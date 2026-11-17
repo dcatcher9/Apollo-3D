@@ -7,8 +7,9 @@
  * Output PNGs are scored by tools/sbsbench/sbsbench.py. Windows-only (the estimator + shaders
  * are D3D11/TensorRT).
  */
-#include "sbs_bench_harness.h"
 #include "offline_frame_transport.h"
+#include "offline_sbs_runner.h"
+#include "sbs_bench_harness.h"
 
 #ifdef _WIN32
 
@@ -3336,6 +3337,7 @@ namespace sbs_bench {
     };
 
     bool parse_opts_unchecked(int argc, char **argv, opts &o);
+    bool validate_opts(const opts &o);
 
     bool parse_opts(int argc, char **argv, opts &o) {
       // std::stoi/stod/stoull throw on a missing or non-numeric value. Report that as an
@@ -3484,6 +3486,10 @@ namespace sbs_bench {
           return false;
         }
       }
+      return validate_opts(o);
+    }
+
+    bool validate_opts(const opts &o) {
       if (!o.capabilities.empty()) {
         if (!o.frames.empty() || !o.out.empty() || o.subtitle_plane_diagnostic_ranges || o.subtitle_plane_diagnostic_render_selected || o.ocr_working_diagnostics || o.subtitle_cohort_research || o.subtitle_inner_colour_research || o.pfm_joined_diagnostics || o.current_outline_qualification) {
           BOOST_LOG(error) << "sbs-bench: --capabilities is a standalone query";
@@ -3712,19 +3718,13 @@ namespace sbs_bench {
     #include "sbs_bench_joined_completion_probe.inc"
     #include "sbs_bench_independent_ocr_raw_probe.inc"
 
-  }  // namespace
+    struct native_pass_counts_t {
+      std::uint64_t source = 0;
+      std::uint64_t adaptive = 0;
+      std::uint64_t sbs = 0;
+    };
 
-  int run(int argc, char **argv, offline_sbs::raw_frame_transport *transport) {
-    opts o;
-    if (!parse_opts(argc, argv, o)) {
-      return 2;
-    }
-    if (!o.capabilities.empty()) {
-      std::error_code ec;
-      const fs::path path = o.capabilities;
-      if (!path.parent_path().empty()) {
-        fs::create_directories(path.parent_path(), ec);
-      }
+    nlohmann::ordered_json build_native_capabilities(bool production) {
       nlohmann::ordered_json capabilities = {
         {"schema", 1},
         {"native_whole_clip", {
@@ -3792,12 +3792,41 @@ namespace sbs_bench {
           }},
         }},
       };
-      if (ec || !publish_json_atomically(path, capabilities)) {
+
+      if (production) {
+        auto &native = capabilities["native_whole_clip"];
+        native.erase("follow_protocol_schema");
+        native.erase("follow_wakeup");
+        native["source_formats"] = {"bgra8", "gbrpf32le"};
+        native["production_runner"] = "typed-native-pass-v1";
+        native["native_evidence_transport"] = offline_sbs::completion_channel_t::name;
+        native["native_evidence_wakeup"] = "condition-variable";
+        native["native_evidence_protocol_schema"] = 1;
+        native["native_evidence_float_representation"] = "finite-native-float32";
+      }
+      return capabilities;
+    }
+
+    int publish_native_capabilities(const std::string &destination, bool production) {
+      std::error_code ec;
+      const fs::path path = destination;
+      if (!path.parent_path().empty()) {
+        fs::create_directories(path.parent_path(), ec);
+      }
+      if (ec || !publish_json_atomically(path, build_native_capabilities(production))) {
         BOOST_LOG(error) << "sbs-bench: cannot publish capabilities document";
         return 2;
       }
       return 0;
     }
+
+  }  // namespace
+
+  static int run_core(
+    opts o,
+    offline_sbs::raw_frame_transport *transport,
+    native_pass_counts_t *native_counts = nullptr
+  ) {
     if (transport && (!o.follow || !o.bounded_adaptive_state || o.follow_count == 0 ||
                       o.artifacts == artifact_mode_e::evaluation || !o.render_cache.empty())) {
       BOOST_LOG(error) << "sbs-bench: raw transport requires bounded causal whole-clip input";
@@ -4278,19 +4307,7 @@ namespace sbs_bench {
       o.max_width > 0 ? o.max_width : config::video.sbs.max_encode_width;
     const std::size_t follow_first_sequence =
       replay_mode ? replay_first_sequence : 1u;
-    if (o.follow &&
-        !publish_follow_progress(
-          follow_progress_path,
-          "running",
-          o.follow_format,
-          artifact_mode_name(o.artifacts),
-          follow_first_sequence,
-          0u,
-          0,
-          0u,
-          0u,
-          {}
-        )) {
+    if (o.follow && !transport && !publish_follow_progress(follow_progress_path, "running", o.follow_format, artifact_mode_name(o.artifacts), follow_first_sequence, 0u, 0, 0u, 0u, {})) {
       BOOST_LOG(error) << "sbs-bench: cannot initialize atomic follow progress";
       return 4;
     }
@@ -4301,7 +4318,27 @@ namespace sbs_bench {
     const fs::path adaptive_state_frame_path =
       fs::path(o.out) / "adaptive_state_frame.json";
     if (writes_adaptive_state) {
-      if (o.bounded_adaptive_state) {
+      if (transport) {
+        offline_sbs::completion_header_t header;
+        header.adaptive_schema = sbs_adaptive_state::schema_version;
+        header.adaptive_contract_sha256 = sbs_adaptive_state::contract_canonical_sha256;
+        header.source = sbs_adaptive_state::source;
+        header.capture = sbs_adaptive_state::capture;
+        for (std::size_t index = 0; index < sbs_adaptive_state::fields.size(); ++index) {
+          header.fields[index].name = sbs_adaptive_state::fields[index].name;
+          header.fields[index].type = sbs_adaptive_state::fields[index].json_type;
+        }
+        header.model = model.name;
+        header.pop_strength = sbs_cfg.pop_strength;
+        header.depth_reuse_interval = effective_depth_every;
+        header.source_format = o.follow_format == "bgra8" ?
+                                 offline_sbs::raw_pixel_format::bgra8 :
+                                 offline_sbs::raw_pixel_format::gbrpf32le;
+        header.source_frame_count = o.follow_count;
+        header.first_sequence = follow_first_sequence;
+        header.sbs_enabled = o.artifacts == artifact_mode_e::conversion;
+        transport->completion.publish_header(std::move(header));
+      } else if (o.bounded_adaptive_state) {
         std::error_code cleanup_error;
         fs::remove(adaptive_state_header_path, cleanup_error);
         fs::remove(adaptive_state_frame_path, cleanup_error);
@@ -5377,6 +5414,14 @@ namespace sbs_bench {
       }
     }
     std::size_t processed_frame_count = 0;
+    // Declared before the post-render owner: its destructor joins before these counts are read.
+    auto native_counts_guard = util::fail_guard([&]() {
+      if (native_counts) {
+        native_counts->source = processed_frame_count;
+        native_counts->adaptive = adaptive_state_frame_count;
+        native_counts->sbs = static_cast<std::uint64_t>(written);
+      }
+    });
     std::optional<follow_directory_watcher_t> follow_watcher;
     if (o.follow && !transport) {
       try {
@@ -5473,36 +5518,39 @@ namespace sbs_bench {
             throw std::runtime_error("post-render pipeline was stopped");
           }
 
-          const auto write_state = [&](std::ostream &out) {
-            return write_adaptive_state_frame(
-              out,
-              frame.output_id,
-              frame.source_index,
-              true,
-              frame.adaptive_state
-            );
-          };
-          if (!publish_adaptive_state_snapshot(
-                adaptive_state_frame_path,
-                write_state
-              )) {
-            throw std::runtime_error(
-              "cannot publish adaptive state for frame " + frame.output_id
-            );
+          if (transport) {
+            offline_sbs::completion_frame_t completed;
+            completed.source = frame.raw_header;
+            completed.adaptive_state = frame.adaptive_state;
+            completed.depth_updated = true;
+            completed.sbs = offline_sbs::completion_sbs_info_t {
+              frame.width,
+              frame.height,
+              frame.pfm ? offline_sbs::raw_pixel_format::rgba16f :
+                          offline_sbs::raw_pixel_format::bgra8,
+            };
+            transport->completion.publish_frame(std::move(completed));
+          } else {
+            const auto write_state = [&](std::ostream &out) {
+              return write_adaptive_state_frame(
+                out,
+                frame.output_id,
+                frame.source_index,
+                true,
+                frame.adaptive_state
+              );
+            };
+            if (!publish_adaptive_state_snapshot(
+                  adaptive_state_frame_path,
+                  write_state
+                )) {
+              throw std::runtime_error(
+                "cannot publish adaptive state for frame " + frame.output_id
+              );
+            }
           }
           ++adaptive_state_frame_count;
-          if (!publish_follow_progress(
-                follow_progress_path,
-                "running",
-                o.follow_format,
-                artifact_mode_name(o.artifacts),
-                follow_first_sequence,
-                frame.processed_count,
-                static_cast<int>(frame.processed_count),
-                frame.width,
-                frame.height,
-                frame.producer_frame_count
-              )) {
+          if (!transport && !publish_follow_progress(follow_progress_path, "running", o.follow_format, artifact_mode_name(o.artifacts), follow_first_sequence, frame.processed_count, static_cast<int>(frame.processed_count), frame.width, frame.height, frame.producer_frame_count)) {
             throw std::runtime_error(
               "cannot acknowledge conversion follow frame " +
               frame.output_id
@@ -5902,6 +5950,10 @@ namespace sbs_bench {
       const bool defer_adaptive_state_readback =
         !replay_mode && o.artifacts == artifact_mode_e::conversion;
       const auto persist_adaptive_state = [&]() {
+        if (transport) {
+          ++adaptive_state_frame_count;
+          return true;
+        }
         const auto write_frame = [&](std::ostream &out) {
           return write_adaptive_state_frame(
             out,
@@ -6561,19 +6613,14 @@ namespace sbs_bench {
 
       if (o.artifacts == artifact_mode_e::adaptive) {
         sbs_perf::tick();
-        if (o.follow &&
-            !publish_follow_progress(
-              follow_progress_path,
-              "running",
-              o.follow_format,
-              artifact_mode_name(o.artifacts),
-              follow_first_sequence,
-              fi + 1u,
-              written,
-              sbs_w,
-              sbs_h,
-              producer_frame_count
-            )) {
+        if (transport) {
+          offline_sbs::completion_frame_t completed;
+          completed.source = raw_source->header;
+          completed.adaptive_state = words;
+          completed.depth_updated = depth_updated;
+          transport->completion.publish_frame(std::move(completed));
+        }
+        if (o.follow && !transport && !publish_follow_progress(follow_progress_path, "running", o.follow_format, artifact_mode_name(o.artifacts), follow_first_sequence, fi + 1u, written, sbs_w, sbs_h, producer_frame_count)) {
           BOOST_LOG(error) << "sbs-bench: cannot acknowledge adaptive follow frame "
                            << output_id;
           return 10;
@@ -7262,18 +7309,20 @@ namespace sbs_bench {
                            << output_id;
           return 10;
         }
-        if (!publish_follow_progress(
-              follow_progress_path,
-              "running",
-              o.follow_format,
-              artifact_mode_name(o.artifacts),
-              follow_first_sequence,
-              fi + 1u,
-              written,
-              sbs_w,
-              sbs_h,
-              producer_frame_count
-            )) {
+        if (transport) {
+          offline_sbs::completion_frame_t completed;
+          completed.source = raw_source->header;
+          completed.adaptive_state = words;
+          completed.depth_updated = depth_updated;
+          completed.sbs = offline_sbs::completion_sbs_info_t {
+            sbs_w,
+            sbs_h,
+            pfm_input ? offline_sbs::raw_pixel_format::rgba16f :
+                        offline_sbs::raw_pixel_format::bgra8,
+          };
+          transport->completion.publish_frame(std::move(completed));
+        }
+        if (!transport && !publish_follow_progress(follow_progress_path, "running", o.follow_format, artifact_mode_name(o.artifacts), follow_first_sequence, fi + 1u, written, sbs_w, sbs_h, producer_frame_count)) {
           BOOST_LOG(error) << "sbs-bench: cannot acknowledge conversion follow frame "
                            << output_id;
           return 10;
@@ -8116,18 +8165,21 @@ namespace sbs_bench {
         .input_transfer = hdr_texture_input ? "linear" : "sRGB",
         .input_primaries = hdr_texture_input ? "scRGB/BT.709" : "sRGB/BT.709",
         .input_reference_white_nits = hdr_texture_input ?
-                                        std::optional<double> {80.0} : std::nullopt,
+                                        std::optional<double> {80.0} :
+                                        std::nullopt,
         .packed_texture_format = packed_texture_format,
         .packed_color_space = pipeline_color_space,
         .packed_transfer = hdr_texture_input ? "linear" : "sRGB",
         .packed_primaries = hdr_texture_input ? "scRGB/BT.709" : "sRGB/BT.709",
         .packed_reference_white_nits = hdr_texture_input ?
-                                         std::optional<double> {80.0} : std::nullopt,
+                                         std::optional<double> {80.0} :
+                                         std::nullopt,
         .output_frame_format = output_frame_format,
         .output_transfer = output_transfer,
         .output_primaries = pfm_input ? "scRGB/BT.709" : "sRGB/BT.709",
         .output_reference_white_nits = pfm_input ?
-                                         std::optional<double> {80.0} : std::nullopt,
+                                         std::optional<double> {80.0} :
+                                         std::nullopt,
         .output_row_order = output_row_order,
         .output_ffmpeg_pixel_format = pfm_input ?
                                         std::optional<std::string> {"gbrpf32le"} :
@@ -8141,7 +8193,8 @@ namespace sbs_bench {
         .output_every = static_cast<std::uint64_t>(o.output_every),
         .follow_mode = o.follow,
         .follow_format = o.follow ?
-                           std::optional<std::string> {o.follow_format} : std::nullopt,
+                           std::optional<std::string> {o.follow_format} :
+                           std::nullopt,
         .follow_count_bound = o.follow_count > 0u ?
                                 std::optional<std::uint64_t> {o.follow_count} :
                                 std::nullopt,
@@ -8157,15 +8210,15 @@ namespace sbs_bench {
                                    } :
                                    std::nullopt,
         .follow_poll_interval_ms = o.follow ?
-                                  std::optional<std::uint32_t> {0u} :
-                                  std::nullopt,
+                                     std::optional<std::uint32_t> {0u} :
+                                     std::nullopt,
         .follow_done_sentinel = o.follow && !transport ?
                                   std::optional<std::string> {".producer-done.json"} :
                                   std::nullopt,
         .follow_failed_sentinel = o.follow && !transport ?
                                     std::optional<std::string> {".producer-failed.json"} :
                                     std::nullopt,
-        .follow_progress_file = o.follow ?
+        .follow_progress_file = o.follow && !transport ?
                                   std::optional<std::string> {"follow_progress.json"} :
                                   std::nullopt,
         .follow_native_input_deletion = false,
@@ -8180,10 +8233,11 @@ namespace sbs_bench {
         .scene_cache_write = !o.scene_cache.empty(),
         .scene_cache_replay = replay_mode,
         .scene_cache_contract_schema = !o.scene_cache.empty() || replay_mode ?
-          std::optional<std::uint32_t> {offline_sbs::scene_cache_contract_schema} :
-          std::nullopt,
+                                         std::optional<std::uint32_t> {offline_sbs::scene_cache_contract_schema} :
+                                         std::nullopt,
         .scene_plan_schema = replay_mode ?
-                               std::optional<std::uint32_t> {2u} : std::nullopt,
+                               std::optional<std::uint32_t> {2u} :
+                               std::nullopt,
         .scene_plan_version = replay_mode ?
                                 std::optional<std::string> {"scene-plan-v2"} :
                                 std::nullopt,
@@ -8198,10 +8252,11 @@ namespace sbs_bench {
                                           } :
                                           std::nullopt,
         .scene_cache_status_at_replay_start = replay_mode ?
-          std::optional<std::string> {replay_cache_metadata.status} : std::nullopt,
+                                                std::optional<std::string> {replay_cache_metadata.status} :
+                                                std::nullopt,
         .scene_cache_processed_count_at_replay_start = replay_mode ?
-          std::optional<std::uint64_t> {replay_cache_metadata.processed_count} :
-          std::nullopt,
+                                                         std::optional<std::uint64_t> {replay_cache_metadata.processed_count} :
+                                                         std::nullopt,
       };
       if (transport) resolved_runtime.frame_transport = offline_sbs::raw_frame_transport::name;
       offline_sbs::wire::whole_clip_adaptive_state_t adaptive_state;
@@ -8211,6 +8266,14 @@ namespace sbs_bench {
           .transport = "none",
           .retained_history = false,
           .frame_count = 0,
+        };
+      } else if (transport) {
+        adaptive_state = {
+          .transport = offline_sbs::completion_channel_t::name,
+          .retained_history = false,
+          .schema = sbs_adaptive_state::schema_version,
+          .capture = std::string {sbs_adaptive_state::capture},
+          .frame_count = adaptive_state_frame_count,
         };
       } else if (o.bounded_adaptive_state) {
         adaptive_state = {
@@ -8306,19 +8369,7 @@ namespace sbs_bench {
                          << exception.what();
         return 8;
       }
-      if (o.follow &&
-          !publish_follow_progress(
-            follow_progress_path,
-            "complete",
-            o.follow_format,
-            artifact_mode_name(o.artifacts),
-            follow_first_sequence,
-            completed_frame_count,
-            written,
-            sbs_w,
-            sbs_h,
-            producer_frame_count
-          )) {
+      if (o.follow && !transport && !publish_follow_progress(follow_progress_path, "complete", o.follow_format, artifact_mode_name(o.artifacts), follow_first_sequence, completed_frame_count, written, sbs_w, sbs_h, producer_frame_count)) {
         BOOST_LOG(error) << "sbs-bench: cannot publish terminal follow progress";
         return 10;
       }
@@ -8327,11 +8378,106 @@ namespace sbs_bench {
     return o.artifacts == artifact_mode_e::adaptive || written > 0 ? 0 : 8;
   }
 
+  int run(int argc, char **argv) {
+    opts o;
+    if (!parse_opts(argc, argv, o)) {
+      return 2;
+    }
+    if (!o.capabilities.empty()) {
+      return publish_native_capabilities(o.capabilities, false);
+    }
+    return run_core(std::move(o), nullptr);
+  }
+
+  static int run_native_pass_impl(
+    const offline_sbs::native_pass_settings &settings,
+    offline_sbs::raw_frame_transport &transport
+  ) {
+    native_pass_counts_t counts;
+    offline_sbs::completion_terminal_t terminal;
+    int code = 2;
+    try {
+      const bool converting = settings.operation == offline_sbs::native_pass_operation::convert;
+      const bool analyzing = settings.operation == offline_sbs::native_pass_operation::analyze;
+      if ((!converting && !analyzing) || (settings.source_format != offline_sbs::raw_pixel_format::bgra8 && settings.source_format != offline_sbs::raw_pixel_format::gbrpf32le) || settings.source_identity_directory.empty() || settings.transient_output_directory.empty() || settings.observation_timeline.empty() || settings.frame_count == 0 || settings.frame_count > follow_max_sequence || settings.frame_count > std::numeric_limits<std::size_t>::max() || settings.transient_raster_hard_cap_bytes == 0 || settings.transient_raster_hard_cap_bytes != transport.byte_limit) {
+        terminal.error = "invalid native pass settings";
+      } else {
+        opts o;
+        o.frames = settings.source_identity_directory;
+        o.out = settings.transient_output_directory;
+        o.observation_timeline = settings.observation_timeline;
+        o.follow = true;
+        o.bounded_adaptive_state = true;
+        o.follow_count = static_cast<std::size_t>(settings.frame_count);
+        o.follow_format = settings.source_format == offline_sbs::raw_pixel_format::bgra8 ?
+                            "bgra8" :
+                            "gbrpf32le";
+        o.artifacts = converting ? artifact_mode_e::conversion : artifact_mode_e::adaptive;
+        // Analyze Only keeps the historical zero option; its raw source transport and worker
+        // retain the mandatory source raster cap. Conversion also preflights packed readback.
+        o.transient_raster_hard_cap_bytes =
+          converting ? settings.transient_raster_hard_cap_bytes : 0;
+        // All replay, diagnostic and research selectors remain inaccessible to this entry.
+        if (validate_opts(o)) {
+          code = run_core(std::move(o), &transport, &counts);
+        }
+      }
+    } catch (const std::exception &exception) {
+      terminal.error = exception.what();
+      code = 10;
+    } catch (...) {
+      terminal.error = "unknown native pass failure";
+      code = 10;
+    }
+    terminal.exit_code = code;
+    terminal.source_frame_count = counts.source;
+    terminal.adaptive_frame_count = counts.adaptive;
+    terminal.sbs_frame_count = counts.sbs;
+    if (code != 0 && terminal.error.empty()) {
+      terminal.error = "native pass failed with exit code " + std::to_string(code);
+    }
+    if (terminal.error.size() > 1024) {
+      terminal.error.resize(1024);
+    }
+    try {
+      transport.completion.finish(std::move(terminal));
+    } catch (...) {
+      code = 10;
+      try {
+        offline_sbs::completion_terminal_t failure;
+        failure.exit_code = code;
+        failure.source_frame_count = counts.source;
+        failure.adaptive_frame_count = counts.adaptive;
+        failure.sbs_frame_count = counts.sbs;
+        failure.error = "native completion publication failed";
+        transport.completion.finish(std::move(failure));
+      } catch (...) {
+        transport.cancel();
+      }
+    }
+    if (code != 0) {
+      // Keep the sticky failure terminal readable while releasing blocked pixel transfers.
+      transport.source.cancel();
+      transport.sbs.cancel();
+    }
+    return code;
+  }
+
 }  // namespace sbs_bench
+
+namespace offline_sbs {
+  int run_native_pass(const native_pass_settings &settings, raw_frame_transport &transport) {
+    return sbs_bench::run_native_pass_impl(settings, transport);
+  }
+
+  int write_native_capabilities(const std::string &destination) {
+    return sbs_bench::publish_native_capabilities(destination, true);
+  }
+}  // namespace offline_sbs
 
 #else  // !_WIN32
 namespace sbs_bench {
-  int run(int, char **, offline_sbs::raw_frame_transport *) {
+  int run(int, char **) {
     return 1;
   }
 }  // namespace sbs_bench

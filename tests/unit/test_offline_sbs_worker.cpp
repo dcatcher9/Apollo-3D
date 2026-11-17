@@ -299,24 +299,29 @@ TEST(OfflineSbsWorker, ConversionUsesOneDirectCausalPass) {
   const auto direct = source.substr(pass_begin, pass_end - pass_begin);
 
   EXPECT_NE(
-    direct.find("spec.operation == \"convert\" ? \"conversion\" : \"adaptive\""),
+    direct.find("native_pass_operation::convert : native_pass_operation::analyze"),
     std::string::npos
   );
-  EXPECT_NE(
-    direct.find("validate_trace_frame(trace.read_frame(analysis, timing.sequence), timing)"),
-    std::string::npos
+  const auto completion = direct.find("transport.completion.receive_frame(");
+  const auto validation = direct.find("completion.validate();", completion);
+  const auto encoder_handoff = direct.find(
+    "conversion_encoder->publish(timing.sequence, std::move(sbs))",
+    validation
   );
+  const auto source_ack = direct.find("transport.source.acknowledge(timing.sequence)", encoder_handoff);
+  ASSERT_NE(completion, std::string::npos);
+  ASSERT_NE(validation, std::string::npos);
+  ASSERT_NE(encoder_handoff, std::string::npos);
+  ASSERT_NE(source_ack, std::string::npos);
+  EXPECT_LT(completion, validation);
+  EXPECT_LT(validation, encoder_handoff);
+  EXPECT_LT(encoder_handoff, source_ack);
   EXPECT_EQ(direct.find("scene_tracker"), std::string::npos);
   EXPECT_EQ(direct.find("scene-audit"), std::string::npos);
-  EXPECT_NE(
-    direct.find("conversion_encoder->publish(timing.sequence, std::move(sbs))"),
-    std::string::npos
-  );
   EXPECT_EQ(
     direct.find("remove_transient_file_checked(sbs)"),
     std::string::npos
   ) << "The asynchronous encoder owns an enqueued SBS artifact";
-  EXPECT_NE(direct.find("directory_change_watcher_t"), std::string::npos);
   EXPECT_EQ(direct.find("--scene-cache"), std::string::npos);
   EXPECT_EQ(direct.find("--render-cache"), std::string::npos);
   EXPECT_EQ(direct.find("render_decoder"), std::string::npos);
@@ -389,7 +394,7 @@ TEST(OfflineSbsWorker, LowCapFailsBeforeFirstSbsOutputSnapshot) {
   ASSERT_FALSE(harness.empty());
 
   EXPECT_NE(
-    worker.find("\"--transient-raster-hard-cap-bytes\""),
+    worker.find("raw_frame_transport transport(spec.transient_raster_hard_cap_bytes)"),
     std::string::npos
   );
   EXPECT_NE(
@@ -462,7 +467,7 @@ TEST(OfflineSbsWorker, SdrSerializerReusesThreadLifetimeWicFactory) {
   EXPECT_GE(count_text(serializer, "writer_wic.factory()"), 2u);
 }
 
-TEST(OfflineSbsWorker, PerFrameBridgeUsesOnlyTransientAtomicWrites) {
+TEST(OfflineSbsWorker, LegacyEvaluatorAndUiProgressUseTransientAtomicWrites) {
   const auto worker = read_source_text("src/offline_sbs_worker.cpp");
   const auto harness = read_source_text("src/sbs_bench_harness.cpp");
   ASSERT_FALSE(worker.empty());
@@ -503,53 +508,6 @@ TEST(OfflineSbsWorker, PerFrameBridgeUsesOnlyTransientAtomicWrites) {
   ) << "Retained JSON contracts must keep the durable default";
 }
 
-TEST(OfflineSbsWorker, FollowProgressChecksChildExitBeforeWaitingAgain) {
-  std::ifstream stream(
-    fs::path(SUNSHINE_SOURCE_DIR) / "src/offline_sbs_worker.cpp",
-    std::ios::binary
-  );
-  ASSERT_TRUE(stream);
-  std::string source {
-    std::istreambuf_iterator<char> {stream},
-    std::istreambuf_iterator<char> {},
-  };
-  source.erase(std::remove(source.begin(), source.end(), '\r'), source.end());
-
-  const auto function_begin = source.find("nlohmann::json read_progress(");
-  const auto function_end = source.find(
-    "void publish_producer_failed(",
-    function_begin
-  );
-  ASSERT_NE(function_begin, std::string::npos);
-  ASSERT_NE(function_end, std::string::npos);
-  const auto function = source.substr(function_begin, function_end - function_begin);
-
-  const auto schema_failure = function.find(
-    "native harness follow progress has an unexpected schema"
-  );
-  const auto liveness_check = function.find("if (!child.running())");
-  const auto notification_wait = function.find("watcher->wait()");
-  ASSERT_NE(schema_failure, std::string::npos);
-  ASSERT_NE(liveness_check, std::string::npos);
-  ASSERT_NE(notification_wait, std::string::npos);
-  EXPECT_LT(schema_failure, liveness_check);
-  EXPECT_LT(liveness_check, notification_wait);
-
-  // A valid but stale ACK must fall through to the liveness check. In particular, do not
-  // reintroduce the old early continue that could hide a dead harness behind ACK N-1 until the
-  // twelve-hour child timeout.
-  const auto stale_ack_branch = function.find(
-    "value.at(\"processed_count\").get<std::uint64_t>() >= minimum"
-  );
-  ASSERT_NE(stale_ack_branch, std::string::npos);
-  EXPECT_EQ(
-    function.substr(stale_ack_branch, liveness_check - stale_ack_branch).find(
-      "continue;"
-    ),
-    std::string::npos
-  );
-}
-
 TEST(OfflineSbsWorker, RequiresSelectedInputFullFrameSourceScope) {
   nlohmann::json scope {
     {"frame_source", std::string {offline_sbs::whole_clip_frame_source}},
@@ -582,10 +540,8 @@ TEST(OfflineSbsWorker, RequiresSelectedInputFullFrameSourceScope) {
   EXPECT_FALSE(offline_sbs::offline_full_frame_source_scope_is_valid(extended));
 }
 
-TEST(OfflineSbsWorker, TransientConsumersRetrySameSnapshotWithoutReparse) {
-  const auto worker = read_source_text("src/offline_sbs_worker.cpp");
+TEST(OfflineSbsWorker, EvaluatorTransientConsumersRetrySameSnapshotWithoutReparse) {
   const auto harness = read_source_text("src/sbs_bench_harness.cpp");
-  ASSERT_FALSE(worker.empty());
   ASSERT_FALSE(harness.empty());
 
   const auto exact_read = source_section(
@@ -647,38 +603,6 @@ TEST(OfflineSbsWorker, TransientConsumersRetrySameSnapshotWithoutReparse) {
     count_text(frame_loop, "load_png(std::string_view(exact_source_snapshot)"),
     1u
   );
-
-  for (const auto &markers : std::array {
-         std::array<std::string_view, 2> {
-           "nlohmann::json read_progress(", "void publish_producer_failed("
-         },
-         std::array<std::string_view, 2> {
-           "nlohmann::json read_snapshot(", "void ensure_open("
-         },
-       }) {
-    const auto reader = source_section(worker, markers[0], markers[1]);
-    ASSERT_FALSE(reader.empty());
-    const auto acquired = reader.find("read_bounded_bytes(");
-    const auto retry = reader.find("sleep_for(transient_file_io_retry_delay)");
-    const auto parsed = reader.find("wire::parse_json_without_duplicate_keys(bytes)");
-    ASSERT_NE(acquired, std::string::npos);
-    ASSERT_NE(retry, std::string::npos);
-    ASSERT_NE(parsed, std::string::npos);
-    EXPECT_LT(acquired, retry);
-    EXPECT_LT(retry, parsed);
-    EXPECT_NE(reader.find("&acquisition_failed"), std::string::npos);
-    EXPECT_EQ(
-      count_text(reader, "wire::parse_json_without_duplicate_keys(bytes)"),
-      1u
-    ) << "A successfully acquired atomic snapshot is immutable";
-  }
-  EXPECT_EQ(
-    source_section(worker, "nlohmann::json read_snapshot(", "void ensure_open(")
-      .find("fs::is_regular_file"),
-    std::string::npos
-  );
-
-
 }
 
 TEST(OfflineSbsWorker, WholeClipReusesOneGpuInputTextureAndView) {

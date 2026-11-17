@@ -3,21 +3,20 @@
  * @brief Native causal SBS evaluation/conversion worker.
  */
 
-#include "offline_sbs_worker.h"
-#include "offline_frame_transport.h"
-#include "sbs_bench_harness.h"
-#include "sbs_perf.h"
-
 #include "crypto.h"
 #include "generated/sbs_adaptive_state_contract.h"
 #include "host_sbs_observation_timeline.h"
 #include "host_sbs_shader_cache.h"
+#include "offline_frame_transport.h"
 #include "offline_sbs_contract.h"
+#include "offline_sbs_runner.h"
 #include "offline_sbs_wire_contract.h"
+#include "offline_sbs_worker.h"
+#include "sbs_perf.h"
 
 #include <algorithm>
-#include <atomic>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <boost/multiprecision/cpp_int.hpp>
 #include <cctype>
@@ -68,30 +67,38 @@ namespace offline_sbs {
       const char *stage_;
       std::chrono::steady_clock::time_point start_;
     };
-    class process_status_t {
-    public:
-      virtual ~process_status_t() = default;
-      virtual bool running() const = 0;
-      virtual int exit_code() const = 0;
-    };
-
     // The manager already owns an isolated worker process. Run its only GPU
     // pipeline here, on one thread, so pixels cross bounded memory channels.
-    class analysis_process_t final: public process_status_t {
+    class analysis_process_t final {
     public:
-      analysis_process_t(std::vector<std::string> arguments, raw_frame_transport &transport): transport_(transport) {
-        thread_ = std::thread([this, arguments = std::move(arguments)]() mutable {
-          std::vector<char *> argv;
-          for (auto &argument : arguments) argv.push_back(argument.data());
-          try { code_.store(sbs_bench::run(static_cast<int>(argv.size()), argv.data(), &transport_)); }
-          catch (...) { code_.store(10); }
-          if (code_.load() != 0) transport_.cancel();
+      analysis_process_t(native_pass_settings settings, raw_frame_transport &transport):
+          transport_(transport) {
+        thread_ = std::thread([this, settings = std::move(settings)]() {
+          try {
+            code_.store(run_native_pass(settings, transport_));
+          } catch (...) {
+            // The typed entry normally publishes even a failed terminal. An exceptional escape
+            // cannot leave a consumer waiting for evidence that will never be notified.
+            code_.store(10);
+            transport_.cancel();
+          }
+          if (code_.load() != 0) {
+            // Preserve an ordinary failed terminal until the worker consumes its status.
+            transport_.source.cancel();
+            transport_.sbs.cancel();
+          }
           running_.store(false, std::memory_order_release);
         });
       }
-      ~analysis_process_t() { terminate(); }
-      bool running() const override { return running_.load(std::memory_order_acquire); }
-      int exit_code() const override { return code_.load(); }
+
+      ~analysis_process_t() {
+        terminate();
+      }
+
+      bool running() const {
+        return running_.load(std::memory_order_acquire);
+      }
+      int exit_code() const { return code_.load(); }
       int wait(std::chrono::milliseconds timeout) {
         const auto deadline = std::chrono::steady_clock::now() + timeout;
         while (running()) {
@@ -542,30 +549,6 @@ namespace offline_sbs {
       }
     }
 
-    void remove_transient_file_checked(const fs::path &path) {
-      std::error_code last_error;
-      for (int attempt = 0; attempt < transient_file_io_attempts; ++attempt) {
-        last_error.clear();
-        if (fs::remove(path, last_error) && !last_error) {
-          return;
-        }
-        const bool retryable =
-          last_error.value() == ERROR_SHARING_VIOLATION ||
-          last_error.value() == ERROR_LOCK_VIOLATION ||
-          last_error.value() == ERROR_ACCESS_DENIED;
-        if (!retryable) {
-          break;
-        }
-        if (attempt + 1 < transient_file_io_attempts) {
-          std::this_thread::sleep_for(transient_file_io_retry_delay);
-        }
-      }
-      throw worker_error(
-        "cannot release transient file: " + path_utf8(path) +
-        (last_error ? ": " + last_error.message() : "")
-      );
-    }
-
     /**
      * Atomically reserves the manager-selected staging pathname and keeps the exact
      * file identity open without delete sharing while FFmpeg writes it. Failed output
@@ -730,12 +713,6 @@ namespace offline_sbs {
         }
       }
       return true;
-    }
-
-    std::string frame_id(const std::uint64_t sequence) {
-      char buffer[16] {};
-      std::snprintf(buffer, sizeof(buffer), "%010llu", static_cast<unsigned long long>(sequence));
-      return buffer;
     }
 
     std::int64_t parse_integer_json(
@@ -1786,7 +1763,7 @@ namespace offline_sbs {
       return L"\\\\.\\pipe\\sunshine-offline-" + std::wstring(token.begin(), token.end());
     }
 
-    class child_process_t: public process_status_t {
+    class child_process_t {
     public:
       child_process_t() = default;
       child_process_t(const child_process_t &) = delete;
@@ -2525,167 +2502,6 @@ namespace offline_sbs {
       );
     }
 
-    class directory_change_watcher_t {
-    public:
-      explicit directory_change_watcher_t(const fs::path &directory) {
-        handle_ = FindFirstChangeNotificationW(
-          directory.c_str(),
-          FALSE,
-          FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_SIZE |
-            FILE_NOTIFY_CHANGE_LAST_WRITE
-        );
-        if (handle_ == INVALID_HANDLE_VALUE) {
-          throw worker_error("cannot watch native harness output directory");
-        }
-      }
-
-      directory_change_watcher_t(const directory_change_watcher_t &) = delete;
-      directory_change_watcher_t &operator=(
-        const directory_change_watcher_t &
-      ) = delete;
-
-      ~directory_change_watcher_t() {
-        if (handle_ != INVALID_HANDLE_VALUE) {
-          FindCloseChangeNotification(handle_);
-        }
-      }
-
-      void wait() {
-        const auto status = WaitForSingleObject(handle_, 1000);
-        if (status == WAIT_TIMEOUT) {
-          return;
-        }
-        if (status != WAIT_OBJECT_0 ||
-            !FindNextChangeNotification(handle_)) {
-          throw worker_error("native harness output notification failed");
-        }
-      }
-
-    private:
-      HANDLE handle_ = INVALID_HANDLE_VALUE;
-    };
-
-    bool follow_progress_has_exact_schema(const nlohmann::json &value) {
-      static constexpr std::array<std::string_view, 14> keys {
-        "schema",
-        "status",
-        "input_format",
-        "artifact_mode",
-        "processed_count",
-        "first_sequence",
-        "last_completed_sequence",
-        "last_frame_id",
-        "last_completed_frame_id",
-        "source_frame_count",
-        "sbs_frame_count",
-        "sbs_width",
-        "sbs_height",
-        "producer_frame_count",
-      };
-      if (!value.is_object() || value.size() != keys.size()) {
-        return false;
-      }
-      return std::ranges::all_of(keys, [&](const std::string_view key) {
-        return value.contains(std::string {key});
-      });
-    }
-
-    nlohmann::json read_progress(
-      const fs::path &path,
-      const process_status_t &child,
-      const std::uint64_t minimum,
-      const std::string_view description,
-      directory_change_watcher_t *watcher = nullptr
-    ) {
-      const auto deadline = std::chrono::steady_clock::now() + child_timeout;
-      while (std::chrono::steady_clock::now() < deadline) {
-        std::error_code ec;
-        std::optional<nlohmann::json> observed;
-        const bool progress_exists = fs::is_regular_file(path, ec);
-        if (progress_exists || ec) {
-          std::string bytes;
-          std::string last_acquisition_error;
-          for (int attempt = 0; attempt < transient_file_io_attempts; ++attempt) {
-            bool acquisition_failed = false;
-            try {
-              bytes = read_bounded_bytes(
-                path,
-                max_small_contract_bytes,
-                &acquisition_failed
-              );
-              break;
-            } catch (const std::exception &exception) {
-              if (!acquisition_failed) {
-                throw;
-              }
-              last_acquisition_error = exception.what();
-            }
-            if (attempt + 1 < transient_file_io_attempts) {
-              std::this_thread::sleep_for(transient_file_io_retry_delay);
-            }
-          }
-          if (bytes.empty()) {
-            throw worker_error(
-              "cannot acquire native harness follow progress: " +
-              last_acquisition_error
-            );
-          }
-          try {
-            observed = wire::parse_json_without_duplicate_keys(bytes);
-          } catch (const std::exception &exception) {
-            throw worker_error(
-              "cannot parse native harness follow progress: " +
-              std::string(exception.what())
-            );
-          }
-        }
-        if (observed) {
-          const auto &value = *observed;
-          if (!follow_progress_has_exact_schema(value) ||
-              value.at("schema") != 2 ||
-              !value.at("processed_count").is_number_unsigned()) {
-            throw worker_error(
-              "native harness follow progress has an unexpected schema"
-            );
-          }
-          if (value.at("processed_count").get<std::uint64_t>() >= minimum) {
-            return value;
-          }
-        }
-        // A stale but valid ACK is normal while the child is working. Check liveness before
-        // every notification wait so a frame-N failure cannot strand the worker behind ACK N-1.
-        if (!child.running()) {
-          throw worker_error(
-            std::string(description) + " exited before acknowledging frame " +
-            std::to_string(minimum) + " (exit " +
-            std::to_string(child.exit_code()) + ")"
-          );
-        }
-        if (watcher) {
-          watcher->wait();
-        } else {
-          std::this_thread::sleep_for(child_poll);
-        }
-      }
-      throw worker_error(
-        "timed out waiting for " + std::string(description)
-      );
-    }
-
-    void publish_producer_failed(
-      const fs::path &directory,
-      const std::string &error
-    ) noexcept {
-      try {
-        write_json_atomic(directory / ".producer-failed.json", {
-                                                                 {"schema", 1},
-                                                                 {"status", "failed"},
-                                                                 {"error", error.substr(0, 1024)},
-                                                               });
-      } catch (...) {
-      }
-    }
-
     class streaming_decoder_t {
     public:
       streaming_decoder_t(
@@ -2774,305 +2590,6 @@ namespace offline_sbs {
       std::string format_;
       child_process_t process_;
       std::uint64_t next_sequence_ = 1;
-    };
-
-    template<std::size_t Size>
-    bool json_object_has_exact_keys(
-      const nlohmann::json &value,
-      const std::array<std::string_view, Size> &keys
-    ) {
-      if (!value.is_object() || value.size() != keys.size()) {
-        return false;
-      }
-      return std::ranges::all_of(keys, [&](const std::string_view key) {
-        return value.contains(std::string {key});
-      });
-    }
-
-    // The bounded adaptive-state snapshot is the harness's per-frame publication handshake.
-    // The worker authenticates its identity and layout against the generated contract and
-    // consumes it; no conversion decision is derived from its values.
-    void validate_trace_frame(
-      const nlohmann::json &value,
-      const frame_timing_t &timing
-    ) {
-      using sbs_adaptive_state::word_e;
-      if (!json_object_has_exact_keys(value, sbs_adaptive_state::frame_keys) ||
-          value.value("record", "") != "frame" ||
-          value.value("frame_id", "") != frame_id(timing.sequence) ||
-          value.value("source_index", max_sequence) != timing.sequence - 1 ||
-          !value["values"].is_array() ||
-          value["values"].size() != sbs_adaptive_state::word_count) {
-        throw worker_error("adaptive trace frame identity/schema mismatch");
-      }
-      const auto &words = value["values"];
-      const auto is_uint32 = [](const nlohmann::json &encoded) {
-        return encoded.is_number_unsigned() &&
-               encoded.get<std::uint64_t>() <=
-                 std::numeric_limits<std::uint32_t>::max();
-      };
-      for (const auto &field : sbs_adaptive_state::fields) {
-        const auto &encoded = words[sbs_adaptive_state::index(field.word)];
-        if (field.gpu_encoding == sbs_adaptive_state::gpu_encoding_e::uint_bits ||
-            field.gpu_encoding ==
-              sbs_adaptive_state::gpu_encoding_e::uint_valued_float) {
-          if (!is_uint32(encoded)) {
-            throw worker_error("adaptive trace integer field encoding mismatch");
-          }
-          continue;
-        }
-        if (!encoded.is_number()) {
-          throw worker_error("adaptive trace float field encoding mismatch");
-        }
-        const auto decoded = encoded.get<double>();
-        if (!std::isfinite(decoded) ||
-            std::abs(decoded) > std::numeric_limits<float>::max()) {
-          throw worker_error("adaptive trace contains a non-finite float field");
-        }
-      }
-      for (const auto word : sbs_adaptive_state::reserved_words) {
-        const auto index = sbs_adaptive_state::index(word);
-        const auto &field = sbs_adaptive_state::fields[index];
-        const auto matches =
-          field.gpu_encoding == sbs_adaptive_state::gpu_encoding_e::uint_bits ?
-            words[index].get<std::uint32_t>() ==
-              sbs_adaptive_state::initial_words[index] :
-            words[index].get<float>() == field.initial_value;
-        if (!matches) {
-          throw worker_error("adaptive trace reserved field is non-default");
-        }
-      }
-      if (!value.at("depth_updated").is_boolean() ||
-          !value.at("depth_updated").get<bool>()) {
-        throw worker_error("adaptive trace uses the retired depth-reuse cadence");
-      }
-      for (const auto &[name, word] : std::array {
-             std::pair {"empty_raw_count", word_e::empty_raw_count},
-             std::pair {"collapsed_raw_count", word_e::collapsed_raw_count},
-           }) {
-        const auto expected = words[sbs_adaptive_state::index(word)].get<std::uint32_t>();
-        if (expected > sbs_adaptive_state::counter_max ||
-            !is_uint32(value.at(name)) ||
-            value.at(name).get<std::uint32_t>() != expected) {
-          throw worker_error(
-            std::string {"adaptive trace counter duplicate disagrees for "} + name
-          );
-        }
-      }
-    }
-
-    class trace_tail_t {
-    public:
-      explicit trace_tail_t(
-        fs::path path,
-        const bool bounded_snapshot = false
-      ):
-          path_(std::move(path)),
-          bounded_snapshot_(bounded_snapshot) {
-      }
-
-      nlohmann::json read_header(const process_status_t &child) {
-        nlohmann::json header;
-        if (bounded_snapshot_) {
-          header = read_snapshot(child, "adaptive_state_header.json");
-        } else {
-          ensure_open(child);
-          header = parse_line(read_complete_line(child));
-        }
-        if (!json_object_has_exact_keys(header, sbs_adaptive_state::header_keys) ||
-            header.value("record", "") != "header" ||
-            !header["schema"].is_number_unsigned() ||
-            header["schema"].get<std::uint64_t>() !=
-              sbs_adaptive_state::schema_version ||
-            !header["fields"].is_array() ||
-            header["fields"].size() != sbs_adaptive_state::word_count) {
-          throw worker_error("adaptive trace header has the wrong schema or word count");
-        }
-        for (std::size_t index = 0; index < sbs_adaptive_state::fields.size(); ++index) {
-          const auto &expected = sbs_adaptive_state::fields[index];
-          const auto &field = header["fields"][index];
-          if (!field.is_object() || field.size() != 2u ||
-              field.value("name", "") != expected.name ||
-              field.value("type", "") != expected.json_type) {
-            throw worker_error(
-              "adaptive trace field layout differs at word " +
-              std::to_string(index)
-            );
-          }
-        }
-        if (header.value("source", "") != sbs_adaptive_state::source ||
-            header.value("capture", "") != sbs_adaptive_state::capture) {
-          throw worker_error("adaptive trace attribution differs");
-        }
-        if (!header.contains("config") || !header["config"].is_object() ||
-            header["config"].size() != sbs_adaptive_state::config_keys.size()) {
-          throw worker_error("adaptive trace config contract differs");
-        }
-        const auto &config = header["config"];
-        for (const auto key : sbs_adaptive_state::config_keys) {
-          if (!config.contains(std::string {key})) {
-            throw worker_error("adaptive trace config contract differs");
-          }
-        }
-        const auto model = config.value("model", "");
-        const auto pop_strength = config.value(
-          "pop_strength", std::numeric_limits<double>::quiet_NaN()
-        );
-        const auto depth_reuse_interval = config.value("depth_reuse_interval", 0);
-        if (model.empty() || !std::isfinite(pop_strength) ||
-            pop_strength < 0.25 || pop_strength > 2.0 ||
-            depth_reuse_interval != 1) {
-          throw worker_error("adaptive trace config values are unsupported");
-        }
-        return header;
-      }
-
-      nlohmann::json read_frame(
-        const process_status_t &child,
-        const std::uint64_t sequence
-      ) {
-        auto value = bounded_snapshot_ ?
-                       read_snapshot(child, "adaptive_state_frame.json") :
-                       parse_line(read_complete_line(child));
-        if (value.value("record", "") != "frame" || value.value("source_index", max_sequence) != sequence - 1) {
-          throw worker_error("adaptive trace is not contiguous");
-        }
-        ++frame_count_;
-        return value;
-      }
-
-      void finish(const std::uint64_t expected) {
-        if (frame_count_ != expected) {
-          throw worker_error("adaptive trace frame count mismatch");
-        }
-        if (bounded_snapshot_) {
-          std::error_code ec;
-          if (
-            fs::exists(path_ / "adaptive_state_header.json", ec) ||
-            ec ||
-            fs::exists(path_ / "adaptive_state_frame.json", ec) ||
-            ec
-          ) {
-            throw worker_error(
-              "bounded adaptive trace retained a consumed snapshot"
-            );
-          }
-          return;
-        }
-        stream_.clear();
-        char trailing = 0;
-        if (stream_.get(trailing)) {
-          throw worker_error("adaptive trace has records past the source timeline");
-        }
-      }
-
-    private:
-      nlohmann::json read_snapshot(
-        const process_status_t &child,
-        const std::string_view filename
-      ) {
-        constexpr std::uintmax_t max_snapshot_bytes = 1ull * 1024ull * 1024ull;
-        const auto snapshot = path_ / filename;
-        // The matching follow ACK orders publication, but cannot guarantee that a filesystem
-        // filter has released the transient path. Retry exact acquisition of this one expected
-        // snapshot without a preliminary pathname stat or another producer notification.
-        std::string bytes;
-        std::string last_snapshot_error;
-        bool acquired = false;
-        for (int attempt = 0; attempt < transient_file_io_attempts; ++attempt) {
-          bool acquisition_failed = false;
-          try {
-            bytes = read_bounded_bytes(
-              snapshot,
-              max_snapshot_bytes,
-              &acquisition_failed
-            );
-            acquired = true;
-            break;
-          } catch (const std::exception &exception) {
-            if (!acquisition_failed) {
-              throw;
-            }
-            last_snapshot_error = exception.what();
-          }
-          if (attempt + 1 < transient_file_io_attempts) {
-            std::this_thread::sleep_for(transient_file_io_retry_delay);
-          }
-        }
-        if (!acquired) {
-          throw worker_error(
-            (!child.running() ?
-               "analysis exited before publishing the expected trace snapshot: " :
-               "cannot read bounded adaptive trace snapshot: ") +
-            last_snapshot_error
-          );
-        }
-        nlohmann::json value;
-        try {
-          // Atomic publication makes successfully acquired bytes immutable. Malformed JSON is
-          // producer corruption, not a transient sharing race, and must fail immediately.
-          value = wire::parse_json_without_duplicate_keys(bytes);
-        } catch (const std::exception &exception) {
-          throw worker_error(
-            "invalid bounded adaptive trace JSON: " +
-            std::string(exception.what())
-          );
-        }
-        remove_transient_file_checked(snapshot);
-        return value;
-      }
-
-      void ensure_open(const process_status_t &child) {
-        const auto deadline = std::chrono::steady_clock::now() + child_timeout;
-        while (std::chrono::steady_clock::now() < deadline) {
-          stream_.open(path_, std::ios::binary);
-          if (stream_) {
-            return;
-          }
-          stream_.clear();
-          if (!child.running()) {
-            throw worker_error("analysis exited before publishing its trace");
-          }
-          std::this_thread::sleep_for(child_poll);
-        }
-        throw worker_error("timed out opening adaptive trace");
-      }
-
-      std::string read_complete_line(const process_status_t &child) {
-        const auto deadline = std::chrono::steady_clock::now() + child_timeout;
-        while (std::chrono::steady_clock::now() < deadline) {
-          const auto position = stream_.tellg();
-          std::string line;
-          if (std::getline(stream_, line)) {
-            if (line.size() > 1024 * 1024) {
-              throw worker_error("adaptive trace record is unreasonably large");
-            }
-            return line;
-          }
-          stream_.clear();
-          stream_.seekg(position);
-          if (!child.running()) {
-            throw worker_error("analysis exited before publishing the expected trace");
-          }
-          std::this_thread::sleep_for(child_poll);
-        }
-        throw worker_error("timed out tailing adaptive trace");
-      }
-
-      nlohmann::json parse_line(const std::string &line) {
-        try {
-          return wire::parse_json_without_duplicate_keys(line);
-        } catch (const std::exception &exception) {
-          throw worker_error(
-            std::string {"invalid adaptive trace JSON: "} + exception.what()
-          );
-        }
-      }
-
-      fs::path path_;
-      bool bounded_snapshot_ = false;
-      std::ifstream stream_;
-      std::uint64_t frame_count_ = 0;
     };
 
     std::string codec_name_for_request(const std::string &codec) {
@@ -6362,42 +5879,32 @@ namespace offline_sbs {
         media_contract_json(media)
       );
 
-      // Refuse to start TensorRT unless the harness can publish each production SBS frame
+      // Refuse to start TensorRT unless the native runner can publish each production SBS frame
       // directly from the same causal estimator/renderer pass. Offline conversion deliberately
       // removes wall-clock pacing; it does not replace the online camera, OCR, conditioning,
       // or renderer state machines with an offline replay implementation.
       const auto capabilities_path = spec.result_directory / "native-capabilities.json";
-      run_logged(
-        {
-          path_utf8(spec.sunshine_executable),
-          path_utf8(spec.sunshine_config),
-          "--sbs-bench",
-          "--capabilities",
-          path_utf8(capabilities_path),
-        },
-        spec.sunshine_executable.parent_path(),
-        work / "logs" / "native-capabilities.log"
-      );
+      if (write_native_capabilities(path_utf8(capabilities_path)) != 0) {
+        throw worker_error("cannot publish native SBS production capabilities");
+      }
       const auto capabilities = read_json(capabilities_path);
       const auto &native = capabilities.at("native_whole_clip");
-      if (capabilities.value("schema", 0) != 1 || native.value("follow_protocol_schema", 0) != 2 || native.value("follow_wakeup", "") != "windows-directory-change-notification" || native.value("adaptive_state_schema", 0u) != sbs_adaptive_state::schema_version || native.value("adaptive_state_contract_canonical_sha256", "") != sbs_adaptive_state::contract_canonical_sha256 || native.value("renderer", "") != "depth-coordinate-v2-live-signed-parallax" || !native.value("direct_conversion_follow", false) || !native.value("direct_conversion_single_pass", false) || !native.value("atomic_sbs_publication", false) || !native.value("transient_raster_cap_preflight", false)) {
-        throw worker_error("native SBS harness lacks the required direct conversion contract");
+      if (capabilities.value("schema", 0) != 1 || native.value("production_runner", "") != "typed-native-pass-v1" || native.value("native_evidence_transport", "") != completion_channel_t::name || native.value("native_evidence_wakeup", "") != "condition-variable" || native.value("native_evidence_protocol_schema", 0) != 1 || native.value("native_evidence_float_representation", "") != "finite-native-float32" || native.value("frame_transport", "") != raw_frame_transport::name || native.value("adaptive_state_schema", 0u) != sbs_adaptive_state::schema_version || native.value("adaptive_state_contract_canonical_sha256", "") != sbs_adaptive_state::contract_canonical_sha256 || native.value("renderer", "") != "depth-coordinate-v2-live-signed-parallax" || !native.value("direct_conversion_follow", false) || !native.value("direct_conversion_single_pass", false) || !native.value("atomic_sbs_publication", false) || !native.value("transient_raster_cap_preflight", false)) {
+        throw worker_error("native SBS runner lacks the required direct conversion contract");
       }
       if (
         !native.contains("source_scope") ||
         !offline_full_frame_source_scope_is_valid(native["source_scope"])
       ) {
         throw worker_error(
-          "native SBS harness is not isolated to selected-input full-frame processing"
+          "native SBS runner is not isolated to selected-input full-frame processing"
         );
       }
 
       const auto analysis_input = work / "analysis-input";
-      // The per-frame adaptive trace, harness progress, and (for conversion) atomic SBS raster
-      // are transient products of one causal production pass. Keep them below native-work so
-      // the manager's identity-pinned cleanup removes them after success, failure, or
-      // cancellation. Durable bounded evidence is emitted separately as the worker result
-      // contract.
+      // These directories retain source identity and the causal pass's bounded final contracts.
+      // Per-frame pixels and completion evidence travel only through owned memory channels.
+      // The manager's identity-pinned cleanup still owns all transient native-work artifacts.
       const auto analysis_output = work / "analysis-output";
       fs::create_directories(analysis_input, ec);
       fs::create_directories(analysis_output, ec);
@@ -6416,33 +5923,20 @@ namespace offline_sbs {
         media,
         work / "logs" / "analysis-decoder.log",
       };
-      directory_change_watcher_t analysis_output_watcher {analysis_output};
-      std::vector<std::string> analysis_command {
-        "--frames",
-        path_utf8(analysis_input),
-        "--follow",
-        "--follow-format",
-        analysis_decoder.format(),
-        "--follow-count",
-        std::to_string(media.frames.size()),
-        "--out",
-        path_utf8(analysis_output),
-        "--artifacts",
-        spec.operation == "convert" ? "conversion" : "adaptive",
-        "--bounded-adaptive-state",
-        "--observation-timeline",
-        path_utf8(observation_timeline),
+      const auto expected_source_format = media.color == media_color_e::sdr ? raw_pixel_format::bgra8 : raw_pixel_format::gbrpf32le;
+      native_pass_settings analysis_settings {
+        .source_identity_directory = path_utf8(analysis_input),
+        .transient_output_directory = path_utf8(analysis_output),
+        .observation_timeline = path_utf8(observation_timeline),
+        .source_format = expected_source_format,
+        .frame_count = media.frames.size(),
+        .operation = spec.operation == "convert" ? native_pass_operation::convert : native_pass_operation::analyze,
+        .transient_raster_hard_cap_bytes = spec.transient_raster_hard_cap_bytes,
       };
-      if (spec.operation == "convert") {
-        analysis_command.insert(analysis_command.end(), {
-          "--transient-raster-hard-cap-bytes",
-          std::to_string(spec.transient_raster_hard_cap_bytes),
-        });
-      }
       raw_frame_transport transport(spec.transient_raster_hard_cap_bytes);
-      analysis_process_t analysis(std::move(analysis_command), transport);
-      trace_tail_t trace(analysis_output, true);
-      bool analysis_done = false;
+      analysis_process_t analysis(std::move(analysis_settings), transport);
+      completion_header_t analysis_header;
+      std::optional<completion_terminal_t> analysis_terminal;
       std::uint64_t peak_live_raster_bytes = 0;
       std::optional<std::uint64_t> analysis_source_raster_bytes;
       std::uint32_t sbs_width = 0;
@@ -6452,7 +5946,6 @@ namespace offline_sbs {
       std::optional<std::uint64_t> conversion_overlap_raster_bound;
       std::optional<std::uint64_t> conversion_sbs_artifact_bound;
       std::unique_ptr<whole_clip_encoder_t> conversion_encoder;
-      nlohmann::json trace_header;
       nlohmann::json timeline_contract =
         spec.operation != "convert" ?
           nlohmann::json {
@@ -6520,77 +6013,66 @@ namespace offline_sbs {
               transport.source.publish(std::move(source));
               ++next_source_index;
             } catch (...) {
-              transport.cancel();
+              transport.source.cancel();
+              transport.sbs.cancel();
               throw;
             }
           }
         };
 
         fill_source_window();
+        const auto completion_timeout = std::chrono::duration_cast<std::chrono::milliseconds>(child_timeout);
+        analysis_header = transport.completion.receive_header(completion_timeout);
+        analysis_header.validate();
+        if (analysis_header.source_format != expected_source_format ||
+            analysis_header.source_frame_count != media.frames.size() ||
+            analysis_header.first_sequence != 1 ||
+            analysis_header.sbs_enabled != (spec.operation == "convert")) {
+          throw worker_error("native completion header differs from the exact source/operation");
+        }
         while (!source_queue.empty()) {
           const auto queued_source = source_queue.front();
           const auto &timing = *queued_source.timing;
           const auto current_source_raster_bytes = queued_source.bytes;
-          const auto progress = read_progress(
-            analysis_output / "follow_progress.json",
-            analysis,
-            timing.sequence,
-            spec.operation == "convert" ? "conversion" : "analysis",
-            &analysis_output_watcher
-          );
+          const auto completion = transport.completion.receive_frame(timing.sequence, completion_timeout);
+          completion.validate();
           const bool converting = spec.operation == "convert";
-          const auto expected_artifact_mode =
-            converting ? std::string_view {"conversion"} :
-                         std::string_view {"adaptive"};
-          const auto expected_frame_id = frame_id(timing.sequence);
+          const auto &completed_source = completion.source;
           if (
-            progress.value("status", "") != "running" ||
-            progress.value("input_format", "") !=
-              analysis_decoder.format() ||
-            progress.value("artifact_mode", "") != expected_artifact_mode ||
-            progress.value("processed_count", 0ull) != timing.sequence ||
-            progress.value("source_frame_count", 0ull) != timing.sequence ||
-            progress.value("first_sequence", 0ull) != 1 ||
-            progress.value("last_completed_sequence", 0ull) !=
-              timing.sequence ||
-            progress.value("last_frame_id", "") != expected_frame_id ||
-            progress.value("last_completed_frame_id", "") !=
-              expected_frame_id
+            completed_source.schema != 1 || completed_source.sequence != timing.sequence ||
+            completed_source.pts != timing.pts ||
+            completed_source.time_base_numerator != media.time_base.numerator ||
+            completed_source.time_base_denominator != media.time_base.denominator ||
+            completed_source.width != media.width || completed_source.height != media.height ||
+            completed_source.format != expected_source_format ||
+            completion.sbs.has_value() != converting
           ) {
-            throw worker_error("causal pass global sequence ACK mismatch");
+            throw worker_error("native completion differs from the exact source timeline/raster/operation");
           }
-          if (timing.sequence == 1) {
-            trace_header = trace.read_header(analysis);
-          }
-          validate_trace_frame(trace.read_frame(analysis, timing.sequence), timing);
 
           std::uint64_t current_live_raster_bytes = source_raster_bound;
           if (converting) {
-            const auto progress_sbs_width =
-              progress.value("sbs_width", 0u);
-            const auto progress_sbs_height =
-              progress.value("sbs_height", 0u);
-            if (progress.value("sbs_frame_count", 0ull) != timing.sequence ||
-                progress_sbs_width == 0 || progress_sbs_height == 0) {
+            const auto &completed_sbs = *completion.sbs;
+            const auto completed_sbs_width = completed_sbs.width;
+            const auto completed_sbs_height = completed_sbs.height;
+            if (completed_sbs_width == 0 || completed_sbs_height == 0 || completed_sbs.format != (media.color == media_color_e::sdr ? raw_pixel_format::bgra8 : raw_pixel_format::rgba16f)) {
               throw worker_error(
-                "conversion ACK lacks its direct SBS geometry/frame"
+                "conversion completion lacks its direct SBS geometry/format"
               );
             }
             if (timing.sequence == 1) {
-              sbs_width = progress_sbs_width;
-              sbs_height = progress_sbs_height;
-            } else if (sbs_width != progress_sbs_width ||
-                       sbs_height != progress_sbs_height) {
+              sbs_width = completed_sbs_width;
+              sbs_height = completed_sbs_height;
+            } else if (sbs_width != completed_sbs_width ||
+                       sbs_height != completed_sbs_height) {
               throw worker_error(
                 "direct SBS geometry changed during conversion"
               );
             }
             auto sbs = transport.sbs.receive(timing.sequence);
-            if (sbs.header.width != sbs_width || sbs.header.height != sbs_height ||
-                sbs.header.pts != timing.pts || sbs.header.time_base_numerator != media.time_base.numerator ||
-                sbs.header.time_base_denominator != media.time_base.denominator ||
-                sbs.header.format != (media.color == media_color_e::sdr ? raw_pixel_format::bgra8 : raw_pixel_format::rgba16f))
+            if (sbs.header.schema != 1 || sbs.header.sequence != timing.sequence || sbs.header.width != sbs_width || sbs.header.height != sbs_height || sbs.header.pts != timing.pts || sbs.header.time_base_numerator != media.time_base.numerator || sbs.header.time_base_denominator != media.time_base.denominator || sbs.header.format != (media.color == media_color_e::sdr ? raw_pixel_format::bgra8 : raw_pixel_format::rgba16f)) {
               throw worker_error("raw SBS output header differs from the exact source timeline/geometry/color");
+            }
             const auto raw_sbs_size = sbs.bytes();
             if (!conversion_encoder) {
               conversion_sbs_artifact_bound = std::uint64_t(sbs_width) * sbs_height *
@@ -6645,13 +6127,10 @@ namespace offline_sbs {
             try {
               conversion_encoder->publish(timing.sequence, std::move(sbs));
             } catch (...) {
-              transport.cancel();
+              transport.source.cancel();
+              transport.sbs.cancel();
               throw;
             }
-          } else if (progress.value("sbs_frame_count", 0ull) != 0 ||
-                     progress.value("sbs_width", 0u) != 0 ||
-                     progress.value("sbs_height", 0u) != 0) {
-            throw worker_error("analysis-only ACK unexpectedly reports SBS output");
           }
           peak_live_raster_bytes = std::max(
             peak_live_raster_bytes,
@@ -6672,21 +6151,31 @@ namespace offline_sbs {
           );
         }
         transport.source.finish();
-        analysis_done = true;
+        // The native pass waits for the final source ACK before publishing its terminal.
+        // Record that status before terminate() performs full transport cancellation.
+        analysis_terminal = transport.completion.wait_finished(completion_timeout);
         const int analysis_code = analysis.wait(
           std::chrono::duration_cast<std::chrono::milliseconds>(child_timeout)
         );
-        if (analysis_code != 0) {
+        if (analysis_code != analysis_terminal->exit_code || analysis_code != 0) {
           throw worker_error(
-            "native analysis exited " + std::to_string(analysis_code)
+            "native analysis exited " + std::to_string(analysis_code) +
+            " (terminal " + std::to_string(analysis_terminal->exit_code) + "): " + analysis_terminal->error
           );
+        }
+        if (analysis_terminal->source_frame_count != media.frames.size() || analysis_terminal->adaptive_frame_count != media.frames.size() || analysis_terminal->sbs_frame_count != (spec.operation == "convert" ? media.frames.size() : 0)) {
+          throw worker_error("native analysis terminal counts differ from the exact source/operation");
         }
         analysis.terminate();
         analysis_decoder.finish();
-        trace.finish(media.frames.size());
       } catch (const std::exception &exception) {
-        if (!analysis_done) {
-          publish_producer_failed(analysis_input, exception.what());
+        if (!analysis_terminal) {
+          // Ordinary runner failure publishes first, then cancels only its pixel channels.
+          // Worker-initiated abort or an exceptional unnotified exit may have no terminal yet.
+          try {
+            analysis_terminal = transport.completion.wait_finished(0ms);
+          } catch (...) {
+          }
         }
         analysis.terminate();
         analysis_decoder.abort();
@@ -6735,6 +6224,9 @@ namespace offline_sbs {
           expected_follow_format ||
         analysis_runtime.frame_transport.value_or("") != raw_frame_transport::name ||
         analysis_runtime.follow_frame_pattern.has_value() ||
+        analysis_runtime.follow_done_sentinel.has_value() ||
+        analysis_runtime.follow_failed_sentinel.has_value() ||
+        analysis_runtime.follow_progress_file.has_value() ||
         analysis_runtime.input_frame_format != expected_input_frame_format ||
         analysis_runtime.scene_cache_write ||
         analysis_runtime.scene_cache_replay
@@ -6758,33 +6250,25 @@ namespace offline_sbs {
             "causal conversion did not attest its complete direct SBS stream"
           );
         }
-      } else if (direct_sbs.enabled || direct_sbs.frame_count != 0 ||
-                 direct_sbs.width != 0 || direct_sbs.height != 0 ||
-                 direct_sbs.atomic_publication ||
-                 analysis_runtime.follow_atomic_sbs_publication) {
+      } else if (direct_sbs.enabled || direct_sbs.frame_count != 0 || direct_sbs.width != 0 || direct_sbs.height != 0 || direct_sbs.atomic_publication || analysis_runtime.follow_atomic_sbs_publication) {
         throw worker_error("analysis-only pass unexpectedly attested SBS output");
       }
-      const auto &trace_config = trace_header.at("config");
       if (
-        !trace_config.is_object() ||
-        trace_config.value("model", "") != analysis_runtime.model ||
-        trace_config.value("model", "") != typed_analysis_contract.model ||
-        trace_config.value(
-          "depth_reuse_interval", 0
-        ) != analysis_runtime.depth_reuse_interval ||
-        trace_config.value(
-          "pop_strength", std::numeric_limits<double>::quiet_NaN()
-        ) != analysis_runtime.pop_strength
+        analysis_header.model != analysis_runtime.model ||
+        analysis_header.model != typed_analysis_contract.model ||
+        analysis_header.depth_reuse_interval != analysis_runtime.depth_reuse_interval ||
+        analysis_header.pop_strength != analysis_runtime.pop_strength
       ) {
         throw worker_error(
-          "adaptive trace config disagrees with the authenticated analysis runtime"
+          "completion header config disagrees with the authenticated analysis runtime"
         );
       }
       const auto &analysis_state = typed_analysis_contract.adaptive_state;
       if (
-        analysis_state.transport != "atomic-latest-v1" ||
-        analysis_state.header_file.value_or("") != "adaptive_state_header.json" ||
-        analysis_state.frame_file.value_or("") != "adaptive_state_frame.json" ||
+        analysis_state.transport != completion_channel_t::name ||
+        analysis_state.header_file.has_value() ||
+        analysis_state.frame_file.has_value() ||
+        analysis_state.file.has_value() ||
         analysis_state.retained_history ||
         analysis_state.schema.value_or(0) != sbs_adaptive_state::schema_version ||
         analysis_state.capture.value_or("") != sbs_adaptive_state::capture ||

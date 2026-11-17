@@ -124,6 +124,7 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/offline_sbs_job.h"
         "${CMAKE_SOURCE_DIR}/src/offline_sbs_worker.cpp"
         "${CMAKE_SOURCE_DIR}/src/offline_sbs_worker.h"
+        "${CMAKE_SOURCE_DIR}/src/offline_sbs_runner.h"
         "${CMAKE_SOURCE_DIR}/src/gpu_workload_arbiter.cpp"
         "${CMAKE_SOURCE_DIR}/src/gpu_workload_arbiter.h"
         "${CMAKE_SOURCE_DIR}/src/platform/common.h"
