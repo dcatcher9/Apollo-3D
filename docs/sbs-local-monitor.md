@@ -52,6 +52,11 @@ windowed mode before entering local 3D. If no physical display is left when 3D e
 after the only monitor is unplugged, there is nothing to restore: Sunshine releases the private
 source and leaves window placement to Windows, so a remote session can still start.
 
+G-SYNC may stay enabled for games. In its windowed mode the driver applies variable refresh to
+whichever program owns the foreground window, and would stop holding Sunshine's images to the
+refresh whenever a Sunshine window, such as its tray menu, came to the front. Sunshine's own NVIDIA
+driver profile therefore requests a fixed refresh for `sunshine.exe`.
+
 Unlock Windows and dismiss its lock or sign-in screen before starting 3D. A lock, sign-in, or
 permission-screen transition stops the monitor session and restores 2D. Start 3D again after
 returning to the ordinary desktop.
