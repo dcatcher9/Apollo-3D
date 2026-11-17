@@ -33,6 +33,7 @@ typedef enum _D3DKMT_GPU_PREFERENCE_QUERY_STATE : DWORD {
 #include "capture_gpu_scheduling.h"
 #include "display.h"
 #include "misc.h"
+#include "src/capture_display_retirement.h"
 #include "src/config.h"
 #include "src/display_device.h"
 #include "src/logging.h"
@@ -1513,25 +1514,35 @@ namespace platf {
   std::shared_ptr<display_t> display(
     const std::string &display_name,
     const video::config_t &config,
-    capture_backend_e preferred_backend
+    capture_backend_e preferred_backend,
+    std::weak_ptr<capture_display_retirement_t> retirement
   ) {
+    const bool retirement_requested = !retirement.expired();
     auto open_backend = [&](capture_backend_e backend) -> std::shared_ptr<display_t> {
       if (backend == capture_backend_e::ddup) {
-        auto disp = std::make_shared<dxgi::display_ddup_vram_t>();
+        auto disp = retirement_requested ? make_unarmed_capture_display<dxgi::display_ddup_vram_t>() :
+                                           std::make_shared<dxgi::display_ddup_vram_t>();
         return !disp->init(config, display_name) ? std::move(disp) : nullptr;
       }
 
-      auto disp = std::make_shared<dxgi::display_wgc_vram_t>();
+      auto disp = retirement_requested ? make_unarmed_capture_display<dxgi::display_wgc_vram_t>() :
+                                         std::make_shared<dxgi::display_wgc_vram_t>();
       return !disp->init(config, display_name) ? std::move(disp) : nullptr;
     };
 
     if (auto disp = open_backend(preferred_backend)) {
+      if (retirement_requested && !arm_capture_display_retirement(disp, retirement)) {
+        return {};
+      }
       return disp;
     }
     const auto fallback_backend = preferred_backend == capture_backend_e::ddup ?
                                     capture_backend_e::wgc :
                                     capture_backend_e::ddup;
     if (auto disp = open_backend(fallback_backend)) {
+      if (retirement_requested && !arm_capture_display_retirement(disp, retirement)) {
+        return {};
+      }
       return disp;
     }
 

@@ -11,6 +11,7 @@
 #include <thread>
 
 // local includes
+#include "capture_display_retirement.h"
 #include "config.h"
 #include "depth_coordinate_v2.h"
 #include "display_device.h"
@@ -25,6 +26,7 @@
 #include "sync.h"
 #include "tracked_async_worker.h"
 #include "video.h"
+#include "video_capture_generation.h"
 #include "video_capture_test.h"
 #include "video_encode_pipeline.h"
 #include "video_encode_session.h"
@@ -557,7 +559,8 @@ namespace video {
       ,
       detail::capture_worker_test_callback_t test_callback = nullptr,
       void *test_state = nullptr,
-      detail::capture_worker_test_callback_t test_before_admission = nullptr
+      detail::capture_worker_test_callback_t test_before_admission = nullptr,
+      std::shared_ptr<const detail::capture_reinit_test_hooks_t> test_platform = nullptr
 #endif
     ):
         images_(std::move(images)),
@@ -566,7 +569,8 @@ namespace video {
         ,
         test_callback_(test_callback),
         test_state_(test_state),
-        test_before_admission_(test_before_admission)
+        test_before_admission_(test_before_admission),
+        test_platform_(std::move(test_platform))
 #endif
         ,
         thread_(&capture_session_t::run, this) {
@@ -586,6 +590,7 @@ namespace video {
       // cancellation and join so the capture worker can leave its display-reference drain.
       images_->stop();
       run_control_.stop();
+      generations_.stop();
       if (thread_.joinable()) {
         thread_.join();
       }
@@ -595,13 +600,12 @@ namespace video {
       return run_control_.running();
     }
 
-    std::shared_ptr<platf::display_t> current_display() {
-      auto lock = display_wp_.lock();
-      return display_wp_->lock();
+    detail::capture_generation_handoff_t::display_lease_t try_acquire_display() {
+      return generations_.acquire();
     }
 
-    safe::signal_t &reinit_event() {
-      return reinit_event_;
+    bool reinit_pending() const {
+      return generations_.reinit_pending();
     }
 
     void set_live_video_mode(std::optional<video_mode_change_t> mode) {
@@ -621,8 +625,7 @@ namespace video {
     img_event_t images_;
     config_t config_;
     safe::signal_t run_control_;
-    safe::signal_t reinit_event_;
-    sync_util::sync_t<std::weak_ptr<platf::display_t>> display_wp_;
+    detail::capture_generation_handoff_t generations_;
 
     // Latest live video mode (0x3007) applied by the encode thread. run() folds it into
     // its own capture config so a *later* display reinitialization rebuilds at the current mode
@@ -634,6 +637,7 @@ namespace video {
     detail::capture_worker_test_callback_t test_callback_;
     void *test_state_;
     detail::capture_worker_test_callback_t test_before_admission_;
+    std::shared_ptr<const detail::capture_reinit_test_hooks_t> test_platform_;
 #endif
 
     std::thread thread_;  ///< Last: run() starts only after all referenced state exists.
@@ -737,12 +741,13 @@ namespace video {
     std::shared_ptr<platf::display_t> &disp,
     const std::string &display_name,
     const config_t &config,
-    platf::capture_backend_e preferred_backend = platf::capture_backend_e::ddup
+    platf::capture_backend_e preferred_backend = platf::capture_backend_e::ddup,
+    std::weak_ptr<platf::capture_display_retirement_t> retirement = {}
   ) {
     // We try this twice, in case we still get an error on reinitialization
     for (int x = 0; x < 2; ++x) {
       disp.reset();
-      disp = platf::display(display_name, config, preferred_backend);
+      disp = platf::display(display_name, config, preferred_backend, retirement);
       if (disp) {
         break;
       }
@@ -818,13 +823,12 @@ namespace video {
     auto &images = images_;
     auto &config = config_;
     auto &run_control = run_control_;
-    auto &display_wp = display_wp_;
-    auto &reinit_event = reinit_event_;
     auto &live_video_mode = live_video_mode_;
 
     auto fg = util::fail_guard([&]() {
       run_control.stop();
       images->stop();
+      generations_.stop();
     });
 
 #ifdef SUNSHINE_TESTS
@@ -848,44 +852,89 @@ namespace video {
     std::vector<std::string> display_names;
     int display_p = -1;
     std::shared_ptr<platf::display_t> disp;
+    auto generation = generations_.begin();
+    if (!generation) {
+      return;
+    }
+    // The capture thread detaches on every exit. A final owner arriving later deletes normally;
+    // a display already returned to this thread is destroyed here, outside admission/slot locks.
+    auto detach_generation = util::fail_guard([&]() {
+      (void) generations_.revoke(generation);
+      auto returned = generation->retirement()->detach();
+    });
     capture_backend_failover_t capture_failover;
     // Display-change evidence starts before a duplication opens: a change after open invalidates it.
-    auto display_epoch_at_open = platf::display_change_epoch();
+    auto display_epoch_at_open =
+#ifdef SUNSHINE_TESTS
+      test_platform_ ? test_platform_->display_change_epoch() :
+#endif
+      platf::display_change_epoch();
     std::string active_display_name;
-    const auto initial_display_name = proc::proc.get_display_name();
+    const auto initial_display_name =
+#ifdef SUNSHINE_TESTS
+      test_platform_ ? test_platform_->preferred_display_name() :
+#endif
+      proc::proc.get_display_name();
     if (!initial_display_name.empty()) {
       active_display_name = initial_display_name;
-      disp = platf::display(
-        initial_display_name,
-        config,
-        capture_failover.preferred_backend()
-      );
+#ifdef SUNSHINE_TESTS
+      if (test_platform_) {
+        disp = test_platform_->open_display(initial_display_name, config, capture_failover.preferred_backend(), generation->retirement());
+      } else
+#endif
+        disp = platf::display(
+          initial_display_name,
+          config,
+          capture_failover.preferred_backend(),
+          generation->retirement()
+        );
       if (disp) {
         capture_failover.note_backend_opened(disp->capture_backend());
       }
     }
+    if (!disp && detail::capture_display_release_wait_cancelled(run_control.running(), images->running())) {
+      return;
+    }
     if (!disp) {
       // Get all the monitor names now, rather than at boot, to
       // get the most up-to-date list available monitors
+#ifdef SUNSHINE_TESTS
+      if (test_platform_) {
+        test_platform_->refresh_displays(display_names, display_p, {});
+      } else
+#endif
       refresh_displays(display_names, display_p);
       if (active_display_name != display_names[display_p]) {
         capture_failover.reset();
         active_display_name = display_names[display_p];
       }
-      disp = platf::display(
-        active_display_name,
-        config,
-        capture_failover.preferred_backend()
-      );
+#ifdef SUNSHINE_TESTS
+      if (test_platform_) {
+        disp = test_platform_->open_display(active_display_name, config, capture_failover.preferred_backend(), generation->retirement());
+      } else
+#endif
+        disp = platf::display(
+          active_display_name,
+          config,
+          capture_failover.preferred_backend(),
+          generation->retirement()
+        );
       if (disp) {
         capture_failover.note_backend_opened(disp->capture_backend());
+#ifdef SUNSHINE_TESTS
+        if (test_platform_) {
+          test_platform_->set_display_name(active_display_name);
+        } else
+#endif
         proc::proc.set_display_name(active_display_name);
       } else {
         return;
       }
     }
 
-    display_wp = disp;
+    if (!generations_.publish(generation, disp)) {
+      return;
+    }
 
     constexpr auto capture_buffer_size = 12;
     std::list<std::shared_ptr<platf::img_t>> imgs(capture_buffer_size);
@@ -985,6 +1034,11 @@ namespace video {
     };
 
     // Capture takes place on this thread
+#ifdef SUNSHINE_TESTS
+    if (test_platform_) {
+      test_platform_->adjust_thread_priority();
+    } else
+#endif
     platf::adjust_thread_priority(platf::thread_priority_e::critical);
 
     bool capture_cursor = true;
@@ -1018,6 +1072,9 @@ namespace video {
             captured_frames,
             std::chrono::steady_clock::now() - capture_started,
             display_epoch_at_open,
+#ifdef SUNSHINE_TESTS
+            test_platform_ ? test_platform_->display_change_epoch() :
+#endif
             platf::display_change_epoch(),
           })) {
         BOOST_LOG(warning) << "Desktop Duplication failed repeatedly before stable capture without a "sv
@@ -1030,7 +1087,7 @@ namespace video {
           [[fallthrough]];
         case platf::capture_e::reinit:
           {
-            reinit_event.raise(true);
+            (void) generations_.revoke(generation);
             // The encode loop releases the display only once it sees the reinit. An independent
             // provider's image wait can last until its keepalive, so end it now.
             if (config.encode_wake) {
@@ -1042,22 +1099,34 @@ namespace video {
               img.reset();
             }
 
-            // display_wp is modified in this thread only
-            // Wait for the other shared_ptr's of display to be destroyed.
-            // New displays will only be created in this thread.
-            while (display_wp->use_count() != 1) {
-              // Free images that weren't consumed by the encoder. These can reference the display and prevent
-              // the ref count from reaching 1. We do this here rather than on the encoder thread to avoid race
-              // conditions where the encoding loop might free a good frame after reinitializing if we capture
-              // a new frame here before the encoder has finished reinitializing.
+            // Revoke admission before dropping capture's strong reference. The original control
+            // block includes ordinary borrowers, partial/retiring encoders and shared_from_this.
+            disp.reset();
+            std::unique_ptr<platf::display_t> returned_display;
+            while (!(returned_display = generation->retirement()->wait_for(0ms))) {
+              // Preserve the old wait's drain, including a retained source returned by encode_run.
               while (images->try_pop()) {
               }
+
+#ifdef SUNSHINE_TESTS
+              if (test_platform_ && test_platform_->waited_for_display_release) {
+                test_platform_->waited_for_display_release();
+              }
+#endif
 
               if (detail::capture_display_release_wait_cancelled(run_control.running(), images->running())) {
                 return;
               }
-
-              std::this_thread::sleep_for(20ms);
+              returned_display = generation->retirement()->wait_for(20ms);
+              if (returned_display) {
+                break;
+              }
+            }
+            // Normal reinitialization deletes on the capture thread, before topology or reopen.
+            returned_display.reset();
+            // A plain Windows image does not retain display_t. Always discard it after final
+            // display release, even when no encoder ever acquired this generation.
+            while (images->try_pop()) {
             }
 
             // Adopt the newest live video mode before rebuilding the display. Without this a
@@ -1079,8 +1148,14 @@ namespace video {
             // The old DDUP/NVENC references are gone. Complete the owned topology
             // repair before probing outputs, rather than racing a game-exit repair
             // on the session-monitor worker and then opening a transient display.
-            disp.reset();
 #ifdef _WIN32
+#ifdef SUNSHINE_TESTS
+            if (test_platform_) {
+              if (!test_platform_->reconcile_topology()) {
+                return;
+              }
+            } else {
+#endif
             const auto topology_generation = platf::primary_display::exclusive_session_generation();
             const auto topology = platf::primary_display::detail::reconcile_before_capture(
               [topology_generation]() {
@@ -1103,15 +1178,36 @@ namespace video {
             if (topology == platf::primary_display::detail::capture_reconcile_result_e::exhausted) {
               BOOST_LOG(warning) << "Exclusive display topology is still settling; continuing normal capture recovery."sv;
             }
+#ifdef SUNSHINE_TESTS
+            }
 #endif
-            display_epoch_at_open = platf::display_change_epoch();
+#endif
+            auto next_generation = generations_.begin();
+            if (!next_generation) {
+              return;
+            }
+            generation = std::move(next_generation);
+            display_epoch_at_open =
+#ifdef SUNSHINE_TESTS
+              test_platform_ ? test_platform_->display_change_epoch() :
+#endif
+              platf::display_change_epoch();
             while (run_control.running()) {
               // Release the display before reenumerating displays, since some capture backends
               // only support a single display session per device/application.
               disp.reset();
 
               // Refresh display names since a display removal might have caused the reinitialization
-              auto preferred_display_name = proc::proc.get_display_name();
+              auto preferred_display_name =
+#ifdef SUNSHINE_TESTS
+                test_platform_ ? test_platform_->preferred_display_name() :
+#endif
+                proc::proc.get_display_name();
+#ifdef SUNSHINE_TESTS
+              if (test_platform_) {
+                test_platform_->refresh_displays(display_names, display_p, preferred_display_name);
+              } else
+#endif
               refresh_displays(display_names, display_p, preferred_display_name);
 
               if (active_display_name != display_names[display_p]) {
@@ -1120,14 +1216,25 @@ namespace video {
               }
 
               // reset_display() will sleep between retries
-              reset_display(
-                disp,
-                active_display_name,
-                config,
-                capture_failover.preferred_backend()
-              );
+#ifdef SUNSHINE_TESTS
+              if (test_platform_) {
+                disp = test_platform_->open_display(active_display_name, config, capture_failover.preferred_backend(), generation->retirement());
+              } else
+#endif
+                reset_display(
+                  disp,
+                  active_display_name,
+                  config,
+                  capture_failover.preferred_backend(),
+                  generation->retirement()
+                );
               if (disp) {
                 capture_failover.note_backend_opened(disp->capture_backend());
+#ifdef SUNSHINE_TESTS
+                if (test_platform_) {
+                  test_platform_->set_display_name(active_display_name);
+                } else
+#endif
                 proc::proc.set_display_name(active_display_name);
                 break;
               }
@@ -1136,9 +1243,9 @@ namespace video {
               return;
             }
 
-            display_wp = disp;
-
-            reinit_event.reset();
+            if (!generations_.publish(generation, disp)) {
+              return;
+            }
             continue;
           }
         case platf::capture_e::ok:
@@ -1318,13 +1425,13 @@ namespace video {
     safe::mail_t mail,
     img_event_t images,
     config_t config,
-    std::shared_ptr<platf::display_t> disp,
+    detail::capture_generation_handoff_t::display_lease_t generation,
     std::unique_ptr<nvenc_encode_session_t> session,
-    safe::signal_t &reinit_event,
     detail::encoder_recovery_t &recovery,
     packet_queue_t packets,
     const std::function<void(const video_mode_change_t &)> &on_bitrate_reconfigured
   ) {
+    const auto &disp = generation.display();
     // All session exits retire their backend through its owner. Failed encoding additionally
     // keeps the destruction receipt so capture can wait for the existing recovery gate.
     bool failed = true;
@@ -1439,7 +1546,7 @@ namespace video {
       // Metadata for pixels a live export owned has none to show: capture copies the whole
       // desktop again for the replacement once the guard below releases the output.
       const bool holds_pixels = !last_img || !last_img->pixels_skipped;
-      source.return_for_rebuild(*images, shutdown_event->peek(), reinit_event.peek(), holds_pixels);
+      source.return_for_rebuild(*images, shutdown_event->peek(), generation.revoked(), holds_pixels);
       // The replacement then starts from its black startup input, as this loop may still do:
       // it holds that input back until capture delivers the desktop.
       awaiting_desktop_after_export = !holds_pixels || startup_input_hold.active(std::chrono::steady_clock::now());
@@ -1648,7 +1755,7 @@ namespace video {
       }
       const bool shutting_down = shutdown_event->peek();
       const bool capture_stopped = !images->running();
-      const bool display_reinit_pending = reinit_event.peek();
+      const bool display_reinit_pending = generation.revoked();
 
       // A completed encode_frame(), or a drained pipeline, has no NVENC work in flight, and all
       // submissions run on this thread. Use that serialized seam for a same-geometry/same-cadence
@@ -2320,18 +2427,15 @@ namespace video {
         recovery_wait_logged = false;
       }
 
-      // Wait for the main capture event when the display is being reinitialized
-      if (capture_session.reinit_event().peek()) {
-        std::this_thread::sleep_for(20ms);
+      // Acquisition and revocation share one admission lock. A lease stays bound to this
+      // generation through the entire encode loop, including its retained-source return guard.
+      auto generation = capture_session.try_acquire_display();
+      if (!generation) {
+        // Keep servicing live-mode requests while capture opens or retires a display.
+        std::this_thread::sleep_for(capture_session.reinit_pending() ? 20ms : 1ms);
         continue;
       }
-      // Wait for the display to be ready
-      auto display = capture_session.current_display();
-      if (!display) {
-        // Yield until the capture thread publishes the display instead of spinning a core.
-        std::this_thread::sleep_for(1ms);
-        continue;
-      }
+      const auto &display = generation.display();
 
       // Retune the running capture session every iteration rather than only when the mode
       // changes. The call is a no-op when the cadence already matches, and republishing it
@@ -2620,9 +2724,8 @@ namespace video {
         mail,
         images,
         session_config,
-        display,
+        generation,
         std::move(encode_session),
-        capture_session.reinit_event(),
         recovery,
         packets,
         [&](const video_mode_change_t &mode) {
@@ -2874,6 +2977,45 @@ namespace video {
 
     std::optional<video_mode_change_t> capture_worker_test_t::live_video_mode() const {
       return impl_->capture.live_video_mode();
+    }
+
+    struct capture_reinit_test_t::impl_t {
+      std::shared_ptr<const capture_reinit_test_hooks_t> platform;
+      capture_session_t capture;
+
+      impl_t(config_t config, img_event_t images, capture_reinit_test_hooks_t hooks):
+          platform(std::make_shared<capture_reinit_test_hooks_t>(std::move(hooks))),
+          capture(std::move(images), config, nullptr, nullptr, nullptr, platform) {
+      }
+    };
+
+    capture_reinit_test_t::capture_reinit_test_t(config_t config, img_event_t images, capture_reinit_test_hooks_t hooks) {
+      if (!images || !hooks.preferred_display_name || !hooks.set_display_name || !hooks.refresh_displays || !hooks.open_display || !hooks.adjust_thread_priority || !hooks.display_change_epoch || !hooks.reconcile_topology) {
+        throw std::invalid_argument("The full inert capture worker requires every physical operation");
+      }
+      impl_ = std::make_unique<impl_t>(std::move(config), std::move(images), std::move(hooks));
+    }
+
+    capture_reinit_test_t::~capture_reinit_test_t() = default;
+
+    void capture_reinit_test_t::stop() {
+      impl_->capture.stop();
+    }
+
+    bool capture_reinit_test_t::running() const {
+      return impl_->capture.running();
+    }
+
+    bool capture_reinit_test_t::reinit_pending() const {
+      return impl_->capture.reinit_pending();
+    }
+
+    std::shared_ptr<platf::display_t> capture_reinit_test_t::current_display() {
+      return impl_->capture.try_acquire_display().display();
+    }
+
+    void capture_reinit_test_t::set_live_video_mode(std::optional<video_mode_change_t> mode) {
+      impl_->capture.set_live_video_mode(std::move(mode));
     }
   }  // namespace detail
 #endif

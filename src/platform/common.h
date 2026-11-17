@@ -75,6 +75,8 @@ namespace nvenc {
 }
 
 namespace platf {
+  class capture_display_retirement_t;
+
   // Limited by bits in activeGamepadMask
   constexpr auto MAX_GAMEPADS = 16;
   constexpr std::uint16_t DS5_HAPTICS_PCM_CAPABILITY = 0x200;
@@ -724,12 +726,14 @@ namespace platf {
    * If you require to use this parameter in a separate thread, make a copy of it.
    * @param display_name The name of the monitor that SHOULD be displayed
    * @param config Stream configuration
+   * @param retirement Optional capture-thread ownership-return slot for the selected display.
    * @return The display_t instance, or nullptr when both DDUP and WGC initialization fail.
    */
   std::shared_ptr<display_t> display(
     const std::string &display_name,
     const video::config_t &config,
-    capture_backend_e preferred_backend = capture_backend_e::ddup
+    capture_backend_e preferred_backend = capture_backend_e::ddup,
+    std::weak_ptr<capture_display_retirement_t> retirement = {}
   );
 
   // A list of names accepted by display().

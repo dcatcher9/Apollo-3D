@@ -7598,7 +7598,7 @@ TEST(EncodeWakeLifecycleSourceTests, ReplacementHoldsAPixelLessPredecessorsStart
   ASSERT_NE(retain, std::string::npos);
   EXPECT_LT(hold, retain) << "The guard reads the hold on exit.";
   const auto retain_body = encode_run_guard_body(scope, "auto retain_source = util::fail_guard(");
-  const auto handoff = retain_body.find("source.return_for_rebuild(*images, shutdown_event->peek(), reinit_event.peek(), holds_pixels);");
+  const auto handoff = retain_body.find("source.return_for_rebuild(*images, shutdown_event->peek(), generation.revoked(), holds_pixels);");
   const auto carried = retain_body.find("awaiting_desktop_after_export = !holds_pixels || startup_input_hold.active(");
   ASSERT_NE(handoff, std::string::npos);
   ASSERT_NE(carried, std::string::npos);
@@ -7664,16 +7664,16 @@ TEST(AsyncTeardownLifecycleSourceTests, DrainsTrackedOwnersBeforeProcessGlobals)
   ASSERT_FALSE(main_source.empty());
   ASSERT_FALSE(config_http.empty());
 
-  const auto reinit_wait = video_source.find("while (display_wp->use_count() != 1)");
+  const auto reinit_wait = video_source.find("while (!(returned_display = generation->retirement()->wait_for(0ms)))");
   const auto cancellation = video_source.find(
     "detail::capture_display_release_wait_cancelled(",
     reinit_wait
   );
-  const auto reinit_sleep = video_source.find("std::this_thread::sleep_for(20ms);", cancellation);
+  const auto reinit_wait_for = video_source.find("generation->retirement()->wait_for(20ms)", cancellation);
   ASSERT_NE(reinit_wait, std::string::npos);
   ASSERT_NE(cancellation, std::string::npos);
-  ASSERT_NE(reinit_sleep, std::string::npos);
-  EXPECT_LT(cancellation, reinit_sleep);
+  ASSERT_NE(reinit_wait_for, std::string::npos);
+  EXPECT_LT(cancellation, reinit_wait_for);
 
   // VideoCaptureLifecycleTest exercises the concrete capture owner's stop-before-join order.
 
@@ -8687,13 +8687,21 @@ TEST(CaptureBackendFailoverTest, CaptureLoopsBracketEachAttemptWithDisplayChange
   const auto video_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/video.cpp");
   const auto capture_thread = video_source.find("void capture_session_t::run()");
   ASSERT_NE(capture_thread, std::string::npos);
-  const auto initial_epoch = video_source.find("display_epoch_at_open = platf::display_change_epoch();", capture_thread);
+  const auto initial_epoch_assignment = video_source.find("display_epoch_at_open =", capture_thread);
+  const auto initial_epoch = video_source.find("platf::display_change_epoch();", initial_epoch_assignment);
   const auto initial_open = video_source.find("disp = platf::display(", capture_thread);
-  const auto reopen_epoch = video_source.find("display_epoch_at_open = platf::display_change_epoch();", initial_open);
+  const auto reopen_epoch_assignment = video_source.find("display_epoch_at_open =", initial_open);
+  const auto reopen_epoch = video_source.find("platf::display_change_epoch();", reopen_epoch_assignment);
   const auto reopen = video_source.find("reset_display(", reopen_epoch);
+  ASSERT_NE(initial_epoch_assignment, std::string::npos);
   ASSERT_NE(initial_epoch, std::string::npos);
+  ASSERT_NE(initial_open, std::string::npos);
+  ASSERT_NE(reopen_epoch_assignment, std::string::npos);
   ASSERT_NE(reopen_epoch, std::string::npos);
+  ASSERT_NE(reopen, std::string::npos);
+  EXPECT_LT(initial_epoch_assignment, initial_epoch);
   EXPECT_LT(initial_epoch, initial_open);
+  EXPECT_LT(reopen_epoch_assignment, reopen_epoch);
   EXPECT_LT(reopen_epoch, reopen);
 
   const auto display_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");

@@ -1235,5 +1235,30 @@ namespace platf::dxgi {
   };
 
   native_capture_release_report_t native_capture_release_for_test(bool foreign);
+
+  /** Hold the concrete no-init native backend after its actual capture-display release. */
+  class native_capture_retirement_test_t {
+  public:
+    native_capture_retirement_test_t(
+      std::shared_ptr<display_base_t> display,
+      ::video::detail::tracked_async_worker_pool_t &workers
+    );
+    ~native_capture_retirement_test_t();
+
+    native_capture_retirement_test_t(const native_capture_retirement_test_t &) = delete;
+    native_capture_retirement_test_t &operator=(const native_capture_retirement_test_t &) = delete;
+    native_capture_retirement_test_t(native_capture_retirement_test_t &&) = delete;
+    native_capture_retirement_test_t &operator=(native_capture_retirement_test_t &&) = delete;
+
+    void retire();
+    bool wait_after_capture_release(std::chrono::milliseconds timeout);
+    void release_native_teardown();
+    bool wait_retired(std::chrono::milliseconds timeout);
+    bool gate_timed_out() const;
+
+  private:
+    struct impl_t;
+    std::unique_ptr<impl_t> impl_;
+  };
 #endif
 }  // namespace platf::dxgi
