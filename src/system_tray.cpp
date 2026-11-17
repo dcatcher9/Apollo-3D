@@ -455,6 +455,43 @@ namespace system_tray {
     tray_update(&tray);
   }
 
+  #ifdef _WIN32
+  // While the tray menu is open Sunshine is the foreground program, and Windows was measured to
+  // stop updating the refresh timing it reports for the local 3D presenter: the refresh count and
+  // its timestamp freeze although pictures keep being shown, the presenter cannot keep its clock
+  // and local 3D ends. So while local 3D is requested, a click on the tray icon opens the web
+  // page, which belongs to another program, instead of the menu. The page has the same controls.
+  static WNDPROC tray_window_procedure = nullptr;
+
+  static LRESULT CALLBACK tray_click_guard(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    constexpr UINT tray_callback_message = WM_USER + 1;  // WM_TRAY_CALLBACK_MESSAGE in the tray library.
+    if (message == tray_callback_message && (lparam == WM_LBUTTONUP || lparam == WM_RBUTTONUP) && ar_glasses::local_session_requested()) {
+      BOOST_LOG(info) << "Opening UI from system tray instead of its menu while local 3D is on"sv;
+      launch_ui();
+      return 0;
+    }
+    return CallWindowProcA(tray_window_procedure, window, message, wparam, lparam);
+  }
+
+  static void guard_tray_clicks() {
+    EnumThreadWindows(
+      GetCurrentThreadId(),
+      [](HWND window, LPARAM) -> BOOL {
+        char name[16] {};
+        if (GetClassNameA(window, name, sizeof(name)) && std::string_view {name} == "TRAY"sv) {
+          tray_window_procedure = reinterpret_cast<WNDPROC>(SetWindowLongPtrA(window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(tray_click_guard)));
+          return FALSE;
+        }
+        return TRUE;
+      },
+      0
+    );
+    if (!tray_window_procedure) {
+      BOOST_LOG(warning) << "Could not guard the system tray menu during local 3D"sv;
+    }
+  }
+  #endif
+
   // Threading functions available on all platforms
   static void tray_thread_worker() {
     BOOST_LOG(info) << "System tray thread started"sv;
@@ -469,6 +506,10 @@ namespace system_tray {
       }
       return;
     }
+
+  #ifdef _WIN32
+    guard_tray_clicks();
+  #endif
 
     // Block for tray events until end_tray() wakes the loop. Once the tray window is gone the
     // loop call returns at once without a quit message, so the exit flag ends the loop too.
