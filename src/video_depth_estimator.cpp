@@ -1,4 +1,9 @@
 #include "video_depth_estimator.h"
+#include "live_model_preparation.h"
+
+#ifdef SUNSHINE_TESTS
+  #include "live_model_preparation_test.h"
+#endif
 
 #include "cuda_conditional_graph.h"
 #include "cuda_driver_api.h"
@@ -1622,6 +1627,19 @@ namespace models {
     );
   }
 
+  void detail::begin_live_model_preparation(const config::depth_model_info &model) {
+    set_model_prepare_status(engine_filename(model), engine_build_status::building);
+  }
+
+  void detail::fail_live_model_preparation(const config::depth_model_info &model) {
+    set_model_prepare_status(engine_filename(model), engine_build_status::failed);
+  }
+
+#ifdef SUNSHINE_TESTS
+  void testing::publish_model_preparation_status_for_test(const config::depth_model_info &model, engine_build_status status) {
+    set_model_prepare_status(engine_filename(model), status);
+  }
+#endif
   engine_build_status tensorrt_model_prepare_status(const config::depth_model_info &model) {
     const auto engine_name = engine_filename(model);
     std::lock_guard<std::mutex> lock(g_model_prepare_status_mutex);
@@ -1636,6 +1654,9 @@ namespace models {
   ) {
     const auto status_key = engine_filename(model);
     set_model_prepare_status(status_key, engine_build_status::building);
+#ifdef SUNSHINE_TESTS
+    testing::observe_preparation_stage_for_test(testing::preparation_stage_e::depth_building);
+#endif
     auto failed = util::fail_guard([&]() {
       set_model_prepare_status(status_key, engine_build_status::failed);
     });

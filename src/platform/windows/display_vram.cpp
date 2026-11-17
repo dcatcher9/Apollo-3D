@@ -61,6 +61,7 @@
 #include "src/host_sbs_subtitle_render.h"
 #include "src/host_sbs_v2_geometry.h"
 #include "src/host_subtitle_context.h"
+#include "src/live_model_preparation.h"
 #include "src/logging.h"
 #include "src/model_manager.h"
 #include "src/nvenc/nvenc_config.h"
@@ -74,6 +75,7 @@
 
 #ifdef SUNSHINE_TESTS
   #include "src/tracked_async_worker.h"
+  #include "model_preparation_converter_test.h"
 #endif
 
 #if !defined(SUNSHINE_SHADERS_DIR)  // for testing this needs to be defined in cmake as we don't do an install
@@ -518,6 +520,28 @@ namespace platf::dxgi {
     ::video::launch_async_teardown_worker(std::move(worker));
   }
 
+#ifdef SUNSHINE_TESTS
+  namespace {
+    struct model_preparation_watch_probe_t {
+      std::uint64_t calls = 0;
+      RECT last_rect {};
+      std::weak_ptr<void> token;
+    };
+    thread_local model_preparation_watch_probe_t *active_model_preparation_watch_probe = nullptr;
+
+    std::shared_ptr<void> model_preparation_watch_for_test(RECT rect) {
+      if (!active_model_preparation_watch_probe) {
+        return platf::game3d::watch_game_setup(rect);
+      }
+      auto &probe = *active_model_preparation_watch_probe;
+      ++probe.calls;
+      probe.last_rect = rect;
+      auto token = std::make_shared<unsigned char>(0u);
+      probe.token = token;
+      return token;
+    }
+  }  // namespace
+#endif
   class d3d_base_encode_device final {
   public:
     ~d3d_base_encode_device() {
@@ -3805,11 +3829,17 @@ namespace platf::dxgi {
         return false;
       }
 
-      // Startup model preparation is process-global and may take minutes on first use. It includes
+      // Model GPU preparation is process-global and may take minutes on first AI use. It includes
       // engine compilation, deserialization, execution-context creation, and CUDA warmup. Report
       // that complete wait as loading, but don't duplicate it on this encode device.
       auto active = ::video::host_sbs_v2_depth_model();
       auto build_status = models::tensorrt_model_prepare_status(active);
+      if (build_status == models::engine_build_status::unknown) {
+        if (!models::request_live_model_preparation()) {
+          return false;
+        }
+        build_status = models::tensorrt_model_prepare_status(active);
+      }
       if (build_status != models::engine_build_status::ready) {
         if (build_status == models::engine_build_status::failed) {
           BOOST_LOG(error) << "Startup TensorRT model preparation failed for '"sv << active.name
@@ -6740,9 +6770,15 @@ namespace platf::dxgi {
       game_source_supported = game_transport_supported &&
                               (display->display_rotation == DXGI_MODE_ROTATION_UNSPECIFIED ||
                                display->display_rotation == DXGI_MODE_ROTATION_IDENTITY);
+#ifdef SUNSHINE_TESTS
+      game_setup_watch = ::video::is_game_mode(sbs_mode) ?
+                           model_preparation_watch_for_test({display->offset_x, display->offset_y, display->offset_x + display->width, display->offset_y + display->height}) :
+                           nullptr;
+#else
       game_setup_watch = ::video::is_game_mode(sbs_mode) ?
                            platf::game3d::watch_game_setup({display->offset_x, display->offset_y, display->offset_x + display->width, display->offset_y + display->height}) :
                            nullptr;
+#endif
       // This converter is used by live local/remote presentation only. The offline worker and
       // benchmark own their independent AI renderer and never instantiate this receiver.
       // A fullscreen game may render at the negotiated resolution while Windows presents it at
@@ -7758,6 +7794,350 @@ namespace platf::dxgi {
 
   #include "host_sbs_actual_converter_probe.inc"
   #include "host_sbs_pending_current_colour_probe.inc"
+
+#ifdef SUNSHINE_TESTS
+  namespace testing {
+    namespace {
+      using Microsoft::WRL::ComPtr;
+
+      void preparation_probe_require(bool condition, const char *message) {
+        if (!condition) {
+          throw std::runtime_error(message);
+        }
+      }
+
+      void preparation_probe_hr(HRESULT status, const char *message) {
+        if (FAILED(status)) {
+          throw std::runtime_error(std::string(message) + ": " + std::to_string(static_cast<long>(status)));
+        }
+      }
+
+      ComPtr<IDXGIAdapter1> preparation_probe_adapter(const model_preparation_adapter_t &required) {
+        preparation_probe_require((required.luid_low || required.luid_high) && required.vendor_id && required.device_id,
+          "Preparation probe requires explicit adapter identity");
+        ComPtr<IDXGIFactory1> factory;
+        preparation_probe_hr(CreateDXGIFactory1(IID_PPV_ARGS(&factory)), "Preparation DXGI factory failed");
+        ComPtr<IDXGIAdapter1> selected;
+        unsigned matches = 0;
+        for (UINT index = 0; index != 64u; ++index) {
+          ComPtr<IDXGIAdapter1> candidate;
+          const auto status = factory->EnumAdapters1(index, &candidate);
+          if (status == DXGI_ERROR_NOT_FOUND) {
+            preparation_probe_require(matches == 1u, "Preparation adapter identity missing or ambiguous");
+            return selected;
+          }
+          preparation_probe_hr(status, "Preparation adapter enumeration failed");
+          DXGI_ADAPTER_DESC1 description {};
+          preparation_probe_hr(candidate->GetDesc1(&description), "Preparation adapter description failed");
+          if (description.AdapterLuid.LowPart != required.luid_low || description.AdapterLuid.HighPart != required.luid_high) {
+            continue;
+          }
+          preparation_probe_require(description.VendorId == required.vendor_id && description.DeviceId == required.device_id &&
+              !(description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE),
+            "Preparation adapter hardware identity differs");
+          selected = candidate;
+          ++matches;
+        }
+        throw std::runtime_error("Preparation adapter census exceeded its finite bound");
+      }
+
+      void preparation_probe_device_adapter(ID3D11Device *device, const model_preparation_adapter_t &required) {
+        ComPtr<IDXGIDevice> dxgi;
+        ComPtr<IDXGIAdapter> adapter;
+        DXGI_ADAPTER_DESC description {};
+        preparation_probe_hr(device->QueryInterface(IID_PPV_ARGS(&dxgi)), "Preparation device DXGI query failed");
+        preparation_probe_hr(dxgi->GetAdapter(&adapter), "Preparation device adapter query failed");
+        preparation_probe_hr(adapter->GetDesc(&description), "Preparation actual adapter description failed");
+        preparation_probe_require(description.AdapterLuid.LowPart == required.luid_low && description.AdapterLuid.HighPart == required.luid_high &&
+            description.VendorId == required.vendor_id && description.DeviceId == required.device_id,
+          "Preparation actual D3D device differs from explicit adapter");
+      }
+
+      struct preparation_probe_display_t final: display_vram_t {
+        bool is_hdr() override { return false; }
+        capture_e snapshot(const pull_free_image_cb_t &, std::shared_ptr<platf::img_t> &, std::chrono::milliseconds, bool) override {
+          throw std::logic_error("Preparation probe must never enter physical capture");
+        }
+        capture_e release_snapshot() override {
+          throw std::logic_error("Preparation probe owns no physical capture");
+        }
+      };
+    }  // namespace
+
+    model_preparation_memory_t query_model_preparation_memory(const model_preparation_adapter_t &required) {
+      const auto adapter = preparation_probe_adapter(required);
+      DXGI_ADAPTER_DESC1 description {};
+      preparation_probe_hr(adapter->GetDesc1(&description), "Preparation memory adapter description failed");
+      model_preparation_memory_t result;
+      result.adapter = required;
+      result.description = platf::to_utf8(description.Description);
+      ComPtr<IDXGIAdapter3> adapter3;
+      preparation_probe_hr(adapter.As(&adapter3), "Preparation process memory interface unavailable");
+      result.local_status = adapter3->QueryVideoMemoryInfo(0u, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &result.local);
+      result.nonlocal_status = adapter3->QueryVideoMemoryInfo(0u, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &result.nonlocal);
+      return result;
+    }
+
+    class model_preparation_converter_t::impl_t {
+    public:
+      explicit impl_t(model_preparation_converter_request_t request):
+          request_(std::move(request)),
+          owner_thread_(std::this_thread::get_id()),
+          ready_event_(std::make_shared<safe::event_t<bool>>()) {
+        const auto width = request_.width, height = request_.height;
+        preparation_probe_require(width && height && width <= 4096u && height <= 4096u &&
+            request_.bgra.size() == std::size_t(width) * height * 4u,
+          "Preparation probe source shape or immutable bytes invalid");
+        const auto attributes = GetFileAttributesW(request_.output_root.c_str());
+        preparation_probe_require(request_.output_root.is_absolute() && attributes != INVALID_FILE_ATTRIBUTES &&
+            (attributes & FILE_ATTRIBUTE_DIRECTORY) && !(attributes & FILE_ATTRIBUTE_REPARSE_POINT),
+          "Preparation probe requires an owned absolute ordinary output directory");
+        source_artifact_ = write_artifact("source.bgra8", request_.bgra.data(), request_.bgra.size(), width, height);
+
+        const auto adapter = preparation_probe_adapter(request_.adapter);
+        preparation_probe_require(::platf::dxgi::init() == 0, "Preparation platform shader initialization failed");
+        display_ = std::make_shared<preparation_probe_display_t>();
+        display_->width = display_->width_before_rotation = width;
+        display_->height = display_->height_before_rotation = height;
+        display_->env_width = width;
+        display_->env_height = height;
+        display_->offset_x = display_->offset_y = 0;
+        display_->display_rotation = DXGI_MODE_ROTATION_IDENTITY;
+        display_->capture_format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        display_->next_image_id = 1u;
+        constexpr D3D_FEATURE_LEVEL levels[] {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
+        preparation_probe_hr(D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+          levels, 2u, D3D11_SDK_VERSION, &display_->device, nullptr, &display_->device_ctx), "Preparation source device creation failed");
+        preparation_probe_device_adapter(display_->device.get(), request_.adapter);
+        converter_ = std::make_unique<d3d_base_encode_device>();
+        preparation_probe_require(converter_->init(display_, adapter.Get(), pix_fmt_e::nv12) == 0, "Preparation actual converter initialization failed");
+        preparation_probe_device_adapter(converter_->device.get(), request_.adapter);
+        probe_context_ = {width, height, 0x5052455041524531ull};
+        converter_->probe_context = &probe_context_;
+        converter_->probe_observer = {this, &impl_t::record};
+
+        image_ = display_->alloc_img();
+        preparation_probe_require(image_ && display_->complete_img(image_.get(), false) == 0, "Preparation shared source image allocation failed");
+        auto &image = static_cast<img_d3d_t &>(*image_);
+        preparation_probe_require(image.capture_mutex.get() != nullptr, "Preparation source keyed mutex unavailable");
+        preparation_probe_require(image.capture_mutex->AcquireSync(0u, 5000u) == S_OK, "Preparation immutable source mutex failed");
+        {
+          auto release = util::fail_guard([&image]() { image.capture_mutex->ReleaseSync(0u); });
+          display_->device_ctx->UpdateSubresource(image.capture_texture.get(), 0u, nullptr, request_.bgra.data(), width * 4u, 0u);
+          display_->device_ctx->Flush();
+        }
+        ++source_uploads_;
+        image.blank = false;
+        const auto stamp = std::chrono::steady_clock::now();
+        image_->frame_timestamp = stamp;
+        image_->content_timestamp = stamp;
+        set_mode(::video::SBS_OFF);
+      }
+
+      ~impl_t() {
+        // The real destructor transfers GPU construction/teardown to its existing tracked owner.
+        // Destroy it while observer state, the source and the synthetic context still exist.
+        converter_.reset();
+      }
+
+      void set_mode(::video::sbs_mode_e mode) {
+        assert_owner();
+        preparation_probe_require(mode == ::video::SBS_OFF || mode == ::video::SBS_GAME_MONO || mode == ::video::SBS_AI,
+          "Preparation probe supports flat, no-provider Game mono and actual Host AI only");
+        const auto output_width = mode == ::video::SBS_AI ? request_.width * 2u : request_.width;
+        // Only synchronous initialization sees this finite external factory edge. The real
+        // Game branch still runs; unsupported transport creates no ReShade receiver/provider.
+        config::video_t::sbs_t settings;
+        settings.reshade = false;
+        {
+          auto *previous = std::exchange(active_model_preparation_watch_probe, &watch_probe_);
+          auto restore_watch = util::fail_guard([previous]() { active_model_preparation_watch_probe = previous; });
+          preparation_probe_require(converter_->init_rgb_output(static_cast<int>(output_width), static_cast<int>(request_.height),
+            mode, settings, ready_event_) == 0, "Preparation actual RGB mode initialization failed");
+        }
+        preparation_probe_require(!converter_->reshade_receiver, "Preparation probe unexpectedly constructed a provider receiver");
+        target_.Reset();
+        target_rtv_.Reset();
+        D3D11_TEXTURE2D_DESC description {};
+        description.Width = output_width;
+        description.Height = request_.height;
+        description.MipLevels = description.ArraySize = description.SampleDesc.Count = 1u;
+        description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        description.Usage = D3D11_USAGE_DEFAULT;
+        description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        preparation_probe_hr(converter_->device->CreateTexture2D(&description, nullptr, &target_), "Preparation output allocation failed");
+        preparation_probe_hr(converter_->device->CreateRenderTargetView(target_.Get(), nullptr, &target_rtv_), "Preparation output RTV failed");
+        constexpr float clear[4] {};
+        converter_->device_ctx->ClearRenderTargetView(target_rtv_.Get(), clear);
+        output_width_ = output_width;
+        draw_ = {};
+      }
+
+      model_preparation_converter_snapshot_t observe() const {
+        assert_owner();
+        auto result = draw_;
+        result.conversions = conversions_;
+        result.source_uploads = source_uploads_;
+        result.source_stamp_ticks = image_->frame_timestamp ? image_->frame_timestamp->time_since_epoch().count() : 0;
+        result.content_stamp_ticks = image_->content_timestamp ? image_->content_timestamp->time_since_epoch().count() : 0;
+        if (const auto stamp = converter_->rendered_content_timestamp()) {
+          result.rendered_stamp_ticks = stamp->time_since_epoch().count();
+        }
+        result.mode = converter_->sbs_mode;
+        result.model_status = models::tensorrt_model_prepare_status(::video::host_sbs_v2_depth_model());
+        result.renderer = converter_->host_sbs_renderer;
+        result.pipeline_ready = ready_event_->peek();
+        result.build_pending = converter_->has_pending_depth_pipeline_build();
+        result.estimator_present = static_cast<bool>(converter_->depth_estimator);
+        result.estimator_valid = result.estimator_present && converter_->depth_estimator->is_valid();
+        result.estimator_terminal = result.estimator_present && converter_->depth_estimator->has_terminal_failure();
+        result.v2_live_warp_seen = converter_->v2_live_warp_seen;
+        result.latest_lineage_authenticated = converter_->latest_v2_lineage.authenticated;
+        result.latest_lineage_known_depth = converter_->latest_v2_lineage.known_depth();
+        const auto &lineage = converter_->latest_v2_lineage;
+        result.latest_lineage_receipt_present = lineage.receipt.has_value();
+        result.latest_lineage_receipt_depth_cache_authorized = lineage.receipt && lineage.receipt->depth_cache_authorized();
+        result.latest_lineage_receipt_matches_publication = lineage.receipt && models::host_sbs_gpu_completion_receipt::matches_publication(*lineage.receipt, lineage.estimate.publication);
+        result.latest_lineage_publication_frame_id = lineage.estimate.publication.frame_id;
+        result.sbs_frame_sequence = converter_->sbs_frame_sequence;
+        result.flat_outputs = converter_->matched_stats_output_flat;
+        result.warped_outputs = converter_->matched_stats_output_warped_new;
+        result.repeat_outputs = converter_->matched_stats_output_packed_repeat;
+        result.setup_watch_factory_calls = watch_probe_.calls;
+        result.setup_watch_tokens_alive = watch_probe_.token.use_count();
+        result.setup_watch_rect = watch_probe_.last_rect;
+        result.setup_watch_present = static_cast<bool>(converter_->game_setup_watch);
+        result.receiver_present = static_cast<bool>(converter_->reshade_receiver);
+        return result;
+      }
+
+      model_preparation_converter_snapshot_t convert_retained() {
+        assert_owner();
+        const bool sampled_ready = ready_event_->peek();
+        preparation_probe_require(converter_->convert_rgb(*image_, target_.Get(), target_rtv_.Get(), false, std::nullopt) == 0,
+          "Preparation actual retained-source conversion failed");
+        ++conversions_;
+        if (sampled_ready) {
+          (void) ready_event_->try_pop();
+        }
+        return observe();
+      }
+
+      bool needs_conversion_poll() const {
+        assert_owner();
+        return converter_->needs_conversion_poll();
+      }
+
+      bool pipeline_ready() const {
+        assert_owner();
+        return ready_event_->peek();
+      }
+
+      model_preparation_artifact_t snapshot_output(std::string_view label) {
+        assert_owner();
+        preparation_probe_require(!label.empty() && label.size() <= 48u && std::all_of(label.begin(), label.end(), [](unsigned char value) {
+          return (value >= 'a' && value <= 'z') || (value >= '0' && value <= '9') || value == '-';
+        }), "Preparation artifact label invalid");
+        D3D11_TEXTURE2D_DESC description {};
+        target_->GetDesc(&description);
+        description.Usage = D3D11_USAGE_STAGING;
+        description.BindFlags = 0u;
+        description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        ComPtr<ID3D11Texture2D> staging;
+        preparation_probe_hr(converter_->device->CreateTexture2D(&description, nullptr, &staging), "Preparation output staging allocation failed");
+        converter_->device_ctx->CopyResource(staging.Get(), target_.Get());
+        std::vector<std::uint8_t> bytes(std::size_t(output_width_) * request_.height * 4u);
+        D3D11_MAPPED_SUBRESOURCE mapped {};
+        preparation_probe_hr(converter_->device_ctx->Map(staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped), "Preparation explicit output readback failed");
+        {
+          auto unmap = util::fail_guard([&]() { converter_->device_ctx->Unmap(staging.Get(), 0u); });
+          preparation_probe_require(mapped.RowPitch >= output_width_ * 4u, "Preparation output readback pitch invalid");
+          for (std::uint32_t row = 0; row != request_.height; ++row) {
+            std::memcpy(bytes.data() + std::size_t(row) * output_width_ * 4u,
+              static_cast<const std::uint8_t *>(mapped.pData) + std::size_t(row) * mapped.RowPitch, output_width_ * 4u);
+          }
+        }
+        return write_artifact(std::string(label) + ".bgra8", bytes.data(), bytes.size(), output_width_, request_.height);
+      }
+
+      model_preparation_artifact_t source_artifact() const {
+        assert_owner();
+        return source_artifact_;
+      }
+
+      model_preparation_memory_t memory() const {
+        assert_owner();
+        return query_model_preparation_memory(request_.adapter);
+      }
+
+    private:
+      void assert_owner() const {
+        preparation_probe_require(std::this_thread::get_id() == owner_thread_, "Preparation converter used outside its D3D owner");
+      }
+
+      model_preparation_artifact_t write_artifact(const std::string &name, const std::uint8_t *bytes, std::size_t size,
+        std::uint32_t width, std::uint32_t height) const {
+        const auto path = request_.output_root / name;
+        preparation_probe_require(!std::filesystem::exists(path), "Preparation probe refuses artifact overwrite");
+        std::ofstream output(path, std::ios::binary);
+        output.write(reinterpret_cast<const char *>(bytes), static_cast<std::streamsize>(size));
+        output.flush();
+        preparation_probe_require(output.good(), "Preparation probe artifact write failed");
+        output.close();
+        const auto hash = models::file_sha256_hex(path);
+        preparation_probe_require(hash.size() == 64u, "Preparation probe artifact hash failed");
+        return {path, hash, width, height, width * 4u};
+      }
+
+      static void record(void *state, const actual_converter_probe_v1::event_t &event) noexcept {
+        if (event.kind != actual_converter_probe_v1::event_e::draw) {
+          return;
+        }
+        auto &self = *static_cast<impl_t *>(state);
+        self.draw_.last_draw_present = true;
+        self.draw_.last_draw_flat = event.flat;
+        self.draw_.last_draw_repeat = event.repeat;
+        self.draw_.last_draw_publication_current = event.publication_current;
+        self.draw_.last_draw_model_frame = event.model_frame;
+        self.draw_.last_draw_observation_us = event.observation_us;
+        self.draw_.last_draw_expected_work = event.publication.expected_work;
+        self.draw_.last_draw_host_subtitle_outcome = static_cast<std::uint32_t>(event.publication.host_subtitle_outcome);
+        self.draw_.last_draw_source_stamp_ticks = event.source_stamp_ticks;
+        self.draw_.last_draw_content_stamp_ticks = event.content_stamp_ticks;
+        self.draw_.last_draw_current_source_stamp_ticks = event.current_source_stamp_ticks;
+        self.draw_.last_draw_current_content_stamp_ticks = event.current_content_stamp_ticks;
+      }
+
+      model_preparation_converter_request_t request_;
+      std::thread::id owner_thread_;
+      std::shared_ptr<safe::event_t<bool>> ready_event_;
+      model_preparation_watch_probe_t watch_probe_;
+      actual_converter_probe_v1::context_t probe_context_;
+      model_preparation_converter_snapshot_t draw_;
+      model_preparation_artifact_t source_artifact_;
+      std::shared_ptr<preparation_probe_display_t> display_;
+      std::shared_ptr<platf::img_t> image_;
+      ComPtr<ID3D11Texture2D> target_;
+      ComPtr<ID3D11RenderTargetView> target_rtv_;
+      std::uint32_t output_width_ = 0;
+      std::uint64_t conversions_ = 0;
+      std::uint64_t source_uploads_ = 0;
+      std::unique_ptr<d3d_base_encode_device> converter_;
+    };
+
+    model_preparation_converter_t::model_preparation_converter_t(model_preparation_converter_request_t request):
+        impl_(std::make_unique<impl_t>(std::move(request))) {}
+    model_preparation_converter_t::~model_preparation_converter_t() = default;
+    void model_preparation_converter_t::set_mode(::video::sbs_mode_e mode) { impl_->set_mode(mode); }
+    model_preparation_converter_snapshot_t model_preparation_converter_t::observe() const { return impl_->observe(); }
+    model_preparation_converter_snapshot_t model_preparation_converter_t::convert_retained() { return impl_->convert_retained(); }
+    bool model_preparation_converter_t::needs_conversion_poll() const { return impl_->needs_conversion_poll(); }
+    bool model_preparation_converter_t::pipeline_ready() const { return impl_->pipeline_ready(); }
+    model_preparation_artifact_t model_preparation_converter_t::snapshot_output(std::string_view label) { return impl_->snapshot_output(label); }
+    model_preparation_artifact_t model_preparation_converter_t::source_artifact() const { return impl_->source_artifact(); }
+    model_preparation_memory_t model_preparation_converter_t::memory() const { return impl_->memory(); }
+  }  // namespace testing
+#endif
 
   namespace {
     constexpr wchar_t local_presenter_window_class[] = L"ApolloLocalArPresenter";

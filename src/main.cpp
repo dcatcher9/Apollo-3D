@@ -25,6 +25,7 @@
 #include "host_sbs_shader_cache.h"
 #include "httpcommon.h"
 #include "logging.h"
+#include "live_model_preparation.h"
 #include "main.h"
 #include "nvhttp.h"
 #include "offline_sbs_job.h"
@@ -548,25 +549,13 @@ int main(int argc, char *argv[]) {
   }
 #endif
 
-  // Prepare the pinned authenticated live TensorRT model in the background for the long-lived host.
+  // Keep CPU shader prewarm at startup; GPU model work begins only at a real live AI request.
   // Command modes such as --sbs-bench own their TensorRT lifecycle and must not race this work.
-  // jthread joins before logging and process globals are torn down, preventing exit-time races.
-  std::jthread model_prepare_thread([model = video::host_sbs_v2_depth_model(),
-                                     adapter_name = config::video.adapter_name]() {
-    BOOST_LOG(info) << "Preparing authenticated live depth model '"sv << model.name << "'..."sv;
-    if (!models::prepare_tensorrt_model(
-          SUNSHINE_ASSETS_DIR,
-          model,
-          adapter_name
-        )) {
-      BOOST_LOG(error) << "Startup depth-model preparation failed for '"sv << model.name << "'."sv;
-    }
-    if (!models::prepare_ocr_tensorrt_model(SUNSHINE_ASSETS_DIR, adapter_name)) {
-      BOOST_LOG(warning)
-        << "Startup PP-OCRv6 tiny preparation failed; Host SBS will run without subtitle "sv
-           "conditioning."sv;
-    }
-  });
+  // Unregister and join the process owner before logging and process globals are torn down.
+  models::live_model_preparation_t model_prepare_thread(
+    video::host_sbs_v2_depth_model(),
+    config::video.adapter_name
+  );
 
   // nanors lazily initializes its process-wide GF lookup table when a context
   // is created. Warm it on the main thread before any broadcast worker can
