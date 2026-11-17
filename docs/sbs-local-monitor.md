@@ -161,6 +161,12 @@ protocol close margin to fit the remaining eye interval. Freshness is checked ag
 before the USB command. These checks bound known host lateness; USB delivery time and panel
 response still require calibration with the physical kit.
 
+Confirmation of an eye arrives a varying fraction of a millisecond after the eye appears. The
+host holds each eye command until 700 µs after the eye appeared and gives the emitter that much
+less delay, so the commands are evenly spaced and the configured delay is measured from the eye
+itself. A confirmation that arrives later than the hold is sent at once. A configured delay
+within 700 µs of the protocol minimum shortens the hold accordingly.
+
 The presenter retains one stereo tuple for its complete left/right cycle. Host AI 3D and Game 3D
 keep their existing source, frame-attribution, fallback, HDR, and geometry rules. Monitor mode,
 device identity, and emitter configuration belong to this output surface; they do not alter those

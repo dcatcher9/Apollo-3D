@@ -898,3 +898,13 @@ TEST(ShutterFeedbackTracker, ColdAcquisitionStillNeedsCounterAndTimeToAgree) {
   EXPECT_EQ(tracker.streak(), 1u);
   EXPECT_FALSE(tracker.arm());
 }
+
+TEST(ShutterPresentationClock, CommandHoldNeverTakesTheEmitterBelowItsMinimumDelay) {
+  using platf::dxgi::detail::shutter_command_hold;
+  using platf::dxgi::detail::shutter_command_hold_us;
+  EXPECT_EQ(shutter_command_hold(2000, 100), shutter_command_hold_us);
+  EXPECT_EQ(shutter_command_hold(100 + shutter_command_hold_us, 100), shutter_command_hold_us);
+  EXPECT_EQ(shutter_command_hold(500, 100), 400);
+  EXPECT_EQ(shutter_command_hold(100, 100), 0);
+  EXPECT_EQ(shutter_command_hold(50, 100), 0);
+}

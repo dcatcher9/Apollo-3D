@@ -10262,10 +10262,14 @@ namespace platf::dxgi {
           fail("the selected display refresh cannot represent a safe shutter-eye interval");
           return;
         }
+        const auto emitter_limits = platf::open3d::timing_limits(config.monitor_config.ir_protocol, config.monitor_config.signal_spacing_us);
+        const int command_hold_us = emitter_limits ?
+                                      detail::shutter_command_hold(config.monitor_config.frame_delay_us, emitter_limits->min_delay_us) :
+                                      0;
         platf::open3d::settings_t emitter_settings {
           .port = config.monitor_config.emitter_port,
           .protocol = config.monitor_config.ir_protocol,
-          .frame_delay_us = config.monitor_config.frame_delay_us,
+          .frame_delay_us = config.monitor_config.frame_delay_us - command_hold_us,
           .frame_duration_us = config.monitor_config.frame_duration_us,
           .signal_spacing_us = config.monitor_config.signal_spacing_us,
           .flip_eyes = config.monitor_config.flip_eyes,
@@ -10836,6 +10840,13 @@ namespace platf::dxgi {
           }
           previous_displayed_refresh = confirmation.feedback.refresh_count;
           set_timing_outcome(local_shutter_slot_timing_t::outcome_e::expired_before_emit);
+          if (const auto boundary = feedback_tracker.last_present_qpc(); boundary && command_hold_us > 0) {
+            // Too short to sleep: the scheduler's granularity is longer than the whole hold.
+            const auto send_at = *boundary + command_hold_us * qpc_frequency.QuadPart / 1000000;
+            while (qpc_now() < send_at) {
+              YieldProcessor();
+            }
+          }
           if (!feedback_tracker.fresh_for_emit(qpc_now())) {
             log_feedback_failure();
             if (recover_clock("displayed eye expired before the USB command"sv)) {

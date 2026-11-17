@@ -32,6 +32,21 @@ namespace platf::dxgi::detail {
   // command is sent during acquisition, so the wait for one is generous.
   inline constexpr auto shutter_acquisition_timeout = std::chrono::seconds {6};
 
+  // An eye is confirmed some tens to several hundred microseconds after it appears, and that
+  // time varies from eye to eye. The emitter times the lens from the arrival of the command,
+  // so the variation reaches the glasses, and an averaging emitter also takes its period from
+  // the spacing of the commands. The host therefore holds each command until a fixed time
+  // after the eye appeared and gives the emitter that much less delay: the lens opens at the
+  // configured delay after the eye, and the commands are evenly spaced. The hold is longer
+  // than nearly every confirmation; a confirmation later than it sends at once. A configured
+  // delay too short to give up this much gives up what it can.
+  inline constexpr int shutter_command_hold_us = 700;
+
+  [[nodiscard]] constexpr int shutter_command_hold(int configured_delay_us, int minimum_emitter_delay_us) noexcept {
+    const int spare = configured_delay_us - minimum_emitter_delay_us;
+    return spare <= 0 ? 0 : (spare < shutter_command_hold_us ? spare : shutter_command_hold_us);
+  }
+
   enum class shutter_feedback_status_e {
     available,
     disjoint,
