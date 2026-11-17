@@ -1,20 +1,14 @@
 <script setup>
-import {computed, inject, ref} from 'vue'
-import {localMonitorFingerprint, rememberLocalMonitorDevices, rememberLocalMonitorTimingLimits, settingEnabled, validLocalMonitorTimingLimits, validateLocalMonitorConfig} from '../localMonitorConfig'
-import LocalMonitorSession from '../../LocalMonitorSession.vue'
+import {computed, inject} from 'vue'
+import {settingEnabled, validLocalMonitorTimingLimits, validateLocalMonitorConfig} from '../localMonitorConfig'
 
-const props = defineProps({config: {type: Object, required: true}, settingsChanged: {type: Boolean, default: false}})
+// status is the host's latest /api/local-monitor reply, read by the Local display page.
+const props = defineProps({config: {type: Object, required: true}, status: {type: Object, default: null}})
+const emit = defineEmits(['refresh'])
 const $t = inject('i18n').t
-const devices = ref([])
-const ports = ref([])
-const timingProfiles = ref([])
-const session = ref(null)
-// What the host process is running with. Saving without restarting changes the file this form
-// was loaded from, but Start uses the running settings.
-const running = ref(null)
-const runningDiffers = computed(() => Boolean(running.value) && localMonitorFingerprint(props.config) !== localMonitorFingerprint(running.value))
-
-const enabled = computed(() => settingEnabled(props.config.local_monitor_enabled))
+const devices = computed(() => props.status?.devices || [])
+const ports = computed(() => props.status?.ports || [])
+const timingProfiles = computed(() => props.status?.timing_limits || [])
 const flipEyes = computed(() => settingEnabled(props.config.local_monitor_flip_eyes))
 const selectedDevice = computed(() => devices.value.find(device => device.id === props.config.local_monitor_display_id))
 const missingDevice = computed(() => props.config.local_monitor_display_id && !selectedDevice.value)
@@ -34,33 +28,18 @@ const setEnabled = (key, event) => {
   props.config[key] = event.target.checked ? 'enabled' : 'disabled'
 }
 const displayLabel = device => `${device.name || 'Physical monitor'} · ${device.width} × ${device.height} · ${(device.refresh_millihz / 1000).toFixed(2)} Hz${device.is_primary ? ' · Primary' : ''}`
-const receiveStatus = body => {
-  devices.value = body.devices || []
-  rememberLocalMonitorDevices(devices.value)
-  timingProfiles.value = body.timing_limits || []
-  rememberLocalMonitorTimingLimits(timingProfiles.value)
-  ports.value = body.ports || []
-  running.value = body.running || null
-}
 </script>
 
 <template>
   <section class="config-page local-monitor" aria-labelledby="local-monitor-heading">
     <header class="monitor-heading">
       <div>
-        <h2 id="local-monitor-heading">Local physical monitor</h2>
+        <h2 id="local-monitor-heading">Shutter-glasses monitor</h2>
         <p>Present Host 3D or Game 3D directly on a monitor with an Open3DOLED USB emitter and active shutter glasses.</p>
       </div>
     </header>
     <p class="text-body-secondary">Save and restart Sunshine 3D to apply changes. Remote streaming temporarily takes priority over local presentation.</p>
     <p class="text-body-secondary">Your selected monitor keeps its desktop position. Sunshine transfers its windows and cursor automatically for 3D and back for 2D; other monitors stay usable. Use borderless fullscreen for games that need to follow this handoff.</p>
-    <LocalMonitorSession ref="session" :show-when-disabled="true" :can-start="(running ? !runningDiffers : !props.settingsChanged) && validation.length === 0" @status="receiveStatus" />
-
-    <label class="monitor-enable" for="local_monitor_enabled">
-      <span><strong>{{ $t('config.local_monitor_enabled') }}</strong><small>{{ $t('config.local_monitor_enabled_desc') }}</small></span>
-      <input id="local_monitor_enabled" class="form-check-input" type="checkbox" :checked="enabled" @change="setEnabled('local_monitor_enabled', $event)" />
-    </label>
-
     <div class="monitor-fields">
       <div>
         <label for="local_monitor_display_id" class="form-label">{{ $t('config.local_monitor_display_id') }}</label>
@@ -138,7 +117,7 @@ const receiveStatus = body => {
       <ul class="mb-0"><li v-for="message in validation" :key="message">{{ message }}</li></ul>
     </div>
     <p class="monitor-note">Turn off G-SYNC, FreeSync and other variable-refresh settings for this monitor. The output alternates full-screen left and right images; the shared 3D pipeline supplies the stereo pair. Calibrate with the physical glasses before judging crosstalk.</p>
-    <button type="button" class="btn btn-outline-secondary" @click="session?.refresh()">
+    <button type="button" class="btn btn-outline-secondary" @click="emit('refresh')">
       <i class="fa-solid fa-rotate" aria-hidden="true"></i> Refresh displays and ports
     </button>
   </section>
@@ -157,23 +136,6 @@ const receiveStatus = body => {
   margin-bottom: 0;
   max-width: 46rem;
 }
-.monitor-enable {
-  align-items: center;
-  background: var(--apollo-surface-raised);
-  border: 1px solid var(--apollo-border);
-  border-radius: var(--apollo-radius-card);
-  display: flex;
-  gap: 1.5rem;
-  justify-content: space-between;
-  margin: 1.5rem 0;
-  padding: 1rem;
-}
-.monitor-enable small {
-  color: var(--bs-secondary-color);
-  display: block;
-  margin-top: .25rem;
-}
-.monitor-enable input {flex-shrink: 0;}
 .monitor-fields {
   display: grid;
   gap: 1rem 1.5rem;

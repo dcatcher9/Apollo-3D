@@ -16,7 +16,7 @@ monitor depth or geometry implementation.
 1. Connect the physical monitor and Open3DOLED emitter to the PC. Choose a stable, fixed high
    refresh rate for that monitor in Windows Display settings. Disable G-SYNC, FreeSync, and other
    variable-refresh features for the selected output.
-2. Open **Settings → Local monitor** in Sunshine 3D. Enable the capability, choose the physical
+2. Open **Settings → Local display** in Sunshine 3D. Choose **Shutter-glasses monitor**, then the physical
    monitor, and select its emitter COM port. The monitor is stored by its exact Windows device
    path rather than its current `DISPLAY` number.
 3. Select **Host 3D** for AI conversion of captured content or **Game 3D** for the game's stereo
@@ -24,8 +24,8 @@ monitor depth or geometry implementation.
 4. Select the glasses' IR protocol and calibrate the shutter delay and duration for the panel.
    The default protocol is Panasonic custom firmware. Timing values are microseconds; a longer
    shutter window can increase brightness and also expose scanout transitions as crosstalk.
-5. Save and restart Sunshine 3D. Enabling the capability does not start a session automatically.
-6. Choose **Start 3D** on the home page or in Local monitor settings when you want to use the
+5. Save and restart Sunshine 3D. Choosing the display does not start a session automatically.
+6. Choose **Start 3D** on the home page or in Local display settings when you want to use the
    glasses. Choose **Return to 2D** to restore the ordinary Windows desktop.
 
 The Sunshine 3D tray menu offers the same session controls. **Ctrl+Alt+Shift+3** toggles a local

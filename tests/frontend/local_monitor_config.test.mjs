@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   localMonitorFingerprint,
+  migrateLocalDisplaySurface,
   rememberLocalMonitorDevices,
   rememberLocalMonitorTimingLimits,
   validateLocalMonitorConfig,
@@ -20,7 +21,7 @@ const timing = Object.freeze({
   min_period_tail_base_us: 320,
 })
 const config = Object.freeze({
-  local_monitor_enabled: 'enabled',
+  local_display_surface: 'shutter_monitor',
   local_monitor_display_id: 'test-physical-monitor',
   local_monitor_mode: 'host',
   local_monitor_emitter_port: 'COM7',
@@ -98,3 +99,20 @@ test('the running-settings fingerprint ignores value types and unrelated keys', 
   assert.notEqual(localMonitorFingerprint(form), localMonitorFingerprint({...running, local_monitor_frame_delay_us: 501}))
 })
 
+test('only a chosen shutter monitor is validated', () => {
+  for (const surface of ['off', 'ar_glasses', undefined]) {
+    assert.deepEqual(validateLocalMonitorConfig({...config, local_display_surface: surface, local_monitor_emitter_port: ''}, 120000, timing), [])
+  }
+  assert.notDeepEqual(validateLocalMonitorConfig({...config, local_monitor_emitter_port: ''}, 120000, timing), [])
+})
+
+test('the earlier monitor switch becomes the surface choice once', () => {
+  assert.deepEqual(migrateLocalDisplaySurface({local_monitor_enabled: 'enabled'}), {local_display_surface: 'shutter_monitor'})
+  assert.deepEqual(migrateLocalDisplaySurface({local_monitor_enabled: 'disabled'}), {})
+  assert.deepEqual(migrateLocalDisplaySurface({local_monitor_enabled: 'enabled', local_display_surface: 'off'}), {local_display_surface: 'off'})
+})
+
+test('changing the surface changes the running-settings fingerprint, the earlier switch does not', () => {
+  assert.notEqual(localMonitorFingerprint(config), localMonitorFingerprint({...config, local_display_surface: 'ar_glasses'}))
+  assert.equal(localMonitorFingerprint(config), localMonitorFingerprint({...config, local_monitor_enabled: 'enabled'}))
+})

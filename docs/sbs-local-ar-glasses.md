@@ -1,7 +1,13 @@
 # Local AR-glasses presentation
 
-Sunshine 3D can automatically own a local presentation session for an AR-glasses monitor connected as a
+Sunshine 3D can own a local presentation session for an AR-glasses monitor connected as a
 Windows display. This is a local D3D11 path: it does not use RTSP, NVENC, Moonlight, or Artemis.
+
+AR glasses are one of the local displays offered by **Settings → Local display**
+(`local_display_surface = ar_glasses`, the default). A session starts only after **Start 3D** in the
+web UI or tray, or Ctrl+Alt+Shift+3, and ends with **Return to 2D** or Ctrl+Alt+Shift+0. Until then
+approved glasses stay an ordinary Windows display. Once started, the session follows the connection
+and wear rules below until it is stopped; the request is not kept across a Sunshine 3D restart.
 
 [Local shutter monitors](sbs-local-monitor.md) reuse this display lifecycle and converter with explicit
 session activation, native per-eye source dimensions, and a frame-sequential output adapter. The
@@ -16,7 +22,7 @@ copies of the processing pipeline.
 
 Monitor decisions are stored by stable EDID/PnP model ID in the managed `ar_glass_devices` option.
 Names specific to common AR-glasses families are approved automatically. A newly seen monitor that
-cannot be identified safely remains inactive and appears in the web UI's **AR Displays** tab, where
+cannot be identified safely remains inactive and appears in the web UI's **Local display** tab, where
 the user can approve or reject it. Clicking the Windows notification for an unknown monitor opens
 that tab. Both decisions persist across reconnects and connector changes.
 

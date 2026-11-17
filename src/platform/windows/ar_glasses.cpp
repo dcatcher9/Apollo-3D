@@ -70,6 +70,12 @@ namespace ar_glasses {
     constexpr auto ownership_release_timeout = 10s;
     std::atomic<bool> physical_monitor_active {false};
     std::atomic<bool> physical_monitor_requested {false};
+    // Local AR glasses present only after an explicit Start 3D, like every other local surface.
+    std::atomic<bool> ar_session_requested {false};
+
+    bool ar_session_allowed() {
+      return config::video.local_surface == config::video_t::local_surface_e::ar_glasses && ar_session_requested.load();
+    }
     std::mutex physical_monitor_error_mutex;
     std::string physical_monitor_error;
 
@@ -1507,7 +1513,9 @@ namespace ar_glasses {
           if (known->decision == device_decision_e::pending && !known->notified) {
             notify_devices.emplace_back(known->id, known->name);
           }
-          if (known->decision == device_decision_e::approved) {
+          // Discovery and approval continue for the settings page; only a requested AR session
+          // may select the glasses as a presentation target.
+          if (known->decision == device_decision_e::approved && ar_session_allowed()) {
             if (approved_targets) {
               approved_targets->push_back(target);
             }
@@ -4343,7 +4351,7 @@ namespace ar_glasses {
         worker_ = std::jthread([this](std::stop_token stop_token) {
           run(stop_token);
         });
-        if (config::video.local_monitor.enabled) {
+        if (config::video.local_surface != config::video_t::local_surface_e::off) {
           monitor_hotkeys_ = std::jthread([](std::stop_token stop_token) {
             const bool desktop_synced = platf::syncThreadDesktop();
             if (!desktop_synced) {
@@ -4383,9 +4391,9 @@ namespace ar_glasses {
               MSG message {};
               while (PeekMessageW(&message, nullptr, WM_HOTKEY, WM_HOTKEY, PM_REMOVE)) {
                 if (message.wParam == stop_id) {
-                  request_monitor_session(false);
+                  request_local_session(false);
                 } else if (message.wParam == toggle_id) {
-                  request_monitor_session(!monitor_requested());
+                  request_local_session(!local_session_requested());
                 }
               }
               std::this_thread::sleep_for(25ms);
@@ -4525,6 +4533,10 @@ namespace ar_glasses {
         if (wear_device_path_.empty()) {
           return false;
         }
+        if (!ar_session_allowed()) {
+          session_request_.observe(false);
+          return false;
+        }
         const auto sensor = wear_monitor_ ? std::make_optional(wear_monitor_->snapshot()) : std::nullopt;
         // Read remembered authority after the live snapshot: a confirmed event received while
         // Windows blocked display setup must survive a subsequent unknown/unavailable report.
@@ -4582,6 +4594,9 @@ namespace ar_glasses {
         }
         if (is_monitor_mode(target.mode)) {
           return physical_monitor_requested.load();
+        }
+        if (!ar_session_allowed()) {
+          return false;
         }
         if (!replacement_target_ || replacement_target_->device_path != target.device_path) {
           replacement_target_ = target;
@@ -5716,6 +5731,69 @@ namespace ar_glasses {
       }
     }
     return true;
+  }
+
+  bool local_session_requested() {
+    return config::video.local_surface == config::video_t::local_surface_e::shutter_monitor ? monitor_requested() : ar_session_allowed();
+  }
+
+  bool local_session_active() {
+    if (config::video.local_surface == config::video_t::local_surface_e::shutter_monitor) {
+      return monitor_active();
+    }
+    if (!ar_session_allowed()) {
+      return false;
+    }
+    std::lock_guard lock(ownership_mutex);
+    return local_session_present;
+  }
+
+  bool local_surface_available() {
+    switch (config::video.local_surface) {
+      case config::video_t::local_surface_e::shutter_monitor:
+        return true;
+      case config::video_t::local_surface_e::ar_glasses:
+        {
+          std::lock_guard lock(device_mutex);
+          return std::any_of(known_devices.begin(), known_devices.end(), [](const auto &device) {
+            return device.connected && device.decision == device_decision_e::approved;
+          });
+        }
+      default:
+        return false;
+    }
+  }
+
+  bool request_local_session(bool start) {
+    const auto fail = [](std::string message) {
+      std::lock_guard lock(physical_monitor_error_mutex);
+      physical_monitor_error = std::move(message);
+      return false;
+    };
+    switch (config::video.local_surface) {
+      case config::video_t::local_surface_e::shutter_monitor:
+        return request_monitor_session(start);
+      case config::video_t::local_surface_e::ar_glasses:
+        {
+          if (!start) {
+            ar_session_requested.store(false);
+            std::lock_guard lock(physical_monitor_error_mutex);
+            physical_monitor_error.clear();
+            return true;
+          }
+          if (!local_surface_available()) {
+            return fail("No approved AR glasses are connected. Connect them, or approve them in Local display settings, then start 3D again.");
+          }
+          {
+            std::lock_guard lock(physical_monitor_error_mutex);
+            physical_monitor_error.clear();
+          }
+          ar_session_requested.store(true);
+          return true;
+        }
+      default:
+        return start ? fail("Local 3D is turned off, or the chosen display's saved settings are invalid. Choose a local display in settings, save, and restart Sunshine 3D before starting 3D.") : true;
+    }
   }
 
   bool set_device_decision(std::string_view id, device_decision_e decision) {

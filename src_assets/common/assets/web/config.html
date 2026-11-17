@@ -340,16 +340,11 @@
           :vdisplay="vdisplayStatus"
         ></audio-video>
 
-        <ar-glasses
-          v-if="currentTab === 'ar-glasses'"
-          :config="config">
-        </ar-glasses>
-
-        <local-monitor
-          v-if="currentTab === 'local-monitor'"
+        <local-display
+          v-if="currentTab === 'local-display'"
           :config="config"
           :settings-changed="localMonitorSettingsChanged">
-        </local-monitor>
+        </local-display>
 
         <network
           v-if="currentTab === 'network'"
@@ -415,9 +410,8 @@
   import Files from './configs/tabs/Files.vue'
   import Advanced from './configs/tabs/Advanced.vue'
   import AudioVideo from './configs/tabs/AudioVideo.vue'
-  import ArGlasses from './configs/tabs/ArGlasses.vue'
-  import LocalMonitor from './configs/tabs/LocalMonitor.vue'
-  import {localMonitorFingerprint, rememberLocalMonitorDevices, rememberLocalMonitorTimingLimits, settingEnabled, validateLocalMonitorConfig} from './configs/localMonitorConfig'
+  import LocalDisplay from './configs/tabs/LocalDisplay.vue'
+  import {localMonitorFingerprint, migrateLocalDisplaySurface, rememberLocalMonitorDevices, rememberLocalMonitorTimingLimits, shutterMonitorSelected, validateLocalMonitorConfig} from './configs/localMonitorConfig'
   import ContainerEncoders from './configs/tabs/ContainerEncoders.vue'
 
   const app = createApp({
@@ -431,8 +425,7 @@
       Advanced,
       // They will be accessible via audio-video, container-encoders only.
       AudioVideo,
-      ArGlasses,
-      LocalMonitor,
+      LocalDisplay,
       ContainerEncoders,
     },
     data() {
@@ -508,17 +501,11 @@
             },
           },
           {
-            id: "ar-glasses",
-            name: "AR Displays",
+            id: "local-display",
+            name: "Local display",
             options: {
+              "local_display_surface": "ar_glasses",
               "local_ar_virtual_display_only": "enabled",
-            },
-          },
-          {
-            id: "local-monitor",
-            name: "Local monitor",
-            options: {
-              "local_monitor_enabled": "disabled",
               "local_monitor_display_id": "",
               "local_monitor_mode": "host",
               "local_monitor_emitter_port": "",
@@ -610,6 +597,7 @@
           delete config.platform;
           delete config.status;
           delete config.version;
+          migrateLocalDisplaySurface(config);
           delete config.ar_glass_devices;
 
           this.vdisplayStatus = config.vdisplayStatus;
@@ -681,8 +669,7 @@
           general: 'fas fa-cog',
           input: 'fas fa-gamepad',
           av: 'fas fa-photo-video',
-          'ar-glasses': 'fas fa-glasses',
-          'local-monitor': 'fas fa-display',
+          'local-display': 'fas fa-display',
           network: 'fas fa-network-wired',
           files: 'fas fa-folder-open',
           advanced: 'fas fa-code',
@@ -713,11 +700,11 @@
         this.saved = false;
         this.restarted = false;
         this.saving = true;
-        if (settingEnabled(this.config.local_monitor_enabled)) {
+        if (shutterMonitorSelected(this.config)) {
           try {
             // Save must validate the running target/profile even when the monitor tab has never
             // mounted, and a Windows mode change must not leave it using a stale cached interval.
-            const response = await fetch('./api/local-monitor', {credentials: 'include'});
+            const response = await fetch('./api/local-monitor?inventory=1', {credentials: 'include'});
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             const context = await response.json();
             rememberLocalMonitorDevices(context.devices || []);
@@ -732,7 +719,7 @@
         if (monitorErrors.length) {
           this.configError = monitorErrors.join(' ');
           this.saving = false;
-          this.selectTab('local-monitor');
+          this.selectTab('local-display');
           return false;
         }
         this.configError = '';
@@ -822,6 +809,10 @@
         if (hash) {
           // remove the # from the hash
           let stripped_hash = hash.substring(1);
+          // The two earlier tabs are now one; keep their links and notifications working.
+          if (stripped_hash === 'ar-glasses' || stripped_hash === 'local-monitor') {
+            stripped_hash = 'local-display';
+          }
 
           this.tabs.forEach(tab => {
             if (tab.id === stripped_hash) {

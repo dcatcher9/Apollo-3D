@@ -1,7 +1,9 @@
 <script setup>
 import {computed, onMounted, onUnmounted, ref} from 'vue'
 
-const props = defineProps({canStart: {type: Boolean, default: true}, showWhenDisabled: {type: Boolean, default: false}})
+// inventory: also read the host's monitors and serial ports, on the first read and on a forced
+// refresh only. The periodic read asks for session state alone, which costs the host nothing.
+const props = defineProps({canStart: {type: Boolean, default: true}, showWhenDisabled: {type: Boolean, default: false}, inventory: {type: Boolean, default: false}})
 const emit = defineEmits(['status'])
 const status = ref(null)
 const error = ref('')
@@ -11,23 +13,38 @@ let refreshTimer = null
 let reading = false
 let readAgain = false
 let unmounted = false
-const visible = computed(() => props.showWhenDisabled || status.value?.enabled || status.value?.requested || status.value?.active || status.value?.error)
+let inventoryWanted = props.inventory
+// On the home page the control appears only when the chosen surface can be used now: a configured
+// monitor, or approved AR glasses that are connected.
+const visible = computed(() => props.showWhenDisabled || (status.value?.enabled && status.value?.available) || status.value?.requested || status.value?.active || status.value?.error)
+const surfaceName = computed(() => ({ar_glasses: 'AR glasses', shutter_monitor: 'Shutter-glasses monitor'})[status.value?.surface] || 'Off')
+const introduction = computed(() => status.value?.surface === 'ar_glasses' ?
+  'Start 3D when you want to use the glasses connected to this PC. Return to 2D to restore your ordinary desktop.' :
+  status.value?.surface === 'shutter_monitor' ?
+    'Start 3D when you want to use the shutter glasses. Return to 2D to restore your ordinary desktop.' :
+    'No local display is chosen. Choose one in Local display settings, save, and restart Sunshine 3D.')
 const label = computed(() => error.value ? 'Status unavailable' : status.value?.error ? '3D stopped' : status.value?.active ? 'Presenting' : status.value?.requested ? 'Starting or waiting' : '2D desktop')
 const refresh = async (force = false) => {
   if (reading) {
     // A read already in flight may predate an action; make sure one more follows it.
     readAgain = readAgain || force
+    inventoryWanted = inventoryWanted || (force && props.inventory)
     return
   }
   reading = true
+  const withInventory = inventoryWanted || (force && props.inventory)
+  inventoryWanted = false
   try {
-    const response = await fetch('./api/local-monitor', {credentials: 'include'})
+    const response = await fetch(withInventory ? './api/local-monitor?inventory=1' : './api/local-monitor', {credentials: 'include'})
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    status.value = await response.json()
+    const body = await response.json()
+    // A state-only reply keeps the monitors and ports from the last inventory read.
+    status.value = body.devices === undefined && status.value ? {...body, devices: status.value.devices, ports: status.value.ports} : body
     emit('status', status.value)
     error.value = ''
   } catch (reason) {
-    error.value = `Could not read monitor status: ${reason}`
+    inventoryWanted = inventoryWanted || withInventory
+    error.value = `Could not read local display status: ${reason}`
   } finally {
     reading = false
     if (readAgain) {
@@ -36,12 +53,12 @@ const refresh = async (force = false) => {
     }
   }
 }
-// The status read enumerates displays and serial ports on the host. Read briskly only while a
-// session is starting or the settings page is showing the panel with no session running;
-// otherwise slowly, so a running presenter is left alone, and not at all while the page is hidden.
+// 3D can start, stop or fail outside this page: the shortcut, the tray, a lock screen, a remote
+// session. Read the session state briskly while that matters, slowly otherwise, and not at all
+// while the page is hidden.
 const schedule = () => {
   if (unmounted) return
-  const brisk = !status.value?.active && (props.showWhenDisabled || status.value?.requested)
+  const brisk = props.showWhenDisabled || status.value?.requested || status.value?.active
   refreshTimer = window.setTimeout(async () => {
     if (!document.hidden) await refresh()
     schedule()
@@ -81,16 +98,16 @@ defineExpose({refresh})
   <section v-if="visible" class="monitor-session" aria-labelledby="monitor-session-heading">
     <div class="monitor-session-title">
       <div>
-        <h3 id="monitor-session-heading"><i class="fa-solid fa-display" aria-hidden="true"></i> Local monitor 3D</h3>
-        <p>Start 3D when you want to use the shutter glasses. Return to 2D to restore your ordinary desktop.</p>
+        <h3 id="monitor-session-heading"><i class="fa-solid" :class="status?.surface === 'ar_glasses' ? 'fa-glasses' : 'fa-display'" aria-hidden="true"></i> Local 3D · {{ surfaceName }}</h3>
+        <p>{{ introduction }}</p>
       </div>
       <span class="badge" :class="status?.error ? 'text-bg-danger' : status?.active && !error ? 'text-bg-success' : 'text-bg-secondary'" role="status">{{ label }}</span>
     </div>
     <p v-if="error" class="text-danger" role="alert">{{ error }}</p>
     <p v-if="actionError" class="text-danger" role="alert">{{ actionError }}</p>
     <p v-if="status?.error && !actionError" class="text-danger" role="alert">3D stopped: {{ status.error }}</p>
-    <p v-if="!error && !status?.error && status?.requested && !status?.active" class="text-body-secondary">{{ 'Waiting for the selected monitor, emitter, or local presentation ownership.' }}</p>
-    <p v-if="!props.canStart" class="text-body-secondary">Save and restart Sunshine 3D to apply your monitor setting changes before starting 3D.</p>
+    <p v-if="!error && !status?.error && status?.requested && !status?.active" class="text-body-secondary">{{ status?.surface === 'ar_glasses' ? 'Waiting for the glasses to be connected and worn, or for local presentation ownership.' : 'Waiting for the selected monitor, emitter, or local presentation ownership.' }}</p>
+    <p v-if="!props.canStart" class="text-body-secondary">Save and restart Sunshine 3D to apply your local display changes before starting 3D.</p>
     <div class="monitor-session-actions">
       <button type="button" class="btn btn-apollo-primary" :disabled="Boolean(busy) || !status?.enabled || status?.requested || !props.canStart || Boolean(error)" @click="control('start')">
         {{ busy === 'start' ? 'Starting…' : 'Start 3D' }}
@@ -98,7 +115,7 @@ defineExpose({refresh})
       <button type="button" class="btn btn-outline-secondary" :disabled="Boolean(busy) || (!status?.requested && !status?.active)" @click="control('stop')">
         {{ busy === 'stop' ? 'Returning…' : 'Return to 2D' }}
       </button>
-      <a href="./config#local-monitor">Monitor settings</a>
+      <a href="./config#local-display">Local display settings</a>
     </div>
     <p class="monitor-session-shortcuts"><kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>3</kbd> toggles 3D. Use <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>0</kbd> to return to 2D.</p>
   </section>

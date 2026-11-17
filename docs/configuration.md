@@ -955,7 +955,19 @@ microphone_sink = CABLE Input (VB-Audio Virtual Cable)
     </tr>
 </table>
 
-## AR Displays
+## Local display
+
+One display on this PC can present local 3D: AR glasses connected as a Windows display, or a
+physical monitor with an Open3DOLED USB emitter and active shutter glasses. A remote session is
+always shown on the remote device and takes priority over local presentation. Choosing a display
+does not start it; choose **Start 3D** in the web UI or tray, or press Ctrl+Alt+Shift+3.
+**Return to 2D** restores the ordinary desktop. Save settings and restart before starting a session.
+
+### local_display_surface
+
+| Default | Description |
+|---|---|
+| `ar_glasses` | The one local display that may start 3D. Values: `off`, `ar_glasses`, `shutter_monitor`. A configuration written before this option existed that contains `local_monitor_enabled = enabled` is read as `shutter_monitor`. A chosen monitor whose settings are invalid behaves as `off`. |
 
 ### local_ar_virtual_display_only
 
@@ -988,21 +1000,11 @@ microphone_sink = CABLE Input (VB-Audio Virtual Cable)
     </tr>
 </table>
 
-## Local monitor
-
-Use a selected physical monitor with an Open3DOLED USB emitter and active shutter glasses.
-Save settings and restart before starting a session. Enabling this surface does not start it;
-choose **Start 3D** in the web UI or tray. **Return to 2D** restores the ordinary desktop.
+The `local_monitor_*` options below apply when `local_display_surface` is `shutter_monitor`.
 The private virtual source takes the selected monitor's original desktop rectangle and primary
 role, with automatic window and cursor handoff. The physical sink remains active for stereo
 scanout; other monitors stay usable. See
 [Local monitor 3D](sbs-local-monitor.md) for presentation, calibration, shortcuts, and lifecycle.
-
-### local_monitor_enabled
-
-| Default | Description |
-|---|---|
-| `disabled` | Allow explicitly requested local monitor sessions. Values: `enabled`, `disabled`. |
 
 ### local_monitor_display_id
 

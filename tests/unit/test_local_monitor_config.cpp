@@ -147,3 +147,62 @@ TEST(LocalMonitorConfig, RequiresBothExactMonitorSelectionAndEmitterPort) {
     EXPECT_FALSE(config::parse_local_monitor_config(values).enabled) << key;
   }
 }
+
+TEST(LocalDisplaySurface, DefaultsToGlassesAndReadsTheEarlierMonitorSwitch) {
+  using surface_e = config::video_t::local_surface_e;
+  std::unordered_map<std::string, std::string> empty;
+  surface_e surface = surface_e::off;
+  EXPECT_FALSE(config::parse_local_monitor_config(empty, &surface).enabled);
+  EXPECT_EQ(surface, surface_e::ar_glasses);
+
+  std::unordered_map<std::string, std::string> earlier {
+    {"local_monitor_enabled", "enabled"},
+    {"local_monitor_display_id", "monitor"},
+    {"local_monitor_emitter_port", "COM4"},
+  };
+  EXPECT_TRUE(config::parse_local_monitor_config(earlier, &surface).enabled);
+  EXPECT_EQ(surface, surface_e::shutter_monitor);
+  EXPECT_TRUE(earlier.empty());
+}
+
+TEST(LocalDisplaySurface, TheChoiceDecidesOverTheEarlierSwitch) {
+  using surface_e = config::video_t::local_surface_e;
+  surface_e surface = surface_e::off;
+  std::unordered_map<std::string, std::string> glasses {
+    {"local_display_surface", "ar_glasses"},
+    {"local_monitor_enabled", "enabled"},
+    {"local_monitor_display_id", "monitor"},
+    {"local_monitor_emitter_port", "COM4"},
+  };
+  EXPECT_FALSE(config::parse_local_monitor_config(glasses, &surface).enabled);
+  EXPECT_EQ(surface, surface_e::ar_glasses);
+
+  std::unordered_map<std::string, std::string> monitor {
+    {"local_display_surface", "shutter_monitor"},
+    {"local_monitor_display_id", "monitor"},
+    {"local_monitor_emitter_port", "COM4"},
+  };
+  EXPECT_TRUE(config::parse_local_monitor_config(monitor, &surface).enabled);
+  EXPECT_EQ(surface, surface_e::shutter_monitor);
+
+  std::unordered_map<std::string, std::string> off {{"local_display_surface", "off"}};
+  EXPECT_FALSE(config::parse_local_monitor_config(off, &surface).enabled);
+  EXPECT_EQ(surface, surface_e::off);
+}
+
+TEST(LocalDisplaySurface, AnInvalidChoiceOrMonitorCannotStartAnything) {
+  using surface_e = config::video_t::local_surface_e;
+  surface_e surface = surface_e::ar_glasses;
+  std::unordered_map<std::string, std::string> unknown {{"local_display_surface", "projector"}};
+  EXPECT_FALSE(config::parse_local_monitor_config(unknown, &surface).enabled);
+  EXPECT_EQ(surface, surface_e::off);
+
+  // A chosen monitor with no emitter must not fall back to glasses.
+  surface = surface_e::ar_glasses;
+  std::unordered_map<std::string, std::string> incomplete {
+    {"local_display_surface", "shutter_monitor"},
+    {"local_monitor_display_id", "monitor"},
+  };
+  EXPECT_FALSE(config::parse_local_monitor_config(incomplete, &surface).enabled);
+  EXPECT_EQ(surface, surface_e::off);
+}

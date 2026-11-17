@@ -81,6 +81,7 @@ namespace config {
     {},  // output_name
     default_local_ar_virtual_display_only,  // local_ar_virtual_display_only
     {},  // local_monitor
+    video_t::local_surface_e::ar_glasses,  // local_surface
 
     0,  // max_bitrate
     0,  // minimum_fps_target (0 = max(requested framerate / 5, 10 FPS); never above the requested framerate)
@@ -651,7 +652,18 @@ namespace config {
     return opts;
   }
 
-  video_t::local_monitor_t parse_local_monitor_config(std::unordered_map<std::string, std::string> &vars) {
+  std::string_view local_surface_name(video_t::local_surface_e surface) {
+    switch (surface) {
+      case video_t::local_surface_e::ar_glasses:
+        return "ar_glasses"sv;
+      case video_t::local_surface_e::shutter_monitor:
+        return "shutter_monitor"sv;
+      default:
+        return "off"sv;
+    }
+  }
+
+  video_t::local_monitor_t parse_local_monitor_config(std::unordered_map<std::string, std::string> &vars, video_t::local_surface_e *surface) {
     video_t::local_monitor_t result;
     bool valid = true;
     const auto invalid = [&](const std::string &key) {
@@ -689,7 +701,28 @@ namespace config {
       vars.erase(entry);
     };
 
-    boolean("local_monitor_enabled", result.enabled);
+    // local_display_surface is the single choice of local surface. local_monitor_enabled is the
+    // older switch for the shutter monitor and decides only when that choice is absent.
+    bool legacy_monitor_enabled = false;
+    if (const auto legacy = vars.find("local_monitor_enabled"); legacy != vars.end()) {
+      const auto &text = legacy->second;
+      legacy_monitor_enabled = text == "enabled" || text == "on" || text == "true" || text == "1";
+      vars.erase(legacy);
+    }
+    auto chosen = legacy_monitor_enabled ? video_t::local_surface_e::shutter_monitor : video_t::local_surface_e::ar_glasses;
+    std::string surface_text;
+    string_f(vars, "local_display_surface", surface_text);
+    if (surface_text == "off") {
+      chosen = video_t::local_surface_e::off;
+    } else if (surface_text == "ar_glasses") {
+      chosen = video_t::local_surface_e::ar_glasses;
+    } else if (surface_text == "shutter_monitor") {
+      chosen = video_t::local_surface_e::shutter_monitor;
+    } else if (!surface_text.empty()) {
+      invalid("local_display_surface");
+      chosen = video_t::local_surface_e::off;
+    }
+    result.enabled = chosen == video_t::local_surface_e::shutter_monitor;
     string_f(vars, "local_monitor_display_id", result.display_id);
     string_f(vars, "local_monitor_mode", result.mode);
     string_f(vars, "local_monitor_emitter_port", result.emitter_port);
@@ -722,6 +755,10 @@ namespace config {
       invalid("local_monitor_emitter_port (expected a COM port such as COM4)");
     }
     result.enabled = result.enabled && valid;
+    if (surface) {
+      // A chosen monitor whose settings are invalid cannot start, and must not fall back to glasses.
+      *surface = chosen == video_t::local_surface_e::shutter_monitor && !result.enabled ? video_t::local_surface_e::off : chosen;
+    }
     return result;
   }
 
@@ -755,7 +792,7 @@ namespace config {
     string_f(vars, "output_name", video.output_name);
     bool_f(vars, "local_ar_virtual_display_only", video.local_ar_virtual_display_only);
 
-    video.local_monitor = parse_local_monitor_config(vars);
+    video.local_monitor = parse_local_monitor_config(vars, &video.local_surface);
 
     int_f(vars, "max_bitrate", video.max_bitrate);
     double_between_f(vars, "minimum_fps_target", video.minimum_fps_target, {0.0, 1000.0});

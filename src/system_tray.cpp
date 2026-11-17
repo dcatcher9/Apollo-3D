@@ -97,13 +97,13 @@ namespace system_tray {
 
   #ifdef _WIN32
   void tray_monitor_toggle_cb([[maybe_unused]] struct tray_menu *item) {
-    if (!ar_glasses::request_monitor_session(!ar_glasses::monitor_requested())) {
-      launch_ui("/config#local-monitor");
+    if (!ar_glasses::request_local_session(!ar_glasses::local_session_requested())) {
+      launch_ui("/config#local-display");
     }
   }
 
   void tray_monitor_stop_cb([[maybe_unused]] struct tray_menu *item) {
-    ar_glasses::request_monitor_session(false);
+    ar_glasses::request_local_session(false);
   }
   #endif
 
@@ -128,8 +128,8 @@ namespace system_tray {
         // { .text = "-" },
         {.text = TRAY_MSG_NO_APP_RUNNING, .cb = tray_force_stop_cb},
         #ifdef _WIN32
-        {.text = "Toggle monitor 3D", .cb = tray_monitor_toggle_cb},
-        {.text = "Return monitor to 2D", .cb = tray_monitor_stop_cb},
+        {.text = "Toggle local 3D", .cb = tray_monitor_toggle_cb},
+        {.text = "Return local display to 2D", .cb = tray_monitor_stop_cb},
         #endif
         {.text = "Restart", .cb = tray_restart_cb},
         {.text = "Quit", .cb = tray_quit_cb},
@@ -377,7 +377,7 @@ namespace system_tray {
     tray.notification_icon = TRAY_ICON;
     tray.tooltip = product_display_name;
     tray.notification_cb = []() {
-      launch_ui("/config#ar-glasses");
+      launch_ui("/config#local-display");
     };
     tray_update(&tray);
     return true;

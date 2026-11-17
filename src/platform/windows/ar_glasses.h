@@ -436,6 +436,12 @@ namespace ar_glasses {
   std::string monitor_error();
   /** Start/stop is separate from saved capability; startup always leaves the desktop in 2D. */
   bool request_monitor_session(bool start);
+  /** Start or stop 3D on the one configured local surface, whichever kind it is. */
+  bool request_local_session(bool start);
+  bool local_session_requested();
+  bool local_session_active();
+  /** Whether the chosen surface could start now: a configured monitor, or connected approved glasses. */
+  bool local_surface_available();
 
   /** Approve or reject a discovered monitor model. Pending is not accepted from the UI. */
   bool set_device_decision(std::string_view id, device_decision_e decision);

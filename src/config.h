@@ -69,6 +69,15 @@ namespace config {
 
     local_monitor_t local_monitor;
 
+    /// The one local presentation surface this host may start. A remote session is always the
+    /// remote device and is not part of this choice.
+    enum class local_surface_e {
+      off,
+      ar_glasses,
+      shutter_monitor,
+    };
+    local_surface_e local_surface = local_surface_e::ar_glasses;
+
     int max_bitrate;  // Maximum bitrate, sets ceiling in kbps for bitrate requested from client
     double minimum_fps_target;  ///< Lowest framerate used when streaming. Range 0-1000; 0 = max(one fifth of the requested rate, 10 FPS). Never above the requested rate.
 
@@ -84,7 +93,10 @@ namespace config {
   };
 
   // Consume this surface's keys together so invalid timing or mode cannot accidentally activate it.
-  video_t::local_monitor_t parse_local_monitor_config(std::unordered_map<std::string, std::string> &vars);
+  // local_display_surface chooses the local surface; the monitor is enabled only when it is chosen
+  // and its settings are valid. The effective choice is written to surface when it is given.
+  video_t::local_monitor_t parse_local_monitor_config(std::unordered_map<std::string, std::string> &vars, video_t::local_surface_e *surface = nullptr);
+  std::string_view local_surface_name(video_t::local_surface_e surface);
 
   struct audio_t {
     std::string sink;

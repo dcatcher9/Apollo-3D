@@ -1,8 +1,22 @@
 export const settingEnabled = value => value === true || value === 1 || ['enabled', 'on', 'true', '1'].includes(value)
 
+// The local surface choice and the monitor's settings, compared by meaning. The retired
+// local_monitor_enabled switch is not part of it; local_display_surface replaced it.
 export const localMonitorFingerprint = config => JSON.stringify(Object.keys(config || {})
-  .filter(key => key.startsWith('local_monitor_')).sort().map(key => [key,
-    key === 'local_monitor_enabled' || key === 'local_monitor_flip_eyes' ? (settingEnabled(config[key]) ? 'enabled' : 'disabled') : String(config[key])]))
+  .filter(key => key === 'local_display_surface' || (key.startsWith('local_monitor_') && key !== 'local_monitor_enabled')).sort().map(key => [key,
+    key === 'local_monitor_flip_eyes' ? (settingEnabled(config[key]) ? 'enabled' : 'disabled') : String(config[key])]))
+
+export const shutterMonitorSelected = config => config?.local_display_surface === 'shutter_monitor'
+
+// A configuration written before the surface choice existed enabled the monitor with its own
+// switch. Carry that into the choice once, and stop writing the old switch.
+export const migrateLocalDisplaySurface = config => {
+  if (config.local_display_surface === undefined && settingEnabled(config.local_monitor_enabled)) {
+    config.local_display_surface = 'shutter_monitor'
+  }
+  delete config.local_monitor_enabled
+  return config
+}
 
 // The settings component and global Save supply API inventory. The shared validator uses those
 // observed rates; the driver still validates the actual selected target before activation.
@@ -32,7 +46,7 @@ export const rememberLocalMonitorTimingLimits = profiles => {
 }
 
 export const validateLocalMonitorConfig = (config, refreshMillihz = monitorRefreshRates.get(config?.local_monitor_display_id), timing = monitorTimingLimits.get(Number(config?.local_monitor_ir_protocol))) => {
-  if (!settingEnabled(config?.local_monitor_enabled)) return []
+  if (!shutterMonitorSelected(config)) return []
   const errors = []
   if (!config.local_monitor_display_id) errors.push('Select a physical monitor.')
   if (!config.local_monitor_emitter_port?.trim()) errors.push('Select the emitter COM port.')

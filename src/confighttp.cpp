@@ -1293,12 +1293,20 @@ namespace confighttp {
       return;
     }
     nlohmann::json output {
-      {"status", true}, {"enabled", config::video.local_monitor.enabled},
-      {"requested", ar_glasses::monitor_requested()}, {"active", ar_glasses::monitor_active()},
+      {"status", true}, {"surface", config::local_surface_name(config::video.local_surface)},
+      {"enabled", config::video.local_surface != config::video_t::local_surface_e::off},
+      {"available", ar_glasses::local_surface_available()},
+      {"requested", ar_glasses::local_session_requested()}, {"active", ar_glasses::local_session_active()},
       {"error", ar_glasses::monitor_error()},
-      {"devices", nlohmann::json::array()}, {"ports", platf::open3d::serial_ports()},
       {"timing_limits", nlohmann::json::array()},
     };
+    // Session state above comes from memory and is safe to read often. Asking Windows for its
+    // displays and serial ports is not, so that inventory is returned only when it is asked for:
+    // when the settings page opens, on its Refresh button, and before saving.
+    bool inventory = false;
+    for (const auto &[name, value] : request->parse_query_string()) {
+      inventory = inventory || (name == "inventory" && value == "1");
+    }
     {
       // The settings this process is actually running with, in configuration-file form. Saving
       // without restarting changes the file but not these, and Start uses these.
@@ -1307,7 +1315,7 @@ namespace confighttp {
         return value ? "enabled" : "disabled";
       };
       output["running"] = {
-        {"local_monitor_enabled", flag(running.enabled)},
+        {"local_display_surface", config::local_surface_name(config::video.local_surface)},
         {"local_monitor_display_id", running.display_id},
         {"local_monitor_mode", running.mode},
         {"local_monitor_emitter_port", running.emitter_port},
@@ -1333,10 +1341,14 @@ namespace confighttp {
         {"max_window_us", limits->max_window_us}, {"min_period_tail_base_us", limits->min_period_tail_base_us},
       });
     }
-    for (const auto &device : ar_glasses::monitor_devices()) {
-      output["devices"].push_back({{"id", device.id}, {"name", device.name},
-        {"width", device.width}, {"height", device.height},
-        {"refresh_millihz", device.refresh_millihz}, {"is_primary", device.is_primary}});
+    if (inventory) {
+      output["ports"] = platf::open3d::serial_ports();
+      output["devices"] = nlohmann::json::array();
+      for (const auto &device : ar_glasses::monitor_devices()) {
+        output["devices"].push_back({{"id", device.id}, {"name", device.name},
+          {"width", device.width}, {"height", device.height},
+          {"refresh_millihz", device.refresh_millihz}, {"is_primary", device.is_primary}});
+      }
     }
     send_response(response, output);
   }
@@ -1351,15 +1363,15 @@ namespace confighttp {
       const auto input = nlohmann::json::parse(body);
       const auto action = input.at("action").get<std::string>();
       if (action != "start" && action != "stop") {
-        bad_request(response, request, "Choose start or stop for the monitor session.");
+        bad_request(response, request, "Choose start or stop for local 3D.");
         return;
       }
-      if (!ar_glasses::request_monitor_session(action == "start")) {
+      if (!ar_glasses::request_local_session(action == "start")) {
         const auto error = ar_glasses::monitor_error();
-        bad_request(response, request, error.empty() ? "Configure a connected physical monitor and emitter, save, and restart before starting 3D." : error);
+        bad_request(response, request, error.empty() ? "Choose and configure a local display, save, and restart before starting 3D." : error);
         return;
       }
-      send_response(response, nlohmann::json {{"status", true}, {"requested", ar_glasses::monitor_requested()}});
+      send_response(response, nlohmann::json {{"status", true}, {"requested", ar_glasses::local_session_requested()}});
     } catch (const std::exception &error) {
       bad_request(response, request, error.what());
     }
