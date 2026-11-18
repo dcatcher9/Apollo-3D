@@ -459,15 +459,16 @@ Because nothing rendered consumes them, live streaming does not run the field-pi
 the two native distance passes, the proposal writer, the compatibility vertical copy or the
 subtitle horizontal guard on an ordinary observation. Ordinary and suppressed completions expose
 the immutable Base view as Final and carry no current conditioning diagnostics. The estimator
-allocates the separate conditioned Final texture when first completing an observation that needs
-it. The passes run while completing an observation that a Dump 3D request snapshots, and on eligible
-observations in the benchmark harness, conversion worker and native tests, whose estimators keep
-the default always-on policy. A dump uses the separate Final only for current diagnostics. When
-subtitle work was suppressed, the dump stages Final from Base, so
-packaged `shadow_final_parallax.f32`, pins, distance and Gaussian artifacts keep their meaning.
+allocates the conditioned Final texture and diagnostic scratch when first completing an observation
+that needs them. The passes run while completing an observation that a Dump 3D request snapshots,
+and on eligible observations in the benchmark harness, conversion worker and native tests, whose
+estimators keep the default always-on policy. A dump uses the separate Final only for current
+diagnostics. When subtitle work was suppressed, the dump stages Final from Base, so packaged
+`shadow_final_parallax.f32`, pins, distance and Gaussian artifacts keep their meaning.
 Renderer presence gates and cached-geometry reuse test Base, not Final. The harness accepts
 `--subtitle-conditioning-live-policy` only as a parity probe of the live policy; its Final then
-equals Base and is not evaluator evidence.
+equals Base and is not evaluator evidence. Subtitle-plane exports from that probe carry Base and
+the current live subtitle tuple.
 
 
 Live subtitle detection and protection run only in Host AI 3D with authenticated video context.
@@ -1961,9 +1962,11 @@ exact-current proof. The full-source proof intentionally makes cursor-only DDup 
 content-clocked rather than bit-exact with the prior behavior, which included the composited cursor
 in model input.
 
-For an already-authorized window-region ROI, DDup damage metadata supplies the second proof. Every
-committed desktop-content surface carries a monotonically ordered capture sequence and the complete
-dirty and move metadata returned for its acquisition. Starting at the exact sequence of a successful
+For an already-authorized window-region ROI, DDup damage metadata supplies the second proof.
+Capture collects this metadata while a converter that can use it owns a demand on that display.
+Once capture observes zero demand, it discards its history. The first committed desktop surface
+after collection resumes starts a new sequence. Later committed surfaces carry the dirty and move
+metadata returned for their acquisition. Starting at the exact sequence of a successful
 ROI enqueue, every later distinct sequence must be contiguous and completely observed. Repeated
 delivery of the same immutable sequence, including a retained image or cursor-only presentation,
 is idempotent. `AccumulatedFrames > 1` is not itself a gap because DDup coalesces the corresponding

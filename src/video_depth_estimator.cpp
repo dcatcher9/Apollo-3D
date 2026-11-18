@@ -3352,7 +3352,6 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Buffer> ocr_resolve_cbuffer;
     Microsoft::WRL::ComPtr<ID3D11Buffer> subtitle_locator_cbuffer;
     Microsoft::WRL::ComPtr<ID3D11Buffer> subtitle_contour_cbuffer;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> subtitle_contour_distance_cbuffer;
     Microsoft::WRL::ComPtr<ID3D11Buffer> near_identical_cbuffer;
     struct d3d_buffer_views_t {
       Microsoft::WRL::ComPtr<ID3D11Buffer> buffer;
@@ -3385,18 +3384,19 @@ namespace models {
         uav.Reset();
       }
     } subtitle_contour_source, subtitle_contour_previous_features, subtitle_contour_next_features,
-      subtitle_contour_support, subtitle_glyph_matte,
-      subtitle_contour_field_mask, subtitle_contour_horizontal_distance,
-      subtitle_contour_distance, subtitle_contour_source_snapshot,
-      subtitle_gaussian_weight, subtitle_gaussian_blend,
-      subtitle_gaussian_vertical_conditioned, subtitle_conditioned_final;
-    d3d_buffer_views_t subtitle_contour_identity, subtitle_contour_probability_snapshot,
-      subtitle_gaussian_control;
+      subtitle_contour_support, subtitle_glyph_matte, subtitle_contour_source_snapshot;
+    d3d_buffer_views_t subtitle_contour_identity, subtitle_contour_probability_snapshot;
+    struct subtitle_conditioning_diagnostics_t {
+      d3d_texture_views_t field_mask, horizontal_distance, distance;
+      d3d_texture_views_t weight, blend, vertical_conditioned, final;
+      d3d_buffer_views_t control;
+      Microsoft::WRL::ComPtr<ID3D11Buffer> distance_constants;
+      UINT horizontal_distance_height = 0u;
+    };
+    std::optional<subtitle_conditioning_diagnostics_t> subtitle_conditioning_diagnostics;
     struct completed_contour_views_t {
-      Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> support, field_pin, distance, identity;
+      Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> support, identity;
       Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> history, source, probability;
-      Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> gaussian_weight, gaussian_blend,
-        gaussian_vertical_conditioned, gaussian_control;
       Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> glyph_matte, condition_params;
       Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> research_selected_matte, research_selected_matte_receipt;
     } completed_contour;
@@ -6322,16 +6322,10 @@ namespace models {
       subtitle_contour_next_features.reset();
       subtitle_contour_support.reset();
       subtitle_glyph_matte.reset();
-      subtitle_contour_field_mask.reset();
-      subtitle_contour_horizontal_distance.reset();
-      subtitle_contour_distance.reset();
       subtitle_contour_identity.reset();
       subtitle_contour_source_snapshot.reset();
       subtitle_contour_probability_snapshot.reset();
-      subtitle_gaussian_weight.reset();
-      subtitle_gaussian_blend.reset();
-      subtitle_gaussian_vertical_conditioned.reset();
-      subtitle_gaussian_control.reset();
+      subtitle_conditioning_diagnostics.reset();
       completed_contour = {};
       completed_subtitle_conditioning_diagnostics = false;
       subtitle_selected_matte = {};
@@ -6350,7 +6344,6 @@ namespace models {
       subtitle_inner_colour_research_command_frame = 0u;
       subtitle_inner_colour_research_command_time = 0u;
       subtitle_contour_cbuffer.Reset();
-      subtitle_contour_distance_cbuffer.Reset();
       depth_coordinate_v2_cbuffer.Reset();
       depth_coordinate_v2_partials_buf.Reset();
       depth_coordinate_v2_partials_uav.Reset();
@@ -6379,7 +6372,6 @@ namespace models {
       depth_coordinate_v2_final_tex.Reset();
       depth_coordinate_v2_final_uav.Reset();
       depth_coordinate_v2_final_srv.Reset();
-      subtitle_conditioned_final.reset();
       subtitle_locator_state_buf.Reset();
       subtitle_locator_state_uav.Reset();
       subtitle_locator_state_srv.Reset();
@@ -6927,6 +6919,26 @@ namespace models {
       }
     }
 
+    bool create_subtitle_texture(
+      const UINT width,
+      const UINT height,
+      const DXGI_FORMAT format,
+      d3d_texture_views_t &views
+    ) {
+      D3D11_TEXTURE2D_DESC desc {};
+      desc.Width = width;
+      desc.Height = height;
+      desc.MipLevels = 1u;
+      desc.ArraySize = 1u;
+      desc.Format = format;
+      desc.SampleDesc.Count = 1u;
+      desc.Usage = D3D11_USAGE_DEFAULT;
+      desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+      return SUCCEEDED(device->CreateTexture2D(&desc, nullptr, &views.texture)) &&
+             SUCCEEDED(device->CreateShaderResourceView(views.texture.Get(), nullptr, &views.srv)) &&
+             SUCCEEDED(device->CreateUnorderedAccessView(views.texture.Get(), nullptr, &views.uav));
+    }
+
     bool ensure_subtitle_contour_textures(
       const std::uint32_t source_width,
       const std::uint32_t source_height
@@ -6946,18 +6958,7 @@ namespace models {
           }
         }
         d3d_texture_views_t next;
-        D3D11_TEXTURE2D_DESC desc {};
-        desc.Width = width;
-        desc.Height = height;
-        desc.MipLevels = 1u;
-        desc.ArraySize = 1u;
-        desc.Format = format;
-        desc.SampleDesc.Count = 1u;
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-        if (FAILED(device->CreateTexture2D(&desc, nullptr, &next.texture)) ||
-            FAILED(device->CreateShaderResourceView(next.texture.Get(), nullptr, &next.srv)) ||
-            FAILED(device->CreateUnorderedAccessView(next.texture.Get(), nullptr, &next.uav))) {
+        if (!create_subtitle_texture(width, height, format, next)) {
           return false;
         }
         const UINT zero[4] {};
@@ -6987,19 +6988,7 @@ namespace models {
              create_texture(native_width, native_height, DXGI_FORMAT_R32_UINT,
                             subtitle_contour_support) &&
              create_texture(native_width, native_height, DXGI_FORMAT_R32_UINT,
-                            subtitle_glyph_matte) &&
-             create_texture(static_cast<UINT>(field_w), static_cast<UINT>(field_h),
-                            DXGI_FORMAT_R32_UINT, subtitle_contour_field_mask) &&
-             create_texture(static_cast<UINT>(field_w), native_height + 4u,
-                            DXGI_FORMAT_R32_FLOAT, subtitle_contour_horizontal_distance) &&
-             create_texture(static_cast<UINT>(field_w), static_cast<UINT>(field_h),
-                            DXGI_FORMAT_R32_FLOAT, subtitle_contour_distance) &&
-             create_texture(static_cast<UINT>(field_w), static_cast<UINT>(field_h),
-                            DXGI_FORMAT_R32_FLOAT, subtitle_gaussian_weight) &&
-             create_texture(static_cast<UINT>(field_w), static_cast<UINT>(field_h),
-                            DXGI_FORMAT_R32_FLOAT, subtitle_gaussian_blend) &&
-             create_texture(static_cast<UINT>(field_w), static_cast<UINT>(field_h),
-                            DXGI_FORMAT_R32_FLOAT, subtitle_gaussian_vertical_conditioned);
+                            subtitle_glyph_matte);
     }
 
     bool reset_subtitle_state() {
@@ -7018,75 +7007,69 @@ namespace models {
       for (auto *uav : {
              ocr_box_record_uav.Get(), subtitle_locator_state_uav.Get(),
              subtitle_condition_params_uav.Get(), subtitle_contour_identity.uav.Get(),
-             subtitle_contour_probability_snapshot.uav.Get(), subtitle_gaussian_control.uav.Get(),
+             subtitle_contour_probability_snapshot.uav.Get(),
              subtitle_contour_source.uav.Get(), subtitle_contour_source_snapshot.uav.Get(),
              subtitle_contour_previous_features.uav.Get(), subtitle_contour_next_features.uav.Get(),
              subtitle_contour_support.uav.Get(), subtitle_glyph_matte.uav.Get(),
-             subtitle_contour_field_mask.uav.Get(),
-             subtitle_contour_horizontal_distance.uav.Get(), subtitle_contour_distance.uav.Get(),
-             subtitle_gaussian_weight.uav.Get(), subtitle_gaussian_blend.uav.Get(),
-             subtitle_gaussian_vertical_conditioned.uav.Get(),
            }) {
         if (uav) {
           context->ClearUnorderedAccessViewUint(uav, zero);
         }
       }
-      const float zero_float[4] = {};
-      if (subtitle_conditioned_final.uav) {
-        context->ClearUnorderedAccessViewFloat(subtitle_conditioned_final.uav.Get(), zero_float);
+      if (const auto &diagnostics = subtitle_conditioning_diagnostics) {
+        clear_subtitle_conditioning_diagnostics(*diagnostics);
       }
       completed_subtitle_conditioning_diagnostics = false;
       // Disabled completions may expose these initialized views only as unused diagnostics.
       // Reentry cannot retain snapshots belonging to a prior source extent or subtitle context.
       completed_contour = {
-        subtitle_contour_support.srv, subtitle_contour_field_mask.srv,
-        subtitle_contour_distance.srv, subtitle_contour_identity.srv,
+        subtitle_contour_support.srv, subtitle_contour_identity.srv,
         subtitle_contour_previous_features.srv, subtitle_contour_source_snapshot.srv,
         subtitle_contour_probability_snapshot.srv,
-        subtitle_gaussian_weight.srv, subtitle_gaussian_blend.srv,
-        subtitle_gaussian_vertical_conditioned.srv, subtitle_gaussian_control.srv,
         subtitle_glyph_matte.srv, subtitle_condition_params_srv
       };
       return true;
     }
 
+    bool create_subtitle_uint_buffer(
+      const std::uint32_t word_count,
+      Microsoft::WRL::ComPtr<ID3D11Buffer> &buffer,
+      Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> &srv,
+      Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> &uav
+    ) {
+      D3D11_BUFFER_DESC desc {};
+      desc.Usage = D3D11_USAGE_DEFAULT;
+      desc.ByteWidth = word_count * sizeof(std::uint32_t);
+      desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+      desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+      desc.StructureByteStride = sizeof(std::uint32_t);
+      return SUCCEEDED(device->CreateBuffer(&desc, nullptr, &buffer)) &&
+             SUCCEEDED(device->CreateShaderResourceView(buffer.Get(), nullptr, &srv)) &&
+             SUCCEEDED(device->CreateUnorderedAccessView(buffer.Get(), nullptr, &uav));
+    }
+
+    bool ensure_subtitle_constant_buffer(
+      const UINT byte_width,
+      Microsoft::WRL::ComPtr<ID3D11Buffer> &buffer
+    ) {
+      if (buffer) {
+        return true;
+      }
+      D3D11_BUFFER_DESC desc {};
+      desc.Usage = D3D11_USAGE_DEFAULT;
+      desc.ByteWidth = byte_width;
+      desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+      return SUCCEEDED(device->CreateBuffer(&desc, nullptr, &buffer));
+    }
+
     bool ensure_subtitle_resources() {
       invalidate_publication();
-      auto create_uint_buffer = [&](
-                                  const std::uint32_t word_count,
-                                  Microsoft::WRL::ComPtr<ID3D11Buffer> &buffer,
-                                  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> &srv,
-                                  Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> &uav
-                                ) {
-        D3D11_BUFFER_DESC desc {};
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.ByteWidth = word_count * sizeof(std::uint32_t);
-        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-        desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-        desc.StructureByteStride = sizeof(std::uint32_t);
-        return SUCCEEDED(device->CreateBuffer(&desc, nullptr, &buffer)) &&
-               SUCCEEDED(device->CreateShaderResourceView(buffer.Get(), nullptr, &srv)) &&
-               SUCCEEDED(device->CreateUnorderedAccessView(buffer.Get(), nullptr, &uav));
-      };
-      auto create_constant_buffer = [&](
-                                      const UINT byte_width,
-                                      Microsoft::WRL::ComPtr<ID3D11Buffer> &buffer
-                                    ) {
-        if (buffer) {
-          return true;
-        }
-        D3D11_BUFFER_DESC desc {};
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.ByteWidth = byte_width;
-        desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        return SUCCEEDED(device->CreateBuffer(&desc, nullptr, &buffer));
-      };
       bool resources_ok = true;
       if (!ocr_box_record_buf || !ocr_box_record_srv || !ocr_box_record_uav) {
         ocr_box_record_buf.Reset();
         ocr_box_record_srv.Reset();
         ocr_box_record_uav.Reset();
-        resources_ok = create_uint_buffer(
+        resources_ok = create_subtitle_uint_buffer(
           ocr_box_record_word_count,
           ocr_box_record_buf,
           ocr_box_record_srv,
@@ -7098,7 +7081,7 @@ namespace models {
         subtitle_locator_state_buf.Reset();
         subtitle_locator_state_srv.Reset();
         subtitle_locator_state_uav.Reset();
-        resources_ok = resources_ok && create_uint_buffer(
+        resources_ok = resources_ok && create_subtitle_uint_buffer(
           subtitle_locator_state_word_count,
           subtitle_locator_state_buf,
           subtitle_locator_state_srv,
@@ -7110,7 +7093,7 @@ namespace models {
         subtitle_condition_params_buf.Reset();
         subtitle_condition_params_srv.Reset();
         subtitle_condition_params_uav.Reset();
-        resources_ok = resources_ok && create_uint_buffer(
+        resources_ok = resources_ok && create_subtitle_uint_buffer(
           subtitle_condition_param_word_count,
           subtitle_condition_params_buf,
           subtitle_condition_params_srv,
@@ -7120,20 +7103,17 @@ namespace models {
       // An exact-current abstention needs the OCR identity constants even when the optional
       // detector never acquired an engine or its interop buffers.
       resources_ok = resources_ok &&
-        create_constant_buffer(sizeof(ocr_resolve_constants_t), ocr_resolve_cbuffer) &&
-        create_constant_buffer(80u, subtitle_locator_cbuffer) &&
-        create_constant_buffer(96u, subtitle_contour_cbuffer) &&
-        create_constant_buffer(48u, subtitle_contour_distance_cbuffer) &&
-        create_uint_buffer(depth_coordinate_v2::subtitle_contour_history_word_count,
-                           subtitle_contour_identity.buffer,
-                           subtitle_contour_identity.srv, subtitle_contour_identity.uav) &&
-        create_uint_buffer(depth_coordinate_v2::subtitle_ocr_output_width *
-                             depth_coordinate_v2::subtitle_ocr_output_height,
-                           subtitle_contour_probability_snapshot.buffer,
-                           subtitle_contour_probability_snapshot.srv,
-                           subtitle_contour_probability_snapshot.uav) &&
-        create_uint_buffer(1u, subtitle_gaussian_control.buffer,
-                           subtitle_gaussian_control.srv, subtitle_gaussian_control.uav) &&
+        ensure_subtitle_constant_buffer(sizeof(ocr_resolve_constants_t), ocr_resolve_cbuffer) &&
+        ensure_subtitle_constant_buffer(80u, subtitle_locator_cbuffer) &&
+        ensure_subtitle_constant_buffer(96u, subtitle_contour_cbuffer) &&
+        create_subtitle_uint_buffer(depth_coordinate_v2::subtitle_contour_history_word_count,
+                                    subtitle_contour_identity.buffer,
+                                    subtitle_contour_identity.srv, subtitle_contour_identity.uav) &&
+        create_subtitle_uint_buffer(depth_coordinate_v2::subtitle_ocr_output_width *
+                                      depth_coordinate_v2::subtitle_ocr_output_height,
+                                    subtitle_contour_probability_snapshot.buffer,
+                                    subtitle_contour_probability_snapshot.srv,
+                                    subtitle_contour_probability_snapshot.uav) &&
         ensure_subtitle_contour_textures(1u, 1u);
       if (!resources_ok) {
         return false;
@@ -7208,13 +7188,13 @@ namespace models {
                                 &ocr_output_srv,
                                 nullptr
                               ) &&
-                              create_uint_buffer(
+                              create_subtitle_uint_buffer(
                                 ocr_cell_stats_word_count,
                                 ocr_cell_stats_buf,
                                 ocr_cell_stats_srv,
                                 ocr_cell_stats_uav
                               ) &&
-                              create_constant_buffer(32u, ocr_preprocess_cbuffer);
+                              ensure_subtitle_constant_buffer(32u, ocr_preprocess_cbuffer);
       auto &cuda = cuda_driver_api::get();
       bool ocr_interop_teardown_failed = false;
       const auto unregister_ocr_interop = [&]() {
@@ -7809,14 +7789,12 @@ namespace models {
       const bool conditioning_diagnostics,
       d3d_perf_slot *perf_slot = nullptr
     ) {
-      if (!subtitle_contour_temporal_cs || !subtitle_glyph_matte_cs || !subtitle_contour_project_cs || !subtitle_contour_history_cs ||
+      if (!subtitle_contour_temporal_cs || !subtitle_glyph_matte_cs || !subtitle_contour_history_cs ||
           !subtitle_contour_history_identity_cs ||
-          !subtitle_contour_horizontal_cs || !subtitle_contour_vertical_cs || !subtitle_contour_snapshot_cs ||
-          !subtitle_contour_cbuffer || !subtitle_contour_distance_cbuffer || !subtitle_contour_identity.ready() ||
+          !subtitle_contour_snapshot_cs || !subtitle_contour_cbuffer || !subtitle_contour_identity.ready() ||
           !subtitle_contour_source.ready() || !subtitle_contour_previous_features.ready() ||
           !subtitle_contour_next_features.ready() ||
-          !subtitle_contour_support.ready() || !subtitle_glyph_matte.ready() || !subtitle_contour_field_mask.ready() ||
-          !subtitle_contour_horizontal_distance.ready() || !subtitle_contour_distance.ready() ||
+          !subtitle_contour_support.ready() || !subtitle_glyph_matte.ready() ||
           !subtitle_contour_source_snapshot.ready() || !subtitle_contour_probability_snapshot.ready()) {
         return false;
       }
@@ -7885,7 +7863,7 @@ namespace models {
       context->CSSetUnorderedAccessViews(6u, 1u, &null_uav, nullptr);
 
       if (conditioning_diagnostics) {
-        output = subtitle_contour_field_mask.uav.Get();
+        output = subtitle_conditioning_diagnostics->field_mask.uav.Get();
         context->CSSetUnorderedAccessViews(1u, 1u, &output, nullptr);
         context->CSSetShader(subtitle_contour_project_cs.Get(), nullptr, 0u);
         context->DispatchIndirect(near_identical_transaction.dispatch.Get(),
@@ -7944,6 +7922,7 @@ namespace models {
       if (!conditioning_diagnostics) {
         return true;
       }
+      const auto &diagnostics = *subtitle_conditioning_diagnostics;
       const std::array<std::uint32_t, 12u> distance_constants {
         pending_input_region.width(), pending_input_region.height(),
         pending_input_region.height() - std::min(crop_height, pending_input_region.height()),
@@ -7951,23 +7930,23 @@ namespace models {
         static_cast<std::uint32_t>(field_w), static_cast<std::uint32_t>(field_h), 0u, 0u,
         content.left, content.top, content.right, content.bottom
       };
-      context->UpdateSubresource(subtitle_contour_distance_cbuffer.Get(), 0u, nullptr,
+      context->UpdateSubresource(diagnostics.distance_constants.Get(), 0u, nullptr,
                                  distance_constants.data(), 0u, 0u);
-      context->CSSetConstantBuffers(0u, 1u, subtitle_contour_distance_cbuffer.GetAddressOf());
+      context->CSSetConstantBuffers(0u, 1u, diagnostics.distance_constants.GetAddressOf());
       // q is measured from native source-pixel centers, including the four offset centers.
       // Projected field pins remain a separate diagnostic and do not seed this transform.
       ID3D11ShaderResourceView *seed = subtitle_contour_support.srv.Get();
       context->CSSetShaderResources(0u, 1u, &seed);
-      output = subtitle_contour_horizontal_distance.uav.Get();
+      output = diagnostics.horizontal_distance.uav.Get();
       context->CSSetUnorderedAccessViews(0u, 1u, &output, nullptr);
       context->CSSetShader(subtitle_contour_horizontal_cs.Get(), nullptr, 0u);
       context->DispatchIndirect(near_identical_transaction.dispatch.Get(),
                                near_identical_gpu_subtitle_condition_grid16_byte_offset);
       context->CSSetUnorderedAccessViews(0u, 1u, &null_uav, nullptr);
       context->CSSetShaderResources(0u, 1u, null_srvs);
-      ID3D11ShaderResourceView *horizontal = subtitle_contour_horizontal_distance.srv.Get();
+      ID3D11ShaderResourceView *horizontal = diagnostics.horizontal_distance.srv.Get();
       context->CSSetShaderResources(1u, 1u, &horizontal);
-      output = subtitle_contour_distance.uav.Get();
+      output = diagnostics.distance.uav.Get();
       context->CSSetUnorderedAccessViews(0u, 1u, &output, nullptr);
       context->CSSetShader(subtitle_contour_vertical_cs.Get(), nullptr, 0u);
       context->DispatchIndirect(near_identical_transaction.dispatch.Get(),
@@ -7977,26 +7956,63 @@ namespace models {
       return true;
     }
 
-    bool ensure_subtitle_conditioned_final() {
-      if (subtitle_conditioned_final.ready()) {
-        return true;
+    void clear_subtitle_conditioning_diagnostics(const subtitle_conditioning_diagnostics_t &diagnostics) {
+      const UINT zero[4] {};
+      for (auto *uav : {
+             diagnostics.field_mask.uav.Get(), diagnostics.horizontal_distance.uav.Get(), diagnostics.distance.uav.Get(),
+             diagnostics.weight.uav.Get(), diagnostics.blend.uav.Get(), diagnostics.vertical_conditioned.uav.Get(),
+             diagnostics.control.uav.Get(),
+           }) {
+        context->ClearUnorderedAccessViewUint(uav, zero);
       }
-      D3D11_TEXTURE2D_DESC desc {};
-      desc.Width = static_cast<UINT>(field_w);
-      desc.Height = static_cast<UINT>(field_h);
-      desc.MipLevels = 1;
-      desc.ArraySize = 1;
-      desc.Format = DXGI_FORMAT_R32_FLOAT;
-      desc.SampleDesc.Count = 1;
-      desc.Usage = D3D11_USAGE_DEFAULT;
-      desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-      d3d_texture_views_t next;
-      if (FAILED(device->CreateTexture2D(&desc, nullptr, &next.texture)) ||
-          FAILED(device->CreateShaderResourceView(next.texture.Get(), nullptr, &next.srv)) ||
-          FAILED(device->CreateUnorderedAccessView(next.texture.Get(), nullptr, &next.uav))) {
+      const float zero_float[4] {};
+      context->ClearUnorderedAccessViewFloat(diagnostics.final.uav.Get(), zero_float);
+    }
+
+    bool ensure_subtitle_conditioning_diagnostics() {
+      if (!subtitle_contour_project_cs || !subtitle_contour_horizontal_cs || !subtitle_contour_vertical_cs ||
+          !subtitle_condition_cs || !subtitle_gaussian_vertical_limit_cs || !subtitle_gaussian_horizontal_limit_cs ||
+          !subtitle_contour_source.ready()) {
         return false;
       }
-      subtitle_conditioned_final = std::move(next);
+      // The field shape belongs to the estimator resource epoch. The native crop may resize
+      // within that epoch, so only the horizontal-distance scratch depends on this texture.
+      D3D11_TEXTURE2D_DESC native {};
+      subtitle_contour_source.texture->GetDesc(&native);
+      const auto horizontal_height = native.Height + 4u;
+      const auto width = static_cast<UINT>(field_w);
+      const auto height = static_cast<UINT>(field_h);
+      if (auto &diagnostics = subtitle_conditioning_diagnostics) {
+        if (diagnostics->horizontal_distance_height != horizontal_height) {
+          d3d_texture_views_t horizontal_distance;
+          if (!create_subtitle_texture(width, horizontal_height, DXGI_FORMAT_R32_FLOAT, horizontal_distance)) {
+            return false;
+          }
+          const UINT zero[4] {};
+          context->ClearUnorderedAccessViewUint(horizontal_distance.uav.Get(), zero);
+          diagnostics->horizontal_distance = std::move(horizontal_distance);
+          diagnostics->horizontal_distance_height = horizontal_height;
+        }
+        return true;
+      }
+
+      subtitle_conditioning_diagnostics_t next;
+      if (!create_subtitle_texture(width, height, DXGI_FORMAT_R32_UINT, next.field_mask) ||
+          !create_subtitle_texture(width, horizontal_height, DXGI_FORMAT_R32_FLOAT, next.horizontal_distance) ||
+          !create_subtitle_texture(width, height, DXGI_FORMAT_R32_FLOAT, next.distance) ||
+          !create_subtitle_texture(width, height, DXGI_FORMAT_R32_FLOAT, next.weight) ||
+          !create_subtitle_texture(width, height, DXGI_FORMAT_R32_FLOAT, next.blend) ||
+          !create_subtitle_texture(width, height, DXGI_FORMAT_R32_FLOAT, next.vertical_conditioned) ||
+          !create_subtitle_texture(width, height, DXGI_FORMAT_R32_FLOAT, next.final) ||
+          !create_subtitle_uint_buffer(1u, next.control.buffer, next.control.srv, next.control.uav) ||
+          !ensure_subtitle_constant_buffer(48u, next.distance_constants)) {
+        return false;
+      }
+      next.horizontal_distance_height = horizontal_height;
+      // Commit only the complete set. A failed optional allocation cannot expose partial views
+      // or make a later request mistake them for initialized scratch.
+      clear_subtitle_conditioning_diagnostics(next);
+      subtitle_conditioning_diagnostics.emplace(std::move(next));
       return true;
     }
 
@@ -8007,15 +8023,12 @@ namespace models {
     ) {
       // An authenticated abstention has no detector probability buffer. Its inactive OCR8
       // record still advances current identity and clears support while rendering from Base.
-      if (!subtitle_locator_resolve_cs || !subtitle_condition_cs ||
-          !subtitle_gaussian_vertical_limit_cs || !subtitle_gaussian_horizontal_limit_cs ||
+      if (!subtitle_locator_resolve_cs ||
           !subtitle_locator_cbuffer || !subtitle_locator_state_srv ||
           !subtitle_locator_state_uav || !depth_coordinate_v2_state_srv ||
           !depth_coordinate_v2_final_srv ||
           !depth_coordinate_v2_final_uav ||
           !subtitle_condition_params_srv || !subtitle_condition_params_uav ||
-          !subtitle_gaussian_weight.ready() || !subtitle_gaussian_blend.ready() ||
-          !subtitle_gaussian_vertical_conditioned.ready() || !subtitle_gaussian_control.ready() ||
           !ocr_box_record_srv ||
           (pending_subtitle_work == cuda_conditional_graph::work_flag_e::optional_ocr &&
            !ocr_output_srv) || !subtitle_contour_identity.ready() ||
@@ -8025,15 +8038,14 @@ namespace models {
       }
 
       bool conditioning_diagnostics = subtitle_conditioning_diagnostics_requested();
-      if (conditioning_diagnostics && !ensure_subtitle_conditioned_final()) {
-        BOOST_LOG(warning) << "Host SBS could not allocate the conditioned parallax diagnostic field.";
+      if (conditioning_diagnostics && !ensure_subtitle_conditioning_diagnostics()) {
+        BOOST_LOG(warning) << "Host SBS conditioned parallax diagnostic resources are unavailable.";
         if (subtitle_conditioning_diagnostics_always) {
           return false;
         }
         // A live dump can wait for a qualified observation while Base and native matte stay live.
         conditioning_diagnostics = false;
       }
-
       const std::uint32_t source_width = pending_input_region.width();
       const std::uint32_t source_height = pending_input_region.height();
       const std::uint32_t field_width = field_w > 0 ?
@@ -8129,12 +8141,9 @@ namespace models {
         // Retain completed backing views before estimate() can allocate the next source extent.
         // Working OCR inputs may change immediately; the joined completed snapshots cannot.
         completed_contour = {
-          subtitle_contour_support.srv, subtitle_contour_field_mask.srv,
-          subtitle_contour_distance.srv, subtitle_contour_identity.srv,
+          subtitle_contour_support.srv, subtitle_contour_identity.srv,
           subtitle_contour_previous_features.srv, subtitle_contour_source_snapshot.srv,
           subtitle_contour_probability_snapshot.srv,
-          subtitle_gaussian_weight.srv, subtitle_gaussian_blend.srv,
-          subtitle_gaussian_vertical_conditioned.srv, subtitle_gaussian_control.srv,
           subtitle_glyph_matte.srv, subtitle_condition_params_srv
         };
         if(subtitle_selected_matte_commands){const auto v=selected_matte_views();completed_contour.research_selected_matte=v.matte;completed_contour.research_selected_matte_receipt=v.receipt;}
@@ -8147,6 +8156,7 @@ namespace models {
         retain_completed_contour();
         return true;
       }
+      const auto &diagnostics = *subtitle_conditioning_diagnostics;
       context->CSSetConstantBuffers(0, 3, constant_buffers);
 
       // Base remains immutable. Every diagnostic subtitle observation writes the complete
@@ -8158,14 +8168,13 @@ namespace models {
         depth_coordinate_v2_final_srv.Get(),
         subtitle_locator_state_srv.Get(),
         subtitle_condition_params_srv.Get(),
-        subtitle_contour_distance.srv.Get(),
+        diagnostics.distance.srv.Get(),
         subtitle_contour_identity.srv.Get(),
         ocr_box_record_srv.Get(),
       };
       context->CSSetShaderResources(0, 8, condition_srvs);
       ID3D11UnorderedAccessView *condition_outputs[3] = {
-        subtitle_gaussian_blend.uav.Get(), subtitle_gaussian_control.uav.Get(),
-        subtitle_gaussian_weight.uav.Get(),
+        diagnostics.blend.uav.Get(), diagnostics.control.uav.Get(), diagnostics.weight.uav.Get(),
       };
       context->CSSetUnorderedAccessViews(3, 3, condition_outputs, nullptr);
       context->CSSetShader(subtitle_condition_cs.Get(), nullptr, 0);
@@ -8181,12 +8190,12 @@ namespace models {
       // entry copies the proposal; unchanged rows and disabled control preserve immutable Base
       // bits. Private resources keep the original scene-stage diagnostics intact.
       ID3D11ShaderResourceView *vertical_srvs[4] = {
-        subtitle_gaussian_blend.srv.Get(), nullptr, subtitle_gaussian_control.srv.Get(),
+        diagnostics.blend.srv.Get(), nullptr, diagnostics.control.srv.Get(),
         depth_coordinate_v2_final_srv.Get(),
       };
       ID3D11UnorderedAccessView *vertical_outputs[2] = {
         nullptr,
-        subtitle_gaussian_vertical_conditioned.uav.Get(),
+        diagnostics.vertical_conditioned.uav.Get(),
       };
       context->CSSetShaderResources(0u, 4u, vertical_srvs);
       context->CSSetUnorderedAccessViews(0u, 2u, vertical_outputs, nullptr);
@@ -8199,10 +8208,10 @@ namespace models {
       context->CSSetShaderResources(0u, 4u, null_srvs);
 
       ID3D11ShaderResourceView *horizontal_srvs[4] = {
-        subtitle_gaussian_vertical_conditioned.srv.Get(), nullptr,
-        subtitle_gaussian_control.srv.Get(), depth_coordinate_v2_final_srv.Get(),
+        diagnostics.vertical_conditioned.srv.Get(), nullptr,
+        diagnostics.control.srv.Get(), depth_coordinate_v2_final_srv.Get(),
       };
-      ID3D11UnorderedAccessView *final_output = subtitle_conditioned_final.uav.Get();
+      ID3D11UnorderedAccessView *final_output = diagnostics.final.uav.Get();
       context->CSSetShaderResources(0u, 4u, horizontal_srvs);
       context->CSSetUnorderedAccessViews(0u, 1u, &final_output, nullptr);
       context->CSSetShader(subtitle_gaussian_horizontal_limit_cs.Get(), nullptr, 0u);
@@ -8608,7 +8617,7 @@ namespace models {
         r.shadow_base_final_parallax = depth_coordinate_v2_final_srv;
         r.subtitle_conditioning_diagnostics_current = completed.valid && completed_subtitle_conditioning_diagnostics;
         if (r.subtitle_conditioning_diagnostics_current) {
-          r.shadow_conditioned_final_parallax = subtitle_conditioned_final.srv;
+          r.shadow_conditioned_final_parallax = subtitle_conditioning_diagnostics->final.srv;
         }
         r.shadow_state = depth_coordinate_v2_state_srv;
         r.shadow_frame_stats = depth_coordinate_v2_frame_stats_srv;
@@ -8622,16 +8631,23 @@ namespace models {
           r.research_selected_matte = completed_contour.research_selected_matte;
           r.research_selected_matte_receipt = completed_contour.research_selected_matte_receipt;
           r.subtitle_condition_params = completed_contour.condition_params;
-          r.subtitle_contour_field_pin = completed_contour.field_pin;
-          r.subtitle_contour_distance = completed_contour.distance;
           r.subtitle_contour_identity = completed_contour.identity;
           r.subtitle_contour_history = completed_contour.history;
           r.subtitle_contour_source = completed_contour.source;
           r.subtitle_ocr_probability = completed_contour.probability;
-          r.subtitle_gaussian_weight = completed_contour.gaussian_weight;
-          r.subtitle_gaussian_blend = completed_contour.gaussian_blend;
-          r.subtitle_gaussian_vertical_conditioned = completed_contour.gaussian_vertical_conditioned;
-          r.subtitle_gaussian_control = completed_contour.gaussian_control;
+          // Always-on evaluation can inspect the held or cleared auxiliary fields when
+          // suppression produced no new conditioning observation. Final still comes from Base.
+          if (subtitle_conditioning_diagnostics &&
+              (r.subtitle_conditioning_diagnostics_current ||
+               (completed.valid && completed.subtitle_work_suppressed && subtitle_conditioning_diagnostics_always))) {
+            const auto &diagnostics = *subtitle_conditioning_diagnostics;
+            r.subtitle_contour_field_pin = diagnostics.field_mask.srv;
+            r.subtitle_contour_distance = diagnostics.distance.srv;
+            r.subtitle_gaussian_weight = diagnostics.weight.srv;
+            r.subtitle_gaussian_blend = diagnostics.blend.srv;
+            r.subtitle_gaussian_vertical_conditioned = diagnostics.vertical_conditioned.srv;
+            r.subtitle_gaussian_control = diagnostics.control.srv;
+          }
         }
         r.parallax_v2_shader_provenance = parallax_v2_shader_provenance;
         if (gpu_trace_ring_srv && gpu_trace_provenance) {
@@ -9237,11 +9253,13 @@ namespace models {
              depth_coordinate_v2_vertical_majorant_uav.Get(),
              depth_coordinate_v2_vertical_conditioned_uav.Get(),
              depth_coordinate_v2_final_uav.Get(),
-             subtitle_conditioned_final.uav.Get(),
            }) {
         if (uav) {
           context->ClearUnorderedAccessViewFloat(uav, zero4);
         }
+      }
+      if (const auto &diagnostics = subtitle_conditioning_diagnostics) {
+        context->ClearUnorderedAccessViewFloat(diagnostics->final.uav.Get(), zero4);
       }
       completed_subtitle_conditioning_diagnostics = false;
     }
@@ -9417,6 +9435,11 @@ namespace models {
       if (subtitle_work_suppressed) {
         // Preserve subtitle history and expose the new Base without a duplicate texture write.
         completed_subtitle_conditioning_diagnostics = false;
+        if (subtitle_conditioning_diagnostics_always && !ensure_subtitle_conditioning_diagnostics()) {
+          BOOST_LOG(warning) << "Host SBS conditioned parallax diagnostic resources are unavailable.";
+          mark_terminal_failure();
+          return false;
+        }
       } else if (!dispatch_subtitle_conditioner(ocr_record_submitted, input_domain_reset, perf_slot)) {
         mark_terminal_failure();
         return false;
@@ -11045,6 +11068,12 @@ namespace models {
       pimpl->subtitle_conditioning_diagnostics_always = always;
     }
   }
+
+#ifdef SUNSHINE_TESTS
+  bool video_depth_estimator::subtitle_conditioning_diagnostics_allocated_for_tests() const noexcept {
+    return pimpl && pimpl->subtitle_conditioning_diagnostics.has_value();
+  }
+#endif
 
   bool video_depth_estimator::set_completed_ocr_conditioner_research_enabled(const bool enabled) {
     if (!pimpl || !pimpl->is_operational() || pimpl->subtitle_cohort_research_configuration_locked) return false;

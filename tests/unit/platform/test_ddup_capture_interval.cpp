@@ -191,7 +191,7 @@ namespace {
       display.height = display.height_before_rotation = height;
       display.display_rotation = DXGI_MODE_ROTATION_IDENTITY;
       display.capture_format = DXGI_FORMAT_UNKNOWN;
-      display.damage_history = history();
+      display.add_damage_observer();
       display.next_image_id = 1u;
       native = new metadata_duplication_t;
       native->dirty = {{1, 0, 2, 1}};
@@ -493,6 +493,69 @@ TEST(WindowsDdupMetadataTest, UnavailableOrOverBudgetMetadataNeverReachesTheDriv
   EXPECT_FALSE(duplication.damage_update(info, DXGI_MODE_ROTATION_ROTATE90, 100, 100).known);
   EXPECT_EQ(native->move_calls, 0u);
   EXPECT_EQ(native->dirty_calls, 0u);
+}
+
+TEST_F(WindowsDdupSnapshotTest, DamageCollectionFollowsActiveConvertersWithoutChangingCapturedPixels) {
+  display.remove_damage_observer();
+  const auto pixels = desktop_pixels(0xff123400u);
+  const auto surface = desktop_surface(pixels);
+  ASSERT_TRUE(surface);
+
+  img_t ordinary;
+  ASSERT_EQ(snapshot(desktop_present(), surface, ordinary), platf::capture_e::ok);
+  ASSERT_TRUE(ordinary && ordinary->content_timestamp);
+  EXPECT_EQ(read_image(ordinary), pixels);
+  EXPECT_FALSE(display.damage_history);
+  EXPECT_FALSE(display.last_ddup_damage);
+  EXPECT_EQ(native->move_calls, 0u);
+  EXPECT_EQ(native->dirty_calls, 0u);
+
+  display.add_damage_observer();
+  img_t first;
+  ASSERT_EQ(snapshot(desktop_present(), surface, first), platf::capture_e::ok);
+  ASSERT_TRUE(first && first->content_timestamp && display.last_ddup_damage);
+  EXPECT_GT(*first->content_timestamp, *ordinary->content_timestamp);
+  EXPECT_EQ(read_image(first), pixels);
+  EXPECT_EQ(native->move_calls, 0u);
+  EXPECT_EQ(native->dirty_calls, 0u);
+  const auto baseline = display.last_ddup_damage;
+
+  // During a converter handoff, one remaining observer keeps the existing history useful.
+  display.add_damage_observer();
+  display.remove_damage_observer();
+  img_t next;
+  ASSERT_EQ(snapshot(desktop_present(), surface, next), platf::capture_e::ok);
+  ASSERT_TRUE(next && next->content_timestamp && display.last_ddup_damage);
+  EXPECT_EQ(read_image(next), pixels);
+  EXPECT_TRUE(d::ddup_adjacent_desktop_present_observed(baseline, display.last_ddup_damage));
+  EXPECT_EQ(d::query_ddup_damage_between(baseline, display.last_ddup_damage, RECT {1, 0, 2, 1}),
+    d::ddup_damage_intersection_e::changed);
+  EXPECT_EQ(native->move_calls, 1u);
+  EXPECT_EQ(native->dirty_calls, 1u);
+  const auto old_damage = display.last_ddup_damage;
+
+  display.remove_damage_observer();
+  img_t unobserved;
+  ASSERT_EQ(snapshot(desktop_present(), surface, unobserved), platf::capture_e::ok);
+  ASSERT_TRUE(unobserved && unobserved->content_timestamp);
+  EXPECT_GT(*unobserved->content_timestamp, *next->content_timestamp);
+  EXPECT_EQ(read_image(unobserved), pixels);
+  EXPECT_FALSE(display.damage_history);
+  EXPECT_FALSE(display.last_ddup_damage);
+  EXPECT_EQ(native->move_calls, 1u);
+  EXPECT_EQ(native->dirty_calls, 1u);
+
+  display.add_damage_observer();
+  img_t resumed;
+  ASSERT_EQ(snapshot(desktop_present(), surface, resumed), platf::capture_e::ok);
+  ASSERT_TRUE(resumed && resumed->content_timestamp && display.last_ddup_damage);
+  EXPECT_GT(*resumed->content_timestamp, *unobserved->content_timestamp);
+  EXPECT_EQ(read_image(resumed), pixels);
+  EXPECT_NE(display.last_ddup_damage->history, old_damage->history);
+  EXPECT_EQ(d::query_ddup_damage_between(old_damage, display.last_ddup_damage, RECT {1, 0, 2, 1}),
+    d::ddup_damage_intersection_e::unknown);
+  EXPECT_EQ(native->move_calls, 1u);
+  EXPECT_EQ(native->dirty_calls, 1u);
 }
 
 TEST_F(WindowsDdupSnapshotTest, VisiblePointerMovesAndHidesWithoutChangingDesktopIdentity) {

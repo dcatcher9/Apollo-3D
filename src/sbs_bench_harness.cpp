@@ -5022,6 +5022,7 @@ namespace sbs_bench {
                                  diagnostic_dir / name, subtitle_plane_buffer_stage);
       };
       const bool exact_subtitle = models::subtitle_evidence_is_exact_frame(result);
+      const bool write_conditioning = exact_subtitle && !o.subtitle_conditioning_live_policy;
       const auto write_contour = [&](ID3D11ShaderResourceView *view,
                                      DXGI_FORMAT format, std::size_t bytes,
                                      const char *name) {
@@ -5042,14 +5043,16 @@ namespace sbs_bench {
             !write_contour(result.subtitle_contour_support.Get(), DXGI_FORMAT_R32_UINT, 4u, "contour_support.u32") ||
             !write_contour(result.subtitle_glyph_matte.Get(), DXGI_FORMAT_R32_UINT, 4u, "glyph_matte.u32") ||
             !write_words(result.subtitle_condition_params.Get(), models::depth_coordinate_v2::subtitle_condition_param_word_count, "condition_params.u32") ||
+            !write_contour(result.subtitle_contour_history.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT, 16u, "contour_history.rgba32f") ||
+            !write_contour(result.subtitle_contour_source.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, 8u, "contour_source.rgba16f"))) ||
+          (write_conditioning &&
+           (!result.subtitle_conditioning_diagnostics_current ||
             !write_contour(result.subtitle_contour_field_pin.Get(), DXGI_FORMAT_R32_UINT, 4u, "contour_field_pin.u32") ||
             !write_contour(result.subtitle_contour_distance.Get(), DXGI_FORMAT_R32_FLOAT, 4u, "contour_distance.f32") ||
             !write_field(result.subtitle_gaussian_weight.Get(), "gaussian_weight.f32") ||
             !write_field(result.subtitle_gaussian_blend.Get(), "gaussian_blend.f32") ||
             !write_field(result.subtitle_gaussian_vertical_conditioned.Get(), "gaussian_vertical_conditioned.f32") ||
-            !write_words(result.subtitle_gaussian_control.Get(), 1u, "gaussian_control.u32") ||
-            !write_contour(result.subtitle_contour_history.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT, 16u, "contour_history.rgba32f") ||
-            !write_contour(result.subtitle_contour_source.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, 8u, "contour_source.rgba16f")))) {
+            !write_words(result.subtitle_gaussian_control.Get(), 1u, "gaussian_control.u32")))) {
         BOOST_LOG(error) << "sbs-bench: incomplete exact-frame subtitle plane diagnostic export";
         return false;
       }
@@ -5082,6 +5085,7 @@ namespace sbs_bench {
         {"input_domain_reset", completion.input_domain_reset},
         {"subtitle_work_suppressed", result.subtitle_work_suppressed},
         {"exact_subtitle_evidence", exact_subtitle},
+        {"conditioning_diagnostics_current", write_conditioning},
         {"contour_schema", models::depth_coordinate_v2::subtitle_contour_schema},
         {"contour_recipe", models::depth_coordinate_v2::subtitle_contour_recipe},
         {"producer_source_closure_sha256", models::depth_coordinate_v2::shader_source_closure_sha256},

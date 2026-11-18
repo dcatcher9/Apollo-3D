@@ -205,6 +205,23 @@ TEST(TensorRtOcrAvailabilityGpuTest, MissingPackagedOcrPreservesJoinedDepthAndEx
   outline.current_outline_shader_root = (assets.path / "shaders" / "directx" / "current_outline").string();
   ASSERT_TRUE(estimator.configure_subtitle_selected_matte_research(outline, error)) << error;
 
+  const auto expect_diagnostic_views = [](const models::depth_observation_views_t &observation, bool expected) {
+    EXPECT_EQ(observation.subtitle_conditioning_diagnostics_current, expected);
+    for (auto *view : {
+           observation.shadow_conditioned_final_parallax.Get(),
+           observation.subtitle_contour_field_pin.Get(),
+           observation.subtitle_contour_distance.Get(),
+           observation.subtitle_gaussian_weight.Get(),
+           observation.subtitle_gaussian_blend.Get(),
+           observation.subtitle_gaussian_vertical_conditioned.Get(),
+           observation.subtitle_gaussian_control.Get(),
+         }) {
+      EXPECT_EQ(view != nullptr, expected);
+    }
+  };
+  estimator.set_subtitle_conditioning_diagnostics_always(false);
+  EXPECT_FALSE(estimator.subtitle_conditioning_diagnostics_allocated_for_tests());
+
   // A session may start during USER32 movement, before any ordinary observation allocated
   // a native band. Suppression must use initialized placeholders and still publish real depth.
   const auto initially_suppressed = estimator.estimate_depth(source.Get(), models::input_color_space::srgb,
@@ -218,15 +235,22 @@ TEST(TensorRtOcrAvailabilityGpuTest, MissingPackagedOcrPreservesJoinedDepthAndEx
   EXPECT_EQ(initial_completed.observation.completed_frame_id, 0x100000000ull);
   EXPECT_TRUE(initial_completed.observation.subtitle_work_suppressed);
   ASSERT_TRUE(models::parallax_v2_result_is_authenticated(initial_completed.observation));
-  EXPECT_FALSE(initial_completed.observation.subtitle_conditioning_diagnostics_current);
-  EXPECT_FALSE(initial_completed.observation.shadow_conditioned_final_parallax);
+  expect_diagnostic_views(initial_completed.observation, false);
+  EXPECT_FALSE(estimator.subtitle_conditioning_diagnostics_allocated_for_tests());
   EXPECT_EQ(initial_completed.observation.final_parallax(), initial_completed.observation.shadow_base_final_parallax.Get());
   std::vector<std::uint32_t> initial_matte;
   ASSERT_TRUE(read_words(device.Get(), context.Get(), initial_completed.observation.subtitle_glyph_matte.Get(), initial_matte));
   ASSERT_EQ(initial_matte.size(), 1u);
   EXPECT_EQ(initial_matte.front(), 0u);
 
-  for (std::uint64_t observation = 1u; observation <= 2u; ++observation) {
+  // Ordinary live work leaves the diagnostic scratch absent until the first late dump.
+  for (std::uint64_t observation = 1u; observation <= 3u; ++observation) {
+    const bool dump_snapshot = observation == 2u;
+    const bool always_diagnose = observation == 3u;
+    const bool diagnostics_expected = dump_snapshot || always_diagnose;
+    if (always_diagnose) {
+      estimator.set_subtitle_conditioning_diagnostics_always(true);
+    }
     const auto frame = 0x100000000ull + observation, clock = 0x200000000ull + observation * 33333u;
     SCOPED_TRACE(frame);
     const auto reusable_deadline = std::chrono::steady_clock::now() + std::chrono::seconds {2};
@@ -238,7 +262,7 @@ TEST(TensorRtOcrAvailabilityGpuTest, MissingPackagedOcrPreservesJoinedDepthAndEx
     const auto submitted = estimator.estimate_depth(source.Get(), models::input_color_space::srgb, frame, false, {}, models::depth_optional_work_mode_e::ordinary, {.observation_timestamp_us = clock}, 1u);
     ASSERT_TRUE(submitted.submission.inference_enqueued);
     EXPECT_FALSE(submitted.submission.subtitle_ocr_inference_enqueued);
-    const auto completed = estimator.finish_pending_depth_for_evaluation();
+    const auto completed = estimator.finish_pending_depth_for_evaluation(models::input_color_space::srgb, dump_snapshot);
     ASSERT_FALSE(estimator.has_terminal_failure());
     ASSERT_TRUE(completed.observation.completed_frame_valid);
     EXPECT_EQ(completed.observation.completed_frame_id, frame);
@@ -269,7 +293,12 @@ TEST(TensorRtOcrAvailabilityGpuTest, MissingPackagedOcrPreservesJoinedDepthAndEx
 
     std::vector<std::uint32_t> base, final, ocr, plane, condition;
     ASSERT_TRUE(read_words(device.Get(), context.Get(), completed.observation.shadow_base_final_parallax.Get(), base));
-    ASSERT_TRUE(completed.observation.shadow_conditioned_final_parallax);
+    expect_diagnostic_views(completed.observation, diagnostics_expected);
+    EXPECT_EQ(estimator.subtitle_conditioning_diagnostics_allocated_for_tests(), diagnostics_expected);
+    if (dump_snapshot) {
+      ASSERT_TRUE(completed.observation.raw_model_depth_snapshot);
+      ASSERT_TRUE(completed.observation.model_input_snapshot);
+    }
     ASSERT_TRUE(read_words(device.Get(), context.Get(), completed.observation.final_parallax(), final));
     EXPECT_EQ(final, base);
     ASSERT_TRUE(read_words(device.Get(), context.Get(), completed.observation.ocr_box_record.Get(), ocr));
@@ -302,17 +331,15 @@ TEST(TensorRtOcrAvailabilityGpuTest, MissingPackagedOcrPreservesJoinedDepthAndEx
       }));
     }
     EXPECT_TRUE(estimator.publication_is_current(completed.observation.publication));
-    // The default (harness/test) policy runs the conditioned-field diagnostics every time.
-    EXPECT_TRUE(completed.observation.subtitle_conditioning_diagnostics_current);
   }
 
   // Live policy exposes the authenticated Base view directly. A late Dump 3D snapshot of an
   // ordinary observation publishes a distinct conditioned view for just that completion.
   // A snapshot of hard-disabled subtitle work still sees the exact Base view.
   estimator.set_subtitle_conditioning_diagnostics_always(false);
-  for (std::uint64_t observation = 3u; observation <= 6u; ++observation) {
-    const bool subtitle_disabled = observation == 6u;
-    const bool dump_snapshot = observation == 4u || subtitle_disabled;
+  for (std::uint64_t observation = 4u; observation <= 7u; ++observation) {
+    const bool subtitle_disabled = observation == 7u;
+    const bool dump_snapshot = observation == 5u || subtitle_disabled;
     const bool diagnostics_expected = dump_snapshot && !subtitle_disabled;
     const auto optional_work = subtitle_disabled ? models::depth_optional_work_mode_e::disable_subtitle :
                                                    models::depth_optional_work_mode_e::ordinary;
@@ -332,8 +359,7 @@ TEST(TensorRtOcrAvailabilityGpuTest, MissingPackagedOcrPreservesJoinedDepthAndEx
     EXPECT_EQ(completed.observation.completed_frame_id, frame);
     ASSERT_TRUE(models::parallax_v2_result_is_authenticated(completed.observation));
     EXPECT_EQ(completed.observation.subtitle_work_suppressed, subtitle_disabled);
-    EXPECT_EQ(completed.observation.subtitle_conditioning_diagnostics_current, diagnostics_expected);
-    EXPECT_EQ(static_cast<bool>(completed.observation.shadow_conditioned_final_parallax), diagnostics_expected);
+    expect_diagnostic_views(completed.observation, diagnostics_expected);
     auto *base_view = completed.observation.shadow_base_final_parallax.Get();
     if (diagnostics_expected) {
       EXPECT_NE(completed.observation.final_parallax(), base_view);

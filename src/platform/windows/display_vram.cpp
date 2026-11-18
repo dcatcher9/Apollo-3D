@@ -555,6 +555,7 @@ namespace platf::dxgi {
   public:
     ~d3d_base_encode_device() {
       claim_capture_pixels(false);
+      capture_damage_observer.reset();
       // The encode session is already leaving the live path, so a short bounded drain cannot
       // stall capture. It preserves the final GPU timing samples; the generation token only
       // rejects results that cross an explicit collector reset (used by the offline harness).
@@ -570,6 +571,7 @@ namespace platf::dxgi {
     void release_capture_display() noexcept {
       // Capture must copy the desktop again for whoever converts next.
       claim_capture_pixels(false);
+      capture_damage_observer.reset();
       // Encoder teardown may remain blocked inside the NVIDIA driver. The shared capture-display
       // owner is not a D3D/NVENC operand, so release it before derived member destruction to let
       // Desktop Duplication reinitialize while device/context resources remain alive.
@@ -660,6 +662,13 @@ namespace platf::dxgi {
       } else if (capture_pixels_token) {
         auto expected = capture_pixels_token;
         owner.compare_exchange_strong(expected, 0, std::memory_order_acq_rel);
+      }
+    }
+
+    void observe_capture_damage() noexcept {
+      if (auto *capture = dynamic_cast<display_ddup_vram_t *>(display.get())) {
+        capture->add_damage_observer();
+        capture_damage_observer.reset(capture);
       }
     }
 
@@ -7116,6 +7125,7 @@ namespace platf::dxgi {
       int game_width = 0,
       int game_height = 0
     ) {
+      capture_damage_observer.reset();
       if (frame_texture) {
         // The underlying frame pool owns the texture, so we must reference it for ourselves.
         frame_texture->AddRef();
@@ -7600,6 +7610,9 @@ namespace platf::dxgi {
       if (rgb_only) {
         // Local AR presents RGB directly. It needs the common capture/SBS resources above, but
         // no encoder output texture, chroma shaders, planar RTVs, or YUV conversion constants.
+        if (depth_path_on) {
+          observe_capture_damage();
+        }
         return 0;
       }
 
@@ -7704,6 +7717,9 @@ namespace platf::dxgi {
         device_ctx->ClearRenderTargetView(out_UV_rtv.get(), uv_black);
       }
 
+      if (depth_path_on) {
+        observe_capture_damage();
+      }
       return 0;
     }
 
@@ -7809,6 +7825,7 @@ namespace platf::dxgi {
       device_ctx->VSSetConstantBuffers(3, 1, &color_matrix);
       device_ctx->PSSetConstantBuffers(0, 1, &color_matrix);
 
+      capture_damage_observer.reset();
       this->display = std::dynamic_pointer_cast<display_base_t>(display);
       if (!this->display) {
         return -1;
@@ -7948,6 +7965,9 @@ namespace platf::dxgi {
     std::map<uint32_t, encoder_img_ctx_t> img_ctx_map;
 
     std::shared_ptr<display_base_t> display;
+    util::safe_ptr<display_ddup_vram_t, [](display_ddup_vram_t *capture) {
+      capture->remove_damage_observer();
+    }> capture_damage_observer;
     bool display_is_hdr = false;
     bool output_is_hdr = false;
 
@@ -12315,6 +12335,14 @@ namespace platf::dxgi {
     return true;
   }
 
+  void display_ddup_vram_t::add_damage_observer() noexcept {
+    damage_observers_.fetch_add(1, std::memory_order_release);
+  }
+
+  void display_ddup_vram_t::remove_damage_observer() noexcept {
+    damage_observers_.fetch_sub(1, std::memory_order_release);
+  }
+
   capture_e display_ddup_vram_t::snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) {
     DXGI_OUTDUPL_FRAME_INFO frame_info {};
 
@@ -12322,6 +12350,12 @@ namespace platf::dxgi {
     const auto capture_status = dup.next_frame(frame_info, timeout, &res_p);
     resource_t res {res_p};
 
+    const bool record_damage = damage_observers_.load(std::memory_order_acquire) != 0;
+    if (!record_damage && damage_history) {
+      // Subsequent captures can omit metadata, so the next observer needs a fresh history.
+      last_ddup_damage.reset();
+      damage_history.reset();
+    }
     // Sampled once per acquisition; the encode thread may claim or release the output any time.
     const bool export_owns_output = external_pixels_owner.load(std::memory_order_acquire) != 0;
     // Only an idle source wait re-duplicates. The short pacing probe keeps the duplication.
@@ -12460,7 +12494,7 @@ namespace platf::dxgi {
     }
 
     detail::ddup_damage_update_t damage;
-    if (!skip_pixels && desktop_present && prior_damage_chain_valid && !acquisition.unknown_damage) {
+    if (damage_history && !skip_pixels && desktop_present && prior_damage_chain_valid && !acquisition.unknown_damage) {
       damage = dup.damage_update(frame_info, display_rotation, width_before_rotation, height_before_rotation);
       damage.single_desktop_present = detail::ddup_frame_has_one_desktop_present(frame_info);
     }
@@ -12522,7 +12556,11 @@ namespace platf::dxgi {
 
       if (desktop_update) {
         last_ddup_damage.reset();
-        if (damage_history) {
+        if (record_damage) {
+          if (!damage_history) {
+            // This copied desktop is the first baseline. Only later surfaces need interval metadata.
+            damage_history = std::make_shared<detail::ddup_damage_history_t>();
+          }
           auto snapshot = damage_history->commit(std::move(damage));
           if (snapshot.history && snapshot.token != 0u) {
             last_ddup_damage = std::move(snapshot);
@@ -12572,7 +12610,7 @@ namespace platf::dxgi {
     dropped_desktop = {};
     last_delivered_cursor = {};
     last_pixel_cursor_visible = false;
-    damage_history = std::make_shared<detail::ddup_damage_history_t>();
+    damage_history.reset();
     damage_chain_valid = true;
     if (display_base_t::init(config, display_name, capture_backend_e::ddup) || dup.init(this)) {
       return -1;

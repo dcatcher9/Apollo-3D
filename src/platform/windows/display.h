@@ -1048,6 +1048,10 @@ namespace platf::dxgi {
     // Replaces the duplication in place so its first acquisition returns the whole desktop.
     capture_e reduplicate_output();
 
+    // Depth-capable converters may overlap while the same display keeps capturing.
+    void add_damage_observer() noexcept;
+    void remove_damage_observer() noexcept;
+
     duplication_t dup;
     sampler_state_t sampler_linear;
 
@@ -1073,6 +1077,9 @@ namespace platf::dxgi {
     sbs_cursor::snapshot_t last_delivered_cursor;
     // The most recent image with desktop pixels may precede a metadata-only delivery.
     bool last_pixel_cursor_visible = false;
+
+  private:
+    std::atomic<unsigned> damage_observers_ {0};
   };
 
   /**

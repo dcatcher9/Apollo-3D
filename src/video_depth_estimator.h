@@ -1465,9 +1465,12 @@ namespace models {
     /** The field pin, native distance, Gaussian proposal and compatibility limiters reach only
      * Dump 3D and harness artifacts; rendering binds Base. The default (true) runs them on every
      * subtitle observation. Live streaming passes false so only a dump-forced observation runs
-     * them; every other observation publishes exact Base through the distinct Final texture.
+     * them. Other observations expose the immutable Base view as their effective Final.
      */
     void set_subtitle_conditioning_diagnostics_always(bool always) noexcept;
+#ifdef SUNSHINE_TESTS
+    [[nodiscard]] bool subtitle_conditioning_diagnostics_allocated_for_tests() const noexcept;
+#endif
 
     /** Research harness only, default false; accepted only before the first input.
      * Runs private cohort/filter/M1 diagnostics without replacing production S/M or geometry.
