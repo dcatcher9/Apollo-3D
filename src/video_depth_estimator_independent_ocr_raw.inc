@@ -6,6 +6,7 @@ bool independent_ocr_raw_prepared = false;
 bool independent_ocr_raw_pending = false;
 bool independent_ocr_raw_leased = false;
 bool independent_ocr_raw_mapped = false;
+std::optional<std::uint64_t> independent_ocr_eager_unmap_frame;
 bool independent_depth_release_deferred = false;
 bool independent_depth_events_valid = false;
 std::uint64_t independent_depth_event_sequence = 0u;
@@ -372,6 +373,22 @@ bool independent_raw_release(raw_ocr_probe_token_t token) {
   return true;
 }
 
+CUresult independent_depth_release(cuda_driver_api &cuda, std::uint64_t frame) {
+  CUgraphicsResource depth[3] {cuda_in_res, cuda_out_res, cuda_near_identical_decision_res};
+  if (benchmark_joined_completion_gate) {
+    benchmark_joined_completion_gate->note_unmap_begin(frame, joined_completion_gate_benchmark::unmap_e::depth);
+  }
+  const auto unmapped = cuda.cuGraphicsUnmapResources(3u, depth, cu_stream);
+  if (benchmark_joined_completion_gate) {
+    benchmark_joined_completion_gate->note_unmap_return(frame, joined_completion_gate_benchmark::unmap_e::depth, unmapped);
+  }
+  if (unmapped != CUDA_SUCCESS) {
+    return unmapped;
+  }
+  independent_depth_release_deferred = false;
+  return record_inference_done_event(cuda, depth_inference_done_event, cu_stream, pending_depth_inference_event_recorded, "private depth release", false) ? CUDA_SUCCESS : static_cast<CUresult>(-1);
+}
+
 CUresult independent_depth_advance_release(cuda_driver_api &cuda, bool wait) {
   if (!independent_depth_release_deferred) {
     return CUDA_SUCCESS;
@@ -386,22 +403,7 @@ CUresult independent_depth_advance_release(cuda_driver_api &cuda, bool wait) {
   if (benchmark_joined_completion_gate) {
     benchmark_joined_completion_gate->note_actual_event_query(pending_frame_id, ready);
   }
-  if (ready != CUDA_SUCCESS) {
-    return ready;
-  }
-  CUgraphicsResource depth[3] {cuda_in_res, cuda_out_res, cuda_near_identical_decision_res};
-  if (benchmark_joined_completion_gate) {
-    benchmark_joined_completion_gate->note_unmap_begin(pending_frame_id, joined_completion_gate_benchmark::unmap_e::depth);
-  }
-  const auto unmapped = cuda.cuGraphicsUnmapResources(3u, depth, cu_stream);
-  if (benchmark_joined_completion_gate) {
-    benchmark_joined_completion_gate->note_unmap_return(pending_frame_id, joined_completion_gate_benchmark::unmap_e::depth, unmapped);
-  }
-  if (unmapped != CUDA_SUCCESS) {
-    return unmapped;
-  }
-  independent_depth_release_deferred = false;
-  return record_inference_done_event(cuda, depth_inference_done_event, cu_stream, pending_depth_inference_event_recorded, "private deferred depth release", false) ? CUDA_SUCCESS : static_cast<CUresult>(-1);
+  return ready == CUDA_SUCCESS ? independent_depth_release(cuda, pending_frame_id) : ready;
 }
 
 bool independent_raw_quiesce(cuda_driver_api &cuda) {

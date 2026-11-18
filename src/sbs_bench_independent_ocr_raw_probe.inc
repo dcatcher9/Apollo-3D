@@ -43,10 +43,10 @@ int run_independent_ocr_raw_probe(const opts &o, const std::vector<fs::path> &fr
     HRESULT graphics_status = S_FALSE;
   } C_attempt;
 
+  const auto event = [](const models::raw_ocr_probe_depth_events_t &e) {
+    return nlohmann::json {{"deferred_mapped_depth_lease", e.deferred_mapped_depth_lease}, {"actual_compute_query", e.actual_compute_query}, {"actual_hold_query", e.actual_hold_query}, {"root_event_recorded", e.root_event_recorded}, {"actual_root_query", e.actual_root_query}, {"depth_frame_id", e.depth_frame_id}, {"depth_observation_timestamp_us", e.depth_observation_timestamp_us}, {"recorded_event_sequence", e.recorded_event_sequence}};
+  };
   const auto attempt_json = [&]() {
-    const auto event = [](const models::raw_ocr_probe_depth_events_t &e) {
-      return nlohmann::json {{"deferred_mapped_depth_lease", e.deferred_mapped_depth_lease}, {"actual_compute_query", e.actual_compute_query}, {"actual_hold_query", e.actual_hold_query}, {"depth_frame_id", e.depth_frame_id}, {"depth_observation_timestamp_us", e.depth_observation_timestamp_us}, {"recorded_event_sequence", e.recorded_event_sequence}};
-    };
     return nlohmann::json {{"schema", 1u}, {"stage", static_cast<std::uint32_t>(C_attempt.stage)}, {"failure_stage", static_cast<std::uint32_t>(C_attempt.failure_stage)}, {"inner_caught", C_attempt.inner_caught}, {"outer_caught", C_attempt.outer_caught}, {"before_B_query_issued", C_attempt.before_B_issued}, {"after_B_query_issued", C_attempt.after_B_issued}, {"before_B", event(C_attempt.before_B)}, {"after_B", event(C_attempt.after_B)}, {"source_assigned", C_attempt.source_assigned}, {"source", {{"capture_epoch", C_attempt.source.capture_epoch}, {"capture_serial", C_attempt.source.capture_serial}, {"capture_timestamp_us", C_attempt.source.capture_timestamp_us}, {"analysis_generation", C_attempt.source.analysis_generation}, {"source_width", C_attempt.source.source_width}, {"source_height", C_attempt.source.source_height}}}, {"submit_called", C_attempt.submit_called}, {"submit_returned", C_attempt.submit_returned}, {"submit_result", C_attempt.submit_result}, {"poll_started", C_attempt.poll_started}, {"poll_returned", C_attempt.poll_returned}, {"first_actual_release_query", C_attempt.first_query}, {"last_actual_release_query", C_attempt.last_query}, {"query0_count", C_attempt.query0_count}, {"query600_count", C_attempt.query600_count}, {"other_query_count", C_attempt.other_query_count}, {"first_poll_begin_us", C_attempt.first_poll_begin_us}, {"first_poll_return_us", C_attempt.first_poll_return_us}, {"last_poll_begin_us", C_attempt.last_poll_begin_us}, {"last_poll_return_us", C_attempt.last_poll_return_us}, {"first_pending", C_attempt.first_pending}, {"last_pending", C_attempt.last_pending}, {"first_has_views", C_attempt.first_has_views}, {"last_has_views", C_attempt.last_has_views}, {"guard_release_flag_observed", C_attempt.guard_release_flag_observed}, {"guard_release_flag", C_attempt.guard_release_flag}, {"guard_release_flag_poll", C_attempt.guard_release_flag_poll}, {"caught_us", C_attempt.caught_us}, {"existing_timings", {{"before_query_us", C_attempt.before_query_us}, {"submit_begin_us", C_attempt.submit_begin_us}, {"submit_return_us", C_attempt.submit_return_us}, {"raw_ready_us", C_attempt.raw_ready_us}, {"D3D_copy_begin_us", C_attempt.copy_begin_us}, {"D3D_event_ready_us", C_attempt.graphics_ready_us}, {"C_only_Map_owned_copy_done_us", C_attempt.map_done_us}, {"after_query_us", C_attempt.after_query_us}, {"graphics_GetData", C_attempt.graphics_status}}}, {"scalar_record_is_not_extra_GPU_query_or_completion_authority", true}};
   };
 
@@ -97,11 +97,31 @@ int run_independent_ocr_raw_probe(const opts &o, const std::vector<fs::path> &fr
   try {
     const auto plan = nlohmann::json::parse(plan_bytes);
     const bool independent = plan.at("run_kind") == "independent";
-    if (plan.at("schema") != 1 || plan.at("probe_kind") != "independent-ocr-raw-v1" || (!independent && plan.at("run_kind") != "ordinary-control") || frames.size() != 3 || timestamps != std::vector<std::uint64_t> {33334u, 66667u, 100000u} || plan.at("hold_after_entry_ms") != 120 || plan.at("callback_safety_timeout_ms") != 500 || fs::exists(root)) {
+    const bool compare_graphics = plan.contains("depth_unmap_schedule");
+    const auto unmap_schedule = plan.value("depth_unmap_schedule", std::string {"deferred"});
+    const bool eager_unmap = unmap_schedule == "eager";
+    const auto hold_ms = plan.at("hold_after_entry_ms").get<std::uint32_t>();
+    const bool natural_overlap = compare_graphics && hold_ms == 0u;
+    if (compare_graphics && (!independent || (!eager_unmap && unmap_schedule != "deferred"))) {
+      throw std::runtime_error("Invalid private graphics/unmap comparison arm");
+    }
+    if (plan.at("schema") != 1 || plan.at("probe_kind") != "independent-ocr-raw-v1" || (!independent && plan.at("run_kind") != "ordinary-control") || frames.size() != 3 || timestamps != std::vector<std::uint64_t> {33334u, 66667u, 100000u} || (!natural_overlap && hold_ms != 120u) || plan.at("callback_safety_timeout_ms") != 500 || fs::exists(root)) {
       throw std::runtime_error("Invalid raw OCR proof plan or existing output");
     }
     fs::create_directories(root);
     created = true;
+    nlohmann::json comparison_adapter;
+    if (compare_graphics) {
+      ComPtr<IDXGIDevice> dxgi;
+      ComPtr<IDXGIAdapter> adapter;
+      jp_require(dev->QueryInterface(IID_PPV_ARGS(&dxgi)), "Graphics comparison DXGI device");
+      jp_require(dxgi->GetAdapter(&adapter), "Graphics comparison adapter");
+      DXGI_ADAPTER_DESC desc {};
+      jp_require(adapter->GetDesc(&desc), "Graphics comparison adapter description");
+      comparison_adapter = {{"luid_low", desc.AdapterLuid.LowPart}, {"luid_high", desc.AdapterLuid.HighPart},
+                            {"vendor_id", desc.VendorId}, {"device_id", desc.DeviceId}};
+      util::require(comparison_adapter == plan.at("required_adapter"), "Graphics comparison adapter identity differs");
+    }
     std::array<jp_texture_t, 3u> source;
     std::array<ID3D11ShaderResourceView *, 3u> input {};
     nlohmann::json bindings = nlohmann::json::array();
@@ -206,12 +226,15 @@ int run_independent_ocr_raw_probe(const opts &o, const std::vector<fs::path> &fr
     diagnostic = {{"schema", 1}, {"probe_kind", "independent-ocr-raw-v1"}, {"run_kind", plan.at("run_kind")}, {"plan_sha256", sha256_hex(plan_bytes)}, {"sources", bindings}, {"logical_P", {960, 160}}, {"raw_availability_only", true}, {"semantic_status", "UNKNOWN"}, {"performance_qualified", false}, {"no_current_UI_or_EMPTY_or_renderer_authority", true}};
     util::require(est.set_completed_ocr_conditioner_research_enabled(true), "Completed control view flag failed");
     if (independent) {
-      util::require(est.set_independent_ocr_raw_probe_enabled(true), "Raw private pre-input flag failed");
+      const auto eager_frame = eager_unmap ? std::optional<std::uint64_t> {3u} : std::nullopt;
+      util::require(est.set_independent_ocr_raw_probe_enabled(true, eager_frame), "Raw private pre-input flag failed");
+    }
+    if (independent && !natural_overlap) {
       gate::configuration_t c;
       c.enabled = true;
       c.placement = gate::placement_e::before_interop_unmaps;
       c.target_frame_id = 3;
-      c.hold_after_callback_enter_ms = 120;
+      c.hold_after_callback_enter_ms = hold_ms;
       c.callback_entry_timeout_ms = 30000;
       c.callback_safety_timeout_ms = 500;
       util::require(est.configure_joined_completion_gate_for_benchmark(c), "Raw depth hold setup failed");
@@ -294,6 +317,117 @@ int run_independent_ocr_raw_probe(const opts &o, const std::vector<fs::path> &fr
     D3D11_QUERY_DESC query_desc {D3D11_QUERY_EVENT, 0u};
     ComPtr<ID3D11Query> copied;
     jp_require(dev->CreateQuery(&query_desc, &copied), "Raw C completion query allocation");
+    if (compare_graphics) {
+      // Both arms keep the same warmed independent OCR topology. This C workload only
+      // copies its own texture, so its event carries no independent CUDA-stream dependency.
+      phases[1] = "graphics_C";
+      diagnostic["comparison_kind"] = "independent_D3D_copy";
+      diagnostic["depth_unmap_schedule"] = unmap_schedule;
+      diagnostic["natural_depth_work_only"] = natural_overlap;
+      diagnostic["raw_availability_only"] = false;
+      diagnostic["adapter"] = comparison_adapter;
+      const auto wait_deadline = std::chrono::steady_clock::now() + std::chrono::seconds {5};
+      const auto B_submit_begin = util::now_us();
+      util::require(submit_depth(1, 3, 66667).submission.inference_enqueued, "Graphics comparison B depth submit failed");
+      const auto B_submit_return = util::now_us();
+      while (!natural_overlap && !util::status(est).callback_entered) {
+        util::require(std::chrono::steady_clock::now() < wait_deadline, "Graphics comparison B gate entry timed out");
+        std::this_thread::yield();
+      }
+      const auto before = est.independent_ocr_raw_depth_events_for_evaluation();
+      util::require(before.depth_frame_id == 3u && before.depth_observation_timestamp_us == 66667u &&
+        before.recorded_event_sequence == 3u &&
+        (before.actual_compute_query == CUDA_SUCCESS || (natural_overlap && before.actual_compute_query == CUDA_ERROR_NOT_READY)) &&
+        before.deferred_mapped_depth_lease != eager_unmap && before.root_event_recorded == eager_unmap,
+        "Graphics comparison has no genuine B event sequence");
+
+      const auto copy_begin = util::now_us();
+      copy(1, 2, source[2].texture.Get());
+      ctx->End(copied.Get());
+      ctx->Flush();
+      const auto flush_return = util::now_us();
+      std::int64_t graphics_ready = 0, B_compute_ready = 0, B_root_ready = 0;
+      models::raw_ocr_probe_depth_events_t after {}, final_root {};
+      for (;;) {
+        if (!graphics_ready) {
+          const auto status = ctx->GetData(copied.Get(), nullptr, 0u, D3D11_ASYNC_GETDATA_DONOTFLUSH);
+          jp_require(status, "Graphics comparison C event failed");
+          if (status == S_OK) {
+            graphics_ready = util::now_us();
+            after = est.independent_ocr_raw_depth_events_for_evaluation();
+          }
+        }
+        if (natural_overlap && !B_root_ready) {
+          const auto events = est.independent_ocr_raw_depth_events_for_evaluation();
+          if (!B_compute_ready && events.actual_compute_query == CUDA_SUCCESS) {
+            B_compute_ready = util::now_us();
+          }
+          // Service ready unmaps even while C is pending. Waiting for C before servicing
+          // them would artificially extend the depth root in the deferred arm.
+          if (est.can_accept_frame()) {
+            final_root = est.independent_ocr_raw_depth_events_for_evaluation();
+            if (final_root.root_event_recorded && final_root.actual_root_query == CUDA_SUCCESS) {
+              B_root_ready = util::now_us();
+            }
+          }
+        }
+        if (graphics_ready && (!natural_overlap || B_root_ready)) {
+          break;
+        }
+        util::require(!est.has_terminal_failure() && std::chrono::steady_clock::now() < wait_deadline,
+          "Graphics comparison copy or B root failed or timed out");
+        std::this_thread::yield();
+      }
+      util::require(after.depth_frame_id == before.depth_frame_id && after.recorded_event_sequence == before.recorded_event_sequence,
+        "Graphics comparison B identity changed while C copied");
+      map_owned(1, 2);
+      const auto map_done = util::now_us();
+      // Use the fixed OS release in BOTH arms, including when C finishes early.
+      while (!natural_overlap && !util::status(est).released) {
+        util::require(std::chrono::steady_clock::now() < wait_deadline, "Graphics comparison fixed release timed out");
+        std::this_thread::yield();
+      }
+      const auto B = finish_depth(3u, 66667u);
+      const auto B_ack = util::now_us();
+      const auto &bytes = captures[1].data[2];
+      util::require(sha256_hex(std::string_view(bytes.data(), bytes.size())) == bindings.at(2).at("decoded_bgra8_sha256").get<std::string>(),
+        "D3D copied bytes differ from immutable C");
+      captures[1].metadata = {{"literal_C_match", true},
+        {"B_compute_pending_before_C", before.actual_compute_query == CUDA_ERROR_NOT_READY},
+        {"B_compute_pending_after_C_event", after.actual_compute_query == CUDA_ERROR_NOT_READY}};
+      diagnostic["B_before_C"] = event(before);
+      diagnostic["B_after_C_event"] = event(after);
+      diagnostic["timing_us"] = {{"B_submit_begin", B_submit_begin}, {"B_submit_return", B_submit_return},
+        {"C_copy_begin", copy_begin}, {"C_flush_return", flush_return}, {"C_D3D_event_ready", graphics_ready},
+        {"C_owned_copy_done", map_done}, {"B_ack", B_ack}};
+      if (natural_overlap) {
+        util::require(final_root.depth_frame_id == before.depth_frame_id &&
+          final_root.recorded_event_sequence == before.recorded_event_sequence,
+          "Graphics comparison final root does not belong to B");
+        diagnostic["B_final_root"] = event(final_root);
+        diagnostic["timing_us"]["B_compute_ready"] = B_compute_ready;
+        diagnostic["timing_us"]["B_root_ready"] = B_root_ready;
+      } else {
+        const auto gate = util::status(est);
+        util::require(gate.queued && gate.callback_entered && gate.callback_exited && !gate.cancelled &&
+          !gate.callback_timed_out && !gate.callback_entry_timed_out &&
+          gate.depth_unmap.issued && gate.depth_unmap.result == CUDA_SUCCESS && !gate.optional_ocr_unmap.issued &&
+          ((gate.depth_unmap.begin_wall_us < gate.released_wall_us) == eager_unmap),
+          "Graphics comparison did not follow the declared depth-only unmap schedule");
+        captures[1].metadata["copy_issued_before_release"] = copy_begin < gate.released_wall_us;
+        captures[1].metadata["D3D_event_ready_while_B_held"] = graphics_ready < gate.released_wall_us &&
+          before.actual_hold_query == CUDA_ERROR_NOT_READY && after.actual_hold_query == CUDA_ERROR_NOT_READY;
+        captures[1].metadata["owned_copy_before_release"] = map_done < gate.released_wall_us;
+        diagnostic["timing_us"]["depth_unmap_begin"] = gate.depth_unmap.begin_wall_us;
+        diagnostic["timing_us"]["depth_unmap_return"] = gate.depth_unmap.return_wall_us;
+        diagnostic["gate"] = jp_gate(gate);
+      }
+      diagnostic["graphics_C"] = captures[1].metadata;
+      diagnostic["B_publication"] = jp_publication(B.publication);
+      flush();
+      jp_json(root / "report.json", diagnostic);
+      return 0;
+    }
     // All uploads, graphics/CUDA allocations, JIT/captures and CPU vectors precede B hold.
     models::raw_ocr_probe_depth_events_t before {}, after {};
     models::raw_ocr_probe_poll_t current;

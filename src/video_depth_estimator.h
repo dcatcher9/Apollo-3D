@@ -1313,7 +1313,9 @@ namespace models {
   };
   struct raw_ocr_probe_depth_events_t {
     bool deferred_mapped_depth_lease = false;
+    bool root_event_recorded = false;
     std::int32_t actual_compute_query = -1, actual_hold_query = -1;
+    std::int32_t actual_root_query = -1;
     std::uint64_t depth_frame_id = 0u, depth_observation_timestamp_us = 0u;
     std::uint64_t recorded_event_sequence = 0u;
     // These private events do NOT establish an interop-release/completed-owner verdict.
@@ -1520,7 +1522,7 @@ namespace models {
      * Exclusive resident OCR context/stream; depth suppresses subtitle work while enabled.
      * No positive/EMPTY/render authority and no normal queued-depth continuation.
      */
-    bool set_independent_ocr_raw_probe_enabled(bool enabled);
+    bool set_independent_ocr_raw_probe_enabled(bool enabled, std::optional<std::uint64_t> eager_unmap_frame = std::nullopt);
     /** Blocking setup/bootstrap only while no depth is pending, before authored B hold. */
     bool prepare_independent_ocr_raw_probe(ID3D11ShaderResourceView *warm_source,
       const raw_ocr_probe_source_t &identity, std::string &error);
@@ -1529,7 +1531,7 @@ namespace models {
     raw_ocr_probe_poll_t poll_independent_ocr_raw_probe();
     /** All D3D readers must be complete before releasing the exact result contents lease. */
     bool release_independent_ocr_raw_probe(raw_ocr_probe_token_t token);
-    /** Real private compute/hold EventQuery calls; no unmap, ACK or fabricated root completion. */
+    /** Real EventQuery calls for the private compute, hold and recorded root events. */
     raw_ocr_probe_depth_events_t independent_ocr_raw_depth_events_for_evaluation();
 
     /** Queue same-submitted-source postprocess ONCE after successful unmap calls, without

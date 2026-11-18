@@ -10884,8 +10884,8 @@ namespace models {
       }
 
       if (independent_ocr_raw_enabled && enqueued && !is_terminal()) {
-        // Do not issue ANY depth/RQST unmap yet: it would fence later graphics behind B.
-        // This event follows the genuine depth graph. The next event also includes the OS gate.
+        // Both private schedules record the same graph and pre-release events. The eager
+        // control submits the designated frame's unmaps without waiting for event readiness.
         independent_depth_release_deferred = true;
         independent_depth_events_valid = false;
         ++independent_depth_event_sequence;
@@ -10902,6 +10902,14 @@ namespace models {
           }
           if (enqueued && cuda.cuEventRecord(independent_depth_hold_event, cu_stream) == CUDA_SUCCESS) {
             independent_depth_events_valid = true;
+            if (independent_ocr_eager_unmap_frame == frame_id &&
+                independent_depth_release(cuda, frame_id) != CUDA_SUCCESS) {
+              if (benchmark_joined_completion_gate) {
+                benchmark_joined_completion_gate->cancel_and_release();
+              }
+              mark_shared_execution_failure(true);
+              enqueued = false;
+            }
           } else {
             mark_shared_execution_failure(true); enqueued = false;
           }
@@ -11100,14 +11108,15 @@ namespace models {
   }
 
 
-  bool video_depth_estimator::set_independent_ocr_raw_probe_enabled(bool enabled) {
+  bool video_depth_estimator::set_independent_ocr_raw_probe_enabled(bool enabled, std::optional<std::uint64_t> eager_unmap_frame) {
     if (!pimpl || !pimpl->is_operational() || pimpl->subtitle_cohort_research_configuration_locked ||
       pimpl->subtitle_cohort_research_enabled || pimpl->subtitle_inner_colour_research_enabled ||
       pimpl->queued_same_source_gpu_continuation_research_enabled ||
       !pimpl->inference_event_poll_available) return false;
-    if (pimpl->independent_ocr_raw_enabled) return enabled;
+    if (pimpl->independent_ocr_raw_enabled) return enabled && eager_unmap_frame == pimpl->independent_ocr_eager_unmap_frame;
     pimpl->independent_ocr_raw_enabled = enabled;
     if (enabled) {
+      pimpl->independent_ocr_eager_unmap_frame = eager_unmap_frame;
       auto &cuda = cuda_driver_api::get();
       if (cuda.cuCtxSetCurrent(pimpl->cuda_ctx) != CUDA_SUCCESS ||
         cuda.cuEventCreate(&pimpl->independent_depth_compute_event, CU_EVENT_DEFAULT) != CUDA_SUCCESS ||
@@ -11133,22 +11142,27 @@ namespace models {
   }
   raw_ocr_probe_depth_events_t video_depth_estimator::independent_ocr_raw_depth_events_for_evaluation() {
     raw_ocr_probe_depth_events_t r;
-    if (!pimpl || !pimpl->independent_depth_release_deferred || pimpl->is_terminal()) return r;
+    if (!pimpl || !pimpl->independent_depth_events_valid || !pimpl->has_previous_frame || pimpl->is_terminal()) return r;
     auto &cuda = cuda_driver_api::get();
     if (cuda.cuCtxSetCurrent(pimpl->cuda_ctx) != CUDA_SUCCESS) {
       pimpl->mark_shared_execution_failure(true); return r;
     }
-    r.deferred_mapped_depth_lease = true;
+    r.deferred_mapped_depth_lease = pimpl->independent_depth_release_deferred;
     r.depth_frame_id = pimpl->pending_frame_id;
     r.depth_observation_timestamp_us = pimpl->pending_observation_timestamp_us;
     r.recorded_event_sequence = pimpl->independent_depth_event_sequence;
     r.actual_compute_query = static_cast<std::int32_t>(cuda.cuEventQuery(pimpl->independent_depth_compute_event));
     r.actual_hold_query = static_cast<std::int32_t>(cuda.cuEventQuery(pimpl->independent_depth_hold_event));
+    r.root_event_recorded = pimpl->pending_depth_inference_event_recorded;
+    if (r.root_event_recorded) {
+      r.actual_root_query = static_cast<std::int32_t>(cuda.cuEventQuery(pimpl->depth_inference_done_event));
+    }
     if (pimpl->benchmark_joined_completion_gate)
       pimpl->benchmark_joined_completion_gate->note_actual_event_query(pimpl->pending_frame_id,
         static_cast<CUresult>(r.actual_hold_query));
     if ((r.actual_compute_query != CUDA_SUCCESS && r.actual_compute_query != CUDA_ERROR_NOT_READY) ||
-        (r.actual_hold_query != CUDA_SUCCESS && r.actual_hold_query != CUDA_ERROR_NOT_READY))
+        (r.actual_hold_query != CUDA_SUCCESS && r.actual_hold_query != CUDA_ERROR_NOT_READY) ||
+        (r.root_event_recorded && r.actual_root_query != CUDA_SUCCESS && r.actual_root_query != CUDA_ERROR_NOT_READY))
       pimpl->mark_shared_execution_failure(true);
     return r;
   }
