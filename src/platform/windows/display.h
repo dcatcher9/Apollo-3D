@@ -551,30 +551,6 @@ namespace platf::dxgi {
       return {presentation_timestamp, retained_content_timestamp};
     }
 
-    /** Publish fresh capture pixels without modifying an image already held by the encoder.
-     *
-     * A pointer-only acquisition can forward the existing cursor-free image without writing any
-     * pixels. Treat that acquisition as idle: neither timestamps nor diagnostic handoff metadata
-     * may be rewritten on the shared image. Cursor removal still publishes its freshly copied
-     * image, as do desktop updates and visible cursor composition.
-     */
-    inline capture_e complete_ddup_image_delivery(
-      std::shared_ptr<platf::img_t> &image,
-      const bool reuses_published_image,
-      const std::optional<std::chrono::steady_clock::time_point> frame_timestamp,
-      const std::optional<std::chrono::steady_clock::time_point> content_timestamp
-    ) {
-      if (reuses_published_image) {
-        image.reset();
-        return capture_e::timeout;
-      }
-      if (image) {
-        image->frame_timestamp = frame_timestamp;
-        image->content_timestamp = content_timestamp;
-      }
-      return capture_e::ok;
-    }
-
     /** Desktop Duplication pixels dropped while an external export owned the encoded output.
      *
      * While an encoder converts a live export, capture forwards each acquisition as metadata and
@@ -1087,9 +1063,6 @@ namespace platf::dxgi {
     // CPU shape data is immutable after publication and safe to upload on an encoder device.
     std::shared_ptr<const sbs_cursor::shape_t> cursor_shape;
 
-    texture2d_t old_surface_delayed_destruction;
-    std::chrono::steady_clock::time_point old_surface_timestamp;
-    std::variant<std::monostate, texture2d_t, std::shared_ptr<platf::img_t>> last_frame_variant;
     std::optional<std::chrono::steady_clock::time_point> last_content_timestamp;
     std::shared_ptr<detail::ddup_damage_history_t> damage_history;
     std::optional<detail::ddup_damage_snapshot_t> last_ddup_damage;
@@ -1098,6 +1071,8 @@ namespace platf::dxgi {
     detail::ddup_dropped_desktop_t dropped_desktop;
     // Cursor of the last delivered image, to tell whether a skipped-pixel update changes anything.
     sbs_cursor::snapshot_t last_delivered_cursor;
+    // The most recent image with desktop pixels may precede a metadata-only delivery.
+    bool last_pixel_cursor_visible = false;
   };
 
   /**

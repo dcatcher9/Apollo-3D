@@ -12326,17 +12326,15 @@ namespace platf::dxgi {
   }
 
   capture_e display_ddup_vram_t::snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) {
-    HRESULT status;
-    DXGI_OUTDUPL_FRAME_INFO frame_info;
+    DXGI_OUTDUPL_FRAME_INFO frame_info {};
 
     resource_t::pointer res_p {};
-    auto capture_status = dup.next_frame(frame_info, timeout, &res_p);
+    const auto capture_status = dup.next_frame(frame_info, timeout, &res_p);
     resource_t res {res_p};
 
     // Sampled once per acquisition; the encode thread may claim or release the output any time.
     const bool export_owns_output = external_pixels_owner.load(std::memory_order_acquire) != 0;
-    // Only an idle source wait re-duplicates, never a short pacing probe: a stream's timed-out
-    // probe is followed by an ordinary source wait, which recovers the desktop if it stays idle.
+    // Only an idle source wait re-duplicates. The short pacing probe keeps the duplication.
     if (capture_status == capture_e::timeout && detail::capture_wait_policy_t::waited_for_source(timeout) && dropped_desktop.reduplicate_on_timeout(export_owns_output)) {
       return reduplicate_output();
     }
@@ -12344,45 +12342,18 @@ namespace platf::dxgi {
       return capture_status;
     }
 
-    const bool mouse_update_flag = frame_info.LastMouseUpdateTime.QuadPart != 0 || frame_info.PointerShapeBufferSize > 0;
-    const bool frame_update_flag = frame_info.LastPresentTime.QuadPart != 0;
-    const bool update_flag = mouse_update_flag || frame_update_flag;
-    const auto acquisition = dropped_desktop.acquire(export_owns_output, frame_update_flag);
-    // After dropped presents, any acquisition's surface holds the whole current desktop.
-    const bool read_surface = frame_update_flag || (acquisition.read_desktop && res);
-
-    if (!update_flag && !read_surface) {
+    const bool mouse_update = frame_info.LastMouseUpdateTime.QuadPart != 0 || frame_info.PointerShapeBufferSize > 0;
+    const bool desktop_present = frame_info.LastPresentTime.QuadPart != 0;
+    const auto acquisition = dropped_desktop.acquire(export_owns_output, desktop_present);
+    const bool prior_damage_chain_valid = damage_chain_valid;
+    const bool desktop_update = desktop_present ||
+                                (res && (acquisition.read_desktop ||
+                                         (!prior_damage_chain_valid && !acquisition.skip_pixels)));
+    if (!mouse_update && !desktop_update) {
       return capture_e::timeout;
     }
-
-    const auto timestamp_now = std::chrono::steady_clock::now();
-    const auto timestamp_qpc = qpc_counter();
-    const auto from_qpc = [&](const std::int64_t value) {
-      return timestamp_now - qpc_time_difference(timestamp_qpc, value);
-    };
-    const auto present_timestamp = frame_info.LastPresentTime.QuadPart != 0 ?
-                                     std::optional {from_qpc(frame_info.LastPresentTime.QuadPart)} :
-                                     std::nullopt;
-    const auto timestamp_selection = detail::select_ddup_timestamps(
-      present_timestamp,
-      frame_info.LastMouseUpdateTime.QuadPart != 0 ?
-        std::optional {from_qpc(frame_info.LastMouseUpdateTime.QuadPart)} :
-        std::nullopt,
-      last_content_timestamp
-    );
-    auto frame_timestamp = timestamp_selection.presentation_timestamp;
-    if (read_surface && !frame_timestamp) {
-      frame_timestamp = timestamp_now;
-    }
-    // A whole-desktop read without a present carries content current as of this acquisition.
-    const auto surface_timestamp = present_timestamp ? present_timestamp :
-                                   read_surface      ? frame_timestamp :
-                                                       std::nullopt;
-    // A present becomes content only after its CopyResource is actually submitted. Mark the
-    // metadata chain discontinuous now so any early return makes the next successful commit
-    // explicitly UNKNOWN instead of omitting an acquired-but-uncopied surface.
-    const bool prior_damage_chain_valid = damage_chain_valid;
-    if (read_surface) {
+    // A present becomes content after the copy. An uncopied present breaks damage continuity.
+    if (desktop_update) {
       damage_chain_valid = false;
     }
 
@@ -12392,7 +12363,7 @@ namespace platf::dxgi {
       util::buffer_t<std::uint8_t> img_data {frame_info.PointerShapeBufferSize};
 
       UINT dummy;
-      status = dup.dup->GetFramePointerShape(img_data.size(), std::begin(img_data), &dummy, &shape_info);
+      const auto status = dup.dup->GetFramePointerShape(img_data.size(), std::begin(img_data), &dummy, &shape_info);
       if (FAILED(status)) {
         BOOST_LOG(error) << "Failed to get new pointer shape [0x"sv << util::hex(status).to_string_view() << ']';
 
@@ -12420,13 +12391,27 @@ namespace platf::dxgi {
       cursor_xor.set_pos(frame_info.PointerPosition.Position.x, frame_info.PointerPosition.Position.y, width, height, display_rotation, frame_info.PointerPosition.Visible);
     }
 
-    const bool blend_mouse_cursor_flag = (cursor_alpha.visible || cursor_xor.visible) && cursor_visible;
+    const bool blend_mouse_cursor = (cursor_alpha.visible || cursor_xor.visible) && cursor_visible;
+    const bool skip_pixels =
+      (acquisition.skip_pixels || (dropped_desktop.dropped() && !desktop_update)) &&
+      (desktop_update || capture_format != DXGI_FORMAT_UNKNOWN);
+    const bool dummy = !desktop_update && !last_content_timestamp;
+    const bool redraw_pointer = !dummy && (blend_mouse_cursor || last_pixel_cursor_visible);
+    if (!skip_pixels && !desktop_update && !redraw_pointer && !dummy) {
+      // The consumer may still hold the preceding image. Leave its pixels and metadata intact.
+      img_out.reset();
+      return capture_e::timeout;
+    }
 
-    texture2d_t src {};
-    std::optional<detail::ddup_damage_update_t> pending_damage;
-    if (read_surface) {
-      // Get the texture object from this frame
-      status = res->QueryInterface(IID_ID3D11Texture2D, (void **) &src);
+    texture2d_t src;
+    if (desktop_update || (!skip_pixels && redraw_pointer)) {
+      // A successful DDup acquisition supplies the complete desktop, even on cursor-only
+      // updates. Read it while this frame is held and keep content identity independent.
+      if (!res) {
+        BOOST_LOG(warning) << "Desktop Duplication did not supply the required desktop bitmap."sv;
+        return capture_e::reinit;
+      }
+      const auto status = res->QueryInterface(IID_ID3D11Texture2D, (void **) &src);
       if (FAILED(status)) {
         BOOST_LOG(error) << "Couldn't query interface [0x"sv << util::hex(status).to_string_view() << ']';
         return capture_e::error;
@@ -12434,448 +12419,141 @@ namespace platf::dxgi {
 
       D3D11_TEXTURE2D_DESC desc {};
       src->GetDesc(&desc);
-
-      // It's possible for our display enumeration to race with mode changes and result in
-      // mismatched image pool and desktop texture sizes. If this happens, just reinit again.
+      // A mode change can race enumeration and invalidate the image pool.
       if (desc.Width != width_before_rotation || desc.Height != height_before_rotation) {
         BOOST_LOG(info) << "Capture size changed ["sv << width << 'x' << height << " -> "sv << desc.Width << 'x' << desc.Height << ']';
         return capture_e::reinit;
       }
-
-      // If we don't know the capture format yet, grab it from this texture
       if (capture_format == DXGI_FORMAT_UNKNOWN) {
         capture_format = desc.Format;
         BOOST_LOG(info) << "Capture format ["sv << dxgi_format_to_string(capture_format) << ']';
       }
-
-      // It's also possible for the capture format to change on the fly. If that happens,
-      // reinitialize capture to try format detection again and create new images.
       if (capture_format != desc.Format) {
         BOOST_LOG(info) << "Capture format changed ["sv << dxgi_format_to_string(capture_format) << " -> "sv << dxgi_format_to_string(desc.Format) << ']';
         return capture_e::reinit;
       }
-
-      pending_damage = frame_update_flag ?
-                         dup.damage_update(
-                           frame_info,
-                           display_rotation,
-                           width_before_rotation,
-                           height_before_rotation
-                         ) :
-                         detail::ddup_damage_update_t {};
-      // Actual adjacent acquired desktop surfaces only; no model/convert token substitute.
-      pending_damage->single_desktop_present =
-        prior_damage_chain_valid && !acquisition.unknown_damage &&
-        detail::ddup_frame_has_one_desktop_present(frame_info);
-      if (!prior_damage_chain_valid || acquisition.unknown_damage) {
-        pending_damage->known = false;
-        pending_damage->rects.clear();
-      }
     }
 
-    auto commit_desktop_surface = [&]() {
-      if (!pending_damage || !surface_timestamp) {
-        return;
-      }
-
-      if (damage_history) {
-        auto snapshot = damage_history->commit(std::move(*pending_damage));
-        if (snapshot.history && snapshot.token != 0u) {
-          last_ddup_damage = std::move(snapshot);
-        } else {
-          last_ddup_damage.reset();
-        }
-      } else {
-        last_ddup_damage.reset();
-      }
-      pending_damage.reset();
-      last_content_timestamp = surface_timestamp;
-      damage_chain_valid = true;
-    };
-
-    const auto cursor_snapshot = [&]() {
-      return sbs_cursor::snapshot_t {
+    sbs_cursor::snapshot_t cursor;
+    if (blend_mouse_cursor) {
+      cursor = {
         .shape = cursor_shape,
         .viewport = cursor_alpha.texture ? cursor_alpha.cursor_view : cursor_xor.cursor_view,
         .capture_width = static_cast<std::uint32_t>(width_before_rotation),
         .capture_height = static_cast<std::uint32_t>(height_before_rotation),
         .rotation = display_rotation,
-        .visible = blend_mouse_cursor_flag,
+        .visible = true,
       };
-    };
-
-    // An encoder converting a live external export never reads these pixels: forward only the
-    // timestamps and the cursor it composites, without a copy or keyed-mutex round trip. Copies
-    // resume once it releases the capture, starting with a whole-desktop read (dropped_desktop).
-    // Should no surface be readable before that, no retained surface holds current pixels either,
-    // so a cursor update stays metadata rather than becoming a black dummy frame.
-    if ((acquisition.skip_pixels || (dropped_desktop.dropped() && !src)) && capture_format != DXGI_FORMAT_UNKNOWN) {
-      if (src) {
-        if (auto surface = std::get_if<texture2d_t>(&last_frame_variant)) {
-          old_surface_delayed_destruction.reset(surface->release());
-          old_surface_timestamp = std::chrono::steady_clock::now();
-        }
-        last_frame_variant = {};
-        last_ddup_damage.reset();
-      }
-      const auto cursor = blend_mouse_cursor_flag ? cursor_snapshot() : sbs_cursor::snapshot_t {};
-      const bool cursor_changed = !sbs_cursor::same_presentation(cursor, last_delivered_cursor);
-      if (!src && !cursor_changed) {
-        // Like a hidden cursor's update on the copying path, it changes nothing.
-        return capture_e::timeout;
-      }
-      if (!pull_free_image_cb(img_out)) {
-        return capture_e::interrupted;
-      }
-      auto *d3d_img = static_cast<img_d3d_t *>(img_out.get());
-      d3d_img->pixels_skipped = true;
-      d3d_img->ddup_damage.reset();
-      d3d_img->cursor = cursor;
-      // A present without a cursor change only refreshes the retained source's timestamps.
-      d3d_img->conversion_needed = cursor_changed;
-      d3d_img->blank = false;
-      last_delivered_cursor = cursor;
-      return detail::complete_ddup_image_delivery(img_out, false, frame_timestamp, last_content_timestamp);
+    }
+    const bool cursor_changed = skip_pixels && !sbs_cursor::same_presentation(cursor, last_delivered_cursor);
+    if (skip_pixels && !desktop_update && !cursor_changed) {
+      return capture_e::timeout;
     }
 
-    enum class lfa {
-      nothing,
-      replace_surface_with_img,
-      replace_img_with_surface,
-      copy_src_to_img,
-      copy_src_to_surface,
+    const auto timestamp_now = std::chrono::steady_clock::now();
+    const auto timestamp_qpc = qpc_counter();
+    const auto from_qpc = [&](const std::int64_t value) {
+      return timestamp_now - qpc_time_difference(timestamp_qpc, value);
     };
-
-    enum class ofa {
-      forward_last_img,
-      copy_last_surface_and_blend_cursor,
-      dummy_fallback,
-    };
-
-    auto last_frame_action = lfa::nothing;
-    auto out_frame_action = ofa::dummy_fallback;
-
-    if (capture_format == DXGI_FORMAT_UNKNOWN) {
-      // We don't know the final capture format yet, so we will encode a black dummy image
-      last_frame_action = lfa::nothing;
-      out_frame_action = ofa::dummy_fallback;
-    } else {
-      if (src) {
-        // We got a new frame from DesktopDuplication...
-        if (blend_mouse_cursor_flag) {
-          // ...and we need to blend the mouse cursor onto it.
-          // Copy the frame to intermediate surface so we can blend this and future mouse cursor updates
-          // without new frames from DesktopDuplication. We use direct3d surface directly here and not
-          // an image from pull_free_image_cb mainly because it's lighter (surface sharing between
-          // direct3d devices produce significant memory overhead).
-          last_frame_action = lfa::copy_src_to_surface;
-          // Copy the intermediate surface to a new image from pull_free_image_cb and blend the mouse cursor onto it.
-          out_frame_action = ofa::copy_last_surface_and_blend_cursor;
-        } else {
-          // ...and we don't need to blend the mouse cursor.
-          // Copy the frame to a new image from pull_free_image_cb and save the shared pointer to the image
-          // in case the mouse cursor appears without a new frame from DesktopDuplication.
-          last_frame_action = lfa::copy_src_to_img;
-          // Use saved last image shared pointer as output image evading copy.
-          out_frame_action = ofa::forward_last_img;
-        }
-      } else if (!std::holds_alternative<std::monostate>(last_frame_variant)) {
-        // We didn't get a new frame from DesktopDuplication...
-        if (blend_mouse_cursor_flag) {
-          // ...but we need to blend the mouse cursor.
-          if (std::holds_alternative<std::shared_ptr<platf::img_t>>(last_frame_variant)) {
-            // We have the shared pointer of the last image, replace it with intermediate surface
-            // while copying contents so we can blend this and future mouse cursor updates.
-            last_frame_action = lfa::replace_img_with_surface;
-          }
-          // Copy the intermediate surface which contains last DesktopDuplication frame
-          // to a new image from pull_free_image_cb and blend the mouse cursor onto it.
-          out_frame_action = ofa::copy_last_surface_and_blend_cursor;
-        } else {
-          // ...and we don't need to blend the mouse cursor.
-          // This happens when the mouse cursor disappears from screen,
-          // or there's mouse cursor on screen, but its drawing is disabled in sunshine.
-          if (std::holds_alternative<texture2d_t>(last_frame_variant)) {
-            // We have the intermediate surface that was used as the mouse cursor blending base.
-            // Replace it with an image from pull_free_image_cb copying contents and freeing up the surface memory.
-            // Save the shared pointer to the image in case the mouse cursor reappears.
-            last_frame_action = lfa::replace_surface_with_img;
-          }
-          // Use saved last image shared pointer as output image evading copy.
-          out_frame_action = ofa::forward_last_img;
-        }
-      }
-    }
-
-    auto create_surface = [&](texture2d_t &surface) -> bool {
-      // Try to reuse the old surface if it hasn't been destroyed yet.
-      if (old_surface_delayed_destruction) {
-        surface.reset(old_surface_delayed_destruction.release());
-        return true;
-      }
-
-      // Otherwise create a new surface.
-      D3D11_TEXTURE2D_DESC t {};
-      t.Width = width_before_rotation;
-      t.Height = height_before_rotation;
-      t.MipLevels = 1;
-      t.ArraySize = 1;
-      t.SampleDesc.Count = 1;
-      t.Usage = D3D11_USAGE_DEFAULT;
-      t.Format = capture_format;
-      t.BindFlags = 0;
-      status = device->CreateTexture2D(&t, nullptr, &surface);
-      if (FAILED(status)) {
-        BOOST_LOG(error) << "Failed to create frame copy texture [0x"sv << util::hex(status).to_string_view() << ']';
-        return false;
-      }
-
-      return true;
-    };
-
-    auto get_locked_d3d_img = [&](std::shared_ptr<platf::img_t> &img, bool dummy = false) -> std::tuple<std::shared_ptr<img_d3d_t>, texture_lock_helper> {
-      auto d3d_img = std::static_pointer_cast<img_d3d_t>(img);
-
-      // Finish creating the image (if it hasn't happened already),
-      // also creates synchronization primitives for shared access from multiple direct3d devices.
-      if (complete_img(d3d_img.get(), dummy)) {
-        return {nullptr, nullptr};
-      }
-
-      // This image is shared between capture direct3d device and encoders direct3d devices,
-      // we must acquire lock before doing anything to it.
-      texture_lock_helper lock_helper(d3d_img->capture_mutex.get());
-      if (!lock_helper.lock()) {
-        BOOST_LOG(error) << "Failed to lock capture texture";
-        return {nullptr, nullptr};
-      }
-
-      return {std::move(d3d_img), std::move(lock_helper)};
-    };
-
-    switch (last_frame_action) {
-      case lfa::nothing:
-        {
-          break;
-        }
-
-      case lfa::replace_surface_with_img:
-        {
-          auto p_surface = std::get_if<texture2d_t>(&last_frame_variant);
-          if (!p_surface) {
-            BOOST_LOG(error) << "Logical error at " << __FILE__ << ":" << __LINE__;
-            return capture_e::error;
-          }
-
-          std::shared_ptr<platf::img_t> img;
-          if (!pull_free_image_cb(img)) {
-            return capture_e::interrupted;
-          }
-
-          auto [d3d_img, lock] = get_locked_d3d_img(img);
-          if (!d3d_img) {
-            return capture_e::error;
-          }
-
-          device_ctx->CopyResource(d3d_img->capture_texture.get(), p_surface->get());
-          d3d_img->ddup_damage = last_ddup_damage;
-          d3d_img->cursor = {};
-
-          // We delay the destruction of intermediate surface in case the mouse cursor reappears shortly.
-          old_surface_delayed_destruction.reset(p_surface->release());
-          old_surface_timestamp = std::chrono::steady_clock::now();
-
-          last_frame_variant = img;
-          break;
-        }
-
-      case lfa::replace_img_with_surface:
-        {
-          auto p_img = std::get_if<std::shared_ptr<platf::img_t>>(&last_frame_variant);
-          if (!p_img) {
-            BOOST_LOG(error) << "Logical error at " << __FILE__ << ":" << __LINE__;
-            return capture_e::error;
-          }
-          auto [d3d_img, lock] = get_locked_d3d_img(*p_img);
-          if (!d3d_img) {
-            return capture_e::error;
-          }
-
-          p_img = nullptr;
-          last_frame_variant = texture2d_t {};
-          auto &surface = std::get<texture2d_t>(last_frame_variant);
-          if (!create_surface(surface)) {
-            return capture_e::error;
-          }
-
-          device_ctx->CopyResource(surface.get(), d3d_img->capture_texture.get());
-          break;
-        }
-
-      case lfa::copy_src_to_img:
-        {
-          last_frame_variant = {};
-
-          std::shared_ptr<platf::img_t> img;
-          if (!pull_free_image_cb(img)) {
-            return capture_e::interrupted;
-          }
-
-          auto [d3d_img, lock] = get_locked_d3d_img(img);
-          if (!d3d_img) {
-            return capture_e::error;
-          }
-
-          device_ctx->CopyResource(d3d_img->capture_texture.get(), src.get());
-          commit_desktop_surface();
-          d3d_img->ddup_damage = last_ddup_damage;
-          d3d_img->cursor = {};
-          last_frame_variant = img;
-          break;
-        }
-
-      case lfa::copy_src_to_surface:
-        {
-          auto p_surface = std::get_if<texture2d_t>(&last_frame_variant);
-          if (!p_surface) {
-            last_frame_variant = texture2d_t {};
-            p_surface = std::get_if<texture2d_t>(&last_frame_variant);
-            if (!create_surface(*p_surface)) {
-              return capture_e::error;
-            }
-          }
-          device_ctx->CopyResource(p_surface->get(), src.get());
-          commit_desktop_surface();
-          break;
-        }
-    }
-
-    if (last_frame_action == lfa::copy_src_to_img || last_frame_action == lfa::copy_src_to_surface) {
-      dropped_desktop.copied();
-    }
-
-    auto blend_cursor = [&](img_d3d_t &d3d_img) {
-      // Called only for a newly acquired output image, never for a forwarded published image.
-      d3d_img.cursor = cursor_snapshot();
-      device_ctx->VSSetShader(cursor_vs.get(), nullptr, 0);
-      device_ctx->PSSetShader(cursor_ps.get(), nullptr, 0);
-      device_ctx->OMSetRenderTargets(1, &d3d_img.capture_rt, nullptr);
-
-      if (cursor_alpha.texture.get()) {
-        // Perform an alpha blending operation
-        device_ctx->OMSetBlendState(blend_alpha.get(), nullptr, 0xFFFFFFFFu);
-
-        device_ctx->PSSetShaderResources(0, 1, &cursor_alpha.input_res);
-        device_ctx->RSSetViewports(1, &cursor_alpha.cursor_view);
-        device_ctx->Draw(3, 0);
-      }
-
-      if (cursor_xor.texture.get()) {
-        // Perform an invert blending without touching alpha values
-        device_ctx->OMSetBlendState(blend_invert.get(), nullptr, 0x00FFFFFFu);
-
-        device_ctx->PSSetShaderResources(0, 1, &cursor_xor.input_res);
-        device_ctx->RSSetViewports(1, &cursor_xor.cursor_view);
-        device_ctx->Draw(3, 0);
-      }
-
-      device_ctx->OMSetBlendState(blend_disable.get(), nullptr, 0xFFFFFFFFu);
-
-      ID3D11RenderTargetView *emptyRenderTarget = nullptr;
-      device_ctx->OMSetRenderTargets(1, &emptyRenderTarget, nullptr);
-      device_ctx->RSSetViewports(0, nullptr);
-      ID3D11ShaderResourceView *emptyShaderResourceView = nullptr;
-      device_ctx->PSSetShaderResources(0, 1, &emptyShaderResourceView);
-    };
-
-    switch (out_frame_action) {
-      case ofa::forward_last_img:
-        {
-          auto p_img = std::get_if<std::shared_ptr<platf::img_t>>(&last_frame_variant);
-          if (!p_img) {
-            BOOST_LOG(error) << "Logical error at " << __FILE__ << ":" << __LINE__;
-            return capture_e::error;
-          }
-          img_out = *p_img;
-          break;
-        }
-
-      case ofa::copy_last_surface_and_blend_cursor:
-        {
-          auto p_surface = std::get_if<texture2d_t>(&last_frame_variant);
-          if (!p_surface) {
-            BOOST_LOG(error) << "Logical error at " << __FILE__ << ":" << __LINE__;
-            return capture_e::error;
-          }
-          if (!blend_mouse_cursor_flag) {
-            BOOST_LOG(error) << "Logical error at " << __FILE__ << ":" << __LINE__;
-            return capture_e::error;
-          }
-
-          if (!pull_free_image_cb(img_out)) {
-            return capture_e::interrupted;
-          }
-
-          auto [d3d_img, lock] = get_locked_d3d_img(img_out);
-          if (!d3d_img) {
-            return capture_e::error;
-          }
-
-          device_ctx->CopyResource(d3d_img->capture_texture.get(), p_surface->get());
-          d3d_img->ddup_damage = last_ddup_damage;
-          blend_cursor(*d3d_img);
-          break;
-        }
-
-      case ofa::dummy_fallback:
-        {
-          if (!pull_free_image_cb(img_out)) {
-            return capture_e::interrupted;
-          }
-
-          // Clear the image if it has been used as a dummy.
-          // It can have the mouse cursor blended onto it.
-          auto old_d3d_img = (img_d3d_t *) img_out.get();
-          bool reclear_dummy = !old_d3d_img->blank && old_d3d_img->capture_texture;
-
-          auto [d3d_img, lock] = get_locked_d3d_img(img_out, true);
-          if (!d3d_img) {
-            return capture_e::error;
-          }
-          d3d_img->ddup_damage.reset();
-          d3d_img->cursor = {};
-
-          if (reclear_dummy) {
-            const float rgb_black[] = {0.0f, 0.0f, 0.0f, 0.0f};
-            device_ctx->ClearRenderTargetView(d3d_img->capture_rt.get(), rgb_black);
-          }
-
-          if (blend_mouse_cursor_flag) {
-            blend_cursor(*d3d_img);
-          }
-
-          break;
-        }
-    }
-
-    // Perform delayed destruction of the unused surface if the time is due.
-    if (old_surface_delayed_destruction && old_surface_timestamp + 10s < std::chrono::steady_clock::now()) {
-      old_surface_delayed_destruction.reset();
-    }
-
-    const auto delivery_status = detail::complete_ddup_image_delivery(
-      img_out,
-      last_frame_action == lfa::nothing && out_frame_action == ofa::forward_last_img,
-      frame_timestamp,
+    const auto present_timestamp = desktop_present ?
+                                     std::optional {from_qpc(frame_info.LastPresentTime.QuadPart)} :
+                                     std::nullopt;
+    auto frame_timestamp = detail::select_ddup_timestamps(
+      present_timestamp,
+      frame_info.LastMouseUpdateTime.QuadPart != 0 ?
+        std::optional {from_qpc(frame_info.LastMouseUpdateTime.QuadPart)} :
+        std::nullopt,
       last_content_timestamp
-    );
-    if (delivery_status == capture_e::ok && img_out) {
-      // Only newly written outputs may change metadata. The cursor re-entry path also locks an
-      // already-published image to read its cursor-free pixels, so locking alone is not ownership.
-      static_cast<img_d3d_t *>(img_out.get())->blank = false;
-      last_delivered_cursor = static_cast<img_d3d_t *>(img_out.get())->cursor;
+    ).presentation_timestamp;
+    if (desktop_update && !frame_timestamp) {
+      frame_timestamp = timestamp_now;
     }
-    return delivery_status;
+
+    detail::ddup_damage_update_t damage;
+    if (!skip_pixels && desktop_present && prior_damage_chain_valid && !acquisition.unknown_damage) {
+      damage = dup.damage_update(frame_info, display_rotation, width_before_rotation, height_before_rotation);
+      damage.single_desktop_present = detail::ddup_frame_has_one_desktop_present(frame_info);
+    }
+
+    if (skip_pixels && desktop_update) {
+      last_ddup_damage.reset();
+    }
+    if (!pull_free_image_cb(img_out)) {
+      return capture_e::interrupted;
+    }
+    auto *image = static_cast<img_d3d_t *>(img_out.get());
+    if (skip_pixels) {
+      // Export reads only metadata. Keep the cursor in the last real desktop image independent.
+      image->ddup_damage.reset();
+    } else {
+      const bool reclear_dummy = dummy && !image->blank && image->capture_texture;
+      if (complete_img(image, dummy)) {
+        return capture_e::error;
+      }
+      {
+        texture_lock_helper lock(image->capture_mutex.get());
+        if (!lock.lock()) {
+          BOOST_LOG(error) << "Failed to lock capture texture";
+          return capture_e::error;
+        }
+        if (src) {
+          device_ctx->CopyResource(image->capture_texture.get(), src.get());
+        } else if (reclear_dummy) {
+          const float rgb_black[4] {};
+          device_ctx->ClearRenderTargetView(image->capture_rt.get(), rgb_black);
+        }
+
+        if (blend_mouse_cursor) {
+          device_ctx->VSSetShader(cursor_vs.get(), nullptr, 0);
+          device_ctx->PSSetShader(cursor_ps.get(), nullptr, 0);
+          device_ctx->OMSetRenderTargets(1, &image->capture_rt, nullptr);
+
+          if (cursor_alpha.texture) {
+            device_ctx->OMSetBlendState(blend_alpha.get(), nullptr, 0xFFFFFFFFu);
+            device_ctx->PSSetShaderResources(0, 1, &cursor_alpha.input_res);
+            device_ctx->RSSetViewports(1, &cursor_alpha.cursor_view);
+            device_ctx->Draw(3, 0);
+          }
+          if (cursor_xor.texture) {
+            device_ctx->OMSetBlendState(blend_invert.get(), nullptr, 0x00FFFFFFu);
+            device_ctx->PSSetShaderResources(0, 1, &cursor_xor.input_res);
+            device_ctx->RSSetViewports(1, &cursor_xor.cursor_view);
+            device_ctx->Draw(3, 0);
+          }
+
+          device_ctx->OMSetBlendState(blend_disable.get(), nullptr, 0xFFFFFFFFu);
+          ID3D11RenderTargetView *empty_target = nullptr;
+          device_ctx->OMSetRenderTargets(1, &empty_target, nullptr);
+          device_ctx->RSSetViewports(0, nullptr);
+          ID3D11ShaderResourceView *empty_srv = nullptr;
+          device_ctx->PSSetShaderResources(0, 1, &empty_srv);
+        }
+      }
+
+      if (desktop_update) {
+        last_ddup_damage.reset();
+        if (damage_history) {
+          auto snapshot = damage_history->commit(std::move(damage));
+          if (snapshot.history && snapshot.token != 0u) {
+            last_ddup_damage = std::move(snapshot);
+          }
+        }
+        last_content_timestamp = present_timestamp ? present_timestamp : frame_timestamp;
+        damage_chain_valid = true;
+        dropped_desktop.copied();
+      }
+      image->ddup_damage = last_ddup_damage;
+      last_pixel_cursor_visible = blend_mouse_cursor;
+    }
+
+    image->cursor = cursor;
+    image->pixels_skipped = skip_pixels;
+    image->conversion_needed = !skip_pixels || cursor_changed;
+    image->blank = false;
+    image->frame_timestamp = frame_timestamp;
+    image->content_timestamp = last_content_timestamp;
+    last_delivered_cursor = std::move(cursor);
+    return capture_e::ok;
   }
 
   capture_e display_ddup_vram_t::release_snapshot() {
@@ -12903,6 +12581,7 @@ namespace platf::dxgi {
     last_ddup_damage.reset();
     dropped_desktop = {};
     last_delivered_cursor = {};
+    last_pixel_cursor_visible = false;
     damage_history = std::make_shared<detail::ddup_damage_history_t>();
     damage_chain_valid = true;
     if (display_base_t::init(config, display_name, capture_backend_e::ddup) || dup.init(this)) {
