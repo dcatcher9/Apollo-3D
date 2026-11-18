@@ -1452,6 +1452,7 @@ namespace models {
   class video_depth_estimator {
   public:
     enum class normalized_depth_diagnostics_e { disabled, enabled };
+    enum class subtitle_legacy_matte_e { always, on_demand };
     /**
      * @brief Construct a new video depth estimator
      *
@@ -1465,6 +1466,8 @@ namespace models {
      *            resolves it to the authenticated fused pixel_values -> refined_depth runtime.
      * @param normalized_depth_diagnostics Retain the normalized-depth and EMA mask history used by
      *            the evaluator. Live V2 rendering uses the independently produced parallax fields.
+     * @param legacy_matte Produce the original dense matte on every subtitle observation or only
+     *            when requested by diagnostics or the legacy research selector.
      */
     video_depth_estimator(
       Microsoft::WRL::ComPtr<ID3D11Device> device,
@@ -1472,7 +1475,8 @@ namespace models {
       const std::filesystem::path &assets_dir,
       const config::video_t::sbs_t &cfg,
       const config::depth_model_info &model,
-      normalized_depth_diagnostics_e normalized_depth_diagnostics = normalized_depth_diagnostics_e::enabled
+      normalized_depth_diagnostics_e normalized_depth_diagnostics = normalized_depth_diagnostics_e::enabled,
+      subtitle_legacy_matte_e legacy_matte = subtitle_legacy_matte_e::always
     );
 
     ~video_depth_estimator();

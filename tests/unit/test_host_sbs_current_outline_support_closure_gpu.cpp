@@ -4256,13 +4256,13 @@ namespace {
       request.source.analysis_generation = generation;request.source.token = token;request.source.transfer_mode = sdr?0u:2u;
       request.probability = p_buffer.srv.Get();request.support = support_texture.srv.Get();
       request.ocr_record = o_buffer.srv.Get();request.actual_uip40 = u_buffer.srv.Get();
-      request.original_legacy_matte = legacy_texture.srv.Get();request.postprocess_mode = mode;request.expected_work = 1u;
+      request.postprocess_mode = mode;request.expected_work = 1u;
       ASSERT_TRUE(owner.queue(context_.Get(), effective_composition, request, error_)) << error_;
       const auto bundle = owner.bundle();
       ASSERT_TRUE(bundle.all_stages_issued);
       selector::inputs_t in;
       in.current_cb96 = bundle.current.actual_contour_constants96.Get();in.actual_root_args = bundle.current.actual_final256.Get();
-      in.legacy_matte = bundle.current.original_legacy_matte.Get();in.sct = bundle.current.sct.Get();
+      in.legacy_matte = legacy_texture.srv.Get();in.sct = bundle.current.sct.Get();
       in.mode = static_cast<selector::postprocess_mode_e>(mode);in.expected_work = 1u;in.transaction_token = token;
       in.current_outline_requested = true;in.baseline_matte = bundle.baseline_matte.Get();in.numeric_proof = bundle.numeric_proof.Get();
       in.source_envelope104 = bundle.source.uip_envelope.Get();in.cbc_meta512 = bundle.enclosure.receipt.Get();

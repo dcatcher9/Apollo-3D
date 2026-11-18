@@ -35,7 +35,6 @@ struct request_t {
   ID3D11ShaderResourceView *support = nullptr;
   ID3D11ShaderResourceView *ocr_record = nullptr;
   ID3D11ShaderResourceView *actual_uip40 = nullptr;
-  ID3D11ShaderResourceView *original_legacy_matte = nullptr;
   UINT postprocess_mode =
       0u; // Actual pending function result1/2/4, never guessed from root80.
   UINT expected_work =
@@ -47,8 +46,7 @@ struct current_operands_t {
   ComPtr<ID3D11DeviceContext> ordered_context;
   ComPtr<ID3D11ShaderResourceView> legacy_display_snapshot, parent_raw_source,
       sct;
-  ComPtr<ID3D11ShaderResourceView> probability, support, ocr_record,
-      actual_uip40, original_legacy_matte;
+  ComPtr<ID3D11ShaderResourceView> probability, support, ocr_record, actual_uip40;
   ComPtr<ID3D11Buffer> actual_contour_constants96, actual_final256;
   std::array<UINT, 4u> parent_roi_ltrb{};
   std::uint64_t frame = 0u, observation_us = 0u, analysis_generation = 0u,
@@ -197,7 +195,7 @@ class resources_t {
     for (auto *view :
          {r.source.display_snapshot_band, r.source.parent_raw_source,
           r.source.actual_sct32, r.probability, r.support, r.ocr_record,
-          r.actual_uip40, r.original_legacy_matte}) {
+          r.actual_uip40}) {
       if (!same_device(view)) {
         error = "Composition current operand missing or on another device";
         return false;
@@ -212,9 +210,8 @@ class resources_t {
                             depth_coordinate_v2::subtitle_ocr_output_height;
     if (!structured_view(r.probability, pwords) ||
         !structured_view(r.ocr_record, 256u) ||
-        !structured_view(r.actual_uip40, 40u) || !native_uint_view(r.support) ||
-        !native_uint_view(r.original_legacy_matte)) {
-      error = "Composition current P/S/OCR/UIP/legacy shape or format mismatch";
+        !structured_view(r.actual_uip40, 40u) || !native_uint_view(r.support)) {
+      error = "Composition current P/S/OCR/UIP shape or format mismatch";
       return false;
     }
     // Only immutable shader/device facts are reused. Every request, resource
@@ -314,7 +311,6 @@ class resources_t {
     c.support = r.support;
     c.ocr_record = r.ocr_record;
     c.actual_uip40 = r.actual_uip40;
-    c.original_legacy_matte = r.original_legacy_matte;
     c.parent_roi_ltrb = r.source.roi_ltrb;
     c.frame = r.source.frame;
     c.observation_us = r.source.observation_us;
@@ -388,8 +384,8 @@ public:
   // Same serialized immediate interval through selector. Caller already owns
   // the actual admitted parent-RAW/color-slot lease; AddRef here cannot freeze
   // or recover an old frame. A false result may follow partial submission:
-  // retain this owner until ordered consumption, mark new path unsupplied, and
-  // select ORIGINAL LEGACY. Never use an analysis-baseline M.
+  // retain this owner until ordered consumption and leave the current-outline
+  // inputs unavailable for selection.
   bool queue(ID3D11DeviceContext *context, const program_t &p,
              const request_t &r, std::string &error) {
     error.clear();

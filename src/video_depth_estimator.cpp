@@ -2461,6 +2461,7 @@ namespace models {
     float minmax_alpha;  // temporal EMA blend for the normalized min/max
     const bool diagnostics_enabled;
     const bool normalized_depth_diagnostics_enabled;
+    const subtitle_legacy_matte_e subtitle_legacy_matte;
     struct tensorrt_cuda_graph_t {
       CUgraph graph = nullptr;
       detail::cuda_graph_replay_policy_t policy;
@@ -3761,6 +3762,10 @@ namespace models {
     [[nodiscard]] bool subtitle_conditioning_diagnostics_requested() const noexcept {
       return subtitle_conditioning_diagnostics_always || pending_dump_forced ||
              completion_dump_snapshot_requested;
+    }
+    [[nodiscard]] bool subtitle_legacy_matte_required() const noexcept {
+      return subtitle_legacy_matte == subtitle_legacy_matte_e::always ||
+             (subtitle_selected_matte_enabled && !subtitle_current_outline_enabled);
     }
     std::uint64_t force_infer_transaction_sequence = 0u;
     bool gpu_undecided_requires_force_infer_refresh = false;
@@ -5536,7 +5541,8 @@ namespace models {
       const std::filesystem::path &assets_dir,
       const config::video_t::sbs_t &cfg,
       const config::depth_model_info &model,
-      normalized_depth_diagnostics_e normalized_depth_diagnostics
+      normalized_depth_diagnostics_e normalized_depth_diagnostics,
+      subtitle_legacy_matte_e legacy_matte
     ):
         device(d),
         context(c),
@@ -5550,6 +5556,7 @@ namespace models {
         minmax_alpha((float) config::host_sbs_v2_live_calibration::minmax_ema),
         diagnostics_enabled(config::sunshine.diagnostics_enabled),
         normalized_depth_diagnostics_enabled(normalized_depth_diagnostics == normalized_depth_diagnostics_e::enabled),
+        subtitle_legacy_matte(legacy_matte),
         parallax_v2_requested_pop_strength(
           depth_coordinate_v2::requested_pop_strength(
             static_cast<float>(cfg.pop_strength)
@@ -6614,7 +6621,6 @@ namespace models {
       request.support=subtitle_contour_support.srv.Get();
       request.ocr_record=ocr_box_record_srv.Get();
       request.actual_uip40=subtitle_locator_state_srv.Get();
-      request.original_legacy_matte=subtitle_glyph_matte.srv.Get();
       request.postprocess_mode=pending_near_identical_postprocess_mode();
       request.expected_work=cuda_conditional_graph::work_flags_value(pending_subtitle_work);
       return request;
@@ -6623,7 +6629,8 @@ namespace models {
     [[nodiscard]] static research_current_outline_selected_matte_v2::inputs_t
     make_subtitle_current_outline_selector_inputs(
       const source5_cbc5_f2_composition_gpu_v1::bundle_t &bundle,
-      ID3D11ShaderResourceView *root_view
+      ID3D11ShaderResourceView *root_view,
+      ID3D11ShaderResourceView *legacy_matte
     ) {
       namespace selector=research_current_outline_selected_matte_v2;
       // Reuse the operands leased by this exact composition publication. The
@@ -6632,7 +6639,7 @@ namespace models {
       selector::inputs_t in;
       in.current_cb96=current.actual_contour_constants96.Get();
       in.actual_root_args=current.actual_final256.Get();
-      in.legacy_matte=current.original_legacy_matte.Get();
+      in.legacy_matte=legacy_matte;
       in.sct=current.sct.Get();
       in.root=root_view;
       in.mode=static_cast<selector::postprocess_mode_e>(current.postprocess_mode);
@@ -6649,7 +6656,7 @@ namespace models {
       return in;
     }
 
-    void dispatch_subtitle_current_outline(d3d_perf_slot *perf_slot = nullptr) {
+    void dispatch_subtitle_current_outline(ID3D11ShaderResourceView *legacy_matte, d3d_perf_slot *perf_slot) {
       const auto failed=[&](const std::string &why) {
         if (subtitle_current_outline_error!=why) {
           BOOST_LOG(warning)<<"Subtitle outline unavailable for this observation: "<<why;
@@ -6657,7 +6664,7 @@ namespace models {
         }
       };
       if (!pending_same_source_gpu_source || !subtitle_contour_source_snapshot.ready() ||
-          !subtitle_contour_probability_snapshot.ready() || !subtitle_glyph_matte.ready()) {
+          !subtitle_contour_probability_snapshot.ready()) {
         failed("Current source tuple unavailable");return;
       }
       const auto w=pending_input_region.width(),h=pending_input_region.height();
@@ -6700,7 +6707,7 @@ namespace models {
         failed("Composition publication identity mismatch");return;
       }
       const auto in=make_subtitle_current_outline_selector_inputs(
-        bundle,near_identical_transaction.srv.Get());
+        bundle,near_identical_transaction.srv.Get(),legacy_matte);
       subtitle_selected_matte_commands=subtitle_current_outline_selected.queue(context.Get(),subtitle_current_outline_programs.selector_program(),in,error);
       if (!subtitle_selected_matte_commands) failed(error);
       else subtitle_current_outline_error.clear();
@@ -6726,16 +6733,16 @@ namespace models {
       if(!sources||cache::source_closure_sha256(sources)!=cfg.selector_source_closure_sha256||!create_shader(sources,specs[0],subtitle_selected_matte_shader)){error="Selected-matte private closure/compilation";return false;}
       subtitle_selected_matte_enabled=true;subtitle_inner_colour_research_enabled=true;return true;
     }
-    void dispatch_subtitle_selected_matte_research(d3d_perf_slot *perf_slot = nullptr) {
+    void dispatch_subtitle_selected_matte_research(ID3D11ShaderResourceView *legacy_matte, d3d_perf_slot *perf_slot) {
       subtitle_selected_matte_commands=false;
-      if (subtitle_current_outline_enabled) {dispatch_subtitle_current_outline(perf_slot);return;}
-      if(!subtitle_selected_matte_enabled||!subtitle_selected_matte_shader||!subtitle_glyph_matte.ready()||!subtitle_contour_source_snapshot.ready())return;
+      if (subtitle_current_outline_enabled) {dispatch_subtitle_current_outline(legacy_matte,perf_slot);return;}
+      if(!subtitle_selected_matte_enabled||!subtitle_selected_matte_shader||!legacy_matte||!subtitle_contour_source_snapshot.ready())return;
       D3D11_TEXTURE2D_DESC desc{};subtitle_contour_source_snapshot.texture->GetDesc(&desc);std::string error;
       if(!subtitle_selected_matte.ensure(device.Get(),desc.Width,desc.Height,error))return;
       research_selected_matte_v1::inputs_t in;
       in.current_cb96=subtitle_contour_cbuffer.Get();in.actual_root_args=near_identical_transaction.dispatch.Get();
       in.observation_one_offset=near_identical_gpu_observation_one_byte_offset;
-      in.legacy_matte=subtitle_glyph_matte.srv.Get();in.sct=subtitle_contour_identity.srv.Get();in.root=near_identical_transaction.srv.Get();
+      in.legacy_matte=legacy_matte;in.sct=subtitle_contour_identity.srv.Get();in.root=near_identical_transaction.srv.Get();
       in.mode=static_cast<research_selected_matte_v1::postprocess_mode_e>(pending_near_identical_postprocess_mode());
       in.expected_work=cuda_conditional_graph::work_flags_value(pending_subtitle_work);in.transaction_token=pending_wrapper_transaction_token;
       const bool current_private=subtitle_inner_colour_research_available&&subtitle_inner_colour_research_command_frame==pending_frame_id&&subtitle_inner_colour_research_command_time==pending_observation_timestamp_us;
@@ -7073,33 +7080,33 @@ namespace models {
              SUCCEEDED(device->CreateUnorderedAccessView(views.texture.Get(), nullptr, &views.uav));
     }
 
+    bool ensure_subtitle_contour_texture(
+      const UINT width,
+      const UINT height,
+      const DXGI_FORMAT format,
+      d3d_texture_views_t &views
+    ) {
+      if (views.ready()) {
+        D3D11_TEXTURE2D_DESC previous {};
+        views.texture->GetDesc(&previous);
+        if (previous.Width == width && previous.Height == height && previous.Format == format) {
+          return true;
+        }
+      }
+      d3d_texture_views_t next;
+      if (!create_shader_texture(width, height, format, next)) {
+        return false;
+      }
+      const UINT zero[4] {};
+      context->ClearUnorderedAccessViewUint(next.uav.Get(), zero);
+      views = std::move(next);
+      return true;
+    }
+
     bool ensure_subtitle_contour_textures(
       const std::uint32_t source_width,
       const std::uint32_t source_height
     ) {
-      const auto create_texture = [&] (
-                                    const UINT width,
-                                    const UINT height,
-                                    const DXGI_FORMAT format,
-                                    d3d_texture_views_t &views
-                                  ) {
-        if (views.ready()) {
-          D3D11_TEXTURE2D_DESC previous {};
-          views.texture->GetDesc(&previous);
-          if (previous.Width == width && previous.Height == height &&
-              previous.Format == format) {
-            return true;
-          }
-        }
-        d3d_texture_views_t next;
-        if (!create_shader_texture(width, height, format, next)) {
-          return false;
-        }
-        const UINT zero[4] {};
-        context->ClearUnorderedAccessViewUint(next.uav.Get(), zero);
-        views = std::move(next);
-        return true;
-      };
       const auto crop_height = subtitle_ocr_source_crop_height(source_width, source_height);
       const bool crop_valid = source_width != 0u &&
                               source_width <= depth_coordinate_v2::subtitle_contour_source_max_extent &&
@@ -7113,18 +7120,27 @@ namespace models {
       // References come directly from the source band and the feature codes are exact in FP16.
       constexpr auto native_float_format = DXGI_FORMAT_R16G16B16A16_FLOAT;
       return field_w > 0 && field_h > 0 &&
-             create_texture(native_width, native_height, native_float_format,
-                            subtitle_contour_source) &&
-             create_texture(native_width, native_height, native_float_format,
-                            subtitle_contour_source_snapshot) &&
-             create_texture(native_width, native_height, native_float_format,
-                            subtitle_contour_previous_features) &&
-             create_texture(native_width, native_height, native_float_format,
-                            subtitle_contour_next_features) &&
-             create_texture(native_width, native_height, DXGI_FORMAT_R32_UINT,
-                            subtitle_contour_support) &&
-             create_texture(native_width, native_height, DXGI_FORMAT_R32_UINT,
-                            subtitle_glyph_matte);
+             ensure_subtitle_contour_texture(native_width, native_height, native_float_format,
+                                             subtitle_contour_source) &&
+             ensure_subtitle_contour_texture(native_width, native_height, native_float_format,
+                                             subtitle_contour_source_snapshot) &&
+             ensure_subtitle_contour_texture(native_width, native_height, native_float_format,
+                                             subtitle_contour_previous_features) &&
+             ensure_subtitle_contour_texture(native_width, native_height, native_float_format,
+                                             subtitle_contour_next_features) &&
+             ensure_subtitle_contour_texture(native_width, native_height, DXGI_FORMAT_R32_UINT,
+                                             subtitle_contour_support) &&
+             (!subtitle_legacy_matte_required() ||
+              ensure_subtitle_contour_texture(native_width, native_height, DXGI_FORMAT_R32_UINT,
+                                              subtitle_glyph_matte));
+    }
+
+    bool ensure_subtitle_dump_matte() {
+      // Admission has already sized support for this source, including ineligible placeholders.
+      D3D11_TEXTURE2D_DESC support {};
+      subtitle_contour_support.texture->GetDesc(&support);
+      return ensure_subtitle_contour_texture(support.Width, support.Height, DXGI_FORMAT_R32_UINT,
+                                             subtitle_glyph_matte);
     }
 
     bool reset_subtitle_state() {
@@ -7146,7 +7162,8 @@ namespace models {
              subtitle_contour_probability_snapshot.uav.Get(),
              subtitle_contour_source.uav.Get(), subtitle_contour_source_snapshot.uav.Get(),
              subtitle_contour_previous_features.uav.Get(), subtitle_contour_next_features.uav.Get(),
-             subtitle_contour_support.uav.Get(), subtitle_glyph_matte.uav.Get(),
+             subtitle_contour_support.uav.Get(),
+             subtitle_legacy_matte_required() ? subtitle_glyph_matte.uav.Get() : nullptr,
            }) {
         if (uav) {
           context->ClearUnorderedAccessViewUint(uav, zero);
@@ -7162,7 +7179,8 @@ namespace models {
         subtitle_contour_support.srv, subtitle_contour_identity.srv,
         subtitle_contour_previous_features.srv, subtitle_contour_source_snapshot.srv,
         subtitle_contour_probability_snapshot.srv,
-        subtitle_glyph_matte.srv, subtitle_condition_params_srv
+        subtitle_legacy_matte_required() ? subtitle_glyph_matte.srv : nullptr,
+        subtitle_condition_params_srv
       };
       return true;
     }
@@ -7927,15 +7945,17 @@ namespace models {
       const bool ocr_record_submitted,
       const bool input_domain_reset,
       const bool conditioning_diagnostics,
+      const bool legacy_matte,
       d3d_perf_slot *perf_slot = nullptr
     ) {
       if (!subtitle_contour_palette_cs || !subtitle_contour_observation.ready() ||
-          !subtitle_contour_temporal_cs || !subtitle_glyph_matte_cs || !subtitle_contour_history_cs ||
+          !subtitle_contour_temporal_cs || !subtitle_contour_history_cs ||
           !subtitle_contour_history_identity_cs ||
           !subtitle_contour_snapshot_cs || !subtitle_contour_cbuffer || !subtitle_contour_identity.ready() ||
           !subtitle_contour_source.ready() || !subtitle_contour_previous_features.ready() ||
           !subtitle_contour_next_features.ready() ||
-          !subtitle_contour_support.ready() || !subtitle_glyph_matte.ready() ||
+          !subtitle_contour_support.ready() ||
+          (legacy_matte && (!subtitle_glyph_matte_cs || !subtitle_glyph_matte.ready())) ||
           !subtitle_contour_source_snapshot.ready() || !subtitle_contour_probability_snapshot.ready()) {
         return false;
       }
@@ -8003,15 +8023,16 @@ namespace models {
 
       srvs[5] = subtitle_contour_support.srv.Get();
       context->CSSetShaderResources(5u, 1u, &srvs[5u]);
-      // Dense completion reads immutable same-frame support and RGB. Its native-resolution
-      // tiles stride over this already authenticated indirect field grid; reuse submits zero
-      // groups and preserves the complete prior tuple. Empty observations write literal zero.
-      output = subtitle_glyph_matte.uav.Get();
-      context->CSSetUnorderedAccessViews(6u, 1u, &output, nullptr);
-      context->CSSetShader(subtitle_glyph_matte_cs.Get(), nullptr, 0u);
-      context->DispatchIndirect(near_identical_transaction.dispatch.Get(),
-                               near_identical_gpu_subtitle_condition_grid16_byte_offset);
-      context->CSSetUnorderedAccessViews(6u, 1u, &null_uav, nullptr);
+      if (legacy_matte) {
+        // Reuse submits zero groups and holds the previous dense output. Fresh observations
+        // write the full native band, including literal zero for empty observations.
+        output = subtitle_glyph_matte.uav.Get();
+        context->CSSetUnorderedAccessViews(6u, 1u, &output, nullptr);
+        context->CSSetShader(subtitle_glyph_matte_cs.Get(), nullptr, 0u);
+        context->DispatchIndirect(near_identical_transaction.dispatch.Get(),
+                                 near_identical_gpu_subtitle_condition_grid16_byte_offset);
+        context->CSSetUnorderedAccessViews(6u, 1u, &null_uav, nullptr);
+      }
 
       if (conditioning_diagnostics) {
         output = subtitle_conditioning_diagnostics->field_mask.uav.Get();
@@ -8067,7 +8088,9 @@ namespace models {
         dispatch_subtitle_inner_colour_research();
       }
 
-      if (subtitle_selected_matte_enabled) dispatch_subtitle_selected_matte_research(perf_slot);
+      if (subtitle_selected_matte_enabled) {
+        dispatch_subtitle_selected_matte_research(legacy_matte ? subtitle_glyph_matte.srv.Get() : nullptr, perf_slot);
+      }
 
       // The native distance transform is consumed only by the diagnostic Gaussian proposal.
       if (!conditioning_diagnostics) {
@@ -8183,20 +8206,24 @@ namespace models {
           !ocr_box_record_srv ||
           (pending_subtitle_work == cuda_conditional_graph::work_flag_e::optional_ocr &&
            !ocr_output_srv) || !subtitle_contour_identity.ready() ||
-          !subtitle_contour_probability_snapshot.ready() ||
+          !subtitle_contour_probability_snapshot.ready() || !subtitle_contour_support.ready() ||
           !depth_health_state_srv || !near_identical_transaction.dispatch) {
         return false;
       }
 
+      const bool legacy_matte_required = subtitle_legacy_matte_required();
       bool conditioning_diagnostics = subtitle_conditioning_diagnostics_requested();
-      if (conditioning_diagnostics && !ensure_subtitle_conditioning_diagnostics()) {
+      if (conditioning_diagnostics &&
+          !(ensure_subtitle_conditioning_diagnostics() &&
+            (legacy_matte_required || ensure_subtitle_dump_matte()))) {
         BOOST_LOG(warning) << "Host SBS conditioned parallax diagnostic resources are unavailable.";
         if (subtitle_conditioning_diagnostics_always) {
           return false;
         }
-        // A live dump can wait for a qualified observation while Base and native matte stay live.
+        // A live dump can wait for a qualified observation while rendering continues.
         conditioning_diagnostics = false;
       }
+      const bool legacy_matte = legacy_matte_required || conditioning_diagnostics;
       const std::uint32_t source_width = pending_input_region.width();
       const std::uint32_t source_height = pending_input_region.height();
       const std::uint32_t field_width = field_w > 0 ?
@@ -8284,7 +8311,7 @@ namespace models {
       context->CSSetUnorderedAccessViews(2, 3, null_resolve_uavs, nullptr);
 
       if (!dispatch_subtitle_contours(
-            ocr_record_submitted, input_domain_reset, conditioning_diagnostics, perf_slot
+            ocr_record_submitted, input_domain_reset, conditioning_diagnostics, legacy_matte, perf_slot
           )) {
         return false;
       }
@@ -8295,7 +8322,7 @@ namespace models {
           subtitle_contour_support.srv, subtitle_contour_identity.srv,
           subtitle_contour_previous_features.srv, subtitle_contour_source_snapshot.srv,
           subtitle_contour_probability_snapshot.srv,
-          subtitle_glyph_matte.srv, subtitle_condition_params_srv
+          legacy_matte ? subtitle_glyph_matte.srv : nullptr, subtitle_condition_params_srv
         };
         if(subtitle_selected_matte_commands){const auto v=selected_matte_views();completed_contour.research_selected_matte=v.matte;completed_contour.research_selected_matte_receipt=v.receipt;}
       };
@@ -8774,7 +8801,9 @@ namespace models {
           r.ocr_box_record = ocr_box_record_srv;
           r.subtitle_locator_state = subtitle_locator_state_srv;
           r.subtitle_contour_support = completed_contour.support;
-          r.subtitle_glyph_matte = completed_contour.glyph_matte;
+          if (!completed.subtitle_work_suppressed || subtitle_legacy_matte_required()) {
+            r.subtitle_glyph_matte = completed_contour.glyph_matte;
+          }
           r.research_selected_matte = completed_contour.research_selected_matte;
           r.research_selected_matte_receipt = completed_contour.research_selected_matte_receipt;
           r.subtitle_condition_params = completed_contour.condition_params;
@@ -11086,7 +11115,8 @@ namespace models {
     const std::filesystem::path &assets_dir,
     const config::video_t::sbs_t &cfg,
     const config::depth_model_info &model,
-    normalized_depth_diagnostics_e normalized_depth_diagnostics
+    normalized_depth_diagnostics_e normalized_depth_diagnostics,
+    subtitle_legacy_matte_e legacy_matte
   ):
       pimpl(std::make_unique<impl>(
         device,
@@ -11094,7 +11124,8 @@ namespace models {
         assets_dir,
         cfg,
         model,
-        normalized_depth_diagnostics
+        normalized_depth_diagnostics,
+        legacy_matte
       )) {}
 
   video_depth_estimator::~video_depth_estimator() = default;

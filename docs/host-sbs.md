@@ -356,8 +356,8 @@ reacquire the camera.
 Live streaming and conversion use `host_sbs_shared_ui_warp.hlsl` and its queued wrapper. Their seven common
 operands are rendered native color, ordinary Base, ParallaxState, the selected native `R32_UINT`
 matte, joined display-sRGB `RGBA16F` source crop, six-word SCP4, and 32-word SCT5. A 64-word selected
-receipt at t7 authenticates the current-outline mask. The unused render-only legacy mask at t8
-is removed; mask construction and its internal fallbacks retain their own inputs. Separate 32-byte PS b3 binds
+receipt at t7 authenticates the current-outline mask. Ordinary streaming constructs the selected
+matte directly from current-outline composition, SCT5 and transaction proof. Separate 32-byte PS b3 binds
 enabled/color mode, exact analysis-domain generation, and the integer analysis-source rectangle
 inside rendered color. Existing 48-byte b2 geometry is unchanged.
 Missing or invalid subtitle inputs preserve authorized Base; invalid Base authorization retains
@@ -422,8 +422,10 @@ bend. UI-row boundaries do not retain Base's two-axis smoothness guarantee. The 
 and the explicit adoption decision are recorded in the
 [review follow-up](host-sbs-review-followups.md#p15-production-shared-ui-warp).
 
-The original dense matte remains an independently validated mask-construction fallback and
-diagnostic. It is not a render fallback and ordinary evaluator images use only Base.
+The original dense matte remains a diagnostic output and a mask-construction fallback for
+selectors that request it. Live streaming generates it for Dump 3D at completion of the
+requested observation. If current-outline proof fails during ordinary streaming, the selector
+reports the matte unavailable and the renderer uses Base. Ordinary evaluator images use only Base.
 It has its own schema 1 recipe, separate from SCT5's diagnostic contour recipe 27. Starting
 from literal current native support, three synchronous eight-neighbor steps admit finite valid
 joined RGB only when neighbor L-infinity distance is at most `0.12` and both pixels have the same

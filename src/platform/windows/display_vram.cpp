@@ -4021,12 +4021,16 @@ namespace platf::dxgi {
       const auto normalized_depth_diagnostics = probe_context ?
                                                   normalized_depth_diagnostics_e::enabled :
                                                   normalized_depth_diagnostics_e::disabled;
+      using subtitle_legacy_matte_e = models::video_depth_estimator::subtitle_legacy_matte_e;
+      const auto legacy_matte = probe_context && probe_context->legacy_matte_always ?
+                                  subtitle_legacy_matte_e::always : subtitle_legacy_matte_e::on_demand;
       const bool prepare_text_game_programs = sbs_mode == ::video::SBS_GAME_SBS && text_game_eligible;
       depth_estimator_build_task_t build_task([dev = std::move(dev),
                                                ctx = std::move(ctx),
                                                active,
                                                sbs_cfg,
                                                normalized_depth_diagnostics,
+                                               legacy_matte,
                                                prepare_live_outline,
                                                prepare_text_game_programs]() mutable {
         depth_pipeline_build_result_t result;
@@ -4036,7 +4040,8 @@ namespace platf::dxgi {
           std::filesystem::path(SUNSHINE_ASSETS_DIR),
           sbs_cfg,
           active,
-          normalized_depth_diagnostics
+          normalized_depth_diagnostics,
+          legacy_matte
         );
         // Live rendering binds Base. Conditioned-field diagnostics run only for Dump 3D.
         result.estimator->set_subtitle_conditioning_diagnostics_always(false);

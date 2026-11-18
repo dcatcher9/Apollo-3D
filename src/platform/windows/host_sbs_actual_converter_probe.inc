@@ -127,6 +127,7 @@ namespace actual_converter_probe_v1 {
       std::array<event_t,phase_count> phase_event{};
       std::array<ComPtr<ID3D11ShaderResourceView>,5> old_working;
       int armed=-1;bool prepared=false,pending_arrival=false,selected_enabled=false,selected_outline=false,background_enabled=false;
+      bool legacy_matte_expected = true;
       std::array<ComPtr<ID3D11Buffer>,3> queued_B_constant_aliases;
       std::uint64_t borrowed_draw_conversion = 0;
       std::array<stage_t, 2> borrowed_draw_sources;
@@ -179,8 +180,12 @@ namespace actual_converter_probe_v1 {
       }
       const event_t *last_draw() const {for(std::size_t i=count;i>0;--i)if(events[i-1].kind==event_e::draw)return &events[i-1];return nullptr;}
       void prepare(ID3D11Device *device,const event_t &a,ID3D11Texture2D *target) {
+        require((a.views[3] != nullptr) == legacy_matte_expected, "Unexpected legacy matte availability at A");
         for(auto &phase:stages){
-          for(std::size_t k=0;k<12;++k){auto r=resource(a.views[k].Get());require(r!=nullptr,"A working view missing");phase[k].prepare(device,r.Get());}
+          for(std::size_t k=0;k<12;++k){
+            if(k==3u && !legacy_matte_expected)continue;
+            auto r=resource(a.views[k].Get());require(r!=nullptr,"A working view missing");phase[k].prepare(device,r.Get());
+          }
           for(std::size_t k=0;k<8;++k){if(a.buffers[k])phase[12+k].prepare(device,a.buffers[k].Get());
             else if(k==2)phase[14].prepare_buffer(device,48u);
             else if(k>=5)phase[12+k].prepare_buffer(device,k==5?64u:k==6?16u:96u);
@@ -225,6 +230,8 @@ namespace actual_converter_probe_v1 {
     const auto *reference_opt_in = std::getenv("SUNSHINE_TEST_HOST_SBS_SHUTTER_COPY_REFERENCE");
     const bool copy_reference = reference_opt_in && std::string_view {reference_opt_in} == "1";
     const auto *cached_route_opt_in = std::getenv("SUNSHINE_TEST_HOST_SBS_CACHED_CURRENT_ROUTE");
+    const auto *skip_legacy_matte = std::getenv("SUNSHINE_TEST_HOST_SBS_SKIP_LEGACY_MATTE");
+    records.legacy_matte_expected = !skip_legacy_matte || std::string_view(skip_legacy_matte) != "1";
     const bool cached_route = cached_route_opt_in && std::string_view {cached_route_opt_in} == "1";
     const auto root=cached_route ? r.output/"actual-converter-cached-current-route-v1" : r.native_p010 ? r.output/"actual-converter-native-p010-v1"/(native_codec == 1 ? "hevc" : "av1") :
       borrowed_recycle?r.output/"actual-converter-borrowed-capture-recycle-v1":
@@ -233,6 +240,8 @@ namespace actual_converter_probe_v1 {
     const auto release=[&](){if(est)est->release_joined_completion_gate_for_benchmark();release_after_draw_query.store(true);if(releaser.joinable()){releaser.request_stop();releaser.join();}};
     try {
       require(r.enabled,"Probe not enabled");require(!std::filesystem::exists(root),"Probe refuses overwrite");
+      require(records.legacy_matte_expected || (records.selected_outline && !r.packed_continuity),
+        "On-demand legacy matte probe requires the current-outline converter");
       require(!cached_route || (r.packed_continuity && !r.queued && !native_nv12 && !r.native_p010 &&
         !pending_arrival && !r.selected_matte && !r.temporal_source_bridge && !r.background_observer),
         "Cached-current route regression requires ordinary SDR/HDR RGB continuity");
@@ -289,7 +298,7 @@ namespace actual_converter_probe_v1 {
       capture_device_adapter=actual_device_adapter(display->device.get());
       require(converter.init(display,adapter.Get(),r.native_p010 ? pix_fmt_e::p010 : pix_fmt_e::nv12)==0,"Real converter init failed");
       converter_device_adapter=actual_device_adapter(converter.device.get());
-      const context_t context{w,h,0x4356524700000001ull,r.packed_continuity};converter.probe_context=&context;
+      const context_t context{w,h,0x4356524700000001ull,r.packed_continuity,records.legacy_matte_expected};converter.probe_context=&context;
       auto settings=r.settings;settings.reshade=false; // only authored source, not an external provider
       D3D11_TEXTURE2D_DESC td {};
       td.Width = 2u * w;
@@ -1129,7 +1138,10 @@ namespace actual_converter_probe_v1 {
       if(!records.captured[5]){wait_ready();convert(2);}
       require(records.captured[5]&&records.phase_event[5].publication_current,"Genuine C not yet drawn; no synthetic empty proof");
       records.copy_target(5,target.Get());records.read_all();
-      for(std::size_t k=0;k<12;++k)require(records.stages[5][k].copied,"Genuine C core render tuple missing");
+      for(std::size_t k=0;k<12;++k){
+        if(k==3u && !records.legacy_matte_expected)continue;
+        require(records.stages[5][k].copied,"Genuine C core render tuple missing");
+      }
       if(r.queued){for(std::size_t k=0;k<slot_count;++k)if(records.stages[2][k].copied&&records.stages[3][k].copied){
         if(pending_arrival&&k==22){
           const auto &before=records.stages[2][k].bytes;const auto &after=records.stages[3][k].bytes;
@@ -1142,7 +1154,8 @@ namespace actual_converter_probe_v1 {
         require(records.stages[4][20].bytes==records.stages[2][20].bytes&&records.stages[4][21].bytes==records.stages[2][21].bytes,"Pending C did not retain literal queued B pixels");
         require(records.stages[4][22].bytes.size()==r.frames[2].bgra.size()&&std::memcmp(records.stages[4][22].bytes.data(),r.frames[2].bgra.data(),r.frames[2].bgra.size())==0,"Pending-C current input is not literal C");
       }
-      require(std::all_of(records.stages[5][3].bytes.begin(),records.stages[5][3].bytes.end(),[](char v){return v==0;}),"Actual current C M not zero");
+      const auto &c_matte=records.stages[5][records.legacy_matte_expected ? 3u : 23u];
+      require(c_matte.copied && std::all_of(c_matte.bytes.begin(),c_matte.bytes.end(),[](char v){return v==0;}),"Actual current C M not zero");
       const auto word=[&](std::size_t slot,std::size_t offset){const auto &v=records.stages[5][slot].bytes;require(v.size()>=(offset+1)*4,"C typed packet truncated");std::uint32_t n=0;std::memcpy(&n,v.data()+offset*4,4);return n;};
       const auto &ce=records.phase_event[5];
       require(word(6,0)==5&&word(6,1)==0x35544353u&&word(6,22)==27&&word(6,23)==1,"C SCT is not a current valid producer packet");

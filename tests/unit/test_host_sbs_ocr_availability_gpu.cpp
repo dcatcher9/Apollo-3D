@@ -198,7 +198,10 @@ TEST(TensorRtOcrAvailabilityGpuTest, MissingPackagedOcrPreservesJoinedDepthAndEx
 
   const auto &calibration = v2::model_calibrations.front();
   const config::depth_model_info model {std::string {calibration.depth_model}, std::string {calibration.depth_model_url}};
-  models::video_depth_estimator estimator {device, context, assets.path, config::video_t::sbs_t {}, model};
+  using estimator_t = models::video_depth_estimator;
+  estimator_t estimator {device, context, assets.path, config::video_t::sbs_t {}, model,
+                         estimator_t::normalized_depth_diagnostics_e::enabled,
+                         estimator_t::subtitle_legacy_matte_e::on_demand};
   ASSERT_TRUE(estimator.is_valid());
   models::subtitle_selected_matte_research_configuration_t outline;
   outline.current_outline = true;
@@ -238,10 +241,7 @@ TEST(TensorRtOcrAvailabilityGpuTest, MissingPackagedOcrPreservesJoinedDepthAndEx
   expect_diagnostic_views(initial_completed.observation, false);
   EXPECT_FALSE(estimator.subtitle_conditioning_diagnostics_allocated_for_tests());
   EXPECT_EQ(initial_completed.observation.final_parallax(), initial_completed.observation.shadow_base_final_parallax.Get());
-  std::vector<std::uint32_t> initial_matte;
-  ASSERT_TRUE(read_words(device.Get(), context.Get(), initial_completed.observation.subtitle_glyph_matte.Get(), initial_matte));
-  ASSERT_EQ(initial_matte.size(), 1u);
-  EXPECT_EQ(initial_matte.front(), 0u);
+  EXPECT_FALSE(initial_completed.observation.subtitle_glyph_matte);
 
   // Ordinary live work leaves the diagnostic scratch absent until the first late dump.
   for (std::uint64_t observation = 1u; observation <= 3u; ++observation) {
@@ -323,7 +323,8 @@ TEST(TensorRtOcrAvailabilityGpuTest, MissingPackagedOcrPreservesJoinedDepthAndEx
     EXPECT_EQ(condition[v2::subtitle_condition_param_active_word], 0u);
     EXPECT_EQ(condition[v2::subtitle_condition_param_current_count_word], 0u);
     EXPECT_EQ(condition[v2::subtitle_condition_param_target_word], 0u);
-    for (auto *view : {completed.observation.subtitle_contour_support.Get(), completed.observation.subtitle_glyph_matte.Get(), completed.observation.subtitle_ocr_probability.Get(), completed.observation.research_selected_matte.Get()}) {
+    EXPECT_EQ(completed.observation.subtitle_glyph_matte != nullptr, diagnostics_expected);
+    for (auto *view : {completed.observation.subtitle_contour_support.Get(), completed.observation.subtitle_ocr_probability.Get(), completed.observation.research_selected_matte.Get()}) {
       std::vector<std::uint32_t> mask;
       ASSERT_TRUE(read_words(device.Get(), context.Get(), view, mask));
       EXPECT_TRUE(std::all_of(mask.begin(), mask.end(), [](auto word) {
@@ -360,6 +361,7 @@ TEST(TensorRtOcrAvailabilityGpuTest, MissingPackagedOcrPreservesJoinedDepthAndEx
     ASSERT_TRUE(models::parallax_v2_result_is_authenticated(completed.observation));
     EXPECT_EQ(completed.observation.subtitle_work_suppressed, subtitle_disabled);
     expect_diagnostic_views(completed.observation, diagnostics_expected);
+    EXPECT_EQ(completed.observation.subtitle_glyph_matte != nullptr, diagnostics_expected);
     auto *base_view = completed.observation.shadow_base_final_parallax.Get();
     if (diagnostics_expected) {
       EXPECT_NE(completed.observation.final_parallax(), base_view);
@@ -375,12 +377,14 @@ TEST(TensorRtOcrAvailabilityGpuTest, MissingPackagedOcrPreservesJoinedDepthAndEx
       ASSERT_TRUE(completed.observation.model_input_snapshot);
     }
     std::vector<std::uint32_t> matte;
-    auto *matte_view = subtitle_disabled ? completed.observation.subtitle_glyph_matte.Get() :
-                                           completed.observation.research_selected_matte.Get();
-    ASSERT_TRUE(read_words(device.Get(), context.Get(), matte_view, matte));
-    EXPECT_TRUE(std::all_of(matte.begin(), matte.end(), [](auto word) {
-      return word == 0u;
-    }));
+    if (!subtitle_disabled) {
+      ASSERT_TRUE(read_words(device.Get(), context.Get(), completed.observation.research_selected_matte.Get(), matte));
+      EXPECT_TRUE(std::all_of(matte.begin(), matte.end(), [](auto word) {return word == 0u;}));
+    }
+    if (diagnostics_expected) {
+      ASSERT_TRUE(read_words(device.Get(), context.Get(), completed.observation.subtitle_glyph_matte.Get(), matte));
+      EXPECT_TRUE(std::all_of(matte.begin(), matte.end(), [](auto word) {return word == 0u;}));
+    }
   }
 }
 #endif
