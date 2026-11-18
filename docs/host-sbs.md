@@ -73,8 +73,8 @@ as one tuple; the draw-owned pin resources are not a new temporal observation.
 ## Authenticated production contract
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
-schema 135/tag `0xF2172305`, canonical SHA-256
-`ae112a5e100ba8d751b6b0d14b15430a498585edffa49d3d79760f25e9a9c4b0`. It binds the
+schema 135/tag `0x7E1A2CB7`, canonical SHA-256
+`8a8c996bb99270ddadf46a393dc5bae354b61e63e9d97bd217d5a9602071dca8`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -85,20 +85,20 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 1 | `395d44b6f4f33d2a6dcdb57f4b355fe897e1255dd685aa2e5cfa4504505d3c85` |
-| `parallax_v2_producer` | 27 | `31570de82c474b5e995372ec09f2ea20e173738f375c7b6534fb91f4c6db2683` |
-| `parallax_v2_coordinate_diagnostic` | 1 | `fac1114745f035dbcd207dad762996b1a80ef3ce2ebc58e27afd2675b5f7429f` |
-| `near_identical_detector` | 3 | `155a70891f56bb94bc841939ce434de7c35469a7e20e34414b8386577165a979` |
-| `gpu_trace` | 1 | `3679d2b805f990f4dd291d07462c18c343cb8abc08b9a9a22263b0b02462b1d1` |
-| `parallax_v2_live_renderer` | 2 | `51b87e783427daa8c3330f8ba6afdf688cdc0270cf5346d67c6efd9f4484838b` |
-| `parallax_v2_p010_y` | 1 | `37d069167c90404a509748e5ca7b8f7257aaf50c14e2c1960d1767cbf2ced6b0` |
+| `parallax_v2_producer` | 28 | `154f11d36be2f7a260d9e3d6ca811179c5f6e6e4f6cf09863a4bb22268e25717` |
+| `parallax_v2_coordinate_diagnostic` | 1 | `917d483ec0d8333a5d7430a9991bd8606b26b5dc7b1655dc52d91d655e115544` |
+| `near_identical_detector` | 3 | `3f3455382abeed407dfd167dac730d8fcb82945c407638a2db7e0f9216386746` |
+| `gpu_trace` | 1 | `97061429c69f1c95ae775e562b6c3e04d0c6d4163de7a52941ee77749f7c24a4` |
+| `parallax_v2_live_renderer` | 2 | `d619c60a3385261cbb035443d15cc131be46e68d6a9ba473247eda232e20b9d0` |
+| `parallax_v2_p010_y` | 1 | `f37e6ecbaa600543d0289a645c676e4406e052ab1a72a69f79951fefde79a544` |
 | `sbs_flat_fallback` | 2 | `7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4` |
-| `parallax_v2_live_diagnostic` | 2 | `812b8f617d429c97330626298cc1223f01ea963a785da6e056b215f004179a68` |
-| `subtitle_cohort_prototype_research` | 3 | `d321571213da4e7ec55cc64aeb767000d1efe533115dcbbbfb9671f761a450b7` |
-| `subtitle_cohort_research` | 4 | `606fd21ba747c62759529c0a61840fa40a44b8a96a216be7d2626e3a4429f529` |
-| `subtitle_inner_colour_research` | 5 | `874e69b56814aeaba88ff75c9d2f578eda9860079f7178487d5f1ef20a73cc75` |
+| `parallax_v2_live_diagnostic` | 2 | `bf77da22401ba67d0787f1faecc4b17f727c0139b5c1c7fdf1cb79e707f4d49f` |
+| `subtitle_cohort_prototype_research` | 3 | `4be70be555ef13b9f3af709e18019a6d619aa335039ad94502a74be1c484f9b5` |
+| `subtitle_cohort_research` | 4 | `14f2d224ba335935cdafec46a2acae7f399416bf095833e8e580223f8461a34f` |
+| `subtitle_inner_colour_research` | 5 | `21ae436322e3e10b736539c5bd05b3b13449ef9e4c8dc943f032683a61d1f6d2` |
 | `subtitle_inner_components_research` | 6 | `7e2f44690d64cebe3261133a3642fa558c8c25c7086bf19551f284a4cb13ebe0` |
-| `subtitle_matte_guard_research` | 1 | `938889d82c5eb9ce9c8ca5b5edb636f80d7a000f75a090c5704db42e1bd10600` |
-| `parallax_v2_queued_renderer` | 1 | `5ec1dcf14fcccf9baab2767284e7ff3d2b28731b63931a0d03aa62d051df4d10` |
+| `subtitle_matte_guard_research` | 1 | `9c9f0e9094a297c7c060f6c0105037ab4e0135e81d1a068849ca515834ea21b2` |
+| `parallax_v2_queued_renderer` | 1 | `31ace939303df111e847536baecfb86bea1f7dac3a2974aed390073de00add7e` |
 | `current_mask_holes` | 9 | `b4e48d5eecab2404951602ad649980001f21cf5f9768381acadc7c3973ef4668` |
 | `current_stroke_coverage` | 3 | `1f03ba4279f6cadbaddf56b408cf20c0bc37776c4971e8e25830a8ffd3a3d063` |
 | `current_foreground_edge` | 1 | `4c8750b262827356b47a691aafe4cc306e541b691709060d979252635e73436c` |
@@ -552,7 +552,10 @@ their evaluator identity and epoch behavior are unchanged.
 
 The adaptive UI controller samples Base under the current authenticated OCR covers. Those covers
 bound the contour search. Native pixels that pass the current palette/stroke or local-outline
-evidence rule supply current subtitle footprints immediately. A minimum slope-budget extension
+evidence rule supply current subtitle footprints immediately. The authenticated optional OCR
+dispatch learns each current cover's palette once. Contour thread groups read those palettes
+after the dispatch completes, and an empty observation exits palette learning before any
+sampling. A minimum slope-budget extension
 changes Base only where required by those footprints and the UI plane.
 Current-cover authentication remains independent of UI-plane filtering. The native contour recipe is
 experimental and still requires paired quality and live acceptance before release.

@@ -287,6 +287,11 @@ namespace platf::sbs_debug {
           },
           {
             {"source_file", "host_sbs_subtitle_contour_cs.hlsl"},
+            {"entrypoint", "shared_palette_main"},
+            {"target", "cs_5_0"},
+          },
+          {
+            {"source_file", "host_sbs_subtitle_contour_cs.hlsl"},
             {"entrypoint", "temporal_main"},
             {"target", "cs_5_0"},
           },

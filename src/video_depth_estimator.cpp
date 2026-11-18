@@ -3433,6 +3433,7 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> ocr_box_resolve_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_locator_resolve_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_condition_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_contour_palette_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_contour_temporal_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_glyph_matte_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_contour_project_cs;
@@ -3490,6 +3491,7 @@ namespace models {
     } subtitle_contour_source, subtitle_contour_previous_features, subtitle_contour_next_features,
       subtitle_contour_support, subtitle_glyph_matte, subtitle_contour_source_snapshot;
     d3d_buffer_views_t subtitle_contour_identity, subtitle_contour_probability_snapshot;
+    d3d_buffer_views_t subtitle_contour_palettes;
     struct subtitle_conditioning_diagnostics_t {
       d3d_texture_views_t field_mask, horizontal_distance, distance;
       d3d_texture_views_t weight, blend, vertical_conditioned, final;
@@ -5901,6 +5903,7 @@ namespace models {
         std::addressof(ocr_box_resolve_cs),
         std::addressof(subtitle_locator_resolve_cs),
         std::addressof(subtitle_condition_cs),
+        std::addressof(subtitle_contour_palette_cs),
         std::addressof(subtitle_contour_temporal_cs),
         std::addressof(subtitle_glyph_matte_cs),
         std::addressof(subtitle_contour_project_cs),
@@ -6448,6 +6451,7 @@ namespace models {
       subtitle_contour_identity.reset();
       subtitle_contour_source_snapshot.reset();
       subtitle_contour_probability_snapshot.reset();
+      subtitle_contour_palettes.reset();
       subtitle_conditioning_diagnostics.reset();
       completed_contour = {};
       completed_subtitle_conditioning_diagnostics = false;
@@ -7158,14 +7162,15 @@ namespace models {
       const std::uint32_t word_count,
       Microsoft::WRL::ComPtr<ID3D11Buffer> &buffer,
       Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> &srv,
-      Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> &uav
+      Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> &uav,
+      const std::uint32_t words_per_element = 1u
     ) {
       D3D11_BUFFER_DESC desc {};
       desc.Usage = D3D11_USAGE_DEFAULT;
       desc.ByteWidth = word_count * sizeof(std::uint32_t);
       desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
       desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-      desc.StructureByteStride = sizeof(std::uint32_t);
+      desc.StructureByteStride = words_per_element * sizeof(std::uint32_t);
       return SUCCEEDED(device->CreateBuffer(&desc, nullptr, &buffer)) &&
              SUCCEEDED(device->CreateShaderResourceView(buffer.Get(), nullptr, &srv)) &&
              SUCCEEDED(device->CreateUnorderedAccessView(buffer.Get(), nullptr, &uav));
@@ -7223,6 +7228,8 @@ namespace models {
           subtitle_condition_params_uav
         );
       }
+      constexpr auto palette_records = depth_coordinate_v2::subtitle_plane_cover_capacity *
+                                      (1u + depth_coordinate_v2::subtitle_contour_palette_max_modes);
       // An exact-current abstention needs the OCR identity constants even when the optional
       // detector never acquired an engine or its interop buffers.
       resources_ok = resources_ok &&
@@ -7237,6 +7244,11 @@ namespace models {
                                     subtitle_contour_probability_snapshot.buffer,
                                     subtitle_contour_probability_snapshot.srv,
                                     subtitle_contour_probability_snapshot.uav) &&
+        (subtitle_contour_palettes.ready() ||
+         create_subtitle_uint_buffer(4u * palette_records,
+                                     subtitle_contour_palettes.buffer,
+                                     subtitle_contour_palettes.srv,
+                                     subtitle_contour_palettes.uav, 4u)) &&
         ensure_subtitle_contour_textures(1u, 1u);
       if (!resources_ok) {
         return false;
@@ -7907,7 +7919,8 @@ namespace models {
       const bool conditioning_diagnostics,
       d3d_perf_slot *perf_slot = nullptr
     ) {
-      if (!subtitle_contour_temporal_cs || !subtitle_glyph_matte_cs || !subtitle_contour_history_cs ||
+      if (!subtitle_contour_palette_cs || !subtitle_contour_palettes.ready() ||
+          !subtitle_contour_temporal_cs || !subtitle_glyph_matte_cs || !subtitle_contour_history_cs ||
           !subtitle_contour_history_identity_cs ||
           !subtitle_contour_snapshot_cs || !subtitle_contour_cbuffer || !subtitle_contour_identity.ready() ||
           !subtitle_contour_source.ready() || !subtitle_contour_previous_features.ready() ||
@@ -7955,6 +7968,17 @@ namespace models {
         depth_coordinate_v2_state_srv.Get(), nullptr, nullptr
       };
       context->CSSetShaderResources(0u, 13u, srvs);
+      // Only the authenticated optional OCR route can produce nonempty current covers.
+      // A fresh abstention still runs the temporal grid to publish its empty support.
+      ID3D11UnorderedAccessView *palette_output = subtitle_contour_palettes.uav.Get();
+      ID3D11UnorderedAccessView *null_uav = nullptr;
+      context->CSSetUnorderedAccessViews(7u, 1u, &palette_output, nullptr);
+      context->CSSetShader(subtitle_contour_palette_cs.Get(), nullptr, 0u);
+      context->DispatchIndirect(near_identical_transaction.dispatch.Get(),
+                               near_identical_gpu_optional_one_byte_offset);
+      context->CSSetUnorderedAccessViews(7u, 1u, &null_uav, nullptr);
+      ID3D11ShaderResourceView *palette_input = subtitle_contour_palettes.srv.Get();
+      context->CSSetShaderResources(12u, 1u, &palette_input);
       // Reuse submits zero groups for every pass. Do not clear or copy the published support
       // unconditionally: its backing holds the previous complete tuple until fresh completion.
       ID3D11UnorderedAccessView *output = subtitle_contour_support.uav.Get();
@@ -7964,9 +7988,9 @@ namespace models {
       context->CSSetShader(subtitle_contour_temporal_cs.Get(), nullptr, 0u);
       context->DispatchIndirect(near_identical_transaction.dispatch.Get(),
                                near_identical_gpu_subtitle_condition_grid16_byte_offset);
-      ID3D11UnorderedAccessView *null_uav = nullptr;
       context->CSSetUnorderedAccessViews(0u, 1u, &null_uav, nullptr);
       context->CSSetUnorderedAccessViews(2u, 1u, &null_uav, nullptr);
+      context->CSSetShaderResources(12u, 1u, &srvs[12u]);
 
       srvs[5] = subtitle_contour_support.srv.Get();
       context->CSSetShaderResources(5u, 1u, &srvs[5u]);

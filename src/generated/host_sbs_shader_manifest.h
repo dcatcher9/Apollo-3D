@@ -35,6 +35,7 @@ namespace models::host_sbs_shader_cache {
   inline constexpr shader_spec host_sbs_ocr_resolve {"host_sbs_ocr_boxes_cs.hlsl", "resolve_main", "cs_5_0"};
   inline constexpr shader_spec host_sbs_subtitle_locator_resolve {"host_sbs_subtitle_locator_cs.hlsl", "resolve_main", "cs_5_0"};
   inline constexpr shader_spec host_sbs_subtitle_condition {"host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_subtitle_contour_palette {"host_sbs_subtitle_contour_cs.hlsl", "shared_palette_main", "cs_5_0"};
   inline constexpr shader_spec host_sbs_subtitle_contour_temporal {"host_sbs_subtitle_contour_cs.hlsl", "temporal_main", "cs_5_0"};
   inline constexpr shader_spec host_sbs_subtitle_contour_dense {"host_sbs_subtitle_contour_cs.hlsl", "dense_main", "cs_5_0"};
   inline constexpr shader_spec host_sbs_subtitle_contour_project {"host_sbs_subtitle_contour_cs.hlsl", "project_main", "cs_5_0"};
@@ -112,6 +113,7 @@ namespace models::host_sbs_shader_cache {
     host_sbs_ocr_resolve,
     host_sbs_subtitle_locator_resolve,
     host_sbs_subtitle_condition,
+    host_sbs_subtitle_contour_palette,
     host_sbs_subtitle_contour_temporal,
     host_sbs_subtitle_contour_dense,
     host_sbs_subtitle_contour_project,
@@ -124,13 +126,13 @@ namespace models::host_sbs_shader_cache {
     host_sbs_subtitle_gaussian_horizontal_limit,
   };
   inline constexpr std::string_view parallax_v2_producer_source_closure_sha256 =
-    "31570de82c474b5e995372ec09f2ea20e173738f375c7b6534fb91f4c6db2683";
+    "154f11d36be2f7a260d9e3d6ca811179c5f6e6e4f6cf09863a4bb22268e25717";
 
   inline constexpr std::array parallax_v2_coordinate_diagnostic_specs {
     depth_coordinate_v2_coordinate_diagnostic,
   };
   inline constexpr std::string_view parallax_v2_coordinate_diagnostic_source_closure_sha256 =
-    "fac1114745f035dbcd207dad762996b1a80ef3ce2ebc58e27afd2675b5f7429f";
+    "917d483ec0d8333a5d7430a9991bd8606b26b5dc7b1655dc52d91d655e115544";
 
   inline constexpr std::array near_identical_detector_specs {
     host_sbs_near_identical_resolve,
@@ -138,26 +140,26 @@ namespace models::host_sbs_shader_cache {
     host_sbs_near_identical_reuse_depth,
   };
   inline constexpr std::string_view near_identical_detector_source_closure_sha256 =
-    "155a70891f56bb94bc841939ce434de7c35469a7e20e34414b8386577165a979";
+    "3f3455382abeed407dfd167dac730d8fcb82945c407638a2db7e0f9216386746";
 
   inline constexpr std::array gpu_trace_specs {
     host_sbs_gpu_trace,
   };
   inline constexpr std::string_view gpu_trace_source_closure_sha256 =
-    "3679d2b805f990f4dd291d07462c18c343cb8abc08b9a9a22263b0b02462b1d1";
+    "97061429c69f1c95ae775e562b6c3e04d0c6d4163de7a52941ee77749f7c24a4";
 
   inline constexpr std::array parallax_v2_live_renderer_specs {
     parallax_v2_live_renderer,
     sbs_reprojection_vertex,
   };
   inline constexpr std::string_view parallax_v2_live_renderer_source_closure_sha256 =
-    "51b87e783427daa8c3330f8ba6afdf688cdc0270cf5346d67c6efd9f4484838b";
+    "d619c60a3385261cbb035443d15cc131be46e68d6a9ba473247eda232e20b9d0";
 
   inline constexpr std::array parallax_v2_p010_y_specs {
     parallax_v2_p010_y_renderer,
   };
   inline constexpr std::string_view parallax_v2_p010_y_source_closure_sha256 =
-    "37d069167c90404a509748e5ca7b8f7257aaf50c14e2c1960d1767cbf2ced6b0";
+    "f37e6ecbaa600543d0289a645c676e4406e052ab1a72a69f79951fefde79a544";
 
   inline constexpr std::array sbs_flat_fallback_specs {
     sbs_flat_identity,
@@ -171,7 +173,7 @@ namespace models::host_sbs_shader_cache {
     parallax_v2_live_mask,
   };
   inline constexpr std::string_view parallax_v2_live_diagnostic_source_closure_sha256 =
-    "812b8f617d429c97330626298cc1223f01ea963a785da6e056b215f004179a68";
+    "bf77da22401ba67d0787f1faecc4b17f727c0139b5c1c7fdf1cb79e707f4d49f";
 
   inline constexpr std::array subtitle_cohort_prototype_research_specs {
     host_sbs_subtitle_cohort_prepare,
@@ -179,7 +181,7 @@ namespace models::host_sbs_shader_cache {
     host_sbs_subtitle_cohort_filter,
   };
   inline constexpr std::string_view subtitle_cohort_prototype_research_source_closure_sha256 =
-    "d321571213da4e7ec55cc64aeb767000d1efe533115dcbbbfb9671f761a450b7";
+    "4be70be555ef13b9f3af709e18019a6d619aa335039ad94502a74be1c484f9b5";
 
   inline constexpr std::array subtitle_cohort_research_specs {
     host_sbs_subtitle_cohort_prepare,
@@ -188,7 +190,7 @@ namespace models::host_sbs_shader_cache {
     host_sbs_subtitle_cohort_snapshot,
   };
   inline constexpr std::string_view subtitle_cohort_research_source_closure_sha256 =
-    "606fd21ba747c62759529c0a61840fa40a44b8a96a216be7d2626e3a4429f529";
+    "14f2d224ba335935cdafec46a2acae7f399416bf095833e8e580223f8461a34f";
 
   inline constexpr std::array subtitle_inner_colour_research_specs {
     host_sbs_subtitle_inner_colour_research_palette,
@@ -198,7 +200,7 @@ namespace models::host_sbs_shader_cache {
     host_sbs_subtitle_inner_colour_research_validate,
   };
   inline constexpr std::string_view subtitle_inner_colour_research_source_closure_sha256 =
-    "874e69b56814aeaba88ff75c9d2f578eda9860079f7178487d5f1ef20a73cc75";
+    "21ae436322e3e10b736539c5bd05b3b13449ef9e4c8dc943f032683a61d1f6d2";
 
   inline constexpr std::array subtitle_inner_components_research_specs {
     host_sbs_subtitle_inner_components_research_init,
@@ -215,13 +217,13 @@ namespace models::host_sbs_shader_cache {
     host_sbs_subtitle_matte_guard,
   };
   inline constexpr std::string_view subtitle_matte_guard_research_source_closure_sha256 =
-    "938889d82c5eb9ce9c8ca5b5edb636f80d7a000f75a090c5704db42e1bd10600";
+    "9c9f0e9094a297c7c060f6c0105037ab4e0135e81d1a068849ca515834ea21b2";
 
   inline constexpr std::array parallax_v2_queued_renderer_specs {
     parallax_v2_queued_renderer,
   };
   inline constexpr std::string_view parallax_v2_queued_renderer_source_closure_sha256 =
-    "5ec1dcf14fcccf9baab2767284e7ff3d2b28731b63931a0d03aa62d051df4d10";
+    "31ace939303df111e847536baecfb86bea1f7dac3a2974aed390073de00add7e";
 
   inline constexpr std::array current_mask_holes_specs {
     host_sbs_current_mask_holes_clear,

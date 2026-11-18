@@ -95,8 +95,12 @@ TEST(HostSbsNearIdenticalPolicyTest, SoleFusedPreprocessIsMandatoryAndNoComparat
   const auto producer_body = estimator.substr(
     producer_loop, producer_end - producer_loop
   );
+  ASSERT_NE(estimator.find(
+    "const std::array producer_shader_outputs {\n"
+    "        std::addressof(near_identical_fused_preprocess_cs),"
+  ), std::string::npos);
   const auto mandatory_assignment = producer_body.find(
-    "producer_shaders_ok = create_shader"
+    "producer_shaders_ok = !output || create_shader"
   );
   ASSERT_NE(mandatory_assignment, std::string::npos);
   EXPECT_EQ(
@@ -446,6 +450,8 @@ TEST(HostSbsNearIdenticalPolicyTest, ProducerOutputsMatchCanonicalShaderOrder) {
                std::string_view {"subtitle_locator_resolve_cs"}},
     std::pair {std::string_view {"host_sbs_subtitle_condition"},
                std::string_view {"subtitle_condition_cs"}},
+    std::pair {std::string_view {"host_sbs_subtitle_contour_palette"},
+               std::string_view {"subtitle_contour_palette_cs"}},
     std::pair {std::string_view {"host_sbs_subtitle_contour_temporal"},
                std::string_view {"subtitle_contour_temporal_cs"}},
     std::pair {std::string_view {"host_sbs_subtitle_contour_dense"},

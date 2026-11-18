@@ -497,6 +497,11 @@
       },
       {
         "source_file": "host_sbs_subtitle_contour_cs.hlsl",
+        "source_entrypoint": "shared_palette_main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "host_sbs_subtitle_contour_cs.hlsl",
         "source_entrypoint": "temporal_main",
         "source_target": "cs_5_0"
       },
@@ -546,7 +551,7 @@
         "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "31570de82c474b5e995372ec09f2ea20e173738f375c7b6534fb91f4c6db2683"
+    "source_closure_sha256": "154f11d36be2f7a260d9e3d6ca811179c5f6e6e4f6cf09863a4bb22268e25717"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,

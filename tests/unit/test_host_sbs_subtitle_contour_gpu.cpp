@@ -247,7 +247,8 @@ namespace {
         cache::shader_spec {"host_sbs_subtitle_contour_cs.hlsl", "project_main", "cs_5_0"},
         cache::shader_spec {"host_sbs_subtitle_contour_cs.hlsl", "history_main", "cs_5_0"},
         cache::shader_spec {"host_sbs_subtitle_contour_cs.hlsl", "snapshot_main", "cs_5_0"},
-        cache::shader_spec {"host_sbs_subtitle_contour_cs.hlsl", "history_identity_main", "cs_5_0"}
+        cache::shader_spec {"host_sbs_subtitle_contour_cs.hlsl", "history_identity_main", "cs_5_0"},
+        cache::shader_spec {"host_sbs_subtitle_contour_cs.hlsl", "shared_palette_main", "cs_5_0"}
       };
       const auto sources = cache::snapshot_sources(SUNSHINE_SHADERS_DIR, specs);
       for (std::size_t pass = 0u; pass < specs.size(); ++pass) {
@@ -266,6 +267,10 @@ namespace {
       desc.BindFlags = 0u;
       desc.MiscFlags = D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS;
       ASSERT_TRUE(SUCCEEDED(device_->CreateBuffer(&desc, nullptr, &indirect_)));
+      ASSERT_TRUE(SUCCEEDED(device_->CreateBuffer(&desc, nullptr, &palette_indirect_)));
+      constexpr auto palette_records = v2::subtitle_plane_cover_capacity * (1u + v2::subtitle_contour_palette_max_modes);
+      ASSERT_TRUE(create_buffer(device_.Get(), palette_records * sizeof(uint4_t), sizeof(uint4_t),
+                                D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, palettes_));
       ASSERT_TRUE(resize(160u, 90u));
     }
 
@@ -530,7 +535,7 @@ namespace {
         return;
       }
       std::array<ID3D11ShaderResourceView *, 13u> srvs {};
-      std::array<ID3D11UnorderedAccessView *, 7u> uavs {};
+      std::array<ID3D11UnorderedAccessView *, 8u> uavs {};
       context_->CSSetShaderResources(0u, srvs.size(), srvs.data());
       context_->CSSetUnorderedAccessViews(0u, uavs.size(), uavs.data(), nullptr);
     }
@@ -583,16 +588,27 @@ namespace {
       context_->UpdateSubresource(indirect_.Get(), 0u, nullptr, arguments.data(), 0u, 0u);
       bind_inputs(baseline_support, eligibility);
       ID3D11UnorderedAccessView *null_uav = nullptr;
+      // The opt-in historical birth-palette variant uses t12 for its immutable source
+      // eligibility bitmap. Its explicit input retains that original shader binding.
+      if (!eligibility) {
+        const std::array<std::uint32_t, 3u> palette_arguments {zero_groups ? 0u : 1u, 1u, 1u};
+        context_->UpdateSubresource(palette_indirect_.Get(), 0u, nullptr, palette_arguments.data(), 0u, 0u);
+        context_->CSSetShader(shaders_[6u].Get(), nullptr, 0u);
+        context_->CSSetUnorderedAccessViews(7u, 1u, palettes_.uav.GetAddressOf(), nullptr);
+        context_->DispatchIndirect(palette_indirect_.Get(), 0u);
+        context_->CSSetUnorderedAccessViews(7u, 1u, &null_uav, nullptr);
+        context_->CSSetShaderResources(12u, 1u, palettes_.srv.GetAddressOf());
+      }
       context_->CSSetShader(shaders_[0u].Get(), nullptr, 0u);
       context_->CSSetUnorderedAccessViews(0u, 1u, support_.uav.GetAddressOf(), nullptr);
       context_->CSSetUnorderedAccessViews(2u, 1u, next_features_.uav.GetAddressOf(), nullptr);
       context_->DispatchIndirect(indirect_.Get(), 0u);
       context_->CSSetUnorderedAccessViews(0u, 1u, &null_uav, nullptr);
       context_->CSSetUnorderedAccessViews(2u, 1u, &null_uav, nullptr);
-      // Experimental inputs exist only during temporal_main. Dense/history/snapshot retain
-      // their production bindings and never read the external eligibility bitmap.
-      ID3D11ShaderResourceView *null_eligibility = nullptr;
-      context_->CSSetShaderResources(12u, 1u, &null_eligibility);
+      // The palette cache or experimental eligibility input belongs only to temporal_main.
+      // Dense/history/snapshot retain their production bindings.
+      ID3D11ShaderResourceView *null_temporal_input = nullptr;
+      context_->CSSetShaderResources(12u, 1u, &null_temporal_input);
       context_->CSSetShaderResources(5u, 1u, support_.srv.GetAddressOf());
       context_->CSSetShader(shaders_[1u].Get(), nullptr, 0u);
       context_->CSSetUnorderedAccessViews(6u, 1u, matte_.uav.GetAddressOf(), nullptr);
@@ -1082,12 +1098,12 @@ namespace {
 
     ComPtr<ID3D11Device> device_;
     ComPtr<ID3D11DeviceContext> context_;
-    std::array<ComPtr<ID3D11ComputeShader>, 6u> shaders_;
+    std::array<ComPtr<ID3D11ComputeShader>, 7u> shaders_;
     bool force_copy_history_ = false;
     ComPtr<ID3D11ComputeShader> probability_probe_;
-    ComPtr<ID3D11Buffer> contour_cb_, geometry_cb_, indirect_;
+    ComPtr<ID3D11Buffer> contour_cb_, geometry_cb_, indirect_, palette_indirect_;
     texture_t display_, support_, matte_, field_, features_, next_features_, completed_display_;
-    buffer_t probability_, plane_, params_, ocr_, health_, geometry_, identity_, completed_probability_;
+    buffer_t probability_, plane_, params_, ocr_, health_, geometry_, identity_, completed_probability_, palettes_;
     std::uint32_t source_w_ {}, source_h_ {}, crop_h_ {}, crop_top_ {}, field_w_ {}, field_h_ {};
     uint4_t content_ {}, native_cover_ {}, field_cover_ {};
     contour_constants_t constants_ {};

@@ -189,8 +189,9 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             # Application text searches a whole dialogue line: covers bridge the gaps between
             # detected pieces, and across a bridged gap only the text fill colour is evidence.
             134: "f175f90f992f9656efc5dac470d08bd4d405720fe976cff733b304e1deedcf69",
-            # The model-input history retains only its consumed NCHW planes.
-            135: "ae112a5e100ba8d751b6b0d14b15430a498585edffa49d3d79760f25e9a9c4b0",
+            # The model-input history retains only its consumed NCHW planes. The subtitle
+            # contour producer learns each palette once per current observation.
+            135: "8a8c996bb99270ddadf46a393dc5bae354b61e63e9d97bd217d5a9602071dca8",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -198,14 +199,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 contract or shader identity changed without a reviewed identity pin",
         )
-        self.assertEqual(generator.contract_tag(contract), 0xF2172305)
+        self.assertEqual(generator.contract_tag(contract), 0x7E1A2CB7)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "f217230534fcdc59d4c4e9a7cba0f53d627c7ceb820943eb0d394a4d631b4c16",
+            "7e1a2cb732890f86ee87d061fcfc67bc86433c9f49e97c0a52688c4fcad8084b",
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "31570de82c474b5e995372ec09f2ea20e173738f375c7b6534fb91f4c6db2683",
+            "154f11d36be2f7a260d9e3d6ca811179c5f6e6e4f6cf09863a4bb22268e25717",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(

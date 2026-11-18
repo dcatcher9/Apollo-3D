@@ -71,6 +71,7 @@ SHADER_SOURCE_SPECS = (
     ("host_sbs_ocr_boxes_cs.hlsl", "resolve_main", "cs_5_0"),
     ("host_sbs_subtitle_locator_cs.hlsl", "resolve_main", "cs_5_0"),
     ("host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"),
+    ("host_sbs_subtitle_contour_cs.hlsl", "shared_palette_main", "cs_5_0"),
     ("host_sbs_subtitle_contour_cs.hlsl", "temporal_main", "cs_5_0"),
     ("host_sbs_subtitle_contour_cs.hlsl", "dense_main", "cs_5_0"),
     ("host_sbs_subtitle_contour_cs.hlsl", "project_main", "cs_5_0"),

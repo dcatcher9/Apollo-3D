@@ -38,6 +38,13 @@ RWTexture2D<float4> CompletedDisplayBandWrite : register(u4); // same RGBA16F as
 RWStructuredBuffer<float> CompletedProbabilityWrite : register(u5);
 RWTexture2D<uint> DenseGlyphMatteWrite : register(u6); // native R32_UINT literal 0/1, never aliases t5
 
+// Each cover owns one count header followed by MAX_MODES
+// exact virtual sum/count payloads. The prepass and temporal pass never bind both views.
+StructuredBuffer<uint4> SharedPalettesRead : register(t12);
+RWStructuredBuffer<uint4> SharedPalettesWrite : register(u7);
+static const uint SHARED_PALETTE_RECORDS_PER_COVER = 1u + V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES;
+static const uint SHARED_PALETTE_RECORD_COUNT = V2_SUBTITLE_PLANE_COVER_CAPACITY * SHARED_PALETTE_RECORDS_PER_COVER;
+
 static const uint CONTOUR_SCHEMA = V2_SUBTITLE_CONTOUR_SCHEMA;
 static const uint RECIPE_SCHEMA = V2_SUBTITLE_CONTOUR_RECIPE;
 static const uint HISTORY_TAG = V2_SUBTITLE_CONTOUR_HISTORY_TAG;
@@ -681,6 +688,96 @@ uint3 PaletteHue(uint3 color) {
     return (color * V2_SUBTITLE_CONTOUR_PALETTE_HUE_CHANNEL_MAX + peak / 2u) / peak;
 }
 
+// All lanes call this for the same cover. Keep the sampling, integer reductions and
+// scalar mode selection in the single observation-owned palette learner.
+void LearnCurrentPalette(uint slot, uint group_index) {
+    if (group_index < V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT) {
+        PaletteHistogramCount[group_index] = 0u;
+        PaletteHistogramRepresentative[group_index] = 0u;
+    }
+    if (group_index == 0u) PaletteAnchorPeak = 0u;
+    GroupMemoryBarrierWithGroupSync();
+    uint4 core = CurrentCores[slot];
+    [loop]
+    for (uint sample_index = group_index;
+         sample_index < V2_SUBTITLE_CONTOUR_PALETTE_GRID_COLUMNS * V2_SUBTITLE_CONTOUR_PALETTE_GRID_ROWS;
+         sample_index += 256u) {
+        int2 p = CurrentPaletteSamplePosition(core, sample_index);
+        float3 color;
+        float probability;
+        bool color_valid = LoadDisplayColor(p, color);
+        bool probability_valid = CurrentProbabilityEvidence(p, probability);
+        bool anchor = false;
+        if (color_valid && probability_valid) {
+            if (probability > V2_OCR_ACTIVE_PROBABILITY_THRESHOLD) anchor = CurrentSpatialEdge(p, color);
+        }
+        if (anchor) {
+            uint3 q = PaletteQuantize(color);
+            // Bin from actual RGB, not q>>14: RGB.75 rounds to q49151.
+            uint3 bin = min((uint3)(color * 4.0f), uint3(3u, 3u, 3u));
+            uint code = bin.x * 16u + bin.y * 4u + bin.z;
+            uint peak = MaxChannel(q);
+            uint key = (peak << V2_SUBTITLE_CONTOUR_PALETTE_REPRESENTATIVE_INDEX_BITS) |
+                (V2_SUBTITLE_CONTOUR_PALETTE_REPRESENTATIVE_INDEX_MASK - sample_index);
+            InterlockedAdd(PaletteHistogramCount[code], 1u);
+            InterlockedMax(PaletteHistogramRepresentative[code], key);
+            InterlockedMax(PaletteAnchorPeak, peak);
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (group_index == 0u) {
+        // Scalar bitsets avoid FXC forcing an unroll for a dynamically written vector lane.
+        uint visited_low = 0u, visited_high = 0u;
+        [loop]
+        for (uint attempt = 0u; attempt < V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT; ++attempt) {
+            uint best = V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT;
+            uint best_peak = 0u, best_count = 1u;
+            [loop]
+            for (uint bin = 0u; bin < V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT; ++bin) {
+                uint count = PaletteHistogramCount[bin];
+                uint peak = PaletteHistogramRepresentative[bin] >> V2_SUBTITLE_CONTOUR_PALETTE_REPRESENTATIVE_INDEX_BITS;
+                uint visited_word = bin < 32u ? visited_low : visited_high;
+                if (count == 0u || (visited_word & (1u << (bin % 32u))) != 0u ||
+                    V2_SUBTITLE_CONTOUR_PALETTE_BRIGHTNESS_DENOMINATOR * peak <
+                        V2_SUBTITLE_CONTOUR_PALETTE_BRIGHTNESS_NUMERATOR * PaletteAnchorPeak) continue;
+                if (best == V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT || peak > best_peak ||
+                    (peak == best_peak && (count > best_count || (count == best_count && bin < best)))) {
+                    best = bin; best_peak = peak; best_count = count;
+                }
+            }
+            if (best == V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT) break;
+            if (best < 32u) visited_low |= 1u << best;
+            else visited_high |= 1u << (best - 32u);
+            uint representative_index = V2_SUBTITLE_CONTOUR_PALETTE_REPRESENTATIVE_INDEX_MASK -
+                (PaletteHistogramRepresentative[best] & V2_SUBTITLE_CONTOUR_PALETTE_REPRESENTATIVE_INDEX_MASK);
+            float3 representative_color;
+            bool representative_valid = LoadDisplayColor(CurrentPaletteSamplePosition(core, representative_index), representative_color);
+            if (!representative_valid) continue;
+            uint3 representative = PaletteQuantize(representative_color);
+            uint3 hue = PaletteHue(representative);
+            bool represented = false;
+            [loop]
+            for (uint prior_mode = 0u; prior_mode < PaletteCount[slot]; ++prior_mode) {
+                uint4 prior = PaletteMode[slot * V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES + prior_mode];
+                uint3 prior_rounded = (prior.xyz + prior.w / 2u) / prior.w;
+                uint3 prior_hue = PaletteHue(prior_rounded);
+                uint distance = MaxChannel((uint3)abs(int3(hue) - int3(prior_hue)));
+                if (V2_SUBTITLE_CONTOUR_PALETTE_MERGE_HUE_DENOMINATOR * distance <=
+                    V2_SUBTITLE_CONTOUR_PALETTE_MERGE_HUE_NUMERATOR * V2_SUBTITLE_CONTOUR_PALETTE_HUE_CHANNEL_MAX)
+                    represented = true;
+            }
+            if (represented) continue;
+            uint selected_mode = PaletteCount[slot];
+            // Keep the existing exact rational matcher representation: virtual sum/count.
+            PaletteMode[slot * V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES + selected_mode] =
+                uint4(representative * best_count, best_count);
+            PaletteCount[slot] = selected_mode + 1u;
+            if (PaletteCount[slot] == V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES) break;
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+}
+
 void PrepareCurrentPalettes(uint group_index, uint2 dispatch_position) {
     if (group_index < V2_SUBTITLE_PLANE_COVER_CAPACITY) {
         PaletteCount[group_index] = 0u;
@@ -703,93 +800,49 @@ void PrepareCurrentPalettes(uint group_index, uint2 dispatch_position) {
     }
     GroupMemoryBarrierWithGroupSync();
     if (PaletteNeeded == 0u) return;
+    uint records, record_stride;
+    SharedPalettesRead.GetDimensions(records, record_stride);
+    if (records != SHARED_PALETTE_RECORD_COUNT || record_stride != 16u) return;
+    if (group_index < CurrentCount) {
+        uint4 header = SharedPalettesRead[group_index * SHARED_PALETTE_RECORDS_PER_COVER];
+        if (header.x <= V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES && all(header.yzw == 0u))
+            PaletteCount[group_index] = header.x;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    [loop]
+    for (uint mode_index = group_index;
+         mode_index < CurrentCount * V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES;
+         mode_index += 256u) {
+        uint slot = mode_index / V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES;
+        uint mode = mode_index % V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES;
+        if (mode < PaletteCount[slot])
+            PaletteMode[mode_index] = SharedPalettesRead[slot * SHARED_PALETTE_RECORDS_PER_COVER + 1u + mode];
+    }
+    GroupMemoryBarrierWithGroupSync();
+}
+
+// The current optional OCR observation uses its existing one-group indirect argument.
+// An empty observation has no palette readers, so leave the previous cache alone.
+[numthreads(16, 16, 1)]
+void shared_palette_main(uint group_index : SV_GroupIndex) {
+    uint param_words, param_stride;
+    CurrentConditionParams.GetDimensions(param_words, param_stride);
+    if (param_words != V2_SUBTITLE_CONDITION_PARAM_WORD_COUNT || param_stride != 4u ||
+        CurrentConditionParams[V2_SUBTITLE_CONDITION_PARAM_CURRENT_COUNT_WORD] == 0u) return;
+    uint records, record_stride;
+    SharedPalettesWrite.GetDimensions(records, record_stride);
+    if (records != SHARED_PALETTE_RECORD_COUNT || record_stride != 16u) return;
+    PrepareCurrentGate(group_index);
+    if (group_index < CurrentCount) PaletteCount[group_index] = 0u;
     [loop]
     for (uint slot = 0u; slot < CurrentCount; ++slot) {
-        if (group_index < V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT) {
-            PaletteHistogramCount[group_index] = 0u;
-            PaletteHistogramRepresentative[group_index] = 0u;
-        }
-        if (group_index == 0u) PaletteAnchorPeak = 0u;
-        GroupMemoryBarrierWithGroupSync();
-        uint4 core = CurrentCores[slot];
-        [loop]
-        for (uint sample_index = group_index;
-             sample_index < V2_SUBTITLE_CONTOUR_PALETTE_GRID_COLUMNS * V2_SUBTITLE_CONTOUR_PALETTE_GRID_ROWS;
-             sample_index += 256u) {
-            int2 p = CurrentPaletteSamplePosition(core, sample_index);
-            float3 color;
-            float probability;
-            bool color_valid = LoadDisplayColor(p, color);
-            bool probability_valid = CurrentProbabilityEvidence(p, probability);
-            bool anchor = false;
-            if (color_valid && probability_valid) {
-                if (probability > V2_OCR_ACTIVE_PROBABILITY_THRESHOLD) anchor = CurrentSpatialEdge(p, color);
-            }
-            if (anchor) {
-                uint3 q = PaletteQuantize(color);
-                // Bin from actual RGB, not q>>14: RGB.75 rounds to q49151.
-                uint3 bin = min((uint3)(color * 4.0f), uint3(3u, 3u, 3u));
-                uint code = bin.x * 16u + bin.y * 4u + bin.z;
-                uint peak = MaxChannel(q);
-                uint key = (peak << V2_SUBTITLE_CONTOUR_PALETTE_REPRESENTATIVE_INDEX_BITS) |
-                    (V2_SUBTITLE_CONTOUR_PALETTE_REPRESENTATIVE_INDEX_MASK - sample_index);
-                InterlockedAdd(PaletteHistogramCount[code], 1u);
-                InterlockedMax(PaletteHistogramRepresentative[code], key);
-                InterlockedMax(PaletteAnchorPeak, peak);
-            }
-        }
-        GroupMemoryBarrierWithGroupSync();
-        if (group_index == 0u) {
-            // Scalar bitsets avoid FXC forcing an unroll for a dynamically written vector lane.
-            uint visited_low = 0u, visited_high = 0u;
-            [loop]
-            for (uint attempt = 0u; attempt < V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT; ++attempt) {
-                uint best = V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT;
-                uint best_peak = 0u, best_count = 1u;
-                [loop]
-                for (uint bin = 0u; bin < V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT; ++bin) {
-                    uint count = PaletteHistogramCount[bin];
-                    uint peak = PaletteHistogramRepresentative[bin] >> V2_SUBTITLE_CONTOUR_PALETTE_REPRESENTATIVE_INDEX_BITS;
-                    uint visited_word = bin < 32u ? visited_low : visited_high;
-                    if (count == 0u || (visited_word & (1u << (bin % 32u))) != 0u ||
-                        V2_SUBTITLE_CONTOUR_PALETTE_BRIGHTNESS_DENOMINATOR * peak <
-                            V2_SUBTITLE_CONTOUR_PALETTE_BRIGHTNESS_NUMERATOR * PaletteAnchorPeak) continue;
-                    if (best == V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT || peak > best_peak ||
-                        (peak == best_peak && (count > best_count || (count == best_count && bin < best)))) {
-                        best = bin; best_peak = peak; best_count = count;
-                    }
-                }
-                if (best == V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT) break;
-                if (best < 32u) visited_low |= 1u << best;
-                else visited_high |= 1u << (best - 32u);
-                uint representative_index = V2_SUBTITLE_CONTOUR_PALETTE_REPRESENTATIVE_INDEX_MASK -
-                    (PaletteHistogramRepresentative[best] & V2_SUBTITLE_CONTOUR_PALETTE_REPRESENTATIVE_INDEX_MASK);
-                float3 representative_color;
-                bool representative_valid = LoadDisplayColor(CurrentPaletteSamplePosition(core, representative_index), representative_color);
-                if (!representative_valid) continue;
-                uint3 representative = PaletteQuantize(representative_color);
-                uint3 hue = PaletteHue(representative);
-                bool represented = false;
-                [loop]
-                for (uint prior_mode = 0u; prior_mode < PaletteCount[slot]; ++prior_mode) {
-                    uint4 prior = PaletteMode[slot * V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES + prior_mode];
-                    uint3 prior_rounded = (prior.xyz + prior.w / 2u) / prior.w;
-                    uint3 prior_hue = PaletteHue(prior_rounded);
-                    uint distance = MaxChannel((uint3)abs(int3(hue) - int3(prior_hue)));
-                    if (V2_SUBTITLE_CONTOUR_PALETTE_MERGE_HUE_DENOMINATOR * distance <=
-                        V2_SUBTITLE_CONTOUR_PALETTE_MERGE_HUE_NUMERATOR * V2_SUBTITLE_CONTOUR_PALETTE_HUE_CHANNEL_MAX)
-                        represented = true;
-                }
-                if (represented) continue;
-                uint selected_mode = PaletteCount[slot];
-                // Keep the existing exact rational matcher representation: virtual sum/count.
-                PaletteMode[slot * V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES + selected_mode] =
-                    uint4(representative * best_count, best_count);
-                PaletteCount[slot] = selected_mode + 1u;
-                if (PaletteCount[slot] == V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES) break;
-            }
-        }
-        GroupMemoryBarrierWithGroupSync();
+        LearnCurrentPalette(slot, group_index);
+        uint base = slot * SHARED_PALETTE_RECORDS_PER_COVER;
+        if (group_index == 0u)
+            SharedPalettesWrite[base] = uint4(PaletteCount[slot], 0u, 0u, 0u);
+        if (group_index < PaletteCount[slot])
+            SharedPalettesWrite[base + 1u + group_index] =
+                PaletteMode[slot * V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES + group_index];
     }
 }
 
