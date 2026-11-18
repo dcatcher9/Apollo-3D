@@ -107,7 +107,7 @@ namespace nvenc {
     return true;
   }
 
-  NV_ENC_REGISTERED_PTR nvenc_d3d11_native::prepare_input(unsigned, std::uint64_t) {
+  NV_ENC_REGISTERED_PTR nvenc_d3d11_native::prepare_input(unsigned) {
     const auto input = registered_input_buffers[converted_input];
     // A repeat can reuse the previous surface once its picture has retired and unmapped.
     return release_input_registration(input) ? input : nullptr;

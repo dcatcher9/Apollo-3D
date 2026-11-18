@@ -404,32 +404,14 @@ namespace video {
   }
 
   int nvenc_encode_session_t::convert(platf::img_t &img) {
-    const auto previous_revision = std::exchange(input_revision, 0);
-    return finish_conversion(device->convert(img), previous_revision);
+    return device->convert(img);
   }
 
   int nvenc_encode_session_t::convert_with_encode_target(
     platf::img_t &img,
     const std::chrono::steady_clock::time_point next_encode_target
   ) {
-    const auto previous_revision = std::exchange(input_revision, 0);
-    return finish_conversion(device->convert_with_encode_target(img, next_encode_target), previous_revision);
-  }
-
-  int nvenc_encode_session_t::finish_conversion(int result, std::uint64_t previous_revision) {
-    if (result == 0) {
-      if (device->encoder_input_pixels_unchanged()) {
-        input_revision = previous_revision;
-      } else {
-        input_revision = next_input_revision;
-        if (next_input_revision != 0) {
-          ++next_input_revision;
-        }
-      }
-    }
-    // Failure or an exception from the delegate leaves the target unknown. Do not reset the
-    // allocator: a later successful write must never reuse a revision still held by a slot.
-    return result;
+    return device->convert_with_encode_target(img, next_encode_target);
   }
 
   bool nvenc_encode_session_t::needs_conversion_poll() const {
@@ -500,8 +482,7 @@ namespace video {
     auto result = encoder.encode_frame(
       frame_index,
       force_idr,
-      std::move(frame_buffer),
-      input_revision
+      std::move(frame_buffer)
     );
     force_idr = false;
     device->encoder_consumed_input();
@@ -528,7 +509,7 @@ namespace video {
 
   /** Encode thread, with pictures in flight: hand off the current converted input. */
   bool nvenc_encode_session_t::submit_frame(uint64_t frame_index) {
-    const bool submitted = encoder.submit_frame(frame_index, force_idr, input_revision);
+    const bool submitted = encoder.submit_frame(frame_index, force_idr);
     force_idr = false;
     // Never blocks: the encode thread's fallback for export slots whose conversion reads
     // completed (the receiver's read-fence wait normally hands them back), and its diagnostics.

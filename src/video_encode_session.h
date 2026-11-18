@@ -53,15 +53,9 @@ namespace video {
     const std::shared_ptr<encoded_frame_buffer_pool_t> &frame_pool() const;
 
   private:
-    int finish_conversion(int result, std::uint64_t previous_revision);
-
     platf::native_encode_owner_t device;
     nvenc::nvenc_base &encoder;
     bool force_idr = false;
-    // Conversion-target content, independent of picture acceptance and packet identity. Zero
-    // means unknown. Exhausting the allocator permanently falls back to unknown, never reuse.
-    std::uint64_t input_revision = 0;
-    std::uint64_t next_input_revision = 1;
     std::shared_ptr<encoded_frame_buffer_pool_t> frame_buffer_pool =
       std::make_shared<encoded_frame_buffer_pool_t>();
   };

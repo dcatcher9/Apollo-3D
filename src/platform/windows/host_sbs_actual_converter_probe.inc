@@ -50,6 +50,7 @@ namespace actual_converter_probe_v1 {
         {"field_width",e.field_width},{"field_height",e.field_height},{"field_content",{e.field_content.left,e.field_content.top,e.field_content.right,e.field_content.bottom}},
         {"force_infer",e.force_infer},{"gpu_undecided",e.gpu_undecided},{"optional_work",e.optional_work},{"ddup_proof",e.ddup_proof},
         {"queued",e.queued},{"flat",e.flat},{"repeat",e.repeat},{"cached_current_colour",e.cached_current_colour},
+        {"native_planes_written",e.native_planes_written},
         {"slot_frames",e.slot_frames},{"slot_pending",e.slot_pending},{"slot_observations",e.slot_observations},{"slot_contexts",e.slot_contexts},
         {"slot_source_addresses",e.slot_source_addresses},{"selected_slot",e.selected_slot},{"pending_slots",e.pending_slots},
         {"publication_current",e.publication_current},{"ticket_publication_current",e.ticket_publication_current},{"publication",pub(e.publication)},
@@ -426,16 +427,20 @@ namespace actual_converter_probe_v1 {
           require(outputs[index].copy(converter.device_ctx.get(), target.Get()), message);
         };
         json native_input_proof = json::object();
-        const auto record_native_input = [&](const char *phase, bool expect_unchanged) {
-          const bool unchanged = converter.encoder_input_pixels_unchanged();
+        const auto record_native_input = [&](const char *phase, const event_t &output, bool expect_unchanged) {
+          require(output.conversion == converter.sbs_frame_sequence &&
+                  (output.kind == event_e::packed_repeat || output.kind == event_e::convert_end),
+            "Native NV12 input proof does not name the latest successful conversion output");
+          const bool unchanged = !output.native_planes_written;
           const bool kept = converter.conversion_kept_input();
-          native_input_proof[phase] = {{"encoder_input_pixels_unchanged", unchanged}, {"conversion_kept_input", kept}};
+          native_input_proof[phase] = {{"encoder_input_pixels_unchanged", unchanged}, {"conversion_kept_input", kept},
+            {"conversion", output.conversion}, {"native_planes_written", output.native_planes_written}};
           require(unchanged == expect_unchanged && !kept, "Native NV12 pixel identity disagrees with the actual converter phase");
         };
         ComPtr<ID3D11Texture2D> flat_reference;
         ComPtr<ID3D11RenderTargetView> flat_reference_rtv;
         if (native_nv12) {
-          record_native_input("matched_A", false);
+          record_native_input("matched_A", last_outcome(2u), false);
         } else {
           hr(converter.device->CreateTexture2D(&td,nullptr,&flat_reference),"Independent flat reference target failed");
           hr(converter.device->CreateRenderTargetView(flat_reference.Get(),nullptr,&flat_reference_rtv),"Independent flat reference RTV failed");
@@ -470,7 +475,7 @@ namespace actual_converter_probe_v1 {
           b_admission->optional_work==static_cast<std::uint32_t>(models::depth_optional_work_mode_e::ordinary),
           "B did not take the actual ordinary force-infer admission branch");
         if (native_nv12) {
-          record_native_input("packed_A_before_cap", true);
+          record_native_input("packed_A_before_cap", before, true);
           require(a_content_timestamp && converter.rendered_content_timestamp() == a_content_timestamp,
             "Copy-free packed repeat changed its rendered content timestamp");
         }
@@ -609,7 +614,7 @@ namespace actual_converter_probe_v1 {
                   converter.rendered_content_timestamp() == a_content_timestamp,
             "Input refresh did not redraw the same packed A while B remained pending");
           native_input_proof["cache_reset_repeat"] = event_json(redrawn);
-          record_native_input("redrawn_A_after_cache_reset", false);
+          record_native_input("redrawn_A_after_cache_reset", redrawn, false);
           snapshot_target(5, "Redrawn NV12 input copy failed");
           (void) real_pending();
           ++after_cap_conversion;
@@ -626,7 +631,7 @@ namespace actual_converter_probe_v1 {
           after.host_event_us-before.host_event_us>250000,
           "After-cap converter output was not actual current-flat B while B remained held");
         if (native_nv12) {
-          record_native_input("current_flat_B_after_cap", false);
+          record_native_input("current_flat_B_after_cap", after, false);
         }
         snapshot_target(2, "Actual after-cap flat target copy failed");
         // Independent GPU reference uses the production flat PS and recorder. It never writes
@@ -671,7 +676,7 @@ namespace actual_converter_probe_v1 {
           [](const auto &e){return e.kind==event_e::admission;})==2,
           "Static/pending/recovery deliveries unexpectedly admitted another root");
         if (native_nv12) {
-          record_native_input("recovered_B", false);
+          record_native_input("recovered_B", recovered, false);
         }
         snapshot_target(3, "Actual recovered B target copy failed");
         for (std::size_t i = 0; i < output_count; ++i) {

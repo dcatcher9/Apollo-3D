@@ -39,7 +39,7 @@ namespace nvenc {
 
   private:
     bool create_and_register_input_buffer() override;
-    NV_ENC_REGISTERED_PTR prepare_input(unsigned slot, std::uint64_t input_revision) override;
+    NV_ENC_REGISTERED_PTR prepare_input(unsigned slot) override;
 
     const ID3D11DevicePtr d3d_device;
     // With pictures in flight, one spare keeps the next conversion independent of retrieval.

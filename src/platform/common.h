@@ -529,14 +529,6 @@ namespace platf {
   struct nvenc_encode_device_t: encode_device_t {
     virtual nvenc::nvenc_base &encoder() = 0;
 
-    /** Whether the most recent successful conversion preserved the native input texture bytes.
-     * A converter can present a packed repeat while retaining those bytes. Keep that identity
-     * separate from the encode loop's missing-source policy in conversion_kept_input().
-     */
-    virtual bool encoder_input_pixels_unchanged() const {
-      return conversion_kept_input();
-    }
-
     std::optional<SS_HDR_METADATA> hdr_metadata;
   };
 

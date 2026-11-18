@@ -601,11 +601,7 @@ namespace platf::dxgi {
     }
 
     bool conversion_kept_input() const {
-      return input_update == input_update_e::missing_source;
-    }
-
-    bool encoder_input_pixels_unchanged() const {
-      return input_update != input_update_e::may_have_written;
+      return conversion_missing_source;
     }
 
     // The streaming loop converts a held live export, whose next frame it re-checks for.
@@ -1034,7 +1030,7 @@ namespace platf::dxgi {
         std::nullopt
     ) {
       auto &img = (img_d3d_t &) img_base;
-      input_update = input_update_e::may_have_written;
+      conversion_missing_source = false;
       std::optional<unsigned> converted_input_surface;
       // Select only when this call will write native planes. A packed repeat, skipped capture,
       // or blank image keeps the last converted surface, even when every other input is busy.
@@ -1157,7 +1153,7 @@ namespace platf::dxgi {
         if (img.pixels_skipped && !export_owns_output) {
           // Capture skipped these pixels while an export owned the stream, and it no longer does.
           // The encoder input stays as it was; capture now copies the whole desktop again.
-          input_update = input_update_e::missing_source;
+          conversion_missing_source = true;
           return 0;
         }
 
@@ -3582,6 +3578,7 @@ namespace platf::dxgi {
 
           if (probe_observer.record) {
             actual_converter_probe_v1::event_t e; e.kind=repeat_matched_output ? actual_converter_probe_v1::event_e::packed_repeat:actual_converter_probe_v1::event_e::convert_end;
+            e.native_planes_written = !rgb_present_target && output_conversion_required;
             e.repeat=repeat_matched_output; e.queued=queued_draw_selected && !queued_attempt_failed_flat; e.pending_current_colour=pending_current_colour_selected && !queued_attempt_failed_flat; e.watermark_before=probe_watermark_at_entry;
             e.actual_draw_pixel_source=probe_actual_draw_pixel_source; e.flat=!repeat_matched_output && (!v2_draw_selected || queued_attempt_failed_flat);
             e.cached_current_colour=cached_current_color_warp; e.watermark_after=drawn_source_order.last_drawn();
@@ -3611,12 +3608,8 @@ namespace platf::dxgi {
               final_sbs_is_linear,
               final_sbs_has_p010_y
             );
-            // The converted planes remain in the session's input texture until another draw.
+            // Packed repeats retain this last converted input through native surface rotation.
             host_sbs_encoder_input_state.mark_converted();
-          } else {
-            // The packed repeat issued neither the warp (including optional P010 luma) nor
-            // the Y/UV draws. The encoder can reuse a picture slot that already owns these bytes.
-            input_update = input_update_e::packed_repeat;
           }
           end_sbs_gpu_timer(gpu_timer);
           // Publication receipts already captured the diagnostic state. External Stats reads
@@ -8172,12 +8165,7 @@ namespace platf::dxgi {
     std::shared_ptr<void> game_setup_watch;
     std::function<void()> external_frame_wake;  ///< See set_external_frame_wake().
     std::uint64_t capture_pixels_token = 0;  ///< This encoder's display->external_pixels_owner value.
-    enum class input_update_e {
-      may_have_written,
-      missing_source,
-      packed_repeat,
-    };
-    input_update_e input_update = input_update_e::may_have_written;
+    bool conversion_missing_source = false;  ///< Skipped capture pixels have no external replacement.
     std::chrono::steady_clock::time_point next_export_wake_log {};  ///< See log_export_wakes().
     std::unique_ptr<sbs_cursor::compositor_t> external_cursor;
     float external_cursor_white_multiplier = 203.0f / 80.0f;
@@ -12489,10 +12477,6 @@ namespace platf::dxgi {
 
     bool conversion_kept_input() const override {
       return base.conversion_kept_input();
-    }
-
-    bool encoder_input_pixels_unchanged() const override {
-      return base.encoder_input_pixels_unchanged();
     }
 
     std::optional<std::chrono::steady_clock::time_point> rendered_content_timestamp() const override {

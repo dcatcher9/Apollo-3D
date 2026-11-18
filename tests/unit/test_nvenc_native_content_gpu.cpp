@@ -162,12 +162,6 @@ namespace {
     return texture;
   }
 
-  // Keep known and unknown caller revisions in the artifact ledger. Native surface ownership,
-  // rather than a revision cache or a corrective copy, determines which input can be submitted.
-  bool submit(nvenc::nvenc_d3d11_native &encoder, std::uint64_t index, bool idr, std::optional<std::uint64_t> revision) {
-    return encoder.submit_frame(index, idr, revision.value_or(0));
-  }
-
   void append(std::ofstream &file, const std::vector<std::uint8_t> &bytes) {
     file.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     require(file.good(), "Cannot write a native content artifact");
@@ -301,11 +295,10 @@ namespace {
       require(converted_surface.has_value(), "A native submission has no committed producer input");
       const auto mapped_before = mappings();
       const bool waits_before = encoder->input_waits_for_retirement();
-      const auto proof = frame == 2 || frame == 3 ? std::optional<std::uint64_t> {} : std::optional {revision};
-      const bool accepted = submit(*encoder, index, idr, proof);
+      const bool accepted = encoder->submit_frame(index, idr);
       const auto after = encoder->frames_in_flight();
       const auto mapped_after = mappings();
-      result["timeline"].push_back({{"event", "submit"}, {"frame_index", index}, {"retained", retained}, {"authored_revision", revision}, {"input_revision", proof ? json(*proof) : json(nullptr)}, {"input_surface", *converted_surface}, {"picture_slot", submitted % profile.depth}, {"force_idr", idr}, {"accepted", accepted}, {"before_in_flight", before}, {"after_in_flight", after}, {"input_waits_before", waits_before}, {"mapped_surfaces_before", mappings_json(mapped_before)}, {"mapped_surfaces_after", mappings_json(mapped_after)}});
+      result["timeline"].push_back({{"event", "submit"}, {"frame_index", index}, {"retained", retained}, {"authored_revision", revision}, {"input_surface", *converted_surface}, {"picture_slot", submitted % profile.depth}, {"force_idr", idr}, {"accepted", accepted}, {"before_in_flight", before}, {"after_in_flight", after}, {"input_waits_before", waits_before}, {"mapped_surfaces_before", mappings_json(mapped_before)}, {"mapped_surfaces_after", mappings_json(mapped_after)}});
       require(accepted == accept, "Actual native submission returned an unexpected result (NEED_MORE_INPUT remains public false)");
       if (accept) {
         require(after == before + 1, "Accepted native submission did not acquire exactly one slot");

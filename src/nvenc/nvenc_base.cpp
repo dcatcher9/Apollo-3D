@@ -1034,16 +1034,15 @@ namespace nvenc {
   nvenc_encoded_frame nvenc_base::encode_frame(
     uint64_t frame_index,
     bool force_idr,
-    std::vector<std::uint8_t> frame_buffer,
-    std::uint64_t input_revision
+    std::vector<std::uint8_t> frame_buffer
   ) {
-    if (!submit_frame(frame_index, force_idr, input_revision)) {
+    if (!submit_frame(frame_index, force_idr)) {
       return {};
     }
     return retrieve_frame(std::move(frame_buffer));
   }
 
-  bool nvenc_base::submit_frame(uint64_t frame_index, bool force_idr, std::uint64_t input_revision) {
+  bool nvenc_base::submit_frame(uint64_t frame_index, bool force_idr) {
     if (!encoder || cleanup_blocked.load(std::memory_order_acquire) || input_waits_for_retirement()) {
       return false;
     }
@@ -1062,7 +1061,7 @@ namespace nvenc {
 
     assert(slot.output_bitstream);
 
-    const auto registered_input = prepare_input(slot_index, input_revision);
+    const auto registered_input = prepare_input(slot_index);
     if (!registered_input) {
       BOOST_LOG(error) << "NvEnc: no registered input prepared for picture " << slot_index;
       return false;

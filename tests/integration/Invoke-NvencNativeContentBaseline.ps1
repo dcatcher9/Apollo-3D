@@ -355,7 +355,7 @@ foreach ($caseSpec in $caseSpecs) {
         $owners.Add($ownerFacts)
     }
     Assert-Hash $manifestPath $nativeHash
-    $cases.Add([ordered]@{name=$caseSpec.name;codec=$caseSpec.codec;pixel_format=$pixelFormat;requested_depth=$caseSpec.depth;coverage_directory=$coverage;adapter=$native.adapter;settings=$native.settings;nvenc_api=$native.nvenc_api;native_manifest=[IO.Path]::GetRelativePath($OutputRoot,$manifestPath);native_manifest_sha256=$nativeHash;owners=$owners.ToArray()})
+    $cases.Add([ordered]@{name=$caseSpec.name;codec=$caseSpec.codec;pixel_format=$pixelFormat;requested_depth=$caseSpec.depth;coverage_directory=$coverage;adapter=$native.adapter;settings=$native.settings;nvenc_api=$native.nvenc_api;native_schema=$native.schema;native_manifest=[IO.Path]::GetRelativePath($OutputRoot,$manifestPath);native_manifest_sha256=$nativeHash;owners=$owners.ToArray()})
 }
 Assert-Pins $SourcePins
 Assert-Hash $TestBinary $ExpectedTestBinarySha256
@@ -383,9 +383,12 @@ foreach ($caseResult in $cases) {
     }
 }
 $result = [ordered]@{
-    schema=1;qualified=$true;output_root=$OutputRoot;coverage_root=$coverageRoot;native_binary_sha256=$ExpectedTestBinarySha256.ToUpperInvariant();ffmpeg_sha256=$ExpectedFFmpegSha256.ToUpperInvariant();ffprobe_sha256=$ExpectedFFprobeSha256.ToUpperInvariant();expected_depth_two_copies=$ExpectedDepthTwoCopies
+    schema=1;qualified=$true;output_root=$OutputRoot;coverage_root=$coverageRoot;native_binary_sha256=$ExpectedTestBinarySha256.ToUpperInvariant();ffmpeg_sha256=$ExpectedFFmpegSha256.ToUpperInvariant();ffprobe_sha256=$ExpectedFFprobeSha256.ToUpperInvariant()
     source_pins_sha256=(Get-Hash (Join-Path $OutputRoot 'source-pins.json'));qualifier_sha256=(Get-Hash (Join-Path $OutputRoot 'qualifier-source.ps1'));cases=$cases.ToArray();artifacts=$artifacts.ToArray()
     boundary='Functional authored native NVENC content only. Logical pictures in flight do not establish GPU overlap; no performance or cancellation claim.'
+}
+if ($cases | Where-Object native_schema -eq 1) {
+    $result.expected_depth_two_copies = $ExpectedDepthTwoCopies
 }
 if ($ControlManifest) {
     $ControlManifest = (Resolve-Path -LiteralPath $ControlManifest).Path

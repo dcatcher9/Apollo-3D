@@ -143,28 +143,22 @@ namespace nvenc {
      *        No restrictions on the first frame index, but later frame indexes must be subsequent.
      * @param force_idr Whether to encode frame as forced IDR.
      * @param frame_buffer Recyclable storage for the copied bitstream.
-     * @param input_revision Conversion-owned target revision, never reused for different content
-     *        during the registered input's lifetime. Zero is unknown; eligible depth-2 submissions
-     *        always copy.
      * @return Encoded frame.
      */
     nvenc_encoded_frame encode_frame(
       uint64_t frame_index,
       bool force_idr,
-      std::vector<std::uint8_t> frame_buffer = {},
-      std::uint64_t input_revision = 0
+      std::vector<std::uint8_t> frame_buffer = {}
     );
 
     /**
-     * Submit the current input surface as the next picture without waiting for it. With a pipeline
-     * depth above 1 each picture has its own input, refreshed from the surface unless its content
-     * already matches input_revision. The caller may convert the next frame while this encodes.
+     * Submit the selected input as the next picture without waiting for it. Its registration
+     * remains owned until retirement; the caller may convert into another allocation meanwhile.
      * Call from one thread (the encode thread).
-     * @param input_revision Same conversion-owned identity as encode_frame(); zero remains the
-     *        conservative path for direct callers that do not track target writes.
-     * @return `false` on failure, or while `pipeline_depth()` pictures are still in flight.
+     * @return `false` on failure, while every picture slot is in flight, or while the selected
+     *         input still belongs to an earlier picture.
      */
-    bool submit_frame(uint64_t frame_index, bool force_idr, std::uint64_t input_revision = 0);
+    bool submit_frame(uint64_t frame_index, bool force_idr);
 
     /**
      * Wait for the oldest submitted picture (the 250 ms encoder budget, from its input's completion
@@ -256,11 +250,10 @@ namespace nvenc {
     /**
      * @brief Prepare and select picture `slot`'s registered input before mapping, at every depth.
      *        Fixed-slot backends may fill it from the outside-facing surface; a pooled backend may
-     *        select an unmapped allocation that already contains the converted output. A nonzero
-     *        revision proves exact content; zero remains unknown. Submitting thread only,
-     *        independent of later map/submission acceptance. Null refuses this submission.
+     *        select an unmapped allocation that already contains the converted output. Submitting
+     *        thread only, independent of later map/submission acceptance. Null refuses this submission.
      */
-    virtual NV_ENC_REGISTERED_PTR prepare_input(unsigned slot, std::uint64_t input_revision) {
+    virtual NV_ENC_REGISTERED_PTR prepare_input(unsigned slot) {
       return registered_input_buffers[slot];
     }
 
