@@ -10,9 +10,22 @@ RWTexture2D<uint> OutputTensorExclusion : register(u1);
 // mip 0, so one bilinear SampleLevel tap aliases whenever the source is appreciably larger than
 // the model grid (3840x2160 -> 770x434 is almost 5x in each axis). Exact overlap weights preserve
 // thin features that sparse quadrant taps can miss at that ratio.
-float3 LoadModelColor(int2 source_pixel, uint2 source_size) {
+float3 LoadModelColorDirect(int2 source_pixel, uint2 source_size) {
     int2 physical_pixel = DepthSourceRegionLoadPosition(source_pixel, source_size);
     return DepthColorToSrgb(InputTexture.Load(int3(physical_pixel, 0)).rgb, color_mode);
+}
+
+// This side length fits alongside the fused comparison's 4 KiB group array.
+static const uint ModelSourceTileSide = 48u;
+groupshared float3 ModelSourceTile[ModelSourceTileSide * ModelSourceTileSide];
+
+float3 LoadModelColor(int2 source_pixel, uint2 source_size, bool use_tile, int2 tile_origin) {
+    if (use_tile) {
+        // The area loop clips its footprint to the source before using the shared tile.
+        uint2 offset = uint2(source_pixel - tile_origin);
+        return ModelSourceTile[offset.y * ModelSourceTileSide + offset.x];
+    }
+    return LoadModelColorDirect(source_pixel, source_size);
 }
 
 float3 SampleModelColorBilinear(float2 center_uv, uint2 source_size) {
@@ -20,22 +33,21 @@ float3 SampleModelColorBilinear(float2 center_uv, uint2 source_size) {
     int2 lo = int2(floor(source_position));
     float2 blend = frac(source_position);
     float3 top = lerp(
-        LoadModelColor(lo, source_size),
-        LoadModelColor(lo + int2(1, 0), source_size),
+        LoadModelColorDirect(lo, source_size),
+        LoadModelColorDirect(lo + int2(1, 0), source_size),
         blend.x);
     float3 bottom = lerp(
-        LoadModelColor(lo + int2(0, 1), source_size),
-        LoadModelColor(lo + int2(1, 1), source_size),
+        LoadModelColorDirect(lo + int2(0, 1), source_size),
+        LoadModelColorDirect(lo + int2(1, 1), source_size),
         blend.x);
     return lerp(top, bottom, blend.y);
 }
 
-float3 SampleModelFootprint(uint2 target_pixel, uint2 source_size, float2 center_uv) {
+float3 SampleModelFootprint(uint2 target_pixel, uint2 source_size, float2 center_uv, bool use_tile, int2 tile_origin) {
     uint2 target_size = uint2(target_w, target_h);
     if (any(source_size < target_size)) {
-        // The authenticated production shapes never upscale. Retain pixel-center bilinear
-        // behavior for diagnostic/native edge cases, but interpolate in model (display-referred)
-        // color so capture transfer cannot change the result.
+        // Upsampling uses pixel-center bilinear interpolation in display-referred model color
+        // so capture transfer cannot change the result.
         return SampleModelColorBilinear(center_uv, source_size);
     }
 
@@ -64,7 +76,7 @@ float3 SampleModelFootprint(uint2 target_pixel, uint2 source_size, float2 center
             // capture-domain linear light first makes isolated HDR highlights contaminate an
             // entire model texel and makes equivalent SDR capture modes disagree.
             weighted_sum += LoadModelColor(
-                int2(source_x, source_y), source_size) * (x_coverage * y_coverage);
+                int2(source_x, source_y), source_size, use_tile, tile_origin) * (x_coverage * y_coverage);
         }
     }
 
@@ -78,7 +90,7 @@ float2 LetterboxSourceUv(float2 model_uv) {
     return saturate((model_uv - content_min) / DepthAnalysisContentScale());
 }
 
-float3 SampleLetterboxedModelFootprint(uint2 target_pixel, uint2 source_size) {
+float3 SampleLetterboxedModelFootprint(uint2 target_pixel, uint2 source_size, bool use_tile, int2 tile_origin) {
     float2 target_size = float2(target_w, target_h);
     float2 content_min = DepthAnalysisContentMinUv();
     float2 content_scale = DepthAnalysisContentScale();
@@ -111,15 +123,14 @@ float3 SampleLetterboxedModelFootprint(uint2 target_pixel, uint2 source_size) {
                     max(source_lo.x, (float)source_x),
                 0.0f);
             weighted_sum += LoadModelColor(
-                int2(source_x, source_y), source_size) * (x_coverage * y_coverage);
+                int2(source_x, source_y), source_size, use_tile, tile_origin) * (x_coverage * y_coverage);
         }
     }
     return weighted_sum / max(source_extent.x * source_extent.y, 1e-6f);
 }
 
 // Compute shader to area-resize RGB interleaved image to NCHW Float32 with ImageNet normalization.
-[numthreads(16, 16, 1)]
-void main(uint3 DTid : SV_DispatchThreadID) {
+void WriteModelInput(uint3 DTid, bool use_tile, int2 tile_origin) {
     if (DTid.x >= target_w || DTid.y >= target_h)
         return;
 
@@ -146,10 +157,10 @@ void main(uint3 DTid : SV_DispatchThreadID) {
         analysis_content_top == 0u && analysis_content_right == target_w &&
         analysis_content_bottom == target_h;
     float3 pixel = content_valid ?
-        (full_content ? SampleModelFootprint(DTid.xy, source_size, uv) :
-         (content_cell ? SampleLetterboxedModelFootprint(DTid.xy, source_size) :
+        (full_content ? SampleModelFootprint(DTid.xy, source_size, uv, use_tile, tile_origin) :
+         (content_cell ? SampleLetterboxedModelFootprint(DTid.xy, source_size, use_tile, tile_origin) :
                          SampleLetterboxedModelFootprint(
-                             DepthAnalysisClampCell(DTid.xy), source_size))) :
+                             DepthAnalysisClampCell(DTid.xy), source_size, use_tile, tile_origin))) :
         float3(0.0f, 0.0f, 0.0f);
     OutputTensorExclusion[DTid.xy] = content_cell ? 0u : 1u;
 
@@ -165,4 +176,9 @@ void main(uint3 DTid : SV_DispatchThreadID) {
     OutputBuffer[base_idx] = r;
     OutputBuffer[base_idx + channel_stride] = g;
     OutputBuffer[base_idx + 2 * channel_stride] = b;
+}
+
+[numthreads(16, 16, 1)]
+void main(uint3 DTid : SV_DispatchThreadID) {
+    WriteModelInput(DTid, false, int2(0, 0));
 }

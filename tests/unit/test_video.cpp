@@ -473,6 +473,7 @@ TEST(DirectxShaderTest, ProductionV2ShadersArePermanentPrewarmSet) {
   EXPECT_TRUE(has_producer_shader(cache::host_sbs_subtitle_locator_resolve));
   EXPECT_TRUE(has_producer_shader(cache::host_sbs_subtitle_condition));
   EXPECT_TRUE(has_producer_shader(cache::host_sbs_near_identical_fused_preprocess));
+  EXPECT_TRUE(has_producer_shader(cache::host_sbs_near_identical_tiled_preprocess));
 
   const auto near_identical_sources = cache::snapshot_sources(
     shader_root,
@@ -581,7 +582,11 @@ TEST(DirectxShaderTest, LoadsPackagedProductionShadersWithoutRuntimeCompilation)
   const auto before = cache::cache_statistics();
   ASSERT_TRUE(cache::prewarm(assets_dir));
   const auto prewarmed = cache::cache_statistics();
-  EXPECT_EQ(prewarmed.embedded_hits - before.embedded_hits, 34u);
+  std::size_t expected_embedded_hits = 0u;
+  for (const auto &set : cache::production_prewarm_sets) {
+    expected_embedded_hits += set.specs.size();
+  }
+  EXPECT_EQ(prewarmed.embedded_hits - before.embedded_hits, expected_embedded_hits);
   EXPECT_EQ(prewarmed.memory_hits, before.memory_hits);
   EXPECT_EQ(prewarmed.persistent_hits, before.persistent_hits);
   EXPECT_EQ(prewarmed.persistent_writes, before.persistent_writes);
@@ -4984,6 +4989,7 @@ TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
 
   constexpr std::array shaders {
     std::tuple {"rgb_to_nchw_near_identical_cs.hlsl", "fused_main", "cs_5_0"},
+    std::tuple {"rgb_to_nchw_near_identical_cs.hlsl", "fused_tiled_main", "cs_5_0"},
     std::tuple {"buffer_to_tex_cs.hlsl", "pad_main", "cs_5_0"},
     std::tuple {"depth_minmax_ema_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_coordinate_v2_map_cs.hlsl", "main", "cs_5_0"},

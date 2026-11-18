@@ -416,6 +416,11 @@
         "source_target": "cs_5_0"
       },
       {
+        "source_file": "rgb_to_nchw_near_identical_cs.hlsl",
+        "source_entrypoint": "fused_tiled_main",
+        "source_target": "cs_5_0"
+      },
+      {
         "source_file": "buffer_to_tex_cs.hlsl",
         "source_entrypoint": "main",
         "source_target": "cs_5_0"
@@ -551,7 +556,7 @@
         "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "154f11d36be2f7a260d9e3d6ca811179c5f6e6e4f6cf09863a4bb22268e25717"
+    "source_closure_sha256": "edf4358c79f2e927d248dbde686818de761f91f8008fe51cd9881e6f01b265ee"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,
@@ -684,7 +689,7 @@
         "source_target": "cs_5_0",
         "source_compile_flags": 34816,
         "source_macro_count": 0,
-        "source_closure_sha256": "395d44b6f4f33d2a6dcdb57f4b355fe897e1255dd685aa2e5cfa4504505d3c85",
+        "source_closure_sha256": "720fe4a316f1f66fd31c8a1833cbf0d93e25f34da494b6c80b94b6cea096689e",
         "model_input_schema": 1,
         "dtype": "float32-le",
         "layout": "NCHW",

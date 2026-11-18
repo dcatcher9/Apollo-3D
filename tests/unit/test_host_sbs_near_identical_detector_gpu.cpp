@@ -97,12 +97,16 @@ TEST(HostSbsNearIdenticalPolicyTest, SoleFusedPreprocessIsMandatoryAndNoComparat
   );
   ASSERT_NE(estimator.find(
     "const std::array producer_shader_outputs {\n"
-    "        std::addressof(near_identical_fused_preprocess_cs),"
+    "        std::addressof(near_identical_fused_preprocess_cs),\n"
+    "        std::addressof(near_identical_tiled_preprocess_cs),"
   ), std::string::npos);
   const auto mandatory_assignment = producer_body.find(
     "producer_shaders_ok = !output || create_shader"
   );
   ASSERT_NE(mandatory_assignment, std::string::npos);
+  const auto optional_tiled = producer_body.find("output == std::addressof(near_identical_tiled_preprocess_cs)");
+  ASSERT_NE(optional_tiled, std::string::npos);
+  EXPECT_LT(optional_tiled, mandatory_assignment);
   EXPECT_EQ(
     estimator.find("parallax_v2_producer_shaders_ready"),
     std::string::npos
@@ -128,10 +132,13 @@ TEST(HostSbsNearIdenticalPolicyTest, SoleFusedPreprocessIsMandatoryAndNoComparat
     << "mandatory producer availability must not silently change a root to force-infer";
   EXPECT_NE(
     estimator.find(
-      "context->CSSetShader(near_identical_fused_preprocess_cs.Get(), nullptr, 0u)"
+      "context->CSSetShader(preprocess_shader, nullptr, 0u)"
     ),
     std::string::npos
   );
+  EXPECT_NE(estimator.find("const bool use_source_tile = near_identical_tiled_preprocess_cs &&"), std::string::npos);
+  EXPECT_NE(estimator.find("near_identical_tiled_preprocess_cs.Get() : near_identical_fused_preprocess_cs.Get()"), std::string::npos);
+  EXPECT_NE(fused.find("void fused_tiled_main("), std::string::npos);
   EXPECT_NE(
     estimator.find(
       "gpu_undecided_host_candidate ?\n          fused_preprocess_compare_cbuffer.Get() :\n"
@@ -289,13 +296,19 @@ TEST(HostSbsNearIdenticalPolicyTest, CompositeRuntimeUsesSingleHighTensorBoundar
     << "single-high geometry must not retain a dormant split-grid authorization path";
 
   const std::string_view preprocess_binding =
-    "context->CSSetShader(near_identical_fused_preprocess_cs.Get(), nullptr, 0u)";
+    "context->CSSetShader(preprocess_shader, nullptr, 0u)";
   const auto preprocess_first = estimator.find(preprocess_binding);
   ASSERT_NE(preprocess_first, std::string::npos);
   EXPECT_EQ(
     estimator.find(preprocess_binding, preprocess_first + preprocess_binding.size()),
     std::string::npos
   ) << "one high input must have exactly one RGB-to-NCHW producer dispatch";
+  const auto preprocess_end = estimator.find("ID3D11UnorderedAccessView *null_uavs[3]", preprocess_first);
+  ASSERT_NE(preprocess_end, std::string::npos);
+  const auto preprocess_dispatch = estimator.substr(preprocess_first, preprocess_end - preprocess_first);
+  const auto dispatch_first = preprocess_dispatch.find("context->Dispatch(");
+  ASSERT_NE(dispatch_first, std::string::npos);
+  EXPECT_EQ(preprocess_dispatch.find("context->Dispatch(", dispatch_first + 1u), std::string::npos);
 
   const auto interop_begin = estimator.find("std::array<CUgraphicsResource, 3> depth_resources");
   const auto interop_end = estimator.find("if (!bindings_ok && !dropped_for_signature_change)", interop_begin);
@@ -421,6 +434,8 @@ TEST(HostSbsNearIdenticalPolicyTest, ProducerOutputsMatchCanonicalShaderOrder) {
   const std::array expected_bindings {
     std::pair {std::string_view {"host_sbs_near_identical_fused_preprocess"},
                std::string_view {"near_identical_fused_preprocess_cs"}},
+    std::pair {std::string_view {"host_sbs_near_identical_tiled_preprocess"},
+               std::string_view {"near_identical_tiled_preprocess_cs"}},
     std::pair {std::string_view {"buffer_to_tex"}, std::string_view {"buffer_to_tex_cs"}},
     std::pair {std::string_view {"buffer_to_tex_pad"}, std::string_view {"buffer_to_tex_pad_cs"}},
     std::pair {std::string_view {"depth_minmax_ema"}, std::string_view {"depth_minmax_ema_cs"}},
@@ -1090,6 +1105,7 @@ namespace {
       if (!compile(preprocess_path, "main", preprocess_shader_, error) ||
           !compile_specialized_oracle(error) ||
           !compile(fused_preprocess_path, "fused_main", fused_preprocess_shader_, error) ||
+          !compile(fused_preprocess_path, "fused_tiled_main", tiled_preprocess_shader_, error) ||
           !compile(fused_map_path, "main", fused_map_shader_, error) ||
           !compile(fused_map_path, "coordinate_main", coordinate_shader_, error) ||
           !compile(shader_path, "resolve_main", resolve_shader_, error) ||
@@ -1304,7 +1320,8 @@ namespace {
       const std::span<const float> previous,
       preprocess_result_t &result,
       std::string &error,
-      const bool evidence_enabled = true
+      const bool evidence_enabled = true,
+      const bool tiled = false
     ) {
       if (source.size() != static_cast<std::size_t>(source_width) * source_height ||
           previous.size() != 3u * field_texels) {
@@ -1421,8 +1438,11 @@ namespace {
         context_->CSSetShader(oracle_pad_shader_.Get(), nullptr, 0u);
         context_->Dispatch(tile_group_width, tile_group_height, 1u);
       } else {
+        auto *producer = fused ?
+                           (tiled ? tiled_preprocess_shader_.Get() : fused_preprocess_shader_.Get()) :
+                           preprocess_shader_.Get();
         context_->CSSetShader(
-          fused ? fused_preprocess_shader_.Get() : preprocess_shader_.Get(), nullptr, 0u
+          producer, nullptr, 0u
         );
         context_->Dispatch(tile_group_width, tile_group_height, 1u);
       }
@@ -2361,6 +2381,7 @@ namespace {
     ComPtr<ID3D11ComputeShader> oracle_content_shader_;
     ComPtr<ID3D11ComputeShader> oracle_pad_shader_;
     ComPtr<ID3D11ComputeShader> fused_preprocess_shader_;
+    ComPtr<ID3D11ComputeShader> tiled_preprocess_shader_;
     ComPtr<ID3D11ComputeShader> fused_map_shader_;
     ComPtr<ID3D11ComputeShader> coordinate_shader_;
     ComPtr<ID3D11ComputeShader> resolve_shader_;
@@ -4073,97 +4094,102 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, FusedPreprocessMatchesCanonicalAndSpec
   )) << error;
   for (const auto &test_case : cases) {
     SCOPED_TRACE(test_case.label);
-    near_identical_gpu_fixture_t::preprocess_result_t reference;
-    near_identical_gpu_fixture_t::preprocess_result_t fused;
-    ASSERT_TRUE(fixture.run_preprocess_and_tile_evidence(
-      false,
-      source,
-      source_width,
-      source_height,
-      test_case.source_region,
-      test_case.tensor_content,
-      previous,
-      reference,
-      error
-    )) << error;
-    ASSERT_TRUE(fixture.run_preprocess_and_tile_evidence(
-      true,
-      source,
-      source_width,
-      source_height,
-      test_case.source_region,
-      test_case.tensor_content,
-      previous,
-      fused,
-      error
-    )) << error;
-    ASSERT_EQ(reference.tensor.size(), fused.tensor.size());
-    EXPECT_EQ(
-      std::memcmp(
-        reference.tensor.data(), fused.tensor.data(),
-        reference.tensor.size() * sizeof(float)
-      ),
-      0
-    ) << "calibrated NCHW words changed";
-    EXPECT_EQ(reference.exclusion, fused.exclusion)
-      << "tensor exclusion words changed";
-    EXPECT_EQ(reference.tiles, fused.tiles) << "tile evidence changed";
+    for (const bool tiled : {false, true}) {
+      SCOPED_TRACE(tiled ? "tiled fused producer" : "direct fused producer");
+      near_identical_gpu_fixture_t::preprocess_result_t reference;
+      near_identical_gpu_fixture_t::preprocess_result_t fused;
+      ASSERT_TRUE(fixture.run_preprocess_and_tile_evidence(
+        false,
+        source,
+        source_width,
+        source_height,
+        test_case.source_region,
+        test_case.tensor_content,
+        previous,
+        reference,
+        error
+      )) << error;
+      ASSERT_TRUE(fixture.run_preprocess_and_tile_evidence(
+        true,
+        source,
+        source_width,
+        source_height,
+        test_case.source_region,
+        test_case.tensor_content,
+        previous,
+        fused,
+        error,
+        true,
+        tiled
+      )) << error;
+      ASSERT_EQ(reference.tensor.size(), fused.tensor.size());
+      EXPECT_EQ(
+        std::memcmp(
+          reference.tensor.data(), fused.tensor.data(),
+          reference.tensor.size() * sizeof(float)
+        ),
+        0
+      ) << "calibrated NCHW words changed";
+      EXPECT_EQ(reference.exclusion, fused.exclusion)
+        << "tensor exclusion words changed";
+      EXPECT_EQ(reference.tiles, fused.tiles) << "tile evidence changed";
 
-    decision_words_t reference_proposal {};
-    decision_words_t fused_proposal {};
-    ASSERT_TRUE(fixture.resolve_seeded_tiles(
-      reference.tiles, reference_proposal, error
-    )) << error;
-    ASSERT_TRUE(fixture.resolve_seeded_tiles(
-      fused.tiles, fused_proposal, error
-    )) << error;
-    EXPECT_EQ(reference_proposal, fused_proposal) << "proposal changed";
+      decision_words_t reference_proposal {};
+      decision_words_t fused_proposal {};
+      ASSERT_TRUE(fixture.resolve_seeded_tiles(
+        reference.tiles, reference_proposal, error
+      )) << error;
+      ASSERT_TRUE(fixture.resolve_seeded_tiles(
+        fused.tiles, fused_proposal, error
+      )) << error;
+      EXPECT_EQ(reference_proposal, fused_proposal) << "proposal changed";
 
-    const auto branch = static_cast<models::near_identical_gpu_branch_e>(
-      reference_proposal[word(models::near_identical_gpu_decision_word_e::decision)]
-    );
-    decision_words_t reference_receipt {};
-    decision_words_t fused_receipt {};
-    ASSERT_TRUE(fixture.resolve_seeded_tiles(
-      reference.tiles, reference_receipt, error
-    )) << error;
-    ASSERT_TRUE(fixture.finalize_depth_receipt(
-      branch, true, reference_receipt, error
-    )) << error;
-    ASSERT_TRUE(fixture.resolve_seeded_tiles(
-      fused.tiles, fused_receipt, error
-    )) << error;
-    ASSERT_TRUE(fixture.finalize_depth_receipt(
-      branch, true, fused_receipt, error
-    )) << error;
-    EXPECT_EQ(reference_receipt, fused_receipt) << "receipt/indirect args changed";
+      const auto branch = static_cast<models::near_identical_gpu_branch_e>(
+        reference_proposal[word(models::near_identical_gpu_decision_word_e::decision)]
+      );
+      decision_words_t reference_receipt {};
+      decision_words_t fused_receipt {};
+      ASSERT_TRUE(fixture.resolve_seeded_tiles(
+        reference.tiles, reference_receipt, error
+      )) << error;
+      ASSERT_TRUE(fixture.finalize_depth_receipt(
+        branch, true, reference_receipt, error
+      )) << error;
+      ASSERT_TRUE(fixture.resolve_seeded_tiles(
+        fused.tiles, fused_receipt, error
+      )) << error;
+      ASSERT_TRUE(fixture.finalize_depth_receipt(
+        branch, true, fused_receipt, error
+      )) << error;
+      EXPECT_EQ(reference_receipt, fused_receipt) << "receipt/indirect args changed";
 
-    decision_words_t reference_malformed {};
-    decision_words_t fused_malformed {};
-    ASSERT_TRUE(fixture.resolve_seeded_tiles(
-      reference.tiles,
-      reference_malformed,
-      error,
-      reduction_group_count,
-      tile_group_width,
-      tile_group_height,
-      tile_group_count - 1u
-    )) << error;
-    ASSERT_TRUE(fixture.resolve_seeded_tiles(
-      fused.tiles,
-      fused_malformed,
-      error,
-      reduction_group_count,
-      tile_group_width,
-      tile_group_height,
-      tile_group_count - 1u
-    )) << error;
-    EXPECT_EQ(reference_malformed, fused_malformed)
-      << "malformed-shape fail-open transaction changed";
-    EXPECT_EQ(
-      reference_malformed[word(models::near_identical_gpu_decision_word_e::decision)],
-      static_cast<std::uint32_t>(models::near_identical_gpu_branch_e::infer)
-    );
+      decision_words_t reference_malformed {};
+      decision_words_t fused_malformed {};
+      ASSERT_TRUE(fixture.resolve_seeded_tiles(
+        reference.tiles,
+        reference_malformed,
+        error,
+        reduction_group_count,
+        tile_group_width,
+        tile_group_height,
+        tile_group_count - 1u
+      )) << error;
+      ASSERT_TRUE(fixture.resolve_seeded_tiles(
+        fused.tiles,
+        fused_malformed,
+        error,
+        reduction_group_count,
+        tile_group_width,
+        tile_group_height,
+        tile_group_count - 1u
+      )) << error;
+      EXPECT_EQ(reference_malformed, fused_malformed)
+        << "malformed-shape fail-open transaction changed";
+      EXPECT_EQ(
+        reference_malformed[word(models::near_identical_gpu_decision_word_e::decision)],
+        static_cast<std::uint32_t>(models::near_identical_gpu_branch_e::infer)
+      );
+    }
   }
 
   // A malformed retained-source rectangle is outside normal host admission. Canonical

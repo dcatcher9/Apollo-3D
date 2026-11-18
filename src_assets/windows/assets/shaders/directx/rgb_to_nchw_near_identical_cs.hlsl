@@ -19,18 +19,54 @@ uint FusedNearIdenticalTileAxisGroups(uint dimension) {
     return dimension / 16u + (dimension % 16u != 0u ? 1u : 0u);
 }
 
-[numthreads(16, 16, 1)]
-void fused_main(
-    uint3 dispatch_thread : SV_DispatchThreadID,
-    uint3 group_thread : SV_GroupThreadID,
-    uint3 group_id : SV_GroupID) {
-    bool in_bounds = dispatch_thread.x < target_w && dispatch_thread.y < target_h;
-    if (in_bounds) {
-        // Calling the calibrated entry point preserves its output bits. Out-of-bounds lanes skip
-        // the call but still participate in the group barrier below.
-        main(dispatch_thread);
+// Bounds mirror the two canonical area integrations. Clip the group to the output
+// before projecting it so every nonempty edge group fits the same sampling contract.
+bool ModelSourceTileBounds(uint2 group, out int2 origin, out uint2 extent, out uint2 source_size) {
+    uint2 texture_size;
+    InputTexture.GetDimensions(texture_size.x, texture_size.y);
+    source_size = DepthSourceRegionSize();
+    origin = 0;
+    extent = 0u;
+    uint2 target_size = uint2(target_w, target_h);
+    uint2 group_first = group * 16u;
+    if (!DepthSourceRegionValid(texture_size) || !DepthAnalysisContentValid() ||
+        any(group_first >= target_size)) {
+        return false;
     }
 
+    uint2 group_end = min(group_first + 16u, target_size);
+    bool full_content = analysis_content_left == 0u && analysis_content_top == 0u &&
+        analysis_content_right == target_w && analysis_content_bottom == target_h;
+    float2 source_lo = 0.0f;
+    float2 source_hi = 0.0f;
+    if (full_content) {
+        if (any(source_size < target_size)) return false;
+        float2 source_scale = float2(source_size) / float2(target_size);
+        source_lo = float2(group_first) * source_scale;
+        source_hi = float2(group_end) * source_scale;
+    } else {
+        float2 content_min = DepthAnalysisContentMinUv();
+        float2 content_scale = DepthAnalysisContentScale();
+        if (any(float2(source_size) < float2(target_size) * content_scale)) return false;
+        uint2 first_cell = DepthAnalysisClampCell(group_first);
+        uint2 last_cell = DepthAnalysisClampCell(group_end - 1u);
+        source_lo = ((float2(first_cell) / float2(target_size)) - content_min) /
+            content_scale * float2(source_size);
+        source_hi = ((float2(last_cell + 1u) / float2(target_size)) - content_min) /
+            content_scale * float2(source_size);
+    }
+    origin = max(int2(floor(source_lo)), int2(0, 0));
+    int2 end = min(int2(ceil(source_hi)), int2(source_size));
+    if (any(end <= origin) || any(end - origin > (int)ModelSourceTileSide)) return false;
+    extent = uint2(end - origin);
+    return true;
+}
+
+void WriteNearIdenticalTileEvidence(
+    uint3 dispatch_thread,
+    uint3 group_thread,
+    uint3 group_id,
+    bool in_bounds) {
     // Force-infer/bootstrap/debug frames share this one calibrated producer binary but do not
     // pay for comparison or reduction. Write one zero record per group before the uniform return:
     // force ignores it, while an accidental disabled-mode resolve must fail open to inference
@@ -93,4 +129,44 @@ void fused_main(
         uint tile_group_width = FusedNearIdenticalTileAxisGroups(target_w);
         NearIdenticalTileOutput[group_id.y * tile_group_width + group_id.x] = evidence;
     }
+}
+
+[numthreads(16, 16, 1)]
+void fused_main(
+    uint3 dispatch_thread : SV_DispatchThreadID,
+    uint3 group_thread : SV_GroupThreadID,
+    uint3 group_id : SV_GroupID) {
+    bool in_bounds = dispatch_thread.x < target_w && dispatch_thread.y < target_h;
+    if (in_bounds) main(dispatch_thread);
+    WriteNearIdenticalTileEvidence(dispatch_thread, group_thread, group_id, in_bounds);
+}
+
+[numthreads(16, 16, 1)]
+void fused_tiled_main(
+    uint3 dispatch_thread : SV_DispatchThreadID,
+    uint3 group_thread : SV_GroupThreadID,
+    uint3 group_id : SV_GroupID) {
+    bool in_bounds = dispatch_thread.x < target_w && dispatch_thread.y < target_h;
+    int2 tile_origin;
+    uint2 tile_extent, source_size;
+    bool tile_valid = ModelSourceTileBounds(group_id.xy, tile_origin, tile_extent, source_size);
+    [branch]
+    if (tile_valid) {
+        // Let fringe lanes load the source too. No lane may bypass this group's barrier.
+        [loop]
+        for (uint y = group_thread.y; y < tile_extent.y; y += 16u) {
+            [loop]
+            for (uint x = group_thread.x; x < tile_extent.x; x += 16u) {
+                ModelSourceTile[y * ModelSourceTileSide + x] =
+                    LoadModelColorDirect(tile_origin + int2(x, y), source_size);
+            }
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (in_bounds) {
+        [branch]
+        if (tile_valid) WriteModelInput(dispatch_thread, true, tile_origin);
+        else main(dispatch_thread);
+    }
+    WriteNearIdenticalTileEvidence(dispatch_thread, group_thread, group_id, in_bounds);
 }

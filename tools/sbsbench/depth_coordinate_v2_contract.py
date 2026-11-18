@@ -55,6 +55,7 @@ SHADER_IMPLEMENTATION_KEYS = {
 }
 SHADER_SOURCE_SPECS = (
     ("rgb_to_nchw_near_identical_cs.hlsl", "fused_main", "cs_5_0"),
+    ("rgb_to_nchw_near_identical_cs.hlsl", "fused_tiled_main", "cs_5_0"),
     ("buffer_to_tex_cs.hlsl", "main", "cs_5_0"),
     ("buffer_to_tex_cs.hlsl", "pad_main", "cs_5_0"),
     ("depth_minmax_ema_cs.hlsl", "main", "cs_5_0"),

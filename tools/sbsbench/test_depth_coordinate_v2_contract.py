@@ -190,8 +190,9 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             # detected pieces, and across a bridged gap only the text fill colour is evidence.
             134: "f175f90f992f9656efc5dac470d08bd4d405720fe976cff733b304e1deedcf69",
             # The model-input history retains only its consumed NCHW planes. The subtitle
-            # contour producer learns each palette once per current observation.
-            135: "8a8c996bb99270ddadf46a393dc5bae354b61e63e9d97bd217d5a9602071dca8",
+            # contour producer learns each palette once per current observation. Direct and
+            # source-color-tiled preprocessing are authenticated equivalent producer programs.
+            135: "559d5db6401ad15095a27bac49317bf6038cb32ce556d05c93de4b1a3cd8e58f",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -199,14 +200,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 contract or shader identity changed without a reviewed identity pin",
         )
-        self.assertEqual(generator.contract_tag(contract), 0x7E1A2CB7)
+        self.assertEqual(generator.contract_tag(contract), 0x8405278D)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "7e1a2cb732890f86ee87d061fcfc67bc86433c9f49e97c0a52688c4fcad8084b",
+            "8405278d24b16afdd8f3c23645595f2d94892210251dd8a0818d1b7529477cbd",
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "154f11d36be2f7a260d9e3d6ca811179c5f6e6e4f6cf09863a4bb22268e25717",
+            "edf4358c79f2e927d248dbde686818de761f91f8008fe51cd9881e6f01b265ee",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -341,7 +342,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertEqual(calibration.preprocess.source_macro_count, 0)
         self.assertEqual(
             calibration.preprocess.source_closure_sha256,
-            "395d44b6f4f33d2a6dcdb57f4b355fe897e1255dd685aa2e5cfa4504505d3c85")
+            "720fe4a316f1f66fd31c8a1833cbf0d93e25f34da494b6c80b94b6cea096689e")
         self.assertEqual(
             calibration.preprocess.source_closure_sha256,
             generator.shader_source_closure_sha256())

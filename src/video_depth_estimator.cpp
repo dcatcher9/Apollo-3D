@@ -3416,6 +3416,7 @@ namespace models {
     }
 
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> near_identical_fused_preprocess_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> near_identical_tiled_preprocess_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> buffer_to_tex_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> buffer_to_tex_pad_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_minmax_ema_cs;
@@ -5887,6 +5888,7 @@ namespace models {
       // analysis roots once as "core" and then again as V2.
       const std::array producer_shader_outputs {
         std::addressof(near_identical_fused_preprocess_cs),
+        std::addressof(near_identical_tiled_preprocess_cs),
         normalized_depth_diagnostics_enabled ? std::addressof(buffer_to_tex_cs) : nullptr,
         normalized_depth_diagnostics_enabled ? std::addressof(buffer_to_tex_pad_cs) : nullptr,
         std::addressof(depth_minmax_ema_cs),
@@ -5925,6 +5927,13 @@ namespace models {
           break;
         }
         auto *output = producer_shader_outputs[index];
+        if (output == std::addressof(near_identical_tiled_preprocess_cs)) {
+          // The authenticated specialization is optional when this device cannot create it.
+          if (!create_shader(producer_sources, host_sbs_shader_cache::parallax_v2_producer_specs[index], *output)) {
+            output->Reset();
+          }
+          continue;
+        }
         producer_shaders_ok = !output || create_shader(
           producer_sources,
           host_sbs_shader_cache::parallax_v2_producer_specs[index],
@@ -5938,7 +5947,7 @@ namespace models {
         return;
       }
 
-      // The sole preprocess shader runs for every root. Two immutable mode buffers make the
+      // One fused preprocess dispatch runs for every root. Two immutable mode buffers make the
       // comparison decision explicit at b1 without rebuilding per-frame state: force/bootstrap
       // exits after canonical NCHW production, while GPU-undecided continues into tile evidence.
       const auto create_fused_mode_cbuffer = [&] (
@@ -10292,10 +10301,20 @@ namespace models {
       mark_d3d_pre_start(d3d_timer);
       ID3D11ShaderResourceView *analysis_input_srv = input_srv;
 
-      // 1. The one authenticated fused entry point is the only RGB-to-NCHW runtime producer.
-      // Force/bootstrap/debug selects a uniform early exit after canonical preprocessing;
-      // GPU-undecided continues into comparison and tile reduction in the same dispatch.
-      context->CSSetShader(near_identical_fused_preprocess_cs.Get(), nullptr, 0u);
+      // Both authenticated programs write the same NCHW words. Use the shared tile only for
+      // area footprints with room for endpoint rounding in the shader's 48-cell extent.
+      // Upsampling and wider footprints use the direct program without the tile allocation.
+      const auto source_tile_axis_fits = [](std::uint32_t source, std::uint32_t content) {
+        return content != 0u && source >= content && 16ull * source <= 46ull * content;
+      };
+      const bool use_source_tile = near_identical_tiled_preprocess_cs &&
+        source_tile_axis_fits(input_region.width(), input_region.tensor_content.width()) &&
+        source_tile_axis_fits(input_region.height(), input_region.tensor_content.height());
+      auto *preprocess_shader = use_source_tile ?
+        near_identical_tiled_preprocess_cs.Get() : near_identical_fused_preprocess_cs.Get();
+      context->CSSetShader(preprocess_shader, nullptr, 0u);
+      // Force/bootstrap/debug exits after canonical preprocessing. GPU-undecided also writes
+      // comparison evidence in this dispatch.
       ID3D11Buffer *preprocess_cbuffers[3] = {
         cbuffer.Get(),
         gpu_undecided_host_candidate ?
