@@ -117,6 +117,33 @@ namespace {
       return input_revisions;
     }
 
+    unsigned preparation_call_count() {
+      std::lock_guard lock(mutex);
+      return preparation_calls;
+    }
+
+    // Pool positions are not picture associations: this registration can move while mapped.
+    void move_first_registration_to_spare() {
+      std::lock_guard lock(mutex);
+      registered_input_buffers[max_pipeline_depth] = std::exchange(registered_input_buffers[0], nullptr);
+    }
+
+    bool registration_is_mapped(unsigned input) noexcept {
+      return input_registration_is_mapped(&inputs[input]);
+    }
+
+    bool registration_in_flight(unsigned input) noexcept {
+      return input_registration_in_flight(&inputs[input]);
+    }
+
+    bool release_registration(unsigned input) {
+      return release_input_registration(&inputs[input]);
+    }
+
+    bool slot_maps_input(unsigned slot, unsigned input) const noexcept {
+      return mapped_input_registration_for_test(slot) == &inputs[input];
+    }
+
     void clear_operations() {
       std::lock_guard lock(mutex);
       log.clear();
@@ -125,6 +152,7 @@ namespace {
     std::array<nvenc::input_producer_state, 2> producer {nvenc::input_producer_state::unknown, nvenc::input_producer_state::unknown};
     /** Video memory runs short for a second picture's input (E_OUTOFMEMORY in the native class). */
     bool second_input_out_of_memory = false;
+    bool refuse_prepared_input = false;
     NVENCSTATUS next_picture_status = NV_ENC_SUCCESS;  ///< Inject one accepted status.
 
   protected:
@@ -146,13 +174,22 @@ namespace {
       return true;
     }
 
-    void prepare_input(unsigned slot, std::uint64_t revision) override {
+    NV_ENC_REGISTERED_PTR prepare_input(unsigned slot, std::uint64_t revision) override {
       std::lock_guard lock(mutex);
+      ++preparation_calls;
+      if (refuse_prepared_input) {
+        return nullptr;
+      }
+      if (pipeline_depth() == 1) {
+        return registered_input_buffers[slot];
+      }
+      EXPECT_FALSE(input_registration_is_mapped(&inputs[slot]));
       EXPECT_FALSE(state[slot].mapped) << "A mapped input must not be written";
       EXPECT_FALSE(state[slot].pending);
       input_revisions.push_back(revision);
       input_content[slot] = target;
       log.push_back("copy-" + std::to_string(slot));
+      return &inputs[slot];
     }
 
     void *create_completion_event(unsigned slot) override {
@@ -228,6 +265,7 @@ namespace {
     std::array<int, 2> timeouts_first {};
     std::deque<unsigned> submitted;
     unsigned bitstreams_created = 0;
+    unsigned preparation_calls = 0;
     bool auto_complete = false;
     int flush_token = 0;
     std::vector<std::string> log;
@@ -460,6 +498,7 @@ TEST(NvencPipelineTest, IndependentProviderAndHostSbsGetTwoPicturesInFlightAndPl
   EXPECT_EQ(only(desktop.operations(), {"register-"}), (std::vector<std::string> {"register-event-0", "register-input-0"}));
   desktop.complete_every_picture();
   ASSERT_FALSE(desktop.encode_frame(1, true).data.empty());
+  EXPECT_EQ(desktop.preparation_call_count(), 1u);
   // One picture at a time encodes the converted surface itself: no copy, unmapped at once.
   EXPECT_EQ(only(desktop.operations(), {"copy", "map", "submit", "lock", "unlock", "unmap"}), (std::vector<std::string> {"map-0", "submit-0:1:idr", "lock-0", "unlock-0", "unmap-0"}));
 
@@ -615,6 +654,76 @@ TEST(NvencPipelineTest, TwoPicturesInFlightUseTheirOwnInputBitstreamAndEvent) {
   EXPECT_EQ(probe.retrieve_frame().frame_index, 3u);
   EXPECT_EQ(probe.frames_in_flight(), 0u);
   EXPECT_TRUE(probe.retrieve_frame().data.empty());  // Nothing in flight.
+}
+
+TEST(NvencPipelineTest, MappedRegistrationSurvivesPoolMovementAndReleasesOnlyAfterRetirement) {
+  nvenc_pipeline_probe probe;
+  ASSERT_TRUE(probe.create(video::SBS_AI));
+  probe.convert(11);
+  ASSERT_TRUE(probe.submit_frame(1, true, 1));
+  probe.move_first_registration_to_spare();
+  EXPECT_TRUE(probe.slot_maps_input(0, 0));
+  EXPECT_TRUE(probe.registration_is_mapped(0));
+  EXPECT_TRUE(probe.registration_in_flight(0));
+  EXPECT_FALSE(probe.release_registration(0));
+
+  probe.convert(22);
+  ASSERT_TRUE(probe.submit_frame(2, false, 2));
+  probe.complete(0);
+  ASSERT_EQ(probe.retrieve_frame().frame_index, 1u);
+  // Retrieval copied the bitstream and unlocked it, but only the submitting thread unmaps.
+  EXPECT_TRUE(probe.registration_is_mapped(0));
+  EXPECT_FALSE(probe.registration_in_flight(0));
+  probe.clear_operations();
+  ASSERT_TRUE(probe.release_registration(0));
+  EXPECT_EQ(probe.operations(), (std::vector<std::string> {"unmap-0"}));
+  EXPECT_FALSE(probe.registration_is_mapped(0));
+  EXPECT_FALSE(probe.slot_maps_input(0, 0));
+  EXPECT_TRUE(probe.registration_in_flight(1));
+  EXPECT_FALSE(probe.release_registration(1));
+
+  // The pool's fixed slot-zero entry is now null. prepare_input still selects the real spare
+  // registration, and its successful map becomes this picture's new exact association.
+  probe.convert(33);
+  ASSERT_TRUE(probe.submit_frame(3, false, 3));
+  EXPECT_TRUE(probe.slot_maps_input(0, 0));
+  EXPECT_TRUE(probe.registration_in_flight(0));
+  probe.complete_every_picture();
+  ASSERT_EQ(probe.retrieve_frame().frame_index, 2u);
+  ASSERT_EQ(probe.retrieve_frame().frame_index, 3u);
+  EXPECT_EQ(probe.encoded_contents(), (std::vector<std::pair<std::uint64_t, int>> {{1, 11}, {2, 22}, {3, 33}}));
+
+  // The next picture would use slot one; release can still find slot zero's real registration.
+  ASSERT_TRUE(probe.release_registration(0));
+  EXPECT_FALSE(probe.registration_is_mapped(0));
+  EXPECT_TRUE(probe.registration_is_mapped(1));
+  EXPECT_FALSE(probe.registration_in_flight(1));
+  probe.clear_operations();
+  probe.destroy_encoder();
+  EXPECT_EQ(only(probe.operations(), {"unmap", "unregister-input"}),
+    (std::vector<std::string> {"unmap-1", "unregister-input-1", "unregister-input-0"}));
+  EXPECT_FALSE(probe.registration_is_mapped(0));
+  EXPECT_FALSE(probe.registration_is_mapped(1));
+  EXPECT_FALSE(probe.registration_in_flight(0));
+  EXPECT_FALSE(probe.registration_in_flight(1));
+}
+
+TEST(NvencPipelineTest, RefusedPreparedRegistrationDoesNotMapOrAdvanceThePicture) {
+  nvenc_pipeline_probe probe;
+  ASSERT_TRUE(probe.create());
+  probe.clear_operations();
+  probe.refuse_prepared_input = true;
+  EXPECT_FALSE(probe.submit_frame(1, true));
+  EXPECT_EQ(probe.frames_in_flight(), 0u);
+  EXPECT_TRUE(probe.operations().empty());
+  EXPECT_FALSE(probe.registration_is_mapped(0));
+
+  probe.refuse_prepared_input = false;
+  probe.complete_every_picture();
+  probe.convert(11);
+  ASSERT_TRUE(probe.submit_frame(1, true));
+  EXPECT_TRUE(probe.slot_maps_input(0, 0));
+  EXPECT_EQ(probe.retrieve_frame().frame_index, 1u);
 }
 
 TEST(NvencPipelineTest, RetrievalWaitsForTheOlderPictureEvenWhenTheNewerCompletedFirst) {

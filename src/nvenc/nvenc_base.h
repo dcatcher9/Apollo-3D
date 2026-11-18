@@ -128,6 +128,13 @@ namespace nvenc {
       return pipeline_depth_;
     }
 
+    /** Whether the selected converted input still belongs to a picture that must retire before
+     *  another submission can use it. Nonblocking; the caller retains its normal retirement wait.
+     */
+    [[nodiscard]] virtual bool input_waits_for_retirement() const noexcept {
+      return false;
+    }
+
     /**
      * @brief Encode the next frame using platform-specific input surface: submit_frame() and then
      *        retrieve_frame(), on the calling thread.
@@ -239,20 +246,44 @@ namespace nvenc {
 
     /**
      * @brief Required. Used for creating outside-facing input surface and registering with
-     *        `nvenc->nvEncRegisterResource()` the input of each picture slot below
-     *        `pipeline_depth()`, setting `registered_input_buffers[slot]`. With a depth of 1 that
-     *        is the outside-facing surface itself. Called during `create_encoder()`.
+     *        `nvenc->nvEncRegisterResource()` its input allocations in `registered_input_buffers`.
+     *        Fixed-slot backends use the matching slot index; a pooled backend may use the extra
+     *        allocation and select a registration in `prepare_input()`. Called during `create_encoder()`.
      * @return `true` on success, `false` on error
      */
     virtual bool create_and_register_input_buffer() = 0;
 
     /**
-     * @brief Required for a depth above 1, where it alone is called: fill picture `slot`'s
-     *        registered input from the outside-facing surface (a GPU copy) before it is mapped.
-     *        A nonzero conversion revision may reuse that texture's already copied content; zero
-     *        must copy. Submitting thread only, independent of later map/submission acceptance.
+     * @brief Prepare and select picture `slot`'s registered input before mapping, at every depth.
+     *        Fixed-slot backends may fill it from the outside-facing surface; a pooled backend may
+     *        select an unmapped allocation that already contains the converted output. A nonzero
+     *        revision proves exact content; zero remains unknown. Submitting thread only,
+     *        independent of later map/submission acceptance. Null refuses this submission.
      */
-    virtual void prepare_input(unsigned slot, std::uint64_t input_revision) {}
+    virtual NV_ENC_REGISTERED_PTR prepare_input(unsigned slot, std::uint64_t input_revision) {
+      return registered_input_buffers[slot];
+    }
+
+    /** Whether any picture still maps this registration. Submitting thread only; the pipelined
+     *  retrieving thread changes the slot phase but leaves its registration until submitting-thread
+     *  unmap. A depth-one retrieval has no concurrent conversion/submission.
+     */
+    [[nodiscard]] bool input_registration_is_mapped(NV_ENC_REGISTERED_PTR registration) const noexcept;
+
+    /** Whether an exact mapped registration still belongs to a submitted or retrieving picture. */
+    [[nodiscard]] bool input_registration_in_flight(NV_ENC_REGISTERED_PTR registration) const noexcept;
+
+    /** Release this registration's completed mappings on the submitting thread. A picture still
+     *  in flight or an unsuccessful unmap refuses release without permitting access to its input.
+     */
+    bool release_input_registration(NV_ENC_REGISTERED_PTR registration);
+
+#ifdef SUNSHINE_TESTS
+    /** Actual mapped registration, independent of a pooled backend's current surface positions.
+     *  Submitting thread only, after map/submission or after joining retrieval.
+     */
+    [[nodiscard]] NV_ENC_REGISTERED_PTR mapped_input_registration_for_test(unsigned slot) const noexcept;
+#endif
 
     /**
      * @brief Optional. Completion event of picture slot `slot` (1 and up; slot 0 uses
@@ -339,8 +370,8 @@ namespace nvenc {
                              ///< Should be set in constructor or `init_library()`.
     std::shared_ptr<NV_ENCODE_API_FUNCTION_LIST> nvenc;  ///< Function pointers list produced by `NvEncodeAPICreateInstance()`.
                                                          ///< Should be set in `init_library()`.
-    std::array<NV_ENC_REGISTERED_PTR, max_pipeline_depth> registered_input_buffers {};  ///< Each picture slot's input registered with `NvEncRegisterResource()`.
-                                                                                        ///< Should be set in `create_and_register_input_buffer()`.
+    std::array<NV_ENC_REGISTERED_PTR, max_pipeline_depth + 1> registered_input_buffers {};  ///< Registered allocations, including an optional conversion target spare.
+                                                                                            ///< Should be set in `create_and_register_input_buffer()`.
     void *async_event_handle = nullptr;  ///< (optional) Platform-specific handle of event object event; slot 0's completion event.
                                          ///< Can be set in constructor or `init_library()`, must override `wait_for_async_event()`.
 
@@ -360,6 +391,7 @@ namespace nvenc {
       void *completion_event = nullptr;
       bool event_registered = false;
       NV_ENC_INPUT_PTR mapped_input = nullptr;
+      NV_ENC_REGISTERED_PTR mapped_registration = nullptr;  ///< Submitting thread; independent of the allocation's current pool position.
       std::atomic<input_phase_t> phase {input_phase_t::unmapped};
       uint64_t frame_index = 0;
       bool after_ref_frame_invalidation = false;

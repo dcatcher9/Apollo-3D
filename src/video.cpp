@@ -522,8 +522,11 @@ namespace video {
     return encoder.pipeline_depth();
   }
 
-  /** Encode thread, with pictures in flight: submit the converted input as the next picture.
-   *  NVENC encodes from the picture's own copy, so the next frame may convert at once. */
+  bool nvenc_encode_session_t::input_waits_for_retirement() const noexcept {
+    return encoder.input_waits_for_retirement();
+  }
+
+  /** Encode thread, with pictures in flight: hand off the current converted input. */
   bool nvenc_encode_session_t::submit_frame(uint64_t frame_index) {
     const bool submitted = encoder.submit_frame(frame_index, force_idr, input_revision);
     force_idr = false;
@@ -1635,9 +1638,8 @@ namespace video {
     }
     // With pictures in flight (an independent provider or desktop Host SBS;
     // nvenc_base::pipeline_depth()) the next frame converts and its picture starts encoding while
-    // the previous one still encodes. Each picture encodes its own copy of the conversion target,
-    // taken at submission, so a later conversion (a new capture, a retained-source poll of pending
-    // inference, a depth-ready install or a stream-gamma reconversion) never changes it. A
+    // the previous one still encodes. Conversion writes an unmapped input surface and submitted
+    // pictures keep their input until retirement. A
     // thread of their own retrieves the pictures in submission order and publishes each packet as
     // soon as its picture completes, whatever this loop is doing. Declared after everything it
     // uses; its destruction on any exit delivers the pictures still in flight, as returning from
@@ -2191,6 +2193,13 @@ namespace video {
       // re-renders an unchanged export converts again but encodes a repeat.
       const bool new_loop_content = loop_stats && loop_content.observe(content_timestamp, !converted_frame) == detail::diagnostic_content_e::new_content;
       const auto encode_started = detail::diagnostic_timestamp(loop_stats.has_value(), std::chrono::steady_clock::now);
+      if (pipeline && session->input_waits_for_retirement()) {
+        // A repeat can reuse the same pixels once the newest picture retires. Changed output
+        // always uses a free surface and reaches the normal picture-capacity wait below.
+        if (!pipeline->drain() || lifecycle_change_requested()) {
+          break;
+        }
+      }
       auto frame = make_encoded_frame_context(
         frame_nr++,
         frame_timestamp,

@@ -125,10 +125,8 @@ namespace platf::dxgi {
 
     /** Tracks whether a persistent encoder input already contains a converted Host-SBS output.
      *
-     * Native NVENC registers one D3D11 input texture for the lifetime of an encode session. A
-     * repeated packed SBS image therefore does not need another RGB-to-YUV draw once that exact
-     * texture has been initialized. Local RGB presentation is deliberately excluded: its
-     * swapchain backbuffer can rotate on every Present().
+     * A repeated packed SBS image can retain its last converted native input without another
+     * RGB-to-YUV draw. Local RGB presentation still draws for each rotating swapchain backbuffer.
      */
     class host_sbs_encoder_input_state_t {
     public:

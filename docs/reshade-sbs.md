@@ -7675,18 +7675,16 @@ which can stall the whole GPU.
 
 The encoder of an independent provider, and of desktop Host SBS, keeps up to two pictures in flight
 (`video::nvenc_pipeline_depth()`, fixed per encoder as `nvenc_base::pipeline_depth()`; plain
-desktop keeps one, and Local AR presents without NVENC). Each picture has its own NVENC input,
-bitstream and completion event. At submission the immediate context copies the converted surface
-when the picture slot lacks its exact input revision. A packed repeat that skips all writes to the
-conversion target retains the revision and can reuse the pixels in a matching slot. A copy at
-7680x2160 10-bit moves about 50 MB in each direction. The two input surfaces cost about 100 MB of
-video memory and allow the next frame to convert and start encoding while the previous picture
-still encodes. An encoder that cannot create a completion event or an input for
-every picture (video memory short, as with Host SBS beside a GPU-bound game) encodes one picture at a
-time from the conversion target instead of failing the stream
+desktop keeps one, and Local AR presents without NVENC). Each picture slot has its own bitstream
+and completion event. The converter draws the Y/UV planes into an unmapped registered input, which
+the next picture uses directly. Two pictures in flight leave one spare conversion surface so a
+changed frame can draw before the loop waits for a picture slot. A packed repeat that skips the
+RGB-to-YUV draw retains the last converted surface. If its picture is still in flight, the loop
+waits for that picture to retire before reusing the surface. An encoder that cannot create all its
+completion events or registered inputs encodes one picture at a time from a single surface
 (`NvencPipelineTest.HostSbsEncodesOnePictureAtATimeWhenASecondInputDoesNotFit`). A thread of its own (`encode_pipeline_t`) waits for the pictures in
 submission order and publishes each packet as soon as its picture completes, whatever the loop is
-doing; the loop waits only while two are in flight, and then for the oldest. Before, on 10-06 in
+doing. Before, on 10-06 in
 Stellar Blade at 4K with FG on, `encode_frame()` waited for each picture: NVENC's completion wait
 averaged 8.5-12.2 ms (about 5 ms uncontended; the rest is the conversion's GPU work queued behind
 the game's) and the host took 55-71 new frames/s, against 80-90 with FG off. A bitrate change, and a
