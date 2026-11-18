@@ -7103,14 +7103,16 @@ namespace models {
       // its exact source/crop dimensions and current OCR authority validate together.
       const UINT native_width = crop_valid ? source_width : 1u;
       const UINT native_height = crop_valid ? crop_height : 1u;
+      // References come directly from the source band and the feature codes are exact in FP16.
+      constexpr auto native_float_format = DXGI_FORMAT_R16G16B16A16_FLOAT;
       return field_w > 0 && field_h > 0 &&
-             create_texture(native_width, native_height, DXGI_FORMAT_R16G16B16A16_FLOAT,
+             create_texture(native_width, native_height, native_float_format,
                             subtitle_contour_source) &&
-             create_texture(native_width, native_height, DXGI_FORMAT_R16G16B16A16_FLOAT,
+             create_texture(native_width, native_height, native_float_format,
                             subtitle_contour_source_snapshot) &&
-             create_texture(native_width, native_height, DXGI_FORMAT_R32G32B32A32_FLOAT,
+             create_texture(native_width, native_height, native_float_format,
                             subtitle_contour_previous_features) &&
-             create_texture(native_width, native_height, DXGI_FORMAT_R32G32B32A32_FLOAT,
+             create_texture(native_width, native_height, native_float_format,
                             subtitle_contour_next_features) &&
              create_texture(native_width, native_height, DXGI_FORMAT_R32_UINT,
                             subtitle_contour_support) &&

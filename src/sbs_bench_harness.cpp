@@ -54,6 +54,7 @@
   #include "crypto.h"
   #include "depth_coordinate_v2.h"
   #include "generated/sbs_adaptive_state_contract.h"
+  #include "host_sbs_contour_history_readback.h"
   #include "host_sbs_current_source_snapshot_gpu.h"
   #include "host_sbs_gpu_trace.h"
   #include "host_sbs_observation_timeline.h"
@@ -238,31 +239,7 @@ namespace sbs_bench {
       return (uint16_t) (sign | ((uint32_t) exp << 10) | (mant >> 13));
     }
 
-    float half_to_float(uint16_t h) {
-      const uint32_t sign = (uint32_t) (h & 0x8000u) << 16;
-      int exp = (h >> 10) & 0x1f;
-      uint32_t mant = h & 0x3ffu;
-      uint32_t bits;
-      if (exp == 0) {
-        if (mant == 0) {
-          bits = sign;
-        } else {
-          exp = 127 - 15 + 1;
-          while (!(mant & 0x400u)) {
-            mant <<= 1;
-            --exp;
-          }
-          bits = sign | ((uint32_t) exp << 23) | ((mant & 0x3ffu) << 13);
-        }
-      } else if (exp == 31) {
-        bits = sign | 0x7f800000u | (mant << 13);
-      } else {
-        bits = sign | ((uint32_t) (exp - 15 + 127) << 23) | (mant << 13);
-      }
-      float value;
-      std::memcpy(&value, &bits, sizeof(value));
-      return value;
-    }
+    using models::contour_history_readback::half_to_float;
 
     // Strict HDR interchange for offline whole-clip conversion. FFmpeg's image2 PFM codec writes
     // this exact standard form reliably: RGB float32, little-endian (negative scale), with rows
@@ -1427,10 +1404,13 @@ namespace sbs_bench {
 
     // Diagnostic-only opaque texture export. Preserve packed contour support, integer distance,
     // and native display/history values exactly; PNG previews cannot authenticate these fields.
+    enum class contour_export_e { native, history_rgba32f };
+
     bool dump_contour_texture(
       ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11ShaderResourceView *srv,
       const DXGI_FORMAT expected_format, const std::size_t bytes_per_pixel,
-      const fs::path &path, ComPtr<ID3D11Texture2D> &stage_cache
+      const fs::path &path, ComPtr<ID3D11Texture2D> &stage_cache,
+      const contour_export_e encoding = contour_export_e::native
     ) {
       if (!dev || !ctx || !srv) return false;
       ComPtr<ID3D11Resource> resource;
@@ -1439,7 +1419,10 @@ namespace sbs_bench {
       if (!resource || FAILED(resource.As(&texture))) return false;
       D3D11_TEXTURE2D_DESC desc {};
       texture->GetDesc(&desc);
-      if (desc.Format != expected_format || desc.Width == 0u || desc.Height == 0u ||
+      const bool expand_history = encoding == contour_export_e::history_rgba32f &&
+        expected_format == DXGI_FORMAT_R32G32B32A32_FLOAT && bytes_per_pixel == 16u &&
+        desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+      if ((!expand_history && desc.Format != expected_format) || desc.Width == 0u || desc.Height == 0u ||
           desc.MipLevels != 1u || desc.ArraySize != 1u || desc.SampleDesc.Count != 1u) return false;
       D3D11_TEXTURE2D_DESC previous {};
       if (stage_cache) stage_cache->GetDesc(&previous);
@@ -1454,14 +1437,29 @@ namespace sbs_bench {
         if (FAILED(dev->CreateTexture2D(&stage_desc, nullptr, &stage_cache))) return false;
       }
       ctx->CopyResource(stage_cache.Get(), texture.Get());
+      const std::size_t row_bytes = desc.Width * bytes_per_pixel;
+      const auto storage_row_bytes = expand_history ? row_bytes / 2u : row_bytes;
+      std::vector<std::uint8_t> expanded_row(expand_history ? row_bytes : 0u);
       D3D11_MAPPED_SUBRESOURCE mapped {};
       if (FAILED(ctx->Map(stage_cache.Get(), 0u, D3D11_MAP_READ, 0u, &mapped))) return false;
+      if (!mapped.pData || mapped.RowPitch < storage_row_bytes) {
+        ctx->Unmap(stage_cache.Get(), 0u);
+        return false;
+      }
       std::ofstream out(path, std::ios::binary | std::ios::trunc);
-      const auto row_bytes = static_cast<std::streamsize>(desc.Width * bytes_per_pixel);
       if (out) {
         for (UINT y = 0u; y < desc.Height; ++y) {
-          out.write(static_cast<const char *>(mapped.pData) +
-                      static_cast<std::size_t>(y) * mapped.RowPitch, row_bytes);
+          const auto *source = static_cast<const std::uint8_t *>(mapped.pData) +
+            static_cast<std::size_t>(y) * mapped.RowPitch;
+          if (expand_history) {
+            if (!models::contour_history_readback::expand_rgba16f_row_to_rgba32f(
+                  {source, storage_row_bytes}, expanded_row)) {
+              out.setstate(std::ios::failbit);
+              break;
+            }
+            source = expanded_row.data();
+          }
+          out.write(reinterpret_cast<const char *>(source), static_cast<std::streamsize>(row_bytes));
         }
         out.flush();
       }
@@ -5043,7 +5041,10 @@ namespace sbs_bench {
             !write_contour(result.subtitle_contour_support.Get(), DXGI_FORMAT_R32_UINT, 4u, "contour_support.u32") ||
             !write_contour(result.subtitle_glyph_matte.Get(), DXGI_FORMAT_R32_UINT, 4u, "glyph_matte.u32") ||
             !write_words(result.subtitle_condition_params.Get(), models::depth_coordinate_v2::subtitle_condition_param_word_count, "condition_params.u32") ||
-            !write_contour(result.subtitle_contour_history.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT, 16u, "contour_history.rgba32f") ||
+            !dump_contour_texture(dev.Get(), ctx.Get(), result.subtitle_contour_history.Get(),
+                                  DXGI_FORMAT_R32G32B32A32_FLOAT, 16u,
+                                  diagnostic_dir / "contour_history.rgba32f", subtitle_contour_texture_stage,
+                                  contour_export_e::history_rgba32f) ||
             !write_contour(result.subtitle_contour_source.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, 8u, "contour_source.rgba16f"))) ||
           (write_conditioning &&
            (!result.subtitle_conditioning_diagnostics_current ||

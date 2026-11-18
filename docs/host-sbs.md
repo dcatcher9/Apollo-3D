@@ -1754,7 +1754,8 @@ can still be false positives or omit glyphs; immediate support
 does not establish complete glyph coverage, same-shape replacement quality, live quality or
 performance acceptance. There is no historical mask union.
 
-The `RGBA32F` history stores a fixed RGB reference and an exact float feature code. Zero is invalid
+GPU history stores a fixed RGB reference and an exact feature code in `RGBA16F`. Dump 3D and
+evaluation exports widen each lane to `RGBA32F` for `contour_history.rgba32f`. Zero is invalid
 source; `2` is valid RGB with count zero; `6`, `10`, `14` encode counts one through three; `19`
 encodes diagnostic count four with the retained legacy feature low bit. This bit is not native
 support authority. Count zero/one RGB equals current source exactly; higher

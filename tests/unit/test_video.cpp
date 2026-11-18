@@ -18,6 +18,7 @@
 #include <limits>
 #include <src/depth_coordinate_v2.h>
 #include <src/generated/sbs_adaptive_state_contract.h>
+#include <src/host_sbs_contour_history_readback.h>
 #include <src/host_sbs_shader_cache.h>
 #include <src/host_sbs_subtitle_plane.h>
 #include <src/host_subtitle_context.h>
@@ -2664,6 +2665,9 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedThir
       EXPECT_EQ(before[index].width, source_width) << names[index];
       EXPECT_EQ(before[index].height, crop_height) << names[index];
     }
+    EXPECT_EQ(before[4u].format, DXGI_FORMAT_R16G16B16A16_FLOAT);
+    EXPECT_EQ(before[4u].element_stride, 4u * sizeof(std::uint16_t));
+    EXPECT_EQ(before[4u].bytes.size(), std::size_t(source_width) * crop_height * 4u * sizeof(std::uint16_t));
     EXPECT_EQ(before[14u].format, DXGI_FORMAT_R32_UINT);
     ASSERT_EQ(before[15u].dimension, D3D11_RESOURCE_DIMENSION_BUFFER);
     ASSERT_EQ(before[15u].bytes.size(), v2::subtitle_condition_param_word_count * sizeof(std::uint32_t));
@@ -2940,8 +2944,23 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
       tuple[7u].bytes != tuple[8u].bytes && any_words(tuple[24u], false) &&
       word(tuple[25u], v2::subtitle_condition_param_active_word) == v2::subtitle_condition_param_fully_active_value;
   };
+  // This adapter is used only when interpreting feature lanes. The tuple still owns
+  // the exact physical readback, including signed-zero bits, for bytewise hold checks.
+  const auto history_word = [](const payload_t &payload, std::size_t index) {
+    if (payload.format != DXGI_FORMAT_R16G16B16A16_FLOAT ||
+        payload.stride != 4u * sizeof(std::uint16_t) ||
+        index >= payload.bytes.size() / sizeof(std::uint16_t)) {
+      ADD_FAILURE() << "History lane is outside the authenticated physical FP16 payload";
+      return std::uint32_t {0u};
+    }
+    const auto offset = index * sizeof(std::uint16_t);
+    const auto half = static_cast<std::uint16_t>(payload.bytes[offset]) |
+      (static_cast<std::uint16_t>(payload.bytes[offset + 1u]) << 8u);
+    return models::contour_history_readback::binary16_to_binary32_bits(
+      static_cast<std::uint16_t>(half));
+  };
   const auto feature_count = [&](const tuple_t &tuple, std::size_t pixel) {
-    const auto code = std::bit_cast<float>(word(tuple[17u], pixel * 4u + 3u));
+    const auto code = std::bit_cast<float>(history_word(tuple[17u], pixel * 4u + 3u));
     constexpr auto maximum_code = v2::subtitle_contour_history_feature_valid_bit |
       (v2::subtitle_contour_history_confirmation_observations <<
         v2::subtitle_contour_history_feature_count_shift) |
@@ -3124,7 +3143,9 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
     EXPECT_EQ(owner->depth_owner_timestamp_us, clock_us);
     EXPECT_EQ(owner->subtitle_frame_id, frame_id);
     ASSERT_TRUE(read_tuple(baseline.observation, expected));
-    ASSERT_EQ(expected[17u].format, DXGI_FORMAT_R32G32B32A32_FLOAT);
+    ASSERT_EQ(expected[17u].format, DXGI_FORMAT_R16G16B16A16_FLOAT);
+    ASSERT_EQ(expected[17u].stride, 4u * sizeof(std::uint16_t));
+    ASSERT_EQ(expected[17u].bytes.size(), std::size_t(expected[17u].width) * expected[17u].height * expected[17u].stride);
     EXPECT_EQ(word(expected[16u], 20u), static_cast<std::uint32_t>(clock_us));
     EXPECT_EQ(word(expected[16u], 21u), static_cast<std::uint32_t>(clock_us >> 32u));
     ASSERT_EQ(expected[24u].format, DXGI_FORMAT_R32_UINT);
@@ -3165,9 +3186,9 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
         for (int dy = -2; eligible && dy <= 2; ++dy) {
           for (int dx = -2; eligible && dx <= 2; ++dx) {
             const auto p = static_cast<std::size_t>(int(y) + dy) * expected[17u].width + int(x) + dx;
-            const auto red = std::bit_cast<float>(word(expected[17u], p * 4u));
-            const auto green = std::bit_cast<float>(word(expected[17u], p * 4u + 1u));
-            const auto blue = std::bit_cast<float>(word(expected[17u], p * 4u + 2u));
+            const auto red = std::bit_cast<float>(history_word(expected[17u], p * 4u));
+            const auto green = std::bit_cast<float>(history_word(expected[17u], p * 4u + 1u));
+            const auto blue = std::bit_cast<float>(history_word(expected[17u], p * 4u + 2u));
             eligible = feature_count(expected, p) == 1u &&
               std::max({std::abs(red), std::abs(1.0f - green), std::abs(blue)}) >
                 v2::subtitle_contour_history_rgb_distance;
@@ -3250,9 +3271,9 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
   EXPECT_NE(expected[18u].bytes, old_source);
   EXPECT_EQ(feature_count(expected, *witness), 1u);
   EXPECT_EQ(word(expected[13u], *witness), current_pixel_support(expected, *witness));
-  EXPECT_EQ(word(expected[17u], *witness * 4u), std::bit_cast<std::uint32_t>(0.0f));
-  EXPECT_EQ(word(expected[17u], *witness * 4u + 1u), std::bit_cast<std::uint32_t>(1.0f));
-  EXPECT_EQ(word(expected[17u], *witness * 4u + 2u), std::bit_cast<std::uint32_t>(0.0f));
+  EXPECT_EQ(history_word(expected[17u], *witness * 4u), std::bit_cast<std::uint32_t>(0.0f));
+  EXPECT_EQ(history_word(expected[17u], *witness * 4u + 1u), std::bit_cast<std::uint32_t>(1.0f));
+  EXPECT_EQ(history_word(expected[17u], *witness * 4u + 2u), std::bit_cast<std::uint32_t>(0.0f));
   verify_idle_hold();
   ASSERT_FALSE(HasFatalFailure());
 
@@ -3370,8 +3391,8 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
   EXPECT_EQ(canonical_empty_distance, !any_words(expected[13u], false));
   bool canonical_reset_history = true;
   std::uint32_t maximum_reset_count = 0u;
-  for (std::size_t pixel = 0u; pixel < expected[17u].bytes.size() / 16u; ++pixel) {
-    const auto code = std::bit_cast<float>(word(expected[17u], pixel * 4u + 3u));
+  for (std::size_t pixel = 0u; pixel < expected[17u].bytes.size() / (4u * sizeof(std::uint16_t)); ++pixel) {
+    const auto code = std::bit_cast<float>(history_word(expected[17u], pixel * 4u + 3u));
     constexpr auto valid = v2::subtitle_contour_history_feature_valid_bit;
     constexpr auto first = valid | (1u << v2::subtitle_contour_history_feature_count_shift);
     canonical_reset_history &= code == 0.0f || code == static_cast<float>(valid) ||

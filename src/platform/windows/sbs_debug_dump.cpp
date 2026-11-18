@@ -37,6 +37,7 @@
 #include "src/generated/sbs_adaptive_state_contract.h"
 #include "src/depth_coordinate_v2.h"
 #include "src/host_sbs_resolution.h"
+#include "src/host_sbs_contour_history_readback.h"
 #include "src/host_sbs_subtitle_plane.h"
 #include "src/host_sbs_subtitle_glyph.h"
 #include "src/host_sbs_gpu_trace.h"
@@ -1394,32 +1395,70 @@ namespace platf::sbs_debug {
       };
     }
 
-    inline float half_to_float(const std::uint16_t h) {
-      const std::uint32_t sign = static_cast<std::uint32_t>(h & 0x8000u) << 16u;
-      int exp = (h & 0x7C00u) >> 10u;
-      std::uint32_t mant = h & 0x03FFu;
-      std::uint32_t bits;
-      if (exp == 0) {
-        if (mant == 0) {
-          bits = sign;
-        } else {
-          exp = 127 - 15 + 1;
-          while (!(mant & 0x0400u)) {
-            mant <<= 1u;
-            --exp;
-          }
-          mant &= 0x03FFu;
-          bits = sign | (static_cast<std::uint32_t>(exp) << 23u) | (mant << 13u);
-        }
-      } else if (exp == 0x1F) {
-        bits = sign | 0x7F800000u | (mant << 13u);
-      } else {
-        bits = sign |
-               (static_cast<std::uint32_t>(exp - 15 + 127) << 23u) |
-               (mant << 13u);
+    using models::contour_history_readback::half_to_float;
+
+    // Capture compact history in its physical format and authenticate the matching RGBA32F
+    // dimensions for export.
+    bool contour_texture_capture_layout_is_authenticated(
+      const detail::subtitle_contour_texture_e role,
+      const DXGI_FORMAT format,
+      const std::uint32_t width,
+      const std::uint32_t height,
+      const std::size_t row_bytes,
+      const std::size_t byte_count,
+      const frame &completed
+    ) {
+      if (role != detail::subtitle_contour_texture_e::history ||
+          format != DXGI_FORMAT_R16G16B16A16_FLOAT) {
+        return detail::subtitle_contour_texture_layout_is_authenticated(
+          role, format, width, height, row_bytes, byte_count, completed
+        );
       }
-      return std::bit_cast<float>(bits);
+      constexpr std::size_t physical_pixel_bytes = 4u * sizeof(std::uint16_t);
+      constexpr std::size_t logical_pixel_bytes = 4u * sizeof(float);
+      if (width == 0u || height == 0u ||
+          width > std::numeric_limits<std::size_t>::max() / logical_pixel_bytes) return false;
+      const auto physical_row_bytes = static_cast<std::size_t>(width) * physical_pixel_bytes;
+      const auto logical_row_bytes = static_cast<std::size_t>(width) * logical_pixel_bytes;
+      if (height > std::numeric_limits<std::size_t>::max() / logical_row_bytes ||
+          row_bytes != physical_row_bytes || byte_count != physical_row_bytes * height) return false;
+      return detail::subtitle_contour_texture_layout_is_authenticated(
+        role, DXGI_FORMAT_R32G32B32A32_FLOAT, width, height,
+        logical_row_bytes, logical_row_bytes * height, completed
+      );
     }
+
+    // Called only on the publication worker after bounded raw-row collection has retired
+    // every GPU operand. Failed conversion leaves the owned snapshot unmodified.
+    bool normalize_contour_history_for_publication(captured_dump_job &job) {
+      auto &history = job.contour_history;
+      if (history.desc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT) return true;
+      if (history.desc.MipLevels != 1u || history.desc.ArraySize != 1u ||
+          history.desc.SampleDesc.Count != 1u ||
+          !contour_texture_capture_layout_is_authenticated(
+            detail::subtitle_contour_texture_e::history,
+            history.desc.Format, history.desc.Width, history.desc.Height,
+            history.row_bytes, history.bytes.size(), job.completed
+          )) return false;
+      const auto logical_row_bytes = history.row_bytes * 2u;
+      std::vector<std::uint8_t> logical(history.bytes.size() * 2u);
+      for (std::size_t row = 0u; row < history.desc.Height; ++row) {
+        const std::span<const std::uint8_t> physical_row(
+          history.bytes.data() + row * history.row_bytes, history.row_bytes
+        );
+        const std::span<std::uint8_t> logical_row(
+          logical.data() + row * logical_row_bytes, logical_row_bytes
+        );
+        if (!models::contour_history_readback::expand_rgba16f_row_to_rgba32f(
+              physical_row, logical_row
+            )) return false;
+      }
+      history.bytes = std::move(logical);
+      history.row_bytes = logical_row_bytes;
+      history.desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+      return true;
+    }
+
 
     inline std::uint8_t encode_srgb(float value) {
       value = std::clamp(value, 0.0f, 1.0f);
@@ -1778,7 +1817,7 @@ namespace platf::sbs_debug {
       const auto row_bytes = static_cast<std::size_t>(desc.Width) * format_bytes_per_pixel(desc.Format);
       if (view.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D || view.Format != desc.Format ||
           view.Texture2D.MostDetailedMip != 0u || view.Texture2D.MipLevels != 1u ||
-          !detail::subtitle_contour_texture_layout_is_authenticated(
+          !contour_texture_capture_layout_is_authenticated(
             role, desc.Format, desc.Width, desc.Height, row_bytes,
             row_bytes * desc.Height, completed)) return false;
       return stage_texture(device, ctx, srv, staging);
@@ -6490,7 +6529,11 @@ namespace platf::sbs_debug {
                   [job = std::move(cpu_job), worker_state, retry_token]() mutable {
                   dump_publish_result result;
                   try {
-                    result = publish_captured_dump(job);
+                    if (!normalize_contour_history_for_publication(job)) {
+                      result.error = "invalid native contour-history storage";
+                    } else {
+                      result = publish_captured_dump(job);
+                    }
                   } catch (const std::exception &exception) {
                     result.error = exception.what();
                   } catch (...) {
