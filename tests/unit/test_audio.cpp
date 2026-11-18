@@ -23,10 +23,12 @@ struct AudioTest: PlatformTestSuite, testing::WithParamInterface<std::tuple<std:
   void SetUp() override {
     m_config = std::get<1>(GetParam());
     m_mail = std::make_shared<safe::mail_raw_t>();
+    m_packets = std::make_shared<safe::queue_t<packet_t>>(audio::ENCODED_PACKET_QUEUE_LIMIT);
   }
 
   config_t m_config;
   safe::mail_t m_mail;
+  audio::packet_queue_t m_packets;
 };
 
 constexpr std::bitset<config_t::MAX_FLAGS> config_flags(const int flag = -1) {
@@ -41,9 +43,9 @@ INSTANTIATE_TEST_SUITE_P(
   Configurations,
   AudioTest,
   testing::Values(
-    std::make_tuple("HIGH_STEREO", config_t {5, 2, 0x3, config_flags(config_t::HIGH_QUALITY)}),
-    std::make_tuple("SURROUND51", config_t {5, 6, 0x3F, config_flags()}),
-    std::make_tuple("SURROUND71", config_t {5, 8, 0x63F, config_flags()})
+    std::make_tuple("HIGH_STEREO", config_t {5, 2, config_flags(config_t::HIGH_QUALITY)}),
+    std::make_tuple("SURROUND51", config_t {5, 6, config_flags()}),
+    std::make_tuple("SURROUND71", config_t {5, 8, config_flags()})
   ),
   [](const auto &info) {
     return std::string(std::get<0>(info.param));
@@ -55,38 +57,45 @@ TEST_P(AudioTest, TestEncode) {
     // Terminate the audio capture after 100 ms
     std::this_thread::sleep_for(100ms);
     const auto shutdown_event = m_mail->event<bool>(mail::shutdown);
-    const auto audio_packets = m_mail->queue<packet_t>(mail::audio_packets);
+    const auto audio_packets = m_packets;
     shutdown_event->raise(true);
     audio_packets->stop();
   });
   std::thread capture([&] {
-    const auto packets = m_mail->queue<packet_t>(mail::audio_packets);
+    const auto packets = m_packets;
     const auto shutdown_event = m_mail->event<bool>(mail::shutdown);
     while (const auto packet = packets->pop()) {
       if (shutdown_event->peek()) {
         break;
       }
-      if (auto packet_data = packet->second; packet_data.size() == 0) {
+      if (packet->size() == 0) {
         FAIL() << "Empty packet data";
       }
     }
   });
-  audio::capture(m_mail, m_config, nullptr);
+  audio::capture(m_mail, m_config, m_packets);
 
   timer.join();
   capture.join();
 }
 
-TEST(AudioPacketLifetimeTest, RetainsBroadcastStateUntilPacketIsConsumed) {
-  auto channel = std::make_shared<int>(42);
-  std::weak_ptr<int> weak_channel = channel;
-  audio::packet_t packet {channel, util::buffer_t<std::uint8_t> {1}};
-
-  channel.reset();
-  EXPECT_FALSE(weak_channel.expired());
-
-  packet.first.reset();
-  EXPECT_TRUE(weak_channel.expired());
+TEST(AudioPacketLifetimeTest, QueueMoveRetainsEncodedBytesAfterProducerAndQueueRelease) {
+  auto packets = std::make_shared<safe::queue_t<audio::packet_t>>(audio::ENCODED_PACKET_QUEUE_LIMIT);
+  constexpr std::array<std::uint8_t, 7> expected {0x81, 0x00, 0x23, 0xFE, 0x00, 0x19, 0xA4};
+  const std::uint8_t *storage = nullptr;
+  {
+    audio::packet_t produced {expected.size()};
+    std::copy(expected.begin(), expected.end(), produced.begin());
+    storage = produced.begin();
+    packets->raise(std::move(produced));
+  }
+  auto consumed = packets->pop(0ms);
+  ASSERT_TRUE(consumed.has_value());
+  packets->stop();
+  packets.reset();
+  EXPECT_EQ(consumed->begin(), storage);
+  EXPECT_EQ(consumed->size(), expected.size());
+  EXPECT_TRUE(std::equal(expected.begin(), expected.end(), consumed->begin()));
 }
 
 TEST(AudioStreamConfigTest, SelectsTheExactTotalBitrateForAllNegotiatedProfiles) {

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -987,55 +988,6 @@ namespace platf::dxgi {
 
     std::unique_ptr<high_precision_timer> timer = create_high_precision_timer();
 
-    typedef enum _D3DKMT_SCHEDULINGPRIORITYCLASS {
-      D3DKMT_SCHEDULINGPRIORITYCLASS_IDLE,  ///< Idle priority class
-      D3DKMT_SCHEDULINGPRIORITYCLASS_BELOW_NORMAL,  ///< Below normal priority class
-      D3DKMT_SCHEDULINGPRIORITYCLASS_NORMAL,  ///< Normal priority class
-      D3DKMT_SCHEDULINGPRIORITYCLASS_ABOVE_NORMAL,  ///< Above normal priority class
-      D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH,  ///< High priority class
-      D3DKMT_SCHEDULINGPRIORITYCLASS_REALTIME  ///< Realtime priority class
-    } D3DKMT_SCHEDULINGPRIORITYCLASS;
-
-    typedef UINT D3DKMT_HANDLE;
-
-    typedef struct _D3DKMT_OPENADAPTERFROMLUID {
-      LUID AdapterLuid;
-      D3DKMT_HANDLE hAdapter;
-    } D3DKMT_OPENADAPTERFROMLUID;
-
-    typedef struct _D3DKMT_WDDM_2_7_CAPS {
-      union {
-        struct
-        {
-          UINT HwSchSupported : 1;
-          UINT HwSchEnabled : 1;
-          UINT HwSchEnabledByDefault : 1;
-          UINT IndependentVidPnVSyncControl : 1;
-          UINT Reserved : 28;
-        };
-
-        UINT Value;
-      };
-    } D3DKMT_WDDM_2_7_CAPS;
-
-    typedef struct _D3DKMT_QUERYADAPTERINFO {
-      D3DKMT_HANDLE hAdapter;
-      UINT Type;
-      VOID *pPrivateDriverData;
-      UINT PrivateDriverDataSize;
-    } D3DKMT_QUERYADAPTERINFO;
-
-    const UINT KMTQAITYPE_WDDM_2_7_CAPS = 70;
-
-    typedef struct _D3DKMT_CLOSEADAPTER {
-      D3DKMT_HANDLE hAdapter;
-    } D3DKMT_CLOSEADAPTER;
-
-    typedef NTSTATUS(WINAPI *PD3DKMTSetProcessSchedulingPriorityClass)(HANDLE, D3DKMT_SCHEDULINGPRIORITYCLASS);
-    typedef NTSTATUS(WINAPI *PD3DKMTOpenAdapterFromLuid)(D3DKMT_OPENADAPTERFROMLUID *);
-    typedef NTSTATUS(WINAPI *PD3DKMTQueryAdapterInfo)(D3DKMT_QUERYADAPTERINFO *);
-    typedef NTSTATUS(WINAPI *PD3DKMTCloseAdapter)(D3DKMT_CLOSEADAPTER *);
-
     virtual bool is_hdr() override;
     virtual bool get_hdr_metadata(SS_HDR_METADATA &metadata) override;
     std::optional<float> get_sdr_white_nits();
@@ -1069,7 +1021,10 @@ namespace platf::dxgi {
 
     bool is_codec_supported(std::string_view name, const ::video::config_t &config) override;
 
-    std::unique_ptr<nvenc_encode_device_t> make_nvenc_encode_device(pix_fmt_e pix_fmt) override;
+    native_encode_owner_t make_nvenc_encode_device(
+      const video::config_t &client_config,
+      const video::sunshine_colorspace_t &colorspace
+    ) override;
 
     std::atomic<uint32_t> next_image_id;
   };
@@ -1095,6 +1050,9 @@ namespace platf::dxgi {
     capture_e release_frame();
 
     ~duplication_t();
+
+  private:
+    std::vector<std::byte> damage_metadata_;
   };
 
   /**
@@ -1152,6 +1110,8 @@ namespace platf::dxgi {
     // Kept so the destructor can revoke the raw-`this` handler before closing the pool.
     winrt::event_token frame_arrived_token {};
     winrt::Windows::Graphics::Capture::GraphicsCaptureSession capture_session {nullptr};
+    // Last successful cursor configuration for this session; capture health is checked separately.
+    std::optional<bool> cursor_capture_enabled;
     winrt::Windows::Graphics::Capture::Direct3D11CaptureFrame produced_frame {nullptr}, consumed_frame {nullptr};
     // Capture thread only; see keep_frame().
     winrt::Windows::Graphics::Capture::Direct3D11CaptureFrame kept_frame {nullptr};
@@ -1159,6 +1119,11 @@ namespace platf::dxgi {
     CONDITION_VARIABLE frame_present_cv;
 
     void on_frame_arrived(winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool const &sender, winrt::Windows::Foundation::IInspectable const &);
+    void assign_capture_session(winrt::Windows::Graphics::Capture::GraphicsCaptureSession session);
+
+#ifdef SUNSHINE_TESTS
+    friend struct wgc_capture_test_access;
+#endif
 
   public:
     wgc_capture_t();
@@ -1283,5 +1248,46 @@ namespace platf::dxgi {
     bool eye_crop_exact = false;
   };
   local_shutter_frame_probe_t probe_local_shutter_frame_ring();
+
+  struct native_capture_release_report_t {
+    bool valid = false;
+    bool gate_entered = false;
+    bool owner_consumed = false;
+    bool retirement_pending_before_release = false;
+    bool display_expired_before_release = false;
+    bool completed_after_release = false;
+    bool gate_timed_out = false;
+    std::uint64_t own_token = 0;
+    std::uint64_t foreign_token = 0;
+    std::uint64_t claim_after_capture_release = 0;
+    std::uint64_t final_claim = 0;
+  };
+
+  native_capture_release_report_t native_capture_release_for_test(bool foreign);
+
+  /** Hold the concrete no-init native backend after its actual capture-display release. */
+  class native_capture_retirement_test_t {
+  public:
+    native_capture_retirement_test_t(
+      std::shared_ptr<display_base_t> display,
+      ::video::detail::tracked_async_worker_pool_t &workers
+    );
+    ~native_capture_retirement_test_t();
+
+    native_capture_retirement_test_t(const native_capture_retirement_test_t &) = delete;
+    native_capture_retirement_test_t &operator=(const native_capture_retirement_test_t &) = delete;
+    native_capture_retirement_test_t(native_capture_retirement_test_t &&) = delete;
+    native_capture_retirement_test_t &operator=(native_capture_retirement_test_t &&) = delete;
+
+    void retire();
+    bool wait_after_capture_release(std::chrono::milliseconds timeout);
+    void release_native_teardown();
+    bool wait_retired(std::chrono::milliseconds timeout);
+    bool gate_timed_out() const;
+
+  private:
+    struct impl_t;
+    std::unique_ptr<impl_t> impl_;
+  };
 #endif
 }  // namespace platf::dxgi

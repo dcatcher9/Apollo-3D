@@ -5,12 +5,29 @@
 
 #include "../tests_common.h"
 
+#include <array>
 #include <atomic>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <src/config.h>
+#include <src/httpcommon.h>
 #include <src/nvhttp.h>
 #include <src/rtsp.h>
 #include <src/stream.h>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <system_error>
 #include <thread>
+#include <utility>
 #include <vector>
+
+namespace nvhttp {
+  void save_state();
+  void load_state();
+}  // namespace nvhttp
 
 using namespace nvhttp;
 
@@ -396,8 +413,8 @@ namespace {
     stream::config_t stream_config {};
     rtsp_stream::launch_session_t launch_session {};
     launch_session.id = id;
-    launch_session.unique_id = std::move(uuid);
-    launch_session.device_name = std::move(name);
+    launch_session.display_context->unique_id = std::move(uuid);
+    launch_session.display_context->device_name = std::move(name);
     launch_session.perm = permissions;
     launch_session.gcm_key.resize(16);
     launch_session.iv.resize(16);
@@ -634,3 +651,238 @@ TEST(PairingStateTest, BoundsUnauthenticatedPairingAndSerializesManualPin) {
   EXPECT_EQ(pairing_admission(1, 16, false, true, true), admission::manual_pin_conflict);
   EXPECT_EQ(pairing_admission(1, 16, false, false, true), admission::allowed);
 }
+
+namespace {
+  using json = nlohmann::json;
+
+  class PairingPersistenceTest: public testing::Test {
+  protected:
+    void SetUp() override {
+      ASSERT_TRUE(get_all_clients().empty());
+      ASSERT_FALSE(rtsp_stream::active_session_uuid());
+      owns_client_state_ = true;
+      config::sunshine.flags[config::flag::FRESH_STATE] = true;
+      erase_all_clients();
+
+      directory_ = std::filesystem::temp_directory_path() /
+                   ("apollo-pairing-state-" + uuid_util::uuid_t::generate().string());
+      state_path_ = directory_ / "state.json";
+      owns_directory_ = std::filesystem::create_directory(directory_);
+      ASSERT_TRUE(owns_directory_);
+      config::nvhttp.file_state = state_path_.string();
+      set_identity(initial_host_id);
+    }
+
+    void TearDown() override {
+      if (!owns_client_state_) {
+        return;
+      }
+      // Suppress every implicit save until the clients are gone and the original globals return.
+      config::sunshine.flags[config::flag::FRESH_STATE] = true;
+      erase_all_clients();
+      config::nvhttp.file_state = original_file_state_;
+      http::uuid = original_uuid_;
+      http::unique_id = original_unique_id_;
+      if (owns_directory_) {
+        std::error_code error;
+        std::filesystem::remove(state_path_, error);
+        EXPECT_FALSE(error) << error.message();
+        std::filesystem::remove(directory_, error);
+        EXPECT_FALSE(error) << error.message();
+      }
+      config::sunshine.flags[config::flag::FRESH_STATE] = original_fresh_state_;
+    }
+
+    void write_raw(std::string_view contents) const {
+      std::ofstream output(state_path_, std::ios::binary | std::ios::trunc);
+      output.exceptions(std::ios::failbit | std::ios::badbit);
+      output.write(contents.data(), static_cast<std::streamsize>(contents.size()));
+      output.close();
+    }
+
+    void write_state(const json &document) const {
+      write_raw(document.dump());
+    }
+
+    std::string read_raw() const {
+      std::ifstream input(state_path_, std::ios::binary);
+      input.exceptions(std::ios::badbit);
+      if (!input.is_open()) {
+        throw std::runtime_error("Could not open the fixture's state file");
+      }
+      return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    }
+
+    json client_record(const std::string &certificate, std::string name = "seed client") const {
+      return {{"cert", certificate}, {"name", std::move(name)}, {"uuid", "persistence-client-a"}};
+    }
+
+    void seed_client() const {
+      write_state({{"root", {{"uniqueid", initial_host_id}, {"named_devices", json::array({client_record(PUBLIC_CERT)})}}}});
+      load_state();
+      ASSERT_EQ(get_all_clients().size(), 1u);
+      ASSERT_TRUE(is_client_certificate_authorized(PUBLIC_CERT));
+    }
+
+    static void set_identity(std::string identity) {
+      http::uuid = uuid_util::uuid_t::parse(identity);
+      http::unique_id = std::move(identity);
+    }
+
+    static constexpr auto initial_host_id = "00112233-4455-6677-8899-AABBCCDDEEFF";
+    static constexpr auto loaded_host_id = "10213243-5465-7687-98A9-BACBDCEDFE0F";
+    const std::string original_file_state_ = config::nvhttp.file_state;
+    const bool original_fresh_state_ = config::sunshine.flags[config::flag::FRESH_STATE];
+    const uuid_util::uuid_t original_uuid_ = http::uuid;
+    const std::string original_unique_id_ = http::unique_id;
+    std::filesystem::path directory_;
+    std::filesystem::path state_path_;
+    bool owns_client_state_ = false;
+    bool owns_directory_ = false;
+  };
+
+  TEST_F(PairingPersistenceTest, RoundTripPreservesClientIdentityPermissionsAndForeignMetadata) {
+    const auto &second_certificate = distinct_test_certificates().front();
+    const auto base_name = std::string {"Quest\0", 6} + " (bedroom)";
+    auto first = client_record(PUBLIC_CERT + "\n", base_name);
+    first["perm"] = static_cast<std::uint32_t>(crypto::PERM::_default) | 0x80000000u;
+    auto second = client_record(second_certificate, base_name + " (9)");
+    second["uuid"] = "persistence-client-b";
+    const json foreign {{"nested", json::array({1, "kept", nullptr})}, {"note", "unrelated state"}};
+    write_state({
+      {"foreign", foreign},
+      {"root", {{"uniqueid", loaded_host_id}, {"retired", true}, {"named_devices", json::array({first, client_record(PUBLIC_CERT, "duplicate"), second, client_record("not a certificate")})}}},
+    });
+
+    ASSERT_NO_THROW(load_state());
+    ASSERT_EQ(get_all_clients().size(), 2u);
+    EXPECT_EQ(http::unique_id, loaded_host_id);
+    const auto first_identity = get_authorized_client_for_test(PUBLIC_CERT);
+    const auto second_identity = get_authorized_client_for_test(second_certificate);
+    ASSERT_TRUE(first_identity);
+    ASSERT_TRUE(second_identity);
+    EXPECT_EQ(first_identity->name, base_name);
+    EXPECT_EQ(first_identity->perm, crypto::PERM::_default);
+    EXPECT_EQ(second_identity->perm, crypto::PERM::_all);
+
+    ASSERT_NO_THROW(save_state());
+    const auto saved = json::parse(read_raw());
+    EXPECT_EQ(saved.at("foreign"), foreign);
+    EXPECT_EQ(saved.at("root").size(), 2u);
+    EXPECT_EQ(saved.at("root").at("uniqueid"), loaded_host_id);
+    const auto &clients = saved.at("root").at("named_devices");
+    ASSERT_EQ(clients.size(), 2u);
+    EXPECT_EQ(clients[0], (json {{"name", base_name}, {"cert", first_identity->cert}, {"uuid", "persistence-client-a"}, {"perm", static_cast<std::uint32_t>(crypto::PERM::_default)}}));
+    EXPECT_EQ(clients[1], (json {{"name", base_name + " (2)"}, {"cert", second_identity->cert}, {"uuid", "persistence-client-b"}, {"perm", static_cast<std::uint32_t>(crypto::PERM::_all)}}));
+
+    erase_all_clients();
+    ASSERT_TRUE(get_all_clients().empty());
+    ASSERT_NO_THROW(load_state());
+    EXPECT_TRUE(is_client_certificate_authorized(PUBLIC_CERT));
+    EXPECT_TRUE(is_client_certificate_authorized(second_certificate));
+    const auto listing = get_all_clients();
+    ASSERT_EQ(listing.size(), 2u);
+    EXPECT_EQ(listing[0].at("name"), base_name);
+    EXPECT_EQ(listing[1].at("name"), base_name + " (2)");
+    EXPECT_EQ(listing[0].at("perm"), static_cast<std::uint32_t>(crypto::PERM::_default));
+    EXPECT_EQ(listing[1].at("perm"), static_cast<std::uint32_t>(crypto::PERM::_all));
+    EXPECT_EQ(listing[0].at("connected"), false);
+    EXPECT_EQ(listing[1].at("connected"), false);
+    ASSERT_NO_THROW(save_state());
+    EXPECT_EQ(json::parse(read_raw()), saved);
+  }
+
+  TEST_F(PairingPersistenceTest, OptionalAndLegacyDeviceContainersKeepTheirExistingLoadBehavior) {
+    const std::array roots {
+      json {{"uniqueid", loaded_host_id}},
+      json {{"uniqueid", loaded_host_id}, {"named_devices", nullptr}},
+      json {{"uniqueid", loaded_host_id}, {"named_devices", json::array()}},
+      json {{"uniqueid", loaded_host_id}, {"named_devices", json::object()}},
+    };
+    for (const auto &root : roots) {
+      SCOPED_TRACE(root.dump());
+      ASSERT_NO_FATAL_FAILURE(seed_client());
+      write_state({{"root", root}});
+      ASSERT_NO_THROW(load_state());
+      EXPECT_EQ(http::unique_id, loaded_host_id);
+      EXPECT_TRUE(get_all_clients().empty());
+      EXPECT_FALSE(is_client_certificate_authorized(PUBLIC_CERT));
+    }
+
+    // The existing loader accepts object values as well as array entries; retain that policy.
+    write_state({{"root", {{"uniqueid", loaded_host_id}, {"named_devices", {{"legacy-entry", client_record(PUBLIC_CERT)}}}}}});
+    ASSERT_NO_THROW(load_state());
+    ASSERT_EQ(get_all_clients().size(), 1u);
+    EXPECT_TRUE(is_client_certificate_authorized(PUBLIC_CERT));
+  }
+
+  TEST_F(PairingPersistenceTest, MissingFileRootAndHostIdRetainClientsWhileRegeneratingIdentity) {
+    ASSERT_NO_FATAL_FAILURE(seed_client());
+    const auto clients = get_all_clients();
+    const auto previous_uuid = http::uuid;
+    ASSERT_TRUE(std::filesystem::remove(state_path_));
+    ASSERT_NO_THROW(load_state());
+    EXPECT_EQ(http::unique_id.size(), 36u);
+    EXPECT_NE(http::unique_id, initial_host_id);
+    EXPECT_TRUE(http::uuid == previous_uuid);  // A missing file only changes the string ID.
+    EXPECT_EQ(get_all_clients(), clients);
+
+    const std::array documents {json::object(), json {{"root", nullptr}}, json {{"root", json::array()}}, json {{"root", json::object()}}};
+    for (const auto &document : documents) {
+      SCOPED_TRACE(document.dump());
+      ASSERT_NO_FATAL_FAILURE(seed_client());
+      write_state(document);
+      ASSERT_NO_THROW(load_state());
+      EXPECT_EQ(http::unique_id.size(), 36u);
+      EXPECT_NE(http::unique_id, initial_host_id);
+      EXPECT_EQ(http::unique_id, http::uuid.string());
+      EXPECT_EQ(get_all_clients(), clients);
+    }
+  }
+
+  TEST_F(PairingPersistenceTest, MalformedJsonLeavesMemoryAndExistingSaveInputUntouched) {
+    ASSERT_NO_FATAL_FAILURE(seed_client());
+    const auto clients = get_all_clients();
+    const auto previous_uuid = http::uuid;
+    const auto previous_id = http::unique_id;
+    constexpr std::string_view malformed = "{\"root\": ";
+    write_raw(malformed);
+
+    EXPECT_NO_THROW(load_state());
+    EXPECT_EQ(get_all_clients(), clients);
+    EXPECT_TRUE(http::uuid == previous_uuid);
+    EXPECT_EQ(http::unique_id, previous_id);
+    EXPECT_TRUE(is_client_certificate_authorized(PUBLIC_CERT));
+    EXPECT_NO_THROW(save_state());
+    EXPECT_EQ(read_raw(), malformed);
+  }
+
+  TEST_F(PairingPersistenceTest, MalformedTypedStateNeverPublishesPartialClients) {
+    ASSERT_NO_FATAL_FAILURE(seed_client());
+    const auto clients = get_all_clients();
+    const auto previous_uuid = http::uuid;
+    const auto previous_id = http::unique_id;
+    write_state({{"root", {{"uniqueid", 42}}}});
+    EXPECT_THROW(load_state(), json::type_error);
+    EXPECT_TRUE(http::uuid == previous_uuid);
+    EXPECT_EQ(http::unique_id, previous_id);
+    write_state({{"root", {{"uniqueid", "short"}}}});
+    EXPECT_THROW(load_state(), std::invalid_argument);
+    EXPECT_TRUE(http::uuid == previous_uuid);
+    EXPECT_EQ(http::unique_id, previous_id);
+    EXPECT_EQ(get_all_clients(), clients);
+
+    const auto &second_certificate = distinct_test_certificates().front();
+    auto wrong_name = client_record(PUBLIC_CERT);
+    wrong_name["name"] = 42;
+    for (const auto &bad_entry : std::array {json {42}, wrong_name}) {
+      SCOPED_TRACE(bad_entry.dump());
+      write_state({{"root", {{"uniqueid", loaded_host_id}, {"named_devices", json::array({client_record(second_certificate), bad_entry})}}}});
+      EXPECT_THROW(load_state(), json::type_error);
+      EXPECT_EQ(http::unique_id, loaded_host_id);  // Host identity is applied before client parsing.
+      EXPECT_EQ(get_all_clients(), clients);
+      EXPECT_TRUE(is_client_certificate_authorized(PUBLIC_CERT));
+      EXPECT_FALSE(is_client_certificate_authorized(second_certificate));
+    }
+  }
+}  // namespace

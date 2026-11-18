@@ -6,16 +6,18 @@
 #define BOOST_BIND_GLOBAL_PLACEHOLDERS
 
 // standard includes
+#include <algorithm>
 #include <array>
 #include <atomic>
-#include <algorithm>
 #include <cctype>
 #include <charconv>
 #include <cmath>
 #include <filesystem>
 #include <format>
 #include <limits>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <utility>
@@ -34,6 +36,7 @@
 #include "file_handler.h"
 #include "globals.h"
 #include "host_sbs_resolution.h"
+#include "http_request_logging.h"
 #include "httpcommon.h"
 #include "logging.h"
 #include "network.h"
@@ -46,6 +49,11 @@
 #include "utility.h"
 #include "uuid.h"
 #include "video.h"
+
+#ifdef SUNSHINE_TESTS
+  #include "nvhttp_launch_test.h"
+  #include <stdexcept>
+#endif
 
 #ifdef _WIN32
   #include "platform/windows/ar_glasses.h"
@@ -313,6 +321,12 @@ namespace nvhttp {
 
   using resp_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<SunshineHTTPS>::Response>;
   using req_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<SunshineHTTPS>::Request>;
+
+#ifdef SUNSHINE_TESTS
+  namespace {
+    thread_local const testing::launch_native_hooks_t *launch_native_hooks = nullptr;
+  }
+#endif
   using resp_http_t = std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTP>::Response>;
   using req_http_t = std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTP>::Request>;
 
@@ -395,7 +409,7 @@ namespace nvhttp {
     root.erase("root");
     root["root"] = nlohmann::json::object();
     root["root"]["uniqueid"] = http::unique_id;
-    root["root"]["named_devices"] = named_cert_nodes;
+    root["root"]["named_devices"] = std::move(named_cert_nodes);
 
     try {
       std::ofstream out(config::nvhttp.file_state);
@@ -436,7 +450,7 @@ namespace nvhttp {
     http::uuid = uuid_util::uuid_t::parse(uid);
     http::unique_id = uid;
 
-    nlohmann::json root = tree["root"];
+    const auto &root = tree["root"];
     client_t client;  // Local client to load into
     std::unordered_set<std::string> loaded_certificates;
 
@@ -780,12 +794,12 @@ namespace nvhttp {
       BOOST_LOG(warning) << "Rejecting invalid display mode for client ["sv << named_cert_p->name << ']';
       return nullptr;
     }
-    launch_session->width = parsed_mode->width;
-    launch_session->height = parsed_mode->height;
-    launch_session->fps = parsed_mode->fps;
+    launch_session->display_context->width = parsed_mode->width;
+    launch_session->display_context->height = parsed_mode->height;
+    launch_session->display_context->fps = parsed_mode->fps;
 
-    launch_session->device_name = named_cert_p->name.empty() ? "ApolloDisplay"s : named_cert_p->name;
-    launch_session->unique_id = named_cert_p->uuid;
+    launch_session->display_context->device_name = named_cert_p->name.empty() ? "ApolloDisplay"s : named_cert_p->name;
+    launch_session->display_context->unique_id = named_cert_p->uuid;
     launch_session->perm = named_cert_p->perm;
     const auto enable_sops = parse_launch_int(launch_int_field::binary_option, get_arg(args, "sops"));
     const auto host_audio = parse_launch_int(launch_int_field::binary_option, get_arg(args, "localAudioPlayMode"));
@@ -823,17 +837,16 @@ namespace nvhttp {
       return nullptr;
     }
 
-    launch_session->enable_sops = *enable_sops;
     launch_session->host_audio = *host_audio;
     launch_session->surround_info = *surround_info;
-    launch_session->enable_hdr = *enable_hdr;
-    launch_session->virtual_display = display_options->virtual_display;
-    launch_session->virtual_display_only = display_options->virtual_display_only;
-    launch_session->scale_factor = display_options->scale_factor;
-    launch_session->sbs_mode = display_options->sbs_mode;
+    launch_session->display_context->enable_hdr = *enable_hdr;
+    launch_session->display_context->virtual_display = display_options->virtual_display;
+    launch_session->display_context->virtual_display_only = display_options->virtual_display_only;
+    launch_session->display_context->scale_factor = display_options->scale_factor;
+    launch_session->display_context->sbs_mode = display_options->sbs_mode;
     launch_session->stream_gamma = static_cast<video::stream_gamma_mode_e>(*stream_gamma);
 
-    if (!proc::calculate_render_size(launch_session->width, launch_session->height, launch_session->scale_factor)) {
+    if (!proc::calculate_render_size(launch_session->display_context->width, launch_session->display_context->height, launch_session->display_context->scale_factor)) {
       BOOST_LOG(warning) << "Rejecting a launch whose scaled display dimensions are invalid."sv;
       return nullptr;
     }
@@ -1049,22 +1062,7 @@ namespace nvhttp {
 
   template<class T>
   void print_req(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
-    BOOST_LOG(debug) << "TUNNEL :: "sv << tunnel<T>::to_string;
-
-    BOOST_LOG(debug) << "METHOD :: "sv << request->method;
-    BOOST_LOG(debug) << "DESTINATION :: "sv << request->path;
-
-    for (auto &[name, val] : request->header) {
-      BOOST_LOG(debug) << name << " -- " << http::redact_request_header(name, val);
-    }
-
-    BOOST_LOG(debug) << " [--] "sv;
-
-    for (auto &[name, val] : request->parse_query_string()) {
-      BOOST_LOG(debug) << name << " -- " << http::redact_query_parameter(name, val);
-    }
-
-    BOOST_LOG(debug) << " [--] "sv;
+    http::log_request_debug(*request, tunnel<T>::to_string);
   }
 
   template<class T>
@@ -1427,7 +1425,7 @@ namespace nvhttp {
 
       named_cert_node["connected"] = connected_uuid && *connected_uuid == named_cert->uuid;
 
-      named_cert_nodes.push_back(named_cert_node);
+      named_cert_nodes.push_back(std::move(named_cert_node));
     }
 
     return named_cert_nodes;
@@ -1457,7 +1455,7 @@ namespace nvhttp {
       return;
     }
     if (!!(named_cert_p->perm & PERM::_all_actions)) {
-      auto app_list = proc::proc.get_apps();
+      auto app_list = proc::proc.get_app_list();
       const auto codec_capabilities = video::nvenc_capabilities_snapshot();
 
       for (const auto &app : app_list) {
@@ -1487,6 +1485,209 @@ namespace nvhttp {
       return;
     }
   }
+
+  namespace {
+    /** Own one HTTP launch/resume attempt until RTSP accepts its reservation. */
+    class remote_launch_attempt_t {
+    public:
+      enum class kind_e {
+        fresh,
+        resume,
+      };
+
+      enum class failure_e {
+        new_session_unavailable,
+        process_start,
+        encoder_probe,
+        remote_display_reservation,
+        retained_reconfiguration,
+      };
+
+      struct error_t {
+        failure_e failure;
+        int status;
+      };
+
+      remote_launch_attempt_t(kind_e kind, std::shared_ptr<rtsp_stream::launch_session_t> launch):
+          kind_(kind),
+          launch_(std::move(launch)),
+          platform_(stream::session::guard_platform_launch()) {
+      }
+
+      ~remote_launch_attempt_t() {
+        if (phase_ != phase_e::published) {
+          if (kind_ == kind_e::fresh && phase_ == phase_e::prepared) {
+            // execute() owns its own failed preparation. Only a successfully created process
+            // needs this request's rollback if RTSP never accepted it.
+#ifdef SUNSHINE_TESTS
+            if (launch_native_hooks) {
+              launch_native_hooks->terminate();
+            } else
+#endif
+              proc::proc.terminate();
+          } else if (kind_ == kind_e::resume && (phase_ == phase_e::resume_reconfiguring || phase_ == phase_e::prepared)) {
+            // Keep the retained app and its coherent updated contract. Undo promotion without
+            // renewing grace; the platform guard arranges retry if restoration is incomplete.
+            platform_->restore_primary_display();
+          }
+          if (phase_ != phase_e::validating) {
+            // Preserve the explicit admission boundary even if transport/socket references
+            // retain an unpublished live-GPU reservation.
+            launch_->release_unpublished_live_gpu();
+          }
+        }
+
+        // The former resume guard was declared before platform_launch. Preserve its exact
+        // unwind order: primary restoration and GPU release under the lifecycle lock, then
+        // unlock, and only then release the temporary remote-display reservation.
+        platform_.reset();
+#ifdef _WIN32
+        if (phase_ != phase_e::published && remote_display_reserved_) {
+  #ifdef SUNSHINE_TESTS
+          if (launch_native_hooks) {
+            launch_native_hooks->remote_ended(launch_->id);
+          } else
+  #endif
+            ar_glasses::remote_virtual_display_ended(launch_->id);
+        }
+#endif
+      }
+
+      remote_launch_attempt_t(const remote_launch_attempt_t &) = delete;
+      remote_launch_attempt_t &operator=(const remote_launch_attempt_t &) = delete;
+      remote_launch_attempt_t(remote_launch_attempt_t &&) = delete;
+      remote_launch_attempt_t &operator=(remote_launch_attempt_t &&) = delete;
+
+      bool idle() const {
+        return platform_->idle();
+      }
+
+      bool reserve_gpu() {
+        if (!launch_->reserve_live_gpu()) {
+          return false;
+        }
+        phase_ = phase_e::gpu_reserved;
+        return true;
+      }
+
+      std::optional<error_t> prepare_new(proc::ctx_t &&app) {
+        // Fresh launch may replace an idle retained app; resume never uses this policy.
+        if (!platform_->prepare_new_session()) {
+          return error_t {failure_e::new_session_unavailable, 503};
+        }
+        const auto error =
+#ifdef SUNSHINE_TESTS
+          launch_native_hooks ? launch_native_hooks->execute(std::move(app), launch_, true) :
+#endif
+                                proc::proc.execute(
+                                  std::move(app),
+                                  launch_->display_context,
+                                  proc::launch_options_t {
+                                    .launch_session_id = launch_->id,
+                                    .host_audio = launch_->host_audio,
+                                    .surround_info = launch_->surround_info,
+                                  },
+                                  true);
+        if (error) {
+          return error_t {failure_e::process_start, error};
+        }
+        phase_ = phase_e::prepared;
+        return std::nullopt;
+      }
+
+      std::optional<error_t> prepare_resume(bool retained_virtual_display) {
+        // Branch on the guarded process snapshot, not the client's requested display option.
+        // Probe a physical source before mutating the retained contract, including before a
+        // physical-to-virtual request can be refused by reconfigure_retained_session().
+        if (!retained_virtual_display) {
+          if (
+#ifdef SUNSHINE_TESTS
+            launch_native_hooks ? launch_native_hooks->probe_encoders() :
+#endif
+                                  video::probe_encoders()
+          ) {
+            return error_t {failure_e::encoder_probe, 503};
+          }
+        }
+#ifdef _WIN32
+        if (retained_virtual_display) {
+          if (
+  #ifdef SUNSHINE_TESTS
+            launch_native_hooks ? !launch_native_hooks->remote_starting(
+                                    launch_->id,
+                                    config::stream.ping_timeout,
+                                    true
+                                  ) :
+  #endif
+                                  !ar_glasses::remote_virtual_display_starting(
+                                    launch_->id,
+                                    config::stream.ping_timeout,
+                                    true
+                                  )
+          ) {
+            return error_t {failure_e::remote_display_reservation, 503};
+          }
+          remote_display_reserved_ = true;
+        }
+#endif
+        // Arm primary rollback before entering the fallible retained-session operation. An
+        // inner failure may already restore or terminate; the guarded retry policy stays intact.
+        phase_ = phase_e::resume_reconfiguring;
+        if (const auto error =
+#ifdef SUNSHINE_TESTS
+              launch_native_hooks ? launch_native_hooks->reconfigure(launch_) :
+#endif
+                                    proc::proc.reconfigure_retained_session(launch_->display_context, launch_->id)) {
+          return error_t {failure_e::retained_reconfiguration, error};
+        }
+#ifdef _WIN32
+        if (retained_virtual_display) {
+          // Reconfiguration can outlast the ordinary connect reservation. Start the fresh
+          // client-connect window only after the retained display is ready for capture.
+  #ifdef SUNSHINE_TESTS
+          if (launch_native_hooks) {
+            launch_native_hooks->remote_awaiting(launch_->id, config::stream.ping_timeout);
+          } else
+  #endif
+            ar_glasses::remote_virtual_display_awaiting_client(
+              launch_->id,
+              config::stream.ping_timeout
+            );
+        }
+#endif
+        phase_ = phase_e::prepared;
+        return std::nullopt;
+      }
+
+      bool publish() {
+        if (phase_ != phase_e::prepared || !rtsp_stream::launch_session_raise(launch_)) {
+          return false;
+        }
+        // RTSP now owns handshake timeout and lease transfer. Disarm before commit(), just
+        // as the old endpoint guards did, so a commit exception cannot undo published work.
+        phase_ = phase_e::published;
+        platform_->commit();
+        return true;
+      }
+
+    private:
+      enum class phase_e {
+        validating,
+        gpu_reserved,
+        resume_reconfiguring,
+        prepared,
+        published,
+      };
+
+      kind_e kind_;
+      std::shared_ptr<rtsp_stream::launch_session_t> launch_;
+      std::optional<stream::session::platform_launch_guard_t> platform_;
+      phase_e phase_ = phase_e::validating;
+#ifdef _WIN32
+      bool remote_display_reserved_ = false;
+#endif
+    };
+  }  // namespace
 
   void launch(resp_https_t response, req_https_t request) {
     print_req<SunshineHTTPS>(request);
@@ -1531,8 +1732,6 @@ namespace nvhttp {
         requested_appid = *parsed_appid;
       }
     }
-    const int appid = requested_appid.value_or(0);
-
     BOOST_LOG(verbose) << "Launching app [" << appid_str << "] with UUID [" << appuuid_str << "]";
     // BOOST_LOG(verbose) << "QS: " << request->query_string;
 
@@ -1552,37 +1751,23 @@ namespace nvhttp {
       return;
     }
 
-    const auto apps = proc::proc.get_apps();
-    auto app_by_id = apps.end();
-    auto app_by_uuid = apps.end();
-    if (requested_appid) {
-      app_by_id = std::find_if(apps.begin(), apps.end(), [appid](const auto &candidate) {
-        return candidate.id == std::to_string(appid);
-      });
-    }
-    if (!appuuid_str.empty()) {
-      app_by_uuid = std::find_if(apps.begin(), apps.end(), [&appuuid_str](const auto &candidate) {
-        return boost::iequals(candidate.uuid, appuuid_str);
-      });
-    }
-    if ((requested_appid && app_by_id == apps.end()) || (!appuuid_str.empty() && app_by_uuid == apps.end())) {
+    auto selected_app = proc::proc.resolve_app(requested_appid, appuuid_str);
+    if (selected_app.status == proc::app_lookup_status_e::not_found) {
       tree.put("root.<xmlattr>.status_code", 404);
       tree.put("root.<xmlattr>.status_message", "Cannot find requested application");
       tree.put("root.gamesession", 0);
       return;
     }
-    if (requested_appid && !appuuid_str.empty() && app_by_id != app_by_uuid) {
+    if (selected_app.status == proc::app_lookup_status_e::identity_mismatch) {
       tree.put("root.<xmlattr>.status_code", 400);
       tree.put("root.<xmlattr>.status_message", "Application ID and UUID identify different applications");
       tree.put("root.gamesession", 0);
       return;
     }
-    const auto app_iter = !appuuid_str.empty() ? app_by_uuid : app_by_id;
-
     // From this point through RTSP publication, grace expiry and sole-session startup are
     // serialized with process/display mutation. Rejected paths release the guard without
     // changing the existing grace deadline.
-    auto platform_launch = stream::session::guard_platform_launch();
+    remote_launch_attempt_t attempt {remote_launch_attempt_t::kind_e::fresh, launch_session};
 
     if (!(named_cert_p->perm & PERM::launch)) {
       BOOST_LOG(debug) << "Permission LaunchApp denied for [" << named_cert_p->name << "] (" << (uint32_t) named_cert_p->perm << ")";
@@ -1592,7 +1777,7 @@ namespace nvhttp {
       return;
     }
 
-    if (!platform_launch.idle()) {
+    if (!attempt.idle()) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 503);
       tree.put("root.<xmlattr>.status_message", "Another streaming session is already active");
@@ -1611,51 +1796,37 @@ namespace nvhttp {
     // Reserve live GPU ownership before proc.execute() performs encoder probing or mutates the
     // virtual display. RTSP transfers this exact lease into its active slot, so offline admission
     // cannot race into the HTTP-to-RTSP handshake window.
-    if (!launch_session->reserve_live_gpu()) {
+    if (!attempt.reserve_gpu()) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 503);
       tree.put("root.<xmlattr>.status_message", "Offline SBS conversion is currently using the GPU");
       return;
     }
-    auto unpublished_gpu_guard = util::fail_guard([&]() {
-      launch_session->release_unpublished_live_gpu();
-    });
 
     // /launch is an explicit new session; /resume alone preserves an exact retained token.
     // Validate permissions, app, parameters and resource availability before ending the old app.
-    if (!platform_launch.prepare_new_session()) {
-      tree.put("root.resume", 0);
-      tree.put("root.<xmlattr>.status_code", 503);
-      tree.put("root.<xmlattr>.status_message", "Another streaming session is active or connecting");
+    if (const auto error = attempt.prepare_new(std::move(*selected_app.app))) {
+      if (error->failure == remote_launch_attempt_t::failure_e::new_session_unavailable) {
+        tree.put("root.resume", 0);
+        tree.put("root.<xmlattr>.status_code", 503);
+        tree.put("root.<xmlattr>.status_message", "Another streaming session is active or connecting");
+      } else {
+        tree.put("root.<xmlattr>.status_code", error->status);
+        tree.put(
+          "root.<xmlattr>.status_message",
+          error->status == 503 ? "Failed to initialize video capture/encoding. Is a display connected and turned on?" : "Failed to start the specified application"
+        );
+        tree.put("root.gamesession", 0);
+      }
       return;
     }
 
-    auto err = proc::proc.execute(*app_iter, launch_session, true);
-    if (err) {
-      tree.put("root.<xmlattr>.status_code", err);
-      tree.put(
-        "root.<xmlattr>.status_message",
-        err == 503 ? "Failed to initialize video capture/encoding. Is a display connected and turned on?" : "Failed to start the specified application"
-      );
-      tree.put("root.gamesession", 0);
-      return;
-    }
-
-    // Until RTSP publication owns the handshake timeout, this request owns every launch side
-    // effect, including temporary primary-display promotion. Publication failure must roll back.
-    auto unpublished_process_guard = util::fail_guard([]() {
-      proc::proc.terminate();
-    });
-
-    if (!rtsp_stream::launch_session_raise(launch_session)) {
+    if (!attempt.publish()) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 503);
       tree.put("root.<xmlattr>.status_message", "Another streaming handshake is already pending");
       return;
     }
-    unpublished_process_guard.disable();
-    unpublished_gpu_guard.disable();
-    platform_launch.commit();
 
     tree.put("root.<xmlattr>.status_code", 200);
     tree.put(
@@ -1747,17 +1918,8 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_message", "Invalid resume parameters");
       return;
     }
-#ifdef _WIN32
-    bool remote_virtual_display_reserved = false;
-    auto remote_virtual_display_guard = util::fail_guard([&]() {
-      if (remote_virtual_display_reserved) {
-        ar_glasses::remote_virtual_display_ended(launch_session->id);
-      }
-    });
-#endif
-
-    auto platform_launch = stream::session::guard_platform_launch();
-    if (!platform_launch.idle()) {
+    remote_launch_attempt_t attempt {remote_launch_attempt_t::kind_e::resume, launch_session};
+    if (!attempt.idle()) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 503);
       tree.put("root.<xmlattr>.status_message", "Another streaming session is already active");
@@ -1789,15 +1951,15 @@ namespace nvhttp {
       return;
     }
 
-    const bool requested_virtual_display_only = launch_session->virtual_display_only;
-    launch_session->virtual_display_only = detail::resolve_resume_virtual_display_only(
+    const bool requested_virtual_display_only = launch_session->display_context->virtual_display_only;
+    launch_session->display_context->virtual_display_only = detail::resolve_resume_virtual_display_only(
       requested_virtual_display_only,
       process_status.virtual_display_only,
       process_status.client_uuid,
       named_cert_p->uuid,
       named_cert_p->perm
     );
-    if (launch_session->virtual_display_only != requested_virtual_display_only) {
+    if (launch_session->display_context->virtual_display_only != requested_virtual_display_only) {
       BOOST_LOG(warning) << "Ignoring a virtual-display-only policy change from view-only client ["
                          << named_cert_p->name << "]; retaining the current session policy."sv;
     }
@@ -1811,79 +1973,31 @@ namespace nvhttp {
 
     // Claim GPU ownership before the retained-session probe/reconfiguration below. The same lease
     // survives publication and is moved into RTSP's active slot without an admission gap.
-    if (!launch_session->reserve_live_gpu()) {
+    if (!attempt.reserve_gpu()) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 503);
       tree.put("root.<xmlattr>.status_message", "Offline SBS conversion is currently using the GPU");
       return;
     }
-    auto unpublished_gpu_guard = util::fail_guard([&]() {
-      launch_session->release_unpublished_live_gpu();
-    });
-
-    if (!process_status.virtual_display) {
-      // Probe before mutating the retained display contract. A probe failure must leave the warm
-      // process exactly as it was so the client can retry or explicitly terminate it.
-      if (video::probe_encoders()) {
-        tree.put("root.resume", 0);
-        tree.put("root.<xmlattr>.status_code", 503);
-        tree.put("root.<xmlattr>.status_message", "Failed to initialize video capture/encoding. Is a display connected and turned on?");
-        return;
-      }
-    }
-
-#ifdef _WIN32
-    if (process_status.virtual_display) {
-      if (!ar_glasses::remote_virtual_display_starting(
-            launch_session->id,
-            config::stream.ping_timeout,
-            true
-          )) {
-        tree.put("root.resume", 0);
-        tree.put("root.<xmlattr>.status_code", 503);
-        tree.put("root.<xmlattr>.status_message", "Local AR display ownership could not be released");
-        return;
-      }
-      remote_virtual_display_reserved = true;
-    }
-#endif
-
-    // Keep the old grace deadline while undoing a failed resume's primary-display promotion.
-    // The lifecycle guard also arranges retry if Windows cannot restore immediately.
-    auto unpublished_primary_guard = util::fail_guard([&]() {
-      platform_launch.restore_primary_display();
-    });
-
-    if (const auto reconfigure_error = proc::proc.reconfigure_retained_session(launch_session)) {
+    if (const auto error = attempt.prepare_resume(process_status.virtual_display)) {
       tree.put("root.resume", 0);
-      tree.put("root.<xmlattr>.status_code", reconfigure_error);
-      tree.put("root.<xmlattr>.status_message", "Failed to reconfigure the retained streaming session");
+      tree.put("root.<xmlattr>.status_code", error->status);
+      if (error->failure == remote_launch_attempt_t::failure_e::encoder_probe) {
+        tree.put("root.<xmlattr>.status_message", "Failed to initialize video capture/encoding. Is a display connected and turned on?");
+      } else if (error->failure == remote_launch_attempt_t::failure_e::remote_display_reservation) {
+        tree.put("root.<xmlattr>.status_message", "Local AR display ownership could not be released");
+      } else {
+        tree.put("root.<xmlattr>.status_message", "Failed to reconfigure the retained streaming session");
+      }
       return;
     }
 
-#ifdef _WIN32
-    if (process_status.virtual_display) {
-      // Monitor recreation and HDR verification can outlast the ordinary connect reservation.
-      // Start a fresh client-connect window only after the retained display is ready for capture.
-      ar_glasses::remote_virtual_display_awaiting_client(
-        launch_session->id,
-        config::stream.ping_timeout
-      );
-    }
-#endif
-
-    if (!rtsp_stream::launch_session_raise(launch_session)) {
+    if (!attempt.publish()) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 503);
       tree.put("root.<xmlattr>.status_message", "Another streaming handshake is already pending");
       return;
     }
-    unpublished_gpu_guard.disable();
-#ifdef _WIN32
-    remote_virtual_display_guard.disable();
-#endif
-    unpublished_primary_guard.disable();
-    platform_launch.commit();
 
     tree.put("root.<xmlattr>.status_code", 200);
     tree.put(
@@ -1902,6 +2016,28 @@ namespace nvhttp {
     system_tray::update_tray_client_connected(named_cert_p->name);
 #endif
   }
+
+#ifdef SUNSHINE_TESTS
+  void testing::invoke_launch_handler_for_test(
+    bool resuming,
+    response_t response,
+    request_t request,
+    launch_native_hooks_t &hooks
+  ) {
+    if (!hooks.execute || !hooks.terminate || !hooks.probe_encoders || !hooks.reconfigure || !hooks.remote_starting || !hooks.remote_awaiting || !hooks.remote_ended) {
+      throw std::invalid_argument("The inert launch handler requires every native operation");
+    }
+    const auto *previous = std::exchange(launch_native_hooks, &hooks);
+    auto restore = util::fail_guard([&]() {
+      launch_native_hooks = previous;
+    });
+    if (resuming) {
+      resume(std::move(response), std::move(request));
+    } else {
+      launch(std::move(response), std::move(request));
+    }
+  }
+#endif
 
   void cancel(resp_https_t response, req_https_t request) {
     print_req<SunshineHTTPS>(request);

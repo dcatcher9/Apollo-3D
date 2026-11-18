@@ -70,6 +70,23 @@ else()
     set(TEST_DIR "${CMAKE_SOURCE_DIR}/tests")
 endif()
 
+# Only these sources read runtime build identity. Keep a version-only reconfigure from
+# recompiling the encoder, capture pipeline, tests and vendored sources. Windows resources
+# receive their own version definitions in compile_definitions/windows.cmake.
+set_property(SOURCE "${CMAKE_SOURCE_DIR}/src/main.cpp"
+        DIRECTORY "${CMAKE_SOURCE_DIR}"
+        APPEND PROPERTY COMPILE_DEFINITIONS
+        "PROJECT_VERSION=\"${PROJECT_VERSION}\""
+        "PROJECT_VERSION_COMMIT=\"${GITHUB_COMMIT}\"")
+set(VERSION_SOURCE_DIRECTORIES "${CMAKE_SOURCE_DIR}")
+if(BUILD_TESTS)
+    list(APPEND VERSION_SOURCE_DIRECTORIES "${CMAKE_SOURCE_DIR}/tests")
+endif()
+set_property(SOURCE "${CMAKE_SOURCE_DIR}/src/confighttp.cpp"
+        DIRECTORY ${VERSION_SOURCE_DIRECTORIES}
+        APPEND PROPERTY COMPILE_DEFINITIONS
+        "PROJECT_VERSION=\"${PROJECT_VERSION}\"")
+
 # third-party/ViGEmClient
 set(VIGEM_COMPILE_FLAGS "")
 string(APPEND VIGEM_COMPILE_FLAGS "-Wno-unknown-pragmas ")

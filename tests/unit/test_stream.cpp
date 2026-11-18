@@ -17,10 +17,6 @@
 #include <string>
 #include <vector>
 
-namespace stream {
-  std::vector<uint8_t> concat_and_insert(uint64_t insert_size, uint64_t slice_size, const std::string_view &data1, const std::string_view &data2);
-}
-
 #include "../tests_common.h"
 
 using namespace std::chrono_literals;
@@ -183,6 +179,13 @@ TEST(SessionWorkerStartTest, RollsBackWhenSecondThreadCannotStart) {
   EXPECT_TRUE(stream::session::worker_start_rollback_for_test());
 }
 
+TEST(SessionWorkerStartTest, RollsBackEveryPreparedWorkerAtEachConstructionFailure) {
+  for (const auto index : {0u, 1u, 2u, 3u}) {
+    SCOPED_TRACE(index);
+    EXPECT_TRUE(stream::session::worker_start_rollback_for_test(index));
+  }
+}
+
 TEST(SessionWorkerStartTest, ControlConnectionGetsFullWindowAfterSlowPlatformPreparation) {
   for (const auto preparation : {0ms, 11500ms, 120000ms}) {
     SCOPED_TRACE(preparation.count());
@@ -191,7 +194,7 @@ TEST(SessionWorkerStartTest, ControlConnectionGetsFullWindowAfterSlowPlatformPre
     EXPECT_EQ(result.expired_before_publication, preparation > 10s);
     EXPECT_EQ(result.clock_samples, 1);
     EXPECT_EQ(result.remaining_ping_budget, 10s);
-    EXPECT_EQ(result.ready_workers, 2) << "Both workers must observe registration and its fresh deadline";
+    EXPECT_EQ(result.ready_workers, 4) << "All four workers must observe registration and its fresh deadline";
   }
 }
 
@@ -338,52 +341,62 @@ TEST(PrimaryDisplayRestoreRetryTest, FailedWorkerClaimDelaysRestorationWithoutLo
 TEST(ConcatAndInsertTests, ConcatNoInsertionTest) {
   char b1[] = {'a', 'b'};
   char b2[] = {'c', 'd', 'e'};
-  auto res = stream::concat_and_insert(0, 2, std::string_view {b1, sizeof(b1)}, std::string_view {b2, sizeof(b2)});
+  std::vector<std::uint8_t> res;
+  const auto size = stream::concat_and_insert_into(res, 0, 2, std::string_view {b1, sizeof(b1)}, std::string_view {b2, sizeof(b2)});
   auto expected = std::vector<uint8_t> {'a', 'b', 'c', 'd', 'e'};
+  ASSERT_EQ(size, expected.size());
   ASSERT_EQ(res, expected);
 }
 
 TEST(ConcatAndInsertTests, ConcatLargeStrideTest) {
   char b1[] = {'a', 'b'};
   char b2[] = {'c', 'd', 'e'};
-  auto res = stream::concat_and_insert(1, sizeof(b1) + sizeof(b2) + 1, std::string_view {b1, sizeof(b1)}, std::string_view {b2, sizeof(b2)});
+  std::vector<std::uint8_t> res;
+  const auto size = stream::concat_and_insert_into(res, 1, sizeof(b1) + sizeof(b2) + 1, std::string_view {b1, sizeof(b1)}, std::string_view {b2, sizeof(b2)});
   auto expected = std::vector<uint8_t> {0, 'a', 'b', 'c', 'd', 'e'};
+  ASSERT_EQ(size, expected.size());
   ASSERT_EQ(res, expected);
 }
 
 TEST(ConcatAndInsertTests, ConcatSmallStrideTest) {
   char b1[] = {'a', 'b'};
   char b2[] = {'c', 'd', 'e'};
-  auto res = stream::concat_and_insert(1, 1, std::string_view {b1, sizeof(b1)}, std::string_view {b2, sizeof(b2)});
+  std::vector<std::uint8_t> res;
+  const auto size = stream::concat_and_insert_into(res, 1, 1, std::string_view {b1, sizeof(b1)}, std::string_view {b2, sizeof(b2)});
   auto expected = std::vector<uint8_t> {0, 'a', 0, 'b', 0, 'c', 0, 'd', 0, 'e'};
+  ASSERT_EQ(size, expected.size());
   ASSERT_EQ(res, expected);
 }
 
 TEST(ConcatAndInsertTests, ConcatAcrossBufferBoundaryAndUnevenFinalSlice) {
   char b1[] = {'a', 'b', 'c'};
   char b2[] = {'d', 'e', 'f', 'g'};
-  auto res = stream::concat_and_insert(1, 4, std::string_view {b1, sizeof(b1)}, std::string_view {b2, sizeof(b2)});
+  std::vector<std::uint8_t> res;
+  const auto size = stream::concat_and_insert_into(res, 1, 4, std::string_view {b1, sizeof(b1)}, std::string_view {b2, sizeof(b2)});
   auto expected = std::vector<uint8_t> {0, 'a', 'b', 'c', 'd', 0, 'e', 'f', 'g'};
+  ASSERT_EQ(size, expected.size());
   ASSERT_EQ(res, expected);
 }
 
 TEST(ConcatAndInsertTests, RejectsZeroStrideAndSizeOverflow) {
   constexpr char data[] = {'a'};
+  std::vector<std::uint8_t> res;
 
-  EXPECT_TRUE(stream::concat_and_insert(1, 0, std::string_view {data, sizeof(data)}, {}).empty());
-  EXPECT_TRUE(
-    stream::concat_and_insert(
+  EXPECT_FALSE(stream::concat_and_insert_into(res, 1, 0, std::string_view {data, sizeof(data)}, {}));
+  EXPECT_FALSE(
+    stream::concat_and_insert_into(
+      res,
       std::numeric_limits<std::uint64_t>::max(),
       1,
       std::string_view {data, sizeof(data)},
       {}
     )
-      .empty()
   );
 }
 
-TEST(ConcatAndInsertTests, EmptyInputProducesEmptyOutput) {
-  EXPECT_TRUE(stream::concat_and_insert(1, 1, {}, {}).empty());
+TEST(ConcatAndInsertTests, RejectsEmptyInput) {
+  std::vector<std::uint8_t> res;
+  EXPECT_FALSE(stream::concat_and_insert_into(res, 1, 1, {}, {}));
 }
 
 TEST(VideoTransportConfigTests, EnforcesPacketAndFecWireBounds) {
@@ -708,59 +721,6 @@ TEST(AtomicPresentationNegotiationTests, PublishesMatchingHostAndClientFeatureBi
     0u
   );
 #endif
-}
-
-TEST(LiveVideoModeSerialGateTests, CoalescesOnlyPendingRequestsAndWaitsThroughCompletion) {
-  stream::detail::live_video_mode_serial_gate_t gate;
-
-  const auto first = gate.submit();
-  ASSERT_NE(first.transaction_id, 0U);
-  EXPECT_FALSE(first.superseded_transaction_id);
-
-  // The first request has not begun, so a newer request can replace it without performing either
-  // display or encoder work.
-  const auto second = gate.submit();
-  EXPECT_EQ(second.superseded_transaction_id, first.transaction_id);
-  ASSERT_TRUE(gate.can_begin());
-  ASSERT_EQ(gate.begin_next(), second.transaction_id);
-  EXPECT_EQ(gate.active(), second.transaction_id);
-
-  // Once B begins, C remains pending. A stale completion (including one correlated by a duplicate
-  // client request id in production) cannot release B or let C overtake it.
-  const auto third = gate.submit();
-  EXPECT_FALSE(third.superseded_transaction_id);
-  EXPECT_FALSE(gate.can_begin());
-  EXPECT_FALSE(gate.finish(first.transaction_id));
-  EXPECT_EQ(gate.active(), second.transaction_id);
-
-  // Merely observing B's encoder completion is not enough: the worker retains the gate while it
-  // restores a rejected desktop. `finish()` is called only after that rollback attempt ends.
-  EXPECT_TRUE(gate.accepts_completion(second.transaction_id));
-  EXPECT_FALSE(gate.can_begin());
-  EXPECT_TRUE(gate.finish(second.transaction_id));
-  ASSERT_TRUE(gate.can_begin());
-  EXPECT_EQ(gate.begin_next(), third.transaction_id);
-  EXPECT_TRUE(gate.finish(third.transaction_id));
-  EXPECT_FALSE(gate.active());
-}
-
-TEST(LiveVideoModeSerialGateTests, CoalescesAQueuedBurstBehindAnActiveTransaction) {
-  stream::detail::live_video_mode_serial_gate_t gate;
-
-  const auto active = gate.submit();
-  ASSERT_EQ(gate.begin_next(), active.transaction_id);
-  const auto pending_a = gate.submit();
-  const auto pending_b = gate.submit();
-  const auto pending_c = gate.submit();
-
-  EXPECT_FALSE(pending_a.superseded_transaction_id);
-  EXPECT_EQ(pending_b.superseded_transaction_id, pending_a.transaction_id);
-  EXPECT_EQ(pending_c.superseded_transaction_id, pending_b.transaction_id);
-  EXPECT_FALSE(gate.can_begin());
-
-  ASSERT_TRUE(gate.finish(active.transaction_id));
-  ASSERT_EQ(gate.begin_next(), pending_c.transaction_id);
-  EXPECT_TRUE(gate.finish(pending_c.transaction_id));
 }
 
 TEST(LiveVideoModeAckTests, MapsEveryDisplayOutcomeToItsWireStatus) {

@@ -400,4 +400,172 @@ namespace VDISPLAY {
     const auto proof = *retirement_;
     return proof.wait_until(deadline, retirement_policy_.timing, callbacks, clock);
   }
+
+  namespace {
+    probe_retirement_io_t production_probe_retirement_io() {
+      return {
+        .detach = [](const creation_result_t &binding, std::chrono::milliseconds timeout, std::shared_ptr<desktop_detach_context_t> &context) {
+          return deactivateVirtualDisplay(*binding.identity, binding.device_path, timeout, context);
+        },
+        .query_active = [](const creation_result_t &binding) {
+          return queryVirtualDisplayIdentity(*binding.identity, binding.device_path, binding.display_name).state;
+        },
+        .query_retirement = [](const creation_result_t &binding) {
+          return queryVirtualDisplayRetirementState(*binding.identity, binding.device_path, binding.display_name);
+        },
+        .remove = [](const GUID &guid) {
+          return removeVirtualDisplay(guid);
+        },
+        .now = []() {
+          return std::chrono::steady_clock::now();
+        },
+        .sleep = [](std::chrono::milliseconds delay) {
+          std::this_thread::sleep_for(delay);
+        },
+      };
+    }
+
+    bool retire_probe_display_impl(const creation_result_t &probe_display, const GUID &probe_guid, const probe_retirement_io_t &io) {
+      using namespace std::chrono_literals;
+      if (!probe_display.added()) {
+        return true;
+      }
+      const auto deadline = io.now() + 8s;
+      bool requires_active_path_absence = false;
+      std::shared_ptr<desktop_detach_context_t> detach_context;
+      const auto reject_unused_io = [](auto &&...) -> bool {
+        throw std::logic_error("Unexpected non-probe virtual-display operation");
+      };
+      // Every slot is explicit: this adapter never falls back to primary-display, creation or
+      // retained-cursor I/O, including when its six finite test operations are installed.
+      session_io_t owner_io {
+        .prepare = reject_unused_io,
+        .create = [](const display_spec_t &) -> creation_result_t {
+          throw std::logic_error("Probe retirement must not create another display");
+        },
+        .bind = reject_unused_io,
+        .promote = reject_unused_io,
+        .restore = reject_unused_io,
+        .pause = reject_unused_io,
+        .reactivate = reject_unused_io,
+        .query = [](const creation_result_t &) -> display_identity_query_t {
+          throw std::logic_error("Probe retirement must not refresh its raw binding");
+        },
+        .query_retirement = [&](const creation_result_t &binding) {
+          if (io.now() >= deadline) {
+            return display_identity_state_e::indeterminate;
+          }
+          // Even a sole active probe must disappear from the complete device topology.
+          return io.query_retirement(binding);
+        },
+        .remove = [&](const GUID &guid) {
+          return io.now() < deadline && io.remove(guid);
+        },
+        .now = io.now,
+        .sleep = io.sleep,
+        .restore_cursor = reject_unused_io,
+      };
+      session_t owner(std::move(owner_io));
+      display_spec_t spec;
+      spec.guid = probe_guid;
+      spec.primary_binding = false;
+      if (!owner.adopt(std::move(spec), probe_display, false)) {
+        return false;
+      }
+      session_retirement_callbacks_t callbacks {
+        .prepare = [&](session_t &retiring) {
+          const auto now = io.now();
+          if (now >= deadline) {
+            return false;
+          }
+          const auto detach = io.detach(
+            retiring.binding(),
+            std::min(1500ms, std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)),
+            detach_context
+          );
+          switch (detach.state) {
+            case desktop_detach_state_e::detached:
+            case desktop_detach_state_e::already_inactive:
+              requires_active_path_absence = true;
+              return true;
+            case desktop_detach_state_e::skipped_only_active:
+              requires_active_path_absence = false;
+              return true;
+            default:
+              return false;
+          }
+        },
+        .before_remove = [&](session_t &retiring) {
+          if (io.now() >= deadline) {
+            return false;
+          }
+          if (requires_active_path_absence) {
+            const auto active = io.query_active(retiring.binding());
+            if (!isDriverRemovalSafeAfterDesktopDetach(true, active)) {
+              requires_active_path_absence = false;
+              detach_context.reset();
+              return false;
+            }
+          }
+          return true;
+        },
+        .finish = [](session_t &) {
+          return true;
+        },
+      };
+      owner.begin_retirement(std::move(callbacks), {
+                                                     .timing = {250ms, 250ms},
+                                                     .remove_retry_interval = 250ms,
+                                                     .require_device_absence = true,
+                                                     .retry_prepare_within_slice = true,
+                                                   });
+
+      bool immediate_retry_available = true;
+      while (io.now() < deadline) {
+        const auto slice_started = io.now();
+        if (slice_started >= deadline) {
+          break;
+        }
+        if (owner.retire_until(deadline)) {
+          return true;
+        }
+        const auto now = io.now();
+        if (now >= deadline) {
+          break;
+        }
+        if (now - slice_started >= 250ms) {
+          immediate_retry_available = true;
+          continue;
+        }
+        if (immediate_retry_available) {
+          // Preserve immediate re-detach after the first invalidated active-path observation.
+          immediate_retry_available = false;
+          continue;
+        }
+        // Repeated blocked slices cannot spin forever on a finite injected clock or busy-loop
+        // a real reattaching topology. This backoff does not own removal or absence evidence.
+        const auto delay = std::min(250ms, std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now));
+        if (delay <= 0ms) {
+          break;
+        }
+        io.sleep(delay);
+        immediate_retry_available = true;
+      }
+      return false;
+    }
+  }  // namespace
+
+  bool retire_probe_display(const creation_result_t &binding, const GUID &guid) {
+    return retire_probe_display_impl(binding, guid, production_probe_retirement_io());
+  }
+
+#ifdef SUNSHINE_TESTS
+  bool retire_probe_display_for_test(const creation_result_t &binding, const GUID &guid, probe_retirement_io_t io) {
+    if (!io.detach || !io.query_active || !io.query_retirement || !io.remove || !io.now || !io.sleep) {
+      throw std::invalid_argument("probe retirement tests must provide every finite I/O operation");
+    }
+    return retire_probe_display_impl(binding, guid, io);
+  }
+#endif
+
 }  // namespace VDISPLAY

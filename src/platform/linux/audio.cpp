@@ -53,7 +53,7 @@ namespace platf {
   struct mic_attr_t: public mic_t {
     util::safe_ptr<pa_simple, pa_simple_free> mic;
 
-    capture_e sample(std::vector<float> &sample_buf) override {
+    capture_e sample(std::span<float> sample_buf) override {
       auto sample_size = sample_buf.size();
 
       auto buf = sample_buf.data();
@@ -457,11 +457,6 @@ namespace platf {
         }
 
         return ::platf::microphone(mapping, channels, sample_rate, frame_size, get_monitor_name(sink_name));
-      }
-
-      bool is_sink_available(const std::string &sink) override {
-        BOOST_LOG(warning) << "audio_control_t::is_sink_available() unimplemented: "sv << sink;
-        return true;
       }
 
       int set_sink(const std::string &sink) override {

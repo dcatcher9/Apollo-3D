@@ -40,8 +40,6 @@ namespace mail {
   // Global mail
   MAIL(shutdown);
   MAIL(broadcast_shutdown);
-  MAIL(video_packets);
-  MAIL(audio_packets);
   // Local mail
   MAIL(touch_port);
   MAIL(idr);
@@ -53,7 +51,6 @@ namespace mail {
   MAIL(sbs_telemetry);
   MAIL(game_source_status);
   MAIL(video_mode);
-  MAIL(video_mode_applied);
   MAIL(live_video_mode_ack);
   MAIL(stream_gamma);
   MAIL(stream_gamma_ack);

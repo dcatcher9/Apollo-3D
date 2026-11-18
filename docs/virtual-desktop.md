@@ -260,6 +260,15 @@ publication quarantine, settled absence, and one-time cleanup through the existi
 in `platform/windows/virtual_display_retirement.h`. Driver removal acknowledgment alone never
 releases ownership.
 
+The temporary startup encoder-probe display also uses this owner for retirement. It adopts the raw
+driver creation result, including an identity whose Windows display name has not appeared, without
+binding or restoring a primary-display transaction. Cleanup retains its eight-second budget and
+250 ms removal retry and observation interval. Removal still requires safe desktop detach, except
+when the virtual display is the sole active output; that exception does not bypass exact device
+absence. Three consecutive absences must survive the shared settle and final confirmation queries,
+with the publication quarantine retained for an unpublished identity. If that proof does not
+complete, startup stops before local AR or network servers can acquire another display.
+
 Recovery information is written to disk before the display change. Virtual-display-only mode also
 records the original active displays, their modes, and their advanced-color settings. A failed
 restore keeps that record and prevents the host from removing the virtual monitor before the

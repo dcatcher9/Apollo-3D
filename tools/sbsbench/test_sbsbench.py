@@ -1781,7 +1781,7 @@ class EvalContractTests(unittest.TestCase):
             stream = fh.read()
         self.assertNotIn("SBS_PRESENTATION_FIXED_HEIGHT", stream)
 
-    def test_native_offline_adaptive_trace_transport_is_bounded(self):
+    def test_evaluator_file_follow_adaptive_trace_transport_is_bounded(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"),
                   encoding="utf-8") as fh:
@@ -1792,18 +1792,6 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn('offline_sbs::wire::whole_clip_contract_t', harness)
         self.assertIn('offline_sbs::wire::to_json(', harness)
         self.assertIn('offline_sbs::wire::whole_clip_resolved_runtime_t', harness)
-
-        with open(os.path.join(repo, "src", "offline_sbs_worker.cpp"),
-                  encoding="utf-8") as fh:
-            worker = fh.read()
-        self.assertEqual(worker.count('"--bounded-adaptive-state"'), 1)
-        self.assertIn("trace_tail_t trace(analysis_output, true)", worker)
-        self.assertIn(
-            'read_snapshot(child, "adaptive_state_frame.json")',
-            worker)
-        self.assertIn(
-            'remove_transient_file_checked(snapshot)',
-            worker)
 
     def test_depth_reuse_cadence_is_fixed_at_one_inference_per_frame(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -2233,7 +2221,7 @@ class EvalContractTests(unittest.TestCase):
         status_end = implementation.index("#ifdef _WIN32", status_start)
         status_implementation = implementation[status_start:status_end]
         self.assertIn("std::lock_guard lock(process_state_mutex);", status_implementation)
-        self.assertIn("return {\n      _app_id,\n      _app_name,", status_implementation)
+        self.assertIn("return {\n      _app_id,\n      _app.name,", status_implementation)
         self.assertIn("_virtual_display,", status_implementation)
         self.assertNotIn("running_locked()", status_implementation)
         self.assertIn(

@@ -4,6 +4,7 @@
  */
 // standard includes
 #include <algorithm>
+#include <array>
 #include <sstream>
 
 // local includes
@@ -17,10 +18,10 @@ using namespace std::literals;
 namespace ip = boost::asio::ip;
 
 namespace net {
-  std::vector<ip::network_v4> pc_ips_v4 {
+  const std::array<ip::network_v4, 1> pc_ips_v4 {
     ip::make_network_v4("127.0.0.0/8"sv),
   };
-  std::vector<ip::network_v4> lan_ips_v4 {
+  const std::array<ip::network_v4, 5> lan_ips_v4 {
     ip::make_network_v4("192.168.0.0/16"sv),
     ip::make_network_v4("172.16.0.0/12"sv),
     ip::make_network_v4("10.0.0.0/8"sv),
@@ -28,10 +29,10 @@ namespace net {
     ip::make_network_v4("169.254.0.0/16"sv),
   };
 
-  std::vector<ip::network_v6> pc_ips_v6 {
+  const std::array<ip::network_v6, 1> pc_ips_v6 {
     ip::make_network_v6("::1/128"sv),
   };
-  std::vector<ip::network_v6> lan_ips_v6 {
+  const std::array<ip::network_v6, 2> lan_ips_v6 {
     ip::make_network_v6("fc00::/7"sv),
     ip::make_network_v6("fe80::/64"sv),
   };
@@ -47,8 +48,8 @@ namespace net {
     return PC;
   }
 
-  net_e from_address(const std::string_view &view) {
-    auto addr = normalize_address(ip::make_address(view));
+  net_e from_address(ip::address addr) {
+    addr = normalize_address(addr);
 
     if (addr.is_v6()) {
       for (auto &range : pc_ips_v6) {

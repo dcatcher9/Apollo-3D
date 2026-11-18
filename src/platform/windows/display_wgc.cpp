@@ -9,6 +9,7 @@
 #define ____FIReference_1_boolean_INTERFACE_DEFINED__
 
 #include <Windows.Graphics.Capture.Interop.h>
+#include <windows.graphics.directx.direct3d11.interop.h>
 #include <winrt/windows.foundation.h>
 #include <winrt/windows.foundation.metadata.h>
 #include <winrt/windows.graphics.directx.direct3d11.h>
@@ -27,40 +28,11 @@ namespace winrt {
   using namespace Windows::Foundation::Metadata;
   using namespace Windows::Graphics::Capture;
   using namespace Windows::Graphics::DirectX::Direct3D11;
-
-  extern "C" {
-    HRESULT __stdcall CreateDirect3D11DeviceFromDXGIDevice(::IDXGIDevice *dxgiDevice, ::IInspectable **graphicsDevice);
-  }
-
-  /**
-   * Windows structures sometimes have compile-time GUIDs. GCC supports this, but in a roundabout way.
-   * If WINRT_IMPL_HAS_DECLSPEC_UUID is true, then the compiler supports adding this attribute to a struct. For example, Visual Studio.
-   * If not, then MinGW GCC has a workaround to assign a GUID to a structure.
-   */
-  struct
-#if WINRT_IMPL_HAS_DECLSPEC_UUID
-    __declspec(uuid("A9B3D012-3DF2-4EE3-B8D1-8695F457D3C1"))
-#endif
-    IDirect3DDxgiInterfaceAccess: ::IUnknown {
-    virtual HRESULT __stdcall GetInterface(REFIID id, void **object) = 0;
-  };
 }  // namespace winrt
-#if !WINRT_IMPL_HAS_DECLSPEC_UUID
-static constexpr GUID GUID__IDirect3DDxgiInterfaceAccess = {
-  0xA9B3D012,
-  0x3DF2,
-  0x4EE3,
-  {0xB8, 0xD1, 0x86, 0x95, 0xF4, 0x57, 0xD3, 0xC1}
-  // compare with __declspec(uuid(...)) for the struct above.
-};
-
-template<>
-constexpr auto __mingw_uuidof<winrt::IDirect3DDxgiInterfaceAccess>() -> GUID const & {
-  return GUID__IDirect3DDxgiInterfaceAccess;
-}
-#endif
 
 namespace platf::dxgi {
+  namespace d3d11_interop = ::Windows::Graphics::DirectX::Direct3D11;
+
   bool test_wgc_capture(output_t &output) {
     try {
       if (!winrt::GraphicsCaptureSession::IsSupported()) {
@@ -89,6 +61,11 @@ namespace platf::dxgi {
     InitializeConditionVariable(&frame_present_cv);
   }
 
+  void wgc_capture_t::assign_capture_session(winrt::GraphicsCaptureSession session) {
+    cursor_capture_enabled.reset();
+    capture_session = std::move(session);
+  }
+
   wgc_capture_t::~wgc_capture_t() {
     drop_kept_frame();
     // Close() can throw (for example after device loss); a destructor must not propagate it.
@@ -112,7 +89,7 @@ namespace platf::dxgi {
     produced_frame = nullptr;
     ReleaseSRWLockExclusive(&frame_lock);
     item = nullptr;
-    capture_session = nullptr;
+    assign_capture_session(nullptr);
     frame_pool = nullptr;
   }
 
@@ -121,6 +98,7 @@ namespace platf::dxgi {
    * @return 0 on success, -1 on failure.
    */
   int wgc_capture_t::init(display_base_t *display, const ::video::config_t &config) {
+    cursor_capture_enabled.reset();
     HRESULT status;
     dxgi::dxgi_t dxgi;
     winrt::com_ptr<::IInspectable> d3d_comhandle;
@@ -133,7 +111,7 @@ namespace platf::dxgi {
         BOOST_LOG(error) << "Failed to query DXGI interface from device [0x"sv << util::hex(status).to_string_view() << ']';
         return -1;
       }
-      if (FAILED(status = winrt::CreateDirect3D11DeviceFromDXGIDevice(*&dxgi, d3d_comhandle.put()))) {
+      if (FAILED(status = ::CreateDirect3D11DeviceFromDXGIDevice(*&dxgi, d3d_comhandle.put()))) {
         BOOST_LOG(error) << "Failed to query WinRT DirectX interface from device [0x"sv << util::hex(status).to_string_view() << ']';
         return -1;
       }
@@ -168,7 +146,7 @@ namespace platf::dxgi {
       // and produced_frame may hold another between ticks. The third is free for the newest
       // composition, so the frame copied when the export releases the output is never stale.
       frame_pool = winrt::Direct3D11CaptureFramePool::CreateFreeThreaded(uwp_device, static_cast<winrt::Windows::Graphics::DirectX::DirectXPixelFormat>(display->capture_format), 3, item.Size());
-      capture_session = frame_pool.CreateCaptureSession(item);
+      assign_capture_session(frame_pool.CreateCaptureSession(item));
       frame_arrived_token = frame_pool.FrameArrived({this, &wgc_capture_t::on_frame_arrived});
     } catch (winrt::hresult_error &e) {
       BOOST_LOG(error) << "Screen capture is not supported on this device for this release of Windows: failed to create capture session: [0x"sv << util::hex(e.code()).to_string_view() << ']';
@@ -258,7 +236,7 @@ namespace platf::dxgi {
     // These WinRT calls throw on failure (a lost device, for example). Report that as a
     // capture error so the caller reinitializes, instead of terminating the process.
     try {
-      auto capture_access = consumed_frame.Surface().try_as<winrt::IDirect3DDxgiInterfaceAccess>();
+      auto capture_access = consumed_frame.Surface().try_as<d3d11_interop::IDirect3DDxgiInterfaceAccess>();
       if (capture_access == nullptr || FAILED(capture_access->GetInterface(IID_ID3D11Texture2D, (void **) out)) || !*out) {
         return capture_e::error;
       }
@@ -296,7 +274,7 @@ namespace platf::dxgi {
       return false;
     }
     try {
-      auto capture_access = kept_frame.Surface().try_as<winrt::IDirect3DDxgiInterfaceAccess>();
+      auto capture_access = kept_frame.Surface().try_as<d3d11_interop::IDirect3DDxgiInterfaceAccess>();
       if (capture_access == nullptr || FAILED(capture_access->GetInterface(IID_ID3D11Texture2D, (void **) out))) {
         drop_kept_frame();
         return false;
@@ -321,12 +299,21 @@ namespace platf::dxgi {
   }
 
   int wgc_capture_t::set_cursor_visible(bool x) {
+    if (!capture_session) {
+      cursor_capture_enabled.reset();
+      return -1;
+    }
+    if (cursor_capture_enabled == x) {
+      return 0;
+    }
     try {
       if (capture_session.IsCursorCaptureEnabled() != x) {
         capture_session.IsCursorCaptureEnabled(x);
       }
+      cursor_capture_enabled = x;
       return 0;
     } catch (winrt::hresult_error &) {
+      cursor_capture_enabled.reset();
       return -1;
     }
   }

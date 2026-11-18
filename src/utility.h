@@ -203,19 +203,6 @@ namespace util {
   }
 
   template<class T>
-  void append_struct(std::vector<uint8_t> &buf, const T &_struct) {
-    constexpr size_t data_len = sizeof(_struct);
-
-    buf.reserve(data_len);
-
-    auto *data = (uint8_t *) &_struct;
-
-    for (size_t x = 0; x < data_len; ++x) {
-      buf.push_back(data[x]);
-    }
-  }
-
-  template<class T>
   class Hex {
   public:
     typedef T elem_type;
@@ -747,98 +734,6 @@ namespace util {
   shared_t<P> make_shared(T *pointer) {
     return shared_t<P>(reinterpret_cast<typename P::pointer>(pointer), typename P::deleter_type());
   }
-
-  template<class T>
-  class wrap_ptr {
-  public:
-    using element_type = T;
-    using pointer = element_type *;
-    using const_pointer = element_type const *;
-    using reference = element_type &;
-    using const_reference = element_type const &;
-
-    wrap_ptr():
-        _own_ptr {false},
-        _p {nullptr} {
-    }
-
-    wrap_ptr(pointer p):
-        _own_ptr {false},
-        _p {p} {
-    }
-
-    wrap_ptr(std::unique_ptr<element_type> &&uniq_p):
-        _own_ptr {true},
-        _p {uniq_p.release()} {
-    }
-
-    wrap_ptr(wrap_ptr &&other):
-        _own_ptr {other._own_ptr},
-        _p {other._p} {
-      other._own_ptr = false;
-    }
-
-    wrap_ptr &operator=(wrap_ptr &&other) noexcept {
-      if (_own_ptr) {
-        delete _p;
-      }
-
-      _p = other._p;
-
-      _own_ptr = other._own_ptr;
-      other._own_ptr = false;
-
-      return *this;
-    }
-
-    template<class V>
-    wrap_ptr &operator=(std::unique_ptr<V> &&uniq_ptr) {
-      static_assert(std::is_base_of_v<element_type, V>, "element_type must be base class of V");
-      _own_ptr = true;
-      _p = uniq_ptr.release();
-
-      return *this;
-    }
-
-    wrap_ptr &operator=(pointer p) {
-      if (_own_ptr) {
-        delete _p;
-      }
-
-      _p = p;
-      _own_ptr = false;
-
-      return *this;
-    }
-
-    ~wrap_ptr() {
-      if (_own_ptr) {
-        delete _p;
-      }
-
-      _own_ptr = false;
-    }
-
-    const_reference operator*() const {
-      return *_p;
-    }
-
-    reference operator*() {
-      return *_p;
-    }
-
-    const_pointer operator->() const {
-      return _p;
-    }
-
-    pointer operator->() {
-      return _p;
-    }
-
-  private:
-    bool _own_ptr;
-    pointer _p;
-  };
 
   template<class T>
   constexpr bool is_pointer_v =

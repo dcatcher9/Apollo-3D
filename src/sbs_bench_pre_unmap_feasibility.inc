@@ -67,7 +67,7 @@
           if(h!=upload_hashes[i])throw std::runtime_error("Actual immutable GPU source bytes differ from decoded input");
           bindings.at(i)["GPU_readback_bgra8_sha256"]=h;
         }
-        const auto owner=[](const models::estimate_result &r,const models::host_sbs_gpu_completion_receipt::receipt_t &receipt) {
+        const auto owner=[](const models::depth_observation_views_t &r,const models::host_sbs_gpu_completion_receipt::receipt_t &receipt) {
           return nlohmann::json{{"publication",jp_publication(r.publication)},
             {"receipt_expected",jp_publication(receipt.expected)},{"depth_owner_frame_id",receipt.depth_owner_frame_id},
             {"depth_owner_timestamp_us",receipt.depth_owner_timestamp_us},{"authenticated",models::parallax_v2_result_is_authenticated(r)}};

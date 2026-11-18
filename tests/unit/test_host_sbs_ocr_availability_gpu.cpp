@@ -210,20 +210,20 @@ TEST(TensorRtOcrAvailabilityGpuTest, MissingPackagedOcrPreservesJoinedDepthAndEx
   const auto initially_suppressed = estimator.estimate_depth(source.Get(), models::input_color_space::srgb,
     0x100000000ull, false, {}, models::depth_optional_work_mode_e::suppress_subtitle,
     {.observation_timestamp_us = 0x200000000ull}, 1u);
-  ASSERT_TRUE(initially_suppressed.inference_enqueued);
-  ASSERT_FALSE(initially_suppressed.subtitle_ocr_inference_enqueued);
+  ASSERT_TRUE(initially_suppressed.submission.inference_enqueued);
+  ASSERT_FALSE(initially_suppressed.submission.subtitle_ocr_inference_enqueued);
   const auto initial_completed = estimator.finish_pending_depth_for_evaluation();
   ASSERT_FALSE(estimator.has_terminal_failure());
-  ASSERT_TRUE(initial_completed.completed_frame_valid);
-  EXPECT_EQ(initial_completed.completed_frame_id, 0x100000000ull);
-  EXPECT_TRUE(initial_completed.subtitle_work_suppressed);
-  ASSERT_TRUE(models::parallax_v2_result_is_authenticated(initial_completed));
+  ASSERT_TRUE(initial_completed.observation.completed_frame_valid);
+  EXPECT_EQ(initial_completed.observation.completed_frame_id, 0x100000000ull);
+  EXPECT_TRUE(initial_completed.observation.subtitle_work_suppressed);
+  ASSERT_TRUE(models::parallax_v2_result_is_authenticated(initial_completed.observation));
   std::vector<std::uint32_t> initial_matte, initial_base, initial_final;
-  ASSERT_TRUE(read_words(device.Get(), context.Get(), initial_completed.subtitle_glyph_matte.Get(), initial_matte));
+  ASSERT_TRUE(read_words(device.Get(), context.Get(), initial_completed.observation.subtitle_glyph_matte.Get(), initial_matte));
   ASSERT_EQ(initial_matte.size(), 1u);
   EXPECT_EQ(initial_matte.front(), 0u);
-  ASSERT_TRUE(read_words(device.Get(), context.Get(), initial_completed.shadow_base_final_parallax.Get(), initial_base));
-  ASSERT_TRUE(read_words(device.Get(), context.Get(), initial_completed.shadow_final_parallax.Get(), initial_final));
+  ASSERT_TRUE(read_words(device.Get(), context.Get(), initial_completed.observation.shadow_base_final_parallax.Get(), initial_base));
+  ASSERT_TRUE(read_words(device.Get(), context.Get(), initial_completed.observation.shadow_final_parallax.Get(), initial_final));
   EXPECT_EQ(initial_final, initial_base);
 
   for (std::uint64_t observation = 1u; observation <= 2u; ++observation) {
@@ -236,15 +236,15 @@ TEST(TensorRtOcrAvailabilityGpuTest, MissingPackagedOcrPreservesJoinedDepthAndEx
     }
     ASSERT_TRUE(estimator.can_accept_frame());
     const auto submitted = estimator.estimate_depth(source.Get(), models::input_color_space::srgb, frame, false, {}, models::depth_optional_work_mode_e::ordinary, {.observation_timestamp_us = clock}, 1u);
-    ASSERT_TRUE(submitted.inference_enqueued);
-    EXPECT_FALSE(submitted.subtitle_ocr_inference_enqueued);
+    ASSERT_TRUE(submitted.submission.inference_enqueued);
+    EXPECT_FALSE(submitted.submission.subtitle_ocr_inference_enqueued);
     const auto completed = estimator.finish_pending_depth_for_evaluation();
     ASSERT_FALSE(estimator.has_terminal_failure());
-    ASSERT_TRUE(completed.completed_frame_valid);
-    EXPECT_EQ(completed.completed_frame_id, frame);
-    EXPECT_FALSE(completed.subtitle_work_suppressed);
-    ASSERT_TRUE(models::parallax_v2_result_is_authenticated(completed));
-    EXPECT_EQ(completed.publication.expected_work, models::near_identical_work_subtitle_observation);
+    ASSERT_TRUE(completed.observation.completed_frame_valid);
+    EXPECT_EQ(completed.observation.completed_frame_id, frame);
+    EXPECT_FALSE(completed.observation.subtitle_work_suppressed);
+    ASSERT_TRUE(models::parallax_v2_result_is_authenticated(completed.observation));
+    EXPECT_EQ(completed.observation.publication.expected_work, models::near_identical_work_subtitle_observation);
 
     context->Flush();
     std::optional<receipt::receipt_t> publication;
@@ -252,7 +252,7 @@ TEST(TensorRtOcrAvailabilityGpuTest, MissingPackagedOcrPreservesJoinedDepthAndEx
     do {
       const auto batch = estimator.poll_publication_receipts();
       ASSERT_FALSE(batch.failed);
-      if (batch.current_publication && receipt::matches_publication(*batch.current_publication, completed.publication)) {
+      if (batch.current_publication && receipt::matches_publication(*batch.current_publication, completed.observation.publication)) {
         publication = batch.current_publication;
         break;
       }
@@ -268,10 +268,10 @@ TEST(TensorRtOcrAvailabilityGpuTest, MissingPackagedOcrPreservesJoinedDepthAndEx
     EXPECT_EQ(publication->subtitle_frame_id, frame);
 
     std::vector<std::uint32_t> base, final, ocr, plane, condition;
-    ASSERT_TRUE(read_words(device.Get(), context.Get(), completed.shadow_base_final_parallax.Get(), base));
-    ASSERT_TRUE(read_words(device.Get(), context.Get(), completed.shadow_final_parallax.Get(), final));
+    ASSERT_TRUE(read_words(device.Get(), context.Get(), completed.observation.shadow_base_final_parallax.Get(), base));
+    ASSERT_TRUE(read_words(device.Get(), context.Get(), completed.observation.shadow_final_parallax.Get(), final));
     EXPECT_EQ(final, base);
-    ASSERT_TRUE(read_words(device.Get(), context.Get(), completed.ocr_box_record.Get(), ocr));
+    ASSERT_TRUE(read_words(device.Get(), context.Get(), completed.observation.ocr_box_record.Get(), ocr));
     ASSERT_EQ(ocr.size(), v2::subtitle_ocr_record_word_count);
     EXPECT_EQ(ocr[0u], v2::subtitle_ocr_record_schema);
     EXPECT_EQ(ocr[1u], v2::subtitle_ocr_record_tag);
@@ -282,27 +282,27 @@ TEST(TensorRtOcrAvailabilityGpuTest, MissingPackagedOcrPreservesJoinedDepthAndEx
     EXPECT_TRUE(std::all_of(ocr.begin() + 16u, ocr.end(), [](auto word) {
       return word == 0u;
     }));
-    ASSERT_TRUE(read_words(device.Get(), context.Get(), completed.subtitle_locator_state.Get(), plane));
+    ASSERT_TRUE(read_words(device.Get(), context.Get(), completed.observation.subtitle_locator_state.Get(), plane));
     ASSERT_EQ(plane.size(), v2::subtitle_plane_state_word_count);
     EXPECT_EQ(plane[v2::subtitle_plane_flags_word], 0u);
     EXPECT_EQ(plane[v2::subtitle_plane_current_slot_mask_word], 0u);
     EXPECT_EQ(models::host_sbs_subtitle_plane::join(plane.data() + v2::subtitle_plane_frame_offset), frame);
     EXPECT_EQ(models::host_sbs_subtitle_plane::join(plane.data() + v2::subtitle_plane_observation_timestamp_offset), clock);
-    ASSERT_TRUE(read_words(device.Get(), context.Get(), completed.subtitle_condition_params.Get(), condition));
+    ASSERT_TRUE(read_words(device.Get(), context.Get(), completed.observation.subtitle_condition_params.Get(), condition));
     ASSERT_EQ(condition.size(), v2::subtitle_condition_param_word_count);
     EXPECT_EQ(condition[v2::subtitle_condition_param_active_word], 0u);
     EXPECT_EQ(condition[v2::subtitle_condition_param_current_count_word], 0u);
     EXPECT_EQ(condition[v2::subtitle_condition_param_target_word], 0u);
-    for (auto *view : {completed.subtitle_contour_support.Get(), completed.subtitle_glyph_matte.Get(), completed.subtitle_ocr_probability.Get(), completed.research_selected_matte.Get()}) {
+    for (auto *view : {completed.observation.subtitle_contour_support.Get(), completed.observation.subtitle_glyph_matte.Get(), completed.observation.subtitle_ocr_probability.Get(), completed.observation.research_selected_matte.Get()}) {
       std::vector<std::uint32_t> mask;
       ASSERT_TRUE(read_words(device.Get(), context.Get(), view, mask));
       EXPECT_TRUE(std::all_of(mask.begin(), mask.end(), [](auto word) {
         return word == 0u;
       }));
     }
-    EXPECT_TRUE(estimator.publication_is_current(completed.publication));
+    EXPECT_TRUE(estimator.publication_is_current(completed.observation.publication));
     // The default (harness/test) policy runs the conditioned-field diagnostics every time.
-    EXPECT_TRUE(completed.subtitle_conditioning_diagnostics_current);
+    EXPECT_TRUE(completed.observation.subtitle_conditioning_diagnostics_current);
   }
 
   // Live policy: an ordinary observation skips the diagnostic conditioner, publishes exact Base
@@ -320,19 +320,19 @@ TEST(TensorRtOcrAvailabilityGpuTest, MissingPackagedOcrPreservesJoinedDepthAndEx
     }
     ASSERT_TRUE(estimator.can_accept_frame());
     const auto submitted = estimator.estimate_depth(source.Get(), models::input_color_space::srgb, frame, false, {}, models::depth_optional_work_mode_e::ordinary, {.observation_timestamp_us = clock}, 1u);
-    ASSERT_TRUE(submitted.inference_enqueued);
+    ASSERT_TRUE(submitted.submission.inference_enqueued);
     const auto completed = estimator.finish_pending_depth_for_evaluation(models::input_color_space::srgb, dump_snapshot);
     ASSERT_FALSE(estimator.has_terminal_failure());
-    ASSERT_TRUE(completed.completed_frame_valid);
-    EXPECT_EQ(completed.completed_frame_id, frame);
-    ASSERT_TRUE(models::parallax_v2_result_is_authenticated(completed));
-    EXPECT_EQ(completed.subtitle_conditioning_diagnostics_current, dump_snapshot);
+    ASSERT_TRUE(completed.observation.completed_frame_valid);
+    EXPECT_EQ(completed.observation.completed_frame_id, frame);
+    ASSERT_TRUE(models::parallax_v2_result_is_authenticated(completed.observation));
+    EXPECT_EQ(completed.observation.subtitle_conditioning_diagnostics_current, dump_snapshot);
     std::vector<std::uint32_t> base, final;
-    ASSERT_TRUE(read_words(device.Get(), context.Get(), completed.shadow_base_final_parallax.Get(), base));
-    ASSERT_TRUE(read_words(device.Get(), context.Get(), completed.shadow_final_parallax.Get(), final));
+    ASSERT_TRUE(read_words(device.Get(), context.Get(), completed.observation.shadow_base_final_parallax.Get(), base));
+    ASSERT_TRUE(read_words(device.Get(), context.Get(), completed.observation.shadow_final_parallax.Get(), final));
     EXPECT_EQ(final, base);
     std::vector<std::uint32_t> matte;
-    ASSERT_TRUE(read_words(device.Get(), context.Get(), completed.research_selected_matte.Get(), matte));
+    ASSERT_TRUE(read_words(device.Get(), context.Get(), completed.observation.research_selected_matte.Get(), matte));
     EXPECT_TRUE(std::all_of(matte.begin(), matte.end(), [](auto word) {
       return word == 0u;
     }));

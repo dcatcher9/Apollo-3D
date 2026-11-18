@@ -334,54 +334,10 @@ namespace safe {
       _cv.notify_one();
     }
 
-    template<class Rep, class Period>
-    auto wait_for(const std::chrono::duration<Rep, Period> &rel_time) {
-      std::unique_lock ul(_lock);
-
-      return _cv.wait_for(ul, rel_time, [this]() {
-        return _rang;
-      });
-    }
-
-    template<class Rep, class Period, class Pred>
-    auto wait_for(const std::chrono::duration<Rep, Period> &rel_time, Pred &&pred) {
-      std::unique_lock ul(_lock);
-
-      return _cv.wait_for(ul, rel_time, [this, &pred]() {
-        return _rang || pred();
-      });
-    }
-
-    template<class Rep, class Period>
-    auto wait_until(const std::chrono::duration<Rep, Period> &rel_time) {
-      std::unique_lock ul(_lock);
-
-      return _cv.wait_until(ul, rel_time, [this]() {
-        return _rang;
-      });
-    }
-
-    template<class Rep, class Period, class Pred>
-    auto wait_until(const std::chrono::duration<Rep, Period> &rel_time, Pred &&pred) {
-      std::unique_lock ul(_lock);
-
-      return _cv.wait_until(ul, rel_time, [this, &pred]() {
-        return _rang || pred();
-      });
-    }
-
     auto wait() {
       std::unique_lock ul(_lock);
       _cv.wait(ul, [this]() {
         return _rang;
-      });
-    }
-
-    template<class Pred>
-    auto wait(Pred &&pred) {
-      std::unique_lock ul(_lock);
-      _cv.wait(ul, [this, &pred]() {
-        return _rang || pred();
       });
     }
 
@@ -391,11 +347,6 @@ namespace safe {
 
     status_t &status() {
       return _status;
-    }
-
-    void reset() {
-      _status = status_t {};
-      _rang = false;
     }
 
   private:

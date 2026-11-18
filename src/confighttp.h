@@ -15,9 +15,6 @@
 // lib includes
 #include <nlohmann/json_fwd.hpp>
 
-// local includes
-#include "thread_safe.h"
-
 #define WEB_DIR SUNSHINE_ASSETS_DIR "/web/"
 
 using namespace std::chrono_literals;
@@ -51,25 +48,12 @@ namespace confighttp {
 
   void erase_retired_config_options(nlohmann::json &config);
 
+  // Consume the current app array, retaining unknown entries and first-match UUID ordering.
+  nlohmann::json reorder_app_list(nlohmann::json apps, const nlohmann::json &order_uuids);
+
+  // Parser diagnostics can retain malformed input bytes; always serialize them as valid JSON.
+  std::string make_bad_request_body(std::string_view error_message);
+
   std::string make_auth_cookie(std::string_view token);
   void start();
 }  // namespace confighttp
-
-// mime types map
-const std::map<std::string, std::string> mime_types = {
-  {"css", "text/css"},
-  {"gif", "image/gif"},
-  {"htm", "text/html"},
-  {"html", "text/html"},
-  {"ico", "image/x-icon"},
-  {"jpeg", "image/jpeg"},
-  {"jpg", "image/jpeg"},
-  {"js", "application/javascript"},
-  {"json", "application/json"},
-  {"png", "image/png"},
-  {"svg", "image/svg+xml"},
-  {"ttf", "font/ttf"},
-  {"txt", "text/plain"},
-  {"woff2", "font/woff2"},
-  {"xml", "text/xml"},
-};

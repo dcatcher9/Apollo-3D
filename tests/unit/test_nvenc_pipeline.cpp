@@ -7,6 +7,10 @@
 #include <mutex>
 #include <optional>
 #include <src/nvenc/nvenc_base.h>
+#include <src/platform/common.h>
+#include <src/tracked_async_worker.h>
+#include <src/video_encode_session.h>
+#include <stdexcept>
 #include <src/video_encode_pipeline.h>
 #include <string>
 #include <thread>
@@ -107,6 +111,12 @@ namespace {
       return encoded;
     }
 
+    /** Provenance forwarded by the actual session/base path; this fake always copies. */
+    std::vector<std::uint64_t> prepared_input_revisions() {
+      std::lock_guard lock(mutex);
+      return input_revisions;
+    }
+
     void clear_operations() {
       std::lock_guard lock(mutex);
       log.clear();
@@ -115,6 +125,7 @@ namespace {
     std::array<nvenc::input_producer_state, 2> producer {nvenc::input_producer_state::unknown, nvenc::input_producer_state::unknown};
     /** Video memory runs short for a second picture's input (E_OUTOFMEMORY in the native class). */
     bool second_input_out_of_memory = false;
+    NVENCSTATUS next_picture_status = NV_ENC_SUCCESS;  ///< Inject one accepted status.
 
   protected:
     bool init_library() override {
@@ -135,10 +146,11 @@ namespace {
       return true;
     }
 
-    void prepare_input(unsigned slot) override {
+    void prepare_input(unsigned slot, std::uint64_t revision) override {
       std::lock_guard lock(mutex);
       EXPECT_FALSE(state[slot].mapped) << "A mapped input must not be written";
       EXPECT_FALSE(state[slot].pending);
+      input_revisions.push_back(revision);
       input_content[slot] = target;
       log.push_back("copy-" + std::to_string(slot));
     }
@@ -210,6 +222,7 @@ namespace {
     int target = 0;  ///< The conversion target's content.
     std::array<int, 2> input_content {};  ///< Each picture input's copy of the target (depth 2).
     std::vector<std::pair<std::uint64_t, int>> encoded;
+    std::vector<std::uint64_t> input_revisions;
     std::array<slot_state_t, 2> state {};
     std::array<bool, 2> signaled {};
     std::array<int, 2> timeouts_first {};
@@ -350,7 +363,7 @@ namespace {
       probe.state[slot].index = params->inputTimeStamp;
       probe.submitted.push_back(slot);
       probe.log.push_back("submit-" + std::to_string(slot) + ":" + std::to_string(params->inputTimeStamp) + (params->encodePicFlags & NV_ENC_PIC_FLAG_FORCEIDR ? ":idr" : ""));
-      return NV_ENC_SUCCESS;
+      return std::exchange(probe.next_picture_status, NV_ENC_SUCCESS);
     }
 
     static NVENCSTATUS NVENCAPI lock_bitstream(void *encoder, NV_ENC_LOCK_BITSTREAM *params) {
@@ -634,7 +647,8 @@ TEST(NvencPipelineTest, PicturesRetrievedOnASecondThreadWhileTheNextIsSubmitted)
       }
       retrieved.push_back(encoded.frame_index);
       return true;
-    });
+    },
+                                                             false);
     for (std::uint64_t frame = 1; frame <= 500; ++frame) {
       ASSERT_TRUE(pipeline.acquire());
       ASSERT_TRUE(probe.submit_frame(frame, frame == 1));
@@ -815,4 +829,192 @@ TEST(NvencPipelineTest, InvalidationThatNeedsNoDriverCallIsDecidedWithPicturesIn
   EXPECT_FALSE(probe.retrieve_frame().after_ref_frame_invalidation);
   ASSERT_TRUE(probe.submit_frame(7, true));
   EXPECT_TRUE(probe.retrieve_frame().after_ref_frame_invalidation);
+}
+
+namespace {
+  // Exercise the real conversion/session/base forwarding path, without modeling native copy
+  // caching. The existing fake driver records every prepare call and always copies its target.
+  class revision_backend_t final: public platf::nvenc_encode_device_t {
+  public:
+    nvenc::nvenc_base &encoder() override {
+      return probe;
+    }
+
+    int convert(platf::img_t &) override {
+      ++conversions;
+      if (!kept_input) {
+        probe.convert(content);
+      }
+      if (throw_after_conversion) {
+        throw std::runtime_error("conversion failed after possibly writing input");
+      }
+      return result;
+    }
+
+    int convert_with_encode_target(platf::img_t &image, std::chrono::steady_clock::time_point target) override {
+      encode_target = target;
+      return convert(image);
+    }
+
+    bool conversion_kept_input() const override {
+      return kept_input;
+    }
+
+    void encoder_consumed_input() override {
+      ++consumed;
+    }
+
+    nvenc_pipeline_probe probe;
+    bool kept_input = false;
+    bool throw_after_conversion = false;
+    int content = 0;
+    int result = 0;
+    unsigned conversions = 0, consumed = 0;
+    std::optional<std::chrono::steady_clock::time_point> encode_target;
+  };
+
+  class NativeInputRevisionTest: public testing::Test {
+  protected:
+    void SetUp() override {
+      auto candidate = std::make_unique<revision_backend_t>();
+      backend = candidate.get();
+      ASSERT_TRUE(backend->probe.create());
+      backend->probe.complete_every_picture();
+      session = std::make_unique<video::nvenc_encode_session_t>(
+        platf::native_encode_owner_test_access::adopt(std::move(candidate), workers)
+      );
+    }
+
+    void TearDown() override {
+      session.reset();
+      workers.seal_and_drain();
+    }
+
+    video::detail::tracked_async_worker_pool_t workers;
+    revision_backend_t *backend = nullptr;
+    std::unique_ptr<video::nvenc_encode_session_t> session;
+    platf::img_t image;
+  };
+}  // namespace
+
+TEST_F(NativeInputRevisionTest, InitialRetainedConversionKeepsUnknownAndBothEncodePathsForwardIt) {
+  // No successful writing conversion has established a content identity yet.
+  ASSERT_FALSE(session->encode_frame(10, {}).data.empty());
+  backend->kept_input = true;
+  ASSERT_EQ(session->convert(image), 0);
+  ASSERT_TRUE(session->submit_frame(11));
+  ASSERT_FALSE(session->retrieve_frame().data.empty());
+  EXPECT_EQ(backend->probe.prepared_input_revisions(), (std::vector<std::uint64_t> {0, 0}));
+  EXPECT_EQ(backend->consumed, 2u);
+}
+
+TEST_F(NativeInputRevisionTest, SuccessfulWritesAdvanceWhileRetainedConversionsKeepTheSameRevision) {
+  backend->content = 11;
+  ASSERT_EQ(session->convert(image), 0);
+  ASSERT_FALSE(session->encode_frame(10, {}).data.empty());
+  backend->kept_input = true;
+  const std::chrono::steady_clock::time_point target {123ms};
+  ASSERT_EQ(session->convert_with_encode_target(image, target), 0);
+  ASSERT_TRUE(session->submit_frame(11));
+  ASSERT_FALSE(session->retrieve_frame().data.empty());
+  backend->kept_input = false;
+  backend->content = 22;
+  ASSERT_EQ(session->convert_with_encode_target(image, target + 1ms), 0);
+  ASSERT_FALSE(session->encode_frame(12, {}).data.empty());
+  EXPECT_EQ(backend->encode_target, target + 1ms);
+  EXPECT_EQ(backend->probe.prepared_input_revisions(), (std::vector<std::uint64_t> {1, 1, 2}));
+  EXPECT_EQ(backend->probe.encoded_contents(), (std::vector<std::pair<std::uint64_t, int>> {{10, 11}, {11, 11}, {12, 22}}));
+}
+
+TEST_F(NativeInputRevisionTest, FailedConversionCannotRestoreAnOldRevisionAndLaterWriteUsesAFreshOne) {
+  backend->content = 11;
+  ASSERT_EQ(session->convert(image), 0);
+  ASSERT_FALSE(session->encode_frame(10, {}).data.empty());
+  backend->content = 22;
+  backend->result = -1;
+  EXPECT_EQ(session->convert(image), -1);
+  backend->kept_input = true;
+  backend->result = 0;
+  ASSERT_EQ(session->convert(image), 0);
+  ASSERT_FALSE(session->encode_frame(11, {}).data.empty());
+  backend->kept_input = false;
+  backend->content = 33;
+  ASSERT_EQ(session->convert(image), 0);
+  ASSERT_FALSE(session->encode_frame(12, {}).data.empty());
+  EXPECT_EQ(backend->probe.prepared_input_revisions(), (std::vector<std::uint64_t> {1, 0, 2}));
+}
+
+TEST_F(NativeInputRevisionTest, ThrowingTargetConversionLeavesUnknownAcrossRetainedRetryAndDoesNotReuseIds) {
+  backend->content = 11;
+  ASSERT_EQ(session->convert(image), 0);
+  ASSERT_FALSE(session->encode_frame(10, {}).data.empty());
+  backend->content = 22;
+  backend->throw_after_conversion = true;
+  const std::chrono::steady_clock::time_point target {123ms};
+  EXPECT_THROW(session->convert_with_encode_target(image, target), std::runtime_error);
+  backend->kept_input = true;
+  backend->throw_after_conversion = false;
+  ASSERT_EQ(session->convert_with_encode_target(image, target + 1ms), 0);
+  ASSERT_TRUE(session->submit_frame(11));
+  ASSERT_FALSE(session->retrieve_frame().data.empty());
+  backend->kept_input = false;
+  backend->content = 33;
+  ASSERT_EQ(session->convert_with_encode_target(image, target + 2ms), 0);
+  ASSERT_TRUE(session->submit_frame(12));
+  ASSERT_FALSE(session->retrieve_frame().data.empty());
+  EXPECT_EQ(backend->probe.prepared_input_revisions(), (std::vector<std::uint64_t> {1, 0, 2}));
+}
+
+TEST_F(NativeInputRevisionTest, ChangedTargetBeforeBusyRefusalKeepsItsRevisionForRetainedRetry) {
+  backend->content = 11;
+  ASSERT_EQ(session->convert(image), 0);
+  ASSERT_TRUE(session->submit_frame(10));
+  backend->kept_input = true;
+  ASSERT_EQ(session->convert(image), 0);
+  ASSERT_TRUE(session->submit_frame(11));
+  ASSERT_EQ(backend->probe.frames_in_flight(), 2u);
+  backend->kept_input = false;
+  backend->content = 22;
+  ASSERT_EQ(session->convert(image), 0);  // The actual target changes before admission can refuse.
+  EXPECT_FALSE(session->submit_frame(12));
+  EXPECT_EQ(backend->probe.prepared_input_revisions(), (std::vector<std::uint64_t> {1, 1}));
+  EXPECT_EQ(backend->probe.frames_in_flight(), 2u);
+  backend->kept_input = true;
+  ASSERT_EQ(session->convert(image), 0);
+  ASSERT_FALSE(session->retrieve_frame().data.empty());
+  ASSERT_TRUE(session->submit_frame(12));
+  ASSERT_FALSE(session->retrieve_frame().data.empty());
+  ASSERT_FALSE(session->retrieve_frame().data.empty());
+  EXPECT_EQ(backend->probe.prepared_input_revisions(), (std::vector<std::uint64_t> {1, 1, 2}));
+  EXPECT_EQ(backend->probe.encoded_contents(), (std::vector<std::pair<std::uint64_t, int>> {{10, 11}, {11, 11}, {12, 22}}));
+  EXPECT_EQ(backend->consumed, 4u);  // Existing input-retirement callback also runs on refusal.
+}
+
+TEST_F(NativeInputRevisionTest, NeedMoreInputStillReturnsFalseAndRetainsAcceptedInputForTeardown) {
+  backend->content = 11;
+  ASSERT_EQ(session->convert(image), 0);
+  backend->probe.next_picture_status = NV_ENC_ERR_NEED_MORE_INPUT;
+  EXPECT_FALSE(session->submit_frame(10));
+  EXPECT_EQ(backend->probe.frames_in_flight(), 1u);
+  EXPECT_EQ(backend->probe.prepared_input_revisions(), (std::vector<std::uint64_t> {1}));
+  EXPECT_TRUE(session->retrieve_frame().data.empty());
+  EXPECT_TRUE(only(backend->probe.operations(), {"unmap", "unlock"}).empty());
+  backend->probe.destroy_encoder();
+  EXPECT_EQ(backend->probe.frames_in_flight(), 0u);
+  EXPECT_EQ(backend->probe.encoded_contents(), (std::vector<std::pair<std::uint64_t, int>> {{10, 11}}));
+  EXPECT_EQ(only(backend->probe.operations(), {"eos", "lock", "unlock", "unmap"}), (std::vector<std::string> {"eos", "lock-0", "unlock-0", "unmap-0"}));
+  EXPECT_EQ(backend->consumed, 1u);
+}
+
+TEST(NvencPipelineTest, DirectCallersDefaultToUnknownForBothSubmitAndSynchronousEncode) {
+  nvenc_pipeline_probe probe;
+  ASSERT_TRUE(probe.create());
+  probe.complete_every_picture();
+  probe.convert(11);
+  ASSERT_TRUE(probe.submit_frame(10, false));
+  ASSERT_FALSE(probe.retrieve_frame().data.empty());
+  probe.convert(22);
+  ASSERT_FALSE(probe.encode_frame(11, false).data.empty());
+  EXPECT_EQ(probe.prepared_input_revisions(), (std::vector<std::uint64_t> {0, 0}));
+  EXPECT_EQ(probe.encoded_contents(), (std::vector<std::pair<std::uint64_t, int>> {{10, 11}, {11, 22}}));
 }

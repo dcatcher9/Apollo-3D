@@ -51,6 +51,7 @@
 #include "misc.h"
 #include "nvprefs/nvprefs_interface.h"
 #include "presentation_scheduling.h"
+#include "process_environment.h"
 #include "src/entry_handler.h"
 #include "src/globals.h"
 #include "src/logging.h"
@@ -110,18 +111,7 @@ namespace platf {
   );
 
   HANDLE qos_handle = nullptr;
-
-  decltype(QOSCreateHandle) *fn_QOSCreateHandle = nullptr;
-  decltype(QOSAddSocketToFlow) *fn_QOSAddSocketToFlow = nullptr;
-  decltype(QOSRemoveSocketFromFlow) *fn_QOSRemoveSocketFromFlow = nullptr;
-
   HANDLE wlan_handle = nullptr;
-
-  decltype(WlanOpenHandle) *fn_WlanOpenHandle = nullptr;
-  decltype(WlanCloseHandle) *fn_WlanCloseHandle = nullptr;
-  decltype(WlanFreeMemory) *fn_WlanFreeMemory = nullptr;
-  decltype(WlanEnumInterfaces) *fn_WlanEnumInterfaces = nullptr;
-  decltype(WlanSetInterface) *fn_WlanSetInterface = nullptr;
 
   std::filesystem::path appdata() {
     WCHAR sunshine_path[MAX_PATH];
@@ -1667,39 +1657,20 @@ namespace platf {
     return ret;
   }
 
-  // Note: This does NOT append a null terminator
-  void append_string_to_environment_block(wchar_t *env_block, int &offset, const std::wstring &wstr) {
-    std::memcpy(&env_block[offset], wstr.data(), wstr.length() * sizeof(wchar_t));
-    offset += wstr.length();
-  }
-
   std::wstring create_environment_block(bp::environment &env) {
-    int size = 0;
+    std::wstring env_block;
     for (const auto &entry : env) {
-      auto name = entry.get_name();
-      auto value = entry.to_string();
-      size += from_utf8(name).length() + 1 /* L'=' */ + from_utf8(value).length() + 1 /* L'\0' */;
-    }
-
-    size += 1 /* L'\0' */;
-
-    wchar_t env_block[size];
-    int offset = 0;
-    for (const auto &entry : env) {
-      auto name = entry.get_name();
-      auto value = entry.to_string();
-
       // Construct the NAME=VAL\0 string
-      append_string_to_environment_block(env_block, offset, from_utf8(name));
-      env_block[offset++] = L'=';
-      append_string_to_environment_block(env_block, offset, from_utf8(value));
-      env_block[offset++] = L'\0';
+      env_block.append(from_utf8(entry.get_name()));
+      env_block.push_back(L'=');
+      env_block.append(from_utf8(entry.to_string()));
+      env_block.push_back(L'\0');
     }
 
     // Append a final null terminator
-    env_block[offset++] = L'\0';
+    env_block.push_back(L'\0');
 
-    return std::wstring(env_block, offset);
+    return env_block;
   }
 
   LPPROC_THREAD_ATTRIBUTE_LIST allocate_proc_thread_attr_list(DWORD attribute_count) {
@@ -2858,63 +2829,31 @@ namespace platf {
     if (!remote_presentation_scheduling) {
       remote_presentation_scheduling = acquire_presentation_scheduling();
     }
-    static std::once_flag load_wlanapi_once_flag;
-    std::call_once(load_wlanapi_once_flag, []() {
-      // wlanapi.dll is not installed by default on Windows Server, so we load it dynamically
-      HMODULE wlanapi = LoadLibraryExA("wlanapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-      if (!wlanapi) {
-        BOOST_LOG(debug) << "wlanapi.dll is not available on this OS"sv;
-        return;
-      }
+    // Enable low latency mode on all connected WLAN NICs when the service is available.
+    DWORD negotiated_version;
+    if (WlanOpenHandle(WLAN_API_MAKE_VERSION(2, 0), nullptr, &negotiated_version, &wlan_handle) == ERROR_SUCCESS) {
+      PWLAN_INTERFACE_INFO_LIST wlan_interface_list;
 
-      fn_WlanOpenHandle = (decltype(fn_WlanOpenHandle)) GetProcAddress(wlanapi, "WlanOpenHandle");
-      fn_WlanCloseHandle = (decltype(fn_WlanCloseHandle)) GetProcAddress(wlanapi, "WlanCloseHandle");
-      fn_WlanFreeMemory = (decltype(fn_WlanFreeMemory)) GetProcAddress(wlanapi, "WlanFreeMemory");
-      fn_WlanEnumInterfaces = (decltype(fn_WlanEnumInterfaces)) GetProcAddress(wlanapi, "WlanEnumInterfaces");
-      fn_WlanSetInterface = (decltype(fn_WlanSetInterface)) GetProcAddress(wlanapi, "WlanSetInterface");
-
-      if (!fn_WlanOpenHandle || !fn_WlanCloseHandle || !fn_WlanFreeMemory || !fn_WlanEnumInterfaces || !fn_WlanSetInterface) {
-        BOOST_LOG(error) << "wlanapi.dll is missing exports?"sv;
-
-        fn_WlanOpenHandle = nullptr;
-        fn_WlanCloseHandle = nullptr;
-        fn_WlanFreeMemory = nullptr;
-        fn_WlanEnumInterfaces = nullptr;
-        fn_WlanSetInterface = nullptr;
-
-        FreeLibrary(wlanapi);
-        return;
-      }
-    });
-
-    // Enable low latency mode on all connected WLAN NICs if wlanapi.dll is available
-    if (fn_WlanOpenHandle) {
-      DWORD negotiated_version;
-
-      if (fn_WlanOpenHandle(WLAN_API_MAKE_VERSION(2, 0), nullptr, &negotiated_version, &wlan_handle) == ERROR_SUCCESS) {
-        PWLAN_INTERFACE_INFO_LIST wlan_interface_list;
-
-        if (fn_WlanEnumInterfaces(wlan_handle, nullptr, &wlan_interface_list) == ERROR_SUCCESS) {
-          for (DWORD i = 0; i < wlan_interface_list->dwNumberOfItems; i++) {
-            if (wlan_interface_list->InterfaceInfo[i].isState == wlan_interface_state_connected) {
-              // Enable media streaming mode for 802.11 wireless interfaces to reduce latency and
-              // unnecessary background scanning operations that cause packet loss and jitter.
-              //
-              // https://docs.microsoft.com/en-us/windows-hardware/drivers/network/oid-wdi-set-connection-quality
-              // https://docs.microsoft.com/en-us/previous-versions/windows/hardware/wireless/native-802-11-media-streaming
-              BOOL value = TRUE;
-              auto error = fn_WlanSetInterface(wlan_handle, &wlan_interface_list->InterfaceInfo[i].InterfaceGuid, wlan_intf_opcode_media_streaming_mode, sizeof(value), &value, nullptr);
-              if (error == ERROR_SUCCESS) {
-                BOOST_LOG(info) << "WLAN interface "sv << i << " is now in low latency mode"sv;
-              }
+      if (WlanEnumInterfaces(wlan_handle, nullptr, &wlan_interface_list) == ERROR_SUCCESS) {
+        for (DWORD i = 0; i < wlan_interface_list->dwNumberOfItems; i++) {
+          if (wlan_interface_list->InterfaceInfo[i].isState == wlan_interface_state_connected) {
+            // Enable media streaming mode for 802.11 wireless interfaces to reduce latency and
+            // unnecessary background scanning operations that cause packet loss and jitter.
+            //
+            // https://docs.microsoft.com/en-us/windows-hardware/drivers/network/oid-wdi-set-connection-quality
+            // https://docs.microsoft.com/en-us/previous-versions/windows/hardware/wireless/native-802-11-media-streaming
+            BOOL value = TRUE;
+            auto error = WlanSetInterface(wlan_handle, &wlan_interface_list->InterfaceInfo[i].InterfaceGuid, wlan_intf_opcode_media_streaming_mode, sizeof(value), &value, nullptr);
+            if (error == ERROR_SUCCESS) {
+              BOOST_LOG(info) << "WLAN interface "sv << i << " is now in low latency mode"sv;
             }
           }
-
-          fn_WlanFreeMemory(wlan_interface_list);
-        } else {
-          fn_WlanCloseHandle(wlan_handle, nullptr);
-          wlan_handle = nullptr;
         }
+
+        WlanFreeMemory(wlan_interface_list);
+      } else {
+        WlanCloseHandle(wlan_handle, nullptr);
+        wlan_handle = nullptr;
       }
     }
 
@@ -2968,7 +2907,7 @@ namespace platf {
 
     // Closing our WLAN client handle will undo our optimizations
     if (wlan_handle != nullptr) {
-      fn_WlanCloseHandle(wlan_handle, nullptr);
+      WlanCloseHandle(wlan_handle, nullptr);
       wlan_handle = nullptr;
     }
 
@@ -3328,7 +3267,7 @@ namespace platf {
     }
 
     virtual ~qos_t() {
-      if (!fn_QOSRemoveSocketFromFlow(qos_handle, (SOCKET) nullptr, flow_id, 0)) {
+      if (!QOSRemoveSocketFromFlow(qos_handle, (SOCKET) nullptr, flow_id, 0)) {
         auto winerr = GetLastError();
         BOOST_LOG(warning) << "QOSRemoveSocketFromFlow() failed: "sv << winerr;
       }
@@ -3357,40 +3296,18 @@ namespace platf {
       return nullptr;
     }
 
-    static std::once_flag load_qwave_once_flag;
-    std::call_once(load_qwave_once_flag, []() {
-      // qWAVE is not installed by default on Windows Server, so we load it dynamically
-      HMODULE qwave = LoadLibraryExA("qwave.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-      if (!qwave) {
-        BOOST_LOG(debug) << "qwave.dll is not available on this OS"sv;
-        return;
-      }
-
-      fn_QOSCreateHandle = (decltype(fn_QOSCreateHandle)) GetProcAddress(qwave, "QOSCreateHandle");
-      fn_QOSAddSocketToFlow = (decltype(fn_QOSAddSocketToFlow)) GetProcAddress(qwave, "QOSAddSocketToFlow");
-      fn_QOSRemoveSocketFromFlow = (decltype(fn_QOSRemoveSocketFromFlow)) GetProcAddress(qwave, "QOSRemoveSocketFromFlow");
-
-      if (!fn_QOSCreateHandle || !fn_QOSAddSocketToFlow || !fn_QOSRemoveSocketFromFlow) {
-        BOOST_LOG(error) << "qwave.dll is missing exports?"sv;
-
-        fn_QOSCreateHandle = nullptr;
-        fn_QOSAddSocketToFlow = nullptr;
-        fn_QOSRemoveSocketFromFlow = nullptr;
-
-        FreeLibrary(qwave);
-        return;
-      }
-
+    static std::once_flag qos_init_once_flag;
+    std::call_once(qos_init_once_flag, []() {
       QOS_VERSION qos_version {1, 0};
-      if (!fn_QOSCreateHandle(&qos_version, &qos_handle)) {
+      if (!QOSCreateHandle(&qos_version, &qos_handle)) {
         auto winerr = GetLastError();
         BOOST_LOG(warning) << "QOSCreateHandle() failed: "sv << winerr;
         return;
       }
     });
 
-    // If qWAVE is unavailable, just return
-    if (!fn_QOSAddSocketToFlow || !qos_handle) {
+    // A failed service initialization leaves QoS disabled.
+    if (!qos_handle) {
       return nullptr;
     }
 
@@ -3446,7 +3363,7 @@ namespace platf {
     }
 
     QOS_FLOWID flow_id = 0;
-    if (!fn_QOSAddSocketToFlow(qos_handle, (SOCKET) native_socket, dest_addr, traffic_type, QOS_NON_ADAPTIVE_FLOW, &flow_id)) {
+    if (!QOSAddSocketToFlow(qos_handle, (SOCKET) native_socket, dest_addr, traffic_type, QOS_NON_ADAPTIVE_FLOW, &flow_id)) {
       auto winerr = GetLastError();
       BOOST_LOG(warning) << "QOSAddSocketToFlow() failed: "sv << winerr;
       return nullptr;

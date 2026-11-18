@@ -29,6 +29,8 @@ namespace nvenc {
   }
 
   bool nvenc_d3d11_native::create_and_register_input_buffer() {
+    // Registration/recreation and a depth fallback cannot inherit another allocation's proof.
+    picture_input_revisions.fill(0);
     D3D11_TEXTURE2D_DESC desc = {};
     desc.Width = encoder_params.width;
     desc.Height = encoder_params.height;
@@ -84,8 +86,11 @@ namespace nvenc {
     return true;
   }
 
-  void nvenc_d3d11_native::prepare_input(unsigned slot) {
+  void nvenc_d3d11_native::prepare_input(unsigned slot, std::uint64_t input_revision) {
     if (pipeline_depth() == 1 || slot >= picture_inputs.size() || !picture_inputs[slot]) {
+      return;
+    }
+    if (input_revision != 0 && picture_input_revisions[slot] == input_revision) {
       return;
     }
     if (!copy_context) {
@@ -94,6 +99,12 @@ namespace nvenc {
     // Ordered on the immediate context after the conversion that wrote the target and before the
     // next one, so the copy needs no other synchronization.
     copy_context->CopyResource(picture_inputs[slot], d3d_input_texture);
+  #ifdef SUNSHINE_TESTS
+    ++input_copy_counts_[slot];
+  #endif
+    // This records ordered texture content, not NVENC acceptance or GPU completion. Unknown
+    // always copies and clears this slot's prior known proof at that same actual write.
+    picture_input_revisions[slot] = input_revision;
   }
 
 }  // namespace nvenc

@@ -7,6 +7,12 @@ include_directories("${CMAKE_SOURCE_DIR}")
 
 enable_testing()
 
+add_test(NAME simple_web_server_overlay
+        COMMAND "${CMAKE_COMMAND}"
+                "-DREPO_SOURCE_DIR=${CMAKE_SOURCE_DIR}"
+                "-DTEST_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}/simple-web-overlay-test"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_simple_web_server_overlay.cmake")
+
 # Add GoogleTest directory to the project
 set(GTEST_SOURCE_DIR "${CMAKE_SOURCE_DIR}/third-party/googletest")
 set(INSTALL_GTEST OFF)
@@ -37,12 +43,13 @@ file(GLOB_RECURSE TEST_SOURCES CONFIGURE_DEPENDS
         ${CMAKE_SOURCE_DIR}/tests/*.h
         ${CMAKE_SOURCE_DIR}/tests/*.cpp)
 
-# The IPC fixtures have their own entry points and do not link the full host.
+# These fixtures have their own entry points and do not link the full host.
 list(REMOVE_ITEM TEST_SOURCES
     "${CMAKE_SOURCE_DIR}/tests/tools/ds5_fake_sidecar.cpp"
     "${CMAKE_SOURCE_DIR}/tests/tools/ds5_sidecar_test_stubs.cpp"
     "${CMAKE_SOURCE_DIR}/tests/unit/platform/windows/test_ds5_sidecar_client.cpp"
-    "${CMAKE_SOURCE_DIR}/tests/unit/platform/windows/test_ds5_component.cpp")
+    "${CMAKE_SOURCE_DIR}/tests/unit/platform/windows/test_ds5_component.cpp"
+    "${CMAKE_SOURCE_DIR}/tests/unit/platform/windows/test_nvapi_wrapper.cpp")
 
 set(SUNSHINE_SOURCES
         ${SUNSHINE_TARGET_FILES})
@@ -177,6 +184,23 @@ if(WIN32)
     endforeach()
     add_dependencies(reshade_receiver_process_helper reshade_receiver_test)
     add_dependencies(reshade_receiver_process_test reshade_receiver_process_helper)
+endif()
+
+if(WIN32)
+    # Exercise the production wrapper with an entirely fake DLL loader and NVAPI dispatch.
+    add_executable(nvapi_wrapper_unit_tests
+        "${CMAKE_SOURCE_DIR}/tests/unit/platform/windows/test_nvapi_wrapper.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/nvprefs/nvapi_opensource_wrapper.cpp")
+    target_include_directories(nvapi_wrapper_unit_tests PRIVATE
+        "${CMAKE_SOURCE_DIR}")
+    target_include_directories(nvapi_wrapper_unit_tests SYSTEM PRIVATE
+        "${CMAKE_SOURCE_DIR}/third-party/nvapi-open-source-sdk")
+    target_link_libraries(nvapi_wrapper_unit_tests PRIVATE gtest_main nlohmann_json::nlohmann_json)
+    target_compile_definitions(nvapi_wrapper_unit_tests PRIVATE SUNSHINE_TESTS)
+    target_compile_options(nvapi_wrapper_unit_tests PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
+    set_target_properties(nvapi_wrapper_unit_tests PROPERTIES CXX_STANDARD 23 LINK_SEARCH_START_STATIC 1)
+    add_test(NAME nvapi_wrapper_unit_tests COMMAND nvapi_wrapper_unit_tests)
+    set_tests_properties(nvapi_wrapper_unit_tests PROPERTIES TIMEOUT 30)
 endif()
 
 # The protocol peer is restricted to the standalone pipe lifecycle tests. The

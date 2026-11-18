@@ -28,6 +28,7 @@ extern "C" {
 }
 
 // local includes
+#include "atomic_presentation.h"
 #include "client_features.h"
 #include "config.h"
 #include "crypto.h"
@@ -43,6 +44,10 @@ extern "C" {
 #include "session_join_watchdog.h"
 #include "session_resume_lifecycle.h"
 #include "stream.h"
+#ifdef SUNSHINE_TESTS
+  #include "atomic_presentation_test.h"
+  #include "stream_media_test.h"
+#endif
 #include "sync.h"
 #include "system_tray.h"
 #include "thread_safe.h"
@@ -774,9 +779,8 @@ namespace stream {
     av_ping_route_queue_t av_ping_route_updates;
 
     std::thread recv_thread;
-    std::thread video_thread;
-    std::thread audio_thread;
     std::thread control_thread;
+    std::chrono::steady_clock::time_point video_epoch;
 
     asio::io_context io_context;
 
@@ -786,9 +790,7 @@ namespace stream {
     control_server_t control_server;
   };
 
-  // Encoded packets may outlive their RTSP session while waiting in the global broadcast queues.
-  // Keep the exact send-side state alive independently; retaining session_t itself would create a
-  // cycle through session_t::broadcast_ref and could run broadcast teardown on a broadcast worker.
+  // Each sender is bound to its session's send-side state until that sender has joined.
   struct video_channel_t {
     int packet_size;
     int min_required_fec_packets;
@@ -840,42 +842,92 @@ namespace stream {
     std::unique_ptr<platf::deinit_t> qos;
   };
 
-  // Everything needed to finish or reject one asynchronous live display-mode request. These
-  // values deliberately do not retain session_t: the session owns and joins the worker instead.
-  struct live_video_mode_request_t {
-    safe::mail_t mail;
-    std::shared_ptr<video_channel_t> video;
-    // The last encoder-proven mode. A normal refusal leaves it in effect; after an unprovable
-    // desktop rollback it remains only the recovery target carried with NEEDS_RECONNECT.
-    std::shared_ptr<video::effective_video_mode_publisher_t> effective_mode;
-    video::video_mode_change_t change;
-    std::uint32_t launch_session_id;
-    std::string client_name;
+  class session_media_senders_t {
+  public:
+    session_media_senders_t() = default;
+
+    ~session_media_senders_t() {
+      stop_and_join();
+    }
+
+    session_media_senders_t(const session_media_senders_t &) = delete;
+    session_media_senders_t &operator=(const session_media_senders_t &) = delete;
+    session_media_senders_t(session_media_senders_t &&) = delete;
+    session_media_senders_t &operator=(session_media_senders_t &&) = delete;
+
+    const video::packet_queue_t &video_packets() const noexcept {
+      return video_packets_;
+    }
+
+    const audio::packet_queue_t &audio_packets() const noexcept {
+      return audio_packets_;
+    }
+
+    void adopt_video(std::thread worker) noexcept {
+      video_thread_ = std::move(worker);
+    }
+
+    void adopt_audio(std::thread worker) noexcept {
+      audio_thread_ = std::move(worker);
+    }
+
+    void stop_and_join() {
+      if (video_packets_) {
+        video_packets_->stop();
+      }
+      if (audio_packets_) {
+        audio_packets_->stop();
+      }
+      if (video_thread_.joinable()) {
+        video_thread_.join();
+      }
+      if (audio_thread_.joinable()) {
+        audio_thread_.join();
+      }
+      // A stopped queue retains unread packets. Release them even if session_t is retained.
+      video_packets_.reset();
+      audio_packets_.reset();
+    }
+
+  private:
+    video::packet_queue_t video_packets_ = std::make_shared<safe::queue_t<video::packet_t>>(video::ENCODED_PACKET_QUEUE_LIMIT);
+    audio::packet_queue_t audio_packets_ = std::make_shared<safe::queue_t<audio::packet_t>>(audio::ENCODED_PACKET_QUEUE_LIMIT);
+    std::thread video_thread_;
+    std::thread audio_thread_;
   };
 
+  // Everything needed to finish or reject one asynchronous live display-mode request. These
+  // values deliberately do not retain session_t: the session owns and joins the worker instead.
+  using live_video_mode_request_t = detail::atomic_presentation_t::request_t;
+
   struct live_video_mode_worker_t {
-    std::mutex mutex;
-    std::condition_variable wake;
-    bool stopping = false;
-    // Only the most recent request that has not begun matters; a burst collapses to one display
-    // transition. Once begun, the serial gate retains exclusive ownership through encoder
-    // confirmation and any required desktop rollback.
-    std::optional<live_video_mode_request_t> pending;
-    std::optional<video::video_mode_applied_t> completion;
-    detail::live_video_mode_serial_gate_t serial_gate;
+    // Serialize thread publication with stop's barrier; the state owns no thread/session.
+    std::mutex thread_mutex;
+    std::shared_ptr<detail::atomic_presentation_t> transactions =
+      std::make_shared<detail::atomic_presentation_t>();
+#ifdef SUNSHINE_TESTS
+    std::shared_ptr<const testing::atomic_presentation_process_hooks_t> process_hooks;
+#endif
     std::thread thread;
 
-    ~live_video_mode_worker_t() {
-      {
-        std::lock_guard lock(mutex);
-        stopping = true;
-        pending.reset();
-        serial_gate.cancel_pending();
-      }
-      wake.notify_all();
+    void stop() {
+      // Close admission and drop pending dependencies without either owner lock held. Then
+      // wait out any dispatch that passed its stopped check before publishing the thread.
+      transactions->stop();
+      std::lock_guard barrier(thread_mutex);
+    }
+
+    void join() {
+      stop();
       if (thread.joinable()) {
+        BOOST_LOG(debug) << "Waiting for live video-mode worker to end..."sv;
         thread.join();
       }
+      transactions->clear_stopped();
+    }
+
+    ~live_video_mode_worker_t() {
+      join();
     }
   };
 
@@ -910,6 +962,9 @@ namespace stream {
       platf::feedback_queue_t feedback_queue;
       platf::feedback_queue_t haptics_feedback_queue;
       safe::mail_raw_t::event_t<video::hdr_info_t> hdr_queue;
+      // Own these posts across capture startup and encoder handoffs instead of resolving weak
+      // mail entries on every control iteration.
+      safe::mail_raw_t::event_t<int> depth_status_event;
       // mail_raw_t keeps only a weak reference to each post. Retain this queue for the full
       // session lifetime so worker/encode-thread replies cannot disappear between raise() and
       // the control thread's next drain.
@@ -949,13 +1004,16 @@ namespace stream {
 
     // The client can send its audio/video UDP ping while platform resume work is still changing
     // the display topology, and before ENet publishes the local source address. Capture must not
-    // feed the broadcast queues until both halves of session startup are complete.
+    // feed the session media queues until both halves of session startup are complete.
     safe::signal_t startup_ready;
     safe::signal_t control_ready;
 
     std::mutex stop_mutex;
     std::atomic_bool graceful_stop_requested {false};
     std::atomic<session::state_e> state;
+
+    // Join senders before their channels, mail and shared socket owner can be destroyed.
+    session_media_senders_t media_senders;
 
     // Keep this last: member destruction runs in reverse declaration order, so its defensive
     // destructor joins before any mail/video state captured by the worker can be destroyed.
@@ -1007,65 +1065,14 @@ namespace stream {
     }
 
     /**
-     * Deliver an encoder completion to the one matching in-flight transaction.
-     *
-     * Client request ids cannot be used here because they are opaque and may repeat. The internal
-     * token also prevents a delayed completion from releasing a newer transaction.
-     */
-    void complete_live_video_mode(
-      session_t &session,
-      video::video_mode_applied_t completion
-    ) {
-      auto &state = session.live_video_mode_worker;
-      bool accepted = false;
-      {
-        std::lock_guard lock(state.mutex);
-        if (!state.stopping && !state.completion) {
-          const auto matching_request = std::find_if(
-            completion.requests.begin(),
-            completion.requests.end(),
-            [&](const video::video_mode_request_ref_t &request) {
-              return state.serial_gate.accepts_completion(request.transaction_id);
-            }
-          );
-          if (matching_request != completion.requests.end()) {
-            state.completion = std::move(completion);
-            accepted = true;
-          }
-        }
-      }
-      if (accepted) {
-        state.wake.notify_one();
-      } else {
-        BOOST_LOG(warning) << "Ignoring a stale or duplicate live video-mode encoder completion."sv;
-      }
-    }
-
-    /**
      * Serialize a live request through display apply, encoder creation and (on failure) display
      * rollback. Only an unstarted pending request may be coalesced.
      */
     void dispatch_live_video_mode(session_t &session, live_video_mode_request_t request) {
       auto &worker_state = session.live_video_mode_worker;
-      std::optional<live_video_mode_request_t> superseded;
-      std::optional<live_video_mode_request_t> rejected;
-      bool start_worker = false;
-      {
-        std::lock_guard lock(worker_state.mutex);
-        if (worker_state.stopping) {
-          rejected = std::move(request);
-        } else {
-          const auto submission = worker_state.serial_gate.submit();
-          request.change.transaction_id = submission.transaction_id;
-          superseded = std::exchange(worker_state.pending, std::move(request));
-          if (static_cast<bool>(superseded) != static_cast<bool>(submission.superseded_transaction_id)) {
-            BOOST_LOG(error) << "Live video-mode pending queue lost synchronization with its transaction gate."sv;
-          }
-        }
-        if (!worker_state.stopping && !worker_state.thread.joinable()) {
-          start_worker = true;
-        }
-      }
+      const auto submitted = worker_state.transactions->submit(std::move(request));
+      const auto &superseded = submitted.superseded;
+      const auto &rejected = submitted.rejected;
 
       if (rejected) {
         reject_live_video_mode(
@@ -1089,52 +1096,32 @@ namespace stream {
         );
       }
 
-      if (!start_worker) {
-        worker_state.wake.notify_one();
+      // Stop closes admission before waiting on this publication lock. A disconnect therefore
+      // cannot miss a thread whose constructor passed the stopped check while it was racing.
+      std::unique_lock worker_lock(worker_state.thread_mutex);
+      if (worker_state.transactions->stopping()) {
         return;
       }
-
-      // Publish the joinable thread while holding the same lock used by stop/join. Otherwise a
-      // concurrent disconnect could observe "no worker", return from join(), and let session_t
-      // die just before this lambda captured it.
-      std::lock_guard worker_lock(worker_state.mutex);
-      if (worker_state.stopping || worker_state.thread.joinable()) {
+      if (worker_state.thread.joinable()) {
+        worker_lock.unlock();
+        worker_state.transactions->notify_pending();
         return;
       }
       worker_state.thread = std::thread([&session]() {
         auto &state = session.live_video_mode_worker;
+        auto &transactions = *state.transactions;
         while (true) {
-          std::optional<live_video_mode_request_t> job;
-          std::uint64_t transaction_id = 0;
-          {
-            std::unique_lock lock(state.mutex);
-            state.wake.wait(lock, [&]() {
-              return state.stopping || state.serial_gate.can_begin();
-            });
-            if (state.stopping) {
-              state.pending.reset();
-              state.serial_gate.cancel_pending();
-              return;
-            }
-            const auto next_transaction = state.serial_gate.begin_next();
-            job = std::move(state.pending);
-            state.pending.reset();
-            if (!next_transaction || !job || job->change.transaction_id != *next_transaction) {
-              BOOST_LOG(error) << "Live video-mode worker found a transaction/payload mismatch."sv;
-              if (next_transaction) {
-                (void) state.serial_gate.finish(*next_transaction);
-              }
-              continue;
-            }
-            transaction_id = *next_transaction;
+          auto job = transactions.wait_next();
+          if (!job) {
+            return;
           }
+          const auto transaction_id = job->change.transaction_id;
 
           // The session can end while a display transition is in flight. Never resize a desktop
           // for a stream that is already gone. The acknowledgement is dropped with it; the client
           // is disconnected at that point and its own timeout covers the missing reply.
           if (job->mail->event<bool>(mail::shutdown)->peek()) {
-            std::lock_guard lock(state.mutex);
-            (void) state.serial_gate.finish(transaction_id);
+            (void) transactions.finish(transaction_id);
             continue;
           }
 
@@ -1146,82 +1133,57 @@ namespace stream {
                      static_cast<std::uint32_t>(job->change.height)
                    );
           };
-          // The quality request was validated on the control thread, but a Host SBS toggle can
-          // race it while the serialized display worker is waiting. Check before touching the
-          // desktop, then check again after the potentially slow display operation below.
+          // Recheck the immutable requested mode's geometry before touching the desktop. This
+          // preflight and the encoder's final checks retain their own authority.
           if (host_sbs_rejects_geometry()) {
             BOOST_LOG(warning)
               << "Rejecting live video mode "sv << job->change.width << 'x'
               << job->change.height
-              << " because Host SBS V2 became active before the transaction committed."sv;
+              << " because the requested Host SBS V2 geometry is unsupported."sv;
             reject_live_video_mode(
               job->mail,
               job->effective_mode,
               job->change.request_id,
               live_video_mode_ack_e::rejected_invalid
             );
-            std::lock_guard lock(state.mutex);
-            (void) state.serial_gate.finish(transaction_id);
+            (void) transactions.finish(transaction_id);
             continue;
           }
 
           auto result = proc::live_video_mode_result_e::unchanged;
-          if (proc::proc.live_video_mode_needs_display_change(job->change.width, job->change.height, job->change.encodingFramerate)) {
-            result = proc::proc.apply_live_video_mode(
-              job->change.width,
-              job->change.height,
-              job->change.encodingFramerate,
-              job->launch_session_id
-            );
+          if (
+#ifdef SUNSHINE_TESTS
+            state.process_hooks ? state.process_hooks->needs_display_change(job->change.width, job->change.height, job->change.encodingFramerate) :
+#endif
+                                  proc::proc.live_video_mode_needs_display_change(job->change.width, job->change.height, job->change.encodingFramerate)
+          ) {
+            result =
+#ifdef SUNSHINE_TESTS
+              state.process_hooks ? state.process_hooks->apply(
+                                      job->change.width,
+                                      job->change.height,
+                                      job->change.encodingFramerate,
+                                      job->launch_session_id
+                                    ) :
+#endif
+                                    proc::proc.apply_live_video_mode(
+                                      job->change.width,
+                                      job->change.height,
+                                      job->change.encodingFramerate,
+                                      job->launch_session_id
+                                    );
           }
           const bool display_changed =
             result == proc::live_video_mode_result_e::applied;
 
-          {
-            std::lock_guard lock(state.mutex);
-            if (state.stopping) {
-              return;
-            }
-          }
-          if ((result == proc::live_video_mode_result_e::applied || result == proc::live_video_mode_result_e::unchanged) && host_sbs_rejects_geometry()) {
-            BOOST_LOG(warning)
-              << "Host SBS V2 became active while live video mode "sv
-              << job->change.width << 'x' << job->change.height
-              << " was being applied; rejecting the transaction."sv;
-            bool rollback_restored_desktop = true;
-            if (display_changed && job->effective_mode) {
-              const auto previous = job->effective_mode->current();
-              const auto rollback = proc::proc.apply_live_video_mode(
-                previous.source_width > 0 ? previous.source_width : previous.width,
-                previous.source_height > 0 ? previous.source_height : previous.height,
-                previous.framerateX100 * 10,
-                job->launch_session_id
-              );
-              if (rollback != proc::live_video_mode_result_e::applied && rollback != proc::live_video_mode_result_e::unchanged) {
-                rollback_restored_desktop = false;
-                BOOST_LOG(error)
-                  << "Could not restore the prior desktop after rejecting a raced Host SBS "sv
-                     "quality transaction; the client will be told to reconnect."sv;
-              }
-            }
-            reject_live_video_mode(
-              job->mail,
-              job->effective_mode,
-              job->change.request_id,
-              rollback_restored_desktop ?
-                live_video_mode_ack_e::rejected_invalid :
-                live_video_mode_ack_e::rejected_needs_reconnect
-            );
-            std::lock_guard lock(state.mutex);
-            (void) state.serial_gate.finish(transaction_id);
-            continue;
+          if (transactions.stopping()) {
+            return;
           }
           switch (result) {
             case proc::live_video_mode_result_e::applied:
             case proc::live_video_mode_result_e::unchanged:
               if (job->mail->event<bool>(mail::shutdown)->peek()) {
-                std::lock_guard lock(state.mutex);
-                (void) state.serial_gate.finish(transaction_id);
+                (void) transactions.finish(transaction_id);
                 continue;
               }
               // The desktop is ready. Keep the transaction active until the encode loop proves
@@ -1239,10 +1201,7 @@ namespace stream {
                 job->change.request_id,
                 live_video_mode_ack_status(result)
               );
-              {
-                std::lock_guard lock(state.mutex);
-                (void) state.serial_gate.finish(transaction_id);
-              }
+              (void) transactions.finish(transaction_id);
               break;
             case proc::live_video_mode_result_e::failed:
               BOOST_LOG(warning) << "type [IDX_SET_VIDEO_MODE]: the desktop could not be resized to "sv
@@ -1254,10 +1213,7 @@ namespace stream {
                 job->change.request_id,
                 live_video_mode_ack_status(result)
               );
-              {
-                std::lock_guard lock(state.mutex);
-                (void) state.serial_gate.finish(transaction_id);
-              }
+              (void) transactions.finish(transaction_id);
               break;
           }
 
@@ -1265,17 +1221,9 @@ namespace stream {
             continue;
           }
 
-          std::optional<video::video_mode_applied_t> completion;
-          {
-            std::unique_lock lock(state.mutex);
-            state.wake.wait(lock, [&]() {
-              return state.stopping || state.completion.has_value();
-            });
-            if (state.stopping) {
-              return;
-            }
-            completion = std::move(state.completion);
-            state.completion.reset();
+          auto completion = transactions.wait_completion(transaction_id);
+          if (!completion) {
+            return;
           }
 
           const auto matching_request = std::find_if(
@@ -1297,12 +1245,28 @@ namespace stream {
                                << completion->desktop_mode.width << 'x'
                                << completion->desktop_mode.height << " after the encoder rejected "
                                << job->change.width << 'x' << job->change.height << '.';
+#ifdef SUNSHINE_TESTS
+            const auto rollback_result = state.process_hooks ?
+                                           state.process_hooks->apply(
+                                             completion->desktop_mode.width,
+                                             completion->desktop_mode.height,
+                                             completion->desktop_mode.framerate_millihz,
+                                             job->launch_session_id
+                                           ) :
+                                           proc::proc.apply_live_video_mode(
+                                             completion->desktop_mode.width,
+                                             completion->desktop_mode.height,
+                                             completion->desktop_mode.framerate_millihz,
+                                             job->launch_session_id
+                                           );
+#else
             const auto rollback_result = proc::proc.apply_live_video_mode(
               completion->desktop_mode.width,
               completion->desktop_mode.height,
               completion->desktop_mode.framerate_millihz,
               job->launch_session_id
             );
+#endif
             if (rollback_result != proc::live_video_mode_result_e::applied && rollback_result != proc::live_video_mode_result_e::unchanged) {
               rollback_restored_desktop = false;
               BOOST_LOG(error) << "The virtual desktop could not be restored after a live encoder "
@@ -1327,37 +1291,155 @@ namespace stream {
             )
           );
 
-          {
-            std::lock_guard lock(state.mutex);
-            if (!state.serial_gate.finish(transaction_id)) {
-              BOOST_LOG(error) << "Live video-mode transaction gate rejected its active completion."sv;
-            }
+          if (!transactions.finish(transaction_id)) {
+            BOOST_LOG(error) << "Live video-mode transaction gate rejected its active completion."sv;
           }
         }
       });
-      worker_state.wake.notify_one();
+      worker_lock.unlock();
+      worker_state.transactions->notify_pending();
     }
 
     void stop_live_video_mode_worker(session_t &session) {
-      auto &worker = session.live_video_mode_worker;
-      {
-        std::lock_guard lock(worker.mutex);
-        worker.stopping = true;
-        worker.pending.reset();
-        worker.serial_gate.cancel_pending();
-      }
-      worker.wake.notify_all();
+      session.live_video_mode_worker.stop();
     }
 
     void join_live_video_mode_worker(session_t &session) {
-      stop_live_video_mode_worker(session);
-      auto &thread = session.live_video_mode_worker.thread;
-      if (thread.joinable()) {
-        BOOST_LOG(debug) << "Waiting for live video-mode worker to end..."sv;
-        thread.join();
-      }
+      session.live_video_mode_worker.join();
     }
   }  // namespace
+
+#ifdef SUNSHINE_TESTS
+  namespace testing {
+    struct atomic_presentation_fixture_t::impl_t {
+      impl_t(video::effective_video_mode_t initial, atomic_presentation_process_hooks_t hooks) {
+        if (!hooks.needs_display_change || !hooks.apply) {
+          throw std::invalid_argument("The presentation fixture requires both inert process edges");
+        }
+        session.mail = std::make_shared<safe::mail_raw_t>();
+        session.shutdown_event = session.mail->event<bool>(mail::shutdown);
+        session.video = std::make_shared<video_channel_t>();
+        session.config.monitor.effective_mode = std::make_shared<video::effective_video_mode_publisher_t>(initial);
+        session.video->effective_mode = session.config.monitor.effective_mode;
+        session.config.monitor.atomic_presentation = session.live_video_mode_worker.transactions;
+        session.video->pacing_plan_logged.store(true);
+        session.video->idr_pacing_plan_logged.store(true);
+        session.control.video_mode_queue = session.mail->queue<video::video_mode_change_t>(mail::video_mode);
+        session.control.live_video_mode_ack_queue = session.mail->queue<live_video_mode_ack_t>(mail::live_video_mode_ack, LIVE_VIDEO_MODE_ACK_QUEUE_LIMIT);
+        session.launch_session_id = 0x70000001U;
+        session.device_name = "atomic presentation fixture";
+        session.live_video_mode_worker.process_hooks = std::make_shared<const atomic_presentation_process_hooks_t>(std::move(hooks));
+        session.video->encode_wake->install([this] {
+          std::unique_lock lock(wake_mutex);
+          if (!wake_armed) {
+            return;
+          }
+          wake_armed = false;
+          wake_entered = true;
+          wake_changed.notify_all();
+          if (!wake_changed.wait_for(lock, 10s, [this] {
+                return wake_released;
+              })) {
+            wake_timed_out = true;
+          }
+        });
+      }
+
+      ~impl_t() {
+        release_wake();
+        stop_live_video_mode_worker(session);
+        join_live_video_mode_worker(session);
+      }
+
+      void release_wake() {
+        std::lock_guard lock(wake_mutex);
+        wake_armed = false;
+        wake_released = true;
+        wake_changed.notify_all();
+      }
+
+      mutable std::mutex wake_mutex;
+      std::condition_variable wake_changed;
+      bool wake_armed = false;
+      bool wake_entered = false;
+      bool wake_released = true;
+      bool wake_timed_out = false;
+      // Its real worker is joined before the gate or any captured session state can die.
+      session_t session {};
+    };
+
+    atomic_presentation_fixture_t::atomic_presentation_fixture_t(video::effective_video_mode_t initial, atomic_presentation_process_hooks_t hooks):
+        impl_(std::make_unique<impl_t>(initial, std::move(hooks))) {}
+
+    atomic_presentation_fixture_t::~atomic_presentation_fixture_t() = default;
+
+    void atomic_presentation_fixture_t::submit(video::video_mode_change_t change) {
+      auto &session = impl_->session;
+      dispatch_live_video_mode(session, {session.mail, session.video, session.config.monitor.effective_mode, change, session.launch_session_id, session.device_name});
+    }
+
+    std::optional<video::video_mode_change_t> atomic_presentation_fixture_t::pop_encode_request(std::chrono::milliseconds timeout) {
+      return impl_->session.control.video_mode_queue->pop(timeout);
+    }
+
+    void atomic_presentation_fixture_t::publish_effective_mode(video::effective_video_mode_t mode) {
+      impl_->session.config.monitor.effective_mode->publish(mode);
+    }
+
+    void atomic_presentation_fixture_t::deliver_completion(video::video_mode_applied_t completion) {
+      (void) impl_->session.config.monitor.atomic_presentation->complete(std::move(completion));
+    }
+
+    std::optional<live_video_mode_ack_t> atomic_presentation_fixture_t::pop_ack(std::chrono::milliseconds timeout) {
+      return impl_->session.control.live_video_mode_ack_queue->pop(timeout);
+    }
+
+    void atomic_presentation_fixture_t::gate_next_encode_wake() {
+      std::lock_guard lock(impl_->wake_mutex);
+      impl_->wake_armed = true;
+      impl_->wake_entered = false;
+      impl_->wake_released = false;
+    }
+
+    bool atomic_presentation_fixture_t::wait_encode_wake(std::chrono::milliseconds timeout) {
+      std::unique_lock lock(impl_->wake_mutex);
+      return impl_->wake_changed.wait_for(lock, timeout, [this] {
+        return impl_->wake_entered;
+      });
+    }
+
+    void atomic_presentation_fixture_t::release_encode_wake() {
+      impl_->release_wake();
+    }
+
+    bool atomic_presentation_fixture_t::gate_timed_out() const {
+      std::lock_guard lock(impl_->wake_mutex);
+      return impl_->wake_timed_out;
+    }
+
+    void atomic_presentation_fixture_t::stop() {
+      stop_live_video_mode_worker(impl_->session);
+      impl_->session.shutdown_event->raise(true);
+    }
+
+    void atomic_presentation_fixture_t::join() {
+      join_live_video_mode_worker(impl_->session);
+    }
+
+    bool atomic_presentation_fixture_t::stopping() const {
+      return impl_->session.live_video_mode_worker.transactions->stopping();
+    }
+
+    std::uint32_t atomic_presentation_fixture_t::launch_session_id() const {
+      return impl_->session.launch_session_id;
+    }
+
+    bool atomic_presentation_fixture_t::pacing_diagnostics_rearmed() const {
+      const auto &video = impl_->session.video;
+      return !video->pacing_plan_logged.load(std::memory_order_acquire) && !video->idr_pacing_plan_logged.load(std::memory_order_acquire);
+    }
+  }  // namespace testing
+#endif
 
   /**
    * First part of cipher must be struct of type control_encrypted_t
@@ -1857,22 +1939,6 @@ namespace stream {
     }
 
     return result_size;
-  }
-
-  std::vector<uint8_t> concat_and_insert(uint64_t insert_size, uint64_t slice_size, const std::string_view &data1, const std::string_view &data2) {
-    std::vector<std::uint8_t> result;
-    const auto result_size = concat_and_insert_into(
-      result,
-      insert_size,
-      slice_size,
-      data1,
-      data2
-    );
-    if (!result_size) {
-      return {};
-    }
-    result.resize(*result_size);
-    return result;
   }
 
   /**
@@ -2653,7 +2719,7 @@ namespace stream {
 
             // Drain depth-engine state to its latest phase. The event intentionally coalesces a
             // fast loading->ready transition so cached engines do not flash the client UI.
-            auto depth_status_event = session->mail->event<int>(mail::sbs_depth_status);
+            auto &depth_status_event = session->control.depth_status_event;
             std::optional<int> depth_phase;
             while (depth_status_event->peek()) {
               if (auto phase = depth_status_event->pop(0ms)) {
@@ -2697,19 +2763,10 @@ namespace stream {
               }
             }
 
-            // Release the matching serialized live-mode transaction. The worker sends the plain
-            // acknowledgement only after any failed-encoder desktop rollback has finished.
-            auto video_mode_applied_queue = session->mail->queue<video::video_mode_applied_t>(mail::video_mode_applied);
-            while (video_mode_applied_queue->peek()) {
-              if (auto applied = video_mode_applied_queue->pop(0ms)) {
-                complete_live_video_mode(*session, std::move(*applied));
-              }
-            }
-
             // Answer every live video-mode request (0x3007) exactly once. Unlike the depth phase
             // these must not coalesce, so they arrive on a real queue: a client that sends two
-            // requests is owed two replies. The detached virtual-display worker and the encode
-            // loop only enqueue outcomes, leaving the peer, the cipher and ENet to this thread.
+            // requests is owed two replies. The joined presentation worker only queues plain
+            // outcomes, leaving the peer, the cipher and ENet to this thread.
             auto &ack_queue = session->control.live_video_mode_ack_queue;
             while (server->_session->peer && ack_queue->peek()) {
               if (auto ack = ack_queue->pop(0ms)) {
@@ -2894,14 +2951,26 @@ namespace stream {
     }
   }
 
-  void videoBroadcastThread(udp::socket &sock) {
-    auto shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
-    auto packets = mail::man->queue<video::packet_t>(
-      mail::video_packets,
-      video::ENCODED_PACKET_QUEUE_LIMIT
-    );
-    auto video_epoch = std::chrono::steady_clock::now();
+#ifdef SUNSHINE_TESTS
+  struct media_sender_test_hooks_t {
+    std::function<void()> ready;
+    std::function<void()> before_admission;
+    std::function<void()> processed;
+    std::optional<int> video_fec_percentage;
+  };
+#endif
 
+  void run_video_sender(
+    udp::socket &sock,
+    video::packet_queue_t packets,
+    std::shared_ptr<video_channel_t> channel,
+    safe::mail_raw_t::event_t<bool> shutdown_event,
+    std::chrono::steady_clock::time_point video_epoch
+#ifdef SUNSHINE_TESTS
+    ,
+    media_sender_test_hooks_t *test_hooks = nullptr
+#endif
+  ) {
     // Video traffic is sent on this thread
     platf::adjust_thread_priority(platf::thread_priority_e::high);
 
@@ -2948,14 +3017,27 @@ namespace stream {
     auto timer = platf::create_high_precision_timer();
     if (!timer || !*timer) {
       BOOST_LOG(error) << "Failed to create timer, aborting video broadcast thread";
-      // Match the audio thread: a session without a video sender must end, not linger.
-      shutdown_event->raise(true);
       return;
     }
 
     auto ratecontrol_next_frame_start = std::chrono::steady_clock::now();
 
+#ifdef SUNSHINE_TESTS
+    if (test_hooks && test_hooks->ready) {
+      test_hooks->ready();
+    }
+#endif
     while (auto packet = packets->pop()) {
+#ifdef SUNSHINE_TESTS
+      auto report_processed = util::fail_guard([test_hooks] {
+        if (test_hooks && test_hooks->processed) {
+          test_hooks->processed();
+        }
+      });
+      if (test_hooks && test_hooks->before_admission) {
+        test_hooks->before_admission();
+      }
+#endif
       auto release_oversized_workspaces = util::fail_guard([&]() {
         if (packetization_storage.capacity() > VIDEO_SEND_WORKSPACE_RETAIN_LIMIT) {
           std::vector<std::uint8_t>().swap(packetization_storage);
@@ -2968,7 +3050,6 @@ namespace stream {
 
       frame_network_latency_logger.first_point_now();
 
-      auto channel = std::static_pointer_cast<video_channel_t>(packet->channel_data);
       if (!channel || !channel->active.load(std::memory_order_acquire)) {
         continue;
       }
@@ -3057,6 +3138,11 @@ namespace stream {
       }
 
       auto fecPercentage = config::stream.fec_percentage;
+#ifdef SUNSHINE_TESTS
+      if (test_hooks && test_hooks->video_fec_percentage) {
+        fecPercentage = *test_hooks->video_fec_percentage;
+      }
+#endif
 
       const auto packetization_started = video::detail::diagnostic_timestamp(
         stage_diagnostics.has_value(),
@@ -3376,21 +3462,24 @@ namespace stream {
         std::this_thread::sleep_for(100ms);
       }
     }
-
-    shutdown_event->raise(true);
   }
 
-  void audioBroadcastThread(udp::socket &sock) {
-    auto shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
-    auto packets = mail::man->queue<audio::packet_t>(mail::audio_packets);
-
+  void run_audio_sender(
+    udp::socket &sock,
+    audio::packet_queue_t packets,
+    std::shared_ptr<audio_channel_t> channel,
+    safe::mail_raw_t::event_t<bool> shutdown_event
+#ifdef SUNSHINE_TESTS
+    ,
+    media_sender_test_hooks_t *test_hooks = nullptr
+#endif
+  ) {
     audio_packet_t audio_packet;
     fec::rs_t rs {reed_solomon_new(RTPA_DATA_SHARDS, RTPA_FEC_SHARDS)};
     crypto::aes_t iv(16);
 
     if (!rs) {
       BOOST_LOG(error) << "Failed to allocate audio Reed-Solomon context"sv;
-      shutdown_event->raise(true);
       return;
     }
 
@@ -3409,13 +3498,27 @@ namespace stream {
     // Audio traffic is sent on this thread
     platf::adjust_thread_priority(platf::thread_priority_e::high);
 
+#ifdef SUNSHINE_TESTS
+    if (test_hooks && test_hooks->ready) {
+      test_hooks->ready();
+    }
+#endif
     while (auto packet = packets->pop()) {
+#ifdef SUNSHINE_TESTS
+      auto report_processed = util::fail_guard([test_hooks] {
+        if (test_hooks && test_hooks->processed) {
+          test_hooks->processed();
+        }
+      });
+      if (test_hooks && test_hooks->before_admission) {
+        test_hooks->before_admission();
+      }
+#endif
       if (shutdown_event->peek()) {
         break;
       }
 
-      TUPLE_2D_REF(channel_data, packet_data, *packet);
-      auto channel = std::static_pointer_cast<audio_channel_t>(channel_data);
+      auto &packet_data = *packet;
       if (!channel || !channel->active.load(std::memory_order_acquire)) {
         continue;
       }
@@ -3497,9 +3600,11 @@ namespace stream {
         std::this_thread::sleep_for(100ms);
       }
     }
-
-    shutdown_event->raise(true);
   }
+
+#ifdef SUNSHINE_TESTS
+  #include "stream_media_test.inc"
+#endif
 
   int start_broadcast(broadcast_ctx_t &ctx) {
     auto address_family = net::af_from_enum_string(config::sunshine.address_family);
@@ -3568,8 +3673,7 @@ namespace stream {
       end_broadcast(ctx);
     });
 
-    ctx.video_thread = std::thread {videoBroadcastThread, std::ref(ctx.video_sock)};
-    ctx.audio_thread = std::thread {audioBroadcastThread, std::ref(ctx.audio_sock)};
+    ctx.video_epoch = std::chrono::steady_clock::now();
     ctx.control_thread = std::thread {controlBroadcastThread, &ctx.control_server};
 
     ctx.recv_thread = std::thread {recvThread, std::ref(ctx)};
@@ -3583,16 +3687,6 @@ namespace stream {
 
     broadcast_shutdown_event->raise(true);
 
-    auto video_packets = mail::man->queue<video::packet_t>(
-      mail::video_packets,
-      video::ENCODED_PACKET_QUEUE_LIMIT
-    );
-    auto audio_packets = mail::man->queue<audio::packet_t>(mail::audio_packets);
-
-    // Minimize delay stopping video/audio threads
-    video_packets->stop();
-    audio_packets->stop();
-
     if (ctx.av_ping_route_updates) {
       ctx.av_ping_route_updates->stop();
     }
@@ -3602,20 +3696,9 @@ namespace stream {
     ctx.video_sock.close(ec);
     ctx.audio_sock.close(ec);
 
-    video_packets.reset();
-    audio_packets.reset();
-
     BOOST_LOG(debug) << "Waiting for main listening thread to end..."sv;
     if (ctx.recv_thread.joinable()) {
       ctx.recv_thread.join();
-    }
-    BOOST_LOG(debug) << "Waiting for main video thread to end..."sv;
-    if (ctx.video_thread.joinable()) {
-      ctx.video_thread.join();
-    }
-    BOOST_LOG(debug) << "Waiting for main audio thread to end..."sv;
-    if (ctx.audio_thread.joinable()) {
-      ctx.audio_thread.join();
     }
     BOOST_LOG(debug) << "Waiting for main control thread to end..."sv;
     if (ctx.control_thread.joinable()) {
@@ -3698,7 +3781,7 @@ namespace stream {
     session->video->qos = platf::enable_socket_qos(ref->video_sock.native_handle(), address, session->video->peer.port(), platf::qos_data_type_e::video, session->config.videoQosType != 0);
 
     BOOST_LOG(debug) << "Start capturing Video"sv;
-    video::capture(session->mail, session->config.monitor, session->video);
+    video::capture(session->mail, session->config.monitor, session->media_senders.video_packets());
   }
 
   void audioThread(session_t *session) {
@@ -3723,14 +3806,14 @@ namespace stream {
     session->audio->qos = platf::enable_socket_qos(ref->audio_sock.native_handle(), address, session->audio->peer.port(), platf::qos_data_type_e::audio, session->config.audioQosType != 0);
 
     BOOST_LOG(debug) << "Start capturing Audio"sv;
-    audio::capture(session->mail, session->config.audio, session->audio);
+    audio::capture(session->mail, session->config.audio, session->media_senders.audio_packets());
   }
 
   namespace session {
     namespace {
-      // Construct both per-session workers behind a shared gate. If creating either std::thread
-      // throws, the already-created worker is released as a no-op and joined before its thread
-      // object is destroyed. This keeps a resource-exhaustion failure from terminating the host.
+      // Construct all four per-session workers behind a shared gate. If creating any std::thread
+      // throws, already-created workers are released as no-ops and joined before their thread
+      // objects are destroyed. This keeps a resource-exhaustion failure from terminating the host.
       class pending_session_workers_t {
       public:
         ~pending_session_workers_t() {
@@ -3745,18 +3828,29 @@ namespace stream {
         bool prepare(
           std::function<void()> audio_entry,
           std::function<void()> video_entry,
-          bool fail_before_video_for_test = false,
+          std::function<void()> video_sender_entry,
+          std::function<void()> audio_sender_entry,
+          std::size_t fail_before_worker_for_test = std::numeric_limits<std::size_t>::max(),
           std::function<void()> failure_handler = {}
         ) noexcept {
           try {
             gate_ = std::make_shared<std::promise<bool>>();
             auto ready = gate_->get_future().share();
-            auto start_worker = [ready, failure_handler](std::string_view name, std::function<void()> entry) {
+            auto start_worker = [ready, failure_handler, fail_before_worker_for_test](std::size_t index, std::string_view name, std::function<void()> entry) {
+#ifdef SUNSHINE_TESTS
+              if (fail_before_worker_for_test == index) {
+                throw std::runtime_error {"injected session-worker start failure"};
+              }
+#else
+              (void) index;
+              (void) fail_before_worker_for_test;
+#endif
               return std::thread {[ready, failure_handler, name, entry = std::move(entry)]() mutable {
                 try {
-                  if (ready.get()) {
-                    entry();
+                  if (!ready.get()) {
+                    return;
                   }
+                  entry();
                 } catch (const std::future_error &) {
                   // A broken startup gate is equivalent to a cancelled session.
                   return;
@@ -3771,24 +3865,17 @@ namespace stream {
                 }
               }};
             };
-            audio_ = start_worker("Audio"sv, std::move(audio_entry));
-
-#ifdef SUNSHINE_TESTS
-            if (fail_before_video_for_test) {
-              throw std::runtime_error {"injected second session-worker start failure"};
-            }
-#else
-            (void) fail_before_video_for_test;
-#endif
-
-            video_ = start_worker("Video"sv, std::move(video_entry));
+            audio_ = start_worker(0, "Audio"sv, std::move(audio_entry));
+            video_ = start_worker(1, "Video"sv, std::move(video_entry));
+            video_sender_ = start_worker(2, "Video sender"sv, std::move(video_sender_entry));
+            audio_sender_ = start_worker(3, "Audio sender"sv, std::move(audio_sender_entry));
             return true;
           } catch (const std::exception &exception) {
-            if (!fail_before_video_for_test) {
+            if (fail_before_worker_for_test == std::numeric_limits<std::size_t>::max()) {
               BOOST_LOG(error) << "Failed to create streaming session workers: "sv << exception.what();
             }
           } catch (...) {
-            if (!fail_before_video_for_test) {
+            if (fail_before_worker_for_test == std::numeric_limits<std::size_t>::max()) {
               BOOST_LOG(error) << "Failed to create streaming session workers with an unknown error."sv;
             }
           }
@@ -3800,11 +3887,19 @@ namespace stream {
         void commit(session_t &session) noexcept {
           session.audioThread = std::move(audio_);
           session.videoThread = std::move(video_);
+          session.media_senders.adopt_video(std::move(video_sender_));
+          session.media_senders.adopt_audio(std::move(audio_sender_));
           resolve(true);
         }
 
         void cancel() noexcept {
           resolve(false);
+          if (audio_sender_.joinable()) {
+            audio_sender_.join();
+          }
+          if (video_sender_.joinable()) {
+            video_sender_.join();
+          }
           if (video_.joinable()) {
             video_.join();
           }
@@ -3814,7 +3909,7 @@ namespace stream {
         }
 
         [[nodiscard]] bool has_joinable_worker() const noexcept {
-          return audio_.joinable() || video_.joinable();
+          return audio_.joinable() || video_.joinable() || video_sender_.joinable() || audio_sender_.joinable();
         }
 
       private:
@@ -3834,6 +3929,8 @@ namespace stream {
         std::shared_ptr<std::promise<bool>> gate_;
         std::thread audio_;
         std::thread video_;
+        std::thread video_sender_;
+        std::thread audio_sender_;
       };
 
       template<class Clock>
@@ -3882,33 +3979,32 @@ namespace stream {
 
       void schedule_primary_restore_locked(detail::primary_display_restore_retry_t retry) {
         pending_primary_restore = task_pool.pushDelayed(
-                                             [retry]() {
-                                               std::lock_guard delayed_lock(platform_lifecycle_mutex);
-                                               // A cancelled callback may already be waiting on the lock. Never clear a new
-                                               // generation's task handle, or restore its pending/active session's display.
-                                               if (retry.generation != platform_lifecycle_generation) {
-                                                 return;
-                                               }
-                                               pending_primary_restore = nullptr;
-                                               const auto action = retry.next_action(
-                                                 platform_lifecycle_generation,
-                                                 proc::proc.get_host_session_id(),
-                                                 warm_process_instance,
-                                                 remote_session_active,
-                                                 !rtsp_stream::launch_session_available(),
-                                                 platform_streaming_warm && pending_platform_stop
-                                               );
-                                               if (action == detail::primary_display_restore_retry_t::action_e::stop) {
-                                                 return;
-                                               }
-                                               if (action == detail::primary_display_restore_retry_t::action_e::wait || !proc::proc.pause_display_for_resume()) {
-                                                 // The existing grace timer remains authoritative; retries never extend it.
-                                                 schedule_primary_restore_locked(retry);
-                                               }
-                                             },
-                                             1s
-        )
-                                    .task_id;
+          [retry]() {
+            std::lock_guard delayed_lock(platform_lifecycle_mutex);
+            // A cancelled callback may already be waiting on the lock. Never clear a new
+            // generation's task handle, or restore its pending/active session's display.
+            if (retry.generation != platform_lifecycle_generation) {
+              return;
+            }
+            pending_primary_restore = nullptr;
+            const auto action = retry.next_action(
+              platform_lifecycle_generation,
+              proc::proc.get_host_session_id(),
+              warm_process_instance,
+              remote_session_active,
+              !rtsp_stream::launch_session_available(),
+              platform_streaming_warm && pending_platform_stop
+            );
+            if (action == detail::primary_display_restore_retry_t::action_e::stop) {
+              return;
+            }
+            if (action == detail::primary_display_restore_retry_t::action_e::wait || !proc::proc.pause_display_for_resume()) {
+              // The existing grace timer remains authoritative; retries never extend it.
+              schedule_primary_restore_locked(retry);
+            }
+          },
+          1s
+        );
       }
 
       void stop_warm_platform_locked() {
@@ -3992,11 +4088,10 @@ namespace stream {
         const auto remaining = *platform_resume_state.deadline() - std::chrono::steady_clock::now();
         const auto delay = std::clamp<std::chrono::steady_clock::duration>(remaining, 0s, 1s);
         pending_platform_stop = task_pool.pushDelayed([generation]() {
-                                           std::lock_guard delayed_lock(platform_lifecycle_mutex);
-                                           check_platform_stop_locked(generation);
-                                         },
-                                                      delay)
-                                  .task_id;
+          std::lock_guard delayed_lock(platform_lifecycle_mutex);
+          check_platform_stop_locked(generation);
+        },
+                                                      delay);
       }
 
       void schedule_platform_stop_locked(std::chrono::steady_clock::duration delay) {
@@ -4192,6 +4287,16 @@ namespace stream {
     }
 
 #ifdef SUNSHINE_TESTS
+    bool platform_lifecycle_lock_available_for_test() {
+      bool available = false;
+      std::thread probe([&]() {
+        std::unique_lock lock {platform_lifecycle_mutex, std::try_to_lock};
+        available = lock.owns_lock();
+      });
+      probe.join();
+      return available;
+    }
+
     void set_state_for_test(session_t &session, state_e state) {
       session.state.store(state, std::memory_order_relaxed);
     }
@@ -4236,17 +4341,18 @@ namespace stream {
       check_platform_stop_locked(generation);
     }
 
-    bool worker_start_rollback_for_test() {
+    bool worker_start_rollback_for_test(std::size_t fail_before_worker) {
       std::atomic_int executed {};
       pending_session_workers_t workers;
+      const auto entry = [&executed]() {
+        ++executed;
+      };
       const bool prepared = workers.prepare(
-        [&executed]() {
-          ++executed;
-        },
-        [&executed]() {
-          ++executed;
-        },
-        true
+        entry,
+        entry,
+        entry,
+        entry,
+        fail_before_worker
       );
       return !prepared && executed.load() == 0 && !workers.has_joinable_worker();
     }
@@ -4272,7 +4378,7 @@ namespace stream {
           ++ready_workers;
         }
       };
-      result.workers_prepared = workers.prepare(observe_registration, observe_registration);
+      result.workers_prepared = workers.prepare(observe_registration, observe_registration, observe_registration, observe_registration);
       if (!result.workers_prepared) {
         return result;
       }
@@ -4286,6 +4392,7 @@ namespace stream {
       }
       session.audioThread.join();
       session.videoThread.join();
+      session.media_senders.stop_and_join();
       result.ready_workers = ready_workers.load();
       return result;
     }
@@ -4422,7 +4529,7 @@ namespace stream {
       {
         const detail::session_join_watchdog_t mode_worker_watchdog {
           [](std::function<void()> expired) {
-            return task_pool.pushDelayed(std::move(expired), 30s).task_id;
+            return task_pool.pushDelayed(std::move(expired), 30s);
           },
           [](auto task_id) {
             task_pool.cancel(task_id);
@@ -4443,7 +4550,7 @@ namespace stream {
         []() {
           return detail::session_join_watchdog_t {
             [](std::function<void()> expired) {
-              return task_pool.pushDelayed(std::move(expired), 10s).task_id;
+              return task_pool.pushDelayed(std::move(expired), 10s);
             },
             [](auto task_id) {
               task_pool.cancel(task_id);
@@ -4466,9 +4573,10 @@ namespace stream {
           BOOST_LOG(debug) << "Resetting Input..."sv;
           input::reset(session.input).wait();
         },
-        []() {
+        [&session]() {
           // Worker shutdown is complete and its watchdog is disarmed. App exit, undo commands
           // and display restoration have separate bounds and may legitimately take longer.
+          session.media_senders.stop_and_join();
           // Keep the active slot until this lock is held so a successor cannot overlap teardown.
           std::lock_guard lifecycle_lock(platform_lifecycle_mutex);
           if (!remote_session_active) {
@@ -4528,7 +4636,24 @@ namespace stream {
             [&session]() {
               videoThread(&session);
             },
-            false,
+            [&session]() {
+              run_video_sender(
+                session.broadcast_ref->video_sock,
+                session.media_senders.video_packets(),
+                session.video,
+                session.shutdown_event,
+                session.broadcast_ref->video_epoch
+              );
+            },
+            [&session]() {
+              run_audio_sender(
+                session.broadcast_ref->audio_sock,
+                session.media_senders.audio_packets(),
+                session.audio,
+                session.shutdown_event
+              );
+            },
+            std::numeric_limits<std::size_t>::max(),
             [&session]() {
               stop(session);
             }
@@ -4537,7 +4662,7 @@ namespace stream {
         return -1;
       }
 
-      // Publish the raw control registration only after platform startup and both worker-thread
+      // Publish the raw control registration only after platform startup and all worker-thread
       // constructions succeed. Its owner remains the RTSP slot; controlEnd is the lifetime barrier.
       {
         auto slot_lock = session.broadcast_ref->control_server._session.lock();
@@ -4581,8 +4706,8 @@ namespace stream {
 
       session->shutdown_event = mail->event<bool>(mail::shutdown);
       session->launch_session_id = launch_session.id;
-      session->device_name = launch_session.device_name;
-      session->device_uuid = launch_session.unique_id;
+      session->device_name = launch_session.display_context->device_name;
+      session->device_uuid = launch_session.display_context->unique_id;
       session->client_policy_generation = 0;
       session->permission.store(launch_session.perm, std::memory_order_relaxed);
 
@@ -4618,6 +4743,7 @@ namespace stream {
       session->video->source_frame_id_negotiated = config.client_supports_source_frame_id_v1;
       session->video->effective_mode = session->config.monitor.effective_mode;
       session->config.monitor.encode_wake = session->video->encode_wake;
+      session->config.monitor.atomic_presentation = session->live_video_mode_worker.transactions;
       session->config.monitor.sbs_debug_dump_pending =
         session->video->sbs_debug_dump_pending;
       session->requested_sbs_mode->store(
@@ -4634,6 +4760,7 @@ namespace stream {
       session->control.haptics_feedback_queue =
         mail->queue<platf::gamepad_feedback_msg_t>(mail::ds5_haptics_feedback, 64);
       session->control.hdr_queue = mail->event<video::hdr_info_t>(mail::hdr);
+      session->control.depth_status_event = mail->event<int>(mail::sbs_depth_status);
       session->control.live_video_mode_ack_queue = mail->queue<live_video_mode_ack_t>(
         mail::live_video_mode_ack,
         LIVE_VIDEO_MODE_ACK_QUEUE_LIMIT

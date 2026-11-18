@@ -192,6 +192,7 @@
   import Navbar from './Navbar.vue'
   import Game3dSetup from './Game3dSetup.vue'
   import LocalMonitorSession from './LocalMonitorSession.vue'
+  import { startVisibilityPolling } from './visibility-polling'
 
   const app = createApp({
     components: { Navbar, Game3dSetup, LocalMonitorSession },
@@ -208,21 +209,22 @@
         apiError: '',
         actionError: '',
         actionBusy: '',
-        refreshTimer: null,
-        diagnosticsTimer: null,
+        stopOverviewPolling: null,
+        stopDiagnosticsPolling: null,
       }
     },
     async created() {
-      await this.loadOverview(true)
+      const initialRequest = this.loadOverview(true)
+      this.stopOverviewPolling = startVisibilityPolling(() => this.loadOverview(false), 5000, { initialRequest })
+      this.stopDiagnosticsPolling = startVisibilityPolling(() => this.loadDiagnostics(), 30000, { initialRequest })
+      await initialRequest
       // The tray notice opens this page at the setup card, which does not exist until the first
       // load has rendered it, so the browser's own jump to the anchor finds nothing.
       if (window.location.hash === '#game3d-setup') this.$nextTick(() => this.showGame3dSetup())
-      this.refreshTimer = window.setInterval(() => this.loadOverview(false), 5000)
-      this.diagnosticsTimer = window.setInterval(() => this.loadDiagnostics(), 30000)
     },
     beforeUnmount() {
-      if (this.refreshTimer) window.clearInterval(this.refreshTimer)
-      if (this.diagnosticsTimer) window.clearInterval(this.diagnosticsTimer)
+      this.stopOverviewPolling?.()
+      this.stopDiagnosticsPolling?.()
     },
     computed: {
       game3dSetupWaiting() {

@@ -624,10 +624,7 @@ namespace nvenc {
       }
     }
 
-    {
-      auto f = stat_trackers::two_digits_after_decimal();
-      BOOST_LOG(debug) << "NvEnc: requested encoded frame size " << f % (client_config.bitrate / 8. / client_config.framerate) << " kB";
-    }
+    BOOST_LOG(debug) << "NvEnc: requested encoded frame size " << stat_trackers::two_digits_after_decimal() % (client_config.bitrate / 8. / client_config.framerate) << " kB";
 
     {
       auto video_format_string = client_config.videoFormat == 0 ? "H.264 " :
@@ -1000,15 +997,16 @@ namespace nvenc {
   nvenc_encoded_frame nvenc_base::encode_frame(
     uint64_t frame_index,
     bool force_idr,
-    std::vector<std::uint8_t> frame_buffer
+    std::vector<std::uint8_t> frame_buffer,
+    std::uint64_t input_revision
   ) {
-    if (!submit_frame(frame_index, force_idr)) {
+    if (!submit_frame(frame_index, force_idr, input_revision)) {
       return {};
     }
     return retrieve_frame(std::move(frame_buffer));
   }
 
-  bool nvenc_base::submit_frame(uint64_t frame_index, bool force_idr) {
+  bool nvenc_base::submit_frame(uint64_t frame_index, bool force_idr, std::uint64_t input_revision) {
     if (!encoder || cleanup_blocked.load(std::memory_order_acquire)) {
       return false;
     }
@@ -1028,10 +1026,10 @@ namespace nvenc {
     assert(registered_input_buffers[slot_index]);
     assert(slot.output_bitstream);
 
-    // With pictures in flight, each has its own input: copy the converted surface into it so the
-    // next conversion cannot overwrite a picture NVENC is still reading.
+    // With pictures in flight, each has its own input: refresh it unless its conversion proof
+    // already matches, so the next conversion cannot overwrite a picture NVENC is still reading.
     if (pipeline_depth_ > 1) {
-      prepare_input(slot_index);
+      prepare_input(slot_index, input_revision);
     }
 
     NV_ENC_MAP_INPUT_RESOURCE mapped_input_buffer = {NV_ENC_MAP_INPUT_RESOURCE_VER};

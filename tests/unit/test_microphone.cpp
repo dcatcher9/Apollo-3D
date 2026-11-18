@@ -34,7 +34,7 @@ namespace {
     return result;
   }
 
-  std::vector<std::uint8_t> opus_packet(int frame_samples = microphone::frame_samples) {
+  std::vector<std::uint8_t> opus_packet(int frame_samples = microphone::frame_samples, int amplitude = 6000) {
     int error;
     OpusEncoder *encoder = opus_encoder_create(microphone::sample_rate, 1, OPUS_APPLICATION_VOIP, &error);
     if (!encoder || error != OPUS_OK) {
@@ -42,7 +42,7 @@ namespace {
     }
     std::vector<std::int16_t> pcm(frame_samples);
     for (int index = 0; index < frame_samples; ++index) {
-      pcm[index] = static_cast<std::int16_t>(6000 * std::sin(index * 0.09));
+      pcm[index] = static_cast<std::int16_t>(amplitude * std::sin(index * 0.09));
     }
     std::vector<std::uint8_t> result(1000);
     const int size = opus_encode(encoder, pcm.data(), frame_samples, result.data(), static_cast<opus_int32>(result.size()));
@@ -203,8 +203,10 @@ namespace {
     resumed.playout();
     resumed.playout();
     ASSERT_EQ(resumed.playout().size(), microphone::frame_samples);
-    for (unsigned index = 0; index < 100; ++index) {
-      resumed.playout();
+    EXPECT_EQ(resumed.playout().size(), microphone::frame_samples);
+    EXPECT_EQ(resumed.playout().size(), microphone::frame_samples);
+    for (unsigned index = 0; index < 98; ++index) {
+      EXPECT_TRUE(resumed.playout().empty());
     }
     EXPECT_TRUE(resumed.receive(packet(value, 1, encoded), value.remote_address, 1234));
     EXPECT_EQ(resumed.playout().size(), microphone::frame_samples);
@@ -303,6 +305,70 @@ namespace {
     stop_two.join();
     EXPECT_FALSE(session->running());
     EXPECT_EQ(state->destroyed.load(), 1u);
+  }
+
+  TEST(Microphone, RealUdpRejectsWrongAddressBeforeNonceAndPortBinding) {
+    const auto value = options(true);
+    auto state = std::make_shared<sink_state_t>();
+    std::string error;
+    auto session = microphone::session_t::start(value, error, [state] {
+      return std::make_unique<test_sink_t>(state, microphone::frame_samples);
+    });
+    ASSERT_TRUE(session) << error;
+    session->activate();
+
+    boost::asio::io_context io;
+    using udp = boost::asio::ip::udp;
+    udp::socket wrong_address(io, udp::endpoint(boost::asio::ip::make_address("127.0.0.2"), 0));
+    udp::socket sender(io, udp::endpoint(boost::asio::ip::make_address(value.remote_address), 0));
+    const udp::endpoint receiver(boost::asio::ip::make_address(value.bind_address), session->bound_port());
+    const auto audio = packet(value, 0, opus_packet());
+    const auto wrong_audio = packet(value, 0, opus_packet(microphone::frame_samples, 0));
+
+    // A correct nonce from a different address must neither bind its source port nor play audio.
+    wrong_address.send_to(boost::asio::buffer(ping(value)), receiver);
+    wrong_address.send_to(boost::asio::buffer(wrong_audio), receiver);
+    {
+      std::unique_lock lock(state->mutex);
+      EXPECT_FALSE(state->ready.wait_for(lock, std::chrono::milliseconds(200), [&] {
+        return !state->pcm.empty();
+      }));
+    }
+
+    // The authorized address still needs its nonce before audio can be admitted.
+    auto wrong_nonce = ping(value);
+    wrong_nonce[0] ^= 1;
+    sender.send_to(boost::asio::buffer(wrong_nonce), receiver);
+    sender.send_to(boost::asio::buffer(audio), receiver);
+    {
+      std::unique_lock lock(state->mutex);
+      EXPECT_FALSE(state->ready.wait_for(lock, std::chrono::milliseconds(100), [&] {
+        return !state->pcm.empty();
+      }));
+    }
+
+    microphone::packet_decoder_t reference(value);
+    ASSERT_TRUE(reference.receive(ping(value), value.remote_address, sender.local_endpoint().port()));
+    ASSERT_TRUE(reference.receive(audio, value.remote_address, sender.local_endpoint().port()));
+    EXPECT_TRUE(reference.playout().empty());
+    EXPECT_TRUE(reference.playout().empty());
+    const auto expected_pcm = reference.playout();
+    ASSERT_EQ(expected_pcm.size(), microphone::frame_samples);
+    ASSERT_TRUE(std::any_of(expected_pcm.begin(), expected_pcm.end(), [](auto sample) {
+      return sample != 0;
+    }));
+
+    sender.send_to(boost::asio::buffer(ping(value)), receiver);
+    sender.send_to(boost::asio::buffer(audio), receiver);
+    {
+      std::unique_lock lock(state->mutex);
+      ASSERT_TRUE(state->ready.wait_for(lock, std::chrono::seconds(2), [&] {
+        return state->pcm.size() >= microphone::frame_samples;
+      }));
+      EXPECT_TRUE(std::equal(expected_pcm.begin(), expected_pcm.end(), state->pcm.begin()));
+    }
+    session->stop();
+    EXPECT_FALSE(session->running());
   }
 
   TEST(Microphone, RealUdpMaintainsCaptureCadenceAcrossSchedulerLateness) {

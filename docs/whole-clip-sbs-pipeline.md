@@ -23,10 +23,12 @@ selected video
   -> atomic output publication
 ```
 
-The manager launches an authenticated isolated worker process. That worker calls the real native
-harness once on its GPU thread. Conversion uses `--artifacts conversion`; Analyze Only uses
-`--artifacts adaptive`. Every source frame runs one authenticated TensorRT update and consumes its
-source-derived observation timestamp. All D3D/TensorRT work stays on this single owner.
+The manager launches an authenticated isolated worker process. That worker calls the typed native
+production entry once on its GPU thread, selecting Convert Video or Analyze Only. The evaluator
+CLI adapts to the same causal estimator and rendering engine. Production does not construct or
+parse evaluator arguments and cannot select its replay, research, or diagnostic modes. Every
+source frame runs one authenticated TensorRT update and consumes its source-derived observation
+timestamp. All D3D/TensorRT work stays on this single owner.
 
 Follow conversion prepares the same current-glyph shared subtitle warp used by live rendering.
 Each valid shared draw samples the original source once; unavailable subtitle programs or
@@ -49,14 +51,29 @@ HDR reference white and primaries remain owned by Host SBS. Production conversio
 source BMP/PFM or rendered PNG/PFM files, run WIC codecs, or serve pixels over HTTP. The standalone
 evaluator keeps its established file-based harness inputs and outputs.
 
-The source channel has capacity two and the packed-output channel has capacity one. A separate
-source acknowledgement proves the worker consumed that frame's exact adaptive-state snapshot.
-The worker authenticates the snapshot's identity and layout and then discards it; no conversion
-decision or retained document is derived from its values. Receiving pixels alone cannot release
-that acknowledgement. The next snapshot/progress record
-waits for the previous acknowledgement. Analyze Only uses the same evidence barrier. Small state
-and progress files retain atomic snapshots and directory-change notifications; raw pixel transfer
-uses condition-variable backpressure.
+The source channel has capacity two and the packed-output channel has capacity one. The separate
+`bounded-completion-memory-v1` handoff owns one resolved header, one frame-evidence slot, and a
+sticky terminal result. The header authenticates the generated adaptive-state identity and layout
+and the resolved model, pop strength, and depth interval. Each completion owns its exact source
+header and adaptive-state words, plus packed-output geometry when converting. Native evidence
+preserves finite float32 bits; the evaluator's decimal JSON representation remains independent.
+
+A separate source acknowledgement proves the worker validated that frame's exact evidence and
+handed its packed output to the encoder when converting. The worker then discards the state words;
+no conversion decision or retained document is derived from their values. Receiving pixels or
+dequeueing evidence alone cannot release the acknowledgement. The next evidence publication waits
+for the previous acknowledgement, and successful terminal publication waits for the final one.
+Analyze Only uses the same barrier without packed output. Header, frame, pixel, and acknowledgement
+waits use condition-variable backpressure and wake on failure or cancellation.
+
+Production's GPU thread and worker exchange neither per-frame progress/state files nor evaluator
+CLI messages. Within a phase, the worker atomically publishes manager/UI progress at most once
+every 200 ms, with immediate first, phase-change, and final-source-frame updates. Only successful
+publication advances the deadline. Suppressed snapshots perform no JSON or file work; filesystem
+errors are reported when publication is due. The manager coalesces durable job updates. Source,
+runtime, timeline, result, and publication contracts remain on disk.
+Evaluator JSONL and file-follow adapters retain their existing atomic snapshots and
+directory-change notifications.
 
 The decoder pipe uses bounded overlapped reads, so each available chunk wakes its owner without
 a polling delay. The persistent encoder has one outstanding handoff. Its private inherited pipe
@@ -101,6 +118,10 @@ output, timeline, and publication. The specification and result are exact-key do
 exchanged only between the manager and the worker of the same build; the manager reads a worker
 result once, when that worker exits. No scene list or scene-audit file is produced.
 
+New production contracts identify the typed runner, its condition-variable evidence wakeup, and
+its memory transport without snapshot filenames. Retained file-transport contracts remain
+readable under their original labels; they are never retagged as native memory evidence.
+
 The durable job record `job.json` is schema 1. A retained record may still carry the retired
 `scene_decisions`, `progress.scene_count`, and `progress.current_scene` fields and scene-audit
 references in its compact worker result. They are accepted and discarded when the record is
@@ -138,6 +159,15 @@ reject older cache versions and analytic renderer labels; retained evidence is n
 The native manager owns production conversion; Python and tools/sbsbench own evaluation only.
 FFmpeg/FFprobe must be the approved installation-local pair. One offline job may hold the GPU lease.
 Admission refuses work while streaming or local AR presentation owns it.
+
+The process facade captures its account and configuration at host startup, but starts the offline
+service only after an authorized, validated offline API request. Other host features do not create
+its job directories, run its media-tool checks, or start its supervisor. That first demand also
+runs retained-job recovery: interrupted-state marking and publication cleanup are deferred until
+then, and finish before any retained record is served or a new job is admitted. The offline
+overview reports initialization while this runs. Failed initialization stays unavailable until
+the host restarts; repeated status polling does not retry it. Shutdown closes new initialization
+requests, stops the service, and joins its initializer before process globals are released.
 
 The exact SHA-256 authenticates the worker specification. Job-root and staging-file identity pins
 constrain writes and cleanup. Cancellation terminates the entire worker process tree, including

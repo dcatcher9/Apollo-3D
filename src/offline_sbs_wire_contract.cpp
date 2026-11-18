@@ -7,6 +7,7 @@
 
 #include "depth_coordinate_v2.h"
 #include "host_sbs_shader_cache.h"
+#include "offline_frame_transport.h"
 #include "offline_sbs_contract.h"
 
 #include <algorithm>
@@ -513,7 +514,7 @@ namespace offline_sbs::wire {
       const auto &analysis = result.analysis_contract;
       const auto &runtime = analysis.resolved_runtime;
       const bool converting = result.operation == "convert";
-      const bool raw_transport = runtime.frame_transport == "bounded-raw-memory-v1";
+      const bool raw_transport = runtime.frame_transport == raw_frame_transport::name;
       const auto expected_follow_format =
         raw_transport ? (source.color_mode == "sdr" ? std::string_view {"bgra8"} : std::string_view {"gbrpf32le"}) :
           (source.color_mode == "sdr" ? std::string_view {"bmp"} : std::string_view {"pfm"});
@@ -535,7 +536,8 @@ namespace offline_sbs::wire {
         analysis.source_width != source.width ||
         analysis.source_height != source.height ||
         analysis.source_first_sequence != 1 ||
-        analysis.adaptive_state.transport != "atomic-latest-v1" ||
+        (analysis.adaptive_state.transport != "atomic-latest-v1" &&
+         analysis.adaptive_state.transport != completion_channel_t::name) ||
         analysis.adaptive_state.retained_history ||
         analysis.adaptive_state.frame_count != source.frame_count ||
         !runtime.parallax_v2_render || !runtime.parallax_v2_live ||
@@ -1287,6 +1289,10 @@ namespace offline_sbs::wire {
       resolved_runtime["frame_transport"] = *runtime.frame_transport;
     }
     const auto &adaptive = value.adaptive_state;
+    if (adaptive.transport == completion_channel_t::name &&
+        (adaptive.header_file || adaptive.frame_file || adaptive.file)) {
+      throw contract_error("whole-clip in-memory adaptive state cannot advertise files");
+    }
     json adaptive_state {
       {"transport", adaptive.transport},
       {"retained_history", adaptive.retained_history},
@@ -1449,7 +1455,7 @@ namespace offline_sbs::wire {
     auto &typed_runtime = result.resolved_runtime;
     if (runtime.contains("frame_transport")) {
       typed_runtime.frame_transport = required_string(runtime, "frame_transport", "whole-clip resolved runtime");
-      if (*typed_runtime.frame_transport != "bounded-raw-memory-v1") {
+      if (*typed_runtime.frame_transport != raw_frame_transport::name) {
         throw contract_error("whole-clip frame transport is unsupported");
       }
     }
@@ -1549,6 +1555,8 @@ namespace offline_sbs::wire {
     typed_adaptive.transport = adaptive.at("transport").get<std::string>();
     if (typed_adaptive.transport == "none") {
       require_exact_keys(adaptive, std::array {"transport"sv, "retained_history"sv, "frame_count"sv}, "whole-clip adaptive state");
+    } else if (typed_adaptive.transport == completion_channel_t::name) {
+      require_exact_keys(adaptive, std::array {"transport"sv, "retained_history"sv, "schema"sv, "capture"sv, "frame_count"sv}, "whole-clip adaptive state");
     } else if (typed_adaptive.transport == "atomic-latest-v1") {
       require_exact_keys(adaptive, std::array {"transport"sv, "header_file"sv, "frame_file"sv, "retained_history"sv, "schema"sv, "capture"sv, "frame_count"sv}, "whole-clip adaptive state");
       typed_adaptive.header_file = required_string(adaptive, "header_file", "whole-clip adaptive state");
@@ -1564,6 +1572,18 @@ namespace offline_sbs::wire {
     if (typed_adaptive.transport != "none") {
       typed_adaptive.schema = unsigned_integer<std::uint32_t>(adaptive, "schema", "whole-clip adaptive state");
       typed_adaptive.capture = required_string(adaptive, "capture", "whole-clip adaptive state");
+    }
+    if (typed_adaptive.transport == completion_channel_t::name &&
+        (typed_runtime.frame_transport != raw_frame_transport::name ||
+         !typed_runtime.follow_mode || typed_runtime.follow_frame_pattern ||
+         typed_runtime.follow_done_sentinel || typed_runtime.follow_failed_sentinel ||
+         typed_runtime.follow_progress_file ||
+         typed_runtime.follow_poll_interval_ms != 0 ||
+         typed_runtime.follow_native_input_deletion || typed_adaptive.retained_history ||
+         typed_adaptive.schema != sbs_adaptive_state::schema_version ||
+         typed_adaptive.capture != sbs_adaptive_state::capture ||
+         typed_adaptive.frame_count != result.source_frame_count)) {
+      throw contract_error("whole-clip in-memory adaptive state disagrees with its native raw transport");
     }
     result.sbs = parse_whole_clip_sbs(value.at("sbs"));
     const bool raw_sbs = result.sbs.frame_format == "bgra8" || result.sbs.frame_format == "rgba16f";

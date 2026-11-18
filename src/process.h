@@ -17,8 +17,10 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <stop_token>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 
@@ -33,7 +35,7 @@
 // local includes
 #include "config.h"
 #include "platform/common.h"
-#include "rtsp.h"
+#include "process_display_context.h"
 #include "utility.h"
 
 #ifdef _WIN32
@@ -48,7 +50,19 @@ namespace platf::primary_display {
 #define FALLBACK_DESKTOP_UUID "EAAC6159-089A-46A9-9E24-6436885F6610"
 
 namespace proc {
+#if defined(SUNSHINE_TESTS) && defined(_WIN32)
+  namespace testing {
+    struct native_edges_t;
+  }
+#endif
   using file_t = util::safe_ptr_v2<FILE, int, fclose>;
+
+  /** Transport-derived startup values consumed once; the retained display record owns none. */
+  struct launch_options_t {
+    std::uint32_t launch_session_id;
+    bool host_audio;
+    int surround_info;
+  };
 
 #ifdef _WIN32
   extern std::atomic<VDISPLAY::DRIVER_STATUS> vDisplayDriverStatus;
@@ -140,6 +154,27 @@ namespace proc {
     std::chrono::seconds exit_timeout;
   };
 
+  /** Owned metadata for application listings, independent of launch commands and policy. */
+  struct app_list_entry_t {
+    std::string idx;
+    std::string uuid;
+    std::string name;
+    std::string image_path;
+    std::string id;
+    bool synthetic_virtual_display = false;
+  };
+
+  enum class app_lookup_status_e {
+    found,
+    not_found,
+    identity_mismatch,
+  };
+
+  struct app_lookup_result_t {
+    app_lookup_status_e status = app_lookup_status_e::not_found;
+    std::optional<ctx_t> app;
+  };
+
   struct process_status_t {
     int app_id;
     std::string app_name;
@@ -200,11 +235,13 @@ namespace proc {
         _apps(std::move(apps)) {
     }
 
+    /** Take ownership of the selected snapshot after cleanup and request validation pass.
+     *  display_context must be non-null; validation and cleanup retain their existing order. */
     int execute(
-      const ctx_t &app,
-      std::shared_ptr<rtsp_stream::launch_session_t> launch_session,
-      bool probe_encoder
-    );
+      ctx_t &&app,
+      std::shared_ptr<process_display_context_t> display_context,
+      launch_options_t launch_options,
+      bool probe_encoder);
 
     /**
      * @return `_app_id` if a process is running, otherwise returns `0`
@@ -219,14 +256,18 @@ namespace proc {
 
     ~proc_t();
 
-    std::vector<ctx_t> get_apps() const;
+    std::vector<app_list_entry_t> get_app_list() const;
+    // Resolve both identifiers against one locked list, copying only the selected entry.
+    app_lookup_result_t resolve_app(std::optional<int> app_id, std::string_view app_uuid) const;
     std::string get_app_image(int app_id);
     std::string get_last_run_app_name();
     std::string get_running_app_uuid();
     /** Stable retained process-instance token. Zero means no resumable process exists. */
     std::uint64_t get_host_session_id() const;
     /** Apply a reconnect's render/display/HDR contract without relaunching the application. */
-    int reconfigure_retained_session(std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
+    int reconfigure_retained_session(
+      std::shared_ptr<process_display_context_t> display_context,
+      std::uint32_t launch_session_id);
     /**
      * Resize the session's virtual desktop in place for a live 0x3007 mode change. The streaming
      * session, its capture pipeline and its RTSP session all survive. Never recreates the monitor:
@@ -290,13 +331,16 @@ namespace proc {
     friend void refresh(const std::string &file_name, bool needs_terminate, bool wait_for_display_driver);
 #ifdef SUNSHINE_TESTS
     friend struct process_test_access;
+    friend struct launch_transaction_test_access;
+  #ifdef _WIN32
+    friend struct process_display_context_test_access;
+  #endif
 #endif
     int running_locked();
     bool stream_process_exited_locked();
     void set_display_name_locked(std::string name);
 
     int _app_id = 0;
-    std::string _app_name;
     bool _virtual_display = false;
     std::uint64_t _host_session_id = 0;
     // The process token/GUID survive resume; the authorized live-control transport does not.
@@ -304,7 +348,7 @@ namespace proc {
 
     boost::process::v1::environment _env;
 
-    std::shared_ptr<rtsp_stream::launch_session_t> _launch_session;
+    std::shared_ptr<process_display_context_t> _display_context;
 #ifdef _WIN32
     VDISPLAY::session_t _display_session;
     // Adapter notification only: a later failed topology check must not repeat the wake request.
@@ -317,6 +361,7 @@ namespace proc {
     // launch proves the display again. It is never inferred from the observed display mode.
     bool _live_display_unproven = false;
   #ifdef SUNSHINE_TESTS
+    const testing::native_edges_t *_display_context_test_edges = nullptr;
     // Process tests replace display/HDR side effects while preserving resume/teardown control flow.
     display_topology_test_hook_t _display_topology_test_hook;
     std::function<std::optional<DEVMODEW>(std::wstring_view)> _display_mode_query_test_hook;
@@ -395,7 +440,7 @@ namespace proc {
     std::string display_name;
 
     std::vector<ctx_t> _apps;
-    ctx_t _app;
+    ctx_t _app {};
     std::chrono::steady_clock::time_point _app_launch_time;
 
     // If no command associated with _app_id, yet it's still running

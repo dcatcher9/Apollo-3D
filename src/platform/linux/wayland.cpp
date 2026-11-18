@@ -19,7 +19,6 @@
 #include "graphics.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
-#include "src/round_robin.h"
 #include "src/utility.h"
 #include "wayland.h"
 

@@ -5,7 +5,13 @@
 #pragma once
 
 // standard includes
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
+#include <utility>
+#include <vector>
 
 // local includes
 #include "task_pool.h"
@@ -15,28 +21,17 @@ namespace thread_pool_util {
    * Allow threads to execute unhindered while keeping full control over the threads.
    */
   class ThreadPool: public task_pool_util::TaskPool {
-  public:
-    typedef TaskPool::__task __task;
-
   private:
     std::vector<std::thread> _thread;
 
     std::condition_variable _cv;
     std::mutex _lock;
 
-    bool _continue;
+    std::atomic_bool _continue;
 
   public:
     ThreadPool():
         _continue {false} {
-    }
-
-    explicit ThreadPool(int threads):
-        _thread(threads),
-        _continue {true} {
-      for (auto &t : _thread) {
-        t = std::thread(&ThreadPool::_main, this);
-      }
     }
 
     ~ThreadPool() noexcept {
@@ -49,28 +44,21 @@ namespace thread_pool_util {
     }
 
     template<class Function, class... Args>
-    auto push(Function &&newTask, Args &&...args) {
+    void push(Function &&newTask, Args &&...args) {
       std::lock_guard lg(_lock);
-      auto future = TaskPool::push(std::forward<Function>(newTask), std::forward<Args>(args)...);
+      TaskPool::push(std::forward<Function>(newTask), std::forward<Args>(args)...);
 
       _cv.notify_one();
-      return future;
-    }
-
-    void pushDelayed(std::pair<__time_point, __task> &&task) {
-      std::lock_guard lg(_lock);
-
-      TaskPool::pushDelayed(std::move(task));
     }
 
     template<class Function, class X, class Y, class... Args>
-    auto pushDelayed(Function &&newTask, std::chrono::duration<X, Y> duration, Args &&...args) {
+    task_id_t pushDelayed(Function &&newTask, std::chrono::duration<X, Y> duration, Args &&...args) {
       std::lock_guard lg(_lock);
-      auto future = TaskPool::pushDelayed(std::forward<Function>(newTask), duration, std::forward<Args>(args)...);
+      auto task_id = TaskPool::pushDelayed(std::forward<Function>(newTask), duration, std::forward<Args>(args)...);
 
       // Update all timers for wait_until
       _cv.notify_all();
-      return future;
+      return task_id;
     }
 
     void start(int threads) {

@@ -259,7 +259,10 @@ namespace offline_sbs {
   /**
    * Process-global facade used by the HTTPS API and main shutdown path.
    */
-  bool initialize(service_config_t config, std::string &error);
+  // Capture the startup account/configuration without starting filesystem or tool work.
+  void configure_default_service();
+  // Explicit authorized offline demand; observations never call this implicitly.
+  void request_initialization();
   void shutdown();
   service_reply_t create(const create_request_t &request);
   service_reply_t cancel(std::string_view id);
@@ -271,6 +274,9 @@ namespace offline_sbs {
   nlohmann::json capabilities();
 
 #ifdef SUNSHINE_TESTS
+  // Read the actual bounded no-follow progress file and validate its worker identity.
+  progress_t read_worker_progress_for_test(const worker_context_t &context);
+
   struct bounded_worker_log_test_result_t {
     std::string retained;
     bool limit_exceeded = false;

@@ -29,8 +29,11 @@ typedef enum _D3DKMT_GPU_PREFERENCE_QUERY_STATE : DWORD {
   D3DKMT_GPU_PREFERENCE_STATE_USER_SPECIFIED_GPU  ///< A specific GPU is preferred.
 } D3DKMT_GPU_PREFERENCE_QUERY_STATE;
 
+#include "capture_dxgi_device.h"
+#include "capture_gpu_scheduling.h"
 #include "display.h"
 #include "misc.h"
+#include "src/capture_display_retirement.h"
 #include "src/config.h"
 #include "src/display_device.h"
 #include "src/logging.h"
@@ -45,6 +48,84 @@ namespace platf {
 namespace platf::dxgi {
 
   namespace detail {
+    void configure_capture_process_gpu_priority(
+      const DXGI_ADAPTER_DESC &adapter_desc,
+      bool nv_realtime_hags,
+      const capture_gpu_scheduling_api_t &api
+    ) {
+      auto check_hags = [&](const LUID &adapter) -> bool {
+        D3DKMT_OPENADAPTERFROMLUID d3dkmt_adapter = {adapter};
+        if (FAILED(api.open_adapter(&d3dkmt_adapter))) {
+          BOOST_LOG(error) << "D3DKMTOpenAdapterFromLuid() failed while trying to determine GPU HAGS status";
+          return false;
+        }
+
+        bool result;
+
+        D3DKMT_WDDM_2_7_CAPS d3dkmt_adapter_caps = {};
+        D3DKMT_QUERYADAPTERINFO d3dkmt_adapter_info = {};
+        d3dkmt_adapter_info.hAdapter = d3dkmt_adapter.hAdapter;
+        d3dkmt_adapter_info.Type = KMTQAITYPE_WDDM_2_7_CAPS;
+        d3dkmt_adapter_info.pPrivateDriverData = &d3dkmt_adapter_caps;
+        d3dkmt_adapter_info.PrivateDriverDataSize = sizeof(d3dkmt_adapter_caps);
+
+        if (SUCCEEDED(api.query_adapter_info(&d3dkmt_adapter_info))) {
+          result = d3dkmt_adapter_caps.HwSchEnabled;
+        } else {
+          BOOST_LOG(warning) << "D3DKMTQueryAdapterInfo() failed while trying to determine GPU HAGS status";
+          result = false;
+        }
+
+        D3DKMT_CLOSEADAPTER d3dkmt_close_adapter_wrap = {d3dkmt_adapter.hAdapter};
+        if (FAILED(api.close_adapter(&d3dkmt_close_adapter_wrap))) {
+          BOOST_LOG(error) << "D3DKMTCloseAdapter() failed while trying to determine GPU HAGS status";
+        }
+
+        return result;
+      };
+
+      auto priority = D3DKMT_SCHEDULINGPRIORITYCLASS_REALTIME;
+      bool hags_enabled = check_hags(adapter_desc.AdapterLuid);
+      if (adapter_desc.VendorId == 0x10DE) {
+        // As of 2023.07, NVIDIA driver has unfixed bug(s) where "realtime" can cause unrecoverable encoding freeze or outright driver crash
+        // This issue happens more frequently with HAGS, in DX12 games or when VRAM is filled close to max capacity
+        // Track OBS to see if they find better workaround or NVIDIA fixes it on their end, they seem to be in communication
+        if (hags_enabled && !nv_realtime_hags) {
+          priority = D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH;
+        }
+      }
+      BOOST_LOG(info) << "Active GPU has HAGS " << (hags_enabled ? "enabled" : "disabled");
+      BOOST_LOG(info) << "Using " << (priority == D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH ? "high" : "realtime") << " GPU priority";
+      if (FAILED(api.set_process_priority(GetCurrentProcess(), priority))) {
+        BOOST_LOG(warning) << "Failed to adjust GPU priority. Please run application as administrator for optimal performance.";
+      }
+    }
+
+    bool configure_capture_dxgi_device(IUnknown *device) {
+      dxgi1_t dxgi {};
+      auto status = device->QueryInterface(IID_IDXGIDevice1, (void **) &dxgi);
+      if (FAILED(status)) {
+        BOOST_LOG(warning) << "Failed to query DXGI interface from device [0x"sv << util::hex(status).to_string_view() << ']';
+        return false;
+      }
+
+      // Keep the boost relative to the process policy selected before this call.
+      // Absolute priority 30 is non-yielding hard realtime and bypasses the HAGS workaround.
+      status = dxgi->SetGPUThreadPriority(7);
+      if (FAILED(status)) {
+        BOOST_LOG(warning) << "Failed to request relative capture GPU thread priority. Please run application as administrator for optimal performance.";
+      } else {
+        BOOST_LOG(info) << "Capture GPU context uses relative priority 7; process scheduling policy retained.";
+      }
+
+      status = dxgi->SetMaximumFrameLatency(1);
+      if (FAILED(status)) {
+        BOOST_LOG(warning) << "Failed to set maximum frame latency [0x"sv << util::hex(status).to_string_view() << ']';
+      }
+
+      return true;
+    }
+
     namespace {
       [[nodiscard]] bool valid_damage_rect(
         const RECT &rect,
@@ -507,10 +588,14 @@ namespace platf::dxgi {
     // TotalMetadataBufferSize is the API-provided capacity for both lists. Querying either method
     // with a null buffer is invalid on real drivers; follow the Desktop Duplication sample's
     // single-buffer order (moves first, then dirty rectangles in the remaining bytes).
-    std::vector<std::byte> metadata(frame_info.TotalMetadataBufferSize);
+    // Keep bounded transport scratch on the capture owner. Only this frame's reported byte
+    // counts below authorize reads; older bytes and the returned coverage have separate lifetimes.
+    if (damage_metadata_.size() < frame_info.TotalMetadataBufferSize) {
+      damage_metadata_.resize(frame_info.TotalMetadataBufferSize);
+    }
     UINT dirty_bytes = 0u;
     UINT move_bytes = 0u;
-    auto *move_rects = reinterpret_cast<DXGI_OUTDUPL_MOVE_RECT *>(metadata.data());
+    auto *move_rects = reinterpret_cast<DXGI_OUTDUPL_MOVE_RECT *>(damage_metadata_.data());
     auto status = dup->GetFrameMoveRects(
       frame_info.TotalMetadataBufferSize,
       move_rects,
@@ -523,7 +608,7 @@ namespace platf::dxgi {
       return {};
     }
     const auto dirty_capacity = frame_info.TotalMetadataBufferSize - move_bytes;
-    auto *dirty_rects = reinterpret_cast<RECT *>(metadata.data() + move_bytes);
+    auto *dirty_rects = reinterpret_cast<RECT *>(damage_metadata_.data() + move_bytes);
     if (dirty_capacity != 0u) {
       status = dup->GetFrameDirtyRects(dirty_capacity, dirty_rects, &dirty_bytes);
       if (
@@ -919,19 +1004,7 @@ namespace platf::dxgi {
     static std::once_flag windows_cpp_once_flag;
 
     std::call_once(windows_cpp_once_flag, []() {
-      DECLARE_HANDLE(DPI_AWARENESS_CONTEXT);
-
-      typedef BOOL (*User32_SetProcessDpiAwarenessContext)(DPI_AWARENESS_CONTEXT value);
-
-      {
-        auto user32 = LoadLibraryA("user32.dll");
-        auto f = (User32_SetProcessDpiAwarenessContext) GetProcAddress(user32, "SetProcessDpiAwarenessContext");
-        if (f) {
-          f(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        }
-
-        FreeLibrary(user32);
-      }
+      SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
       {
         // We aren't calling MH_Uninitialize(), but that's okay because this hook lasts for the life of the process
@@ -1062,14 +1135,8 @@ namespace platf::dxgi {
       feature_level = device->GetFeatureLevel();
       status = S_OK;
     } else {
-      status = adapter->QueryInterface(IID_IDXGIAdapter, (void **) &adapter_p);
-      if (FAILED(status)) {
-        BOOST_LOG(error) << "Failed to query IDXGIAdapter interface"sv;
-        return -1;
-      }
-
       status = D3D11CreateDevice(
-        adapter_p,
+        adapter.get(),
         D3D_DRIVER_TYPE_UNKNOWN,
         nullptr,
         D3D11_CREATE_DEVICE_FLAGS,
@@ -1080,8 +1147,6 @@ namespace platf::dxgi {
         &feature_level,
         &device_ctx
       );
-
-      adapter_p->Release();
     }
 
     if (FAILED(status)) {
@@ -1098,10 +1163,9 @@ namespace platf::dxgi {
       return -1;
     }
 
-    auto description = to_utf8(adapter_desc.Description);
     BOOST_LOG(info)
       << std::endl
-      << "Device Description : " << description << std::endl
+      << "Device Description : " << to_utf8(adapter_desc.Description) << std::endl
       << "Device Vendor ID   : 0x"sv << util::hex(adapter_desc.VendorId).to_string_view() << std::endl
       << "Device Device ID   : 0x"sv << util::hex(adapter_desc.DeviceId).to_string_view() << std::endl
       << "Device Video Mem   : "sv << adapter_desc.DedicatedVideoMemory / 1048576 << " MiB"sv << std::endl
@@ -1133,98 +1197,10 @@ namespace platf::dxgi {
         CloseHandle(token);
       }
 
-      HMODULE gdi32 = GetModuleHandleA("GDI32");
-      if (gdi32) {
-        auto check_hags = [&](const LUID &adapter) -> bool {
-          auto d3dkmt_open_adapter = (PD3DKMTOpenAdapterFromLuid) GetProcAddress(gdi32, "D3DKMTOpenAdapterFromLuid");
-          auto d3dkmt_query_adapter_info = (PD3DKMTQueryAdapterInfo) GetProcAddress(gdi32, "D3DKMTQueryAdapterInfo");
-          auto d3dkmt_close_adapter = (PD3DKMTCloseAdapter) GetProcAddress(gdi32, "D3DKMTCloseAdapter");
-          if (!d3dkmt_open_adapter || !d3dkmt_query_adapter_info || !d3dkmt_close_adapter) {
-            BOOST_LOG(error) << "Couldn't load d3dkmt functions from gdi32.dll to determine GPU HAGS status";
-            return false;
-          }
+      detail::configure_capture_process_gpu_priority(adapter_desc, config::video.nv_realtime_hags);
 
-          D3DKMT_OPENADAPTERFROMLUID d3dkmt_adapter = {adapter};
-          if (FAILED(d3dkmt_open_adapter(&d3dkmt_adapter))) {
-            BOOST_LOG(error) << "D3DKMTOpenAdapterFromLuid() failed while trying to determine GPU HAGS status";
-            return false;
-          }
-
-          bool result;
-
-          D3DKMT_WDDM_2_7_CAPS d3dkmt_adapter_caps = {};
-          D3DKMT_QUERYADAPTERINFO d3dkmt_adapter_info = {};
-          d3dkmt_adapter_info.hAdapter = d3dkmt_adapter.hAdapter;
-          d3dkmt_adapter_info.Type = KMTQAITYPE_WDDM_2_7_CAPS;
-          d3dkmt_adapter_info.pPrivateDriverData = &d3dkmt_adapter_caps;
-          d3dkmt_adapter_info.PrivateDriverDataSize = sizeof(d3dkmt_adapter_caps);
-
-          if (SUCCEEDED(d3dkmt_query_adapter_info(&d3dkmt_adapter_info))) {
-            result = d3dkmt_adapter_caps.HwSchEnabled;
-          } else {
-            BOOST_LOG(warning) << "D3DKMTQueryAdapterInfo() failed while trying to determine GPU HAGS status";
-            result = false;
-          }
-
-          D3DKMT_CLOSEADAPTER d3dkmt_close_adapter_wrap = {d3dkmt_adapter.hAdapter};
-          if (FAILED(d3dkmt_close_adapter(&d3dkmt_close_adapter_wrap))) {
-            BOOST_LOG(error) << "D3DKMTCloseAdapter() failed while trying to determine GPU HAGS status";
-          }
-
-          return result;
-        };
-
-        auto d3dkmt_set_process_priority = (PD3DKMTSetProcessSchedulingPriorityClass) GetProcAddress(gdi32, "D3DKMTSetProcessSchedulingPriorityClass");
-        if (d3dkmt_set_process_priority) {
-          auto priority = D3DKMT_SCHEDULINGPRIORITYCLASS_REALTIME;
-          bool hags_enabled = check_hags(adapter_desc.AdapterLuid);
-          if (adapter_desc.VendorId == 0x10DE) {
-            // As of 2023.07, NVIDIA driver has unfixed bug(s) where "realtime" can cause unrecoverable encoding freeze or outright driver crash
-            // This issue happens more frequently with HAGS, in DX12 games or when VRAM is filled close to max capacity
-            // Track OBS to see if they find better workaround or NVIDIA fixes it on their end, they seem to be in communication
-            if (hags_enabled && !config::video.nv_realtime_hags) {
-              priority = D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH;
-            }
-          }
-          BOOST_LOG(info) << "Active GPU has HAGS " << (hags_enabled ? "enabled" : "disabled");
-          BOOST_LOG(info) << "Using " << (priority == D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH ? "high" : "realtime") << " GPU priority";
-          if (FAILED(d3dkmt_set_process_priority(GetCurrentProcess(), priority))) {
-            BOOST_LOG(warning) << "Failed to adjust GPU priority. Please run application as administrator for optimal performance.";
-          }
-        } else {
-          BOOST_LOG(error) << "Couldn't load D3DKMTSetProcessSchedulingPriorityClass function from gdi32.dll to adjust GPU priority";
-        }
-      }
-
-      dxgi::dxgi_t dxgi;
-      status = device->QueryInterface(IID_IDXGIDevice, (void **) &dxgi);
-      if (FAILED(status)) {
-        BOOST_LOG(warning) << "Failed to query DXGI interface from device [0x"sv << util::hex(status).to_string_view() << ']';
+      if (!detail::configure_capture_dxgi_device(device.get())) {
         return -1;
-      }
-
-      // Keep the boost relative to the process policy selected above. Absolute
-      // priority 30 is non-yielding hard realtime and bypasses the HAGS workaround.
-      status = dxgi->SetGPUThreadPriority(7);
-      if (FAILED(status)) {
-        BOOST_LOG(warning) << "Failed to request relative capture GPU thread priority. Please run application as administrator for optimal performance.";
-      } else {
-        BOOST_LOG(info) << "Capture GPU context uses relative priority 7; process scheduling policy retained.";
-      }
-    }
-
-    // Try to reduce latency
-    {
-      dxgi::dxgi1_t dxgi {};
-      status = device->QueryInterface(IID_IDXGIDevice, (void **) &dxgi);
-      if (FAILED(status)) {
-        BOOST_LOG(error) << "Failed to query DXGI interface from device [0x"sv << util::hex(status).to_string_view() << ']';
-        return -1;
-      }
-
-      status = dxgi->SetMaximumFrameLatency(1);
-      if (FAILED(status)) {
-        BOOST_LOG(warning) << "Failed to set maximum frame latency [0x"sv << util::hex(status).to_string_view() << ']';
       }
     }
 
@@ -1560,25 +1536,35 @@ namespace platf {
   std::shared_ptr<display_t> display(
     const std::string &display_name,
     const video::config_t &config,
-    capture_backend_e preferred_backend
+    capture_backend_e preferred_backend,
+    std::weak_ptr<capture_display_retirement_t> retirement
   ) {
+    const bool retirement_requested = !retirement.expired();
     auto open_backend = [&](capture_backend_e backend) -> std::shared_ptr<display_t> {
       if (backend == capture_backend_e::ddup) {
-        auto disp = std::make_shared<dxgi::display_ddup_vram_t>();
+        auto disp = retirement_requested ? make_unarmed_capture_display<dxgi::display_ddup_vram_t>() :
+                                           std::make_shared<dxgi::display_ddup_vram_t>();
         return !disp->init(config, display_name) ? std::move(disp) : nullptr;
       }
 
-      auto disp = std::make_shared<dxgi::display_wgc_vram_t>();
+      auto disp = retirement_requested ? make_unarmed_capture_display<dxgi::display_wgc_vram_t>() :
+                                         std::make_shared<dxgi::display_wgc_vram_t>();
       return !disp->init(config, display_name) ? std::move(disp) : nullptr;
     };
 
     if (auto disp = open_backend(preferred_backend)) {
+      if (retirement_requested && !arm_capture_display_retirement(disp, retirement)) {
+        return {};
+      }
       return disp;
     }
     const auto fallback_backend = preferred_backend == capture_backend_e::ddup ?
                                     capture_backend_e::wgc :
                                     capture_backend_e::ddup;
     if (auto disp = open_backend(fallback_backend)) {
+      if (retirement_requested && !arm_capture_display_retirement(disp, retirement)) {
+        return {};
+      }
       return disp;
     }
 

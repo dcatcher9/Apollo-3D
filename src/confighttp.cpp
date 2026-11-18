@@ -12,11 +12,15 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <numeric>
 #include <set>
 #include <sstream>
+#include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 // lib includes
 #include <boost/algorithm/string.hpp>
@@ -32,6 +36,7 @@
 #include "crypto.h"
 #include "file_handler.h"
 #include "globals.h"
+#include "http_request_logging.h"
 #include "httpcommon.h"
 #include "logging.h"
 #include "network.h"
@@ -41,6 +46,7 @@
 #include "process.h"
 #include "rtsp.h"
 #include "stream.h"
+#include "thread_safe.h"
 #include "utility.h"
 #include "uuid.h"
 
@@ -55,6 +61,26 @@
 using namespace std::literals;
 
 namespace confighttp {
+  namespace {
+    const std::map<std::string, std::string> mime_types = {
+      {"css", "text/css"},
+      {"gif", "image/gif"},
+      {"htm", "text/html"},
+      {"html", "text/html"},
+      {"ico", "image/x-icon"},
+      {"jpeg", "image/jpeg"},
+      {"jpg", "image/jpeg"},
+      {"js", "application/javascript"},
+      {"json", "application/json"},
+      {"png", "image/png"},
+      {"svg", "image/svg+xml"},
+      {"ttf", "font/ttf"},
+      {"txt", "text/plain"},
+      {"woff2", "font/woff2"},
+      {"xml", "text/xml"},
+    };
+  }  // namespace
+
   namespace fs = std::filesystem;
 
   using https_server_t = SimpleWeb::Server<SimpleWeb::HTTPS>;
@@ -146,16 +172,7 @@ namespace confighttp {
    * @param request The HTTP request object.
    */
   void print_req(const req_https_t &request) {
-    BOOST_LOG(debug) << "METHOD :: "sv << request->method;
-    BOOST_LOG(debug) << "DESTINATION :: "sv << request->path;
-    for (auto &[name, val] : request->header) {
-      BOOST_LOG(debug) << name << " -- " << http::redact_request_header(name, val);
-    }
-    BOOST_LOG(debug) << " [--] "sv;
-    for (auto &[name, val] : request->parse_query_string()) {
-      BOOST_LOG(debug) << name << " -- " << http::redact_query_parameter(name, val);
-    }
-    BOOST_LOG(debug) << " [--] "sv;
+    http::log_request_debug(*request);
   }
 
   /**
@@ -248,28 +265,17 @@ namespace confighttp {
    * @brief Check if the IP origin is allowed.
    * @param response The HTTP response object.
    * @param request The HTTP request object.
-   * @return True if allowed, false otherwise.
+   * @return The admitted peer class, or no value after sending the denial response.
    */
-  bool checkIPOrigin(resp_https_t response, req_https_t request) {
-    auto address = net::addr_to_normalized_string(request->remote_endpoint().address());
+  std::optional<net::net_e> checkIPOrigin(resp_https_t response, req_https_t request) {
+    const auto address = request->remote_endpoint().address();
     auto ip_type = net::from_address(address);
     if (ip_type > http::origin_web_ui_allowed) {
-      BOOST_LOG(info) << "Web UI: ["sv << address << "] -- denied"sv;
+      BOOST_LOG(info) << "Web UI: ["sv << net::addr_to_normalized_string(address) << "] -- denied"sv;
       response->write(SimpleWeb::StatusCode::client_error_forbidden);
-      return false;
+      return std::nullopt;
     }
-    return true;
-  }
-
-  /**
-   * @brief Treat the PC and its local network as the trusted Web UI boundary.
-   *
-   * Apollo's host controls are designed for direct use on a private LAN. Requests from a
-   * public address still use the credential flow when WAN access has been explicitly enabled.
-   */
-  bool is_trusted_local_request(const req_https_t &request) {
-    const auto address = net::addr_to_normalized_string(request->remote_endpoint().address());
-    return net::from_address(address) <= net::LAN;
+    return ip_type;
   }
 
   namespace {
@@ -332,13 +338,14 @@ namespace confighttp {
    * This function uses session cookies (if set) and ensures they have not expired.
    */
   bool authenticate(resp_https_t response, req_https_t request, bool needsRedirect = false) {
-    if (!checkIPOrigin(response, request) || !checkBrowserOrigin(response, request)) {
+    const auto peer_class = checkIPOrigin(response, request);
+    if (!peer_class || !checkBrowserOrigin(response, request)) {
       return false;
     }
 
     // Local control should feel appliance-like: the network boundary is the trust prompt.
     // Unsafe browser requests still pass the strict same-origin validation above.
-    if (is_trusted_local_request(request)) {
+    if (*peer_class <= net::LAN) {
       return true;
     }
 
@@ -401,24 +408,28 @@ namespace confighttp {
     response->write(code, tree.dump(), headers);
   }
 
+  std::string make_bad_request_body(std::string_view error_message) {
+    nlohmann::json tree;
+    tree["status_code"] = static_cast<int>(SimpleWeb::StatusCode::client_error_bad_request);
+    tree["status"] = false;
+    tree["error"] = error_message;
+    return tree.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+  }
+
   /**
    * @brief Send a 400 Bad Request response.
    * @param response The HTTP response object.
    * @param request The HTTP request object.
    * @param error_message The error message.
    */
-  void bad_request(resp_https_t response, [[maybe_unused]] req_https_t request, const std::string &error_message = "Bad Request") {
+  void bad_request(resp_https_t response, [[maybe_unused]] req_https_t request, std::string_view error_message = "Bad Request") {
     constexpr SimpleWeb::StatusCode code = SimpleWeb::StatusCode::client_error_bad_request;
-    nlohmann::json tree;
-    tree["status_code"] = static_cast<int>(code);
-    tree["status"] = false;
-    tree["error"] = error_message;
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "application/json");
     headers.emplace("X-Frame-Options", "DENY");
     headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
 
-    response->write(code, tree.dump(), headers);
+    response->write(code, make_bad_request_body(error_message), headers);
   }
 
   /**
@@ -624,11 +635,12 @@ namespace confighttp {
    * @todo Combine this function with getWelcomePage if appropriate.
    */
   void getLoginPage(resp_https_t response, req_https_t request) {
-    if (!checkIPOrigin(response, request)) {
+    const auto peer_class = checkIPOrigin(response, request);
+    if (!peer_class) {
       return;
     }
 
-    if (is_trusted_local_request(request)) {
+    if (*peer_class <= net::LAN) {
       send_redirect(response, request, "/");
       return;
     }
@@ -819,7 +831,7 @@ namespace confighttp {
       // them separately so the Library can show them without allowing an edit, delete, or
       // reorder operation to create a duplicate persisted entry.
       file_tree["builtin_apps"] = nlohmann::json::array();
-      for (const auto &app : proc::proc.get_apps()) {
+      for (const auto &app : proc::proc.get_app_list()) {
         if (!app.synthetic_virtual_display) {
           continue;
         }
@@ -883,15 +895,12 @@ namespace confighttp {
 
     print_req(request);
 
-    std::stringstream ss;
-    ss << request->content.rdbuf();
-
     BOOST_LOG(info) << config::stream.file_apps;
     try {
       // TODO: Input Validation
 
       // Read the input JSON from the request body.
-      nlohmann::json inputTree = nlohmann::json::parse(ss.str());
+      nlohmann::json inputTree = nlohmann::json::parse(request->content);
 
       // Read the existing apps file.
       std::string content = file_handler::read_file(config::stream.file_apps.c_str());
@@ -934,6 +943,49 @@ namespace confighttp {
     send_response(response, output_tree);
   }
 
+  nlohmann::json reorder_app_list(nlohmann::json original_apps_list, const nlohmann::json &order_uuids) {
+    nlohmann::json reordered_apps_list = nlohmann::json::array();
+    std::vector<bool> item_moved(original_apps_list.size(), false);
+
+    // Place the first remaining app for each requested UUID, including duplicate UUIDs.
+    for (const auto &uuid_json_value : order_uuids) {
+      if (!uuid_json_value.is_string()) {
+        BOOST_LOG(warning) << "ReorderApps: Encountered a non-string UUID in the 'order' array. Skipping this entry.";
+        continue;
+      }
+      const auto &target_uuid = uuid_json_value.get_ref<const nlohmann::json::string_t &>();
+      bool found_match_for_ordered_uuid = false;
+
+      for (size_t i = 0; i < original_apps_list.size(); ++i) {
+        if (item_moved[i]) {
+          continue;
+        }
+
+        auto &app_item = original_apps_list[i];
+        if (app_item.is_object() && app_item.contains("uuid") && app_item["uuid"].is_string()) {
+          if (app_item["uuid"].get_ref<const nlohmann::json::string_t &>() == target_uuid) {
+            reordered_apps_list.push_back(std::move(app_item));
+            item_moved[i] = true;
+            found_match_for_ordered_uuid = true;
+            break;
+          }
+        }
+      }
+
+      if (!found_match_for_ordered_uuid) {
+        BOOST_LOG(debug) << "ReorderApps: UUID '" << target_uuid << "' from 'order' array not found in available apps list or its matching app was already processed. Omitting.";
+      }
+    }
+
+    // Preserve the original order and data of every unspecified or malformed entry.
+    for (size_t i = 0; i < original_apps_list.size(); ++i) {
+      if (!item_moved[i]) {
+        reordered_apps_list.push_back(std::move(original_apps_list[i]));
+      }
+    }
+    return reordered_apps_list;
+  }
+
   /**
    * @brief Reorder applications.
    * @param response The HTTP response object.
@@ -949,10 +1001,7 @@ namespace confighttp {
     print_req(request);
 
     try {
-      std::stringstream ss;
-      ss << request->content.rdbuf();
-
-      nlohmann::json input_tree = nlohmann::json::parse(ss.str());
+      nlohmann::json input_tree = nlohmann::json::parse(request->content);
       nlohmann::json output_tree;
 
       // Read the existing apps file.
@@ -970,7 +1019,7 @@ namespace confighttp {
       nlohmann::json original_apps_list = nlohmann::json::array();
       if (fileTree.contains("apps")) {
         if (fileTree["apps"].is_array()) {
-          original_apps_list = fileTree["apps"];
+          original_apps_list = std::move(fileTree["apps"]);
         } else {
           // "apps" key exists but is not an array. This is a malformed state.
           BOOST_LOG(error) << "ReorderApps: 'apps' key in apps configuration file ('" << config::stream.file_apps
@@ -984,55 +1033,8 @@ namespace confighttp {
         // original_apps_list is already an empty array, so no specific action needed here.
       }
 
-      nlohmann::json reordered_apps_list = nlohmann::json::array();
-      std::vector<bool> item_moved(original_apps_list.size(), false);
-
-      // Phase 1: Place apps according to the 'order' array from the request.
-      // Iterate through the desired order of UUIDs.
-      for (const auto &uuid_json_value : order_uuids_json) {
-        if (!uuid_json_value.is_string()) {
-          BOOST_LOG(warning) << "ReorderApps: Encountered a non-string UUID in the 'order' array. Skipping this entry.";
-          continue;
-        }
-        std::string target_uuid = uuid_json_value.get<std::string>();
-        bool found_match_for_ordered_uuid = false;
-
-        // Find the first unmoved app in the original list that matches the current target_uuid.
-        for (size_t i = 0; i < original_apps_list.size(); ++i) {
-          if (item_moved[i]) {
-            continue;  // This specific app object has already been placed.
-          }
-
-          const auto &app_item = original_apps_list[i];
-          // Ensure the app item is an object and has a UUID to match against.
-          if (app_item.is_object() && app_item.contains("uuid") && app_item["uuid"].is_string()) {
-            if (app_item["uuid"].get<std::string>() == target_uuid) {
-              reordered_apps_list.push_back(app_item);  // Add the found app object to the new list.
-              item_moved[i] = true;  // Mark this specific object as moved.
-              found_match_for_ordered_uuid = true;
-              break;  // Found an app for this UUID, move to the next UUID in the 'order' array.
-            }
-          }
-        }
-
-        if (!found_match_for_ordered_uuid) {
-          // This means a UUID specified in the 'order' array was not found in the original_apps_list
-          // among the currently available (unmoved) app objects.
-          // Per instruction "If the uuid is missing from the original json file, omit it."
-          BOOST_LOG(debug) << "ReorderApps: UUID '" << target_uuid << "' from 'order' array not found in available apps list or its matching app was already processed. Omitting.";
-        }
-      }
-
-      // Phase 2: Append any remaining apps from the original list that were not explicitly ordered.
-      // These are app objects that were not marked 'item_moved' in Phase 1.
-      for (size_t i = 0; i < original_apps_list.size(); ++i) {
-        if (!item_moved[i]) {
-          reordered_apps_list.push_back(original_apps_list[i]);
-        }
-      }
-
       // Update the fileTree with the new, reordered list of apps.
-      fileTree["apps"] = reordered_apps_list;
+      fileTree["apps"] = reorder_app_list(std::move(original_apps_list), order_uuids_json);
 
       // Write the modified fileTree back to the apps configuration file.
       file_handler::write_file(config::stream.file_apps.c_str(), fileTree.dump(4));
@@ -1063,9 +1065,7 @@ namespace confighttp {
     print_req(request);
 
     try {
-      std::stringstream ss;
-      ss << request->content.rdbuf();
-      nlohmann::json input_tree = nlohmann::json::parse(ss.str());
+      nlohmann::json input_tree = nlohmann::json::parse(request->content);
 
       // Check for required uuid field in body
       if (!input_tree.contains("uuid") || !input_tree["uuid"].is_string()) {
@@ -1117,9 +1117,8 @@ namespace confighttp {
 
     print_req(request);
 
-    nlohmann::json named_certs = nvhttp::get_all_clients();
     nlohmann::json output_tree;
-    output_tree["named_certs"] = named_certs;
+    output_tree["named_certs"] = nvhttp::get_all_clients();
 #ifdef _WIN32
     output_tree["platform"] = "windows";
 #endif
@@ -1150,10 +1149,8 @@ namespace confighttp {
 
     print_req(request);
 
-    std::stringstream ss;
-    ss << request->content.rdbuf();
     try {
-      nlohmann::json input_tree = nlohmann::json::parse(ss.str());
+      nlohmann::json input_tree = nlohmann::json::parse(request->content);
       nlohmann::json output_tree;
       std::string uuid = input_tree.value("uuid", "");
       std::string name = input_tree.value("name", "");
@@ -1191,10 +1188,8 @@ namespace confighttp {
 
     print_req(request);
 
-    std::stringstream ss;
-    ss << request->content.rdbuf();
     try {
-      nlohmann::json input_tree = nlohmann::json::parse(ss.str());
+      nlohmann::json input_tree = nlohmann::json::parse(request->content);
       nlohmann::json output_tree;
       std::string uuid = input_tree.value("uuid", "");
       output_tree["status"] = nvhttp::unpair_client(uuid);
@@ -1247,9 +1242,7 @@ namespace confighttp {
     print_req(request);
 
     try {
-      std::stringstream body;
-      body << request->content.rdbuf();
-      const auto input = nlohmann::json::parse(body);
+      const auto input = nlohmann::json::parse(request->content);
       const auto failure = platf::game3d::decide_setup(input.at("executable").get<std::string>(), input.at("identity").get<std::string>(), input.at("decision").get<std::string>());
       if (failure) {
         bad_request(response, request, *failure);
@@ -1395,9 +1388,7 @@ namespace confighttp {
     print_req(request);
 
     try {
-      std::stringstream body;
-      body << request->content.rdbuf();
-      const auto input = nlohmann::json::parse(body);
+      const auto input = nlohmann::json::parse(request->content);
       const auto id = input.value("id", "");
       const auto decision_name = input.value("decision", "");
       const auto decision = decision_name == "approved" ?
@@ -1549,13 +1540,11 @@ namespace confighttp {
 
     print_req(request);
 
-    std::stringstream ss;
-    ss << request->content.rdbuf();
     try {
       // TODO: Input Validation
       std::stringstream config_stream;
       nlohmann::json output_tree;
-      nlohmann::json input_tree = nlohmann::json::parse(ss);
+      nlohmann::json input_tree = nlohmann::json::parse(request->content);
       erase_retired_config_options(input_tree);
       // This option is live-managed by the AR display decision API rather than the general form.
       input_tree.erase("ar_glass_devices");
@@ -1608,11 +1597,8 @@ namespace confighttp {
       return;
     }
 
-    std::stringstream ss;
-
-    ss << request->content.rdbuf();
     try {
-      nlohmann::json input_tree = nlohmann::json::parse(ss.str());
+      nlohmann::json input_tree = nlohmann::json::parse(request->content);
       nlohmann::json output_tree;
       std::string key = input_tree.value("key", "");
       if (key.empty()) {
@@ -1703,10 +1689,8 @@ namespace confighttp {
     }
     print_req(request);
     std::vector<std::string> errors;
-    std::stringstream ss;
-    ss << request->content.rdbuf();
     try {
-      nlohmann::json input_tree = nlohmann::json::parse(ss.str());
+      nlohmann::json input_tree = nlohmann::json::parse(request->content);
       nlohmann::json output_tree;
       std::string username = input_tree.value("currentUsername", "");
       std::string newUsername = input_tree.value("newUsername", "");
@@ -1764,9 +1748,7 @@ namespace confighttp {
 
     nlohmann::json output_tree;
     try {
-      std::stringstream ss;
-      ss << request->content.rdbuf();
-      nlohmann::json input_tree = nlohmann::json::parse(ss.str());
+      nlohmann::json input_tree = nlohmann::json::parse(request->content);
 
       std::string passphrase = input_tree.value("passphrase", "");
       if (passphrase.empty()) {
@@ -1812,9 +1794,7 @@ namespace confighttp {
     print_req(request);
 
     try {
-      std::stringstream ss;
-      ss << request->content.rdbuf();
-      nlohmann::json input_tree = nlohmann::json::parse(ss.str());
+      nlohmann::json input_tree = nlohmann::json::parse(request->content);
       nlohmann::json output_tree;
       std::string pin = input_tree.value("pin", "");
       std::string name = input_tree.value("name", "");
@@ -1887,10 +1867,8 @@ namespace confighttp {
     print_req(request);
 
     try {
-      std::stringstream ss;
-      ss << request->content.rdbuf();
       nlohmann::json output_tree;
-      nlohmann::json input_tree = nlohmann::json::parse(ss.str());
+      nlohmann::json input_tree = nlohmann::json::parse(request->content);
       std::string uuid = input_tree.value("uuid", "");
       output_tree["status"] = nvhttp::find_and_stop_session(uuid, true);
       send_response(response, output_tree);
@@ -1923,9 +1901,7 @@ namespace confighttp {
     });
 
     try {
-      std::stringstream ss;
-      ss << request->content.rdbuf();
-      nlohmann::json input_tree = nlohmann::json::parse(ss.str());
+      nlohmann::json input_tree = nlohmann::json::parse(request->content);
       std::string username = input_tree.value("username", "");
       std::string password = input_tree.value("password", "");
       std::string sessionCookieRaw = crypto::rand_alphabet(64);
@@ -1986,6 +1962,7 @@ namespace confighttp {
     if (!authenticate(response, request)) {
       return;
     }
+    offline_sbs::request_initialization();
     const auto capabilities = offline_sbs::capabilities();
     const bool available = capabilities.value("available", false);
     send_json_response(
@@ -2015,11 +1992,10 @@ namespace confighttp {
         !validateOfflineSbsRequestSize(response, request)) {
       return;
     }
-    const auto address =
-      net::addr_to_normalized_string(request->remote_endpoint().address());
+    const auto address = request->remote_endpoint().address();
     if (net::from_address(address) != net::PC) {
       BOOST_LOG(warning)
-        << "Web UI: ["sv << address
+        << "Web UI: ["sv << net::addr_to_normalized_string(address)
         << "] -- rejected non-loopback offline filesystem browse"sv;
       send_json_response(
         response,
@@ -2044,9 +2020,7 @@ namespace confighttp {
       );
     };
     try {
-      std::stringstream content;
-      content << request->content.rdbuf();
-      const auto input = nlohmann::json::parse(content.str());
+      const auto input = nlohmann::json::parse(request->content);
       if (!input.is_object()) {
         reject_request("Offline browse request must be an object");
         return;
@@ -2085,6 +2059,7 @@ namespace confighttp {
         return;
       }
 
+      offline_sbs::request_initialization();
       const auto reply = offline_sbs::browse(browse);
       send_json_response(
         response,
@@ -2100,6 +2075,7 @@ namespace confighttp {
     if (!authenticate(response, request)) {
       return;
     }
+    offline_sbs::request_initialization();
     const auto capabilities = offline_sbs::capabilities();
     if (!capabilities.value("available", false)) {
       send_json_response(
@@ -2141,10 +2117,7 @@ namespace confighttp {
       return;
     }
     try {
-      std::stringstream content;
-      content << request->content.rdbuf();
-      const auto serialized = content.str();
-      const auto input = nlohmann::json::parse(serialized);
+      const auto input = nlohmann::json::parse(request->content);
       if (!input.is_object()) {
         bad_request(response, request, "Offline conversion request must be an object");
         return;
@@ -2245,6 +2218,7 @@ namespace confighttp {
         return;
       }
 
+      offline_sbs::request_initialization();
       const auto reply = offline_sbs::create(create);
       send_json_response(
         response,
@@ -2263,6 +2237,7 @@ namespace confighttp {
     if (!authenticate(response, request)) {
       return;
     }
+    offline_sbs::request_initialization();
     const auto reply = offline_sbs::get(request->path_match[1].str());
     send_json_response(
       response,
@@ -2275,6 +2250,7 @@ namespace confighttp {
     if (!authenticate(response, request)) {
       return;
     }
+    offline_sbs::request_initialization();
     const auto reply = offline_sbs::cancel(request->path_match[1].str());
     send_json_response(
       response,
@@ -2287,6 +2263,7 @@ namespace confighttp {
     if (!authenticate(response, request)) {
       return;
     }
+    offline_sbs::request_initialization();
     const auto reply = offline_sbs::clear(request->path_match[1].str());
     send_json_response(
       response,

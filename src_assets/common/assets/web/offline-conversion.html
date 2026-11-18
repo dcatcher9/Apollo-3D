@@ -54,6 +54,20 @@
     </section>
 
     <div
+      v-if="capabilities.initializing"
+      class="apollo-notice"
+      role="status"
+      aria-live="polite">
+      <span class="apollo-notice-icon" aria-hidden="true">
+        <i class="fa-solid fa-spinner fa-spin"></i>
+      </span>
+      <div>
+        <strong>Preparing offline conversion</strong>
+        <p>Saved jobs will appear when preparation finishes. This page updates automatically.</p>
+      </div>
+    </div>
+
+    <div
       v-if="apiError"
       class="apollo-notice is-danger"
       role="alert"
@@ -193,6 +207,7 @@
                 class="btn btn-outline-secondary offline-browse-button"
                 type="button"
                 aria-label="Browse for an input video"
+                :disabled="initialLoading || capabilities.initializing"
                 @click="openInputPicker">
                 <i class="fa-solid fa-folder-open" aria-hidden="true"></i>
                 Browse
@@ -228,7 +243,7 @@
                 class="btn btn-outline-secondary offline-browse-button"
                 type="button"
                 aria-label="Choose the output video file name"
-                :disabled="initialLoading || !inputDirectory"
+                :disabled="initialLoading || capabilities.initializing || !inputDirectory"
                 @click="openOutputPicker">
                 <i class="fa-solid fa-file-circle-plus" aria-hidden="true"></i>
                 Choose
@@ -485,8 +500,8 @@
             <i class="fa-solid fa-film"></i>
           </span>
           <div>
-            <h3>No offline jobs yet</h3>
-            <p>Choose a job type and source, then complete the settings shown for that job.</p>
+            <h3>{{ capabilities.initializing ? 'Preparing saved jobs…' : 'No offline jobs yet' }}</h3>
+            <p v-if="!capabilities.initializing">Choose a job type and source, then complete the settings shown for that job.</p>
           </div>
         </article>
       </section>
@@ -674,6 +689,7 @@
     getOfflineSbsJob,
     getOfflineSbsOverview,
   } from './offline-sbs-api'
+  import { startVisibilityPolling } from './visibility-polling'
 
   const ACTIVE_STATUSES = new Set([
     'queued',
@@ -733,7 +749,7 @@
         startBusy: false,
         cancelBusy: false,
         clearBusy: false,
-        refreshTimer: null,
+        stopPolling: null,
         overviewRequestSerial: 0,
         detailRequestSerial: 0,
         pickerMode: 'input',
@@ -820,6 +836,7 @@
       startDisabledReason() {
         if (this.startBusy) return 'Sunshine 3D is starting the job…'
         if (this.initialLoading) return 'Checking offline conversion support…'
+        if (this.capabilities.initializing) return 'Preparing offline conversion…'
         if (this.apiError) return 'Reconnect to the offline job manager before starting.'
         if (this.activeJobExists) return 'Wait for the active offline job to finish or cancel it.'
         if (this.liveStreamActive) return 'End the current live stream before starting an offline job.'
@@ -835,12 +852,12 @@
         return !this.startDisabledReason
       },
     },
-    async mounted() {
-      await this.loadJobs(false)
-      this.refreshTimer = window.setInterval(() => this.loadJobs(true), 2000)
+    mounted() {
+      const initialRequest = this.loadJobs(false)
+      this.stopPolling = startVisibilityPolling(() => this.loadJobs(true), 2000, { initialRequest })
     },
     beforeUnmount() {
-      if (this.refreshTimer) window.clearInterval(this.refreshTimer)
+      this.stopPolling?.()
       overviewAbortController?.abort()
       detailAbortController?.abort()
       pickerAbortController?.abort()
@@ -1265,6 +1282,14 @@
         } catch (error) {
           if (error?.name === 'AbortError') return
           if (requestSerial === this.overviewRequestSerial) {
+            const capabilities = error?.payload?.capabilities
+            if (
+              error?.status === 503 &&
+              capabilities?.available === false &&
+              capabilities.initializing === false
+            ) {
+              this.capabilities = capabilities
+            }
             const message = this.apiMessage(error)
             if (silent && this.jobs.length) {
               this.pollWarning = message

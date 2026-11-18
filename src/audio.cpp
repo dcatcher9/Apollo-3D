@@ -11,6 +11,7 @@
 
 // local includes
 #include "audio.h"
+#include "audio_capture.h"
 #include "config.h"
 #include "globals.h"
 #include "logging.h"
@@ -21,7 +22,7 @@
 namespace audio {
   using namespace std::literals;
   using opus_t = util::safe_ptr<OpusMSEncoder, opus_multistream_encoder_destroy>;
-  using sample_queue_t = std::shared_ptr<safe::queue_t<std::vector<float>>>;
+  using sample_queue_t = std::shared_ptr<detail::pcm_queue_t>;
 
   static int start_audio_control(audio_ctx_t &ctx);
   static void stop_audio_control(audio_ctx_t &);
@@ -102,8 +103,7 @@ namespace audio {
     return select_stream_config(channels, high_quality).bitrate / 1000;
   }
 
-  void encodeThread(sample_queue_t samples, config_t config, std::shared_ptr<void> channel_data) {
-    auto packets = mail::man->queue<packet_t>(mail::audio_packets);
+  void encodeThread(sample_queue_t samples, config_t config, packet_queue_t packets) {
     const auto &stream = select_stream_config(config.channels, config.flags[config_t::HIGH_QUALITY]);
 
     // Encoding takes place on this thread
@@ -130,7 +130,7 @@ namespace audio {
     while (auto sample = samples->pop()) {
       buffer_t packet {1400};
 
-      int bytes = opus_multistream_encode_float(opus.get(), sample->data(), frame_size, std::begin(packet), packet.size());
+      int bytes = opus_multistream_encode_float(opus.get(), sample.get(), frame_size, std::begin(packet), packet.size());
       if (bytes < 0) {
         BOOST_LOG(error) << "Couldn't encode audio: "sv << opus_strerror(bytes);
         packets->stop();
@@ -139,11 +139,11 @@ namespace audio {
       }
 
       packet.fake_resize(bytes);
-      packets->raise(channel_data, std::move(packet));
+      packets->raise(std::move(packet));
     }
   }
 
-  void capture(safe::mail_t mail, config_t config, std::shared_ptr<void> channel_data) {
+  void capture(safe::mail_t mail, config_t config, packet_queue_t packets) {
     auto shutdown_event = mail->event<bool>(mail::shutdown);
     const auto &stream = select_stream_config(config.channels, config.flags[config_t::HIGH_QUALITY]);
 
@@ -216,7 +216,7 @@ namespace audio {
     platf::adjust_thread_priority(platf::thread_priority_e::critical);
 
     auto samples = std::make_shared<sample_queue_t::element_type>(30);
-    std::thread thread {encodeThread, samples, config, channel_data};
+    std::thread thread {encodeThread, samples, config, std::move(packets)};
 
     auto fg = util::fail_guard([&]() {
       samples->stop();
@@ -226,12 +226,10 @@ namespace audio {
     });
 
     int samples_per_frame = frame_size * stream.channelCount;
+    detail::pcm_frame_t sample_buffer;
 
     while (!shutdown_event->peek()) {
-      std::vector<float> sample_buffer;
-      sample_buffer.resize(samples_per_frame);
-
-      auto status = mic->sample(sample_buffer);
+      auto status = detail::capture_pcm_frame(*mic, sample_buffer, samples_per_frame, *samples);
       switch (status) {
         case platf::capture_e::ok:
           break;
@@ -251,8 +249,6 @@ namespace audio {
         default:
           return;
       }
-
-      samples->raise(std::move(sample_buffer));
     }
   }
 

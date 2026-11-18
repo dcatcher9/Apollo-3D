@@ -53,6 +53,7 @@
 #include "src/game_source_tracker.h"
 #include "src/generated/sbs_adaptive_state_contract.h"
 #include "src/host_sbs_drawn_source_order.h"
+#include "src/host_sbs_observation_handoff.h"
 #include "src/host_sbs_packed_presentation_clock.h"
 #include "host_sbs_actual_converter_probe.h"
 #include <fstream>
@@ -69,6 +70,7 @@
 #include "src/host_sbs_subtitle_render.h"
 #include "src/host_sbs_v2_geometry.h"
 #include "src/host_subtitle_context.h"
+#include "src/live_model_preparation.h"
 #include "src/logging.h"
 #include "src/model_manager.h"
 #include "src/nvenc/nvenc_config.h"
@@ -80,6 +82,12 @@
 #include "video_dom_client.h"
 #include "host3d_subtitle_apps.h"
 #include "video_player_context.h"
+
+#ifdef SUNSHINE_TESTS
+  #include "src/tracked_async_worker.h"
+  #include "model_preparation_converter_test.h"
+  #include "conversion_poll_test.h"
+#endif
 
 #if !defined(SUNSHINE_SHADERS_DIR)  // for testing this needs to be defined in cmake as we don't do an install
   #define SUNSHINE_SHADERS_DIR SUNSHINE_ASSETS_DIR "/shaders/directx"
@@ -273,7 +281,7 @@ namespace platf::dxgi {
 
   /** Exact completion-to-color binding, including the estimator-owned model-grid raster. */
   [[nodiscard]] static bool depth_completion_region_matches_submission(
-    const models::estimate_result &estimate,
+    const models::depth_observation_views_t &estimate,
     const models::depth_input_region_t &submitted_region
   ) noexcept {
     const bool fused_runtime = estimate.composite_depth_runtime_provenance != nullptr;
@@ -527,6 +535,51 @@ namespace platf::dxgi {
     ::video::launch_async_teardown_worker(std::move(worker));
   }
 
+#ifdef SUNSHINE_TESTS
+  namespace {
+    struct model_preparation_watch_probe_t {
+      std::uint64_t calls = 0;
+      RECT last_rect {};
+      std::weak_ptr<void> token;
+    };
+    thread_local model_preparation_watch_probe_t *active_model_preparation_watch_probe = nullptr;
+
+    std::shared_ptr<void> model_preparation_watch_for_test(RECT rect) {
+      if (!active_model_preparation_watch_probe) {
+        return platf::game3d::watch_game_setup(rect);
+      }
+      auto &probe = *active_model_preparation_watch_probe;
+      ++probe.calls;
+      probe.last_rect = rect;
+      auto token = std::make_shared<unsigned char>(0u);
+      probe.token = token;
+      return token;
+    }
+  }  // namespace
+#endif
+#ifdef SUNSHINE_TESTS
+  namespace {
+    struct conversion_poll_model_read_t {
+      const std::function<models::engine_build_status()> &read;
+      std::uint32_t calls = 0;
+    };
+
+    thread_local conversion_poll_model_read_t *active_conversion_poll_model_read = nullptr;
+
+    class conversion_poll_model_read_scope_t {
+    public:
+      explicit conversion_poll_model_read_scope_t(conversion_poll_model_read_t &read):
+          previous_(std::exchange(active_conversion_poll_model_read, &read)) {}
+
+      ~conversion_poll_model_read_scope_t() {
+        active_conversion_poll_model_read = previous_;
+      }
+
+    private:
+      conversion_poll_model_read_t *previous_;
+    };
+  }  // namespace
+#endif
   class d3d_base_encode_device final {
   public:
     ~d3d_base_encode_device() {
@@ -701,11 +754,21 @@ namespace platf::dxgi {
         .pipeline_build_pending = depth_estimator_build.valid(),
         .depth_completion_pending = depth_completion_poll_pending,
         .authority_reprocess_pending = depth_authority_reprocess_pending || subtitle_context_reprocess_pending ||
-          (sbs_mode != ::video::SBS_OFF && models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer) &&
-           video_player_registry && !video_player_registry_ready_observed && video_player_registry->ready()),
+                                       (sbs_mode != ::video::SBS_OFF &&
+                                        detail::host_sbs_window_authority_observation_needed(
+                                          depth_estimator != nullptr,
+                                          models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer)
+                                        ) &&
+                                        video_player_registry && !video_player_registry_ready_observed && video_player_registry->ready()),
         .dump_pending = sbs_dumper.needs_conversion_poll(),
       };
       return work.needs_service([]() {
+#ifdef SUNSHINE_TESTS
+        if (active_conversion_poll_model_read) {
+          ++active_conversion_poll_model_read->calls;
+          return active_conversion_poll_model_read->read();
+        }
+#endif
         return models::tensorrt_model_prepare_status(::video::host_sbs_v2_depth_model());
       });
     }
@@ -1502,8 +1565,10 @@ namespace platf::dxgi {
           ID3D11ShaderResourceView *render_input_srv = img_ctx->encoder_input_res.get();
           matched_frame_slot_t *matched_render_slot = nullptr;
           matched_frame_slot_t *matched_candidate_slot = nullptr;
-          models::estimate_result est;
-          // Planned working views are local to this convert call, never an estimate_result.
+          host_sbs::observation_handoff_t handoff;
+          auto &depth_step = handoff.step();
+          auto &est = depth_step.observation;
+          // Planned working views are local to this convert call, never a completed observation.
           std::optional<models::queued_same_source_gpu_continuation_research_views_t> queued_draw;
           matched_frame_slot_t *queued_source_slot = nullptr;
           bool queued_refined_geometry = false;
@@ -1559,7 +1624,7 @@ namespace platf::dxgi {
             if (!subtitle_context.matches(matched_render_slot->subtitle_context_generation)) {
               // Normal focus/video transitions retire old work without displaying its protected field.
               matched_render_slot = nullptr;
-              est = {};
+              handoff.reset();
               render_input_srv = img_ctx->encoder_input_res.get();
               matched_presentation_cache.invalidate();
               return false;
@@ -1578,7 +1643,7 @@ namespace platf::dxgi {
                    "does not match its exact buffered color frame; "sv
                    "rendering current-frame identity."sv;
               matched_render_slot = nullptr;
-              est = {};
+              handoff.reset();
               render_input_srv = img_ctx->encoder_input_res.get();
               matched_presentation_cache.invalidate();
               return false;
@@ -1594,7 +1659,7 @@ namespace platf::dxgi {
                 matched_presentation_cache.reset();
                 latest_v2_lineage.reset();
                 matched_render_slot = nullptr;
-                est = {};
+                handoff.reset();
                 render_input_srv = img_ctx->encoder_input_res.get();
                 return false;
               }
@@ -1612,7 +1677,7 @@ namespace platf::dxgi {
             if (!matched_render_slot) {
               return false;
             }
-            if (est.input_domain_reset) {
+            if (depth_step.completion.input_domain_reset) {
               sbs_telemetry_min_frame_id = std::max(
                 sbs_telemetry_min_frame_id,
                 est.completed_frame_id
@@ -1627,7 +1692,7 @@ namespace platf::dxgi {
               if (failed_renderer != host_sbs_renderer) {
                 fail_depth_pipeline_flat();
                 matched_render_slot = nullptr;
-                est = {};
+                handoff.reset();
                 render_input_srv = img_ctx->encoder_input_res.get();
                 BOOST_LOG(error)
                   << "Host SBS parallax-v2 producer reported a terminal CUDA/TensorRT failure; "sv
@@ -1675,7 +1740,7 @@ namespace platf::dxgi {
                   << ")."sv;
                 fail_depth_pipeline_flat();
                 matched_render_slot = nullptr;
-                est = {};
+                handoff.reset();
                 render_input_srv = img_ctx->encoder_input_res.get();
                 return false;
               }
@@ -1693,6 +1758,7 @@ namespace platf::dxgi {
             }
             (void) retain_latest_v2_lineage(
               est,
+              depth_step.status,
               *matched_render_slot,
               completed_source_desc,
               live_source_desc,
@@ -1757,16 +1823,16 @@ namespace platf::dxgi {
               if (polled.ready) {
                 latest_v2_lineage.reset();
                 depth_completion_poll_pending = false;
-                if (!polled.result.completed_frame_valid) {
+                if (!polled.result.observation.completed_frame_valid) {
                   for (auto &slot : matched_frame_slots) {
                     slot.pending = false;
                   }
                   block_current_submission_after_early_poll = true;
                 } else {
                   auto *completed_slot =
-                    find_pending_matched_slot(polled.result.completed_frame_id);
+                    find_pending_matched_slot(polled.result.observation.completed_frame_id);
                   if (!completed_slot) {
-                    release_unknown_completion(polled.result.completed_frame_id, nullptr);
+                    release_unknown_completion(polled.result.observation.completed_frame_id, nullptr);
                     block_current_submission_after_early_poll = true;
                   } else {
                     completed_slot->pending = false;
@@ -1775,7 +1841,7 @@ namespace platf::dxgi {
                     }
                     matched_render_slot = completed_slot;
                     render_input_srv = completed_slot->srv.get();
-                    est = std::move(polled.result);
+                    handoff.select(std::move(polled.result));
                     if (probe_observer.record) {
                       actual_converter_probe_v1::event_t e; e.kind=actual_converter_probe_v1::event_e::ack;
                       emit_converter_probe(std::move(e),matched_render_slot,&est,nullptr,render_input_srv,img_ctx->encoder_input_res.get(),frame_id);
@@ -1984,15 +2050,15 @@ namespace platf::dxgi {
                 // not retain resource aliases authenticated before that state transition.
                 latest_v2_lineage.reset();
                 depth_completion_poll_pending = false;
-                if (!polled.result.completed_frame_valid) {
+                if (!polled.result.observation.completed_frame_valid) {
                   // The verified slot represented the estimator's sole pending inference. A ready
                   // empty/failure result has consumed or invalidated that ownership too; retaining
                   // the bit would suppress every later submission indefinitely.
                   unchanged_input_pending_slot->pending = false;
                 }
-                if (polled.result.completed_frame_valid) {
+                if (polled.result.observation.completed_frame_valid) {
                   auto *completed_slot =
-                    find_pending_matched_slot(polled.result.completed_frame_id);
+                    find_pending_matched_slot(polled.result.observation.completed_frame_id);
                   if (completed_slot == unchanged_input_pending_slot) {
                     completed_slot->pending = false;
                     if (!completed_slot->depth_input_region.is_video_region()) {
@@ -2004,7 +2070,7 @@ namespace platf::dxgi {
                       current_input_reuse_kind(*completed_slot);
                     force_fresh_current_color =
                       completed_reuse_kind != detail::host_sbs_ddup_reuse_proof_e::none;
-                    est = std::move(polled.result);
+                    handoff.select(std::move(polled.result));
                     if (probe_observer.record) {
                       actual_converter_probe_v1::event_t e; e.kind=actual_converter_probe_v1::event_e::ack;
                       emit_converter_probe(std::move(e),matched_render_slot,&est,nullptr,render_input_srv,img_ctx->encoder_input_res.get(),frame_id);
@@ -2024,7 +2090,7 @@ namespace platf::dxgi {
                       }
                     }
                   } else {
-                    release_unknown_completion(polled.result.completed_frame_id, nullptr);
+                    release_unknown_completion(polled.result.observation.completed_frame_id, nullptr);
                   }
                 }
               }
@@ -2092,7 +2158,7 @@ namespace platf::dxgi {
                 // and delivery now. A route mismatch cannot restore publication authority.
                 latest_v2_lineage.reset();
                 matched_render_slot = nullptr;
-                est = {};
+                handoff.reset();
                 render_input_srv = img_ctx->encoder_input_res.get();
                 completion_finalized_before_admission = false;
               }
@@ -2146,13 +2212,13 @@ namespace platf::dxgi {
                   matched_candidate_slot->temporal_source,
                   matched_candidate_slot->subtitle_line_policy
                 );
-                const bool submitted_refined_geometry = submitted.refined_live_geometry_active;
+                const bool submitted_refined_geometry = submitted.observation.refined_live_geometry_active;
                 if (completion_finalized_before_admission &&
                     !depth_estimator->publication_is_current(est.publication)) {
                   // Admission can reset subtitle state without changing the depth domain.
                   // Borrowed views from the early completion no longer authorize this draw.
                   matched_render_slot = nullptr;
-                  est = {};
+                  handoff.reset();
                   render_input_srv = img_ctx->encoder_input_res.get();
                   matched_presentation_cache.reset();
                   latest_v2_lineage.reset();
@@ -2161,29 +2227,15 @@ namespace platf::dxgi {
                 if (
                   diagnostics_enabled &&
                   matched_candidate_slot->depth_input_region.is_video_region() &&
-                  (submitted.inference_enqueued ||
-                   submitted.gpu_undecided_transaction_enqueued)
+                  (submitted.submission.inference_enqueued ||
+                   submitted.submission.gpu_undecided_transaction_enqueued)
                 ) {
                   ++matched_stats_roi_direct_inputs;
                 }
-                if (
-                  completion_finalized_before_admission && est.completed_frame_valid &&
-                  !submitted.completed_frame_valid
-                ) {
-                  // Preserve the already-authenticated prior completion for this draw while the
-                  // current call's submission flags retain ownership of the new matched slot.
-                  // The wrapper result owns no per-enqueue resources beyond these call metadata.
-                  est.inference_enqueued = submitted.inference_enqueued;
-                  est.gpu_undecided_transaction_enqueued =
-                    submitted.gpu_undecided_transaction_enqueued;
-                  est.subtitle_ocr_inference_enqueued =
-                    submitted.subtitle_ocr_inference_enqueued;
-                  est.cuda_graph_active =
-                    est.cuda_graph_active || submitted.cuda_graph_active;
-                } else {
-                  est = std::move(submitted);
-                  completion_finalized_before_admission = false;
-                }
+                completion_finalized_before_admission = handoff.accept_submission(
+                  std::move(submitted),
+                  completion_finalized_before_admission
+                );
                 if (
                   est.completed_frame_valid &&
                   !completion_finalized_before_admission
@@ -2213,8 +2265,8 @@ namespace platf::dxgi {
                   }
                 }
                 const bool gpu_undecided_transaction_enqueued =
-                  est.gpu_undecided_transaction_enqueued;
-                const bool force_infer_transaction_enqueued = est.inference_enqueued;
+                  depth_step.submission.gpu_undecided_transaction_enqueued;
+                const bool force_infer_transaction_enqueued = depth_step.submission.inference_enqueued;
                 const bool depth_transaction_enqueued =
                   force_infer_transaction_enqueued || gpu_undecided_transaction_enqueued;
                 const auto adaptive_submission_class =
@@ -2341,7 +2393,7 @@ namespace platf::dxgi {
                       matched_render_slot = nullptr;
                       completion_finalized_before_admission = false;
                       queued_refined_geometry = submitted_refined_geometry;
-                      est = {};
+                      handoff.reset();
                       render_input_srv = img_ctx->encoder_input_res.get();
                       // Slots keep the calibrated DAV2 submission raster; the ticket owns
                       // the estimator's authenticated realized field, as ordinary completions do.
@@ -2377,7 +2429,7 @@ namespace platf::dxgi {
                       // No ticket is used, and this call renders current identity.
                       queued_attempt_failed_flat = true;
                       matched_render_slot = nullptr;
-                      est = {};
+                      handoff.reset();
                       render_input_srv = img_ctx->encoder_input_res.get();
                     }
                   }
@@ -2412,8 +2464,8 @@ namespace platf::dxgi {
 
                   const auto completion = detail::host_sbs_same_frame_completion(
                     polled.ready,
-                    polled.result.completed_frame_valid,
-                    polled.result.completed_frame_id,
+                    polled.result.observation.completed_frame_valid,
+                    polled.result.observation.completed_frame_id,
                     matched_candidate_slot->frame_id
                   );
                   const auto poll_outcome = detail::host_sbs_same_frame_poll_outcome(
@@ -2492,7 +2544,7 @@ namespace platf::dxgi {
                     depth_completion_poll_pending = false;
                     matched_render_slot = nullptr;
                     render_input_srv = img_ctx->encoder_input_res.get();
-                    est = {};
+                    handoff.reset();
                     completion_finalized_before_admission = false;
                     if (
                       completion ==
@@ -2504,7 +2556,7 @@ namespace platf::dxgi {
                       }
                       matched_render_slot = matched_candidate_slot;
                       render_input_srv = matched_candidate_slot->srv.get();
-                      est = std::move(polled.result);
+                      handoff.select(std::move(polled.result));
                       if (probe_observer.record) {
                         actual_converter_probe_v1::event_t e; e.kind=actual_converter_probe_v1::event_e::ack;
                         emit_converter_probe(std::move(e),matched_render_slot,&est,nullptr,render_input_srv,img_ctx->encoder_input_res.get(),frame_id);
@@ -2528,9 +2580,9 @@ namespace platf::dxgi {
                       // A ready empty/failure result consumed or invalidated B. Clear its exact
                       // slot and let the existing terminal-flat/authentication path decide output.
                       matched_candidate_slot->pending = false;
-                      if (polled.result.completed_frame_valid) {
+                      if (polled.result.observation.completed_frame_valid) {
                         release_unknown_completion(
-                          polled.result.completed_frame_id,
+                          polled.result.observation.completed_frame_id,
                           nullptr
                         );
                       }
@@ -2586,10 +2638,10 @@ namespace platf::dxgi {
             );
           if (
             !matched_render_slot && post_completion_cache_render_allowed &&
-            (unchanged_content_submission_suppressed || est.inference_enqueued ||
-             est.gpu_undecided_transaction_enqueued)
+            (unchanged_content_submission_suppressed || depth_step.submission.inference_enqueued ||
+             depth_step.submission.gpu_undecided_transaction_enqueued)
           ) {
-            est = latest_v2_lineage.estimate;
+            handoff.select(host_sbs::observation_handoff_t::repeat(latest_v2_lineage.estimate, latest_v2_lineage.status));
             copy_matched_frame_attribution(
               current_color_reuse_slot,
               latest_v2_lineage.slot
@@ -2663,7 +2715,7 @@ namespace platf::dxgi {
               latest_v2_lineage.reset();
             }
             matched_render_slot = nullptr;
-            est = {};
+            handoff.reset();
             render_input_srv = img_ctx->encoder_input_res.get();
             completion_finalized_before_admission = false;
           } else if (!completion_finalized_before_admission && matched_render_slot) {
@@ -2678,7 +2730,7 @@ namespace platf::dxgi {
             if (failed_renderer != host_sbs_renderer) {
               fail_depth_pipeline_flat();
               matched_render_slot = nullptr;
-              est = {};
+              handoff.reset();
               render_input_srv = img_ctx->encoder_input_res.get();
               BOOST_LOG(error)
                 << "Host SBS parallax-v2 producer reported a terminal CUDA/TensorRT failure; "sv
@@ -2705,7 +2757,7 @@ namespace platf::dxgi {
           // cached-current RGB reuse. Reject a late private B only after a newer source was drawn.
           if (matched_render_slot && !cached_current_color_warp && !same_source(matched_render_slot->source_timestamp, current_source_timestamp) && !drawn_source_order.permits(matched_render_slot->frame_id)) {
             matched_render_slot = nullptr;
-            est = {};
+            handoff.reset();
             render_input_srv = img_ctx->encoder_input_res.get();
           }
           const auto repeat_now = std::chrono::steady_clock::now();
@@ -2713,7 +2765,7 @@ namespace platf::dxgi {
           if (matched_render_slot && host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2 && !models::host_sbs_matched_completion_is_current(same_source(matched_render_slot->source_timestamp, current_source_timestamp), repeat_now - matched_render_slot->captured_at)) {
             stale_v2_completion = true;
             matched_render_slot = nullptr;
-            est = {};
+            handoff.reset();
             render_input_srv = img_ctx->encoder_input_res.get();
           }
           if (matched_render_slot) {
@@ -2902,7 +2954,7 @@ namespace platf::dxgi {
             // ordinary completion renders its private matched color; an authorized cache reuse
             // deliberately renders current color/cursor with authenticated cached geometry.
             if (!matched_render_slot && !queued_geometry_selected) {
-              est = {};
+              handoff.reset();
               render_input_srv = img_ctx->encoder_input_res.get();
             }
 
@@ -3665,7 +3717,7 @@ namespace platf::dxgi {
                   est.publication.observation_timestamp_us;
                 dump_frame.depth_input_region = est.input_region;
                 dump_frame.depth_video_plan = matched_render_slot->depth_video_plan;
-                dump_frame.input_domain_reset = est.input_domain_reset;
+                dump_frame.input_domain_reset = depth_step.completion.input_domain_reset;
                 dump_frame.gpu_undecided_completion =
                   est.gpu_undecided_completion;
                 dump_frame.subtitle_work_suppressed =
@@ -3675,7 +3727,7 @@ namespace platf::dxgi {
                   matched_render_slot->window_region_observer_status;
                 dump_frame.window_region_mapping_status =
                   matched_render_slot->window_region_mapping_status;
-                dump_frame.cuda_graph_active = est.cuda_graph_active;
+                dump_frame.cuda_graph_active = depth_step.status.cuda_graph_active;
                 dump_frame.parallax_v2_producer_active =
                   est.parallax_v2_producer_active;
                 dump_frame.parallax_v2_render_selected =
@@ -4107,7 +4159,16 @@ namespace platf::dxgi {
         return false;
       }
       if (!video_player_registry && !probe_context) {
+#ifdef SUNSHINE_TESTS
+        if (test_registry_executables.valid()) {
+          video_player_registry = std::make_unique<video_player::registry_t>(test_registry_executables);
+          ++test_registry_factory_calls;
+        } else {
+          video_player_registry = std::make_unique<video_player::registry_t>();
+        }
+#else
         video_player_registry = std::make_unique<video_player::registry_t>();
+#endif
       }
       if (depth_estimator) {
         return true;
@@ -4163,11 +4224,17 @@ namespace platf::dxgi {
         return false;
       }
 
-      // Startup model preparation is process-global and may take minutes on first use. It includes
+      // Model GPU preparation is process-global and may take minutes on first AI use. It includes
       // engine compilation, deserialization, execution-context creation, and CUDA warmup. Report
       // that complete wait as loading, but don't duplicate it on this encode device.
       auto active = ::video::host_sbs_v2_depth_model();
       auto build_status = models::tensorrt_model_prepare_status(active);
+      if (build_status == models::engine_build_status::unknown) {
+        if (!models::request_live_model_preparation()) {
+          return false;
+        }
+        build_status = models::tensorrt_model_prepare_status(active);
+      }
       if (build_status != models::engine_build_status::ready) {
         if (build_status == models::engine_build_status::failed) {
           BOOST_LOG(error) << "Startup TensorRT model preparation failed for '"sv << active.name
@@ -4837,11 +4904,7 @@ namespace platf::dxgi {
       }
     };
 
-    void emit_converter_probe(actual_converter_probe_v1::event_t event,
-      const matched_frame_slot_t *slot, const models::estimate_result *result,
-      const models::queued_same_source_gpu_continuation_research_views_t *ticket,
-      ID3D11ShaderResourceView *selected, ID3D11ShaderResourceView *current,
-      std::uint64_t conversion) noexcept {
+    void emit_converter_probe(actual_converter_probe_v1::event_t event, const matched_frame_slot_t *slot, const models::depth_observation_views_t *result, const models::queued_same_source_gpu_continuation_research_views_t *ticket, ID3D11ShaderResourceView *selected, ID3D11ShaderResourceView *current, std::uint64_t conversion) noexcept {
       if (!probe_observer.record) { return; }
       const auto now = std::chrono::steady_clock::now();
       event.host_event_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
@@ -4928,7 +4991,8 @@ namespace platf::dxgi {
     }
 
     struct latest_v2_lineage_t {
-      models::estimate_result estimate;
+      models::depth_observation_views_t estimate;
+      models::depth_call_status_t status;
       matched_frame_slot_t slot;
       std::optional<models::host_sbs_gpu_completion_receipt::receipt_t> receipt;
 
@@ -5074,9 +5138,6 @@ namespace platf::dxgi {
       }
     }
 
-    models::host_sbs_temporal_source_bridge::counters_t temporal_source_bridge_counters_for_evaluation() const noexcept {
-      return temporal_source_ledger.counters();
-    }
     // Explicit same-TU instance setup, before first input. No public encoder or UI setting.
     bool configure_temporal_source_bridge_for_instance(
       const models::subtitle_temporal_source_research_configuration_t &cfg,std::string &error) {
@@ -5143,7 +5204,7 @@ namespace platf::dxgi {
     }
 
     [[nodiscard]] static bool gpu_transaction_class_matches(
-      const models::estimate_result &estimate,
+      const models::depth_observation_views_t &estimate,
       const matched_frame_slot_t &slot
     ) noexcept {
       return estimate.gpu_undecided_completion == slot.gpu_undecided_transaction;
@@ -5311,7 +5372,8 @@ namespace platf::dxgi {
     }
 
     [[nodiscard]] bool retain_latest_v2_lineage(
-      const models::estimate_result &estimate,
+      const models::depth_observation_views_t &estimate,
+      const models::depth_call_status_t &status,
       const matched_frame_slot_t &slot,
       const D3D11_TEXTURE2D_DESC &completed_source_desc,
       const D3D11_TEXTURE2D_DESC &current_source_desc,
@@ -5348,13 +5410,9 @@ namespace platf::dxgi {
         latest_v2_lineage.receipt.reset();
       }
       latest_v2_lineage.estimate = estimate;
-      // A reused presentation is not a new inference/completion transition. Preserve the completed
-      // geometry identity while preventing reset side effects from replaying on every cursor
-      // delivery that shares the same DDup desktop-content clock.
-      latest_v2_lineage.estimate.inference_enqueued = false;
-      latest_v2_lineage.estimate.gpu_undecided_transaction_enqueued = false;
-      latest_v2_lineage.estimate.input_domain_reset = false;
-      latest_v2_lineage.estimate.subtitle_ocr_inference_enqueued = false;
+      // Retain observation views and diagnostic status only. Repeated presentation cannot
+      // replay a submission or a completion event because neither belongs to this cache.
+      latest_v2_lineage.status = status;
       // The cache renders current color, never the old private color copy. Retain only the scalar
       // attribution needed by the V2 renderer; matched slots own move-only D3D resources.
       copy_matched_frame_attribution(latest_v2_lineage.slot, slot);
@@ -7115,9 +7173,15 @@ namespace platf::dxgi {
       game_source_supported = game_transport_supported &&
                               (display->display_rotation == DXGI_MODE_ROTATION_UNSPECIFIED ||
                                display->display_rotation == DXGI_MODE_ROTATION_IDENTITY);
+#ifdef SUNSHINE_TESTS
+      game_setup_watch = ::video::is_game_mode(sbs_mode) ?
+                           model_preparation_watch_for_test({display->offset_x, display->offset_y, display->offset_x + display->width, display->offset_y + display->height}) :
+                           nullptr;
+#else
       game_setup_watch = ::video::is_game_mode(sbs_mode) ?
                            platf::game3d::watch_game_setup(display->screen_rect()) :
                            nullptr;
+#endif
       // This converter is used by live local/remote presentation only. The offline worker and
       // benchmark own their independent AI renderer and never instantiate this receiver.
       // A fullscreen game may render at the negotiated resolution while Windows presents it at
@@ -8111,6 +8175,10 @@ namespace platf::dxgi {
     D3D11_VIEWPORT sbs_viewport;
     std::array<matched_frame_slot_t, 2> matched_frame_slots;
     std::optional<video_dom::lease_t> video_dom_lease;
+#ifdef SUNSHINE_TESTS
+    std::shared_future<std::vector<std::wstring>> test_registry_executables;
+    std::uint64_t test_registry_factory_calls = 0;
+#endif
     std::unique_ptr<video_player::registry_t> video_player_registry;
     bool video_player_registry_ready_observed = false;
     models::host_subtitle_context::tracker_t subtitle_context;
@@ -8200,6 +8268,475 @@ namespace platf::dxgi {
 
   #include "host_sbs_actual_converter_probe.inc"
   #include "host_sbs_pending_current_colour_probe.inc"
+
+#ifdef SUNSHINE_TESTS
+  namespace testing {
+    namespace {
+      using Microsoft::WRL::ComPtr;
+
+      void preparation_probe_require(bool condition, const char *message) {
+        if (!condition) {
+          throw std::runtime_error(message);
+        }
+      }
+
+      void preparation_probe_hr(HRESULT status, const char *message) {
+        if (FAILED(status)) {
+          throw std::runtime_error(std::string(message) + ": " + std::to_string(static_cast<long>(status)));
+        }
+      }
+
+      ComPtr<IDXGIAdapter1> preparation_probe_adapter(const model_preparation_adapter_t &required) {
+        preparation_probe_require((required.luid_low || required.luid_high) && required.vendor_id && required.device_id,
+          "Preparation probe requires explicit adapter identity");
+        ComPtr<IDXGIFactory1> factory;
+        preparation_probe_hr(CreateDXGIFactory1(IID_PPV_ARGS(&factory)), "Preparation DXGI factory failed");
+        ComPtr<IDXGIAdapter1> selected;
+        unsigned matches = 0;
+        for (UINT index = 0; index != 64u; ++index) {
+          ComPtr<IDXGIAdapter1> candidate;
+          const auto status = factory->EnumAdapters1(index, &candidate);
+          if (status == DXGI_ERROR_NOT_FOUND) {
+            preparation_probe_require(matches == 1u, "Preparation adapter identity missing or ambiguous");
+            return selected;
+          }
+          preparation_probe_hr(status, "Preparation adapter enumeration failed");
+          DXGI_ADAPTER_DESC1 description {};
+          preparation_probe_hr(candidate->GetDesc1(&description), "Preparation adapter description failed");
+          if (description.AdapterLuid.LowPart != required.luid_low || description.AdapterLuid.HighPart != required.luid_high) {
+            continue;
+          }
+          preparation_probe_require(description.VendorId == required.vendor_id && description.DeviceId == required.device_id &&
+              !(description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE),
+            "Preparation adapter hardware identity differs");
+          selected = candidate;
+          ++matches;
+        }
+        throw std::runtime_error("Preparation adapter census exceeded its finite bound");
+      }
+
+      void preparation_probe_device_adapter(ID3D11Device *device, const model_preparation_adapter_t &required) {
+        ComPtr<IDXGIDevice> dxgi;
+        ComPtr<IDXGIAdapter> adapter;
+        DXGI_ADAPTER_DESC description {};
+        preparation_probe_hr(device->QueryInterface(IID_PPV_ARGS(&dxgi)), "Preparation device DXGI query failed");
+        preparation_probe_hr(dxgi->GetAdapter(&adapter), "Preparation device adapter query failed");
+        preparation_probe_hr(adapter->GetDesc(&description), "Preparation actual adapter description failed");
+        preparation_probe_require(description.AdapterLuid.LowPart == required.luid_low && description.AdapterLuid.HighPart == required.luid_high &&
+            description.VendorId == required.vendor_id && description.DeviceId == required.device_id,
+          "Preparation actual D3D device differs from explicit adapter");
+      }
+
+      struct preparation_probe_display_t final: display_vram_t {
+        bool is_hdr() override { return false; }
+        capture_e snapshot(const pull_free_image_cb_t &, std::shared_ptr<platf::img_t> &, std::chrono::milliseconds, bool) override {
+          throw std::logic_error("Preparation probe must never enter physical capture");
+        }
+        capture_e release_snapshot() override {
+          throw std::logic_error("Preparation probe owns no physical capture");
+        }
+      };
+    }  // namespace
+
+    model_preparation_memory_t query_model_preparation_memory(const model_preparation_adapter_t &required) {
+      const auto adapter = preparation_probe_adapter(required);
+      DXGI_ADAPTER_DESC1 description {};
+      preparation_probe_hr(adapter->GetDesc1(&description), "Preparation memory adapter description failed");
+      model_preparation_memory_t result;
+      result.adapter = required;
+      result.description = platf::to_utf8(description.Description);
+      ComPtr<IDXGIAdapter3> adapter3;
+      preparation_probe_hr(adapter.As(&adapter3), "Preparation process memory interface unavailable");
+      result.local_status = adapter3->QueryVideoMemoryInfo(0u, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &result.local);
+      result.nonlocal_status = adapter3->QueryVideoMemoryInfo(0u, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &result.nonlocal);
+      return result;
+    }
+
+    class model_preparation_converter_t::impl_t {
+    public:
+      explicit impl_t(model_preparation_converter_request_t request):
+          request_(std::move(request)),
+          owner_thread_(std::this_thread::get_id()),
+          ready_event_(std::make_shared<safe::event_t<bool>>()) {
+        const auto width = request_.width, height = request_.height;
+        preparation_probe_require(width && height && width <= 4096u && height <= 4096u &&
+            request_.bgra.size() == std::size_t(width) * height * 4u,
+          "Preparation probe source shape or immutable bytes invalid");
+        const auto attributes = GetFileAttributesW(request_.output_root.c_str());
+        preparation_probe_require(request_.output_root.is_absolute() && attributes != INVALID_FILE_ATTRIBUTES &&
+            (attributes & FILE_ATTRIBUTE_DIRECTORY) && !(attributes & FILE_ATTRIBUTE_REPARSE_POINT),
+          "Preparation probe requires an owned absolute ordinary output directory");
+        source_artifact_ = write_artifact("source.bgra8", request_.bgra.data(), request_.bgra.size(), width, height);
+
+        const auto adapter = preparation_probe_adapter(request_.adapter);
+        preparation_probe_require(::platf::dxgi::init() == 0, "Preparation platform shader initialization failed");
+        display_ = std::make_shared<preparation_probe_display_t>();
+        display_->width = display_->width_before_rotation = width;
+        display_->height = display_->height_before_rotation = height;
+        display_->env_width = width;
+        display_->env_height = height;
+        display_->offset_x = display_->offset_y = 0;
+        display_->display_rotation = DXGI_MODE_ROTATION_IDENTITY;
+        display_->capture_format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        display_->next_image_id = 1u;
+        constexpr D3D_FEATURE_LEVEL levels[] {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
+        preparation_probe_hr(D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+          levels, 2u, D3D11_SDK_VERSION, &display_->device, nullptr, &display_->device_ctx), "Preparation source device creation failed");
+        preparation_probe_device_adapter(display_->device.get(), request_.adapter);
+        converter_ = std::make_unique<d3d_base_encode_device>();
+        preparation_probe_require(converter_->init(display_, adapter.Get(), pix_fmt_e::nv12) == 0, "Preparation actual converter initialization failed");
+        preparation_probe_device_adapter(converter_->device.get(), request_.adapter);
+        probe_context_ = {width, height, 0x5052455041524531ull};
+        if (request_.production_observer_path) {
+          preparation_probe_require(request_.registry_executables.valid(), "Production-observer probe requires its finite registry future");
+          converter_->test_registry_executables = request_.registry_executables;
+        } else {
+          converter_->probe_context = &probe_context_;
+        }
+        converter_->probe_observer = {this, &impl_t::record};
+
+        image_ = display_->alloc_img();
+        preparation_probe_require(image_ && display_->complete_img(image_.get(), false) == 0, "Preparation shared source image allocation failed");
+        auto &image = static_cast<img_d3d_t &>(*image_);
+        preparation_probe_require(image.capture_mutex.get() != nullptr, "Preparation source keyed mutex unavailable");
+        preparation_probe_require(image.capture_mutex->AcquireSync(0u, 5000u) == S_OK, "Preparation immutable source mutex failed");
+        {
+          auto release = util::fail_guard([&image]() { image.capture_mutex->ReleaseSync(0u); });
+          display_->device_ctx->UpdateSubresource(image.capture_texture.get(), 0u, nullptr, request_.bgra.data(), width * 4u, 0u);
+          display_->device_ctx->Flush();
+        }
+        ++source_uploads_;
+        image.blank = false;
+        const auto stamp = std::chrono::steady_clock::now();
+        image_->frame_timestamp = stamp;
+        image_->content_timestamp = stamp;
+        set_mode(::video::SBS_OFF);
+      }
+
+      ~impl_t() {
+        // The real destructor transfers GPU construction/teardown to its existing tracked owner.
+        // Destroy it while observer state, the source and the synthetic context still exist.
+        converter_.reset();
+      }
+
+      void set_mode(::video::sbs_mode_e mode) {
+        assert_owner();
+        preparation_probe_require(mode == ::video::SBS_OFF || mode == ::video::SBS_GAME_MONO || mode == ::video::SBS_AI,
+          "Preparation probe supports flat, no-provider Game mono and actual Host AI only");
+        const auto output_width = mode == ::video::SBS_AI ? request_.width * 2u : request_.width;
+        // Only synchronous initialization sees this finite external factory edge. The real
+        // Game branch still runs; unsupported transport creates no ReShade receiver/provider.
+        config::video_t::sbs_t settings;
+        settings.reshade = false;
+        {
+          auto *previous = std::exchange(active_model_preparation_watch_probe, &watch_probe_);
+          auto restore_watch = util::fail_guard([previous]() { active_model_preparation_watch_probe = previous; });
+          preparation_probe_require(converter_->init_rgb_output(static_cast<int>(output_width), static_cast<int>(request_.height),
+            mode, settings, ready_event_) == 0, "Preparation actual RGB mode initialization failed");
+        }
+        preparation_probe_require(!converter_->reshade_receiver, "Preparation probe unexpectedly constructed a provider receiver");
+        target_.Reset();
+        target_rtv_.Reset();
+        D3D11_TEXTURE2D_DESC description {};
+        description.Width = output_width;
+        description.Height = request_.height;
+        description.MipLevels = description.ArraySize = description.SampleDesc.Count = 1u;
+        description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        description.Usage = D3D11_USAGE_DEFAULT;
+        description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        preparation_probe_hr(converter_->device->CreateTexture2D(&description, nullptr, &target_), "Preparation output allocation failed");
+        preparation_probe_hr(converter_->device->CreateRenderTargetView(target_.Get(), nullptr, &target_rtv_), "Preparation output RTV failed");
+        constexpr float clear[4] {};
+        converter_->device_ctx->ClearRenderTargetView(target_rtv_.Get(), clear);
+        output_width_ = output_width;
+        draw_ = {};
+      }
+
+      model_preparation_converter_snapshot_t observe() const {
+        assert_owner();
+        auto result = draw_;
+        result.conversions = conversions_;
+        result.source_uploads = source_uploads_;
+        result.source_stamp_ticks = image_->frame_timestamp ? image_->frame_timestamp->time_since_epoch().count() : 0;
+        result.content_stamp_ticks = image_->content_timestamp ? image_->content_timestamp->time_since_epoch().count() : 0;
+        if (const auto stamp = converter_->rendered_content_timestamp()) {
+          result.rendered_stamp_ticks = stamp->time_since_epoch().count();
+        }
+        result.mode = converter_->sbs_mode;
+        result.model_status = models::tensorrt_model_prepare_status(::video::host_sbs_v2_depth_model());
+        result.renderer = converter_->host_sbs_renderer;
+        result.pipeline_ready = ready_event_->peek();
+        result.build_pending = converter_->has_pending_depth_pipeline_build();
+        result.estimator_present = static_cast<bool>(converter_->depth_estimator);
+        result.estimator_valid = result.estimator_present && converter_->depth_estimator->is_valid();
+        result.estimator_terminal = result.estimator_present && converter_->depth_estimator->has_terminal_failure();
+        result.v2_live_warp_seen = converter_->v2_live_warp_seen;
+        result.latest_lineage_authenticated = converter_->latest_v2_lineage.authenticated;
+        result.latest_lineage_known_depth = converter_->latest_v2_lineage.known_depth();
+        const auto &lineage = converter_->latest_v2_lineage;
+        result.latest_lineage_receipt_present = lineage.receipt.has_value();
+        result.latest_lineage_receipt_depth_cache_authorized = lineage.receipt && lineage.receipt->depth_cache_authorized();
+        result.latest_lineage_receipt_matches_publication = lineage.receipt && models::host_sbs_gpu_completion_receipt::matches_publication(*lineage.receipt, lineage.estimate.publication);
+        result.latest_lineage_publication_frame_id = lineage.estimate.publication.frame_id;
+        result.sbs_frame_sequence = converter_->sbs_frame_sequence;
+        result.flat_outputs = converter_->matched_stats_output_flat;
+        result.warped_outputs = converter_->matched_stats_output_warped_new;
+        result.repeat_outputs = converter_->matched_stats_output_packed_repeat;
+        result.setup_watch_factory_calls = watch_probe_.calls;
+        result.setup_watch_tokens_alive = watch_probe_.token.use_count();
+        result.setup_watch_rect = watch_probe_.last_rect;
+        result.setup_watch_present = static_cast<bool>(converter_->game_setup_watch);
+        result.receiver_present = static_cast<bool>(converter_->reshade_receiver);
+        result.production_observer_path = converter_->probe_context == nullptr;
+        result.registry_present = static_cast<bool>(converter_->video_player_registry);
+        result.registry_ready = result.registry_present && converter_->video_player_registry->ready();
+        result.registry_ready_observed = converter_->video_player_registry_ready_observed;
+        result.registry_factory_calls = converter_->test_registry_factory_calls;
+        result.registry_consumption_eligible = detail::host_sbs_window_authority_observation_needed(
+          result.estimator_present,
+          models::host_sbs_renderer_uses_depth_pipeline(converter_->host_sbs_renderer)
+        );
+        result.pipeline_enabled = converter_->sbs_mode != ::video::SBS_OFF && models::host_sbs_renderer_uses_depth_pipeline(converter_->host_sbs_renderer);
+        result.depth_completion_pending = converter_->depth_completion_poll_pending;
+        result.authority_reprocess_pending = converter_->depth_authority_reprocess_pending;
+        result.subtitle_reprocess_pending = converter_->subtitle_context_reprocess_pending;
+        result.dump_pending = converter_->sbs_dumper.needs_conversion_poll();
+        result.gamma_pending = converter_->stream_gamma_conversion_pending;
+        result.gamma_white_query_due =
+          converter_->stream_gamma_mode_ != ::video::stream_gamma_mode_e::windows_default &&
+          std::chrono::steady_clock::now() >= converter_->stream_gamma_white_query_at;
+        return result;
+      }
+
+      model_preparation_converter_snapshot_t convert_retained() {
+        assert_owner();
+        const bool sampled_ready = ready_event_->peek();
+        preparation_probe_require(converter_->convert_rgb(*image_, target_.Get(), target_rtv_.Get(), false, std::nullopt) == 0,
+          "Preparation actual retained-source conversion failed");
+        ++conversions_;
+        if (sampled_ready) {
+          (void) ready_event_->try_pop();
+        }
+        return observe();
+      }
+
+      bool needs_conversion_poll() const {
+        assert_owner();
+        return converter_->needs_conversion_poll();
+      }
+
+      bool pipeline_ready() const {
+        assert_owner();
+        return ready_event_->peek();
+      }
+
+      model_preparation_artifact_t snapshot_output(std::string_view label) {
+        assert_owner();
+        preparation_probe_require(!label.empty() && label.size() <= 48u && std::all_of(label.begin(), label.end(), [](unsigned char value) {
+          return (value >= 'a' && value <= 'z') || (value >= '0' && value <= '9') || value == '-';
+        }), "Preparation artifact label invalid");
+        D3D11_TEXTURE2D_DESC description {};
+        target_->GetDesc(&description);
+        description.Usage = D3D11_USAGE_STAGING;
+        description.BindFlags = 0u;
+        description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        ComPtr<ID3D11Texture2D> staging;
+        preparation_probe_hr(converter_->device->CreateTexture2D(&description, nullptr, &staging), "Preparation output staging allocation failed");
+        converter_->device_ctx->CopyResource(staging.Get(), target_.Get());
+        std::vector<std::uint8_t> bytes(std::size_t(output_width_) * request_.height * 4u);
+        D3D11_MAPPED_SUBRESOURCE mapped {};
+        preparation_probe_hr(converter_->device_ctx->Map(staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped), "Preparation explicit output readback failed");
+        {
+          auto unmap = util::fail_guard([&]() { converter_->device_ctx->Unmap(staging.Get(), 0u); });
+          preparation_probe_require(mapped.RowPitch >= output_width_ * 4u, "Preparation output readback pitch invalid");
+          for (std::uint32_t row = 0; row != request_.height; ++row) {
+            std::memcpy(bytes.data() + std::size_t(row) * output_width_ * 4u,
+              static_cast<const std::uint8_t *>(mapped.pData) + std::size_t(row) * mapped.RowPitch, output_width_ * 4u);
+          }
+        }
+        return write_artifact(std::string(label) + ".bgra8", bytes.data(), bytes.size(), output_width_, request_.height);
+      }
+
+      model_preparation_artifact_t source_artifact() const {
+        assert_owner();
+        return source_artifact_;
+      }
+
+      model_preparation_memory_t memory() const {
+        assert_owner();
+        return query_model_preparation_memory(request_.adapter);
+      }
+
+    private:
+      void assert_owner() const {
+        preparation_probe_require(std::this_thread::get_id() == owner_thread_, "Preparation converter used outside its D3D owner");
+      }
+
+      model_preparation_artifact_t write_artifact(const std::string &name, const std::uint8_t *bytes, std::size_t size,
+        std::uint32_t width, std::uint32_t height) const {
+        const auto path = request_.output_root / name;
+        preparation_probe_require(!std::filesystem::exists(path), "Preparation probe refuses artifact overwrite");
+        std::ofstream output(path, std::ios::binary);
+        output.write(reinterpret_cast<const char *>(bytes), static_cast<std::streamsize>(size));
+        output.flush();
+        preparation_probe_require(output.good(), "Preparation probe artifact write failed");
+        output.close();
+        const auto hash = models::file_sha256_hex(path);
+        preparation_probe_require(hash.size() == 64u, "Preparation probe artifact hash failed");
+        return {path, hash, width, height, width * 4u};
+      }
+
+      static void record(void *state, const actual_converter_probe_v1::event_t &event) noexcept {
+        if (event.kind != actual_converter_probe_v1::event_e::draw) {
+          return;
+        }
+        auto &self = *static_cast<impl_t *>(state);
+        self.draw_.last_draw_present = true;
+        self.draw_.last_draw_flat = event.flat;
+        self.draw_.last_draw_repeat = event.repeat;
+        self.draw_.last_draw_publication_current = event.publication_current;
+        self.draw_.last_draw_model_frame = event.model_frame;
+        self.draw_.last_draw_observation_us = event.observation_us;
+        self.draw_.last_draw_expected_work = event.publication.expected_work;
+        self.draw_.last_draw_host_subtitle_outcome = static_cast<std::uint32_t>(event.publication.host_subtitle_outcome);
+        self.draw_.last_draw_source_stamp_ticks = event.source_stamp_ticks;
+        self.draw_.last_draw_content_stamp_ticks = event.content_stamp_ticks;
+        self.draw_.last_draw_current_source_stamp_ticks = event.current_source_stamp_ticks;
+        self.draw_.last_draw_current_content_stamp_ticks = event.current_content_stamp_ticks;
+      }
+
+      model_preparation_converter_request_t request_;
+      std::thread::id owner_thread_;
+      std::shared_ptr<safe::event_t<bool>> ready_event_;
+      model_preparation_watch_probe_t watch_probe_;
+      actual_converter_probe_v1::context_t probe_context_;
+      model_preparation_converter_snapshot_t draw_;
+      model_preparation_artifact_t source_artifact_;
+      std::shared_ptr<preparation_probe_display_t> display_;
+      std::shared_ptr<platf::img_t> image_;
+      ComPtr<ID3D11Texture2D> target_;
+      ComPtr<ID3D11RenderTargetView> target_rtv_;
+      std::uint32_t output_width_ = 0;
+      std::uint64_t conversions_ = 0;
+      std::uint64_t source_uploads_ = 0;
+      std::unique_ptr<d3d_base_encode_device> converter_;
+    };
+
+    model_preparation_converter_t::model_preparation_converter_t(model_preparation_converter_request_t request):
+        impl_(std::make_unique<impl_t>(std::move(request))) {}
+    model_preparation_converter_t::~model_preparation_converter_t() = default;
+    void model_preparation_converter_t::set_mode(::video::sbs_mode_e mode) { impl_->set_mode(mode); }
+    model_preparation_converter_snapshot_t model_preparation_converter_t::observe() const { return impl_->observe(); }
+    model_preparation_converter_snapshot_t model_preparation_converter_t::convert_retained() { return impl_->convert_retained(); }
+    bool model_preparation_converter_t::needs_conversion_poll() const { return impl_->needs_conversion_poll(); }
+    bool model_preparation_converter_t::pipeline_ready() const { return impl_->pipeline_ready(); }
+    model_preparation_artifact_t model_preparation_converter_t::snapshot_output(std::string_view label) { return impl_->snapshot_output(label); }
+    model_preparation_artifact_t model_preparation_converter_t::source_artifact() const { return impl_->source_artifact(); }
+    model_preparation_memory_t model_preparation_converter_t::memory() const { return impl_->memory(); }
+  }  // namespace testing
+#endif
+
+#ifdef SUNSHINE_TESTS
+  namespace testing {
+    class conversion_poll_probe_t::impl_t {
+    public:
+      explicit impl_t(std::optional<std::shared_future<std::vector<std::wstring>>> registry_future) {
+        const char *dump_directory = std::getenv("APOLLO_SBS_DUMP");
+        if (dump_directory && *dump_directory && config::sunshine.diagnostics_enabled) {
+          throw std::invalid_argument("CPU conversion-poll probe requires diagnostic file triggers disabled");
+        }
+        // No init method is called: all D3D handles and the estimator remain empty.
+        converter_ = std::make_unique<d3d_base_encode_device>();
+        if (registry_future) {
+          converter_->video_player_registry = std::make_unique<video_player::registry_t>(std::move(*registry_future));
+        }
+        converter_->sbs_dumper.set_button_request(button_);
+      }
+
+      ~impl_t() {
+        clear_build();
+      }
+
+      conversion_poll_snapshot_t observe(
+        const conversion_poll_inputs_t &inputs,
+        const std::function<models::engine_build_status()> &read_model_status
+      ) {
+        if (!read_model_status) {
+          throw std::invalid_argument("CPU conversion-poll probe requires a finite model-status reader");
+        }
+        if (converter_->device || converter_->device_ctx || converter_->depth_estimator) {
+          throw std::logic_error("CPU conversion-poll probe acquired a graphics owner");
+        }
+        clear_build();
+        if (inputs.build != conversion_poll_build_e::absent) {
+          build_completion_.emplace();
+          converter_->depth_estimator_build = build_completion_->get_future();
+          if (inputs.build == conversion_poll_build_e::ready) {
+            build_completion_->set_value({});
+          }
+        }
+        converter_->sbs_mode = inputs.mode;
+        converter_->host_sbs_renderer = inputs.renderer;
+        converter_->video_player_registry_ready_observed = inputs.registry_ready_observed;
+        converter_->depth_completion_poll_pending = inputs.depth_completion_pending;
+        converter_->depth_authority_reprocess_pending = inputs.depth_authority_reprocess_pending;
+        converter_->subtitle_context_reprocess_pending = inputs.subtitle_context_reprocess_pending;
+        converter_->stream_gamma_conversion_pending = inputs.stream_gamma_conversion_pending;
+        converter_->stream_gamma_mode_ = inputs.white_query_due ? ::video::stream_gamma_mode_e::gamma_2_2 : ::video::stream_gamma_mode_e::windows_default;
+        converter_->stream_gamma_white_query_at = inputs.white_query_due.value_or(false) ?
+                                                    std::chrono::steady_clock::time_point::min() :
+                                                    std::chrono::steady_clock::time_point::max();
+        button_->store(inputs.dump_button_requested, std::memory_order_release);
+
+        conversion_poll_model_read_t model_read {read_model_status};
+        conversion_poll_model_read_scope_t scope {model_read};
+        const bool needs_conversion = converter_->needs_conversion_poll();
+        const bool build_valid = converter_->depth_estimator_build.valid();
+        return {
+          .needs_conversion = needs_conversion,
+          .registry_present = static_cast<bool>(converter_->video_player_registry),
+          .registry_ready = converter_->video_player_registry && converter_->video_player_registry->ready(),
+          .registry_ready_observed = converter_->video_player_registry_ready_observed,
+          .build_valid = build_valid,
+          .build_ready = build_valid && converter_->depth_estimator_build.wait_for(std::chrono::seconds {0}) == std::future_status::ready,
+          .estimator_present = static_cast<bool>(converter_->depth_estimator),
+          .device_present = static_cast<bool>(converter_->device),
+          .context_present = static_cast<bool>(converter_->device_ctx),
+          .model_status_reads = model_read.calls,
+        };
+      }
+
+    private:
+      void clear_build() {
+        if (converter_ && converter_->depth_estimator_build.valid()) {
+          if (converter_->depth_estimator_build.wait_for(std::chrono::seconds {0}) != std::future_status::ready) {
+            build_completion_->set_value({});
+          }
+          // Consume the actual empty future before the real converter destructor: it must not
+          // hand test-owned work to the process-lifetime estimator retirement service.
+          (void) converter_->depth_estimator_build.get();
+        }
+        build_completion_.reset();
+      }
+
+      std::shared_ptr<std::atomic<bool>> button_ = std::make_shared<std::atomic<bool>>(false);
+      std::optional<std::promise<depth_pipeline_build_result_t>> build_completion_;
+      std::unique_ptr<d3d_base_encode_device> converter_;
+    };
+
+    conversion_poll_probe_t::conversion_poll_probe_t(std::optional<std::shared_future<std::vector<std::wstring>>> registry_future):
+        impl_(std::make_unique<impl_t>(std::move(registry_future))) {}
+
+    conversion_poll_probe_t::~conversion_poll_probe_t() = default;
+
+    conversion_poll_snapshot_t conversion_poll_probe_t::observe(
+      const conversion_poll_inputs_t &inputs,
+      const std::function<models::engine_build_status()> &read_model_status
+    ) {
+      return impl_->observe(inputs, read_model_status);
+    }
+  }  // namespace testing
+#endif
 
   namespace {
     constexpr wchar_t local_presenter_window_class[] = L"ApolloLocalArPresenter";
@@ -11260,8 +11797,46 @@ namespace platf::dxgi {
       // The destructor body runs before nvenc_d3d is destroyed. Do not let a hung NVENC teardown
       // retain the capture display and deadlock capture-thread reinitialization.
       base.release_capture_display();
+#ifdef SUNSHINE_TESTS
+      if (test_after_capture_release_) {
+        test_after_capture_release_();
+      }
+#endif
     }
 
+    static native_encode_owner_t create(
+      std::shared_ptr<platf::display_t> display,
+      adapter_t::pointer adapter,
+      const ::video::config_t &client_config,
+      const ::video::sunshine_colorspace_t &colorspace
+    ) {
+      auto candidate = std::make_unique<d3d_nvenc_encode_device_t>();
+      auto &device = *candidate;
+      native_encode_owner_t owner {std::move(candidate)};
+      const auto pix_fmt = colorspace.bit_depth == 10 ? pix_fmt_e::p010 : pix_fmt_e::nv12;
+      if (!device.init_device(display, adapter, pix_fmt)) {
+        return {};
+      }
+      device.colorspace = colorspace;
+      if (::video::colorspace_is_hdr(colorspace)) {
+        SS_HDR_METADATA metadata {};
+        if (display->get_hdr_metadata(metadata)) {
+          device.hdr_metadata = metadata;
+        } else {
+          BOOST_LOG(error) << "Couldn't get display HDR metadata for the native encoder bitstream."sv;
+        }
+      }
+      if (!device.init_encoder(client_config, colorspace)) {
+        return {};
+      }
+      return owner;
+    }
+
+    nvenc::nvenc_base &encoder() override {
+      return *nvenc_d3d;
+    }
+
+  private:
     bool init_device(std::shared_ptr<platf::display_t> display, adapter_t::pointer adapter_p, pix_fmt_e pix_fmt) {
       buffer_format = nvenc::nvenc_format_from_sunshine_format(pix_fmt);
       if (buffer_format == NV_ENC_BUFFER_FORMAT_UNDEFINED) {
@@ -11274,12 +11849,11 @@ namespace platf::dxgi {
       }
 
       nvenc_d3d = std::make_unique<nvenc::nvenc_d3d11_native>(base.device.get());
-      nvenc = nvenc_d3d.get();
 
       return true;
     }
 
-    bool init_encoder(const ::video::config_t &client_config, const ::video::sunshine_colorspace_t &colorspace) override {
+    bool init_encoder(const ::video::config_t &client_config, const ::video::sunshine_colorspace_t &colorspace) {
       if (!nvenc_d3d) {
         return false;
       }
@@ -11320,6 +11894,7 @@ namespace platf::dxgi {
              ) == 0;
     }
 
+  public:
     int convert(platf::img_t &img_base) override {
       return base.convert(img_base);
     }
@@ -11371,7 +11946,15 @@ namespace platf::dxgi {
     d3d_base_encode_device base;
     std::unique_ptr<nvenc::nvenc_d3d11_native> nvenc_d3d;
     NV_ENC_BUFFER_FORMAT buffer_format = NV_ENC_BUFFER_FORMAT_UNDEFINED;
+#ifdef SUNSHINE_TESTS
+    friend struct native_capture_release_test_access;
+    std::function<void()> test_after_capture_release_;
+#endif
   };
+
+#ifdef SUNSHINE_TESTS
+  #include "display_vram_native_owner_test.inc"
+#endif
 
   bool set_cursor_texture(device_t::pointer device, gpu_cursor_t &cursor, const std::vector<std::uint8_t> &cursor_img, const sbs_cursor::shape_t &shape) {
     // This cursor image may not be used
@@ -12350,12 +12933,11 @@ namespace platf::dxgi {
     return boost::algorithm::ends_with(name, "_nvenc");
   }
 
-  std::unique_ptr<nvenc_encode_device_t> display_vram_t::make_nvenc_encode_device(pix_fmt_e pix_fmt) {
-    auto device = std::make_unique<d3d_nvenc_encode_device_t>();
-    if (!device->init_device(shared_from_this(), adapter.get(), pix_fmt)) {
-      return nullptr;
-    }
-    return device;
+  native_encode_owner_t display_vram_t::make_nvenc_encode_device(
+    const ::video::config_t &client_config,
+    const ::video::sunshine_colorspace_t &colorspace
+  ) {
+    return d3d_nvenc_encode_device_t::create(shared_from_this(), adapter.get(), client_config, colorspace);
   }
 
   int init() {

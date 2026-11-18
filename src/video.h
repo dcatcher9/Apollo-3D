@@ -30,6 +30,10 @@
 #include "video_encode_pacing.h"
 #include "video_frame_diagnostics.h"
 
+namespace stream::detail {
+  class atomic_presentation_t;
+}
+
 namespace video {
   // The broadcast worker should never be allowed to accumulate hundreds of milliseconds of
   // already encoded video. Three frames absorb ordinary encoder/network scheduling jitter while
@@ -555,6 +559,9 @@ namespace video {
     bool stream_gamma_supported = false;
     // APPEND-ONLY. Shared with the control stream, which wakes the encode loop after each request.
     std::shared_ptr<encode_wake_t> encode_wake;
+    // APPEND-ONLY. Direct plain completion of this session's serialized presentation request.
+    // The endpoint owns neither the session nor its worker thread.
+    std::shared_ptr<stream::detail::atomic_presentation_t> atomic_presentation;
   };
 
   /** Game 3D, and Host SBS fed by the ReShade export, convert an independent provider's frames as
@@ -665,70 +672,6 @@ namespace video {
   config::depth_model_info host_sbs_v2_depth_model();
   using img_event_t = std::shared_ptr<safe::event_t<std::shared_ptr<platf::img_t>>>;
 
-  struct encode_session_t {
-    virtual ~encode_session_t() = default;
-
-    virtual int convert(platf::img_t &img) = 0;
-
-    virtual int convert_with_encode_target(
-      platf::img_t &img,
-      std::chrono::steady_clock::time_point next_encode_target
-    ) {
-      (void) next_encode_target;
-      return convert(img);
-    }
-
-    virtual std::optional<std::chrono::steady_clock::time_point> rendered_content_timestamp() const {
-      return std::nullopt;
-    }
-
-    virtual bool needs_conversion_poll() const {
-      return false;
-    }
-
-    virtual void request_idr_frame() = 0;
-
-    virtual void request_normal_frame() = 0;
-
-    virtual void invalidate_ref_frames(int64_t first_frame, int64_t last_frame) = 0;
-  };
-
-  struct packet_raw_t {
-    virtual ~packet_raw_t() = default;
-
-    virtual bool is_idr() = 0;
-
-    virtual int64_t frame_index() = 0;
-
-    virtual uint8_t *data() = 0;
-
-    virtual size_t data_size() = 0;
-
-    // Retain only the network-send state needed by the broadcast worker. This deliberately does
-    // not own the stream session (which owns the broadcast context), avoiding both dangling raw
-    // pointers and a session -> broadcast -> queued packet -> session ownership cycle.
-    std::shared_ptr<void> channel_data;
-    bool after_ref_frame_invalidation = false;
-    // Presentation/cadence time. This is the only timestamp used to derive the monotonic RTP PTS.
-    std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
-    // Actual desktop/content pixels rendered into this packet. This may predate frame_timestamp
-    // for cursor-only capture updates, matched Host SBS output, and repeated encoder input.
-    std::optional<std::chrono::steady_clock::time_point> content_timestamp;
-    // Current conversion-pass start, independent of old source pixels and encode/RTP cadence.
-    // Empty when this packet repeats the retained encoder input without a conversion.
-    detail::optional_frame_time_point_t processing_started;
-    // Conservative exact encoder-input proof. Every conversion and encoder replacement clears
-    // this, including cursor-only updates and conversions that ultimately render cached pixels.
-    bool encoder_input_retained = false;
-    // Filled only by diagnostic runs; the broadcast worker must preserve the encoder's output
-    // classification instead of inferring freshness from packet delivery order or cadence.
-    detail::diagnostic_content_e diagnostic_content = detail::diagnostic_content_e::unknown;
-    std::shared_ptr<host_sbs_telemetry::collector> sbs_telemetry_performance;
-    // Timestamp after encoding, used independently from the capture timestamp to bound only
-    // host-side encoded-packet backlog.
-    std::chrono::steady_clock::time_point encoded_timestamp = std::chrono::steady_clock::now();
-  };
-
   class encoded_frame_buffer_pool_t {
   public:
     std::vector<std::uint8_t> acquire() {
@@ -759,8 +702,8 @@ namespace video {
     std::vector<std::vector<std::uint8_t>> buffers_;
   };
 
-  struct packet_raw_generic: packet_raw_t {
-    packet_raw_generic(
+  struct encoded_packet_t {
+    encoded_packet_t(
       std::vector<uint8_t> &&frame_data,
       int64_t frame_index,
       bool idr,
@@ -772,27 +715,47 @@ namespace video {
         frame_buffer_pool {std::move(frame_buffer_pool)} {
     }
 
-    ~packet_raw_generic() override {
+    ~encoded_packet_t() {
       if (frame_buffer_pool) {
         frame_buffer_pool->recycle(std::move(frame_data));
       }
     }
 
-    bool is_idr() override {
+    bool is_idr() {
       return idr;
     }
 
-    int64_t frame_index() override {
+    int64_t frame_index() {
       return index;
     }
 
-    uint8_t *data() override {
+    uint8_t *data() {
       return frame_data.data();
     }
 
-    size_t data_size() override {
+    size_t data_size() {
       return frame_data.size();
     }
+
+    bool after_ref_frame_invalidation = false;
+    // Presentation/cadence time. This is the only timestamp used to derive the monotonic RTP PTS.
+    std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
+    // Actual desktop/content pixels rendered into this packet. This may predate frame_timestamp
+    // for cursor-only capture updates, matched Host SBS output, and repeated encoder input.
+    std::optional<std::chrono::steady_clock::time_point> content_timestamp;
+    // Current conversion-pass start, independent of old source pixels and encode/RTP cadence.
+    // Empty when this packet repeats the retained encoder input without a conversion.
+    detail::optional_frame_time_point_t processing_started;
+    // Conservative exact encoder-input proof. Every conversion and encoder replacement clears
+    // this, including cursor-only updates and conversions that ultimately render cached pixels.
+    bool encoder_input_retained = false;
+    // Filled only by diagnostic runs; the broadcast worker must preserve the encoder's output
+    // classification instead of inferring freshness from packet delivery order or cadence.
+    detail::diagnostic_content_e diagnostic_content = detail::diagnostic_content_e::unknown;
+    std::shared_ptr<host_sbs_telemetry::collector> sbs_telemetry_performance;
+    // Timestamp after encoding, used independently from the capture timestamp to bound only
+    // host-side encoded-packet backlog.
+    std::chrono::steady_clock::time_point encoded_timestamp = std::chrono::steady_clock::now();
 
     std::vector<uint8_t> frame_data;
     int64_t index;
@@ -800,7 +763,8 @@ namespace video {
     std::shared_ptr<encoded_frame_buffer_pool_t> frame_buffer_pool;
   };
 
-  using packet_t = std::unique_ptr<packet_raw_t>;
+  using packet_t = std::unique_ptr<encoded_packet_t>;
+  using packet_queue_t = std::shared_ptr<safe::queue_t<packet_t>>;
 
   struct hdr_info_raw_t {
     explicit hdr_info_raw_t(bool enabled):
@@ -829,7 +793,7 @@ namespace video {
   void capture(
     safe::mail_t mail,
     config_t config,
-    std::shared_ptr<void> channel_data
+    packet_queue_t packets
   );
 
   /**

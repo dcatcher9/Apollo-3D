@@ -129,7 +129,6 @@ namespace input {
 
   enum class button_state_e {
     NONE,  ///< No button state
-    DOWN,  ///< Button is down
     UP  ///< Button is up
   };
 
@@ -461,7 +460,7 @@ namespace input {
         mouse_press[BUTTON_LEFT] = false;
       };
 
-    input->mouse_left_button_timeout = task_pool.pushDelayed(std::move(f), 10ms).task_id;
+    input->mouse_left_button_timeout = task_pool.pushDelayed(std::move(f), 10ms);
 
       return;
     }
@@ -603,7 +602,7 @@ namespace input {
       flags,
       synthetic_modifiers,
       generation
-    ).task_id;
+    );
   }
 
   void passthrough(std::shared_ptr<input_t> &input, PNV_KEYBOARD_PACKET packet) {
@@ -656,7 +655,7 @@ namespace input {
             packet->flags,
             synthetic_modifiers,
             repeat_generation
-          ).task_id;
+          );
         }
       } else {
         // Already released
@@ -840,14 +839,6 @@ namespace input {
       rotation %= 360;
     }
 
-    // Normalize the contact area based on the touchport
-    auto contact_area = scale_client_contact_area(
-      {from_clamped_netfloat(packet->contactAreaMajor, 0.0f, 1.0f) * 65535.f,
-       from_clamped_netfloat(packet->contactAreaMinor, 0.0f, 1.0f) * 65535.f},
-      rotation,
-      {abs_port.width / 65535.f, abs_port.height / 65535.f}
-    );
-
     platf::pen_input_t pen {
       packet->eventType,
       packet->toolType,
@@ -857,8 +848,6 @@ namespace input {
       coords->first,
       coords->second,
       from_clamped_netfloat(packet->pressureOrDistance, 0.0f, 1.0f),
-      contact_area.first,
-      contact_area.second,
     };
 
     platf::pen_update(input->client_context.get(), abs_port, pen);
@@ -1002,12 +991,6 @@ namespace input {
         }
         gamepad_state.buttonFlags &= ~platf::BACK;
         break;
-      case button_state_e::DOWN:
-        if (platf::BACK & bf_new) {
-          gamepad.back_button_state = button_state_e::NONE;
-        }
-        gamepad_state.buttonFlags |= platf::BACK;
-        break;
       case button_state_e::NONE:
         break;
     }
@@ -1061,10 +1044,10 @@ namespace input {
               gamepad.gamepad_state.buttonFlags &= ~platf::HOME;
               platf::gamepad_update(platf_input, gamepad.id, gamepad.gamepad_state);
             };
-            gamepad.home_release_id = task_pool.pushDelayed(std::move(release_home), 100ms).task_id;
+            gamepad.home_release_id = task_pool.pushDelayed(std::move(release_home), 100ms);
           };
 
-          gamepad.back_timeout_id = task_pool.pushDelayed(std::move(f), config::input.back_button_timeout).task_id;
+          gamepad.back_timeout_id = task_pool.pushDelayed(std::move(f), config::input.back_button_timeout);
         }
       } else if (gamepad.back_timeout_id || gamepad.home_release_id) {
         task_pool.cancel(gamepad.back_timeout_id);

@@ -2361,9 +2361,21 @@ Transitions before acceptance require force-infer; after acceptance, neither the
 nor a late receipt can establish authority on the new route.
 
 Model preparation, shader compilation, and the live renderer are fail-closed. Shared producer,
-arbitration and ordinary Base-renderer bytecode is prewarmed at process startup. Live current-outline
-compute and shared-warp device programs prepare on the tracked per-device background build
-worker before its future becomes ready; the encode thread only adopts the prepared handles.
+arbitration and ordinary Base-renderer bytecode is prewarmed on the CPU at process startup.
+TensorRT GPU preparation starts on the first actual Host AI conversion that observes an unknown
+preparation state. Flat and Game presentation do not request it. The process-scoped owner admits
+one background depth-then-optional-OCR sequence under its own live GPU workload reservation and
+joins that worker before logging teardown. A denied reservation leaves the request unconsumed
+and the global preparation state unchanged. Ready depth remains usable without another request.
+First AI use therefore streams flat/loading while compilation, context creation and warmup finish;
+a missing engine cache can make this wait take minutes. Healthy engines and pooled contexts remain
+resident for later AI use until process exit. Context isolation, physical limits and quarantine are
+unchanged; preparation does not evict resident models. Optional OCR keeps its existing per-estimator
+construction-time availability and subtitle authorization; depth readiness does not promise that
+optional OCR preparation has completed or enable it later in an already constructed estimator.
+Live current-outline compute and shared-warp device programs prepare on the tracked per-device
+background build worker before its future becomes ready; the encode thread only adopts the
+prepared handles.
 There is no separate literal selected-matte pixel shader or preparation task. Per-frame shared
 failure disables b3 subtitle permission and clears selected authority before recording an ordinary
 Base draw. The shared shader imports only canonical Base/ROI/packed geometry and current glyph
@@ -2517,13 +2529,22 @@ a final update from waiting for the default one-fifth-rate heartbeat without spi
 repeated frames faster than the requested cadence. Pipeline initialization readiness may bypass
 the wait entirely, but only after a real captured source has been retained.
 
-Global model preparation is checked at that ordinary idle boundary. When it becomes ready or
-fails, the retained static source services initialization or publishes the terminal flat status
+Global model preparation is checked at that ordinary idle boundary. Model-status reads do not
+request GPU preparation; unknown and building states do not add conversion demand or a faster
+wake. Only actual AI conversion requests an unknown model state. When preparation becomes ready
+or fails, the retained static source services initialization or publishes the terminal flat status
 without waiting for desktop motion. Preparation itself does not request frame-rate conversion;
 the next idle wake observes its outcome, while per-device construction retains its existing
 completion notification. Receipt readiness alone does not request conversion, and pending
 diagnostic receipts do not keep a faster retry active. A completed near-identical reuse may remain
 idle with its older analysis owner; no final or periodic inference is required for unchanged input.
+
+The bounded application-registration census still starts as background prefetch at the first
+production AI conversion. Its ready result requests retained-source conversion only when the
+depth estimator exists and the renderer can run the foreground/subtitle observer. Until then,
+census readiness stays unconsumed and by itself does not shorten the ordinary idle wait. Global
+preparation ready/failure, the device-build completion event, and existing depth, authority, dump,
+and gamma work retain their independent service paths.
 
 ### Client exact-repeat transport
 

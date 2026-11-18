@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <mutex>
 #include <optional>
@@ -24,6 +25,7 @@
 #include "host_sbs_shader_cache.h"
 #include "httpcommon.h"
 #include "logging.h"
+#include "live_model_preparation.h"
 #include "main.h"
 #include "nvhttp.h"
 #include "offline_sbs_job.h"
@@ -42,6 +44,7 @@
   #include "platform/windows/misc.h"
   #include "platform/windows/primary_display.h"
   #include "platform/windows/virtual_display.h"
+  #include "platform/windows/virtual_display_session.h"
 #endif
 
 #define PROBE_DISPLAY_UUID "38F72B96-B00C-4F21-8B6C-E1BFF1602B0E"
@@ -547,25 +550,13 @@ int main(int argc, char *argv[]) {
   }
 #endif
 
-  // Prepare the pinned authenticated live TensorRT model in the background for the long-lived host.
+  // Keep CPU shader prewarm at startup; GPU model work begins only at a real live AI request.
   // Command modes such as --sbs-bench own their TensorRT lifecycle and must not race this work.
-  // jthread joins before logging and process globals are torn down, preventing exit-time races.
-  std::jthread model_prepare_thread([model = video::host_sbs_v2_depth_model(),
-                                     adapter_name = config::video.adapter_name]() {
-    BOOST_LOG(info) << "Preparing authenticated live depth model '"sv << model.name << "'..."sv;
-    if (!models::prepare_tensorrt_model(
-          SUNSHINE_ASSETS_DIR,
-          model,
-          adapter_name
-        )) {
-      BOOST_LOG(error) << "Startup depth-model preparation failed for '"sv << model.name << "'."sv;
-    }
-    if (!models::prepare_ocr_tensorrt_model(SUNSHINE_ASSETS_DIR, adapter_name)) {
-      BOOST_LOG(warning)
-        << "Startup PP-OCRv6 tiny preparation failed; Host SBS will run without subtitle "sv
-           "conditioning."sv;
-    }
-  });
+  // Unregister and join the process owner before logging and process globals are torn down.
+  models::live_model_preparation_t model_prepare_thread(
+    video::host_sbs_v2_depth_model(),
+    config::video.adapter_name
+  );
 
   // nanors lazily initializes its process-wide GF lookup table when a context
   // is created. Warm it on the main thread before any broadcast worker can
@@ -688,7 +679,7 @@ int main(int argc, char *argv[]) {
         logging::log_flush();
         lifetime::debug_trap();
       };
-      force_shutdown = task_pool.pushDelayed(task, 10s).task_id;
+      force_shutdown = task_pool.pushDelayed(task, 10s);
     }
 
     if (session_monitor_hwnd_future.wait_for(1s) != std::future_status::ready) {
@@ -719,7 +710,7 @@ int main(int argc, char *argv[]) {
       lifetime::debug_trap();
     };
 
-    force_shutdown = task_pool.pushDelayed(task, 10s).task_id;
+    force_shutdown = task_pool.pushDelayed(task, 10s);
 
     shutdown_event->raise(true);
   });
@@ -732,7 +723,7 @@ int main(int argc, char *argv[]) {
       logging::log_flush();
       lifetime::debug_trap();
     };
-    force_shutdown = task_pool.pushDelayed(task, 10s).task_id;
+    force_shutdown = task_pool.pushDelayed(task, 10s);
 
     shutdown_event->raise(true);
   });
@@ -775,7 +766,7 @@ int main(int argc, char *argv[]) {
         logging::log_flush();
         lifetime::debug_trap();
       };
-      force_shutdown = task_pool.pushDelayed(task, 10s).task_id;
+      force_shutdown = task_pool.pushDelayed(task, 10s);
     }
     video::drain_async_teardown_workers();
   });
@@ -831,99 +822,7 @@ int main(int argc, char *argv[]) {
       }
 
       if (probe_display.added()) {
-        const auto retirement_started = std::chrono::steady_clock::now();
-        const auto retirement_deadline = retirement_started + 8s;
-        auto next_remove_retry = retirement_started;
-        unsigned int consecutive_absent_observations = 0;
-        bool remove_ready = false;
-        bool remove_accepted = false;
-        bool requires_active_path_absence = false;
-        bool retired = false;
-        std::shared_ptr<VDISPLAY::desktop_detach_context_t> detach_context;
-        while (std::chrono::steady_clock::now() < retirement_deadline) {
-          const auto now = std::chrono::steady_clock::now();
-          if (!remove_ready) {
-            const auto detach_budget = std::min(
-              1500ms,
-              std::chrono::duration_cast<std::chrono::milliseconds>(
-                retirement_deadline - now
-              )
-            );
-            const auto detach = VDISPLAY::deactivateVirtualDisplay(
-              *probe_display.identity,
-              probe_display.device_path,
-              detach_budget,
-              detach_context
-            );
-            if (detach.state == VDISPLAY::desktop_detach_state_e::detached || detach.state == VDISPLAY::desktop_detach_state_e::already_inactive) {
-              remove_ready = true;
-              requires_active_path_absence = true;
-            } else if (
-              detach.state == VDISPLAY::desktop_detach_state_e::skipped_only_active
-            ) {
-              // With no surviving desktop there is no multi-monitor shell state to preserve.
-              remove_ready = true;
-              requires_active_path_absence = false;
-            } else {
-              std::this_thread::sleep_for(250ms);
-              continue;
-            }
-          }
-
-          if (!remove_accepted && now >= next_remove_retry) {
-            if (requires_active_path_absence) {
-              const auto active_state = VDISPLAY::queryVirtualDisplayIdentity(
-                                          *probe_display.identity,
-                                          probe_display.device_path,
-                                          probe_display.display_name
-              )
-                                          .state;
-              if (!VDISPLAY::isDriverRemovalSafeAfterDesktopDetach(
-                    true,
-                    active_state
-                  )) {
-                // Detach readiness can become stale if Windows reattaches the path. Re-enter the
-                // same context-preserving detach sequence instead of hot-removing it.
-                remove_ready = false;
-                requires_active_path_absence = false;
-                detach_context.reset();
-                consecutive_absent_observations =
-                  VDISPLAY::advanceStableAbsenceEvidence(
-                    consecutive_absent_observations,
-                    true,
-                    active_state
-                  );
-                continue;
-              }
-            }
-            remove_accepted = VDISPLAY::removeVirtualDisplay(*probe_guid);
-            next_remove_retry = now + 250ms;
-          }
-
-          // Once CCD detaches a target, active-path absence alone no longer proves that the IddCx
-          // monitor is gone. Query the complete topology and require stable exact absence.
-          const auto identity = VDISPLAY::queryVirtualDisplayRetirementState(
-            *probe_display.identity,
-            probe_display.device_path,
-            probe_display.display_name
-          );
-          consecutive_absent_observations =
-            VDISPLAY::advanceStableAbsenceEvidence(
-              consecutive_absent_observations,
-              false,
-              identity
-            );
-          if (identity == VDISPLAY::display_identity_state_e::absent) {
-            const bool publication_quarantine_complete = !probe_display.display_name.empty() ||
-                                                         now - retirement_started >= 750ms;
-            if (consecutive_absent_observations >= 3 && publication_quarantine_complete) {
-              retired = true;
-              break;
-            }
-          }
-          std::this_thread::sleep_for(250ms);
-        }
-        if (!retired) {
+        if (!VDISPLAY::retire_probe_display(probe_display, *probe_guid)) {
           BOOST_LOG(fatal) << "The encoder-probe virtual display did not retire cleanly; "sv
                               "refusing to start another virtual-display owner."sv;
           return 1;
@@ -957,24 +856,12 @@ int main(int argc, char *argv[]) {
     return -1;
   }
 
-  // Media-tool and NVENC capability probes are optional and can take several seconds on
-  // a cold driver/toolchain. They must not delay pairing, mDNS, RTSP, or the configuration
-  // UI. The process-global offline facade remains unavailable until this task commits a
-  // fully initialized service.
-  auto offline_sbs_initialization = std::async(std::launch::async, []() {
-    std::string error;
-    if (!offline_sbs::initialize(
-          offline_sbs::default_service_config(),
-          error
-        )) {
-      BOOST_LOG(warning)
-        << "Offline SBS conversion is unavailable: "sv << error;
-    }
-  });
+  // The offline facade owns its initializer and captures the startup account/configuration.
+  // Arm fallback cleanup before any later demand can launch its owning worker.
   auto offline_sbs_shutdown_guard = util::fail_guard([]() {
     offline_sbs::shutdown();
   });
-
+  offline_sbs::configure_default_service();
   std::unique_ptr<platf::deinit_t> mDNS;
   auto sync_mDNS = std::async(std::launch::async, [&mDNS]() {
     if (config::sunshine.enable_discovery) {
@@ -1015,7 +902,6 @@ int main(int argc, char *argv[]) {
   rtspThread.join();
 
   offline_sbs::shutdown();
-  offline_sbs_initialization.wait();
   offline_sbs_shutdown_guard.disable();
 
   // A recent disconnect may have left Windows streaming state warm for fast reconnect. Flush it
@@ -1032,7 +918,7 @@ int main(int argc, char *argv[]) {
       logging::log_flush();
       lifetime::debug_trap();
     };
-    force_shutdown = task_pool.pushDelayed(task, 10s).task_id;
+    force_shutdown = task_pool.pushDelayed(task, 10s);
   }
 
   // RTSP shutdown above has stopped and joined capture, encode, audio, control, and input. Only

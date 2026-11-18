@@ -9,10 +9,13 @@
   #include "src/platform/windows/ds5/ds5_controller_slot.h"
   #include "src/platform/windows/ds5/ds5_sidecar_client.h"
   #include "src/platform/windows/virtual_device_host/protocol.h"
+  #include "src/utility.h"
 
   #include <chrono>
+  #include <future>
   #include <gtest/gtest-spi.h>
   #include <gtest/gtest.h>
+  #include <set>
   #include <windows.h>
 
 namespace {
@@ -156,6 +159,38 @@ namespace {
     }
     SetLastError(ERROR_ACCESS_DENIED);
     return FALSE;
+  }
+
+  struct pipe_io_events_t {
+    explicit pipe_io_events_t(std::wstring_view name):
+        names(name),
+        continue_event(CreateEventW(nullptr, TRUE, TRUE, (L"Local\\sunshine-ds5-test-continue-" + names.suffix).c_str())),
+        writer_event(CreateEventW(nullptr, FALSE, FALSE, (L"Local\\sunshine-ds5-test-writer-" + names.suffix).c_str())),
+        paused_event(CreateEventW(nullptr, TRUE, FALSE, (L"Local\\sunshine-ds5-test-paused-" + names.suffix).c_str())),
+        resume_event(CreateEventW(nullptr, TRUE, FALSE, (L"Local\\sunshine-ds5-test-resume-" + names.suffix).c_str())),
+        start_event(CreateEventW(nullptr, TRUE, FALSE, nullptr)) {}
+
+    bool valid() const {
+      return continue_event.handle && writer_event.handle && paused_event.handle && resume_event.handle && start_event.handle;
+    }
+
+    event_namespace_scope_t names;
+    handle_scope_t continue_event;
+    handle_scope_t writer_event;
+    handle_scope_t paused_event;
+    handle_scope_t resume_event;
+    handle_scope_t start_event;
+  };
+
+  void submit_mixed_state(platf::ds5::sidecar_client_t &client, platf::gamepad_id_t id, std::uint16_t sequence) {
+    client.submit_touch({id, 1, sequence, 0.25f, 0.75f, 0.5f});
+    client.submit_motion({id, 1, 1.0f, 2.0f, 3.0f});
+    client.submit_battery({id, 2, 75});
+    platf::gamepad_state_t state {};
+    state.buttonFlags = 0xaa550000u | sequence;
+    state.lt = static_cast<std::uint8_t>(sequence);
+    state.rsY = static_cast<std::int16_t>(sequence);
+    client.submit_input(id.globalIndex, state);
   }
 }  // namespace
 
@@ -332,6 +367,188 @@ TEST(Ds5SidecarClientTests, AllocThenFreeCancelsBlockedReader) {
   client.free(0);
   const auto elapsed = std::chrono::steady_clock::now() - started;
   EXPECT_LT(elapsed, std::chrono::seconds(2));
+}
+
+TEST(Ds5SidecarClientTests, ReusesBothEventsAcrossFragmentedMixedDuplexTraffic) {
+  config_scope_t restore_config;
+  restore_config.enable();
+  pipe_io_events_t events(L"fragmented-duplex");
+  ASSERT_TRUE(events.valid());
+  environment_scope_t fragmented(L"SUNSHINE_DS5_TEST_FRAGMENT_REPLIES", L"1");
+  environment_scope_t echo(L"SUNSHINE_DS5_TEST_ECHO_INPUT", L"1");
+  auto mail = std::make_shared<safe::mail_raw_t>();
+  auto feedback = mail->queue<platf::gamepad_feedback_msg_t>("fragmented-duplex", 64);
+  std::array<std::future<bool>, 2> writers;
+  platf::ds5::sidecar_client_t client;
+  auto cleanup = util::fail_guard([&]() {
+    SetEvent(events.start_event.handle);
+    SetEvent(events.resume_event.handle);
+    client.close_transport_for_test();
+    for (auto &writer : writers) {
+      if (writer.valid()) {
+        writer.wait();
+      }
+    }
+  });
+  client.set_transfer_chunk_limit_for_test(3);
+  ASSERT_EQ(client.alloc({2, 3}, feedback, false), 0);
+  ASSERT_TRUE(feedback->pop(std::chrono::seconds(2)));
+  const auto before = client.completion_event_stats_for_test();
+  EXPECT_EQ(before.read_creations, 1u);
+  EXPECT_EQ(before.write_creations, 1u);
+
+  constexpr unsigned rounds_per_writer = 16;
+  for (unsigned index = 0; index < writers.size(); ++index) {
+    writers[index] = std::async(std::launch::async, [&, index]() {
+      if (WaitForSingleObject(events.start_event.handle, 2000) != WAIT_OBJECT_0) {
+        return false;
+      }
+      for (unsigned round = 0; round < rounds_per_writer; ++round) {
+        submit_mixed_state(client, {2, 3}, static_cast<std::uint16_t>(1 + index * rounds_per_writer + round));
+      }
+      return true;
+    });
+  }
+  ASSERT_TRUE(SetEvent(events.start_event.handle));
+  std::set<std::uint16_t> received;
+  for (unsigned index = 0; index < 2 * rounds_per_writer; ++index) {
+    const auto message = feedback->pop(std::chrono::seconds(2));
+    ASSERT_TRUE(message);
+    ASSERT_EQ(message->type, platf::gamepad_feedback_e::rumble);
+    EXPECT_EQ(message->id, 3);
+    EXPECT_EQ(message->data.rumble.highfreq, 0xaa55);
+    EXPECT_TRUE(received.insert(message->data.rumble.lowfreq).second);
+  }
+  for (std::uint16_t sequence = 1; sequence <= 2 * rounds_per_writer; ++sequence) {
+    EXPECT_TRUE(received.contains(sequence));
+  }
+  for (auto &writer : writers) {
+    ASSERT_EQ(writer.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_TRUE(writer.get());
+  }
+  const auto after = client.completion_event_stats_for_test();
+  RecordProperty("read_event_creations", std::to_string(after.read_creations));
+  RecordProperty("write_event_creations", std::to_string(after.write_creations));
+  RecordProperty("read_operations", std::to_string(after.read_operations));
+  RecordProperty("write_operations", std::to_string(after.write_operations));
+  EXPECT_EQ(after.read_creations, 1u);
+  EXPECT_EQ(after.write_creations, 1u);
+  EXPECT_GT(after.read_operations - before.read_operations, 2 * rounds_per_writer * 4u);
+  // 36/32/20/36-byte frames, each deliberately issued in at most three-byte chunks.
+  EXPECT_GE(after.write_operations - before.write_operations, 2 * rounds_per_writer * 42u);
+}
+
+TEST(Ds5SidecarClientTests, StalledWriteTimesOutThenReusesEventsAfterRecovery) {
+  config_scope_t restore_config;
+  restore_config.enable();
+  pipe_io_events_t events(L"write-timeout-recovery");
+  ASSERT_TRUE(events.valid());
+  environment_scope_t pause(L"SUNSHINE_DS5_TEST_PAUSE_READS", L"1");
+  environment_scope_t echo(L"SUNSHINE_DS5_TEST_ECHO_INPUT", L"1");
+  auto mail = std::make_shared<safe::mail_raw_t>();
+  auto feedback = mail->queue<platf::gamepad_feedback_msg_t>("write-timeout-recovery", 64);
+  std::future<std::chrono::steady_clock::duration> writer;
+  platf::ds5::sidecar_client_t client;
+  auto cleanup = util::fail_guard([&]() {
+    SetEvent(events.resume_event.handle);
+    client.close_transport_for_test();
+    if (writer.valid()) {
+      writer.wait();
+    }
+  });
+  ASSERT_EQ(client.alloc({1, 4}, feedback, false), 0);
+  ASSERT_TRUE(feedback->pop(std::chrono::seconds(2)));
+  ASSERT_EQ(WaitForSingleObject(events.paused_event.handle, 2000), WAIT_OBJECT_0);
+  ASSERT_TRUE(ResetEvent(events.writer_event.handle));
+  const auto before = client.completion_event_stats_for_test();
+  writer = std::async(std::launch::async, [&]() {
+    const auto started = std::chrono::steady_clock::now();
+    for (unsigned sequence = 1; sequence <= 512; ++sequence) {
+      submit_mixed_state(client, {1, 4}, static_cast<std::uint16_t>(sequence));
+    }
+    return std::chrono::steady_clock::now() - started;
+  });
+  ASSERT_EQ(WaitForSingleObject(events.writer_event.handle, 2000), WAIT_OBJECT_0);
+  ASSERT_EQ(writer.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+  const auto elapsed = writer.get();
+  RecordProperty("stalled_write_elapsed_ms", std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count()));
+  EXPECT_GE(elapsed, std::chrono::milliseconds(200));
+  EXPECT_LT(elapsed, std::chrono::seconds(2));
+  ASSERT_TRUE(SetEvent(events.resume_event.handle));
+  // The first marker was consumed before the server stopped reading. A new marker proves that
+  // cancellation drained the old I/O and the reader completed a fresh hello/attach handshake.
+  const auto recovered = feedback->pop(std::chrono::seconds(5));
+  ASSERT_TRUE(recovered);
+  ASSERT_EQ(recovered->type, platf::gamepad_feedback_e::rumble);
+  EXPECT_EQ(recovered->id, 4);
+  EXPECT_EQ(recovered->data.rumble.lowfreq, 0);
+  EXPECT_EQ(recovered->data.rumble.highfreq, 0);
+  EXPECT_TRUE(client.owns(1));
+  submit_mixed_state(client, {1, 4}, 0x1234);
+  const auto echoed = feedback->pop(std::chrono::seconds(2));
+  ASSERT_TRUE(echoed);
+  ASSERT_EQ(echoed->type, platf::gamepad_feedback_e::rumble);
+  EXPECT_EQ(echoed->id, 4);
+  EXPECT_EQ(echoed->data.rumble.lowfreq, 0x1234);
+  EXPECT_EQ(echoed->data.rumble.highfreq, 0xaa55);
+  const auto after = client.completion_event_stats_for_test();
+  RecordProperty("read_event_creations", std::to_string(after.read_creations));
+  RecordProperty("write_event_creations", std::to_string(after.write_creations));
+  RecordProperty("write_timeouts", std::to_string(after.write_timeouts));
+  RecordProperty("write_stop_cancels", std::to_string(after.write_stop_cancels));
+  EXPECT_EQ(after.read_creations, 1u);
+  EXPECT_EQ(after.write_creations, 1u);
+  EXPECT_GT(after.read_operations, before.read_operations);
+  EXPECT_GT(after.write_operations, before.write_operations);
+  EXPECT_GT(after.write_timeouts, before.write_timeouts);
+  EXPECT_EQ(after.write_stop_cancels, 0u);
+}
+
+TEST(Ds5SidecarClientTests, StopCancelsPendingWriteAndReaderBeforeDestruction) {
+  config_scope_t restore_config;
+  restore_config.enable();
+  pipe_io_events_t events(L"stop-pending-write");
+  ASSERT_TRUE(events.valid());
+  environment_scope_t pause(L"SUNSHINE_DS5_TEST_PAUSE_READS", L"1");
+  auto mail = std::make_shared<safe::mail_raw_t>();
+  auto feedback = mail->queue<platf::gamepad_feedback_msg_t>("stop-pending-write", 64);
+  std::future<void> writer;
+  platf::ds5::sidecar_client_t client;
+  auto cleanup = util::fail_guard([&]() {
+    SetEvent(events.resume_event.handle);
+    client.close_transport_for_test();
+    if (writer.valid()) {
+      writer.wait();
+    }
+  });
+  ASSERT_EQ(client.alloc({0, 2}, feedback, false), 0);
+  ASSERT_TRUE(feedback->pop(std::chrono::seconds(2)));
+  ASSERT_EQ(WaitForSingleObject(events.paused_event.handle, 2000), WAIT_OBJECT_0);
+  ASSERT_TRUE(ResetEvent(events.writer_event.handle));
+  writer = std::async(std::launch::async, [&]() {
+    for (unsigned sequence = 1; sequence <= 512; ++sequence) {
+      submit_mixed_state(client, {0, 2}, static_cast<std::uint16_t>(sequence));
+    }
+  });
+  ASSERT_EQ(WaitForSingleObject(events.writer_event.handle, 2000), WAIT_OBJECT_0);
+  ASSERT_EQ(writer.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+  const auto started = std::chrono::steady_clock::now();
+  // This calls the real close while retaining the impl. Public free() remains serialized after
+  // the sender has joined, so the test never races replacement of its owning unique_ptr.
+  client.close_transport_for_test();
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+  RecordProperty("close_elapsed_ms", std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count()));
+  EXPECT_LT(elapsed, std::chrono::seconds(3));
+  ASSERT_EQ(writer.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+  writer.get();
+  EXPECT_FALSE(client.owns(0));
+  const auto stats = client.completion_event_stats_for_test();
+  RecordProperty("write_timeouts", std::to_string(stats.write_timeouts));
+  RecordProperty("write_stop_cancels", std::to_string(stats.write_stop_cancels));
+  EXPECT_EQ(stats.read_creations, 1u);
+  EXPECT_EQ(stats.write_creations, 1u);
+  EXPECT_EQ(stats.write_timeouts, 0u);
+  EXPECT_GT(stats.write_stop_cancels, 0u);
 }
 
 TEST(Ds5SidecarClientTests, AttachSurvivesInterleavedAsyncFeedback) {

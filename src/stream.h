@@ -443,67 +443,6 @@ namespace stream {
       }
     };
 
-    /**
-     * Transaction gate for live 0x3007 mode requests.
-     *
-     * The control thread may replace a request that is still pending, but once the worker begins
-     * one transaction no later request may begin until the matching encoder completion and any
-     * desktop rollback have finished. Tokens are host-generated because client request ids are
-     * opaque and may repeat.
-     */
-    class live_video_mode_serial_gate_t {
-    public:
-      struct submission_t {
-        std::uint64_t transaction_id;
-        std::optional<std::uint64_t> superseded_transaction_id;
-      };
-
-      [[nodiscard]] submission_t submit() noexcept {
-        ++_last_transaction_id;
-        if (_last_transaction_id == 0) {
-          ++_last_transaction_id;
-        }
-        const auto superseded = std::exchange(_pending_transaction_id, _last_transaction_id);
-        return {_last_transaction_id, superseded};
-      }
-
-      [[nodiscard]] bool can_begin() const noexcept {
-        return !_active_transaction_id && _pending_transaction_id.has_value();
-      }
-
-      [[nodiscard]] std::optional<std::uint64_t> begin_next() noexcept {
-        if (!can_begin()) {
-          return std::nullopt;
-        }
-        _active_transaction_id = std::exchange(_pending_transaction_id, std::nullopt);
-        return _active_transaction_id;
-      }
-
-      [[nodiscard]] bool accepts_completion(std::uint64_t transaction_id) const noexcept {
-        return _active_transaction_id == transaction_id;
-      }
-
-      [[nodiscard]] bool finish(std::uint64_t transaction_id) noexcept {
-        if (!accepts_completion(transaction_id)) {
-          return false;
-        }
-        _active_transaction_id.reset();
-        return true;
-      }
-
-      void cancel_pending() noexcept {
-        _pending_transaction_id.reset();
-      }
-
-      [[nodiscard]] std::optional<std::uint64_t> active() const noexcept {
-        return _active_transaction_id;
-      }
-
-    private:
-      std::uint64_t _last_transaction_id = 0;
-      std::optional<std::uint64_t> _pending_transaction_id;
-      std::optional<std::uint64_t> _active_transaction_id;
-    };
   }  // namespace detail
 
   /**
@@ -786,6 +725,8 @@ namespace stream {
 
     state_e state(session_t &session);
 #ifdef SUNSHINE_TESTS
+    /** Observe lock availability from another thread without mutating platform lifecycle state. */
+    bool platform_lifecycle_lock_available_for_test();
     void set_state_for_test(session_t &session, state_e state);
     bool claim_active_slot_for_test();
     void release_active_slot_for_test();
@@ -793,7 +734,7 @@ namespace stream {
     std::uint64_t platform_lifecycle_generation_for_test();
     std::optional<std::chrono::steady_clock::time_point> platform_stop_deadline_for_test();
     void check_platform_stop_for_test(std::optional<std::uint64_t> dispatched_generation = std::nullopt);
-    bool worker_start_rollback_for_test();
+    bool worker_start_rollback_for_test(std::size_t fail_before_worker = 1);
 
     struct control_registration_test_result_t {
       bool workers_prepared = false;

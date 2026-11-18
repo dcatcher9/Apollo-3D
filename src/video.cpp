@@ -9,8 +9,11 @@
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <utility>
 
 // local includes
+#include "atomic_presentation.h"
+#include "capture_display_retirement.h"
 #include "config.h"
 #include "depth_coordinate_v2.h"
 #include "display_device.h"
@@ -25,8 +28,15 @@
 #include "sync.h"
 #include "tracked_async_worker.h"
 #include "video.h"
+#include "video_capture_generation.h"
+#include "video_capture_test.h"
 #include "video_encode_pipeline.h"
+#include "video_encode_session.h"
 #include "video_session_recovery.h"
+
+#ifdef SUNSHINE_TESTS
+  #include <stdexcept>
+#endif
 
 #ifdef _WIN32
   #include "platform/windows/exclusive_display_reconcile_retry.h"
@@ -388,194 +398,322 @@ namespace video {
     return false;
   }
 
-  class nvenc_encode_session_t: public encode_session_t {
-  public:
-    nvenc_encode_session_t(std::unique_ptr<platf::nvenc_encode_device_t> encode_device):
-        device(std::move(encode_device)) {
-    }
+  nvenc_encode_session_t::nvenc_encode_session_t(platf::native_encode_owner_t encode_device):
+      device(std::move(encode_device)),
+      encoder(device->encoder()) {
+  }
 
-    int convert(platf::img_t &img) override {
-      if (!device) {
-        return -1;
-      }
-      return device->convert(img);
-    }
+  int nvenc_encode_session_t::convert(platf::img_t &img) {
+    const auto previous_revision = std::exchange(input_revision, 0);
+    return finish_conversion(device->convert(img), previous_revision);
+  }
 
-    int convert_with_encode_target(
-      platf::img_t &img,
-      const std::chrono::steady_clock::time_point next_encode_target
-    ) override {
-      if (!device) {
-        return -1;
-      }
-      return device->convert_with_encode_target(img, next_encode_target);
-    }
+  int nvenc_encode_session_t::convert_with_encode_target(
+    platf::img_t &img,
+    const std::chrono::steady_clock::time_point next_encode_target
+  ) {
+    const auto previous_revision = std::exchange(input_revision, 0);
+    return finish_conversion(device->convert_with_encode_target(img, next_encode_target), previous_revision);
+  }
 
-    bool needs_conversion_poll() const override {
-      return device && device->needs_conversion_poll();
-    }
-
-    void set_external_frame_wake(std::function<void()> wake) {
-      if (device) {
-        device->set_external_frame_wake(std::move(wake));
+  int nvenc_encode_session_t::finish_conversion(int result, std::uint64_t previous_revision) {
+    if (result == 0) {
+      if (device->conversion_kept_input()) {
+        input_revision = previous_revision;
+      } else {
+        input_revision = next_input_revision;
+        if (next_input_revision != 0) {
+          ++next_input_revision;
+        }
       }
     }
+    // Failure or an exception from the delegate leaves the target unknown. Do not reset the
+    // allocator: a later successful write must never reuse a revision still held by a slot.
+    return result;
+  }
 
-    bool conversion_kept_input() const {
-      return device && device->conversion_kept_input();
-    }
+  bool nvenc_encode_session_t::needs_conversion_poll() const {
+    return device->needs_conversion_poll();
+  }
 
-    bool external_frame_held() const {
-      return device && device->external_frame_held();
-    }
+  void nvenc_encode_session_t::set_external_frame_wake(std::function<void()> wake) {
+    device->set_external_frame_wake(std::move(wake));
+  }
 
-    bool set_stream_gamma(stream_gamma_mode_e mode) {
-      return device && device->set_stream_gamma(mode);
-    }
+  bool nvenc_encode_session_t::conversion_kept_input() const {
+    return device->conversion_kept_input();
+  }
 
-    stream_gamma_mode_e stream_gamma_mode() const {
-      return device ? device->stream_gamma_mode() : stream_gamma_mode_e::windows_default;
-    }
+  bool nvenc_encode_session_t::external_frame_held() const {
+    return device->external_frame_held();
+  }
 
-    float stream_gamma_white_nits() const {
-      return device ? device->stream_gamma_white_nits() : 203.0f;
-    }
+  bool nvenc_encode_session_t::set_stream_gamma(stream_gamma_mode_e mode) {
+    return device->set_stream_gamma(mode);
+  }
 
-    bool stream_is_hdr() const {
-      return device && colorspace_is_hdr(device->colorspace);
-    }
+  stream_gamma_mode_e nvenc_encode_session_t::stream_gamma_mode() const {
+    return device->stream_gamma_mode();
+  }
 
-    std::optional<std::chrono::steady_clock::time_point> rendered_content_timestamp() const override {
-      return device ? device->rendered_content_timestamp() : std::nullopt;
-    }
+  float nvenc_encode_session_t::stream_gamma_white_nits() const {
+    return device->stream_gamma_white_nits();
+  }
 
-    void request_idr_frame() override {
+  bool nvenc_encode_session_t::stream_is_hdr() const {
+    return colorspace_is_hdr(device->colorspace);
+  }
+
+  std::optional<std::chrono::steady_clock::time_point> nvenc_encode_session_t::rendered_content_timestamp() const {
+    return device->rendered_content_timestamp();
+  }
+
+  void nvenc_encode_session_t::request_idr_frame() {
+    force_idr = true;
+  }
+
+  void nvenc_encode_session_t::request_normal_frame() {
+    force_idr = false;
+  }
+
+  void nvenc_encode_session_t::invalidate_ref_frames(int64_t first_frame, int64_t last_frame) {
+    if (!encoder.invalidate_ref_frames(first_frame, last_frame)) {
       force_idr = true;
     }
+  }
 
-    void request_normal_frame() override {
-      force_idr = false;
-    }
+  /** With pictures in flight: whether invalidate_ref_frames() must first wait for them, because it
+   *  would invalidate (an already handled, malformed or too-large range is decided at once). */
+  bool nvenc_encode_session_t::invalidation_needs_drain(int64_t first_frame, int64_t last_frame) const {
+    return encoder.frames_in_flight() != 0 &&
+           encoder.would_invalidate_ref_frames(first_frame, last_frame);
+  }
 
-    void invalidate_ref_frames(int64_t first_frame, int64_t last_frame) override {
-      if (!device || !device->nvenc) {
-        return;
+  bool nvenc_encode_session_t::reconfigure_bitrate(int bitrate_kbps) {
+    return encoder.reconfigure_bitrate(bitrate_kbps);
+  }
+
+  nvenc::nvenc_encoded_frame nvenc_encode_session_t::encode_frame(
+    uint64_t frame_index,
+    std::vector<std::uint8_t> &&frame_buffer
+  ) {
+    auto result = encoder.encode_frame(
+      frame_index,
+      force_idr,
+      std::move(frame_buffer),
+      input_revision
+    );
+    force_idr = false;
+    device->encoder_consumed_input();
+    return result;
+  }
+
+  nvenc::nvenc_base::frame_timing_t nvenc_encode_session_t::last_frame_timing() const {
+    return encoder.last_frame_timing();
+  }
+
+  /** This process's video memory on the encoder's adapter (nvenc_base::video_memory_diagnostics()). */
+  std::string nvenc_encode_session_t::video_memory_diagnostics() const {
+    return encoder.video_memory_diagnostics();
+  }
+
+  /** NVENC pictures that may be in flight (nvenc_base::pipeline_depth()). */
+  unsigned nvenc_encode_session_t::pipeline_depth() const {
+    return encoder.pipeline_depth();
+  }
+
+  /** Encode thread, with pictures in flight: submit the converted input as the next picture.
+   *  NVENC encodes from the picture's own copy, so the next frame may convert at once. */
+  bool nvenc_encode_session_t::submit_frame(uint64_t frame_index) {
+    const bool submitted = encoder.submit_frame(frame_index, force_idr, input_revision);
+    force_idr = false;
+    // Never blocks: the encode thread's fallback for export slots whose conversion reads
+    // completed (the receiver's read-fence wait normally hands them back), and its diagnostics.
+    device->encoder_consumed_input();
+    return submitted;
+  }
+
+  /** Retrieving thread: the oldest submitted picture, waited for (nvenc_base::retrieve_frame()). */
+  nvenc::nvenc_encoded_frame nvenc_encode_session_t::retrieve_frame() {
+    return encoder.retrieve_frame(acquire_frame_buffer());
+  }
+
+  std::chrono::nanoseconds nvenc_encode_session_t::last_submit_timing() const {
+    return encoder.last_submit_timing();
+  }
+
+  hdr_info_t nvenc_encode_session_t::hdr_info() const {
+    auto info = std::make_unique<hdr_info_raw_t>(false);
+    if (colorspace_is_hdr(device->colorspace)) {
+      if (device->hdr_metadata) {
+        info->metadata = *device->hdr_metadata;
+        info->enabled = true;
+      } else {
+        BOOST_LOG(error) << "Couldn't get display hdr metadata when colorspace selection indicates it should have one";
       }
+    }
+    return info;
+  }
 
-      if (!device->nvenc->invalidate_ref_frames(first_frame, last_frame)) {
-        force_idr = true;
+  std::future<void> nvenc_encode_session_t::retire() && {
+    return std::move(device).retire();
+  }
+
+  std::vector<std::uint8_t> nvenc_encode_session_t::acquire_frame_buffer() {
+    return frame_buffer_pool->acquire();
+  }
+
+  void nvenc_encode_session_t::recycle_frame_buffer(std::vector<std::uint8_t> &&frame_buffer) {
+    frame_buffer_pool->recycle(std::move(frame_buffer));
+  }
+
+  const std::shared_ptr<encoded_frame_buffer_pool_t> &nvenc_encode_session_t::frame_pool() const {
+    return frame_buffer_pool;
+  }
+
+  class capture_session_t {
+  public:
+    capture_session_t(
+      img_event_t images,
+      const config_t &config
+#ifdef SUNSHINE_TESTS
+      ,
+      detail::capture_worker_test_callback_t test_callback = nullptr,
+      void *test_state = nullptr,
+      detail::capture_worker_test_callback_t test_before_admission = nullptr,
+      std::shared_ptr<const detail::capture_reinit_test_hooks_t> test_platform = nullptr
+#endif
+    ):
+        images_(std::move(images)),
+        config_(config)
+#ifdef SUNSHINE_TESTS
+        ,
+        test_callback_(test_callback),
+        test_state_(test_state),
+        test_before_admission_(test_before_admission),
+        test_platform_(std::move(test_platform))
+#endif
+        ,
+        thread_(&capture_session_t::run, this) {
+    }
+
+    ~capture_session_t() {
+      stop();
+    }
+
+    capture_session_t(const capture_session_t &) = delete;
+    capture_session_t &operator=(const capture_session_t &) = delete;
+    capture_session_t(capture_session_t &&) = delete;
+    capture_session_t &operator=(capture_session_t &&) = delete;
+
+    void stop() {
+      // A tracked native teardown may still retain the old display. End the image wait before
+      // cancellation and join so the capture worker can leave its display-reference drain.
+      images_->stop();
+      run_control_.stop();
+      generations_.stop();
+      if (thread_.joinable()) {
+        thread_.join();
       }
     }
 
-    /** With pictures in flight: whether invalidate_ref_frames() must first wait for them, because it
-     *  would invalidate (an already handled, malformed or too-large range is decided at once). */
-    bool invalidation_needs_drain(int64_t first_frame, int64_t last_frame) const {
-      return device && device->nvenc && device->nvenc->frames_in_flight() != 0 &&
-             device->nvenc->would_invalidate_ref_frames(first_frame, last_frame);
+    bool running() const {
+      return run_control_.running();
     }
 
-    bool reconfigure_bitrate(int bitrate_kbps) {
-      return device && device->nvenc && device->nvenc->reconfigure_bitrate(bitrate_kbps);
+    detail::capture_generation_handoff_t::display_lease_t try_acquire_display() {
+      return generations_.acquire();
     }
 
-    nvenc::nvenc_encoded_frame encode_frame(
-      uint64_t frame_index,
-      std::vector<std::uint8_t> &&frame_buffer
-    ) {
-      if (!device || !device->nvenc) {
-        return {};
-      }
-
-      auto result = device->nvenc->encode_frame(
-        frame_index,
-        force_idr,
-        std::move(frame_buffer)
-      );
-      force_idr = false;
-      device->encoder_consumed_input();
-      return result;
+    bool reinit_pending() const {
+      return generations_.reinit_pending();
     }
 
-    nvenc::nvenc_base::frame_timing_t last_frame_timing() const {
-      return device && device->nvenc ? device->nvenc->last_frame_timing() : nvenc::nvenc_base::frame_timing_t {};
+    void set_live_video_mode(std::optional<video_mode_change_t> mode) {
+      live_video_mode_ = std::move(mode);
     }
 
-    /** This process's video memory on the encoder's adapter (nvenc_base::video_memory_diagnostics()). */
-    std::string video_memory_diagnostics() const {
-      return device && device->nvenc ? device->nvenc->video_memory_diagnostics() : std::string {};
+#ifdef SUNSHINE_TESTS
+    std::optional<video_mode_change_t> live_video_mode() {
+      auto lock = live_video_mode_.lock();
+      return *live_video_mode_;
     }
-
-    /** NVENC pictures that may be in flight (nvenc_base::pipeline_depth()). */
-    unsigned pipeline_depth() const {
-      return device && device->nvenc ? device->nvenc->pipeline_depth() : 1;
-    }
-
-    /** Encode thread, with pictures in flight: submit the converted input as the next picture.
-     *  NVENC encodes from the picture's own copy, so the next frame may convert at once. */
-    bool submit_frame(uint64_t frame_index) {
-      if (!device || !device->nvenc) {
-        return false;
-      }
-      const bool submitted = device->nvenc->submit_frame(frame_index, force_idr);
-      force_idr = false;
-      // Never blocks: the encode thread's fallback for export slots whose conversion reads
-      // completed (the receiver's read-fence wait normally hands them back), and its diagnostics.
-      device->encoder_consumed_input();
-      return submitted;
-    }
-
-    /** Retrieving thread: the oldest submitted picture, waited for (nvenc_base::retrieve_frame()). */
-    nvenc::nvenc_encoded_frame retrieve_frame() {
-      if (!device || !device->nvenc) {
-        return {};
-      }
-      return device->nvenc->retrieve_frame(acquire_frame_buffer());
-    }
-
-    std::chrono::nanoseconds last_submit_timing() const {
-      return device && device->nvenc ? device->nvenc->last_submit_timing() : std::chrono::nanoseconds {};
-    }
-
-    std::vector<std::uint8_t> acquire_frame_buffer() {
-      return frame_buffer_pool->acquire();
-    }
-
-    void recycle_frame_buffer(std::vector<std::uint8_t> &&frame_buffer) {
-      frame_buffer_pool->recycle(std::move(frame_buffer));
-    }
-
-    const std::shared_ptr<encoded_frame_buffer_pool_t> &frame_pool() const {
-      return frame_buffer_pool;
-    }
+#endif
 
   private:
-    std::unique_ptr<platf::nvenc_encode_device_t> device;
-    bool force_idr = false;
-    std::shared_ptr<encoded_frame_buffer_pool_t> frame_buffer_pool =
-      std::make_shared<encoded_frame_buffer_pool_t>();
-  };
+    void run();
 
-  struct capture_ctx_t {
-    img_event_t images;
-    config_t config;
-  };
+    img_event_t images_;
+    config_t config_;
+    safe::signal_t run_control_;
+    detail::capture_generation_handoff_t generations_;
 
-  struct capture_thread_async_ctx_t {
-    std::shared_ptr<safe::queue_t<capture_ctx_t>> capture_ctx_queue;
-    std::thread capture_thread;
-
-    safe::signal_t reinit_event;
-    sync_util::sync_t<std::weak_ptr<platf::display_t>> display_wp;
-
-    // Latest live video mode (0x3007) applied by the encode thread. captureThread folds it into
+    // Latest live video mode (0x3007) applied by the encode thread. run() folds it into
     // its own capture config so a *later* display reinitialization rebuilds at the current mode
     // instead of reverting to the mode negotiated at launch. The in-flight capture session is
     // retuned through display_t::set_client_frame_rate() rather than through this copy.
-    sync_util::sync_t<std::optional<video_mode_change_t>> live_video_mode;
+    sync_util::sync_t<std::optional<video_mode_change_t>> live_video_mode_;
+
+#ifdef SUNSHINE_TESTS
+    detail::capture_worker_test_callback_t test_callback_;
+    void *test_state_;
+    detail::capture_worker_test_callback_t test_before_admission_;
+    std::shared_ptr<const detail::capture_reinit_test_hooks_t> test_platform_;
+#endif
+
+    std::thread thread_;  ///< Last: run() starts only after all referenced state exists.
   };
 
-  int start_capture_async(capture_thread_async_ctx_t &ctx);
-  void end_capture_async(capture_thread_async_ctx_t &ctx);
+#ifdef SUNSHINE_TESTS
+  namespace detail {
+    capture_worker_test_context_t::capture_worker_test_context_t(
+      const config_t &config,
+      const img_event_t &images,
+      void *cancel_state,
+      bool (*running)(const void *) noexcept,
+      bool (*wait_for_cancel)(void *, std::chrono::milliseconds) noexcept
+    ):
+        config(config),
+        images(images),
+        cancel_state_(cancel_state),
+        running_(running),
+        wait_for_cancel_(wait_for_cancel) {
+    }
+
+    bool capture_worker_test_context_t::running() const noexcept {
+      return running_(cancel_state_);
+    }
+
+    bool capture_worker_test_context_t::wait_for_cancel(std::chrono::milliseconds timeout) const noexcept {
+      return wait_for_cancel_(cancel_state_, timeout);
+    }
+
+    struct capture_worker_test_access {
+      static void invoke(
+        const config_t &config,
+        const img_event_t &images,
+        safe::signal_t &run_control,
+        capture_worker_test_callback_t callback,
+        void *state
+      ) noexcept {
+        const capture_worker_test_context_t borrowed {
+          config,
+          images,
+          &run_control,
+          [](const void *cancel_state) noexcept {
+            return static_cast<const safe::signal_t *>(cancel_state)->running();
+          },
+          [](void *cancel_state, std::chrono::milliseconds timeout) noexcept {
+            auto &run_control = *static_cast<safe::signal_t *>(cancel_state);
+            (void) run_control.pop(timeout);
+            return !run_control.running();
+          },
+        };
+        callback(state, borrowed);
+      }
+    };
+  }  // namespace detail
+#endif
 
 #ifndef _WIN32
   #error Apollo requires Windows with native NVIDIA NVENC support
@@ -624,12 +762,13 @@ namespace video {
     std::shared_ptr<platf::display_t> &disp,
     const std::string &display_name,
     const config_t &config,
-    platf::capture_backend_e preferred_backend = platf::capture_backend_e::ddup
+    platf::capture_backend_e preferred_backend = platf::capture_backend_e::ddup,
+    std::weak_ptr<platf::capture_display_retirement_t> retirement = {}
   ) {
     // We try this twice, in case we still get an error on reinitialization
     for (int x = 0; x < 2; ++x) {
       disp.reset();
-      disp = platf::display(display_name, config, preferred_backend);
+      disp = platf::display(display_name, config, preferred_backend, retirement);
       if (disp) {
         break;
       }
@@ -701,73 +840,122 @@ namespace video {
     refresh_displays(display_names, current_display_index, empty_str);
   }
 
-  void captureThread(
-    std::shared_ptr<safe::queue_t<capture_ctx_t>> capture_ctx_queue,
-    sync_util::sync_t<std::weak_ptr<platf::display_t>> &display_wp,
-    safe::signal_t &reinit_event,
-    sync_util::sync_t<std::optional<video_mode_change_t>> &live_video_mode
-  ) {
-    std::optional<capture_ctx_t> capture_ctx;
+  void capture_session_t::run() {
+    auto &images = images_;
+    auto &config = config_;
+    auto &run_control = run_control_;
+    auto &live_video_mode = live_video_mode_;
 
     auto fg = util::fail_guard([&]() {
-      capture_ctx_queue->stop();
-
-      if (capture_ctx) {
-        capture_ctx->images->stop();
-      }
-      for (auto &queued_ctx : capture_ctx_queue->unsafe()) {
-        queued_ctx.images->stop();
-      }
+      run_control.stop();
+      images->stop();
+      generations_.stop();
     });
 
-    // Wait for the initial capture context or a request to stop the queue
-    auto initial_capture_ctx = capture_ctx_queue->pop();
-    if (!initial_capture_ctx) {
+#ifdef SUNSHINE_TESTS
+    if (test_before_admission_) {
+      detail::capture_worker_test_access::invoke(config, images, run_control, test_before_admission_, test_state_);
+    }
+#endif
+
+    // The old initial-context pop rejected a stop that won before worker admission.
+    if (!run_control.running()) {
       return;
     }
-    capture_ctx.emplace(std::move(*initial_capture_ctx));
+
+#ifdef SUNSHINE_TESTS
+    if (test_callback_) {
+      detail::capture_worker_test_access::invoke(config, images, run_control, test_callback_, test_state_);
+      return;
+    }
+#endif
 
     std::vector<std::string> display_names;
     int display_p = -1;
     std::shared_ptr<platf::display_t> disp;
+    auto generation = generations_.begin();
+    if (!generation) {
+      return;
+    }
+    // The capture thread detaches on every exit. A final owner arriving later deletes normally;
+    // a display already returned to this thread is destroyed here, outside admission/slot locks.
+    auto detach_generation = util::fail_guard([&]() {
+      (void) generations_.revoke(generation);
+      auto returned = generation->retirement()->detach();
+    });
     capture_backend_failover_t capture_failover;
     // Display-change evidence starts before a duplication opens: a change after open invalidates it.
-    auto display_epoch_at_open = platf::display_change_epoch();
+    auto display_epoch_at_open =
+#ifdef SUNSHINE_TESTS
+      test_platform_ ? test_platform_->display_change_epoch() :
+#endif
+      platf::display_change_epoch();
     std::string active_display_name;
-    const auto initial_display_name = proc::proc.get_display_name();
+    const auto initial_display_name =
+#ifdef SUNSHINE_TESTS
+      test_platform_ ? test_platform_->preferred_display_name() :
+#endif
+      proc::proc.get_display_name();
     if (!initial_display_name.empty()) {
       active_display_name = initial_display_name;
-      disp = platf::display(
-        initial_display_name,
-        capture_ctx->config,
-        capture_failover.preferred_backend()
-      );
+#ifdef SUNSHINE_TESTS
+      if (test_platform_) {
+        disp = test_platform_->open_display(initial_display_name, config, capture_failover.preferred_backend(), generation->retirement());
+      } else
+#endif
+        disp = platf::display(
+          initial_display_name,
+          config,
+          capture_failover.preferred_backend(),
+          generation->retirement()
+        );
       if (disp) {
         capture_failover.note_backend_opened(disp->capture_backend());
       }
     }
+    if (!disp && detail::capture_display_release_wait_cancelled(run_control.running(), images->running())) {
+      return;
+    }
     if (!disp) {
       // Get all the monitor names now, rather than at boot, to
       // get the most up-to-date list available monitors
+#ifdef SUNSHINE_TESTS
+      if (test_platform_) {
+        test_platform_->refresh_displays(display_names, display_p, {});
+      } else
+#endif
       refresh_displays(display_names, display_p);
       if (active_display_name != display_names[display_p]) {
         capture_failover.reset();
         active_display_name = display_names[display_p];
       }
-      disp = platf::display(
-        active_display_name,
-        capture_ctx->config,
-        capture_failover.preferred_backend()
-      );
+#ifdef SUNSHINE_TESTS
+      if (test_platform_) {
+        disp = test_platform_->open_display(active_display_name, config, capture_failover.preferred_backend(), generation->retirement());
+      } else
+#endif
+        disp = platf::display(
+          active_display_name,
+          config,
+          capture_failover.preferred_backend(),
+          generation->retirement()
+        );
       if (disp) {
         capture_failover.note_backend_opened(disp->capture_backend());
+#ifdef SUNSHINE_TESTS
+        if (test_platform_) {
+          test_platform_->set_display_name(active_display_name);
+        } else
+#endif
         proc::proc.set_display_name(active_display_name);
       } else {
         return;
       }
     }
 
-    display_wp = disp;
+    if (!generations_.publish(generation, disp)) {
+      return;
+    }
 
     constexpr auto capture_buffer_size = 12;
     std::list<std::shared_ptr<platf::img_t>> imgs(capture_buffer_size);
@@ -824,7 +1012,7 @@ namespace video {
 
     auto pull_free_image_callback = [&](std::shared_ptr<platf::img_t> &img_out) -> bool {
       img_out.reset();
-      while (capture_ctx_queue->running()) {
+      while (run_control.running()) {
         // pick first allocated but unused
         for (auto it = imgs.begin(); it != imgs.end(); it++) {
           if (*it && it->use_count() == 1) {
@@ -867,16 +1055,21 @@ namespace video {
     };
 
     // Capture takes place on this thread
+#ifdef SUNSHINE_TESTS
+    if (test_platform_) {
+      test_platform_->adjust_thread_priority();
+    } else
+#endif
     platf::adjust_thread_priority(platf::thread_priority_e::critical);
 
     bool capture_cursor = true;
     auto capture_diagnostics = detail::make_diagnostic_state<capture_stage_diagnostics_t>(
       config::sunshine.diagnostics_enabled
     );
-    while (capture_ctx_queue->running()) {
+    while (run_control.running()) {
       std::uint64_t captured_frames = 0;
       auto push_captured_image_callback = [&](std::shared_ptr<platf::img_t> &&img, bool frame_captured) -> bool {
-        if (!capture_ctx_queue->running() || !capture_ctx->images->running()) {
+        if (!run_control.running() || !images->running()) {
           return false;
         }
 
@@ -885,7 +1078,7 @@ namespace video {
             capture_diagnostics->record(*img);
           }
           ++captured_frames;
-          capture_ctx->images->raise(std::move(img));
+          images->raise(std::move(img));
         }
 
         return true;
@@ -900,6 +1093,9 @@ namespace video {
             captured_frames,
             std::chrono::steady_clock::now() - capture_started,
             display_epoch_at_open,
+#ifdef SUNSHINE_TESTS
+            test_platform_ ? test_platform_->display_change_epoch() :
+#endif
             platf::display_change_epoch(),
           })) {
         BOOST_LOG(warning) << "Desktop Duplication failed repeatedly before stable capture without a "sv
@@ -912,11 +1108,11 @@ namespace video {
           [[fallthrough]];
         case platf::capture_e::reinit:
           {
-            reinit_event.raise(true);
+            (void) generations_.revoke(generation);
             // The encode loop releases the display only once it sees the reinit. An independent
             // provider's image wait can last until its keepalive, so end it now.
-            if (capture_ctx->config.encode_wake) {
-              capture_ctx->config.encode_wake->wake();
+            if (config.encode_wake) {
+              config.encode_wake->wake();
             }
 
             // Some classes of images contain references to the display --> display won't delete unless img is deleted
@@ -924,22 +1120,34 @@ namespace video {
               img.reset();
             }
 
-            // display_wp is modified in this thread only
-            // Wait for the other shared_ptr's of display to be destroyed.
-            // New displays will only be created in this thread.
-            while (display_wp->use_count() != 1) {
-              // Free images that weren't consumed by the encoder. These can reference the display and prevent
-              // the ref count from reaching 1. We do this here rather than on the encoder thread to avoid race
-              // conditions where the encoding loop might free a good frame after reinitializing if we capture
-              // a new frame here before the encoder has finished reinitializing.
-              while (capture_ctx->images->try_pop()) {
+            // Revoke admission before dropping capture's strong reference. The original control
+            // block includes ordinary borrowers, partial/retiring encoders and shared_from_this.
+            disp.reset();
+            std::unique_ptr<platf::display_t> returned_display;
+            while (!(returned_display = generation->retirement()->wait_for(0ms))) {
+              // Preserve the old wait's drain, including a retained source returned by encode_run.
+              while (images->try_pop()) {
               }
 
-              if (detail::capture_display_release_wait_cancelled(capture_ctx_queue->running(), capture_ctx->images->running())) {
+#ifdef SUNSHINE_TESTS
+              if (test_platform_ && test_platform_->waited_for_display_release) {
+                test_platform_->waited_for_display_release();
+              }
+#endif
+
+              if (detail::capture_display_release_wait_cancelled(run_control.running(), images->running())) {
                 return;
               }
-
-              std::this_thread::sleep_for(20ms);
+              returned_display = generation->retirement()->wait_for(20ms);
+              if (returned_display) {
+                break;
+              }
+            }
+            // Normal reinitialization deletes on the capture thread, before topology or reopen.
+            returned_display.reset();
+            // A plain Windows image does not retain display_t. Always discard it after final
+            // display release, even when no encoder ever acquired this generation.
+            while (images->try_pop()) {
             }
 
             // Adopt the newest live video mode before rebuilding the display. Without this a
@@ -949,31 +1157,41 @@ namespace video {
               auto lg = live_video_mode.lock();
               if (*live_video_mode) {
                 const auto &mode = **live_video_mode;
-                capture_ctx->config.width = mode.width;
-                capture_ctx->config.height = mode.height;
-                capture_ctx->config.framerate = mode.framerate;
-                capture_ctx->config.framerateX100 = mode.framerateX100;
-                capture_ctx->config.encodingFramerate = mode.encodingFramerate;
-                capture_ctx->config.bitrate = mode.bitrate;
+                config.width = mode.width;
+                config.height = mode.height;
+                config.framerate = mode.framerate;
+                config.framerateX100 = mode.framerateX100;
+                config.encodingFramerate = mode.encodingFramerate;
+                config.bitrate = mode.bitrate;
               }
             }
 
             // The old DDUP/NVENC references are gone. Complete the owned topology
             // repair before probing outputs, rather than racing a game-exit repair
             // on the session-monitor worker and then opening a transient display.
-            disp.reset();
 #ifdef _WIN32
+#ifdef SUNSHINE_TESTS
+            if (test_platform_) {
+              if (!test_platform_->reconcile_topology()) {
+                return;
+              }
+            } else {
+#endif
             const auto topology_generation = platf::primary_display::exclusive_session_generation();
             const auto topology = platf::primary_display::detail::reconcile_before_capture(
               [topology_generation]() {
                 return platf::primary_display::reconcile_exclusive_display_topology(topology_generation).result;
               },
               [&]() {
-                return capture_ctx_queue->running() && capture_ctx->images->running() &&
+                return run_control.running() && images->running() &&
                        platf::primary_display::exclusive_session_generation() == topology_generation;
               },
-              []() { return std::chrono::steady_clock::now(); },
-              [](auto delay) { std::this_thread::sleep_for(delay); }
+              []() {
+                return std::chrono::steady_clock::now();
+              },
+              [](auto delay) {
+                std::this_thread::sleep_for(delay);
+              }
             );
             if (topology == platf::primary_display::detail::capture_reconcile_result_e::cancelled) {
               return;
@@ -981,28 +1199,63 @@ namespace video {
             if (topology == platf::primary_display::detail::capture_reconcile_result_e::exhausted) {
               BOOST_LOG(warning) << "Exclusive display topology is still settling; continuing normal capture recovery."sv;
             }
+#ifdef SUNSHINE_TESTS
+            }
 #endif
-            display_epoch_at_open = platf::display_change_epoch();
+#endif
+            auto next_generation = generations_.begin();
+            if (!next_generation) {
+              return;
+            }
+            generation = std::move(next_generation);
+            display_epoch_at_open =
+#ifdef SUNSHINE_TESTS
+              test_platform_ ? test_platform_->display_change_epoch() :
+#endif
+              platf::display_change_epoch();
             // Reopen the display this session was already capturing before looking for another
             // one, as the first open of the session does. Enumerating the outputs probes every
             // adapter and output while the viewer waits, and is only needed when that display is
             // gone or cannot be opened.
             {
-              const auto session_display_name = proc::proc.get_display_name();
+              const auto session_display_name =
+#ifdef SUNSHINE_TESTS
+                test_platform_ ? test_platform_->preferred_display_name() :
+#endif
+                proc::proc.get_display_name();
               if (!session_display_name.empty() && session_display_name == active_display_name) {
-                disp = platf::display(active_display_name, capture_ctx->config, capture_failover.preferred_backend());
+#ifdef SUNSHINE_TESTS
+                if (test_platform_) {
+                  disp = test_platform_->open_display(active_display_name, config, capture_failover.preferred_backend(), generation->retirement());
+                } else
+#endif
+                  disp = platf::display(
+                    active_display_name,
+                    config,
+                    capture_failover.preferred_backend(),
+                    generation->retirement()
+                  );
                 if (disp) {
                   capture_failover.note_backend_opened(disp->capture_backend());
                 }
               }
             }
-            while (!disp && capture_ctx_queue->running()) {
+            while (!disp && run_control.running()) {
               // Release the display before reenumerating displays, since some capture backends
               // only support a single display session per device/application.
               disp.reset();
 
               // Refresh display names since a display removal might have caused the reinitialization
-              auto preferred_display_name = proc::proc.get_display_name();
+              auto preferred_display_name =
+#ifdef SUNSHINE_TESTS
+                test_platform_ ? test_platform_->preferred_display_name() :
+#endif
+                proc::proc.get_display_name();
+#ifdef SUNSHINE_TESTS
+              if (test_platform_) {
+                test_platform_->refresh_displays(display_names, display_p, preferred_display_name);
+              } else
+#endif
               refresh_displays(display_names, display_p, preferred_display_name);
 
               if (active_display_name != display_names[display_p]) {
@@ -1011,14 +1264,25 @@ namespace video {
               }
 
               // reset_display() will sleep between retries
-              reset_display(
-                disp,
-                active_display_name,
-                capture_ctx->config,
-                capture_failover.preferred_backend()
-              );
+#ifdef SUNSHINE_TESTS
+              if (test_platform_) {
+                disp = test_platform_->open_display(active_display_name, config, capture_failover.preferred_backend(), generation->retirement());
+              } else
+#endif
+                reset_display(
+                  disp,
+                  active_display_name,
+                  config,
+                  capture_failover.preferred_backend(),
+                  generation->retirement()
+                );
               if (disp) {
                 capture_failover.note_backend_opened(disp->capture_backend());
+#ifdef SUNSHINE_TESTS
+                if (test_platform_) {
+                  test_platform_->set_display_name(active_display_name);
+                } else
+#endif
                 proc::proc.set_display_name(active_display_name);
                 break;
               }
@@ -1027,9 +1291,9 @@ namespace video {
               return;
             }
 
-            display_wp = disp;
-
-            reinit_event.reset();
+            if (!generations_.publish(generation, disp)) {
+              return;
+            }
             continue;
           }
         case platf::capture_e::ok:
@@ -1089,8 +1353,7 @@ namespace video {
     nvenc::nvenc_encoded_frame &&encoded_frame,
     const encoded_frame_context_t &frame,
     nvenc_encode_session_t &session,
-    safe::mail_raw_t::queue_t<packet_t> &packets,
-    const std::shared_ptr<void> &channel_data,
+    packet_queue_t &packets,
     encode_stage_diagnostics_t *diagnostics
   ) {
     if (diagnostics) {
@@ -1112,13 +1375,12 @@ namespace video {
       BOOST_LOG(error) << "NvENC frame index mismatch " << frame.frame_nr << " " << encoded_frame.frame_index;
     }
 
-    auto packet = std::make_unique<packet_raw_generic>(
+    auto packet = std::make_unique<encoded_packet_t>(
       std::move(encoded_frame.data),
       encoded_frame.frame_index,
       encoded_frame.idr,
       session.frame_pool()
     );
-    packet->channel_data = channel_data;
     packet->after_ref_frame_invalidation = encoded_frame.after_ref_frame_invalidation;
     packet->frame_timestamp = frame.frame_timestamp;
     packet->content_timestamp = frame.content_timestamp;
@@ -1149,13 +1411,12 @@ namespace video {
   /** One picture at a time: submit, wait for and publish it on the encode thread. */
   encoded_packet_publish_result_t encode(
     nvenc_encode_session_t &session,
-    safe::mail_raw_t::queue_t<packet_t> &packets,
-    const std::shared_ptr<void> &channel_data,
+    packet_queue_t &packets,
     const encoded_frame_context_t &frame,
     encode_stage_diagnostics_t *diagnostics
   ) {
     auto encoded_frame = session.encode_frame(frame.frame_nr, session.acquire_frame_buffer());
-    return publish_encoded_frame(std::move(encoded_frame), frame, session, packets, channel_data, diagnostics);
+    return publish_encoded_frame(std::move(encoded_frame), frame, session, packets, diagnostics);
   }
 
   /** Encoded-queue backpressure, on whichever thread publishes packets: a dropped delta frame asks
@@ -1196,18 +1457,6 @@ namespace video {
     std::chrono::steady_clock::time_point next_log = std::chrono::steady_clock::now();
   };
 
-  std::unique_ptr<nvenc_encode_session_t> make_encode_session(const config_t &client_config, std::unique_ptr<platf::nvenc_encode_device_t> encode_device) {
-    if (!encode_device->init_encoder(client_config, encode_device->colorspace)) {
-      std::packaged_task<void()> teardown([device = std::move(encode_device)]() mutable {
-        device.reset();
-      });
-      launch_async_teardown_worker(std::move(teardown));
-      return nullptr;
-    }
-
-    return std::make_unique<nvenc_encode_session_t>(std::move(encode_device));
-  }
-
   void refresh_mouse_keys_if_due(std::chrono::steady_clock::time_point &next_refresh) {
     const auto now = std::chrono::steady_clock::now();
     if (now < next_refresh) {
@@ -1224,30 +1473,23 @@ namespace video {
     safe::mail_t mail,
     img_event_t images,
     config_t config,
-    std::shared_ptr<platf::display_t> disp,
+    detail::capture_generation_handoff_t::display_lease_t generation,
     std::unique_ptr<nvenc_encode_session_t> session,
-    safe::signal_t &reinit_event,
     detail::encoder_recovery_t &recovery,
-    std::shared_ptr<void> channel_data,
+    packet_queue_t packets,
     const std::function<void(const video_mode_change_t &)> &on_bitrate_reconfigured
   ) {
-    // Move expensive NVENC destruction off the encode thread so a reinit can proceed. The worker
-    // is process-owned rather than detached: it must drain while logging, CUDA, TensorRT, and D3D
-    // globals are still alive, under the application's forced-shutdown watchdog.
+    const auto &disp = generation.display();
+    // All session exits retire their backend through its owner. Failed encoding additionally
+    // keeps the destruction receipt so capture can wait for the existing recovery gate.
     bool failed = true;
     auto fail_guard = util::fail_guard([&session, &recovery, &failed] {
-      std::packaged_task<void()> teardown([session = std::move(session)]() mutable {
-        BOOST_LOG(info) << "Starting async encoder teardown";
-        session.reset();
-        BOOST_LOG(info) << "Async encoder teardown complete";
-      });
       if (failed) {
         // A timeout keeps NVENC's global creation gate closed until its owner is destroyed.
         // Keep this completion so capture_async does not treat that temporary refusal as a
         // fatal encoder/configuration error. Ordinary mode changes still retire asynchronously.
-        recovery.start(teardown.get_future());
+        recovery.start(std::move(*session).retire());
       }
-      launch_async_teardown_worker(std::move(teardown));
     });
 
     // set max frame time based on client-requested target framerate; never shorter than its interval.
@@ -1260,16 +1502,10 @@ namespace video {
     BOOST_LOG(info) << "Encoding Frame threshold: "sv << encode_frame_threshold;
 
     auto shutdown_event = mail->event<bool>(mail::shutdown);
-    auto packets = mail::man->queue<packet_t>(
-      mail::video_packets,
-      ENCODED_PACKET_QUEUE_LIMIT
-    );
     auto idr_events = mail->event<bool>(mail::idr);
     auto invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
     // Atomic client-requested mode/geometry/cadence/bitrate changes arrive on one queue.
     auto video_mode_event = mail->queue<video_mode_change_t>(mail::video_mode);
-    auto video_mode_applied_queue =
-      mail->queue<video_mode_applied_t>(mail::video_mode_applied);
     auto depth_pipeline_ready_event = config.sbs_depth_pipeline_ready_event;
     auto stream_gamma_requests = mail->queue<stream_gamma_request_t>(mail::stream_gamma, stream_gamma_queue_limit);
     auto stream_gamma_acks = mail->queue<stream_gamma_ack_t>(mail::stream_gamma_ack, 2 * stream_gamma_queue_limit);
@@ -1356,7 +1592,7 @@ namespace video {
       // Metadata for pixels a live export owned has none to show: capture copies the whole
       // desktop again for the replacement once the guard below releases the output.
       const bool holds_pixels = !last_img || !last_img->pixels_skipped;
-      source.return_for_rebuild(*images, shutdown_event->peek(), reinit_event.peek(), holds_pixels);
+      source.return_for_rebuild(*images, shutdown_event->peek(), generation.revoked(), holds_pixels);
       // The replacement then starts from its black startup input, as this loop may still do:
       // it holds that input back until capture delivers the desktop.
       awaiting_desktop_after_export = !holds_pixels || startup_input_hold.active(std::chrono::steady_clock::now());
@@ -1377,7 +1613,7 @@ namespace video {
     }
     // Where this loop's time goes (holds, waits, conversion, encode), one line every 20 s.
     auto loop_stats = detail::make_diagnostic_state<detail::encode_loop_stats_t>(config::sunshine.diagnostics_enabled);
-    auto loop_stats_since = std::chrono::steady_clock::now();
+    auto loop_stats_since = detail::diagnostic_timestamp(loop_stats.has_value(), std::chrono::steady_clock::now);
     detail::diagnostic_content_tracker_t loop_content;
     // Every bounded image wait (a pending capture's target, a retained-source poll, the keepalive)
     // ends at the first of a capture, a wake and its bound, and that bound on this high-resolution
@@ -1418,7 +1654,7 @@ namespace video {
             drop_report.record_awaiting_idr();
             return true;
           }
-          const auto result = publish_encoded_frame(std::move(encoded_frame), frame, *session, packets, channel_data, encode_diagnostics ? &*encode_diagnostics : nullptr);
+          const auto result = publish_encoded_frame(std::move(encoded_frame), frame, *session, packets, encode_diagnostics ? &*encode_diagnostics : nullptr);
           if (result.failed) {
             BOOST_LOG(error) << "Could not encode video packet"sv;
             return false;
@@ -1432,6 +1668,7 @@ namespace video {
           }
           return true;
         },
+        loop_stats.has_value(),
         [images]() {
           // The loop notices the failure at its next iteration.
           images->wake();
@@ -1536,16 +1773,18 @@ namespace video {
       }
       on_bitrate_reconfigured(*requested);
 
-      video_mode_applied_queue->raise(video_mode_applied_t {
-        {{requested->request_id, requested->transaction_id}},
-        true,
-        effective_mode,
-        {
-          requested->width,
-          requested->height,
-          requested->encodingFramerate,
-        },
-      });
+      if (config.atomic_presentation) {
+        (void) config.atomic_presentation->complete(video_mode_applied_t {
+          {{requested->request_id, requested->transaction_id}},
+          true,
+          effective_mode,
+          {
+            requested->width,
+            requested->height,
+            requested->encodingFramerate,
+          },
+        });
+      }
       BOOST_LOG(info) << "Applied live bitrate-only video mode at "sv
                       << requested->bitrate
                       << "kbps without rebuilding NVENC or forcing an IDR."sv;
@@ -1564,7 +1803,7 @@ namespace video {
       }
       const bool shutting_down = shutdown_event->peek();
       const bool capture_stopped = !images->running();
-      const bool display_reinit_pending = reinit_event.peek();
+      const bool display_reinit_pending = generation.revoked();
 
       // A completed encode_frame(), or a drained pipeline, has no NVENC work in flight, and all
       // submissions run on this thread. Use that serialized seam for a same-geometry/same-cadence
@@ -1599,12 +1838,12 @@ namespace video {
 
     while (true) {
       if (loop_stats) {
-        if (const auto now = std::chrono::steady_clock::now(); now - loop_stats_since >= 20s) {
+        if (const auto now = std::chrono::steady_clock::now(); now - *loop_stats_since >= 20s) {
           if (pipeline) {
             const auto pictures = pipeline->take_stats();
             loop_stats->pictures(pictures.pushed_behind, pictures.retired, pictures.latency_total, pictures.latency_max);
           }
-          BOOST_LOG(info) << loop_stats->report(now - loop_stats_since) << session->video_memory_diagnostics();
+          BOOST_LOG(info) << loop_stats->report(now - *loop_stats_since) << session->video_memory_diagnostics();
           loop_stats->reset();
           loop_stats_since = now;
         }
@@ -1727,10 +1966,10 @@ namespace video {
         }
         bool captured = false;
         const auto image_wait = detail::encode_image_wait(idle_wait, encode_frame_threshold, last_img && !hold_startup_input, depth_pipeline_ready, conversion_poll_pending, pending_source_wait);
-        const auto image_wait_started = std::chrono::steady_clock::now();
+        const auto image_wait_started = detail::diagnostic_timestamp(loop_stats.has_value(), std::chrono::steady_clock::now);
         auto img = detail::pop_encode_image(*images, image_wait, image_deadline_waiter.get());
         if (loop_stats && !safe::no_wait(image_wait)) {
-          loop_stats->waited(std::chrono::duration_cast<std::chrono::nanoseconds>(image_wait), std::chrono::steady_clock::now() - image_wait_started);
+          loop_stats->waited(std::chrono::duration_cast<std::chrono::nanoseconds>(image_wait), std::chrono::steady_clock::now() - *image_wait_started);
         }
         if (img) {
           // Metadata for pixels an external provider owns, with an unchanged cursor, only
@@ -1951,7 +2190,7 @@ namespace video {
       // New content is told by its identity, as for the packets: a keepalive or poll that
       // re-renders an unchanged export converts again but encodes a repeat.
       const bool new_loop_content = loop_stats && loop_content.observe(content_timestamp, !converted_frame) == detail::diagnostic_content_e::new_content;
-      const auto encode_started = std::chrono::steady_clock::now();
+      const auto encode_started = detail::diagnostic_timestamp(loop_stats.has_value(), std::chrono::steady_clock::now);
       auto frame = make_encoded_frame_context(
         frame_nr++,
         frame_timestamp,
@@ -1969,20 +2208,20 @@ namespace video {
         // ClaimingAtThePollTargetKeepsTheCadenceWhenEveryPictureIsInFlight). The picture is
         // published by the retrieving thread when it completes.
         encoded = pipeline->acquire();
-        const auto completion_wait = std::chrono::steady_clock::now() - encode_started;
+        const auto completion_finished = detail::diagnostic_timestamp(loop_stats.has_value(), std::chrono::steady_clock::now);
         encoded = encoded && session->submit_frame(frame.frame_nr);
         if (encoded) {
           pipeline->push(std::move(frame));
         }
         if (loop_stats) {
-          loop_stats->encoded(new_loop_content, std::chrono::steady_clock::now() - encode_started, session->last_submit_timing(), completion_wait);
+          loop_stats->encoded(new_loop_content, std::chrono::steady_clock::now() - *encode_started, session->last_submit_timing(), *completion_finished - *encode_started);
         }
       } else {
-        const auto publish_result = encode(*session, packets, channel_data, frame, encode_diagnostics ? &*encode_diagnostics : nullptr);
+        const auto publish_result = encode(*session, packets, frame, encode_diagnostics ? &*encode_diagnostics : nullptr);
         encoded = !publish_result.failed;
         if (loop_stats) {
           const auto timing = session->last_frame_timing();
-          const auto call = std::chrono::steady_clock::now() - encode_started;
+          const auto call = std::chrono::steady_clock::now() - *encode_started;
           loop_stats->encoded(new_loop_content, call, timing.submit, timing.completion_wait);
           if (encoded) {
             loop_stats->pictures(0, 1, call, call);
@@ -2063,7 +2302,7 @@ namespace video {
     };
   }
 
-  std::unique_ptr<platf::nvenc_encode_device_t> make_encode_device(
+  std::unique_ptr<nvenc_encode_session_t> make_encode_session(
     platf::display_t &disp,
     const config_t &config,
     bool enforce_launch_hdr_contract = false
@@ -2081,8 +2320,6 @@ namespace video {
 
     auto colorspace = colorspace_from_client_config(config, disp.is_hdr());
 
-    const auto pix_fmt = colorspace.bit_depth == 10 ? platf::pix_fmt_e::p010 : platf::pix_fmt_e::nv12;
-
     {
       const auto encoder_name = nvenc_codec_name(config.videoFormat);
 
@@ -2099,28 +2336,37 @@ namespace video {
       BOOST_LOG(info) << "Color range: " << (colorspace.full_range ? "JPEG" : "MPEG");
     }
 
-    auto result = disp.make_nvenc_encode_device(pix_fmt);
+    auto device = disp.make_nvenc_encode_device(config, colorspace);
+    if (!device) {
+      return nullptr;
+    }
+    return std::make_unique<nvenc_encode_session_t>(std::move(device));
+  }
 
-    if (result) {
-      result->colorspace = colorspace;
-      if (colorspace_is_hdr(colorspace)) {
-        SS_HDR_METADATA metadata {};
-        if (disp.get_hdr_metadata(metadata)) {
-          result->hdr_metadata = metadata;
-        } else {
-          BOOST_LOG(error)
-            << "Couldn't get display HDR metadata for the native encoder bitstream."sv;
-        }
-      }
+#ifdef SUNSHINE_TESTS
+  namespace detail {
+    std::unique_ptr<nvenc_encode_session_t> make_native_encode_session_for_test(
+      platf::display_t &display,
+      const config_t &config,
+      bool enforce_launch_hdr_contract
+    ) {
+      return make_encode_session(display, config, enforce_launch_hdr_contract);
     }
 
-    return result;
-  }
+    hdr_info_t native_encode_session_hdr_info_for_test(const nvenc_encode_session_t &session) {
+      return session.hdr_info();
+    }
+
+    std::future<void> retire_native_encode_session_for_test(std::unique_ptr<nvenc_encode_session_t> session) {
+      return session ? std::move(*session).retire() : std::future<void> {};
+    }
+  }  // namespace detail
+#endif
 
   void capture_async(
     safe::mail_t mail,
     config_t &config,
-    std::shared_ptr<void> channel_data
+    packet_queue_t packets
   ) {
     auto shutdown_event = mail->event<bool>(mail::shutdown);
 
@@ -2130,21 +2376,8 @@ namespace video {
       shutdown_event->raise(true);
     });
 
-    capture_thread_async_ctx_t capture_thread_ctx;
-    if (start_capture_async(capture_thread_ctx)) {
-      return;
-    }
-    auto capture_guard = util::fail_guard([&]() {
-      // The capture thread can be inside its display-reference reinit wait. Stop the image owner
-      // before joining so that wait has an explicit cancellation edge even if a tracked driver
-      // teardown worker still retains the old display.
-      images->stop();
-      end_capture_async(capture_thread_ctx);
-    });
-
-    capture_thread_ctx.capture_ctx_queue->raise(capture_ctx_t {images, config});
-
-    if (!capture_thread_ctx.capture_ctx_queue->running()) {
+    capture_session_t capture_session {images, config};
+    if (!capture_session.running()) {
       return;
     }
 
@@ -2176,7 +2409,6 @@ namespace video {
     // Every live request owes the client exactly one answer, and only this loop knows the geometry
     // that actually gets installed. The host-generated transaction id (unlike the opaque client
     // request id) lets the serialized stream worker match this completion unambiguously.
-    auto video_mode_applied_queue = mail->queue<video_mode_applied_t>(mail::video_mode_applied);
     std::optional<video_mode_request_ref_t> active_ack_request;
     std::vector<video_mode_request_ref_t> superseded_ack_requests;
 
@@ -2206,7 +2438,7 @@ namespace video {
             }
             sbs_depth_status_event->raise(0);
           }
-          capture_thread_ctx.live_video_mode = std::optional<video_mode_change_t> {*mode};
+          capture_session.set_live_video_mode(std::optional<video_mode_change_t> {*mode});
           config_from_live_video_mode = true;
           if (active_ack_request) {
             superseded_ack_requests.push_back(*active_ack_request);
@@ -2242,26 +2474,19 @@ namespace video {
         recovery_wait_logged = false;
       }
 
-      // Wait for the main capture event when the display is being reinitialized
-      if (capture_thread_ctx.reinit_event.peek()) {
-        std::this_thread::sleep_for(20ms);
+      // Acquisition and revocation share one admission lock. A lease stays bound to this
+      // generation through the entire encode loop, including its retained-source return guard.
+      auto generation = capture_session.try_acquire_display();
+      if (!generation) {
+        // Keep servicing live-mode requests while capture opens or retires a display.
+        std::this_thread::sleep_for(capture_session.reinit_pending() ? 20ms : 1ms);
         continue;
       }
-      // Wait for the display to be ready
-      std::shared_ptr<platf::display_t> display;
-      {
-        auto lg = capture_thread_ctx.display_wp.lock();
-        display = capture_thread_ctx.display_wp->lock();
-      }
-      if (!display) {
-        // Yield until the capture thread publishes the display instead of spinning a core.
-        std::this_thread::sleep_for(1ms);
-        continue;
-      }
+      const auto &display = generation.display();
 
       // Retune the running capture session every iteration rather than only when the mode
       // changes. The call is a no-op when the cadence already matches, and republishing it
-      // unconditionally means a display rebuilt by captureThread is corrected here even if it
+      // unconditionally means a display rebuilt by the capture worker is corrected here even if it
       // raced the mode change and was created with the previous rate.
       display->set_client_frame_rate(config.framerate, config.framerateX100);
 
@@ -2427,7 +2652,7 @@ namespace video {
         if (current_sbs_mode != SBS_AI) {
           sbs_depth_status_event->raise(0);
         }
-        capture_thread_ctx.live_video_mode = proven_video_mode;
+        capture_session.set_live_video_mode(proven_video_mode);
         config_from_live_video_mode = false;
         // The request never made it into an encode session, so it must not be reported as applied.
         // It is answered once the fallback session comes up and its real mode is known.
@@ -2448,35 +2673,7 @@ namespace video {
         return;
       }
 
-      auto encode_device = make_encode_device(*display, session_config, true);
-      if (!encode_device) {
-        if (recover_failed_sbs_session()) {
-          continue;
-        }
-        if (revert_failed_live_video_mode()) {
-          continue;
-        }
-        return;
-      }
-
-      // Snapshot the HDR state while capture_async still owns the encode device. The device is
-      // transferred into the encode session below and must not be dereferenced after that move.
-      // Publication remains after successful encoder initialization so a failed candidate never
-      // advertises HDR state for a session that did not start.
-      hdr_info_t hdr_info = std::make_unique<hdr_info_raw_t>(false);
-      if (colorspace_is_hdr(encode_device->colorspace)) {
-        if (encode_device->hdr_metadata) {
-          hdr_info->metadata = *encode_device->hdr_metadata;
-          hdr_info->enabled = true;
-        } else {
-          BOOST_LOG(error) << "Couldn't get display hdr metadata when colorspace selection indicates it should have one";
-        }
-      }
-
-      auto encode_session = make_encode_session(
-        session_config,
-        std::move(encode_device)
-      );
+      auto encode_session = make_encode_session(*display, session_config, true);
       if (!encode_session) {
         if (recover_failed_sbs_session()) {
           continue;
@@ -2487,9 +2684,9 @@ namespace video {
         return;
       }
 
-      // The requested geometry produced a fully initialized encoder, so it is now the safe
-      // fallback. Pacing publication and the worker completion must remain below this point:
-      // make_encode_device() alone has not yet called init_encoder() and can still fail here.
+      // Only the fully initialized session may publish HDR, become the safe mode fallback,
+      // or complete a live mode acknowledgement.
+      auto hdr_info = encode_session->hdr_info();
       proven_video_mode = video_mode_change_t {
         config.width,
         config.height,
@@ -2541,21 +2738,25 @@ namespace video {
       // Answer the live requests this session resolves. Superseded ones are reported as not
       // applied so the client can drop them and resynchronize on the mode that is really running.
       if (!superseded_ack_requests.empty()) {
-        video_mode_applied_queue->raise(video_mode_applied_t {
-          std::move(superseded_ack_requests),
-          false,
-          effective_mode,
-          desktop_mode,
-        });
+        if (config.atomic_presentation) {
+          (void) config.atomic_presentation->complete(video_mode_applied_t {
+            std::move(superseded_ack_requests),
+            false,
+            effective_mode,
+            desktop_mode,
+          });
+        }
         superseded_ack_requests.clear();
       }
       if (active_ack_request) {
-        video_mode_applied_queue->raise(video_mode_applied_t {
-          {*active_ack_request},
-          true,
-          effective_mode,
-          desktop_mode,
-        });
+        if (config.atomic_presentation) {
+          (void) config.atomic_presentation->complete(video_mode_applied_t {
+            {*active_ack_request},
+            true,
+            effective_mode,
+            desktop_mode,
+          });
+        }
         active_ack_request.reset();
       }
 
@@ -2574,18 +2775,16 @@ namespace video {
         mail,
         images,
         session_config,
-        display,
+        generation,
         std::move(encode_session),
-        capture_thread_ctx.reinit_event,
         recovery,
-        channel_data,
+        packets,
         [&](const video_mode_change_t &mode) {
           // Keep every rebuild/fallback owner on the bitrate NVENC actually accepted. Without
           // this callback, a later SBS toggle or display reinitialization would reconstruct the
           // session from the pre-reconfigure bitrate even though the client was told otherwise.
           config.bitrate = mode.bitrate;
-          capture_thread_ctx.live_video_mode =
-            std::optional<video_mode_change_t> {mode};
+          capture_session.set_live_video_mode(std::optional<video_mode_change_t> {mode});
           proven_video_mode = mode;
           config_from_live_video_mode = false;
         }
@@ -2596,33 +2795,19 @@ namespace video {
   void capture(
     safe::mail_t mail,
     config_t config,
-    std::shared_ptr<void> channel_data
+    packet_queue_t packets
   ) {
     // Initialize this stream's depth status independently of every other session.
     mail->event<int>(mail::sbs_depth_status)->raise(0);
     mail->event<bool>(mail::idr)->raise(true);
-    capture_async(std::move(mail), config, channel_data);
+    capture_async(std::move(mail), config, std::move(packets));
   }
 
   int validate_config(std::shared_ptr<platf::display_t> disp, const config_t &config) {
-    auto encode_device = make_encode_device(*disp, config);
-    if (!encode_device) {
-      return -1;
-    }
-
-    auto session = make_encode_session(config, std::move(encode_device));
+    auto session = make_encode_session(*disp, config);
     if (!session) {
       return -1;
     }
-    // A probe can time out after NVENC accepted its image just like a live encode. Retain its
-    // complete owner on the same tracked teardown path; never release GPU input on this caller.
-    auto teardown_guard = util::fail_guard([&session] {
-      std::packaged_task<void()> teardown([session = std::move(session)]() mutable {
-        session.reset();
-      });
-      launch_async_teardown_worker(std::move(teardown));
-    });
-
     {
       // Image buffers are large, so we use a separate scope to free it immediately after convert()
       auto img = disp->alloc_img();
@@ -2633,12 +2818,9 @@ namespace video {
 
     session->request_idr_frame();
 
-    auto packets = mail::man->queue<packet_t>(
-      mail::video_packets,
-      ENCODED_PACKET_QUEUE_LIMIT
-    );
+    auto packets = std::make_shared<packet_queue_t::element_type>(ENCODED_PACKET_QUEUE_LIMIT);
     while (!packets->peek()) {
-      if (encode(*session, packets, nullptr, make_encoded_frame_context(1, {}, {}, nullptr, true, {}, true), nullptr).failed) {
+      if (encode(*session, packets, make_encoded_frame_context(1, {}, {}, nullptr, true, {}, true), nullptr).failed) {
         return -1;
       }
     }
@@ -2801,26 +2983,92 @@ namespace video {
     return 0;
   }
 
-  int start_capture_async(capture_thread_async_ctx_t &capture_thread_ctx) {
-    capture_thread_ctx.reinit_event.reset();
+#ifdef SUNSHINE_TESTS
+  namespace detail {
+    struct capture_worker_test_t::impl_t {
+      capture_session_t capture;
 
-    capture_thread_ctx.capture_ctx_queue = std::make_shared<safe::queue_t<capture_ctx_t>>(1);
-
-    capture_thread_ctx.capture_thread = std::thread {
-      captureThread,
-      capture_thread_ctx.capture_ctx_queue,
-      std::ref(capture_thread_ctx.display_wp),
-      std::ref(capture_thread_ctx.reinit_event),
-      std::ref(capture_thread_ctx.live_video_mode)
+      impl_t(
+        config_t config,
+        img_event_t images,
+        capture_worker_test_callback_t callback,
+        void *state,
+        capture_worker_test_callback_t before_admission
+      ):
+          capture(std::move(images), config, callback, state, before_admission) {
+      }
     };
 
-    return 0;
-  }
+    capture_worker_test_t::capture_worker_test_t(
+      config_t config,
+      img_event_t images,
+      capture_worker_test_callback_t callback,
+      void *state,
+      capture_worker_test_callback_t before_admission
+    ) {
+      if (!images || !callback) {
+        throw std::invalid_argument("The inert capture worker requires images and a callback");
+      }
+      impl_ = std::make_unique<impl_t>(std::move(config), std::move(images), callback, state, before_admission);
+    }
 
-  void end_capture_async(capture_thread_async_ctx_t &capture_thread_ctx) {
-    capture_thread_ctx.capture_ctx_queue->stop();
+    capture_worker_test_t::~capture_worker_test_t() = default;
 
-    capture_thread_ctx.capture_thread.join();
-  }
+    void capture_worker_test_t::stop() {
+      impl_->capture.stop();
+    }
+
+    bool capture_worker_test_t::running() const {
+      return impl_->capture.running();
+    }
+
+    void capture_worker_test_t::set_live_video_mode(std::optional<video_mode_change_t> mode) {
+      impl_->capture.set_live_video_mode(std::move(mode));
+    }
+
+    std::optional<video_mode_change_t> capture_worker_test_t::live_video_mode() const {
+      return impl_->capture.live_video_mode();
+    }
+
+    struct capture_reinit_test_t::impl_t {
+      std::shared_ptr<const capture_reinit_test_hooks_t> platform;
+      capture_session_t capture;
+
+      impl_t(config_t config, img_event_t images, capture_reinit_test_hooks_t hooks):
+          platform(std::make_shared<capture_reinit_test_hooks_t>(std::move(hooks))),
+          capture(std::move(images), config, nullptr, nullptr, nullptr, platform) {
+      }
+    };
+
+    capture_reinit_test_t::capture_reinit_test_t(config_t config, img_event_t images, capture_reinit_test_hooks_t hooks) {
+      if (!images || !hooks.preferred_display_name || !hooks.set_display_name || !hooks.refresh_displays || !hooks.open_display || !hooks.adjust_thread_priority || !hooks.display_change_epoch || !hooks.reconcile_topology) {
+        throw std::invalid_argument("The full inert capture worker requires every physical operation");
+      }
+      impl_ = std::make_unique<impl_t>(std::move(config), std::move(images), std::move(hooks));
+    }
+
+    capture_reinit_test_t::~capture_reinit_test_t() = default;
+
+    void capture_reinit_test_t::stop() {
+      impl_->capture.stop();
+    }
+
+    bool capture_reinit_test_t::running() const {
+      return impl_->capture.running();
+    }
+
+    bool capture_reinit_test_t::reinit_pending() const {
+      return impl_->capture.reinit_pending();
+    }
+
+    std::shared_ptr<platf::display_t> capture_reinit_test_t::current_display() {
+      return impl_->capture.try_acquire_display().display();
+    }
+
+    void capture_reinit_test_t::set_live_video_mode(std::optional<video_mode_change_t> mode) {
+      impl_->capture.set_live_video_mode(std::move(mode));
+    }
+  }  // namespace detail
+#endif
 
 }  // namespace video

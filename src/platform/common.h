@@ -14,6 +14,7 @@
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 
 // lib includes
@@ -28,6 +29,7 @@
 // local includes
 #include "src/config.h"
 #include "src/logging.h"
+#include "src/native_encode_owner.h"
 #include "src/stream_gamma.h"
 #include "src/thread_safe.h"
 #include "src/utility.h"
@@ -73,6 +75,8 @@ namespace nvenc {
 }
 
 namespace platf {
+  class capture_display_retirement_t;
+
   // Limited by bits in activeGamepadMask
   constexpr auto MAX_GAMEPADS = 16;
   constexpr std::uint16_t DS5_HAPTICS_PCM_CAPABILITY = 0x200;
@@ -385,8 +389,6 @@ namespace platf {
     float x;
     float y;
     float pressureOrDistance;  // Distance for hover and pressure for contact
-    float contactAreaMajor;
-    float contactAreaMinor;
   };
 
   class deinit_t {
@@ -525,9 +527,7 @@ namespace platf {
   };
 
   struct nvenc_encode_device_t: encode_device_t {
-    virtual bool init_encoder(const video::config_t &client_config, const video::sunshine_colorspace_t &colorspace) = 0;
-
-    nvenc::nvenc_base *nvenc = nullptr;
+    virtual nvenc::nvenc_base &encoder() = 0;
     std::optional<SS_HDR_METADATA> hdr_metadata;
   };
 
@@ -618,8 +618,12 @@ namespace platf {
 
     virtual int dummy_img(img_t *img) = 0;
 
-    virtual std::unique_ptr<nvenc_encode_device_t> make_nvenc_encode_device(pix_fmt_e pix_fmt) {
-      return nullptr;
+    /** Return a fully initialized backend; partial construction retires through its owner. */
+    virtual native_encode_owner_t make_nvenc_encode_device(
+      const video::config_t &,
+      const video::sunshine_colorspace_t &
+    ) {
+      return {};
     }
 
     virtual bool is_hdr() {
@@ -656,7 +660,12 @@ namespace platf {
 
   class mic_t {
   public:
-    virtual capture_e sample(std::vector<float> &frame_buffer) = 0;
+    /**
+     * Fill a caller-owned PCM frame whose extent is fixed for this call. Never retain the
+     * borrowed storage or resize it. `ok` means the entire frame was written; on any other
+     * result, the caller must not publish the frame's contents.
+     */
+    virtual capture_e sample(std::span<float> frame_buffer) = 0;
 
     virtual ~mic_t() = default;
   };
@@ -666,13 +675,6 @@ namespace platf {
     virtual int set_sink(const std::string &sink) = 0;
 
     virtual std::unique_ptr<mic_t> microphone(const std::uint8_t *mapping, int channels, std::uint32_t sample_rate, std::uint32_t frame_size) = 0;
-
-    /**
-     * @brief Check if the audio sink is available in the system.
-     * @param sink Sink to be checked.
-     * @returns True if available, false otherwise.
-     */
-    virtual bool is_sink_available(const std::string &sink) = 0;
 
     virtual std::optional<sink_t> sink_info() = 0;
 
@@ -724,12 +726,14 @@ namespace platf {
    * If you require to use this parameter in a separate thread, make a copy of it.
    * @param display_name The name of the monitor that SHOULD be displayed
    * @param config Stream configuration
+   * @param retirement Optional capture-thread ownership-return slot for the selected display.
    * @return The display_t instance, or nullptr when both DDUP and WGC initialization fail.
    */
   std::shared_ptr<display_t> display(
     const std::string &display_name,
     const video::config_t &config,
-    capture_backend_e preferred_backend = capture_backend_e::ddup
+    capture_backend_e preferred_backend = capture_backend_e::ddup,
+    std::weak_ptr<capture_display_retirement_t> retirement = {}
   );
 
   // A list of names accepted by display().

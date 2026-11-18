@@ -20,79 +20,16 @@
 #include "src/platform/common.h"
 #include "src/thread_safe.h"
 
-#define _FN(x, ret, args) \
-  typedef ret(*x##_fn) args; \
-  static x##_fn x
-
 using namespace std::literals;
 
 #define __SV(quote) L##quote##sv
 #define SV(quote) __SV(quote)
 
-extern "C" {
-#ifndef __MINGW32__
-  constexpr auto DNS_REQUEST_PENDING = 9506L;
-  constexpr auto DNS_QUERY_REQUEST_VERSION1 = 0x1;
-  constexpr auto DNS_QUERY_RESULTS_VERSION1 = 0x1;
-#endif
-
 #define SERVICE_DOMAIN "local"
 
+namespace platf::publish {
   constexpr auto SERVICE_TYPE_DOMAIN = SV(SERVICE_TYPE "." SERVICE_DOMAIN);
 
-#ifndef __MINGW32__
-  typedef struct _DNS_SERVICE_INSTANCE {
-    LPWSTR pszInstanceName;
-    LPWSTR pszHostName;
-
-    IP4_ADDRESS *ip4Address;
-    IP6_ADDRESS *ip6Address;
-
-    WORD wPort;
-    WORD wPriority;
-    WORD wWeight;
-
-    // Property list
-    DWORD dwPropertyCount;
-
-    PWSTR *keys;
-    PWSTR *values;
-
-    DWORD dwInterfaceIndex;
-  } DNS_SERVICE_INSTANCE, *PDNS_SERVICE_INSTANCE;
-#endif
-
-  typedef VOID WINAPI
-    DNS_SERVICE_REGISTER_COMPLETE(
-      _In_ DWORD Status,
-      _In_ PVOID pQueryContext,
-      _In_ PDNS_SERVICE_INSTANCE pInstance
-    );
-
-  typedef DNS_SERVICE_REGISTER_COMPLETE *PDNS_SERVICE_REGISTER_COMPLETE;
-
-#ifndef __MINGW32__
-  typedef struct _DNS_SERVICE_CANCEL {
-    PVOID reserved;
-  } DNS_SERVICE_CANCEL, *PDNS_SERVICE_CANCEL;
-
-  typedef struct _DNS_SERVICE_REGISTER_REQUEST {
-    ULONG Version;
-    ULONG InterfaceIndex;
-    PDNS_SERVICE_INSTANCE pServiceInstance;
-    PDNS_SERVICE_REGISTER_COMPLETE pRegisterCompletionCallback;
-    PVOID pQueryContext;
-    HANDLE hCredentials;
-    BOOL unicastEnabled;
-  } DNS_SERVICE_REGISTER_REQUEST, *PDNS_SERVICE_REGISTER_REQUEST;
-#endif
-
-  _FN(_DnsServiceFreeInstance, VOID, (_In_ PDNS_SERVICE_INSTANCE pInstance));
-  _FN(_DnsServiceDeRegister, DWORD, (_In_ PDNS_SERVICE_REGISTER_REQUEST pRequest, _Inout_opt_ PDNS_SERVICE_CANCEL pCancel));
-  _FN(_DnsServiceRegister, DWORD, (_In_ PDNS_SERVICE_REGISTER_REQUEST pRequest, _Inout_opt_ PDNS_SERVICE_CANCEL pCancel));
-} /* extern "C" */
-
-namespace platf::publish {
   VOID WINAPI register_cb(DWORD status, PVOID pQueryContext, PDNS_SERVICE_INSTANCE pInstance) {
     auto alarm = (safe::alarm_t<PDNS_SERVICE_INSTANCE>::element_type *) pQueryContext;
 
@@ -141,13 +78,13 @@ namespace platf::publish {
     DNS_STATUS status {};
 
     if (enable) {
-      status = _DnsServiceRegister(&req, nullptr);
+      status = DnsServiceRegister(&req, nullptr);
       if (status != DNS_REQUEST_PENDING) {
         print_status("DnsServiceRegister()"sv, status);
         return -1;
       }
     } else {
-      status = _DnsServiceDeRegister(&req, nullptr);
+      status = DnsServiceDeRegister(&req, nullptr);
       if (status != DNS_REQUEST_PENDING) {
         print_status("DnsServiceDeRegister()"sv, status);
         return -1;
@@ -162,7 +99,7 @@ namespace platf::publish {
       existing_instance = registered_instance;
     } else if (registered_instance) {
       // Deregistration was successful
-      _DnsServiceFreeInstance(registered_instance);
+      DnsServiceFreeInstance(registered_instance);
       existing_instance = nullptr;
     }
 
@@ -196,32 +133,7 @@ namespace platf::publish {
     PDNS_SERVICE_INSTANCE existing_instance;
   };
 
-  int load_funcs(HMODULE handle) {
-    auto fg = util::fail_guard([handle]() {
-      FreeLibrary(handle);
-    });
-
-    _DnsServiceFreeInstance = (_DnsServiceFreeInstance_fn) GetProcAddress(handle, "DnsServiceFreeInstance");
-    _DnsServiceDeRegister = (_DnsServiceDeRegister_fn) GetProcAddress(handle, "DnsServiceDeRegister");
-    _DnsServiceRegister = (_DnsServiceRegister_fn) GetProcAddress(handle, "DnsServiceRegister");
-
-    if (!(_DnsServiceFreeInstance && _DnsServiceDeRegister && _DnsServiceRegister)) {
-      BOOST_LOG(error) << "mDNS service not available in dnsapi.dll"sv;
-      return -1;
-    }
-
-    fg.disable();
-    return 0;
-  }
-
   std::unique_ptr<::platf::deinit_t> start() {
-    HMODULE handle = LoadLibrary("dnsapi.dll");
-
-    if (!handle || load_funcs(handle)) {
-      BOOST_LOG(error) << "Couldn't load dnsapi.dll; add this PC manually from Moonlight 3D"sv;
-      return nullptr;
-    }
-
     return std::make_unique<mdns_registration_t>();
   }
 }  // namespace platf::publish

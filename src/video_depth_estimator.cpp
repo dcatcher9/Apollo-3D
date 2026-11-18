@@ -1,4 +1,9 @@
 #include "video_depth_estimator.h"
+#include "live_model_preparation.h"
+
+#ifdef SUNSHINE_TESTS
+  #include "live_model_preparation_test.h"
+#endif
 
 #include "cuda_conditional_graph.h"
 #include "cuda_driver_api.h"
@@ -960,7 +965,7 @@ namespace models {
 
   }  // namespace
 
-  bool parallax_v2_result_is_authenticated(const estimate_result &result) {
+  bool parallax_v2_result_is_authenticated(const depth_observation_views_t &result) {
     if (!result.completed_frame_valid || result.completed_frame_id == 0u ||
         !result.parallax_v2_producer_active || !result.shadow_candidate_parallax ||
         !result.shadow_vertical_majorant || !result.shadow_vertical_conditioned ||
@@ -1622,6 +1627,19 @@ namespace models {
     );
   }
 
+  void detail::begin_live_model_preparation(const config::depth_model_info &model) {
+    set_model_prepare_status(engine_filename(model), engine_build_status::building);
+  }
+
+  void detail::fail_live_model_preparation(const config::depth_model_info &model) {
+    set_model_prepare_status(engine_filename(model), engine_build_status::failed);
+  }
+
+#ifdef SUNSHINE_TESTS
+  void testing::publish_model_preparation_status_for_test(const config::depth_model_info &model, engine_build_status status) {
+    set_model_prepare_status(engine_filename(model), status);
+  }
+#endif
   engine_build_status tensorrt_model_prepare_status(const config::depth_model_info &model) {
     const auto engine_name = engine_filename(model);
     std::lock_guard<std::mutex> lock(g_model_prepare_status_mutex);
@@ -1636,6 +1654,9 @@ namespace models {
   ) {
     const auto status_key = engine_filename(model);
     set_model_prepare_status(status_key, engine_build_status::building);
+#ifdef SUNSHINE_TESTS
+    testing::observe_preparation_stage_for_test(testing::preparation_stage_e::depth_building);
+#endif
     auto failed = util::fail_guard([&]() {
       set_model_prepare_status(status_key, engine_build_status::failed);
     });
@@ -3375,7 +3396,7 @@ namespace models {
     } completed_contour;
 
     // Entirely private, opt-in working diagnostics. None of these views enter
-    // completed_contour, estimate_result, rendering, or production history.
+    // completed_contour, depth_observation_views_t, rendering, or production history.
     bool completed_ocr_conditioner_research_enabled = false;
     bool queued_same_source_gpu_continuation_research_enabled = false;
     bool pending_same_source_gpu_postprocess_queued = false;
@@ -8483,32 +8504,76 @@ namespace models {
       return depth_srv;
     }
 
-    estimate_result make_result(
-      bool completed_frame_valid = false,
-      std::uint64_t completed_frame_id = 0,
-      bool inference_enqueued = false,
-      bool raw_snapshot_valid = false,
-      bool model_input_snapshot_valid = false,
-      bool composite_snapshots_valid = false,
-      bool coordinate_snapshot_valid = false,
-      depth_input_region_t completed_input_region = {},
-      input_color_space completed_color_space = input_color_space::srgb,
-      bool input_domain_reset = false,
-      bool subtitle_work_suppressed = false,
-      bool subtitle_ocr_inference_enqueued = false,
-      bool gpu_undecided_transaction_enqueued = false,
-      bool gpu_undecided_completion = false
+    struct completion_snapshot_validity_t {
+      bool raw_model_depth = false;
+      bool model_input = false;
+      bool composite = false;
+      bool coordinate = false;
+    };
+
+    struct completed_depth_metadata_t {
+      bool valid = false;
+      std::uint64_t frame_id = 0u;
+      depth_input_region_t input_region {};
+      input_color_space color_space = input_color_space::srgb;
+      bool input_domain_reset = false;
+      bool subtitle_work_suppressed = false;
+      bool gpu_undecided = false;
+      completion_snapshot_validity_t snapshots;
+    };
+
+    // Both completion paths call this only after ordered postprocess, receipt and debug copies.
+    // Retain the completed source/domain and publication views; consume only pending authority.
+    completed_depth_metadata_t consume_pending_completion(
+      const bool input_domain_reset,
+      const completion_snapshot_validity_t snapshots
     ) {
-      estimate_result r;
+      completed_depth_metadata_t completed {
+        .valid = true,
+        .frame_id = pending_frame_id,
+        .input_region = pending_input_region,
+        .color_space = pending_color_space,
+        .input_domain_reset = input_domain_reset,
+        .subtitle_work_suppressed = depth_optional_work_suppresses_subtitle(pending_optional_work),
+        .gpu_undecided = gpu_undecided_postprocess_pending(),
+        .snapshots = snapshots,
+      };
+      if (!completed.gpu_undecided) {
+        gpu_undecided_requires_force_infer_refresh = false;
+      }
+      clear_queued_same_source_gpu_continuation();
+      has_previous_frame = false;  // actual root ACK; never fold queued output twice
+      clear_pending_inference_event_state();
+      pending_optional_work = depth_optional_work_mode_e::ordinary;
+      pending_subtitle_work = cuda_conditional_graph::work_flag_e::none;
+      pending_submission_class = pending_submission_class_e::force_infer;
+      pending_wrapper_transaction_token = 0u;
+      pending_dump_forced = false;
+      pending_gpu_transaction_token = 0u;
+      pending_gpu_transaction_current_frame_id = 0u;
+      pending_gpu_transaction_baseline_frame_id = 0u;
+      pending_observation_timestamp_us = 0u;
+      if (diagnostics_enabled) {
+        throughput_stats_completions++;
+      }
+      return completed;
+    }
+
+    depth_step_result_t make_result(
+      const completed_depth_metadata_t &completed,
+      const depth_submission_t &submission = {}
+    ) {
+      depth_step_result_t step;
+      auto &r = step.observation;
       r.depth = output_srv();
       r.depth_health_state = depth_health_state_srv;
       r.depth_frame_state = minmax_ema_srv;
       r.ema_motion_mask = ema_motion_mask_srv;
       r.raw_model_depth = tensor_out_srv;
-      if (raw_snapshot_valid) {
+      if (completed.snapshots.raw_model_depth) {
         r.raw_model_depth_snapshot = raw_snapshot_srv;
       }
-      if (model_input_snapshot_valid) {
+      if (completed.snapshots.model_input) {
         r.model_input_snapshot = model_input_snapshot_srv;
       }
       r.raw_model_provenance = raw_model_provenance;
@@ -8518,13 +8583,13 @@ namespace models {
         r.guidance_height = target_h;
         r.refined_width = target_w;
         r.refined_height = target_h;
-        if (composite_snapshots_valid) {
+        if (completed.snapshots.composite) {
           r.guidance_model_input_snapshot = r.model_input_snapshot;
           r.refined_model_depth_snapshot = r.raw_model_depth_snapshot;
         }
       }
       if (parallax_v2_producer_active) {
-        if (coordinate_snapshot_valid) {
+        if (completed.snapshots.coordinate) {
           r.shadow_coordinate = depth_coordinate_v2_coordinate_srv;
         }
         r.shadow_candidate_parallax = depth_coordinate_v2_candidate_srv;
@@ -8572,28 +8637,27 @@ namespace models {
       r.field_width = field_w;
       r.field_height = field_h;
       r.refined_live_geometry_active = refined_live_geometry_active;
-      r.completed_frame_valid = completed_frame_valid;
-      r.completed_frame_id = completed_frame_id;
-      r.inference_enqueued = inference_enqueued;
-      r.gpu_undecided_transaction_enqueued =
-        gpu_undecided_transaction_enqueued;
-      r.gpu_undecided_completion = gpu_undecided_completion;
-      if (completed_frame_valid && current_publication.frame_id == completed_frame_id) {
+      r.completed_frame_valid = completed.valid;
+      r.completed_frame_id = completed.frame_id;
+      r.gpu_undecided_completion = completed.gpu_undecided;
+      if (completed.valid && current_publication.frame_id == completed.frame_id) {
         r.publication = current_publication;
       }
-      r.subtitle_ocr_inference_enqueued = subtitle_ocr_inference_enqueued;
-      r.cuda_graph_active = depth_conditional_graph.ready() &&
-                            !depth_inference_graph.policy.capture_failed;
-      if (completed_frame_valid) {
-        r.input_region = completed_input_region;
-        r.color_space = completed_color_space;
-        r.input_domain_reset = input_domain_reset;
-        r.subtitle_work_suppressed = subtitle_work_suppressed;
-        r.field_content = live_field_content(completed_input_region).value_or(
-          depth_tensor_content_rect_t {}
-        );
+      step.submission = submission;
+      step.status.cuda_graph_active = depth_conditional_graph.ready() &&
+                                      !depth_inference_graph.policy.capture_failed;
+      if (completed.valid) {
+        r.input_region = completed.input_region;
+        r.color_space = completed.color_space;
+        step.completion.input_domain_reset = completed.input_domain_reset;
+        r.subtitle_work_suppressed = completed.subtitle_work_suppressed;
+        r.field_content = live_field_content(completed.input_region).value_or(depth_tensor_content_rect_t {});
       }
-      return r;
+      return step;
+    }
+
+    depth_step_result_t make_result() {
+      return make_result(completed_depth_metadata_t {});
     }
 
     bool snapshot_buffer(
@@ -8748,7 +8812,7 @@ namespace models {
       return view;
     }
 
-    estimate_result finish_pending(
+    depth_step_result_t finish_pending(
       input_color_space color_space,
       bool snapshot_debug_inputs = false,
       const bool root_completion_proven = false
@@ -8843,46 +8907,16 @@ namespace models {
       }
       mark_d3d_pre_start(d3d_timer);
       end_d3d_perf(d3d_timer);
-      const auto completed_frame_id = pending_frame_id;
-      const auto completed_input_region = pending_input_region;
-      const auto completed_color_space = pending_color_space;
-      const bool completed_gpu_undecided = gpu_undecided_postprocess_pending();
-      const bool completed_subtitle_work_suppressed =
-        depth_optional_work_suppresses_subtitle(pending_optional_work);
-      if (!completed_gpu_undecided) {
-        gpu_undecided_requires_force_infer_refresh = false;
-      }
-      clear_queued_same_source_gpu_continuation();
-      has_previous_frame = false;  // actual root ACK; never fold queued output twice
-      clear_pending_inference_event_state();
-      pending_optional_work = depth_optional_work_mode_e::ordinary;
-      pending_subtitle_work = cuda_conditional_graph::work_flag_e::none;
-      pending_submission_class = pending_submission_class_e::force_infer;
-      pending_wrapper_transaction_token = 0u;
-      pending_dump_forced = false;
-      pending_gpu_transaction_token = 0u;
-      pending_gpu_transaction_current_frame_id = 0u;
-      pending_gpu_transaction_baseline_frame_id = 0u;
-      pending_observation_timestamp_us = 0u;
-      if (diagnostics_enabled) {
-        throughput_stats_completions++;
-      }
-      return make_result(
-        true,
-        completed_frame_id,
-        false,
-        raw_snapshot_valid,
-        model_input_snapshot_valid,
-        composite_snapshots_valid,
-        coordinate_snapshot_valid,
-        completed_input_region,
-        completed_color_space,
+      const auto completed = consume_pending_completion(
         input_domain_reset,
-        completed_subtitle_work_suppressed,
-        false,
-        false,
-        completed_gpu_undecided
+        {
+          .raw_model_depth = raw_snapshot_valid,
+          .model_input = model_input_snapshot_valid,
+          .composite = composite_snapshots_valid,
+          .coordinate = coordinate_snapshot_valid,
+        }
       );
+      return make_result(completed);
     }
 
     pending_depth_poll_result try_finish_pending(
@@ -9504,7 +9538,7 @@ namespace models {
       return true;
     }
 
-    estimate_result estimate(
+    depth_step_result_t estimate(
       ID3D11ShaderResourceView *input_srv,
       input_color_space color_space,
       std::uint64_t frame_id,
@@ -9519,16 +9553,12 @@ namespace models {
       if (!is_operational() || !input_srv) {
         return {};
       }
-      bool completed_frame_valid = false;
-      std::uint64_t completed_frame_id = 0;
+      completed_depth_metadata_t completed;
       bool raw_snapshot_valid = false;
       bool model_input_snapshot_valid = false;
       bool composite_snapshots_valid = false;
       bool coordinate_snapshot_valid = false;
-      depth_input_region_t completed_input_region {};
-      input_color_space completed_color_space = input_color_space::srgb;
       bool completed_input_domain_reset = false;
-      bool completed_subtitle_work_suppressed = false;
       bool completed_gpu_undecided = false;
       // Dump may override temporary move/size suppression, but never enables an ineligible
       // subtitle context. Suppressed dump sections remain explicitly unused in the package.
@@ -9903,8 +9933,6 @@ namespace models {
       // caller uses completed_frame_id to select the color slot that produced this exact result.
       if (has_previous_frame) {
         completed_gpu_undecided = gpu_undecided_postprocess_pending();
-        completed_subtitle_work_suppressed =
-          depth_optional_work_suppresses_subtitle(pending_optional_work);
         completed_input_domain_reset = pending_same_source_gpu_postprocess_queued ?
           pending_same_source_gpu_input_domain_reset : prepare_pending_input_domain();
         completion_dump_snapshot_requested = snapshot_raw_model_depth;
@@ -9968,28 +9996,15 @@ namespace models {
         }
         // Every debug copy is now ordered after this completion's consumers and before estimator
         // working resources can be reused.
-        completed_frame_id = pending_frame_id;
-        completed_input_region = pending_input_region;
-        completed_color_space = pending_color_space;
-        completed_frame_valid = true;
-        clear_queued_same_source_gpu_continuation();
-        has_previous_frame = false;
-        clear_pending_inference_event_state();
-        pending_optional_work = depth_optional_work_mode_e::ordinary;
-        pending_subtitle_work = cuda_conditional_graph::work_flag_e::none;
-        pending_submission_class = pending_submission_class_e::force_infer;
-        pending_wrapper_transaction_token = 0u;
-        pending_dump_forced = false;
-        pending_gpu_transaction_token = 0u;
-        pending_gpu_transaction_current_frame_id = 0u;
-        pending_gpu_transaction_baseline_frame_id = 0u;
-        pending_observation_timestamp_us = 0u;
-        if (!completed_gpu_undecided) {
-          gpu_undecided_requires_force_infer_refresh = false;
-        }
-        if (diagnostics_enabled) {
-          throughput_stats_completions++;
-        }
+        completed = consume_pending_completion(
+          completed_input_domain_reset,
+          {
+            .raw_model_depth = raw_snapshot_valid,
+            .model_input = model_input_snapshot_valid,
+            .composite = composite_snapshots_valid,
+            .coordinate = coordinate_snapshot_valid,
+          }
+        );
       } else {
         mark_d3d_post_end(d3d_timer);
       }
@@ -9999,28 +10014,13 @@ namespace models {
       const bool subtitle_context_changed =
         subtitle_context_generation != accepted_subtitle_context_generation ||
         subtitle_context_disabled != accepted_subtitle_context_disabled;
-      if (completed_frame_valid && subtitle_context_changed) {
+      if (completed.valid && subtitle_context_changed) {
         // This call must hand the preceding publication to its caller before clearing any of
         // the singleton subtitle/final resources it owns. Admit the changed context on a later
         // call; neither its epoch nor its optional work has been accepted yet.
         mark_d3d_pre_start(d3d_timer);
         end_d3d_perf(d3d_timer);
-        return make_result(
-          true,
-          completed_frame_id,
-          false,
-          raw_snapshot_valid,
-          model_input_snapshot_valid,
-          composite_snapshots_valid,
-          coordinate_snapshot_valid,
-          completed_input_region,
-          completed_color_space,
-          completed_input_domain_reset,
-          completed_subtitle_work_suppressed,
-          false,
-          false,
-          completed_gpu_undecided
-        );
+        return make_result(completed);
       }
 
       // The first ROI trial deliberately keeps one session tensor shape. A validated crop whose
@@ -10038,22 +10038,7 @@ namespace models {
         }
         mark_d3d_pre_start(d3d_timer);
         end_d3d_perf(d3d_timer);
-        return make_result(
-          completed_frame_valid,
-          completed_frame_id,
-          false,
-          raw_snapshot_valid,
-          model_input_snapshot_valid,
-          composite_snapshots_valid,
-          coordinate_snapshot_valid,
-          completed_input_region,
-          completed_color_space,
-          completed_input_domain_reset,
-          completed_subtitle_work_suppressed,
-          false,
-          false,
-          completed_gpu_undecided
-        );
+        return make_result(completed);
       }
 
       if (!ocr_available) {
@@ -10302,22 +10287,7 @@ namespace models {
         (void) observe_joined_cuda_failure(
           "depth interop map", map_res, true
         );
-        return make_result(
-          completed_frame_valid,
-          completed_frame_id,
-          false,
-          raw_snapshot_valid,
-          model_input_snapshot_valid,
-          composite_snapshots_valid,
-          coordinate_snapshot_valid,
-          completed_input_region,
-          completed_color_space,
-          completed_input_domain_reset,
-          completed_subtitle_work_suppressed,
-          false,
-          false,
-          completed_gpu_undecided
-        );
+        return make_result(completed);
       }
       CUgraphicsResource ocr_resources[2] = {cuda_ocr_in_res, cuda_ocr_out_res};
       bool ocr_mapped = false;
@@ -10946,22 +10916,14 @@ namespace models {
       }
 
       return make_result(
-        completed_frame_valid,
-        completed_frame_id,
-        enqueued && accepted_submission_class == pending_submission_class_e::force_infer,
-        raw_snapshot_valid,
-        model_input_snapshot_valid,
-        composite_snapshots_valid,
-        coordinate_snapshot_valid,
-        completed_input_region,
-        completed_color_space,
-        completed_input_domain_reset,
-        completed_subtitle_work_suppressed,
-        enqueued && ocr_armed &&
-          accepted_optional_work == depth_optional_work_mode_e::ordinary,
-        enqueued &&
-          accepted_submission_class == pending_submission_class_e::gpu_undecided,
-        completed_gpu_undecided
+        completed,
+        {
+          .inference_enqueued = enqueued && accepted_submission_class == pending_submission_class_e::force_infer,
+          .gpu_undecided_transaction_enqueued = enqueued &&
+                                                accepted_submission_class == pending_submission_class_e::gpu_undecided,
+          .subtitle_ocr_inference_enqueued = enqueued && ocr_armed &&
+                                             accepted_optional_work == depth_optional_work_mode_e::ordinary,
+        }
       );
     }
   };
@@ -11150,7 +11112,7 @@ namespace models {
     return !pimpl || !pimpl->is_operational();
   }
 
-  estimate_result video_depth_estimator::estimate_depth(
+  depth_step_result_t video_depth_estimator::estimate_depth(
     ID3D11ShaderResourceView *input_srv,
     input_color_space color_space,
     std::uint64_t frame_id,
@@ -11177,7 +11139,7 @@ namespace models {
     );
   }
 
-  estimate_result video_depth_estimator::finish_pending_depth_for_evaluation(
+  depth_step_result_t video_depth_estimator::finish_pending_depth_for_evaluation(
     input_color_space color_space,
     bool snapshot_debug_inputs
   ) {

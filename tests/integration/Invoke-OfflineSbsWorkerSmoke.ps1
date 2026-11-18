@@ -191,6 +191,35 @@ function Read-JsonFile {
     ConvertFrom-Json
 }
 
+function Assert-NativeMemoryInterface {
+  param([Parameter(Mandatory = $true)] [object] $Worker)
+
+  $forbiddenEvidence = @(Get-ChildItem -LiteralPath (
+      Join-Path $Worker.JobDirectory 'native-work'
+    ) -Recurse -File | Where-Object {
+      $_.Name -in @(
+        'adaptive_state.jsonl', 'adaptive_state_header.json',
+        'adaptive_state_frame.json', 'follow_progress.json'
+      )
+    })
+  Assert-Contract ($forbiddenEvidence.Count -eq 0) (
+    "$($Worker.Operation) unexpectedly wrote internal per-frame state/progress files"
+  )
+  $capabilities = Read-JsonFile -Path (
+    Join-Path $Worker.ResultDirectory 'native-capabilities.json'
+  )
+  $native = $capabilities.native_whole_clip
+  Assert-Contract (
+    $native.production_runner -eq 'typed-native-pass-v1' -and
+    $native.native_evidence_transport -eq 'bounded-completion-memory-v1' -and
+    $native.native_evidence_wakeup -eq 'condition-variable' -and
+    [long] $native.native_evidence_protocol_schema -eq 1 -and
+    $native.native_evidence_float_representation -eq 'finite-native-float32' -and
+    $native.PSObject.Properties.Name -notcontains 'follow_wakeup' -and
+    $native.PSObject.Properties.Name -notcontains 'follow_protocol_schema'
+  ) "$($Worker.Operation) capabilities do not attest the actual native interface"
+}
+
 function Invoke-JsonProbe {
   param(
     [Parameter(Mandatory = $true)]
@@ -1011,6 +1040,21 @@ title=Smoke chapter
     ) `
     -WorkingDirectory $runRoot `
     -Description 'native model-preflight frame extraction' | Out-Null
+  # The first extracted source observation is timestamp 1, matching the worker's
+  # elapsed-source-time origin. Supply the native SBSOTL1 single-frame timeline
+  # required by the causal estimator instead of relying on wall-clock timing.
+  $preflightTimeline = Join-Path $runRoot 'preflight-observation-timeline.sbsotl'
+  $timelineStream = [IO.File]::Open($preflightTimeline, [IO.FileMode]::CreateNew)
+  $timelineWriter = [IO.BinaryWriter]::new($timelineStream)
+  try {
+    $timelineWriter.Write([byte[]] @(83, 66, 83, 79, 84, 76, 49, 0))
+    $timelineWriter.Write([uint32] 1)
+    $timelineWriter.Write([uint32] 24)
+    $timelineWriter.Write([uint64] 1)
+    $timelineWriter.Write([uint64] 1)
+  } finally {
+    $timelineWriter.Dispose()
+  }
   $modelRun = Invoke-Native `
     -Executable $script:SunshinePath `
     -Arguments @(
@@ -1019,7 +1063,8 @@ title=Smoke chapter
       '--frames', $preflightFrames,
       '--out', $preflightOutput,
       '--limit', '1',
-      '--artifacts', 'adaptive'
+      '--artifacts', 'adaptive',
+      '--observation-timeline', $preflightTimeline
     ) `
     -WorkingDirectory (Split-Path -Parent $script:SunshinePath)
   if ($modelRun.ExitCode -ne 0) {
@@ -1105,6 +1150,9 @@ title=Smoke chapter
   Assert-Contract (
     $runtimeContract.follow_format -eq $expectedFollowFormat -and
     $null -eq $runtimeContract.follow_frame_pattern -and
+    $null -eq $runtimeContract.follow_progress_file -and
+    $null -eq $runtimeContract.follow_done_sentinel -and
+    $null -eq $runtimeContract.follow_failed_sentinel -and
     $runtimeContract.frame_transport -eq 'bounded-raw-memory-v1' -and
     $runtimeContract.input_frame_format -eq $expectedInputFrameFormat
   ) 'direct conversion follow raster contract disagrees with the source color mode'
@@ -1200,27 +1248,14 @@ title=Smoke chapter
 
   $adaptiveContract = $analysisContract.adaptive_state
   Assert-Contract (
-    $adaptiveContract.transport -eq 'atomic-latest-v1' -and
+    $adaptiveContract.transport -eq 'bounded-completion-memory-v1' -and
     $adaptiveContract.retained_history -eq $false -and
-    [long] $adaptiveContract.frame_count -eq 16
+    [long] $adaptiveContract.frame_count -eq 16 -and
+    @($adaptiveContract.PSObject.Properties.Name | Where-Object {
+      $_ -in @('header_file', 'frame_file', 'file')
+    }).Count -eq 0
   ) 'offline analysis did not attest its bounded adaptive-state transport'
-  $rawAdaptiveHistory = @(Get-ChildItem -LiteralPath (
-      $nativeWork
-    ) -Recurse -File | Where-Object {
-      $_.Name -eq 'adaptive_state.jsonl'
-    })
-  Assert-Contract (
-    $rawAdaptiveHistory.Count -eq 0
-  ) 'offline worker retained an unbounded per-frame state history'
-  $boundedSnapshots = @(Get-ChildItem -LiteralPath (
-      $nativeWork
-    ) -Recurse -File | Where-Object {
-      $_.Name -eq 'adaptive_state_header.json' -or
-      $_.Name -eq 'adaptive_state_frame.json'
-    })
-  Assert-Contract (
-    @($boundedSnapshots | Where-Object { $_.Length -gt 1MB }).Count -eq 0
-  ) 'bounded adaptive-state snapshot exceeded its one-MiB reader contract'
+  Assert-NativeMemoryInterface -Worker $successWorker
 
   $timeline = Read-JsonFile -Path (
     Join-Path $successWorker.ResultDirectory 'timeline-contract.json'
@@ -1328,6 +1363,9 @@ title=Smoke chapter
     $evaluationRuntime.follow_format -eq $expectedFollowFormat -and
     $evaluationRuntime.frame_transport -eq 'bounded-raw-memory-v1' -and
     $null -eq $evaluationRuntime.follow_frame_pattern -and
+    $null -eq $evaluationRuntime.follow_progress_file -and
+    $null -eq $evaluationRuntime.follow_done_sentinel -and
+    $null -eq $evaluationRuntime.follow_failed_sentinel -and
     $evaluationRuntime.input_frame_format -eq $expectedInputFrameFormat -and
     [long] $evaluationRuntime.follow_poll_interval_ms -eq 0 -and
     $evaluationRuntime.parallax_v2_render -eq $true -and
@@ -1335,6 +1373,12 @@ title=Smoke chapter
     $evaluationRuntime.scene_cache_write -eq $false -and
     $evaluationRuntime.scene_cache_replay -eq $false
   ) 'evaluation does not share the direct causal online runtime contract'
+  Assert-Contract (
+    $evaluationAnalysis.adaptive_state.transport -eq 'bounded-completion-memory-v1' -and
+    $evaluationAnalysis.adaptive_state.retained_history -eq $false -and
+    [long] $evaluationAnalysis.adaptive_state.frame_count -eq 16
+  ) 'evaluation did not retain the separate bounded evidence acknowledgement'
+  Assert-NativeMemoryInterface -Worker $evaluationWorker
   Assert-Contract (
     $evaluationAnalysis.sbs.enabled -eq $false -and
     [long] $evaluationAnalysis.sbs.frame_count -eq 0 -and

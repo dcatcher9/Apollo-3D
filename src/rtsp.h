@@ -21,6 +21,7 @@
 #include "crypto.h"
 #include "gpu_workload_arbiter.h"
 #include "microphone.h"
+#include "process_display_context.h"
 #include "stream_gamma.h"
 #include "thread_safe.h"
 
@@ -96,21 +97,13 @@ namespace rtsp_stream {
     std::string av_ping_payload;
     uint32_t control_connect_data;
 
-    std::string device_name;
-    std::string unique_id;
+    // Separate ownership: retaining display metadata never retains this encrypted transport.
+    std::shared_ptr<proc::process_display_context_t> display_context =
+      std::make_shared<proc::process_display_context_t>();
     crypto::PERM perm;
 
     bool host_audio;
-    int width;
-    int height;
-    int fps;
     int surround_info;
-    bool enable_hdr;
-    bool enable_sops;
-    bool virtual_display;
-    bool virtual_display_only = false;  ///< Client-owned preference for this launch or resume.
-    uint32_t scale_factor;
-    int sbs_mode = 0;
     video::stream_gamma_mode_e stream_gamma = video::stream_gamma_mode_e::windows_default;
 
     // SETUP owns the dormant receiver until a validated ANNOUNCE transfers it.
@@ -197,8 +190,8 @@ namespace rtsp_stream {
     /**
      * Release an HTTP-side reservation that was never published to RTSP.
      *
-     * A newly launched process retains this launch object, so relying on shared_ptr destruction
-     * after a rejected publication can otherwise pin GPU ownership for the lifetime of the app.
+     * Release before dropping the platform launch lock; transport/socket references can outlive
+     * a rejected publication, so shared_ptr destruction is not this admission boundary.
      * This is only called while the HTTP launch mutex still excludes RTSP claim/transfer.
      */
     void release_unpublished_live_gpu() {
@@ -209,9 +202,6 @@ namespace rtsp_stream {
     std::optional<crypto::cipher::gcm_t> rtsp_cipher;
     uint32_t rtsp_iv_counter = 0;
 
-#ifdef _WIN32
-    GUID display_guid {};
-#endif
   };
 
   [[nodiscard]] bool launch_session_raise(std::shared_ptr<launch_session_t> launch_session);

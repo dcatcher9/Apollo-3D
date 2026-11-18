@@ -1593,12 +1593,12 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
       models::input_color_space::srgb,
       warm_frame_id
     );
-    ASSERT_TRUE(warm.inference_enqueued);
+    ASSERT_TRUE(warm.submission.inference_enqueued);
     observed_ocr_child_armed =
-      observed_ocr_child_armed || warm.subtitle_ocr_inference_enqueued;
+      observed_ocr_child_armed || warm.submission.subtitle_ocr_inference_enqueued;
     const auto warmed = estimator.finish_pending_depth_for_evaluation();
-    ASSERT_TRUE(warmed.completed_frame_valid);
-    ASSERT_EQ(warmed.completed_frame_id, warm_frame_id);
+    ASSERT_TRUE(warmed.observation.completed_frame_valid);
+    ASSERT_EQ(warmed.observation.completed_frame_id, warm_frame_id);
     (void) estimator.poll_publication_receipts();
   }
 
@@ -1635,9 +1635,9 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
         .observation_timestamp_us = observed_frame_id,
       }
     );
-    ASSERT_TRUE(submitted.inference_enqueued);
+    ASSERT_TRUE(submitted.submission.inference_enqueued);
     observed_ocr_child_armed =
-      observed_ocr_child_armed || submitted.subtitle_ocr_inference_enqueued;
+      observed_ocr_child_armed || submitted.submission.subtitle_ocr_inference_enqueued;
 
     // An expired budget still performs exactly one nonblocking joined query. If it is busy, the
     // second call exercises the production eight-millisecond cap. A timeout is valid under external
@@ -1663,14 +1663,14 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
       immediate_hits += immediate_ready ? 1u : 0u;
       bounded_hits += immediate_ready ? 0u : 1u;
       ASSERT_FALSE(completed.timed_out);
-      ASSERT_TRUE(completed.result.completed_frame_valid);
-      ASSERT_EQ(completed.result.completed_frame_id, observed_frame_id);
+      ASSERT_TRUE(completed.result.observation.completed_frame_valid);
+      ASSERT_EQ(completed.result.observation.completed_frame_id, observed_frame_id);
     } else {
       ++timeouts;
       ASSERT_TRUE(completed.timed_out);
       const auto fallback = estimator.finish_pending_depth_for_evaluation();
-      ASSERT_TRUE(fallback.completed_frame_valid);
-      ASSERT_EQ(fallback.completed_frame_id, observed_frame_id);
+      ASSERT_TRUE(fallback.observation.completed_frame_valid);
+      ASSERT_EQ(fallback.observation.completed_frame_id, observed_frame_id);
     }
 
     const auto consumed_once = estimator.try_finish_pending_depth_nonblocking(
@@ -1678,7 +1678,7 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
       false
     );
     EXPECT_TRUE(consumed_once.ready);
-    EXPECT_FALSE(consumed_once.result.completed_frame_valid);
+    EXPECT_FALSE(consumed_once.result.observation.completed_frame_valid);
     EXPECT_EQ(consumed_once.query_count, 0u);
     (void) estimator.poll_publication_receipts();
   }
@@ -1748,7 +1748,7 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
     } while (!reusable && std::chrono::steady_clock::now() < deadline);
     return reusable;
   };
-  const auto wait_for_publication = [&](const models::estimate_result &publication)
+  const auto wait_for_publication = [&](const models::depth_observation_views_t &publication)
     -> std::optional<models::host_sbs_gpu_completion_receipt::receipt_t> {
     context->Flush();
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds {1};
@@ -1780,11 +1780,11 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
     models::depth_optional_work_mode_e::ordinary,
     {.observation_timestamp_us = baseline_frame_id}
   );
-  ASSERT_TRUE(baseline.inference_enqueued);
-  ASSERT_FALSE(baseline.subtitle_ocr_inference_enqueued);
+  ASSERT_TRUE(baseline.submission.inference_enqueued);
+  ASSERT_FALSE(baseline.submission.subtitle_ocr_inference_enqueued);
   const auto baseline_completed = estimator.finish_pending_depth_for_evaluation();
-  ASSERT_TRUE(baseline_completed.completed_frame_valid);
-  ASSERT_TRUE(baseline_completed.parallax_v2_producer_active);
+  ASSERT_TRUE(baseline_completed.observation.completed_frame_valid);
+  ASSERT_TRUE(baseline_completed.observation.parallax_v2_producer_active);
   // An unprojectable OCR crop still completes valid depth. Its exact-current abstention must
   // clear every box and every protection diagnostic, with the published Final copying Base.
   const auto read_words = [&](ID3D11ShaderResourceView *view, std::vector<std::uint32_t> &words) {
@@ -1835,7 +1835,7 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
   };
   namespace v2 = models::depth_coordinate_v2;
   std::vector<std::uint32_t> ocr_words;
-  ASSERT_TRUE(read_words(baseline_completed.ocr_box_record.Get(), ocr_words));
+  ASSERT_TRUE(read_words(baseline_completed.observation.ocr_box_record.Get(), ocr_words));
   std::vector<std::uint32_t> abstention(v2::subtitle_ocr_record_word_count, 0u);
   abstention[0u] = v2::subtitle_ocr_record_schema;
   abstention[1u] = v2::subtitle_ocr_record_tag;
@@ -1849,7 +1849,7 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
   abstention[12u] = static_cast<std::uint32_t>(high_shape->height);
   EXPECT_EQ(ocr_words, abstention);
   std::vector<std::uint32_t> locator_words;
-  ASSERT_TRUE(read_words(baseline_completed.subtitle_locator_state.Get(), locator_words));
+  ASSERT_TRUE(read_words(baseline_completed.observation.subtitle_locator_state.Get(), locator_words));
   ASSERT_EQ(locator_words.size(), v2::subtitle_plane_state_word_count);
   EXPECT_EQ(models::host_sbs_subtitle_plane::join(locator_words.data() + v2::subtitle_plane_frame_offset),
     baseline_frame_id);
@@ -1857,26 +1857,24 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
     conditional_region.analysis_generation);
   EXPECT_EQ(models::host_sbs_subtitle_plane::join(locator_words.data() + v2::subtitle_plane_observation_timestamp_offset),
     baseline_frame_id);
-  EXPECT_TRUE(std::equal(baseline_completed.publication.subtitle_domain.begin(),
-    baseline_completed.publication.subtitle_domain.end(),
-    locator_words.begin() + v2::subtitle_plane_source_extent_offset));
+  EXPECT_TRUE(std::equal(baseline_completed.observation.publication.subtitle_domain.begin(), baseline_completed.observation.publication.subtitle_domain.end(), locator_words.begin() + v2::subtitle_plane_source_extent_offset));
   EXPECT_EQ(locator_words[v2::subtitle_plane_flags_word], 0u);
   EXPECT_EQ(locator_words[v2::subtitle_plane_current_slot_mask_word], 0u);
   for (auto *view : {
-         baseline_completed.subtitle_contour_support.Get(),
-         baseline_completed.subtitle_contour_field_pin.Get(),
-         baseline_completed.subtitle_gaussian_weight.Get(),
+         baseline_completed.observation.subtitle_contour_support.Get(),
+         baseline_completed.observation.subtitle_contour_field_pin.Get(),
+         baseline_completed.observation.subtitle_gaussian_weight.Get(),
        }) {
     ASSERT_NE(view, nullptr);
     std::vector<std::uint32_t> protection;
     ASSERT_TRUE(read_words(view, protection));
     EXPECT_TRUE(std::all_of(protection.begin(), protection.end(), [](auto word) { return word == 0u; }));
   }
-  ASSERT_NE(baseline_completed.shadow_base_final_parallax.Get(), nullptr);
-  ASSERT_NE(baseline_completed.shadow_final_parallax.Get(), nullptr);
+  ASSERT_NE(baseline_completed.observation.shadow_base_final_parallax.Get(), nullptr);
+  ASSERT_NE(baseline_completed.observation.shadow_final_parallax.Get(), nullptr);
   std::vector<std::uint32_t> base_words, final_words;
-  ASSERT_TRUE(read_words(baseline_completed.shadow_base_final_parallax.Get(), base_words));
-  ASSERT_TRUE(read_words(baseline_completed.shadow_final_parallax.Get(), final_words));
+  ASSERT_TRUE(read_words(baseline_completed.observation.shadow_base_final_parallax.Get(), base_words));
+  ASSERT_TRUE(read_words(baseline_completed.observation.shadow_final_parallax.Get(), final_words));
   EXPECT_EQ(final_words, base_words);
   // An idle encode/presentation iteration drains the shared readback without submitting another
   // frame. The next functional caller still receives the exact completed proof from the cache.
@@ -1898,12 +1896,12 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
   const auto idle_receipts = estimator.poll_publication_receipts();
   EXPECT_EQ(idle_receipts.count, 0u);
   ASSERT_TRUE(idle_receipts.current_publication);
-  EXPECT_EQ(idle_receipts.current_publication->expected, baseline_completed.publication);
+  EXPECT_EQ(idle_receipts.current_publication->expected, baseline_completed.observation.publication);
   const auto repeated_health = estimator.latest_depth_telemetry();
   ASSERT_TRUE(repeated_health.sample);
   EXPECT_EQ(repeated_health.sample->sampled_frame_id, idle_health.sample->sampled_frame_id);
   EXPECT_EQ(repeated_health.sample->sampled_at, idle_health.sample->sampled_at);
-  const auto baseline_receipt = wait_for_publication(baseline_completed);
+  const auto baseline_receipt = wait_for_publication(baseline_completed.observation);
   ASSERT_TRUE(baseline_receipt);
   ASSERT_TRUE(baseline_receipt->depth_cache_authorized());
   ASSERT_EQ(baseline_receipt->depth_owner_frame_id, baseline_frame_id);
@@ -1923,14 +1921,14 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
       .observation_timestamp_us = conditional_frame_id,
     }
   );
-  ASSERT_TRUE(conditional.gpu_undecided_transaction_enqueued);
-  EXPECT_FALSE(conditional.inference_enqueued);
-  EXPECT_FALSE(conditional.subtitle_ocr_inference_enqueued);
+  ASSERT_TRUE(conditional.submission.gpu_undecided_transaction_enqueued);
+  EXPECT_FALSE(conditional.submission.inference_enqueued);
+  EXPECT_FALSE(conditional.submission.subtitle_ocr_inference_enqueued);
 
   const auto conditional_completed = estimator.finish_pending_depth_for_evaluation();
-  ASSERT_TRUE(conditional_completed.completed_frame_valid);
-  EXPECT_FALSE(estimator.publication_is_current(baseline_completed.publication));
-  const auto conditional_receipt = wait_for_publication(conditional_completed);
+  ASSERT_TRUE(conditional_completed.observation.completed_frame_valid);
+  EXPECT_FALSE(estimator.publication_is_current(baseline_completed.observation.publication));
+  const auto conditional_receipt = wait_for_publication(conditional_completed.observation);
   ASSERT_TRUE(conditional_receipt);
   ASSERT_TRUE(conditional_receipt->depth_cache_authorized());
   EXPECT_EQ(conditional_receipt->depth,
@@ -1958,14 +1956,14 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
       .observation_timestamp_us = followup_frame_id,
     }
   );
-  EXPECT_FALSE(followup.completed_frame_valid);
-  EXPECT_FALSE(followup.inference_enqueued);
-  EXPECT_TRUE(followup.gpu_undecided_transaction_enqueued);
-  EXPECT_FALSE(followup.subtitle_ocr_inference_enqueued);
+  EXPECT_FALSE(followup.observation.completed_frame_valid);
+  EXPECT_FALSE(followup.submission.inference_enqueued);
+  EXPECT_TRUE(followup.submission.gpu_undecided_transaction_enqueued);
+  EXPECT_FALSE(followup.submission.subtitle_ocr_inference_enqueued);
 
   const auto followup_completed = estimator.finish_pending_depth_for_evaluation();
-  ASSERT_TRUE(followup_completed.completed_frame_valid);
-  EXPECT_FALSE(estimator.publication_is_current(conditional_completed.publication));
+  ASSERT_TRUE(followup_completed.observation.completed_frame_valid);
+  EXPECT_FALSE(estimator.publication_is_current(conditional_completed.observation.publication));
 
   // CUDA/finalizer completion alone supplies no host admission proof. Do not poll this receipt:
   // the old, otherwise correct owner A must fall back to force inference until a current receipt
@@ -1986,17 +1984,16 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
       .observation_timestamp_us = forced_frame_id,
     }
   );
-  EXPECT_FALSE(forced.completed_frame_valid);
-  EXPECT_TRUE(forced.inference_enqueued);
-  EXPECT_FALSE(forced.gpu_undecided_transaction_enqueued);
+  EXPECT_FALSE(forced.observation.completed_frame_valid);
+  EXPECT_TRUE(forced.submission.inference_enqueued);
+  EXPECT_FALSE(forced.submission.gpu_undecided_transaction_enqueued);
   const auto forced_completed = estimator.finish_pending_depth_for_evaluation();
-  ASSERT_TRUE(forced_completed.completed_frame_valid);
-  EXPECT_EQ(forced_completed.completed_frame_id, forced_frame_id);
-  EXPECT_FALSE(forced_completed.gpu_undecided_completion);
-  EXPECT_GT(forced_completed.publication.publication_sequence,
-            followup_completed.publication.publication_sequence);
-  EXPECT_FALSE(estimator.publication_is_current(followup_completed.publication));
-  const auto forced_receipt = wait_for_publication(forced_completed);
+  ASSERT_TRUE(forced_completed.observation.completed_frame_valid);
+  EXPECT_EQ(forced_completed.observation.completed_frame_id, forced_frame_id);
+  EXPECT_FALSE(forced_completed.observation.gpu_undecided_completion);
+  EXPECT_GT(forced_completed.observation.publication.publication_sequence, followup_completed.observation.publication.publication_sequence);
+  EXPECT_FALSE(estimator.publication_is_current(followup_completed.observation.publication));
+  const auto forced_receipt = wait_for_publication(forced_completed.observation);
   ASSERT_TRUE(forced_receipt);
   ASSERT_TRUE(forced_receipt->depth_cache_authorized());
   EXPECT_EQ(forced_receipt->depth_owner_frame_id, forced_frame_id);
@@ -2036,13 +2033,13 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
       .observation_timestamp_us = changed_frame_id,
     }
   );
-  ASSERT_TRUE(changed.gpu_undecided_transaction_enqueued);
-  EXPECT_FALSE(changed.inference_enqueued);
+  ASSERT_TRUE(changed.submission.gpu_undecided_transaction_enqueued);
+  EXPECT_FALSE(changed.submission.inference_enqueued);
   const auto changed_completed = estimator.finish_pending_depth_for_evaluation();
-  ASSERT_TRUE(changed_completed.completed_frame_valid);
-  EXPECT_EQ(changed_completed.completed_frame_id, changed_frame_id);
-  EXPECT_TRUE(changed_completed.gpu_undecided_completion);
-  const auto changed_receipt = wait_for_publication(changed_completed);
+  ASSERT_TRUE(changed_completed.observation.completed_frame_valid);
+  EXPECT_EQ(changed_completed.observation.completed_frame_id, changed_frame_id);
+  EXPECT_TRUE(changed_completed.observation.gpu_undecided_completion);
+  const auto changed_receipt = wait_for_publication(changed_completed.observation);
   ASSERT_TRUE(changed_receipt);
   EXPECT_EQ(changed_receipt->depth,
             models::host_sbs_gpu_completion_receipt::depth_disposition_e::infer);
@@ -2056,10 +2053,10 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
     models::depth_optional_work_mode_e::suppress_subtitle,
     models::gpu_adaptive_reuse_request {.observation_timestamp_us = suppressed_frame_id}
   );
-  ASSERT_TRUE(suppressed.inference_enqueued);
+  ASSERT_TRUE(suppressed.submission.inference_enqueued);
   const auto suppressed_completed = estimator.finish_pending_depth_for_evaluation();
-  ASSERT_TRUE(suppressed_completed.completed_frame_valid);
-  const auto suppressed_receipt = wait_for_publication(suppressed_completed);
+  ASSERT_TRUE(suppressed_completed.observation.completed_frame_valid);
+  const auto suppressed_receipt = wait_for_publication(suppressed_completed.observation);
   ASSERT_TRUE(suppressed_receipt);
   ASSERT_TRUE(suppressed_receipt->depth_cache_authorized());
   ASSERT_NE(suppressed_receipt->expected.flags &
@@ -2077,11 +2074,11 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
       .observation_timestamp_us = ordinary_frame_id,
     }
   );
-  EXPECT_TRUE(ordinary.inference_enqueued);
-  EXPECT_FALSE(ordinary.gpu_undecided_transaction_enqueued);
+  EXPECT_TRUE(ordinary.submission.inference_enqueued);
+  EXPECT_FALSE(ordinary.submission.gpu_undecided_transaction_enqueued);
   const auto ordinary_completed = estimator.finish_pending_depth_for_evaluation();
-  ASSERT_TRUE(ordinary_completed.completed_frame_valid);
-  const auto ordinary_receipt = wait_for_publication(ordinary_completed);
+  ASSERT_TRUE(ordinary_completed.observation.completed_frame_valid);
+  const auto ordinary_receipt = wait_for_publication(ordinary_completed.observation);
   ASSERT_TRUE(ordinary_receipt);
   EXPECT_EQ(ordinary_receipt->depth_owner_frame_id, ordinary_frame_id);
   EXPECT_TRUE(ordinary_receipt->subtitle_is_current());
@@ -2095,47 +2092,45 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
     false, conditional_region, models::depth_optional_work_mode_e::ordinary,
     {.observation_timestamp_us = scope_baseline_frame}
   );
-  ASSERT_TRUE(scope_baseline.inference_enqueued);
+  ASSERT_TRUE(scope_baseline.submission.inference_enqueued);
   const auto scope_baseline_completed = estimator.finish_pending_depth_for_evaluation();
-  ASSERT_TRUE(scope_baseline_completed.completed_frame_valid);
-  const auto scope_baseline_receipt = wait_for_publication(scope_baseline_completed);
+  ASSERT_TRUE(scope_baseline_completed.observation.completed_frame_valid);
+  const auto scope_baseline_receipt = wait_for_publication(scope_baseline_completed.observation);
   ASSERT_TRUE(scope_baseline_receipt);
   ASSERT_TRUE(wait_until_reusable());
   const auto scope_frame = scope_baseline_frame + 1u;
-  const auto scope_request = models::make_gpu_adaptive_request(scope_frame, true,
-    &*scope_baseline_receipt, scope_baseline_completed.publication, scope_frame);
+  const auto scope_request = models::make_gpu_adaptive_request(scope_frame, true, &*scope_baseline_receipt, scope_baseline_completed.observation.publication, scope_frame);
   ASSERT_TRUE(scope_request.authorize_gpu_undecided_reuse);
   const auto scoped = estimator.estimate_depth(
     conditional_source.Get(), models::input_color_space::srgb, scope_frame,
     false, conditional_region, models::depth_optional_work_mode_e::ordinary,
     scope_request, 1u
   );
-  ASSERT_TRUE(scoped.inference_enqueued);
-  EXPECT_FALSE(scoped.gpu_undecided_transaction_enqueued);
+  ASSERT_TRUE(scoped.submission.inference_enqueued);
+  EXPECT_FALSE(scoped.submission.gpu_undecided_transaction_enqueued);
   const auto scoped_completed = estimator.finish_pending_depth_for_evaluation();
-  ASSERT_TRUE(scoped_completed.completed_frame_valid);
-  EXPECT_FALSE(scoped_completed.input_domain_reset);
-  EXPECT_EQ(scoped_completed.publication.domain_tag, scope_baseline_completed.publication.domain_tag);
-  const auto scoped_receipt = wait_for_publication(scoped_completed);
+  ASSERT_TRUE(scoped_completed.observation.completed_frame_valid);
+  EXPECT_FALSE(scoped_completed.completion.input_domain_reset);
+  EXPECT_EQ(scoped_completed.observation.publication.domain_tag, scope_baseline_completed.observation.publication.domain_tag);
+  const auto scoped_receipt = wait_for_publication(scoped_completed.observation);
   ASSERT_TRUE(scoped_receipt);
   EXPECT_EQ(scoped_receipt->depth_owner_frame_id, scope_frame);
 
   // The accepted epoch is stable: later same-epoch requests retain ordinary reuse eligibility.
   ASSERT_TRUE(wait_until_reusable());
   const auto scoped_followup_frame = scope_frame + 1u;
-  const auto scoped_followup_request = models::make_gpu_adaptive_request(scoped_followup_frame, true,
-    &*scoped_receipt, scoped_completed.publication, scoped_followup_frame);
+  const auto scoped_followup_request = models::make_gpu_adaptive_request(scoped_followup_frame, true, &*scoped_receipt, scoped_completed.observation.publication, scoped_followup_frame);
   ASSERT_TRUE(scoped_followup_request.authorize_gpu_undecided_reuse);
   const auto scoped_followup = estimator.estimate_depth(
     conditional_source.Get(), models::input_color_space::srgb, scoped_followup_frame,
     false, conditional_region, models::depth_optional_work_mode_e::ordinary,
     scoped_followup_request, 1u
   );
-  ASSERT_TRUE(scoped_followup.gpu_undecided_transaction_enqueued);
-  EXPECT_FALSE(scoped_followup.inference_enqueued);
+  ASSERT_TRUE(scoped_followup.submission.gpu_undecided_transaction_enqueued);
+  EXPECT_FALSE(scoped_followup.submission.inference_enqueued);
   const auto scoped_followup_completed = estimator.finish_pending_depth_for_evaluation();
-  ASSERT_TRUE(scoped_followup_completed.completed_frame_valid);
-  const auto scoped_followup_receipt = wait_for_publication(scoped_followup_completed);
+  ASSERT_TRUE(scoped_followup_completed.observation.completed_frame_valid);
+  const auto scoped_followup_receipt = wait_for_publication(scoped_followup_completed.observation);
   ASSERT_TRUE(scoped_followup_receipt);
   EXPECT_EQ(scoped_followup_receipt->depth,
     models::host_sbs_gpu_completion_receipt::depth_disposition_e::reuse);
@@ -2312,7 +2307,7 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedThir
     context->Unmap(staging.Get(), 0u);
     return true;
   };
-  const auto read_tuple = [&](const models::estimate_result &result, tuple_t &out) {
+  const auto read_tuple = [&](const models::depth_observation_views_t &result, tuple_t &out) {
     const std::array<ID3D11ShaderResourceView *, 16u> views {
       result.subtitle_contour_support.Get(), result.subtitle_contour_field_pin.Get(),
       result.subtitle_contour_distance.Get(), result.subtitle_contour_identity.Get(),
@@ -2324,7 +2319,8 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedThir
       result.subtitle_glyph_matte.Get(), result.subtitle_condition_params.Get()
     };
     for (std::size_t i = 0u; i < views.size(); ++i) {
-      if (!read_view(views[i], out[i])) return false;
+      if (!read_view(views[i], out[i]))
+        return false;
     }
     return true;
   };
@@ -2354,17 +2350,17 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedThir
     };
     ASSERT_TRUE(control.is_valid());
     const auto warm = submit_n(control, true);
-    ASSERT_TRUE(warm.inference_enqueued);
-    ASSERT_TRUE(warm.subtitle_ocr_inference_enqueued);
-    ASSERT_TRUE(control.finish_pending_depth_for_evaluation().completed_frame_valid);
+    ASSERT_TRUE(warm.submission.inference_enqueued);
+    ASSERT_TRUE(warm.submission.subtitle_ocr_inference_enqueued);
+    ASSERT_TRUE(control.finish_pending_depth_for_evaluation().observation.completed_frame_valid);
     ASSERT_TRUE(wait_until_reusable(control));
     const auto submission = submit_n(control, false);
-    ASSERT_TRUE(submission.inference_enqueued);
-    ASSERT_TRUE(submission.subtitle_ocr_inference_enqueued);
+    ASSERT_TRUE(submission.submission.inference_enqueued);
+    ASSERT_TRUE(submission.submission.subtitle_ocr_inference_enqueued);
     const auto expected_metadata = control.finish_pending_depth_for_evaluation();
-    ASSERT_TRUE(models::subtitle_evidence_is_exact_frame(expected_metadata));
-    ASSERT_EQ(expected_metadata.completed_frame_id, frame_n);
-    ASSERT_TRUE(read_tuple(expected_metadata, expected));
+    ASSERT_TRUE(models::subtitle_evidence_is_exact_frame(expected_metadata.observation));
+    ASSERT_EQ(expected_metadata.observation.completed_frame_id, frame_n);
+    ASSERT_TRUE(read_tuple(expected_metadata.observation, expected));
   }
 
   const UINT crop_height = models::subtitle_ocr_source_crop_height(source_width, source_height);
@@ -2420,14 +2416,14 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedThir
     };
     ASSERT_TRUE(estimator.is_valid());
     const auto warm = submit_n(estimator, true);
-    ASSERT_TRUE(warm.inference_enqueued);
-    ASSERT_TRUE(warm.subtitle_ocr_inference_enqueued);
-    ASSERT_TRUE(estimator.finish_pending_depth_for_evaluation().completed_frame_valid);
+    ASSERT_TRUE(warm.submission.inference_enqueued);
+    ASSERT_TRUE(warm.submission.subtitle_ocr_inference_enqueued);
+    ASSERT_TRUE(estimator.finish_pending_depth_for_evaluation().observation.completed_frame_valid);
     ASSERT_TRUE(wait_until_reusable(estimator));
     const auto pending_n = submit_n(estimator, false);
-    ASSERT_TRUE(pending_n.inference_enqueued);
-    ASSERT_TRUE(pending_n.subtitle_ocr_inference_enqueued);
-    ASSERT_FALSE(pending_n.completed_frame_valid);
+    ASSERT_TRUE(pending_n.submission.inference_enqueued);
+    ASSERT_TRUE(pending_n.submission.subtitle_ocr_inference_enqueued);
+    ASSERT_FALSE(pending_n.observation.completed_frame_valid);
     // Query readiness only. The next estimate consumes N and may admit N+1 only when its
     // context does not need to clear any singleton resource belonging to N's publication.
     ASSERT_TRUE(wait_until_reusable(estimator));
@@ -2437,20 +2433,19 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedThir
       {.observation_timestamp_us = clock_n + 33333u},
       test_case.subtitle_context_generation
     );
-    ASSERT_TRUE(completed_n.completed_frame_valid);
-    ASSERT_EQ(completed_n.completed_frame_id, frame_n);
-    ASSERT_EQ(completed_n.inference_enqueued, !defer_context_admission);
-    ASSERT_EQ(completed_n.subtitle_ocr_inference_enqueued,
-      !defer_context_admission && test_case.optional_work == models::depth_optional_work_mode_e::ordinary);
-    ASSERT_FALSE(completed_n.gpu_undecided_transaction_enqueued);
-    ASSERT_FALSE(completed_n.subtitle_work_suppressed);
-    ASSERT_TRUE(models::subtitle_evidence_is_exact_frame(completed_n));
-    ASSERT_TRUE(estimator.publication_is_current(completed_n.publication));
-    ASSERT_EQ(completed_n.input_region.source_width, source_width);
-    ASSERT_EQ(completed_n.input_region.source_height, source_height);
+    ASSERT_TRUE(completed_n.observation.completed_frame_valid);
+    ASSERT_EQ(completed_n.observation.completed_frame_id, frame_n);
+    ASSERT_EQ(completed_n.submission.inference_enqueued, !defer_context_admission);
+    ASSERT_EQ(completed_n.submission.subtitle_ocr_inference_enqueued, !defer_context_admission && test_case.optional_work == models::depth_optional_work_mode_e::ordinary);
+    ASSERT_FALSE(completed_n.submission.gpu_undecided_transaction_enqueued);
+    ASSERT_FALSE(completed_n.observation.subtitle_work_suppressed);
+    ASSERT_TRUE(models::subtitle_evidence_is_exact_frame(completed_n.observation));
+    ASSERT_TRUE(estimator.publication_is_current(completed_n.observation.publication));
+    ASSERT_EQ(completed_n.observation.input_region.source_width, source_width);
+    ASSERT_EQ(completed_n.observation.input_region.source_height, source_height);
 
     tuple_t before, after;
-    ASSERT_TRUE(read_tuple(completed_n, before));
+    ASSERT_TRUE(read_tuple(completed_n.observation, before));
     ASSERT_EQ(before[3u].bytes.size(), v2::subtitle_contour_history_word_count * sizeof(std::uint32_t));
     std::array<std::uint32_t, v2::subtitle_contour_history_word_count> identity {};
     std::memcpy(identity.data(), before[3u].bytes.data(), before[3u].bytes.size());
@@ -2464,8 +2459,8 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedThir
     EXPECT_EQ(identity[9u], source_height);
     EXPECT_EQ(identity[10u], source_height - crop_height);
     EXPECT_EQ(identity[11u], crop_height);
-    EXPECT_EQ(identity[12u], static_cast<UINT>(completed_n.field_width));
-    EXPECT_EQ(identity[13u], static_cast<UINT>(completed_n.field_height));
+    EXPECT_EQ(identity[12u], static_cast<UINT>(completed_n.observation.field_width));
+    EXPECT_EQ(identity[13u], static_cast<UINT>(completed_n.observation.field_height));
     EXPECT_EQ(identity[20u], static_cast<std::uint32_t>(clock_n));
     EXPECT_EQ(identity[21u], static_cast<std::uint32_t>(clock_n >> 32u));
     EXPECT_EQ(identity[22u], v2::subtitle_contour_recipe);
@@ -2495,8 +2490,8 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedThir
     // N+1 may finish CUDA or remain unadmitted. Neither case may replace N's complete published
     // tuple, including Final/OCR8/UIP4, before the next admission or completion is consumed.
     ASSERT_TRUE(wait_until_reusable(estimator));
-    ASSERT_TRUE(estimator.publication_is_current(completed_n.publication));
-    ASSERT_TRUE(read_tuple(completed_n, after));
+    ASSERT_TRUE(estimator.publication_is_current(completed_n.observation.publication));
+    ASSERT_TRUE(read_tuple(completed_n.observation, after));
     for (std::size_t i = 0u; i < after.size(); ++i) {
       SCOPED_TRACE(names[i]);
       EXPECT_EQ(after[i].dimension, before[i].dimension);
@@ -2510,32 +2505,30 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedThir
       // Returning N did not accept any part of the new request. No hidden pending work exists,
       // and the next actual admission must still perform the requested context reset.
       const auto no_pending = estimator.finish_pending_depth_for_evaluation();
-      ASSERT_FALSE(no_pending.completed_frame_valid);
-      ASSERT_TRUE(estimator.publication_is_current(completed_n.publication));
+      ASSERT_FALSE(no_pending.observation.completed_frame_valid);
+      ASSERT_TRUE(estimator.publication_is_current(completed_n.observation.publication));
       const auto admitted_follower = estimator.estimate_depth(
         follower.view.Get(), models::input_color_space::srgb, frame_n + 1u, false, {},
         test_case.optional_work,
         {.observation_timestamp_us = clock_n + 33333u},
         test_case.subtitle_context_generation
       );
-      ASSERT_FALSE(admitted_follower.completed_frame_valid);
-      ASSERT_TRUE(admitted_follower.inference_enqueued);
-      ASSERT_FALSE(admitted_follower.gpu_undecided_transaction_enqueued);
-      EXPECT_EQ(admitted_follower.subtitle_ocr_inference_enqueued,
-        test_case.optional_work == models::depth_optional_work_mode_e::ordinary);
-      EXPECT_FALSE(estimator.publication_is_current(completed_n.publication));
+      ASSERT_FALSE(admitted_follower.observation.completed_frame_valid);
+      ASSERT_TRUE(admitted_follower.submission.inference_enqueued);
+      ASSERT_FALSE(admitted_follower.submission.gpu_undecided_transaction_enqueued);
+      EXPECT_EQ(admitted_follower.submission.subtitle_ocr_inference_enqueued, test_case.optional_work == models::depth_optional_work_mode_e::ordinary);
+      EXPECT_FALSE(estimator.publication_is_current(completed_n.observation.publication));
     }
     // A new publication ends N's borrowed view lifetime. Never claim that saved SRVs
     // authenticate N after that invalidation.
     const auto completed_follower = estimator.finish_pending_depth_for_evaluation();
-    ASSERT_TRUE(completed_follower.completed_frame_valid);
-    EXPECT_EQ(completed_follower.completed_frame_id, frame_n + 1u);
-    EXPECT_EQ(completed_follower.subtitle_work_suppressed,
-      models::depth_optional_work_suppresses_subtitle(test_case.optional_work));
-    EXPECT_FALSE(estimator.publication_is_current(completed_n.publication));
+    ASSERT_TRUE(completed_follower.observation.completed_frame_valid);
+    EXPECT_EQ(completed_follower.observation.completed_frame_id, frame_n + 1u);
+    EXPECT_EQ(completed_follower.observation.subtitle_work_suppressed, models::depth_optional_work_suppresses_subtitle(test_case.optional_work));
+    EXPECT_FALSE(estimator.publication_is_current(completed_n.observation.publication));
     if (test_case.optional_work == models::depth_optional_work_mode_e::disable_subtitle) {
       tuple_t disabled;
-      ASSERT_TRUE(read_tuple(completed_follower, disabled));
+      ASSERT_TRUE(read_tuple(completed_follower.observation, disabled));
       for (const auto index : {0u, 4u, 5u, 14u}) {
         SCOPED_TRACE(names[index]);
         EXPECT_EQ(disabled[index].width, 1u);
@@ -2549,7 +2542,7 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedThir
     }
     if (test_case.optional_work == models::depth_optional_work_mode_e::suppress_subtitle) {
       tuple_t suppressed;
-      ASSERT_TRUE(read_tuple(completed_follower, suppressed));
+      ASSERT_TRUE(read_tuple(completed_follower.observation, suppressed));
       // No subtitle observation occurred: native backing and its retained pixels survive.
       for (const auto index : {0u, 3u, 4u, 5u, 6u, 14u, 15u}) {
         SCOPED_TRACE(names[index]);
@@ -2707,7 +2700,7 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
     context->Unmap(staging.Get(), 0u);
     return true;
   };
-  const auto read_tuple = [&](const models::estimate_result &result, tuple_t &out) {
+  const auto read_tuple = [&](const models::depth_observation_views_t &result, tuple_t &out) {
     const std::array<ID3D11ShaderResourceView *, names.size()> views {
       result.depth.Get(), result.depth_health_state.Get(), result.depth_frame_state.Get(), result.raw_model_depth.Get(),
       result.shadow_candidate_parallax.Get(), result.shadow_vertical_majorant.Get(),
@@ -2722,7 +2715,8 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
       result.subtitle_glyph_matte.Get(), result.subtitle_condition_params.Get()
     };
     for (std::size_t i = 0u; i < views.size(); ++i) {
-      if (!read_view(views[i], out[i])) return false;
+      if (!read_view(views[i], out[i]))
+        return false;
     }
     return true;
   };
@@ -2876,13 +2870,14 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
     } while (std::chrono::steady_clock::now() < deadline);
     return false;
   };
-  const auto wait_for_receipt = [&](const models::estimate_result &publication)
+  const auto wait_for_receipt = [&](const models::depth_observation_views_t &publication)
     -> std::optional<receipt::receipt_t> {
     context->Flush();
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds {2};
     do {
       const auto batch = estimator.poll_publication_receipts();
-      if (batch.failed) return std::nullopt;
+      if (batch.failed)
+        return std::nullopt;
       if (batch.current_publication && receipt::matches_publication(
             *batch.current_publication, publication.publication)) {
         return batch.current_publication;
@@ -2895,31 +2890,36 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
   constexpr std::uint64_t first_clock = 0x200040000ull;
   std::uint64_t frame_id = first_frame, clock_us = first_clock;
   std::uint64_t subtitle_context_generation = 1u;
-  models::estimate_result baseline;
+  models::depth_step_result_t baseline;
   std::optional<receipt::receipt_t> owner;
   tuple_t expected;
   const auto observe = [&](ID3D11ShaderResourceView *input) {
     ASSERT_TRUE(wait_until_reusable());
     const auto request = owner ? models::make_gpu_adaptive_request(
-      frame_id, true, &*owner, baseline.publication, clock_us
-    ) : models::gpu_adaptive_reuse_request {.observation_timestamp_us = clock_us};
+                                   frame_id,
+                                   true,
+                                   &*owner,
+                                   baseline.observation.publication,
+                                   clock_us
+                                 ) :
+                                 models::gpu_adaptive_reuse_request {.observation_timestamp_us = clock_us};
     if (owner) {
       ASSERT_TRUE(request.authorize_gpu_undecided_reuse);
     }
-    const auto old_publication = baseline.publication;
+    const auto old_publication = baseline.observation.publication;
     const auto submitted = estimator.estimate_depth(input, models::input_color_space::srgb,
       frame_id, false, {}, models::depth_optional_work_mode_e::ordinary, request,
       subtitle_context_generation);
-    ASSERT_TRUE(submitted.inference_enqueued);
-    ASSERT_FALSE(submitted.gpu_undecided_transaction_enqueued);
-    ASSERT_TRUE(submitted.subtitle_ocr_inference_enqueued);
+    ASSERT_TRUE(submitted.submission.inference_enqueued);
+    ASSERT_FALSE(submitted.submission.gpu_undecided_transaction_enqueued);
+    ASSERT_TRUE(submitted.submission.subtitle_ocr_inference_enqueued);
     baseline = estimator.finish_pending_depth_for_evaluation();
-    ASSERT_TRUE(models::subtitle_evidence_is_exact_frame(baseline));
-    EXPECT_EQ(baseline.completed_frame_id, frame_id);
+    ASSERT_TRUE(models::subtitle_evidence_is_exact_frame(baseline.observation));
+    EXPECT_EQ(baseline.observation.completed_frame_id, frame_id);
     if (owner) {
       EXPECT_FALSE(estimator.publication_is_current(old_publication));
     }
-    owner = wait_for_receipt(baseline);
+    owner = wait_for_receipt(baseline.observation);
     ASSERT_TRUE(owner);
     ASSERT_EQ(owner->depth, receipt::depth_disposition_e::infer);
     ASSERT_TRUE(owner->depth_cache_authorized());
@@ -2927,7 +2927,7 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
     EXPECT_EQ(owner->depth_owner_frame_id, frame_id);
     EXPECT_EQ(owner->depth_owner_timestamp_us, clock_us);
     EXPECT_EQ(owner->subtitle_frame_id, frame_id);
-    ASSERT_TRUE(read_tuple(baseline, expected));
+    ASSERT_TRUE(read_tuple(baseline.observation, expected));
     ASSERT_EQ(expected[17u].format, DXGI_FORMAT_R32G32B32A32_FLOAT);
     EXPECT_EQ(word(expected[16u], 20u), static_cast<std::uint32_t>(clock_us));
     EXPECT_EQ(word(expected[16u], 21u), static_cast<std::uint32_t>(clock_us >> 32u));
@@ -3001,15 +3001,15 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
   const auto original_owner_frame = owner->depth_owner_frame_id;
   const auto original_owner_clock = owner->depth_owner_timestamp_us;
   const auto verify_idle_hold = [&]() {
-    const auto old_publication = baseline.publication;
+    const auto old_publication = baseline.observation.publication;
     const auto old_owner = *owner;
     const auto idle = estimator.try_finish_pending_depth_nonblocking(
       models::input_color_space::srgb, false
     );
     ASSERT_TRUE(idle.ready);
-    EXPECT_FALSE(idle.result.completed_frame_valid);
-    EXPECT_FALSE(idle.result.inference_enqueued);
-    EXPECT_FALSE(idle.result.gpu_undecided_transaction_enqueued);
+    EXPECT_FALSE(idle.result.observation.completed_frame_valid);
+    EXPECT_FALSE(idle.result.submission.inference_enqueued);
+    EXPECT_FALSE(idle.result.submission.gpu_undecided_transaction_enqueued);
     EXPECT_EQ(idle.query_count, 0u);
     const auto batch = estimator.poll_publication_receipts();
     ASSERT_FALSE(batch.failed);
@@ -3020,7 +3020,7 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
     EXPECT_EQ(batch.current_publication->subtitle_frame_id, old_owner.subtitle_frame_id);
     ASSERT_TRUE(estimator.publication_is_current(old_publication));
     tuple_t held;
-    ASSERT_TRUE(read_tuple(baseline, held));
+    ASSERT_TRUE(read_tuple(baseline.observation, held));
     for (std::size_t i = 0u; i < expected.size(); ++i) {
       SCOPED_TRACE(names[i]);
       EXPECT_EQ(held[i].dimension, expected[i].dimension);
@@ -3049,7 +3049,7 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
   ++frame_id; clock_us += 100000u;
   observe(changed_source.Get());
   ASSERT_FALSE(HasFatalFailure());
-  EXPECT_FALSE(baseline.input_domain_reset);
+  EXPECT_FALSE(baseline.completion.input_domain_reset);
   EXPECT_EQ(word(expected[12u], v2::subtitle_plane_current_slot_mask_word), subtitle_slot_mask);
   EXPECT_NE(expected[18u].bytes, old_source);
   EXPECT_EQ(feature_count(expected, *witness), 1u);
@@ -3075,26 +3075,25 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
   // must still clear mature subtitle history, skip OCR even for Dump, and publish Base exactly.
   ASSERT_TRUE(wait_until_reusable());
   ++frame_id; clock_us += 100000u;
-  const auto scope_domain = baseline.publication.domain_tag;
-  const auto disabled_request = models::make_gpu_adaptive_request(frame_id, true, &*owner,
-    baseline.publication, clock_us);
+  const auto scope_domain = baseline.observation.publication.domain_tag;
+  const auto disabled_request = models::make_gpu_adaptive_request(frame_id, true, &*owner, baseline.observation.publication, clock_us);
   ASSERT_TRUE(disabled_request.authorize_gpu_undecided_reuse);
   const auto disabled = estimator.estimate_depth(changed_source.Get(), models::input_color_space::srgb,
     frame_id, true, {}, models::depth_optional_work_mode_e::disable_subtitle, disabled_request,
     subtitle_context_generation);
-  ASSERT_TRUE(disabled.inference_enqueued);
-  EXPECT_FALSE(disabled.gpu_undecided_transaction_enqueued);
-  EXPECT_FALSE(disabled.subtitle_ocr_inference_enqueued);
+  ASSERT_TRUE(disabled.submission.inference_enqueued);
+  EXPECT_FALSE(disabled.submission.gpu_undecided_transaction_enqueued);
+  EXPECT_FALSE(disabled.submission.subtitle_ocr_inference_enqueued);
   baseline = estimator.finish_pending_depth_for_evaluation();
-  ASSERT_TRUE(baseline.completed_frame_valid);
-  EXPECT_TRUE(baseline.subtitle_work_suppressed);
-  EXPECT_FALSE(baseline.input_domain_reset);
-  EXPECT_EQ(baseline.publication.domain_tag, scope_domain);
-  EXPECT_FALSE(models::subtitle_evidence_is_exact_frame(baseline));
-  owner = wait_for_receipt(baseline);
+  ASSERT_TRUE(baseline.observation.completed_frame_valid);
+  EXPECT_TRUE(baseline.observation.subtitle_work_suppressed);
+  EXPECT_FALSE(baseline.completion.input_domain_reset);
+  EXPECT_EQ(baseline.observation.publication.domain_tag, scope_domain);
+  EXPECT_FALSE(models::subtitle_evidence_is_exact_frame(baseline.observation));
+  owner = wait_for_receipt(baseline.observation);
   ASSERT_TRUE(owner);
   EXPECT_EQ(owner->subtitle, receipt::subtitle_disposition_e::suppressed);
-  ASSERT_TRUE(read_tuple(baseline, expected));
+  ASSERT_TRUE(read_tuple(baseline.observation, expected));
   EXPECT_EQ(expected[7u].bytes, expected[8u].bytes);
   for (std::size_t index = 11u; index < expected.size(); ++index) {
     SCOPED_TRACE(names[index]);
@@ -3108,8 +3107,8 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
   ++frame_id; clock_us += 100000u;
   observe(changed_source.Get());
   ASSERT_FALSE(HasFatalFailure());
-  EXPECT_FALSE(baseline.input_domain_reset);
-  EXPECT_EQ(baseline.publication.domain_tag, scope_domain);
+  EXPECT_FALSE(baseline.completion.input_domain_reset);
+  EXPECT_EQ(baseline.observation.publication.domain_tag, scope_domain);
   EXPECT_EQ(feature_count(expected, *witness), 1u);
   EXPECT_EQ(word(expected[13u], *witness), current_pixel_support(expected, *witness));
   for (std::uint32_t count = 2u; count <= v2::subtitle_contour_history_confirmation_observations; ++count) {
@@ -3126,8 +3125,8 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
   ++frame_id; clock_us += 100000u;
   observe(changed_source.Get());
   ASSERT_FALSE(HasFatalFailure());
-  EXPECT_FALSE(baseline.input_domain_reset);
-  EXPECT_EQ(baseline.publication.domain_tag, scope_domain);
+  EXPECT_FALSE(baseline.completion.input_domain_reset);
+  EXPECT_EQ(baseline.observation.publication.domain_tag, scope_domain);
   EXPECT_EQ(feature_count(expected, *witness), 1u);
   EXPECT_EQ(word(expected[13u], *witness), current_pixel_support(expected, *witness));
 
@@ -3136,27 +3135,26 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
   // evidence can protect immediately while its diagnostic pixel history restarts.
   ASSERT_TRUE(wait_until_reusable());
   ++frame_id; clock_us += 100000u;
-  const auto old_domain = baseline.publication.domain_tag;
-  const auto reset_request = models::make_gpu_adaptive_request(frame_id, true, &*owner,
-    baseline.publication, clock_us);
+  const auto old_domain = baseline.observation.publication.domain_tag;
+  const auto reset_request = models::make_gpu_adaptive_request(frame_id, true, &*owner, baseline.observation.publication, clock_us);
   ASSERT_TRUE(reset_request.authorize_gpu_undecided_reuse);
   const auto resized = estimator.estimate_depth(larger_source.Get(), models::input_color_space::srgb,
     frame_id, false, {}, models::depth_optional_work_mode_e::ordinary, reset_request,
     subtitle_context_generation);
-  ASSERT_TRUE(resized.inference_enqueued);
-  EXPECT_FALSE(resized.gpu_undecided_transaction_enqueued);
+  ASSERT_TRUE(resized.submission.inference_enqueued);
+  EXPECT_FALSE(resized.submission.gpu_undecided_transaction_enqueued);
   baseline = estimator.finish_pending_depth_for_evaluation();
-  ASSERT_TRUE(baseline.completed_frame_valid);
-  EXPECT_TRUE(baseline.input_domain_reset);
-  EXPECT_NE(baseline.publication.domain_tag, old_domain);
-  ASSERT_TRUE(models::subtitle_evidence_is_exact_frame(baseline));
-  owner = wait_for_receipt(baseline);
+  ASSERT_TRUE(baseline.observation.completed_frame_valid);
+  EXPECT_TRUE(baseline.completion.input_domain_reset);
+  EXPECT_NE(baseline.observation.publication.domain_tag, old_domain);
+  ASSERT_TRUE(models::subtitle_evidence_is_exact_frame(baseline.observation));
+  owner = wait_for_receipt(baseline.observation);
   ASSERT_TRUE(owner);
   ASSERT_EQ(owner->depth, receipt::depth_disposition_e::infer);
   ASSERT_TRUE(owner->subtitle_is_current());
   EXPECT_EQ(owner->depth_owner_frame_id, frame_id);
   EXPECT_EQ(owner->depth_owner_timestamp_us, clock_us);
-  ASSERT_TRUE(read_tuple(baseline, expected));
+  ASSERT_TRUE(read_tuple(baseline.observation, expected));
   EXPECT_EQ(expected[18u].width, 1920u);
   EXPECT_EQ(expected[18u].height, models::subtitle_ocr_source_crop_height(1920u, 1080u));
   EXPECT_EQ(expected[24u].format, DXGI_FORMAT_R32_UINT);
@@ -3324,25 +3322,25 @@ TEST(TensorRtConditionalWrapperGpuTest, AllAuthenticatedShapesBuildAndExecute) {
         models::input_color_space::srgb,
         frame_id
       );
-      ASSERT_TRUE(submission.inference_enqueued);
-      EXPECT_FALSE(submission.gpu_undecided_transaction_enqueued);
+      ASSERT_TRUE(submission.submission.inference_enqueued);
+      EXPECT_FALSE(submission.submission.gpu_undecided_transaction_enqueued);
       const auto completed = estimator.finish_pending_depth_for_evaluation();
-      ASSERT_TRUE(completed.completed_frame_valid);
-      EXPECT_EQ(completed.completed_frame_id, frame_id);
+      ASSERT_TRUE(completed.observation.completed_frame_valid);
+      EXPECT_EQ(completed.observation.completed_frame_id, frame_id);
       const auto high_shape = models::host_sbs_convex2x_field_shape({
         shape.dav2_width,
         shape.dav2_height,
       });
       ASSERT_TRUE(high_shape);
-      EXPECT_EQ(completed.raw_width, high_shape->width);
-      EXPECT_EQ(completed.raw_height, high_shape->height);
-      EXPECT_EQ(completed.field_width, high_shape->width);
-      EXPECT_EQ(completed.field_height, high_shape->height);
-      EXPECT_TRUE(completed.field_content.full(*high_shape))
+      EXPECT_EQ(completed.observation.raw_width, high_shape->width);
+      EXPECT_EQ(completed.observation.raw_height, high_shape->height);
+      EXPECT_EQ(completed.observation.field_width, high_shape->width);
+      EXPECT_EQ(completed.observation.field_height, high_shape->height);
+      EXPECT_TRUE(completed.observation.field_content.full(*high_shape))
         << "Full-frame phone/tablet inference must not introduce tensor padding";
-      EXPECT_TRUE(completed.refined_live_geometry_active);
-      EXPECT_TRUE(models::parallax_v2_result_is_authenticated(completed));
-      EXPECT_FALSE(completed.gpu_undecided_completion);
+      EXPECT_TRUE(completed.observation.refined_live_geometry_active);
+      EXPECT_TRUE(models::parallax_v2_result_is_authenticated(completed.observation));
+      EXPECT_FALSE(completed.observation.gpu_undecided_completion);
       EXPECT_FALSE(estimator.has_terminal_failure());
     }
   }
@@ -3772,7 +3770,7 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   ASSERT_TRUE(create_field_views(770u, 434u, coarse_field_views));
 
   const auto &calibration = v2::model_calibrations.front();
-  models::estimate_result result;
+  models::depth_observation_views_t result;
   result.shadow_candidate_parallax = coarse_field_views[0];
   result.shadow_vertical_majorant = coarse_field_views[1];
   result.shadow_vertical_conditioned = coarse_field_views[2];
@@ -7134,7 +7132,7 @@ TEST(EncodedFrameBufferPoolTests, PacketDestructionReturnsStorageToPool) {
   std::vector<std::uint8_t> storage(4096, 0x3C);
   const auto capacity = storage.capacity();
   {
-    video::packet_raw_generic packet {std::move(storage), 7, false, pool};
+    video::encoded_packet_t packet {std::move(storage), 7, false, pool};
     EXPECT_EQ(packet.data_size(), 4096u);
   }
 
@@ -7171,7 +7169,7 @@ TEST(EffectiveVideoModePublisherTests, PublishesOnlyCoherentProvenPacingPairs) {
   EXPECT_EQ(pacing.framerate_millihz, 60000);
 
   // Constructing a speculative request cannot affect packet pacing. Production performs the same
-  // separation by publishing only after make_encode_device() returns a real encoder.
+  // separation by publishing only after make_encode_session() returns a ready session.
   const video::effective_video_mode_t unproven {3840, 2160, 9000, 50000};
   pacing = publisher.pacing();
   EXPECT_EQ(pacing.bitrate, 20000);
@@ -7220,60 +7218,29 @@ TEST(EffectiveVideoModePublisherTests, ProductionPublishesAfterEncoderInitializa
   ASSERT_FALSE(source.empty());
 
   const auto capture_begin = source.find("void capture_async(");
-  const auto hdr_snapshot = source.find(
-    "hdr_info_t hdr_info = std::make_unique<hdr_info_raw_t>(false);",
-    capture_begin
-  );
-  const auto hdr_device_read = source.find(
-    "colorspace_is_hdr(encode_device->colorspace)",
-    hdr_snapshot
-  );
-  const auto encoder_init = source.find(
-    "auto encode_session = make_encode_session(",
-    capture_begin
-  );
-  const auto encode_device_transfer = source.find(
-    "std::move(encode_device)",
-    encoder_init
-  );
-  const auto capture_end = source.find(
-    "\n  void capture(",
-    encode_device_transfer
-  );
-  const auto post_transfer_device_read = source.find(
-    "encode_device->",
-    encode_device_transfer
-  );
-  const auto effective_publish = source.find(
-    "config.effective_mode->publish(effective_mode);",
-    encoder_init
-  );
-  const auto completion_publish = source.find(
-    "video_mode_applied_queue->raise(video_mode_applied_t",
-    effective_publish
-  );
-  const auto hdr_publish = source.find(
-    "hdr_event->raise(std::move(hdr_info));",
-    encoder_init
-  );
   ASSERT_NE(capture_begin, std::string::npos);
-  ASSERT_NE(hdr_snapshot, std::string::npos);
-  ASSERT_NE(hdr_device_read, std::string::npos);
-  ASSERT_NE(encoder_init, std::string::npos);
-  ASSERT_NE(encode_device_transfer, std::string::npos);
+  const auto capture_end = source.find("\n  void capture(", capture_begin);
   ASSERT_NE(capture_end, std::string::npos);
+  const auto capture = source.substr(capture_begin, capture_end - capture_begin);
+  // The factory owns initialization and failure retirement. This guard covers only the live
+  // caller's publication boundary; actual factory/owner fixtures exercise readiness and ownership.
+  const auto encoder_init = capture.find("auto encode_session = make_encode_session(");
+  const auto reject_failed_session = capture.find("if (!encode_session) {", encoder_init);
+  const auto hdr_snapshot = capture.find("auto hdr_info = encode_session->hdr_info();", reject_failed_session);
+  const auto effective_publish = capture.find("config.effective_mode->publish(effective_mode);", hdr_snapshot);
+  const auto completion_publish = capture.find("config.atomic_presentation->complete(video_mode_applied_t", effective_publish);
+  const auto hdr_publish = capture.find("hdr_event->raise(std::move(hdr_info));", hdr_snapshot);
+  ASSERT_NE(hdr_snapshot, std::string::npos);
+  ASSERT_NE(encoder_init, std::string::npos);
+  ASSERT_NE(reject_failed_session, std::string::npos);
   ASSERT_NE(effective_publish, std::string::npos);
   ASSERT_NE(completion_publish, std::string::npos);
   ASSERT_NE(hdr_publish, std::string::npos);
-  EXPECT_LT(hdr_snapshot, encoder_init);
-  EXPECT_LT(hdr_device_read, encoder_init);
-  EXPECT_TRUE(
-    post_transfer_device_read == std::string::npos ||
-    post_transfer_device_read >= capture_end
-  );
-  EXPECT_LT(encoder_init, effective_publish);
+  EXPECT_LT(encoder_init, reject_failed_session);
+  EXPECT_LT(reject_failed_session, hdr_snapshot);
+  EXPECT_LT(hdr_snapshot, effective_publish);
   EXPECT_LT(effective_publish, completion_publish);
-  EXPECT_LT(encoder_init, hdr_publish);
+  EXPECT_LT(hdr_snapshot, hdr_publish);
 }
 
 TEST(AtomicPresentationOrderingTests, AppliesImmutableModeBeforeEncoderAndAcksAfterRollback) {
@@ -7289,23 +7256,26 @@ TEST(AtomicPresentationOrderingTests, AppliesImmutableModeBeforeEncoderAndAcksAf
   );
   const auto session_config = video_source.find("config_t session_config = config;", immutable_mode);
   const auto encoder_success = video_source.find("auto encode_session = make_encode_session(", session_config);
+  const auto reject_failed_session = video_source.find("if (!encode_session) {", encoder_success);
   const auto state_publish = video_source.find(
     "config.effective_mode->publish(effective_mode);",
-    encoder_success
+    reject_failed_session
   );
   const auto completion = video_source.find(
-    "video_mode_applied_queue->raise(video_mode_applied_t",
+    "config.atomic_presentation->complete(video_mode_applied_t",
     state_publish
   );
   ASSERT_NE(request_drain, std::string::npos);
   ASSERT_NE(immutable_mode, std::string::npos);
   ASSERT_NE(session_config, std::string::npos);
   ASSERT_NE(encoder_success, std::string::npos);
+  ASSERT_NE(reject_failed_session, std::string::npos);
   ASSERT_NE(state_publish, std::string::npos);
   ASSERT_NE(completion, std::string::npos);
   EXPECT_LT(immutable_mode, session_config);
   EXPECT_LT(session_config, encoder_success);
-  EXPECT_LT(encoder_success, state_publish);
+  EXPECT_LT(encoder_success, reject_failed_session);
+  EXPECT_LT(reject_failed_session, state_publish);
   EXPECT_LT(state_publish, completion);
 
   const auto rollback_state = stream_source.find("bool rollback_restored_desktop = true;");
@@ -7628,7 +7598,7 @@ TEST(EncodeWakeLifecycleSourceTests, ReplacementHoldsAPixelLessPredecessorsStart
   ASSERT_NE(retain, std::string::npos);
   EXPECT_LT(hold, retain) << "The guard reads the hold on exit.";
   const auto retain_body = encode_run_guard_body(scope, "auto retain_source = util::fail_guard(");
-  const auto handoff = retain_body.find("source.return_for_rebuild(*images, shutdown_event->peek(), reinit_event.peek(), holds_pixels);");
+  const auto handoff = retain_body.find("source.return_for_rebuild(*images, shutdown_event->peek(), generation.revoked(), holds_pixels);");
   const auto carried = retain_body.find("awaiting_desktop_after_export = !holds_pixels || startup_input_hold.active(");
   ASSERT_NE(handoff, std::string::npos);
   ASSERT_NE(carried, std::string::npos);
@@ -7694,31 +7664,32 @@ TEST(AsyncTeardownLifecycleSourceTests, DrainsTrackedOwnersBeforeProcessGlobals)
   ASSERT_FALSE(main_source.empty());
   ASSERT_FALSE(config_http.empty());
 
-  const auto reinit_wait = video_source.find("while (display_wp->use_count() != 1)");
+  const auto reinit_wait = video_source.find("while (!(returned_display = generation->retirement()->wait_for(0ms)))");
   const auto cancellation = video_source.find(
     "detail::capture_display_release_wait_cancelled(",
     reinit_wait
   );
-  const auto reinit_sleep = video_source.find("std::this_thread::sleep_for(20ms);", cancellation);
+  const auto reinit_wait_for = video_source.find("generation->retirement()->wait_for(20ms)", cancellation);
   ASSERT_NE(reinit_wait, std::string::npos);
   ASSERT_NE(cancellation, std::string::npos);
-  ASSERT_NE(reinit_sleep, std::string::npos);
-  EXPECT_LT(cancellation, reinit_sleep);
+  ASSERT_NE(reinit_wait_for, std::string::npos);
+  EXPECT_LT(cancellation, reinit_wait_for);
 
-  const auto capture_guard = video_source.find("auto capture_guard = util::fail_guard(");
-  const auto stop_images = video_source.find("images->stop();", capture_guard);
-  const auto join_capture = video_source.find("end_capture_async(capture_thread_ctx);", stop_images);
-  ASSERT_NE(capture_guard, std::string::npos);
-  ASSERT_NE(stop_images, std::string::npos);
-  ASSERT_NE(join_capture, std::string::npos);
-  EXPECT_LT(stop_images, join_capture);
+  // VideoCaptureLifecycleTest exercises the concrete capture owner's stop-before-join order.
 
   const auto encode_run = video_source.find("void encode_run(");
   const auto capture_async = video_source.find("void capture_async(", encode_run);
   ASSERT_NE(encode_run, std::string::npos);
   ASSERT_NE(capture_async, std::string::npos);
   const auto encode_scope = video_source.substr(encode_run, capture_async - encode_run);
-  EXPECT_NE(encode_scope.find("launch_async_teardown_worker(std::move(teardown))"), std::string::npos);
+  const auto retirement_guard = encode_scope.find("auto fail_guard = util::fail_guard(");
+  const auto recovery_receipt = encode_scope.find("recovery.start(std::move(*session).retire());", retirement_guard);
+  const auto retrieval_pipeline = encode_scope.find("std::optional<detail::encode_pipeline_t<encoded_frame_context_t>> pipeline;");
+  ASSERT_NE(retirement_guard, std::string::npos);
+  ASSERT_NE(recovery_receipt, std::string::npos);
+  ASSERT_NE(retrieval_pipeline, std::string::npos);
+  // Reverse local destruction drains/joins retrieval before the guard consumes the backend.
+  EXPECT_LT(retirement_guard, retrieval_pipeline);
   EXPECT_EQ(encode_scope.find(".detach()"), std::string::npos);
 
   const auto base_destructor = display.find("~d3d_base_encode_device()");
@@ -7737,11 +7708,6 @@ TEST(AsyncTeardownLifecycleSourceTests, DrainsTrackedOwnersBeforeProcessGlobals)
   EXPECT_NE(display.find("busy_retries="), std::string::npos);
   EXPECT_EQ(display.find("busy_drops="), std::string::npos)
     << "A retained source/backbuffer retry is not a dropped frame.";
-
-  const auto nvenc_destructor = display.find("~d3d_nvenc_encode_device_t() override");
-  const auto release_display = display.find("base.release_capture_display();", nvenc_destructor);
-  ASSERT_NE(nvenc_destructor, std::string::npos);
-  ASSERT_NE(release_display, std::string::npos);
 
   const auto normal_shutdown = main_source.find(
     "UI/API shutdown does not necessarily pass through the signal handler"
@@ -8458,7 +8424,7 @@ TEST(NvencBitrateReconfigureTest, FailureKeepsRequestOnExistingRebuildPath) {
     restore
   );
   const auto successful_ack = video_source.find(
-    "video_mode_applied_queue->raise(video_mode_applied_t",
+    "config.atomic_presentation->complete(video_mode_applied_t",
     driver_call
   );
   const auto commit = video_source.find("restore_for_rebuild.disable();", successful_ack);
@@ -8719,15 +8685,23 @@ TEST(CaptureBackendFailoverTest, CaptureLoopsBracketEachAttemptWithDisplayChange
   // Both capture owners sample before opening the display and after capture returns; host mode
   // changes and Windows notifications advance the same process-wide epoch.
   const auto video_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/video.cpp");
-  const auto capture_thread = video_source.find("void captureThread(");
+  const auto capture_thread = video_source.find("void capture_session_t::run()");
   ASSERT_NE(capture_thread, std::string::npos);
-  const auto initial_epoch = video_source.find("display_epoch_at_open = platf::display_change_epoch();", capture_thread);
+  const auto initial_epoch_assignment = video_source.find("display_epoch_at_open =", capture_thread);
+  const auto initial_epoch = video_source.find("platf::display_change_epoch();", initial_epoch_assignment);
   const auto initial_open = video_source.find("disp = platf::display(", capture_thread);
-  const auto reopen_epoch = video_source.find("display_epoch_at_open = platf::display_change_epoch();", initial_open);
+  const auto reopen_epoch_assignment = video_source.find("display_epoch_at_open =", initial_open);
+  const auto reopen_epoch = video_source.find("platf::display_change_epoch();", reopen_epoch_assignment);
   const auto reopen = video_source.find("reset_display(", reopen_epoch);
+  ASSERT_NE(initial_epoch_assignment, std::string::npos);
   ASSERT_NE(initial_epoch, std::string::npos);
+  ASSERT_NE(initial_open, std::string::npos);
+  ASSERT_NE(reopen_epoch_assignment, std::string::npos);
   ASSERT_NE(reopen_epoch, std::string::npos);
+  ASSERT_NE(reopen, std::string::npos);
+  EXPECT_LT(initial_epoch_assignment, initial_epoch);
   EXPECT_LT(initial_epoch, initial_open);
+  EXPECT_LT(reopen_epoch_assignment, reopen_epoch);
   EXPECT_LT(reopen_epoch, reopen);
 
   const auto display_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");
@@ -9050,17 +9024,110 @@ TEST(EncodeDimensionLimitsTest, HostSbsAndOrdinaryClampShareRuntimeCeilings) {
   EXPECT_LE(packed.height, 2800);
 }
 
-TEST(VideoPacketLifetimeTest, RetainsBroadcastStateUntilPacketIsConsumed) {
-  auto channel = std::make_shared<int>(42);
-  std::weak_ptr<int> weak_channel = channel;
-  video::packet_raw_generic packet {{0x01}, 1, true};
-  packet.channel_data = channel;
+TEST(VideoPacketLifetimeTest, QueuedPacketRetainsOriginatingPoolUntilConsumption) {
+  auto packets = std::make_shared<safe::queue_t<video::packet_t>>(video::ENCODED_PACKET_QUEUE_LIMIT);
+  std::weak_ptr<video::encoded_frame_buffer_pool_t> pool;
+  const std::uint8_t *storage = nullptr;
+  std::size_t capacity = 0;
+  {
+    auto producer_pool = std::make_shared<video::encoded_frame_buffer_pool_t>();
+    pool = producer_pool;
+    std::vector<std::uint8_t> produced(256, 0x5A);
+    storage = produced.data();
+    capacity = produced.capacity();
+    packets->raise(std::make_unique<video::encoded_packet_t>(std::move(produced), 7, true, producer_pool));
+  }
+  EXPECT_FALSE(pool.expired());
+  auto consumed = packets->pop(0ms);
+  ASSERT_TRUE(consumed);
+  packets->stop();
+  packets.reset();
+  EXPECT_EQ(consumed->data(), storage);
+  EXPECT_EQ(consumed->data_size(), 256u);
+  EXPECT_TRUE(std::all_of(consumed->data(), consumed->data() + consumed->data_size(), [](auto byte) {
+    return byte == 0x5A;
+  }));
+  auto retained_pool = pool.lock();
+  ASSERT_TRUE(retained_pool);
+  consumed.reset();
+  auto recycled = retained_pool->acquire();
+  EXPECT_TRUE(recycled.empty());
+  EXPECT_GE(recycled.capacity(), capacity);
+  retained_pool.reset();
+  EXPECT_TRUE(pool.expired());
+}
 
-  channel.reset();
-  EXPECT_FALSE(weak_channel.expired());
+TEST(VideoPacketLifetimeTest, OverflowDiscardRecyclesEveryPacketToItsOriginatingPool) {
+  constexpr auto packet_count = static_cast<std::size_t>(video::ENCODED_PACKET_QUEUE_LIMIT) + 1;
+  std::array<std::shared_ptr<video::encoded_frame_buffer_pool_t>, packet_count> pools;
+  std::array<const std::uint8_t *, packet_count> storage {};
+  std::array<std::size_t, packet_count> capacities {};
+  auto packets = std::make_shared<safe::queue_t<video::packet_t>>(video::ENCODED_PACKET_QUEUE_LIMIT);
+  const auto make_packet = [&](std::size_t index) {
+    pools[index] = std::make_shared<video::encoded_frame_buffer_pool_t>();
+    std::vector<std::uint8_t> produced(256 + index * 64, static_cast<std::uint8_t>(index + 1));
+    storage[index] = produced.data();
+    capacities[index] = produced.capacity();
+    return std::make_unique<video::encoded_packet_t>(std::move(produced), index + 1, false, pools[index]);
+  };
+  for (std::size_t index = 0; index < video::ENCODED_PACKET_QUEUE_LIMIT; ++index) {
+    packets->raise(make_packet(index));
+  }
 
-  packet.channel_data.reset();
-  EXPECT_TRUE(weak_channel.expired());
+  // The rejected temporary is destroyed at this statement's end, like a discarded producer packet.
+  const auto result = packets->raise_with_overflow_policy(false, make_packet(packet_count - 1));
+  EXPECT_FALSE(result.queued);
+  EXPECT_EQ(result.dropped, video::ENCODED_PACKET_QUEUE_LIMIT);
+  EXPECT_TRUE(packets->running());
+  EXPECT_FALSE(packets->peek());
+  EXPECT_FALSE(packets->pop(0ms));
+  packets.reset();
+
+  for (std::size_t index = 0; index < pools.size(); ++index) {
+    SCOPED_TRACE(index);
+    auto recycled = pools[index]->acquire();
+    EXPECT_TRUE(recycled.empty());
+    EXPECT_EQ(recycled.data(), storage[index]);
+    EXPECT_EQ(recycled.capacity(), capacities[index]);
+    const auto duplicate = pools[index]->acquire();
+    EXPECT_TRUE(duplicate.empty());
+    EXPECT_EQ(duplicate.capacity(), 0u);
+  }
+}
+
+TEST(VideoPacketLifetimeTest, StoppedNonemptyQueueRetainsPacketsUntilQueueDestruction) {
+  std::array<std::shared_ptr<video::encoded_frame_buffer_pool_t>, 2> pools;
+  std::array<const std::uint8_t *, 2> storage {};
+  std::array<std::size_t, 2> capacities {};
+  auto packets = std::make_shared<safe::queue_t<video::packet_t>>(video::ENCODED_PACKET_QUEUE_LIMIT);
+  for (std::size_t index = 0; index < pools.size(); ++index) {
+    pools[index] = std::make_shared<video::encoded_frame_buffer_pool_t>();
+    std::vector<std::uint8_t> produced(384 + index * 64, static_cast<std::uint8_t>(index + 1));
+    storage[index] = produced.data();
+    capacities[index] = produced.capacity();
+    packets->raise(std::make_unique<video::encoded_packet_t>(std::move(produced), index + 1, true, pools[index]));
+  }
+  ASSERT_TRUE(packets->peek());
+  packets->stop();
+  EXPECT_FALSE(packets->running());
+  EXPECT_FALSE(packets->pop(0ms));
+  for (const auto &pool : pools) {
+    const auto premature = pool->acquire();
+    EXPECT_TRUE(premature.empty());
+    EXPECT_EQ(premature.capacity(), 0u);
+  }
+
+  packets.reset();
+  for (std::size_t index = 0; index < pools.size(); ++index) {
+    SCOPED_TRACE(index);
+    auto recycled = pools[index]->acquire();
+    EXPECT_TRUE(recycled.empty());
+    EXPECT_EQ(recycled.data(), storage[index]);
+    EXPECT_EQ(recycled.capacity(), capacities[index]);
+    const auto duplicate = pools[index]->acquire();
+    EXPECT_TRUE(duplicate.empty());
+    EXPECT_EQ(duplicate.capacity(), 0u);
+  }
 }
 
 TEST(EncodePipelineWiringTest, ExitsRecoveryAndInvalidationKeepTheirOneAtATimeGuarantees) {

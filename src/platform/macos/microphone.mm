@@ -18,7 +18,7 @@ namespace platf {
       [av_audio_capture release];
     }
 
-    capture_e sample(std::vector<float> &sample_in) override {
+    capture_e sample(std::span<float> sample_in) override {
       auto sample_size = sample_in.size();
 
       uint32_t length = 0;
@@ -76,11 +76,6 @@ namespace platf {
       }
 
       return mic;
-    }
-
-    bool is_sink_available(const std::string &sink) override {
-      BOOST_LOG(warning) << "audio_control_t::is_sink_available() unimplemented: "sv << sink;
-      return true;
     }
 
     std::optional<sink_t> sink_info() override {

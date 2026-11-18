@@ -1443,6 +1443,7 @@ class GeneratedContractWriteTests(unittest.TestCase):
                 "_write_current_stroke_math_mirrors": lambda check: True,
                 "_write_current_outline_runtime_pins": lambda check: True,
                 "_write_current_background_runtime_pin": lambda check: True,
+                "_write_shared_ui_warp_runtime_pin": lambda check: True,
                 "validate_renderer_source_closure_pins": lambda: None,
                 "load_contract": lambda *args, **kwargs: {},
                 "render_cpp": lambda contract: "// C++ caf\u00e9\n",
@@ -1455,6 +1456,16 @@ class GeneratedContractWriteTests(unittest.TestCase):
             patches.enter_context(mock.patch.object(
                 shader_generator, "load_manifest", side_effect=lambda: copy.deepcopy(groups)))
             patches.enter_context(mock.patch.object(shader_generator, "generate", return_value=True))
+            write_output = shader_generator._write_utf8_if_changed
+
+            def write_temporary_output(path, content):
+                self.assertTrue(
+                    path.resolve().is_relative_to(root.resolve()),
+                    f"generator output escaped temporary fixture: {path}")
+                return write_output(path, content)
+
+            patches.enter_context(mock.patch.object(
+                shader_generator, "_write_utf8_if_changed", side_effect=write_temporary_output))
             refresh = ["--refresh-shader-identity", "--manifest", str(manifest)]
             self.assertEqual(generator.main(refresh), 0)
             paths = (manifest, cpp, *hlsl, *assertions)

@@ -631,7 +631,7 @@ namespace rtsp_stream {
         // Accepted sockets retain the launch object after it leaves launch_event. Release an
         // untransferred HTTP lease here so a silent peer cannot block offline work forever.
         discarded->pending_live_gpu_lease.reset();
-        BOOST_LOG(debug) << "Event timeout: "sv << discarded->unique_id;
+        BOOST_LOG(debug) << "Event timeout: "sv << discarded->display_context->unique_id;
       }
     }
 
@@ -1432,7 +1432,8 @@ namespace rtsp_stream {
       };
 
       config.audio.channels = required_int(detail::announce_int_field::audio_channels, "x-nv-audio.surround.numChannels"sv);
-      config.audio.mask = required_int(detail::announce_int_field::audio_channel_mask, "x-nv-audio.surround.channelMask"sv);
+      // The negotiated profile owns channel mapping; still validate the required wire field.
+      required_int(detail::announce_int_field::audio_channel_mask, "x-nv-audio.surround.channelMask"sv);
       config.audio.packetDuration = required_int(detail::announce_int_field::audio_packet_duration, "x-nv-aqos.packetDuration"sv);
 
       config.audio.flags[audio::config_t::HIGH_QUALITY] =
@@ -1527,14 +1528,14 @@ namespace rtsp_stream {
       if (required_int(detail::announce_int_field::binary_option, "x-ss-video[0].chromaSamplingType"sv) != 0) {
         throw std::invalid_argument("x-ss-video[0].chromaSamplingType requires 4:2:0");
       }
-      if (session.fps <= 0 || session.fps > 1000000) {
+      if (session.display_context->fps <= 0 || session.display_context->fps > 1000000) {
         throw std::invalid_argument("launch session frame rate");
       }
 
       if (config.monitor.framerateX100 > 0) {
         config.monitor.encodingFramerate = config.monitor.framerateX100 * 10;
       } else {
-        config.monitor.encodingFramerate = session.fps;
+        config.monitor.encodingFramerate = session.display_context->fps;
       }
 
       // When fractional refresh rate requested from client side, it should be well above 1000fps
@@ -1543,7 +1544,7 @@ namespace rtsp_stream {
         config.monitor.framerate = std::round((float) config.monitor.framerate / 1000);
       }
 
-      config.monitor.sbs_mode = session.sbs_mode;
+      config.monitor.sbs_mode = session.display_context->sbs_mode;
       config.monitor.stream_gamma = config.monitor.stream_gamma_supported ?
                                       session.stream_gamma :
                                       video::stream_gamma_mode_e::windows_default;
@@ -1580,7 +1581,7 @@ namespace rtsp_stream {
       BOOST_LOG(info) << "Host Streaming bitrate is [" << configuredBitrateKbps << "kbps]";
 
       // Preserve the requested bitrate budget when Artemis uses a Warp frame-rate multiplier.
-      const auto warp_factor = detail::calculate_warp_bitrate_factor(config.monitor.framerate, session.fps);
+      const auto warp_factor = detail::calculate_warp_bitrate_factor(config.monitor.framerate, session.display_context->fps);
       if (warp_factor >= 2) {
         configuredBitrateKbps *= warp_factor;
         BOOST_LOG(info) << "Warp factor [" << warp_factor << "] engaged";
@@ -1676,6 +1677,19 @@ namespace rtsp_stream {
 
     respond(sock, session, &option, 200, "OK", req->sequenceNumber, {});
   }
+
+#if defined(SUNSHINE_TESTS) && defined(_WIN32)
+  void invoke_stale_announce_for_test(tcp::socket &socket, launch_session_t &launch, std::string_view payload) {
+    // A revoked record cannot pass the real claim below, even if a caller still owns a socket.
+    // Refuse every other state before parsing so this fixture can never allocate/start a stream.
+    if (launch.reservation() != launch_reservation_state_e::revoked) {
+      throw std::invalid_argument("The inert ANNOUNCE fixture requires a revoked launch");
+    }
+    msg_t request {new RTSP_MESSAGE {}};
+    createRtspRequest(request.get(), nullptr, 0, const_cast<char *>("ANNOUNCE"), const_cast<char *>("rtsp://127.0.0.1/stream"), const_cast<char *>("RTSP/1.0"), 7, nullptr, const_cast<char *>(payload.data()), static_cast<int>(payload.size()));
+    cmd_announce(&server, socket, launch, std::move(request));
+  }
+#endif
 
   void cmd_play(rtsp_server_t *server, tcp::socket &sock, launch_session_t &session, msg_t &&req) {
     OPTION_ITEM option {};
