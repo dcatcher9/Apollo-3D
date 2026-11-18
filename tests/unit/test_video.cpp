@@ -4676,10 +4676,10 @@ TEST(ParallaxV2ContractTest, GpuTimerKeepsEveryNotReadyTimestampPending) {
   }
   EXPECT_EQ(nonflushing_queries, 7u);
 
-  const auto copy_function = display.find("bool copy_matched_frame(");
+  const auto prepare_function = display.find("bool prepare_matched_frame(");
   const auto copy_start = display.find(
     "mark_sbs_matched_copy_start(gpu_timer);",
-    copy_function
+    prepare_function
   );
   const auto private_copy = display.find(
     "device_ctx->CopyResource(slot.texture.get(), source);",
@@ -4689,7 +4689,7 @@ TEST(ParallaxV2ContractTest, GpuTimerKeepsEveryNotReadyTimestampPending) {
     "mark_sbs_matched_copy_end(gpu_timer, true);",
     private_copy
   );
-  ASSERT_NE(copy_function, std::string::npos);
+  ASSERT_NE(prepare_function, std::string::npos);
   ASSERT_NE(copy_start, std::string::npos);
   ASSERT_NE(private_copy, std::string::npos);
   ASSERT_NE(copy_end, std::string::npos);
@@ -6541,7 +6541,7 @@ TEST(DirectxShaderSourceTest, VideoRoiSamplesRetainedSourceAndCopiesOnlyForDump)
     std::string::npos
   );
   const auto select_begin = display.find("    void select_depth_input_region(");
-  const auto select_end = display.find("    bool copy_matched_frame(", select_begin);
+  const auto select_end = display.find("    bool prepare_matched_frame(", select_begin);
   ASSERT_NE(select_begin, std::string::npos);
   ASSERT_NE(select_end, std::string::npos);
   const auto selection = display.substr(select_begin, select_end - select_begin);
@@ -7063,23 +7063,25 @@ TEST(DirectxShaderSourceTest, AdaptiveReuseUsesExactCurrentPublicationAndActualD
   const auto receipt_poll = display.find("depth_estimator->poll_publication_receipts()");
   const auto early_poll = display.find("try_finish_pending_depth_nonblocking(", receipt_poll);
   const auto admission = display.find("const bool cached_geometry_render_allowed =", early_poll);
-  const auto private_copy = display.find("copy_matched_frame(", admission);
-  const auto request = display.find("models::make_gpu_adaptive_request(", private_copy);
-  const auto late_poll = display.find("consume_publications(true);", private_copy);
-  const auto candidate = display.find("gpu_undecided_candidate_matches(", private_copy);
+  const auto matched_source = display.find("prepare_matched_frame(", admission);
+  const auto source_prepared = display.find("if (matched_source_prepared)", matched_source);
+  const auto request = display.find("models::make_gpu_adaptive_request(", source_prepared);
+  const auto late_poll = display.find("consume_publications(true);", source_prepared);
+  const auto candidate = display.find("gpu_undecided_candidate_matches(", source_prepared);
   const auto enqueue = display.find("auto submitted = depth_estimator->estimate_depth(", request);
   ASSERT_NE(receipt_poll, std::string::npos);
   ASSERT_NE(early_poll, std::string::npos);
   ASSERT_NE(admission, std::string::npos);
-  ASSERT_NE(private_copy, std::string::npos);
+  ASSERT_NE(matched_source, std::string::npos);
+  ASSERT_NE(source_prepared, std::string::npos);
   ASSERT_NE(request, std::string::npos);
   ASSERT_NE(late_poll, std::string::npos);
   ASSERT_NE(candidate, std::string::npos);
   ASSERT_NE(enqueue, std::string::npos);
   EXPECT_LT(receipt_poll, early_poll);  // Drain before normalization can replace borrowed fields.
   EXPECT_LT(early_poll, admission);
-  EXPECT_LT(private_copy, request);    // Recheck authority after the private color copy.
-  EXPECT_LT(private_copy, late_poll);
+  EXPECT_LT(matched_source, source_prepared);  // Secure the source and recheck authority first.
+  EXPECT_LT(source_prepared, late_poll);
   EXPECT_LT(late_poll, candidate);
   EXPECT_LT(candidate, request);
   const auto receipt_body = display.substr(receipt_poll, early_poll - receipt_poll);
@@ -7089,7 +7091,7 @@ TEST(DirectxShaderSourceTest, AdaptiveReuseUsesExactCurrentPublicationAndActualD
   EXPECT_NE(receipt_body.find("receipt, latest_v2_lineage.estimate.publication"), std::string::npos);
   EXPECT_EQ(receipt_body.find("sleep"), std::string::npos);
   EXPECT_EQ(receipt_body.find("Flush("), std::string::npos);
-  const auto authorization = display.substr(private_copy, enqueue - private_copy);
+  const auto authorization = display.substr(source_prepared, enqueue - source_prepared);
   EXPECT_NE(authorization.find("gpu_undecided_candidate_matches("), std::string::npos);
   EXPECT_NE(authorization.find("models::depth_optional_work_allows_gpu_undecided("), std::string::npos);
   EXPECT_NE(authorization.find("!matched_inference_pending_at_entry && !any_pending_slot"), std::string::npos);

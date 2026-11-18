@@ -1491,14 +1491,42 @@ namespace platf::dxgi {
           } else {
             sbs_dumper.cancel_pending_request();
           }
+          // Only a pending inference may keep a capture image between conversions. Inside this
+          // call the completed source stays alive through its last shader or dump read.
+          auto release_completed_capture_images = util::fail_guard([this]() {
+            for (auto &slot : matched_frame_slots) {
+              if (!slot.pending) {
+                slot.release_capture_image();
+              }
+            }
+          });
+          std::optional<detail::keyed_mutex_lock_t<IDXGIKeyedMutex>> prior_capture_lock;
+          const auto pending_it = std::find_if(
+            matched_frame_slots.begin(), matched_frame_slots.end(),
+            [](const matched_frame_slot_t &slot) { return slot.pending; }
+          );
+          bool pending_source_readable = true;
+          if (pending_it != matched_frame_slots.end() && pending_it->capture_mutex &&
+              pending_it->capture_mutex != img_ctx->encoder_mutex.get()) {
+            // The current image's key is already held. A prior image is pinned against
+            // recycling, but still needs its own key before postprocessing can bind its SRV.
+            prior_capture_lock.emplace(pending_it->capture_mutex);
+            const auto status = prior_capture_lock->lock(0, 0);
+            if (status != S_OK && status != WAIT_TIMEOUT) {
+              BOOST_LOG(error) << "Failed to acquire pending Host SBS texture mutex [0x"sv
+                               << util::hex(status).to_string_view() << ']';
+              return -1;
+            }
+            pending_source_readable = status == S_OK;
+          }
           // Stable tensor copies are inserted into the same D3D command stream before the current
           // preprocess. Skip whole-frame performance publication for an explicit dump frame so
           // diagnostic work cannot appear as a production regression.
           auto *gpu_timer =
             perf && !snapshot_debug_inputs ? begin_sbs_gpu_timer() : nullptr;
 
-          // Production uses bounded matched pairing: infer asynchronously from a private color
-          // slot, then warp only its completion. The exact DDup reuse exception below can prove
+          // Production uses bounded matched pairing: retain the exact capture image for
+          // asynchronous inference, then warp only its completion. The DDup reuse exception can prove
           // either an identical full desktop-content timestamp or an exact ROI untouched by every
           // dirty/move record since the accepted crop. It still fresh-warps current color.
           const auto input_color_space = input_is_linear ?
@@ -1524,11 +1552,11 @@ namespace platf::dxgi {
           // conversion, not merely when TensorRT can accept a new matched frame. Before then
           // there is no ROI completion/cache to revoke, so synchronous USER32/DWM work has no
           // consumer. A focus transition between accepted inferences still revokes authority.
-          live_window_authority_observation_t pre_copy_authority;
+          live_window_authority_observation_t initial_source_authority;
           D3D11_TEXTURE2D_DESC live_source_desc {};
           img_ctx->encoder_texture->GetDesc(&live_source_desc);
           if (detail::host_sbs_window_authority_observation_needed(depth_estimator != nullptr, models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer))) {
-            pre_copy_authority = observe_live_window_authority(
+            initial_source_authority = observe_live_window_authority(
               live_source_desc,
               current_content_timestamp
             );
@@ -1778,14 +1806,7 @@ namespace platf::dxgi {
             depth_estimator &&
             models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer)
           ) {
-            auto pending_it = std::find_if(
-              matched_frame_slots.begin(),
-              matched_frame_slots.end(),
-              [](const matched_frame_slot_t &slot) {
-                return slot.pending;
-              }
-            );
-            if (pending_it != matched_frame_slots.end()) {
+            if (pending_it != matched_frame_slots.end() && pending_source_readable) {
               prior_poll_plan = detail::host_sbs_same_frame_poll_plan(
                 true, snapshot_debug_inputs, next_encode_target, std::chrono::steady_clock::now()
               );
@@ -1799,8 +1820,8 @@ namespace platf::dxgi {
                 );
               if (polled.wait_attempted) {
                 // C's admission must see authority sampled after the possible B wait.
-                pre_copy_authority = observe_live_window_authority(
-                  live_source_desc, current_content_timestamp, &pre_copy_authority.foreground
+                initial_source_authority = observe_live_window_authority(
+                  live_source_desc, current_content_timestamp, &initial_source_authority.foreground
                 );
               }
               if (polled.ready) {
@@ -2008,7 +2029,7 @@ namespace platf::dxgi {
               mark_sbs_matched_copy_end(gpu_timer, false);
             } else if (retained_source_pending_slot) {
               mark_sbs_matched_copy_end(gpu_timer, false);
-            } else if (unchanged_input_pending_slot) {
+            } else if (unchanged_input_pending_slot && pending_source_readable) {
               // Never enqueue an input already represented by the sole pending inference. This is
               // either a DDup content-clock duplicate or a changed desktop whose entire damage
               // history stayed outside the exact accepted ROI. Poll once without waiting so a
@@ -2101,25 +2122,24 @@ namespace platf::dxgi {
               matched_candidate_slot = available_matched_slot(
                 completion_finalized_before_admission ? matched_render_slot : nullptr
               );
-              // Readiness is checked before the full-resolution private-slot copy. When TensorRT is
-              // still using the previous matched frame, the output is repeated without spending a
-              // D3D11 CopyResource on a source frame that cannot be enqueued.
+              // Only a candidate the estimator can accept reserves a matched source.
               const bool estimator_ready =
                 matched_candidate_slot && depth_estimator->can_accept_frame();
-              const bool matched_copy_submitted =
+              const bool matched_source_prepared =
                 estimator_ready &&
-                copy_matched_frame(
-                  img_ctx->encoder_texture.get(),
+                prepare_matched_frame(
+                  *img_ctx,
+                  live_source_desc,
                   *matched_candidate_slot,
                   frame_id,
                   input_color_space,
                   current_source_timestamp,
                   current_content_timestamp,
                   current_ddup_damage,
-                  pre_copy_authority,
+                  initial_source_authority,
                   gpu_timer
                 );
-              if (!matched_copy_submitted) {
+              if (!matched_source_prepared) {
                 // Every timing slot needs a complete timestamp tuple. A skipped/failed copy gets
                 // adjacent markers and publishes no matched_frame_copy_gpu sample.
                 mark_sbs_matched_copy_end(gpu_timer, false);
@@ -2136,7 +2156,7 @@ namespace platf::dxgi {
                   interactive_move_size_observed
                 )
               ) {
-                // copy_matched_frame() performs a second live authority observation. If that
+                // prepare_matched_frame() performs a second live authority observation. If that
                 // closes a route race after the early completion was accepted, revoke its cache
                 // and delivery now. A route mismatch cannot restore publication authority.
                 latest_v2_lineage.reset();
@@ -2145,8 +2165,8 @@ namespace platf::dxgi {
                 render_input_srv = img_ctx->encoder_input_res.get();
                 completion_finalized_before_admission = false;
               }
-              if (matched_copy_submitted) {
-                // B's final event may have completed during ordinary route/copy work. Give it
+              if (matched_source_prepared) {
+                // B's final event may have completed during ordinary source preparation. Give it
                 // one nonblocking opportunity before forming C's adaptive proof against owner A.
                 consume_publications(true);
                 const bool known_publication_at_admission = latest_v2_lineage.known_depth() &&
@@ -2761,7 +2781,7 @@ namespace platf::dxgi {
             matched_presentation_cache.source_matches(current_source_timestamp);
           // Packed-presentation retention is deliberately weaker than reusable V2 lineage: it
           // may replay only the already-rendered pixels. Recheck the live transfer/source domain
-          // here even though copy_matched_frame() also invalidates mismatched domains, so no route
+          // here even though prepare_matched_frame() also invalidates mismatched domains, so no route
           // or reset race can turn presentation continuity into geometry authority.
           const bool packed_presentation_route_matches =
             matched_presentation_cache.route_matches(
@@ -2926,7 +2946,7 @@ namespace platf::dxgi {
             }
           } else {
             // Before the first matched completion, provide a flat current-frame SBS image. An
-            // ordinary completion renders its private matched color; an authorized cache reuse
+            // ordinary completion renders its matched color; an authorized cache reuse
             // deliberately renders current color/cursor with authenticated cached geometry.
             if (!matched_render_slot && !queued_geometry_selected) {
               handoff.reset();
@@ -3384,9 +3404,13 @@ namespace platf::dxgi {
             final_sbs_texture = sbs_intermediate_texture.get();
             sbs_intermediate_is_linear = render_input_is_linear;
             final_sbs_is_linear = render_input_is_linear;
-            // The successful recorder's colour SRV is authoritative, including a rejected
-            // queued draw that was replaced with current-C flat while a B slot still exists.
-            const bool actual_current_colour = draw_command.shader_resources[0] == img_ctx->encoder_input_res.get();
+            // A matched capture can alias the current SRV even when the presentation has no
+            // timestamp. Keep the matched frame's identity in that case. A rejected queued
+            // draw explicitly replaces its operands with current flat colour.
+            const bool matched_capture_draw = draw_source_slot && draw_source_slot->capture_image &&
+                                              !queued_attempt_failed_flat;
+            const bool actual_current_colour = !matched_capture_draw &&
+                                                draw_command.shader_resources[0] == img_ctx->encoder_input_res.get();
             const auto pixel_source_frame_id = actual_current_colour ? frame_id : queued_geometry_selected && !queued_attempt_failed_flat ? queued_geometry_slot->frame_id :
                                                matched_render_slot && !cached_current_color_warp &&
                                                    !same_source(matched_render_slot->source_timestamp, current_source_timestamp) ?
@@ -4755,7 +4779,13 @@ namespace platf::dxgi {
       models::host_subtitle_context::presentation_authority_t presentation_authority_;
     };
 
+    struct encoder_img_ctx_t;
+
     struct matched_frame_slot_t {
+      // The pool may recycle only unreferenced images. This pin also keeps the encoder
+      // context mapped, so its keyed mutex survives until the matched draw is submitted.
+      std::shared_ptr<const platf::img_t> capture_image;
+      IDXGIKeyedMutex *capture_mutex = nullptr;
       texture2d_t texture;
       shader_res_t srv;
       std::uint64_t frame_id = 0;
@@ -4804,6 +4834,15 @@ namespace platf::dxgi {
 
       ID3D11ShaderResourceView *analysis_input_srv() noexcept {
         return srv.get();
+      }
+
+      void release_capture_image() noexcept {
+        if (capture_image) {
+          srv.reset();
+          texture.reset();
+          capture_mutex = nullptr;
+          capture_image.reset();
+        }
       }
     };
 
@@ -5051,6 +5090,7 @@ namespace platf::dxgi {
       matched_frame_slot_t &destination,
       const matched_frame_slot_t &source
     ) {
+      destination.release_capture_image();
       destination.texture.reset();
       destination.srv.reset();
       destination.frame_id = source.frame_id;
@@ -5162,7 +5202,7 @@ namespace platf::dxgi {
       temporal_current_source=temporal_source_ledger.observe(in);
       if(temporal_current_source.valid()){temporal_previous_damage=damage;temporal_previous_cursor=cursor;temporal_previous_source=source;temporal_previous_content=content;}
     }
-    models::host_sbs_temporal_source_bridge::certificate_t freeze_temporal_source_on_copy(
+    models::host_sbs_temporal_source_bridge::certificate_t freeze_temporal_source(
       const matched_frame_slot_t &slot,const D3D11_TEXTURE2D_DESC &desc) {
       const auto d=temporal_domain_for_slot(slot,desc);
       if(!slot.subtitle_context_eligible||!d.valid()){temporal_source_ledger.uncertain_interval();temporal_source_domain_active=false;return {};}
@@ -5392,7 +5432,7 @@ namespace platf::dxgi {
       // Retain observation views and diagnostic status only. Repeated presentation cannot
       // replay a submission or a completion event because neither belongs to this cache.
       latest_v2_lineage.status = status;
-      // The cache renders current color, never the old private color copy. Retain only the scalar
+      // The cache renders current color, independently of the retained matched image. Retain only the scalar
       // attribution needed by the V2 renderer; matched slots own move-only D3D resources.
       copy_matched_frame_attribution(latest_v2_lineage.slot, slot);
       latest_v2_lineage.source_width = completed_source_desc.Width;
@@ -5522,7 +5562,7 @@ namespace platf::dxgi {
       const matched_frame_slot_t *reserved_render_slot = nullptr
     ) {
       for (auto &slot : matched_frame_slots) {
-        if (!slot.pending && &slot != reserved_render_slot) {
+        if (!slot.pending && !slot.capture_image && &slot != reserved_render_slot) {
           return &slot;
         }
       }
@@ -6567,91 +6607,100 @@ namespace platf::dxgi {
       last_window_region_mapping_status = slot.window_region_mapping_status;
     }
 
-    bool copy_matched_frame(
-      ID3D11Texture2D *source,
+    bool ensure_private_matched_texture(
+      matched_frame_slot_t &slot,
+      const D3D11_TEXTURE2D_DESC &source_desc
+    ) {
+      if (slot.srv && matched_source_signature_matches(slot, source_desc)) {
+        return true;
+      }
+
+      auto private_desc = source_desc;
+      private_desc.Usage = D3D11_USAGE_DEFAULT;
+      private_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+      private_desc.CPUAccessFlags = 0;
+      private_desc.MiscFlags = 0;
+
+      texture2d_t texture;
+      auto status = device->CreateTexture2D(&private_desc, nullptr, &texture);
+      if (FAILED(status)) {
+        BOOST_LOG(error) << "Failed to create matched-frame texture [0x"sv
+                         << util::hex(status).to_string_view() << ']';
+        return false;
+      }
+
+      shader_res_t srv;
+      status = device->CreateShaderResourceView(texture.get(), nullptr, &srv);
+      if (FAILED(status)) {
+        BOOST_LOG(error) << "Failed to create matched-frame resource view [0x"sv
+                         << util::hex(status).to_string_view() << ']';
+        return false;
+      }
+      slot.texture = std::move(texture);
+      slot.srv = std::move(srv);
+      return true;
+    }
+
+    bool prepare_matched_frame(
+      encoder_img_ctx_t &image_context,
+      const D3D11_TEXTURE2D_DESC &source_desc,
       matched_frame_slot_t &slot,
       std::uint64_t frame_id,
       models::input_color_space color_space,
       std::optional<std::chrono::steady_clock::time_point> source_timestamp,
       std::optional<std::chrono::steady_clock::time_point> content_timestamp,
       std::optional<detail::ddup_damage_snapshot_t> ddup_damage,
-      const live_window_authority_observation_t &pre_copy_authority,
+      const live_window_authority_observation_t &initial_source_authority,
       sbs_gpu_timer_slot_t *gpu_timer
     ) {
-      if (!source) {
+      auto *source = image_context.encoder_texture.get();
+      auto *input = image_context.encoder_input_res.get();
+      if (!source || !input) {
         return false;
       }
 
-      D3D11_TEXTURE2D_DESC source_desc {};
-      source->GetDesc(&source_desc);
-      bool recreate = !slot.texture || !slot.srv;
-      if (!recreate) {
-        D3D11_TEXTURE2D_DESC slot_desc {};
-        slot.texture->GetDesc(&slot_desc);
-        recreate = slot_desc.Width != source_desc.Width ||
-                   slot_desc.Height != source_desc.Height ||
-                   slot_desc.MipLevels != source_desc.MipLevels ||
-                   slot_desc.ArraySize != source_desc.ArraySize ||
-                   slot_desc.Format != source_desc.Format ||
-                   slot_desc.SampleDesc.Count != source_desc.SampleDesc.Count ||
-                   slot_desc.SampleDesc.Quality != source_desc.SampleDesc.Quality;
+      const bool borrow_capture = !queued_research && (!probe_context || probe_context->borrow_matched_capture);
+      if (borrow_capture) {
+        slot.capture_image = image_context.img_weak.lock();
       }
-
-      if (recreate) {
-        auto private_desc = source_desc;
-        private_desc.Usage = D3D11_USAGE_DEFAULT;
-        private_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        private_desc.CPUAccessFlags = 0;
-        private_desc.MiscFlags = 0;
-
-        texture2d_t texture;
-        auto status = device->CreateTexture2D(&private_desc, nullptr, &texture);
-        if (FAILED(status)) {
-          BOOST_LOG(error) << "Failed to create matched-frame texture [0x"sv
-                           << util::hex(status).to_string_view() << ']';
-          return false;
-        }
-
-        shader_res_t srv;
-        status = device->CreateShaderResourceView(texture.get(), nullptr, &srv);
-        if (FAILED(status)) {
-          BOOST_LOG(error) << "Failed to create matched-frame resource view [0x"sv
-                           << util::hex(status).to_string_view() << ']';
-          return false;
-        }
-        slot.texture = std::move(texture);
-        slot.srv = std::move(srv);
+      if (slot.capture_image) {
+        source->AddRef();
+        input->AddRef();
+        slot.texture.reset(source);
+        slot.srv.reset(input);
+        slot.capture_mutex = image_context.encoder_mutex.get();
+      } else if (!ensure_private_matched_texture(slot, source_desc)) {
+        return false;
       }
 
       const auto captured_at = std::chrono::steady_clock::now();
-      mark_sbs_matched_copy_start(gpu_timer);
-      device_ctx->CopyResource(slot.texture.get(), source);
-      mark_sbs_matched_copy_end(gpu_timer, true);
-      // Recheck after the copy as the causal authority for this exact matched image. The earlier
-      // per-convert observation breaks continuity across busy periods; this second observation
-      // closes a focus/move/resize race between admission and CopyResource. During an already
-      // authenticated native move/resize, ROI authority has been withdrawn and this frame is
-      // forced to full-source analysis, so repeating the synchronous USER32/DWM guard cannot
-      // improve attribution. For an ordinary positive observation, revalidate only that exact
-      // whole-client identity and geometry, so a provisional content-child candidate cannot cause
-      // a second census in this call. An already authenticated structural child retains the full
-      // census/revalidation because its uniqueness proof includes every eligible sibling.
-      const bool pre_copy_interactive_move_size =
-        pre_copy_authority.foreground.status ==
+      if (slot.capture_image) {
+        mark_sbs_matched_copy_end(gpu_timer, false);
+      } else {
+        mark_sbs_matched_copy_start(gpu_timer);
+        device_ctx->CopyResource(slot.texture.get(), source);
+        mark_sbs_matched_copy_end(gpu_timer, true);
+      }
+      // Recheck live authority after securing the exact source. During an authenticated native
+      // move/resize the existing observation already forces full-frame analysis. Ordinary
+      // whole-client observations revalidate their exact identity and geometry; structural
+      // child authority still requires the full census to revalidate sibling uniqueness.
+      const bool initial_interactive_move_size =
+        initial_source_authority.foreground.status ==
         foreground_window::status_e::interactive_move_size;
-      const auto copied_authority = pre_copy_interactive_move_size ?
-                                      pre_copy_authority :
+      const auto matched_authority = initial_interactive_move_size ?
+                                      initial_source_authority :
                                       observe_live_window_authority(
                                         source_desc,
                                         content_timestamp,
-                                        &pre_copy_authority.foreground
+                                        &initial_source_authority.foreground
                                       );
-      const auto &copied_foreground_snapshot = copied_authority.foreground;
+      const auto &matched_foreground_snapshot = matched_authority.foreground;
       // A pre-drag ROI completion may still own the estimator after USER32 stops producing desktop
       // damage. Full-source analysis is independent of window geometry, so submit these exact
       // retained pixels once without letting post-drag ROI causality block completion retirement.
       const bool preexisting_force_full_source =
-        depth_authority_reprocess_pending || pre_copy_interactive_move_size;
+        depth_authority_reprocess_pending || initial_interactive_move_size;
       const auto attributed_at = std::chrono::steady_clock::now();
       slot.frame_id = frame_id;
       slot.color_space = color_space;
@@ -6666,7 +6715,7 @@ namespace platf::dxgi {
       slot.window_region_observer_status = "not-observed";
       slot.window_region_mapping_status = "not-mapped";
       slot.live_browser_geometry_valid_since = {};
-      if (pre_copy_interactive_move_size) {
+      if (initial_interactive_move_size) {
         slot.window_region_observer_status = foreground_window::status_name(
           foreground_window::status_e::interactive_move_size
         );
@@ -6677,14 +6726,14 @@ namespace platf::dxgi {
       const bool foreground_causal_wait =
         live_foreground_region &&
         foreground_window::requires_full_source_causal_fallback(
-          copied_foreground_snapshot,
+          matched_foreground_snapshot,
           *live_foreground_region,
           content_timestamp
         );
       const bool force_full_source =
         preexisting_force_full_source || foreground_causal_wait;
       if (foreground_causal_wait) {
-        // The copied desktop content predates this same-size programmatic move. Desktop
+        // The captured desktop content predates this same-size programmatic move. Desktop
         // Duplication may never publish another content timestamp after the move, so submit this
         // exact frame through full-source V2 instead of starving depth indefinitely.
         slot.window_region_observer_status = "causal-wait-full-source";
@@ -6694,7 +6743,7 @@ namespace platf::dxgi {
                               std::optional<sbs_debug::window_region_snapshot> {} :
                               capture_browser_window_region(
                                 source_desc,
-                                copied_authority.browser_snapshot,
+                                matched_authority.browser_snapshot,
                                 frame_id,
                                 content_timestamp,
                                 captured_at,
@@ -6730,7 +6779,7 @@ namespace platf::dxgi {
           frame_id,
           content_timestamp,
           attributed_at,
-          copied_foreground_snapshot,
+          matched_foreground_snapshot,
           foreground_observer_status,
           foreground_mapping_status
         );
@@ -6759,7 +6808,7 @@ namespace platf::dxgi {
           frame_id,
           content_timestamp,
           attributed_at,
-          copied_foreground_snapshot,
+          matched_foreground_snapshot,
           foreground_observer_status,
           foreground_mapping_status
         );
@@ -6780,23 +6829,23 @@ namespace platf::dxgi {
         slot.window_region &&
             slot.window_region->authority_kind ==
               sbs_debug::window_region_authority_kind_e::chromium_video ?
-          copied_authority.browser_authority_epoch :
+          matched_authority.browser_authority_epoch :
           0u;
       if (slot.live_browser_authority_generation != 0u && video_dom_lease) {
-        if (copied_authority.browser_authority) {
+        if (matched_authority.browser_authority) {
           slot.live_browser_screen_left =
-            copied_authority.browser_authority->screen_rect.left;
+            matched_authority.browser_authority->screen_rect.left;
           slot.live_browser_screen_top =
-            copied_authority.browser_authority->screen_rect.top;
+            matched_authority.browser_authority->screen_rect.top;
           slot.live_browser_screen_right =
-            copied_authority.browser_authority->screen_rect.right;
+            matched_authority.browser_authority->screen_rect.right;
           slot.live_browser_screen_bottom =
-            copied_authority.browser_authority->screen_rect.bottom;
+            matched_authority.browser_authority->screen_rect.bottom;
           slot.live_browser_geometry_valid_since =
-            copied_authority.browser_authority->geometry_valid_since;
+            matched_authority.browser_authority->geometry_valid_since;
           slot.live_browser_authority_class =
             video_dom::geometry_authority_class(
-              copied_authority.browser_authority->status
+              matched_authority.browser_authority->status
             );
         }
       }
@@ -6807,7 +6856,7 @@ namespace platf::dxgi {
         authority_generation(live_window_authority);
       slot.observed_region_authority_generation =
         authority_generation(live_foreground_region);
-      slot.observed_browser_authority_epoch = copied_authority.browser_authority_epoch;
+      slot.observed_browser_authority_epoch = matched_authority.browser_authority_epoch;
       slot.observed_interactive_move_size = interactive_move_size_observed;
       slot.subtitle_context_generation = subtitle_context.generation();
       slot.subtitle_context_suppression_eligible =
@@ -6853,7 +6902,7 @@ namespace platf::dxgi {
         slot.unchanged_roi_proof.reset();
       }
       slot.temporal_source={};
-      if(temporal_source_bridge_enabled)slot.temporal_source=freeze_temporal_source_on_copy(slot,source_desc);
+      if(temporal_source_bridge_enabled)slot.temporal_source=freeze_temporal_source(slot,source_desc);
       return true;
     }
 

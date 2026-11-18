@@ -43,6 +43,7 @@ namespace platf::dxgi::actual_converter_probe_v1 {
     std::uint32_t width = 0, height = 0;
     std::uint64_t instance = 0;
     // This is a declared synthetic scheduling domain, NEVER actual Win32 video eligibility.
+    bool borrow_matched_capture = false;
   };
   enum class event_e : std::uint32_t { admission, queue_begin, queued, ack, draw, packed_repeat, convert_end };
   // PRIVATE observed actual draw bindings; this carries no new UI/EMPTY authority.

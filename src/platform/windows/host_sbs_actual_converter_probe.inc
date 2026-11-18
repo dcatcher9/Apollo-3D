@@ -126,6 +126,8 @@ namespace actual_converter_probe_v1 {
       std::array<ComPtr<ID3D11ShaderResourceView>,5> old_working;
       int armed=-1;bool prepared=false,pending_arrival=false,selected_enabled=false,selected_outline=false,background_enabled=false;
       std::array<ComPtr<ID3D11Buffer>,3> queued_B_constant_aliases;
+      std::uint64_t borrowed_draw_conversion = 0;
+      std::array<stage_t, 2> borrowed_draw_sources;
       void capture(std::size_t phase,const event_t &e) noexcept {
         if(!prepared||captured[phase]){capture_fault=true;return;}
         auto copy=e;
@@ -156,6 +158,15 @@ namespace actual_converter_probe_v1 {
       }
       static void record(void *state,const event_t &e) noexcept {
         auto &s=*static_cast<recorder_t*>(state);if(s.count==s.events.size()){s.overflow=true;return;}s.events[s.count++]=e;
+        if (s.borrowed_draw_conversion == e.conversion && e.kind == event_e::draw) {
+          // The converter still owns both keys here. COM references alone do not pin the pixels.
+          const auto matched = resource(e.views[0].Get());
+          const auto current = resource(e.current_input.Get());
+          if (!s.borrowed_draw_sources[0].copy(s.ctx, matched.Get()) ||
+              !s.borrowed_draw_sources[1].copy(s.ctx, current.Get())) {
+            s.capture_fault = true;
+          }
+        }
         if(e.kind==event_e::draw&&e.publication_current&&!e.queued)for(std::size_t i=7;i<12;++i)s.old_working[i-7]=e.views[i];
         if(s.armed==1&&e.kind==event_e::queue_begin)s.capture(1,e);
         if(s.armed==1&&e.kind==event_e::draw&&e.queued)s.capture(2,e);
@@ -203,7 +214,10 @@ namespace actual_converter_probe_v1 {
     json result,adapter_entries=json::array(),selected_adapter=nullptr,capture_device_adapter=nullptr,converter_device_adapter=nullptr;bool created=false,released_before_readback=false;
     const auto *native_nv12_opt_in = std::getenv("SUNSHINE_TEST_HOST_SBS_NATIVE_NV12");
     const bool native_nv12 = r.packed_continuity && native_nv12_opt_in && std::string_view {native_nv12_opt_in} == "1";
-    const auto root=r.packed_continuity?r.output/(native_nv12 ? "actual-converter-packed-continuity-nv12-v1" : "actual-converter-packed-continuity-v1"):
+    const auto *recycle_opt_in = std::getenv("SUNSHINE_TEST_HOST_SBS_BORROWED_CAPTURE_RECYCLE");
+    const bool borrowed_recycle = r.packed_continuity && recycle_opt_in && std::string_view {recycle_opt_in} == "1";
+    const auto root=borrowed_recycle?r.output/"actual-converter-borrowed-capture-recycle-v1":
+      r.packed_continuity?r.output/(native_nv12 ? "actual-converter-packed-continuity-nv12-v1" : "actual-converter-packed-continuity-v1"):
       r.output/(pending_arrival?"trajectory2-pending-C":"trajectory1-B-parity")/"actual-converter-rgb-probe-v1";
     const auto release=[&](){if(est)est->release_joined_completion_gate_for_benchmark();release_after_draw_query.store(true);if(releaser.joinable()){releaser.request_stop();releaser.join();}};
     try {
@@ -255,7 +269,7 @@ namespace actual_converter_probe_v1 {
       capture_device_adapter=actual_device_adapter(display->device.get());
       require(converter.init(display,adapter.Get(),pix_fmt_e::nv12)==0,"Real converter init failed");
       converter_device_adapter=actual_device_adapter(converter.device.get());
-      const context_t context{w,h,0x4356524700000001ull};converter.probe_context=&context;
+      const context_t context{w,h,0x4356524700000001ull,r.packed_continuity};converter.probe_context=&context;
       auto settings=r.settings;settings.reshade=false; // only authored source, not an external provider
       D3D11_TEXTURE2D_DESC td {};
       td.Width = 2u * w;
@@ -284,18 +298,19 @@ namespace actual_converter_probe_v1 {
       if(r.queued)require(converter.initialize_queued_renderer_for_instance(),"Per-instance queued resources unavailable");
       models::joined_completion_gate_benchmark::configuration_t gate;gate.enabled=true;
       gate.placement=r.packed_continuity?models::joined_completion_gate_benchmark::placement_e::after_interop_unmaps:models::joined_completion_gate_benchmark::placement_e::before_interop_unmaps;
-      gate.target_frame_id=3;gate.hold_after_callback_enter_ms=r.packed_continuity?350u:120u;gate.callback_safety_timeout_ms=500;
+      gate.target_frame_id=3;gate.hold_after_callback_enter_ms=r.packed_continuity&&!borrowed_recycle?350u:120u;gate.callback_safety_timeout_ms=500;
       require(est->configure_joined_completion_gate_for_benchmark(gate),"Pre-input gate configuration failed");
       if (!native_nv12) {
         hr(converter.device->CreateTexture2D(&td,nullptr,&target),"RGB target failed");hr(converter.device->CreateRenderTargetView(target.Get(),nullptr,&target_rtv),"RGB target RTV failed");
       }
       for(std::size_t i=0;i<3;++i){images[i]=display->alloc_img();require(images[i]&&display->complete_img(images[i].get(),false)==0,"Actual shared image allocation failed");auto &img=static_cast<img_d3d_t&>(*images[i]);texture_lock_helper lock(img.capture_mutex.get());require(lock.lock(),"Capture keyed mutex failed");display->device_ctx->UpdateSubresource(img.capture_texture.get(),0,nullptr,payload(r.frames[i]),w*pixel_bytes,0);display->device_ctx->Flush();img.blank=false;}
-      // Open every existing shared-image binding and allocate the existing TWO private slots
-      // before input1. Allocation establishes no frame, source clock, pending or publication.
+      // Open every shared image before input1 without establishing frame or publication ownership.
       for(const auto &image:images){auto &img=static_cast<img_d3d_t&>(*image);auto [it,inserted]=converter.img_ctx_map.try_emplace(img.id);(void)inserted;require(converter.initialize_image_context(img,it->second)==0,"Shared image preparation failed");}
-      D3D11_TEXTURE2D_DESC private_desc{};static_cast<img_d3d_t&>(*images[0]).capture_texture->GetDesc(&private_desc);
-      private_desc.Usage=D3D11_USAGE_DEFAULT;private_desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;private_desc.MiscFlags=0;private_desc.CPUAccessFlags=0;
-      for(auto &slot:converter.matched_frame_slots){hr(converter.device->CreateTexture2D(&private_desc,nullptr,&slot.texture),"Private slot preparation failed");hr(converter.device->CreateShaderResourceView(slot.texture.get(),nullptr,&slot.srv),"Private slot SRV failed");}
+      if (!context.borrow_matched_capture) {
+        D3D11_TEXTURE2D_DESC private_desc{};static_cast<img_d3d_t&>(*images[0]).capture_texture->GetDesc(&private_desc);
+        private_desc.Usage=D3D11_USAGE_DEFAULT;private_desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;private_desc.MiscFlags=0;private_desc.CPUAccessFlags=0;
+        for(auto &slot:converter.matched_frame_slots){hr(converter.device->CreateTexture2D(&private_desc,nullptr,&slot.texture),"Private slot preparation failed");hr(converter.device->CreateShaderResourceView(slot.texture.get(),nullptr,&slot.srv),"Private slot SRV failed");}
+      }
       records.ctx=converter.device_ctx.get();converter.probe_observer={&records,&recorder_t::record};
       const auto stamp=[&](std::size_t i){const auto t=clock_t::now();images[i]->frame_timestamp=t;images[i]->content_timestamp=t;};
       const auto convert = [&](std::size_t i) {
@@ -329,6 +344,76 @@ namespace actual_converter_probe_v1 {
         // Only source arrival and the real joined-event gate are controlled. Every output below
         // comes from the actual converter observer and ordered copies of its output target.
         require(r.frames[0].bgra!=r.frames[1].bgra,"A and B must have distinct authenticated source bytes");
+        const auto no_private_matched_texture = [&]() {
+          return std::none_of(converter.matched_frame_slots.begin(), converter.matched_frame_slots.end(),
+            [](const auto &slot) { return slot.texture && !slot.capture_image; });
+        };
+        require(a->views[0].Get() == a->current_input.Get() && images[0].use_count() == 1 &&
+          no_private_matched_texture(), "Completed A did not render from and release its shared capture image");
+        auto &b_image = static_cast<img_d3d_t &>(*images[1]);
+        auto &b_context = converter.img_ctx_map.at(b_image.id);
+        const auto free_pool_image = [&]() {
+          return std::find_if(images.begin(), images.end(), [](const auto &image) { return image.use_count() == 1; });
+        };
+        const auto check_pending_b_pin = [&]() {
+          const auto slot = std::find_if(converter.matched_frame_slots.begin(), converter.matched_frame_slots.end(),
+            [](const auto &candidate) { return candidate.pending && candidate.frame_id == 3u; });
+          require(slot != converter.matched_frame_slots.end() &&
+            slot->capture_image.get() == images[1].get() &&
+            slot->texture.get() == b_context.encoder_texture.get() &&
+            slot->srv.get() == b_context.encoder_input_res.get() && images[1].use_count() > 1 &&
+            no_private_matched_texture(), "Pending B did not pin the exact shared capture source");
+          const auto reserve_a = images[0];
+          require(free_pool_image() == images.begin() + 2,
+            "Three-image pool did not skip the pinned B source for C");
+        };
+        const auto check_released_b_pin = [&]() {
+          const auto reserve_a = images[0];
+          const auto reserve_c = images[2];
+          require(free_pool_image() == images.begin() + 1 &&
+            std::none_of(converter.matched_frame_slots.begin(), converter.matched_frame_slots.end(),
+              [&](const auto &slot) { return slot.capture_image.get() == images[1].get(); }) &&
+            no_private_matched_texture(), "Completed B did not release its exact capture image for recycle");
+        };
+        const auto wait_for_b_gate_entry = [&]() {
+          const auto entered_deadline=clock_t::now()+std::chrono::milliseconds(100);
+          for(;;) {
+            const auto status=est->joined_completion_gate_status_for_benchmark();
+            require(status&&!status->released&&clock_t::now()<entered_deadline,"No bounded held B callback window");
+            if(status->callback_entered) return;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          }
+        };
+        const auto real_pending = [&]() {
+          detail::keyed_mutex_lock_t lease {b_context.encoder_mutex.get()};
+          require(lease.lock(0, 100) == S_OK, "Diagnostic B completion query could not acquire its source key");
+          const auto pending=est->try_finish_pending_depth_nonblocking(models::input_color_space::srgb,false);
+          const auto held=est->joined_completion_gate_status_for_benchmark();
+          require(!pending.ready&&held&&held->queued&&held->callback_entered&&!held->released&&
+            !held->cancelled&&!held->callback_timed_out&&!held->callback_entry_timed_out&&
+            held->configuration.placement==models::joined_completion_gate_benchmark::placement_e::after_interop_unmaps&&
+            held->configuration.hold_after_callback_enter_ms==gate.hold_after_callback_enter_ms&&
+            held->configuration.callback_safety_timeout_ms==gate.callback_safety_timeout_ms&&
+            held->last_actual_event_query==CUDA_ERROR_NOT_READY&&held->actual_not_ready_queries>0u,
+            "B is not an actually queried held root; no manufactured pending result");
+          require(std::count_if(converter.matched_frame_slots.begin(),converter.matched_frame_slots.end(),
+            [](const auto &s){return s.pending&&s.frame_id==3u;})==1,"Held B lost its sole pending slot");
+          check_pending_b_pin();
+          return *held;
+        };
+        const auto last_outcome=[&](std::uint64_t conversion) {
+          for(std::size_t i=records.count;i>0;--i) {
+            const auto &e=records.events[i-1u];
+            if(e.conversion==conversion&&(e.kind==event_e::packed_repeat||e.kind==event_e::convert_end))return e;
+          }
+          throw std::runtime_error("Actual converter outcome missing");
+        };
+        stage_t recycled_b_source;
+        if (borrowed_recycle) {
+          records.borrowed_draw_sources[0].prepare(converter.device.get(), b_context.encoder_texture.get());
+          records.borrowed_draw_sources[1].prepare(converter.device.get(), b_context.encoder_texture.get());
+          recycled_b_source.prepare(converter.device.get(), b_context.encoder_texture.get());
+        }
         std::array<stage_t, 6u> outputs;
         const auto output_count = native_nv12 ? outputs.size() : outputs.size() - 1u;
         for (std::size_t i = 0; i < output_count; ++i) {
@@ -361,26 +446,6 @@ namespace actual_converter_probe_v1 {
         const auto idle_begin=clock_t::now();
         std::this_thread::sleep_until(idle_begin+std::chrono::milliseconds(300));
         const auto idle_end=clock_t::now();
-        const auto last_outcome=[&](std::uint64_t conversion) {
-          for(std::size_t i=records.count;i>0;--i) {
-            const auto &e=records.events[i-1u];
-            if(e.conversion==conversion&&(e.kind==event_e::packed_repeat||e.kind==event_e::convert_end))return e;
-          }
-          throw std::runtime_error("Actual converter outcome missing");
-        };
-        const auto real_pending=[&]() {
-          const auto pending=est->try_finish_pending_depth_nonblocking(models::input_color_space::srgb,false);
-          const auto held=est->joined_completion_gate_status_for_benchmark();
-          require(!pending.ready&&held&&held->queued&&held->callback_entered&&!held->released&&
-            !held->cancelled&&!held->callback_timed_out&&!held->callback_entry_timed_out&&
-            held->configuration.placement==models::joined_completion_gate_benchmark::placement_e::after_interop_unmaps&&
-            held->configuration.hold_after_callback_enter_ms==350u&&held->configuration.callback_safety_timeout_ms==500u&&
-            held->last_actual_event_query==CUDA_ERROR_NOT_READY&&held->actual_not_ready_queries>0u,
-            "B is not an actually queried held root; no manufactured pending result");
-          require(std::count_if(converter.matched_frame_slots.begin(),converter.matched_frame_slots.end(),
-            [](const auto &s){return s.pending&&s.frame_id==3u;})==1,"Held B lost its sole pending slot");
-          return *held;
-        };
         stamp(1);
         const auto b_begin=clock_t::now();
         convert(1);
@@ -411,14 +476,121 @@ namespace actual_converter_probe_v1 {
         }
         snapshot_target(1, "Actual before-cap packed target copy failed");
         converter.device_ctx->Flush();
-        const auto entered_deadline=clock_t::now()+std::chrono::milliseconds(100);
-        for(;;) {
-          const auto status=est->joined_completion_gate_status_for_benchmark();
-          require(status&&!status->released&&clock_t::now()<entered_deadline,"No bounded held B callback window");
-          if(status->callback_entered)break;
-          std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
+        wait_for_b_gate_entry();
         const auto held_before=real_pending();
+        if (borrowed_recycle) {
+          auto &c_image = static_cast<img_d3d_t &>(*images[2]);
+          const auto &c_context = converter.img_ctx_map.at(c_image.id);
+          const auto upload_a_pixels = [&](img_d3d_t &image) {
+            detail::keyed_mutex_lock_t lease {image.capture_mutex.get()};
+            require(lease.lock(0, 100) == S_OK, "Reusable capture image key unavailable");
+            display->device_ctx->UpdateSubresource(image.capture_texture.get(), 0, nullptr, payload(r.frames[0]), w * pixel_bytes, 0);
+            display->device_ctx->Flush();
+          };
+          // Frame 3 of the Continuity recipe can be byte-identical to B. Reuse archived A
+          // bytes on the available third image C so recycling is observable and reproducible.
+          upload_a_pixels(c_image);
+          stamp(2);
+          wait_ready(); // Query-only preflight. The converter still owns the sole B completion.
+          const auto released = est->joined_completion_gate_status_for_benchmark();
+          require(released && released->released && released->callback_exited && !released->cancelled &&
+            !released->callback_timed_out && !released->callback_entry_timed_out,
+            "B did not become ready after its genuine held root");
+          const auto timeout_conversion = converter.sbs_frame_sequence + 1u;
+          {
+            detail::keyed_mutex_lock_t contention {b_image.capture_mutex.get()};
+            require(contention.lock(0, 100) == S_OK, "Could not induce prior-image key contention");
+            convert(2);
+          }
+          const auto key_timeout = last_outcome(timeout_conversion);
+          const auto still_unconsumed = est->joined_completion_gate_status_for_benchmark();
+          require(still_unconsumed && still_unconsumed->actual_event_queries == released->actual_event_queries &&
+            key_timeout.repeat && !key_timeout.flat && key_timeout.watermark_after == key_timeout.watermark_before &&
+            key_timeout.current_input.Get() == c_context.encoder_input_res.get(),
+            "Unavailable B key did not leave the ready completion pending and repeat packed A");
+          check_pending_b_pin();
+
+          const auto recovery_conversion = converter.sbs_frame_sequence + 1u;
+          records.borrowed_draw_conversion = recovery_conversion;
+          convert(2); // Current C retains its real capture stamp; the available prior source is B.
+          records.borrowed_draw_conversion = 0;
+          const auto recovered = last_outcome(recovery_conversion);
+          const auto *draw = records.last_draw();
+          require(draw && draw->conversion == recovery_conversion && draw->publication_current && !draw->flat && !draw->queued &&
+            draw->publication.frame_id == 3u && draw->actual_draw_pixel_source == 3u &&
+            draw->source_stamp_ticks == before.current_source_stamp_ticks &&
+            draw->current_source_stamp_ticks == images[2]->frame_timestamp->time_since_epoch().count() &&
+            draw->current_source_stamp_ticks != draw->source_stamp_ticks &&
+            draw->views[0].Get() == b_context.encoder_input_res.get() &&
+            draw->current_input.Get() == c_context.encoder_input_res.get() &&
+            recovered.publication_current && !recovered.repeat && recovered.query_observed &&
+            recovered.literal_last_query_result == CUDA_SUCCESS && recovered.literal_ready_count > 0u,
+            "Late C conversion did not render the genuine B completion from its separately keyed source");
+          check_released_b_pin();
+          snapshot_target(3, "Actual late B target copy failed");
+
+          // Only after the actual matched draw and its keyed diagnostic copies are recorded can
+          // the capture pool recycle B. Mutate that same shared surface before mapping any data.
+          upload_a_pixels(b_image);
+          stamp(1);
+          {
+            detail::keyed_mutex_lock_t lease {b_context.encoder_mutex.get()};
+            require(lease.lock(0, 100) == S_OK &&
+              recycled_b_source.copy(converter.device_ctx.get(), b_context.encoder_texture.get()),
+              "Recycled B shared source readback unavailable");
+            converter.device_ctx->Flush();
+          }
+          for (auto &source : records.borrowed_draw_sources) source.read(converter.device_ctx.get());
+          recycled_b_source.read(converter.device_ctx.get());
+          outputs[3].read(converter.device_ctx.get());
+          const auto matches_frame = [&](const stage_t &stage, std::size_t index) {
+            return stage.copied && stage.bytes.size() == payload_size(r.frames[index]) &&
+              std::memcmp(stage.bytes.data(), payload(r.frames[index]), stage.bytes.size()) == 0;
+          };
+          const auto &matched_b = records.borrowed_draw_sources[0];
+          const auto &current_c = records.borrowed_draw_sources[1];
+          require(matches_frame(matched_b, 1) && matches_frame(current_c, 0) && matches_frame(recycled_b_source, 0) &&
+            matched_b.actual_resource_address == recycled_b_source.actual_resource_address &&
+            matched_b.actual_resource_address != current_c.actual_resource_address &&
+            (matched_b.source_misc & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX) &&
+            (current_c.source_misc & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX),
+            "Keyed snapshots did not retain literal B pixels across C arrival and B recycle");
+          json artifacts = json::array();
+          const auto save = [&](const char *name, const stage_t &stage) {
+            const auto path = root / name;
+            std::ofstream file(path, std::ios::binary);
+            file.write(stage.bytes.data(), static_cast<std::streamsize>(stage.bytes.size()));
+            file.flush();
+            require(file.good(), "Borrowed capture readback artifact write failed");
+            file.close();
+            auto artifact = binding(path);
+            artifact["role"] = name;
+            artifact["resource_address"] = stage.actual_resource_address;
+            artifacts.push_back(std::move(artifact));
+          };
+          save("late-draw-matched-B.bgra8", matched_b);
+          save("late-draw-current-C.bgra8", current_c);
+          save("recycled-B.bgra8", recycled_b_source);
+          save(native_nv12 ? "late-draw-output.nv12" : "late-draw-output.bgra8", outputs[3]);
+          // A fresh C may have entered the sole slot during B's successful recovery. Retire
+          // it on the same immutable C source before the diagnostic converter is destroyed.
+          if (std::any_of(converter.matched_frame_slots.begin(), converter.matched_frame_slots.end(),
+              [](const auto &slot) { return slot.pending; })) {
+            wait_ready();
+            convert(2);
+            require(std::none_of(converter.matched_frame_slots.begin(), converter.matched_frame_slots.end(),
+              [](const auto &slot) { return slot.pending; }), "Final C still retains a pending capture source");
+          }
+          write_json(root / "result.json", {{"schema",1},{"status","PASS_FUNCTIONAL_ACTUAL_CONVERTER_BORROWED_CAPTURE_RECYCLE"},
+            {"context_scope","synthetic-video-scheduling-only; not actual Win32 eligibility"}, {"source_inputs",sources},
+            {"capture_device_adapter",capture_device_adapter},{"converter_device_adapter",converter_device_adapter},
+            {"target_format",static_cast<UINT>(td.Format)},{"target_width",td.Width},{"target_height",td.Height},
+            {"B_pending_pinned_source",true},{"B_key_timeout_preserved_ready_owner",true},{"B_released_and_recycled",true},
+            {"C_and_recycled_B_use_archived_A_payload",true},{"private_matched_texture_allocated",false},
+            {"before_cap",event_json(before)},{"key_timeout",event_json(key_timeout)},{"late_draw",event_json(*draw)},
+            {"gate_held",gate_json(held_before)},{"gate_released",gate_json(released)},{"outputs",artifacts}});
+          converter.depth_estimator.reset();est=nullptr;return 0;
+        }
         std::uint64_t after_cap_conversion = 4u;
         if (native_nv12) {
           // Force the same input-cache invalidation used by stream gamma. The dirty input is
@@ -492,6 +664,9 @@ namespace actual_converter_probe_v1 {
           recovered.query_observed&&recovered.literal_last_query_result==CUDA_SUCCESS&&
           recovered.literal_ready_count>0u&&recovered.gate_released,
           "Exact held B did not genuinely ACK and recover without restamping/resubmission");
+        require(recovered.views[0].Get() == b_context.encoder_input_res.get(),
+          "Recovered B did not draw from its pinned shared source");
+        check_released_b_pin();
         require(std::count_if(records.events.begin(),records.events.begin()+records.count,
           [](const auto &e){return e.kind==event_e::admission;})==2,
           "Static/pending/recovery deliveries unexpectedly admitted another root");
@@ -553,6 +728,9 @@ namespace actual_converter_probe_v1 {
           {"selected_adapter",selected_adapter},{"capture_device_adapter",capture_device_adapter},{"converter_device_adapter",converter_device_adapter},
           {"target_width",td.Width},{"target_height",td.Height},{"target_format",static_cast<UINT>(td.Format)},
           {"outputs",artifacts},{"trace",trace},{"readbacks_only_after_release",true},
+          {"borrowed_capture",{{"A_draw_used_shared_source",true},{"B_pending_pinned_source",true},
+            {"pool_skipped_B_while_pending",true},{"B_recovered_from_shared_source",true},
+            {"pool_can_recycle_B_after_draw",true},{"private_matched_texture_allocated",false}}},
           {"no_CPU_warp_or_fabricated_completion_or_output_substitution",true},
           {"live_classification_encoder_presenter_latency_or_FPS_qualified",false}};
         if (native_nv12) {

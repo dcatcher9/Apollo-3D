@@ -291,9 +291,8 @@ the curve, reference white, live acknowledgement, and optional luma-MRT selectio
 The model and the rendered color have different color requirements:
 
 - BGRA8 SDR capture is interpreted as display-referred sRGB for model preprocessing.
-- FP16 scRGB HDR capture remains linear Rec.709/scRGB for rendering. The inference copy applies a
-  luminance-preserving absolute tone map and the sRGB transfer needed by DAV2; it does not clamp
-  highlights to `1.0` before inference.
+- FP16 scRGB HDR capture remains linear Rec.709/scRGB for rendering. DAV2 preprocessing applies
+  the luminance-preserving absolute tone map and sRGB transfer to the full highlight range.
 - The stereo warp applies no transfer function, gamut conversion, sharpening, or post-warp blur.
   Each eye takes one sample from the original source texture in its native linear or encoded domain.
 - The encoder conversion stage produces SDR YUV or Rec.2100 PQ and carries the validated HDR
@@ -1950,6 +1949,16 @@ later usable frame resumes the same coordinate, but outside the exact DDup proof
 pairs old per-pixel geometry with new color. Only an analysis-domain reset clears the adaptive
 geometry controller.
 
+Ordinary local and remote Host SBS use the encoder's shared view of the exact committed capture
+image for matched preprocessing and rendering. The current capture key covers reads issued in that
+conversion. An accepted root that is still pending at return retains its capture image, keeping that
+pool slot unavailable for reuse. At most one image persists this way. The local three-image pool can
+hold the pending image, the latest retained input, and the next capture. The converter releases a
+completed image at the end of its conversion after recording any matched draw and dump reads.
+Completed lineage retains the authenticated observation, and the packed presentation cache retains
+its rendered pixels independently of the capture image. Research paths that require private
+sources and inputs without a stable shared image owner use a private matched copy.
+
 Desktop Duplication has one explicit current-color reuse exception with two conservative
 proofs. For full-source V2, when its non-null desktop-content timestamp is unchanged, the source
 format/extent/transfer and complete live authority epoch still match, and an authenticated
@@ -2001,10 +2010,9 @@ or matched slot on those transitions. A reuse may poll the one matching pending 
 authenticated cached field against the current captured color, but it does not create a new depth
 observation, relabel the geometry completion, or advance normalization, camera, OCR, or
 UIP4 state. Any pending completion advances those states at most once under its original exact-frame
-identity. Every failed proof returns through the normal matched copy and
-enqueue gate rather than using an unbounded GPU wait. A newly accepted frame may still use the
-bounded same-frame completion query below. Current composited color is still warped on each reused
-delivery; the separate `250 ms` changing-source presentation fallback is unchanged.
+identity. A failed proof returns to the ordinary matched-frame admission gate. A newly accepted
+frame can use the bounded same-frame completion query below. Each reused delivery warps current
+composited color. The separate changing-source presentation fallback has a `250 ms` limit.
 
 If A was analyzed, changed color B reused A, and the source then stays at B, the current publication
 still names A as the depth and subtitle owner. Exact continuity from B can retain that authenticated
@@ -2511,12 +2519,17 @@ own nonblocking D3D event and is never awaited by this loop. If readiness-event 
 same-frame completion safely downgrades to one full-stream nonblocking status query and does not
 spend the bounded-wait budget.
 
-At the start of a later conversion, any still-owned root receives an immediate completion query
-*before* current DDup/adaptive admission is derived. It may repeat within the same cadence reserve
-and absolute wait cap. After a yielded wait, foreground/browser authority is freshly observed before
-current authority snapshots and temporal-source observation are derived. A ready completion is
-matched to its exact private color slot and authenticated. Ready completed-publication receipts are
-also consumed before admission; only an exact current receipt can make conditional output reusable.
+At the start of a later conversion, a pending shared image reuses the current capture key if both
+roles name the same texture. For a different texture, the converter tries its encoder-side key
+with zero timeout before polling, since completion can issue postprocess reads of that view.
+A key timeout defers the pending root's completion queries and new admissions for that conversion.
+The ordinary packed-repeat and current-flat policies still choose the output. A readable root
+receives an immediate completion query *before* current DDup/adaptive admission is derived. The
+query may repeat within the cadence reserve and absolute wait cap. After a yielded wait, the
+converter observes foreground/browser authority again before deriving current snapshots and the
+temporal-source observation. A ready completion is authenticated against its exact matched color
+slot. The converter also consumes ready completed-publication receipts before admission. Conditional
+output becomes reusable only with an exact current receipt.
 Admission is recomputed from that post-completion state. The completed render slot is reserved for
 the current delivery while a distinct free slot may own the newly submitted frame. A prior root B
 and a newly submitted C in one conversion share the first poll plan's absolute deadline: C can use
@@ -2527,7 +2540,7 @@ readiness still grants no reusable D3D receipt. The query budget bounds polling,
 postprocess, draw or encoder time; live onset/removal latency remains separately measured.
 
 Ordinary and queued rendering share one source-conversion watermark. Once newer current colour C
-has actually been drawn, including flat identity, an older private B whose source differs from the
+has actually been drawn, including flat identity, an older matched B whose source differs from the
 current capture cannot replace it. B's completion is still consumed normally; rejecting its old
 pixels does not cancel inference or supply current EMPTY evidence. Proven same-source redelivery
 remains allowed, and authenticated cached geometry drawn with current colour records the current
@@ -2606,10 +2619,10 @@ The same cadence line labels its denominator as `conversions` (not encoded packe
 each converted SBS output into `warped_new/packed_repeat/flat`. `flat_pending_miss` is a narrower
 subset, so any same-frame busy resultâ€”cadence-ineligible, eligible timeout, or event-unavailableâ€”
 that used the presentation-only cache is distinguishable from a route/reset invalidation that had
-to render identity. GPU timing brackets `matched_frame_copy_gpu` immediately around the private
-`CopyResource`, outside completed-depth postprocess, and `sbs_warp_gpu` covers either the
-authenticated reprojection or the current-frame flat-identity fullscreen pass. Packed repeats
-submit neither fullscreen pass nor a matched-frame copy. On the optional HDR P010 MRT path,
+to render identity. `matched_frame_copy_gpu` measures only a private matched-frame `CopyResource`
+when one is issued, outside completed-depth postprocess. `sbs_warp_gpu` covers the authenticated
+reprojection or current-frame flat-identity fullscreen pass. Packed repeats skip those passes
+and the matched-frame copy. On the optional HDR P010 MRT path,
 `sbs_warp_gpu` includes fused luma production and `sbs_output_gpu` contains only the unchanged
 chroma pass; the cadence line reports `p010_y_mrt` so sums can be compared without mistaking that
 timer-boundary shift for a regression.
@@ -2835,12 +2848,10 @@ a renderer descendant is not made an independent authority. A positive selection
 same winning HWND and rectangle in complete censuses from two consecutive samples, followed by one
 final identity/geometry recheck. The censuses must be no more than 250 ms apart. The first sample
 remains provisional, so each sample performs at most one complete child census instead of repeating
-synchronous USER32 traversal. When the pre-copy authority is the whole client, the matched-frame
-post-copy race closure revalidates only that exact root identity and geometry and does not perform a
-second child census after the pixels have already been retained. An authenticated structural child
-still requires a complete post-copy census and revalidation, preserving its proof that no competing
-eligible sibling appeared during the copy race. Negative census results alone are retained for 100
-ms; that can only delay acquiring the child optimization and cannot grant child authority.
+synchronous USER32 traversal. Once the converter retains the matched source, it revalidates the
+exact root identity and geometry for a whole-client selection. An authenticated structural child
+still requires a complete census and revalidation at this point to prove it remains the unique
+eligible child. Only negative census results are cached for 100 ms, which can delay child selection.
 
 ### Chromium semantic source
 
@@ -2918,8 +2929,8 @@ the foreground root window, and still belongs to the reported process. This chea
 closes the helper-heartbeat gap on Alt-Tab, close, and HWND reuse without putting COM on the stream.
 
 After exact frame attribution, DAV2 and OCR preprocessing sample the selected rectangle directly
-from the retained full matched texture with one exact integer source offset; all resize, center,
-and history coordinates remain ROI-local. Arbitrary
+from the full matched source with one exact integer source offset. Resize, center, and history
+coordinates remain ROI-local. Arbitrary
 source aspect ratios use the centered integer contain-fit described above, with edge-replicated
 padding excluded from analysis. No ordinary live ROI allocation or copy is submitted. Dump 3D alone
 may reconstruct the exact completed ROI as a same-format `CopySubresourceRegion` artifact after
@@ -2936,8 +2947,8 @@ ordinary full-frame V2 rather than a guessed ROI; an internal V2 authentication 
 remains fail-closed flat.
 
 The host separately tracks the newest helper heartbeat and the beginning of the current exact
-`{HWND, process, document, video, rectangle}` run. The heartbeat must be fresh when the private
-matched color slot is created, while the uninterrupted geometry run must have begun no later than
+`{HWND, process, document, video, rectangle}` run. The heartbeat must be fresh when the converter
+retains the matched color source, and the uninterrupted geometry run must have begun no later than
 the source frame's content timestamp. Identical later heartbeats therefore preserve a video border
 through pause, but a changed identity or rectangle cannot be attached retroactively to older
 pixels. The run-begin timestamp is part of both the live authority epoch and the matched slot, so
@@ -2958,8 +2969,8 @@ be current when bound. This one-observation continuity gate prevents an Alt-Tab 
 attaching new geometry to old pixels while avoiding a blocking drain or second capture. The current
 root/client is also sampled while inference is busy. Every ROI matched slot carries that exact live
 observation generation: focus, move, resize, desktop focus, and monitor changes revoke older pending
-completions and cached ROI output before warp or dump. A pure translation may reuse the DAV2 analysis
-history after a new private matched-frame copy is authorized, but never the pre-move color/depth pair.
+completions and cached ROI output before warp or dump. A pure translation may reuse the DAV2
+analysis history for a newly authorized source at the new position.
 
 During the native USER32 interactive move/size loop, Host SBS withdraws window-region authority and
 continues full-source 3D for the current captured display instead of chasing a moving client
@@ -2971,9 +2982,9 @@ the current modal root identity and its registered-player or browser evidence co
 already eligible video context; lost video authority selects hard disable. Semantic retention grants
 no positioned ROI or glyph-rendering authority. An explicitly armed
 Dump 3D request overrides temporary suppression, but cannot override hard context disable.
-When the loop ends, ordinary foreground causality must authorize a
-new private matched-frame copy before the matched-domain transition can submit a new ROI; output may briefly be
-identity while that exact ROI completion is pending. This covers standard caption dragging, border
+When the loop ends, ordinary foreground causality must authorize a new matched capture before the
+matched-domain transition can submit a new ROI. Output may briefly be identity while that exact
+ROI completion is pending. This covers standard caption dragging, border
 resizing, and borderless applications that delegate native hit-testing to USER32. For fully custom
 applications that animate themselves with `SetWindowPos`, a copied desktop image that still
 predates a newly observed same-size position is submitted through full-source V2 rather than
