@@ -1,5 +1,171 @@
 // Included inside platf::dxgi after the converter class is defined.
 
+int d3d_base_encode_device::convert_with_queued_research(
+  platf::img_t &img,
+  ::video::detail::optional_frame_time_point_t next_encode_target,
+  rgb_output_t *rgb
+) {
+  // The private entry owns both tickets through recording, even if the converter retires
+  // its research session. Keep their construction and destruction out of the shared frame.
+  queued_converter_frame_t frame;
+  return convert_frame(img, next_encode_target, rgb, &frame);
+}
+
+bool d3d_base_encode_device::queue_research_observation(
+  queued_converter_frame_t &frame,
+  matched_frame_slot_t &source,
+  const models::depth_observation_views_t &previous,
+  const queued_capture_t &capture,
+  std::uint64_t observation_timestamp_us,
+  bool refined_geometry
+) {
+  if (probe_observer.record) {
+    actual_converter_probe_v1::event_t event;
+    event.kind = actual_converter_probe_v1::event_e::queue_begin;
+    emit_converter_probe(std::move(event), &source, &previous, nullptr, source.srv.get(), capture.current_input, capture.frame_id);
+  }
+
+  std::string queue_error;
+  auto ticket = depth_estimator->queue_pending_same_source_gpu_continuation_for_evaluation(
+    source.analysis_input_srv(), capture.frame_id, observation_timestamp_us, queue_error
+  );
+  // Even an unavailable ticket can follow a rewrite of the borrowed estimator fields.
+  latest_v2_lineage.reset();
+  if (!ticket || !queued_ticket_matches(*ticket, source, capture.frame_id, observation_timestamp_us, capture.transfer, refined_geometry)) {
+    BOOST_LOG(error) << "Host SBS queued continuation unavailable; current flat identity: "sv << queue_error;
+    return false;
+  }
+
+  frame.refined_geometry = refined_geometry;
+  frame.ticket = std::move(ticket);
+  frame.source_slot = &source;
+  const auto &draw = *frame.ticket;
+  if (auto *pending = queued_research->pending_colour.get()) {
+    const auto material = observe_pending_colour_material(
+      *pending, draw, capture.desc, capture.transfer, capture.source, capture.content, capture.damage, capture.cursor
+    );
+    const auto operands = depth_estimator->pending_ocr_conditioner_working_views_for_evaluation(
+      draw.ticket_sequence, draw.submitted_frame_id, draw.observation_timestamp_us
+    );
+    std::string archive_error;
+    pending->owner_unavailable = !operands || !material.usable() ||
+                                 !pending->lane.capture_pending(device_ctx.get(), *operands, draw, material, archive_error);
+    if (pending->owner_unavailable) {
+      pending->lane.release_geometry_lease();
+      BOOST_LOG(warning) << "Pending current-colour owner unavailable: " << archive_error;
+    }
+  }
+  if (probe_observer.record) {
+    actual_converter_probe_v1::event_t event;
+    event.kind = actual_converter_probe_v1::event_e::queued;
+    event.queued = true;
+    emit_converter_probe(std::move(event), &source, nullptr, &draw, draw.submitted_source.Get(), capture.current_input, capture.frame_id);
+  }
+  return true;
+}
+
+d3d_base_encode_device::queued_draw_t d3d_base_encode_device::select_queued_research_draw(
+  queued_converter_frame_t &frame,
+  const matched_frame_slot_t *candidate,
+  const queued_capture_t &capture,
+  std::chrono::steady_clock::time_point now,
+  bool force_flat,
+  bool snapshot_debug_inputs,
+  bool producer_terminal,
+  bool has_current_capture_mutex,
+  bool current_interactive_move_size
+) {
+  queued_draw_t draw;
+  draw.force_flat = force_flat;
+  if (!queued_research) {
+    // A retired session cannot authorize the ticket that the request still owns.
+    draw.force_flat |= frame.ticket.has_value();
+    return draw;
+  }
+
+  const bool warp_available = !snapshot_debug_inputs && !producer_terminal &&
+                              host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2;
+  auto *pending = queued_research->pending_colour.get();
+  if (pending) {
+    const bool current_draw_allowed = has_current_capture_mutex && warp_available &&
+                                      !current_interactive_move_size && !depth_authority_reprocess_pending &&
+                                      !subtitle_context_reprocess_pending;
+    draw.force_flat |= select_pending_colour_draw(
+      *pending, frame, capture.current_input, current_draw_allowed, capture.desc, capture.transfer,
+      now, capture.source, capture.content, capture.damage, capture.cursor, capture.frame_id
+    );
+  }
+
+  // Recheck the exact pending source after queueing. The ticket's COM references alone
+  // cannot establish which capture the slot now owns.
+  auto *source = frame.source_slot;
+  draw.same_source = frame.ticket && source && !draw.force_flat && warp_available &&
+                     source->pending && source == candidate && source->frame_id == capture.frame_id &&
+                     drawn_source_order.permits(source->frame_id) &&
+                     matched_route_matches_current(
+                       *source, capture.desc, capture.transfer, authority_generation(live_window_authority),
+                       authority_generation(live_foreground_region), live_browser_authority_epoch, interactive_move_size_observed
+                     );
+  draw.force_flat |= frame.ticket.has_value() && !draw.same_source;
+  if (frame.pending_colour_geometry) {
+    draw.ticket = &*frame.pending_colour_geometry;
+    draw.source = frame.pending_colour_source_slot;
+    draw.current_colour = pending;
+    draw.pixel_shader = pending->lane.pixel_shader();
+  } else if (draw.same_source) {
+    draw.ticket = &*frame.ticket;
+    draw.source = source;
+    draw.pixel_shader = queued_research->pixel_shader.get();
+  }
+  return draw;
+}
+
+ID3D11Buffer *d3d_base_encode_device::prepare_queued_draw_guard(const queued_ticket_t &ticket) {
+  auto *buffer = queued_research->guard_constants.get();
+  const auto guard = models::research_queued_render_guard_v1::make_expected(
+    ticket.transaction_token, ticket.expected_work, ticket.observation_timestamp_us
+  );
+  device_ctx->UpdateSubresource(buffer, 0u, nullptr, &guard, 0u, 0u);
+  return buffer;
+}
+
+bool d3d_base_encode_device::record_pending_colour_draw(
+  const host_sbs_v2_draw_command_t &draw,
+  pending_colour_research_t &pending
+) {
+  auto &lane = pending.lane;
+  models::research_pending_current_colour_v1::scoped_negative_t negative;
+  return negative.bind(device_ctx.get(), lane.negative_expected(), lane.negative_receipt(),
+                       lane.current_constants().Get(), lane.current_snapshot().receipt.Get()) &&
+         record_host_sbs_v2_draw(device_ctx.get(), draw);
+}
+
+bool d3d_base_encode_device::record_rejected_queued_draw_as_flat(
+  host_sbs_v2_draw_command_t &draw,
+  ID3D11ShaderResourceView *current_input
+) {
+  // A guarded draw can reject predication before recording commands. Submit current
+  // identity unconditionally and restore the original context state on return.
+  Microsoft::WRL::ComPtr<ID3D11Predicate> predicate;
+  BOOL predicate_value = FALSE;
+  device_ctx->GetPredication(&predicate, &predicate_value);
+  const auto restore_predication = util::fail_guard([&] {
+    device_ctx->SetPredication(predicate.Get(), predicate_value);
+  });
+  device_ctx->SetPredication(nullptr, FALSE);
+  if (!update_sbs_constant_buffer(sbs_content_scale_x, sbs_content_scale_y, nullptr, nullptr)) {
+    return false;
+  }
+  draw.pixel_shader = sbs_flat_identity_ps.get();
+  draw.shader_resources = {current_input};
+  draw.geometry_constants = sbs_reprojection_cbuffer.get();
+  draw.subtitle_constants = nullptr;
+  draw.queued_guard_constants = nullptr;
+  draw.queued_guard_transaction = nullptr;
+  draw.queued_guard_override = false;
+  return record_host_sbs_v2_draw(device_ctx.get(), draw);
+}
+
 bool d3d_base_encode_device::initialize_queued_renderer_for_instance() {
   if (!probe_context || !depth_estimator) {
     return false;

@@ -6413,7 +6413,11 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
 TEST(DirectxShaderSourceTest, HostSbsLatestV2LineageIsNotCurrentRenderAuthorization) {
   const auto display =
     read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");
+  const auto queued_research = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/host_sbs_queued_converter_research.inc"
+  );
   ASSERT_FALSE(display.empty());
+  ASSERT_FALSE(queued_research.empty());
 
   const auto retain_begin = display.find("[[nodiscard]] bool retain_latest_v2_lineage(");
   const auto retain_end = display.find("bool ensure_sbs_intermediate_storage", retain_begin);
@@ -6467,12 +6471,21 @@ TEST(DirectxShaderSourceTest, HostSbsLatestV2LineageIsNotCurrentRenderAuthorizat
     {"ordinary asynchronous completion", "est.completed_frame_valid &&\n                  !completion_finalized_before_admission", "matched_render_slot = find_pending_matched_slot(est.completed_frame_id);"},
     {"invalid adaptive submission class", "models::gpu_adaptive_submission_class_e::invalid", "if (force_infer_transaction_enqueued) {"},
     {"missing force-infer capture causality", "!matched_candidate_slot->inference_content_timestamp ||", "// The forced full-source submission has retired the old ROI authority."},
-    {"queued continuation may rewrite singleton fields", "depth_estimator->queue_pending_same_source_gpu_continuation_for_evaluation(", "clear_matched_selection();"},
     {"current-frame completion no longer pending", "detail::host_sbs_same_frame_completion_e::keep_pending\n", "depth_completion_poll_pending = false;"},
   };
   for (const auto &boundary : selection_boundaries) {
     expect_reset_between(selection, boundary.name, boundary.begin, boundary.end);
   }
+  expect_reset_between(queued_research, "queued continuation may rewrite singleton fields",
+                       "depth_estimator->queue_pending_same_source_gpu_continuation_for_evaluation(",
+                       "queued_ticket_matches(");
+  const auto queue_attempt = selection.find("queued_attempt_failed_flat = !queue_research_observation(");
+  ASSERT_NE(queue_attempt, std::string::npos);
+  const auto clear_after_queue = selection.find("clear_matched_selection();", queue_attempt);
+  const auto discard_completion = selection.find("completion_finalized_before_admission = false;", queue_attempt);
+  ASSERT_NE(clear_after_queue, std::string::npos);
+  ASSERT_NE(discard_completion, std::string::npos);
+  EXPECT_LT(clear_after_queue, discard_completion);
   EXPECT_EQ(display.find("reusable_v2"), std::string::npos);
 
   expect_reset_between(display, "terminal pipeline failure", "void fail_depth_pipeline_flat()", "matched_presentation_cache.reset();");
