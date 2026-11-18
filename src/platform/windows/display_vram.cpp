@@ -618,7 +618,11 @@ namespace platf::dxgi {
     }
 
     bool conversion_kept_input() const {
-      return conversion_kept_input_;
+      return input_update == input_update_e::missing_source;
+    }
+
+    bool encoder_input_pixels_unchanged() const {
+      return input_update != input_update_e::may_have_written;
     }
 
     // The streaming loop converts a held live export, whose next frame it re-checks for.
@@ -1040,7 +1044,7 @@ namespace platf::dxgi {
         std::nullopt
     ) {
       auto &img = (img_d3d_t &) img_base;
-      conversion_kept_input_ = false;
+      input_update = input_update_e::may_have_written;
       // Reference white belongs to the captured Windows display, not its EDID peak or
       // the headset. Poll at most once a second, including when the desktop is static.
       const auto gamma_now = std::chrono::steady_clock::now();
@@ -1141,7 +1145,7 @@ namespace platf::dxgi {
         if (img.pixels_skipped && !export_owns_output) {
           // Capture skipped these pixels while an export owned the stream, and it no longer does.
           // The encoder input stays as it was; capture now copies the whole desktop again.
-          conversion_kept_input_ = true;
+          input_update = input_update_e::missing_source;
           return 0;
         }
 
@@ -3538,10 +3542,12 @@ namespace platf::dxgi {
               final_sbs_is_linear,
               final_sbs_has_p010_y
             );
-            // Native NVENC owns one registered input texture for this whole encode session. The
-            // completed draw remains there until a later conversion overwrites it, so a repeated
-            // packed SBS frame can be encoded again without identical Y and UV draws.
+            // The converted planes remain in the session's input texture until another draw.
             host_sbs_encoder_input_state.mark_converted();
+          } else {
+            // The packed repeat issued neither the warp (including optional P010 luma) nor
+            // the Y/UV draws. The encoder can reuse a picture slot that already owns these bytes.
+            input_update = input_update_e::packed_repeat;
           }
           end_sbs_gpu_timer(gpu_timer);
           // Publication receipts already captured the diagnostic state. External Stats reads
@@ -8015,7 +8021,12 @@ namespace platf::dxgi {
     std::shared_ptr<void> game_setup_watch;
     std::function<void()> external_frame_wake;  ///< See set_external_frame_wake().
     std::uint64_t capture_pixels_token = 0;  ///< This encoder's display->external_pixels_owner value.
-    bool conversion_kept_input_ = false;  ///< See platf::encode_device_t::conversion_kept_input().
+    enum class input_update_e {
+      may_have_written,
+      missing_source,
+      packed_repeat,
+    };
+    input_update_e input_update = input_update_e::may_have_written;
     std::chrono::steady_clock::time_point next_export_wake_log {};  ///< See log_export_wakes().
     std::unique_ptr<sbs_cursor::compositor_t> external_cursor;
     float external_cursor_white_multiplier = 203.0f / 80.0f;
@@ -12261,6 +12272,10 @@ namespace platf::dxgi {
 
     bool conversion_kept_input() const override {
       return base.conversion_kept_input();
+    }
+
+    bool encoder_input_pixels_unchanged() const override {
+      return base.encoder_input_pixels_unchanged();
     }
 
     std::optional<std::chrono::steady_clock::time_point> rendered_content_timestamp() const override {

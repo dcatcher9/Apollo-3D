@@ -842,7 +842,7 @@ namespace {
 
     int convert(platf::img_t &) override {
       ++conversions;
-      if (!kept_input) {
+      if (!encoder_input_pixels_unchanged()) {
         probe.convert(content);
       }
       if (throw_after_conversion) {
@@ -860,12 +860,17 @@ namespace {
       return kept_input;
     }
 
+    bool encoder_input_pixels_unchanged() const override {
+      return packed_repeat || platf::nvenc_encode_device_t::encoder_input_pixels_unchanged();
+    }
+
     void encoder_consumed_input() override {
       ++consumed;
     }
 
     nvenc_pipeline_probe probe;
     bool kept_input = false;
+    bool packed_repeat = false;
     bool throw_after_conversion = false;
     int content = 0;
     int result = 0;
@@ -924,6 +929,72 @@ TEST_F(NativeInputRevisionTest, SuccessfulWritesAdvanceWhileRetainedConversionsK
   EXPECT_EQ(backend->encode_target, target + 1ms);
   EXPECT_EQ(backend->probe.prepared_input_revisions(), (std::vector<std::uint64_t> {1, 1, 2}));
   EXPECT_EQ(backend->probe.encoded_contents(), (std::vector<std::pair<std::uint64_t, int>> {{10, 11}, {11, 11}, {12, 22}}));
+}
+
+TEST_F(NativeInputRevisionTest, PackedRepeatRetainsPixelRevisionAndStillPresents) {
+  backend->content = 11;
+  ASSERT_EQ(session->convert(image), 0);
+  ASSERT_FALSE(session->encode_frame(10, {}).data.empty());
+
+  backend->packed_repeat = true;
+  ASSERT_EQ(session->convert(image), 0);
+  EXPECT_FALSE(session->conversion_kept_input());
+  session->request_idr_frame();
+  ASSERT_TRUE(session->submit_frame(11));
+  ASSERT_FALSE(session->retrieve_frame().data.empty());
+
+  const std::chrono::steady_clock::time_point target {123ms};
+  ASSERT_EQ(session->convert_with_encode_target(image, target), 0);
+  EXPECT_FALSE(session->conversion_kept_input());
+  EXPECT_EQ(backend->encode_target, target);
+  ASSERT_FALSE(session->encode_frame(12, {}).data.empty());
+
+  // A redraw of the same source still writes the target, as after a gamma change.
+  backend->packed_repeat = false;
+  ASSERT_EQ(session->convert_with_encode_target(image, target + 1ms), 0);
+  ASSERT_TRUE(session->submit_frame(13));
+  ASSERT_FALSE(session->retrieve_frame().data.empty());
+  EXPECT_EQ(backend->probe.prepared_input_revisions(), (std::vector<std::uint64_t> {1, 1, 1, 2}));
+  EXPECT_EQ(backend->probe.encoded_contents(), (std::vector<std::pair<std::uint64_t, int>> {{10, 11}, {11, 11}, {12, 11}, {13, 11}}));
+  EXPECT_EQ(only(backend->probe.operations(), {"submit"}), (std::vector<std::string> {"submit-0:10", "submit-1:11:idr", "submit-0:12", "submit-1:13"}));
+}
+
+TEST_F(NativeInputRevisionTest, PackedRepeatCannotRestoreProofAfterFailedOrThrowingConversion) {
+  backend->content = 11;
+  ASSERT_EQ(session->convert(image), 0);
+  ASSERT_FALSE(session->encode_frame(10, {}).data.empty());
+
+  backend->content = 22;
+  backend->result = -1;
+  EXPECT_EQ(session->convert(image), -1);
+  backend->result = 0;
+  backend->packed_repeat = true;
+  ASSERT_EQ(session->convert(image), 0);
+  EXPECT_FALSE(session->conversion_kept_input());
+  ASSERT_FALSE(session->encode_frame(11, {}).data.empty());
+
+  backend->packed_repeat = false;
+  backend->content = 33;
+  ASSERT_EQ(session->convert(image), 0);
+  ASSERT_FALSE(session->encode_frame(12, {}).data.empty());
+
+  const std::chrono::steady_clock::time_point target {123ms};
+  backend->content = 44;
+  backend->throw_after_conversion = true;
+  EXPECT_THROW(session->convert_with_encode_target(image, target), std::runtime_error);
+  backend->throw_after_conversion = false;
+  backend->packed_repeat = true;
+  ASSERT_EQ(session->convert_with_encode_target(image, target + 1ms), 0);
+  EXPECT_FALSE(session->conversion_kept_input());
+  ASSERT_TRUE(session->submit_frame(13));
+  ASSERT_FALSE(session->retrieve_frame().data.empty());
+
+  backend->packed_repeat = false;
+  backend->content = 55;
+  ASSERT_EQ(session->convert(image), 0);
+  ASSERT_FALSE(session->encode_frame(14, {}).data.empty());
+  EXPECT_EQ(backend->probe.prepared_input_revisions(), (std::vector<std::uint64_t> {1, 0, 2, 0, 3}));
+  EXPECT_EQ(backend->probe.encoded_contents(), (std::vector<std::pair<std::uint64_t, int>> {{10, 11}, {11, 22}, {12, 33}, {13, 44}, {14, 55}}));
 }
 
 TEST_F(NativeInputRevisionTest, FailedConversionCannotRestoreAnOldRevisionAndLaterWriteUsesAFreshOne) {

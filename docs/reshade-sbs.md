@@ -7675,11 +7675,13 @@ which can stall the whole GPU.
 
 The encoder of an independent provider, and of desktop Host SBS, keeps up to two pictures in flight
 (`video::nvenc_pipeline_depth()`, fixed per encoder as `nvenc_base::pipeline_depth()`; plain
-desktop keeps one, and Local AR presents without NVENC). Each picture has its own
-NVENC input, bitstream and completion event: at submission the converted surface is copied into
-the picture's input on the immediate context (about 50 MB each way at 7680x2160 10-bit; the two
-inputs cost about 100 MB of video memory), so the next frame converts and starts encoding while the
-previous picture still encodes. An encoder that cannot create a completion event or an input for
+desktop keeps one, and Local AR presents without NVENC). Each picture has its own NVENC input,
+bitstream and completion event. At submission the immediate context copies the converted surface
+when the picture slot lacks its exact input revision. A packed repeat that skips all writes to the
+conversion target retains the revision and can reuse the pixels in a matching slot. A copy at
+7680x2160 10-bit moves about 50 MB in each direction. The two input surfaces cost about 100 MB of
+video memory and allow the next frame to convert and start encoding while the previous picture
+still encodes. An encoder that cannot create a completion event or an input for
 every picture (video memory short, as with Host SBS beside a GPU-bound game) encodes one picture at a
 time from the conversion target instead of failing the stream
 (`NvencPipelineTest.HostSbsEncodesOnePictureAtATimeWhenASecondInputDoesNotFit`). A thread of its own (`encode_pipeline_t`) waits for the pictures in
@@ -7715,7 +7717,7 @@ flight, Present to packet within 0.5 ms of one picture at a time on the same rin
 Desktop Host SBS (AI depth on desktop capture, a 7680x2160 picture at 4K) keeps its capture
 cadence: it is not an independent provider, so it holds nothing and an image wait that runs out
 still encodes the input again; only its picture now encodes while the next capture converts. A
-conversion writes only the conversion target, which each picture copied at its submission, so the
+conversion writes only the conversion target. Each picture owns its submitted input, so the
 next capture, a retained-source poll of pending inference (busy, it keeps the target and the picture
 repeats it; complete, it redraws the frame with its own depth), a depth-ready install and a
 stream-gamma reconversion never change a picture in flight

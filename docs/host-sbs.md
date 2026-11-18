@@ -2730,9 +2730,8 @@ NVENC also reports input mapping, picture submission, completion wait, and bitst
 unlock/unmap separately. CPU stage summaries use the existing twenty-second min/max/average logs.
 The completion wait includes any unfinished input-surface GPU work and the host thread's wakeup
 delay as well as encoding; it is not an isolated NVENC hardware timer. The encoder keeps up to two
-pictures in flight, each encoding its own copy of the conversion target with its own bitstream and
-event, so the next capture converts while the previous picture encodes and no later conversion
-changes a picture in flight ([pictures in flight](reshade-sbs.md#gpu-handoff-contract)). The NVENC
+pictures in flight with separate input surfaces, bitstreams and events, so the next capture
+converts while the previous picture encodes ([pictures in flight](reshade-sbs.md#gpu-handoff-contract)). The NVENC
 encode/retrieve stage then runs from the encode loop's start of a picture to its retrieval on the
 retrieving thread, including any wait for the older picture while both are in flight.
 These stages complement the existing depth/preprocess/postprocess/warp GPU timers and FEC/send

@@ -418,7 +418,7 @@ namespace video {
 
   int nvenc_encode_session_t::finish_conversion(int result, std::uint64_t previous_revision) {
     if (result == 0) {
-      if (device->conversion_kept_input()) {
+      if (device->encoder_input_pixels_unchanged()) {
         input_revision = previous_revision;
       } else {
         input_revision = next_input_revision;
