@@ -252,9 +252,11 @@ namespace {
   }
 
   TEST(RemoteEncodeProviderPacingTest, KeepaliveIsMeasuredFromTheLastEncode) {
-    EXPECT_EQ(video::detail::provider_keepalive_wait(at(10ms), at(0ns), 55ms), 45ms);
-    EXPECT_EQ(video::detail::provider_keepalive_wait(at(55ms), at(0ns), 55ms), 0ns);
-    EXPECT_EQ(video::detail::provider_keepalive_wait(at(80ms), at(0ns), 55ms), 0ns);
+    EXPECT_EQ(video::detail::encode_keepalive_wait(at(10ms), at(0ns), 55ms), 45ms);
+    EXPECT_EQ(video::detail::encode_keepalive_wait(at(55ms), at(0ns), 55ms), 0ns);
+    EXPECT_EQ(video::detail::encode_keepalive_wait(at(80ms), at(0ns), 55ms), 0ns);
+    const auto after_repeat_wake = video::detail::encode_keepalive_wait(at(90ms), at(0ns), 100ms);
+    EXPECT_EQ(video::detail::encode_image_wait(after_repeat_wake, 11ms, true, false, false), 10ms);
   }
 
   TEST(RemoteEncodeKeepaliveTest, MinimumFpsTargetIsNeverAboveTheStreamRate) {
@@ -292,7 +294,7 @@ namespace {
         std::chrono::nanoseconds now {}, last_encode {};
         std::vector<std::chrono::nanoseconds> provider;
         while (now < 1s) {
-          now += video::detail::provider_keepalive_wait(at(now), at(last_encode), keepalive);
+          now += video::detail::encode_keepalive_wait(at(now), at(last_encode), keepalive);
           if (now >= last_encode + keepalive) {
             last_encode = now;
             provider.push_back(now);
@@ -547,7 +549,7 @@ namespace {
   // Host: claims the newest ready frame past its held one whose fence passed and returns the
   // replaced slot once its conversion's reads completed (with `encoder`, by its `retire` rule;
   // without, they completed during the previous encode). Its wait composes
-  // remaining_wait(), provider_keepalive_wait() and, by `rules`, provider_hold() as encode_run()
+  // remaining_wait(), encode_keepalive_wait() and, by `rules`, provider_hold() as encode_run()
   // does; a fence wake or desktop capture ends an image wait early, and one that arrives while the
   // loop is busy ends the next image wait at once (event_t). After the wait a pending frame
   // converts once due, a due keepalive repeats the input, and anything else encodes nothing.
@@ -721,7 +723,7 @@ namespace {
       if (loop == loop_e::planning) {
         const auto poll_target = target - threshold;
         const auto pending_wait = source.remaining_wait(at(now), poll_target, frame_pending());
-        const auto keepalive_wait = video::detail::provider_keepalive_wait(at(now), at(last_encode), keepalive);
+        const auto keepalive_wait = video::detail::encode_keepalive_wait(at(now), at(last_encode), keepalive);
         if (rules == loop_rules_e::head) {
           const auto bound = std::min(keepalive_wait, head_export_recheck_wait(now, poll_target.time_since_epoch()));
           wait_until = tick_wait_end(now, pending_wait ? std::min(*pending_wait, bound) : bound);

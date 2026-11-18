@@ -7790,7 +7790,7 @@ TEST(EncodeWakeLifecycleSourceTests, ReplacementHoldsAPixelLessPredecessorsStart
 
   // While held, even a recovery request waits for capture, and only the hold bounds that wait.
   EXPECT_NE(scope.find("if (!recovery_frame_requested || images->peek() || hold_startup_input) {"), std::string::npos);
-  EXPECT_NE(scope.find("idle_wait = startup_input_hold.wait(wait_started, idle_wait);"), std::string::npos);
+  EXPECT_NE(scope.find("startup_input_hold.wait(wait_started, keepalive_interval)"), std::string::npos);
   EXPECT_NE(scope.find("detail::encode_image_wait(idle_wait, encode_frame_threshold, last_img && !hold_startup_input,"), std::string::npos);
   // No exact hold to a provider's poll target delays a held startup input or a recovery frame.
   EXPECT_NE(scope.find("hold_timer && !hold_startup_input && !recovery_frame_requested && !depth_pipeline_ready ?"), std::string::npos);

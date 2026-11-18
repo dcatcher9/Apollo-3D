@@ -43,6 +43,7 @@ namespace video {
     std::string video_memory_diagnostics() const;
     unsigned pipeline_depth() const;
     bool input_waits_for_retirement() const noexcept;
+    void retire_input_reads();
     bool submit_frame(uint64_t frame_index);
     nvenc::nvenc_encoded_frame retrieve_frame();
     std::chrono::nanoseconds last_submit_timing() const;

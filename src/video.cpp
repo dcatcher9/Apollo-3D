@@ -485,7 +485,7 @@ namespace video {
       std::move(frame_buffer)
     );
     force_idr = false;
-    device->encoder_consumed_input();
+    retire_input_reads();
     return result;
   }
 
@@ -507,13 +507,17 @@ namespace video {
     return encoder.input_waits_for_retirement();
   }
 
+  void nvenc_encode_session_t::retire_input_reads() {
+    // Nonblocking fallback for export slots whose conversion reads completed.
+    // The receiver's read-fence wait normally hands them back without this check.
+    device->encoder_consumed_input();
+  }
+
   /** Encode thread, with pictures in flight: hand off the current converted input. */
   bool nvenc_encode_session_t::submit_frame(uint64_t frame_index) {
     const bool submitted = encoder.submit_frame(frame_index, force_idr);
     force_idr = false;
-    // Never blocks: the encode thread's fallback for export slots whose conversion reads
-    // completed (the receiver's read-fence wait normally hands them back), and its diagnostics.
-    device->encoder_consumed_input();
+    retire_input_reads();
     return submitted;
   }
 
@@ -1462,6 +1466,9 @@ namespace video {
     detail::encoder_recovery_t &recovery,
     packet_queue_t packets,
     const std::function<void(const video_mode_change_t &)> &on_bitrate_reconfigured
+#ifdef SUNSHINE_TESTS
+    , const detail::native_encode_loop_test_hooks_t *test_hooks = nullptr
+#endif
   ) {
     const auto &disp = generation.display();
     // All session exits retire their backend through its owner. Failed encoding additionally
@@ -1630,6 +1637,11 @@ namespace video {
       pipeline.emplace(
         session->pipeline_depth(),
         [&, recovery_gate = detail::recovery_gate_t {}](encoded_frame_context_t &frame) mutable {
+#ifdef SUNSHINE_TESTS
+          if (test_hooks && test_hooks->before_retrieve) {
+            test_hooks->before_retrieve(static_cast<int>(frame.frame_nr), frame.content_timestamp);
+          }
+#endif
           auto encoded_frame = session->retrieve_frame();
           if (!encoded_frame.data.empty() && !recovery_gate.admits(encoded_frame.idr)) {
             // Submitted before the recovery IDR was requested: it references the dropped frame.
@@ -1934,11 +1946,11 @@ namespace video {
         const bool conversion_poll_pending = last_img && (pending_gamma || session->needs_conversion_poll());
         const bool depth_pipeline_ready = depth_pipeline_ready_event && depth_pipeline_ready_event->peek();
         const auto wait_started = std::chrono::steady_clock::now();
+        const auto keepalive_wait = detail::encode_keepalive_wait(wait_started, last_encode_at, keepalive_interval);
         auto pending_source_wait = source.remaining_wait(wait_started, provider_poll_target, independent_provider && conversion_poll_pending);
         if (independent_provider && last_img) {
           // The export's fence wake, captures and control requests end this wait; a pending frame
           // that is not yet due is held exactly to its poll target instead.
-          const auto keepalive_wait = detail::provider_keepalive_wait(wait_started, last_encode_at, keepalive_interval);
           const auto hold = hold_timer && !hold_startup_input && !recovery_frame_requested && !depth_pipeline_ready ?
                               detail::provider_hold(pending_source_wait, keepalive_wait, encode_frame_threshold) :
                               std::nullopt;
@@ -1955,16 +1967,13 @@ namespace video {
             }
             // Then take whatever arrived meanwhile without waiting.
             pending_source_wait = std::chrono::nanoseconds::zero();
-          } else {
-            pending_source_wait = pending_source_wait ? std::min(*pending_source_wait, keepalive_wait) : keepalive_wait;
           }
         }
         // Nothing is encoded before capture delivers a frame while the startup input is held, so
         // only the hold's deadline bounds this wait: a due poll or keepalive must not spin it.
-        auto idle_wait = max_frametime;
-        if (hold_startup_input) {
-          idle_wait = startup_input_hold.wait(wait_started, idle_wait);
-        }
+        const auto idle_wait = hold_startup_input ?
+                                 startup_input_hold.wait(wait_started, keepalive_interval) :
+                                 keepalive_wait;
         bool captured = false;
         const auto image_wait = detail::encode_image_wait(idle_wait, encode_frame_threshold, last_img && !hold_startup_input, depth_pipeline_ready, conversion_poll_pending, pending_source_wait);
         const auto image_wait_started = detail::diagnostic_timestamp(loop_stats.has_value(), std::chrono::steady_clock::now);
@@ -2169,18 +2178,30 @@ namespace video {
         break;
       }
 
-      const auto content_timestamp = session->rendered_content_timestamp();
-      // New content is told by its identity, as for the packets: a keepalive or poll that
-      // re-renders an unchanged export converts again but encodes a repeat.
-      const bool new_loop_content = loop_stats && loop_content.observe(content_timestamp, !converted_frame) == detail::diagnostic_content_e::new_content;
       const auto encode_started = detail::diagnostic_timestamp(loop_stats.has_value(), std::chrono::steady_clock::now);
       if (pipeline && session->input_waits_for_retirement()) {
-        // A repeat can reuse the same pixels once the newest picture retires. Changed output
-        // always uses a free surface and reaches the normal picture-capacity wait below.
+        // These exact pixels already have a submitted picture. Keep servicing capture and depth
+        // while that picture retires. Recovery, gamma proof and due keepalives still deliver.
+        if (
+          !first_encoder_output && !requested_idr_frame && !invalidated_ref_frames &&
+          !(pending_gamma && config.stream_gamma_state) &&
+          std::chrono::steady_clock::now() < last_encode_at + keepalive_interval
+        ) {
+          session->retire_input_reads();
+#ifdef SUNSHINE_TESTS
+          if (test_hooks && test_hooks->repeat_coalesced) {
+            test_hooks->repeat_coalesced();
+          }
+#endif
+          continue;
+        }
         if (!pipeline->drain() || lifecycle_change_requested()) {
           break;
         }
       }
+      const auto content_timestamp = session->rendered_content_timestamp();
+      // A keepalive or poll that re-renders an unchanged export still carries the same content.
+      const bool new_loop_content = loop_stats && loop_content.observe(content_timestamp, !converted_frame) == detail::diagnostic_content_e::new_content;
       auto frame = make_encoded_frame_context(
         frame_nr++,
         frame_timestamp,
@@ -2201,6 +2222,11 @@ namespace video {
         const auto completion_finished = detail::diagnostic_timestamp(loop_stats.has_value(), std::chrono::steady_clock::now);
         encoded = encoded && session->submit_frame(frame.frame_nr);
         if (encoded) {
+#ifdef SUNSHINE_TESTS
+          if (test_hooks && test_hooks->after_submit) {
+            test_hooks->after_submit(static_cast<int>(frame.frame_nr), frame.content_timestamp);
+          }
+#endif
           pipeline->push(std::move(frame));
         }
         if (loop_stats) {
@@ -2340,7 +2366,8 @@ namespace video {
       safe::mail_t mail,
       img_event_t images,
       config_t config,
-      packet_queue_t packets
+      packet_queue_t packets,
+      const native_encode_loop_test_hooks_t &hooks
     ) {
       if (!display || !mail || !images || !packets) {
         throw std::invalid_argument("The native encode-loop fixture requires its display, mail, images and packet queue");
@@ -2379,7 +2406,8 @@ namespace video {
         std::move(session),
         recovery,
         std::move(packets),
-        [](const video_mode_change_t &) {}
+        [](const video_mode_change_t &) {},
+        &hooks
       );
       return result;
     }

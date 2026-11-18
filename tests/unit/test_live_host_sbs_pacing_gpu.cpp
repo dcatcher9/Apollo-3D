@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #if defined(_WIN32) && defined(SUNSHINE_TESTS)
+  #include "src/config.h"
   #include "src/globals.h"
   #include "src/live_model_preparation.h"
   #include "src/platform/common.h"
@@ -8,11 +9,13 @@
   #include "src/platform/windows/host_sbs_actual_converter_probe.h"
   #include "src/platform/windows/misc.h"
   #include "src/platform/windows/model_preparation_converter_test.h"
+  #include "src/utility.h"
   #include "src/video_capture_test.h"
 
   #include <algorithm>
   #include <atomic>
   #include <chrono>
+  #include <condition_variable>
   #include <cstdint>
   #include <cstdlib>
   #include <exception>
@@ -610,5 +613,350 @@ namespace {
              (info.param.qualified_owner ? "ScheduledOwner" : "NormalOwner");
     }
   );
+
+  struct repeat_coalescing_probe_t {
+    struct submitted_t {
+      int frame;
+      std::optional<clock_t::time_point> content;
+      bool while_held;
+    };
+
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::atomic<bool> callback_failed {false};
+    std::vector<submitted_t> submitted;
+    std::vector<pacing_delivery_t> deliveries;
+    pacing_event_t last_output;
+    clock_t::time_point previous_finished {};
+    std::uint32_t pending_slots = 0;
+    std::int64_t first_stamp = 0, next_stamp = 0;
+    int held_frame = 0;
+    unsigned coalesced = 0;
+    bool armed = false, entered = false, release_requested = false, exited = false;
+    bool gate_timed_out = false, next_draw_while_held = false;
+
+    static void record(void *opaque, const probe::event_t &event) noexcept {
+      auto &self = *static_cast<repeat_coalescing_probe_t *>(opaque);
+      if (event.kind != probe::event_e::convert_end && event.kind != probe::event_e::packed_repeat) {
+        return;
+      }
+      try {
+        std::lock_guard lock {self.mutex};
+        pacing_event_t output;
+        output.kind = event.kind;
+        output.conversion = event.conversion;
+        output.model = event.model_frame;
+        output.source = event.source_stamp_ticks;
+        output.current = event.current_source_stamp_ticks;
+        output.actual_pixels = event.actual_draw_pixel_source;
+        output.flat = event.flat;
+        output.repeat = event.repeat;
+        output.current_publication = event.publication_current;
+        self.last_output = output;
+        self.pending_slots = event.pending_slots;
+        self.next_draw_while_held |= self.entered && !self.exited && !self.release_requested &&
+                                     self.next_stamp != 0 && output.current == self.next_stamp &&
+                                     !output.repeat && event.native_planes_written &&
+                                     (output.source == self.next_stamp || output.flat || event.cached_current_colour);
+        self.changed.notify_all();
+      } catch (...) {
+        self.callback_failed.store(true);
+        self.changed.notify_all();
+      }
+    }
+
+    static void record_delivery(void *opaque, const fixture::native_pacing_delivery_t &call) noexcept {
+      auto &self = *static_cast<repeat_coalescing_probe_t *>(opaque);
+      try {
+        std::lock_guard lock {self.mutex};
+        self.deliveries.push_back({call, self.previous_finished, self.last_output});
+        self.previous_finished = call.finished;
+        self.changed.notify_all();
+      } catch (...) {
+        self.callback_failed.store(true);
+        self.changed.notify_all();
+      }
+    }
+
+    void release() {
+      std::lock_guard lock {mutex};
+      release_requested = true;
+      changed.notify_all();
+    }
+
+    template<class Predicate>
+    bool await(Predicate predicate, std::chrono::milliseconds timeout) {
+      std::unique_lock lock {mutex};
+      changed.wait_for(lock, timeout, [&]() {
+        return predicate() || callback_failed.load();
+      });
+      return predicate() && !callback_failed.load();
+    }
+  };
+
+  TEST(LiveHostSbsPacingGpuTest, CoalescesBusyRepeatBeforeNewNativeSubmission) {
+    const auto *enabled = std::getenv("APOLLO_RUN_TENSORRT_TESTS");
+    if (!enabled || std::string_view {enabled} != "1") {
+      GTEST_SKIP() << "Set APOLLO_RUN_TENSORRT_TESTS=1 for the local NVIDIA/TensorRT integration check.";
+    }
+    const auto adapter = nvidia_adapter();
+    ASSERT_TRUE(adapter);
+    // The held retirement is shorter than this ordinary keepalive interval. A due keepalive
+    // intentionally retains the production drain behavior and is not the operation under test.
+    const auto previous_minimum_fps = config::video.minimum_fps_target;
+    config::video.minimum_fps_target = 0.05;
+    const auto restore_minimum_fps = util::fail_guard([&]() {
+      config::video.minimum_fps_target = previous_minimum_fps;
+    });
+    constexpr unsigned width = 1280, height = 720;
+    repeat_coalescing_probe_t observed;
+    fixture::native_pacing_probe_t binding;
+    binding.converter_observer = {&observed, repeat_coalescing_probe_t::record};
+    binding.record_delivery = repeat_coalescing_probe_t::record_delivery;
+    auto display = fixture::make_native_pacing_display(*adapter, width, height, binding);
+    auto mail = std::make_shared<safe::mail_raw_t>();
+    auto images = std::make_shared<video::img_event_t::element_type>();
+    auto packets = std::make_shared<video::packet_queue_t::element_type>();
+    auto shutdown = mail->event<bool>(mail::shutdown);
+    video::config_t config {};
+    config.width = 2 * width;
+    config.height = height;
+    config.framerate = 90;
+    config.framerateX100 = 9000;
+    config.encodingFramerate = 90000;
+    config.bitrate = 20000;
+    config.slicesPerFrame = 1;
+    config.numRefFrames = 1;
+    config.encoderCscMode = 2;
+    config.videoFormat = 1;
+    config.sbs_mode = video::SBS_AI;
+    config.sbs_depth_status_event = mail->event<int>(mail::sbs_depth_status);
+    config.sbs_depth_pipeline_ready_event = std::make_shared<safe::event_t<bool>>();
+
+    std::vector<std::uint32_t> pixels(std::size_t(width) * height);
+    for (unsigned y = 0; y < height; ++y) {
+      for (unsigned x = 0; x < width; ++x) {
+        pixels[std::size_t(y) * width + x] = (x / 64 + y / 48) % 2 ? 0xff3853a0u : 0xffa48b45u;
+      }
+    }
+    auto first = fixture::upload_native_pacing_image(*display, pixels);
+    for (auto &pixel : pixels) {
+      pixel ^= 0x00569662u;
+    }
+    auto next = fixture::upload_native_pacing_image(*display, pixels);
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(next);
+    models::live_model_preparation_t preparation(video::host_sbs_v2_depth_model(), {});
+    const auto captured = clock_t::now();
+    first->frame_timestamp = first->content_timestamp = captured;
+    observed.first_stamp = captured.time_since_epoch().count();
+    // Match a real session's gamma owner so the first valid submit retires initial proof work.
+    config.stream_gamma_state = std::make_shared<video::stream_gamma_publisher_t>();
+
+    video::detail::native_encode_loop_test_hooks_t hooks;
+    hooks.before_retrieve = [&](int frame, std::optional<clock_t::time_point> content) noexcept {
+      try {
+        std::unique_lock lock {observed.mutex};
+        if (!observed.armed || observed.entered || !content || content->time_since_epoch().count() != observed.first_stamp) {
+          return;
+        }
+        observed.held_frame = frame;
+        observed.entered = true;
+        observed.changed.notify_all();
+        if (!observed.changed.wait_for(lock, 10s, [&]() {
+              return observed.release_requested;
+            })) {
+          observed.gate_timed_out = true;
+        }
+        observed.exited = true;
+        observed.changed.notify_all();
+      } catch (...) {
+        observed.callback_failed.store(true);
+        observed.changed.notify_all();
+      }
+    };
+    hooks.after_submit = [&](int frame, std::optional<clock_t::time_point> content) noexcept {
+      try {
+        std::lock_guard lock {observed.mutex};
+        observed.submitted.push_back({frame, content, observed.entered && !observed.exited && !observed.release_requested});
+        observed.changed.notify_all();
+      } catch (...) {
+        observed.callback_failed.store(true);
+        observed.changed.notify_all();
+      }
+    };
+    hooks.repeat_coalesced = [&]() noexcept {
+      try {
+        std::lock_guard lock {observed.mutex};
+        if (observed.entered && !observed.exited && !observed.release_requested) {
+          ++observed.coalesced;
+          observed.changed.notify_all();
+        }
+      } catch (...) {
+        observed.callback_failed.store(true);
+        observed.changed.notify_all();
+      }
+    };
+
+    video::detail::native_encode_loop_test_result_t result;
+    std::exception_ptr loop_error;
+    std::atomic<bool> loop_finished {false};
+    std::vector<video::packet_t> received;
+    std::int64_t last_index = 0;
+    const auto collect = [&](video::packet_t packet) {
+      EXPECT_GT(packet->data_size(), 0u);
+      EXPECT_GT(packet->frame_index(), last_index);
+      last_index = packet->frame_index();
+      received.push_back(std::move(packet));
+    };
+    const auto await_packets = [&](auto complete, auto limit) {
+      while (!complete() && clock_t::now() < limit && !loop_finished.load()) {
+        if (auto packet = packets->pop(20ms)) {
+          collect(std::move(packet));
+        }
+      }
+      return complete();
+    };
+    {
+      std::jthread encoder([&](std::stop_token stop) {
+        std::stop_callback stop_loop(stop, [&]() {
+          shutdown->raise(true);
+          images->wake();
+        });
+        try {
+          result = video::detail::run_native_encode_loop_for_test(display, mail, images, config, packets, hooks);
+        } catch (...) {
+          loop_error = std::current_exception();
+        }
+        loop_finished.store(true);
+        observed.changed.notify_all();
+      });
+      // This guard precedes jthread destruction on every fatal assertion/exception path.
+      const auto release_before_join = util::fail_guard([&]() {
+        observed.release();
+        shutdown->raise(true);
+        images->wake();
+      });
+      images->raise(first);
+      auto next_warm_capture = clock_t::now() + 100ms;
+      const bool warm = await_packets([&]() {
+        bool authenticated = false;
+        bool settled = false;
+        {
+          std::lock_guard lock {observed.mutex};
+          authenticated = std::any_of(received.begin(), received.end(), [&](const auto &packet) {
+            return packet->content_timestamp == captured &&
+                   std::any_of(observed.deliveries.begin(), observed.deliveries.end(), [&](const auto &delivery) {
+                     return delivery.owns_packet(*packet) && delivery.output.model != 0 &&
+                            delivery.output.source == observed.first_stamp &&
+                            !delivery.output.flat && !delivery.output.repeat && delivery.output.current_publication;
+                   });
+          });
+          settled = observed.pending_slots == 0 && !observed.submitted.empty() &&
+                    observed.submitted.back().frame == last_index;
+        }
+        // A cold build can start after A's first flat output. Feed the retained capture during
+        // startup so the deliberately long keepalive cannot delay adoption of the ready model.
+        const auto now = clock_t::now();
+        if (!authenticated && now >= next_warm_capture) {
+          images->raise(first);
+          next_warm_capture = now + 100ms;
+        }
+        return authenticated && settled && config.stream_gamma_state->current().generation != 0;
+      },
+                                      clock_t::now() + 30s);
+      ASSERT_TRUE(warm) << "A must settle and publish its authenticated native packet before retrieval is held.";
+      {
+        std::lock_guard lock {observed.mutex};
+        observed.armed = true;
+      }
+      // A non-content wake requests a delivery of the committed A input, without requiring
+      // another warp or depending on an unchanged-source converter admission decision.
+      images->wake();
+      ASSERT_TRUE(observed.await([&]() {
+        return observed.entered;
+      },
+                                 3s));
+      images->wake();
+      ASSERT_TRUE(observed.await([&]() {
+        return observed.coalesced != 0;
+      },
+                                 3s));
+      {
+        std::lock_guard lock {observed.mutex};
+        ASSERT_FALSE(observed.exited);
+        ASSERT_FALSE(observed.gate_timed_out);
+        ASSERT_EQ(observed.submitted.back().frame, observed.held_frame)
+          << "Coalescing must not submit or allocate an additional native frame.";
+      }
+
+      const auto next_captured = clock_t::now();
+      next->frame_timestamp = next->content_timestamp = next_captured;
+      {
+        std::lock_guard lock {observed.mutex};
+        observed.next_stamp = next_captured.time_since_epoch().count();
+      }
+      images->raise(std::move(next));
+      ASSERT_TRUE(observed.await([&]() {
+        return observed.next_draw_while_held &&
+               std::any_of(observed.submitted.begin(), observed.submitted.end(), [&](const auto &picture) {
+                 return picture.content == next_captured && picture.while_held;
+               });
+      },
+                                 3s))
+        << "The actual next source must write native planes and submit before A retrieval resumes.";
+      int held_frame, next_frame;
+      {
+        std::lock_guard lock {observed.mutex};
+        ASSERT_FALSE(observed.exited);
+        held_frame = observed.held_frame;
+        const auto submitted = std::find_if(observed.submitted.begin(), observed.submitted.end(), [&](const auto &picture) {
+          return picture.content == next_captured && picture.while_held;
+        });
+        ASSERT_NE(submitted, observed.submitted.end());
+        next_frame = submitted->frame;
+        EXPECT_EQ(next_frame, held_frame + 1);
+      }
+      observed.release();
+      ASSERT_TRUE(await_packets([&]() {
+        return std::any_of(received.begin(), received.end(), [&](const auto &packet) {
+          return packet->frame_index() == next_frame && packet->content_timestamp == next_captured;
+        });
+      },
+                                clock_t::now() + 3s));
+      const auto held_packet = std::find_if(received.begin(), received.end(), [&](const auto &packet) {
+        return packet->frame_index() == held_frame;
+      });
+      const auto next_packet = std::find_if(received.begin(), received.end(), [&](const auto &packet) {
+        return packet->frame_index() == next_frame;
+      });
+      ASSERT_NE(held_packet, received.end());
+      ASSERT_NE(next_packet, received.end());
+      EXPECT_LT(held_packet, next_packet);
+      EXPECT_EQ((*held_packet)->content_timestamp, captured);
+      {
+        std::lock_guard lock {observed.mutex};
+        EXPECT_TRUE(std::any_of(observed.deliveries.begin(), observed.deliveries.end(), [&](const auto &delivery) {
+          return delivery.owns_packet(**next_packet) && delivery.output.current == observed.next_stamp &&
+                 !delivery.output.repeat && delivery.output.actual_pixels != 0;
+        }));
+      }
+      encoder.request_stop();
+    }
+    while (auto packet = packets->pop(0ms)) {
+      collect(std::move(packet));
+    }
+    packets->stop();
+    if (loop_error) {
+      std::rethrow_exception(loop_error);
+    }
+    EXPECT_TRUE(result.session_created);
+    EXPECT_EQ(result.pipeline_depth, 2u);
+    EXPECT_FALSE(observed.callback_failed.load());
+    EXPECT_FALSE(observed.gate_timed_out);
+    EXPECT_TRUE(observed.next_draw_while_held);
+    ::testing::Test::RecordProperty("coalesced_while_retrieval_held", observed.coalesced);
+    ::testing::Test::RecordProperty("held_native_frame", observed.held_frame);
+  }
 }  // namespace
 #endif

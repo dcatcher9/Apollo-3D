@@ -22,20 +22,31 @@ namespace video::detail {
     bool awaiting_desktop_after_export = false;
   };
 
+  struct native_encode_loop_test_hooks_t {
+    using picture_observer_t = std::function<void(
+      int, std::optional<std::chrono::steady_clock::time_point>
+    )>;
+
+    picture_observer_t before_retrieve;
+    picture_observer_t after_submit;
+    std::function<void()> repeat_coalesced;
+  };
+
   /** Synchronously create a normal native session and run the actual production encode loop.
    * The supplied display must have its original, unarmed make_unarmed_capture_display control
    * block. This bridge arms, publishes and acquires one real capture generation; it does not run
    * a capture worker. The fixture supplies captures/control/packet consumption and stops the loop
    * through its normal mail or image event. Only the unrelated HTTP launch-HDR check is omitted.
-   * Joins native and per-device teardown before returning. No clock, conversion, scheduling
-   * or driver hook is used.
+   * Joins native and per-device teardown before returning. Optional hooks observe the actual
+   * picture lifecycle on its submitting and retrieving threads.
    */
   native_encode_loop_test_result_t run_native_encode_loop_for_test(
     std::shared_ptr<platf::display_t> display,
     safe::mail_t mail,
     img_event_t images,
     config_t config,
-    packet_queue_t packets
+    packet_queue_t packets,
+    const native_encode_loop_test_hooks_t &hooks = {}
   );
 
   struct capture_worker_test_access;

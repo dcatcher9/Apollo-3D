@@ -7680,7 +7680,9 @@ and completion event. The converter draws the Y/UV planes into an unmapped regis
 the next picture uses directly. Two pictures in flight leave one spare conversion surface so a
 changed frame can draw before the loop waits for a picture slot. A packed repeat that skips the
 RGB-to-YUV draw retains the last converted surface. If its picture is still in flight, the loop
-waits for that picture to retire before reusing the surface. An encoder that cannot create all its
+can continue handling capture and depth without sending another copy of the same picture.
+Recovery, pending gamma proof and due keepalives still wait for retirement and submit the retained
+input. The keepalive deadline runs from the last submitted picture. An encoder that cannot create all its
 completion events or registered inputs encodes one picture at a time from a single surface
 (`NvencPipelineTest.HostSbsEncodesOnePictureAtATimeWhenASecondInputDoesNotFit`). A thread of its own (`encode_pipeline_t`) waits for the pictures in
 submission order and publishes each packet as soon as its picture completes, whatever the loop is
