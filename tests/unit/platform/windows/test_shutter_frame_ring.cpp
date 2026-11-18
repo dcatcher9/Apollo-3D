@@ -13,4 +13,16 @@ TEST(LocalShutterPresentationGpu, BoundsPublicationAndRetainsAnExactStereoPair) 
   EXPECT_TRUE(result.eye_crop_exact);
   EXPECT_TRUE(result.next_pair_published);
 }
+
+TEST(LocalShutterPresentationGpu, SwitchesOnlyToAnAuthorizedCompletePairFromAnotherProducer) {
+  const auto result = platf::dxgi::probe_local_shutter_pair_handoff();
+  if (!result.available) {
+    GTEST_SKIP() << "Shared keyed textures and fences are unavailable on this adapter";
+  }
+  RecordProperty("driver", result.used_warp ? "WARP" : "hardware");
+  EXPECT_TRUE(result.unpublished_retained);
+  EXPECT_TRUE(result.unfenced_retained);
+  EXPECT_TRUE(result.denied_retained);
+  EXPECT_TRUE(result.adopted_exact_pair);
+}
 #endif

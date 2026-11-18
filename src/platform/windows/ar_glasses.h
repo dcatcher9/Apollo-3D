@@ -359,11 +359,9 @@ namespace ar_glasses {
       const local_session_contract_t &after
     );
 
-    bool restart_verified_monitor_source_for_test(
+    bool verify_monitor_source_request_for_test(
       const std::function<bool()> &current,
-      const std::function<void()> &stop,
-      const std::function<bool()> &verify,
-      const std::function<bool()> &start
+      const std::function<bool()> &verify
     );
 
     /** Reject a new presentation generation after a placement-only topology update. */

@@ -158,56 +158,47 @@ TEST(LocalMonitorSourceSwitch, GeometryIdentityOrColorRevisionsRequireDisplayRep
   EXPECT_FALSE(local_monitor_source_only_change_for_test(unverified_host, game));
 }
 
-TEST(LocalMonitorSourceSwitch, RestartRechecksAuthorityAroundJoinAndVerification) {
-  using ar_glasses::detail::restart_verified_monitor_source_for_test;
+TEST(LocalMonitorSourceSwitch, RechecksAuthorityAroundVerificationWithoutStoppingScanout) {
+  using ar_glasses::detail::verify_monitor_source_request_for_test;
   enum class event_e {
     none,
     remote_busy,
     request_superseded,
     desktop_locked,
     topology_changed,
-    launch_failed
   };
 
   struct scenario_t {
     event_e event;
     const char *trace;
-    bool restarted;
+    bool verified;
   };
 
-  // R checks the current request, J joins, V verifies the live desktop, and S starts.
+  // R checks the live request and V verifies the existing desktop. Either side can revoke it.
   const scenario_t scenarios[] {
-    {event_e::none, "RJRVRS", true},
+    {event_e::none, "RVR", true},
     {event_e::remote_busy, "R", false},
-    {event_e::request_superseded, "RJR", false},
-    {event_e::desktop_locked, "RJRV", false},
-    {event_e::topology_changed, "RJRVR", false},
-    {event_e::launch_failed, "RJRVRS", false},
+    {event_e::request_superseded, "RVR", false},
+    {event_e::desktop_locked, "RV", false},
+    {event_e::topology_changed, "RVR", false},
   };
   for (const auto &scenario : scenarios) {
     SCOPED_TRACE(static_cast<int>(scenario.event));
     bool current = scenario.event != event_e::remote_busy;
     std::string trace;
-    const bool restarted = restart_verified_monitor_source_for_test(
+    const bool verified = verify_monitor_source_request_for_test(
       [&] {
         trace += 'R';
         return current;
       },
       [&] {
-        trace += 'J';
-        current = scenario.event != event_e::request_superseded;
-      },
-      [&] {
         trace += 'V';
-        current = scenario.event != event_e::topology_changed;
+        current = scenario.event != event_e::topology_changed &&
+                  scenario.event != event_e::request_superseded;
         return scenario.event != event_e::desktop_locked;
-      },
-      [&] {
-        trace += 'S';
-        return scenario.event != event_e::launch_failed;
       }
     );
-    EXPECT_EQ(restarted, scenario.restarted);
+    EXPECT_EQ(verified, scenario.verified);
     EXPECT_EQ(trace, scenario.trace);
   }
 }

@@ -89,6 +89,7 @@ namespace ar_glasses {
     constexpr int source_height = 1080;
     constexpr auto topology_poll_interval = 250ms;
     constexpr auto topology_debounce = 750ms;
+    constexpr auto monitor_source_switch_timeout = 5s;
     constexpr auto incompatible_transition_grace = 5s;
     constexpr auto virtual_display_absence_grace = 5s;
     constexpr unsigned virtual_display_absence_confirmations = 3;
@@ -1066,14 +1067,18 @@ namespace ar_glasses {
       return before.mode != after.mode && same_monitor_scanout_generation(before, after);
     }
 
-    template<class Current, class Stop, class Verify, class Start>
-    bool restart_verified_monitor_source(Current current, Stop stop, Verify verify, Start start) {
-      if (!current()) {
-        return false;
-      }
-      stop();
-      return current() && verify() && current() && start();
+    template<class Current, class Verify>
+    bool verify_monitor_source_request(Current current, Verify verify) {
+      return current() && verify() && current();
     }
+
+    enum class monitor_source_switch_progress_e {
+      waiting,
+      presented,
+      failed,
+    };
+
+    using monitor_source_switch_t = platf::dxgi::local_monitor_source_switch_t;
 
     bool contains_case_insensitive(std::wstring_view haystack, std::wstring_view needle) {
       return std::search(
@@ -3583,6 +3588,7 @@ namespace ar_glasses {
 
       bool suspend_for_resume() {
         presenter_.request_stop();
+        cancel_monitor_source_switch();
         if (presenter_.joinable() && presenter_quiesced_) {
           // The renderer acknowledges that capture and input are stopped before its potentially
           // slow graphics/scheduling destructors. Keep those resources owned until the join below.
@@ -3761,59 +3767,87 @@ namespace ar_glasses {
                now - *virtual_display_absence_started_ >= virtual_display_absence_grace;
       }
 
-      bool restart_monitor_source(
+      bool has_monitor_source_switch() const {
+        return monitor_source_switch_ && monitor_source_switch_->request.load();
+      }
+
+      monitor_source_switch_progress_e advance_monitor_source_switch(
         const target_state_t &expected,
         std::uint64_t display_epoch,
         std::stop_token controller_stop_token
       ) {
-        if (!monitor_surface_ || !desktop_handoff_ || !live_gpu_lease_) {
-          return false;
+        using enum monitor_source_switch_progress_e;
+        if (!monitor_source_switch_ || !desktop_handoff_ || !live_gpu_lease_) {
+          return failed;
         }
         const bool game = expected.mode == presentation_mode_e::monitor_game;
+        const int mode = game ? ::video::SBS_GAME_SBS : ::video::SBS_AI;
         const auto current = [&]() {
-          return !controller_stop_token.stop_requested() && session_requested_() &&
+          return !controller_stop_token.stop_requested() && session_requested_() && running() && has_presented() &&
                  game == monitor_uses_game_source() &&
                  platf::display_change_epoch() == display_epoch && !remote_virtual_display_blocks_local();
         };
-        return restart_verified_monitor_source(
-          current,
-          [this]() {
-            stop_presenter();
-          },
-          [&]() {
-            const auto sink = find_target(target_device_path_);
-            if (!sink || sink->mode != expected.mode || !same_monitor_scanout_generation(expected, *sink)) {
-              return false;
-            }
-            const auto binding = virtual_display_binding();
-            const auto source = binding.identity ? resolve_virtual_display(*binding.identity, binding.device_path, binding.display_name, nullptr, source_width_, source_height_) : std::nullopt;
-            if (!source || source->device_path != binding.device_path || source->gdi_name != binding.display_name || !same_virtual_display_identity(source->identity, *binding.identity) || !source_refresh_matches(source->refresh_millihz, sink->refresh_millihz)) {
-              return false;
-            }
-            const auto hdr = VDISPLAY::queryDisplayHDR(source->identity.AdapterLuid, source->identity.TargetId);
-            if (!hdr || *hdr != virtual_hdr_active_ || sink->hdr.active != virtual_hdr_active_ || !platf::primary_display::verify_local_monitor_replacement(source->device_path, sink->device_path)) {
-              return false;
-            }
-            if (const auto reason = query_monitor_desktop_block_reason(L"Default", sink->rect); !reason.empty()) {
-              request_monitor_session(false);
-              std::lock_guard lock(physical_monitor_error_mutex);
-              physical_monitor_error = reason;
-              return false;
-            }
-            return true;
-          },
-          [&]() {
-            return start_presenter(expected);
+        const auto verify = [&]() {
+          const auto sink = find_target(target_device_path_);
+          if (!sink || sink->mode != expected.mode || !same_monitor_scanout_generation(expected, *sink)) {
+            return false;
           }
-        );
+          const auto binding = virtual_display_binding();
+          const auto source = binding.identity ? resolve_virtual_display(*binding.identity, binding.device_path, binding.display_name, nullptr, source_width_, source_height_) : std::nullopt;
+          if (!source || source->device_path != binding.device_path || source->gdi_name != binding.display_name || !same_virtual_display_identity(source->identity, *binding.identity) || !source_refresh_matches(source->refresh_millihz, sink->refresh_millihz)) {
+            return false;
+          }
+          const auto hdr = VDISPLAY::queryDisplayHDR(source->identity.AdapterLuid, source->identity.TargetId);
+          if (!hdr || *hdr != virtual_hdr_active_ || sink->hdr.active != virtual_hdr_active_ || !platf::primary_display::verify_local_monitor_replacement(source->device_path, sink->device_path)) {
+            return false;
+          }
+          if (const auto reason = query_monitor_desktop_block_reason(L"Default", sink->rect); !reason.empty()) {
+            request_monitor_session(false);
+            std::lock_guard lock(physical_monitor_error_mutex);
+            physical_monitor_error = reason;
+            return false;
+          }
+          return true;
+        };
+        const auto request = monitor_source_switch_->request.load();
+        if (!request) {
+          if (!verify_monitor_source_request(current, verify)) {
+            return failed;
+          }
+          // Preparation and scanout happen on their existing owners. The topology controller
+          // keeps watching the desktop and remote admission while the old pair is displayed.
+          const auto expires = std::chrono::steady_clock::now() + monitor_source_switch_timeout;
+          monitor_source_switch_->request.store(std::make_shared<monitor_source_switch_t::request_t>(mode, display_epoch, expires));
+          return waiting;
+        }
+        if (request->sbs_mode != mode || request->display_epoch != display_epoch) {
+          return failed;
+        }
+        switch (request->state.load()) {
+          case monitor_source_switch_t::state_e::requested:
+          case monitor_source_switch_t::state_e::adopted:
+            return current() && std::chrono::steady_clock::now() < request->expires ? waiting : failed;
+          case monitor_source_switch_t::state_e::presented:
+            if (monitor_source_switch_->presented_mode.load() != mode || !verify_monitor_source_request(current, verify)) {
+              return failed;
+            }
+            monitor_source_switch_->request.store({});
+            return presented;
+          case monitor_source_switch_t::state_e::failed:
+          case monitor_source_switch_t::state_e::cancelled:
+            return failed;
+        }
+        return failed;
       }
 
       std::optional<target_state_t> reconfigure_target(
         const target_state_t &target,
         std::stop_token controller_stop_token
       ) {
-        const auto cancelled = [this, controller_stop_token]() {
-          return controller_stop_token.stop_requested() || !session_requested_();
+        const bool requested_game = target.mode == presentation_mode_e::monitor_game;
+        const auto cancelled = [this, controller_stop_token, requested_game]() {
+          return controller_stop_token.stop_requested() || !session_requested_() ||
+                 (monitor_surface_ && requested_game != monitor_uses_game_source());
         };
         stop_presenter();
         if (cancelled() || target.device_path != target_device_path_ || !same_luid(target.adapter_id, target_adapter_id_) || target.mode == presentation_mode_e::unsupported) {
@@ -3959,7 +3993,7 @@ namespace ar_glasses {
         if (cancelled()) {
           return std::nullopt;
         }
-        if (!activate_monitor_desktop()) {
+        if (!activate_monitor_desktop() || cancelled()) {
           return std::nullopt;
         }
         start_presenter(*presentation_target);
@@ -4385,11 +4419,29 @@ namespace ar_glasses {
         }
       }
 
+      void cancel_monitor_source_switch() {
+        if (!monitor_source_switch_) {
+          return;
+        }
+        const auto request = monitor_source_switch_->request.exchange({});
+        if (request) {
+          using enum monitor_source_switch_t::state_e;
+          auto state = request->state.load();
+          while (state == requested || state == adopted) {
+            if (request->state.compare_exchange_weak(state, cancelled)) {
+              break;
+            }
+          }
+        }
+      }
+
       void stop_presenter() {
         presenter_.request_stop();
+        cancel_monitor_source_switch();
         if (presenter_.joinable()) {
           presenter_.join();
         }
+        monitor_source_switch_.reset();
         running_.store(false);
         if (monitor_surface_) {
           physical_monitor_active.store(false);
@@ -4500,6 +4552,13 @@ namespace ar_glasses {
                                       ::video::SBS_OFF;
         if (monitor_surface_) {
           presenter_config.sbs_mode = presentation_target.mode == presentation_mode_e::monitor_game ? ::video::SBS_GAME_SBS : ::video::SBS_AI;
+          monitor_source_switch_ = std::make_shared<monitor_source_switch_t>();
+          monitor_source_switch_->presented_mode.store(presenter_config.sbs_mode);
+          monitor_source_switch_->mode_is_requested = [](int mode) {
+            return monitor_requested() &&
+                   mode == (monitor_uses_game_source() ? ::video::SBS_GAME_SBS : ::video::SBS_AI);
+          };
+          presenter_config.source_switch = monitor_source_switch_;
         }
         presenter_config.sbs_config = config::video.sbs;
         presenter_config.sbs_config.reshade = !monitor_surface_ && presentation_target.game_source;
@@ -4543,6 +4602,9 @@ namespace ar_glasses {
               } else {
                 BOOST_LOG(error) << "Local AR virtual desktop could not be resolved; pausing for a controller retry."sv;
                 break;
+              }
+              if (presenter_config.source_switch) {
+                presenter_config.sbs_mode = presenter_config.source_switch->presented_mode.load();
               }
             }
             // Stability is per continuous presenter attempt. Do not let several short failed
@@ -4623,6 +4685,7 @@ namespace ar_glasses {
       };
       std::shared_ptr<std::atomic<std::uint64_t>> presented_frames_;
       std::shared_ptr<platf::dxgi::local_presenter_cursor_clip_t> cursor_clip_;
+      std::shared_ptr<monitor_source_switch_t> monitor_source_switch_;
       std::shared_ptr<safe::event_t<bool>> presenter_quiesced_;
       std::jthread presenter_;
       std::atomic<bool> running_ {false};
@@ -5184,6 +5247,10 @@ namespace ar_glasses {
             if (incompatible_transition_started_) {
               incompatible_transition_started_ = indeterminate_at;
             }
+            if (session_ && session_->has_monitor_source_switch()) {
+              session_->pause_presenter(std::nullopt);
+              transition_presenter_paused_ = true;
+            }
             if (suspend_inactive_session(applied_, false)) {
               pending.reset();
               pending_since = std::chrono::steady_clock::now();
@@ -5208,13 +5275,15 @@ namespace ar_glasses {
                                    session_->running() && session_->has_presented() && applied_ && observed &&
                                    monitor_source_only_change(*applied_, *observed) &&
                                    display_epoch == platf::display_change_epoch();
-          if (observed != pending) {
+          const bool source_switch_revoked = !source_only && session_ && session_->has_monitor_source_switch();
+          if (observed != pending || source_switch_revoked) {
             pending = observed;
             pending_since = now;
             // Stop using old-size textures immediately, but keep SudoVDA attached during the
             // debounce interval. A physical 2D/SBS switch is allowed to pass through transient
             // modes; removing the source here would make Windows migrate all of its windows.
-            if (!source_only && !resume_state_.retained() && observed != applied_ && !same_presentation_contract(observed, applied_)) {
+            // A reversal can also return to the applied mode with a replacement still in flight.
+            if (source_switch_revoked || (!source_only && !resume_state_.retained() && observed != applied_ && !same_presentation_contract(observed, applied_))) {
               if (session_) {
                 session_->pause_presenter(observed);
                 transition_presenter_paused_ = true;
@@ -5254,16 +5323,23 @@ namespace ar_glasses {
           }
 
           if (source_only && now >= retry_after_) {
-            if (session_->restart_monitor_source(*observed, display_epoch, stop_token)) {
-              accept_reconfigured_target(*observed, now);
-              BOOST_LOG(info) << "Local monitor presentation switched to "sv << mode_name(observed->mode)
-                              << " on its existing display layout."sv;
-            } else {
-              // Re-observe after a lost proof or cancelled restart before attempting a topology
-              // transaction. A paused physical transition must use the ordinary repair path.
-              session_->pause_presenter(std::nullopt);
-              transition_presenter_paused_ = true;
-              pending_since = std::chrono::steady_clock::now();
+            switch (session_->advance_monitor_source_switch(*observed, display_epoch, stop_token)) {
+              case monitor_source_switch_progress_e::waiting:
+                break;
+              case monitor_source_switch_progress_e::presented:
+                applied_ = pending = observed;
+                pending_since = now;
+                incompatible_transition_started_.reset();
+                BOOST_LOG(info) << "Local monitor presentation switched to "sv << mode_name(observed->mode)
+                                << " at a complete stereo pair."sv;
+                break;
+              case monitor_source_switch_progress_e::failed:
+                // A stalled conversion or lost proof invalidates this handoff. Re-observe before
+                // running the ordinary repair path on the retained desktop.
+                session_->pause_presenter(std::nullopt);
+                transition_presenter_paused_ = true;
+                pending_since = std::chrono::steady_clock::now();
+                break;
             }
             std::this_thread::sleep_for(topology_poll_interval);
             continue;
@@ -5911,13 +5987,11 @@ namespace ar_glasses {
     return monitor_source_only_change(make_test_target(before), make_test_target(after));
   }
 
-  bool detail::restart_verified_monitor_source_for_test(
+  bool detail::verify_monitor_source_request_for_test(
     const std::function<bool()> &current,
-    const std::function<void()> &stop,
-    const std::function<bool()> &verify,
-    const std::function<bool()> &start
+    const std::function<bool()> &verify
   ) {
-    return restart_verified_monitor_source(current, stop, verify, start);
+    return verify_monitor_source_request(current, verify);
   }
 
   bool detail::local_presenter_target_contract_matches_for_test(
@@ -6313,8 +6387,8 @@ namespace ar_glasses {
       return false;
     }
     const bool monitor = surface == config::video_t::local_surface_e::shutter_monitor;
-    // The controller sees the change at its next look at the displays and rebuilds the
-    // presenter on the desktop it already has; a running session does not return to 2D.
+    // The controller handles the request on its next look at the displays. A verified monitor
+    // keeps scanout and switches the source at a complete stereo pair.
     (monitor ? monitor_source_game : ar_source_game).store(game ? 1 : 0);
     // Remember it for the next start. The surface keeps its own saved setting.
     std::lock_guard lock(device_mutex);

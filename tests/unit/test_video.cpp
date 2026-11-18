@@ -7375,7 +7375,7 @@ TEST(LocalPresenterLifecycleSourceTests, RetainsFinalSourceAndDoesNotSwallowLate
   const auto latency_wait = callback.find("WaitForSingleObject(frame_latency_waitable, 0)", process_decision);
   const auto ready_pop = callback.find("depth_pipeline_ready_event->pop(0ms);", latency_wait);
   const auto schedule = callback.find("presenter_schedule.begin_frame(std::chrono::steady_clock::now())", latency_wait);
-  const auto convert = callback.find("converter.convert_rgb(", ready_pop);
+  const auto convert = callback.find("converter->convert_rgb(", ready_pop);
   const auto converted = callback.find("presenter_retry.record_converted();", convert);
   const auto present = callback.find("swapchain->Present1(", converted);
   const auto busy = callback.find("status == DXGI_ERROR_WAS_STILL_DRAWING", present);

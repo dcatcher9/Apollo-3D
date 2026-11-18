@@ -1182,6 +1182,28 @@ namespace platf::dxgi {
     ~local_presenter_cursor_clip_t();
   };
 
+  /**
+   * One in-place source change on a verified physical monitor. Request identity belongs to
+   * this presenter, so an old producer cannot acknowledge another request for the same mode.
+   */
+  struct local_monitor_source_switch_t {
+    enum class state_e {requested, adopted, presented, failed, cancelled};
+
+    struct request_t {
+      const int sbs_mode;
+      const std::uint64_t display_epoch;
+      const std::chrono::steady_clock::time_point expires;
+      std::atomic<state_e> state {state_e::requested};
+
+      request_t(int mode, std::uint64_t epoch, std::chrono::steady_clock::time_point expiration):
+          sbs_mode(mode), display_epoch(epoch), expires(expiration) {}
+    };
+
+    std::atomic<std::shared_ptr<request_t>> request;
+    std::atomic<int> presented_mode {::video::SBS_OFF};
+    std::function<bool(int)> mode_is_requested;
+  };
+
   struct local_presenter_config_t {
     std::string source_display_name;
     RECT target_rect {};
@@ -1199,6 +1221,7 @@ namespace platf::dxgi {
     std::function<bool()> shutter_recovery_allowed;
     config::video_t::local_monitor_t monitor_config {};
     std::shared_ptr<::video::capture_backend_failover_t> capture_failover;
+    std::shared_ptr<local_monitor_source_switch_t> source_switch;
 
     struct target_t {
       std::mutex mutex;
@@ -1248,6 +1271,17 @@ namespace platf::dxgi {
     bool eye_crop_exact = false;
   };
   local_shutter_frame_probe_t probe_local_shutter_frame_ring();
+
+  struct local_shutter_handoff_probe_t {
+    bool available = false;
+    bool used_warp = false;
+    bool unpublished_retained = false;
+    bool unfenced_retained = false;
+    bool denied_retained = false;
+    bool adopted_exact_pair = false;
+  };
+
+  local_shutter_handoff_probe_t probe_local_shutter_pair_handoff();
 
   struct native_capture_release_report_t {
     bool valid = false;

@@ -9774,14 +9774,22 @@ namespace platf::dxgi {
         return true;
       }
 
-      ID3D11Texture2D *acquire_pair() {
+      ID3D11Texture2D *acquire_pair(bool advance = true) {
         std::lock_guard lock(mutex_);
-        // A removed device reports UINT64_MAX, which releases every packet to the failure path.
+        // A removed device reports UINT64_MAX. It cannot authorize any packet.
         const auto completed = completion_fence_->GetCompletedValue();
+        if (completed == std::numeric_limits<std::uint64_t>::max()) {
+          failed_ = true;
+        }
+        if (failed_) {
+          return nullptr;
+        }
+        if (!advance) {
+          return current_ ? current_->consumer_texture.Get() : nullptr;
+        }
         slot_t *newest = nullptr;
         for (auto &slot : slots_) {
-          if (slot.state == slot_t::state_e::pending && slot.completion <= completed &&
-              (!newest || slot.sequence > newest->sequence)) {
+          if (slot.state == slot_t::state_e::pending && slot.completion <= completed && (!newest || slot.sequence > newest->sequence)) {
             newest = &slot;
           }
         }
@@ -9837,9 +9845,103 @@ namespace platf::dxgi {
       slot_t *current_ = nullptr;
       std::atomic<bool> failed_ = false;
     };
+
+    struct local_shutter_source_t {
+      local_shutter_frame_ring_t ring;
+      std::shared_ptr<local_monitor_source_switch_t::request_t> request;
+    };
+
+    // Capture publishes the fully initialized producer. The shutter thread alone adopts its
+    // first completed packet, at a whole-pair boundary. Capture retains source owners so the
+    // shutter thread never has to retire a converter or destroy its last ring reference.
+    class local_shutter_pair_handoff_t {
+    public:
+      explicit local_shutter_pair_handoff_t(std::shared_ptr<local_shutter_source_t> initial):
+          current_(std::move(initial)) {}
+
+      void publish(std::shared_ptr<local_shutter_source_t> candidate) {
+        candidate_.store(std::move(candidate), std::memory_order_release);
+      }
+
+      template<class TryAdopt>
+      ID3D11Texture2D *acquire_pair(TryAdopt try_adopt) {
+        if (failed_) {
+          return nullptr;
+        }
+        auto candidate = candidate_.load(std::memory_order_acquire);
+        const bool changing_source = candidate && candidate != current_;
+        auto *current_pair = current_->ring.acquire_pair(!changing_source);
+        if (current_->ring.failed()) {
+          failed_ = true;
+          return nullptr;
+        }
+        using state_e = local_monitor_source_switch_t::state_e;
+        if (!changing_source || !candidate->request || candidate->request->state.load(std::memory_order_acquire) != state_e::requested) {
+          return current_pair;
+        }
+
+        auto *new_pair = candidate->ring.acquire_pair();
+        if (candidate->ring.failed()) {
+          auto expected = state_e::requested;
+          candidate->request->state.compare_exchange_strong(expected, state_e::failed, std::memory_order_acq_rel);
+          return current_pair;
+        }
+        if (new_pair && try_adopt(candidate->request)) {
+          current_ = std::move(candidate);
+          return new_pair;
+        }
+        return current_pair;
+      }
+
+      [[nodiscard]] const std::shared_ptr<local_monitor_source_switch_t::request_t> &current_request() const noexcept {
+        return current_->request;
+      }
+
+      [[nodiscard]] bool failed() const noexcept {
+        return failed_.load(std::memory_order_acquire);
+      }
+
+    private:
+      std::shared_ptr<local_shutter_source_t> current_;
+      std::atomic<std::shared_ptr<local_shutter_source_t>> candidate_;
+      std::atomic<bool> failed_ = false;
+    };
   }  // namespace
 
 #ifdef SUNSHINE_TESTS
+  namespace {
+    std::vector<std::uint32_t> read_shutter_probe_texture(
+      ID3D11Device *device,
+      ID3D11DeviceContext *context,
+      ID3D11Texture2D *texture,
+      UINT left,
+      UINT width
+    ) {
+      D3D11_TEXTURE2D_DESC desc {};
+      texture->GetDesc(&desc);
+      desc.Width = width;
+      desc.MiscFlags = desc.BindFlags = 0;
+      desc.Usage = D3D11_USAGE_STAGING;
+      desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
+      if (FAILED(device->CreateTexture2D(&desc, nullptr, &staging))) {
+        return {};
+      }
+      const D3D11_BOX box {left, 0, 0, left + width, desc.Height, 1};
+      context->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, texture, 0, &box);
+      D3D11_MAPPED_SUBRESOURCE mapped {};
+      if (FAILED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+        return {};
+      }
+      std::vector<std::uint32_t> pixels(width * desc.Height);
+      for (UINT y = 0; y < desc.Height; ++y) {
+        std::memcpy(pixels.data() + y * width, static_cast<const std::uint8_t *>(mapped.pData) + y * mapped.RowPitch, width * sizeof(std::uint32_t));
+      }
+      context->Unmap(staging.Get(), 0);
+      return pixels;
+    }
+  }  // namespace
+
   local_shutter_frame_probe_t probe_local_shutter_frame_ring() {
     local_shutter_frame_probe_t result;
     Microsoft::WRL::ComPtr<ID3D11Device> producer;
@@ -9893,29 +9995,8 @@ namespace platf::dxgi {
       return result;
     }
     result.publication_bounded = frames.acquire_producer() == nullptr;
-    const auto read = [&](ID3D11Texture2D *texture, UINT left, UINT width) -> std::vector<std::uint32_t> {
-      D3D11_TEXTURE2D_DESC desc {};
-      texture->GetDesc(&desc);
-      desc.Width = width;
-      desc.MiscFlags = desc.BindFlags = 0;
-      desc.Usage = D3D11_USAGE_STAGING;
-      desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-      Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
-      if (FAILED(consumer->CreateTexture2D(&desc, nullptr, &staging))) {
-        return {};
-      }
-      const D3D11_BOX box {left, 0, 0, left + width, 2, 1};
-      consumer_context->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, texture, 0, &box);
-      D3D11_MAPPED_SUBRESOURCE mapped {};
-      if (FAILED(consumer_context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
-        return {};
-      }
-      std::vector<std::uint32_t> pixels(width * 2);
-      for (UINT y = 0; y < 2; ++y) {
-        std::memcpy(pixels.data() + y * width, static_cast<const std::uint8_t *>(mapped.pData) + y * mapped.RowPitch, width * sizeof(std::uint32_t));
-      }
-      consumer_context->Unmap(staging.Get(), 0);
-      return pixels;
+    const auto read = [&](ID3D11Texture2D *texture, UINT left, UINT width) {
+      return read_shutter_probe_texture(consumer.Get(), consumer_context.Get(), texture, left, width);
     };
     result.current_pair_immutable = read(pair, 0, 4) == std::vector<std::uint32_t>(first.begin(), first.end());
     result.eye_crop_exact = read(pair, 0, 2) == std::vector<std::uint32_t>(4, 0xff0000ff) &&
@@ -9930,6 +10011,138 @@ namespace platf::dxgi {
     }
     result.next_pair_published = next && next != pair && read(next, 0, 4) == std::vector<std::uint32_t>(second.begin(), second.end());
     return result;
+  }
+
+  local_shutter_handoff_probe_t probe_local_shutter_pair_handoff() {
+    const auto probe = [](D3D_DRIVER_TYPE driver) {
+      using Microsoft::WRL::ComPtr;
+      using state_e = local_monitor_source_switch_t::state_e;
+      local_shutter_handoff_probe_t result;
+      ComPtr<ID3D11Device> initial_device, candidate_device, consumer_device;
+      ComPtr<ID3D11DeviceContext> initial_context, candidate_context, consumer_context;
+      const auto make_device = [driver](auto &device, auto &context) {
+        constexpr D3D_FEATURE_LEVEL level = D3D_FEATURE_LEVEL_11_0;
+        return SUCCEEDED(D3D11CreateDevice(nullptr, driver, nullptr, 0, &level, 1, D3D11_SDK_VERSION, &device, nullptr, &context));
+      };
+      if (!make_device(initial_device, initial_context) || !make_device(candidate_device, candidate_context) || !make_device(consumer_device, consumer_context)) {
+        return result;
+      }
+
+      auto initial = std::make_shared<local_shutter_source_t>();
+      auto candidate = std::make_shared<local_shutter_source_t>();
+      if (
+        !initial->ring.init(initial_device.Get(), consumer_device.Get(), 4, 2, DXGI_FORMAT_R8G8B8A8_UNORM) ||
+        !candidate->ring.init(candidate_device.Get(), consumer_device.Get(), 4, 2, DXGI_FORMAT_R8G8B8A8_UNORM)
+      ) {
+        return result;
+      }
+
+      // An independent producer context holds the candidate's real ring completion fence below
+      // its signalled value without relying on execution time or reading back the candidate.
+      ComPtr<ID3D11Device5> initial_device5, candidate_device5;
+      ComPtr<ID3D11DeviceContext4> initial_context4, candidate_context4;
+      ComPtr<ID3D11Fence> signal_gate, wait_gate;
+      HANDLE gate_handle = nullptr;
+      if (
+        FAILED(initial_device.As(&initial_device5)) || FAILED(candidate_device.As(&candidate_device5)) ||
+        FAILED(initial_context.As(&initial_context4)) || FAILED(candidate_context.As(&candidate_context4)) ||
+        FAILED(initial_device5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&signal_gate))) ||
+        FAILED(signal_gate->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &gate_handle))
+      ) {
+        return result;
+      }
+      const auto opened_gate = candidate_device5->OpenSharedFence(gate_handle, IID_PPV_ARGS(&wait_gate));
+      CloseHandle(gate_handle);
+      if (FAILED(opened_gate)) {
+        return result;
+      }
+      result.available = true;
+      result.used_warp = driver == D3D_DRIVER_TYPE_WARP;
+
+      candidate->request = std::make_shared<local_monitor_source_switch_t::request_t>(
+        ::video::SBS_GAME_SBS,
+        1u,
+        std::chrono::steady_clock::now() + 5s
+      );
+      local_shutter_pair_handoff_t handoff(initial);
+      unsigned admission_attempts = 0;
+      bool authorized = false;
+      const auto try_adopt = [&](const auto &request) {
+        ++admission_attempts;
+        auto expected = state_e::requested;
+        return authorized && request == candidate->request &&
+               request->state.compare_exchange_strong(expected, state_e::adopted);
+      };
+      const auto publish = [](local_shutter_source_t &source, ID3D11DeviceContext *context, const auto &pixels) {
+        auto *slot = source.ring.acquire_producer();
+        if (!slot) {
+          return false;
+        }
+        context->UpdateSubresource(slot->producer_texture.Get(), 0, nullptr, pixels.data(), 4 * sizeof(std::uint32_t), 0);
+        return source.ring.publish(*slot, true, context);
+      };
+      constexpr std::array<std::uint32_t, 8> old_pixels {0xff0000ff, 0xff0000ff, 0xff00ff00, 0xff00ff00, 0xff0000ff, 0xff0000ff, 0xff00ff00, 0xff00ff00};
+      constexpr std::array<std::uint32_t, 8> new_pixels {0xffff0000, 0xffff0000, 0xffffffff, 0xffffffff, 0xffff0000, 0xffff0000, 0xffffffff, 0xffffffff};
+      if (!publish(*initial, initial_context.Get(), old_pixels)) {
+        return result;
+      }
+      ID3D11Texture2D *old_pair = nullptr;
+      for (int attempt = 0; attempt < 1000 && !old_pair; ++attempt) {
+        old_pair = handoff.acquire_pair(try_adopt);
+        if (!old_pair) {
+          std::this_thread::sleep_for(1ms);
+        }
+      }
+      if (!old_pair || !publish(*initial, initial_context.Get(), new_pixels)) {
+        return result;
+      }
+      const auto read = [&](ID3D11Texture2D *texture) {
+        return read_shutter_probe_texture(consumer_device.Get(), consumer_context.Get(), texture, 0, 4);
+      };
+      handoff.publish(candidate);
+      result.unpublished_retained = handoff.acquire_pair(try_adopt) == old_pair && !handoff.current_request() &&
+                                    admission_attempts == 0u && read(old_pair) == std::vector<std::uint32_t>(old_pixels.begin(), old_pixels.end());
+
+      if (FAILED(candidate_context4->Wait(wait_gate.Get(), 1))) {
+        return result;
+      }
+      const auto release_gate = [&] {
+        const auto status = initial_context4->Signal(signal_gate.Get(), 1);
+        initial_context->Flush();
+        return SUCCEEDED(status);
+      };
+      auto unblock = util::fail_guard([&] {
+        (void) release_gate();
+      });
+      if (!publish(*candidate, candidate_context.Get(), new_pixels)) {
+        return result;
+      }
+      result.unfenced_retained = handoff.acquire_pair(try_adopt) == old_pair && !handoff.current_request() && admission_attempts == 0u;
+      if (!release_gate()) {
+        return result;
+      }
+      unblock.disable();
+
+      ID3D11Texture2D *denied_pair = nullptr;
+      for (int attempt = 0; attempt < 1000 && admission_attempts == 0u; ++attempt) {
+        denied_pair = handoff.acquire_pair(try_adopt);
+        if (admission_attempts == 0u) {
+          std::this_thread::sleep_for(1ms);
+        }
+      }
+      result.denied_retained = admission_attempts == 1u && denied_pair == old_pair && !handoff.current_request() &&
+                               candidate->request->state.load() == state_e::requested &&
+                               read(old_pair) == std::vector<std::uint32_t>(old_pixels.begin(), old_pixels.end());
+      authorized = true;
+      auto *new_pair = handoff.acquire_pair(try_adopt);
+      result.adopted_exact_pair = new_pair && new_pair != old_pair && !handoff.failed() &&
+                                  handoff.current_request() == candidate->request &&
+                                  candidate->request->state.load() == state_e::adopted &&
+                                  read(new_pair) == std::vector<std::uint32_t>(new_pixels.begin(), new_pixels.end());
+      return result;
+    };
+    auto result = probe(D3D_DRIVER_TYPE_WARP);
+    return result.available ? result : probe(D3D_DRIVER_TYPE_HARDWARE);
   }
 #endif
 
@@ -10191,6 +10404,22 @@ namespace platf::dxgi {
   }  // namespace
 
   local_presenter_result_e run_local_presenter(const local_presenter_config_t &config, std::stop_token stop_token) {
+    using switch_state_e = local_monitor_source_switch_t::state_e;
+    using switch_request_t = local_monitor_source_switch_t::request_t;
+    const auto source_switch = config.frame_sequential ? config.source_switch : nullptr;
+    const auto mark_switch_failed = [](const std::shared_ptr<switch_request_t> &request) {
+      if (request) {
+        auto state = request->state.load();
+        while ((state == switch_state_e::requested || state == switch_state_e::adopted) &&
+               !request->state.compare_exchange_weak(state, switch_state_e::failed)) {}
+      }
+    };
+    // A capture attempt cannot hand an unfinished producer to its successor.
+    auto fail_unfinished_switch = util::fail_guard([&]() {
+      if (source_switch) {
+        mark_switch_failed(source_switch->request.load());
+      }
+    });
     // Internal optical-calibration aid, sampled once for this presenter initialization.
     // It replaces only the physical shutter image; packet ownership and all timing gates stay active.
     std::array<wchar_t, 2> test_pattern_flag {};
@@ -10288,6 +10517,14 @@ namespace platf::dxgi {
                                              capture_backend_e::ddup;
     // A display-mode change after this point invalidates the duplication opened below.
     const auto display_epoch_at_open = platf::display_change_epoch();
+    const auto switch_is_current = [&](const std::shared_ptr<switch_request_t> &request) {
+      return source_switch && request && !stop_token.stop_requested() &&
+             request->display_epoch == display_epoch_at_open &&
+             request->display_epoch == platf::display_change_epoch() &&
+             std::chrono::steady_clock::now() < request->expires &&
+             source_switch->mode_is_requested && source_switch->mode_is_requested(request->sbs_mode) &&
+             source_switch->request.load() == request;
+    };
     auto display = platf::display(
       config.source_display_name,
       capture_config,
@@ -10319,15 +10556,19 @@ namespace platf::dxgi {
       return local_presenter_result_e::reinit;
     }
 
-    d3d_base_encode_device converter;
-    if (converter.init(display, dxgi_display->adapter.get(), platf::pix_fmt_e::nv12)) {
-      BOOST_LOG(error) << "Local AR presenter could not initialize the production SBS converter."sv;
-      return local_presenter_result_e::error;
-    }
-
+    const auto open_converter = [&](int mode, const std::shared_ptr<safe::event_t<bool>> &ready) -> std::unique_ptr<d3d_base_encode_device> {
+      auto instance = std::make_unique<d3d_base_encode_device>();
+      if (instance->init(display, dxgi_display->adapter.get(), platf::pix_fmt_e::nv12) ||
+          instance->init_rgb_output(packed_width, output_height, mode, config.sbs_config, ready)) {
+        BOOST_LOG(error) << "Local AR presenter could not initialize the production RGB converter."sv;
+        return nullptr;
+      }
+      return instance;
+    };
+    int producer_mode = config.sbs_mode;
     auto depth_pipeline_ready_event = std::make_shared<safe::event_t<bool>>();
-    if (converter.init_rgb_output(packed_width, output_height, config.sbs_mode, config.sbs_config, depth_pipeline_ready_event)) {
-      BOOST_LOG(error) << "Local AR presenter could not initialize RGB presentation resources."sv;
+    auto converter = open_converter(producer_mode, depth_pipeline_ready_event);
+    if (!converter) {
       return local_presenter_result_e::error;
     }
 
@@ -10458,10 +10699,11 @@ namespace platf::dxgi {
     Microsoft::WRL::ComPtr<IDXGISwapChain1> swapchain;
     Microsoft::WRL::ComPtr<ID3D11Device> shutter_device;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> shutter_context;
-    auto status = converter.device->QueryInterface(IID_PPV_ARGS(&dxgi_device));
+    auto status = converter->device->QueryInterface(IID_PPV_ARGS(&dxgi_device));
     if (SUCCEEDED(status)) {
       status = dxgi_device->GetAdapter(&adapter);
     }
+    dxgi_device.Reset();
     if (SUCCEEDED(status)) {
       status = adapter->GetParent(IID_PPV_ARGS(&factory));
     }
@@ -10517,7 +10759,7 @@ namespace platf::dxgi {
         }
       }
     }
-    ID3D11Device *presentation_device = config.frame_sequential ? shutter_device.Get() : converter.device.get();
+    ID3D11Device *presentation_device = config.frame_sequential ? shutter_device.Get() : converter->device.get();
 
     Microsoft::WRL::ComPtr<IDXGIOutput> target_output;
     DXGI_OUTPUT_DESC target_output_desc {};
@@ -10732,14 +10974,24 @@ namespace platf::dxgi {
                       << config.monitor_config.flip_eyes << '.';
     }
 
-    local_shutter_frame_ring_t shutter_frames;
+    const auto open_shutter_source = [&](ID3D11Device *device, std::shared_ptr<switch_request_t> request = {}) -> std::shared_ptr<local_shutter_source_t> {
+      auto source = std::make_shared<local_shutter_source_t>();
+      source->request = std::move(request);
+      if (!source->ring.init(device, shutter_device.Get(), packed_width, output_height, swapchain_desc.Format)) {
+        BOOST_LOG(error) << "Local shutter monitor could not create its bounded shared stereo packets."sv;
+        return nullptr;
+      }
+      return source;
+    };
+    auto shutter_source = config.frame_sequential ? open_shutter_source(converter->device.get()) : nullptr;
     std::atomic<bool> shutter_failed = false;
-    if (config.frame_sequential && !shutter_frames.init(
-          converter.device.get(), shutter_device.Get(), packed_width, output_height, swapchain_desc.Format
-        )) {
-      BOOST_LOG(error) << "Local shutter monitor could not create its bounded shared stereo packets."sv;
+    std::atomic<bool> shutter_pair_presented = false;
+    if (config.frame_sequential && !shutter_source) {
       return local_presenter_result_e::error;
     }
+    local_shutter_pair_handoff_t shutter_pairs {shutter_source};
+    // Retire the previous ring on the producer thread after the new pair has been confirmed.
+    std::shared_ptr<local_shutter_source_t> retired_shutter_source;
     std::jthread shutter_thread;
     if (config.frame_sequential) {
       shutter_thread = std::jthread([&](std::stop_token shutter_stop) {
@@ -10973,6 +11225,7 @@ namespace platf::dxgi {
         };
         const auto first_pair_deadline = std::chrono::steady_clock::now() + 5s;
         bool has_displayed = false;
+        std::shared_ptr<switch_request_t> confirmed_left_source;
         bool recovering_clock = false;
         std::optional<std::uint32_t> previous_displayed_refresh;
         const auto log_acquisition_history = [&]() {
@@ -10998,7 +11251,7 @@ namespace platf::dxgi {
           }
         };
         const auto recovery_context_valid = [&]() {
-          if (stopped() || shutter_frames.failed() || !config.shutter_recovery_allowed ||
+          if (stopped() || shutter_pairs.failed() || !config.shutter_recovery_allowed ||
               !config.shutter_recovery_allowed() || platf::display_change_epoch() != display_epoch_at_open) {
             return false;
           }
@@ -11048,6 +11301,7 @@ namespace platf::dxgi {
           owed_refreshes = 0;
           eye_presents = previous_eye_presents = static_cast<unsigned>(eye_repeats);
           has_displayed = false;
+          confirmed_left_source.reset();
           recovering_clock = true;
           previous_displayed_refresh.reset();
           acquisition_presents = 0;
@@ -11059,7 +11313,7 @@ namespace platf::dxgi {
           return true;
         };
         while (!stopped()) {
-          if (!emitter.healthy() || shutter_frames.failed()) {
+          if (!emitter.healthy() || shutter_pairs.failed()) {
             fail("USB emitter or shared stereo packet became unavailable");
             break;
           }
@@ -11069,7 +11323,13 @@ namespace platf::dxgi {
           // The current packet stays keyed-locked through both eyes, including all repeated
           // refreshes. Publishing another capture can never change the second eye of this pair.
           if (!pair || (has_displayed && eye_clock.starts_pair())) {
-            pair = shutter_frames.acquire_pair();
+            pair = shutter_pairs.acquire_pair([&](const std::shared_ptr<switch_request_t> &request) {
+              if (acquiring || !left_eye || !switch_is_current(request)) {
+                return false;
+              }
+              auto expected = switch_state_e::requested;
+              return request->state.compare_exchange_strong(expected, switch_state_e::adopted);
+            });
           }
           if (!pair) {
             if (has_displayed) {
@@ -11395,6 +11655,23 @@ namespace platf::dxgi {
             break;
           }
           set_timing_outcome(local_shutter_slot_timing_t::outcome_e::signalled);
+          if (!left_eye && has_displayed && !shutter_pair_presented.load(std::memory_order_relaxed)) {
+            shutter_pair_presented.store(true, std::memory_order_release);
+          }
+          if (const auto &request = shutter_pairs.current_request(); request && request->state.load() == switch_state_e::adopted) {
+            if (left_eye) {
+              confirmed_left_source = request;
+            } else if (request == confirmed_left_source && switch_is_current(request)) {
+              auto expected = switch_state_e::adopted;
+              const auto previous_mode = source_switch->presented_mode.exchange(request->sbs_mode);
+              if (!request->state.compare_exchange_strong(expected, switch_state_e::presented)) {
+                // Cancellation won the acknowledgement race. A later attempt starts from
+                // the last confirmed mode after this thread has joined.
+                source_switch->presented_mode.store(previous_mode);
+              }
+              confirmed_left_source.reset();
+            }
+          }
           ++confirmed_eye_commands;
           maximum_confirmed_refresh_delta = std::max(maximum_confirmed_refresh_delta, confirmed_refresh_delta);
           // The eye before this one was meant to last previous_eye_presents refreshes. Elapsed
@@ -11507,6 +11784,49 @@ namespace platf::dxgi {
     std::shared_ptr<platf::img_t> retained_presenter_source;
     detail::local_presenter_retry_state_t presenter_retry;
     detail::local_presenter_schedule_t presenter_schedule {capture_refresh_millihz};
+    bool replacement_published = false;
+    const auto prepare_requested_source = [&]() {
+      // A request that raced a capture reinitialization must wait for this attempt's own
+      // confirmed pair. An empty initial ring cannot anchor a continuing shutter clock.
+      if (!source_switch || !shutter_pair_presented.load(std::memory_order_acquire)) {
+        return true;
+      }
+      if (shutter_source->request && shutter_source->request->state.load() == switch_state_e::presented) {
+        retired_shutter_source.reset();
+      }
+      const auto request = source_switch->request.load();
+      if (!request || request == shutter_source->request || request->state.load() != switch_state_e::requested) {
+        return true;
+      }
+      if (!switch_is_current(request) || request->sbs_mode == producer_mode ||
+          (request->sbs_mode != ::video::SBS_AI && request->sbs_mode != ::video::SBS_GAME_SBS)) {
+        mark_switch_failed(request);
+        return false;
+      }
+
+      // The old converter can retire its estimator on a background thread. The replacement
+      // owns a distinct immediate context and starts with fresh input and depth authority.
+      // Completion of the old ring is independent of either converter's destruction.
+      converter.reset();
+      auto ready = std::make_shared<safe::event_t<bool>>();
+      auto replacement = open_converter(request->sbs_mode, ready);
+      auto replacement_source = replacement ? open_shutter_source(replacement->device.get(), request) : nullptr;
+      if (!replacement_source || !switch_is_current(request) || request->state.load() != switch_state_e::requested) {
+        mark_switch_failed(request);
+        return false;
+      }
+      retired_shutter_source = std::exchange(shutter_source, std::move(replacement_source));
+      converter = std::move(replacement);
+      depth_pipeline_ready_event = std::move(ready);
+      producer_mode = request->sbs_mode;
+      replacement_published = false;
+      presenter_retry = {};
+      presenter_schedule = detail::local_presenter_schedule_t {capture_refresh_millihz};
+      if (retained_presenter_source) {
+        presenter_retry.observe_source();
+      }
+      return true;
+    };
     auto present_stats_started = diagnostics_enabled ? std::chrono::steady_clock::now() :
                                                        std::chrono::steady_clock::time_point {};
     auto log_present_stats = [&]() {
@@ -11537,7 +11857,7 @@ namespace platf::dxgi {
       if (stop_token.stop_requested() || window_closed) {
         return false;
       }
-      if (config.frame_sequential && (shutter_failed.load(std::memory_order_acquire) || shutter_frames.failed())) {
+      if (config.frame_sequential && (shutter_failed.load(std::memory_order_acquire) || shutter_pairs.failed())) {
         return false;
       }
       if (frame_captured) {
@@ -11553,9 +11873,22 @@ namespace platf::dxgi {
         }
       }
 
+      if (!prepare_requested_source() || !converter) {
+        return true;
+      }
+      if (shutter_source && shutter_source->request) {
+        const auto &request = shutter_source->request;
+        const auto state = request->state.load();
+        if (state != switch_state_e::presented &&
+            ((state != switch_state_e::requested && state != switch_state_e::adopted) || !switch_is_current(request))) {
+          mark_switch_failed(request);
+          return true;
+        }
+      }
+
       const bool depth_pipeline_ready =
         depth_pipeline_ready_event && depth_pipeline_ready_event->peek();
-      const bool conversion_poll_pending = converter.needs_conversion_poll();
+      const bool conversion_poll_pending = converter->needs_conversion_poll();
       if (!presenter_retry.should_process(
             static_cast<bool>(retained_presenter_source),
             depth_pipeline_ready,
@@ -11594,24 +11927,41 @@ namespace platf::dxgi {
         // Capture/conversion is a producer, never the physical eye clock. If both packets are
         // owned, retain the newest source and service it later rather than queueing GPU work or
         // blocking the independent scanout thread.
-        auto *slot = shutter_frames.acquire_producer();
+        auto &frames = shutter_source->ring;
+        const auto source_failure = [&]() {
+          const auto &request = shutter_source->request;
+          if (request && request->state.load() != switch_state_e::presented) {
+            mark_switch_failed(request);
+            return true;
+          }
+          return false;
+        };
+        auto *slot = frames.acquire_producer();
         if (!slot) {
-          return !shutter_frames.failed();
+          return !frames.failed() || source_failure();
         }
         if (depth_pipeline_ready && depth_pipeline_ready_event) {
           depth_pipeline_ready_event->pop(0ms);
         }
-        const auto deadline = config.sbs_mode == ::video::SBS_AI ?
+        const auto deadline = producer_mode == ::video::SBS_AI ?
                                 std::optional {presenter_schedule.begin_frame(std::chrono::steady_clock::now())} :
                                 std::nullopt;
-        const bool converted = converter.convert_rgb(
+        const bool converted = converter->convert_rgb(
                                  *retained_presenter_source,
                                  slot->producer_texture.Get(), slot->producer_target.Get(),
                                  config.hdr, deadline
                                ) == 0;
-        if (!shutter_frames.publish(*slot, converted, converter.device_ctx.get()) || !converted) {
+        if (!frames.publish(*slot, converted, converter->device_ctx.get()) || !converted) {
           BOOST_LOG(error) << "Local shutter monitor failed to publish a complete stereo pair."sv;
-          return false;
+          return source_failure();
+        }
+        if (shutter_source->request && !replacement_published) {
+          if (!switch_is_current(shutter_source->request)) {
+            mark_switch_failed(shutter_source->request);
+            return true;
+          }
+          shutter_pairs.publish(shutter_source);
+          replacement_published = true;
         }
         presenter_retry.record_slot_acquired();
         presenter_retry.record_converted();
@@ -11644,7 +11994,7 @@ namespace platf::dxgi {
 
       // Start the render budget only after DXGI admits this draw. Calls that still own a busy
       // Present retain their original target, including when a newer captured source replaces it.
-      const auto presentation_target = config.sbs_mode == ::video::SBS_AI ?
+      const auto presentation_target = producer_mode == ::video::SBS_AI ?
                                          std::optional {presenter_schedule.begin_frame(std::chrono::steady_clock::now())} :
                                          std::nullopt;
 
@@ -11662,7 +12012,7 @@ namespace platf::dxgi {
           // ready during conversion must remain armed for the next static-source timeout.
           depth_pipeline_ready_event->pop(0ms);
         }
-        if (converter.convert_rgb(*retained_presenter_source, backbuffer.Get(), backbuffer_rtv.Get(), config.hdr, presentation_target)) {
+        if (converter->convert_rgb(*retained_presenter_source, backbuffer.Get(), backbuffer_rtv.Get(), config.hdr, presentation_target)) {
           BOOST_LOG(error) << "Local AR presenter failed to convert a captured frame."sv;
           return false;
         }
@@ -11709,13 +12059,14 @@ namespace platf::dxgi {
     const auto capture_backend = display->capture_backend();
     const auto capture_started = std::chrono::steady_clock::now();
     const auto has_pending_work = [&]() {
-      return (config.frame_sequential && (shutter_failed.load(std::memory_order_acquire) || shutter_frames.failed())) ||
-             presenter_retry.should_process(
+      const auto request = source_switch ? source_switch->request.load() : nullptr;
+      return (config.frame_sequential && (shutter_failed.load(std::memory_order_acquire) || shutter_pairs.failed())) ||
+             (request && request != shutter_source->request && request->state.load() == switch_state_e::requested) ||
+             (converter && (presenter_retry.should_process(
                static_cast<bool>(retained_presenter_source),
                depth_pipeline_ready_event && depth_pipeline_ready_event->peek(),
-               converter.needs_conversion_poll()
-             ) ||
-             (retained_presenter_source && converter.has_pending_depth_pipeline_build());
+               converter->needs_conversion_poll()
+             ) || (retained_presenter_source && converter->has_pending_depth_pipeline_build())));
     };
     const auto capture_status = dxgi_display->capture_with_pending_work(
       push_image,
@@ -11734,7 +12085,7 @@ namespace platf::dxgi {
     if (config.on_quiesced) {
       config.on_quiesced();
     }
-    if (config.frame_sequential && (shutter_failed.load(std::memory_order_acquire) || shutter_frames.failed())) {
+    if (config.frame_sequential && (shutter_failed.load(std::memory_order_acquire) || shutter_pairs.failed())) {
       return local_presenter_result_e::error;
     }
     if (config.capture_failover && config.capture_failover->note_capture_result({
