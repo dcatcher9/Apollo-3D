@@ -77,6 +77,9 @@ namespace models::host_sbs_shader_cache {
   /** PE resource name for an entry owned by the given snapshot. */
   std::string bytecode_resource_name(const source_snapshot_t &sources, const shader_spec &spec);
 
+  /** Load only the executable resource for this exact source snapshot and program. */
+  bytecode_t get_embedded(const source_snapshot_t &sources, const shader_spec &spec);
+
   /**
    * Return cached bytecode from the executable, the writable cache, or compilation of this exact
    * source snapshot. The producer resolves each process-local key once.

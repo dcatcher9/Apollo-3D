@@ -94,6 +94,10 @@ Use `RelWithDebInfo` for live XR testing. It preserves symbols without the captu
 stalls of an unoptimized Debug build. Build directories must use the `cmake-build-` prefix because
 repository tooling uses it to distinguish generated artifacts.
 
+The Windows build embeds the conversion, cursor, and RGB presentation shaders. Optimized builds
+reuse that bytecode when the installed sources match the package. Debug builds and installations
+with local shader edits use the existing runtime compiler.
+
 The host build also builds the matching production Game 3D add-on from `tools/reshade` and
 bundles it with its licenses and installer in `tools/reshade` beside `sunshine.exe`. The first
 build fetches the pinned ReShade SDK and ImGui headers. ReShade's runtime is downloaded and

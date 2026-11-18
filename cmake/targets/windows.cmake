@@ -2,8 +2,8 @@
 include("${CMAKE_CURRENT_LIST_DIR}/windows_game3d.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/windows_text_hook.cmake")
 
-# Compile the source-pinned Host SBS shaders at build time using the same source
-# snapshots and D3D compiler as the live runtime. Embed the generated resources in each consumer.
+# Compile the Windows display and source-pinned Host SBS shaders at build time. Embed the
+# generated resources in each consumer using keys derived from the same source snapshots.
 add_executable(embed-host-sbs-shaders EXCLUDE_FROM_ALL
         "${CMAKE_SOURCE_DIR}/tools/embed_host_sbs_shaders.cpp"
         "${CMAKE_SOURCE_DIR}/src/host_sbs_shader_cache.cpp"
@@ -28,7 +28,7 @@ add_custom_command(
                 "${HOST_SBS_SHADER_RESOURCE}" "${HOST_SBS_SHADER_RESOURCE_DEPFILE}"
         DEPENDS embed-host-sbs-shaders
         DEPFILE "${HOST_SBS_SHADER_RESOURCE_DEPFILE}"
-        COMMENT "Preparing authenticated Host SBS shader resources"
+        COMMENT "Preparing Windows display and Host SBS shader resources"
         VERBATIM)
 add_library(host_sbs_shader_resources OBJECT "${HOST_SBS_SHADER_RESOURCE}")
 set_target_properties(host_sbs_shader_resources PROPERTIES INCLUDE_DIRECTORIES "")

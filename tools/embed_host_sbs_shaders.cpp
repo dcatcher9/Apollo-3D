@@ -1,8 +1,9 @@
-/** @file Build the resources for production Host SBS shaders. */
+/** @file Build the resources for Windows display and production Host SBS shaders. */
 
 #include "src/host_sbs_current_outline_runtime_programs.h"
 #include "src/host_sbs_shared_ui_warp_runtime.h"
 #include "src/logging.h"
+#include "src/platform/windows/display_shader_manifest.h"
 
 #include <cstdint>
 #include <filesystem>
@@ -108,6 +109,15 @@ namespace {
       shared_ui::text_game_closure,
       programs.bytecodes
     );
+    // Display shaders use the build's source closure as their resource key. Runtime can
+    // still compile an edited display shader without changing any pinned Host SBS contract.
+    const auto display_sources = cache::snapshot_sources(shader_root, platf::dxgi::display_shader_specs);
+    if (!display_sources) {
+      throw std::runtime_error("Could not snapshot Windows display shader sources");
+    }
+    for (const auto &spec : platf::dxgi::display_shader_specs) {
+      programs.bytecodes.push_back({display_sources, spec, {}, {}});
+    }
     outline::detail::prepare_bytecodes(programs.bytecodes);
 
     auto temporary = resource;
@@ -122,7 +132,7 @@ namespace {
     for (const auto &request : programs.bytecodes) {
       const auto name = cache::bytecode_resource_name(request.sources, request.spec);
       if (name.size() != 64u || !names.insert(name).second) {
-        throw std::runtime_error("Invalid or duplicate Host SBS shader resource name");
+        throw std::runtime_error("Invalid or duplicate shader resource name");
       }
       const auto &code = outline::detail::prepared_bytecode(request, request.spec.filename);
       write_shader(output, name, *code);
@@ -133,7 +143,7 @@ namespace {
     // output as it was before the build attempt.
     write_depfile(depfile, resource, dependencies);
     finish_output(output, temporary, resource);
-    std::cout << "Prepared " << names.size() << " authenticated Host SBS shader resources\n";
+    std::cout << "Prepared " << names.size() << " Windows display and Host SBS shader resources\n";
   }
 }  // namespace
 
@@ -147,7 +157,7 @@ int wmain(int argc, wchar_t **argv) {
     embed_shaders(argv[1], argv[2], argv[3]);
     return 0;
   } catch (const std::exception &error) {
-    std::cerr << "Could not embed Host SBS shaders: " << error.what() << '\n';
+    std::cerr << "Could not embed Windows display and Host SBS shaders: " << error.what() << '\n';
     return 1;
   }
 }

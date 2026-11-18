@@ -38,13 +38,16 @@
   #include <d3d11.h>
   #include <d3dcompiler.h>
   #include <src/nvenc/nvenc_d3d11.h>
+  #include <src/platform/windows/display.h>
   #include <src/platform/windows/display_config.h>
+  #include <src/platform/windows/display_shader_manifest.h>
   #include <wrl/client.h>
   #include <wincodec.h>
 #include <tests/fixtures/host_sbs_adaptive_camera_state.h>
 
 namespace platf::dxgi {
   int init();
+  blob_t compile_shader(LPCSTR file, LPCSTR entrypoint, LPCSTR shader_model);
 }
 #endif
 
@@ -612,6 +615,114 @@ TEST(DirectxShaderTest, LoadsPackagedProductionShadersWithoutRuntimeCompilation)
   EXPECT_EQ(rejected.persistent_hits, p010_loaded.persistent_hits);
   EXPECT_EQ(rejected.persistent_writes, p010_loaded.persistent_writes);
   EXPECT_EQ(rejected.compiled, p010_loaded.compiled);
+}
+
+TEST(DirectxShaderTest, LoadsPackagedDisplayShadersBitForBitWithoutRuntimeCompilation) {
+  using Microsoft::WRL::ComPtr;
+  using platf::dxgi::display_shader_specs;
+  namespace cache = models::host_sbs_shader_cache;
+  namespace fs = std::filesystem;
+
+  const auto unique = std::to_string(GetCurrentProcessId()) + "-" +
+                      std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+  const auto root = fs::temp_directory_path() / ("apollo-packaged-display-shaders-" + unique);
+  ASSERT_TRUE(fs::create_directory(root));
+  struct cleanup_t {
+    fs::path root;
+
+    ~cleanup_t() {
+      const auto *configured_cache = std::getenv("SUNSHINE_TEST_HOST_SBS_SHADER_CACHE");
+      cache::configure_persistent_cache(configured_cache ? configured_cache : "");
+      std::error_code ignored;
+      fs::remove_all(root, ignored);
+    }
+  } cleanup {root};
+
+  const auto source_root = fs::canonical(SUNSHINE_SHADERS_DIR);
+  const auto shipped = cache::snapshot_sources(source_root, display_shader_specs);
+  ASSERT_TRUE(shipped);
+  const auto shader_root = root / "assets" / "shaders" / "directx";
+  for (const auto &source : cache::source_paths(shipped)) {
+    const auto destination = shader_root / fs::relative(source, source_root);
+    fs::create_directories(destination.parent_path());
+    ASSERT_TRUE(fs::copy_file(source, destination));
+  }
+  const auto sources = cache::snapshot_sources(shader_root, display_shader_specs);
+  ASSERT_TRUE(sources);
+  ASSERT_EQ(cache::source_closure_sha256(sources), cache::source_closure_sha256(shipped));
+  const auto persistent = root / "cache";
+  cache::configure_persistent_cache(persistent);
+
+  const auto compile_direct = [](const fs::path &path, const cache::shader_spec &spec, UINT flags) {
+    ComPtr<ID3DBlob> shader;
+    ComPtr<ID3DBlob> diagnostics;
+    const auto status = D3DCompileFromFile(
+      path.c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, spec.entrypoint.data(),
+      spec.target.data(), flags, 0, &shader, &diagnostics
+    );
+    EXPECT_TRUE(SUCCEEDED(status)) << (diagnostics ?
+                                        static_cast<const char *>(diagnostics->GetBufferPointer()) : "");
+    return shader;
+  };
+  const auto before = cache::cache_statistics();
+  constexpr auto optimized_flags = D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3;
+  static_assert(display_shader_specs.size() == 29u);
+  for (const auto &spec : display_shader_specs) {
+    SCOPED_TRACE(std::string {spec.filename});
+    const auto embedded = cache::get_embedded(sources, spec);
+    ASSERT_TRUE(embedded);
+    const auto direct = compile_direct(shader_root / spec.filename, spec, optimized_flags);
+    ASSERT_TRUE(direct);
+    ASSERT_EQ(embedded->size(), direct->GetBufferSize());
+    EXPECT_EQ(std::memcmp(embedded->data(), direct->GetBufferPointer(), embedded->size()), 0);
+  }
+
+  const auto cursor = std::find_if(display_shader_specs.begin(), display_shader_specs.end(), [](const auto &spec) {
+    return spec.filename == "cursor_ps.hlsl";
+  });
+  ASSERT_NE(cursor, display_shader_specs.end());
+  const auto cursor_path = shader_root / cursor->filename;
+  constexpr std::string_view original_sample = "return cursor.Sample(def_sampler, input.tex_coord, 0);";
+  auto cursor_source = [&] {
+    std::ifstream input(cursor_path, std::ios::binary);
+    return std::string {std::istreambuf_iterator<char> {input}, std::istreambuf_iterator<char> {}};
+  }();
+  const auto sample = cursor_source.find(original_sample);
+  ASSERT_NE(sample, std::string::npos);
+  cursor_source.replace(sample, original_sample.size(), "return 0.5f * cursor.Sample(def_sampler, input.tex_coord, 0);");
+  std::ofstream edit(cursor_path, std::ios::binary | std::ios::trunc);
+  edit << cursor_source;
+  edit.close();
+  ASSERT_TRUE(edit.good());
+  const auto changed = cache::snapshot_sources(shader_root, display_shader_specs);
+  ASSERT_TRUE(changed);
+  ASSERT_NE(cache::source_closure_sha256(changed), cache::source_closure_sha256(sources));
+  EXPECT_FALSE(cache::get_embedded(changed, *cursor));
+  EXPECT_FALSE(cache::get_embedded(changed, display_shader_specs.front()));
+
+  const auto after = cache::cache_statistics();
+  EXPECT_EQ(after.embedded_hits - before.embedded_hits, display_shader_specs.size());
+  EXPECT_EQ(after.memory_hits, before.memory_hits);
+  EXPECT_EQ(after.persistent_hits, before.persistent_hits);
+  EXPECT_EQ(after.persistent_writes, before.persistent_writes);
+  EXPECT_EQ(after.rejected_artifacts, before.rejected_artifacts);
+  EXPECT_EQ(after.compiled, before.compiled);
+  EXPECT_FALSE(fs::exists(persistent));
+
+  const auto cursor_path_utf8 = cursor_path.u8string();
+  auto fallback = platf::dxgi::compile_shader(
+    reinterpret_cast<const char *>(cursor_path_utf8.c_str()), cursor->entrypoint.data(), cursor->target.data()
+  );
+  ASSERT_TRUE(fallback);
+#ifdef NDEBUG
+  constexpr auto fallback_flags = optimized_flags;
+#else
+  constexpr auto fallback_flags = D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+  const auto direct = compile_direct(cursor_path, *cursor, fallback_flags);
+  ASSERT_TRUE(direct);
+  ASSERT_EQ(fallback->GetBufferSize(), direct->GetBufferSize());
+  EXPECT_EQ(std::memcmp(fallback->GetBufferPointer(), direct->GetBufferPointer(), direct->GetBufferSize()), 0);
 }
 
 TEST(DirectxShaderTest, PersistentHostSbsCacheSurvivesProcessEquivalentRoots) {

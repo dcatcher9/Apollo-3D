@@ -32,6 +32,7 @@
 // local includes
 #include "display.h"
 #include "display_config.h"
+#include "display_shader_manifest.h"
 #include "foreground_window_region.h"
 #include "subtitle_context_policy.h"
 #include "game3d_debug_dump.h"
@@ -189,36 +190,10 @@ namespace platf::dxgi {
     return blend;
   }
 
-  blob_t convert_yuv420_packed_uv_type0_ps_hlsl;
-  blob_t convert_yuv420_packed_uv_type0_ps_linear_hlsl;
-  blob_t convert_yuv420_packed_uv_type0_ps_perceptual_quantizer_hlsl;
-  blob_t convert_yuv420_packed_uv_type0_vs_hlsl;
-  blob_t convert_yuv420_packed_uv_type0s_ps_hlsl;
-  blob_t convert_yuv420_packed_uv_type0s_ps_linear_hlsl;
-  blob_t convert_yuv420_packed_uv_type0s_ps_perceptual_quantizer_hlsl;
-  blob_t convert_yuv420_packed_uv_type0s_vs_hlsl;
-  blob_t convert_yuv420_planar_y_ps_hlsl;
-  blob_t convert_yuv420_planar_y_ps_linear_hlsl;
-  blob_t convert_yuv420_planar_y_ps_perceptual_quantizer_hlsl;
-  blob_t convert_yuv420_planar_y_vs_hlsl;
-  // Game 3D "pq" exports (Rec.2020 ST 2084 code values): HDR streams pass the codes through.
-  blob_t convert_yuv420_packed_uv_type0_ps_pq_input_linear_hlsl;
-  blob_t convert_yuv420_packed_uv_type0_ps_pq_input_perceptual_quantizer_hlsl;
-  blob_t convert_yuv420_packed_uv_type0s_ps_pq_input_linear_hlsl;
-  blob_t convert_yuv420_packed_uv_type0s_ps_pq_input_perceptual_quantizer_hlsl;
-  blob_t convert_yuv420_planar_y_ps_pq_input_linear_hlsl;
-  blob_t convert_yuv420_planar_y_ps_pq_input_perceptual_quantizer_hlsl;
-  blob_t rgb_present_pq_input_to_linear_ps_hlsl;
-  blob_t rgb_present_pq_input_to_srgb_ps_hlsl;
-  blob_t sbs_packed_resample_pq_input_ps_hlsl;
-  blob_t pq_input_to_scrgb_ps_hlsl;
-  blob_t cursor_ps_hlsl;
-  blob_t cursor_ps_normalize_white_hlsl;
-  blob_t sbs_packed_resample_ps_hlsl;
-  blob_t rgb_present_linear_to_srgb_ps_hlsl;
-  blob_t rgb_present_hdr_to_srgb_ps_hlsl;
-  blob_t rgb_present_srgb_to_linear_ps_hlsl;
-  blob_t cursor_vs_hlsl;
+#define DISPLAY_SHADER_BLOB(stem, stage) blob_t stem##_hlsl;
+  WINDOWS_DISPLAY_SHADERS(DISPLAY_SHADER_BLOB)
+#undef DISPLAY_SHADER_BLOB
+
   // Authenticated production Host SBS V2 shaders. The renderer closure covers the warp pixel
   // shader plus the shared fullscreen vertex shader; the independent fallback closure covers the
   // flat-identity pixel shader plus the same vertex shader. Dump-only entry points are
@@ -12960,42 +12935,38 @@ namespace platf::dxgi {
   }
 
   int init() {
-    BOOST_LOG(info) << "Compiling shaders..."sv;
+    BOOST_LOG(info) << "Loading Windows display shaders..."sv;
+    namespace cache = models::host_sbs_shader_cache;
 
-#define compile_vertex_shader_helper(x) \
-  if (!(x##_hlsl = compile_vertex_shader(SUNSHINE_SHADERS_DIR "/" #x ".hlsl"))) \
-    return -1;
-#define compile_pixel_shader_helper(x) \
-  if (!(x##_hlsl = compile_pixel_shader(SUNSHINE_SHADERS_DIR "/" #x ".hlsl"))) \
-    return -1;
-    compile_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps);
-    compile_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_linear);
-    compile_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_perceptual_quantizer);
-    compile_vertex_shader_helper(convert_yuv420_packed_uv_type0_vs);
-    compile_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps);
-    compile_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_linear);
-    compile_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_perceptual_quantizer);
-    compile_vertex_shader_helper(convert_yuv420_packed_uv_type0s_vs);
-    compile_pixel_shader_helper(convert_yuv420_planar_y_ps);
-    compile_pixel_shader_helper(convert_yuv420_planar_y_ps_linear);
-    compile_pixel_shader_helper(convert_yuv420_planar_y_ps_perceptual_quantizer);
-    compile_vertex_shader_helper(convert_yuv420_planar_y_vs);
-    compile_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_pq_input_linear);
-    compile_pixel_shader_helper(convert_yuv420_packed_uv_type0_ps_pq_input_perceptual_quantizer);
-    compile_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_pq_input_linear);
-    compile_pixel_shader_helper(convert_yuv420_packed_uv_type0s_ps_pq_input_perceptual_quantizer);
-    compile_pixel_shader_helper(convert_yuv420_planar_y_ps_pq_input_linear);
-    compile_pixel_shader_helper(convert_yuv420_planar_y_ps_pq_input_perceptual_quantizer);
-    compile_pixel_shader_helper(rgb_present_pq_input_to_linear_ps);
-    compile_pixel_shader_helper(rgb_present_pq_input_to_srgb_ps);
-    compile_pixel_shader_helper(sbs_packed_resample_pq_input_ps);
-    compile_pixel_shader_helper(pq_input_to_scrgb_ps);
-    compile_pixel_shader_helper(cursor_ps);
-    compile_pixel_shader_helper(cursor_ps_normalize_white);
-    compile_pixel_shader_helper(sbs_packed_resample_ps);
-    compile_pixel_shader_helper(rgb_present_linear_to_srgb_ps);
-    compile_pixel_shader_helper(rgb_present_hdr_to_srgb_ps);
-    compile_pixel_shader_helper(rgb_present_srgb_to_linear_ps);
+#define DISPLAY_SHADER_TARGET(stem, stage) std::addressof(stem##_hlsl),
+    const std::array targets {WINDOWS_DISPLAY_SHADERS(DISPLAY_SHADER_TARGET)};
+#undef DISPLAY_SHADER_TARGET
+    static_assert(targets.size() == display_shader_specs.size());
+
+    std::size_t embedded_count = 0u;
+#ifdef NDEBUG
+    const auto display_sources = cache::snapshot_sources(SUNSHINE_SHADERS_DIR, display_shader_specs);
+#endif
+    for (std::size_t index = 0u; index < targets.size(); ++index) {
+      const auto &spec = display_shader_specs[index];
+      blob_t bytecode;
+#ifdef NDEBUG
+      const auto embedded = cache::get_embedded(display_sources, spec);
+      if (embedded && SUCCEEDED(D3DCreateBlob(embedded->size(), &bytecode))) {
+        std::memcpy(bytecode->GetBufferPointer(), embedded->data(), embedded->size());
+        ++embedded_count;
+      }
+#endif
+      if (!bytecode) {
+        const auto path = SUNSHINE_SHADERS_DIR "/" + std::string {spec.filename};
+        bytecode = compile_shader(path.c_str(), spec.entrypoint.data(), spec.target.data());
+        if (!bytecode) {
+          return -1;
+        }
+      }
+      *targets[index] = std::move(bytecode);
+    }
+
     sbs_reprojection_v2_live_ps_hlsl.reset();
     sbs_reprojection_v2_live_source_closure_sha256.clear();
     sbs_reprojection_v2_p010_y_ps_hlsl.reset();
@@ -13003,7 +12974,6 @@ namespace platf::dxgi {
     sbs_flat_identity_ps_hlsl.reset();
     sbs_reprojection_vs_hlsl.reset();
 
-    namespace cache = models::host_sbs_shader_cache;
     {
       // Host AI remains available independently of the local-AR provider selection. Game
       // converters never instantiate this renderer, but a later Host AI session may need it.
@@ -13106,12 +13076,8 @@ namespace platf::dxgi {
         return -1;
       }
     }
-    compile_vertex_shader_helper(cursor_vs);
-
-    BOOST_LOG(info) << "Compiled shaders"sv;
-
-#undef compile_vertex_shader_helper
-#undef compile_pixel_shader_helper
+    BOOST_LOG(info) << "Windows display shaders ready (embedded="sv << embedded_count
+                    << ", runtime_compiled="sv << display_shader_specs.size() - embedded_count << ")."sv;
 
     return 0;
   }

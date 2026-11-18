@@ -344,7 +344,7 @@ namespace models::host_sbs_shader_cache {
       }
       auto bytecode = std::make_shared<std::vector<unsigned char>>(data, data + size);
       if (!bytecode_matches_target(*bytecode, spec.target)) {
-        BOOST_LOG(warning) << "Invalid Host SBS bytecode resource " << name;
+        BOOST_LOG(warning) << "Invalid Direct3D bytecode resource " << name;
         return {};
       }
       embedded_hit_count.fetch_add(1u, std::memory_order_relaxed);
@@ -737,6 +737,11 @@ namespace models::host_sbs_shader_cache {
   std::string bytecode_resource_name(const source_snapshot_t &sources, const shader_spec &spec) {
     const auto *selected = sources ? find_owned_spec(*sources, spec) : nullptr;
     return selected ? resource_name(bytecode_cache_key(*sources, *selected)) : std::string {};
+  }
+
+  bytecode_t get_embedded(const source_snapshot_t &sources, const shader_spec &spec) {
+    const auto *selected = sources ? find_owned_spec(*sources, spec) : nullptr;
+    return selected ? load_embedded_artifact(bytecode_cache_key(*sources, *selected), *selected) : bytecode_t {};
   }
 
   bytecode_t get(
