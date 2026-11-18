@@ -457,12 +457,13 @@ matte membership, and protected Final is not the production renderer's warp inpu
 
 Because nothing rendered consumes them, live streaming does not run the field-pin projection,
 the two native distance passes, the proposal writer, the compatibility vertical copy or the
-subtitle horizontal guard on an ordinary observation. It publishes exact Base bits through the
-distinct Final texture instead, as suppressed observations already do, and marks the result's
-conditioning diagnostics as not current. The passes run while completing an observation that a
-Dump 3D request snapshots, and on every observation in the benchmark harness, conversion worker
-and native tests, whose estimators keep the default always-on policy. A dump is published only
-from a completion whose diagnostics are current (or whose subtitle work was suppressed), so
+subtitle horizontal guard on an ordinary observation. Ordinary and suppressed completions expose
+the immutable Base view as Final and carry no current conditioning diagnostics. The estimator
+allocates the separate conditioned Final texture when first completing an observation that needs
+it. The passes run while completing an observation that a Dump 3D request snapshots, and on eligible
+observations in the benchmark harness, conversion worker and native tests, whose estimators keep
+the default always-on policy. A dump uses the separate Final only for current diagnostics. When
+subtitle work was suppressed, the dump stages Final from Base, so
 packaged `shadow_final_parallax.f32`, pins, distance and Gaussian artifacts keep their meaning.
 Renderer presence gates and cached-geometry reuse test Base, not Final. The harness accepts
 `--subtitle-conditioning-live-policy` only as a parity probe of the live policy; its Final then

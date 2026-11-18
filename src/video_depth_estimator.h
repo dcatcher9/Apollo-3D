@@ -907,10 +907,9 @@ namespace models {
     // the vertical pass, vertical_majorant is the upper-envelope diagnostic, and
     // vertical_conditioned is the fixed upper/lower vertical share consumed by the pure row
     // majorant. base_final_parallax is independently observable as the ordinary post-limiter field
-    // for explicit diagnostics and padded ROI. Subtitle conditioning always writes a separate
-    // complete texture, so base_final_parallax remains immutable. final_parallax is that atomic
-    // OCR-conditioned diagnostic publication. The renderer uses Base plus the joined native
-    // glyph matte and an analytic UI-plane sample. Adaptive reuse holds
+    // for explicit diagnostics and padded ROI. When requested, subtitle conditioning writes a
+    // separate complete texture, so Base remains immutable. The renderer uses Base plus the
+    // joined native glyph matte and an analytic UI-plane sample. Adaptive reuse holds
     // the complete DAV2/OCR/SLR/final tuple; a shared refresh updates the analysis bundle together.
     // In ROI mode
     // both are crop-local producer q; Base and the glyph tuple become renderer authority through
@@ -922,10 +921,16 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_vertical_majorant;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_vertical_conditioned;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_base_final_parallax;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_final_parallax;
-    /// True only when this completion ran the diagnostic conditioner. Otherwise Final holds exact
-    /// Base and the field-pin, distance and Gaussian views are not current evidence.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_conditioned_final_parallax;
+    /// True only when the completed tuple carries current field-pin, distance and Gaussian evidence.
     bool subtitle_conditioning_diagnostics_current = false;
+
+    /// Use the separate diagnostic field when published, and the immutable Base field otherwise.
+    [[nodiscard]] ID3D11ShaderResourceView *final_parallax() const noexcept {
+      return shadow_conditioned_final_parallax ? shadow_conditioned_final_parallax.Get() :
+                                                 shadow_base_final_parallax.Get();
+    }
+
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_state;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_frame_stats;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ocr_box_record;  ///< Exact-frame OCR8 only when subtitle_evidence_is_exact_frame() succeeds.

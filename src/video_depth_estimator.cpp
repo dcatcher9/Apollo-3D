@@ -969,7 +969,9 @@ namespace models {
     if (!result.completed_frame_valid || result.completed_frame_id == 0u ||
         !result.parallax_v2_producer_active || !result.shadow_candidate_parallax ||
         !result.shadow_vertical_majorant || !result.shadow_vertical_conditioned ||
-        !result.shadow_base_final_parallax || !result.shadow_final_parallax ||
+        !result.shadow_base_final_parallax ||
+        (result.subtitle_conditioning_diagnostics_current &&
+         !result.shadow_conditioned_final_parallax) ||
         !result.shadow_state || !result.shadow_frame_stats ||
         !result.raw_model_provenance || !result.composite_depth_runtime_provenance ||
         !result.parallax_v2_shader_provenance ||
@@ -1025,9 +1027,13 @@ namespace models {
       result.shadow_vertical_majorant.Get(),
       result.shadow_vertical_conditioned.Get(),
       result.shadow_base_final_parallax.Get(),
-      result.shadow_final_parallax.Get(),
+      result.shadow_conditioned_final_parallax.Get(),
     };
     for (std::size_t index = 0u; index < field_views.size(); ++index) {
+      if (!field_views[index]) {
+        // Only the separate conditioned field may be absent.
+        continue;
+      }
       ID3D11Resource *resource = nullptr;
       if (!r32_float_texture_srv_matches(
             field_views[index],
@@ -3383,7 +3389,7 @@ namespace models {
       subtitle_contour_field_mask, subtitle_contour_horizontal_distance,
       subtitle_contour_distance, subtitle_contour_source_snapshot,
       subtitle_gaussian_weight, subtitle_gaussian_blend,
-      subtitle_gaussian_vertical_conditioned;
+      subtitle_gaussian_vertical_conditioned, subtitle_conditioned_final;
     d3d_buffer_views_t subtitle_contour_identity, subtitle_contour_probability_snapshot,
       subtitle_gaussian_control;
     struct completed_contour_views_t {
@@ -3585,9 +3591,6 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_coordinate_v2_final_tex;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_coordinate_v2_final_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_coordinate_v2_final_srv;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> subtitle_conditioned_tex;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subtitle_conditioned_uav;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_conditioned_srv;
     Microsoft::WRL::ComPtr<ID3D11Buffer> subtitle_locator_state_buf;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subtitle_locator_state_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_locator_state_srv;
@@ -3658,7 +3661,7 @@ namespace models {
     // Field pin, native distance, Gaussian proposal and both compatibility limiters feed only
     // Dump 3D and harness artifacts; the renderer binds Base. Live streaming runs them only
     // while completing an observation that a Dump 3D request snapshots (or one a dump forced)
-    // and otherwise publishes exact Base as the Final field.
+    // and otherwise exposes the same immutable Base view for Final.
     bool subtitle_conditioning_diagnostics_always = true;
     bool completion_dump_snapshot_requested = false;
     bool completed_subtitle_conditioning_diagnostics = false;
@@ -6376,9 +6379,7 @@ namespace models {
       depth_coordinate_v2_final_tex.Reset();
       depth_coordinate_v2_final_uav.Reset();
       depth_coordinate_v2_final_srv.Reset();
-      subtitle_conditioned_tex.Reset();
-      subtitle_conditioned_uav.Reset();
-      subtitle_conditioned_srv.Reset();
+      subtitle_conditioned_final.reset();
       subtitle_locator_state_buf.Reset();
       subtitle_locator_state_uav.Reset();
       subtitle_locator_state_srv.Reset();
@@ -7031,8 +7032,8 @@ namespace models {
         }
       }
       const float zero_float[4] = {};
-      if (subtitle_conditioned_uav) {
-        context->ClearUnorderedAccessViewFloat(subtitle_conditioned_uav.Get(), zero_float);
+      if (subtitle_conditioned_final.uav) {
+        context->ClearUnorderedAccessViewFloat(subtitle_conditioned_final.uav.Get(), zero_float);
       }
       completed_subtitle_conditioning_diagnostics = false;
       // Disabled completions may expose these initialized views only as unused diagnostics.
@@ -7115,28 +7116,6 @@ namespace models {
           subtitle_condition_params_srv,
           subtitle_condition_params_uav
         );
-      }
-      if (!subtitle_conditioned_tex || !subtitle_conditioned_srv ||
-          !subtitle_conditioned_uav) {
-        D3D11_TEXTURE2D_DESC desc {};
-        desc.Width = static_cast<UINT>(field_w);
-        desc.Height = static_cast<UINT>(field_h);
-        desc.MipLevels = 1;
-        desc.ArraySize = 1;
-        desc.Format = DXGI_FORMAT_R32_FLOAT;
-        desc.SampleDesc.Count = 1;
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-        resources_ok = resources_ok &&
-          SUCCEEDED(device->CreateTexture2D(&desc, nullptr, &subtitle_conditioned_tex)) &&
-          SUCCEEDED(device->CreateShaderResourceView(
-            subtitle_conditioned_tex.Get(), nullptr,
-                         &subtitle_conditioned_srv
-                       )) &&
-          SUCCEEDED(device->CreateUnorderedAccessView(
-            subtitle_conditioned_tex.Get(), nullptr,
-                         &subtitle_conditioned_uav
-                       ));
       }
       // An exact-current abstention needs the OCR identity constants even when the optional
       // detector never acquired an engine or its interop buffers.
@@ -7827,6 +7806,7 @@ namespace models {
     bool dispatch_subtitle_contours(
       const bool ocr_record_submitted,
       const bool input_domain_reset,
+      const bool conditioning_diagnostics,
       d3d_perf_slot *perf_slot = nullptr
     ) {
       if (!subtitle_contour_temporal_cs || !subtitle_glyph_matte_cs || !subtitle_contour_project_cs || !subtitle_contour_history_cs ||
@@ -7904,7 +7884,6 @@ namespace models {
                                near_identical_gpu_subtitle_condition_grid16_byte_offset);
       context->CSSetUnorderedAccessViews(6u, 1u, &null_uav, nullptr);
 
-      const bool conditioning_diagnostics = subtitle_conditioning_diagnostics_requested();
       if (conditioning_diagnostics) {
         output = subtitle_contour_field_mask.uav.Get();
         context->CSSetUnorderedAccessViews(1u, 1u, &output, nullptr);
@@ -7998,21 +7977,42 @@ namespace models {
       return true;
     }
 
+    bool ensure_subtitle_conditioned_final() {
+      if (subtitle_conditioned_final.ready()) {
+        return true;
+      }
+      D3D11_TEXTURE2D_DESC desc {};
+      desc.Width = static_cast<UINT>(field_w);
+      desc.Height = static_cast<UINT>(field_h);
+      desc.MipLevels = 1;
+      desc.ArraySize = 1;
+      desc.Format = DXGI_FORMAT_R32_FLOAT;
+      desc.SampleDesc.Count = 1;
+      desc.Usage = D3D11_USAGE_DEFAULT;
+      desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+      d3d_texture_views_t next;
+      if (FAILED(device->CreateTexture2D(&desc, nullptr, &next.texture)) ||
+          FAILED(device->CreateShaderResourceView(next.texture.Get(), nullptr, &next.srv)) ||
+          FAILED(device->CreateUnorderedAccessView(next.texture.Get(), nullptr, &next.uav))) {
+        return false;
+      }
+      subtitle_conditioned_final = std::move(next);
+      return true;
+    }
+
     bool dispatch_subtitle_conditioner(
       const bool ocr_record_submitted,
       const bool input_domain_reset,
       d3d_perf_slot *perf_slot = nullptr
     ) {
       // An authenticated abstention has no detector probability buffer. Its inactive OCR8
-      // record still advances the current identity and clears support before copying exact Base.
+      // record still advances current identity and clears support while rendering from Base.
       if (!subtitle_locator_resolve_cs || !subtitle_condition_cs ||
           !subtitle_gaussian_vertical_limit_cs || !subtitle_gaussian_horizontal_limit_cs ||
           !subtitle_locator_cbuffer || !subtitle_locator_state_srv ||
-          !subtitle_locator_state_uav || !subtitle_conditioned_srv ||
-          !subtitle_conditioned_uav || !depth_coordinate_v2_state_srv ||
+          !subtitle_locator_state_uav || !depth_coordinate_v2_state_srv ||
           !depth_coordinate_v2_final_srv ||
           !depth_coordinate_v2_final_uav ||
-          !depth_coordinate_v2_final_tex || !subtitle_conditioned_tex ||
           !subtitle_condition_params_srv || !subtitle_condition_params_uav ||
           !subtitle_gaussian_weight.ready() || !subtitle_gaussian_blend.ready() ||
           !subtitle_gaussian_vertical_conditioned.ready() || !subtitle_gaussian_control.ready() ||
@@ -8022,6 +8022,16 @@ namespace models {
           !subtitle_contour_probability_snapshot.ready() ||
           !depth_health_state_srv || !near_identical_transaction.dispatch) {
         return false;
+      }
+
+      bool conditioning_diagnostics = subtitle_conditioning_diagnostics_requested();
+      if (conditioning_diagnostics && !ensure_subtitle_conditioned_final()) {
+        BOOST_LOG(warning) << "Host SBS could not allocate the conditioned parallax diagnostic field.";
+        if (subtitle_conditioning_diagnostics_always) {
+          return false;
+        }
+        // A live dump can wait for a qualified observation while Base and native matte stay live.
+        conditioning_diagnostics = false;
       }
 
       const std::uint32_t source_width = pending_input_region.width();
@@ -8040,8 +8050,8 @@ namespace models {
         tensor_content.value_or(depth_tensor_content_rect_t {})
       );
       // Direct OCR8 coverage follows the current authenticated analysis field. An unsupported tensor or an
-      // unprojectable bottom crop has no subtitle authority; the complete condition writer still
-      // publishes Base exactly into the distinct live output texture.
+      // unprojectable bottom crop has no subtitle authority. If requested, diagnostics
+      // still produce a complete field with exact Base bits.
       const auto field_content = tensor_content.value_or(depth_tensor_content_rect_t {});
       const std::array<std::uint32_t, 20> constants {
         field_width,
@@ -8110,7 +8120,9 @@ namespace models {
       ID3D11UnorderedAccessView *null_resolve_uavs[3] = {};
       context->CSSetUnorderedAccessViews(2, 3, null_resolve_uavs, nullptr);
 
-      if (!dispatch_subtitle_contours(ocr_record_submitted, input_domain_reset, perf_slot)) {
+      if (!dispatch_subtitle_contours(
+            ocr_record_submitted, input_domain_reset, conditioning_diagnostics, perf_slot
+          )) {
         return false;
       }
       const auto retain_completed_contour = [&]() {
@@ -8127,12 +8139,10 @@ namespace models {
         };
         if(subtitle_selected_matte_commands){const auto v=selected_matte_views();completed_contour.research_selected_matte=v.matte;completed_contour.research_selected_matte_receipt=v.receipt;}
       };
-      if (!subtitle_conditioning_diagnostics_requested()) {
-        // No renderer consumes the conditioned field. Publish exact Base through the distinct
-        // Final texture, as suppressed observations do, and leave the diagnostic tuple unclaimed.
+      if (!conditioning_diagnostics) {
+        // No renderer consumes the conditioned field. The effective Final remains Base.
         ID3D11Buffer *null_constants[3] = {};
         context->CSSetConstantBuffers(0, 3, null_constants);
-        context->CopyResource(subtitle_conditioned_tex.Get(), depth_coordinate_v2_final_tex.Get());
         completed_subtitle_conditioning_diagnostics = false;
         retain_completed_contour();
         return true;
@@ -8192,7 +8202,7 @@ namespace models {
         subtitle_gaussian_vertical_conditioned.srv.Get(), nullptr,
         subtitle_gaussian_control.srv.Get(), depth_coordinate_v2_final_srv.Get(),
       };
-      ID3D11UnorderedAccessView *final_output = subtitle_conditioned_uav.Get();
+      ID3D11UnorderedAccessView *final_output = subtitle_conditioned_final.uav.Get();
       context->CSSetShaderResources(0u, 4u, horizontal_srvs);
       context->CSSetUnorderedAccessViews(0u, 1u, &final_output, nullptr);
       context->CSSetShader(subtitle_gaussian_horizontal_limit_cs.Get(), nullptr, 0u);
@@ -8596,8 +8606,10 @@ namespace models {
         r.shadow_vertical_majorant = depth_coordinate_v2_vertical_majorant_srv;
         r.shadow_vertical_conditioned = depth_coordinate_v2_vertical_conditioned_srv;
         r.shadow_base_final_parallax = depth_coordinate_v2_final_srv;
-        r.shadow_final_parallax = subtitle_conditioned_srv;
-        r.subtitle_conditioning_diagnostics_current = completed_subtitle_conditioning_diagnostics;
+        r.subtitle_conditioning_diagnostics_current = completed.valid && completed_subtitle_conditioning_diagnostics;
+        if (r.subtitle_conditioning_diagnostics_current) {
+          r.shadow_conditioned_final_parallax = subtitle_conditioned_final.srv;
+        }
         r.shadow_state = depth_coordinate_v2_state_srv;
         r.shadow_frame_stats = depth_coordinate_v2_frame_stats_srv;
         const auto calibration_shape = calibrated_dav2_shape();
@@ -9225,12 +9237,13 @@ namespace models {
              depth_coordinate_v2_vertical_majorant_uav.Get(),
              depth_coordinate_v2_vertical_conditioned_uav.Get(),
              depth_coordinate_v2_final_uav.Get(),
-             subtitle_conditioned_uav.Get(),
+             subtitle_conditioned_final.uav.Get(),
            }) {
         if (uav) {
           context->ClearUnorderedAccessViewFloat(uav, zero4);
         }
       }
+      completed_subtitle_conditioning_diagnostics = false;
     }
 
     bool prepare_pending_input_domain() {
@@ -9397,38 +9410,14 @@ namespace models {
         mark_d3d_parallax_start(perf_slot);
       }
       const bool base_ready = frame_stats_ready && dispatch_parallax_v2_producer(perf_slot);
-      bool trace_condition_executed = false;
-      if (base_ready) {
-        bool conditioner_ready = false;
-        if (!subtitle_work_suppressed) {
-          conditioner_ready = dispatch_subtitle_conditioner(
-            ocr_record_submitted,
-            input_domain_reset,
-            perf_slot
-          );
-          if (!conditioner_ready) {
-            mark_terminal_failure();
-            return false;
-          }
-          // For an opaque root this call submits only receipt-gated indirect work. The CPU must
-          // not claim that the device executed it; the trace shader derives that from CBRG.
-          trace_condition_executed = !subtitle_publication_branch_opaque;
-        }
-        if (!conditioner_ready) {
-          // Suppressed/disabled work skips the conditioner and advances no OCR/SLR state.
-          // Publish the fresh immutable Base through the same complete out-of-place texture used
-          // by every transaction class. Non-suppressed conditioner failure returned terminal above.
-          if (subtitle_conditioned_tex && depth_coordinate_v2_final_tex) {
-            context->CopyResource(
-              subtitle_conditioned_tex.Get(), depth_coordinate_v2_final_tex.Get()
-            );
-            completed_subtitle_conditioning_diagnostics = false;
-          } else {
-            mark_terminal_failure();
-            return false;
-          }
-        }
-      } else {
+      if (!base_ready) {
+        mark_terminal_failure();
+        return false;
+      }
+      if (subtitle_work_suppressed) {
+        // Preserve subtitle history and expose the new Base without a duplicate texture write.
+        completed_subtitle_conditioning_diagnostics = false;
+      } else if (!dispatch_subtitle_conditioner(ocr_record_submitted, input_domain_reset, perf_slot)) {
         mark_terminal_failure();
         return false;
       }
@@ -9441,7 +9430,8 @@ namespace models {
         .ocr_record_submitted =
           !subtitle_publication_branch_opaque && ocr_record_submitted,
         .subtitle_work_suppressed = subtitle_work_suppressed,
-        .condition_executed = trace_condition_executed,
+        // For opaque roots the trace shader derives execution from the device receipt.
+        .condition_executed = !subtitle_publication_branch_opaque && !subtitle_work_suppressed,
         .subtitle_branch_gated =
           subtitle_publication_branch_opaque && !subtitle_work_suppressed,
         .input_domain_reset = input_domain_reset,

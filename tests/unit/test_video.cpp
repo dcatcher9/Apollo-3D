@@ -1938,10 +1938,10 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
     EXPECT_TRUE(std::all_of(protection.begin(), protection.end(), [](auto word) { return word == 0u; }));
   }
   ASSERT_NE(baseline_completed.observation.shadow_base_final_parallax.Get(), nullptr);
-  ASSERT_NE(baseline_completed.observation.shadow_final_parallax.Get(), nullptr);
+  ASSERT_TRUE(baseline_completed.observation.shadow_conditioned_final_parallax);
   std::vector<std::uint32_t> base_words, final_words;
   ASSERT_TRUE(read_words(baseline_completed.observation.shadow_base_final_parallax.Get(), base_words));
-  ASSERT_TRUE(read_words(baseline_completed.observation.shadow_final_parallax.Get(), final_words));
+  ASSERT_TRUE(read_words(baseline_completed.observation.final_parallax(), final_words));
   EXPECT_EQ(final_words, base_words);
   // An idle encode/presentation iteration drains the shared readback without submitting another
   // frame. The next functional caller still receives the exact completed proof from the cache.
@@ -1972,6 +1972,7 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
   ASSERT_TRUE(baseline_receipt);
   ASSERT_TRUE(baseline_receipt->depth_cache_authorized());
   ASSERT_EQ(baseline_receipt->depth_owner_frame_id, baseline_frame_id);
+  estimator.set_subtitle_conditioning_diagnostics_always(false);
   ASSERT_TRUE(wait_until_reusable());
   const auto conditional = estimator.estimate_depth(
     conditional_source.Get(),
@@ -1994,6 +1995,10 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
 
   const auto conditional_completed = estimator.finish_pending_depth_for_evaluation();
   ASSERT_TRUE(conditional_completed.observation.completed_frame_valid);
+  EXPECT_TRUE(models::parallax_v2_result_is_authenticated(conditional_completed.observation));
+  EXPECT_FALSE(conditional_completed.observation.subtitle_conditioning_diagnostics_current);
+  EXPECT_FALSE(conditional_completed.observation.shadow_conditioned_final_parallax);
+  EXPECT_EQ(conditional_completed.observation.final_parallax(), conditional_completed.observation.shadow_base_final_parallax.Get());
   EXPECT_FALSE(estimator.publication_is_current(baseline_completed.observation.publication));
   const auto conditional_receipt = wait_for_publication(conditional_completed.observation);
   ASSERT_TRUE(conditional_receipt);
@@ -2106,6 +2111,10 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
   ASSERT_TRUE(changed_completed.observation.completed_frame_valid);
   EXPECT_EQ(changed_completed.observation.completed_frame_id, changed_frame_id);
   EXPECT_TRUE(changed_completed.observation.gpu_undecided_completion);
+  EXPECT_TRUE(models::parallax_v2_result_is_authenticated(changed_completed.observation));
+  EXPECT_FALSE(changed_completed.observation.subtitle_conditioning_diagnostics_current);
+  EXPECT_FALSE(changed_completed.observation.shadow_conditioned_final_parallax);
+  EXPECT_EQ(changed_completed.observation.final_parallax(), changed_completed.observation.shadow_base_final_parallax.Get());
   const auto changed_receipt = wait_for_publication(changed_completed.observation);
   ASSERT_TRUE(changed_receipt);
   EXPECT_EQ(changed_receipt->depth,
@@ -2381,7 +2390,7 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedThir
       result.subtitle_contour_history.Get(), result.subtitle_contour_source.Get(),
       result.subtitle_ocr_probability.Get(), result.subtitle_gaussian_weight.Get(),
       result.subtitle_gaussian_blend.Get(), result.subtitle_gaussian_vertical_conditioned.Get(),
-      result.subtitle_gaussian_control.Get(), result.shadow_final_parallax.Get(),
+      result.subtitle_gaussian_control.Get(), result.final_parallax(),
       result.ocr_box_record.Get(), result.subtitle_locator_state.Get(),
       result.subtitle_glyph_matte.Get(), result.subtitle_condition_params.Get()
     };
@@ -2772,7 +2781,7 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
       result.depth.Get(), result.depth_health_state.Get(), result.depth_frame_state.Get(), result.raw_model_depth.Get(),
       result.shadow_candidate_parallax.Get(), result.shadow_vertical_majorant.Get(),
       result.shadow_vertical_conditioned.Get(), result.shadow_base_final_parallax.Get(),
-      result.shadow_final_parallax.Get(), result.shadow_state.Get(), result.shadow_frame_stats.Get(),
+      result.final_parallax(), result.shadow_state.Get(), result.shadow_frame_stats.Get(),
       result.ocr_box_record.Get(), result.subtitle_locator_state.Get(), result.subtitle_contour_support.Get(),
       result.subtitle_contour_field_pin.Get(), result.subtitle_contour_distance.Get(),
       result.subtitle_contour_identity.Get(), result.subtitle_contour_history.Get(),
@@ -3279,6 +3288,33 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
   EXPECT_NE(owner->depth_owner_timestamp_us, original_owner_clock);
   verify_idle_hold();
   ASSERT_FALSE(HasFatalFailure());
+
+  // The actual OCR child and native matte still publish for live presentation after the
+  // diagnostic conditioner is disabled. The preceding conditioned view must stay out of it.
+  estimator.set_subtitle_conditioning_diagnostics_always(false);
+  ASSERT_TRUE(wait_until_reusable());
+  ++frame_id;
+  clock_us += 100000u;
+  const auto live = estimator.estimate_depth(larger_source.Get(), models::input_color_space::srgb,
+    frame_id, false, {}, models::depth_optional_work_mode_e::ordinary,
+    {.observation_timestamp_us = clock_us}, subtitle_context_generation);
+  ASSERT_TRUE(live.submission.inference_enqueued);
+  ASSERT_TRUE(live.submission.subtitle_ocr_inference_enqueued);
+  const auto live_completed = estimator.finish_pending_depth_for_evaluation();
+  const auto &live_observation = live_completed.observation;
+  ASSERT_TRUE(models::parallax_v2_result_is_authenticated(live_observation));
+  EXPECT_EQ(live_observation.completed_frame_id, frame_id);
+  EXPECT_FALSE(live_observation.subtitle_conditioning_diagnostics_current);
+  EXPECT_FALSE(live_observation.shadow_conditioned_final_parallax);
+  EXPECT_EQ(live_observation.final_parallax(), live_observation.shadow_base_final_parallax.Get());
+  ASSERT_TRUE(models::subtitle_evidence_is_exact_frame(live_observation));
+  payload_t live_matte;
+  ASSERT_TRUE(read_view(live_observation.subtitle_glyph_matte.Get(), live_matte));
+  EXPECT_TRUE(any_words(live_matte, false));
+  const auto live_receipt = wait_for_receipt(live_observation);
+  ASSERT_TRUE(live_receipt);
+  EXPECT_TRUE(live_receipt->subtitle_is_current());
+  EXPECT_EQ(live_receipt->subtitle_frame_id, frame_id);
 }
 
 TEST(TensorRtConditionalWrapperGpuTest, AllAuthenticatedShapesBuildAndExecute) {
@@ -3842,7 +3878,8 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   result.shadow_vertical_majorant = coarse_field_views[1];
   result.shadow_vertical_conditioned = coarse_field_views[2];
   result.shadow_base_final_parallax = coarse_field_views[3];
-  result.shadow_final_parallax = coarse_field_views[4];
+  result.shadow_conditioned_final_parallax = coarse_field_views[4];
+  result.subtitle_conditioning_diagnostics_current = true;
   result.shadow_state = view;
   result.shadow_frame_stats = view;
   result.ocr_box_record = view;
@@ -3924,7 +3961,7 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   refined_result.shadow_vertical_majorant = refined_field_views[1];
   refined_result.shadow_vertical_conditioned = refined_field_views[2];
   refined_result.shadow_base_final_parallax = refined_field_views[3];
-  refined_result.shadow_final_parallax = refined_field_views[4];
+  refined_result.shadow_conditioned_final_parallax = refined_field_views[4];
   refined_result.raw_width = 1540;
   refined_result.raw_height = 868;
   refined_result.field_width = 1540;
@@ -3979,7 +4016,7 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   fused_portrait_fallback.shadow_vertical_majorant = portrait_field_views[1];
   fused_portrait_fallback.shadow_vertical_conditioned = portrait_field_views[2];
   fused_portrait_fallback.shadow_base_final_parallax = portrait_field_views[3];
-  fused_portrait_fallback.shadow_final_parallax = portrait_field_views[4];
+  fused_portrait_fallback.shadow_conditioned_final_parallax = portrait_field_views[4];
   fused_portrait_fallback.raw_width = 868;
   fused_portrait_fallback.raw_height = 1540;
   fused_portrait_fallback.field_width = 868;
@@ -4050,6 +4087,8 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
 
   auto subtitle_suppressed = refined_result;
   subtitle_suppressed.subtitle_work_suppressed = true;
+  subtitle_suppressed.subtitle_conditioning_diagnostics_current = false;
+  subtitle_suppressed.shadow_conditioned_final_parallax.Reset();
   EXPECT_TRUE(models::parallax_v2_result_is_authenticated(subtitle_suppressed));
   EXPECT_FALSE(models::subtitle_evidence_is_exact_frame(subtitle_suppressed));
 
@@ -4060,11 +4099,18 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
     << "the CPU cannot distinguish an exact infer tuple from a held reuse tuple";
 
   auto missing_final = refined_result;
-  missing_final.shadow_final_parallax.Reset();
+  missing_final.shadow_conditioned_final_parallax.Reset();
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(missing_final));
 
+  auto live_base_only = missing_final;
+  live_base_only.subtitle_conditioning_diagnostics_current = false;
+  EXPECT_TRUE(models::parallax_v2_result_is_authenticated(live_base_only));
+  EXPECT_EQ(live_base_only.final_parallax(), live_base_only.shadow_base_final_parallax.Get());
+  live_base_only.shadow_base_final_parallax.Reset();
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(live_base_only));
+
   auto final_aliases_base = refined_result;
-  final_aliases_base.shadow_final_parallax = refined_result.shadow_base_final_parallax;
+  final_aliases_base.shadow_conditioned_final_parallax = refined_result.shadow_base_final_parallax;
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(final_aliases_base));
 
   auto wrong_field_extent = refined_result;
@@ -4117,8 +4163,8 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(refined_field_uses_coarse_texture));
 
   auto refined_field_aliases_stage = refined_result;
-  refined_field_aliases_stage.shadow_final_parallax =
-    refined_field_aliases_stage.shadow_base_final_parallax;
+  refined_field_aliases_stage.shadow_conditioned_final_parallax =
+    refined_field_aliases_stage.shadow_vertical_conditioned;
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(refined_field_aliases_stage));
 
   auto split_grid_portrait = fused_portrait_fallback;
@@ -4209,7 +4255,7 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
     supported_shape.shadow_vertical_majorant = supported_field_views[1];
     supported_shape.shadow_vertical_conditioned = supported_field_views[2];
     supported_shape.shadow_base_final_parallax = supported_field_views[3];
-    supported_shape.shadow_final_parallax = supported_field_views[4];
+    supported_shape.shadow_conditioned_final_parallax = supported_field_views[4];
     supported_shape.raw_width = width;
     supported_shape.raw_height = height;
     supported_shape.field_width = width;

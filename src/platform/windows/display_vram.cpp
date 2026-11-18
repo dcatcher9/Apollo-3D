@@ -3576,7 +3576,7 @@ namespace platf::dxgi {
             const bool complete_dump_snapshot =
               matched_render_slot && dump_warp_depth && est.model_input_snapshot &&
               est.raw_model_depth_snapshot && est.raw_model_provenance &&
-              est.shadow_final_parallax &&
+              est.final_parallax() &&
               (est.subtitle_conditioning_diagnostics_current || est.subtitle_work_suppressed) &&
               v2_renderer_selected &&
               models::parallax_v2_result_is_authenticated(est);
@@ -3671,7 +3671,7 @@ namespace platf::dxgi {
                   est.shadow_vertical_conditioned.Get();
                 dump_frame.shadow_base_final_parallax =
                   est.shadow_base_final_parallax.Get();
-                dump_frame.shadow_final_parallax = est.shadow_final_parallax.Get();
+                dump_frame.shadow_final_parallax = est.final_parallax();
                 dump_frame.ocr_box_record = est.ocr_box_record.Get();
                 dump_frame.subtitle_locator_state =
                   est.subtitle_locator_state.Get();

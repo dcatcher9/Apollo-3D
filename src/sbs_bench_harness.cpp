@@ -5031,7 +5031,7 @@ namespace sbs_bench {
       if (!write_field(result.shadow_candidate_parallax.Get(), "candidate.f32") ||
           !write_field(result.shadow_vertical_conditioned.Get(), "vertical.f32") ||
           !write_field(result.shadow_base_final_parallax.Get(), "base.f32") ||
-          !write_field(result.shadow_final_parallax.Get(), "final.f32") ||
+          !write_field(result.final_parallax(), "final.f32") ||
           !write_words(result.shadow_state.Get(), models::depth_coordinate_v2::state_float_count, "state.f32") ||
           !write_words(result.depth_health_state.Get(), sbs_adaptive_state::word_count, "depth_health_state.f32") ||
           (exact_subtitle &&
@@ -6064,9 +6064,6 @@ namespace sbs_bench {
           BOOST_LOG(error) << "sbs-bench: invalid cached glyph tuple for sequence " << sequence;
           return 6;
         }
-        // This alias is diagnostic only during cache replay. Rendering consumes Base and the
-        // separately restored tuple, never a fabricated conditioned field.
-        est.shadow_final_parallax = est.shadow_base_final_parallax;
         est.color_space = input_color;
         est.raw_width = static_cast<int>(replay_cache_metadata.depth_width);
         est.raw_height = static_cast<int>(replay_cache_metadata.depth_height);
@@ -7219,7 +7216,7 @@ namespace sbs_bench {
               const auto final_parallax_path =
                 fs::path(o.out) / ("final_parallax_" + output_id + ".f32");
               if (!dump_replay_field(
-                    est.shadow_final_parallax.Get(),
+                    est.final_parallax(),
                     "final parallax",
                     final_parallax_path,
                     final_parallax_field_stage
