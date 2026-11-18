@@ -18,8 +18,9 @@ namespace nvenc {
   public:
     /**
      * @param d3d_device Direct3D11 device used for encoding.
+     * @param allow_p010_chroma_store Request unordered access for P010 inputs when available.
      */
-    explicit nvenc_d3d11_native(ID3D11Device *d3d_device);
+    explicit nvenc_d3d11_native(ID3D11Device *d3d_device, bool allow_p010_chroma_store = false);
     ~nvenc_d3d11_native();
 
     ID3D11Texture2D *get_input_texture() override;
@@ -42,6 +43,7 @@ namespace nvenc {
     NV_ENC_REGISTERED_PTR prepare_input(unsigned slot) override;
 
     const ID3D11DevicePtr d3d_device;
+    const bool allow_p010_chroma_store;
     // With pictures in flight, one spare keeps the next conversion independent of retrieval.
     std::array<ID3D11Texture2DPtr, max_pipeline_depth + 1> input_surfaces;
     unsigned converted_input = 0;

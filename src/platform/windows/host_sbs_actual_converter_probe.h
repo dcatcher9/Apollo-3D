@@ -25,6 +25,8 @@ namespace platf::dxgi::actual_converter_probe_v1 {
     bool packed_continuity = false; // Explicit idle/held-root/expiry regression; default scheduler unchanged.
     bool background_observer = false; // Explicit V7 HDR qualification only; no default readbacks.
     bool hdr_input = false; // Explicit three-PFM current-outline or shutter probe.
+    bool native_p010 = false; // Private actual-converter/native NVENC lane.
+    std::string p010_chroma_mode = "default"; // default, raster, no-uav; no live setting.
     bool explicit_adapter = false; // Private probe plan binding for SDR or HDR; absent SDR keeps its legacy default.
     std::uint32_t hdr_adapter_luid_low=0u,hdr_adapter_vendor_id=0u,hdr_adapter_device_id=0u;
     std::int32_t hdr_adapter_luid_high=0; // Explicit HDR plan identity; no implicit adapter choice.
@@ -83,6 +85,7 @@ namespace platf::dxgi::actual_converter_probe_v1 {
     bool force_infer = false, gpu_undecided = false, ddup_proof = false;
     bool queued = false, flat = false, repeat = false, route_matches = false, source_matches = false;
     bool native_planes_written = false; // Output-event evidence; independent of packed RGB reuse.
+    bool p010_chroma_tiled = false;
     bool rgb_rendered_directly = false;
     bool rgb_output_retained = false;
     bool current_capture_key = false, prior_capture_key = false;

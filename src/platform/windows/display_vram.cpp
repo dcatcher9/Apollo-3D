@@ -22,6 +22,7 @@
 #include <thread>
 
 // platform includes
+#include <d3d11_3.h>
 #include <d3dcompiler.h>
 #include <DirectXMath.h>
 #include <dwmapi.h>
@@ -3510,24 +3511,10 @@ namespace platf::dxgi {
             BOOST_LOG(info) << "Host SBS V2 depth completion recovered; stereo warp resumed."sv;
           }
 
-          if (probe_observer.record) {
-            actual_converter_probe_v1::event_t e; e.kind=repeat_matched_output ? actual_converter_probe_v1::event_e::packed_repeat:actual_converter_probe_v1::event_e::convert_end;
-            e.current_capture_key = encoder_mutex_lock.owns_lock();
-            e.prior_capture_key = prior_capture_lock && prior_capture_lock->owns_lock();
-            e.native_planes_written = !rgb && output_conversion_required;
-            e.packed = final_sbs_texture;
-            e.rgb_rendered_directly = rendered_directly_to_rgb;
-            e.rgb_output_retained = retain_rgb_pair;
-            e.repeat=repeat_matched_output; e.queued=queued_draw_selected && !queued_attempt_failed_flat; e.pending_current_colour=pending_current_colour_selected && !queued_attempt_failed_flat; e.watermark_before=probe_watermark_at_entry;
-            e.actual_draw_pixel_source=probe_actual_draw_pixel_source; e.flat=!repeat_matched_output && (!v2_draw_selected || queued_attempt_failed_flat);
-            e.cached_current_colour=cached_current_color_warp; e.watermark_after=drawn_source_order.last_drawn();
-            e.pixel_source_frame=matched_presentation_cache.pixel_source_frame_id();
-            e.packed_valid=matched_presentation_cache.has_fresh_pixels(); e.packed_age_us=std::chrono::duration_cast<std::chrono::microseconds>(repeat_source_age).count();
-            e.route_matches=packed_presentation_route_matches; e.source_matches=output_source_unchanged;
-            emit_converter_probe(std::move(e),queued_geometry_selected ? queued_geometry_slot:matched_render_slot,&est,
-              queued_geometry_selected ? queued_geometry:nullptr,repeat_matched_output ? nullptr:render_input_srv,img_ctx->encoder_input_res.get(),frame_id);
-          }
-          if(pending_current_colour_selected)device_ctx->Flush(); // keyed CURRENT reads submitted before release
+          auto *tiled_chroma = !rgb && output_conversion_required && final_sbs_is_linear &&
+                                 !snapshot_debug_inputs && !queued_research ?
+                                 active_output_views().p010_chroma.Get() :
+                                 nullptr;
           mark_sbs_warp_end(gpu_timer);
 
           if (rgb) {
@@ -3541,17 +3528,42 @@ namespace platf::dxgi {
           } else if (output_conversion_required) {
             // Host SBS accepts identity-oriented sources only. Portrait is represented by actual
             // W < H display dimensions, so this final conversion never rotates a packed 2W frame.
-            draw(
-              final_sbs_srv,
-              out_Y_or_YUV_viewport,
-              out_UV_viewport,
-              final_sbs_is_linear,
-              final_sbs_has_p010_y
-            );
+            if (!tiled_chroma || !final_sbs_has_p010_y) {
+              draw(
+                final_sbs_srv,
+                out_Y_or_YUV_viewport,
+                out_UV_viewport,
+                final_sbs_is_linear,
+                final_sbs_has_p010_y,
+                false, false, tiled_chroma ? 1 : 3
+              );
+            }
+            if (tiled_chroma) {
+              dispatch_p010_chroma_tiles(final_sbs_srv, tiled_chroma);
+            }
             // Packed repeats retain this last converted input through native surface rotation.
             host_sbs_encoder_input_state.mark_converted();
           }
           end_sbs_gpu_timer(gpu_timer);
+          if (probe_observer.record) {
+            actual_converter_probe_v1::event_t e; e.kind=repeat_matched_output ? actual_converter_probe_v1::event_e::packed_repeat:actual_converter_probe_v1::event_e::convert_end;
+            e.current_capture_key = encoder_mutex_lock.owns_lock();
+            e.prior_capture_key = prior_capture_lock && prior_capture_lock->owns_lock();
+            e.native_planes_written = !rgb && output_conversion_required;
+            e.p010_chroma_tiled = tiled_chroma != nullptr;
+            e.packed = final_sbs_texture;
+            e.rgb_rendered_directly = rendered_directly_to_rgb;
+            e.rgb_output_retained = retain_rgb_pair;
+            e.repeat=repeat_matched_output; e.queued=queued_draw_selected && !queued_attempt_failed_flat; e.pending_current_colour=pending_current_colour_selected && !queued_attempt_failed_flat; e.watermark_before=probe_watermark_at_entry;
+            e.actual_draw_pixel_source=probe_actual_draw_pixel_source; e.flat=!repeat_matched_output && (!v2_draw_selected || queued_attempt_failed_flat);
+            e.cached_current_colour=cached_current_color_warp; e.watermark_after=drawn_source_order.last_drawn();
+            e.pixel_source_frame=matched_presentation_cache.pixel_source_frame_id();
+            e.packed_valid=matched_presentation_cache.has_fresh_pixels(); e.packed_age_us=std::chrono::duration_cast<std::chrono::microseconds>(repeat_source_age).count();
+            e.route_matches=packed_presentation_route_matches; e.source_matches=output_source_unchanged;
+            emit_converter_probe(std::move(e),queued_geometry_selected ? queued_geometry_slot:matched_render_slot,&est,
+              queued_geometry_selected ? queued_geometry:nullptr,repeat_matched_output ? nullptr:render_input_srv,img_ctx->encoder_input_res.get(),frame_id);
+          }
+          if(pending_current_colour_selected)device_ctx->Flush(); // keyed CURRENT reads submitted before release
           // Publication receipts already captured the diagnostic state. External Stats reads
           // that immutable CPU snapshot after output without scheduling any GPU work.
           publish_sbs_telemetry_after_output();
@@ -5525,6 +5537,44 @@ namespace platf::dxgi {
       BOOST_LOG(info) << "Host SBS intermediate storage finalized as "sv
                       << (input_is_linear ? "FP16 linear-capable."sv : "BGRA8 SDR."sv);
       return true;
+    }
+
+    bool prepare_p010_chroma_tiles() {
+      UINT view_support = 0;
+      D3D11_FEATURE_DATA_FORMAT_SUPPORT2 support {DXGI_FORMAT_R16G16_UNORM, 0};
+      if (format != DXGI_FORMAT_P010 ||
+          FAILED(device->CheckFormatSupport(support.InFormat, &view_support)) ||
+          !(view_support & D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW) ||
+          FAILED(device->CheckFeatureSupport(D3D11_FEATURE_FORMAT_SUPPORT2, &support, sizeof(support))) ||
+          !(support.OutFormatSupport2 & D3D11_FORMAT_SUPPORT2_UAV_TYPED_STORE)) {
+        return false;
+      }
+
+      // Compile only for an eligible encoder. Failure leaves raster chroma available.
+      static auto bytecode = compile_shader(SUNSHINE_SHADERS_DIR "/p010_uv_tile_cs.hlsl", "main_cs", "cs_5_0");
+      return bytecode && SUCCEEDED(device->CreateComputeShader(
+        bytecode->GetBufferPointer(), bytecode->GetBufferSize(), nullptr, &p010_chroma_shader
+      ));
+    }
+
+    void dispatch_p010_chroma_tiles(ID3D11ShaderResourceView *input, ID3D11UnorderedAccessView *output) {
+      // D3D11 treats the two native P010 planes as one resource for binding hazards.
+      device_ctx->OMSetRenderTargets(0, nullptr, nullptr);
+      ID3D11Buffer *constants[] = {
+        color_matrix.get(), nullptr, subsample_offset.get(), nullptr, stream_gamma_transform.get(),
+      };
+      device_ctx->CSSetConstantBuffers(0, std::size(constants), constants);
+      device_ctx->CSSetShader(p010_chroma_shader.Get(), nullptr, 0);
+      device_ctx->CSSetShaderResources(0, 1, &input);
+      device_ctx->CSSetUnorderedAccessViews(0, 1, &output, nullptr);
+      const auto eye_chroma_width = static_cast<UINT>(out_UV_viewport.Width) / 2u;
+      const auto chroma_height = static_cast<UINT>(out_UV_viewport.Height);
+      device_ctx->Dispatch((eye_chroma_width + 15u) / 16u, (chroma_height + 7u) / 8u, 2u);
+      output = nullptr;
+      input = nullptr;
+      device_ctx->CSSetUnorderedAccessViews(0, 1, &output, nullptr);
+      device_ctx->CSSetShaderResources(0, 1, &input);
+      device_ctx->CSSetShader(nullptr, nullptr, 0);
     }
 
     bool qualify_p010_y_mrt_targets() {
@@ -7779,6 +7829,10 @@ namespace platf::dxgi {
         return -1;
       }
       output_surface_views.resize(surface_count);
+      Microsoft::WRL::ComPtr<ID3D11Device3> chroma_device;
+      if (native_input_owner && ai_on && output_is_hdr && p010_chroma_shader) {
+        device->QueryInterface(IID_PPV_ARGS(&chroma_device));
+      }
       const float y_black[] = {output_black_y, output_black_y, output_black_y, output_black_y};
       const float uv_black[] = {
         output_neutral_uv,
@@ -7792,6 +7846,19 @@ namespace platf::dxgi {
         if (!texture || !create_rtv(texture, surface.y_or_yuv, rtv_Y_or_YUV_format) ||
             (rtv_UV_format != DXGI_FORMAT_UNKNOWN && !create_rtv(texture, surface.uv, rtv_UV_format))) {
           return -1;
+        }
+        if (chroma_device) {
+          D3D11_TEXTURE2D_DESC desc {};
+          texture->GetDesc(&desc);
+          if (desc.Format == DXGI_FORMAT_P010 && desc.Width == static_cast<UINT>(out_width) &&
+              desc.Height == static_cast<UINT>(out_height) && (desc.BindFlags & D3D11_BIND_UNORDERED_ACCESS)) {
+            D3D11_UNORDERED_ACCESS_VIEW_DESC1 view {};
+            view.Format = DXGI_FORMAT_R16G16_UNORM;
+            view.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+            view.Texture2D.PlaneSlice = 1;
+            // Failure leaves this surface's regular chroma RTV available.
+            chroma_device->CreateUnorderedAccessView1(texture, &view, &surface.p010_chroma);
+          }
         }
         // Every allocation receives black/neutral aspect-ratio padding once.
         device_ctx->ClearRenderTargetView(surface.y_or_yuv.get(), y_black);
@@ -8040,6 +8107,7 @@ namespace platf::dxgi {
     struct output_surface_views_t {
       render_target_t y_or_yuv;
       render_target_t uv;
+      Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView1> p010_chroma;
       bool p010_y_mrt_targets_checked = false;
       bool p010_y_mrt_targets_qualified = false;
     };
@@ -8073,6 +8141,7 @@ namespace platf::dxgi {
     ps_t convert_UV_ps;
     ps_t convert_UV_fp16_ps;
     ps_t convert_UV_pq_ps;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> p010_chroma_shader;
 
     D3D11_VIEWPORT out_Y_or_YUV_viewport;
     D3D11_VIEWPORT out_UV_viewport;
@@ -12392,15 +12461,13 @@ namespace platf::dxgi {
         return false;
       }
 
-      nvenc_d3d = std::make_unique<nvenc::nvenc_d3d11_native>(base.device.get());
-
       return true;
     }
 
     bool init_encoder(const ::video::config_t &client_config, const ::video::sunshine_colorspace_t &colorspace) {
-      if (!nvenc_d3d) {
-        return false;
-      }
+      const bool tiled_chroma = client_config.sbs_mode == ::video::SBS_AI && !client_config.sbs_config.reshade &&
+                                ::video::colorspace_is_hdr(colorspace) && base.prepare_p010_chroma_tiles();
+      nvenc_d3d = std::make_unique<nvenc::nvenc_d3d11_native>(base.device.get(), tiled_chroma);
 
       auto nvenc_colorspace = nvenc::nvenc_colorspace_from_sunshine_colorspace(colorspace);
       if (!nvenc_d3d->create_encoder(

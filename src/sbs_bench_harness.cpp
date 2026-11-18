@@ -3847,7 +3847,7 @@ namespace sbs_bench {
         const auto p=nlohmann::json::parse(f);
         const auto kind = p.value("probe_kind", std::string {});
         private_hdr_probe = p.value("source_transfer", std::string {}) == "scrgb_hdr" && !p.value("queue_enabled", true) &&
-          (kind == "actual-converter-shutter-hdr-v1" ||
+          (kind == "actual-converter-shutter-hdr-v1" || kind == "actual-converter-native-p010-v1" ||
            (kind == "actual-converter-current-outline-hdr-v1" &&
             p.contains("selected_matte") && p.at("selected_matte").value("current_outline", false)));
         private_fixed6_sdr_probe=p.value("probe_kind",std::string{})=="actual-converter-current-outline-sequence6-sdr-v1" &&
@@ -4112,15 +4112,24 @@ namespace sbs_bench {
         }
         const auto probe_kind = plan.value("probe_kind", std::string {});
         const bool shutter_hdr = probe_kind == "actual-converter-shutter-hdr-v1";
-        if (probe_kind=="actual-converter-rgb-v1" || probe_kind=="actual-converter-pending-current-colour-v1" || probe_kind=="actual-converter-current-outline-hdr-v1" || probe_kind=="actual-converter-packed-continuity-v1" || shutter_hdr) {
+        const bool native_p010 = probe_kind == "actual-converter-native-p010-v1";
+        if (probe_kind=="actual-converter-rgb-v1" || probe_kind=="actual-converter-pending-current-colour-v1" || probe_kind=="actual-converter-current-outline-hdr-v1" || probe_kind=="actual-converter-packed-continuity-v1" || shutter_hdr || native_p010) {
           if (plan.at("schema")!=1 || plan.at("context_provider")!="synthetic-video-scheduling-only" ||
               frames.size()!=3 || observation_timestamps.size()!=3 || plan.at("sources").size()!=3) {
             BOOST_LOG(error) << "sbs-bench: invalid actual-converter protocol"; return 7;
           }
           platf::dxgi::actual_converter_probe_v1::request_t request;
           request.enabled=true;request.queued=plan.at("queue_enabled").get<bool>();
-          request.packed_continuity=probe_kind=="actual-converter-packed-continuity-v1" || shutter_hdr;
+          request.packed_continuity=probe_kind=="actual-converter-packed-continuity-v1" || shutter_hdr || native_p010;
           request.hdr_input=private_hdr_probe;
+          request.native_p010 = native_p010;
+          if (native_p010) {
+            request.p010_chroma_mode = plan.at("p010_chroma_mode").get<std::string>();
+            if (request.p010_chroma_mode != "default" && request.p010_chroma_mode != "raster" && request.p010_chroma_mode != "no-uav") {
+              BOOST_LOG(error) << "sbs-bench: invalid native P010 chroma mode";
+              return 7;
+            }
+          }
           if (request.hdr_input || plan.contains("required_adapter")) {
             request.explicit_adapter=true;
             const auto &adapter=plan.at("required_adapter");
@@ -4130,7 +4139,7 @@ namespace sbs_bench {
             request.hdr_adapter_device_id=adapter.at("device_id").get<std::uint32_t>();
           }
           if (pfm_input != request.hdr_input || (request.hdr_input && request.queued) ||
-              (shutter_hdr && (!pfm_input || plan.contains("selected_matte") || plan.contains("temporal_source_bridge")))) {
+              ((shutter_hdr || native_p010) && (!pfm_input || plan.contains("selected_matte") || plan.contains("temporal_source_bridge")))) {
             BOOST_LOG(error) << "sbs-bench: unsupported private HDR probe declaration";
             return 7;
           }

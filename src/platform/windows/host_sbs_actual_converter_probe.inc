@@ -50,6 +50,7 @@ namespace actual_converter_probe_v1 {
         {"force_infer",e.force_infer},{"gpu_undecided",e.gpu_undecided},{"optional_work",e.optional_work},{"ddup_proof",e.ddup_proof},
         {"queued",e.queued},{"flat",e.flat},{"repeat",e.repeat},{"cached_current_colour",e.cached_current_colour},
         {"native_planes_written",e.native_planes_written},
+        {"p010_chroma_tiled",e.p010_chroma_tiled},
         {"slot_frames",e.slot_frames},{"slot_pending",e.slot_pending},{"slot_observations",e.slot_observations},{"slot_contexts",e.slot_contexts},
         {"slot_source_addresses",e.slot_source_addresses},{"selected_slot",e.selected_slot},{"pending_slots",e.pending_slots},
         {"publication_current",e.publication_current},{"ticket_publication_current",e.ticket_publication_current},{"publication",pub(e.publication)},
@@ -97,12 +98,13 @@ namespace actual_converter_probe_v1 {
         else {require(kind==D3D11_RESOURCE_DIMENSION_TEXTURE2D,"Unsupported resource");ComPtr<ID3D11Texture2D>t;hr(r->QueryInterface(IID_PPV_ARGS(&t)),"Texture QI failed");t->GetDesc(&td);
           require(td.MipLevels==1&&td.ArraySize==1&&td.SampleDesc.Count==1,"Unsupported texture layout");
           const bool nv12 = td.Format == DXGI_FORMAT_NV12;
-          const UINT pixel=nv12?1u:td.Format==DXGI_FORMAT_R32G32B32A32_FLOAT?16u:td.Format==DXGI_FORMAT_R16G16B16A16_FLOAT?8u:4u;
-          require(nv12||pixel==16u||pixel==8u||td.Format==DXGI_FORMAT_R32_FLOAT||td.Format==DXGI_FORMAT_R32_UINT||td.Format==DXGI_FORMAT_B8G8R8A8_UNORM,"Unsupported staging format");
+          const bool p010 = td.Format == DXGI_FORMAT_P010;
+          const UINT pixel=nv12?1u:p010?2u:td.Format==DXGI_FORMAT_R32G32B32A32_FLOAT?16u:td.Format==DXGI_FORMAT_R16G16B16A16_FLOAT?8u:4u;
+          require(nv12||p010||pixel==16u||pixel==8u||td.Format==DXGI_FORMAT_R32_FLOAT||td.Format==DXGI_FORMAT_R32_UINT||td.Format==DXGI_FORMAT_B8G8R8A8_UNORM,"Unsupported staging format");
           auto desc=td;desc.Usage=D3D11_USAGE_STAGING;desc.BindFlags=0;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;desc.MiscFlags=0;
           ComPtr<ID3D11Texture2D>out;hr(d->CreateTexture2D(&desc,nullptr,&out),"Staging texture allocation failed");staging=out;
           // NV12 maps Y and interleaved UV consecutively with the same row pitch.
-          row_bytes=std::size_t(td.Width)*pixel;rows=td.Height+(nv12?td.Height/2u:0u);bytes.resize(row_bytes*rows);}
+          row_bytes=std::size_t(td.Width)*pixel;rows=td.Height+((nv12||p010)?td.Height/2u:0u);bytes.resize(row_bytes*rows);}
       }
       bool copy(ID3D11DeviceContext *ctx,ID3D11Resource *r) noexcept {
         if(!r||!staging||copied)return false;D3D11_RESOURCE_DIMENSION k{};r->GetType(&k);if(k!=kind)return false;
@@ -203,8 +205,11 @@ namespace actual_converter_probe_v1 {
     };
   }
 
-  int run_one(const request_t &r,bool pending_arrival,std::string &error) noexcept {
-    error.clear();std::shared_ptr<fixture_display_t> display;d3d_base_encode_device converter;
+  int run_one(const request_t &r,bool pending_arrival,std::string &error,int native_codec = 1) noexcept {
+    error.clear();std::shared_ptr<fixture_display_t> display;
+    // The converter's borrowed output owner must survive converter teardown.
+    std::unique_ptr<nvenc::nvenc_d3d11_native> native_encoder;
+    d3d_base_encode_device converter;
     recorder_t records;ComPtr<ID3D11Texture2D> target;ComPtr<ID3D11RenderTargetView> target_rtv;
     std::array<std::shared_ptr<platf::img_t>,3> images;
     models::video_depth_estimator *est=nullptr;
@@ -216,20 +221,25 @@ namespace actual_converter_probe_v1 {
     const bool native_nv12 = r.packed_continuity && native_nv12_opt_in && std::string_view {native_nv12_opt_in} == "1";
     const auto *recycle_opt_in = std::getenv("SUNSHINE_TEST_HOST_SBS_BORROWED_CAPTURE_RECYCLE");
     const bool borrowed_recycle = r.packed_continuity && (r.hdr_input || (recycle_opt_in && std::string_view {recycle_opt_in} == "1"));
-    const bool check_retained_rgb = borrowed_recycle && !native_nv12;
+    const bool check_retained_rgb = borrowed_recycle && !native_nv12 && !r.native_p010;
     const auto *reference_opt_in = std::getenv("SUNSHINE_TEST_HOST_SBS_SHUTTER_COPY_REFERENCE");
     const bool copy_reference = reference_opt_in && std::string_view {reference_opt_in} == "1";
-    const auto root=borrowed_recycle?r.output/"actual-converter-borrowed-capture-recycle-v1":
+    const auto root=r.native_p010 ? r.output/"actual-converter-native-p010-v1"/(native_codec == 1 ? "hevc" : "av1") :
+      borrowed_recycle?r.output/"actual-converter-borrowed-capture-recycle-v1":
       r.packed_continuity?r.output/(native_nv12 ? "actual-converter-packed-continuity-nv12-v1" : "actual-converter-packed-continuity-v1"):
       r.output/(pending_arrival?"trajectory2-pending-C":"trajectory1-B-parity")/"actual-converter-rgb-probe-v1";
     const auto release=[&](){if(est)est->release_joined_completion_gate_for_benchmark();release_after_draw_query.store(true);if(releaser.joinable()){releaser.request_stop();releaser.join();}};
     try {
       require(r.enabled,"Probe not enabled");require(!std::filesystem::exists(root),"Probe refuses overwrite");
+      require(!r.native_p010 || (r.hdr_input && !native_nv12 && r.packed_continuity &&
+        (native_codec == 1 || native_codec == 2) &&
+        (r.p010_chroma_mode == "default" || r.p010_chroma_mode == "raster" || r.p010_chroma_mode == "no-uav")),
+        "Invalid native P010 fixture declaration");
       require(!r.packed_continuity || (!r.queued && !pending_arrival && !r.pending_current_colour.enabled &&
-        (!r.hdr_input || check_retained_rgb)), "Packed continuity regression requires the ordinary converter");
+        (!r.hdr_input || check_retained_rgb || r.native_p010)), "Packed continuity regression requires the ordinary converter");
       const UINT w=r.frames[0].width,h=r.frames[0].height;
       require(w&&h&&w<=5120u&&h<=5120u,"Invalid source extent");
-      require(!r.hdr_input || (!r.queued && (check_retained_rgb || (r.selected_matte && r.selected_matte->current_outline))),
+      require(!r.hdr_input || (!r.queued && (check_retained_rgb || r.native_p010 || (r.selected_matte && r.selected_matte->current_outline))),
         "HDR fixture requires an explicit ordinary shutter or current-outline route");
       const UINT pixel_bytes=r.hdr_input?8u:4u;
       const auto payload=[&](const frame_t &f)->const void* {return r.hdr_input?static_cast<const void*>(f.rgba16.data()):static_cast<const void*>(f.bgra.data());};
@@ -272,7 +282,7 @@ namespace actual_converter_probe_v1 {
       const D3D_FEATURE_LEVEL levels[]{D3D_FEATURE_LEVEL_11_1,D3D_FEATURE_LEVEL_11_0};
       hr(D3D11CreateDevice(adapter.Get(),D3D_DRIVER_TYPE_UNKNOWN,nullptr,D3D11_CREATE_DEVICE_BGRA_SUPPORT,levels,2,D3D11_SDK_VERSION,&display->device,nullptr,&display->device_ctx),"Capture-side fixture device failed");
       capture_device_adapter=actual_device_adapter(display->device.get());
-      require(converter.init(display,adapter.Get(),pix_fmt_e::nv12)==0,"Real converter init failed");
+      require(converter.init(display,adapter.Get(),r.native_p010 ? pix_fmt_e::p010 : pix_fmt_e::nv12)==0,"Real converter init failed");
       converter_device_adapter=actual_device_adapter(converter.device.get());
       const context_t context{w,h,0x4356524700000001ull,r.packed_continuity};converter.probe_context=&context;
       auto settings=r.settings;settings.reshade=false; // only authored source, not an external provider
@@ -282,11 +292,37 @@ namespace actual_converter_probe_v1 {
       td.Height = native_nv12 ? (h + 1u) & ~1u : h;
       td.MipLevels = 1;
       td.ArraySize = 1;
-      td.Format = native_nv12 ? DXGI_FORMAT_NV12 : r.hdr_input ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_B8G8R8A8_UNORM;
+      td.Format = r.native_p010 ? DXGI_FORMAT_P010 : native_nv12 ? DXGI_FORMAT_NV12 : r.hdr_input ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_B8G8R8A8_UNORM;
       td.SampleDesc.Count = 1;
       td.Usage = D3D11_USAGE_DEFAULT;
       td.BindFlags = native_nv12 ? D3D11_BIND_RENDER_TARGET : D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-      if (native_nv12) {
+      if (r.native_p010) {
+        require(w % 2u == 0u && h % 2u == 0u, "Native P010 fixture requires even source dimensions");
+        if (r.p010_chroma_mode != "raster") {
+          require(converter.prepare_p010_chroma_tiles(), "Native P010 tile program preparation failed");
+        }
+        native_encoder = std::make_unique<nvenc::nvenc_d3d11_native>(converter.device.get(), r.p010_chroma_mode != "no-uav");
+        ::video::config_t client {};
+        client.width = td.Width;client.height = td.Height;
+        client.framerate = 90;client.framerateX100 = 9000;client.encodingFramerate = 90000;
+        client.bitrate = 166170;client.slicesPerFrame = 1;client.numRefFrames = 1;
+        client.encoderCscMode = 2;client.videoFormat = native_codec;client.dynamicRange = 1;client.sbs_mode = ::video::SBS_AI;
+        nvenc::nvenc_config encoder_config;
+        encoder_config.quality_preset = 1;encoder_config.two_pass = nvenc::nvenc_two_pass::disabled;
+        encoder_config.vbv_percentage_increase = 100;encoder_config.adaptive_quantization = false;
+        encoder_config.hevc_unidirectional_b = false;encoder_config.split_encode = false;
+        const nvenc::nvenc_colorspace_t native_colorspace {NV_ENC_VUI_COLOR_PRIMARIES_BT2020,
+          NV_ENC_VUI_TRANSFER_CHARACTERISTIC_SMPTE2084,NV_ENC_VUI_MATRIX_COEFFS_BT2020_NCL,true};
+        require(native_encoder->create_encoder(encoder_config, client, native_colorspace,
+          NV_ENC_BUFFER_FORMAT_YUV420_10BIT, std::nullopt) && native_encoder->pipeline_depth() == 2u &&
+          native_encoder->input_surface_count() == 3u, "Native P010 depth2 owner unavailable");
+        target = native_encoder->get_input_texture(0u);
+        require(converter.apply_colorspace({::video::colorspace_e::bt2020,true,10u}), "Native P010 colorspace setup failed");
+        require(converter.init_output(target.Get(),td.Width,td.Height,::video::SBS_AI,settings,
+          {},{},{},{},0,{},false,{},{},{},false,0,0,native_encoder.get()) == 0,
+          "Actual native P010 converter output setup failed");
+        require(converter.set_stream_gamma(::video::stream_gamma_mode_e::gamma_2_4), "Native P010 gamma2 setup failed");
+      } else if (native_nv12) {
         hr(converter.device->CreateTexture2D(&td, nullptr, &target), "Native NV12 input target failed");
         require(converter.apply_colorspace({::video::colorspace_e::rec709, false, 8u}), "Native NV12 colorspace initialization failed");
         require(converter.init_output(target.Get(), td.Width, td.Height, ::video::SBS_AI, settings) == 0,
@@ -306,7 +342,7 @@ namespace actual_converter_probe_v1 {
       gate.placement=r.packed_continuity?models::joined_completion_gate_benchmark::placement_e::after_interop_unmaps:models::joined_completion_gate_benchmark::placement_e::before_interop_unmaps;
       gate.target_frame_id=3;gate.hold_after_callback_enter_ms=r.packed_continuity&&!borrowed_recycle?350u:120u;gate.callback_safety_timeout_ms=500;
       require(est->configure_joined_completion_gate_for_benchmark(gate),"Pre-input gate configuration failed");
-      if (!native_nv12) {
+      if (!native_nv12 && !r.native_p010) {
         hr(converter.device->CreateTexture2D(&td,nullptr,&target),"RGB target failed");hr(converter.device->CreateRenderTargetView(target.Get(),nullptr,&target_rtv),"RGB target RTV failed");
       }
       for(std::size_t i=0;i<3;++i){images[i]=display->alloc_img();require(images[i]&&display->complete_img(images[i].get(),false)==0,"Actual shared image allocation failed");auto &img=static_cast<img_d3d_t&>(*images[i]);detail::keyed_mutex_lock_t lock {img.capture_mutex.get()};require(lock.lock() == S_OK,"Capture keyed mutex failed");display->device_ctx->UpdateSubresource(img.capture_texture.get(),0,nullptr,payload(r.frames[i]),w*pixel_bytes,0);display->device_ctx->Flush();img.blank=false;}
@@ -321,7 +357,7 @@ namespace actual_converter_probe_v1 {
       const auto stamp=[&](std::size_t i){const auto t=clock_t::now();images[i]->frame_timestamp=t;images[i]->content_timestamp=t;};
       const auto convert = [&](std::size_t i) {
         const auto deadline = clock_t::now() - std::chrono::milliseconds(1);
-        const bool converted = native_nv12 ? converter.convert(*images[i], deadline) == 0 :
+        const bool converted = (native_nv12 || r.native_p010) ? converter.convert(*images[i], deadline) == 0 :
                                              converter.convert_rgb(*images[i], target.Get(), target_rtv.Get(), r.hdr_input, deadline) ==
                                                d3d_base_encode_device::rgb_conversion_e::converted;
         require(converted, "Actual converter failed");
@@ -480,10 +516,11 @@ namespace actual_converter_probe_v1 {
           outputs[i].prepare(converter.device.get(), target.Get());
         }
         const auto snapshot_target = [&](std::size_t index, const char *message) {
-          if (native_nv12) {
+          if (native_nv12 || r.native_p010) {
             converter.device_ctx->OMSetRenderTargets(0, nullptr, nullptr);
           }
-          require(outputs[index].copy(converter.device_ctx.get(), target.Get()), message);
+          auto *actual = r.native_p010 ? native_encoder->get_input_texture(converter.active_output_surface) : target.Get();
+          require(outputs[index].copy(converter.device_ctx.get(), actual), message);
         };
         json native_input_proof = json::object();
         const auto record_native_input = [&](const char *phase, const event_t &output, bool expect_unchanged) {
@@ -498,7 +535,7 @@ namespace actual_converter_probe_v1 {
         };
         ComPtr<ID3D11Texture2D> flat_reference;
         ComPtr<ID3D11RenderTargetView> flat_reference_rtv;
-        if (native_nv12) {
+        if (native_nv12 || r.native_p010) {
           record_native_input("matched_A", last_outcome(2u), false);
         } else {
           hr(converter.device->CreateTexture2D(&td,nullptr,&flat_reference),"Independent flat reference target failed");
@@ -506,6 +543,26 @@ namespace actual_converter_probe_v1 {
         }
         const auto a_content_timestamp = converter.rendered_content_timestamp();
         snapshot_target(0, "Actual A target copy failed");
+        json native_p010_proof = json::object();
+        unsigned native_a_surface = 0;
+        if (r.native_p010) {
+          const auto a_output = last_outcome(2u);
+          const bool expect_tiles = r.p010_chroma_mode == "default";
+          require(a_output.native_planes_written && a_output.p010_chroma_tiled == expect_tiles,
+            "Matched A used the wrong native P010 conversion program");
+          native_a_surface = converter.active_output_surface;
+          outputs[0].read(converter.device_ctx.get()); // Before mapping A; outside held B interval.
+          D3D11_TEXTURE2D_DESC desc {};
+          native_encoder->get_input_texture(native_a_surface)->GetDesc(&desc);
+          require(((desc.BindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0u) == (r.p010_chroma_mode != "no-uav"),
+            "Native P010 fixture allocation did not exercise the requested UAV policy");
+          require(native_encoder->submit_frame(1u,true) && native_encoder->frames_in_flight() == 1u,
+            "Actual matched A native submission failed");
+          native_p010_proof = {{"mode",r.p010_chroma_mode},{"A_surface",native_a_surface},
+            {"A_tiled",a_output.p010_chroma_tiled},{"A_bind_flags",desc.BindFlags},
+            {"gamma_mode",static_cast<unsigned>(converter.stream_gamma_mode())},
+            {"gamma_white_nits",converter.stream_gamma_white_nits()}};
+        }
         ID3D11Texture2D *matched_a_shutter_pair = nullptr;
         stage_t unused_rgb_target, retained_rgb_pair;
         if (check_retained_rgb) {
@@ -541,6 +598,9 @@ namespace actual_converter_probe_v1 {
           convert(1);
         }
         const auto before=last_outcome(3u);
+        require(!r.native_p010 || (!before.native_planes_written && !before.p010_chroma_tiled &&
+          native_encoder->frames_in_flight() == 1u && converter.active_output_surface == native_a_surface),
+          "Held B changed the mapped native A output instead of retaining it");
         const json first_checks{{"repeat",before.repeat},{"not_flat",!before.flat},{"not_queued",!before.queued},
           {"packed_valid",before.packed_valid},{"route_matches",before.route_matches},{"changed_source",!before.source_matches},
           {"actual_A_pixel_source_matches",before.pixel_source_frame==a_pixel_source_frame},
@@ -596,6 +656,9 @@ namespace actual_converter_probe_v1 {
             convert(2);
           }
           const auto key_timeout = last_outcome(timeout_conversion);
+          require(!r.native_p010 || (!key_timeout.native_planes_written && !key_timeout.p010_chroma_tiled &&
+            native_encoder->frames_in_flight() == 1u && converter.active_output_surface == native_a_surface),
+            "Unavailable B source changed the mapped native A output");
           const auto still_unconsumed = est->joined_completion_gate_status_for_benchmark();
           require(still_unconsumed && still_unconsumed->actual_event_queries == released->actual_event_queries + 1 &&
             still_unconsumed->last_actual_event_query == CUDA_SUCCESS &&
@@ -637,6 +700,39 @@ namespace actual_converter_probe_v1 {
             require(outputs[3].copy(shutter_context.Get(), pair), "Direct shutter pair consumer readback failed");
           } else {
             snapshot_target(3, "Actual late B target copy failed");
+          }
+
+          if (r.native_p010) {
+            const auto b_surface = converter.active_output_surface;
+            require(recovered.native_planes_written && recovered.p010_chroma_tiled == (r.p010_chroma_mode == "default") &&
+              b_surface != native_a_surface && native_encoder->frames_in_flight() == 1u &&
+              !native_encoder->input_waits_for_retirement(),
+              "B did not convert into a distinct free native P010 owner while A remained mapped");
+            D3D11_TEXTURE2D_DESC desc {};
+            native_encoder->get_input_texture(b_surface)->GetDesc(&desc);
+            require(((desc.BindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0u) == (r.p010_chroma_mode != "no-uav"),
+              "B native P010 allocation differs from the requested UAV policy");
+            require(native_encoder->submit_frame(2u,false) && native_encoder->frames_in_flight() == 2u,
+              "Both actual native pictures were not accepted before retrieval");
+            auto packet_a = native_encoder->retrieve_frame();
+            auto packet_b = native_encoder->retrieve_frame();
+            require(!packet_a.data.empty() && !packet_b.data.empty() && packet_a.frame_index == 1u &&
+              packet_b.frame_index == 2u && packet_a.idr && native_encoder->frames_in_flight() == 0u,
+              "Native HEVC/AV1 packets did not retire the exact A/B owners in FIFO order");
+            const auto stream_path = root / (native_codec == 1 ? "native.hevc" : "native.obu");
+            std::ofstream stream(stream_path,std::ios::binary);
+            stream.write(reinterpret_cast<const char *>(packet_a.data.data()),static_cast<std::streamsize>(packet_a.data.size()));
+            stream.write(reinterpret_cast<const char *>(packet_b.data.data()),static_cast<std::streamsize>(packet_b.data.size()));
+            stream.flush();require(stream.good(),"Native P010 bitstream write failed");stream.close();
+            native_p010_proof["B_surface"] = b_surface;
+            native_p010_proof["B_tiled"] = recovered.p010_chroma_tiled;
+            native_p010_proof["B_bind_flags"] = desc.BindFlags;
+            native_p010_proof["submitted_before_retrieval"] = 2u;
+            native_p010_proof["packets"] = json::array({
+              {{"frame_index",packet_a.frame_index},{"idr",packet_a.idr},{"bytes",packet_a.data.size()}},
+              {{"frame_index",packet_b.frame_index},{"idr",packet_b.idr},{"bytes",packet_b.data.size()}}});
+            native_p010_proof["stream"] = binding(stream_path);
+            native_p010_proof["independent_decode_qualified"] = false;
           }
 
           // Only after the actual matched draw and its keyed diagnostic copies are recorded can
@@ -694,7 +790,8 @@ namespace actual_converter_probe_v1 {
           artifacts.push_back(save("late-draw-matched-B" + suffix, matched_b));
           artifacts.push_back(save("late-draw-current-C" + suffix, current_c));
           artifacts.push_back(save("recycled-B" + suffix, recycled_b_source));
-          artifacts.push_back(save("late-draw-output" + (native_nv12 ? ".nv12" : suffix), outputs[3]));
+          artifacts.push_back(save("late-draw-output" + (r.native_p010 ? ".p010" : native_nv12 ? ".nv12" : suffix), outputs[3]));
+          if (r.native_p010) artifacts.push_back(save("matched-A.p010",outputs[0]));
           // A fresh C may have entered the sole slot during B's successful recovery. Retire
           // it on the same immutable C source before the diagnostic converter is destroyed.
           if (std::any_of(converter.matched_frame_slots.begin(), converter.matched_frame_slots.end(),
@@ -704,11 +801,11 @@ namespace actual_converter_probe_v1 {
             require(std::none_of(converter.matched_frame_slots.begin(), converter.matched_frame_slots.end(),
               [](const auto &slot) { return slot.pending; }), "Final C still retains a pending capture source");
           }
-          write_json(root / "result.json", {{"schema",1},{"status","PASS_FUNCTIONAL_ACTUAL_CONVERTER_BORROWED_CAPTURE_RECYCLE"},
+          write_json(root / "result.json", {{"schema",1},{"status",r.native_p010 ? "PASS_FUNCTIONAL_ACTUAL_CONVERTER_NATIVE_P010" : "PASS_FUNCTIONAL_ACTUAL_CONVERTER_BORROWED_CAPTURE_RECYCLE"},
             {"context_scope","synthetic-video-scheduling-only; not actual Win32 eligibility"}, {"source_inputs",sources},
             {"capture_device_adapter",capture_device_adapter},{"converter_device_adapter",converter_device_adapter},
             {"target_format",static_cast<UINT>(td.Format)},{"target_width",td.Width},{"target_height",td.Height},
-            {"retained_rgb_target_untouched",check_retained_rgb},
+            {"retained_rgb_target_untouched",check_retained_rgb},{"native_p010",native_p010_proof},
             {"initial_shutter_frame_direct_without_scratch",check_retained_rgb && !copy_reference},
             {"initial_shutter_output",check_retained_rgb ? save("initial-shutter-output" + suffix, initial_rgb_output) : json(nullptr)},
             {"late_draw_rgb_rendered_directly",recovered.rgb_rendered_directly},
@@ -965,6 +1062,13 @@ namespace actual_converter_probe_v1 {
     }
   }
   int run(const request_t &r,std::string &error) noexcept {
+    if (r.native_p010) {
+      // One TensorRT/graphics/native owner at a time, with the original A/B gate protocol.
+      for (int codec : {1,2}) {
+        const auto code = run_one(r,false,error,codec);if(code)return code;
+      }
+      return 0;
+    }
     const int first=run_one(r,false,error);if(first)return first;
     if(r.queued)return run_one(r,true,error);
     return 0;

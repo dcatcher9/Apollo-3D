@@ -14,9 +14,10 @@
 
 namespace nvenc {
 
-  nvenc_d3d11_native::nvenc_d3d11_native(ID3D11Device *d3d_device):
+  nvenc_d3d11_native::nvenc_d3d11_native(ID3D11Device *d3d_device, bool allow_p010_chroma_store):
       nvenc_d3d11(NV_ENC_DEVICE_TYPE_DIRECTX),
-      d3d_device(d3d_device) {
+      d3d_device(d3d_device),
+      allow_p010_chroma_store(allow_p010_chroma_store) {
     device = d3d_device;
   }
 
@@ -74,19 +75,22 @@ namespace nvenc {
     desc.SampleDesc.Count = 1;
     desc.Usage = D3D11_USAGE_DEFAULT;
     desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+    if (allow_p010_chroma_store && desc.Format == DXGI_FORMAT_P010) {
+      desc.BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
+    }
     const auto count = input_surface_count();
     for (unsigned surface = count; surface < input_surfaces.size(); ++surface) {
       input_surfaces[surface] = nullptr;
     }
-    for (unsigned surface = 0; surface < count; ++surface) {
+    const auto register_surface = [&](unsigned surface) {
       auto &input = input_surfaces[surface];
-      if (!input && d3d_device->CreateTexture2D(&desc, nullptr, &input) != S_OK) {
-        BOOST_LOG(error) << "NvEnc: couldn't create input texture " << surface;
-        return false;
-      }
       auto &registration = registered_input_buffers[surface];
       if (registration) {
-        continue;
+        return true;
+      }
+      if (!input && d3d_device->CreateTexture2D(&desc, nullptr, &input) != S_OK) {
+        BOOST_LOG(debug) << "NvEnc: couldn't create input texture " << surface << " with bind flags " << desc.BindFlags;
+        return false;
       }
       NV_ENC_REGISTER_RESOURCE register_resource = {NV_ENC_REGISTER_RESOURCE_VER};
       register_resource.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
@@ -97,11 +101,33 @@ namespace nvenc {
       register_resource.bufferUsage = NV_ENC_INPUT_IMAGE;
 
       if (nvenc_failed(nvenc->nvEncRegisterResource(encoder, &register_resource))) {
-        BOOST_LOG(error) << "NvEnc: NvEncRegisterResource() failed: " << last_nvenc_error_string;
+        BOOST_LOG(debug) << "NvEnc: NvEncRegisterResource() failed: " << last_nvenc_error_string;
         return false;
       }
 
       registration = register_resource.registeredResource;
+      return true;
+    };
+    for (unsigned surface = 0; surface < count; ++surface) {
+      if (register_surface(surface)) {
+        continue;
+      }
+      auto failed_desc = desc;
+      if (input_surfaces[surface]) {
+        input_surfaces[surface]->GetDesc(&failed_desc);
+      }
+      if (failed_desc.BindFlags & D3D11_BIND_UNORDERED_ACCESS) {
+        // The failed surface has no registration. Leave previously registered inputs owned
+        // by NVENC and use raster-compatible allocations for this and subsequent surfaces.
+        input_surfaces[surface] = nullptr;
+        desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+        BOOST_LOG(info) << "NvEnc: using regular P010 render targets after unordered input setup failed";
+        if (register_surface(surface)) {
+          continue;
+        }
+      }
+      BOOST_LOG(error) << "NvEnc: couldn't allocate or register input texture " << surface;
+      return false;
     }
 
     return true;

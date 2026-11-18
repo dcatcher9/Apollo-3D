@@ -306,6 +306,9 @@ The model and the rendered color have different color requirements:
   always 1:1 with the packed intermediate; any source resizing already happened in the warp, or,
   for Game 3D eyes authored at another size, in a resample pass that reads each output eye only
   from its own source half.
+  On native HDR Host AI output, a supported P010 chroma-plane UAV lets one compute tile share the
+  transfer-converted texels across neighboring samples. The tile and raster shaders use the same
+  filter and matrix, and surfaces without the UAV use the raster shader.
   Ordinary unrotated 1:1 host video, including input to Client SBS, uses the same texel-conversion
   filter with whole-texture clamping. Generic 2D scaling or Windows rotation retains its existing
   sampled-source conversion; those paths are outside this exact-raster filtering contract.
