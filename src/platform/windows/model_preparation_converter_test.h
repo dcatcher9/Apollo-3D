@@ -9,9 +9,14 @@
   #include <filesystem>
   #include <future>
   #include <memory>
+  #include <span>
   #include <string>
   #include <string_view>
   #include <vector>
+
+namespace platf::dxgi {
+  class display_vram_t;
+}
 
 namespace platf::dxgi::testing {
   struct model_preparation_adapter_t {
@@ -20,6 +25,15 @@ namespace platf::dxgi::testing {
     std::uint32_t vendor_id = 0;
     std::uint32_t device_id = 0;
   };
+
+  // No desktop duplication or output window. The native encoder sees the same shared
+  // capture image and keyed mutex it receives from a normal display.
+  std::shared_ptr<display_vram_t> make_native_pacing_display(
+    const model_preparation_adapter_t &adapter, unsigned width, unsigned height
+  );
+  std::shared_ptr<platf::img_t> upload_native_pacing_image(
+    display_vram_t &display, std::span<const std::uint32_t> bgra
+  );
 
   struct model_preparation_memory_t {
     model_preparation_adapter_t adapter;

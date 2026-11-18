@@ -1921,6 +1921,24 @@ namespace video {
       };
       processing_started.reset();
       bool consume_sampled_depth_pipeline_ready = false;
+      // One delivery owns the retained source and its schedule through conversion. Sample the
+      // readiness event before converting, and commit cadence only after the converter returns.
+      const auto convert_delivery = [&](
+        std::chrono::steady_clock::time_point presentation_timestamp,
+        std::optional<std::chrono::steady_clock::time_point> next_encode_target = std::nullopt
+      ) {
+        consume_sampled_depth_pipeline_ready =
+          depth_pipeline_ready_event && depth_pipeline_ready_event->peek();
+        if (convert_frame(*last_img, next_encode_target)) {
+          return false;
+        }
+        finish_conversion();
+        frame_timestamp = presentation_timestamp;
+        if (next_encode_target) {
+          encode_frame_timestamp = *next_encode_target;
+        }
+        return true;
+      };
       const auto provider_poll_target = independent_provider ?
                                           encode_frame_timestamp - frame_variation_threshold :
                                           encode_frame_timestamp;
@@ -2036,16 +2054,10 @@ namespace video {
             encode_frame_threshold,
             frame_variation_threshold
           );
-          consume_sampled_depth_pipeline_ready =
-            depth_pipeline_ready_event && depth_pipeline_ready_event->peek();
-          if (convert_frame(*last_img, schedule.next_encode_target)) {
+          if (!convert_delivery(schedule.presentation_timestamp, schedule.next_encode_target)) {
             BOOST_LOG(error) << "Could not convert image"sv;
             break;
           }
-          finish_conversion();
-
-          *frame_timestamp = schedule.presentation_timestamp;
-          encode_frame_timestamp = schedule.next_encode_target;
         }
       } else if (!independent_provider) {
         // A recovery skips the wait, so the retrieving thread's wake for this IDR, if it came while
@@ -2074,15 +2086,10 @@ namespace video {
             encode_frame_threshold,
             frame_variation_threshold
           );
-          consume_sampled_depth_pipeline_ready =
-            depth_pipeline_ready_event && depth_pipeline_ready_event->peek();
-          if (convert_frame(*last_img, schedule.next_encode_target)) {
+          if (!convert_delivery(schedule.presentation_timestamp, schedule.next_encode_target)) {
             BOOST_LOG(error) << "Could not convert deferred capture image"sv;
             break;
           }
-          finish_conversion();
-          frame_timestamp = schedule.presentation_timestamp;
-          encode_frame_timestamp = schedule.next_encode_target;
         }
       }
 
@@ -2115,13 +2122,10 @@ namespace video {
         if (lifecycle_change_requested()) {
           break;
         }
-        frame_timestamp = std::chrono::steady_clock::now();
-        consume_sampled_depth_pipeline_ready = true;
-        if (convert_frame(*last_img)) {
+        if (!convert_delivery(std::chrono::steady_clock::now())) {
           BOOST_LOG(error) << "Could not activate the initialized Host SBS GPU pipeline"sv;
           break;
         }
-        finish_conversion();
       }
 
       // Host SBS inference may still be pending when capture goes idle. Reconvert the retained
@@ -2144,16 +2148,12 @@ namespace video {
                                     now, encode_frame_timestamp, encode_frame_threshold, frame_variation_threshold
                                   )} :
                                   std::nullopt;
-          frame_timestamp = schedule ? schedule->presentation_timestamp : now;
-          consume_sampled_depth_pipeline_ready =
-            depth_pipeline_ready_event && depth_pipeline_ready_event->peek();
-          if (convert_frame(*last_img, schedule ? std::optional {schedule->next_encode_target} : std::nullopt)) {
+          if (!convert_delivery(
+                schedule ? schedule->presentation_timestamp : now,
+                schedule ? std::optional {schedule->next_encode_target} : std::nullopt
+              )) {
             BOOST_LOG(error) << "Could not consume pending Host SBS depth for retained source"sv;
             break;
-          }
-          finish_conversion();
-          if (schedule) {
-            encode_frame_timestamp = schedule->next_encode_target;
           }
         }
       }
@@ -2345,6 +2345,55 @@ namespace video {
 
 #ifdef SUNSHINE_TESTS
   namespace detail {
+    native_encode_loop_test_result_t run_native_encode_loop_for_test(
+      std::shared_ptr<platf::display_t> display,
+      safe::mail_t mail,
+      img_event_t images,
+      config_t config,
+      packet_queue_t packets
+    ) {
+      if (!display || !mail || !images || !packets) {
+        throw std::invalid_argument("The native encode-loop fixture requires its display, mail, images and packet queue");
+      }
+      const auto drain = util::fail_guard([]() {
+        async_teardown_workers().drain_for_test();
+      });
+      capture_generation_handoff_t generations;
+      const auto generation = generations.begin();
+      if (!generation || !platf::arm_capture_display_retirement(display, generation->retirement()) ||
+          !generations.publish(generation, display)) {
+        throw std::logic_error("The native encode-loop fixture requires an original unarmed capture display");
+      }
+      auto lease = generations.acquire();
+      if (!lease) {
+        throw std::logic_error("The native encode-loop fixture could not acquire its published display generation");
+      }
+      auto revoke = util::fail_guard([&]() {
+        generations.stop();
+      });
+      native_encode_loop_test_result_t result;
+      auto session = make_encode_session(*display, config, false);
+      if (!session) {
+        return result;
+      }
+      result.session_created = true;
+      result.pipeline_depth = session->pipeline_depth();
+      encoder_recovery_t recovery;
+      encode_run(
+        result.next_frame_nr,
+        result.awaiting_desktop_after_export,
+        std::move(mail),
+        std::move(images),
+        std::move(config),
+        std::move(lease),
+        std::move(session),
+        recovery,
+        std::move(packets),
+        [](const video_mode_change_t &) {}
+      );
+      return result;
+    }
+
     std::unique_ptr<nvenc_encode_session_t> make_native_encode_session_for_test(
       platf::display_t &display,
       const config_t &config,

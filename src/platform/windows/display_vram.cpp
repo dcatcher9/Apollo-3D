@@ -85,6 +85,7 @@
 #include "video_player_context.h"
 
 #ifdef SUNSHINE_TESTS
+  #include "src/capture_display_retirement.h"
   #include "src/tracked_async_worker.h"
   #include "model_preparation_converter_test.h"
   #include "conversion_poll_test.h"
@@ -2342,22 +2343,13 @@ namespace platf::dxgi {
                   if (diagnostics_enabled) {
                     ++matched_stats_same_frame_poll_submissions;
                   }
-                  auto poll_plan = detail::host_sbs_same_frame_poll_plan(
+                  const auto poll_plan = detail::host_sbs_same_frame_poll_plan(
                     true,
                     false,
                     next_encode_target,
-                    poll_started
+                    poll_started,
+                    prior_poll_plan
                   );
-                  if (prior_poll_plan) {
-                    // Do not restart an 8 ms allowance after waiting for B. Expired or
-                    // sub-minimum remaining slack still gets the ordinary immediate query.
-                    poll_plan.deadline = std::min(poll_plan.deadline, prior_poll_plan->deadline);
-                    poll_plan.budget = poll_plan.deadline > poll_started ?
-                      poll_plan.deadline - poll_started : std::chrono::steady_clock::duration {};
-                    poll_plan.eligible = poll_plan.eligible && prior_poll_plan->eligible &&
-                      poll_plan.budget >= detail::host_sbs_same_frame_poll_min_budget;
-                    poll_plan.limited_by_hard_cap = prior_poll_plan->limited_by_hard_cap;
-                  }
                   const bool queued_first_query = queued_research &&
                                                   host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2 &&
                                                   force_infer_transaction_enqueued && !gpu_undecided_transaction_enqueued &&
@@ -8378,6 +8370,50 @@ namespace platf::dxgi {
         }
       };
     }  // namespace
+
+    std::shared_ptr<display_vram_t> make_native_pacing_display(
+      const model_preparation_adapter_t &required, unsigned width, unsigned height
+    ) {
+      const auto adapter = preparation_probe_adapter(required);
+      preparation_probe_require(platf::dxgi::init() == 0, "Native pacing shader initialization failed");
+      auto display = platf::make_unarmed_capture_display<preparation_probe_display_t>();
+      adapter->AddRef();
+      display->adapter.reset(adapter.Get());
+      display->width = display->width_before_rotation = width;
+      display->height = display->height_before_rotation = height;
+      display->env_width = width;
+      display->env_height = height;
+      display->offset_x = display->offset_y = 0;
+      display->display_rotation = DXGI_MODE_ROTATION_IDENTITY;
+      display->capture_format = DXGI_FORMAT_B8G8R8A8_UNORM;
+      display->next_image_id = 1u;
+      constexpr D3D_FEATURE_LEVEL levels[] {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
+      preparation_probe_hr(
+        D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+          levels, 2u, D3D11_SDK_VERSION, &display->device, &display->feature_level, &display->device_ctx),
+        "Native pacing capture device creation failed"
+      );
+      preparation_probe_device_adapter(display->device.get(), required);
+      return display;
+    }
+
+    std::shared_ptr<platf::img_t> upload_native_pacing_image(
+      display_vram_t &display, std::span<const std::uint32_t> bgra
+    ) {
+      preparation_probe_require(bgra.size() == std::size_t(display.width) * display.height,
+        "Native pacing source shape differs from its capture device");
+      auto image = display.alloc_img();
+      preparation_probe_require(image && display.complete_img(image.get(), false) == 0,
+        "Native pacing shared image allocation failed");
+      auto &native = static_cast<img_d3d_t &>(*image);
+      texture_lock_helper lock(native.capture_mutex.get());
+      preparation_probe_require(lock.lock(), "Native pacing capture image keyed mutex failed");
+      display.device_ctx->UpdateSubresource(native.capture_texture.get(), 0u, nullptr,
+        bgra.data(), native.row_pitch, 0u);
+      display.device_ctx->Flush();
+      native.blank = false;
+      return image;
+    }
 
     model_preparation_memory_t query_model_preparation_memory(const model_preparation_adapter_t &required) {
       const auto adapter = preparation_probe_adapter(required);

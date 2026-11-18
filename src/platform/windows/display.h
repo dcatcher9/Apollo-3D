@@ -264,35 +264,39 @@ namespace platf::dxgi {
                host_sbs_same_frame_poll_outcome_e::wait_unavailable_busy;
     }
 
-    /** Bound a newly submitted matched-frame transaction query by the encode cadence scheduler.
+    /** Bound a matched-frame transaction query by the encode cadence scheduler.
      * Capture/content timestamps are deliberately absent: they identify pixels but do not own the
      * encode deadline. An unavailable, late, or too-small budget fails open to nonblocking output.
+     * A second poll in the same delivery can spend only the remaining part of the first plan.
      */
     [[nodiscard]] constexpr host_sbs_same_frame_poll_plan_t
     host_sbs_same_frame_poll_plan(
       const bool transaction_enqueued,
       const bool snapshot_debug_inputs,
       const std::optional<std::chrono::steady_clock::time_point> next_encode_target,
-      const std::chrono::steady_clock::time_point now
+      const std::chrono::steady_clock::time_point now,
+      const std::optional<host_sbs_same_frame_poll_plan_t> &earlier_poll = std::nullopt
     ) noexcept {
-      if (!transaction_enqueued || snapshot_debug_inputs || !next_encode_target) {
-        return {};
+      host_sbs_same_frame_poll_plan_t plan;
+      if (transaction_enqueued && !snapshot_debug_inputs && next_encode_target) {
+        const auto cadence_deadline =
+          *next_encode_target - host_sbs_same_frame_poll_downstream_reserve;
+        if (cadence_deadline > now &&
+            cadence_deadline - now >= host_sbs_same_frame_poll_min_budget) {
+          const auto hard_deadline = now + host_sbs_same_frame_poll_max_wait;
+          const auto deadline = std::min(hard_deadline, cadence_deadline);
+          plan = {deadline, deadline - now, true, hard_deadline <= cadence_deadline};
+        }
       }
-      const auto cadence_deadline =
-        *next_encode_target - host_sbs_same_frame_poll_downstream_reserve;
-      if (cadence_deadline <= now ||
-          cadence_deadline - now < host_sbs_same_frame_poll_min_budget) {
-        return {};
+      if (earlier_poll) {
+        plan.deadline = std::min(plan.deadline, earlier_poll->deadline);
+        plan.budget = plan.deadline > now ?
+          plan.deadline - now : std::chrono::steady_clock::duration::zero();
+        plan.eligible = plan.eligible && earlier_poll->eligible &&
+          plan.budget >= host_sbs_same_frame_poll_min_budget;
+        plan.limited_by_hard_cap = earlier_poll->limited_by_hard_cap;
       }
-      const auto hard_deadline = now + host_sbs_same_frame_poll_max_wait;
-      const bool limited_by_hard_cap = hard_deadline <= cadence_deadline;
-      const auto deadline = limited_by_hard_cap ? hard_deadline : cadence_deadline;
-      return {
-        deadline,
-        deadline - now,
-        true,
-        limited_by_hard_cap,
-      };
+      return plan;
     }
 
     enum class host_sbs_depth_reuse_kind_e : std::uint8_t {

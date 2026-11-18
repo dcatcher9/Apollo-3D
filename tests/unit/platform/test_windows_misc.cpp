@@ -936,6 +936,37 @@ namespace {
                    .eligible);
   }
 
+  TEST(WindowsHostSbsSameFramePollTest, PriorCompletionAndNewSubmissionShareOneDeliveryDeadline) {
+    using namespace std::chrono_literals;
+    using platf::dxgi::detail::host_sbs_same_frame_poll_plan;
+
+    const auto started = std::chrono::steady_clock::time_point {1s};
+    const auto target = started + 20ms;
+    const auto prior = host_sbs_same_frame_poll_plan(true, false, target, started);
+    ASSERT_TRUE(prior.eligible);
+
+    const auto followup = [&](auto elapsed) {
+      return host_sbs_same_frame_poll_plan(true, false, target, started + elapsed, prior);
+    };
+    const auto remaining = followup(6ms);
+    EXPECT_EQ(remaining.deadline, prior.deadline);
+    EXPECT_EQ(remaining.budget, 2ms);
+    EXPECT_TRUE(remaining.eligible);
+    EXPECT_EQ(remaining.limited_by_hard_cap, prior.limited_by_hard_cap);
+
+    EXPECT_TRUE(followup(7750us).eligible);
+    EXPECT_FALSE(followup(7751us).eligible);
+    const auto expired = followup(8ms);
+    EXPECT_EQ(expired.deadline, prior.deadline);
+    EXPECT_EQ(expired.budget, 0us);
+    EXPECT_FALSE(expired.eligible);
+
+    const auto unavailable = host_sbs_same_frame_poll_plan(true, true, target, started);
+    EXPECT_FALSE(host_sbs_same_frame_poll_plan(
+      true, false, target, started + 1ms, unavailable
+    ).eligible);
+  }
+
   TEST(WindowsHostSbsSameFramePollTest, HitWaitBucketsKeepExactIntervalBoundaries) {
     using namespace std::chrono_literals;
     using bucket_e =
