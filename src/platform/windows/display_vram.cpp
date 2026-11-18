@@ -5692,7 +5692,12 @@ namespace platf::dxgi {
 
     struct live_window_authority_observation_t {
       foreground_window::snapshot_t foreground;
+      std::optional<foreground_window::capture_target_t> capture_target;
+      foreground_window::mapping_result_t foreground_projection {
+        .status = foreground_window::mapping_status_e::invalid_capture_target,
+      };
       video_dom::snapshot_ptr browser_snapshot;
+      std::optional<video_dom::mapping_result_t> browser_projection;
       std::optional<browser_live_authority_key_t> browser_authority;
       std::uint64_t browser_authority_epoch = 0u;
     };
@@ -5818,7 +5823,8 @@ namespace platf::dxgi {
     live_window_authority_observation_t observe_live_window_authority(
       const D3D11_TEXTURE2D_DESC &source_desc,
       const std::optional<std::chrono::steady_clock::time_point> &content_timestamp,
-      const foreground_window::snapshot_t *revalidate_expected = nullptr
+      const foreground_window::snapshot_t *revalidate_expected = nullptr,
+      bool sampling_for_attribution = false
     ) {
       if (probe_context) {
         if (source_desc.Width != probe_context->width || source_desc.Height != probe_context->height || !probe_context->instance) {
@@ -5887,16 +5893,18 @@ namespace platf::dxgi {
       foreground_window::mapping_result_t foreground_mapping {
         .status = foreground_window::mapping_status_e::invalid_capture_target,
       };
-      DXGI_OUTPUT_DESC output_desc {};
-      if (
-        next_root &&
-        display && display->output &&
+      std::optional<foreground_window::capture_target_t> capture_target;
+      foreground_window::mapping_result_t foreground_projection {
+        .status = foreground_window::mapping_status_e::invalid_capture_target,
+      };
+      const bool can_map_live_target = display &&
         display->display_rotation == DXGI_MODE_ROTATION_IDENTITY &&
         static_cast<std::uint32_t>(display->width) == source_desc.Width &&
-        static_cast<std::uint32_t>(display->height) == source_desc.Height &&
-        SUCCEEDED(display->output->GetDesc(&output_desc))
-      ) {
-        const foreground_window::capture_target_t target {
+        static_cast<std::uint32_t>(display->height) == source_desc.Height;
+      DXGI_OUTPUT_DESC output_desc {};
+      if (next_root && display && display->output && (can_map_live_target || sampling_for_attribution) &&
+          SUCCEEDED(display->output->GetDesc(&output_desc))) {
+        capture_target = foreground_window::capture_target_t {
           .screen_rect = {
             output_desc.DesktopCoordinates.left,
             output_desc.DesktopCoordinates.top,
@@ -5906,14 +5914,19 @@ namespace platf::dxgi {
           .width = source_desc.Width,
           .height = source_desc.Height,
           .monitor = reinterpret_cast<std::uintptr_t>(output_desc.Monitor),
-          .identity_orientation = true,
+          .identity_orientation = display->display_rotation == DXGI_MODE_ROTATION_IDENTITY,
         };
+        foreground_projection = foreground_window::map_to_capture(observed, *capture_target);
+      }
+      if (capture_target && can_map_live_target) {
+        // Keep liveness's stricter target gate and its diagnostic status. Attribution below
+        // reuses the raw projection, including unsupported orientation/extent failures.
         // Liveness follows the current root/client/content geometry, not the content-causality
         // gate. A move must revoke an old positioned completion immediately, while the later
         // private-copy path still requires geometry_valid_since <= content_timestamp before
         // authorizing a new foreground ROI. This separation preserves the position-independent
         // DAV2 domain.
-        foreground_mapping = foreground_window::map_to_capture(observed, target);
+        foreground_mapping = foreground_projection;
         if (foreground_mapping) {
           next_region = observed;
         }
@@ -5996,10 +6009,14 @@ namespace platf::dxgi {
       // the live epoch derived from it, and any later ROI mapping remain one attribution unit.
       const auto browser_snapshot = video_dom_lease ? video_dom_lease->latest() : nullptr;
       observe_live_browser_authority(browser_snapshot);
-      observe_subtitle_context(observed, browser_snapshot, output_desc, source_desc, content_timestamp, foreground_mapping);
+      const auto subtitle_admission = observe_subtitle_context(
+        observed, browser_snapshot, output_desc, source_desc, content_timestamp, foreground_mapping);
       return {
         .foreground = observed,
+        .capture_target = capture_target,
+        .foreground_projection = foreground_projection,
         .browser_snapshot = browser_snapshot,
+        .browser_projection = subtitle_admission.browser_mapping,
         .browser_authority = live_browser_authority,
         .browser_authority_epoch = live_browser_authority_epoch,
       };
@@ -6007,7 +6024,7 @@ namespace platf::dxgi {
 
     // Subtitle permission is independent of the generic foreground depth ROI. Fullscreen keeps
     // its semantic video identity even when depth analysis canonicalizes to the whole source.
-    void observe_subtitle_context(
+    subtitle_context_policy::evaluation_t observe_subtitle_context(
       const foreground_window::snapshot_t &foreground,
       const video_dom::snapshot_ptr &browser,
       const DXGI_OUTPUT_DESC &output,
@@ -6031,9 +6048,10 @@ namespace platf::dxgi {
       const bool foreground_usable = admission.foreground_usable;
       const bool browser_identity_matches = admission.browser_identity_matches;
       const bool browser_usable = admission.browser_usable;
-      const bool mapping_attempted = admission.mapping_attempted;
-      const auto mapping_status = admission.mapping_status;
-      const bool mapping_succeeded = admission.mapping_succeeded;
+      const bool mapping_attempted = admission.browser_mapping.has_value();
+      const auto mapping_status = mapping_attempted ?
+        admission.browser_mapping->status : video_dom::mapping_status_e::invalid_video_rect;
+      const bool mapping_succeeded = mapping_attempted && static_cast<bool>(*admission.browser_mapping);
       const bool fullscreen_check_evaluated = admission.fullscreen_check_evaluated;
       const bool fullscreen_match = admission.fullscreen_match;
       const bool browser_video = admission.browser_key.kind == kind_e::browser_video;
@@ -6139,7 +6157,7 @@ namespace platf::dxgi {
       if (!context_changed && last_subtitle_admission_diagnostic &&
           (*last_subtitle_admission_diagnostic == diagnostic_key ||
            now - last_subtitle_admission_diagnostic_at < std::chrono::seconds {1})) {
-        return;
+        return admission;
       }
       last_subtitle_admission_diagnostic = diagnostic_key;
       last_subtitle_admission_diagnostic_at = now;
@@ -6204,6 +6222,7 @@ namespace platf::dxgi {
                       << " heartbeat_age_ms="sv << heartbeat_age_ms
                       << " geometry_content_delta_available="sv << geometry_content_delta_available
                       << " content_minus_geometry_ms="sv << content_minus_geometry_ms;
+      return admission;
     }
 
     bool window_region_matches_live_authority(
@@ -6402,13 +6421,14 @@ namespace platf::dxgi {
     std::optional<sbs_debug::window_region_snapshot>
       capture_browser_window_region(
         const D3D11_TEXTURE2D_DESC &source_desc,
-        const video_dom::snapshot_ptr &observed,
+        const live_window_authority_observation_t &authority,
         const std::uint64_t frame_id,
         const std::optional<std::chrono::steady_clock::time_point> &content_timestamp,
         const std::chrono::steady_clock::time_point captured_at,
         video_dom::status_e &video_status,
         video_dom::mapping_status_e &mapping_status
       ) const {
+      const auto &observed = authority.browser_snapshot;
       video_status = video_dom::status_e::stopped;
       mapping_status = video_dom::mapping_status_e::invalid_video_rect;
       if (!observed || !display) {
@@ -6466,24 +6486,23 @@ namespace platf::dxgi {
         return std::nullopt;
       }
 
-      DXGI_OUTPUT_DESC output_desc {};
-      if (!display->output || FAILED(display->output->GetDesc(&output_desc))) {
+      if (!authority.capture_target) {
         mapping_status = video_dom::mapping_status_e::invalid_capture_rect;
         return std::nullopt;
       }
+      const auto &target = *authority.capture_target;
       const video_dom::rect_t desktop_rect {
-        output_desc.DesktopCoordinates.left,
-        output_desc.DesktopCoordinates.top,
-        output_desc.DesktopCoordinates.right,
-        output_desc.DesktopCoordinates.bottom,
+        target.screen_rect.left,
+        target.screen_rect.top,
+        target.screen_rect.right,
+        target.screen_rect.bottom,
       };
-      const auto mapped = video_dom::map_screen_rect_to_capture(
-        observed->screen_rect,
-        desktop_rect,
-        source_desc.Width,
-        source_desc.Height,
-        video_dom::rotation_e::identity
-      );
+      const auto mapped = authority.browser_projection ?
+                            *authority.browser_projection :
+                            video_dom::map_screen_rect_to_capture(
+                              observed->screen_rect, desktop_rect,
+                              source_desc.Width, source_desc.Height,
+                              video_dom::rotation_e::identity);
       mapping_status = mapped.status;
       if (!mapped) {
         return std::nullopt;
@@ -6515,10 +6534,11 @@ namespace platf::dxgi {
         const std::uint64_t frame_id,
         const std::optional<std::chrono::steady_clock::time_point> &content_timestamp,
         const std::chrono::steady_clock::time_point captured_at,
-        const foreground_window::snapshot_t &snapshot,
+        const live_window_authority_observation_t &authority,
         std::string_view &observer_status,
         std::string_view &mapping_status
       ) {
+      const auto &snapshot = authority.foreground;
       constexpr auto maximum_age = std::chrono::milliseconds {250};
       observer_status = foreground_window::status_name(snapshot.status);
       mapping_status = "not-mapped";
@@ -6534,26 +6554,7 @@ namespace platf::dxgi {
         return std::nullopt;
       }
 
-      DXGI_OUTPUT_DESC output_desc {};
-      if (!display->output || FAILED(display->output->GetDesc(&output_desc))) {
-        mapping_status = foreground_window::mapping_status_name(
-          foreground_window::mapping_status_e::invalid_capture_target
-        );
-        return std::nullopt;
-      }
-      const foreground_window::capture_target_t target {
-        .screen_rect = {
-          output_desc.DesktopCoordinates.left,
-          output_desc.DesktopCoordinates.top,
-          output_desc.DesktopCoordinates.right,
-          output_desc.DesktopCoordinates.bottom,
-        },
-        .width = source_desc.Width,
-        .height = source_desc.Height,
-        .monitor = reinterpret_cast<std::uintptr_t>(output_desc.Monitor),
-        .identity_orientation = display->display_rotation == DXGI_MODE_ROTATION_IDENTITY,
-      };
-      const auto mapped = foreground_window::map_to_capture(snapshot, target);
+      const auto &mapped = authority.foreground_projection;
       mapping_status = foreground_window::mapping_status_name(mapped.status);
       if (!mapped) {
         return std::nullopt;
@@ -6762,7 +6763,8 @@ namespace platf::dxgi {
                                       observe_live_window_authority(
                                         source_desc,
                                         content_timestamp,
-                                        &initial_source_authority.foreground
+                                        &initial_source_authority.foreground,
+                                        true
                                       );
       const auto &matched_foreground_snapshot = matched_authority.foreground;
       // A pre-drag ROI completion may still own the estimator after USER32 stops producing desktop
@@ -6812,7 +6814,7 @@ namespace platf::dxgi {
                               std::optional<sbs_debug::window_region_snapshot> {} :
                               capture_browser_window_region(
                                 source_desc,
-                                matched_authority.browser_snapshot,
+                                matched_authority,
                                 frame_id,
                                 content_timestamp,
                                 captured_at,
@@ -6848,7 +6850,7 @@ namespace platf::dxgi {
           frame_id,
           content_timestamp,
           attributed_at,
-          matched_foreground_snapshot,
+          matched_authority,
           foreground_observer_status,
           foreground_mapping_status
         );
@@ -6877,7 +6879,7 @@ namespace platf::dxgi {
           frame_id,
           content_timestamp,
           attributed_at,
-          matched_foreground_snapshot,
+          matched_authority,
           foreground_observer_status,
           foreground_mapping_status
         );

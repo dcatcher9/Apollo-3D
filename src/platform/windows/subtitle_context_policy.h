@@ -16,9 +16,7 @@ namespace platf::subtitle_context_policy {
     bool foreground_target_usable = false;
     bool browser_identity_matches = false;
     bool browser_usable = false;
-    bool mapping_attempted = false;
-    bool mapping_succeeded = false;
-    video_dom::mapping_status_e mapping_status = video_dom::mapping_status_e::invalid_video_rect;
+    std::optional<video_dom::mapping_result_t> browser_mapping;
     bool fullscreen_check_evaluated = false;
     bool fullscreen_match = false;
     bool registered_player_candidate = false;
@@ -111,19 +109,16 @@ namespace platf::subtitle_context_policy {
       return result;
     }
 
-    const auto mapped = video_dom::map_screen_rect_to_capture(
+    const auto &mapped = result.browser_mapping.emplace(video_dom::map_screen_rect_to_capture(
       browser->screen_rect, capture_desktop_rect, source_width, source_height,
-      video_dom::rotation_e::identity);
-    result.mapping_attempted = true;
-    result.mapping_status = mapped.status;
-    result.mapping_succeeded = static_cast<bool>(mapped);
-    if (result.mapping_succeeded) {
+      video_dom::rotation_e::identity));
+    if (mapped) {
       result.fullscreen_check_evaluated = true;
       result.fullscreen_match = browser->status != video_dom::status_e::ok_fullscreen ||
         (mapped.capture_pixels.left == 0 && mapped.capture_pixels.top == 0 &&
          mapped.capture_pixels.right == source_width && mapped.capture_pixels.bottom == source_height);
     }
-    if (result.mapping_succeeded && result.fullscreen_match) {
+    if (mapped && result.fullscreen_match) {
       // The live geometry epoch remains an admission prerequisite above. Only semantic video
       // identity belongs to the context key; exact positioned authority stays with each slot.
       result.browser_key = {models::host_subtitle_context::kind_e::browser_video,

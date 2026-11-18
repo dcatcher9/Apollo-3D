@@ -2860,6 +2860,12 @@ exact root identity and geometry for a whole-client selection. An authenticated 
 still requires a complete census and revalidation at this point to prove it remains the unique
 eligible child. Only negative census results are cached for 100 ms, which can delay child selection.
 
+Each authority observation uses one selected-output description for foreground liveness, subtitle
+admission, and matched-frame attribution. These consumers share the foreground projection and any
+browser projection already computed for the same observation. Output-query failure rejects the
+target for that observation. Matched-frame attribution still checks capture timing and current
+browser foreground identity.
+
 ### Chromium semantic source
 
 Windows Host SBS can bind a Chromium `<video>` observation to one matched color/depth frame. A
