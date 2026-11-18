@@ -286,7 +286,8 @@ namespace {
       return result;
     }
 
-    ComPtr<IDXGIResource> desktop_surface(const pixels_t &pixels, UINT surface_width = width, DXGI_FORMAT format = DXGI_FORMAT_B8G8R8A8_UNORM) {
+    template<class Pixel>
+    ComPtr<IDXGIResource> desktop_surface_as(const std::array<Pixel, width * height> &pixels, DXGI_FORMAT format, UINT surface_width = width) {
       D3D11_TEXTURE2D_DESC desc {};
       desc.Width = surface_width;
       desc.Height = height;
@@ -294,13 +295,17 @@ namespace {
       desc.Format = format;
       desc.Usage = D3D11_USAGE_IMMUTABLE;
       desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-      const D3D11_SUBRESOURCE_DATA initial {pixels.data(), width * sizeof(pixels_t::value_type), 0u};
+      const D3D11_SUBRESOURCE_DATA initial {pixels.data(), width * sizeof(Pixel), 0u};
       ComPtr<ID3D11Texture2D> texture;
       ComPtr<IDXGIResource> resource;
       if (SUCCEEDED(display.device->CreateTexture2D(&desc, &initial, &texture))) {
         EXPECT_EQ(texture.As(&resource), S_OK);
       }
       return resource;
+    }
+
+    ComPtr<IDXGIResource> desktop_surface(const pixels_t &pixels, UINT surface_width = width, DXGI_FORMAT format = DXGI_FORMAT_B8G8R8A8_UNORM) {
+      return desktop_surface_as(pixels, format, surface_width);
     }
 
     DXGI_OUTDUPL_FRAME_INFO desktop_present() {
@@ -350,14 +355,15 @@ namespace {
       return display.capture_with_pending_work(push, [this](img_t &slot) { return pull_image(slot); }, &cursor, pending);
     }
 
-    std::optional<pixels_t> read_image(const img_t &image) {
+    template<class Pixel>
+    std::optional<std::array<Pixel, width * height>> read_image_as(const img_t &image, DXGI_FORMAT format) {
       if (!image || !image->data) {
         return {};
       }
       auto *texture = reinterpret_cast<ID3D11Texture2D *>(image->data);
       D3D11_TEXTURE2D_DESC desc {};
       texture->GetDesc(&desc);
-      if (desc.Width != width || desc.Height != height || desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM) {
+      if (desc.Width != width || desc.Height != height || desc.Format != format) {
         return {};
       }
       desc.Usage = D3D11_USAGE_STAGING;
@@ -375,13 +381,17 @@ namespace {
       if (FAILED(display.device_ctx->Map(staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped))) {
         return {};
       }
-      pixels_t pixels {};
+      std::array<Pixel, width * height> pixels {};
       for (UINT y = 0u; y < height; ++y) {
         std::memcpy(pixels.data() + y * width, static_cast<const std::uint8_t *>(mapped.pData) + y * mapped.RowPitch,
-          width * sizeof(pixels_t::value_type));
+          width * sizeof(Pixel));
       }
       display.device_ctx->Unmap(staging.Get(), 0u);
       return pixels;
+    }
+
+    std::optional<pixels_t> read_image(const img_t &image) {
+      return read_image_as<pixels_t::value_type>(image, DXGI_FORMAT_B8G8R8A8_UNORM);
     }
 
     static pixels_t with_cursor(pixels_t pixels, POINT point, std::uint32_t cursor_bgra = metadata_duplication_t::cursor_bgra) {
@@ -916,6 +926,8 @@ TEST_F(WindowsDdupSnapshotTest, RecycledTextureRestoresItsOwnCursorAndCopiesFres
   const auto fresh_pixels = desktop_pixels(0xff562300u);
   const auto fresh_surface = desktop_surface(fresh_pixels);
   ASSERT_TRUE(fresh_surface);
+  // This authored desktop changes every texel; its metadata must cover the complete change.
+  native->dirty = {{0, 0, width, height}};
   recycled_image = std::move(moved);
   img_t fresh;
   ASSERT_EQ(snapshot(desktop_present(), fresh_surface, fresh), platf::capture_e::ok);
@@ -931,6 +943,193 @@ TEST_F(WindowsDdupSnapshotTest, RecycledTextureRestoresItsOwnCursorAndCopiesFres
   ASSERT_EQ(stale.get(), second_slot);
   EXPECT_EQ(read_image(stale), with_cursor(fresh_pixels, first_position));
   EXPECT_EQ(stale->content_timestamp, fresh->content_timestamp);
+}
+
+TEST_F(WindowsDdupSnapshotTest, ChangedDesktopAccumulatesDamageAcrossOtherSlotsAndRestoresItsOwnCursor) {
+  constexpr POINT old_cursor {6, 4}, middle_cursor {7, 4}, new_cursor {15, 7};
+  const auto baseline_pixels = desktop_pixels(0xff123400u);
+  const auto baseline_surface = desktop_surface(baseline_pixels);
+  ASSERT_TRUE(baseline_surface);
+  auto info = desktop_present();
+  pointer_update(info, old_cursor, true, true);
+  img_t baseline;
+  ASSERT_EQ(snapshot(info, baseline_surface, baseline), platf::capture_e::ok);
+  ASSERT_EQ(read_image(baseline), with_cursor(baseline_pixels, old_cursor));
+  const auto *recycled_slot = baseline.get();
+  const auto baseline_damage = display.last_ddup_damage;
+  const auto baseline_stamp = baseline->content_timestamp;
+
+  auto middle_pixels = baseline_pixels;
+  for (UINT x = 1u; x < 3u; ++x) {
+    middle_pixels[width + x] = 0xff1234ffu;
+  }
+  native->dirty = {{1, 1, 3, 2}};
+  const auto middle_surface = desktop_surface(middle_pixels);
+  ASSERT_TRUE(middle_surface);
+  info = desktop_present();
+  pointer_update(info, middle_cursor, true);
+  img_t middle;
+  ASSERT_EQ(snapshot(info, middle_surface, middle), platf::capture_e::ok);
+  ASSERT_NE(middle.get(), recycled_slot);
+  ASSERT_EQ(read_image(middle), with_cursor(middle_pixels, middle_cursor));
+
+  auto current_pixels = middle_pixels;
+  // The acquired surface already contains this move; copy its affected coverage from that
+  // surface rather than replaying a move inside the stale pooled texture.
+  for (UINT x = 0u; x < 2u; ++x) {
+    current_pixels[2u * width + 12u + x] = middle_pixels[2u * width + 8u + x];
+  }
+  for (UINT y = 5u; y < 7u; ++y) {
+    for (UINT x = 10u; x < 12u; ++x) {
+      current_pixels[y * width + x] = 0xffabcdefu;
+    }
+  }
+  native->moves = {{{8, 2}, {12, 2, 14, 3}}};
+  native->dirty = {{10, 5, 12, 7}};
+  info = desktop_present();
+  info.TotalMetadataBufferSize = sizeof(DXGI_OUTDUPL_MOVE_RECT) + sizeof(RECT);
+  pointer_update(info, new_cursor, true);
+  const auto current_surface = desktop_surface(current_pixels);
+  ASSERT_TRUE(current_surface);
+  recycled_image = std::move(baseline);
+  img_t current;
+  ASSERT_EQ(snapshot(info, current_surface, current), platf::capture_e::ok);
+  ASSERT_EQ(current.get(), recycled_slot);
+  EXPECT_EQ(read_image(current), with_cursor(current_pixels, new_cursor));
+  EXPECT_EQ(read_image(middle), with_cursor(middle_pixels, middle_cursor));
+  EXPECT_GT(current->content_timestamp, baseline_stamp);
+  ASSERT_TRUE(baseline_damage && display.last_ddup_damage);
+  EXPECT_EQ(display.last_ddup_damage->token, baseline_damage->token + 2u);
+  EXPECT_EQ(d::query_ddup_damage_between(baseline_damage, display.last_ddup_damage, {1, 1, 3, 2}),
+    d::ddup_damage_intersection_e::changed);
+}
+
+TEST_F(WindowsDdupSnapshotTest, ChangedDesktopRegionLeavesAnOutsideCanaryUntouched) {
+  const auto pixels = desktop_pixels(0xff123400u);
+  const auto baseline_surface = desktop_surface(pixels);
+  ASSERT_TRUE(baseline_surface);
+  img_t baseline;
+  ASSERT_EQ(snapshot(desktop_present(), baseline_surface, baseline), platf::capture_e::ok);
+  const auto *slot = baseline.get();
+
+  auto expected = pixels;
+  expected[3u * width + 5u] ^= 0x000000ffu;
+  auto source_pixels = expected;
+  // Deliberately outside the admitted dirty rectangle: retaining the old texel proves that
+  // the actual production capture used its bounded regional copy instead of CopyResource.
+  source_pixels[0] ^= 0x0000ff00u;
+  native->dirty = {{5, 3, 6, 4}};
+  const auto source = desktop_surface(source_pixels);
+  ASSERT_TRUE(source);
+  recycled_image = std::move(baseline);
+  img_t current;
+  ASSERT_EQ(snapshot(desktop_present(), source, current), platf::capture_e::ok);
+  EXPECT_EQ(current.get(), slot);
+  EXPECT_EQ(read_image(current), expected);
+  EXPECT_NE(read_image(current), source_pixels);
+}
+
+TEST_F(WindowsDdupSnapshotTest, ChangedDesktopUnknownOrNewHistoryCopiesTheCompleteRecycledSurface) {
+  const auto pixels = desktop_pixels(0xff123400u);
+  const auto changed_pixels = desktop_pixels(0xff562300u);
+  const auto baseline_surface = desktop_surface(pixels);
+  const auto changed_surface = desktop_surface(changed_pixels);
+  ASSERT_TRUE(baseline_surface && changed_surface);
+  for (const std::string_view reason : {"missing metadata", "protected", "new history", "rotated", "full damage"}) {
+    SCOPED_TRACE(reason);
+    display.display_rotation = DXGI_MODE_ROTATION_IDENTITY;
+    native->dirty = {{0, 0, width, height}};
+    img_t baseline;
+    ASSERT_EQ(snapshot(desktop_present(), baseline_surface, baseline), platf::capture_e::ok);
+    ASSERT_EQ(read_image(baseline), pixels);
+    const auto *slot = baseline.get();
+    auto info = desktop_present();
+    if (reason == "missing metadata") {
+      info.TotalMetadataBufferSize = 0u;
+    } else if (reason == "protected") {
+      info.ProtectedContentMaskedOut = TRUE;
+    } else if (reason == "new history") {
+      display.last_ddup_damage.reset();
+      display.damage_history.reset();
+    } else if (reason == "rotated") {
+      display.display_rotation = DXGI_MODE_ROTATION_ROTATE90;
+    }
+    recycled_image = std::move(baseline);
+    img_t current;
+    ASSERT_EQ(snapshot(info, changed_surface, current), platf::capture_e::ok);
+    EXPECT_EQ(current.get(), slot);
+    EXPECT_EQ(read_image(current), changed_pixels);
+  }
+}
+
+TEST_F(WindowsDdupSnapshotTest, UncertainNonPresentBeforeKnownDamageForcesACompleteRecycledCopy) {
+  const auto baseline_pixels = desktop_pixels(0xff123400u);
+  const auto baseline_surface = desktop_surface(baseline_pixels);
+  ASSERT_TRUE(baseline_surface);
+  img_t baseline;
+  ASSERT_EQ(snapshot(desktop_present(), baseline_surface, baseline), platf::capture_e::ok);
+  ASSERT_TRUE(display.last_ddup_damage);
+  const auto baseline_damage = display.last_ddup_damage;
+  const auto *slot = baseline.get();
+
+  auto unknown_pixels = baseline_pixels;
+  unknown_pixels[0] ^= 0x0000ff00u;
+  const auto unknown_surface = desktop_surface(unknown_pixels);
+  ASSERT_TRUE(unknown_surface);
+  DXGI_OUTDUPL_FRAME_INFO uncertain {};
+  uncertain.AccumulatedFrames = 1u;
+  img_t filtered;
+  EXPECT_EQ(snapshot(uncertain, unknown_surface, filtered), platf::capture_e::timeout);
+  EXPECT_FALSE(filtered);
+  EXPECT_EQ(image_pulls, 1u);
+  ASSERT_TRUE(display.last_ddup_damage);
+  EXPECT_EQ(display.last_ddup_damage->token, baseline_damage->token);
+
+  auto current_pixels = unknown_pixels;
+  current_pixels[3u * width + 5u] ^= 0x000000ffu;
+  // This metadata truthfully covers changes since the uncertain acquired surface, but not
+  // the uncommitted earlier change. The private serial gap must force a whole-surface copy.
+  native->dirty = {{5, 3, 6, 4}};
+  const auto current_surface = desktop_surface(current_pixels);
+  ASSERT_TRUE(current_surface);
+  recycled_image = std::move(baseline);
+  img_t current;
+  ASSERT_EQ(snapshot(desktop_present(), current_surface, current), platf::capture_e::ok);
+  EXPECT_EQ(current.get(), slot);
+  EXPECT_EQ(read_image(current), current_pixels);
+  ASSERT_TRUE(display.last_ddup_damage);
+  EXPECT_EQ(display.last_ddup_damage->token, baseline_damage->token + 1u);
+}
+
+TEST_F(WindowsDdupSnapshotTest, ChangedFp16DesktopCopiesBothNewDamageAndTheRetainedIntervalExactly) {
+  using pixel_t = std::array<std::uint16_t, 4u>;
+  std::array<pixel_t, width * height> baseline_pixels {};
+  for (std::size_t i = 0u; i < baseline_pixels.size(); ++i) {
+    baseline_pixels[i] = {static_cast<std::uint16_t>(0x3000u + i), 0x3800u, 0x3c00u, 0x3c00u};
+  }
+  const auto baseline_surface = desktop_surface_as(baseline_pixels, DXGI_FORMAT_R16G16B16A16_FLOAT);
+  ASSERT_TRUE(baseline_surface);
+  img_t baseline;
+  ASSERT_EQ(snapshot(desktop_present(), baseline_surface, baseline), platf::capture_e::ok);
+  ASSERT_EQ(read_image_as<pixel_t>(baseline, DXGI_FORMAT_R16G16B16A16_FLOAT), baseline_pixels);
+
+  auto middle_pixels = baseline_pixels;
+  middle_pixels[width + 2u] = {0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u};
+  native->dirty = {{2, 1, 3, 2}};
+  const auto middle_surface = desktop_surface_as(middle_pixels, DXGI_FORMAT_R16G16B16A16_FLOAT);
+  ASSERT_TRUE(middle_surface);
+  img_t middle;
+  ASSERT_EQ(snapshot(desktop_present(), middle_surface, middle), platf::capture_e::ok);
+  auto current_pixels = middle_pixels;
+  current_pixels[6u * width + 12u] = {0x4000u, 0x3800u, 0x3000u, 0x3c00u};
+  native->dirty = {{12, 6, 13, 7}};
+  const auto current_surface = desktop_surface_as(current_pixels, DXGI_FORMAT_R16G16B16A16_FLOAT);
+  ASSERT_TRUE(current_surface);
+  recycled_image = std::move(baseline);
+  img_t current;
+  ASSERT_EQ(snapshot(desktop_present(), current_surface, current), platf::capture_e::ok);
+  EXPECT_EQ(read_image_as<pixel_t>(current, DXGI_FORMAT_R16G16B16A16_FLOAT), current_pixels);
+  EXPECT_EQ(read_image_as<pixel_t>(middle, DXGI_FORMAT_R16G16B16A16_FLOAT), middle_pixels);
 }
 
 TEST_F(WindowsDdupSnapshotTest, RecycledTextureRestoresClippedRotatedCursor) {

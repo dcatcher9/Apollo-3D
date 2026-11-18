@@ -12649,10 +12649,21 @@ namespace platf::dxgi {
           return capture_e::error;
         }
         if (src) {
-          if (image->ddup_desktop_serial == 0 || image->ddup_desktop_serial != desktop_serial_) {
+          const auto &cursor_box = image->ddup_cursor_box;
+          const RECT old_cursor {static_cast<LONG>(cursor_box.left), static_cast<LONG>(cursor_box.top),
+                                 static_cast<LONG>(cursor_box.right), static_cast<LONG>(cursor_box.bottom)};
+          const auto copy = detail::plan_ddup_capture_copy(
+            image->ddup_desktop_serial, desktop_serial_, image->ddup_damage,
+            last_ddup_damage, damage, old_cursor, width_before_rotation, height_before_rotation
+          );
+          if (copy.kind == detail::ddup_capture_copy_kind_e::full) {
             device_ctx->CopyResource(image->capture_texture.get(), src.get());
-          } else if (const auto &box = image->ddup_cursor_box; box.left < box.right && box.top < box.bottom) {
-            // This slot already holds the acquired desktop outside its previous cursor.
+          } else if (copy.kind == detail::ddup_capture_copy_kind_e::region) {
+            // The exact retained interval covers every changed desktop pixel. Read one
+            // conservative rectangle from the current full bitmap, including this slot's old
+            // cursor. Moves need no replay or temporary surface; the source is already current.
+            const D3D11_BOX box {static_cast<UINT>(copy.region.left), static_cast<UINT>(copy.region.top), 0u,
+                                 static_cast<UINT>(copy.region.right), static_cast<UINT>(copy.region.bottom), 1u};
             device_ctx->CopySubresourceRegion(image->capture_texture.get(), 0u, box.left, box.top, 0u, src.get(), 0u, &box);
           }
         } else if (reclear_dummy) {

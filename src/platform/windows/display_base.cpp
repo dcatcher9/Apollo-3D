@@ -153,6 +153,46 @@ namespace platf::dxgi {
         return static_cast<std::uint64_t>(width) *
                static_cast<std::uint64_t>(height);
       }
+
+      [[nodiscard]] bool add_copy_bounds(
+        RECT &bounds,
+        const RECT &rect,
+        const LONG width,
+        const LONG height,
+        const bool allow_empty = false
+      ) noexcept {
+        if (allow_empty && rect.left >= 0 && rect.top >= 0 &&
+            rect.right >= rect.left && rect.bottom >= rect.top &&
+            rect.right <= width && rect.bottom <= height &&
+            (rect.left == rect.right || rect.top == rect.bottom)) {
+          return true;
+        }
+        if (!valid_damage_rect(rect, width, height)) {
+          return false;
+        }
+        if (bounds.left == bounds.right || bounds.top == bounds.bottom) {
+          bounds = rect;
+        } else {
+          bounds = {std::min(bounds.left, rect.left), std::min(bounds.top, rect.top),
+                    std::max(bounds.right, rect.right), std::max(bounds.bottom, rect.bottom)};
+        }
+        return true;
+      }
+
+      [[nodiscard]] ddup_capture_copy_plan_t copy_plan_from_bounds(
+        const RECT &bounds,
+        const LONG width,
+        const LONG height
+      ) noexcept {
+        if (bounds.left == bounds.right || bounds.top == bounds.bottom) {
+          return {ddup_capture_copy_kind_e::none, {}};
+        }
+        if (bounds.left == 0 && bounds.top == 0 &&
+            bounds.right == width && bounds.bottom == height) {
+          return {};
+        }
+        return {ddup_capture_copy_kind_e::region, bounds};
+      }
     }  // namespace
 
     ddup_damage_update_t make_ddup_damage_update(
@@ -274,6 +314,36 @@ namespace platf::dxgi {
                ddup_damage_intersection_e::changed;
     }
 
+    std::optional<ddup_damage_history_t::range_t>
+    ddup_damage_history_t::retained_range_locked(
+      const std::uint64_t from_exclusive,
+      const std::uint64_t through_inclusive
+    ) const {
+      if (from_exclusive == 0u || through_inclusive == 0u || from_exclusive > through_inclusive) {
+        return std::nullopt;
+      }
+      if (from_exclusive == through_inclusive) {
+        return range_t {};
+      }
+      if (entries_.empty() || from_exclusive == UINT64_MAX ||
+          from_exclusive + 1u < entries_.front().token || through_inclusive > entries_.back().token) {
+        return std::nullopt;
+      }
+      const auto first_token = from_exclusive + 1u;
+      const auto first = static_cast<std::size_t>(first_token - entries_.front().token);
+      const auto count = static_cast<std::size_t>(through_inclusive - first_token + 1u);
+      if (first > entries_.size() || count > entries_.size() - first) {
+        return std::nullopt;
+      }
+      for (std::size_t offset = 0u; offset < count; ++offset) {
+        const auto &entry = entries_[first + offset];
+        if (entry.token != first_token + offset || !entry.known) {
+          return std::nullopt;
+        }
+      }
+      return range_t {first, count};
+    }
+
     ddup_damage_coverage_t ddup_damage_history_t::query_coverage(
       const std::uint64_t from_exclusive,
       const std::uint64_t through_inclusive,
@@ -301,33 +371,12 @@ namespace platf::dxgi {
       }
 
       std::lock_guard lock {mutex_};
-      if (
-        entries_.empty() || from_exclusive == UINT64_MAX ||
-        from_exclusive + 1u < entries_.front().token ||
-        through_inclusive > entries_.back().token
-      ) {
+      const auto range = retained_range_locked(from_exclusive, through_inclusive);
+      if (!range) {
         return result;
       }
-
-      const auto first_token = from_exclusive + 1u;
-      const auto first_index = static_cast<std::size_t>(
-        first_token - entries_.front().token
-      );
-      const auto count = static_cast<std::size_t>(
-        through_inclusive - first_token + 1u
-      );
-      if (first_index > entries_.size() || count > entries_.size() - first_index) {
-        return result;
-      }
-
-      for (std::size_t offset = 0u; offset < count; ++offset) {
-        const auto &entry = entries_[first_index + offset];
-        if (entry.token != first_token + offset) {
-          return result;
-        }
-        if (!entry.known) {
-          return result;
-        }
+      for (std::size_t offset = 0u; offset < range->count; ++offset) {
+        const auto &entry = entries_[range->first + offset];
         for (const auto &rect : entry.rects) {
           const auto overlap = damage_rect_intersection_area(rect, region);
           if (collect_max_single_intersection) {
@@ -353,6 +402,86 @@ namespace platf::dxgi {
 
       result.known = true;
       return result;
+    }
+
+    ddup_capture_copy_plan_t ddup_damage_history_t::plan_copy(
+      const std::uint64_t from_exclusive,
+      const std::uint64_t through_inclusive,
+      const ddup_damage_update_t &current_update,
+      const RECT &old_cursor,
+      const LONG width,
+      const LONG height
+    ) const {
+      if (width <= 0 || height <= 0 || !current_update.known ||
+          current_update.rects.size() > ddup_damage_frame_rect_budget) {
+        return {};
+      }
+      RECT bounds {};
+      if (!add_copy_bounds(bounds, old_cursor, width, height, true)) {
+        return {};
+      }
+      for (const auto &rect : current_update.rects) {
+        if (!add_copy_bounds(bounds, rect, width, height)) {
+          return {};
+        }
+        // Full current damage needs neither a history lock nor a retained-range traversal.
+        if (copy_plan_from_bounds(bounds, width, height).kind == ddup_capture_copy_kind_e::full) {
+          return {};
+        }
+      }
+      std::lock_guard lock {mutex_};
+      const auto range = retained_range_locked(from_exclusive, through_inclusive);
+      if (!range) {
+        return {};
+      }
+      for (std::size_t offset = 0u; offset < range->count; ++offset) {
+        for (const auto &rect : entries_[range->first + offset].rects) {
+          if (!add_copy_bounds(bounds, rect, width, height)) {
+            return {};
+          }
+          if (copy_plan_from_bounds(bounds, width, height).kind == ddup_capture_copy_kind_e::full) {
+            return {};
+          }
+        }
+      }
+      return copy_plan_from_bounds(bounds, width, height);
+    }
+
+    ddup_capture_copy_plan_t plan_ddup_capture_copy(
+      const std::uint64_t image_desktop_serial,
+      const std::uint64_t current_desktop_serial,
+      const std::optional<ddup_damage_snapshot_t> &image_damage,
+      const std::optional<ddup_damage_snapshot_t> &previous_damage,
+      const ddup_damage_update_t &current_update,
+      const RECT &old_cursor,
+      const LONG width,
+      const LONG height
+    ) {
+      if (width <= 0 || height <= 0 || image_desktop_serial == 0u ||
+          current_desktop_serial == 0u || image_desktop_serial > current_desktop_serial) {
+        return {};
+      }
+      if (image_desktop_serial == current_desktop_serial) {
+        RECT bounds {};
+        return add_copy_bounds(bounds, old_cursor, width, height, true) ?
+                 copy_plan_from_bounds(bounds, width, height) : ddup_capture_copy_plan_t {};
+      }
+      if (!image_damage || !previous_damage || !image_damage->history ||
+          image_damage->history != previous_damage->history || image_damage->token == 0u ||
+          previous_damage->token < image_damage->token) {
+        return {};
+      }
+      // An uncertain non-present acquisition or re-duplication can retire private texture
+      // serials without committing a history entry. Every intervening serial must therefore
+      // have one retained update; the current acquired present is the one not yet committed.
+      // Subtract the known-positive serial distance first to avoid a token + 1 overflow.
+      if (previous_damage->token - image_damage->token !=
+          current_desktop_serial - image_desktop_serial - 1u) {
+        return {};
+      }
+      return image_damage->history->plan_copy(
+        image_damage->token, previous_damage->token, current_update, old_cursor, width, height
+      );
     }
 
     ddup_damage_intersection_e query_ddup_damage_between(

@@ -6,6 +6,7 @@
 
 #ifdef _WIN32
   #include <algorithm>
+  #include <array>
   #include <boost/filesystem/path.hpp>
   #include <boost/process/v1/child.hpp>
   #include <boost/process/v1/environment.hpp>
@@ -270,6 +271,133 @@ namespace {
       platf::dxgi::detail::query_ddup_damage_between(base, inside, roi),
       changed
     );
+  }
+
+  void expect_capture_copy_plan(
+    const platf::dxgi::detail::ddup_capture_copy_plan_t &plan,
+    const platf::dxgi::detail::ddup_capture_copy_kind_e kind,
+    const RECT &region = {}
+  ) {
+    EXPECT_EQ(plan.kind, kind);
+    EXPECT_EQ(plan.region.left, region.left);
+    EXPECT_EQ(plan.region.top, region.top);
+    EXPECT_EQ(plan.region.right, region.right);
+    EXPECT_EQ(plan.region.bottom, region.bottom);
+  }
+
+  TEST(WindowsDdupCaptureCopyTest, AccumulatesEveryRetainedUpdateCurrentMoveAndOldCursor) {
+    using namespace platf::dxgi::detail;
+    auto history = std::make_shared<ddup_damage_history_t>();
+    const auto baseline = history->commit({false, {}});
+    (void) history->commit({true, {{40, 30, 50, 40}}});
+    const auto previous = history->commit({true, {{60, 50, 80, 70}}});
+    const RECT dirty {100, 80, 120, 100};
+    const DXGI_OUTDUPL_MOVE_RECT move {{130, 110}, {160, 140, 180, 160}};
+    const auto current = make_ddup_damage_update({&dirty, 1u}, {&move, 1u}, 640, 480);
+    ASSERT_TRUE(current.known);
+    expect_capture_copy_plan(
+      plan_ddup_capture_copy(1u, 4u, baseline, previous, current, {10, 20, 20, 30}, 640, 480),
+      ddup_capture_copy_kind_e::region, {10, 20, 180, 160}
+    );
+    // The new copy planner never commits the acquired update or changes observation identity.
+    EXPECT_EQ(previous.token, baseline.token + 2u);
+    EXPECT_EQ(history->query(baseline.token, previous.token, {100, 80, 120, 100}),
+      ddup_damage_intersection_e::unchanged);
+  }
+
+  TEST(WindowsDdupCaptureCopyTest, SameDesktopRetainsExistingCursorOnlyBehaviorWithoutDamageAuthority) {
+    using namespace platf::dxgi::detail;
+    expect_capture_copy_plan(plan_ddup_capture_copy(9u, 9u, {}, {}, {}, {}, 640, 480),
+      ddup_capture_copy_kind_e::none);
+    expect_capture_copy_plan(plan_ddup_capture_copy(9u, 9u, {}, {}, {}, {0, 450, 8, 480}, 640, 480),
+      ddup_capture_copy_kind_e::region, {0, 450, 8, 480});
+    expect_capture_copy_plan(plan_ddup_capture_copy(0u, 9u, {}, {}, {}, {}, 640, 480),
+      ddup_capture_copy_kind_e::full);
+    expect_capture_copy_plan(plan_ddup_capture_copy(9u, 8u, {}, {}, {}, {}, 640, 480),
+      ddup_capture_copy_kind_e::full);
+    expect_capture_copy_plan(plan_ddup_capture_copy(9u, 9u, {}, {}, {}, {0, 0, 641, 1}, 640, 480),
+      ddup_capture_copy_kind_e::full);
+  }
+
+  TEST(WindowsDdupCaptureCopyTest, ChangedDesktopRequiresTheCompleteSameHistoryRange) {
+    using namespace platf::dxgi::detail;
+    auto history = std::make_shared<ddup_damage_history_t>();
+    const auto baseline = history->commit({true, {}});
+    const auto previous = history->commit({true, {{2, 2, 4, 4}}});
+    auto unrelated = std::make_shared<ddup_damage_history_t>();
+    const auto foreign = unrelated->commit({true, {}});
+    const ddup_damage_update_t current {true, {{8, 8, 10, 10}}};
+    for (const auto &from : std::array<std::optional<ddup_damage_snapshot_t>, 4u> {
+           std::nullopt, foreign, ddup_damage_snapshot_t {history, 0u},
+           ddup_damage_snapshot_t {history, previous.token + 1u}}) {
+      expect_capture_copy_plan(plan_ddup_capture_copy(1u, 3u, from, previous, current, {}, 640, 480),
+        ddup_capture_copy_kind_e::full);
+    }
+    const auto unknown = history->commit({false, {}});
+    expect_capture_copy_plan(plan_ddup_capture_copy(1u, 4u, baseline, {}, current, {}, 640, 480),
+      ddup_capture_copy_kind_e::full);
+    expect_capture_copy_plan(plan_ddup_capture_copy(1u, 4u, baseline, unknown, current, {}, 640, 480),
+      ddup_capture_copy_kind_e::full);
+    auto latest = unknown;
+    for (std::size_t i = 0u; i < ddup_damage_history_frame_budget; ++i) {
+      latest = history->commit({true, {}});
+    }
+    expect_capture_copy_plan(plan_ddup_capture_copy(1u, latest.token + 1u, baseline, latest, current, {}, 640, 480),
+      ddup_capture_copy_kind_e::full);
+  }
+
+  TEST(WindowsDdupCaptureCopyTest, SerialGapsWithoutMatchingCommittedUpdatesRequireWholeCopy) {
+    using namespace platf::dxgi::detail;
+    auto history = std::make_shared<ddup_damage_history_t>();
+    const auto baseline = history->commit({true, {}});
+    const ddup_damage_update_t current {true, {{8, 8, 10, 10}}};
+    expect_capture_copy_plan(plan_ddup_capture_copy(1u, 2u, baseline, baseline, current, {}, 640, 480),
+      ddup_capture_copy_kind_e::region, {8, 8, 10, 10});
+    // A skipped uncertain acquisition changed the private serial, but supplied no committed
+    // damage record. Same-token history cannot bridge that missing desktop observation.
+    expect_capture_copy_plan(plan_ddup_capture_copy(1u, 3u, baseline, baseline, current, {}, 640, 480),
+      ddup_capture_copy_kind_e::full);
+    const auto previous = history->commit({true, {{2, 2, 4, 4}}});
+    expect_capture_copy_plan(plan_ddup_capture_copy(1u, 4u, baseline, previous, current, {}, 640, 480),
+      ddup_capture_copy_kind_e::full);
+    expect_capture_copy_plan(plan_ddup_capture_copy(1u, 2u, baseline, previous, current, {}, 640, 480),
+      ddup_capture_copy_kind_e::full);
+  }
+
+  TEST(WindowsDdupCaptureCopyTest, UnknownMalformedAndFullDamageKeepTheWholeSurfaceFallback) {
+    using namespace platf::dxgi::detail;
+    auto history = std::make_shared<ddup_damage_history_t>();
+    const auto baseline = history->commit({true, {}});
+    const std::array<ddup_damage_update_t, 5u> updates {{
+      {}, {false, {{1, 1, 2, 2}}}, {true, {{-1, 0, 2, 2}}},
+      {true, {{1, 1, 641, 2}}}, {true, {{0, 0, 640, 480}}},
+    }};
+    for (const auto &current : updates) {
+      expect_capture_copy_plan(plan_ddup_capture_copy(1u, 2u, baseline, baseline, current, {}, 640, 480),
+        ddup_capture_copy_kind_e::full);
+    }
+    ddup_damage_update_t oversized {true, std::vector<RECT>(ddup_damage_frame_rect_budget + 1u, {1, 1, 2, 2})};
+    expect_capture_copy_plan(plan_ddup_capture_copy(1u, 2u, baseline, baseline, oversized, {}, 640, 480),
+      ddup_capture_copy_kind_e::full);
+    const auto malformed = history->commit({true, {{-1, 0, 2, 2}}});
+    expect_capture_copy_plan(plan_ddup_capture_copy(1u, 3u, baseline, malformed, {true, {}}, {}, 640, 480),
+      ddup_capture_copy_kind_e::full);
+    const auto full = history->commit({true, {{0, 0, 640, 480}}});
+    expect_capture_copy_plan(plan_ddup_capture_copy(2u, 4u, malformed, full, {true, {}}, {}, 640, 480),
+      ddup_capture_copy_kind_e::full);
+  }
+
+  TEST(WindowsDdupCaptureCopyTest, KnownEmptyUpdateCanRetainPixelsButStillRestoresTheOldCursor) {
+    using namespace platf::dxgi::detail;
+    auto history = std::make_shared<ddup_damage_history_t>();
+    const auto baseline = history->commit({true, {}});
+    const auto previous = history->commit({true, {}});
+    expect_capture_copy_plan(plan_ddup_capture_copy(1u, 3u, baseline, previous, {true, {}}, {}, 640, 480),
+      ddup_capture_copy_kind_e::none);
+    expect_capture_copy_plan(plan_ddup_capture_copy(1u, 3u, baseline, previous, {true, {}}, {20, 30, 24, 34}, 640, 480),
+      ddup_capture_copy_kind_e::region, {20, 30, 24, 34});
+    expect_capture_copy_plan(plan_ddup_capture_copy(1u, 3u, baseline, previous, {true, {}}, {}, 0, 480),
+      ddup_capture_copy_kind_e::full);
   }
 
   TEST(WindowsDdupDamageTest, ClassifiesFullContentAndExactRoiProofsSeparately) {

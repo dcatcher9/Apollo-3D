@@ -687,13 +687,24 @@ namespace platf::dxgi {
       bool single_desktop_present = false;
     };
 
-    /** Immutable identity of one desktop surface actually committed by CopyResource. */
+    /** Immutable identity of one desktop surface actually committed by capture's copy. */
     class ddup_damage_history_t;
 
     struct ddup_damage_snapshot_t {
       std::shared_ptr<const ddup_damage_history_t> history;
       std::uint64_t token = 0u;
       bool single_desktop_present = false;
+    };
+
+    enum class ddup_capture_copy_kind_e : std::uint8_t {
+      full,
+      none,
+      region,
+    };
+
+    struct ddup_capture_copy_plan_t {
+      ddup_capture_copy_kind_e kind = ddup_capture_copy_kind_e::full;
+      RECT region {};
     };
 
     /** The caller observed two adjacent committed surfaces and DDup reported exactly one
@@ -738,7 +749,30 @@ namespace platf::dxgi {
         bool collect_max_single_intersection = false
       ) const;
 
+      /** Copy bounds across an exact retained interval. Unknown/invalid/full coverage all
+       * require the ordinary whole-surface copy; none authorizes retaining unknown pixels.
+       */
+      [[nodiscard]] ddup_capture_copy_plan_t plan_copy(
+        std::uint64_t from_exclusive,
+        std::uint64_t through_inclusive,
+        const ddup_damage_update_t &current_update,
+        const RECT &old_cursor,
+        LONG width,
+        LONG height
+      ) const;
+
     private:
+      struct range_t {
+        std::size_t first = 0u;
+        std::size_t count = 0u;
+      };
+
+      // Caller holds mutex_. A same-token interval contains no intervening update.
+      [[nodiscard]] std::optional<range_t> retained_range_locked(
+        std::uint64_t from_exclusive,
+        std::uint64_t through_inclusive
+      ) const;
+
       struct entry_t {
         std::uint64_t token = 0u;
         bool known = false;
@@ -750,6 +784,21 @@ namespace platf::dxgi {
       std::size_t retained_rects_ = 0u;
       std::uint64_t next_token_ = 1u;
     };
+
+    /** Capture's private texture identity and exact damage history select one conservative
+     * desktop copy. Cursor restoration uses the same acquired current desktop, before drawing
+     * the new cursor. This never supplies Host SBS model/reuse authority.
+     */
+    [[nodiscard]] ddup_capture_copy_plan_t plan_ddup_capture_copy(
+      std::uint64_t image_desktop_serial,
+      std::uint64_t current_desktop_serial,
+      const std::optional<ddup_damage_snapshot_t> &image_damage,
+      const std::optional<ddup_damage_snapshot_t> &previous_damage,
+      const ddup_damage_update_t &current_update,
+      const RECT &old_cursor,
+      LONG width,
+      LONG height
+    );
 
     /** Query only when both snapshots belong to the same retained exact history range. */
     [[nodiscard]] ddup_damage_intersection_e query_ddup_damage_between(
