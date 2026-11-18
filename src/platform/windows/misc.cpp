@@ -2726,16 +2726,11 @@ namespace platf {
   }
 
   namespace {
-    struct presentation_scheduling_operations_t {
-      bool dwm_mmcss_enabled = false;
+    struct presentation_cpu_scheduling_operations_t {
       detail::presentation_timer_request_t timer_request;
       DWORD previous_priority = 0;
 
       void start() {
-        if (!dwm_mmcss_enabled) {
-          dwm_mmcss_enabled = SUCCEEDED(DwmEnableMMCSS(TRUE));
-        }
-
         // Retain the exact successfully acquired timer request. A failed cleanup can be retried
         // after the next presentation lifetime without adding another outstanding request.
         timer_request.start(
@@ -2760,17 +2755,6 @@ namespace platf {
         // Preserve a caller-selected higher priority and only claim a change with a known undo.
         if (!previous_priority && priority != 0 && priority != HIGH_PRIORITY_CLASS && priority != REALTIME_PRIORITY_CLASS && SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS)) {
           previous_priority = priority;
-        }
-
-        // This first-owner transition is serialized with every local/remote acquire and release.
-        // Startup/shutdown profile ownership surrounds both presentation lifetimes in main().
-        if (nvprefs_instance.load()) {
-          if (!nvprefs_instance.owning_undo_file()) {
-            nvprefs_instance.restore_from_and_delete_undo_file_if_exists();
-          }
-          nvprefs_instance.modify_application_profile();
-          nvprefs_instance.modify_global_profile();
-          nvprefs_instance.unload();
         }
       }
 
@@ -2797,6 +2781,38 @@ namespace platf {
             return timeEndPeriod(1) == TIMERR_NOERROR;
           }
         );
+      }
+    };
+
+    using presentation_cpu_scheduling_controller_t =
+      detail::presentation_scheduling_t<presentation_cpu_scheduling_operations_t>;
+    // The full presentation controller below and test CPU leases share this exact owner.
+    presentation_cpu_scheduling_controller_t presentation_cpu_scheduling;
+
+    struct presentation_scheduling_operations_t {
+      bool dwm_mmcss_enabled = false;
+      presentation_cpu_scheduling_controller_t::lease_t cpu_scheduling;
+
+      void start() {
+        if (!dwm_mmcss_enabled) {
+          dwm_mmcss_enabled = SUCCEEDED(DwmEnableMMCSS(TRUE));
+        }
+        cpu_scheduling = presentation_cpu_scheduling.acquire();
+
+        // This first-owner transition is serialized with every local/remote acquire and release.
+        // Startup/shutdown profile ownership surrounds both presentation lifetimes in main().
+        if (nvprefs_instance.load()) {
+          if (!nvprefs_instance.owning_undo_file()) {
+            nvprefs_instance.restore_from_and_delete_undo_file_if_exists();
+          }
+          nvprefs_instance.modify_application_profile();
+          nvprefs_instance.modify_global_profile();
+          nvprefs_instance.unload();
+        }
+      }
+
+      void stop() noexcept {
+        cpu_scheduling.reset();
         if (dwm_mmcss_enabled && SUCCEEDED(DwmEnableMMCSS(FALSE))) {
           dwm_mmcss_enabled = false;
         }
@@ -2823,6 +2839,50 @@ namespace platf {
   std::unique_ptr<deinit_t> acquire_presentation_scheduling() {
     return std::make_unique<presentation_scheduling_lease_t>();
   }
+
+  bool host_sbs_completion_wait_available() noexcept {
+    try {
+      return presentation_cpu_scheduling.active_satisfies([](const auto &cpu) {
+        // This is eligibility for the measured notification transport, not a new timer policy.
+        // Production still requests the OS-reported finest native period, or its existing
+        // multimedia fallback. The fallback alone has no matching notification qualification.
+        constexpr std::uint32_t maximum_period_100ns = 10'000u;
+        if (!cpu.timer_request.owns_native_request_at_most(maximum_period_100ns)) {
+          return false;
+        }
+        ULONG minimum = 0, maximum = 0, current = 0;
+        if (!NT_SUCCESS(NtQueryTimerResolution(&minimum, &maximum, &current)) ||
+            current == 0u || current > maximum_period_100ns) {
+          return false;
+        }
+        const auto process_priority = GetPriorityClass(GetCurrentProcess());
+        if (process_priority != HIGH_PRIORITY_CLASS && process_priority != REALTIME_PRIORITY_CLASS) {
+          return false;
+        }
+        const auto owner_priority = GetThreadPriority(GetCurrentThread());
+        return owner_priority != THREAD_PRIORITY_ERROR_RETURN && owner_priority >= THREAD_PRIORITY_ABOVE_NORMAL;
+      });
+    } catch (...) {
+      return false;
+    }
+  }
+
+#ifdef SUNSHINE_TESTS
+  namespace testing {
+    std::unique_ptr<deinit_t> acquire_presentation_cpu_scheduling_for_test() {
+      class cpu_scheduling_lease_t final: public deinit_t {
+      public:
+        cpu_scheduling_lease_t():
+            lease_(presentation_cpu_scheduling.acquire()) {
+        }
+
+      private:
+        presentation_cpu_scheduling_controller_t::lease_t lease_;
+      };
+      return std::make_unique<cpu_scheduling_lease_t>();
+    }
+  }
+#endif
 
   void streaming_will_start() {
     // stream.cpp serializes the remote hooks and retains this lease across reconnect grace.

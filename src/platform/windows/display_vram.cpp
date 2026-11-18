@@ -1609,6 +1609,7 @@ namespace platf::dxgi {
               test_native_pacing.record_poll(test_native_pacing.converter_observer.state, {
                 frame_id, prior, plan.eligible, plan.deadline,
                 poll.ready, poll.timed_out, poll.query_count, poll.wait_duration,
+                poll.notification_armed, poll.notification_waited, poll.notification_callback_pending,
               });
             }
           };
@@ -1829,7 +1830,7 @@ namespace platf::dxgi {
               auto polled = prior_poll_plan->eligible ?
                 depth_estimator->try_finish_pending_depth_until(
                   input_color_space, prior_poll_plan->deadline,
-                  detail::host_sbs_same_frame_poll_max_queries, false
+                  detail::host_sbs_same_frame_poll_max_queries, false, !local_presentation
                 ) :
                 depth_estimator->try_finish_pending_depth_nonblocking(
                   input_color_space, snapshot_debug_inputs
@@ -2395,7 +2396,7 @@ namespace platf::dxgi {
                                     input_color_space,
                                     poll_plan.deadline,
                                     detail::host_sbs_same_frame_poll_max_queries,
-                                    false
+                                    false, !local_presentation
                                   ) :
                                   depth_estimator->try_finish_pending_depth_nonblocking(input_color_space, false);
 #ifdef SUNSHINE_TESTS

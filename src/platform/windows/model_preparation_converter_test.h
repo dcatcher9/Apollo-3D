@@ -42,6 +42,9 @@ namespace platf::dxgi::testing {
     bool ready = false, timed_out = false;
     std::uint32_t query_count = 0;
     std::chrono::steady_clock::duration wait_duration;
+    bool notification_armed = false;
+    bool notification_waited = false;
+    bool notification_callback_pending = false;
   };
 
   struct native_pacing_probe_t {

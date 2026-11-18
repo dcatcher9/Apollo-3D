@@ -1071,10 +1071,15 @@ namespace models {
   struct pending_depth_poll_result {
     depth_step_result_t result;
     bool ready = false;  ///< Joined query proved completion; result may still report a failure.
-    bool wait_attempted = false;  ///< At least one yielded repeat was attempted after the initial query.
+    bool wait_attempted = false;  ///< At least one repeat was attempted after the initial query.
     bool timed_out = false;  ///< The exact pending unit remained busy at the deadline/query fuse.
     std::uint32_t query_count = 0;  ///< Joined DAV2/OCR readiness queries issued by this call.
     std::chrono::steady_clock::duration wait_duration {};  ///< Query time only; excludes completed-depth postprocess.
+#ifdef SUNSHINE_TESTS
+    bool notification_armed = false;
+    bool notification_waited = false;
+    bool notification_callback_pending = false;
+#endif
   };
 
   struct publication_receipt_poll_result {
@@ -1635,7 +1640,8 @@ namespace models {
       input_color_space color_space,
       std::chrono::steady_clock::time_point deadline,
       std::uint32_t max_queries,
-      bool snapshot_debug_inputs = false
+      bool snapshot_debug_inputs = false,
+      bool allow_completion_notification = false
     );
 
     /** Latest cached scene telemetry from the shared completion receipt. This accessor has no

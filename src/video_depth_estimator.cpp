@@ -23,6 +23,7 @@
 #include "host_sbs_v2_gpu_executor.h"
 #include "logging.h"
 #include "model_manager.h"
+#include "platform/common.h"
 #include "platform/windows/misc.h"
 #include "platform/windows/utils.h"
 #include "prod_zipdepth_convex2x.h"
@@ -1995,6 +1996,108 @@ namespace models {
   namespace {
     namespace publication_receipt = host_sbs_gpu_completion_receipt;
 
+    class inference_completion_notification_t {
+      using host_function_t = void (__stdcall *)(void *);
+      using launch_host_function_t = CUresult (__stdcall *)(CUstream, host_function_t, void *);
+      using stream_wait_event_t = CUresult (__stdcall *)(CUstream, CUevent, unsigned);
+
+      struct callback_state_t {
+        std::weak_ptr<safe::deadline_waiter_t> waiter;
+        std::atomic<unsigned> references {1};
+
+        void release() noexcept {
+          if (references.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            delete this;
+          }
+        }
+      };
+
+      static void __stdcall notify(void *opaque) noexcept {
+        auto *state = static_cast<callback_state_t *>(opaque);
+        if (const auto waiter = state->waiter.lock()) {
+          waiter->notify();
+        }
+        state->release();
+      }
+
+    public:
+      inference_completion_notification_t() = default;
+      inference_completion_notification_t(const inference_completion_notification_t &) = delete;
+      inference_completion_notification_t &operator=(const inference_completion_notification_t &) = delete;
+
+      ~inference_completion_notification_t() {
+        waiter_.reset();
+        if (state_) {
+          state_->release();
+        }
+      }
+
+      bool destroy_stream(cuda_driver_api &cuda) noexcept {
+        return !stream_ || cuda.cuStreamDestroy(stream_) == CUDA_SUCCESS;
+      }
+
+      bool callback_pending() const noexcept {
+        return state_ && state_->references.load(std::memory_order_acquire) > 1;
+      }
+
+      std::optional<CUresult> arm(cuda_driver_api &cuda, CUevent event) {
+        if (!setup_attempted_) {
+          setup_attempted_ = true;
+          const auto created = create_stream(cuda);
+          if (created != CUDA_SUCCESS) {
+            return created;
+          }
+        }
+        if (!stream_ || callback_pending()) {
+          return std::nullopt;
+        }
+        // The notification stream waits for the recorded root. Future root inference can
+        // advance independently of CPU dispatch of this host function.
+        const auto waiting = wait_for_event_(stream_, event, 0u);
+        if (waiting != CUDA_SUCCESS) {
+          return waiting;
+        }
+        // CUDA can suppress host functions after a context error. Preserve the reference
+        // after an ambiguous launch failure as well as during ordinary delayed dispatch.
+        state_->references.fetch_add(1, std::memory_order_relaxed);
+        return launch_host_function_(stream_, &notify, state_);
+      }
+
+      bool wait_until(std::chrono::steady_clock::time_point deadline) noexcept {
+        return waiter_->wait_until(deadline);
+      }
+
+    private:
+      CUresult create_stream(cuda_driver_api &cuda) {
+        wait_for_event_ = std::bit_cast<stream_wait_event_t>(
+          GetProcAddress(cuda.hMod, "cuStreamWaitEvent")
+        );
+        launch_host_function_ = std::bit_cast<launch_host_function_t>(
+          GetProcAddress(cuda.hMod, "cuLaunchHostFunc")
+        );
+        if (!wait_for_event_ || !launch_host_function_) {
+          return CUDA_SUCCESS;
+        }
+        waiter_ = platf::create_deadline_waiter();
+        if (!waiter_) {
+          return CUDA_SUCCESS;
+        }
+        // Lazy creation keeps this stream outside the inference graph capture.
+        const auto created = cuda.cuStreamCreate(&stream_, CU_STREAM_NON_BLOCKING);
+        if (created == CUDA_SUCCESS) {
+          state_ = new callback_state_t {waiter_};
+        }
+        return created;
+      }
+
+      std::shared_ptr<safe::deadline_waiter_t> waiter_;
+      callback_state_t *state_ = nullptr;
+      CUstream stream_ = nullptr;
+      stream_wait_event_t wait_for_event_ = nullptr;
+      launch_host_function_t launch_host_function_ = nullptr;
+      bool setup_attempted_ = false;
+    };
+
     // The offsets describe existing GPU records, copied without another shader or CUDA node.
     constexpr std::array<std::pair<std::size_t, std::size_t>, 8> publication_copy_ranges {{
       {publication_receipt::transaction_begin, publication_receipt::transaction_word_count},
@@ -3607,6 +3710,8 @@ namespace models {
     // branches and every interop-unmap tail. A ready event therefore proves the same resource
     // release boundary as the conservative full-stream query without exposing either branch.
     CUevent depth_inference_done_event = nullptr;
+    inference_completion_notification_t root_completion_notification;
+    bool completion_notification_disabled = false;
     std::unique_ptr<joined_completion_gate_benchmark::controller_t> benchmark_joined_completion_gate;
     bool benchmark_joined_completion_gate_configuration_seen = false;
     bool near_identical_detector_available = false;
@@ -6160,6 +6265,12 @@ namespace models {
               observe_teardown(
                 perf_destroy_events(cuda),
                 "diagnostic event destruction"
+              );
+            }
+            if (cuda_teardown_may_continue) {
+              observe_teardown(
+                root_completion_notification.destroy_stream(cuda),
+                "inference notification stream destruction"
               );
             }
             if (cuda_teardown_may_continue) {
@@ -8955,7 +9066,8 @@ namespace models {
       bool snapshot_debug_inputs,
       const bool allow_wait,
       const std::chrono::steady_clock::time_point deadline,
-      const std::uint32_t max_queries
+      const std::uint32_t max_queries,
+      const bool allow_completion_notification = false
     ) {
       readiness_preflighted = false;
       auto &cuda = cuda_driver_api::get();
@@ -8963,6 +9075,9 @@ namespace models {
       const bool use_inference_events = inference_event_poll_available;
       const bool repeated_wait_allowed = allow_wait && use_inference_events;
       pending_depth_poll_result polled;
+#ifdef SUNSHINE_TESTS
+      polled.notification_callback_pending = root_completion_notification.callback_pending();
+#endif
       if (!has_previous_frame) {
         polled.result = make_result();
         polled.ready = true;
@@ -8977,6 +9092,7 @@ namespace models {
 
       const auto query_limit = std::max<std::uint32_t>(1u, max_queries);
       constexpr auto repeated_query_interval = std::chrono::microseconds {50};
+      constexpr auto deadline_poll_tail = std::chrono::milliseconds {1};
       while (true) {
         // The first joined query is always immediate. Before every repeated query, preserve the
         // absolute deadline even if the thread was descheduled beyond its intended poll interval.
@@ -9011,13 +9127,38 @@ namespace models {
               return polled;
             }
             polled.wait_attempted = true;
-            // Do not burn the query fuse faster than the GPU can make useful progress. Yield until
-            // the next 50 us query point, capped by the absolute deadline; no sleeping primitive
-            // can overshoot the budget unnoticed because steady_clock is checked every turn.
+            // Keep the final portion of the budget on the 50 us query cadence. The notification
+            // is a wake hint; only another literal joined query can prove release of the root.
             const auto next_query_at = std::min(
               deadline,
               now + repeated_query_interval
             );
+            const auto notification_cutoff = deadline - deadline_poll_tail;
+            if (
+              allow_completion_notification && !completion_notification_disabled &&
+              polled.query_count == 1u && next_query_at < notification_cutoff &&
+              !independent_depth_release_deferred && platf::host_sbs_completion_wait_available()
+            ) {
+              const auto armed = root_completion_notification.arm(cuda, depth_inference_done_event);
+#ifdef SUNSHINE_TESTS
+              polled.notification_callback_pending |= root_completion_notification.callback_pending();
+              polled.notification_armed = armed == CUDA_SUCCESS;
+#endif
+              if (armed && *armed != CUDA_SUCCESS) {
+                (void) observe_joined_cuda_failure("completion notification", *armed, true);
+                polled.result = make_result();
+                polled.ready = true;
+                polled.wait_duration = std::chrono::steady_clock::now() - started;
+                return polled;
+              }
+              if (armed && std::chrono::steady_clock::now() < notification_cutoff) {
+#ifdef SUNSHINE_TESTS
+                polled.notification_waited = true;
+#endif
+                const bool waited = root_completion_notification.wait_until(notification_cutoff);
+                completion_notification_disabled = !waited || std::chrono::steady_clock::now() >= deadline;
+              }
+            }
             while (std::chrono::steady_clock::now() < next_query_at) {
               std::this_thread::yield();
             }
@@ -9060,14 +9201,16 @@ namespace models {
       input_color_space color_space,
       const std::chrono::steady_clock::time_point deadline,
       const std::uint32_t max_queries,
-      bool snapshot_debug_inputs = false
+      bool snapshot_debug_inputs,
+      bool allow_completion_notification
     ) {
       return try_finish_pending(
         color_space,
         snapshot_debug_inputs,
         true,
         deadline,
-        max_queries
+        max_queries,
+        allow_completion_notification
       );
     }
 
@@ -11119,13 +11262,15 @@ namespace models {
     input_color_space color_space,
     const std::chrono::steady_clock::time_point deadline,
     const std::uint32_t max_queries,
-    bool snapshot_debug_inputs
+    bool snapshot_debug_inputs,
+    bool allow_completion_notification
   ) {
     return pimpl ? pimpl->try_finish_pending_until(
                      color_space,
                      deadline,
                      max_queries,
-                     snapshot_debug_inputs
+                     snapshot_debug_inputs,
+                     allow_completion_notification
                    ) :
                    pending_depth_poll_result {.ready = true};
   }

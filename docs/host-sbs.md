@@ -2505,12 +2505,19 @@ the render budget adds no separate pacing wait and does not change 2D passthroug
 Repeated queries use all of that post-reserve cadence slack up to an absolute `8 ms` wait cap, with
 an independent query-count fuse. Thus a low-rate stream may spend its real extra cadence headroom,
 while a late/high-rate frame remains cadence-limited and every stream retains a bounded latency.
-After the immediate query, queries are spaced by at
-least `50 us` of yielded steady-clock time so the fuse cannot exhaust before the GPU has a useful
-opportunity to progress. Capture and content timestamps remain pixel identities and are never
-interpreted as an output deadline. Force-infer work uses joined non-timing CUDA events recorded
-after the conditional root and every unmap tail; GPU-undecided work uses the same event, which
-does not reveal which children ran. Between repeated queries the encode thread yields.
+After the immediate query, queries are spaced by at least `50 us` of steady-clock time so the fuse
+leaves the GPU time to progress. A remote encoder owner can wait once for a CUDA completion
+notification when it has elevated process and thread priorities, an active native presentation
+timer request, and requested and effective periods of at most `1 ms`. An independent stream
+signals the owner after the joined event. The wait targets the start of the final `1 ms` of the original
+budget, which uses the yielded query cadence. Local presentation and remote conversions without
+these conditions use the yielded cadence for the full wait. A failed or over-budget Windows wait
+disables notification waiting for that estimator. Every wake still requires a joined query within
+the same cadence deadline and query fuse.
+
+Capture and content timestamps identify pixels. Force-infer and GPU-undecided work both record
+the joined non-timing CUDA event after the conditional root and every unmap tail. The event
+reports readiness for the entire root.
 An event-ready finish submits D3D11 postprocess behind the already-issued unmaps without
 synchronizing a whole stream. Each transaction records exactly one root-completion event.
 This CUDA readiness polling adds no inference kernels, shader passes, replacement work, payload
@@ -2525,7 +2532,7 @@ with zero timeout before polling, since completion can issue postprocess reads o
 A key timeout defers the pending root's completion queries and new admissions for that conversion.
 The ordinary packed-repeat and current-flat policies still choose the output. A readable root
 receives an immediate completion query *before* current DDup/adaptive admission is derived. The
-query may repeat within the cadence reserve and absolute wait cap. After a yielded wait, the
+query may repeat within the cadence reserve and absolute wait cap. After a bounded wait, the
 converter observes foreground/browser authority again before deriving current snapshots and the
 temporal-source observation. A ready completion is authenticated against its exact matched color
 slot. The converter also consumes ready completed-publication receipts before admission. Conditional

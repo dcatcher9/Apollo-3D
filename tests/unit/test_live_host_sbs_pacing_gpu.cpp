@@ -3,8 +3,10 @@
 #if defined(_WIN32) && defined(SUNSHINE_TESTS)
   #include "src/globals.h"
   #include "src/live_model_preparation.h"
+  #include "src/platform/common.h"
   #include "src/platform/windows/display.h"
   #include "src/platform/windows/host_sbs_actual_converter_probe.h"
+  #include "src/platform/windows/misc.h"
   #include "src/platform/windows/model_preparation_converter_test.h"
   #include "src/video_capture_test.h"
 
@@ -17,6 +19,8 @@
   #include <iostream>
   #include <mutex>
   #include <optional>
+  #include <stdexcept>
+  #include <string>
   #include <string_view>
   #include <thread>
   #include <vector>
@@ -221,8 +225,10 @@ namespace {
     pacing_event_t last_output, held_output;
     clock_t::time_point previous_finished {}, stop_requested {};
     std::int64_t next_stamp = 0;
+    std::uint64_t next_held_conversion = 0;
     bool stop_case = false, next_published = false, next_observed_held = false;
     bool pending_image_alive = false, callback_failed = false;
+    bool qualified_owner = false, owner_policy_matched = true;
 
     static void record(void *opaque, const probe::event_t &event) noexcept {
       auto &self = *static_cast<held_pacing_t *>(opaque);
@@ -265,7 +271,10 @@ namespace {
           self.images->raise(std::move(self.next_capture));
         } else if (self.next_published && copy.current == self.next_stamp &&
                    copy.held && copy.queried_busy && copy.pending_target) {
-          self.next_observed_held = true;
+          if (!self.next_observed_held) {
+            self.next_observed_held = true;
+            self.next_held_conversion = copy.conversion;
+          }
           self.pending_image_alive = !self.held_image.expired();
           if (self.stop_case && self.stop_requested == clock_t::time_point {}) {
             // The owner has actually delivered C with B still held. Normal lifecycle checks
@@ -285,6 +294,8 @@ namespace {
       auto &self = *static_cast<held_pacing_t *>(opaque);
       try {
         std::lock_guard lock {self.mutex};
+        self.owner_policy_matched &=
+          platf::host_sbs_completion_wait_available() == self.qualified_owner;
         self.polls.push_back(poll);
       } catch (...) {
         std::lock_guard lock {self.mutex};
@@ -320,7 +331,12 @@ namespace {
     }
   };
 
-  class LiveHostSbsHeldDepthGpuTest: public ::testing::TestWithParam<bool> {};
+  struct held_pacing_case_t {
+    bool stop = false;
+    bool qualified_owner = false;
+  };
+
+  class LiveHostSbsHeldDepthGpuTest: public ::testing::TestWithParam<held_pacing_case_t> {};
 
   TEST_P(LiveHostSbsHeldDepthGpuTest, ExpiredDeliveryNewCaptureAndStopUseRealNativeOwnership) {
     const auto *enabled = std::getenv("APOLLO_RUN_TENSORRT_TESTS");
@@ -329,9 +345,15 @@ namespace {
     }
     const auto adapter = nvidia_adapter();
     ASSERT_TRUE(adapter);
+    // Both cases own the real CPU-only timer/process policy. A normal-priority encode owner
+    // deliberately fails the shipping thread gate even if another presentation is active.
+    const auto cpu_scheduling = platf::testing::acquire_presentation_cpu_scheduling_for_test();
+    ASSERT_TRUE(cpu_scheduling);
+    const auto scenario = GetParam();
     constexpr unsigned width = 1280, height = 720;
     held_pacing_t observed;
-    observed.stop_case = GetParam();
+    observed.stop_case = scenario.stop;
+    observed.qualified_owner = scenario.qualified_owner;
     observed.mail = std::make_shared<safe::mail_raw_t>();
     observed.images = std::make_shared<video::img_event_t::element_type>();
     fixture::native_pacing_probe_t binding;
@@ -375,6 +397,7 @@ namespace {
     models::live_model_preparation_t preparation(video::host_sbs_v2_depth_model(), {});
     video::detail::native_encode_loop_test_result_t result;
     std::exception_ptr loop_error;
+    bool owner_scheduling_available = false;
     std::atomic<bool> loop_finished {false};
     std::vector<video::packet_t> received;
     std::int64_t last_index = 0;
@@ -403,6 +426,11 @@ namespace {
       std::jthread encoder([&](std::stop_token stop) {
         std::stop_callback stop_loop(stop, [&]() { shutdown->raise(true); observed.images->wake(); });
         try {
+          const auto priority = scenario.qualified_owner ? THREAD_PRIORITY_ABOVE_NORMAL : THREAD_PRIORITY_NORMAL;
+          if (!SetThreadPriority(GetCurrentThread(), priority)) {
+            throw std::runtime_error("Could not set the native fixture's encode-owner priority");
+          }
+          owner_scheduling_available = platf::host_sbs_completion_wait_available();
           result = video::detail::run_native_encode_loop_for_test(display, observed.mail, observed.images, config, packets);
         } catch (...) {
           loop_error = std::current_exception();
@@ -438,9 +466,11 @@ namespace {
     if (loop_error) std::rethrow_exception(loop_error);
     EXPECT_TRUE(result.session_created);
     EXPECT_EQ(result.pipeline_depth, 2u);
+    EXPECT_EQ(owner_scheduling_available, scenario.qualified_owner);
 
     std::lock_guard lock {observed.mutex};
     EXPECT_FALSE(observed.callback_failed);
+    EXPECT_TRUE(observed.owner_policy_matched);
     EXPECT_TRUE(observed.next_published);
     EXPECT_TRUE(observed.next_observed_held);
     EXPECT_TRUE(observed.pending_image_alive) << "B must remain owned after the source slot advances to C.";
@@ -453,6 +483,29 @@ namespace {
              (poll.timed_out || !poll.eligible) && poll.query_count > 0;
     });
     EXPECT_NE(expired, observed.polls.end()) << "The held source must survive a real expired/ineligible joined query.";
+    std::size_t notification_arms = 0, notification_waits = 0, notification_pending_polls = 0;
+    for (const auto &poll : observed.polls) {
+      notification_arms += poll.notification_armed;
+      notification_waits += poll.notification_waited;
+      notification_pending_polls += poll.notification_callback_pending;
+      if (!poll.eligible || !scenario.qualified_owner) {
+        EXPECT_FALSE(poll.notification_armed);
+        EXPECT_FALSE(poll.notification_waited);
+      }
+      if (!scenario.qualified_owner) {
+        EXPECT_FALSE(poll.notification_callback_pending);
+      }
+    }
+    if (scenario.qualified_owner) {
+      EXPECT_TRUE(std::any_of(observed.polls.begin(), observed.polls.end(), [&](const auto &poll) {
+        return poll.conversion == held.target && !poll.prior && !poll.ready && poll.timed_out &&
+               poll.notification_armed && poll.notification_waited && poll.notification_callback_pending;
+      })) << "The real gated B root must actually arm and wait, rather than only select notification policy.";
+      EXPECT_TRUE(std::any_of(observed.polls.begin(), observed.polls.end(), [&](const auto &poll) {
+        return poll.conversion == observed.next_held_conversion && poll.prior && !poll.ready &&
+               poll.notification_callback_pending;
+      })) << "C's held delivery/stop must retain B's actual outstanding notification callback.";
+    }
     if (held.repeat) {
       EXPECT_EQ(held.before, held.after);
       EXPECT_TRUE(held.packed_valid && held.route_matches);
@@ -526,22 +579,36 @@ namespace {
       }
     }
     std::cout << "Live Host SBS held-depth arm=" << (observed.stop_case ? "stop" : "complete")
+              << " scheduled_owner=" << scenario.qualified_owner
               << " packets=" << received.size() << " B_model=" << held.target
               << " C_held=" << observed.next_observed_held << " pending_owner=" << observed.pending_image_alive
               << " fallback=" << (held.repeat ? "packed-A" : held.flat ? "flat-B" : "matched-A") << '\n';
+    std::cout << "Live Host SBS completion transport: scheduled_owner=" << scenario.qualified_owner
+              << " policy_available=" << owner_scheduling_available << " armed=" << notification_arms
+              << " waited=" << notification_waits << " callback_pending_polls=" << notification_pending_polls << '\n';
     for (const auto &poll : observed.polls) {
       if (poll.conversion < held.conversion) continue;
       std::cout << "Live Host SBS held-depth poll conversion=" << poll.conversion
                 << " prior=" << poll.prior << " eligible=" << poll.eligible
                 << " ready=" << poll.ready << " expired=" << poll.timed_out
+                << " notification_armed=" << poll.notification_armed
+                << " notification_waited=" << poll.notification_waited
+                << " notification_callback_pending=" << poll.notification_callback_pending
                 << " queries=" << poll.query_count << " wait_us="
                 << std::chrono::duration_cast<std::chrono::microseconds>(poll.wait_duration).count() << '\n';
     }
   }
 
   INSTANTIATE_TEST_SUITE_P(
-    RealNativeLoop, LiveHostSbsHeldDepthGpuTest, ::testing::Bool(),
-    [](const ::testing::TestParamInfo<bool> &info) { return info.param ? "StopWhileHeld" : "Complete"; }
+    RealNativeLoop, LiveHostSbsHeldDepthGpuTest,
+    ::testing::Values(
+      held_pacing_case_t {false, true}, held_pacing_case_t {true, true},
+      held_pacing_case_t {false, false}, held_pacing_case_t {true, false}
+    ),
+    [](const ::testing::TestParamInfo<held_pacing_case_t> &info) {
+      return std::string {info.param.stop ? "StopWhileHeld" : "Complete"} +
+             (info.param.qualified_owner ? "ScheduledOwner" : "NormalOwner");
+    }
   );
 }  // namespace
 #endif
