@@ -83,6 +83,8 @@ namespace platf::dxgi::actual_converter_probe_v1 {
     bool force_infer = false, gpu_undecided = false, ddup_proof = false;
     bool queued = false, flat = false, repeat = false, route_matches = false, source_matches = false;
     bool native_planes_written = false; // Output-event evidence; independent of packed RGB reuse.
+    bool rgb_rendered_directly = false;
+    bool rgb_output_retained = false;
     bool current_capture_key = false, prior_capture_key = false;
     bool cached_current_colour = false;
     bool pending_current_colour=false, material_interval_contiguous=false;

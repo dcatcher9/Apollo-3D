@@ -124,6 +124,10 @@ The converter and presenter exchange stereo pairs through two shared textures. T
 publishes a slot after submitting its GPU work and releasing the write key. The presenter can
 keep scanning out its current pair during that submission. At a left-eye boundary it may take
 the newest published pair whose GPU fence has completed and whose read key is available.
+When Host SBS repeats the exact packed image, the ring can keep that pair without another
+RGB copy or packet publication. Depth and capture servicing still run on the converter.
+When a new warp matches the shutter slot's full extent, format and transfer, Host SBS can
+draw directly into that slot.
 
 Only unsignalled clock acquisition may use `DwmFlush` to request feedback publication. Armed
 presentation polls exact metadata with cancellable 200 µs waits; it never falls back to this

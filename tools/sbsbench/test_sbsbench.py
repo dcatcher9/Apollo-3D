@@ -2035,8 +2035,8 @@ class EvalContractTests(unittest.TestCase):
             display = fh.read()
         with open(shader_path, encoding="utf-8") as fh:
             shader = fh.read()
-        self.assertIn("bool rgb_present_target_is_linear = false;", display)
-        self.assertIn("if (input_is_linear != rgb_present_target_is_linear)", display)
+        self.assertIn("struct rgb_output_t {", display)
+        self.assertIn("if (input_is_linear != rgb->linear)", display)
         self.assertIn("rgb_present_srgb_to_linear_ps.get()", display)
         self.assertIn("rgb_present_linear_to_srgb_ps.get()", display)
         self.assertNotIn("frame_is_hdr = d3d_image.format", display)

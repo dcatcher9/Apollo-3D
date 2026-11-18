@@ -9,6 +9,7 @@ TEST(LocalShutterPresentationGpu, BoundsPublicationAndRetainsAnExactStereoPair) 
     GTEST_SKIP() << "D3D11 shared keyed textures are unavailable on this adapter";
   }
   ASSERT_TRUE(result.consumer_progress_during_publication);
+  EXPECT_TRUE(result.retained_pair_not_republished);
   EXPECT_TRUE(result.publication_bounded);
   EXPECT_TRUE(result.current_pair_immutable);
   EXPECT_TRUE(result.eye_crop_exact);

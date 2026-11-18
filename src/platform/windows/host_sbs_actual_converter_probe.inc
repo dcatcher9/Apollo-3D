@@ -1,6 +1,5 @@
 // Included only inside platf::dxgi AFTER the actual converter class is complete.
 // No duplicate converter policy, CUDA verdict, CPU warp or encoder session.
-int init();
 namespace actual_converter_probe_v1 {
   namespace {
     using Microsoft::WRL::ComPtr;
@@ -316,9 +315,10 @@ namespace actual_converter_probe_v1 {
       const auto stamp=[&](std::size_t i){const auto t=clock_t::now();images[i]->frame_timestamp=t;images[i]->content_timestamp=t;};
       const auto convert = [&](std::size_t i) {
         const auto deadline = clock_t::now() - std::chrono::milliseconds(1);
-        const int status = native_nv12 ? converter.convert(*images[i], deadline) :
-                                        converter.convert_rgb(*images[i], target.Get(), target_rtv.Get(), r.hdr_input, deadline);
-        require(status == 0, "Actual converter failed");
+        const bool converted = native_nv12 ? converter.convert(*images[i], deadline) == 0 :
+                                             converter.convert_rgb(*images[i], target.Get(), target_rtv.Get(), r.hdr_input, deadline) ==
+                                               d3d_base_encode_device::rgb_conversion_e::converted;
+        require(converted, "Actual converter failed");
         require(!records.overflow && !records.capture_fault, "Passive observer unavailable");
       };
       const auto wait_ready=[&](){const auto until=clock_t::now()+std::chrono::seconds(30);while(!est->can_accept_frame()){require(!est->has_terminal_failure()&&clock_t::now()<until,"Real root readiness timeout");std::this_thread::sleep_for(std::chrono::milliseconds(1));}};
@@ -416,8 +416,12 @@ namespace actual_converter_probe_v1 {
           recycled_b_source.prepare(converter.device.get(), b_context.encoder_texture.get());
         }
         std::array<stage_t, 6u> outputs;
+        const bool check_retained_rgb = borrowed_recycle && !native_nv12;
         const auto output_count = native_nv12 ? outputs.size() : outputs.size() - 1u;
         for (std::size_t i = 0; i < output_count; ++i) {
+          if (check_retained_rgb && i == 3u) {
+            continue;
+          }
           outputs[i].prepare(converter.device.get(), target.Get());
         }
         const auto snapshot_target = [&](std::size_t index, const char *message) {
@@ -447,13 +451,61 @@ namespace actual_converter_probe_v1 {
         }
         const auto a_content_timestamp = converter.rendered_content_timestamp();
         snapshot_target(0, "Actual A target copy failed");
+        ComPtr<ID3D11Device> shutter_consumer;
+        ComPtr<ID3D11DeviceContext> shutter_context;
+        local_shutter_frame_ring_t shutter_ring;
+        ID3D11Texture2D *first_shutter_pair = nullptr;
+        stage_t unused_rgb_target, retained_rgb_pair;
+        const auto acquire_shutter_pair = [&](ID3D11Texture2D *previous) {
+          const auto limit = clock_t::now() + std::chrono::seconds(2);
+          while (!shutter_ring.failed() && clock_t::now() < limit) {
+            auto *pair = shutter_ring.acquire_pair();
+            if (pair && pair != previous) {
+              return pair;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          }
+          throw std::runtime_error("The consumer did not acquire the complete shutter pair");
+        };
+        if (check_retained_rgb) {
+          hr(D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            levels, 2, D3D11_SDK_VERSION, &shutter_consumer, nullptr, &shutter_context), "Shutter consumer device failed");
+          require(shutter_ring.init(converter.device.get(), shutter_consumer.Get(), td.Width, td.Height, td.Format),
+            "Actual shutter packet allocation failed");
+          auto *slot = shutter_ring.acquire_producer();
+          require(slot && !shutter_ring.has_published_pair(), "First shutter slot unavailable");
+          converter.device_ctx->CopyResource(slot->producer_texture.Get(), target.Get());
+          require(shutter_ring.finish_producer(*slot, true, converter.device_ctx.get()), "First shutter pair publication failed");
+          first_shutter_pair = acquire_shutter_pair(nullptr);
+          retained_rgb_pair.prepare(shutter_consumer.Get(), first_shutter_pair);
+        }
         converter.device_ctx->Flush();
         const auto idle_begin=clock_t::now();
         std::this_thread::sleep_until(idle_begin+std::chrono::milliseconds(300));
         const auto idle_end=clock_t::now();
         stamp(1);
         const auto b_begin=clock_t::now();
-        convert(1);
+        if (check_retained_rgb) {
+          auto *slot = shutter_ring.acquire_producer();
+          require(slot != nullptr, "Shutter producer could not reserve a free slot for B");
+          unused_rgb_target.prepare(converter.device.get(), slot->producer_texture.Get());
+          const float canary[4] {};
+          converter.device_ctx->ClearRenderTargetView(slot->producer_target.Get(), canary);
+          const auto deadline = clock_t::now() - std::chrono::milliseconds(1);
+          require(converter.convert_rgb(*images[1], slot->producer_texture.Get(), slot->producer_target.Get(), r.hdr_input, deadline,
+                    shutter_ring.has_published_pair()) ==
+                    d3d_base_encode_device::rgb_conversion_e::retained,
+            "The retained shutter pair unexpectedly rendered to the free slot");
+          require(unused_rgb_target.copy(converter.device_ctx.get(), slot->producer_texture.Get()),
+            "Copy of the unused shutter slot failed");
+          require(shutter_ring.finish_producer(*slot, false, converter.device_ctx.get()) &&
+                    shutter_ring.acquire_pair() == first_shutter_pair &&
+                    retained_rgb_pair.copy(shutter_context.Get(), first_shutter_pair),
+            "The consumer did not retain the original shutter packet");
+          require(!records.overflow && !records.capture_fault, "Passive observer unavailable");
+        } else {
+          convert(1);
+        }
         const auto before=last_outcome(3u);
         const json first_checks{{"repeat",before.repeat},{"not_flat",!before.flat},{"not_queued",!before.queued},
           {"packed_valid",before.packed_valid},{"route_matches",before.route_matches},{"changed_source",!before.source_matches},
@@ -497,6 +549,17 @@ namespace actual_converter_probe_v1 {
           upload_a_pixels(c_image);
           stamp(2);
           wait_ready(); // Query-only preflight. The converter still owns the sole B completion.
+          if (check_retained_rgb) {
+            unused_rgb_target.read(converter.device_ctx.get());
+            retained_rgb_pair.read(shutter_context.Get());
+            outputs[0].read(converter.device_ctx.get());
+            require(!unused_rgb_target.bytes.empty() &&
+                      std::all_of(unused_rgb_target.bytes.begin(), unused_rgb_target.bytes.end(),
+                        [](char byte) { return byte == 0; }),
+              "Retaining a shutter pair modified the unused RGB target");
+            require(!outputs[0].bytes.empty() && retained_rgb_pair.bytes == outputs[0].bytes,
+              "The consumer's retained packet differs from the full reference A output");
+          }
           const auto released = est->joined_completion_gate_status_for_benchmark();
           require(released && released->released && released->callback_exited && !released->cancelled &&
             !released->callback_timed_out && !released->callback_entry_timed_out,
@@ -518,9 +581,22 @@ namespace actual_converter_probe_v1 {
 
           const auto recovery_conversion = converter.sbs_frame_sequence + 1u;
           records.borrowed_draw_conversion = recovery_conversion;
-          convert(2); // Current C retains its real capture stamp; the available prior source is B.
+          // Current C retains its capture stamp. The ready completion still owns B.
+          if (check_retained_rgb) {
+            auto *slot = shutter_ring.acquire_producer();
+            require(slot && converter.convert_rgb(*images[2], slot->producer_texture.Get(), slot->producer_target.Get(),
+                      r.hdr_input, clock_t::now() - std::chrono::milliseconds(1), shutter_ring.has_published_pair()) ==
+                      d3d_base_encode_device::rgb_conversion_e::converted &&
+                      shutter_ring.finish_producer(*slot, true, converter.device_ctx.get()),
+              "The joined B completion did not produce a shutter pair");
+            require(!records.overflow && !records.capture_fault, "Passive observer unavailable");
+          } else {
+            convert(2);
+          }
           records.borrowed_draw_conversion = 0;
           const auto recovered = last_outcome(recovery_conversion);
+          require(!check_retained_rgb || recovered.rgb_rendered_directly,
+            "The qualified matched warp did not render directly into the RGB slot");
           const auto *draw = records.last_draw();
           require(draw && draw->conversion == recovery_conversion && draw->publication_current && !draw->flat && !draw->queued &&
             draw->publication.frame_id == 3u && draw->actual_draw_pixel_source == 3u &&
@@ -533,7 +609,13 @@ namespace actual_converter_probe_v1 {
             recovered.literal_last_query_result == CUDA_SUCCESS && recovered.literal_ready_count > 0u,
             "Late C conversion did not render the genuine B completion from its separately keyed source");
           check_released_b_pin();
-          snapshot_target(3, "Actual late B target copy failed");
+          if (check_retained_rgb) {
+            auto *pair = acquire_shutter_pair(first_shutter_pair);
+            outputs[3].prepare(shutter_consumer.Get(), pair);
+            require(outputs[3].copy(shutter_context.Get(), pair), "Direct shutter pair consumer readback failed");
+          } else {
+            snapshot_target(3, "Actual late B target copy failed");
+          }
 
           // Only after the actual matched draw and its keyed diagnostic copies are recorded can
           // the capture pool recycle B. Mutate that same shared surface before mapping any data.
@@ -548,7 +630,7 @@ namespace actual_converter_probe_v1 {
           }
           for (auto &source : records.borrowed_draw_sources) source.read(converter.device_ctx.get());
           recycled_b_source.read(converter.device_ctx.get());
-          outputs[3].read(converter.device_ctx.get());
+          outputs[3].read(check_retained_rgb ? shutter_context.Get() : converter.device_ctx.get());
           const auto matches_frame = [&](const stage_t &stage, std::size_t index) {
             return stage.copied && stage.bytes.size() == payload_size(r.frames[index]) &&
               std::memcmp(stage.bytes.data(), payload(r.frames[index]), stage.bytes.size()) == 0;
@@ -591,6 +673,8 @@ namespace actual_converter_probe_v1 {
             {"context_scope","synthetic-video-scheduling-only; not actual Win32 eligibility"}, {"source_inputs",sources},
             {"capture_device_adapter",capture_device_adapter},{"converter_device_adapter",converter_device_adapter},
             {"target_format",static_cast<UINT>(td.Format)},{"target_width",td.Width},{"target_height",td.Height},
+            {"retained_rgb_target_untouched",check_retained_rgb},
+            {"late_draw_rgb_rendered_directly",recovered.rgb_rendered_directly},
             {"B_pending_pinned_source",true},{"B_key_timeout_preserved_ready_owner",true},{"B_released_and_recycled",true},
             {"C_and_recycled_B_use_archived_A_payload",true},{"private_matched_texture_allocated",false},
             {"before_cap",event_json(before)},{"key_timeout",event_json(key_timeout)},{"late_draw",event_json(*draw)},
@@ -1005,7 +1089,7 @@ namespace actual_converter_probe_v1 {
         const auto deadline=clock_t::now()+std::chrono::seconds(30);const event_t *own=nullptr;std::size_t conversions=0;
         while(!own && conversions<8u) {
           require(clock_t::now()<deadline&&!est->has_terminal_failure(),"Fixed-six own ACK timeout or terminal estimator failure");
-          require(converter.convert_rgb(*images[i],target.Get(),target_rtv.Get(),false,clock_t::now()-std::chrono::milliseconds(1))==0,"Actual fixed-six convert failed");++conversions;
+          require(converter.convert_rgb(*images[i],target.Get(),target_rtv.Get(),false,clock_t::now()-std::chrono::milliseconds(1))==d3d_base_encode_device::rgb_conversion_e::converted,"Actual fixed-six convert failed");++conversions;
           require(!records.overflow,"Fixed-six bounded event recorder overflow");own=records.own_draw(first_event,ticks);if(own)break;
           while(!est->can_accept_frame()){require(clock_t::now()<deadline&&!est->has_terminal_failure(),"Fixed-six native readiness timeout");std::this_thread::sleep_for(std::chrono::milliseconds(1));}
         }

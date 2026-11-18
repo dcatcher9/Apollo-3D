@@ -7235,7 +7235,7 @@ TEST(DirectxShaderSourceTest, LocalRgbPresentationPreservesTheTransferContract) 
   // A BGRA/sRGB source can otherwise look layout-compatible with an FP16 intermediate while the
   // local HDR swapchain interprets its code values as linear light.
   EXPECT_NE(
-    display.find("input_is_linear == rgb_present_target_is_linear"),
+    display.find("input_is_linear == rgb->linear"),
     std::string::npos
   );
   EXPECT_NE(

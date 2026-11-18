@@ -242,7 +242,7 @@ namespace pending_current_colour_probe_v1 {
       for(auto &slot:converter.matched_frame_slots){hr(converter.device->CreateTexture2D(&private_desc,nullptr,&slot.texture),"Private slot preparation failed");hr(converter.device->CreateShaderResourceView(slot.texture.get(),nullptr,&slot.srv),"Private slot SRV failed");}
       records.ctx=converter.device_ctx.get();converter.probe_observer={&records,&recorder_t::record};
       const auto stamp=[&](std::size_t i){const auto t=clock_t::now();images[i]->frame_timestamp=t;images[i]->content_timestamp=t;};
-      const auto convert=[&](std::size_t i){require(converter.convert_rgb(*images[i],target.Get(),target_rtv.Get(),false,clock_t::now()-std::chrono::milliseconds(1))==0,"Actual RGB convert failed");require(!records.overflow&&!records.capture_fault,"Passive observer unavailable");};
+      const auto convert=[&](std::size_t i){require(converter.convert_rgb(*images[i],target.Get(),target_rtv.Get(),false,clock_t::now()-std::chrono::milliseconds(1))==d3d_base_encode_device::rgb_conversion_e::converted,"Actual RGB convert failed");require(!records.overflow&&!records.capture_fault,"Passive observer unavailable");};
       const auto wait_ready=[&](){const auto until=clock_t::now()+std::chrono::seconds(30);while(!est->can_accept_frame()){require(!est->has_terminal_failure()&&clock_t::now()<until,"Real root readiness timeout");std::this_thread::sleep_for(std::chrono::milliseconds(1));}};
       stamp(0);convert(0);wait_ready();convert(0); // exact same img/source/content identity on retry
       const auto *a=records.last_draw();require(a&&a->publication_current&&!a->queued&&a->publication.frame_id==1&&converter.sbs_frame_sequence==2,"A/ACK protocol unavailable; no invented ordinal");

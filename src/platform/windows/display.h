@@ -1304,6 +1304,7 @@ namespace platf::dxgi {
   struct local_shutter_frame_probe_t {
     bool available = false;
     bool consumer_progress_during_publication = false;
+    bool retained_pair_not_republished = false;
     bool publication_bounded = false;
     bool current_pair_immutable = false;
     bool next_pair_published = false;

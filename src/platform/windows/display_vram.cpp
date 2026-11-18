@@ -624,22 +624,30 @@ namespace platf::dxgi {
       }
     }
 
-    int convert_rgb(
+    enum class rgb_conversion_e { failed, converted, retained };
+
+    struct rgb_output_t {
+      ID3D11Texture2D *texture;
+      ID3D11RenderTargetView *target;
+      bool linear;
+      bool may_retain_pair;
+      bool retained_pair = false;
+    };
+
+    // Only a shutter sink with a published pair from this converter can retain RGB output.
+    rgb_conversion_e convert_rgb(
       platf::img_t &img,
       ID3D11Texture2D *target_texture,
       ID3D11RenderTargetView *target,
       bool target_is_linear,
-      const std::optional<std::chrono::steady_clock::time_point> presentation_target
+      const std::optional<std::chrono::steady_clock::time_point> presentation_target,
+      bool may_retain_pair = false
     ) {
-      rgb_present_texture = target_texture;
-      rgb_present_target = target;
-      rgb_present_target_is_linear = target_is_linear;
-      auto clear_target = util::fail_guard([this]() {
-        rgb_present_texture = nullptr;
-        rgb_present_target = nullptr;
-        rgb_present_target_is_linear = false;
-      });
-      return convert(img, presentation_target);
+      rgb_output_t output {target_texture, target, target_is_linear, may_retain_pair};
+      if (convert(img, presentation_target, &output) != 0) {
+        return rgb_conversion_e::failed;
+      }
+      return output.retained_pair ? rgb_conversion_e::retained : rgb_conversion_e::converted;
     }
 
     bool needs_conversion_poll() const {
@@ -976,8 +984,8 @@ namespace platf::dxgi {
 
     int convert(
       platf::img_t &img_base,
-      const std::optional<std::chrono::steady_clock::time_point> next_encode_target =
-        std::nullopt
+      const std::optional<std::chrono::steady_clock::time_point> next_encode_target = std::nullopt,
+      rgb_output_t *rgb = nullptr
     ) {
       auto &img = (img_d3d_t &) img_base;
       conversion_missing_source = false;
@@ -985,7 +993,7 @@ namespace platf::dxgi {
       // Select only when this call will write native planes. A packed repeat, skipped capture,
       // or blank image keeps the last converted surface, even when every other input is busy.
       const auto select_native_output = [&]() {
-        if (!native_input_owner || rgb_present_target || converted_input_surface) {
+        if (!native_input_owner || rgb || converted_input_surface) {
           return true;
         }
         const auto surface = native_input_owner->begin_input_conversion();
@@ -1181,20 +1189,20 @@ namespace platf::dxgi {
         };
 
         auto draw_rgb = [&](ID3D11ShaderResourceView *input, bool input_is_linear, bool input_is_hdr = false, bool input_is_pq = false) {
-          device_ctx->OMSetRenderTargets(1, &rgb_present_target, nullptr);
+          device_ctx->OMSetRenderTargets(1, &rgb->target, nullptr);
           device_ctx->VSSetShader(sbs_reprojection_vs.get(), nullptr, 0);
           ID3D11PixelShader *presentation_shader = rgb_present_ps.get();
           if (input_is_pq) {
             // A PQ export is HDR: decode it for a linear output, or tone map it for an SDR one.
-            presentation_shader = rgb_present_target_is_linear ? rgb_present_pq_to_linear_ps.get() : rgb_present_pq_to_srgb_ps.get();
+            presentation_shader = rgb->linear ? rgb_present_pq_to_linear_ps.get() : rgb_present_pq_to_srgb_ps.get();
             input_is_hdr = true;
-          } else if (input_is_linear != rgb_present_target_is_linear) {
+          } else if (input_is_linear != rgb->linear) {
             presentation_shader = input_is_linear ?
                                     (input_is_hdr ? rgb_present_hdr_to_srgb_ps.get() : rgb_present_linear_to_srgb_ps.get()) :
                                     rgb_present_srgb_to_linear_ps.get();
           }
           device_ctx->PSSetShader(presentation_shader, nullptr, 0);
-          if ((!input_is_linear && !input_is_pq && rgb_present_target_is_linear) || (input_is_hdr && !rgb_present_target_is_linear)) {
+          if ((!input_is_linear && !input_is_pq && rgb->linear) || (input_is_hdr && !rgb->linear)) {
             ID3D11Buffer *sdr_white = rgb_present_sdr_white.get();
             device_ctx->PSSetConstantBuffers(1, 1, &sdr_white);
           }
@@ -1210,14 +1218,14 @@ namespace platf::dxgi {
         };
 
         auto copy_rgb = [&](ID3D11Texture2D *input, bool input_is_linear) {
-          if (!input || !rgb_present_texture) {
+          if (!input || !rgb->texture) {
             return false;
           }
 
           D3D11_TEXTURE2D_DESC input_desc {};
           D3D11_TEXTURE2D_DESC output_desc {};
           input->GetDesc(&input_desc);
-          rgb_present_texture->GetDesc(&output_desc);
+          rgb->texture->GetDesc(&output_desc);
           const bool compatible = input_desc.Width == output_desc.Width &&
                                   input_desc.Height == output_desc.Height &&
                                   input_desc.MipLevels == output_desc.MipLevels &&
@@ -1225,7 +1233,7 @@ namespace platf::dxgi {
                                   input_desc.Format == output_desc.Format &&
                                   input_desc.SampleDesc.Count == output_desc.SampleDesc.Count &&
                                   input_desc.SampleDesc.Quality == output_desc.SampleDesc.Quality &&
-                                  input_is_linear == rgb_present_target_is_linear;
+                                  input_is_linear == rgb->linear;
           if (!compatible) {
             if (!rgb_copy_fallback_logged) {
               BOOST_LOG(info) << "Local AR exact-copy path unavailable (source "sv
@@ -1234,7 +1242,7 @@ namespace platf::dxgi {
                               << output_desc.Width << 'x' << output_desc.Height << ' '
                               << (int) output_desc.Format << ", transfer "sv
                               << (input_is_linear ? "linear" : "sRGB") << " -> "sv
-                              << (rgb_present_target_is_linear ? "linear" : "sRGB")
+                              << (rgb->linear ? "linear" : "sRGB")
                               << "); using the RGB presentation shader."sv;
               rgb_copy_fallback_logged = true;
             }
@@ -1248,7 +1256,7 @@ namespace platf::dxgi {
           std::array<ID3D11ShaderResourceView *, 5> null_srvs {};
           device_ctx->OMSetRenderTargets(1, &null_rtv, nullptr);
           device_ctx->PSSetShaderResources(0, (UINT) null_srvs.size(), null_srvs.data());
-          device_ctx->CopyResource(rgb_present_texture, input);
+          device_ctx->CopyResource(rgb->texture, input);
           if (!rgb_copy_path_logged) {
             BOOST_LOG(info) << "Local AR exact texture-copy presentation path active."sv;
             rgb_copy_path_logged = true;
@@ -1302,7 +1310,7 @@ namespace platf::dxgi {
                 return std::min(viewport.Width / float(packed_desc.Width), viewport.Height / float(packed_desc.Height));
               };
               const float minimum_scale = resample           ? platf::packed_output::minimum_scale(fit_passes, packed_desc.Width, packed_desc.Height) :
-                                          rgb_present_target ? scale(rgb_present_viewport) :
+                                          rgb ? scale(rgb_present_viewport) :
                                                                std::min(scale(out_Y_or_YUV_viewport), scale(out_UV_viewport));
               auto transfer = packed_linear ? sbs_cursor::source_transfer_e::scrgb : sbs_cursor::source_transfer_e::srgb;
               if (packed_pq) {
@@ -1408,14 +1416,14 @@ namespace platf::dxgi {
           }
           D3D11_TEXTURE2D_DESC final_desc {};
           packed_texture->GetDesc(&final_desc);
-          if (rgb_present_target) {
+          if (rgb) {
             // A PQ export never matches a local sRGB or scRGB swapchain's transfer.
             if (!packed_pq && copy_rgb(packed_texture, packed_linear)) {
               // The patch has the export's format and transfer; copy the cursor's texels exactly.
               for (std::uint32_t i = 0; cursor_patch && i < cursor_patch->regions; ++i) {
                 const auto &changed = cursor_patch->changed[i];
                 const D3D11_BOX box {UINT(changed.left), UINT(changed.top), 0, UINT(changed.right), UINT(changed.bottom), 1};
-                device_ctx->CopySubresourceRegion(rgb_present_texture, 0, box.left, box.top, 0, cursor_patch->texture, 0, &box);
+                device_ctx->CopySubresourceRegion(rgb->texture, 0, box.left, box.top, 0, cursor_patch->texture, 0, &box);
               }
             } else {
               draw_rgb(packed_view, packed_linear, packed_linear && (external.has_value() || display_is_hdr), packed_pq);
@@ -2773,7 +2781,9 @@ namespace platf::dxgi {
             queued_attempt_failed_flat = true;
             render_input_srv = img_ctx->encoder_input_res.get();
           }
-          const bool repeat_matched_output = !pending_current_colour_selected && !queued_draw_selected && !queued_attempt_failed_flat &&
+          const bool can_retain_shutter_pair = rgb && rgb->may_retain_pair;
+          const bool repeat_matched_output = (!packed_output_in_shutter_pair || can_retain_shutter_pair) &&
+                                             !pending_current_colour_selected && !queued_draw_selected && !queued_attempt_failed_flat &&
                                              drawn_source_order.permits(matched_presentation_cache.pixel_source_frame_id()) &&
                                              models::host_sbs_should_repeat_packed_presentation(
                                                host_sbs_renderer,
@@ -2786,8 +2796,9 @@ namespace platf::dxgi {
           const bool output_conversion_required =
             host_sbs_encoder_input_state.conversion_required(
               repeat_matched_output,
-              rgb_present_target != nullptr
+              rgb != nullptr
             );
+          const bool retain_rgb_pair = can_retain_shutter_pair && repeat_matched_output;
           if (!repeat_matched_output && !acquire_current_capture()) {
             return -1;
           }
@@ -2868,6 +2879,7 @@ namespace platf::dxgi {
           ID3D11Texture2D *final_sbs_texture = nullptr;
           bool final_sbs_is_linear = sbs_intermediate_is_linear;
           bool final_sbs_has_p010_y = false;
+          bool rendered_directly_to_rgb = false;
           std::uint64_t probe_actual_draw_pixel_source = 0u;
           ID3D11ShaderResourceView *dump_warp_depth = nullptr;
           std::array<ID3D11ShaderResourceView *, 7u> dump_warp_inputs {};
@@ -2897,8 +2909,10 @@ namespace platf::dxgi {
             }
           }
           if (repeat_matched_output) {
-            final_sbs_srv = sbs_intermediate_srv.get();
-            final_sbs_texture = sbs_intermediate_texture.get();
+            if (!retain_rgb_pair) {
+              final_sbs_srv = sbs_intermediate_srv.get();
+              final_sbs_texture = sbs_intermediate_texture.get();
+            }
             if (diagnostics_enabled) {
               ++matched_stats_repeats;
             }
@@ -2923,12 +2937,28 @@ namespace platf::dxgi {
                                                   ) :
                                                   input_is_linear;
 
+            if (can_retain_shutter_pair && rgb->linear == render_input_is_linear &&
+                !snapshot_debug_inputs && !queued_research && rgb->texture) {
+              D3D11_TEXTURE2D_DESC target_desc {};
+              D3D11_RENDER_TARGET_VIEW_DESC target_view_desc {};
+              rgb->texture->GetDesc(&target_desc);
+              rgb->target->GetDesc(&target_view_desc);
+              const auto packed_format = render_input_is_linear ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_B8G8R8A8_UNORM;
+              rendered_directly_to_rgb = target_desc.Format == packed_format && target_view_desc.Format == packed_format &&
+                                         target_view_desc.ViewDimension == D3D11_RTV_DIMENSION_TEXTURE2D &&
+                                         target_desc.ArraySize == 1 && target_desc.MipLevels == 1 &&
+                                         target_desc.SampleDesc.Count == 1 &&
+                                         sbs_viewport.TopLeftX == 0 && sbs_viewport.TopLeftY == 0 &&
+                                         sbs_viewport.Width == static_cast<float>(target_desc.Width) &&
+                                         sbs_viewport.Height == static_cast<float>(target_desc.Height);
+            }
+
             // DDup reveals the current capture transfer only after the first real frame, while
             // asynchronous depth completion can select an older buffered color frame. Size the
             // packed target from the frame we are about to render, not from the newest capture.
             // Repeated output deliberately skips this path so a transfer transition cannot
             // reallocate and erase the last completed SBS image before it is presented.
-            if (!ensure_sbs_intermediate_storage(render_input_is_linear)) {
+            if (!rendered_directly_to_rgb && !ensure_sbs_intermediate_storage(render_input_is_linear)) {
               return -1;
             }
 
@@ -3023,7 +3053,7 @@ namespace platf::dxgi {
                 render_input_is_linear,
                 output_is_hdr,
                 format == DXGI_FORMAT_P010,
-                rgb_present_target == nullptr,
+                rgb == nullptr,
                 snapshot_debug_inputs,
                 sbs_reprojection_v2_p010_y_ps != nullptr &&
                   stream_gamma_mode_ == ::video::stream_gamma_mode_e::windows_default,
@@ -3054,7 +3084,7 @@ namespace platf::dxgi {
                                                                   sbs_flat_identity_ps.get();
             host_sbs_v2_draw_command_t draw_command {
               .render_targets = {
-                sbs_intermediate_rtv.get(),
+                rendered_directly_to_rgb ? rgb->target : sbs_intermediate_rtv.get(),
                 p010_y_mrt_selected ? out_Y_or_YUV_rtv.get() : nullptr,
               },
               .render_target_count = p010_y_mrt_selected ? 2u : 1u,
@@ -3358,9 +3388,14 @@ namespace platf::dxgi {
             }
             final_sbs_has_p010_y = p010_y_mrt_selected;
 
-            final_sbs_srv = sbs_intermediate_srv.get();
-            final_sbs_texture = sbs_intermediate_texture.get();
-            sbs_intermediate_is_linear = render_input_is_linear;
+            packed_output_in_shutter_pair = rendered_directly_to_rgb;
+            if (rendered_directly_to_rgb) {
+              final_sbs_texture = rgb->texture;
+            } else {
+              final_sbs_srv = sbs_intermediate_srv.get();
+              final_sbs_texture = sbs_intermediate_texture.get();
+              sbs_intermediate_is_linear = render_input_is_linear;
+            }
             final_sbs_is_linear = render_input_is_linear;
             // A matched capture can alias the current SRV even when the presentation has no
             // timestamp. Keep the matched frame's identity in that case. A rejected queued
@@ -3378,6 +3413,7 @@ namespace platf::dxgi {
             probe_actual_draw_pixel_source = pixel_source_frame_id;
             if (probe_observer.record) {
               actual_converter_probe_v1::event_t e; e.kind=actual_converter_probe_v1::event_e::draw;
+              e.packed = final_sbs_texture;
               e.queued=queued_draw_selected && !queued_attempt_failed_flat; e.pending_current_colour=pending_current_colour_selected && !queued_attempt_failed_flat; e.flat=!v2_draw_selected || queued_attempt_failed_flat;
               e.cached_current_colour=cached_current_color_warp; e.watermark_before=probe_watermark_at_entry;
               e.watermark_after=drawn_source_order.last_drawn(); e.actual_draw_pixel_source=pixel_source_frame_id;
@@ -3476,7 +3512,10 @@ namespace platf::dxgi {
             actual_converter_probe_v1::event_t e; e.kind=repeat_matched_output ? actual_converter_probe_v1::event_e::packed_repeat:actual_converter_probe_v1::event_e::convert_end;
             e.current_capture_key = encoder_mutex_lock.owns_lock();
             e.prior_capture_key = prior_capture_lock && prior_capture_lock->owns_lock();
-            e.native_planes_written = !rgb_present_target && output_conversion_required;
+            e.native_planes_written = !rgb && output_conversion_required;
+            e.packed = final_sbs_texture;
+            e.rgb_rendered_directly = rendered_directly_to_rgb;
+            e.rgb_output_retained = retain_rgb_pair;
             e.repeat=repeat_matched_output; e.queued=queued_draw_selected && !queued_attempt_failed_flat; e.pending_current_colour=pending_current_colour_selected && !queued_attempt_failed_flat; e.watermark_before=probe_watermark_at_entry;
             e.actual_draw_pixel_source=probe_actual_draw_pixel_source; e.flat=!repeat_matched_output && (!v2_draw_selected || queued_attempt_failed_flat);
             e.cached_current_colour=cached_current_color_warp; e.watermark_after=drawn_source_order.last_drawn();
@@ -3489,11 +3528,12 @@ namespace platf::dxgi {
           if(pending_current_colour_selected)device_ctx->Flush(); // keyed CURRENT reads submitted before release
           mark_sbs_warp_end(gpu_timer);
 
-          if (rgb_present_target) {
-            // The local AR presenter consumes the production RGB warp directly, avoiding an
-            // encode/decode round trip. Exact layouts take the copy fast path; retain the shader
-            // for any future mode whose source and physical target require scaling or conversion.
-            if (!copy_rgb(final_sbs_texture, final_sbs_is_linear)) {
+          if (rgb) {
+            // A shutter ring can keep its last complete packet. A rotating backbuffer still
+            // needs pixels even when the packed image is an exact repeat.
+            if (retain_rgb_pair) {
+              rgb->retained_pair = true;
+            } else if (!rendered_directly_to_rgb && !copy_rgb(final_sbs_texture, final_sbs_is_linear)) {
               draw_rgb(final_sbs_srv, final_sbs_is_linear);
             }
           } else if (output_conversion_required) {
@@ -3839,7 +3879,7 @@ namespace platf::dxgi {
           }
 
         } else {
-          if (rgb_present_target) {
+          if (rgb) {
             const bool input_is_linear =
               img.format == DXGI_FORMAT_R16G16B16A16_FLOAT;
             if (!copy_rgb(img_ctx->encoder_texture.get(), input_is_linear)) {
@@ -4879,7 +4919,10 @@ namespace platf::dxgi {
       event.current_source_stamp_ticks=probe_current_source_ticks;
       event.current_content_stamp_ticks=probe_current_content_ticks;
       if (matched_presentation_cache.source_timestamp()) event.pixel_source_stamp_ticks=matched_presentation_cache.source_timestamp()->time_since_epoch().count();
-      event.views[0] = selected; event.packed = sbs_intermediate_texture.get();
+      event.views[0] = selected;
+      if (!event.packed && !event.rgb_output_retained && !packed_output_in_shutter_pair) {
+        event.packed = sbs_intermediate_texture.get();
+      }
       event.buffers[0] = sbs_reprojection_cbuffer.get(); event.buffers[1] = sbs_subtitle_render_cbuffer.get();
       if (queued_research) {
         event.buffers[2] = queued_research->guard_constants.get();
@@ -5475,6 +5518,7 @@ namespace platf::dxgi {
         surface.p010_y_mrt_targets_qualified = false;
       }
       sbs_intermediate_is_linear = false;
+      packed_output_in_shutter_pair = false;
       matched_presentation_cache.reset();
       BOOST_LOG(info) << "Host SBS intermediate storage finalized as "sv
                       << (input_is_linear ? "FP16 linear-capable."sv : "BGRA8 SDR."sv);
@@ -7288,6 +7332,7 @@ namespace platf::dxgi {
       depth_completion_poll_pending = false;
       depth_authority_reprocess_pending = false;
       sbs_intermediate_is_linear = false;
+      packed_output_in_shutter_pair = false;
       host_sbs_encoder_input_state.reset();
       matched_unknown_frame_error_last = {};
       matched_unknown_frame_errors_suppressed = 0;
@@ -8039,9 +8084,6 @@ namespace platf::dxgi {
     device_ctx_t device_ctx;
 
     texture2d_t output_texture;
-    ID3D11Texture2D *rgb_present_texture = nullptr;  ///< Non-owning swapchain texture during convert_rgb().
-    ID3D11RenderTargetView *rgb_present_target = nullptr;  ///< Non-owning swapchain RTV during convert_rgb().
-    bool rgb_present_target_is_linear = false;  ///< True for a linear scRGB swapchain, independent of the physical output mode.
     bool rgb_copy_path_logged = false;
     bool rgb_copy_fallback_logged = false;
     ps_t rgb_present_ps;
@@ -8182,6 +8224,7 @@ namespace platf::dxgi {
     render_target_t sbs_intermediate_rtv;
     shader_res_t sbs_intermediate_srv;
     bool sbs_intermediate_is_linear = false;
+    bool packed_output_in_shutter_pair = false;
     detail::host_sbs_encoder_input_state_t host_sbs_encoder_input_state;
     detail::uploaded_value_state_t<models::host_sbs_v2_geometry_t>
       sbs_reprojection_constants;
@@ -8289,8 +8332,8 @@ namespace platf::dxgi {
   };
 
   #include "host_sbs_queued_converter_research.inc"
-  #include "host_sbs_actual_converter_probe.inc"
-  #include "host_sbs_pending_current_colour_probe.inc"
+
+  int init();
 
 #ifdef SUNSHINE_TESTS
   namespace testing {
@@ -8585,7 +8628,7 @@ namespace platf::dxgi {
       model_preparation_converter_snapshot_t convert_retained() {
         assert_owner();
         const bool sampled_ready = ready_event_->peek();
-        preparation_probe_require(converter_->convert_rgb(*image_, target_.Get(), target_rtv_.Get(), false, std::nullopt) == 0,
+        preparation_probe_require(converter_->convert_rgb(*image_, target_.Get(), target_rtv_.Get(), false, std::nullopt) == d3d_base_encode_device::rgb_conversion_e::converted,
           "Preparation actual retained-source conversion failed");
         ++conversions_;
         if (sampled_ready) {
@@ -9859,26 +9902,34 @@ namespace platf::dxgi {
         return nullptr;
       }
 
-      // Submits the producer's commands for this packet, followed by its completion signal.
-      bool publish(slot_t &slot, bool converted, ID3D11DeviceContext *producer_context) {
-        Microsoft::WRL::ComPtr<ID3D11DeviceContext4> producer_context4;
-        if (FAILED(producer_context->QueryInterface(IID_PPV_ARGS(&producer_context4))) ||
-            FAILED(producer_context4->Signal(completion_fence_.Get(), completion_ + 1))) {
-          failed_ = true;
-          return false;
-        }
-        slot.completion = ++completion_;
+      [[nodiscard]] bool has_published_pair() const {
+        return completion_ != 0;
+      }
+
+      bool finish_producer(slot_t &slot, bool publish_pair, ID3D11DeviceContext *producer_context) {
+        if (publish_pair) {
+          Microsoft::WRL::ComPtr<ID3D11DeviceContext4> producer_context4;
+          if (FAILED(producer_context->QueryInterface(IID_PPV_ARGS(&producer_context4))) ||
+              FAILED(producer_context4->Signal(completion_fence_.Get(), completion_ + 1))) {
+            failed_ = true;
+            return false;
+          }
 #ifdef SUNSHINE_TESTS
-        if (before_flush_for_test) {
-          before_flush_for_test();
-        }
+          if (before_flush_for_test) {
+            before_flush_for_test();
+          }
 #endif
+        }
+        // The conversion can enqueue upstream work even when it reuses the published RGB.
         producer_context->Flush();
-        if (FAILED(slot.producer_mutex->ReleaseSync(converted ? 1 : 0))) {
+        if (FAILED(slot.producer_mutex->ReleaseSync(publish_pair ? 1 : 0))) {
           failed_ = true;
           return false;
         }
-        slot.state.store(converted ? slot_t::state_e::pending : slot_t::state_e::free, std::memory_order_release);
+        if (publish_pair) {
+          slot.completion = ++completion_;
+        }
+        slot.state.store(publish_pair ? slot_t::state_e::pending : slot_t::state_e::free, std::memory_order_release);
         return true;
       }
 
@@ -10024,6 +10075,9 @@ namespace platf::dxgi {
     };
   }  // namespace
 
+  #include "host_sbs_actual_converter_probe.inc"
+  #include "host_sbs_pending_current_colour_probe.inc"
+
 #ifdef SUNSHINE_TESTS
   namespace {
     std::vector<std::uint32_t> read_shutter_probe_texture(
@@ -10087,7 +10141,7 @@ namespace platf::dxgi {
         return false;
       }
       producer_context->UpdateSubresource(slot->producer_texture.Get(), 0, nullptr, pixels.data(), 4 * sizeof(std::uint32_t), 0);
-      return frames.publish(*slot, true, producer_context.Get());
+      return frames.finish_producer(*slot, true, producer_context.Get());
     };
     const auto wait_pair = [&]() {
       ID3D11Texture2D *pair = nullptr;
@@ -10110,6 +10164,17 @@ namespace platf::dxgi {
     if (!pair) {
       return result;
     }
+    bool signalled = false;
+    frames.before_flush_for_test = [&] { signalled = true; };
+    auto *unused_slot = frames.acquire_producer();
+    if (!unused_slot) {
+      return result;
+    }
+    const auto unused_completion = unused_slot->completion;
+    result.retained_pair_not_republished =
+      frames.finish_producer(*unused_slot, false, producer_context.Get()) &&
+      !signalled && unused_slot->completion == unused_completion && frames.acquire_pair() == pair;
+
     // Hold the real producer inside publication. The consumer must return the first pair
     // before the producer is allowed to flush and release the second slot.
     std::promise<void> publisher_entered, allow_flush;
@@ -10219,7 +10284,7 @@ namespace platf::dxgi {
           return false;
         }
         context->UpdateSubresource(slot->producer_texture.Get(), 0, nullptr, pixels.data(), 4 * sizeof(std::uint32_t), 0);
-        return source.ring.publish(*slot, true, context);
+        return source.ring.finish_producer(*slot, true, context);
       };
       constexpr std::array<std::uint32_t, 8> old_pixels {0xff0000ff, 0xff0000ff, 0xff00ff00, 0xff00ff00, 0xff0000ff, 0xff0000ff, 0xff00ff00, 0xff00ff00};
       constexpr std::array<std::uint32_t, 8> new_pixels {0xffff0000, 0xffff0000, 0xffffffff, 0xffffffff, 0xffff0000, 0xffff0000, 0xffffffff, 0xffffffff};
@@ -12086,16 +12151,19 @@ namespace platf::dxgi {
         const auto deadline = producer_mode == ::video::SBS_AI ?
                                 std::optional {presenter_schedule.begin_frame(std::chrono::steady_clock::now())} :
                                 std::nullopt;
-        const bool converted = converter->convert_rgb(
-                                 *retained_presenter_source,
-                                 slot->producer_texture.Get(), slot->producer_target.Get(),
-                                 config.hdr, deadline
-                               ) == 0;
-        if (!frames.publish(*slot, converted, converter->device_ctx.get()) || !converted) {
+        using rgb_conversion_e = d3d_base_encode_device::rgb_conversion_e;
+        const auto converted = converter->convert_rgb(
+          *retained_presenter_source,
+          slot->producer_texture.Get(), slot->producer_target.Get(),
+          config.hdr, deadline, frames.has_published_pair()
+        );
+        const bool publish_pair = converted == rgb_conversion_e::converted;
+        if (!frames.finish_producer(*slot, publish_pair, converter->device_ctx.get()) ||
+            converted == rgb_conversion_e::failed) {
           BOOST_LOG(error) << "Local shutter monitor failed to publish a complete stereo pair."sv;
           return source_failure();
         }
-        if (shutter_source->request && !replacement_published) {
+        if (publish_pair && shutter_source->request && !replacement_published) {
           if (!switch_is_current(shutter_source->request)) {
             mark_switch_failed(shutter_source->request);
             return true;
@@ -12152,7 +12220,8 @@ namespace platf::dxgi {
           // ready during conversion must remain armed for the next static-source timeout.
           depth_pipeline_ready_event->pop(0ms);
         }
-        if (converter->convert_rgb(*retained_presenter_source, backbuffer.Get(), backbuffer_rtv.Get(), config.hdr, presentation_target)) {
+        if (converter->convert_rgb(*retained_presenter_source, backbuffer.Get(), backbuffer_rtv.Get(), config.hdr, presentation_target) !=
+            d3d_base_encode_device::rgb_conversion_e::converted) {
           BOOST_LOG(error) << "Local AR presenter failed to convert a captured frame."sv;
           return false;
         }
