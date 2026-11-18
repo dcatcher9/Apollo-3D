@@ -9782,6 +9782,8 @@ namespace platf::dxgi {
     // whole conversion behind it, and so does the eye it is about to present. The producer
     // therefore signals a fence after each packet, and the consumer takes a packet only once
     // that fence has completed; until then it keeps scanning out the pair it already owns.
+    // One capture thread produces packets and one shutter thread consumes them. Slot state
+    // passes CPU ownership without putting the shutter clock behind producer driver calls.
     class local_shutter_frame_ring_t {
     public:
       struct slot_t {
@@ -9790,9 +9792,9 @@ namespace platf::dxgi {
         Microsoft::WRL::ComPtr<IDXGIKeyedMutex> producer_mutex;
         Microsoft::WRL::ComPtr<ID3D11Texture2D> consumer_texture;
         Microsoft::WRL::ComPtr<IDXGIKeyedMutex> consumer_mutex;
-        enum class state_e { free, producing, pending, current } state = state_e::free;
-        std::uint64_t sequence = 0;
-        // The producer fence value that marks this packet as executed; 0 when none was signalled.
+        enum class state_e { free, producing, pending, current };
+        std::atomic<state_e> state {state_e::free};
+        // Published with pending. The producer cannot replace it until the slot is free.
         std::uint64_t completion = 0;
       };
 
@@ -9836,9 +9838,11 @@ namespace platf::dxgi {
       }
 
       slot_t *acquire_producer() {
-        std::lock_guard lock(mutex_);
+        if (failed()) {
+          return nullptr;
+        }
         for (auto &slot : slots_) {
-          if (slot.state != slot_t::state_e::free) {
+          if (slot.state.load(std::memory_order_acquire) != slot_t::state_e::free) {
             continue;
           }
           const auto status = slot.producer_mutex->AcquireSync(0, 0);
@@ -9849,7 +9853,7 @@ namespace platf::dxgi {
             failed_ = true;
             return nullptr;
           }
-          slot.state = slot_t::state_e::producing;
+          slot.state.store(slot_t::state_e::producing, std::memory_order_relaxed);
           return &slot;
         }
         return nullptr;
@@ -9857,7 +9861,6 @@ namespace platf::dxgi {
 
       // Submits the producer's commands for this packet, followed by its completion signal.
       bool publish(slot_t &slot, bool converted, ID3D11DeviceContext *producer_context) {
-        std::lock_guard lock(mutex_);
         Microsoft::WRL::ComPtr<ID3D11DeviceContext4> producer_context4;
         if (FAILED(producer_context->QueryInterface(IID_PPV_ARGS(&producer_context4))) ||
             FAILED(producer_context4->Signal(completion_fence_.Get(), completion_ + 1))) {
@@ -9865,24 +9868,27 @@ namespace platf::dxgi {
           return false;
         }
         slot.completion = ++completion_;
+#ifdef SUNSHINE_TESTS
+        if (before_flush_for_test) {
+          before_flush_for_test();
+        }
+#endif
         producer_context->Flush();
         if (FAILED(slot.producer_mutex->ReleaseSync(converted ? 1 : 0))) {
           failed_ = true;
           return false;
         }
-        slot.sequence = ++sequence_;
-        slot.state = converted ? slot_t::state_e::pending : slot_t::state_e::free;
+        slot.state.store(converted ? slot_t::state_e::pending : slot_t::state_e::free, std::memory_order_release);
         return true;
       }
 
       ID3D11Texture2D *acquire_pair(bool advance = true) {
-        std::lock_guard lock(mutex_);
         // A removed device reports UINT64_MAX. It cannot authorize any packet.
         const auto completed = completion_fence_->GetCompletedValue();
         if (completed == std::numeric_limits<std::uint64_t>::max()) {
           failed_ = true;
         }
-        if (failed_) {
+        if (failed()) {
           return nullptr;
         }
         if (!advance) {
@@ -9890,7 +9896,8 @@ namespace platf::dxgi {
         }
         slot_t *newest = nullptr;
         for (auto &slot : slots_) {
-          if (slot.state == slot_t::state_e::pending && slot.completion <= completed && (!newest || slot.sequence > newest->sequence)) {
+          if (slot.state.load(std::memory_order_acquire) == slot_t::state_e::pending &&
+              slot.completion <= completed && (!newest || slot.completion > newest->completion)) {
             newest = &slot;
           }
         }
@@ -9906,30 +9913,32 @@ namespace platf::dxgi {
           return nullptr;
         }
         if (current_) {
-          if (FAILED(current_->consumer_mutex->ReleaseSync(0))) {
-            failed_ = true;
-          }
-          current_->state = slot_t::state_e::free;
+          release_consumer_slot(*current_);
         }
         current_ = newest;
-        current_->state = slot_t::state_e::current;
+        current_->state.store(slot_t::state_e::current, std::memory_order_relaxed);
+        if (failed()) {
+          return nullptr;
+        }
         // Only startup can have two pending packets. Retire the older one before the producer
         // runs again; subsequent cycles always have one current and at most one pending packet.
         for (auto &slot : slots_) {
-          if (slot.state == slot_t::state_e::pending && slot.sequence < current_->sequence &&
+          if (slot.state.load(std::memory_order_acquire) == slot_t::state_e::pending &&
+              slot.completion < current_->completion &&
               slot.consumer_mutex->AcquireSync(1, 0) == S_OK) {
-            if (FAILED(slot.consumer_mutex->ReleaseSync(0))) {
-              failed_ = true;
-            }
-            slot.state = slot_t::state_e::free;
+            release_consumer_slot(slot);
           }
         }
-        return failed_ ? nullptr : current_->consumer_texture.Get();
+        return failed() ? nullptr : current_->consumer_texture.Get();
       }
 
       [[nodiscard]] bool failed() const {
         return failed_.load(std::memory_order_acquire);
       }
+
+#ifdef SUNSHINE_TESTS
+      std::function<void()> before_flush_for_test;
+#endif
 
       ~local_shutter_frame_ring_t() {
         if (current_) {
@@ -9938,9 +9947,15 @@ namespace platf::dxgi {
       }
 
     private:
+      void release_consumer_slot(slot_t &slot) {
+        if (FAILED(slot.consumer_mutex->ReleaseSync(0))) {
+          failed_ = true;
+          return;
+        }
+        slot.state.store(slot_t::state_e::free, std::memory_order_release);
+      }
+
       std::array<slot_t, 2> slots_;
-      std::mutex mutex_;
-      std::uint64_t sequence_ = 0;
       Microsoft::WRL::ComPtr<ID3D11Fence> completion_fence_;
       std::uint64_t completion_ = 0;
       slot_t *current_ = nullptr;
@@ -10092,9 +10107,33 @@ namespace platf::dxgi {
       return result;
     }
     auto *pair = wait_pair();
-    if (!pair || !publish(second)) {
+    if (!pair) {
       return result;
     }
+    // Hold the real producer inside publication. The consumer must return the first pair
+    // before the producer is allowed to flush and release the second slot.
+    std::promise<void> publisher_entered, allow_flush;
+    auto publication_entered = publisher_entered.get_future();
+    auto flush_allowed = allow_flush.get_future();
+    frames.before_flush_for_test = [&] {
+      publisher_entered.set_value();
+      flush_allowed.wait();
+    };
+    std::future<ID3D11Texture2D *> acquiring;
+    auto publishing = std::async(std::launch::async, [&] { return publish(second); });
+    auto unblock = util::fail_guard([&] { allow_flush.set_value(); });
+    if (publication_entered.wait_for(2s) != std::future_status::ready) {
+      return result;
+    }
+    acquiring = std::async(std::launch::async, [&] { return frames.acquire_pair(); });
+    result.consumer_progress_during_publication =
+      acquiring.wait_for(2s) == std::future_status::ready && acquiring.get() == pair;
+    allow_flush.set_value();
+    unblock.disable();
+    if (!publishing.get() || !result.consumer_progress_during_publication) {
+      return result;
+    }
+    frames.before_flush_for_test = {};
     result.publication_bounded = frames.acquire_producer() == nullptr;
     const auto read = [&](ID3D11Texture2D *texture, UINT left, UINT width) {
       return read_shutter_probe_texture(consumer.Get(), consumer_context.Get(), texture, left, width);

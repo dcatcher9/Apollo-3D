@@ -120,6 +120,11 @@ Cold timeouts and counter-domain changes restart acquisition within a six-second
 per-present wait scales with the eye interval. Waiting for the first stereo packet has a separate
 five-second limit. No eye commands are sent during this startup phase.
 
+The converter and presenter exchange stereo pairs through two shared textures. The converter
+publishes a slot after submitting its GPU work and releasing the write key. The presenter can
+keep scanning out its current pair during that submission. At a left-eye boundary it may take
+the newest published pair whose GPU fence has completed and whose read key is available.
+
 Only unsignalled clock acquisition may use `DwmFlush` to request feedback publication. Armed
 presentation polls exact metadata with cancellable 200 µs waits; it never falls back to this
 blocking call, which can consume more than a shutter interval under load. If a driver requires
