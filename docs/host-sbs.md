@@ -74,7 +74,7 @@ as one tuple; the draw-owned pin resources are not a new temporal observation.
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
 schema 135/tag `0x8405278D`, canonical SHA-256
-`559d5db6401ad15095a27bac49317bf6038cb32ce556d05c93de4b1a3cd8e58f`. It binds the
+`debb465435a27c73010538101c1bf56dc6719fe4d3fde46f97fb7a056a89366f`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -85,7 +85,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 2 | `720fe4a316f1f66fd31c8a1833cbf0d93e25f34da494b6c80b94b6cea096689e` |
-| `parallax_v2_producer` | 29 | `edf4358c79f2e927d248dbde686818de761f91f8008fe51cd9881e6f01b265ee` |
+| `parallax_v2_producer` | 29 | `fbb7ecfe8c3272467a8b700372bb74127250be1d0d5d9470f75d1deeef2cb143` |
 | `parallax_v2_coordinate_diagnostic` | 1 | `8fa3b38378aacc681b44daf2adc6da90d8ad8dd5937fd0e1dd5cc1bf597ab184` |
 | `near_identical_detector` | 3 | `c8988887dcdd5b7f1aa81fd5c144e7bf85ed126712bf72c8d8be4943e7067bca` |
 | `gpu_trace` | 1 | `8b2fc3d19020721799f826549cafd74db0d3248c2fc24356b211b85287ef87bb` |
@@ -1777,7 +1777,8 @@ SCT5 through an identity-only entry, then the serialized owner exchanges its two
 texture/view bundles. This removes the extra native-band feature copy while retaining the exact
 current references and counts. The force finalizer still supplies the grid and exact-current
 abstention; no receipt or geometry check is bypassed. Receipt-gated infer/reuse and queued roots
-keep the original copy-and-publish entry, because a zero-group reuse cannot exchange CPU owners.
+keep the copy-and-publish entry, because a zero-group reuse cannot exchange CPU owners. The copy
+uses the whole band written by the preceding temporal dispatch, which zeros invalid source pixels.
 
 The joined completion also snapshots the source band and probability map into distinct GPU
 resources before a later admission can overwrite the OCR working inputs. The completed tuple owns

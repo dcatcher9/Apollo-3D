@@ -192,7 +192,8 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             # The model-input history retains only its consumed NCHW planes. The subtitle
             # contour producer learns each palette once per current observation. Direct and
             # source-color-tiled preprocessing are authenticated equivalent producer programs.
-            135: "559d5db6401ad15095a27bac49317bf6038cb32ce556d05c93de4b1a3cd8e58f",
+            # Conditional contour history copies the validated features from the temporal pass.
+            135: "debb465435a27c73010538101c1bf56dc6719fe4d3fde46f97fb7a056a89366f",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -207,7 +208,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "edf4358c79f2e927d248dbde686818de761f91f8008fe51cd9881e6f01b265ee",
+            "fbb7ecfe8c3272467a8b700372bb74127250be1d0d5d9470f75d1deeef2cb143",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(

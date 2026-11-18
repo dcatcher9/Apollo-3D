@@ -1222,14 +1222,8 @@ void history_main(uint3 dispatch_id : SV_DispatchThreadID, uint group_index : SV
     for (uint y = dispatch_id.y; y < height; y += stride.y) {
         [loop]
         for (uint x = dispatch_id.x; x < width; x += stride.x) {
-            float4 feature = 0.0f;
-            float3 color;
-            if (valid && LoadDisplayColor(int2(x, y), color)) {
-                // The immutable next texture carries the chosen reference/count. Reading old
-                // neighbor history while overwriting it would otherwise race across threadgroups.
-                feature = NextFeaturesRead.Load(int3(x, y, 0));
-            }
-            HistoryFeaturesWrite[uint2(x, y)] = feature;
+            // The matching temporal dispatch writes zero for invalid source pixels.
+            HistoryFeaturesWrite[uint2(x, y)] = valid ? NextFeaturesRead.Load(int3(x, y, 0)) : 0.0f;
         }
     }
     if (dispatch_id.y == 0u) {

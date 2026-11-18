@@ -3077,10 +3077,28 @@ namespace {
           pixel[3u] = std::numeric_limits<float>::quiet_NaN();
           break;
       }
-      ASSERT_TRUE(run());
+      ASSERT_TRUE(run(false, nullptr, nullptr, true));
       EXPECT_EQ(result_.support[point_index()], 0u);
+      EXPECT_EQ(result_.next_features[point_index()], (pixel_t {}));
       EXPECT_EQ(result_.features[point_index()], (pixel_t {}));
     }
+  }
+
+  TEST_F(HostSbsSubtitleContourGpuTest, ReceiptGatedHistoryClearsMismatchedDestination) {
+    texture_t mismatched;
+    ASSERT_TRUE(create_texture(device_.Get(), source_w_ + 1u, crop_h_, DXGI_FORMAT_R32G32B32A32_FLOAT,
+                               D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, mismatched));
+    const float poison[4] {.75f, .75f, .75f, feature_code(4u)};
+    context_->ClearUnorderedAccessViewFloat(mismatched.uav.Get(), poison);
+    features_ = std::move(mismatched);
+    paint_glyph_point();
+
+    ASSERT_TRUE(run(false, nullptr, nullptr, true));
+
+    ASSERT_EQ(result_.next_features[point_index()][3u], feature_code(1u));
+    ASSERT_EQ(result_.features.size(), std::size_t(source_w_ + 1u) * crop_h_);
+    EXPECT_TRUE(std::ranges::all_of(result_.features, [](const auto &feature) { return feature == pixel_t {}; }));
+    EXPECT_EQ(result_.identity[v2::subtitle_contour_history_snapshot_valid_word], 0u);
   }
 
   TEST_F(HostSbsSubtitleContourGpuTest, MalformedPriorRgbAndCountNamespaceCannotForgeFourthObservation) {
