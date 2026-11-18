@@ -66,6 +66,8 @@ namespace platf::dxgi::testing {
     bool estimator_present = false;
     bool estimator_valid = false;
     bool estimator_terminal = false;
+    bool current_outline_warp_ready = false;
+    bool text_game_warp_ready = false;
     bool v2_live_warp_seen = false;
     bool latest_lineage_authenticated = false;
     bool latest_lineage_known_depth = false;

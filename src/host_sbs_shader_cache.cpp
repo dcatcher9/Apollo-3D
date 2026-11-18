@@ -154,6 +154,22 @@ namespace models::host_sbs_shader_cache {
       return standard_sha256_hex(canonical);
     }
 
+    const owned_shader_spec *find_owned_spec(const source_snapshot &snapshot, const shader_spec &spec) {
+      const auto found = std::find_if(snapshot.specs.begin(), snapshot.specs.end(), [&](const owned_shader_spec &candidate) {
+        return candidate.filename == spec.filename && candidate.entrypoint == spec.entrypoint && candidate.target == spec.target;
+      });
+      return found == snapshot.specs.end() ? nullptr : &*found;
+    }
+
+    std::string resource_name(std::string key) {
+      for (auto &digit : key) {
+        if (digit >= 'a' && digit <= 'f') {
+          digit = static_cast<char>(digit - 'a' + 'A');
+        }
+      }
+      return key;
+    }
+
     bool bytecode_matches_target(
       const std::vector<unsigned char> &bytecode,
       const std::string_view target
@@ -305,18 +321,34 @@ namespace models::host_sbs_shader_cache {
     std::atomic<std::uint64_t> compile_count {0u};
     std::atomic<std::uint64_t> persistent_write_count {0u};
     std::atomic<std::uint64_t> rejected_artifact_count {0u};
+    std::atomic<std::uint64_t> embedded_hit_count {0u};
     std::atomic<std::uint64_t> temporary_artifact_sequence {0u};
     constexpr std::size_t maximum_persistent_artifact_count = 128u;
 
-    std::filesystem::path persistent_artifact_path(
-      const std::filesystem::path &directory,
-      const source_snapshot &snapshot,
-      const owned_shader_spec &spec
-    ) {
-      if (directory.empty()) {
+    bytecode_t load_embedded_artifact(const std::string &key, const owned_shader_spec &spec) {
+      const auto name = resource_name(key);
+      const auto module = GetModuleHandleW(nullptr);
+      // RT_RCDATA is the built-in raw-data resource type. Use the wide API independently of UNICODE.
+      const auto resource = FindResourceW(module, std::wstring(name.begin(), name.end()).c_str(), MAKEINTRESOURCEW(10));
+      if (!resource) {
         return {};
       }
-      return directory / (bytecode_cache_key(snapshot, spec) + ".dxbc");
+      const auto size = SizeofResource(module, resource);
+      if (size == 0u || size > maximum_cached_bytecode_bytes) {
+        return {};
+      }
+      const auto handle = LoadResource(module, resource);
+      const auto *data = handle ? static_cast<const unsigned char *>(LockResource(handle)) : nullptr;
+      if (!data) {
+        return {};
+      }
+      auto bytecode = std::make_shared<std::vector<unsigned char>>(data, data + size);
+      if (!bytecode_matches_target(*bytecode, spec.target)) {
+        BOOST_LOG(warning) << "Invalid Host SBS bytecode resource " << name;
+        return {};
+      }
+      embedded_hit_count.fetch_add(1u, std::memory_order_relaxed);
+      return bytecode;
     }
 
     bytecode_t load_persistent_artifact(
@@ -644,6 +676,7 @@ namespace models::host_sbs_shader_cache {
       compile_count.load(std::memory_order_relaxed),
       persistent_write_count.load(std::memory_order_relaxed),
       rejected_artifact_count.load(std::memory_order_relaxed),
+      embedded_hit_count.load(std::memory_order_relaxed),
     };
   }
 
@@ -690,6 +723,22 @@ namespace models::host_sbs_shader_cache {
     return sources ? sources->closure_sha256 : std::string {};
   }
 
+  std::vector<std::filesystem::path> source_paths(const source_snapshot_t &sources) {
+    std::vector<std::filesystem::path> paths;
+    if (sources) {
+      paths.reserve(sources->sources.size());
+      for (const auto &[relative, text] : sources->sources) {
+        paths.push_back(sources->root / relative);
+      }
+    }
+    return paths;
+  }
+
+  std::string bytecode_resource_name(const source_snapshot_t &sources, const shader_spec &spec) {
+    const auto *selected = sources ? find_owned_spec(*sources, spec) : nullptr;
+    return selected ? resource_name(bytecode_cache_key(*sources, *selected)) : std::string {};
+  }
+
   bytecode_t get(
     const source_snapshot_t &sources,
     const shader_spec &spec
@@ -698,16 +747,8 @@ namespace models::host_sbs_shader_cache {
         spec.entrypoint.empty() || spec.target.empty()) {
       return {};
     }
-    const auto selected = std::find_if(
-      sources->specs.begin(),
-      sources->specs.end(),
-      [&](const owned_shader_spec &candidate) {
-        return candidate.filename == spec.filename &&
-               candidate.entrypoint == spec.entrypoint &&
-               candidate.target == spec.target;
-      }
-    );
-    if (selected == sources->specs.end()) {
+    const auto *selected = find_owned_spec(*sources, spec);
+    if (!selected) {
       BOOST_LOG(error)
         << "Host SBS shader was requested from a snapshot that does not own it: "
         << spec.filename;
@@ -721,18 +762,21 @@ namespace models::host_sbs_shader_cache {
       selected->target,
     };
 
-    bool produced = false;
     std::filesystem::path artifact_path;
     const auto bytecode = cache.get(
       key,
       [&] {
-        produced = true;
+        const auto artifact_key = bytecode_cache_key(*sources, *selected);
+        if (auto embedded = load_embedded_artifact(artifact_key, *selected)) {
+          return embedded;
+        }
         // Path/hash/configuration copies can throw too. They belong to the same guarded
         // producer as disk loading and compilation, after publication of its shared state.
         {
           std::lock_guard lock(cache_mutex);
-          artifact_path = persistent_artifact_path(
-            persistent_cache_directory, *sources, *selected);
+          if (!persistent_cache_directory.empty()) {
+            artifact_path = persistent_cache_directory / (artifact_key + ".dxbc");
+          }
         }
         auto code = load_persistent_artifact(artifact_path, *selected);
         if (!code) {
@@ -745,7 +789,7 @@ namespace models::host_sbs_shader_cache {
         memory_hit_count.fetch_add(1u, std::memory_order_relaxed);
       }
     );
-    if (produced && bytecode) {
+    if (!artifact_path.empty() && bytecode) {
       // The shared bytecode has already succeeded. Best-effort persistence cannot turn this
       // caller into a failure while attached callers have received the successful value.
       try {
@@ -802,6 +846,8 @@ namespace models::host_sbs_shader_cache {
       << " production shaders"
       << "; persistent_hits="
       << cache_statistics().persistent_hits - statistics_before.persistent_hits
+      << ", embedded_hits="
+      << cache_statistics().embedded_hits - statistics_before.embedded_hits
       << ", compiled="
       << cache_statistics().compiled - statistics_before.compiled
       << "; live current-outline device programs prepare separately; diagnostics remain lazy).";

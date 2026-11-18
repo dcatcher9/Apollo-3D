@@ -466,10 +466,6 @@ namespace platf::dxgi {
     result.configured = true;
     const auto shader_root = std::filesystem::path(configuration.current_outline_shader_root).parent_path();
     result.ready = result.shared_warp.load(device, shader_root, result.error);
-    // The Game 3D text-game route is optional and independent of the subtitle routes.
-    if (std::string text_game_error; result.ready && !result.shared_warp.load_text_game(device, shader_root, text_game_error)) {
-      BOOST_LOG(warning) << "Game 3D text-game pin unavailable; a text game keeps the picture-based protection: " << text_game_error;
-    }
     return result;
   }
 
@@ -4262,11 +4258,13 @@ namespace platf::dxgi {
       Microsoft::WRL::ComPtr<ID3D11Device> dev(device.get());
       Microsoft::WRL::ComPtr<ID3D11DeviceContext> ctx(device_ctx.get());
       const bool prepare_live_outline = !probe_context;
+      const bool prepare_text_game_programs = sbs_mode == ::video::SBS_GAME_SBS && text_game_eligible;
       depth_estimator_build_task_t build_task([dev = std::move(dev),
                                                ctx = std::move(ctx),
                                                active,
                                                sbs_cfg,
-                                               prepare_live_outline]() mutable {
+                                               prepare_live_outline,
+                                               prepare_text_game_programs]() mutable {
         depth_pipeline_build_result_t result;
         result.estimator = std::make_unique<models::video_depth_estimator>(
           dev,
@@ -4287,8 +4285,15 @@ namespace platf::dxgi {
           configuration.selector_shader_root = outline::selector_root(root).string();
           configuration.selector_source_closure_sha256 = std::string(outline::selector_closure);
           result.selected_matte = prepare_selected_matte_programs(
-            *result.estimator, dev.Get(), configuration
+            *result.estimator,
+            dev.Get(),
+            configuration
           );
+          // Keep the optional program creation on the background worker for packed Game 3D,
+          // including its early local warmup before a text game appears.
+          if (std::string error; prepare_text_game_programs && result.selected_matte.ready && !result.selected_matte.shared_warp.load_text_game(dev.Get(), root.parent_path(), error)) {
+            BOOST_LOG(warning) << "Game 3D text-game pin unavailable; a text game keeps the picture-based protection: " << error;
+          }
         }
         return result;
       });
@@ -8470,6 +8475,8 @@ namespace platf::dxgi {
         result.estimator_present = static_cast<bool>(converter_->depth_estimator);
         result.estimator_valid = result.estimator_present && converter_->depth_estimator->is_valid();
         result.estimator_terminal = result.estimator_present && converter_->depth_estimator->has_terminal_failure();
+        result.current_outline_warp_ready = converter_->selected_matte_ready;
+        result.text_game_warp_ready = converter_->selected_shared_warp_programs.text_game_ready();
         result.v2_live_warp_seen = converter_->v2_live_warp_seen;
         result.latest_lineage_authenticated = converter_->latest_v2_lineage.authenticated;
         result.latest_lineage_known_depth = converter_->latest_v2_lineage.known_depth();

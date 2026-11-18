@@ -2377,6 +2377,11 @@ optional OCR preparation has completed or enable it later in an already construc
 Live current-outline compute and shared-warp device programs prepare on the tracked per-device
 background build worker before its future becomes ready; the encode thread only adopts the
 prepared handles.
+The Windows build embeds Current Outline, completed shared UI, and Game 3D text-game bytecode.
+The producer inventory and shader compiler policy are shared with the runtime. The device build
+authenticates the installed source closures before selecting bytecode keyed to those closures.
+Entries without matching embedded bytecode use the existing writable cache and compiler. The
+optional Game 3D text programs prepare only for an eligible packed Game 3D session.
 There is no separate literal selected-matte pixel shader or preparation task. Per-frame shared
 failure disables b3 subtitle permission and clears selected authority before recording an ordinary
 Base draw. The shared shader imports only canonical Base/ROI/packed geometry and current glyph

@@ -25,6 +25,7 @@ namespace models::host_sbs_shader_cache {
     std::uint64_t compiled = 0u;
     std::uint64_t persistent_writes = 0u;
     std::uint64_t rejected_artifacts = 0u;
+    std::uint64_t embedded_hits = 0u;
   };
 
   /**
@@ -54,9 +55,15 @@ namespace models::host_sbs_shader_cache {
    */
   std::string source_closure_sha256(const source_snapshot_t &sources);
 
+  /** Files in the authenticated snapshot, for the build generator's dependency file. */
+  std::vector<std::filesystem::path> source_paths(const source_snapshot_t &sources);
+
+  /** PE resource name for an entry owned by the given snapshot. */
+  std::string bytecode_resource_name(const source_snapshot_t &sources, const shader_spec &spec);
+
   /**
-   * Return cached bytecode, loading a validated closure-keyed artifact or compiling this exact
-   * source snapshot once process-wide if needed.
+   * Return cached bytecode from the executable, the writable cache, or compilation of this exact
+   * source snapshot. The producer resolves each process-local key once.
    */
   bytecode_t get(
     const source_snapshot_t &sources,

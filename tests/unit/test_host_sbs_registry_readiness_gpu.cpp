@@ -101,6 +101,8 @@ namespace {
   json observation(const probe::model_preparation_converter_snapshot_t &sample) {
     return {
       {"production_observer_path", sample.production_observer_path},
+      {"current_outline_warp_ready", sample.current_outline_warp_ready},
+      {"text_game_warp_ready", sample.text_game_warp_ready},
       {"registry_present", sample.registry_present},
       {"registry_ready", sample.registry_ready},
       {"registry_ready_observed", sample.registry_ready_observed},
@@ -493,6 +495,8 @@ TEST(HostSbsRegistryReadinessGpuTest, BuildingCensusWakeWaitsForTheActualObserva
     checkpoint(plan, report, "actual-observer-adoption");
     ASSERT_TRUE(adopted.estimator_present);
     ASSERT_TRUE(adopted.estimator_valid);
+    EXPECT_TRUE(adopted.current_outline_warp_ready);
+    EXPECT_FALSE(adopted.text_game_warp_ready);
     EXPECT_TRUE(adopted.registry_ready_observed);
 
     report["active_phase"] = "waiting-actual-authenticated-output";

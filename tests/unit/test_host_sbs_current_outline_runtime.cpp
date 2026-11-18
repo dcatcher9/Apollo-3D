@@ -79,6 +79,53 @@ namespace {
     }
   };
 
+  TEST_F(HostSbsCurrentOutlineRuntimeTest, EmbeddedCurrentOutlineProgramsRequireAuthenticatedSource) {
+    // Each temporary root has its own process-cache key. This exercises the embedded lookup
+    // even if another test already created every production program in this process.
+    const auto root = directory / "current_outline";
+    std::filesystem::copy(
+      std::filesystem::path(SUNSHINE_SHADERS_DIR) / "current_outline",
+      root,
+      std::filesystem::copy_options::recursive
+    );
+
+    const auto before = cache::cache_statistics();
+    runtime::programs_t programs;
+    std::string error;
+    ASSERT_TRUE(programs.load(device.Get(), root, error)) << error;
+    EXPECT_TRUE(programs.ready());
+    EXPECT_TRUE(programs.stability_ready()) << programs.stability_error();
+    EXPECT_TRUE(programs.hole_ready()) << programs.hole_error();
+    EXPECT_TRUE(programs.coverage_ready()) << programs.coverage_error();
+    EXPECT_TRUE(programs.foreground_edge_ready()) << programs.foreground_edge_error();
+    EXPECT_TRUE(programs.trusted_inner_ready()) << programs.trusted_inner_error();
+
+    const auto loaded = cache::cache_statistics();
+    EXPECT_EQ(loaded.embedded_hits - before.embedded_hits, runtime::unique_compute_shader_count);
+    EXPECT_EQ(loaded.memory_hits, before.memory_hits);
+    EXPECT_EQ(loaded.persistent_hits, before.persistent_hits);
+    EXPECT_EQ(loaded.persistent_writes, before.persistent_writes);
+    EXPECT_EQ(loaded.compiled, before.compiled);
+
+    std::ofstream changed(
+      root / "source5" / runtime::source5_specs.front().filename,
+      std::ios::binary | std::ios::app
+    );
+    changed << "\n// Deliberate source closure change.\n";
+    changed.close();
+    ASSERT_TRUE(changed.good());
+
+    runtime::programs_t rejected;
+    EXPECT_FALSE(rejected.load(device.Get(), root, error));
+    EXPECT_FALSE(rejected.ready());
+    EXPECT_NE(error.find("source closure mismatch: source5"), std::string::npos) << error;
+    const auto after = cache::cache_statistics();
+    EXPECT_EQ(after.embedded_hits, loaded.embedded_hits);
+    EXPECT_EQ(after.memory_hits, loaded.memory_hits);
+    EXPECT_EQ(after.persistent_hits, loaded.persistent_hits);
+    EXPECT_EQ(after.compiled, loaded.compiled);
+  }
+
   TEST_F(HostSbsCurrentOutlineRuntimeTest, BytecodeWorkersAreBoundedAndPreserveRequestOrdering) {
     const auto sources = cache::snapshot_sources(shader_root, fixture_specs);
     ASSERT_TRUE(sources);
