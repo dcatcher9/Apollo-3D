@@ -1564,13 +1564,12 @@ namespace platf::dxgi {
           host_sbs::observation_handoff_t handoff;
           auto &depth_step = handoff.step();
           auto &est = depth_step.observation;
-          // Planned working views are local to this convert call, never a completed observation.
-          std::optional<models::queued_same_source_gpu_continuation_research_views_t> queued_draw;
-          matched_frame_slot_t *queued_source_slot = nullptr;
-          bool queued_refined_geometry = false;
-          bool pending_current_colour_selected=false;
-          matched_frame_slot_t *pending_colour_source_slot=nullptr;
-          std::optional<models::queued_same_source_gpu_continuation_research_views_t> pending_colour_geometry;
+          // Only an explicit research converter owns planned working views. They remain local to
+          // this call, even if a failed depth pipeline retires the research session before drawing.
+          std::optional<queued_converter_frame_t> queued_frame;
+          if (queued_research) {
+            queued_frame.emplace();
+          }
           bool queued_attempt_failed_flat = false;
           bool unchanged_content_submission_suppressed = false;
           bool damage_guided_submission_suppressed = false;
@@ -2298,7 +2297,10 @@ namespace platf::dxgi {
                   depth_authority_reprocess_pending = false;
                 }
                 if (depth_transaction_enqueued) {
-                  if(pending_colour_ready){pending_colour_lane.release_geometry_lease();pending_colour_owner_unavailable=true;}
+                  if (auto *pending = queued_research ? queued_research->pending_colour.get() : nullptr) {
+                    pending->lane.release_geometry_lease();
+                    pending->owner_unavailable = true;
+                  }
                   matched_candidate_slot->pending = true;
                   if(temporal_source_bridge_enabled)temporal_source_ledger.note_admitted(matched_candidate_slot->temporal_source);
                   matched_candidate_slot->gpu_undecided_transaction =
@@ -2343,7 +2345,7 @@ namespace platf::dxgi {
                       poll_plan.budget >= detail::host_sbs_same_frame_poll_min_budget;
                     poll_plan.limited_by_hard_cap = prior_poll_plan->limited_by_hard_cap;
                   }
-                  const bool queued_first_query = queued_live_ready &&
+                  const bool queued_first_query = queued_research &&
                                                   host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2 &&
                                                   force_infer_transaction_enqueued && !gpu_undecided_transaction_enqueued &&
                                                   optional_work == models::depth_optional_work_mode_e::ordinary &&
@@ -2388,31 +2390,27 @@ namespace platf::dxgi {
                       latest_v2_lineage.reset();
                       matched_render_slot = nullptr;
                       completion_finalized_before_admission = false;
-                      queued_refined_geometry = submitted_refined_geometry;
+                      queued_frame->refined_geometry = submitted_refined_geometry;
                       handoff.reset();
                       render_input_srv = img_ctx->encoder_input_res.get();
-                      // Slots keep the calibrated DAV2 submission raster; the ticket owns
-                      // the estimator's authenticated realized field, as ordinary completions do.
-                      const auto queued_expected_region = ticket ?
-                        realize_depth_input_region(matched_candidate_slot->depth_input_region,
-                          submitted_refined_geometry, static_cast<int>(ticket->field_width), static_cast<int>(ticket->field_height)) :
-                        std::optional<models::depth_input_region_t> {};
-                      if (ticket && ticket->postprocess_queued && ticket->both_unmap_calls_succeeded && ticket->submitted_frame_id == frame_id && ticket->observation_timestamp_us == observation_timestamp_us && ticket->submitted_source.Get() == matched_candidate_slot->analysis_input_srv() && ticket->color_space == input_color_space && ticket->postprocess_request_flags == 4u && ticket->expected_work == 1u && ticket->transaction_token != 0u && ticket->subtitle_context_generation == matched_candidate_slot->subtitle_context_generation && queued_expected_region && ticket->input_region == *queued_expected_region && ticket->field_content == queued_expected_region->tensor_content && ticket->input_region.valid() && ticket->field_width != 0u && ticket->field_height != 0u && ticket->field_content.valid() && ticket->field_content.right <= ticket->field_width && ticket->field_content.bottom <= ticket->field_height && ticket->base && ticket->state && ticket->transaction_raw && queued_render_guard_cbuffer && ticket->glyph_matte && ticket->display_band && ticket->condition_params && ticket->contour_identity) {
-                        queued_draw = std::move(ticket);
-                        queued_source_slot = matched_candidate_slot;
-                        if(pending_colour_ready) {
-                          const auto material=observe_pending_colour_material(*queued_draw,live_source_desc,input_color_space,current_source_timestamp,current_content_timestamp,current_ddup_damage,img.cursor);
-                          const auto operands=depth_estimator->pending_ocr_conditioner_working_views_for_evaluation(queued_draw->ticket_sequence,queued_draw->submitted_frame_id,queued_draw->observation_timestamp_us);
+                      if (ticket && queued_ticket_matches(*ticket, *matched_candidate_slot, frame_id, observation_timestamp_us, input_color_space, submitted_refined_geometry)) {
+                        queued_frame->ticket = std::move(ticket);
+                        queued_frame->source_slot = matched_candidate_slot;
+                        const auto &draw = *queued_frame->ticket;
+                        if (auto *pending = queued_research->pending_colour.get()) {
+                          const auto material = observe_pending_colour_material(*pending, draw, live_source_desc, input_color_space, current_source_timestamp, current_content_timestamp, current_ddup_damage, img.cursor);
+                          const auto operands = depth_estimator->pending_ocr_conditioner_working_views_for_evaluation(draw.ticket_sequence, draw.submitted_frame_id, draw.observation_timestamp_us);
                           std::string archive_error;
-                          if(!operands || !material.usable() || !pending_colour_lane.capture_pending(device_ctx.get(),*operands,*queued_draw,material,archive_error)) {
-                            pending_colour_lane.release_geometry_lease();pending_colour_owner_unavailable=true;
-                            BOOST_LOG(warning)<<"Pending current-colour owner unavailable: "<<archive_error;
-                          } else pending_colour_owner_unavailable=false;
+                          pending->owner_unavailable = !operands || !material.usable() || !pending->lane.capture_pending(device_ctx.get(), *operands, draw, material, archive_error);
+                          if (pending->owner_unavailable) {
+                            pending->lane.release_geometry_lease();
+                            BOOST_LOG(warning) << "Pending current-colour owner unavailable: " << archive_error;
+                          }
                         }
-                        render_input_srv = queued_draw->submitted_source.Get();
+                        render_input_srv = draw.submitted_source.Get();
                         if (probe_observer.record) {
                           actual_converter_probe_v1::event_t e; e.kind=actual_converter_probe_v1::event_e::queued; e.queued=true;
-                          emit_converter_probe(std::move(e),queued_source_slot,nullptr,&*queued_draw,render_input_srv,img_ctx->encoder_input_res.get(),frame_id);
+                          emit_converter_probe(std::move(e), matched_candidate_slot, nullptr, &draw, render_input_srv, img_ctx->encoder_input_res.get(), frame_id);
                         }
                       } else {
                         queued_attempt_failed_flat = true;
@@ -2788,45 +2786,37 @@ namespace platf::dxgi {
               {authority_generation(live_window_authority), authority_generation(live_foreground_region),
                live_browser_authority_epoch, interactive_move_size_observed}
             );
-          // Recheck source/domain after queueing and before binding the ticket. ComPtr only
-          // preserves allocation lifetime; pending slot ownership protects the submitted bytes.
-          if(pending_colour_ready && pending_colour_owner_unavailable) {
-            for(const auto &slot:matched_frame_slots)if(slot.pending && !same_source(slot.source_timestamp,current_source_timestamp)) {
-              queued_attempt_failed_flat=true;render_input_srv=img_ctx->encoder_input_res.get();
+          auto *pending_colour = queued_research ? queued_research->pending_colour.get() : nullptr;
+          if (pending_colour) {
+            const bool current_draw_allowed =
+              img_ctx->encoder_mutex && !snapshot_debug_inputs && !producer_terminal &&
+              host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2 &&
+              !current_interactive_move_size &&
+              !depth_authority_reprocess_pending && !subtitle_context_reprocess_pending;
+            const bool use_flat = select_pending_colour_draw(
+              *pending_colour, *queued_frame, img_ctx->encoder_input_res.get(), current_draw_allowed,
+              live_source_desc, input_color_space, repeat_now, current_source_timestamp,
+              current_content_timestamp, current_ddup_damage, img.cursor, frame_id
+            );
+            if (use_flat || queued_frame->pending_colour_geometry) {
+              render_input_srv = img_ctx->encoder_input_res.get();
             }
+            queued_attempt_failed_flat |= use_flat;
           }
-          // Current C colours and pending B geometry have distinct typed identities.
-          if(pending_colour_ready && pending_colour_lane.ticket()) {
-            const auto &owner=*pending_colour_lane.ticket();
-            for(auto &candidate:matched_frame_slots)if(candidate.pending && candidate.frame_id==owner.submitted_frame_id)pending_colour_source_slot=&candidate;
-            const bool changed_current=pending_colour_source_slot && !same_source(pending_colour_source_slot->source_timestamp,current_source_timestamp);
-            const bool safe=changed_current && img_ctx->encoder_mutex && !snapshot_debug_inputs && !producer_terminal &&
-              host_sbs_renderer==models::host_sbs_renderer_e::parallax_v2 && !current_interactive_move_size &&
-              !depth_authority_reprocess_pending && !subtitle_context_reprocess_pending &&
-              subtitle_context.matches(owner.subtitle_context_generation) && pending_colour_source_slot->subtitle_context_eligible &&
-              owner.color_space==input_color_space && drawn_source_order.permits(frame_id) &&
-              models::host_sbs_matched_completion_is_current(false,repeat_now-pending_colour_source_slot->captured_at) &&
-              matched_route_matches_current(*pending_colour_source_slot,live_source_desc,input_color_space,authority_generation(live_window_authority),authority_generation(live_foreground_region),live_browser_authority_epoch,interactive_move_size_observed);
-            if(safe) {
-              const auto material=observe_pending_colour_material(owner,live_source_desc,input_color_space,current_source_timestamp,current_content_timestamp,current_ddup_damage,img.cursor);
-              const auto still_owned=depth_estimator->pending_ocr_conditioner_working_views_for_evaluation(owner.ticket_sequence,owner.submitted_frame_id,owner.observation_timestamp_us);
-              std::string error;
-              if(still_owned && material.usable() && pending_colour_lane.observe_current(device_ctx.get(),img_ctx->encoder_input_res.get(),material,error)) {
-                pending_colour_geometry=owner;pending_current_colour_selected=true;render_input_srv=img_ctx->encoder_input_res.get();
-              } else {queued_attempt_failed_flat=true;render_input_srv=img_ctx->encoder_input_res.get();}
-            } else if(!pending_colour_source_slot) {
-              pending_colour_lane.release_geometry_lease(); // ACK never resets bank/latch/watermark
-            } else if(changed_current) {queued_attempt_failed_flat=true;render_input_srv=img_ctx->encoder_input_res.get();}
-          }
-          const bool queued_draw_selected = queued_draw && queued_source_slot &&
+          const bool pending_current_colour_selected = queued_frame && queued_frame->pending_colour_geometry.has_value();
+          // Recheck ownership after queueing. A ComPtr cannot prove that a pending slot's pixels
+          // still belong to the submitted source.
+          auto *queued_source_slot = queued_frame ? queued_frame->source_slot : nullptr;
+          const bool has_queued_ticket = queued_frame && queued_frame->ticket.has_value();
+          const bool queued_draw_selected = has_queued_ticket && queued_source_slot &&
                                             !queued_attempt_failed_flat && !snapshot_debug_inputs && !producer_terminal &&
                                             host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2 &&
-                                            sbs_reprojection_v2_queued_ps &&
+                                            queued_research &&
                                             queued_source_slot->pending && queued_source_slot == matched_candidate_slot &&
                                             queued_source_slot->frame_id == frame_id &&
                                             drawn_source_order.permits(queued_source_slot->frame_id) &&
                                             matched_route_matches_current(*queued_source_slot, live_source_desc, input_color_space, authority_generation(live_window_authority), authority_generation(live_foreground_region), live_browser_authority_epoch, interactive_move_size_observed);
-          if (queued_draw && !queued_draw_selected) {
+          if (has_queued_ticket && !queued_draw_selected) {
             queued_attempt_failed_flat = true;
             render_input_srv = img_ctx->encoder_input_res.get();
           }
@@ -2853,9 +2843,10 @@ namespace platf::dxgi {
               current_source_timestamp
             );
           if(pending_current_colour_selected)converted_content_timestamp=current_content_timestamp?current_content_timestamp:current_source_timestamp;
-          const bool queued_geometry_selected=queued_draw_selected || pending_current_colour_selected;
-          const auto *queued_geometry=pending_current_colour_selected?&*pending_colour_geometry:queued_draw_selected?&*queued_draw:nullptr;
-          auto *queued_geometry_slot=pending_current_colour_selected?pending_colour_source_slot:queued_source_slot;
+          const bool queued_geometry_selected = queued_draw_selected || pending_current_colour_selected;
+          const auto *queued_geometry = pending_current_colour_selected ? &*queued_frame->pending_colour_geometry :
+                                        queued_draw_selected ? &*queued_frame->ticket : nullptr;
+          auto *queued_geometry_slot = pending_current_colour_selected ? queued_frame->pending_colour_source_slot : queued_source_slot;
           const bool v2_repeat_age_expired =
             stale_v2_completion ||
             (host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2 &&
@@ -3034,7 +3025,7 @@ namespace platf::dxgi {
             std::array<UINT, 4u> text_pin_shape {};
             bool text_pin_selected = false;
             if (text_game_ai_active && selected_shared_warp_programs.text_game_ready() && v2_live_warp_selected &&
-                !queued_geometry_selected && !pending_current_colour_selected && render_input_srv) {
+                !queued_geometry_selected && render_input_srv) {
               Microsoft::WRL::ComPtr<ID3D11Predicate> predicate;
               BOOL predicate_value = FALSE;
               device_ctx->GetPredication(&predicate, &predicate_value);
@@ -3081,16 +3072,20 @@ namespace platf::dxgi {
               ID3D11Buffer *matrix = color_matrix.get();
               device_ctx->PSSetConstantBuffers(0, 1, &matrix);
             }
-            if (queued_geometry_selected) {
+            auto *queued_guard = queued_geometry_selected ? queued_research->guard_constants.get() : nullptr;
+            if (queued_guard) {
               const auto guard = models::research_queued_render_guard_v1::make_expected(
                 queued_geometry->transaction_token,
                 queued_geometry->expected_work,
                 queued_geometry->observation_timestamp_us
               );
-              device_ctx->UpdateSubresource(queued_render_guard_cbuffer.get(), 0u, nullptr, &guard, 0u, 0u);
+              device_ctx->UpdateSubresource(queued_guard, 0u, nullptr, &guard, 0u, 0u);
             }
-            auto *ordinary_pixel_shader = p010_y_mrt_selected ? sbs_reprojection_v2_p010_y_ps.get() : queued_geometry_selected ? (pending_current_colour_selected ? pending_colour_lane.pixel_shader() : sbs_reprojection_v2_queued_ps.get()) :
-              v2_live_warp_selected ? sbs_reprojection_v2_live_ps.get() : sbs_flat_identity_ps.get();
+            auto *ordinary_pixel_shader = p010_y_mrt_selected ? sbs_reprojection_v2_p010_y_ps.get() :
+                                          pending_current_colour_selected ? pending_colour->lane.pixel_shader() :
+                                          queued_draw_selected ? queued_research->pixel_shader.get() :
+                                          v2_live_warp_selected ? sbs_reprojection_v2_live_ps.get() :
+                                                                  sbs_flat_identity_ps.get();
             host_sbs_v2_draw_command_t draw_command {
               .render_targets = {
                 sbs_intermediate_rtv.get(),
@@ -3105,7 +3100,7 @@ namespace platf::dxgi {
               .geometry_constants = sbs_constants,
               .subtitle_constants = dump_subtitle_constants,
               .queued_guard_override = queued_geometry_selected,
-              .queued_guard_constants = queued_geometry_selected ? queued_render_guard_cbuffer.get() : nullptr,
+              .queued_guard_constants = queued_guard,
               .queued_guard_transaction = queued_geometry_selected ? queued_geometry->transaction_raw.Get() : nullptr,
             };
             // One fresh pin field uses the current actual draw source. The immutable draw
@@ -3214,8 +3209,12 @@ namespace platf::dxgi {
             }
             bool draw_recorded = false;
             {
-              models::research_pending_current_colour_v1::scoped_negative_t negative;
-              const bool bound = !pending_current_colour_selected || negative.bind(device_ctx.get(), pending_colour_lane.negative_expected(), pending_colour_lane.negative_receipt(), pending_colour_lane.current_constants().Get(), pending_colour_lane.current_snapshot().receipt.Get());
+              std::optional<models::research_pending_current_colour_v1::scoped_negative_t> negative;
+              bool bound = true;
+              if (pending_current_colour_selected) {
+                auto &lane = pending_colour->lane;
+                bound = negative.emplace().bind(device_ctx.get(), lane.negative_expected(), lane.negative_receipt(), lane.current_constants().Get(), lane.current_snapshot().receipt.Get());
+              }
               models::research_current_outline_selected_matte_v2::scoped_receipt_t outline_scope;
               const bool selected_bound = !selected_draw || outline_scope.bind(device_ctx.get(), selected_receipt);
               shared_warp::scoped_binding_t shared_scope;
@@ -3431,7 +3430,7 @@ namespace platf::dxgi {
                 converted_content_timestamp,
                 queued_geometry->input_region,
                 queued_geometry_slot->color_space,
-                queued_refined_geometry,
+                queued_frame->refined_geometry,
                 queued_geometry->field_width,
                 queued_geometry->field_height,
                 queued_geometry_slot->subtitle_context_generation,
@@ -4049,104 +4048,12 @@ namespace platf::dxgi {
       }
       latest_v2_lineage.reset();
       matched_presentation_cache.reset();
-      pending_colour_lane.release_geometry_lease();
-      pending_colour_ready=false;
-      queued_live_ready = false;
-      queued_render_guard_cbuffer.reset();
-      sbs_reprojection_v2_queued_ps.reset();
+      queued_research.reset();
       depth_completion_poll_pending = false;
       depth_authority_reprocess_pending = false;
       subtitle_context_reprocess_pending = false;
       sbs_dumper.cancel_pending_request();
       publish_depth_status(0);
-    }
-
-    // Create the D3D depth pipeline on demand (first SBS frame). The heavy TensorRT engine,
-    // execution context, and CUDA modules were prepared at host startup; construction now borrows
-    // that warm context and creates only device/session resources on a background thread.
-    bool initialize_pending_current_colour_for_instance(
-      const models::research_pending_current_colour_v1::configuration_t &cfg,
-      const models::host_sbs_gpu_completion_receipt::expected_t &genuine_warm,std::string &error) {
-      if(!cfg.enabled || !queued_live_ready || pending_colour_ready || !depth_estimator)return false;
-      const auto warm=depth_estimator->completed_ocr_conditioner_working_views_for_evaluation(genuine_warm);
-      if(!warm){error="Genuine completed warm descriptors unavailable";return false;}
-      static std::atomic<std::uint64_t> next_scope{1u};
-      pending_colour_capture_epoch=next_scope.fetch_add(1u,std::memory_order_relaxed);
-      const auto permission=next_scope.fetch_add(1u,std::memory_order_relaxed);
-      if(!pending_colour_capture_epoch || !permission)return false;
-      pending_colour_ready=pending_colour_lane.prepare(device.get(),device_ctx.get(),*warm,cfg,pending_colour_capture_epoch,permission,error);
-      return pending_colour_ready;
-    }
-    models::research_material_capture_v1::identity_t observe_pending_colour_material(
-      const models::queued_same_source_gpu_continuation_research_views_t &owner,
-      const D3D11_TEXTURE2D_DESC &desc,models::input_color_space transfer,
-      const std::optional<std::chrono::steady_clock::time_point> &source,
-      const std::optional<std::chrono::steady_clock::time_point> &content,
-      const std::optional<detail::ddup_damage_snapshot_t> &damage,
-      const platf::sbs_cursor::snapshot_t &cursor) {
-      namespace identity=models::research_material_capture_v1;
-      const bool cursor_same=pending_colour_previous_cursor && platf::sbs_cursor::same_presentation(*pending_colour_previous_cursor,cursor);
-      if(pending_colour_last_identity.latest_capture_stamp && source==pending_colour_last_identity.latest_capture_stamp && !cursor_same)return {};
-      identity::input_t in;in.capture_epoch=pending_colour_capture_epoch;in.source_stamp=source;in.content_stamp=content;
-      auto &d=in.domain;d.width=desc.Width;d.height=desc.Height;d.format=desc.Format;d.transfer=static_cast<std::uint32_t>(transfer);
-      d.mip_levels=desc.MipLevels;d.array_size=desc.ArraySize;d.samples=desc.SampleDesc.Count;d.quality=desc.SampleDesc.Quality;
-      d.analysis_ltrb={owner.input_region.left,owner.input_region.top,owner.input_region.right,owner.input_region.bottom};
-      d.content_ltrb={owner.field_content.left,owner.field_content.top,owner.field_content.right,owner.field_content.bottom};
-      d.field_width=owner.field_width;d.field_height=owner.field_height;d.authority=static_cast<std::uint32_t>(owner.input_region.authority);
-      d.analysis_generation=owner.input_region.analysis_generation;d.context_generation=owner.subtitle_context_generation;
-      d.root_authority_generation=authority_generation(live_window_authority);d.region_authority_generation=authority_generation(live_foreground_region);d.browser_epoch=live_browser_authority_epoch;
-      const auto rect=damage_region(owner.input_region);
-      const bool same_history=pending_colour_previous_damage && damage && pending_colour_previous_damage->history &&
-        pending_colour_previous_damage->history.get()==damage->history.get();
-      const bool roi_clean=same_history && rect && detail::query_ddup_damage_between(pending_colour_previous_damage,damage,*rect)==detail::ddup_damage_intersection_e::unchanged;
-      in.exact_analysis_pixels_unchanged=cursor_same && (roi_clean || (same_history && content && pending_colour_previous_content && content==pending_colour_previous_content));
-      // One DDup token is one committed acquired surface, not every presented/video frame:
-      // AccumulatedFrames may exceed1 and is not carried by snapshot_t. No fabricated +1 proof.
-      in.complete_capture_interval_observed=false;
-      const auto material=pending_colour_material.observe(in);
-      if(material.usable()){pending_colour_previous_damage=damage;pending_colour_previous_content=content;pending_colour_previous_cursor=cursor;pending_colour_last_identity=material;}
-      return material;
-    }
-    bool initialize_queued_renderer_for_instance(bool enable) {
-      if (!enable || !depth_estimator) { return false; }
-      if (queued_live_ready) { return true; }
-
-      // Optional queued shaders are prepared only for this explicit route. Their failure
-      // leaves the completed subtitle programs and ordinary depth renderer available.
-      if (selected_matte_ready) {
-        std::string shared_error;
-        if (!selected_shared_warp_programs.load_queued(device.get(), selected_shared_warp_root, shared_error)) {
-          BOOST_LOG(warning) << "Queued subtitle shared renderer unavailable; completed protection remains available: " << shared_error;
-        }
-      }
-
-      namespace cache = models::host_sbs_shader_cache;
-      const auto queued_sources = cache::snapshot_sources(SUNSHINE_SHADERS_DIR, cache::parallax_v2_queued_renderer_specs);
-      const bool queued_source_exact = queued_sources &&
-                                       cache::source_closure_sha256(queued_sources) == cache::parallax_v2_queued_renderer_source_closure_sha256;
-      const auto queued_code = queued_source_exact ? cache::get(queued_sources, cache::parallax_v2_queued_renderer) : cache::bytecode_t {};
-      if (queued_code) {
-        const auto status = device->CreatePixelShader(queued_code->data(), queued_code->size(), nullptr, &sbs_reprojection_v2_queued_ps);
-        if (FAILED(status)) {
-          sbs_reprojection_v2_queued_ps.reset();
-        }
-      }
-      models::research_queued_render_guard_v1::expected_t disabled {};
-      D3D11_BUFFER_DESC desc {};
-      desc.ByteWidth = sizeof(disabled);
-      desc.Usage = D3D11_USAGE_DEFAULT;
-      desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-      D3D11_SUBRESOURCE_DATA initial {&disabled, 0u, 0u};
-      buf_t::pointer buffer = nullptr;
-      if (sbs_reprojection_v2_queued_ps && SUCCEEDED(device->CreateBuffer(&desc, &initial, &buffer))) {
-        queued_render_guard_cbuffer = buf_t {buffer};
-        queued_live_ready = depth_estimator->set_queued_same_source_gpu_continuation_research_enabled(true);
-      }
-      if (!queued_live_ready) {
-        BOOST_LOG(error) << "Host SBS queued LIVE candidate unavailable; retaining legacy completion route."sv;
-      }
-
-      return queued_live_ready;
     }
 
     bool ensure_depth_estimator() {
@@ -4191,11 +4098,6 @@ namespace platf::dxgi {
                     BOOST_LOG(warning) << "Subtitle shared renderer unavailable; ordinary authenticated Base rendering remains available.";
                   }
                 }
-              }
-              // Isolated source-stage activation only; no new user config/UI. Qualification
-              // enables this constant in a separate explicit patch before any input submission.
-              if constexpr (queued_live_candidate_enabled) {
-                (void) initialize_queued_renderer_for_instance(true);
               }
             }
           } catch (const std::exception &e) {
@@ -4909,6 +4811,72 @@ namespace platf::dxgi {
       }
     };
 
+    using queued_ticket_t = models::queued_same_source_gpu_continuation_research_views_t;
+
+    struct queued_converter_frame_t {
+      std::optional<queued_ticket_t> ticket;
+      matched_frame_slot_t *source_slot = nullptr;
+      bool refined_geometry = false;
+      std::optional<queued_ticket_t> pending_colour_geometry;
+      matched_frame_slot_t *pending_colour_source_slot = nullptr;
+    };
+
+    struct pending_colour_research_t {
+      models::research_pending_current_colour_v1::resources_t lane;
+      models::research_material_capture_v1::tracker_t material;
+      models::research_material_capture_v1::identity_t last_identity;
+      std::optional<detail::ddup_damage_snapshot_t> previous_damage;
+      std::optional<platf::sbs_cursor::snapshot_t> previous_cursor;
+      std::optional<std::chrono::steady_clock::time_point> previous_content;
+      std::uint64_t capture_epoch = 0;
+      bool owner_unavailable = false;
+    };
+
+    struct queued_converter_research_t {
+      buf_t guard_constants;
+      ps_t pixel_shader;
+      std::unique_ptr<pending_colour_research_t> pending_colour;
+    };
+
+    bool initialize_queued_renderer_for_instance();
+    bool initialize_pending_current_colour_for_instance(
+      const models::research_pending_current_colour_v1::configuration_t &cfg,
+      const models::host_sbs_gpu_completion_receipt::expected_t &genuine_warm,
+      std::string &error
+    );
+    models::research_material_capture_v1::identity_t observe_pending_colour_material(
+      pending_colour_research_t &pending,
+      const queued_ticket_t &owner,
+      const D3D11_TEXTURE2D_DESC &desc,
+      models::input_color_space transfer,
+      const std::optional<std::chrono::steady_clock::time_point> &source,
+      const std::optional<std::chrono::steady_clock::time_point> &content,
+      const std::optional<detail::ddup_damage_snapshot_t> &damage,
+      const platf::sbs_cursor::snapshot_t &cursor
+    );
+    bool select_pending_colour_draw(
+      pending_colour_research_t &pending,
+      queued_converter_frame_t &frame,
+      ID3D11ShaderResourceView *current_input,
+      bool current_draw_allowed,
+      const D3D11_TEXTURE2D_DESC &live_source_desc,
+      models::input_color_space input_color_space,
+      std::chrono::steady_clock::time_point repeat_now,
+      const std::optional<std::chrono::steady_clock::time_point> &current_source_timestamp,
+      const std::optional<std::chrono::steady_clock::time_point> &current_content_timestamp,
+      const std::optional<detail::ddup_damage_snapshot_t> &current_ddup_damage,
+      const platf::sbs_cursor::snapshot_t &cursor,
+      std::uint64_t frame_id
+    );
+    bool queued_ticket_matches(
+      const queued_ticket_t &ticket,
+      const matched_frame_slot_t &slot,
+      std::uint64_t frame_id,
+      std::uint64_t observation_timestamp_us,
+      models::input_color_space input_color_space,
+      bool submitted_refined_geometry
+    ) const;
+
     void emit_converter_probe(actual_converter_probe_v1::event_t event, const matched_frame_slot_t *slot, const models::depth_observation_views_t *result, const models::queued_same_source_gpu_continuation_research_views_t *ticket, ID3D11ShaderResourceView *selected, ID3D11ShaderResourceView *current, std::uint64_t conversion) noexcept {
       if (!probe_observer.record) { return; }
       const auto now = std::chrono::steady_clock::now();
@@ -4919,7 +4887,9 @@ namespace platf::dxgi {
       if (matched_presentation_cache.source_timestamp()) event.pixel_source_stamp_ticks=matched_presentation_cache.source_timestamp()->time_since_epoch().count();
       event.views[0] = selected; event.packed = sbs_intermediate_texture.get();
       event.buffers[0] = sbs_reprojection_cbuffer.get(); event.buffers[1] = sbs_subtitle_render_cbuffer.get();
-      event.buffers[2] = queued_render_guard_cbuffer.get();
+      if (queued_research) {
+        event.buffers[2] = queued_research->guard_constants.get();
+      }
       for (std::size_t i=0;i<matched_frame_slots.size();++i) {
         const auto &s = matched_frame_slots[i]; event.slot_frames[i]=s.frame_id;
         event.slot_pending[i]=s.pending; event.pending_slots+=s.pending ? 1u:0u;
@@ -4982,15 +4952,23 @@ namespace platf::dxgi {
         for (std::size_t i=1;i<event.views.size();++i) event.views[i].Reset();
         for (std::size_t i=1;i<event.buffers.size();++i) event.buffers[i].Reset();
       }
-      if(pending_colour_ready) {
-        event.watermark_after=drawn_source_order.last_drawn();
-        event.material_epoch=pending_colour_last_identity.epoch;event.material_serial=pending_colour_last_identity.material_serial;
-        event.material_capture_clock_us=pending_colour_last_identity.material_capture_clock_us;event.material_interval_contiguous=pending_colour_last_identity.interval_contiguous;
-        const auto current=pending_colour_lane.current_snapshot();event.negative_current_source=current.source;
-        event.negative_current_receipt=current.receipt;event.negative_current_constants=pending_colour_lane.current_constants();
-        event.negative_expected=pending_colour_lane.negative_expected();event.negative_receipt=pending_colour_lane.negative_receipt();
-        for(UINT bank=0;bank<2u;++bank)event.negative_owner_resources[bank]=pending_colour_lane.owner_resources(bank);
-        event.negative_bank=pending_colour_lane.active_bank().value_or(0xffffffffu);
+      if (auto *pending = queued_research ? queued_research->pending_colour.get() : nullptr) {
+        event.watermark_after = drawn_source_order.last_drawn();
+        const auto &material = pending->last_identity;
+        event.material_epoch = material.epoch;
+        event.material_serial = material.material_serial;
+        event.material_capture_clock_us = material.material_capture_clock_us;
+        event.material_interval_contiguous = material.interval_contiguous;
+        const auto current = pending->lane.current_snapshot();
+        event.negative_current_source = current.source;
+        event.negative_current_receipt = current.receipt;
+        event.negative_current_constants = pending->lane.current_constants();
+        event.negative_expected = pending->lane.negative_expected();
+        event.negative_receipt = pending->lane.negative_receipt();
+        for (UINT bank = 0; bank < 2u; ++bank) {
+          event.negative_owner_resources[bank] = pending->lane.owner_resources(bank);
+        }
+        event.negative_bank = pending->lane.active_bank().value_or(0xffffffffu);
       }
       probe_observer.emit(event);
     }
@@ -7240,9 +7218,7 @@ namespace platf::dxgi {
       sbs_reprojection_v2_live_ps.reset();
       selected_shared_warp={};
       reset_text_game_pin();
-      queued_live_ready = false;
-      queued_render_guard_cbuffer.reset();
-      sbs_reprojection_v2_queued_ps.reset();
+      queued_research.reset();
       sbs_reprojection_v2_p010_y_ps.reset();
       p010_y_mrt_targets_checked = false;
       p010_y_mrt_targets_qualified = false;
@@ -8144,15 +8120,11 @@ namespace platf::dxgi {
     bool v2_live_warp_loss_logged = false;
     buf_t sbs_reprojection_cbuffer;
     buf_t sbs_subtitle_render_cbuffer;
-    static constexpr bool queued_live_candidate_enabled = false;
-    bool queued_live_ready = false;
     bool selected_matte_ready = false;
     bool selected_matte_configured = false;
     models::host_sbs_shared_ui_warp::programs_t selected_shared_warp_programs;
     models::host_sbs_shared_ui_warp::resources_t selected_shared_warp;
     std::filesystem::path selected_shared_warp_root;
-    buf_t queued_render_guard_cbuffer;
-    ps_t sbs_reprojection_v2_queued_ps;
     detail::host_sbs_drawn_source_order_t drawn_source_order;
     detail::uploaded_value_state_t<models::host_sbs_subtitle_render_constants_t>
       sbs_subtitle_render_constants;
@@ -8191,15 +8163,8 @@ namespace platf::dxgi {
     std::chrono::steady_clock::time_point last_subtitle_admission_diagnostic_at {};
     const actual_converter_probe_v1::context_t *probe_context = nullptr;
     actual_converter_probe_v1::observer_t probe_observer {};
-    // Same-TU research actor only; no UI/config/default activation.
-    models::research_pending_current_colour_v1::resources_t pending_colour_lane;
-    models::research_material_capture_v1::tracker_t pending_colour_material;
-    models::research_material_capture_v1::identity_t pending_colour_last_identity{};
-    std::optional<detail::ddup_damage_snapshot_t> pending_colour_previous_damage;
-    std::optional<platf::sbs_cursor::snapshot_t> pending_colour_previous_cursor;
-    std::optional<std::chrono::steady_clock::time_point> pending_colour_previous_content;
-    std::uint64_t pending_colour_capture_epoch=0;
-    bool pending_colour_ready=false, pending_colour_owner_unavailable=false;
+    // Only the explicit converter probes can acquire this owner.
+    std::unique_ptr<queued_converter_research_t> queued_research;
     std::int64_t probe_current_source_ticks = 0, probe_current_content_ticks = 0;
     bool subtitle_context_reprocess_pending = false;
     models::depth_analysis_generation_tracker_t depth_analysis_generation_tracker;
@@ -8271,6 +8236,7 @@ namespace platf::dxgi {
     std::optional<std::chrono::steady_clock::time_point> rendered_content_timestamp_;
   };
 
+  #include "host_sbs_queued_converter_research.inc"
   #include "host_sbs_actual_converter_probe.inc"
   #include "host_sbs_pending_current_colour_probe.inc"
 
@@ -8477,6 +8443,7 @@ namespace platf::dxgi {
         result.estimator_terminal = result.estimator_present && converter_->depth_estimator->has_terminal_failure();
         result.current_outline_warp_ready = converter_->selected_matte_ready;
         result.text_game_warp_ready = converter_->selected_shared_warp_programs.text_game_ready();
+        result.queued_research_active = static_cast<bool>(converter_->queued_research);
         result.v2_live_warp_seen = converter_->v2_live_warp_seen;
         result.latest_lineage_authenticated = converter_->latest_v2_lineage.authenticated;
         result.latest_lineage_known_depth = converter_->latest_v2_lineage.known_depth();

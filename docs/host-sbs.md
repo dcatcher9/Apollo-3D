@@ -2153,7 +2153,10 @@ query and error handling remain mandatory, and both acknowledgment paths skip al
 normalization before publishing the ordinary completed receipt. An independent private pixel
 shader checks the current transaction, finalized shapes and state clock before using Base or UI;
 rejection renders current color through identity. Callers must serialize the immediate context and
-retain source contents until the draw is recorded. Live conversion has not adopted this ticket.
+retain source contents until the draw is recorded. The explicit converter probes own the queued
+shader and guard together. The pending-current-colour probe separately acquires its source and
+retirement resources after validating a real completed observation. Ordinary converters construct
+neither research owner.
 
 The conditional executable has one setter followed by two sibling conditional nodes and their
 common receipt-commit kernel. The first conditional

@@ -224,7 +224,7 @@ namespace pending_current_colour_probe_v1 {
       while(!converter.ensure_depth_estimator()){require(clock_t::now()<prepare_deadline&&converter.host_sbs_renderer!=models::host_sbs_renderer_e::failed_flat,"Estimator preparation unavailable");std::this_thread::sleep_for(std::chrono::milliseconds(1));}
       est=converter.depth_estimator.get();require(est&&est->is_valid(),"Real estimator unavailable");
       require(est->set_completed_ocr_conditioner_research_enabled(true),"Preinput warm descriptors unavailable");
-      if(r.queued)require(converter.initialize_queued_renderer_for_instance(true),"Per-instance queued resources unavailable");
+      if(r.queued)require(converter.initialize_queued_renderer_for_instance(),"Per-instance queued resources unavailable");
       models::joined_completion_gate_benchmark::configuration_t gate;gate.enabled=true;gate.placement=models::joined_completion_gate_benchmark::placement_e::before_interop_unmaps;
       gate.target_frame_id=3;gate.hold_after_callback_enter_ms=120;gate.callback_safety_timeout_ms=500;
       require(est->configure_joined_completion_gate_for_benchmark(gate),"Pre-input gate configuration failed");
@@ -260,7 +260,7 @@ namespace pending_current_colour_probe_v1 {
       }
       const auto a_publication=a->publication;
       require(converter.initialize_pending_current_colour_for_instance(r.pending_current_colour,a_publication,error),"Pending-colour resources unavailable before B");
-      records.prepare_negative(converter.device.get(),converter.pending_colour_lane,reference.Get());
+      records.prepare_negative(converter.device.get(),converter.queued_research->pending_colour->lane,reference.Get());
       // All diagnostic staging/textures/CPU vectors now exist. No Map/hash/JSON until release.
       records.armed=r.queued?1:-1;
       releaser=std::jthread([&](std::stop_token stop){const auto hard_deadline=clock_t::now()+std::chrono::milliseconds(500);while(!stop.stop_requested()){

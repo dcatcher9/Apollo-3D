@@ -259,7 +259,7 @@ namespace actual_converter_probe_v1 {
       est=converter.depth_estimator.get();require(est&&est->is_valid(),"Real estimator unavailable");
       if(r.temporal_source_bridge){std::string setup_error;require(converter.configure_temporal_source_bridge_for_instance(*r.temporal_source_bridge,setup_error),("Temporal source bridge pre-input setup: "+setup_error).c_str());}
       if(r.selected_matte){std::string setup_error;require(converter.configure_selected_matte_for_instance(*r.selected_matte,setup_error),("Selected matte pre-input setup: "+setup_error).c_str());}
-      if(r.queued)require(converter.initialize_queued_renderer_for_instance(true),"Per-instance queued resources unavailable");
+      if(r.queued)require(converter.initialize_queued_renderer_for_instance(),"Per-instance queued resources unavailable");
       models::joined_completion_gate_benchmark::configuration_t gate;gate.enabled=true;
       gate.placement=r.packed_continuity?models::joined_completion_gate_benchmark::placement_e::after_interop_unmaps:models::joined_completion_gate_benchmark::placement_e::before_interop_unmaps;
       gate.target_frame_id=3;gate.hold_after_callback_enter_ms=r.packed_continuity?350u:120u;gate.callback_safety_timeout_ms=500;
