@@ -1130,12 +1130,17 @@ namespace platf::dxgi {
           }
         }
         detail::keyed_mutex_lock_t encoder_mutex_lock {img_ctx ? img_ctx->encoder_mutex.get() : nullptr};
-        if (img_ctx) {
-          const auto status = encoder_mutex_lock.lock(0, INFINITE);
+        const auto acquire_current_capture = [&]() {
+          const auto status = encoder_mutex_lock.lock();
           if (status != S_OK) {
             BOOST_LOG(error) << "Failed to acquire encoder mutex [0x"sv << util::hex(status).to_string_view() << ']';
-            return -1;
           }
+          return status == S_OK;
+        };
+        const bool depth_route = sbs_mode == ::video::SBS_AI || text_game_ai_active;
+        // Snapshot probes may read the current source even on an otherwise source-free repeat.
+        if (img_ctx && (!depth_route || probe_context || queued_research) && !acquire_current_capture()) {
+          return -1;
         }
 
         // `planes` selects Y (1) and/or UV (2); the cursor patch re-runs one plane at a time.
@@ -1446,7 +1451,7 @@ namespace platf::dxgi {
               }
             }
           }
-        } else if (sbs_mode == ::video::SBS_AI || text_game_ai_active) {
+        } else if (depth_route) {
           const bool input_is_linear =
             img.format == DXGI_FORMAT_R16G16B16A16_FLOAT;
 
@@ -1482,20 +1487,30 @@ namespace platf::dxgi {
             matched_frame_slots.begin(), matched_frame_slots.end(),
             [](const matched_frame_slot_t &slot) { return slot.pending; }
           );
-          bool pending_source_readable = true;
-          if (pending_it != matched_frame_slots.end() && pending_it->capture_mutex &&
-              pending_it->capture_mutex != img_ctx->encoder_mutex.get()) {
-            // The current image's key is already held. A prior image is pinned against
-            // recycling, but still needs its own key before postprocessing can bind its SRV.
-            prior_capture_lock.emplace(pending_it->capture_mutex);
-            const auto status = prior_capture_lock->lock(0, 0);
-            if (status != S_OK && status != WAIT_TIMEOUT) {
-              BOOST_LOG(error) << "Failed to acquire pending Host SBS texture mutex [0x"sv
-                               << util::hex(status).to_string_view() << ']';
-              return -1;
+          HRESULT pending_source_status = S_OK;
+          const auto acquire_pending_capture = [&]() {
+            if (pending_source_status != S_OK || pending_it == matched_frame_slots.end() || !pending_it->capture_mutex) {
+              return pending_source_status == S_OK;
             }
-            pending_source_readable = status == S_OK;
-          }
+            // Preserve current-before-prior ordering. Polling a busy root needs neither key.
+            if (!acquire_current_capture()) {
+              pending_source_status = E_FAIL;
+              return false;
+            }
+            if (pending_it->capture_mutex != img_ctx->encoder_mutex.get() && !prior_capture_lock) {
+              prior_capture_lock.emplace(pending_it->capture_mutex);
+              pending_source_status = prior_capture_lock->lock(0, 0);
+              if (pending_source_status != S_OK && pending_source_status != WAIT_TIMEOUT) {
+                BOOST_LOG(error) << "Failed to acquire pending Host SBS texture mutex [0x"sv
+                                 << util::hex(pending_source_status).to_string_view() << ']';
+              }
+            }
+            return pending_source_status == S_OK;
+          };
+          const models::pending_depth_source_access_t pending_source_access {
+            &acquire_pending_capture,
+            [](const void *owner) { return (*static_cast<decltype(acquire_pending_capture) *>(owner))(); },
+          };
           // Stable tensor copies are inserted into the same D3D command stream before the current
           // preprocess. Skip whole-frame performance publication for an explicit dump frame so
           // diagnostic work cannot appear as a production regression.
@@ -1594,13 +1609,13 @@ namespace platf::dxgi {
               }
             }
           };
-          const auto poll_pending_depth = [&](const detail::host_sbs_same_frame_poll_plan_t *plan, bool snapshot = false) {
+          const auto poll_pending_depth = [&](const detail::host_sbs_same_frame_poll_plan_t *plan, bool snapshot = false, models::pending_depth_source_access_t access = {}) {
             if (plan && plan->eligible) {
               return depth_estimator->try_finish_pending_depth_until(
-                input_color_space, plan->deadline, detail::host_sbs_same_frame_poll_max_queries, false, !local_presentation
+                input_color_space, plan->deadline, detail::host_sbs_same_frame_poll_max_queries, false, !local_presentation, access
               );
             }
-            return depth_estimator->try_finish_pending_depth_nonblocking(input_color_space, snapshot);
+            return depth_estimator->try_finish_pending_depth_nonblocking(input_color_space, snapshot, access);
           };
           // Only an explicit research converter owns planned working views. They remain local to
           // this call, even if a failed depth pipeline retires the research session before drawing.
@@ -1829,11 +1844,14 @@ namespace platf::dxgi {
             depth_estimator &&
             models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer)
           ) {
-            if (pending_it != matched_frame_slots.end() && pending_source_readable) {
+            if (pending_it != matched_frame_slots.end()) {
               prior_poll_plan = detail::host_sbs_same_frame_poll_plan(
                 true, snapshot_debug_inputs, next_encode_target, std::chrono::steady_clock::now()
               );
-              auto polled = poll_pending_depth(&*prior_poll_plan, snapshot_debug_inputs);
+              auto polled = poll_pending_depth(&*prior_poll_plan, snapshot_debug_inputs, pending_source_access);
+              if (pending_source_status != S_OK && pending_source_status != WAIT_TIMEOUT) {
+                return -1;
+              }
 #ifdef SUNSHINE_TESTS
               record_native_poll(*prior_poll_plan, polled, true);
 #endif
@@ -2030,23 +2048,27 @@ namespace platf::dxgi {
               mark_sbs_matched_copy_end(gpu_timer, false);
             } else if (retained_source_pending) {
               mark_sbs_matched_copy_end(gpu_timer, false);
-            } else if (unchanged_input_pending_slot && pending_source_readable) {
+            } else if (unchanged_input_pending_slot && pending_source_status == S_OK) {
               // Never enqueue an input already represented by the sole pending inference. This is
               // either a DDup content-clock duplicate or a changed desktop whose entire damage
               // history stayed outside the exact accepted ROI. Poll once without waiting so a
               // ready completion can immediately drive a fresh current-color warp.
               mark_sbs_matched_copy_end(gpu_timer, false);
-              unchanged_content_submission_suppressed = true;
-              depth_reuse_authorization =
-                detail::select_host_sbs_cached_depth_reuse(
-                  pending_reuse_kind,
-                  unchanged_input_pending_slot->frame_id,
-                  frame_id
-                );
-              damage_guided_submission_suppressed =
-                pending_reuse_kind == detail::host_sbs_ddup_reuse_proof_e::roi_damage;
-              force_fresh_current_color = cached_geometry_render_allowed;
-              auto polled = poll_pending_depth(nullptr);
+              auto polled = poll_pending_depth(nullptr, false, pending_source_access);
+              if (pending_source_status == S_OK) {
+                unchanged_content_submission_suppressed = true;
+                depth_reuse_authorization =
+                  detail::select_host_sbs_cached_depth_reuse(
+                    pending_reuse_kind,
+                    unchanged_input_pending_slot->frame_id,
+                    frame_id
+                  );
+                damage_guided_submission_suppressed =
+                  pending_reuse_kind == detail::host_sbs_ddup_reuse_proof_e::roi_damage;
+                force_fresh_current_color = cached_geometry_render_allowed;
+              } else if (pending_source_status != WAIT_TIMEOUT) {
+                return -1;
+              }
               if (polled.ready) {
                 // A ready poll either normalized a completion or latched a producer failure. Do
                 // not retain resource aliases authenticated before that state transition.
@@ -2093,6 +2115,9 @@ namespace platf::dxgi {
               // Only a candidate the estimator can accept reserves a matched source.
               const bool estimator_ready =
                 matched_candidate_slot && depth_estimator->can_accept_frame();
+              if (estimator_ready && !acquire_current_capture()) {
+                return -1;
+              }
               const bool matched_source_prepared =
                 estimator_ready &&
                 prepare_matched_frame(
@@ -2763,6 +2788,9 @@ namespace platf::dxgi {
               repeat_matched_output,
               rgb_present_target != nullptr
             );
+          if (!repeat_matched_output && !acquire_current_capture()) {
+            return -1;
+          }
           // The optional warp+luma MRT and the later chroma/cursor draws must address the same
           // selected allocation. Ordinary packed repeats do not select or invalidate an input.
           if (output_conversion_required && !select_native_output()) {
@@ -3446,6 +3474,8 @@ namespace platf::dxgi {
 
           if (probe_observer.record) {
             actual_converter_probe_v1::event_t e; e.kind=repeat_matched_output ? actual_converter_probe_v1::event_e::packed_repeat:actual_converter_probe_v1::event_e::convert_end;
+            e.current_capture_key = encoder_mutex_lock.owns_lock();
+            e.prior_capture_key = prior_capture_lock && prior_capture_lock->owns_lock();
             e.native_planes_written = !rgb_present_target && output_conversion_required;
             e.repeat=repeat_matched_output; e.queued=queued_draw_selected && !queued_attempt_failed_flat; e.pending_current_colour=pending_current_colour_selected && !queued_attempt_failed_flat; e.watermark_before=probe_watermark_at_entry;
             e.actual_draw_pixel_source=probe_actual_draw_pixel_source; e.flat=!repeat_matched_output && (!v2_draw_selected || queued_attempt_failed_flat);

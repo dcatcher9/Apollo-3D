@@ -9102,7 +9102,8 @@ namespace models {
       const bool allow_wait,
       const std::chrono::steady_clock::time_point deadline,
       const std::uint32_t max_queries,
-      const bool allow_completion_notification = false
+      const bool allow_completion_notification,
+      const pending_depth_source_access_t source_access
     ) {
       readiness_preflighted = false;
       auto &cuda = cuda_driver_api::get();
@@ -9210,6 +9211,9 @@ namespace models {
         }
         break;
       }
+      if (source_access.acquire && !source_access.acquire(source_access.owner)) {
+        return polled;
+      }
       polled.result = finish_pending(
         color_space,
         snapshot_debug_inputs,
@@ -9221,14 +9225,17 @@ namespace models {
 
     pending_depth_poll_result try_finish_pending_nonblocking(
       input_color_space color_space,
-      bool snapshot_debug_inputs = false
+      const bool snapshot_debug_inputs,
+      const pending_depth_source_access_t source_access
     ) {
       return try_finish_pending(
         color_space,
         snapshot_debug_inputs,
         false,
         std::chrono::steady_clock::time_point {},
-        1u
+        1u,
+        false,
+        source_access
       );
     }
 
@@ -9237,7 +9244,8 @@ namespace models {
       const std::chrono::steady_clock::time_point deadline,
       const std::uint32_t max_queries,
       bool snapshot_debug_inputs,
-      bool allow_completion_notification
+      bool allow_completion_notification,
+      const pending_depth_source_access_t source_access
     ) {
       return try_finish_pending(
         color_space,
@@ -9245,7 +9253,8 @@ namespace models {
         true,
         deadline,
         max_queries,
-        allow_completion_notification
+        allow_completion_notification,
+        source_access
       );
     }
 
@@ -11294,11 +11303,13 @@ namespace models {
 
   pending_depth_poll_result video_depth_estimator::try_finish_pending_depth_nonblocking(
     input_color_space color_space,
-    bool snapshot_debug_inputs
+    bool snapshot_debug_inputs,
+    const pending_depth_source_access_t source_access
   ) {
     return pimpl ? pimpl->try_finish_pending_nonblocking(
                      color_space,
-                     snapshot_debug_inputs
+                      snapshot_debug_inputs,
+                      source_access
                    ) :
                    pending_depth_poll_result {.ready = true};
   }
@@ -11308,14 +11319,16 @@ namespace models {
     const std::chrono::steady_clock::time_point deadline,
     const std::uint32_t max_queries,
     bool snapshot_debug_inputs,
-    bool allow_completion_notification
+    bool allow_completion_notification,
+    const pending_depth_source_access_t source_access
   ) {
     return pimpl ? pimpl->try_finish_pending_until(
                      color_space,
                      deadline,
                      max_queries,
                      snapshot_debug_inputs,
-                     allow_completion_notification
+                      allow_completion_notification,
+                      source_access
                    ) :
                    pending_depth_poll_result {.ready = true};
   }

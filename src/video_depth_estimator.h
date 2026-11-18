@@ -1068,9 +1068,15 @@ namespace models {
            result.subtitle_locator_state.Get() != nullptr;
   }
 
+  /** Synchronous owner-thread source guard. Its callback and state are never retained. */
+  struct pending_depth_source_access_t {
+    const void *owner = nullptr;
+    bool (*acquire)(const void *) = nullptr;
+  };
+
   struct pending_depth_poll_result {
     depth_step_result_t result;
-    bool ready = false;  ///< Joined query proved completion; result may still report a failure.
+    bool ready = false;  ///< The completion was consumed or failed. Denied source access leaves it pending.
     bool wait_attempted = false;  ///< At least one repeat was attempted after the initial query.
     bool timed_out = false;  ///< The exact pending unit remained busy at the deadline/query fuse.
     std::uint32_t query_count = 0;  ///< Joined DAV2/OCR readiness queries issued by this call.
@@ -1622,7 +1628,8 @@ namespace models {
     /** Query the pending joined DAV2/OCR completion fence once and consume the exact unit when ready. */
     pending_depth_poll_result try_finish_pending_depth_nonblocking(
       input_color_space color_space,
-      bool snapshot_debug_inputs = false
+      bool snapshot_debug_inputs = false,
+      pending_depth_source_access_t source_access = {}
     );
 
     /** Query one pending exact-frame DAV2/OCR unit until ready or an absolute CPU deadline.
@@ -1635,13 +1642,16 @@ namespace models {
      * A timeout preserves the pending inference, event state, and exact owner. If event setup was
      * unavailable before enqueue, this degrades to one full-stream query with no repeated wait;
      * admission and fixed-resource reuse always retain their full-stream query.
+     * The optional source access callback runs after readiness and before any postprocess.
+     * When it returns false, the exact completion remains pending.
      */
     pending_depth_poll_result try_finish_pending_depth_until(
       input_color_space color_space,
       std::chrono::steady_clock::time_point deadline,
       std::uint32_t max_queries,
       bool snapshot_debug_inputs = false,
-      bool allow_completion_notification = false
+      bool allow_completion_notification = false,
+      pending_depth_source_access_t source_access = {}
     );
 
     /** Latest cached scene telemetry from the shared completion receipt. This accessor has no

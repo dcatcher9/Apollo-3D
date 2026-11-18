@@ -509,7 +509,8 @@ namespace actual_converter_probe_v1 {
           }
           const auto key_timeout = last_outcome(timeout_conversion);
           const auto still_unconsumed = est->joined_completion_gate_status_for_benchmark();
-          require(still_unconsumed && still_unconsumed->actual_event_queries == released->actual_event_queries &&
+          require(still_unconsumed && still_unconsumed->actual_event_queries == released->actual_event_queries + 1 &&
+            still_unconsumed->last_actual_event_query == CUDA_SUCCESS &&
             key_timeout.repeat && !key_timeout.flat && key_timeout.watermark_after == key_timeout.watermark_before &&
             key_timeout.current_input.Get() == c_context.encoder_input_res.get(),
             "Unavailable B key did not leave the ready completion pending and repeat packed A");

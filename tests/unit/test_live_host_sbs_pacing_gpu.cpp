@@ -197,6 +197,7 @@ namespace {
     std::uint64_t actual_pixels = 0;
     std::int64_t source = 0, current = 0, packed_source = 0;
     bool flat = false, repeat = false, current_publication = false;
+    bool current_capture_key = false, prior_capture_key = false;
     bool submitted = false;
     bool held = false, queried_busy = false, pending_target = false;
     bool packed_valid = false, route_matches = false;
@@ -250,6 +251,8 @@ namespace {
         copy.packed_source = event.pixel_source_stamp_ticks;
         copy.flat = event.flat;
         copy.repeat = event.repeat;
+        copy.current_capture_key = event.current_capture_key;
+        copy.prior_capture_key = event.prior_capture_key;
         copy.current_publication = event.publication_current;
         copy.submitted = event.force_infer || event.gpu_undecided;
         copy.held = event.gate_entered && !event.gate_released;
@@ -382,6 +385,7 @@ namespace {
     config.sbs_mode = video::SBS_AI;
     config.sbs_depth_status_event = observed.mail->event<int>(mail::sbs_depth_status);
     config.sbs_depth_pipeline_ready_event = std::make_shared<safe::event_t<bool>>();
+    config.stream_gamma_state = std::make_shared<video::stream_gamma_publisher_t>();
 
     std::vector<std::uint32_t> pixels(std::size_t(width) * height);
     for (unsigned y = 0; y < height; ++y) {
@@ -470,6 +474,7 @@ namespace {
     EXPECT_TRUE(result.session_created);
     EXPECT_EQ(result.pipeline_depth, 2u);
     EXPECT_EQ(owner_scheduling_available, scenario.qualified_owner);
+    EXPECT_NE(config.stream_gamma_state->current().generation, 0u);
 
     std::lock_guard lock {observed.mutex};
     EXPECT_FALSE(observed.callback_failed);
@@ -481,6 +486,15 @@ namespace {
     const auto &held = observed.held_output;
     EXPECT_TRUE(held.held && held.queried_busy && held.pending_target);
     EXPECT_NE(held.target, 0u);
+    const auto next_held = std::find_if(observed.events.begin(), observed.events.end(), [&](const auto &event) {
+      return event.conversion == observed.next_held_conversion &&
+             (event.kind == probe::event_e::convert_end || event.kind == probe::event_e::packed_repeat);
+    });
+    ASSERT_NE(next_held, observed.events.end());
+    EXPECT_FALSE(next_held->prior_capture_key) << "A busy prior poll needs no key for its retained source.";
+    if (next_held->repeat) {
+      EXPECT_FALSE(next_held->current_capture_key) << "A packed repeat needs no current source.";
+    }
     const auto expired = std::find_if(observed.polls.begin(), observed.polls.end(), [&](const auto &poll) {
       return poll.conversion == held.conversion && !poll.ready &&
              (poll.timed_out || !poll.eligible) && poll.query_count > 0;
@@ -585,6 +599,7 @@ namespace {
               << " scheduled_owner=" << scenario.qualified_owner
               << " packets=" << received.size() << " B_model=" << held.target
               << " C_held=" << observed.next_observed_held << " pending_owner=" << observed.pending_image_alive
+              << " C_packed_repeat=" << next_held->repeat
               << " fallback=" << (held.repeat ? "packed-A" : held.flat ? "flat-B" : "matched-A") << '\n';
     std::cout << "Live Host SBS completion transport: scheduled_owner=" << scenario.qualified_owner
               << " policy_available=" << owner_scheduling_available << " armed=" << notification_arms

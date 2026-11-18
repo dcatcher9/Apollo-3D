@@ -7088,7 +7088,8 @@ TEST(DirectxShaderSourceTest, AdaptiveReuseUsesExactCurrentPublicationAndActualD
   const auto display = read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");
   ASSERT_FALSE(display.empty());
   const auto receipt_poll = display.find("depth_estimator->poll_publication_receipts()");
-  const auto early_poll = display.find("try_finish_pending_depth_nonblocking(", receipt_poll);
+  const auto receipt_consume = display.find("consume_publications(false);", receipt_poll);
+  const auto early_poll = display.find("auto polled = poll_pending_depth(&*prior_poll_plan,", receipt_consume);
   const auto admission = display.find("const bool cached_geometry_render_allowed =", early_poll);
   const auto matched_source = display.find("prepare_matched_frame(", admission);
   const auto source_prepared = display.find("if (matched_source_prepared)", matched_source);
@@ -7097,6 +7098,7 @@ TEST(DirectxShaderSourceTest, AdaptiveReuseUsesExactCurrentPublicationAndActualD
   const auto candidate = display.find("gpu_undecided_candidate_matches(", source_prepared);
   const auto enqueue = display.find("auto submitted = depth_estimator->estimate_depth(", request);
   ASSERT_NE(receipt_poll, std::string::npos);
+  ASSERT_NE(receipt_consume, std::string::npos);
   ASSERT_NE(early_poll, std::string::npos);
   ASSERT_NE(admission, std::string::npos);
   ASSERT_NE(matched_source, std::string::npos);
@@ -7105,7 +7107,7 @@ TEST(DirectxShaderSourceTest, AdaptiveReuseUsesExactCurrentPublicationAndActualD
   ASSERT_NE(late_poll, std::string::npos);
   ASSERT_NE(candidate, std::string::npos);
   ASSERT_NE(enqueue, std::string::npos);
-  EXPECT_LT(receipt_poll, early_poll);  // Drain before normalization can replace borrowed fields.
+  EXPECT_LT(receipt_consume, early_poll);  // Drain before normalization can replace borrowed fields.
   EXPECT_LT(early_poll, admission);
   EXPECT_LT(matched_source, source_prepared);  // Secure the source and recheck authority first.
   EXPECT_LT(source_prepared, late_poll);
@@ -7121,7 +7123,7 @@ TEST(DirectxShaderSourceTest, AdaptiveReuseUsesExactCurrentPublicationAndActualD
   const auto authorization = display.substr(source_prepared, enqueue - source_prepared);
   EXPECT_NE(authorization.find("gpu_undecided_candidate_matches("), std::string::npos);
   EXPECT_NE(authorization.find("models::depth_optional_work_allows_gpu_undecided("), std::string::npos);
-  EXPECT_NE(authorization.find("!matched_inference_pending_at_entry && !any_pending_slot"), std::string::npos);
+  EXPECT_NE(authorization.find("!inference_pending &&"), std::string::npos);
   EXPECT_NE(authorization.find("publication_is_current(latest_v2_lineage.estimate.publication)"), std::string::npos);
   EXPECT_NE(display.find("candidate.inference_ddup_damage->token <= baseline.inference_ddup_damage->token"), std::string::npos);
   EXPECT_NE(display.find("matched_motion_damage(baseline, candidate.inference_ddup_damage)"), std::string::npos);
@@ -7146,7 +7148,7 @@ TEST(DirectxShaderSourceTest, AdaptiveReuseUsesExactCurrentPublicationAndActualD
 
   // Packed or current-color reuse cannot mint a new publication or rename the real depth owner.
   const auto redelivery = display.find("if (current_source_already_completed)", admission);
-  const auto redelivery_end = display.find("else if (retained_source_pending_slot)", redelivery);
+  const auto redelivery_end = display.find("else if (retained_source_pending)", redelivery);
   ASSERT_NE(redelivery, std::string::npos);
   ASSERT_NE(redelivery_end, std::string::npos);
   const auto redelivery_body = display.substr(redelivery, redelivery_end - redelivery);
