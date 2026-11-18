@@ -6,6 +6,7 @@
 #include <cstring>
 #include <initializer_list>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 #include <wrl/client.h>
@@ -48,6 +49,7 @@ namespace {
     std::optional<DXGI_OUTDUPL_FRAME_INFO> next_frame;
     ComPtr<IDXGIResource> next_surface;
     std::vector<capture_call_e> capture_calls;
+    std::chrono::steady_clock::time_point last_acquire_started;
     HRESULT release_status = S_OK;
     bool frame_owned = false;
     static constexpr std::uint32_t cursor_bgra = 0xffe1b643u;
@@ -91,6 +93,7 @@ namespace {
     void STDMETHODCALLTYPE GetDesc(DXGI_OUTDUPL_DESC *) override {}
 
     HRESULT STDMETHODCALLTYPE AcquireNextFrame(UINT, DXGI_OUTDUPL_FRAME_INFO *info, IDXGIResource **surface) override {
+      last_acquire_started = std::chrono::steady_clock::now();
       capture_calls.push_back(capture_call_e::acquire);
       if (frame_owned) {
         return DXGI_ERROR_INVALID_CALL;
@@ -630,6 +633,90 @@ TEST_F(WindowsDdupSnapshotTest, CapturePropagatesAccessLostOnDeferredReleaseBefo
   EXPECT_TRUE(native->next_frame);
   EXPECT_FALSE(display.dup.has_frame);
   EXPECT_FALSE(native->frame_owned);
+}
+
+TEST_F(WindowsDdupSnapshotTest, CaptureDistinguishesFilteredAcquisitionFromNativeTimeout) {
+  ASSERT_EQ(init_capture_loop(), S_OK);
+  constexpr POINT cursor {2, 3};
+  const auto seed_pixels = desktop_pixels(0xff123400u);
+  const auto next_pixels = desktop_pixels(0xff562300u);
+  const auto seed_surface = desktop_surface(seed_pixels);
+  const auto next_surface = desktop_surface(next_pixels);
+  ASSERT_TRUE(seed_surface && next_surface);
+
+  struct callback_t {
+    img_t image;
+    bool captured;
+    bool frame_owned;
+    std::chrono::microseconds elapsed;
+  };
+  constexpr std::array labels {
+    "filtered_acquire_to_callback_us", "native_timeout_to_callback_us", "desktop_acquire_to_callback_us",
+  };
+  std::array<std::string, labels.size()> elapsed_trials;
+  const std::vector expected_calls {
+    capture_call_e::acquire, capture_call_e::release, capture_call_e::acquire, capture_call_e::release,
+    capture_call_e::acquire, capture_call_e::acquire, capture_call_e::release,
+  };
+  qpc_step /= 4;
+  for (unsigned trial = 0u; trial < 16u; ++trial) {
+    SCOPED_TRACE(trial);
+    native->capture_calls.clear();
+    image_pulls = 0u;
+    auto seed_info = desktop_present();
+    pointer_update(seed_info, cursor, true, true);
+    img_t seed;
+    ASSERT_EQ(snapshot(seed_info, seed_surface, seed), platf::capture_e::ok);
+    ASSERT_EQ(read_image(seed), with_cursor(seed_pixels, cursor));
+
+    // Seeded outside capture_loop(), so its first acquisition takes the ordinary source wait.
+    DXGI_OUTDUPL_FRAME_INFO duplicate {};
+    pointer_update(duplicate, cursor, true);
+    native->next_frame = duplicate;
+    native->next_surface = seed_surface;
+    std::array<callback_t, labels.size()> observations {};
+    std::size_t callbacks = 0u;
+    const auto status = capture_loop([&](img_t &&image, bool captured) {
+      const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - native->last_acquire_started);
+      observations[callbacks++] = {std::move(image), captured, native->frame_owned, elapsed};
+      if (callbacks == 2u) {
+        // The second acquisition receives no frame from the fake DXGI source.
+        native->next_frame = desktop_present();
+        native->next_surface = next_surface;
+      }
+      return callbacks < observations.size();
+    });
+
+    EXPECT_EQ(status, platf::capture_e::ok);
+    EXPECT_EQ(native->capture_calls, expected_calls);
+    EXPECT_EQ(image_pulls, 2u);
+    EXPECT_FALSE(display.dup.has_frame);
+    EXPECT_FALSE(native->frame_owned);
+    ASSERT_EQ(callbacks, observations.size());
+    const auto &[filtered, timed_out, desktop] = observations;
+    EXPECT_FALSE(filtered.captured);
+    EXPECT_FALSE(filtered.image);
+    EXPECT_TRUE(filtered.frame_owned);
+    EXPECT_FALSE(timed_out.captured);
+    EXPECT_FALSE(timed_out.image);
+    EXPECT_FALSE(timed_out.frame_owned);
+    EXPECT_TRUE(desktop.captured);
+    EXPECT_TRUE(desktop.frame_owned);
+    EXPECT_EQ(read_image(desktop.image), with_cursor(next_pixels, cursor));
+    ASSERT_TRUE(seed && seed->content_timestamp && desktop.image && desktop.image->content_timestamp);
+    EXPECT_GT(*desktop.image->content_timestamp, *seed->content_timestamp);
+
+    for (std::size_t i = 0u; i < observations.size(); ++i) {
+      if (trial != 0u) {
+        elapsed_trials[i] += ',';
+      }
+      elapsed_trials[i] += std::to_string(observations[i].elapsed.count());
+    }
+  }
+  for (std::size_t i = 0u; i < labels.size(); ++i) {
+    RecordProperty(labels[i], elapsed_trials[i]);
+  }
 }
 
 TEST_F(WindowsDdupSnapshotTest, DamageCollectionFollowsActiveConvertersWithoutChangingCapturedPixels) {

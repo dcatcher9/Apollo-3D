@@ -850,11 +850,15 @@ namespace platf::dxgi {
       // Start new frame pacing group if necessary, snapshot() is called with non-zero timeout
       if ((status == capture_e::timeout && wait_policy.retry_after_pacing_timeout()) ||
           (status == capture_e::ok && !frame_pacing_group_start)) {
-        status = snapshot(pull_free_image_cb, img_out, wait_policy.source_timeout(), *cursor);
+        const auto source_timeout = wait_policy.source_timeout();
+        const auto source_deadline = std::chrono::steady_clock::now() + source_timeout;
+        status = snapshot(pull_free_image_cb, img_out, source_timeout, *cursor);
 
         if (status == capture_e::ok && img_out) {
           start_frame_pacing_group(img_out);
-        } else if (status == platf::capture_e::timeout) {
+        } else if (status == platf::capture_e::timeout &&
+                   (wait_policy.pending_local_work || !snapshot_filtered_acquisition() ||
+                    std::chrono::steady_clock::now() >= source_deadline)) {
           // The D3D11 device is protected by an unfair lock that is held the entire time that
           // IDXGIOutputDuplication::AcquireNextFrame() is running. This is normally harmless,
           // however sometimes the encoding thread needs to interact with our ID3D11Device to
@@ -869,9 +873,8 @@ namespace platf::dxgi {
           // AcquireNextFrame(). The starvation caused by this lock contention causes encoder
           // reinitialization to take several seconds instead of a fraction of a second.
           //
-          // To avoid starving the encoding thread, sleep without the lock held for a little
-          // while each time we reach our max frame timeout. This will only happen when nothing
-          // is updating the display, so no visible stutter should be introduced by the sleep.
+          // Yield without the lock after an idle wait. A DDup acquisition filtered promptly
+          // by capture already freed the lock and can proceed to the next source frame.
           std::this_thread::sleep_for(wait_policy.idle_backoff());
         }
       } else if (status == capture_e::timeout && wait_policy.pending_local_work) {

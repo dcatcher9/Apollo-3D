@@ -978,6 +978,8 @@ namespace platf::dxgi {
     }
 
     virtual capture_e snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) = 0;
+    // Queried immediately after an ordinary source snapshot reports a timeout.
+    virtual bool snapshot_filtered_acquisition() const noexcept { return false; }
     virtual capture_e release_snapshot() = 0;
     virtual int complete_img(img_t *img, bool dummy) = 0;
 
@@ -1080,6 +1082,7 @@ namespace platf::dxgi {
     bool last_pixel_cursor_visible = false;
 
   private:
+    bool snapshot_filtered_acquisition() const noexcept override { return dup.has_frame; }
     std::atomic<unsigned> damage_observers_ {0};
     std::uint64_t desktop_serial_ = 0;
   };
