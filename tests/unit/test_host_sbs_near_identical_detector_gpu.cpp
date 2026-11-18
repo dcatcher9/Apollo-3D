@@ -45,6 +45,7 @@ TEST(HostSbsNearIdenticalPolicyTest, RawDecisionLayoutMatchesCudaBridge) {
 }
 
 TEST(HostSbsNearIdenticalPolicyTest, SoleFusedPreprocessIsMandatoryAndNoComparatorRemains) {
+  namespace shader_cache = models::host_sbs_shader_cache;
   const auto read = [](const std::string &path) {
     std::ifstream stream(path, std::ios::binary);
     return std::string {
@@ -107,14 +108,10 @@ TEST(HostSbsNearIdenticalPolicyTest, SoleFusedPreprocessIsMandatoryAndNoComparat
   EXPECT_EQ(cache.find("prewarm_producer_set"), std::string::npos);
   EXPECT_EQ(cache_header.find("producer_shader_e"), std::string::npos);
   EXPECT_EQ(cache_header.find("producer_shader_binding"), std::string::npos);
-  EXPECT_NE(
-    cache.find("static constexpr std::array production_prewarm_sets"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    cache.find("std::span<const shader_spec> {parallax_v2_producer_specs}"),
-    std::string::npos
-  );
+  const auto &startup_producer = shader_cache::production_prewarm_sets.front();
+  EXPECT_EQ(startup_producer.specs.data(), shader_cache::parallax_v2_producer_specs.data());
+  EXPECT_EQ(startup_producer.specs.size(), shader_cache::parallax_v2_producer_specs.size());
+  EXPECT_EQ(startup_producer.closure, shader_cache::parallax_v2_producer_source_closure_sha256);
 
   const auto route_begin = estimator.find("const bool gpu_undecided_host_candidate =");
   const auto route_end = estimator.find(

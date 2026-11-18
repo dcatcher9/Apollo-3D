@@ -804,56 +804,37 @@ namespace models::host_sbs_shader_cache {
     return bytecode;
   }
 
-  static bool prewarm_shader_set(
-    const std::filesystem::path &shader_root,
-    const std::span<const shader_spec> specs,
-    bool &all_compiled
-  ) {
-    const auto sources = snapshot_sources(shader_root, specs);
-    if (!sources) {
-      return false;
-    }
-    for (const auto &spec : specs) {
-      all_compiled = static_cast<bool>(get(sources, spec)) && all_compiled;
-    }
-    return true;
-  }
-
-  // Preserve the shared producer/arbitration startup order. The live current-outline device
-  // programs prepare separately on its tracked build worker. Diagnostic, trace, dump-only, and
-  // optional P010 shaders remain lazy and independent of host startup success.
-  static constexpr std::array production_prewarm_sets {
-    std::span<const shader_spec> {parallax_v2_producer_specs},
-    std::span<const shader_spec> {near_identical_detector_specs},
-    std::span<const shader_spec> {parallax_v2_live_renderer_specs},
-    std::span<const shader_spec> {sbs_flat_fallback_specs},
-  };
-
   bool prewarm(const std::filesystem::path &assets_dir) {
     const auto statistics_before = cache_statistics();
     const auto shader_root = assets_dir / "shaders" / "directx";
-    bool all_compiled = true;
+    bool all_ready = true;
     std::size_t prewarmed_shader_count = 0u;
-    for (const auto specs : production_prewarm_sets) {
-      if (!prewarm_shader_set(shader_root, specs, all_compiled)) {
+    for (const auto &set : production_prewarm_sets) {
+      const auto sources = snapshot_sources(shader_root, set.specs);
+      if (!sources || source_closure_sha256(sources) != set.closure) {
+        BOOST_LOG(error) << "Host SBS prewarm source authentication failed for " << set.name;
         return false;
       }
-      prewarmed_shader_count += specs.size();
+      for (const auto &spec : set.specs) {
+        all_ready = static_cast<bool>(get(sources, spec)) && all_ready;
+      }
+      prewarmed_shader_count += set.specs.size();
     }
+    const auto statistics_after = cache_statistics();
     BOOST_LOG(info)
       << "Prewarmed the shared Host SBS V2 producer and renderer shader set ("
       << prewarmed_shader_count
       << " production shaders"
       << "; persistent_hits="
-      << cache_statistics().persistent_hits - statistics_before.persistent_hits
+      << statistics_after.persistent_hits - statistics_before.persistent_hits
       << ", embedded_hits="
-      << cache_statistics().embedded_hits - statistics_before.embedded_hits
+      << statistics_after.embedded_hits - statistics_before.embedded_hits
       << ", compiled="
-      << cache_statistics().compiled - statistics_before.compiled
+      << statistics_after.compiled - statistics_before.compiled
       << "; live current-outline device programs prepare separately; diagnostics remain lazy).";
-    if (all_compiled) {
+    if (all_ready) {
       prune_persistent_artifacts();
     }
-    return all_compiled;
+    return all_ready;
   }
 }  // namespace models::host_sbs_shader_cache

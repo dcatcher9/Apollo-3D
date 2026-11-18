@@ -1,4 +1,4 @@
-/** @file Build the resources for the production Current Outline and shared UI shaders. */
+/** @file Build the resources for production Host SBS shaders. */
 
 #include "src/host_sbs_current_outline_runtime_programs.h"
 #include "src/host_sbs_shared_ui_warp_runtime.h"
@@ -82,6 +82,18 @@ namespace {
     if (programs.bytecodes.size() != outline::unique_compute_shader_count) {
       throw std::runtime_error("The production Current Outline shader set is incomplete");
     }
+    for (const auto &set : cache::production_prewarm_sets) {
+      outline::detail::authenticate_group(set.name, shader_root, set.specs, set.closure, programs.bytecodes);
+    }
+    // P010 remains independent of startup readiness. Its existing runtime loader resolves this
+    // distinct resource only when creating the optional HDR luma program.
+    outline::detail::authenticate_group(
+      "P010 luma",
+      shader_root,
+      cache::parallax_v2_p010_y_specs,
+      cache::parallax_v2_p010_y_source_closure_sha256,
+      programs.bytecodes
+    );
     outline::detail::authenticate_group(
       "completed shared UI",
       shader_root,

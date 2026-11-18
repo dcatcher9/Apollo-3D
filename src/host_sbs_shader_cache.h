@@ -5,6 +5,7 @@
 #pragma once
 
 #include "generated/host_sbs_shader_manifest.h"
+#include <array>
 
 #include <cstdint>
 #include <filesystem>
@@ -18,6 +19,21 @@ namespace models::host_sbs_shader_cache {
   struct source_snapshot;
   using source_snapshot_t = std::shared_ptr<const source_snapshot>;
   using bytecode_t = std::shared_ptr<const std::vector<unsigned char>>;
+
+  struct shader_set_t {
+    std::string_view name;
+    std::span<const shader_spec> specs;
+    std::string_view closure;
+  };
+
+  // The package builder and live startup use this exact order and group identity. The shared
+  // vertex program belongs to both the completed and flat source closures.
+  inline constexpr std::array<shader_set_t, 4u> production_prewarm_sets {{
+    {"depth producer", parallax_v2_producer_specs, parallax_v2_producer_source_closure_sha256},
+    {"near-identical arbitration", near_identical_detector_specs, near_identical_detector_source_closure_sha256},
+    {"completed renderer", parallax_v2_live_renderer_specs, parallax_v2_live_renderer_source_closure_sha256},
+    {"flat identity", sbs_flat_fallback_specs, sbs_flat_fallback_source_closure_sha256},
+  }};
 
   struct cache_statistics_t {
     std::uint64_t memory_hits = 0u;
@@ -70,6 +86,6 @@ namespace models::host_sbs_shader_cache {
     const shader_spec &spec
   );
 
-  /** Precompile the production V2, mandatory GPU arbitration, and fail-flat shader sets. */
+  /** Authenticate and resolve the production V2, mandatory GPU arbitration, and fail-flat shader sets. */
   bool prewarm(const std::filesystem::path &assets_dir);
 }  // namespace models::host_sbs_shader_cache

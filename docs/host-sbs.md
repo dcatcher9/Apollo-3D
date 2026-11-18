@@ -2364,14 +2364,16 @@ authentication. A transition clears the host candidate and reusable lineage.
 Transitions before acceptance require force-infer; after acceptance, neither the old publication
 nor a late receipt can establish authority on the new route.
 
-Model preparation, shader compilation, and the live renderer are fail-closed. Shared producer,
-arbitration and ordinary Base-renderer bytecode is prewarmed on the CPU at process startup.
+Model preparation, shader loading, and the live renderer are fail-closed. The Windows build
+embeds the shared producer, arbitration, completed renderer, and flat identity shaders.
+Startup authenticates and resolves the same four source sets on the CPU. The optional P010 luma
+shader is also embedded and loads independently of that readiness check.
 TensorRT GPU preparation starts on the first actual Host AI conversion that observes an unknown
 preparation state. Flat and Game presentation do not request it. The process-scoped owner admits
 one background depth-then-optional-OCR sequence under its own live GPU workload reservation and
 joins that worker before logging teardown. A denied reservation leaves the request unconsumed
 and the global preparation state unchanged. Ready depth remains usable without another request.
-First AI use therefore streams flat/loading while compilation, context creation and warmup finish;
+First AI use therefore streams flat/loading while model preparation, context creation and warmup finish;
 a missing engine cache can make this wait take minutes. Healthy engines and pooled contexts remain
 resident for later AI use until process exit. Context isolation, physical limits and quarantine are
 unchanged; preparation does not evict resident models. Optional OCR keeps its existing per-estimator

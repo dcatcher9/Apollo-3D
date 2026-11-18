@@ -547,6 +547,73 @@ TEST(DirectxShaderTest, ProductionV2ShadersArePermanentPrewarmSet) {
   EXPECT_EQ(cache::parallax_v2_live_diagnostic_specs.size(), 2u);
 }
 
+TEST(DirectxShaderTest, LoadsPackagedProductionShadersWithoutRuntimeCompilation) {
+  namespace cache = models::host_sbs_shader_cache;
+  namespace fs = std::filesystem;
+  const auto unique = std::to_string(GetCurrentProcessId()) + "-" +
+                      std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+  const auto temporary_root =
+    fs::temp_directory_path() / ("apollo-packaged-production-shaders-" + unique);
+  ASSERT_TRUE(fs::create_directory(temporary_root));
+
+  struct cleanup_t {
+    fs::path root;
+
+    ~cleanup_t() {
+      const auto *configured_cache = std::getenv("SUNSHINE_TEST_HOST_SBS_SHADER_CACHE");
+      cache::configure_persistent_cache(configured_cache ? configured_cache : "");
+      std::error_code ignored;
+      fs::remove_all(root, ignored);
+    }
+  } cleanup {temporary_root};
+
+  const auto assets_dir = temporary_root / "assets";
+  const auto shader_root = assets_dir / "shaders" / "directx";
+  fs::create_directories(shader_root.parent_path());
+  // A separate installation root misses the process-local cache even if other tests prewarmed it.
+  fs::copy(SUNSHINE_SHADERS_DIR, shader_root, fs::copy_options::recursive);
+  cache::configure_persistent_cache(temporary_root / "cache");
+
+  const auto before = cache::cache_statistics();
+  ASSERT_TRUE(cache::prewarm(assets_dir));
+  const auto prewarmed = cache::cache_statistics();
+  EXPECT_EQ(prewarmed.embedded_hits - before.embedded_hits, 34u);
+  EXPECT_EQ(prewarmed.memory_hits, before.memory_hits);
+  EXPECT_EQ(prewarmed.persistent_hits, before.persistent_hits);
+  EXPECT_EQ(prewarmed.persistent_writes, before.persistent_writes);
+  EXPECT_EQ(prewarmed.compiled, before.compiled);
+
+  const auto p010_sources = cache::snapshot_sources(shader_root, cache::parallax_v2_p010_y_specs);
+  ASSERT_TRUE(p010_sources);
+  ASSERT_EQ(
+    cache::source_closure_sha256(p010_sources),
+    cache::parallax_v2_p010_y_source_closure_sha256
+  );
+  ASSERT_TRUE(cache::get(p010_sources, cache::parallax_v2_p010_y_renderer));
+  const auto p010_loaded = cache::cache_statistics();
+  EXPECT_EQ(p010_loaded.embedded_hits - prewarmed.embedded_hits, 1u);
+  EXPECT_EQ(p010_loaded.memory_hits, prewarmed.memory_hits);
+  EXPECT_EQ(p010_loaded.persistent_hits, prewarmed.persistent_hits);
+  EXPECT_EQ(p010_loaded.persistent_writes, prewarmed.persistent_writes);
+  EXPECT_EQ(p010_loaded.compiled, prewarmed.compiled);
+
+  const auto &producer = cache::production_prewarm_sets.front();
+  std::ofstream changed(shader_root / producer.specs.front().filename, std::ios::binary | std::ios::app);
+  changed << "\n// Deliberate production source closure change.\n";
+  changed.close();
+  ASSERT_TRUE(changed.good());
+  const auto changed_sources = cache::snapshot_sources(shader_root, producer.specs);
+  ASSERT_TRUE(changed_sources);
+  ASSERT_NE(cache::source_closure_sha256(changed_sources), producer.closure);
+  EXPECT_FALSE(cache::prewarm(assets_dir));
+  const auto rejected = cache::cache_statistics();
+  EXPECT_EQ(rejected.embedded_hits, p010_loaded.embedded_hits);
+  EXPECT_EQ(rejected.memory_hits, p010_loaded.memory_hits);
+  EXPECT_EQ(rejected.persistent_hits, p010_loaded.persistent_hits);
+  EXPECT_EQ(rejected.persistent_writes, p010_loaded.persistent_writes);
+  EXPECT_EQ(rejected.compiled, p010_loaded.compiled);
+}
+
 TEST(DirectxShaderTest, PersistentHostSbsCacheSurvivesProcessEquivalentRoots) {
   namespace cache = models::host_sbs_shader_cache;
   const auto unique = std::to_string(
