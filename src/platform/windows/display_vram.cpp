@@ -1003,13 +1003,7 @@ namespace platf::dxgi {
           return false;
         }
         converted_input_surface = surface;
-        if (active_output_surface != *surface) {
-          std::swap(out_Y_or_YUV_rtv, output_surface_views[active_output_surface].y_or_yuv);
-          std::swap(out_UV_rtv, output_surface_views[active_output_surface].uv);
-          std::swap(out_Y_or_YUV_rtv, output_surface_views[*surface].y_or_yuv);
-          std::swap(out_UV_rtv, output_surface_views[*surface].uv);
-          active_output_surface = *surface;
-        }
+        active_output_surface = *surface;
         return true;
       };
       // Reference white belongs to the captured Windows display, not its EDID peak or
@@ -1168,8 +1162,10 @@ namespace platf::dxgi {
 
           // The optional HDR Host-SBS MRT has already populated luma while producing the packed
           // RGB raster. Every other path retains the established standalone Y/YUV draw.
+          auto &output = active_output_views();
           if (!y_already_written && (planes & 1)) {
-            device_ctx->OMSetRenderTargets(1, &out_Y_or_YUV_rtv, nullptr);
+            auto *luma = output.y_or_yuv.get();
+            device_ctx->OMSetRenderTargets(1, &luma, nullptr);
             device_ctx->VSSetShader(convert_Y_or_YUV_vs.get(), nullptr, 0);
             auto *y_shader = input_is_linear ? convert_Y_or_YUV_fp16_ps.get() : convert_Y_or_YUV_ps.get();
             device_ctx->PSSetShader(input_is_pq ? convert_Y_or_YUV_pq_ps.get() : y_shader, nullptr, 0);
@@ -1178,9 +1174,10 @@ namespace platf::dxgi {
           }
 
           // Draw UV if needed
-          if (out_UV_rtv && (planes & 2)) {
+          if (output.uv && (planes & 2)) {
             assert(format == DXGI_FORMAT_NV12 || format == DXGI_FORMAT_P010);
-            device_ctx->OMSetRenderTargets(1, &out_UV_rtv, nullptr);
+            auto *chroma = output.uv.get();
+            device_ctx->OMSetRenderTargets(1, &chroma, nullptr);
             device_ctx->VSSetShader(convert_UV_vs.get(), nullptr, 0);
             auto *uv_shader = input_is_linear ? convert_UV_fp16_ps.get() : convert_UV_ps.get();
             device_ctx->PSSetShader(input_is_pq ? convert_UV_pq_ps.get() : uv_shader, nullptr, 0);
@@ -1451,7 +1448,9 @@ namespace platf::dxgi {
                   return true;
                 });
               }
-              const auto chroma = out_UV_rtv ? sbs_cursor::output_region(changed, final_desc.Width, final_desc.Height, out_UV_viewport) : std::nullopt;
+              const auto chroma = active_output_views().uv ?
+                                    sbs_cursor::output_region(changed, final_desc.Width, final_desc.Height, out_UV_viewport) :
+                                    std::nullopt;
               if (chroma) {
                 with_scissor(*chroma, [&]() {
                   draw(patch_view, out_Y_or_YUV_viewport, out_UV_viewport, cursor_patch->linear, false, true, false, 2);
@@ -3049,6 +3048,7 @@ namespace platf::dxgi {
             // Only an authenticated V2 stream selects the production warp. Awaiting, stale, and
             // terminal failure states use the independent current-frame identity shader, so V2
             // shader authentication/device-creation failures cannot freeze or end the stream.
+            auto *native_luma = rgb ? nullptr : active_output_views().y_or_yuv.get();
             const bool p010_y_mrt_authorized =
               detail::host_sbs_p010_y_mrt_eligible(
                 v2_live_warp_selected && !pending_current_colour_selected,
@@ -3059,7 +3059,7 @@ namespace platf::dxgi {
                 snapshot_debug_inputs,
                 sbs_reprojection_v2_p010_y_ps != nullptr &&
                   stream_gamma_mode_ == ::video::stream_gamma_mode_e::windows_default,
-                out_Y_or_YUV_rtv != nullptr
+                native_luma != nullptr
               );
             const bool p010_y_mrt_selected =
               !selected_draw && !text_pin_selected && p010_y_mrt_authorized && qualify_p010_y_mrt_targets();
@@ -3087,7 +3087,7 @@ namespace platf::dxgi {
             host_sbs_v2_draw_command_t draw_command {
               .render_targets = {
                 rendered_directly_to_rgb ? rgb->target : sbs_intermediate_rtv.get(),
-                p010_y_mrt_selected ? out_Y_or_YUV_rtv.get() : nullptr,
+                p010_y_mrt_selected ? native_luma : nullptr,
               },
               .render_target_count = p010_y_mrt_selected ? 2u : 1u,
               .vertex_shader = sbs_reprojection_vs.get(),
@@ -5539,13 +5539,13 @@ namespace platf::dxgi {
       }
       p010_y_mrt_targets_checked = true;
       p010_y_mrt_targets_qualified = false;
-      if (!sbs_intermediate_rtv || !out_Y_or_YUV_rtv) {
+      if (!sbs_intermediate_rtv || !surface.y_or_yuv) {
         return false;
       }
 
       ID3D11RenderTargetView *requested[] = {
         sbs_intermediate_rtv.get(),
-        out_Y_or_YUV_rtv.get(),
+        surface.y_or_yuv.get(),
       };
       device_ctx->OMSetRenderTargets((UINT) std::size(requested), requested, nullptr);
       ID3D11RenderTargetView *observed[] = {nullptr, nullptr};
@@ -7202,8 +7202,6 @@ namespace platf::dxgi {
     ) {
       capture_damage_observer.reset();
       native_input_owner = rgb_only ? nullptr : native_input;
-      out_Y_or_YUV_rtv.reset();
-      out_UV_rtv.reset();
       output_surface_views.clear();
       active_output_surface = 0;
       if (frame_texture) {
@@ -7795,16 +7793,12 @@ namespace platf::dxgi {
             (rtv_UV_format != DXGI_FORMAT_UNKNOWN && !create_rtv(texture, surface.uv, rtv_UV_format))) {
           return -1;
         }
-        // Every allocation receives black/neutral aspect-ratio padding once. Rotation moves
-        // view ownership without clearing or adding/releasing COM references per frame.
+        // Every allocation receives black/neutral aspect-ratio padding once.
         device_ctx->ClearRenderTargetView(surface.y_or_yuv.get(), y_black);
         if (surface.uv) {
           device_ctx->ClearRenderTargetView(surface.uv.get(), uv_black);
         }
       }
-      out_Y_or_YUV_rtv = std::move(output_surface_views[0].y_or_yuv);
-      out_UV_rtv = std::move(output_surface_views[0].uv);
-
       if (depth_path_on) {
         observe_capture_damage();
       }
@@ -8052,9 +8046,10 @@ namespace platf::dxgi {
     std::vector<output_surface_views_t> output_surface_views;
     unsigned active_output_surface = 0;
     nvenc::nvenc_d3d11_native *native_input_owner = nullptr;  ///< Owned by the native wrapper.
-    // Active views live here; its surface entry holds only qualification state until rotated out.
-    render_target_t out_Y_or_YUV_rtv;
-    render_target_t out_UV_rtv;
+
+    output_surface_views_t &active_output_views() {
+      return output_surface_views[active_output_surface];
+    }
 
     // d3d_img_t::id -> encoder_img_ctx_t
     // These store the encoder textures for each img_t that passes through

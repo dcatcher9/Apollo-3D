@@ -291,7 +291,8 @@ namespace actual_converter_probe_v1 {
         require(converter.apply_colorspace({::video::colorspace_e::rec709, false, 8u}), "Native NV12 colorspace initialization failed");
         require(converter.init_output(target.Get(), td.Width, td.Height, ::video::SBS_AI, settings) == 0,
           "Real native NV12 converter initialization failed");
-        require(converter.out_Y_or_YUV_rtv && converter.out_UV_rtv, "Native NV12 converter did not bind both plane render targets");
+        const auto &output = converter.active_output_views();
+        require(output.y_or_yuv && output.uv, "Native NV12 converter did not bind both plane render targets");
       } else {
         require(converter.init_rgb_output(w*2,h,::video::SBS_AI,settings)==0,"Real RGB-only initialization failed");
       }
@@ -723,8 +724,9 @@ namespace actual_converter_probe_v1 {
           // private to this fixture; neither packed RGB nor the held B publication is changed.
           const float overwrite_y[4] {1.0f, 0.0f, 0.0f, 0.0f};
           const float overwrite_uv[4] {};
-          converter.device_ctx->ClearRenderTargetView(converter.out_Y_or_YUV_rtv.get(), overwrite_y);
-          converter.device_ctx->ClearRenderTargetView(converter.out_UV_rtv.get(), overwrite_uv);
+          auto &output = converter.active_output_views();
+          converter.device_ctx->ClearRenderTargetView(output.y_or_yuv.get(), overwrite_y);
+          converter.device_ctx->ClearRenderTargetView(output.uv.get(), overwrite_uv);
           snapshot_target(4, "Sentinel NV12 input copy failed");
           converter.host_sbs_encoder_input_state.reset();
           convert(1);
