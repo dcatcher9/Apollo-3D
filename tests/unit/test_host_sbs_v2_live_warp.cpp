@@ -48,6 +48,7 @@ class HostSbsV2LiveWarpGpuTest_SharedUiPinProductionOwnerRestoresContextAndRejec
 class HostSbsV2LiveWarpGpuTest_SharedUiPinProductionRejectsInvalidRowExtentAndDiagnosticDevice_Test;
 class HostSbsV2LiveWarpGpuTest_SharedUiPinQueuedProductionRequiresCurrentGuardAtPrepareAndDraw_Test;
 class HostSbsV2LiveWarpGpuTest_SharedUiPinQueuedPreparationFailurePreservesCompletedProtection_Test;
+class HostSbsV2LiveWarpGpuTest_SharedUiPinCompletedProtectionDoesNotRequireQueuedSource_Test;
 
 namespace {
   using Microsoft::WRL::ComPtr;
@@ -157,6 +158,7 @@ namespace {
     friend class ::HostSbsV2LiveWarpGpuTest_SharedUiPinProductionRejectsInvalidRowExtentAndDiagnosticDevice_Test;
     friend class ::HostSbsV2LiveWarpGpuTest_SharedUiPinQueuedProductionRequiresCurrentGuardAtPrepareAndDraw_Test;
     friend class ::HostSbsV2LiveWarpGpuTest_SharedUiPinQueuedPreparationFailurePreservesCompletedProtection_Test;
+    friend class ::HostSbsV2LiveWarpGpuTest_SharedUiPinCompletedProtectionDoesNotRequireQueuedSource_Test;
   public:
     bool initialize(
       std::string &error,
@@ -705,12 +707,12 @@ namespace {
         return false;
       }
       if (production_shared_pin && !production_shared_ui_pin_programs.ready() &&
-          !production_shared_ui_pin_programs.load(device.Get(), SUNSHINE_SHADERS_DIR, error)) return false;
+          !production_shared_ui_pin_programs.load(device.Get(), production_shared_ui_pin_root, error)) return false;
       const bool production_queued_pin = production_shared_pin && outline && outline->production_shared_ui_pin_queued;
       if (production_queued_pin && !production_shared_ui_pin_programs.ready(true) &&
-          !production_shared_ui_pin_programs.load_queued(device.Get(), SUNSHINE_SHADERS_DIR, error)) return false;
+          !production_shared_ui_pin_programs.load_queued(device.Get(), production_shared_ui_pin_root, error)) return false;
       if (production_shared_pin && (mapping_output || shared_boundary_output) &&
-          !production_shared_ui_pin_programs.load_diagnostics(device.Get(), SUNSHINE_SHADERS_DIR, error)) return false;
+          !production_shared_ui_pin_programs.load_diagnostics(device.Get(), production_shared_ui_pin_root, error, production_queued_pin)) return false;
       platf::dxgi::host_sbs_v2_draw_command_t draw_command {
         .render_targets = {output_rtv.Get(), nullptr},
         .render_target_count = 1u,
@@ -962,7 +964,7 @@ namespace {
         // Production renders do not configure the separate private pin shaders.
         // Read their diagnostics through the canonical same-device program tuple.
         if (production_shared_pin &&
-            !production_shared_ui_pin_programs.load_diagnostics(device.Get(), SUNSHINE_SHADERS_DIR, error)) return false;
+            !production_shared_ui_pin_programs.load_diagnostics(device.Get(), production_shared_ui_pin_root, error, production_queued_pin)) return false;
         auto &out=*outline->shared_ui_pin_diagnostic_output;out={};out.shape=pin_shape;
         std::vector<std::byte> bytes;
         if (!read_diagnostic_texture(pin_field.texture.Get(),4u,bytes)) {error="shared UI pin field diagnostic readback failed";return false;}
@@ -1720,6 +1722,7 @@ namespace {
     std::array<ComPtr<ID3D11PixelShader>,3u> shared_ui_pin_ps;
     std::filesystem::path shared_ui_pin_root;
     std::string shared_ui_pin_closure;
+    std::filesystem::path production_shared_ui_pin_root {SUNSHINE_SHADERS_DIR};
     models::host_sbs_shared_ui_warp::programs_t production_shared_ui_pin_programs;
     models::host_sbs_shared_ui_warp::resources_t production_shared_ui_pin_owner;
     models::host_sbs_shared_ui_warp::resources_t text_game_pin_owner;
@@ -3983,7 +3986,7 @@ TEST(HostSbsV2LiveWarpGpuTest, SavedCurrentHdrCompletedDrawReplay) {
       {"input_specification", {{"path", input.string()}, {"sha256", sha256(specification_bytes)}}},
       {"test_executable", {{"path", executable.string()}, {"sha256", sha256(executable_bytes)}}},
       {"fixture_source", {{"path", fixture_path.string()}, {"sha256", sha256(fixture_bytes)}}},
-      {"shared_shader_closure", models::host_sbs_shared_ui_warp::closure},
+      {"shared_shader_closure", models::host_sbs_shared_ui_warp::source_closure(false)},
       {"scope", "Immutable saved native-HDR source/producer inputs rendered by the current shared warp; captured renderer identity remains provenance only"},
       {"pixel_route_map", "not exported; colour crops and whole-output hashes only"},
       {"quality_claim", false}, {"performance_claim", false}, {"cases", json::array()}};
@@ -4375,8 +4378,8 @@ TEST(HostSbsV2LiveWarpGpuTest, SavedGlyphTupleReplay) {
       {"coordinate_contract_sha256", v2::contract_canonical_sha256},
       {"live_renderer_source_closure_sha256", cache::parallax_v2_live_renderer_source_closure_sha256},
       {"live_diagnostic_source_closure_sha256", cache::parallax_v2_live_diagnostic_source_closure_sha256},
-      {"shared_renderer_source_closure_sha256", models::host_sbs_shared_ui_warp::closure},
-      {"shared_diagnostic_source_closure_sha256", models::host_sbs_shared_ui_warp::diagnostic_closure},
+      {"shared_renderer_source_closure_sha256", models::host_sbs_shared_ui_warp::source_closure(false)},
+      {"shared_diagnostic_source_closure_sha256", models::host_sbs_shared_ui_warp::diagnostic_source_closure(false)},
       {"scope", "Literal saved current matte/receipt and source tuple, actual shared D3D11 renderer; no CPU inverse or color warp"},
       {"route_definitions", {
         {"base", "Saved Base/state/b2 and all saved subtitle resources; only b3.enabled set to zero"},
@@ -4691,8 +4694,8 @@ TEST(HostSbsV2LiveWarpGpuTest, PrivateNativeMatteLayerReplay) {
       {"live_diagnostic_source_closure_sha256", cache::parallax_v2_live_diagnostic_source_closure_sha256},
       {"scope", "PRIVATE saved-input old/new native-M rendering through the actual shared warp; supplied receipt is context for counterfactual masks; authored GPU layer reference; no live/producer qualification"},
       {"production_tuple_claim_for_candidate", false},
-      {"shared_renderer_source_closure_sha256", models::host_sbs_shared_ui_warp::closure},
-      {"shared_diagnostic_source_closure_sha256", models::host_sbs_shared_ui_warp::diagnostic_closure},
+      {"shared_renderer_source_closure_sha256", models::host_sbs_shared_ui_warp::source_closure(false)},
+      {"shared_diagnostic_source_closure_sha256", models::host_sbs_shared_ui_warp::diagnostic_source_closure(false)},
       {"private_layer_shader_root", specification.at("private_layer_shader_root")},
       {"private_layer_source_closure_sha256", specification.at("private_layer_source_closure_sha256")},
       {"cases", json::array()}};
@@ -5527,6 +5530,109 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinQueuedPreparationFailurePreservesCompl
   EXPECT_TRUE(programs.ready(true));
   EXPECT_TRUE(programs.route_error(true).empty());
   expect_completed_unchanged();
+}
+
+TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinCompletedProtectionDoesNotRequireQueuedSource) {
+  namespace fs = std::filesystem;
+  namespace shared = models::host_sbs_shared_ui_warp;
+
+  // Reserve an owned source-only tree and remove only that exact directory on exit.
+  struct owned_shader_root_t {
+    fs::path path;
+
+    ~owned_shader_root_t() {
+      std::error_code error;
+      if (!path.empty() && fs::weakly_canonical(path, error) == path && !error) {
+        fs::remove_all(path, error);
+      }
+    }
+  } isolated_root;
+
+  const auto temp = fs::canonical(fs::temp_directory_path());
+  for (unsigned attempt = 0; attempt < 16u && isolated_root.path.empty(); ++attempt) {
+    const auto candidate = temp / ("apollo-completed-ui-" + std::to_string(GetCurrentProcessId()) +
+                                   "-" + std::to_string(GetTickCount64()) + "-" + std::to_string(attempt));
+    if (fs::create_directory(candidate)) {
+      isolated_root.path = candidate;
+    }
+  }
+  ASSERT_FALSE(isolated_root.path.empty());
+  const fs::path full_root {SUNSHINE_SHADERS_DIR};
+  const auto &root = isolated_root.path;
+  ASSERT_TRUE(fs::create_directory(root / "include"));
+  for (const auto *source : {"host_sbs_shared_ui_warp.hlsl", "sbs_reprojection_v2_live_ps.hlsl", "include/depth_coordinate_v2_contract.generated.hlsl", "include/host_sbs_queued_render_guard.hlsl", "include/host_sbs_shared_current_glyph.hlsl", "include/depth_color.hlsl", "include/ui_pin_band_shared.hlsl"}) {
+    ASSERT_TRUE(fs::copy_file(full_root / source, root / source)) << source;
+  }
+  constexpr auto queued_source = "host_sbs_shared_ui_warp_queued.hlsl";
+  ASSERT_FALSE(fs::exists(root / queued_source));
+
+  live_v2_warp_fixture_t full, isolated, ordinary;
+  std::string error;
+  ASSERT_TRUE(full.initialize(error, warp_shader_e::selected_outline)) << error;
+  ASSERT_TRUE(isolated.initialize(error, warp_shader_e::selected_outline)) << error;
+  ASSERT_TRUE(ordinary.initialize(error)) << error;
+  isolated.production_shared_ui_pin_root = root;
+  constexpr UINT width = 128u, height = 16u;
+  const auto state = make_live_state(true, true);
+  const std::vector<float> base(width * height, -1.0f / width);
+  auto ui = make_subtitle_inputs(width, height, state, 2.5f / width);
+  ui.matte[8u * width + 64u] = 1u;
+  ui.snapshot[8u * width + 64u] = {0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u};
+  std::vector<rgba16_bits_t> source(width * height, {0x3400u, 0x3400u, 0x3400u, 0x3c00u});
+  source[8u * width + 64u] = ui.snapshot[8u * width + 64u];
+  const auto render = [&](live_v2_warp_fixture_t &fixture, std::vector<std::byte> &pixels, shared_ui_pin_diagnostics_t &diagnostics) {
+    auto selected = make_current_outline_inputs(ui);
+    selected.production_shared_ui_pin = true;
+    selected.shared_ui_pin_diagnostic_output = &diagnostics;
+    return fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height, source.data(), base, base, state, {}, pixels, error, 0u, 0u, {}, &ui, nullptr, true, &selected);
+  };
+  std::vector<std::byte> full_pixels, isolated_pixels, ordinary_pixels;
+  shared_ui_pin_diagnostics_t full_diagnostics, isolated_diagnostics;
+  ASSERT_TRUE(render(full, full_pixels, full_diagnostics)) << error;
+  ASSERT_TRUE(ordinary.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height, source.data(), base, base, state, {}, ordinary_pixels, error)) << error;
+  ASSERT_NE(full_pixels, ordinary_pixels) << "The reference must actually protect the glyph";
+  ASSERT_TRUE(render(isolated, isolated_pixels, isolated_diagnostics)) << error;
+  EXPECT_EQ(isolated_pixels, full_pixels);
+  ASSERT_FALSE(full_diagnostics.mapping_rgba32f.empty());
+  EXPECT_EQ(isolated_diagnostics.mapping_rgba32f, full_diagnostics.mapping_rgba32f);
+  EXPECT_EQ(isolated_diagnostics.ui_coverage_rgba32f, full_diagnostics.ui_coverage_rgba32f);
+  EXPECT_EQ(isolated_diagnostics.shape, full_diagnostics.shape);
+  EXPECT_EQ(isolated_diagnostics.active_rows, full_diagnostics.active_rows);
+
+  auto &programs = isolated.production_shared_ui_pin_programs;
+  auto *const device = isolated.device.Get();
+  const auto completed = programs.program();
+  auto *const mapping = programs.mapping();
+  ASSERT_TRUE(completed.pixel);
+  ASSERT_TRUE(mapping);
+  EXPECT_FALSE(programs.load_queued(device, root, error));
+  EXPECT_FALSE(programs.ready(true));
+  EXPECT_EQ(programs.mapping(true), nullptr);
+  ASSERT_TRUE(fs::copy_file(full_root / queued_source, root / queued_source));
+  ASSERT_TRUE(programs.load_queued(device, root, error)) << error;
+  ASSERT_TRUE(programs.ready(true));
+  // With the queued program ready, prove its diagnostics independently authenticate source.
+  ASSERT_TRUE(fs::remove(root / queued_source));
+  EXPECT_FALSE(programs.load_diagnostics(device, root, error, true));
+  EXPECT_EQ(programs.mapping(true), nullptr);
+  EXPECT_EQ(programs.mapping(), mapping);
+  EXPECT_EQ(programs.program().pixel, completed.pixel);
+  EXPECT_TRUE(programs.route_error(false).empty());
+  ASSERT_TRUE(fs::copy_file(full_root / queued_source, root / queued_source));
+  ASSERT_TRUE(programs.load_diagnostics(device, root, error, true)) << error;
+  EXPECT_TRUE(programs.mapping(true));
+  EXPECT_TRUE(programs.coverage(true));
+  EXPECT_TRUE(programs.boundary(true));
+  EXPECT_EQ(programs.mapping(), mapping);
+
+  // The completed closure must still fail closed for actual source changes.
+  std::ofstream altered(root / "host_sbs_shared_ui_warp.hlsl", std::ios::binary | std::ios::app);
+  altered << "\n// Changed completed source bytes.\n";
+  altered.close();
+  ASSERT_TRUE(altered.good());
+  shared::programs_t untrusted;
+  EXPECT_FALSE(untrusted.load(device, root, error));
+  EXPECT_FALSE(untrusted.ready(false));
 }
 
 TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinQueuedProductionRequiresCurrentGuardAtPrepareAndDraw) {

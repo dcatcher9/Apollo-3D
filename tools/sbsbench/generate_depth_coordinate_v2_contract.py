@@ -2289,12 +2289,17 @@ def _write_current_background_runtime_pin(
 
 def shared_ui_warp_runtime_closures(
         shader_root: Path = SHADER_ROOT,
-        header: Path = CURRENT_SHARED_UI_WARP_RUNTIME_HEADER) -> dict[str, str]:
-    """Calculate the two confined Host adapters from their one runtime specification owner."""
+        header: Path = CURRENT_SHARED_UI_WARP_RUNTIME_HEADER,
+        *, names: tuple[str, ...] | None = None) -> dict[str, str]:
+    """Calculate the selected route pins from their runtime specification owner."""
     source = header.read_text(encoding="utf-8")
+    routes = ("completed", "queued", "completed_diagnostic", "queued_diagnostic", "text_game")
+    spec_names = {f"{route}_closure": f"{route}_specs" for route in routes}
     result = {}
-    for name, array_name in (("closure", "specs"), ("diagnostic_closure", "diagnostic_specs"),
-                             ("text_game_closure", "text_game_specs")):
+    for name in spec_names if names is None else names:
+        if name not in spec_names:
+            raise ValueError(f"unknown shared UI warp pin {name}")
+        array_name = spec_names[name]
         array = re.search(
             rf"inline constexpr std::array<cache::shader_spec,\s*(\d+)u>\s+{array_name}\s*\{{\{{(.*?)\}}\}};",
             source, re.DOTALL)
@@ -2310,9 +2315,10 @@ def shared_ui_warp_runtime_closures(
 
 def _write_shared_ui_warp_runtime_pin(
         check: bool, shader_root: Path = SHADER_ROOT,
-        header: Path = CURRENT_SHARED_UI_WARP_RUNTIME_HEADER) -> bool:
+        header: Path = CURRENT_SHARED_UI_WARP_RUNTIME_HEADER,
+        *, names: tuple[str, ...] | None = None) -> bool:
     source = header.read_text(encoding="utf-8")
-    for name, digest in shared_ui_warp_runtime_closures(shader_root, header).items():
+    for name, digest in shared_ui_warp_runtime_closures(shader_root, header, names=names).items():
         pattern = rf'(inline constexpr std::string_view {name}\s*=\s*")[0-9a-f]{{64}}(";)'
         if len(re.findall(pattern, source)) != 1:
             raise ValueError(f"shared UI warp {name} pin is missing or duplicated")

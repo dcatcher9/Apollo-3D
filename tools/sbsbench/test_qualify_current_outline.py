@@ -242,7 +242,7 @@ class CurrentOutlineQualificationTests(unittest.TestCase):
         self.assertEqual(document["ordinary_metric_artifacts"], "authenticated-ordinary-base-renderer-v1")
 
     def test_ordinary_metric_semantics_cannot_cross_qualification_versions(self):
-        for schema in range(1, 9):
+        for schema in range(1, 10):
             with self.subTest(schema=schema):
                 document = self.document_for_schema(schema)
                 document["ordinary_metric_artifacts"] = ("unchanged-legacy-native-matte-renderer" if schema >= 7
@@ -279,6 +279,27 @@ class CurrentOutlineQualificationTests(unittest.TestCase):
         self.assertEqual(result["producer_stage_current_frames"], 2)
         self.assertIn("trusted_inner", document["composition_source_closures"])
         self.assertFalse(result["ordinary_metrics_qualify_selected_composite"])
+
+    def test_schema9_requires_isolated_completed_pin_and_keeps_schema8_geometry_policy(self):
+        historical = self.document_for_schema(8)
+        current = self.document_for_schema(9)
+        key = "shared_warp_source_closure_sha256"
+        self.assertEqual(historical[key], qualification.LEGACY_COMBINED_CLOSURE)
+        queued = generator.shared_ui_warp_runtime_closures(names=("queued_closure",))["queued_closure"]
+        self.assertNotIn(current[key], {historical[key], queued})
+        self.assertEqual(current["composition_source_closures"], historical["composition_source_closures"])
+        result = self.validate(current)
+        self.assertEqual(result["renderer_schema"], 9)
+        self.assertTrue(result["renderer_policy_current"])
+        self.assertEqual(result["producer_stage_current_frames"], 2)
+        for invalid in (historical[key], queued):
+            changed = copy.deepcopy(current)
+            changed[key] = invalid
+            with self.assertRaisesRegex(ValueError, "shared_warp_source_closure_sha256 differs"):
+                self.validate(changed)
+        historical[key] = current[key]
+        with self.assertRaisesRegex(ValueError, "shared_warp_source_closure_sha256 differs"):
+            self.validate(historical)
 
     def test_schema8_requires_trusted_inner_source_and_boolean_readiness(self):
         document = self.document_for_schema(8)

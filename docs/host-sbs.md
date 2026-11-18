@@ -363,13 +363,14 @@ the existing flat fallback. Shared preparation adds a native full-width subtitle
 weights, row/header storage and draw geometry. These resources belong to the current immutable
 draw only, are unbound between compute and sampling, and are rebuilt before reuse. The queued
 wrapper retains the exact-source GPU guard independently of subtitle authorisation.
-`src/host_sbs_shared_ui_warp_runtime.h` owns the ordered completed/queued production and diagnostic
-shader specifications. The depth-contract generator checks both source-closure pins, including
-the common pin owner. All six source specifications must authenticate, but ordinary completed
-programs prepare independently; queued programs prepare only when that route is explicitly
-requested. A queued compile or device-creation failure preserves completed handles and readiness,
-while a missing queued program still disables that route. This changes no estimator state schema
-or calibration.
+`src/host_sbs_shared_ui_warp_runtime.h` owns the ordered completed and queued shader specifications.
+The depth-contract generator checks a separate source-closure pin for each route's production and
+diagnostic programs. Each closure authenticates its own three entry points and their transitive
+includes. The queued wrapper includes the common source. Production prepares the selected route
+independently, and actual-map capture prepares that route's diagnostic programs on demand.
+A missing queued source, queued compile failure, or queued device-creation failure disables that
+route and preserves completed readiness. Current Outline qualification schema 9 records the
+completed production closure and retains the same renderer geometry policy as schema 8.
 
 #### Text-game pin
 

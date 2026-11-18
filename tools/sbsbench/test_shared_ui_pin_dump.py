@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import shutil
 import struct
 import tempfile
 import unittest
@@ -13,8 +14,10 @@ from unittest import mock
 import numpy as np
 
 try:
+    from . import generate_depth_coordinate_v2_contract as generator
     from . import shared_ui_pin_dump as pin
 except ImportError:
+    import generate_depth_coordinate_v2_contract as generator
     import shared_ui_pin_dump as pin
 
 
@@ -23,10 +26,7 @@ class SharedUiPinDumpTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.closure = "a" * 64
-        patch = mock.patch.object(pin, "_expected_closure", return_value=self.closure)
-        patch.start()
-        self.addCleanup(patch.stop)
+        self.closure = pin.LEGACY_COMBINED_CLOSURE
         self.manifest = {
             "matched_frame_id": 42, "matched_observation_timestamp_us": 100001,
             "renderer": {"mapping_artifacts_match_selected_renderer": False,
@@ -89,13 +89,16 @@ class SharedUiPinDumpTests(unittest.TestCase):
     def test_legacy_packages_keep_their_original_attribution(self):
         self.assertFalse(pin.verify(self.root, {"renderer": {}})["shared_pin_selected"])
 
-    def current_attribution(self):
+    def current_attribution(self, kind=pin.KIND):
+        closure = pin._expected_closure(kind)
         self.manifest["schema"] = 51
         self.manifest["renderer"]["actual_draw_renderer"] = {
-            "schema": 2, "kind": pin.KIND, "source_closure_sha256": self.closure,
+            "schema": 2, "kind": kind, "source_closure_sha256": closure,
             "mapping_role": pin.SHARED_ROLE, "evidence_artifact": pin.EVIDENCE}
         self.evidence["schema"] = 2
         self.evidence["binding_roles"] = {"t3": "actual_draw_M.u32"}
+        self.evidence.update(program=kind, pixel_shader_closure=closure, queued_geometry=kind == pin.QUEUED_KIND)
+        self.evidence["shared_pin"]["source_closure_sha256"] = closure
         self.seal()
 
     def test_current_shared_draw_has_versioned_base_diagnostic_attribution(self):
@@ -103,6 +106,31 @@ class SharedUiPinDumpTests(unittest.TestCase):
         summary = pin.verify(self.root, self.manifest)
         self.assertTrue(summary["actual_map_verified"])
         self.assertEqual(summary["evidence_schema"], 2)
+
+    def test_split_routes_keep_their_own_closures_and_retained_combined_identity(self):
+        for kind in (pin.COMPLETED_KIND, pin.QUEUED_KIND, pin.KIND):
+            with self.subTest(kind=kind):
+                self.current_attribution(kind)
+                summary = pin.verify(self.root, self.manifest)
+                self.assertTrue(summary["actual_map_verified"])
+                self.assertEqual(summary["kind"], kind)
+                attribution = self.manifest["renderer"]["actual_draw_renderer"]
+                previous_kind = attribution["kind"]
+                attribution["kind"] = pin.QUEUED_KIND if kind == pin.COMPLETED_KIND else pin.COMPLETED_KIND
+                with self.assertRaisesRegex(ValueError, "unknown source or map"):
+                    pin.verify(self.root, self.manifest)
+                attribution["kind"] = previous_kind
+
+    def test_split_route_cannot_certify_draw_with_inconsistent_route_metadata(self):
+        self.current_attribution(pin.COMPLETED_KIND)
+        for key, invalid_value in (("program", pin.QUEUED_KIND), ("queued_geometry", True), ("queued_geometry", 0)):
+            with self.subTest(key=key, value=invalid_value):
+                previous = self.evidence[key]
+                self.evidence[key] = invalid_value
+                self.seal()
+                with self.assertRaisesRegex(ValueError, "attributed shared pin route"):
+                    pin.verify(self.root, self.manifest)
+                self.evidence[key] = previous
 
     def test_current_ordinary_base_cannot_be_relabelled_as_legacy_fallback(self):
         self.current_attribution()
@@ -255,12 +283,26 @@ class SharedUiPinDumpTests(unittest.TestCase):
 
 
 class SharedUiPinDumpOwnerTests(unittest.TestCase):
-    def test_unmocked_source_closure_matches_actual_runtime_owner(self):
-        header = Path(__file__).resolve().parents[2] / "src" / "host_sbs_shared_ui_warp_runtime.h"
-        expected = re.search(r'inline constexpr std::string_view closure\s*=\s*"([0-9a-f]{64})"',
-                             header.read_text(encoding="utf-8"))
-        self.assertIsNotNone(expected)
-        self.assertEqual(pin._expected_closure(), expected.group(1))
+    def test_unmocked_route_closures_match_actual_runtime_owner(self):
+        source = generator.CURRENT_SHARED_UI_WARP_RUNTIME_HEADER.read_text(encoding="utf-8")
+        for kind, name in ((pin.COMPLETED_KIND, "completed_closure"), (pin.QUEUED_KIND, "queued_closure")):
+            with self.subTest(kind=kind):
+                expected = re.search(rf'inline constexpr std::string_view {name}\s*=\s*"([0-9a-f]{{64}})"', source)
+                self.assertIsNotNone(expected)
+                self.assertEqual(pin._expected_closure(kind), expected.group(1))
+
+    def test_completed_source_identity_survives_missing_queued_shader(self):
+        completed = pin._expected_closure(pin.COMPLETED_KIND)
+        calculate = generator.shared_ui_warp_runtime_closures
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "shaders"
+            shutil.copytree(generator.SHADER_ROOT, root,
+                            ignore=shutil.ignore_patterns("host_sbs_shared_ui_warp_queued.hlsl"))
+            with mock.patch.object(generator, "shared_ui_warp_runtime_closures",
+                                   side_effect=lambda **kwargs: calculate(root, **kwargs)):
+                self.assertEqual(pin._expected_closure(pin.COMPLETED_KIND), completed)
+                with self.assertRaises(FileNotFoundError):
+                    pin._expected_closure(pin.QUEUED_KIND)
 
 
 if __name__ == "__main__":

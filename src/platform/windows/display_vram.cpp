@@ -3253,7 +3253,7 @@ namespace platf::dxgi {
                     s.queued = queued_geometry_selected;
                     s.serial = current_shared_warp.serial;
                     s.shape = current_shared_warp.shape;
-                    s.source_closure = shared_warp::closure;
+                    s.source_closure = shared_warp::source_closure(s.queued);
                     s.pixel_shader_address = reinterpret_cast<std::uintptr_t>(actual_shader.Get());
                     s.weights = actual[12];
                     s.field = actual[13];
@@ -3287,8 +3287,8 @@ namespace platf::dxgi {
                   e.shared_pin_selected = e.selected_shader && shared_warp_selected;
                   e.pixel_shader_address = reinterpret_cast<std::uintptr_t>(actual_shader.Get());
                   if (e.shared_pin_selected) {
-                    e.program = "shared-ui-pin-v1";
-                    e.pixel_shader_closure = shared_warp::closure;
+                    e.program = shared_warp::renderer_kind(e.queued_geometry);
+                    e.pixel_shader_closure = shared_warp::source_closure(e.queued_geometry);
                   } else if (actual_shader.Get() == sbs_reprojection_v2_live_ps.get()) {
                     e.program = "ordinary-v2";
                     e.pixel_shader_closure = sbs_reprojection_v2_live_source_closure_sha256;
@@ -3306,7 +3306,7 @@ namespace platf::dxgi {
                     e.shared_pin_field = actual[13];
                     e.shared_pin_rows = actual[14];
                     e.shared_pin_geometry = constants[4];
-                    e.shared_pin_source_closure = shared_warp::closure;
+                    e.shared_pin_source_closure = e.pixel_shader_closure;
                   }
                   e.geometry_constants = constants[0];
                   e.subtitle_constants = constants[1];
@@ -7021,7 +7021,7 @@ namespace platf::dxgi {
       sbs_debug::actual_draw_evidence &evidence
     ) {
       std::string error;
-      if (!evidence.shared_pin_selected || !sbs_intermediate_texture || !selected_shared_warp_programs.load_diagnostics(device.get(), selected_shared_warp_root, error)) {
+      if (!evidence.shared_pin_selected || !sbs_intermediate_texture || !selected_shared_warp_programs.load_diagnostics(device.get(), selected_shared_warp_root, error, actual_draw.queued_guard_override)) {
         return false;
       }
       D3D11_TEXTURE2D_DESC desc {};

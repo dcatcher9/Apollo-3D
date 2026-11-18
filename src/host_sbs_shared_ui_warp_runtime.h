@@ -21,24 +21,42 @@ namespace models::host_sbs_shared_ui_warp {
   namespace cache = host_sbs_shader_cache;
   using Microsoft::WRL::ComPtr;
 
-  inline constexpr std::array<cache::shader_spec, 6u> specs {{
+  inline constexpr std::array<cache::shader_spec, 3u> completed_specs {{
     {"host_sbs_shared_ui_warp.hlsl", "initialize_main", "cs_5_0"},
     {"host_sbs_shared_ui_warp.hlsl", "SunshineApplyUICS", "cs_5_0"},
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_main_ps", "ps_5_0"},
+  }};
+  inline constexpr std::string_view completed_closure = "4271f01d3044d0e567ad06f95f49ac13b53f937980170e238c254a019c165ae5";
+  inline constexpr std::array<cache::shader_spec, 3u> queued_specs {{
     {"host_sbs_shared_ui_warp_queued.hlsl", "initialize_main", "cs_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "SunshineApplyUICS", "cs_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "shared_pin_main_ps", "ps_5_0"},
   }};
-  inline constexpr std::string_view closure = "326bf2defe8021e1930f46279fea27ceac12effad2ad9d2a17127d647bcdddef";
-  inline constexpr std::array<cache::shader_spec, 6u> diagnostic_specs {{
+  inline constexpr std::string_view queued_closure = "0e21685d5be7434a771f76b3f245aaf4aeaf59e532cbd071c0bcd3d3a79191d7";
+  inline constexpr std::array<cache::shader_spec, 3u> completed_diagnostic_specs {{
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_mapping_ps", "ps_5_0"},
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_coverage_ps", "ps_5_0"},
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_boundary_ps", "ps_5_0"},
+  }};
+  inline constexpr std::string_view completed_diagnostic_closure = "6af16aa9f14331f454e6a10d74d9b88ea765e9710c0d47c1d8d04b886ed539fe";
+  inline constexpr std::array<cache::shader_spec, 3u> queued_diagnostic_specs {{
     {"host_sbs_shared_ui_warp_queued.hlsl", "shared_pin_mapping_ps", "ps_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "shared_pin_coverage_ps", "ps_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "shared_pin_boundary_ps", "ps_5_0"},
   }};
-  inline constexpr std::string_view diagnostic_closure = "a192363e69d00105766e1445c538c4d854885a962e3ca2ad05377160d5c94208";
+  inline constexpr std::string_view queued_diagnostic_closure = "3b3d98584b9e9d0db4be6b21ae67d0f29b19b0f74b0ffce639e8c2157ffbd78f";
+
+  inline constexpr std::string_view source_closure(bool queued) noexcept {
+    return queued ? queued_closure : completed_closure;
+  }
+
+  inline constexpr std::string_view diagnostic_source_closure(bool queued) noexcept {
+    return queued ? queued_diagnostic_closure : completed_diagnostic_closure;
+  }
+
+  inline constexpr std::string_view renderer_kind(bool queued) noexcept {
+    return queued ? "shared-ui-pin-queued-v2" : "shared-ui-pin-completed-v2";
+  }
 
   // The Game 3D text-game route. Its pin weight is the text coverage a game's own helper reports,
   // so it reads no subtitle matte, receipt or condition; everything after the weight is shared.
@@ -83,17 +101,18 @@ namespace models::host_sbs_shared_ui_warp {
     std::array<route_t, 2u> routes_;
     route_t text_game_;
     ComPtr<ID3D11ComputeShader> text_game_verify_, text_game_columns_;
-    std::array<ComPtr<ID3D11PixelShader>, 6u> diagnostics_;
+    using diagnostics_t = std::array<ComPtr<ID3D11PixelShader>, 3u>;
+    std::array<diagnostics_t, 2u> diagnostics_;
     std::array<std::string, 2u> route_errors_;
 
-    static bool create_route(ID3D11Device *device, const cache::source_snapshot_t &source,
-                             std::size_t route, route_t &output, std::string &error) {
-      for (std::size_t stage = 0u; stage < 3u; ++stage) {
-        const auto code = cache::get(source, specs[route * 3u + stage]);
+    static bool create_route(ID3D11Device *device, const cache::source_snapshot_t &source, bool queued, route_t &output, std::string &error) {
+      const auto &specs = queued ? queued_specs : completed_specs;
+      for (std::size_t stage = 0u; stage < specs.size(); ++stage) {
+        const auto code = cache::get(source, specs[stage]);
         if (!code || code->empty() || (stage < 2u ?
             FAILED(device->CreateComputeShader(code->data(), code->size(), nullptr, &output.compute[stage])) :
             FAILED(device->CreatePixelShader(code->data(), code->size(), nullptr, &output.pixel)))) {
-          error = route == 0u ? "Completed shared UI warp shader creation failed" : "Queued shared UI warp shader creation failed";
+          error = queued ? "Queued shared UI warp shader creation failed" : "Completed shared UI warp shader creation failed";
           return false;
         }
       }
@@ -104,15 +123,13 @@ namespace models::host_sbs_shared_ui_warp {
     bool load(ID3D11Device *device, const std::filesystem::path &root, std::string &error) {
       error.clear();
       try {
-        const auto source = cache::snapshot_sources(root, specs);
-        if (!device || !source || cache::source_closure_sha256(source) != closure) {
+        const auto source = cache::snapshot_sources(root, completed_specs);
+        if (!device || !source || cache::source_closure_sha256(source) != completed_closure) {
           error = route_errors_[0] = "Shared UI warp shader source mismatch";
           return false;
         }
         programs_t next;
-        // Both routes remain source-authenticated above. Only the completed route is
-        // mandatory; unused queued bytecode/device objects cannot disable its mask.
-        if (!create_route(device, source, 0u, next.routes_[0], error)) {
+        if (!create_route(device, source, false, next.routes_[0], error)) {
           route_errors_[0] = error;
           return false;
         }
@@ -135,14 +152,14 @@ namespace models::host_sbs_shared_ui_warp {
           error = route_errors_[1] = "Queued shared UI warp device does not match its completed programs";
           return false;
         }
-        const auto source = cache::snapshot_sources(root, specs);
-        if (!source || cache::source_closure_sha256(source) != closure) {
+        const auto source = cache::snapshot_sources(root, queued_specs);
+        if (!source || cache::source_closure_sha256(source) != queued_closure) {
           error = route_errors_[1] = "Shared UI warp shader source mismatch";
           return false;
         }
         if (!ready(true)) {
           route_t next;
-          if (!create_route(device, source, 1u, next, error)) {
+          if (!create_route(device, source, true, next, error)) {
             route_errors_[1] = error;
             return false;
           }
@@ -197,32 +214,40 @@ namespace models::host_sbs_shared_ui_warp {
       return {text_game_.compute[0].Get(), text_game_.compute[1].Get(), text_game_.pixel.Get(), false, true, text_game_verify_.Get(), text_game_columns_.Get()};
     }
 
-    bool load_diagnostics(ID3D11Device *device, const std::filesystem::path &root, std::string &error) {
+    bool load_diagnostics(ID3D11Device *device, const std::filesystem::path &root, std::string &error, bool queued = false) {
       error.clear();
-      // Diagnostics belong to the same device as the retained production programs.
-      // Their immutable authenticated objects can then be reused without re-reading source.
+      // The selected route owns both the production and diagnostic shaders on one device.
+      const auto route = queued ? 1u : 0u;
       ComPtr<ID3D11Device> program_device;
-      if (routes_[0].pixel) routes_[0].pixel->GetDevice(&program_device);
+      if (routes_[route].pixel) {
+        routes_[route].pixel->GetDevice(&program_device);
+      }
       if (!device || program_device.Get() != device) {
         error = "Shared UI warp diagnostic device does not match its production programs";
         return false;
       }
-      if (std::all_of(diagnostics_.begin(), diagnostics_.end(), [](const auto &shader) { return bool(shader); })) return true;
+      auto &diagnostics = diagnostics_[route];
+      if (std::all_of(diagnostics.begin(), diagnostics.end(), [](const auto &shader) {
+            return bool(shader);
+          })) {
+        return true;
+      }
       try {
-        const auto source = cache::snapshot_sources(root, diagnostic_specs);
-        if (!source || cache::source_closure_sha256(source) != diagnostic_closure) {
+        const auto &specs = queued ? queued_diagnostic_specs : completed_diagnostic_specs;
+        const auto source = cache::snapshot_sources(root, specs);
+        if (!source || cache::source_closure_sha256(source) != diagnostic_source_closure(queued)) {
           error = "Shared UI warp diagnostic source mismatch";
           return false;
         }
-        std::array<ComPtr<ID3D11PixelShader>, 6u> next;
+        diagnostics_t next;
         for (std::size_t i = 0u; i < next.size(); ++i) {
-          const auto code = cache::get(source, diagnostic_specs[i]);
+          const auto code = cache::get(source, specs[i]);
           if (!code || code->empty() || FAILED(device->CreatePixelShader(code->data(), code->size(), nullptr, &next[i]))) {
             error = "Shared UI warp diagnostic shader creation failed";
             return false;
           }
         }
-        diagnostics_ = std::move(next);
+        diagnostics = std::move(next);
         return true;
       } catch (const std::exception &exception) {
         error = exception.what();
@@ -240,9 +265,18 @@ namespace models::host_sbs_shared_ui_warp {
       const auto &shaders = routes_[route];
       return {shaders.compute[0].Get(), shaders.compute[1].Get(), shaders.pixel.Get(), queued};
     }
-    [[nodiscard]] ID3D11PixelShader *mapping(bool queued = false) const noexcept { return diagnostics_[queued ? 3u : 0u].Get(); }
-    [[nodiscard]] ID3D11PixelShader *coverage(bool queued = false) const noexcept { return diagnostics_[queued ? 4u : 1u].Get(); }
-    [[nodiscard]] ID3D11PixelShader *boundary(bool queued = false) const noexcept { return diagnostics_[queued ? 5u : 2u].Get(); }
+
+    [[nodiscard]] ID3D11PixelShader *mapping(bool queued = false) const noexcept {
+      return diagnostics_[queued ? 1u : 0u][0u].Get();
+    }
+
+    [[nodiscard]] ID3D11PixelShader *coverage(bool queued = false) const noexcept {
+      return diagnostics_[queued ? 1u : 0u][1u].Get();
+    }
+
+    [[nodiscard]] ID3D11PixelShader *boundary(bool queued = false) const noexcept {
+      return diagnostics_[queued ? 1u : 0u][2u].Get();
+    }
   };
 
   struct request_t {

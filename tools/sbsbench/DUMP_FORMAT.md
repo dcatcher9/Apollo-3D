@@ -105,13 +105,17 @@ and inactive SCP4 immediately. No extra observation wait is added.
 ### Actual shared UI warp observation
 
 Schema 52 requires version 2 of `renderer.actual_draw_renderer`. Its `ordinary-base-v1`
-kind names the authenticated ordinary Base diagnostic. A `shared-ui-pin-v1` kind binds the
-production shared shader closure and schema-2 `actual_draw_evidence.json`;
-`mapping_artifacts_match_selected_renderer` is false because `warp_map.f32` remains the independent
-Base diagnostic. Its geometry-chain and ROI exterior checks cannot score or explain the actual
-shared render. Historical schema-50 exports and their unversioned analytic attribution remain
-unchanged; the standalone shared reader can inspect that format without relabelling it as current.
-The current canonical reader rejects older dump schemas.
+kind names the authenticated ordinary Base diagnostic. The kinds `shared-ui-pin-completed-v2`
+and `shared-ui-pin-queued-v2` bind their respective production shader closures. When
+`actual_draw_evidence.json` captures the draw, its schema-2 `program` repeats the kind and its
+`queued_geometry` is the JSON boolean for the selected route. The older `shared-ui-pin-v1`
+kind continues to bind its historical combined closure.
+
+For all shared kinds, `mapping_artifacts_match_selected_renderer` is false because `warp_map.f32`
+remains the independent Base diagnostic. Its geometry-chain and ROI exterior checks cannot score
+or explain the actual shared render. The standalone reader also supports historical schema-50
+exports and their unversioned analytic attribution. The canonical reader requires the current
+dump schema.
 
 Schema-2 draw evidence removes the unused `t8` role and `actual_original_legacy_M.u32` artifact.
 Raw and legacy masks required by mask construction or independent diagnostics remain available.

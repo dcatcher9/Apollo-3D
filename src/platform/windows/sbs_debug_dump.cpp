@@ -5589,7 +5589,7 @@ namespace platf::sbs_debug {
                          {"mapping_artifacts_match_selected_renderer", !completed.actual_draw.shared_pin_selected && warp_map_available && warp_mask_available},
                          {"actual_draw_renderer", {
                            {"schema", 2u},
-                           {"kind", completed.actual_draw.shared_pin_selected ? "shared-ui-pin-v1" : "ordinary-base-v1"},
+                           {"kind", completed.actual_draw.shared_pin_selected ? completed.actual_draw.program : "ordinary-base-v1"},
                            {"source_closure_sha256", completed.actual_draw.shared_pin_selected ? completed.actual_draw.shared_pin_source_closure : std::string {}},
                            {"mapping_role", completed.actual_draw.shared_pin_selected ? "independent Base diagnostic; does not describe rendered shared warp" : "authenticated Base inverse diagnostic"},
                            {"evidence_artifact", "actual_draw_evidence.json"},
