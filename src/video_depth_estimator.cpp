@@ -3751,6 +3751,29 @@ namespace models {
       return resolved;
     }
 
+    bool install_benchmark_joined_completion_gate(
+      const joined_completion_gate_benchmark::configuration_t &configuration
+    ) {
+      if (!is_operational() || benchmark_joined_completion_gate_configuration_seen ||
+          !configuration.valid()) {
+        return false;
+      }
+      benchmark_joined_completion_gate_configuration_seen = true;
+      if (!configuration.enabled) {
+        return true;
+      }
+      // Event-query fallback cannot prove a literal held root.
+      if (!inference_event_poll_available) {
+        return false;
+      }
+      auto gate = std::make_unique<joined_completion_gate_benchmark::controller_t>(configuration);
+      if (!gate->available(cuda_driver_api::get())) {
+        return false;
+      }
+      benchmark_joined_completion_gate = std::move(gate);
+      return true;
+    }
+
     void clear_pending_inference_event_state() noexcept {
       pending_depth_inference_event_recorded = false;
     }
@@ -11015,17 +11038,18 @@ namespace models {
   bool video_depth_estimator::configure_joined_completion_gate_for_benchmark(
     const joined_completion_gate_benchmark::configuration_t &configuration
   ) {
-    if (!pimpl || !pimpl->is_operational() || pimpl->subtitle_cohort_research_configuration_locked ||
-        pimpl->benchmark_joined_completion_gate_configuration_seen || !configuration.valid()) return false;
-    pimpl->benchmark_joined_completion_gate_configuration_seen = true;
-    if (!configuration.enabled) return true;
-    // Event-query fallback is not accepted as evidence for this particular experiment.
-    if (!pimpl->inference_event_poll_available) return false;
-    auto gate = std::make_unique<joined_completion_gate_benchmark::controller_t>(configuration);
-    if (!gate->available(cuda_driver_api::get())) return false;
-    pimpl->benchmark_joined_completion_gate = std::move(gate);
-    return true;
+    return pimpl && !pimpl->subtitle_cohort_research_configuration_locked &&
+           pimpl->install_benchmark_joined_completion_gate(configuration);
   }
+
+#ifdef SUNSHINE_TESTS
+  bool video_depth_estimator::configure_joined_completion_gate_for_native_pacing_test(
+    const joined_completion_gate_benchmark::configuration_t &configuration
+  ) {
+    return pimpl && !pimpl->has_previous_frame && !pimpl->pending_depth_inference_event_recorded &&
+           pimpl->install_benchmark_joined_completion_gate(configuration);
+  }
+#endif
 
   std::optional<joined_completion_gate_benchmark::snapshot_t>
   video_depth_estimator::joined_completion_gate_status_for_benchmark() const noexcept {

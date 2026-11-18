@@ -1603,6 +1603,16 @@ namespace platf::dxgi {
           bool same_frame_poll_missed_for_current_draw = false;
           // A prior B and a newly admitted C share one conversion's absolute wait cap.
           std::optional<detail::host_sbs_same_frame_poll_plan_t> prior_poll_plan;
+#ifdef SUNSHINE_TESTS
+          const auto record_native_poll = [&](const auto &plan, const auto &poll, bool prior) noexcept {
+            if (test_native_pacing.record_poll) {
+              test_native_pacing.record_poll(test_native_pacing.converter_observer.state, {
+                frame_id, prior, plan.eligible, plan.deadline,
+                poll.ready, poll.timed_out, poll.query_count, poll.wait_duration,
+              });
+            }
+          };
+#endif
           detail::host_sbs_depth_reuse_authorization_t depth_reuse_authorization;
           matched_frame_slot_t current_color_reuse_slot;
           const auto release_unknown_completion = [this](
@@ -1824,6 +1834,9 @@ namespace platf::dxgi {
                 depth_estimator->try_finish_pending_depth_nonblocking(
                   input_color_space, snapshot_debug_inputs
                 );
+#ifdef SUNSHINE_TESTS
+              record_native_poll(*prior_poll_plan, polled, true);
+#endif
               if (polled.wait_attempted) {
                 // C's admission must see authority sampled after the possible B wait.
                 initial_source_authority = observe_live_window_authority(
@@ -2209,6 +2222,23 @@ namespace platf::dxgi {
                       models::host_sbs_gpu_completion_receipt::expected_t {},
                     observation_timestamp_us
                   );
+#ifdef SUNSHINE_TESTS
+                if (!test_native_pacing_gate_configured && test_native_pacing.held_source_stamp_ticks &&
+                    current_source_timestamp &&
+                    current_source_timestamp->time_since_epoch().count() ==
+                      test_native_pacing.held_source_stamp_ticks->load(std::memory_order_acquire)) {
+                  models::joined_completion_gate_benchmark::configuration_t gate {
+                    .enabled = true,
+                    .target_frame_id = frame_id,
+                    .hold_after_callback_enter_ms = test_native_pacing.hold_ms,
+                  };
+                  if (!depth_estimator->configure_joined_completion_gate_for_native_pacing_test(gate)) {
+                    BOOST_LOG(error) << "Could not arm the native pacing test's joined depth gate";
+                    return -1;
+                  }
+                  test_native_pacing_gate_configured = true;
+                }
+#endif
                 auto submitted = depth_estimator->estimate_depth(
                   matched_candidate_slot->analysis_input_srv(),
                   input_color_space,
@@ -2368,6 +2398,9 @@ namespace platf::dxgi {
                                     false
                                   ) :
                                   depth_estimator->try_finish_pending_depth_nonblocking(input_color_space, false);
+#ifdef SUNSHINE_TESTS
+                  record_native_poll(poll_plan, polled, false);
+#endif
                   if (queued_first_query && !polled.ready) {
                     const bool exact_live_route = matched_route_matches_current(
                       *matched_candidate_slot,
@@ -8225,6 +8258,10 @@ namespace platf::dxgi {
     std::chrono::steady_clock::time_point last_subtitle_admission_diagnostic_at {};
     const actual_converter_probe_v1::context_t *probe_context = nullptr;
     actual_converter_probe_v1::observer_t probe_observer {};
+#ifdef SUNSHINE_TESTS
+    testing::native_pacing_probe_t test_native_pacing;
+    bool test_native_pacing_gate_configured = false;
+#endif
     // Only the explicit converter probes can acquire this owner.
     std::unique_ptr<queued_converter_research_t> queued_research;
     std::int64_t probe_current_source_ticks = 0, probe_current_content_ticks = 0;
@@ -8361,6 +8398,8 @@ namespace platf::dxgi {
       }
 
       struct preparation_probe_display_t final: display_vram_t {
+        native_pacing_probe_t native_pacing;
+
         bool is_hdr() override { return false; }
         capture_e snapshot(const pull_free_image_cb_t &, std::shared_ptr<platf::img_t> &, std::chrono::milliseconds, bool) override {
           throw std::logic_error("Preparation probe must never enter physical capture");
@@ -8372,11 +8411,13 @@ namespace platf::dxgi {
     }  // namespace
 
     std::shared_ptr<display_vram_t> make_native_pacing_display(
-      const model_preparation_adapter_t &required, unsigned width, unsigned height
+      const model_preparation_adapter_t &required, unsigned width, unsigned height,
+      const native_pacing_probe_t &probe
     ) {
       const auto adapter = preparation_probe_adapter(required);
       preparation_probe_require(platf::dxgi::init() == 0, "Native pacing shader initialization failed");
       auto display = platf::make_unarmed_capture_display<preparation_probe_display_t>();
+      display->native_pacing = probe;
       adapter->AddRef();
       display->adapter.reset(adapter.Get());
       display->width = display->width_before_rotation = width;
@@ -12261,6 +12302,12 @@ namespace platf::dxgi {
       if (!device.init_encoder(client_config, colorspace)) {
         return {};
       }
+#ifdef SUNSHINE_TESTS
+      if (const auto *fixture = dynamic_cast<const testing::preparation_probe_display_t *>(display.get())) {
+        device.base.test_native_pacing = fixture->native_pacing;
+        device.base.probe_observer = fixture->native_pacing.converter_observer;
+      }
+#endif
       return owner;
     }
 
@@ -12328,7 +12375,11 @@ namespace platf::dxgi {
 
   public:
     int convert(platf::img_t &img_base) override {
+#ifdef SUNSHINE_TESTS
+      return convert_with_native_pacing_probe(img_base, std::nullopt);
+#else
       return base.convert(img_base);
+#endif
     }
 
     bool set_stream_gamma(::video::stream_gamma_mode_e mode) override {
@@ -12347,7 +12398,11 @@ namespace platf::dxgi {
       platf::img_t &img_base,
       const std::chrono::steady_clock::time_point next_encode_target
     ) override {
+#ifdef SUNSHINE_TESTS
+      return convert_with_native_pacing_probe(img_base, next_encode_target);
+#else
       return base.convert(img_base, next_encode_target);
+#endif
     }
 
     bool needs_conversion_poll() const override {
@@ -12379,6 +12434,22 @@ namespace platf::dxgi {
     }
 
   private:
+#ifdef SUNSHINE_TESTS
+    int convert_with_native_pacing_probe(
+      platf::img_t &image, std::optional<std::chrono::steady_clock::time_point> next_encode_target
+    ) {
+      const auto &probe = base.test_native_pacing;
+      if (!probe.record_delivery) {
+        return base.convert(image, next_encode_target);
+      }
+      const auto started = std::chrono::steady_clock::now();
+      const int result = base.convert(image, next_encode_target);
+      probe.record_delivery(probe.converter_observer.state, {
+        started, std::chrono::steady_clock::now(), image.frame_timestamp, result,
+      });
+      return result;
+    }
+#endif
     d3d_base_encode_device base;
     std::unique_ptr<nvenc::nvenc_d3d11_native> nvenc_d3d;
     NV_ENC_BUFFER_FORMAT buffer_format = NV_ENC_BUFFER_FORMAT_UNDEFINED;

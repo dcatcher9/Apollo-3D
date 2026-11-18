@@ -3,7 +3,10 @@
 #if defined(_WIN32) && defined(SUNSHINE_TESTS)
   #include "src/video.h"
   #include "src/video_depth_estimator.h"
+  #include "host_sbs_actual_converter_probe.h"
 
+  #include <atomic>
+  #include <chrono>
   #include <cstdint>
   #include <dxgi1_4.h>
   #include <filesystem>
@@ -26,10 +29,34 @@ namespace platf::dxgi::testing {
     std::uint32_t device_id = 0;
   };
 
+  struct native_pacing_delivery_t {
+    std::chrono::steady_clock::time_point started, finished;
+    std::optional<std::chrono::steady_clock::time_point> source_timestamp;
+    int result = -1;
+  };
+
+  struct native_pacing_poll_t {
+    std::uint64_t conversion = 0;
+    bool prior = false, eligible = false;
+    std::chrono::steady_clock::time_point deadline;
+    bool ready = false, timed_out = false;
+    std::uint32_t query_count = 0;
+    std::chrono::steady_clock::duration wait_duration;
+  };
+
+  struct native_pacing_probe_t {
+    const std::atomic<std::int64_t> *held_source_stamp_ticks = nullptr;
+    unsigned hold_ms = 120;
+    actual_converter_probe_v1::observer_t converter_observer;
+    void (*record_delivery)(void *, const native_pacing_delivery_t &) noexcept = nullptr;
+    void (*record_poll)(void *, const native_pacing_poll_t &) noexcept = nullptr;
+  };
+
   // No desktop duplication or output window. The native encoder sees the same shared
   // capture image and keyed mutex it receives from a normal display.
   std::shared_ptr<display_vram_t> make_native_pacing_display(
-    const model_preparation_adapter_t &adapter, unsigned width, unsigned height
+    const model_preparation_adapter_t &adapter, unsigned width, unsigned height,
+    const native_pacing_probe_t &probe = {}
   );
   std::shared_ptr<platf::img_t> upload_native_pacing_image(
     display_vram_t &display, std::span<const std::uint32_t> bgra

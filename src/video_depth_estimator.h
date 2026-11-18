@@ -1541,6 +1541,11 @@ namespace models {
     bool configure_joined_completion_gate_for_benchmark(
       const joined_completion_gate_benchmark::configuration_t &configuration
     );
+#ifdef SUNSHINE_TESTS
+    bool configure_joined_completion_gate_for_native_pacing_test(
+      const joined_completion_gate_benchmark::configuration_t &configuration
+    );
+#endif
     /** Pure CPU gate/query diagnostics, never a source clock or fabricated CUDA verdict. */
     [[nodiscard]] std::optional<joined_completion_gate_benchmark::snapshot_t>
       joined_completion_gate_status_for_benchmark() const noexcept;
