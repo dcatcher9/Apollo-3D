@@ -354,9 +354,11 @@ namespace actual_converter_probe_v1 {
       // Open every shared image before input1 without establishing frame or publication ownership.
       for(const auto &image:images){auto &img=static_cast<img_d3d_t&>(*image);auto [it,inserted]=converter.img_ctx_map.try_emplace(img.id);(void)inserted;require(converter.initialize_image_context(img,it->second)==0,"Shared image preparation failed");}
       if (!context.borrow_matched_capture) {
-        D3D11_TEXTURE2D_DESC private_desc{};static_cast<img_d3d_t&>(*images[0]).capture_texture->GetDesc(&private_desc);
-        private_desc.Usage=D3D11_USAGE_DEFAULT;private_desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;private_desc.MiscFlags=0;private_desc.CPUAccessFlags=0;
-        for(auto &slot:converter.matched_frame_slots){hr(converter.device->CreateTexture2D(&private_desc,nullptr,&slot.texture),"Private slot preparation failed");hr(converter.device->CreateShaderResourceView(slot.texture.get(),nullptr,&slot.srv),"Private slot SRV failed");}
+        D3D11_TEXTURE2D_DESC source_desc {};
+        static_cast<img_d3d_t &>(*images[0]).capture_texture->GetDesc(&source_desc);
+        for (auto &slot : converter.matched_frame_slots) {
+          require(converter.ensure_private_matched_texture(slot, source_desc), "Private slot preparation failed");
+        }
       }
       records.ctx=converter.device_ctx.get();converter.probe_observer={&records,&recorder_t::record};
       const auto stamp=[&](std::size_t i){const auto t=clock_t::now();images[i]->frame_timestamp=t;images[i]->content_timestamp=t;};
@@ -887,12 +889,41 @@ namespace actual_converter_probe_v1 {
             require(std::none_of(converter.matched_frame_slots.begin(), converter.matched_frame_slots.end(),
               [](const auto &slot) { return slot.pending; }), "Final C still retains a pending capture source");
           }
+          if (check_retained_rgb) {
+            auto image = display->alloc_img();
+            image->width = image->height = 16;
+            auto &capture = static_cast<img_d3d_t &>(*image);
+            const auto image_id = capture.id;
+            const auto format = display->capture_format;
+            display->capture_format = DXGI_FORMAT_UNKNOWN;
+            const auto dummy_status = display->complete_img(image.get(), true);
+            display->capture_format = format;
+            d3d_base_encode_device::encoder_img_ctx_t imported;
+            require(dummy_status == 0 && converter.initialize_image_context(capture, imported) == 0,
+              "Dummy source import failed");
+            const auto dummy_desc = imported.encoder_texture.description();
+            ComPtr<ID3D11Texture2D> dummy_texture {imported.encoder_texture.get()};
+            require(dummy_desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM &&
+              display->complete_img(image.get(), false) == 0 && capture.id == image_id &&
+              converter.initialize_image_context(capture, imported) == 0,
+              "Pooled image did not reopen for real capture");
+            auto *real_texture = imported.encoder_texture.get();
+            require(real_texture != dummy_texture.Get(), "Pooled image kept the dummy shared resource");
+            D3D11_TEXTURE2D_DESC actual_desc {};
+            real_texture->GetDesc(&actual_desc);
+            require(actual_desc.Format == format &&
+              converter.source_signatures_match(imported.encoder_texture.description(), actual_desc) &&
+              converter.initialize_image_context(capture, imported) == 0 &&
+              imported.encoder_texture.get() == real_texture,
+              "Reopened capture did not keep its actual description and resource");
+          }
           write_json(root / "result.json", {{"schema",1},{"status",r.native_p010 ? "PASS_FUNCTIONAL_ACTUAL_CONVERTER_NATIVE_P010" : "PASS_FUNCTIONAL_ACTUAL_CONVERTER_BORROWED_CAPTURE_RECYCLE"},
             {"context_scope","synthetic-video-scheduling-only; not actual Win32 eligibility"}, {"source_inputs",sources},
             {"capture_device_adapter",capture_device_adapter},{"converter_device_adapter",converter_device_adapter},
             {"target_format",static_cast<UINT>(td.Format)},{"target_width",td.Width},{"target_height",td.Height},
             {"retained_rgb_target_untouched",check_retained_rgb},{"native_p010",native_p010_proof},
             {"initial_shutter_frame_direct_without_scratch",check_retained_rgb && !copy_reference},
+            {"pooled_dummy_to_real_reimport_verified",check_retained_rgb},
             {"initial_shutter_output",check_retained_rgb ? save("initial-shutter-output" + suffix, initial_rgb_output) : json(nullptr)},
             {"late_draw_rgb_rendered_directly",recovered.rgb_rendered_directly},
             {"B_pending_pinned_source",true},{"B_key_timeout_preserved_ready_owner",true},{"B_released_and_recycled",true},
@@ -1307,9 +1338,11 @@ namespace actual_converter_probe_v1 {
         display->device_ctx->UpdateSubresource(img.capture_texture.get(),0u,nullptr,q.frames[i].bgra.data(),w*4u,0u);display->device_ctx->Flush();img.blank=false;}
       for(const auto &image:images){auto &img=static_cast<img_d3d_t&>(*image);auto [it,inserted]=converter.img_ctx_map.try_emplace(img.id);(void)inserted;
         require(converter.initialize_image_context(img,it->second)==0,"Shared image preparation failed");}
-      D3D11_TEXTURE2D_DESC private_desc{};static_cast<img_d3d_t&>(*images[0]).capture_texture->GetDesc(&private_desc);
-      private_desc.Usage=D3D11_USAGE_DEFAULT;private_desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;private_desc.MiscFlags=0;private_desc.CPUAccessFlags=0;
-      for(auto &slot:converter.matched_frame_slots){hr(converter.device->CreateTexture2D(&private_desc,nullptr,&slot.texture),"Private slot preparation failed");hr(converter.device->CreateShaderResourceView(slot.texture.get(),nullptr,&slot.srv),"Private slot SRV failed");}
+      D3D11_TEXTURE2D_DESC source_desc {};
+      static_cast<img_d3d_t &>(*images[0]).capture_texture->GetDesc(&source_desc);
+      for (auto &slot : converter.matched_frame_slots) {
+        require(converter.ensure_private_matched_texture(slot, source_desc), "Private slot preparation failed");
+      }
       converter.probe_observer={&records,&sequence6_recorder_t::record};
       for(std::size_t i=0;i<6u;++i) {
         const auto stamp=clock_t::now();images[i]->frame_timestamp=stamp;images[i]->content_timestamp=stamp;

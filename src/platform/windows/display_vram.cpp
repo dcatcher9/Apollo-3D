@@ -299,6 +299,8 @@ namespace platf::dxgi {
 
     // Shared handle used by an encode device to open capture_texture.
     HANDLE encoder_texture_handle = {};
+    // Changes when this pooled image replaces its shared resource.
+    std::uint64_t capture_texture_generation = 0;
 
     // Set to true if the image corresponds to a dummy texture used prior to
     // the first successful capture of a desktop frame
@@ -1237,13 +1239,7 @@ namespace platf::dxgi {
           D3D11_TEXTURE2D_DESC output_desc {};
           input->GetDesc(&input_desc);
           rgb->texture->GetDesc(&output_desc);
-          const bool compatible = input_desc.Width == output_desc.Width &&
-                                  input_desc.Height == output_desc.Height &&
-                                  input_desc.MipLevels == output_desc.MipLevels &&
-                                  input_desc.ArraySize == output_desc.ArraySize &&
-                                  input_desc.Format == output_desc.Format &&
-                                  input_desc.SampleDesc.Count == output_desc.SampleDesc.Count &&
-                                  input_desc.SampleDesc.Quality == output_desc.SampleDesc.Quality &&
+          const bool compatible = source_signatures_match(input_desc, output_desc) &&
                                   input_is_linear == rgb->linear;
           if (!compatible) {
             if (!rgb_copy_fallback_logged) {
@@ -1566,8 +1562,7 @@ namespace platf::dxgi {
           // there is no ROI completion/cache to revoke, so synchronous USER32/DWM work has no
           // consumer. A focus transition between accepted inferences still revokes authority.
           live_window_authority_observation_t initial_source_authority;
-          D3D11_TEXTURE2D_DESC live_source_desc {};
-          img_ctx->encoder_texture->GetDesc(&live_source_desc);
+          const auto &live_source_desc = img_ctx->encoder_texture.description();
           if (detail::host_sbs_window_authority_observation_needed(depth_estimator != nullptr, models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer))) {
             initial_source_authority = observe_live_window_authority(
               live_source_desc,
@@ -1812,10 +1807,9 @@ namespace platf::dxgi {
             if (!matched_render_slot || !est.completed_frame_valid || using_cached_estimate) {
               return;
             }
-            D3D11_TEXTURE2D_DESC completed_source_desc = live_source_desc;
-            if (matched_render_slot->texture) {
-              matched_render_slot->texture->GetDesc(&completed_source_desc);
-            }
+            const auto &completed_source_desc = matched_render_slot->texture ?
+                                                   matched_render_slot->texture.description() :
+                                                   live_source_desc;
             (void) retain_latest_v2_lineage(
               handoff,
               *matched_render_slot,
@@ -4627,6 +4621,41 @@ namespace platf::dxgi {
 
     struct encoder_img_ctx_t;
 
+    class described_texture_t {
+    public:
+      [[nodiscard]] explicit operator bool() const noexcept {
+        return static_cast<bool>(texture_);
+      }
+
+      [[nodiscard]] ID3D11Texture2D *get() noexcept {
+        return texture_.get();
+      }
+
+      void reset(texture2d_t texture = {}) noexcept {
+        texture_ = std::move(texture);
+        description_.reset();
+      }
+
+      void borrow_from(described_texture_t &source) noexcept {
+        auto *texture = source.get();
+        texture->AddRef();
+        texture_.reset(texture);
+        description_ = source.description();
+      }
+
+      [[nodiscard]] const D3D11_TEXTURE2D_DESC &description() noexcept {
+        // Ordinary SDR conversion samples the SRV without needing a description.
+        if (!description_) {
+          texture_.get()->GetDesc(&description_.emplace());
+        }
+        return *description_;
+      }
+
+    private:
+      texture2d_t texture_;
+      std::optional<D3D11_TEXTURE2D_DESC> description_;
+    };
+
     struct sbs_draw_colour_t {
       ID3D11ShaderResourceView *srv;
       models::input_color_space color_space;
@@ -4645,7 +4674,7 @@ namespace platf::dxgi {
       // context mapped, so its keyed mutex survives until the matched draw is submitted.
       std::shared_ptr<const platf::img_t> capture_image;
       IDXGIKeyedMutex *capture_mutex = nullptr;
-      texture2d_t texture;
+      described_texture_t texture;
       shader_res_t srv;
       std::uint64_t frame_id = 0;
       models::input_color_space color_space = models::input_color_space::srgb;
@@ -4938,13 +4967,7 @@ namespace platf::dxgi {
                models::host_sbs_gpu_completion_receipt::matches_publication(*receipt, estimate().publication);
       }
 
-      UINT source_width = 0u;
-      UINT source_height = 0u;
-      UINT mip_levels = 0u;
-      UINT array_size = 0u;
-      DXGI_FORMAT source_format = DXGI_FORMAT_UNKNOWN;
-      UINT sample_count = 0u;
-      UINT sample_quality = 0u;
+      D3D11_TEXTURE2D_DESC completed_source_desc {};
       std::uint64_t root_authority_generation = 0u;
       std::uint64_t region_authority_generation = 0u;
       std::uint64_t browser_authority_epoch = 0u;
@@ -4971,10 +4994,7 @@ namespace platf::dxgi {
                  slot.depth_input_region
                ) &&
                slot.inference_content_timestamp && slot.color_space == current_color_space &&
-               source_width == source_desc.Width && source_height == source_desc.Height &&
-               mip_levels == source_desc.MipLevels && array_size == source_desc.ArraySize &&
-               source_format == source_desc.Format && sample_count == source_desc.SampleDesc.Count &&
-               sample_quality == source_desc.SampleDesc.Quality &&
+               source_signatures_match(completed_source_desc, source_desc) &&
                root_authority_generation == current_root_authority_generation &&
                region_authority_generation == current_region_authority_generation &&
                browser_authority_epoch == current_browser_authority_epoch &&
@@ -4997,12 +5017,7 @@ namespace platf::dxgi {
       matched_frame_slot_t &slot,
       const D3D11_TEXTURE2D_DESC &source_desc
     ) noexcept {
-      if (!slot.texture) {
-        return false;
-      }
-      D3D11_TEXTURE2D_DESC slot_desc {};
-      slot.texture->GetDesc(&slot_desc);
-      return source_signatures_match(slot_desc, source_desc);
+      return slot.texture && source_signatures_match(slot.texture.description(), source_desc);
     }
 
     static void copy_matched_frame_attribution(
@@ -5353,13 +5368,7 @@ namespace platf::dxgi {
       // The cache renders current color, independently of the retained matched image. Retain only the scalar
       // attribution needed by the V2 renderer; matched slots own move-only D3D resources.
       copy_matched_frame_attribution(latest_v2_lineage.slot, slot);
-      latest_v2_lineage.source_width = completed_source_desc.Width;
-      latest_v2_lineage.source_height = completed_source_desc.Height;
-      latest_v2_lineage.mip_levels = completed_source_desc.MipLevels;
-      latest_v2_lineage.array_size = completed_source_desc.ArraySize;
-      latest_v2_lineage.source_format = completed_source_desc.Format;
-      latest_v2_lineage.sample_count = completed_source_desc.SampleDesc.Count;
-      latest_v2_lineage.sample_quality = completed_source_desc.SampleDesc.Quality;
+      latest_v2_lineage.completed_source_desc = completed_source_desc;
       latest_v2_lineage.root_authority_generation =
         slot.observed_root_authority_generation;
       latest_v2_lineage.region_authority_generation =
@@ -6601,7 +6610,7 @@ namespace platf::dxgi {
                          << util::hex(status).to_string_view() << ']';
         return false;
       }
-      slot.texture = std::move(texture);
+      slot.texture.reset(std::move(texture));
       slot.srv = std::move(srv);
       return true;
     }
@@ -6629,9 +6638,8 @@ namespace platf::dxgi {
         slot.capture_image = image_context.img_weak.lock();
       }
       if (slot.capture_image) {
-        source->AddRef();
         input->AddRef();
-        slot.texture.reset(source);
+        slot.texture.borrow_from(image_context.encoder_texture);
         slot.srv.reset(input);
         slot.capture_mutex = image_context.encoder_mutex.get();
       } else if (!ensure_private_matched_texture(slot, source_desc)) {
@@ -7924,18 +7932,16 @@ namespace platf::dxgi {
     }
 
     struct encoder_img_ctx_t {
-      // Used to determine if the underlying texture changes.
-      // Not safe for actual use by the encoder!
-      texture2d_t::const_pointer capture_texture_p;
+      std::uint64_t capture_texture_generation = 0;
 
-      texture2d_t encoder_texture;
+      described_texture_t encoder_texture;
       shader_res_t encoder_input_res;
       keyed_mutex_t encoder_mutex;
 
       std::weak_ptr<const platf::img_t> img_weak;
 
       void reset() {
-        capture_texture_p = nullptr;
+        capture_texture_generation = 0;
         encoder_texture.reset();
         encoder_input_res.reset();
         encoder_mutex.reset();
@@ -7945,7 +7951,7 @@ namespace platf::dxgi {
 
     int initialize_image_context(const img_d3d_t &img, encoder_img_ctx_t &img_ctx) {
       // If we've already opened the shared texture, we're done
-      if (img_ctx.encoder_texture && img.capture_texture.get() == img_ctx.capture_texture_p) {
+      if (img_ctx.encoder_texture && img.capture_texture_generation == img_ctx.capture_texture_generation) {
         return 0;
       }
 
@@ -7961,28 +7967,33 @@ namespace platf::dxgi {
       }
 
       // Open a handle to the shared texture
-      status = device1->OpenSharedResource1(img.encoder_texture_handle, __uuidof(ID3D11Texture2D), (void **) &img_ctx.encoder_texture);
+      texture2d_t texture;
+      status = device1->OpenSharedResource1(img.encoder_texture_handle, __uuidof(ID3D11Texture2D), (void **) &texture);
       if (FAILED(status)) {
         BOOST_LOG(error) << "Failed to open shared image texture [0x"sv << util::hex(status).to_string_view() << ']';
         return -1;
       }
 
       // Get the keyed mutex to synchronize with the capture code
-      status = img_ctx.encoder_texture->QueryInterface(__uuidof(IDXGIKeyedMutex), (void **) &img_ctx.encoder_mutex);
+      keyed_mutex_t mutex;
+      status = texture->QueryInterface(__uuidof(IDXGIKeyedMutex), (void **) &mutex);
       if (FAILED(status)) {
         BOOST_LOG(error) << "Failed to query IDXGIKeyedMutex [0x"sv << util::hex(status).to_string_view() << ']';
         return -1;
       }
 
       // Create the SRV for the encoder texture
-      status = device->CreateShaderResourceView(img_ctx.encoder_texture.get(), nullptr, &img_ctx.encoder_input_res);
+      shader_res_t srv;
+      status = device->CreateShaderResourceView(texture.get(), nullptr, &srv);
       if (FAILED(status)) {
         BOOST_LOG(error) << "Failed to create shader resource view for encoding [0x"sv << util::hex(status).to_string_view() << ']';
         return -1;
       }
 
-      img_ctx.capture_texture_p = img.capture_texture.get();
-
+      img_ctx.encoder_texture.reset(std::move(texture));
+      img_ctx.encoder_mutex = std::move(mutex);
+      img_ctx.encoder_input_res = std::move(srv);
+      img_ctx.capture_texture_generation = img.capture_texture_generation;
       img_ctx.img_weak = img.weak_from_this();
 
       return 0;
@@ -13084,6 +13095,7 @@ namespace platf::dxgi {
     }
 
     // Reset the image (in case this was previously a dummy)
+    ++img->capture_texture_generation;
     img->ddup_desktop_serial = 0;
     img->capture_texture.reset();
     img->capture_rt.reset();

@@ -237,9 +237,11 @@ namespace pending_current_colour_probe_v1 {
       // Open every existing shared-image binding and allocate the existing TWO private slots
       // before input1. Allocation establishes no frame, source clock, pending or publication.
       for(const auto &image:images){auto &img=static_cast<img_d3d_t&>(*image);auto [it,inserted]=converter.img_ctx_map.try_emplace(img.id);(void)inserted;require(converter.initialize_image_context(img,it->second)==0,"Shared image preparation failed");}
-      D3D11_TEXTURE2D_DESC private_desc{};static_cast<img_d3d_t&>(*images[0]).capture_texture->GetDesc(&private_desc);
-      private_desc.Usage=D3D11_USAGE_DEFAULT;private_desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;private_desc.MiscFlags=0;private_desc.CPUAccessFlags=0;
-      for(auto &slot:converter.matched_frame_slots){hr(converter.device->CreateTexture2D(&private_desc,nullptr,&slot.texture),"Private slot preparation failed");hr(converter.device->CreateShaderResourceView(slot.texture.get(),nullptr,&slot.srv),"Private slot SRV failed");}
+      D3D11_TEXTURE2D_DESC source_desc {};
+      static_cast<img_d3d_t &>(*images[0]).capture_texture->GetDesc(&source_desc);
+      for (auto &slot : converter.matched_frame_slots) {
+        require(converter.ensure_private_matched_texture(slot, source_desc), "Private slot preparation failed");
+      }
       records.ctx=converter.device_ctx.get();converter.probe_observer={&records,&recorder_t::record};
       const auto stamp=[&](std::size_t i){const auto t=clock_t::now();images[i]->frame_timestamp=t;images[i]->content_timestamp=t;};
       const auto convert=[&](std::size_t i){require(converter.convert_rgb(*images[i],target.Get(),target_rtv.Get(),false,clock_t::now()-std::chrono::milliseconds(1))==d3d_base_encode_device::rgb_conversion_e::converted,"Actual RGB convert failed");require(!records.overflow&&!records.capture_fault,"Passive observer unavailable");};
