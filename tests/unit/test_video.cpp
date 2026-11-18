@@ -6458,16 +6458,16 @@ TEST(DirectxShaderSourceTest, HostSbsLatestV2LineageIsNotCurrentRenderAuthorizat
   };
 
   const boundary_t selection_boundaries[] {
-    {"lost window/video authority", "!window_region_authorized_for_render(*matched_render_slot)", "matched_render_slot = nullptr;"},
+    {"lost window/video authority", "!window_region_authorized_for_render(*matched_render_slot)", "clear_matched_selection();"},
     {"early ready completion or producer failure", "if (polled.ready) {", "depth_completion_poll_pending = false;"},
     {"route/dump/reprocess/terminal revocation", "if (detail::host_sbs_latest_v2_lineage_reset_required(", "const bool cached_geometry_render_allowed"},
     {"unchanged pending input completes", "unchanged_content_submission_suppressed = true;", "depth_completion_poll_pending = false;"},
-    {"authority changes during matched copy", "completion_finalized_before_admission && matched_render_slot &&\n                !matched_route_matches_current(", "matched_render_slot = nullptr;"},
+    {"authority changes during matched copy", "completion_finalized_before_admission && matched_render_slot &&\n                !matched_route_matches_current(", "clear_matched_selection();"},
     {"admission revokes an early publication", "!depth_estimator->publication_is_current(est.publication)", "completion_finalized_before_admission = false;"},
     {"ordinary asynchronous completion", "est.completed_frame_valid &&\n                  !completion_finalized_before_admission", "matched_render_slot = find_pending_matched_slot(est.completed_frame_id);"},
     {"invalid adaptive submission class", "models::gpu_adaptive_submission_class_e::invalid", "if (force_infer_transaction_enqueued) {"},
     {"missing force-infer capture causality", "!matched_candidate_slot->inference_content_timestamp ||", "// The forced full-source submission has retired the old ROI authority."},
-    {"queued continuation may rewrite singleton fields", "depth_estimator->queue_pending_same_source_gpu_continuation_for_evaluation(", "matched_render_slot = nullptr;"},
+    {"queued continuation may rewrite singleton fields", "depth_estimator->queue_pending_same_source_gpu_continuation_for_evaluation(", "clear_matched_selection();"},
     {"current-frame completion no longer pending", "detail::host_sbs_same_frame_completion_e::keep_pending\n", "depth_completion_poll_pending = false;"},
   };
   for (const auto &boundary : selection_boundaries) {
@@ -6529,21 +6529,25 @@ TEST(DirectxShaderSourceTest, VideoRoiExactProofIsIndependentOfInferenceAndPrese
     read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");
   ASSERT_FALSE(display.empty());
 
-  // A presentation-only copy carries the proof without relabeling its actual inference owner.
+  // Retained analysis carries its own proof and controls reuse independently of the draw colour.
   EXPECT_NE(display.find("destination.unchanged_roi_proof = source.unchanged_roi_proof;"), std::string::npos);
   EXPECT_NE(display.find("slot.unchanged_roi_proof.reset(slot.inference_ddup_damage, *proof_region);"), std::string::npos);
   EXPECT_NE(display.find("slot.unchanged_roi_proof.observe(current_damage, *region)"), std::string::npos);
   EXPECT_EQ(display.find("memoized_input_reuse_kind"), std::string::npos);
 
-  const auto reuse_begin = display.find("current_color_reuse_slot.frame_id = est.completed_frame_id;");
-  const auto reuse_end = display.find("depth_reuse_authorization = post_completion_reuse_authorization;", reuse_begin);
-  ASSERT_NE(reuse_begin, std::string::npos);
-  ASSERT_NE(reuse_end, std::string::npos);
-  const auto reuse = display.substr(reuse_begin, reuse_end - reuse_begin);
-  EXPECT_NE(reuse.find("current_color_reuse_slot.captured_at = reuse_now;"), std::string::npos);
-  EXPECT_NE(reuse.find("current_color_reuse_slot.source_timestamp = current_source_timestamp;"), std::string::npos);
-  EXPECT_EQ(reuse.find("inference_content_timestamp"), std::string::npos);
-  EXPECT_EQ(reuse.find("inference_ddup_damage"), std::string::npos);
+  const auto colour_begin = display.find("const auto current_colour =");
+  const auto colour_end = display.find("const bool v2_repeat_age_expired", colour_begin);
+  ASSERT_NE(colour_begin, std::string::npos);
+  ASSERT_NE(colour_end, std::string::npos);
+  const auto colour = display.substr(colour_begin, colour_end - colour_begin);
+  EXPECT_NE(colour.find("current_source_timestamp"), std::string::npos);
+  EXPECT_NE(colour.find("current_content_timestamp"), std::string::npos);
+  EXPECT_NE(colour.find("reuse_now"), std::string::npos);
+  EXPECT_NE(colour.find("cached_current_color_warp"), std::string::npos);
+  EXPECT_NE(colour.find("uses_current_colour ? current_colour()"), std::string::npos);
+  EXPECT_EQ(colour.find("inference_content_timestamp"), std::string::npos);
+  EXPECT_EQ(colour.find("inference_ddup_damage"), std::string::npos);
+  EXPECT_EQ(colour.find("unchanged_roi_proof"), std::string::npos);
 }
 
 TEST(DirectxShaderSourceTest, VideoRoiSamplesRetainedSourceAndCopiesOnlyForDump) {
@@ -6664,7 +6668,7 @@ TEST(DirectxShaderSourceTest, Convex2xRoiRendererUsesTheAuthenticatedFieldConten
   const auto selected_domain = convert.find(
     "const bool v2_draw_selected = v2_live_warp_selected || queued_geometry_selected;"
   );
-  const auto draw_begin = convert.find("const auto *draw_source_slot =");
+  const auto draw_begin = convert.find("const auto *draw_region =", selected_domain);
   const auto draw_end = convert.find("dump_subtitle_constants =", draw_begin);
   ASSERT_NE(selected_domain, std::string::npos);
   ASSERT_NE(draw_begin, std::string::npos);
@@ -6922,8 +6926,10 @@ TEST(DirectxShaderSourceTest, PackedPresentationCannotSeedSemanticLineage) {
   ASSERT_NE(retention_end, std::string::npos);
   const auto body = display.substr(retention, retention_end - retention);
   EXPECT_NE(body.find("v2_live_warp_selected"), std::string::npos);
+  EXPECT_NE(body.find("draw_colour.pixel_source_frame_id"), std::string::npos);
   for (const auto *forbidden_authority : {
-         "latest_v2_lineage",
+         "latest_v2_lineage.",
+         "latest_v2_lineage =",
          "reusable_ocr_input",
          "gpu_observation_barrier",
          "unchanged_roi_proof",
@@ -6946,7 +6952,7 @@ TEST(DirectxShaderSourceTest, PackedPresentationCannotSeedSemanticLineage) {
     "matched_presentation_cache.observe_current_source(current_source_timestamp, gamma_now)"
   );
   ASSERT_NE(source_observation, std::string::npos);
-  const auto early_completion_poll = display.find("auto polled = prior_poll_plan->eligible");
+  const auto early_completion_poll = display.find("auto polled = poll_pending_depth(&*prior_poll_plan,");
   ASSERT_NE(early_completion_poll, std::string::npos);
   EXPECT_LT(source_observation, early_completion_poll);
   const auto timeout_observation = display.find(
@@ -6956,11 +6962,14 @@ TEST(DirectxShaderSourceTest, PackedPresentationCannotSeedSemanticLineage) {
   ASSERT_NE(timeout_observation, std::string::npos);
   ASSERT_NE(recorder_failure, std::string::npos);
   EXPECT_LT(recorder_failure, timeout_observation);
-  const auto output_classification = display.rfind("const auto presentation_output =", timeout_observation);
+  const auto output_classification = display.rfind("auto presentation_output =", recorder_failure);
   ASSERT_NE(output_classification, std::string::npos);
-  EXPECT_NE(display.substr(output_classification, timeout_observation - output_classification).find(
-              "queued_attempt_failed_flat ? presentation_clock_t::output_e::flat"),
+  EXPECT_NE(display.substr(output_classification, recorder_failure - output_classification).find(
+              "queued_attempt_failed_flat ? presentation_output_e::flat"),
             std::string::npos);
+  const auto fallback_classification = display.find("presentation_output = presentation_output_e::flat;", recorder_failure);
+  ASSERT_NE(fallback_classification, std::string::npos);
+  EXPECT_LT(fallback_classification, timeout_observation);
   const auto route_gate = display.rfind(
     "const bool packed_presentation_route_matches =",
     selection
@@ -8001,7 +8010,7 @@ TEST(DirectxShaderSourceTest, OcrResolveConstantsAppendReferenceAndSourceObserva
     std::string::npos
   );
   EXPECT_NE(
-    estimator.find("create_constant_buffer(sizeof(ocr_resolve_constants_t), ocr_resolve_cbuffer)"),
+    estimator.find("ensure_subtitle_constant_buffer(sizeof(ocr_resolve_constants_t), ocr_resolve_cbuffer)"),
     std::string::npos
   );
 

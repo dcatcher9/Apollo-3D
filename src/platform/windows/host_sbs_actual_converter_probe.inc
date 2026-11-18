@@ -224,13 +224,18 @@ namespace actual_converter_probe_v1 {
     const bool check_retained_rgb = borrowed_recycle && !native_nv12 && !r.native_p010;
     const auto *reference_opt_in = std::getenv("SUNSHINE_TEST_HOST_SBS_SHUTTER_COPY_REFERENCE");
     const bool copy_reference = reference_opt_in && std::string_view {reference_opt_in} == "1";
-    const auto root=r.native_p010 ? r.output/"actual-converter-native-p010-v1"/(native_codec == 1 ? "hevc" : "av1") :
+    const auto *cached_route_opt_in = std::getenv("SUNSHINE_TEST_HOST_SBS_CACHED_CURRENT_ROUTE");
+    const bool cached_route = cached_route_opt_in && std::string_view {cached_route_opt_in} == "1";
+    const auto root=cached_route ? r.output/"actual-converter-cached-current-route-v1" : r.native_p010 ? r.output/"actual-converter-native-p010-v1"/(native_codec == 1 ? "hevc" : "av1") :
       borrowed_recycle?r.output/"actual-converter-borrowed-capture-recycle-v1":
       r.packed_continuity?r.output/(native_nv12 ? "actual-converter-packed-continuity-nv12-v1" : "actual-converter-packed-continuity-v1"):
       r.output/(pending_arrival?"trajectory2-pending-C":"trajectory1-B-parity")/"actual-converter-rgb-probe-v1";
     const auto release=[&](){if(est)est->release_joined_completion_gate_for_benchmark();release_after_draw_query.store(true);if(releaser.joinable()){releaser.request_stop();releaser.join();}};
     try {
       require(r.enabled,"Probe not enabled");require(!std::filesystem::exists(root),"Probe refuses overwrite");
+      require(!cached_route || (r.packed_continuity && !r.queued && !native_nv12 && !r.native_p010 &&
+        !pending_arrival && !r.selected_matte && !r.temporal_source_bridge && !r.background_observer),
+        "Cached-current route regression requires ordinary SDR/HDR RGB continuity");
       require(!r.native_p010 || (r.hdr_input && !native_nv12 && r.packed_continuity &&
         (native_codec == 1 || native_codec == 2) &&
         (r.p010_chroma_mode == "default" || r.p010_chroma_mode == "raster" || r.p010_chroma_mode == "no-uav")),
@@ -340,7 +345,7 @@ namespace actual_converter_probe_v1 {
       if(r.queued)require(converter.initialize_queued_renderer_for_instance(),"Per-instance queued resources unavailable");
       models::joined_completion_gate_benchmark::configuration_t gate;gate.enabled=true;
       gate.placement=r.packed_continuity?models::joined_completion_gate_benchmark::placement_e::after_interop_unmaps:models::joined_completion_gate_benchmark::placement_e::before_interop_unmaps;
-      gate.target_frame_id=3;gate.hold_after_callback_enter_ms=r.packed_continuity&&!borrowed_recycle?350u:120u;gate.callback_safety_timeout_ms=500;
+      gate.target_frame_id=cached_route?4u:3u;gate.hold_after_callback_enter_ms=r.packed_continuity&&!borrowed_recycle?350u:120u;gate.callback_safety_timeout_ms=500;
       require(est->configure_joined_completion_gate_for_benchmark(gate),"Pre-input gate configuration failed");
       if (!native_nv12 && !r.native_p010) {
         hr(converter.device->CreateTexture2D(&td,nullptr,&target),"RGB target failed");hr(converter.device->CreateRenderTargetView(target.Get(),nullptr,&target_rtv),"RGB target RTV failed");
@@ -427,6 +432,87 @@ namespace actual_converter_probe_v1 {
         converter.device_ctx->Flush(); // submit every shared read BEFORE ReleaseSync(0)
       }
       const auto a_publication=a->publication;
+      if (cached_route) {
+        require(!a->flat && !a->repeat && !a->region.is_video_region() && images[0]->content_timestamp, "A must establish genuine full-source warped color and content clock");
+        const auto original = *a;
+        const auto owner = est;
+        std::array<stage_t, 6u> output;
+        for (std::size_t i = 0u; i < 4u; ++i) output[i].prepare(converter.device.get(), target.Get());
+        const auto base = resource(original.views[1].Get());require(base != nullptr, "A actual Base binding missing");
+        output[4].prepare(converter.device.get(), base.Get());output[5].prepare(converter.device.get(), base.Get());
+        require(output[0].copy(converter.device_ctx.get(), target.Get()) && output[4].copy(converter.device_ctx.get(), base.Get()), "A reference staging failed");
+        auto &fresh_image = static_cast<img_d3d_t &>(*images[1]);
+        const auto &fresh_context = converter.img_ctx_map.at(fresh_image.id);
+        {
+          detail::keyed_mutex_lock_t lease {fresh_image.capture_mutex.get()};require(lease.lock() == S_OK, "Fresh capture upload key failed");
+          display->device_ctx->UpdateSubresource(fresh_image.capture_texture.get(), 0u, nullptr, payload(r.frames[0]), w * pixel_bytes, 0u);
+          display->device_ctx->Flush();
+        }
+        stamp(1);images[1]->content_timestamp = images[0]->content_timestamp;
+        require(images[1]->frame_timestamp != images[0]->frame_timestamp, "Fresh capture must have a distinct source clock");
+        convert(1);
+        const auto *observed_cached = records.last_draw();require(observed_cached != nullptr, "Cached current draw absent");
+        const auto cached = *observed_cached;
+        require(cached.conversion == 3u && cached.cached_current_colour && !cached.flat && !cached.repeat && !cached.queued &&
+          cached.publication_current && cached.publication == a_publication && cached.model_frame == a_publication.frame_id &&
+          cached.actual_draw_pixel_source == 3u && cached.source_stamp_ticks == images[1]->frame_timestamp->time_since_epoch().count() &&
+          cached.content_stamp_ticks == images[0]->content_timestamp->time_since_epoch().count() &&
+          cached.views[0].Get() == fresh_context.encoder_input_res.get() && cached.current_input.Get() == cached.views[0].Get() &&
+          cached.views[0].Get() != original.views[0].Get() && cached.views[1].Get() == original.views[1].Get() &&
+          std::count_if(records.events.begin(), records.events.begin() + records.count, [](const auto &e) { return e.kind == event_e::admission; }) == 1,
+          "Exact full-source proof did not draw new capture color using A's genuine depth publication");
+        require(output[1].copy(converter.device_ctx.get(), target.Get()) && output[5].copy(converter.device_ctx.get(), base.Get()), "Cached output staging failed");
+        ComPtr<ID3D11Texture2D> flat_reference;ComPtr<ID3D11RenderTargetView> flat_reference_rtv;
+        hr(converter.device->CreateTexture2D(&td, nullptr, &flat_reference), "Route flat reference target failed");
+        hr(converter.device->CreateRenderTargetView(flat_reference.Get(), nullptr, &flat_reference_rtv), "Route flat reference RTV failed");
+        const context_t changed_context {w, h, context.instance + 1u, context.borrow_matched_capture};
+        require(r.hdr_input ? r.frames[0].rgba16 != r.frames[2].rgba16 : r.frames[0].bgra != r.frames[2].bgra, "Changed-route current pixels must differ from A");
+        converter.probe_context = &changed_context;stamp(2);convert(2);
+        require(converter.depth_estimator.get() == owner, "Route transition replaced the warmed estimator");
+        const auto changed_generation = converter.subtitle_context.generation();
+        const auto *observed_flat = records.last_draw();require(observed_flat != nullptr, "Changed-context draw absent");
+        const auto flat = *observed_flat;
+        auto &current_context = converter.img_ctx_map.at(static_cast<img_d3d_t &>(*images[2]).id);
+        require(flat.conversion == 4u && flat.flat && !flat.repeat && !flat.queued && !flat.cached_current_colour &&
+          flat.views[0].Get() == current_context.encoder_input_res.get() && flat.views[0].Get() == flat.current_input.Get() &&
+          flat.current_source_stamp_ticks == images[2]->frame_timestamp->time_since_epoch().count() && flat.watermark_after >= 4u &&
+          changed_generation != cached.context_generation && !converter.latest_v2_lineage.authenticated,
+          "Changed synthetic route reused old protected pixels or analysis");
+        require(std::any_of(records.events.begin(), records.events.begin() + records.count, [](const auto &e) { return e.kind == event_e::admission && e.conversion == 4u && e.model_frame == 4u && e.force_infer && !e.queued && e.optional_work == static_cast<std::uint32_t>(models::depth_optional_work_mode_e::ordinary); }), "Changed route did not admit its own ordinary force-infer root4");
+        const auto entered_until = clock_t::now() + std::chrono::seconds(2);
+        std::optional<models::joined_completion_gate_benchmark::snapshot_t> held;
+        do { held = est->joined_completion_gate_status_for_benchmark();require(held && !held->released && clock_t::now() < entered_until, "Changed-route root gate unavailable");if (!held->callback_entered) std::this_thread::yield(); } while (!held->callback_entered);
+        const auto color = r.hdr_input ? models::input_color_space::scrgb_hdr : models::input_color_space::srgb;
+        {
+          detail::keyed_mutex_lock_t lease {current_context.encoder_mutex.get()};require(lease.lock() == S_OK, "Changed-route source key failed");
+          require(!est->try_finish_pending_depth_nonblocking(color, false).ready, "Changed-route root unexpectedly completed");
+          held = est->joined_completion_gate_status_for_benchmark();
+          require(held && held->configuration.target_frame_id == 4u && held->last_actual_event_query == CUDA_ERROR_NOT_READY && !held->released, "No literal pending root4 evidence");
+          host_sbs_v2_draw_command_t draw {.render_targets={flat_reference_rtv.Get(),nullptr}, .vertex_shader=converter.sbs_reprojection_vs.get(),
+            .pixel_shader=converter.sbs_flat_identity_ps.get(), .viewport=converter.sbs_viewport, .sampler=converter.sampler_linear.get(),
+            .shader_resources={flat.current_input.Get(),nullptr,nullptr,nullptr,nullptr,nullptr,nullptr}, .geometry_constants=flat.buffers[0].Get()};
+          require(record_host_sbs_v2_draw(converter.device_ctx.get(), draw) && output[2].copy(converter.device_ctx.get(), target.Get()) &&
+            output[3].copy(converter.device_ctx.get(), flat_reference.Get()), "Changed-route flat reference recording failed");
+          converter.device_ctx->Flush();
+        }
+        wait_ready();const auto released = est->joined_completion_gate_status_for_benchmark();
+        require(released && released->released && released->callback_exited && !released->cancelled && !released->callback_timed_out && !released->callback_entry_timed_out, "Changed-route root did not release normally");
+        convert(2);const auto *recovered = records.last_draw();
+        require(recovered && recovered->publication_current && recovered->publication.frame_id == 4u && !recovered->flat &&
+          !recovered->repeat && !recovered->cached_current_colour && recovered->pending_slots == 0u && recovered->context_generation == changed_generation,
+          "Changed-route root did not ACK under its own new context");
+        json artifacts = json::array();constexpr std::array<const char *, 6u> roles {"matched-A", "cached-current-A", "changed-route-flat", "canonical-current-flat", "matched-Base", "cached-Base"};
+        for (std::size_t i = 0u; i < output.size(); ++i) { output[i].read(converter.device_ctx.get());const auto path = root / (std::string(roles[i]) + (i >= 4u ? ".f32" : r.hdr_input ? ".rgba16f" : ".bgra8"));
+          std::ofstream f(path, std::ios::binary);f.write(output[i].bytes.data(), output[i].bytes.size());f.close();require(f.good(), "Cached-route artifact write failed");auto artifact = binding(path);artifact["role"] = roles[i];artifacts.push_back(artifact); }
+        require(output[0].bytes == output[1].bytes && output[4].bytes == output[5].bytes && output[2].bytes == output[3].bytes,
+          "Cached depth/current color or changed-route flat output differs from its literal reference");
+        write_json(root / "result.json", {{"schema",1}, {"status","PASS_FUNCTIONAL_CACHED_CURRENT_ROUTE"}, {"scope","actual converter; synthetic route transition; full-source exact content-clock proof; no live eligibility or latency claim"},
+          {"source_inputs",sources}, {"fresh_capture_payload_parent_index",0}, {"overwritten_archived_input_index",1}, {"cached_depth_publication",pub(cached.publication)},
+          {"A",event_json(original)}, {"cached_current",event_json(cached)}, {"changed_route_flat",event_json(flat)}, {"changed_route_recovered",event_json(*recovered)},
+          {"context_instances",{context.instance,changed_context.instance}}, {"context_generations",{cached.context_generation,changed_generation}}, {"cached_event_observation_us_diagnostic",cached.observation_us},
+          {"cached_model_observation_us",cached.publication.observation_timestamp_us}, {"gate_held",gate_json(held)}, {"gate_released",gate_json(released)}, {"outputs",artifacts}});
+        converter.probe_context = nullptr;converter.probe_observer = {};return 0;
+      }
       if(r.packed_continuity) {
         const auto a_pixel_source_frame=a->actual_draw_pixel_source;
         const auto a_source_stamp=a->source_stamp_ticks;
