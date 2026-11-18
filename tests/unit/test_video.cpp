@@ -38,6 +38,7 @@
 #ifdef _WIN32
   #include <d3d11.h>
   #include <d3dcompiler.h>
+  #include <src/host_sbs_observation_handoff.h>
   #include <src/nvenc/nvenc_d3d11.h>
   #include <src/platform/windows/display.h>
   #include <src/platform/windows/display_config.h>
@@ -4117,6 +4118,35 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   refined_result.refined_live_geometry_active = true;
   EXPECT_TRUE(models::parallax_v2_result_is_authenticated(refined_result));
 
+  {
+    host_sbs::observation_handoff_t selection;
+    selection.select({.observation = refined_result});
+    ASSERT_TRUE(selection.authenticate_structure());
+    ASSERT_TRUE(selection.accept_submission({.submission = {.inference_enqueued = true}}, true));
+    EXPECT_TRUE(selection.has_authenticated_structure());
+
+    host_sbs::observation_handoff_t retained;
+    retained.select_retained(selection);
+    EXPECT_TRUE(retained.has_authenticated_structure());
+    EXPECT_FALSE(retained.step().submission.inference_enqueued);
+
+    // A substituted view with the same numeric frame/publication identity is a new selection.
+    auto wrong_view = refined_result;
+    wrong_view.shadow_base_final_parallax = refined_result.shadow_vertical_conditioned;
+    EXPECT_FALSE(selection.accept_submission({.observation = std::move(wrong_view)}, true));
+    EXPECT_FALSE(selection.has_authenticated_structure());
+    EXPECT_FALSE(selection.authenticate_structure());
+    EXPECT_TRUE(retained.authenticate_structure());
+
+    selection.select({.observation = refined_result});
+    EXPECT_FALSE(selection.has_authenticated_structure());
+    EXPECT_TRUE(selection.authenticate_structure());
+    selection.select_retained(retained);
+    EXPECT_TRUE(selection.has_authenticated_structure());
+    selection.reset();
+    EXPECT_FALSE(selection.authenticate_structure());
+  }
+
   auto adaptive_result = refined_result;
   adaptive_result.parallax_v2_joint_plane_mode = 3u;
   EXPECT_TRUE(models::parallax_v2_result_is_authenticated(adaptive_result));
@@ -7139,14 +7169,14 @@ TEST(DirectxShaderSourceTest, AdaptiveReuseUsesExactCurrentPublicationAndActualD
   EXPECT_NE(receipt_body.find("publications.current_publication"), std::string::npos);
   EXPECT_NE(receipt_body.find("publication_is_current(receipt.expected)"), std::string::npos);
   EXPECT_NE(receipt_body.find("matches_publication("), std::string::npos);
-  EXPECT_NE(receipt_body.find("receipt, latest_v2_lineage.estimate.publication"), std::string::npos);
+  EXPECT_NE(receipt_body.find("receipt, latest_v2_lineage.estimate().publication"), std::string::npos);
   EXPECT_EQ(receipt_body.find("sleep"), std::string::npos);
   EXPECT_EQ(receipt_body.find("Flush("), std::string::npos);
   const auto authorization = display.substr(source_prepared, enqueue - source_prepared);
   EXPECT_NE(authorization.find("gpu_undecided_candidate_matches("), std::string::npos);
   EXPECT_NE(authorization.find("models::depth_optional_work_allows_gpu_undecided("), std::string::npos);
   EXPECT_NE(authorization.find("!inference_pending &&"), std::string::npos);
-  EXPECT_NE(authorization.find("publication_is_current(latest_v2_lineage.estimate.publication)"), std::string::npos);
+  EXPECT_NE(authorization.find("publication_is_current(latest_v2_lineage.estimate().publication)"), std::string::npos);
   EXPECT_NE(display.find("candidate.inference_ddup_damage->token <= baseline.inference_ddup_damage->token"), std::string::npos);
   EXPECT_NE(display.find("matched_motion_damage(baseline, candidate.inference_ddup_damage)"), std::string::npos);
   EXPECT_NE(display.find("latest_v2_lineage.receipt ? &*latest_v2_lineage.receipt : nullptr"), std::string::npos);
@@ -7189,7 +7219,7 @@ TEST(DirectxShaderSourceTest, AdaptiveReuseUsesExactCurrentPublicationAndActualD
   ASSERT_NE(retain, std::string::npos);
   ASSERT_NE(retain_end, std::string::npos);
   EXPECT_NE(display.substr(retain, retain_end - retain).find("using_cached_estimate"), std::string::npos);
-  EXPECT_EQ(display.find("latest_v2_lineage.estimate.gpu_undecided_completion = false"), std::string::npos);
+  EXPECT_EQ(display.find("latest_v2_lineage.estimate().gpu_undecided_completion = false"), std::string::npos);
   EXPECT_EQ(display.find("opaque_gpu_followup_anchor"), std::string::npos);
   EXPECT_EQ(display.find("gpu_observation_barrier"), std::string::npos);
   EXPECT_EQ(display.find("adaptive_hold_cadence"), std::string::npos);
@@ -7230,7 +7260,7 @@ TEST(DirectxShaderSourceTest, HostSbsRejectsRotationAndUsesMatchedV2Frames) {
     std::string::npos
   );
   EXPECT_NE(display.find("find_pending_matched_slot(est.completed_frame_id)"), std::string::npos);
-  EXPECT_NE(display.find("parallax_v2_result_is_authenticated(est)"), std::string::npos);
+  EXPECT_NE(display.find("handoff.authenticate_structure()"), std::string::npos);
   EXPECT_NE(display.find("v2_live_resources_complete"), std::string::npos);
   EXPECT_EQ(
     live_shader.find("Texture2D<float> CandidateParallax"),

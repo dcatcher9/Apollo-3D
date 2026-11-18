@@ -1591,8 +1591,8 @@ namespace platf::dxgi {
           matched_frame_slot_t *matched_candidate_slot = nullptr;
           bool cached_current_color_warp = false;
           host_sbs::observation_handoff_t handoff;
-          auto &depth_step = handoff.step();
-          auto &est = depth_step.observation;
+          const auto &depth_step = handoff.step();
+          const auto &est = depth_step.observation;
           const auto clear_matched_selection = [&]() {
             matched_render_slot = nullptr;
             handoff.reset();
@@ -1767,8 +1767,7 @@ namespace platf::dxgi {
             // Authenticate the first completed V2 field for which the exact buffered color
             // remains. A later invalid frame is handled inside the V2 shader.
             if (host_sbs_renderer == models::host_sbs_renderer_e::awaiting_v2) {
-              const bool result_authenticated =
-                models::parallax_v2_result_is_authenticated(est);
+              const bool result_authenticated = handoff.authenticate_structure();
               host_sbs_renderer = models::latch_host_sbs_renderer(
                 host_sbs_renderer,
                 result_authenticated
@@ -1818,8 +1817,7 @@ namespace platf::dxgi {
               matched_render_slot->texture->GetDesc(&completed_source_desc);
             }
             (void) retain_latest_v2_lineage(
-              est,
-              depth_step.status,
+              handoff,
               *matched_render_slot,
               completed_source_desc,
               live_source_desc,
@@ -1839,7 +1837,7 @@ namespace platf::dxgi {
             }
             if (publications.current_publication) {
               const auto &receipt = *publications.current_publication;
-              if (depth_estimator->publication_is_current(receipt.expected) && models::host_sbs_gpu_completion_receipt::matches_publication(receipt, latest_v2_lineage.estimate.publication)) {
+              if (depth_estimator->publication_is_current(receipt.expected) && models::host_sbs_gpu_completion_receipt::matches_publication(receipt, latest_v2_lineage.estimate().publication)) {
                 if (late && diagnostics_enabled && !latest_v2_lineage.receipt) {
                   ++matched_stats_publication_late_ready;
                 }
@@ -1956,7 +1954,7 @@ namespace platf::dxgi {
           const bool completed_current_route_matches =
             completion_finalized_before_admission && matched_render_slot &&
             same_source(matched_render_slot->source_timestamp, current_source_timestamp) &&
-            models::parallax_v2_result_is_authenticated(est) &&
+            handoff.authenticate_structure() &&
             matched_route_matches_current(
               *matched_render_slot,
               live_source_desc,
@@ -2031,7 +2029,7 @@ namespace platf::dxgi {
           );
           const bool current_source_already_completed =
             completed_source_action != detail::host_sbs_completed_source_action_e::observe;
-          if (detail::host_sbs_latest_v2_lineage_reset_required(latest_v2_lineage.authenticated, latest_v2_route_matches, snapshot_debug_inputs, depth_authority_reprocess_pending, producer_terminal)) {
+          if (detail::host_sbs_latest_v2_lineage_reset_required(latest_v2_lineage.authenticated(), latest_v2_route_matches, snapshot_debug_inputs, depth_authority_reprocess_pending, producer_terminal)) {
             latest_v2_lineage.reset();
             // Route/dump/reprocess/terminal revocation invalidates the cached resource aliases
             // regardless of any current-frame proof computed above.
@@ -2043,8 +2041,8 @@ namespace platf::dxgi {
               depth_reuse_authorization,
               latest_v2_lineage.slot.frame_id,
               frame_id,
-              latest_v2_lineage.estimate.shadow_base_final_parallax &&
-                latest_v2_lineage.estimate.shadow_state
+              latest_v2_lineage.estimate().shadow_base_final_parallax &&
+                latest_v2_lineage.estimate().shadow_state
             );
           if (source_admission.pipeline_active) {
             // The encode loop calls convert() on a retained source when accepted inference is
@@ -2173,7 +2171,7 @@ namespace platf::dxgi {
                 // one nonblocking opportunity before forming C's adaptive proof against owner A.
                 consume_publications(true);
                 const bool known_publication_at_admission = latest_v2_lineage.known_depth() &&
-                                                            depth_estimator->publication_is_current(latest_v2_lineage.estimate.publication);
+                                                            depth_estimator->publication_is_current(latest_v2_lineage.estimate().publication);
                 const auto observation_timestamp_us =
                   host_sbs_observation_timestamp_us(
                     matched_candidate_slot->captured_at
@@ -2201,8 +2199,8 @@ namespace platf::dxgi {
                     frame_id,
                     authorize_gpu_undecided,
                     latest_v2_lineage.receipt ? &*latest_v2_lineage.receipt : nullptr,
-                    depth_estimator->publication_is_current(latest_v2_lineage.estimate.publication) ?
-                      latest_v2_lineage.estimate.publication :
+                    depth_estimator->publication_is_current(latest_v2_lineage.estimate().publication) ?
+                      latest_v2_lineage.estimate().publication :
                       models::host_sbs_gpu_completion_receipt::expected_t {},
                     observation_timestamp_us
                   );
@@ -2562,15 +2560,15 @@ namespace platf::dxgi {
               post_completion_reuse_authorization,
               latest_v2_lineage.slot.frame_id,
               frame_id,
-              latest_v2_lineage.estimate.shadow_base_final_parallax &&
-                latest_v2_lineage.estimate.shadow_state
+              latest_v2_lineage.estimate().shadow_base_final_parallax &&
+                latest_v2_lineage.estimate().shadow_state
             );
           if (
             !matched_render_slot && post_completion_cache_render_allowed &&
             (unchanged_content_submission_suppressed || depth_step.submission.inference_enqueued ||
              depth_step.submission.gpu_undecided_transaction_enqueued)
           ) {
-            handoff.select(host_sbs::observation_handoff_t::repeat(latest_v2_lineage.estimate, latest_v2_lineage.status));
+            handoff.select_retained(latest_v2_lineage.completion);
             matched_render_slot = &latest_v2_lineage.slot;
             using_cached_estimate = true;
             cached_current_color_warp = true;
@@ -2756,8 +2754,7 @@ namespace platf::dxgi {
             host_sbs_renderer == models::host_sbs_renderer_e::failed_flat;
           const bool v2_live_resources_complete =
             est.shadow_base_final_parallax && est.shadow_state;
-          const bool v2_result_authenticated =
-            models::parallax_v2_result_is_authenticated(est);
+          const bool v2_result_authenticated = handoff.authenticate_structure();
           const bool v2_live_warp_selected =
             v2_renderer_selected && matched_render_slot &&
             v2_result_authenticated &&
@@ -3438,7 +3435,7 @@ namespace platf::dxgi {
               est.final_parallax() &&
               (est.subtitle_conditioning_diagnostics_current || est.subtitle_work_suppressed) &&
               v2_renderer_selected &&
-              models::parallax_v2_result_is_authenticated(est);
+              handoff.authenticate_structure();
             ID3D11ShaderResourceView *dump_depth_input_source =
               matched_render_slot ? matched_render_slot->analysis_input_srv() : nullptr;
             if (complete_dump_snapshot && est.input_region.is_video_region() && matched_render_slot->texture) {
@@ -4924,14 +4921,21 @@ namespace platf::dxgi {
     }
 
     struct latest_v2_lineage_t {
-      models::depth_observation_views_t estimate;
-      models::depth_call_status_t status;
+      host_sbs::observation_handoff_t completion;
       matched_frame_slot_t slot;
       std::optional<models::host_sbs_gpu_completion_receipt::receipt_t> receipt;
 
+      [[nodiscard]] const models::depth_observation_views_t &estimate() const noexcept {
+        return completion.step().observation;
+      }
+
+      [[nodiscard]] bool authenticated() const noexcept {
+        return completion.has_authenticated_structure();
+      }
+
       [[nodiscard]] bool known_depth() const noexcept {
-        return authenticated && receipt && receipt->depth_cache_authorized() &&
-               models::host_sbs_gpu_completion_receipt::matches_publication(*receipt, estimate.publication);
+        return authenticated() && receipt && receipt->depth_cache_authorized() &&
+               models::host_sbs_gpu_completion_receipt::matches_publication(*receipt, estimate().publication);
       }
 
       UINT source_width = 0u;
@@ -4945,7 +4949,6 @@ namespace platf::dxgi {
       std::uint64_t region_authority_generation = 0u;
       std::uint64_t browser_authority_epoch = 0u;
       bool interactive_move_size = false;
-      bool authenticated = false;
 
       void reset() noexcept {
         *this = {};
@@ -4959,7 +4962,8 @@ namespace platf::dxgi {
         const std::uint64_t current_browser_authority_epoch,
         const bool current_interactive_move_size
       ) const noexcept {
-        return authenticated && estimate.completed_frame_valid &&
+        const auto &estimate = this->estimate();
+        return authenticated() && estimate.completed_frame_valid &&
                estimate.completed_frame_id == slot.frame_id && estimate.shadow_base_final_parallax &&
                estimate.shadow_state && estimate.input_region.valid() &&
                depth_completion_region_matches_submission(
@@ -5291,7 +5295,7 @@ namespace platf::dxgi {
       const bool current_interactive_move_size
     ) const noexcept {
       return depth_estimator && subtitle_context.matches(latest_v2_lineage.slot.subtitle_context_generation) &&
-             depth_estimator->publication_is_current(latest_v2_lineage.estimate.publication) &&
+             depth_estimator->publication_is_current(latest_v2_lineage.estimate().publication) &&
              latest_v2_lineage.route_matches(
                source_desc,
                current_color_space,
@@ -5306,13 +5310,13 @@ namespace platf::dxgi {
     }
 
     [[nodiscard]] bool retain_latest_v2_lineage(
-      const models::depth_observation_views_t &estimate,
-      const models::depth_call_status_t &status,
+      const host_sbs::observation_handoff_t &observation,
       const matched_frame_slot_t &slot,
       const D3D11_TEXTURE2D_DESC &completed_source_desc,
       const D3D11_TEXTURE2D_DESC &current_source_desc,
       const models::input_color_space current_color_space
     ) {
+      const auto &estimate = observation.step().observation;
       const bool completion_route_matches_current =
         subtitle_context.matches(slot.subtitle_context_generation) &&
         slot.inference_content_timestamp && estimate.completed_frame_id == slot.frame_id &&
@@ -5332,7 +5336,7 @@ namespace platf::dxgi {
          (slot.inference_ddup_damage && window_region_authorized_for_render(slot)));
       if (!detail::host_sbs_latest_v2_completion_retention_allowed(
             host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2,
-            models::parallax_v2_result_is_authenticated(estimate),
+            observation.authenticate_structure(),
             completion_route_matches_current,
             gpu_transaction_class_matches(estimate, slot)
           )) {
@@ -5340,13 +5344,12 @@ namespace platf::dxgi {
         return false;
       }
 
-      if (latest_v2_lineage.estimate.publication != estimate.publication) {
+      if (latest_v2_lineage.estimate().publication != estimate.publication) {
         latest_v2_lineage.receipt.reset();
       }
-      latest_v2_lineage.estimate = estimate;
       // Retain observation views and diagnostic status only. Repeated presentation cannot
       // replay a submission or a completion event because neither belongs to this cache.
-      latest_v2_lineage.status = status;
+      latest_v2_lineage.completion.select_retained(observation);
       // The cache renders current color, independently of the retained matched image. Retain only the scalar
       // attribution needed by the V2 renderer; matched slots own move-only D3D resources.
       copy_matched_frame_attribution(latest_v2_lineage.slot, slot);
@@ -5365,7 +5368,6 @@ namespace platf::dxgi {
         slot.observed_browser_authority_epoch;
       latest_v2_lineage.interactive_move_size =
         slot.observed_interactive_move_size;
-      latest_v2_lineage.authenticated = true;
       return true;
     }
 
@@ -8555,13 +8557,14 @@ namespace platf::dxgi {
         result.text_game_warp_ready = converter_->selected_shared_warp_programs.text_game_ready();
         result.queued_research_active = static_cast<bool>(converter_->queued_research);
         result.v2_live_warp_seen = converter_->v2_live_warp_seen;
-        result.latest_lineage_authenticated = converter_->latest_v2_lineage.authenticated;
+        result.latest_lineage_authenticated = converter_->latest_v2_lineage.authenticated();
         result.latest_lineage_known_depth = converter_->latest_v2_lineage.known_depth();
         const auto &lineage = converter_->latest_v2_lineage;
         result.latest_lineage_receipt_present = lineage.receipt.has_value();
         result.latest_lineage_receipt_depth_cache_authorized = lineage.receipt && lineage.receipt->depth_cache_authorized();
-        result.latest_lineage_receipt_matches_publication = lineage.receipt && models::host_sbs_gpu_completion_receipt::matches_publication(*lineage.receipt, lineage.estimate.publication);
-        result.latest_lineage_publication_frame_id = lineage.estimate.publication.frame_id;
+        const auto &publication = lineage.estimate().publication;
+        result.latest_lineage_receipt_matches_publication = lineage.receipt && models::host_sbs_gpu_completion_receipt::matches_publication(*lineage.receipt, publication);
+        result.latest_lineage_publication_frame_id = publication.frame_id;
         result.sbs_frame_sequence = converter_->sbs_frame_sequence;
         result.flat_outputs = converter_->matched_stats_output_flat;
         result.warped_outputs = converter_->matched_stats_output_warped_new;

@@ -8,10 +8,12 @@
   #include "src/host_sbs_observation_handoff.h"
 
   #include <memory>
+  #include <type_traits>
   #include <utility>
 
 namespace {
   using handoff_t = host_sbs::observation_handoff_t;
+  static_assert(std::is_same_v<decltype(std::declval<handoff_t &>().step()), const models::depth_step_result_t &>);
 
   models::depth_step_result_t step_for(const std::uint64_t frame, const std::uint64_t domain, const bool completed) {
     models::depth_step_result_t step;
@@ -58,7 +60,8 @@ namespace {
 
   TEST(HostSbsObservationHandoffTest, SelectPreservesPopulatedWorkingViewsWithoutFreshCompletion) {
     handoff_t handoff;
-    const auto working = step_for(17u, 7u, false);
+    auto working = step_for(17u, 7u, false);
+    working.status.cuda_graph_active = true;
     handoff.select(working);
 
     const auto &selected = std::as_const(handoff).step();
@@ -67,10 +70,7 @@ namespace {
     expect_observation(selected.observation, working.observation);
     expect_no_submission(selected.submission);
     EXPECT_FALSE(selected.completion.input_domain_reset);
-    EXPECT_FALSE(selected.status.cuda_graph_active);
-
-    handoff.step().status.cuda_graph_active = true;
-    EXPECT_TRUE(std::as_const(handoff).step().status.cuda_graph_active);
+    EXPECT_TRUE(selected.status.cuda_graph_active);
   }
 
   TEST(HostSbsObservationHandoffTest, FinalizedCompletionKeepsItsViewsAndEventWhileSubmissionAdvances) {
@@ -185,9 +185,12 @@ namespace {
     source.status.cuda_graph_active = true;
     const auto expected = source.observation;
 
-    const auto repeated = handoff_t::repeat(source.observation, source.status);
-    source.observation = {};
-    source.status = {};
+    handoff_t original;
+    original.select(std::move(source));
+    handoff_t repeat;
+    repeat.select_retained(original);
+    original.reset();
+    const auto &repeated = repeat.step();
 
     expect_observation(repeated.observation, expected);
     EXPECT_TRUE(repeated.status.cuda_graph_active);

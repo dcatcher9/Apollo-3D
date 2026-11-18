@@ -476,7 +476,7 @@ namespace actual_converter_probe_v1 {
         require(flat.conversion == 4u && flat.flat && !flat.repeat && !flat.queued && !flat.cached_current_colour &&
           flat.views[0].Get() == current_context.encoder_input_res.get() && flat.views[0].Get() == flat.current_input.Get() &&
           flat.current_source_stamp_ticks == images[2]->frame_timestamp->time_since_epoch().count() && flat.watermark_after >= 4u &&
-          changed_generation != cached.context_generation && !converter.latest_v2_lineage.authenticated,
+          changed_generation != cached.context_generation && !converter.latest_v2_lineage.authenticated(),
           "Changed synthetic route reused old protected pixels or analysis");
         require(std::any_of(records.events.begin(), records.events.begin() + records.count, [](const auto &e) { return e.kind == event_e::admission && e.conversion == 4u && e.model_frame == 4u && e.force_infer && !e.queued && e.optional_work == static_cast<std::uint32_t>(models::depth_optional_work_mode_e::ordinary); }), "Changed route did not admit its own ordinary force-infer root4");
         const auto entered_until = clock_t::now() + std::chrono::seconds(2);
