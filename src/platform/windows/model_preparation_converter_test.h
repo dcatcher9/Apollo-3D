@@ -102,6 +102,7 @@ namespace platf::dxgi::testing {
     bool last_draw_flat = false;
     bool last_draw_repeat = false;
     bool last_draw_publication_current = false;
+    bool last_draw_ema_motion_mask_present = false;
     std::uint64_t last_draw_model_frame = 0;
     std::uint64_t last_draw_observation_us = 0;
     std::uint32_t last_draw_expected_work = 0;

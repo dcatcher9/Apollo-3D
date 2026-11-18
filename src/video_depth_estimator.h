@@ -889,10 +889,10 @@ namespace models {
    * storage. Consumers must still validate the exact current publication before rendering.
    */
   struct depth_observation_views_t {
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth;  ///< Normalized-depth diagnostics.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_health_state;  ///< Tagged depth-health state shared with telemetry and coordinate production.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_frame_state;  ///< {min,max,initialized,frame_state}; frame_state 0 means an all-invalid completion held the prior depth.
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ema_motion_mask;  ///< Edge-selective EMA snap mask.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ema_motion_mask;  ///< Diagnostic edge-selective EMA snap mask.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_model_depth;  ///< Public model output buffer, before normalization/EMA/curvature; primarily for the offline evaluator.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_model_depth_snapshot;  ///< Optional stable copy of the completed frame's raw output for a live Dump 3D request.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> model_input_snapshot;  ///< Optional stable NCHW/ImageNet-normalized input for the same live Dump 3D frame.
@@ -1438,6 +1438,7 @@ namespace models {
 
   class video_depth_estimator {
   public:
+    enum class normalized_depth_diagnostics_e { disabled, enabled };
     /**
      * @brief Construct a new video depth estimator
      *
@@ -1449,13 +1450,16 @@ namespace models {
      *            config::host_sbs_v2_live_calibration values).
      * @param model The selected public DAV2 identity and preprocessing calibration. Production
      *            resolves it to the authenticated fused pixel_values -> refined_depth runtime.
+     * @param normalized_depth_diagnostics Retain the normalized-depth and EMA mask history used by
+     *            the evaluator. Live V2 rendering uses the independently produced parallax fields.
      */
     video_depth_estimator(
       Microsoft::WRL::ComPtr<ID3D11Device> device,
       Microsoft::WRL::ComPtr<ID3D11DeviceContext> context,
       const std::filesystem::path &assets_dir,
       const config::video_t::sbs_t &cfg,
-      const config::depth_model_info &model
+      const config::depth_model_info &model,
+      normalized_depth_diagnostics_e normalized_depth_diagnostics = normalized_depth_diagnostics_e::enabled
     );
 
     ~video_depth_estimator();

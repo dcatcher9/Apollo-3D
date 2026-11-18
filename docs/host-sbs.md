@@ -742,7 +742,7 @@ branch: OCR preprocessing and inference,
 OCR8 reduction, UIP4 observation, and subtitle conditioning do not run. When temporary suppression
 is selected within an unchanged eligible context, this is no OCR observation rather than an
 abstaining or missing record, so retained UIP4 state does not age or clear. The frame publishes the
-ordinary post-limit Base field. Depth normalization/EMA,
+ordinary post-limit Base field. The raw-depth range EMA,
 the V2 camera and the remaining geometry producer continue normally. An explicitly armed Dump 3D
 frame remains an ordinary complete observation only when its subtitle context is eligible, so frozen
 OCR/UIP4 resources are never serialized as current-frame evidence. Hard context disable takes
@@ -2138,10 +2138,10 @@ authorize TensorRT output. Ordinary work can publish only on valid infer and pub
 abstention when its optional receipt is absent. Work `1` consumes OCR only with a valid `OOCR` marker;
 work `2` requires the marker to remain zero. Suppression publishes no observation. A CPU-known force
 root always has exact current Base, so malformed receipt proof emits the current OCR abstention and
-complete Base-derived conditioner output without relabeling retained boxes. Because normalization
-rotates two private depth targets before receipt validation, invalid GPU-undecided authority runs
-only the retained-depth copy needed to restore the previous normalized field into the new target;
-it advances no depth or subtitle temporal or ownership state.
+complete Base-derived conditioner output without relabeling retained boxes. Invalid GPU-undecided
+authority holds depth and subtitle temporal and ownership state. When the evaluator retains
+normalized-depth diagnostics, the retained-depth copy restores the previous field into the
+rotated diagnostic target.
 
 A private queued-force postprocess mode (`request_flags = 4`, distinct from optional-work flags)
 requires the current post-child receipt for both depth and subtitle indirect shapes. It cannot
@@ -2193,16 +2193,21 @@ launch contains the recaptured OCR child, or OCR has been definitively disabled.
 optional-mode transition cannot accidentally clear depth or OCR repair authority, and no address
 change creates a raw-model fallback.
 
-An inference receipt runs the complete depth postprocess chain, including frame statistics,
-normalization reductions and histogram, depth texture publication, history work, and
-every V2 state, mapping, limiter and Base-field pass. Ordinary subtitle work consumes OCR output with
-complete `RQST`/`CBRG`/`OOCR` proof, or publishes its requested abstention, then advances UIP4 and
-writes the complete conditioned Final diagnostic from immutable Base together with the native matte.
+An inference receipt triggers the production depth postprocess. It computes frame statistics and the
+raw-depth normalization histogram, updates `MinMaxEma` and depth health, advances model-input
+history when valid, and runs the V2 state, mapping, limiter and Base-field passes.
+Ordinary subtitle work consumes OCR output with complete `RQST`/`CBRG`/`OOCR` proof or publishes
+its requested abstention, then advances UIP4 and writes the complete conditioned Final diagnostic
+from immutable Base together with the native matte.
 
-A reuse receipt copies previous normalized depth through the swapped output target and preserves
-normalization, camera, model-input history, DAV2/V2 Base, OCR8, UIP4, condition parameters and
-the conditioned Final diagnostic, native matte, SCT5 and joined source byte-for-byte. Native USER32
-suppression produces no OCR/UIP4 observation and disables subtitle pinning for that draw.
+Direct evaluation and converter research retain normalized depth and the EMA motion mask by
+default. Ordinary live sessions, including Dump 3D, omit these diagnostic textures and passes.
+
+A reuse receipt preserves the raw-depth range, camera, model-input history, DAV2/V2 Base, OCR8,
+UIP4, condition parameters, conditioned Final diagnostic, native matte, SCT5 and joined source
+byte for byte. The evaluator restores the previous normalized-depth field into its rotated
+target when that diagnostic is enabled. Native USER32 suppression produces no OCR/UIP4
+observation and disables subtitle pinning for that draw.
 A failure to publish the complete joined tuple is
 terminal and produces no nominal completion. Optional OCR readiness remains independently checked,
 but depth and subtitle advance or hold as one coherent transaction.
@@ -2306,9 +2311,9 @@ substitute for exact rendering proof, seed cache lineage, select the detector br
 another observation. Packed-image redelivery does not advance that completed-transaction identity.
 An authenticated infer advances model-input history when the shared depth-validity predicate
 (`MinMaxEma.w >= 0.5`) passes. The coordinate-map dispatch copies the three NCHW planes for
-every cell of the padded target domain before coordinate clamping or mapping early exit. A
-separate normalization pass maintains normalized-depth history. An invalid or empty depth
-frame holds both histories and clears the model-input history owner tag.
+every cell of the padded target domain before coordinate clamping or mapping early exit. An
+invalid or empty depth frame holds the comparison tensor and clears its owner tag. When
+enabled, the evaluator's separate normalization pass also holds the previous normalized-depth field.
 Thread zero refreshes owner metadata and commits its tag only under the stricter
 depth-health-tag/domain/work proof. Completion of the direct or indirect map dispatch and
 unbinding its three UAVs publishes the history and owner. `coordinate_main` remains diagnostic-only.
@@ -2325,8 +2330,7 @@ The successor's input preparation cannot overwrite the already-published V2 fiel
 synthetically reset temporal state: authenticated inference advances the complete depth/subtitle
 observation and every reuse freezes both. The history-owner record's frame/domain/dimension/timestamp words refresh only
 in the same fused map dispatch as the receipt-authorized infer and shared depth-validity
-gate that advances the comparison tensor and normalized-depth history; a non-advancing
-infer leaves a zero owner tag. An
+gate that advances the NCHW comparison tensor. A non-advancing infer leaves a zero owner tag. An
 `A -> B -> C` sequence therefore compares C against B when B advanced valid inference history and against A
 when B reused it. Learning the completed outcome on the
 CPU advances no history. Only a real input-domain transition clears these
@@ -2612,9 +2616,9 @@ timer-boundary shift for a regression.
 `depth_preprocess_gpu` includes the calibrated RGB-to-NCHW work and GPU-undecided tile comparison
 against the retained matched source. ROI samples therefore appear in that timer
 without a separate live crop allocation or copy.
-`depth_parallax_map_gpu` now includes both candidate mapping and the fused six-value padded-history
-copy plus owner publication up to `parallax_limits_start`; that added bandwidth belongs to this existing
-timer and is not a new counter or schema boundary. The cadence diagnostics report
+`depth_parallax_map_gpu` covers candidate mapping, copying the three padded NCHW planes into
+model-input history, and publishing the history owner. The interval ends at
+`parallax_limits_start`. The cadence diagnostics report
 `roi_direct_inputs/dump_copies`; the first counts admitted direct ROI inputs, while the second can
 increase only for an explicit Dump 3D diagnostic reconstruction after live timing has closed.
 
@@ -2959,7 +2963,7 @@ history after a new private matched-frame copy is authorized, but never the pre-
 
 During the native USER32 interactive move/size loop, Host SBS withdraws window-region authority and
 continues full-source 3D for the current captured display instead of chasing a moving client
-rectangle. DAV2, depth normalization/EMA, the V2 camera and geometry production
+rectangle. DAV2, the raw-depth range EMA, the V2 camera and geometry production
 retain their normal full-frame behavior. The optional subtitle branch is suppressed as described
 above, so moving desktop text cannot acquire or age subtitle authority and the current Base field is
 rendered without subtitle conditioning. Temporary suppression freezes subtitle memory only while

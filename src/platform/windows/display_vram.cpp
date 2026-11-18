@@ -4150,11 +4150,16 @@ namespace platf::dxgi {
       Microsoft::WRL::ComPtr<ID3D11Device> dev(device.get());
       Microsoft::WRL::ComPtr<ID3D11DeviceContext> ctx(device_ctx.get());
       const bool prepare_live_outline = !probe_context;
+      using normalized_depth_diagnostics_e = models::video_depth_estimator::normalized_depth_diagnostics_e;
+      const auto normalized_depth_diagnostics = probe_context ?
+                                                  normalized_depth_diagnostics_e::enabled :
+                                                  normalized_depth_diagnostics_e::disabled;
       const bool prepare_text_game_programs = sbs_mode == ::video::SBS_GAME_SBS && text_game_eligible;
       depth_estimator_build_task_t build_task([dev = std::move(dev),
                                                ctx = std::move(ctx),
                                                active,
                                                sbs_cfg,
+                                               normalized_depth_diagnostics,
                                                prepare_live_outline,
                                                prepare_text_game_programs]() mutable {
         depth_pipeline_build_result_t result;
@@ -4163,7 +4168,8 @@ namespace platf::dxgi {
           std::move(ctx),
           std::filesystem::path(SUNSHINE_ASSETS_DIR),
           sbs_cfg,
-          active
+          active,
+          normalized_depth_diagnostics
         );
         // Live rendering binds Base. Conditioned-field diagnostics run only for Dump 3D.
         result.estimator->set_subtitle_conditioning_diagnostics_always(false);
@@ -8579,6 +8585,7 @@ namespace platf::dxgi {
         self.draw_.last_draw_flat = event.flat;
         self.draw_.last_draw_repeat = event.repeat;
         self.draw_.last_draw_publication_current = event.publication_current;
+        self.draw_.last_draw_ema_motion_mask_present = event.views[11] != nullptr;
         self.draw_.last_draw_model_frame = event.model_frame;
         self.draw_.last_draw_observation_us = event.observation_us;
         self.draw_.last_draw_expected_work = event.publication.expected_work;

@@ -2357,6 +2357,7 @@ namespace models {
     float max_aspect;  // aspect cap for short-side mode
     float minmax_alpha;  // temporal EMA blend for the normalized min/max
     const bool diagnostics_enabled;
+    const bool normalized_depth_diagnostics_enabled;
     struct tensorrt_cuda_graph_t {
       CUgraph graph = nullptr;
       detail::cuda_graph_replay_policy_t policy;
@@ -3533,17 +3534,10 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_health_state_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_health_state_srv;
 
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_tex;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_uav;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_srv;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_previous_tex;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_previous_uav;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_previous_srv;
-    // Normalized depth of the last valid infer observation, restored by near-identical reuse.
-    // The ordinary previous texture must still advance every frame for temporal EMA.
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> ema_motion_mask_tex;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> ema_motion_mask_uav;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ema_motion_mask_srv;
+    // Optional evaluator fields. The two depth textures rotate for the diagnostic temporal EMA.
+    d3d_texture_views_t normalized_depth;
+    d3d_texture_views_t previous_normalized_depth;
+    d3d_texture_views_t ema_motion_mask;
     // Synthetic letterbox support is visible to DAV2 but excluded from every analysis statistic,
     // history comparison and positioned renderer sample.
     Microsoft::WRL::ComPtr<ID3D11Texture2D> tensor_exclusion_tex;
@@ -4331,11 +4325,12 @@ namespace models {
           host_sbs_shader_cache::host_sbs_near_identical_finalize,
           near_identical_finalize_cs
         ) &&
-        create_shader(
-          sources,
-          host_sbs_shader_cache::host_sbs_near_identical_reuse_depth,
-          near_identical_reuse_depth_cs
-        );
+        (!normalized_depth_diagnostics_enabled ||
+         create_shader(
+           sources,
+           host_sbs_shader_cache::host_sbs_near_identical_reuse_depth,
+           near_identical_reuse_depth_cs
+         ));
       D3D11_BUFFER_DESC constants_desc {};
       constants_desc.Usage = D3D11_USAGE_DEFAULT;
       constants_desc.ByteWidth = static_cast<UINT>(sizeof(near_identical_constants_t));
@@ -5196,7 +5191,7 @@ namespace models {
     void dispatch_near_identical_reuse_depth() {
       if (
         !receipt_gated_postprocess_pending() || !near_identical_reuse_depth_cs ||
-        !near_identical_transaction.dispatch || !depth_previous_srv || !depth_uav ||
+        !near_identical_transaction.dispatch || !previous_normalized_depth.srv || !normalized_depth.uav ||
         !cbuffer
       ) {
         return;
@@ -5207,14 +5202,14 @@ namespace models {
         nullptr,
         nullptr,
         nullptr,
-        depth_previous_srv.Get(),
+        previous_normalized_depth.srv.Get(),
       };
       ID3D11UnorderedAccessView *outputs[5] = {
         nullptr,
         nullptr,
         nullptr,
         nullptr,
-        depth_uav.Get(),
+        normalized_depth.uav.Get(),
       };
       context->CSSetShader(near_identical_reuse_depth_cs.Get(), nullptr, 0u);
       context->CSSetConstantBuffers(0u, 1u, cbuffer.GetAddressOf());
@@ -5409,7 +5404,8 @@ namespace models {
       Microsoft::WRL::ComPtr<ID3D11DeviceContext> c,
       const std::filesystem::path &assets_dir,
       const config::video_t::sbs_t &cfg,
-      const config::depth_model_info &model
+      const config::depth_model_info &model,
+      normalized_depth_diagnostics_e normalized_depth_diagnostics
     ):
         device(d),
         context(c),
@@ -5422,6 +5418,7 @@ namespace models {
         max_aspect((float) config::host_sbs_v2_live_calibration::depth_max_aspect),
         minmax_alpha((float) config::host_sbs_v2_live_calibration::minmax_ema),
         diagnostics_enabled(config::sunshine.diagnostics_enabled),
+        normalized_depth_diagnostics_enabled(normalized_depth_diagnostics == normalized_depth_diagnostics_e::enabled),
         parallax_v2_requested_pop_strength(
           depth_coordinate_v2::requested_pop_strength(
             static_cast<float>(cfg.pop_strength)
@@ -5754,14 +5751,14 @@ namespace models {
         shader_source_closure_sha256 ==
           depth_coordinate_v2::shader_source_closure_sha256;
 
-      // Create every compute object from bytecode keyed by the one authenticated producer
-      // snapshot. Startup prewarm populates these exact cache entries, so the constructor neither
+      // Create the required compute objects from the one authenticated producer snapshot.
+      // Startup prewarm populates these exact cache entries, so the constructor neither
       // recompiles the fused preprocess from its identity-only calibration closure nor compiles the shared
       // analysis roots once as "core" and then again as V2.
       const std::array producer_shader_outputs {
         std::addressof(near_identical_fused_preprocess_cs),
-        std::addressof(buffer_to_tex_cs),
-        std::addressof(buffer_to_tex_pad_cs),
+        normalized_depth_diagnostics_enabled ? std::addressof(buffer_to_tex_cs) : nullptr,
+        normalized_depth_diagnostics_enabled ? std::addressof(buffer_to_tex_pad_cs) : nullptr,
         std::addressof(depth_minmax_ema_cs),
         std::addressof(depth_coordinate_v2_moments_cs),
         std::addressof(depth_coordinate_v2_frame_resolve_cs),
@@ -5796,10 +5793,11 @@ namespace models {
         if (!producer_shaders_ok) {
           break;
         }
-        producer_shaders_ok = create_shader(
+        auto *output = producer_shader_outputs[index];
+        producer_shaders_ok = !output || create_shader(
           producer_sources,
           host_sbs_shader_cache::parallax_v2_producer_specs[index],
-          *producer_shader_outputs[index]
+          *output
         );
       }
       if (!producer_shaders_ok) {
@@ -5961,7 +5959,7 @@ namespace models {
         engine && exec_context && cu_stream &&
         near_identical_fused_preprocess_cs &&
         fused_preprocess_force_cbuffer && fused_preprocess_compare_cbuffer &&
-        buffer_to_tex_cs && buffer_to_tex_pad_cs &&
+        (!normalized_depth_diagnostics_enabled || (buffer_to_tex_cs && buffer_to_tex_pad_cs)) &&
         depth_minmax_ema_cs &&
         minmax_raw_uav && minmax_ema_uav && minmax_ema_srv && hist_uav &&
         depth_health_state_uav && depth_health_state_srv;
@@ -6910,7 +6908,7 @@ namespace models {
       }
     }
 
-    bool create_subtitle_texture(
+    bool create_shader_texture(
       const UINT width,
       const UINT height,
       const DXGI_FORMAT format,
@@ -6949,7 +6947,7 @@ namespace models {
           }
         }
         d3d_texture_views_t next;
-        if (!create_subtitle_texture(width, height, format, next)) {
+        if (!create_shader_texture(width, height, format, next)) {
           return false;
         }
         const UINT zero[4] {};
@@ -7971,7 +7969,7 @@ namespace models {
       if (auto &diagnostics = subtitle_conditioning_diagnostics) {
         if (diagnostics->horizontal_distance_height != horizontal_height) {
           d3d_texture_views_t horizontal_distance;
-          if (!create_subtitle_texture(width, horizontal_height, DXGI_FORMAT_R32_FLOAT, horizontal_distance)) {
+          if (!create_shader_texture(width, horizontal_height, DXGI_FORMAT_R32_FLOAT, horizontal_distance)) {
             return false;
           }
           const UINT zero[4] {};
@@ -7983,13 +7981,13 @@ namespace models {
       }
 
       subtitle_conditioning_diagnostics_t next;
-      if (!create_subtitle_texture(width, height, DXGI_FORMAT_R32_UINT, next.field_mask) ||
-          !create_subtitle_texture(width, horizontal_height, DXGI_FORMAT_R32_FLOAT, next.horizontal_distance) ||
-          !create_subtitle_texture(width, height, DXGI_FORMAT_R32_FLOAT, next.distance) ||
-          !create_subtitle_texture(width, height, DXGI_FORMAT_R32_FLOAT, next.weight) ||
-          !create_subtitle_texture(width, height, DXGI_FORMAT_R32_FLOAT, next.blend) ||
-          !create_subtitle_texture(width, height, DXGI_FORMAT_R32_FLOAT, next.vertical_conditioned) ||
-          !create_subtitle_texture(width, height, DXGI_FORMAT_R32_FLOAT, next.final) ||
+      if (!create_shader_texture(width, height, DXGI_FORMAT_R32_UINT, next.field_mask) ||
+          !create_shader_texture(width, horizontal_height, DXGI_FORMAT_R32_FLOAT, next.horizontal_distance) ||
+          !create_shader_texture(width, height, DXGI_FORMAT_R32_FLOAT, next.distance) ||
+          !create_shader_texture(width, height, DXGI_FORMAT_R32_FLOAT, next.weight) ||
+          !create_shader_texture(width, height, DXGI_FORMAT_R32_FLOAT, next.blend) ||
+          !create_shader_texture(width, height, DXGI_FORMAT_R32_FLOAT, next.vertical_conditioned) ||
+          !create_shader_texture(width, height, DXGI_FORMAT_R32_FLOAT, next.final) ||
           !create_subtitle_uint_buffer(1u, next.control.buffer, next.control.srv, next.control.uav) ||
           !ensure_subtitle_constant_buffer(48u, next.distance_constants)) {
         return false;
@@ -8505,10 +8503,6 @@ namespace models {
       return true;
     }
 
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> output_srv() {
-      return depth_srv;
-    }
-
     struct completion_snapshot_validity_t {
       bool raw_model_depth = false;
       bool model_input = false;
@@ -8570,10 +8564,10 @@ namespace models {
     ) {
       depth_step_result_t step;
       auto &r = step.observation;
-      r.depth = output_srv();
+      r.depth = normalized_depth.srv;
       r.depth_health_state = depth_health_state_srv;
       r.depth_frame_state = minmax_ema_srv;
-      r.ema_motion_mask = ema_motion_mask_srv;
+      r.ema_motion_mask = ema_motion_mask.srv;
       r.raw_model_depth = tensor_out_srv;
       if (completed.snapshots.raw_model_depth) {
         r.raw_model_depth_snapshot = raw_snapshot_srv;
@@ -9191,15 +9185,7 @@ namespace models {
           near_identical_history_owner.uav.Get(), zero_uint4
         );
       }
-      if (depth_uav) {
-        context->ClearUnorderedAccessViewFloat(depth_uav.Get(), zero4);
-      }
-      if (depth_previous_uav) {
-        context->ClearUnorderedAccessViewFloat(depth_previous_uav.Get(), zero4);
-      }
-      if (ema_motion_mask_uav) {
-        context->ClearUnorderedAccessViewUint(ema_motion_mask_uav.Get(), zero_uint4);
-      }
+      clear_normalized_depth_diagnostics();
       if (subtitle_locator_state_uav) {
         context->ClearUnorderedAccessViewUint(
           subtitle_locator_state_uav.Get(),
@@ -9252,9 +9238,80 @@ namespace models {
       return changed;
     }
 
-    // Normalize the finished raw disparity in tensor_out_buf into depth_tex: the scale
-    // passes (min/max reduction, permanent percentile histogram, EMA fold) followed by the
-    // mapping/temporal-EMA pass. GPU-resident throughout, no CPU readback.
+    void clear_normalized_depth_diagnostics() {
+      if (!normalized_depth.ready() || !previous_normalized_depth.ready() || !ema_motion_mask.ready()) {
+        return;
+      }
+      const float zero_depth[4] {};
+      const UINT zero_mask[4] {};
+      context->ClearUnorderedAccessViewFloat(normalized_depth.uav.Get(), zero_depth);
+      context->ClearUnorderedAccessViewFloat(previous_normalized_depth.uav.Get(), zero_depth);
+      context->ClearUnorderedAccessViewUint(ema_motion_mask.uav.Get(), zero_mask);
+    }
+
+    void dispatch_normalized_depth_diagnostics() {
+      // Rotate the two identically provisioned depth textures. The old current side becomes the
+      // immutable previous-frame SRV, while the older side becomes this completion's UAV target.
+      // This preserves the exact EMA history without a full-field CopyResource every frame.
+      std::swap(normalized_depth, previous_normalized_depth);
+
+      // Buffer to Texture: normalize disparity, classify the deterministic moving-edge
+      // stencil, apply temporal EMA, and publish the diagnostic mask in one content dispatch.
+      // Consuming the mask decision in-register removes the R32 mask round trip while retaining
+      // the exact independently observable mask. Contain-fit padding is filled afterward by a
+      // lightweight UAV copy entry point, avoiding repeated boundary-stencil work. Full-content
+      // fields remain one dispatch. MinMaxEma.frame_state makes the first valid frame snap and
+      // makes an all-invalid frame hold entirely on the GPU.
+      context->CSSetShader(buffer_to_tex_cs.Get(), nullptr, 0);
+      context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
+      ID3D11ShaderResourceView *bt_srvs[4] = {
+        tensor_out_srv.Get(),
+        minmax_ema_srv.Get(),
+        previous_normalized_depth.srv.Get(),
+        tensor_exclusion_srv.Get(),
+      };
+      ID3D11UnorderedAccessView *bt_uavs[2] = {
+        normalized_depth.uav.Get(),
+        ema_motion_mask.uav.Get(),
+      };
+      context->CSSetShaderResources(0, 4, bt_srvs);
+      context->CSSetUnorderedAccessViews(0, 2, bt_uavs, nullptr);
+
+      dispatch_infer_postprocess(
+        (target_w + 15) / 16,
+        (target_h + 15) / 16,
+        1u,
+        near_identical_gpu_infer_grid16_byte_offset
+      );
+
+      const auto &tensor_content = pending_input_region.tensor_content;
+      const bool has_synthetic_padding =
+        tensor_content.left != 0u || tensor_content.top != 0u ||
+        tensor_content.right != target_w || tensor_content.bottom != target_h;
+      if (has_synthetic_padding) {
+        // The preceding dispatch has completed its UAV accesses before this dispatch begins.
+        // pad_main reads only an already-written admitted boundary texel and writes one excluded
+        // destination, so no cross-thread or cross-group dependency exists inside this pass.
+        context->CSSetShader(buffer_to_tex_pad_cs.Get(), nullptr, 0);
+        dispatch_infer_postprocess(
+          (target_w + 15) / 16,
+          (target_h + 15) / 16,
+          1u,
+          near_identical_gpu_infer_grid16_byte_offset
+        );
+      }
+
+      ID3D11UnorderedAccessView *null_uav2[2] = {nullptr, nullptr};
+      ID3D11ShaderResourceView *null_srvs[4] = {
+        nullptr, nullptr, nullptr, nullptr
+      };
+      context->CSSetUnorderedAccessViews(0, 2, null_uav2, nullptr);
+      context->CSSetShaderResources(0, 4, null_srvs);
+      dispatch_near_identical_reuse_depth();
+    }
+
+    // Publish the live V2 depth and subtitle state from finished raw disparity. The shared
+    // scale passes also supply the evaluator's optional normalized texture and motion mask.
     bool normalize_depth_output(
       d3d_perf_slot *perf_slot,
       const bool input_domain_reset
@@ -9331,66 +9388,9 @@ namespace models {
         context->CSSetUnorderedAccessViews(0, 4, null_uav2, nullptr);
       }
 
-      // Rotate the two identically provisioned depth textures. The old current side becomes the
-      // immutable previous-frame SRV, while the older side becomes this completion's UAV target.
-      // This preserves the exact EMA history without a full-field CopyResource every frame.
-      std::swap(depth_tex, depth_previous_tex);
-      std::swap(depth_uav, depth_previous_uav);
-      std::swap(depth_srv, depth_previous_srv);
-
-      // 3b. Buffer to Texture: normalize disparity, classify the deterministic moving-edge
-      // stencil, apply temporal EMA, and publish the diagnostic mask in one content dispatch.
-      // Consuming the mask decision in-register removes the R32 mask round trip while retaining
-      // the exact independently observable mask. Contain-fit padding is filled afterward by a
-      // lightweight UAV copy entry point, avoiding repeated boundary-stencil work. Full-content
-      // fields remain one dispatch. MinMaxEma.frame_state makes the first valid frame snap and
-      // makes an all-invalid frame hold entirely on the GPU.
-      context->CSSetShader(buffer_to_tex_cs.Get(), nullptr, 0);
-      context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
-      ID3D11ShaderResourceView *bt_srvs[4] = {
-        tensor_out_srv.Get(),
-        minmax_ema_srv.Get(),
-        depth_previous_srv.Get(),
-        tensor_exclusion_srv.Get(),
-      };
-      ID3D11UnorderedAccessView *bt_uavs[2] = {
-        depth_uav.Get(),
-        ema_motion_mask_uav.Get(),
-      };
-      context->CSSetShaderResources(0, 4, bt_srvs);
-      context->CSSetUnorderedAccessViews(0, 2, bt_uavs, nullptr);
-
-      dispatch_infer_postprocess(
-        (target_w + 15) / 16,
-        (target_h + 15) / 16,
-        1u,
-        near_identical_gpu_infer_grid16_byte_offset
-      );
-
-      const auto &tensor_content = pending_input_region.tensor_content;
-      const bool has_synthetic_padding =
-        tensor_content.left != 0u || tensor_content.top != 0u ||
-        tensor_content.right != target_w || tensor_content.bottom != target_h;
-      if (has_synthetic_padding) {
-        // The preceding dispatch has completed its UAV accesses before this dispatch begins.
-        // pad_main reads only an already-written admitted boundary texel and writes one excluded
-        // destination, so no cross-thread or cross-group dependency exists inside this pass.
-        context->CSSetShader(buffer_to_tex_pad_cs.Get(), nullptr, 0);
-        dispatch_infer_postprocess(
-          (target_w + 15) / 16,
-          (target_h + 15) / 16,
-          1u,
-          near_identical_gpu_infer_grid16_byte_offset
-        );
+      if (normalized_depth_diagnostics_enabled) {
+        dispatch_normalized_depth_diagnostics();
       }
-
-      ID3D11UnorderedAccessView *null_uav2[2] = {nullptr, nullptr};
-      ID3D11ShaderResourceView *null_srvs[4] = {
-        nullptr, nullptr, nullptr, nullptr
-      };
-      context->CSSetUnorderedAccessViews(0, 2, null_uav2, nullptr);
-      context->CSSetShaderResources(0, 4, null_srvs);
-      dispatch_near_identical_reuse_depth();
       if (!upload_near_identical_history_owner_constants()) {
         fail_gpu_conditional_bridge_once(
           "GPU inference-observation history-owner constants failed"
@@ -9770,38 +9770,23 @@ namespace models {
                          &tensor_out_srv
                        ));
 
-        D3D11_TEXTURE2D_DESC tex_desc = {};
-        tex_desc.Width = target_w;
-        tex_desc.Height = target_h;
-        tex_desc.MipLevels = 1;
-        tex_desc.ArraySize = 1;
-        tex_desc.Format = DXGI_FORMAT_R32_FLOAT;
-        tex_desc.SampleDesc.Count = 1;
-        tex_desc.Usage = D3D11_USAGE_DEFAULT;
-        tex_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-        resources_ok = resources_ok &&
-                       SUCCEEDED(device->CreateTexture2D(&tex_desc, nullptr, &depth_tex)) &&
-                       SUCCEEDED(device->CreateUnorderedAccessView(depth_tex.Get(), nullptr, &depth_uav)) &&
-                       SUCCEEDED(device->CreateShaderResourceView(depth_tex.Get(), nullptr, &depth_srv));
+        if (normalized_depth_diagnostics_enabled) {
+          resources_ok = resources_ok &&
+                         create_shader_texture(target_w, target_h, DXGI_FORMAT_R32_FLOAT, normalized_depth) &&
+                         create_shader_texture(target_w, target_h, DXGI_FORMAT_R32_FLOAT, previous_normalized_depth) &&
+                         create_shader_texture(target_w, target_h, DXGI_FORMAT_R32_UINT, ema_motion_mask);
+        }
 
-        // The two ordinary depth fields rotate roles after every completed inference. Give both
-        // identical views so rotation replaces a full-field copy without changing shader bindings.
-        resources_ok = resources_ok &&
-                       SUCCEEDED(device->CreateTexture2D(&tex_desc, nullptr, &depth_previous_tex)) &&
-                       SUCCEEDED(device->CreateUnorderedAccessView(
-                         depth_previous_tex.Get(),
-                         nullptr,
-                         &depth_previous_uav
-                       )) &&
-                       SUCCEEDED(device->CreateShaderResourceView(depth_previous_tex.Get(), nullptr, &depth_previous_srv));
-
-        auto mask_desc = tex_desc;
+        D3D11_TEXTURE2D_DESC mask_desc {};
+        mask_desc.Width = target_w;
+        mask_desc.Height = target_h;
+        mask_desc.MipLevels = 1u;
+        mask_desc.ArraySize = 1u;
         mask_desc.Format = DXGI_FORMAT_R32_UINT;
+        mask_desc.SampleDesc.Count = 1u;
+        mask_desc.Usage = D3D11_USAGE_DEFAULT;
         mask_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
         resources_ok = resources_ok &&
-                       SUCCEEDED(device->CreateTexture2D(&mask_desc, nullptr, &ema_motion_mask_tex)) &&
-                       SUCCEEDED(device->CreateUnorderedAccessView(ema_motion_mask_tex.Get(), nullptr, &ema_motion_mask_uav)) &&
-                       SUCCEEDED(device->CreateShaderResourceView(ema_motion_mask_tex.Get(), nullptr, &ema_motion_mask_srv)) &&
                        SUCCEEDED(device->CreateTexture2D(&mask_desc, nullptr, &tensor_exclusion_tex)) &&
                        SUCCEEDED(device->CreateUnorderedAccessView(tensor_exclusion_tex.Get(), nullptr, &tensor_exclusion_uav)) &&
                        SUCCEEDED(device->CreateShaderResourceView(tensor_exclusion_tex.Get(), nullptr, &tensor_exclusion_srv));
@@ -9821,17 +9806,10 @@ namespace models {
           return {};
         }
 
-        // Clear depth and model-input history so the sole fused preprocess always observes
-        // initialized storage, including the first force/bootstrap frame. Force mode exits before
-        // reading history; this clear remains defense in depth and defines first compare state.
-        const float clear_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-        const UINT clear_uint[4] = {0u, 0u, 0u, 0u};
-        context->ClearUnorderedAccessViewUint(
-          tensor_previous_input_uav.Get(), clear_uint
-        );
-        context->ClearUnorderedAccessViewFloat(depth_uav.Get(), clear_color);
-        context->ClearUnorderedAccessViewFloat(depth_previous_uav.Get(), clear_color);
-        context->ClearUnorderedAccessViewUint(ema_motion_mask_uav.Get(), clear_uint);
+        // Initialize the comparison history before the first eligible fused preprocess.
+        const UINT clear_uint[4] {};
+        context->ClearUnorderedAccessViewUint(tensor_previous_input_uav.Get(), clear_uint);
+        clear_normalized_depth_diagnostics();
         context->ClearUnorderedAccessViewUint(tensor_exclusion_uav.Get(), clear_uint);
 
         auto res1 = cuda.cuGraphicsD3D11RegisterResource(&cuda_in_res, tensor_in_buf.Get(), 0);
@@ -10881,14 +10859,16 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> context,
     const std::filesystem::path &assets_dir,
     const config::video_t::sbs_t &cfg,
-    const config::depth_model_info &model
+    const config::depth_model_info &model,
+    normalized_depth_diagnostics_e normalized_depth_diagnostics
   ):
       pimpl(std::make_unique<impl>(
         device,
         context,
         assets_dir,
         cfg,
-        model
+        model,
+        normalized_depth_diagnostics
       )) {}
 
   video_depth_estimator::~video_depth_estimator() = default;

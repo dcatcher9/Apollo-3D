@@ -1925,10 +1925,12 @@ class EvalContractTests(unittest.TestCase):
         with open(os.path.join(repo, "src", "video_depth_estimator.cpp"),
                   encoding="utf-8") as fh:
             estimator = fh.read()
-        self.assertIn("std::swap(depth_tex, depth_previous_tex)", estimator)
-        self.assertIn("std::swap(depth_uav, depth_previous_uav)", estimator)
-        self.assertIn("std::swap(depth_srv, depth_previous_srv)", estimator)
-        self.assertIn("ema_motion_mask_srv", estimator)
+        self.assertIn("std::swap(normalized_depth, previous_normalized_depth);", estimator)
+        self.assertIn("previous_normalized_depth.srv.Get()", estimator)
+        self.assertIn("normalized_depth.uav.Get()", estimator)
+        self.assertRegex(estimator, r"if \(normalized_depth_diagnostics_enabled\) \{\s+"
+                                    r"dispatch_normalized_depth_diagnostics\(\);\s+\}")
+        self.assertIn("r.ema_motion_mask = ema_motion_mask.srv;", estimator)
         self.assertNotIn("depth_ema_motion_cs", estimator)
         self.assertIn("ID3D11UnorderedAccessView *bt_uavs[2]", estimator)
         with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"),

@@ -153,6 +153,7 @@ namespace {
       {"last_draw_observation_us", sample.last_draw_observation_us},
       {"last_draw_expected_work", sample.last_draw_expected_work},
       {"last_draw_host_subtitle_outcome", sample.last_draw_host_subtitle_outcome},
+      {"last_draw_ema_motion_mask_present", sample.last_draw_ema_motion_mask_present},
       {"last_draw_source_stamp_ticks", sample.last_draw_source_stamp_ticks},
       {"last_draw_content_stamp_ticks", sample.last_draw_content_stamp_ticks},
       {"last_draw_current_source_stamp_ticks", sample.last_draw_current_source_stamp_ticks},
@@ -513,6 +514,7 @@ TEST(HostSbsRegistryReadinessGpuTest, BuildingCensusWakeWaitsForTheActualObserva
     ASSERT_FALSE(ready.last_draw_flat);
     ASSERT_FALSE(ready.last_draw_repeat);
     ASSERT_TRUE(ready.last_draw_publication_current);
+    EXPECT_FALSE(ready.last_draw_ema_motion_mask_present);
     EXPECT_GT(ready.last_draw_model_frame, 0u);
     EXPECT_EQ(ready.last_draw_model_frame, ready.latest_lineage_publication_frame_id);
     EXPECT_TRUE(ready.production_observer_path);

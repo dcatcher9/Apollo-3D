@@ -480,8 +480,11 @@ TEST(HostSbsNearIdenticalPolicyTest, ProducerOutputsMatchCanonicalShaderOrder) {
   std::size_t output_cursor = 0u;
   for (const auto &[spec, output] : expected_bindings) {
     const auto spec_token = "\n    " + std::string {spec} + ",";
-    const auto output_token =
-      "\n        std::addressof(" + std::string {output} + "),";
+    const auto output_address = "std::addressof(" + std::string {output} + ")";
+    const bool optional_normalizer = spec == "buffer_to_tex" || spec == "buffer_to_tex_pad";
+    const auto output_token = optional_normalizer ?
+      "\n        normalized_depth_diagnostics_enabled ? " + output_address + " : nullptr," :
+      "\n        " + output_address + ",";
     const auto spec_position = specs.find(spec_token, spec_cursor);
     const auto output_position = outputs.find(output_token, output_cursor);
     ASSERT_NE(spec_position, std::string::npos) << spec;

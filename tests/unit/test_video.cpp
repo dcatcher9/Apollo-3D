@@ -1754,6 +1754,7 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
     std::filesystem::path {SUNSHINE_TEST_BIN_DIR}.parent_path() / "assets",
     config::video_t::sbs_t {},
     video::host_sbs_v2_depth_model(),
+    models::video_depth_estimator::normalized_depth_diagnostics_e::disabled,
   };
   ASSERT_TRUE(estimator.is_valid());
 
@@ -1777,6 +1778,10 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
     const auto warmed = estimator.finish_pending_depth_for_evaluation();
     ASSERT_TRUE(warmed.observation.completed_frame_valid);
     ASSERT_EQ(warmed.observation.completed_frame_id, warm_frame_id);
+    EXPECT_FALSE(warmed.observation.depth);
+    EXPECT_FALSE(warmed.observation.ema_motion_mask);
+    EXPECT_TRUE(warmed.observation.depth_frame_state);
+    EXPECT_TRUE(warmed.observation.depth_health_state);
     (void) estimator.poll_publication_receipts();
   }
 
@@ -2107,6 +2112,8 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
   const auto conditional_completed = estimator.finish_pending_depth_for_evaluation();
   ASSERT_TRUE(conditional_completed.observation.completed_frame_valid);
   EXPECT_TRUE(models::parallax_v2_result_is_authenticated(conditional_completed.observation));
+  EXPECT_FALSE(conditional_completed.observation.depth);
+  EXPECT_FALSE(conditional_completed.observation.ema_motion_mask);
   EXPECT_FALSE(conditional_completed.observation.subtitle_conditioning_diagnostics_current);
   EXPECT_FALSE(conditional_completed.observation.shadow_conditioned_final_parallax);
   EXPECT_EQ(conditional_completed.observation.final_parallax(), conditional_completed.observation.shadow_base_final_parallax.Get());
@@ -2223,6 +2230,8 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
   EXPECT_EQ(changed_completed.observation.completed_frame_id, changed_frame_id);
   EXPECT_TRUE(changed_completed.observation.gpu_undecided_completion);
   EXPECT_TRUE(models::parallax_v2_result_is_authenticated(changed_completed.observation));
+  EXPECT_FALSE(changed_completed.observation.depth);
+  EXPECT_FALSE(changed_completed.observation.ema_motion_mask);
   EXPECT_FALSE(changed_completed.observation.subtitle_conditioning_diagnostics_current);
   EXPECT_FALSE(changed_completed.observation.shadow_conditioned_final_parallax);
   EXPECT_EQ(changed_completed.observation.final_parallax(), changed_completed.observation.shadow_base_final_parallax.Get());
