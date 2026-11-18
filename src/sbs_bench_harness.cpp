@@ -3839,19 +3839,21 @@ namespace sbs_bench {
       return 3;
     }
 
-    bool private_current_outline_hdr_probe=false;
+    bool private_hdr_probe=false;
     bool private_fixed6_sdr_probe=false;
     if (!o.joined_completion_probe.empty()) {
       try {
         std::ifstream f(o.joined_completion_probe,std::ios::binary);
         const auto p=nlohmann::json::parse(f);
-        private_current_outline_hdr_probe=p.value("probe_kind",std::string{})=="actual-converter-current-outline-hdr-v1" &&
-          p.value("source_transfer",std::string{})=="scrgb_hdr" && !p.value("queue_enabled",true) &&
-          p.contains("selected_matte") && p.at("selected_matte").value("current_outline",false);
+        const auto kind = p.value("probe_kind", std::string {});
+        private_hdr_probe = p.value("source_transfer", std::string {}) == "scrgb_hdr" && !p.value("queue_enabled", true) &&
+          (kind == "actual-converter-shutter-hdr-v1" ||
+           (kind == "actual-converter-current-outline-hdr-v1" &&
+            p.contains("selected_matte") && p.at("selected_matte").value("current_outline", false)));
         private_fixed6_sdr_probe=p.value("probe_kind",std::string{})=="actual-converter-current-outline-sequence6-sdr-v1" &&
           p.value("source_transfer",std::string{})=="encoded-srgb" && !p.value("queue_enabled",true) &&
           p.contains("selected_matte") && p.at("selected_matte").value("current_outline",false);
-      } catch (...) { private_current_outline_hdr_probe=false; private_fixed6_sdr_probe=false; }
+      } catch (...) { private_hdr_probe=false; private_fixed6_sdr_probe=false; }
     }
     // Evaluation keeps its established WIC raster contract. Whole-clip adaptive/conversion modes
     // additionally accept strict linear-scRGB PFM frames. A clip is one format family throughout:
@@ -3890,13 +3892,13 @@ namespace sbs_bench {
           found_sdr_raster = true;
           frames.push_back(e.path());
         } else if (ext == ".pfm" &&
-                   (o.artifacts != artifact_mode_e::evaluation || private_current_outline_hdr_probe)) {
+                   (o.artifacts != artifact_mode_e::evaluation || private_hdr_probe)) {
           found_hdr_pfm = true;
           frames.push_back(e.path());
         }
       }
     }
-    if ((o.artifacts != artifact_mode_e::evaluation || private_current_outline_hdr_probe) &&
+    if ((o.artifacts != artifact_mode_e::evaluation || private_hdr_probe) &&
         ((found_sdr_raster && found_hdr_pfm) || found_mixed_sdr_formats)) {
       BOOST_LOG(error) << "sbs-bench: mixed source image formats are not a valid whole clip";
       return 4;
@@ -3935,8 +3937,8 @@ namespace sbs_bench {
       return 4;
     }
     if (!o.joined_completion_probe.empty() && (frames.size() != (private_fixed6_sdr_probe?6u:3u) ||
-        (pfm_input ? !private_current_outline_hdr_probe : sdr_raster_format != "png"))) {
-      BOOST_LOG(error) << "sbs-bench: private joined probe requires exactly3 immutable SDRPNG or explicitly declared current-outline HDR PFM sources";
+        (pfm_input ? !private_hdr_probe : sdr_raster_format != "png"))) {
+      BOOST_LOG(error) << "sbs-bench: private joined probe requires immutable SDR PNG or explicitly declared HDR PFM sources";
       return 4;
     }
     if (o.pfm_joined_diagnostics && (!pfm_input || frames.empty() || frames.size() > 64u)) {
@@ -4108,15 +4110,17 @@ namespace sbs_bench {
           if(code)BOOST_LOG(error)<<"sbs-bench: actual fixed-six converter probe: "<<probe_error;
           return code;
         }
-        if (plan.value("probe_kind",std::string{})=="actual-converter-rgb-v1" || plan.value("probe_kind",std::string{})=="actual-converter-pending-current-colour-v1" || plan.value("probe_kind",std::string{})=="actual-converter-current-outline-hdr-v1" || plan.value("probe_kind",std::string{})=="actual-converter-packed-continuity-v1") {
+        const auto probe_kind = plan.value("probe_kind", std::string {});
+        const bool shutter_hdr = probe_kind == "actual-converter-shutter-hdr-v1";
+        if (probe_kind=="actual-converter-rgb-v1" || probe_kind=="actual-converter-pending-current-colour-v1" || probe_kind=="actual-converter-current-outline-hdr-v1" || probe_kind=="actual-converter-packed-continuity-v1" || shutter_hdr) {
           if (plan.at("schema")!=1 || plan.at("context_provider")!="synthetic-video-scheduling-only" ||
               frames.size()!=3 || observation_timestamps.size()!=3 || plan.at("sources").size()!=3) {
             BOOST_LOG(error) << "sbs-bench: invalid actual-converter protocol"; return 7;
           }
           platf::dxgi::actual_converter_probe_v1::request_t request;
           request.enabled=true;request.queued=plan.at("queue_enabled").get<bool>();
-          request.packed_continuity=plan.value("probe_kind",std::string{})=="actual-converter-packed-continuity-v1";
-          request.hdr_input=private_current_outline_hdr_probe;
+          request.packed_continuity=probe_kind=="actual-converter-packed-continuity-v1" || shutter_hdr;
+          request.hdr_input=private_hdr_probe;
           if (request.hdr_input || plan.contains("required_adapter")) {
             request.explicit_adapter=true;
             const auto &adapter=plan.at("required_adapter");
@@ -4125,9 +4129,13 @@ namespace sbs_bench {
             request.hdr_adapter_vendor_id=adapter.at("vendor_id").get<std::uint32_t>();
             request.hdr_adapter_device_id=adapter.at("device_id").get<std::uint32_t>();
           }
-          if ((pfm_input!=request.hdr_input) || (request.hdr_input&&request.queued)) { BOOST_LOG(error)<<"sbs-bench: unsupported private HDR probe declaration";return 7; }
+          if (pfm_input != request.hdr_input || (request.hdr_input && request.queued) ||
+              (shutter_hdr && (!pfm_input || plan.contains("selected_matte") || plan.contains("temporal_source_bridge")))) {
+            BOOST_LOG(error) << "sbs-bench: unsupported private HDR probe declaration";
+            return 7;
+          }
           request.settings=sbs_cfg;request.output=o.out;request.background_observer=plan.value("require_actual_push_pull_background",false);
-          const bool pending_colour=plan.value("probe_kind",std::string{})=="actual-converter-pending-current-colour-v1";
+          const bool pending_colour=probe_kind=="actual-converter-pending-current-colour-v1";
           if(plan.contains("temporal_source_bridge")) {
             const auto &t=plan.at("temporal_source_bridge");models::subtitle_temporal_source_research_configuration_t cfg;
             cfg.temporal_shader_root=t.at("temporal_shader_root").get<std::string>();cfg.temporal_source_closure_sha256=t.at("temporal_source_closure_sha256").get<std::string>();

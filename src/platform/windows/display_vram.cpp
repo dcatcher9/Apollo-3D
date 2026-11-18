@@ -625,12 +625,13 @@ namespace platf::dxgi {
     }
 
     enum class rgb_conversion_e { failed, converted, retained };
+    enum class rgb_destination_e { backbuffer, shutter, shutter_with_pair };
 
     struct rgb_output_t {
       ID3D11Texture2D *texture;
       ID3D11RenderTargetView *target;
       bool linear;
-      bool may_retain_pair;
+      rgb_destination_e destination;
       bool retained_pair = false;
     };
 
@@ -641,9 +642,9 @@ namespace platf::dxgi {
       ID3D11RenderTargetView *target,
       bool target_is_linear,
       const std::optional<std::chrono::steady_clock::time_point> presentation_target,
-      bool may_retain_pair = false
+      rgb_destination_e destination = rgb_destination_e::backbuffer
     ) {
-      rgb_output_t output {target_texture, target, target_is_linear, may_retain_pair};
+      rgb_output_t output {target_texture, target, target_is_linear, destination};
       if (convert(img, presentation_target, &output) != 0) {
         return rgb_conversion_e::failed;
       }
@@ -2781,7 +2782,7 @@ namespace platf::dxgi {
             queued_attempt_failed_flat = true;
             render_input_srv = img_ctx->encoder_input_res.get();
           }
-          const bool can_retain_shutter_pair = rgb && rgb->may_retain_pair;
+          const bool can_retain_shutter_pair = rgb && rgb->destination == rgb_destination_e::shutter_with_pair;
           const bool repeat_matched_output = (!packed_output_in_shutter_pair || can_retain_shutter_pair) &&
                                              !pending_current_colour_selected && !queued_draw_selected && !queued_attempt_failed_flat &&
                                              drawn_source_order.permits(matched_presentation_cache.pixel_source_frame_id()) &&
@@ -2937,7 +2938,8 @@ namespace platf::dxgi {
                                                   ) :
                                                   input_is_linear;
 
-            if (can_retain_shutter_pair && rgb->linear == render_input_is_linear &&
+            if (rgb && rgb->destination != rgb_destination_e::backbuffer &&
+                rgb->linear == render_input_is_linear &&
                 !snapshot_debug_inputs && !queued_research && rgb->texture) {
               D3D11_TEXTURE2D_DESC target_desc {};
               D3D11_RENDER_TARGET_VIEW_DESC target_view_desc {};
@@ -7677,9 +7679,11 @@ namespace platf::dxgi {
           BOOST_LOG(info) << "Host SBS source: ReShade final full-SBS texture, with flat desktop fallback."sv;
         }
         sbs_viewport = {0.0f, 0.0f, out_width_f, out_height_f, 0.0f, 1.0f};
-        // DDup starts with UNKNOWN and exposes the actual format on its first real frame. Defer
-        // allocation in that case; known WGC/DDup formats can be finalized now.
-        if (display->capture_format != DXGI_FORMAT_UNKNOWN && !ensure_sbs_intermediate_storage(display->capture_format == DXGI_FORMAT_R16G16B16A16_FLOAT)) {
+        // RGB sinks can draw directly into the shutter packet. Allocate their scratch
+        // texture only when conversion actually needs it. DDup also defers until its
+        // first real frame reveals the capture format.
+        if (!rgb_only && display->capture_format != DXGI_FORMAT_UNKNOWN &&
+            !ensure_sbs_intermediate_storage(display->capture_format == DXGI_FORMAT_R16G16B16A16_FLOAT)) {
           return -1;
         }
       }
@@ -9904,6 +9908,11 @@ namespace platf::dxgi {
 
       [[nodiscard]] bool has_published_pair() const {
         return completion_ != 0;
+      }
+
+      [[nodiscard]] d3d_base_encode_device::rgb_destination_e rgb_destination() const {
+        using destination_e = d3d_base_encode_device::rgb_destination_e;
+        return has_published_pair() ? destination_e::shutter_with_pair : destination_e::shutter;
       }
 
       bool finish_producer(slot_t &slot, bool publish_pair, ID3D11DeviceContext *producer_context) {
@@ -12155,7 +12164,7 @@ namespace platf::dxgi {
         const auto converted = converter->convert_rgb(
           *retained_presenter_source,
           slot->producer_texture.Get(), slot->producer_target.Get(),
-          config.hdr, deadline, frames.has_published_pair()
+          config.hdr, deadline, frames.rgb_destination()
         );
         const bool publish_pair = converted == rgb_conversion_e::converted;
         if (!frames.finish_producer(*slot, publish_pair, converter->device_ctx.get()) ||
