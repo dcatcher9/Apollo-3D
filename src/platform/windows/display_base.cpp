@@ -768,6 +768,13 @@ namespace platf::dxgi {
     auto clear_display_required = util::fail_guard([]() {
       SetThreadExecutionState(ES_CONTINUOUS);
     });
+    auto release_last_snapshot = util::fail_guard([this]() {
+      (void) release_snapshot();
+    });
+    // Desktop Duplication already releases immediately before its next acquisition. Keep
+    // ownership across the pacing interval so DXGI can accumulate regions without copying
+    // intervening desktop updates. WGC returns each frame to its pool after delivery.
+    const bool retain_snapshot_until_next_acquire = capture_backend() == capture_backend_e::ddup;
 
     sleep_overshoot_logger.reset();
 
@@ -893,9 +900,11 @@ namespace platf::dxgi {
           return status;
       }
 
-      status = release_snapshot();
-      if (status != platf::capture_e::ok) {
-        return status;
+      if (!retain_snapshot_until_next_acquire) {
+        status = release_snapshot();
+        if (status != platf::capture_e::ok) {
+          return status;
+        }
       }
     }
 

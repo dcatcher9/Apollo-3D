@@ -7,6 +7,7 @@
 #include <initializer_list>
 #include <optional>
 #include <utility>
+#include <vector>
 #include <wrl/client.h>
 
 // Match the existing Windows platform fixture prerequisite before display.h.
@@ -33,6 +34,8 @@ namespace {
   }
   auto history() { return std::make_shared<d::ddup_damage_history_t>(); }
 
+  enum class capture_call_e { acquire, wait, release };
+
   class metadata_duplication_t final: public IDXGIOutputDuplication {
   public:
     std::vector<DXGI_OUTDUPL_MOVE_RECT> moves;
@@ -44,6 +47,9 @@ namespace {
     void *move_buffer = nullptr;
     std::optional<DXGI_OUTDUPL_FRAME_INFO> next_frame;
     ComPtr<IDXGIResource> next_surface;
+    std::vector<capture_call_e> capture_calls;
+    HRESULT release_status = S_OK;
+    bool frame_owned = false;
     static constexpr std::uint32_t cursor_bgra = 0xffe1b643u;
     std::uint32_t pointer_shape_bgra = cursor_bgra;
 
@@ -84,12 +90,17 @@ namespace {
     void STDMETHODCALLTYPE GetDesc(DXGI_OUTDUPL_DESC *) override {}
 
     HRESULT STDMETHODCALLTYPE AcquireNextFrame(UINT, DXGI_OUTDUPL_FRAME_INFO *info, IDXGIResource **surface) override {
+      capture_calls.push_back(capture_call_e::acquire);
+      if (frame_owned) {
+        return DXGI_ERROR_INVALID_CALL;
+      }
       if (!next_frame) {
         return DXGI_ERROR_WAIT_TIMEOUT;
       }
       *info = *next_frame;
       next_frame.reset();
       *surface = next_surface.Detach();
+      frame_owned = true;
       return S_OK;
     }
 
@@ -145,11 +156,34 @@ namespace {
     }
 
     HRESULT STDMETHODCALLTYPE ReleaseFrame() override {
-      return S_OK;
+      capture_calls.push_back(capture_call_e::release);
+      if (!frame_owned) {
+        return DXGI_ERROR_INVALID_CALL;
+      }
+      frame_owned = false;
+      return release_status;
     }
 
   private:
     ULONG references_ = 1u;
+  };
+
+  class recording_capture_timer_t final: public platf::high_precision_timer {
+  public:
+    explicit recording_capture_timer_t(metadata_duplication_t &native):
+        native {native} {}
+
+    void sleep_for(const std::chrono::nanoseconds &) override {
+      EXPECT_TRUE(native.frame_owned);
+      native.capture_calls.push_back(capture_call_e::wait);
+    }
+
+    operator bool() override {
+      return true;
+    }
+
+  private:
+    metadata_duplication_t &native;
   };
 
   void expect_rects(const d::ddup_damage_update_t &update, std::initializer_list<RECT> expected) {
@@ -276,17 +310,37 @@ namespace {
       info.PointerShapeBufferSize = new_shape ? sizeof(metadata_duplication_t::cursor_bgra) : 0u;
     }
 
+    bool pull_image(img_t &slot) {
+      ++image_pulls;
+      if (!allow_image) {
+        return false;
+      }
+      slot = display.alloc_img();
+      return true;
+    }
+
     platf::capture_e snapshot(DXGI_OUTDUPL_FRAME_INFO info, const ComPtr<IDXGIResource> &surface, img_t &image) {
       native->next_frame = info;
       native->next_surface = surface;
-      return display.snapshot([&](img_t &slot) {
-        ++image_pulls;
-        if (!allow_image) {
-          return false;
-        }
-        slot = display.alloc_img();
-        return true;
-      }, image, std::chrono::milliseconds {0}, true);
+      return display.snapshot([this](img_t &slot) { return pull_image(slot); }, image, std::chrono::milliseconds {0}, true);
+    }
+
+    HRESULT init_capture_loop() {
+      ComPtr<IDXGIFactory1> factory;
+      const auto status = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
+      if (SUCCEEDED(status)) {
+        display.factory.reset(factory.Detach());
+        // Leave a pacing interval ahead of the fixture's historical QPC stamp. The timer
+        // records the wait and returns immediately so the test never waits for this interval.
+        display.set_local_frame_rate_millihz(100);
+        display.timer = std::make_unique<recording_capture_timer_t>(*native);
+      }
+      return status;
+    }
+
+    platf::capture_e capture_loop(const platf::display_t::push_captured_image_cb_t &push, const std::function<bool()> &pending = {}) {
+      bool cursor = true;
+      return display.capture_with_pending_work(push, [this](img_t &slot) { return pull_image(slot); }, &cursor, pending);
     }
 
     std::optional<pixels_t> read_image(const img_t &image) {
@@ -494,6 +548,84 @@ TEST(WindowsDdupMetadataTest, UnavailableOrOverBudgetMetadataNeverReachesTheDriv
   EXPECT_FALSE(duplication.damage_update(info, DXGI_MODE_ROTATION_ROTATE90, 100, 100).known);
   EXPECT_EQ(native->move_calls, 0u);
   EXPECT_EQ(native->dirty_calls, 0u);
+}
+
+TEST_F(WindowsDdupSnapshotTest, CaptureHoldsFrameThroughPacingAndReleasesBeforeAcquireOrStop) {
+  ASSERT_EQ(init_capture_loop(), S_OK);
+  const auto first_pixels = desktop_pixels(0xff123400u);
+  const auto next_pixels = desktop_pixels(0xff562300u);
+  const auto first_surface = desktop_surface(first_pixels);
+  const auto next_surface = desktop_surface(next_pixels);
+  ASSERT_TRUE(first_surface && next_surface);
+  native->next_frame = desktop_present();
+  native->next_surface = first_surface;
+
+  std::vector<img_t> images;
+  unsigned iterations = 0u;
+  const auto status = capture_loop([&](img_t &&image, bool captured) {
+    EXPECT_TRUE(captured);
+    EXPECT_TRUE(native->frame_owned);
+    images.push_back(std::move(image));
+    if (!captured || images.size() != 1u) {
+      return false;
+    }
+    native->next_frame = desktop_present();
+    native->next_surface = next_surface;
+    return true;
+  }, [&]() {
+    if (++iterations == 2u) {
+      EXPECT_TRUE(display.dup.has_frame);
+      EXPECT_TRUE(native->frame_owned);
+      EXPECT_EQ(native->capture_calls, std::vector {capture_call_e::acquire});
+    }
+    return false;
+  });
+
+  EXPECT_EQ(status, platf::capture_e::ok);
+  EXPECT_EQ(iterations, 2u);
+  EXPECT_EQ(image_pulls, 2u);
+  const std::vector expected_calls {capture_call_e::acquire, capture_call_e::wait,
+    capture_call_e::release, capture_call_e::acquire, capture_call_e::release};
+  EXPECT_EQ(native->capture_calls, expected_calls);
+  EXPECT_FALSE(display.dup.has_frame);
+  EXPECT_FALSE(native->frame_owned);
+  ASSERT_EQ(images.size(), 2u);
+  ASSERT_TRUE(images[0] && images[0]->frame_timestamp && images[0]->content_timestamp);
+  ASSERT_TRUE(images[1] && images[1]->frame_timestamp && images[1]->content_timestamp);
+  EXPECT_GT(*images[1]->frame_timestamp, *images[0]->frame_timestamp);
+  EXPECT_GT(*images[1]->content_timestamp, *images[0]->content_timestamp);
+  EXPECT_EQ(read_image(images[0]), first_pixels);
+  EXPECT_EQ(read_image(images[1]), next_pixels);
+}
+
+TEST_F(WindowsDdupSnapshotTest, CapturePropagatesAccessLostOnDeferredReleaseBeforeAcquire) {
+  ASSERT_EQ(init_capture_loop(), S_OK);
+  const auto surface = desktop_surface(desktop_pixels(0xff123400u));
+  ASSERT_TRUE(surface);
+  native->next_frame = desktop_present();
+  native->next_surface = surface;
+
+  unsigned deliveries = 0u;
+  const auto status = capture_loop([&](img_t &&image, bool captured) {
+    EXPECT_TRUE(captured && image);
+    EXPECT_TRUE(native->frame_owned);
+    if (++deliveries != 1u) {
+      return false;
+    }
+    native->next_frame = desktop_present();
+    native->next_surface = surface;
+    native->release_status = DXGI_ERROR_ACCESS_LOST;
+    return true;
+  });
+
+  EXPECT_EQ(status, platf::capture_e::reinit);
+  EXPECT_EQ(deliveries, 1u);
+  EXPECT_EQ(image_pulls, 1u);
+  const std::vector expected_calls {capture_call_e::acquire, capture_call_e::wait, capture_call_e::release};
+  EXPECT_EQ(native->capture_calls, expected_calls);
+  EXPECT_TRUE(native->next_frame);
+  EXPECT_FALSE(display.dup.has_frame);
+  EXPECT_FALSE(native->frame_owned);
 }
 
 TEST_F(WindowsDdupSnapshotTest, DamageCollectionFollowsActiveConvertersWithoutChangingCapturedPixels) {
