@@ -490,19 +490,22 @@ namespace ar_glasses {
       bool is_primary = false;
       bool is_cloned = false;
 
-      bool operator==(const target_state_t &other) const {
+      bool same_display_observation(const target_state_t &other) const {
         return device_id == other.device_id && device_path == other.device_path &&
                gdi_name == other.gdi_name && desktop_topology == other.desktop_topology &&
                same_luid(adapter_id, other.adapter_id) &&
                rect.left == other.rect.left && rect.top == other.rect.top &&
                rect.right == other.rect.right && rect.bottom == other.rect.bottom &&
-               refresh_millihz == other.refresh_millihz && mode == other.mode &&
-               game_source == other.game_source &&
+               refresh_millihz == other.refresh_millihz &&
                is_primary == other.is_primary && is_cloned == other.is_cloned &&
                hdr.known == other.hdr.known &&
                hdr.supported == other.hdr.supported &&
                hdr.active == other.hdr.active &&
                hdr.limited_by_policy == other.hdr.limited_by_policy;
+      }
+
+      bool operator==(const target_state_t &other) const {
+        return mode == other.mode && game_source == other.game_source && same_display_observation(other);
       }
     };
 
@@ -1049,6 +1052,27 @@ namespace ar_glasses {
       // must run full mode/color repair; repeating placement alone cannot repair source HDR.
       return left && right && !transition_presenter_paused &&
              same_presentation_contract(left, right);
+    }
+
+    bool same_monitor_scanout_generation(const target_state_t &left, const target_state_t &right) {
+      return is_monitor_mode(left.mode) && is_monitor_mode(right.mode) && !left.is_primary && !left.is_cloned &&
+             left.hdr.known && left.same_display_observation(right) &&
+             same_luid(left.source_adapter_id, right.source_adapter_id) && left.source_id == right.source_id &&
+             left.target_id == right.target_id && left.hdr.user_enabled == right.hdr.user_enabled &&
+             left.hdr.bits_per_color == right.hdr.bits_per_color;
+    }
+
+    bool monitor_source_only_change(const target_state_t &before, const target_state_t &after) {
+      return before.mode != after.mode && same_monitor_scanout_generation(before, after);
+    }
+
+    template<class Current, class Stop, class Verify, class Start>
+    bool restart_verified_monitor_source(Current current, Stop stop, Verify verify, Start start) {
+      if (!current()) {
+        return false;
+      }
+      stop();
+      return current() && verify() && current() && start();
     }
 
     bool contains_case_insensitive(std::wstring_view haystack, std::wstring_view needle) {
@@ -3737,6 +3761,53 @@ namespace ar_glasses {
                now - *virtual_display_absence_started_ >= virtual_display_absence_grace;
       }
 
+      bool restart_monitor_source(
+        const target_state_t &expected,
+        std::uint64_t display_epoch,
+        std::stop_token controller_stop_token
+      ) {
+        if (!monitor_surface_ || !desktop_handoff_ || !live_gpu_lease_) {
+          return false;
+        }
+        const bool game = expected.mode == presentation_mode_e::monitor_game;
+        const auto current = [&]() {
+          return !controller_stop_token.stop_requested() && session_requested_() &&
+                 game == monitor_uses_game_source() &&
+                 platf::display_change_epoch() == display_epoch && !remote_virtual_display_blocks_local();
+        };
+        return restart_verified_monitor_source(
+          current,
+          [this]() {
+            stop_presenter();
+          },
+          [&]() {
+            const auto sink = find_target(target_device_path_);
+            if (!sink || sink->mode != expected.mode || !same_monitor_scanout_generation(expected, *sink)) {
+              return false;
+            }
+            const auto binding = virtual_display_binding();
+            const auto source = binding.identity ? resolve_virtual_display(*binding.identity, binding.device_path, binding.display_name, nullptr, source_width_, source_height_) : std::nullopt;
+            if (!source || source->device_path != binding.device_path || source->gdi_name != binding.display_name || !same_virtual_display_identity(source->identity, *binding.identity) || !source_refresh_matches(source->refresh_millihz, sink->refresh_millihz)) {
+              return false;
+            }
+            const auto hdr = VDISPLAY::queryDisplayHDR(source->identity.AdapterLuid, source->identity.TargetId);
+            if (!hdr || *hdr != virtual_hdr_active_ || sink->hdr.active != virtual_hdr_active_ || !platf::primary_display::verify_local_monitor_replacement(source->device_path, sink->device_path)) {
+              return false;
+            }
+            if (const auto reason = query_monitor_desktop_block_reason(L"Default", sink->rect); !reason.empty()) {
+              request_monitor_session(false);
+              std::lock_guard lock(physical_monitor_error_mutex);
+              physical_monitor_error = reason;
+              return false;
+            }
+            return true;
+          },
+          [&]() {
+            return start_presenter(expected);
+          }
+        );
+      }
+
       std::optional<target_state_t> reconfigure_target(
         const target_state_t &target,
         std::stop_token controller_stop_token
@@ -4366,7 +4437,7 @@ namespace ar_glasses {
         return virtual_display_.binding();
       }
 
-      void start_presenter(const target_state_t &presentation_target) {
+      bool start_presenter(const target_state_t &presentation_target) {
         stop_presenter();
         if (!live_target_) {
           live_target_ = std::make_shared<platf::dxgi::local_presenter_config_t::target_t>();
@@ -4378,7 +4449,7 @@ namespace ar_glasses {
           BOOST_LOG(error) << "Local AR presenter refused to open without stable source/sink identities."sv;
           failed_.store(true);
           running_.store(false);
-          return;
+          return false;
         }
         {
           std::lock_guard lock(live_target_->mutex);
@@ -4524,6 +4595,7 @@ namespace ar_glasses {
             }
           }
         });
+        return true;
       }
 
       VDISPLAY::session_t virtual_display_;
@@ -5045,6 +5117,15 @@ namespace ar_glasses {
       void run(std::stop_token stop_token) {
         std::optional<target_state_t> pending;
         auto pending_since = std::chrono::steady_clock::now();
+        const auto accept_reconfigured_target = [&](const target_state_t &target, std::chrono::steady_clock::time_point now) {
+          pending = target;
+          applied_ = pending;
+          pending_since = now;
+          session_stability_confirmed_ = false;
+          transition_presenter_paused_ = false;
+          incompatible_transition_started_.reset();
+          arm_presenter_retry();
+        };
 
         while (!stop_token.stop_requested()) {
           suspend_for_remote_if_needed();
@@ -5055,6 +5136,7 @@ namespace ar_glasses {
           const std::wstring_view preferred_device_path = wear_device_path_;
           bool topology_query_succeeded = false;
           std::vector<target_state_t> approved_targets;
+          const auto display_epoch = platf::display_change_epoch();
           auto observed = find_target({}, preferred_device_path, &topology_query_succeeded, &approved_targets);
           if (topology_query_succeeded) {
             if (!wear_device_path_.empty()) {
@@ -5122,13 +5204,17 @@ namespace ar_glasses {
           if (wear_device_path_.empty() && observed) {
             monitor_target(observed);
           }
+          const bool source_only = session_ && !resume_state_.retained() && !transition_presenter_paused_ &&
+                                   session_->running() && session_->has_presented() && applied_ && observed &&
+                                   monitor_source_only_change(*applied_, *observed) &&
+                                   display_epoch == platf::display_change_epoch();
           if (observed != pending) {
             pending = observed;
             pending_since = now;
             // Stop using old-size textures immediately, but keep SudoVDA attached during the
             // debounce interval. A physical 2D/SBS switch is allowed to pass through transient
             // modes; removing the source here would make Windows migrate all of its windows.
-            if (!resume_state_.retained() && observed != applied_ && !same_presentation_contract(observed, applied_)) {
+            if (!source_only && !resume_state_.retained() && observed != applied_ && !same_presentation_contract(observed, applied_)) {
               if (session_) {
                 session_->pause_presenter(observed);
                 transition_presenter_paused_ = true;
@@ -5163,6 +5249,22 @@ namespace ar_glasses {
           if (session_ && !wear_allows_session()) {
             // Extended-mode recovery may still need a durable sink-mode rebase. Never restart
             // presentation or mutate to another mode while that off-head teardown is pending.
+            std::this_thread::sleep_for(topology_poll_interval);
+            continue;
+          }
+
+          if (source_only && now >= retry_after_) {
+            if (session_->restart_monitor_source(*observed, display_epoch, stop_token)) {
+              accept_reconfigured_target(*observed, now);
+              BOOST_LOG(info) << "Local monitor presentation switched to "sv << mode_name(observed->mode)
+                              << " on its existing display layout."sv;
+            } else {
+              // Re-observe after a lost proof or cancelled restart before attempting a topology
+              // transaction. A paused physical transition must use the ordinary repair path.
+              session_->pause_presenter(std::nullopt);
+              transition_presenter_paused_ = true;
+              pending_since = std::chrono::steady_clock::now();
+            }
             std::this_thread::sleep_for(topology_poll_interval);
             continue;
           }
@@ -5224,13 +5326,7 @@ namespace ar_glasses {
                   pending_since = now;
                 }
               } else {
-                pending = reconfigured;
-                applied_ = reconfigured;
-                pending_since = now;
-                session_stability_confirmed_ = false;
-                transition_presenter_paused_ = false;
-                incompatible_transition_started_.reset();
-                arm_presenter_retry();
+                accept_reconfigured_target(*reconfigured, now);
               }
             } else if (!session_ || !incompatible_transition_started_ || now - *incompatible_transition_started_ >= incompatible_transition_grace) {
               if (session_ && pending && applied_ && same_physical_output(applied_, pending)) {
@@ -5264,13 +5360,7 @@ namespace ar_glasses {
                 pending_since = now;
               }
             } else {
-              pending = reconfigured;
-              applied_ = reconfigured;
-              pending_since = now;
-              session_stability_confirmed_ = false;
-              transition_presenter_paused_ = false;
-              incompatible_transition_started_.reset();
-              arm_presenter_retry();
+              accept_reconfigured_target(*reconfigured, now);
             }
           } else if (pending == applied_ && session_ && !session_stability_confirmed_ && session_->stable()) {
             // Construction only proves that a presenter thread was spawned. Reset exponential
@@ -5795,6 +5885,13 @@ namespace ar_glasses {
       target.is_cloned = contract.is_cloned;
       target.rect = contract.rect;
       target.refresh_millihz = contract.refresh_millihz;
+      target.source_adapter_id = contract.source_adapter_id;
+      target.source_id = contract.source_id;
+      target.target_id = contract.target_id;
+      target.gdi_name = contract.gdi_name;
+      target.desktop_topology = contract.desktop_topology;
+      target.hdr.user_enabled = contract.hdr_user_enabled;
+      target.hdr.bits_per_color = contract.hdr_bits_per_color;
       return target;
     }
   }  // namespace
@@ -5805,6 +5902,22 @@ namespace ar_glasses {
     bool exclusive
   ) {
     return can_reconfigure_local_session(make_test_target(before), make_test_target(after), exclusive);
+  }
+
+  bool detail::local_monitor_source_only_change_for_test(
+    const local_session_contract_t &before,
+    const local_session_contract_t &after
+  ) {
+    return monitor_source_only_change(make_test_target(before), make_test_target(after));
+  }
+
+  bool detail::restart_verified_monitor_source_for_test(
+    const std::function<bool()> &current,
+    const std::function<void()> &stop,
+    const std::function<bool()> &verify,
+    const std::function<bool()> &start
+  ) {
+    return restart_verified_monitor_source(current, stop, verify, start);
   }
 
   bool detail::local_presenter_target_contract_matches_for_test(

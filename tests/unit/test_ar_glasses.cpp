@@ -69,6 +69,150 @@ TEST(LocalMonitor, NativeResolutionChangeRequiresNewSourceButRefreshCanReconfigu
 }
 
 namespace {
+  using local_session_contract_t = ar_glasses::detail::local_session_contract_t;
+
+  local_session_contract_t monitor_source_contract() {
+    local_session_contract_t target;
+    target.device_path = LR"(\\?\DISPLAY#TCL03D4#monitor)";
+    target.adapter_id = {42, 7};
+    target.mode = ar_glasses::presentation_mode_e::monitor_host;
+    target.hdr_known = true;
+    target.hdr_supported = true;
+    target.hdr_active = true;
+    target.rect = {1920, -1080, 3840, 0};
+    target.refresh_millihz = 120000;
+    target.source_adapter_id = {42, 7};
+    target.source_id = 1;
+    target.target_id = 2;
+    target.gdi_name = R"(\\.\DISPLAY2)";
+    target.desktop_topology = "primary=owned-source;neighbor@3840,0:1920x1080@60000";
+    target.hdr_user_enabled = true;
+    target.hdr_bits_per_color = 10;
+    return target;
+  }
+}  // namespace
+
+TEST(LocalMonitorSourceSwitch, ExactMonitorContractAllowsEitherProviderDirection) {
+  using ar_glasses::detail::local_monitor_source_only_change_for_test;
+  for (const bool hdr : {false, true}) {
+    SCOPED_TRACE(hdr);
+    auto host = monitor_source_contract();
+    host.hdr_active = hdr;
+    host.hdr_user_enabled = hdr;
+    host.hdr_bits_per_color = hdr ? 10u : 8u;
+    auto game = host;
+    game.mode = ar_glasses::presentation_mode_e::monitor_game;
+
+    EXPECT_TRUE(local_monitor_source_only_change_for_test(host, game));
+    EXPECT_TRUE(local_monitor_source_only_change_for_test(game, host));
+  }
+}
+
+TEST(LocalMonitorSourceSwitch, UnchangedProviderAndOtherSurfaceModesDoNotQualify) {
+  using enum ar_glasses::presentation_mode_e;
+  using ar_glasses::detail::local_monitor_source_only_change_for_test;
+  const auto host = monitor_source_contract();
+  auto other = host;
+  for (auto mode : {monitor_host, normal, sbs_ai, unsupported}) {
+    SCOPED_TRACE(static_cast<int>(mode));
+    other.mode = mode;
+    EXPECT_FALSE(local_monitor_source_only_change_for_test(host, other));
+    EXPECT_FALSE(local_monitor_source_only_change_for_test(other, host));
+  }
+}
+
+TEST(LocalMonitorSourceSwitch, GeometryIdentityOrColorRevisionsRequireDisplayRepair) {
+  using ar_glasses::detail::local_monitor_source_only_change_for_test;
+  const auto host = monitor_source_contract();
+  auto game = host;
+  game.mode = ar_glasses::presentation_mode_e::monitor_game;
+
+  const auto expect_rejected_change = [&](const char *name, auto member, const auto &value) {
+    SCOPED_TRACE(name);
+    auto changed = game;
+    changed.*member = value;
+    EXPECT_FALSE(local_monitor_source_only_change_for_test(host, changed));
+  };
+  expect_rejected_change("physical device", &local_session_contract_t::device_path, LR"(\\?\DISPLAY#other)");
+  expect_rejected_change("target adapter", &local_session_contract_t::adapter_id, LUID {43, 7});
+  expect_rejected_change("target identity", &local_session_contract_t::target_id, 3u);
+  expect_rejected_change("source adapter", &local_session_contract_t::source_adapter_id, LUID {42, 8});
+  expect_rejected_change("source identity", &local_session_contract_t::source_id, 2u);
+  expect_rejected_change("GDI name", &local_session_contract_t::gdi_name, R"(\\.\DISPLAY3)");
+  expect_rejected_change("moved sink", &local_session_contract_t::rect, RECT {1940, -1110, 3860, -30});
+  expect_rejected_change("raster", &local_session_contract_t::rect, RECT {1920, -1080, 4480, 0});
+  expect_rejected_change("refresh", &local_session_contract_t::refresh_millihz, 119880);
+  expect_rejected_change("other display moved", &local_session_contract_t::desktop_topology, "primary=owned-source;neighbor@3840,100:1920x1080@60000");
+  expect_rejected_change("primary sink", &local_session_contract_t::is_primary, true);
+  expect_rejected_change("cloned sink", &local_session_contract_t::is_cloned, true);
+  expect_rejected_change("unknown HDR", &local_session_contract_t::hdr_known, false);
+  expect_rejected_change("HDR support", &local_session_contract_t::hdr_supported, false);
+  expect_rejected_change("HDR setting", &local_session_contract_t::hdr_user_enabled, false);
+  expect_rejected_change("active HDR", &local_session_contract_t::hdr_active, false);
+  expect_rejected_change("HDR policy", &local_session_contract_t::hdr_limited_by_policy, true);
+  expect_rejected_change("bit depth", &local_session_contract_t::hdr_bits_per_color, 8u);
+
+  auto unverified_host = host;
+  unverified_host.hdr_known = false;
+  game.hdr_known = false;
+  EXPECT_FALSE(local_monitor_source_only_change_for_test(unverified_host, game));
+}
+
+TEST(LocalMonitorSourceSwitch, RestartRechecksAuthorityAroundJoinAndVerification) {
+  using ar_glasses::detail::restart_verified_monitor_source_for_test;
+  enum class event_e {
+    none,
+    remote_busy,
+    request_superseded,
+    desktop_locked,
+    topology_changed,
+    launch_failed
+  };
+
+  struct scenario_t {
+    event_e event;
+    const char *trace;
+    bool restarted;
+  };
+
+  // R checks the current request, J joins, V verifies the live desktop, and S starts.
+  const scenario_t scenarios[] {
+    {event_e::none, "RJRVRS", true},
+    {event_e::remote_busy, "R", false},
+    {event_e::request_superseded, "RJR", false},
+    {event_e::desktop_locked, "RJRV", false},
+    {event_e::topology_changed, "RJRVR", false},
+    {event_e::launch_failed, "RJRVRS", false},
+  };
+  for (const auto &scenario : scenarios) {
+    SCOPED_TRACE(static_cast<int>(scenario.event));
+    bool current = scenario.event != event_e::remote_busy;
+    std::string trace;
+    const bool restarted = restart_verified_monitor_source_for_test(
+      [&] {
+        trace += 'R';
+        return current;
+      },
+      [&] {
+        trace += 'J';
+        current = scenario.event != event_e::request_superseded;
+      },
+      [&] {
+        trace += 'V';
+        current = scenario.event != event_e::topology_changed;
+        return scenario.event != event_e::desktop_locked;
+      },
+      [&] {
+        trace += 'S';
+        return scenario.event != event_e::launch_failed;
+      }
+    );
+    EXPECT_EQ(restarted, scenario.restarted);
+    EXPECT_EQ(trace, scenario.trace);
+  }
+}
+
+namespace {
   std::array<std::uint8_t, 65> rayneo_sensor_report(
     float proximity,
     std::uint32_t tick = 1,

@@ -4004,6 +4004,96 @@ TEST(PrimaryDisplayMonitorReplacement, SecondaryMonitorDoesNotStealThePhysicalPr
   expect_positions(fake.current, {{L"other", 0, 0}, {L"monitor", 1920, 0}, {L"left", -1920, 0}, {L"virtual", 4480, 0}});
 }
 
+TEST(PrimaryDisplayMonitorReplacement, ReadOnlyVerificationAcceptsCommittedPrimaryAndSecondaryReplacement) {
+  for (const bool primary : {false, true}) {
+    SCOPED_TRACE(primary);
+    fake_io_t fake;
+    monitor_baseline(fake, primary);
+    manager_t manager(fake.io());
+    ASSERT_TRUE(manager.prepare(true, L"monitor", true));
+    fake.current = fake.catalog;
+    ASSERT_TRUE(manager.bind_pending(L"virtual"));
+    ASSERT_TRUE(manager.promote(L"virtual", true));
+
+    fake.events.clear();
+    EXPECT_TRUE(manager.verify_local_monitor_replacement(L"virtual", L"monitor"));
+    EXPECT_EQ(fake.events, (std::vector<std::string> {"load", "query"}));
+
+    // Compare the read-only proof with re-promoting the very same replacement layout.
+    fake.events.clear();
+    ASSERT_TRUE(manager.promote(L"virtual", true));
+    EXPECT_EQ(std::ranges::count(fake.events, "save"), 1);
+    EXPECT_GT(std::ranges::count(fake.events, "query"), 1);
+  }
+}
+
+TEST(PrimaryDisplayMonitorReplacement, ReadOnlyVerificationRejectsTopologyOrColorDrift) {
+  fake_io_t fake;
+  monitor_baseline(fake, true);
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"monitor", true));
+  fake.current = fake.catalog;
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  ASSERT_TRUE(fake.journal && fake.journal->exclusive_topology);
+  const auto committed = fake.current;
+  const auto source = named_index(committed, L"virtual");
+  const auto other = named_index(committed, L"other");
+  const auto sink = named_index(committed, L"monitor");
+  const auto verify_rejected = [&]() {
+    fake.events.clear();
+    EXPECT_FALSE(manager.verify_local_monitor_replacement(L"virtual", L"monitor"));
+    EXPECT_EQ(fake.events, (std::vector<std::string> {"load", "query"}));
+    fake.current = committed;
+  };
+
+  // A different origin owner can leave the sink and both display modes intact.
+  std::swap(fake.current.modes[committed.paths[source].sourceInfo.sourceModeInfoIdx].sourceMode.position, fake.current.modes[committed.paths[other].sourceInfo.sourceModeInfoIdx].sourceMode.position);
+  verify_rejected();
+
+  fake.current.paths[sink].targetInfo.refreshRate = {120, 1};
+  verify_rejected();
+
+  auto &live_source_color = *fake.current.colors[source];
+  live_source_color.advanced_color_enabled = live_source_color.hdr_user_enabled = live_source_color.advanced_color_active = true;
+  live_source_color.active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
+  verify_rejected();
+
+  fake.failed_queries.insert(fake.query_count + 1);
+  verify_rejected();
+
+  // Equality of two unknown values cannot qualify the live color contract.
+  fake.journal->exclusive_topology->colors[source].reset();
+  fake.current.colors[source].reset();
+  verify_rejected();
+}
+
+TEST(PrimaryDisplayMonitorReplacement, ReadOnlyVerificationRejectsUncommittedOrDifferentOwnership) {
+  fake_io_t fake;
+  monitor_baseline(fake, true);
+  manager_t manager(fake.io());
+  const auto verify_rejected = [&](std::wstring_view source, std::wstring_view sink) {
+    fake.events.clear();
+    EXPECT_FALSE(manager.verify_local_monitor_replacement(source, sink));
+    EXPECT_EQ(fake.events, (std::vector<std::string> {"load"}));
+  };
+
+  verify_rejected(L"virtual", L"monitor");
+  ASSERT_TRUE(manager.prepare(true, L"monitor", true));
+  verify_rejected(L"virtual", L"monitor");
+  fake.current = fake.catalog;
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  verify_rejected(L"virtual", L"monitor");
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+
+  verify_rejected(L"other", L"monitor");
+  verify_rejected(L"virtual", L"other");
+
+  ASSERT_TRUE(fake.journal);
+  fake.journal->pending_restore = fake.current;
+  verify_rejected(L"virtual", L"monitor");
+}
+
 TEST(PrimaryDisplayMonitorReplacement, ConnectedInactiveSecondary4kTvUsesRecordedNativeModeAndKeepsThe5120Primary) {
   fake_io_t fake;
   secondary_tv_baseline(fake);

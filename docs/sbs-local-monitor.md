@@ -52,6 +52,12 @@ physical output are transferred automatically. Windows that the user moves onto 
 remain there. Native input goes directly to the application on the virtual source; the presenter
 does not activate itself or reinject keyboard or mouse events.
 
+Switching between **Host 3D** and **Game 3D** can reuse the private desktop and its window
+placements. When Sunshine verifies the active display layout, refresh, and color against the
+committed setup, it restarts presentation for the new source without reapplying the display
+configuration. The shutter clock reacquires with the new presenter. Changed or unverified display
+settings use the ordinary reconfiguration path.
+
 Returning to 2D stops local capture, restores the selected physical monitor, and hands its windows
 and cursor back through the shared display lifecycle. A connecting or active remote session takes
 priority over local presentation. Use borderless fullscreen for games so their windows follow the
