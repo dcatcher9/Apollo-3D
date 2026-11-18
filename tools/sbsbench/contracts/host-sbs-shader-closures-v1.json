@@ -475,7 +475,7 @@
         "host_sbs_subtitle_gaussian_vertical_limit",
         "host_sbs_subtitle_gaussian_horizontal_limit"
       ],
-      "source_closure_sha256": "fbb7ecfe8c3272467a8b700372bb74127250be1d0d5d9470f75d1deeef2cb143"
+      "source_closure_sha256": "0fbf965181a85fe5a7f02a65a251e99a47a8ac8ed6dfc4a33caa33926a772d64"
     },
     {
       "name": "parallax_v2_coordinate_diagnostic",

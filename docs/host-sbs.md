@@ -74,7 +74,7 @@ as one tuple; the draw-owned pin resources are not a new temporal observation.
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
 schema 135/tag `0x8405278D`, canonical SHA-256
-`debb465435a27c73010538101c1bf56dc6719fe4d3fde46f97fb7a056a89366f`. It binds the
+`6cc37d5eeadc98ab263d01d0b02a131de2f374a88daeff56aae8379fef529a79`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -85,7 +85,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 2 | `720fe4a316f1f66fd31c8a1833cbf0d93e25f34da494b6c80b94b6cea096689e` |
-| `parallax_v2_producer` | 29 | `fbb7ecfe8c3272467a8b700372bb74127250be1d0d5d9470f75d1deeef2cb143` |
+| `parallax_v2_producer` | 29 | `0fbf965181a85fe5a7f02a65a251e99a47a8ac8ed6dfc4a33caa33926a772d64` |
 | `parallax_v2_coordinate_diagnostic` | 1 | `8fa3b38378aacc681b44daf2adc6da90d8ad8dd5937fd0e1dd5cc1bf597ab184` |
 | `near_identical_detector` | 3 | `c8988887dcdd5b7f1aa81fd5c144e7bf85ed126712bf72c8d8be4943e7067bca` |
 | `gpu_trace` | 1 | `8b2fc3d19020721799f826549cafd74db0d3248c2fc24356b211b85287ef87bb` |
@@ -555,10 +555,11 @@ their evaluator identity and epoch behavior are unchanged.
 
 The adaptive UI controller samples Base under the current authenticated OCR covers. Those covers
 bound the contour search. Native pixels that pass the current palette/stroke or local-outline
-evidence rule supply current subtitle footprints immediately. The authenticated optional OCR
-dispatch learns each current cover's palette once. Contour thread groups read those palettes
-after the dispatch completes, and an empty observation exits palette learning before any
-sampling. A minimum slope-budget extension
+evidence rule supply current subtitle footprints immediately. One GPU group validates current
+source and subtitle evidence, prepares the cover geometry, and learns each cover's palette.
+The contour passes reuse those results. Each fresh observation writes its own validity result,
+including empty observations and OCR abstentions. Only active covers enter palette learning.
+A minimum slope-budget extension
 changes Base only where required by those footprints and the UI plane.
 Current-cover authentication remains independent of UI-plane filtering. The native contour recipe is
 experimental and still requires paired quality and live acceptance before release.

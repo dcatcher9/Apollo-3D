@@ -222,6 +222,9 @@ namespace {
 
   class HostSbsSubtitleContourGpuTest: public ::testing::Test {
   protected:
+    static constexpr auto observation_header = v2::subtitle_plane_cover_capacity *
+                                               (1u + v2::subtitle_contour_palette_max_modes);
+
     void SetUp() override {
       constexpr D3D_FEATURE_LEVEL requested[] {D3D_FEATURE_LEVEL_11_0};
       D3D_FEATURE_LEVEL actual {};
@@ -268,9 +271,9 @@ namespace {
       desc.MiscFlags = D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS;
       ASSERT_TRUE(SUCCEEDED(device_->CreateBuffer(&desc, nullptr, &indirect_)));
       ASSERT_TRUE(SUCCEEDED(device_->CreateBuffer(&desc, nullptr, &palette_indirect_)));
-      constexpr auto palette_records = v2::subtitle_plane_cover_capacity * (1u + v2::subtitle_contour_palette_max_modes);
-      ASSERT_TRUE(create_buffer(device_.Get(), palette_records * sizeof(uint4_t), sizeof(uint4_t),
-                                D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, palettes_));
+      constexpr auto observation_records = observation_header + 1u + 3u * v2::subtitle_plane_cover_capacity;
+      ASSERT_TRUE(create_buffer(device_.Get(), observation_records * sizeof(uint4_t), sizeof(uint4_t),
+                                D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, observation_));
       ASSERT_TRUE(resize(160u, 90u));
     }
 
@@ -540,8 +543,7 @@ namespace {
       context_->CSSetUnorderedAccessViews(0u, uavs.size(), uavs.data(), nullptr);
     }
 
-    void bind_inputs(ID3D11ShaderResourceView *baseline_support = nullptr,
-                     ID3D11ShaderResourceView *eligibility = nullptr) {
+    void bind_inputs(ID3D11ShaderResourceView *baseline_support = nullptr) {
       const std::array<ID3D11ShaderResourceView *, 13u> srvs {
         display_.srv.Get(),
         probability_.srv.Get(),
@@ -555,11 +557,22 @@ namespace {
         ocr_.srv.Get(),
         geometry_.srv.Get(),
         nullptr,
-        eligibility
+        nullptr
       };
       context_->CSSetShaderResources(0u, srvs.size(), srvs.data());
       const std::array<ID3D11Buffer *, 2u> cbuffers {contour_cb_.Get(), geometry_cb_.Get()};
       context_->CSSetConstantBuffers(0u, cbuffers.size(), cbuffers.data());
+    }
+
+    void prepare_current_observation(bool zero_groups) {
+      const std::array<std::uint32_t, 3u> args {zero_groups ? 0u : 1u, 1u, 1u};
+      context_->UpdateSubresource(palette_indirect_.Get(), 0u, nullptr, args.data(), 0u, 0u);
+      context_->CSSetShader(shaders_[6u].Get(), nullptr, 0u);
+      context_->CSSetUnorderedAccessViews(7u, 1u, observation_.uav.GetAddressOf(), nullptr);
+      context_->DispatchIndirect(palette_indirect_.Get(), 0u);
+      ID3D11UnorderedAccessView *null_uav = nullptr;
+      context_->CSSetUnorderedAccessViews(7u, 1u, &null_uav, nullptr);
+      context_->CSSetShaderResources(12u, 1u, observation_.srv.GetAddressOf());
     }
 
     bool run(bool zero_groups = false,
@@ -586,18 +599,12 @@ namespace {
         zero_groups ? 0u : 1u
       };
       context_->UpdateSubresource(indirect_.Get(), 0u, nullptr, arguments.data(), 0u, 0u);
-      bind_inputs(baseline_support, eligibility);
+      bind_inputs(baseline_support);
+      prepare_current_observation(zero_groups);
       ID3D11UnorderedAccessView *null_uav = nullptr;
-      // The opt-in historical birth-palette variant uses t12 for its immutable source
-      // eligibility bitmap. Its explicit input retains that original shader binding.
-      if (!eligibility) {
-        const std::array<std::uint32_t, 3u> palette_arguments {zero_groups ? 0u : 1u, 1u, 1u};
-        context_->UpdateSubresource(palette_indirect_.Get(), 0u, nullptr, palette_arguments.data(), 0u, 0u);
-        context_->CSSetShader(shaders_[6u].Get(), nullptr, 0u);
-        context_->CSSetUnorderedAccessViews(7u, 1u, palettes_.uav.GetAddressOf(), nullptr);
-        context_->DispatchIndirect(palette_indirect_.Get(), 0u);
-        context_->CSSetUnorderedAccessViews(7u, 1u, &null_uav, nullptr);
-        context_->CSSetShaderResources(12u, 1u, palettes_.srv.GetAddressOf());
+      // The historical temporal variant still receives its eligibility bitmap at t12.
+      if (eligibility) {
+        context_->CSSetShaderResources(12u, 1u, &eligibility);
       }
       context_->CSSetShader(shaders_[0u].Get(), nullptr, 0u);
       context_->CSSetUnorderedAccessViews(0u, 1u, support_.uav.GetAddressOf(), nullptr);
@@ -605,10 +612,9 @@ namespace {
       context_->DispatchIndirect(indirect_.Get(), 0u);
       context_->CSSetUnorderedAccessViews(0u, 1u, &null_uav, nullptr);
       context_->CSSetUnorderedAccessViews(2u, 1u, &null_uav, nullptr);
-      // The palette cache or experimental eligibility input belongs only to temporal_main.
-      // Dense/history/snapshot retain their production bindings.
-      ID3D11ShaderResourceView *null_temporal_input = nullptr;
-      context_->CSSetShaderResources(12u, 1u, &null_temporal_input);
+      if (eligibility) {
+        context_->CSSetShaderResources(12u, 1u, observation_.srv.GetAddressOf());
+      }
       context_->CSSetShaderResources(5u, 1u, support_.srv.GetAddressOf());
       context_->CSSetShader(shaders_[1u].Get(), nullptr, 0u);
       context_->CSSetUnorderedAccessViews(6u, 1u, matte_.uav.GetAddressOf(), nullptr);
@@ -706,6 +712,7 @@ namespace {
       const std::array<std::uint32_t, 3u> arguments {(field_w_ + 15u) / 16u, (field_h_ + 15u) / 16u, 1u};
       context_->UpdateSubresource(indirect_.Get(), 0u, nullptr, arguments.data(), 0u, 0u);
       bind_inputs();
+      prepare_current_observation(false);
       context_->CSSetShaderResources(5u, 1u, support_.srv.GetAddressOf());
       context_->CSSetShader(shaders_[1u].Get(), nullptr, 0u);
       context_->CSSetUnorderedAccessViews(6u, 1u, matte_.uav.GetAddressOf(), nullptr);
@@ -1103,7 +1110,7 @@ namespace {
     ComPtr<ID3D11ComputeShader> probability_probe_;
     ComPtr<ID3D11Buffer> contour_cb_, geometry_cb_, indirect_, palette_indirect_;
     texture_t display_, support_, matte_, field_, features_, next_features_, completed_display_;
-    buffer_t probability_, plane_, params_, ocr_, health_, geometry_, identity_, completed_probability_, palettes_;
+    buffer_t probability_, plane_, params_, ocr_, health_, geometry_, identity_, completed_probability_, observation_;
     std::uint32_t source_w_ {}, source_h_ {}, crop_h_ {}, crop_top_ {}, field_w_ {}, field_h_ {};
     uint4_t content_ {}, native_cover_ {}, field_cover_ {};
     contour_constants_t constants_ {};
@@ -3562,6 +3569,34 @@ namespace {
         }
       }
     }
+  }
+
+  TEST_F(HostSbsSubtitleContourGpuTest, FreshAbstentionReplacesPreparedEvidenceAfterReuse) {
+    paint_glyph_point();
+    ASSERT_TRUE(observe(1u));
+    const auto retained = result_;
+    constexpr auto header_word = 4u * observation_header;
+    std::vector<std::uint32_t> prepared, current;
+    ASSERT_TRUE(read_buffer(device_.Get(), context_.Get(), observation_.buffer.Get(), prepared));
+    ASSERT_EQ(prepared[header_word], 1u);
+    ASSERT_GT(prepared[header_word + 1u], 0u);
+
+    make_authority(2u, 1100001u);
+    without_current_authority(true);
+    ocr_words_[2u] = 0u;
+    ASSERT_TRUE(run(true, nullptr, nullptr, true));
+    expect_tuple_equal(retained);
+    ASSERT_TRUE(read_buffer(device_.Get(), context_.Get(), observation_.buffer.Get(), current));
+    EXPECT_EQ(current, prepared);
+
+    ASSERT_TRUE(run(false, nullptr, nullptr, true));
+    expect_no_mask();
+    EXPECT_EQ(result_.identity[v2::subtitle_contour_history_snapshot_valid_word], 0u);
+    EXPECT_TRUE(std::ranges::all_of(result_.source, [](const auto &pixel) { return pixel == half_pixel_t {}; }));
+    ASSERT_TRUE(read_buffer(device_.Get(), context_.Get(), observation_.buffer.Get(), current));
+    EXPECT_EQ(current[header_word], 0u);
+    EXPECT_EQ(current[header_word + 1u], 0u);
+    EXPECT_EQ(current[header_word + 2u], 1100001u);
   }
 
   TEST_F(HostSbsSubtitleContourGpuTest, OpaqueInferAndPoisonedZeroGroupReuseKeepFeatureOwnersUntilForceObservation) {
