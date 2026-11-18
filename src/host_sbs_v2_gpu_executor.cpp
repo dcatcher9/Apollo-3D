@@ -207,44 +207,38 @@ namespace models::host_sbs_v2_gpu {
       return false;
     }
     if (!command.raw_depth || !command.state || !command.tensor_exclusion ||
-        !command.minmax_ema || !command.current_model_input ||
-        !command.current_appearance_ordinal || !command.depth_health_state) {
+        !command.minmax_ema || !command.current_model_input || !command.depth_health_state) {
       return false;
     }
     if (!command.candidate_output || !command.previous_model_input_output ||
-        !command.previous_appearance_ordinal_output ||
-        !command.previous_tensor_exclusion_output ||
         !command.history_owner_output) {
       return false;
     }
 
     bind_stage_constants(context, command.constants, command.near_identical_constants);
     context->CSSetShader(command.shader, nullptr, 0u);
-    ID3D11ShaderResourceView *inputs[7] = {
+    ID3D11ShaderResourceView *inputs[6] = {
       command.raw_depth,
       command.state,
       command.tensor_exclusion,
       command.minmax_ema,
       command.current_model_input,
-      command.current_appearance_ordinal,
       command.depth_health_state,
     };
-    ID3D11UnorderedAccessView *outputs[5] = {
+    ID3D11UnorderedAccessView *outputs[3] = {
       command.candidate_output,
       command.previous_model_input_output,
-      command.previous_appearance_ordinal_output,
-      command.previous_tensor_exclusion_output,
       command.history_owner_output,
     };
-    context->CSSetShaderResources(0u, 7u, inputs);
-    context->CSSetUnorderedAccessViews(0u, 5u, outputs, nullptr);
+    context->CSSetShaderResources(0u, 6u, inputs);
+    context->CSSetUnorderedAccessViews(0u, 3u, outputs, nullptr);
     (void) record_dispatch(context, command.dispatch);
 
     // This full unbind is the cross-dispatch publication boundary for the history tuple/owner.
-    ID3D11ShaderResourceView *null_inputs[7] = {};
-    ID3D11UnorderedAccessView *null_outputs[5] = {};
-    context->CSSetShaderResources(0u, 7u, null_inputs);
-    context->CSSetUnorderedAccessViews(0u, 5u, null_outputs, nullptr);
+    ID3D11ShaderResourceView *null_inputs[6] = {};
+    ID3D11UnorderedAccessView *null_outputs[3] = {};
+    context->CSSetShaderResources(0u, 6u, null_inputs);
+    context->CSSetUnorderedAccessViews(0u, 3u, null_outputs, nullptr);
     return true;
   }
 

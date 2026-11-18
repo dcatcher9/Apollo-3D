@@ -12,10 +12,10 @@
 #include <type_traits>
 
 namespace models::depth_coordinate_v2 {
-  inline constexpr std::uint32_t contract_schema = 134u;
-  inline constexpr std::uint32_t contract_tag = 0xAE886945u;
-  inline constexpr std::string_view contract_canonical_sha256 = "f175f90f992f9656efc5dac470d08bd4d405720fe976cff733b304e1deedcf69";
-  inline constexpr std::string_view contract_tag_semantic_sha256 = "ae886945c41afa13d0e74d76ac99201ffeee804e10dced23c1c294a443d0ebd9";
+  inline constexpr std::uint32_t contract_schema = 135u;
+  inline constexpr std::uint32_t contract_tag = 0xF2172305u;
+  inline constexpr std::string_view contract_canonical_sha256 = "ae112a5e100ba8d751b6b0d14b15430a498585edffa49d3d79760f25e9a9c4b0";
+  inline constexpr std::string_view contract_tag_semantic_sha256 = "f217230534fcdc59d4c4e9a7cba0f53d627c7ceb820943eb0d394a4d631b4c16";
   inline constexpr std::string_view shadow_state_source = "depth_coordinate_v2_state_resolve_cs.ShadowState";
   inline constexpr std::string_view shadow_state_capture = "after-every-complete-depth-coordinate-v2-state-update";
   inline constexpr std::string_view frame_stats_source = "depth_coordinate_v2_frame_resolve_cs.FrameStats";
@@ -368,7 +368,7 @@ namespace models::depth_coordinate_v2 {
         "cs_5_0",
         34816u,
         0u,
-        "23b786200fa4178ef23aa2ca962bad3fbb279100fa6c68a523e08650a72aa6bd",
+        "395d44b6f4f33d2a6dcdb57f4b355fe897e1255dd685aa2e5cfa4504505d3c85",
         1u,
         "float32-le",
         "NCHW",

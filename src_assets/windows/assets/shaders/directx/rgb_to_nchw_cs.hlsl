@@ -1,7 +1,6 @@
 Texture2D<float4> InputTexture : register(t0);
 RWStructuredBuffer<float> OutputBuffer : register(u0);
-RWStructuredBuffer<float> OutputAppearanceOrdinal : register(u1);
-RWTexture2D<uint> OutputTensorExclusion : register(u2);
+RWTexture2D<uint> OutputTensorExclusion : register(u1);
 
 #include "include/depth_constants.hlsl"
 #include "include/depth_color.hlsl"
@@ -137,7 +136,6 @@ void main(uint3 DTid : SV_DispatchThreadID) {
         OutputBuffer[base_idx] = 0.0f;
         OutputBuffer[base_idx + invalid_stride] = 0.0f;
         OutputBuffer[base_idx + 2u * invalid_stride] = 0.0f;
-        OutputAppearanceOrdinal[base_idx] = 0.0f;
         OutputTensorExclusion[DTid.xy] = 1u;
         return;
     }
@@ -154,27 +152,6 @@ void main(uint3 DTid : SV_DispatchThreadID) {
                              DepthAnalysisClampCell(DTid.xy), source_size))) :
         float3(0.0f, 0.0f, 0.0f);
     OutputTensorExclusion[DTid.xy] = content_cell ? 0u : 1u;
-
-    // Preserve one exposure-ordinal signal independently from the model's HDR tonemapper.
-    //
-    // Point sampling is deliberate. A nonlinear exposure curve followed by spatial mixing can
-    // also reverse the ordering of two mixtures even when the curve is globally monotone. At a
-    // fixed capture texel, however, maxRGB commutes with an identical monotone channel curve; a
-    // pair can retain its order or collapse to a tie, never reverse it. The later census requires
-    // reliable contrast in both frames, so ties abstain.
-    float2 appearance_model_uv = content_valid ?
-        (float2(DepthAnalysisClampCell(DTid.xy)) + 0.5f) /
-            float2(target_w, target_h) :
-        float2(0.0f, 0.0f);
-    float2 appearance_uv = full_content ? uv :
-        (content_valid ? LetterboxSourceUv(appearance_model_uv) : float2(0.0f, 0.0f));
-    uint2 source_point = min(
-        uint2(appearance_uv * float2(source_size)),
-        source_size - 1u);
-    float3 capture_rgb = InputTexture.Load(int3(
-        DepthSourceRegionLoadPosition(int2(source_point), source_size), 0)).rgb;
-    OutputAppearanceOrdinal[base_idx] =
-        DepthAppearanceOrdinal(capture_rgb, color_mode);
 
     // ImageNet Normalization
     float r = (pixel.r - 0.485f) / 0.229f;

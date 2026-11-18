@@ -1,5 +1,5 @@
 {
-  "schema": 134,
+  "schema": 135,
   "vector_width": 4,
   "capture_provenance": {
     "schema": 3,
@@ -546,7 +546,7 @@
         "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "f3e2861b7a6976a42897e9c1523aabf7e2bb120815a5967ddb3472c89acf4614"
+    "source_closure_sha256": "31570de82c474b5e995372ec09f2ea20e173738f375c7b6534fb91f4c6db2683"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,
@@ -679,7 +679,7 @@
         "source_target": "cs_5_0",
         "source_compile_flags": 34816,
         "source_macro_count": 0,
-        "source_closure_sha256": "23b786200fa4178ef23aa2ca962bad3fbb279100fa6c68a523e08650a72aa6bd",
+        "source_closure_sha256": "395d44b6f4f33d2a6dcdb57f4b355fe897e1255dd685aa2e5cfa4504505d3c85",
         "model_input_schema": 1,
         "dtype": "float32-le",
         "layout": "NCHW",

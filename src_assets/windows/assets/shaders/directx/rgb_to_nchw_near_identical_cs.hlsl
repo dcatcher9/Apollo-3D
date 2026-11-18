@@ -1,12 +1,12 @@
 // Common-path fusion for the calibrated RGB-to-NCHW producer and the GPU-only near-identical
-// tile evidence. The included producer remains the sole owner of resize, transfer, normalization,
-// appearance, and exclusion semantics. This wrapper only observes its committed FP32 NCHW words.
+// tile evidence. The included producer owns resize, transfer, normalization, and exclusion.
+// This wrapper observes the producer's committed NCHW and exclusion words.
 
 #include "rgb_to_nchw_cs.hlsl"
 #include "include/host_sbs_near_identical_compare.hlsl"
 
 StructuredBuffer<float> PreviousModelInput : register(t1);
-RWStructuredBuffer<NearIdenticalTileEvidence> NearIdenticalTileOutput : register(u3);
+RWStructuredBuffer<NearIdenticalTileEvidence> NearIdenticalTileOutput : register(u2);
 
 cbuffer NearIdenticalFusedMode : register(b1) {
     uint NearIdenticalEvidenceEnabled;

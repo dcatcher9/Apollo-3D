@@ -454,20 +454,12 @@ void main(uint3 id : SV_DispatchThreadID) {
     ComPtr<ID3D11Buffer> dummy_previous_model_input_buffer;
     ComPtr<ID3D11ShaderResourceView> dummy_previous_model_input_srv;
     ComPtr<ID3D11UnorderedAccessView> dummy_previous_model_input_uav;
-    ComPtr<ID3D11Buffer> dummy_current_appearance_buffer;
-    ComPtr<ID3D11ShaderResourceView> dummy_current_appearance_srv;
-    ComPtr<ID3D11Buffer> dummy_previous_appearance_buffer;
-    ComPtr<ID3D11ShaderResourceView> dummy_previous_appearance_srv;
-    ComPtr<ID3D11UnorderedAccessView> dummy_previous_appearance_uav;
     ComPtr<ID3D11Buffer> dummy_history_owner_buffer;
     ComPtr<ID3D11ShaderResourceView> dummy_history_owner_srv;
     ComPtr<ID3D11UnorderedAccessView> dummy_history_owner_uav;
     ComPtr<ID3D11Texture2D> dummy_exclusion_texture;
     ComPtr<ID3D11ShaderResourceView> dummy_exclusion_srv;
     ComPtr<ID3D11UnorderedAccessView> dummy_exclusion_uav;
-    ComPtr<ID3D11Texture2D> dummy_previous_exclusion_texture;
-    ComPtr<ID3D11ShaderResourceView> dummy_previous_exclusion_srv;
-    ComPtr<ID3D11UnorderedAccessView> dummy_previous_exclusion_uav;
     ComPtr<ID3D11Texture2D> coordinate_texture;
     ComPtr<ID3D11ShaderResourceView> coordinate_srv;
     ComPtr<ID3D11UnorderedAccessView> coordinate_uav;
@@ -942,6 +934,8 @@ void main(uint3 id : SV_DispatchThreadID) {
         }
       }
       auto depth_health_state_words = sbs_adaptive_state::initial_words;
+      // Replay starts from saved raw depth. Its inactive MinMaxEma prevents the shared map
+      // from advancing NCHW history, while the dummy bindings preserve the production ABI.
       const std::array<float, 4> invalid_minmax {{0.0f, 0.0f, 0.0f, 0.0f}};
       if (!create_structured_buffer(
             device.Get(), sizeof(float) * 4u,
@@ -962,26 +956,12 @@ void main(uint3 id : SV_DispatchThreadID) {
             dummy_previous_model_input_uav
           ) ||
           !create_structured_buffer(
-            device.Get(), sizeof(float), width * height, nullptr, false,
-            dummy_current_appearance_buffer, dummy_current_appearance_srv, unused_uav
-          ) ||
-          !create_structured_buffer(
-            device.Get(), sizeof(float), width * height, nullptr, true,
-            dummy_previous_appearance_buffer, dummy_previous_appearance_srv,
-            dummy_previous_appearance_uav
-          ) ||
-          !create_structured_buffer(
             device.Get(), sizeof(std::uint32_t), 10u, nullptr, true,
             dummy_history_owner_buffer, dummy_history_owner_srv, dummy_history_owner_uav
           ) ||
           !create_uint_texture(
             device.Get(), width, height,
             dummy_exclusion_texture, dummy_exclusion_srv, dummy_exclusion_uav
-          ) ||
-          !create_uint_texture(
-            device.Get(), width, height,
-            dummy_previous_exclusion_texture, dummy_previous_exclusion_srv,
-            dummy_previous_exclusion_uav
           ) ||
           !create_float_texture(
             device.Get(), width, height,
@@ -1015,7 +995,6 @@ void main(uint3 id : SV_DispatchThreadID) {
       const UINT zero_uint[4] = {};
       const float zero_float[4] = {};
       context->ClearUnorderedAccessViewUint(dummy_exclusion_uav.Get(), zero_uint);
-      context->ClearUnorderedAccessViewUint(dummy_previous_exclusion_uav.Get(), zero_uint);
       return true;
     }
 
@@ -1141,12 +1120,9 @@ void main(uint3 id : SV_DispatchThreadID) {
         .tensor_exclusion = dummy_exclusion_srv.Get(),
         .minmax_ema = dummy_minmax_srv.Get(),
         .current_model_input = dummy_current_model_input_srv.Get(),
-        .current_appearance_ordinal = dummy_current_appearance_srv.Get(),
         .depth_health_state = depth_health_state_srv.Get(),
         .candidate_output = candidate_uav.Get(),
         .previous_model_input_output = dummy_previous_model_input_uav.Get(),
-        .previous_appearance_ordinal_output = dummy_previous_appearance_uav.Get(),
-        .previous_tensor_exclusion_output = dummy_previous_exclusion_uav.Get(),
         .history_owner_output = dummy_history_owner_uav.Get(),
         .dispatch = v2_gpu::dispatch_command_t::direct(
           (width + 15u) / 16u,

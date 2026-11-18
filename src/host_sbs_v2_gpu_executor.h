@@ -91,12 +91,9 @@ namespace models::host_sbs_v2_gpu {
     ID3D11ShaderResourceView *tensor_exclusion = nullptr;
     ID3D11ShaderResourceView *minmax_ema = nullptr;
     ID3D11ShaderResourceView *current_model_input = nullptr;
-    ID3D11ShaderResourceView *current_appearance_ordinal = nullptr;
     ID3D11ShaderResourceView *depth_health_state = nullptr;
     ID3D11UnorderedAccessView *candidate_output = nullptr;
     ID3D11UnorderedAccessView *previous_model_input_output = nullptr;
-    ID3D11UnorderedAccessView *previous_appearance_ordinal_output = nullptr;
-    ID3D11UnorderedAccessView *previous_tensor_exclusion_output = nullptr;
     ID3D11UnorderedAccessView *history_owner_output = nullptr;
     dispatch_command_t dispatch;
   };

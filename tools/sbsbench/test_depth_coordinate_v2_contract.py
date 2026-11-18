@@ -189,6 +189,8 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             # Application text searches a whole dialogue line: covers bridge the gaps between
             # detected pieces, and across a bridged gap only the text fill colour is evidence.
             134: "f175f90f992f9656efc5dac470d08bd4d405720fe976cff733b304e1deedcf69",
+            # The model-input history retains only its consumed NCHW planes.
+            135: "ae112a5e100ba8d751b6b0d14b15430a498585edffa49d3d79760f25e9a9c4b0",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -196,14 +198,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 contract or shader identity changed without a reviewed identity pin",
         )
-        self.assertEqual(generator.contract_tag(contract), 0xAE886945)
+        self.assertEqual(generator.contract_tag(contract), 0xF2172305)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "ae886945c41afa13d0e74d76ac99201ffeee804e10dced23c1c294a443d0ebd9",
+            "f217230534fcdc59d4c4e9a7cba0f53d627c7ceb820943eb0d394a4d631b4c16",
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "f3e2861b7a6976a42897e9c1523aabf7e2bb120815a5967ddb3472c89acf4614",
+            "31570de82c474b5e995372ec09f2ea20e173738f375c7b6534fb91f4c6db2683",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -338,7 +340,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertEqual(calibration.preprocess.source_macro_count, 0)
         self.assertEqual(
             calibration.preprocess.source_closure_sha256,
-            "23b786200fa4178ef23aa2ca962bad3fbb279100fa6c68a523e08650a72aa6bd")
+            "395d44b6f4f33d2a6dcdb57f4b355fe897e1255dd685aa2e5cfa4504505d3c85")
         self.assertEqual(
             calibration.preprocess.source_closure_sha256,
             generator.shader_source_closure_sha256())
@@ -488,7 +490,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         cpp = generator.render_cpp(contract)
         hlsl = generator.render_hlsl(contract)
         for token in (
-                'contract_schema = 134u',
+                'contract_schema = 135u',
                 'final_parallax_contract_schema = 4u',
                 'final_parallax_authority = '
                 '"authenticated-subtitle-conditioned-r32f-diagnostic-only"',
@@ -588,7 +590,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'constexpr bool subtitle_ocr_field_is_calibrated('):
             self.assertIn(token, cpp)
         for token in (
-                '#define V2_CONTRACT_SCHEMA 134u',
+                '#define V2_CONTRACT_SCHEMA 135u',
                 '#define V2_SUBTITLE_PLANE_ADAPTIVE_KNOWN_FLAGS 28u',
                 '#define V2_SUBTITLE_PLANE_ADAPTIVE_RETIRED_APPROACH_FLAG 1u',
                 '#define V2_SUBTITLE_CONTOUR_RECIPE 27u',

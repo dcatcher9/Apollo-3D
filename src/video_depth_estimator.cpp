@@ -3508,12 +3508,6 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Buffer> tensor_previous_input_buf;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tensor_previous_input_srv;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> tensor_previous_input_uav;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> appearance_ordinal_buf;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> appearance_ordinal_srv;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> appearance_ordinal_uav;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> previous_appearance_ordinal_buf;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> previous_appearance_ordinal_srv;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> previous_appearance_ordinal_uav;
     Microsoft::WRL::ComPtr<ID3D11Buffer> tensor_out_buf;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tensor_out_srv;
     Microsoft::WRL::ComPtr<ID3D11Buffer> raw_snapshot_buf;
@@ -3555,9 +3549,6 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> tensor_exclusion_tex;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> tensor_exclusion_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tensor_exclusion_srv;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> tensor_previous_exclusion_tex;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> tensor_previous_exclusion_uav;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tensor_previous_exclusion_srv;
 
     // GPU-only raw-coordinate V2 producer. The canonical-coordinate texture is exceptional: its
     // shader, texture, and views are created only for an explicit Dump 3D snapshot. The
@@ -7531,9 +7522,7 @@ namespace models {
           !near_identical_cbuffer || !near_identical_history_owner.uav ||
           !tensor_out_srv || !depth_coordinate_v2_state_srv ||
           !tensor_exclusion_srv || !minmax_ema_srv || !tensor_in_srv ||
-          !appearance_ordinal_srv || !depth_health_state_srv ||
-          !depth_coordinate_v2_candidate_uav || !tensor_previous_input_uav ||
-          !previous_appearance_ordinal_uav || !tensor_previous_exclusion_uav) {
+          !depth_health_state_srv || !depth_coordinate_v2_candidate_uav || !tensor_previous_input_uav) {
         return false;
       }
 
@@ -7564,9 +7553,9 @@ namespace models {
       mark_d3d_parallax_map_start(perf_slot);
 
       // Raw depth -> immutable pre-limiter candidate, while the same infer-grid dispatch advances
-      // the complete raw padded appearance history and publishes its narrower authenticated
-      // owner. normalize_depth_output uploaded the exact b2 words consumed here; no host update
-      // occurs between that upload and this dispatch. The full-size canonical-coordinate
+      // the padded NCHW history and publishes its authenticated owner. normalize_depth_output
+      // uploaded the exact b2 words consumed here. They stay intact until this dispatch.
+      // The full-size canonical-coordinate
       // field is deliberately absent from production; an explicit Dump 3D dispatches it separately.
       const host_sbs_v2_gpu::map_history_command_t map_history_command {
         .constants = base_constants,
@@ -7577,12 +7566,9 @@ namespace models {
         .tensor_exclusion = tensor_exclusion_srv.Get(),
         .minmax_ema = minmax_ema_srv.Get(),
         .current_model_input = tensor_in_srv.Get(),
-        .current_appearance_ordinal = appearance_ordinal_srv.Get(),
         .depth_health_state = depth_health_state_srv.Get(),
         .candidate_output = depth_coordinate_v2_candidate_uav.Get(),
         .previous_model_input_output = tensor_previous_input_uav.Get(),
-        .previous_appearance_ordinal_output = previous_appearance_ordinal_uav.Get(),
-        .previous_tensor_exclusion_output = tensor_previous_exclusion_uav.Get(),
         .history_owner_output = near_identical_history_owner.uav.Get(),
         .dispatch = parallax_v2_dispatch_command(
           (target_w + 15) / 16,
@@ -9205,11 +9191,6 @@ namespace models {
           near_identical_history_owner.uav.Get(), zero_uint4
         );
       }
-      if (previous_appearance_ordinal_uav) {
-        context->ClearUnorderedAccessViewUint(
-          previous_appearance_ordinal_uav.Get(), zero_uint4
-        );
-      }
       if (depth_uav) {
         context->ClearUnorderedAccessViewFloat(depth_uav.Get(), zero4);
       }
@@ -9218,10 +9199,6 @@ namespace models {
       }
       if (ema_motion_mask_uav) {
         context->ClearUnorderedAccessViewUint(ema_motion_mask_uav.Get(), zero_uint4);
-      }
-      if (tensor_previous_exclusion_uav) {
-        context->ClearUnorderedAccessViewUint(
-          tensor_previous_exclusion_uav.Get(), zero_uint4);
       }
       if (subtitle_locator_state_uav) {
         context->ClearUnorderedAccessViewUint(
@@ -9769,43 +9746,6 @@ namespace models {
                          &tensor_previous_input_uav
                        ));
 
-        // One capture-domain point maxRGB scalar per model texel. Keeping it outside TensorRT's
-        // three-plane input preserves a pre-tone-map exposure ordinal without changing the engine
-        // binding size. Current/history are copied in lockstep with the valid NCHW/depth pair.
-        auto appearance_desc = buf_desc;
-        appearance_desc.ByteWidth = target_w * target_h * sizeof(float);
-        resources_ok = resources_ok &&
-                       SUCCEEDED(device->CreateBuffer(
-                         &appearance_desc,
-                         nullptr,
-                         &appearance_ordinal_buf
-                       )) &&
-                       SUCCEEDED(device->CreateShaderResourceView(
-                         appearance_ordinal_buf.Get(),
-                         nullptr,
-                         &appearance_ordinal_srv
-                       )) &&
-                       SUCCEEDED(device->CreateUnorderedAccessView(
-                         appearance_ordinal_buf.Get(),
-                         nullptr,
-                         &appearance_ordinal_uav
-                       )) &&
-                       SUCCEEDED(device->CreateBuffer(
-                         &appearance_desc,
-                         nullptr,
-                         &previous_appearance_ordinal_buf
-                       )) &&
-                       SUCCEEDED(device->CreateShaderResourceView(
-                         previous_appearance_ordinal_buf.Get(),
-                         nullptr,
-                         &previous_appearance_ordinal_srv
-                       )) &&
-                       SUCCEEDED(device->CreateUnorderedAccessView(
-                         previous_appearance_ordinal_buf.Get(),
-                         nullptr,
-                         &previous_appearance_ordinal_uav
-                       ));
-
         const std::size_t output_logical_bytes =
           static_cast<std::size_t>(target_w) * target_h * sizeof(float);
         const std::optional<std::size_t> output_allocation_bytes =
@@ -9864,10 +9804,7 @@ namespace models {
                        SUCCEEDED(device->CreateShaderResourceView(ema_motion_mask_tex.Get(), nullptr, &ema_motion_mask_srv)) &&
                        SUCCEEDED(device->CreateTexture2D(&mask_desc, nullptr, &tensor_exclusion_tex)) &&
                        SUCCEEDED(device->CreateUnorderedAccessView(tensor_exclusion_tex.Get(), nullptr, &tensor_exclusion_uav)) &&
-                       SUCCEEDED(device->CreateShaderResourceView(tensor_exclusion_tex.Get(), nullptr, &tensor_exclusion_srv)) &&
-                       SUCCEEDED(device->CreateTexture2D(&mask_desc, nullptr, &tensor_previous_exclusion_tex)) &&
-                       SUCCEEDED(device->CreateUnorderedAccessView(tensor_previous_exclusion_tex.Get(), nullptr, &tensor_previous_exclusion_uav)) &&
-                       SUCCEEDED(device->CreateShaderResourceView(tensor_previous_exclusion_tex.Get(), nullptr, &tensor_previous_exclusion_srv));
+                       SUCCEEDED(device->CreateShaderResourceView(tensor_exclusion_tex.Get(), nullptr, &tensor_exclusion_srv));
 
         if (!resources_ok) {
           BOOST_LOG(error)
@@ -9896,7 +9833,6 @@ namespace models {
         context->ClearUnorderedAccessViewFloat(depth_previous_uav.Get(), clear_color);
         context->ClearUnorderedAccessViewUint(ema_motion_mask_uav.Get(), clear_uint);
         context->ClearUnorderedAccessViewUint(tensor_exclusion_uav.Get(), clear_uint);
-        context->ClearUnorderedAccessViewUint(tensor_previous_exclusion_uav.Get(), clear_uint);
 
         auto res1 = cuda.cuGraphicsD3D11RegisterResource(&cuda_in_res, tensor_in_buf.Get(), 0);
         auto res2 = cuda.cuGraphicsD3D11RegisterResource(&cuda_out_res, tensor_out_buf.Get(), 0);
@@ -10203,19 +10139,18 @@ namespace models {
         tensor_previous_input_srv.Get(),
       };
       context->CSSetShaderResources(0, 2, preprocess_srvs);
-      ID3D11UnorderedAccessView *preprocess_uavs[4] = {
+      ID3D11UnorderedAccessView *preprocess_uavs[3] = {
         tensor_in_uav.Get(),
-        appearance_ordinal_uav.Get(),
         tensor_exclusion_uav.Get(),
         near_identical_tile.uav.Get(),
       };
-      context->CSSetUnorderedAccessViews(0, 4, preprocess_uavs, nullptr);
+      context->CSSetUnorderedAccessViews(0, 3, preprocess_uavs, nullptr);
       context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
 
-      ID3D11UnorderedAccessView *null_uavs[4] = {};
+      ID3D11UnorderedAccessView *null_uavs[3] = {};
       ID3D11ShaderResourceView *null_srvs[2] = {};
       ID3D11Buffer *null_preprocess_cbuffers[3] = {};
-      context->CSSetUnorderedAccessViews(0, 4, null_uavs, nullptr);
+      context->CSSetUnorderedAccessViews(0, 3, null_uavs, nullptr);
       context->CSSetShaderResources(0, 2, null_srvs);
       context->CSSetConstantBuffers(0u, 3u, null_preprocess_cbuffers);
       // GPU-undecided publishes its dense proposal. CPU-known force-infer publishes a complete

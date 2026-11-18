@@ -789,11 +789,11 @@ TEST(HostSbsV2GpuExecutorTest, BindingContractAndExecutorCallSitesStayShared) {
             std::string::npos);
   EXPECT_NE(map.find("bind_stage_constants(context,command.constants"),
             std::string::npos);
-  EXPECT_NE(map.find("CSSetShaderResources(0u,7u,"), std::string::npos);
-  EXPECT_NE(map.find("CSSetUnorderedAccessViews(0u,5u,"),
+  EXPECT_NE(map.find("CSSetShaderResources(0u,6u,"), std::string::npos);
+  EXPECT_NE(map.find("CSSetUnorderedAccessViews(0u,3u,"),
             std::string::npos);
-  EXPECT_EQ(count_occurrences(map, "CSSetShaderResources(0u,7u,"), 2u);
-  EXPECT_EQ(count_occurrences(map, "CSSetUnorderedAccessViews(0u,5u,"), 2u);
+  EXPECT_EQ(count_occurrences(map, "CSSetShaderResources(0u,6u,"), 2u);
+  EXPECT_EQ(count_occurrences(map, "CSSetUnorderedAccessViews(0u,3u,"), 2u);
   EXPECT_NE(vertical.find("CSSetShaderResources(0u,1u"), std::string::npos);
   EXPECT_NE(vertical.find("CSSetUnorderedAccessViews(0u,2u"), std::string::npos);
   EXPECT_NE(horizontal.find("CSSetShaderResources(0u,1u"), std::string::npos);

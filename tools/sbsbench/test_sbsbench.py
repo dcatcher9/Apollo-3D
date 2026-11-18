@@ -1679,10 +1679,10 @@ class EvalContractTests(unittest.TestCase):
                   encoding="utf-8") as fh:
             executor = fh.read()
         self.assertIn("bool record_map_history(", executor)
-        self.assertIn("ID3D11ShaderResourceView *inputs[7]", executor)
-        self.assertIn("ID3D11UnorderedAccessView *outputs[5]", executor)
-        self.assertIn("CSSetShaderResources(0u, 7u, inputs)", executor)
-        self.assertIn("CSSetUnorderedAccessViews(0u, 5u, outputs, nullptr)", executor)
+        self.assertIn("ID3D11ShaderResourceView *inputs[6]", executor)
+        self.assertIn("ID3D11UnorderedAccessView *outputs[3]", executor)
+        self.assertIn("CSSetShaderResources(0u, 6u, inputs)", executor)
+        self.assertIn("CSSetUnorderedAccessViews(0u, 3u, outputs, nullptr)", executor)
 
         shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders",
                                   "directx")

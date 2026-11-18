@@ -85,10 +85,10 @@ namespace {
     }
 
     void unbind() {
-      ID3D11ShaderResourceView *srvs[7] {};
-      ID3D11UnorderedAccessView *uavs[5] {};
-      context->CSSetShaderResources(0u, 7u, srvs);
-      context->CSSetUnorderedAccessViews(0u, 5u, uavs, nullptr);
+      ID3D11ShaderResourceView *srvs[6] {};
+      ID3D11UnorderedAccessView *uavs[3] {};
+      context->CSSetShaderResources(0u, 6u, srvs);
+      context->CSSetUnorderedAccessViews(0u, 3u, uavs, nullptr);
     }
 
     void SetUp() override {
@@ -295,10 +295,10 @@ namespace {
       ID3D11Buffer *cbs[] {depth_constants.Get(), constants.Get(), owner_constants.Get()};
       context->CSSetConstantBuffers(0u, 3u, cbs);
       ID3D11ShaderResourceView *srvs[] {raw.srv.Get(), state.srv.Get(), exclusion_srv.Get(),
-        minmax.srv.Get(), nullptr, nullptr, health.srv.Get()};
-      context->CSSetShaderResources(0u, 7u, srvs);
-      ID3D11UnorderedAccessView *uavs[] {candidate_uav.Get(), nullptr, nullptr, nullptr, owner.uav.Get()};
-      context->CSSetUnorderedAccessViews(0u, 5u, uavs, nullptr);
+        minmax.srv.Get(), nullptr, health.srv.Get()};
+      context->CSSetShaderResources(0u, 6u, srvs);
+      ID3D11UnorderedAccessView *uavs[] {candidate_uav.Get(), nullptr, owner.uav.Get()};
+      context->CSSetUnorderedAccessViews(0u, 3u, uavs, nullptr);
       context->CSSetShader(map_shader.Get(), nullptr, 0u);
       context->Dispatch((width + 15u) / 16u, 1u, 1u);
       unbind();

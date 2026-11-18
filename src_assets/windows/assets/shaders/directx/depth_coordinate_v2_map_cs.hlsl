@@ -1,5 +1,5 @@
 // Map raw DAV2 into the desired signed one-eye source-U candidate. The production entrypoint also
-// commits the complete raw padded comparison tuple and its authenticated owner. Completion of
+// commits the padded model-input history and its authenticated owner. Completion of
 // the direct or indirect dispatch followed by UAV unbinding is the publication boundary; the tag
 // written by thread zero is not a same-dispatch synchronization point. coordinate_main is a
 // Dump-3D-only diagnostic entrypoint over the same authenticated source and has no history or owner
@@ -10,13 +10,10 @@ StructuredBuffer<float4> ShadowState : register(t1);
 Texture2D<uint> TensorExclusion : register(t2);
 StructuredBuffer<float4> MinMaxEma : register(t3);
 StructuredBuffer<float> CurrentModelInput : register(t4);
-StructuredBuffer<float> CurrentAppearanceOrdinal : register(t5);
-StructuredBuffer<float4> DepthHealthState : register(t6);
+StructuredBuffer<float4> DepthHealthState : register(t5);
 RWTexture2D<float> Output : register(u0);
 RWStructuredBuffer<float> PreviousModelInput : register(u1);
-RWStructuredBuffer<float> PreviousAppearanceOrdinal : register(u2);
-RWTexture2D<uint> PreviousTensorExclusion : register(u3);
-RWStructuredBuffer<uint> NearIdenticalHistoryOwnerOutput : register(u4);
+RWStructuredBuffer<uint> NearIdenticalHistoryOwnerOutput : register(u2);
 
 #include "include/depth_constants.hlsl"
 #include "include/depth_coordinate_v2.hlsl"
@@ -103,17 +100,14 @@ bool CanonicalCoordinate(uint index, out float coordinate) {
 void main(uint3 id : SV_DispatchThreadID) {
     bool history_advances = DepthHistoryAdvances();
 
-    // Preserve the raw padded inference domain before any coordinate-map clamp or early exit.
-    // Padded NCHW/depth cells are edge-replicated by their producers and exclusion remains 1.
-    // The tuple is target-sized, so every in-bounds texel advances all five values together.
+    // Copy the three NCHW planes across the full inference grid before mapping coordinates.
+    // This retains the edge-replicated padding supplied by preprocessing.
     if (id.x < target_w && id.y < target_h && history_advances) {
         uint plane = target_w * target_h;
         uint raw_index = id.y * target_w + id.x;
         PreviousModelInput[raw_index] = CurrentModelInput[raw_index];
         PreviousModelInput[raw_index + plane] = CurrentModelInput[raw_index + plane];
         PreviousModelInput[raw_index + 2u * plane] = CurrentModelInput[raw_index + 2u * plane];
-        PreviousAppearanceOrdinal[raw_index] = CurrentAppearanceOrdinal[raw_index];
-        PreviousTensorExclusion[id.xy] = TensorExclusion[id.xy];
     }
 
     if (all(id == uint3(0u, 0u, 0u))) {

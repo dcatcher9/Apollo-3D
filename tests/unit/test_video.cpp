@@ -5849,7 +5849,6 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
                           UINT target_height,
                           const std::vector<rgba_pixel_t> &source_pixels,
                           std::vector<float> &model_output,
-                          std::vector<float> &appearance_ordinal,
                           std::uint32_t color_mode = 0u,
                           models::depth_tensor_content_rect_t tensor_content = {},
                           std::vector<std::uint32_t> *tensor_exclusion = nullptr,
@@ -5900,9 +5899,7 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
     const UINT target_texels = target_width * target_height;
     ComPtr<ID3D11Buffer> model_buffer;
     ComPtr<ID3D11UnorderedAccessView> model_uav;
-    ComPtr<ID3D11Buffer> appearance_buffer;
-    ComPtr<ID3D11UnorderedAccessView> appearance_uav;
-    if (!create_output(target_texels * 3u, model_buffer, model_uav) || !create_output(target_texels, appearance_buffer, appearance_uav)) {
+    if (!create_output(target_texels * 3u, model_buffer, model_uav)) {
       return false;
     }
 
@@ -5977,13 +5974,12 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
     ID3D11ShaderResourceView *input_srvs[] = {input_srv.Get()};
     ID3D11UnorderedAccessView *output_uavs[] = {
       model_uav.Get(),
-      appearance_uav.Get(),
       exclusion_uav.Get(),
     };
     ID3D11Buffer *constant_buffers[] = {constant_buffer.Get()};
     context->CSSetShader(shader.Get(), nullptr, 0);
     context->CSSetShaderResources(0, 1, input_srvs);
-    context->CSSetUnorderedAccessViews(0, 3, output_uavs, nullptr);
+    context->CSSetUnorderedAccessViews(0, 2, output_uavs, nullptr);
     context->CSSetConstantBuffers(0, 1, constant_buffers);
     context->CSSetConstantBuffers(2, 1, source_region_buffer.GetAddressOf());
     context->Dispatch(
@@ -5993,9 +5989,9 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
     );
 
     ID3D11ShaderResourceView *null_srvs[] = {nullptr};
-    ID3D11UnorderedAccessView *null_uavs[] = {nullptr, nullptr, nullptr};
+    ID3D11UnorderedAccessView *null_uavs[] = {nullptr, nullptr};
     context->CSSetShaderResources(0, 1, null_srvs);
-    context->CSSetUnorderedAccessViews(0, 3, null_uavs, nullptr);
+    context->CSSetUnorderedAccessViews(0, 2, null_uavs, nullptr);
 
     const auto read_buffer = [&](
                                ID3D11Buffer *source,
@@ -6059,11 +6055,6 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
              model_buffer.Get(),
              target_texels * 3u,
              model_output
-           ) &&
-           read_buffer(
-             appearance_buffer.Get(),
-             target_texels,
-             appearance_ordinal
            ) && read_exclusion();
   };
 
@@ -6128,18 +6119,15 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
     );
     source_pixels[12] = {1.0f, 1.0f, 1.0f, 1.0f};
     std::vector<float> model_output;
-    std::vector<float> appearance_ordinal;
     ASSERT_TRUE(run_case(
       5,
       5,
       1,
       1,
       source_pixels,
-      model_output,
-      appearance_ordinal
+      model_output
     ));
     ASSERT_EQ(model_output.size(), 3u);
-    ASSERT_EQ(appearance_ordinal.size(), 1u);
     for (UINT channel = 0; channel < 3u; ++channel) {
       EXPECT_NEAR(
         reconstructed_channel(model_output, 1, 0, channel),
@@ -6147,7 +6135,6 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
         2e-6f
       );
     }
-    EXPECT_FLOAT_EQ(appearance_ordinal[0], 1.0f);
   }
 
   {
@@ -6157,18 +6144,15 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
       rgba_pixel_t {0.6f, 0.6f, 0.6f, 1.0f}
     };
     std::vector<float> model_output;
-    std::vector<float> appearance_ordinal;
     ASSERT_TRUE(run_case(
       3,
       1,
       2,
       1,
       source_pixels,
-      model_output,
-      appearance_ordinal
+      model_output
     ));
     ASSERT_EQ(model_output.size(), 6u);
-    ASSERT_EQ(appearance_ordinal.size(), 2u);
     constexpr std::array expected_model_values {0.1f, 0.5f};
     for (UINT target_index = 0; target_index < 2u; ++target_index) {
       for (UINT channel = 0; channel < 3u; ++channel) {
@@ -6179,8 +6163,6 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
         );
       }
     }
-    EXPECT_FLOAT_EQ(appearance_ordinal[0], 0.0f);
-    EXPECT_NEAR(appearance_ordinal[1], srgb_to_linear(0.6f), 2e-6f);
   }
 
   // FP16 Advanced-Color SDR is linear, not already encoded sRGB. Execute the real shader path
@@ -6188,7 +6170,6 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
   {
     const rgba_pixel_t source {0.18f, 0.0031308f, 2.0f, 1.0f};
     std::vector<float> model_output;
-    std::vector<float> appearance_ordinal;
     ASSERT_TRUE(run_case(
       1,
       1,
@@ -6196,7 +6177,6 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
       1,
       {source},
       model_output,
-      appearance_ordinal,
       static_cast<std::uint32_t>(models::input_color_space::linear_sdr)
     ));
     const auto expected = depth_color_reference(source, 1u);
@@ -6205,12 +6185,10 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
       EXPECT_TRUE(std::isfinite(actual));
       EXPECT_NEAR(actual, expected[channel], 3e-6f);
     }
-    ASSERT_EQ(appearance_ordinal.size(), 1u);
-    EXPECT_FLOAT_EQ(appearance_ordinal[0], 2.0f);
   }
 
-  // Transfer-equivalent SDR capture must produce the same model tensor and the same ordinal
-  // evidence. This specifically protects the per-source conversion-before-area-resize order.
+  // Transfer-equivalent SDR capture must produce the same model tensor. This protects the
+  // per-source conversion-before-area-resize order.
   {
     const std::vector<rgba_pixel_t> encoded {
       {0.10f, 0.25f, 0.50f, 1.0f},
@@ -6236,17 +6214,13 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
         pixel[channel] = srgb_to_linear(pixel[channel]);
       }
     }
-    std::vector<float> encoded_model, encoded_ordinal;
-    std::vector<float> linear_model, linear_ordinal;
-    ASSERT_TRUE(run_case(4, 4, 2, 2, encoded, encoded_model, encoded_ordinal, 0u));
-    ASSERT_TRUE(run_case(4, 4, 2, 2, linear, linear_model, linear_ordinal, 1u));
+    std::vector<float> encoded_model;
+    std::vector<float> linear_model;
+    ASSERT_TRUE(run_case(4, 4, 2, 2, encoded, encoded_model, 0u));
+    ASSERT_TRUE(run_case(4, 4, 2, 2, linear, linear_model, 1u));
     ASSERT_EQ(encoded_model.size(), linear_model.size());
-    ASSERT_EQ(encoded_ordinal.size(), linear_ordinal.size());
     for (std::size_t index = 0; index < encoded_model.size(); ++index) {
       EXPECT_NEAR(encoded_model[index], linear_model[index], 6e-6f);
-    }
-    for (std::size_t index = 0; index < encoded_ordinal.size(); ++index) {
-      EXPECT_NEAR(encoded_ordinal[index], linear_ordinal[index], 4e-6f);
     }
   }
 
@@ -6259,28 +6233,23 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
     );
     source_pixels[12] = {100.0f, 100.0f, 100.0f, 1.0f};
     std::vector<float> model_output;
-    std::vector<float> appearance_ordinal;
-    ASSERT_TRUE(run_case(5, 5, 1, 1, source_pixels, model_output, appearance_ordinal, 2u));
+    ASSERT_TRUE(run_case(5, 5, 1, 1, source_pixels, model_output, 2u));
     const auto mapped_highlight = depth_color_reference(source_pixels[12], 2u);
     for (UINT channel = 0; channel < 3u; ++channel) {
       const float actual = reconstructed_channel(model_output, 1u, 0u, channel);
       EXPECT_NEAR(actual, mapped_highlight[channel] / 25.0f, 6e-6f);
       EXPECT_LT(actual, 0.05f);
     }
-    ASSERT_EQ(appearance_ordinal.size(), 1u);
-    EXPECT_FLOAT_EQ(appearance_ordinal[0], 100.0f);
   }
 
   // HDR capture is linear scRGB. The model input must use luminance-preserving Reinhard,
-  // optional uniform peak normalization, and then the same sRGB OETF. HDR appearance evidence
-  // stays in scene-linear scRGB and therefore deliberately retains values above one.
+  // optional uniform peak normalization, and then the same sRGB OETF.
   {
     const std::vector<rgba_pixel_t> source_pixels {
       rgba_pixel_t {0.6f, 0.3f, 0.15f, 1.0f},
       rgba_pixel_t {-0.5f, 4.0f, 1.0f, 1.0f},
     };
     std::vector<float> model_output;
-    std::vector<float> appearance_ordinal;
     ASSERT_TRUE(run_case(
       2,
       1,
@@ -6288,7 +6257,6 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
       1,
       source_pixels,
       model_output,
-      appearance_ordinal,
       static_cast<std::uint32_t>(models::input_color_space::scrgb_hdr)
     ));
     for (UINT pixel = 0; pixel < 2u; ++pixel) {
@@ -6299,9 +6267,6 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
         EXPECT_NEAR(actual, expected[channel], 4e-6f);
       }
     }
-    ASSERT_EQ(appearance_ordinal.size(), 2u);
-    EXPECT_FLOAT_EQ(appearance_ordinal[0], 0.6f);
-    EXPECT_FLOAT_EQ(appearance_ordinal[1], 4.0f);
   }
 
   // Downsampling must replicate the resized boundary cell, not sample the outermost source pixel.
@@ -6317,19 +6282,17 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
       }
     }
     std::vector<float> model_output;
-    std::vector<float> appearance_ordinal;
     std::vector<std::uint32_t> exclusion;
     constexpr UINT target_width = 6u;
     constexpr UINT target_height = 4u;
     constexpr models::depth_tensor_content_rect_t content {1u, 1u, 5u, 3u};
     ASSERT_TRUE(run_case(
       8u, 4u, target_width, target_height, source_pixels,
-      model_output, appearance_ordinal, 0u,
+      model_output, 0u,
       content, &exclusion
     ));
     constexpr UINT target_texels = target_width * target_height;
     ASSERT_EQ(model_output.size(), 3u * target_texels);
-    ASSERT_EQ(appearance_ordinal.size(), target_texels);
     ASSERT_EQ(exclusion.size(), target_texels);
     for (UINT y = 0u; y < target_height; ++y) {
       for (UINT x = 0u; x < target_width; ++x) {
@@ -6350,10 +6313,6 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
             std::bit_cast<std::uint32_t>(model_output[channel_offset + source_index])
           ) << x << ',' << y << " channel " << channel;
         }
-        EXPECT_EQ(
-          std::bit_cast<std::uint32_t>(appearance_ordinal[index]),
-          std::bit_cast<std::uint32_t>(appearance_ordinal[source_index])
-        ) << x << ',' << y;
       }
     }
   }
@@ -6391,33 +6350,24 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
 
     for (const std::uint32_t color_mode : {0u, 1u, 2u}) {
       std::vector<float> crop_model;
-      std::vector<float> crop_appearance;
       std::vector<std::uint32_t> crop_exclusion;
       std::vector<float> direct_model;
-      std::vector<float> direct_appearance;
       std::vector<std::uint32_t> direct_exclusion;
       ASSERT_TRUE(run_case(
         roi_width, roi_height, target_width, target_height, cropped_source,
-        crop_model, crop_appearance, color_mode, content, &crop_exclusion
+        crop_model, color_mode, content, &crop_exclusion
       ));
       ASSERT_TRUE(run_case(
         full_width, full_height, target_width, target_height, full_source,
-        direct_model, direct_appearance, color_mode, content, &direct_exclusion, roi
+        direct_model, color_mode, content, &direct_exclusion, roi
       ));
       ASSERT_EQ(direct_model.size(), crop_model.size());
-      ASSERT_EQ(direct_appearance.size(), crop_appearance.size());
       EXPECT_EQ(direct_exclusion, crop_exclusion);
       for (std::size_t index = 0u; index < crop_model.size(); ++index) {
         EXPECT_EQ(
           std::bit_cast<std::uint32_t>(direct_model[index]),
           std::bit_cast<std::uint32_t>(crop_model[index])
         ) << "model index=" << index << " color_mode=" << color_mode;
-      }
-      for (std::size_t index = 0u; index < crop_appearance.size(); ++index) {
-        EXPECT_EQ(
-          std::bit_cast<std::uint32_t>(direct_appearance[index]),
-          std::bit_cast<std::uint32_t>(crop_appearance[index])
-        ) << "appearance index=" << index << " color_mode=" << color_mode;
       }
     }
   }
