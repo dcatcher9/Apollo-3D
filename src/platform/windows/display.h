@@ -475,7 +475,7 @@ namespace platf::dxgi {
     /** Non-owning scope guard for one successful IDXGIKeyedMutex acquisition.
      *
      * Keeping this generic makes the ownership contract testable without a D3D device. The
-     * referenced mutex must outlive the guard, as it does for an image encoder context.
+     * referenced mutex must outlive the guard, as it does for a capture image or encoder context.
      */
     template<typename KeyedMutex>
     class keyed_mutex_lock_t {

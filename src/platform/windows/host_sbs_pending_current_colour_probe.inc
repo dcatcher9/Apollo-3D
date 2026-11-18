@@ -233,7 +233,7 @@ namespace pending_current_colour_probe_v1 {
       hr(converter.device->CreateTexture2D(&td,nullptr,&reference),"Reference target failed");hr(converter.device->CreateRenderTargetView(reference.Get(),nullptr,&reference_rtv),"Reference RTV failed");
       models::host_sbs_subtitle_render_constants_t disabled_subtitle{};D3D11_BUFFER_DESC disabled_desc{};disabled_desc.ByteWidth=sizeof(disabled_subtitle);disabled_desc.Usage=D3D11_USAGE_DEFAULT;disabled_desc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;D3D11_SUBRESOURCE_DATA disabled_init{&disabled_subtitle,0,0};
       hr(converter.device->CreateBuffer(&disabled_desc,&disabled_init,&reference_subtitle_disabled),"Reference UI CB failed");
-      for(std::size_t i=0;i<3;++i){images[i]=display->alloc_img();require(images[i]&&display->complete_img(images[i].get(),false)==0,"Actual shared image allocation failed");auto &img=static_cast<img_d3d_t&>(*images[i]);texture_lock_helper lock(img.capture_mutex.get());require(lock.lock(),"Capture keyed mutex failed");display->device_ctx->UpdateSubresource(img.capture_texture.get(),0,nullptr,r.frames[i].bgra.data(),w*4,0);display->device_ctx->Flush();img.blank=false;}
+      for(std::size_t i=0;i<3;++i){images[i]=display->alloc_img();require(images[i]&&display->complete_img(images[i].get(),false)==0,"Actual shared image allocation failed");auto &img=static_cast<img_d3d_t&>(*images[i]);detail::keyed_mutex_lock_t lock {img.capture_mutex.get()};require(lock.lock() == S_OK,"Capture keyed mutex failed");display->device_ctx->UpdateSubresource(img.capture_texture.get(),0,nullptr,r.frames[i].bgra.data(),w*4,0);display->device_ctx->Flush();img.blank=false;}
       // Open every existing shared-image binding and allocate the existing TWO private slots
       // before input1. Allocation establishes no frame, source clock, pending or publication.
       for(const auto &image:images){auto &img=static_cast<img_d3d_t&>(*image);auto [it,inserted]=converter.img_ctx_map.try_emplace(img.id);(void)inserted;require(converter.initialize_image_context(img,it->second)==0,"Shared image preparation failed");}
@@ -253,8 +253,8 @@ namespace pending_current_colour_probe_v1 {
         const auto a_context=converter.img_ctx_map.find(static_cast<img_d3d_t&>(*images[0]).id);
         require(a_context!=converter.img_ctx_map.end()&&a_context->second.encoder_mutex&&
           a_context->second.encoder_input_res.get()==a->current_input.Get(),"Prepared A shared context identity unavailable");
-        texture_lock_helper a_snapshot_lease(a_context->second.encoder_mutex.get());
-        require(a_snapshot_lease.lock(),"Initial A shared diagnostic keyed lease failed");
+        detail::keyed_mutex_lock_t a_snapshot_lease {a_context->second.encoder_mutex.get()};
+        require(a_snapshot_lease.lock() == S_OK,"Initial A shared diagnostic keyed lease failed");
         records.prepare(converter.device.get(),*a,target.Get());records.copy_target(0,target.Get());
         converter.device_ctx->Flush(); // submit every shared read BEFORE ReleaseSync(0)
       }
@@ -302,7 +302,7 @@ namespace pending_current_colour_probe_v1 {
         require(records.captured[6]&&records.phase_event[6].material_epoch==first_c_identity.material_epoch&&records.phase_event[6].material_serial==first_c_identity.material_serial&&records.phase_event[6].material_capture_clock_us==first_c_identity.material_capture_clock_us,"Same capture retry minted a material observation");
         const auto c_context=converter.img_ctx_map.find(static_cast<img_d3d_t&>(*images[2]).id);
         require(c_context!=converter.img_ctx_map.end()&&c_context->second.encoder_mutex,"Current C encoder binding missing");
-        {texture_lock_helper lease(c_context->second.encoder_mutex.get());require(lease.lock(),"Reference current-C keyed lease failed");
+        {detail::keyed_mutex_lock_t lease {c_context->second.encoder_mutex.get()};require(lease.lock() == S_OK,"Reference current-C keyed lease failed");
           const auto &e=records.phase_event[4];host_sbs_v2_draw_command_t command;
           command.render_targets[0]=reference_rtv.Get();command.vertex_shader=converter.sbs_reprojection_vs.get();command.pixel_shader=converter.sbs_reprojection_v2_live_ps.get();
           command.viewport=converter.sbs_viewport;command.sampler=converter.sampler_linear.get();

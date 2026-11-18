@@ -304,7 +304,7 @@ namespace actual_converter_probe_v1 {
       if (!native_nv12) {
         hr(converter.device->CreateTexture2D(&td,nullptr,&target),"RGB target failed");hr(converter.device->CreateRenderTargetView(target.Get(),nullptr,&target_rtv),"RGB target RTV failed");
       }
-      for(std::size_t i=0;i<3;++i){images[i]=display->alloc_img();require(images[i]&&display->complete_img(images[i].get(),false)==0,"Actual shared image allocation failed");auto &img=static_cast<img_d3d_t&>(*images[i]);texture_lock_helper lock(img.capture_mutex.get());require(lock.lock(),"Capture keyed mutex failed");display->device_ctx->UpdateSubresource(img.capture_texture.get(),0,nullptr,payload(r.frames[i]),w*pixel_bytes,0);display->device_ctx->Flush();img.blank=false;}
+      for(std::size_t i=0;i<3;++i){images[i]=display->alloc_img();require(images[i]&&display->complete_img(images[i].get(),false)==0,"Actual shared image allocation failed");auto &img=static_cast<img_d3d_t&>(*images[i]);detail::keyed_mutex_lock_t lock {img.capture_mutex.get()};require(lock.lock() == S_OK,"Capture keyed mutex failed");display->device_ctx->UpdateSubresource(img.capture_texture.get(),0,nullptr,payload(r.frames[i]),w*pixel_bytes,0);display->device_ctx->Flush();img.blank=false;}
       // Open every shared image before input1 without establishing frame or publication ownership.
       for(const auto &image:images){auto &img=static_cast<img_d3d_t&>(*image);auto [it,inserted]=converter.img_ctx_map.try_emplace(img.id);(void)inserted;require(converter.initialize_image_context(img,it->second)==0,"Shared image preparation failed");}
       if (!context.borrow_matched_capture) {
@@ -331,8 +331,8 @@ namespace actual_converter_probe_v1 {
         const auto a_context=converter.img_ctx_map.find(static_cast<img_d3d_t&>(*images[0]).id);
         require(a_context!=converter.img_ctx_map.end()&&a_context->second.encoder_mutex&&
           a_context->second.encoder_input_res.get()==a->current_input.Get(),"Prepared A shared context identity unavailable");
-        texture_lock_helper a_snapshot_lease(a_context->second.encoder_mutex.get());
-        require(a_snapshot_lease.lock(),"Initial A shared diagnostic keyed lease failed");
+        detail::keyed_mutex_lock_t a_snapshot_lease {a_context->second.encoder_mutex.get()};
+        require(a_snapshot_lease.lock() == S_OK,"Initial A shared diagnostic keyed lease failed");
         records.prepare(converter.device.get(),*a,target.Get());records.copy_target(0,target.Get());
         converter.device_ctx->Flush(); // submit every shared read BEFORE ReleaseSync(0)
       }
@@ -640,8 +640,8 @@ namespace actual_converter_probe_v1 {
           const auto b_context=converter.img_ctx_map.find(static_cast<img_d3d_t&>(*images[1]).id);
           require(b_context!=converter.img_ctx_map.end()&&b_context->second.encoder_mutex&&
             b_context->second.encoder_input_res.get()==after.current_input.Get(),"Actual B shared source identity unavailable");
-          texture_lock_helper source_lease(b_context->second.encoder_mutex.get());
-          require(source_lease.lock(),"Independent B flat reference shared-source lease failed");
+          detail::keyed_mutex_lock_t source_lease {b_context->second.encoder_mutex.get()};
+          require(source_lease.lock() == S_OK,"Independent B flat reference shared-source lease failed");
           host_sbs_v2_draw_command_t reference {
             .render_targets={flat_reference_rtv.Get(),nullptr},
             .vertex_shader=converter.sbs_reprojection_vs.get(),
@@ -990,7 +990,7 @@ namespace actual_converter_probe_v1 {
       td.SampleDesc.Count=1;td.Usage=D3D11_USAGE_DEFAULT;td.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
       hr(converter.device->CreateTexture2D(&td,nullptr,&target),"Fixed-six target failed");hr(converter.device->CreateRenderTargetView(target.Get(),nullptr,&target_rtv),"Fixed-six target RTV failed");
       for(std::size_t i=0;i<6u;++i){images[i]=display->alloc_img();require(images[i]&&display->complete_img(images[i].get(),false)==0,"Shared image allocation failed");
-        auto &img=static_cast<img_d3d_t&>(*images[i]);texture_lock_helper lock(img.capture_mutex.get());require(lock.lock(),"Capture keyed mutex failed");
+        auto &img=static_cast<img_d3d_t&>(*images[i]);detail::keyed_mutex_lock_t lock {img.capture_mutex.get()};require(lock.lock() == S_OK,"Capture keyed mutex failed");
         display->device_ctx->UpdateSubresource(img.capture_texture.get(),0u,nullptr,q.frames[i].bgra.data(),w*4u,0u);display->device_ctx->Flush();img.blank=false;}
       for(const auto &image:images){auto &img=static_cast<img_d3d_t&>(*image);auto [it,inserted]=converter.img_ctx_map.try_emplace(img.id);(void)inserted;
         require(converter.initialize_image_context(img,it->second)==0,"Shared image preparation failed");}
@@ -1014,8 +1014,8 @@ namespace actual_converter_probe_v1 {
         const auto actual=*own;auto &img=static_cast<img_d3d_t&>(*images[i]);
         const auto image_context=converter.img_ctx_map.find(img.id);
         require(image_context!=converter.img_ctx_map.end(),"Own matched encoder image context missing");
-        texture_lock_helper lease(image_context->second.encoder_mutex.get());
-        require(lease.lock(),"Own matched encoder-device diagnostic keyed lease failed");
+        detail::keyed_mutex_lock_t lease {image_context->second.encoder_mutex.get()};
+        require(lease.lock() == S_OK,"Own matched encoder-device diagnostic keyed lease failed");
         const auto dir=root/("observation_"+std::to_string(i+1u));
         captures.push_back(sequence6_copy_matched(converter.device.get(),converter.device_ctx.get(),actual,target.Get(),dir,i+1u,q.frames[i]));
         converter.device_ctx->Flush(); // all shared reads submitted before releasing this actual image lease

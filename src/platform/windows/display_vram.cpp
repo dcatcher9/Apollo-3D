@@ -333,56 +333,6 @@ namespace platf::dxgi {
     };
   };
 
-  struct texture_lock_helper {
-    keyed_mutex_t _mutex;
-    bool _locked = false;
-
-    texture_lock_helper(const texture_lock_helper &) = delete;
-    texture_lock_helper &operator=(const texture_lock_helper &) = delete;
-
-    texture_lock_helper(texture_lock_helper &&other) {
-      _mutex.reset(other._mutex.release());
-      _locked = other._locked;
-      other._locked = false;
-    }
-
-    texture_lock_helper &operator=(texture_lock_helper &&other) {
-      if (_locked) {
-        _mutex->ReleaseSync(0);
-      }
-      _mutex.reset(other._mutex.release());
-      _locked = other._locked;
-      other._locked = false;
-      return *this;
-    }
-
-    texture_lock_helper(IDXGIKeyedMutex *mutex):
-        _mutex(mutex) {
-      if (_mutex) {
-        _mutex->AddRef();
-      }
-    }
-
-    ~texture_lock_helper() {
-      if (_locked) {
-        _mutex->ReleaseSync(0);
-      }
-    }
-
-    bool lock() {
-      if (_locked) {
-        return true;
-      }
-      HRESULT status = _mutex->AcquireSync(0, INFINITE);
-      if (status == S_OK) {
-        _locked = true;
-      } else {
-        BOOST_LOG(error) << "Failed to acquire texture mutex [0x"sv << util::hex(status).to_string_view() << ']';
-      }
-      return _locked;
-    }
-  };
-
   blob_t compile_shader(LPCSTR file, LPCSTR entrypoint, LPCSTR shader_model) {
     blob_t::pointer msg_p = nullptr;
     blob_t::pointer compiled_p;
@@ -8420,8 +8370,8 @@ namespace platf::dxgi {
       preparation_probe_require(image && display.complete_img(image.get(), false) == 0,
         "Native pacing shared image allocation failed");
       auto &native = static_cast<img_d3d_t &>(*image);
-      texture_lock_helper lock(native.capture_mutex.get());
-      preparation_probe_require(lock.lock(), "Native pacing capture image keyed mutex failed");
+      detail::keyed_mutex_lock_t lock {native.capture_mutex.get()};
+      preparation_probe_require(lock.lock() == S_OK, "Native pacing capture image keyed mutex failed");
       display.device_ctx->UpdateSubresource(native.capture_texture.get(), 0u, nullptr,
         bgra.data(), native.row_pitch, 0u);
       display.device_ctx->Flush();
@@ -12679,34 +12629,35 @@ namespace platf::dxgi {
       // Export reads only metadata. Keep the cursor in the last real desktop image independent.
       image->ddup_damage.reset();
     } else {
-      const bool reclear_dummy = dummy && !image->blank && image->capture_texture;
+      const bool reclear_dummy = !src && dummy && !image->blank && image->capture_texture;
       if (complete_img(image, dummy)) {
         return capture_e::error;
       }
-      {
-        texture_lock_helper lock(image->capture_mutex.get());
-        if (!lock.lock()) {
-          BOOST_LOG(error) << "Failed to lock capture texture";
+      detail::ddup_capture_copy_plan_t copy {detail::ddup_capture_copy_kind_e::none};
+      if (src) {
+        const auto &cursor_box = image->ddup_cursor_box;
+        const RECT old_cursor {static_cast<LONG>(cursor_box.left), static_cast<LONG>(cursor_box.top),
+                               static_cast<LONG>(cursor_box.right), static_cast<LONG>(cursor_box.bottom)};
+        copy = detail::plan_ddup_capture_copy(
+          image->ddup_desktop_serial, desktop_serial_, image->ddup_damage,
+          last_ddup_damage, damage, old_cursor, width_before_rotation, height_before_rotation
+        );
+      }
+      if (copy.kind != detail::ddup_capture_copy_kind_e::none || reclear_dummy || blend_mouse_cursor) {
+        detail::keyed_mutex_lock_t lock {image->capture_mutex.get()};
+        if (const auto status = lock.lock(); status != S_OK) {
+          BOOST_LOG(error) << "Failed to lock capture texture [0x"sv << util::hex(status).to_string_view() << ']';
           return capture_e::error;
         }
-        if (src) {
-          const auto &cursor_box = image->ddup_cursor_box;
-          const RECT old_cursor {static_cast<LONG>(cursor_box.left), static_cast<LONG>(cursor_box.top),
-                                 static_cast<LONG>(cursor_box.right), static_cast<LONG>(cursor_box.bottom)};
-          const auto copy = detail::plan_ddup_capture_copy(
-            image->ddup_desktop_serial, desktop_serial_, image->ddup_damage,
-            last_ddup_damage, damage, old_cursor, width_before_rotation, height_before_rotation
-          );
-          if (copy.kind == detail::ddup_capture_copy_kind_e::full) {
-            device_ctx->CopyResource(image->capture_texture.get(), src.get());
-          } else if (copy.kind == detail::ddup_capture_copy_kind_e::region) {
-            // The exact retained interval covers every changed desktop pixel. Read one
-            // conservative rectangle from the current full bitmap, including this slot's old
-            // cursor. Moves need no replay or temporary surface; the source is already current.
-            const D3D11_BOX box {static_cast<UINT>(copy.region.left), static_cast<UINT>(copy.region.top), 0u,
-                                 static_cast<UINT>(copy.region.right), static_cast<UINT>(copy.region.bottom), 1u};
-            device_ctx->CopySubresourceRegion(image->capture_texture.get(), 0u, box.left, box.top, 0u, src.get(), 0u, &box);
-          }
+        if (copy.kind == detail::ddup_capture_copy_kind_e::full) {
+          device_ctx->CopyResource(image->capture_texture.get(), src.get());
+        } else if (copy.kind == detail::ddup_capture_copy_kind_e::region) {
+          // The exact retained interval covers every changed desktop pixel. Read one
+          // conservative rectangle from the current full bitmap, including this slot's old
+          // cursor. Moves need no replay or temporary surface; the source is already current.
+          const D3D11_BOX box {static_cast<UINT>(copy.region.left), static_cast<UINT>(copy.region.top), 0u,
+                               static_cast<UINT>(copy.region.right), static_cast<UINT>(copy.region.bottom), 1u};
+          device_ctx->CopySubresourceRegion(image->capture_texture.get(), 0u, box.left, box.top, 0u, src.get(), 0u, &box);
         } else if (reclear_dummy) {
           const float rgb_black[4] {};
           device_ctx->ClearRenderTargetView(image->capture_rt.get(), rgb_black);
@@ -12737,9 +12688,9 @@ namespace platf::dxgi {
           ID3D11ShaderResourceView *empty_srv = nullptr;
           device_ctx->PSSetShaderResources(0, 1, &empty_srv);
         }
-        image->ddup_desktop_serial = src && !uncertain_desktop ? desktop_serial_ : 0;
-        image->ddup_cursor_box = cursor.visible ? ddup_cursor_bounds(cursor) : D3D11_BOX {};
       }
+      image->ddup_desktop_serial = src && !uncertain_desktop ? desktop_serial_ : 0;
+      image->ddup_cursor_box = cursor.visible ? ddup_cursor_bounds(cursor) : D3D11_BOX {};
 
       if (desktop_update) {
         last_ddup_damage.reset();
@@ -12955,13 +12906,12 @@ namespace platf::dxgi {
       d3d_img->conversion_needed = false;
       dup.keep_frame();
     } else if (complete_img(d3d_img.get(), false) == 0) {
-      texture_lock_helper lock_helper(d3d_img->capture_mutex.get());
-      if (lock_helper.lock()) {
-        device_ctx->CopyResource(d3d_img->capture_texture.get(), src.get());
-      } else {
-        BOOST_LOG(error) << "Failed to lock capture texture";
+      detail::keyed_mutex_lock_t lock {d3d_img->capture_mutex.get()};
+      if (const auto status = lock.lock(); status != S_OK) {
+        BOOST_LOG(error) << "Failed to lock capture texture [0x"sv << util::hex(status).to_string_view() << ']';
         return capture_e::error;
       }
+      device_ctx->CopyResource(d3d_img->capture_texture.get(), src.get());
       // This copy, or a newer frame's, supersedes any kept frame.
       dup.drop_kept_frame();
     } else {

@@ -1029,6 +1029,32 @@ TEST_F(WindowsDdupSnapshotTest, ChangedDesktopRegionLeavesAnOutsideCanaryUntouch
   EXPECT_NE(read_image(current), source_pixels);
 }
 
+TEST_F(WindowsDdupSnapshotTest, EmptyDamageKeepsRecycledPixelsAndAdvancesCaptureMetadata) {
+  const auto pixels = desktop_pixels(0xff123400u);
+  const auto surface = desktop_surface(pixels);
+  ASSERT_TRUE(surface);
+  img_t baseline;
+  ASSERT_EQ(snapshot(desktop_present(), surface, baseline), platf::capture_e::ok);
+  ASSERT_TRUE(baseline && baseline->content_timestamp && display.last_ddup_damage);
+  const auto stamp = baseline->content_timestamp;
+  const auto damage = display.last_ddup_damage;
+  const auto *slot = baseline.get();
+
+  // A canary outside the empty dirty region distinguishes retaining the surface from a full copy.
+  const auto canary = desktop_surface(desktop_pixels(0xff562300u));
+  ASSERT_TRUE(canary);
+  native->dirty.clear();
+  recycled_image = std::move(baseline);
+  img_t current;
+  ASSERT_EQ(snapshot(desktop_present(), canary, current), platf::capture_e::ok);
+  ASSERT_EQ(current.get(), slot);
+  EXPECT_EQ(read_image(current), pixels);
+  EXPECT_GT(current->content_timestamp, stamp);
+  EXPECT_TRUE(d::ddup_adjacent_desktop_present_observed(damage, display.last_ddup_damage));
+  EXPECT_EQ(d::query_ddup_damage_between(damage, display.last_ddup_damage, {0, 0, width, height}),
+    d::ddup_damage_intersection_e::unchanged);
+}
+
 TEST_F(WindowsDdupSnapshotTest, ChangedDesktopUnknownOrNewHistoryCopiesTheCompleteRecycledSurface) {
   const auto pixels = desktop_pixels(0xff123400u);
   const auto changed_pixels = desktop_pixels(0xff562300u);
