@@ -12,6 +12,7 @@
   #include <fstream>
   #include <gtest/gtest.h>
   #include <iterator>
+  #include <limits>
   #include <memory>
   #include <nlohmann/json.hpp>
   #include <optional>
@@ -186,6 +187,7 @@ namespace {
         },
         .match_display = [this](std::wstring name) {
           check_native_lock();
+          ++match_display_queries_;
           EXPECT_EQ(name, L"SudoMaker Virtual Display Adapter");
           return virtual_sources_;
         },
@@ -204,6 +206,7 @@ namespace {
             return ERROR_NOT_FOUND;
           }
           if (source) {
+            ++source_name_queries_;
             EXPECT_EQ(header->size, sizeof(DISPLAYCONFIG_SOURCE_DEVICE_NAME));
             if (failed_source_ == header->id) {
               return ERROR_GEN_FAILURE;
@@ -213,6 +216,7 @@ namespace {
             return ERROR_SUCCESS;
           }
           if (header->type == DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME) {
+            ++target_name_queries_;
             EXPECT_EQ(header->size, sizeof(DISPLAYCONFIG_TARGET_DEVICE_NAME));
             if (failed_target_ == header->id) {
               return ERROR_GEN_FAILURE;
@@ -257,6 +261,7 @@ namespace {
         },
         .enum_devices = [this](LPCWSTR name, DWORD index, PDISPLAY_DEVICEW device, DWORD flags) -> BOOL {
           check_native_lock();
+          ++enum_devices_queries_;
           EXPECT_EQ(name, nullptr);
           EXPECT_EQ(flags, 0u);
           EXPECT_NE(device, nullptr);
@@ -308,6 +313,10 @@ namespace {
     std::optional<UINT32> failed_target_;
     std::function<void(std::vector<DISPLAYCONFIG_PATH_INFO> &, std::vector<DISPLAYCONFIG_MODE_INFO> &)> corrupt_snapshot_;
     unsigned queries_ = 0;
+    unsigned match_display_queries_ = 0;
+    unsigned source_name_queries_ = 0;
+    unsigned target_name_queries_ = 0;
+    unsigned enum_devices_queries_ = 0;
     unsigned modern_queries_ = 0;
     unsigned legacy_queries_ = 0;
     bool accept_notification_ = true;
@@ -689,6 +698,134 @@ TEST_F(ArTargetDiscoveryTest, StoppedMonitorDoesNotSelectAnApprovedGlassesModel)
   EXPECT_FALSE(result.selected);
   EXPECT_TRUE(result.approved.empty());
   EXPECT_EQ(session_->costs().hdr_queries, 0u);
+}
+
+TEST_F(ArTargetDiscoveryTest, WatchdogRectRefreshesExactGeometryWithoutDiscoveryCosts) {
+  rows_ = {monitor(L"TCL03D4", 1), monitor(L"TCL03D4", 2), monitor(L"SMKD1CE", 3, L"Apollo AR Desktop")};
+  virtual_sources_ = {rows_[2].gdi};
+  const auto selected_path = rows_[1].path;
+  const auto original_config = read_config();
+  start({.ar_requested = false, .monitor_requested = true, .monitor_device_path = selected_path});
+
+  for (unsigned sample = 0; sample != 2; ++sample) {
+    SCOPED_TRACE(sample);
+    const auto baseline = find(selected_path);
+    ASSERT_TRUE(baseline.query_succeeded);
+    ASSERT_TRUE(baseline.selected);
+    const auto costs = session_->costs();
+    const auto snapshots = queries_;
+    const auto target_names = target_name_queries_;
+    const auto source_names = source_name_queries_;
+    const auto virtual_matches = match_display_queries_;
+    const auto primary_queries = enum_devices_queries_;
+    const auto modern_hdr_queries = modern_queries_;
+    const auto legacy_hdr_queries = legacy_queries_;
+    const auto rect = session_->watchdog_rect(selected_path);
+    ASSERT_TRUE(rect);
+    EXPECT_EQ(rect->left, rows_[1].x);
+    EXPECT_EQ(rect->top, rows_[1].y);
+    EXPECT_EQ(rect->left, baseline.selected->rect.left);
+    EXPECT_EQ(rect->top, baseline.selected->rect.top);
+    EXPECT_EQ(rect->right, baseline.selected->rect.right);
+    EXPECT_EQ(rect->bottom, baseline.selected->rect.bottom);
+    EXPECT_EQ(queries_, snapshots + 1u);
+    EXPECT_EQ(target_name_queries_, target_names + rows_.size());
+    EXPECT_EQ(source_name_queries_, source_names);
+    EXPECT_EQ(match_display_queries_, virtual_matches);
+    EXPECT_EQ(enum_devices_queries_, primary_queries);
+    EXPECT_EQ(modern_queries_, modern_hdr_queries);
+    EXPECT_EQ(legacy_queries_, legacy_hdr_queries);
+    EXPECT_EQ(session_->costs().hdr_queries, costs.hdr_queries);
+    EXPECT_EQ(session_->costs().fingerprints, costs.fingerprints);
+
+    // The exact path survives source-name changes and a move to a different desktop rectangle.
+    rows_[1].gdi = L"\\\\.\\DISPLAY8";
+    rows_[1].source_id = 8;
+    rows_[1].target_id = 18;
+    rows_[1].x = -3200;
+    rows_[1].y = 350;
+    rows_[1].width = 1600;
+    rows_[1].height = 900;
+  }
+  EXPECT_EQ(session_->costs().hdr_queries, 2u);
+  EXPECT_EQ(session_->costs().fingerprints, 2u);
+  EXPECT_EQ(session_->costs().persistence_attempts, 0u);
+  EXPECT_TRUE(notifications_.empty());
+  EXPECT_EQ(read_config(), original_config);
+}
+
+TEST_F(ArTargetDiscoveryTest, WatchdogRectRejectsUnboundOrInvalidGeometry) {
+  const auto removed = monitor(L"TCL03D4", 1);
+  rows_ = {monitor(L"TCL03D4", 2)};
+  rows_[0].gdi = removed.gdi;
+  start();
+  EXPECT_FALSE(session_->watchdog_rect(removed.path));
+  EXPECT_FALSE(session_->watchdog_rect(removed.gdi));
+  EXPECT_FALSE(session_->watchdog_rect({}));
+
+  rows_.push_back(removed);
+  ASSERT_TRUE(session_->watchdog_rect(removed.path));
+  rows_[0].path = removed.path;
+  EXPECT_FALSE(session_->watchdog_rect(removed.path));
+  rows_.erase(rows_.begin());
+
+  query_ok_ = false;
+  EXPECT_FALSE(session_->watchdog_rect(removed.path));
+  query_ok_ = true;
+  for (unsigned failure = 0; failure != 7; ++failure) {
+    SCOPED_TRACE(failure);
+    corrupt_snapshot_ = [failure](auto &paths, auto &modes) {
+      switch (failure) {
+        case 0:
+          paths[0].sourceInfo.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
+          break;
+        case 1:
+          paths[0].sourceInfo.modeInfoIdx = static_cast<UINT32>(modes.size());
+          break;
+        case 2:
+          modes[0].infoType = DISPLAYCONFIG_MODE_INFO_TYPE_TARGET;
+          break;
+        case 3:
+          ++modes[0].id;
+          break;
+        case 4:
+          ++modes[0].adapterId.LowPart;
+          break;
+        case 5:
+          modes[0].sourceMode.width = 0;
+          break;
+        case 6:
+          modes[0].sourceMode.position.x = std::numeric_limits<LONG>::max();
+          break;
+      }
+    };
+    EXPECT_FALSE(session_->watchdog_rect(removed.path));
+  }
+}
+
+TEST_F(ArTargetDiscoveryTest, WatchdogRectPreservesLegacyVirtualSourceFallback) {
+  rows_ = {monitor(L"TCL03D4", 1), monitor(L"SMKD1CE", 2, L"Apollo AR Desktop")};
+  virtual_sources_ = {rows_[1].gdi};
+  failed_target_ = rows_[1].target_id;
+  start();
+  const auto baseline = find(rows_[0].path);
+  ASSERT_TRUE(baseline.query_succeeded);
+  ASSERT_TRUE(baseline.selected);
+  const auto costs = session_->costs();
+  const auto snapshots = queries_;
+  const auto rect = session_->watchdog_rect(rows_[0].path);
+  ASSERT_TRUE(rect);
+  EXPECT_EQ(rect->left, baseline.selected->rect.left);
+  EXPECT_EQ(rect->top, baseline.selected->rect.top);
+  EXPECT_EQ(rect->right, baseline.selected->rect.right);
+  EXPECT_EQ(rect->bottom, baseline.selected->rect.bottom);
+  EXPECT_EQ(queries_, snapshots + 1u);
+  EXPECT_EQ(session_->costs().hdr_queries, costs.hdr_queries);
+  EXPECT_EQ(session_->costs().fingerprints, costs.fingerprints);
+
+  // An unresolved physical identity still makes the lookup indeterminate.
+  virtual_sources_.clear();
+  EXPECT_FALSE(session_->watchdog_rect(rows_[0].path));
 }
 
 #endif

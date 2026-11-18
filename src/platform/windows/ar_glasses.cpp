@@ -1344,17 +1344,57 @@ namespace ar_glasses {
       std::string primary_device_path;
     };
 
-    std::optional<target_discovery_snapshot_t> discover_targets() {
-      std::vector<DISPLAYCONFIG_PATH_INFO> paths;
-      std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+    bool query_discovery_paths(
+      std::vector<DISPLAYCONFIG_PATH_INFO> &paths,
+      std::vector<DISPLAYCONFIG_MODE_INFO> &modes
+    ) {
 #ifdef SUNSHINE_TESTS
-      if (!(active_discovery_test ? active_discovery_test->hooks.query_active(paths, modes) : VDISPLAY::queryActiveDisplayConfig(paths, modes))) {
-#else
-      if (!VDISPLAY::queryActiveDisplayConfig(paths, modes)) {
+      if (active_discovery_test) {
+        return active_discovery_test->hooks.query_active(paths, modes);
+      }
 #endif
+      return VDISPLAY::queryActiveDisplayConfig(paths, modes);
+    }
+
+    std::optional<DISPLAYCONFIG_TARGET_DEVICE_NAME> discovery_target_name(const DISPLAYCONFIG_PATH_INFO &path) {
+      DISPLAYCONFIG_TARGET_DEVICE_NAME target {};
+      target.header = {DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, sizeof(target), path.targetInfo.adapterId, path.targetInfo.id};
+#ifdef SUNSHINE_TESTS
+      const auto status = discovery_info_api_for_test().get(&target.header);
+#else
+      const auto status = DisplayConfigGetDeviceInfo(&target.header);
+#endif
+      if (status != ERROR_SUCCESS) {
         return std::nullopt;
       }
+      return target;
+    }
 
+    std::optional<RECT> discovery_source_rect(
+      const DISPLAYCONFIG_PATH_INFO &path,
+      const std::vector<DISPLAYCONFIG_MODE_INFO> &modes
+    ) {
+      const auto index = path.sourceInfo.modeInfoIdx;
+      if (index >= modes.size()) {
+        return std::nullopt;
+      }
+      const auto &mode = modes[index];
+      if (mode.infoType != DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE || mode.id != path.sourceInfo.id || !same_luid(mode.adapterId, path.sourceInfo.adapterId)) {
+        return std::nullopt;
+      }
+      const auto &source = mode.sourceMode;
+      const auto right = static_cast<std::int64_t>(source.position.x) + source.width;
+      const auto bottom = static_cast<std::int64_t>(source.position.y) + source.height;
+      if (!source.width || !source.height || !std::in_range<LONG>(source.width) || !std::in_range<LONG>(source.height) || !std::in_range<LONG>(right) || !std::in_range<LONG>(bottom)) {
+        return std::nullopt;
+      }
+      return RECT {source.position.x, source.position.y, static_cast<LONG>(right), static_cast<LONG>(bottom)};
+    }
+
+    std::optional<target_discovery_snapshot_t> discover_targets(
+      std::vector<DISPLAYCONFIG_PATH_INFO> paths,
+      const std::vector<DISPLAYCONFIG_MODE_INFO> &modes
+    ) {
 #ifdef SUNSHINE_TESTS
       const auto virtual_sources = active_discovery_test ? active_discovery_test->hooks.match_display(virtual_display_driver_name) : VDISPLAY::matchDisplay(virtual_display_driver_name);
 #else
@@ -1388,18 +1428,11 @@ namespace ar_glasses {
           continue;
         }
 
-        DISPLAYCONFIG_TARGET_DEVICE_NAME target_name {};
-        target_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
-        target_name.header.size = sizeof(target_name);
-        target_name.header.adapterId = path.targetInfo.adapterId;
-        target_name.header.id = path.targetInfo.id;
-#ifdef SUNSHINE_TESTS
-        if ((active_discovery_test ? discovery_get_info_for_test(&target_name.header) : DisplayConfigGetDeviceInfo(&target_name.header)) != ERROR_SUCCESS) {
-#else
-        if (DisplayConfigGetDeviceInfo(&target_name.header) != ERROR_SUCCESS) {
-#endif
+        const auto target = discovery_target_name(path);
+        if (!target) {
           return std::nullopt;
         }
+        const auto &target_name = *target;
         if (contains_case_insensitive(target_name.monitorDevicePath, L"SUDOVDA")) {
           continue;
         }
@@ -1409,15 +1442,12 @@ namespace ar_glasses {
           continue;
         }
 
-        if (path.sourceInfo.modeInfoIdx == DISPLAYCONFIG_PATH_MODE_IDX_INVALID || path.sourceInfo.modeInfoIdx >= modes.size()) {
-          return std::nullopt;
-        }
-        const auto &mode_info = modes[path.sourceInfo.modeInfoIdx];
-        if (mode_info.infoType != DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE) {
+        const auto rect = discovery_source_rect(path, modes);
+        if (!rect) {
           return std::nullopt;
         }
 
-        const auto &source_mode = mode_info.sourceMode;
+        const auto &source_mode = modes[path.sourceInfo.modeInfoIdx].sourceMode;
         const auto &refresh = path.targetInfo.refreshRate;
         int refresh_millihz = 60000;
         if (refresh.Numerator && refresh.Denominator) {
@@ -1438,10 +1468,7 @@ namespace ar_glasses {
         state.source_id = path.sourceInfo.id;
         state.adapter_id = path.targetInfo.adapterId;
         state.target_id = path.targetInfo.id;
-        state.rect.left = source_mode.position.x;
-        state.rect.top = source_mode.position.y;
-        state.rect.right = source_mode.position.x + (LONG) source_mode.width;
-        state.rect.bottom = source_mode.position.y + (LONG) source_mode.height;
+        state.rect = *rect;
         state.refresh_millihz = refresh_millihz;
         state.mode = classify_mode(source_mode.width, source_mode.height);
         state.game_source = ar_uses_game_source();
@@ -1493,6 +1520,62 @@ namespace ar_glasses {
         .primary_gdi_name = std::move(primary_gdi_name),
         .primary_device_path = std::move(primary_device_path),
       };
+    }
+
+    std::optional<target_discovery_snapshot_t> discover_targets() {
+      std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+      std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+      if (!query_discovery_paths(paths, modes)) {
+        return std::nullopt;
+      }
+      return discover_targets(std::move(paths), modes);
+    }
+
+    // The desktop safety check only needs the current screen rectangle of the already selected
+    // physical instance. Full target discovery still owns startup and topology decisions.
+    std::optional<RECT> monitor_watchdog_rect(std::wstring_view device_path) {
+      std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+      std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+      if (device_path.empty() || !query_discovery_paths(paths, modes)) {
+        return std::nullopt;
+      }
+
+      std::optional<RECT> rect;
+      for (const auto &path : paths) {
+        if (!(path.flags & DISPLAYCONFIG_PATH_ACTIVE)) {
+          continue;
+        }
+        const auto target = discovery_target_name(path);
+        if (!target) {
+          // A virtual source may lack target metadata. Apply the existing source exclusion
+          // and completeness rules to this same snapshot when a target name is unresolved.
+          const auto snapshot = discover_targets(std::move(paths), modes);
+          if (!snapshot) {
+            return std::nullopt;
+          }
+          rect.reset();
+          for (const auto &row : snapshot->targets) {
+            if (row.device_path == device_path) {
+              if (rect) {
+                return std::nullopt;
+              }
+              rect = row.rect;
+            }
+          }
+          return rect;
+        }
+        if (device_path != target->monitorDevicePath) {
+          continue;
+        }
+        if (rect) {
+          return std::nullopt;
+        }
+        rect = discovery_source_rect(path, modes);
+        if (!rect) {
+          return std::nullopt;
+        }
+      }
+      return rect;
     }
 
     // One call-local snapshot supplies identity, geometry, primary evidence and every clone path.
@@ -4509,8 +4592,8 @@ namespace ar_glasses {
             while (!stop_token.stop_requested()) {
               if (monitor_requested() && std::chrono::steady_clock::now() >= next_desktop_check) {
                 next_desktop_check = std::chrono::steady_clock::now() + 100ms;
-                const auto selected = find_target(platf::from_utf8(config::video.local_monitor.display_id));
-                if (const auto reason = query_monitor_desktop_block_reason(presentation_desktop, selected ? std::make_optional(selected->rect) : std::nullopt); !reason.empty()) {
+                const auto rect = monitor_watchdog_rect(platf::from_utf8(config::video.local_monitor.display_id));
+                if (const auto reason = query_monitor_desktop_block_reason(presentation_desktop, rect); !reason.empty()) {
                   // A private primary source must not hide a sign-in/UAC screen on the secure
                   // desktop, or a lock-screen overlay which Windows can place on Default.
                   request_monitor_session(false);
@@ -5379,6 +5462,14 @@ namespace ar_glasses {
         return costs_;
       }
 
+      std::optional<RECT> watchdog_rect(std::wstring_view device_path) {
+        std::optional<RECT> result;
+        scoped_call([&]() {
+          result = monitor_watchdog_rect(device_path);
+        });
+        return result;
+      }
+
     private:
       template<class Call>
       void scoped_call(Call &&call) {
@@ -5446,6 +5537,10 @@ namespace ar_glasses {
 
     discovery_result_t discovery_session_t::find(std::wstring_view required, std::wstring_view preferred, bool collect_approved) {
       return impl_->find(required, preferred, collect_approved);
+    }
+
+    std::optional<RECT> discovery_session_t::watchdog_rect(std::wstring_view device_path) {
+      return impl_->watchdog_rect(device_path);
     }
 
     discovery_costs_t discovery_session_t::costs() const {

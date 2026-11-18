@@ -82,6 +82,7 @@ namespace ar_glasses::testing {
 
     void reload_decisions();
     discovery_result_t find(std::wstring_view required = {}, std::wstring_view preferred = {}, bool collect_approved = true);
+    [[nodiscard]] std::optional<RECT> watchdog_rect(std::wstring_view device_path);
     [[nodiscard]] discovery_costs_t costs() const;
 
   private:
