@@ -5,6 +5,7 @@ import hashlib
 import html
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1511,10 +1512,14 @@ class EvalContractTests(unittest.TestCase):
 
         with open(os.path.join(repo, "src", "main.cpp"), encoding="utf-8") as fh:
             main = fh.read()
-        self.assertIn("prepare_tensorrt_model", main)
-        self.assertIn("std::jthread model_prepare_thread", main)
+        preparation = "models::live_model_preparation_t model_prepare_thread("
         self.assertLess(main.index("if (!config::sunshine.cmd.name.empty())"),
-                        main.index("std::jthread model_prepare_thread"))
+                        main.index(preparation))
+        self.assertRegex(
+            main,
+            re.escape(preparation) +
+            r"\s*video::host_sbs_v2_depth_model\(\),\s*config::video.adapter_name\s*\);",
+        )
 
     def test_relative_cli_paths_are_resolved_before_subprocess_cwd(self):
         args = argparse.Namespace(build_dir="cmake-build-relwithdebinfo", conf="bench.conf",
@@ -2241,13 +2246,12 @@ class EvalContractTests(unittest.TestCase):
         with open(os.path.join(repo, "src", "platform", "windows", "ar_glasses.cpp"),
                   encoding="utf-8") as fh:
             ownership = fh.read()
-        launch_tail = process[process.index("start_hdr_worker(launch_session->enable_hdr);"):
-                              process.index("fg.disable();")]
-        self.assertIn(
-            "remote_virtual_display_awaiting_client(\n"
-            "        *_remote_virtual_display_lease,\n"
-            "        config::stream.ping_timeout",
+        hdr_ready_check = process.index("!request_hdr_state(display_context->enable_hdr, 6s)")
+        launch_tail = process[hdr_ready_check:process.index("fg.disable();", hdr_ready_check)]
+        self.assertRegex(
             launch_tail,
+            r"ar_glasses::remote_virtual_display_awaiting_client\(\s*"
+            r"\*_remote_virtual_display_lease,\s*config::stream.ping_timeout\s*\);",
         )
         self.assertIn("std::chrono::steady_clock::now() + "
                       "detail::remote_pending_duration(connect_timeout)", ownership)
