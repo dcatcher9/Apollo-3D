@@ -1073,8 +1073,9 @@ namespace platf::dxgi {
     bool damage_chain_valid = true;
     // Presents acquired without a copy while external_pixels_owner was set, and their recovery.
     detail::ddup_dropped_desktop_t dropped_desktop;
-    // Cursor of the last delivered image, to tell whether a skipped-pixel update changes anything.
+    // Compare against the last delivered cursor only when its pixel ownership can be reused.
     sbs_cursor::snapshot_t last_delivered_cursor;
+    bool last_delivery_skipped_pixels = false;
     // The most recent image with desktop pixels may precede a metadata-only delivery.
     bool last_pixel_cursor_visible = false;
 

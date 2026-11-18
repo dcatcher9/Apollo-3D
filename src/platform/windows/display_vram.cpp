@@ -5925,18 +5925,22 @@ namespace platf::dxgi {
       if (browser_video) {
         next = admission.browser_key;
       } else if (admission.registered_player_candidate) {
-        // Registration is checked first so a player keeps its identity. Any other application
-        // is admitted only when its owner enabled that executable; the check runs on every
-        // observation, so the Web UI changes a running stream at once.
-        const bool registered = video_player_registry && video_player_registry->contains_process(foreground.process_id);
         // A Game 3D text game is an application its owner approved for exactly this purpose. The
         // approval names that process: the game's answer is refreshed a few times a second, so
         // another window that has just come in front must not inherit it meanwhile.
         // Until its helper has shown that it sees the text, the picture-based search covers it.
         const bool approved_text_game = text_game_ai_active && !text_game_helper_sees_text && text_game_source &&
                                         text_game_source->process_id == foreground.process_id;
-        next = {native_kind(registered, !registered && (approved_text_game || host3d_subtitle_apps::observe_process(foreground.process_id))),
-          foreground.window, foreground.process_id};
+        const auto registered_executables = video_player_registry ?
+          video_player_registry->executables_if_ready() : std::span<const std::wstring> {};
+        const auto executable = !registered_executables.empty() || !approved_text_game ?
+          foreground_window::process_image_path(foreground.process_id) : std::nullopt;
+        // Registration keeps precedence. Both policies inspect the same process image while
+        // the owner's current settings still take effect on every authority observation.
+        const bool registered = executable && video_player::matches_registered_executable(registered_executables, *executable);
+        const bool owner_enabled = !registered &&
+          (approved_text_game || (executable && host3d_subtitle_apps::observe_executable(*executable)));
+        next = {native_kind(registered, owner_enabled), foreground.window, foreground.process_id};
       }
       const bool context_changed = subtitle_context.update(next);
       if (context_changed) {
@@ -12469,8 +12473,12 @@ namespace platf::dxgi {
         .visible = true,
       };
     }
-    const bool cursor_changed = skip_pixels && !sbs_cursor::same_presentation(cursor, last_delivered_cursor);
-    if (skip_pixels && !desktop_update && !cursor_changed) {
+    // Metadata-only delivery leaves the encoder without a reusable desktop image. Let the first
+    // otherwise useful redraw after export restore its pixels even when the cursor is unchanged.
+    const bool compare_cursor = skip_pixels || (!desktop_update && redraw_pointer && !last_delivery_skipped_pixels);
+    const bool same_cursor = compare_cursor && sbs_cursor::same_presentation(cursor, last_delivered_cursor);
+    if (!desktop_update && same_cursor) {
+      img_out.reset();
       return capture_e::timeout;
     }
 
@@ -12576,11 +12584,12 @@ namespace platf::dxgi {
 
     image->cursor = cursor;
     image->pixels_skipped = skip_pixels;
-    image->conversion_needed = !skip_pixels || cursor_changed;
+    image->conversion_needed = !skip_pixels || !same_cursor;
     image->blank = false;
     image->frame_timestamp = frame_timestamp;
     image->content_timestamp = last_content_timestamp;
     last_delivered_cursor = std::move(cursor);
+    last_delivery_skipped_pixels = skip_pixels;
     return capture_e::ok;
   }
 
@@ -12609,6 +12618,7 @@ namespace platf::dxgi {
     last_ddup_damage.reset();
     dropped_desktop = {};
     last_delivered_cursor = {};
+    last_delivery_skipped_pixels = false;
     last_pixel_cursor_visible = false;
     damage_history.reset();
     damage_chain_valid = true;

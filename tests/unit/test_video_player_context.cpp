@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "src/platform/windows/video_player_context.h"
+#include "src/platform/windows/foreground_window_region.h"
 
 #include <gtest/gtest.h>
+#include <windows.h>
 
 namespace {
   namespace player = platf::video_player::detail;
@@ -63,5 +65,26 @@ namespace {
     EXPECT_FALSE(player::same_executable_path(LR"(C:\Media\viewer.exe)", LR"(D:\Other\viewer.exe)"));
     EXPECT_FALSE(player::same_executable_path(LR"(C:\Media\viewer.exe)", L"viewer.exe"));
     EXPECT_FALSE(player::same_executable_path({}, {}));
+  }
+
+  TEST(VideoPlayerContext, AResolvedImageCanBeMatchedAgainstTheFinishedRegistry) {
+    const auto executable = platf::foreground_window::process_image_path(GetCurrentProcessId());
+    ASSERT_TRUE(executable);
+    std::wstring module_name(32768u, L'\0');
+    const auto length = GetModuleFileNameW(nullptr, module_name.data(), static_cast<DWORD>(module_name.size()));
+    ASSERT_GT(length, 0u);
+    ASSERT_LT(length, module_name.size());
+    module_name.resize(length);
+    ASSERT_TRUE(player::same_executable_path(module_name, *executable));
+    EXPECT_FALSE(platf::foreground_window::process_image_path(0u));
+
+    std::promise<std::vector<std::wstring>> census;
+    const platf::video_player::registry_t registry {census.get_future().share()};
+    EXPECT_TRUE(registry.executables_if_ready().empty());
+    census.set_value({module_name});
+    const auto registered = registry.executables_if_ready();
+    ASSERT_EQ(registered.size(), 1u);
+    EXPECT_TRUE(platf::video_player::matches_registered_executable(registered, *executable));
+    EXPECT_FALSE(platf::video_player::matches_registered_executable(registered, L"test_sunshine.exe"));
   }
 }  // namespace

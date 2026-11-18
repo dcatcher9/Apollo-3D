@@ -2,9 +2,7 @@
 #include "host3d_subtitle_apps.h"
 
 #include <algorithm>
-#include <array>
 #include <filesystem>
-#include <memory>
 #include <mutex>
 #include <optional>
 #include <windows.h>
@@ -31,7 +29,7 @@ namespace platf::host3d_subtitle_apps {
     }
 
     std::optional<std::string> narrow(const std::wstring_view text) {
-      if (text.empty()) {
+      if (text.empty() || text.size() > max_path_bytes) {
         return std::nullopt;
       }
       const auto length = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
@@ -190,20 +188,9 @@ namespace platf::host3d_subtitle_apps {
     return selection.set_enabled(executable, enabled);
   }
 
-  bool observe_process(const std::uint32_t process_id) noexcept {
-    if (process_id == 0u) {
-      return false;
-    }
+  bool observe_executable(const std::wstring_view executable) noexcept {
     try {
-      const std::unique_ptr<void, decltype(&CloseHandle)> process(
-        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id), CloseHandle
-      );
-      std::array<wchar_t, 32768> image {};
-      DWORD length = static_cast<DWORD>(image.size());
-      if (!process || !QueryFullProcessImageNameW(process.get(), 0u, image.data(), &length)) {
-        return false;
-      }
-      const auto path = narrow(std::wstring_view {image.data(), length});
+      const auto path = narrow(executable);
       if (!path) {
         return false;
       }

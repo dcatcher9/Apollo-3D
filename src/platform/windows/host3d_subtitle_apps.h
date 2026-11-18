@@ -5,7 +5,6 @@
 #pragma once
 
 #include <cstddef>
-#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -57,8 +56,8 @@ namespace platf::host3d_subtitle_apps {
   /** Change one application for the running host at once. The caller persists `serialize()`. */
   bool set_enabled(std::string_view executable, bool enabled);
   /**
-   * Resolve the current executable of a validated foreground process, remember it as recent and
-   * report whether it is enabled. The caller owns foreground HWND/PID validation; no PID is cached.
+   * Remember an observed foreground executable as recent and report whether it is enabled.
+   * The caller owns foreground identity and executable observation.
    */
-  [[nodiscard]] bool observe_process(std::uint32_t process_id) noexcept;
+  [[nodiscard]] bool observe_executable(std::wstring_view executable) noexcept;
 }  // namespace platf::host3d_subtitle_apps

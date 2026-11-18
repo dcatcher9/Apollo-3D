@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <memory>
 #include <string_view>
 #include <utility>
 
@@ -796,6 +797,44 @@ namespace platf::foreground_window {
   observation_t sample_after_copy(const snapshot_t &expected) noexcept {
     return detail::post_copy_revalidation_allowed(expected) ?
              sample_impl(&expected) : sample_impl(nullptr);
+  }
+
+  std::optional<std::wstring> process_image_path(const std::uint32_t process_id) noexcept {
+    if (process_id == 0u) {
+      return std::nullopt;
+    }
+    try {
+      const std::unique_ptr<void, decltype(&CloseHandle)> process(
+        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id), CloseHandle
+      );
+      if (!process) {
+        return std::nullopt;
+      }
+
+      std::array<wchar_t, MAX_PATH> image;
+      DWORD length = static_cast<DWORD>(image.size());
+      if (QueryFullProcessImageNameW(process.get(), 0u, image.data(), &length)) {
+        if (length == 0u || length >= image.size()) {
+          return std::nullopt;
+        }
+        return std::wstring {image.data(), length};
+      }
+      if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+        return std::nullopt;
+      }
+
+      // Long paths retain the previous bound and are retried on the same process handle.
+      std::wstring long_image(32768u, L'\0');
+      length = static_cast<DWORD>(long_image.size());
+      if (!QueryFullProcessImageNameW(process.get(), 0u, long_image.data(), &length) ||
+          length == 0u || length >= long_image.size()) {
+        return std::nullopt;
+      }
+      long_image.resize(length);
+      return long_image;
+    } catch (...) {
+      return std::nullopt;
+    }
   }
 
   bool interactive_move_size_active() noexcept {

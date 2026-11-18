@@ -45,6 +45,7 @@ namespace {
     std::optional<DXGI_OUTDUPL_FRAME_INFO> next_frame;
     ComPtr<IDXGIResource> next_surface;
     static constexpr std::uint32_t cursor_bgra = 0xffe1b643u;
+    std::uint32_t pointer_shape_bgra = cursor_bgra;
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void **out) override {
       *out = nullptr;
@@ -131,7 +132,7 @@ namespace {
         return DXGI_ERROR_MORE_DATA;
       }
       *shape = {DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR, 1u, 1u, sizeof(cursor_bgra), {0, 0}};
-      std::memcpy(data, &cursor_bgra, sizeof(cursor_bgra));
+      std::memcpy(data, &pointer_shape_bgra, sizeof(pointer_shape_bgra));
       return S_OK;
     }
 
@@ -244,12 +245,12 @@ namespace {
       return result;
     }
 
-    ComPtr<IDXGIResource> desktop_surface(const pixels_t &pixels) {
+    ComPtr<IDXGIResource> desktop_surface(const pixels_t &pixels, UINT surface_width = width, DXGI_FORMAT format = DXGI_FORMAT_B8G8R8A8_UNORM) {
       D3D11_TEXTURE2D_DESC desc {};
-      desc.Width = width;
+      desc.Width = surface_width;
       desc.Height = height;
       desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1u;
-      desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+      desc.Format = format;
       desc.Usage = D3D11_USAGE_IMMUTABLE;
       desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
       const D3D11_SUBRESOURCE_DATA initial {pixels.data(), width * sizeof(pixels_t::value_type), 0u};
@@ -322,9 +323,9 @@ namespace {
       return pixels;
     }
 
-    static pixels_t with_cursor(pixels_t pixels, POINT point) {
+    static pixels_t with_cursor(pixels_t pixels, POINT point, std::uint32_t cursor_bgra = metadata_duplication_t::cursor_bgra) {
       // The production straight-alpha blend writes zero alpha and the opaque cursor RGB.
-      pixels[point.y * width + point.x] = metadata_duplication_t::cursor_bgra & 0x00ffffffu;
+      pixels[point.y * width + point.x] = cursor_bgra & 0x00ffffffu;
       return pixels;
     }
   };
@@ -624,6 +625,107 @@ TEST_F(WindowsDdupSnapshotTest, VisiblePointerMovesAndHidesWithoutChangingDeskto
   EXPECT_TRUE(d::ddup_adjacent_desktop_present_observed(damage, display.last_ddup_damage));
   EXPECT_EQ(d::query_ddup_damage_between(damage, display.last_ddup_damage, RECT {1, 0, 2, 1}),
     d::ddup_damage_intersection_e::changed);
+}
+
+TEST_F(WindowsDdupSnapshotTest, DuplicateVisibleCursorOnlyFramesSkipCopyAfterBitmapValidation) {
+  constexpr POINT position {2, 3};
+  const auto pixels = desktop_pixels(0xff123400u);
+  const auto surface = desktop_surface(pixels);
+  const auto wrong_size = desktop_surface(pixels, width / 2u);
+  const auto wrong_format = desktop_surface(pixels, width, DXGI_FORMAT_R8G8B8A8_UNORM);
+  ASSERT_TRUE(surface && wrong_size && wrong_format);
+
+  auto info = desktop_present();
+  pointer_update(info, position, true, true);
+  img_t first;
+  ASSERT_EQ(snapshot(info, surface, first), platf::capture_e::ok);
+  ASSERT_TRUE(first && first->frame_timestamp && first->content_timestamp && display.last_ddup_damage);
+  const auto first_presentation = first->frame_timestamp;
+  const auto content_time = first->content_timestamp;
+  const auto damage = display.last_ddup_damage;
+  ASSERT_EQ(read_image(first), with_cursor(pixels, position));
+
+  info = {};
+  pointer_update(info, position, true);
+  img_t repeated = first;
+  EXPECT_EQ(snapshot(info, surface, repeated), platf::capture_e::timeout);
+  EXPECT_FALSE(repeated);
+  EXPECT_EQ(image_pulls, 1u);
+  EXPECT_EQ(first->frame_timestamp, first_presentation);
+  EXPECT_EQ(first->content_timestamp, content_time);
+  EXPECT_EQ(read_image(first), with_cursor(pixels, position));
+
+  for (const ComPtr<IDXGIResource> &invalid : {ComPtr<IDXGIResource> {}, wrong_size, wrong_format}) {
+    info = {};
+    pointer_update(info, position, true);
+    EXPECT_EQ(snapshot(info, invalid, repeated), platf::capture_e::reinit);
+    EXPECT_FALSE(repeated);
+    EXPECT_EQ(image_pulls, 1u);
+  }
+
+  native->pointer_shape_bgra = 0xff2143c5u;
+  info = {};
+  pointer_update(info, position, true, true);
+  img_t changed_shape;
+  ASSERT_EQ(snapshot(info, surface, changed_shape), platf::capture_e::ok);
+  ASSERT_TRUE(changed_shape && changed_shape->frame_timestamp);
+  EXPECT_EQ(image_pulls, 2u);
+  EXPECT_GT(changed_shape->frame_timestamp, first_presentation);
+  EXPECT_EQ(changed_shape->content_timestamp, content_time);
+  EXPECT_EQ(read_image(changed_shape), with_cursor(pixels, position, native->pointer_shape_bgra));
+
+  display.external_pixels_owner = 123u;
+  info = {};
+  pointer_update(info, {3, 3}, true);
+  img_t metadata;
+  ASSERT_EQ(snapshot(info, {}, metadata), platf::capture_e::ok);
+  ASSERT_TRUE(metadata && metadata->pixels_skipped);
+  info = {};
+  pointer_update(info, position, true);
+  ASSERT_EQ(snapshot(info, {}, metadata), platf::capture_e::ok);
+  ASSERT_TRUE(metadata && metadata->pixels_skipped && metadata->frame_timestamp);
+  EXPECT_FALSE(display.dropped_desktop.dropped());
+  EXPECT_EQ(image_pulls, 4u);
+
+  display.external_pixels_owner = 0u;
+  info = {};
+  pointer_update(info, position, true);
+  img_t restored;
+  ASSERT_EQ(snapshot(info, surface, restored), platf::capture_e::ok);
+  ASSERT_TRUE(restored && restored->frame_timestamp && display.last_ddup_damage);
+  EXPECT_FALSE(restored->pixels_skipped);
+  EXPECT_GT(restored->frame_timestamp, metadata->frame_timestamp);
+  EXPECT_EQ(restored->content_timestamp, content_time);
+  EXPECT_EQ(display.last_ddup_damage->token, damage->token);
+  EXPECT_EQ(read_image(restored), with_cursor(pixels, position, native->pointer_shape_bgra));
+  EXPECT_EQ(image_pulls, 5u);
+
+  info = {};
+  pointer_update(info, position, true);
+  EXPECT_EQ(snapshot(info, surface, repeated), platf::capture_e::timeout);
+  EXPECT_FALSE(repeated);
+  EXPECT_EQ(image_pulls, 5u);
+
+  const auto next_pixels = desktop_pixels(0xff562300u);
+  const auto next_surface = desktop_surface(next_pixels);
+  ASSERT_TRUE(next_surface);
+  img_t updated;
+  ASSERT_EQ(snapshot(desktop_present(), next_surface, updated), platf::capture_e::ok);
+  ASSERT_TRUE(updated && updated->content_timestamp);
+  EXPECT_GT(updated->content_timestamp, content_time);
+  EXPECT_EQ(read_image(updated), with_cursor(next_pixels, position, native->pointer_shape_bgra));
+  EXPECT_EQ(image_pulls, 6u);
+
+  EXPECT_EQ(snapshot(desktop_present(), {}, repeated), platf::capture_e::reinit);
+  EXPECT_FALSE(display.damage_chain_valid);
+  info = {};
+  pointer_update(info, position, true);
+  img_t resynchronized;
+  ASSERT_EQ(snapshot(info, surface, resynchronized), platf::capture_e::ok);
+  ASSERT_TRUE(resynchronized && resynchronized->content_timestamp);
+  EXPECT_GT(resynchronized->content_timestamp, updated->content_timestamp);
+  EXPECT_EQ(read_image(resynchronized), with_cursor(pixels, position, native->pointer_shape_bgra));
+  EXPECT_EQ(image_pulls, 7u);
 }
 
 TEST_F(WindowsDdupSnapshotTest, ExportMetadataKeepsBakedCursorIdentityAndDroppedDesktopRecoversOnPointerUpdate) {
