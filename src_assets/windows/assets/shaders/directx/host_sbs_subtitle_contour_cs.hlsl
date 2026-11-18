@@ -89,6 +89,7 @@ groupshared float4 GlyphTileColors[GLYPH_TILE_PIXELS];
 groupshared uint GlyphTileMask[GLYPH_TILE_PIXELS];
 groupshared uint GlyphTileNext[GLYPH_TILE_PIXELS];
 groupshared uint2 GlyphTileGroupStride;
+groupshared uint GlyphTileHasSeed;
 
 bool ContourFinite(float value) {
     return (asuint(value) & 0x7f800000u) != 0x7f800000u;
@@ -1057,9 +1058,6 @@ void temporal_main(uint3 dispatch_id : SV_DispatchThreadID, uint group_index : S
 [numthreads(16, 16, 1)]
 void dense_main(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupThreadID,
                 uint group_index : SV_GroupIndex) {
-    if (group_index == 0u) GlyphTileGroupStride = max((contour_field.xy + 15u) / 16u, uint2(1u, 1u));
-    GroupMemoryBarrierWithGroupSync();
-    uint2 group_stride = GlyphTileGroupStride;
     uint2 observation = ReadCurrentObservation();
     uint width, height, support_w, support_h;
     DenseGlyphMatteWrite.GetDimensions(width, height);
@@ -1067,76 +1065,99 @@ void dense_main(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupThreadID,
     bool valid = observation.y != 0u &&
         width == contour_source.x && height == contour_source.w &&
         support_w == width && support_h == height;
-    // Authority is a data gate, never a barrier/loop-control gate. All lanes execute the
-    // same texture-dimension tile loops even for current empty/invalid or canonical 1x1
-    // resources. Invalid authority loads zero membership and overwrites every output zero.
+    // All lanes agree on observation authority and resource extents. When there can be no
+    // glyph membership, clear the actual output extent without loading tile halos.
+    if (!valid) {
+        uint2 first = group_id.xy * GLYPH_TILE_SIDE + thread_id.xy;
+        uint2 stride = SourceDispatchStride();
+        [loop]
+        for (uint y = first.y; y < height; y += stride.y) {
+            [loop]
+            for (uint x = first.x; x < width; x += stride.x)
+                DenseGlyphMatteWrite[uint2(x, y)] = 0u;
+        }
+        return;
+    }
+    if (group_index == 0u) GlyphTileGroupStride = max((contour_field.xy + 15u) / 16u, uint2(1u, 1u));
+    GroupMemoryBarrierWithGroupSync();
+    uint2 group_stride = GlyphTileGroupStride;
     [loop]
     for (uint tile_y = group_id.y * GLYPH_TILE_SIDE; tile_y < height;
          tile_y += group_stride.y * GLYPH_TILE_SIDE) {
         [loop]
         for (uint tile_x = group_id.x * GLYPH_TILE_SIDE; tile_x < width;
              tile_x += group_stride.x * GLYPH_TILE_SIDE) {
+            if (group_index == 0u) GlyphTileHasSeed = 0u;
+            GroupMemoryBarrierWithGroupSync();
+            uint has_seed = 0u;
             [loop]
             for (uint index = group_index; index < GLYPH_TILE_PIXELS; index += 256u) {
                 int2 p = int2(tile_x, tile_y) +
                     int2(index % GLYPH_TILE_EXTENT, index / GLYPH_TILE_EXTENT) - (int)GLYPH_TILE_HALO;
                 float3 color;
-                bool color_valid = LoadDisplayColor(p, color) && valid;
+                bool color_valid = LoadDisplayColor(p, color);
                 GlyphTileColors[index] = color_valid ? float4(color, 1.0f) : 0.0f;
-                GlyphTileMask[index] = color_valid && CurrentSupportRead.Load(int3(p, 0)) == 1u ? 1u : 0u;
+                uint seed = color_valid && CurrentSupportRead.Load(int3(p, 0)) == 1u ? 1u : 0u;
+                GlyphTileMask[index] = seed;
+                has_seed |= seed;
             }
+            if (has_seed != 0u) InterlockedOr(GlyphTileHasSeed, has_seed);
             GroupMemoryBarrierWithGroupSync();
-            [loop]
-            for (uint step = 0u; step < V2_SUBTITLE_GLYPH_MATTE_STEPS; ++step) {
-                [loop]
-                for (uint index = group_index; index < GLYPH_TILE_PIXELS; index += 256u) {
-                    uint admitted = GlyphTileMask[index];
-                    float4 color = GlyphTileColors[index];
-                    if (admitted == 0u && color.a == 1.0f) {
-                        int2 p = int2(index % GLYPH_TILE_EXTENT, index / GLYPH_TILE_EXTENT);
-                        bool bright = max(color.r, max(color.g, color.b)) >= V2_SUBTITLE_GLYPH_MATTE_BRIGHTNESS_SPLIT;
-                        [unroll]
-                        for (int dy = -1; dy <= 1; ++dy) {
-                            [unroll]
-                            for (int dx = -1; dx <= 1; ++dx) {
-                                int2 q = p + int2(dx, dy);
-                                if ((dx == 0 && dy == 0) || any(q < 0) ||
-                                    any(q >= (int)GLYPH_TILE_EXTENT)) continue;
-                                uint neighbor = (uint)q.y * GLYPH_TILE_EXTENT + (uint)q.x;
-                                float4 other = GlyphTileColors[neighbor];
-                                bool other_bright = max(other.r, max(other.g, other.b)) >= V2_SUBTITLE_GLYPH_MATTE_BRIGHTNESS_SPLIT;
-                                if (GlyphTileMask[neighbor] == 1u && other.a == 1.0f && bright == other_bright &&
-                                    ColorDistance(color.rgb, other.rgb) <= V2_SUBTITLE_GLYPH_MATTE_RGB_DISTANCE) admitted = 1u;
-                            }
-                        }
-                    }
-                    GlyphTileNext[index] = admitted;
-                }
-                GroupMemoryBarrierWithGroupSync();
-                [loop]
-                for (uint index = group_index; index < GLYPH_TILE_PIXELS; index += 256u)
-                    GlyphTileMask[index] = GlyphTileNext[index];
-                GroupMemoryBarrierWithGroupSync();
-            }
             uint2 output = uint2(tile_x, tile_y) + thread_id.xy;
-            if (output.x < width && output.y < height) {
-                uint center = (thread_id.y + GLYPH_TILE_HALO) * GLYPH_TILE_EXTENT + thread_id.x + GLYPH_TILE_HALO;
-                uint admitted = 0u;
-                if (GlyphTileColors[center].a == 1.0f) {
-                    const int radius = (int)V2_SUBTITLE_GLYPH_MATTE_COLLAR_RADIUS_SOURCE_PIXELS;
-                    [unroll]
-                    for (int dy = -radius; dy <= radius; ++dy) {
+            uint admitted = 0u;
+            // An empty dependency halo cannot create membership.
+            if (GlyphTileHasSeed != 0u) {
+                [loop]
+                for (uint step = 0u; step < V2_SUBTITLE_GLYPH_MATTE_STEPS; ++step) {
+                    [loop]
+                    for (uint index = group_index; index < GLYPH_TILE_PIXELS; index += 256u) {
+                        uint admitted = GlyphTileMask[index];
+                        float4 color = GlyphTileColors[index];
+                        if (admitted == 0u && color.a == 1.0f) {
+                            int2 p = int2(index % GLYPH_TILE_EXTENT, index / GLYPH_TILE_EXTENT);
+                            bool bright = max(color.r, max(color.g, color.b)) >= V2_SUBTITLE_GLYPH_MATTE_BRIGHTNESS_SPLIT;
+                            [unroll]
+                            for (int dy = -1; dy <= 1; ++dy) {
+                                [unroll]
+                                for (int dx = -1; dx <= 1; ++dx) {
+                                    int2 q = p + int2(dx, dy);
+                                    if ((dx == 0 && dy == 0) || any(q < 0) ||
+                                        any(q >= (int)GLYPH_TILE_EXTENT)) continue;
+                                    uint neighbor = (uint)q.y * GLYPH_TILE_EXTENT + (uint)q.x;
+                                    float4 other = GlyphTileColors[neighbor];
+                                    bool other_bright = max(other.r, max(other.g, other.b)) >= V2_SUBTITLE_GLYPH_MATTE_BRIGHTNESS_SPLIT;
+                                    if (GlyphTileMask[neighbor] == 1u && other.a == 1.0f && bright == other_bright &&
+                                        ColorDistance(color.rgb, other.rgb) <= V2_SUBTITLE_GLYPH_MATTE_RGB_DISTANCE) admitted = 1u;
+                                }
+                            }
+                        }
+                        GlyphTileNext[index] = admitted;
+                    }
+                    GroupMemoryBarrierWithGroupSync();
+                    [loop]
+                    for (uint index = group_index; index < GLYPH_TILE_PIXELS; index += 256u)
+                        GlyphTileMask[index] = GlyphTileNext[index];
+                    GroupMemoryBarrierWithGroupSync();
+                }
+                if (output.x < width && output.y < height) {
+                    uint center = (thread_id.y + GLYPH_TILE_HALO) * GLYPH_TILE_EXTENT + thread_id.x + GLYPH_TILE_HALO;
+                    if (GlyphTileColors[center].a == 1.0f) {
+                        const int radius = (int)V2_SUBTITLE_GLYPH_MATTE_COLLAR_RADIUS_SOURCE_PIXELS;
                         [unroll]
-                        for (int dx = -radius; dx <= radius; ++dx) {
-                            if (dx * dx + dy * dy <= (int)V2_SUBTITLE_GLYPH_MATTE_COLLAR_RADIUS_SQUARED) {
-                                uint neighbor = (uint)((int)center + dy * (int)GLYPH_TILE_EXTENT + dx);
-                                admitted |= GlyphTileMask[neighbor];
+                        for (int dy = -radius; dy <= radius; ++dy) {
+                            [unroll]
+                            for (int dx = -radius; dx <= radius; ++dx) {
+                                if (dx * dx + dy * dy <= (int)V2_SUBTITLE_GLYPH_MATTE_COLLAR_RADIUS_SQUARED) {
+                                    uint neighbor = (uint)((int)center + dy * (int)GLYPH_TILE_EXTENT + dx);
+                                    admitted |= GlyphTileMask[neighbor];
+                                }
                             }
                         }
                     }
                 }
-                DenseGlyphMatteWrite[output] = admitted != 0u ? 1u : 0u;
             }
+            if (output.x < width && output.y < height)
+                DenseGlyphMatteWrite[output] = admitted != 0u ? 1u : 0u;
             // Every lane finishes reading this tile before any lane loads the next one.
             GroupMemoryBarrierWithGroupSync();
         }

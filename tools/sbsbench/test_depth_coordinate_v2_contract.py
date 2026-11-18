@@ -193,7 +193,8 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             # contour producer learns each palette once per current observation. Direct and
             # source-color-tiled preprocessing are authenticated equivalent producer programs.
             # The contour passes share one authenticated current observation and its cover geometry.
-            135: "6cc37d5eeadc98ab263d01d0b02a131de2f374a88daeff56aae8379fef529a79",
+            # Dense glyph growth only runs in tiles with native support in their dependency halo.
+            135: "a3ec17da3e62c6312fe3034f4d1a4ec0ac1eee54574f05bc8dfe266341c1586d",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -208,7 +209,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "0fbf965181a85fe5a7f02a65a251e99a47a8ac8ed6dfc4a33caa33926a772d64",
+            "9d8f2411847645308d4df19ec5f037b8e3aecca7a9a053a3549885859ceb9f1d",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(

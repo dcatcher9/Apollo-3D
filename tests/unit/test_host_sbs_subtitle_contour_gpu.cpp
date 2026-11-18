@@ -703,10 +703,13 @@ namespace {
     // Authority, FP16 source upload, field-indirect dispatch, native boundaries and poisoned
     // output clearing remain the production mechanisms.
     bool run_dense_only(const std::vector<std::uint32_t> &seeds) {
-      if (seeds.size() != std::size_t(source_w_) * crop_h_) return false;
+      D3D11_TEXTURE2D_DESC support_desc {};
+      support_.texture->GetDesc(&support_desc);
+      if (seeds.size() != std::size_t(support_desc.Width) * support_desc.Height) return false;
       unbind();
       if (!upload()) return false;
-      context_->UpdateSubresource(support_.texture.Get(), 0u, nullptr, seeds.data(), source_w_ * sizeof(std::uint32_t), 0u);
+      context_->UpdateSubresource(support_.texture.Get(), 0u, nullptr, seeds.data(),
+                                  support_desc.Width * sizeof(std::uint32_t), 0u);
       const UINT poison[4] {0xdeadbeefu, 0xdeadbeefu, 0xdeadbeefu, 0xdeadbeefu};
       context_->ClearUnorderedAccessViewUint(matte_.uav.Get(), poison);
       const std::array<std::uint32_t, 3u> arguments {(field_w_ + 15u) / 16u, (field_h_ + 15u) / 16u, 1u};
@@ -1214,6 +1217,28 @@ namespace {
     EXPECT_EQ(result_.matte, std::vector<std::uint32_t> {0u});
   }
 
+  TEST_F(HostSbsSubtitleContourGpuTest, DenseMatteClearsActualOutputForMismatchedExtents) {
+    ASSERT_TRUE(resize(1057u, 595u, 770u, 434u));
+    clear_scene(.5f);
+    const std::vector<std::uint32_t> seeds(pixels_.size(), 1u);
+    ASSERT_TRUE(run_dense_only(seeds));
+    ASSERT_EQ(pin_count(result_.matte), seeds.size());
+
+    constexpr UINT bindings = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+    const UINT output_width = source_w_ + 16u;
+    const UINT output_height = crop_h_ + 4u;
+    auto original_matte = std::move(matte_);
+    ASSERT_TRUE(create_texture(device_.Get(), output_width, output_height, DXGI_FORMAT_R32_UINT, bindings, matte_));
+    ASSERT_TRUE(run_dense_only(seeds));
+    EXPECT_EQ(result_.matte, std::vector<std::uint32_t>(std::size_t(output_width) * output_height, 0u));
+
+    matte_ = std::move(original_matte);
+    support_ = {};
+    ASSERT_TRUE(create_texture(device_.Get(), 1u, 1u, DXGI_FORMAT_R32_UINT, bindings, support_));
+    ASSERT_TRUE(run_dense_only({1u}));
+    EXPECT_EQ(result_.matte, std::vector<std::uint32_t>(seeds.size(), 0u));
+  }
+
   TEST_F(HostSbsSubtitleContourGpuTest, DenseMatteInvalidNativeColorsAndNonbinarySeedsCannotAuthorizePixels) {
     clear_scene(.5f);
     std::vector<std::uint32_t> seeds(pixels_.size());
@@ -1239,6 +1264,10 @@ namespace {
     EXPECT_EQ(result_.matte[native_index(774u, crop_h_ / 2u)], 1u);
     EXPECT_EQ(result_.matte[native_index(1542u, crop_h_ / 2u)], 1u);
     EXPECT_EQ(result_.matte[native_index(1000u, crop_h_ / 2u)], 0u);
+
+    std::fill(seeds.begin(), seeds.end(), 0u);
+    ASSERT_TRUE(run_dense_only(seeds));
+    EXPECT_EQ(result_.matte, seeds);
   }
 
   TEST_F(HostSbsSubtitleContourGpuTest, SavedNativeContourReplay) {
