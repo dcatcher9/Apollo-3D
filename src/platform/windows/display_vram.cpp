@@ -316,6 +316,11 @@ namespace platf::dxgi {
     // disengaged so consumers fail open.
     std::optional<detail::ddup_damage_snapshot_t> ddup_damage;
 
+    // DDup capture owns this pixel history for the lifetime of the texture. A metadata-only
+    // delivery can change the published cursor without touching the baked cursor below.
+    std::uint64_t ddup_desktop_serial = 0;
+    D3D11_BOX ddup_cursor_box {};
+
     // The desktop capture already contains this cursor. External SBS bypasses those pixels,
     // so retain its immutable CPU shape and position for composition on the encoder device.
     sbs_cursor::snapshot_t cursor;
@@ -12403,6 +12408,23 @@ namespace platf::dxgi {
     damage_observers_.fetch_sub(1, std::memory_order_release);
   }
 
+  static D3D11_BOX ddup_cursor_bounds(const sbs_cursor::snapshot_t &cursor) {
+    // The alpha and XOR planes of one decoded shape use the same integer viewport. It is
+    // already in capture texture coordinates, including rotation and offscreen placement.
+    const auto clip = [](float coordinate, UINT extent) {
+      return static_cast<UINT>(std::clamp(coordinate, 0.0f, static_cast<float>(extent)));
+    };
+    const auto &view = cursor.viewport;
+    return {
+      clip(view.TopLeftX, cursor.capture_width),
+      clip(view.TopLeftY, cursor.capture_height),
+      0u,
+      clip(view.TopLeftX + view.Width, cursor.capture_width),
+      clip(view.TopLeftY + view.Height, cursor.capture_height),
+      1u,
+    };
+  }
+
   capture_e display_ddup_vram_t::snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) {
     DXGI_OUTDUPL_FRAME_INFO frame_info {};
 
@@ -12433,6 +12455,12 @@ namespace platf::dxgi {
     const bool desktop_update = desktop_present ||
                                 (res && (acquisition.read_desktop ||
                                          (!prior_damage_chain_valid && !acquisition.skip_pixels)));
+    const bool uncertain_desktop = frame_info.ProtectedContentMaskedOut ||
+                                   (!desktop_present && (frame_info.AccumulatedFrames || frame_info.TotalMetadataBufferSize || frame_info.RectsCoalesced));
+    if (desktop_update || uncertain_desktop) {
+      // Retire every pooled copy even if this desktop is subsequently dropped or fails to copy.
+      ++desktop_serial_;
+    }
     if (!mouse_update && !desktop_update) {
       return capture_e::timeout;
     }
@@ -12585,7 +12613,12 @@ namespace platf::dxgi {
           return capture_e::error;
         }
         if (src) {
-          device_ctx->CopyResource(image->capture_texture.get(), src.get());
+          if (image->ddup_desktop_serial == 0 || image->ddup_desktop_serial != desktop_serial_) {
+            device_ctx->CopyResource(image->capture_texture.get(), src.get());
+          } else if (const auto &box = image->ddup_cursor_box; box.left < box.right && box.top < box.bottom) {
+            // This slot already holds the acquired desktop outside its previous cursor.
+            device_ctx->CopySubresourceRegion(image->capture_texture.get(), 0u, box.left, box.top, 0u, src.get(), 0u, &box);
+          }
         } else if (reclear_dummy) {
           const float rgb_black[4] {};
           device_ctx->ClearRenderTargetView(image->capture_rt.get(), rgb_black);
@@ -12616,6 +12649,8 @@ namespace platf::dxgi {
           ID3D11ShaderResourceView *empty_srv = nullptr;
           device_ctx->PSSetShaderResources(0, 1, &empty_srv);
         }
+        image->ddup_desktop_serial = src && !uncertain_desktop ? desktop_serial_ : 0;
+        image->ddup_cursor_box = cursor.visible ? ddup_cursor_bounds(cursor) : D3D11_BOX {};
       }
 
       if (desktop_update) {
@@ -12655,6 +12690,7 @@ namespace platf::dxgi {
 
   capture_e display_ddup_vram_t::reduplicate_output() {
     BOOST_LOG(info) << "Desktop Duplication: re-duplicating the output to read the desktop a Game 3D export covered."sv;
+    ++desktop_serial_;
     // Duplicating resets the detected format. Keep it so the first acquisition still detects a
     // real format change (and reinitializes) instead of delivering a dummy frame.
     const auto format = capture_format;
@@ -12669,6 +12705,7 @@ namespace platf::dxgi {
   }
 
   int display_ddup_vram_t::init(const ::video::config_t &config, const std::string &display_name) {
+    ++desktop_serial_;
     cursor_shape.reset();
     last_content_timestamp.reset();
     last_ddup_damage.reset();
@@ -12883,6 +12920,7 @@ namespace platf::dxgi {
 
     if (dummy) {
       img->ddup_damage.reset();
+      img->ddup_desktop_serial = 0;
     }
 
     // If this already has a capture texture and it's not switching dummy state, nothing to do
@@ -12897,6 +12935,7 @@ namespace platf::dxgi {
     }
 
     // Reset the image (in case this was previously a dummy)
+    img->ddup_desktop_serial = 0;
     img->capture_texture.reset();
     img->capture_rt.reset();
     img->capture_mutex.reset();

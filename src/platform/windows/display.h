@@ -1081,6 +1081,7 @@ namespace platf::dxgi {
 
   private:
     std::atomic<unsigned> damage_observers_ {0};
+    std::uint64_t desktop_serial_ = 0;
   };
 
   /**

@@ -52,6 +52,7 @@ namespace {
     bool frame_owned = false;
     static constexpr std::uint32_t cursor_bgra = 0xffe1b643u;
     std::uint32_t pointer_shape_bgra = cursor_bgra;
+    UINT pointer_shape_width = 1u;
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void **out) override {
       *out = nullptr;
@@ -138,12 +139,14 @@ namespace {
     }
 
     HRESULT STDMETHODCALLTYPE GetFramePointerShape(UINT capacity, void *data, UINT *required, DXGI_OUTDUPL_POINTER_SHAPE_INFO *shape) override {
-      *required = sizeof(cursor_bgra);
+      *required = pointer_shape_width * sizeof(cursor_bgra);
       if (capacity < *required) {
         return DXGI_ERROR_MORE_DATA;
       }
-      *shape = {DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR, 1u, 1u, sizeof(cursor_bgra), {0, 0}};
-      std::memcpy(data, &pointer_shape_bgra, sizeof(pointer_shape_bgra));
+      *shape = {DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR, pointer_shape_width, 1u, *required, {0, 0}};
+      for (std::size_t offset = 0; offset < *required; offset += sizeof(pointer_shape_bgra)) {
+        std::memcpy(static_cast<std::uint8_t *>(data) + offset, &pointer_shape_bgra, sizeof(pointer_shape_bgra));
+      }
       return S_OK;
     }
 
@@ -211,6 +214,7 @@ namespace {
 
     unsigned image_pulls = 0u;
     bool allow_image = true;
+    img_t recycled_image;
     LONGLONG qpc_stamp = 0;
     LONGLONG qpc_step = 0;
 
@@ -307,7 +311,7 @@ namespace {
       info.LastMouseUpdateTime.QuadPart = qpc_stamp += qpc_step;
       info.PointerPosition.Position = position;
       info.PointerPosition.Visible = visible;
-      info.PointerShapeBufferSize = new_shape ? sizeof(metadata_duplication_t::cursor_bgra) : 0u;
+      info.PointerShapeBufferSize = new_shape ? native->pointer_shape_width * sizeof(metadata_duplication_t::cursor_bgra) : 0u;
     }
 
     bool pull_image(img_t &slot) {
@@ -315,7 +319,7 @@ namespace {
       if (!allow_image) {
         return false;
       }
-      slot = display.alloc_img();
+      slot = recycled_image ? std::move(recycled_image) : display.alloc_img();
       return true;
     }
 
@@ -759,6 +763,152 @@ TEST_F(WindowsDdupSnapshotTest, VisiblePointerMovesAndHidesWithoutChangingDeskto
     d::ddup_damage_intersection_e::changed);
 }
 
+TEST_F(WindowsDdupSnapshotTest, RecycledTextureRestoresItsOwnCursorAndCopiesFreshDesktops) {
+  constexpr POINT first_position {2, 3};
+  constexpr POINT second_position {9, 4};
+  constexpr POINT third_position {7, 1};
+  const auto pixels = desktop_pixels(0xff123400u);
+  const auto surface = desktop_surface(pixels);
+  ASSERT_TRUE(surface);
+
+  auto info = desktop_present();
+  pointer_update(info, first_position, true, true);
+  img_t first;
+  ASSERT_EQ(snapshot(info, surface, first), platf::capture_e::ok);
+  ASSERT_EQ(read_image(first), with_cursor(pixels, first_position));
+  const auto first_stamp = first->content_timestamp;
+  const auto *first_slot = first.get();
+
+  info = {};
+  pointer_update(info, second_position, true);
+  img_t second;
+  ASSERT_EQ(snapshot(info, surface, second), platf::capture_e::ok);
+  ASSERT_EQ(read_image(second), with_cursor(pixels, second_position));
+  const auto *second_slot = second.get();
+  ASSERT_NE(first_slot, second_slot);
+
+  recycled_image = std::move(first);
+  info = {};
+  pointer_update(info, third_position, true);
+  img_t moved;
+  ASSERT_EQ(snapshot(info, surface, moved), platf::capture_e::ok);
+  ASSERT_EQ(moved.get(), first_slot);
+  EXPECT_EQ(read_image(moved), with_cursor(pixels, third_position));
+  EXPECT_EQ(moved->content_timestamp, first_stamp);
+  EXPECT_EQ(read_image(second), with_cursor(pixels, second_position));
+
+  // Metadata-only delivery updates this slot's published cursor while its baked cursor stays.
+  recycled_image = std::move(second);
+  display.external_pixels_owner = 123u;
+  info = {};
+  pointer_update(info, third_position, false);
+  img_t metadata;
+  ASSERT_EQ(snapshot(info, {}, metadata), platf::capture_e::ok);
+  ASSERT_EQ(metadata.get(), second_slot);
+  EXPECT_TRUE(metadata->pixels_skipped);
+  EXPECT_EQ(read_image(metadata), with_cursor(pixels, second_position));
+
+  // The test-only canary violates the unchanged-desktop promise outside the old cursor box.
+  // Seeing the previous desktop's texel here proves this production snapshot used a region copy.
+  auto canary_pixels = pixels;
+  canary_pixels[0] ^= 0x000000ffu;
+  const auto canary_surface = desktop_surface(canary_pixels);
+  ASSERT_TRUE(canary_surface);
+  recycled_image = std::move(metadata);
+  display.external_pixels_owner = 0u;
+  info = {};
+  pointer_update(info, third_position, false);
+  img_t hidden;
+  ASSERT_EQ(snapshot(info, canary_surface, hidden), platf::capture_e::ok);
+  ASSERT_EQ(hidden.get(), second_slot);
+  EXPECT_FALSE(hidden->pixels_skipped);
+  EXPECT_EQ(read_image(hidden), pixels);
+  EXPECT_EQ(hidden->content_timestamp, first_stamp);
+
+  // An accepted present retires the other slot even though its pixels are still readable.
+  const auto fresh_pixels = desktop_pixels(0xff562300u);
+  const auto fresh_surface = desktop_surface(fresh_pixels);
+  ASSERT_TRUE(fresh_surface);
+  recycled_image = std::move(moved);
+  img_t fresh;
+  ASSERT_EQ(snapshot(desktop_present(), fresh_surface, fresh), platf::capture_e::ok);
+  ASSERT_EQ(fresh.get(), first_slot);
+  EXPECT_EQ(read_image(fresh), fresh_pixels);
+  EXPECT_GT(fresh->content_timestamp, first_stamp);
+
+  recycled_image = std::move(hidden);
+  info = {};
+  pointer_update(info, first_position, true);
+  img_t stale;
+  ASSERT_EQ(snapshot(info, fresh_surface, stale), platf::capture_e::ok);
+  ASSERT_EQ(stale.get(), second_slot);
+  EXPECT_EQ(read_image(stale), with_cursor(fresh_pixels, first_position));
+  EXPECT_EQ(stale->content_timestamp, fresh->content_timestamp);
+}
+
+TEST_F(WindowsDdupSnapshotTest, RecycledTextureRestoresClippedRotatedCursor) {
+  display.width = height;
+  display.height = width;
+  display.display_rotation = DXGI_MODE_ROTATION_ROTATE90;
+  native->pointer_shape_width = 2u;
+  const auto pixels = desktop_pixels(0xff123400u);
+  const auto surface = desktop_surface(pixels);
+  ASSERT_TRUE(surface);
+
+  auto info = desktop_present();
+  // The 2×1 shape rotates to a 1×2 viewport at (3, -1) on the capture texture.
+  pointer_update(info, {7, 3}, true, true);
+  img_t visible;
+  ASSERT_EQ(snapshot(info, surface, visible), platf::capture_e::ok);
+  ASSERT_EQ(read_image(visible), with_cursor(pixels, {3, 0}));
+  const auto *slot = visible.get();
+
+  auto canary_pixels = pixels;
+  canary_pixels[0] ^= 0x000000ffu;
+  const auto canary_surface = desktop_surface(canary_pixels);
+  ASSERT_TRUE(canary_surface);
+  recycled_image = std::move(visible);
+  info = {};
+  pointer_update(info, {7, 3}, false);
+  img_t hidden;
+  ASSERT_EQ(snapshot(info, canary_surface, hidden), platf::capture_e::ok);
+  ASSERT_EQ(hidden.get(), slot);
+  EXPECT_EQ(read_image(hidden), pixels);
+}
+
+TEST_F(WindowsDdupSnapshotTest, UncertainAcquisitionRetiresOlderTextureContents) {
+  const auto pixels = desktop_pixels(0xff123400u);
+  const auto surface = desktop_surface(pixels);
+  const auto changed_pixels = desktop_pixels(0xff562300u);
+  const auto changed_surface = desktop_surface(changed_pixels);
+  ASSERT_TRUE(surface && changed_surface);
+
+  for (const std::string_view reason : {"missing timestamp", "coalesced rectangles", "protected content"}) {
+    SCOPED_TRACE(reason);
+    auto info = desktop_present();
+    pointer_update(info, {2, 3}, true, true);
+    img_t old;
+    ASSERT_EQ(snapshot(info, surface, old), platf::capture_e::ok);
+    ASSERT_EQ(read_image(old), with_cursor(pixels, {2, 3}));
+
+    info = {};
+    pointer_update(info, {7, 1}, true);
+    info.ProtectedContentMaskedOut = reason == "protected content";
+    info.RectsCoalesced = reason == "coalesced rectangles";
+    info.AccumulatedFrames = reason == "missing timestamp" ? 1u : 0u;
+    img_t uncertain;
+    ASSERT_EQ(snapshot(info, changed_surface, uncertain), platf::capture_e::ok);
+    EXPECT_EQ(read_image(uncertain), with_cursor(changed_pixels, {7, 1}));
+
+    recycled_image = std::move(old);
+    info = {};
+    pointer_update(info, {9, 4}, true);
+    img_t recovered;
+    ASSERT_EQ(snapshot(info, changed_surface, recovered), platf::capture_e::ok);
+    EXPECT_EQ(read_image(recovered), with_cursor(changed_pixels, {9, 4}));
+  }
+}
+
 TEST_F(WindowsDdupSnapshotTest, DuplicateVisibleCursorOnlyFramesSkipCopyAfterBitmapValidation) {
   constexpr POINT position {2, 3};
   const auto pixels = desktop_pixels(0xff123400u);
@@ -922,6 +1072,7 @@ TEST_F(WindowsDdupSnapshotTest, ExportMetadataKeepsBakedCursorIdentityAndDropped
   info = {};
   constexpr POINT recovered_pointer {5, 5};
   pointer_update(info, recovered_pointer, true);
+  recycled_image = std::move(cursor_removed);
   img_t recovered;
   ASSERT_EQ(snapshot(info, next_surface, recovered), platf::capture_e::ok);
   ASSERT_TRUE(recovered && recovered->content_timestamp);
