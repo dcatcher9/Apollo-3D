@@ -7875,11 +7875,14 @@ TEST(LocalPresenterLifecycleSourceTests, RetainsFinalSourceAndDoesNotSwallowLate
   EXPECT_LT(schedule, convert);
   EXPECT_NE(callback.substr(convert, converted - convert).find("presentation_target"), std::string::npos)
     << "Local 3D must pass its owner cadence deadline to conversion.";
-  const auto rgb_begin = display.find("int convert_rgb(");
+  const auto rgb_begin = display.find(" convert_rgb(");
   const auto rgb_end = display.find("bool needs_conversion_poll()", rgb_begin);
   ASSERT_NE(rgb_begin, std::string::npos);
   ASSERT_NE(rgb_end, std::string::npos);
-  EXPECT_NE(display.substr(rgb_begin, rgb_end - rgb_begin).find("return convert(img, presentation_target);"), std::string::npos);
+  EXPECT_NE(
+    display.substr(rgb_begin, rgb_end - rgb_begin).find("convert(img, presentation_target, &output)"),
+    std::string::npos
+  ) << "The RGB wrapper must forward the presentation deadline to conversion.";
   EXPECT_LT(ready_pop, convert);
   EXPECT_LT(convert, converted);
   EXPECT_LT(converted, present);

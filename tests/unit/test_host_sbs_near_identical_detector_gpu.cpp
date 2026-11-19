@@ -187,15 +187,15 @@ TEST(HostSbsNearIdenticalPolicyTest, D3dResourcesUseTypedBundlesWithoutChangingC
     estimator.end()
   );
 
-  EXPECT_NE(estimator.find("struct d3d_buffer_views_t"), std::string::npos);
+  const auto bundle_begin = estimator.find("struct d3d_buffer_views_t");
+  const auto bundle_end = estimator.find("struct d3d_texture_views_t", bundle_begin);
+  ASSERT_NE(bundle_begin, std::string::npos);
+  ASSERT_NE(bundle_end, std::string::npos);
+  const auto buffer_bundle = estimator.substr(bundle_begin, bundle_end - bundle_begin);
+  EXPECT_NE(buffer_bundle.find("near_identical_tile"), std::string::npos);
+  EXPECT_NE(buffer_bundle.find("near_identical_history_owner"), std::string::npos);
   EXPECT_NE(
     estimator.find("struct near_identical_transaction_resources_t : d3d_buffer_views_t"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    estimator.find(
-      "} near_identical_tile, near_identical_history_owner;"
-    ),
     std::string::npos
   );
   EXPECT_NE(estimator.find("} near_identical_transaction;"), std::string::npos);
