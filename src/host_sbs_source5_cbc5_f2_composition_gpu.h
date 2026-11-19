@@ -90,8 +90,9 @@ class resources_t {
   source5::resources_t source_;
   f2::resources_t f2_;
   current_operands_t current_;
-  std::array<ComPtr<ID3D11ComputeShader>, 52u> shader_lease_;
-  // Optional all-or-none cache programs do not change the mandatory52 contract.
+  using shader_lease_t = std::array<ComPtr<ID3D11ComputeShader>, 51u>;
+  shader_lease_t shader_lease_;
+  // Optional cache programs are leased separately and only as complete groups.
   std::array<ComPtr<ID3D11ComputeShader>, 3u> stability_shader_lease_;
   std::array<ComPtr<ID3D11ComputeShader>, 9u> hole_shader_lease_;
   std::array<ComPtr<ID3D11ComputeShader>, 3u> coverage_shader_lease_;
@@ -173,7 +174,7 @@ class resources_t {
 
   bool preflight(ID3D11DeviceContext *context, const program_t &p,
                  const request_t &r,
-                 std::array<ComPtr<ID3D11ComputeShader>, 52u> &shaders,
+                 shader_lease_t &shaders,
                  std::array<ComPtr<ID3D11ComputeShader>, 3u> &stability_shaders,
                  std::array<ComPtr<ID3D11ComputeShader>, 9u> &hole_shaders,
                  std::array<ComPtr<ID3D11ComputeShader>, 3u> &coverage_shaders,
@@ -390,7 +391,7 @@ public:
              const request_t &r, std::string &error) {
     error.clear();
     all_stages_issued_ = false;
-    std::array<ComPtr<ID3D11ComputeShader>, 52u> shaders;
+    shader_lease_t shaders;
     std::array<ComPtr<ID3D11ComputeShader>, 3u> stability_shaders;
     std::array<ComPtr<ID3D11ComputeShader>, 9u> hole_shaders;
     std::array<ComPtr<ID3D11ComputeShader>, 3u> coverage_shaders;

@@ -46,10 +46,9 @@ inline constexpr std::array<cache::shader_spec, 6u> components_specs{{
   cache::shader_spec{"host_sbs_subtitle_seeded_components_cs.hlsl","dilate_box_main","cs_5_0"},
 }};
 inline constexpr std::string_view components_closure="3c5884de250262680dff4fb80c67e30335217af90d237fc7b531131ba9b967d1";
-inline constexpr std::array<cache::shader_spec, 12u> enclosure_specs{{
+inline constexpr std::array<cache::shader_spec, 11u> enclosure_specs{{
   cache::shader_spec{"host_sbs_current_black_enclosure_cs.hlsl","begin_main","cs_5_0"},
-  cache::shader_spec{"host_sbs_current_black_enclosure_cs.hlsl","clear_main","cs_5_0"},
-  cache::shader_spec{"host_sbs_current_black_enclosure_cs.hlsl","validate_encoding_main","cs_5_0"},
+  cache::shader_spec{"host_sbs_current_black_enclosure_cs.hlsl","initialize_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_black_enclosure_cs.hlsl","unit_meta_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_black_enclosure_cs.hlsl","collect_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_black_enclosure_cs.hlsl","clear_scratch_main","cs_5_0"},
@@ -60,7 +59,7 @@ inline constexpr std::array<cache::shader_spec, 12u> enclosure_specs{{
   cache::shader_spec{"host_sbs_current_black_enclosure_cs.hlsl","select_unit_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_black_enclosure_cs.hlsl","publish_main","cs_5_0"},
 }};
-inline constexpr std::string_view enclosure_closure="8746f4fe9e2ee2d13bff5f09119ad72f425c047d05410511dfbca757131efc79";
+inline constexpr std::string_view enclosure_closure="64178f50277157d3524fbd3dc35c6625b15f0fde31ae20fd03c8bc29fbace6a6";
 // One canonical ROI owner; the historical enclosure-local file remains for its independently
 // pinned enclosure/ring fixtures. Production loads this group once.
 inline constexpr std::array<cache::shader_spec, 3u> roi_specs{{
@@ -143,8 +142,8 @@ inline constexpr std::size_t coverage_compute_shader_offset=hole_compute_shader_
 inline constexpr std::size_t foreground_edge_compute_shader_offset=coverage_compute_shader_offset+coverage_specs.size();
 inline constexpr std::size_t trusted_inner_compute_shader_offset=foreground_edge_compute_shader_offset+foreground_edge_specs.size();
 inline constexpr std::size_t unique_compute_shader_count=trusted_inner_compute_shader_offset+trusted_inner_specs.size();
-static_assert(required_compute_shader_count==51u&&hole_compute_shader_offset==54u&&
-              coverage_compute_shader_offset==63u&&foreground_edge_compute_shader_offset==66u&&trusted_inner_compute_shader_offset==67u&&unique_compute_shader_count==68u);
+static_assert(required_compute_shader_count==50u&&hole_compute_shader_offset==53u&&
+              coverage_compute_shader_offset==62u&&foreground_edge_compute_shader_offset==65u&&trusted_inner_compute_shader_offset==66u&&unique_compute_shader_count==67u);
 
 namespace detail {
   inline constexpr std::size_t maximum_bytecode_workers = 4u;
@@ -376,8 +375,7 @@ public:
       next.composition_.source = {s[0], s[1], s[2], s[3]};
       next.composition_.colour = compile(sources.colour, colour_specs);
       next.composition_.components = compile(sources.components, components_specs);
-      const auto e = compile(sources.enclosure, enclosure_specs);
-      std::copy_n(e.begin(), 12u, next.composition_.outline.enclosure.shaders.begin());
+      next.composition_.outline.enclosure.shaders = compile(sources.enclosure, enclosure_specs);
       const auto r = compile(sources.roi, roi_specs);
       std::copy_n(r.begin(), 3u, next.composition_.outline.enclosure.roi_graph.begin());
       std::copy_n(r.begin(), 3u, next.composition_.outline.roi_graph.begin());

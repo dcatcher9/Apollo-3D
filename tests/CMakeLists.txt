@@ -64,6 +64,7 @@ add_executable(${PROJECT_NAME}
 # Keep test provenance tied to the helper sources actually compiled into this
 # executable. Header edits must regenerate these pins before the fixtures rebuild.
 set(SUBTITLE_CBC_HELPER "${CMAKE_SOURCE_DIR}/src/host_sbs_current_black_enclosure_gpu.h")
+set(SUBTITLE_RING_HELPER "${CMAKE_SOURCE_DIR}/src/host_sbs_current_black_ring_gpu.h")
 set(SUBTITLE_OUTLINE_HELPER "${CMAKE_SOURCE_DIR}/src/host_sbs_current_outline_support_closure_gpu.h")
 set(SUBTITLE_HOLE_HELPER "${CMAKE_SOURCE_DIR}/src/host_sbs_current_mask_holes_gpu.h")
 set(SUBTITLE_FOREGROUND_EDGE_HELPER "${CMAKE_SOURCE_DIR}/src/host_sbs_current_foreground_edge_gpu.h")
@@ -72,9 +73,10 @@ set(SUBTITLE_PROGRAM_LEASE "${CMAKE_SOURCE_DIR}/src/host_sbs_compute_program_lea
 set(SUBTITLE_STAGE_OBSERVER "${CMAKE_SOURCE_DIR}/src/host_sbs_current_outline_stage_observer.h")
 set(SUBTITLE_DISPLAY_RGB8_HELPER "${CMAKE_SOURCE_DIR}/src/host_sbs_display_snapshot_rgb8_analysis_gpu.h")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-    "${SUBTITLE_CBC_HELPER}" "${SUBTITLE_OUTLINE_HELPER}" "${SUBTITLE_HOLE_HELPER}" "${SUBTITLE_FOREGROUND_EDGE_HELPER}" "${SUBTITLE_BASELINE_HELPER}"
+    "${SUBTITLE_CBC_HELPER}" "${SUBTITLE_RING_HELPER}" "${SUBTITLE_OUTLINE_HELPER}" "${SUBTITLE_HOLE_HELPER}" "${SUBTITLE_FOREGROUND_EDGE_HELPER}" "${SUBTITLE_BASELINE_HELPER}"
     "${SUBTITLE_PROGRAM_LEASE}" "${SUBTITLE_STAGE_OBSERVER}" "${SUBTITLE_DISPLAY_RGB8_HELPER}")
 file(SHA256 "${SUBTITLE_CBC_HELPER}" SUBTITLE_CBC_HELPER_SHA256)
+file(SHA256 "${SUBTITLE_RING_HELPER}" SUBTITLE_RING_HELPER_SHA256)
 file(SHA256 "${SUBTITLE_OUTLINE_HELPER}" SUBTITLE_OUTLINE_HELPER_SHA256)
 file(SHA256 "${SUBTITLE_HOLE_HELPER}" SUBTITLE_HOLE_HELPER_SHA256)
 file(SHA256 "${SUBTITLE_FOREGROUND_EDGE_HELPER}" SUBTITLE_FOREGROUND_EDGE_HELPER_SHA256)
@@ -88,6 +90,7 @@ configure_file(
     @ONLY)
 set_property(SOURCE
     "${CMAKE_CURRENT_SOURCE_DIR}/unit/test_host_sbs_current_black_enclosure_gpu.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/unit/test_host_sbs_current_black_ring_gpu.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/unit/test_host_sbs_current_outline_support_closure_gpu.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/unit/test_host_sbs_v2_live_warp.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/unit/test_host_sbs_display_snapshot_rgb8_analysis_gpu.cpp"
