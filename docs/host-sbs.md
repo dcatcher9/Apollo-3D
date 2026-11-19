@@ -2206,11 +2206,11 @@ common receipt-commit kernel. The first conditional
 contains the already-captured DAV2 TensorRT graph as its inference child; the second contains the
 captured OCR TensorRT graph when optional work is available. A valid reuse proposal leaves DAV2
 dormant and also leaves OCR dormant. A valid infer proposal selects DAV2 and may select current-ready
-OCR under the same authenticated request. Both children, every
-mapped interop resource, their unmap tails, and one completion event
-live on the same CUDA root stream, so completion joins the unit without a branch readback or a
-second OCR event. A force-infer request also uses this wrapper; no post-bootstrap DAV2 call bypasses
-it.
+OCR under the same authenticated request. The production root maps and releases its active
+interop buffers together on the CUDA root stream. The depth and decision buffers are always in
+that batch, and an OCR-eligible observation adds the OCR input and output buffers. A single
+completion event follows the release and covers both children and all participating resources.
+A force-infer request uses the same wrapper for every post-bootstrap DAV2 call.
 
 After an OCR child has been captured and embedded, ineligible, abstention, and native-suppression
 transactions retain that superset executable while leaving OCR interop unmapped and the optional

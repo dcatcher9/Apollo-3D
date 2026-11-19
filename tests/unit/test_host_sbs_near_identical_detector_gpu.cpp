@@ -310,7 +310,7 @@ TEST(HostSbsNearIdenticalPolicyTest, CompositeRuntimeUsesSingleHighTensorBoundar
   ASSERT_NE(dispatch_first, std::string::npos);
   EXPECT_EQ(preprocess_dispatch.find("context->Dispatch(", dispatch_first + 1u), std::string::npos);
 
-  const auto interop_begin = estimator.find("std::array<CUgraphicsResource, 3> depth_resources");
+  const auto interop_begin = estimator.find("std::array<CUgraphicsResource, 5> interop_resources");
   const auto interop_end = estimator.find("if (!bindings_ok && !dropped_for_signature_change)", interop_begin);
   ASSERT_NE(interop_begin, std::string::npos);
   ASSERT_NE(interop_end, std::string::npos);
@@ -322,7 +322,7 @@ TEST(HostSbsNearIdenticalPolicyTest, CompositeRuntimeUsesSingleHighTensorBoundar
        }) {
     EXPECT_NE(interop.find(token), std::string::npos) << token;
   }
-  EXPECT_NE(interop.find("depth_resource_count, depth_resources.data(), cu_stream"), std::string::npos);
+  EXPECT_NE(interop.find("primary_interop_count, interop_resources.data(), cu_stream"), std::string::npos);
   EXPECT_EQ(interop.find("guidance_input_mapped_bytes"), std::string::npos);
   EXPECT_EQ(interop.find("refined_output_mapped_bytes"), std::string::npos);
 
@@ -579,10 +579,12 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
   EXPECT_EQ(estimator.find("gpu_decision_resource_requested"), std::string::npos);
   EXPECT_NE(
     estimator.find(
-      "std::array<CUgraphicsResource, 3> depth_resources {\n"
+      "std::array<CUgraphicsResource, 5> interop_resources {\n"
       "        cuda_in_res,\n"
       "        cuda_out_res,\n"
-      "        cuda_near_identical_decision_res,"
+      "        cuda_near_identical_decision_res,\n"
+      "        cuda_ocr_in_res,\n"
+      "        cuda_ocr_out_res,"
     ),
     std::string::npos
   );
@@ -590,7 +592,9 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
     estimator.find("constexpr unsigned int depth_resource_count = 3u;"),
     std::string::npos
   );
-  EXPECT_NE(estimator.find("depth_resource_count"), std::string::npos);
+  EXPECT_NE(estimator.find("constexpr unsigned int ocr_resource_count = 2u;"), std::string::npos);
+  EXPECT_NE(estimator.find("depth_resource_count + (ocr_frame_eligible ? ocr_resource_count : 0u)"), std::string::npos);
+  EXPECT_NE(estimator.find("split_interop_for_benchmark ? depth_resource_count : interop_resource_count"), std::string::npos);
   EXPECT_NE(estimator.find("near_identical_transaction.dispatch"), std::string::npos);
   const auto dispatch_copy = estimator.find("context->CopyResource(");
   ASSERT_NE(dispatch_copy, std::string::npos);
@@ -641,7 +645,7 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
   );
   EXPECT_NE(unified_submit.find("ensure_depth_conditional_graph("), std::string::npos);
   EXPECT_NE(unified_submit.find("optional_child"), std::string::npos);
-  EXPECT_NE(estimator.find("if (ocr_frame_eligible)"), std::string::npos);
+  EXPECT_NE(estimator.find("if (split_interop_for_benchmark && ocr_frame_eligible)"), std::string::npos);
   EXPECT_NE(
     unified_submit.find("conditional_optional_child_policy_e::retain_if_present"),
     std::string::npos
@@ -787,20 +791,20 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
   const auto optional_unmap = estimator.find(
     "ocr_unmap_res = cuda.cuGraphicsUnmapResources(", submit_end
   );
-  const auto depth_unmap = estimator.find(
-    "auto unmap_res = cuda.cuGraphicsUnmapResources(", submit_end
+  const auto primary_unmap = estimator.find(
+    "cuda.cuGraphicsUnmapResources(\n        primary_interop_count, interop_resources.data(), cu_stream", submit_end
   );
   const auto joined_event = estimator.find(
-    "record_inference_done_event(\n          cuda,", depth_unmap
+    "record_inference_done_event(\n          cuda,", primary_unmap
   );
   ASSERT_NE(wrapper_launch, std::string::npos);
   ASSERT_NE(optional_unmap, std::string::npos);
-  ASSERT_NE(depth_unmap, std::string::npos);
+  ASSERT_NE(primary_unmap, std::string::npos);
   ASSERT_NE(joined_event, std::string::npos);
   EXPECT_LT(wrapper_launch, optional_unmap);
-  EXPECT_LT(wrapper_launch, depth_unmap);
-  EXPECT_LT(optional_unmap, joined_event);
-  EXPECT_LT(depth_unmap, joined_event);
+  EXPECT_LT(optional_unmap, primary_unmap);
+  EXPECT_LT(primary_unmap, joined_event);
+  EXPECT_NE(estimator.substr(submit_end, optional_unmap - submit_end).find("if (split_interop_for_benchmark && ocr_mapped)"), std::string::npos);
 
   // A CPU-completed force-infer still launches the wrapper. Depth postprocess is direct, but every
   // optional observation is receipt-gated: force failure emits infer-without-optional while an

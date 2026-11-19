@@ -10390,32 +10390,50 @@ namespace models {
       // Force-flushing every frame only prevents the driver from interleaving other GPU
       // consumers (DWM / Edge / the Widgets panel), which starves them and can trigger a TDR.
 
-      // 2. CUDA Execution (for CURRENT frame). Depth remains mandatory. Optional OCR interop maps
-      // on the same root stream and its TensorRT graph is embedded as a sibling conditional child;
-      // one completion event after both unmap tails therefore covers the exact transaction.
-      std::array<CUgraphicsResource, 3> depth_resources {
+      // 2. CUDA Execution (for CURRENT frame). Both conditional children share one root stream
+      // and completion event, so transfer their D3D ownership in one batch. Private unmap
+      // experiments retain their original split calls, including warmup and separate receipts.
+      std::array<CUgraphicsResource, 5> interop_resources {
         cuda_in_res,
         cuda_out_res,
         cuda_near_identical_decision_res,
+        cuda_ocr_in_res,
+        cuda_ocr_out_res,
       };
       constexpr unsigned int depth_resource_count = 3u;
-      auto map_res = cuda.cuGraphicsMapResources(
-        depth_resource_count, depth_resources.data(), cu_stream
+      constexpr unsigned int ocr_resource_count = 2u;
+      const unsigned int interop_resource_count =
+        depth_resource_count + (ocr_frame_eligible ? ocr_resource_count : 0u);
+      const bool split_interop_for_benchmark = benchmark_joined_completion_gate != nullptr;
+      const unsigned int primary_interop_count =
+        split_interop_for_benchmark ? depth_resource_count : interop_resource_count;
+      auto *const ocr_resources = interop_resources.data() + depth_resource_count;
+      const auto map_res = cuda.cuGraphicsMapResources(
+        primary_interop_count, interop_resources.data(), cu_stream
       );
       if (map_res != CUDA_SUCCESS) {
+        if (!split_interop_for_benchmark && ocr_frame_eligible) {
+          ocr_available = false;
+          mark_ocr_context_failure(
+            detail::warmed_execution_context_failure_e::pre_enqueue_interop_or_binding
+          );
+        }
+        // A failed multi-resource call does not prove that none of its resources mapped.
+        // Keep the terminal teardown/quarantine policy; never retry individual resources.
         (void) observe_joined_cuda_failure(
-          "depth interop map", map_res, true
+          !split_interop_for_benchmark && ocr_frame_eligible ?
+            "joined depth/OCR interop map" : "depth interop map",
+          map_res, true
         );
         return make_result(completed);
       }
-      CUgraphicsResource ocr_resources[2] = {cuda_ocr_in_res, cuda_ocr_out_res};
-      bool ocr_mapped = false;
+      bool ocr_mapped = !split_interop_for_benchmark && ocr_frame_eligible;
       if (is_terminal()) {
         ocr_frame_eligible = false;
       }
-      if (ocr_frame_eligible) {
+      if (split_interop_for_benchmark && ocr_frame_eligible) {
         const auto ocr_map = cuda.cuGraphicsMapResources(
-          2,
+          ocr_resource_count,
           ocr_resources,
           cu_stream
         );
@@ -10901,25 +10919,28 @@ namespace models {
         }
       }
       CUresult ocr_unmap_res = CUDA_SUCCESS;
-      if (ocr_mapped) {
-        if (benchmark_joined_completion_gate) benchmark_joined_completion_gate->note_unmap_begin(frame_id, joined_completion_gate_benchmark::unmap_e::optional_ocr);
+      if (split_interop_for_benchmark && ocr_mapped) {
+        benchmark_joined_completion_gate->note_unmap_begin(frame_id, joined_completion_gate_benchmark::unmap_e::optional_ocr);
         ocr_unmap_res = cuda.cuGraphicsUnmapResources(
-          2,
+          ocr_resource_count,
           ocr_resources,
           cu_stream
         );
-        if (benchmark_joined_completion_gate) benchmark_joined_completion_gate->note_unmap_return(frame_id, joined_completion_gate_benchmark::unmap_e::optional_ocr, ocr_unmap_res);
+        benchmark_joined_completion_gate->note_unmap_return(frame_id, joined_completion_gate_benchmark::unmap_e::optional_ocr, ocr_unmap_res);
       }
-      if (benchmark_joined_completion_gate) benchmark_joined_completion_gate->note_unmap_begin(frame_id, joined_completion_gate_benchmark::unmap_e::depth);
-      auto unmap_res = cuda.cuGraphicsUnmapResources(
-        depth_resource_count, depth_resources.data(), cu_stream
+      if (split_interop_for_benchmark) benchmark_joined_completion_gate->note_unmap_begin(frame_id, joined_completion_gate_benchmark::unmap_e::depth);
+      const auto unmap_res = cuda.cuGraphicsUnmapResources(
+        primary_interop_count, interop_resources.data(), cu_stream
       );
-      if (benchmark_joined_completion_gate) benchmark_joined_completion_gate->note_unmap_return(frame_id, joined_completion_gate_benchmark::unmap_e::depth, unmap_res);
+      if (split_interop_for_benchmark) benchmark_joined_completion_gate->note_unmap_return(frame_id, joined_completion_gate_benchmark::unmap_e::depth, unmap_res);
       if (unmap_res != CUDA_SUCCESS) {
         (void) observe_joined_cuda_failure(
-          "depth interop unmap", unmap_res, true
+          !split_interop_for_benchmark && ocr_mapped ?
+            "joined depth/OCR interop unmap" : "depth interop unmap",
+          unmap_res, true
         );
         enqueued = false;
+        if (!split_interop_for_benchmark) ocr_armed = false;
       }
       if (ocr_unmap_res != CUDA_SUCCESS) {
         (void) observe_joined_cuda_failure(
