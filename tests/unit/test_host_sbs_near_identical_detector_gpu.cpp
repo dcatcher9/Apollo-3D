@@ -1224,7 +1224,8 @@ namespace {
       const UINT dispatch_groups_y = tile_group_height,
       const bool coordinate_only = false,
       const std::uint32_t stream_frame_delta = 0u,
-      const std::uint32_t expected_work = 0u
+      const std::uint32_t expected_work = 0u,
+      const bool skip_input_history = false
     ) {
       if (raw.size() != field_texels || current_model_input.size() != 3u * field_texels ||
           current_exclusion.size() != field_texels ||
@@ -1271,7 +1272,8 @@ namespace {
 
       update_depth_constants(tensor_content);
       update_detector_constants(
-        0u, 0u, 0u, frame_id, 0u, 0u, observation_timestamp_us,
+        skip_input_history ? models::near_identical_map_skip_input_history : 0u,
+        0u, 0u, frame_id, 0u, 0u, observation_timestamp_us,
         stream_frame_delta, reduction_group_count, expected_work
       );
       ID3D11Buffer *constants[3] = {
@@ -3017,6 +3019,17 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, FusedMapAdvancesCompleteTupleAndOwnerF
     // The last texel lives in the final partial dispatch group and proves that completion, not
     // thread (0,0)'s tag store, is the observable tuple/owner publication boundary.
     EXPECT_EQ(result.previous_model_input.back(), inputs.model_input.back());
+
+    fused_map_result_t suppressed;
+    ASSERT_TRUE(fixture.run_fused_map(
+      inputs.raw, inputs.model_input, inputs.exclusion,
+      health_state(), valid_minmax_ema, authenticated_mapping_state(), baseline_frame_id,
+      owner_observation_timestamp_us, suppressed, error, content, tile_group_width,
+      tile_group_height, false, 0u, 0u, true
+    )) << error;
+    EXPECT_EQ(suppressed.output, result.output);
+    EXPECT_EQ(suppressed.owner, result.owner);
+    EXPECT_EQ(suppressed.previous_model_input, std::vector<float>(inputs.model_input.size(), -73.25f));
   }
 }
 

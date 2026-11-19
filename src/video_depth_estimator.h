@@ -654,6 +654,8 @@ namespace models {
   inline constexpr std::uint32_t near_identical_history_owner_contract_tag = 0x3142484Eu;
   inline constexpr std::uint32_t near_identical_history_owner_contract_schema = 2u;
   inline constexpr std::size_t near_identical_history_owner_word_count = 10u;
+  /** Request flag used only by the map dispatch's separate constant-buffer upload. */
+  inline constexpr std::uint32_t near_identical_map_skip_input_history = 1u << 3u;
 
   inline constexpr std::uint32_t near_identical_decision_cookie = 0xD1EC15A5u;
   inline constexpr std::uint32_t near_identical_token_low_cookie = 0xA3756C91u;

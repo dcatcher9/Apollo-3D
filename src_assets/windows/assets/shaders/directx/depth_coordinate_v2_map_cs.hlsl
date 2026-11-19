@@ -1,5 +1,5 @@
 // Map raw DAV2 into the desired signed one-eye source-U candidate. The production entrypoint also
-// commits the padded model-input history and its authenticated owner. Completion of
+// updates requested model-input history and publishes the authenticated depth owner. Completion of
 // the direct or indirect dispatch followed by UAV unbinding is the publication boundary; the tag
 // written by thread zero is not a same-dispatch synchronization point. coordinate_main is a
 // Dump-3D-only diagnostic entrypoint over the same authenticated source and has no history or owner
@@ -22,6 +22,8 @@ RWStructuredBuffer<uint> NearIdenticalHistoryOwnerOutput : register(u2);
 #define HOST_SBS_NEAR_IDENTICAL_CONSTANTS_REGISTER b2
 #include "include/host_sbs_near_identical_constants.hlsl"
 #include "include/host_sbs_near_identical_history_owner.hlsl"
+
+static const uint NEAR_IDENTICAL_MAP_SKIP_INPUT_HISTORY = 1u << 3u;
 
 bool DepthHistoryAdvances() {
     return DepthValidHistoryAdvances(MinMaxEma[0].w);
@@ -100,9 +102,10 @@ bool CanonicalCoordinate(uint index, out float coordinate) {
 void main(uint3 id : SV_DispatchThreadID) {
     bool history_advances = DepthHistoryAdvances();
 
-    // Copy the three NCHW planes across the full inference grid before mapping coordinates.
-    // This retains the edge-replicated padding supplied by preprocessing.
-    if (id.x < target_w && id.y < target_h && history_advances) {
+    // Eligible comparison inputs retain the edge-replicated padding supplied by preprocessing.
+    // The map-specific request flag leaves the authenticated depth owner independent of the copy.
+    if (near_identical_request_flags != NEAR_IDENTICAL_MAP_SKIP_INPUT_HISTORY &&
+        id.x < target_w && id.y < target_h && history_advances) {
         uint plane = target_w * target_h;
         uint raw_index = id.y * target_w + id.x;
         PreviousModelInput[raw_index] = CurrentModelInput[raw_index];

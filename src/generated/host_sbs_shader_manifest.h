@@ -129,13 +129,13 @@ namespace models::host_sbs_shader_cache {
     host_sbs_subtitle_gaussian_horizontal_limit,
   };
   inline constexpr std::string_view parallax_v2_producer_source_closure_sha256 =
-    "9d8f2411847645308d4df19ec5f037b8e3aecca7a9a053a3549885859ceb9f1d";
+    "a7582cf14bedfcae924d882929b356e8b9d66fa5da590bf30d09f005672b9d41";
 
   inline constexpr std::array parallax_v2_coordinate_diagnostic_specs {
     depth_coordinate_v2_coordinate_diagnostic,
   };
   inline constexpr std::string_view parallax_v2_coordinate_diagnostic_source_closure_sha256 =
-    "8fa3b38378aacc681b44daf2adc6da90d8ad8dd5937fd0e1dd5cc1bf597ab184";
+    "fa7a5a0d525344163fb57e13c194d29f8103e324da2f675aa28433e3bdb56c84";
 
   inline constexpr std::array near_identical_detector_specs {
     host_sbs_near_identical_resolve,

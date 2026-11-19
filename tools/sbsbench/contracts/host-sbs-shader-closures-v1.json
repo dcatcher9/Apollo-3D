@@ -475,7 +475,7 @@
         "host_sbs_subtitle_gaussian_vertical_limit",
         "host_sbs_subtitle_gaussian_horizontal_limit"
       ],
-      "source_closure_sha256": "9d8f2411847645308d4df19ec5f037b8e3aecca7a9a053a3549885859ceb9f1d"
+      "source_closure_sha256": "a7582cf14bedfcae924d882929b356e8b9d66fa5da590bf30d09f005672b9d41"
     },
     {
       "name": "parallax_v2_coordinate_diagnostic",
@@ -483,7 +483,7 @@
       "specs": [
         "depth_coordinate_v2_coordinate_diagnostic"
       ],
-      "source_closure_sha256": "8fa3b38378aacc681b44daf2adc6da90d8ad8dd5937fd0e1dd5cc1bf597ab184"
+      "source_closure_sha256": "fa7a5a0d525344163fb57e13c194d29f8103e324da2f675aa28433e3bdb56c84"
     },
     {
       "name": "near_identical_detector",

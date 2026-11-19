@@ -194,7 +194,8 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             # source-color-tiled preprocessing are authenticated equivalent producer programs.
             # The contour passes share one authenticated current observation and its cover geometry.
             # Dense glyph growth only runs in tiles with native support in their dependency halo.
-            135: "a3ec17da3e62c6312fe3034f4d1a4ec0ac1eee54574f05bc8dfe266341c1586d",
+            # CPU-completed suppressed observations skip the comparison tensor copy.
+            135: "6b63c4f7cbbdb5c2b81e6f994138616f0e3f47c6e88ddc5dd52fb5a13f5fee7c",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -209,7 +210,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "9d8f2411847645308d4df19ec5f037b8e3aecca7a9a053a3549885859ceb9f1d",
+            "a7582cf14bedfcae924d882929b356e8b9d66fa5da590bf30d09f005672b9d41",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(

@@ -5027,7 +5027,7 @@ namespace models {
 
     // The fused map root authenticates the history owner it publishes against these exact b2
     // words. Upload them once per infer postprocess, with no host update before that dispatch.
-    bool upload_near_identical_history_owner_constants() {
+    bool upload_near_identical_history_owner_constants(const bool skip_input_history) {
       if (
         !near_identical_cbuffer || !near_identical_history_owner.srv || !cbuffer ||
         pending_frame_id == 0u ||
@@ -5042,7 +5042,8 @@ namespace models {
         static_cast<std::uint32_t>(target_h)
       );
       update_near_identical_constants(
-        0u, 0u, 0u, pending_frame_id, 0u, domain_tag, 0u, 0u,
+        skip_input_history ? near_identical_map_skip_input_history : 0u,
+        0u, 0u, pending_frame_id, 0u, domain_tag, 0u, 0u,
         cuda_conditional_graph::work_flag_e::none,
         pending_observation_timestamp_us
       );
@@ -7724,9 +7725,8 @@ namespace models {
 
       mark_d3d_parallax_map_start(perf_slot);
 
-      // Raw depth -> immutable pre-limiter candidate, while the same infer-grid dispatch advances
-      // the padded NCHW history and publishes its authenticated owner. normalize_depth_output
-      // uploaded the exact b2 words consumed here. They stay intact until this dispatch.
+      // Map raw depth into the immutable pre-limiter candidate and publish the depth owner.
+      // The same dispatch copies padded NCHW history when requested by the b2 upload.
       // The full-size canonical-coordinate
       // field is deliberately absent from production; an explicit Dump 3D dispatches it separately.
       const host_sbs_v2_gpu::map_history_command_t map_history_command {
@@ -9628,7 +9628,11 @@ namespace models {
       if (normalized_depth_diagnostics_enabled) {
         dispatch_normalized_depth_diagnostics();
       }
-      if (!upload_near_identical_history_owner_constants()) {
+      // Suppressed publications cannot be GPU-undecided baselines. The next ordinary inference
+      // refreshes the input before reuse is eligible. The depth receipt still needs its owner.
+      if (!upload_near_identical_history_owner_constants(
+            subtitle_work_suppressed && !subtitle_publication_branch_opaque
+          )) {
         fail_gpu_conditional_bridge_once(
           "GPU inference-observation history-owner constants failed"
         );

@@ -74,7 +74,7 @@ as one tuple; the draw-owned pin resources are not a new temporal observation.
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
 schema 135/tag `0x8405278D`, canonical SHA-256
-`a3ec17da3e62c6312fe3034f4d1a4ec0ac1eee54574f05bc8dfe266341c1586d`. It binds the
+`6b63c4f7cbbdb5c2b81e6f994138616f0e3f47c6e88ddc5dd52fb5a13f5fee7c`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -85,8 +85,8 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 2 | `720fe4a316f1f66fd31c8a1833cbf0d93e25f34da494b6c80b94b6cea096689e` |
-| `parallax_v2_producer` | 29 | `9d8f2411847645308d4df19ec5f037b8e3aecca7a9a053a3549885859ceb9f1d` |
-| `parallax_v2_coordinate_diagnostic` | 1 | `8fa3b38378aacc681b44daf2adc6da90d8ad8dd5937fd0e1dd5cc1bf597ab184` |
+| `parallax_v2_producer` | 29 | `a7582cf14bedfcae924d882929b356e8b9d66fa5da590bf30d09f005672b9d41` |
+| `parallax_v2_coordinate_diagnostic` | 1 | `fa7a5a0d525344163fb57e13c194d29f8103e324da2f675aa28433e3bdb56c84` |
 | `near_identical_detector` | 3 | `c8988887dcdd5b7f1aa81fd5c144e7bf85ed126712bf72c8d8be4943e7067bca` |
 | `gpu_trace` | 1 | `8b2fc3d19020721799f826549cafd74db0d3248c2fc24356b211b85287ef87bb` |
 | `parallax_v2_live_renderer` | 2 | `fdb0d7ec420ad4dff453be3c02a3b5e9163a32612f6465c217cab9123a39b826` |
@@ -756,8 +756,10 @@ ordinary post-limit Base field. The raw-depth range EMA,
 the V2 camera and the remaining geometry producer continue normally. An explicitly armed Dump 3D
 frame remains an ordinary complete observation only when its subtitle context is eligible, so frozen
 OCR/UIP4 resources are never serialized as current-frame evidence. Hard context disable takes
-precedence if video authority is lost. A suppressed completion cannot authorize ordinary joint reuse: a later
-noninteractive candidate needs a complete ordinary depth/subtitle owner under the current route.
+precedence if video authority is lost. A CPU-completed suppressed observation publishes its depth
+owner and skips the model-input history copy. A later noninteractive candidate needs a complete
+ordinary depth/subtitle owner under the current route. Its ordinary inference refreshes the
+comparison tensor before GPU-undecided reuse becomes eligible.
 Without that proof it forces an ordinary observation with current-ready OCR (`1`) or exact-current
 ineligible abstention (`2`). Dump 3D forces a complete depth observation and retains hard context exclusion.
 
@@ -2333,10 +2335,10 @@ identity so recovery remains visible. Its frame ID identifies the completed tran
 retain an older real depth owner. Health snapshots and aggregate outcome counters remain diagnostic-only; they cannot
 substitute for exact rendering proof, seed cache lineage, select the detector branch or authorize
 another observation. Packed-image redelivery does not advance that completed-transaction identity.
-An authenticated infer advances model-input history when the shared depth-validity predicate
+An authenticated infer advances requested model-input history when the shared depth-validity predicate
 (`MinMaxEma.w >= 0.5`) passes. The coordinate-map dispatch copies the three NCHW planes for
 every cell of the padded target domain before coordinate clamping or mapping early exit. An
-invalid or empty depth frame holds the comparison tensor and clears its owner tag. When
+invalid or empty depth frame holds the comparison tensor and clears the depth-owner tag. When
 enabled, the evaluator's separate normalization pass also holds the previous normalized-depth field.
 Thread zero refreshes owner metadata and commits its tag only under the stricter
 depth-health-tag/domain/work proof. Completion of the direct or indirect map dispatch and
@@ -2653,7 +2655,7 @@ timer-boundary shift for a regression.
 against the retained matched source. ROI samples therefore appear in that timer
 without a separate live crop allocation or copy.
 `depth_parallax_map_gpu` covers candidate mapping, copying the three padded NCHW planes into
-model-input history, and publishing the history owner. The interval ends at
+model-input history when requested, and publishing the depth owner. The interval ends at
 `parallax_limits_start`. The cadence diagnostics report
 `roi_direct_inputs/dump_copies`; the first counts admitted direct ROI inputs, while the second can
 increase only for an explicit Dump 3D diagnostic reconstruction after live timing has closed.
