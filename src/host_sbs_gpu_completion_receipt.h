@@ -73,6 +73,8 @@ namespace models::host_sbs_gpu_completion_receipt {
     submission_class_e submission_class = submission_class_e::invalid;
     std::uint32_t flags = 0u;
     host_subtitle_outcome_e host_subtitle_outcome = host_subtitle_outcome_e::suppressed;
+    // Host publication identity for a hard-disabled source with maintained comparison history.
+    bool depth_only_history = false;
 
     bool operator==(const expected_t &) const = default;
   };
@@ -160,6 +162,9 @@ namespace models::host_sbs_gpu_completion_receipt {
            expected.width != 0u && expected.height != 0u &&
            std::isfinite(expected.raw_coordinate_scale) && expected.raw_coordinate_scale > 0.0f &&
            cuda_conditional_graph::authenticated_work_flags(expected.expected_work) &&
+           (!expected.depth_only_history ||
+            (expected.expected_work == 0u &&
+             (expected.flags & trace::record_flag_e::subtitle_suppressed) != 0u)) &&
            (expected.submission_class == submission_class_e::force_infer ||
             (expected.submission_class == submission_class_e::gpu_undecided &&
              expected.observation_timestamp_us != 0u &&

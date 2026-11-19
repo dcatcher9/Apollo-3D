@@ -2339,6 +2339,99 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
     models::host_sbs_gpu_completion_receipt::depth_disposition_e::reuse);
   EXPECT_EQ(scoped_followup_receipt->depth_owner_frame_id, scope_frame);
 
+  // A stable hard-disabled route may compare depth only. Seed with a different image from the
+  // ordinary owner above so the minor change below can reuse only if the new tensor was copied.
+  using optional_work = models::depth_optional_work_mode_e;
+  namespace receipt = models::host_sbs_gpu_completion_receipt;
+  auto dirty_pixels = changed_pixels;
+  dirty_pixels[conditional_height / 2u * conditional_width] = 0xfffefeffu;
+  const D3D11_SUBRESOURCE_DATA dirty_initial {
+    dirty_pixels.data(), conditional_width * sizeof(std::uint32_t), 0u
+  };
+  ComPtr<ID3D11Texture2D> dirty_texture;
+  ComPtr<ID3D11ShaderResourceView> dirty_source;
+  ASSERT_TRUE(SUCCEEDED(device->CreateTexture2D(&conditional_desc, &dirty_initial, &dirty_texture)));
+  ASSERT_TRUE(SUCCEEDED(device->CreateShaderResourceView(dirty_texture.Get(), nullptr, &dirty_source)));
+
+  ASSERT_TRUE(wait_until_reusable());
+  const auto depth_only_frame = scoped_followup_frame + 1u;
+  const auto depth_only_seed = estimator.estimate_depth(
+    changed_source.Get(), models::input_color_space::srgb, depth_only_frame,
+    false, conditional_region, optional_work::disable_subtitle,
+    {.observation_timestamp_us = depth_only_frame, .depth_only_history = true}, 1u
+  );
+  ASSERT_TRUE(depth_only_seed.submission.inference_enqueued);
+  const auto depth_only_completed = estimator.finish_pending_depth_for_evaluation();
+  ASSERT_TRUE(depth_only_completed.observation.completed_frame_valid);
+  const auto depth_only_receipt = wait_for_publication(depth_only_completed.observation);
+  ASSERT_TRUE(depth_only_receipt);
+  ASSERT_TRUE(depth_only_receipt->depth_cache_authorized());
+  EXPECT_TRUE(depth_only_receipt->expected.depth_only_history);
+  EXPECT_EQ(depth_only_receipt->subtitle, receipt::subtitle_disposition_e::suppressed);
+  std::vector<std::uint32_t> depth_only_base;
+  ASSERT_TRUE(read_words(depth_only_completed.observation.final_parallax(), depth_only_base));
+
+  ASSERT_TRUE(wait_until_reusable());
+  const auto depth_only_reuse_frame = depth_only_frame + 1u;
+  const auto depth_only_reuse_request = models::make_gpu_adaptive_request(
+    depth_only_reuse_frame, true, &*depth_only_receipt,
+    depth_only_completed.observation.publication, depth_only_reuse_frame, true
+  );
+  ASSERT_TRUE(depth_only_reuse_request.authorize_gpu_undecided_reuse);
+  const auto depth_only_reuse = estimator.estimate_depth(
+    dirty_source.Get(), models::input_color_space::srgb, depth_only_reuse_frame,
+    false, conditional_region, optional_work::disable_subtitle, depth_only_reuse_request, 1u
+  );
+  ASSERT_TRUE(depth_only_reuse.submission.gpu_undecided_transaction_enqueued);
+  const auto depth_only_reused = estimator.finish_pending_depth_for_evaluation();
+  ASSERT_TRUE(depth_only_reused.observation.completed_frame_valid);
+  const auto depth_only_reused_receipt = wait_for_publication(depth_only_reused.observation);
+  ASSERT_TRUE(depth_only_reused_receipt);
+  EXPECT_EQ(depth_only_reused_receipt->depth, receipt::depth_disposition_e::reuse);
+  EXPECT_EQ(depth_only_reused_receipt->depth_owner_frame_id, depth_only_frame);
+  EXPECT_EQ(depth_only_reused_receipt->subtitle, receipt::subtitle_disposition_e::suppressed);
+  std::vector<std::uint32_t> reused_base;
+  ASSERT_TRUE(read_words(depth_only_reused.observation.final_parallax(), reused_base));
+  EXPECT_EQ(reused_base, depth_only_base);
+
+  ASSERT_TRUE(wait_until_reusable());
+  const auto depth_only_change_frame = depth_only_reuse_frame + 1u;
+  const auto depth_only_change_request = models::make_gpu_adaptive_request(
+    depth_only_change_frame, true, &*depth_only_reused_receipt,
+    depth_only_reused.observation.publication, depth_only_change_frame, true
+  );
+  ASSERT_TRUE(depth_only_change_request.authorize_gpu_undecided_reuse);
+  const auto depth_only_change = estimator.estimate_depth(
+    conditional_source.Get(), models::input_color_space::srgb, depth_only_change_frame,
+    false, conditional_region, optional_work::disable_subtitle, depth_only_change_request, 1u
+  );
+  ASSERT_TRUE(depth_only_change.submission.gpu_undecided_transaction_enqueued);
+  const auto depth_only_changed = estimator.finish_pending_depth_for_evaluation();
+  const auto depth_only_changed_receipt = wait_for_publication(depth_only_changed.observation);
+  ASSERT_TRUE(depth_only_changed_receipt);
+  EXPECT_EQ(depth_only_changed_receipt->depth, receipt::depth_disposition_e::infer);
+  EXPECT_EQ(depth_only_changed_receipt->depth_owner_frame_id, depth_only_change_frame);
+  EXPECT_EQ(depth_only_changed_receipt->subtitle, receipt::subtitle_disposition_e::suppressed);
+
+  ASSERT_TRUE(wait_until_reusable());
+  const auto reentry_frame = depth_only_change_frame + 1u;
+  const auto reentry_request = models::make_gpu_adaptive_request(
+    reentry_frame, true, &*depth_only_changed_receipt, depth_only_changed.observation.publication,
+    reentry_frame
+  );
+  EXPECT_FALSE(reentry_request.authorize_gpu_undecided_reuse);
+  const auto reentry = estimator.estimate_depth(
+    conditional_source.Get(), models::input_color_space::srgb, reentry_frame,
+    false, conditional_region, optional_work::ordinary, reentry_request, 1u
+  );
+  ASSERT_TRUE(reentry.submission.inference_enqueued);
+  EXPECT_FALSE(reentry.submission.gpu_undecided_transaction_enqueued);
+  const auto reentered = estimator.finish_pending_depth_for_evaluation();
+  const auto reentered_receipt = wait_for_publication(reentered.observation);
+  ASSERT_TRUE(reentered_receipt);
+  EXPECT_EQ(reentered_receipt->depth_owner_frame_id, reentry_frame);
+  EXPECT_TRUE(reentered_receipt->subtitle_is_current());
+
   EXPECT_FALSE(estimator.has_terminal_failure());
 }
 

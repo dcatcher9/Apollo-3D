@@ -3737,6 +3737,7 @@ namespace models {
     // that the device executed it. The authenticated receipt remains OCR-output authority.
     depth_optional_work_mode_e pending_optional_work =
       depth_optional_work_mode_e::ordinary;
+    bool pending_depth_only_history = false;
     std::uint64_t accepted_subtitle_context_generation = 0u;
     bool accepted_subtitle_context_disabled = false;
     subtitle_line_policy_e pending_subtitle_line_policy = subtitle_line_policy_e::video_caption;
@@ -5055,9 +5056,7 @@ namespace models {
     ) const noexcept {
       return cached_current_publication &&
              publication_is_current(cached_current_publication->expected) &&
-             cached_current_publication->depth_cache_authorized() &&
-             (cached_current_publication->expected.flags &
-              host_sbs_gpu_trace::record_flag_e::subtitle_suppressed) == 0u &&
+             gpu_adaptive_baseline_matches(*cached_current_publication, request.depth_only_history) &&
              request.baseline_frame_id == cached_current_publication->depth_owner_frame_id;
     }
 
@@ -8464,6 +8463,7 @@ namespace models {
                               publication_receipt::submission_class_e::force_infer,
         .flags = pending_gpu_completion_flags(pending_gpu_trace_append),
         .host_subtitle_outcome = pending_gpu_trace_append.host_subtitle_outcome,
+        .depth_only_history = pending_depth_only_history,
       };
     }
 
@@ -8738,6 +8738,7 @@ namespace models {
       has_previous_frame = false;  // actual root ACK; never fold queued output twice
       clear_pending_inference_event_state();
       pending_optional_work = depth_optional_work_mode_e::ordinary;
+      pending_depth_only_history = false;
       pending_subtitle_work = cuda_conditional_graph::work_flag_e::none;
       pending_submission_class = pending_submission_class_e::force_infer;
       pending_wrapper_transaction_token = 0u;
@@ -9628,10 +9629,10 @@ namespace models {
       if (normalized_depth_diagnostics_enabled) {
         dispatch_normalized_depth_diagnostics();
       }
-      // Suppressed publications cannot be GPU-undecided baselines. The next ordinary inference
-      // refreshes the input before reuse is eligible. The depth receipt still needs its owner.
+      // Only an explicitly maintained depth-only baseline needs the suppressed input tensor.
+      // The depth receipt still needs its owner even when the map skips the copy.
       if (!upload_near_identical_history_owner_constants(
-            subtitle_work_suppressed && !subtitle_publication_branch_opaque
+            subtitle_work_suppressed && !pending_depth_only_history && !subtitle_publication_branch_opaque
           )) {
         fail_gpu_conditional_bridge_once(
           "GPU inference-observation history-owner constants failed"
@@ -10291,6 +10292,8 @@ namespace models {
         accepted_optional_work,
         ocr_frame_eligible
       );
+      const bool depth_only_history = adaptive_reuse_request.depth_only_history &&
+        accepted_optional_work == depth_optional_work_mode_e::disable_subtitle && !snapshot_raw_model_depth;
       // The CPU may only classify a frame as GPU-undecided from host-owned facts. The wrapper is
       // prepared after the exact D3D interop pointers are mapped; no pre-existing source graph is
       // an admission prerequisite and no admitted class may bypass the wrapper.
@@ -10305,12 +10308,12 @@ namespace models {
         gpu_undecided_baseline_authorized(adaptive_reuse_request) &&
         frame_id > adaptive_reuse_request.baseline_frame_id &&
         !gpu_undecided_requires_force_infer_refresh &&
-        !ocr_signature_refresh_required &&
+        (!ocr_signature_refresh_required || depth_only_history) &&
         !subtitle_context_changed &&
         // Every new OCR-eligible source observation runs the joined depth/subtitle path.
         // Similarity reuse would otherwise freeze four-observation pixel confirmation.
         !ocr_frame_eligible &&
-        depth_optional_work_allows_gpu_undecided(accepted_optional_work) &&
+        depth_optional_work_allows_gpu_undecided(accepted_optional_work, adaptive_reuse_request.depth_only_history) &&
         !snapshot_raw_model_depth && current_shape_matches &&
         processed_input_domain.matches_analysis_domain(input_region, color_space) &&
         input_region.tensor_content.valid({target_w, target_h});
@@ -11065,6 +11068,7 @@ namespace models {
              d.transfer==static_cast<std::uint32_t>(color_space))pending_source_observation=source_observation;
         }
         pending_optional_work = accepted_optional_work;
+        pending_depth_only_history = depth_only_history;
         pending_subtitle_work = subtitle_work;
         pending_submission_class = accepted_submission_class;
         pending_wrapper_transaction_token = accepted_transaction_token;

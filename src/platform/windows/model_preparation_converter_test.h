@@ -85,6 +85,8 @@ namespace platf::dxgi::testing {
     std::filesystem::path output_root;
     // Opt-in original consumer path for registry readiness; default preserves the B41 fixture.
     bool production_observer_path = false;
+    // TEST-only ineligible synthetic context with real committed DDup damage history.
+    bool hard_disabled_dirty_source = false;
     std::shared_future<std::vector<std::wstring>> registry_executables;
   };
 
@@ -97,6 +99,9 @@ namespace platf::dxgi::testing {
   };
 
   struct model_preparation_converter_snapshot_t {
+    std::optional<models::host_sbs_gpu_completion_receipt::receipt_t> receipt;
+    bool last_admission_gpu_undecided = false;
+    std::uint32_t last_admission_optional_work = 0u;
     std::uint64_t conversions = 0;
     std::uint64_t source_uploads = 0;
     std::int64_t source_stamp_ticks = 0;
@@ -181,6 +186,8 @@ namespace platf::dxgi::testing {
     bool needs_conversion_poll() const;
     bool pipeline_ready() const;
     model_preparation_artifact_t snapshot_output(std::string_view label);
+    void upload_dirty_source(std::span<const std::uint8_t> bgra, const RECT &damage);
+    bool drawn_source_matches_upload() const;
     model_preparation_artifact_t source_artifact() const;
     model_preparation_memory_t memory() const;
 

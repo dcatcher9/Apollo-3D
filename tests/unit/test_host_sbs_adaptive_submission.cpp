@@ -199,6 +199,20 @@ namespace {
     EXPECT_EQ(request.baseline_frame_id, 0u);
     EXPECT_EQ(models::classify_gpu_adaptive_submission(43u, request, true, false),
               models::gpu_adaptive_submission_class_e::force_infer);
+
+    const auto without_history = models::make_gpu_adaptive_request(
+      43u, true, &completed, completed.expected, 3000u, true
+    );
+    EXPECT_FALSE(without_history.authorize_gpu_undecided_reuse);
+    EXPECT_TRUE(without_history.depth_only_history);
+
+    completed.expected.depth_only_history = true;
+    const auto depth_only = models::make_gpu_adaptive_request(
+      43u, true, &completed, completed.expected, 3000u, true
+    );
+    EXPECT_TRUE(depth_only.authorize_gpu_undecided_reuse);
+    EXPECT_EQ(depth_only.baseline_frame_id, completed.depth_owner_frame_id);
+    EXPECT_FALSE(publication_adapter_t {completed.expected}.admit(&completed).authorize_gpu_undecided_reuse);
   }
 
   TEST(HostSbsAdaptiveSubmissionTest, ExplicitSubtitleSuppressionStillControlsEligibility) {
@@ -208,5 +222,9 @@ namespace {
     EXPECT_EQ(models::select_depth_optional_work_mode(true, true), work::ordinary);
     EXPECT_TRUE(models::depth_optional_work_allows_gpu_undecided(work::ordinary));
     EXPECT_FALSE(models::depth_optional_work_allows_gpu_undecided(work::suppress_subtitle));
+    EXPECT_FALSE(models::depth_optional_work_allows_gpu_undecided(work::disable_subtitle));
+    EXPECT_TRUE(models::depth_optional_work_allows_gpu_undecided(work::disable_subtitle, true));
+    EXPECT_FALSE(models::depth_optional_work_allows_gpu_undecided(work::suppress_subtitle, true));
+    EXPECT_FALSE(models::depth_optional_work_allows_gpu_undecided(work::ordinary, true));
   }
 }  // namespace

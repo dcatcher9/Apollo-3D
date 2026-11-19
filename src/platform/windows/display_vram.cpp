@@ -2176,10 +2176,14 @@ namespace platf::dxgi {
                   matched_candidate_slot->subtitle_context_eligible ||
                     matched_candidate_slot->subtitle_context_suppression_eligible
                 );
+                const bool depth_only_history =
+                  dedup_gate_open && matched_candidate_slot->inference_ddup_damage &&
+                  !matched_candidate_slot->observed_interactive_move_size &&
+                  optional_work == models::depth_optional_work_mode_e::disable_subtitle;
                 const bool authorize_gpu_undecided =
                   dedup_gate_open &&
                   models::depth_optional_work_allows_gpu_undecided(
-                    optional_work
+                    optional_work, depth_only_history
                   ) &&
                   !inference_pending &&
                   gpu_undecided_candidate_matches(
@@ -2196,7 +2200,8 @@ namespace platf::dxgi {
                     depth_estimator->publication_is_current(latest_v2_lineage.estimate().publication) ?
                       latest_v2_lineage.estimate().publication :
                       models::host_sbs_gpu_completion_receipt::expected_t {},
-                    observation_timestamp_us
+                    observation_timestamp_us,
+                    depth_only_history
                   );
 #ifdef SUNSHINE_TESTS
                 if (!test_native_pacing_gate_configured && test_native_pacing.held_source_stamp_ticks &&
@@ -8490,6 +8495,13 @@ namespace platf::dxgi {
         preparation_probe_require(converter_->init(display_, adapter.Get(), pix_fmt_e::nv12) == 0, "Preparation actual converter initialization failed");
         preparation_probe_device_adapter(converter_->device.get(), request_.adapter);
         probe_context_ = {width, height, 0x5052455041524531ull};
+        if (request_.hard_disabled_dirty_source) {
+          preparation_probe_require(!request_.production_observer_path, "Dirty source probe requires the synthetic context");
+          // The existing zero-instance branch disables subtitles without native authority.
+          probe_context_.instance = 0u;
+          probe_context_.borrow_matched_capture = true;
+          damage_history_ = std::make_shared<detail::ddup_damage_history_t>();
+        }
         if (request_.production_observer_path) {
           preparation_probe_require(request_.registry_executables.valid(), "Production-observer probe requires its finite registry future");
           converter_->test_registry_executables = request_.registry_executables;
@@ -8509,6 +8521,9 @@ namespace platf::dxgi {
           display_->device_ctx->Flush();
         }
         ++source_uploads_;
+        if (damage_history_) {
+          image.ddup_damage = damage_history_->commit({true, {{0, 0, static_cast<LONG>(width), static_cast<LONG>(height)}}});
+        }
         image.blank = false;
         const auto stamp = std::chrono::steady_clock::now();
         image_->frame_timestamp = stamp;
@@ -8580,6 +8595,7 @@ namespace platf::dxgi {
         result.latest_lineage_authenticated = converter_->latest_v2_lineage.authenticated();
         result.latest_lineage_known_depth = converter_->latest_v2_lineage.known_depth();
         const auto &lineage = converter_->latest_v2_lineage;
+        result.receipt = lineage.receipt;
         result.latest_lineage_receipt_present = lineage.receipt.has_value();
         result.latest_lineage_receipt_depth_cache_authorized = lineage.receipt && lineage.receipt->depth_cache_authorized();
         const auto &publication = lineage.estimate().publication;
@@ -8664,6 +8680,79 @@ namespace platf::dxgi {
         return write_artifact(std::string(label) + ".bgra8", bytes.data(), bytes.size(), output_width_, request_.height);
       }
 
+      void upload_dirty_source(std::span<const std::uint8_t> bgra, const RECT &damage) {
+        assert_owner();
+        preparation_probe_require(damage_history_ && bgra.size() == request_.bgra.size() && damage.left >= 0 && damage.top >= 0 && damage.right <= static_cast<LONG>(request_.width) && damage.bottom <= static_cast<LONG>(request_.height) && damage.left < damage.right && damage.top < damage.bottom, "Dirty source probe requires bounded known damage");
+        bool changed = false;
+        for (std::uint32_t y = 0; y != request_.height; ++y) {
+          for (std::uint32_t x = 0; x != request_.width; ++x) {
+            const auto offset = (std::size_t(y) * request_.width + x) * 4u;
+            if (std::memcmp(bgra.data() + offset, request_.bgra.data() + offset, 4u) != 0) {
+              preparation_probe_require(x >= static_cast<unsigned>(damage.left) && x < static_cast<unsigned>(damage.right) && y >= static_cast<unsigned>(damage.top) && y < static_cast<unsigned>(damage.bottom), "Changed pixels escape declared damage");
+              changed = true;
+            }
+          }
+        }
+        preparation_probe_require(changed, "Dirty source probe refuses identical uploads");
+        // Retain A's immutable pool image while the real matched lineage owns it. B is a
+        // distinct shared capture allocation, as on the ordinary borrowed-capture path.
+        auto replacement = display_->alloc_img();
+        preparation_probe_require(replacement && display_->complete_img(replacement.get(), false) == 0, "Dirty source allocation failed");
+        auto &image = static_cast<img_d3d_t &>(*replacement);
+        preparation_probe_require(image.capture_mutex->AcquireSync(0u, 5000u) == S_OK, "Dirty source capture mutex failed");
+        {
+          auto release = util::fail_guard([&image]() {
+            image.capture_mutex->ReleaseSync(0u);
+          });
+          display_->device_ctx->UpdateSubresource(image.capture_texture.get(), 0u, nullptr, bgra.data(), request_.width * 4u, 0u);
+          display_->device_ctx->Flush();
+        }
+        request_.bgra.assign(bgra.begin(), bgra.end());
+        image.ddup_damage = damage_history_->commit({true, {damage}});
+        image.blank = false;
+        replacement->frame_timestamp = replacement->content_timestamp = std::chrono::steady_clock::now();
+        image_ = std::move(replacement);
+        ++source_uploads_;
+        draw_ = {};
+        drawn_source_.Reset();
+      }
+
+      bool drawn_source_matches_upload() const {
+        assert_owner();
+        if (!drawn_source_) {
+          return false;
+        }
+        ComPtr<ID3D11Resource> resource;
+        drawn_source_->GetResource(&resource);
+        ComPtr<ID3D11Texture2D> texture;
+        preparation_probe_hr(resource.As(&texture), "Draw source is not a texture");
+        D3D11_TEXTURE2D_DESC description {};
+        texture->GetDesc(&description);
+        preparation_probe_require(description.Width == request_.width && description.Height == request_.height && description.Format == DXGI_FORMAT_B8G8R8A8_UNORM, "Unexpected actual draw source shape");
+        description.Usage = D3D11_USAGE_STAGING;
+        description.BindFlags = description.MiscFlags = 0u;
+        description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        ComPtr<ID3D11Texture2D> staging;
+        preparation_probe_hr(converter_->device->CreateTexture2D(&description, nullptr, &staging), "Draw source staging failed");
+        ComPtr<IDXGIKeyedMutex> mutex;
+        preparation_probe_hr(texture.As(&mutex), "Borrowed draw source keyed mutex unavailable");
+        preparation_probe_require(mutex->AcquireSync(0u, 5000u) == S_OK, "Draw source readback mutex failed");
+        auto release = util::fail_guard([&]() { mutex->ReleaseSync(0u); });
+        converter_->device_ctx->CopyResource(staging.Get(), texture.Get());
+        D3D11_MAPPED_SUBRESOURCE mapped {};
+        preparation_probe_hr(converter_->device_ctx->Map(staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped), "Draw source readback failed");
+        auto unmap = util::fail_guard([&]() {
+          converter_->device_ctx->Unmap(staging.Get(), 0u);
+        });
+        preparation_probe_require(mapped.RowPitch >= request_.width * 4u, "Draw source pitch invalid");
+        for (std::uint32_t y = 0; y != request_.height; ++y) {
+          if (std::memcmp(static_cast<const std::uint8_t *>(mapped.pData) + std::size_t(y) * mapped.RowPitch, request_.bgra.data() + std::size_t(y) * request_.width * 4u, request_.width * 4u) != 0) {
+            return false;
+          }
+        }
+        return true;
+      }
+
       model_preparation_artifact_t source_artifact() const {
         assert_owner();
         return source_artifact_;
@@ -8694,10 +8783,17 @@ namespace platf::dxgi {
       }
 
       static void record(void *state, const actual_converter_probe_v1::event_t &event) noexcept {
+        auto &self = *static_cast<impl_t *>(state);
+        if (event.kind == actual_converter_probe_v1::event_e::admission) {
+          self.draw_.last_admission_gpu_undecided = event.gpu_undecided;
+          self.draw_.last_admission_optional_work = event.optional_work;
+        }
         if (event.kind != actual_converter_probe_v1::event_e::draw) {
           return;
         }
-        auto &self = *static_cast<impl_t *>(state);
+        if (self.request_.hard_disabled_dirty_source) {
+          self.drawn_source_ = event.views[0];
+        }
         self.draw_.last_draw_present = true;
         self.draw_.last_draw_flat = event.flat;
         self.draw_.last_draw_repeat = event.repeat;
@@ -8720,6 +8816,8 @@ namespace platf::dxgi {
       actual_converter_probe_v1::context_t probe_context_;
       model_preparation_converter_snapshot_t draw_;
       model_preparation_artifact_t source_artifact_;
+      std::shared_ptr<detail::ddup_damage_history_t> damage_history_;
+      ComPtr<ID3D11ShaderResourceView> drawn_source_;
       std::shared_ptr<preparation_probe_display_t> display_;
       std::shared_ptr<platf::img_t> image_;
       ComPtr<ID3D11Texture2D> target_;
@@ -8739,6 +8837,14 @@ namespace platf::dxgi {
     bool model_preparation_converter_t::needs_conversion_poll() const { return impl_->needs_conversion_poll(); }
     bool model_preparation_converter_t::pipeline_ready() const { return impl_->pipeline_ready(); }
     model_preparation_artifact_t model_preparation_converter_t::snapshot_output(std::string_view label) { return impl_->snapshot_output(label); }
+
+    void model_preparation_converter_t::upload_dirty_source(std::span<const std::uint8_t> bgra, const RECT &damage) {
+      impl_->upload_dirty_source(bgra, damage);
+    }
+
+    bool model_preparation_converter_t::drawn_source_matches_upload() const {
+      return impl_->drawn_source_matches_upload();
+    }
     model_preparation_artifact_t model_preparation_converter_t::source_artifact() const { return impl_->source_artifact(); }
     model_preparation_memory_t model_preparation_converter_t::memory() const { return impl_->memory(); }
   }  // namespace testing

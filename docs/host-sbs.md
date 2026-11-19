@@ -757,9 +757,12 @@ the V2 camera and the remaining geometry producer continue normally. An explicit
 frame remains an ordinary complete observation only when its subtitle context is eligible, so frozen
 OCR/UIP4 resources are never serialized as current-frame evidence. Hard context disable takes
 precedence if video authority is lost. A CPU-completed suppressed observation publishes its depth
-owner and skips the model-input history copy. A later noninteractive candidate needs a complete
-ordinary depth/subtitle owner under the current route. Its ordinary inference refreshes the
-comparison tensor before GPU-undecided reuse becomes eligible.
+owner. Stable hard-disabled DDup routes can keep comparison history and use the existing GPU
+similarity decision for depth alone. The current and retained sources must pass the normal route,
+motion and ownership checks, and the retained publication must explicitly carry depth-only history.
+Other CPU-completed suppressed observations skip the input copy. A later ordinary candidate
+needs a complete ordinary depth/subtitle owner under the current route. Its ordinary inference
+refreshes the comparison tensor before GPU-undecided reuse becomes eligible.
 Without that proof it forces an ordinary observation with current-ready OCR (`1`) or exact-current
 ineligible abstention (`2`). Dump 3D forces a complete depth observation and retains hard context exclusion.
 

@@ -594,4 +594,77 @@ TEST(LiveModelPreparationGpuTest, RejectedCanonicalIdentityPublishesRealFailureF
   report["active_phase"] = "completed";
 }
 
+TEST(LiveModelPreparationGpuTest, ChangedHardDisabledSourceReusesDepthAndDrawsCurrentColour) {
+  if (!enabled()) {
+    GTEST_SKIP() << "Set SUNSHINE_RUN_LIVE_PREPARATION_TESTS=1 and an explicit adapter plan.";
+  }
+  const auto plan = read_plan();
+  auto live_lease = gpu_workload::try_acquire(gpu_workload::kind_e::live_stream);
+  ASSERT_TRUE(live_lease);
+  drain_t drain;
+  auto owner = access_t::create(video::host_sbs_v2_depth_model(), plan.preparation_adapter_name, {});
+  auto request = source(plan);
+  request.hard_disabled_dirty_source = true;
+  auto changed = request.bgra;
+  const RECT damage {320, 240, 352, 272};
+  for (LONG y = damage.top; y != damage.bottom; ++y) {
+    for (LONG x = damage.left; x != damage.right; ++x) {
+      const auto offset = (std::size_t(y) * request.width + x) * 4u;
+      for (unsigned channel = 0; channel != 3u; ++channel) {
+        changed[offset + channel] ^= 4u;
+      }
+    }
+  }
+  {
+    probe::model_preparation_converter_t converter(std::move(request));
+    converter.set_mode(video::SBS_AI);
+    const auto await_receipt = [&](std::chrono::seconds budget) {
+      const auto deadline = std::chrono::steady_clock::now() + budget;
+      while (std::chrono::steady_clock::now() < deadline) {
+        const auto sample = converter.observe();
+        if (sample.estimator_terminal || sample.model_status == status_t::failed ||
+            (sample.receipt && sample.receipt->depth_cache_authorized() &&
+             sample.latest_lineage_receipt_matches_publication && sample.last_draw_present &&
+             !sample.last_draw_flat && sample.last_draw_publication_current &&
+             sample.last_draw_model_frame == sample.receipt->expected.frame_id &&
+             sample.last_draw_source_stamp_ticks == sample.source_stamp_ticks)) {
+          return sample;
+        }
+        // A completed draw can precede the nonblocking receipt. Keep delivering this immutable
+        // source while waiting for the converter to consume that receipt.
+        (void) converter.convert_retained();
+        std::this_thread::sleep_for(1ms);
+      }
+      return converter.observe();
+    };
+    const auto a = await_receipt(180s);
+    ASSERT_TRUE(a.receipt && a.receipt->depth_cache_authorized()) << observation(a).dump();
+    ASSERT_TRUE(a.receipt->expected.depth_only_history);
+    ASSERT_TRUE(converter.drawn_source_matches_upload());
+    const auto packed_a = converter.snapshot_output("dirty-a");
+    converter.upload_dirty_source(changed, damage);
+    const auto b = await_receipt(30s);
+    ASSERT_TRUE(b.receipt && b.receipt->depth_cache_authorized()) << observation(b).dump();
+    EXPECT_TRUE(b.latest_lineage_receipt_matches_publication);
+    EXPECT_TRUE(b.last_admission_gpu_undecided);
+    EXPECT_EQ(b.last_admission_optional_work, static_cast<std::uint32_t>(models::depth_optional_work_mode_e::disable_subtitle));
+    EXPECT_GT(b.receipt->expected.frame_id, a.receipt->expected.frame_id);
+    EXPECT_EQ(b.receipt->expected.expected_work, 0u);
+    EXPECT_EQ(b.receipt->depth, models::host_sbs_gpu_completion_receipt::depth_disposition_e::reuse);
+    EXPECT_EQ(b.receipt->depth_owner_frame_id, a.receipt->depth_owner_frame_id);
+    EXPECT_EQ(b.receipt->depth_owner_timestamp_us, a.receipt->depth_owner_timestamp_us);
+    EXPECT_EQ(b.receipt->subtitle, models::host_sbs_gpu_completion_receipt::subtitle_disposition_e::suppressed);
+    EXPECT_TRUE(b.receipt->expected.depth_only_history);
+    EXPECT_EQ(b.source_uploads, 2u);
+    EXPECT_NE(b.content_stamp_ticks, a.content_stamp_ticks);
+    EXPECT_EQ(b.last_draw_source_stamp_ticks, b.source_stamp_ticks);
+    EXPECT_EQ(b.last_draw_current_content_stamp_ticks, b.content_stamp_ticks);
+    EXPECT_TRUE(converter.drawn_source_matches_upload());
+    EXPECT_NE(converter.snapshot_output("dirty-b").sha256, packed_a.sha256);
+  }
+  access_t::join(*owner);
+  owner.reset();
+  drain.finish();
+}
+
 #endif
