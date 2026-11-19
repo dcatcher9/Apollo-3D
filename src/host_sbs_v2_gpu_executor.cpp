@@ -116,8 +116,14 @@ namespace models::host_sbs_v2_gpu {
       return false;
     }
     if (!command.histogram_shader || !command.quantile_shader || !command.frame_stats ||
-        !command.histogram_output || !command.histogram ||
-        !command.normalization_histogram_output) {
+        !command.histogram_output || !command.histogram) {
+      return false;
+    }
+    const auto &publication = command.publication_outputs;
+    if (publication ?
+          (!publication->minmax_ema || !publication->depth_health || !publication->camera_state ||
+           command.normalization_histogram_output) :
+          !command.normalization_histogram_output) {
       return false;
     }
 
@@ -161,13 +167,22 @@ namespace models::host_sbs_v2_gpu {
       context->CSSetUnorderedAccessViews(0u, 2u, null_outputs, nullptr);
       context->CSSetShader(command.quantile_shader, nullptr, 0u);
       context->CSSetShaderResources(0u, 1u, &command.histogram);
-      ID3D11UnorderedAccessView *quantile_outputs[2] = {
+      ID3D11UnorderedAccessView *quantile_outputs[6] = {
         command.frame_stats_output, command.normalization_histogram_output,
       };
-      context->CSSetUnorderedAccessViews(0u, 2u, quantile_outputs, nullptr);
+      UINT output_count = 2u;
+      if (publication) {
+        quantile_outputs[2] = publication->minmax_ema;
+        quantile_outputs[3] = command.minmax_raw_output;
+        quantile_outputs[4] = publication->depth_health;
+        quantile_outputs[5] = publication->camera_state;
+        output_count = 6u;
+      }
+      context->CSSetUnorderedAccessViews(0u, output_count, quantile_outputs, nullptr);
       (void) record_dispatch(context, command.frame_resolve_dispatch);
       context->CSSetShaderResources(0u, 1u, null_inputs);
-      context->CSSetUnorderedAccessViews(0u, 2u, null_outputs, nullptr);
+      ID3D11UnorderedAccessView *null_quantile_outputs[6] = {};
+      context->CSSetUnorderedAccessViews(0u, output_count, null_quantile_outputs, nullptr);
     }
     return true;
   }

@@ -5120,6 +5120,7 @@ TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
     std::tuple {"depth_coordinate_v2_frame_resolve_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_coordinate_v2_histogram_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_coordinate_v2_quantiles_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {"depth_coordinate_v2_quantiles_cs.hlsl", "publish_main", "cs_5_0"},
     std::tuple {"sbs_flat_identity_ps.hlsl", "main_ps", "ps_5_0"},
     std::tuple {"sbs_packed_resample_ps.hlsl", "main_ps", "ps_5_0"},
     std::tuple {"sbs_reprojection_v2_live_ps.hlsl", "main_ps", "ps_5_0"},
@@ -8266,7 +8267,7 @@ TEST(DirectxShaderSourceTest, FusedDepthMapperSpecializesSyntheticPadding) {
 TEST(DirectxShaderSourceTest, HostTelemetrySharesPublicationReadbackWithTheDepthHealthState) {
   const std::string shader_dir =
     SUNSHINE_SOURCE_DIR "/src_assets/windows/assets/shaders/directx/";
-  const auto minmax = read_source_file(shader_dir + "depth_minmax_ema_cs.hlsl");
+  const auto minmax = read_source_file(shader_dir + "include/depth_minmax_ema_common.hlsl");
   const auto estimator =
     read_source_file(SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp");
   const auto receipt_decoder =

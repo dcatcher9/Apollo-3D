@@ -431,11 +431,6 @@
         "source_target": "cs_5_0"
       },
       {
-        "source_file": "depth_minmax_ema_cs.hlsl",
-        "source_entrypoint": "main",
-        "source_target": "cs_5_0"
-      },
-      {
         "source_file": "depth_coordinate_v2_moments_cs.hlsl",
         "source_entrypoint": "main",
         "source_target": "cs_5_0"
@@ -452,12 +447,7 @@
       },
       {
         "source_file": "depth_coordinate_v2_quantiles_cs.hlsl",
-        "source_entrypoint": "main",
-        "source_target": "cs_5_0"
-      },
-      {
-        "source_file": "depth_coordinate_v2_state_resolve_cs.hlsl",
-        "source_entrypoint": "main",
+        "source_entrypoint": "publish_main",
         "source_target": "cs_5_0"
       },
       {
@@ -556,7 +546,7 @@
         "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "a7582cf14bedfcae924d882929b356e8b9d66fa5da590bf30d09f005672b9d41"
+    "source_closure_sha256": "84c80a04ee9e71b2c2c49124d81f7855676a4412d70b942105c758a65b969d96"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,

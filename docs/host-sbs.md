@@ -73,8 +73,8 @@ as one tuple; the draw-owned pin resources are not a new temporal observation.
 ## Authenticated production contract
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
-schema 135/tag `0x8405278D`, canonical SHA-256
-`6b63c4f7cbbdb5c2b81e6f994138616f0e3f47c6e88ddc5dd52fb5a13f5fee7c`. It binds the
+schema 135/tag `0x43F4A0F4`, canonical SHA-256
+`964a6b7edea90dc5aa346f19c96dbf12fa8a6e2fb1038e186ba3ca9ef5662774`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -85,20 +85,21 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 2 | `720fe4a316f1f66fd31c8a1833cbf0d93e25f34da494b6c80b94b6cea096689e` |
-| `parallax_v2_producer` | 29 | `a7582cf14bedfcae924d882929b356e8b9d66fa5da590bf30d09f005672b9d41` |
-| `parallax_v2_coordinate_diagnostic` | 1 | `fa7a5a0d525344163fb57e13c194d29f8103e324da2f675aa28433e3bdb56c84` |
-| `near_identical_detector` | 3 | `c8988887dcdd5b7f1aa81fd5c144e7bf85ed126712bf72c8d8be4943e7067bca` |
-| `gpu_trace` | 1 | `8b2fc3d19020721799f826549cafd74db0d3248c2fc24356b211b85287ef87bb` |
-| `parallax_v2_live_renderer` | 2 | `fdb0d7ec420ad4dff453be3c02a3b5e9163a32612f6465c217cab9123a39b826` |
-| `parallax_v2_p010_y` | 1 | `cf9baf96fedd9da4dda68f803d507eeb8b698fa6bf857c5c020705ed8004a42c` |
+| `parallax_v2_producer` | 27 | `84c80a04ee9e71b2c2c49124d81f7855676a4412d70b942105c758a65b969d96` |
+| `parallax_v2_replay_resolve` | 2 | `03de8ed7ec5287b35b3588e71a336414402695f1ee865d95ca018c0537b56796` |
+| `parallax_v2_coordinate_diagnostic` | 1 | `4fcc81d5e39a82ed191ea698744b4adf4d1eb76a901b5c530b701c6acd8cfa88` |
+| `near_identical_detector` | 3 | `9ad9e92a4322dfc1e98ddcf48640c1e756fc302bf0d87a83bc7dd375fd9426da` |
+| `gpu_trace` | 1 | `17821b83f08f37f6aae1b43c1b1c5d82a2992e6f8b8a38dc66da76bcb5c32905` |
+| `parallax_v2_live_renderer` | 2 | `32fc83ea81789e2b151926743e98a9fe1c6b7c9b74dc5f3a51e0ca58ce6d7576` |
+| `parallax_v2_p010_y` | 1 | `226cef8463910d1d0996fb67c07f14e9df5b758bafb6d63751b9af5beb9df0f8` |
 | `sbs_flat_fallback` | 2 | `7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4` |
-| `parallax_v2_live_diagnostic` | 2 | `b2eed89e55200580c17de1eec3ba68ddf455013f14e639306701cf7dd4cf4e1c` |
-| `subtitle_cohort_prototype_research` | 3 | `26cd0ec289f9c5d72cd5ce2ed01c6d93f698f780ccf94d233261f2d241f3218b` |
-| `subtitle_cohort_research` | 4 | `3d5080d9e1227d6ffa0f203a6396771a06642f6ac7ef17b499c75571010c1895` |
-| `subtitle_inner_colour_research` | 5 | `32654d30128f1d622fc7e1d31295bda425eeb6e4088c20f0aa125ebef1980d09` |
+| `parallax_v2_live_diagnostic` | 2 | `86861b0a58abeb3384c7fdc9991ef5b2e332eee700fe7b774b6672fc60cbe251` |
+| `subtitle_cohort_prototype_research` | 3 | `d1d12b05995d9ca92b5050c98116e3bc75cbafa2266c1dfa5d2102537aa11c71` |
+| `subtitle_cohort_research` | 4 | `01460384ad84a0df6c58faf9858701be6cfc2b4943e728ebbf32e92b297939df` |
+| `subtitle_inner_colour_research` | 5 | `0e04aab4599f2f889790cdbe642a9df4ecd7b35a8fdcd3932f0b614831138b0d` |
 | `subtitle_inner_components_research` | 6 | `7e2f44690d64cebe3261133a3642fa558c8c25c7086bf19551f284a4cb13ebe0` |
-| `subtitle_matte_guard_research` | 1 | `ceebd683e379333b66c23904e46eaf2bbf436ddb7f0cb7576325ac5035c05668` |
-| `parallax_v2_queued_renderer` | 1 | `732079ec1e91bcf0381bedd9f3ccc740ea6f0dacbf73ae1640df4350c0a6e792` |
+| `subtitle_matte_guard_research` | 1 | `0d4837fb52d096c2ff1085f12564bd95542cb11f200e71bd6fe2416173502381` |
+| `parallax_v2_queued_renderer` | 1 | `95ebed7add987357e35cd35829d61928a3ccff92252a6f9e572753f3f686622e` |
 | `current_mask_holes` | 9 | `b4e48d5eecab2404951602ad649980001f21cf5f9768381acadc7c3973ef4668` |
 | `current_stroke_coverage` | 3 | `1f03ba4279f6cadbaddf56b408cf20c0bc37776c4971e8e25830a8ffd3a3d063` |
 | `current_foreground_edge` | 1 | `4c8750b262827356b47a691aafe4cc306e541b691709060d979252635e73436c` |
@@ -2663,10 +2664,10 @@ model-input history when requested, and publishing the depth owner. The interval
 `roi_direct_inputs/dump_copies`; the first counts admitted direct ROI inputs, while the second can
 increase only for an explicit Dump 3D diagnostic reconstruction after live timing has closed.
 
-`depth_parallax_stats_gpu` also includes both independent histogram populations and their
-shared resolve. The later normalization-only histogram dispatch is absent. Compare the complete
-`depth_postprocess_gpu` interval across the scan change, rather than treating the wider stats
-interval as new work.
+One infer dispatch publishes camera quantiles, the normalization EMA and depth health, and
+the camera state. It consumes the independent normalization histogram in shared memory.
+`depth_parallax_stats_gpu` and `depth_parallax_gpu` both include the fused normalization work.
+The enclosing `depth_postprocess_gpu` interval preserves its scope across the fusion.
 
 With diagnostics enabled and optional CUDA event-node support available, the parent conditional
 graph records one common start after its setter and one completion after each sibling IF node.

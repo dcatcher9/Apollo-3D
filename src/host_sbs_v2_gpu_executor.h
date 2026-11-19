@@ -8,6 +8,7 @@
 
   // standard includes
   #include <cstdint>
+  #include <optional>
 
   // platform includes
   #include <d3d11.h>
@@ -49,6 +50,12 @@ namespace models::host_sbs_v2_gpu {
     [[nodiscard]] bool valid() const noexcept;
   };
 
+  struct frame_publication_outputs_t {
+    ID3D11UnorderedAccessView *minmax_ema = nullptr;
+    ID3D11UnorderedAccessView *depth_health = nullptr;
+    ID3D11UnorderedAccessView *camera_state = nullptr;
+  };
+
   struct moments_frame_command_t {
     base_constants_t constants;
     ID3D11ComputeShader *moments_shader = nullptr;
@@ -68,8 +75,10 @@ namespace models::host_sbs_v2_gpu {
     ID3D11ShaderResourceView *frame_stats = nullptr;
     ID3D11UnorderedAccessView *histogram_output = nullptr;
     ID3D11ShaderResourceView *histogram = nullptr;
-    /** The shared scan also overwrites the independent normalization P02/P98 population. */
+    /** Replay's quantile-only shader exports the independent P02/P98 bins. */
     ID3D11UnorderedAccessView *normalization_histogram_output = nullptr;
+    /** Live publish_main consumes those bins in shared memory and writes the complete state. */
+    std::optional<frame_publication_outputs_t> publication_outputs;
   };
 
   struct state_command_t {
@@ -121,7 +130,7 @@ namespace models::host_sbs_v2_gpu {
     dispatch_command_t dispatch;
   };
 
-  /** Record moments followed by the one-thread frame resolve. */
+  /** Record the shared raw scan and either replay quantiles or the complete live publication. */
   [[nodiscard]] bool record_moments_frame(
     ID3D11DeviceContext *context,
     const moments_frame_command_t &command

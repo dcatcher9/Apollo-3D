@@ -195,7 +195,8 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             # The contour passes share one authenticated current observation and its cover geometry.
             # Dense glyph growth only runs in tiles with native support in their dependency halo.
             # CPU-completed suppressed observations skip the comparison tensor copy.
-            135: "6b63c4f7cbbdb5c2b81e6f994138616f0e3f47c6e88ddc5dd52fb5a13f5fee7c",
+            # Live frame publication resolves the quantiles, normalization and camera in one entry.
+            135: "964a6b7edea90dc5aa346f19c96dbf12fa8a6e2fb1038e186ba3ca9ef5662774",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -203,14 +204,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 contract or shader identity changed without a reviewed identity pin",
         )
-        self.assertEqual(generator.contract_tag(contract), 0x8405278D)
+        self.assertEqual(generator.contract_tag(contract), 0x43F4A0F4)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "8405278d24b16afdd8f3c23645595f2d94892210251dd8a0818d1b7529477cbd",
+            "43f4a0f4b16f09cd54ec0bdabf1ebbbabb842bae75c2dfe097e4d700be625b5a",
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "a7582cf14bedfcae924d882929b356e8b9d66fa5da590bf30d09f005672b9d41",
+            "84c80a04ee9e71b2c2c49124d81f7855676a4412d70b942105c758a65b969d96",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -1325,7 +1326,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
 
     def test_gpu_counter_updates_preserve_the_reserved_sentinel(self):
         source = (REPO / "src_assets" / "windows" / "assets" / "shaders" / "directx" /
-                  "depth_coordinate_v2_state_resolve_cs.hlsl").read_text(encoding="utf-8")
+                  "include" / "depth_coordinate_v2_state_resolve_common.hlsl").read_text(encoding="utf-8")
         self.assertIn("return min(value, 0xfffffffdu) + 1u;", source)
         # Legacy camera acquisition and completed Game-gain seeding both use the same
         # saturating increment, so neither can manufacture the reserved revision sentinel.

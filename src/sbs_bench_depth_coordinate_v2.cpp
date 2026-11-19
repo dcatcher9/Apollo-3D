@@ -804,22 +804,33 @@ void main(uint3 id : SV_DispatchThreadID) {
         error = "production V2 shader source closure does not match the generated V2 contract";
         return false;
       }
+      const auto replay_resolve_sources = shader_cache::snapshot_sources(
+        shader_root,
+        shader_cache::parallax_v2_replay_resolve_specs
+      );
+      if (!replay_resolve_sources || shader_cache::source_closure_sha256(replay_resolve_sources) !=
+                                     shader_cache::parallax_v2_replay_resolve_source_closure_sha256) {
+        error = "raw V2 replay resolve source closure does not match its generated pin";
+        return false;
+      }
       struct shader_target {
         const shader_cache::shader_spec *spec;
         ComPtr<ID3D11ComputeShader> *shader;
+        bool replay_resolve = false;
       };
       const std::array<shader_target, 8> targets {{
         {&shader_cache::depth_coordinate_v2_moments, &moments_shader},
         {&shader_cache::depth_coordinate_v2_frame_resolve, &frame_shader},
         {&shader_cache::depth_coordinate_v2_histogram, &histogram_shader},
-        {&shader_cache::depth_coordinate_v2_quantiles, &quantile_shader},
-        {&shader_cache::depth_coordinate_v2_state_resolve, &state_shader},
+        {&shader_cache::depth_coordinate_v2_quantiles, &quantile_shader, true},
+        {&shader_cache::depth_coordinate_v2_state_resolve, &state_shader, true},
         {&shader_cache::depth_coordinate_v2_map, &map_shader},
         {&shader_cache::depth_coordinate_v2_vertical_limit, &vertical_limit_shader},
         {&shader_cache::depth_coordinate_v2_limit, &limit_shader},
       }};
       for (const auto &target : targets) {
-        const auto bytecode = shader_cache::get(shader_sources, *target.spec);
+        const auto &sources = target.replay_resolve ? replay_resolve_sources : shader_sources;
+        const auto bytecode = shader_cache::get(sources, *target.spec);
         if (!bytecode || bytecode->empty() || FAILED(device->CreateComputeShader(
               bytecode->data(), bytecode->size(), nullptr,
               target.shader->ReleaseAndGetAddressOf()
@@ -1633,9 +1644,8 @@ void main(uint3 id : SV_DispatchThreadID) {
           {"width", impl_->width},
           {"height", impl_->height},
         }},
-        // Production state/geometry passes. The replay's coordinate_main dispatch is
-        // diagnostic report materialization, exactly like live Dump 3D, and is intentionally
-        // excluded from the authenticated producer source closure.
+        // Shared raw scan, replay-only resolve, then production geometry. The replay's
+        // coordinate_main materializes diagnostics under the same pin as live Dump 3D.
         {"shader_sequence", nlohmann::ordered_json {
           "depth_coordinate_v2_moments_cs.hlsl",
           "depth_coordinate_v2_frame_resolve_cs.hlsl",

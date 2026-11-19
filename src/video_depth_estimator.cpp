@@ -3420,12 +3420,10 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> near_identical_tiled_preprocess_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> buffer_to_tex_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> buffer_to_tex_pad_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_minmax_ema_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_moments_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_frame_resolve_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_histogram_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_quantiles_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_state_resolve_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_publish_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_map_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_coordinate_diagnostic_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_vertical_limit_cs;
@@ -3633,8 +3631,6 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Buffer> minmax_ema_buf;  // float4 {min,max,initialized,frame_state}
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> minmax_ema_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> minmax_ema_srv;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> hist_buf;  // 256 uint bins for percentile normalization
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> hist_uav;
     // Established 32-word tagged state ABI. V2 writes only its depth-health fields; every
     // retired word keeps its zero initial value.
     Microsoft::WRL::ComPtr<ID3D11Buffer> depth_health_state_buf;
@@ -5898,12 +5894,10 @@ namespace models {
         std::addressof(near_identical_tiled_preprocess_cs),
         normalized_depth_diagnostics_enabled ? std::addressof(buffer_to_tex_cs) : nullptr,
         normalized_depth_diagnostics_enabled ? std::addressof(buffer_to_tex_pad_cs) : nullptr,
-        std::addressof(depth_minmax_ema_cs),
         std::addressof(depth_coordinate_v2_moments_cs),
         std::addressof(depth_coordinate_v2_frame_resolve_cs),
         std::addressof(depth_coordinate_v2_histogram_cs),
-        std::addressof(depth_coordinate_v2_quantiles_cs),
-        std::addressof(depth_coordinate_v2_state_resolve_cs),
+        std::addressof(depth_coordinate_v2_publish_cs),
         std::addressof(depth_coordinate_v2_map_cs),
         std::addressof(depth_coordinate_v2_vertical_limit_cs),
         std::addressof(depth_coordinate_v2_limit_cs),
@@ -6030,7 +6024,7 @@ namespace models {
       // Raw normalization record, pre-seeded to
       // {min = 0xFFFFFFFF, max = 0, valid = 0, eligible = 0}.
       // The fused V2 frame resolve overwrites all four words before the histogram consumes them;
-      // depth_minmax_ema_cs resets the identity after each frame as an additional safe default.
+      // Frame publication resets the raw reduction identity after each inference.
       {
         uint32_t init_raw[4] = {0xFFFFFFFFu, 0u, 0u, 0u};
         D3D11_BUFFER_DESC bd = {};
@@ -6065,25 +6059,6 @@ namespace models {
         device->CreateShaderResourceView(minmax_ema_buf.Get(), nullptr, &minmax_ema_srv);
       }
 
-      // Permanent P2/P98 histogram: 256 uint bins, reset after every scan.
-      {
-        uint32_t init_hist[256] = {};
-        D3D11_BUFFER_DESC bd = {};
-        bd.Usage = D3D11_USAGE_DEFAULT;
-        bd.ByteWidth = sizeof(init_hist);
-        bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
-        bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-        bd.StructureByteStride = sizeof(uint32_t);
-        D3D11_SUBRESOURCE_DATA sd = {init_hist, 0, 0};
-        device->CreateBuffer(&bd, &sd, &hist_buf);
-        if (hist_buf) {
-          device->CreateUnorderedAccessView(hist_buf.Get(), nullptr, &hist_uav);
-        }
-        if (!hist_uav) {
-          BOOST_LOG(error) << "Required P2/P98 histogram buffer creation failed.";
-        }
-      }
-
       // The tagged depth-health state serves offline traces, Dump 3D, and live telemetry. Its
       // CPU-initialized tag is never rewritten on the GPU.
       {
@@ -6107,8 +6082,8 @@ namespace models {
         near_identical_fused_preprocess_cs &&
         fused_preprocess_force_cbuffer && fused_preprocess_compare_cbuffer &&
         (!normalized_depth_diagnostics_enabled || (buffer_to_tex_cs && buffer_to_tex_pad_cs)) &&
-        depth_minmax_ema_cs &&
-        minmax_raw_uav && minmax_ema_uav && minmax_ema_srv && hist_uav &&
+        depth_coordinate_v2_publish_cs &&
+        minmax_raw_uav && minmax_ema_uav && minmax_ema_srv &&
         depth_health_state_uav && depth_health_state_srv;
       if (!mandatory_resources_ready) {
         BOOST_LOG(error) << "Depth estimator failed: required engine or Host SBS GPU resource initialization failed.";
@@ -7650,7 +7625,7 @@ namespace models {
       return true;
     }
 
-    bool dispatch_parallax_v2_frame_stats(d3d_perf_slot *perf_slot) {
+    bool dispatch_parallax_v2_frame_publication(d3d_perf_slot *perf_slot) {
       if (!parallax_v2_producer_active) {
         return false;
       }
@@ -7675,11 +7650,15 @@ namespace models {
         .moments_dispatch = parallax_v2_dispatch_command(reduce_groups, 1u, 1u, near_identical_gpu_infer_reduce_byte_offset),
         .frame_resolve_dispatch = parallax_v2_dispatch_command(1u, 1u, 1u, near_identical_gpu_infer_one_byte_offset),
         .histogram_shader = depth_coordinate_v2_histogram_cs.Get(),
-        .quantile_shader = depth_coordinate_v2_quantiles_cs.Get(),
+        .quantile_shader = depth_coordinate_v2_publish_cs.Get(),
         .frame_stats = depth_coordinate_v2_frame_stats_srv.Get(),
         .histogram_output = depth_coordinate_v2_histogram_uav.Get(),
         .histogram = depth_coordinate_v2_histogram_srv.Get(),
-        .normalization_histogram_output = hist_uav.Get(),
+        .publication_outputs = host_sbs_v2_gpu::frame_publication_outputs_t {
+          .minmax_ema = minmax_ema_uav.Get(),
+          .depth_health = depth_health_state_uav.Get(),
+          .camera_state = depth_coordinate_v2_state_uav.Get(),
+        },
       };
       const bool recorded = host_sbs_v2_gpu::record_moments_frame(
         context.Get(),
@@ -7702,25 +7681,6 @@ namespace models {
         .depth = cbuffer.Get(),
         .coordinate_v2 = depth_coordinate_v2_cbuffer.Get(),
       };
-
-      // Acquire the first usable camera on startup and follow it continuously. An unusable
-      // frame publishes flat without erasing the retained camera.
-      const host_sbs_v2_gpu::state_command_t state_command {
-        .constants = base_constants,
-        .shader = depth_coordinate_v2_state_resolve_cs.Get(),
-        .frame_stats = depth_coordinate_v2_frame_stats_srv.Get(),
-        .depth_health_state = depth_health_state_srv.Get(),
-        .state_output = depth_coordinate_v2_state_uav.Get(),
-        .dispatch = parallax_v2_dispatch_command(
-          1u,
-          1u,
-          1u,
-          near_identical_gpu_infer_one_byte_offset
-        ),
-      };
-      if (!host_sbs_v2_gpu::record_state(context.Get(), state_command)) {
-        return false;
-      }
 
       mark_d3d_parallax_map_start(perf_slot);
 
@@ -9395,15 +9355,11 @@ namespace models {
       const std::uint32_t raw_identity[4] = {0xFFFFFFFFu, 0u, 0u, 0u};
       const float zero4[4] = {0.0f, 0.0f, 0.0f, 0.0f};
       const UINT zero_uint4[4] = {0u, 0u, 0u, 0u};
-      const std::array<std::uint32_t, 256> zero_hist {};
       if (minmax_raw_buf) {
         context->UpdateSubresource(minmax_raw_buf.Get(), 0, nullptr, raw_identity, 0, 0);
       }
       if (minmax_ema_buf) {
         context->UpdateSubresource(minmax_ema_buf.Get(), 0, nullptr, zero4, 0, 0);
-      }
-      if (hist_buf) {
-        context->UpdateSubresource(hist_buf.Get(), 0, nullptr, zero_hist.data(), 0, 0);
       }
       if (depth_health_state_buf) {
         context->UpdateSubresource(
@@ -9603,27 +9559,11 @@ namespace models {
         }
         return false;
       }
-      // 3a. One shared traversal produces V2 finite-value moments and the older non-negative
-      // normalization reduction. Frame resolve publishes both FrameStats and MinMaxRaw before the
-      // histogram consumes the latter. This remains GPU-resident and introduces no readback.
-      const bool frame_stats_ready = dispatch_parallax_v2_frame_stats(perf_slot);
-      if (frame_stats_ready && depth_minmax_ema_cs && minmax_raw_uav && minmax_ema_uav) {
-        // The shared raw scan already overwrote this independent normalization histogram.
-        // Pass B: fold into the EMA'd bounds and reset the accumulators (1 thread).
-        context->CSSetShader(depth_minmax_ema_cs.Get(), nullptr, 0);
-        ID3D11UnorderedAccessView *ema_uavs[4] = {
-          minmax_ema_uav.Get(),
-          minmax_raw_uav.Get(),
-          hist_uav.Get(),
-          depth_health_state_uav.Get(),
-        };
-        context->CSSetUnorderedAccessViews(0, 4, ema_uavs, nullptr);
-        dispatch_infer_postprocess(
-          1u, 1u, 1u, near_identical_gpu_infer_one_byte_offset
-        );
-
-        ID3D11UnorderedAccessView *null_uav2[4] = {nullptr, nullptr, nullptr, nullptr};
-        context->CSSetUnorderedAccessViews(0, 4, null_uav2, nullptr);
+      // Resolve quantiles, normalization and camera state from the shared scan before mapping.
+      // The authenticated zero-group argument preserves all three on depth reuse.
+      if (!dispatch_parallax_v2_frame_publication(perf_slot)) {
+        mark_terminal_failure();
+        return false;
       }
 
       if (normalized_depth_diagnostics_enabled) {
@@ -9641,12 +9581,11 @@ namespace models {
       }
 
       if (parallax_v2_producer_active) {
-        // Together with the earlier fused frame-stats query pair, this interval covers the same
-        // V2 stats/state/geometry work as before. Both remain inside depth_postprocess_gpu, and the
-        // diagnostics resolver sums the discontiguous intervals so benchmark semantics do not move.
+        // Join this mapping interval with the earlier frame-publication interval. Normalized
+        // diagnostic textures are outside the sum. Both intervals sit inside depth_postprocess_gpu.
         mark_d3d_parallax_start(perf_slot);
       }
-      const bool base_ready = frame_stats_ready && dispatch_parallax_v2_producer(perf_slot);
+      const bool base_ready = dispatch_parallax_v2_producer(perf_slot);
       if (!base_ready) {
         mark_terminal_failure();
         return false;

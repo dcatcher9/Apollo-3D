@@ -43,6 +43,7 @@ EXPECTED_GROUP_KEYS = {
 EXPECTED_GROUP_NAMES = (
     "preprocess",
     "parallax_v2_producer",
+    "parallax_v2_replay_resolve",
     "parallax_v2_coordinate_diagnostic",
     "near_identical_detector",
     "gpu_trace",

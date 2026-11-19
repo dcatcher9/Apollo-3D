@@ -1676,7 +1676,8 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn(".previous_model_input_output = tensor_previous_input_uav.Get()", estimator)
         self.assertIn("tensor_previous_input_uav", estimator)
         self.assertNotIn("context->CSSetShader(depth_minmax_cs.Get()", estimator)
-        self.assertIn("dispatch_parallax_v2_frame_stats(perf_slot)", estimator)
+        self.assertIn("dispatch_parallax_v2_frame_publication(perf_slot)", estimator)
+        self.assertNotIn("depth_minmax_ema_cs", estimator)
         self.assertIn("static_cast<std::size_t>(reduce_groups) * 3u", estimator)
         self.assertIn("parallax_frame_stats_end -", estimator)
 
@@ -1716,7 +1717,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("MinMaxRaw.Store(4, normalization_maximum_bits)", frame_resolve)
         self.assertIn("MinMaxRaw.Store(8, normalization_valid_count)", frame_resolve)
         self.assertIn("MinMaxRaw.Store(12, eligible_count)", frame_resolve)
-        with open(os.path.join(shader_dir, "depth_minmax_ema_cs.hlsl"),
+        with open(os.path.join(shader_dir, "include", "depth_minmax_ema_common.hlsl"),
                   encoding="utf-8") as fh:
             bounds = fh.read()
         self.assertIn("eligible_count > 0u && valid_count == eligible_count", bounds)

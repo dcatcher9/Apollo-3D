@@ -30,8 +30,10 @@
 
 #include <nlohmann/json.hpp>
 
+#include <src/config.h>
 #include <src/crypto.h>
 #include <src/depth_coordinate_v2.h>
+#include <src/generated/sbs_adaptive_state_contract.h>
 #include <src/host_sbs_v2_gpu_executor.h>
 #include <src/prod_zipdepth_convex2x.h>
 #include <src/sbs_bench_depth_coordinate_v2.h>
@@ -783,6 +785,8 @@ TEST(HostSbsV2GpuExecutorTest, BindingContractAndExecutorCallSitesStayShared) {
   EXPECT_NE(moments.find("CSSetShaderResources(0u,1u,&command.partials)"),
             std::string::npos);
   EXPECT_NE(moments.find("CSSetUnorderedAccessViews(0u,2u"), std::string::npos);
+  EXPECT_NE(moments.find("output_count=6u"), std::string::npos);
+  EXPECT_EQ(count_occurrences(moments, "CSSetUnorderedAccessViews(0u,output_count,"), 2u);
   EXPECT_NE(state.find("CSSetShaderResources(0u,2u,"), std::string::npos);
   EXPECT_NE(state.find("CSSetUnorderedAccessViews(0u,1u"), std::string::npos);
   EXPECT_NE(compact_executor.find("CSSetConstantBuffers(0u,3u,"),
@@ -802,7 +806,6 @@ TEST(HostSbsV2GpuExecutorTest, BindingContractAndExecutorCallSitesStayShared) {
 
   for (const std::string_view recorder : {
          "record_moments_frame",
-         "record_state",
          "record_map_history",
          "record_vertical",
          "record_horizontal",
@@ -810,6 +813,8 @@ TEST(HostSbsV2GpuExecutorTest, BindingContractAndExecutorCallSitesStayShared) {
     EXPECT_EQ(count_occurrences(compact_replay, recorder), 1u) << recorder;
     EXPECT_EQ(count_occurrences(compact_live, recorder), 1u) << recorder;
   }
+  EXPECT_EQ(count_occurrences(compact_replay, "record_state"), 1u);
+  EXPECT_EQ(count_occurrences(compact_live, "record_state"), 0u);
   EXPECT_EQ(count_occurrences(compact_replay, ".tensor_exclusion="), 2u);
   EXPECT_EQ(count_occurrences(compact_live, ".tensor_exclusion="), 2u);
   EXPECT_EQ(compact_replay.find("CSSetShader(moments_shader.Get()"),
@@ -2182,16 +2187,17 @@ void main(uint3 tid : SV_GroupThreadID) {
 }
 )QUANT_REF";
   const auto compile = [&](const std::string_view filename,
-                           const std::string_view reference = {}) {
+                           const std::string_view reference = {},
+                           const char *entrypoint = "main") {
     ComPtr<ID3DBlob> bytecode;
     ComPtr<ID3DBlob> diagnostics;
     const auto path = shader_root / filename;
     const auto status = reference.empty() ?
       D3DCompileFromFile(path.c_str(), nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE,
-        "main", "cs_5_0", D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3,
+        entrypoint, "cs_5_0", D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3,
         0u, &bytecode, &diagnostics) :
       D3DCompile(reference.data(), reference.size(), path.string().c_str(), nullptr,
-        D3D_COMPILE_STANDARD_FILE_INCLUDE, "main", "cs_5_0",
+        D3D_COMPILE_STANDARD_FILE_INCLUDE, entrypoint, "cs_5_0",
         D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3,
         0u, &bytecode, &diagnostics);
     EXPECT_TRUE(SUCCEEDED(status)) << filename << ": " <<
@@ -2207,14 +2213,17 @@ void main(uint3 tid : SV_GroupThreadID) {
   const auto frame_resolve = compile("depth_coordinate_v2_frame_resolve_cs.hlsl");
   const auto histogram = compile("depth_coordinate_v2_histogram_cs.hlsl");
   const auto quantiles = compile("depth_coordinate_v2_quantiles_cs.hlsl");
+  const auto publication = compile("depth_coordinate_v2_quantiles_cs.hlsl", {}, "publish_main");
+  const auto ema = compile("depth_minmax_ema_cs.hlsl");
+  const auto state_resolve = compile("depth_coordinate_v2_state_resolve_cs.hlsl");
   const auto old_histogram = compile("depth_coordinate_v2_histogram_cs.hlsl", reference_histogram);
   const auto old_quantiles = compile("depth_coordinate_v2_quantiles_cs.hlsl", reference_quantiles);
   // Frozen pre-fusion normalization arithmetic remains an independent test-only oracle.
   const auto normalization_histogram = compile("depth_coordinate_v2_histogram_cs.hlsl",
     read_bytes(fs::path(SUNSHINE_SOURCE_DIR) /
       "tests/fixtures/host_sbs_normalization_histogram_reference_cs.hlsl"));
-  ASSERT_TRUE(moments && frame_resolve && histogram && quantiles && old_histogram &&
-    old_quantiles && normalization_histogram);
+  ASSERT_TRUE(moments && frame_resolve && histogram && quantiles && publication && ema &&
+    state_resolve && old_histogram && old_quantiles && normalization_histogram);
 
   struct buffer_t {
     ComPtr<ID3D11Buffer> buffer;
@@ -2247,12 +2256,16 @@ void main(uint3 tid : SV_GroupThreadID) {
     desc.MiscFlags = 0u;
     desc.StructureByteStride = 0u;
     ComPtr<ID3D11Buffer> staging;
-    if (FAILED(warp.device->CreateBuffer(&desc, nullptr, &staging))) {
+    const auto created = warp.device->CreateBuffer(&desc, nullptr, &staging);
+    EXPECT_TRUE(SUCCEEDED(created));
+    if (FAILED(created)) {
       return result;
     }
     warp.context->CopyResource(staging.Get(), source);
     D3D11_MAPPED_SUBRESOURCE mapped {};
-    if (FAILED(warp.context->Map(staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped))) {
+    const auto mapped_status = warp.context->Map(staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped);
+    EXPECT_TRUE(SUCCEEDED(mapped_status));
+    if (FAILED(mapped_status)) {
       return result;
     }
     const auto *words = static_cast<const std::uint32_t *>(mapped.pData);
@@ -2264,7 +2277,7 @@ void main(uint3 tid : SV_GroupThreadID) {
     ComPtr<ID3D11Buffer> result;
     D3D11_BUFFER_DESC desc {};
     desc.ByteWidth = bytes;
-    desc.Usage = D3D11_USAGE_IMMUTABLE;
+    desc.Usage = D3D11_USAGE_DEFAULT;
     desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     D3D11_SUBRESOURCE_DATA initial {data, 0u, 0u};
     EXPECT_TRUE(SUCCEEDED(warp.device->CreateBuffer(&desc, &initial, &result)));
@@ -2272,9 +2285,9 @@ void main(uint3 tid : SV_GroupThreadID) {
   };
   const auto unbind = [&] {
     ID3D11ShaderResourceView *inputs[3] = {};
-    ID3D11UnorderedAccessView *outputs[2] = {};
+    ID3D11UnorderedAccessView *outputs[6] = {};
     warp.context->CSSetShaderResources(0u, 3u, inputs);
-    warp.context->CSSetUnorderedAccessViews(0u, 2u, outputs, nullptr);
+    warp.context->CSSetUnorderedAccessViews(0u, 6u, outputs, nullptr);
   };
 
   // The first grid has more lanes than texels; the second crosses rows on a grid-stride visit.
@@ -2285,11 +2298,19 @@ void main(uint3 tid : SV_GroupThreadID) {
     std::array<std::uint32_t, 16> common_words {};
     common_words[0] = width;
     common_words[1] = height;
+    common_words[4] = std::bit_cast<std::uint32_t>(
+      static_cast<float>(config::host_sbs_v2_live_calibration::minmax_ema));
     common_words[5] = groups * 256u;
     common_words[11] = width;
     common_words[12] = height;
     auto common_constants = constants_buffer(common_words.data(), sizeof(common_words));
     v2::constants_t v2_words {};
+    v2_words.raw_coordinate_scale = v2::model_calibrations.front().raw_coordinate_scale;
+    v2_words.collapse_abs_epsilon = v2::collapse_abs_epsilon;
+    v2_words.requested_gain = v2::requested_gain_for_config(1.75f);
+    v2_words.max_horizontal_slope = v2::max_horizontal_slope;
+    v2_words.direct_container_limit = v2::direct_container_limit;
+    v2_words.convergence_curve_default = v2::convergence_curve_default;
     v2_words.joint_plane_mode = 3u;
     auto v2_constants = constants_buffer(&v2_words, sizeof(v2_words));
     ASSERT_TRUE(common_constants && v2_constants);
@@ -2303,23 +2324,53 @@ void main(uint3 tid : SV_GroupThreadID) {
       static_cast<UINT>(v2::frame_stats_vector_count));
     auto shared_normalization = structured(sizeof(std::uint32_t), 256u);
     auto reference_normalization = structured(sizeof(std::uint32_t), 256u);
+    auto fused_partials = structured(sizeof(std::uint32_t) * 4u, groups * 3u);
+    auto fused_bins = structured(sizeof(std::uint32_t) * 4u, groups * 128u);
+    auto fused_frame = structured(sizeof(float) * 4u,
+      static_cast<UINT>(v2::frame_stats_vector_count));
+    auto split_ema = structured(sizeof(float) * 4u, 1u);
+    auto fused_ema = structured(sizeof(float) * 4u, 1u);
+    auto split_health = structured(sizeof(float) * 4u,
+      static_cast<UINT>(sbs_adaptive_state::vector_count));
+    auto fused_health = structured(sizeof(float) * 4u,
+      static_cast<UINT>(sbs_adaptive_state::vector_count));
+    auto split_state = structured(sizeof(std::uint32_t) * 4u,
+      static_cast<UINT>(v2::state_initial_words.size() / 4u));
+    auto fused_state = structured(sizeof(std::uint32_t) * 4u,
+      static_cast<UINT>(v2::state_initial_words.size() / 4u));
     ASSERT_TRUE(raw.srv && partials.uav && shared_bins.uav && reference_bins.uav &&
       shared_frame.uav && reference_frame.uav && shared_normalization.uav &&
-      reference_normalization.uav);
-    buffer_t minmax;
+      reference_normalization.uav && fused_partials.uav && fused_bins.uav && fused_frame.uav &&
+      split_ema.uav && fused_ema.uav && split_health.uav && fused_health.uav &&
+      split_state.uav && fused_state.uav);
+    buffer_t minmax, reference_minmax, fused_minmax;
     D3D11_BUFFER_DESC minmax_desc {};
     minmax_desc.ByteWidth = sizeof(std::uint32_t) * 4u;
     minmax_desc.Usage = D3D11_USAGE_DEFAULT;
     minmax_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
     minmax_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
-    ASSERT_TRUE(SUCCEEDED(warp.device->CreateBuffer(&minmax_desc, nullptr, &minmax.buffer)));
     D3D11_UNORDERED_ACCESS_VIEW_DESC minmax_view {};
     minmax_view.Format = DXGI_FORMAT_R32_TYPELESS;
     minmax_view.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
     minmax_view.Buffer.NumElements = 4u;
     minmax_view.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
-    ASSERT_TRUE(SUCCEEDED(warp.device->CreateUnorderedAccessView(
-      minmax.buffer.Get(), &minmax_view, &minmax.uav)));
+    for (auto *output : {&minmax, &reference_minmax, &fused_minmax}) {
+      ASSERT_TRUE(SUCCEEDED(warp.device->CreateBuffer(&minmax_desc, nullptr, &output->buffer)));
+      ASSERT_TRUE(SUCCEEDED(warp.device->CreateUnorderedAccessView(
+        output->buffer.Get(), &minmax_view, &output->uav)));
+    }
+    constexpr std::array<UINT, 4> zero {};
+    for (auto *output : {&split_ema, &fused_ema}) {
+      warp.context->ClearUnorderedAccessViewUint(output->uav.Get(), zero.data());
+    }
+    for (auto *output : {&split_health, &fused_health}) {
+      warp.context->UpdateSubresource(output->buffer.Get(), 0u, nullptr,
+        sbs_adaptive_state::initial_words.data(), 0u, 0u);
+    }
+    for (auto *output : {&split_state, &fused_state}) {
+      warp.context->UpdateSubresource(output->buffer.Get(), 0u, nullptr,
+        v2::state_initial_words.data(), 0u, 0u);
+    }
     D3D11_TEXTURE2D_DESC exclusion_desc {};
     exclusion_desc.Width = width;
     exclusion_desc.Height = height;
@@ -2346,12 +2397,49 @@ void main(uint3 tid : SV_GroupThreadID) {
       .minmax_raw_output = minmax.uav.Get(),
       .moments_dispatch = gpu::dispatch_command_t::direct(groups, 1u, 1u),
       .frame_resolve_dispatch = gpu::dispatch_command_t::direct(1u, 1u, 1u),
-            .histogram_shader = histogram.Get(),
+      .histogram_shader = histogram.Get(),
       .quantile_shader = quantiles.Get(),
       .frame_stats = shared_frame.srv.Get(),
       .histogram_output = shared_bins.uav.Get(),
       .histogram = shared_bins.srv.Get(),
       .normalization_histogram_output = shared_normalization.uav.Get(),
+    };
+    auto fused_command = command;
+    fused_command.partials_output = fused_partials.uav.Get();
+    fused_command.partials = fused_partials.srv.Get();
+    fused_command.frame_stats_output = fused_frame.uav.Get();
+    fused_command.minmax_raw_output = fused_minmax.uav.Get();
+    fused_command.quantile_shader = publication.Get();
+    fused_command.frame_stats = fused_frame.srv.Get();
+    fused_command.histogram_output = fused_bins.uav.Get();
+    fused_command.histogram = fused_bins.srv.Get();
+    fused_command.normalization_histogram_output = nullptr;
+    fused_command.publication_outputs = gpu::frame_publication_outputs_t {
+      .minmax_ema = fused_ema.uav.Get(),
+      .depth_health = fused_health.uav.Get(),
+      .camera_state = fused_state.uav.Get(),
+    };
+    const auto record_split_publication = [&](const gpu::dispatch_command_t dispatch) {
+      warp.context->CSSetShader(ema.Get(), nullptr, 0u);
+      ID3D11UnorderedAccessView *outputs[] = {
+        split_ema.uav.Get(), minmax.uav.Get(), shared_normalization.uav.Get(),
+        split_health.uav.Get(),
+      };
+      warp.context->CSSetUnorderedAccessViews(0u, 4u, outputs, nullptr);
+      if (dispatch.mode == gpu::dispatch_command_t::mode_e::indirect) {
+        warp.context->DispatchIndirect(dispatch.indirect_arguments, dispatch.indirect_byte_offset);
+      } else {
+        warp.context->Dispatch(1u, 1u, 1u);
+      }
+      unbind();
+      return gpu::record_state(warp.context.Get(), {
+        .constants = command.constants,
+        .shader = state_resolve.Get(),
+        .frame_stats = shared_frame.srv.Get(),
+        .depth_health_state = split_health.srv.Get(),
+        .state_output = split_state.uav.Get(),
+        .dispatch = dispatch,
+      });
     };
     const auto missing_normalization = [&] {
       auto missing = command;
@@ -2359,16 +2447,22 @@ void main(uint3 tid : SV_GroupThreadID) {
       return gpu::record_moments_frame(warp.context.Get(), missing);
     };
     EXPECT_FALSE(missing_normalization());
+    auto missing_publication = fused_command;
+    missing_publication.publication_outputs->depth_health = nullptr;
+    EXPECT_FALSE(gpu::record_moments_frame(warp.context.Get(), missing_publication));
+    std::uint64_t observation_us = 100000u;
     for (const std::string_view sample : {"positive_crossings", "finite_negative",
       "mixed_signed_zero", "negative_zero_only", "collapsed", "tiny_span", "subnormal",
       "large_atoms_outliers", "nan", "positive_infinity", "negative_infinity",
-      "all_nan", "all_excluded", "roi_exclusion", "overflowing_moments"}) {
+      "all_nan", "all_excluded", "roi_exclusion", "overflowing_moments",
+      "all_negative", "positive_recovery"}) {
       SCOPED_TRACE(std::string(sample) + " " + std::to_string(width) + "x" + std::to_string(height));
       std::vector<float> values(count);
       std::vector<std::uint32_t> exclusions(count, 0u);
       for (UINT index = 0u; index < count; ++index) {
         values[index] = 1.0f + float(index % 257u) / 32.0f;
         if (sample == "finite_negative") values[index] -= 6.0f;
+        if (sample == "all_negative") values[index] -= 20.0f;
         if (sample == "mixed_signed_zero") values[index] = index % 2u ? -0.0f : 0.0f;
         if (sample == "negative_zero_only") values[index] = -0.0f;
         if (sample == "collapsed") values[index] = 3.0f;
@@ -2396,12 +2490,18 @@ void main(uint3 tid : SV_GroupThreadID) {
       warp.context->UpdateSubresource(raw.buffer.Get(), 0u, nullptr, values.data(), 0u, 0u);
       warp.context->UpdateSubresource(exclusion.Get(), 0u, nullptr, exclusions.data(),
         width * sizeof(std::uint32_t), 0u);
+      v2_words.joint_observation_timestamp_low = static_cast<std::uint32_t>(observation_us);
+      v2_words.joint_observation_timestamp_high = static_cast<std::uint32_t>(observation_us >> 32u);
+      observation_us += 33333u;
+      warp.context->UpdateSubresource(v2_constants.Get(), 0u, nullptr, &v2_words, 0u, 0u);
       constexpr std::array<UINT, 4> poison {0xcdcdcdcdu, 0xcdcdcdcdu, 0xcdcdcdcdu, 0xcdcdcdcdu};
-      constexpr std::array<UINT, 4> zero {};
       warp.context->ClearUnorderedAccessViewUint(shared_bins.uav.Get(), poison.data());
       warp.context->ClearUnorderedAccessViewUint(shared_normalization.uav.Get(), poison.data());
       warp.context->ClearUnorderedAccessViewUint(reference_bins.uav.Get(), poison.data());
       warp.context->ClearUnorderedAccessViewUint(reference_normalization.uav.Get(), zero.data());
+      warp.context->ClearUnorderedAccessViewUint(fused_partials.uav.Get(), poison.data());
+      warp.context->ClearUnorderedAccessViewUint(fused_bins.uav.Get(), poison.data());
+      warp.context->ClearUnorderedAccessViewUint(fused_minmax.uav.Get(), poison.data());
       ASSERT_TRUE(gpu::record_moments_frame(warp.context.Get(), command));
       warp.context->CopyResource(reference_frame.buffer.Get(), shared_frame.buffer.Get());
 
@@ -2419,8 +2519,9 @@ void main(uint3 tid : SV_GroupThreadID) {
       warp.context->Dispatch(1u, 1u, 1u);
       unbind();
       ID3D11UnorderedAccessView *normalization_outputs[] = {
-        reference_normalization.uav.Get(), minmax.uav.Get(),
+        reference_normalization.uav.Get(), reference_minmax.uav.Get(),
       };
+      warp.context->CopyResource(reference_minmax.buffer.Get(), minmax.buffer.Get());
       warp.context->CSSetShader(normalization_histogram.Get(), nullptr, 0u);
       warp.context->CSSetShaderResources(0u, 2u, histogram_inputs);
       warp.context->CSSetUnorderedAccessViews(0u, 2u, normalization_outputs, nullptr);
@@ -2445,12 +2546,45 @@ void main(uint3 tid : SV_GroupThreadID) {
       const auto expected_normalization = read_words(reference_normalization.buffer.Get());
       ASSERT_EQ(actual_normalization.size(), 256u);
       EXPECT_EQ(actual_normalization, expected_normalization) << "P02/P98 population changed";
+
+      // The split arm executes the actual replay quantile, normalization and camera shaders;
+      // the fused arm executes the actual live command, with independent persistent owners.
+      ASSERT_TRUE(record_split_publication(gpu::dispatch_command_t::direct(1u, 1u, 1u)));
+      ASSERT_TRUE(gpu::record_moments_frame(warp.context.Get(), fused_command));
+      EXPECT_EQ(read_words(fused_frame.buffer.Get()), actual_frame);
+      EXPECT_EQ(read_words(fused_ema.buffer.Get()), read_words(split_ema.buffer.Get()));
+      EXPECT_EQ(read_words(fused_health.buffer.Get()), read_words(split_health.buffer.Get()));
+      EXPECT_EQ(read_words(fused_state.buffer.Get()), read_words(split_state.buffer.Get()));
+      if (sample == "positive_crossings" || sample == "positive_recovery") {
+        const auto actual_state = read_words(fused_state.buffer.Get());
+        v2::state_words_t authenticated_state {};
+        ASSERT_EQ(actual_state.size(), authenticated_state.size());
+        std::copy(actual_state.begin(), actual_state.end(), authenticated_state.begin());
+        EXPECT_TRUE(v2::parallax_state_words_are_authenticated(
+          authenticated_state, v2_words.raw_coordinate_scale, 3u));
+        EXPECT_EQ(actual_state[v2::frame_valid], std::bit_cast<std::uint32_t>(1.0f));
+      }
+      const std::vector<std::uint32_t> raw_identity {0xffffffffu, 0u, 0u, 0u};
+      EXPECT_EQ(read_words(minmax.buffer.Get()), raw_identity);
+      EXPECT_EQ(read_words(fused_minmax.buffer.Get()), raw_identity);
+      EXPECT_EQ(read_words(shared_normalization.buffer.Get()), std::vector<std::uint32_t>(256u, 0u));
+      if (sample == "all_negative") {
+        // Finite signed depth still authorizes V2 quantiles, while the nonnegative
+        // normalization population is empty and must hold the last EMA.
+        EXPECT_EQ(actual_frame[v2::frame_stat_valid], std::bit_cast<std::uint32_t>(1.0f));
+        const auto held_ema = read_words(fused_ema.buffer.Get());
+        ASSERT_EQ(held_ema.size(), 4u);
+        EXPECT_EQ(held_ema[3u], 0u);
+      }
     }
 
     // Zero-group indirect work is the real reuse gate. No moments, quantile or histogram word moves.
     const auto held_frame = read_words(shared_frame.buffer.Get());
     const auto held_histogram = read_words(shared_bins.buffer.Get());
     const auto held_normalization = read_words(shared_normalization.buffer.Get());
+    const auto held_ema = read_words(split_ema.buffer.Get());
+    const auto held_health = read_words(split_health.buffer.Get());
+    const auto held_state = read_words(split_state.buffer.Get());
     constexpr std::array<UINT, 6> no_infer {0u, 1u, 1u, 0u, 1u, 1u};
     D3D11_BUFFER_DESC indirect_desc {};
     indirect_desc.ByteWidth = sizeof(no_infer);
@@ -2464,9 +2598,53 @@ void main(uint3 tid : SV_GroupThreadID) {
     command.moments_dispatch = gpu::dispatch_command_t::indirect(indirect.Get(), 0u);
     command.frame_resolve_dispatch = gpu::dispatch_command_t::indirect(indirect.Get(), 12u);
     ASSERT_TRUE(gpu::record_moments_frame(warp.context.Get(), command));
+    ASSERT_TRUE(record_split_publication(command.frame_resolve_dispatch));
     EXPECT_EQ(read_words(shared_frame.buffer.Get()), held_frame);
     EXPECT_EQ(read_words(shared_bins.buffer.Get()), held_histogram);
     EXPECT_EQ(read_words(shared_normalization.buffer.Get()), held_normalization);
+    EXPECT_EQ(read_words(split_ema.buffer.Get()), held_ema);
+    EXPECT_EQ(read_words(split_health.buffer.Get()), held_health);
+    EXPECT_EQ(read_words(split_state.buffer.Get()), held_state);
+
+    // Poison every fused scratch owner, keeping its authentic publication alive. No stage
+    // of a zero-group command may resolve the poison, reset Raw, or observe the camera clock.
+    constexpr std::array<UINT, 4> reuse_poison {0xcdcdcdcdu, 0xcdcdcdcdu, 0xcdcdcdcdu, 0xcdcdcdcdu};
+    for (auto *output : {&fused_partials, &fused_bins, &fused_minmax}) {
+      warp.context->ClearUnorderedAccessViewUint(output->uav.Get(), reuse_poison.data());
+    }
+    const std::array fused_owners {
+      fused_partials.buffer.Get(), fused_bins.buffer.Get(), fused_minmax.buffer.Get(),
+      fused_frame.buffer.Get(), fused_ema.buffer.Get(), fused_health.buffer.Get(),
+      fused_state.buffer.Get(),
+    };
+    std::vector<std::vector<std::uint32_t>> before_reuse;
+    for (auto *owner : fused_owners) {
+      before_reuse.push_back(read_words(owner));
+    }
+    fused_command.moments_dispatch = command.moments_dispatch;
+    fused_command.frame_resolve_dispatch = command.frame_resolve_dispatch;
+    ASSERT_TRUE(gpu::record_moments_frame(warp.context.Get(), fused_command));
+    for (std::size_t index = 0u; index < fused_owners.size(); ++index) {
+      EXPECT_EQ(read_words(fused_owners[index]), before_reuse[index]) << "owner " << index;
+    }
+
+    // A real inference after held reuse must overwrite all poisoned scratch and observe
+    // exactly once, with the same persistent history as the independent split sequence.
+    v2_words.joint_observation_timestamp_low = static_cast<std::uint32_t>(observation_us);
+    v2_words.joint_observation_timestamp_high = static_cast<std::uint32_t>(observation_us >> 32u);
+    warp.context->UpdateSubresource(v2_constants.Get(), 0u, nullptr, &v2_words, 0u, 0u);
+    command.moments_dispatch = gpu::dispatch_command_t::direct(groups, 1u, 1u);
+    command.frame_resolve_dispatch = gpu::dispatch_command_t::direct(1u, 1u, 1u);
+    fused_command.moments_dispatch = command.moments_dispatch;
+    fused_command.frame_resolve_dispatch = command.frame_resolve_dispatch;
+    ASSERT_TRUE(gpu::record_moments_frame(warp.context.Get(), command));
+    ASSERT_TRUE(record_split_publication(command.frame_resolve_dispatch));
+    ASSERT_TRUE(gpu::record_moments_frame(warp.context.Get(), fused_command));
+    EXPECT_EQ(read_words(fused_frame.buffer.Get()), read_words(shared_frame.buffer.Get()));
+    EXPECT_EQ(read_words(fused_ema.buffer.Get()), read_words(split_ema.buffer.Get()));
+    EXPECT_EQ(read_words(fused_health.buffer.Get()), read_words(split_health.buffer.Get()));
+    EXPECT_EQ(read_words(fused_state.buffer.Get()), read_words(split_state.buffer.Get()));
+    EXPECT_EQ(read_words(fused_minmax.buffer.Get()), read_words(minmax.buffer.Get()));
   }
 }
 
