@@ -8715,6 +8715,13 @@ namespace models {
       const depth_submission_t &submission = {}
     ) {
       depth_step_result_t step;
+      step.submission = submission;
+      step.status.cuda_graph_active = depth_conditional_graph.ready() &&
+                                      !depth_inference_graph.policy.capture_failed;
+      if (!completed.valid) {
+        return step;
+      }
+
       auto &r = step.observation;
       r.depth = normalized_depth.srv;
       r.depth_health_state = depth_health_state_srv;
@@ -8747,7 +8754,7 @@ namespace models {
         r.shadow_vertical_majorant = depth_coordinate_v2_vertical_majorant_srv;
         r.shadow_vertical_conditioned = depth_coordinate_v2_vertical_conditioned_srv;
         r.shadow_base_final_parallax = depth_coordinate_v2_final_srv;
-        r.subtitle_conditioning_diagnostics_current = completed.valid && completed_subtitle_conditioning_diagnostics;
+        r.subtitle_conditioning_diagnostics_current = completed_subtitle_conditioning_diagnostics;
         if (r.subtitle_conditioning_diagnostics_current) {
           r.shadow_conditioned_final_parallax = subtitle_conditioning_diagnostics->final.srv;
         }
@@ -8773,7 +8780,7 @@ namespace models {
           // suppression produced no new conditioning observation. Final still comes from Base.
           if (subtitle_conditioning_diagnostics &&
               (r.subtitle_conditioning_diagnostics_current ||
-               (completed.valid && completed.subtitle_work_suppressed && subtitle_conditioning_diagnostics_always))) {
+               (completed.subtitle_work_suppressed && subtitle_conditioning_diagnostics_always))) {
             const auto &diagnostics = *subtitle_conditioning_diagnostics;
             r.subtitle_contour_field_pin = diagnostics.field_mask.srv;
             r.subtitle_contour_distance = diagnostics.distance.srv;
@@ -8799,22 +8806,17 @@ namespace models {
       r.field_width = field_w;
       r.field_height = field_h;
       r.refined_live_geometry_active = refined_live_geometry_active;
-      r.completed_frame_valid = completed.valid;
+      r.completed_frame_valid = true;
       r.completed_frame_id = completed.frame_id;
       r.gpu_undecided_completion = completed.gpu_undecided;
-      if (completed.valid && current_publication.frame_id == completed.frame_id) {
+      if (current_publication.frame_id == completed.frame_id) {
         r.publication = current_publication;
       }
-      step.submission = submission;
-      step.status.cuda_graph_active = depth_conditional_graph.ready() &&
-                                      !depth_inference_graph.policy.capture_failed;
-      if (completed.valid) {
-        r.input_region = completed.input_region;
-        r.color_space = completed.color_space;
-        step.completion.input_domain_reset = completed.input_domain_reset;
-        r.subtitle_work_suppressed = completed.subtitle_work_suppressed;
-        r.field_content = live_field_content(completed.input_region).value_or(depth_tensor_content_rect_t {});
-      }
+      r.input_region = completed.input_region;
+      r.color_space = completed.color_space;
+      step.completion.input_domain_reset = completed.input_domain_reset;
+      r.subtitle_work_suppressed = completed.subtitle_work_suppressed;
+      r.field_content = live_field_content(completed.input_region).value_or(depth_tensor_content_rect_t {});
       return step;
     }
 
@@ -8948,6 +8950,7 @@ namespace models {
       view.postprocess_request_flags = gpu_undecided_postprocess_pending() ? 1u : 4u;
       view.both_unmap_calls_succeeded = true; // has_previous_frame set only after successful calls
       view.postprocess_queued = true;
+      view.refined_live_geometry_active = refined_live_geometry_active;
       view.input_region = pending_input_region;
       view.color_space = pending_color_space;
       view.field_width = static_cast<std::uint32_t>(field_w);

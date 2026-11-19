@@ -17,6 +17,9 @@ namespace {
 
   models::depth_step_result_t step_for(const std::uint64_t frame, const std::uint64_t domain, const bool completed) {
     models::depth_step_result_t step;
+    if (!completed) {
+      return step;
+    }
     auto &observation = step.observation;
     observation.raw_width = 1540;
     observation.raw_height = 868;
@@ -58,17 +61,22 @@ namespace {
     EXPECT_FALSE(submission.subtitle_ocr_inference_enqueued);
   }
 
-  TEST(HostSbsObservationHandoffTest, SelectPreservesPopulatedWorkingViewsWithoutFreshCompletion) {
+  TEST(HostSbsObservationHandoffTest, SelectPreservesAdmissionAndStatusWithoutAnObservation) {
     handoff_t handoff;
     auto working = step_for(17u, 7u, false);
+    working.submission.inference_enqueued = true;
+    working.submission.subtitle_ocr_inference_enqueued = true;
     working.status.cuda_graph_active = true;
     handoff.select(working);
 
     const auto &selected = std::as_const(handoff).step();
     EXPECT_FALSE(selected.observation.completed_frame_valid);
-    EXPECT_NE(selected.observation.raw_width, 0);
+    EXPECT_EQ(selected.observation.raw_width, 0);
+    EXPECT_FALSE(selected.observation.raw_model_provenance);
     expect_observation(selected.observation, working.observation);
-    expect_no_submission(selected.submission);
+    EXPECT_TRUE(selected.submission.inference_enqueued);
+    EXPECT_TRUE(selected.submission.subtitle_ocr_inference_enqueued);
+    EXPECT_FALSE(selected.submission.gpu_undecided_transaction_enqueued);
     EXPECT_FALSE(selected.completion.input_domain_reset);
     EXPECT_TRUE(selected.status.cuda_graph_active);
   }
@@ -127,13 +135,16 @@ namespace {
     earlier.status.cuda_graph_active = true;
     earlier.completion.input_domain_reset = true;
     earlier.submission.gpu_undecided_transaction_enqueued = true;
-    handoff.select(earlier);
+    const auto metadata = std::weak_ptr {earlier.observation.raw_model_provenance};
+    handoff.select(std::move(earlier));
+    ASSERT_FALSE(metadata.expired());
     auto current = step_for(18u, 8u, false);
     current.submission.inference_enqueued = true;
 
     // The caller has already revoked its finalized verdict. This composer does not
     // authenticate domains or decide whether GPU resources remain current.
     ASSERT_FALSE(handoff.accept_submission(current, false));
+    EXPECT_TRUE(metadata.expired());
     expect_observation(handoff.step().observation, current.observation);
     EXPECT_FALSE(handoff.step().observation.completed_frame_valid);
     EXPECT_FALSE(handoff.step().status.cuda_graph_active);

@@ -5193,6 +5193,8 @@ namespace sbs_bench {
       std::error_code error;
       if (!fs::create_directory(directory, error) || error) return false;
       const auto &p = result.publication;
+      // Without a completion, the field and ROI default to zero. The source dimensions below
+      // still identify the attempted input for an UNAVAILABLE record.
       nlohmann::json metadata {
         {"schema", 1u}, {"role", "private-real-pfm-completed-numeric-operands"},
         {"production_dump", false}, {"live_capture", false}, {"source_alpha", "PFM loader constructs alpha=1"},

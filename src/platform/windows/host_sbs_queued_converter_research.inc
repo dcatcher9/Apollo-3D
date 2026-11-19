@@ -16,8 +16,7 @@ bool d3d_base_encode_device::queue_research_observation(
   matched_frame_slot_t &source,
   const models::depth_observation_views_t &previous,
   const queued_capture_t &capture,
-  std::uint64_t observation_timestamp_us,
-  bool refined_geometry
+  std::uint64_t observation_timestamp_us
 ) {
   if (probe_observer.record) {
     actual_converter_probe_v1::event_t event;
@@ -31,12 +30,11 @@ bool d3d_base_encode_device::queue_research_observation(
   );
   // Even an unavailable ticket can follow a rewrite of the borrowed estimator fields.
   latest_v2_lineage.reset();
-  if (!ticket || !queued_ticket_matches(*ticket, source, capture.frame_id, observation_timestamp_us, capture.transfer, refined_geometry)) {
+  if (!ticket || !queued_ticket_matches(*ticket, source, capture.frame_id, observation_timestamp_us, capture.transfer)) {
     BOOST_LOG(error) << "Host SBS queued continuation unavailable; current flat identity: "sv << queue_error;
     return false;
   }
 
-  frame.refined_geometry = refined_geometry;
   frame.ticket = std::move(ticket);
   frame.source_slot = &source;
   const auto &draw = *frame.ticket;
@@ -375,13 +373,12 @@ bool d3d_base_encode_device::queued_ticket_matches(
   const matched_frame_slot_t &slot,
   std::uint64_t frame_id,
   std::uint64_t observation_timestamp_us,
-  models::input_color_space input_color_space,
-  bool submitted_refined_geometry
+  models::input_color_space input_color_space
 ) const {
-  // The slot owns its submission raster. Its ticket must own the calibrated realized field.
+  // The slot owns its submission raster; the leased ticket owns its calibrated field mode.
   const auto expected_region = realize_depth_input_region(
     slot.depth_input_region,
-    submitted_refined_geometry,
+    ticket.refined_live_geometry_active,
     static_cast<int>(ticket.field_width),
     static_cast<int>(ticket.field_height)
   );

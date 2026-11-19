@@ -1703,6 +1703,36 @@ TEST(TensorRtContextLifecycleTest, ReleasesWarmupOperandsOnlyAfterProvenQuiescen
 }
 
 #ifdef _WIN32
+namespace {
+  void expect_empty_depth_observation(const models::depth_observation_views_t &observation) {
+    EXPECT_FALSE(observation.completed_frame_valid);
+    EXPECT_EQ(observation.completed_frame_id, 0u);
+    EXPECT_FALSE(observation.raw_model_depth);
+    EXPECT_FALSE(observation.raw_model_depth_snapshot);
+    EXPECT_FALSE(observation.model_input_snapshot);
+    EXPECT_FALSE(observation.depth_frame_state);
+    EXPECT_FALSE(observation.depth_health_state);
+    EXPECT_FALSE(observation.final_parallax());
+    EXPECT_FALSE(observation.shadow_state);
+    EXPECT_FALSE(observation.subtitle_contour_identity);
+    EXPECT_FALSE(observation.subtitle_contour_source);
+    EXPECT_FALSE(observation.subtitle_glyph_matte);
+    EXPECT_FALSE(observation.subtitle_condition_params);
+    EXPECT_FALSE(observation.raw_model_provenance);
+    EXPECT_FALSE(observation.composite_depth_runtime_provenance);
+    EXPECT_FALSE(observation.parallax_v2_shader_provenance);
+    EXPECT_FALSE(observation.gpu_trace_provenance);
+    EXPECT_EQ(observation.raw_width, 0);
+    EXPECT_EQ(observation.raw_height, 0);
+    EXPECT_EQ(observation.field_width, 0);
+    EXPECT_EQ(observation.field_height, 0);
+    EXPECT_FALSE(observation.refined_live_geometry_active);
+    EXPECT_EQ(observation.field_content, models::depth_tensor_content_rect_t {});
+    EXPECT_EQ(observation.input_region, models::depth_input_region_t {});
+    EXPECT_EQ(observation.publication, models::host_sbs_gpu_completion_receipt::expected_t {});
+  }
+}  // namespace
+
 TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndConsumesExactFrameOnce) {
   const auto *enabled = std::getenv("APOLLO_RUN_TENSORRT_TESTS");
   if (!enabled || std::string_view {enabled} != "1") {
@@ -1764,6 +1794,12 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
     models::video_depth_estimator::normalized_depth_diagnostics_e::disabled,
   };
   ASSERT_TRUE(estimator.is_valid());
+  const auto initially_idle = estimator.finish_pending_depth_for_evaluation();
+  expect_empty_depth_observation(initially_idle.observation);
+  EXPECT_FALSE(initially_idle.submission.inference_enqueued);
+  EXPECT_FALSE(initially_idle.submission.gpu_undecided_transaction_enqueued);
+  EXPECT_FALSE(initially_idle.submission.subtitle_ocr_inference_enqueued);
+  EXPECT_FALSE(initially_idle.completion.input_domain_reset);
 
   // The first exact signature performs its private non-authoritative warm/capture bootstrap and
   // then launches the force-infer wrapper. Every result observed by this fixture therefore comes
@@ -1780,6 +1816,7 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
       warm_frame_id
     );
     ASSERT_TRUE(warm.submission.inference_enqueued);
+    expect_empty_depth_observation(warm.observation);
     observed_ocr_child_armed =
       observed_ocr_child_armed || warm.submission.subtitle_ocr_inference_enqueued;
     const auto warmed = estimator.finish_pending_depth_for_evaluation();
@@ -1826,6 +1863,7 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
       }
     );
     ASSERT_TRUE(submitted.submission.inference_enqueued);
+    expect_empty_depth_observation(submitted.observation);
     observed_ocr_child_armed =
       observed_ocr_child_armed || submitted.submission.subtitle_ocr_inference_enqueued;
 
@@ -1841,6 +1879,7 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
     const bool immediate_ready = completed.ready;
     if (!immediate_ready) {
       ASSERT_TRUE(completed.timed_out);
+      expect_empty_depth_observation(completed.result.observation);
       completed = estimator.try_finish_pending_depth_until(
         models::input_color_space::srgb,
         std::chrono::steady_clock::now() + std::chrono::milliseconds {8},
@@ -1858,6 +1897,7 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
     } else {
       ++timeouts;
       ASSERT_TRUE(completed.timed_out);
+      expect_empty_depth_observation(completed.result.observation);
       const auto fallback = estimator.finish_pending_depth_for_evaluation();
       ASSERT_TRUE(fallback.observation.completed_frame_valid);
       ASSERT_EQ(fallback.observation.completed_frame_id, observed_frame_id);
@@ -1868,7 +1908,12 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
       false
     );
     EXPECT_TRUE(consumed_once.ready);
-    EXPECT_FALSE(consumed_once.result.observation.completed_frame_valid);
+    expect_empty_depth_observation(consumed_once.result.observation);
+    EXPECT_EQ(consumed_once.result.status.cuda_graph_active, submitted.status.cuda_graph_active);
+    EXPECT_FALSE(consumed_once.result.submission.inference_enqueued);
+    EXPECT_FALSE(consumed_once.result.submission.gpu_undecided_transaction_enqueued);
+    EXPECT_FALSE(consumed_once.result.submission.subtitle_ocr_inference_enqueued);
+    EXPECT_FALSE(consumed_once.result.completion.input_domain_reset);
     EXPECT_EQ(consumed_once.query_count, 0u);
     (void) estimator.poll_publication_receipts();
   }
@@ -2714,12 +2759,13 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedThir
     const auto warm = submit_n(estimator, true);
     ASSERT_TRUE(warm.submission.inference_enqueued);
     ASSERT_TRUE(warm.submission.subtitle_ocr_inference_enqueued);
+    expect_empty_depth_observation(warm.observation);
     ASSERT_TRUE(estimator.finish_pending_depth_for_evaluation().observation.completed_frame_valid);
     ASSERT_TRUE(wait_until_reusable(estimator));
     const auto pending_n = submit_n(estimator, false);
     ASSERT_TRUE(pending_n.submission.inference_enqueued);
     ASSERT_TRUE(pending_n.submission.subtitle_ocr_inference_enqueued);
-    ASSERT_FALSE(pending_n.observation.completed_frame_valid);
+    expect_empty_depth_observation(pending_n.observation);
     // Query readiness only. The next estimate consumes N and may admit N+1 only when its
     // context does not need to clear any singleton resource belonging to N's publication.
     ASSERT_TRUE(wait_until_reusable(estimator));
@@ -2804,7 +2850,11 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedThir
       // Returning N did not accept any part of the new request. No hidden pending work exists,
       // and the next actual admission must still perform the requested context reset.
       const auto no_pending = estimator.finish_pending_depth_for_evaluation();
-      ASSERT_FALSE(no_pending.observation.completed_frame_valid);
+      expect_empty_depth_observation(no_pending.observation);
+      EXPECT_EQ(no_pending.status.cuda_graph_active, completed_n.status.cuda_graph_active);
+      EXPECT_FALSE(no_pending.submission.inference_enqueued);
+      EXPECT_FALSE(no_pending.submission.subtitle_ocr_inference_enqueued);
+      EXPECT_FALSE(no_pending.completion.input_domain_reset);
       ASSERT_TRUE(estimator.publication_is_current(completed_n.observation.publication));
       const auto admitted_follower = estimator.estimate_depth(
         follower.view.Get(), models::input_color_space::srgb, frame_n + 1u, false, {},
@@ -2812,7 +2862,7 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedThir
         {.observation_timestamp_us = clock_n + 33333u},
         test_case.subtitle_context_generation
       );
-      ASSERT_FALSE(admitted_follower.observation.completed_frame_valid);
+      expect_empty_depth_observation(admitted_follower.observation);
       ASSERT_TRUE(admitted_follower.submission.inference_enqueued);
       ASSERT_FALSE(admitted_follower.submission.gpu_undecided_transaction_enqueued);
       EXPECT_EQ(admitted_follower.submission.subtitle_ocr_inference_enqueued, test_case.optional_work == models::depth_optional_work_mode_e::ordinary);
@@ -6726,6 +6776,9 @@ TEST(DirectxShaderSourceTest, HostSbsLatestV2LineageIsNotCurrentRenderAuthorizat
   expect_reset_between(queued_research, "queued continuation may rewrite singleton fields",
                        "depth_estimator->queue_pending_same_source_gpu_continuation_for_evaluation(",
                        "queued_ticket_matches(");
+  EXPECT_NE(queued_research.find("ticket.refined_live_geometry_active,"), std::string::npos);
+  EXPECT_NE(display.find(".refined = ticket->refined_live_geometry_active,"), std::string::npos);
+  EXPECT_EQ(queued_research.find("submitted_refined_geometry"), std::string::npos);
   const auto queue_attempt = selection.find("queued_attempt_failed_flat = !queue_research_observation(");
   ASSERT_NE(queue_attempt, std::string::npos);
   const auto clear_after_queue = selection.find("clear_matched_selection();", queue_attempt);

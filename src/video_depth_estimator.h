@@ -1005,8 +1005,8 @@ namespace models {
   };
 
   /** One estimator call may complete observation N and submit N+1 independently.
-   * Observation views retain their existing populated-default semantics even when no new
-   * completion is returned. Completion events must not replay with retained observations.
+   * GPU views and completion events are returned only for an observation completed by the call.
+   * Submission and call status can be reported independently of that completion.
    */
   struct depth_step_result_t {
     depth_observation_views_t observation;
@@ -1029,6 +1029,7 @@ namespace models {
     std::uint32_t expected_work = 0u, postprocess_request_flags = 0u;
     bool both_unmap_calls_succeeded = false; // HOST enqueue boundary, NOT GPU readiness
     bool postprocess_queued = false;
+    bool refined_live_geometry_active = false;
     depth_input_region_t input_region {};
     input_color_space color_space = input_color_space::srgb;
     std::uint32_t field_width = 0u, field_height = 0u;
@@ -1605,8 +1606,8 @@ namespace models {
      *        submit the changed context again after consuming the returned frame.
      * @param subtitle_line_policy Horizontal position rule for this submission's OCR line
      *        classifier. It may change only together with the subtitle context generation.
-     * @return Separate observation views, submission outcome, completion events and call status.
-     *         Views are owned by the estimator and may be overwritten by later calls.
+     * @return Submission outcome and call status, plus views and events for any completed observation.
+     *         The estimator owns the backed resources, and later calls may overwrite their contents.
      */
     depth_step_result_t estimate_depth(
       ID3D11ShaderResourceView *input_srv,

@@ -2236,7 +2236,6 @@ namespace platf::dxgi {
                   matched_candidate_slot->temporal_source,
                   matched_candidate_slot->subtitle_line_policy
                 );
-                const bool submitted_refined_geometry = submitted.observation.refined_live_geometry_active;
                 if (completion_finalized_before_admission &&
                     !depth_estimator->publication_is_current(step_observation.publication)) {
                   // Admission can reset subtitle state without changing the depth domain.
@@ -2377,7 +2376,7 @@ namespace platf::dxgi {
                         *queued_frame, *matched_candidate_slot, step_observation,
                         {live_source_desc, input_color_space, current_source_timestamp, current_content_timestamp,
                          current_ddup_damage, img.cursor, img_ctx->encoder_input_res.get(), frame_id},
-                        observation_timestamp_us, submitted_refined_geometry
+                        observation_timestamp_us
                       );
                       clear_matched_selection();
                       completion_finalized_before_admission = false;
@@ -2729,7 +2728,7 @@ namespace platf::dxgi {
             v2_renderer_selected && v2_result_authenticated && sbs_reprojection_v2_live_ps &&
             est.shadow_base_final_parallax && est.shadow_state;
           const auto geometry = select_sbs_draw_geometry(
-            queued_draw, queued_frame, matched_render_slot, v2_live_warp_selected ? &est : nullptr
+            queued_draw, matched_render_slot, v2_live_warp_selected ? &est : nullptr
           );
           const auto *queued_geometry = geometry.queued;
           const bool queued_geometry_selected = queued_geometry != nullptr;
@@ -4724,7 +4723,6 @@ namespace platf::dxgi {
     struct queued_converter_frame_t {
       std::optional<queued_ticket_t> ticket;
       matched_frame_slot_t *source_slot = nullptr;
-      bool refined_geometry = false;
       std::optional<queued_ticket_t> pending_colour_geometry;
       matched_frame_slot_t *pending_colour_source_slot = nullptr;
     };
@@ -4794,7 +4792,6 @@ namespace platf::dxgi {
 
     [[nodiscard]] sbs_draw_geometry_t select_sbs_draw_geometry(
       const queued_draw_t &queued_draw,
-      const queued_converter_frame_t *queued_frame,
       matched_frame_slot_t *matched_slot,
       const models::depth_observation_views_t *completed
     ) noexcept {
@@ -4816,7 +4813,7 @@ namespace platf::dxgi {
           .frame_id = ticket->submitted_frame_id,
           .field_width = static_cast<int>(ticket->field_width),
           .field_height = static_cast<int>(ticket->field_height),
-          .refined = queued_frame->refined_geometry,
+          .refined = ticket->refined_live_geometry_active,
         };
       }
       if (completed) {
@@ -4852,8 +4849,7 @@ namespace platf::dxgi {
       matched_frame_slot_t &source,
       const models::depth_observation_views_t &previous,
       const queued_capture_t &capture,
-      std::uint64_t observation_timestamp_us,
-      bool refined_geometry
+      std::uint64_t observation_timestamp_us
     );
     queued_draw_t select_queued_research_draw(
       queued_converter_frame_t &frame,
@@ -4905,8 +4901,7 @@ namespace platf::dxgi {
       const matched_frame_slot_t &slot,
       std::uint64_t frame_id,
       std::uint64_t observation_timestamp_us,
-      models::input_color_space input_color_space,
-      bool submitted_refined_geometry
+      models::input_color_space input_color_space
     ) const;
 
     void emit_converter_probe(actual_converter_probe_v1::event_t event, const matched_frame_slot_t *slot, const models::depth_observation_views_t *result, const models::queued_same_source_gpu_continuation_research_views_t *ticket, ID3D11ShaderResourceView *selected, ID3D11ShaderResourceView *current, std::uint64_t conversion, const sbs_draw_colour_t *colour = nullptr) noexcept {
