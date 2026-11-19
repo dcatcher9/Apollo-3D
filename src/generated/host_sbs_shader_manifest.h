@@ -133,7 +133,7 @@ namespace models::host_sbs_shader_cache {
     host_sbs_subtitle_gaussian_horizontal_limit,
   };
   inline constexpr std::string_view parallax_v2_producer_source_closure_sha256 =
-    "90e6b8aae617f1c78af05fb2421bc603355aa2fb7e418d517b4b0f6b30246759";
+    "9511d645d89430fe88284b708bfbd12f45a2679f270ae1d83afca4dfd969fcfa";
 
   inline constexpr std::array parallax_v2_replay_resolve_specs {
     depth_coordinate_v2_quantiles,

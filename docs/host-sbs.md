@@ -74,7 +74,7 @@ as one tuple; the draw-owned pin resources are not a new temporal observation.
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
 schema 135/tag `0xC932B35D`, canonical SHA-256
-`afe616a15f24e0bef954e867bb2aa9d29a870c54ef37df1d6ccca90fb91a865f`. It binds the
+`408afb0d2615f36d82a920b09015f557ba1c56ec5a44cd39ec96e4653ca94a96`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -85,7 +85,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 2 | `8e2de9ed76bd64a38a0c956e75dd7a13c8883d39d0ef0050ffe5aba9f7208672` |
-| `parallax_v2_producer` | 30 | `90e6b8aae617f1c78af05fb2421bc603355aa2fb7e418d517b4b0f6b30246759` |
+| `parallax_v2_producer` | 30 | `9511d645d89430fe88284b708bfbd12f45a2679f270ae1d83afca4dfd969fcfa` |
 | `parallax_v2_replay_resolve` | 2 | `9a73e8a92ba55e3d99f3e37868918329c0e0d478bd7281319670dd4f2fe55347` |
 | `parallax_v2_coordinate_diagnostic` | 1 | `b895dea87363c1859c16d97c3d79121a2996d5f03ee8c8b56e20e756609e4e59` |
 | `near_identical_detector` | 3 | `c894bfb39134f169638662441024cc234a74faf4eac096a65cefe6487cb35ee5` |
@@ -1936,16 +1936,18 @@ The production limiters use signed Q30 arithmetic. Each group owns eight adjacen
 (vertical) or rows (horizontal), and each line is split into eight chunks. Neighboring threads
 therefore read and write neighboring texels. Upper inputs round outward, lower inputs round
 downward, and the slope step uses integer division, so chunk composition is associative and
-cannot create a float-only discontinuity at a chunk boundary. A first pass stores each chunk's
-local forward envelope in the output and forms both chunk ends. A second, backward pass completes
-each texel with the incoming carries. The forward envelope is stored as float; Q30-to-float
-conversion is monotonic, so taking max/min after conversion gives the same bits. Every Q30 input
-lies within the container and the decay saturates at twice that limit, so a saturated carry
-never wins. The result is bit-identical to the serial Q30 recurrence; the schema 78 A/B produced
-byte-identical depth and field artifacts on all 19 core clips. With no full-line arrays in group
-memory, occupancy is not limited by group memory: the two limiter passes went from 0.125-0.136 ms
-to 0.076-0.080 ms (p50, five clips, idle RTX 5080). Lines of 32 cells or fewer retain the serial
-float recurrence. Schema 52 permits the
+cannot create a float-only discontinuity at a chunk boundary. The forward sweep forms both chunk
+ends. The vertical limiter stores its local forward envelope as float and reads it back during
+the backward sweep. The horizontal limiter stores exact Q30 checkpoints for 16-cell blocks in
+group-shared memory. In reverse block order, each lane reconstructs the block's forward values
+in its own scratch space and continues the backward recurrence across blocks. It combines the
+local values and incoming carries in Q30 and writes the completed texel once. Q30-to-float
+conversion is monotonic, so the order of conversion and max/min preserves the same bits. Every
+Q30 input lies within the container and the decay saturates at twice that limit, so a saturated
+carry never wins. The result is bit-identical to the serial Q30 recurrence. When the chunked
+limiters were introduced, the schema 78 A/B produced byte-identical depth and field artifacts
+on all 19 core clips. The two passes went from 0.125-0.136 ms to 0.076-0.080 ms (p50, five clips,
+idle RTX 5080). Lines of 32 cells or fewer retain the serial float recurrence. Schema 52 permits the
 limiter field to differ by up to `2e-7` from the former bitwise serial recurrence while the
 container, majorant/minorant ordering, and spatial bounds remain fail-closed requirements.
 

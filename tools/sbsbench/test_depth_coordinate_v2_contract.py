@@ -201,7 +201,8 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             # Shared source reads require the complete clipped pixel footprint.
             # Compact live limiters preserve exact Base on horizontally padded observations.
             # The compact Map writes only the admitted candidate columns on the same live route.
-            135: "afe616a15f24e0bef954e867bb2aa9d29a870c54ef37df1d6ccca90fb91a865f",
+            # The horizontal limiter writes each texel once using exact Q30 checkpoints.
+            135: "408afb0d2615f36d82a920b09015f557ba1c56ec5a44cd39ec96e4653ca94a96",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -216,7 +217,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "90e6b8aae617f1c78af05fb2421bc603355aa2fb7e418d517b4b0f6b30246759",
+            "9511d645d89430fe88284b708bfbd12f45a2679f270ae1d83afca4dfd969fcfa",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
