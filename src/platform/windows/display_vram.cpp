@@ -11474,8 +11474,7 @@ namespace platf::dxgi {
           // The eye's first present: its identity and when it was handed to DXGI.
           std::uint32_t present_id = 0;
           std::int64_t present_begin_qpc = 0, present_end_qpc = 0;
-          UINT prior_count = 0;
-          HRESULT prior_count_result = S_FALSE, result = S_FALSE, count_result = S_FALSE;
+          HRESULT result = S_FALSE, count_result = S_FALSE;
         };
         const auto draw_eye = [&](bool left_eye) {
           if (shutter_test_pattern) {
@@ -11498,7 +11497,6 @@ namespace platf::dxgi {
         const auto submit_eye = [&](bool left_eye, unsigned presents) {
           submission_t submission;
           draw_eye(left_eye);
-          submission.prior_count_result = swapchain->GetLastPresentCount(&submission.prior_count);
           DXGI_PRESENT_PARAMETERS parameters {};
           submission.present_begin_qpc = qpc_now();
           submission.result = swapchain->Present1(1, DXGI_PRESENT_RESTRICT_TO_OUTPUT, &parameters);
@@ -11519,7 +11517,7 @@ namespace platf::dxgi {
                 submission.result = FAILED(repeated) ? repeated : E_FAIL;
               }
             }
-            if (submission.result == S_OK && SUCCEEDED(submission.count_result)) {
+            if (presents > 1 && submission.result == S_OK && SUCCEEDED(submission.count_result)) {
               UINT last_present = 0;
               const auto last_result = swapchain->GetLastPresentCount(&last_present);
               if (FAILED(last_result) || last_present != static_cast<UINT>(submission.present_id + static_cast<UINT>(presents) - 1u)) {
@@ -11626,7 +11624,6 @@ namespace platf::dxgi {
           }
           const bool acquiring = !feedback_tracker.armed();
           const bool left_eye = eye_clock.left_eye();
-          submission_t submission;
           // The current packet stays keyed-locked through both eyes, including all repeated
           // refreshes. Publishing another capture can never change the second eye of this pair.
           if (!pair || (has_displayed && eye_clock.starts_pair())) {
@@ -11721,9 +11718,7 @@ namespace platf::dxgi {
             eye_presents -= repaid;
             owed_refreshes -= repaid;
           }
-          submission = submit_eye(left_eye, eye_presents);
-          const auto before_present_count = submission.prior_count;
-          const auto before_count_result = submission.prior_count_result;
+          const auto submission = submit_eye(left_eye, eye_presents);
           const auto present_start_qpc = submission.present_begin_qpc;
           const auto present_end_qpc = submission.present_end_qpc;
           const auto presented = submission.result;
@@ -11765,14 +11760,16 @@ namespace platf::dxgi {
             log_local_shutter_window_snapshot(window, read_target_rect(), target_output_desc.Monitor);
             const auto first = first_feedback.value_or(detail::shutter_feedback_t {});
             const auto &last = confirmation.feedback;
+            UINT latest_submitted = 0;
+            const auto latest_count_result = swapchain->GetLastPresentCount(&latest_submitted);
             constexpr std::array status_names {"displayed", "cancelled", "timeout", "unsupported", "flush_failed", "wait_failed"};
             BOOST_LOG(error) << "Local shutter scanout feedback: result="sv
                              << status_names[static_cast<std::size_t>(confirmation.status)]
-                             << " requested="sv << requested_present << " prior_submitted="sv << before_present_count
+                             << " requested="sv << requested_present << " latest_submitted="sv << latest_submitted
                              << " first_eye="sv << !has_displayed << " left="sv << left_eye << " repeats="sv << eye_repeats
                              << " Present1="sv << util::log_hex(presented)
                              << " count_hr="sv << util::log_hex(present_count_result)
-                             << " prior_count_hr="sv << util::log_hex(before_count_result)
+                             << " latest_count_hr="sv << util::log_hex(latest_count_result)
                              << " queries="sv << confirmation.queries << " flushes="sv << confirmation.flushes << " waits="sv << confirmation.waits
                              << " first_hr="sv << util::log_hex(first.result_code)
                              << " first_present="sv << first.present_count << " first_refresh="sv << first.refresh_count
