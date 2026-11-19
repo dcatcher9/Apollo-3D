@@ -2718,9 +2718,18 @@ namespace platf::dxgi {
           if (output_conversion_required && !select_native_output()) {
             return -1;
           }
-          const auto *queued_geometry = queued_draw.ticket;
+          const bool v2_renderer_selected = host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2;
+          const bool v2_renderer_failed_flat = host_sbs_renderer == models::host_sbs_renderer_e::failed_flat;
+          const bool v2_result_authenticated = matched_render_slot && handoff.authenticate_structure();
+          const bool v2_live_warp_selected =
+            v2_renderer_selected && v2_result_authenticated && sbs_reprojection_v2_live_ps &&
+            est.shadow_base_final_parallax && est.shadow_state;
+          const auto geometry = select_sbs_draw_geometry(
+            queued_draw, queued_frame, matched_render_slot, v2_live_warp_selected ? &est : nullptr
+          );
+          const auto *queued_geometry = geometry.queued;
           const bool queued_geometry_selected = queued_geometry != nullptr;
-          auto *draw_source_slot = queued_geometry_selected ? queued_draw.source : matched_render_slot;
+          auto *draw_source_slot = geometry.source_slot;
           const auto current_colour = [&]() -> sbs_draw_colour_t {
             return {
               img_ctx->encoder_input_res.get(), input_color_space, current_source_timestamp,
@@ -2747,18 +2756,6 @@ namespace platf::dxgi {
              !matched_render_slot && matched_presentation_cache.has_fresh_pixels() &&
              !output_source_unchanged &&
              repeat_hold_age > models::host_sbs_v2_max_matched_repeat_age);
-          const bool v2_renderer_selected =
-            host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2;
-          const bool v2_renderer_failed_flat =
-            host_sbs_renderer == models::host_sbs_renderer_e::failed_flat;
-          const bool v2_live_resources_complete =
-            est.shadow_base_final_parallax && est.shadow_state;
-          const bool v2_result_authenticated = handoff.authenticate_structure();
-          const bool v2_live_warp_selected =
-            v2_renderer_selected && matched_render_slot &&
-            v2_result_authenticated &&
-            sbs_reprojection_v2_live_ps && v2_live_resources_complete;
-          const bool v2_draw_selected = v2_live_warp_selected || queued_geometry_selected;
           using presentation_clock_t = detail::host_sbs_packed_presentation_clock_t;
           using presentation_output_e = presentation_clock_t::output_e;
           auto presentation_output = repeat_matched_output ? presentation_output_e::packed :
@@ -2790,10 +2787,6 @@ namespace platf::dxgi {
                 break;
             }
           }
-          ID3D11ShaderResourceView *selected_parallax_field =
-            queued_geometry_selected  ? queued_geometry->base.Get() :
-            v2_live_warp_selected ? est.shadow_base_final_parallax.Get() :
-                                    nullptr;
           // The same fullscreen pass performs either authenticated reprojection or current-frame
           // flat identity. Time both; a packed repeat performs neither draw.
           const bool timing_has_sbs_composite = !repeat_matched_output;
@@ -2803,7 +2796,6 @@ namespace platf::dxgi {
           bool final_sbs_is_linear = sbs_intermediate_is_linear;
           bool final_sbs_has_p010_y = false;
           bool rendered_directly_to_rgb = false;
-          ID3D11ShaderResourceView *dump_warp_depth = nullptr;
           std::array<ID3D11ShaderResourceView *, 7u> dump_warp_inputs {};
           ID3D11Buffer *dump_subtitle_constants = nullptr;
           bool dump_subtitle_render_enabled = false;
@@ -2815,7 +2807,7 @@ namespace platf::dxgi {
           if (diagnostics_enabled) {
             if (repeat_matched_output) {
               ++matched_stats_output_packed_repeat;
-            } else if (v2_draw_selected) {
+            } else if (geometry.region) {
               ++matched_stats_output_warped_new;
             } else {
               ++matched_stats_output_flat;
@@ -2849,8 +2841,6 @@ namespace platf::dxgi {
             // Output transfer follows the color frame actually rendered. Matched inference may
             // complete later than the current capture; repeated output retains the transfer of
             // the packed texture already stored in the intermediate.
-            const auto *draw_region = queued_geometry_selected ? &queued_geometry->input_region : &est.input_region;
-            const auto *draw_content = queued_geometry_selected ? &queued_geometry->field_content : &est.field_content;
             const bool render_input_is_linear = models::input_color_space_is_linear(draw_colour.color_space);
 
             if (rgb && rgb->destination != rgb_destination_e::backbuffer &&
@@ -2879,88 +2869,61 @@ namespace platf::dxgi {
               return -1;
             }
 
-            ID3D11ShaderResourceView *warp_depth = selected_parallax_field;
-            dump_warp_depth = warp_depth;
             if (!update_sbs_constant_buffer(
                   sbs_content_scale_x,
                   sbs_content_scale_y,
-                  v2_draw_selected ? draw_region : nullptr,
-                  v2_draw_selected ? draw_content : nullptr
+                  geometry.region,
+                  geometry.field_content
                 )) {
               return -1;
             }
-            ID3D11Buffer *sbs_constants = sbs_reprojection_cbuffer.get();
             models::host_sbs_subtitle_render_constants_t subtitle_constants;
-            if (v2_draw_selected) {
-              const bool complete_ui = queued_geometry_selected ?
-                                         queued_geometry->display_band && queued_geometry->condition_params && queued_geometry->contour_identity :
-                                         !est.subtitle_work_suppressed && est.subtitle_contour_source &&
-                                           est.subtitle_condition_params && est.subtitle_contour_identity;
+            if (geometry.region) {
+              const auto &region = *geometry.region;
               subtitle_constants.enabled = draw_source_slot->subtitle_context_eligible &&
                                                subtitle_context.matches(draw_source_slot->subtitle_context_generation) &&
-                                               !current_interactive_move_size && complete_ui ?
+                                               !current_interactive_move_size && geometry.has_subtitle_inputs() ?
                                              1u :
                                              0u;
               subtitle_constants.color_mode = static_cast<std::uint32_t>(draw_colour.color_space);
-              subtitle_constants.analysis_generation_low = static_cast<std::uint32_t>(draw_region->analysis_generation);
-              subtitle_constants.analysis_generation_high = static_cast<std::uint32_t>(draw_region->analysis_generation >> 32u);
-              subtitle_constants.source_left = draw_region->left;
-              subtitle_constants.source_top = draw_region->top;
-              subtitle_constants.source_width = draw_region->width();
-              subtitle_constants.source_height = draw_region->height();
+              subtitle_constants.analysis_generation_low = static_cast<std::uint32_t>(region.analysis_generation);
+              subtitle_constants.analysis_generation_high = static_cast<std::uint32_t>(region.analysis_generation >> 32u);
+              subtitle_constants.source_left = region.left;
+              subtitle_constants.source_top = region.top;
+              subtitle_constants.source_width = region.width();
+              subtitle_constants.source_height = region.height();
             }
             if (!update_sbs_subtitle_constant_buffer(subtitle_constants)) {
               return -1;
             }
-            dump_subtitle_constants = sbs_subtitle_render_cbuffer.get();
-            dump_subtitle_render_enabled = subtitle_constants.enabled == 1u;
-            dump_warp_inputs = {
-              draw_colour.srv,
-              warp_depth,
-              queued_geometry_selected ? queued_geometry->state.Get() : v2_live_warp_selected ? est.shadow_state.Get() :
-                                                                                        nullptr,
-              nullptr, // Only a selected shared draw binds a native render mask below.
-              queued_geometry_selected ? queued_geometry->display_band.Get() : v2_live_warp_selected ? est.subtitle_contour_source.Get() :
-                                                                                               nullptr,
-              queued_geometry_selected ? queued_geometry->condition_params.Get() : v2_live_warp_selected ? est.subtitle_condition_params.Get() :
-                                                                                                   nullptr,
-              queued_geometry_selected ? queued_geometry->contour_identity.Get() : v2_live_warp_selected ? est.subtitle_contour_identity.Get() :
-                                                                                                   nullptr,
-            };
 
-            // Current-outline selected rendering uses only the authenticated
-            // shared warp. Pending current-colour research is not this route.
-            ID3D11ShaderResourceView *selected_receipt=nullptr;
-            bool selected_unpredicated=true;
-            if(selected_matte_ready){Microsoft::WRL::ComPtr<ID3D11Predicate> p;BOOL value=FALSE;device_ctx->GetPredication(&p,&value);selected_unpredicated=!p;}
+            const bool subtitle_pin_candidate = selected_matte_ready && geometry.selected_matte &&
+              geometry.selected_receipt && !pending_current_colour_selected &&
+              selected_shared_warp_programs.ready(queued_geometry_selected);
+            const bool text_pin_candidate = text_game_ai_active && selected_shared_warp_programs.text_game_ready() &&
+              v2_live_warp_selected && !queued_geometry_selected && draw_colour.srv;
+            Microsoft::WRL::ComPtr<ID3D11Predicate> predicate;
+            if (subtitle_pin_candidate || text_pin_candidate) {
+              BOOL value = FALSE;
+              device_ctx->GetPredication(&predicate, &value);
+            }
             // A text game's own text takes the place of the picture-based protection whenever its
             // helper reports text for this frame; without any, that protection stays as it was.
             std::array<UINT, 4u> text_pin_shape {};
             bool text_pin_selected = false;
-            if (text_game_ai_active && selected_shared_warp_programs.text_game_ready() && v2_live_warp_selected &&
-                !queued_geometry_selected && draw_colour.srv) {
-              Microsoft::WRL::ComPtr<ID3D11Predicate> predicate;
-              BOOL predicate_value = FALSE;
-              device_ctx->GetPredication(&predicate, &predicate_value);
+            if (text_pin_candidate && !predicate) {
               Microsoft::WRL::ComPtr<ID3D11Resource> colour_resource;
               Microsoft::WRL::ComPtr<ID3D11Texture2D> colour_texture;
               draw_colour.srv->GetResource(&colour_resource);
-              if (!predicate && SUCCEEDED(colour_resource.As(&colour_texture))) {
+              if (SUCCEEDED(colour_resource.As(&colour_texture))) {
                 D3D11_TEXTURE2D_DESC colour_desc {};
                 colour_texture->GetDesc(&colour_desc);
                 text_pin_selected = prepare_text_game_pin(colour_desc, text_pin_shape);
               }
             }
-            const bool selected_supported=selected_matte_ready&&!text_pin_selected&&
-              selected_shared_warp_programs.ready(queued_geometry_selected)&&
-              v2_draw_selected&&!pending_current_colour_selected&&
-              selected_unpredicated;
-            if(selected_supported){
-              auto *m=queued_geometry_selected?queued_geometry->research_selected_matte.Get():est.research_selected_matte.Get();
-              auto *r=queued_geometry_selected?queued_geometry->research_selected_matte_receipt.Get():est.research_selected_matte_receipt.Get();
-              if(m&&r){dump_warp_inputs[3]=m;selected_receipt=r;}
-            }
-            bool selected_draw=selected_receipt!=nullptr;
+            auto *selected_receipt = subtitle_pin_candidate && !text_pin_selected && !predicate ?
+                                       geometry.selected_receipt : nullptr;
+            bool selected_draw = selected_receipt != nullptr;
             // Only an authenticated V2 stream selects the production warp. Awaiting, stale, and
             // terminal failure states use the independent current-frame identity shader, so V2
             // shader authentication/device-creation failures cannot freeze or end the stream.
@@ -2987,10 +2950,6 @@ namespace platf::dxgi {
               device_ctx->PSSetConstantBuffers(0, 1, &matrix);
             }
             auto *queued_guard = queued_geometry_selected ? prepare_queued_draw_guard(*queued_geometry) : nullptr;
-            auto *ordinary_pixel_shader = p010_y_mrt_selected ? sbs_reprojection_v2_p010_y_ps.get() :
-                                          queued_geometry_selected ? queued_draw.pixel_shader :
-                                          v2_live_warp_selected ? sbs_reprojection_v2_live_ps.get() :
-                                                                  sbs_flat_identity_ps.get();
             host_sbs_v2_draw_command_t draw_command {
               .render_targets = {
                 rendered_directly_to_rgb ? rgb->target : sbs_intermediate_rtv.get(),
@@ -2998,15 +2957,18 @@ namespace platf::dxgi {
               },
               .render_target_count = p010_y_mrt_selected ? 2u : 1u,
               .vertex_shader = sbs_reprojection_vs.get(),
-              .pixel_shader = ordinary_pixel_shader,
+              .pixel_shader = p010_y_mrt_selected ? sbs_reprojection_v2_p010_y_ps.get() : geometry.pixel_shader,
               .viewport = sbs_viewport,
               .sampler = sampler_linear.get(),
-              .shader_resources = dump_warp_inputs,
-              .geometry_constants = sbs_constants,
-              .subtitle_constants = dump_subtitle_constants,
+              .shader_resources = {
+                draw_colour.srv, geometry.base, geometry.state, selected_draw ? geometry.selected_matte : nullptr,
+                geometry.display_band, geometry.condition_params, geometry.contour_identity,
+              },
+              .geometry_constants = sbs_reprojection_cbuffer.get(),
+              .subtitle_constants = sbs_subtitle_render_cbuffer.get(),
               .queued_guard_override = queued_geometry_selected,
               .queued_guard_constants = queued_guard,
-              .queued_guard_transaction = queued_geometry_selected ? queued_geometry->transaction_raw.Get() : nullptr,
+              .queued_guard_transaction = geometry.queued_transaction,
             };
             // One fresh pin field uses the current actual draw source. The immutable draw
             // keeps the selected receipt/current RGB checks and performs no RGB reconstruction.
@@ -3029,13 +2991,13 @@ namespace platf::dxgi {
               request.queued_guard_transaction = draw_command.queued_guard_transaction;
               return request;
             };
-            if (selected_draw && subtitle_constants.enabled == 1u && selected_shared_warp_programs.ready(queued_geometry_selected)) {
+            if (selected_draw && subtitle_constants.enabled == 1u) {
               Microsoft::WRL::ComPtr<ID3D11Resource> matte_resource;
               Microsoft::WRL::ComPtr<ID3D11Texture2D> matte_texture;
-              dump_warp_inputs[3]->GetResource(&matte_resource);
+              draw_command.shader_resources[3]->GetResource(&matte_resource);
               Microsoft::WRL::ComPtr<ID3D11Resource> colour_resource;
               Microsoft::WRL::ComPtr<ID3D11Texture2D> colour_texture;
-              dump_warp_inputs[0]->GetResource(&colour_resource);
+              draw_command.shader_resources[0]->GetResource(&colour_resource);
               D3D11_TEXTURE2D_DESC matte_desc {};
               D3D11_TEXTURE2D_DESC colour_desc {};
               std::string shared_error;
@@ -3064,16 +3026,15 @@ namespace platf::dxgi {
               // preparation. This draw uses ordinary authenticated Base geometry
               // and current RGB, with no native render mask or subtitle permission.
               // Finalize before receipt scopes, recorder binding and evidence.
-              dump_warp_inputs[3u] = nullptr;
               draw_command.shader_resources[3u] = nullptr;
-              draw_command.pixel_shader = ordinary_pixel_shader;
               selected_receipt = nullptr;
               selected_draw = false;
-              subtitle_constants.enabled = 0u;
-              if (!update_sbs_subtitle_constant_buffer(subtitle_constants)) return -1;
-              dump_subtitle_constants = sbs_subtitle_render_cbuffer.get();
-              draw_command.subtitle_constants = dump_subtitle_constants;
-              dump_subtitle_render_enabled = false;
+              if (subtitle_constants.enabled != 0u) {
+                subtitle_constants.enabled = 0u;
+                if (!update_sbs_subtitle_constant_buffer(subtitle_constants)) {
+                  return -1;
+                }
+              }
             }
             shared_warp::views_t text_pin_views;
             if (text_pin_selected) {
@@ -3276,6 +3237,11 @@ namespace platf::dxgi {
               v2_live_warp_seen = true;
             }
             final_sbs_has_p010_y = draw_recorded && p010_y_mrt_selected;
+            if (snapshot_debug_inputs) {
+              dump_warp_inputs = draw_command.shader_resources;
+              dump_subtitle_constants = draw_command.subtitle_constants;
+              dump_subtitle_render_enabled = subtitle_constants.enabled != 0u;
+            }
 
             packed_output_in_shutter_pair = rendered_directly_to_rgb;
             if (rendered_directly_to_rgb) {
@@ -3308,16 +3274,16 @@ namespace platf::dxgi {
               // Only packed PIXELS enter this continuity cache. Planned publication remains
               // unavailable to latest_v2_lineage / known_depth / estimator publication checks.
               matched_presentation_cache.publish(
-                queued_geometry_selected ? queued_geometry->submitted_frame_id : est.completed_frame_id,
+                geometry.frame_id,
                 draw_colour.pixel_source_frame_id,
                 draw_colour.captured_at,
                 draw_colour.source_timestamp,
                 converted_content_timestamp,
-                *draw_region,
+                *geometry.region,
                 draw_colour.color_space,
-                queued_geometry_selected ? queued_frame->refined_geometry : est.refined_live_geometry_active,
-                queued_geometry_selected ? queued_geometry->field_width : est.field_width,
-                queued_geometry_selected ? queued_geometry->field_height : est.field_height,
+                geometry.refined,
+                geometry.field_width,
+                geometry.field_height,
                 draw_source_slot->subtitle_context_generation,
                 subtitle_constants.enabled != 0u,
                 {draw_source_slot->observed_root_authority_generation,
@@ -3431,14 +3397,14 @@ namespace platf::dxgi {
                  "package exists."sv;
             sbs_dumper.reject_pending_request();
           }
-          if (!repeat_matched_output) {
+          if (snapshot_debug_inputs && !repeat_matched_output) {
             const bool complete_dump_snapshot =
-              matched_render_slot && dump_warp_depth && est.model_input_snapshot &&
+              matched_render_slot && dump_warp_inputs[1] && est.model_input_snapshot &&
               est.raw_model_depth_snapshot && est.raw_model_provenance &&
               est.final_parallax() &&
               (est.subtitle_conditioning_diagnostics_current || est.subtitle_work_suppressed) &&
               v2_renderer_selected &&
-              handoff.authenticate_structure();
+              v2_result_authenticated;
             ID3D11ShaderResourceView *dump_depth_input_source =
               matched_render_slot ? matched_render_slot->analysis_input_srv() : nullptr;
             if (complete_dump_snapshot && est.input_region.is_video_region() && matched_render_slot->texture) {
@@ -3513,7 +3479,7 @@ namespace platf::dxgi {
                 dump_frame.depth_input_source = dump_depth_input_source;
                 dump_frame.model_input = est.model_input_snapshot.Get();
                 dump_frame.raw_depth = est.raw_model_depth_snapshot.Get();
-                dump_frame.warp_depth = dump_warp_depth;
+                dump_frame.warp_depth = dump_warp_inputs[1];
                 dump_frame.adaptive_state = est.depth_health_state.Get();
                 dump_frame.depth_frame_state = est.depth_frame_state.Get();
                 dump_frame.warp_map =
@@ -3617,7 +3583,7 @@ namespace platf::dxgi {
             const bool video_roi_output =
               repeat_matched_output ?
                 matched_presentation_cache.is_video_region() :
-                matched_render_slot && selected_parallax_field &&
+                matched_render_slot && geometry.base &&
                   est.input_region.is_video_region();
             if (video_roi_output) {
               ++matched_stats_video_roi_route_outputs;
@@ -3727,7 +3693,7 @@ namespace platf::dxgi {
               reset_matched_stats(now);
             }
             if (sbs_telemetry_performance) {
-              sbs_telemetry_performance->record_output(repeat_matched_output, v2_draw_selected && !queued_attempt_failed_flat, now);
+              sbs_telemetry_performance->record_output(repeat_matched_output, geometry.region && !queued_attempt_failed_flat, now);
             }
           }
 
@@ -4794,6 +4760,82 @@ namespace platf::dxgi {
       bool same_source = false;
       bool force_flat = false;
     };
+
+    // Resolved once per conversion. Geometry and its attribution borrow from the same owner;
+    // the source slot can still describe matched color on a flat draw.
+    struct sbs_draw_geometry_t {
+      matched_frame_slot_t *source_slot = nullptr;
+      ID3D11PixelShader *pixel_shader = nullptr;
+      const queued_ticket_t *queued = nullptr;
+      ID3D11ShaderResourceView *queued_transaction = nullptr;
+      const models::depth_input_region_t *region = nullptr;
+      const models::depth_tensor_content_rect_t *field_content = nullptr;
+      ID3D11ShaderResourceView *base = nullptr;
+      ID3D11ShaderResourceView *state = nullptr;
+      ID3D11ShaderResourceView *display_band = nullptr;
+      ID3D11ShaderResourceView *condition_params = nullptr;
+      ID3D11ShaderResourceView *contour_identity = nullptr;
+      ID3D11ShaderResourceView *selected_matte = nullptr;
+      ID3D11ShaderResourceView *selected_receipt = nullptr;
+      std::uint64_t frame_id = 0u;
+      int field_width = 0, field_height = 0;
+      bool refined = false;
+      bool subtitle_suppressed = false;
+
+      [[nodiscard]] bool has_subtitle_inputs() const noexcept {
+        return !subtitle_suppressed && display_band && condition_params && contour_identity;
+      }
+    };
+
+    [[nodiscard]] sbs_draw_geometry_t select_sbs_draw_geometry(
+      const queued_draw_t &queued_draw,
+      const queued_converter_frame_t *queued_frame,
+      matched_frame_slot_t *matched_slot,
+      const models::depth_observation_views_t *completed
+    ) noexcept {
+      if (const auto *ticket = queued_draw.ticket) {
+        return {
+          .source_slot = queued_draw.source,
+          .pixel_shader = queued_draw.pixel_shader,
+          .queued = ticket,
+          .queued_transaction = ticket->transaction_raw.Get(),
+          .region = &ticket->input_region,
+          .field_content = &ticket->field_content,
+          .base = ticket->base.Get(),
+          .state = ticket->state.Get(),
+          .display_band = ticket->display_band.Get(),
+          .condition_params = ticket->condition_params.Get(),
+          .contour_identity = ticket->contour_identity.Get(),
+          .selected_matte = ticket->research_selected_matte.Get(),
+          .selected_receipt = ticket->research_selected_matte_receipt.Get(),
+          .frame_id = ticket->submitted_frame_id,
+          .field_width = static_cast<int>(ticket->field_width),
+          .field_height = static_cast<int>(ticket->field_height),
+          .refined = queued_frame->refined_geometry,
+        };
+      }
+      if (completed) {
+        return {
+          .source_slot = matched_slot,
+          .pixel_shader = sbs_reprojection_v2_live_ps.get(),
+          .region = &completed->input_region,
+          .field_content = &completed->field_content,
+          .base = completed->shadow_base_final_parallax.Get(),
+          .state = completed->shadow_state.Get(),
+          .display_band = completed->subtitle_contour_source.Get(),
+          .condition_params = completed->subtitle_condition_params.Get(),
+          .contour_identity = completed->subtitle_contour_identity.Get(),
+          .selected_matte = completed->research_selected_matte.Get(),
+          .selected_receipt = completed->research_selected_matte_receipt.Get(),
+          .frame_id = completed->completed_frame_id,
+          .field_width = completed->field_width,
+          .field_height = completed->field_height,
+          .refined = completed->refined_live_geometry_active,
+          .subtitle_suppressed = completed->subtitle_work_suppressed,
+        };
+      }
+      return {.source_slot = matched_slot, .pixel_shader = sbs_flat_identity_ps.get()};
+    }
 
     [[gnu::noinline]] int convert_with_queued_research(
       platf::img_t &img,

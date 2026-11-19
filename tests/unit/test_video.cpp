@@ -6801,35 +6801,23 @@ TEST(DirectxShaderSourceTest, Convex2xRoiRendererUsesTheAuthenticatedFieldConten
   ASSERT_NE(convert_begin, std::string::npos);
   ASSERT_NE(convert_end, std::string::npos);
   const auto convert = display.substr(convert_begin, convert_end - convert_begin);
-  const auto selected_domain = convert.find(
-    "const bool v2_draw_selected = v2_live_warp_selected || queued_geometry_selected;"
-  );
-  const auto draw_begin = convert.find("const auto *draw_region =", selected_domain);
-  const auto draw_end = convert.find("dump_subtitle_constants =", draw_begin);
-  ASSERT_NE(selected_domain, std::string::npos);
-  ASSERT_NE(draw_begin, std::string::npos);
-  ASSERT_NE(draw_end, std::string::npos);
-  EXPECT_LT(selected_domain, draw_begin);
-  const auto draw = convert.substr(draw_begin, draw_end - draw_begin);
   // Completed and queued fields have separate owners. Their realized source rectangle and
   // field content must follow the same selected owner into the renderer constants.
-  const auto region = draw.find(
-    "const auto *draw_region = queued_geometry_selected ? &queued_geometry->input_region : &est.input_region;"
-  );
-  const auto content = draw.find(
-    "const auto *draw_content = queued_geometry_selected ? &queued_geometry->field_content : &est.field_content;"
-  );
-  const auto bind = draw.find("if (!update_sbs_constant_buffer(");
-  ASSERT_NE(region, std::string::npos);
-  ASSERT_NE(content, std::string::npos);
+  const auto plan = display.find("sbs_draw_geometry_t select_sbs_draw_geometry(");
+  const auto plan_end = display.find("[[gnu::noinline]] int convert_with_queued_research(", plan);
+  ASSERT_NE(plan, std::string::npos);
+  ASSERT_NE(plan_end, std::string::npos);
+  const auto selection = display.substr(plan, plan_end - plan);
+  EXPECT_NE(selection.find(".region = &ticket->input_region,\n          .field_content = &ticket->field_content,"), std::string::npos);
+  EXPECT_NE(selection.find(".region = &completed->input_region,\n          .field_content = &completed->field_content,"), std::string::npos);
+  const auto selected_domain = convert.find("const auto geometry = select_sbs_draw_geometry(");
+  ASSERT_NE(selected_domain, std::string::npos);
+  const auto bind = convert.find("if (!update_sbs_constant_buffer(", selected_domain);
   ASSERT_NE(bind, std::string::npos);
-  EXPECT_LT(region, bind);
-  EXPECT_LT(content, bind);
-  const auto bind_end = draw.find("ID3D11Buffer *sbs_constants =", bind);
+  const auto bind_end = convert.find("models::host_sbs_subtitle_render_constants_t subtitle_constants", bind);
   ASSERT_NE(bind_end, std::string::npos);
-  const auto binding = draw.substr(bind, bind_end - bind);
-  EXPECT_NE(binding.find("v2_draw_selected ? draw_region : nullptr,\n"
-                         "                  v2_draw_selected ? draw_content : nullptr"),
+  const auto binding = convert.substr(bind, bind_end - bind);
+  EXPECT_NE(binding.find("geometry.region,\n                  geometry.field_content"),
             std::string::npos);
   const auto update_begin = display.find("    bool update_sbs_constant_buffer(");
   const auto update_end = display.find(
@@ -7354,7 +7342,9 @@ TEST(DirectxShaderSourceTest, HostSbsRejectsRotationAndUsesMatchedV2Frames) {
   );
   EXPECT_NE(display.find("find_pending_matched_slot(est.completed_frame_id)"), std::string::npos);
   EXPECT_NE(display.find("handoff.authenticate_structure()"), std::string::npos);
-  EXPECT_NE(display.find("v2_live_resources_complete"), std::string::npos);
+  const auto live_selection = display.find("const bool v2_live_warp_selected =");
+  ASSERT_NE(live_selection, std::string::npos);
+  EXPECT_NE(display.find("est.shadow_base_final_parallax && est.shadow_state;", live_selection), std::string::npos);
   EXPECT_EQ(
     live_shader.find("Texture2D<float> CandidateParallax"),
     std::string::npos
