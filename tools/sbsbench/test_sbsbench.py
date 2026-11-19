@@ -1729,7 +1729,7 @@ class EvalContractTests(unittest.TestCase):
                   encoding="utf-8") as fh:
             mapper = fh.read()
         self.assertIn("OutputTexture[DTid.xy] = PreviousDepth[sample_position]", mapper)
-        self.assertIn("DepthAnalysisClampCell(DTid.xy)", mapper)
+        self.assertIn("TensorAnalysisClampCell(DTid.xy, use_domain, domain_rectangle)", mapper)
         self.assertIn("scale.w < 0.5f", mapper)
         self.assertIn("scale.w > 1.5f ? 1.0f : ema_alpha", mapper)
         self.assertFalse(os.path.exists(os.path.join(shader_dir, "depth_ema_motion_cs.hlsl")))

@@ -69,11 +69,11 @@ namespace {
       return SUCCEEDED(device->CreateBuffer(&desc, &initial, &out));
     }
 
-    bool compile(const char *name, ComPtr<ID3D11ComputeShader> &out) {
+    bool compile(const char *name, ComPtr<ID3D11ComputeShader> &out, const char *entrypoint = "main") {
       ComPtr<ID3DBlob> code, errors;
       const auto path = std::filesystem::path(SUNSHINE_SHADERS_DIR) / name;
       const auto status = D3DCompileFromFile(path.c_str(), nullptr,
-        D3D_COMPILE_STANDARD_FILE_INCLUDE, "main", "cs_5_0",
+        D3D_COMPILE_STANDARD_FILE_INCLUDE, entrypoint, "cs_5_0",
         D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3, 0u, &code, &errors);
       if (FAILED(status)) {
         ADD_FAILURE() << name << ": " << (errors ?
@@ -212,7 +212,7 @@ namespace {
         .moments_shader = moments_shader.Get(),
         .frame_resolve_shader = frame_shader.Get(),
         .raw_depth = raw.srv.Get(),
-        .tensor_exclusion = exclusion_srv.Get(),
+        .analysis_domain = exclusion_srv.Get(),
         .partials_output = partials.uav.Get(),
         .partials = partials.srv.Get(),
         .frame_stats_output = stats.uav.Get(),
@@ -291,15 +291,24 @@ namespace {
     std::vector<float> map_and_limit(float value, bool horizontal = false) {
       std::array<float, width> values;
       values.fill(value);
+      return map_field(values, map_shader.Get(), exclusion_srv.Get(), horizontal);
+    }
+
+    std::vector<float> map_field(
+      const std::array<float, width> &values,
+      ID3D11ComputeShader *shader,
+      ID3D11ShaderResourceView *analysis_domain,
+      bool horizontal = false
+    ) {
       context->UpdateSubresource(raw.buffer.Get(), 0u, nullptr, values.data(), 0u, 0u);
       ID3D11Buffer *cbs[] {depth_constants.Get(), constants.Get(), owner_constants.Get()};
       context->CSSetConstantBuffers(0u, 3u, cbs);
-      ID3D11ShaderResourceView *srvs[] {raw.srv.Get(), state.srv.Get(), exclusion_srv.Get(),
+      ID3D11ShaderResourceView *srvs[] {raw.srv.Get(), state.srv.Get(), analysis_domain,
         minmax.srv.Get(), nullptr, health.srv.Get()};
       context->CSSetShaderResources(0u, 6u, srvs);
       ID3D11UnorderedAccessView *uavs[] {candidate_uav.Get(), nullptr, owner.uav.Get()};
       context->CSSetUnorderedAccessViews(0u, 3u, uavs, nullptr);
-      context->CSSetShader(map_shader.Get(), nullptr, 0u);
+      context->CSSetShader(shader, nullptr, 0u);
       context->Dispatch((width + 15u) / 16u, 1u, 1u);
       unbind();
       ID3D11Texture2D *source = candidate.Get();
@@ -329,6 +338,60 @@ namespace {
       return result;
     }
   };
+}
+
+TEST_F(HostSbsAdaptiveCameraGpuTest, CompactDomainClampsPaddedMapAndCoordinateExactly) {
+  namespace gpu = models::host_sbs_v2_gpu;
+  seed(-2.0f, 4.0f);
+  constexpr UINT left = 5u, right = width - 9u;
+  std::array<std::uint32_t, 16u> depth {};
+  depth[0] = width;
+  depth[1] = 1u;
+  depth[9] = left;
+  depth[11] = right;
+  depth[12] = 1u;
+  context->UpdateSubresource(depth_constants.Get(), 0u, nullptr, depth.data(), 0u, 0u);
+  std::array<std::uint32_t, width> mask {};
+  std::array<float, width> values {};
+  for (UINT x = 0u; x < width; ++x) {
+    mask[x] = x < left || x >= right ? 1u : 0u;
+    values[x] = mask[x] ? 123.0f : static_cast<float>(x) / 8.0f - 2.0f;
+  }
+  values[left + 1u] = -0.0f;
+  values[left + 2u] = std::numeric_limits<float>::infinity();
+  values[left + 3u] = std::numeric_limits<float>::quiet_NaN();
+  context->UpdateSubresource(exclusion.Get(), 0u, nullptr, mask.data(), sizeof(mask), 0u);
+
+  gain_buffer_t compact;
+  gpu::analysis_domain_record_t domain {
+    .valid = 1u, .width = width, .height = 1u, .left = left, .right = right, .bottom = 1u,
+  };
+  ASSERT_TRUE(buffer(&domain, sizeof(domain), sizeof(domain), D3D11_BIND_SHADER_RESOURCE, compact));
+  ComPtr<ID3D11ComputeShader> compact_map, coordinate, compact_coordinate;
+  ASSERT_TRUE(compile("depth_coordinate_v2_map_cs.hlsl", compact_map, "domain_main"));
+  ASSERT_TRUE(compile("depth_coordinate_v2_map_cs.hlsl", coordinate, "coordinate_main"));
+  ASSERT_TRUE(compile("depth_coordinate_v2_map_cs.hlsl", compact_coordinate, "domain_coordinate_main"));
+  for (const auto &[control_shader, compact_shader] : {
+         std::pair {map_shader.Get(), compact_map.Get()}, std::pair {coordinate.Get(), compact_coordinate.Get()}}) {
+    const auto expected = map_field(values, control_shader, exclusion_srv.Get());
+    const auto actual = map_field(values, compact_shader, compact.srv.Get());
+    ASSERT_EQ(expected.size(), width);
+    ASSERT_EQ(actual.size(), width);
+    EXPECT_EQ(std::memcmp(expected.data(), actual.data(), sizeof(values)), 0);
+    EXPECT_NE(actual.front(), actual.back());
+    EXPECT_EQ(actual.front(), actual[left]);
+    EXPECT_EQ(actual.back(), actual[right - 1u]);
+  }
+
+  ++domain.left; // Still a valid rectangle, but it belongs to different depth constants.
+  context->UpdateSubresource(compact.buffer.Get(), 0u, nullptr, &domain, 0u, 0u);
+  for (auto *shader : {compact_map.Get(), compact_coordinate.Get()}) {
+    const auto rejected = map_field(values, shader, compact.srv.Get());
+    ASSERT_EQ(rejected.size(), width);
+    EXPECT_TRUE(std::all_of(rejected.begin(), rejected.end(), [](float x) {
+      return std::bit_cast<std::uint32_t>(x) == 0u;
+    }));
+  }
 }
 
 TEST_F(HostSbsAdaptiveCameraGpuTest, CapsCurrentNearPixelsWhileLogGainAndZeroAdapt) {

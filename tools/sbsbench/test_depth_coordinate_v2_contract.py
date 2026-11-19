@@ -196,7 +196,8 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             # Dense glyph growth only runs in tiles with native support in their dependency halo.
             # CPU-completed suppressed observations skip the comparison tensor copy.
             # Live frame publication resolves the quantiles, normalization and camera in one entry.
-            135: "964a6b7edea90dc5aa346f19c96dbf12fa8a6e2fb1038e186ba3ca9ef5662774",
+            # The depth producer and replay share a compact analysis domain instead of a mask.
+            135: "b83ded4e3d5e399fe2758f4238af84431db332719a68a4acc65a28a5d3abf98e",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -204,14 +205,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 contract or shader identity changed without a reviewed identity pin",
         )
-        self.assertEqual(generator.contract_tag(contract), 0x43F4A0F4)
+        self.assertEqual(generator.contract_tag(contract), 0x444FB45D)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "43f4a0f4b16f09cd54ec0bdabf1ebbbabb842bae75c2dfe097e4d700be625b5a",
+            "444fb45da980bca7de927a4c3982aab3e2723092f5be80c4d6f1baa29ab7c480",
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "84c80a04ee9e71b2c2c49124d81f7855676a4412d70b942105c758a65b969d96",
+            "d87554ce9e4cc2120b752133e79d9bd1162d3d44b168d89e5cbfdd0f7b7e6423",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -340,13 +341,13 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertEqual(
             calibration.preprocess.source_file,
             "rgb_to_nchw_near_identical_cs.hlsl")
-        self.assertEqual(calibration.preprocess.source_entrypoint, "fused_main")
+        self.assertEqual(calibration.preprocess.source_entrypoint, "fused_domain_main")
         self.assertEqual(calibration.preprocess.source_target, "cs_5_0")
         self.assertEqual(calibration.preprocess.source_compile_flags, 0x00008800)
         self.assertEqual(calibration.preprocess.source_macro_count, 0)
         self.assertEqual(
             calibration.preprocess.source_closure_sha256,
-            "720fe4a316f1f66fd31c8a1833cbf0d93e25f34da494b6c80b94b6cea096689e")
+            "ccd6b647610036cbb5afe4f982335bb047e4eec61cfad00268b6645da932a754")
         self.assertEqual(
             calibration.preprocess.source_closure_sha256,
             generator.shader_source_closure_sha256())

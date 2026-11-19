@@ -5,6 +5,11 @@ RWTexture2D<uint> OutputTensorExclusion : register(u1);
 #include "include/depth_constants.hlsl"
 #include "include/depth_color.hlsl"
 #include "include/depth_source_region.hlsl"
+#include "include/depth_analysis_domain.hlsl"
+
+// Entry-local alternative to the authored arbitrary-mask output at the same slot.
+// A compact entry never reads or writes OutputTensorExclusion.
+RWStructuredBuffer<TensorAnalysisDomain> OutputTensorAnalysisDomain : register(u1);
 
 // Integrate the source texel cells covered by one target texel. The capture texture exposes only
 // mip 0, so one bilinear SampleLevel tap aliases whenever the source is appreciably larger than
@@ -130,9 +135,9 @@ float3 SampleLetterboxedModelFootprint(uint2 target_pixel, uint2 source_size, bo
 }
 
 // Compute shader to area-resize RGB interleaved image to NCHW Float32 with ImageNet normalization.
-void WriteModelInput(uint3 DTid, bool use_tile, int2 tile_origin) {
+bool WriteModelInput(uint3 DTid, bool use_tile, int2 tile_origin, bool compact_domain) {
     if (DTid.x >= target_w || DTid.y >= target_h)
-        return;
+        return false;
 
     // Calculate normalized UV coordinates based on target dimensions (center of the pixel)
     float2 uv = float2((DTid.x + 0.5f) / (float)target_w, (DTid.y + 0.5f) / (float)target_h);
@@ -142,16 +147,25 @@ void WriteModelInput(uint3 DTid, bool use_tile, int2 tile_origin) {
     InputTexture.GetDimensions(texture_w, texture_h);
     uint2 texture_size = uint2(texture_w, texture_h);
     bool source_region_valid = DepthSourceRegionValid(texture_size);
+    bool content_valid = DepthAnalysisContentValid();
+    if (compact_domain && all(DTid == 0u)) {
+        uint records, record_stride;
+        OutputTensorAnalysisDomain.GetDimensions(records, record_stride);
+        if (records == 1u && record_stride == 32u) {
+            OutputTensorAnalysisDomain[0u] = MakeTensorAnalysisDomain(
+                uint2(target_w, target_h), DepthAnalysisContentCells(),
+                source_region_valid && content_valid);
+        }
+    }
     if (!source_region_valid) {
         uint invalid_stride = target_w * target_h;
         OutputBuffer[base_idx] = 0.0f;
         OutputBuffer[base_idx + invalid_stride] = 0.0f;
         OutputBuffer[base_idx + 2u * invalid_stride] = 0.0f;
-        OutputTensorExclusion[DTid.xy] = 1u;
-        return;
+        if (!compact_domain) OutputTensorExclusion[DTid.xy] = 1u;
+        return false;
     }
     uint2 source_size = DepthSourceRegionSize();
-    bool content_valid = DepthAnalysisContentValid();
     bool content_cell = content_valid && DepthAnalysisCellIsContent(DTid.xy);
     bool full_content = content_valid && analysis_content_left == 0u &&
         analysis_content_top == 0u && analysis_content_right == target_w &&
@@ -162,7 +176,7 @@ void WriteModelInput(uint3 DTid, bool use_tile, int2 tile_origin) {
                          SampleLetterboxedModelFootprint(
                              DepthAnalysisClampCell(DTid.xy), source_size, use_tile, tile_origin))) :
         float3(0.0f, 0.0f, 0.0f);
-    OutputTensorExclusion[DTid.xy] = content_cell ? 0u : 1u;
+    if (!compact_domain) OutputTensorExclusion[DTid.xy] = content_cell ? 0u : 1u;
 
     // ImageNet Normalization
     float r = (pixel.r - 0.485f) / 0.229f;
@@ -176,9 +190,10 @@ void WriteModelInput(uint3 DTid, bool use_tile, int2 tile_origin) {
     OutputBuffer[base_idx] = r;
     OutputBuffer[base_idx + channel_stride] = g;
     OutputBuffer[base_idx + 2 * channel_stride] = b;
+    return content_cell;
 }
 
 [numthreads(16, 16, 1)]
 void main(uint3 DTid : SV_DispatchThreadID) {
-    WriteModelInput(DTid, false, int2(0, 0));
+    WriteModelInput(DTid, false, int2(0, 0), false);
 }

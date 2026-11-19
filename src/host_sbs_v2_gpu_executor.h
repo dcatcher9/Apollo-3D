@@ -50,6 +50,19 @@ namespace models::host_sbs_v2_gpu {
     [[nodiscard]] bool valid() const noexcept;
   };
 
+  // One structured element, in the same order as TensorAnalysisDomain in HLSL.
+  struct analysis_domain_record_t {
+    std::uint32_t valid = 0u;
+    std::uint32_t width = 0u;
+    std::uint32_t height = 0u;
+    std::uint32_t reserved = 0u;
+    std::uint32_t left = 0u;
+    std::uint32_t top = 0u;
+    std::uint32_t right = 0u;
+    std::uint32_t bottom = 0u;
+  };
+  static_assert(sizeof(analysis_domain_record_t) == 32u);
+
   struct frame_publication_outputs_t {
     ID3D11UnorderedAccessView *minmax_ema = nullptr;
     ID3D11UnorderedAccessView *depth_health = nullptr;
@@ -61,8 +74,8 @@ namespace models::host_sbs_v2_gpu {
     ID3D11ComputeShader *moments_shader = nullptr;
     ID3D11ComputeShader *frame_resolve_shader = nullptr;
     ID3D11ShaderResourceView *raw_depth = nullptr;
-    /** Always explicit: live exclusion or replay's zero-cleared exclusion texture. */
-    ID3D11ShaderResourceView *tensor_exclusion = nullptr;
+    /** The analysis domain expected by the selected scan shaders. */
+    ID3D11ShaderResourceView *analysis_domain = nullptr;
     ID3D11UnorderedAccessView *partials_output = nullptr;
     ID3D11ShaderResourceView *partials = nullptr;
     ID3D11UnorderedAccessView *frame_stats_output = nullptr;
@@ -97,7 +110,7 @@ namespace models::host_sbs_v2_gpu {
     ID3D11ComputeShader *shader = nullptr;
     ID3D11ShaderResourceView *raw_depth = nullptr;
     ID3D11ShaderResourceView *state = nullptr;
-    ID3D11ShaderResourceView *tensor_exclusion = nullptr;
+    ID3D11ShaderResourceView *analysis_domain = nullptr;
     ID3D11ShaderResourceView *minmax_ema = nullptr;
     ID3D11ShaderResourceView *current_model_input = nullptr;
     ID3D11ShaderResourceView *depth_health_state = nullptr;

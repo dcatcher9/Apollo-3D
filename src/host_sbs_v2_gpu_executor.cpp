@@ -110,7 +110,7 @@ namespace models::host_sbs_v2_gpu {
         !command.frame_resolve_dispatch.valid()) {
       return false;
     }
-    if (!command.raw_depth || !command.tensor_exclusion ||
+    if (!command.raw_depth || !command.analysis_domain ||
         !command.partials_output || !command.partials ||
         !command.frame_stats_output || !command.minmax_raw_output) {
       return false;
@@ -131,7 +131,7 @@ namespace models::host_sbs_v2_gpu {
     context->CSSetShader(command.moments_shader, nullptr, 0u);
     ID3D11ShaderResourceView *moments_inputs[2] = {
       command.raw_depth,
-      command.tensor_exclusion,
+      command.analysis_domain,
     };
     context->CSSetShaderResources(0u, 2u, moments_inputs);
     context->CSSetUnorderedAccessViews(0u, 1u, &command.partials_output, nullptr);
@@ -154,7 +154,7 @@ namespace models::host_sbs_v2_gpu {
     {
       context->CSSetShader(command.histogram_shader, nullptr, 0u);
       ID3D11ShaderResourceView *histogram_inputs[3] = {
-        command.raw_depth, command.tensor_exclusion, command.frame_stats,
+        command.raw_depth, command.analysis_domain, command.frame_stats,
       };
       context->CSSetShaderResources(0u, 3u, histogram_inputs);
       ID3D11UnorderedAccessView *histogram_outputs[2] = {
@@ -221,7 +221,7 @@ namespace models::host_sbs_v2_gpu {
     if (!context || !command.constants.valid() || !command.near_identical_constants || !command.shader || !command.dispatch.valid()) {
       return false;
     }
-    if (!command.raw_depth || !command.state || !command.tensor_exclusion ||
+    if (!command.raw_depth || !command.state || !command.analysis_domain ||
         !command.minmax_ema || !command.current_model_input || !command.depth_health_state) {
       return false;
     }
@@ -235,7 +235,7 @@ namespace models::host_sbs_v2_gpu {
     ID3D11ShaderResourceView *inputs[6] = {
       command.raw_depth,
       command.state,
-      command.tensor_exclusion,
+      command.analysis_domain,
       command.minmax_ema,
       command.current_model_input,
       command.depth_health_state,

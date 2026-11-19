@@ -412,27 +412,27 @@
     "source_specs": [
       {
         "source_file": "rgb_to_nchw_near_identical_cs.hlsl",
-        "source_entrypoint": "fused_main",
+        "source_entrypoint": "fused_domain_main",
         "source_target": "cs_5_0"
       },
       {
         "source_file": "rgb_to_nchw_near_identical_cs.hlsl",
-        "source_entrypoint": "fused_tiled_main",
+        "source_entrypoint": "fused_tiled_domain_main",
         "source_target": "cs_5_0"
       },
       {
         "source_file": "buffer_to_tex_cs.hlsl",
-        "source_entrypoint": "main",
+        "source_entrypoint": "domain_main",
         "source_target": "cs_5_0"
       },
       {
         "source_file": "buffer_to_tex_cs.hlsl",
-        "source_entrypoint": "pad_main",
+        "source_entrypoint": "domain_pad_main",
         "source_target": "cs_5_0"
       },
       {
         "source_file": "depth_coordinate_v2_moments_cs.hlsl",
-        "source_entrypoint": "main",
+        "source_entrypoint": "domain_main",
         "source_target": "cs_5_0"
       },
       {
@@ -442,7 +442,7 @@
       },
       {
         "source_file": "depth_coordinate_v2_histogram_cs.hlsl",
-        "source_entrypoint": "main",
+        "source_entrypoint": "domain_main",
         "source_target": "cs_5_0"
       },
       {
@@ -452,7 +452,7 @@
       },
       {
         "source_file": "depth_coordinate_v2_map_cs.hlsl",
-        "source_entrypoint": "main",
+        "source_entrypoint": "domain_main",
         "source_target": "cs_5_0"
       },
       {
@@ -546,7 +546,7 @@
         "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "84c80a04ee9e71b2c2c49124d81f7855676a4412d70b942105c758a65b969d96"
+    "source_closure_sha256": "d87554ce9e4cc2120b752133e79d9bd1162d3d44b168d89e5cbfdd0f7b7e6423"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,
@@ -675,11 +675,11 @@
         "profile": "apollo-dav2-centered-integer-contain-edge-pad-area-hdr-srgb-imagenet-v2",
         "source_closure_schema": 2,
         "source_file": "rgb_to_nchw_near_identical_cs.hlsl",
-        "source_entrypoint": "fused_main",
+        "source_entrypoint": "fused_domain_main",
         "source_target": "cs_5_0",
         "source_compile_flags": 34816,
         "source_macro_count": 0,
-        "source_closure_sha256": "720fe4a316f1f66fd31c8a1833cbf0d93e25f34da494b6c80b94b6cea096689e",
+        "source_closure_sha256": "ccd6b647610036cbb5afe4f982335bb047e4eec61cfad00268b6645da932a754",
         "model_input_schema": 1,
         "dtype": "float32-le",
         "layout": "NCHW",

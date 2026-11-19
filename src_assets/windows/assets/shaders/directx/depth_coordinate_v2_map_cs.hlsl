@@ -16,6 +16,9 @@ RWStructuredBuffer<float> PreviousModelInput : register(u1);
 RWStructuredBuffer<uint> NearIdenticalHistoryOwnerOutput : register(u2);
 
 #include "include/depth_constants.hlsl"
+#include "include/depth_analysis_domain.hlsl"
+StructuredBuffer<TensorAnalysisDomain> TensorAnalysisDomainRead : register(t2);
+#include "include/depth_analysis_domain_consumer.hlsl"
 #include "include/depth_coordinate_v2.hlsl"
 #include "include/sbs_adaptive_state_contract.generated.hlsl"
 #include "include/depth_valid_history_contract.hlsl"
@@ -98,9 +101,11 @@ bool CanonicalCoordinate(uint index, out float coordinate) {
     return true;
 }
 
-[numthreads(16, 16, 1)]
-void main(uint3 id : SV_DispatchThreadID) {
-    bool history_advances = DepthHistoryAdvances();
+void MapDepth(uint3 id, bool use_domain) {
+    uint4 domain_rectangle = 0u;
+    bool domain_valid = true;
+    if (use_domain) domain_valid = LoadTensorAnalysisDomain(domain_rectangle);
+    bool history_advances = DepthHistoryAdvances() && (!use_domain || domain_valid);
 
     // Eligible comparison inputs retain the edge-replicated padding supplied by preprocessing.
     // The map-specific request flag leaves the authenticated depth owner independent of the copy.
@@ -123,8 +128,12 @@ void main(uint3 id : SV_DispatchThreadID) {
     // Synthetic letterbox cells are a nearest-boundary extension of the real analysis domain.
     // Sanitizing before ownership and both limiters prevents arbitrary model padding output from
     // entering a valid row/column envelope.
-    uint2 sample_position = TensorExclusion[id.xy] != 0u ?
-        DepthAnalysisClampCell(id.xy) : id.xy;
+    if (use_domain && !domain_valid) {
+        Output[id.xy] = 0.0f;
+        return;
+    }
+    uint2 sample_position = !TensorAnalysisCellAdmitted(id.xy, use_domain, domain_valid, domain_rectangle) ?
+        TensorAnalysisClampCell(id.xy, use_domain, domain_rectangle) : id.xy;
     uint index = sample_position.y * target_w + sample_position.x;
     float coordinate;
     if (!CanonicalCoordinate(index, coordinate)) {
@@ -141,14 +150,32 @@ void main(uint3 id : SV_DispatchThreadID) {
     Output[id.xy] = candidate;
 }
 
-[numthreads(16, 16, 1)]
-void coordinate_main(uint3 id : SV_DispatchThreadID) {
+void MapCoordinate(uint3 id, bool use_domain) {
+    uint4 domain_rectangle = 0u;
+    bool domain_valid = true;
+    if (use_domain) domain_valid = LoadTensorAnalysisDomain(domain_rectangle);
     if (id.x >= target_w || id.y >= target_h) {
         return;
     }
     float coordinate;
-    uint2 sample_position = TensorExclusion[id.xy] != 0u ?
-        DepthAnalysisClampCell(id.xy) : id.xy;
+    if (use_domain && !domain_valid) {
+        Output[id.xy] = 0.0f;
+        return;
+    }
+    uint2 sample_position = !TensorAnalysisCellAdmitted(id.xy, use_domain, domain_valid, domain_rectangle) ?
+        TensorAnalysisClampCell(id.xy, use_domain, domain_rectangle) : id.xy;
     CanonicalCoordinate(sample_position.y * target_w + sample_position.x, coordinate);
     Output[id.xy] = coordinate;
 }
+
+[numthreads(16, 16, 1)]
+void main(uint3 id : SV_DispatchThreadID) { MapDepth(id, false); }
+
+[numthreads(16, 16, 1)]
+void domain_main(uint3 id : SV_DispatchThreadID) { MapDepth(id, true); }
+
+[numthreads(16, 16, 1)]
+void coordinate_main(uint3 id : SV_DispatchThreadID) { MapCoordinate(id, false); }
+
+[numthreads(16, 16, 1)]
+void domain_coordinate_main(uint3 id : SV_DispatchThreadID) { MapCoordinate(id, true); }

@@ -139,6 +139,10 @@ TEST(HostSbsNearIdenticalPolicyTest, SoleFusedPreprocessIsMandatoryAndNoComparat
   EXPECT_NE(estimator.find("const bool use_source_tile = near_identical_tiled_preprocess_cs &&"), std::string::npos);
   EXPECT_NE(estimator.find("near_identical_tiled_preprocess_cs.Get() : near_identical_fused_preprocess_cs.Get()"), std::string::npos);
   EXPECT_NE(fused.find("void fused_tiled_main("), std::string::npos);
+  EXPECT_NE(fused.find("void fused_domain_main("), std::string::npos);
+  EXPECT_NE(fused.find("void fused_tiled_domain_main("), std::string::npos);
+  EXPECT_EQ(shader_cache::host_sbs_near_identical_fused_preprocess.entrypoint, "fused_domain_main");
+  EXPECT_EQ(shader_cache::host_sbs_near_identical_tiled_preprocess.entrypoint, "fused_tiled_domain_main");
   EXPECT_NE(
     estimator.find(
       "gpu_undecided_host_candidate ?\n          fused_preprocess_compare_cbuffer.Get() :\n"
@@ -1107,6 +1111,8 @@ namespace {
           !compile_specialized_oracle(error) ||
           !compile(fused_preprocess_path, "fused_main", fused_preprocess_shader_, error) ||
           !compile(fused_preprocess_path, "fused_tiled_main", tiled_preprocess_shader_, error) ||
+          !compile(fused_preprocess_path, "fused_domain_main", domain_preprocess_shader_, error) ||
+          !compile(fused_preprocess_path, "fused_tiled_domain_main", tiled_domain_preprocess_shader_, error) ||
           !compile(fused_map_path, "main", fused_map_shader_, error) ||
           !compile(fused_map_path, "coordinate_main", coordinate_shader_, error) ||
           !compile(shader_path, "resolve_main", resolve_shader_, error) ||
@@ -1206,6 +1212,7 @@ namespace {
     struct preprocess_result_t {
       std::vector<float> tensor;
       std::vector<std::uint32_t> exclusion;
+      std::array<std::uint32_t, 8u> domain {};
       tile_records_t tiles {};
     };
 
@@ -1324,10 +1331,13 @@ namespace {
       preprocess_result_t &result,
       std::string &error,
       const bool evidence_enabled = true,
-      const bool tiled = false
+      const bool tiled = false,
+      const bool compact_domain = false,
+      const bool zero_dispatch = false,
+      const bool invalid_content_reserved = false
     ) {
       if (source.size() != static_cast<std::size_t>(source_width) * source_height ||
-          previous.size() != 3u * field_texels) {
+          previous.size() != 3u * field_texels || (compact_domain && !fused)) {
         error = "invalid preprocess parity input size";
         return false;
       }
@@ -1394,7 +1404,23 @@ namespace {
         return false;
       }
 
-      update_depth_constants(tensor_content);
+      ComPtr<ID3D11Buffer> domain_buffer;
+      ComPtr<ID3D11ShaderResourceView> domain_srv;
+      ComPtr<ID3D11UnorderedAccessView> domain_uav;
+      if (compact_domain) {
+        if (!create_structured_output(1u, 8u * sizeof(UINT), domain_buffer, domain_srv, domain_uav)) {
+          error = "could not create compact preprocessing domain";
+          return false;
+        }
+        std::array<UINT, 8u> stale_domain;
+        stale_domain.fill(0xa5a5a5a5u);
+        context_->UpdateSubresource(domain_buffer.Get(), 0u, nullptr, stale_domain.data(), 0u, 0u);
+      }
+      if (zero_dispatch) {
+        const UINT zeros[4] {};
+        context_->ClearUnorderedAccessViewUint(tensor_uav.Get(), zeros);
+      }
+      update_depth_constants(tensor_content, field_width, field_height, invalid_content_reserved ? 1u : 0u);
       context_->UpdateSubresource(
         source_region_constants_.Get(), 0u, nullptr, source_region.data(), 0u, 0u
       );
@@ -1410,10 +1436,10 @@ namespace {
         input_srv.Get(), fused ? previous_srv.Get() : nullptr,
       };
       ID3D11UnorderedAccessView *preprocess_outputs[3] = {
-        tensor_uav.Get(), exclusion_uav.Get(),
+        tensor_uav.Get(), compact_domain ? domain_uav.Get() : exclusion_uav.Get(),
         fused ? tile_uav_.Get() : nullptr,
       };
-      if (fused && !evidence_enabled) {
+      if (fused && (!evidence_enabled || zero_dispatch)) {
         tile_records_t stale_tiles {};
         for (auto &tile : stale_tiles) {
           tile = {0xA5A5A5A5u, 0x5A5A5A5Au, 0xDEADBEEFu, 0xFFFFFFFFu};
@@ -1442,17 +1468,31 @@ namespace {
         context_->Dispatch(tile_group_width, tile_group_height, 1u);
       } else {
         auto *producer = fused ?
-                           (tiled ? tiled_preprocess_shader_.Get() : fused_preprocess_shader_.Get()) :
+                           (compact_domain ? (tiled ? tiled_domain_preprocess_shader_.Get() : domain_preprocess_shader_.Get()) :
+                            (tiled ? tiled_preprocess_shader_.Get() : fused_preprocess_shader_.Get())) :
                            preprocess_shader_.Get();
         context_->CSSetShader(
           producer, nullptr, 0u
         );
-        context_->Dispatch(tile_group_width, tile_group_height, 1u);
+        context_->Dispatch(zero_dispatch ? 0u : tile_group_width, tile_group_height, 1u);
       }
       unbind(2u, 3u, 3u);
 
-      if (!read_buffer(tensor_buffer.Get(), result.tensor, 3u * field_texels, error) ||
-          !read_texture_u32(exclusion_texture.Get(), result.exclusion, error)) {
+      if (!read_buffer(tensor_buffer.Get(), result.tensor, 3u * field_texels, error)) {
+        return false;
+      }
+      if (compact_domain) {
+        if (!read_buffer(domain_buffer.Get(), result.domain, error)) return false;
+        const auto &d = result.domain;
+        const bool valid = d[0u] == 1u && d[1u] == field_width && d[2u] == field_height && d[3u] == 0u &&
+          d[4u] < d[6u] && d[5u] < d[7u] && d[6u] <= field_width && d[7u] <= field_height &&
+          !invalid_content_reserved && d[4u] == tensor_content.left && d[5u] == tensor_content.top &&
+          d[6u] == tensor_content.right && d[7u] == tensor_content.bottom;
+        result.exclusion.resize(field_texels);
+        for (UINT y = 0u; y < field_height; ++y)
+          for (UINT x = 0u; x < field_width; ++x)
+            result.exclusion[y * field_width + x] = valid && x >= d[4u] && y >= d[5u] && x < d[6u] && y < d[7u] ? 0u : 1u;
+      } else if (!read_texture_u32(exclusion_texture.Get(), result.exclusion, error)) {
         return false;
       }
       if (fused) {
@@ -2082,7 +2122,8 @@ namespace {
     void update_depth_constants(
       const models::depth_tensor_content_rect_t tensor_content = content,
       const UINT width = field_width,
-      const UINT height = field_height
+      const UINT height = field_height,
+      const UINT reserved = 0u
     ) {
       std::array<std::uint32_t, 16> constants {};
       constants[0] = width;
@@ -2091,6 +2132,7 @@ namespace {
       constants[10] = tensor_content.top;
       constants[11] = tensor_content.right;
       constants[12] = tensor_content.bottom;
+      constants[13] = reserved;
       context_->UpdateSubresource(
         depth_constants_.Get(), 0u, nullptr, constants.data(), 0u, 0u
       );
@@ -2385,6 +2427,8 @@ namespace {
     ComPtr<ID3D11ComputeShader> oracle_pad_shader_;
     ComPtr<ID3D11ComputeShader> fused_preprocess_shader_;
     ComPtr<ID3D11ComputeShader> tiled_preprocess_shader_;
+    ComPtr<ID3D11ComputeShader> domain_preprocess_shader_;
+    ComPtr<ID3D11ComputeShader> tiled_domain_preprocess_shader_;
     ComPtr<ID3D11ComputeShader> fused_map_shader_;
     ComPtr<ID3D11ComputeShader> coordinate_shader_;
     ComPtr<ID3D11ComputeShader> resolve_shader_;
@@ -4101,6 +4145,11 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, FusedPreprocessMatchesCanonicalAndSpec
       {source_width - 1u, 0u, source_width + 1u, source_height},
       {0u, 0u, field_width, field_height},
     },
+    parity_case_t {
+      "zero-area retained source",
+      {0u, 0u, 0u, source_height},
+      {0u, 0u, field_width, field_height},
+    },
   };
 
   ASSERT_TRUE(fixture.publish_history_owner(
@@ -4147,6 +4196,27 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, FusedPreprocessMatchesCanonicalAndSpec
       EXPECT_EQ(reference.exclusion, fused.exclusion)
         << "tensor exclusion words changed";
       EXPECT_EQ(reference.tiles, fused.tiles) << "tile evidence changed";
+
+      near_identical_gpu_fixture_t::preprocess_result_t compact;
+      ASSERT_TRUE(fixture.run_preprocess_and_tile_evidence(
+        true, source, source_width, source_height, test_case.source_region,
+        test_case.tensor_content, previous, compact, error, true, tiled, true
+      )) << error;
+      ASSERT_EQ(reference.tensor.size(), compact.tensor.size());
+      EXPECT_EQ(std::memcmp(reference.tensor.data(), compact.tensor.data(), reference.tensor.size() * sizeof(float)), 0)
+        << "compact-domain NCHW words changed";
+      EXPECT_EQ(reference.exclusion, compact.exclusion) << "expanded compact domain changed canonical exclusion";
+      EXPECT_EQ(reference.tiles, compact.tiles) << "same-dispatch compact evidence changed";
+      const auto &region = test_case.source_region;
+      constexpr models::depth_tensor_shape_t shape {field_width, field_height};
+      const bool domain_valid = region[0u] < region[2u] && region[1u] < region[3u] &&
+        region[2u] <= source_width && region[3u] <= source_height && test_case.tensor_content.valid(shape);
+      const std::array<std::uint32_t, 8u> expected_domain {
+        domain_valid ? 1u : 0u, field_width, field_height, 0u,
+        domain_valid ? test_case.tensor_content.left : 0u, domain_valid ? test_case.tensor_content.top : 0u,
+        domain_valid ? test_case.tensor_content.right : 0u, domain_valid ? test_case.tensor_content.bottom : 0u,
+      };
+      EXPECT_EQ(compact.domain, expected_domain) << "producer must overwrite every descriptor word, including invalid domains";
 
       decision_words_t reference_proposal {};
       decision_words_t fused_proposal {};
@@ -4235,6 +4305,62 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, FusedPreprocessMatchesCanonicalAndSpec
     malformed_source_proposal[word(models::near_identical_gpu_decision_word_e::decision)],
     static_cast<std::uint32_t>(models::near_identical_gpu_branch_e::infer)
   );
+}
+
+TEST(HostSbsNearIdenticalDetectorGpuTest, CompactPreprocessDomainPreservesForceReservedFaultAndZeroDispatch) {
+  near_identical_gpu_fixture_t fixture;
+  std::string error;
+  const auto initialized = initialize_fixture(fixture, error);
+  if (initialized == near_identical_gpu_fixture_t::initialize_result_e::d3d_unavailable) {
+    GTEST_SKIP() << error;
+  }
+  ASSERT_EQ(initialized, near_identical_gpu_fixture_t::initialize_result_e::ready) << error;
+  constexpr UINT source_width = 144u, source_height = 112u;
+  const std::vector<std::array<float, 4>> source(source_width * source_height, {.25f, .5f, .75f, 1.f});
+  const auto previous = uniform_model_input(.25f);
+  const std::array<std::uint32_t, 4u> region {16u, 8u, 16u + field_width, 8u + field_height};
+  const models::depth_tensor_content_rect_t padded {7u, 5u, 104u, 86u};
+  // This padded source spans many groups. Poison the output descriptor before every
+  // dispatch; comparison must use each producer lane's result, not another group's store.
+  for (const bool tiled : {false, true}) {
+    for (const bool evidence : {false, true}) {
+      for (const bool reserved_fault : {false, true}) {
+        SCOPED_TRACE(tiled);
+        SCOPED_TRACE(evidence);
+        SCOPED_TRACE(reserved_fault);
+        near_identical_gpu_fixture_t::preprocess_result_t legacy, compact;
+        ASSERT_TRUE(fixture.run_preprocess_and_tile_evidence(
+          true, source, source_width, source_height, region, padded, previous,
+          legacy, error, evidence, tiled, false, false, reserved_fault
+        )) << error;
+        ASSERT_TRUE(fixture.run_preprocess_and_tile_evidence(
+          true, source, source_width, source_height, region, padded, previous,
+          compact, error, evidence, tiled, true, false, reserved_fault
+        )) << error;
+        ASSERT_EQ(legacy.tensor.size(), compact.tensor.size());
+        EXPECT_EQ(std::memcmp(legacy.tensor.data(), compact.tensor.data(), legacy.tensor.size() * sizeof(float)), 0);
+        EXPECT_EQ(legacy.exclusion, compact.exclusion);
+        EXPECT_EQ(legacy.tiles, compact.tiles);
+        const std::array<std::uint32_t, 8u> expected_domain {
+          reserved_fault ? 0u : 1u, field_width, field_height, 0u,
+          reserved_fault ? 0u : padded.left, reserved_fault ? 0u : padded.top,
+          reserved_fault ? 0u : padded.right, reserved_fault ? 0u : padded.bottom,
+        };
+        EXPECT_EQ(compact.domain, expected_domain);
+      }
+    }
+    near_identical_gpu_fixture_t::preprocess_result_t held;
+    ASSERT_TRUE(fixture.run_preprocess_and_tile_evidence(
+      true, source, source_width, source_height, region, padded, previous,
+      held, error, true, tiled, true, true
+    )) << error;
+    std::array<std::uint32_t, 8u> poison;
+    poison.fill(0xa5a5a5a5u);
+    EXPECT_EQ(held.domain, poison) << "Zero groups cannot manufacture a fresh domain publication";
+    EXPECT_TRUE(std::ranges::all_of(held.tensor, [](float value) { return std::bit_cast<std::uint32_t>(value) == 0u; }));
+    for (const auto &tile : held.tiles)
+      EXPECT_EQ(tile, (tile_evidence_t {0xa5a5a5a5u, 0x5a5a5a5au, 0xdeadbeefu, 0xffffffffu}));
+  }
 }
 
 #else

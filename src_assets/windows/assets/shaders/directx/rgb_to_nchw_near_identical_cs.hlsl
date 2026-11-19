@@ -1,6 +1,7 @@
 // Common-path fusion for the calibrated RGB-to-NCHW producer and the GPU-only near-identical
 // tile evidence. The included producer owns resize, transfer, normalization, and exclusion.
-// This wrapper observes the producer's committed NCHW and exclusion words.
+// The authored entries observe committed NCHW and exclusion words. Compact entries
+// use the producer's local admission predicate and publish its derived domain once.
 
 #include "rgb_to_nchw_cs.hlsl"
 #include "include/host_sbs_near_identical_compare.hlsl"
@@ -66,7 +67,9 @@ void WriteNearIdenticalTileEvidence(
     uint3 dispatch_thread,
     uint3 group_thread,
     uint3 group_id,
-    bool in_bounds) {
+    bool in_bounds,
+    bool compact_domain,
+    bool producer_admitted) {
     // Force-infer/bootstrap/debug frames share this one calibrated producer binary but do not
     // pay for comparison or reduction. Write one zero record per group before the uniform return:
     // force ignores it, while an accidental disabled-mode resolve must fail open to inference
@@ -92,10 +95,11 @@ void WriteNearIdenticalTileEvidence(
 
     uint linear_thread = group_thread.y * 16u + group_thread.x;
     uint4 primary = 0u;
-    // Read the producer's committed exclusion bit rather than reconstructing admission only from
-    // tensor geometry. This also fails malformed source-region b2 evidence open to inference:
-    // canonical preprocessing writes exclusion=1 when the retained physical rectangle is invalid.
-    bool admitted = in_bounds && OutputTensorExclusion[dispatch_thread.xy] == 0u;
+    // Both paths include actual retained-source validity, not only the content rectangle.
+    // A compact entry uses this thread's producer result, never lane zero's new descriptor:
+    // there is no cross-group synchronization inside this dispatch.
+    bool admitted = producer_admitted;
+    if (!compact_domain) admitted = in_bounds && OutputTensorExclusion[dispatch_thread.xy] == 0u;
     if (admitted) {
         uint plane = target_w * target_h;
         uint index = dispatch_thread.y * target_w + dispatch_thread.x;
@@ -138,14 +142,14 @@ void fused_main(
     uint3 group_id : SV_GroupID) {
     bool in_bounds = dispatch_thread.x < target_w && dispatch_thread.y < target_h;
     if (in_bounds) main(dispatch_thread);
-    WriteNearIdenticalTileEvidence(dispatch_thread, group_thread, group_id, in_bounds);
+    WriteNearIdenticalTileEvidence(dispatch_thread, group_thread, group_id, in_bounds, false, false);
 }
 
-[numthreads(16, 16, 1)]
-void fused_tiled_main(
-    uint3 dispatch_thread : SV_DispatchThreadID,
-    uint3 group_thread : SV_GroupThreadID,
-    uint3 group_id : SV_GroupID) {
+void WriteFusedTiledInput(
+    uint3 dispatch_thread,
+    uint3 group_thread,
+    uint3 group_id,
+    bool compact_domain) {
     bool in_bounds = dispatch_thread.x < target_w && dispatch_thread.y < target_h;
     int2 tile_origin;
     uint2 tile_extent, source_size;
@@ -163,10 +167,38 @@ void fused_tiled_main(
         }
     }
     GroupMemoryBarrierWithGroupSync();
+    bool admitted = false;
     if (in_bounds) {
         [branch]
-        if (tile_valid) WriteModelInput(dispatch_thread, true, tile_origin);
-        else main(dispatch_thread);
+        if (tile_valid) admitted = WriteModelInput(dispatch_thread, true, tile_origin, compact_domain);
+        else admitted = WriteModelInput(dispatch_thread, false, int2(0, 0), compact_domain);
     }
-    WriteNearIdenticalTileEvidence(dispatch_thread, group_thread, group_id, in_bounds);
+    WriteNearIdenticalTileEvidence(dispatch_thread, group_thread, group_id, in_bounds, compact_domain, admitted);
+}
+
+[numthreads(16, 16, 1)]
+void fused_tiled_main(
+    uint3 dispatch_thread : SV_DispatchThreadID,
+    uint3 group_thread : SV_GroupThreadID,
+    uint3 group_id : SV_GroupID) {
+    WriteFusedTiledInput(dispatch_thread, group_thread, group_id, false);
+}
+
+[numthreads(16, 16, 1)]
+void fused_domain_main(
+    uint3 dispatch_thread : SV_DispatchThreadID,
+    uint3 group_thread : SV_GroupThreadID,
+    uint3 group_id : SV_GroupID) {
+    bool in_bounds = dispatch_thread.x < target_w && dispatch_thread.y < target_h;
+    bool admitted = false;
+    if (in_bounds) admitted = WriteModelInput(dispatch_thread, false, int2(0, 0), true);
+    WriteNearIdenticalTileEvidence(dispatch_thread, group_thread, group_id, in_bounds, true, admitted);
+}
+
+[numthreads(16, 16, 1)]
+void fused_tiled_domain_main(
+    uint3 dispatch_thread : SV_DispatchThreadID,
+    uint3 group_thread : SV_GroupThreadID,
+    uint3 group_id : SV_GroupID) {
+    WriteFusedTiledInput(dispatch_thread, group_thread, group_id, true);
 }

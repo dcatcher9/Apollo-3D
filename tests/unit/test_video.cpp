@@ -5111,14 +5111,14 @@ TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
   using Microsoft::WRL::ComPtr;
 
   constexpr std::array shaders {
-    std::tuple {"rgb_to_nchw_near_identical_cs.hlsl", "fused_main", "cs_5_0"},
-    std::tuple {"rgb_to_nchw_near_identical_cs.hlsl", "fused_tiled_main", "cs_5_0"},
-    std::tuple {"buffer_to_tex_cs.hlsl", "pad_main", "cs_5_0"},
+    std::tuple {"rgb_to_nchw_near_identical_cs.hlsl", "fused_domain_main", "cs_5_0"},
+    std::tuple {"rgb_to_nchw_near_identical_cs.hlsl", "fused_tiled_domain_main", "cs_5_0"},
+    std::tuple {"buffer_to_tex_cs.hlsl", "domain_pad_main", "cs_5_0"},
     std::tuple {"depth_minmax_ema_cs.hlsl", "main", "cs_5_0"},
-    std::tuple {"depth_coordinate_v2_map_cs.hlsl", "main", "cs_5_0"},
-    std::tuple {"depth_coordinate_v2_moments_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {"depth_coordinate_v2_map_cs.hlsl", "domain_main", "cs_5_0"},
+    std::tuple {"depth_coordinate_v2_moments_cs.hlsl", "domain_main", "cs_5_0"},
     std::tuple {"depth_coordinate_v2_frame_resolve_cs.hlsl", "main", "cs_5_0"},
-    std::tuple {"depth_coordinate_v2_histogram_cs.hlsl", "main", "cs_5_0"},
+    std::tuple {"depth_coordinate_v2_histogram_cs.hlsl", "domain_main", "cs_5_0"},
     std::tuple {"depth_coordinate_v2_quantiles_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_coordinate_v2_quantiles_cs.hlsl", "publish_main", "cs_5_0"},
     std::tuple {"sbs_flat_identity_ps.hlsl", "main_ps", "ps_5_0"},
@@ -5942,6 +5942,129 @@ TEST(DirectxShaderTest, BufferToTexMainThenPadReplicatesBoundaryDepthAndClearsPa
   // old/new byte equality for both subnormal signs.
   EXPECT_EQ(special_depth_bits[5] & 0x7fffffffu, 0u);
   EXPECT_TRUE(std::isfinite(std::bit_cast<float>(special_depth_bits[6])));
+
+  // Exercise the compact live representation against the actual independently authored mask
+  // entries. The complete output/motion tuple must agree, including the padded boundary stencil
+  // and compiler-sensitive special-value case above.
+  const auto domain_main_bytecode = compile_shader("domain_main");
+  const auto domain_pad_bytecode = compile_shader("domain_pad_main");
+  ASSERT_TRUE(domain_main_bytecode);
+  ASSERT_TRUE(domain_pad_bytecode);
+  ComPtr<ID3D11ComputeShader> domain_main_shader, domain_pad_shader;
+  ASSERT_TRUE(SUCCEEDED(device->CreateComputeShader(
+    domain_main_bytecode->GetBufferPointer(), domain_main_bytecode->GetBufferSize(),
+    nullptr, &domain_main_shader
+  )));
+  ASSERT_TRUE(SUCCEEDED(device->CreateComputeShader(
+    domain_pad_bytecode->GetBufferPointer(), domain_pad_bytecode->GetBufferSize(),
+    nullptr, &domain_pad_shader
+  )));
+
+  const std::array<std::uint32_t, 8> padded_domain {
+    1u, width, height, 0u, content.left, content.top, content.right, content.bottom
+  };
+  const std::array<std::uint32_t, 8> full_domain {
+    1u, width, height, 0u, 0u, 0u, width, height
+  };
+  const auto run_compact = [&](ID3D11ShaderResourceView *domain,
+                               ID3D11ShaderResourceView *raw,
+                               ID3D11ShaderResourceView *scale,
+                               ID3D11ShaderResourceView *previous,
+                               ID3D11Buffer *cb,
+                               std::array<std::uint32_t, texel_count> &depth,
+                               std::array<std::uint32_t, texel_count> &motion) {
+    context->UpdateSubresource(output_texture.Get(), 0u, nullptr,
+      initial_output.data(), width * sizeof(float), 0u);
+    context->UpdateSubresource(motion_texture.Get(), 0u, nullptr,
+      initial_motion.data(), width * sizeof(std::uint32_t), 0u);
+    ID3D11ShaderResourceView *compact_srvs[] {raw, scale, previous, domain};
+    context->CSSetShaderResources(0u, 4u, compact_srvs);
+    context->CSSetUnorderedAccessViews(0u, 2u, uavs, nullptr);
+    context->CSSetConstantBuffers(0u, 1u, &cb);
+    context->CSSetShader(domain_main_shader.Get(), nullptr, 0u);
+    context->Dispatch((width + 15u) / 16u, (height + 15u) / 16u, 1u);
+    context->CSSetShader(domain_pad_shader.Get(), nullptr, 0u);
+    context->Dispatch((width + 15u) / 16u, (height + 15u) / 16u, 1u);
+    context->CSSetShader(nullptr, nullptr, 0u);
+    context->CSSetShaderResources(0u, 4u, null_srvs);
+    context->CSSetUnorderedAccessViews(0u, 2u, null_uavs, nullptr);
+    context->CSSetConstantBuffers(0u, 1u, null_constant_buffers);
+    return read_texture_bits(output_texture.Get(), depth) &&
+      read_texture_bits(motion_texture.Get(), motion);
+  };
+  ComPtr<ID3D11Buffer> padded_domain_buffer, full_domain_buffer;
+  ComPtr<ID3D11ShaderResourceView> padded_domain_srv, full_domain_srv;
+  ASSERT_TRUE(create_structured_srv(
+    &padded_domain, 1u, padded_domain_buffer, padded_domain_srv
+  ));
+  ASSERT_TRUE(create_structured_srv(
+    &full_domain, 1u, full_domain_buffer, full_domain_srv
+  ));
+  std::array<std::uint32_t, texel_count> compact_depth {}, compact_motion {};
+  ASSERT_TRUE(run_compact(padded_domain_srv.Get(), raw_srv.Get(), minmax_srv.Get(),
+    previous_srv.Get(), constant_buffer.Get(), compact_depth, compact_motion));
+  EXPECT_EQ(compact_depth, depth_bits);
+  EXPECT_EQ(compact_motion, motion_bits);
+  ASSERT_TRUE(run_compact(full_domain_srv.Get(), special_raw_srv.Get(),
+    special_scale_srv.Get(), special_previous_srv.Get(), special_constant_buffer.Get(),
+    compact_depth, compact_motion));
+  EXPECT_EQ(compact_depth, special_depth_bits);
+  EXPECT_EQ(compact_motion, special_motion_bits);
+
+  // A valid full domain with no current raw evidence holds history; it is not a malformed
+  // compact record. Distinct finite words make an accidental clear or stale target observable.
+  std::array<float, texel_count> invalid_raw, held_previous;
+  for (UINT i = 0u; i < texel_count; ++i) {
+    invalid_raw[i] = std::numeric_limits<float>::quiet_NaN();
+    held_previous[i] = float(i + 1u) / 64.0f;
+  }
+  const std::array<float, 4> held_scale {0.0f, 1.0f, 1.0f, 0.0f};
+  ComPtr<ID3D11Buffer> invalid_raw_buffer, held_scale_buffer;
+  ComPtr<ID3D11ShaderResourceView> invalid_raw_srv, held_scale_srv, held_previous_srv;
+  ComPtr<ID3D11Texture2D> held_previous_texture;
+  ASSERT_TRUE(create_structured_srv(
+    invalid_raw.data(), texel_count, invalid_raw_buffer, invalid_raw_srv
+  ));
+  ASSERT_TRUE(create_structured_srv(&held_scale, 1u, held_scale_buffer, held_scale_srv));
+  ASSERT_TRUE(create_input_texture(DXGI_FORMAT_R32_FLOAT, held_previous.data(),
+    held_previous_texture, held_previous_srv));
+  ASSERT_TRUE(run_compact(full_domain_srv.Get(), invalid_raw_srv.Get(),
+    held_scale_srv.Get(), held_previous_srv.Get(), special_constant_buffer.Get(),
+    compact_depth, compact_motion));
+  for (UINT i = 0u; i < texel_count; ++i) {
+    EXPECT_EQ(compact_depth[i], std::bit_cast<std::uint32_t>(held_previous[i]));
+    EXPECT_EQ(compact_motion[i], 0u);
+  }
+
+  // Invalid flag, dimensions, reserved word, bounds, b0 join and element count reject a compact
+  // record without borrowing prior depth or leaving poisoned current output behind. The SDK
+  // resource's stride is fixed by the host allocation. Do not reinterpret a mismatched view.
+  for (unsigned fault = 0u; fault < 6u; ++fault) {
+    SCOPED_TRACE(fault);
+    auto malformed = full_domain;
+    switch (fault) {
+      case 0u: malformed[0] = 0u; break;
+      case 1u: malformed[1]++; break;
+      case 2u: malformed[3] = 1u; break;
+      case 3u: malformed[6] = width + 1u; break;
+      case 4u: malformed[4] = 1u; break;
+      default: break;
+    }
+    ComPtr<ID3D11Buffer> malformed_buffer;
+    ComPtr<ID3D11ShaderResourceView> malformed_srv;
+    if (fault == 5u) {
+      const std::array records {malformed, malformed};
+      ASSERT_TRUE(create_structured_srv(records.data(), 2u, malformed_buffer, malformed_srv));
+    } else {
+      ASSERT_TRUE(create_structured_srv(&malformed, 1u, malformed_buffer, malformed_srv));
+    }
+    ASSERT_TRUE(run_compact(malformed_srv.Get(), raw_srv.Get(), minmax_srv.Get(),
+      previous_srv.Get(), special_constant_buffer.Get(), compact_depth, compact_motion));
+    for (UINT i = 0u; i < texel_count; ++i) {
+      EXPECT_EQ(compact_depth[i], 0u);
+      EXPECT_EQ(compact_motion[i], 0u);
+    }
+  }
 }
 
 TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
@@ -8219,7 +8342,7 @@ TEST(DirectxShaderSourceTest, FusedDepthMapperUsesResolvedReferenceGridGradients
   const auto change_rejection = mapper.find(
     "if (!(change >= ema_edge_change))"
   );
-  const auto exclusion_stencil = mapper.find("TensorExclusion[neighbor]");
+  const auto exclusion_stencil = mapper.find("TensorAnalysisCellAdmitted(uint2(neighbor)");
   const auto depth_stencil = mapper.find("float gradient = 0.0f");
   ASSERT_NE(change_rejection, std::string::npos);
   ASSERT_NE(exclusion_stencil, std::string::npos);
@@ -8232,7 +8355,7 @@ TEST(DirectxShaderSourceTest, FusedDepthMapperUsesResolvedReferenceGridGradients
   );
   EXPECT_NE(
     mapper.find(
-      "IsMovingEdge(int2(sample_position), mapped, previous, mm)"
+      "IsMovingEdge(int2(sample_position), mapped, previous, mm,"
     ),
     std::string::npos
   );
@@ -8258,7 +8381,7 @@ TEST(DirectxShaderSourceTest, FusedDepthMapperSpecializesSyntheticPadding) {
   ASSERT_FALSE(mapper.empty());
   EXPECT_NE(mapper.find("void pad_main"), std::string::npos);
   EXPECT_NE(
-    mapper.find("OutputTexture[DepthAnalysisClampCell(DTid.xy)]"),
+    mapper.find("OutputTexture[TensorAnalysisClampCell(DTid.xy, use_domain, domain_rectangle)]"),
     std::string::npos
   );
   EXPECT_NE(mapper.find("MotionMask[DTid.xy] = 0u"), std::string::npos);

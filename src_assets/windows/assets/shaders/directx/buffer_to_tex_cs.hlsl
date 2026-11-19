@@ -9,6 +9,9 @@ RWTexture2D<float>        OutputTexture : register(u0);
 RWTexture2D<uint>         MotionMask : register(u1);
 
 #include "include/depth_constants.hlsl"
+#include "include/depth_analysis_domain.hlsl"
+StructuredBuffer<TensorAnalysisDomain> TensorAnalysisDomainRead : register(t3);
+#include "include/depth_analysis_domain_consumer.hlsl"
 
 int2 ClampPixel(int2 p) {
     return clamp(p, int2(0, 0), int2((int)target_w - 1, (int)target_h - 1));
@@ -25,7 +28,8 @@ float CurrentDepth(int2 p, float2 mm) {
     return saturate((raw - mm.x) / max(mm.y - mm.x, 1e-6f));
 }
 
-bool IsMovingEdge(int2 p, float current, float previous, float2 mm) {
+bool IsMovingEdge(int2 p, float current, float previous, float2 mm,
+    bool use_domain, bool domain_valid, uint4 domain_rectangle) {
     p = ClampPixel(p);
 
     // Most history texels are stable. Reject them after one history load, before paying for the
@@ -41,7 +45,7 @@ bool IsMovingEdge(int2 p, float current, float previous, float2 mm) {
     [unroll]
     for (int neighbor_index = 0; neighbor_index < 4; ++neighbor_index) {
         int2 neighbor = ClampPixel(p + neighbor_offsets[neighbor_index]);
-        if (TensorExclusion[neighbor] != 0u) {
+        if (!TensorAnalysisCellAdmitted(uint2(neighbor), use_domain, domain_valid, domain_rectangle)) {
             // The moving-edge classifier is a five-cell stencil. An artificial sanitizer fill
             // boundary must not make an adjacent admitted texel snap toward current depth.
             return false;
@@ -59,16 +63,26 @@ bool IsMovingEdge(int2 p, float current, float previous, float2 mm) {
     return reference_gradient >= ema_edge_gradient;
 }
 
-[numthreads(16, 16, 1)]
-void main(uint3 DTid : SV_DispatchThreadID) {
+void NormalizeDepth(uint3 DTid, bool use_domain) {
     if (DTid.x >= target_w || DTid.y >= target_h)
         return;
+
+    uint4 domain_rectangle = 0u;
+    bool domain_valid = true;
+    if (use_domain) {
+        domain_valid = LoadTensorAnalysisDomain(domain_rectangle);
+        if (!domain_valid) {
+            MotionMask[DTid.xy] = 0u;
+            OutputTexture[DTid.xy] = 0.0f;
+            return;
+        }
+    }
 
     // Synthetic contain-fit padding has no diagnostic authority. Its normalized depth is filled
     // by pad_main after every admitted content texel has been published. Keeping the padding path
     // out of this pass avoids recomputing the same five-cell boundary stencil for every padded
     // texel on narrow or tall analysis ROIs.
-    if (TensorExclusion[DTid.xy] != 0u) {
+    if (!TensorAnalysisCellAdmitted(DTid.xy, use_domain, domain_valid, domain_rectangle)) {
         MotionMask[DTid.xy] = 0u;
         return;
     }
@@ -99,7 +113,8 @@ void main(uint3 DTid : SV_DispatchThreadID) {
     bool moving = false;
     if (ema_edge_change > 0.0f && ema_edge_gradient > 0.0f &&
         !(scale.w < 0.5f || scale.w > 1.5f)) {
-        moving = IsMovingEdge(int2(sample_position), mapped, previous, mm);
+        moving = IsMovingEdge(int2(sample_position), mapped, previous, mm,
+            use_domain, domain_valid, domain_rectangle);
     }
 
     MotionMask[DTid.xy] = moving ? 1u : 0u;
@@ -122,11 +137,29 @@ void main(uint3 DTid : SV_DispatchThreadID) {
 // The first dispatch has completed before this entry point runs, so every clamped source below is
 // an admitted content texel already written by main. D3D11 serializes UAV dispatch accesses; this
 // pass performs only one exclusion lookup and one depth load/store per synthetic padding texel.
-[numthreads(16, 16, 1)]
-void pad_main(uint3 DTid : SV_DispatchThreadID) {
-    if (DTid.x >= target_w || DTid.y >= target_h ||
-        TensorExclusion[DTid.xy] == 0u)
-        return;
-
-    OutputTexture[DTid.xy] = OutputTexture[DepthAnalysisClampCell(DTid.xy)];
+void PadNormalizedDepth(uint3 DTid, bool use_domain) {
+    if (DTid.x >= target_w || DTid.y >= target_h) return;
+    uint4 domain_rectangle = 0u;
+    bool domain_valid = true;
+    if (use_domain) {
+        domain_valid = LoadTensorAnalysisDomain(domain_rectangle);
+        if (!domain_valid) {
+            OutputTexture[DTid.xy] = 0.0f;
+            return;
+        }
+    }
+    if (TensorAnalysisCellAdmitted(DTid.xy, use_domain, domain_valid, domain_rectangle)) return;
+    OutputTexture[DTid.xy] = OutputTexture[TensorAnalysisClampCell(DTid.xy, use_domain, domain_rectangle)];
 }
+
+[numthreads(16, 16, 1)]
+void main(uint3 DTid : SV_DispatchThreadID) { NormalizeDepth(DTid, false); }
+
+[numthreads(16, 16, 1)]
+void domain_main(uint3 DTid : SV_DispatchThreadID) { NormalizeDepth(DTid, true); }
+
+[numthreads(16, 16, 1)]
+void pad_main(uint3 DTid : SV_DispatchThreadID) { PadNormalizedDepth(DTid, false); }
+
+[numthreads(16, 16, 1)]
+void domain_pad_main(uint3 DTid : SV_DispatchThreadID) { PadNormalizedDepth(DTid, true); }

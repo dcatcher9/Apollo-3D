@@ -815,8 +815,8 @@ TEST(HostSbsV2GpuExecutorTest, BindingContractAndExecutorCallSitesStayShared) {
   }
   EXPECT_EQ(count_occurrences(compact_replay, "record_state"), 1u);
   EXPECT_EQ(count_occurrences(compact_live, "record_state"), 0u);
-  EXPECT_EQ(count_occurrences(compact_replay, ".tensor_exclusion="), 2u);
-  EXPECT_EQ(count_occurrences(compact_live, ".tensor_exclusion="), 2u);
+  EXPECT_EQ(count_occurrences(compact_replay, ".analysis_domain="), 2u);
+  EXPECT_EQ(count_occurrences(compact_live, ".analysis_domain="), 2u);
   EXPECT_EQ(compact_replay.find("CSSetShader(moments_shader.Get()"),
             std::string::npos);
   EXPECT_EQ(compact_replay.find("CSSetShader(map_shader.Get()"), std::string::npos);
@@ -2210,8 +2210,10 @@ void main(uint3 tid : SV_GroupThreadID) {
     return shader;
   };
   const auto moments = compile("depth_coordinate_v2_moments_cs.hlsl");
+  const auto domain_moments = compile("depth_coordinate_v2_moments_cs.hlsl", {}, "domain_main");
   const auto frame_resolve = compile("depth_coordinate_v2_frame_resolve_cs.hlsl");
   const auto histogram = compile("depth_coordinate_v2_histogram_cs.hlsl");
+  const auto domain_histogram = compile("depth_coordinate_v2_histogram_cs.hlsl", {}, "domain_main");
   const auto quantiles = compile("depth_coordinate_v2_quantiles_cs.hlsl");
   const auto publication = compile("depth_coordinate_v2_quantiles_cs.hlsl", {}, "publish_main");
   const auto ema = compile("depth_minmax_ema_cs.hlsl");
@@ -2222,8 +2224,9 @@ void main(uint3 tid : SV_GroupThreadID) {
   const auto normalization_histogram = compile("depth_coordinate_v2_histogram_cs.hlsl",
     read_bytes(fs::path(SUNSHINE_SOURCE_DIR) /
       "tests/fixtures/host_sbs_normalization_histogram_reference_cs.hlsl"));
-  ASSERT_TRUE(moments && frame_resolve && histogram && quantiles && publication && ema &&
-    state_resolve && old_histogram && old_quantiles && normalization_histogram);
+  ASSERT_TRUE(moments && domain_moments && frame_resolve && histogram && domain_histogram &&
+    quantiles && publication && ema && state_resolve && old_histogram && old_quantiles &&
+    normalization_histogram);
 
   struct buffer_t {
     ComPtr<ID3D11Buffer> buffer;
@@ -2315,6 +2318,7 @@ void main(uint3 tid : SV_GroupThreadID) {
     auto v2_constants = constants_buffer(&v2_words, sizeof(v2_words));
     ASSERT_TRUE(common_constants && v2_constants);
     auto raw = structured(sizeof(float), count);
+    auto domain = structured(sizeof(gpu::analysis_domain_record_t), 1u);
     auto partials = structured(sizeof(std::uint32_t) * 4u, groups * 3u);
     auto shared_bins = structured(sizeof(std::uint32_t) * 4u, groups * 128u);
     auto reference_bins = structured(sizeof(std::uint32_t) * 4u, groups * 64u);
@@ -2338,7 +2342,7 @@ void main(uint3 tid : SV_GroupThreadID) {
       static_cast<UINT>(v2::state_initial_words.size() / 4u));
     auto fused_state = structured(sizeof(std::uint32_t) * 4u,
       static_cast<UINT>(v2::state_initial_words.size() / 4u));
-    ASSERT_TRUE(raw.srv && partials.uav && shared_bins.uav && reference_bins.uav &&
+    ASSERT_TRUE(raw.srv && domain.srv && partials.uav && shared_bins.uav && reference_bins.uav &&
       shared_frame.uav && reference_frame.uav && shared_normalization.uav &&
       reference_normalization.uav && fused_partials.uav && fused_bins.uav && fused_frame.uav &&
       split_ema.uav && fused_ema.uav && split_health.uav && fused_health.uav &&
@@ -2390,7 +2394,7 @@ void main(uint3 tid : SV_GroupThreadID) {
       .moments_shader = moments.Get(),
       .frame_resolve_shader = frame_resolve.Get(),
       .raw_depth = raw.srv.Get(),
-      .tensor_exclusion = exclusion_srv.Get(),
+      .analysis_domain = exclusion_srv.Get(),
       .partials_output = partials.uav.Get(),
       .partials = partials.srv.Get(),
       .frame_stats_output = shared_frame.uav.Get(),
@@ -2454,9 +2458,16 @@ void main(uint3 tid : SV_GroupThreadID) {
     for (const std::string_view sample : {"positive_crossings", "finite_negative",
       "mixed_signed_zero", "negative_zero_only", "collapsed", "tiny_span", "subnormal",
       "large_atoms_outliers", "nan", "positive_infinity", "negative_infinity",
-      "all_nan", "all_excluded", "roi_exclusion", "overflowing_moments",
+      "all_nan", "all_excluded", "malformed_domain", "roi_exclusion", "authored_holes", "overflowing_moments",
       "all_negative", "positive_recovery"}) {
       SCOPED_TRACE(std::string(sample) + " " + std::to_string(width) + "x" + std::to_string(height));
+      const bool padded = sample == "roi_exclusion";
+      const bool all_excluded = sample == "all_excluded" || sample == "malformed_domain";
+      const bool compact_domain = sample != "authored_holes";
+      common_words[9] = padded ? 3u : 0u;
+      common_words[10] = padded ? 2u : 0u;
+      common_words[11] = padded ? width - 4u : width;
+      common_words[12] = padded ? height - 3u : height;
       std::vector<float> values(count);
       std::vector<std::uint32_t> exclusions(count, 0u);
       for (UINT index = 0u; index < count; ++index) {
@@ -2472,10 +2483,11 @@ void main(uint3 tid : SV_GroupThreadID) {
           values[index] = index % 100u == 0u ? 1000.0f : (index % 3u ? 1.0f : 7.0f);
         }
         if (sample == "all_nan") values[index] = std::numeric_limits<float>::quiet_NaN();
-        if (sample == "all_excluded") exclusions[index] = 1u;
-        if (sample == "roi_exclusion") {
+        if (all_excluded || (!compact_domain && index % 5u == 2u)) exclusions[index] = 1u;
+        if (padded) {
           const UINT x = index % width, y = index / width;
-          if (x < 3u || y < 2u || x >= width - 4u || y >= height - 3u) {
+          if (x < common_words[9] || y < common_words[10] ||
+              x >= common_words[11] || y >= common_words[12]) {
             exclusions[index] = 1u;
             values[index] = std::numeric_limits<float>::quiet_NaN();
           }
@@ -2490,6 +2502,21 @@ void main(uint3 tid : SV_GroupThreadID) {
       warp.context->UpdateSubresource(raw.buffer.Get(), 0u, nullptr, values.data(), 0u, 0u);
       warp.context->UpdateSubresource(exclusion.Get(), 0u, nullptr, exclusions.data(),
         width * sizeof(std::uint32_t), 0u);
+      const gpu::analysis_domain_record_t domain_record {
+        .valid = sample == "all_excluded" ? 0u : 1u,
+        .width = width,
+        .height = height,
+        .reserved = sample == "malformed_domain" ? 1u : 0u,
+        .left = common_words[9],
+        .top = common_words[10],
+        .right = sample == "all_excluded" ? 0u : common_words[11],
+        .bottom = sample == "all_excluded" ? 0u : common_words[12],
+      };
+      warp.context->UpdateSubresource(common_constants.Get(), 0u, nullptr, common_words.data(), 0u, 0u);
+      warp.context->UpdateSubresource(domain.buffer.Get(), 0u, nullptr, &domain_record, 0u, 0u);
+      fused_command.moments_shader = compact_domain ? domain_moments.Get() : moments.Get();
+      fused_command.histogram_shader = compact_domain ? domain_histogram.Get() : histogram.Get();
+      fused_command.analysis_domain = compact_domain ? domain.srv.Get() : exclusion_srv.Get();
       v2_words.joint_observation_timestamp_low = static_cast<std::uint32_t>(observation_us);
       v2_words.joint_observation_timestamp_high = static_cast<std::uint32_t>(observation_us >> 32u);
       observation_us += 33333u;
@@ -2551,6 +2578,8 @@ void main(uint3 tid : SV_GroupThreadID) {
       // the fused arm executes the actual live command, with independent persistent owners.
       ASSERT_TRUE(record_split_publication(gpu::dispatch_command_t::direct(1u, 1u, 1u)));
       ASSERT_TRUE(gpu::record_moments_frame(warp.context.Get(), fused_command));
+      EXPECT_EQ(read_words(fused_partials.buffer.Get()), read_words(partials.buffer.Get()));
+      EXPECT_EQ(read_words(fused_bins.buffer.Get()), actual_histogram);
       EXPECT_EQ(read_words(fused_frame.buffer.Get()), actual_frame);
       EXPECT_EQ(read_words(fused_ema.buffer.Get()), read_words(split_ema.buffer.Get()));
       EXPECT_EQ(read_words(fused_health.buffer.Get()), read_words(split_health.buffer.Get()));

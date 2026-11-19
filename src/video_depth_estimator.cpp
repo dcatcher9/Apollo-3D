@@ -3472,7 +3472,7 @@ namespace models {
         srv.Reset();
         uav.Reset();
       }
-    } near_identical_tile, near_identical_history_owner;
+    } near_identical_tile, near_identical_history_owner, analysis_domain;
 
     struct d3d_texture_views_t {
       Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
@@ -3643,9 +3643,6 @@ namespace models {
     d3d_texture_views_t ema_motion_mask;
     // Synthetic letterbox support is visible to DAV2 but excluded from every analysis statistic,
     // history comparison and positioned renderer sample.
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> tensor_exclusion_tex;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> tensor_exclusion_uav;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tensor_exclusion_srv;
 
     // GPU-only raw-coordinate V2 producer. The canonical-coordinate texture is exceptional: its
     // shader, texture, and views are created only for an explicit Dump 3D snapshot. The
@@ -7160,7 +7157,7 @@ namespace models {
       return true;
     }
 
-    bool create_subtitle_uint_buffer(
+    bool create_shader_uint_buffer(
       const std::uint32_t word_count,
       Microsoft::WRL::ComPtr<ID3D11Buffer> &buffer,
       Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> &srv,
@@ -7199,7 +7196,7 @@ namespace models {
         ocr_box_record_buf.Reset();
         ocr_box_record_srv.Reset();
         ocr_box_record_uav.Reset();
-        resources_ok = create_subtitle_uint_buffer(
+        resources_ok = create_shader_uint_buffer(
           ocr_box_record_word_count,
           ocr_box_record_buf,
           ocr_box_record_srv,
@@ -7211,7 +7208,7 @@ namespace models {
         subtitle_locator_state_buf.Reset();
         subtitle_locator_state_srv.Reset();
         subtitle_locator_state_uav.Reset();
-        resources_ok = resources_ok && create_subtitle_uint_buffer(
+        resources_ok = resources_ok && create_shader_uint_buffer(
           subtitle_locator_state_word_count,
           subtitle_locator_state_buf,
           subtitle_locator_state_srv,
@@ -7223,7 +7220,7 @@ namespace models {
         subtitle_condition_params_buf.Reset();
         subtitle_condition_params_srv.Reset();
         subtitle_condition_params_uav.Reset();
-        resources_ok = resources_ok && create_subtitle_uint_buffer(
+        resources_ok = resources_ok && create_shader_uint_buffer(
           subtitle_condition_param_word_count,
           subtitle_condition_params_buf,
           subtitle_condition_params_srv,
@@ -7239,16 +7236,16 @@ namespace models {
         ensure_subtitle_constant_buffer(sizeof(ocr_resolve_constants_t), ocr_resolve_cbuffer) &&
         ensure_subtitle_constant_buffer(80u, subtitle_locator_cbuffer) &&
         ensure_subtitle_constant_buffer(96u, subtitle_contour_cbuffer) &&
-        create_subtitle_uint_buffer(depth_coordinate_v2::subtitle_contour_history_word_count,
+        create_shader_uint_buffer(depth_coordinate_v2::subtitle_contour_history_word_count,
                                     subtitle_contour_identity.buffer,
                                     subtitle_contour_identity.srv, subtitle_contour_identity.uav) &&
-        create_subtitle_uint_buffer(depth_coordinate_v2::subtitle_ocr_output_width *
+        create_shader_uint_buffer(depth_coordinate_v2::subtitle_ocr_output_width *
                                       depth_coordinate_v2::subtitle_ocr_output_height,
                                     subtitle_contour_probability_snapshot.buffer,
                                     subtitle_contour_probability_snapshot.srv,
                                     subtitle_contour_probability_snapshot.uav) &&
         (subtitle_contour_observation.ready() ||
-         create_subtitle_uint_buffer(4u * contour_observation_records,
+         create_shader_uint_buffer(4u * contour_observation_records,
                                      subtitle_contour_observation.buffer,
                                      subtitle_contour_observation.srv,
                                      subtitle_contour_observation.uav, 4u)) &&
@@ -7326,7 +7323,7 @@ namespace models {
                                 &ocr_output_srv,
                                 nullptr
                               ) &&
-                              create_subtitle_uint_buffer(
+                              create_shader_uint_buffer(
                                 ocr_cell_stats_word_count,
                                 ocr_cell_stats_buf,
                                 ocr_cell_stats_srv,
@@ -7642,7 +7639,7 @@ namespace models {
         .moments_shader = depth_coordinate_v2_moments_cs.Get(),
         .frame_resolve_shader = depth_coordinate_v2_frame_resolve_cs.Get(),
         .raw_depth = tensor_out_srv.Get(),
-        .tensor_exclusion = tensor_exclusion_srv.Get(),
+        .analysis_domain = analysis_domain.srv.Get(),
         .partials_output = depth_coordinate_v2_partials_uav.Get(),
         .partials = depth_coordinate_v2_partials_srv.Get(),
         .frame_stats_output = depth_coordinate_v2_frame_stats_uav.Get(),
@@ -7672,7 +7669,7 @@ namespace models {
       if (!parallax_v2_producer_active || !depth_coordinate_v2_map_cs ||
           !near_identical_cbuffer || !near_identical_history_owner.uav ||
           !tensor_out_srv || !depth_coordinate_v2_state_srv ||
-          !tensor_exclusion_srv || !minmax_ema_srv || !tensor_in_srv ||
+          !analysis_domain.srv || !minmax_ema_srv || !tensor_in_srv ||
           !depth_health_state_srv || !depth_coordinate_v2_candidate_uav || !tensor_previous_input_uav) {
         return false;
       }
@@ -7694,7 +7691,7 @@ namespace models {
         .shader = depth_coordinate_v2_map_cs.Get(),
         .raw_depth = tensor_out_srv.Get(),
         .state = depth_coordinate_v2_state_srv.Get(),
-        .tensor_exclusion = tensor_exclusion_srv.Get(),
+        .analysis_domain = analysis_domain.srv.Get(),
         .minmax_ema = minmax_ema_srv.Get(),
         .current_model_input = tensor_in_srv.Get(),
         .depth_health_state = depth_health_state_srv.Get(),
@@ -8137,7 +8134,7 @@ namespace models {
           !create_shader_texture(width, height, DXGI_FORMAT_R32_FLOAT, next.blend) ||
           !create_shader_texture(width, height, DXGI_FORMAT_R32_FLOAT, next.vertical_conditioned) ||
           !create_shader_texture(width, height, DXGI_FORMAT_R32_FLOAT, next.final) ||
-          !create_subtitle_uint_buffer(1u, next.control.buffer, next.control.srv, next.control.uav) ||
+          !create_shader_uint_buffer(1u, next.control.buffer, next.control.srv, next.control.uav) ||
           !ensure_subtitle_constant_buffer(48u, next.distance_constants)) {
         return false;
       }
@@ -8627,7 +8624,7 @@ namespace models {
       ID3D11ShaderResourceView *inputs[3] = {
         tensor_out_srv.Get(),
         depth_coordinate_v2_state_srv.Get(),
-        tensor_exclusion_srv.Get(),
+        analysis_domain.srv.Get(),
       };
       context->CSSetShader(
         depth_coordinate_v2_coordinate_diagnostic_cs.Get(),
@@ -9462,7 +9459,7 @@ namespace models {
         tensor_out_srv.Get(),
         minmax_ema_srv.Get(),
         previous_normalized_depth.srv.Get(),
-        tensor_exclusion_srv.Get(),
+        analysis_domain.srv.Get(),
       };
       ID3D11UnorderedAccessView *bt_uavs[2] = {
         normalized_depth.uav.Get(),
@@ -9958,19 +9955,11 @@ namespace models {
                          create_shader_texture(target_w, target_h, DXGI_FORMAT_R32_UINT, ema_motion_mask);
         }
 
-        D3D11_TEXTURE2D_DESC mask_desc {};
-        mask_desc.Width = target_w;
-        mask_desc.Height = target_h;
-        mask_desc.MipLevels = 1u;
-        mask_desc.ArraySize = 1u;
-        mask_desc.Format = DXGI_FORMAT_R32_UINT;
-        mask_desc.SampleDesc.Count = 1u;
-        mask_desc.Usage = D3D11_USAGE_DEFAULT;
-        mask_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-        resources_ok = resources_ok &&
-                       SUCCEEDED(device->CreateTexture2D(&mask_desc, nullptr, &tensor_exclusion_tex)) &&
-                       SUCCEEDED(device->CreateUnorderedAccessView(tensor_exclusion_tex.Get(), nullptr, &tensor_exclusion_uav)) &&
-                       SUCCEEDED(device->CreateShaderResourceView(tensor_exclusion_tex.Get(), nullptr, &tensor_exclusion_srv));
+        constexpr auto domain_words =
+          sizeof(host_sbs_v2_gpu::analysis_domain_record_t) / sizeof(std::uint32_t);
+        resources_ok = resources_ok && create_shader_uint_buffer(
+          domain_words, analysis_domain.buffer, analysis_domain.srv, analysis_domain.uav, domain_words
+        );
 
         if (!resources_ok) {
           BOOST_LOG(error)
@@ -9991,7 +9980,7 @@ namespace models {
         const UINT clear_uint[4] {};
         context->ClearUnorderedAccessViewUint(tensor_previous_input_uav.Get(), clear_uint);
         clear_normalized_depth_diagnostics();
-        context->ClearUnorderedAccessViewUint(tensor_exclusion_uav.Get(), clear_uint);
+        context->ClearUnorderedAccessViewUint(analysis_domain.uav.Get(), clear_uint);
 
         auto res1 = cuda.cuGraphicsD3D11RegisterResource(&cuda_in_res, tensor_in_buf.Get(), 0);
         auto res2 = cuda.cuGraphicsD3D11RegisterResource(&cuda_out_res, tensor_out_buf.Get(), 0);
@@ -10312,7 +10301,7 @@ namespace models {
       context->CSSetShaderResources(0, 2, preprocess_srvs);
       ID3D11UnorderedAccessView *preprocess_uavs[3] = {
         tensor_in_uav.Get(),
-        tensor_exclusion_uav.Get(),
+        analysis_domain.uav.Get(),
         near_identical_tile.uav.Get(),
       };
       context->CSSetUnorderedAccessViews(0, 3, preprocess_uavs, nullptr);

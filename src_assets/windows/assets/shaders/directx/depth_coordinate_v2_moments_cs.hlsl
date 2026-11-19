@@ -12,6 +12,9 @@ Texture2D<uint> TensorExclusion : register(t1);
 RWStructuredBuffer<uint4> Partials : register(u0);
 
 #include "include/depth_constants.hlsl"
+#include "include/depth_analysis_domain.hlsl"
+StructuredBuffer<TensorAnalysisDomain> TensorAnalysisDomainRead : register(t1);
+#include "include/depth_analysis_domain_consumer.hlsl"
 
 #define GROUP_SIZE 256
 groupshared float g_mean[GROUP_SIZE];
@@ -24,10 +27,10 @@ groupshared uint g_normalization_minimum[GROUP_SIZE];
 groupshared uint g_normalization_maximum[GROUP_SIZE];
 groupshared uint g_normalization_valid_count[GROUP_SIZE];
 
-[numthreads(GROUP_SIZE, 1, 1)]
-void main(uint3 dtid : SV_DispatchThreadID,
-          uint3 tid : SV_GroupThreadID,
-          uint3 gid : SV_GroupID) {
+void ComputeMoments(uint3 dtid, uint3 tid, uint3 gid, bool use_domain) {
+    uint4 domain_rectangle = 0u;
+    bool domain_valid = true;
+    if (use_domain) domain_valid = LoadTensorAnalysisDomain(domain_rectangle);
     uint element_count = target_w * target_h;
     float mean = 0.0f;
     float m2 = 0.0f;
@@ -48,7 +51,7 @@ void main(uint3 dtid : SV_DispatchThreadID,
     [loop]
     for (uint index = dtid.x; index < element_count; index += reduce_threads) {
         uint2 position = uint2(position_x, position_y);
-        if (TensorExclusion[position] == 0u) {
+        if (TensorAnalysisCellAdmitted(position, use_domain, domain_valid, domain_rectangle)) {
             eligible++;
             float value = InputBuffer[index];
             if (!isnan(value) && !isinf(value)) {
@@ -133,4 +136,15 @@ void main(uint3 dtid : SV_DispatchThreadID,
         Partials[gid.x * 3u + 2u] =
             uint4(g_normalization_valid_count[0], 0u, 0u, 0u);
     }
+}
+
+// The same reduction order and arithmetic serve compact live records and arbitrary masks.
+[numthreads(GROUP_SIZE, 1, 1)]
+void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
+    ComputeMoments(dtid, tid, gid, false);
+}
+
+[numthreads(GROUP_SIZE, 1, 1)]
+void domain_main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
+    ComputeMoments(dtid, tid, gid, true);
 }

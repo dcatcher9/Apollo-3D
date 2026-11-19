@@ -287,28 +287,6 @@ void main(uint3 id : SV_DispatchThreadID) {
              SUCCEEDED(device->CreateUnorderedAccessView(texture.Get(), nullptr, &uav));
     }
 
-    bool create_uint_texture(
-      ID3D11Device *device,
-      const UINT width,
-      const UINT height,
-      ComPtr<ID3D11Texture2D> &texture,
-      ComPtr<ID3D11ShaderResourceView> &srv,
-      ComPtr<ID3D11UnorderedAccessView> &uav
-    ) {
-      D3D11_TEXTURE2D_DESC desc {};
-      desc.Width = width;
-      desc.Height = height;
-      desc.MipLevels = 1u;
-      desc.ArraySize = 1u;
-      desc.Format = DXGI_FORMAT_R32_UINT;
-      desc.SampleDesc.Count = 1u;
-      desc.Usage = D3D11_USAGE_DEFAULT;
-      desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-      return SUCCEEDED(device->CreateTexture2D(&desc, nullptr, &texture)) &&
-             SUCCEEDED(device->CreateShaderResourceView(texture.Get(), nullptr, &srv)) &&
-             SUCCEEDED(device->CreateUnorderedAccessView(texture.Get(), nullptr, &uav));
-    }
-
     std::vector<std::uint32_t> read_buffer_words(
       ID3D11Device *device,
       ID3D11DeviceContext *context,
@@ -457,9 +435,8 @@ void main(uint3 id : SV_DispatchThreadID) {
     ComPtr<ID3D11Buffer> dummy_history_owner_buffer;
     ComPtr<ID3D11ShaderResourceView> dummy_history_owner_srv;
     ComPtr<ID3D11UnorderedAccessView> dummy_history_owner_uav;
-    ComPtr<ID3D11Texture2D> dummy_exclusion_texture;
-    ComPtr<ID3D11ShaderResourceView> dummy_exclusion_srv;
-    ComPtr<ID3D11UnorderedAccessView> dummy_exclusion_uav;
+    ComPtr<ID3D11Buffer> analysis_domain;
+    ComPtr<ID3D11ShaderResourceView> analysis_domain_srv;
     ComPtr<ID3D11Texture2D> coordinate_texture;
     ComPtr<ID3D11ShaderResourceView> coordinate_srv;
     ComPtr<ID3D11UnorderedAccessView> coordinate_uav;
@@ -894,6 +871,10 @@ void main(uint3 id : SV_DispatchThreadID) {
       }
       ComPtr<ID3D11ShaderResourceView> unused_srv;
       ComPtr<ID3D11UnorderedAccessView> unused_uav;
+      // Raw-coordinate replay has no synthetic padding: every supplied depth cell is content.
+      const models::host_sbs_v2_gpu::analysis_domain_record_t full_domain {
+        .valid = 1u, .width = width, .height = height, .right = width, .bottom = height,
+      };
       if (!create_structured_buffer(
             device.Get(), sizeof(float), width * height, nullptr, false,
             raw_buffer, raw_srv, unused_uav
@@ -970,9 +951,9 @@ void main(uint3 id : SV_DispatchThreadID) {
             device.Get(), sizeof(std::uint32_t), 10u, nullptr, true,
             dummy_history_owner_buffer, dummy_history_owner_srv, dummy_history_owner_uav
           ) ||
-          !create_uint_texture(
-            device.Get(), width, height,
-            dummy_exclusion_texture, dummy_exclusion_srv, dummy_exclusion_uav
+          !create_structured_buffer(
+            device.Get(), sizeof(full_domain), 1u, &full_domain, false,
+            analysis_domain, analysis_domain_srv, unused_uav
           ) ||
           !create_float_texture(
             device.Get(), width, height,
@@ -1003,9 +984,6 @@ void main(uint3 id : SV_DispatchThreadID) {
         error = "cannot create V2 GPU replay textures or depth-health state buffer";
         return false;
       }
-      const UINT zero_uint[4] = {};
-      const float zero_float[4] = {};
-      context->ClearUnorderedAccessViewUint(dummy_exclusion_uav.Get(), zero_uint);
       return true;
     }
 
@@ -1077,7 +1055,7 @@ void main(uint3 id : SV_DispatchThreadID) {
         .moments_shader = moments_shader.Get(),
         .frame_resolve_shader = frame_shader.Get(),
         .raw_depth = raw_srv.Get(),
-        .tensor_exclusion = dummy_exclusion_srv.Get(),
+        .analysis_domain = analysis_domain_srv.Get(),
         .partials_output = partial_uav.Get(),
         .partials = partial_srv.Get(),
         .frame_stats_output = frame_uav.Get(),
@@ -1112,7 +1090,7 @@ void main(uint3 id : SV_DispatchThreadID) {
       }
 
       ID3D11ShaderResourceView *coordinate_srvs[] = {
-        raw_srv.Get(), state_srv.Get(), dummy_exclusion_srv.Get(),
+        raw_srv.Get(), state_srv.Get(), analysis_domain_srv.Get(),
       };
 
       // The canonical coordinate is a replay diagnostic, matching the live Dump-3D-only pass.
@@ -1128,7 +1106,7 @@ void main(uint3 id : SV_DispatchThreadID) {
         .shader = map_shader.Get(),
         .raw_depth = raw_srv.Get(),
         .state = state_srv.Get(),
-        .tensor_exclusion = dummy_exclusion_srv.Get(),
+        .analysis_domain = analysis_domain_srv.Get(),
         .minmax_ema = dummy_minmax_srv.Get(),
         .current_model_input = dummy_current_model_input_srv.Get(),
         .depth_health_state = depth_health_state_srv.Get(),
