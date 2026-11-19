@@ -700,7 +700,7 @@ namespace platf::dxgi {
                             models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer),
         .estimator_present = static_cast<bool>(depth_estimator),
         .pipeline_build_pending = depth_estimator_build.valid(),
-        .depth_completion_pending = depth_completion_poll_pending,
+        .depth_completion_pending = pending_matched_frame != nullptr,
         .authority_reprocess_pending = depth_authority_reprocess_pending || subtitle_context_reprocess_pending ||
                                        (sbs_mode != ::video::SBS_OFF &&
                                         detail::host_sbs_window_authority_observation_needed(
@@ -1494,19 +1494,16 @@ namespace platf::dxgi {
           // call the completed source stays alive through its last shader or dump read.
           auto release_completed_capture_images = util::fail_guard([this]() {
             for (auto &slot : matched_frame_slots) {
-              if (!slot.pending) {
+              if (&slot != pending_matched_frame) {
                 slot.release_capture_image();
               }
             }
           });
           std::optional<detail::keyed_mutex_lock_t<IDXGIKeyedMutex>> prior_capture_lock;
-          const auto pending_it = std::find_if(
-            matched_frame_slots.begin(), matched_frame_slots.end(),
-            [](const matched_frame_slot_t &slot) { return slot.pending; }
-          );
+          const auto *prior_pending_frame = pending_matched_frame;
           HRESULT pending_source_status = S_OK;
           const auto acquire_pending_capture = [&]() {
-            if (pending_source_status != S_OK || pending_it == matched_frame_slots.end() || !pending_it->capture_mutex) {
+            if (pending_source_status != S_OK || !prior_pending_frame || !prior_pending_frame->capture_mutex) {
               return pending_source_status == S_OK;
             }
             // Preserve current-before-prior ordering. Polling a busy root needs neither key.
@@ -1514,8 +1511,8 @@ namespace platf::dxgi {
               pending_source_status = E_FAIL;
               return false;
             }
-            if (pending_it->capture_mutex != img_ctx->encoder_mutex.get() && !prior_capture_lock) {
-              prior_capture_lock.emplace(pending_it->capture_mutex);
+            if (prior_pending_frame->capture_mutex != img_ctx->encoder_mutex.get() && !prior_capture_lock) {
+              prior_capture_lock.emplace(prior_pending_frame->capture_mutex);
               pending_source_status = prior_capture_lock->lock(0, 0);
               if (pending_source_status != S_OK && pending_source_status != WAIT_TIMEOUT) {
                 BOOST_LOG(error) << "Failed to acquire pending Host SBS texture mutex [0x"sv
@@ -1600,7 +1597,6 @@ namespace platf::dxgi {
                                                    models::depth_step_result_t *polled = nullptr,
                                                    std::optional<std::chrono::steady_clock::time_point> age_sample_at = std::nullopt
                                                  ) {
-            slot.pending = false;
             matched_render_slot = &slot;
             // An explicit poll supplies the new step. Admission has already composed its step
             // and can report a completion together with a separately enqueued submission.
@@ -1655,10 +1651,18 @@ namespace platf::dxgi {
           };
 #endif
           detail::host_sbs_depth_reuse_authorization_t depth_reuse_authorization;
-          const auto release_unknown_completion = [this](
-                                                    const std::uint64_t completed_frame_id,
-                                                    const matched_frame_slot_t *preserve_slot
-                                                  ) {
+          const auto consume_matched_completion = [this](const models::depth_observation_views_t &observation) -> matched_frame_slot_t * {
+            // A ready result consumed the root even when no usable observation was produced.
+            // Its postprocess can overwrite the resources behind every prior borrowed view.
+            latest_v2_lineage.reset();
+            auto *completed_slot = std::exchange(pending_matched_frame, nullptr);
+            if (!observation.completed_frame_valid) {
+              return nullptr;
+            }
+            const auto completed_frame_id = observation.completed_frame_id;
+            if (completed_slot && completed_slot->frame_id == completed_frame_id) {
+              return completed_slot;
+            }
             const auto error_now = std::chrono::steady_clock::now();
             if (matched_unknown_frame_error_last.time_since_epoch().count() == 0 || error_now - matched_unknown_frame_error_last >= std::chrono::seconds(30)) {
               if (matched_unknown_frame_errors_suppressed) {
@@ -1675,13 +1679,7 @@ namespace platf::dxgi {
             } else {
               ++matched_unknown_frame_errors_suppressed;
             }
-            // The completion consumed its inference and no longer owns the source texture.
-            // Preserve only a separately enqueued current candidate, if one exists.
-            for (auto &slot : matched_frame_slots) {
-              if (&slot != preserve_slot) {
-                slot.pending = false;
-              }
-            }
+            return nullptr;
           };
 
           const auto validate_completed_slot = [&]() {
@@ -1852,7 +1850,7 @@ namespace platf::dxgi {
             depth_estimator &&
             models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer)
           ) {
-            if (pending_it != matched_frame_slots.end()) {
+            if (prior_pending_frame) {
               prior_poll_plan = detail::host_sbs_same_frame_poll_plan(
                 true, snapshot_debug_inputs, next_encode_target, std::chrono::steady_clock::now()
               );
@@ -1870,32 +1868,15 @@ namespace platf::dxgi {
                 );
               }
               if (polled.ready) {
-                latest_v2_lineage.reset();
-                depth_completion_poll_pending = false;
-                if (!polled.result.observation.completed_frame_valid) {
-                  for (auto &slot : matched_frame_slots) {
-                    slot.pending = false;
-                  }
-                  block_current_submission_after_early_poll = true;
-                } else {
-                  auto *completed_slot =
-                    find_pending_matched_slot(polled.result.observation.completed_frame_id);
-                  if (!completed_slot) {
-                    release_unknown_completion(polled.result.observation.completed_frame_id, nullptr);
-                    block_current_submission_after_early_poll = true;
-                  } else {
-                    adopt_matched_completion(*completed_slot, &polled.result);
-                    if (
-                      validate_completed_slot() &&
-                      apply_completed_domain_and_renderer()
-                    ) {
-                      retain_completed_lineage();
-                      completion_finalized_before_admission = true;
-                    } else {
-                      block_current_submission_after_early_poll = true;
-                    }
+                if (auto *completed_slot = consume_matched_completion(polled.result.observation)) {
+                  adopt_matched_completion(*completed_slot, &polled.result);
+                  completion_finalized_before_admission =
+                    validate_completed_slot() && apply_completed_domain_and_renderer();
+                  if (completion_finalized_before_admission) {
+                    retain_completed_lineage();
                   }
                 }
+                block_current_submission_after_early_poll = !completion_finalized_before_admission;
               }
             }
           }
@@ -1962,37 +1943,28 @@ namespace platf::dxgi {
               current_browser_authority_epoch,
               current_interactive_move_size
             );
-          // Harvesting the prior root can change the pending set. Classify those remaining
-          // sources once for packed repeats, DDup reuse, and admission of a new root.
-          bool inference_pending = false;
-          bool retained_source_pending = false;
+          // Classify any root still pending after the early poll for packed repeats, DDup reuse,
+          // and admission of the next root.
+          const bool inference_pending = source_admission.pipeline_active && pending_matched_frame;
+          const bool retained_source_pending =
+            inference_pending && same_source(pending_matched_frame->source_timestamp, current_source_timestamp);
           matched_frame_slot_t *unchanged_input_pending_slot = nullptr;
           auto pending_reuse_kind = detail::host_sbs_ddup_reuse_proof_e::none;
-          if (source_admission.pipeline_active) {
-            for (auto &slot : matched_frame_slots) {
-              if (!slot.pending) {
-                continue;
-              }
-              inference_pending = true;
-              if (same_source(slot.source_timestamp, current_source_timestamp)) {
-                retained_source_pending = true;
-                break;
-              }
-              if (dedup_gate_open && matched_route_matches_current(
-                slot,
-                live_source_desc,
-                input_color_space,
-                current_root_authority_generation,
-                current_region_authority_generation,
-                current_browser_authority_epoch,
-                current_interactive_move_size
-              )) {
-                const auto reuse_kind = current_input_reuse_kind(slot);
-                if (reuse_kind != detail::host_sbs_ddup_reuse_proof_e::none) {
-                  unchanged_input_pending_slot = &slot;
-                  pending_reuse_kind = reuse_kind;
-                }
-              }
+          if (
+            inference_pending && !retained_source_pending && dedup_gate_open &&
+            matched_route_matches_current(
+              *pending_matched_frame,
+              live_source_desc,
+              input_color_space,
+              current_root_authority_generation,
+              current_region_authority_generation,
+              current_browser_authority_epoch,
+              current_interactive_move_size
+            )
+          ) {
+            pending_reuse_kind = current_input_reuse_kind(*pending_matched_frame);
+            if (pending_reuse_kind != detail::host_sbs_ddup_reuse_proof_e::none) {
+              unchanged_input_pending_slot = pending_matched_frame;
             }
           }
           const auto completed_source_action = detail::host_sbs_completed_source_action(
@@ -2078,25 +2050,10 @@ namespace platf::dxgi {
                 return -1;
               }
               if (polled.ready) {
-                // A ready poll either normalized a completion or latched a producer failure. Do
-                // not retain resource aliases authenticated before that state transition.
-                latest_v2_lineage.reset();
-                depth_completion_poll_pending = false;
-                if (!polled.result.observation.completed_frame_valid) {
-                  // The verified slot represented the estimator's sole pending inference. A ready
-                  // empty/failure result has consumed or invalidated that ownership too; retaining
-                  // the bit would suppress every later submission indefinitely.
-                  unchanged_input_pending_slot->pending = false;
-                } else {
-                  auto *completed_slot =
-                    find_pending_matched_slot(polled.result.observation.completed_frame_id);
-                  if (completed_slot == unchanged_input_pending_slot) {
-                    force_fresh_current_color =
-                      current_input_reuse_kind(*completed_slot) != detail::host_sbs_ddup_reuse_proof_e::none;
-                    adopt_matched_completion(*completed_slot, &polled.result, reuse_now);
-                  } else {
-                    release_unknown_completion(polled.result.observation.completed_frame_id, nullptr);
-                  }
+                if (auto *completed_slot = consume_matched_completion(polled.result.observation)) {
+                  force_fresh_current_color =
+                    current_input_reuse_kind(*completed_slot) != detail::host_sbs_ddup_reuse_proof_e::none;
+                  adopt_matched_completion(*completed_slot, &polled.result, reuse_now);
                 }
               }
             } else if (inference_pending || block_current_submission_after_early_poll) {
@@ -2261,15 +2218,9 @@ namespace platf::dxgi {
                   step_observation.completed_frame_valid &&
                   !completion_finalized_before_admission
                 ) {
-                  latest_v2_lineage.reset();
-                  matched_render_slot = find_pending_matched_slot(step_observation.completed_frame_id);
+                  matched_render_slot = consume_matched_completion(step_observation);
                   if (matched_render_slot) {
                     adopt_matched_completion(*matched_render_slot);
-                  } else {
-                    release_unknown_completion(
-                      step_observation.completed_frame_id,
-                      matched_candidate_slot
-                    );
                   }
                 }
                 const bool gpu_undecided_transaction_enqueued =
@@ -2314,11 +2265,10 @@ namespace platf::dxgi {
                     pending->lane.release_geometry_lease();
                     pending->owner_unavailable = true;
                   }
-                  matched_candidate_slot->pending = true;
+                  pending_matched_frame = matched_candidate_slot;
                   if(temporal_source_bridge_enabled)temporal_source_ledger.note_admitted(matched_candidate_slot->temporal_source);
                   matched_candidate_slot->gpu_undecided_transaction =
                     gpu_undecided_transaction_enqueued;
-                  depth_completion_poll_pending = true;
                 }
 
                 if (probe_observer.record) {
@@ -2335,8 +2285,8 @@ namespace platf::dxgi {
                 // untouched. No older busy admission can enter this path because estimate_depth()
                 // must have successfully enqueued this candidate in the current call.
                 if (
-                  depth_transaction_enqueued && matched_candidate_slot &&
-                  matched_candidate_slot->pending && !snapshot_debug_inputs
+                  depth_transaction_enqueued &&
+                  pending_matched_frame == matched_candidate_slot && !snapshot_debug_inputs
                 ) {
                   const auto poll_started = std::chrono::steady_clock::now();
                   if (diagnostics_enabled) {
@@ -2496,25 +2446,11 @@ namespace platf::dxgi {
                     // finish_pending() rewrites the estimator's singleton V2 resources. The prior
                     // completion returned by estimate_depth() can no longer render after any ready
                     // current-frame query, including a ready failure or corrupt frame identity.
-                    latest_v2_lineage.reset();
-                    depth_completion_poll_pending = false;
+                    auto *completed_slot = consume_matched_completion(polled.result.observation);
                     clear_matched_selection();
                     completion_finalized_before_admission = false;
-                    if (
-                      completion ==
-                      detail::host_sbs_same_frame_completion_e::adopt_exact
-                    ) {
-                      adopt_matched_completion(*matched_candidate_slot, &polled.result);
-                    } else {
-                      // A ready empty/failure result consumed or invalidated B. Clear its exact
-                      // slot and let the existing terminal-flat/authentication path decide output.
-                      matched_candidate_slot->pending = false;
-                      if (polled.result.observation.completed_frame_valid) {
-                        release_unknown_completion(
-                          polled.result.observation.completed_frame_id,
-                          nullptr
-                        );
-                      }
+                    if (completed_slot) {
+                      adopt_matched_completion(*completed_slot, &polled.result);
                     }
                   }
                 }
@@ -2522,7 +2458,6 @@ namespace platf::dxgi {
             }
           } else {
             mark_sbs_matched_copy_end(gpu_timer, false);
-            depth_completion_poll_pending = false;
           }
 
           if (unchanged_content_submission_suppressed && depth_reuse_authorization.valid() && diagnostics_enabled) {
@@ -2595,7 +2530,7 @@ namespace platf::dxgi {
           }
           if (
             matched_render_slot && matched_candidate_slot &&
-            matched_candidate_slot->pending &&
+            pending_matched_frame == matched_candidate_slot &&
             (
               // Both operands are display-selected submission regions here. Their calibrated
               // coarse raster is intentional; no estimator publication participates in this
@@ -2816,7 +2751,7 @@ namespace platf::dxgi {
               ++matched_stats_output_flat;
               if (
                 same_frame_poll_missed_for_current_draw &&
-                depth_completion_poll_pending
+                pending_matched_frame
               ) {
                 // This should remain zero once a valid packed presentation exists. Keep the
                 // counter explicit so a route/reset invalidation can be distinguished from the
@@ -3880,14 +3815,13 @@ namespace platf::dxgi {
       host_sbs_renderer = models::fail_host_sbs_renderer_flat(host_sbs_renderer);
       retire_depth_estimator(std::move(depth_estimator));
       selected_matte_configured = selected_matte_ready = false;
+      pending_matched_frame = nullptr;
       for (auto &slot : matched_frame_slots) {
         slot.gpu_undecided_transaction = false;
-        slot.pending = false;
       }
       latest_v2_lineage.reset();
       matched_presentation_cache.reset();
       queued_research.reset();
-      depth_completion_poll_pending = false;
       depth_authority_reprocess_pending = false;
       subtitle_context_reprocess_pending = false;
       sbs_dumper.cancel_pending_request();
@@ -4704,7 +4638,6 @@ namespace platf::dxgi {
       // publication receipt independently reports the actual infer/reuse branch and depth owner.
       models::host_sbs_temporal_source_bridge::certificate_t temporal_source;
       bool gpu_undecided_transaction = false;
-      bool pending = false;
 
       ID3D11ShaderResourceView *analysis_input_srv() noexcept {
         return srv.get();
@@ -4924,7 +4857,8 @@ namespace platf::dxgi {
       }
       for (std::size_t i=0;i<matched_frame_slots.size();++i) {
         const auto &s = matched_frame_slots[i]; event.slot_frames[i]=s.frame_id;
-        event.slot_pending[i]=s.pending; event.pending_slots+=s.pending ? 1u:0u;
+        event.slot_pending[i] = &s == pending_matched_frame;
+        event.pending_slots += event.slot_pending[i] ? 1u : 0u;
         event.slot_observations[i]=host_sbs_observation_timestamp_us(s.captured_at);
         event.slot_contexts[i]=s.subtitle_context_generation;
         event.slot_source_addresses[i]=reinterpret_cast<std::uintptr_t>(s.srv.get());
@@ -5123,7 +5057,6 @@ namespace platf::dxgi {
       destination.subtitle_line_policy = source.subtitle_line_policy;
       destination.probe_instance = source.probe_instance;
       destination.gpu_undecided_transaction = source.gpu_undecided_transaction;
-      destination.pending = false;
     }
 
 
@@ -5281,9 +5214,8 @@ namespace platf::dxgi {
       const auto current_root_generation = authority_generation(live_window_authority);
       const auto current_region_generation = authority_generation(live_foreground_region);
       const auto &baseline = latest_v2_lineage.slot;
-      if (!latest_v2_lineage.known_depth() || candidate.frame_id <= baseline.frame_id || candidate.pending || candidate.observed_interactive_move_size || depth_completion_poll_pending || std::any_of(matched_frame_slots.begin(), matched_frame_slots.end(), [](const matched_frame_slot_t &slot) {
-            return slot.pending;
-          }) ||
+      if (!latest_v2_lineage.known_depth() || candidate.frame_id <= baseline.frame_id ||
+          candidate.observed_interactive_move_size || pending_matched_frame ||
           !candidate.inference_content_timestamp || candidate.inference_content_timestamp == baseline.inference_content_timestamp || !candidate.inference_ddup_damage || !baseline.inference_ddup_damage || candidate.inference_ddup_damage->history != baseline.inference_ddup_damage->history || baseline.inference_ddup_damage->token == 0u || candidate.inference_ddup_damage->token <= baseline.inference_ddup_damage->token || candidate.depth_input_region != baseline.depth_input_region || candidate.color_space != baseline.color_space || !matched_route_matches_current(candidate, source_desc, candidate.color_space, current_root_generation, current_region_generation, live_browser_authority_epoch, interactive_move_size_observed) || !latest_v2_lineage_route_matches_current(source_desc, candidate.color_space, current_root_generation, current_region_generation, live_browser_authority_epoch, interactive_move_size_observed)) {
         return false;
       }
@@ -5552,16 +5484,7 @@ namespace platf::dxgi {
       const matched_frame_slot_t *reserved_render_slot = nullptr
     ) {
       for (auto &slot : matched_frame_slots) {
-        if (!slot.pending && !slot.capture_image && &slot != reserved_render_slot) {
-          return &slot;
-        }
-      }
-      return nullptr;
-    }
-
-    matched_frame_slot_t *find_pending_matched_slot(std::uint64_t frame_id) {
-      for (auto &slot : matched_frame_slots) {
-        if (slot.pending && slot.frame_id == frame_id) {
+        if (&slot != pending_matched_frame && !slot.capture_image && &slot != reserved_render_slot) {
           return &slot;
         }
       }
@@ -5787,14 +5710,11 @@ namespace platf::dxgi {
           BOOST_LOG(info)
             << "Host SBS selected full-source 3D for an interactive foreground-window "sv
                "move/resize."sv;
-          for (const auto &slot : matched_frame_slots) {
-            if (slot.pending && slot.depth_input_region.is_video_region()) {
-              // Consuming this exact-source ROI completion does not enqueue a replacement. Ask
-              // the retained-source owner for one more conversion so full-source depth starts
-              // even if USER32 stops producing desktop damage during the modal move loop.
-              depth_authority_reprocess_pending = true;
-              break;
-            }
+          if (pending_matched_frame && pending_matched_frame->depth_input_region.is_video_region()) {
+            // Consuming this exact-source ROI completion does not enqueue a replacement. Ask
+            // the retained-source owner for one more conversion so full-source depth starts
+            // even if USER32 stops producing desktop damage during the modal move loop.
+            depth_authority_reprocess_pending = true;
           }
         }
         interactive_move_size_observed = true;
@@ -6885,7 +6805,6 @@ namespace platf::dxgi {
         sbs_telemetry_min_frame_id = frame_id;
       }
       slot.gpu_undecided_transaction = false;
-      slot.pending = false;
       const auto proof_region = damage_region(slot.depth_input_region);
       if (slot.depth_input_region.is_video_region() && proof_region) {
         slot.unchanged_roi_proof.reset(slot.inference_ddup_damage, *proof_region);
@@ -7284,6 +7203,7 @@ namespace platf::dxgi {
       sbs_telemetry_input_domain_valid = false;
       sbs_telemetry_producer_failure_published = false;
       sbs_telemetry_last_publish_attempt = {};
+      pending_matched_frame = nullptr;
       matched_frame_slots = {};
       depth_analysis_generation_tracker = {};
       foreground_window_tracker.reset();
@@ -7305,7 +7225,6 @@ namespace platf::dxgi {
       drawn_source_order.reset();
       latest_v2_lineage.reset();
       matched_presentation_cache.reset();
-      depth_completion_poll_pending = false;
       depth_authority_reprocess_pending = false;
       sbs_intermediate_is_linear = false;
       packed_output_in_shutter_pair = false;
@@ -8239,6 +8158,8 @@ namespace platf::dxgi {
     bool sbs_debug_geometry_ready = false;
     D3D11_VIEWPORT sbs_viewport;
     std::array<matched_frame_slot_t, 2> matched_frame_slots;
+    // The estimator's sole pending root pins this source and keeps conversion polling active.
+    matched_frame_slot_t *pending_matched_frame = nullptr;
     std::optional<video_dom::lease_t> video_dom_lease;
 #ifdef SUNSHINE_TESTS
     std::shared_future<std::vector<std::wstring>> test_registry_executables;
@@ -8273,7 +8194,6 @@ namespace platf::dxgi {
     std::uint64_t sbs_frame_sequence = 0;
     latest_v2_lineage_t latest_v2_lineage;
     matched_presentation_cache_t matched_presentation_cache;
-    bool depth_completion_poll_pending = false;
     bool depth_authority_reprocess_pending = false;
     std::chrono::steady_clock::time_point matched_stats_started {};
     unsigned matched_stats_calls = 0;
@@ -8623,7 +8543,7 @@ namespace platf::dxgi {
           models::host_sbs_renderer_uses_depth_pipeline(converter_->host_sbs_renderer)
         );
         result.pipeline_enabled = converter_->sbs_mode != ::video::SBS_OFF && models::host_sbs_renderer_uses_depth_pipeline(converter_->host_sbs_renderer);
-        result.depth_completion_pending = converter_->depth_completion_poll_pending;
+        result.depth_completion_pending = converter_->pending_matched_frame != nullptr;
         result.authority_reprocess_pending = converter_->depth_authority_reprocess_pending;
         result.subtitle_reprocess_pending = converter_->subtitle_context_reprocess_pending;
         result.dump_pending = converter_->sbs_dumper.needs_conversion_poll();
@@ -8895,7 +8815,8 @@ namespace platf::dxgi {
         converter_->sbs_mode = inputs.mode;
         converter_->host_sbs_renderer = inputs.renderer;
         converter_->video_player_registry_ready_observed = inputs.registry_ready_observed;
-        converter_->depth_completion_poll_pending = inputs.depth_completion_pending;
+        converter_->pending_matched_frame = inputs.depth_completion_pending ?
+                                             &converter_->matched_frame_slots.front() : nullptr;
         converter_->depth_authority_reprocess_pending = inputs.depth_authority_reprocess_pending;
         converter_->subtitle_context_reprocess_pending = inputs.subtitle_context_reprocess_pending;
         converter_->stream_gamma_conversion_pending = inputs.stream_gamma_conversion_pending;

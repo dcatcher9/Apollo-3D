@@ -98,7 +98,7 @@ d3d_base_encode_device::queued_draw_t d3d_base_encode_device::select_queued_rese
   // cannot establish which capture the slot now owns.
   auto *source = frame.source_slot;
   draw.same_source = frame.ticket && source && !draw.force_flat && warp_available &&
-                     source->pending && source == candidate && source->frame_id == capture.frame_id &&
+                     source == pending_matched_frame && source == candidate && source->frame_id == capture.frame_id &&
                      drawn_source_order.permits(source->frame_id) &&
                      matched_route_matches_current(
                        *source, capture.desc, capture.transfer, authority_generation(live_window_authority),
@@ -311,22 +311,16 @@ bool d3d_base_encode_device::select_pending_colour_draw(
   const auto same_source = [&](const matched_frame_slot_t &slot) {
     return slot.source_timestamp && current_source_timestamp && slot.source_timestamp == current_source_timestamp;
   };
-  const bool force_flat = pending.owner_unavailable && std::ranges::any_of(matched_frame_slots, [&](const auto &slot) {
-                            return slot.pending && !same_source(slot);
-                          });
+  const bool force_flat =
+    pending.owner_unavailable && pending_matched_frame && !same_source(*pending_matched_frame);
 
   const auto &owner = pending.lane.ticket();
   if (!owner) {
     return force_flat;
   }
 
-  matched_frame_slot_t *owner_slot = nullptr;
-  for (auto &candidate : matched_frame_slots) {
-    if (candidate.pending && candidate.frame_id == owner->submitted_frame_id) {
-      owner_slot = &candidate;
-    }
-  }
-  if (!owner_slot) {
+  auto *owner_slot = pending_matched_frame;
+  if (!owner_slot || owner_slot->frame_id != owner->submitted_frame_id) {
     // An ACK releases geometry ownership while the retirement bank and watermark survive.
     pending.lane.release_geometry_lease();
     return force_flat;

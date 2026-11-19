@@ -430,7 +430,7 @@ namespace actual_converter_probe_v1 {
       wait_ready();
       convert(0); // exact same img/source/content identity on retry
       const auto *a=records.last_draw();require(a&&a->publication_current&&!a->queued&&a->publication.frame_id==1&&converter.sbs_frame_sequence==2,"A/ACK protocol unavailable; no invented ordinal");
-      require(std::none_of(converter.matched_frame_slots.begin(),converter.matched_frame_slots.end(),[](const auto &s){return s.pending;}),"A retry unexpectedly enqueued; target3 unavailable");
+      require(!converter.pending_matched_frame, "A retry unexpectedly enqueued; target3 unavailable");
       if(!r.packed_continuity) {
         // convert() has released its encoder-side keyed lease. Reacquire that SAME
         // prepared A context before the initial diagnostic reads its shared SRV.
@@ -545,9 +545,8 @@ namespace actual_converter_probe_v1 {
           return std::find_if(images.begin(), images.end(), [](const auto &image) { return image.use_count() == 1; });
         };
         const auto check_pending_b_pin = [&]() {
-          const auto slot = std::find_if(converter.matched_frame_slots.begin(), converter.matched_frame_slots.end(),
-            [](const auto &candidate) { return candidate.pending && candidate.frame_id == 3u; });
-          require(slot != converter.matched_frame_slots.end() &&
+          auto *slot = converter.pending_matched_frame;
+          require(slot && slot->frame_id == 3u &&
             slot->capture_image.get() == images[1].get() &&
             slot->texture.get() == b_context.encoder_texture.get() &&
             slot->srv.get() == b_context.encoder_input_res.get() && images[1].use_count() > 1 &&
@@ -586,8 +585,6 @@ namespace actual_converter_probe_v1 {
             held->configuration.callback_safety_timeout_ms==gate.callback_safety_timeout_ms&&
             held->last_actual_event_query==CUDA_ERROR_NOT_READY&&held->actual_not_ready_queries>0u,
             "B is not an actually queried held root; no manufactured pending result");
-          require(std::count_if(converter.matched_frame_slots.begin(),converter.matched_frame_slots.end(),
-            [](const auto &s){return s.pending&&s.frame_id==3u;})==1,"Held B lost its sole pending slot");
           check_pending_b_pin();
           return *held;
         };
@@ -891,12 +888,10 @@ namespace actual_converter_probe_v1 {
           if (r.native_p010) artifacts.push_back(save("matched-A.p010",outputs[0]));
           // A fresh C may have entered the sole slot during B's successful recovery. Retire
           // it on the same immutable C source before the diagnostic converter is destroyed.
-          if (std::any_of(converter.matched_frame_slots.begin(), converter.matched_frame_slots.end(),
-              [](const auto &slot) { return slot.pending; })) {
+          if (converter.pending_matched_frame) {
             wait_ready();
             convert(2);
-            require(std::none_of(converter.matched_frame_slots.begin(), converter.matched_frame_slots.end(),
-              [](const auto &slot) { return slot.pending; }), "Final C still retains a pending capture source");
+            require(!converter.pending_matched_frame, "Final C still retains a pending capture source");
           }
           if (check_retained_rgb) {
             auto image = display->alloc_img();
@@ -1110,7 +1105,8 @@ namespace actual_converter_probe_v1 {
       for(;;){auto q=est->joined_completion_gate_status_for_benchmark();require(q&&!q->released&&clock_t::now()<entered_deadline,"No held B gate window");if(q->callback_entered)break;std::this_thread::sleep_for(std::chrono::milliseconds(1));}
       const auto pending=est->try_finish_pending_depth_nonblocking(r.hdr_input?models::input_color_space::scrgb_hdr:models::input_color_space::srgb,false);const auto after_query=us();
       const auto held=est->joined_completion_gate_status_for_benchmark();require(!pending.ready&&held&&held->callback_entered&&!held->released&&held->last_actual_event_query==CUDA_ERROR_NOT_READY,"B must be actual recorded NOT_READY");
-      require(converter.sbs_frame_sequence==3&&std::count_if(converter.matched_frame_slots.begin(),converter.matched_frame_slots.end(),[](const auto &s){return s.pending&&s.frame_id==3;})==1,"Exact pending B source slot lost");
+      require(converter.sbs_frame_sequence == 3 && converter.pending_matched_frame &&
+        converter.pending_matched_frame->frame_id == 3, "Exact pending B source slot lost");
       const auto b_admission=std::find_if(records.events.begin(),records.events.begin()+records.count,[](const auto &e){return e.kind==event_e::admission&&e.conversion==3;});
       require(b_admission!=records.events.begin()+records.count&&b_admission->model_frame==3&&b_admission->force_infer&&!b_admission->gpu_undecided&&
         b_admission->optional_work==static_cast<std::uint32_t>(models::depth_optional_work_mode_e::ordinary),"B did not take the actual ordinary force-infer admission branch");
@@ -1125,7 +1121,8 @@ namespace actual_converter_probe_v1 {
         const auto still_pending=est->try_finish_pending_depth_nonblocking(r.hdr_input?models::input_color_space::scrgb_hdr:models::input_color_space::srgb,false);
         pending_c_query=est->joined_completion_gate_status_for_benchmark();
         require(!timeout_forced_release.load()&&!still_pending.ready&&pending_c_query&&pending_c_query->callback_entered&&!pending_c_query->released&&pending_c_query->last_actual_event_query==CUDA_ERROR_NOT_READY,"No real pending-B window at C return; timeout is unavailable, not success");
-        require(records.captured[4]&&converter.sbs_frame_sequence==4&&std::count_if(converter.matched_frame_slots.begin(),converter.matched_frame_slots.end(),[](const auto&s){return s.pending&&s.frame_id==3;})==1,"C arrival lost actual pending B lease");
+        require(records.captured[4] && converter.sbs_frame_sequence == 4 && converter.pending_matched_frame &&
+          converter.pending_matched_frame->frame_id == 3, "C arrival lost actual pending B lease");
         require(std::none_of(records.events.begin(),records.events.begin()+records.count,[](const auto &e){return e.kind==event_e::admission&&e.conversion==4;}),"C was admitted while B retained the sole inflight lease");
       }
       require(!timeout_forced_release.load(),"Independent release deadline fired before selection proof");
@@ -1133,7 +1130,10 @@ namespace actual_converter_probe_v1 {
       const auto released=est->joined_completion_gate_status_for_benchmark();require(released&&released->released,"Release not observed");released_before_readback=true;
       records.armed=3;const auto ack_begin=us();convert(pending_arrival?2:1);const auto ack_return=us();
       require(records.captured[3]&&records.phase_event[3].publication_current&&records.phase_event[3].publication.frame_id==3,"Genuine converter B ACK unavailable");
-      if(!pending_arrival){require(converter.sbs_frame_sequence==4&&std::none_of(converter.matched_frame_slots.begin(),converter.matched_frame_slots.end(),[](const auto&s){return s.pending;}),"B ACK unexpectedly resubmitted");records.copy_target(3,target.Get());}
+      if (!pending_arrival) {
+        require(converter.sbs_frame_sequence == 4 && !converter.pending_matched_frame, "B ACK unexpectedly resubmitted");
+        records.copy_target(3, target.Get());
+      }
       if(!pending_arrival){records.armed=5;stamp(2);convert(2);}
       if(!records.captured[5]){wait_ready();convert(2);}
       require(records.captured[5]&&records.phase_event[5].publication_current,"Genuine C not yet drawn; no synthetic empty proof");
@@ -1368,8 +1368,7 @@ namespace actual_converter_probe_v1 {
           while(!est->can_accept_frame()){require(clock_t::now()<deadline&&!est->has_terminal_failure(),"Fixed-six native readiness timeout");std::this_thread::sleep_for(std::chrono::milliseconds(1));}
         }
         require(own,"Fixed-six own matched draw unavailable after bounded retries");
-        require(std::none_of(converter.matched_frame_slots.begin(),converter.matched_frame_slots.end(),
-          [](const auto &slot){return slot.pending;}),"Own matched draw left another pending source; no next admission");
+        require(!converter.pending_matched_frame, "Own matched draw left another pending source; no next admission");
         const auto actual=*own;auto &img=static_cast<img_d3d_t&>(*images[i]);
         const auto image_context=converter.img_ctx_map.find(img.id);
         require(image_context!=converter.img_ctx_map.end(),"Own matched encoder image context missing");

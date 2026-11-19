@@ -6855,13 +6855,13 @@ TEST(DirectxShaderSourceTest, HostSbsLatestV2LineageIsNotCurrentRenderAuthorizat
   // Each transition that can revoke or rewrite the singleton resources must clear the borrowed
   // lineage before the branch continues. A total reset count could miss one of these boundaries
   // while counting an unrelated new reset, and would reject additional safe revocation paths.
-  const auto expect_reset_between = [](const std::string &source, const char *boundary, const char *begin_anchor, const char *end_anchor) {
+  const auto expect_reset_between = [](const std::string &source, const char *boundary, const char *begin_anchor, const char *end_anchor, const char *operation = "latest_v2_lineage.reset();") {
     SCOPED_TRACE(boundary);
     const auto begin = source.find(begin_anchor);
     ASSERT_NE(begin, std::string::npos);
     const auto end = source.find(end_anchor, begin + std::string_view {begin_anchor}.size());
     ASSERT_NE(end, std::string::npos);
-    const auto reset = source.find("latest_v2_lineage.reset();", begin);
+    const auto reset = source.find(operation, begin);
     ASSERT_NE(reset, std::string::npos);
     EXPECT_LT(reset, end) << "Revocation must precede the branch's next ownership action.";
   };
@@ -6872,18 +6872,25 @@ TEST(DirectxShaderSourceTest, HostSbsLatestV2LineageIsNotCurrentRenderAuthorizat
 
   const boundary_t selection_boundaries[] {
     {"lost window/video authority", "!window_region_authorized_for_render(*matched_render_slot)", "return false;"},
-    {"early ready completion or producer failure", "if (polled.ready) {", "depth_completion_poll_pending = false;"},
     {"route/dump/reprocess/terminal revocation", "if (detail::host_sbs_latest_v2_lineage_reset_required(", "const bool cached_geometry_render_allowed"},
-    {"unchanged pending input completes", "unchanged_content_submission_suppressed = true;", "depth_completion_poll_pending = false;"},
     {"authority changes during matched copy", "completion_finalized_before_admission && matched_render_slot &&\n                !matched_route_matches_current(", "clear_matched_selection();"},
     {"admission revokes an early publication", "!depth_estimator->publication_is_current(step_observation.publication)", "completion_finalized_before_admission = false;"},
-    {"ordinary asynchronous completion", "step_observation.completed_frame_valid &&\n                  !completion_finalized_before_admission", "matched_render_slot = find_pending_matched_slot(step_observation.completed_frame_id);"},
     {"invalid adaptive submission class", "models::gpu_adaptive_submission_class_e::invalid", "if (force_infer_transaction_enqueued) {"},
     {"missing force-infer capture causality", "!matched_candidate_slot->inference_content_timestamp ||", "// The forced full-source submission has retired the old ROI authority."},
-    {"current-frame completion no longer pending", "detail::host_sbs_same_frame_completion_e::keep_pending\n", "depth_completion_poll_pending = false;"},
   };
   for (const auto &boundary : selection_boundaries) {
     expect_reset_between(selection, boundary.name, boundary.begin, boundary.end);
+  }
+  expect_reset_between(selection, "consuming the pending owner",
+                       "const auto consume_matched_completion =", "std::exchange(pending_matched_frame, nullptr)");
+  const boundary_t completion_boundaries[] {
+    {"early ready completion or producer failure", "if (polled.ready) {", "adopt_matched_completion("},
+    {"unchanged pending input completes", "unchanged_content_submission_suppressed = true;", "} else if (inference_pending"},
+    {"ordinary asynchronous completion", "step_observation.completed_frame_valid &&\n                  !completion_finalized_before_admission", "if (matched_render_slot) {"},
+    {"current-frame completion no longer pending", "detail::host_sbs_same_frame_completion_e::keep_pending\n", "clear_matched_selection();"},
+  };
+  for (const auto &boundary : completion_boundaries) {
+    expect_reset_between(selection, boundary.name, boundary.begin, boundary.end, "consume_matched_completion(");
   }
   expect_reset_between(queued_research, "queued continuation may rewrite singleton fields",
                        "depth_estimator->queue_pending_same_source_gpu_continuation_for_evaluation(",
@@ -7656,7 +7663,7 @@ TEST(DirectxShaderSourceTest, HostSbsRejectsRotationAndUsesMatchedV2Frames) {
     display.find("display->display_rotation != DXGI_MODE_ROTATION_IDENTITY"),
     std::string::npos
   );
-  EXPECT_NE(display.find("find_pending_matched_slot(step_observation.completed_frame_id)"), std::string::npos);
+  EXPECT_NE(display.find("completed_slot->frame_id == completed_frame_id"), std::string::npos);
   EXPECT_NE(display.find("render_handoff->authenticate_structure()"), std::string::npos);
   const auto live_selection = display.find("const bool v2_live_warp_selected =");
   ASSERT_NE(live_selection, std::string::npos);
