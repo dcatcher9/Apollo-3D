@@ -31,7 +31,7 @@ void oracle_content_main(uint3 dispatch_thread : SV_DispatchThreadID) {
         return;
     }
     uint2 source_size = DepthSourceRegionSize();
-    float3 pixel = SampleLetterboxedModelFootprint(output_position, source_size, false, int2(0, 0));
+    float3 pixel = SampleModelFootprint(output_position, source_size, false, false, int2(0, 0));
     OutputTensorExclusion[output_position] = 0u;
 
     float r = (pixel.r - 0.485f) / 0.229f;

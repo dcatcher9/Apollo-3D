@@ -36,7 +36,7 @@ inline constexpr std::array<cache::shader_spec, 5u> colour_specs{{
   cache::shader_spec{"host_sbs_subtitle_inner_colour_cs.hlsl","accumulate_main","cs_5_0"},
   cache::shader_spec{"host_sbs_subtitle_inner_colour_cs.hlsl","validate_main","cs_5_0"},
 }};
-inline constexpr std::string_view colour_closure="3acf5709c8a03f72fa08cb604b49360c76415cee5278ea375f4b2822b51f5a22";
+inline constexpr std::string_view colour_closure="aae8edf01f977612d0b33b46c85ef7874fff39864d5d27f13bdc6d5196feebec";
 inline constexpr std::array<cache::shader_spec, 6u> components_specs{{
   cache::shader_spec{"host_sbs_subtitle_seeded_components_cs.hlsl","init_main","cs_5_0"},
   cache::shader_spec{"host_sbs_subtitle_seeded_components_cs.hlsl","union_main","cs_5_0"},
@@ -59,7 +59,7 @@ inline constexpr std::array<cache::shader_spec, 11u> enclosure_specs{{
   cache::shader_spec{"host_sbs_current_black_enclosure_cs.hlsl","select_unit_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_black_enclosure_cs.hlsl","publish_main","cs_5_0"},
 }};
-inline constexpr std::string_view enclosure_closure="53fbb00cf2fb05827667b7ae52623a520aad2fa186141f455c53b18b0bc101ae";
+inline constexpr std::string_view enclosure_closure="93a6a29660f7abb07c50254f18259223df394497873d4d4993160799c38be1ce";
 // One canonical ROI owner; the historical enclosure-local file remains for its independently
 // pinned enclosure/ring fixtures. Production loads this group once.
 inline constexpr std::array<cache::shader_spec, 3u> roi_specs{{

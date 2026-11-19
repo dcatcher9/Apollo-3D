@@ -439,7 +439,7 @@
         "host_sbs_near_identical_fused_preprocess",
         "host_sbs_near_identical_tiled_preprocess"
       ],
-      "source_closure_sha256": "ccd6b647610036cbb5afe4f982335bb047e4eec61cfad00268b6645da932a754"
+      "source_closure_sha256": "83d03389a9a73211a7b5815f4a92d81edb6ab3804e23f73881e86ba9f83e8eb9"
     },
     {
       "name": "parallax_v2_producer",
@@ -473,7 +473,7 @@
         "host_sbs_subtitle_gaussian_vertical_limit",
         "host_sbs_subtitle_gaussian_horizontal_limit"
       ],
-      "source_closure_sha256": "d87554ce9e4cc2120b752133e79d9bd1162d3d44b168d89e5cbfdd0f7b7e6423"
+      "source_closure_sha256": "05397c7a6a07661a5c7219f374e07c22e4f04e55606defe410ef893903bb408d"
     },
     {
       "name": "parallax_v2_replay_resolve",
@@ -482,7 +482,7 @@
         "depth_coordinate_v2_quantiles",
         "depth_coordinate_v2_state_resolve"
       ],
-      "source_closure_sha256": "b912c8e09a25fb5acf83c14f6c39657d44ed82fdaf90ab1558f1a00e7ed5c976"
+      "source_closure_sha256": "d3fbe5f1aa63f94c74ecf95a7a65e1839f4d7287d30fb18c8b2c109b33feb990"
     },
     {
       "name": "parallax_v2_coordinate_diagnostic",
@@ -490,7 +490,7 @@
       "specs": [
         "depth_coordinate_v2_coordinate_diagnostic"
       ],
-      "source_closure_sha256": "4ee6e15edec2f4b3290ec0495f0be39a67ee68096ac44ab3d4842d18016650fc"
+      "source_closure_sha256": "a034fc63141864b9ee616562fbef86e9c356a9b391f57a99425ae410193e06dc"
     },
     {
       "name": "near_identical_detector",
@@ -500,7 +500,7 @@
         "host_sbs_near_identical_finalize",
         "host_sbs_near_identical_reuse_depth"
       ],
-      "source_closure_sha256": "d6d5bf436341a21d08ae7e7b2be662d3ccda9c41859020dde297dd0fcdf08b50"
+      "source_closure_sha256": "ad8bad6c6f8423dcf4029b7d0c4c1b12f2c0fb101aaf0d29c29ab146dd73a006"
     },
     {
       "name": "gpu_trace",
@@ -508,7 +508,7 @@
       "specs": [
         "host_sbs_gpu_trace"
       ],
-      "source_closure_sha256": "d606c3949ec9d8a471dcc6fabaf99893abab859715334a2daa73309812519a20"
+      "source_closure_sha256": "561759a22bf2606641073a9fc65f537142ac16530161aa4e575bbf787204e27e"
     },
     {
       "name": "parallax_v2_live_renderer",
@@ -517,7 +517,7 @@
         "parallax_v2_live_renderer",
         "sbs_reprojection_vertex"
       ],
-      "source_closure_sha256": "d2f116909b2f0a8433d0b5d69a3eebb0d7f03ceb323350ae06f50d85c6c099b3"
+      "source_closure_sha256": "a1b4f1d80ded3008f0218e209416d8940e9960a8f30eeaf4292096aeee16c572"
     },
     {
       "name": "parallax_v2_p010_y",
@@ -525,7 +525,7 @@
       "specs": [
         "parallax_v2_p010_y_renderer"
       ],
-      "source_closure_sha256": "6e73f1e4b950a5e60e57fb9efa6e1829d70aaeda3bc5c2a35c82754766b99a0d"
+      "source_closure_sha256": "f87de264915af3e7c28a8d98a4b6e4c52b400f437cfc20dc77d95c689125d975"
     },
     {
       "name": "sbs_flat_fallback",
@@ -543,7 +543,7 @@
         "parallax_v2_live_mapping",
         "parallax_v2_live_mask"
       ],
-      "source_closure_sha256": "6fb2832eafe14d4b5dbc67db9ba4d87fdb9296d5f2a96c079e44c9215f461e97"
+      "source_closure_sha256": "6f60e144f42a2d9a25208fe5a1c38582718d58e8b4f6f4e8f7da2e193f4e81a8"
     },
     {
       "name": "subtitle_cohort_prototype_research",
@@ -553,7 +553,7 @@
         "host_sbs_subtitle_cohort_members",
         "host_sbs_subtitle_cohort_filter"
       ],
-      "source_closure_sha256": "2320658291bdaaf9d4871f9ffeea0106108a926094de7e4f733233bae861126a"
+      "source_closure_sha256": "f60cd79b31c5fe95bd4f9462e8384bf0601e78db8d76fa23b1807455fa613e70"
     },
     {
       "name": "subtitle_cohort_research",
@@ -564,7 +564,7 @@
         "host_sbs_subtitle_cohort_filter",
         "host_sbs_subtitle_cohort_snapshot"
       ],
-      "source_closure_sha256": "9a475f343f24bd2f58232df084d5c079ac262576a121e3fd7a3adc092c3a68d0"
+      "source_closure_sha256": "04c03288c498edb67d8d6ab9d583929624d442a7d1a3c041763afff0f3dbc264"
     },
     {
       "name": "subtitle_inner_colour_research",
@@ -576,7 +576,7 @@
         "host_sbs_subtitle_inner_colour_research_accumulate",
         "host_sbs_subtitle_inner_colour_research_validate"
       ],
-      "source_closure_sha256": "dea347868332dd499eeea0f643c6ddef3d59d5125fb188c27919822ee8b7f4b6"
+      "source_closure_sha256": "5d669059161bc027e27a1194ee8a59248c32b3f84aaee300a4406635c7c793aa"
     },
     {
       "name": "subtitle_inner_components_research",
@@ -597,7 +597,7 @@
       "specs": [
         "host_sbs_subtitle_matte_guard"
       ],
-      "source_closure_sha256": "f4f3ce723ab9b2b39051b17d347c33fe03376493a26a54777b05fb34216baa1c"
+      "source_closure_sha256": "84d1a0ba26a3b7b72952aa9d3a649ce068f0285ba57cb15b04e1d563f5b318d8"
     },
     {
       "name": "parallax_v2_queued_renderer",
@@ -605,7 +605,7 @@
       "specs": [
         "parallax_v2_queued_renderer"
       ],
-      "source_closure_sha256": "3dd83477653bd2c3c0185e748dd588ef96d7db4239bd6b75bb291b2d9f7eed2c"
+      "source_closure_sha256": "3cd12e9b8a6ae298658e440bc00810a9859316dd0560fcaa918c363966fcb958"
     },
     {
       "name": "current_mask_holes",

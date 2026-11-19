@@ -20,7 +20,7 @@ uint FusedNearIdenticalTileAxisGroups(uint dimension) {
     return dimension / 16u + (dimension % 16u != 0u ? 1u : 0u);
 }
 
-// Bounds mirror the two canonical area integrations. Clip the group to the output
+// Bounds mirror the canonical full-grid and letterbox footprints. Clip the group to the output
 // before projecting it so every nonempty edge group fits the same sampling contract.
 bool ModelSourceTileBounds(uint2 group, out int2 origin, out uint2 extent, out uint2 source_size) {
     uint2 texture_size;
