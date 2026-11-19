@@ -90,10 +90,10 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | `parallax_v2_coordinate_diagnostic` | 1 | `4fcc81d5e39a82ed191ea698744b4adf4d1eb76a901b5c530b701c6acd8cfa88` |
 | `near_identical_detector` | 3 | `9ad9e92a4322dfc1e98ddcf48640c1e756fc302bf0d87a83bc7dd375fd9426da` |
 | `gpu_trace` | 1 | `17821b83f08f37f6aae1b43c1b1c5d82a2992e6f8b8a38dc66da76bcb5c32905` |
-| `parallax_v2_live_renderer` | 2 | `32fc83ea81789e2b151926743e98a9fe1c6b7c9b74dc5f3a51e0ca58ce6d7576` |
-| `parallax_v2_p010_y` | 1 | `226cef8463910d1d0996fb67c07f14e9df5b758bafb6d63751b9af5beb9df0f8` |
+| `parallax_v2_live_renderer` | 2 | `e2c4aa5b6be16c9d22f11f4facf8767df6d4cbb0914141307fdb73fa5e54224a` |
+| `parallax_v2_p010_y` | 1 | `29711ff50c3c8bafb09324cf12fde8692bb90819f2d3ead2bcb67f83ea2dcdad` |
 | `sbs_flat_fallback` | 2 | `7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4` |
-| `parallax_v2_live_diagnostic` | 2 | `86861b0a58abeb3384c7fdc9991ef5b2e332eee700fe7b774b6672fc60cbe251` |
+| `parallax_v2_live_diagnostic` | 2 | `54e676448419e47a74a0b7a29a05f5f5fc3a01c021b3236b1a3fb8c873d76eb0` |
 | `subtitle_cohort_prototype_research` | 3 | `d1d12b05995d9ca92b5050c98116e3bc75cbafa2266c1dfa5d2102537aa11c71` |
 | `subtitle_cohort_research` | 4 | `01460384ad84a0df6c58faf9858701be6cfc2b4943e728ebbf32e92b297939df` |
 | `subtitle_inner_colour_research` | 5 | `0e04aab4599f2f889790cdbe642a9df4ecd7b35a8fdcd3932f0b614831138b0d` |

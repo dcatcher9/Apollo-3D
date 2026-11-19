@@ -561,7 +561,7 @@ PARALLAX_V2_LIVE_RENDERER_GROUP = ClosureGroup(
         PARALLAX_V2_LIVE_RENDERER,
         SBS_REPROJECTION_VERTEX,
     ),
-    source_closure_sha256="32fc83ea81789e2b151926743e98a9fe1c6b7c9b74dc5f3a51e0ca58ce6d7576",
+    source_closure_sha256="e2c4aa5b6be16c9d22f11f4facf8767df6d4cbb0914141307fdb73fa5e54224a",
 )
 
 PARALLAX_V2_P010_Y_GROUP = ClosureGroup(
@@ -572,7 +572,7 @@ PARALLAX_V2_P010_Y_GROUP = ClosureGroup(
     specs=(
         PARALLAX_V2_P010_Y_RENDERER,
     ),
-    source_closure_sha256="226cef8463910d1d0996fb67c07f14e9df5b758bafb6d63751b9af5beb9df0f8",
+    source_closure_sha256="29711ff50c3c8bafb09324cf12fde8692bb90819f2d3ead2bcb67f83ea2dcdad",
 )
 
 SBS_FLAT_FALLBACK_GROUP = ClosureGroup(
@@ -596,7 +596,7 @@ PARALLAX_V2_LIVE_DIAGNOSTIC_GROUP = ClosureGroup(
         PARALLAX_V2_LIVE_MAPPING,
         PARALLAX_V2_LIVE_MASK,
     ),
-    source_closure_sha256="86861b0a58abeb3384c7fdc9991ef5b2e332eee700fe7b774b6672fc60cbe251",
+    source_closure_sha256="54e676448419e47a74a0b7a29a05f5f5fc3a01c021b3236b1a3fb8c873d76eb0",
 )
 
 SUBTITLE_COHORT_PROTOTYPE_RESEARCH_GROUP = ClosureGroup(
