@@ -10267,14 +10267,12 @@ namespace models {
         return {};
       }
 
-      // CUDA cannot map the raw transaction buffer while D3D owns it. Copy the proposal-authored
-      // preprocess args to the D3D-only indirect twin, then run the crop for authenticated OCR
-      // only when the shared analysis decision selects inference.
-      // Malformed/missing proposals do not consume stale input.
-      context->CopyResource(
-        near_identical_transaction.dispatch.Get(), near_identical_transaction.buffer.Get()
-      );
       if (ocr_frame_eligible) {
+        // The pre-CUDA crop consumes the proposal's indirect arguments. The finalizer publishes
+        // the postprocess arguments separately after CUDA releases the raw transaction.
+        context->CopyResource(
+          near_identical_transaction.dispatch.Get(), near_identical_transaction.buffer.Get()
+        );
         const std::array<std::uint32_t, 8> ocr_constants {
           input_region.width(),
           input_region.height(),

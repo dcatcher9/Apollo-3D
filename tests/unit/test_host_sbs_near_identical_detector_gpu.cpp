@@ -600,16 +600,33 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
   EXPECT_NE(estimator.find("depth_resource_count + (ocr_frame_eligible ? ocr_resource_count : 0u)"), std::string::npos);
   EXPECT_NE(estimator.find("split_interop_for_benchmark ? depth_resource_count : interop_resource_count"), std::string::npos);
   EXPECT_NE(estimator.find("near_identical_transaction.dispatch"), std::string::npos);
-  const auto dispatch_copy = estimator.find("context->CopyResource(");
-  ASSERT_NE(dispatch_copy, std::string::npos);
-  EXPECT_NE(
-    estimator.find("near_identical_transaction.dispatch.Get()", dispatch_copy),
-    std::string::npos
-  );
-  EXPECT_NE(
-    estimator.find("near_identical_transaction.buffer.Get()", dispatch_copy),
-    std::string::npos
-  );
+  // Only OCR preprocessing consumes the proposal's pre-CUDA indirect arguments. Depth-only
+  // admission must leave the twin alone until the authoritative receipt finalizer copies it.
+  const auto proposal_begin = estimator.find("const bool transaction_published =");
+  const auto map_begin = estimator.find("std::array<CUgraphicsResource, 5> interop_resources", proposal_begin);
+  ASSERT_NE(proposal_begin, std::string::npos);
+  ASSERT_NE(map_begin, std::string::npos);
+  const auto prepare = estimator.substr(proposal_begin, map_begin - proposal_begin);
+  const auto optional_begin = prepare.find("if (ocr_frame_eligible) {");
+  const auto optional_end = prepare.find("\n      }", optional_begin);
+  const auto proposal_copy = prepare.find("context->CopyResource(");
+  const auto optional_dispatch = prepare.find("context->DispatchIndirect(", optional_begin);
+  ASSERT_NE(optional_begin, std::string::npos);
+  ASSERT_NE(optional_end, std::string::npos);
+  ASSERT_NE(proposal_copy, std::string::npos);
+  ASSERT_NE(optional_dispatch, std::string::npos);
+  EXPECT_LT(optional_begin, proposal_copy);
+  EXPECT_LT(proposal_copy, optional_dispatch);
+  EXPECT_LT(optional_dispatch, optional_end);
+  EXPECT_EQ(prepare.find("context->CopyResource(", proposal_copy + 1u), std::string::npos);
+  const auto proposal_copy_end = prepare.find(");", proposal_copy);
+  ASSERT_NE(proposal_copy_end, std::string::npos);
+  const auto proposal_copy_call = prepare.substr(proposal_copy, proposal_copy_end - proposal_copy);
+  EXPECT_NE(proposal_copy_call.find("near_identical_transaction.dispatch.Get()"), std::string::npos);
+  EXPECT_NE(proposal_copy_call.find("near_identical_transaction.buffer.Get()"), std::string::npos);
+  EXPECT_NE(prepare.substr(optional_dispatch, optional_end - optional_dispatch).find(
+              "near_identical_gpu_optional_preprocess_byte_offset"), std::string::npos);
+
   EXPECT_NE(
     estimator.find("desc.MiscFlags = D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS"),
     std::string::npos
@@ -859,6 +876,14 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
     finalizer_body.find("context->Dispatch(1u, 1u, 1u)", one_direct_dispatch + 1u),
     std::string::npos
   );
+  const auto unbind = finalizer_body.find("context->CSSetUnorderedAccessViews(0u, 4u, null_outputs, nullptr);", one_direct_dispatch);
+  const auto receipt_copy = finalizer_body.find("context->CopyResource(");
+  ASSERT_NE(unbind, std::string::npos);
+  ASSERT_NE(receipt_copy, std::string::npos);
+  EXPECT_LT(unbind, receipt_copy);
+  EXPECT_EQ(finalizer_body.find("context->CopyResource(", receipt_copy + 1u), std::string::npos);
+  EXPECT_NE(finalizer_body.find("near_identical_transaction.dispatch.Get()", receipt_copy), std::string::npos);
+  EXPECT_NE(finalizer_body.find("near_identical_transaction.buffer.Get()", receipt_copy), std::string::npos);
   EXPECT_NE(
     finalizer_body.find("near_identical_finalize_cs.Get()"),
     std::string::npos

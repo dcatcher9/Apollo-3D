@@ -2161,9 +2161,10 @@ remain uncommitted; a valid request with a malformed proposal still selects infe
 The tag establishes post-child execution ordering, not numeric model validity or CPU publication.
 OCR is infer-only; reuse leaves both children dormant. D3D11 buffers marked `DRAWINDIRECT_ARGS` are not
 CUDA-registerable on the production driver, so the registerable transaction has a same-sized
-D3D-only indirect twin. D3D copies it once after proposal resolution for authenticated OCR
-preprocessing on infer. After CUDA unmap, one direct one-thread detector finalizer validates the
-depth receipt, geometry constants and requested subtitle proof together before authorizing any
+D3D-only indirect twin. Only OCR-eligible submissions copy the proposal into the twin before CUDA.
+The proposal authorizes preprocessing only for an infer decision. After CUDA unmap, one direct
+one-thread detector finalizer validates the depth receipt, geometry constants and requested
+subtitle proof together before authorizing any
 infer postprocess shape. Valid inference publishes exact-current OCR abstention when optional output
 is not authorized; malformed conditional authority holds both depth and subtitle. It never writes force-infer depth shapes; those stages remain host-authored direct
 dispatches. D3D then copies the finalized transaction once for all indirect consumers. The twelve
