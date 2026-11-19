@@ -282,7 +282,7 @@ namespace {
     EXPECT_NE(video_source.find("bool first_encoder_output = true;"), std::string::npos);
     EXPECT_NE(video_source.find("first_encoder_output = false;"), std::string::npos);
     const auto wire_start = stream_source.find("if (packet->processing_started || stage_diagnostics)");
-    const auto wire_end = stream_source.find("auto fecPercentage", wire_start);
+    const auto wire_end = stream_source.find("const auto packetization_started =", wire_start);
     ASSERT_NE(wire_start, std::string::npos);
     ASSERT_NE(wire_end, std::string::npos);
     const auto wire_body = stream_source.substr(wire_start, wire_end - wire_start);

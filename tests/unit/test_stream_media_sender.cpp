@@ -232,6 +232,102 @@ TEST(StreamMediaSenderTest, VideoFecPacketsAuthenticateAndRecoverOneMissingPaylo
   expect_no_worker_error(state);
 }
 
+TEST(StreamMediaSenderTest, VideoSplitsFecBlocksAndClearsTheTailOfReusedDataShards) {
+  media::media_sender_config_t config;
+  config.video_packet_size = 200;
+  config.video_fec_percentage = 1;
+  config.video_min_fec_packets = 2;
+  const std::size_t picture_bytes = config.video_packet_size - sizeof(NV_VIDEO_PACKET);
+  // At 1% FEC, 252 data shards fit in one block. The next shard forces a split.
+  constexpr std::array<std::size_t, 2> data_per_block {127, 126};
+  constexpr std::size_t total_data = data_per_block[0] + data_per_block[1];
+  constexpr std::size_t total_wire = total_data + 4;
+  const auto payload = authored_bytes(total_data * picture_bytes - short_frame_header_size, 61);
+
+  media::media_sender_fixture_t sender(config);
+  sender.start();
+  ASSERT_TRUE(sender.wait_ready(lane_e::video, 3s));
+  ASSERT_TRUE(sender.enqueue_video({payload, 7}));
+  const auto wire = sender.receive(lane_e::video, total_wire, 3s);
+  ASSERT_EQ(wire.size(), total_wire);
+  ASSERT_TRUE(sender.wait_processed(lane_e::video, 1, 3s));
+
+  bytes_t joined;
+  std::size_t wire_index = 0;
+  for (std::size_t block = 0; block < data_per_block.size(); ++block) {
+    const auto data = data_per_block[block];
+    for (std::size_t shard = 0; shard < data + 2; ++shard, ++wire_index) {
+      const auto decoded = decrypt_video(wire[wire_index], config);
+      ASSERT_TRUE(decoded.has_value());
+      EXPECT_EQ(decoded->video.multiFecBlocks, (block << 4) | 0x40);
+      EXPECT_EQ(decoded->video.fecInfo, (data << 22) | (shard << 12) | 0x10);
+      EXPECT_EQ(boost::endian::big_to_native(decoded->rtp.sequenceNumber), config.video_sequence + wire_index);
+      expect_video_nonce(*decoded, config.video_iv_counter + wire_index);
+      if (shard < data) {
+        const auto flags = FLAG_CONTAINS_PIC_DATA | (shard == 0 ? FLAG_SOF : 0) | (shard == data - 1 ? FLAG_EOF : 0);
+        EXPECT_EQ(decoded->video.flags, flags);
+        joined.insert(joined.end(), decoded->plaintext.begin() + video_header_size, decoded->plaintext.end());
+      }
+    }
+  }
+  ASSERT_EQ(joined.size(), total_data * picture_bytes);
+  EXPECT_EQ(little_u16(joined.data() + 4), picture_bytes);
+  EXPECT_TRUE(std::equal(payload.begin(), payload.end(), joined.begin() + short_frame_header_size));
+
+  // This short frame reuses the previous workspace and raises parity to the negotiated minimum.
+  const auto short_payload = authored_bytes(17, 93);
+  ASSERT_TRUE(sender.enqueue_video({short_payload, 8, false}));
+  const auto short_wire = sender.receive(lane_e::video, 3, 3s);
+  ASSERT_EQ(short_wire.size(), 3u);
+  const auto decoded = decrypt_video(short_wire.front(), config);
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(decoded->video.multiFecBlocks, 0);
+  EXPECT_EQ(decoded->video.fecInfo, (1u << 22) | (200u << 4));
+  const auto *header = decoded->plaintext.data() + video_header_size;
+  const auto used = short_frame_header_size + short_payload.size();
+  EXPECT_EQ(little_u16(header + 4), used);
+  EXPECT_TRUE(std::equal(short_payload.begin(), short_payload.end(), header + short_frame_header_size));
+  EXPECT_TRUE(std::all_of(header + used, header + picture_bytes, [](auto byte) {
+    return byte == 0;
+  }));
+  ASSERT_TRUE(sender.wait_processed(lane_e::video, 2, 3s));
+  sender.stop();
+  const auto state = sender.state_after_stop();
+  EXPECT_EQ(state.video_sequence, config.video_sequence + total_wire + 3);
+  EXPECT_EQ(state.video_iv_counter, config.video_iv_counter + total_wire + 3);
+  expect_no_worker_error(state);
+}
+
+TEST(StreamMediaSenderTest, OversizedFrameRequiresRecoveryIdrWithoutConsumingSequenceOrNonce) {
+  media::media_sender_config_t config;
+  config.video_packet_size = 200;
+  const std::size_t picture_bytes = config.video_packet_size - sizeof(NV_VIDEO_PACKET);
+  const auto oversized = authored_bytes(4 * 1023 * picture_bytes - short_frame_header_size + 1, 23);
+  const auto payload = authored_bytes(17, 93);
+
+  media::media_sender_fixture_t sender(config);
+  sender.start();
+  ASSERT_TRUE(sender.wait_ready(lane_e::video, 3s));
+  ASSERT_TRUE(sender.enqueue_video({oversized, 7}));
+  ASSERT_TRUE(sender.wait_processed(lane_e::video, 1, 3s));
+  ASSERT_TRUE(sender.enqueue_video({payload, 8, false}));
+  ASSERT_TRUE(sender.wait_processed(lane_e::video, 2, 3s));
+  ASSERT_TRUE(sender.enqueue_video({payload, 9}));
+  const auto wire = sender.receive(lane_e::video, 1, 3s);
+  ASSERT_EQ(wire.size(), 1u);
+  const auto decoded = decrypt_video(wire.front(), config);
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(decoded->video.frameIndex, 9u);
+  EXPECT_EQ(boost::endian::big_to_native(decoded->rtp.sequenceNumber), config.video_sequence);
+  expect_video_nonce(*decoded, config.video_iv_counter);
+  ASSERT_TRUE(sender.wait_processed(lane_e::video, 3, 3s));
+  sender.stop();
+  const auto state = sender.state_after_stop();
+  EXPECT_EQ(state.video_sequence, config.video_sequence + 1);
+  EXPECT_EQ(state.video_iv_counter, config.video_iv_counter + 1);
+  expect_no_worker_error(state);
+}
+
 TEST(StreamMediaSenderTest, AudioDecryptsFourPayloadsAndEmitsTwoFecShardsWithExactHeaders) {
   media::media_sender_config_t config;
   media::media_sender_fixture_t sender(config);
