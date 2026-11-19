@@ -234,9 +234,10 @@ TEST(StreamMediaSenderTest, VideoFecPacketsAuthenticateAndRecoverOneMissingPaylo
 
 TEST(StreamMediaSenderTest, VideoSplitsFecBlocksAndClearsTheTailOfReusedDataShards) {
   media::media_sender_config_t config;
-  config.video_packet_size = 200;
+  config.video_packet_size = 201;
   config.video_fec_percentage = 1;
   config.video_min_fec_packets = 2;
+  config.video_sequence = 65'520;
   const std::size_t picture_bytes = config.video_packet_size - sizeof(NV_VIDEO_PACKET);
   // At 1% FEC, 252 data shards fit in one block. The next shard forces a split.
   constexpr std::array<std::size_t, 2> data_per_block {127, 126};
@@ -247,7 +248,7 @@ TEST(StreamMediaSenderTest, VideoSplitsFecBlocksAndClearsTheTailOfReusedDataShar
   media::media_sender_fixture_t sender(config);
   sender.start();
   ASSERT_TRUE(sender.wait_ready(lane_e::video, 3s));
-  ASSERT_TRUE(sender.enqueue_video({payload, 7}));
+  ASSERT_TRUE(sender.enqueue_video({payload, 7, true, false, false, 1s}));
   const auto wire = sender.receive(lane_e::video, total_wire, 3s);
   ASSERT_EQ(wire.size(), total_wire);
   ASSERT_TRUE(sender.wait_processed(lane_e::video, 1, 3s));
@@ -261,11 +262,14 @@ TEST(StreamMediaSenderTest, VideoSplitsFecBlocksAndClearsTheTailOfReusedDataShar
       ASSERT_TRUE(decoded.has_value());
       EXPECT_EQ(decoded->video.multiFecBlocks, (block << 4) | 0x40);
       EXPECT_EQ(decoded->video.fecInfo, (data << 22) | (shard << 12) | 0x10);
-      EXPECT_EQ(boost::endian::big_to_native(decoded->rtp.sequenceNumber), config.video_sequence + wire_index);
+      EXPECT_EQ(boost::endian::big_to_native(decoded->rtp.sequenceNumber), static_cast<std::uint16_t>(config.video_sequence + wire_index));
+      EXPECT_EQ(boost::endian::big_to_native(decoded->rtp.timestamp), 90'000u);
       expect_video_nonce(*decoded, config.video_iv_counter + wire_index);
       if (shard < data) {
         const auto flags = FLAG_CONTAINS_PIC_DATA | (shard == 0 ? FLAG_SOF : 0) | (shard == data - 1 ? FLAG_EOF : 0);
         EXPECT_EQ(decoded->video.flags, flags);
+        EXPECT_EQ(decoded->video.multiFecFlags, 0x10);
+        EXPECT_EQ(decoded->video.streamPacketIndex, (config.video_sequence + wire_index) << 8);
         joined.insert(joined.end(), decoded->plaintext.begin() + video_header_size, decoded->plaintext.end());
       }
     }

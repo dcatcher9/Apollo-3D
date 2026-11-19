@@ -2794,6 +2794,8 @@ instead: it records no capture or conversion content age and no handoff to conve
 (`video::detail::diagnostic_captured_content_timestamp`). Before 10-07 those ages grew by the log
 window, to 115 s, for pixels nothing encoded. The export's own age is the output stage's. Diagnostics report fresh and repeated output separately, along with capture
 handoff, conversion, NVENC encode/retrieve, encoded-packet queue residence, and packetization time.
+The packetization sample adds the frame pacing plan and each FEC block's data-shard packing time.
+It excludes parity encoding, pacing waits, and socket sends.
 The standard video-header processing-latency field measures the current conversion-pass start
 through send-side packetization admission, including that pass, NVENC, and encoded-packet queue
 residence. It excludes time before this conversion, including a previously pending inference,

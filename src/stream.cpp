@@ -1897,25 +1897,32 @@ namespace stream {
     }
   }  // namespace fec
 
-  // Materialize complete data shards so FEC and the sender can both reference them directly.
-  static std::uint8_t *packetize_video_frame(
+  // Pack one block in wire order. FEC and the synchronous sends share these same data shards.
+  static std::uint8_t *packetize_video_block(
     video_shard_storage_t &storage,
     std::size_t blocksize,
-    const video_short_frame_header_t &frame_header,
-    std::string_view payload,
-    std::size_t data_shards
+    std::size_t data_shards,
+    std::string_view &payload,
+    video_packet_raw_t header,
+    std::uint32_t block_lowseq,
+    const video_short_frame_header_t *frame_header
   ) {
     const auto size = data_shards * blocksize;
     if (storage.size() < size) {
       storage.resize(size);
     }
 
-    auto *shard = storage.data();
-    std::memcpy(shard + sizeof(video_packet_raw_t), &frame_header, sizeof(frame_header));
-    auto prefix_bytes = sizeof(video_packet_raw_t) + sizeof(frame_header);
+    auto *const first_shard = storage.data();
+    auto *shard = first_shard;
+    auto prefix_bytes = sizeof(header);
+    if (frame_header) {
+      std::memcpy(shard + prefix_bytes, frame_header, sizeof(*frame_header));
+      prefix_bytes += sizeof(*frame_header);
+    }
+    header.packet.flags = FLAG_CONTAINS_PIC_DATA;
     for (std::size_t index = 0; index < data_shards; ++index, shard += blocksize) {
-      // The packet fields filled after FEC must be zero while parity is generated.
-      std::memset(shard, 0, sizeof(video_packet_raw_t));
+      std::memcpy(shard, &header, sizeof(header));
+      reinterpret_cast<video_packet_raw_t *>(shard)->packet.streamPacketIndex = block_lowseq++ << 8;
       auto *picture = shard + prefix_bytes;
       const auto capacity = blocksize - prefix_bytes;
       const auto bytes = std::min(capacity, payload.size());
@@ -1926,9 +1933,11 @@ namespace stream {
       if (bytes < capacity) {
         std::memset(picture + bytes, 0, capacity - bytes);
       }
-      prefix_bytes = sizeof(video_packet_raw_t);
+      prefix_bytes = sizeof(header);
     }
-    return storage.data();
+    reinterpret_cast<video_packet_raw_t *>(first_shard)->packet.flags |= FLAG_SOF;
+    reinterpret_cast<video_packet_raw_t *>(shard - blocksize)->packet.flags |= FLAG_EOF;
+    return first_shard;
   }
 
   /**
@@ -3000,7 +3009,7 @@ namespace stream {
     );
 
     crypto::aes_t iv(12);
-    video_shard_storage_t packetization_storage;
+    video_shard_storage_t data_shard_storage;
     fec::rs_cache_t video_rs_cache;
     fec::workspace_t video_fec_workspace;
 
@@ -3029,8 +3038,8 @@ namespace stream {
       }
 #endif
       auto release_oversized_workspaces = util::fail_guard([&]() {
-        if (packetization_storage.capacity() > VIDEO_SEND_WORKSPACE_RETAIN_LIMIT) {
-          video_shard_storage_t().swap(packetization_storage);
+        if (data_shard_storage.capacity() > VIDEO_SEND_WORKSPACE_RETAIN_LIMIT) {
+          video_shard_storage_t().swap(data_shard_storage);
         }
         video_fec_workspace.release_oversized();
       });
@@ -3079,7 +3088,7 @@ namespace stream {
 
       auto lowseq = channel->lowseq;
 
-      const std::string_view payload {reinterpret_cast<const char *>(packet->data()), packet->data_size()};
+      std::string_view payload {reinterpret_cast<const char *>(packet->data()), packet->data_size()};
 
       video_short_frame_header_t frame_header = {};
       frame_header.headerType = 0x01;  // Short header type
@@ -3156,13 +3165,6 @@ namespace stream {
       const auto fec_blocks_needed = frame_plan->block_count;
 
       try {
-        auto *block_payload = packetize_video_frame(
-          packetization_storage,
-          blocksize,
-          frame_header,
-          payload,
-          frame_plan->data_shards
-        );
         const auto wire_packet_bytes = blocksize + sizeof(video_packet_enc_prefix_t);
         const auto pacing_plan = make_video_pacing_plan(
           effective_pacing.bitrate,
@@ -3187,10 +3189,9 @@ namespace stream {
           send_batch_size,
           pacing_plan.packets_per_quantum,
         });
-        if (stage_diagnostics) {
-          if (const auto elapsed = video::detail::diagnostic_elapsed_ms(packetization_started, video::detail::diagnostic_clock_t::now())) {
-            stage_diagnostics->packetization.collect_and_log(*elapsed);
-          }
+        auto packetization_time = video::detail::diagnostic_clock_t::duration::zero();
+        if (packetization_started) {
+          packetization_time = video::detail::diagnostic_clock_t::now() - *packetization_started;
         }
 
         const auto ceiling_label =
@@ -3212,34 +3213,42 @@ namespace stream {
                           << (pacing_plan.max_frame_span_ns / 1'000'000.0) << " ms."sv;
         }
 
-        // Don't overlap this frame with the final paced packet of the previous frame.
-        auto ratecontrol_frame_start = std::max(ratecontrol_next_frame_start, std::chrono::steady_clock::now());
+        // A duplicate without a capture timestamp uses the same pacing timestamp for every block.
+        using rtp_tick = std::chrono::duration<std::uint32_t, std::ratio<1, 90000>>;
+        const auto capture_time = packet->frame_timestamp.value_or(ratecontrol_next_frame_start);
+        const auto timestamp = std::chrono::round<rtp_tick>(capture_time - video_epoch).count();
+
+        // Leave RTP and fecInfo zero until the parity shards have been generated.
+        video_packet_raw_t block_header {};
+        block_header.packet.frameIndex = packet->frame_index();
+        block_header.packet.multiFecFlags = 0x10;
+        auto ratecontrol_frame_start = ratecontrol_next_frame_start;
 
         size_t ratecontrol_frame_packets_sent = 0;
 
         for (std::size_t block_index = 0; block_index < fec_blocks_needed; ++block_index) {
           const auto &block = frame_plan->blocks[block_index];
-          const auto packets = block.data_shards;
           const auto block_lowseq = lowseq;
-
-          for (std::size_t x = 0; x < packets; ++x) {
-            auto *inspect = reinterpret_cast<video_packet_raw_t *>(block_payload + x * blocksize);
-
-            inspect->packet.frameIndex = packet->frame_index();
-            inspect->packet.streamPacketIndex =
-              (block_lowseq + static_cast<std::uint32_t>(x)) << 8;
-
-            // Match multiFecFlags with Artemis
-            inspect->packet.multiFecFlags = 0x10;
-            inspect->packet.multiFecBlocks = (block_index << 4) | ((fec_blocks_needed - 1) << 6);
-
-            inspect->packet.flags = FLAG_CONTAINS_PIC_DATA;
-            if (x == 0) {
-              inspect->packet.flags |= FLAG_SOF;
-            }
-            if (x == packets - 1) {
-              inspect->packet.flags |= FLAG_EOF;
-            }
+          const auto block_packing_started = video::detail::diagnostic_timestamp(
+            stage_diagnostics.has_value(),
+            video::detail::diagnostic_clock_t::now
+          );
+          block_header.packet.multiFecBlocks = (block_index << 4) | ((fec_blocks_needed - 1) << 6);
+          auto *block_payload = packetize_video_block(
+            data_shard_storage,
+            blocksize,
+            block.data_shards,
+            payload,
+            block_header,
+            block_lowseq,
+            block_index == 0 ? &frame_header : nullptr
+          );
+          if (block_packing_started) {
+            packetization_time += video::detail::diagnostic_clock_t::now() - *block_packing_started;
+          }
+          if (block_index == 0) {
+            // Start pacing when the first block is packed and the previous frame's slot has ended.
+            ratecontrol_frame_start = std::max(ratecontrol_frame_start, std::chrono::steady_clock::now());
           }
 
           frame_fec_latency_logger.first_point_now();
@@ -3275,14 +3284,6 @@ namespace stream {
 
           size_t next_shard_to_send = 0;
 
-          // RTP video timestamps use a 90 KHz clock and the frame_timestamp from when the frame was captured
-          // When a timestamp isn't available (duplicate frames), the timestamp from rate control is used instead.
-          if (!packet->frame_timestamp) {
-            packet->frame_timestamp = ratecontrol_next_frame_start;
-          }
-          using rtp_tick = std::chrono::duration<uint32_t, std::ratio<1, 90000>>;
-          uint32_t timestamp = std::chrono::round<rtp_tick>(*packet->frame_timestamp - video_epoch).count();
-
           // set FEC info now that we know for sure what our percentage will be for this frame
           for (auto x = 0; x < shards.size(); ++x) {
             auto *inspect = (video_packet_raw_t *) shards.data(x);
@@ -3298,8 +3299,8 @@ namespace stream {
             );
             inspect->rtp.timestamp = util::endian::big<uint32_t>(timestamp);
 
-            inspect->packet.multiFecBlocks = (block_index << 4) | ((fec_blocks_needed - 1) << 6);
-            inspect->packet.frameIndex = packet->frame_index();
+            inspect->packet.multiFecBlocks = block_header.packet.multiFecBlocks;
+            inspect->packet.frameIndex = block_header.packet.frameIndex;
 
             // Use the deterministic IV construction algorithm specified in NIST SP 800-38D
             // Section 8.2.1. The counter identifies each use of the client's unique key.
@@ -3308,7 +3309,7 @@ namespace stream {
             channel->gcm_iv_counter++;
 
             auto *prefix = (video_packet_enc_prefix_t *) shards.prefix(x);
-            prefix->frameNumber = packet->frame_index();
+            prefix->frameNumber = block_header.packet.frameIndex;
             std::copy(std::begin(iv), std::end(iv), prefix->iv);
             channel->cipher.encrypt(std::string_view {(char *) inspect, (size_t) blocksize}, prefix->tag, (uint8_t *) inspect, &iv);
 
@@ -3365,8 +3366,9 @@ namespace stream {
               next_shard_to_send = x + 1;
             }
           }
-
-          block_payload += packets * blocksize;
+        }
+        if (stage_diagnostics) {
+          stage_diagnostics->packetization.collect_and_log(std::chrono::duration<double, std::milli>(packetization_time).count());
         }
 
         // Remember the final scheduled packet time in case the next frame is already queued.
