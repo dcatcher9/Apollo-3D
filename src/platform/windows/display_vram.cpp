@@ -5269,47 +5269,6 @@ namespace platf::dxgi {
       );
     }
 
-    struct matched_motion_damage_t {
-      detail::ddup_damage_coverage_t coverage;
-    };
-
-    [[nodiscard]] std::optional<matched_motion_damage_t> matched_motion_damage(
-      const models::depth_input_region_t &input_region,
-      const std::optional<std::chrono::steady_clock::time_point> &baseline_content,
-      const std::optional<detail::ddup_damage_snapshot_t> &baseline_damage,
-      const std::optional<detail::ddup_damage_snapshot_t> &current_damage
-    ) const noexcept {
-      if (!baseline_content || !baseline_damage || !current_damage) {
-        return std::nullopt;
-      }
-      const auto region = damage_region(input_region);
-      if (!region) {
-        return std::nullopt;
-      }
-      const auto coverage = detail::query_ddup_damage_coverage_between(
-        baseline_damage,
-        current_damage,
-        *region
-      );
-      return matched_motion_damage_t {coverage};
-    }
-
-    /** DDup continuity from the latest completed analysis input, never an approximate rendered
-     * color or packed redelivery. The receipt keeps the actual depth owner distinct; the device
-     * compares current input cumulatively against that owner and decides similarity.
-     */
-    [[nodiscard]] std::optional<matched_motion_damage_t> matched_motion_damage(
-      const matched_frame_slot_t &slot,
-      const std::optional<detail::ddup_damage_snapshot_t> &current_damage
-    ) const noexcept {
-      return matched_motion_damage(
-        slot.depth_input_region,
-        slot.inference_content_timestamp,
-        slot.inference_ddup_damage,
-        current_damage
-      );
-    }
-
     /** Form the host proof once, after private-copy ROI/authority selection and the late receipt
      * poll. B owns complete DDup source continuity; the receipt separately names actual depth A.
      */
@@ -5326,8 +5285,8 @@ namespace platf::dxgi {
           !candidate.inference_content_timestamp || candidate.inference_content_timestamp == baseline.inference_content_timestamp || !candidate.inference_ddup_damage || !baseline.inference_ddup_damage || candidate.inference_ddup_damage->history != baseline.inference_ddup_damage->history || baseline.inference_ddup_damage->token == 0u || candidate.inference_ddup_damage->token <= baseline.inference_ddup_damage->token || candidate.depth_input_region != baseline.depth_input_region || candidate.color_space != baseline.color_space || !matched_route_matches_current(candidate, source_desc, candidate.color_space, current_root_generation, current_region_generation, live_browser_authority_epoch, interactive_move_size_observed) || !latest_v2_lineage_route_matches_current(source_desc, candidate.color_space, current_root_generation, current_region_generation, live_browser_authority_epoch, interactive_move_size_observed)) {
         return false;
       }
-      const auto damage = matched_motion_damage(baseline, candidate.inference_ddup_damage);
-      return damage && detail::host_sbs_adaptive_motion_damage_candidate(damage->coverage);
+      return baseline.inference_content_timestamp && damage_region(baseline.depth_input_region) &&
+             detail::has_complete_ddup_damage_between(baseline.inference_ddup_damage, candidate.inference_ddup_damage);
     }
 
     [[nodiscard]] bool matched_route_matches_current(

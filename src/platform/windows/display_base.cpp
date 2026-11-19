@@ -137,23 +137,6 @@ namespace platf::dxgi {
                rect.right <= width && rect.bottom <= height;
       }
 
-      [[nodiscard]] std::uint64_t damage_rect_intersection_area(
-        const RECT &a,
-        const RECT &b
-      ) noexcept {
-        const auto width = static_cast<std::int64_t>(
-          std::min(a.right, b.right)
-        ) - std::max(a.left, b.left);
-        const auto height = static_cast<std::int64_t>(
-          std::min(a.bottom, b.bottom)
-        ) - std::max(a.top, b.top);
-        if (width <= 0 || height <= 0) {
-          return 0u;
-        }
-        return static_cast<std::uint64_t>(width) *
-               static_cast<std::uint64_t>(height);
-      }
-
       [[nodiscard]] bool add_copy_bounds(
         RECT &bounds,
         const RECT &rect,
@@ -296,22 +279,15 @@ namespace platf::dxgi {
       };
     }
 
-    ddup_damage_intersection_e ddup_damage_history_t::query(
+    bool ddup_damage_history_t::has_complete_interval(
       const std::uint64_t from_exclusive,
-      const std::uint64_t through_inclusive,
-      const RECT &region
+      const std::uint64_t through_inclusive
     ) const {
-      const auto coverage = query_coverage(
-        from_exclusive,
-        through_inclusive,
-        region
-      );
-      if (!coverage.known) {
-        return ddup_damage_intersection_e::unknown;
+      if (from_exclusive == through_inclusive) {
+        return from_exclusive != 0u;
       }
-      return coverage.potentially_changed_area == 0u ?
-               ddup_damage_intersection_e::unchanged :
-               ddup_damage_intersection_e::changed;
+      std::lock_guard lock {mutex_};
+      return retained_range_locked(from_exclusive, through_inclusive).has_value();
     }
 
     std::optional<ddup_damage_history_t::range_t>
@@ -344,64 +320,34 @@ namespace platf::dxgi {
       return range_t {first, count};
     }
 
-    ddup_damage_coverage_t ddup_damage_history_t::query_coverage(
+    ddup_damage_intersection_e ddup_damage_history_t::query(
       const std::uint64_t from_exclusive,
       const std::uint64_t through_inclusive,
-      const RECT &region,
-      const bool collect_max_single_intersection
+      const RECT &region
     ) const {
-      ddup_damage_coverage_t result;
-      if (
-        from_exclusive == 0u || through_inclusive == 0u ||
-        from_exclusive > through_inclusive || region.left < 0 || region.top < 0 ||
-        region.right <= region.left || region.bottom <= region.top
-      ) {
-        return result;
+      if (region.left < 0 || region.top < 0 || region.right <= region.left || region.bottom <= region.top) {
+        return ddup_damage_intersection_e::unknown;
       }
-      result.region_area =
-        static_cast<std::uint64_t>(
-          static_cast<std::int64_t>(region.right) - region.left
-        ) *
-        static_cast<std::uint64_t>(
-          static_cast<std::int64_t>(region.bottom) - region.top
-        );
       if (from_exclusive == through_inclusive) {
-        result.known = true;
-        return result;
+        return from_exclusive != 0u ? ddup_damage_intersection_e::unchanged :
+                                      ddup_damage_intersection_e::unknown;
       }
 
       std::lock_guard lock {mutex_};
       const auto range = retained_range_locked(from_exclusive, through_inclusive);
       if (!range) {
-        return result;
+        return ddup_damage_intersection_e::unknown;
       }
       for (std::size_t offset = 0u; offset < range->count; ++offset) {
         const auto &entry = entries_[range->first + offset];
         for (const auto &rect : entry.rects) {
-          const auto overlap = damage_rect_intersection_area(rect, region);
-          if (collect_max_single_intersection) {
-            result.max_single_intersection_area =
-              std::max(result.max_single_intersection_area, overlap);
+          if (std::max(rect.left, region.left) < std::min(rect.right, region.right) &&
+              std::max(rect.top, region.top) < std::min(rect.bottom, region.bottom)) {
+            return ddup_damage_intersection_e::changed;
           }
-          if (result.potentially_changed_area == result.region_area) {
-            if (!collect_max_single_intersection) {
-              break;
-            }
-            continue;
-          }
-          if (overlap >= result.region_area - result.potentially_changed_area) {
-            result.potentially_changed_area = result.region_area;
-            if (!collect_max_single_intersection) {
-              break;
-            }
-            continue;
-          }
-          result.potentially_changed_area += overlap;
         }
       }
-
-      result.known = true;
-      return result;
+      return ddup_damage_intersection_e::unchanged;
     }
 
     ddup_capture_copy_plan_t ddup_damage_history_t::plan_copy(
@@ -484,6 +430,14 @@ namespace platf::dxgi {
       );
     }
 
+    bool has_complete_ddup_damage_between(
+      const std::optional<ddup_damage_snapshot_t> &from,
+      const std::optional<ddup_damage_snapshot_t> &through
+    ) {
+      return from && through && from->history && from->history == through->history &&
+             through->history->has_complete_interval(from->token, through->token);
+    }
+
     ddup_damage_intersection_e query_ddup_damage_between(
       const std::optional<ddup_damage_snapshot_t> &from,
       const std::optional<ddup_damage_snapshot_t> &through,
@@ -496,26 +450,6 @@ namespace platf::dxgi {
         return ddup_damage_intersection_e::unknown;
       }
       return through->history->query(from->token, through->token, region);
-    }
-
-    ddup_damage_coverage_t query_ddup_damage_coverage_between(
-      const std::optional<ddup_damage_snapshot_t> &from,
-      const std::optional<ddup_damage_snapshot_t> &through,
-      const RECT &region,
-      const bool collect_max_single_intersection
-    ) {
-      if (
-        !from || !through || !from->history || !through->history ||
-        from->history.get() != through->history.get()
-      ) {
-        return {};
-      }
-      return through->history->query_coverage(
-        from->token,
-        through->token,
-        region,
-        collect_max_single_intersection
-      );
     }
 
     void ddup_unchanged_roi_proof_t::reset() noexcept {

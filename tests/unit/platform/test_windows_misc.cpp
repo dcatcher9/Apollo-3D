@@ -484,11 +484,14 @@ namespace {
     }
 
     const RECT roi {0, 0, 100, 100};
+    EXPECT_FALSE(platf::dxgi::detail::has_complete_ddup_damage_between(base, current));
+    EXPECT_TRUE(platf::dxgi::detail::has_complete_ddup_damage_between(base, base));
     EXPECT_EQ(
       platf::dxgi::detail::query_ddup_damage_between(base, current, roi),
       unknown
     );
     const auto recent = history->commit({true, {}});
+    EXPECT_TRUE(platf::dxgi::detail::has_complete_ddup_damage_between(current, recent));
     EXPECT_EQ(
       platf::dxgi::detail::query_ddup_damage_between(current, recent, roi),
       unchanged
@@ -622,75 +625,52 @@ namespace {
     );
   }
 
-  TEST(WindowsDdupDamageTest, CoverageSumsOverlapsAndSaturatesAtRegionArea) {
-    auto history = std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
+  TEST(WindowsDdupDamageTest, IntersectionClipsDamageAndUsesHalfOpenEdges) {
+    using namespace platf::dxgi::detail;
+    using enum ddup_damage_intersection_e;
+
+    auto history = std::make_shared<ddup_damage_history_t>();
     const auto base = history->commit({true, {}});
-    const auto overlap_twice = history->commit({
+    const auto current = history->commit({
       true,
       {
         {10, 10, 20, 20},
         {10, 10, 20, 20},
+        {60, 50, 40, 70},
         {95, 95, 110, 110},
       },
     });
-    const RECT roi {0, 0, 100, 100};
 
-    const auto coverage =
-      platf::dxgi::detail::query_ddup_damage_coverage_between(
-        base,
-        overlap_twice,
-        roi,
-        true
-      );
-    ASSERT_TRUE(coverage.known);
-    EXPECT_EQ(coverage.region_area, 10000u);
-    // The repeated 10x10 rectangle is counted twice on purpose; the clipped corner adds 5x5.
-    EXPECT_EQ(coverage.potentially_changed_area, 225u);
-    EXPECT_EQ(coverage.max_single_intersection_area, 100u);
-
-    const auto saturated = history->commit({
-      true,
-      {
-        {0, 0, 100, 100},
-        {0, 0, 100, 100},
-      },
-    });
-    const auto saturated_coverage =
-      platf::dxgi::detail::query_ddup_damage_coverage_between(
-        overlap_twice,
-        saturated,
-        roi,
-        true
-      );
-    ASSERT_TRUE(saturated_coverage.known);
-    EXPECT_EQ(saturated_coverage.potentially_changed_area, 10000u);
-    EXPECT_EQ(saturated_coverage.max_single_intersection_area, 10000u);
+    EXPECT_EQ(query_ddup_damage_between(base, current, {0, 0, 100, 100}), changed);
+    EXPECT_EQ(query_ddup_damage_between(base, current, {94, 94, 100, 100}), changed);
+    EXPECT_EQ(query_ddup_damage_between(base, current, {20, 20, 95, 95}), unchanged);
+    EXPECT_EQ(query_ddup_damage_between(base, current, {20, 20, 20, 95}), unknown);
   }
 
-  TEST(WindowsDdupDamageTest, CoverageDiscontinuityAndCrossHistoryFailOpen) {
-    auto first_history =
-      std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
-    auto second_history =
-      std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
+  TEST(WindowsDdupDamageTest, ContinuityRejectsUnknownAndCrossHistoryIntervals) {
+    using namespace platf::dxgi::detail;
+    using enum ddup_damage_intersection_e;
+
+    auto first_history = std::make_shared<ddup_damage_history_t>();
+    auto second_history = std::make_shared<ddup_damage_history_t>();
     const auto base = first_history->commit({true, {}});
+    const auto updated = first_history->commit({true, {{0, 0, 100, 100}}});
     const auto discontinuity = first_history->commit({false, {}});
+    const auto resumed = first_history->commit({true, {}});
     const auto unrelated = second_history->commit({true, {}});
     const RECT roi {0, 0, 100, 100};
 
-    EXPECT_FALSE(
-      platf::dxgi::detail::query_ddup_damage_coverage_between(
-        base,
-        discontinuity,
-        roi
-      ).known
-    );
-    EXPECT_FALSE(
-      platf::dxgi::detail::query_ddup_damage_coverage_between(
-        base,
-        unrelated,
-        roi
-      ).known
-    );
+    EXPECT_TRUE(has_complete_ddup_damage_between(base, updated));
+    EXPECT_FALSE(has_complete_ddup_damage_between(base, resumed));
+    EXPECT_FALSE(has_complete_ddup_damage_between(base, unrelated));
+    EXPECT_FALSE(has_complete_ddup_damage_between(resumed, base));
+    EXPECT_FALSE(has_complete_ddup_damage_between(std::nullopt, updated));
+    EXPECT_FALSE(has_complete_ddup_damage_between(ddup_damage_snapshot_t {first_history, 0u}, updated));
+    EXPECT_TRUE(has_complete_ddup_damage_between(discontinuity, resumed));
+    EXPECT_TRUE(has_complete_ddup_damage_between(discontinuity, discontinuity));
+    EXPECT_EQ(query_ddup_damage_between(base, updated, roi), changed);
+    EXPECT_EQ(query_ddup_damage_between(base, resumed, roi), unknown);
+    EXPECT_EQ(query_ddup_damage_between(discontinuity, resumed, roi), unchanged);
   }
 
   TEST(WindowsHostSbsEncoderInputStateTest, FirstRepeatStillInitializesPersistentInput) {
@@ -907,15 +887,14 @@ namespace {
   }
 
   TEST(WindowsDdupDamageTest, AdaptiveCandidateUsesCompleteHistoryNotDamageShape) {
-    using platf::dxgi::detail::ddup_damage_coverage_t;
-    using platf::dxgi::detail::host_sbs_adaptive_motion_damage_candidate;
+    using namespace platf::dxgi::detail;
 
-    auto history = std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
+    auto history = std::make_shared<ddup_damage_history_t>();
     const auto accepted = history->commit({true, {}});
     DXGI_OUTDUPL_MOVE_RECT move {};
     move.SourcePoint = {0, 0};
     move.DestinationRect = {0, 0, 40, 100};
-    const auto overlapping_move = platf::dxgi::detail::make_ddup_damage_update(
+    const auto overlapping_move = make_ddup_damage_update(
       {},
       std::span<const DXGI_OUTDUPL_MOVE_RECT> {&move, 1u},
       100,
@@ -924,64 +903,29 @@ namespace {
     ASSERT_TRUE(overlapping_move.known);
     ASSERT_EQ(overlapping_move.rects.size(), 2u);
     const auto moved = history->commit(overlapping_move);
-    const RECT roi {0, 0, 100, 100};
-    const auto overlap = platf::dxgi::detail::query_ddup_damage_coverage_between(
-      accepted,
-      moved,
-      roi,
-      true
-    );
-    ASSERT_TRUE(overlap.known);
-    EXPECT_EQ(overlap.potentially_changed_area, 8000u);
-    EXPECT_EQ(overlap.max_single_intersection_area, 4000u);
-    EXPECT_TRUE(host_sbs_adaptive_motion_damage_candidate(overlap));
-
+    const auto small = history->commit({true, {{24, 32, 26, 34}}});
     const auto broad = history->commit({true, {{0, 0, 50, 100}}});
-    const auto broad_coverage =
-      platf::dxgi::detail::query_ddup_damage_coverage_between(
-        moved,
-        broad,
-        roi,
-        true
-      );
-    EXPECT_EQ(broad_coverage.max_single_intersection_area, 5000u);
-    EXPECT_TRUE(host_sbs_adaptive_motion_damage_candidate(broad_coverage));
-    EXPECT_FALSE(host_sbs_adaptive_motion_damage_candidate(
-      ddup_damage_coverage_t {1u, 10000u, false}
-    ));
-    EXPECT_FALSE(host_sbs_adaptive_motion_damage_candidate(
-      ddup_damage_coverage_t {0u, 0u, true}
-    ));
+
+    EXPECT_TRUE(has_complete_ddup_damage_between(accepted, moved));
+    EXPECT_TRUE(has_complete_ddup_damage_between(moved, small));
+    EXPECT_TRUE(has_complete_ddup_damage_between(small, broad));
+    EXPECT_TRUE(has_complete_ddup_damage_between(accepted, broad));
   }
 
   TEST(WindowsDdupDamageTest, AdaptiveCandidateCoversBothTopHalfPhases) {
-    auto history = std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
+    using namespace platf::dxgi::detail;
+
+    auto history = std::make_shared<ddup_damage_history_t>();
     const auto baseline = history->commit({true, {}});
     const RECT top_half {0, 0, 770, 217};
     const auto first_phase = history->commit({true, {top_half}});
     const auto second_phase = history->commit({true, {top_half}});
     const RECT analysis_region {0, 0, 770, 434};
 
-    const auto expect_broad = [&](const auto &from, const auto &to) {
-      const auto coverage =
-        platf::dxgi::detail::query_ddup_damage_coverage_between(
-          from,
-          to,
-          analysis_region,
-          true
-        );
-      ASSERT_TRUE(coverage.known);
-      EXPECT_EQ(coverage.region_area, 770u * 434u);
-      EXPECT_EQ(coverage.max_single_intersection_area, 770u * 217u);
-      EXPECT_TRUE(
-        platf::dxgi::detail::host_sbs_adaptive_motion_damage_candidate(
-          coverage
-        )
-      );
-    };
-
-    expect_broad(baseline, first_phase);
-    expect_broad(first_phase, second_phase);
+    EXPECT_TRUE(has_complete_ddup_damage_between(baseline, first_phase));
+    EXPECT_TRUE(has_complete_ddup_damage_between(first_phase, second_phase));
+    EXPECT_EQ(query_ddup_damage_between(baseline, first_phase, analysis_region), ddup_damage_intersection_e::changed);
+    EXPECT_EQ(query_ddup_damage_between(first_phase, second_phase, analysis_region), ddup_damage_intersection_e::changed);
   }
 
   TEST(WindowsHostSbsSameFramePollTest, CadenceSlackCapsAndFailClosesWaitBudget) {

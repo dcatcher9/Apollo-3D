@@ -7544,7 +7544,8 @@ TEST(DirectxShaderSourceTest, AdaptiveReuseUsesExactCurrentPublicationAndActualD
   EXPECT_NE(authorization.find("!inference_pending &&"), std::string::npos);
   EXPECT_NE(authorization.find("publication_is_current(latest_v2_lineage.estimate().publication)"), std::string::npos);
   EXPECT_NE(display.find("candidate.inference_ddup_damage->token <= baseline.inference_ddup_damage->token"), std::string::npos);
-  EXPECT_NE(display.find("matched_motion_damage(baseline, candidate.inference_ddup_damage)"), std::string::npos);
+  EXPECT_NE(display.find("damage_region(baseline.depth_input_region)"), std::string::npos);
+  EXPECT_NE(display.find("detail::has_complete_ddup_damage_between(baseline.inference_ddup_damage, candidate.inference_ddup_damage)"), std::string::npos);
   EXPECT_NE(display.find("latest_v2_lineage.receipt ? &*latest_v2_lineage.receipt : nullptr"), std::string::npos);
   EXPECT_NE(display.find("models::classify_gpu_adaptive_submission("), std::string::npos);
   const auto exact_completion = display.find("const bool completed_current_route_matches =");

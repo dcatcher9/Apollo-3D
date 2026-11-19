@@ -2090,8 +2090,9 @@ depth owner. All candidates use the same host path: matching source signature, t
 input region, root/region generations and browser epoch; complete retained DDup history and strictly
 ordered endpoint tokens; no pending depth work; and no native interactive move/size. The completed
 color publication supplies the continuity endpoint, while the next GPU request names the actual
-depth owner from its receipt. These identities can differ after reuse. DDup supplies continuity and
-attribution only; neither accumulated area nor a single rectangle's shape decides similarity.
+depth owner from its receipt. These identities can differ after reuse. Admission checks DDup
+history continuity without inspecting rectangle geometry. Exact ROI reuse checks whether any
+retained damage rectangle overlaps the ROI after validating the whole interval.
 Observation ordering must not regress. Bottom OCR-crop damage is not admission authority: neither a
 clean nor dirty crop changes the host-owned OCR eligibility rule, and either may enter the
 GPU-undecided path when current OCR work is unavailable or ineligible. Missing, late, stale or invalid completion

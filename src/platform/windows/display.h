@@ -647,31 +647,6 @@ namespace platf::dxgi {
       changed,
     };
 
-    /** Saturated upper bound on pixels that may have changed inside one queried region.
-     *
-     * Rectangles are deliberately not unioned: summing clipped overlaps and saturating at the
-     * region area can only overestimate damage, so an accepted small fraction stays conservative.
-     */
-    struct ddup_damage_coverage_t {
-      std::uint64_t potentially_changed_area = 0u;
-      std::uint64_t region_area = 0u;
-      bool known = false;
-      // A lower bound on metadata coverage: unlike the saturated sum above, overlapping dirty
-      // rectangles and a move's source/destination cannot inflate this value.
-      std::uint64_t max_single_intersection_area = 0u;
-    };
-
-    /** Complete DDup history is admission evidence, never a similarity verdict.
-     *
-     * Every authority-valid changed frame may reach the device detector. Localized/broad shape is
-     * deliberately absent: the authenticated current-vs-history tensor comparison owns reuse.
-     */
-    [[nodiscard]] constexpr bool host_sbs_adaptive_motion_damage_candidate(
-      const ddup_damage_coverage_t &coverage
-    ) noexcept {
-      return coverage.known && coverage.region_area != 0u;
-    }
-
     /** One acquired DDup present's normalized dirty coverage.
      *
      * Move rectangles contribute both their source and destination rectangles. `known == false`
@@ -734,17 +709,15 @@ namespace platf::dxgi {
     public:
       [[nodiscard]] ddup_damage_snapshot_t commit(ddup_damage_update_t update);
 
+      [[nodiscard]] bool has_complete_interval(
+        std::uint64_t from_exclusive,
+        std::uint64_t through_inclusive
+      ) const;
+
       [[nodiscard]] ddup_damage_intersection_e query(
         std::uint64_t from_exclusive,
         std::uint64_t through_inclusive,
         const RECT &region
-      ) const;
-
-      [[nodiscard]] ddup_damage_coverage_t query_coverage(
-        std::uint64_t from_exclusive,
-        std::uint64_t through_inclusive,
-        const RECT &region,
-        bool collect_max_single_intersection = false
       ) const;
 
       /** Copy bounds across an exact retained interval. Unknown/invalid/full coverage all
@@ -798,6 +771,12 @@ namespace platf::dxgi {
       LONG height
     );
 
+    /** Verify continuity in one retained history without examining rectangle geometry. */
+    [[nodiscard]] bool has_complete_ddup_damage_between(
+      const std::optional<ddup_damage_snapshot_t> &from,
+      const std::optional<ddup_damage_snapshot_t> &through
+    );
+
     /** Query only when both snapshots belong to the same retained exact history range. */
     [[nodiscard]] ddup_damage_intersection_e query_ddup_damage_between(
       const std::optional<ddup_damage_snapshot_t> &from,
@@ -822,14 +801,6 @@ namespace platf::dxgi {
       std::optional<ddup_damage_snapshot_t> anchor_;
       RECT region_ {};
     };
-
-    /** Query conservative accumulated coverage only across one complete retained history range. */
-    [[nodiscard]] ddup_damage_coverage_t query_ddup_damage_coverage_between(
-      const std::optional<ddup_damage_snapshot_t> &from,
-      const std::optional<ddup_damage_snapshot_t> &through,
-      const RECT &region,
-      bool collect_max_single_intersection = false
-    );
 
     enum class host_sbs_ddup_reuse_proof_e : std::uint8_t {
       none,
