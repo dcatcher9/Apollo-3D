@@ -700,22 +700,32 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
   EXPECT_EQ(estimator.find("last_gpu_opaque_transaction_frame_id"), std::string::npos);
   EXPECT_EQ(estimator.find("GPU-undecided initial roots"), std::string::npos);
   EXPECT_EQ(estimator.find("GPU-undecided follow-up roots"), std::string::npos);
-  std::size_t publication_paths = 0u;
-  for (auto diagnostic_trace = estimator.find("dispatch_pending_gpu_completion_trace();");
-       diagnostic_trace != std::string::npos;
-       diagnostic_trace = estimator.find("dispatch_pending_gpu_completion_trace();", diagnostic_trace + 1u)) {
-    const auto publication = estimator.find("snapshot_pending_publication_receipt();", diagnostic_trace);
-    ASSERT_NE(publication, std::string::npos);
-    const auto production_end = estimator.find("mark_d3d_post_end(d3d_timer);", publication);
-    ASSERT_NE(production_end, std::string::npos);
-    EXPECT_LT(diagnostic_trace, publication);
-    EXPECT_LT(publication, production_end)
-      << "The shared snapshot includes current cumulative outcomes and all copy cost is timed";
-    const auto next_trace = estimator.find("dispatch_pending_gpu_completion_trace();", diagnostic_trace + 1u);
-    EXPECT_TRUE(next_trace == std::string::npos || production_end < next_trace);
-    ++publication_paths;
+  const auto completion_begin = estimator.find("completed_depth_metadata_t complete_ready_pending(");
+  const auto finish_begin = estimator.find("depth_step_result_t finish_pending(", completion_begin);
+  ASSERT_NE(completion_begin, std::string::npos);
+  ASSERT_NE(finish_begin, std::string::npos);
+  const auto completion_body = estimator.substr(completion_begin, finish_begin - completion_begin);
+  const std::string_view publication_steps[] {
+    "dispatch_pending_gpu_completion_trace();",
+    "snapshot_pending_publication_receipt();",
+    "pending_gpu_trace_append = {};",
+    "mark_d3d_post_end(d3d_timer);",
+    "dispatch_parallax_v2_coordinate_diagnostic();",
+    "snapshots.raw_model_depth = snapshot_buffer(",
+    "snapshots.model_input = snapshot_buffer(",
+    "return consume_pending_completion(",
+  };
+  // Time the trace and receipt with production. Dump copies follow that marker and precede
+  // retirement of the pending observation.
+  std::size_t next_step = 0u;
+  for (const auto step : publication_steps) {
+    const auto found = completion_body.find(step, next_step);
+    ASSERT_NE(found, std::string::npos) << step;
+    next_step = found + step.size();
   }
-  EXPECT_EQ(publication_paths, 2u);
+  for (const auto step : {publication_steps[0], publication_steps[1]}) {
+    EXPECT_EQ(estimator.find(step), estimator.rfind(step)) << step;
+  }
   const auto trace_begin = estimator.find("void dispatch_pending_gpu_completion_trace()");
   const auto trace_end = estimator.find("bool ensure_parallax_v2_coordinate_diagnostic_resource()", trace_begin);
   ASSERT_NE(trace_begin, std::string::npos);

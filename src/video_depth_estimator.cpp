@@ -8977,9 +8977,59 @@ namespace models {
       return view;
     }
 
+    // The caller has proved the root ready and prepared its constants. Retire that observation
+    // before a later submission changes either the constants or the raw tensors.
+    completed_depth_metadata_t complete_ready_pending(
+      d3d_perf_slot *d3d_timer,
+      const bool snapshot_requested
+    ) {
+      const bool input_domain_reset = pending_same_source_gpu_postprocess_queued ?
+        pending_same_source_gpu_input_domain_reset : prepare_pending_input_domain();
+      completion_dump_snapshot_requested = snapshot_requested;
+      if (!pending_same_source_gpu_postprocess_queued && !normalize_depth_output(
+            d3d_timer,
+            input_domain_reset
+          )) {
+        mark_d3d_post_end(d3d_timer);
+        return {};
+      }
+
+      dispatch_pending_gpu_completion_trace();
+      snapshot_pending_publication_receipt();
+      pending_gpu_trace_append = {};
+      mark_d3d_post_end(d3d_timer);
+
+      // Dump 3D copies the exact completed input and output, outside the live postprocess interval.
+      // For ROI this uses the pending crop-local domain and its exact tensor-content rectangle.
+      completion_snapshot_validity_t snapshots;
+      if (snapshot_requested && !gpu_undecided_postprocess_pending()) {
+        snapshots.coordinate = dispatch_parallax_v2_coordinate_diagnostic();
+        snapshots.raw_model_depth = snapshot_buffer(
+          tensor_out_buf.Get(),
+          raw_snapshot_buf,
+          raw_snapshot_srv,
+          raw_snapshot_error_logged,
+          raw_snapshot_retry_frames,
+          "raw-depth",
+          static_cast<UINT>(target_w * target_h)
+        );
+        snapshots.model_input = snapshot_buffer(
+          tensor_in_buf.Get(),
+          model_input_snapshot_buf,
+          model_input_snapshot_srv,
+          model_input_snapshot_error_logged,
+          model_input_snapshot_retry_frames,
+          "model-input"
+        );
+        snapshots.composite = composite_depth_runtime_provenance &&
+                              snapshots.raw_model_depth && snapshots.model_input;
+      }
+      return consume_pending_completion(input_domain_reset, snapshots);
+    }
+
     depth_step_result_t finish_pending(
       input_color_space color_space,
-      bool snapshot_debug_inputs = false,
+      const bool snapshot_debug_inputs = false,
       const bool root_completion_proven = false
     ) {
       // A caller may first prove nonblocking readiness with can_accept(). Consuming instead of
@@ -8988,9 +9038,6 @@ namespace models {
       auto &cuda = cuda_driver_api::get();
       if (!has_previous_frame) {
         return make_result();
-      }
-      if (gpu_undecided_postprocess_pending()) {
-        snapshot_debug_inputs = false;
       }
       if (cuda_ctx && cuda.cuCtxSetCurrent(cuda_ctx) != CUDA_SUCCESS) {
         BOOST_LOG(error) << "cuCtxSetCurrent failed while finishing pending depth.";
@@ -9024,63 +9071,11 @@ namespace models {
         return make_result();
       }
       auto *d3d_timer = diagnostics_enabled ? begin_d3d_perf(true, false) : nullptr;
-      const bool input_domain_reset = pending_same_source_gpu_postprocess_queued ?
-        pending_same_source_gpu_input_domain_reset : prepare_pending_input_domain();
-      completion_dump_snapshot_requested = snapshot_debug_inputs;
-      if (!pending_same_source_gpu_postprocess_queued && !normalize_depth_output(
-            d3d_timer,
-            input_domain_reset
-          )) {
-        mark_d3d_post_end(d3d_timer);
-        mark_d3d_pre_start(d3d_timer);
-        end_d3d_perf(d3d_timer);
-        return make_result();
-      }
-      dispatch_pending_gpu_completion_trace();
-      snapshot_pending_publication_receipt();
-      pending_gpu_trace_append = {};
-      mark_d3d_post_end(d3d_timer);
-      bool raw_snapshot_valid = false;
-      bool model_input_snapshot_valid = false;
-      bool composite_snapshots_valid = false;
-      bool coordinate_snapshot_valid = false;
-      // Dump 3D binds these immutable tensors to pending_input_region. For a video ROI they are
-      // bound to the logical crop-local analysis domain and its exact tensor content rectangle;
-      // the package separately records the full-source embedding.
-      if (snapshot_debug_inputs) {
-        coordinate_snapshot_valid = dispatch_parallax_v2_coordinate_diagnostic();
-        raw_snapshot_valid = snapshot_buffer(
-          tensor_out_buf.Get(),
-          raw_snapshot_buf,
-          raw_snapshot_srv,
-          raw_snapshot_error_logged,
-          raw_snapshot_retry_frames,
-          "raw-depth",
-          static_cast<UINT>(target_w * target_h)
-        );
-        model_input_snapshot_valid = snapshot_buffer(
-          tensor_in_buf.Get(),
-          model_input_snapshot_buf,
-          model_input_snapshot_srv,
-          model_input_snapshot_error_logged,
-          model_input_snapshot_retry_frames,
-          "model-input"
-        );
-        composite_snapshots_valid = composite_depth_runtime_provenance &&
-                                    raw_snapshot_valid &&
-                                    model_input_snapshot_valid;
-      }
+      const auto completed = complete_ready_pending(
+        d3d_timer, snapshot_debug_inputs && !gpu_undecided_postprocess_pending()
+      );
       mark_d3d_pre_start(d3d_timer);
       end_d3d_perf(d3d_timer);
-      const auto completed = consume_pending_completion(
-        input_domain_reset,
-        {
-          .raw_model_depth = raw_snapshot_valid,
-          .model_input = model_input_snapshot_valid,
-          .composite = composite_snapshots_valid,
-          .coordinate = coordinate_snapshot_valid,
-        }
-      );
       return make_result(completed);
     }
 
@@ -9725,12 +9720,6 @@ namespace models {
         return {};
       }
       completed_depth_metadata_t completed;
-      bool raw_snapshot_valid = false;
-      bool model_input_snapshot_valid = false;
-      bool composite_snapshots_valid = false;
-      bool coordinate_snapshot_valid = false;
-      bool completed_input_domain_reset = false;
-      bool completed_gpu_undecided = false;
       // Dump may override temporary move/size suppression, but never enables an ineligible
       // subtitle context. Suppressed dump sections remain explicitly unused in the package.
       const auto accepted_optional_work =
@@ -10007,11 +9996,8 @@ namespace models {
         }
       }
 
-      // Shared constants for buffer_to_tex_cs, the min/max passes and rgb_to_nchw_cs.
-      // Session-constant, so the buffer is built once (immutable), not mapped per frame.
-      // The caller's color_space can already describe a new mode while the pending raw field and
-      // retained source still belong to the previous one. Always interpret that completed pair
-      // with the mode accepted alongside it.
+      // Keep the pending transfer and crop constants through its publication and Dump copies.
+      // With no preceding observation, prepare the first submission's constants directly.
       ensure_cbuffers(
         has_previous_frame ? pending_color_space : color_space,
         has_previous_frame ? pending_input_region : input_region
@@ -10032,79 +10018,12 @@ namespace models {
       // (fully unmapped from CUDA), so consuming it here never blocks the encode thread. The
       // caller uses completed_frame_id to select the color slot that produced this exact result.
       if (has_previous_frame) {
-        completed_gpu_undecided = gpu_undecided_postprocess_pending();
-        completed_input_domain_reset = pending_same_source_gpu_postprocess_queued ?
-          pending_same_source_gpu_input_domain_reset : prepare_pending_input_domain();
-        completion_dump_snapshot_requested = snapshot_raw_model_depth;
-        if (!pending_same_source_gpu_postprocess_queued && !normalize_depth_output(
-              d3d_timer,
-              completed_input_domain_reset
-            )) {
-          mark_d3d_post_end(d3d_timer);
+        completed = complete_ready_pending(d3d_timer, snapshot_raw_model_depth);
+        if (!completed.valid) {
           mark_d3d_pre_start(d3d_timer);
           end_d3d_perf(d3d_timer);
           return {};
         }
-        // Restore the newly supplied frame's transfer mode before its full-resolution preprocess.
-        ensure_cbuffers(color_space, input_region);
-        ensure_source_region_cbuffer(input_region);
-        if (!cbuffer || !source_region_cbuffer) {
-          mark_terminal_failure();
-          return {};
-        }
-        // Measure the complete publication, including enabled counter/trace production and the
-        // single routine readback snapshot. Explicit Dump 3D exports remain outside this interval.
-        dispatch_pending_gpu_completion_trace();
-        snapshot_pending_publication_receipt();
-        pending_gpu_trace_append = {};
-        mark_d3d_post_end(d3d_timer);
-        if (snapshot_raw_model_depth && !completed_gpu_undecided) {
-          // The diagnostic map belongs to the completed raw tensor, including its exact content
-          // rectangle. The current-frame preprocess has not run yet, so the exclusion texture is
-          // still the same completed authority as well.
-          ensure_cbuffers(pending_color_space, pending_input_region);
-          coordinate_snapshot_valid =
-            dispatch_parallax_v2_coordinate_diagnostic();
-          // tensor_in_buf and tensor_out_buf still own the exact completed frame here. Preserve
-          // both before the current frame's preprocess and CUDA mapping reuse those allocations.
-          raw_snapshot_valid = snapshot_buffer(
-            tensor_out_buf.Get(),
-            raw_snapshot_buf,
-            raw_snapshot_srv,
-            raw_snapshot_error_logged,
-            raw_snapshot_retry_frames,
-            "raw-depth",
-            static_cast<UINT>(target_w * target_h)
-          );
-          model_input_snapshot_valid = snapshot_buffer(
-            tensor_in_buf.Get(),
-            model_input_snapshot_buf,
-            model_input_snapshot_srv,
-            model_input_snapshot_error_logged,
-            model_input_snapshot_retry_frames,
-            "model-input"
-          );
-          composite_snapshots_valid = composite_depth_runtime_provenance &&
-                                      raw_snapshot_valid &&
-                                      model_input_snapshot_valid;
-          ensure_cbuffers(color_space, input_region);
-          ensure_source_region_cbuffer(input_region);
-          if (!cbuffer || !source_region_cbuffer) {
-            mark_terminal_failure();
-            return {};
-          }
-        }
-        // Every debug copy is now ordered after this completion's consumers and before estimator
-        // working resources can be reused.
-        completed = consume_pending_completion(
-          completed_input_domain_reset,
-          {
-            .raw_model_depth = raw_snapshot_valid,
-            .model_input = model_input_snapshot_valid,
-            .composite = composite_snapshots_valid,
-            .coordinate = coordinate_snapshot_valid,
-          }
-        );
       } else {
         mark_d3d_post_end(d3d_timer);
       }
@@ -10139,6 +10058,17 @@ namespace models {
         mark_d3d_pre_start(d3d_timer);
         end_d3d_perf(d3d_timer);
         return make_result(completed);
+      }
+
+      if (completed.valid) {
+        ensure_cbuffers(color_space, input_region);
+        ensure_source_region_cbuffer(input_region);
+        if (!cbuffer || !source_region_cbuffer) {
+          mark_terminal_failure();
+          mark_d3d_pre_start(d3d_timer);
+          end_d3d_perf(d3d_timer);
+          return {};
+        }
       }
 
       if (!ocr_available) {

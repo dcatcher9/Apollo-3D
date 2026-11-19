@@ -2665,6 +2665,13 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedThir
     }
     return true;
   };
+  using snapshots_t = std::array<payload_t, 3u>;
+  constexpr std::array<const char *, 3u> snapshot_names {"raw depth", "model input", "coordinate"};
+  const auto read_snapshots = [&](const models::depth_observation_views_t &result, snapshots_t &out) {
+    return read_view(result.raw_model_depth_snapshot.Get(), out[0]) &&
+           read_view(result.model_input_snapshot.Get(), out[1]) &&
+           read_view(result.shadow_coordinate.Get(), out[2]);
+  };
   const auto wait_until_reusable = [](models::video_depth_estimator &estimator) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds {2};
     do {
@@ -2684,8 +2691,9 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedThir
 
   // A serialized control supplies actual production probability/support bytes, not a CPU model.
   // Release its physical engine context before constructing either pipelined estimator.
-  tuple_t expected;
-  {
+  tuple_t expected, expected_dump;
+  snapshots_t expected_snapshots;
+  for (const bool request_dump : {false, true}) {
     models::video_depth_estimator control {
       device, context, assets, config::video_t::sbs_t {}, video::host_sbs_v2_depth_model()
     };
@@ -2698,10 +2706,16 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedThir
     const auto submission = submit_n(control, false);
     ASSERT_TRUE(submission.submission.inference_enqueued);
     ASSERT_TRUE(submission.submission.subtitle_ocr_inference_enqueued);
-    const auto expected_metadata = control.finish_pending_depth_for_evaluation();
+    const auto expected_metadata = control.finish_pending_depth_for_evaluation(
+      models::input_color_space::srgb,
+      request_dump
+    );
     ASSERT_TRUE(models::subtitle_evidence_is_exact_frame(expected_metadata.observation));
     ASSERT_EQ(expected_metadata.observation.completed_frame_id, frame_n);
-    ASSERT_TRUE(read_tuple(expected_metadata.observation, expected));
+    ASSERT_TRUE(read_tuple(expected_metadata.observation, request_dump ? expected_dump : expected));
+    if (request_dump) {
+      ASSERT_TRUE(read_snapshots(expected_metadata.observation, expected_snapshots));
+    }
   }
 
   const UINT crop_height = models::subtitle_ocr_source_crop_height(source_width, source_height);
@@ -2736,20 +2750,24 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedThir
     UINT width, height;
     models::depth_optional_work_mode_e optional_work;
     std::uint64_t subtitle_context_generation;
+    bool request_dump = false;
   };
-  constexpr std::array<follower_case_t, 5u> followers {{
+
+  constexpr std::array<follower_case_t, 6u> followers {{
     {1280u, 720u, models::depth_optional_work_mode_e::ordinary, 0u},
     {1920u, 1080u, models::depth_optional_work_mode_e::ordinary, 0u},
     {1280u, 720u, models::depth_optional_work_mode_e::ordinary, 1u},
     {1280u, 720u, models::depth_optional_work_mode_e::disable_subtitle, 0u},
     {1280u, 720u, models::depth_optional_work_mode_e::suppress_subtitle, 0u},
+    {1280u, 720u, models::depth_optional_work_mode_e::ordinary, 0u, true},
   }};
   for (const auto &test_case : followers) {
     const bool defer_context_admission = test_case.subtitle_context_generation != 0u ||
-      test_case.optional_work == models::depth_optional_work_mode_e::disable_subtitle;
+                                         test_case.optional_work == models::depth_optional_work_mode_e::disable_subtitle;
     SCOPED_TRACE(std::to_string(test_case.width) + 'x' + std::to_string(test_case.height) +
       " scope=" + std::to_string(test_case.subtitle_context_generation) +
-      " disable=" + std::to_string(test_case.optional_work == models::depth_optional_work_mode_e::disable_subtitle));
+      " disable=" + std::to_string(test_case.optional_work == models::depth_optional_work_mode_e::disable_subtitle) +
+      " dump=" + std::to_string(test_case.request_dump));
     source_t follower;
     ASSERT_TRUE(create_source(test_case.width, test_case.height, true, follower));
     models::video_depth_estimator estimator {
@@ -2769,8 +2787,35 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedThir
     // Query readiness only. The next estimate consumes N and may admit N+1 only when its
     // context does not need to clear any singleton resource belonging to N's publication.
     ASSERT_TRUE(wait_until_reusable(estimator));
+    models::depth_input_region_t follower_region;
+    if (test_case.request_dump) {
+      const auto plan = models::plan_host_sbs_v2_video_region(
+        {160u, 60u, 1120u, 660u},
+        source_width,
+        source_height,
+        models::fit_host_sbs_v2_depth_tensor_shape(source_width, source_height)
+      );
+      ASSERT_TRUE(plan);
+      ASSERT_GT(plan->tensor_content.left, 0u);
+      follower_region = {
+        .source_width = source_width,
+        .source_height = source_height,
+        .left = 160u,
+        .top = 60u,
+        .right = 1120u,
+        .bottom = 660u,
+        .tensor_content = plan->tensor_content,
+        .analysis_generation = 1u,
+        .authority = models::depth_analysis_authority_e::foreground_client,
+      };
+      ASSERT_TRUE(follower_region.valid());
+    }
     const auto completed_n = estimator.estimate_depth(
-      follower.view.Get(), models::input_color_space::srgb, frame_n + 1u, false, {},
+      follower.view.Get(),
+      models::input_color_space::srgb,
+      frame_n + 1u,
+      test_case.request_dump,
+      follower_region,
       test_case.optional_work,
       {.observation_timestamp_us = clock_n + 33333u},
       test_case.subtitle_context_generation
@@ -2785,6 +2830,27 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedThir
     ASSERT_TRUE(estimator.publication_is_current(completed_n.observation.publication));
     ASSERT_EQ(completed_n.observation.input_region.source_width, source_width);
     ASSERT_EQ(completed_n.observation.input_region.source_height, source_height);
+    EXPECT_FALSE(completed_n.observation.input_region.is_video_region());
+    snapshots_t snapshots_before;
+    if (test_case.request_dump) {
+      ASSERT_TRUE(read_snapshots(completed_n.observation, snapshots_before));
+      EXPECT_EQ(completed_n.observation.guidance_model_input_snapshot.Get(), completed_n.observation.model_input_snapshot.Get());
+      EXPECT_EQ(completed_n.observation.refined_model_depth_snapshot.Get(), completed_n.observation.raw_model_depth_snapshot.Get());
+      ComPtr<ID3D11Resource> raw, snapshot;
+      ASSERT_TRUE(completed_n.observation.raw_model_depth);
+      completed_n.observation.raw_model_depth->GetResource(&raw);
+      completed_n.observation.raw_model_depth_snapshot->GetResource(&snapshot);
+      EXPECT_NE(raw.Get(), snapshot.Get());
+      for (std::size_t i = 0u; i < snapshots_before.size(); ++i) {
+        SCOPED_TRACE(snapshot_names[i]);
+        EXPECT_EQ(snapshots_before[i].dimension, expected_snapshots[i].dimension);
+        EXPECT_EQ(snapshots_before[i].format, expected_snapshots[i].format);
+        EXPECT_EQ(snapshots_before[i].width, expected_snapshots[i].width);
+        EXPECT_EQ(snapshots_before[i].height, expected_snapshots[i].height);
+        EXPECT_EQ(snapshots_before[i].element_stride, expected_snapshots[i].element_stride);
+        EXPECT_EQ(snapshots_before[i].bytes, expected_snapshots[i].bytes);
+      }
+    }
 
     tuple_t before, after;
     ASSERT_TRUE(read_tuple(completed_n.observation, before));
@@ -2823,20 +2889,29 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedThir
     std::memcpy(plane.data(), before[13u].bytes.data(), sizeof(plane));
     std::memcpy(condition.data(), before[15u].bytes.data(), sizeof(condition));
     EXPECT_TRUE(models::host_sbs_subtitle_plane::condition_words_match_plane(condition, plane, true));
+    const auto &expected_tuple = test_case.request_dump ? expected_dump : expected;
     for (std::size_t i = 0u; i < before.size(); ++i) {
       SCOPED_TRACE(names[i]);
-      EXPECT_EQ(before[i].dimension, expected[i].dimension);
-      EXPECT_EQ(before[i].format, expected[i].format);
-      EXPECT_EQ(before[i].width, expected[i].width);
-      EXPECT_EQ(before[i].height, expected[i].height);
-      EXPECT_EQ(before[i].element_stride, expected[i].element_stride);
-      EXPECT_EQ(before[i].bytes, expected[i].bytes);
+      EXPECT_EQ(before[i].dimension, expected_tuple[i].dimension);
+      EXPECT_EQ(before[i].format, expected_tuple[i].format);
+      EXPECT_EQ(before[i].width, expected_tuple[i].width);
+      EXPECT_EQ(before[i].height, expected_tuple[i].height);
+      EXPECT_EQ(before[i].element_stride, expected_tuple[i].element_stride);
+      EXPECT_EQ(before[i].bytes, expected_tuple[i].bytes);
     }
     // N+1 may finish CUDA or remain unadmitted. Neither case may replace N's complete published
     // tuple, including Final/OCR8/UIP4, before the next admission or completion is consumed.
     ASSERT_TRUE(wait_until_reusable(estimator));
     ASSERT_TRUE(estimator.publication_is_current(completed_n.observation.publication));
     ASSERT_TRUE(read_tuple(completed_n.observation, after));
+    if (test_case.request_dump) {
+      snapshots_t snapshots_after;
+      ASSERT_TRUE(read_snapshots(completed_n.observation, snapshots_after));
+      for (std::size_t i = 0u; i < snapshots_after.size(); ++i) {
+        SCOPED_TRACE(snapshot_names[i]);
+        EXPECT_EQ(snapshots_after[i].bytes, snapshots_before[i].bytes);
+      }
+    }
     for (std::size_t i = 0u; i < after.size(); ++i) {
       SCOPED_TRACE(names[i]);
       EXPECT_EQ(after[i].dimension, before[i].dimension);
@@ -2873,6 +2948,13 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedThir
     const auto completed_follower = estimator.finish_pending_depth_for_evaluation();
     ASSERT_TRUE(completed_follower.observation.completed_frame_valid);
     EXPECT_EQ(completed_follower.observation.completed_frame_id, frame_n + 1u);
+    if (test_case.request_dump) {
+      EXPECT_TRUE(completed_follower.observation.input_region.is_video_region());
+      EXPECT_EQ(completed_follower.observation.input_region.left, follower_region.left);
+      EXPECT_EQ(completed_follower.observation.input_region.top, follower_region.top);
+      EXPECT_EQ(completed_follower.observation.input_region.analysis_generation, follower_region.analysis_generation);
+      EXPECT_GT(completed_follower.observation.field_content.left, 0u);
+    }
     EXPECT_EQ(completed_follower.observation.subtitle_work_suppressed, models::depth_optional_work_suppresses_subtitle(test_case.optional_work));
     EXPECT_FALSE(estimator.publication_is_current(completed_n.observation.publication));
     if (test_case.optional_work == models::depth_optional_work_mode_e::disable_subtitle) {
@@ -7035,13 +7117,38 @@ TEST(DirectxShaderSourceTest, PendingCompletionReusesThePreparedConstantBuffer) 
     read_source_file(SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp");
   ASSERT_FALSE(estimator.empty());
 
-  const auto constants = estimator.find(
-    "// Shared constants for buffer_to_tex_cs, the min/max passes and rgb_to_nchw_cs."
-  );
-  const auto normalize = estimator.find("normalize_depth_output(", constants);
+  const auto helper_begin = estimator.find("completed_depth_metadata_t complete_ready_pending(");
+  const auto finish_begin = estimator.find("depth_step_result_t finish_pending(", helper_begin);
+  const auto finish_end = estimator.find("pending_depth_poll_result try_finish_pending(", finish_begin);
+  ASSERT_NE(helper_begin, std::string::npos);
+  ASSERT_NE(finish_begin, std::string::npos);
+  ASSERT_NE(finish_end, std::string::npos);
+  const auto helper = estimator.substr(helper_begin, finish_begin - helper_begin);
+  EXPECT_NE(helper.find("d3d_perf_slot *d3d_timer"), std::string::npos);
+  EXPECT_NE(helper.find("const bool snapshot_requested"), std::string::npos);
+  EXPECT_NE(helper.find("normalize_depth_output("), std::string::npos);
+  for (const auto *caller_owned : {"ensure_cbuffers(", "ensure_source_region_cbuffer(", "begin_d3d_perf(", "mark_d3d_pre_start(", "end_d3d_perf("}) {
+    EXPECT_EQ(helper.find(caller_owned), std::string::npos) << caller_owned;
+  }
+  const auto finish = estimator.substr(finish_begin, finish_end - finish_begin);
+  const auto finish_constants = finish.find("ensure_cbuffers(pending_color_space, pending_input_region);");
+  const auto finish_region = finish.find("ensure_source_region_cbuffer(pending_input_region);");
+  const auto finish_timer = finish.find("begin_d3d_perf(true, false)");
+  const auto finish_complete = finish.find("complete_ready_pending(");
+  ASSERT_NE(finish_constants, std::string::npos);
+  ASSERT_NE(finish_region, std::string::npos);
+  ASSERT_NE(finish_timer, std::string::npos);
+  ASSERT_NE(finish_complete, std::string::npos);
+  EXPECT_LT(finish_constants, finish_timer);
+  EXPECT_LT(finish_region, finish_timer);
+  EXPECT_LT(finish_timer, finish_complete);
+  EXPECT_EQ(finish.find("normalize_depth_output("), std::string::npos);
+
+  const auto constants = estimator.find("// Keep the pending transfer and crop constants");
+  const auto complete = estimator.find("completed = complete_ready_pending(", constants);
   ASSERT_NE(constants, std::string::npos);
-  ASSERT_NE(normalize, std::string::npos);
-  const auto completion_setup = estimator.substr(constants, normalize - constants);
+  ASSERT_NE(complete, std::string::npos);
+  const auto completion_setup = estimator.substr(constants, complete - constants);
   std::size_t ensures = 0u;
   for (std::size_t offset = 0u;
        (offset = completion_setup.find("ensure_cbuffers(", offset)) !=
@@ -7050,6 +7157,7 @@ TEST(DirectxShaderSourceTest, PendingCompletionReusesThePreparedConstantBuffer) 
     ++ensures;
   }
   EXPECT_EQ(ensures, 1u);
+  EXPECT_EQ(completion_setup.find("normalize_depth_output("), std::string::npos);
   EXPECT_NE(
     completion_setup.find(
       "has_previous_frame ? pending_color_space : color_space"
