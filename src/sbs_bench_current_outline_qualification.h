@@ -235,6 +235,7 @@ namespace sbs_bench::current_outline_qualification {
       request.geometry_constants = draw.geometry_constants;
       request.subtitle_constants = draw.subtitle_constants;
       request.sampler = draw.sampler;
+      request.materialize_inactive = false; // Qualification reads rows and rendered pixels.
       if (!shared_warp_.queue(context, program, request, error) || !shared_warp_.matches(context, request)) {
         return false;
       }

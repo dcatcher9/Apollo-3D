@@ -49,6 +49,7 @@ class HostSbsV2LiveWarpGpuTest_SharedUiPinProductionRejectsInvalidRowExtentAndDi
 class HostSbsV2LiveWarpGpuTest_SharedUiPinQueuedProductionRequiresCurrentGuardAtPrepareAndDraw_Test;
 class HostSbsV2LiveWarpGpuTest_SharedUiPinQueuedPreparationFailurePreservesCompletedProtection_Test;
 class HostSbsV2LiveWarpGpuTest_SharedUiPinCompletedProtectionDoesNotRequireQueuedSource_Test;
+class HostSbsV2LiveWarpGpuTest_SharedUiPinInactiveDispatchPreservesReusedPlanesAndDiagnostics_Test;
 
 namespace {
   using Microsoft::WRL::ComPtr;
@@ -150,6 +151,7 @@ namespace {
     bool converter_owns_pin_bindings = false;
     ID3D11ShaderResourceView *shared_ui_pin_draw_guard_override = nullptr;
     bool shared_ui_pin_resample_only = false;
+    bool materialize_inactive = true;
     shared_ui_pin_diagnostics_t *shared_ui_pin_diagnostic_output = nullptr;
     double *render_gpu_ms = nullptr;
   };
@@ -160,6 +162,7 @@ namespace {
     friend class ::HostSbsV2LiveWarpGpuTest_SharedUiPinQueuedProductionRequiresCurrentGuardAtPrepareAndDraw_Test;
     friend class ::HostSbsV2LiveWarpGpuTest_SharedUiPinQueuedPreparationFailurePreservesCompletedProtection_Test;
     friend class ::HostSbsV2LiveWarpGpuTest_SharedUiPinCompletedProtectionDoesNotRequireQueuedSource_Test;
+    friend class ::HostSbsV2LiveWarpGpuTest_SharedUiPinInactiveDispatchPreservesReusedPlanesAndDiagnostics_Test;
   public:
     bool initialize(
       std::string &error,
@@ -423,7 +426,8 @@ namespace {
       return true;
     }
 
-    static constexpr std::array<models::host_sbs_shader_cache::shader_spec, 5u> shared_ui_pin_specs {{
+    static constexpr std::array<models::host_sbs_shader_cache::shader_spec, 6u> shared_ui_pin_specs {{
+      {"host_sbs_shared_ui_warp.hlsl", "prepare_main", "cs_5_0"},
       {"host_sbs_shared_ui_warp.hlsl", "initialize_main", "cs_5_0"},
       {"host_sbs_shared_ui_warp.hlsl", "SunshineApplyUICS", "cs_5_0"},
       {"host_sbs_shared_ui_warp.hlsl", "shared_pin_main_ps", "ps_5_0"},
@@ -437,12 +441,12 @@ namespace {
         error = "shared UI pin experiment requires initialized fixture and exact pinned source closure";
         return false;
       }
-      std::array<ComPtr<ID3D11ComputeShader>, 2u> cs;
+      std::array<ComPtr<ID3D11ComputeShader>, 3u> cs;
       std::array<ComPtr<ID3D11PixelShader>, 3u> ps;
       for (std::size_t i=0u;i<shared_ui_pin_specs.size();++i) {
         const auto code = models::host_sbs_shader_cache::get(sources,shared_ui_pin_specs[i]);
-        if (!code || (i<2u ? FAILED(device->CreateComputeShader(code->data(),code->size(),nullptr,&cs[i])) :
-                            FAILED(device->CreatePixelShader(code->data(),code->size(),nullptr,&ps[i-2u])))) {
+        if (!code || (i<3u ? FAILED(device->CreateComputeShader(code->data(),code->size(),nullptr,&cs[i])) :
+                            FAILED(device->CreatePixelShader(code->data(),code->size(),nullptr,&ps[i-3u])))) {
           error = "shared UI pin experimental shader creation failed";
           return false;
         }
@@ -861,6 +865,7 @@ namespace {
           request.geometry_constants = geometry_buffer.Get();request.subtitle_constants = subtitle_buffer.Get();
           request.sampler = sampler.Get();
           request.queued = production_queued_pin;
+          request.materialize_inactive = outline->materialize_inactive;
           request.queued_guard_constants = production_queued_pin ? private_guard_cb.Get() : nullptr;
           request.queued_guard_transaction = production_queued_pin ? private_guard_srv.Get() : nullptr;
           if (!production_shared_ui_pin_owner.ensure(device.Get(), pin_shape, error)) return false;
@@ -899,21 +904,46 @@ namespace {
         begin_timing();
         const UINT clear[4] {};context->ClearUnorderedAccessViewUint(pin_rows.uav.Get(),clear);
         ID3D11ShaderResourceView *srvs[15] {color_srv.Get(),parallax_srv.Get(),state_srv.Get(),selected_matte_srv.Get(),
-          snapshot_srv.Get(),condition_srv.Get(),identity_srv.Get(),selected_receipt_srv.Get(),matte_srv.Get(),
+          snapshot_srv.Get(),condition_srv.Get(),identity_srv.Get(),selected_receipt_srv.Get(),nullptr,
           nullptr,nullptr,nullptr,nullptr,nullptr,nullptr};
         ID3D11Buffer *b2=geometry_buffer.Get(),*b3=subtitle_buffer.Get(),*b5=pin_geometry.Get();
         ID3D11SamplerState *linear=sampler.Get();
-        ID3D11UnorderedAccessView *uavs[3] {pin_field.uav.Get(),pin_weights.uav.Get(),pin_rows.uav.Get()};
+        // The direct qualification arm retains dense dispatches, but consumes the same
+        // actual immutable preparation verdict as production. CS t8 has no legacy matte role.
+        D3D11_BUFFER_DESC args_desc {};
+        args_desc.ByteWidth=48u;args_desc.Usage=D3D11_USAGE_DEFAULT;
+        args_desc.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;
+        args_desc.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS|D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS;
+        ComPtr<ID3D11Buffer> prepared;
+        ComPtr<ID3D11UnorderedAccessView> prepared_uav;
+        ComPtr<ID3D11ShaderResourceView> prepared_srv;
+        D3D11_UNORDERED_ACCESS_VIEW_DESC args_uav {};
+        args_uav.Format=DXGI_FORMAT_R32_TYPELESS;args_uav.ViewDimension=D3D11_UAV_DIMENSION_BUFFER;
+        args_uav.Buffer.NumElements=12u;args_uav.Buffer.Flags=D3D11_BUFFER_UAV_FLAG_RAW;
+        D3D11_SHADER_RESOURCE_VIEW_DESC args_srv {};
+        args_srv.Format=DXGI_FORMAT_R32_TYPELESS;args_srv.ViewDimension=D3D11_SRV_DIMENSION_BUFFEREX;
+        args_srv.BufferEx.NumElements=12u;args_srv.BufferEx.Flags=D3D11_BUFFEREX_SRV_FLAG_RAW;
+        if(FAILED(device->CreateBuffer(&args_desc,nullptr,&prepared))||
+           FAILED(device->CreateUnorderedAccessView(prepared.Get(),&args_uav,&prepared_uav))||
+           FAILED(device->CreateShaderResourceView(prepared.Get(),&args_srv,&prepared_srv))) {
+          error="shared UI pin preparation verdict unavailable";return false;
+        }
+        ID3D11UnorderedAccessView *uavs[4] {nullptr,nullptr,pin_rows.uav.Get(),prepared_uav.Get()};
         context->CSSetConstantBuffers(2u,1u,&b2);context->CSSetConstantBuffers(3u,1u,&b3);context->CSSetConstantBuffers(6u,1u,&b5);
         context->CSSetSamplers(0u,1u,&linear);context->CSSetShaderResources(0u,15u,srvs);
-        context->CSSetUnorderedAccessViews(0u,3u,uavs,nullptr);context->CSSetShader(shared_ui_pin_cs[0].Get(),nullptr,0u);
+        context->CSSetUnorderedAccessViews(0u,4u,uavs,nullptr);context->CSSetShader(shared_ui_pin_cs[0].Get(),nullptr,0u);
+        context->Dispatch(1u,1u,1u);
+        ID3D11UnorderedAccessView *null_uavs[4] {};context->CSSetUnorderedAccessViews(0u,4u,null_uavs,nullptr);
+        srvs[8u]=prepared_srv.Get();context->CSSetShaderResources(8u,1u,&srvs[8u]);
+        uavs[0u]=pin_field.uav.Get();uavs[1u]=pin_weights.uav.Get();uavs[3u]=nullptr;
+        context->CSSetUnorderedAccessViews(0u,4u,uavs,nullptr);context->CSSetShader(shared_ui_pin_cs[1].Get(),nullptr,0u);
         context->Dispatch((source_width+15u)/16u,(pin_shape[3u]+15u)/16u,1u);
-        ID3D11UnorderedAccessView *null_uavs[3] {};context->CSSetUnorderedAccessViews(0u,3u,null_uavs,nullptr);
+        context->CSSetUnorderedAccessViews(0u,4u,null_uavs,nullptr);
         if (!outline->shared_ui_pin_resample_only) {
           srvs[12u]=pin_weights.srv.Get();context->CSSetShaderResources(0u,15u,srvs);
-          uavs[1u]=uavs[2u]=nullptr;context->CSSetUnorderedAccessViews(0u,3u,uavs,nullptr);
-          context->CSSetShader(shared_ui_pin_cs[1].Get(),nullptr,0u);context->Dispatch((pin_shape[3u]+7u)/8u,1u,1u);
-          context->CSSetUnorderedAccessViews(0u,3u,null_uavs,nullptr);
+          uavs[1u]=uavs[2u]=nullptr;context->CSSetUnorderedAccessViews(0u,4u,uavs,nullptr);
+          context->CSSetShader(shared_ui_pin_cs[2].Get(),nullptr,0u);context->Dispatch((pin_shape[3u]+7u)/8u,1u,1u);
+          context->CSSetUnorderedAccessViews(0u,4u,null_uavs,nullptr);
         }
         ID3D11ShaderResourceView *null_srvs[15] {};context->CSSetShaderResources(0u,15u,null_srvs);
         ID3D11Buffer *null_cb=nullptr;ID3D11SamplerState *null_sampler=nullptr;
@@ -1733,7 +1763,7 @@ namespace {
     bool direct_replay = false;
     bool selected_outline = false;
     bool shared_boundary_output = false;
-    std::array<ComPtr<ID3D11ComputeShader>,2u> shared_ui_pin_cs;
+    std::array<ComPtr<ID3D11ComputeShader>,3u> shared_ui_pin_cs;
     std::array<ComPtr<ID3D11PixelShader>,3u> shared_ui_pin_ps;
     std::filesystem::path shared_ui_pin_root;
     std::string shared_ui_pin_closure;
@@ -5375,6 +5405,127 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinProductionRetainsAuthorityAndClearsReu
   EXPECT_EQ(rejected, flat_pixels) << "A selected receipt cannot bypass renderer authorization";
 }
 
+TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinInactiveDispatchPreservesReusedPlanesAndDiagnostics) {
+  constexpr UINT width = 128u, height = 17u, field_width = 32u, field_height = 9u;
+  constexpr float field_poison = 0.75f, weight_poison = 0.875f;
+  const auto state = make_live_state(true, true);
+  const std::vector<float> base(field_width * field_height, -1.25f / width);
+  for (const UINT mode : {0u, 2u}) for (const bool owned : {false, true}) {
+    SCOPED_TRACE("mode=" + std::to_string(mode) + " owned=" + std::to_string(owned));
+    live_v2_warp_fixture_t optimized, dense;
+    std::string error;
+    ASSERT_TRUE(optimized.initialize(error, warp_shader_e::selected_outline)) << error;
+    ASSERT_TRUE(dense.initialize(error, warp_shader_e::selected_outline)) << error;
+    auto active = make_subtitle_inputs(width, height, state, 2.5f / width, field_width, field_height);
+    active.constants.color_mode = mode;
+    const std::uint16_t native = mode == 0u ? 0x3800u : 0x3c00u;
+    const std::uint16_t display = mode == 0u ? 0x3800u : 0x39e2u;
+    std::vector<rgba16_bits_t> source(width * height, {0x3400u, 0x3400u, 0x3400u, 0x3c00u});
+    for (UINT y = 7u; y < 10u; ++y) for (UINT x = 62u; x < 67u; ++x) {
+      active.matte[y * width + x] = 1u;
+      active.snapshot[y * width + x] = {display, display, display, 0x3c00u};
+      source[y * width + x] = {native, native, native, 0x3c00u};
+    }
+    const auto run = [&](live_v2_warp_fixture_t &renderer, const subtitle_inputs_t &ui,
+                         current_outline_inputs_t operands, shared_ui_pin_diagnostics_t &diagnostic,
+                         std::vector<std::byte> &pixels) {
+      operands.production_shared_ui_pin = true;
+      operands.converter_owns_pin_bindings = owned;
+      operands.shared_ui_pin_diagnostic_output = &diagnostic;
+      return renderer.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height,
+        source.data(), base, base, state, {}, pixels, error, field_width, field_height, {}, &ui,
+        nullptr, true, &operands);
+    };
+    const auto expect_diagnostics = [](const shared_ui_pin_diagnostics_t &actual,
+                                       const shared_ui_pin_diagnostics_t &expected,
+                                       const bool materialized) {
+      EXPECT_EQ(actual.shape, expected.shape);
+      EXPECT_EQ(actual.active_rows, expected.active_rows);
+      EXPECT_EQ(actual.selected_receipt_header, expected.selected_receipt_header);
+      EXPECT_EQ(actual.selected_receipt_authorized, expected.selected_receipt_authorized);
+      EXPECT_EQ(actual.mapping_rgba32f, expected.mapping_rgba32f);
+      EXPECT_EQ(actual.ui_coverage_rgba32f, expected.ui_coverage_rgba32f);
+      if (materialized) {
+        EXPECT_EQ(actual.field, expected.field);
+        EXPECT_EQ(actual.authorized_weights, expected.authorized_weights);
+      }
+    };
+    auto active_operands = make_current_outline_inputs(active);
+    active_operands.materialize_inactive = false;
+    shared_ui_pin_diagnostics_t positive, expected_positive;
+    std::vector<std::byte> positive_pixels, expected_positive_pixels;
+    auto dense_operands = active_operands;
+    dense_operands.materialize_inactive = true;
+    ASSERT_TRUE(run(dense, active, dense_operands, expected_positive, expected_positive_pixels)) << error;
+    ASSERT_TRUE(run(optimized, active, active_operands, positive, positive_pixels)) << error;
+    EXPECT_EQ(positive_pixels, expected_positive_pixels);
+    expect_diagnostics(positive, expected_positive, true);
+    ASSERT_TRUE(std::any_of(positive.authorized_weights.begin(), positive.authorized_weights.end(),
+      [](float value) { return value > 0.0f; }));
+    const auto original = optimized.production_shared_ui_pin_owner.views();
+    const auto poison = [&] {
+      const auto views = optimized.production_shared_ui_pin_owner.views();
+      const std::array srvs {views.field.Get(), views.weights.Get(), views.rows.Get()};
+      for (std::size_t index = 0u; index < srvs.size(); ++index) {
+        ComPtr<ID3D11Resource> resource;
+        srvs[index]->GetResource(&resource);
+        if (index < 2u) {
+          const std::vector<float> values(width * height, index == 0u ? field_poison : weight_poison);
+          optimized.context->UpdateSubresource(resource.Get(), 0u, nullptr, values.data(), width * 4u, 0u);
+        } else {
+          const std::vector<UINT> values(height + 1u, 1u);
+          optimized.context->UpdateSubresource(resource.Get(), 0u, nullptr, values.data(), 4u, 0u);
+        }
+      }
+      return true;
+    };
+    for (const std::string_view reason : {"disabled", "empty", "revoked-receipt"}) {
+      SCOPED_TRACE(std::string(reason));
+      auto inactive = active;
+      if (reason == "disabled") inactive.constants.enabled = 0u;
+      if (reason == "empty") {
+        inactive.condition[2u] = inactive.condition[4u] = 0u;
+        inactive.identity[2u] = 0u;
+        std::fill(inactive.matte.begin(), inactive.matte.end(), 0u);
+      }
+      auto operands = make_current_outline_inputs(inactive);
+      if (reason == "revoked-receipt") operands.receipt[0u] ^= 1u;
+      operands.materialize_inactive = true;
+      shared_ui_pin_diagnostics_t expected, skipped, materialized, recovered;
+      std::vector<std::byte> expected_pixels, skipped_pixels, materialized_pixels, recovered_pixels;
+      ASSERT_TRUE(run(dense, inactive, operands, expected, expected_pixels)) << error;
+      ASSERT_TRUE(poison());
+      operands.materialize_inactive = false;
+      ASSERT_TRUE(run(optimized, inactive, operands, skipped, skipped_pixels)) << error;
+      EXPECT_EQ(skipped_pixels, expected_pixels);
+      expect_diagnostics(skipped, expected, false);
+      EXPECT_EQ(skipped.field, std::vector<float>(width * height, field_poison));
+      EXPECT_EQ(skipped.authorized_weights, std::vector<float>(width * height, weight_poison));
+      EXPECT_TRUE(std::all_of(skipped.active_rows.begin(), skipped.active_rows.end(),
+        [](UINT row) { return row == 0u; }));
+      EXPECT_EQ(skipped.selected_receipt_header[0u], reason == "revoked-receipt" ? 0u : 1u);
+      const auto reused = optimized.production_shared_ui_pin_owner.views();
+      EXPECT_EQ(reused.field.Get(), original.field.Get());
+      EXPECT_EQ(reused.weights.Get(), original.weights.Get());
+      EXPECT_EQ(reused.rows.Get(), original.rows.Get());
+      ASSERT_TRUE(run(optimized, active, active_operands, recovered, recovered_pixels)) << error;
+      EXPECT_EQ(recovered_pixels, expected_positive_pixels);
+      expect_diagnostics(recovered, expected_positive, true);
+
+      // Explicit diagnostics retain the dense inactive field/weight publication even
+      // when those same physical planes contain positive data from the preceding draw.
+      ASSERT_TRUE(poison());
+      operands.materialize_inactive = true;
+      ASSERT_TRUE(run(optimized, inactive, operands, materialized, materialized_pixels)) << error;
+      EXPECT_EQ(materialized_pixels, expected_pixels);
+      expect_diagnostics(materialized, expected, true);
+      ASSERT_TRUE(run(optimized, active, active_operands, recovered, recovered_pixels)) << error;
+      EXPECT_EQ(recovered_pixels, expected_positive_pixels);
+      expect_diagnostics(recovered, expected_positive, true);
+    }
+  }
+}
+
 TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinProductionOwnerRestoresContextAndRejectsMissingInputs) {
   namespace shared = models::host_sbs_shared_ui_warp;
   live_v2_warp_fixture_t fixture;
@@ -5401,18 +5552,22 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinProductionOwnerRestoresContextAndRejec
   ComPtr<ID3D11UnorderedAccessView> sentinel_uav;
   ASSERT_TRUE(SUCCEEDED(fixture.device->CreateTexture2D(&texture_desc, nullptr, &sentinel_uav_texture)));
   ASSERT_TRUE(SUCCEEDED(fixture.device->CreateUnorderedAccessView(sentinel_uav_texture.Get(), nullptr, &sentinel_uav)));
+  ComPtr<ID3D11Texture2D> sentinel_prepare_texture;
+  ComPtr<ID3D11UnorderedAccessView> sentinel_prepare_uav;
+  ASSERT_TRUE(SUCCEEDED(fixture.device->CreateTexture2D(&texture_desc, nullptr, &sentinel_prepare_texture)));
+  ASSERT_TRUE(SUCCEEDED(fixture.device->CreateUnorderedAccessView(sentinel_prepare_texture.Get(), nullptr, &sentinel_prepare_uav)));
   D3D11_BUFFER_DESC desc {};desc.ByteWidth = 48u;desc.Usage = D3D11_USAGE_DEFAULT;desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
   ComPtr<ID3D11Buffer> sentinel_constants;
   ASSERT_TRUE(SUCCEEDED(fixture.device->CreateBuffer(&desc, nullptr, &sentinel_constants)));
   std::array<ID3D11ShaderResourceView *, 15u> old_srvs;old_srvs.fill(sentinel_srv.Get());
   std::array<ID3D11Buffer *, 7u> old_constants;old_constants.fill(sentinel_constants.Get());
-  ID3D11UnorderedAccessView *old_uavs[3] {sentinel_uav.Get(), nullptr, nullptr};
+  ID3D11UnorderedAccessView *old_uavs[4] {sentinel_uav.Get(), nullptr, nullptr, sentinel_prepare_uav.Get()};
   ID3D11ShaderResourceView *old_pixel[3] {sentinel_srv.Get(), sentinel_srv.Get(), sentinel_srv.Get()};
   auto *old_buffer = sentinel_constants.Get();auto *old_sampler = fixture.sampler.Get();
   auto *old_shader = fixture.production_shared_ui_pin_programs.program().initialize;
   fixture.context->CSSetShaderResources(0u, 15u, old_srvs.data());
   fixture.context->CSSetConstantBuffers(0u, 7u, old_constants.data());
-  fixture.context->CSSetUnorderedAccessViews(0u, 3u, old_uavs, nullptr);
+  fixture.context->CSSetUnorderedAccessViews(0u, 4u, old_uavs, nullptr);
   fixture.context->CSSetSamplers(0u, 1u, &old_sampler);fixture.context->CSSetShader(old_shader, nullptr, 0u);
   fixture.context->PSSetShaderResources(12u, 3u, old_pixel);fixture.context->PSSetConstantBuffers(6u, 1u, &old_buffer);
   auto *old_background = sentinel_srv.Get();
@@ -5424,16 +5579,18 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinProductionOwnerRestoresContextAndRejec
     source.data(), base, base, state, {}, output, error, 0u, 0u, {}, &subtitle, nullptr, true, &operands)) << error;
   ID3D11ShaderResourceView *restored_srvs[15] {}, *restored_pixel[3] {};
   ID3D11Buffer *restored_constants[7] {}, *restored_pixel_constant = nullptr;
-  ID3D11UnorderedAccessView *restored_uavs[3] {};
+  ID3D11UnorderedAccessView *restored_uavs[4] {};
   ComPtr<ID3D11SamplerState> restored_sampler;ComPtr<ID3D11ComputeShader> restored_shader;
   fixture.context->CSGetShaderResources(0u, 15u, restored_srvs);fixture.context->CSGetConstantBuffers(0u, 7u, restored_constants);
-  fixture.context->CSGetUnorderedAccessViews(0u, 3u, restored_uavs);fixture.context->CSGetSamplers(0u, 1u, &restored_sampler);
+  fixture.context->CSGetUnorderedAccessViews(0u, 4u, restored_uavs);fixture.context->CSGetSamplers(0u, 1u, &restored_sampler);
   fixture.context->CSGetShader(&restored_shader, nullptr, nullptr);fixture.context->PSGetShaderResources(12u, 3u, restored_pixel);
   fixture.context->PSGetConstantBuffers(6u, 1u, &restored_pixel_constant);
   for (UINT i = 0u; i < 15u; ++i) {EXPECT_EQ(restored_srvs[i], old_srvs[i]);if(restored_srvs[i])restored_srvs[i]->Release();}
   for (UINT i = 0u; i < 7u; ++i) {EXPECT_EQ(restored_constants[i], old_constants[i]);if(restored_constants[i])restored_constants[i]->Release();}
-  for (UINT i = 0u; i < 3u; ++i) {
+  for (UINT i = 0u; i < 4u; ++i) {
     EXPECT_EQ(restored_uavs[i], old_uavs[i]);if(restored_uavs[i])restored_uavs[i]->Release();
+  }
+  for (UINT i = 0u; i < 3u; ++i) {
     EXPECT_EQ(restored_pixel[i], old_pixel[i]);if(restored_pixel[i])restored_pixel[i]->Release();
   }
   EXPECT_EQ(restored_sampler.Get(), old_sampler);EXPECT_EQ(restored_shader.Get(), old_shader);
@@ -5730,12 +5887,36 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinQueuedProductionRequiresCurrentGuardAt
   fixture.use_recorder_guard_scope = true;
   selected.production_shared_ui_pin_queued = true;
   selected.converter_owns_pin_bindings = true;
+  selected.materialize_inactive = false;
+  shared_ui_pin_diagnostics_t queued_diagnostic;
+  selected.shared_ui_pin_diagnostic_output = &queued_diagnostic;
   ASSERT_TRUE(configure(expected, good)) << error;
   EXPECT_EQ(render(fixture, &selected), completed);
+  const auto positive_queued = queued_diagnostic;
+  const auto pin_views = fixture.production_shared_ui_pin_owner.views();
+  const std::array poison_views {pin_views.field.Get(), pin_views.weights.Get(), pin_views.rows.Get()};
+  for (std::size_t index = 0u; index < poison_views.size(); ++index) {
+    ComPtr<ID3D11Resource> resource;
+    poison_views[index]->GetResource(&resource);
+    if (index < 2u) {
+      const std::vector<float> values(width * height, index == 0u ? 0.75f : 0.875f);
+      fixture.context->UpdateSubresource(resource.Get(), 0u, nullptr, values.data(), width * 4u, 0u);
+    } else {
+      const std::vector<UINT> values(height + 1u, 1u);
+      fixture.context->UpdateSubresource(resource.Get(), 0u, nullptr, values.data(), 4u, 0u);
+    }
+  }
   auto bad = good;bad[6u] = 0u;
   ASSERT_TRUE(configure(expected, bad)) << error;
   const auto bad_draw_packet = fixture.private_guard_srv;
   EXPECT_EQ(render(fixture, &selected), identity) << "A rejected prepare guard must produce current flat pixels";
+  EXPECT_EQ(queued_diagnostic.field, std::vector<float>(width * height, 0.75f));
+  EXPECT_EQ(queued_diagnostic.authorized_weights, std::vector<float>(width * height, 0.875f));
+  EXPECT_TRUE(std::all_of(queued_diagnostic.active_rows.begin(), queued_diagnostic.active_rows.end(),
+    [](UINT row) { return row == 0u; }));
+  EXPECT_EQ(queued_diagnostic.selected_receipt_header[0u], 1u)
+    << "The literal selected receipt remains valid while the separate queued guard rejects work";
+  selected.shared_ui_pin_diagnostic_output = nullptr;
   ASSERT_TRUE(configure(expected, good)) << error;
   selected.shared_ui_pin_draw_guard_override = bad_draw_packet.Get();
   EXPECT_EQ(render(fixture, &selected), identity) << "Revocation after preparation must reject the issued pin field";
@@ -5818,7 +5999,14 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinQueuedProductionRequiresCurrentGuardAt
   EXPECT_EQ(restored_predicate.Get(), predicate.Get());EXPECT_EQ(restored_predicate_value, TRUE);
   fixture.context->SetPredication(nullptr, FALSE);
   ASSERT_TRUE(configure(expected, good)) << error;
+  selected.shared_ui_pin_diagnostic_output = &queued_diagnostic;
   EXPECT_EQ(render(fixture, &selected), completed) << "Rejected guards must not poison a later current queued draw";
+  EXPECT_EQ(queued_diagnostic.field, positive_queued.field);
+  EXPECT_EQ(queued_diagnostic.authorized_weights, positive_queued.authorized_weights);
+  EXPECT_EQ(queued_diagnostic.active_rows, positive_queued.active_rows);
+  EXPECT_EQ(queued_diagnostic.selected_receipt_header, positive_queued.selected_receipt_header);
+  EXPECT_EQ(queued_diagnostic.mapping_rgba32f, positive_queued.mapping_rgba32f);
+  EXPECT_EQ(queued_diagnostic.ui_coverage_rgba32f, positive_queued.ui_coverage_rgba32f);
   EXPECT_TRUE(fixture.private_guard_slots_clear());
 }
 

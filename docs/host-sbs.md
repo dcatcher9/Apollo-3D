@@ -716,9 +716,12 @@ authenticates the current abstention without granting subtitle geometry or prote
 exact Base. A malformed source/field policy cannot acquire this identity publication.
 
 Every reuse leaves OCR crop/TensorRT/postprocess/plane/condition work dormant and holds the complete
-depth/camera/OCR8/UIP4/contour/history/conditioned-final tuple byte-for-byte. Reprojection builds
-the shared pin field from that retained tuple; exact current native RGB can only revoke matte
-contributors. Failed shared preparation restores ordinary authenticated Base rendering with b3
+depth/camera/OCR8/UIP4/contour/history/conditioned-final tuple byte-for-byte. Shared pin preparation
+authorizes the selected receipt, subtitle inputs and Base warp once per draw. The GPU schedules the
+field and row pass when subtitle protection is authorized. Exact current native RGB can then revoke
+individual matte contributors. Inactive rows use the Base inverse. Debug snapshots and the draw
+probe request a fully materialized field and weights even for inactive draws. The queued proof is
+also checked when sampling the draw. Failed shared preparation restores ordinary authenticated Base rendering with b3
 subtitle permission disabled and selected-receipt state cleared. An invalid selected receipt in a
 shared draw also selects the canonical Base inverse. Once
 the joined root has submitted work, any asynchronous CUDA error

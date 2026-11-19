@@ -15,6 +15,37 @@ RWTexture2D<float> SunshineHostFinalStore : register(u0);
 RWTexture2D<float> SharedPinWeightStore : register(u1);
 RWTexture2D<uint> SharedPinRowStore : register(u2);
 
+#if !defined(HOST_SBS_TEXT_GAME_PIN)
+// Per-draw preparation: initialize args at byte 0, row-pin args at byte 16, and
+// {selected receipt, subtitle authorized, Base warp authorized, reserved zero} at byte 32.
+// The owner unbinds u3 before indirect execution, then binds the same allocation at t8.
+ByteAddressBuffer SharedPinPreparation : register(t8);
+RWByteAddressBuffer SharedPinPreparationStore : register(u3);
+groupshared uint SharedPinGroupWarpAuthorized;
+
+[numthreads(1,1,1)]
+void prepare_main(uint3 id : SV_DispatchThreadID) {
+    if (any(id != 0u)) return;
+    uint bytes; SharedPinPreparationStore.GetDimensions(bytes);
+    if (bytes != 48u) return;
+    uint warp_authorized = WarpAuthorized() ? 1u : 0u;
+    uint selected_receipt = SelectedMatteAuthorized() ? 1u : 0u;
+    uint2 source_size; float plane;
+    uint subtitle_authorized = SubtitleRenderAuthorized(source_size, plane) &&
+        selected_receipt != 0u && all(source_size == PinSourceShape.xy) ? 1u : 0u;
+    SharedPinPreparationStore.Store4(0u,
+        uint4((PinSourceShape.x + 15u) / 16u, (PinSourceShape.w + 15u) / 16u,
+              subtitle_authorized, 0u));
+    SharedPinPreparationStore.Store4(16u,
+        uint4((PinSourceShape.w + 7u) / 8u, 1u, subtitle_authorized, 0u));
+    SharedPinPreparationStore.Store4(32u,
+        uint4(selected_receipt, subtitle_authorized, warp_authorized, 0u));
+    // The owner has cleared every row. Keep this literal receipt header even when no
+    // subtitle is authorized: empty rows still select the exact ordinary Base inverse.
+    SharedPinRowStore[uint2(0u,PinSourceShape.w)] = selected_receipt;
+}
+#endif
+
 #if defined(HOST_SBS_TEXT_GAME_PIN)
 // A Game 3D text game supplies its own text: the helper loaded into it publishes the coverage of
 // every piece of text the game draws. That picture is the pin weight, so no part of the Host
@@ -136,7 +167,13 @@ float SharedNativeBaseSample(float2 uv) {
     return lerp(lerp(a,b,fraction.x),lerp(c,d,fraction.x),fraction.y);
 }
 float SharedOriginalParallax(float2 uv) {
+#if defined(HOST_SBS_TEXT_GAME_PIN)
     if (!WarpAuthorized()) return 0.0f;
+#else
+    // Preparation and initialization share immutable draw operands. Pixel shaders still
+    // evaluate their independent live authorization, including the queued transaction.
+    if (SharedPinGroupWarpAuthorized == 0u) return 0.0f;
+#endif
     if (video_roi_active == 0.0f) return SharedNativeBaseSample(uv);
     uint2 field_size; BaseParallax.GetDimensions(field_size.x, field_size.y);
     if (!VideoRoiRectValid() || !VideoRoiContentValid(field_size)) return 0.0f;
@@ -167,10 +204,12 @@ void initialize_main(uint3 id : SV_DispatchThreadID, uint3 lane : SV_GroupThread
         SharedPinGroupSelectedReceipt = TextGamePinAuthorized() && TextGameTextVisible() && all(source_size == PinSourceShape.xy) ? 1u : 0u;
         SharedPinGroupAuthorized = SharedPinGroupSelectedReceipt;
 #else
-        uint2 source_size; float plane;
-        SharedPinGroupSelectedReceipt = SelectedMatteAuthorized() ? 1u : 0u;
-        SharedPinGroupAuthorized = SubtitleRenderAuthorized(source_size, plane) &&
-            SharedPinGroupSelectedReceipt != 0u && all(source_size == PinSourceShape.xy) ? 1u : 0u;
+        uint4 prepared = SharedPinPreparation.Load4(32u);
+        bool valid = all(prepared.xyz <= 1u) && prepared.w == 0u;
+        SharedPinGroupSelectedReceipt = valid && prepared.x == 1u ? 1u : 0u;
+        SharedPinGroupWarpAuthorized = valid && prepared.z == 1u ? 1u : 0u;
+        SharedPinGroupAuthorized = valid && prepared.y == 1u &&
+            SharedPinGroupSelectedReceipt != 0u && SharedPinGroupWarpAuthorized != 0u ? 1u : 0u;
 #endif
     }
     GroupMemoryBarrierWithGroupSync();

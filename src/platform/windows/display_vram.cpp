@@ -2989,6 +2989,7 @@ namespace platf::dxgi {
               request.queued = draw_command.queued_guard_override;
               request.queued_guard_constants = draw_command.queued_guard_constants;
               request.queued_guard_transaction = draw_command.queued_guard_transaction;
+              request.materialize_inactive = snapshot_debug_inputs || probe_observer.record;
               return request;
             };
             if (selected_draw && subtitle_constants.enabled == 1u) {
