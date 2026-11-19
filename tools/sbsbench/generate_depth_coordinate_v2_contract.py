@@ -2354,6 +2354,14 @@ def main(argv: list[str] | None = None) -> int:
         # validate the old pins yet: this is the command used precisely after a shader edit makes
         # one or more of them stale.
         shader_manifest = shader_manifest_generator.load_manifest()
+        # Calibration binds the preprocess closure into the GPU tag. Its source graph is
+        # independent of the generated tag, so refresh it before projecting the contract.
+        preprocess = shader_manifest_generator.closure_group(shader_manifest, "preprocess")
+        preprocess["source_closure_sha256"] = shader_source_closure_sha256(
+            PREPROCESS_SHADER_ROOT,
+            shader_manifest_generator.group_specs(shader_manifest, "preprocess"),
+            shader_compile_flags=shader_manifest["shader_compile_flags"],
+        )
         try:
             projected = shader_manifest_generator.render_dvc_manifest(
                 shader_manifest, args.manifest.read_text(encoding="utf-8")

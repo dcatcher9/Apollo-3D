@@ -1495,6 +1495,57 @@ class GeneratedContractWriteTests(unittest.TestCase):
             self.assertEqual(cpp.read_bytes(), b"stale\r\n")
             self.assertEqual(cpp.stat().st_mtime_ns, before[cpp])
 
+    def test_preprocess_source_edit_refreshes_contract_identity_in_one_pass(self):
+        shader_generator = generator.shader_manifest_generator
+        original = generator.load_contract()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            def staged(path):
+                return root / path.relative_to(REPO)
+
+            runtime_headers = (
+                generator.CURRENT_OUTLINE_RUNTIME_HEADER,
+                generator.CURRENT_BACKGROUND_RUNTIME_HEADER,
+                generator.CURRENT_SHARED_UI_WARP_RUNTIME_HEADER,
+            )
+            for path in (
+                    Path(generator.__file__), Path(shader_generator.__file__),
+                    generator.MANIFEST, shader_generator.MANIFEST,
+                    shader_generator.DOC_TARGET, *runtime_headers):
+                target = staged(path)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(path, target)
+            shader_root = staged(generator.PREPROCESS_SHADER_ROOT)
+            shutil.copytree(generator.PREPROCESS_SHADER_ROOT, shader_root)
+            preprocess = shader_root / "rgb_to_nchw_cs.hlsl"
+            preprocess.write_bytes(preprocess.read_bytes() + b"\n// Preprocess edit for refresh test\n")
+
+            def run(script, flag):
+                result = subprocess.run(
+                    [sys.executable, "-B", str(staged(Path(script.__file__))), flag],
+                    cwd=root, text=True, capture_output=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            run(generator, "--refresh-shader-identity")
+            run(generator, "--check")
+            run(shader_generator, "--check")
+            refreshed = json.loads(staged(generator.MANIFEST).read_text(encoding="utf-8"))
+            self.assertNotEqual(generator.contract_tag(refreshed), generator.contract_tag(original))
+            outputs = tuple(map(staged, (
+                generator.MANIFEST, shader_generator.MANIFEST, generator.CPP_TARGET,
+                shader_generator.CPP_TARGET, shader_generator.PYTHON_TARGET, shader_generator.DOC_TARGET,
+                *runtime_headers, *generator.HLSL_TARGETS, *generator.HLSL_OCR_ASSERT_TARGETS,
+            )))
+            timestamp = 1600000000000000000
+            for path in outputs:
+                os.utime(path, ns=(timestamp, timestamp))
+            before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in outputs}
+            run(generator, "--refresh-shader-identity")
+            self.assertEqual(
+                {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in outputs}, before)
+
 
 if __name__ == "__main__":
     unittest.main()
