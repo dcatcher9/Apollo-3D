@@ -20,6 +20,9 @@ Texture2D<uint> RawM : register(t10);
 StructuredBuffer<uint> RawMeta : register(t11);
 globallycoherent RWByteAddressBuffer Data : register(u0);
 RWTexture2D<uint> V3M : register(u1); // Packed ownership/AA/closure temp until final binary publication.
+// Begin-only alias. Other entries retain their original texture binding at u1.
+// Optional standalone diagnostics leave this unbound and keep their direct dispatch.
+RWByteAddressBuffer PrivateCacheValidationArgs : register(u1);
 globallycoherent RWTexture2D<uint> PassableCache : register(u2);
 // Current own Raw-root witness scratch. Canonical second-graph init clears the
 // borrowed mode-final texture over EVERY ROI pixel before this unit's reduction.
@@ -675,8 +678,11 @@ void WeakAABegin(){
 // transition with an authenticated old full-image RGB anchor. This is evidence of
 // changed trusted foreground, not a claim OCR-empty proved physical absence.
 // Old pixel words remain immutable throughout this prepublication dispatch.
+bool WeakAAAppearanceSampleWork(){
+    return WeakAAPlan()&&WeakAAState[4u]==1u&&WeakAAState[234u]!=0u&&InputReady();
+}
 void WeakAASampleAppearance(uint2 lane){
-    if(any(lane>=8u)||!WeakAAPlan()||WeakAAState[4u]!=1u||WeakAAState[234u]==0u||!InputReady())return;
+    if(any(lane>=8u)||!WeakAAAppearanceSampleWork())return;
     uint mask=WeakAAState[234u];
     [unroll]for(uint unit=0u;unit<8u;++unit)if((mask&(1u<<unit))!=0u){
         uint b=128u+32u*unit,bit=1u<<unit;
@@ -748,11 +754,28 @@ void WeakAACommit(){
     }
 }
 
+void PreparePrivateCacheValidationArgs(){
+    uint bytes;PrivateCacheValidationArgs.GetDimensions(bytes);if(bytes!=16u)return;
+    // The begin plans remain immutable until validation. Later unit faults can only
+    // revoke InputReady, never create a missing geometry or appearance-sampling plan.
+    bool framePlan=StabilityFramePlanRW()&&InputReady();
+    bool fullBand=framePlan&&(SW(5u)==1u||SW(STABILITY_AA_OLD_STRONG_PLAN)==1u);
+    // Without old geometry/AA, only pixel0's completion plan and the at-most8x8
+    // WeakAA appearance sites can write. One existing16x16 group covers them all.
+    // With neither plan, begin already wrote validation's otherwise redundant SS102=0.
+    bool oneGroup=framePlan||WeakAAAppearanceSampleWork();
+    uint2 groups=fullBand?(Shape.xy+15u)/16u:uint2(1u,1u);
+    PrivateCacheValidationArgs.Store4(0u,uint4(groups,oneGroup?1u:0u,0u));
+}
+
 [numthreads(1,1,1)]
 void private_cache_begin_main(uint3 g:SV_GroupID){
     if(any(g))return;
     WeakAABegin();
-    if(!StabilityHeaderRWShape())return;
+    if(!StabilityHeaderRWShape()){
+        // WeakAA has its own owner and can still need appearance sampling.
+        PreparePrivateCacheValidationArgs();return;
+    }
     bool header=SW(0u)==STABILITY_TAG&&SW(1u)==STABILITY_SCHEMA;
     bool wasValid=header&&SW(2u)==1u;
     bool legacyValid=wasValid&&SW(STABILITY_LEGACY_GLOBAL_VALID)==1u;
@@ -792,6 +815,9 @@ void private_cache_begin_main(uint3 g:SV_GroupID){
         [unroll]for(uint k=0u;k<16u;++k)SS(128u+k,CBCMeta[StabilityStaticProducerWord(k)]);
         SS(127u,0u);SS(107u,1u);
     }
+    // Root0 skips begin entirely. The caller must copy observationOne.X into this
+    // vector's Z before begin, just as it does for the existing native arguments.
+    PreparePrivateCacheValidationArgs();
 }
 [numthreads(16,16,1)]
 void private_cache_validate_main(uint3 d:SV_DispatchThreadID){

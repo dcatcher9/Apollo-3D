@@ -85,13 +85,13 @@ inline constexpr std::array<cache::shader_spec, 15u> outline_specs{{
   cache::shader_spec{"host_sbs_current_outline_support_band_cs.hlsl","aggregate_support_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_outline_support_band_cs.hlsl","publish_closure_main","cs_5_0"},
 }};
-inline constexpr std::string_view outline_closure="77ef293359988b8b6b762b1ff286e299746f244cd237d56874b172eaf563c9a5";
+inline constexpr std::string_view outline_closure="198b489d4cb5b7a63005852d7c464679ab84df0b061f4b138ca51dd1f9404b46";
 inline constexpr std::array<cache::shader_spec, 3u> stability_specs{{
   cache::shader_spec{"host_sbs_current_outline_support_band_cs.hlsl","private_cache_begin_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_outline_support_band_cs.hlsl","private_cache_validate_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_outline_support_band_cs.hlsl","private_cache_commit_main","cs_5_0"},
 }};
-inline constexpr std::string_view stability_closure="e79498f8dadd4ea1c652471241417bc82002d0725246e3de75ee09f045cd5a49";
+inline constexpr std::string_view stability_closure="6e23e79d2b643a8ae34c7f80b67c64f50876ea303c24fdf3ad08d00b2c191ed4";
 inline constexpr std::array<cache::shader_spec, 9u> hole_specs{{
   cache::shader_spec{"host_sbs_current_mask_holes_cs.hlsl","clear_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_mask_holes_cs.hlsl","capture_unit_main","cs_5_0"},

@@ -1192,6 +1192,12 @@ images use the same immutable full-image write plan and become valid only throug
 complete, fault-free commit. The reference can precede intervening weak observations. Current
 glyph evidence and first AA admission do not wait for history, and this adds no GPU dispatch.
 
+Cache begin sets the indirect validation grid from the current observation plans. A prior
+geometry or strong AA reference can require the full native grid. Snapshot planning and
+appearance sampling fit in the origin workgroup. When neither is needed, validation dispatches
+zero groups. Fresh empty observations still publish the RGB anchor, and the Root0 gate masks
+any grid left by the previous observation.
+
 The optional AA observer owns RGB, positive colour-change witnesses, previous direct-AA
 candidates and actually accepted AA in a separate structured buffer. Its existing
 begin/validation/publication/commit passes validate the source domain, observation high-water
