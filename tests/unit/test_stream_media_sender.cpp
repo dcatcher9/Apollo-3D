@@ -302,6 +302,44 @@ TEST(StreamMediaSenderTest, VideoSplitsFecBlocksAndClearsTheTailOfReusedDataShar
   expect_no_worker_error(state);
 }
 
+TEST(StreamMediaSenderTest, VideoSendsDataOnlyBlocksAboveReedSolomonCapacity) {
+  media::media_sender_config_t config;
+  config.video_packet_size = 200;
+  config.video_fec_percentage = 20;
+  constexpr std::array<std::size_t, 4> block_sizes {257, 257, 257, 254};
+  constexpr std::size_t packet_count = 1025;
+  const std::size_t picture_bytes = config.video_packet_size - sizeof(NV_VIDEO_PACKET);
+  const auto payload = authored_bytes(packet_count * picture_bytes - short_frame_header_size, 41);
+
+  media::media_sender_fixture_t sender(config);
+  sender.start();
+  ASSERT_TRUE(sender.wait_ready(lane_e::video, 3s));
+  ASSERT_TRUE(sender.enqueue_video({payload, 11}));
+  const auto wire = sender.receive(lane_e::video, packet_count, 3s);
+  ASSERT_EQ(wire.size(), packet_count);
+  ASSERT_TRUE(sender.wait_processed(lane_e::video, 1, 3s));
+  sender.stop();
+
+  bytes_t joined;
+  std::size_t wire_index = 0;
+  // The planned parity would require five blocks. The sender uses four data-only blocks,
+  // each of which may have more shards than the Reed–Solomon pointer table can hold.
+  for (std::size_t block = 0; block < block_sizes.size(); ++block) {
+    for (std::size_t shard = 0; shard < block_sizes[block]; ++shard, ++wire_index) {
+      const auto decoded = decrypt_video(wire[wire_index], config);
+      ASSERT_TRUE(decoded.has_value());
+      EXPECT_EQ(decoded->video.multiFecBlocks, (block << 4) | 0xc0);
+      EXPECT_EQ(decoded->video.fecInfo, (block_sizes[block] << 22) | (shard << 12));
+      EXPECT_EQ(boost::endian::big_to_native(decoded->rtp.sequenceNumber), config.video_sequence + wire_index);
+      expect_video_nonce(*decoded, config.video_iv_counter + wire_index);
+      joined.insert(joined.end(), decoded->plaintext.begin() + video_header_size, decoded->plaintext.end());
+    }
+  }
+  ASSERT_EQ(joined.size(), packet_count * picture_bytes);
+  EXPECT_TRUE(std::equal(payload.begin(), payload.end(), joined.begin() + short_frame_header_size));
+  expect_no_worker_error(sender.state_after_stop());
+}
+
 TEST(StreamMediaSenderTest, OversizedFrameRequiresRecoveryIdrWithoutConsumingSequenceOrNonce) {
   media::media_sender_config_t config;
   config.video_packet_size = 200;

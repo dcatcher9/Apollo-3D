@@ -3135,183 +3135,110 @@ namespace platf {
     return saddr_v6;
   }
 
-  // Use UDP segmentation offload if it is supported by the OS. If the NIC is capable, this will use
-  // hardware acceleration to reduce CPU usage. Support for USO was introduced in Windows 10 20H1.
-  bool send_batch(batched_send_info_t &send_info) {
-    WSAMSG msg;
-
-    // Convert the target address into a SOCKADDR
-    SOCKADDR_IN taddr_v4;
-    SOCKADDR_IN6 taddr_v6;
-    if (send_info.target_address.is_v6()) {
-      taddr_v6 = to_sockaddr(send_info.target_address.to_v6(), send_info.target_port);
-
-      msg.name = (PSOCKADDR) &taddr_v6;
-      msg.namelen = sizeof(taddr_v6);
+  static bool send_udp_datagrams(
+    std::uintptr_t socket,
+    const boost::asio::ip::address &target_address,
+    uint16_t target_port,
+    const boost::asio::ip::address &source_address,
+    WSABUF *buffers,
+    DWORD buffer_count,
+    DWORD segment_size
+  ) {
+    WSAMSG msg {};
+    SOCKADDR_IN target_v4;
+    SOCKADDR_IN6 target_v6;
+    if (target_address.is_v6()) {
+      target_v6 = to_sockaddr(target_address.to_v6(), target_port);
+      msg.name = reinterpret_cast<SOCKADDR *>(&target_v6);
+      msg.namelen = sizeof(target_v6);
     } else {
-      taddr_v4 = to_sockaddr(send_info.target_address.to_v4(), send_info.target_port);
-
-      msg.name = (PSOCKADDR) &taddr_v4;
-      msg.namelen = sizeof(taddr_v4);
+      target_v4 = to_sockaddr(target_address.to_v4(), target_port);
+      msg.name = reinterpret_cast<SOCKADDR *>(&target_v4);
+      msg.namelen = sizeof(target_v4);
     }
 
-    auto const max_bufs_per_msg = send_info.payload_buffers.size() + (send_info.headers ? 1 : 0);
+    msg.lpBuffers = buffers;
+    msg.dwBufferCount = buffer_count;
 
-    WSABUF bufs[(send_info.headers ? send_info.block_count : 1) * max_bufs_per_msg];
-    DWORD bufcount = 0;
-    if (send_info.headers) {
-      // Interleave buffers for headers and payloads
-      for (auto i = 0; i < send_info.block_count; i++) {
-        bufs[bufcount].buf = (char *) &send_info.headers[(send_info.block_offset + i) * send_info.header_size];
-        bufs[bufcount].len = send_info.header_size;
-        bufcount++;
-        auto payload_desc = send_info.buffer_for_payload_offset((send_info.block_offset + i) * send_info.payload_size);
-        bufs[bufcount].buf = (char *) payload_desc.buffer;
-        bufs[bufcount].len = send_info.payload_size;
-        bufcount++;
-      }
+    // One packet-info option and space for an optional UDP segmentation size.
+    alignas(WSACMSGHDR) char control[WSA_CMSG_SPACE(sizeof(DWORD)) + std::max(WSA_CMSG_SPACE(sizeof(IN6_PKTINFO)), WSA_CMSG_SPACE(sizeof(IN_PKTINFO)))] = {};
+    msg.Control.buf = control;
+    msg.Control.len = sizeof(control);
+
+    auto *option = WSA_CMSG_FIRSTHDR(&msg);
+    ULONG control_size;
+    if (source_address.is_v6()) {
+      IN6_PKTINFO packet_info {};
+      packet_info.ipi6_addr = to_sockaddr(source_address.to_v6(), 0).sin6_addr;
+      control_size = WSA_CMSG_SPACE(sizeof(packet_info));
+      option->cmsg_level = IPPROTO_IPV6;
+      option->cmsg_type = IPV6_PKTINFO;
+      option->cmsg_len = WSA_CMSG_LEN(sizeof(packet_info));
+      std::memcpy(WSA_CMSG_DATA(option), &packet_info, sizeof(packet_info));
     } else {
-      // Translate buffer descriptors into WSABUFs
-      auto payload_offset = send_info.block_offset * send_info.payload_size;
-      auto payload_length = payload_offset + (send_info.block_count * send_info.payload_size);
-      while (payload_offset < payload_length) {
-        auto payload_desc = send_info.buffer_for_payload_offset(payload_offset);
-        bufs[bufcount].buf = (char *) payload_desc.buffer;
-        bufs[bufcount].len = std::min(payload_desc.size, payload_length - payload_offset);
-        payload_offset += bufs[bufcount].len;
-        bufcount++;
-      }
+      IN_PKTINFO packet_info {};
+      packet_info.ipi_addr = to_sockaddr(source_address.to_v4(), 0).sin_addr;
+      control_size = WSA_CMSG_SPACE(sizeof(packet_info));
+      option->cmsg_level = IPPROTO_IP;
+      option->cmsg_type = IP_PKTINFO;
+      option->cmsg_len = WSA_CMSG_LEN(sizeof(packet_info));
+      std::memcpy(WSA_CMSG_DATA(option), &packet_info, sizeof(packet_info));
     }
 
-    msg.lpBuffers = bufs;
-    msg.dwBufferCount = bufcount;
-    msg.dwFlags = 0;
-
-    // At most, one DWORD option and one PKTINFO option
-    char cmbuf[WSA_CMSG_SPACE(sizeof(DWORD)) + std::max(WSA_CMSG_SPACE(sizeof(IN6_PKTINFO)), WSA_CMSG_SPACE(sizeof(IN_PKTINFO)))] = {};
-    ULONG cmbuflen = 0;
-
-    msg.Control.buf = cmbuf;
-    msg.Control.len = sizeof(cmbuf);
-
-    auto cm = WSA_CMSG_FIRSTHDR(&msg);
-    if (send_info.source_address.is_v6()) {
-      IN6_PKTINFO pktInfo;
-
-      SOCKADDR_IN6 saddr_v6 = to_sockaddr(send_info.source_address.to_v6(), 0);
-      pktInfo.ipi6_addr = saddr_v6.sin6_addr;
-      pktInfo.ipi6_ifindex = 0;
-
-      cmbuflen += WSA_CMSG_SPACE(sizeof(pktInfo));
-
-      cm->cmsg_level = IPPROTO_IPV6;
-      cm->cmsg_type = IPV6_PKTINFO;
-      cm->cmsg_len = WSA_CMSG_LEN(sizeof(pktInfo));
-      memcpy(WSA_CMSG_DATA(cm), &pktInfo, sizeof(pktInfo));
-    } else {
-      IN_PKTINFO pktInfo;
-
-      SOCKADDR_IN saddr_v4 = to_sockaddr(send_info.source_address.to_v4(), 0);
-      pktInfo.ipi_addr = saddr_v4.sin_addr;
-      pktInfo.ipi_ifindex = 0;
-
-      cmbuflen += WSA_CMSG_SPACE(sizeof(pktInfo));
-
-      cm->cmsg_level = IPPROTO_IP;
-      cm->cmsg_type = IP_PKTINFO;
-      cm->cmsg_len = WSA_CMSG_LEN(sizeof(pktInfo));
-      memcpy(WSA_CMSG_DATA(cm), &pktInfo, sizeof(pktInfo));
+    if (segment_size != 0) {
+      control_size += WSA_CMSG_SPACE(sizeof(segment_size));
+      option = WSA_CMSG_NXTHDR(&msg, option);
+      option->cmsg_level = IPPROTO_UDP;
+      option->cmsg_type = UDP_SEND_MSG_SIZE;
+      option->cmsg_len = WSA_CMSG_LEN(sizeof(segment_size));
+      std::memcpy(WSA_CMSG_DATA(option), &segment_size, sizeof(segment_size));
     }
 
-    if (send_info.block_count > 1) {
-      cmbuflen += WSA_CMSG_SPACE(sizeof(DWORD));
-
-      cm = WSA_CMSG_NXTHDR(&msg, cm);
-      cm->cmsg_level = IPPROTO_UDP;
-      cm->cmsg_type = UDP_SEND_MSG_SIZE;
-      cm->cmsg_len = WSA_CMSG_LEN(sizeof(DWORD));
-      *((DWORD *) WSA_CMSG_DATA(cm)) = send_info.header_size + send_info.payload_size;
-    }
-
-    msg.Control.len = cmbuflen;
-
-    // If USO is not supported, this will fail and the caller will fall back to unbatched sends.
+    msg.Control.len = control_size;
     DWORD bytes_sent;
-    return WSASendMsg((SOCKET) send_info.native_socket, &msg, 0, &bytes_sent, nullptr, nullptr) != SOCKET_ERROR;
+    return WSASendMsg(static_cast<SOCKET>(socket), &msg, 0, &bytes_sent, nullptr, nullptr) != SOCKET_ERROR;
+  }
+
+  bool send_batch(const batched_send_info_t &send_info) {
+    if (send_info.packet_count == 0 || send_info.packet_count > MAX_UDP_BATCH_PACKETS) {
+      return false;
+    }
+
+    WSABUF buffers[2 * MAX_UDP_BATCH_PACKETS];
+    const auto header_size = static_cast<ULONG>(send_info.header_size);
+    const auto payload_size = static_cast<ULONG>(send_info.payloads.payload_size);
+    for (size_t index = 0; index < send_info.packet_count; ++index) {
+      buffers[2 * index] = {header_size, const_cast<char *>(send_info.header_at(index))};
+      buffers[2 * index + 1] = {payload_size, const_cast<char *>(send_info.payload_at(index))};
+    }
+
+    // If segmentation offload is unavailable, the caller sends these packets individually.
+    return send_udp_datagrams(
+      send_info.native_socket,
+      send_info.target_address,
+      send_info.target_port,
+      send_info.source_address,
+      buffers,
+      static_cast<DWORD>(2 * send_info.packet_count),
+      send_info.packet_count > 1 ? header_size + payload_size : 0
+    );
   }
 
   bool send(send_info_t &send_info) {
-    WSAMSG msg;
-
-    // Convert the target address into a SOCKADDR
-    SOCKADDR_IN taddr_v4;
-    SOCKADDR_IN6 taddr_v6;
-    if (send_info.target_address.is_v6()) {
-      taddr_v6 = to_sockaddr(send_info.target_address.to_v6(), send_info.target_port);
-
-      msg.name = (PSOCKADDR) &taddr_v6;
-      msg.namelen = sizeof(taddr_v6);
-    } else {
-      taddr_v4 = to_sockaddr(send_info.target_address.to_v4(), send_info.target_port);
-
-      msg.name = (PSOCKADDR) &taddr_v4;
-      msg.namelen = sizeof(taddr_v4);
-    }
-
-    WSABUF bufs[2];
-    DWORD bufcount = 0;
-    if (send_info.header) {
-      bufs[bufcount].buf = (char *) send_info.header;
-      bufs[bufcount].len = send_info.header_size;
-      bufcount++;
-    }
-    bufs[bufcount].buf = (char *) send_info.payload;
-    bufs[bufcount].len = send_info.payload_size;
-    bufcount++;
-
-    msg.lpBuffers = bufs;
-    msg.dwBufferCount = bufcount;
-    msg.dwFlags = 0;
-
-    char cmbuf[std::max(WSA_CMSG_SPACE(sizeof(IN6_PKTINFO)), WSA_CMSG_SPACE(sizeof(IN_PKTINFO)))] = {};
-    ULONG cmbuflen = 0;
-
-    msg.Control.buf = cmbuf;
-    msg.Control.len = sizeof(cmbuf);
-
-    auto cm = WSA_CMSG_FIRSTHDR(&msg);
-    if (send_info.source_address.is_v6()) {
-      IN6_PKTINFO pktInfo;
-
-      SOCKADDR_IN6 saddr_v6 = to_sockaddr(send_info.source_address.to_v6(), 0);
-      pktInfo.ipi6_addr = saddr_v6.sin6_addr;
-      pktInfo.ipi6_ifindex = 0;
-
-      cmbuflen += WSA_CMSG_SPACE(sizeof(pktInfo));
-
-      cm->cmsg_level = IPPROTO_IPV6;
-      cm->cmsg_type = IPV6_PKTINFO;
-      cm->cmsg_len = WSA_CMSG_LEN(sizeof(pktInfo));
-      memcpy(WSA_CMSG_DATA(cm), &pktInfo, sizeof(pktInfo));
-    } else {
-      IN_PKTINFO pktInfo;
-
-      SOCKADDR_IN saddr_v4 = to_sockaddr(send_info.source_address.to_v4(), 0);
-      pktInfo.ipi_addr = saddr_v4.sin_addr;
-      pktInfo.ipi_ifindex = 0;
-
-      cmbuflen += WSA_CMSG_SPACE(sizeof(pktInfo));
-
-      cm->cmsg_level = IPPROTO_IP;
-      cm->cmsg_type = IP_PKTINFO;
-      cm->cmsg_len = WSA_CMSG_LEN(sizeof(pktInfo));
-      memcpy(WSA_CMSG_DATA(cm), &pktInfo, sizeof(pktInfo));
-    }
-
-    msg.Control.len = cmbuflen;
-
-    DWORD bytes_sent;
-    if (WSASendMsg((SOCKET) send_info.native_socket, &msg, 0, &bytes_sent, nullptr, nullptr) == SOCKET_ERROR) {
+    WSABUF buffers[] {
+      {static_cast<ULONG>(send_info.header_size), const_cast<char *>(send_info.header)},
+      {static_cast<ULONG>(send_info.payload_size), const_cast<char *>(send_info.payload)},
+    };
+    const auto first = send_info.header ? 0u : 1u;
+    if (!send_udp_datagrams(
+          send_info.native_socket,
+          send_info.target_address,
+          send_info.target_port,
+          send_info.source_address,
+          buffers + first,
+          2 - first,
+          0
+        )) {
       auto winerr = WSAGetLastError();
       BOOST_LOG(warning) << "WSASendMsg() failed: "sv << winerr;
       return false;

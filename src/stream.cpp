@@ -1771,129 +1771,66 @@ namespace stream {
     };
 
     struct workspace_t {
-      video_shard_storage_t shards;
-      std::vector<char> headers;
-      std::vector<std::uint8_t *> shard_pointers;
-      std::vector<platf::buffer_descriptor_t> payload_buffers;
-
-      void ensure_capacity(
-        std::size_t shard_bytes,
-        std::size_t header_bytes,
-        std::size_t shard_count
-      ) {
-        if (shards.size() < shard_bytes) {
-          shards.resize(shard_bytes);
-        }
-        if (headers.size() < header_bytes) {
-          headers.resize(header_bytes);
-        }
-        if (shard_pointers.size() < shard_count) {
-          shard_pointers.resize(shard_count);
-        }
-        payload_buffers.clear();
-        if (payload_buffers.capacity() < 2) {
-          payload_buffers.reserve(2);
-        }
-      }
+      video_shard_storage_t parity;
+      std::array<std::uint8_t *, RS8_DATA_SHARDS_MAX> rs_pointers;
 
       void release_oversized() {
-        if (shards.capacity() > VIDEO_SEND_WORKSPACE_RETAIN_LIMIT) {
-          video_shard_storage_t().swap(shards);
-        }
-        if (headers.capacity() > VIDEO_SEND_WORKSPACE_RETAIN_LIMIT) {
-          std::vector<char>().swap(headers);
-        }
-        if (shard_pointers.capacity() * sizeof(std::uint8_t *) > VIDEO_SEND_WORKSPACE_RETAIN_LIMIT) {
-          std::vector<std::uint8_t *>().swap(shard_pointers);
+        if (parity.capacity() > VIDEO_SEND_WORKSPACE_RETAIN_LIMIT) {
+          video_shard_storage_t().swap(parity);
         }
       }
     };
 
-    struct fec_t {
-      size_t data_shards;
-      size_t nr_shards;
-      size_t percentage;
-
-      size_t blocksize;
-      size_t prefixsize;
-      workspace_t *workspace;
-
-      char *data(size_t el) {
-        return reinterpret_cast<char *>(workspace->shard_pointers[el]);
-      }
-
-      char *prefix(size_t el) {
-        return prefixsize ? workspace->headers.data() + el * prefixsize : nullptr;
-      }
-
-      const char *headers_begin() const {
-        return prefixsize ? workspace->headers.data() : nullptr;
-      }
-
-      size_t size() const {
-        return nr_shards;
-      }
-
-      std::vector<platf::buffer_descriptor_t> &payload_buffers() {
-        return workspace->payload_buffers;
-      }
+    struct encoded_block_t {
+      platf::udp_payload_block_t payloads;
+      std::size_t percentage;
     };
 
-    static fec_t encode(
+    static encoded_block_t encode(
       std::uint8_t *payload,
       std::size_t blocksize,
       const block_plan_t &plan,
-      std::size_t prefixsize,
       rs_cache_t &rs_cache,
       workspace_t &workspace
     ) {
-      const auto [data_shards, parity_shards, percentage] = plan;
-      auto nr_shards = data_shards + parity_shards;
-      auto fec_percentage = percentage;
-      workspace.ensure_capacity(
-        parity_shards * blocksize,
-        nr_shards * prefixsize,
-        nr_shards
-      );
-      auto &shards = workspace.shards;
-      auto &shard_pointers = workspace.shard_pointers;
-      auto &payload_buffers = workspace.payload_buffers;
-
-      for (std::size_t index = 0; index < data_shards; ++index) {
-        shard_pointers[index] = payload + index * blocksize;
-      }
-      payload_buffers.emplace_back(reinterpret_cast<const char *>(payload), data_shards * blocksize);
-
-      if (parity_shards != 0) {
-        for (std::size_t index = 0; index < parity_shards; ++index) {
-          shard_pointers[data_shards + index] = shards.data() + index * blocksize;
-        }
-
-        // Matrix construction is substantially more expensive than encoding and shard counts are
-        // highly repetitive. Retain a fixed number of contexts on this serial sender thread.
-        auto *rs = rs_cache.acquire(data_shards, parity_shards);
-        if (!rs) {
-          BOOST_LOG(error) << "Failed to allocate video Reed-Solomon context; sending this FEC block without parity"sv;
-          nr_shards = data_shards;
-          fec_percentage = 0;
-        } else if (reed_solomon_encode(rs, shard_pointers.data(), nr_shards, blocksize) != 0) {
-          rs_cache.discard(data_shards, parity_shards);
-          BOOST_LOG(error) << "Failed to encode video Reed-Solomon shards; sending this FEC block without parity"sv;
-          nr_shards = data_shards;
-          fec_percentage = 0;
-        } else {
-          payload_buffers.emplace_back(reinterpret_cast<const char *>(shards.data()), parity_shards * blocksize);
-        }
-      }
-
-      return {
-        data_shards,
-        nr_shards,
-        fec_percentage,
+      platf::udp_payload_block_t payloads {
+        reinterpret_cast<char *>(payload),
+        nullptr,
+        plan.data_shards,
+        0,
         blocksize,
-        prefixsize,
-        &workspace,
       };
+
+      if (plan.parity_shards == 0) {
+        return {payloads, 0};
+      }
+
+      // The context validates the total Reed-Solomon shard count before using the fixed table.
+      // Data-only blocks can exceed that count and never use the table.
+      auto *rs = rs_cache.acquire(plan.data_shards, plan.parity_shards);
+      if (!rs) {
+        BOOST_LOG(error) << "Failed to allocate video Reed-Solomon context; sending this FEC block without parity"sv;
+        return {payloads, 0};
+      }
+
+      const auto parity_bytes = plan.parity_shards * blocksize;
+      if (workspace.parity.size() < parity_bytes) {
+        workspace.parity.resize(parity_bytes);
+      }
+      payloads.parity = reinterpret_cast<char *>(workspace.parity.data());
+      payloads.parity_count = plan.parity_shards;
+      for (std::size_t index = 0; index < payloads.size(); ++index) {
+        workspace.rs_pointers[index] = reinterpret_cast<std::uint8_t *>(payloads.payload_at(index));
+      }
+
+      if (reed_solomon_encode(rs, workspace.rs_pointers.data(), payloads.size(), blocksize) != 0) {
+        rs_cache.discard(plan.data_shards, plan.parity_shards);
+        BOOST_LOG(error) << "Failed to encode video Reed-Solomon shards; sending this FEC block without parity"sv;
+        payloads.parity_count = 0;
+        return {payloads, 0};
+      }
+
+      return {payloads, plan.percentage};
     }
   }  // namespace fec
 
@@ -3009,6 +2946,7 @@ namespace stream {
     );
 
     crypto::aes_t iv(12);
+    std::array<video_packet_enc_prefix_t, platf::MAX_UDP_BATCH_PACKETS> prefixes {};
     video_shard_storage_t data_shard_storage;
     fec::rs_cache_t video_rs_cache;
     fec::workspace_t video_fec_workspace;
@@ -3185,7 +3123,7 @@ namespace stream {
         // unusually small packet size.
         // Generic Segmentation Offload on Linux can't do more than 64.
         send_batch_size = std::min({
-          std::size_t {64},
+          platf::MAX_UDP_BATCH_PACKETS,
           send_batch_size,
           pacing_plan.packets_per_quantum,
         });
@@ -3252,119 +3190,101 @@ namespace stream {
           }
 
           frame_fec_latency_logger.first_point_now();
-          auto shards = fec::encode(
-            block_payload,
-            blocksize,
-            block,
-            sizeof(video_packet_enc_prefix_t),
-            video_rs_cache,
-            video_fec_workspace
-          );
+          const auto [payloads, percentage] = fec::encode(block_payload, blocksize, block, video_rs_cache, video_fec_workspace);
           frame_fec_latency_logger.second_point_now_and_log();
 
-          // Reserve this whole block's sequence range before the first send. If a send throws
-          // after transmitting only part of the block, the recovery IDR must start after the
-          // abandoned range rather than reusing sequence numbers the client already observed.
-          lowseq += static_cast<std::uint32_t>(shards.size());
+          // Reserve this block's sequence range before the first send. A recovery IDR starts
+          // after that range even when a failed send may have delivered part of the block.
+          lowseq += static_cast<std::uint32_t>(payloads.size());
           channel->lowseq = lowseq;
 
           auto peer_address = channel->peer.address();
-          auto batch_info = platf::batched_send_info_t {
-            shards.headers_begin(),
-            shards.prefixsize,
-            shards.payload_buffers(),
-            shards.blocksize,
-            0,
-            0,
-            (uintptr_t) sock.native_handle(),
-            peer_address,
-            channel->peer.port(),
-            channel->local_address,
-          };
+          for (std::size_t first_packet = 0; first_packet < payloads.size(); first_packet += send_batch_size) {
+            const auto count = std::min(send_batch_size, payloads.size() - first_packet);
+            const platf::batched_send_info_t batch {
+              payloads,
+              reinterpret_cast<const char *>(prefixes.data()),
+              sizeof(video_packet_enc_prefix_t),
+              first_packet,
+              count,
+              (uintptr_t) sock.native_handle(),
+              peer_address,
+              channel->peer.port(),
+              channel->local_address,
+            };
 
-          size_t next_shard_to_send = 0;
+            // Encrypt just the packets needed by this send. It borrows the prefixes until it
+            // returns, including when segmentation offload falls back to individual datagrams.
+            for (std::size_t index = 0; index < count; ++index) {
+              const auto packet_index = first_packet + index;
+              auto *payload = payloads.payload_at(packet_index);
+              auto *inspect = reinterpret_cast<video_packet_raw_t *>(payload);
 
-          // set FEC info now that we know for sure what our percentage will be for this frame
-          for (auto x = 0; x < shards.size(); ++x) {
-            auto *inspect = (video_packet_raw_t *) shards.data(x);
+              inspect->packet.fecInfo =
+                (packet_index << 12 |
+                 payloads.data_count << 22 |
+                 percentage << 4);
+              inspect->rtp.header = 0x80 | FLAG_EXTENSION;
+              inspect->rtp.sequenceNumber = util::endian::big<uint16_t>(
+                static_cast<std::uint16_t>(block_lowseq + static_cast<std::uint32_t>(packet_index))
+              );
+              inspect->rtp.timestamp = util::endian::big<uint32_t>(timestamp);
+              inspect->packet.multiFecBlocks = block_header.packet.multiFecBlocks;
+              inspect->packet.frameIndex = block_header.packet.frameIndex;
 
-            inspect->packet.fecInfo =
-              (x << 12 |
-               shards.data_shards << 22 |
-               shards.percentage << 4);
+              // NIST SP 800-38D, Section 8.2.1. The counter identifies each use of the client's unique key.
+              std::copy_n((uint8_t *) &channel->gcm_iv_counter, sizeof(channel->gcm_iv_counter), std::begin(iv));
+              iv[11] = 'V';  // Video stream
+              channel->gcm_iv_counter++;
 
-            inspect->rtp.header = 0x80 | FLAG_EXTENSION;
-            inspect->rtp.sequenceNumber = util::endian::big<uint16_t>(
-              static_cast<std::uint16_t>(block_lowseq + static_cast<std::uint32_t>(x))
-            );
-            inspect->rtp.timestamp = util::endian::big<uint32_t>(timestamp);
-
-            inspect->packet.multiFecBlocks = block_header.packet.multiFecBlocks;
-            inspect->packet.frameIndex = block_header.packet.frameIndex;
-
-            // Use the deterministic IV construction algorithm specified in NIST SP 800-38D
-            // Section 8.2.1. The counter identifies each use of the client's unique key.
-            std::copy_n((uint8_t *) &channel->gcm_iv_counter, sizeof(channel->gcm_iv_counter), std::begin(iv));
-            iv[11] = 'V';  // Video stream
-            channel->gcm_iv_counter++;
-
-            auto *prefix = (video_packet_enc_prefix_t *) shards.prefix(x);
-            prefix->frameNumber = block_header.packet.frameIndex;
-            std::copy(std::begin(iv), std::end(iv), prefix->iv);
-            channel->cipher.encrypt(std::string_view {(char *) inspect, (size_t) blocksize}, prefix->tag, (uint8_t *) inspect, &iv);
-
-            if (x - next_shard_to_send + 1 >= send_batch_size || x + 1 == shards.size()) {
-              // Pace every bounded batch. The first batch is due immediately; subsequent batches
-              // are distributed according to the negotiated bitrate/FEC/cadence plan.
-              const auto due = ratecontrol_frame_start +
-                               video_pacing_offset(ratecontrol_frame_packets_sent, pacing_plan.packets_per_second);
-              auto now = std::chrono::steady_clock::now();
-              const auto schedule_rebase = std::chrono::nanoseconds {
-                video_pacing_rebase_ns(
-                  std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    due - ratecontrol_frame_start
-                  )
-                    .count(),
-                  std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    now - ratecontrol_frame_start
-                  )
-                    .count()
-                )
-              };
-              ratecontrol_frame_start += schedule_rebase;
-              const auto bounded_due = due + schedule_rebase;
-              if (now < bounded_due) {
-                timer->sleep_for(bounded_due - now);
-              }
-
-              size_t current_batch_size = x - next_shard_to_send + 1;
-              batch_info.block_offset = next_shard_to_send;
-              batch_info.block_count = current_batch_size;
-
-              frame_send_batch_latency_logger.first_point_now();
-              // Use a batched send if it's supported on this platform
-              if (!platf::send_batch(batch_info)) {
-                // Batched send is not available, so send each packet individually
-                for (auto y = 0; y < current_batch_size; y++) {
-                  auto send_info = platf::send_info_t {
-                    shards.prefix(next_shard_to_send + y),
-                    shards.prefixsize,
-                    shards.data(next_shard_to_send + y),
-                    shards.blocksize,
-                    (uintptr_t) sock.native_handle(),
-                    peer_address,
-                    channel->peer.port(),
-                    channel->local_address,
-                  };
-
-                  platf::send(send_info);
-                }
-              }
-              frame_send_batch_latency_logger.second_point_now_and_log();
-
-              ratecontrol_frame_packets_sent += current_batch_size;
-              next_shard_to_send = x + 1;
+              auto &prefix = prefixes[index];
+              prefix.frameNumber = block_header.packet.frameIndex;
+              std::copy(std::begin(iv), std::end(iv), prefix.iv);
+              channel->cipher.encrypt(std::string_view {payload, blocksize}, prefix.tag, reinterpret_cast<std::uint8_t *>(payload), &iv);
             }
+
+            // Pace every bounded batch. The first batch is due immediately. Later batches
+            // are distributed according to the negotiated bitrate, FEC, and cadence.
+            const auto due = ratecontrol_frame_start +
+                             video_pacing_offset(ratecontrol_frame_packets_sent, pacing_plan.packets_per_second);
+            auto now = std::chrono::steady_clock::now();
+            const auto schedule_rebase = std::chrono::nanoseconds {
+              video_pacing_rebase_ns(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  due - ratecontrol_frame_start
+                )
+                  .count(),
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  now - ratecontrol_frame_start
+                )
+                  .count()
+              )
+            };
+            ratecontrol_frame_start += schedule_rebase;
+            const auto bounded_due = due + schedule_rebase;
+            if (now < bounded_due) {
+              timer->sleep_for(bounded_due - now);
+            }
+
+            frame_send_batch_latency_logger.first_point_now();
+            if (!platf::send_batch(batch)) {
+              for (std::size_t index = 0; index < count; ++index) {
+                auto send_info = platf::send_info_t {
+                  batch.header_at(index),
+                  batch.header_size,
+                  batch.payload_at(index),
+                  payloads.payload_size,
+                  batch.native_socket,
+                  peer_address,
+                  channel->peer.port(),
+                  channel->local_address,
+                };
+                platf::send(send_info);
+              }
+            }
+            frame_send_batch_latency_logger.second_point_now_and_log();
+
+            ratecontrol_frame_packets_sent += count;
           }
         }
         if (stage_diagnostics) {

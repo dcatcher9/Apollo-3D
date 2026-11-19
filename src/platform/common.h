@@ -801,66 +801,51 @@ namespace platf {
    */
   int unset_env(const std::string &name);
 
-  struct buffer_descriptor_t {
-    const char *buffer;
-    size_t size;
+  inline constexpr size_t MAX_UDP_BATCH_PACKETS = 64;
 
-    // Constructors required for emplace_back() prior to C++20
-    buffer_descriptor_t(const char *buffer, size_t size):
-        buffer(buffer),
-        size(size) {
+  // Fixed-size payloads in wire order. Each of the data and parity ranges is contiguous.
+  struct udp_payload_block_t {
+    char *data;
+    char *parity;
+    size_t data_count;
+    size_t parity_count;
+    size_t payload_size;
+
+    [[nodiscard]] size_t size() const {
+      return data_count + parity_count;
     }
 
-    buffer_descriptor_t():
-        buffer(nullptr),
-        size(0) {
+    [[nodiscard]] char *payload_at(size_t index) const {
+      return index < data_count
+               ? data + index * payload_size
+               : parity + (index - data_count) * payload_size;
     }
   };
 
   struct batched_send_info_t {
-    // Optional headers to be prepended to each packet
+    // Headers start at this batch. Payload indices are relative to the entire FEC block.
+    const udp_payload_block_t &payloads;
     const char *headers;
     size_t header_size;
-
-    // One or more data buffers to use for the payloads
-    //
-    // NB: Data buffers must be aligned to payload size!
-    std::vector<buffer_descriptor_t> &payload_buffers;
-    size_t payload_size;
-
-    // The offset (in header+payload message blocks) in the header and payload
-    // buffers to begin sending messages from
-    size_t block_offset;
-
-    // The number of header+payload message blocks to send
-    size_t block_count;
+    size_t first_packet;
+    size_t packet_count;
 
     std::uintptr_t native_socket;
-    boost::asio::ip::address &target_address;
+    const boost::asio::ip::address &target_address;
     uint16_t target_port;
-    boost::asio::ip::address &source_address;
+    const boost::asio::ip::address &source_address;
 
-    /**
-     * @brief Returns a payload buffer descriptor for the given payload offset.
-     * @param offset The offset in the total payload data (bytes).
-     * @return Buffer descriptor describing the region at the given offset.
-     */
-    buffer_descriptor_t buffer_for_payload_offset(ptrdiff_t offset) {
-      for (const auto &desc : payload_buffers) {
-        if (offset < desc.size) {
-          return {
-            desc.buffer + offset,
-            desc.size - offset,
-          };
-        } else {
-          offset -= desc.size;
-        }
-      }
-      return {};
+    [[nodiscard]] const char *header_at(size_t index) const {
+      return headers + index * header_size;
+    }
+
+    [[nodiscard]] const char *payload_at(size_t index) const {
+      return payloads.payload_at(first_packet + index);
     }
   };
 
-  bool send_batch(batched_send_info_t &send_info);
+  // Both ranges are borrowed only until this synchronous call returns.
+  bool send_batch(const batched_send_info_t &send_info);
 
   struct send_info_t {
     const char *header;

@@ -499,7 +499,11 @@ std::string get_local_ip_for_gateway() {
     return saddr_v6;
   }
 
-  bool send_batch(batched_send_info_t &send_info) {
+  bool send_batch(const batched_send_info_t &send_info) {
+    if (send_info.packet_count == 0 || send_info.packet_count > MAX_UDP_BATCH_PACKETS) {
+      return false;
+    }
+
     auto sockfd = (int) send_info.native_socket;
     struct msghdr msg = {};
 
@@ -559,44 +563,25 @@ std::string get_local_ip_for_gateway() {
       memcpy(CMSG_DATA(pktinfo_cm), &pktInfo, sizeof(pktInfo));
     }
 
-    auto const max_iovs_per_msg = send_info.payload_buffers.size() + (send_info.headers ? 1 : 0);
+    auto fill_packet_buffers = [&](struct iovec *iov, size_t index) {
+      iov[0] = {const_cast<char *>(send_info.header_at(index)), send_info.header_size};
+      iov[1] = {const_cast<char *>(send_info.payload_at(index)), send_info.payloads.payload_size};
+    };
 
 #ifdef UDP_SEGMENT
     {
-      // UDP GSO on Linux currently only supports sending 64K or 64 segments at a time
+      // UDP GSO on Linux currently only supports sending 64K or 64 segments at a time.
       size_t seg_index = 0;
-      const size_t seg_max = 65536 / 1500;
-      struct iovec iovs[(send_info.headers ? std::min(seg_max, send_info.block_count) : 1) * max_iovs_per_msg];
-      auto msg_size = send_info.header_size + send_info.payload_size;
-      while (seg_index < send_info.block_count) {
-        int iovlen = 0;
-        auto segs_in_batch = std::min(send_info.block_count - seg_index, seg_max);
-        if (send_info.headers) {
-          // Interleave iovs for headers and payloads
-          for (auto i = 0; i < segs_in_batch; i++) {
-            iovs[iovlen].iov_base = (void *) &send_info.headers[(send_info.block_offset + seg_index + i) * send_info.header_size];
-            iovs[iovlen].iov_len = send_info.header_size;
-            iovlen++;
-            auto payload_desc = send_info.buffer_for_payload_offset((send_info.block_offset + seg_index + i) * send_info.payload_size);
-            iovs[iovlen].iov_base = (void *) payload_desc.buffer;
-            iovs[iovlen].iov_len = send_info.payload_size;
-            iovlen++;
-          }
-        } else {
-          // Translate buffer descriptors into iovs
-          auto payload_offset = (send_info.block_offset + seg_index) * send_info.payload_size;
-          auto payload_length = payload_offset + (segs_in_batch * send_info.payload_size);
-          while (payload_offset < payload_length) {
-            auto payload_desc = send_info.buffer_for_payload_offset(payload_offset);
-            iovs[iovlen].iov_base = (void *) payload_desc.buffer;
-            iovs[iovlen].iov_len = std::min(payload_desc.size, payload_length - payload_offset);
-            payload_offset += iovs[iovlen].iov_len;
-            iovlen++;
-          }
+      constexpr size_t seg_max = 65536 / 1500;
+      struct iovec iovs[2 * seg_max];
+      const auto msg_size = send_info.header_size + send_info.payloads.payload_size;
+      while (seg_index < send_info.packet_count) {
+        const auto segs_in_batch = std::min(send_info.packet_count - seg_index, seg_max);
+        for (size_t i = 0; i < segs_in_batch; ++i) {
+          fill_packet_buffers(&iovs[2 * i], seg_index + i);
         }
-
         msg.msg_iov = iovs;
-        msg.msg_iovlen = iovlen;
+        msg.msg_iovlen = 2 * segs_in_batch;
 
         // We should not use GSO if the data is <= one full block size
         if (segs_in_batch > 1) {
@@ -642,31 +627,20 @@ std::string get_local_ip_for_gateway() {
 
       // If we sent something, return the status and don't fall back to the non-GSO path.
       if (seg_index != 0) {
-        return seg_index >= send_info.block_count;
+        return seg_index >= send_info.packet_count;
       }
     }
 #endif
 
     {
       // If GSO is not supported, use sendmmsg() instead.
-      struct mmsghdr msgs[send_info.block_count];
-      struct iovec iovs[send_info.block_count * (send_info.headers ? 2 : 1)];
-      int iov_idx = 0;
-      for (size_t i = 0; i < send_info.block_count; i++) {
+      struct mmsghdr msgs[MAX_UDP_BATCH_PACKETS];
+      struct iovec iovs[2 * MAX_UDP_BATCH_PACKETS];
+      for (size_t i = 0; i < send_info.packet_count; ++i) {
+        fill_packet_buffers(&iovs[2 * i], i);
         msgs[i].msg_len = 0;
-        msgs[i].msg_hdr.msg_iov = &iovs[iov_idx];
-        msgs[i].msg_hdr.msg_iovlen = send_info.headers ? 2 : 1;
-
-        if (send_info.headers) {
-          iovs[iov_idx].iov_base = (void *) &send_info.headers[(send_info.block_offset + i) * send_info.header_size];
-          iovs[iov_idx].iov_len = send_info.header_size;
-          iov_idx++;
-        }
-        auto payload_desc = send_info.buffer_for_payload_offset((send_info.block_offset + i) * send_info.payload_size);
-        iovs[iov_idx].iov_base = (void *) payload_desc.buffer;
-        iovs[iov_idx].iov_len = send_info.payload_size;
-        iov_idx++;
-
+        msgs[i].msg_hdr.msg_iov = &iovs[2 * i];
+        msgs[i].msg_hdr.msg_iovlen = 2;
         msgs[i].msg_hdr.msg_name = msg.msg_name;
         msgs[i].msg_hdr.msg_namelen = msg.msg_namelen;
         msgs[i].msg_hdr.msg_control = cmbuf.buf;
@@ -676,8 +650,8 @@ std::string get_local_ip_for_gateway() {
 
       // Call sendmmsg() until all messages are sent
       size_t blocks_sent = 0;
-      while (blocks_sent < send_info.block_count) {
-        int msgs_sent = sendmmsg(sockfd, &msgs[blocks_sent], send_info.block_count - blocks_sent, 0);
+      while (blocks_sent < send_info.packet_count) {
+        int msgs_sent = sendmmsg(sockfd, &msgs[blocks_sent], send_info.packet_count - blocks_sent, 0);
         if (msgs_sent < 0) {
           // If there's no send buffer space, wait for some to be available
           if (errno == EAGAIN) {
