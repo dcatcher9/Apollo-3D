@@ -3006,6 +3006,7 @@ namespace platf::dxgi {
             // One fresh pin field uses the current actual draw source. The immutable draw
             // keeps the selected receipt/current RGB checks and performs no RGB reconstruction.
             namespace shared_warp = models::host_sbs_shared_ui_warp;
+            constexpr auto pin_bindings = shared_warp::resources_t::binding_policy_e::converter_owned;
             shared_warp::views_t current_shared_warp;
             bool shared_warp_selected = false;
             actual_converter_probe_v1::shared_warp_draw_t current_shared_observed;
@@ -3043,7 +3044,9 @@ namespace platf::dxgi {
                   const std::array<UINT, 4u> shape {colour_desc.Width, colour_desc.Height, padded_top, std::min(colour_desc.Height, band_end + 1u) - padded_top};
                   const auto request = shared_request_for_draw();
                   const auto program = selected_shared_warp_programs.program(queued_geometry_selected);
-                  if (selected_shared_warp.ensure(device.get(), shape, shared_error) && selected_shared_warp.queue(device_ctx.get(), program, request, shared_error) && selected_shared_warp.matches(device_ctx.get(), request)) {
+                  if (selected_shared_warp.ensure(device.get(), shape, shared_error) &&
+                      selected_shared_warp.queue(device_ctx.get(), program, request, shared_error, pin_bindings) &&
+                      selected_shared_warp.matches(device_ctx.get(), request)) {
                     current_shared_warp = selected_shared_warp.views();
                     shared_warp_selected = true;
                     draw_command.pixel_shader = program.pixel;
@@ -3082,7 +3085,7 @@ namespace platf::dxgi {
               const auto program = selected_shared_warp_programs.text_game_program();
               std::string text_pin_error;
               text_pin_selected = text_game_shared_warp.ensure(device.get(), text_pin_shape, text_pin_error) &&
-                                  text_game_shared_warp.queue(device_ctx.get(), program, request, text_pin_error) &&
+                                  text_game_shared_warp.queue(device_ctx.get(), program, request, text_pin_error, pin_bindings) &&
                                   text_game_shared_warp.matches(device_ctx.get(), request);
               if (text_pin_selected) {
                 text_pin_views = text_game_shared_warp.views();
@@ -3107,20 +3110,22 @@ namespace platf::dxgi {
                 }
               }
             }
+            if (shared_warp_selected || text_pin_selected) {
+              const auto &pin = shared_warp_selected ? current_shared_warp : text_pin_views;
+              draw_command.shared_pin = host_sbs_v2_shared_pin_bindings_t {
+                {pin.weights.Get(), pin.field.Get(), pin.rows.Get()},
+                pin.geometry.Get(),
+                selected_receipt,
+              };
+            }
             bool draw_recorded = false;
             {
-              models::research_current_outline_selected_matte_v2::scoped_receipt_t outline_scope;
-              const bool selected_bound = !selected_draw || outline_scope.bind(device_ctx.get(), selected_receipt);
-              shared_warp::scoped_binding_t shared_scope;
-              const bool shared_bound = !(selected_draw || text_pin_selected) ||
-                                        shared_scope.bind(device_ctx.get(), shared_warp_selected ? &current_shared_warp : text_pin_selected ? &text_pin_views : nullptr);
               auto observe_dump_bindings = [&](ID3D11DeviceContext *observed_context) noexcept {
                 if (!dump_actual_draw && !(probe_observer.record && shared_warp_selected)) {
                   return;
                 }
                 try {
-                  // Observe AFTER the recorder binds its operands, while receipt and pin scopes
-                  // still exist, BEFORE Draw and recorder cleanup. Strong references survive restoration; maybe_dump below
+                  // Observe the recorder's actual operands before Draw and cleanup. Strong references survive unbinding; maybe_dump below
                   // issues their GPU copies before the next conversion can reuse these buffers.
                   std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 15u> actual;
                   ID3D11ShaderResourceView *raw[15] {};
@@ -3230,9 +3235,8 @@ namespace platf::dxgi {
                   (*static_cast<observer_t *>(state))(context);
                 };
               }
-              draw_recorded = selected_bound && shared_bound &&
-                (pending_current_colour_selected ? record_pending_colour_draw(draw_command, *queued_draw.current_colour) :
-                                                   record_host_sbs_v2_draw(device_ctx.get(), draw_command));
+              draw_recorded = pending_current_colour_selected ? record_pending_colour_draw(draw_command, *queued_draw.current_colour) :
+                                                               record_host_sbs_v2_draw(device_ctx.get(), draw_command);
               // A queued failure can reuse draw_command for flat fallback below, after this
               // stack observer has expired. Never let that later draw call a dangling state.
               draw_command.observe_bound_draw = nullptr;

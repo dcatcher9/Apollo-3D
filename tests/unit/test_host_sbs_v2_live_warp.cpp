@@ -147,6 +147,7 @@ namespace {
     bool shared_ui_pin = false;
     bool production_shared_ui_pin = false;
     bool production_shared_ui_pin_queued = false;
+    bool converter_owns_pin_bindings = false;
     ID3D11ShaderResourceView *shared_ui_pin_draw_guard_override = nullptr;
     bool shared_ui_pin_resample_only = false;
     shared_ui_pin_diagnostics_t *shared_ui_pin_diagnostic_output = nullptr;
@@ -709,6 +710,10 @@ namespace {
       if (production_shared_pin && !production_shared_ui_pin_programs.ready() &&
           !production_shared_ui_pin_programs.load(device.Get(), production_shared_ui_pin_root, error)) return false;
       const bool production_queued_pin = production_shared_pin && outline && outline->production_shared_ui_pin_queued;
+      namespace pin_runtime = models::host_sbs_shared_ui_warp;
+      using binding_policy_e = pin_runtime::resources_t::binding_policy_e;
+      const auto pin_binding_policy = outline && outline->converter_owns_pin_bindings ?
+                                        binding_policy_e::converter_owned : binding_policy_e::restore;
       if (production_queued_pin && !production_shared_ui_pin_programs.ready(true) &&
           !production_shared_ui_pin_programs.load_queued(device.Get(), production_shared_ui_pin_root, error)) return false;
       if (production_shared_pin && (mapping_output || shared_boundary_output) &&
@@ -804,7 +809,7 @@ namespace {
         request.text_game_constants = text_game_constants.Get();
         const auto program = production_shared_ui_pin_programs.text_game_program();
         if (!text_game_pin_owner.ensure(device.Get(), text.shape, error) ||
-            !text_game_pin_owner.queue(context.Get(), program, request, error) ||
+            !text_game_pin_owner.queue(context.Get(), program, request, error, pin_binding_policy) ||
             !text_game_pin_owner.matches(context.Get(), request)) return false;
         text_game_views = text_game_pin_owner.views();
         draw_command.pixel_shader = program.pixel;
@@ -860,7 +865,7 @@ namespace {
           request.queued_guard_transaction = production_queued_pin ? private_guard_srv.Get() : nullptr;
           if (!production_shared_ui_pin_owner.ensure(device.Get(), pin_shape, error)) return false;
           begin_timing();
-          if (!production_shared_ui_pin_owner.queue(context.Get(), production_shared_ui_pin_programs.program(production_queued_pin), request, error) ||
+          if (!production_shared_ui_pin_owner.queue(context.Get(), production_shared_ui_pin_programs.program(production_queued_pin), request, error, pin_binding_policy) ||
               !production_shared_ui_pin_owner.matches(context.Get(), request)) return false;
           // Explicit test-only mutation after the pin field has been issued. The queued PS
           // must authenticate its actual draw guard rather than trust the preparation header.
@@ -918,11 +923,18 @@ namespace {
         context->PSSetShaderResources(12u,3u,pin_srvs);context->PSSetConstantBuffers(6u,1u,&b5);
         }
       }
+      if ((production_shared_pin || text_game_pin) && pin_binding_policy == binding_policy_e::converter_owned) {
+        const auto &pin = text_game_pin ? text_game_views : production_pin_views;
+        draw_command.shared_pin = platf::dxgi::host_sbs_v2_shared_pin_bindings_t {
+          {pin.weights.Get(), pin.field.Get(), pin.rows.Get()}, pin.geometry.Get(),
+          text_game_pin ? nullptr : selected_receipt_srv.Get(),
+        };
+      }
       begin_timing();
       bool submitted = false;
       ComPtr<ID3D11Buffer> previous_auxiliary_constants;
       std::array<ComPtr<ID3D11ShaderResourceView>, 2u> previous_auxiliary_resources;
-      if (selected_outline) {
+      if (selected_outline && !draw_command.shared_pin) {
         context->PSGetConstantBuffers(4u, 1u, previous_auxiliary_constants.GetAddressOf());
         context->PSGetShaderResources(9u, 1u, &previous_auxiliary_resources[0u]);
         context->PSGetShaderResources(11u, 1u, &previous_auxiliary_resources[1u]);
@@ -934,13 +946,13 @@ namespace {
           return false;
         }
         models::research_current_outline_selected_matte_v2::scoped_receipt_t selected_scope;
-        if (selected_outline && subtitle && !selected_scope.bind(context.Get(), selected_receipt_srv.Get())) {
+        if (!draw_command.shared_pin && selected_outline && subtitle && !selected_scope.bind(context.Get(), selected_receipt_srv.Get())) {
           error = "production selected-matte receipt scope rejected draw operands";
           return false;
         }
         models::host_sbs_shared_ui_warp::scoped_binding_t pin_scope;
-        if (production_shared_pin && !pin_scope.bind(context.Get(), &production_pin_views)) return false;
-        if (text_game_pin && !pin_scope.bind(context.Get(), &text_game_views)) return false;
+        if (!draw_command.shared_pin && (production_shared_pin || text_game_pin) &&
+            !pin_scope.bind(context.Get(), text_game_pin ? &text_game_views : &production_pin_views)) return false;
         submitted = platf::dxgi::record_host_sbs_v2_draw(context.Get(), draw_command);
       }
       if (selected_outline) {
@@ -982,9 +994,9 @@ namespace {
           shared_ui_pin_ps[1u].Get();
         command.render_targets[0u]=map_rtv.Get();
         models::research_current_outline_selected_matte_v2::scoped_receipt_t coverage_scope;
-        if (!coverage_scope.bind(context.Get(),selected_receipt_srv.Get())) {error="shared UI pin diagnostic receipt binding failed";return false;}
+        if (!command.shared_pin && !coverage_scope.bind(context.Get(),selected_receipt_srv.Get())) {error="shared UI pin diagnostic receipt binding failed";return false;}
         models::host_sbs_shared_ui_warp::scoped_binding_t pin_scope;
-        if (production_shared_pin && !pin_scope.bind(context.Get(), &production_pin_views)) {error="production shared UI pin diagnostic binding failed";return false;}
+        if (!command.shared_pin && production_shared_pin && !pin_scope.bind(context.Get(), &production_pin_views)) {error="production shared UI pin diagnostic binding failed";return false;}
         if (!platf::dxgi::record_host_sbs_v2_draw(context.Get(),command) || !read_diagnostic_texture(map.Get(),16u,out.mapping_rgba32f)) {error="shared UI pin mapping diagnostic draw/readback failed";return false;}
         command.pixel_shader=production_shared_pin?production_shared_ui_pin_programs.coverage(production_queued_pin):
           shared_ui_pin_ps[2u].Get();
@@ -1001,12 +1013,15 @@ namespace {
         return false;
       }
 
-      std::array<ID3D11ShaderResourceView *, 7u> remaining_resources {};
-      context->PSGetShaderResources(0u, static_cast<UINT>(remaining_resources.size()), remaining_resources.data());
-      ID3D11Buffer *remaining_subtitle = nullptr;
-      context->PSGetConstantBuffers(3u, 1u, &remaining_subtitle);
-      bool unbound = remaining_subtitle == nullptr;
-      if (remaining_subtitle) remaining_subtitle->Release();
+      std::array<ID3D11ShaderResourceView *, 15u> remaining_resources {};
+      context->PSGetShaderResources(0u, draw_command.shared_pin ? 15u : 7u, remaining_resources.data());
+      ID3D11Buffer *remaining_constants[4] {};
+      context->PSGetConstantBuffers(3u, draw_command.shared_pin ? 4u : 1u, remaining_constants);
+      bool unbound = true;
+      for (auto *buffer : remaining_constants) {
+        unbound = unbound && buffer == nullptr;
+        if (buffer) buffer->Release();
+      }
       for (auto *resource : remaining_resources) {
         unbound = unbound && resource == nullptr;
         if (resource) resource->Release();
@@ -5179,6 +5194,7 @@ TEST(HostSbsV2LiveWarpGpuTest, TextGamePinFollowsTheGlyphsOnlyWhileThePictureSho
   text.shape = {width, height, 0u, height};
   current_outline_inputs_t operands;
   operands.text_game = &text;
+  operands.converter_owns_pin_bindings = true;
   std::string error;
   live_v2_warp_fixture_t fixture;
   ASSERT_TRUE(fixture.initialize(error)) << error;
@@ -5430,6 +5446,37 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinProductionOwnerRestoresContextAndRejec
   ComPtr<ID3D11Buffer> restored_auxiliary_constants;
   fixture.context->PSGetConstantBuffers(4u, 1u, &restored_auxiliary_constants);
   EXPECT_EQ(restored_auxiliary_constants.Get(), old_buffer);
+  fixture.context->CSSetConstantBuffers(7u, 1u, &old_buffer);
+  operands.converter_owns_pin_bindings = true;
+  std::vector<std::byte> owned_output;
+  ASSERT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height,
+    source.data(), base, base, state, {}, owned_output, error, 0u, 0u, {}, &subtitle, nullptr, true, &operands)) << error;
+  EXPECT_EQ(owned_output, output);
+  ID3D11ShaderResourceView *owned_srvs[15] {};
+  ID3D11UnorderedAccessView *owned_uavs[4] {};
+  ID3D11Buffer *owned_constants[8] {};
+  fixture.context->CSGetShaderResources(0u, 15u, owned_srvs);
+  fixture.context->CSGetUnorderedAccessViews(0u, 4u, owned_uavs);
+  fixture.context->CSGetConstantBuffers(0u, 8u, owned_constants);
+  for (auto *view : owned_srvs) {
+    EXPECT_EQ(view, nullptr);
+    if (view) view->Release();
+  }
+  for (auto *view : owned_uavs) {
+    EXPECT_EQ(view, nullptr);
+    if (view) view->Release();
+  }
+  for (UINT slot = 0u; slot < 8u; ++slot) {
+    const bool untouched = slot == 0u || slot == 1u || slot == 4u || slot == 7u;
+    EXPECT_EQ(owned_constants[slot], untouched ? old_buffer : nullptr) << slot;
+    if (owned_constants[slot]) owned_constants[slot]->Release();
+  }
+  restored_sampler.Reset();
+  restored_shader.Reset();
+  fixture.context->CSGetSamplers(0u, 1u, &restored_sampler);
+  fixture.context->CSGetShader(&restored_shader, nullptr, nullptr);
+  EXPECT_FALSE(restored_sampler);
+  EXPECT_FALSE(restored_shader);
   shared::request_t missing;
   EXPECT_FALSE(fixture.production_shared_ui_pin_owner.queue(fixture.context.Get(),
     fixture.production_shared_ui_pin_programs.program(), missing, error));
@@ -5583,6 +5630,7 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinCompletedProtectionDoesNotRequireQueue
   const auto render = [&](live_v2_warp_fixture_t &fixture, std::vector<std::byte> &pixels, shared_ui_pin_diagnostics_t &diagnostics) {
     auto selected = make_current_outline_inputs(ui);
     selected.production_shared_ui_pin = true;
+    selected.converter_owns_pin_bindings = &fixture == &isolated;
     selected.shared_ui_pin_diagnostic_output = &diagnostics;
     return fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height, source.data(), base, base, state, {}, pixels, error, 0u, 0u, {}, &ui, nullptr, true, &selected);
   };
@@ -5681,6 +5729,7 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinQueuedProductionRequiresCurrentGuardAt
   ASSERT_NE(completed, identity);
   fixture.use_recorder_guard_scope = true;
   selected.production_shared_ui_pin_queued = true;
+  selected.converter_owns_pin_bindings = true;
   ASSERT_TRUE(configure(expected, good)) << error;
   EXPECT_EQ(render(fixture, &selected), completed);
   auto bad = good;bad[6u] = 0u;

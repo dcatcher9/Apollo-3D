@@ -11,6 +11,7 @@
   #include <exception>
   #include <filesystem>
   #include <limits>
+  #include <optional>
   #include <string>
   #include <string_view>
   #include <utility>
@@ -336,8 +337,31 @@ namespace models::host_sbs_shared_ui_warp {
       return desc.ByteWidth == bytes && desc.BindFlags == D3D11_BIND_CONSTANT_BUFFER;
     }
 
-    // Restore every touched slot, sampler, shader and dynamic class instance. The pin planes
-    // are reserved PS12..14 outputs; unbind them while writing to avoid SRV/UAV hazards.
+    static void unbind_compute_resources(ID3D11DeviceContext *context) {
+      ID3D11ShaderResourceView *srvs[15] {};
+      ID3D11UnorderedAccessView *uavs[4] {};
+      context->CSSetShaderResources(0u, 15u, srvs);
+      context->CSSetUnorderedAccessViews(0u, 4u, uavs, nullptr);
+    }
+
+    // The pin planes are reserved PS12..14 outputs. Both policies unbind them before writes.
+    static void unbind_preparation_resources(ID3D11DeviceContext *context) {
+      unbind_compute_resources(context);
+      ID3D11ShaderResourceView *pixel[3] {};
+      context->PSSetShaderResources(12u, 3u, pixel);
+    }
+
+    static void clear_converter_bindings(ID3D11DeviceContext *context, const bool text_game) {
+      unbind_compute_resources(context);
+      ID3D11Buffer *constants[3] {};
+      context->CSSetConstantBuffers(2u, 2u, constants);
+      context->CSSetConstantBuffers(5u, text_game ? 3u : 2u, constants);
+      ID3D11SamplerState *sampler = nullptr;
+      context->CSSetSamplers(0u, 1u, &sampler);
+      context->CSSetShader(nullptr, nullptr, 0u);
+    }
+
+    // Standalone preparation restores every touched slot, sampler, shader and class instance.
     struct saved_t {
       ID3D11DeviceContext *context;
       std::array<ComPtr<ID3D11ShaderResourceView>, 15u> srvs;
@@ -363,14 +387,8 @@ namespace models::host_sbs_shared_ui_warp {
         for (std::size_t i = 0u; i < pixel.size(); ++i) pixel[i].Attach(p[i]);
         for (UINT i = 0u; i < count; ++i) instances[i].Attach(ci[i]);
       }
-      static void unbind(ID3D11DeviceContext *c) {
-        ID3D11ShaderResourceView *s[15] {}, *p[3] {};
-        ID3D11UnorderedAccessView *u[4] {};
-        c->CSSetShaderResources(0u, 15u, s); c->CSSetUnorderedAccessViews(0u, 4u, u, nullptr);
-        c->PSSetShaderResources(12u, 3u, p);
-      }
       ~saved_t() {
-        unbind(context);
+        unbind_preparation_resources(context);
         ID3D11ShaderResourceView *s[15] {}, *p[3] {};
         ID3D11UnorderedAccessView *u[4] {};
         ID3D11Buffer *b[8] {};
@@ -398,6 +416,8 @@ namespace models::host_sbs_shared_ui_warp {
     }
 
   public:
+    enum class binding_policy_e { restore, converter_owned };
+
     resources_t() = default;
     resources_t(const resources_t &) = delete;
     resources_t &operator=(const resources_t &) = delete;
@@ -441,7 +461,9 @@ namespace models::host_sbs_shared_ui_warp {
     // Serial immediate-context submission only. CPU shape/resource checks grant no mask
     // authority; current SCT/SCP/state/receipt/RGB are validated by the initializer itself.
     // Keep all operands immutable until the matching draw, before any subsequent queue.
-    bool queue(ID3D11DeviceContext *context, const program_t &program, const request_t &request, std::string &error) {
+    // The converter-owned policy leaves preparation bindings clear for its next draw.
+    bool queue(ID3D11DeviceContext *context, const program_t &program, const request_t &request, std::string &error,
+               const binding_policy_e binding_policy = binding_policy_e::restore) {
       issued_ = false; error.clear();
       if (!geometry_ || request.queued != program.queued || request.text_game != program.text_game || (request.text_game && request.queued) || !context || context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE || !same_device(context) ||
           !programs_.acquire(device_.Get(), {program.initialize, program.pin}) || !same_device(program.pixel) ||
@@ -477,7 +499,9 @@ namespace models::host_sbs_shared_ui_warp {
           view_desc.Texture2D.MostDetailedMip != 0u || view_desc.Texture2D.MipLevels != 1u || serial_ == std::numeric_limits<std::uint64_t>::max()) {
         error = "Shared UI warp source view/serial unavailable"; return false;
       }
-      saved_t saved(context); saved_t::unbind(context);
+      std::optional<saved_t> saved;
+      if (binding_policy != binding_policy_e::converter_owned) saved.emplace(context);
+      unbind_preparation_resources(context);
       const UINT clear[4] {}; context->ClearUnorderedAccessViewUint(rows_.uav.Get(), clear);
       ID3D11ShaderResourceView *srvs[15] {};
       std::copy(request.draw_srvs.begin(), request.draw_srvs.end(), srvs);
@@ -524,7 +548,9 @@ namespace models::host_sbs_shared_ui_warp {
       draw_geometry_ = geometry; draw_subtitle_ = subtitle; sampler_ = sampler;
       guard_ = request.queued_guard_constants; transaction_ = request.queued_guard_transaction;
       text_game_constants_ = request.text_game_constants; text_game_coverage_ = request.text_game_coverage; text_game_ = request.text_game;
-      context_ = context; queued_ = request.queued; ++serial_; issued_ = true; return true;
+      context_ = context; queued_ = request.queued; ++serial_; issued_ = true;
+      if (binding_policy == binding_policy_e::converter_owned) clear_converter_bindings(context, request.text_game);
+      return true;
     }
 
     [[nodiscard]] bool matches(ID3D11DeviceContext *context, const request_t &request) const noexcept {

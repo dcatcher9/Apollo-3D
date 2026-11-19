@@ -6935,7 +6935,7 @@ TEST(DirectxShaderSourceTest, LiveAndOfflineShareStatelessV2DrawRecorder) {
     std::string::npos
   );
   EXPECT_NE(
-    recorder.find("std::array<ID3D11ShaderResourceView *, 7u> null_resources"),
+    recorder.find("context->PSSetShaderResources(0u, resource_count, null_resources.data())"),
     std::string::npos
   );
 }

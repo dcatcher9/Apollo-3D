@@ -163,6 +163,7 @@ bool d3d_base_encode_device::record_rejected_queued_draw_as_flat(
   draw.queued_guard_constants = nullptr;
   draw.queued_guard_transaction = nullptr;
   draw.queued_guard_override = false;
+  draw.shared_pin.reset();
   return record_host_sbs_v2_draw(device_ctx.get(), draw);
 }
 
