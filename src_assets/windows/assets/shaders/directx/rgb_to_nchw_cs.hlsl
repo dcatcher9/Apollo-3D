@@ -48,8 +48,36 @@ float3 SampleModelColorBilinear(float2 center_uv, uint2 source_size) {
     return lerp(top, bottom, blend.y);
 }
 
+float3 IntegrateModelFootprint(
+    int2 first, int2 end, float2 source_lo, float2 source_hi, uint2 source_size,
+    bool use_tile, int2 tile_origin) {
+    float3 weighted_sum = 0.0f;
+    [loop]
+    for (int source_y = first.y; source_y < end.y; ++source_y) {
+        float y_coverage = max(
+            min(source_hi.y, (float)(source_y + 1)) -
+                max(source_lo.y, (float)source_y),
+            0.0f);
+        [loop]
+        for (int source_x = first.x; source_x < end.x; ++source_x) {
+            float x_coverage = max(
+                min(source_hi.x, (float)(source_x + 1)) -
+                    max(source_lo.x, (float)source_x),
+                0.0f);
+            // The model was trained on display-referred images resized in encoded color. Apply
+            // linear/HDR conversion to every source cell before spatial integration; averaging
+            // capture-domain linear light first makes isolated HDR highlights contaminate an
+            // entire model texel and makes equivalent SDR capture modes disagree.
+            weighted_sum += LoadModelColor(
+                int2(source_x, source_y), source_size, use_tile, tile_origin) * (x_coverage * y_coverage);
+        }
+    }
+
+    return weighted_sum;
+}
+
 float3 SampleModelFootprint(
-    uint2 target_pixel, uint2 source_size, bool full_content, bool use_tile, int2 tile_origin) {
+    uint2 target_pixel, uint2 source_size, bool full_content, bool use_tile, int2 tile_origin, uint2 tile_extent) {
     uint2 target_size = uint2(target_w, target_h);
     float2 source_lo, source_hi, source_extent;
     if (full_content) {
@@ -88,34 +116,21 @@ float3 SampleModelFootprint(
     int2 first = max(int2(floor(source_lo)), int2(0, 0));
     int2 end = min(int2(ceil(source_hi)), int2(source_size));
 
-    float3 weighted_sum = 0.0f;
-    [loop]
-    for (int source_y = first.y; source_y < end.y; ++source_y) {
-        float y_coverage = max(
-            min(source_hi.y, (float)(source_y + 1)) -
-                max(source_lo.y, (float)source_y),
-            0.0f);
-        [loop]
-        for (int source_x = first.x; source_x < end.x; ++source_x) {
-            float x_coverage = max(
-                min(source_hi.x, (float)(source_x + 1)) -
-                    max(source_lo.x, (float)source_x),
-                0.0f);
-            // The model was trained on display-referred images resized in encoded color. Apply
-            // linear/HDR conversion to every source cell before spatial integration; averaging
-            // capture-domain linear light first makes isolated HDR highlights contaminate an
-            // entire model texel and makes equivalent SDR capture modes disagree.
-            weighted_sum += LoadModelColor(
-                int2(source_x, source_y), source_size, use_tile, tile_origin) * (x_coverage * y_coverage);
-        }
+    // Group bounds and per-pixel divisions can round differently at an integer edge.
+    // Use the tile only when it contains every tap in this pixel's clipped footprint.
+    float3 weighted_sum;
+    [branch]
+    if (use_tile && all(first >= tile_origin) && all(end <= tile_origin + int2(tile_extent))) {
+        weighted_sum = IntegrateModelFootprint(first, end, source_lo, source_hi, source_size, true, tile_origin);
+    } else {
+        weighted_sum = IntegrateModelFootprint(first, end, source_lo, source_hi, source_size, false, int2(0, 0));
     }
-
     float footprint_area = max(source_extent.x * source_extent.y, 1e-6f);
     return weighted_sum / footprint_area;
 }
 
 // Compute shader to area-resize RGB interleaved image to NCHW Float32 with ImageNet normalization.
-bool WriteModelInput(uint3 DTid, bool use_tile, int2 tile_origin, bool compact_domain) {
+bool WriteModelInput(uint3 DTid, bool use_tile, int2 tile_origin, uint2 tile_extent, bool compact_domain) {
     if (DTid.x >= target_w || DTid.y >= target_h)
         return false;
 
@@ -149,7 +164,7 @@ bool WriteModelInput(uint3 DTid, bool use_tile, int2 tile_origin, bool compact_d
         analysis_content_top == 0u && analysis_content_right == target_w &&
         analysis_content_bottom == target_h;
     float3 pixel = content_valid ?
-        SampleModelFootprint(DTid.xy, source_size, full_content, use_tile, tile_origin) :
+        SampleModelFootprint(DTid.xy, source_size, full_content, use_tile, tile_origin, tile_extent) :
         float3(0.0f, 0.0f, 0.0f);
     if (!compact_domain) OutputTensorExclusion[DTid.xy] = content_cell ? 0u : 1u;
 
@@ -170,5 +185,5 @@ bool WriteModelInput(uint3 DTid, bool use_tile, int2 tile_origin, bool compact_d
 
 [numthreads(16, 16, 1)]
 void main(uint3 DTid : SV_DispatchThreadID) {
-    WriteModelInput(DTid, false, int2(0, 0), false);
+    WriteModelInput(DTid, false, int2(0, 0), uint2(0u, 0u), false);
 }

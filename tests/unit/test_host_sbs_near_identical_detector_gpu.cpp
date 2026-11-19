@@ -4115,6 +4115,63 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, FusedModeSwitchesCompareForceCompareWi
   ));
 }
 
+TEST(HostSbsNearIdenticalDetectorGpuTest, TiledPreprocessMatchesDirectAtExactTwoToOneLetterbox) {
+  near_identical_gpu_fixture_t fixture;
+  std::string error;
+  const auto initialized = fixture.initialize(error, true);
+  if (initialized == near_identical_gpu_fixture_t::initialize_result_e::d3d_unavailable) {
+    GTEST_SKIP() << error;
+  }
+  ASSERT_EQ(initialized, near_identical_gpu_fixture_t::initialize_result_e::ready) << error;
+
+  constexpr UINT source_width = 260u;
+  constexpr UINT source_height = 220u;
+  constexpr std::array<std::uint32_t, 4> source_region {17u, 11u, 161u, 177u};
+  constexpr models::depth_tensor_content_rect_t tensor_content {20u, 6u, 92u, 89u};
+  constexpr std::array<std::uint32_t, 8> expected_domain {
+    1u, field_width, field_height, 0u,
+    tensor_content.left, tensor_content.top, tensor_content.right, tensor_content.bottom,
+  };
+  std::vector<std::array<float, 4>> source(source_width * source_height);
+  for (UINT y = 0u; y < source_height; ++y) {
+    for (UINT x = 0u; x < source_width; ++x) {
+      source[y * source_width + x] = {
+        static_cast<float>((13u * x + 7u * y) % 251u) / 250.0f,
+        static_cast<float>((5u * x + 17u * y) % 241u) / 240.0f,
+        static_cast<float>((19u * x + 3u * y) % 239u) / 238.0f,
+        1.0f,
+      };
+    }
+  }
+  const auto previous = uniform_model_input();
+
+  // Exact 2:1 letterboxing can put a source tap on a shared-tile boundary after rounding.
+  for (const bool evidence_enabled : {false, true}) {
+    SCOPED_TRACE(evidence_enabled ? "compare" : "force");
+    near_identical_gpu_fixture_t::preprocess_result_t direct;
+    near_identical_gpu_fixture_t::preprocess_result_t tiled;
+    ASSERT_TRUE(fixture.run_preprocess_and_tile_evidence(
+      true, source, source_width, source_height, source_region, tensor_content,
+      previous, direct, error, evidence_enabled, false, true
+    )) << error;
+    ASSERT_TRUE(fixture.run_preprocess_and_tile_evidence(
+      true, source, source_width, source_height, source_region, tensor_content,
+      previous, tiled, error, evidence_enabled, true, true
+    )) << error;
+    ASSERT_EQ(direct.tensor.size(), tiled.tensor.size());
+    EXPECT_EQ(std::memcmp(direct.tensor.data(), tiled.tensor.data(), direct.tensor.size() * sizeof(float)), 0)
+      << "exact 2:1 letterboxed NCHW differs at the tiled producer";
+    EXPECT_EQ(direct.domain, expected_domain);
+    EXPECT_EQ(tiled.domain, expected_domain);
+    EXPECT_EQ(tiled.tiles, direct.tiles);
+    if (evidence_enabled) {
+      EXPECT_TRUE(std::ranges::any_of(direct.tiles, [](const auto &tile) { return tile[0] != 0u; }));
+    } else {
+      EXPECT_EQ(direct.tiles, (tile_records_t {}));
+    }
+  }
+}
+
 TEST(HostSbsNearIdenticalDetectorGpuTest, FusedPreprocessMatchesCanonicalAndSpecializedOracle) {
   near_identical_gpu_fixture_t fixture;
   std::string error;

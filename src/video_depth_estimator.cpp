@@ -10205,11 +10205,10 @@ namespace models {
       mark_d3d_pre_start(d3d_timer);
       ID3D11ShaderResourceView *analysis_input_srv = input_srv;
 
-      // Both authenticated programs write the same NCHW words. Use the shared tile only for
-      // area footprints with room for endpoint rounding in the shader's 48-cell extent.
-      // Upsampling and wider footprints use the direct program without the tile allocation.
+      // The direct program is faster for small footprints after the area loop was unified.
+      // Use the shared tile for stronger downsampling when both axes fit its 48-cell extent.
       const auto source_tile_axis_fits = [](std::uint32_t source, std::uint32_t content) {
-        return content != 0u && source >= content && 16ull * source <= 46ull * content;
+        return content != 0u && source > 2ull * content && 16ull * source <= 46ull * content;
       };
       const bool use_source_tile = near_identical_tiled_preprocess_cs &&
         source_tile_axis_fits(input_region.width(), input_region.tensor_content.width()) &&

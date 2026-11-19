@@ -546,7 +546,7 @@
         "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "05397c7a6a07661a5c7219f374e07c22e4f04e55606defe410ef893903bb408d"
+    "source_closure_sha256": "8a72428b07402f99460469003b399642219c23493bae0d93c6e1d50bfeff5904"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,
@@ -679,7 +679,7 @@
         "source_target": "cs_5_0",
         "source_compile_flags": 34816,
         "source_macro_count": 0,
-        "source_closure_sha256": "83d03389a9a73211a7b5815f4a92d81edb6ab3804e23f73881e86ba9f83e8eb9",
+        "source_closure_sha256": "8e2de9ed76bd64a38a0c956e75dd7a13c8883d39d0ef0050ffe5aba9f7208672",
         "model_input_schema": 1,
         "dtype": "float32-le",
         "layout": "NCHW",

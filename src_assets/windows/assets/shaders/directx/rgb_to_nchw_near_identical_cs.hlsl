@@ -169,9 +169,7 @@ void WriteFusedTiledInput(
     GroupMemoryBarrierWithGroupSync();
     bool admitted = false;
     if (in_bounds) {
-        [branch]
-        if (tile_valid) admitted = WriteModelInput(dispatch_thread, true, tile_origin, compact_domain);
-        else admitted = WriteModelInput(dispatch_thread, false, int2(0, 0), compact_domain);
+        admitted = WriteModelInput(dispatch_thread, tile_valid, tile_origin, tile_extent, compact_domain);
     }
     WriteNearIdenticalTileEvidence(dispatch_thread, group_thread, group_id, in_bounds, compact_domain, admitted);
 }
@@ -191,7 +189,7 @@ void fused_domain_main(
     uint3 group_id : SV_GroupID) {
     bool in_bounds = dispatch_thread.x < target_w && dispatch_thread.y < target_h;
     bool admitted = false;
-    if (in_bounds) admitted = WriteModelInput(dispatch_thread, false, int2(0, 0), true);
+    if (in_bounds) admitted = WriteModelInput(dispatch_thread, false, int2(0, 0), uint2(0u, 0u), true);
     WriteNearIdenticalTileEvidence(dispatch_thread, group_thread, group_id, in_bounds, true, admitted);
 }
 

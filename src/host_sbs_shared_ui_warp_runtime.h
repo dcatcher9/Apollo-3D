@@ -28,26 +28,26 @@ namespace models::host_sbs_shared_ui_warp {
     {"host_sbs_shared_ui_warp.hlsl", "prepare_main", "cs_5_0"},
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_main_ps", "ps_5_0"},
   }};
-  inline constexpr std::string_view completed_closure = "96d3598854f059803fb97dc672b2bda4744692fd2f8aecf41eb5213965aa12d3";
+  inline constexpr std::string_view completed_closure = "18c3ce5b61562f00bb71e6c97a718531cfb5fe099ae0c1d5c5a067b2540576fe";
   inline constexpr std::array<cache::shader_spec, 4u> queued_specs {{
     {"host_sbs_shared_ui_warp_queued.hlsl", "initialize_main", "cs_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "SunshineApplyUICS", "cs_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "prepare_main", "cs_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "shared_pin_main_ps", "ps_5_0"},
   }};
-  inline constexpr std::string_view queued_closure = "c02f351224dea5dae9db237dc9abee27dba04d1eba4eb9cf35cd0a1642507f21";
+  inline constexpr std::string_view queued_closure = "8ed74f9f8bff33529f1065e8993df2e04f31387f5e210bcdf7862c23b4330dce";
   inline constexpr std::array<cache::shader_spec, 3u> completed_diagnostic_specs {{
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_mapping_ps", "ps_5_0"},
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_coverage_ps", "ps_5_0"},
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_boundary_ps", "ps_5_0"},
   }};
-  inline constexpr std::string_view completed_diagnostic_closure = "33328cdf54f48d38811a02138a7926895a844673da9640894a51cdc844fab722";
+  inline constexpr std::string_view completed_diagnostic_closure = "94c96454759531dc354c9838c7ed8a984d559dbc1becef7ce0ebee93e4122f92";
   inline constexpr std::array<cache::shader_spec, 3u> queued_diagnostic_specs {{
     {"host_sbs_shared_ui_warp_queued.hlsl", "shared_pin_mapping_ps", "ps_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "shared_pin_coverage_ps", "ps_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "shared_pin_boundary_ps", "ps_5_0"},
   }};
-  inline constexpr std::string_view queued_diagnostic_closure = "252565ec901e5dfca18fff1b2062f95a96548f179dc7750175436aa33da3dbf6";
+  inline constexpr std::string_view queued_diagnostic_closure = "b7466c17246a8175f6c40bb6a4c5493f155bf86b55e1ba29f3f876de623041dc";
 
   inline constexpr std::string_view source_closure(bool queued) noexcept {
     return queued ? queued_closure : completed_closure;
@@ -70,7 +70,7 @@ namespace models::host_sbs_shared_ui_warp {
     {"host_sbs_text_game_ui_warp.hlsl", "text_game_verify_main", "cs_5_0"},
     {"host_sbs_text_game_ui_warp.hlsl", "text_game_columns_main", "cs_5_0"},
   }};
-  inline constexpr std::string_view text_game_closure = "fe888f435c41d3e0903702f61c3c8f32a7357e4a3dd6f8dbcbf9e56a1113ccbc";
+  inline constexpr std::string_view text_game_closure = "f4e240833be82005f098276adba6e34fe3da4c30911fb22a983e2ddff10b8eef";
 
   struct program_t {
     ID3D11ComputeShader *initialize = nullptr, *pin = nullptr, *prepare = nullptr;
