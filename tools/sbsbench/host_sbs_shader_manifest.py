@@ -71,6 +71,11 @@ DEPTH_COORDINATE_V2_MAP = ShaderSpec(
     source_entrypoint="domain_main",
     source_target="cs_5_0",
 )
+DEPTH_COORDINATE_V2_MAP_COMPACT = ShaderSpec(
+    source_file="depth_coordinate_v2_map_cs.hlsl",
+    source_entrypoint="compact_domain_main",
+    source_target="cs_5_0",
+)
 DEPTH_COORDINATE_V2_COORDINATE_DIAGNOSTIC = ShaderSpec(
     source_file="depth_coordinate_v2_map_cs.hlsl",
     source_entrypoint="domain_coordinate_main",
@@ -402,6 +407,7 @@ SHADER_SPECS: Dict[str, ShaderSpec] = {
     "depth_coordinate_v2_publish": DEPTH_COORDINATE_V2_PUBLISH,
     "depth_coordinate_v2_state_resolve": DEPTH_COORDINATE_V2_STATE_RESOLVE,
     "depth_coordinate_v2_map": DEPTH_COORDINATE_V2_MAP,
+    "depth_coordinate_v2_map_compact": DEPTH_COORDINATE_V2_MAP_COMPACT,
     "depth_coordinate_v2_coordinate_diagnostic": DEPTH_COORDINATE_V2_COORDINATE_DIAGNOSTIC,
     "depth_coordinate_v2_vertical_limit": DEPTH_COORDINATE_V2_VERTICAL_LIMIT,
     "depth_coordinate_v2_limit": DEPTH_COORDINATE_V2_LIMIT,
@@ -495,6 +501,7 @@ PARALLAX_V2_PRODUCER_GROUP = ClosureGroup(
         DEPTH_COORDINATE_V2_HISTOGRAM,
         DEPTH_COORDINATE_V2_PUBLISH,
         DEPTH_COORDINATE_V2_MAP,
+        DEPTH_COORDINATE_V2_MAP_COMPACT,
         DEPTH_COORDINATE_V2_VERTICAL_LIMIT,
         DEPTH_COORDINATE_V2_LIMIT,
         DEPTH_COORDINATE_V2_VERTICAL_LIMIT_COMPACT,
@@ -516,7 +523,7 @@ PARALLAX_V2_PRODUCER_GROUP = ClosureGroup(
         HOST_SBS_SUBTITLE_GAUSSIAN_VERTICAL_LIMIT,
         HOST_SBS_SUBTITLE_GAUSSIAN_HORIZONTAL_LIMIT,
     ),
-    source_closure_sha256="560eb9bad4c679009134702e353b4d71f2ec8c0a461cf9213f3d62c12a4b61cc",
+    source_closure_sha256="90e6b8aae617f1c78af05fb2421bc603355aa2fb7e418d517b4b0f6b30246759",
 )
 
 PARALLAX_V2_REPLAY_RESOLVE_GROUP = ClosureGroup(
@@ -528,7 +535,7 @@ PARALLAX_V2_REPLAY_RESOLVE_GROUP = ClosureGroup(
         DEPTH_COORDINATE_V2_QUANTILES,
         DEPTH_COORDINATE_V2_STATE_RESOLVE,
     ),
-    source_closure_sha256="86eef4a8b05719f2ea7c24bba68258ea968cbd456dc350b2a0d0a8fa684140a2",
+    source_closure_sha256="9a73e8a92ba55e3d99f3e37868918329c0e0d478bd7281319670dd4f2fe55347",
 )
 
 PARALLAX_V2_COORDINATE_DIAGNOSTIC_GROUP = ClosureGroup(
@@ -539,7 +546,7 @@ PARALLAX_V2_COORDINATE_DIAGNOSTIC_GROUP = ClosureGroup(
     specs=(
         DEPTH_COORDINATE_V2_COORDINATE_DIAGNOSTIC,
     ),
-    source_closure_sha256="1604e07ae5cc79b931406f22ace026435bff107006fc85bda0a253dc6a4b40d2",
+    source_closure_sha256="b895dea87363c1859c16d97c3d79121a2996d5f03ee8c8b56e20e756609e4e59",
 )
 
 NEAR_IDENTICAL_DETECTOR_GROUP = ClosureGroup(
@@ -552,7 +559,7 @@ NEAR_IDENTICAL_DETECTOR_GROUP = ClosureGroup(
         HOST_SBS_NEAR_IDENTICAL_FINALIZE,
         HOST_SBS_NEAR_IDENTICAL_REUSE_DEPTH,
     ),
-    source_closure_sha256="f8a17e91d41496992fdf5b63abd2d6815b5d5414e053991973b76cc07a929356",
+    source_closure_sha256="c894bfb39134f169638662441024cc234a74faf4eac096a65cefe6487cb35ee5",
 )
 
 GPU_TRACE_GROUP = ClosureGroup(
@@ -563,7 +570,7 @@ GPU_TRACE_GROUP = ClosureGroup(
     specs=(
         HOST_SBS_GPU_TRACE,
     ),
-    source_closure_sha256="4c33ab7ddd90a347f219a9bf4b7d8a2d0f488239eeb2119463d01e3c1769bebb",
+    source_closure_sha256="bcfab2a5da6361c9142c82b05d47503b27acbfcac010d25bd012cf30051ce3ef",
 )
 
 PARALLAX_V2_LIVE_RENDERER_GROUP = ClosureGroup(
@@ -575,7 +582,7 @@ PARALLAX_V2_LIVE_RENDERER_GROUP = ClosureGroup(
         PARALLAX_V2_LIVE_RENDERER,
         SBS_REPROJECTION_VERTEX,
     ),
-    source_closure_sha256="99cade013bb1e065c95d2422eeec52fe604cb6d7aa8b659c56dafcdddfc0aa42",
+    source_closure_sha256="b094a4b4e2bd25c9ecf3ea6ec704404c6241510034206db6ee4bb5aeee8d35a7",
 )
 
 PARALLAX_V2_P010_Y_GROUP = ClosureGroup(
@@ -586,7 +593,7 @@ PARALLAX_V2_P010_Y_GROUP = ClosureGroup(
     specs=(
         PARALLAX_V2_P010_Y_RENDERER,
     ),
-    source_closure_sha256="85202788207818c2f978b918e05ba5cee27e83842d24605488c0d1cb6db06bc4",
+    source_closure_sha256="92075e2e9e10cb9d3334492741d6b43ef5872cd78a9d57fda070c17e257b53e9",
 )
 
 SBS_FLAT_FALLBACK_GROUP = ClosureGroup(
@@ -610,7 +617,7 @@ PARALLAX_V2_LIVE_DIAGNOSTIC_GROUP = ClosureGroup(
         PARALLAX_V2_LIVE_MAPPING,
         PARALLAX_V2_LIVE_MASK,
     ),
-    source_closure_sha256="ec0a697777e8c66850d865a60cee0310ecd36f8b9c2ac3f11abc4689668c2924",
+    source_closure_sha256="9355e83a84ef9c2b94300c20bfc72160aa3820f575585fc639003b3e76a36fe8",
 )
 
 SUBTITLE_COHORT_PROTOTYPE_RESEARCH_GROUP = ClosureGroup(
@@ -623,7 +630,7 @@ SUBTITLE_COHORT_PROTOTYPE_RESEARCH_GROUP = ClosureGroup(
         HOST_SBS_SUBTITLE_COHORT_MEMBERS,
         HOST_SBS_SUBTITLE_COHORT_FILTER,
     ),
-    source_closure_sha256="f66c1feef6fc743eb74db2eb103bfb53b7932d5c9754c9878a1b0b790072f28a",
+    source_closure_sha256="e23004ab90035382849409bcf4ecf67d8433fd1310ff1d0bacde665fdbeb256a",
 )
 
 SUBTITLE_COHORT_RESEARCH_GROUP = ClosureGroup(
@@ -637,7 +644,7 @@ SUBTITLE_COHORT_RESEARCH_GROUP = ClosureGroup(
         HOST_SBS_SUBTITLE_COHORT_FILTER,
         HOST_SBS_SUBTITLE_COHORT_SNAPSHOT,
     ),
-    source_closure_sha256="f05e2cd74dd345f507dbb741dbbcb36b005c8daea6352423c1ce653f42179067",
+    source_closure_sha256="3c6226ff2de686d0e21f550b2b1fcb9827fe3edb1c29f6134bc47114a9c7e687",
 )
 
 SUBTITLE_INNER_COLOUR_RESEARCH_GROUP = ClosureGroup(
@@ -652,7 +659,7 @@ SUBTITLE_INNER_COLOUR_RESEARCH_GROUP = ClosureGroup(
         HOST_SBS_SUBTITLE_INNER_COLOUR_RESEARCH_ACCUMULATE,
         HOST_SBS_SUBTITLE_INNER_COLOUR_RESEARCH_VALIDATE,
     ),
-    source_closure_sha256="a17771d0f97c947cdfe017eced5673e893671b50708fa7bfd9008bb0e202e629",
+    source_closure_sha256="d96f30ddd0e71b92cab2dde6b7b1b4d5523827ff6d296e73ce963dee0914f6de",
 )
 
 SUBTITLE_INNER_COMPONENTS_RESEARCH_GROUP = ClosureGroup(
@@ -679,7 +686,7 @@ SUBTITLE_MATTE_GUARD_RESEARCH_GROUP = ClosureGroup(
     specs=(
         HOST_SBS_SUBTITLE_MATTE_GUARD,
     ),
-    source_closure_sha256="20f93f022b7681737e636e534e60824926b4ec9c049279d5a7b6a2f097560d75",
+    source_closure_sha256="50b7458e44cd1983fc6e2bbee3bf4624b1b62110fa478f48a2dec1c491d6d3b2",
 )
 
 PARALLAX_V2_QUEUED_RENDERER_GROUP = ClosureGroup(
@@ -690,7 +697,7 @@ PARALLAX_V2_QUEUED_RENDERER_GROUP = ClosureGroup(
     specs=(
         PARALLAX_V2_QUEUED_RENDERER,
     ),
-    source_closure_sha256="58d83134e3dc49be6179c99b04ac0f6e04d379f151f3cbfeef332ba2c6cd278e",
+    source_closure_sha256="2cf47a4299353b8f7f98f74cc56eb712567371a74a0b5468aa13d6f7db1c15e7",
 )
 
 CURRENT_MASK_HOLES_GROUP = ClosureGroup(

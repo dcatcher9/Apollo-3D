@@ -967,11 +967,12 @@ namespace models {
   }  // namespace
 
   bool parallax_v2_result_is_authenticated(const depth_observation_views_t &result) {
-    const bool expects_vertical_diagnostics = !result.base_vertical_diagnostics_omitted;
+    const bool expects_base_diagnostics = !result.base_diagnostics_omitted;
     if (!result.completed_frame_valid || result.completed_frame_id == 0u ||
-        !result.parallax_v2_producer_active || !result.shadow_candidate_parallax ||
-        static_cast<bool>(result.shadow_vertical_majorant) != expects_vertical_diagnostics ||
-        static_cast<bool>(result.shadow_vertical_conditioned) != expects_vertical_diagnostics ||
+        !result.parallax_v2_producer_active ||
+        static_cast<bool>(result.shadow_candidate_parallax) != expects_base_diagnostics ||
+        static_cast<bool>(result.shadow_vertical_majorant) != expects_base_diagnostics ||
+        static_cast<bool>(result.shadow_vertical_conditioned) != expects_base_diagnostics ||
         !result.shadow_base_final_parallax ||
         (result.subtitle_conditioning_diagnostics_current &&
          !result.shadow_conditioned_final_parallax) ||
@@ -3427,6 +3428,7 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_histogram_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_publish_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_map_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_map_compact_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_coordinate_diagnostic_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_vertical_limit_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_limit_cs;
@@ -5180,7 +5182,7 @@ namespace models {
       return gpu_undecided_postprocess_pending() || pending_same_source_gpu_postprocess_queued;
     }
 
-    [[nodiscard]] bool base_vertical_diagnostics_always() const noexcept {
+    [[nodiscard]] bool base_diagnostics_always() const noexcept {
       // These evaluation modes are fixed before the first submission, so a held publication
       // can only preserve fields produced by the full limiter pair.
       return normalized_depth_diagnostics_enabled ||
@@ -5908,6 +5910,7 @@ namespace models {
         std::addressof(depth_coordinate_v2_histogram_cs),
         std::addressof(depth_coordinate_v2_publish_cs),
         std::addressof(depth_coordinate_v2_map_cs),
+        normalized_depth_diagnostics_enabled ? nullptr : std::addressof(depth_coordinate_v2_map_compact_cs),
         std::addressof(depth_coordinate_v2_vertical_limit_cs),
         std::addressof(depth_coordinate_v2_limit_cs),
         normalized_depth_diagnostics_enabled ? nullptr : std::addressof(depth_coordinate_v2_vertical_limit_compact_cs),
@@ -5940,6 +5943,7 @@ namespace models {
         }
         auto *output = producer_shader_outputs[index];
         if (output == std::addressof(near_identical_tiled_preprocess_cs) ||
+            output == std::addressof(depth_coordinate_v2_map_compact_cs) ||
             output == std::addressof(depth_coordinate_v2_vertical_limit_compact_cs) ||
             output == std::addressof(depth_coordinate_v2_limit_compact_cs)) {
           // A device that cannot create a specialization uses its original shader route.
@@ -7674,7 +7678,7 @@ namespace models {
       return recorded;
     }
 
-    bool dispatch_parallax_v2_producer(d3d_perf_slot *perf_slot) {
+    bool dispatch_parallax_v2_producer(d3d_perf_slot *perf_slot, const bool skip_input_history) {
       if (!parallax_v2_producer_active) {
         return false;
       }
@@ -7682,11 +7686,16 @@ namespace models {
       const auto content = live_field_content(pending_input_region);
       const bool use_compact_limiters =
         depth_coordinate_v2_vertical_limit_compact_cs && depth_coordinate_v2_limit_compact_cs &&
-        !receipt_gated_postprocess_pending() && !base_vertical_diagnostics_always() &&
+        !receipt_gated_postprocess_pending() && !base_diagnostics_always() &&
         !subtitle_conditioning_diagnostics_requested() && pending_input_region.is_video_region() &&
         content && content->valid(live_field_shape()) &&
         content->right - content->left > depth_coordinate_v2::limiter_serial_max_lines &&
         (content->left != 0u || content->right < static_cast<std::uint32_t>(field_w));
+
+      const bool use_compact_map = use_compact_limiters && depth_coordinate_v2_map_compact_cs;
+      const auto map_width = use_compact_map && skip_input_history ?
+                               content->width() :
+                               static_cast<UINT>(target_w);
 
       // Mapping publishes the history owner and may copy NCHW input. An explicit Dump 3D
       // separately materializes the full-size canonical-coordinate field.
@@ -7696,7 +7705,7 @@ namespace models {
           .coordinate_v2 = depth_coordinate_v2_cbuffer.Get(),
         },
         .near_identical_constants = near_identical_cbuffer.Get(),
-        .map_shader = depth_coordinate_v2_map_cs.Get(),
+        .map_shader = use_compact_map ? depth_coordinate_v2_map_compact_cs.Get() : depth_coordinate_v2_map_cs.Get(),
         .vertical_shader = use_compact_limiters ? depth_coordinate_v2_vertical_limit_compact_cs.Get() :
                                                   depth_coordinate_v2_vertical_limit_cs.Get(),
         .horizontal_shader = use_compact_limiters ? depth_coordinate_v2_limit_compact_cs.Get() :
@@ -7716,7 +7725,7 @@ namespace models {
         .vertical_conditioned_output = depth_coordinate_v2_vertical_conditioned_uav.Get(),
         .final_output = depth_coordinate_v2_final_uav.Get(),
         .map_dispatch = parallax_v2_dispatch_command(
-          (target_w + 15) / 16,
+          (map_width + 15u) / 16u,
           (target_h + 15) / 16,
           1u,
           near_identical_gpu_infer_grid16_byte_offset
@@ -8643,7 +8652,7 @@ namespace models {
       bool model_input = false;
       bool composite = false;
       bool coordinate = false;
-      bool base_vertical_diagnostics = false;
+      bool base_diagnostics = false;
     };
 
     struct completed_depth_metadata_t {
@@ -8735,9 +8744,9 @@ namespace models {
         if (completed.snapshots.coordinate) {
           r.shadow_coordinate = depth_coordinate_v2_coordinate_srv;
         }
-        r.shadow_candidate_parallax = depth_coordinate_v2_candidate_srv;
-        r.base_vertical_diagnostics_omitted = !completed.snapshots.base_vertical_diagnostics;
-        if (!r.base_vertical_diagnostics_omitted) {
+        r.base_diagnostics_omitted = !completed.snapshots.base_diagnostics;
+        if (!r.base_diagnostics_omitted) {
+          r.shadow_candidate_parallax = depth_coordinate_v2_candidate_srv;
           r.shadow_vertical_majorant = depth_coordinate_v2_vertical_majorant_srv;
           r.shadow_vertical_conditioned = depth_coordinate_v2_vertical_conditioned_srv;
         }
@@ -8990,10 +8999,10 @@ namespace models {
       // Dump 3D copies the exact completed input and output, outside the live postprocess interval.
       // For ROI this uses the pending crop-local domain and its exact tensor-content rectangle.
       completion_snapshot_validity_t snapshots;
-      // An indirect dispatch can preserve padding from an earlier compact completion. Only
-      // always-diagnostic instances or a direct completion for this snapshot expose the pair.
-      snapshots.base_vertical_diagnostics = base_vertical_diagnostics_always() ||
-        (snapshot_requested && !receipt_gated_postprocess_pending());
+      // An indirect dispatch can preserve padding from an earlier compact completion. Expose
+      // the diagnostic fields only when their writer is known to have filled the full grid.
+      snapshots.base_diagnostics = base_diagnostics_always() ||
+                                   (snapshot_requested && !receipt_gated_postprocess_pending());
       if (snapshot_requested && !gpu_undecided_postprocess_pending()) {
         snapshots.coordinate = dispatch_parallax_v2_coordinate_diagnostic();
         snapshots.raw_model_depth = snapshot_buffer(
@@ -9558,9 +9567,9 @@ namespace models {
       }
       // Only an explicitly maintained depth-only baseline needs the suppressed input tensor.
       // The depth receipt still needs its owner even when the map skips the copy.
-      if (!upload_near_identical_history_owner_constants(
-            subtitle_work_suppressed && !pending_depth_only_history && !subtitle_publication_branch_opaque
-          )) {
+      const bool skip_input_history =
+        subtitle_work_suppressed && !pending_depth_only_history && !subtitle_publication_branch_opaque;
+      if (!upload_near_identical_history_owner_constants(skip_input_history)) {
         fail_gpu_conditional_bridge_once(
           "GPU inference-observation history-owner constants failed"
         );
@@ -9572,8 +9581,7 @@ namespace models {
         // diagnostic textures are outside the sum. Both intervals sit inside depth_postprocess_gpu.
         mark_d3d_parallax_start(perf_slot);
       }
-      const bool base_ready = dispatch_parallax_v2_producer(perf_slot);
-      if (!base_ready) {
+      if (!dispatch_parallax_v2_producer(perf_slot, skip_input_history)) {
         mark_terminal_failure();
         return false;
       }

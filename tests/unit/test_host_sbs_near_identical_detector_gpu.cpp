@@ -452,6 +452,8 @@ TEST(HostSbsNearIdenticalPolicyTest, ProducerOutputsMatchCanonicalShaderOrder) {
                std::string_view {"depth_coordinate_v2_publish_cs"}},
     std::pair {std::string_view {"depth_coordinate_v2_map"},
                std::string_view {"depth_coordinate_v2_map_cs"}},
+    std::pair {std::string_view {"depth_coordinate_v2_map_compact"},
+               std::string_view {"depth_coordinate_v2_map_compact_cs"}},
     std::pair {std::string_view {"depth_coordinate_v2_vertical_limit"},
                std::string_view {"depth_coordinate_v2_vertical_limit_cs"}},
     std::pair {std::string_view {"depth_coordinate_v2_limit"},

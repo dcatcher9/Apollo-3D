@@ -101,15 +101,16 @@ bool CanonicalCoordinate(uint index, out float coordinate) {
     return true;
 }
 
-void MapDepth(uint3 id, bool use_domain) {
+void MapDepth(uint3 id, bool use_domain, bool compact_requested) {
     uint4 domain_rectangle = 0u;
     bool domain_valid = true;
     if (use_domain) domain_valid = LoadTensorAnalysisDomain(domain_rectangle);
     bool history_advances = DepthHistoryAdvances() && (!use_domain || domain_valid);
+    bool skip_input_history = near_identical_request_flags == NEAR_IDENTICAL_MAP_SKIP_INPUT_HISTORY;
 
     // Eligible comparison inputs retain the edge-replicated padding supplied by preprocessing.
     // The map-specific request flag leaves the authenticated depth owner independent of the copy.
-    if (near_identical_request_flags != NEAR_IDENTICAL_MAP_SKIP_INPUT_HISTORY &&
+    if (!skip_input_history &&
         id.x < target_w && id.y < target_h && history_advances) {
         uint plane = target_w * target_h;
         uint raw_index = id.y * target_w + id.x;
@@ -122,22 +123,33 @@ void MapDepth(uint3 id, bool use_domain) {
         PublishNearIdenticalHistoryOwner(history_advances);
     }
 
-    if (id.x >= target_w || id.y >= target_h) {
+    // The compact dispatch starts at zero as usual. Translate only after publishing the owner
+    // from the physical origin. Use b0 even when the structured domain fails authentication so
+    // every admitted destination still receives this dispatch's invalid-data zero.
+    bool compact = compact_requested && DepthAnalysisContentValid();
+    bool compact_dispatch = compact && skip_input_history;
+    uint map_width = compact_dispatch ? analysis_content_right - analysis_content_left : target_w;
+    if (id.x >= map_width || id.y >= target_h) {
+        return;
+    }
+    uint2 position = uint2(id.x + (compact_dispatch ? analysis_content_left : 0u), id.y);
+    if (compact && !compact_dispatch &&
+        (position.x < analysis_content_left || position.x >= analysis_content_right)) {
         return;
     }
     // Synthetic letterbox cells are a nearest-boundary extension of the real analysis domain.
     // Sanitizing before ownership and both limiters prevents arbitrary model padding output from
     // entering a valid row/column envelope.
     if (use_domain && !domain_valid) {
-        Output[id.xy] = 0.0f;
+        Output[position] = 0.0f;
         return;
     }
-    uint2 sample_position = !TensorAnalysisCellAdmitted(id.xy, use_domain, domain_valid, domain_rectangle) ?
-        TensorAnalysisClampCell(id.xy, use_domain, domain_rectangle) : id.xy;
+    uint2 sample_position = !TensorAnalysisCellAdmitted(position, use_domain, domain_valid, domain_rectangle) ?
+        TensorAnalysisClampCell(position, use_domain, domain_rectangle) : position;
     uint index = sample_position.y * target_w + sample_position.x;
     float coordinate;
     if (!CanonicalCoordinate(index, coordinate)) {
-        Output[id.xy] = 0.0f;
+        Output[position] = 0.0f;
         return;
     }
     float4 active = ShadowState[0];
@@ -147,7 +159,7 @@ void MapDepth(uint3 id, bool use_domain) {
     if (!V2Finite(candidate)) {
         candidate = 0.0f;
     }
-    Output[id.xy] = candidate;
+    Output[position] = candidate;
 }
 
 void MapCoordinate(uint3 id, bool use_domain) {
@@ -169,10 +181,13 @@ void MapCoordinate(uint3 id, bool use_domain) {
 }
 
 [numthreads(16, 16, 1)]
-void main(uint3 id : SV_DispatchThreadID) { MapDepth(id, false); }
+void main(uint3 id : SV_DispatchThreadID) { MapDepth(id, false, false); }
 
 [numthreads(16, 16, 1)]
-void domain_main(uint3 id : SV_DispatchThreadID) { MapDepth(id, true); }
+void domain_main(uint3 id : SV_DispatchThreadID) { MapDepth(id, true, false); }
+
+[numthreads(16, 16, 1)]
+void compact_domain_main(uint3 id : SV_DispatchThreadID) { MapDepth(id, true, true); }
 
 [numthreads(16, 16, 1)]
 void coordinate_main(uint3 id : SV_DispatchThreadID) { MapCoordinate(id, false); }

@@ -63,6 +63,7 @@ SHADER_SOURCE_SPECS = (
     ("depth_coordinate_v2_histogram_cs.hlsl", "domain_main", "cs_5_0"),
     ("depth_coordinate_v2_quantiles_cs.hlsl", "publish_main", "cs_5_0"),
     ("depth_coordinate_v2_map_cs.hlsl", "domain_main", "cs_5_0"),
+    ("depth_coordinate_v2_map_cs.hlsl", "compact_domain_main", "cs_5_0"),
     ("depth_coordinate_v2_vertical_limit_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_limit_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_vertical_limit_cs.hlsl", "compact_main", "cs_5_0"),

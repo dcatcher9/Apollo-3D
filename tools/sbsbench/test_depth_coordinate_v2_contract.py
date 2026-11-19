@@ -200,7 +200,8 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             # Full-grid and letterboxed preprocessing share one area-resize loop.
             # Shared source reads require the complete clipped pixel footprint.
             # Compact live limiters preserve exact Base on horizontally padded observations.
-            135: "88a3d8c01deee9b2957d895059694e804a1659533aa950bf02524b01ce4a92ef",
+            # The compact Map writes only the admitted candidate columns on the same live route.
+            135: "afe616a15f24e0bef954e867bb2aa9d29a870c54ef37df1d6ccca90fb91a865f",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -208,14 +209,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 contract or shader identity changed without a reviewed identity pin",
         )
-        self.assertEqual(generator.contract_tag(contract), 0x3F150060)
+        self.assertEqual(generator.contract_tag(contract), 0xC932B35D)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "3f150060679bb5ba813e3ce7ab6cf6055f9fa00a13eaeae15606bacd1294e6a7",
+            "c932b35dde631550e24e078a4af292252a2960c4f0a76663d3ec7495c7bda2bc",
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "560eb9bad4c679009134702e353b4d71f2ec8c0a461cf9213f3d62c12a4b61cc",
+            "90e6b8aae617f1c78af05fb2421bc603355aa2fb7e418d517b4b0f6b30246759",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(

@@ -4406,17 +4406,19 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   EXPECT_TRUE(models::parallax_v2_result_is_authenticated(refined_video_region));
   ASSERT_GT(high_video_content->left, 0u);
   for (const bool omitted : {false, true}) {
-    for (unsigned present = 0u; present < 4u; ++present) {
+    for (unsigned present = 0u; present < 8u; ++present) {
       auto roi = refined_video_region;
-      roi.base_vertical_diagnostics_omitted = omitted;
+      roi.base_diagnostics_omitted = omitted;
       if ((present & 1u) == 0u) {
-        roi.shadow_vertical_majorant.Reset();
+        roi.shadow_candidate_parallax.Reset();
       }
       if ((present & 2u) == 0u) {
+        roi.shadow_vertical_majorant.Reset();
+      }
+      if ((present & 4u) == 0u) {
         roi.shadow_vertical_conditioned.Reset();
       }
-      EXPECT_EQ(models::parallax_v2_result_is_authenticated(roi),
-        present == (omitted ? 0u : 3u)) << "omitted=" << omitted << ", present=" << present;
+      EXPECT_EQ(models::parallax_v2_result_is_authenticated(roi), present == (omitted ? 0u : 7u)) << "omitted=" << omitted << ", present=" << present;
     }
   }
 
@@ -4425,7 +4427,8 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(invalid_vertical_view));
 
   auto omitted_without_base = refined_video_region;
-  omitted_without_base.base_vertical_diagnostics_omitted = true;
+  omitted_without_base.base_diagnostics_omitted = true;
+  omitted_without_base.shadow_candidate_parallax.Reset();
   omitted_without_base.shadow_vertical_majorant.Reset();
   omitted_without_base.shadow_vertical_conditioned.Reset();
   omitted_without_base.shadow_base_final_parallax.Reset();

@@ -1628,7 +1628,7 @@ namespace sbs_bench {
     // score the geometry the shipped V2 renderer intends, not raw model ordering: on thin
     // structure the raw model and the V2-limited field legitimately disagree. The canonical
     // coordinate SRV (est.shadow_coordinate) is Dump-3D-gated and never published in evaluation
-    // mode, so this dumps est.shadow_candidate_parallax instead -- the always-published signed
+    // mode, so this dumps est.shadow_candidate_parallax instead -- the signed
     // candidate parallax, monotone in the canonical coordinate. Container matches
     // dump_raw_model_depth_png exactly: 16-bit grayscale PNG under an explicit per-frame finite
     // min/max normalization; non-finite and degenerate-range values map to 0.
