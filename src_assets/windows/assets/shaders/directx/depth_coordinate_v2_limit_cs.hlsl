@@ -33,6 +33,8 @@ RWTexture2D<float> FinalOut : register(u0);
 groupshared int2 LocalEndsQ30[V2_LIMIT_LINE_CHUNKS][V2_LIMIT_GROUP_LINES];
 // {incoming forward value, incoming backward value}
 groupshared int2 ChunkCarriesQ30[V2_LIMIT_LINE_CHUNKS][V2_LIMIT_GROUP_LINES];
+// Exact completed Q30 values at the first and last admitted columns.
+groupshared int2 EdgesQ30[V2_LIMIT_GROUP_LINES];
 
 int V2LimitUpperQ30(float value) {
     value = V2Finite(value) ?
@@ -66,7 +68,11 @@ int V2LimitSaturatedDecayQ30(int step_q30, uint distance, uint saturation_distan
     return distance <= saturation_distance ? step_q30 * (int)distance : max_decay_q30;
 }
 
-void V2LimitMain(uint3 group_id, uint3 group_thread_id) {
+float LoadVerticalShare(uint x, uint y, bool compact, uint2 columns) {
+    return VerticalShare[uint2(compact ? clamp(x, columns.x, columns.y) : x, y)];
+}
+
+void V2LimitMain(uint3 group_id, uint3 group_thread_id, bool compact) {
     if (target_w == 0u || target_h == 0u ||
         target_w > V2_LIMIT_MAX_HORIZONTAL_DIMENSION) {
         return;
@@ -76,17 +82,19 @@ void V2LimitMain(uint3 group_id, uint3 group_thread_id) {
     uint y = group_id.x * V2_LIMIT_GROUP_LINES + row;
     // A partial last group keeps its idle threads until the final group barrier.
     bool active = y < target_h;
+    uint2 columns = compact && DepthAnalysisContentValid() ?
+        uint2(analysis_content_left, analysis_content_right - 1u) : uint2(0u, target_w - 1u);
 
     float max_step = v2_max_horizontal_slope / DepthAnalysisContentWidthCells();
 
     // Preserve the tiny diagnostic/unit-test path exactly and avoid empty chunks.
     if (target_w <= V2_LIMIT_SERIAL_MAX_LINES) {
         if (active && lane == 0u) {
-            float value = VerticalShare[uint2(0u, y)];
+            float value = LoadVerticalShare(0u, y, compact, columns);
             FinalOut[uint2(0u, y)] = V2BoundDisplayParallax(value);
             [loop]
             for (uint serial_x = 1u; serial_x < target_w; ++serial_x) {
-                value = max(VerticalShare[uint2(serial_x, y)], value - max_step);
+                value = max(LoadVerticalShare(serial_x, y, compact, columns), value - max_step);
                 FinalOut[uint2(serial_x, y)] = V2BoundDisplayParallax(value);
             }
             DeviceMemoryBarrier();
@@ -109,8 +117,12 @@ void V2LimitMain(uint3 group_id, uint3 group_thread_id) {
     int max_step_q30 = V2LimitStepQ30(content_width, max_decay_q30);
     uint saturation_distance = (uint)(max_decay_q30 / max_step_q30);
 
-    uint chunk_start = lane * target_w / V2_LIMIT_LINE_CHUNKS;
-    uint chunk_end = (lane + 1u) * target_w / V2_LIMIT_LINE_CHUNKS;
+    uint domain_width = columns.y - columns.x + 1u;
+    bool restricted = compact && domain_width > V2_LIMIT_SERIAL_MAX_LINES && domain_width < target_w;
+    uint scan_width = restricted ? domain_width : target_w;
+    uint scan_left = restricted ? columns.x : 0u;
+    uint chunk_start = scan_left + lane * scan_width / V2_LIMIT_LINE_CHUNKS;
+    uint chunk_end = scan_left + (lane + 1u) * scan_width / V2_LIMIT_LINE_CHUNKS;
     int forward_q30 = 0;
     int backward_q30 = 0;
     if (active) {
@@ -120,14 +132,14 @@ void V2LimitMain(uint3 group_id, uint3 group_thread_id) {
         // [-container, container] and the decay saturates at twice that limit, so a saturated
         // term can never exceed VerticalShare(chunk_start); the serial recurrence gives the same
         // value.
-        forward_q30 = V2LimitUpperQ30(VerticalShare[uint2(chunk_start, y)]);
+        forward_q30 = V2LimitUpperQ30(LoadVerticalShare(chunk_start, y, compact, columns));
         backward_q30 = forward_q30;
         FinalOut[uint2(chunk_start, y)] = V2LimitFromQ30(forward_q30);
         [loop]
         for (uint local_forward_x = chunk_start + 1u;
              local_forward_x < chunk_end;
              ++local_forward_x) {
-            int value_q30 = V2LimitUpperQ30(VerticalShare[uint2(local_forward_x, y)]);
+            int value_q30 = V2LimitUpperQ30(LoadVerticalShare(local_forward_x, y, compact, columns));
             forward_q30 = max(value_q30, forward_q30 - max_step_q30);
             int decay_q30 = V2LimitSaturatedDecayQ30(
                 max_step_q30,
@@ -148,8 +160,8 @@ void V2LimitMain(uint3 group_id, uint3 group_thread_id) {
              forward_chunk < V2_LIMIT_LINE_CHUNKS;
              ++forward_chunk) {
             ChunkCarriesQ30[forward_chunk][row].x = forward_q30;
-            uint forward_start = forward_chunk * target_w / V2_LIMIT_LINE_CHUNKS;
-            uint forward_end = (forward_chunk + 1u) * target_w / V2_LIMIT_LINE_CHUNKS;
+            uint forward_start = forward_chunk * scan_width / V2_LIMIT_LINE_CHUNKS;
+            uint forward_end = (forward_chunk + 1u) * scan_width / V2_LIMIT_LINE_CHUNKS;
             int forward_span_q30 = V2LimitDecayQ30(
                 max_step_q30,
                 forward_end - forward_start,
@@ -165,8 +177,8 @@ void V2LimitMain(uint3 group_id, uint3 group_thread_id) {
              backward_chunk >= 0;
              --backward_chunk) {
             ChunkCarriesQ30[(uint)backward_chunk][row].y = backward_q30;
-            uint backward_start = (uint)backward_chunk * target_w / V2_LIMIT_LINE_CHUNKS;
-            uint backward_end = ((uint)backward_chunk + 1u) * target_w / V2_LIMIT_LINE_CHUNKS;
+            uint backward_start = (uint)backward_chunk * scan_width / V2_LIMIT_LINE_CHUNKS;
+            uint backward_end = ((uint)backward_chunk + 1u) * scan_width / V2_LIMIT_LINE_CHUNKS;
             int backward_span_q30 = V2LimitDecayQ30(
                 max_step_q30,
                 backward_end - backward_start,
@@ -174,6 +186,9 @@ void V2LimitMain(uint3 group_id, uint3 group_thread_id) {
             backward_q30 = max(
                 LocalEndsQ30[(uint)backward_chunk][row].y,
                 backward_q30 - backward_span_q30);
+        }
+        if (restricted) {
+            EdgesQ30[row] = int2(backward_q30, forward_q30);
         }
     }
     GroupMemoryBarrierWithGroupSync();
@@ -191,7 +206,7 @@ void V2LimitMain(uint3 group_id, uint3 group_thread_id) {
     [loop]
     for (int scan_x = (int)chunk_end - 1; scan_x >= (int)chunk_start; --scan_x) {
         uint write_x = (uint)scan_x;
-        int value_q30 = V2LimitUpperQ30(VerticalShare[uint2(write_x, y)]);
+        int value_q30 = V2LimitUpperQ30(LoadVerticalShare(write_x, y, compact, columns));
         backward_q30 = write_x + 1u == chunk_end ?
             value_q30 : max(value_q30, backward_q30 - max_step_q30);
         int complete_q30 = backward_q30;
@@ -208,6 +223,30 @@ void V2LimitMain(uint3 group_id, uint3 group_thread_id) {
         FinalOut[uint2(write_x, y)] = V2BoundDisplayParallax(max(
             FinalOut[uint2(write_x, y)],
             V2LimitFromQ30(complete_q30)));
+    }
+
+    if (restricted) {
+        // Outside the admitted interval the input is the nearest edge value. Interior
+        // contributions decay away from the edge at the same rate as the majorant.
+        const int2 complete_edge_q30 = EdgesQ30[row];
+        if (columns.x > 0u) {
+            const int edge_q30 = V2LimitUpperQ30(VerticalShare[uint2(columns.x, y)]);
+            [loop]
+            for (uint distance = lane + 1u; distance <= columns.x; distance += V2_LIMIT_LINE_CHUNKS) {
+                int decay = V2LimitSaturatedDecayQ30(max_step_q30, distance, saturation_distance, max_decay_q30);
+                FinalOut[uint2(columns.x - distance, y)] = V2BoundDisplayParallax(
+                    V2LimitFromQ30(max(edge_q30, complete_edge_q30.x - decay)));
+            }
+        }
+        if (columns.y + 1u < target_w) {
+            const int edge_q30 = V2LimitUpperQ30(VerticalShare[uint2(columns.y, y)]);
+            [loop]
+            for (uint distance = lane + 1u; distance < target_w - columns.y; distance += V2_LIMIT_LINE_CHUNKS) {
+                int decay = V2LimitSaturatedDecayQ30(max_step_q30, distance, saturation_distance, max_decay_q30);
+                FinalOut[uint2(columns.y + distance, y)] = V2BoundDisplayParallax(
+                    V2LimitFromQ30(max(edge_q30, complete_edge_q30.y - decay)));
+            }
+        }
     }
 }
 
@@ -226,7 +265,7 @@ bool GaussianSmoothingEnabled() {
 
 [numthreads(V2_LIMIT_GROUP_LINES, V2_LIMIT_LINE_CHUNKS, 1)]
 void main(uint3 group_id : SV_GroupID, uint3 group_thread_id : SV_GroupThreadID) {
-    V2LimitMain(group_id, group_thread_id);
+    V2LimitMain(group_id, group_thread_id, false);
 }
 
 [numthreads(V2_LIMIT_GROUP_LINES, V2_LIMIT_LINE_CHUNKS, 1)]
@@ -247,7 +286,7 @@ void subtitle_main(uint3 group_id : SV_GroupID, uint3 group_thread_id : SV_Group
             }
         }
         GroupMemoryBarrierWithGroupSync();
-        V2LimitMain(group_id, group_thread_id);
+        V2LimitMain(group_id, group_thread_id, false);
         DeviceMemoryBarrierWithGroupSync();
         if (y < target_h && SubtitleRowChanged[row] == 0u) {
             [loop]
@@ -264,4 +303,9 @@ void subtitle_main(uint3 group_id : SV_GroupID, uint3 group_thread_id : SV_Group
             }
         }
     }
+}
+
+[numthreads(V2_LIMIT_GROUP_LINES, V2_LIMIT_LINE_CHUNKS, 1)]
+void compact_main(uint3 group_id : SV_GroupID, uint3 group_thread_id : SV_GroupThreadID) {
+    V2LimitMain(group_id, group_thread_id, true);
 }

@@ -456,6 +456,10 @@ TEST(HostSbsNearIdenticalPolicyTest, ProducerOutputsMatchCanonicalShaderOrder) {
                std::string_view {"depth_coordinate_v2_vertical_limit_cs"}},
     std::pair {std::string_view {"depth_coordinate_v2_limit"},
                std::string_view {"depth_coordinate_v2_limit_cs"}},
+    std::pair {std::string_view {"depth_coordinate_v2_vertical_limit_compact"},
+               std::string_view {"depth_coordinate_v2_vertical_limit_compact_cs"}},
+    std::pair {std::string_view {"depth_coordinate_v2_limit_compact"},
+               std::string_view {"depth_coordinate_v2_limit_compact_cs"}},
     std::pair {std::string_view {"host_sbs_ocr_preprocess"},
                std::string_view {"ocr_preprocess_cs"}},
     std::pair {std::string_view {"host_sbs_ocr_cells"},
@@ -503,10 +507,12 @@ TEST(HostSbsNearIdenticalPolicyTest, ProducerOutputsMatchCanonicalShaderOrder) {
   for (const auto &[spec, output] : expected_bindings) {
     const auto spec_token = "\n    " + std::string {spec} + ",";
     const auto output_address = "std::addressof(" + std::string {output} + ")";
-    const bool optional_normalizer = spec == "buffer_to_tex" || spec == "buffer_to_tex_pad";
-    const auto output_token = optional_normalizer ?
-      "\n        normalized_depth_diagnostics_enabled ? " + output_address + " : nullptr," :
-      "\n        " + output_address + ",";
+    auto output_token = "\n        " + output_address + ",";
+    if (spec == "buffer_to_tex" || spec == "buffer_to_tex_pad") {
+      output_token = "\n        normalized_depth_diagnostics_enabled ? " + output_address + " : nullptr,";
+    } else if (spec.ends_with("_compact")) {
+      output_token = "\n        normalized_depth_diagnostics_enabled ? nullptr : " + output_address + ",";
+    }
     const auto spec_position = specs.find(spec_token, spec_cursor);
     const auto output_position = outputs.find(output_token, output_cursor);
     ASSERT_NE(spec_position, std::string::npos) << spec;

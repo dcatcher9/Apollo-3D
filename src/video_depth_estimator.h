@@ -908,8 +908,9 @@ namespace models {
     // Production V2 outputs. candidate_parallax is immutable pre-conditioner evidence consumed by
     // the vertical pass, vertical_majorant is the upper-envelope diagnostic, and
     // vertical_conditioned is the fixed upper/lower vertical share consumed by the pure row
-    // majorant. base_final_parallax is independently observable as the ordinary post-limiter field
-    // for explicit diagnostics and padded ROI. When requested, subtitle conditioning writes a
+    // majorant. The vertical pair is exposed together for diagnostics; ordinary live results
+    // may omit it. base_final_parallax is the independently observable post-limiter field for
+    // explicit diagnostics and padded ROI. When requested, subtitle conditioning writes a
     // separate complete texture, so Base remains immutable. The renderer uses Base plus the
     // joined native glyph matte and an analytic UI-plane sample. Adaptive reuse holds
     // the complete DAV2/OCR/SLR/final tuple; a shared refresh updates the analysis bundle together.
@@ -924,6 +925,8 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_vertical_conditioned;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_base_final_parallax;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_conditioned_final_parallax;
+    /// An authenticated live result may omit both vertical diagnostic fields.
+    bool base_vertical_diagnostics_omitted = false;
     /// True only when the completed tuple carries current field-pin, distance and Gaussian evidence.
     bool subtitle_conditioning_diagnostics_current = false;
 

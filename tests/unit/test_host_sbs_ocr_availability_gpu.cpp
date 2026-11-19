@@ -2,7 +2,9 @@
 #include <gtest/gtest.h>
 
 #ifdef _WIN32
+  #include "host_sbs_limiter_oracle.h"
   #include <algorithm>
+  #include <bit>
   #include <chrono>
   #include <cstddef>
   #include <cstdint>
@@ -11,6 +13,7 @@
   #include <filesystem>
   #include <optional>
   #include <src/depth_coordinate_v2.h>
+  #include <src/host_sbs_shader_cache.h>
   #include <src/model_manager.h>
   #include <src/prod_zipdepth_convex2x.h>
   #include <src/video_depth_estimator.h>
@@ -153,49 +156,56 @@ namespace {
     context->Unmap(staging.Get(), 0u);
     return true;
   }
+
+  class TensorRtOcrAvailabilityGpuTest: public testing::Test {
+  protected:
+    static constexpr UINT width = 1280u, height = 720u;
+    private_assets_t assets;
+    ComPtr<ID3D11Device> device;
+    ComPtr<ID3D11DeviceContext> context;
+    ComPtr<ID3D11ShaderResourceView> source;
+
+    void SetUp() override {
+      const auto *enabled = std::getenv("APOLLO_RUN_TENSORRT_TESTS");
+      if (!enabled || std::string_view {enabled} != "1") {
+        GTEST_SKIP() << "Set APOLLO_RUN_TENSORRT_TESTS=1 for the local NVIDIA/TensorRT integration check.";
+      }
+      std::string error;
+      const auto packaged = std::filesystem::path {SUNSHINE_TEST_BIN_DIR}.parent_path() / "assets";
+      ASSERT_TRUE(assets.create_without_ocr(packaged, error)) << error;
+      ASSERT_FALSE(std::filesystem::exists(assets.path / std::filesystem::path {models::ocr_model_asset_path}));
+
+      D3D_FEATURE_LEVEL actual {};
+      constexpr D3D_FEATURE_LEVEL requested[] {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
+      ASSERT_TRUE(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, requested, static_cast<UINT>(std::size(requested)), D3D11_SDK_VERSION, &device, &actual, &context)));
+
+      std::vector<std::uint32_t> pixels(static_cast<std::size_t>(width) * height);
+      for (UINT y = 0u; y < height; ++y) {
+        for (UINT x = 0u; x < width; ++x) {
+          const auto r = 32u + 159u * x / (width - 1u), g = 24u + 143u * y / (height - 1u);
+          const auto b = 20u + ((x / 64u + y / 48u) % 2u) * 68u;
+          pixels[static_cast<std::size_t>(y) * width + x] = 0xff000000u | (r << 16u) | (g << 8u) | b;
+        }
+      }
+      D3D11_TEXTURE2D_DESC desc {};
+      desc.Width = width;
+      desc.Height = height;
+      desc.MipLevels = 1u;
+      desc.ArraySize = 1u;
+      desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+      desc.SampleDesc.Count = 1u;
+      desc.Usage = D3D11_USAGE_IMMUTABLE;
+      desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+      const D3D11_SUBRESOURCE_DATA initial {pixels.data(), width * sizeof(std::uint32_t), 0u};
+      ComPtr<ID3D11Texture2D> texture;
+      ASSERT_TRUE(SUCCEEDED(device->CreateTexture2D(&desc, &initial, &texture)));
+      ASSERT_TRUE(SUCCEEDED(device->CreateShaderResourceView(texture.Get(), nullptr, &source)));
+    }
+  };
 }  // namespace
 
-TEST(TensorRtOcrAvailabilityGpuTest, MissingPackagedOcrPreservesJoinedDepthAndExactBase) {
-  const auto *enabled = std::getenv("APOLLO_RUN_TENSORRT_TESTS");
-  if (!enabled || std::string_view {enabled} != "1") {
-    GTEST_SKIP() << "Set APOLLO_RUN_TENSORRT_TESTS=1 for the local NVIDIA/TensorRT integration check.";
-  }
-  private_assets_t assets;
+TEST_F(TensorRtOcrAvailabilityGpuTest, MissingPackagedOcrPreservesJoinedDepthAndExactBase) {
   std::string error;
-  const auto packaged = std::filesystem::path {SUNSHINE_TEST_BIN_DIR}.parent_path() / "assets";
-  ASSERT_TRUE(assets.create_without_ocr(packaged, error)) << error;
-  ASSERT_FALSE(std::filesystem::exists(assets.path / std::filesystem::path {models::ocr_model_asset_path}));
-
-  ComPtr<ID3D11Device> device;
-  ComPtr<ID3D11DeviceContext> context;
-  D3D_FEATURE_LEVEL actual {};
-  constexpr D3D_FEATURE_LEVEL requested[] {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
-  ASSERT_TRUE(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, requested, static_cast<UINT>(std::size(requested)), D3D11_SDK_VERSION, &device, &actual, &context)));
-
-  constexpr UINT width = 1280u, height = 720u;
-  std::vector<std::uint32_t> pixels(static_cast<std::size_t>(width) * height);
-  for (UINT y = 0u; y < height; ++y) {
-    for (UINT x = 0u; x < width; ++x) {
-      const auto r = 32u + 159u * x / (width - 1u), g = 24u + 143u * y / (height - 1u);
-      const auto b = 20u + ((x / 64u + y / 48u) % 2u) * 68u;
-      pixels[static_cast<std::size_t>(y) * width + x] = 0xff000000u | (r << 16u) | (g << 8u) | b;
-    }
-  }
-  D3D11_TEXTURE2D_DESC desc {};
-  desc.Width = width;
-  desc.Height = height;
-  desc.MipLevels = 1u;
-  desc.ArraySize = 1u;
-  desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-  desc.SampleDesc.Count = 1u;
-  desc.Usage = D3D11_USAGE_IMMUTABLE;
-  desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-  const D3D11_SUBRESOURCE_DATA initial {pixels.data(), width * sizeof(std::uint32_t), 0u};
-  ComPtr<ID3D11Texture2D> texture;
-  ComPtr<ID3D11ShaderResourceView> source;
-  ASSERT_TRUE(SUCCEEDED(device->CreateTexture2D(&desc, &initial, &texture)));
-  ASSERT_TRUE(SUCCEEDED(device->CreateShaderResourceView(texture.Get(), nullptr, &source)));
-
   const auto &calibration = v2::model_calibrations.front();
   const config::depth_model_info model {std::string {calibration.depth_model}, std::string {calibration.depth_model_url}};
   using estimator_t = models::video_depth_estimator;
@@ -209,6 +219,9 @@ TEST(TensorRtOcrAvailabilityGpuTest, MissingPackagedOcrPreservesJoinedDepthAndEx
   ASSERT_TRUE(estimator.configure_subtitle_selected_matte_research(outline, error)) << error;
 
   const auto expect_diagnostic_views = [](const models::depth_observation_views_t &observation, bool expected) {
+    EXPECT_FALSE(observation.base_vertical_diagnostics_omitted);
+    EXPECT_TRUE(observation.shadow_vertical_majorant);
+    EXPECT_TRUE(observation.shadow_vertical_conditioned);
     EXPECT_EQ(observation.subtitle_conditioning_diagnostics_current, expected);
     for (auto *view : {
            observation.shadow_conditioned_final_parallax.Get(),
@@ -384,6 +397,110 @@ TEST(TensorRtOcrAvailabilityGpuTest, MissingPackagedOcrPreservesJoinedDepthAndEx
     if (diagnostics_expected) {
       ASSERT_TRUE(read_words(device.Get(), context.Get(), completed.observation.subtitle_glyph_matte.Get(), matte));
       EXPECT_TRUE(std::all_of(matte.begin(), matte.end(), [](auto word) {return word == 0u;}));
+    }
+  }
+}
+
+TEST_F(TensorRtOcrAvailabilityGpuTest, PaddedLiveBaseRestoresFullVerticalFieldsForLateSnapshot) {
+  namespace shaders = models::host_sbs_shader_cache;
+  const auto shader_sources = shaders::snapshot_sources(assets.path / "shaders" / "directx", shaders::parallax_v2_producer_specs);
+  ASSERT_TRUE(shader_sources);
+  ASSERT_EQ(shaders::source_closure_sha256(shader_sources), v2::shader_source_closure_sha256);
+  for (const auto &spec : {shaders::depth_coordinate_v2_vertical_limit_compact, shaders::depth_coordinate_v2_limit_compact}) {
+    const auto bytecode = shaders::get_embedded(shader_sources, spec);
+    ASSERT_TRUE(bytecode) << spec.filename;
+    ComPtr<ID3D11ComputeShader> shader;
+    ASSERT_TRUE(SUCCEEDED(device->CreateComputeShader(bytecode->data(), bytecode->size(), nullptr, &shader))) << spec.filename;
+  }
+
+  using estimator_t = models::video_depth_estimator;
+  const auto &calibration = v2::model_calibrations.front();
+  const config::depth_model_info model {std::string {calibration.depth_model}, std::string {calibration.depth_model_url}};
+  estimator_t estimator {device, context, assets.path, config::video_t::sbs_t {}, model,
+                         estimator_t::normalized_depth_diagnostics_e::disabled,
+                         estimator_t::subtitle_legacy_matte_e::on_demand};
+  ASSERT_TRUE(estimator.is_valid());
+  estimator.set_subtitle_conditioning_diagnostics_always(false);
+
+  constexpr models::depth_source_rect_t crop {300u, 100u, 950u, 620u};
+  const auto coarse = models::fit_host_sbs_v2_depth_tensor_shape(width, height);
+  const auto plan = models::plan_host_sbs_v2_video_region(crop, width, height, coarse);
+  const auto high = models::host_sbs_convex2x_field_shape(coarse);
+  ASSERT_TRUE(plan);
+  ASSERT_TRUE(high);
+  const auto content = models::host_sbs_convex2x_content_rect(plan->tensor_content, coarse);
+  ASSERT_TRUE(content);
+  ASSERT_GT(content->left, 0u);
+  ASSERT_LT(content->right, static_cast<std::uint32_t>(high->width));
+  ASSERT_GT(content->width(), v2::limiter_serial_max_lines);
+  const models::depth_input_region_t region {
+    .source_width = width,
+    .source_height = height,
+    .left = crop.left,
+    .top = crop.top,
+    .right = crop.right,
+    .bottom = crop.bottom,
+    .tensor_content = plan->tensor_content,
+    .analysis_generation = 1u,
+    .authority = models::depth_analysis_authority_e::chromium_video,
+  };
+
+  const auto expect_field = [&](ID3D11ShaderResourceView *view, const std::vector<float> &expected, const char *name) {
+    std::vector<std::uint32_t> actual;
+    ASSERT_TRUE(read_words(device.Get(), context.Get(), view, actual)) << name;
+    ASSERT_EQ(actual.size(), expected.size()) << name;
+    const auto mismatch = std::mismatch(expected.begin(), expected.end(), actual.begin(), [](float value, std::uint32_t word) {
+      return std::bit_cast<std::uint32_t>(value) == word;
+    });
+    if (mismatch.first != expected.end()) {
+      const auto index = mismatch.first - expected.begin();
+      ADD_FAILURE() << name << " differs at " << index % high->width << ',' << index / high->width
+                    << " expected bits=" << std::bit_cast<std::uint32_t>(*mismatch.first)
+                    << " actual bits=" << *mismatch.second;
+    }
+  };
+
+  for (std::uint64_t frame = 1u; frame <= 3u; ++frame) {
+    SCOPED_TRACE(frame);
+    const bool snapshot = frame == 2u;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds {2};
+    while (!estimator.can_accept_frame() && !estimator.has_terminal_failure() && std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::yield();
+    }
+    ASSERT_TRUE(estimator.can_accept_frame());
+    const auto submitted = estimator.estimate_depth(source.Get(), models::input_color_space::srgb, frame, false,
+      region, models::depth_optional_work_mode_e::ordinary, {.observation_timestamp_us = frame * 33333u}, 1u);
+    ASSERT_TRUE(submitted.submission.inference_enqueued);
+    ASSERT_FALSE(submitted.submission.gpu_undecided_transaction_enqueued);
+
+    // The Dump 3D request arrives after submission and before the direct completion.
+    const auto completed = estimator.finish_pending_depth_for_evaluation(models::input_color_space::srgb, snapshot);
+    const auto &observation = completed.observation;
+    ASSERT_FALSE(estimator.has_terminal_failure());
+    ASSERT_TRUE(models::parallax_v2_result_is_authenticated(observation));
+    ASSERT_EQ(observation.completed_frame_id, frame);
+    ASSERT_FALSE(observation.gpu_undecided_completion);
+    ASSERT_EQ(observation.field_content, *content);
+    ASSERT_EQ(observation.field_width, high->width);
+    ASSERT_EQ(observation.field_height, high->height);
+    ASSERT_EQ(observation.base_vertical_diagnostics_omitted, !snapshot);
+    ASSERT_EQ(static_cast<bool>(observation.shadow_vertical_majorant), snapshot);
+    ASSERT_EQ(static_cast<bool>(observation.shadow_vertical_conditioned), snapshot);
+    ASSERT_EQ(static_cast<bool>(observation.raw_model_depth_snapshot), snapshot);
+    ASSERT_EQ(static_cast<bool>(observation.model_input_snapshot), snapshot);
+
+    std::vector<std::uint32_t> candidate_words;
+    ASSERT_TRUE(read_words(device.Get(), context.Get(), observation.shadow_candidate_parallax.Get(), candidate_words));
+    std::vector<float> candidate(candidate_words.size());
+    std::transform(candidate_words.begin(), candidate_words.end(), candidate.begin(), std::bit_cast<float, std::uint32_t>);
+    const auto vertical = host_sbs_test::exact_q30_vertical_oracle(candidate, high->width, high->height, content->width());
+    ASSERT_EQ(vertical.majorant.size(), candidate.size());
+    ASSERT_EQ(vertical.conditioned.size(), candidate.size());
+    const auto base = host_sbs_test::exact_q30_horizontal_oracle(vertical.conditioned, high->width, high->height, content->width());
+    ASSERT_NO_FATAL_FAILURE(expect_field(observation.shadow_base_final_parallax.Get(), base, "Base"));
+    if (snapshot) {
+      ASSERT_NO_FATAL_FAILURE(expect_field(observation.shadow_vertical_majorant.Get(), vertical.majorant, "vertical majorant"));
+      ASSERT_NO_FATAL_FAILURE(expect_field(observation.shadow_vertical_conditioned.Get(), vertical.conditioned, "vertical conditioned"));
     }
   }
 }

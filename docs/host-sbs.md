@@ -73,8 +73,8 @@ as one tuple; the draw-owned pin resources are not a new temporal observation.
 ## Authenticated production contract
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
-schema 135/tag `0x0CA15670`, canonical SHA-256
-`68177a200fba2b5a9d05199daab4dbfe1cb3e63869ae9e1b7e4f79131fa2edd3`. It binds the
+schema 135/tag `0x3F150060`, canonical SHA-256
+`88a3d8c01deee9b2957d895059694e804a1659533aa950bf02524b01ce4a92ef`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -85,21 +85,21 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 2 | `8e2de9ed76bd64a38a0c956e75dd7a13c8883d39d0ef0050ffe5aba9f7208672` |
-| `parallax_v2_producer` | 27 | `8a72428b07402f99460469003b399642219c23493bae0d93c6e1d50bfeff5904` |
-| `parallax_v2_replay_resolve` | 2 | `1498f6d2bd548ebbbf53b5a70754ae7bc4adf8c8d499ad3a21a007da0f1f7459` |
-| `parallax_v2_coordinate_diagnostic` | 1 | `1dd5e6424fc30edd3c04810276022911f567188dafe0793c05838634a99e1fca` |
-| `near_identical_detector` | 3 | `7e85aed711daae5f178f433c55d098232a8364a2494acdd592aeb3a33c65ce36` |
-| `gpu_trace` | 1 | `e1dc3ee17c01855101e671200d037f42716d613fde55c24d2b5893ab602d9ad0` |
-| `parallax_v2_live_renderer` | 2 | `514e41a83b807fa91cba24f5c34ab23d2274ddfd84f07b0288d376855583c676` |
-| `parallax_v2_p010_y` | 1 | `eb3c539a5990865c46907fed6ce8cdd1eb23beb1dafab40d03d293e33b116765` |
+| `parallax_v2_producer` | 29 | `560eb9bad4c679009134702e353b4d71f2ec8c0a461cf9213f3d62c12a4b61cc` |
+| `parallax_v2_replay_resolve` | 2 | `86eef4a8b05719f2ea7c24bba68258ea968cbd456dc350b2a0d0a8fa684140a2` |
+| `parallax_v2_coordinate_diagnostic` | 1 | `1604e07ae5cc79b931406f22ace026435bff107006fc85bda0a253dc6a4b40d2` |
+| `near_identical_detector` | 3 | `f8a17e91d41496992fdf5b63abd2d6815b5d5414e053991973b76cc07a929356` |
+| `gpu_trace` | 1 | `4c33ab7ddd90a347f219a9bf4b7d8a2d0f488239eeb2119463d01e3c1769bebb` |
+| `parallax_v2_live_renderer` | 2 | `99cade013bb1e065c95d2422eeec52fe604cb6d7aa8b659c56dafcdddfc0aa42` |
+| `parallax_v2_p010_y` | 1 | `85202788207818c2f978b918e05ba5cee27e83842d24605488c0d1cb6db06bc4` |
 | `sbs_flat_fallback` | 2 | `7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4` |
-| `parallax_v2_live_diagnostic` | 2 | `74087b4e405bf3cf819b3ed06766554669e5d8a230d16ed7490e6283702c1362` |
-| `subtitle_cohort_prototype_research` | 3 | `cc0da78cdbb80d995770ba267bf7a034ccf4c4bcbe65a4813e77237dbb04e205` |
-| `subtitle_cohort_research` | 4 | `d90a061df0cfbd5cd86109a81c24cf1150b0de60b8aa91d546347ac77d1c094a` |
-| `subtitle_inner_colour_research` | 5 | `c3e476e8da7aae4cd841d71a21f874796a5e11768e8d90a0bce875de2590a21a` |
+| `parallax_v2_live_diagnostic` | 2 | `ec0a697777e8c66850d865a60cee0310ecd36f8b9c2ac3f11abc4689668c2924` |
+| `subtitle_cohort_prototype_research` | 3 | `f66c1feef6fc743eb74db2eb103bfb53b7932d5c9754c9878a1b0b790072f28a` |
+| `subtitle_cohort_research` | 4 | `f05e2cd74dd345f507dbb741dbbcb36b005c8daea6352423c1ce653f42179067` |
+| `subtitle_inner_colour_research` | 5 | `a17771d0f97c947cdfe017eced5673e893671b50708fa7bfd9008bb0e202e629` |
 | `subtitle_inner_components_research` | 6 | `7e2f44690d64cebe3261133a3642fa558c8c25c7086bf19551f284a4cb13ebe0` |
-| `subtitle_matte_guard_research` | 1 | `281a4fbad32f50fffb5278052512482695a2efd00a62583c0a7443040c8c78d0` |
-| `parallax_v2_queued_renderer` | 1 | `602bf698bde90826fe9a1d68867be231532bea65f95de9ad31f103444ecaa3a7` |
+| `subtitle_matte_guard_research` | 1 | `20f93f022b7681737e636e534e60824926b4ec9c049279d5a7b6a2f097560d75` |
+| `parallax_v2_queued_renderer` | 1 | `58d83134e3dc49be6179c99b04ac0f6e04d379f151f3cbfeef332ba2c6cd278e` |
 | `current_mask_holes` | 9 | `b4e48d5eecab2404951602ad649980001f21cf5f9768381acadc7c3973ef4668` |
 | `current_stroke_coverage` | 3 | `1f03ba4279f6cadbaddf56b408cf20c0bc37776c4971e8e25830a8ffd3a3d063` |
 | `current_foreground_edge` | 1 | `4c8750b262827356b47a691aafe4cc306e541b691709060d979252635e73436c` |
@@ -203,6 +203,16 @@ limiters can alter local relief. Adaptive changes to D still change strength. Th
 intentionally breaks multiplicative affine invariance when active; filtering raw zero/scale state
 also does not cancel arbitrary independently changing per-frame model gauges. Composition changes,
 temporal pumping and foreground relief still require paired evaluation and physical live inspection.
+
+For a direct live observation with horizontal tensor padding and a content interval wide enough
+for parallel limiting, the mapper repeats the nearest content column and the vertical limiter
+computes only the admitted columns. The horizontal
+majorant scans the admitted interval and fills each margin from its input edge value and the
+completed majorant at that edge, decayed by distance with the same Q30 step. This produces the
+full Base field with the same values as processing the repeated columns. Narrow intervals,
+receipt-gated completions, replay, and diagnostic snapshots use the full-grid limiter pair.
+Ordinary live observations can omit both vertical intermediate views. Dump 3D requires the
+complete pair from a known writer because a zero-group hold leaves the previous fields in place.
 
 The subtitle path transfers Game 3D's UI mask/protection/plane ideas using Host's current OCR8
 cores and paired coarse covers to bound native current pixel evidence. It does not add a logo detector.

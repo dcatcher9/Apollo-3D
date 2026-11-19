@@ -199,7 +199,8 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             # The depth producer and replay share a compact analysis domain instead of a mask.
             # Full-grid and letterboxed preprocessing share one area-resize loop.
             # Shared source reads require the complete clipped pixel footprint.
-            135: "68177a200fba2b5a9d05199daab4dbfe1cb3e63869ae9e1b7e4f79131fa2edd3",
+            # Compact live limiters preserve exact Base on horizontally padded observations.
+            135: "88a3d8c01deee9b2957d895059694e804a1659533aa950bf02524b01ce4a92ef",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -207,14 +208,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 contract or shader identity changed without a reviewed identity pin",
         )
-        self.assertEqual(generator.contract_tag(contract), 0x0CA15670)
+        self.assertEqual(generator.contract_tag(contract), 0x3F150060)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "0ca15670aa941a56949ba65f94a4837f2dac1e08b37edc79ce93da21b5ac6486",
+            "3f150060679bb5ba813e3ce7ab6cf6055f9fa00a13eaeae15606bacd1294e6a7",
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "8a72428b07402f99460469003b399642219c23493bae0d93c6e1d50bfeff5904",
+            "560eb9bad4c679009134702e353b4d71f2ec8c0a461cf9213f3d62c12a4b61cc",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(

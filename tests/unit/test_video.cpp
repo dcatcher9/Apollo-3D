@@ -4381,7 +4381,7 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
     EXPECT_FALSE(models::parallax_v2_result_is_authenticated(unknown_mode)) << mode;
   }
 
-  const models::depth_source_rect_t video_rect {100u, 80u, 1700u, 980u};
+  const models::depth_source_rect_t video_rect {100u, 80u, 1460u, 980u};
   const auto coarse_video_plan = models::plan_host_sbs_v2_video_region(
     video_rect, 1920u, 1080u, {770, 434}
   );
@@ -4404,6 +4404,33 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   };
   refined_video_region.field_content = *high_video_content;
   EXPECT_TRUE(models::parallax_v2_result_is_authenticated(refined_video_region));
+  ASSERT_GT(high_video_content->left, 0u);
+  for (const bool omitted : {false, true}) {
+    for (unsigned present = 0u; present < 4u; ++present) {
+      auto roi = refined_video_region;
+      roi.base_vertical_diagnostics_omitted = omitted;
+      if ((present & 1u) == 0u) {
+        roi.shadow_vertical_majorant.Reset();
+      }
+      if ((present & 2u) == 0u) {
+        roi.shadow_vertical_conditioned.Reset();
+      }
+      EXPECT_EQ(models::parallax_v2_result_is_authenticated(roi),
+        present == (omitted ? 0u : 3u)) << "omitted=" << omitted << ", present=" << present;
+    }
+  }
+
+  auto invalid_vertical_view = refined_video_region;
+  invalid_vertical_view.shadow_vertical_conditioned = refined_field_views[3];
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(invalid_vertical_view));
+
+  auto omitted_without_base = refined_video_region;
+  omitted_without_base.base_vertical_diagnostics_omitted = true;
+  omitted_without_base.shadow_vertical_majorant.Reset();
+  omitted_without_base.shadow_vertical_conditioned.Reset();
+  omitted_without_base.shadow_base_final_parallax.Reset();
+  EXPECT_FALSE(models::parallax_v2_result_is_authenticated(omitted_without_base));
+
   auto coarse_content_on_high_grid = refined_video_region;
   coarse_content_on_high_grid.input_region.tensor_content =
     coarse_video_plan->tensor_content;

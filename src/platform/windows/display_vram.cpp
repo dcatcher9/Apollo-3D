@@ -3405,6 +3405,7 @@ namespace platf::dxgi {
             const bool complete_dump_snapshot =
               matched_render_slot && dump_warp_inputs[1] && est.model_input_snapshot &&
               est.raw_model_depth_snapshot && est.raw_model_provenance &&
+              est.shadow_vertical_majorant && est.shadow_vertical_conditioned &&
               est.final_parallax() &&
               (est.subtitle_conditioning_diagnostics_current || est.subtitle_work_suppressed) &&
               v2_renderer_selected &&

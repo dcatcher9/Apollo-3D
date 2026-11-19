@@ -466,6 +466,16 @@
         "source_target": "cs_5_0"
       },
       {
+        "source_file": "depth_coordinate_v2_vertical_limit_cs.hlsl",
+        "source_entrypoint": "compact_main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "depth_coordinate_v2_limit_cs.hlsl",
+        "source_entrypoint": "compact_main",
+        "source_target": "cs_5_0"
+      },
+      {
         "source_file": "host_sbs_ocr_preprocess_cs.hlsl",
         "source_entrypoint": "main",
         "source_target": "cs_5_0"
@@ -546,7 +556,7 @@
         "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "8a72428b07402f99460469003b399642219c23493bae0d93c6e1d50bfeff5904"
+    "source_closure_sha256": "560eb9bad4c679009134702e353b4d71f2ec8c0a461cf9213f3d62c12a4b61cc"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,

@@ -30,6 +30,8 @@ namespace models::host_sbs_shader_cache {
   inline constexpr shader_spec depth_coordinate_v2_coordinate_diagnostic {"depth_coordinate_v2_map_cs.hlsl", "domain_coordinate_main", "cs_5_0"};
   inline constexpr shader_spec depth_coordinate_v2_vertical_limit {"depth_coordinate_v2_vertical_limit_cs.hlsl", "main", "cs_5_0"};
   inline constexpr shader_spec depth_coordinate_v2_limit {"depth_coordinate_v2_limit_cs.hlsl", "main", "cs_5_0"};
+  inline constexpr shader_spec depth_coordinate_v2_vertical_limit_compact {"depth_coordinate_v2_vertical_limit_cs.hlsl", "compact_main", "cs_5_0"};
+  inline constexpr shader_spec depth_coordinate_v2_limit_compact {"depth_coordinate_v2_limit_cs.hlsl", "compact_main", "cs_5_0"};
   inline constexpr shader_spec host_sbs_ocr_preprocess {"host_sbs_ocr_preprocess_cs.hlsl", "main", "cs_5_0"};
   inline constexpr shader_spec host_sbs_ocr_cells {"host_sbs_ocr_boxes_cs.hlsl", "cells_main", "cs_5_0"};
   inline constexpr shader_spec host_sbs_ocr_resolve {"host_sbs_ocr_boxes_cs.hlsl", "resolve_main", "cs_5_0"};
@@ -109,6 +111,8 @@ namespace models::host_sbs_shader_cache {
     depth_coordinate_v2_map,
     depth_coordinate_v2_vertical_limit,
     depth_coordinate_v2_limit,
+    depth_coordinate_v2_vertical_limit_compact,
+    depth_coordinate_v2_limit_compact,
     host_sbs_ocr_preprocess,
     host_sbs_ocr_cells,
     host_sbs_ocr_resolve,
@@ -127,20 +131,20 @@ namespace models::host_sbs_shader_cache {
     host_sbs_subtitle_gaussian_horizontal_limit,
   };
   inline constexpr std::string_view parallax_v2_producer_source_closure_sha256 =
-    "8a72428b07402f99460469003b399642219c23493bae0d93c6e1d50bfeff5904";
+    "560eb9bad4c679009134702e353b4d71f2ec8c0a461cf9213f3d62c12a4b61cc";
 
   inline constexpr std::array parallax_v2_replay_resolve_specs {
     depth_coordinate_v2_quantiles,
     depth_coordinate_v2_state_resolve,
   };
   inline constexpr std::string_view parallax_v2_replay_resolve_source_closure_sha256 =
-    "1498f6d2bd548ebbbf53b5a70754ae7bc4adf8c8d499ad3a21a007da0f1f7459";
+    "86eef4a8b05719f2ea7c24bba68258ea968cbd456dc350b2a0d0a8fa684140a2";
 
   inline constexpr std::array parallax_v2_coordinate_diagnostic_specs {
     depth_coordinate_v2_coordinate_diagnostic,
   };
   inline constexpr std::string_view parallax_v2_coordinate_diagnostic_source_closure_sha256 =
-    "1dd5e6424fc30edd3c04810276022911f567188dafe0793c05838634a99e1fca";
+    "1604e07ae5cc79b931406f22ace026435bff107006fc85bda0a253dc6a4b40d2";
 
   inline constexpr std::array near_identical_detector_specs {
     host_sbs_near_identical_resolve,
@@ -148,26 +152,26 @@ namespace models::host_sbs_shader_cache {
     host_sbs_near_identical_reuse_depth,
   };
   inline constexpr std::string_view near_identical_detector_source_closure_sha256 =
-    "7e85aed711daae5f178f433c55d098232a8364a2494acdd592aeb3a33c65ce36";
+    "f8a17e91d41496992fdf5b63abd2d6815b5d5414e053991973b76cc07a929356";
 
   inline constexpr std::array gpu_trace_specs {
     host_sbs_gpu_trace,
   };
   inline constexpr std::string_view gpu_trace_source_closure_sha256 =
-    "e1dc3ee17c01855101e671200d037f42716d613fde55c24d2b5893ab602d9ad0";
+    "4c33ab7ddd90a347f219a9bf4b7d8a2d0f488239eeb2119463d01e3c1769bebb";
 
   inline constexpr std::array parallax_v2_live_renderer_specs {
     parallax_v2_live_renderer,
     sbs_reprojection_vertex,
   };
   inline constexpr std::string_view parallax_v2_live_renderer_source_closure_sha256 =
-    "514e41a83b807fa91cba24f5c34ab23d2274ddfd84f07b0288d376855583c676";
+    "99cade013bb1e065c95d2422eeec52fe604cb6d7aa8b659c56dafcdddfc0aa42";
 
   inline constexpr std::array parallax_v2_p010_y_specs {
     parallax_v2_p010_y_renderer,
   };
   inline constexpr std::string_view parallax_v2_p010_y_source_closure_sha256 =
-    "eb3c539a5990865c46907fed6ce8cdd1eb23beb1dafab40d03d293e33b116765";
+    "85202788207818c2f978b918e05ba5cee27e83842d24605488c0d1cb6db06bc4";
 
   inline constexpr std::array sbs_flat_fallback_specs {
     sbs_flat_identity,
@@ -181,7 +185,7 @@ namespace models::host_sbs_shader_cache {
     parallax_v2_live_mask,
   };
   inline constexpr std::string_view parallax_v2_live_diagnostic_source_closure_sha256 =
-    "74087b4e405bf3cf819b3ed06766554669e5d8a230d16ed7490e6283702c1362";
+    "ec0a697777e8c66850d865a60cee0310ecd36f8b9c2ac3f11abc4689668c2924";
 
   inline constexpr std::array subtitle_cohort_prototype_research_specs {
     host_sbs_subtitle_cohort_prepare,
@@ -189,7 +193,7 @@ namespace models::host_sbs_shader_cache {
     host_sbs_subtitle_cohort_filter,
   };
   inline constexpr std::string_view subtitle_cohort_prototype_research_source_closure_sha256 =
-    "cc0da78cdbb80d995770ba267bf7a034ccf4c4bcbe65a4813e77237dbb04e205";
+    "f66c1feef6fc743eb74db2eb103bfb53b7932d5c9754c9878a1b0b790072f28a";
 
   inline constexpr std::array subtitle_cohort_research_specs {
     host_sbs_subtitle_cohort_prepare,
@@ -198,7 +202,7 @@ namespace models::host_sbs_shader_cache {
     host_sbs_subtitle_cohort_snapshot,
   };
   inline constexpr std::string_view subtitle_cohort_research_source_closure_sha256 =
-    "d90a061df0cfbd5cd86109a81c24cf1150b0de60b8aa91d546347ac77d1c094a";
+    "f05e2cd74dd345f507dbb741dbbcb36b005c8daea6352423c1ce653f42179067";
 
   inline constexpr std::array subtitle_inner_colour_research_specs {
     host_sbs_subtitle_inner_colour_research_palette,
@@ -208,7 +212,7 @@ namespace models::host_sbs_shader_cache {
     host_sbs_subtitle_inner_colour_research_validate,
   };
   inline constexpr std::string_view subtitle_inner_colour_research_source_closure_sha256 =
-    "c3e476e8da7aae4cd841d71a21f874796a5e11768e8d90a0bce875de2590a21a";
+    "a17771d0f97c947cdfe017eced5673e893671b50708fa7bfd9008bb0e202e629";
 
   inline constexpr std::array subtitle_inner_components_research_specs {
     host_sbs_subtitle_inner_components_research_init,
@@ -225,13 +229,13 @@ namespace models::host_sbs_shader_cache {
     host_sbs_subtitle_matte_guard,
   };
   inline constexpr std::string_view subtitle_matte_guard_research_source_closure_sha256 =
-    "281a4fbad32f50fffb5278052512482695a2efd00a62583c0a7443040c8c78d0";
+    "20f93f022b7681737e636e534e60824926b4ec9c049279d5a7b6a2f097560d75";
 
   inline constexpr std::array parallax_v2_queued_renderer_specs {
     parallax_v2_queued_renderer,
   };
   inline constexpr std::string_view parallax_v2_queued_renderer_source_closure_sha256 =
-    "602bf698bde90826fe9a1d68867be231532bea65f95de9ad31f103444ecaa3a7";
+    "58d83134e3dc49be6179c99b04ac0f6e04d379f151f3cbfeef332ba2c6cd278e";
 
   inline constexpr std::array current_mask_holes_specs {
     host_sbs_current_mask_holes_clear,
