@@ -1587,9 +1587,11 @@ namespace platf::dxgi {
           bool cached_current_color_warp = false;
           host_sbs::observation_handoff_t handoff;
           const auto &depth_step = handoff.step();
-          const auto &est = depth_step.observation;
+          const auto &step_observation = depth_step.observation;
+          const host_sbs::observation_handoff_t *render_handoff = &handoff;
           const auto clear_matched_selection = [&]() {
             matched_render_slot = nullptr;
+            render_handoff = &handoff;
             handoff.reset();
             cached_current_color_warp = false;
           };
@@ -1610,7 +1612,7 @@ namespace platf::dxgi {
               if (probe_observer.record) {
                 actual_converter_probe_v1::event_t event;
                 event.kind = actual_converter_probe_v1::event_e::ack;
-                emit_converter_probe(std::move(event), &slot, &est, nullptr, slot.srv.get(), img_ctx->encoder_input_res.get(), frame_id);
+                emit_converter_probe(std::move(event), &slot, &step_observation, nullptr, slot.srv.get(), img_ctx->encoder_input_res.get(), frame_id);
               }
             }
             if (diagnostics_enabled) {
@@ -1636,7 +1638,6 @@ namespace platf::dxgi {
           bool unchanged_content_submission_suppressed = false;
           bool damage_guided_submission_suppressed = false;
           bool force_fresh_current_color = false;
-          bool using_cached_estimate = false;
           bool completion_finalized_before_admission = false;
           bool block_current_submission_after_early_poll = false;
           bool same_frame_poll_missed_for_current_draw = false;
@@ -1693,6 +1694,7 @@ namespace platf::dxgi {
               matched_presentation_cache.invalidate();
               return false;
             }
+            const auto &est = render_handoff->step().observation;
             if (
               !est.completed_frame_valid ||
               est.completed_frame_id != matched_render_slot->frame_id ||
@@ -1719,8 +1721,8 @@ namespace platf::dxgi {
                 // The completion is still consumed and releases its pending slot, but geometry
                 // observed before a focus/move/resize/monitor transition cannot warp newer pixels.
                 matched_presentation_cache.reset();
-                latest_v2_lineage.reset();
                 clear_matched_selection();
+                latest_v2_lineage.reset();
                 return false;
               }
               // Full-source depth is independent of optional exact-full window provenance.
@@ -1737,7 +1739,9 @@ namespace platf::dxgi {
             if (!matched_render_slot) {
               return false;
             }
-            if (depth_step.completion.input_domain_reset) {
+            const auto &render_step = render_handoff->step();
+            const auto &est = render_step.observation;
+            if (render_step.completion.input_domain_reset) {
               sbs_telemetry_min_frame_id = std::max(
                 sbs_telemetry_min_frame_id,
                 est.completed_frame_id
@@ -1750,8 +1754,8 @@ namespace platf::dxgi {
               const auto failed_renderer =
                 models::fail_host_sbs_renderer_flat(host_sbs_renderer);
               if (failed_renderer != host_sbs_renderer) {
-                fail_depth_pipeline_flat();
                 clear_matched_selection();
+                fail_depth_pipeline_flat();
                 BOOST_LOG(error)
                   << "Host SBS parallax-v2 producer reported a terminal CUDA/TensorRT failure; "sv
                      "this stream is now live flat identity with depth submissions disabled."sv;
@@ -1762,7 +1766,7 @@ namespace platf::dxgi {
             // Authenticate the first completed V2 field for which the exact buffered color
             // remains. A later invalid frame is handled inside the V2 shader.
             if (host_sbs_renderer == models::host_sbs_renderer_e::awaiting_v2) {
-              const bool result_authenticated = handoff.authenticate_structure();
+              const bool result_authenticated = render_handoff->authenticate_structure();
               host_sbs_renderer = models::latch_host_sbs_renderer(
                 host_sbs_renderer,
                 result_authenticated
@@ -1795,8 +1799,8 @@ namespace platf::dxgi {
                   << ", refined="sv
                   << (est.refined_live_geometry_active ? "true" : "false")
                   << ")."sv;
-                fail_depth_pipeline_flat();
                 clear_matched_selection();
+                fail_depth_pipeline_flat();
                 return false;
               }
             }
@@ -1804,7 +1808,7 @@ namespace platf::dxgi {
           };
 
           const auto retain_completed_lineage = [&, this]() {
-            if (!matched_render_slot || !est.completed_frame_valid || using_cached_estimate) {
+            if (!matched_render_slot || !step_observation.completed_frame_valid || render_handoff != &handoff) {
               return;
             }
             const auto &completed_source_desc = matched_render_slot->texture ?
@@ -2234,7 +2238,7 @@ namespace platf::dxgi {
                 );
                 const bool submitted_refined_geometry = submitted.observation.refined_live_geometry_active;
                 if (completion_finalized_before_admission &&
-                    !depth_estimator->publication_is_current(est.publication)) {
+                    !depth_estimator->publication_is_current(step_observation.publication)) {
                   // Admission can reset subtitle state without changing the depth domain.
                   // Borrowed views from the early completion no longer authorize this draw.
                   clear_matched_selection();
@@ -2255,16 +2259,16 @@ namespace platf::dxgi {
                   completion_finalized_before_admission
                 );
                 if (
-                  est.completed_frame_valid &&
+                  step_observation.completed_frame_valid &&
                   !completion_finalized_before_admission
                 ) {
                   latest_v2_lineage.reset();
-                  matched_render_slot = find_pending_matched_slot(est.completed_frame_id);
+                  matched_render_slot = find_pending_matched_slot(step_observation.completed_frame_id);
                   if (matched_render_slot) {
                     adopt_matched_completion(*matched_render_slot);
                   } else {
                     release_unknown_completion(
-                      est.completed_frame_id,
+                      step_observation.completed_frame_id,
                       matched_candidate_slot
                     );
                   }
@@ -2370,7 +2374,7 @@ namespace platf::dxgi {
                     );
                     if (exact_live_route) {
                       queued_attempt_failed_flat = !queue_research_observation(
-                        *queued_frame, *matched_candidate_slot, est,
+                        *queued_frame, *matched_candidate_slot, step_observation,
                         {live_source_desc, input_color_space, current_source_timestamp, current_content_timestamp,
                          current_ddup_damage, img.cursor, img_ctx->encoder_input_res.get(), frame_id},
                         observation_timestamp_us, submitted_refined_geometry
@@ -2567,15 +2571,16 @@ namespace platf::dxgi {
             (unchanged_content_submission_suppressed || depth_step.submission.inference_enqueued ||
              depth_step.submission.gpu_undecided_transaction_enqueued)
           ) {
-            handoff.select_retained(latest_v2_lineage.completion);
+            // All estimator work is finished for this draw. Borrow the current lineage on the
+            // converter thread, and keep this call's submission and completion events separate.
+            render_handoff = &latest_v2_lineage.completion;
             matched_render_slot = &latest_v2_lineage.slot;
-            using_cached_estimate = true;
             cached_current_color_warp = true;
             depth_reuse_authorization = post_completion_reuse_authorization;
           } else if (post_completion_cache_gate_open && force_fresh_current_color && matched_render_slot) {
             const auto completed_reuse_authorization = detail::select_host_sbs_cached_depth_reuse(
               current_input_reuse_kind(*matched_render_slot),
-              est.completed_frame_id,
+              step_observation.completed_frame_id,
               frame_id
             );
             if (completed_reuse_authorization.valid()) {
@@ -2605,10 +2610,10 @@ namespace platf::dxgi {
             // estimate_depth may retire domain A while enqueueing the first frame of domain B in
             // the same call. Once B is observed, do not resurrect or repeat A; show current flat
             // color until the exact B completion arrives and rearms its scene camera.
+            clear_matched_selection();
             if (completion_finalized_before_admission) {
               latest_v2_lineage.reset();
             }
-            clear_matched_selection();
             completion_finalized_before_admission = false;
           } else if (!completion_finalized_before_admission && matched_render_slot) {
             (void) apply_completed_domain_and_renderer();
@@ -2620,8 +2625,8 @@ namespace platf::dxgi {
             const auto failed_renderer =
               models::fail_host_sbs_renderer_flat(host_sbs_renderer);
             if (failed_renderer != host_sbs_renderer) {
-              fail_depth_pipeline_flat();
               clear_matched_selection();
+              fail_depth_pipeline_flat();
               BOOST_LOG(error)
                 << "Host SBS parallax-v2 producer reported a terminal CUDA/TensorRT failure; "sv
                    "this stream is now live flat identity with depth submissions disabled."sv;
@@ -2632,10 +2637,7 @@ namespace platf::dxgi {
           // authentication latch. This lineage aliases the estimator's singleton V2 resources but
           // does not itself authorize rendering; a typed current-frame reuse proof remains
           // separate.
-          if (
-            !completion_finalized_before_admission && matched_render_slot &&
-            est.completed_frame_valid && !using_cached_estimate
-          ) {
+          if (!completion_finalized_before_admission) {
             retain_completed_lineage();
           }
 
@@ -2720,7 +2722,9 @@ namespace platf::dxgi {
           }
           const bool v2_renderer_selected = host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2;
           const bool v2_renderer_failed_flat = host_sbs_renderer == models::host_sbs_renderer_e::failed_flat;
-          const bool v2_result_authenticated = matched_render_slot && handoff.authenticate_structure();
+          const auto &render_step = render_handoff->step();
+          const auto &est = render_step.observation;
+          const bool v2_result_authenticated = matched_render_slot && render_handoff->authenticate_structure();
           const bool v2_live_warp_selected =
             v2_renderer_selected && v2_result_authenticated && sbs_reprojection_v2_live_ps &&
             est.shadow_base_final_parallax && est.shadow_state;
@@ -3538,7 +3542,7 @@ namespace platf::dxgi {
                   est.publication.observation_timestamp_us;
                 dump_frame.depth_input_region = est.input_region;
                 dump_frame.depth_video_plan = matched_render_slot->depth_video_plan;
-                dump_frame.input_domain_reset = depth_step.completion.input_domain_reset;
+                dump_frame.input_domain_reset = render_step.completion.input_domain_reset;
                 dump_frame.gpu_undecided_completion =
                   est.gpu_undecided_completion;
                 dump_frame.subtitle_work_suppressed =
@@ -3548,7 +3552,7 @@ namespace platf::dxgi {
                   matched_render_slot->window_region_observer_status;
                 dump_frame.window_region_mapping_status =
                   matched_render_slot->window_region_mapping_status;
-                dump_frame.cuda_graph_active = depth_step.status.cuda_graph_active;
+                dump_frame.cuda_graph_active = render_step.status.cuda_graph_active;
                 dump_frame.parallax_v2_producer_active =
                   est.parallax_v2_producer_active;
                 dump_frame.parallax_v2_render_selected =

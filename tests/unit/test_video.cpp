@@ -316,8 +316,8 @@ namespace {
     ASSERT_NE(completion, std::string::npos);
     ASSERT_NE(authority, std::string::npos);
     const auto observation = display.substr(completion, authority - completion);
-    EXPECT_NE(observation.find("!est.completed_frame_valid"), std::string::npos);
-    EXPECT_NE(observation.find("using_cached_estimate"), std::string::npos);
+    EXPECT_NE(observation.find("!step_observation.completed_frame_valid"), std::string::npos);
+    EXPECT_NE(observation.find("render_handoff != &handoff"), std::string::npos);
     EXPECT_EQ(observation.find("sbs_telemetry_last_sampled_frame_id"), std::string::npos);
     EXPECT_EQ(observation.find("receipt ="), std::string::npos);
     const auto poll = display.find("void publish_sbs_telemetry_after_output()");
@@ -6709,13 +6709,13 @@ TEST(DirectxShaderSourceTest, HostSbsLatestV2LineageIsNotCurrentRenderAuthorizat
   };
 
   const boundary_t selection_boundaries[] {
-    {"lost window/video authority", "!window_region_authorized_for_render(*matched_render_slot)", "clear_matched_selection();"},
+    {"lost window/video authority", "!window_region_authorized_for_render(*matched_render_slot)", "return false;"},
     {"early ready completion or producer failure", "if (polled.ready) {", "depth_completion_poll_pending = false;"},
     {"route/dump/reprocess/terminal revocation", "if (detail::host_sbs_latest_v2_lineage_reset_required(", "const bool cached_geometry_render_allowed"},
     {"unchanged pending input completes", "unchanged_content_submission_suppressed = true;", "depth_completion_poll_pending = false;"},
     {"authority changes during matched copy", "completion_finalized_before_admission && matched_render_slot &&\n                !matched_route_matches_current(", "clear_matched_selection();"},
-    {"admission revokes an early publication", "!depth_estimator->publication_is_current(est.publication)", "completion_finalized_before_admission = false;"},
-    {"ordinary asynchronous completion", "est.completed_frame_valid &&\n                  !completion_finalized_before_admission", "matched_render_slot = find_pending_matched_slot(est.completed_frame_id);"},
+    {"admission revokes an early publication", "!depth_estimator->publication_is_current(step_observation.publication)", "completion_finalized_before_admission = false;"},
+    {"ordinary asynchronous completion", "step_observation.completed_frame_valid &&\n                  !completion_finalized_before_admission", "matched_render_slot = find_pending_matched_slot(step_observation.completed_frame_id);"},
     {"invalid adaptive submission class", "models::gpu_adaptive_submission_class_e::invalid", "if (force_infer_transaction_enqueued) {"},
     {"missing force-infer capture causality", "!matched_candidate_slot->inference_content_timestamp ||", "// The forced full-source submission has retired the old ROI authority."},
     {"current-frame completion no longer pending", "detail::host_sbs_same_frame_completion_e::keep_pending\n", "depth_completion_poll_pending = false;"},
@@ -7423,7 +7423,7 @@ TEST(DirectxShaderSourceTest, AdaptiveReuseUsesExactCurrentPublicationAndActualD
   const auto retain_end = display.find("// Consume a completed publication", retain);
   ASSERT_NE(retain, std::string::npos);
   ASSERT_NE(retain_end, std::string::npos);
-  EXPECT_NE(display.substr(retain, retain_end - retain).find("using_cached_estimate"), std::string::npos);
+  EXPECT_NE(display.substr(retain, retain_end - retain).find("render_handoff != &handoff"), std::string::npos);
   EXPECT_EQ(display.find("latest_v2_lineage.estimate().gpu_undecided_completion = false"), std::string::npos);
   EXPECT_EQ(display.find("opaque_gpu_followup_anchor"), std::string::npos);
   EXPECT_EQ(display.find("gpu_observation_barrier"), std::string::npos);
@@ -7464,8 +7464,8 @@ TEST(DirectxShaderSourceTest, HostSbsRejectsRotationAndUsesMatchedV2Frames) {
     display.find("display->display_rotation != DXGI_MODE_ROTATION_IDENTITY"),
     std::string::npos
   );
-  EXPECT_NE(display.find("find_pending_matched_slot(est.completed_frame_id)"), std::string::npos);
-  EXPECT_NE(display.find("handoff.authenticate_structure()"), std::string::npos);
+  EXPECT_NE(display.find("find_pending_matched_slot(step_observation.completed_frame_id)"), std::string::npos);
+  EXPECT_NE(display.find("render_handoff->authenticate_structure()"), std::string::npos);
   const auto live_selection = display.find("const bool v2_live_warp_selected =");
   ASSERT_NE(live_selection, std::string::npos);
   EXPECT_NE(display.find("est.shadow_base_final_parallax && est.shadow_state;", live_selection), std::string::npos);
