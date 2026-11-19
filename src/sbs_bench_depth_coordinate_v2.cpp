@@ -1100,52 +1100,36 @@ void main(uint3 id : SV_DispatchThreadID) {
       context->Dispatch((width + 15u) / 16u, (height + 15u) / 16u, 1u);
       unbind(3u, 1u);
 
-      const v2_gpu::map_history_command_t map_history_command {
+      const v2_gpu::base_geometry_command_t base_geometry_command {
         .constants = base_constants,
         .near_identical_constants = near_constants.Get(),
-        .shader = map_shader.Get(),
+        .map_shader = map_shader.Get(),
+        .vertical_shader = vertical_limit_shader.Get(),
+        .horizontal_shader = limit_shader.Get(),
         .raw_depth = raw_srv.Get(),
         .state = state_srv.Get(),
         .analysis_domain = analysis_domain_srv.Get(),
         .minmax_ema = dummy_minmax_srv.Get(),
         .current_model_input = dummy_current_model_input_srv.Get(),
         .depth_health_state = depth_health_state_srv.Get(),
+        .candidate = candidate_srv.Get(),
+        .vertical_conditioned = vertical_conditioned_srv.Get(),
         .candidate_output = candidate_uav.Get(),
         .previous_model_input_output = dummy_previous_model_input_uav.Get(),
         .history_owner_output = dummy_history_owner_uav.Get(),
-        .dispatch = v2_gpu::dispatch_command_t::direct(
+        .vertical_majorant_output = vertical_majorant_uav.Get(),
+        .vertical_conditioned_output = vertical_conditioned_uav.Get(),
+        .final_output = final_uav.Get(),
+        .map_dispatch = v2_gpu::dispatch_command_t::direct(
           (width + 15u) / 16u,
           (height + 15u) / 16u,
           1u
         ),
+        .vertical_dispatch = v2_gpu::dispatch_command_t::direct(v2_gpu::limiter_groups(width), 1u, 1u),
+        .horizontal_dispatch = v2_gpu::dispatch_command_t::direct(v2_gpu::limiter_groups(height), 1u, 1u),
       };
-      if (!v2_gpu::record_map_history(context.Get(), map_history_command)) {
-        error = "shared V2 GPU executor rejected replay map/history operands";
-        return false;
-      }
-
-      const v2_gpu::vertical_command_t vertical_command {
-        .constants = base_constants,
-        .shader = vertical_limit_shader.Get(),
-        .candidate = candidate_srv.Get(),
-        .vertical_majorant_output = vertical_majorant_uav.Get(),
-        .vertical_conditioned_output = vertical_conditioned_uav.Get(),
-        .dispatch = v2_gpu::dispatch_command_t::direct(v2_gpu::limiter_groups(width), 1u, 1u),
-      };
-      if (!v2_gpu::record_vertical(context.Get(), vertical_command)) {
-        error = "shared V2 GPU executor rejected replay vertical operands";
-        return false;
-      }
-
-      const v2_gpu::horizontal_command_t horizontal_command {
-        .constants = base_constants,
-        .shader = limit_shader.Get(),
-        .vertical_conditioned = vertical_conditioned_srv.Get(),
-        .final_output = final_uav.Get(),
-        .dispatch = v2_gpu::dispatch_command_t::direct(v2_gpu::limiter_groups(height), 1u, 1u),
-      };
-      if (!v2_gpu::record_horizontal(context.Get(), horizontal_command)) {
-        error = "shared V2 GPU executor rejected replay horizontal operands";
+      if (!v2_gpu::record_base_geometry(context.Get(), base_geometry_command)) {
+        error = "shared V2 GPU executor rejected replay Base geometry operands";
         return false;
       }
 

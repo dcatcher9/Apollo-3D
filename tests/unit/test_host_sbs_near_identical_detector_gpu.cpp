@@ -956,9 +956,9 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
   EXPECT_NE(fused_map.find("NearIdenticalHistoryOwnerOutput : register(u2)"),
             std::string::npos);
   EXPECT_NE(estimator.find("minmax_ema_srv.Get(),"), std::string::npos);
-  EXPECT_NE(estimator.find("host_sbs_v2_gpu::record_map_history("), std::string::npos);
-  EXPECT_NE(executor.find("CSSetShaderResources(0u, 6u, inputs)"), std::string::npos);
-  EXPECT_NE(executor.find("CSSetUnorderedAccessViews(0u, 3u, outputs"), std::string::npos);
+  EXPECT_NE(estimator.find("host_sbs_v2_gpu::record_base_geometry("), std::string::npos);
+  EXPECT_NE(executor.find("CSSetShaderResources(0u, 6u, map_inputs)"), std::string::npos);
+  EXPECT_NE(executor.find("CSSetUnorderedAccessViews(0u, 3u, map_outputs"), std::string::npos);
   EXPECT_NE(estimator.find("CSSetShaderResources(0u, 4u, resolve_inputs)"), std::string::npos);
   EXPECT_EQ(shader.find("NearIdenticalSubtitleCoherentTransition"), std::string::npos);
   EXPECT_EQ(shader.find("NearIdenticalSubtitleStateSteady"), std::string::npos);

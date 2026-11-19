@@ -103,21 +103,33 @@ namespace models::host_sbs_v2_gpu {
     dispatch_command_t dispatch;
   };
 
-  struct map_history_command_t {
+  struct base_geometry_command_t {
     base_constants_t constants;
     /** Exact Host-SBS near-identical constants at b2. */
     ID3D11Buffer *near_identical_constants = nullptr;
-    ID3D11ComputeShader *shader = nullptr;
+    ID3D11ComputeShader *map_shader = nullptr;
+    ID3D11ComputeShader *vertical_shader = nullptr;
+    ID3D11ComputeShader *horizontal_shader = nullptr;
     ID3D11ShaderResourceView *raw_depth = nullptr;
     ID3D11ShaderResourceView *state = nullptr;
     ID3D11ShaderResourceView *analysis_domain = nullptr;
     ID3D11ShaderResourceView *minmax_ema = nullptr;
     ID3D11ShaderResourceView *current_model_input = nullptr;
     ID3D11ShaderResourceView *depth_health_state = nullptr;
+    ID3D11ShaderResourceView *candidate = nullptr;
+    ID3D11ShaderResourceView *vertical_conditioned = nullptr;
     ID3D11UnorderedAccessView *candidate_output = nullptr;
     ID3D11UnorderedAccessView *previous_model_input_output = nullptr;
     ID3D11UnorderedAccessView *history_owner_output = nullptr;
-    dispatch_command_t dispatch;
+    ID3D11UnorderedAccessView *vertical_majorant_output = nullptr;
+    ID3D11UnorderedAccessView *vertical_conditioned_output = nullptr;
+    ID3D11UnorderedAccessView *final_output = nullptr;
+    dispatch_command_t map_dispatch;
+    dispatch_command_t vertical_dispatch;
+    dispatch_command_t horizontal_dispatch;
+    /** Optional timestamps before mapping and at the map-to-limiter boundary. */
+    ID3D11Query *map_start = nullptr;
+    ID3D11Query *limits_start = nullptr;
   };
 
   /** Direct group count for a limiter pass over `lines` columns (vertical) or rows (horizontal). */
@@ -125,23 +137,6 @@ namespace models::host_sbs_v2_gpu {
     constexpr UINT group_lines = depth_coordinate_v2::limiter_group_lines;
     return (lines + group_lines - 1u) / group_lines;
   }
-
-  struct vertical_command_t {
-    base_constants_t constants;
-    ID3D11ComputeShader *shader = nullptr;
-    ID3D11ShaderResourceView *candidate = nullptr;
-    ID3D11UnorderedAccessView *vertical_majorant_output = nullptr;
-    ID3D11UnorderedAccessView *vertical_conditioned_output = nullptr;
-    dispatch_command_t dispatch;
-  };
-
-  struct horizontal_command_t {
-    base_constants_t constants;
-    ID3D11ComputeShader *shader = nullptr;
-    ID3D11ShaderResourceView *vertical_conditioned = nullptr;
-    ID3D11UnorderedAccessView *final_output = nullptr;
-    dispatch_command_t dispatch;
-  };
 
   /** Record the shared raw scan and either replay quantiles or the complete live publication. */
   [[nodiscard]] bool record_moments_frame(
@@ -155,22 +150,13 @@ namespace models::host_sbs_v2_gpu {
     const state_command_t &command
   ) noexcept;
 
-  /** Record candidate mapping plus exact history/owner publication. */
-  [[nodiscard]] bool record_map_history(
+  /**
+   * Record mapping and history publication, the vertical share, and the final horizontal majorant.
+   * Leaves b0-b2 bound and clears the SRV and UAV slots used by the chain.
+   */
+  [[nodiscard]] bool record_base_geometry(
     ID3D11DeviceContext *context,
-    const map_history_command_t &command
-  ) noexcept;
-
-  /** Record the column upper/lower envelope and fixed vertical share. */
-  [[nodiscard]] bool record_vertical(
-    ID3D11DeviceContext *context,
-    const vertical_command_t &command
-  ) noexcept;
-
-  /** Record the final row-wise horizontal majorant. */
-  [[nodiscard]] bool record_horizontal(
-    ID3D11DeviceContext *context,
-    const horizontal_command_t &command
+    const base_geometry_command_t &command
   ) noexcept;
 
 }  // namespace models::host_sbs_v2_gpu

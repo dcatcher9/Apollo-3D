@@ -715,9 +715,7 @@ TEST(HostSbsV2GpuExecutorTest, EveryStageRejectsMissingOperandsWithoutRecording)
   using namespace models::host_sbs_v2_gpu;
   EXPECT_FALSE(record_moments_frame(warp.context.Get(), moments_frame_command_t {}));
   EXPECT_FALSE(record_state(warp.context.Get(), state_command_t {}));
-  EXPECT_FALSE(record_map_history(warp.context.Get(), map_history_command_t {}));
-  EXPECT_FALSE(record_vertical(warp.context.Get(), vertical_command_t {}));
-  EXPECT_FALSE(record_horizontal(warp.context.Get(), horizontal_command_t {}));
+  EXPECT_FALSE(record_base_geometry(warp.context.Get(), base_geometry_command_t {}));
 }
 
 TEST(HostSbsV2GpuExecutorTest, BindingContractAndExecutorCallSitesStayShared) {
@@ -771,10 +769,8 @@ TEST(HostSbsV2GpuExecutorTest, BindingContractAndExecutorCallSitesStayShared) {
     return std::string_view(compact_executor).substr(first, last - first);
   };
   const auto moments = stage("boolrecord_moments_frame(", "boolrecord_state(");
-  const auto state = stage("boolrecord_state(", "boolrecord_map_history(");
-  const auto map = stage("boolrecord_map_history(", "boolrecord_vertical(");
-  const auto vertical = stage("boolrecord_vertical(", "boolrecord_horizontal(");
-  const auto horizontal = stage("boolrecord_horizontal(", "}//namespacemodels");
+  const auto state = stage("boolrecord_state(", "boolrecord_base_geometry(");
+  const auto base = stage("boolrecord_base_geometry(", "}//namespacemodels");
 
   // Behavioral GPU tests below cover the generated fields. This narrow structural guard proves
   // that both production call sites still cross the shared recorder API. Normalize formatting and
@@ -789,26 +785,26 @@ TEST(HostSbsV2GpuExecutorTest, BindingContractAndExecutorCallSitesStayShared) {
   EXPECT_EQ(count_occurrences(moments, "CSSetUnorderedAccessViews(0u,output_count,"), 2u);
   EXPECT_NE(state.find("CSSetShaderResources(0u,2u,"), std::string::npos);
   EXPECT_NE(state.find("CSSetUnorderedAccessViews(0u,1u"), std::string::npos);
-  EXPECT_NE(compact_executor.find("CSSetConstantBuffers(0u,3u,"),
-            std::string::npos);
-  EXPECT_NE(map.find("bind_stage_constants(context,command.constants"),
-            std::string::npos);
-  EXPECT_NE(map.find("CSSetShaderResources(0u,6u,"), std::string::npos);
-  EXPECT_NE(map.find("CSSetUnorderedAccessViews(0u,3u,"),
-            std::string::npos);
-  EXPECT_EQ(count_occurrences(map, "CSSetShaderResources(0u,6u,"), 2u);
-  EXPECT_EQ(count_occurrences(map, "CSSetUnorderedAccessViews(0u,3u,"), 2u);
-  EXPECT_NE(vertical.find("CSSetShaderResources(0u,1u"), std::string::npos);
-  EXPECT_NE(vertical.find("CSSetUnorderedAccessViews(0u,2u"), std::string::npos);
-  EXPECT_NE(horizontal.find("CSSetShaderResources(0u,1u"), std::string::npos);
-  EXPECT_NE(horizontal.find("CSSetUnorderedAccessViews(0u,1u"),
-            std::string::npos);
+  EXPECT_EQ(count_occurrences(base, "CSSetConstantBuffers("), 1u);
+  EXPECT_NE(base.find("CSSetConstantBuffers(0u,3u,"), std::string::npos);
+  EXPECT_EQ(count_occurrences(base, "CSSetShaderResources(0u,6u,"), 2u);
+  EXPECT_EQ(count_occurrences(base, "CSSetShaderResources(0u,1u,"), 2u);
+  EXPECT_EQ(count_occurrences(base, "CSSetUnorderedAccessViews(0u,3u,"), 2u);
+  EXPECT_EQ(count_occurrences(base, "CSSetUnorderedAccessViews(0u,2u,"), 2u);
+  EXPECT_EQ(count_occurrences(base, "CSSetUnorderedAccessViews(0u,1u,"), 2u);
+  const auto map_release = base.find("CSSetUnorderedAccessViews(0u,3u,null_outputs,");
+  const auto limits_start = base.find("context->End(command.limits_start)");
+  const auto vertical_read = base.find("CSSetShaderResources(0u,6u,vertical_inputs)");
+  const auto vertical_release = base.find("CSSetUnorderedAccessViews(0u,2u,null_outputs,");
+  const auto horizontal_read = base.find("CSSetShaderResources(0u,1u,&command.vertical_conditioned)");
+  EXPECT_LT(map_release, limits_start);
+  EXPECT_LT(limits_start, vertical_read);
+  EXPECT_LT(vertical_release, horizontal_read);
+  EXPECT_NE(horizontal_read, std::string::npos);
 
   for (const std::string_view recorder : {
          "record_moments_frame",
-         "record_map_history",
-         "record_vertical",
-         "record_horizontal",
+         "record_base_geometry",
        }) {
     EXPECT_EQ(count_occurrences(compact_replay, recorder), 1u) << recorder;
     EXPECT_EQ(count_occurrences(compact_live, recorder), 1u) << recorder;
@@ -845,7 +841,9 @@ TEST(HostSbsV2GpuExecutorTest, BindingContractAndExecutorCallSitesStayShared) {
             std::string::npos);
   EXPECT_EQ(compact_live.find("depth_coordinate_v2_ownership"), std::string::npos);
   EXPECT_EQ(compact_live.find("pending_source_srv"), std::string::npos);
-  EXPECT_NE(compact_live.find("mark_d3d_parallax_map_start(perf_slot)"),
+  EXPECT_NE(compact_live.find("perf_slot->parallax_map_start.Get()"),
+            std::string::npos);
+  EXPECT_NE(compact_live.find("perf_slot->parallax_limits_start.Get()"),
             std::string::npos);
   EXPECT_NE(compact_live.find("mark_d3d_parallax_subtitle_start(perf_slot)"),
             std::string::npos);

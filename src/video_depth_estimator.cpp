@@ -6414,13 +6414,6 @@ namespace models {
       }
     }
 
-    void mark_d3d_parallax_map_start(d3d_perf_slot *slot) {
-      if (slot && slot->has_parallax) {
-        slot->has_parallax_map_start = true;
-        context->End(slot->parallax_map_start.Get());
-      }
-    }
-
     void mark_d3d_parallax_subtitle_start(d3d_perf_slot *slot) {
       if (slot && slot->has_parallax) {
         slot->has_parallax_subtitle_start = true;
@@ -7666,100 +7659,64 @@ namespace models {
     }
 
     bool dispatch_parallax_v2_producer(d3d_perf_slot *perf_slot) {
-      if (!parallax_v2_producer_active || !depth_coordinate_v2_map_cs ||
-          !near_identical_cbuffer || !near_identical_history_owner.uav ||
-          !tensor_out_srv || !depth_coordinate_v2_state_srv ||
-          !analysis_domain.srv || !minmax_ema_srv || !tensor_in_srv ||
-          !depth_health_state_srv || !depth_coordinate_v2_candidate_uav || !tensor_previous_input_uav) {
+      if (!parallax_v2_producer_active) {
         return false;
       }
 
-      const host_sbs_v2_gpu::base_constants_t base_constants {
-        .depth = cbuffer.Get(),
-        .coordinate_v2 = depth_coordinate_v2_cbuffer.Get(),
-      };
-
-      mark_d3d_parallax_map_start(perf_slot);
-
-      // Map raw depth into the immutable pre-limiter candidate and publish the depth owner.
-      // The same dispatch copies padded NCHW history when requested by the b2 upload.
-      // The full-size canonical-coordinate
-      // field is deliberately absent from production; an explicit Dump 3D dispatches it separately.
-      const host_sbs_v2_gpu::map_history_command_t map_history_command {
-        .constants = base_constants,
+      // Mapping publishes the history owner and may copy NCHW input. An explicit Dump 3D
+      // separately materializes the full-size canonical-coordinate field.
+      const host_sbs_v2_gpu::base_geometry_command_t command {
+        .constants = {
+          .depth = cbuffer.Get(),
+          .coordinate_v2 = depth_coordinate_v2_cbuffer.Get(),
+        },
         .near_identical_constants = near_identical_cbuffer.Get(),
-        .shader = depth_coordinate_v2_map_cs.Get(),
+        .map_shader = depth_coordinate_v2_map_cs.Get(),
+        .vertical_shader = depth_coordinate_v2_vertical_limit_cs.Get(),
+        .horizontal_shader = depth_coordinate_v2_limit_cs.Get(),
         .raw_depth = tensor_out_srv.Get(),
         .state = depth_coordinate_v2_state_srv.Get(),
         .analysis_domain = analysis_domain.srv.Get(),
         .minmax_ema = minmax_ema_srv.Get(),
         .current_model_input = tensor_in_srv.Get(),
         .depth_health_state = depth_health_state_srv.Get(),
+        .candidate = depth_coordinate_v2_candidate_srv.Get(),
+        .vertical_conditioned = depth_coordinate_v2_vertical_conditioned_srv.Get(),
         .candidate_output = depth_coordinate_v2_candidate_uav.Get(),
         .previous_model_input_output = tensor_previous_input_uav.Get(),
         .history_owner_output = near_identical_history_owner.uav.Get(),
-        .dispatch = parallax_v2_dispatch_command(
+        .vertical_majorant_output = depth_coordinate_v2_vertical_majorant_uav.Get(),
+        .vertical_conditioned_output = depth_coordinate_v2_vertical_conditioned_uav.Get(),
+        .final_output = depth_coordinate_v2_final_uav.Get(),
+        .map_dispatch = parallax_v2_dispatch_command(
           (target_w + 15) / 16,
           (target_h + 15) / 16,
           1u,
           near_identical_gpu_infer_grid16_byte_offset
         ),
-      };
-      if (!host_sbs_v2_gpu::record_map_history(
-            context.Get(),
-            map_history_command
-          )) {
-        return false;
-      }
-      if (perf_slot) {
-        perf_slot->has_parallax_limits_start = true;
-        context->End(perf_slot->parallax_limits_start.Get());
-      }
-
-      const host_sbs_v2_gpu::base_constants_t geometry_constants {
-        .depth = cbuffer.Get(),
-        .coordinate_v2 = depth_coordinate_v2_cbuffer.Get(),
-      };
-
-      // Produce the exact column upper envelope plus the fixed 75/25 vertical share. The upper
-      // remains diagnostic evidence; only the neutral conditioned field feeds live geometry.
-      const host_sbs_v2_gpu::vertical_command_t vertical_command {
-        .constants = geometry_constants,
-        .shader = depth_coordinate_v2_vertical_limit_cs.Get(),
-        .candidate = depth_coordinate_v2_candidate_srv.Get(),
-        .vertical_majorant_output = depth_coordinate_v2_vertical_majorant_uav.Get(),
-        .vertical_conditioned_output =
-          depth_coordinate_v2_vertical_conditioned_uav.Get(),
-        .dispatch = parallax_v2_dispatch_command(
+        .vertical_dispatch = parallax_v2_dispatch_command(
           host_sbs_v2_gpu::limiter_groups(static_cast<UINT>(field_w)),
           1u,
           1u,
           near_identical_gpu_infer_columns_byte_offset
         ),
-      };
-      if (!host_sbs_v2_gpu::record_vertical(context.Get(), vertical_command)) {
-        return false;
-      }
-
-      // Apply one pure horizontal majorant to the vertically conditioned field. There is no
-      // horizontal minorant or completed-2D-envelope blend, so lateral lowering is not added.
-      const host_sbs_v2_gpu::horizontal_command_t horizontal_command {
-        .constants = geometry_constants,
-        .shader = depth_coordinate_v2_limit_cs.Get(),
-        .vertical_conditioned = depth_coordinate_v2_vertical_conditioned_srv.Get(),
-        .final_output = depth_coordinate_v2_final_uav.Get(),
-        .dispatch = parallax_v2_dispatch_command(
+        .horizontal_dispatch = parallax_v2_dispatch_command(
           host_sbs_v2_gpu::limiter_groups(static_cast<UINT>(field_h)),
           1u,
           1u,
           near_identical_gpu_infer_rows_byte_offset
         ),
+        .map_start = perf_slot && perf_slot->has_parallax ? perf_slot->parallax_map_start.Get() : nullptr,
+        .limits_start = perf_slot ? perf_slot->parallax_limits_start.Get() : nullptr,
       };
-      if (!host_sbs_v2_gpu::record_horizontal(
-            context.Get(),
-            horizontal_command
-          )) {
+      if (!host_sbs_v2_gpu::record_base_geometry(context.Get(), command)) {
         return false;
+      }
+      if (command.map_start) {
+        perf_slot->has_parallax_map_start = true;
+      }
+      if (command.limits_start) {
+        perf_slot->has_parallax_limits_start = true;
       }
 
       mark_d3d_parallax_subtitle_start(perf_slot);

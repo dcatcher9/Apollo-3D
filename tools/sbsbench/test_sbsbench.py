@@ -1672,7 +1672,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertNotIn("cbuffer_first_frame", estimator)
         self.assertNotIn("depth_history_valid", estimator)
         self.assertNotIn("depth_valid_history_cs", estimator)
-        self.assertIn("host_sbs_v2_gpu::record_map_history(", estimator)
+        self.assertIn("host_sbs_v2_gpu::record_base_geometry(", estimator)
         self.assertIn(".previous_model_input_output = tensor_previous_input_uav.Get()", estimator)
         self.assertIn("tensor_previous_input_uav", estimator)
         self.assertNotIn("context->CSSetShader(depth_minmax_cs.Get()", estimator)
@@ -1684,11 +1684,11 @@ class EvalContractTests(unittest.TestCase):
         with open(os.path.join(repo, "src", "host_sbs_v2_gpu_executor.cpp"),
                   encoding="utf-8") as fh:
             executor = fh.read()
-        self.assertIn("bool record_map_history(", executor)
-        self.assertIn("ID3D11ShaderResourceView *inputs[6]", executor)
-        self.assertIn("ID3D11UnorderedAccessView *outputs[3]", executor)
-        self.assertIn("CSSetShaderResources(0u, 6u, inputs)", executor)
-        self.assertIn("CSSetUnorderedAccessViews(0u, 3u, outputs, nullptr)", executor)
+        self.assertIn("bool record_base_geometry(", executor)
+        self.assertIn("ID3D11ShaderResourceView *map_inputs[6]", executor)
+        self.assertIn("ID3D11UnorderedAccessView *map_outputs[3]", executor)
+        self.assertIn("CSSetShaderResources(0u, 6u, map_inputs)", executor)
+        self.assertIn("CSSetUnorderedAccessViews(0u, 3u, map_outputs, nullptr)", executor)
 
         shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders",
                                   "directx")

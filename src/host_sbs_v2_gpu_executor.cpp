@@ -10,13 +10,10 @@ namespace models::host_sbs_v2_gpu {
 
   namespace {
 
-    bool record_dispatch(
+    void record_validated_dispatch(
       ID3D11DeviceContext *context,
       const dispatch_command_t &command
     ) noexcept {
-      if (!context || !command.valid()) {
-        return false;
-      }
       if (command.mode == dispatch_command_t::mode_e::direct) {
         context->Dispatch(
           command.group_count_x,
@@ -29,7 +26,6 @@ namespace models::host_sbs_v2_gpu {
           command.indirect_byte_offset
         );
       }
-      return true;
     }
 
     void bind_base_constants(
@@ -41,19 +37,6 @@ namespace models::host_sbs_v2_gpu {
         constants.coordinate_v2,
       };
       context->CSSetConstantBuffers(0u, 2u, buffers);
-    }
-
-    void bind_stage_constants(
-      ID3D11DeviceContext *context,
-      const base_constants_t &constants,
-      ID3D11Buffer *stage_constants
-    ) noexcept {
-      ID3D11Buffer *buffers[3] = {
-        constants.depth,
-        constants.coordinate_v2,
-        stage_constants,
-      };
-      context->CSSetConstantBuffers(0u, 3u, buffers);
     }
 
   }  // namespace
@@ -135,7 +118,7 @@ namespace models::host_sbs_v2_gpu {
     };
     context->CSSetShaderResources(0u, 2u, moments_inputs);
     context->CSSetUnorderedAccessViews(0u, 1u, &command.partials_output, nullptr);
-    (void) record_dispatch(context, command.moments_dispatch);
+    record_validated_dispatch(context, command.moments_dispatch);
     ID3D11ShaderResourceView *null_inputs[2] = {};
     ID3D11UnorderedAccessView *null_outputs[2] = {};
     context->CSSetShaderResources(0u, 2u, null_inputs);
@@ -148,7 +131,7 @@ namespace models::host_sbs_v2_gpu {
       command.minmax_raw_output,
     };
     context->CSSetUnorderedAccessViews(0u, 2u, frame_outputs, nullptr);
-    (void) record_dispatch(context, command.frame_resolve_dispatch);
+    record_validated_dispatch(context, command.frame_resolve_dispatch);
     context->CSSetShaderResources(0u, 1u, null_inputs);
     context->CSSetUnorderedAccessViews(0u, 2u, null_outputs, nullptr);
     {
@@ -161,7 +144,7 @@ namespace models::host_sbs_v2_gpu {
         command.histogram_output, command.minmax_raw_output,
       };
       context->CSSetUnorderedAccessViews(0u, 2u, histogram_outputs, nullptr);
-      (void) record_dispatch(context, command.moments_dispatch);
+      record_validated_dispatch(context, command.moments_dispatch);
       ID3D11ShaderResourceView *null_histogram_inputs[3] = {};
       context->CSSetShaderResources(0u, 3u, null_histogram_inputs);
       context->CSSetUnorderedAccessViews(0u, 2u, null_outputs, nullptr);
@@ -179,7 +162,7 @@ namespace models::host_sbs_v2_gpu {
         output_count = 6u;
       }
       context->CSSetUnorderedAccessViews(0u, output_count, quantile_outputs, nullptr);
-      (void) record_dispatch(context, command.frame_resolve_dispatch);
+      record_validated_dispatch(context, command.frame_resolve_dispatch);
       context->CSSetShaderResources(0u, 1u, null_inputs);
       ID3D11UnorderedAccessView *null_quantile_outputs[6] = {};
       context->CSSetUnorderedAccessViews(0u, output_count, null_quantile_outputs, nullptr);
@@ -206,7 +189,7 @@ namespace models::host_sbs_v2_gpu {
     };
     context->CSSetShaderResources(0u, 2u, inputs);
     context->CSSetUnorderedAccessViews(0u, 1u, &command.state_output, nullptr);
-    (void) record_dispatch(context, command.dispatch);
+    record_validated_dispatch(context, command.dispatch);
     ID3D11ShaderResourceView *null_inputs[2] = {};
     ID3D11UnorderedAccessView *null_output = nullptr;
     context->CSSetShaderResources(0u, 2u, null_inputs);
@@ -214,25 +197,37 @@ namespace models::host_sbs_v2_gpu {
     return true;
   }
 
-  bool record_map_history(
+  bool record_base_geometry(
     ID3D11DeviceContext *context,
-    const map_history_command_t &command
+    const base_geometry_command_t &command
   ) noexcept {
-    if (!context || !command.constants.valid() || !command.near_identical_constants || !command.shader || !command.dispatch.valid()) {
+    if (!context || !command.constants.valid() || !command.near_identical_constants ||
+        !command.map_shader || !command.vertical_shader || !command.horizontal_shader ||
+        !command.map_dispatch.valid() || !command.vertical_dispatch.valid() ||
+        !command.horizontal_dispatch.valid()) {
       return false;
     }
     if (!command.raw_depth || !command.state || !command.analysis_domain ||
-        !command.minmax_ema || !command.current_model_input || !command.depth_health_state) {
+        !command.minmax_ema || !command.current_model_input || !command.depth_health_state ||
+        !command.candidate || !command.vertical_conditioned) {
       return false;
     }
-    if (!command.candidate_output || !command.previous_model_input_output ||
-        !command.history_owner_output) {
+    if (!command.candidate_output || !command.previous_model_input_output || !command.history_owner_output ||
+        !command.vertical_majorant_output || !command.vertical_conditioned_output || !command.final_output) {
       return false;
     }
 
-    bind_stage_constants(context, command.constants, command.near_identical_constants);
-    context->CSSetShader(command.shader, nullptr, 0u);
-    ID3D11ShaderResourceView *inputs[6] = {
+    if (command.map_start) {
+      context->End(command.map_start);
+    }
+    ID3D11Buffer *constants[3] = {
+      command.constants.depth,
+      command.constants.coordinate_v2,
+      command.near_identical_constants,
+    };
+    context->CSSetConstantBuffers(0u, 3u, constants);
+    context->CSSetShader(command.map_shader, nullptr, 0u);
+    ID3D11ShaderResourceView *map_inputs[6] = {
       command.raw_depth,
       command.state,
       command.analysis_domain,
@@ -240,70 +235,41 @@ namespace models::host_sbs_v2_gpu {
       command.current_model_input,
       command.depth_health_state,
     };
-    ID3D11UnorderedAccessView *outputs[3] = {
+    ID3D11UnorderedAccessView *map_outputs[3] = {
       command.candidate_output,
       command.previous_model_input_output,
       command.history_owner_output,
     };
-    context->CSSetShaderResources(0u, 6u, inputs);
-    context->CSSetUnorderedAccessViews(0u, 3u, outputs, nullptr);
-    (void) record_dispatch(context, command.dispatch);
+    context->CSSetShaderResources(0u, 6u, map_inputs);
+    context->CSSetUnorderedAccessViews(0u, 3u, map_outputs, nullptr);
+    record_validated_dispatch(context, command.map_dispatch);
 
-    // This full unbind is the cross-dispatch publication boundary for the history tuple/owner.
-    ID3D11ShaderResourceView *null_inputs[6] = {};
+    // Release the history outputs and candidate UAV before the next pass reads it as an SRV.
     ID3D11UnorderedAccessView *null_outputs[3] = {};
-    context->CSSetShaderResources(0u, 6u, null_inputs);
     context->CSSetUnorderedAccessViews(0u, 3u, null_outputs, nullptr);
-    return true;
-  }
-
-  bool record_vertical(
-    ID3D11DeviceContext *context,
-    const vertical_command_t &command
-  ) noexcept {
-    if (!context || !command.constants.valid() || !command.shader || !command.dispatch.valid()) {
-      return false;
+    if (command.limits_start) {
+      context->End(command.limits_start);
     }
-    if (!command.candidate || !command.vertical_majorant_output || !command.vertical_conditioned_output) {
-      return false;
-    }
-
-    bind_base_constants(context, command.constants);
-    context->CSSetShader(command.shader, nullptr, 0u);
-    context->CSSetShaderResources(0u, 1u, &command.candidate);
-    ID3D11UnorderedAccessView *outputs[2] = {
+    context->CSSetShader(command.vertical_shader, nullptr, 0u);
+    // Both limiters use the same b0/b1 as mapping. Replace t0 and clear t1-t5 together.
+    ID3D11ShaderResourceView *vertical_inputs[6] = {command.candidate};
+    context->CSSetShaderResources(0u, 6u, vertical_inputs);
+    ID3D11UnorderedAccessView *vertical_outputs[2] = {
       command.vertical_majorant_output,
       command.vertical_conditioned_output,
     };
-    context->CSSetUnorderedAccessViews(0u, 2u, outputs, nullptr);
-    (void) record_dispatch(context, command.dispatch);
-    ID3D11ShaderResourceView *null_input = nullptr;
-    ID3D11UnorderedAccessView *null_outputs[2] = {};
-    context->CSSetShaderResources(0u, 1u, &null_input);
+    context->CSSetUnorderedAccessViews(0u, 2u, vertical_outputs, nullptr);
+    record_validated_dispatch(context, command.vertical_dispatch);
+    // Release the conditioned UAV before rebinding it for the horizontal pass.
     context->CSSetUnorderedAccessViews(0u, 2u, null_outputs, nullptr);
-    return true;
-  }
 
-  bool record_horizontal(
-    ID3D11DeviceContext *context,
-    const horizontal_command_t &command
-  ) noexcept {
-    if (!context || !command.constants.valid() || !command.shader || !command.dispatch.valid()) {
-      return false;
-    }
-    if (!command.vertical_conditioned || !command.final_output) {
-      return false;
-    }
-
-    bind_base_constants(context, command.constants);
-    context->CSSetShader(command.shader, nullptr, 0u);
+    context->CSSetShader(command.horizontal_shader, nullptr, 0u);
     context->CSSetShaderResources(0u, 1u, &command.vertical_conditioned);
     context->CSSetUnorderedAccessViews(0u, 1u, &command.final_output, nullptr);
-    (void) record_dispatch(context, command.dispatch);
+    record_validated_dispatch(context, command.horizontal_dispatch);
     ID3D11ShaderResourceView *null_input = nullptr;
-    ID3D11UnorderedAccessView *null_output = nullptr;
     context->CSSetShaderResources(0u, 1u, &null_input);
-    context->CSSetUnorderedAccessViews(0u, 1u, &null_output, nullptr);
+    context->CSSetUnorderedAccessViews(0u, 1u, null_outputs, nullptr);
     return true;
   }
 
