@@ -1698,7 +1698,7 @@ namespace stream {
     };
 
     struct workspace_t {
-      std::vector<char> shards;
+      video_shard_storage_t shards;
       std::vector<char> headers;
       std::vector<std::uint8_t *> shard_pointers;
       std::vector<platf::buffer_descriptor_t> payload_buffers;
@@ -1725,7 +1725,7 @@ namespace stream {
 
       void release_oversized() {
         if (shards.capacity() > VIDEO_SEND_WORKSPACE_RETAIN_LIMIT) {
-          std::vector<char>().swap(shards);
+          video_shard_storage_t().swap(shards);
         }
         if (headers.capacity() > VIDEO_SEND_WORKSPACE_RETAIN_LIMIT) {
           std::vector<char>().swap(headers);
@@ -1822,7 +1822,7 @@ namespace stream {
 
       // If the last data shard needs to be zero-padded, we must use the shards buffer
       if (pad) {
-        shards_p[aligned_data_shards] = reinterpret_cast<std::uint8_t *>(shards.data());
+        shards_p[aligned_data_shards] = shards.data();
 
         // GCC doesn't figure out that std::copy_n() can be replaced with memcpy() here
         // and ends up compiling a horribly slow element-by-element copy loop, so we
@@ -1836,14 +1836,12 @@ namespace stream {
       }
 
       // Add a payload buffer describing the shard buffer
-      payload_buffers.emplace_back(shards.data(), shard_storage_size);
+      payload_buffers.emplace_back(reinterpret_cast<const char *>(shards.data()), shard_storage_size);
 
       if (fecpercentage != 0) {
         // Point into our allocated buffer for the parity shards
         for (auto x = 0; x < parity_shards; ++x) {
-          shards_p[data_shards + x] = reinterpret_cast<std::uint8_t *>(
-            shards.data() + (parity_shard_offset + x) * blocksize
-          );
+          shards_p[data_shards + x] = shards.data() + (parity_shard_offset + x) * blocksize;
         }
 
         // Matrix construction is substantially more expensive than encoding and shard counts are
@@ -1880,7 +1878,7 @@ namespace stream {
    * @param data2 The second data buffer.
    */
   std::optional<std::size_t> concat_and_insert_into(
-    std::vector<std::uint8_t> &storage,
+    video_shard_storage_t &storage,
     std::uint64_t insert_size,
     std::uint64_t slice_size,
     const std::string_view data1,
@@ -3010,7 +3008,7 @@ namespace stream {
     );
 
     crypto::aes_t iv(12);
-    std::vector<std::uint8_t> packetization_storage;
+    video_shard_storage_t packetization_storage;
     fec::rs_cache_t video_rs_cache;
     fec::workspace_t video_fec_workspace;
 
@@ -3040,7 +3038,7 @@ namespace stream {
 #endif
       auto release_oversized_workspaces = util::fail_guard([&]() {
         if (packetization_storage.capacity() > VIDEO_SEND_WORKSPACE_RETAIN_LIMIT) {
-          std::vector<std::uint8_t>().swap(packetization_storage);
+          video_shard_storage_t().swap(packetization_storage);
         }
         video_fec_workspace.release_oversized();
       });

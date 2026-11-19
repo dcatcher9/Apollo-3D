@@ -341,9 +341,9 @@ TEST(PrimaryDisplayRestoreRetryTest, FailedWorkerClaimDelaysRestorationWithoutLo
 TEST(ConcatAndInsertTests, ConcatNoInsertionTest) {
   char b1[] = {'a', 'b'};
   char b2[] = {'c', 'd', 'e'};
-  std::vector<std::uint8_t> res;
+  stream::video_shard_storage_t res;
   const auto size = stream::concat_and_insert_into(res, 0, 2, std::string_view {b1, sizeof(b1)}, std::string_view {b2, sizeof(b2)});
-  auto expected = std::vector<uint8_t> {'a', 'b', 'c', 'd', 'e'};
+  const stream::video_shard_storage_t expected {'a', 'b', 'c', 'd', 'e'};
   ASSERT_EQ(size, expected.size());
   ASSERT_EQ(res, expected);
 }
@@ -351,9 +351,9 @@ TEST(ConcatAndInsertTests, ConcatNoInsertionTest) {
 TEST(ConcatAndInsertTests, ConcatLargeStrideTest) {
   char b1[] = {'a', 'b'};
   char b2[] = {'c', 'd', 'e'};
-  std::vector<std::uint8_t> res;
+  stream::video_shard_storage_t res;
   const auto size = stream::concat_and_insert_into(res, 1, sizeof(b1) + sizeof(b2) + 1, std::string_view {b1, sizeof(b1)}, std::string_view {b2, sizeof(b2)});
-  auto expected = std::vector<uint8_t> {0, 'a', 'b', 'c', 'd', 'e'};
+  const stream::video_shard_storage_t expected {0, 'a', 'b', 'c', 'd', 'e'};
   ASSERT_EQ(size, expected.size());
   ASSERT_EQ(res, expected);
 }
@@ -361,9 +361,9 @@ TEST(ConcatAndInsertTests, ConcatLargeStrideTest) {
 TEST(ConcatAndInsertTests, ConcatSmallStrideTest) {
   char b1[] = {'a', 'b'};
   char b2[] = {'c', 'd', 'e'};
-  std::vector<std::uint8_t> res;
+  stream::video_shard_storage_t res;
   const auto size = stream::concat_and_insert_into(res, 1, 1, std::string_view {b1, sizeof(b1)}, std::string_view {b2, sizeof(b2)});
-  auto expected = std::vector<uint8_t> {0, 'a', 0, 'b', 0, 'c', 0, 'd', 0, 'e'};
+  const stream::video_shard_storage_t expected {0, 'a', 0, 'b', 0, 'c', 0, 'd', 0, 'e'};
   ASSERT_EQ(size, expected.size());
   ASSERT_EQ(res, expected);
 }
@@ -371,16 +371,16 @@ TEST(ConcatAndInsertTests, ConcatSmallStrideTest) {
 TEST(ConcatAndInsertTests, ConcatAcrossBufferBoundaryAndUnevenFinalSlice) {
   char b1[] = {'a', 'b', 'c'};
   char b2[] = {'d', 'e', 'f', 'g'};
-  std::vector<std::uint8_t> res;
+  stream::video_shard_storage_t res;
   const auto size = stream::concat_and_insert_into(res, 1, 4, std::string_view {b1, sizeof(b1)}, std::string_view {b2, sizeof(b2)});
-  auto expected = std::vector<uint8_t> {0, 'a', 'b', 'c', 'd', 0, 'e', 'f', 'g'};
+  const stream::video_shard_storage_t expected {0, 'a', 'b', 'c', 'd', 0, 'e', 'f', 'g'};
   ASSERT_EQ(size, expected.size());
   ASSERT_EQ(res, expected);
 }
 
 TEST(ConcatAndInsertTests, RejectsZeroStrideAndSizeOverflow) {
   constexpr char data[] = {'a'};
-  std::vector<std::uint8_t> res;
+  stream::video_shard_storage_t res;
 
   EXPECT_FALSE(stream::concat_and_insert_into(res, 1, 0, std::string_view {data, sizeof(data)}, {}));
   EXPECT_FALSE(
@@ -395,7 +395,7 @@ TEST(ConcatAndInsertTests, RejectsZeroStrideAndSizeOverflow) {
 }
 
 TEST(ConcatAndInsertTests, RejectsEmptyInput) {
-  std::vector<std::uint8_t> res;
+  stream::video_shard_storage_t res;
   EXPECT_FALSE(stream::concat_and_insert_into(res, 1, 1, {}, {}));
 }
 
@@ -482,7 +482,7 @@ TEST(VideoPacingTests, NinetyFpsFrameSpanIsAtMostHalfAnInterval) {
 }
 
 TEST(VideoPacketizationWorkspaceTests, ReusesCapacityAndClearsOnlyInsertedPrefixes) {
-  std::vector<std::uint8_t> workspace(128, 0xA5);
+  stream::video_shard_storage_t workspace(128, 0xA5);
   const auto original_capacity = workspace.capacity();
   const std::array<std::uint8_t, 3> first {1, 2, 3};
   const std::array<std::uint8_t, 2> second {4, 5};
@@ -497,6 +497,7 @@ TEST(VideoPacketizationWorkspaceTests, ReusesCapacityAndClearsOnlyInsertedPrefix
 
   ASSERT_EQ(size, 9u);
   EXPECT_EQ(workspace.capacity(), original_capacity);
+  EXPECT_EQ(reinterpret_cast<std::uintptr_t>(workspace.data()) % stream::VIDEO_SHARD_ALIGNMENT, 0u);
   const std::array<std::uint8_t, 9> expected {0, 0, 1, 2, 3, 0, 0, 4, 5};
   EXPECT_TRUE(std::equal(expected.begin(), expected.end(), workspace.begin()));
   EXPECT_EQ(workspace[9], 0xA5);

@@ -17,6 +17,7 @@
 #include <vector>
 
 // lib includes
+#include <boost/align/aligned_allocator.hpp>
 #include <boost/asio.hpp>
 
 // local includes
@@ -293,13 +294,20 @@ namespace stream {
            declared_payload_size == plaintext_size - CONTROL_HEADER_V2_SIZE;
   }
 
+  // Keep the data and parity shard bases aligned for the widest Reed–Solomon SIMD backend.
+  // Shards retain their negotiated wire stride, so alignment of individual shards depends on it.
+  constexpr std::size_t VIDEO_SHARD_ALIGNMENT = 64;
+  using video_shard_storage_t = std::vector<
+    std::uint8_t,
+    boost::alignment::aligned_allocator<std::uint8_t, VIDEO_SHARD_ALIGNMENT>>;
+
   /**
    * Combine two logical input buffers while reserving and clearing a prefix at every slice.
    * `storage` is a retained high-watermark workspace; only the returned prefix is valid. This
    * avoids a full-size allocation and value-initialization on every encoded frame.
    */
   [[nodiscard]] std::optional<std::size_t> concat_and_insert_into(
-    std::vector<std::uint8_t> &storage,
+    video_shard_storage_t &storage,
     std::uint64_t insert_size,
     std::uint64_t slice_size,
     std::string_view data1,
