@@ -952,6 +952,10 @@ not completion. The CBC and Raw stages share one compiled ROI graph program; the
 dispatches remain separate. Historical private replay roots retain their old ROI source locations
 for compatibility, while the production loader uses the canonical `current_outline/roi` owner.
 
+The current-outline selector authenticates the observation and writes its receipt in the existing
+single-thread preparation pass. The following band pass reads that result and writes the selected
+pixels. A zero observation dispatch holds both the receipt and the independent selected texture.
+
 Queued diagnostic views authenticate the exact pending tuple and ticket independently of a
 completed publication. Completed views still require a current publication; neither diagnostic
 role grants GPU completion or drawing authority. Selector resources transfer their COM references

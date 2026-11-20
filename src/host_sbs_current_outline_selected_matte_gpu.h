@@ -307,7 +307,11 @@ namespace models::research_current_outline_selected_matte_v2 {
       if (i.current_outline_requested) {
         auto *a=native_args_uav_.Get();c->CSSetUnorderedAccessViews(2,1,&a,nullptr);
         c->CSSetShader(program.prepare,nullptr,0);c->Dispatch(1,1,1);
-        ID3D11UnorderedAccessView *z=nullptr;c->CSSetUnorderedAccessViews(2,1,&z,nullptr);
+        // Preparation owns the decision. Bind it read-only for the band pass.
+        ID3D11UnorderedAccessView *null_outputs[2] {};
+        c->CSSetUnorderedAccessViews(1,2,null_outputs,nullptr);
+        auto *prepared_receipt=receipt_srv_.Get();
+        c->CSSetShaderResources(13,1,&prepared_receipt);
       } else {
         // Original algorithm1 copies observationOne.X unchanged.
         const D3D11_BOX box {i.observation_one_offset,0,0,i.observation_one_offset+4u,1,1};

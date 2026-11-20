@@ -1,6 +1,5 @@
-// PRIVATE selected-matte publication, algorithm version1. Not an EMPTY/PRESENT classifier.
-// Dispatch Z is copied from the actual observationOne.X. Root0 executes no threads and
-// preserves this independently allocated selected tuple across temporal epoch replacement.
+// Selected-matte publication for the current outline and the legacy diagnostic path.
+// Root0 preserves the selected pixels and receipt across temporal epoch replacement.
 cbuffer ActualContour : register(b0) {
     uint4 Source; uint4 Field; uint4 Content; uint4 Model; uint4 Observation; uint4 Options;
 };
@@ -21,6 +20,7 @@ StructuredBuffer<uint> CBCMeta : register(t9);
 StructuredBuffer<uint> RawMeta : register(t10);
 ByteAddressBuffer F2Data : register(t11);
 Texture2D<uint> CurrentOutlineM : register(t12);
+StructuredBuffer<uint> PreparedReceipt : register(t13);
 RWTexture2D<uint> SelectedM : register(u0);
 RWStructuredBuffer<uint> SelectedReceipt : register(u1);
 RWByteAddressBuffer NativeArguments : register(u2);
@@ -160,6 +160,12 @@ bool CurrentOutlineTyped() {
     // CFB5 certified collar plus UNKNOWN packed membership and independent literal RawM fault fallback.
     return true;
 }
+void PublishReceipt(uint kind, bool current) {
+    SelectedReceipt[0u]=0x31534d53u;SelectedReceipt[1u]=1u;SelectedReceipt[2u]=kind;SelectedReceipt[3u]=current?0u:1u;
+    [loop]for(uint i=0u;i<24u;++i)SelectedReceipt[4u+i]=CBWord(i);
+    [loop]for(uint j=0u;j<32u;++j)SelectedReceipt[28u+j]=current?SCT[j]:0u;
+    SelectedReceipt[60u]=Token.x;SelectedReceipt[61u]=Token.y;SelectedReceipt[62u]=Request.w==2u?2u:1u;SelectedReceipt[63u]=0u;
+}
 [numthreads(1,1,1)]
 void prepare_main(uint3 group:SV_GroupID) {
     if(any(group))return;
@@ -168,41 +174,37 @@ void prepare_main(uint3 group:SV_GroupID) {
     Root.GetDimensions(bytes);
     bool hold=bytes==256u&&any(Root.Load3(240u)==0u);
     NativeArguments.Store4(0u,uint4((w+15u)/16u,(h+15u)/16u,hold?0u:1u,0u));
+    if(hold||w==0u||h==0u)return;
+
+    // The frame proof is immutable until the selected pixels and receipt are published.
+    bool context=CurrentContextTyped();
+    const bool legacyRequested=Request.z==0u;
+    [branch]
+    if(legacyRequested)context=context&&SizeMatches(LegacyM);
+    const bool selected=context&&RootTyped()&&BaselineTyped()&&CurrentOutlineTyped();
+    PublishReceipt(selected?3u:1u,selected||(legacyRequested&&context));
 }
 groupshared uint GroupCurrent,GroupKind;
 [numthreads(16,16,1)]
 void select_main(uint3 id:SV_DispatchThreadID,uint lane:SV_GroupIndex) {
-    if(lane==0u) {
-        if(Request.w==2u) {
-            bool context=CurrentContextTyped();
-            const bool legacyRequested=Request.z==0u;
-            [branch]
-            if(legacyRequested)context=context&&SizeMatches(LegacyM);
-            const bool selected=context&&RootTyped()&&BaselineTyped()&&CurrentOutlineTyped();
-            GroupKind=selected?3u:1u;
-            GroupCurrent=(selected||(legacyRequested&&context))?1u:0u;
-        } else {
+    const bool current_outline=Request.w==2u;
+    if(!current_outline) {
+        if(lane==0u) {
             GroupCurrent=CurrentTyped()?1u:0u;GroupKind=1u;
             if(GroupCurrent!=0u&&BaselineTyped()){GroupKind=2u;if(TemporalTyped())GroupKind=3u;}
         }
+        GroupMemoryBarrierWithGroupSync();
     }
-    GroupMemoryBarrierWithGroupSync();
     uint w,h;SelectedM.GetDimensions(w,h);if(id.z!=0u||id.x>=w||id.y>=h)return;
     uint value=0u;
-    if(Request.w==2u) {
-        // Supplied legacy data retains its literal diagnostic fallback. Without it, a failed
-        // current proof publishes unavailable kind1/status1; shared rendering preserves Base.
-        if(GroupKind==3u)value=CurrentOutlineM.Load(int3(id.xy,0));
+    if(current_outline) {
+        // Preparation authenticated the whole observation once. Root0 dispatches no copy.
+        if(PreparedReceipt[2u]==3u)value=CurrentOutlineM.Load(int3(id.xy,0));
         else if(Request.z==0u)value=LegacyM.Load(int3(id.xy,0));
         SelectedM[id.xy]=value;
     } else {
         if(GroupCurrent!=0u){value=LegacyM.Load(int3(id.xy,0));if(GroupKind==2u)value=BaselineM.Load(int3(id.xy,0));if(GroupKind==3u)value=TemporalM.Load(int3(id.xy,0));}
         SelectedM[id.xy]=value==1u?1u:0u;
-    }
-    if(all(id.xy==0u)) {
-        SelectedReceipt[0u]=0x31534d53u;SelectedReceipt[1u]=1u;SelectedReceipt[2u]=GroupKind;SelectedReceipt[3u]=GroupCurrent!=0u?0u:1u;
-        [loop]for(uint i=0u;i<24u;++i)SelectedReceipt[4u+i]=CBWord(i);
-        [loop]for(uint j=0u;j<32u;++j)SelectedReceipt[28u+j]=GroupCurrent!=0u?SCT[j]:0u;
-        SelectedReceipt[60u]=Token.x;SelectedReceipt[61u]=Token.y;SelectedReceipt[62u]=Request.w==2u?2u:1u;SelectedReceipt[63u]=0u;
+        if(all(id.xy==0u))PublishReceipt(GroupKind,GroupCurrent!=0u);
     }
 }

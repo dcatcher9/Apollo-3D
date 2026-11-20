@@ -168,6 +168,15 @@ namespace {
   TEST_F(HostSbsCurrentOutlineSelectedMatteGpuTest, StaleSctMarksReceiptUnavailableWithoutRelabelingLegacy) {
     identity[20]^=1u;upload();queue();expect(1,lm,1u);
   }
+  TEST_F(HostSbsCurrentOutlineSelectedMatteGpuTest, RestoresComputeBindingAfterReadingPreparedReceipt) {
+    auto *sentinel=baseline.s.Get();
+    context->CSSetShaderResources(13u,1u,&sentinel);
+    queue(2u,false);
+    expect(3u,cm);
+    ComPtr<ID3D11ShaderResourceView> restored;
+    context->CSGetShaderResources(13u,1u,&restored);
+    EXPECT_EQ(restored.Get(),sentinel);
+  }
   TEST_F(HostSbsCurrentOutlineSelectedMatteGpuTest, DrawReceiptScopeRestoresOnlyItsSlotAndLeavesT8Untouched) {
     queue();const auto views=output.views();
     ID3D11ShaderResourceView *sentinels[2]{baseline.s.Get(),legacy.s.Get()};
