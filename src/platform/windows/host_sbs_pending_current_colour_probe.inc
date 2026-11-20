@@ -282,7 +282,7 @@ namespace pending_current_colour_probe_v1 {
       const auto pending=est->try_finish_pending_depth_nonblocking(models::input_color_space::srgb,false);const auto after_query=us();
       const auto held=est->joined_completion_gate_status_for_benchmark();require(!pending.ready&&held&&held->callback_entered&&!held->released&&held->last_actual_event_query==CUDA_ERROR_NOT_READY,"B must be actual recorded NOT_READY");
       require(converter.sbs_frame_sequence == 3 && converter.pending_matched_frame &&
-        converter.pending_matched_frame->frame_id == 3, "Exact pending B source slot lost");
+        converter.pending_matched_frame->attribution.frame_id == 3, "Exact pending B source slot lost");
       const auto b_admission=std::find_if(records.events.begin(),records.events.begin()+records.count,[](const auto &e){return e.kind==event_e::admission&&e.conversion==3;});
       require(b_admission!=records.events.begin()+records.count&&b_admission->model_frame==3&&b_admission->force_infer&&!b_admission->gpu_undecided&&
         b_admission->optional_work==static_cast<std::uint32_t>(models::depth_optional_work_mode_e::ordinary),"B did not take the actual ordinary force-infer admission branch");
@@ -298,7 +298,7 @@ namespace pending_current_colour_probe_v1 {
         pending_c_query=est->joined_completion_gate_status_for_benchmark();
         require(!timeout_forced_release.load()&&!still_pending.ready&&pending_c_query&&pending_c_query->callback_entered&&!pending_c_query->released&&pending_c_query->last_actual_event_query==CUDA_ERROR_NOT_READY,"No real pending-B window at C return; timeout is unavailable, not success");
         require(records.captured[4] && converter.sbs_frame_sequence == 4 && converter.pending_matched_frame &&
-          converter.pending_matched_frame->frame_id == 3, "C arrival lost actual pending B lease");
+          converter.pending_matched_frame->attribution.frame_id == 3, "C arrival lost actual pending B lease");
         require(std::none_of(records.events.begin(),records.events.begin()+records.count,[](const auto &e){return e.kind==event_e::admission&&e.conversion==4;}),"C was admitted while B retained the sole inflight lease");
         require(records.phase_event[4].pending_current_colour&&!records.phase_event[4].repeat&&records.phase_event[4].actual_draw_pixel_source==4u,"Actual current-C negative-only draw unavailable");
         const auto first_c_identity=records.phase_event[4];

@@ -2594,7 +2594,10 @@ temporal-source observation. A ready completion is authenticated against its exa
 slot. The converter also consumes ready completed-publication receipts before admission. Conditional
 output becomes reusable only with an exact current receipt.
 Admission is recomputed from that post-completion state. The completed render slot is reserved for
-the current delivery while a distinct free slot may own the newly submitted frame. A prior root B
+the current delivery while a distinct free slot may own the newly submitted frame. The slot owns
+the capture texture and its lifetime. Cached V2 geometry keeps a value copy of the completed
+frame's attribution, including its rolling ROI proof, and draws from the current capture. Dump 3D
+uses the completed physical slot for the exact source and any diagnostic ROI crop. A prior root B
 and a newly submitted C in one conversion share the first poll plan's absolute deadline: C can use
 only its remaining budget, with no second wait cap. An expired or sub-minimum remainder gets one
 nonblocking query. If B remains busy, returns no valid completed frame or reports an unknown

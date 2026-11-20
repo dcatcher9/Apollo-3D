@@ -444,6 +444,7 @@ namespace actual_converter_probe_v1 {
       }
       const auto a_publication=a->publication;
       if (cached_route) {
+        require(a->selected_slot < a->slot_source_addresses.size(), "A must select a physical capture slot");
         require(!a->flat && !a->repeat && !a->region.is_video_region() && images[0]->content_timestamp, "A must establish genuine full-source warped color and content clock");
         const auto original = *a;
         const auto owner = est;
@@ -464,6 +465,7 @@ namespace actual_converter_probe_v1 {
         convert(1);
         const auto *observed_cached = records.last_draw();require(observed_cached != nullptr, "Cached current draw absent");
         const auto cached = *observed_cached;
+        require(cached.selected_slot == 0xffffffffu, "Retained geometry must draw without a matched capture slot");
         require(cached.conversion == 3u && cached.cached_current_colour && !cached.flat && !cached.repeat && !cached.queued &&
           cached.publication_current && cached.publication == a_publication && cached.model_frame == a_publication.frame_id &&
           cached.actual_draw_pixel_source == 3u && cached.source_stamp_ticks == images[1]->frame_timestamp->time_since_epoch().count() &&
@@ -483,6 +485,7 @@ namespace actual_converter_probe_v1 {
         const auto changed_generation = converter.subtitle_context.generation();
         const auto *observed_flat = records.last_draw();require(observed_flat != nullptr, "Changed-context draw absent");
         const auto flat = *observed_flat;
+        require(flat.selected_slot == 0xffffffffu, "Changed-route flat draw must drop the matched capture");
         auto &current_context = converter.img_ctx_map.at(static_cast<img_d3d_t &>(*images[2]).id);
         require(flat.conversion == 4u && flat.flat && !flat.repeat && !flat.queued && !flat.cached_current_colour &&
           flat.views[0].Get() == current_context.encoder_input_res.get() && flat.views[0].Get() == flat.current_input.Get() &&
@@ -510,6 +513,7 @@ namespace actual_converter_probe_v1 {
         require(released && released->released && released->callback_exited && !released->cancelled && !released->callback_timed_out && !released->callback_entry_timed_out, "Changed-route root did not release normally");
         convert(2);const auto *recovered = records.last_draw();
         require(recovered && recovered->publication_current && recovered->publication.frame_id == 4u && !recovered->flat &&
+          recovered->selected_slot < recovered->slot_source_addresses.size() &&
           !recovered->repeat && !recovered->cached_current_colour && recovered->pending_slots == 0u && recovered->context_generation == changed_generation,
           "Changed-route root did not ACK under its own new context");
         json artifacts = json::array();constexpr std::array<const char *, 6u> roles {"matched-A", "cached-current-A", "changed-route-flat", "canonical-current-flat", "matched-Base", "cached-Base"};
@@ -546,7 +550,7 @@ namespace actual_converter_probe_v1 {
         };
         const auto check_pending_b_pin = [&]() {
           auto *slot = converter.pending_matched_frame;
-          require(slot && slot->frame_id == 3u &&
+          require(slot && slot->attribution.frame_id == 3u &&
             slot->capture_image.get() == images[1].get() &&
             slot->texture.get() == b_context.encoder_texture.get() &&
             slot->srv.get() == b_context.encoder_input_res.get() && images[1].use_count() > 1 &&
@@ -1106,7 +1110,7 @@ namespace actual_converter_probe_v1 {
       const auto pending=est->try_finish_pending_depth_nonblocking(r.hdr_input?models::input_color_space::scrgb_hdr:models::input_color_space::srgb,false);const auto after_query=us();
       const auto held=est->joined_completion_gate_status_for_benchmark();require(!pending.ready&&held&&held->callback_entered&&!held->released&&held->last_actual_event_query==CUDA_ERROR_NOT_READY,"B must be actual recorded NOT_READY");
       require(converter.sbs_frame_sequence == 3 && converter.pending_matched_frame &&
-        converter.pending_matched_frame->frame_id == 3, "Exact pending B source slot lost");
+        converter.pending_matched_frame->attribution.frame_id == 3, "Exact pending B source slot lost");
       const auto b_admission=std::find_if(records.events.begin(),records.events.begin()+records.count,[](const auto &e){return e.kind==event_e::admission&&e.conversion==3;});
       require(b_admission!=records.events.begin()+records.count&&b_admission->model_frame==3&&b_admission->force_infer&&!b_admission->gpu_undecided&&
         b_admission->optional_work==static_cast<std::uint32_t>(models::depth_optional_work_mode_e::ordinary),"B did not take the actual ordinary force-infer admission branch");
@@ -1122,7 +1126,7 @@ namespace actual_converter_probe_v1 {
         pending_c_query=est->joined_completion_gate_status_for_benchmark();
         require(!timeout_forced_release.load()&&!still_pending.ready&&pending_c_query&&pending_c_query->callback_entered&&!pending_c_query->released&&pending_c_query->last_actual_event_query==CUDA_ERROR_NOT_READY,"No real pending-B window at C return; timeout is unavailable, not success");
         require(records.captured[4] && converter.sbs_frame_sequence == 4 && converter.pending_matched_frame &&
-          converter.pending_matched_frame->frame_id == 3, "C arrival lost actual pending B lease");
+          converter.pending_matched_frame->attribution.frame_id == 3, "C arrival lost actual pending B lease");
         require(std::none_of(records.events.begin(),records.events.begin()+records.count,[](const auto &e){return e.kind==event_e::admission&&e.conversion==4;}),"C was admitted while B retained the sole inflight lease");
       }
       require(!timeout_forced_release.load(),"Independent release deadline fired before selection proof");

@@ -6871,12 +6871,12 @@ TEST(DirectxShaderSourceTest, HostSbsLatestV2LineageIsNotCurrentRenderAuthorizat
   };
 
   const boundary_t selection_boundaries[] {
-    {"lost window/video authority", "!window_region_authorized_for_render(*matched_render_slot)", "return false;"},
+    {"lost window/video authority", "!window_region_authorized_for_render(*render_attribution())", "return false;"},
     {"route/dump/reprocess/terminal revocation", "if (detail::host_sbs_latest_v2_lineage_reset_required(", "const bool cached_geometry_render_allowed"},
-    {"authority changes during matched copy", "completion_finalized_before_admission && matched_render_slot &&\n                !matched_route_matches_current(", "clear_matched_selection();"},
+    {"authority changes during matched copy", "completion_finalized_before_admission && matched_render_capture &&\n                !matched_route_matches_current(", "clear_matched_selection();"},
     {"admission revokes an early publication", "!depth_estimator->publication_is_current(step_observation.publication)", "completion_finalized_before_admission = false;"},
     {"invalid adaptive submission class", "models::gpu_adaptive_submission_class_e::invalid", "if (force_infer_transaction_enqueued) {"},
-    {"missing force-infer capture causality", "!matched_candidate_slot->inference_content_timestamp ||", "// The forced full-source submission has retired the old ROI authority."},
+    {"missing force-infer capture causality", "!matched_candidate_slot->attribution.inference_content_timestamp ||", "// The forced full-source submission has retired the old ROI authority."},
   };
   for (const auto &boundary : selection_boundaries) {
     expect_reset_between(selection, boundary.name, boundary.begin, boundary.end);
@@ -6886,7 +6886,7 @@ TEST(DirectxShaderSourceTest, HostSbsLatestV2LineageIsNotCurrentRenderAuthorizat
   const boundary_t completion_boundaries[] {
     {"early ready completion or producer failure", "if (polled.ready) {", "adopt_matched_completion("},
     {"unchanged pending input completes", "unchanged_content_submission_suppressed = true;", "} else if (inference_pending"},
-    {"ordinary asynchronous completion", "step_observation.completed_frame_valid &&\n                  !completion_finalized_before_admission", "if (matched_render_slot) {"},
+    {"ordinary asynchronous completion", "step_observation.completed_frame_valid &&\n                  !completion_finalized_before_admission", "adopt_matched_completion(*completed);"},
     {"current-frame completion no longer pending", "detail::host_sbs_same_frame_completion_e::keep_pending\n", "clear_matched_selection();"},
   };
   for (const auto &boundary : completion_boundaries) {
@@ -6947,7 +6947,7 @@ TEST(DirectxShaderSourceTest, HostSbsCompletionBindsTheEstimatorGridToTheSubmitt
   EXPECT_NE(cache.find("field_height_"), std::string::npos);
 
   EXPECT_EQ(
-    display.find("est.input_region != matched_render_slot->depth_input_region"),
+    display.find("est.input_region != render_attribution()->depth_input_region"),
     std::string::npos
   );
   EXPECT_EQ(
@@ -6962,9 +6962,9 @@ TEST(DirectxShaderSourceTest, VideoRoiExactProofIsIndependentOfInferenceAndPrese
   ASSERT_FALSE(display.empty());
 
   // Retained analysis carries its own proof and controls reuse independently of the draw colour.
-  EXPECT_NE(display.find("destination.unchanged_roi_proof = source.unchanged_roi_proof;"), std::string::npos);
-  EXPECT_NE(display.find("slot.unchanged_roi_proof.reset(slot.inference_ddup_damage, *proof_region);"), std::string::npos);
-  EXPECT_NE(display.find("slot.unchanged_roi_proof.observe(current_damage, *region)"), std::string::npos);
+  EXPECT_NE(display.find("latest_v2_lineage.attribution = attribution;"), std::string::npos);
+  EXPECT_NE(display.find("attribution.unchanged_roi_proof.reset(attribution.inference_ddup_damage, *proof_region);"), std::string::npos);
+  EXPECT_NE(display.find("attribution.unchanged_roi_proof.observe(current_damage, *region)"), std::string::npos);
   EXPECT_EQ(display.find("memoized_input_reuse_kind"), std::string::npos);
 
   const auto colour_begin = display.find("const auto current_colour =");
@@ -7040,6 +7040,10 @@ TEST(DirectxShaderSourceTest, VideoRoiSamplesRetainedSourceAndCopiesOnlyForDump)
   ASSERT_NE(dump_copy, std::string::npos);
   ASSERT_NE(dump_ready, std::string::npos);
   EXPECT_LT(dump_copy, dump_ready);
+  const auto dump_source = display.substr(dump_begin, dump_ready - dump_begin);
+  EXPECT_NE(dump_source.find("matched_render_capture &&"), std::string::npos);
+  EXPECT_NE(dump_source.find("matched_render_capture->analysis_input_srv()"), std::string::npos);
+  EXPECT_NE(dump_source.find("matched_render_capture->texture.get()"), std::string::npos);
   EXPECT_NE(
     display.find("dump_frame.depth_input_source = dump_depth_input_source", dump_ready),
     std::string::npos
@@ -7429,19 +7433,29 @@ TEST(DirectxShaderSourceTest, PackedPresentationCannotSeedSemanticLineage) {
          "input_color_space",
          "depth_authority_reprocess_pending",
          "producer_terminal",
+         "live_presentation_authority()",
+       }) {
+    EXPECT_NE(route_body.find(required_gate), std::string::npos) << required_gate;
+  }
+  const auto authority_begin = display.find("presentation_authority_t live_presentation_authority()");
+  const auto authority_end = display.find("bool matched_route_matches_current(", authority_begin);
+  ASSERT_NE(authority_begin, std::string::npos);
+  ASSERT_NE(authority_end, std::string::npos);
+  const auto authority = display.substr(authority_begin, authority_end - authority_begin);
+  for (const auto *field : {
          "authority_generation(live_window_authority)",
          "authority_generation(live_foreground_region)",
          "live_browser_authority_epoch",
          "interactive_move_size_observed",
        }) {
-    EXPECT_NE(route_body.find(required_gate), std::string::npos) << required_gate;
+    EXPECT_NE(authority.find(field), std::string::npos) << field;
   }
   EXPECT_NE(
     display.find("class matched_presentation_cache_t {"),
     std::string::npos
   );
   const auto cache_begin = display.find("class matched_presentation_cache_t {");
-  const auto cache_end = display.find("struct matched_frame_slot_t {", cache_begin);
+  const auto cache_end = display.find("struct matched_frame_attribution_t {", cache_begin);
   ASSERT_NE(cache_end, std::string::npos);
   const auto cache_body = display.substr(cache_begin, cache_end - cache_begin);
   for (const auto *operation : {
@@ -7599,8 +7613,8 @@ TEST(DirectxShaderSourceTest, AdaptiveReuseUsesExactCurrentPublicationAndActualD
   const auto source_action = display.substr(exact_completion_end, source_action_end - exact_completion_end);
   EXPECT_NE(source_action.find("current_source_timestamp,\n            source_admission,"), std::string::npos);
   // DDup packed-redelivery proof still rejects missing/regressed damage identity.
-  EXPECT_NE(source_action.find("current_ddup_damage && latest_v2_lineage.slot.inference_ddup_damage"), std::string::npos);
-  EXPECT_NE(source_action.find("current_ddup_damage->token == latest_v2_lineage.slot.inference_ddup_damage->token"), std::string::npos);
+  EXPECT_NE(source_action.find("current_ddup_damage && latest_v2_lineage.attribution.inference_ddup_damage"), std::string::npos);
+  EXPECT_NE(source_action.find("current_ddup_damage->token == latest_v2_lineage.attribution.inference_ddup_damage->token"), std::string::npos);
 
   // Packed or current-color reuse cannot mint a new publication or rename the real depth owner.
   const auto redelivery = display.find("if (current_source_already_completed)", admission);
@@ -7663,7 +7677,7 @@ TEST(DirectxShaderSourceTest, HostSbsRejectsRotationAndUsesMatchedV2Frames) {
     display.find("display->display_rotation != DXGI_MODE_ROTATION_IDENTITY"),
     std::string::npos
   );
-  EXPECT_NE(display.find("completed_slot->frame_id == completed_frame_id"), std::string::npos);
+  EXPECT_NE(display.find("completed_slot->attribution.frame_id == completed_frame_id"), std::string::npos);
   EXPECT_NE(display.find("render_handoff->authenticate_structure()"), std::string::npos);
   const auto live_selection = display.find("const bool v2_live_warp_selected =");
   ASSERT_NE(live_selection, std::string::npos);

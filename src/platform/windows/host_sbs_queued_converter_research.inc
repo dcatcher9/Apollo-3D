@@ -21,7 +21,7 @@ bool d3d_base_encode_device::queue_research_observation(
   if (probe_observer.record) {
     actual_converter_probe_v1::event_t event;
     event.kind = actual_converter_probe_v1::event_e::queue_begin;
-    emit_converter_probe(std::move(event), &source, &previous, nullptr, source.srv.get(), capture.current_input, capture.frame_id);
+    emit_converter_probe(std::move(event), &source.attribution, &previous, nullptr, source.srv.get(), capture.current_input, capture.frame_id);
   }
 
   std::string queue_error;
@@ -57,7 +57,7 @@ bool d3d_base_encode_device::queue_research_observation(
     actual_converter_probe_v1::event_t event;
     event.kind = actual_converter_probe_v1::event_e::queued;
     event.queued = true;
-    emit_converter_probe(std::move(event), &source, nullptr, &draw, draw.submitted_source.Get(), capture.current_input, capture.frame_id);
+    emit_converter_probe(std::move(event), &source.attribution, nullptr, &draw, draw.submitted_source.Get(), capture.current_input, capture.frame_id);
   }
   return true;
 }
@@ -98,11 +98,10 @@ d3d_base_encode_device::queued_draw_t d3d_base_encode_device::select_queued_rese
   // cannot establish which capture the slot now owns.
   auto *source = frame.source_slot;
   draw.same_source = frame.ticket && source && !draw.force_flat && warp_available &&
-                     source == pending_matched_frame && source == candidate && source->frame_id == capture.frame_id &&
-                     drawn_source_order.permits(source->frame_id) &&
+                     source == pending_matched_frame && source == candidate && source->attribution.frame_id == capture.frame_id &&
+                     drawn_source_order.permits(source->attribution.frame_id) &&
                      matched_route_matches_current(
-                       *source, capture.desc, capture.transfer, authority_generation(live_window_authority),
-                       authority_generation(live_foreground_region), live_browser_authority_epoch, interactive_move_size_observed
+                       *source, capture.desc, capture.transfer, live_presentation_authority()
                      );
   draw.force_flat |= frame.ticket.has_value() && !draw.same_source;
   if (frame.pending_colour_geometry) {
@@ -309,7 +308,7 @@ bool d3d_base_encode_device::select_pending_colour_draw(
   std::uint64_t frame_id
 ) {
   const auto same_source = [&](const matched_frame_slot_t &slot) {
-    return slot.source_timestamp && current_source_timestamp && slot.source_timestamp == current_source_timestamp;
+    return slot.attribution.source_timestamp && current_source_timestamp && slot.attribution.source_timestamp == current_source_timestamp;
   };
   const bool force_flat =
     pending.owner_unavailable && pending_matched_frame && !same_source(*pending_matched_frame);
@@ -320,7 +319,7 @@ bool d3d_base_encode_device::select_pending_colour_draw(
   }
 
   auto *owner_slot = pending_matched_frame;
-  if (!owner_slot || owner_slot->frame_id != owner->submitted_frame_id) {
+  if (!owner_slot || owner_slot->attribution.frame_id != owner->submitted_frame_id) {
     // An ACK releases geometry ownership while the retirement bank and watermark survive.
     pending.lane.release_geometry_lease();
     return force_flat;
@@ -334,18 +333,15 @@ bool d3d_base_encode_device::select_pending_colour_draw(
   if (
     !current_draw_allowed ||
     !subtitle_context.matches(owner->subtitle_context_generation) ||
-    !owner_slot->subtitle_context_eligible ||
+    !owner_slot->attribution.subtitle_context_eligible ||
     owner->color_space != input_color_space ||
     !drawn_source_order.permits(frame_id) ||
-    !models::host_sbs_matched_completion_is_current(false, repeat_now - owner_slot->captured_at) ||
+    !models::host_sbs_matched_completion_is_current(false, repeat_now - owner_slot->attribution.captured_at) ||
     !matched_route_matches_current(
       *owner_slot,
       live_source_desc,
       input_color_space,
-      authority_generation(live_window_authority),
-      authority_generation(live_foreground_region),
-      live_browser_authority_epoch,
-      interactive_move_size_observed
+      live_presentation_authority()
     )
   ) {
     return true;
@@ -371,7 +367,7 @@ bool d3d_base_encode_device::queued_ticket_matches(
 ) const {
   // The slot owns its submission raster; the leased ticket owns its calibrated field mode.
   const auto expected_region = realize_depth_input_region(
-    slot.depth_input_region,
+    slot.attribution.depth_input_region,
     ticket.refined_live_geometry_active,
     static_cast<int>(ticket.field_width),
     static_cast<int>(ticket.field_height)
@@ -380,7 +376,7 @@ bool d3d_base_encode_device::queued_ticket_matches(
          ticket.submitted_frame_id == frame_id && ticket.observation_timestamp_us == observation_timestamp_us &&
          ticket.submitted_source.Get() == slot.srv.get() && ticket.color_space == input_color_space &&
          ticket.postprocess_request_flags == 4u && ticket.expected_work == 1u && ticket.transaction_token != 0u &&
-         ticket.subtitle_context_generation == slot.subtitle_context_generation &&
+         ticket.subtitle_context_generation == slot.attribution.subtitle_context_generation &&
          expected_region && ticket.input_region == *expected_region &&
          ticket.field_content == expected_region->tensor_content && ticket.input_region.valid() &&
          ticket.field_width != 0u && ticket.field_height != 0u && ticket.field_content.valid() &&

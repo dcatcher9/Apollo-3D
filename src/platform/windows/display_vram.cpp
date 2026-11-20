@@ -1547,9 +1547,9 @@ namespace platf::dxgi {
           const auto &current_ddup_damage = img.ddup_damage;
           // Each lineage copy advances its own transitive proof. Repeated same-token queries
           // are constant-time, so a cross-slot memo would only leave another copy's anchor stale.
-          const auto current_input_reuse_kind = [&](const matched_frame_slot_t &slot) {
+          const auto current_input_reuse_kind = [&](const matched_frame_attribution_t &attribution) {
             return matched_input_reuse_kind(
-              slot,
+              attribution,
               current_content_timestamp,
               current_ddup_damage
             );
@@ -1579,7 +1579,13 @@ namespace platf::dxgi {
             probe_current_source_ticks = img_base.frame_timestamp ? img_base.frame_timestamp->time_since_epoch().count() : 0;
             probe_current_content_ticks = img_base.content_timestamp ? img_base.content_timestamp->time_since_epoch().count() : 0;
           }
-          matched_frame_slot_t *matched_render_slot = nullptr;
+          // Cached geometry borrows only the attribution. A completion may also have the
+          // physical slot needed for matched color, capture lifetime, and exact Dump 3D inputs.
+          matched_frame_slot_t *matched_render_capture = nullptr;
+          matched_frame_attribution_t *retained_render_attribution = nullptr;
+          const auto render_attribution = [&]() {
+            return matched_render_capture ? &matched_render_capture->attribution : retained_render_attribution;
+          };
           matched_frame_slot_t *matched_candidate_slot = nullptr;
           bool cached_current_color_warp = false;
           host_sbs::observation_handoff_t handoff;
@@ -1587,7 +1593,8 @@ namespace platf::dxgi {
           const auto &step_observation = depth_step.observation;
           const host_sbs::observation_handoff_t *render_handoff = &handoff;
           const auto clear_matched_selection = [&]() {
-            matched_render_slot = nullptr;
+            retained_render_attribution = nullptr;
+            matched_render_capture = nullptr;
             render_handoff = &handoff;
             handoff.reset();
             cached_current_color_warp = false;
@@ -1597,23 +1604,23 @@ namespace platf::dxgi {
                                                    models::depth_step_result_t *polled = nullptr,
                                                    std::optional<std::chrono::steady_clock::time_point> age_sample_at = std::nullopt
                                                  ) {
-            matched_render_slot = &slot;
+            matched_render_capture = &slot;
             // An explicit poll supplies the new step. Admission has already composed its step
             // and can report a completion together with a separately enqueued submission.
             if (polled) {
-              if (!slot.depth_input_region.is_video_region()) {
+              if (!slot.attribution.depth_input_region.is_video_region()) {
                 depth_authority_reprocess_pending = false;
               }
               handoff.select(std::move(*polled));
               if (probe_observer.record) {
                 actual_converter_probe_v1::event_t event;
                 event.kind = actual_converter_probe_v1::event_e::ack;
-                emit_converter_probe(std::move(event), &slot, &step_observation, nullptr, slot.srv.get(), img_ctx->encoder_input_res.get(), frame_id);
+                emit_converter_probe(std::move(event), &slot.attribution, &step_observation, nullptr, slot.srv.get(), img_ctx->encoder_input_res.get(), frame_id);
               }
             }
             if (diagnostics_enabled) {
               const auto sampled_at = age_sample_at ? *age_sample_at : std::chrono::steady_clock::now();
-              const double age_ms = std::chrono::duration<double, std::milli>(sampled_at - slot.captured_at).count();
+              const double age_ms = std::chrono::duration<double, std::milli>(sampled_at - slot.attribution.captured_at).count();
               matched_stats_age_sum_ms += age_ms;
               matched_stats_age_max_ms = std::max(matched_stats_age_max_ms, age_ms);
               ++matched_stats_completions;
@@ -1660,7 +1667,7 @@ namespace platf::dxgi {
               return nullptr;
             }
             const auto completed_frame_id = observation.completed_frame_id;
-            if (completed_slot && completed_slot->frame_id == completed_frame_id) {
+            if (completed_slot && completed_slot->attribution.frame_id == completed_frame_id) {
               return completed_slot;
             }
             const auto error_now = std::chrono::steady_clock::now();
@@ -1683,10 +1690,10 @@ namespace platf::dxgi {
           };
 
           const auto validate_completed_slot = [&]() {
-            if (!matched_render_slot) {
+            if (!render_attribution()) {
               return false;
             }
-            if (!subtitle_context.matches(matched_render_slot->subtitle_context_generation)) {
+            if (!subtitle_context.matches(render_attribution()->subtitle_context_generation)) {
               // Normal focus/video transitions retire old work without displaying its protected field.
               clear_matched_selection();
               matched_presentation_cache.invalidate();
@@ -1695,11 +1702,11 @@ namespace platf::dxgi {
             const auto &est = render_handoff->step().observation;
             if (
               !est.completed_frame_valid ||
-              est.completed_frame_id != matched_render_slot->frame_id ||
-              !gpu_transaction_class_matches(est, *matched_render_slot) ||
+              est.completed_frame_id != render_attribution()->frame_id ||
+              !gpu_transaction_class_matches(est, *render_attribution()) ||
               !depth_completion_region_matches_submission(
                 est,
-                matched_render_slot->depth_input_region
+                render_attribution()->depth_input_region
               )
             ) {
               BOOST_LOG(error)
@@ -1711,11 +1718,11 @@ namespace platf::dxgi {
               return false;
             }
             if (
-              matched_render_slot->window_region &&
-              !window_region_authorized_for_render(*matched_render_slot)
+              render_attribution()->window_region &&
+              !window_region_authorized_for_render(*render_attribution())
             ) {
-              if (matched_render_slot->depth_input_region.is_video_region() ||
-                  matched_render_slot->subtitle_context_eligible) {
+              if (render_attribution()->depth_input_region.is_video_region() ||
+                  render_attribution()->subtitle_context_eligible) {
                 // The completion is still consumed and releases its pending slot, but geometry
                 // observed before a focus/move/resize/monitor transition cannot warp newer pixels.
                 matched_presentation_cache.reset();
@@ -1724,17 +1731,17 @@ namespace platf::dxgi {
                 return false;
               }
               // Full-source depth is independent of optional exact-full window provenance.
-              matched_render_slot->window_region.reset();
-              matched_render_slot->window_region_observer_status = "not-observed";
-              matched_render_slot->window_region_mapping_status = "not-mapped";
-              matched_render_slot->live_window_authority_generation = 0u;
+              render_attribution()->window_region.reset();
+              render_attribution()->window_region_observer_status = "not-observed";
+              render_attribution()->window_region_mapping_status = "not-mapped";
+              render_attribution()->live_window_authority_generation = 0u;
             }
             subtitle_context_reprocess_pending = false;
             return true;
           };
 
           const auto apply_completed_domain_and_renderer = [&]() {
-            if (!matched_render_slot) {
+            if (!render_attribution()) {
               return false;
             }
             const auto &render_step = render_handoff->step();
@@ -1802,19 +1809,19 @@ namespace platf::dxgi {
                 return false;
               }
             }
-            return matched_render_slot != nullptr;
+            return render_attribution() != nullptr;
           };
 
           const auto retain_completed_lineage = [&, this]() {
-            if (!matched_render_slot || !step_observation.completed_frame_valid || render_handoff != &handoff) {
+            if (!matched_render_capture || !step_observation.completed_frame_valid || render_handoff != &handoff) {
               return;
             }
-            const auto &completed_source_desc = matched_render_slot->texture ?
-                                                   matched_render_slot->texture.description() :
+            const auto &completed_source_desc = matched_render_capture->texture ?
+                                                   matched_render_capture->texture.description() :
                                                    live_source_desc;
             (void) retain_latest_v2_lineage(
               handoff,
-              *matched_render_slot,
+              matched_render_capture->attribution,
               completed_source_desc,
               live_source_desc,
               input_color_space
@@ -1881,12 +1888,7 @@ namespace platf::dxgi {
             }
           }
           // Derive C proof only after B harvest and the fresh authority observation.
-          const auto current_root_authority_generation =
-            authority_generation(live_window_authority);
-          const auto current_region_authority_generation =
-            authority_generation(live_foreground_region);
-          const auto current_browser_authority_epoch = live_browser_authority_epoch;
-          const bool current_interactive_move_size = interactive_move_size_observed;
+          const auto current_authority = live_presentation_authority();
           if (temporal_source_bridge_enabled) {
             temporal_current_cursor=img.cursor;
             observe_temporal_capture(live_source_desc,input_color_space,current_source_timestamp,current_content_timestamp,current_ddup_damage,img.cursor);
@@ -1901,7 +1903,7 @@ namespace platf::dxgi {
             .snapshot_debug_inputs = snapshot_debug_inputs,
             .authority_reprocess_pending = depth_authority_reprocess_pending || subtitle_context_reprocess_pending,
             .producer_terminal = producer_terminal,
-            .interactive_move_size = current_interactive_move_size,
+            .interactive_move_size = current_authority.interactive_move_size,
           };
           const bool dedup_gate_open =
             source_admission.ddup_reuse_allowed(current_content_timestamp);
@@ -1910,14 +1912,11 @@ namespace platf::dxgi {
           const auto latest_v2_route_matches = latest_v2_lineage_route_matches_current(
             live_source_desc,
             input_color_space,
-            current_root_authority_generation,
-            current_region_authority_generation,
-            current_browser_authority_epoch,
-            current_interactive_move_size
+            current_authority
           );
           const auto cached_reuse_kind = latest_v2_route_matches ?
                                            current_input_reuse_kind(
-                                             latest_v2_lineage.slot
+                                             latest_v2_lineage.attribution
                                            ) :
                                            detail::host_sbs_ddup_reuse_proof_e::none;
           const auto reuse_now = std::chrono::steady_clock::now();
@@ -1927,27 +1926,24 @@ namespace platf::dxgi {
             !cache_reuse_gate_open ?
               detail::host_sbs_ddup_reuse_proof_e::none :
               cached_reuse_kind,
-            latest_v2_lineage.slot.frame_id,
+            latest_v2_lineage.attribution.frame_id,
             frame_id
           );
           const bool completed_current_route_matches =
-            completion_finalized_before_admission && matched_render_slot &&
-            same_source(matched_render_slot->source_timestamp, current_source_timestamp) &&
+            completion_finalized_before_admission && matched_render_capture &&
+            same_source(matched_render_capture->attribution.source_timestamp, current_source_timestamp) &&
             handoff.authenticate_structure() &&
             matched_route_matches_current(
-              *matched_render_slot,
+              *matched_render_capture,
               live_source_desc,
               input_color_space,
-              current_root_authority_generation,
-              current_region_authority_generation,
-              current_browser_authority_epoch,
-              current_interactive_move_size
+              current_authority
             );
           // Classify any root still pending after the early poll for packed repeats, DDup reuse,
           // and admission of the next root.
           const bool inference_pending = source_admission.pipeline_active && pending_matched_frame;
           const bool retained_source_pending =
-            inference_pending && same_source(pending_matched_frame->source_timestamp, current_source_timestamp);
+            inference_pending && same_source(pending_matched_frame->attribution.source_timestamp, current_source_timestamp);
           matched_frame_slot_t *unchanged_input_pending_slot = nullptr;
           auto pending_reuse_kind = detail::host_sbs_ddup_reuse_proof_e::none;
           if (
@@ -1956,13 +1952,10 @@ namespace platf::dxgi {
               *pending_matched_frame,
               live_source_desc,
               input_color_space,
-              current_root_authority_generation,
-              current_region_authority_generation,
-              current_browser_authority_epoch,
-              current_interactive_move_size
+              current_authority
             )
           ) {
-            pending_reuse_kind = current_input_reuse_kind(*pending_matched_frame);
+            pending_reuse_kind = current_input_reuse_kind(pending_matched_frame->attribution);
             if (pending_reuse_kind != detail::host_sbs_ddup_reuse_proof_e::none) {
               unchanged_input_pending_slot = pending_matched_frame;
             }
@@ -1971,19 +1964,19 @@ namespace platf::dxgi {
             current_source_timestamp,
             source_admission,
             {
-              matched_render_slot ? matched_render_slot->frame_id : 0u,
-              matched_render_slot ? matched_render_slot->source_timestamp : std::nullopt,
+              render_attribution() ? render_attribution()->frame_id : 0u,
+              render_attribution() ? render_attribution()->source_timestamp : std::nullopt,
               completed_current_route_matches,
             },
             {
               matched_presentation_cache.frame_id(),
-              latest_v2_lineage.slot.source_timestamp,
+              latest_v2_lineage.attribution.source_timestamp,
               dedup_gate_open && latest_v2_route_matches &&
                 !inference_pending &&
-                matched_presentation_cache.frame_id() == latest_v2_lineage.slot.frame_id &&
-                current_ddup_damage && latest_v2_lineage.slot.inference_ddup_damage &&
-                current_ddup_damage->history == latest_v2_lineage.slot.inference_ddup_damage->history &&
-                current_ddup_damage->token == latest_v2_lineage.slot.inference_ddup_damage->token &&
+                matched_presentation_cache.frame_id() == latest_v2_lineage.attribution.frame_id &&
+                current_ddup_damage && latest_v2_lineage.attribution.inference_ddup_damage &&
+                current_ddup_damage->history == latest_v2_lineage.attribution.inference_ddup_damage->history &&
+                current_ddup_damage->token == latest_v2_lineage.attribution.inference_ddup_damage->token &&
                 matched_presentation_cache.source_matches(current_source_timestamp) &&
                 matched_presentation_cache.route_matches(
                   live_source_desc.Width,
@@ -1992,8 +1985,7 @@ namespace platf::dxgi {
                   depth_authority_reprocess_pending,
                   producer_terminal,
                   subtitle_context.generation(),
-                  {current_root_authority_generation, current_region_authority_generation,
-                   current_browser_authority_epoch, current_interactive_move_size}
+                  current_authority
                 ),
             }
           );
@@ -2009,7 +2001,7 @@ namespace platf::dxgi {
               cache_reuse_gate_open && latest_v2_route_matches,
               host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2,
               depth_reuse_authorization,
-              latest_v2_lineage.slot.frame_id,
+              latest_v2_lineage.attribution.frame_id,
               frame_id,
               latest_v2_lineage.estimate().shadow_base_final_parallax &&
                 latest_v2_lineage.estimate().shadow_state
@@ -2040,7 +2032,7 @@ namespace platf::dxgi {
                 depth_reuse_authorization =
                   detail::select_host_sbs_cached_depth_reuse(
                     pending_reuse_kind,
-                    unchanged_input_pending_slot->frame_id,
+                    unchanged_input_pending_slot->attribution.frame_id,
                     frame_id
                   );
                 damage_guided_submission_suppressed =
@@ -2052,7 +2044,7 @@ namespace platf::dxgi {
               if (polled.ready) {
                 if (auto *completed_slot = consume_matched_completion(polled.result.observation)) {
                   force_fresh_current_color =
-                    current_input_reuse_kind(*completed_slot) != detail::host_sbs_ddup_reuse_proof_e::none;
+                    current_input_reuse_kind(completed_slot->attribution) != detail::host_sbs_ddup_reuse_proof_e::none;
                   adopt_matched_completion(*completed_slot, &polled.result, reuse_now);
                 }
               }
@@ -2075,7 +2067,7 @@ namespace platf::dxgi {
               force_fresh_current_color = cached_geometry_render_allowed;
             } else {
               matched_candidate_slot = available_matched_slot(
-                completion_finalized_before_admission ? matched_render_slot : nullptr
+                completion_finalized_before_admission ? matched_render_capture : nullptr
               );
               // Only a candidate the estimator can accept reserves a matched source.
               const bool estimator_ready =
@@ -2103,15 +2095,12 @@ namespace platf::dxgi {
                 mark_sbs_matched_copy_end(gpu_timer, false);
               }
               if (
-                completion_finalized_before_admission && matched_render_slot &&
+                completion_finalized_before_admission && matched_render_capture &&
                 !matched_route_matches_current(
-                  *matched_render_slot,
+                  *matched_render_capture,
                   live_source_desc,
                   input_color_space,
-                  authority_generation(live_window_authority),
-                  authority_generation(live_foreground_region),
-                  live_browser_authority_epoch,
-                  interactive_move_size_observed
+                  live_presentation_authority()
                 )
               ) {
                 // prepare_matched_frame() performs a second live authority observation. If that
@@ -2129,17 +2118,17 @@ namespace platf::dxgi {
                                                             depth_estimator->publication_is_current(latest_v2_lineage.estimate().publication);
                 const auto observation_timestamp_us =
                   host_sbs_observation_timestamp_us(
-                    matched_candidate_slot->captured_at
+                    matched_candidate_slot->attribution.captured_at
                   );
                 const auto optional_work = models::select_depth_optional_work_mode(
-                  matched_candidate_slot->observed_interactive_move_size,
+                  matched_candidate_slot->attribution.observed_authority.interactive_move_size,
                   snapshot_debug_inputs,
-                  matched_candidate_slot->subtitle_context_eligible ||
-                    matched_candidate_slot->subtitle_context_suppression_eligible
+                  matched_candidate_slot->attribution.subtitle_context_eligible ||
+                    matched_candidate_slot->attribution.subtitle_context_suppression_eligible
                 );
                 const bool depth_only_history =
-                  dedup_gate_open && matched_candidate_slot->inference_ddup_damage &&
-                  !matched_candidate_slot->observed_interactive_move_size &&
+                  dedup_gate_open && matched_candidate_slot->attribution.inference_ddup_damage &&
+                  !matched_candidate_slot->attribution.observed_authority.interactive_move_size &&
                   optional_work == models::depth_optional_work_mode_e::disable_subtitle;
                 const bool authorize_gpu_undecided =
                   dedup_gate_open &&
@@ -2186,12 +2175,12 @@ namespace platf::dxgi {
                   input_color_space,
                   frame_id,
                   snapshot_debug_inputs,
-                  matched_candidate_slot->depth_input_region,
+                  matched_candidate_slot->attribution.depth_input_region,
                   optional_work,
                   adaptive_request,
-                  matched_candidate_slot->subtitle_context_generation,
-                  matched_candidate_slot->temporal_source,
-                  matched_candidate_slot->subtitle_line_policy
+                  matched_candidate_slot->attribution.subtitle_context_generation,
+                  matched_candidate_slot->attribution.temporal_source,
+                  matched_candidate_slot->attribution.subtitle_line_policy
                 );
                 if (completion_finalized_before_admission &&
                     !depth_estimator->publication_is_current(step_observation.publication)) {
@@ -2204,7 +2193,7 @@ namespace platf::dxgi {
                 }
                 if (
                   diagnostics_enabled &&
-                  matched_candidate_slot->depth_input_region.is_video_region() &&
+                  matched_candidate_slot->attribution.depth_input_region.is_video_region() &&
                   (submitted.submission.inference_enqueued ||
                    submitted.submission.gpu_undecided_transaction_enqueued)
                 ) {
@@ -2218,9 +2207,11 @@ namespace platf::dxgi {
                   step_observation.completed_frame_valid &&
                   !completion_finalized_before_admission
                 ) {
-                  matched_render_slot = consume_matched_completion(step_observation);
-                  if (matched_render_slot) {
-                    adopt_matched_completion(*matched_render_slot);
+                  if (auto *completed = consume_matched_completion(step_observation)) {
+                    adopt_matched_completion(*completed);
+                  } else {
+                    matched_render_capture = nullptr;
+                    retained_render_attribution = nullptr;
                   }
                 }
                 const bool gpu_undecided_transaction_enqueued =
@@ -2250,9 +2241,9 @@ namespace platf::dxgi {
                     ++matched_stats_force_missing_publication;
                   }
                   if (
-                    !matched_candidate_slot->inference_content_timestamp ||
-                    (matched_candidate_slot->depth_input_region.is_video_region() &&
-                     !matched_candidate_slot->inference_ddup_damage)
+                    !matched_candidate_slot->attribution.inference_content_timestamp ||
+                    (matched_candidate_slot->attribution.depth_input_region.is_video_region() &&
+                     !matched_candidate_slot->attribution.inference_ddup_damage)
                   ) {
                     latest_v2_lineage.reset();
                   }
@@ -2266,16 +2257,16 @@ namespace platf::dxgi {
                     pending->owner_unavailable = true;
                   }
                   pending_matched_frame = matched_candidate_slot;
-                  if(temporal_source_bridge_enabled)temporal_source_ledger.note_admitted(matched_candidate_slot->temporal_source);
-                  matched_candidate_slot->gpu_undecided_transaction =
+                  if(temporal_source_bridge_enabled)temporal_source_ledger.note_admitted(matched_candidate_slot->attribution.temporal_source);
+                  matched_candidate_slot->attribution.gpu_undecided_transaction =
                     gpu_undecided_transaction_enqueued;
                 }
 
                 if (probe_observer.record) {
                   actual_converter_probe_v1::event_t e; e.kind=actual_converter_probe_v1::event_e::admission;
                   e.force_infer=force_infer_transaction_enqueued; e.gpu_undecided=gpu_undecided_transaction_enqueued;
-                  e.optional_work=static_cast<std::uint32_t>(optional_work); e.ddup_proof=matched_candidate_slot->inference_ddup_damage.has_value();
-                  emit_converter_probe(std::move(e),matched_candidate_slot,nullptr,nullptr,matched_candidate_slot->srv.get(),img_ctx->encoder_input_res.get(),frame_id);
+                  e.optional_work=static_cast<std::uint32_t>(optional_work); e.ddup_proof=matched_candidate_slot->attribution.inference_ddup_damage.has_value();
+                  emit_converter_probe(std::move(e),&matched_candidate_slot->attribution,nullptr,nullptr,matched_candidate_slot->srv.get(),img_ctx->encoder_input_res.get(),frame_id);
                 }
                 // Give the just-submitted matched-frame unit one immediate joined query. For a
                 // conditional transaction this queries only root completion; it never reads the
@@ -2303,8 +2294,8 @@ namespace platf::dxgi {
                                                   host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2 &&
                                                   force_infer_transaction_enqueued && !gpu_undecided_transaction_enqueued &&
                                                   optional_work == models::depth_optional_work_mode_e::ordinary &&
-                                                  matched_candidate_slot->frame_id == frame_id &&
-                                                  matched_route_matches_current(*matched_candidate_slot, live_source_desc, input_color_space, current_root_authority_generation, current_region_authority_generation, current_browser_authority_epoch, current_interactive_move_size);
+                                                  matched_candidate_slot->attribution.frame_id == frame_id &&
+                                                  matched_route_matches_current(*matched_candidate_slot, live_source_desc, input_color_space, current_authority);
                   // Preserve the ordinary first nonblocking query. Only the bounded candidate
                   // substitutes GPU-ordered continuation for the repeated host wait.
                   auto polled = poll_pending_depth(queued_first_query ? nullptr : &poll_plan);
@@ -2316,10 +2307,7 @@ namespace platf::dxgi {
                       *matched_candidate_slot,
                       live_source_desc,
                       input_color_space,
-                      current_root_authority_generation,
-                      current_region_authority_generation,
-                      current_browser_authority_epoch,
-                      current_interactive_move_size
+                      current_authority
                     );
                     if (exact_live_route) {
                       queued_attempt_failed_flat = !queue_research_observation(
@@ -2372,7 +2360,7 @@ namespace platf::dxgi {
                     polled.ready,
                     polled.result.observation.completed_frame_valid,
                     polled.result.observation.completed_frame_id,
-                    matched_candidate_slot->frame_id
+                    matched_candidate_slot->attribution.frame_id
                   );
                   const auto poll_outcome = detail::host_sbs_same_frame_poll_outcome(
                     poll_plan.eligible && !queued_first_query,
@@ -2473,21 +2461,18 @@ namespace platf::dxgi {
             latest_v2_lineage_route_matches_current(
               live_source_desc,
               input_color_space,
-              authority_generation(live_window_authority),
-              authority_generation(live_foreground_region),
-              live_browser_authority_epoch,
-              interactive_move_size_observed
+              live_presentation_authority()
             );
           const bool post_completion_cache_gate_open =
             dedup_gate_open && latest_v2_lineage.known_depth();
           const auto post_completion_cache_reuse_kind =
             post_completion_cache_gate_open && post_completion_cache_route_matches ?
-              current_input_reuse_kind(latest_v2_lineage.slot) :
+              current_input_reuse_kind(latest_v2_lineage.attribution) :
               detail::host_sbs_ddup_reuse_proof_e::none;
           const auto post_completion_reuse_authorization =
             detail::select_host_sbs_cached_depth_reuse(
               post_completion_cache_reuse_kind,
-              latest_v2_lineage.slot.frame_id,
+              latest_v2_lineage.attribution.frame_id,
               frame_id
             );
           const bool post_completion_cache_render_allowed =
@@ -2495,25 +2480,25 @@ namespace platf::dxgi {
               post_completion_cache_gate_open && post_completion_cache_route_matches,
               host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2,
               post_completion_reuse_authorization,
-              latest_v2_lineage.slot.frame_id,
+              latest_v2_lineage.attribution.frame_id,
               frame_id,
               latest_v2_lineage.estimate().shadow_base_final_parallax &&
                 latest_v2_lineage.estimate().shadow_state
             );
           if (
-            !matched_render_slot && post_completion_cache_render_allowed &&
+            !render_attribution() && post_completion_cache_render_allowed &&
             (unchanged_content_submission_suppressed || depth_step.submission.inference_enqueued ||
              depth_step.submission.gpu_undecided_transaction_enqueued)
           ) {
             // All estimator work is finished for this draw. Borrow the current lineage on the
             // converter thread, and keep this call's submission and completion events separate.
             render_handoff = &latest_v2_lineage.completion;
-            matched_render_slot = &latest_v2_lineage.slot;
+            retained_render_attribution = &latest_v2_lineage.attribution;
             cached_current_color_warp = true;
             depth_reuse_authorization = post_completion_reuse_authorization;
-          } else if (post_completion_cache_gate_open && force_fresh_current_color && matched_render_slot) {
+          } else if (post_completion_cache_gate_open && force_fresh_current_color && render_attribution()) {
             const auto completed_reuse_authorization = detail::select_host_sbs_cached_depth_reuse(
-              current_input_reuse_kind(*matched_render_slot),
+              current_input_reuse_kind(*render_attribution()),
               step_observation.completed_frame_id,
               frame_id
             );
@@ -2525,20 +2510,20 @@ namespace platf::dxgi {
 
           // A completion retired before admission was already authenticated and retained so the
           // current proof could name it. All other completions pass through the same helpers here.
-          if (!completion_finalized_before_admission && matched_render_slot) {
+          if (!completion_finalized_before_admission && render_attribution()) {
             (void) validate_completed_slot();
           }
           if (
-            matched_render_slot && matched_candidate_slot &&
+            render_attribution() && matched_candidate_slot &&
             pending_matched_frame == matched_candidate_slot &&
             (
               // Both operands are display-selected submission regions here. Their calibrated
               // coarse raster is intentional; no estimator publication participates in this
               // pending-domain transition check.
-              !matched_render_slot->depth_input_region.same_analysis_domain(
-                matched_candidate_slot->depth_input_region
+              !render_attribution()->depth_input_region.same_analysis_domain(
+                matched_candidate_slot->attribution.depth_input_region
               ) ||
-              matched_render_slot->color_space != matched_candidate_slot->color_space
+              render_attribution()->color_space != matched_candidate_slot->attribution.color_space
             )
           ) {
             // estimate_depth may retire domain A while enqueueing the first frame of domain B in
@@ -2549,7 +2534,7 @@ namespace platf::dxgi {
               latest_v2_lineage.reset();
             }
             completion_finalized_before_admission = false;
-          } else if (!completion_finalized_before_admission && matched_render_slot) {
+          } else if (!completion_finalized_before_admission && render_attribution()) {
             (void) apply_completed_domain_and_renderer();
           }
 
@@ -2581,21 +2566,24 @@ namespace platf::dxgi {
           // continuing nonblocking queries so a later fresh completion can recover automatically.
           // Model owner frame and actual rendered RGB conversion are different on authorized
           // cached-current RGB reuse. Reject a late private B only after a newer source was drawn.
-          if (matched_render_slot && !cached_current_color_warp && !same_source(matched_render_slot->source_timestamp, current_source_timestamp) && !drawn_source_order.permits(matched_render_slot->frame_id)) {
+          if (const auto *attribution = render_attribution();
+              attribution && !cached_current_color_warp &&
+              !same_source(attribution->source_timestamp, current_source_timestamp) &&
+              !drawn_source_order.permits(attribution->frame_id)) {
             clear_matched_selection();
           }
           const auto repeat_now = std::chrono::steady_clock::now();
           bool stale_v2_completion = false;
-          if (matched_render_slot && host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2) {
-            const auto &source = cached_current_color_warp ? current_source_timestamp : matched_render_slot->source_timestamp;
-            const auto captured_at = cached_current_color_warp ? reuse_now : matched_render_slot->captured_at;
+          if (render_attribution() && host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2) {
+            const auto &source = cached_current_color_warp ? current_source_timestamp : render_attribution()->source_timestamp;
+            const auto captured_at = cached_current_color_warp ? reuse_now : render_attribution()->captured_at;
             if (!models::host_sbs_matched_completion_is_current(same_source(source, current_source_timestamp), repeat_now - captured_at)) {
               stale_v2_completion = true;
               clear_matched_selection();
             }
           }
-          if (matched_render_slot) {
-            publish_window_region_transition(*matched_render_slot);
+          if (render_attribution()) {
+            publish_window_region_transition(*render_attribution());
           }
           const auto repeat_source_age =
             matched_presentation_cache.source_age(repeat_now);
@@ -2615,15 +2603,14 @@ namespace platf::dxgi {
               depth_authority_reprocess_pending,
               producer_terminal,
               subtitle_context.generation(),
-              {authority_generation(live_window_authority), authority_generation(live_foreground_region),
-               live_browser_authority_epoch, interactive_move_size_observed}
+              live_presentation_authority()
             );
           const auto queued_draw = queued_frame ? select_queued_research_draw(
             *queued_frame, matched_candidate_slot,
             {live_source_desc, input_color_space, current_source_timestamp, current_content_timestamp,
              current_ddup_damage, img.cursor, img_ctx->encoder_input_res.get(), frame_id},
             repeat_now, queued_attempt_failed_flat, snapshot_debug_inputs, producer_terminal,
-            static_cast<bool>(img_ctx->encoder_mutex), current_interactive_move_size
+            static_cast<bool>(img_ctx->encoder_mutex), current_authority.interactive_move_size
           ) : queued_draw_t {};
           queued_attempt_failed_flat = queued_draw.force_flat;
           const bool pending_current_colour_selected = queued_draw.current_colour != nullptr;
@@ -2634,7 +2621,7 @@ namespace platf::dxgi {
                                              drawn_source_order.permits(matched_presentation_cache.pixel_source_frame_id()) &&
                                              models::host_sbs_should_repeat_packed_presentation(
                                                host_sbs_renderer,
-                                               matched_render_slot != nullptr,
+                                               render_attribution() != nullptr,
                                                matched_presentation_cache.has_fresh_pixels(),
                                                packed_presentation_route_matches,
                                                repeat_hold_age,
@@ -2658,16 +2645,16 @@ namespace platf::dxgi {
           const bool v2_renderer_failed_flat = host_sbs_renderer == models::host_sbs_renderer_e::failed_flat;
           const auto &render_step = render_handoff->step();
           const auto &est = render_step.observation;
-          const bool v2_result_authenticated = matched_render_slot && render_handoff->authenticate_structure();
+          const bool v2_result_authenticated = render_attribution() && render_handoff->authenticate_structure();
           const bool v2_live_warp_selected =
             v2_renderer_selected && v2_result_authenticated && sbs_reprojection_v2_live_ps &&
             est.shadow_base_final_parallax && est.shadow_state;
           const auto geometry = select_sbs_draw_geometry(
-            queued_draw, matched_render_slot, v2_live_warp_selected ? &est : nullptr
+            queued_draw, matched_render_capture, retained_render_attribution, v2_live_warp_selected ? &est : nullptr
           );
           const auto *queued_geometry = geometry.queued;
           const bool queued_geometry_selected = queued_geometry != nullptr;
-          auto *draw_source_slot = geometry.source_slot;
+          const auto *draw_source_attribution = geometry.source_attribution;
           const auto current_colour = [&]() -> sbs_draw_colour_t {
             return {
               img_ctx->encoder_input_res.get(), input_color_space, current_source_timestamp,
@@ -2677,21 +2664,21 @@ namespace platf::dxgi {
           };
           // Match geometry to its true submission while resolving colour and its presentation
           // identity independently. Reuse and the pending-colour probe bind the current capture.
-          const bool uses_current_colour = !draw_source_slot || cached_current_color_warp ||
+          const bool uses_current_colour = !geometry.source_capture || cached_current_color_warp ||
                                            pending_current_colour_selected || queued_attempt_failed_flat;
           auto draw_colour = uses_current_colour ? current_colour() : sbs_draw_colour_t {
-            queued_draw_selected ? queued_geometry->submitted_source.Get() : draw_source_slot->srv.get(),
-            draw_source_slot->color_space, draw_source_slot->source_timestamp, draw_source_slot->content_timestamp,
-            draw_source_slot->captured_at,
-            queued_draw_selected || !same_source(draw_source_slot->source_timestamp, current_source_timestamp) ?
-              draw_source_slot->frame_id : frame_id,
+            queued_draw_selected ? queued_geometry->submitted_source.Get() : geometry.source_capture->srv.get(),
+            draw_source_attribution->color_space, draw_source_attribution->source_timestamp, draw_source_attribution->content_timestamp,
+            draw_source_attribution->captured_at,
+            queued_draw_selected || !same_source(draw_source_attribution->source_timestamp, current_source_timestamp) ?
+              draw_source_attribution->frame_id : frame_id,
           };
           converted_content_timestamp = repeat_matched_output ? matched_presentation_cache.content_timestamp() :
                                                                 draw_colour.rendered_content_timestamp();
           const bool v2_repeat_age_expired =
             stale_v2_completion ||
             (host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2 &&
-             !matched_render_slot && matched_presentation_cache.has_fresh_pixels() &&
+             !render_attribution() && matched_presentation_cache.has_fresh_pixels() &&
              !output_source_unchanged &&
              repeat_hold_age > models::host_sbs_v2_max_matched_repeat_age);
           using presentation_clock_t = detail::host_sbs_packed_presentation_clock_t;
@@ -2701,7 +2688,7 @@ namespace platf::dxgi {
                                      v2_live_warp_selected ? presentation_output_e::completed :
                                      queued_geometry_selected ? presentation_output_e::queued :
                                                                 presentation_output_e::flat;
-          if (!v2_live_warp_selected && v2_renderer_selected && matched_render_slot && v2_live_warp_seen && !v2_live_warp_loss_logged) {
+          if (!v2_live_warp_selected && v2_renderer_selected && render_attribution() && v2_live_warp_seen && !v2_live_warp_loss_logged) {
             BOOST_LOG(error)
               << "Host SBS lost authenticated live-warp authority after parallax-v2 was active"
               << " (result_authenticated=" << (v2_result_authenticated ? "true" : "false")
@@ -2772,7 +2759,7 @@ namespace platf::dxgi {
             // Before the first matched completion, provide a flat current-frame SBS image. An
             // ordinary completion renders its matched color; an authorized cache reuse
             // deliberately renders current color/cursor with authenticated cached geometry.
-            if (!matched_render_slot && !queued_geometry_selected) {
+            if (!render_attribution() && !queued_geometry_selected) {
               handoff.reset();
             }
 
@@ -2818,9 +2805,9 @@ namespace platf::dxgi {
             models::host_sbs_subtitle_render_constants_t subtitle_constants;
             if (geometry.region) {
               const auto &region = *geometry.region;
-              subtitle_constants.enabled = draw_source_slot->subtitle_context_eligible &&
-                                               subtitle_context.matches(draw_source_slot->subtitle_context_generation) &&
-                                               !current_interactive_move_size && geometry.has_subtitle_inputs() ?
+              subtitle_constants.enabled = draw_source_attribution->subtitle_context_eligible &&
+                                               subtitle_context.matches(draw_source_attribution->subtitle_context_generation) &&
+                                               !current_authority.interactive_move_size && geometry.has_subtitle_inputs() ?
                                              1u :
                                              0u;
               subtitle_constants.color_mode = static_cast<std::uint32_t>(draw_colour.color_space);
@@ -3079,8 +3066,8 @@ namespace platf::dxgi {
                   auto &e = *dump_actual_draw;
 
                   e.conversion_frame = frame_id;
-                  e.model_frame = draw_source_slot ? draw_source_slot->frame_id : 0u;
-                  e.observation_us = draw_source_slot ? host_sbs_observation_timestamp_us(draw_source_slot->captured_at) : 0u;
+                  e.model_frame = draw_source_attribution ? draw_source_attribution->frame_id : 0u;
+                  e.observation_us = draw_source_attribution ? host_sbs_observation_timestamp_us(draw_source_attribution->captured_at) : 0u;
                   e.selected_shader = selected_draw && actual_shader.Get() == draw_command.pixel_shader;
                   e.queued_geometry = queued_geometry_selected;
                   e.shared_pin_selected = e.selected_shader && shared_warp_selected;
@@ -3113,7 +3100,7 @@ namespace platf::dxgi {
                   // Retired repair ownership fields retain their unavailable defaults. The
                   // unused repair slots above remain observed so diagnostics cannot invent absence.
                   e.owner_serial = e.shared_pin_selected ? current_shared_warp.serial : 0u;
-                  e.colour_key = {frame_id, draw_source_slot ? draw_source_slot->frame_id : 0u, draw_source_slot ? static_cast<std::uint64_t>(draw_colour.captured_at.time_since_epoch().count()) : 0u, static_cast<std::uint64_t>(subtitle_constants.color_mode)};
+                  e.colour_key = {frame_id, draw_source_attribution ? draw_source_attribution->frame_id : 0u, draw_source_attribution ? static_cast<std::uint64_t>(draw_colour.captured_at.time_since_epoch().count()) : 0u, static_cast<std::uint64_t>(subtitle_constants.color_mode)};
                   e.analysis_source_rect = {subtitle_constants.source_left, subtitle_constants.source_top, subtitle_constants.source_width, subtitle_constants.source_height};
                   e.analysis_shape = e.shared_pin_selected ? current_shared_warp.shape : std::array<std::uint32_t, 4u> {};
                   e.context_address = reinterpret_cast<std::uintptr_t>(observed_context);
@@ -3203,12 +3190,12 @@ namespace platf::dxgi {
               e.selected_draw=selected_draw&&!queued_attempt_failed_flat;
               if(e.selected_draw&&shared_warp_selected)e.shared_warp=current_shared_observed;
               if(e.selected_draw){e.selected_views[2]=draw_command.shader_resources[3];Microsoft::WRL::ComPtr<ID3D11Resource> r;selected_receipt->GetResource(&r);e.actual_draw_selected_receipt_address=reinterpret_cast<std::uintptr_t>(r.Get());}
-              emit_converter_probe(std::move(e),draw_source_slot,queued_attempt_failed_flat ? nullptr:&est,
+              emit_converter_probe(std::move(e),draw_source_attribution,queued_attempt_failed_flat ? nullptr:&est,
                 queued_geometry_selected && !queued_attempt_failed_flat ? queued_geometry:nullptr,
                 draw_colour.srv,img_ctx->encoder_input_res.get(),frame_id, cached_current_color_warp ? &draw_colour : nullptr);
             }
             const bool cache_recorded_warp = presentation_output != presentation_output_e::flat &&
-              (queued_geometry_selected || models::host_sbs_packed_output_can_enter_presentation_cache(matched_render_slot != nullptr, v2_live_warp_selected));
+              (queued_geometry_selected || models::host_sbs_packed_output_can_enter_presentation_cache(render_attribution() != nullptr, v2_live_warp_selected));
             if (cache_recorded_warp) {
               // Only packed PIXELS enter this continuity cache. Planned publication remains
               // unavailable to latest_v2_lineage / known_depth / estimator publication checks.
@@ -3223,12 +3210,9 @@ namespace platf::dxgi {
                 geometry.refined,
                 geometry.field_width,
                 geometry.field_height,
-                draw_source_slot->subtitle_context_generation,
+                draw_source_attribution->subtitle_context_generation,
                 subtitle_constants.enabled != 0u,
-                {draw_source_slot->observed_root_authority_generation,
-                 draw_source_slot->observed_region_authority_generation,
-                 draw_source_slot->observed_browser_authority_epoch,
-                 draw_source_slot->observed_interactive_move_size},
+                draw_source_attribution->observed_authority,
                 current_source_timestamp,
                 gamma_now
               );
@@ -3303,7 +3287,7 @@ namespace platf::dxgi {
             e.pixel_source_frame=matched_presentation_cache.pixel_source_frame_id();
             e.packed_valid=matched_presentation_cache.has_fresh_pixels(); e.packed_age_us=std::chrono::duration_cast<std::chrono::microseconds>(repeat_source_age).count();
             e.route_matches=packed_presentation_route_matches; e.source_matches=output_source_unchanged;
-            emit_converter_probe(std::move(e),draw_source_slot,&est,
+            emit_converter_probe(std::move(e),draw_source_attribution,&est,
               queued_geometry_selected ? queued_geometry:nullptr,repeat_matched_output ? nullptr:draw_colour.srv,img_ctx->encoder_input_res.get(),frame_id,
               cached_current_color_warp ? &draw_colour : nullptr);
           }
@@ -3338,7 +3322,7 @@ namespace platf::dxgi {
           }
           if (snapshot_debug_inputs && !repeat_matched_output) {
             const bool complete_dump_snapshot =
-              matched_render_slot && dump_warp_inputs[1] && est.model_input_snapshot &&
+              matched_render_capture && dump_warp_inputs[1] && est.model_input_snapshot &&
               est.raw_model_depth_snapshot && est.raw_model_provenance &&
               est.shadow_candidate_parallax && est.shadow_vertical_majorant &&
               est.shadow_vertical_conditioned &&
@@ -3347,15 +3331,15 @@ namespace platf::dxgi {
               v2_renderer_selected &&
               v2_result_authenticated;
             ID3D11ShaderResourceView *dump_depth_input_source =
-              matched_render_slot ? matched_render_slot->analysis_input_srv() : nullptr;
-            if (complete_dump_snapshot && est.input_region.is_video_region() && matched_render_slot->texture) {
+              matched_render_capture ? matched_render_capture->analysis_input_srv() : nullptr;
+            if (complete_dump_snapshot && est.input_region.is_video_region() && matched_render_capture->texture) {
               // This explicit diagnostic copy targets the exact completed slot after all live
               // timing has closed. The dumper revalidates the retained texture against the
               // completed region and owns the crop; ordinary ROI analysis allocates no crop.
               dump_depth_input_source = sbs_dumper.prepare_diagnostic_roi_crop(
                 device.get(),
                 device_ctx.get(),
-                matched_render_slot->texture.get(),
+                matched_render_capture->texture.get(),
                 est.input_region
               );
               if (dump_depth_input_source && diagnostics_enabled) {
@@ -3380,6 +3364,7 @@ namespace platf::dxgi {
               complete_dump_snapshot && dump_roi_source_ready &&
               sbs_dumper.prepare_requested_v2_frame(est.completed_frame_id);
             if (dump_frame_valid) {
+              const auto &dump_attribution = matched_render_capture->attribution;
               ID3D11Buffer *completed_constants = sbs_reprojection_cbuffer.get();
               bool geometry_available = false;
               try {
@@ -3477,17 +3462,17 @@ namespace platf::dxgi {
                 dump_frame.matched_observation_timestamp_us =
                   est.publication.observation_timestamp_us;
                 dump_frame.depth_input_region = est.input_region;
-                dump_frame.depth_video_plan = matched_render_slot->depth_video_plan;
+                dump_frame.depth_video_plan = dump_attribution.depth_video_plan;
                 dump_frame.input_domain_reset = render_step.completion.input_domain_reset;
                 dump_frame.gpu_undecided_completion =
                   est.gpu_undecided_completion;
                 dump_frame.subtitle_work_suppressed =
                   est.subtitle_work_suppressed;
-                dump_frame.window_region = matched_render_slot->window_region;
+                dump_frame.window_region = dump_attribution.window_region;
                 dump_frame.window_region_observer_status =
-                  matched_render_slot->window_region_observer_status;
+                  dump_attribution.window_region_observer_status;
                 dump_frame.window_region_mapping_status =
-                  matched_render_slot->window_region_mapping_status;
+                  dump_attribution.window_region_mapping_status;
                 dump_frame.cuda_graph_active = render_step.status.cuda_graph_active;
                 dump_frame.parallax_v2_producer_active =
                   est.parallax_v2_producer_active;
@@ -3505,7 +3490,7 @@ namespace platf::dxgi {
                   est.parallax_v2_requested_gain;
                 dump_frame.parallax_v2_joint_plane_mode =
                   est.parallax_v2_joint_plane_mode;
-                dump_frame.color_space = matched_render_slot->color_space;
+                dump_frame.color_space = dump_attribution.color_space;
                 dump_frame.depth_model = est.raw_model_provenance ?
                                            est.raw_model_provenance->depth_model :
                                            ::video::host_sbs_v2_depth_model().name;
@@ -3524,7 +3509,7 @@ namespace platf::dxgi {
             const bool video_roi_output =
               repeat_matched_output ?
                 matched_presentation_cache.is_video_region() :
-                matched_render_slot && geometry.base &&
+                render_attribution() && geometry.base &&
                   est.input_region.is_video_region();
             if (video_roi_output) {
               ++matched_stats_video_roi_route_outputs;
@@ -3817,7 +3802,7 @@ namespace platf::dxgi {
       selected_matte_configured = selected_matte_ready = false;
       pending_matched_frame = nullptr;
       for (auto &slot : matched_frame_slots) {
-        slot.gpu_undecided_transaction = false;
+        slot.attribution.gpu_undecided_transaction = false;
       }
       latest_v2_lineage.reset();
       matched_presentation_cache.reset();
@@ -4589,13 +4574,7 @@ namespace platf::dxgi {
       }
     };
 
-    struct matched_frame_slot_t {
-      // The pool may recycle only unreferenced images. This pin also keeps the encoder
-      // context mapped, so its keyed mutex survives until the matched draw is submitted.
-      std::shared_ptr<const platf::img_t> capture_image;
-      IDXGIKeyedMutex *capture_mutex = nullptr;
-      described_texture_t texture;
-      shader_res_t srv;
+    struct matched_frame_attribution_t {
       std::uint64_t frame_id = 0;
       models::input_color_space color_space = models::input_color_space::srgb;
       std::optional<std::chrono::steady_clock::time_point> source_timestamp;
@@ -4622,10 +4601,7 @@ namespace platf::dxgi {
       std::chrono::steady_clock::time_point live_browser_geometry_valid_since {};
       video_dom::geometry_authority_class_e live_browser_authority_class =
         video_dom::geometry_authority_class_e::none;
-      std::uint64_t observed_root_authority_generation = 0u;
-      std::uint64_t observed_region_authority_generation = 0u;
-      std::uint64_t observed_browser_authority_epoch = 0u;
-      bool observed_interactive_move_size = false;
+      models::host_subtitle_context::presentation_authority_t observed_authority;
       std::uint64_t subtitle_context_generation = 0u;
       bool subtitle_context_eligible = false;
       // Semantic retention during a freshly verified modal loop permits no positioned glyph
@@ -4638,6 +4614,16 @@ namespace platf::dxgi {
       // publication receipt independently reports the actual infer/reuse branch and depth owner.
       models::host_sbs_temporal_source_bridge::certificate_t temporal_source;
       bool gpu_undecided_transaction = false;
+    };
+
+    struct matched_frame_slot_t {
+      // The pool may recycle only unreferenced images. This pin also keeps the encoder
+      // context mapped, so its keyed mutex survives until the matched draw is submitted.
+      std::shared_ptr<const platf::img_t> capture_image;
+      IDXGIKeyedMutex *capture_mutex = nullptr;
+      described_texture_t texture;
+      shader_res_t srv;
+      matched_frame_attribution_t attribution;
 
       ID3D11ShaderResourceView *analysis_input_srv() noexcept {
         return srv.get();
@@ -4699,10 +4685,11 @@ namespace platf::dxgi {
       bool force_flat = false;
     };
 
-    // Resolved once per conversion. Geometry and its attribution borrow from the same owner;
-    // the source slot can still describe matched color on a flat draw.
+    // Resolved once per conversion. Geometry and attribution borrow from the same owner.
+    // A physical source can provide matched color on a flat draw as well.
     struct sbs_draw_geometry_t {
-      matched_frame_slot_t *source_slot = nullptr;
+      const matched_frame_attribution_t *source_attribution = nullptr;
+      matched_frame_slot_t *source_capture = nullptr;
       ID3D11PixelShader *pixel_shader = nullptr;
       const queued_ticket_t *queued = nullptr;
       ID3D11ShaderResourceView *queued_transaction = nullptr;
@@ -4727,12 +4714,15 @@ namespace platf::dxgi {
 
     [[nodiscard]] sbs_draw_geometry_t select_sbs_draw_geometry(
       const queued_draw_t &queued_draw,
-      matched_frame_slot_t *matched_slot,
+      matched_frame_slot_t *matched_capture,
+      const matched_frame_attribution_t *retained_attribution,
       const models::depth_observation_views_t *completed
     ) noexcept {
+      const auto *matched_attribution = matched_capture ? &matched_capture->attribution : retained_attribution;
       if (const auto *ticket = queued_draw.ticket) {
         return {
-          .source_slot = queued_draw.source,
+          .source_attribution = queued_draw.source ? &queued_draw.source->attribution : nullptr,
+          .source_capture = queued_draw.source,
           .pixel_shader = queued_draw.pixel_shader,
           .queued = ticket,
           .queued_transaction = ticket->transaction_raw.Get(),
@@ -4753,7 +4743,8 @@ namespace platf::dxgi {
       }
       if (completed) {
         return {
-          .source_slot = matched_slot,
+          .source_attribution = matched_attribution,
+          .source_capture = matched_capture,
           .pixel_shader = sbs_reprojection_v2_live_ps.get(),
           .region = &completed->input_region,
           .field_content = &completed->field_content,
@@ -4771,7 +4762,11 @@ namespace platf::dxgi {
           .subtitle_suppressed = completed->subtitle_work_suppressed,
         };
       }
-      return {.source_slot = matched_slot, .pixel_shader = sbs_flat_identity_ps.get()};
+      return {
+        .source_attribution = matched_attribution,
+        .source_capture = matched_capture,
+        .pixel_shader = sbs_flat_identity_ps.get(),
+      };
     }
 
     [[gnu::noinline]] int convert_with_queued_research(
@@ -4839,7 +4834,7 @@ namespace platf::dxgi {
       models::input_color_space input_color_space
     ) const;
 
-    void emit_converter_probe(actual_converter_probe_v1::event_t event, const matched_frame_slot_t *slot, const models::depth_observation_views_t *result, const models::queued_same_source_gpu_continuation_research_views_t *ticket, ID3D11ShaderResourceView *selected, ID3D11ShaderResourceView *current, std::uint64_t conversion, const sbs_draw_colour_t *colour = nullptr) noexcept {
+    void emit_converter_probe(actual_converter_probe_v1::event_t event, const matched_frame_attribution_t *slot, const models::depth_observation_views_t *result, const models::queued_same_source_gpu_continuation_research_views_t *ticket, ID3D11ShaderResourceView *selected, ID3D11ShaderResourceView *current, std::uint64_t conversion, const sbs_draw_colour_t *colour = nullptr) noexcept {
       if (!probe_observer.record) { return; }
       const auto now = std::chrono::steady_clock::now();
       event.host_event_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
@@ -4856,13 +4851,13 @@ namespace platf::dxgi {
         event.buffers[2] = queued_research->guard_constants.get();
       }
       for (std::size_t i=0;i<matched_frame_slots.size();++i) {
-        const auto &s = matched_frame_slots[i]; event.slot_frames[i]=s.frame_id;
+        const auto &s = matched_frame_slots[i]; event.slot_frames[i]=s.attribution.frame_id;
         event.slot_pending[i] = &s == pending_matched_frame;
         event.pending_slots += event.slot_pending[i] ? 1u : 0u;
-        event.slot_observations[i]=host_sbs_observation_timestamp_us(s.captured_at);
-        event.slot_contexts[i]=s.subtitle_context_generation;
+        event.slot_observations[i]=host_sbs_observation_timestamp_us(s.attribution.captured_at);
+        event.slot_contexts[i]=s.attribution.subtitle_context_generation;
         event.slot_source_addresses[i]=reinterpret_cast<std::uintptr_t>(s.srv.get());
-        if (&s==slot) { event.selected_slot=static_cast<std::uint32_t>(i); }
+        if (&s.attribution == slot) { event.selected_slot=static_cast<std::uint32_t>(i); }
       }
       if (slot) {
         event.model_frame=slot->frame_id; event.copied_at_ticks=slot->captured_at.time_since_epoch().count();
@@ -4943,7 +4938,7 @@ namespace platf::dxgi {
 
     struct latest_v2_lineage_t {
       host_sbs::observation_handoff_t completion;
-      matched_frame_slot_t slot;
+      matched_frame_attribution_t attribution;
       std::optional<models::host_sbs_gpu_completion_receipt::receipt_t> receipt;
 
       [[nodiscard]] const models::depth_observation_views_t &estimate() const noexcept {
@@ -4960,11 +4955,6 @@ namespace platf::dxgi {
       }
 
       D3D11_TEXTURE2D_DESC completed_source_desc {};
-      std::uint64_t root_authority_generation = 0u;
-      std::uint64_t region_authority_generation = 0u;
-      std::uint64_t browser_authority_epoch = 0u;
-      bool interactive_move_size = false;
-
       void reset() noexcept {
         *this = {};
       }
@@ -4972,25 +4962,19 @@ namespace platf::dxgi {
       [[nodiscard]] bool route_matches(
         const D3D11_TEXTURE2D_DESC &source_desc,
         const models::input_color_space current_color_space,
-        const std::uint64_t current_root_authority_generation,
-        const std::uint64_t current_region_authority_generation,
-        const std::uint64_t current_browser_authority_epoch,
-        const bool current_interactive_move_size
+        const models::host_subtitle_context::presentation_authority_t current_authority
       ) const noexcept {
         const auto &estimate = this->estimate();
         return authenticated() && estimate.completed_frame_valid &&
-               estimate.completed_frame_id == slot.frame_id && estimate.shadow_base_final_parallax &&
+               estimate.completed_frame_id == attribution.frame_id && estimate.shadow_base_final_parallax &&
                estimate.shadow_state && estimate.input_region.valid() &&
                depth_completion_region_matches_submission(
                  estimate,
-                 slot.depth_input_region
+                 attribution.depth_input_region
                ) &&
-               slot.inference_content_timestamp && slot.color_space == current_color_space &&
+               attribution.inference_content_timestamp && attribution.color_space == current_color_space &&
                source_signatures_match(completed_source_desc, source_desc) &&
-               root_authority_generation == current_root_authority_generation &&
-               region_authority_generation == current_region_authority_generation &&
-               browser_authority_epoch == current_browser_authority_epoch &&
-               interactive_move_size == current_interactive_move_size;
+               attribution.observed_authority == current_authority;
       }
     };
 
@@ -5011,54 +4995,6 @@ namespace platf::dxgi {
     ) noexcept {
       return slot.texture && source_signatures_match(slot.texture.description(), source_desc);
     }
-
-    static void copy_matched_frame_attribution(
-      matched_frame_slot_t &destination,
-      const matched_frame_slot_t &source
-    ) {
-      destination.release_capture_image();
-      destination.texture.reset();
-      destination.srv.reset();
-      destination.frame_id = source.frame_id;
-      destination.color_space = source.color_space;
-      destination.source_timestamp = source.source_timestamp;
-      destination.content_timestamp = source.content_timestamp;
-      destination.inference_content_timestamp = source.inference_content_timestamp;
-      destination.inference_ddup_damage = source.inference_ddup_damage;
-      destination.temporal_source = source.temporal_source;
-      destination.unchanged_roi_proof = source.unchanged_roi_proof;
-      destination.captured_at = source.captured_at;
-      destination.window_region = source.window_region;
-      destination.depth_video_plan = source.depth_video_plan;
-      destination.depth_input_region = source.depth_input_region;
-      destination.window_region_observer_status = source.window_region_observer_status;
-      destination.window_region_mapping_status = source.window_region_mapping_status;
-      destination.live_window_authority_generation =
-        source.live_window_authority_generation;
-      destination.live_browser_authority_generation =
-        source.live_browser_authority_generation;
-      destination.live_browser_screen_left = source.live_browser_screen_left;
-      destination.live_browser_screen_top = source.live_browser_screen_top;
-      destination.live_browser_screen_right = source.live_browser_screen_right;
-      destination.live_browser_screen_bottom = source.live_browser_screen_bottom;
-      destination.live_browser_geometry_valid_since =
-        source.live_browser_geometry_valid_since;
-      destination.live_browser_authority_class = source.live_browser_authority_class;
-      destination.observed_root_authority_generation =
-        source.observed_root_authority_generation;
-      destination.observed_region_authority_generation =
-        source.observed_region_authority_generation;
-      destination.observed_browser_authority_epoch =
-        source.observed_browser_authority_epoch;
-      destination.observed_interactive_move_size = source.observed_interactive_move_size;
-      destination.subtitle_context_generation = source.subtitle_context_generation;
-      destination.subtitle_context_eligible = source.subtitle_context_eligible;
-      destination.subtitle_context_suppression_eligible = source.subtitle_context_suppression_eligible;
-      destination.subtitle_line_policy = source.subtitle_line_policy;
-      destination.probe_instance = source.probe_instance;
-      destination.gpu_undecided_transaction = source.gpu_undecided_transaction;
-    }
-
 
     // Explicit current-outline shared-renderer activation before the first input.
     bool configure_selected_matte_for_instance(const models::subtitle_selected_matte_research_configuration_t &cfg,std::string &error) {
@@ -5090,13 +5026,13 @@ namespace platf::dxgi {
       temporal_source_bridge_enabled=true;return true;
     }
     models::host_sbs_temporal_source_bridge::domain_t temporal_domain_for_slot(
-      const matched_frame_slot_t &slot,const D3D11_TEXTURE2D_DESC &desc) const {
+      const matched_frame_attribution_t &slot,const D3D11_TEXTURE2D_DESC &desc) const {
       models::host_sbs_temporal_source_bridge::domain_t d;
       d.source_width=desc.Width;d.source_height=desc.Height;d.format=desc.Format;d.transfer=static_cast<std::uint32_t>(slot.color_space);
       d.mip_levels=desc.MipLevels;d.array_size=desc.ArraySize;d.samples=desc.SampleDesc.Count;d.quality=desc.SampleDesc.Quality;
       const auto &r=slot.depth_input_region;d.analysis_ltrb={r.left,r.top,r.right,r.bottom};d.authority=static_cast<std::uint32_t>(r.authority);
       d.analysis_generation=r.analysis_generation;d.context_generation=slot.subtitle_context_generation;
-      d.root_authority_generation=slot.observed_root_authority_generation;d.region_authority_generation=slot.observed_region_authority_generation;d.browser_epoch=slot.observed_browser_authority_epoch;return d;
+      d.root_authority_generation=slot.observed_authority.foreground_generation;d.region_authority_generation=slot.observed_authority.region_generation;d.browser_epoch=slot.observed_authority.browser_epoch;return d;
     }
     void observe_temporal_capture(const D3D11_TEXTURE2D_DESC &desc,models::input_color_space transfer,
       const std::optional<std::chrono::steady_clock::time_point>&source,const std::optional<std::chrono::steady_clock::time_point>&content,
@@ -5128,7 +5064,7 @@ namespace platf::dxgi {
       if(temporal_current_source.valid()){temporal_previous_damage=damage;temporal_previous_cursor=cursor;temporal_previous_source=source;temporal_previous_content=content;}
     }
     models::host_sbs_temporal_source_bridge::certificate_t freeze_temporal_source(
-      const matched_frame_slot_t &slot,const D3D11_TEXTURE2D_DESC &desc) {
+      const matched_frame_attribution_t &slot,const D3D11_TEXTURE2D_DESC &desc) {
       const auto d=temporal_domain_for_slot(slot,desc);
       if(!slot.subtitle_context_eligible||!d.valid()){temporal_source_ledger.uncertain_interval();temporal_source_domain_active=false;return {};}
       if(!temporal_source_domain_active||d!=temporal_source_domain){
@@ -5149,7 +5085,7 @@ namespace platf::dxgi {
 
     [[nodiscard]] static bool gpu_transaction_class_matches(
       const models::depth_observation_views_t &estimate,
-      const matched_frame_slot_t &slot
+      const matched_frame_attribution_t &slot
     ) noexcept {
       return estimate.gpu_undecided_completion == slot.gpu_undecided_transaction;
     }
@@ -5178,26 +5114,26 @@ namespace platf::dxgi {
     }
 
     [[nodiscard]] detail::host_sbs_ddup_reuse_proof_e matched_input_reuse_kind(
-      const matched_frame_slot_t &slot,
+      const matched_frame_attribution_t &attribution,
       const std::optional<std::chrono::steady_clock::time_point> &current_content,
       const std::optional<detail::ddup_damage_snapshot_t> &current_damage
     ) const noexcept {
-      const auto region = damage_region(slot.depth_input_region);
+      const auto region = damage_region(attribution.depth_input_region);
       if (!region) {
         return detail::host_sbs_ddup_reuse_proof_e::none;
       }
-      if (slot.depth_input_region.is_video_region()) {
-        if (!slot.inference_content_timestamp || !current_content || !slot.unchanged_roi_proof.observe(current_damage, *region)) {
+      if (attribution.depth_input_region.is_video_region()) {
+        if (!attribution.inference_content_timestamp || !current_content || !attribution.unchanged_roi_proof.observe(current_damage, *region)) {
           return detail::host_sbs_ddup_reuse_proof_e::none;
         }
-        return slot.inference_content_timestamp == current_content ?
+        return attribution.inference_content_timestamp == current_content ?
                  detail::host_sbs_ddup_reuse_proof_e::content_clock :
                  detail::host_sbs_ddup_reuse_proof_e::roi_damage;
       }
       return detail::classify_host_sbs_ddup_reuse(
-        slot.inference_content_timestamp,
-        slot.inference_ddup_damage,
-        slot.depth_input_region.is_video_region(),
+        attribution.inference_content_timestamp,
+        attribution.inference_ddup_damage,
+        attribution.depth_input_region.is_video_region(),
         *region,
         current_content,
         current_damage
@@ -5208,101 +5144,102 @@ namespace platf::dxgi {
      * poll. B owns complete DDup source continuity; the receipt separately names actual depth A.
      */
     [[nodiscard]] bool gpu_undecided_candidate_matches(
-      matched_frame_slot_t &candidate,
+      matched_frame_slot_t &slot,
       const D3D11_TEXTURE2D_DESC &source_desc
     ) const noexcept {
-      const auto current_root_generation = authority_generation(live_window_authority);
-      const auto current_region_generation = authority_generation(live_foreground_region);
-      const auto &baseline = latest_v2_lineage.slot;
+      const auto current_authority = live_presentation_authority();
+      const auto &candidate = slot.attribution;
+      const auto &baseline = latest_v2_lineage.attribution;
       if (!latest_v2_lineage.known_depth() || candidate.frame_id <= baseline.frame_id ||
-          candidate.observed_interactive_move_size || pending_matched_frame ||
-          !candidate.inference_content_timestamp || candidate.inference_content_timestamp == baseline.inference_content_timestamp || !candidate.inference_ddup_damage || !baseline.inference_ddup_damage || candidate.inference_ddup_damage->history != baseline.inference_ddup_damage->history || baseline.inference_ddup_damage->token == 0u || candidate.inference_ddup_damage->token <= baseline.inference_ddup_damage->token || candidate.depth_input_region != baseline.depth_input_region || candidate.color_space != baseline.color_space || !matched_route_matches_current(candidate, source_desc, candidate.color_space, current_root_generation, current_region_generation, live_browser_authority_epoch, interactive_move_size_observed) || !latest_v2_lineage_route_matches_current(source_desc, candidate.color_space, current_root_generation, current_region_generation, live_browser_authority_epoch, interactive_move_size_observed)) {
+          candidate.observed_authority.interactive_move_size || pending_matched_frame ||
+          !candidate.inference_content_timestamp ||
+          candidate.inference_content_timestamp == baseline.inference_content_timestamp ||
+          !candidate.inference_ddup_damage || !baseline.inference_ddup_damage ||
+          candidate.inference_ddup_damage->history != baseline.inference_ddup_damage->history ||
+          baseline.inference_ddup_damage->token == 0u ||
+          candidate.inference_ddup_damage->token <= baseline.inference_ddup_damage->token ||
+          candidate.depth_input_region != baseline.depth_input_region || candidate.color_space != baseline.color_space ||
+          !matched_route_matches_current(slot, source_desc, candidate.color_space, current_authority) ||
+          !latest_v2_lineage_route_matches_current(source_desc, candidate.color_space, current_authority)) {
         return false;
       }
       return baseline.inference_content_timestamp && damage_region(baseline.depth_input_region) &&
              detail::has_complete_ddup_damage_between(baseline.inference_ddup_damage, candidate.inference_ddup_damage);
     }
 
+    [[nodiscard]] models::host_subtitle_context::presentation_authority_t live_presentation_authority() const noexcept {
+      return {
+        authority_generation(live_window_authority),
+        authority_generation(live_foreground_region),
+        live_browser_authority_epoch,
+        interactive_move_size_observed,
+      };
+    }
+
     [[nodiscard]] bool matched_route_matches_current(
       matched_frame_slot_t &slot,
       const D3D11_TEXTURE2D_DESC &source_desc,
       const models::input_color_space current_color_space,
-      const std::uint64_t current_root_authority_generation,
-      const std::uint64_t current_region_authority_generation,
-      const std::uint64_t current_browser_authority_epoch,
-      const bool current_interactive_move_size
+      const models::host_subtitle_context::presentation_authority_t current_authority
     ) const noexcept {
+      const auto &attribution = slot.attribution;
       if (
-        !subtitle_context.matches(slot.subtitle_context_generation) ||
-        !slot.depth_input_region.valid() ||
-        slot.depth_input_region.source_width != source_desc.Width ||
-        slot.depth_input_region.source_height != source_desc.Height ||
+        !subtitle_context.matches(attribution.subtitle_context_generation) ||
+        !attribution.depth_input_region.valid() ||
+        attribution.depth_input_region.source_width != source_desc.Width ||
+        attribution.depth_input_region.source_height != source_desc.Height ||
         !matched_source_signature_matches(slot, source_desc) ||
-        slot.color_space != current_color_space ||
-        slot.observed_root_authority_generation != current_root_authority_generation ||
-        slot.observed_region_authority_generation != current_region_authority_generation ||
-        slot.observed_browser_authority_epoch != current_browser_authority_epoch ||
-        slot.observed_interactive_move_size != current_interactive_move_size
+        attribution.color_space != current_color_space ||
+        attribution.observed_authority != current_authority
       ) {
         return false;
       }
-      return (!slot.depth_input_region.is_video_region() && !slot.subtitle_context_eligible) ||
-             window_region_authorized_for_render(slot);
+      return (!attribution.depth_input_region.is_video_region() && !attribution.subtitle_context_eligible) ||
+             window_region_authorized_for_render(attribution);
     }
 
     [[nodiscard]] bool latest_v2_lineage_route_matches_current(
       const D3D11_TEXTURE2D_DESC &source_desc,
       const models::input_color_space current_color_space,
-      const std::uint64_t current_root_authority_generation,
-      const std::uint64_t current_region_authority_generation,
-      const std::uint64_t current_browser_authority_epoch,
-      const bool current_interactive_move_size
+      const models::host_subtitle_context::presentation_authority_t current_authority
     ) const noexcept {
-      return depth_estimator && subtitle_context.matches(latest_v2_lineage.slot.subtitle_context_generation) &&
+      return depth_estimator && subtitle_context.matches(latest_v2_lineage.attribution.subtitle_context_generation) &&
              depth_estimator->publication_is_current(latest_v2_lineage.estimate().publication) &&
              latest_v2_lineage.route_matches(
                source_desc,
                current_color_space,
-               current_root_authority_generation,
-               current_region_authority_generation,
-               current_browser_authority_epoch,
-               current_interactive_move_size
+               current_authority
              ) &&
-             ((!latest_v2_lineage.slot.depth_input_region.is_video_region() &&
-               !latest_v2_lineage.slot.subtitle_context_eligible) ||
-              window_region_authorized_for_render(latest_v2_lineage.slot));
+             ((!latest_v2_lineage.attribution.depth_input_region.is_video_region() &&
+               !latest_v2_lineage.attribution.subtitle_context_eligible) ||
+              window_region_authorized_for_render(latest_v2_lineage.attribution));
     }
 
     [[nodiscard]] bool retain_latest_v2_lineage(
       const host_sbs::observation_handoff_t &observation,
-      const matched_frame_slot_t &slot,
+      const matched_frame_attribution_t &attribution,
       const D3D11_TEXTURE2D_DESC &completed_source_desc,
       const D3D11_TEXTURE2D_DESC &current_source_desc,
       const models::input_color_space current_color_space
     ) {
       const auto &estimate = observation.step().observation;
       const bool completion_route_matches_current =
-        subtitle_context.matches(slot.subtitle_context_generation) &&
-        slot.inference_content_timestamp && estimate.completed_frame_id == slot.frame_id &&
-        depth_completion_region_matches_submission(estimate, slot.depth_input_region) &&
-        estimate.color_space == slot.color_space && estimate.color_space == current_color_space &&
+        subtitle_context.matches(attribution.subtitle_context_generation) &&
+        attribution.inference_content_timestamp && estimate.completed_frame_id == attribution.frame_id &&
+        depth_completion_region_matches_submission(estimate, attribution.depth_input_region) &&
+        estimate.color_space == attribution.color_space && estimate.color_space == current_color_space &&
         estimate.input_region.source_width == completed_source_desc.Width &&
         estimate.input_region.source_height == completed_source_desc.Height &&
         source_signatures_match(completed_source_desc, current_source_desc) &&
-        slot.observed_root_authority_generation ==
-          authority_generation(live_window_authority) &&
-        slot.observed_region_authority_generation ==
-          authority_generation(live_foreground_region) &&
-        slot.observed_browser_authority_epoch == live_browser_authority_epoch &&
-        slot.observed_interactive_move_size == interactive_move_size_observed &&
-        (!slot.subtitle_context_eligible || window_region_authorized_for_render(slot)) &&
-        (!slot.depth_input_region.is_video_region() ||
-         (slot.inference_ddup_damage && window_region_authorized_for_render(slot)));
+        attribution.observed_authority == live_presentation_authority() &&
+        (!attribution.subtitle_context_eligible || window_region_authorized_for_render(attribution)) &&
+        (!attribution.depth_input_region.is_video_region() ||
+         (attribution.inference_ddup_damage && window_region_authorized_for_render(attribution)));
       if (!detail::host_sbs_latest_v2_completion_retention_allowed(
             host_sbs_renderer == models::host_sbs_renderer_e::parallax_v2,
             observation.authenticate_structure(),
             completion_route_matches_current,
-            gpu_transaction_class_matches(estimate, slot)
+            gpu_transaction_class_matches(estimate, attribution)
           )) {
         latest_v2_lineage.reset();
         return false;
@@ -5314,18 +5251,10 @@ namespace platf::dxgi {
       // Retain observation views and diagnostic status only. Repeated presentation cannot
       // replay a submission or a completion event because neither belongs to this cache.
       latest_v2_lineage.completion.select_retained(observation);
-      // The cache renders current color, independently of the retained matched image. Retain only the scalar
-      // attribution needed by the V2 renderer; matched slots own move-only D3D resources.
-      copy_matched_frame_attribution(latest_v2_lineage.slot, slot);
+      // The cached draw uses current color. Copy the submitted attribution, including its
+      // independent rolling ROI proof. Physical capture ownership stays with the matched slot.
+      latest_v2_lineage.attribution = attribution;
       latest_v2_lineage.completed_source_desc = completed_source_desc;
-      latest_v2_lineage.root_authority_generation =
-        slot.observed_root_authority_generation;
-      latest_v2_lineage.region_authority_generation =
-        slot.observed_region_authority_generation;
-      latest_v2_lineage.browser_authority_epoch =
-        slot.observed_browser_authority_epoch;
-      latest_v2_lineage.interactive_move_size =
-        slot.observed_interactive_move_size;
       return true;
     }
 
@@ -5710,7 +5639,7 @@ namespace platf::dxgi {
           BOOST_LOG(info)
             << "Host SBS selected full-source 3D for an interactive foreground-window "sv
                "move/resize."sv;
-          if (pending_matched_frame && pending_matched_frame->depth_input_region.is_video_region()) {
+          if (pending_matched_frame && pending_matched_frame->attribution.depth_input_region.is_video_region()) {
             // Consuming this exact-source ROI completion does not enqueue a replacement. Ask
             // the retained-source owner for one more conversion so full-source depth starts
             // even if USER32 stops producing desktop damage during the modal move loop.
@@ -6078,7 +6007,7 @@ namespace platf::dxgi {
     }
 
     bool window_region_authorized_for_render(
-      const matched_frame_slot_t &slot
+      const matched_frame_attribution_t &slot
     ) const noexcept {
       if (probe_context) {
         return slot.probe_instance == probe_context->instance && slot.probe_instance != 0u &&
@@ -6114,7 +6043,7 @@ namespace platf::dxgi {
     }
 
     void select_depth_input_region(
-      matched_frame_slot_t &slot,
+      matched_frame_attribution_t &slot,
       const D3D11_TEXTURE2D_DESC &source_desc,
       const bool finalize_full_source = true
     ) {
@@ -6432,7 +6361,7 @@ namespace platf::dxgi {
              left.document_id == right.document_id && left.video_id == right.video_id;
     }
 
-    void publish_window_region_transition(const matched_frame_slot_t &slot) {
+    void publish_window_region_transition(const matched_frame_attribution_t &slot) {
       const bool observer_state_changed =
         !last_window_region_observer_status ||
         *last_window_region_observer_status != slot.window_region_observer_status ||
@@ -6612,22 +6541,23 @@ namespace platf::dxgi {
       // retained pixels once without letting post-drag ROI causality block completion retirement.
       const bool preexisting_force_full_source =
         depth_authority_reprocess_pending || initial_interactive_move_size;
+      auto &attribution = slot.attribution;
       const auto attributed_at = std::chrono::steady_clock::now();
-      slot.frame_id = frame_id;
-      slot.color_space = color_space;
-      slot.source_timestamp = source_timestamp;
-      slot.content_timestamp = content_timestamp;
-      slot.inference_content_timestamp = content_timestamp;
-      slot.inference_ddup_damage = std::move(ddup_damage);
+      attribution.frame_id = frame_id;
+      attribution.color_space = color_space;
+      attribution.source_timestamp = source_timestamp;
+      attribution.content_timestamp = content_timestamp;
+      attribution.inference_content_timestamp = content_timestamp;
+      attribution.inference_ddup_damage = std::move(ddup_damage);
       // Source age bounds older matched completions. Packed-pixel continuity separately excludes
       // exact-static time before its first changed source. Age diagnostics remain opt-in.
-      slot.captured_at = captured_at;
-      slot.window_region.reset();
-      slot.window_region_observer_status = "not-observed";
-      slot.window_region_mapping_status = "not-mapped";
-      slot.live_browser_geometry_valid_since = {};
+      attribution.captured_at = captured_at;
+      attribution.window_region.reset();
+      attribution.window_region_observer_status = "not-observed";
+      attribution.window_region_mapping_status = "not-mapped";
+      attribution.live_browser_geometry_valid_since = {};
       if (initial_interactive_move_size) {
-        slot.window_region_observer_status = foreground_window::status_name(
+        attribution.window_region_observer_status = foreground_window::status_name(
           foreground_window::status_e::interactive_move_size
         );
       }
@@ -6647,8 +6577,8 @@ namespace platf::dxgi {
         // The captured desktop content predates this same-size programmatic move. Desktop
         // Duplication may never publish another content timestamp after the move, so submit this
         // exact frame through full-source V2 instead of starving depth indefinitely.
-        slot.window_region_observer_status = "causal-wait-full-source";
-        slot.window_region_mapping_status = "not-mapped";
+        attribution.window_region_observer_status = "causal-wait-full-source";
+        attribution.window_region_mapping_status = "not-mapped";
       }
       auto browser_region = force_full_source ?
                               std::optional<sbs_debug::window_region_snapshot> {} :
@@ -6678,14 +6608,14 @@ namespace platf::dxgi {
       }
 
       if (browser_region) {
-        slot.window_region = std::move(browser_region);
-        slot.window_region_observer_status = video_dom::status_name(browser_status);
-        slot.window_region_mapping_status =
+        attribution.window_region = std::move(browser_region);
+        attribution.window_region_observer_status = video_dom::status_name(browser_status);
+        attribution.window_region_mapping_status =
           video_dom::mapping_status_name(browser_mapping_status);
       } else if (!force_full_source) {
         std::string_view foreground_observer_status;
         std::string_view foreground_mapping_status;
-        slot.window_region = capture_foreground_window_region(
+        attribution.window_region = capture_foreground_window_region(
           source_desc,
           frame_id,
           content_timestamp,
@@ -6694,27 +6624,27 @@ namespace platf::dxgi {
           foreground_observer_status,
           foreground_mapping_status
         );
-        slot.window_region_observer_status = foreground_observer_status;
-        slot.window_region_mapping_status = foreground_mapping_status;
+        attribution.window_region_observer_status = foreground_observer_status;
+        attribution.window_region_mapping_status = foreground_mapping_status;
       }
       const bool retry_foreground_after_browser =
-        slot.window_region &&
-        slot.window_region->authority_kind ==
+        attribution.window_region &&
+        attribution.window_region->authority_kind ==
           sbs_debug::window_region_authority_kind_e::chromium_video &&
         !(
-          slot.window_region->left == 0 && slot.window_region->top == 0 &&
-          slot.window_region->right == slot.window_region->source_width &&
-          slot.window_region->bottom == slot.window_region->source_height
+          attribution.window_region->left == 0 && attribution.window_region->top == 0 &&
+          attribution.window_region->right == attribution.window_region->source_width &&
+          attribution.window_region->bottom == attribution.window_region->source_height
         );
       select_depth_input_region(
-        slot,
+        attribution,
         source_desc,
         !retry_foreground_after_browser
       );
-      if (!slot.depth_input_region.is_video_region() && retry_foreground_after_browser) {
+      if (!attribution.depth_input_region.is_video_region() && retry_foreground_after_browser) {
         std::string_view foreground_observer_status;
         std::string_view foreground_mapping_status;
-        slot.window_region = capture_foreground_window_region(
+        attribution.window_region = capture_foreground_window_region(
           source_desc,
           frame_id,
           content_timestamp,
@@ -6723,38 +6653,38 @@ namespace platf::dxgi {
           foreground_observer_status,
           foreground_mapping_status
         );
-        slot.window_region_observer_status = foreground_observer_status;
-        slot.window_region_mapping_status = foreground_mapping_status;
-        select_depth_input_region(slot, source_desc);
+        attribution.window_region_observer_status = foreground_observer_status;
+        attribution.window_region_mapping_status = foreground_mapping_status;
+        select_depth_input_region(attribution, source_desc);
       }
-      slot.live_window_authority_generation =
-        slot.window_region && window_region_matches_live_authority(*slot.window_region) ?
+      attribution.live_window_authority_generation =
+        attribution.window_region && window_region_matches_live_authority(*attribution.window_region) ?
           (
-            slot.window_region->authority_kind ==
+            attribution.window_region->authority_kind ==
                 sbs_debug::window_region_authority_kind_e::chromium_video ?
               live_window_authority->generation :
               live_foreground_region->generation
           ) :
           0u;
-      slot.live_browser_authority_generation =
-        slot.window_region &&
-            slot.window_region->authority_kind ==
+      attribution.live_browser_authority_generation =
+        attribution.window_region &&
+            attribution.window_region->authority_kind ==
               sbs_debug::window_region_authority_kind_e::chromium_video ?
           matched_authority.browser_authority_epoch :
           0u;
-      if (slot.live_browser_authority_generation != 0u && video_dom_lease) {
+      if (attribution.live_browser_authority_generation != 0u && video_dom_lease) {
         if (matched_authority.browser_authority) {
-          slot.live_browser_screen_left =
+          attribution.live_browser_screen_left =
             matched_authority.browser_authority->screen_rect.left;
-          slot.live_browser_screen_top =
+          attribution.live_browser_screen_top =
             matched_authority.browser_authority->screen_rect.top;
-          slot.live_browser_screen_right =
+          attribution.live_browser_screen_right =
             matched_authority.browser_authority->screen_rect.right;
-          slot.live_browser_screen_bottom =
+          attribution.live_browser_screen_bottom =
             matched_authority.browser_authority->screen_rect.bottom;
-          slot.live_browser_geometry_valid_since =
+          attribution.live_browser_geometry_valid_since =
             matched_authority.browser_authority->geometry_valid_since;
-          slot.live_browser_authority_class =
+          attribution.live_browser_authority_class =
             video_dom::geometry_authority_class(
               matched_authority.browser_authority->status
             );
@@ -6763,56 +6693,56 @@ namespace platf::dxgi {
       // Capture the complete live route epoch even for a full-source frame. A later unchanged-
       // content reuse may retain that geometry only while the same focus/ROI/move authority is
       // still live; otherwise a new matched copy must select the current route.
-      slot.observed_root_authority_generation =
-        authority_generation(live_window_authority);
-      slot.observed_region_authority_generation =
-        authority_generation(live_foreground_region);
-      slot.observed_browser_authority_epoch = matched_authority.browser_authority_epoch;
-      slot.observed_interactive_move_size = interactive_move_size_observed;
-      slot.subtitle_context_generation = subtitle_context.generation();
-      slot.subtitle_context_suppression_eligible =
-        slot.observed_interactive_move_size && subtitle_context.eligible();
-      slot.probe_instance = probe_context ? probe_context->instance : 0u;
-      slot.subtitle_line_policy =
+      attribution.observed_authority = {
+        authority_generation(live_window_authority),
+        authority_generation(live_foreground_region),
+        matched_authority.browser_authority_epoch,
+        interactive_move_size_observed,
+      };
+      attribution.subtitle_context_generation = subtitle_context.generation();
+      attribution.subtitle_context_suppression_eligible =
+        attribution.observed_authority.interactive_move_size && subtitle_context.eligible();
+      attribution.probe_instance = probe_context ? probe_context->instance : 0u;
+      attribution.subtitle_line_policy =
         models::host_subtitle_context::requires_centered_lines(subtitle_context.kind()) ?
           models::subtitle_line_policy_e::video_caption :
           models::subtitle_line_policy_e::application_text;
-      slot.subtitle_context_eligible = probe_context ?
+      attribution.subtitle_context_eligible = probe_context ?
         subtitle_context.eligible() && source_desc.Width == probe_context->width && source_desc.Height == probe_context->height :
-        subtitle_context.eligible() && slot.window_region &&
-        window_region_matches_live_authority(*slot.window_region) &&
+        subtitle_context.eligible() && attribution.window_region &&
+        window_region_matches_live_authority(*attribution.window_region) &&
         ((subtitle_context.kind() == models::host_subtitle_context::kind_e::browser_video) ==
-         (slot.window_region->authority_kind == sbs_debug::window_region_authority_kind_e::chromium_video));
-      if (slot.depth_input_region.is_video_region() && slot.live_window_authority_generation == 0u) {
-        slot.window_region.reset();
-        slot.window_region_observer_status = "not-observed";
-        slot.window_region_mapping_status = "not-mapped";
-        select_depth_input_region(slot, source_desc);
+         (attribution.window_region->authority_kind == sbs_debug::window_region_authority_kind_e::chromium_video));
+      if (attribution.depth_input_region.is_video_region() && attribution.live_window_authority_generation == 0u) {
+        attribution.window_region.reset();
+        attribution.window_region_observer_status = "not-observed";
+        attribution.window_region_mapping_status = "not-mapped";
+        select_depth_input_region(attribution, source_desc);
       }
       if (
         !sbs_telemetry_input_domain_valid ||
         // Telemetry admission is keyed before estimator submission, so both operands retain the
         // display-selected raster. Completed estimator/dump metadata carries est.input_region.
-        !slot.depth_input_region.same_analysis_domain(sbs_telemetry_input_region) ||
-        slot.color_space != sbs_telemetry_input_color_space
+        !attribution.depth_input_region.same_analysis_domain(sbs_telemetry_input_region) ||
+        attribution.color_space != sbs_telemetry_input_color_space
       ) {
         // Stop an old-domain staging readback from publishing while the renderer is deliberately
         // flat and waiting for this newly observed ROI/full/transfer domain. The first completion
         // in the new domain establishes the new health-counter baseline.
-        sbs_telemetry_input_region = slot.depth_input_region;
-        sbs_telemetry_input_color_space = slot.color_space;
+        sbs_telemetry_input_region = attribution.depth_input_region;
+        sbs_telemetry_input_color_space = attribution.color_space;
         sbs_telemetry_input_domain_valid = true;
         sbs_telemetry_min_frame_id = frame_id;
       }
-      slot.gpu_undecided_transaction = false;
-      const auto proof_region = damage_region(slot.depth_input_region);
-      if (slot.depth_input_region.is_video_region() && proof_region) {
-        slot.unchanged_roi_proof.reset(slot.inference_ddup_damage, *proof_region);
+      attribution.gpu_undecided_transaction = false;
+      const auto proof_region = damage_region(attribution.depth_input_region);
+      if (attribution.depth_input_region.is_video_region() && proof_region) {
+        attribution.unchanged_roi_proof.reset(attribution.inference_ddup_damage, *proof_region);
       } else {
-        slot.unchanged_roi_proof.reset();
+        attribution.unchanged_roi_proof.reset();
       }
-      slot.temporal_source={};
-      if(temporal_source_bridge_enabled)slot.temporal_source=freeze_temporal_source(slot,source_desc);
+      attribution.temporal_source={};
+      if(temporal_source_bridge_enabled)attribution.temporal_source=freeze_temporal_source(attribution,source_desc);
       return true;
     }
 
