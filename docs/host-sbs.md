@@ -1164,7 +1164,9 @@ their final matte union remains late. Each ROI publication replaces its own unit
 rejected pixels, while preserving other units. Glyph publication reads the current Inside image
 through its read-only view. The existing Inside finalizer owns full-image canonicalization against
 the completed glyph-publication result, current good units and covers, then unions that same kept
-value. Invalid publication clears the image before the finalizer's stricter readiness return.
+value. The finalizer validates the immutable frame, resource dimensions and receipt header once
+per workgroup. Invalid publication clears the image before the finalizer's stricter readiness
+return.
 No resource or dispatch is added. An unissued Raw graph's shared parent/flags scratch is not a
 current Raw result and can differ when this ordering changes.
 

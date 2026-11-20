@@ -150,14 +150,24 @@ void publish_inside_main(uint3 d:SV_DispatchThreadID){
     }
     if(updated!=old)InsideWrite[p]=updated;
 }
+groupshared bool InsideShapeValid;
+groupshared bool InsideFrameReady;
+
 [numthreads(16,16,1)]
-void finalize_main(uint3 d:SV_DispatchThreadID){
+void finalize_main(uint3 d:SV_DispatchThreadID,uint lane:SV_GroupIndex){
+    // This pass updates only pixel results and receipt counters. The frame proof is immutable.
+    if(lane==0u){
+        uint width,height;
+        InsideWrite.GetDimensions(width,height);
+        InsideShapeValid=all(uint2(width,height)==Shape.xy);
+        InsideFrameReady=InsideShapeValid&&FrameReadyRW();
+    }
+    GroupMemoryBarrierWithGroupSync();
     if(d.z!=0u||!Native(d.xy))return;
-    uint w,h;InsideWrite.GetDimensions(w,h);
-    bool insideShapeValid=all(uint2(w,h)==Shape.xy);uint kept=0u;
+    uint kept=0u;
     // Normalize the early current bits before any frame-readiness return.
     // This preserves the old publication cleanup, including its lack of77/78 gates.
-    if(insideShapeValid){
+    if(InsideShapeValid){
         uint old=InsideWrite[d.xy];
         if(old!=0u){
             bool publicationValid=DataRWShape();
@@ -168,9 +178,8 @@ void finalize_main(uint3 d:SV_DispatchThreadID){
             if(kept!=old)InsideWrite[d.xy]=kept;
         }
     }
-    bool ready=FrameReadyRW()&&insideShapeValid;
-    if(all(d.xy==0u)&&DataRWShape())StageWords.Store(83u*4u,ready?1u:0u);
-    if(!ready)return; // Existing141 currentpixel remains byte-exact.
+    if(all(d.xy==0u)&&DataRWShape())StageWords.Store(83u*4u,InsideFrameReady?1u:0u);
+    if(!InsideFrameReady)return; // Existing141 currentpixel remains byte-exact.
     uint inside=kept;uint before=MaskWrite[d.xy];uint ignored;
     if(inside!=0u)StageWords.InterlockedAdd(81u*4u,1u,ignored);
     if(before==0u&&inside!=0u){
