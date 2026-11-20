@@ -7172,8 +7172,8 @@ TEST(DirectxShaderSourceTest, PendingCompletionReusesThePreparedConstantBuffer) 
     EXPECT_EQ(helper.find(caller_owned), std::string::npos) << caller_owned;
   }
   const auto finish = estimator.substr(finish_begin, finish_end - finish_begin);
-  const auto finish_constants = finish.find("ensure_cbuffers(pending_color_space, pending_input_region);");
-  const auto finish_region = finish.find("ensure_source_region_cbuffer(pending_input_region);");
+  const auto finish_constants = finish.find("ensure_cbuffers(pending_root->color_space, pending_root->input_region);");
+  const auto finish_region = finish.find("ensure_source_region_cbuffer(pending_root->input_region);");
   const auto finish_timer = finish.find("begin_d3d_perf(true, false)");
   const auto finish_complete = finish.find("complete_ready_pending(");
   ASSERT_NE(finish_constants, std::string::npos);
@@ -7201,13 +7201,13 @@ TEST(DirectxShaderSourceTest, PendingCompletionReusesThePreparedConstantBuffer) 
   EXPECT_EQ(completion_setup.find("normalize_depth_output("), std::string::npos);
   EXPECT_NE(
     completion_setup.find(
-      "has_previous_frame ? pending_color_space : color_space"
+      "pending_root ? pending_root->color_space : color_space"
     ),
     std::string::npos
   );
   EXPECT_NE(
     completion_setup.find(
-      "has_previous_frame ? pending_input_region : input_region"
+      "pending_root ? pending_root->input_region : input_region"
     ),
     std::string::npos
   );
@@ -8491,10 +8491,10 @@ TEST(DirectxShaderSourceTest, OcrResolveConstantsAppendReferenceAndSourceObserva
   const auto layout = estimator.substr(initializer, initializer_end - initializer);
   std::size_t cursor = 0u;
   for (const auto *word : {
-         "static_cast<std::uint32_t>(pending_frame_id)",
-         "static_cast<std::uint32_t>(pending_frame_id >> 32u)",
-         "static_cast<std::uint32_t>(pending_input_region.analysis_generation)",
-         "static_cast<std::uint32_t>(pending_input_region.analysis_generation >> 32u)",
+         "static_cast<std::uint32_t>(pending_root->frame_id)",
+         "static_cast<std::uint32_t>(pending_root->frame_id >> 32u)",
+         "static_cast<std::uint32_t>(pending_root->input_region.analysis_generation)",
+         "static_cast<std::uint32_t>(pending_root->input_region.analysis_generation >> 32u)",
          "source_width", "source_height",
          "static_cast<std::uint32_t>(target_w)",
          "static_cast<std::uint32_t>(target_h)",
@@ -8505,9 +8505,9 @@ TEST(DirectxShaderSourceTest, OcrResolveConstantsAppendReferenceAndSourceObserva
          "std::bit_cast<std::uint32_t>(line_reference->center_twice_source)",
          "line_reference->width",
          "std::bit_cast<std::uint32_t>(line_reference->search_top_source)",
-         "static_cast<std::uint32_t>(pending_subtitle_line_policy)",
-         "static_cast<std::uint32_t>(pending_observation_timestamp_us)",
-         "static_cast<std::uint32_t>(pending_observation_timestamp_us >> 32u)",
+         "static_cast<std::uint32_t>(pending_root->subtitle_line_policy)",
+         "static_cast<std::uint32_t>(pending_root->observation_timestamp_us)",
+         "static_cast<std::uint32_t>(pending_root->observation_timestamp_us >> 32u)",
          "input_domain_reset ? 1u : 0u",
          "0u",
        }) {

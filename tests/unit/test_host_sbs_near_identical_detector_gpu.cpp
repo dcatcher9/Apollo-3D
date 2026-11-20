@@ -693,7 +693,7 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
     unified_submit.find("subtitle_work == cuda_conditional_graph::work_flag_e::optional_ocr"),
     std::string::npos
   );
-  EXPECT_NE(estimator.find("pending_subtitle_work = subtitle_work"), std::string::npos);
+  EXPECT_NE(estimator.find(".subtitle_work = subtitle_work"), std::string::npos);
   EXPECT_NE(unified_submit.find("depth_conditional_graph.get()"), std::string::npos);
   EXPECT_EQ(unified_submit.find("enqueueV3("), std::string::npos);
   EXPECT_EQ(unified_submit.find("depth_inference_graph.executable"), std::string::npos);
@@ -862,7 +862,8 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
     std::string::npos
   );
   EXPECT_NE(
-    estimator.find("return gpu_undecided_postprocess_pending() || pending_same_source_gpu_postprocess_queued;"),
+    estimator.find("return gpu_undecided_postprocess_pending() ||\n"
+                   "             (pending_root && pending_root->queued_input_domain_reset.has_value());"),
     std::string::npos
   );
   EXPECT_NE(dispatch_body.find("context->Dispatch(direct_x, direct_y, direct_z)"), std::string::npos);

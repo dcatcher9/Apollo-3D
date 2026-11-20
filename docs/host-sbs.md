@@ -2000,6 +2000,11 @@ later usable frame resumes the same coordinate, but outside the exact DDup proof
 pairs old per-pixel geometry with new color. Only an analysis-domain reset clears the adaptive
 geometry controller.
 
+The depth estimator records one accepted inference with its input domain, transaction identity and
+work disposition. Completion consumes that record after ordered postprocess and publication.
+The completed input metadata supports private diagnostics and the next subtitle-context check.
+Stream-wide CUDA failure tracking still covers work that may report an error after completion.
+
 Ordinary local and remote Host SBS use the encoder's shared view of the exact committed capture
 image for matched preprocessing and rendering. The current capture key covers reads issued in that
 conversion. An accepted root that is still pending at return retains its capture image, keeping that

@@ -7,7 +7,7 @@ bool independent_ocr_raw_pending = false;
 bool independent_ocr_raw_leased = false;
 bool independent_ocr_raw_mapped = false;
 std::optional<std::uint64_t> independent_ocr_eager_unmap_frame;
-bool independent_depth_release_deferred = false;
+std::optional<std::uint64_t> independent_depth_release_frame;
 bool independent_depth_events_valid = false;
 std::uint64_t independent_depth_event_sequence = 0u;
 CUstream independent_ocr_raw_stream = nullptr;
@@ -60,7 +60,7 @@ bool independent_raw_bind_and_capture(cuda_driver_api &cuda, CUdeviceptr input, 
             mailbox == independent_ocr_raw_mailbox_pointer && independent_ocr_raw_wrapper.ready()) ||
            independent_raw_fail(error, "OCR remap signature changed: private proof unavailable");
   }
-  if (has_previous_frame || independent_ocr_raw_wrapper.ready() || ocr_inference_graph.graph) {
+  if (pending_root || independent_ocr_raw_wrapper.ready() || ocr_inference_graph.graph) {
     return independent_raw_fail(error, "OCR bootstrap requires empty isolated graph ownership");
   }
   std::lock_guard<std::mutex> lock(g_trt_mutex);
@@ -277,7 +277,7 @@ bool independent_raw_submit(ID3D11ShaderResourceView *source, const raw_ocr_prob
 
 bool independent_raw_prepare(ID3D11ShaderResourceView *warm_source, const raw_ocr_probe_source_t &identity, std::string &error) {
   auto &cuda = cuda_driver_api::get();
-  if (!independent_ocr_raw_enabled || independent_ocr_raw_prepared || has_previous_frame || !is_operational() || !independent_raw_context_ok() || !warm_source || !identity.capture_epoch || !identity.capture_serial || !identity.capture_timestamp_us || !identity.source_width || !identity.source_height || identity.source_width > 5120u || identity.source_height > 5120u || !ocr_available || !ocr_exec_context || !ocr_preprocess_cs || !cuda_ocr_in_res || !cuda_ocr_out_res || !cuda.cuGraphInstantiateWithFlags || !cuda.cuStreamBeginCapture || !cuda.cuStreamEndCapture || !cuda.cuStreamSynchronize || !cuda.cuEventRecord || !cuda.cuEventQuery || cuda.cuCtxSetCurrent(cuda_ctx) != CUDA_SUCCESS) {
+  if (!independent_ocr_raw_enabled || independent_ocr_raw_prepared || pending_root || !is_operational() || !independent_raw_context_ok() || !warm_source || !identity.capture_epoch || !identity.capture_serial || !identity.capture_timestamp_us || !identity.source_width || !identity.source_height || identity.source_width > 5120u || identity.source_height > 5120u || !ocr_available || !ocr_exec_context || !ocr_preprocess_cs || !cuda_ocr_in_res || !cuda_ocr_out_res || !cuda.cuGraphInstantiateWithFlags || !cuda.cuStreamBeginCapture || !cuda.cuStreamEndCapture || !cuda.cuStreamSynchronize || !cuda.cuEventRecord || !cuda.cuEventQuery || cuda.cuCtxSetCurrent(cuda_ctx) != CUDA_SUCCESS) {
     return independent_raw_fail(error, "Private OCR prepare precondition unavailable");
   }
   independent_ocr_raw_source = identity;
@@ -385,12 +385,12 @@ CUresult independent_depth_release(cuda_driver_api &cuda, std::uint64_t frame) {
   if (unmapped != CUDA_SUCCESS) {
     return unmapped;
   }
-  independent_depth_release_deferred = false;
+  independent_depth_release_frame.reset();
   return record_inference_done_event(cuda, depth_inference_done_event, cu_stream, pending_depth_inference_event_recorded, "private depth release", false) ? CUDA_SUCCESS : static_cast<CUresult>(-1);
 }
 
 CUresult independent_depth_advance_release(cuda_driver_api &cuda, bool wait) {
-  if (!independent_depth_release_deferred) {
+  if (!independent_depth_release_frame) {
     return CUDA_SUCCESS;
   }
   if (!independent_depth_events_valid) {
@@ -401,9 +401,9 @@ CUresult independent_depth_advance_release(cuda_driver_api &cuda, bool wait) {
   }
   const auto ready = cuda.cuEventQuery(independent_depth_hold_event);
   if (benchmark_joined_completion_gate) {
-    benchmark_joined_completion_gate->note_actual_event_query(pending_frame_id, ready);
+    benchmark_joined_completion_gate->note_actual_event_query(*independent_depth_release_frame, ready);
   }
-  return ready == CUDA_SUCCESS ? independent_depth_release(cuda, pending_frame_id) : ready;
+  return ready == CUDA_SUCCESS ? independent_depth_release(cuda, *independent_depth_release_frame) : ready;
 }
 
 bool independent_raw_quiesce(cuda_driver_api &cuda) {
@@ -423,7 +423,7 @@ bool independent_raw_quiesce(cuda_driver_api &cuda) {
       std::this_thread::sleep_for(std::chrono::milliseconds {1});
     }
   }
-  if (independent_depth_release_deferred && independent_depth_advance_release(cuda, false) != CUDA_SUCCESS) {
+  if (independent_depth_release_frame && independent_depth_advance_release(cuda, false) != CUDA_SUCCESS) {
     return false;
   }
   return !independent_ocr_raw_mapped && (!cu_stream || cuda.cuStreamQuery(cu_stream) == CUDA_SUCCESS);

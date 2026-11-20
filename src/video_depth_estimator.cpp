@@ -3010,10 +3010,12 @@ namespace models {
     }
 
     void resolve_completed_branch_timing() {
-      // Both callers already proved this exact pending root complete. Branch events alone are
-      // insufficient: until graph execution reaches them they may still name the earlier launch.
+      if (!pending_root) {
+        return;
+      }
+      // The callers proved this exact root complete. Branch events can still name an earlier launch.
       const auto generation = pending_branch_timing.consume(
-        pending_wrapper_transaction_token, true
+        pending_root->transaction_token, true
       );
       if (!generation || *generation != sbs_perf::generation()) {
         return;
@@ -3530,10 +3532,7 @@ namespace models {
     // completed_contour, depth_observation_views_t, rendering, or production history.
     bool completed_ocr_conditioner_research_enabled = false;
     bool queued_same_source_gpu_continuation_research_enabled = false;
-    bool pending_same_source_gpu_postprocess_queued = false;
-    bool pending_same_source_gpu_input_domain_reset = false;
     std::uint64_t queued_same_source_gpu_ticket_sequence = 0u;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> pending_same_source_gpu_source;
 
     bool subtitle_cohort_research_enabled = false;
     bool subtitle_inner_colour_research_enabled = false;
@@ -3556,7 +3555,6 @@ namespace models {
     bool subtitle_temporal_source_enabled=false,subtitle_temporal_source_commands=false;
     std::uint64_t subtitle_temporal_source_epoch=0;
     subtitle_temporal_source_research_configuration_t subtitle_temporal_source_configuration;
-    host_sbs_temporal_source_bridge::certificate_t pending_source_observation;
     std::array<Microsoft::WRL::ComPtr<ID3D11ComputeShader>,19u> subtitle_temporal_source_shaders;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_temporal_frame_shader;
     host_sbs_body_witness_temporal_recorded::resources_t subtitle_temporal_source_composition;
@@ -3740,31 +3738,46 @@ namespace models {
     // those late failures quarantine every TensorRT context that could have executed.
     bool joined_stream_work_ever_submitted = false;
     bool joined_stream_ocr_ever_submitted_or_armed = false;
-    // The host knows which authenticated subtitle transaction it submitted without learning the
-    // DAV2 branch. Receipt-gated postprocess uses this exact expected disposition.
-    cuda_conditional_graph::work_flag_e pending_subtitle_work =
-      cuda_conditional_graph::work_flag_e::none;
-    bool pending_ocr_submitted = false;
-    // This host bit means the optional OCR child was present and requested in the joined root, not
-    // that the device executed it. The authenticated receipt remains OCR-output authority.
-    depth_optional_work_mode_e pending_optional_work =
-      depth_optional_work_mode_e::ordinary;
-    bool pending_depth_only_history = false;
-    std::uint64_t accepted_subtitle_context_generation = 0u;
-    bool accepted_subtitle_context_disabled = false;
-    subtitle_line_policy_e pending_subtitle_line_policy = subtitle_line_policy_e::video_caption;
-    enum class pending_submission_class_e : std::uint8_t {
+    enum class submission_class_e : std::uint8_t {
       force_infer,
       gpu_undecided,
     };
-    pending_submission_class_e pending_submission_class =
-      pending_submission_class_e::force_infer;
-    std::uint64_t pending_wrapper_transaction_token = 0u;
-    std::uint64_t pending_gpu_transaction_token = 0u;
-    std::uint64_t pending_gpu_transaction_current_frame_id = 0u;
-    std::uint64_t pending_gpu_transaction_baseline_frame_id = 0u;
-    std::uint64_t pending_observation_timestamp_us = 0u;
-    bool pending_dump_forced = false;
+    struct subtitle_context_t {
+      std::uint64_t generation = 0u;
+      bool disabled = false;
+      bool operator==(const subtitle_context_t &) const = default;
+    };
+    struct accepted_inference_t {
+      std::uint64_t frame_id;
+      std::uint64_t observation_timestamp_us;
+      std::uint64_t transaction_token;
+      std::uint64_t baseline_frame_id;
+      depth_input_region_t input_region;
+      input_color_space color_space;
+      subtitle_context_t subtitle_context;
+      subtitle_line_policy_e subtitle_line_policy;
+      host_sbs_temporal_source_bridge::certificate_t source_observation;
+      depth_optional_work_mode_e optional_work;
+      submission_class_e submission_class;
+      // The submitted disposition is used to authenticate the device receipt at postprocess.
+      cuda_conditional_graph::work_flag_e subtitle_work;
+      // This flag records OCR participation in the root, before reading the device receipt.
+      bool ocr_armed;
+      bool depth_only_history;
+      bool dump_forced;
+      Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> submitted_source;
+      // A present value records queued postprocess and whether it reset the input domain.
+      std::optional<bool> queued_input_domain_reset;
+    };
+    std::optional<accepted_inference_t> pending_root;
+    // Admission compares the completed subtitle context. Private diagnostics also need the
+    // exact input region and certificate after the pending root has been consumed.
+    struct {
+      std::uint64_t frame_id = 0u;
+      depth_input_region_t region {};
+      subtitle_context_t subtitle_context;
+      host_sbs_temporal_source_bridge::certificate_t source_observation;
+    } completed_input;
     // Field pin, native distance, Gaussian proposal and both compatibility limiters feed only
     // Dump 3D and harness artifacts; the renderer binds Base. Live streaming runs them only
     // while completing an observation that a Dump 3D request snapshots (or one a dump forced)
@@ -3773,7 +3786,7 @@ namespace models {
     bool completion_dump_snapshot_requested = false;
     bool completed_subtitle_conditioning_diagnostics = false;
     [[nodiscard]] bool subtitle_conditioning_diagnostics_requested() const noexcept {
-      return subtitle_conditioning_diagnostics_always || pending_dump_forced ||
+      return subtitle_conditioning_diagnostics_always || (pending_root && pending_root->dump_forced) ||
              completion_dump_snapshot_requested;
     }
     [[nodiscard]] bool subtitle_legacy_matte_required() const noexcept {
@@ -3786,11 +3799,7 @@ namespace models {
     bool ocr_shape_bound = false;
     bool ocr_output_size_validated = false;
     bool ocr_error_logged = false;
-    input_color_space pending_color_space = input_color_space::srgb;
-    depth_input_region_t pending_input_region {};
     depth_input_domain_tracker_t processed_input_domain;
-    bool has_previous_frame = false;
-    std::uint64_t pending_frame_id = 0;
     // Only a consumed final-publication receipt supplies this owner. A reused publication B may
     // retain owner A; completed color identity is never substituted for the actual infer owner.
     std::optional<publication_receipt::receipt_t> cached_current_publication;
@@ -3915,7 +3924,10 @@ namespace models {
     // context that participated.
     void mark_terminal_failure(const bool poison_execution_context = false) {
       pending_branch_timing.clear();
-      clear_queued_same_source_gpu_continuation();
+      if (pending_root) {
+        pending_root->queued_input_domain_reset.reset();
+        pending_root->submitted_source.Reset();
+      }
       invalidate_publication();
       clear_pending_inference_event_state();
       execution_context_poisoned =
@@ -4279,7 +4291,7 @@ namespace models {
 
     // Failing to select the shared CUDA context prevents proving the joined root's completion.
     void mark_cuda_context_failure() noexcept {
-      mark_shared_execution_failure(pending_ocr_submitted);
+      mark_shared_execution_failure(pending_root && pending_root->ocr_armed);
     }
 
     void mark_ocr_enqueue_failure(
@@ -4320,12 +4332,12 @@ namespace models {
       cuda_driver_api &cuda,
       const char *phase
     ) {
-      if (independent_depth_release_deferred) {
+      if (independent_depth_release_frame) {
         const auto release = independent_depth_advance_release(cuda, false);
         if (release == CUDA_ERROR_NOT_READY) return pending_execution_readiness_e::busy;
         if (release != CUDA_SUCCESS) { mark_shared_execution_failure(true); return pending_execution_readiness_e::failed; }
       }
-      const bool ocr_context_participated = pending_ocr_submitted;
+      const bool ocr_context_participated = pending_root && pending_root->ocr_armed;
       if (!cu_stream || !cuda.cuStreamQuery) {
         if (!stream_error_logged) {
           BOOST_LOG(error) << "DAV2/OCR joined CUDA root query is unavailable during " << phase
@@ -4360,7 +4372,7 @@ namespace models {
       cuda_driver_api &cuda,
       const char *phase
     ) {
-      if (independent_depth_release_deferred) {
+      if (independent_depth_release_frame) {
         const auto release = independent_depth_advance_release(cuda, false);
         if (release == CUDA_ERROR_NOT_READY) return pending_execution_readiness_e::busy;
         if (release != CUDA_SUCCESS) {
@@ -4375,13 +4387,13 @@ namespace models {
             << "DAV2/OCR root inference-event state was incomplete during " << phase << '.';
           stream_error_logged = true;
         }
-        mark_shared_execution_failure(pending_ocr_submitted);
+        mark_shared_execution_failure(pending_root && pending_root->ocr_armed);
         return pending_execution_readiness_e::failed;
       }
 
       const CUresult root_query = cuda.cuEventQuery(depth_inference_done_event);
       if (benchmark_joined_completion_gate) {
-        benchmark_joined_completion_gate->note_actual_event_query(pending_frame_id, root_query);
+        benchmark_joined_completion_gate->note_actual_event_query(pending_root->frame_id, root_query);
       }
       switch (normalized_cuda_readiness(root_query)) {
         case detail::async_stream_readiness_e::ready:
@@ -4394,17 +4406,17 @@ namespace models {
                              << ": result=" << root_query;
             stream_error_logged = true;
           }
-          mark_shared_execution_failure(pending_ocr_submitted);
+          mark_shared_execution_failure(pending_root && pending_root->ocr_armed);
           return pending_execution_readiness_e::failed;
       }
       return pending_execution_readiness_e::failed;
     }
 
     bool synchronize_pending_execution(cuda_driver_api &cuda) {
-      if (independent_depth_release_deferred && independent_depth_advance_release(cuda, true) != CUDA_SUCCESS) {
+      if (independent_depth_release_frame && independent_depth_advance_release(cuda, true) != CUDA_SUCCESS) {
         mark_shared_execution_failure(true); return false;
       }
-      const bool ocr_participated = pending_ocr_submitted;
+      const bool ocr_participated = pending_root && pending_root->ocr_armed;
       if (!cu_stream || !cuda.cuStreamSynchronize) {
         if (!stream_error_logged) {
           BOOST_LOG(error) << "DAV2/OCR root synchronization is unavailable"
@@ -5043,22 +5055,22 @@ namespace models {
     bool upload_near_identical_history_owner_constants(const bool skip_input_history) {
       if (
         !near_identical_cbuffer || !near_identical_history_owner.srv || !cbuffer ||
-        pending_frame_id == 0u ||
-        !pending_input_region.tensor_content.valid({target_w, target_h})
+        pending_root->frame_id == 0u ||
+        !pending_root->input_region.tensor_content.valid({target_w, target_h})
       ) {
         return false;
       }
       const auto domain_tag = near_identical_input_domain_tag(
-        pending_input_region,
-        pending_color_space,
+        pending_root->input_region,
+        pending_root->color_space,
         static_cast<std::uint32_t>(target_w),
         static_cast<std::uint32_t>(target_h)
       );
       update_near_identical_constants(
         skip_input_history ? near_identical_map_skip_input_history : 0u,
-        0u, 0u, pending_frame_id, 0u, domain_tag, 0u, 0u,
+        0u, 0u, pending_root->frame_id, 0u, domain_tag, 0u, 0u,
         cuda_conditional_graph::work_flag_e::none,
-        pending_observation_timestamp_us
+        pending_root->observation_timestamp_us
       );
       return true;
     }
@@ -5188,11 +5200,12 @@ namespace models {
     }
 
     [[nodiscard]] bool gpu_undecided_postprocess_pending() const noexcept {
-      return pending_submission_class == pending_submission_class_e::gpu_undecided;
+      return pending_root && pending_root->submission_class == submission_class_e::gpu_undecided;
     }
 
     [[nodiscard]] bool receipt_gated_postprocess_pending() const noexcept {
-      return gpu_undecided_postprocess_pending() || pending_same_source_gpu_postprocess_queued;
+      return gpu_undecided_postprocess_pending() ||
+             (pending_root && pending_root->queued_input_domain_reset.has_value());
     }
 
     [[nodiscard]] bool base_diagnostics_always() const noexcept {
@@ -5200,12 +5213,6 @@ namespace models {
       // can only preserve fields produced by the full limiter pair.
       return normalized_depth_diagnostics_enabled ||
              queued_same_source_gpu_continuation_research_enabled;
-    }
-
-    void clear_queued_same_source_gpu_continuation() noexcept {
-      pending_same_source_gpu_postprocess_queued = false;
-      pending_same_source_gpu_input_domain_reset = false;
-      pending_same_source_gpu_source.Reset();
     }
 
     void dispatch_infer_postprocess(
@@ -5246,7 +5253,7 @@ namespace models {
 
     [[nodiscard]] std::uint32_t pending_near_identical_postprocess_mode() const noexcept {
       const bool gpu_undecided = gpu_undecided_postprocess_pending();
-      const bool queued_force = pending_same_source_gpu_postprocess_queued && !gpu_undecided;
+      const bool queued_force = pending_root && pending_root->queued_input_domain_reset.has_value() && !gpu_undecided;
       return gpu_undecided ? 1u : queued_force ? 4u : 2u;
     }
     void update_pending_near_identical_postprocess_constants() {
@@ -5255,8 +5262,8 @@ namespace models {
       const bool queued_force = mode == 4u;
       const bool receipt_gated = gpu_undecided || queued_force;
       const auto domain_tag = near_identical_input_domain_tag(
-        pending_input_region,
-        pending_color_space,
+        pending_root->input_region,
+        pending_root->color_space,
         static_cast<std::uint32_t>(target_w),
         static_cast<std::uint32_t>(target_h)
       );
@@ -5265,31 +5272,29 @@ namespace models {
       const std::uint32_t groups_y =
         (static_cast<std::uint32_t>(target_h) + 15u) / 16u;
       std::uint64_t stream_frame_delta = 1u;
-      if (pending_gpu_transaction_baseline_frame_id != 0u &&
-          pending_gpu_transaction_current_frame_id >
-            pending_gpu_transaction_baseline_frame_id) {
-        stream_frame_delta = pending_gpu_transaction_current_frame_id -
-                             pending_gpu_transaction_baseline_frame_id;
+      if (pending_root->baseline_frame_id != 0u &&
+          pending_root->frame_id > pending_root->baseline_frame_id) {
+        stream_frame_delta = pending_root->frame_id - pending_root->baseline_frame_id;
       }
       update_near_identical_constants(
         mode,
         receipt_gated ? groups_x : 0u,
         receipt_gated ? groups_y : 0u,
-        gpu_undecided ? pending_gpu_transaction_current_frame_id : pending_frame_id,
-        gpu_undecided ? pending_gpu_transaction_baseline_frame_id : 0u,
+        pending_root->frame_id,
+        gpu_undecided ? pending_root->baseline_frame_id : 0u,
         domain_tag,
-        pending_wrapper_transaction_token,
+        pending_root->transaction_token,
         static_cast<std::uint32_t>(
           std::min<std::uint64_t>(stream_frame_delta, 65535u)
         ),
-        pending_subtitle_work,
-        pending_observation_timestamp_us
+        pending_root->subtitle_work,
+        pending_root->observation_timestamp_us
       );
     }
 
     bool dispatch_near_identical_finalizer(const bool input_domain_reset) {
       const bool subtitle_publication_expected =
-        cuda_conditional_graph::work_flags_value(pending_subtitle_work) != 0u;
+        cuda_conditional_graph::work_flags_value(pending_root->subtitle_work) != 0u;
       ID3D11Buffer *geometry_cbuffer = cbuffer.Get();
       if (
         !near_identical_finalize_cs ||
@@ -5297,7 +5302,7 @@ namespace models {
         !near_identical_transaction.buffer || !near_identical_transaction.dispatch ||
         !near_identical_history_owner.srv ||
         !near_identical_cbuffer || !cbuffer || !geometry_cbuffer ||
-        pending_wrapper_transaction_token == 0u ||
+        pending_root->transaction_token == 0u ||
         (subtitle_publication_expected &&
          (!ocr_box_record_uav || !ocr_resolve_cbuffer ||
           !update_pending_ocr_constants(input_domain_reset)))
@@ -6480,7 +6485,11 @@ namespace models {
       subtitle_cohort_research_command_time = 0u;
       subtitle_inner_colour_research = {};
       subtitle_temporal_source_composition={};subtitle_temporal_source_backend={};subtitle_temporal_frame_context={};
-      subtitle_temporal_source_epoch=0;subtitle_temporal_source_commands=false;pending_source_observation={};
+      subtitle_temporal_source_epoch=0;subtitle_temporal_source_commands=false;
+      if (pending_root) {
+        pending_root->source_observation = {};
+      }
+      completed_input.source_observation = {};
       subtitle_inner_colour_research_available = false;
       subtitle_inner_colour_research_command_frame = 0u;
       subtitle_inner_colour_research_command_time = 0u;
@@ -6561,7 +6570,7 @@ namespace models {
       const std::array<ID3D11ComputeShader *,6u>&components,std::string &error) {
       using namespace host_sbs_body_witness_temporal_gpu;
       subtitle_temporal_source_commands=false;
-      const auto &certificate=pending_source_observation;
+      const auto &certificate=pending_root->source_observation;
       if(!subtitle_temporal_source_enabled||!certificate.valid())return false;
       // A genuine source-domain transition gets NEW private storage; reset is not a watermark rewind.
       if(subtitle_temporal_source_epoch!=certificate.source_epoch){
@@ -6574,7 +6583,7 @@ namespace models {
         !subtitle_temporal_source_backend.ensure(device.Get(),source.Width,source.Height,caps,error)||
         !subtitle_temporal_frame_context.ensure(device.Get(),error))return false;
       const auto seed=host_sbs_temporal_frame_context_gpu::seed(certificate,source.Width,source.Height,caps,
-        pending_frame_id,pending_observation_timestamp_us,pending_wrapper_transaction_token,
+        pending_root->frame_id,pending_root->observation_timestamp_us,pending_root->transaction_token,
         static_cast<host_sbs_temporal_frame_context_gpu::postprocess_mode_e>(pending_near_identical_postprocess_mode()));
       if(!subtitle_temporal_frame_context.queue(context.Get(),subtitle_temporal_frame_shader.Get(),subtitle_contour_cbuffer.Get(),
         subtitle_locator_state_srv.Get(),near_identical_transaction.srv.Get(),seed,error))return false;
@@ -6605,22 +6614,22 @@ namespace models {
       composition::request_t request;
       request.source.display_snapshot_band=subtitle_contour_source_snapshot.srv.Get();
       // Descriptor-only parent reference; source pixels come from the joined snapshot above.
-      request.source.parent_raw_source=pending_same_source_gpu_source.Get();
+      request.source.parent_raw_source=pending_root->submitted_source.Get();
       request.source.actual_contour_constants96=subtitle_contour_cbuffer.Get();
       request.source.actual_sct32=subtitle_contour_identity.srv.Get();
       request.source.actual_final256=near_identical_transaction.dispatch.Get();
-      request.source.roi_ltrb={pending_input_region.left,pending_input_region.top,pending_input_region.right,pending_input_region.bottom};
-      request.source.frame=pending_frame_id;
-      request.source.observation_us=pending_observation_timestamp_us;
-      request.source.analysis_generation=pending_input_region.analysis_generation;
-      request.source.token=pending_wrapper_transaction_token;
-      request.source.transfer_mode=static_cast<UINT>(pending_color_space);
+      request.source.roi_ltrb={pending_root->input_region.left,pending_root->input_region.top,pending_root->input_region.right,pending_root->input_region.bottom};
+      request.source.frame=pending_root->frame_id;
+      request.source.observation_us=pending_root->observation_timestamp_us;
+      request.source.analysis_generation=pending_root->input_region.analysis_generation;
+      request.source.token=pending_root->transaction_token;
+      request.source.transfer_mode=static_cast<UINT>(pending_root->color_space);
       request.probability=subtitle_contour_probability_snapshot.srv.Get();
       request.support=subtitle_contour_support.srv.Get();
       request.ocr_record=ocr_box_record_srv.Get();
       request.actual_uip40=subtitle_locator_state_srv.Get();
       request.postprocess_mode=pending_near_identical_postprocess_mode();
-      request.expected_work=cuda_conditional_graph::work_flags_value(pending_subtitle_work);
+      request.expected_work=cuda_conditional_graph::work_flags_value(pending_root->subtitle_work);
       return request;
     }
 
@@ -6661,11 +6670,11 @@ namespace models {
           subtitle_current_outline_error=why;
         }
       };
-      if (!pending_same_source_gpu_source || !subtitle_contour_source_snapshot.ready() ||
+      if (!pending_root->submitted_source || !subtitle_contour_source_snapshot.ready() ||
           !subtitle_contour_probability_snapshot.ready()) {
         failed("Current source tuple unavailable");return;
       }
-      const auto w=pending_input_region.width(),h=pending_input_region.height();
+      const auto w=pending_root->input_region.width(),h=pending_root->input_region.height();
       const auto crop=subtitle_ocr_source_crop_height(w,h);
       if (!w || !h || !crop || crop>h) {failed("Invalid source geometry");return;}
       std::string error;
@@ -6698,10 +6707,10 @@ namespace models {
         failed(error);return;
       }
       const auto bundle=subtitle_current_outline_composition.bundle();
-      if (!bundle.all_stages_issued || bundle.current.frame!=pending_frame_id ||
-          bundle.current.observation_us!=pending_observation_timestamp_us ||
-          bundle.current.analysis_generation!=pending_input_region.analysis_generation ||
-          bundle.current.token!=pending_wrapper_transaction_token) {
+      if (!bundle.all_stages_issued || bundle.current.frame!=pending_root->frame_id ||
+          bundle.current.observation_us!=pending_root->observation_timestamp_us ||
+          bundle.current.analysis_generation!=pending_root->input_region.analysis_generation ||
+          bundle.current.token!=pending_root->transaction_token) {
         failed("Composition publication identity mismatch");return;
       }
       const auto in=make_subtitle_current_outline_selector_inputs(
@@ -6742,8 +6751,8 @@ namespace models {
       in.observation_one_offset=near_identical_gpu_observation_one_byte_offset;
       in.legacy_matte=legacy_matte;in.sct=subtitle_contour_identity.srv.Get();in.root=near_identical_transaction.srv.Get();
       in.mode=static_cast<research_selected_matte_v1::postprocess_mode_e>(pending_near_identical_postprocess_mode());
-      in.expected_work=cuda_conditional_graph::work_flags_value(pending_subtitle_work);in.transaction_token=pending_wrapper_transaction_token;
-      const bool current_private=subtitle_inner_colour_research_available&&subtitle_inner_colour_research_command_frame==pending_frame_id&&subtitle_inner_colour_research_command_time==pending_observation_timestamp_us;
+      in.expected_work=cuda_conditional_graph::work_flags_value(pending_root->subtitle_work);in.transaction_token=pending_root->transaction_token;
+      const bool current_private=subtitle_inner_colour_research_available&&subtitle_inner_colour_research_command_frame==pending_root->frame_id&&subtitle_inner_colour_research_command_time==pending_root->observation_timestamp_us;
       if(current_private){
         const auto b=subtitle_temporal_source_commands?subtitle_temporal_source_composition.baseline_views():subtitle_inner_colour_research.mutable_views();
         in.baseline_matte=b.matte.Get();in.numeric_proof=b.validation_receipt.Get();
@@ -6805,7 +6814,7 @@ namespace models {
         std::string error;
         subtitle_inner_colour_research.set_recorded_execution(true);
         subtitle_temporal_source_commands=false;
-        const bool use_temporal=subtitle_temporal_source_enabled && pending_source_observation.valid();
+        const bool use_temporal=subtitle_temporal_source_enabled && pending_root->source_observation.valid();
         if (!use_temporal && !subtitle_inner_colour_research.ensure(device.Get(), source.Width, source.Height, error)) {
           subtitle_inner_colour_research_unavailable(error);
           return;
@@ -6823,8 +6832,8 @@ namespace models {
           return;
         }
         subtitle_inner_colour_research_available = true;
-        subtitle_inner_colour_research_command_frame = pending_frame_id;
-        subtitle_inner_colour_research_command_time = pending_observation_timestamp_us;
+        subtitle_inner_colour_research_command_frame = pending_root->frame_id;
+        subtitle_inner_colour_research_command_time = pending_root->observation_timestamp_us;
       } catch (const std::exception &e) {
         subtitle_inner_colour_research_unavailable(e.what());
       } catch (...) {
@@ -6947,16 +6956,16 @@ namespace models {
         }
         namespace cohort = host_sbs_subtitle_cohort;
         auto &r = subtitle_cohort_research;
-        const auto content = live_field_content(pending_input_region).value_or(depth_tensor_content_rect_t {});
-        const auto roi = fit_subtitle_analysis_geometry(pending_input_region.width(), pending_input_region.height(), live_field_shape(), content);
-        const auto crop_height = subtitle_ocr_source_crop_height(pending_input_region.width(), pending_input_region.height());
+        const auto content = live_field_content(pending_root->input_region).value_or(depth_tensor_content_rect_t {});
+        const auto roi = fit_subtitle_analysis_geometry(pending_root->input_region.width(), pending_root->input_region.height(), live_field_shape(), content);
+        const auto crop_height = subtitle_ocr_source_crop_height(pending_root->input_region.width(), pending_root->input_region.height());
         const cohort::constants_t constants {
-          {pending_input_region.width(), pending_input_region.height(), pending_input_region.height() - std::min(crop_height, pending_input_region.height()), crop_height},
+          {pending_root->input_region.width(), pending_root->input_region.height(), pending_root->input_region.height() - std::min(crop_height, pending_root->input_region.height()), crop_height},
           {static_cast<std::uint32_t>(field_w), static_cast<std::uint32_t>(field_h), roi.roi_top, roi.roi_bottom},
           {content.left, content.top, content.right, content.bottom},
-          {static_cast<std::uint32_t>(pending_frame_id), static_cast<std::uint32_t>(pending_frame_id >> 32u),
-           static_cast<std::uint32_t>(pending_input_region.analysis_generation), static_cast<std::uint32_t>(pending_input_region.analysis_generation >> 32u)},
-          {static_cast<std::uint32_t>(pending_observation_timestamp_us), static_cast<std::uint32_t>(pending_observation_timestamp_us >> 32u), input_domain_reset ? 1u : 0u, 0u},
+          {static_cast<std::uint32_t>(pending_root->frame_id), static_cast<std::uint32_t>(pending_root->frame_id >> 32u),
+           static_cast<std::uint32_t>(pending_root->input_region.analysis_generation), static_cast<std::uint32_t>(pending_root->input_region.analysis_generation >> 32u)},
+          {static_cast<std::uint32_t>(pending_root->observation_timestamp_us), static_cast<std::uint32_t>(pending_root->observation_timestamp_us >> 32u), input_domain_reset ? 1u : 0u, 0u},
           {1u, SBC_SCHEMA, 0u, 0u}
         };
         context->UpdateSubresource(r.constants.Get(), 0u, nullptr, &constants, 0u, 0u);
@@ -7049,8 +7058,8 @@ namespace models {
         context->CSSetShader(subtitle_cohort_research_shaders[3u].Get(), nullptr, 0u);
         context->DispatchIndirect(near_identical_transaction.dispatch.Get(), near_identical_gpu_subtitle_condition_grid16_byte_offset);
         subtitle_cohort_research_available = true;
-        subtitle_cohort_research_command_frame = pending_frame_id;
-        subtitle_cohort_research_command_time = pending_observation_timestamp_us;
+        subtitle_cohort_research_command_frame = pending_root->frame_id;
+        subtitle_cohort_research_command_time = pending_root->observation_timestamp_us;
       } catch (const std::exception &e) {
         subtitle_cohort_research_unavailable(e.what());
       } catch (...) {
@@ -7639,8 +7648,8 @@ namespace models {
         .joint_plane_reserved0 = 0u,
         .joint_plane_reserved1 = 0u,
         .joint_plane_reserved2 = 0u,
-        .joint_observation_timestamp_low = static_cast<std::uint32_t>(pending_observation_timestamp_us),
-        .joint_observation_timestamp_high = static_cast<std::uint32_t>(pending_observation_timestamp_us >> 32u),
+        .joint_observation_timestamp_low = static_cast<std::uint32_t>(pending_root->observation_timestamp_us),
+        .joint_observation_timestamp_high = static_cast<std::uint32_t>(pending_root->observation_timestamp_us >> 32u),
         .joint_observation_reserved0 = 0u,
         .joint_observation_reserved1 = 0u,
       };
@@ -7696,11 +7705,11 @@ namespace models {
         return false;
       }
 
-      const auto content = live_field_content(pending_input_region);
+      const auto content = live_field_content(pending_root->input_region);
       const bool use_compact_limiters =
         depth_coordinate_v2_vertical_limit_compact_cs && depth_coordinate_v2_limit_compact_cs &&
         !receipt_gated_postprocess_pending() && !base_diagnostics_always() &&
-        !subtitle_conditioning_diagnostics_requested() && pending_input_region.is_video_region() &&
+        !subtitle_conditioning_diagnostics_requested() && pending_root->input_region.is_video_region() &&
         content && content->valid(live_field_shape()) &&
         content->right - content->left > depth_coordinate_v2::limiter_serial_max_lines &&
         (content->left != 0u || content->right < static_cast<std::uint32_t>(field_w));
@@ -7776,15 +7785,15 @@ namespace models {
     }
 
     bool update_pending_ocr_constants(const bool input_domain_reset) {
-      const auto tensor_content = live_field_content(pending_input_region);
-      if (!ocr_resolve_cbuffer || pending_frame_id == 0u || target_w <= 0 || target_h <= 0 ||
+      const auto tensor_content = live_field_content(pending_root->input_region);
+      if (!ocr_resolve_cbuffer || pending_root->frame_id == 0u || target_w <= 0 || target_h <= 0 ||
           !tensor_content || !tensor_content->valid(live_field_shape()) ||
           !depth_coordinate_v2::subtitle_ocr_field_is_calibrated(
             static_cast<std::uint32_t>(field_w), static_cast<std::uint32_t>(field_h))) {
         return false;
       }
-      const std::uint32_t source_width = pending_input_region.width();
-      const std::uint32_t source_height = pending_input_region.height();
+      const std::uint32_t source_width = pending_root->input_region.width();
+      const std::uint32_t source_height = pending_root->input_region.height();
       const auto roi = fit_subtitle_analysis_geometry(
         source_width,
         source_height,
@@ -7794,7 +7803,7 @@ namespace models {
       // A legal unprojectable OCR crop still owes this frame an exact abstention header.
       // It cannot authorize an optional detector child or manufacture a search region.
       if (!roi.valid() &&
-          pending_subtitle_work != cuda_conditional_graph::work_flag_e::subtitle_observation) {
+          pending_root->subtitle_work != cuda_conditional_graph::work_flag_e::subtitle_observation) {
         return false;
       }
       const std::uint32_t crop_height = subtitle_ocr_source_crop_height(
@@ -7806,12 +7815,12 @@ namespace models {
       }
       auto line_reference = subtitle_ocr_line_reference(
         source_width, source_height,
-        pending_input_region.source_width, pending_input_region.source_height,
-        pending_input_region.left, pending_input_region.top,
-        pending_input_region.is_video_region()
+        pending_root->input_region.source_width, pending_root->input_region.source_height,
+        pending_root->input_region.left, pending_root->input_region.top,
+        pending_root->input_region.is_video_region()
       );
       if (!line_reference) {
-        if (pending_subtitle_work != cuda_conditional_graph::work_flag_e::subtitle_observation) {
+        if (pending_root->subtitle_work != cuda_conditional_graph::work_flag_e::subtitle_observation) {
           return false;
         }
         // The finalizer's abstention consumes only the exact source/field identity prefix.
@@ -7819,10 +7828,10 @@ namespace models {
         line_reference.emplace();
       }
       const ocr_resolve_constants_t constants {
-        static_cast<std::uint32_t>(pending_frame_id),
-        static_cast<std::uint32_t>(pending_frame_id >> 32u),
-        static_cast<std::uint32_t>(pending_input_region.analysis_generation),
-        static_cast<std::uint32_t>(pending_input_region.analysis_generation >> 32u),
+        static_cast<std::uint32_t>(pending_root->frame_id),
+        static_cast<std::uint32_t>(pending_root->frame_id >> 32u),
+        static_cast<std::uint32_t>(pending_root->input_region.analysis_generation),
+        static_cast<std::uint32_t>(pending_root->input_region.analysis_generation >> 32u),
         source_width,
         source_height,
         static_cast<std::uint32_t>(target_w),
@@ -7838,9 +7847,9 @@ namespace models {
         std::bit_cast<std::uint32_t>(line_reference->center_twice_source),
         line_reference->width,
         std::bit_cast<std::uint32_t>(line_reference->search_top_source),
-        static_cast<std::uint32_t>(pending_subtitle_line_policy),
-        static_cast<std::uint32_t>(pending_observation_timestamp_us),
-        static_cast<std::uint32_t>(pending_observation_timestamp_us >> 32u),
+        static_cast<std::uint32_t>(pending_root->subtitle_line_policy),
+        static_cast<std::uint32_t>(pending_root->observation_timestamp_us),
+        static_cast<std::uint32_t>(pending_root->observation_timestamp_us >> 32u),
         input_domain_reset ? 1u : 0u,
         0u,
       };
@@ -7851,7 +7860,7 @@ namespace models {
     }
 
     bool dispatch_ocr_postprocess() {
-      const bool optional_child_armed = std::exchange(pending_ocr_submitted, false);
+      const bool optional_child_armed = std::exchange(pending_root->ocr_armed, false);
       if (!near_identical_transaction.dispatch || !ocr_box_record_uav ||
           !ocr_resolve_cbuffer) {
         return false;
@@ -7921,27 +7930,27 @@ namespace models {
           !subtitle_contour_source_snapshot.ready() || !subtitle_contour_probability_snapshot.ready()) {
         return false;
       }
-      const auto content = live_field_content(pending_input_region)
+      const auto content = live_field_content(pending_root->input_region)
                              .value_or(depth_tensor_content_rect_t {});
       const auto roi = fit_subtitle_analysis_geometry(
-        pending_input_region.width(), pending_input_region.height(), live_field_shape(), content
+        pending_root->input_region.width(), pending_root->input_region.height(), live_field_shape(), content
       );
       const auto crop_height = subtitle_ocr_source_crop_height(
-        pending_input_region.width(), pending_input_region.height()
+        pending_root->input_region.width(), pending_root->input_region.height()
       );
       std::array<std::uint32_t, 24u> constants {
-        pending_input_region.width(), pending_input_region.height(),
-        pending_input_region.height() - std::min(crop_height, pending_input_region.height()),
+        pending_root->input_region.width(), pending_root->input_region.height(),
+        pending_root->input_region.height() - std::min(crop_height, pending_root->input_region.height()),
         crop_height,
         static_cast<std::uint32_t>(field_w), static_cast<std::uint32_t>(field_h),
         roi.roi_top, roi.roi_bottom,
         content.left, content.top, content.right, content.bottom,
-        static_cast<std::uint32_t>(pending_frame_id),
-        static_cast<std::uint32_t>(pending_frame_id >> 32u),
-        static_cast<std::uint32_t>(pending_input_region.analysis_generation),
-        static_cast<std::uint32_t>(pending_input_region.analysis_generation >> 32u),
-        static_cast<std::uint32_t>(pending_observation_timestamp_us),
-        static_cast<std::uint32_t>(pending_observation_timestamp_us >> 32u),
+        static_cast<std::uint32_t>(pending_root->frame_id),
+        static_cast<std::uint32_t>(pending_root->frame_id >> 32u),
+        static_cast<std::uint32_t>(pending_root->input_region.analysis_generation),
+        static_cast<std::uint32_t>(pending_root->input_region.analysis_generation >> 32u),
+        static_cast<std::uint32_t>(pending_root->observation_timestamp_us),
+        static_cast<std::uint32_t>(pending_root->observation_timestamp_us >> 32u),
         input_domain_reset ? 1u : 0u, 0u,
         ocr_record_submitted ? 1u : 0u,
         depth_coordinate_v2::subtitle_contour_recipe, 0u, 0u
@@ -8060,8 +8069,8 @@ namespace models {
       }
       const auto &diagnostics = *subtitle_conditioning_diagnostics;
       const std::array<std::uint32_t, 12u> distance_constants {
-        pending_input_region.width(), pending_input_region.height(),
-        pending_input_region.height() - std::min(crop_height, pending_input_region.height()),
+        pending_root->input_region.width(), pending_root->input_region.height(),
+        pending_root->input_region.height() - std::min(crop_height, pending_root->input_region.height()),
         crop_height,
         static_cast<std::uint32_t>(field_w), static_cast<std::uint32_t>(field_h), 0u, 0u,
         content.left, content.top, content.right, content.bottom
@@ -8166,7 +8175,7 @@ namespace models {
           !depth_coordinate_v2_final_uav ||
           !subtitle_condition_params_srv || !subtitle_condition_params_uav ||
           !ocr_box_record_srv ||
-          (pending_subtitle_work == cuda_conditional_graph::work_flag_e::optional_ocr &&
+          (pending_root->subtitle_work == cuda_conditional_graph::work_flag_e::optional_ocr &&
            !ocr_output_srv) || !subtitle_contour_identity.ready() ||
           !subtitle_contour_probability_snapshot.ready() || !subtitle_contour_support.ready() ||
           !depth_health_state_srv || !near_identical_transaction.dispatch) {
@@ -8186,15 +8195,15 @@ namespace models {
         conditioning_diagnostics = false;
       }
       const bool legacy_matte = legacy_matte_required || conditioning_diagnostics;
-      const std::uint32_t source_width = pending_input_region.width();
-      const std::uint32_t source_height = pending_input_region.height();
+      const std::uint32_t source_width = pending_root->input_region.width();
+      const std::uint32_t source_height = pending_root->input_region.height();
       const std::uint32_t field_width = field_w > 0 ?
                                           static_cast<std::uint32_t>(field_w) :
                                           0u;
       const std::uint32_t field_height = field_h > 0 ?
                                            static_cast<std::uint32_t>(field_h) :
                                            0u;
-      const auto tensor_content = live_field_content(pending_input_region);
+      const auto tensor_content = live_field_content(pending_root->input_region);
       const auto roi = fit_subtitle_analysis_geometry(
         source_width,
         source_height,
@@ -8214,16 +8223,16 @@ namespace models {
         source_height,
         ocr_record_submitted ? 1u : 0u,
         input_domain_reset ? 1u : 0u,
-        static_cast<std::uint32_t>(pending_frame_id),
-        static_cast<std::uint32_t>(pending_frame_id >> 32u),
-        static_cast<std::uint32_t>(pending_input_region.analysis_generation),
-        static_cast<std::uint32_t>(pending_input_region.analysis_generation >> 32u),
+        static_cast<std::uint32_t>(pending_root->frame_id),
+        static_cast<std::uint32_t>(pending_root->frame_id >> 32u),
+        static_cast<std::uint32_t>(pending_root->input_region.analysis_generation),
+        static_cast<std::uint32_t>(pending_root->input_region.analysis_generation >> 32u),
         field_content.left,
         field_content.top,
         field_content.right,
         field_content.bottom,
-        static_cast<std::uint32_t>(pending_observation_timestamp_us),
-        static_cast<std::uint32_t>(pending_observation_timestamp_us >> 32u),
+        static_cast<std::uint32_t>(pending_root->observation_timestamp_us),
+        static_cast<std::uint32_t>(pending_root->observation_timestamp_us >> 32u),
         0u,
         0u,
       };
@@ -8378,7 +8387,7 @@ namespace models {
       if (append.input_domain_reset) {
         flags |= host_sbs_gpu_trace::record_flag_e::input_domain_reset;
       }
-      if (pending_dump_forced) {
+      if (pending_root->dump_forced) {
         flags |= host_sbs_gpu_trace::record_flag_e::dump_forced;
       }
       if (append.ocr_record_submitted) {
@@ -8397,36 +8406,36 @@ namespace models {
     }
 
     [[nodiscard]] publication_receipt::expected_t pending_publication_expected() const {
-      const auto content = live_field_content(pending_input_region).value_or(depth_tensor_content_rect_t {});
-      const auto subtitle_roi = fit_subtitle_analysis_geometry(pending_input_region.width(),
-        pending_input_region.height(), live_field_shape(), content);
+      const auto content = live_field_content(pending_root->input_region).value_or(depth_tensor_content_rect_t {});
+      const auto subtitle_roi = fit_subtitle_analysis_geometry(pending_root->input_region.width(),
+        pending_root->input_region.height(), live_field_shape(), content);
       return {
         .estimator_generation = publication_generation,
         .publication_sequence = publication_sequence,
-        .analysis_generation = pending_input_region.analysis_generation,
-        .frame_id = pending_frame_id,
-        .transaction_token = pending_wrapper_transaction_token,
+        .analysis_generation = pending_root->input_region.analysis_generation,
+        .frame_id = pending_root->frame_id,
+        .transaction_token = pending_root->transaction_token,
         .domain_tag = near_identical_input_domain_tag(
-          pending_input_region, pending_color_space,
+          pending_root->input_region, pending_root->color_space,
           static_cast<std::uint32_t>(target_w), static_cast<std::uint32_t>(target_h)
         ),
-        .observation_timestamp_us = pending_observation_timestamp_us,
-        .baseline_frame_id = pending_gpu_transaction_baseline_frame_id,
+        .observation_timestamp_us = pending_root->observation_timestamp_us,
+        .baseline_frame_id = pending_root->baseline_frame_id,
         .width = static_cast<std::uint32_t>(target_w),
         .height = static_cast<std::uint32_t>(target_h),
-        .subtitle_domain = {pending_input_region.width(), pending_input_region.height(),
+        .subtitle_domain = {pending_root->input_region.width(), pending_root->input_region.height(),
           static_cast<std::uint32_t>(field_w), static_cast<std::uint32_t>(field_h),
           subtitle_roi.roi_top, subtitle_roi.roi_bottom,
           content.left, content.top, content.right, content.bottom},
         .raw_coordinate_scale = parallax_v2_raw_coordinate_scale,
         .joint_plane_mode = joint_plane_mode,
-        .expected_work = cuda_conditional_graph::work_flags_value(pending_subtitle_work),
+        .expected_work = cuda_conditional_graph::work_flags_value(pending_root->subtitle_work),
         .submission_class = gpu_undecided_postprocess_pending() ?
                               publication_receipt::submission_class_e::gpu_undecided :
                               publication_receipt::submission_class_e::force_infer,
         .flags = pending_gpu_completion_flags(pending_gpu_trace_append),
         .host_subtitle_outcome = pending_gpu_trace_append.host_subtitle_outcome,
-        .depth_only_history = pending_depth_only_history,
+        .depth_only_history = pending_root->depth_only_history,
       };
     }
 
@@ -8462,7 +8471,7 @@ namespace models {
       }
       // A receipt for B may arrive after C was already accepted. It still describes B's final
       // views, but cannot supply admission authority across the pending C transaction.
-      if (!has_previous_frame && !result.transport_failed) {
+      if (!pending_root && !result.transport_failed) {
         for (std::size_t index = 0u; index < result.count; ++index) {
           const auto &receipt = result.receipts[index];
           if (publication_is_current(receipt.expected)) {
@@ -8494,35 +8503,35 @@ namespace models {
       // raw SRV is safe to borrow here after finalization has unbound the transaction UAV.
 
       const auto domain_tag = near_identical_input_domain_tag(
-        pending_input_region,
-        pending_color_space,
+        pending_root->input_region,
+        pending_root->color_space,
         static_cast<std::uint32_t>(target_w),
         static_cast<std::uint32_t>(target_h)
       );
       const auto flags = pending_gpu_completion_flags(append);
       const auto submission_class =
-        pending_submission_class == pending_submission_class_e::gpu_undecided ?
+        pending_root->submission_class == submission_class_e::gpu_undecided ?
           host_sbs_gpu_trace::submission_class_e::gpu_undecided :
           host_sbs_gpu_trace::submission_class_e::force_infer;
       const std::array<std::uint32_t, host_sbs_gpu_trace::constant_word_count> constants {
-        static_cast<std::uint32_t>(pending_frame_id),
-        static_cast<std::uint32_t>(pending_frame_id >> 32u),
-        static_cast<std::uint32_t>(pending_input_region.analysis_generation),
-        static_cast<std::uint32_t>(pending_input_region.analysis_generation >> 32u),
+        static_cast<std::uint32_t>(pending_root->frame_id),
+        static_cast<std::uint32_t>(pending_root->frame_id >> 32u),
+        static_cast<std::uint32_t>(pending_root->input_region.analysis_generation),
+        static_cast<std::uint32_t>(pending_root->input_region.analysis_generation >> 32u),
         static_cast<std::uint32_t>(domain_tag),
         static_cast<std::uint32_t>(domain_tag >> 32u),
-        static_cast<std::uint32_t>(pending_wrapper_transaction_token),
-        static_cast<std::uint32_t>(pending_wrapper_transaction_token >> 32u),
-        cuda_conditional_graph::work_flags_value(pending_subtitle_work),
+        static_cast<std::uint32_t>(pending_root->transaction_token),
+        static_cast<std::uint32_t>(pending_root->transaction_token >> 32u),
+        cuda_conditional_graph::work_flags_value(pending_root->subtitle_work),
         static_cast<std::uint32_t>(submission_class),
         flags,
         static_cast<std::uint32_t>(append.host_subtitle_outcome),
-        pending_input_region.width(),
-        pending_input_region.height(),
+        pending_root->input_region.width(),
+        pending_root->input_region.height(),
         static_cast<std::uint32_t>(field_w),
         static_cast<std::uint32_t>(field_h),
-        static_cast<std::uint32_t>(pending_observation_timestamp_us),
-        static_cast<std::uint32_t>(pending_observation_timestamp_us >> 32u),
+        static_cast<std::uint32_t>(pending_root->observation_timestamp_us),
+        static_cast<std::uint32_t>(pending_root->observation_timestamp_us >> 32u),
         0u,
         0u,
       };
@@ -8687,30 +8696,25 @@ namespace models {
     ) {
       completed_depth_metadata_t completed {
         .valid = true,
-        .frame_id = pending_frame_id,
-        .input_region = pending_input_region,
-        .color_space = pending_color_space,
+        .frame_id = pending_root->frame_id,
+        .input_region = pending_root->input_region,
+        .color_space = pending_root->color_space,
         .input_domain_reset = input_domain_reset,
-        .subtitle_work_suppressed = depth_optional_work_suppresses_subtitle(pending_optional_work),
+        .subtitle_work_suppressed = depth_optional_work_suppresses_subtitle(pending_root->optional_work),
         .gpu_undecided = gpu_undecided_postprocess_pending(),
         .snapshots = snapshots,
       };
       if (!completed.gpu_undecided) {
         gpu_undecided_requires_force_infer_refresh = false;
       }
-      clear_queued_same_source_gpu_continuation();
-      has_previous_frame = false;  // actual root ACK; never fold queued output twice
+      completed_input = {
+        .frame_id = pending_root->frame_id,
+        .region = pending_root->input_region,
+        .subtitle_context = pending_root->subtitle_context,
+        .source_observation = pending_root->source_observation,
+      };
+      pending_root.reset();
       clear_pending_inference_event_state();
-      pending_optional_work = depth_optional_work_mode_e::ordinary;
-      pending_depth_only_history = false;
-      pending_subtitle_work = cuda_conditional_graph::work_flag_e::none;
-      pending_submission_class = pending_submission_class_e::force_infer;
-      pending_wrapper_transaction_token = 0u;
-      pending_dump_forced = false;
-      pending_gpu_transaction_token = 0u;
-      pending_gpu_transaction_current_frame_id = 0u;
-      pending_gpu_transaction_baseline_frame_id = 0u;
-      pending_observation_timestamp_us = 0u;
       if (diagnostics_enabled) {
         throughput_stats_completions++;
       }
@@ -8911,10 +8915,10 @@ namespace models {
       ) {
       error.clear();
       if (!queued_same_source_gpu_continuation_research_enabled || !is_operational() ||
-          !has_previous_frame || !source || source != pending_same_source_gpu_source.Get() ||
-          frame == 0u || frame != pending_frame_id || observation == 0u ||
-          observation != pending_observation_timestamp_us || pending_dump_forced ||
-          pending_wrapper_transaction_token == 0u || !pending_input_region.valid() ||
+          !pending_root || !source || source != pending_root->submitted_source.Get() ||
+          frame == 0u || frame != pending_root->frame_id || observation == 0u ||
+          observation != pending_root->observation_timestamp_us || pending_root->dump_forced ||
+          pending_root->transaction_token == 0u || !pending_root->input_region.valid() ||
           !near_identical_transaction.ready() || !parallax_v2_producer_active) {
         error = "Same-source queued research owner unavailable";
         return std::nullopt;
@@ -8930,20 +8934,20 @@ namespace models {
         error = "Same-source queued continuation rejects predication";
         return std::nullopt;
       }
-      if (!pending_same_source_gpu_postprocess_queued) {
-        ensure_cbuffers(pending_color_space, pending_input_region);
-        ensure_source_region_cbuffer(pending_input_region);
+      if (!pending_root->queued_input_domain_reset.has_value()) {
+        ensure_cbuffers(pending_root->color_space, pending_root->input_region);
+        ensure_source_region_cbuffer(pending_root->input_region);
         if (!cbuffer || !source_region_cbuffer) {
           error = "Same-source pending constants unavailable";
           mark_terminal_failure();
           return std::nullopt;
         }
-        pending_same_source_gpu_input_domain_reset = prepare_pending_input_domain();
+        const bool input_domain_reset = prepare_pending_input_domain();
         // Activates receipt-gated indirect work and queued-force mode4 BEFORE any mutation.
         // normalize invalidates old borrowed publication; no completed authority is installed.
-        pending_same_source_gpu_postprocess_queued = true;
+        pending_root->queued_input_domain_reset = input_domain_reset;
         completion_dump_snapshot_requested = false;
-        if (!normalize_depth_output(nullptr, pending_same_source_gpu_input_domain_reset)) {
+        if (!normalize_depth_output(nullptr, input_domain_reset)) {
           error = "Same-source GPU continuation submission failed";
           mark_terminal_failure();
           return std::nullopt;
@@ -8952,22 +8956,22 @@ namespace models {
       }
       queued_same_source_gpu_continuation_research_views_t view;
       view.ticket_sequence = queued_same_source_gpu_ticket_sequence;
-      view.submitted_frame_id = pending_frame_id;
-      view.observation_timestamp_us = pending_observation_timestamp_us;
-      view.transaction_token = pending_wrapper_transaction_token;
-      view.subtitle_context_generation = accepted_subtitle_context_generation;
-      view.expected_work = cuda_conditional_graph::work_flags_value(pending_subtitle_work);
+      view.submitted_frame_id = pending_root->frame_id;
+      view.observation_timestamp_us = pending_root->observation_timestamp_us;
+      view.transaction_token = pending_root->transaction_token;
+      view.subtitle_context_generation = pending_root->subtitle_context.generation;
+      view.expected_work = cuda_conditional_graph::work_flags_value(pending_root->subtitle_work);
       view.postprocess_request_flags = gpu_undecided_postprocess_pending() ? 1u : 4u;
-      view.both_unmap_calls_succeeded = true; // has_previous_frame set only after successful calls
+      view.both_unmap_calls_succeeded = true; // The root is accepted after successful unmap calls.
       view.postprocess_queued = true;
       view.refined_live_geometry_active = refined_live_geometry_active;
-      view.input_region = pending_input_region;
-      view.color_space = pending_color_space;
+      view.input_region = pending_root->input_region;
+      view.color_space = pending_root->color_space;
       view.field_width = static_cast<std::uint32_t>(field_w);
       view.field_height = static_cast<std::uint32_t>(field_h);
-      view.field_content = live_field_content(pending_input_region).value_or(depth_tensor_content_rect_t {});
+      view.field_content = live_field_content(pending_root->input_region).value_or(depth_tensor_content_rect_t {});
       view.planned_publication = pending_publication_expected(); // value only, not published
-      view.submitted_source = pending_same_source_gpu_source;
+      view.submitted_source = pending_root->submitted_source;
       view.base = depth_coordinate_v2_final_srv;
       view.state = depth_coordinate_v2_state_srv;
       view.glyph_matte = completed_contour.glyph_matte;
@@ -8982,7 +8986,7 @@ namespace models {
       view.depth_constants = cbuffer;
       view.source_region_constants = source_region_cbuffer;
       view.contour_constants = subtitle_contour_cbuffer;
-      // has_previous_frame/event/pending owner remain intact. No query, sync, snapshot,
+      // Keep the accepted root and its completion event. No query, sync, snapshot,
       // current_publication assignment or completed_frame_valid return occurs here.
       return view;
     }
@@ -8993,10 +8997,11 @@ namespace models {
       d3d_perf_slot *d3d_timer,
       const bool snapshot_requested
     ) {
-      const bool input_domain_reset = pending_same_source_gpu_postprocess_queued ?
-        pending_same_source_gpu_input_domain_reset : prepare_pending_input_domain();
+      const bool postprocess_queued = pending_root->queued_input_domain_reset.has_value();
+      const bool input_domain_reset = postprocess_queued ?
+        *pending_root->queued_input_domain_reset : prepare_pending_input_domain();
       completion_dump_snapshot_requested = snapshot_requested;
-      if (!pending_same_source_gpu_postprocess_queued && !normalize_depth_output(
+      if (!postprocess_queued && !normalize_depth_output(
             d3d_timer,
             input_domain_reset
           )) {
@@ -9050,7 +9055,7 @@ namespace models {
       // enqueueing must retire that admission token so a later estimate cannot skip its own query.
       readiness_preflighted = false;
       auto &cuda = cuda_driver_api::get();
-      if (!has_previous_frame) {
+      if (!pending_root) {
         return make_result();
       }
       if (cuda_ctx && cuda.cuCtxSetCurrent(cuda_ctx) != CUDA_SUCCESS) {
@@ -9073,8 +9078,8 @@ namespace models {
         }
       }
       (void) color_space;  // the pending frame owns its transfer mode
-      ensure_cbuffers(pending_color_space, pending_input_region);
-      ensure_source_region_cbuffer(pending_input_region);
+      ensure_cbuffers(pending_root->color_space, pending_root->input_region);
+      ensure_source_region_cbuffer(pending_root->input_region);
       if (!cbuffer || !source_region_cbuffer) {
         // A persistent constant-buffer allocation failure must latch terminal like every other
         // resource failure; returning empty without latching leaves the caller retrying at the
@@ -9111,7 +9116,7 @@ namespace models {
 #ifdef SUNSHINE_TESTS
       polled.notification_callback_pending = root_completion_notification.callback_pending();
 #endif
-      if (!has_previous_frame) {
+      if (!pending_root) {
         polled.result = make_result();
         polled.ready = true;
         return polled;
@@ -9170,7 +9175,7 @@ namespace models {
             if (
               allow_completion_notification && !completion_notification_disabled &&
               polled.query_count == 1u && next_query_at < notification_cutoff &&
-              !independent_depth_release_deferred && platf::host_sbs_completion_wait_available()
+              !independent_depth_release_frame && platf::host_sbs_completion_wait_available()
             ) {
               const auto armed = root_completion_notification.arm(cuda, depth_inference_done_event);
 #ifdef SUNSHINE_TESTS
@@ -9432,8 +9437,8 @@ namespace models {
 
     bool prepare_pending_input_domain() {
       const bool changed = processed_input_domain.update(
-        pending_input_region,
-        pending_color_space
+        pending_root->input_region,
+        pending_root->color_space
       );
       if (changed) {
         reset_temporal_state_for_input_domain();
@@ -9487,7 +9492,7 @@ namespace models {
         near_identical_gpu_infer_grid16_byte_offset
       );
 
-      const auto &tensor_content = pending_input_region.tensor_content;
+      const auto &tensor_content = pending_root->input_region.tensor_content;
       const bool has_synthetic_padding =
         tensor_content.left != 0u || tensor_content.top != 0u ||
         tensor_content.right != target_w || tensor_content.bottom != target_h;
@@ -9539,7 +9544,7 @@ namespace models {
       // event follows both children and every interop-unmap tail, so both outputs are safe before
       // any next-frame mapping reuses the fixed buffers.
       const bool subtitle_work_suppressed =
-        depth_optional_work_suppresses_subtitle(pending_optional_work);
+        depth_optional_work_suppresses_subtitle(pending_root->optional_work);
       // Native move/resize and ineligible video contexts keep depth/camera live and publish
       // fresh Base. Move/resize freezes same-context subtitle memory; context admission separately
       // clears subtitle state when entering/leaving hard disable or changing the scope epoch.
@@ -9547,7 +9552,7 @@ namespace models {
       auto trace_host_subtitle_outcome =
         host_sbs_gpu_trace::host_subtitle_outcome_e::suppressed;
       if (subtitle_work_suppressed) {
-        pending_ocr_submitted = false;
+        pending_root->ocr_armed = false;
       } else {
         ocr_record_submitted = dispatch_ocr_postprocess();
         if (ocr_record_submitted) {
@@ -9581,7 +9586,7 @@ namespace models {
       // Only an explicitly maintained depth-only baseline needs the suppressed input tensor.
       // The depth receipt still needs its owner even when the map skips the copy.
       const bool skip_input_history =
-        subtitle_work_suppressed && !pending_depth_only_history && !subtitle_publication_branch_opaque;
+        subtitle_work_suppressed && !pending_root->depth_only_history && !subtitle_publication_branch_opaque;
       if (!upload_near_identical_history_owner_constants(skip_input_history)) {
         fail_gpu_conditional_bridge_once(
           "GPU inference-observation history-owner constants failed"
@@ -9668,7 +9673,7 @@ namespace models {
       throughput_stats_calls++;
     }
 
-    // Query-only producer preflight. It deliberately leaves has_previous_frame and the finished
+    // Query-only producer preflight. It leaves the accepted root and the finished
     // output buffer untouched; estimate() consumes that result after the caller has copied the
     // exact color frame that will own the next inference.
     bool can_accept() {
@@ -10012,11 +10017,11 @@ namespace models {
       // Keep the pending transfer and crop constants through its publication and Dump copies.
       // With no preceding observation, prepare the first submission's constants directly.
       ensure_cbuffers(
-        has_previous_frame ? pending_color_space : color_space,
-        has_previous_frame ? pending_input_region : input_region
+        pending_root ? pending_root->color_space : color_space,
+        pending_root ? pending_root->input_region : input_region
       );
       ensure_source_region_cbuffer(
-        has_previous_frame ? pending_input_region : input_region
+        pending_root ? pending_root->input_region : input_region
       );
       if (!cbuffer || !source_region_cbuffer) {
         mark_terminal_failure();
@@ -10024,13 +10029,13 @@ namespace models {
       }
 
       auto *d3d_timer = diagnostics_enabled ?
-                          begin_d3d_perf(has_previous_frame, true) :
+                          begin_d3d_perf(pending_root.has_value(), true) :
                           nullptr;
 
       // tensor_out_buf holds the finished raw disparity from the previous asynchronous submit
       // (fully unmapped from CUDA), so consuming it here never blocks the encode thread. The
       // caller uses completed_frame_id to select the color slot that produced this exact result.
-      if (has_previous_frame) {
+      if (pending_root) {
         completed = complete_ready_pending(d3d_timer, snapshot_raw_model_depth);
         if (!completed.valid) {
           mark_d3d_pre_start(d3d_timer);
@@ -10041,11 +10046,11 @@ namespace models {
         mark_d3d_post_end(d3d_timer);
       }
 
-      const bool subtitle_context_disabled =
-        accepted_optional_work == depth_optional_work_mode_e::disable_subtitle;
-      const bool subtitle_context_changed =
-        subtitle_context_generation != accepted_subtitle_context_generation ||
-        subtitle_context_disabled != accepted_subtitle_context_disabled;
+      const subtitle_context_t subtitle_context {
+        subtitle_context_generation,
+        accepted_optional_work == depth_optional_work_mode_e::disable_subtitle,
+      };
+      const bool subtitle_context_changed = subtitle_context != completed_input.subtitle_context;
       if (completed.valid && subtitle_context_changed) {
         // This call must hand the preceding publication to its caller before clearing any of
         // the singleton subtitle/final resources it owns. Admit the changed context on a later
@@ -10121,7 +10126,7 @@ namespace models {
       // resumes; it must not resize or discard frozen subtitle memory.
       const bool contour_resources_ready =
         accepted_optional_work == depth_optional_work_mode_e::suppress_subtitle ||
-        (subtitle_context_disabled ?
+        (subtitle_context.disabled ?
            ensure_subtitle_contour_textures(1u, 1u) :
            ensure_subtitle_contour_textures(input_region.width(), input_region.height()));
       if (!contour_resources_ready) {
@@ -10193,8 +10198,8 @@ namespace models {
         input_region.tensor_content.valid({target_w, target_h});
       auto accepted_submission_class =
         gpu_undecided_host_candidate ?
-          pending_submission_class_e::gpu_undecided :
-          pending_submission_class_e::force_infer;
+          submission_class_e::gpu_undecided :
+          submission_class_e::force_infer;
       const std::uint64_t accepted_transaction_token =
         gpu_undecided_host_candidate ?
           adaptive_reuse_request.gpu_reuse_decision_token :
@@ -10262,7 +10267,7 @@ namespace models {
       // authenticated infer PROP/RQST instead. Both records carry the exact subtitle disposition;
       // only prepared OCR carries the optional-child request, and every completion consumes CBRG.
       const bool transaction_published =
-        accepted_submission_class == pending_submission_class_e::gpu_undecided ?
+        accepted_submission_class == submission_class_e::gpu_undecided ?
           dispatch_near_identical_detector() :
           publish_force_infer_transaction(
             accepted_transaction_token,
@@ -10270,7 +10275,7 @@ namespace models {
           );
       if (!transaction_published) {
         fail_gpu_conditional_bridge_once(
-          accepted_submission_class == pending_submission_class_e::gpu_undecided ?
+          accepted_submission_class == submission_class_e::gpu_undecided ?
             "GPU near-identical proposal dispatch failed" :
             "force-infer transaction publication failed"
         );
@@ -10524,7 +10529,7 @@ namespace models {
           selected_profile.value_or(0u),
         };
         bool dropped_for_signature_change =
-          accepted_submission_class == pending_submission_class_e::gpu_undecided &&
+          accepted_submission_class == submission_class_e::gpu_undecided &&
           !detail::cuda_graph_signature_matches(
             depth_inference_graph.policy, depth_signature
           );
@@ -10637,7 +10642,7 @@ namespace models {
         };
         if (
           ocr_bindings_ok &&
-          accepted_submission_class == pending_submission_class_e::gpu_undecided &&
+          accepted_submission_class == submission_class_e::gpu_undecided &&
           !detail::cuda_graph_signature_matches(
             ocr_inference_graph.policy, ocr_signature
           )
@@ -10716,7 +10721,7 @@ namespace models {
           {
             std::lock_guard<std::mutex> lock(g_trt_mutex);
             const bool allow_private_bootstrap =
-              accepted_submission_class == pending_submission_class_e::force_infer;
+              accepted_submission_class == submission_class_e::force_infer;
             bool wrapper_ready = prepare_depth_inference_graph(
               cuda, allow_private_bootstrap
             );
@@ -10809,7 +10814,7 @@ namespace models {
       if (independent_ocr_raw_enabled && enqueued && !is_terminal()) {
         // Both private schedules record the same graph and pre-release events. The eager
         // control submits the designated frame's unmaps without waiting for event readiness.
-        independent_depth_release_deferred = true;
+        independent_depth_release_frame = frame_id;
         independent_depth_events_valid = false;
         ++independent_depth_event_sequence;
         if (ocr_mapped || ocr_armed ||
@@ -10929,59 +10934,58 @@ namespace models {
             ocr_signature_refresh_required,
             ocr_available,
             enqueued &&
-              accepted_submission_class == pending_submission_class_e::force_infer,
+              accepted_submission_class == submission_class_e::force_infer,
             accepted_optional_work,
             ocr_armed
           )) {
         ocr_signature_refresh_required = false;
       }
 
-      has_previous_frame = enqueued;
-      pending_ocr_submitted = enqueued && ocr_armed;
       if (enqueued) {
+        host_sbs_temporal_source_bridge::certificate_t accepted_source;
+        if (subtitle_temporal_source_enabled && source_observation.valid()) {
+          const auto &domain = source_observation.domain;
+          if (domain.source_width == input_region.source_width &&
+              domain.source_height == input_region.source_height &&
+              domain.analysis_ltrb == std::array {
+                input_region.left, input_region.top, input_region.right, input_region.bottom} &&
+              domain.analysis_generation == input_region.analysis_generation &&
+              domain.context_generation == subtitle_context.generation &&
+              domain.transfer == static_cast<std::uint32_t>(color_space)) {
+            accepted_source = source_observation;
+          }
+        }
+        pending_root = accepted_inference_t {
+          .frame_id = frame_id,
+          .observation_timestamp_us = adaptive_reuse_request.observation_timestamp_us,
+          .transaction_token = accepted_transaction_token,
+          .baseline_frame_id = accepted_submission_class == submission_class_e::gpu_undecided ?
+                                 adaptive_reuse_request.baseline_frame_id : 0u,
+          .input_region = input_region,
+          .color_space = color_space,
+          .subtitle_context = subtitle_context,
+          .subtitle_line_policy = subtitle_line_policy,
+          .source_observation = accepted_source,
+          .optional_work = accepted_optional_work,
+          .submission_class = accepted_submission_class,
+          .subtitle_work = subtitle_work,
+          .ocr_armed = ocr_armed,
+          .depth_only_history = depth_only_history,
+          .dump_forced = snapshot_raw_model_depth,
+          .submitted_source = {},
+          .queued_input_domain_reset = std::nullopt,
+        };
         if (queued_same_source_gpu_continuation_research_enabled || subtitle_current_outline_enabled) {
           // Only the descriptor is needed after admission; immutable RGB is the OCR snapshot.
-          pending_same_source_gpu_source = input_srv;
-          pending_same_source_gpu_postprocess_queued = false;
-          pending_same_source_gpu_input_domain_reset = false;
+          pending_root->submitted_source = input_srv;
         }
-        accepted_subtitle_context_generation = subtitle_context_generation;
-        accepted_subtitle_context_disabled = subtitle_context_disabled;
-        pending_color_space = color_space;
-        pending_frame_id = frame_id;
-        pending_input_region = input_region;
-        pending_subtitle_line_policy = subtitle_line_policy;
-        pending_source_observation={};
-        if(subtitle_temporal_source_enabled&&source_observation.valid()){
-          const auto &d=source_observation.domain;
-          if(d.source_width==input_region.source_width&&d.source_height==input_region.source_height&&
-             d.analysis_ltrb==std::array<std::uint32_t,4>{input_region.left,input_region.top,input_region.right,input_region.bottom}&&
-             d.analysis_generation==input_region.analysis_generation&&d.context_generation==subtitle_context_generation&&
-             d.transfer==static_cast<std::uint32_t>(color_space))pending_source_observation=source_observation;
-        }
-        pending_optional_work = accepted_optional_work;
-        pending_depth_only_history = depth_only_history;
-        pending_subtitle_work = subtitle_work;
-        pending_submission_class = accepted_submission_class;
-        pending_wrapper_transaction_token = accepted_transaction_token;
-        pending_dump_forced = snapshot_raw_model_depth;
-        pending_gpu_transaction_token =
-          accepted_submission_class == pending_submission_class_e::gpu_undecided ?
-            accepted_transaction_token : 0u;
-        pending_gpu_transaction_current_frame_id =
-          accepted_submission_class == pending_submission_class_e::gpu_undecided ?
-            frame_id : 0u;
-        pending_gpu_transaction_baseline_frame_id =
-          accepted_submission_class == pending_submission_class_e::gpu_undecided ?
-            adaptive_reuse_request.baseline_frame_id : 0u;
-        pending_observation_timestamp_us = adaptive_reuse_request.observation_timestamp_us;
         cached_current_publication.reset();
         if (diagnostics_enabled) {
           throughput_stats_enqueues++;
-          if (accepted_submission_class == pending_submission_class_e::force_infer) {
+          if (accepted_submission_class == submission_class_e::force_infer) {
             throughput_stats_force_infer_enqueues++;
           } else if (
-            accepted_submission_class == pending_submission_class_e::gpu_undecided
+            accepted_submission_class == submission_class_e::gpu_undecided
           ) {
             throughput_stats_gpu_undecided_enqueues++;
           }
@@ -10999,9 +11003,9 @@ namespace models {
       return make_result(
         completed,
         {
-          .inference_enqueued = enqueued && accepted_submission_class == pending_submission_class_e::force_infer,
+          .inference_enqueued = enqueued && accepted_submission_class == submission_class_e::force_infer,
           .gpu_undecided_transaction_enqueued = enqueued &&
-                                                accepted_submission_class == pending_submission_class_e::gpu_undecided,
+                                                accepted_submission_class == submission_class_e::gpu_undecided,
           .subtitle_ocr_inference_enqueued = enqueued && ocr_armed &&
                                              accepted_optional_work == depth_optional_work_mode_e::ordinary,
         }
@@ -11071,14 +11075,14 @@ namespace models {
   }
   raw_ocr_probe_depth_events_t video_depth_estimator::independent_ocr_raw_depth_events_for_evaluation() {
     raw_ocr_probe_depth_events_t r;
-    if (!pimpl || !pimpl->independent_depth_events_valid || !pimpl->has_previous_frame || pimpl->is_terminal()) return r;
+    if (!pimpl || !pimpl->independent_depth_events_valid || !pimpl->pending_root || pimpl->is_terminal()) return r;
     auto &cuda = cuda_driver_api::get();
     if (cuda.cuCtxSetCurrent(pimpl->cuda_ctx) != CUDA_SUCCESS) {
       pimpl->mark_shared_execution_failure(true); return r;
     }
-    r.deferred_mapped_depth_lease = pimpl->independent_depth_release_deferred;
-    r.depth_frame_id = pimpl->pending_frame_id;
-    r.depth_observation_timestamp_us = pimpl->pending_observation_timestamp_us;
+    r.deferred_mapped_depth_lease = pimpl->independent_depth_release_frame.has_value();
+    r.depth_frame_id = pimpl->pending_root->frame_id;
+    r.depth_observation_timestamp_us = pimpl->pending_root->observation_timestamp_us;
     r.recorded_event_sequence = pimpl->independent_depth_event_sequence;
     r.actual_compute_query = static_cast<std::int32_t>(cuda.cuEventQuery(pimpl->independent_depth_compute_event));
     r.actual_hold_query = static_cast<std::int32_t>(cuda.cuEventQuery(pimpl->independent_depth_hold_event));
@@ -11087,7 +11091,7 @@ namespace models {
       r.actual_root_query = static_cast<std::int32_t>(cuda.cuEventQuery(pimpl->depth_inference_done_event));
     }
     if (pimpl->benchmark_joined_completion_gate)
-      pimpl->benchmark_joined_completion_gate->note_actual_event_query(pimpl->pending_frame_id,
+      pimpl->benchmark_joined_completion_gate->note_actual_event_query(pimpl->pending_root->frame_id,
         static_cast<CUresult>(r.actual_hold_query));
     if ((r.actual_compute_query != CUDA_SUCCESS && r.actual_compute_query != CUDA_ERROR_NOT_READY) ||
         (r.actual_hold_query != CUDA_SUCCESS && r.actual_hold_query != CUDA_ERROR_NOT_READY) ||
@@ -11136,7 +11140,7 @@ namespace models {
       pimpl->subtitle_inner_colour_research_command_frame!=expected||pimpl->subtitle_inner_colour_research_command_time!=current->observation_timestamp_us)return std::nullopt;
     const auto t=pimpl->subtitle_temporal_source_backend.mutable_views();const auto b=pimpl->subtitle_temporal_source_composition.baseline_views();
     return subtitle_temporal_source_working_views_t{.model_frame=expected,.model_observation_us=current->observation_timestamp_us,
-      .source=pimpl->pending_source_observation,.baseline_body=b.body,.baseline_matte=b.matte,.body=t.body,.matte=t.matte,.state=t.state,.receipt=t.receipt,
+      .source=pimpl->completed_input.source_observation,.baseline_body=b.body,.baseline_matte=b.matte,.body=t.body,.matte=t.matte,.state=t.state,.receipt=t.receipt,
       .frame256=pimpl->subtitle_temporal_frame_context.output_view(),.current_constants=pimpl->subtitle_contour_cbuffer,
       .transaction=pimpl->near_identical_transaction.buffer,.dispatch_arguments=pimpl->near_identical_transaction.dispatch};
   }
@@ -11186,7 +11190,7 @@ namespace models {
   bool video_depth_estimator::configure_joined_completion_gate_for_native_pacing_test(
     const joined_completion_gate_benchmark::configuration_t &configuration
   ) {
-    return pimpl && !pimpl->has_previous_frame && !pimpl->pending_depth_inference_event_recorded &&
+    return pimpl && !pimpl->pending_root && !pimpl->pending_depth_inference_event_recorded &&
            pimpl->install_benchmark_joined_completion_gate(configuration);
   }
 #endif
@@ -11311,27 +11315,27 @@ namespace models {
   video_depth_estimator::ocr_working_views_for_evaluation(
     const std::uint64_t expected_completed_frame_id
   ) const noexcept {
-    if (!pimpl || pimpl->independent_ocr_raw_enabled || !pimpl->is_operational() || pimpl->has_previous_frame ||
+    if (!pimpl || pimpl->independent_ocr_raw_enabled || !pimpl->is_operational() || pimpl->pending_root ||
         pimpl->pending_depth_inference_event_recorded || expected_completed_frame_id == 0u ||
         !host_sbs_gpu_completion_receipt::valid_expected(pimpl->current_publication) ||
         pimpl->current_publication.frame_id != expected_completed_frame_id ||
-        pimpl->pending_frame_id != expected_completed_frame_id ||
-        !pimpl->pending_input_region.valid() ||
+        pimpl->completed_input.frame_id != expected_completed_frame_id ||
+        !pimpl->completed_input.region.valid() ||
         pimpl->current_publication.analysis_generation !=
-          pimpl->pending_input_region.analysis_generation ||
+          pimpl->completed_input.region.analysis_generation ||
         !pimpl->ocr_output_srv || !pimpl->ocr_cell_stats_srv ||
         !pimpl->subtitle_contour_source.ready() || !pimpl->near_identical_transaction.ready() ||
         !pimpl->ocr_resolve_cbuffer || pimpl->field_w <= 0 || pimpl->field_h <= 0) {
       return std::nullopt;
     }
-    const auto content = pimpl->live_field_content(pimpl->pending_input_region);
+    const auto content = pimpl->live_field_content(pimpl->completed_input.region);
     if (!content || !content->valid(pimpl->live_field_shape())) {
       return std::nullopt;
     }
     return ocr_working_research_views_t {
       .completed_frame_id = pimpl->current_publication.frame_id,
       .observation_timestamp_us = pimpl->current_publication.observation_timestamp_us,
-      .input_region = pimpl->pending_input_region,
+      .input_region = pimpl->completed_input.region,
       .field_width = static_cast<std::uint32_t>(pimpl->field_w),
       .field_height = static_cast<std::uint32_t>(pimpl->field_h),
       .field_content = *content,
@@ -11350,26 +11354,26 @@ namespace models {
     const std::uint64_t observation) const noexcept {
     if(!pimpl || !pimpl->is_operational() || pimpl->independent_ocr_raw_enabled || !pimpl->parallax_v2_producer_active ||
        !pimpl->queued_same_source_gpu_continuation_research_enabled ||
-       !pimpl->has_previous_frame || !pimpl->pending_same_source_gpu_postprocess_queued ||
-       pimpl->pending_dump_forced || pimpl->gpu_undecided_postprocess_pending() ||
-       pimpl->pending_wrapper_transaction_token==0u || sequence==0u ||
-       sequence!=pimpl->queued_same_source_gpu_ticket_sequence || frame!=pimpl->pending_frame_id ||
-       observation!=pimpl->pending_observation_timestamp_us ||
-       pimpl->pending_subtitle_work!=cuda_conditional_graph::work_flag_e::optional_ocr ||
-       !pimpl->pending_input_region.valid() || !pimpl->near_identical_transaction.ready() ||
+       !pimpl->pending_root || !pimpl->pending_root->queued_input_domain_reset.has_value() ||
+       pimpl->pending_root->dump_forced || pimpl->gpu_undecided_postprocess_pending() ||
+       pimpl->pending_root->transaction_token==0u || sequence==0u ||
+       sequence!=pimpl->queued_same_source_gpu_ticket_sequence || frame!=pimpl->pending_root->frame_id ||
+       observation!=pimpl->pending_root->observation_timestamp_us ||
+       pimpl->pending_root->subtitle_work!=cuda_conditional_graph::work_flag_e::optional_ocr ||
+       !pimpl->pending_root->input_region.valid() || !pimpl->near_identical_transaction.ready() ||
        !pimpl->subtitle_contour_source_snapshot.ready() ||
        !pimpl->subtitle_contour_probability_snapshot.ready() || !pimpl->ocr_box_record_srv ||
        !pimpl->subtitle_locator_state_srv || !pimpl->subtitle_contour_identity.ready() ||
        !pimpl->subtitle_contour_cbuffer) return std::nullopt;
-    const auto content=pimpl->live_field_content(pimpl->pending_input_region);
+    const auto content=pimpl->live_field_content(pimpl->pending_root->input_region);
     if(!content)return std::nullopt;
     return pending_ocr_conditioner_research_views_t {
       .ticket_sequence=sequence, .submitted_frame_id=frame, .observation_timestamp_us=observation,
-      .transaction_token=pimpl->pending_wrapper_transaction_token,
-      .subtitle_context_generation=pimpl->accepted_subtitle_context_generation,
-      .expected_work=cuda_conditional_graph::work_flags_value(pimpl->pending_subtitle_work),
+      .transaction_token=pimpl->pending_root->transaction_token,
+      .subtitle_context_generation=pimpl->pending_root->subtitle_context.generation,
+      .expected_work=cuda_conditional_graph::work_flags_value(pimpl->pending_root->subtitle_work),
       .postprocess_request_flags=4u, .planned_owner=pimpl->pending_publication_expected(),
-      .input_region=pimpl->pending_input_region, .color_space=pimpl->pending_color_space,
+      .input_region=pimpl->pending_root->input_region, .color_space=pimpl->pending_root->color_space,
       .field_width=static_cast<std::uint32_t>(pimpl->field_w), .field_height=static_cast<std::uint32_t>(pimpl->field_h),
       .field_content=*content,
       .source_band=pimpl->subtitle_contour_source_snapshot.srv,
@@ -11527,10 +11531,13 @@ namespace models {
       namespace observation_owner=current_outline_observation_v1;
       const auto role=observation_owner::classify(frame,observation,
         {current.frame,current.observation_us,current.analysis_generation,current.token,current.expected_work},
-        {pimpl->pending_frame_id,pimpl->pending_observation_timestamp_us,
-          pimpl->pending_input_region.analysis_generation,pimpl->pending_wrapper_transaction_token,
-          cuda_conditional_graph::work_flags_value(pimpl->pending_subtitle_work)},
-        pimpl->has_previous_frame,pimpl->pending_same_source_gpu_postprocess_queued,
+        pimpl->pending_root ? observation_owner::identity_t {
+          pimpl->pending_root->frame_id, pimpl->pending_root->observation_timestamp_us,
+          pimpl->pending_root->input_region.analysis_generation, pimpl->pending_root->transaction_token,
+          cuda_conditional_graph::work_flags_value(pimpl->pending_root->subtitle_work)
+        } : observation_owner::identity_t {},
+        pimpl->pending_root.has_value(),
+        pimpl->pending_root && pimpl->pending_root->queued_input_domain_reset.has_value(),
         pimpl->queued_same_source_gpu_ticket_sequence,
         {published.frame_id,published.observation_timestamp_us,published.analysis_generation,
           published.transaction_token,published.expected_work},
@@ -11573,8 +11580,12 @@ namespace models {
       // Leave them absent; commands/host identity do not certify GPU freshness or UI.
       return v;
     }
-    const bool queued=pimpl->has_previous_frame&&pimpl->pending_same_source_gpu_postprocess_queued&&pimpl->queued_same_source_gpu_ticket_sequence!=0u&&frame==pimpl->pending_frame_id&&observation==pimpl->pending_observation_timestamp_us;
-    const bool completed=!pimpl->has_previous_frame&&pimpl->publication_is_current(pimpl->current_publication)&&pimpl->current_publication.frame_id==frame&&pimpl->current_publication.observation_timestamp_us==observation;
+    const bool queued = pimpl->pending_root &&
+                        pimpl->pending_root->queued_input_domain_reset.has_value() &&
+                        pimpl->queued_same_source_gpu_ticket_sequence != 0u &&
+                        frame == pimpl->pending_root->frame_id &&
+                        observation == pimpl->pending_root->observation_timestamp_us;
+    const bool completed=!pimpl->pending_root&&pimpl->publication_is_current(pimpl->current_publication)&&pimpl->current_publication.frame_id==frame&&pimpl->current_publication.observation_timestamp_us==observation;
     if(!queued&&!completed)return std::nullopt;
     if(!pimpl->subtitle_contour_probability_snapshot.ready()||!pimpl->subtitle_contour_support.ready()||!pimpl->subtitle_contour_cbuffer)return std::nullopt;
     subtitle_selected_matte_diagnostic_views_t v;v.model_frame=frame;v.model_observation_us=observation;v.pending_queued=queued;
@@ -11582,7 +11593,9 @@ namespace models {
     v.current_probability=pimpl->subtitle_contour_probability_snapshot.srv;v.current_support=pimpl->subtitle_contour_support.srv;v.current_constants=pimpl->subtitle_contour_cbuffer;
     v.baseline_current=pimpl->subtitle_inner_colour_research_available&&pimpl->subtitle_inner_colour_research_command_frame==frame&&pimpl->subtitle_inner_colour_research_command_time==observation;
     if(v.baseline_current){const auto b=pimpl->subtitle_temporal_source_commands?pimpl->subtitle_temporal_source_composition.baseline_views():pimpl->subtitle_inner_colour_research.mutable_views();v.baseline_body=b.body;v.baseline_matte=b.matte;v.numeric_proof=b.validation_receipt;}
-    v.temporal_commands=pimpl->subtitle_temporal_source_commands;v.source_certificate_valid=pimpl->pending_source_observation.valid();
+    v.temporal_commands=pimpl->subtitle_temporal_source_commands;
+    v.source_certificate_valid = queued ? pimpl->pending_root->source_observation.valid() :
+                                         pimpl->completed_input.source_observation.valid();
     if(v.temporal_commands){const auto t=pimpl->subtitle_temporal_source_backend.mutable_views();v.temporal_matte=t.matte;v.temporal_receipt=t.receipt;v.frame256=pimpl->subtitle_temporal_frame_context.output_view();}
     if(!v.selected_matte||!v.selected_receipt)return std::nullopt;
     return v;
