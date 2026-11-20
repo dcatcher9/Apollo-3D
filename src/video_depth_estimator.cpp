@@ -2007,6 +2007,7 @@ namespace models {
       struct callback_state_t {
         std::weak_ptr<safe::deadline_waiter_t> waiter;
         std::atomic<unsigned> references {1};
+        std::atomic<bool> completed {false};
 
         void release() noexcept {
           if (references.fetch_sub(1, std::memory_order_acq_rel) == 1) {
@@ -2017,6 +2018,7 @@ namespace models {
 
       static void __stdcall notify(void *opaque) noexcept {
         auto *state = static_cast<callback_state_t *>(opaque);
+        state->completed.store(true, std::memory_order_release);
         if (const auto waiter = state->waiter.lock()) {
           waiter->notify();
         }
@@ -2060,6 +2062,9 @@ namespace models {
         if (waiting != CUDA_SUCCESS) {
           return waiting;
         }
+        // The previous callback released its reference after signalling, so it can no
+        // longer publish completion for this arm.
+        state_->completed.store(false, std::memory_order_relaxed);
         // CUDA can suppress host functions after a context error. Preserve the reference
         // after an ambiguous launch failure as well as during ordinary delayed dispatch.
         state_->references.fetch_add(1, std::memory_order_relaxed);
@@ -2067,7 +2072,15 @@ namespace models {
       }
 
       bool wait_until(std::chrono::steady_clock::time_point deadline) noexcept {
-        return waiter_->wait_until(deadline);
+        // A callback can signal after its wait has already reached the cutoff.
+        // Reuse the same cutoff if a wake precedes this arm's callback.
+        do {
+          if (!waiter_->wait_until(deadline)) {
+            return false;
+          }
+        } while (!state_->completed.load(std::memory_order_acquire) &&
+                 std::chrono::steady_clock::now() < deadline);
+        return true;
       }
 
     private:

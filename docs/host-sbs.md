@@ -2565,10 +2565,11 @@ leaves the GPU time to progress. A remote encoder owner can wait once for a CUDA
 notification when it has elevated process and thread priorities, an active native presentation
 timer request, and requested and effective periods of at most `1 ms`. An independent stream
 signals the owner after the joined event. The wait targets the start of the final `1 ms` of the original
-budget, which uses the yielded query cadence. Local presentation and remote conversions without
-these conditions use the yielded cadence for the full wait. A failed or over-budget Windows wait
-disables notification waiting for that estimator. Every wake still requires a joined query within
-the same cadence deadline and query fuse.
+budget, which uses the yielded query cadence. A signal left by an earlier callback is consumed
+and the notifier continues waiting to its current cutoff. Local presentation and remote
+conversions without these conditions use the yielded cadence for the full wait. A failed or
+over-budget Windows wait disables notification waiting for that estimator. Only a joined query
+within the same cadence deadline and query fuse proves completion.
 
 Capture and content timestamps identify pixels. Force-infer and GPU-undecided work both record
 the joined non-timing CUDA event after the conditional root and every unmap tail. The event
