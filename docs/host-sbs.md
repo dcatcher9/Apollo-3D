@@ -1161,12 +1161,14 @@ replace Raw, supply profile or AA evidence, or commit a new weak calibration.
 
 The existing current Inside graphs run before Raw so they can supply that local anchor evidence;
 their final matte union remains late. Each ROI publication replaces its own unit bit, including
-rejected pixels, while preserving other units. Glyph publication reads the current Inside image
-through its read-only view. The existing Inside finalizer owns full-image canonicalization against
-the completed glyph-publication result, current good units and covers, then unions that same kept
-value. The finalizer validates the immutable frame, resource dimensions and receipt header once
-per workgroup. Invalid publication clears the image before the finalizer's stricter readiness
-return.
+rejected pixels, while preserving other units. Publication validates the immutable rectangle and
+graph once per workgroup and records the shared result once per unit. A graph fault clears that
+unit's stale bits, while an invalid Inside texture shape prevents pixel access. Glyph publication
+reads the current Inside image through its read-only view. The existing Inside finalizer owns
+full-image canonicalization against the completed glyph-publication result, current good units
+and covers, then unions that same kept value. The finalizer validates the immutable frame,
+resource dimensions and receipt header once per workgroup. Invalid publication clears the image
+before the finalizer's stricter readiness return.
 No resource or dispatch is added. An unissued Raw graph's shared parent/flags scratch is not a
 current Raw result and can differ when this ordering changes.
 

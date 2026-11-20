@@ -128,24 +128,52 @@ uint FindStable(uint id){
     return 0u;
 }
 void FailUnit(){uint ignored;StageWords.InterlockedOr(80u*4u,1u<<Hook.x,ignored);}
+groupshared uint4 InsideUnitRect;
+groupshared bool InsideUnitReady;
+groupshared bool InsideUnitShapeValid;
+groupshared bool InsideUnitGraphValid;
+
 [numthreads(16,16,1)]
-void publish_inside_main(uint3 d:SV_DispatchThreadID){
-    uint2 p;if(d.z!=0u||!FrameReadyRW()||!ROI(d.xy,p))return;
-    uint w,h;InsideWrite.GetDimensions(w,h);if(any(uint2(w,h)!=Shape.xy)){FailUnit();return;}
+void publish_inside_main(uint3 d:SV_DispatchThreadID,uint lane:SV_GroupIndex){
+    // Only immutable inputs participate in the uniform proof. Publication updates words 79/80.
+    if(lane==0u){
+        uint2 origin;
+        InsideUnitReady=FrameReadyRW()&&ROI(uint2(0u,0u),origin);
+        InsideUnitRect=0u;
+        InsideUnitShapeValid=false;
+        InsideUnitGraphValid=false;
+        if(InsideUnitReady){
+            uint u=UB(Hook.x);
+            InsideUnitRect=uint4(origin,CBCMeta[u+26u],CBCMeta[u+27u]);
+            uint w,h;InsideWrite.GetDimensions(w,h);
+            InsideUnitShapeValid=all(uint2(w,h)==Shape.xy);
+            if(InsideUnitShapeValid&&GraphShape())InsideUnitGraphValid=Parent[0u]==0u;
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if(d.z!=0u||!InsideUnitReady||any(d.xy>=InsideUnitRect.zw-InsideUnitRect.xy))return;
+
+    // Dispatch coordinates start at the rectangle origin. The uniform result belongs to the unit.
+    if(all(d.xy==0u)){
+        if(!InsideUnitGraphValid)FailUnit();
+        else {
+            uint ignored;
+            StageWords.InterlockedOr(79u*4u,1u<<Hook.x,ignored);
+        }
+    }
+    if(!InsideUnitShapeValid)return;
+
     // Each serialized unit replaces its own bit at every current ROI texel.
-    // Compute the final word once, so unchanged glyph/background needs no write.
+    // A bad graph still clears this unit's old bits. Pixel faults leave other units intact.
+    uint2 p=InsideUnitRect.xy+d.xy;
     uint bit=1u<<Hook.x,old=InsideWrite[p],updated=old&~bit;
-    if(!GraphShape()||Parent[0u]!=0u)FailUnit();
-    else {
-        uint ignored;StageWords.InterlockedOr(79u*4u,bit,ignored);
-        if(Eligible.Load(int3(p,0))==1u){
-            uint root=FindStable(p.y*Shape.x+p.x+1u);
-            if(root==0u)FailUnit();
-            else {
-                uint flags=RootFlags[root];
-                if((flags&~3u)!=0u)FailUnit();
-                else if((flags&3u)==1u)updated|=bit;
-            }
+    if(InsideUnitGraphValid&&Eligible.Load(int3(p,0))==1u){
+        uint root=FindStable(p.y*Shape.x+p.x+1u);
+        if(root==0u)FailUnit();
+        else {
+            uint flags=RootFlags[root];
+            if((flags&~3u)!=0u)FailUnit();
+            else if((flags&3u)==1u)updated|=bit;
         }
     }
     if(updated!=old)InsideWrite[p]=updated;

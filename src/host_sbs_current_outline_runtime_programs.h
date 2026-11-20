@@ -124,7 +124,7 @@ inline constexpr std::array<cache::shader_spec, 4u> inside_specs{{
   cache::shader_spec{"host_sbs_current_inside_completion_cs.hlsl","publish_inside_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_inside_completion_cs.hlsl","finalize_main","cs_5_0"},
 }};
-inline constexpr std::string_view inside_closure="0cf1cc39c9e461bb7a4a0d164cf2e2d0a50d9aad4a1ac27930831717c99684dd";
+inline constexpr std::string_view inside_closure="1c7168e189089c88bfdd19b629d9845d12bbe47858db5e48abdb78b30214bafd";
 inline constexpr std::array<cache::shader_spec, 2u> selector_specs{{
   cache::shader_spec{"host_sbs_selected_matte_cs.hlsl","prepare_main","cs_5_0"},
   cache::shader_spec{"host_sbs_selected_matte_cs.hlsl","select_main","cs_5_0"},
