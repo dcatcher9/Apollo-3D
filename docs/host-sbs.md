@@ -378,7 +378,9 @@ enabled/color mode, exact analysis-domain generation, and the integer analysis-s
 inside rendered color. Existing 48-byte b2 geometry is unchanged.
 Missing or invalid subtitle inputs preserve authorized Base; invalid Base authorization retains
 the existing flat fallback. Shared preparation adds a native full-width subtitle band, authorised
-weights, row/header storage and draw geometry. These resources belong to the current immutable
+weights, row/header storage and draw geometry. The shared runtime derives the band from the
+submitted analysis rectangle and the actual color and matte textures. It uses those same texture
+identities to reject inputs that alias its writable planes. These resources belong to the current immutable
 draw only, are unbound between compute and sampling, and are rebuilt before reuse. The queued
 wrapper retains the exact-source GPU guard independently of subtitle authorisation.
 `src/host_sbs_shared_ui_warp_runtime.h` owns the ordered completed and queued shader specifications.

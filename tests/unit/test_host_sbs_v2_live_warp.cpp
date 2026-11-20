@@ -46,6 +46,7 @@
 
 class HostSbsV2LiveWarpGpuTest_SharedUiPinProductionOwnerRestoresContextAndRejectsMissingInputs_Test;
 class HostSbsV2LiveWarpGpuTest_SharedUiPinProductionRejectsInvalidRowExtentAndDiagnosticDevice_Test;
+class HostSbsV2LiveWarpGpuTest_SharedUiPinSubtitlePreparationPlacesBandAndRevokesInvalidRequests_Test;
 class HostSbsV2LiveWarpGpuTest_SharedUiPinQueuedProductionRequiresCurrentGuardAtPrepareAndDraw_Test;
 class HostSbsV2LiveWarpGpuTest_SharedUiPinQueuedPreparationFailurePreservesCompletedProtection_Test;
 class HostSbsV2LiveWarpGpuTest_SharedUiPinCompletedProtectionDoesNotRequireQueuedSource_Test;
@@ -159,6 +160,7 @@ namespace {
   class live_v2_warp_fixture_t {
     friend class ::HostSbsV2LiveWarpGpuTest_SharedUiPinProductionOwnerRestoresContextAndRejectsMissingInputs_Test;
     friend class ::HostSbsV2LiveWarpGpuTest_SharedUiPinProductionRejectsInvalidRowExtentAndDiagnosticDevice_Test;
+    friend class ::HostSbsV2LiveWarpGpuTest_SharedUiPinSubtitlePreparationPlacesBandAndRevokesInvalidRequests_Test;
     friend class ::HostSbsV2LiveWarpGpuTest_SharedUiPinQueuedProductionRequiresCurrentGuardAtPrepareAndDraw_Test;
     friend class ::HostSbsV2LiveWarpGpuTest_SharedUiPinQueuedPreparationFailurePreservesCompletedProtection_Test;
     friend class ::HostSbsV2LiveWarpGpuTest_SharedUiPinCompletedProtectionDoesNotRequireQueuedSource_Test;
@@ -5663,6 +5665,161 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinProductionRejectsInvalidRowExtentAndDi
   error = "previous diagnostic failure";
   ASSERT_TRUE(programs.load_diagnostics(fixture.device.Get(), SUNSHINE_SHADERS_DIR, error)) << error;
   EXPECT_TRUE(error.empty());
+}
+
+TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinSubtitlePreparationPlacesBandAndRevokesInvalidRequests) {
+  namespace shared = models::host_sbs_shared_ui_warp;
+  namespace v2 = models::depth_coordinate_v2;
+  constexpr UINT width = 128u, height = 32u, field_width = 24u, field_height = 10u;
+  constexpr rgba16_bits_t grey {0x3400u, 0x3400u, 0x3400u, 0x3c00u};
+  constexpr rgba16_bits_t white {0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u};
+  live_v2_warp_fixture_t fixture;
+  std::string error;
+  ASSERT_TRUE(fixture.initialize(error, warp_shader_e::selected_outline)) << error;
+  shared::programs_t programs;
+  ASSERT_TRUE(programs.load(fixture.device.Get(), SUNSHINE_SHADERS_DIR, error)) << error;
+  const auto program = programs.program();
+
+  const auto texture = [&](DXGI_FORMAT format, UINT w, UINT h, const auto &pixels) {
+    ComPtr<ID3D11Texture2D> resource;
+    ComPtr<ID3D11ShaderResourceView> view;
+    EXPECT_TRUE(fixture.create_immutable_texture_srv(format, w, h, sizeof(pixels[0]), pixels.data(), resource, view));
+    return view;
+  };
+  const auto buffer = [&](const auto &value, UINT stride) {
+    D3D11_BUFFER_DESC desc {};
+    desc.ByteWidth = sizeof(value);
+    desc.Usage = D3D11_USAGE_IMMUTABLE;
+    desc.BindFlags = stride ? D3D11_BIND_SHADER_RESOURCE : D3D11_BIND_CONSTANT_BUFFER;
+    desc.MiscFlags = stride ? D3D11_RESOURCE_MISC_BUFFER_STRUCTURED : 0u;
+    desc.StructureByteStride = stride;
+    const D3D11_SUBRESOURCE_DATA initial {&value, 0u, 0u};
+    ComPtr<ID3D11Buffer> result;
+    EXPECT_TRUE(SUCCEEDED(fixture.device->CreateBuffer(&desc, &initial, &result)));
+    return result;
+  };
+  const auto structured = [&](const auto &words, UINT stride = sizeof(std::uint32_t)) {
+    const auto resource = buffer(words, stride);
+    D3D11_SHADER_RESOURCE_VIEW_DESC desc {};
+    desc.Format = DXGI_FORMAT_UNKNOWN;
+    desc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+    desc.Buffer.NumElements = sizeof(words) / stride;
+    ComPtr<ID3D11ShaderResourceView> view;
+    EXPECT_TRUE(resource && SUCCEEDED(fixture.device->CreateShaderResourceView(resource.Get(), &desc, &view)));
+    return view;
+  };
+
+  ComPtr<ID3D11Device> foreign_device;
+  ASSERT_TRUE(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0u, nullptr, 0u,
+    D3D11_SDK_VERSION, &foreign_device, nullptr, nullptr)));
+  const D3D11_TEXTURE2D_DESC foreign_desc {width, height, 1u, 1u, DXGI_FORMAT_R16G16B16A16_FLOAT,
+    {1u, 0u}, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0u, 0u};
+  ComPtr<ID3D11Texture2D> foreign_texture;
+  ComPtr<ID3D11ShaderResourceView> foreign_view;
+  ASSERT_TRUE(SUCCEEDED(foreign_device->CreateTexture2D(&foreign_desc, nullptr, &foreign_texture)));
+  ASSERT_TRUE(SUCCEEDED(foreign_device->CreateShaderResourceView(foreign_texture.Get(), nullptr, &foreign_view)));
+
+  const auto state = make_live_state(true, true);
+  shared::resources_t owner;
+  for (const bool roi : {false, true}) {
+    SCOPED_TRACE(roi ? "offset ROI" : "full source");
+    const shared::subtitle_domain_t domain {roi ? 64u : width, roi ? 16u : height, roi ? 8u : 0u};
+    const UINT source_left = roi ? 32u : 0u;
+    const UINT native_top = roi ? 8u : 0u;
+    const UINT glyph_x = domain.width / 2u, glyph_y = 4u;
+    const UINT full_y = domain.top + native_top + glyph_y;
+    auto subtitle = make_subtitle_inputs(domain.width, domain.height, state, 2.5f / domain.width, field_width, field_height);
+    subtitle.constants.source_left = source_left;
+    subtitle.constants.source_top = domain.top;
+    subtitle.identity[10u] = native_top;
+    subtitle.height -= native_top;
+    subtitle.identity[11u] = subtitle.height;
+    subtitle.matte.resize(domain.width * subtitle.height);
+    subtitle.snapshot.resize(subtitle.matte.size());
+    subtitle.matte[glyph_y * domain.width + glyph_x] = 1u;
+    subtitle.snapshot[glyph_y * domain.width + glyph_x] = white;
+    std::vector<rgba16_bits_t> source(width * height, grey);
+    source[full_y * width + source_left + glyph_x] = white;
+    const std::vector<float> base(field_width * field_height, -1.25f / domain.width);
+    const auto selected = make_current_outline_inputs(subtitle);
+    host_sbs_v2_geometry_t geometry;
+    if (roi) {
+      geometry.video_roi_active = 1.0f;
+      geometry.video_roi_left = geometry.video_roi_top = 0.25f;
+      geometry.video_roi_right = geometry.video_roi_bottom = 0.75f;
+      geometry.tensor_content_right = field_width;
+      geometry.tensor_content_bottom = field_height;
+    }
+    const std::array views {
+      texture(DXGI_FORMAT_R16G16B16A16_FLOAT, width, height, source),
+      texture(DXGI_FORMAT_R32_FLOAT, field_width, field_height, base),
+      structured(state, v2::state_vector_width * sizeof(float)),
+      texture(DXGI_FORMAT_R32_UINT, domain.width, subtitle.height, selected.matte),
+      texture(DXGI_FORMAT_R16G16B16A16_FLOAT, domain.width, subtitle.height, subtitle.snapshot),
+      structured(subtitle.condition), structured(subtitle.identity), structured(selected.receipt),
+    };
+    ASSERT_TRUE(std::all_of(views.begin(), views.end(), [](const auto &view) { return view.Get() != nullptr; }));
+    const auto geometry_constants = buffer(geometry, 0u);
+    const auto subtitle_constants = buffer(subtitle.constants, 0u);
+    shared::request_t request;
+    for (std::size_t slot = 0u; slot < views.size(); ++slot) {
+      request.draw_srvs[slot] = views[slot].Get();
+    }
+    request.geometry_constants = geometry_constants.Get();
+    request.subtitle_constants = subtitle_constants.Get();
+    request.sampler = fixture.sampler.Get();
+    const auto prepare = [&](const shared::request_t &inputs, const shared::subtitle_domain_t placement) {
+      return owner.prepare_subtitle(fixture.device.Get(), fixture.context.Get(), program, inputs,
+        placement, error, shared::resources_t::binding_policy_e::converter_owned);
+    };
+
+    ASSERT_TRUE(prepare(request, domain)) << error;
+    const auto accepted = owner.views();
+    const std::array<UINT, 4u> expected_shape {width, height, roi ? 15u : 0u, roi ? 10u : height};
+    ASSERT_EQ(accepted.shape, expected_shape);
+    ASSERT_TRUE(accepted.field && accepted.rows);
+    ASSERT_TRUE(owner.matches(fixture.context.Get(), request));
+    ComPtr<ID3D11Resource> rows;
+    accepted.rows->GetResource(&rows);
+    auto staging_desc = D3D11_TEXTURE2D_DESC {1u, expected_shape[3] + 1u, 1u, 1u, DXGI_FORMAT_R32_UINT,
+      {1u, 0u}, D3D11_USAGE_STAGING, 0u, D3D11_CPU_ACCESS_READ, 0u};
+    ComPtr<ID3D11Texture2D> staging;
+    ASSERT_TRUE(SUCCEEDED(fixture.device->CreateTexture2D(&staging_desc, nullptr, &staging)));
+    fixture.context->CopyResource(staging.Get(), rows.Get());
+    D3D11_MAPPED_SUBRESOURCE mapped {};
+    ASSERT_TRUE(SUCCEEDED(fixture.context->Map(staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped)));
+    const auto read_row = [&](UINT row) {
+      std::uint32_t value;
+      std::memcpy(&value, static_cast<const std::byte *>(mapped.pData) + row * mapped.RowPitch, sizeof(value));
+      return value;
+    };
+    for (UINT row = 0u; row < expected_shape[3]; ++row) {
+      EXPECT_EQ(read_row(row), row + expected_shape[2] == full_y ? 1u : 0u) << row;
+    }
+    EXPECT_EQ(read_row(expected_shape[3]), 1u) << "The selected receipt must authenticate this draw";
+    fixture.context->Unmap(staging.Get(), 0u);
+
+    auto aliased = request;
+    aliased.draw_srvs[roi ? 1u : 0u] = accepted.field.Get();
+    auto foreign = request;
+    foreign.draw_srvs[0] = foreign_view.Get();
+    const auto expect_rejection = [&](const shared::request_t &inputs, shared::subtitle_domain_t placement,
+                                     std::string_view expected_error) {
+      const auto previous_serial = owner.views().serial;
+      EXPECT_FALSE(prepare(inputs, placement));
+      EXPECT_EQ(error, expected_error);
+      EXPECT_FALSE(owner.views().field);
+      EXPECT_FALSE(owner.matches(fixture.context.Get(), request));
+      ASSERT_TRUE(prepare(request, domain)) << error;
+      EXPECT_TRUE(owner.matches(fixture.context.Get(), request));
+      EXPECT_EQ(owner.views().field.Get(), accepted.field.Get());
+      EXPECT_GT(owner.views().serial, previous_serial);
+    };
+    ASSERT_NO_FATAL_FAILURE(expect_rejection(aliased, domain, "Shared UI warp writable input alias"));
+    ASSERT_NO_FATAL_FAILURE(expect_rejection(foreign, domain, "Shared UI warp draw resource missing or foreign"));
+    ASSERT_NO_FATAL_FAILURE(expect_rejection(request, {domain.width, domain.height, height},
+      "Shared UI warp subtitle band outside source domain"));
+  }
 }
 
 TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinQueuedPreparationFailurePreservesCompletedProtection) {

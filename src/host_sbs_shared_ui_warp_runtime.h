@@ -304,6 +304,10 @@ namespace models::host_sbs_shared_ui_warp {
     std::uint64_t serial = 0u;
   };
 
+  struct subtitle_domain_t {
+    UINT width, height, top;
+  };
+
   class resources_t {
     struct plane_t {
       ComPtr<ID3D11Texture2D> texture;
@@ -330,6 +334,18 @@ namespace models::host_sbs_shared_ui_warp {
     ID3D11DeviceContext *context_ = nullptr;
     std::uint64_t serial_ = 0u;
     bool issued_ = false, queued_ = false, text_game_ = false, materialize_inactive_ = true;
+
+    struct subtitle_inputs_t {
+      ComPtr<ID3D11Resource> source, matte;
+      D3D11_TEXTURE2D_DESC source_desc {};
+    };
+
+    static bool describe_texture(const ComPtr<ID3D11Resource> &resource, D3D11_TEXTURE2D_DESC &desc) {
+      ComPtr<ID3D11Texture2D> texture;
+      if (!resource || FAILED(resource.As(&texture))) return false;
+      texture->GetDesc(&desc);
+      return true;
+    }
 
     template<class T> bool same_device(T *object) const {
       if (!object) return false;
@@ -491,12 +507,51 @@ namespace models::host_sbs_shared_ui_warp {
       *this = std::move(next); return true;
     }
 
+    // The supplied domain is the one uploaded to the subtitle constants for this draw.
+    // Inspect the literal color and matte once to place the full-width pin band.
+    bool prepare_subtitle(ID3D11Device *device, ID3D11DeviceContext *context, const program_t &program,
+                          const request_t &request, const subtitle_domain_t domain, std::string &error,
+                          const binding_policy_e binding_policy = binding_policy_e::restore) {
+      issued_ = false;
+      if (request.text_game || !request.draw_srvs[0] || !request.draw_srvs[3]) {
+        error = "Shared UI warp source or subtitle matte unavailable";
+        return false;
+      }
+      subtitle_inputs_t inputs;
+      request.draw_srvs[0]->GetResource(&inputs.source);
+      request.draw_srvs[3]->GetResource(&inputs.matte);
+      D3D11_TEXTURE2D_DESC matte_desc {};
+      if (!describe_texture(inputs.source, inputs.source_desc) || !describe_texture(inputs.matte, matte_desc)) {
+        error = "Shared UI warp source or subtitle matte texture unavailable";
+        return false;
+      }
+      const auto &source = inputs.source_desc;
+      if (matte_desc.Width != domain.width || matte_desc.Height == 0u || matte_desc.Height > domain.height ||
+          domain.top > source.Height || domain.height > source.Height - domain.top) {
+        error = "Shared UI warp subtitle band outside source domain";
+        return false;
+      }
+      const UINT band_end = domain.top + domain.height;
+      const UINT band_top = band_end - matte_desc.Height;
+      const UINT padded_top = band_top > 0u ? band_top - 1u : 0u;
+      const std::array<UINT, 4u> shape {
+        source.Width, source.Height, padded_top, std::min(source.Height, band_end + 1u) - padded_top,
+      };
+      return ensure(device, shape, error) && queue_draw(context, program, request, error, binding_policy, &inputs);
+    }
+
+    bool queue(ID3D11DeviceContext *context, const program_t &program, const request_t &request, std::string &error,
+               const binding_policy_e binding_policy = binding_policy_e::restore) {
+      return queue_draw(context, program, request, error, binding_policy, nullptr);
+    }
+
+  private:
     // Serial immediate-context submission only. CPU shape/resource checks grant no mask
     // authority; the GPU validates the current SCT/SCP/state/receipt/RGB for this draw.
     // Keep all operands immutable until the matching draw, before any subsequent queue.
     // The converter-owned policy leaves preparation bindings clear for its next draw.
-    bool queue(ID3D11DeviceContext *context, const program_t &program, const request_t &request, std::string &error,
-               const binding_policy_e binding_policy = binding_policy_e::restore) {
+    bool queue_draw(ID3D11DeviceContext *context, const program_t &program, const request_t &request, std::string &error,
+                    const binding_policy_e binding_policy, const subtitle_inputs_t *subtitle_inputs) {
       issued_ = false; error.clear();
       if (!geometry_ || request.queued != program.queued || request.text_game != program.text_game || (request.text_game && request.queued) || !context || context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE || !same_device(context) ||
           !programs_.acquire(device_.Get(), {program.initialize, program.pin}) || !same_device(program.pixel) ||
@@ -509,6 +564,7 @@ namespace models::host_sbs_shared_ui_warp {
       ComPtr<ID3D11Predicate> predicate; BOOL predicate_value = FALSE;
       context->GetPredication(&predicate, &predicate_value);
       if (predicate) { error = "Shared UI warp requires an unpredicated draw"; return false; }
+      ComPtr<ID3D11Resource> standalone_source;
       for (std::size_t slot = 0u; slot < request.draw_srvs.size(); ++slot) {
         auto *view = request.draw_srvs[slot];
         // The text-game route has no subtitle operands: its t3..7 must be absent, not optional.
@@ -517,17 +573,25 @@ namespace models::host_sbs_shared_ui_warp {
           continue;
         }
         if (!same_device(view)) { error = "Shared UI warp draw resource missing or foreign"; return false; }
-        ComPtr<ID3D11Resource> resource; view->GetResource(&resource);
-        if (resource.Get() == field_.texture.Get() || resource.Get() == weights_.texture.Get() || resource.Get() == rows_.texture.Get()) {
+        auto *identity = subtitle_inputs && slot == 0u ? subtitle_inputs->source.Get() :
+                         subtitle_inputs && slot == 3u ? subtitle_inputs->matte.Get() : nullptr;
+        ComPtr<ID3D11Resource> resource;
+        if (!identity) {
+          view->GetResource(&resource);
+          identity = resource.Get();
+        }
+        if (identity == field_.texture.Get() || identity == weights_.texture.Get() || identity == rows_.texture.Get()) {
           error = "Shared UI warp writable input alias"; return false;
         }
+        if (!subtitle_inputs && slot == 0u) standalone_source = std::move(resource);
       }
-      ComPtr<ID3D11Resource> source; ComPtr<ID3D11Texture2D> source_texture;
-      request.draw_srvs[0]->GetResource(&source);
-      D3D11_TEXTURE2D_DESC source_desc {}; D3D11_SHADER_RESOURCE_VIEW_DESC view_desc {};
+      D3D11_TEXTURE2D_DESC standalone_source_desc {};
+      if (!subtitle_inputs && !describe_texture(standalone_source, standalone_source_desc)) {
+        error = "Shared UI warp source texture unavailable"; return false;
+      }
+      const auto &source_desc = subtitle_inputs ? subtitle_inputs->source_desc : standalone_source_desc;
+      D3D11_SHADER_RESOURCE_VIEW_DESC view_desc {};
       request.draw_srvs[0]->GetDesc(&view_desc);
-      if (FAILED(source.As(&source_texture))) { error = "Shared UI warp source texture unavailable"; return false; }
-      source_texture->GetDesc(&source_desc);
       if (source_desc.Width != shape_[0] || source_desc.Height != shape_[1] || source_desc.ArraySize != 1u ||
           source_desc.MipLevels != 1u || source_desc.SampleDesc.Count != 1u || view_desc.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D ||
           view_desc.Texture2D.MostDetailedMip != 0u || view_desc.Texture2D.MipLevels != 1u || serial_ == std::numeric_limits<std::uint64_t>::max()) {
@@ -603,6 +667,7 @@ namespace models::host_sbs_shared_ui_warp {
       return true;
     }
 
+  public:
     [[nodiscard]] bool matches(ID3D11DeviceContext *context, const request_t &request) const noexcept {
       if (!issued_ || context != context_ || request.queued != queued_ || request.geometry_constants != draw_geometry_.Get() ||
           request.subtitle_constants != draw_subtitle_.Get() || request.sampler != sampler_.Get() ||

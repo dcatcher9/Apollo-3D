@@ -2918,33 +2918,17 @@ namespace platf::dxgi {
               return request;
             };
             if (selected_draw && subtitle_constants.enabled == 1u) {
-              Microsoft::WRL::ComPtr<ID3D11Resource> matte_resource;
-              Microsoft::WRL::ComPtr<ID3D11Texture2D> matte_texture;
-              draw_command.shader_resources[3]->GetResource(&matte_resource);
-              Microsoft::WRL::ComPtr<ID3D11Resource> colour_resource;
-              Microsoft::WRL::ComPtr<ID3D11Texture2D> colour_texture;
-              draw_command.shader_resources[0]->GetResource(&colour_resource);
-              D3D11_TEXTURE2D_DESC matte_desc {};
-              D3D11_TEXTURE2D_DESC colour_desc {};
+              const auto request = shared_request_for_draw();
+              const auto program = selected_shared_warp_programs.program(queued_geometry_selected);
               std::string shared_error;
-              if (SUCCEEDED(matte_resource.As(&matte_texture)) && SUCCEEDED(colour_resource.As(&colour_texture))) {
-                matte_texture->GetDesc(&matte_desc);
-                colour_texture->GetDesc(&colour_desc);
-                if (matte_desc.Width == subtitle_constants.source_width && matte_desc.Height > 0u && matte_desc.Height <= subtitle_constants.source_height && subtitle_constants.source_top <= colour_desc.Height && subtitle_constants.source_height <= colour_desc.Height - subtitle_constants.source_top) {
-                  const UINT band_top = subtitle_constants.source_top + subtitle_constants.source_height - matte_desc.Height;
-                  const UINT band_end = subtitle_constants.source_top + subtitle_constants.source_height;
-                  const UINT padded_top = band_top > 0u ? band_top - 1u : 0u;
-                  const std::array<UINT, 4u> shape {colour_desc.Width, colour_desc.Height, padded_top, std::min(colour_desc.Height, band_end + 1u) - padded_top};
-                  const auto request = shared_request_for_draw();
-                  const auto program = selected_shared_warp_programs.program(queued_geometry_selected);
-                  if (selected_shared_warp.ensure(device.get(), shape, shared_error) &&
-                      selected_shared_warp.queue(device_ctx.get(), program, request, shared_error, pin_bindings) &&
-                      selected_shared_warp.matches(device_ctx.get(), request)) {
-                    current_shared_warp = selected_shared_warp.views();
-                    shared_warp_selected = true;
-                    draw_command.pixel_shader = program.pixel;
-                  }
-                }
+              if (selected_shared_warp.prepare_subtitle(
+                    device.get(), device_ctx.get(), program, request,
+                    {subtitle_constants.source_width, subtitle_constants.source_height, subtitle_constants.source_top},
+                    shared_error, pin_bindings
+                  ) && selected_shared_warp.matches(device_ctx.get(), request)) {
+                current_shared_warp = selected_shared_warp.views();
+                shared_warp_selected = true;
+                draw_command.pixel_shader = program.pixel;
               }
             }
             if (!shared_warp_selected) {
