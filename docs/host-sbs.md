@@ -2015,6 +2015,9 @@ conversion. An accepted root that is still pending at return retains its capture
 pool slot unavailable for reuse. At most one image persists this way. The local three-image pool can
 hold the pending image, the latest retained input, and the next capture. The converter releases a
 completed image at the end of its conversion after recording any matched draw and dump reads.
+Local presentation and remote capture both prefer the most recently checked-out free backing.
+Remote capture keeps a twelve-slot pool. While frames arrive it checks about once per second and
+trims unborrowed backing idle for at least three seconds.
 Completed lineage retains the authenticated observation, and the packed presentation cache retains
 its rendered pixels independently of the capture image. Research paths that require private
 sources and inputs without a stable shared image owner use a private matched copy.

@@ -1,3 +1,4 @@
+#include "src/capture_image_pool.h"
 #include "src/video_capture_test.h"
 
 #include <atomic>
@@ -16,6 +17,90 @@ namespace {
   using namespace std::chrono_literals;
   using worker_t = video::detail::capture_worker_test_t;
   using context_t = video::detail::capture_worker_test_context_t;
+
+  struct capture_pool_clock_t {
+    using time_point = std::chrono::steady_clock::time_point;
+    static inline time_point time {};
+    static time_point now() noexcept { return time; }
+  };
+
+  TEST(CaptureImagePoolTest, ReusesRecentFreeBackingAndResetsDeliveryMetadata) {
+    video::detail::capture_image_pool_t<3> pool;
+    unsigned allocations = 0;
+    const auto allocate = [&] {
+      ++allocations;
+      return std::make_shared<platf::img_t>();
+    };
+    const auto first = pool.try_acquire(allocate);
+    auto second = pool.try_acquire(allocate);
+    auto third = pool.try_acquire(allocate);
+    ASSERT_TRUE(first && second && third);
+    EXPECT_NE(first.get(), second.get());
+    EXPECT_NE(second.get(), third.get());
+    EXPECT_FALSE(pool.try_acquire(allocate));
+    EXPECT_EQ(allocations, 3u);
+
+    third->width = 1920;
+    third->frame_timestamp = std::chrono::steady_clock::time_point {};
+    third->content_timestamp = third->frame_timestamp;
+    third->pixels_skipped = true;
+    third->conversion_needed = false;
+    const auto *recent = third.get();
+    third.reset();
+    second.reset();
+    const auto result = pool.try_acquire(allocate);
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result.get(), recent);
+    EXPECT_EQ(result->width, 1920);
+    EXPECT_FALSE(result->frame_timestamp);
+    EXPECT_FALSE(result->content_timestamp);
+    EXPECT_FALSE(result->pixels_skipped);
+    EXPECT_TRUE(result->conversion_needed);
+    EXPECT_EQ(allocations, 3u);
+  }
+
+  TEST(CaptureImagePoolTest, ReclaimsIdleBackingAndKeepsBorrowedImages) {
+    capture_pool_clock_t::time = {};
+    video::detail::capture_image_pool_t<4, capture_pool_clock_t> pool {
+      video::detail::capture_image_retention_e::reclaim_idle
+    };
+    const auto allocate = [] { return std::make_shared<platf::img_t>(); };
+    auto old = pool.try_acquire(allocate);
+    auto held = pool.try_acquire(allocate);
+    auto recent = pool.try_acquire(allocate);
+    const std::weak_ptr<platf::img_t> idle = old;
+    const std::weak_ptr<platf::img_t> borrowed = held;
+    old.reset();
+    recent.reset();
+
+    capture_pool_clock_t::time += 2s;
+    EXPECT_TRUE(pool.try_acquire(allocate));
+    EXPECT_FALSE(idle.expired());
+    capture_pool_clock_t::time += 1s;
+    EXPECT_TRUE(pool.try_acquire(allocate));
+    EXPECT_TRUE(idle.expired());
+    EXPECT_FALSE(borrowed.expired());
+    held.reset();
+    capture_pool_clock_t::time += 1s;
+    EXPECT_TRUE(pool.try_acquire(allocate));
+    EXPECT_TRUE(borrowed.expired());
+  }
+
+  TEST(CaptureImagePoolTest, FailedAllocationCanRetryAndClearDetachesTheGeneration) {
+    video::detail::capture_image_pool_t<1> pool;
+    const auto allocate = [] { return std::make_shared<platf::img_t>(); };
+    EXPECT_FALSE(pool.try_acquire([] { return std::shared_ptr<platf::img_t> {}; }));
+    auto previous = pool.try_acquire(allocate);
+    ASSERT_TRUE(previous);
+    const std::weak_ptr<platf::img_t> old_backing = previous;
+    pool.clear();
+    const auto next = pool.try_acquire(allocate);
+    ASSERT_TRUE(next);
+    EXPECT_NE(next.get(), previous.get());
+    EXPECT_FALSE(old_backing.expired());
+    previous.reset();
+    EXPECT_TRUE(old_backing.expired());
+  }
 
   class manual_event_t {
   public:

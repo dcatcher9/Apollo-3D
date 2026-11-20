@@ -50,6 +50,7 @@
 #include "reshade_bridge.h"
 #include "sbs_debug_dump.h"
 #include "utils.h"
+#include "src/capture_image_pool.h"
 #include "src/config.h"
 #include "src/depth_coordinate_v2.h"
 #include "src/game_source_tracker.h"
@@ -11876,7 +11877,7 @@ namespace platf::dxgi {
                     << " color="sv << (config.hdr ? "HDR linear scRGB FP16"sv : "SDR Rec.709 BGRA8"sv)
                     << "; physical output is presentation-only."sv;
 
-    std::array<std::shared_ptr<platf::img_t>, 3> image_pool;
+    ::video::detail::capture_image_pool_t<3> image_pool;
     const bool diagnostics_enabled = ::config::sunshine.diagnostics_enabled;
     bool capture_cursor = true;
     bool window_closed = false;
@@ -11894,25 +11895,14 @@ namespace platf::dxgi {
     };
 
     auto pull_image = [&](std::shared_ptr<platf::img_t> &image) {
+      image.reset();
       if (stop_token.stop_requested() || window_closed) {
-        image.reset();
         return false;
       }
-      for (auto &candidate : image_pool) {
-        if (!candidate) {
-          candidate = display->alloc_img();
-        }
-        if (candidate && candidate.use_count() == 1) {
-          image = candidate;
-          image->frame_timestamp.reset();
-          image->content_timestamp.reset();
-          image->pixels_skipped = false;
-          image->conversion_needed = true;
-          return true;
-        }
-      }
-      image.reset();
-      return false;
+      image = image_pool.try_acquire([&] {
+        return display->alloc_img();
+      });
+      return static_cast<bool>(image);
     };
 
     bool presentation_reinit_requested = false;

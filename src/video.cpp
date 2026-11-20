@@ -5,7 +5,6 @@
 // standard includes
 #include <atomic>
 #include <functional>
-#include <list>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -14,6 +13,7 @@
 // local includes
 #include "atomic_presentation.h"
 #include "capture_display_retirement.h"
+#include "capture_image_pool.h"
 #include "config.h"
 #include "depth_coordinate_v2.h"
 #include "display_device.h"
@@ -945,99 +945,17 @@ namespace video {
       return;
     }
 
-    constexpr auto capture_buffer_size = 12;
-    std::list<std::shared_ptr<platf::img_t>> imgs(capture_buffer_size);
-
-    std::vector<std::optional<std::chrono::steady_clock::time_point>> imgs_used_timestamps;
-    const std::chrono::seconds trim_timeot = 3s;
-    auto trim_imgs = [&]() {
-      // count allocated and used within current pool
-      size_t allocated_count = 0;
-      size_t used_count = 0;
-      for (const auto &img : imgs) {
-        if (img) {
-          allocated_count += 1;
-          if (img.use_count() > 1) {
-            used_count += 1;
-          }
-        }
-      }
-
-      // remember the timestamp of currently used count
-      const auto now = std::chrono::steady_clock::now();
-      if (imgs_used_timestamps.size() <= used_count) {
-        imgs_used_timestamps.resize(used_count + 1);
-      }
-      imgs_used_timestamps[used_count] = now;
-
-      // decide whether to trim allocated unused above the currently used count
-      // based on last used timestamp and universal timeout
-      size_t trim_target = used_count;
-      for (size_t i = used_count; i < imgs_used_timestamps.size(); i++) {
-        if (imgs_used_timestamps[i] && now - *imgs_used_timestamps[i] < trim_timeot) {
-          trim_target = i;
-        }
-      }
-
-      // trim allocated unused above the newly decided trim target
-      if (allocated_count > trim_target) {
-        size_t to_trim = allocated_count - trim_target;
-        // prioritize trimming least recently used
-        for (auto it = imgs.rbegin(); it != imgs.rend(); it++) {
-          auto &img = *it;
-          if (img && img.use_count() == 1) {
-            img.reset();
-            to_trim -= 1;
-            if (to_trim == 0) {
-              break;
-            }
-          }
-        }
-        // forget timestamps that no longer relevant
-        imgs_used_timestamps.resize(trim_target + 1);
-      }
-    };
-
+    detail::capture_image_pool_t<12> image_pool {detail::capture_image_retention_e::reclaim_idle};
     auto pull_free_image_callback = [&](std::shared_ptr<platf::img_t> &img_out) -> bool {
       img_out.reset();
       while (run_control.running()) {
-        // pick first allocated but unused
-        for (auto it = imgs.begin(); it != imgs.end(); it++) {
-          if (*it && it->use_count() == 1) {
-            img_out = *it;
-            if (it != imgs.begin()) {
-              // Relink the existing node so the per-frame LRU update does not allocate.
-              imgs.splice(imgs.begin(), imgs, it);
-            }
-            break;
-          }
-        }
-        // otherwise pick first unallocated
-        if (!img_out) {
-          for (auto it = imgs.begin(); it != imgs.end(); it++) {
-            if (!*it) {
-              // allocate image
-              *it = disp->alloc_img();
-              img_out = *it;
-              if (it != imgs.begin()) {
-                imgs.splice(imgs.begin(), imgs, it);
-              }
-              break;
-            }
-          }
-        }
+        img_out = image_pool.try_acquire([&] {
+          return disp->alloc_img();
+        });
         if (img_out) {
-          // trim allocated but unused portion of the pool based on timeouts
-          trim_imgs();
-          img_out->frame_timestamp.reset();
-          img_out->content_timestamp.reset();
-          img_out->pixels_skipped = false;
-          img_out->conversion_needed = true;
           return true;
-        } else {
-          // sleep and retry if image pool is full
-          std::this_thread::sleep_for(1ms);
         }
+        std::this_thread::sleep_for(1ms);
       }
       return false;
     };
@@ -1104,9 +1022,7 @@ namespace video {
             }
 
             // Some classes of images contain references to the display --> display won't delete unless img is deleted
-            for (auto &img : imgs) {
-              img.reset();
-            }
+            image_pool.clear();
 
             // Revoke admission before dropping capture's strong reference. The original control
             // block includes ordinary borrowers, partial/retiring encoders and shared_from_this.
