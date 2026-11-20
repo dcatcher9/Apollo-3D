@@ -370,6 +370,58 @@ TEST(StreamMediaSenderTest, OversizedFrameRequiresRecoveryIdrWithoutConsumingSeq
   expect_no_worker_error(state);
 }
 
+TEST(StreamMediaSenderTest, VideoEncryptionFailureDropsTheBatchAndWaitsForRecoveryIdr) {
+  // The first size fits all three shards in one batch. The second hits the 64 KiB
+  // batch limit after one shard, so an earlier authenticated datagram can arrive.
+  for (const auto &[packet_size, sent_before_failure] : {std::pair {1024, 0u}, std::pair {60000, 1u}}) {
+    SCOPED_TRACE(packet_size);
+    media::media_sender_config_t config;
+    config.video_packet_size = packet_size;
+    config.video_min_fec_packets = 0;
+    config.video_sequence = 65534;
+    config.video_fail_encryption_at_iv = config.video_iv_counter + 2;
+    const std::size_t picture_bytes = packet_size - sizeof(NV_VIDEO_PACKET);
+    const auto payload = authored_bytes(17, 93);
+
+    media::media_sender_fixture_t sender(config);
+    sender.start();
+    ASSERT_TRUE(sender.wait_ready(lane_e::video, 3s));
+    ASSERT_TRUE(sender.enqueue_video({payload, 7}));
+    const auto warm = sender.receive(lane_e::video, 1, 3s);
+    ASSERT_EQ(warm.size(), 1u);
+    ASSERT_TRUE(decrypt_video(warm.front(), config).has_value());
+
+    ASSERT_TRUE(sender.enqueue_video({authored_bytes(3 * picture_bytes - short_frame_header_size, 23), 8, false}));
+    ASSERT_TRUE(sender.wait_processed(lane_e::video, 2, 3s));
+    ASSERT_TRUE(sender.enqueue_video({payload, 9, false}));
+    ASSERT_TRUE(sender.wait_processed(lane_e::video, 3, 3s));
+    ASSERT_TRUE(sender.enqueue_video({payload, 10}));
+    ASSERT_TRUE(sender.wait_processed(lane_e::video, 4, 3s));
+
+    const auto wire = sender.receive(lane_e::video, sent_before_failure + 1, 3s);
+    ASSERT_EQ(wire.size(), sent_before_failure + 1);
+    if (sent_before_failure) {
+      const auto prior = decrypt_video(wire.front(), config);
+      ASSERT_TRUE(prior.has_value());
+      EXPECT_EQ(prior->video.frameIndex, 8u);
+      EXPECT_EQ(boost::endian::big_to_native(prior->rtp.sequenceNumber), config.video_sequence + 1);
+      expect_video_nonce(*prior, config.video_iv_counter + 1);
+    }
+    const auto recovery = decrypt_video(wire.back(), config);
+    ASSERT_TRUE(recovery.has_value());
+    EXPECT_EQ(recovery->video.frameIndex, 10u);
+    EXPECT_EQ(boost::endian::big_to_native(recovery->rtp.sequenceNumber), static_cast<std::uint16_t>(config.video_sequence + 4));
+    expect_video_nonce(*recovery, config.video_iv_counter + 3);
+    EXPECT_TRUE(sender.receive(lane_e::video, 1, 0ms).empty());
+
+    sender.stop();
+    const auto state = sender.state_after_stop();
+    EXPECT_EQ(state.video_sequence, config.video_sequence + 5);
+    EXPECT_EQ(state.video_iv_counter, config.video_iv_counter + 4);
+    expect_no_worker_error(state);
+  }
+}
+
 TEST(StreamMediaSenderTest, AudioDecryptsFourPayloadsAndEmitsTwoFecShardsWithExactHeaders) {
   media::media_sender_config_t config;
   media::media_sender_fixture_t sender(config);

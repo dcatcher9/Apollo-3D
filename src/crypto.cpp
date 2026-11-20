@@ -4,6 +4,7 @@
  */
 // standard includes
 #include <algorithm>
+#include <limits>
 
 // lib includes
 #include <openssl/pem.h>
@@ -118,8 +119,7 @@ namespace crypto {
     static int init_encrypt_gcm(cipher_ctx_t &ctx, aes_t *key, aes_t *iv, bool padding) {
       ctx.reset(EVP_CIPHER_CTX_new());
 
-      // Gen 7 servers use 128-bit AES ECB
-      if (EVP_EncryptInit_ex(ctx.get(), EVP_aes_128_gcm(), nullptr, nullptr, nullptr) != 1) {
+      if (!ctx || EVP_EncryptInit_ex(ctx.get(), EVP_aes_128_gcm(), nullptr, nullptr, nullptr) != 1) {
         return -1;
       }
 
@@ -239,37 +239,46 @@ namespace crypto {
      * The function handles the creation and initialization of the encryption context, and manages the encryption process.
      * The resulting ciphertext and the GCM tag are written into the tagged_cipher buffer.
      */
-    int gcm_t::encrypt(const std::string_view &plaintext, std::uint8_t *tag, std::uint8_t *ciphertext, aes_t *iv) {
+    bool gcm_t::encrypt(const std::string_view &plaintext, std::uint8_t *tag, std::uint8_t *ciphertext, aes_t *iv) {
+      if (plaintext.size() > std::numeric_limits<int>::max()) {
+        return false;
+      }
+
+      const auto fail = [this] {
+        // The next message can initialize a fresh context with a new IV.
+        encrypt_ctx.reset();
+        return false;
+      };
       if (!encrypt_ctx && init_encrypt_gcm(encrypt_ctx, &key, iv, padding)) {
-        return -1;
+        return fail();
       }
 
       // Calling with cipher == nullptr results in a parameter change
       // without requiring a reallocation of the internal cipher ctx.
       if (EVP_EncryptInit_ex(encrypt_ctx.get(), nullptr, nullptr, nullptr, iv->data()) != 1) {
-        return -1;
+        return fail();
       }
 
       int update_outlen, final_outlen;
 
-      // Encrypt into the caller's buffer
-      if (EVP_EncryptUpdate(encrypt_ctx.get(), ciphertext, &update_outlen, (const std::uint8_t *) plaintext.data(), plaintext.size()) != 1) {
-        return -1;
+      const auto payload_size = static_cast<int>(plaintext.size());
+      if (EVP_EncryptUpdate(encrypt_ctx.get(), ciphertext, &update_outlen, reinterpret_cast<const std::uint8_t *>(plaintext.data()), payload_size) != 1 || update_outlen != payload_size) {
+        return fail();
       }
 
-      // GCM encryption won't ever fill ciphertext here but we have to call it anyway
-      if (EVP_EncryptFinal_ex(encrypt_ctx.get(), ciphertext + update_outlen, &final_outlen) != 1) {
-        return -1;
+      // GCM finalization must succeed without adding bytes to the ciphertext.
+      if (EVP_EncryptFinal_ex(encrypt_ctx.get(), ciphertext + update_outlen, &final_outlen) != 1 || final_outlen != 0) {
+        return fail();
       }
 
       if (EVP_CIPHER_CTX_ctrl(encrypt_ctx.get(), EVP_CTRL_GCM_GET_TAG, tag_size, tag) != 1) {
-        return -1;
+        return fail();
       }
 
-      return update_outlen + final_outlen;
+      return true;
     }
 
-    int gcm_t::encrypt(const std::string_view &plaintext, std::uint8_t *tagged_cipher, aes_t *iv) {
+    bool gcm_t::encrypt(const std::string_view &plaintext, std::uint8_t *tagged_cipher, aes_t *iv) {
       // This overload handles the common case of [GCM tag][cipher text] buffer layout
       return encrypt(plaintext, tagged_cipher, tagged_cipher + tag_size, iv);
     }

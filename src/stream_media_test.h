@@ -28,6 +28,7 @@ namespace stream::testing {
     std::optional<int> video_fec_percentage = 0;
     std::uint32_t video_sequence = 400;
     std::uint64_t video_iv_counter = 9;
+    std::optional<std::uint64_t> video_fail_encryption_at_iv;
     std::uint16_t audio_sequence = 400;
     std::uint32_t audio_timestamp = 9000;
     std::uint32_t audio_key_id = 0x10203040;

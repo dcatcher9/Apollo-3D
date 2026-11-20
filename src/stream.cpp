@@ -1476,13 +1476,12 @@ namespace stream {
 
     auto packet = (control_encrypted_p) tagged_cipher.data();
 
-    auto bytes = session->control.cipher.encrypt(plaintext, packet->payload(), &iv);
-    if (bytes <= 0) {
+    if (plaintext.empty() || !session->control.cipher.encrypt(plaintext, packet->payload(), &iv)) {
       BOOST_LOG(error) << "Couldn't encrypt control data"sv;
       return {};
     }
 
-    std::uint16_t packet_length = bytes + crypto::cipher::tag_size + sizeof(control_encrypted_t::seq);
+    std::uint16_t packet_length = plaintext.size() + crypto::cipher::tag_size + sizeof(control_encrypted_t::seq);
 
     packet->encryptedHeaderType = util::endian::little(0x0001);
     packet->length = util::endian::little(packet_length);
@@ -2893,6 +2892,7 @@ namespace stream {
     std::function<void()> before_admission;
     std::function<void()> processed;
     std::optional<int> video_fec_percentage;
+    std::optional<std::uint64_t> video_fail_encryption_at_iv;
   };
 #endif
 
@@ -2946,6 +2946,7 @@ namespace stream {
     );
 
     crypto::aes_t iv(12);
+    iv[11] = 'V';  // Video stream
     std::array<video_packet_enc_prefix_t, platf::MAX_UDP_BATCH_PACKETS> prefixes {};
     video_shard_storage_t data_shard_storage;
     fec::rs_cache_t video_rs_cache;
@@ -3023,8 +3024,6 @@ namespace stream {
         }
         channel->awaiting_recovery_idr = false;
       }
-
-      auto lowseq = channel->lowseq;
 
       std::string_view payload {reinterpret_cast<const char *>(packet->data()), packet->data_size()};
 
@@ -3161,12 +3160,14 @@ namespace stream {
         block_header.packet.frameIndex = packet->frame_index();
         block_header.packet.multiFecFlags = 0x10;
         auto ratecontrol_frame_start = ratecontrol_next_frame_start;
+        auto peer_address = channel->peer.address();
 
         size_t ratecontrol_frame_packets_sent = 0;
+        bool frame_encrypted = true;
 
-        for (std::size_t block_index = 0; block_index < fec_blocks_needed; ++block_index) {
+        for (std::size_t block_index = 0; block_index < fec_blocks_needed && frame_encrypted; ++block_index) {
           const auto &block = frame_plan->blocks[block_index];
-          const auto block_lowseq = lowseq;
+          const auto block_lowseq = channel->lowseq;
           const auto block_packing_started = video::detail::diagnostic_timestamp(
             stage_diagnostics.has_value(),
             video::detail::diagnostic_clock_t::now
@@ -3195,26 +3196,12 @@ namespace stream {
 
           // Reserve this block's sequence range before the first send. A recovery IDR starts
           // after that range even when a failed send may have delivered part of the block.
-          lowseq += static_cast<std::uint32_t>(payloads.size());
-          channel->lowseq = lowseq;
+          channel->lowseq += static_cast<std::uint32_t>(payloads.size());
 
-          auto peer_address = channel->peer.address();
           for (std::size_t first_packet = 0; first_packet < payloads.size(); first_packet += send_batch_size) {
             const auto count = std::min(send_batch_size, payloads.size() - first_packet);
-            const platf::batched_send_info_t batch {
-              payloads,
-              reinterpret_cast<const char *>(prefixes.data()),
-              sizeof(video_packet_enc_prefix_t),
-              first_packet,
-              count,
-              (uintptr_t) sock.native_handle(),
-              peer_address,
-              channel->peer.port(),
-              channel->local_address,
-            };
 
-            // Encrypt just the packets needed by this send. It borrows the prefixes until it
-            // returns, including when segmentation offload falls back to individual datagrams.
+            // Complete encryption of the whole batch before handing any of it to the socket.
             for (std::size_t index = 0; index < count; ++index) {
               const auto packet_index = first_packet + index;
               auto *payload = payloads.payload_at(packet_index);
@@ -3233,14 +3220,25 @@ namespace stream {
               inspect->packet.frameIndex = block_header.packet.frameIndex;
 
               // NIST SP 800-38D, Section 8.2.1. The counter identifies each use of the client's unique key.
-              std::copy_n((uint8_t *) &channel->gcm_iv_counter, sizeof(channel->gcm_iv_counter), std::begin(iv));
-              iv[11] = 'V';  // Video stream
-              channel->gcm_iv_counter++;
+              const auto counter = channel->gcm_iv_counter++;
+              std::memcpy(iv.data(), &counter, sizeof(counter));
 
               auto &prefix = prefixes[index];
               prefix.frameNumber = block_header.packet.frameIndex;
               std::copy(std::begin(iv), std::end(iv), prefix.iv);
-              channel->cipher.encrypt(std::string_view {payload, blocksize}, prefix.tag, reinterpret_cast<std::uint8_t *>(payload), &iv);
+#ifdef SUNSHINE_TESTS
+              if (test_hooks && test_hooks->video_fail_encryption_at_iv == counter && channel->cipher.encrypt_ctx) {
+                EVP_CIPHER_CTX_reset(channel->cipher.encrypt_ctx.get());
+              }
+#endif
+              if (!channel->cipher.encrypt(std::string_view {payload, blocksize}, prefix.tag, reinterpret_cast<std::uint8_t *>(payload), &iv)) {
+                frame_encrypted = false;
+                break;
+              }
+            }
+            if (!frame_encrypted) {
+              request_recovery_idr("video datagram encryption failed"sv);
+              break;
             }
 
             // Pace every bounded batch. The first batch is due immediately. Later batches
@@ -3266,17 +3264,28 @@ namespace stream {
               timer->sleep_for(bounded_due - now);
             }
 
+            const platf::batched_send_info_t batch {
+              payloads,
+              reinterpret_cast<const char *>(prefixes.data()),
+              sizeof(video_packet_enc_prefix_t),
+              first_packet,
+              count,
+              (uintptr_t) sock.native_handle(),
+              peer_address,
+              channel->peer.port(),
+              channel->local_address,
+            };
             frame_send_batch_latency_logger.first_point_now();
             if (!platf::send_batch(batch)) {
-              for (std::size_t index = 0; index < count; ++index) {
+              for (std::size_t index = 0; index < batch.packet_count; ++index) {
                 auto send_info = platf::send_info_t {
                   batch.header_at(index),
                   batch.header_size,
                   batch.payload_at(index),
-                  payloads.payload_size,
+                  batch.payloads.payload_size,
                   batch.native_socket,
                   peer_address,
-                  channel->peer.port(),
+                  batch.target_port,
                   channel->local_address,
                 };
                 platf::send(send_info);
@@ -3298,10 +3307,9 @@ namespace stream {
                                          pacing_plan.packets_per_second
                                        );
 
-        // The start point is recorded once for the encoded frame above. Finish the sample only
-        // after every FEC block has been paced and submitted, rather than producing one partial
-        // sample per block.
-        frame_network_latency_logger.second_point_now_and_log();
+        if (frame_encrypted) {
+          frame_network_latency_logger.second_point_now_and_log();
+        }
       } catch (const std::exception &e) {
         BOOST_LOG(error) << "Broadcast video failed "sv << e.what();
         request_recovery_idr("video packetization or send failed"sv);

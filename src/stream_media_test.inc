@@ -120,6 +120,7 @@ namespace testing {
         };
       }
       video_lane.hooks.video_fec_percentage = this->config.video_fec_percentage;
+      video_lane.hooks.video_fail_encryption_at_iv = this->config.video_fail_encryption_at_iv;
     }
 
     ~impl_t() {

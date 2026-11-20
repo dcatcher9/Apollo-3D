@@ -170,19 +170,19 @@ namespace crypto {
        * @param tag The buffer where the GCM tag will be written.
        * @param ciphertext The buffer where the resulting ciphertext will be written.
        * @param iv The initialization vector to be used for the encryption.
-       * @return The total length of the ciphertext and GCM tag. Returns -1 in case of an error.
+       * @return True when the full plaintext was encrypted and the GCM tag was written.
        */
-      int encrypt(const std::string_view &plaintext, std::uint8_t *tag, std::uint8_t *ciphertext, aes_t *iv);
+      [[nodiscard]] bool encrypt(const std::string_view &plaintext, std::uint8_t *tag, std::uint8_t *ciphertext, aes_t *iv);
 
       /**
        * @brief Encrypts the plaintext using AES GCM mode.
-       * length of cipher must be at least: round_to_pkcs7_padded(plaintext.size()) + crypto::cipher::tag_size
+       * The output needs tag_size + plaintext.size() bytes.
        * @param plaintext The plaintext data to be encrypted.
        * @param tagged_cipher The buffer where the resulting ciphertext and GCM tag will be written.
        * @param iv The initialization vector to be used for the encryption.
-       * @return The total length of the ciphertext and GCM tag written into tagged_cipher. Returns -1 in case of an error.
+       * @return True when the full plaintext was encrypted and the GCM tag was written.
        */
-      int encrypt(const std::string_view &plaintext, std::uint8_t *tagged_cipher, aes_t *iv);
+      [[nodiscard]] bool encrypt(const std::string_view &plaintext, std::uint8_t *tagged_cipher, aes_t *iv);
 
       int decrypt(const std::string_view &cipher, std::vector<std::uint8_t> &plaintext, aes_t *iv);
 

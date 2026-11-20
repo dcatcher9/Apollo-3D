@@ -1194,7 +1194,10 @@ namespace rtsp_stream {
     header->sequenceNumber = util::endian::big<std::uint32_t>(session.rtsp_iv_counter);
 
     // Encrypt the RTSP message in place
-    session.rtsp_cipher->encrypt(std::string_view {(const char *) header->payload(), (std::size_t) payload_length}, header->tag, &iv);
+    if (!session.rtsp_cipher->encrypt(std::string_view {(const char *) header->payload(), (std::size_t) payload_length}, header->tag, &iv)) {
+      BOOST_LOG(error) << "RTSP: couldn't encrypt response"sv;
+      return;
+    }
 
     // Send the full encrypted message
     send(sock, std::string_view {(char *) message.data(), message.size()});
