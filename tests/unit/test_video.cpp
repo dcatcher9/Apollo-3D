@@ -8176,10 +8176,10 @@ TEST(EncodeWakeLifecycleSourceTests, ControlStreamSharesTheSessionWakeWithTheEnc
   EXPECT_NE(stream_source.find("session->config.monitor.encode_wake = session->video->encode_wake;"), std::string::npos);
 }
 
-TEST(EncodeWakeLifecycleSourceTests, OnlyAProviderLoopInstallsTheWakeAndItsExitUninstallsItFirst) {
+TEST(EncodeWakeLifecycleSourceTests, RemoteLoopInstallsTheWakeAndUninstallsItBeforeSourceHandoff) {
   const auto scope = encode_run_source_scope();
   ASSERT_FALSE(scope.empty());
-  const auto gate = scope.find("if (independent_provider && config.encode_wake) {");
+  const auto gate = scope.find("if (config.encode_wake) {");
   const auto install = scope.find("config.encode_wake->install(", gate);
   ASSERT_NE(gate, std::string::npos);
   ASSERT_NE(install, std::string::npos);
@@ -8207,7 +8207,7 @@ TEST(EncodeWakeLifecycleSourceTests, KeptInputIsNotConvertedContentAndLossRecove
   const auto finish_body = scope.substr(finish, finish_end - finish);
   EXPECT_NE(finish_body.find("converted_frame = !session->conversion_kept_input();"), std::string::npos);
   EXPECT_NE(
-    scope.find("recovery_frame_requested = requested_idr_frame || (independent_provider && invalidated_ref_frames)"),
+    scope.find("recovery_frame_requested = requested_idr_frame || invalidated_ref_frames"),
     std::string::npos
   );
 }
@@ -8215,25 +8215,24 @@ TEST(EncodeWakeLifecycleSourceTests, KeptInputIsNotConvertedContentAndLossRecove
 TEST(EncodeWakeLifecycleSourceTests, ARecoveryRequestDuringAProviderHoldMakesTheHeldFrameTheRecoveryFrame) {
   const auto scope = encode_run_source_scope();
   ASSERT_FALSE(scope.empty());
-  // Recovery requests are read at the top of the loop, before any hold.
-  const auto idr_read = scope.find("if (idr_events->peek()) {");
+  const auto controls = scope.find("const auto poll_encode_requests =");
   const auto hold = scope.find("hold_timer->sleep_for(*hold);");
-  ASSERT_NE(idr_read, std::string::npos);
+  ASSERT_NE(controls, std::string::npos);
   ASSERT_NE(hold, std::string::npos);
-  EXPECT_LT(idr_read, hold);
-  // A control wake cannot end the hold. One that arrived meanwhile restarts the iteration before
-  // the zero-timeout pop consumes it and the held frame is encoded as an ordinary P-frame.
-  const auto recheck = scope.find("if (idr_events->peek() || invalidate_ref_frames_events->peek()) {", hold);
-  const auto restart = scope.find("continue;", recheck);
+  EXPECT_LT(controls, hold);
+  // A control wake cannot end the hold. Read both the latest image and the requests that arrived
+  // during the hold before converting the recovery picture.
   const auto take = scope.find("pending_source_wait = std::chrono::nanoseconds::zero();", hold);
   const auto pop = scope.find("auto img = detail::pop_encode_image(*images, image_wait, image_deadline_waiter.get());", hold);
-  ASSERT_NE(recheck, std::string::npos);
-  ASSERT_NE(restart, std::string::npos);
+  const auto recheck = scope.find("if (!poll_encode_requests(requested_idr_frame, invalidated_ref_frames))", pop);
+  const auto convert = scope.find("convert_delivery(schedule.presentation_timestamp", pop);
   ASSERT_NE(take, std::string::npos);
   ASSERT_NE(pop, std::string::npos);
-  EXPECT_LT(recheck, take);
-  EXPECT_LT(restart, take) << "The re-check must restart the iteration itself.";
+  ASSERT_NE(recheck, std::string::npos);
+  ASSERT_NE(convert, std::string::npos);
   EXPECT_LT(take, pop);
+  EXPECT_LT(pop, recheck);
+  EXPECT_LT(recheck, convert);
 }
 
 TEST(EncodeWakeLifecycleSourceTests, EveryImageWaitKeepsItsBoundOnTheDeadlineTimer) {
@@ -8305,7 +8304,7 @@ TEST(EncodeWakeLifecycleSourceTests, ReplacementHoldsAPixelLessPredecessorsStart
   const auto replaced = scope.find("startup_input_hold.replaced();");
   const auto held = scope.find("} else if (startup_input_hold.active(std::chrono::steady_clock::now())) {", replaced);
   const auto skip = scope.find("continue;", held);
-  const auto keepalive_skip = scope.find("if (independent_provider && !converted_frame && !recovery_frame_requested", held);
+  const auto keepalive_skip = scope.find("if (wake_without_picture && !recovery_frame_requested", held);
   const auto encode = scope.find("const auto publish_result = encode(", held);
   ASSERT_NE(replaced, std::string::npos);
   ASSERT_NE(held, std::string::npos);
@@ -9848,8 +9847,8 @@ TEST(EncodePipelineWiringTest, ExitsRecoveryAndInvalidationKeepTheirOneAtATimeGu
   EXPECT_LT(publish, gate_update);
 
   // Only an actual invalidation waits for the pictures in flight.
-  const auto invalidation = source.find("while (invalidate_ref_frames_events->peek())", lifecycle);
-  const auto invalidation_drain = source.find("if (pipeline && session->invalidation_needs_drain(frames->first, frames->second))", invalidation);
+  const auto invalidation = source.find("while (auto frames = invalidate_ref_frames_events->pop(0ms))", lifecycle);
+  const auto invalidation_drain = source.find("session->invalidation_needs_drain(frames->first, frames->second) && !pipeline->drain()", invalidation);
   const auto invalidate = source.find("session->invalidate_ref_frames(frames->first, frames->second);", invalidation);
   ASSERT_NE(invalidation, std::string::npos);
   ASSERT_NE(invalidation_drain, std::string::npos);

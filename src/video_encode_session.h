@@ -35,7 +35,7 @@ namespace video {
     std::optional<std::chrono::steady_clock::time_point> rendered_content_timestamp() const;
     void request_idr_frame();
     void request_normal_frame();
-    void invalidate_ref_frames(int64_t first_frame, int64_t last_frame);
+    [[nodiscard]] bool invalidate_ref_frames(int64_t first_frame, int64_t last_frame);
     bool invalidation_needs_drain(int64_t first_frame, int64_t last_frame) const;
     bool reconfigure_bitrate(int bitrate_kbps);
     nvenc::nvenc_encoded_frame encode_frame(uint64_t frame_index, std::vector<std::uint8_t> &&frame_buffer);

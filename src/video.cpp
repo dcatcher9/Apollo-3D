@@ -458,10 +458,13 @@ namespace video {
     force_idr = false;
   }
 
-  void nvenc_encode_session_t::invalidate_ref_frames(int64_t first_frame, int64_t last_frame) {
-    if (!encoder.invalidate_ref_frames(first_frame, last_frame)) {
+  bool nvenc_encode_session_t::invalidate_ref_frames(int64_t first_frame, int64_t last_frame) {
+    using result_e = nvenc::nvenc_base::ref_frame_invalidation_e;
+    const auto result = encoder.invalidate_ref_frames(first_frame, last_frame);
+    if (result == result_e::needs_idr) {
       force_idr = true;
     }
+    return result != result_e::unchanged;
   }
 
   /** With pictures in flight: whether invalidate_ref_frames() must first wait for them, because it
@@ -1015,8 +1018,7 @@ namespace video {
         case platf::capture_e::reinit:
           {
             (void) generations_.revoke(generation);
-            // The encode loop releases the display only once it sees the reinit. An independent
-            // provider's image wait can last until its keepalive, so end it now.
+            // End the idle wait so the encode loop can release the revoked display now.
             if (config.encode_wake) {
               config.encode_wake->wake();
             }
@@ -1470,9 +1472,8 @@ namespace video {
     session->set_external_frame_wake([images]() {
       images->wake();
     });
-    // Without stream-cadence polls, control requests (IDR, reference invalidation, stream gamma,
-    // video mode, shutdown) would otherwise wait for the next provider frame or keepalive.
-    if (independent_provider && config.encode_wake) {
+    // A static capture or provider can leave any session waiting until its keepalive.
+    if (config.encode_wake) {
       config.encode_wake->install([images]() {
         images->wake();
       });
@@ -1573,8 +1574,7 @@ namespace video {
           recovery_gate.published(result.request_idr);
           drop_report.record(result, idr_events);
           if (result.request_idr) {
-            // The loop reads the recovery IDR right after its image wait, which nothing else ends
-            // for desktop sources, rather than when the next capture or the idle bound ends it.
+            // Service the recovery IDR at the same wait boundary as session control mail.
             images->wake();
           }
           return true;
@@ -1747,21 +1747,9 @@ namespace video {
       return true;
     };
 
-    while (true) {
-      if (loop_stats) {
-        if (const auto now = std::chrono::steady_clock::now(); now - *loop_stats_since >= 20s) {
-          if (pipeline) {
-            const auto pictures = pipeline->take_stats();
-            loop_stats->pictures(pictures.pushed_behind, pictures.retired, pictures.latency_total, pictures.latency_max);
-          }
-          BOOST_LOG(info) << loop_stats->report(now - *loop_stats_since) << session->video_memory_diagnostics();
-          loop_stats->reset();
-          loop_stats_since = now;
-        }
-        loop_stats->iteration();
-      }
+    const auto poll_encode_requests = [&](bool &requested_idr_frame, bool &invalidated_ref_frames) {
       if (lifecycle_change_requested()) {
-        break;
+        return false;
       }
 
       // Only this encode thread mutates the converter. A setting is acknowledged after a real
@@ -1786,39 +1774,45 @@ namespace video {
         }
       }
 
-      bool requested_idr_frame = false;
-      bool invalidated_ref_frames = false;
-
-      while (invalidate_ref_frames_events->peek()) {
-        if (auto frames = invalidate_ref_frames_events->pop(0ms)) {
-          // The range extends to the pictures in flight, which may reference the lost frames, and
-          // the next picture submitted confirms it. Only an actual invalidation waits for them
-          // first (refused, so an IDR, if one failed); a handled, malformed or too-large range is
-          // decided at once, so its recovery frame converts without that wait.
-          if (pipeline && session->invalidation_needs_drain(frames->first, frames->second)) {
-            pipeline->drain();
-          }
-          session->invalidate_ref_frames(frames->first, frames->second);
-          invalidated_ref_frames = true;
+      while (auto frames = invalidate_ref_frames_events->pop(0ms)) {
+        // Only an actual invalidation waits for pictures in flight that may reference the lost
+        // frames. The next submission confirms the recovery.
+        if (pipeline && session->invalidation_needs_drain(frames->first, frames->second) && !pipeline->drain()) {
+          return false;
         }
+        invalidated_ref_frames |= session->invalidate_ref_frames(frames->first, frames->second);
       }
       if (pipeline && pipeline->failed()) {
-        break;  // While draining for the invalidation; `failed` stays set.
+        return false;
       }
 
-      if (idr_events->peek()) {
+      if (idr_events->pop(0ms)) {
         requested_idr_frame = true;
-        idr_events->pop();
-      }
-
-      if (requested_idr_frame) {
         session->request_idr_frame();
       }
+      return true;
+    };
 
-      // An independent provider encodes no repeats between its frames, so a client recovering
-      // from loss gets its reference-invalidated frame now, like an IDR, rather than at the next
-      // provider frame or keepalive. Other sources keep encoding at capture cadence.
-      const bool recovery_frame_requested = requested_idr_frame || (independent_provider && invalidated_ref_frames);
+    while (true) {
+      if (loop_stats) {
+        if (const auto now = std::chrono::steady_clock::now(); now - *loop_stats_since >= 20s) {
+          if (pipeline) {
+            const auto pictures = pipeline->take_stats();
+            loop_stats->pictures(pictures.pushed_behind, pictures.retired, pictures.latency_total, pictures.latency_max);
+          }
+          BOOST_LOG(info) << loop_stats->report(now - *loop_stats_since) << session->video_memory_diagnostics();
+          loop_stats->reset();
+          loop_stats_since = now;
+        }
+        loop_stats->iteration();
+      }
+
+      bool requested_idr_frame = false;
+      bool invalidated_ref_frames = false;
+      if (!poll_encode_requests(requested_idr_frame, invalidated_ref_frames)) {
+        break;
+      }
+      bool recovery_frame_requested = requested_idr_frame || invalidated_ref_frames;
 
       std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
       bool converted_frame = false;
@@ -1875,13 +1869,8 @@ namespace video {
             if (loop_stats) {
               loop_stats->held(*hold, std::chrono::steady_clock::now() - wait_started);
             }
-            // The hold does not end at a control wake. An IDR or reference invalidation that
-            // arrived meanwhile is read at the top of the loop and makes the pending frame the
-            // recovery frame, instead of encoding it as a P-frame the client cannot use first.
-            if (idr_events->peek() || invalidate_ref_frames_events->peek()) {
-              continue;
-            }
-            // Then take whatever arrived meanwhile without waiting.
+            // Take the latest capture without a second wait. Control mail is read before
+            // converting or encoding it.
             pending_source_wait = std::chrono::nanoseconds::zero();
           }
         }
@@ -1892,6 +1881,11 @@ namespace video {
                                  keepalive_wait;
         bool captured = false;
         const auto image_wait = detail::encode_image_wait(idle_wait, encode_frame_threshold, last_img && !hold_startup_input, depth_pipeline_ready, conversion_poll_pending, pending_source_wait);
+#ifdef SUNSHINE_TESTS
+        if (test_hooks && test_hooks->before_image_wait) {
+          test_hooks->before_image_wait(static_cast<bool>(last_img), std::chrono::duration_cast<std::chrono::nanoseconds>(image_wait));
+        }
+#endif
         const auto image_wait_started = detail::diagnostic_timestamp(loop_stats.has_value(), std::chrono::steady_clock::now);
         auto img = detail::pop_encode_image(*images, image_wait, image_deadline_waiter.get());
         if (loop_stats && !safe::no_wait(image_wait)) {
@@ -1906,16 +1900,12 @@ namespace video {
         } else if (!images->running()) {
           break;
         }
-        // An IDR requested during the wait (by the client, or by the retrieving thread, which wakes
-        // the wait when the full encoded queue dropped a delta frame) is read at the top of the loop
-        // first, as after a provider hold. The recovery frame is then this capture, still pending in
-        // `source`, or the retained input, rather than a P-frame the client cannot use (with pictures
-        // in flight, recovery_gate_t discards it) followed by the IDR. A held startup input still
-        // converts the capture at once: its wait does not shorten for a pending source.
-        const bool read_recovery_first = !hold_startup_input && idr_events->peek();
-        if (read_recovery_first && !captured) {
-          continue;
+        // The same wake source carries client controls, sender recovery and display reinit.
+        // Read requests raised during the wait before using either the new or retained input.
+        if (!poll_encode_requests(requested_idr_frame, invalidated_ref_frames)) {
+          break;
         }
+        recovery_frame_requested = requested_idr_frame || invalidated_ref_frames;
         if (captured) {
           frame_timestamp = last_img->frame_timestamp;
           if (!frame_timestamp) {
@@ -1928,16 +1918,6 @@ namespace video {
             // exact source identity when a later encode-thread timeout consumes its pending
             // inference; a local-only timestamp would make that safe completion unmatchable.
             last_img->frame_timestamp = frame_timestamp;
-          }
-
-          // Re-check after the potentially blocking image wait and before conversion. On Windows,
-          // conversion can include the full D3D11/TensorRT SBS pipeline, so avoid starting it after
-          // capture teardown or an encode-dimension change has been requested.
-          if (lifecycle_change_requested()) {
-            break;
-          }
-          if (read_recovery_first) {
-            continue;  // With any substitute timestamp persisted on the source it converts.
           }
 
           auto current_timestamp = *frame_timestamp;
@@ -1967,13 +1947,6 @@ namespace video {
             break;
           }
         }
-      } else if (!independent_provider) {
-        // A recovery skips the wait, so the retrieving thread's wake for this IDR, if it came while
-        // nothing waited, is still pending. Left there, it would end the next capture wait at once
-        // and encode a repeat. A failed picture's wake is not needed: the loop checks for that
-        // failure before it encodes. (Such a wake is harmless to an independent provider, which
-        // encodes no repeats, and its provider and control wakes must not be lost.)
-        images->discard_wake();
       }
 
       // A final early capture may never be followed by another image event. Convert it when
@@ -2081,9 +2054,9 @@ namespace video {
         continue;
       }
 
-      if (independent_provider && !converted_frame && !recovery_frame_requested && std::chrono::steady_clock::now() < last_encode_at + keepalive_interval) {
-        // Woken without new content (a provider frame not yet due, an unchanged metadata capture,
-        // a kept input or a stale wake): wait again instead of encoding a repeat of the input.
+      const bool wake_without_picture = !converted_frame && (!conversion_ran || independent_provider);
+      if (wake_without_picture && !recovery_frame_requested && std::chrono::steady_clock::now() < last_encode_at + keepalive_interval) {
+        // A wake can end the wait without authorizing a picture. Preserve the idle deadline.
         continue;
       }
 

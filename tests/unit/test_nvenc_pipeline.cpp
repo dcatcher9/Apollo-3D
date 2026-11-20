@@ -881,7 +881,7 @@ TEST(NvencPipelineTest, InvalidationWaitsForNoPictureInFlightAndMarksTheNextSubm
 
   // Drained: the range extends to the last submitted picture and the next one confirms it.
   EXPECT_TRUE(probe.would_invalidate_ref_frames(2, 2));
-  EXPECT_TRUE(probe.invalidate_ref_frames(2, 2));
+  EXPECT_EQ(probe.invalidate_ref_frames(2, 2), nvenc::nvenc_base::ref_frame_invalidation_e::applied);
   EXPECT_EQ(only(probe.operations(), {"invalidate"}), (std::vector<std::string> {"invalidate-2"}));
   EXPECT_FALSE(probe.would_invalidate_ref_frames(2, 2));  // Done.
   ASSERT_TRUE(probe.submit_frame(3, false));
@@ -910,18 +910,18 @@ TEST(NvencPipelineTest, InvalidationThatNeedsNoDriverCallIsDecidedWithPicturesIn
   // One that would invalidate is refused while a picture is in flight (an IDR), never run: the
   // caller waits for the pictures first.
   EXPECT_TRUE(probe.would_invalidate_ref_frames(5, 5));
-  EXPECT_FALSE(probe.invalidate_ref_frames(5, 5));
+  EXPECT_EQ(probe.invalidate_ref_frames(5, 5), nvenc::nvenc_base::ref_frame_invalidation_e::needs_idr);
   EXPECT_TRUE(only(probe.operations(), {"invalidate"}).empty());
 
   // 2-6 (extended to the last submitted picture) is five pictures: an IDR, decided now.
   EXPECT_FALSE(probe.would_invalidate_ref_frames(2, 3));
-  EXPECT_FALSE(probe.invalidate_ref_frames(2, 3));
+  EXPECT_EQ(probe.invalidate_ref_frames(2, 3), nvenc::nvenc_base::ref_frame_invalidation_e::needs_idr);
   // Handled by that IDR: done.
   EXPECT_FALSE(probe.would_invalidate_ref_frames(3, 4));
-  EXPECT_TRUE(probe.invalidate_ref_frames(3, 4));
+  EXPECT_EQ(probe.invalidate_ref_frames(3, 4), nvenc::nvenc_base::ref_frame_invalidation_e::unchanged);
   // Malformed: an IDR.
   EXPECT_FALSE(probe.would_invalidate_ref_frames(9, 8));
-  EXPECT_FALSE(probe.invalidate_ref_frames(9, 8));
+  EXPECT_EQ(probe.invalidate_ref_frames(9, 8), nvenc::nvenc_base::ref_frame_invalidation_e::needs_idr);
   EXPECT_TRUE(only(probe.operations(), {"invalidate"}).empty());
   EXPECT_EQ(probe.frames_in_flight(), 2u);
 

@@ -183,6 +183,12 @@ namespace nvenc {
      */
     bool reconfigure_bitrate(int bitrate_kbps);
 
+    enum class ref_frame_invalidation_e {
+      unchanged,
+      applied,
+      needs_idr,
+    };
+
     /**
      * @brief Perform reference frame invalidation (RFI) procedure. The range extends to the last
      *        submitted picture and the next submitted one is the first encoded after it. A request
@@ -191,10 +197,9 @@ namespace nvenc {
      *        flight and is refused, so an IDR, while one is.
      * @param first_frame First frame index of the invalidation range.
      * @param last_frame Last frame index of the invalidation range.
-     * @return `true` on success, `false` on error.
-     *         After error next frame must be encoded with `force_idr = true`.
+     * @return Whether a new recovery picture is needed and if it must be an IDR.
      */
-    bool invalidate_ref_frames(uint64_t first_frame, uint64_t last_frame);
+    [[nodiscard]] ref_frame_invalidation_e invalidate_ref_frames(uint64_t first_frame, uint64_t last_frame);
 
     /**
      * Whether invalidate_ref_frames() with this range would call `NvEncInvalidateRefFrames()`,

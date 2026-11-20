@@ -30,6 +30,7 @@ namespace video::detail {
     picture_observer_t before_retrieve;
     picture_observer_t after_submit;
     std::function<void()> repeat_coalesced;
+    std::function<void(bool has_retained_source, std::chrono::nanoseconds)> before_image_wait;
   };
 
   /** Synchronously create a normal native session and run the actual production encode loop.

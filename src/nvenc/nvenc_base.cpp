@@ -1327,22 +1327,22 @@ namespace nvenc {
     return plan_ref_frame_invalidation(first_frame, last_frame) == rfi_plan_e::invalidate;
   }
 
-  bool nvenc_base::invalidate_ref_frames(uint64_t first_frame, uint64_t last_frame) {
+  nvenc_base::ref_frame_invalidation_e nvenc_base::invalidate_ref_frames(uint64_t first_frame, uint64_t last_frame) {
     const auto plan = plan_ref_frame_invalidation(first_frame, last_frame);
     if (plan == rfi_plan_e::refused) {
-      return false;
+      return ref_frame_invalidation_e::needs_idr;
     }
 
     if (plan == rfi_plan_e::done) {
       BOOST_LOG(debug) << "NvEnc: rfi request " << first_frame << "-" << last_frame << " already done";
-      return true;
+      return ref_frame_invalidation_e::unchanged;
     }
 
     encoder_state.rfi_needs_confirmation = true;
 
     if (plan == rfi_plan_e::malformed) {
       BOOST_LOG(error) << "NvEnc: invaid rfi request " << first_frame << "-" << last_frame << ", generating IDR";
-      return false;
+      return ref_frame_invalidation_e::needs_idr;
     }
 
     BOOST_LOG(debug) << "NvEnc: rfi request " << first_frame << "-" << last_frame << " expanding to last encoded frame " << encoder_state.last_encoded_frame_index;
@@ -1352,24 +1352,24 @@ namespace nvenc {
 
     if (plan == rfi_plan_e::too_large) {
       BOOST_LOG(debug) << "NvEnc: rfi request too large, generating IDR";
-      return false;
+      return ref_frame_invalidation_e::needs_idr;
     }
 
     // Only the invalidation itself needs no picture in flight (the caller retrieves them first:
     // would_invalidate_ref_frames()). Should one still be in flight, fall back to an IDR.
     if (frames_in_flight() != 0) {
       BOOST_LOG(debug) << "NvEnc: rfi request with a picture in flight, generating IDR";
-      return false;
+      return ref_frame_invalidation_e::needs_idr;
     }
 
     for (auto i = first_frame; i <= last_frame; i++) {
       if (nvenc_failed(nvenc->nvEncInvalidateRefFrames(encoder, i))) {
         BOOST_LOG(error) << "NvEnc: NvEncInvalidateRefFrames() " << i << " failed: " << last_nvenc_error_string;
-        return false;
+        return ref_frame_invalidation_e::needs_idr;
       }
     }
 
-    return true;
+    return ref_frame_invalidation_e::applied;
   }
 
   bool nvenc_base::nvenc_failed(NVENCSTATUS status) {

@@ -55,6 +55,94 @@ namespace {
     }
   }
 
+  TEST(LiveHostSbsPacingGpuTest, IdleDesktopWakeServicesRecoveryWithoutAnExtraPicture) {
+    const auto *enabled = std::getenv("APOLLO_RUN_TENSORRT_TESTS");
+    if (!enabled || std::string_view {enabled} != "1") {
+      GTEST_SKIP() << "Set APOLLO_RUN_TENSORRT_TESTS=1 for the local NVIDIA integration check.";
+    }
+
+    // Use a long, valid idle interval so the keepalive cannot satisfy the request.
+    const auto previous_minimum_fps = config::video.minimum_fps_target;
+    config::video.minimum_fps_target = 0.05;
+    const auto restore_minimum_fps = util::fail_guard([previous_minimum_fps] {
+      config::video.minimum_fps_target = previous_minimum_fps;
+    });
+    const auto adapter = nvidia_adapter();
+    ASSERT_TRUE(adapter);
+    constexpr unsigned width = 640, height = 480;
+    auto display = fixture::make_native_pacing_display(*adapter, width, height);
+    auto first = fixture::upload_native_pacing_image(*display, std::vector<std::uint32_t>(width * height, 0xff3853a0u));
+    ASSERT_TRUE(first);
+
+    auto mail = std::make_shared<safe::mail_raw_t>();
+    auto images = std::make_shared<video::img_event_t::element_type>();
+    auto packets = std::make_shared<video::packet_queue_t::element_type>();
+    auto shutdown = mail->event<bool>(mail::shutdown);
+    auto idr = mail->event<bool>(mail::idr);
+    video::config_t config {};
+    config.width = width;
+    config.height = height;
+    config.framerate = 60;
+    config.framerateX100 = 6000;
+    config.encodingFramerate = 60000;
+    config.bitrate = 10000;
+    config.slicesPerFrame = 1;
+    config.numRefFrames = 1;
+    config.encoderCscMode = 2;
+    config.videoFormat = 1;
+    config.sbs_mode = video::SBS_OFF;
+    config.stream_gamma_state = std::make_shared<video::stream_gamma_publisher_t>();
+    config.encode_wake = std::make_shared<video::encode_wake_t>();
+
+    unsigned idle_waits = 0;
+    video::detail::native_encode_loop_test_hooks_t hooks;
+    hooks.before_image_wait = [&](bool has_source, std::chrono::nanoseconds wait) {
+      if (!has_source || wait < 10s) {
+        return;
+      }
+      // The loop has already polled its request mail. First wake it without work, then
+      // deliver a real request in the same race window on its next idle wait.
+      if (++idle_waits == 1) {
+        config.encode_wake->wake();
+      } else if (idle_waits == 2) {
+        idr->raise(true);
+        config.encode_wake->wake();
+      }
+    };
+    const auto captured = clock_t::now();
+    first->frame_timestamp = first->content_timestamp = captured;
+    images->raise(first);
+
+    safe::event_t<bool> returned;
+    std::exception_ptr loop_error;
+    video::detail::native_encode_loop_test_result_t result;
+    std::jthread encoder([&](std::stop_token stop) {
+      std::stop_callback stop_loop(stop, [&] { images->stop(); });
+      try {
+        result = video::detail::run_native_encode_loop_for_test(display, mail, images, config, packets, hooks);
+      } catch (...) {
+        loop_error = std::current_exception();
+      }
+      packets->stop();
+      returned.raise(true);
+    });
+
+    const auto initial = packets->pop(3s);
+    ASSERT_TRUE(initial);
+    const auto recovery = packets->pop(3s);
+    ASSERT_TRUE(recovery);
+    EXPECT_TRUE(recovery->is_idr());
+    EXPECT_EQ(recovery->frame_index(), initial->frame_index() + 1);
+    EXPECT_EQ(recovery->content_timestamp, captured);
+    shutdown->raise(true);
+    config.encode_wake->wake();
+    ASSERT_TRUE(returned.pop(3s));
+    encoder.join();
+    EXPECT_FALSE(loop_error);
+    EXPECT_TRUE(result.session_created);
+    EXPECT_GE(idle_waits, 2u);
+  }
+
   TEST(LiveHostSbsPacingGpuTest, RetainedSourceReachesNativePacketsAfterModelReadiness) {
     const auto *enabled = std::getenv("APOLLO_RUN_TENSORRT_TESTS");
     if (!enabled || std::string_view {enabled} != "1") {
@@ -733,6 +821,7 @@ namespace {
     auto images = std::make_shared<video::img_event_t::element_type>();
     auto packets = std::make_shared<video::packet_queue_t::element_type>();
     auto shutdown = mail->event<bool>(mail::shutdown);
+    auto idr = mail->event<bool>(mail::idr);
     video::config_t config {};
     config.width = 2 * width;
     config.height = height;
@@ -747,6 +836,7 @@ namespace {
     config.sbs_mode = video::SBS_AI;
     config.sbs_depth_status_event = mail->event<int>(mail::sbs_depth_status);
     config.sbs_depth_pipeline_ready_event = std::make_shared<safe::event_t<bool>>();
+    config.encode_wake = std::make_shared<video::encode_wake_t>();
 
     std::vector<std::uint32_t> pixels(std::size_t(width) * height);
     for (unsigned y = 0; y < height; ++y) {
@@ -759,8 +849,10 @@ namespace {
       pixel ^= 0x00569662u;
     }
     auto next = fixture::upload_native_pacing_image(*display, pixels);
+    auto skipped = fixture::upload_native_pacing_image(*display, pixels);
     ASSERT_TRUE(first);
     ASSERT_TRUE(next);
+    ASSERT_TRUE(skipped);
     models::live_model_preparation_t preparation(video::host_sbs_v2_depth_model(), {});
     const auto captured = clock_t::now();
     first->frame_timestamp = first->content_timestamp = captured;
@@ -885,14 +977,20 @@ namespace {
         std::lock_guard lock {observed.mutex};
         observed.armed = true;
       }
-      // A non-content wake requests a delivery of the committed A input, without requiring
-      // another warp or depending on an unchanged-source converter admission decision.
-      images->wake();
+      // Recovery submits the committed A input without requiring another warp.
+      idr->raise(true);
+      config.encode_wake->wake();
       ASSERT_TRUE(observed.await([&]() {
         return observed.entered;
       },
                                  3s));
-      images->wake();
+      // Capture can deliver metadata without pixels while a source handoff is in progress.
+      // The converter keeps the committed input, which still has a picture in flight here.
+      skipped->pixels_skipped = true;
+      skipped->conversion_needed = true;
+      skipped->frame_timestamp = clock_t::now();
+      skipped->content_timestamp = captured;
+      images->raise(std::move(skipped));
       ASSERT_TRUE(observed.await([&]() {
         return observed.coalesced != 0;
       },
