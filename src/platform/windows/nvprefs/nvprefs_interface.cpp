@@ -3,6 +3,7 @@
  * @brief Definitions for nvidia preferences interface.
  */
 // standard includes
+#include <atomic>
 #include <cassert>
 
 // local includes
@@ -21,6 +22,7 @@ namespace nvprefs {
 
   struct nvprefs_interface::impl {
     bool loaded = false;
+    std::atomic<bool> allow_variable_refresh = false;
     driver_settings_t driver_settings;
     std::filesystem::path undo_folder_path;
     std::filesystem::path undo_file_path;
@@ -107,7 +109,7 @@ namespace nvprefs {
 
     // Modify and save sunshine.exe application profile settings, if needed
     bool modified = false;
-    if (!pimpl->driver_settings.check_and_modify_application_profile(modified)) {
+    if (!pimpl->driver_settings.check_and_modify_application_profile(modified, pimpl->allow_variable_refresh.load())) {
       error_message("Failed to modify application profile settings");
       return false;
     } else if (modified) {
@@ -122,6 +124,10 @@ namespace nvprefs {
     }
 
     return true;
+  }
+
+  void nvprefs_interface::allow_variable_refresh(bool allowed) {
+    pimpl->allow_variable_refresh.store(allowed);
   }
 
   bool nvprefs_interface::modify_global_profile() {

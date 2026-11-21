@@ -167,6 +167,29 @@ less delay, so the commands are evenly spaced and the configured delay is measur
 itself. A confirmation that arrives later than the hold is sent at once. A configured delay
 within 700 µs of the protocol minimum shortens the hold accordingly.
 
+A display mode with long vertical blanking draws each picture quickly and then holds it complete
+until the next one starts. That hold begins a whole eye interval after the picture's refresh
+boundary, so a lens window for it has to reach into the following eye interval. When delay,
+duration, spacing and close margin no longer fit the eye's own interval, the emitter is given
+the longest delay that still ends its signals 1000 µs before its next command, and the host holds
+the command for the remainder. The next eye is handed to Windows only after that command, so
+the hold is limited to half an eye interval. Such a window is accepted only with one of these
+long-blanking modes in mind: in an ordinary mode the panel is already drawing the next eye then.
+
+Windows 11 offers such modes by itself on a variable-refresh monitor: a refresh rate below the
+monitor's fastest is a desktop rate carried by the fastest signal's line timing with a longer
+vertical blanking. Attaching the virtual source can leave the monitor at the signal's own rate, so
+the host asks Windows for the selected rate again before it builds the replacement topology, and
+reads and writes the display configuration with virtual-refresh awareness while such a rate is in
+use. A session always runs at the rate the monitor was selected at.
+
+The host's NVIDIA driver profile normally asks for a fixed refresh rate, so that a Sunshine window
+that comes to the foreground cannot pull the monitor into windowed G-SYNC. On a desktop rate the
+driver would then show the presenter's pictures at the fastest signal's own rate. A monitor session
+on a desktop rate therefore leaves variable refresh to the driver for as long as its presenter
+runs, set before the presenter creates its graphics device, and asks for a fixed refresh again
+when the presenter ends.
+
 The presenter retains one stereo tuple for its complete left/right cycle. Host AI 3D and Game 3D
 keep their existing source, frame-attribution, fallback, HDR, and geometry rules. Monitor mode,
 device identity, and emitter configuration belong to this output surface; they do not alter those
@@ -181,10 +204,12 @@ Invalid mode, boolean, timing, protocol, or repeat values disable the monitor ca
 configuration loading. An enabled configuration also requires both a physical monitor selection
 and an emitter port. Configuration loading never starts a 3D session by itself.
 
-Delay plus duration must not exceed `32767` µs and must fit the assigned eye interval: the monitor's
-physical refresh period multiplied by **Refreshes per eye**. Delay, duration, signal spacing, and the
-protocol's close-pulse margin together must leave positive time for host presentation feedback in
-that interval. These limits leave room for the emitter's IR pulse and scheduling.
+Delay plus duration must not exceed `32767` µs. The eye interval is the monitor's physical refresh
+period multiplied by **Refreshes per eye**. Duration, signal spacing, and the protocol's close-pulse
+margin must fit that interval. Together with the delay they either leave positive time for host
+presentation feedback in the eye's own interval, or the delay exceeds that by no more than the host
+can hold a command back, as described under the presentation clock. These limits leave room for the
+emitter's IR pulse and scheduling.
 The UI receives the native protocol limits and checks the interval when the selected monitor is
 connected; Start 3D and the presenter share the native feedback-budget check before preparing a
 display session or sending eye commands.

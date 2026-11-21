@@ -213,7 +213,7 @@ namespace nvprefs {
     return true;
   }
 
-  bool driver_settings_t::check_and_modify_application_profile(bool &modified) {
+  bool driver_settings_t::check_and_modify_application_profile(bool &modified, bool allow_variable_refresh) {
     if (!session_handle) {
       return false;
     }
@@ -312,18 +312,25 @@ namespace nvprefs {
     // glasses from that; when a Sunshine window came to the front, such as its tray menu, the
     // driver stopped holding its images to the refresh and local 3D lost its clock. Sunshine
     // never benefits from variable refresh, so its own profile always asks for a fixed one.
+    // The exception is a local presenter on a monitor that Windows runs at a desktop refresh
+    // rate: there the driver itself makes the selected rate by stretching the fastest signal's
+    // vertical blanking, and with a fixed refresh asked for it shows this program's pictures
+    // at the signal's own, faster rate instead. Such a session allows variable refresh for as
+    // long as it presents. The driver reads the setting when a graphics device is created.
+    const bool allow_vrr = allow_variable_refresh;
+    const NvU32 wanted_vrr = allow_vrr ? VRR_APP_OVERRIDE_ALLOW : VRR_APP_OVERRIDE_FIXED_REFRESH;
     setting = {};
     setting.version = NVDRS_SETTING_VER1;
     status = NvAPI_DRS_GetSetting(session_handle, profile_handle, VRR_APP_OVERRIDE_ID, &setting);
     if (status != NVAPI_OK ||
         setting.settingLocation != NVDRS_CURRENT_PROFILE_LOCATION ||
-        setting.u32CurrentValue != VRR_APP_OVERRIDE_FIXED_REFRESH) {
+        setting.u32CurrentValue != wanted_vrr) {
       setting = {};
       setting.version = NVDRS_SETTING_VER1;
       setting.settingId = VRR_APP_OVERRIDE_ID;
       setting.settingType = NVDRS_DWORD_TYPE;
       setting.settingLocation = NVDRS_CURRENT_PROFILE_LOCATION;
-      setting.u32CurrentValue = VRR_APP_OVERRIDE_FIXED_REFRESH;
+      setting.u32CurrentValue = wanted_vrr;
 
       status = NvAPI_DRS_SetSetting(session_handle, profile_handle, &setting);
       if (status != NVAPI_OK) {
@@ -333,7 +340,7 @@ namespace nvprefs {
       }
       modified = true;
 
-      info_message(std::wstring(L"Changed VRR_APP_OVERRIDE to VRR_APP_OVERRIDE_FIXED_REFRESH for ") + sunshine_application_path);
+      info_message(std::wstring(allow_vrr ? L"Changed VRR_APP_OVERRIDE to VRR_APP_OVERRIDE_ALLOW for " : L"Changed VRR_APP_OVERRIDE to VRR_APP_OVERRIDE_FIXED_REFRESH for ") + sunshine_application_path);
     }
 
     return true;

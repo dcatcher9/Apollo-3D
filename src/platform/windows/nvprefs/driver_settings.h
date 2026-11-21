@@ -44,7 +44,9 @@ namespace nvprefs {
 
     bool check_and_modify_global_profile(std::optional<undo_data_t> &undo_data);
 
-    bool check_and_modify_application_profile(bool &modified);
+    // allow_variable_refresh: leave variable refresh to the driver's default instead of asking
+    // for a fixed refresh rate. See the note in the definition.
+    bool check_and_modify_application_profile(bool &modified, bool allow_variable_refresh = false);
 
   private:
     NvDRSSessionHandle session_handle = nullptr;

@@ -2726,6 +2726,10 @@ namespace platf {
   }
 
   namespace {
+    // The driver profile object is shared by presentation start-up and the per-presenter
+    // variable-refresh choice, which run on different threads.
+    std::mutex driver_profile_mutex;
+
     struct presentation_scheduling_operations_t {
       bool dwm_mmcss_enabled = false;
       detail::presentation_timer_request_t timer_request;
@@ -2764,6 +2768,7 @@ namespace platf {
 
         // This first-owner transition is serialized with every local/remote acquire and release.
         // Startup/shutdown profile ownership surrounds both presentation lifetimes in main().
+        std::lock_guard profile_lock(driver_profile_mutex);
         if (nvprefs_instance.load()) {
           if (!nvprefs_instance.owning_undo_file()) {
             nvprefs_instance.restore_from_and_delete_undo_file_if_exists();
@@ -2822,6 +2827,17 @@ namespace platf {
 
   std::unique_ptr<deinit_t> acquire_presentation_scheduling() {
     return std::make_unique<presentation_scheduling_lease_t>();
+  }
+
+  bool set_presentation_variable_refresh(bool allowed) {
+    std::lock_guard profile_lock(driver_profile_mutex);
+    nvprefs_instance.allow_variable_refresh(allowed);
+    if (!nvprefs_instance.load()) {
+      return false;
+    }
+    const bool written = nvprefs_instance.modify_application_profile();
+    nvprefs_instance.unload();
+    return written;
   }
 
   void streaming_will_start() {

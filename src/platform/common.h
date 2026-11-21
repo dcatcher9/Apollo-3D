@@ -776,6 +776,12 @@ namespace platf {
   // Hold through capture/presentation teardown; the last owner restores the acquired state.
   [[nodiscard]] std::unique_ptr<deinit_t> acquire_presentation_scheduling();
 
+  // Whether this program's driver profile leaves variable refresh to the driver instead of
+  // asking for a fixed refresh rate. A local presenter allows it while it presents to a monitor
+  // on a Windows desktop refresh rate, and must set it before creating its graphics device.
+  // Returns false when the profile could not be written.
+  bool set_presentation_variable_refresh(bool allowed);
+
   // Refresh any platform workaround needed to keep a remote mouse cursor visible.
   void refresh_mouse_keys();
 

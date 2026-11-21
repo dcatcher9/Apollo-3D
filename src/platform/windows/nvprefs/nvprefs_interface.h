@@ -22,6 +22,10 @@ namespace nvprefs {
 
     bool modify_application_profile();
 
+    // Whether the application profile leaves variable refresh to the driver's default. Takes
+    // effect with the next modify_application_profile().
+    void allow_variable_refresh(bool allowed);
+
     bool modify_global_profile();
 
     bool owning_undo_file();

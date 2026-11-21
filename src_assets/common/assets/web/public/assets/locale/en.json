@@ -188,7 +188,7 @@
     "local_monitor_ir_protocol": "Glasses IR protocol",
     "local_monitor_ir_protocol_desc": "Finite shutter windows support NVIDIA 3D Vision (2), Sony (4), Panasonic (5), and Panasonic custom firmware (6).",
     "local_monitor_frame_delay_us": "Shutter delay (µs)",
-    "local_monitor_frame_delay_us_desc": "Leave time for the emitter to schedule its IR pulse. Delay plus duration must fit both the emitter timer and the selected eye interval.",
+    "local_monitor_frame_delay_us_desc": "Time from an eye's refresh to its lens opening. Leave time for the emitter to schedule its IR pulse. Delay plus duration must fit the emitter timer. With a long-blanking display mode the window may reach into the next eye interval by up to half an interval.",
     "local_monitor_frame_duration_us": "Shutter duration (µs)",
     "local_monitor_frame_duration_us_desc": "Leave room for the protocol's open pulse and IR spacing. The shutter window and close-pulse margin must fit the selected eye interval.",
     "local_monitor_signal_spacing_us": "IR signal spacing (µs)",

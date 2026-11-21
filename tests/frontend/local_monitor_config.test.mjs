@@ -62,6 +62,20 @@ test('uses native tail metadata, rounded eye intervals and the configured repeat
   assert(feedbackError(validate({...repeated, local_monitor_frame_duration_us: 5211}, 330000)))
 })
 
+test('a window may reach into the next eye interval while the host can hold its command back', () => {
+  // 120 Hz with long blanking: a picture is complete 8333 µs after its boundary and held 2.7 ms.
+  const late = {local_monitor_frame_delay_us: 7770, local_monitor_frame_duration_us: 2300}
+  assert.deepEqual(validate(late), [])
+  // Emitter delay 8333 - 2300 - 350 - 1000 = 4683 µs; the host may hold at most 4166 µs.
+  assert.deepEqual(validate({...late, local_monitor_frame_delay_us: 8849}), [])
+  assert(validate({...late, local_monitor_frame_delay_us: 8850}).some(error => error.startsWith('Shutter delay plus duration')))
+  // A window too long to leave the emitter any delay cannot be moved by the host either.
+  assert.notDeepEqual(validate({local_monitor_frame_delay_us: 900, local_monitor_frame_duration_us: 7700}), [])
+  // The first delay that no longer fits its own interval is already held by the host.
+  assert.deepEqual(validate({local_monitor_frame_delay_us: 5683, local_monitor_frame_duration_us: 2300}), [])
+  assert.deepEqual(validate({local_monitor_frame_delay_us: 5682, local_monitor_frame_duration_us: 2300}), [])
+})
+
 test('retains distinct firmware, pulse-tail and missing-metadata errors', () => {
   assert(validate({local_monitor_signal_spacing_us: 29}).some(error => error.includes('IR signal spacing')))
   assert(validate({local_monitor_frame_delay_us: 16000, local_monitor_frame_duration_us: 16768}, 60000)

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <combaseapi.h>
 #include <condition_variable>
 #include <cstdint>
@@ -569,7 +570,10 @@ LONG applyDisplaySettings(const wchar_t *deviceName, int width, int height, int 
   std::vector<DISPLAYCONFIG_PATH_INFO> pathArray;
   std::vector<DISPLAYCONFIG_MODE_INFO> modeArray;
 
-  if (!queryActiveDisplayConfig(pathArray, modeArray)) {
+  // The whole configuration goes back to Windows, the other displays included. A monitor on a
+  // desktop refresh rate keeps it only if that is read and written with awareness of it.
+  UINT32 awarenessFlags = 0;
+  if (!queryActiveDisplayConfigForApply(pathArray, modeArray, awarenessFlags)) {
     wprintf(L"[SUDOVDA] Failed to query display configuration.\n");
     return ERROR_INVALID_PARAMETER;
   }
@@ -613,7 +617,7 @@ LONG applyDisplaySettings(const wchar_t *deviceName, int width, int height, int 
             pathArray.data(),
             modeCount,
             modeArray.data(),
-            SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | (persist_settings ? SDC_SAVE_TO_DATABASE : 0)
+            SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | awarenessFlags | (persist_settings ? SDC_SAVE_TO_DATABASE : 0)
           );
           if (status != ERROR_SUCCESS) {
             wprintf(L"[SUDOVDA] Failed to apply display settings.\n");
@@ -648,6 +652,9 @@ LONG testDisplaySettings(const wchar_t *deviceName, int width, int height, int r
 LONG changeDisplaySettings(const wchar_t *deviceName, int width, int height, int refresh_rate, bool persist_settings) {
   // Capture attempts open across this call restart because the host changed the mode.
   platf::note_display_change();
+  // Setting one display's mode makes Windows lay out the whole configuration again, and a
+  // monitor on a desktop refresh rate then falls back to its signal's own rate.
+  const auto keptDesktopRates = desktopRefreshRatesInUse();
   const auto refreshRates = baselineRefreshRates(refresh_rate);
   wprintf(L"[SUDOVDA] Applying baseline display mode [%dx%dx%d] for %ls.\n", width, height, refreshRates.preferred, deviceName);
   const auto baselineStatus = changeBaselineDisplaySettings(
@@ -665,6 +672,7 @@ LONG changeDisplaySettings(const wchar_t *deviceName, int width, int height, int
 
   // Apply the exact fractional refresh rate through DisplayConfig.
   const auto status = applyDisplaySettings(deviceName, width, height, refresh_rate, persist_settings);
+  restoreDesktopRefreshRates(keptDesktopRates);
   platf::note_display_change();
   return status;
 }
@@ -920,6 +928,168 @@ bool queryActiveDisplayConfig(
   std::vector<DISPLAYCONFIG_MODE_INFO> &modes
 ) {
   return queryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, paths, modes);
+}
+
+namespace {
+bool pathUsesVirtualRefreshRate(const DISPLAYCONFIG_PATH_INFO &path, const std::vector<DISPLAYCONFIG_MODE_INFO> &modes) {
+  if (!(path.flags & DISPLAYCONFIG_PATH_ACTIVE)) {
+    return false;
+  }
+  if (path.flags & DISPLAYCONFIG_PATH_BOOST_REFRESH_RATE) {
+    return true;
+  }
+  // An indirect display's signal description is the driver's own invention.
+  const auto technology = static_cast<int>(path.targetInfo.outputTechnology);
+  if (technology == static_cast<int>(DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INDIRECT_WIRED) ||
+      technology == static_cast<int>(DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INDIRECT_VIRTUAL)) {
+    return false;
+  }
+  const auto index = path.targetInfo.modeInfoIdx;
+  if (index >= modes.size() || modes[index].infoType != DISPLAYCONFIG_MODE_INFO_TYPE_TARGET) {
+    return false;
+  }
+  const auto &signal = modes[index].targetMode.targetVideoSignalInfo;
+  const auto &desktop = path.targetInfo.refreshRate;
+  if (signal.scanLineOrdering != DISPLAYCONFIG_SCANLINE_ORDERING_PROGRESSIVE || !desktop.Numerator || !desktop.Denominator ||
+      !signal.pixelRate || !signal.totalSize.cx || !signal.totalSize.cy) {
+    return false;
+  }
+  // The rate the signal's own clock and size give, against the rate the desktop runs at.
+  const double signal_hz = static_cast<double>(signal.pixelRate) / (static_cast<double>(signal.totalSize.cx) * signal.totalSize.cy);
+  const double desktop_hz = static_cast<double>(desktop.Numerator) / desktop.Denominator;
+  return std::abs(signal_hz - desktop_hz) > signal_hz * 0.005;
+}
+
+bool sameRate(const DISPLAYCONFIG_RATIONAL &left, const DISPLAYCONFIG_RATIONAL &right) {
+  return static_cast<std::uint64_t>(left.Numerator) * right.Denominator == static_cast<std::uint64_t>(right.Numerator) * left.Denominator;
+}
+}  // namespace
+
+bool displayConfigUsesVirtualRefreshRate(
+  const std::vector<DISPLAYCONFIG_PATH_INFO> &paths,
+  const std::vector<DISPLAYCONFIG_MODE_INFO> &modes
+) {
+  return std::any_of(paths.begin(), paths.end(), [&](const DISPLAYCONFIG_PATH_INFO &path) {
+    return pathUsesVirtualRefreshRate(path, modes);
+  });
+}
+
+std::vector<desktop_refresh_rate_t> desktopRefreshRatesInUse() {
+  std::vector<desktop_refresh_rate_t> rates;
+  std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+  std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+  if (!queryActiveDisplayConfig(paths, modes)) {
+    return rates;
+  }
+  for (const auto &path : paths) {
+    if (pathUsesVirtualRefreshRate(path, modes)) {
+      rates.push_back({path.targetInfo.adapterId, path.targetInfo.id, path.targetInfo.refreshRate});
+    }
+  }
+  return rates;
+}
+
+bool targetUsesDesktopRefreshRate(const LUID &adapterId, uint32_t targetId) {
+  const auto rates = desktopRefreshRatesInUse();
+  return std::any_of(rates.begin(), rates.end(), [&](const desktop_refresh_rate_t &rate) {
+    return rate.adapterId.HighPart == adapterId.HighPart && rate.adapterId.LowPart == adapterId.LowPart && rate.targetId == targetId;
+  });
+}
+
+bool restoreDesktopRefreshRates(const std::vector<desktop_refresh_rate_t> &rates) {
+  if (rates.empty()) {
+    return true;
+  }
+  std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+  std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+  if (!queryDisplayConfig(QDC_ONLY_ACTIVE_PATHS | QDC_VIRTUAL_REFRESH_RATE_AWARE, paths, modes)) {
+    return false;
+  }
+  bool changed = false;
+  for (const auto &rate : rates) {
+    const auto path = std::find_if(paths.begin(), paths.end(), [&](const DISPLAYCONFIG_PATH_INFO &candidate) {
+      return candidate.targetInfo.adapterId.HighPart == rate.adapterId.HighPart && candidate.targetInfo.adapterId.LowPart == rate.adapterId.LowPart &&
+             candidate.targetInfo.id == rate.targetId;
+    });
+    // A display that is no longer active is not this function's to bring back.
+    if (path != paths.end() && !sameRate(path->targetInfo.refreshRate, rate.rate)) {
+      BOOST_LOG(info) << "A display left its selected desktop refresh rate "
+                      << (static_cast<double>(rate.rate.Numerator) / rate.rate.Denominator) << " Hz for "
+                      << (path->targetInfo.refreshRate.Denominator ? static_cast<double>(path->targetInfo.refreshRate.Numerator) / path->targetInfo.refreshRate.Denominator : 0.0)
+                      << " Hz when another display's mode was set; asking Windows for it again.";
+      path->targetInfo.refreshRate = rate.rate;
+      changed = true;
+    }
+  }
+  if (!changed) {
+    return true;
+  }
+  platf::note_display_change();
+  const LONG status = SetDisplayConfig(
+    static_cast<UINT32>(paths.size()),
+    paths.data(),
+    static_cast<UINT32>(modes.size()),
+    modes.data(),
+    SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_VIRTUAL_REFRESH_RATE_AWARE
+  );
+  platf::note_display_change();
+  if (status != ERROR_SUCCESS) {
+    BOOST_LOG(warning) << "Windows refused the selected desktop refresh rate (status " << status << ").";
+  }
+  return status == ERROR_SUCCESS;
+}
+
+bool queryActiveDisplayConfigForApply(
+  std::vector<DISPLAYCONFIG_PATH_INFO> &paths,
+  std::vector<DISPLAYCONFIG_MODE_INFO> &modes,
+  UINT32 &setAwarenessFlags
+) {
+  setAwarenessFlags = 0;
+  if (!queryActiveDisplayConfig(paths, modes)) {
+    return false;
+  }
+  if (!displayConfigUsesVirtualRefreshRate(paths, modes)) {
+    return true;
+  }
+  std::vector<DISPLAYCONFIG_PATH_INFO> aware_paths;
+  std::vector<DISPLAYCONFIG_MODE_INFO> aware_modes;
+  if (queryDisplayConfig(QDC_ONLY_ACTIVE_PATHS | QDC_VIRTUAL_REFRESH_RATE_AWARE, aware_paths, aware_modes)) {
+    paths = std::move(aware_paths);
+    modes = std::move(aware_modes);
+    setAwarenessFlags = SDC_VIRTUAL_REFRESH_RATE_AWARE;
+  }
+  return true;
+}
+
+LONG setTargetDesktopRefreshRate(const LUID &adapterId, uint32_t targetId, int refreshMillihz) {
+  if (refreshMillihz <= 0) {
+    return ERROR_INVALID_PARAMETER;
+  }
+  std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+  std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+  LONG status = ERROR_SUCCESS;
+  if (!queryDisplayConfig(QDC_ONLY_ACTIVE_PATHS | QDC_VIRTUAL_REFRESH_RATE_AWARE, paths, modes, &status)) {
+    return status == ERROR_SUCCESS ? ERROR_GEN_FAILURE : status;
+  }
+  const auto path = std::find_if(paths.begin(), paths.end(), [&](const DISPLAYCONFIG_PATH_INFO &candidate) {
+    return candidate.targetInfo.adapterId.HighPart == adapterId.HighPart && candidate.targetInfo.adapterId.LowPart == adapterId.LowPart &&
+           candidate.targetInfo.id == targetId;
+  });
+  if (path == paths.end()) {
+    return ERROR_NOT_FOUND;
+  }
+  // Capture attempts open across this call restart because the host changed the mode.
+  platf::note_display_change();
+  path->targetInfo.refreshRate = {static_cast<UINT32>(refreshMillihz), 1000};
+  status = SetDisplayConfig(
+    static_cast<UINT32>(paths.size()),
+    paths.data(),
+    static_cast<UINT32>(modes.size()),
+    modes.data(),
+    SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_VIRTUAL_REFRESH_RATE_AWARE
+  );
+  platf::note_display_change();
+  return status;
 }
 
 namespace {

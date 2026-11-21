@@ -17,6 +17,7 @@
 #include "open3d_emitter.h"
 #include "primary_display.h"
 #include "rayneo_wear_monitor.h"
+#include "shutter_presentation_clock.h"
 #include "src/config.h"
 #include "src/gpu_workload_arbiter.h"
 #include "src/logging.h"
@@ -3211,6 +3212,8 @@ namespace ar_glasses {
               BOOST_LOG(error) << "Could not establish the selected monitor's native local source mode before display replacement."sv;
               return;
             }
+            // Before the replacement topology is built from what Windows reports now.
+            keep_monitor_refresh(active_target, cancelled);
           } else if (!refresh_virtual_display_reference() || !virtual_display_.bind()) {
             BOOST_LOG(error) << "Could not resolve and bind the local AR source after virtual-display creation."sv;
             return;
@@ -3325,6 +3328,9 @@ namespace ar_glasses {
               return false;
             }
             virtual_hdr_active_ = requested_target_hdr;
+            // Colour changes on the source set its mode again; the final promotion below records
+            // whatever rate the monitor is at then.
+            keep_monitor_refresh(target, cancelled);
             // Advanced Color may temporarily deactivate the still-connected physical sink.
             // Return only after the exact source is ready, allowing this transaction's final
             // owner promotion to restore scanout. Validate the physical contract after promotion,
@@ -3433,15 +3439,28 @@ namespace ar_glasses {
           return true;
         });
         if (!configured) {
+          if (!cancelled()) {
+            BOOST_LOG(warning) << "Local presentation display set-up did not complete; no picture was started."sv;
+          }
           return;
         }
         // The exclusive transaction can renumber or move the sink during its final verification.
         // Publish its current exact identity and coordinates only after that transaction completes.
         if (!refresh_virtual_display_reference()) {
+          BOOST_LOG(warning) << "The local source display could not be found after display set-up; no picture was started."sv;
           return;
         }
         const auto final_target = find_target(target_device_path_);
         if (!final_target || !final_presentation_contract_matches(presentation_target, *final_target)) {
+          BOOST_LOG(warning) << "The physical output changed during display set-up; no picture was started. Planned "sv
+                             << (presentation_target.rect.right - presentation_target.rect.left) << 'x'
+                             << (presentation_target.rect.bottom - presentation_target.rect.top) << '@'
+                             << (presentation_target.refresh_millihz / 1000.0) << " HDR="sv << presentation_target.hdr.active
+                             << ", found "sv
+                             << (final_target ? final_target->rect.right - final_target->rect.left : 0) << 'x'
+                             << (final_target ? final_target->rect.bottom - final_target->rect.top : 0) << '@'
+                             << (final_target ? final_target->refresh_millihz / 1000.0 : 0.0) << " HDR="sv
+                             << (final_target ? final_target->hdr.active : false) << '.';
           return;
         }
         presentation_target = *final_target;
@@ -4093,6 +4112,39 @@ namespace ar_glasses {
         return true;
       }
 
+      // Windows gives a variable-refresh monitor its lower refresh rates as a desktop rate on
+      // top of the monitor's fastest signal, and attaching the virtual source can leave the
+      // monitor at the signal's own rate. The session was planned for the rate the monitor was
+      // selected at, and a shutter profile may depend on that rate's long vertical blanking,
+      // so ask Windows for it again.
+      void keep_monitor_refresh(const target_state_t &selected, const std::function<bool()> &cancelled) {
+        const auto current = find_target(target_device_path_);
+        if (!current) {
+          BOOST_LOG(info) << "Local monitor refresh check: the monitor is not active while its source is attached; its recorded "sv
+                          << (selected.refresh_millihz / 1000.0) << " Hz mode is restored with the replacement topology."sv;
+          return;
+        }
+        if (current->refresh_millihz == selected.refresh_millihz) {
+          return;
+        }
+        BOOST_LOG(info) << "Local monitor left its selected "sv << (selected.refresh_millihz / 1000.0) << " Hz for "sv
+                        << (current->refresh_millihz / 1000.0) << " Hz while its source was attached; asking Windows for the selected rate again."sv;
+        const auto status = VDISPLAY::setTargetDesktopRefreshRate(current->adapter_id, current->target_id, selected.refresh_millihz);
+        if (status != ERROR_SUCCESS) {
+          BOOST_LOG(warning) << "Windows refused the monitor's selected refresh rate (status "sv << status << ")."sv;
+          return;
+        }
+        for (int attempt = 0; attempt < 20 && !cancelled(); ++attempt) {
+          std::this_thread::sleep_for(100ms);
+          const auto settled = find_target(target_device_path_);
+          if (settled && settled->refresh_millihz == selected.refresh_millihz) {
+            BOOST_LOG(info) << "Local monitor is back at "sv << (settled->refresh_millihz / 1000.0) << " Hz."sv;
+            return;
+          }
+        }
+        BOOST_LOG(warning) << "The monitor did not return to its selected refresh rate."sv;
+      }
+
       bool establish_native_source_mode(int requested_millihz, const std::function<bool()> &cancelled) {
         const bool established = establish_source_mode_with_io(
           source_width_,
@@ -4321,6 +4373,8 @@ namespace ar_glasses {
         presenter_config.target_adapter_id = presentation_target.adapter_id;
         presenter_config.target_refresh_millihz = presentation_target.refresh_millihz;
         presenter_config.frame_sequential = monitor_surface_;
+        presenter_config.target_desktop_refresh_rate =
+          monitor_surface_ && VDISPLAY::targetUsesDesktopRefreshRate(presentation_target.adapter_id, presentation_target.target_id);
         presenter_config.monitor_config = config::video.local_monitor;
         if (monitor_surface_) {
           presenter_config.shutter_recovery_allowed = [target = live_target_]() {
@@ -6028,17 +6082,29 @@ namespace ar_glasses {
         return fail(std::string(reason));
       }
       const auto period = platf::open3d::eye_period_us(target->refresh_millihz, settings.eye_repeats);
+      // The presenter's own split of the delay between host and emitter decides what fits: a
+      // window may reach into the next eye interval when the host can hold its command back.
+      const auto emitter_limits = platf::open3d::timing_limits(settings.ir_protocol, settings.signal_spacing_us);
+      const auto command_plan = period && emitter_limits ?
+                                  platf::dxgi::detail::plan_shutter_command(
+                                    settings.frame_delay_us,
+                                    settings.frame_duration_us,
+                                    settings.signal_spacing_us + emitter_limits->min_period_tail_base_us,
+                                    emitter_limits->min_delay_us,
+                                    *period
+                                  ) :
+                                  std::nullopt;
       const platf::open3d::settings_t emitter_settings {
         .port = settings.emitter_port,
         .protocol = settings.ir_protocol,
-        .frame_delay_us = settings.frame_delay_us,
+        .frame_delay_us = command_plan ? command_plan->emitter_delay_us : settings.frame_delay_us,
         .frame_duration_us = settings.frame_duration_us,
         .signal_spacing_us = settings.signal_spacing_us,
         .flip_eyes = settings.flip_eyes,
         .target_frametime_us = period.value_or(-1),
         .averaging = settings.emitter_averaging,
       };
-      if (!period || !platf::open3d::detail::host_feedback_budget_us(emitter_settings)) {
+      if (!command_plan || !platf::open3d::detail::host_feedback_budget_us(emitter_settings)) {
         return fail("The shutter timing does not fit this monitor's refresh rate. Shorten the timing window or increase refreshes per eye in Monitor settings before starting 3D.");
       }
       {

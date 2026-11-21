@@ -116,6 +116,39 @@ namespace VDISPLAY {
     std::vector<DISPLAYCONFIG_PATH_INFO> &paths,
     std::vector<DISPLAYCONFIG_MODE_INFO> &modes
   );
+  // Windows 11 gives a variable-refresh monitor its lower refresh rates as a desktop ("virtual")
+  // rate on top of the monitor's fastest signal: the path keeps the selected rate while the
+  // signal description keeps the fast mode. True when an active physical path, as a query
+  // without virtual-refresh awareness reports it, is in that state.
+  bool displayConfigUsesVirtualRefreshRate(
+    const std::vector<DISPLAYCONFIG_PATH_INFO> &paths,
+    const std::vector<DISPLAYCONFIG_MODE_INFO> &modes
+  );
+  // The active configuration for a caller that hands it back to SetDisplayConfig() with
+  // SDC_USE_SUPPLIED_DISPLAY_CONFIG. While a desktop rate is in use the configuration is read
+  // with virtual-refresh awareness and setAwarenessFlags names the flag the apply needs with
+  // it; otherwise both are exactly as before.
+  bool queryActiveDisplayConfigForApply(
+    std::vector<DISPLAYCONFIG_PATH_INFO> &paths,
+    std::vector<DISPLAYCONFIG_MODE_INFO> &modes,
+    UINT32 &setAwarenessFlags
+  );
+  // The active physical displays that are on a desktop refresh rate, and that rate.
+  struct desktop_refresh_rate_t {
+    LUID adapterId;
+    uint32_t targetId;
+    DISPLAYCONFIG_RATIONAL rate;
+  };
+  std::vector<desktop_refresh_rate_t> desktopRefreshRatesInUse();
+  // Whether that list holds this target.
+  bool targetUsesDesktopRefreshRate(const LUID &adapterId, uint32_t targetId);
+  // Asks Windows again for each of those rates that a display has since left. Displays that are
+  // no longer active are left alone.
+  bool restoreDesktopRefreshRates(const std::vector<desktop_refresh_rate_t> &rates);
+  // Asks Windows for a desktop refresh rate on one active target and leaves its signal as it is.
+  // On a variable-refresh monitor a rate below the signal's own is then sent with the signal's
+  // line timing and a longer vertical blanking.
+  LONG setTargetDesktopRefreshRate(const LUID &adapterId, uint32_t targetId, int refreshMillihz);
   display_identity_query_t queryDisplayIdentity(const LUID &adapterLuid, uint32_t targetId);
   display_identity_query_t queryVirtualDisplayIdentity(
     const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
