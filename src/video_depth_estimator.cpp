@@ -23,6 +23,7 @@
 #include "host_sbs_v2_gpu_executor.h"
 #include "logging.h"
 #include "model_manager.h"
+#include "platform/common.h"
 #include "platform/windows/misc.h"
 #include "platform/windows/utils.h"
 #include "prod_zipdepth_convex2x.h"
@@ -966,10 +967,15 @@ namespace models {
   }  // namespace
 
   bool parallax_v2_result_is_authenticated(const depth_observation_views_t &result) {
+    const bool expects_base_diagnostics = !result.base_diagnostics_omitted;
     if (!result.completed_frame_valid || result.completed_frame_id == 0u ||
-        !result.parallax_v2_producer_active || !result.shadow_candidate_parallax ||
-        !result.shadow_vertical_majorant || !result.shadow_vertical_conditioned ||
-        !result.shadow_base_final_parallax || !result.shadow_final_parallax ||
+        !result.parallax_v2_producer_active ||
+        static_cast<bool>(result.shadow_candidate_parallax) != expects_base_diagnostics ||
+        static_cast<bool>(result.shadow_vertical_majorant) != expects_base_diagnostics ||
+        static_cast<bool>(result.shadow_vertical_conditioned) != expects_base_diagnostics ||
+        !result.shadow_base_final_parallax ||
+        (result.subtitle_conditioning_diagnostics_current &&
+         !result.shadow_conditioned_final_parallax) ||
         !result.shadow_state || !result.shadow_frame_stats ||
         !result.raw_model_provenance || !result.composite_depth_runtime_provenance ||
         !result.parallax_v2_shader_provenance ||
@@ -1025,9 +1031,13 @@ namespace models {
       result.shadow_vertical_majorant.Get(),
       result.shadow_vertical_conditioned.Get(),
       result.shadow_base_final_parallax.Get(),
-      result.shadow_final_parallax.Get(),
+      result.shadow_conditioned_final_parallax.Get(),
     };
     for (std::size_t index = 0u; index < field_views.size(); ++index) {
+      if (!field_views[index]) {
+        // The completeness check above permits absent diagnostics.
+        continue;
+      }
       ID3D11Resource *resource = nullptr;
       if (!r32_float_texture_srv_matches(
             field_views[index],
@@ -1989,6 +1999,121 @@ namespace models {
   namespace {
     namespace publication_receipt = host_sbs_gpu_completion_receipt;
 
+    class inference_completion_notification_t {
+      using host_function_t = void (__stdcall *)(void *);
+      using launch_host_function_t = CUresult (__stdcall *)(CUstream, host_function_t, void *);
+      using stream_wait_event_t = CUresult (__stdcall *)(CUstream, CUevent, unsigned);
+
+      struct callback_state_t {
+        std::weak_ptr<safe::deadline_waiter_t> waiter;
+        std::atomic<unsigned> references {1};
+        std::atomic<bool> completed {false};
+
+        void release() noexcept {
+          if (references.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            delete this;
+          }
+        }
+      };
+
+      static void __stdcall notify(void *opaque) noexcept {
+        auto *state = static_cast<callback_state_t *>(opaque);
+        state->completed.store(true, std::memory_order_release);
+        if (const auto waiter = state->waiter.lock()) {
+          waiter->notify();
+        }
+        state->release();
+      }
+
+    public:
+      inference_completion_notification_t() = default;
+      inference_completion_notification_t(const inference_completion_notification_t &) = delete;
+      inference_completion_notification_t &operator=(const inference_completion_notification_t &) = delete;
+
+      ~inference_completion_notification_t() {
+        waiter_.reset();
+        if (state_) {
+          state_->release();
+        }
+      }
+
+      bool destroy_stream(cuda_driver_api &cuda) noexcept {
+        return !stream_ || cuda.cuStreamDestroy(stream_) == CUDA_SUCCESS;
+      }
+
+      bool callback_pending() const noexcept {
+        return state_ && state_->references.load(std::memory_order_acquire) > 1;
+      }
+
+      std::optional<CUresult> arm(cuda_driver_api &cuda, CUevent event) {
+        if (!setup_attempted_) {
+          setup_attempted_ = true;
+          const auto created = create_stream(cuda);
+          if (created != CUDA_SUCCESS) {
+            return created;
+          }
+        }
+        if (!stream_ || callback_pending()) {
+          return std::nullopt;
+        }
+        // The notification stream waits for the recorded root. Future root inference can
+        // advance independently of CPU dispatch of this host function.
+        const auto waiting = wait_for_event_(stream_, event, 0u);
+        if (waiting != CUDA_SUCCESS) {
+          return waiting;
+        }
+        // The previous callback released its reference after signalling, so it can no
+        // longer publish completion for this arm.
+        state_->completed.store(false, std::memory_order_relaxed);
+        // CUDA can suppress host functions after a context error. Preserve the reference
+        // after an ambiguous launch failure as well as during ordinary delayed dispatch.
+        state_->references.fetch_add(1, std::memory_order_relaxed);
+        return launch_host_function_(stream_, &notify, state_);
+      }
+
+      bool wait_until(std::chrono::steady_clock::time_point deadline) noexcept {
+        // A callback can signal after its wait has already reached the cutoff.
+        // Reuse the same cutoff if a wake precedes this arm's callback.
+        do {
+          if (!waiter_->wait_until(deadline)) {
+            return false;
+          }
+        } while (!state_->completed.load(std::memory_order_acquire) &&
+                 std::chrono::steady_clock::now() < deadline);
+        return true;
+      }
+
+    private:
+      CUresult create_stream(cuda_driver_api &cuda) {
+        wait_for_event_ = std::bit_cast<stream_wait_event_t>(
+          GetProcAddress(cuda.hMod, "cuStreamWaitEvent")
+        );
+        launch_host_function_ = std::bit_cast<launch_host_function_t>(
+          GetProcAddress(cuda.hMod, "cuLaunchHostFunc")
+        );
+        if (!wait_for_event_ || !launch_host_function_) {
+          return CUDA_SUCCESS;
+        }
+        waiter_ = platf::create_deadline_waiter();
+        if (!waiter_) {
+          return CUDA_SUCCESS;
+        }
+        // Lazy creation keeps this stream outside the inference graph capture.
+        const auto created = cuda.cuStreamCreate(&stream_, CU_STREAM_NON_BLOCKING);
+        if (created == CUDA_SUCCESS) {
+          state_ = new callback_state_t {waiter_};
+        }
+        return created;
+      }
+
+      std::shared_ptr<safe::deadline_waiter_t> waiter_;
+      callback_state_t *state_ = nullptr;
+      CUstream stream_ = nullptr;
+      stream_wait_event_t wait_for_event_ = nullptr;
+      launch_host_function_t launch_host_function_ = nullptr;
+      bool setup_attempted_ = false;
+    };
+
     // The offsets describe existing GPU records, copied without another shader or CUDA node.
     constexpr std::array<std::pair<std::size_t, std::size_t>, 8> publication_copy_ranges {{
       {publication_receipt::transaction_begin, publication_receipt::transaction_word_count},
@@ -2351,6 +2476,8 @@ namespace models {
     float max_aspect;  // aspect cap for short-side mode
     float minmax_alpha;  // temporal EMA blend for the normalized min/max
     const bool diagnostics_enabled;
+    const bool normalized_depth_diagnostics_enabled;
+    const subtitle_legacy_matte_e subtitle_legacy_matte;
     struct tensorrt_cuda_graph_t {
       CUgraph graph = nullptr;
       detail::cuda_graph_replay_policy_t policy;
@@ -2883,10 +3010,12 @@ namespace models {
     }
 
     void resolve_completed_branch_timing() {
-      // Both callers already proved this exact pending root complete. Branch events alone are
-      // insufficient: until graph execution reaches them they may still name the earlier launch.
+      if (!pending_root) {
+        return;
+      }
+      // The callers proved this exact root complete. Branch events can still name an earlier launch.
       const auto generation = pending_branch_timing.consume(
-        pending_wrapper_transaction_token, true
+        pending_root->transaction_token, true
       );
       if (!generation || *generation != sbs_perf::generation()) {
         return;
@@ -3306,23 +3435,26 @@ namespace models {
     }
 
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> near_identical_fused_preprocess_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> near_identical_tiled_preprocess_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> buffer_to_tex_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> buffer_to_tex_pad_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_minmax_ema_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_moments_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_frame_resolve_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_histogram_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_quantiles_cs;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_state_resolve_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_publish_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_map_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_map_compact_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_coordinate_diagnostic_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_vertical_limit_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_limit_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_vertical_limit_compact_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_limit_compact_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> ocr_preprocess_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> ocr_box_cells_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> ocr_box_resolve_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_locator_resolve_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_condition_cs;
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_contour_palette_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_contour_temporal_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_glyph_matte_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_contour_project_cs;
@@ -3346,7 +3478,6 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Buffer> ocr_resolve_cbuffer;
     Microsoft::WRL::ComPtr<ID3D11Buffer> subtitle_locator_cbuffer;
     Microsoft::WRL::ComPtr<ID3D11Buffer> subtitle_contour_cbuffer;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> subtitle_contour_distance_cbuffer;
     Microsoft::WRL::ComPtr<ID3D11Buffer> near_identical_cbuffer;
     struct d3d_buffer_views_t {
       Microsoft::WRL::ComPtr<ID3D11Buffer> buffer;
@@ -3362,7 +3493,7 @@ namespace models {
         srv.Reset();
         uav.Reset();
       }
-    } near_identical_tile, near_identical_history_owner;
+    } near_identical_tile, near_identical_history_owner, analysis_domain;
 
     struct d3d_texture_views_t {
       Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
@@ -3379,18 +3510,20 @@ namespace models {
         uav.Reset();
       }
     } subtitle_contour_source, subtitle_contour_previous_features, subtitle_contour_next_features,
-      subtitle_contour_support, subtitle_glyph_matte,
-      subtitle_contour_field_mask, subtitle_contour_horizontal_distance,
-      subtitle_contour_distance, subtitle_contour_source_snapshot,
-      subtitle_gaussian_weight, subtitle_gaussian_blend,
-      subtitle_gaussian_vertical_conditioned;
-    d3d_buffer_views_t subtitle_contour_identity, subtitle_contour_probability_snapshot,
-      subtitle_gaussian_control;
+      subtitle_contour_support, subtitle_glyph_matte, subtitle_contour_source_snapshot;
+    d3d_buffer_views_t subtitle_contour_identity, subtitle_contour_probability_snapshot;
+    d3d_buffer_views_t subtitle_contour_observation;
+    struct subtitle_conditioning_diagnostics_t {
+      d3d_texture_views_t field_mask, horizontal_distance, distance;
+      d3d_texture_views_t weight, blend, vertical_conditioned, final;
+      d3d_buffer_views_t control;
+      Microsoft::WRL::ComPtr<ID3D11Buffer> distance_constants;
+      UINT horizontal_distance_height = 0u;
+    };
+    std::optional<subtitle_conditioning_diagnostics_t> subtitle_conditioning_diagnostics;
     struct completed_contour_views_t {
-      Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> support, field_pin, distance, identity;
+      Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> support, identity;
       Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> history, source, probability;
-      Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> gaussian_weight, gaussian_blend,
-        gaussian_vertical_conditioned, gaussian_control;
       Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> glyph_matte, condition_params;
       Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> research_selected_matte, research_selected_matte_receipt;
     } completed_contour;
@@ -3399,10 +3532,7 @@ namespace models {
     // completed_contour, depth_observation_views_t, rendering, or production history.
     bool completed_ocr_conditioner_research_enabled = false;
     bool queued_same_source_gpu_continuation_research_enabled = false;
-    bool pending_same_source_gpu_postprocess_queued = false;
-    bool pending_same_source_gpu_input_domain_reset = false;
     std::uint64_t queued_same_source_gpu_ticket_sequence = 0u;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> pending_same_source_gpu_source;
 
     bool subtitle_cohort_research_enabled = false;
     bool subtitle_inner_colour_research_enabled = false;
@@ -3425,7 +3555,6 @@ namespace models {
     bool subtitle_temporal_source_enabled=false,subtitle_temporal_source_commands=false;
     std::uint64_t subtitle_temporal_source_epoch=0;
     subtitle_temporal_source_research_configuration_t subtitle_temporal_source_configuration;
-    host_sbs_temporal_source_bridge::certificate_t pending_source_observation;
     std::array<Microsoft::WRL::ComPtr<ID3D11ComputeShader>,19u> subtitle_temporal_source_shaders;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_temporal_frame_shader;
     host_sbs_body_witness_temporal_recorded::resources_t subtitle_temporal_source_composition;
@@ -3502,12 +3631,6 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Buffer> tensor_previous_input_buf;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tensor_previous_input_srv;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> tensor_previous_input_uav;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> appearance_ordinal_buf;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> appearance_ordinal_srv;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> appearance_ordinal_uav;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> previous_appearance_ordinal_buf;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> previous_appearance_ordinal_srv;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> previous_appearance_ordinal_uav;
     Microsoft::WRL::ComPtr<ID3D11Buffer> tensor_out_buf;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tensor_out_srv;
     Microsoft::WRL::ComPtr<ID3D11Buffer> raw_snapshot_buf;
@@ -3525,33 +3648,18 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Buffer> minmax_ema_buf;  // float4 {min,max,initialized,frame_state}
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> minmax_ema_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> minmax_ema_srv;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> hist_buf;  // 256 uint bins for percentile normalization
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> hist_uav;
     // Established 32-word tagged state ABI. V2 writes only its depth-health fields; every
     // retired word keeps its zero initial value.
     Microsoft::WRL::ComPtr<ID3D11Buffer> depth_health_state_buf;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_health_state_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_health_state_srv;
 
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_tex;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_uav;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_srv;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_previous_tex;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_previous_uav;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_previous_srv;
-    // Normalized depth of the last valid infer observation, restored by near-identical reuse.
-    // The ordinary previous texture must still advance every frame for temporal EMA.
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> ema_motion_mask_tex;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> ema_motion_mask_uav;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ema_motion_mask_srv;
+    // Optional evaluator fields. The two depth textures rotate for the diagnostic temporal EMA.
+    d3d_texture_views_t normalized_depth;
+    d3d_texture_views_t previous_normalized_depth;
+    d3d_texture_views_t ema_motion_mask;
     // Synthetic letterbox support is visible to DAV2 but excluded from every analysis statistic,
     // history comparison and positioned renderer sample.
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> tensor_exclusion_tex;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> tensor_exclusion_uav;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tensor_exclusion_srv;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> tensor_previous_exclusion_tex;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> tensor_previous_exclusion_uav;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> tensor_previous_exclusion_srv;
 
     // GPU-only raw-coordinate V2 producer. The canonical-coordinate texture is exceptional: its
     // shader, texture, and views are created only for an explicit Dump 3D snapshot. The
@@ -3585,9 +3693,6 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_coordinate_v2_final_tex;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_coordinate_v2_final_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_coordinate_v2_final_srv;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> subtitle_conditioned_tex;
-    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subtitle_conditioned_uav;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_conditioned_srv;
     Microsoft::WRL::ComPtr<ID3D11Buffer> subtitle_locator_state_buf;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subtitle_locator_state_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_locator_state_srv;
@@ -3619,6 +3724,8 @@ namespace models {
     // branches and every interop-unmap tail. A ready event therefore proves the same resource
     // release boundary as the conservative full-stream query without exposing either branch.
     CUevent depth_inference_done_event = nullptr;
+    inference_completion_notification_t root_completion_notification;
+    bool completion_notification_disabled = false;
     std::unique_ptr<joined_completion_gate_benchmark::controller_t> benchmark_joined_completion_gate;
     bool benchmark_joined_completion_gate_configuration_seen = false;
     bool near_identical_detector_available = false;
@@ -3631,40 +3738,60 @@ namespace models {
     // those late failures quarantine every TensorRT context that could have executed.
     bool joined_stream_work_ever_submitted = false;
     bool joined_stream_ocr_ever_submitted_or_armed = false;
-    // The host knows which authenticated subtitle transaction it submitted without learning the
-    // DAV2 branch. Receipt-gated postprocess uses this exact expected disposition.
-    cuda_conditional_graph::work_flag_e pending_subtitle_work =
-      cuda_conditional_graph::work_flag_e::none;
-    bool pending_ocr_submitted = false;
-    // This host bit means the optional OCR child was present and requested in the joined root, not
-    // that the device executed it. The authenticated receipt remains OCR-output authority.
-    depth_optional_work_mode_e pending_optional_work =
-      depth_optional_work_mode_e::ordinary;
-    std::uint64_t accepted_subtitle_context_generation = 0u;
-    bool accepted_subtitle_context_disabled = false;
-    subtitle_line_policy_e pending_subtitle_line_policy = subtitle_line_policy_e::video_caption;
-    enum class pending_submission_class_e : std::uint8_t {
+    enum class submission_class_e : std::uint8_t {
       force_infer,
       gpu_undecided,
     };
-    pending_submission_class_e pending_submission_class =
-      pending_submission_class_e::force_infer;
-    std::uint64_t pending_wrapper_transaction_token = 0u;
-    std::uint64_t pending_gpu_transaction_token = 0u;
-    std::uint64_t pending_gpu_transaction_current_frame_id = 0u;
-    std::uint64_t pending_gpu_transaction_baseline_frame_id = 0u;
-    std::uint64_t pending_observation_timestamp_us = 0u;
-    bool pending_dump_forced = false;
+    struct subtitle_context_t {
+      std::uint64_t generation = 0u;
+      bool disabled = false;
+      bool operator==(const subtitle_context_t &) const = default;
+    };
+    struct accepted_inference_t {
+      std::uint64_t frame_id;
+      std::uint64_t observation_timestamp_us;
+      std::uint64_t transaction_token;
+      std::uint64_t baseline_frame_id;
+      depth_input_region_t input_region;
+      input_color_space color_space;
+      subtitle_context_t subtitle_context;
+      subtitle_line_policy_e subtitle_line_policy;
+      host_sbs_temporal_source_bridge::certificate_t source_observation;
+      depth_optional_work_mode_e optional_work;
+      submission_class_e submission_class;
+      // The submitted disposition is used to authenticate the device receipt at postprocess.
+      cuda_conditional_graph::work_flag_e subtitle_work;
+      // This flag records OCR participation in the root, before reading the device receipt.
+      bool ocr_armed;
+      bool depth_only_history;
+      bool dump_forced;
+      Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> submitted_source;
+      // A present value records queued postprocess and whether it reset the input domain.
+      std::optional<bool> queued_input_domain_reset;
+    };
+    std::optional<accepted_inference_t> pending_root;
+    // Admission compares the completed subtitle context. Private diagnostics also need the
+    // exact input region and certificate after the pending root has been consumed.
+    struct {
+      std::uint64_t frame_id = 0u;
+      depth_input_region_t region {};
+      subtitle_context_t subtitle_context;
+      host_sbs_temporal_source_bridge::certificate_t source_observation;
+    } completed_input;
     // Field pin, native distance, Gaussian proposal and both compatibility limiters feed only
     // Dump 3D and harness artifacts; the renderer binds Base. Live streaming runs them only
     // while completing an observation that a Dump 3D request snapshots (or one a dump forced)
-    // and otherwise publishes exact Base as the Final field.
+    // and otherwise exposes the same immutable Base view for Final.
     bool subtitle_conditioning_diagnostics_always = true;
     bool completion_dump_snapshot_requested = false;
     bool completed_subtitle_conditioning_diagnostics = false;
     [[nodiscard]] bool subtitle_conditioning_diagnostics_requested() const noexcept {
-      return subtitle_conditioning_diagnostics_always || pending_dump_forced ||
+      return subtitle_conditioning_diagnostics_always || (pending_root && pending_root->dump_forced) ||
              completion_dump_snapshot_requested;
+    }
+    [[nodiscard]] bool subtitle_legacy_matte_required() const noexcept {
+      return subtitle_legacy_matte == subtitle_legacy_matte_e::always ||
+             (subtitle_selected_matte_enabled && !subtitle_current_outline_enabled);
     }
     std::uint64_t force_infer_transaction_sequence = 0u;
     bool gpu_undecided_requires_force_infer_refresh = false;
@@ -3672,11 +3799,7 @@ namespace models {
     bool ocr_shape_bound = false;
     bool ocr_output_size_validated = false;
     bool ocr_error_logged = false;
-    input_color_space pending_color_space = input_color_space::srgb;
-    depth_input_region_t pending_input_region {};
     depth_input_domain_tracker_t processed_input_domain;
-    bool has_previous_frame = false;
-    std::uint64_t pending_frame_id = 0;
     // Only a consumed final-publication receipt supplies this owner. A reused publication B may
     // retain owner A; completed color identity is never substituted for the actual infer owner.
     std::optional<publication_receipt::receipt_t> cached_current_publication;
@@ -3763,6 +3886,29 @@ namespace models {
       return resolved;
     }
 
+    bool install_benchmark_joined_completion_gate(
+      const joined_completion_gate_benchmark::configuration_t &configuration
+    ) {
+      if (!is_operational() || benchmark_joined_completion_gate_configuration_seen ||
+          !configuration.valid()) {
+        return false;
+      }
+      benchmark_joined_completion_gate_configuration_seen = true;
+      if (!configuration.enabled) {
+        return true;
+      }
+      // Event-query fallback cannot prove a literal held root.
+      if (!inference_event_poll_available) {
+        return false;
+      }
+      auto gate = std::make_unique<joined_completion_gate_benchmark::controller_t>(configuration);
+      if (!gate->available(cuda_driver_api::get())) {
+        return false;
+      }
+      benchmark_joined_completion_gate = std::move(gate);
+      return true;
+    }
+
     void clear_pending_inference_event_state() noexcept {
       pending_depth_inference_event_recorded = false;
     }
@@ -3778,7 +3924,10 @@ namespace models {
     // context that participated.
     void mark_terminal_failure(const bool poison_execution_context = false) {
       pending_branch_timing.clear();
-      clear_queued_same_source_gpu_continuation();
+      if (pending_root) {
+        pending_root->queued_input_domain_reset.reset();
+        pending_root->submitted_source.Reset();
+      }
       invalidate_publication();
       clear_pending_inference_event_state();
       execution_context_poisoned =
@@ -4142,7 +4291,7 @@ namespace models {
 
     // Failing to select the shared CUDA context prevents proving the joined root's completion.
     void mark_cuda_context_failure() noexcept {
-      mark_shared_execution_failure(pending_ocr_submitted);
+      mark_shared_execution_failure(pending_root && pending_root->ocr_armed);
     }
 
     void mark_ocr_enqueue_failure(
@@ -4183,12 +4332,12 @@ namespace models {
       cuda_driver_api &cuda,
       const char *phase
     ) {
-      if (independent_depth_release_deferred) {
+      if (independent_depth_release_frame) {
         const auto release = independent_depth_advance_release(cuda, false);
         if (release == CUDA_ERROR_NOT_READY) return pending_execution_readiness_e::busy;
         if (release != CUDA_SUCCESS) { mark_shared_execution_failure(true); return pending_execution_readiness_e::failed; }
       }
-      const bool ocr_context_participated = pending_ocr_submitted;
+      const bool ocr_context_participated = pending_root && pending_root->ocr_armed;
       if (!cu_stream || !cuda.cuStreamQuery) {
         if (!stream_error_logged) {
           BOOST_LOG(error) << "DAV2/OCR joined CUDA root query is unavailable during " << phase
@@ -4223,7 +4372,7 @@ namespace models {
       cuda_driver_api &cuda,
       const char *phase
     ) {
-      if (independent_depth_release_deferred) {
+      if (independent_depth_release_frame) {
         const auto release = independent_depth_advance_release(cuda, false);
         if (release == CUDA_ERROR_NOT_READY) return pending_execution_readiness_e::busy;
         if (release != CUDA_SUCCESS) {
@@ -4238,13 +4387,13 @@ namespace models {
             << "DAV2/OCR root inference-event state was incomplete during " << phase << '.';
           stream_error_logged = true;
         }
-        mark_shared_execution_failure(pending_ocr_submitted);
+        mark_shared_execution_failure(pending_root && pending_root->ocr_armed);
         return pending_execution_readiness_e::failed;
       }
 
       const CUresult root_query = cuda.cuEventQuery(depth_inference_done_event);
       if (benchmark_joined_completion_gate) {
-        benchmark_joined_completion_gate->note_actual_event_query(pending_frame_id, root_query);
+        benchmark_joined_completion_gate->note_actual_event_query(pending_root->frame_id, root_query);
       }
       switch (normalized_cuda_readiness(root_query)) {
         case detail::async_stream_readiness_e::ready:
@@ -4257,17 +4406,17 @@ namespace models {
                              << ": result=" << root_query;
             stream_error_logged = true;
           }
-          mark_shared_execution_failure(pending_ocr_submitted);
+          mark_shared_execution_failure(pending_root && pending_root->ocr_armed);
           return pending_execution_readiness_e::failed;
       }
       return pending_execution_readiness_e::failed;
     }
 
     bool synchronize_pending_execution(cuda_driver_api &cuda) {
-      if (independent_depth_release_deferred && independent_depth_advance_release(cuda, true) != CUDA_SUCCESS) {
+      if (independent_depth_release_frame && independent_depth_advance_release(cuda, true) != CUDA_SUCCESS) {
         mark_shared_execution_failure(true); return false;
       }
-      const bool ocr_participated = pending_ocr_submitted;
+      const bool ocr_participated = pending_root && pending_root->ocr_armed;
       if (!cu_stream || !cuda.cuStreamSynchronize) {
         if (!stream_error_logged) {
           BOOST_LOG(error) << "DAV2/OCR root synchronization is unavailable"
@@ -4337,11 +4486,12 @@ namespace models {
           host_sbs_shader_cache::host_sbs_near_identical_finalize,
           near_identical_finalize_cs
         ) &&
-        create_shader(
-          sources,
-          host_sbs_shader_cache::host_sbs_near_identical_reuse_depth,
-          near_identical_reuse_depth_cs
-        );
+        (!normalized_depth_diagnostics_enabled ||
+         create_shader(
+           sources,
+           host_sbs_shader_cache::host_sbs_near_identical_reuse_depth,
+           near_identical_reuse_depth_cs
+         ));
       D3D11_BUFFER_DESC constants_desc {};
       constants_desc.Usage = D3D11_USAGE_DEFAULT;
       constants_desc.ByteWidth = static_cast<UINT>(sizeof(near_identical_constants_t));
@@ -4902,24 +5052,25 @@ namespace models {
 
     // The fused map root authenticates the history owner it publishes against these exact b2
     // words. Upload them once per infer postprocess, with no host update before that dispatch.
-    bool upload_near_identical_history_owner_constants() {
+    bool upload_near_identical_history_owner_constants(const bool skip_input_history) {
       if (
         !near_identical_cbuffer || !near_identical_history_owner.srv || !cbuffer ||
-        pending_frame_id == 0u ||
-        !pending_input_region.tensor_content.valid({target_w, target_h})
+        pending_root->frame_id == 0u ||
+        !pending_root->input_region.tensor_content.valid({target_w, target_h})
       ) {
         return false;
       }
       const auto domain_tag = near_identical_input_domain_tag(
-        pending_input_region,
-        pending_color_space,
+        pending_root->input_region,
+        pending_root->color_space,
         static_cast<std::uint32_t>(target_w),
         static_cast<std::uint32_t>(target_h)
       );
       update_near_identical_constants(
-        0u, 0u, 0u, pending_frame_id, 0u, domain_tag, 0u, 0u,
+        skip_input_history ? near_identical_map_skip_input_history : 0u,
+        0u, 0u, pending_root->frame_id, 0u, domain_tag, 0u, 0u,
         cuda_conditional_graph::work_flag_e::none,
-        pending_observation_timestamp_us
+        pending_root->observation_timestamp_us
       );
       return true;
     }
@@ -4929,9 +5080,7 @@ namespace models {
     ) const noexcept {
       return cached_current_publication &&
              publication_is_current(cached_current_publication->expected) &&
-             cached_current_publication->depth_cache_authorized() &&
-             (cached_current_publication->expected.flags &
-              host_sbs_gpu_trace::record_flag_e::subtitle_suppressed) == 0u &&
+             gpu_adaptive_baseline_matches(*cached_current_publication, request.depth_only_history) &&
              request.baseline_frame_id == cached_current_publication->depth_owner_frame_id;
     }
 
@@ -5051,16 +5200,19 @@ namespace models {
     }
 
     [[nodiscard]] bool gpu_undecided_postprocess_pending() const noexcept {
-      return pending_submission_class == pending_submission_class_e::gpu_undecided;
+      return pending_root && pending_root->submission_class == submission_class_e::gpu_undecided;
     }
 
     [[nodiscard]] bool receipt_gated_postprocess_pending() const noexcept {
-      return gpu_undecided_postprocess_pending() || pending_same_source_gpu_postprocess_queued;
+      return gpu_undecided_postprocess_pending() ||
+             (pending_root && pending_root->queued_input_domain_reset.has_value());
     }
-    void clear_queued_same_source_gpu_continuation() noexcept {
-      pending_same_source_gpu_postprocess_queued = false;
-      pending_same_source_gpu_input_domain_reset = false;
-      pending_same_source_gpu_source.Reset();
+
+    [[nodiscard]] bool base_diagnostics_always() const noexcept {
+      // These evaluation modes are fixed before the first submission, so a held publication
+      // can only preserve fields produced by the full limiter pair.
+      return normalized_depth_diagnostics_enabled ||
+             queued_same_source_gpu_continuation_research_enabled;
     }
 
     void dispatch_infer_postprocess(
@@ -5101,7 +5253,7 @@ namespace models {
 
     [[nodiscard]] std::uint32_t pending_near_identical_postprocess_mode() const noexcept {
       const bool gpu_undecided = gpu_undecided_postprocess_pending();
-      const bool queued_force = pending_same_source_gpu_postprocess_queued && !gpu_undecided;
+      const bool queued_force = pending_root && pending_root->queued_input_domain_reset.has_value() && !gpu_undecided;
       return gpu_undecided ? 1u : queued_force ? 4u : 2u;
     }
     void update_pending_near_identical_postprocess_constants() {
@@ -5110,8 +5262,8 @@ namespace models {
       const bool queued_force = mode == 4u;
       const bool receipt_gated = gpu_undecided || queued_force;
       const auto domain_tag = near_identical_input_domain_tag(
-        pending_input_region,
-        pending_color_space,
+        pending_root->input_region,
+        pending_root->color_space,
         static_cast<std::uint32_t>(target_w),
         static_cast<std::uint32_t>(target_h)
       );
@@ -5120,31 +5272,29 @@ namespace models {
       const std::uint32_t groups_y =
         (static_cast<std::uint32_t>(target_h) + 15u) / 16u;
       std::uint64_t stream_frame_delta = 1u;
-      if (pending_gpu_transaction_baseline_frame_id != 0u &&
-          pending_gpu_transaction_current_frame_id >
-            pending_gpu_transaction_baseline_frame_id) {
-        stream_frame_delta = pending_gpu_transaction_current_frame_id -
-                             pending_gpu_transaction_baseline_frame_id;
+      if (pending_root->baseline_frame_id != 0u &&
+          pending_root->frame_id > pending_root->baseline_frame_id) {
+        stream_frame_delta = pending_root->frame_id - pending_root->baseline_frame_id;
       }
       update_near_identical_constants(
         mode,
         receipt_gated ? groups_x : 0u,
         receipt_gated ? groups_y : 0u,
-        gpu_undecided ? pending_gpu_transaction_current_frame_id : pending_frame_id,
-        gpu_undecided ? pending_gpu_transaction_baseline_frame_id : 0u,
+        pending_root->frame_id,
+        gpu_undecided ? pending_root->baseline_frame_id : 0u,
         domain_tag,
-        pending_wrapper_transaction_token,
+        pending_root->transaction_token,
         static_cast<std::uint32_t>(
           std::min<std::uint64_t>(stream_frame_delta, 65535u)
         ),
-        pending_subtitle_work,
-        pending_observation_timestamp_us
+        pending_root->subtitle_work,
+        pending_root->observation_timestamp_us
       );
     }
 
     bool dispatch_near_identical_finalizer(const bool input_domain_reset) {
       const bool subtitle_publication_expected =
-        cuda_conditional_graph::work_flags_value(pending_subtitle_work) != 0u;
+        cuda_conditional_graph::work_flags_value(pending_root->subtitle_work) != 0u;
       ID3D11Buffer *geometry_cbuffer = cbuffer.Get();
       if (
         !near_identical_finalize_cs ||
@@ -5152,7 +5302,7 @@ namespace models {
         !near_identical_transaction.buffer || !near_identical_transaction.dispatch ||
         !near_identical_history_owner.srv ||
         !near_identical_cbuffer || !cbuffer || !geometry_cbuffer ||
-        pending_wrapper_transaction_token == 0u ||
+        pending_root->transaction_token == 0u ||
         (subtitle_publication_expected &&
          (!ocr_box_record_uav || !ocr_resolve_cbuffer ||
           !update_pending_ocr_constants(input_domain_reset)))
@@ -5202,7 +5352,7 @@ namespace models {
     void dispatch_near_identical_reuse_depth() {
       if (
         !receipt_gated_postprocess_pending() || !near_identical_reuse_depth_cs ||
-        !near_identical_transaction.dispatch || !depth_previous_srv || !depth_uav ||
+        !near_identical_transaction.dispatch || !previous_normalized_depth.srv || !normalized_depth.uav ||
         !cbuffer
       ) {
         return;
@@ -5213,14 +5363,14 @@ namespace models {
         nullptr,
         nullptr,
         nullptr,
-        depth_previous_srv.Get(),
+        previous_normalized_depth.srv.Get(),
       };
       ID3D11UnorderedAccessView *outputs[5] = {
         nullptr,
         nullptr,
         nullptr,
         nullptr,
-        depth_uav.Get(),
+        normalized_depth.uav.Get(),
       };
       context->CSSetShader(near_identical_reuse_depth_cs.Get(), nullptr, 0u);
       context->CSSetConstantBuffers(0u, 1u, cbuffer.GetAddressOf());
@@ -5415,7 +5565,9 @@ namespace models {
       Microsoft::WRL::ComPtr<ID3D11DeviceContext> c,
       const std::filesystem::path &assets_dir,
       const config::video_t::sbs_t &cfg,
-      const config::depth_model_info &model
+      const config::depth_model_info &model,
+      normalized_depth_diagnostics_e normalized_depth_diagnostics,
+      subtitle_legacy_matte_e legacy_matte
     ):
         device(d),
         context(c),
@@ -5428,6 +5580,8 @@ namespace models {
         max_aspect((float) config::host_sbs_v2_live_calibration::depth_max_aspect),
         minmax_alpha((float) config::host_sbs_v2_live_calibration::minmax_ema),
         diagnostics_enabled(config::sunshine.diagnostics_enabled),
+        normalized_depth_diagnostics_enabled(normalized_depth_diagnostics == normalized_depth_diagnostics_e::enabled),
+        subtitle_legacy_matte(legacy_matte),
         parallax_v2_requested_pop_strength(
           depth_coordinate_v2::requested_pop_strength(
             static_cast<float>(cfg.pop_strength)
@@ -5760,28 +5914,31 @@ namespace models {
         shader_source_closure_sha256 ==
           depth_coordinate_v2::shader_source_closure_sha256;
 
-      // Create every compute object from bytecode keyed by the one authenticated producer
-      // snapshot. Startup prewarm populates these exact cache entries, so the constructor neither
+      // Create the required compute objects from the one authenticated producer snapshot.
+      // Startup prewarm populates these exact cache entries, so the constructor neither
       // recompiles the fused preprocess from its identity-only calibration closure nor compiles the shared
       // analysis roots once as "core" and then again as V2.
       const std::array producer_shader_outputs {
         std::addressof(near_identical_fused_preprocess_cs),
-        std::addressof(buffer_to_tex_cs),
-        std::addressof(buffer_to_tex_pad_cs),
-        std::addressof(depth_minmax_ema_cs),
+        std::addressof(near_identical_tiled_preprocess_cs),
+        normalized_depth_diagnostics_enabled ? std::addressof(buffer_to_tex_cs) : nullptr,
+        normalized_depth_diagnostics_enabled ? std::addressof(buffer_to_tex_pad_cs) : nullptr,
         std::addressof(depth_coordinate_v2_moments_cs),
         std::addressof(depth_coordinate_v2_frame_resolve_cs),
         std::addressof(depth_coordinate_v2_histogram_cs),
-        std::addressof(depth_coordinate_v2_quantiles_cs),
-        std::addressof(depth_coordinate_v2_state_resolve_cs),
+        std::addressof(depth_coordinate_v2_publish_cs),
         std::addressof(depth_coordinate_v2_map_cs),
+        normalized_depth_diagnostics_enabled ? nullptr : std::addressof(depth_coordinate_v2_map_compact_cs),
         std::addressof(depth_coordinate_v2_vertical_limit_cs),
         std::addressof(depth_coordinate_v2_limit_cs),
+        normalized_depth_diagnostics_enabled ? nullptr : std::addressof(depth_coordinate_v2_vertical_limit_compact_cs),
+        normalized_depth_diagnostics_enabled ? nullptr : std::addressof(depth_coordinate_v2_limit_compact_cs),
         std::addressof(ocr_preprocess_cs),
         std::addressof(ocr_box_cells_cs),
         std::addressof(ocr_box_resolve_cs),
         std::addressof(subtitle_locator_resolve_cs),
         std::addressof(subtitle_condition_cs),
+        std::addressof(subtitle_contour_palette_cs),
         std::addressof(subtitle_contour_temporal_cs),
         std::addressof(subtitle_glyph_matte_cs),
         std::addressof(subtitle_contour_project_cs),
@@ -5802,10 +5959,21 @@ namespace models {
         if (!producer_shaders_ok) {
           break;
         }
-        producer_shaders_ok = create_shader(
+        auto *output = producer_shader_outputs[index];
+        if (output == std::addressof(near_identical_tiled_preprocess_cs) ||
+            output == std::addressof(depth_coordinate_v2_map_compact_cs) ||
+            output == std::addressof(depth_coordinate_v2_vertical_limit_compact_cs) ||
+            output == std::addressof(depth_coordinate_v2_limit_compact_cs)) {
+          // A device that cannot create a specialization uses its original shader route.
+          if (!create_shader(producer_sources, host_sbs_shader_cache::parallax_v2_producer_specs[index], *output)) {
+            output->Reset();
+          }
+          continue;
+        }
+        producer_shaders_ok = !output || create_shader(
           producer_sources,
           host_sbs_shader_cache::parallax_v2_producer_specs[index],
-          *producer_shader_outputs[index]
+          *output
         );
       }
       if (!producer_shaders_ok) {
@@ -5815,7 +5983,7 @@ namespace models {
         return;
       }
 
-      // The sole preprocess shader runs for every root. Two immutable mode buffers make the
+      // One fused preprocess dispatch runs for every root. Two immutable mode buffers make the
       // comparison decision explicit at b1 without rebuilding per-frame state: force/bootstrap
       // exits after canonical NCHW production, while GPU-undecided continues into tile evidence.
       const auto create_fused_mode_cbuffer = [&] (
@@ -5891,7 +6059,7 @@ namespace models {
       // Raw normalization record, pre-seeded to
       // {min = 0xFFFFFFFF, max = 0, valid = 0, eligible = 0}.
       // The fused V2 frame resolve overwrites all four words before the histogram consumes them;
-      // depth_minmax_ema_cs resets the identity after each frame as an additional safe default.
+      // Frame publication resets the raw reduction identity after each inference.
       {
         uint32_t init_raw[4] = {0xFFFFFFFFu, 0u, 0u, 0u};
         D3D11_BUFFER_DESC bd = {};
@@ -5926,25 +6094,6 @@ namespace models {
         device->CreateShaderResourceView(minmax_ema_buf.Get(), nullptr, &minmax_ema_srv);
       }
 
-      // Permanent P2/P98 histogram: 256 uint bins, reset after every scan.
-      {
-        uint32_t init_hist[256] = {};
-        D3D11_BUFFER_DESC bd = {};
-        bd.Usage = D3D11_USAGE_DEFAULT;
-        bd.ByteWidth = sizeof(init_hist);
-        bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
-        bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-        bd.StructureByteStride = sizeof(uint32_t);
-        D3D11_SUBRESOURCE_DATA sd = {init_hist, 0, 0};
-        device->CreateBuffer(&bd, &sd, &hist_buf);
-        if (hist_buf) {
-          device->CreateUnorderedAccessView(hist_buf.Get(), nullptr, &hist_uav);
-        }
-        if (!hist_uav) {
-          BOOST_LOG(error) << "Required P2/P98 histogram buffer creation failed.";
-        }
-      }
-
       // The tagged depth-health state serves offline traces, Dump 3D, and live telemetry. Its
       // CPU-initialized tag is never rewritten on the GPU.
       {
@@ -5967,9 +6116,9 @@ namespace models {
         engine && exec_context && cu_stream &&
         near_identical_fused_preprocess_cs &&
         fused_preprocess_force_cbuffer && fused_preprocess_compare_cbuffer &&
-        buffer_to_tex_cs && buffer_to_tex_pad_cs &&
-        depth_minmax_ema_cs &&
-        minmax_raw_uav && minmax_ema_uav && minmax_ema_srv && hist_uav &&
+        (!normalized_depth_diagnostics_enabled || (buffer_to_tex_cs && buffer_to_tex_pad_cs)) &&
+        depth_coordinate_v2_publish_cs &&
+        minmax_raw_uav && minmax_ema_uav && minmax_ema_srv &&
         depth_health_state_uav && depth_health_state_srv;
       if (!mandatory_resources_ready) {
         BOOST_LOG(error) << "Depth estimator failed: required engine or Host SBS GPU resource initialization failed.";
@@ -6149,6 +6298,12 @@ namespace models {
             }
             if (cuda_teardown_may_continue) {
               observe_teardown(
+                root_completion_notification.destroy_stream(cuda),
+                "inference notification stream destruction"
+              );
+            }
+            if (cuda_teardown_may_continue) {
+              observe_teardown(
                 destroy_inference_done_events(cuda),
                 inference_event_ever_recorded ?
                   "recorded inference event destruction" :
@@ -6297,13 +6452,6 @@ namespace models {
       }
     }
 
-    void mark_d3d_parallax_map_start(d3d_perf_slot *slot) {
-      if (slot && slot->has_parallax) {
-        slot->has_parallax_map_start = true;
-        context->End(slot->parallax_map_start.Get());
-      }
-    }
-
     void mark_d3d_parallax_subtitle_start(d3d_perf_slot *slot) {
       if (slot && slot->has_parallax) {
         slot->has_parallax_subtitle_start = true;
@@ -6319,16 +6467,11 @@ namespace models {
       subtitle_contour_next_features.reset();
       subtitle_contour_support.reset();
       subtitle_glyph_matte.reset();
-      subtitle_contour_field_mask.reset();
-      subtitle_contour_horizontal_distance.reset();
-      subtitle_contour_distance.reset();
       subtitle_contour_identity.reset();
       subtitle_contour_source_snapshot.reset();
       subtitle_contour_probability_snapshot.reset();
-      subtitle_gaussian_weight.reset();
-      subtitle_gaussian_blend.reset();
-      subtitle_gaussian_vertical_conditioned.reset();
-      subtitle_gaussian_control.reset();
+      subtitle_contour_observation.reset();
+      subtitle_conditioning_diagnostics.reset();
       completed_contour = {};
       completed_subtitle_conditioning_diagnostics = false;
       subtitle_selected_matte = {};
@@ -6342,12 +6485,15 @@ namespace models {
       subtitle_cohort_research_command_time = 0u;
       subtitle_inner_colour_research = {};
       subtitle_temporal_source_composition={};subtitle_temporal_source_backend={};subtitle_temporal_frame_context={};
-      subtitle_temporal_source_epoch=0;subtitle_temporal_source_commands=false;pending_source_observation={};
+      subtitle_temporal_source_epoch=0;subtitle_temporal_source_commands=false;
+      if (pending_root) {
+        pending_root->source_observation = {};
+      }
+      completed_input.source_observation = {};
       subtitle_inner_colour_research_available = false;
       subtitle_inner_colour_research_command_frame = 0u;
       subtitle_inner_colour_research_command_time = 0u;
       subtitle_contour_cbuffer.Reset();
-      subtitle_contour_distance_cbuffer.Reset();
       depth_coordinate_v2_cbuffer.Reset();
       depth_coordinate_v2_partials_buf.Reset();
       depth_coordinate_v2_partials_uav.Reset();
@@ -6376,9 +6522,6 @@ namespace models {
       depth_coordinate_v2_final_tex.Reset();
       depth_coordinate_v2_final_uav.Reset();
       depth_coordinate_v2_final_srv.Reset();
-      subtitle_conditioned_tex.Reset();
-      subtitle_conditioned_uav.Reset();
-      subtitle_conditioned_srv.Reset();
       subtitle_locator_state_buf.Reset();
       subtitle_locator_state_uav.Reset();
       subtitle_locator_state_srv.Reset();
@@ -6427,7 +6570,7 @@ namespace models {
       const std::array<ID3D11ComputeShader *,6u>&components,std::string &error) {
       using namespace host_sbs_body_witness_temporal_gpu;
       subtitle_temporal_source_commands=false;
-      const auto &certificate=pending_source_observation;
+      const auto &certificate=pending_root->source_observation;
       if(!subtitle_temporal_source_enabled||!certificate.valid())return false;
       // A genuine source-domain transition gets NEW private storage; reset is not a watermark rewind.
       if(subtitle_temporal_source_epoch!=certificate.source_epoch){
@@ -6440,7 +6583,7 @@ namespace models {
         !subtitle_temporal_source_backend.ensure(device.Get(),source.Width,source.Height,caps,error)||
         !subtitle_temporal_frame_context.ensure(device.Get(),error))return false;
       const auto seed=host_sbs_temporal_frame_context_gpu::seed(certificate,source.Width,source.Height,caps,
-        pending_frame_id,pending_observation_timestamp_us,pending_wrapper_transaction_token,
+        pending_root->frame_id,pending_root->observation_timestamp_us,pending_root->transaction_token,
         static_cast<host_sbs_temporal_frame_context_gpu::postprocess_mode_e>(pending_near_identical_postprocess_mode()));
       if(!subtitle_temporal_frame_context.queue(context.Get(),subtitle_temporal_frame_shader.Get(),subtitle_contour_cbuffer.Get(),
         subtitle_locator_state_srv.Get(),near_identical_transaction.srv.Get(),seed,error))return false;
@@ -6471,30 +6614,30 @@ namespace models {
       composition::request_t request;
       request.source.display_snapshot_band=subtitle_contour_source_snapshot.srv.Get();
       // Descriptor-only parent reference; source pixels come from the joined snapshot above.
-      request.source.parent_raw_source=pending_same_source_gpu_source.Get();
+      request.source.parent_raw_source=pending_root->submitted_source.Get();
       request.source.actual_contour_constants96=subtitle_contour_cbuffer.Get();
       request.source.actual_sct32=subtitle_contour_identity.srv.Get();
       request.source.actual_final256=near_identical_transaction.dispatch.Get();
-      request.source.roi_ltrb={pending_input_region.left,pending_input_region.top,pending_input_region.right,pending_input_region.bottom};
-      request.source.frame=pending_frame_id;
-      request.source.observation_us=pending_observation_timestamp_us;
-      request.source.analysis_generation=pending_input_region.analysis_generation;
-      request.source.token=pending_wrapper_transaction_token;
-      request.source.transfer_mode=static_cast<UINT>(pending_color_space);
+      request.source.roi_ltrb={pending_root->input_region.left,pending_root->input_region.top,pending_root->input_region.right,pending_root->input_region.bottom};
+      request.source.frame=pending_root->frame_id;
+      request.source.observation_us=pending_root->observation_timestamp_us;
+      request.source.analysis_generation=pending_root->input_region.analysis_generation;
+      request.source.token=pending_root->transaction_token;
+      request.source.transfer_mode=static_cast<UINT>(pending_root->color_space);
       request.probability=subtitle_contour_probability_snapshot.srv.Get();
       request.support=subtitle_contour_support.srv.Get();
       request.ocr_record=ocr_box_record_srv.Get();
       request.actual_uip40=subtitle_locator_state_srv.Get();
-      request.original_legacy_matte=subtitle_glyph_matte.srv.Get();
       request.postprocess_mode=pending_near_identical_postprocess_mode();
-      request.expected_work=cuda_conditional_graph::work_flags_value(pending_subtitle_work);
+      request.expected_work=cuda_conditional_graph::work_flags_value(pending_root->subtitle_work);
       return request;
     }
 
     [[nodiscard]] static research_current_outline_selected_matte_v2::inputs_t
     make_subtitle_current_outline_selector_inputs(
       const source5_cbc5_f2_composition_gpu_v1::bundle_t &bundle,
-      ID3D11ShaderResourceView *root_view
+      ID3D11ShaderResourceView *root_view,
+      ID3D11ShaderResourceView *legacy_matte
     ) {
       namespace selector=research_current_outline_selected_matte_v2;
       // Reuse the operands leased by this exact composition publication. The
@@ -6503,7 +6646,7 @@ namespace models {
       selector::inputs_t in;
       in.current_cb96=current.actual_contour_constants96.Get();
       in.actual_root_args=current.actual_final256.Get();
-      in.legacy_matte=current.original_legacy_matte.Get();
+      in.legacy_matte=legacy_matte;
       in.sct=current.sct.Get();
       in.root=root_view;
       in.mode=static_cast<selector::postprocess_mode_e>(current.postprocess_mode);
@@ -6520,18 +6663,18 @@ namespace models {
       return in;
     }
 
-    void dispatch_subtitle_current_outline(d3d_perf_slot *perf_slot = nullptr) {
+    void dispatch_subtitle_current_outline(ID3D11ShaderResourceView *legacy_matte, d3d_perf_slot *perf_slot) {
       const auto failed=[&](const std::string &why) {
         if (subtitle_current_outline_error!=why) {
           BOOST_LOG(warning)<<"Subtitle outline unavailable for this observation: "<<why;
           subtitle_current_outline_error=why;
         }
       };
-      if (!pending_same_source_gpu_source || !subtitle_contour_source_snapshot.ready() ||
-          !subtitle_contour_probability_snapshot.ready() || !subtitle_glyph_matte.ready()) {
+      if (!pending_root->submitted_source || !subtitle_contour_source_snapshot.ready() ||
+          !subtitle_contour_probability_snapshot.ready()) {
         failed("Current source tuple unavailable");return;
       }
-      const auto w=pending_input_region.width(),h=pending_input_region.height();
+      const auto w=pending_root->input_region.width(),h=pending_root->input_region.height();
       const auto crop=subtitle_ocr_source_crop_height(w,h);
       if (!w || !h || !crop || crop>h) {failed("Invalid source geometry");return;}
       std::string error;
@@ -6564,14 +6707,14 @@ namespace models {
         failed(error);return;
       }
       const auto bundle=subtitle_current_outline_composition.bundle();
-      if (!bundle.all_stages_issued || bundle.current.frame!=pending_frame_id ||
-          bundle.current.observation_us!=pending_observation_timestamp_us ||
-          bundle.current.analysis_generation!=pending_input_region.analysis_generation ||
-          bundle.current.token!=pending_wrapper_transaction_token) {
+      if (!bundle.all_stages_issued || bundle.current.frame!=pending_root->frame_id ||
+          bundle.current.observation_us!=pending_root->observation_timestamp_us ||
+          bundle.current.analysis_generation!=pending_root->input_region.analysis_generation ||
+          bundle.current.token!=pending_root->transaction_token) {
         failed("Composition publication identity mismatch");return;
       }
       const auto in=make_subtitle_current_outline_selector_inputs(
-        bundle,near_identical_transaction.srv.Get());
+        bundle,near_identical_transaction.srv.Get(),legacy_matte);
       subtitle_selected_matte_commands=subtitle_current_outline_selected.queue(context.Get(),subtitle_current_outline_programs.selector_program(),in,error);
       if (!subtitle_selected_matte_commands) failed(error);
       else subtitle_current_outline_error.clear();
@@ -6597,19 +6740,19 @@ namespace models {
       if(!sources||cache::source_closure_sha256(sources)!=cfg.selector_source_closure_sha256||!create_shader(sources,specs[0],subtitle_selected_matte_shader)){error="Selected-matte private closure/compilation";return false;}
       subtitle_selected_matte_enabled=true;subtitle_inner_colour_research_enabled=true;return true;
     }
-    void dispatch_subtitle_selected_matte_research(d3d_perf_slot *perf_slot = nullptr) {
+    void dispatch_subtitle_selected_matte_research(ID3D11ShaderResourceView *legacy_matte, d3d_perf_slot *perf_slot) {
       subtitle_selected_matte_commands=false;
-      if (subtitle_current_outline_enabled) {dispatch_subtitle_current_outline(perf_slot);return;}
-      if(!subtitle_selected_matte_enabled||!subtitle_selected_matte_shader||!subtitle_glyph_matte.ready()||!subtitle_contour_source_snapshot.ready())return;
+      if (subtitle_current_outline_enabled) {dispatch_subtitle_current_outline(legacy_matte,perf_slot);return;}
+      if(!subtitle_selected_matte_enabled||!subtitle_selected_matte_shader||!legacy_matte||!subtitle_contour_source_snapshot.ready())return;
       D3D11_TEXTURE2D_DESC desc{};subtitle_contour_source_snapshot.texture->GetDesc(&desc);std::string error;
       if(!subtitle_selected_matte.ensure(device.Get(),desc.Width,desc.Height,error))return;
       research_selected_matte_v1::inputs_t in;
       in.current_cb96=subtitle_contour_cbuffer.Get();in.actual_root_args=near_identical_transaction.dispatch.Get();
       in.observation_one_offset=near_identical_gpu_observation_one_byte_offset;
-      in.legacy_matte=subtitle_glyph_matte.srv.Get();in.sct=subtitle_contour_identity.srv.Get();in.root=near_identical_transaction.srv.Get();
+      in.legacy_matte=legacy_matte;in.sct=subtitle_contour_identity.srv.Get();in.root=near_identical_transaction.srv.Get();
       in.mode=static_cast<research_selected_matte_v1::postprocess_mode_e>(pending_near_identical_postprocess_mode());
-      in.expected_work=cuda_conditional_graph::work_flags_value(pending_subtitle_work);in.transaction_token=pending_wrapper_transaction_token;
-      const bool current_private=subtitle_inner_colour_research_available&&subtitle_inner_colour_research_command_frame==pending_frame_id&&subtitle_inner_colour_research_command_time==pending_observation_timestamp_us;
+      in.expected_work=cuda_conditional_graph::work_flags_value(pending_root->subtitle_work);in.transaction_token=pending_root->transaction_token;
+      const bool current_private=subtitle_inner_colour_research_available&&subtitle_inner_colour_research_command_frame==pending_root->frame_id&&subtitle_inner_colour_research_command_time==pending_root->observation_timestamp_us;
       if(current_private){
         const auto b=subtitle_temporal_source_commands?subtitle_temporal_source_composition.baseline_views():subtitle_inner_colour_research.mutable_views();
         in.baseline_matte=b.matte.Get();in.numeric_proof=b.validation_receipt.Get();
@@ -6671,7 +6814,7 @@ namespace models {
         std::string error;
         subtitle_inner_colour_research.set_recorded_execution(true);
         subtitle_temporal_source_commands=false;
-        const bool use_temporal=subtitle_temporal_source_enabled && pending_source_observation.valid();
+        const bool use_temporal=subtitle_temporal_source_enabled && pending_root->source_observation.valid();
         if (!use_temporal && !subtitle_inner_colour_research.ensure(device.Get(), source.Width, source.Height, error)) {
           subtitle_inner_colour_research_unavailable(error);
           return;
@@ -6689,8 +6832,8 @@ namespace models {
           return;
         }
         subtitle_inner_colour_research_available = true;
-        subtitle_inner_colour_research_command_frame = pending_frame_id;
-        subtitle_inner_colour_research_command_time = pending_observation_timestamp_us;
+        subtitle_inner_colour_research_command_frame = pending_root->frame_id;
+        subtitle_inner_colour_research_command_time = pending_root->observation_timestamp_us;
       } catch (const std::exception &e) {
         subtitle_inner_colour_research_unavailable(e.what());
       } catch (...) {
@@ -6813,16 +6956,16 @@ namespace models {
         }
         namespace cohort = host_sbs_subtitle_cohort;
         auto &r = subtitle_cohort_research;
-        const auto content = live_field_content(pending_input_region).value_or(depth_tensor_content_rect_t {});
-        const auto roi = fit_subtitle_analysis_geometry(pending_input_region.width(), pending_input_region.height(), live_field_shape(), content);
-        const auto crop_height = subtitle_ocr_source_crop_height(pending_input_region.width(), pending_input_region.height());
+        const auto content = live_field_content(pending_root->input_region).value_or(depth_tensor_content_rect_t {});
+        const auto roi = fit_subtitle_analysis_geometry(pending_root->input_region.width(), pending_root->input_region.height(), live_field_shape(), content);
+        const auto crop_height = subtitle_ocr_source_crop_height(pending_root->input_region.width(), pending_root->input_region.height());
         const cohort::constants_t constants {
-          {pending_input_region.width(), pending_input_region.height(), pending_input_region.height() - std::min(crop_height, pending_input_region.height()), crop_height},
+          {pending_root->input_region.width(), pending_root->input_region.height(), pending_root->input_region.height() - std::min(crop_height, pending_root->input_region.height()), crop_height},
           {static_cast<std::uint32_t>(field_w), static_cast<std::uint32_t>(field_h), roi.roi_top, roi.roi_bottom},
           {content.left, content.top, content.right, content.bottom},
-          {static_cast<std::uint32_t>(pending_frame_id), static_cast<std::uint32_t>(pending_frame_id >> 32u),
-           static_cast<std::uint32_t>(pending_input_region.analysis_generation), static_cast<std::uint32_t>(pending_input_region.analysis_generation >> 32u)},
-          {static_cast<std::uint32_t>(pending_observation_timestamp_us), static_cast<std::uint32_t>(pending_observation_timestamp_us >> 32u), input_domain_reset ? 1u : 0u, 0u},
+          {static_cast<std::uint32_t>(pending_root->frame_id), static_cast<std::uint32_t>(pending_root->frame_id >> 32u),
+           static_cast<std::uint32_t>(pending_root->input_region.analysis_generation), static_cast<std::uint32_t>(pending_root->input_region.analysis_generation >> 32u)},
+          {static_cast<std::uint32_t>(pending_root->observation_timestamp_us), static_cast<std::uint32_t>(pending_root->observation_timestamp_us >> 32u), input_domain_reset ? 1u : 0u, 0u},
           {1u, SBC_SCHEMA, 0u, 0u}
         };
         context->UpdateSubresource(r.constants.Get(), 0u, nullptr, &constants, 0u, 0u);
@@ -6878,13 +7021,11 @@ namespace models {
         context->CSSetShader(subtitle_cohort_research_shaders[2u].Get(), nullptr, 0u);
         context->DispatchIndirect(near_identical_transaction.dispatch.Get(), near_identical_gpu_subtitle_condition_grid16_byte_offset);
         unbind();
-        // Unchanged production M1 shader, with private S/input snapshots and a private target.
-        ID3D11Buffer *dense_constants[2] {subtitle_contour_cbuffer.Get(), depth_coordinate_v2_cbuffer.Get()};
-        context->CSSetConstantBuffers(0u, 2u, dense_constants);
+        // The completed source snapshot uses the same current observation evidence.
+        context->CSSetConstantBuffers(0u, 1u, subtitle_contour_cbuffer.GetAddressOf());
         ID3D11ShaderResourceView *dense_inputs[13] {
-          subtitle_contour_source_snapshot.srv.Get(), subtitle_contour_probability_snapshot.srv.Get(),
-          subtitle_locator_state_srv.Get(), subtitle_condition_params_srv.Get(), nullptr, r.filtered_support.srv.Get(),
-          nullptr, nullptr, depth_health_state_srv.Get(), ocr_box_record_srv.Get(), depth_coordinate_v2_state_srv.Get(), nullptr, nullptr
+          subtitle_contour_source_snapshot.srv.Get(), nullptr, nullptr, nullptr, nullptr, r.filtered_support.srv.Get(),
+          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, subtitle_contour_observation.srv.Get()
         };
         context->CSSetShaderResources(0u, 13u, dense_inputs);
         context->CSSetUnorderedAccessViews(6u, 1u, r.glyph_matte.uav.GetAddressOf(), nullptr);
@@ -6917,8 +7058,8 @@ namespace models {
         context->CSSetShader(subtitle_cohort_research_shaders[3u].Get(), nullptr, 0u);
         context->DispatchIndirect(near_identical_transaction.dispatch.Get(), near_identical_gpu_subtitle_condition_grid16_byte_offset);
         subtitle_cohort_research_available = true;
-        subtitle_cohort_research_command_frame = pending_frame_id;
-        subtitle_cohort_research_command_time = pending_observation_timestamp_us;
+        subtitle_cohort_research_command_frame = pending_root->frame_id;
+        subtitle_cohort_research_command_time = pending_root->observation_timestamp_us;
       } catch (const std::exception &e) {
         subtitle_cohort_research_unavailable(e.what());
       } catch (...) {
@@ -6926,44 +7067,53 @@ namespace models {
       }
     }
 
+    bool create_shader_texture(
+      const UINT width,
+      const UINT height,
+      const DXGI_FORMAT format,
+      d3d_texture_views_t &views
+    ) {
+      D3D11_TEXTURE2D_DESC desc {};
+      desc.Width = width;
+      desc.Height = height;
+      desc.MipLevels = 1u;
+      desc.ArraySize = 1u;
+      desc.Format = format;
+      desc.SampleDesc.Count = 1u;
+      desc.Usage = D3D11_USAGE_DEFAULT;
+      desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+      return SUCCEEDED(device->CreateTexture2D(&desc, nullptr, &views.texture)) &&
+             SUCCEEDED(device->CreateShaderResourceView(views.texture.Get(), nullptr, &views.srv)) &&
+             SUCCEEDED(device->CreateUnorderedAccessView(views.texture.Get(), nullptr, &views.uav));
+    }
+
+    bool ensure_subtitle_contour_texture(
+      const UINT width,
+      const UINT height,
+      const DXGI_FORMAT format,
+      d3d_texture_views_t &views
+    ) {
+      if (views.ready()) {
+        D3D11_TEXTURE2D_DESC previous {};
+        views.texture->GetDesc(&previous);
+        if (previous.Width == width && previous.Height == height && previous.Format == format) {
+          return true;
+        }
+      }
+      d3d_texture_views_t next;
+      if (!create_shader_texture(width, height, format, next)) {
+        return false;
+      }
+      const UINT zero[4] {};
+      context->ClearUnorderedAccessViewUint(next.uav.Get(), zero);
+      views = std::move(next);
+      return true;
+    }
+
     bool ensure_subtitle_contour_textures(
       const std::uint32_t source_width,
       const std::uint32_t source_height
     ) {
-      const auto create_texture = [&] (
-                                    const UINT width,
-                                    const UINT height,
-                                    const DXGI_FORMAT format,
-                                    d3d_texture_views_t &views
-                                  ) {
-        if (views.ready()) {
-          D3D11_TEXTURE2D_DESC previous {};
-          views.texture->GetDesc(&previous);
-          if (previous.Width == width && previous.Height == height &&
-              previous.Format == format) {
-            return true;
-          }
-        }
-        d3d_texture_views_t next;
-        D3D11_TEXTURE2D_DESC desc {};
-        desc.Width = width;
-        desc.Height = height;
-        desc.MipLevels = 1u;
-        desc.ArraySize = 1u;
-        desc.Format = format;
-        desc.SampleDesc.Count = 1u;
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-        if (FAILED(device->CreateTexture2D(&desc, nullptr, &next.texture)) ||
-            FAILED(device->CreateShaderResourceView(next.texture.Get(), nullptr, &next.srv)) ||
-            FAILED(device->CreateUnorderedAccessView(next.texture.Get(), nullptr, &next.uav))) {
-          return false;
-        }
-        const UINT zero[4] {};
-        context->ClearUnorderedAccessViewUint(next.uav.Get(), zero);
-        views = std::move(next);
-        return true;
-      };
       const auto crop_height = subtitle_ocr_source_crop_height(source_width, source_height);
       const bool crop_valid = source_width != 0u &&
                               source_width <= depth_coordinate_v2::subtitle_contour_source_max_extent &&
@@ -6974,31 +7124,30 @@ namespace models {
       // its exact source/crop dimensions and current OCR authority validate together.
       const UINT native_width = crop_valid ? source_width : 1u;
       const UINT native_height = crop_valid ? crop_height : 1u;
+      // References come directly from the source band and the feature codes are exact in FP16.
+      constexpr auto native_float_format = DXGI_FORMAT_R16G16B16A16_FLOAT;
       return field_w > 0 && field_h > 0 &&
-             create_texture(native_width, native_height, DXGI_FORMAT_R16G16B16A16_FLOAT,
-                            subtitle_contour_source) &&
-             create_texture(native_width, native_height, DXGI_FORMAT_R16G16B16A16_FLOAT,
-                            subtitle_contour_source_snapshot) &&
-             create_texture(native_width, native_height, DXGI_FORMAT_R32G32B32A32_FLOAT,
-                            subtitle_contour_previous_features) &&
-             create_texture(native_width, native_height, DXGI_FORMAT_R32G32B32A32_FLOAT,
-                            subtitle_contour_next_features) &&
-             create_texture(native_width, native_height, DXGI_FORMAT_R32_UINT,
-                            subtitle_contour_support) &&
-             create_texture(native_width, native_height, DXGI_FORMAT_R32_UINT,
-                            subtitle_glyph_matte) &&
-             create_texture(static_cast<UINT>(field_w), static_cast<UINT>(field_h),
-                            DXGI_FORMAT_R32_UINT, subtitle_contour_field_mask) &&
-             create_texture(static_cast<UINT>(field_w), native_height + 4u,
-                            DXGI_FORMAT_R32_FLOAT, subtitle_contour_horizontal_distance) &&
-             create_texture(static_cast<UINT>(field_w), static_cast<UINT>(field_h),
-                            DXGI_FORMAT_R32_FLOAT, subtitle_contour_distance) &&
-             create_texture(static_cast<UINT>(field_w), static_cast<UINT>(field_h),
-                            DXGI_FORMAT_R32_FLOAT, subtitle_gaussian_weight) &&
-             create_texture(static_cast<UINT>(field_w), static_cast<UINT>(field_h),
-                            DXGI_FORMAT_R32_FLOAT, subtitle_gaussian_blend) &&
-             create_texture(static_cast<UINT>(field_w), static_cast<UINT>(field_h),
-                            DXGI_FORMAT_R32_FLOAT, subtitle_gaussian_vertical_conditioned);
+             ensure_subtitle_contour_texture(native_width, native_height, native_float_format,
+                                             subtitle_contour_source) &&
+             ensure_subtitle_contour_texture(native_width, native_height, native_float_format,
+                                             subtitle_contour_source_snapshot) &&
+             ensure_subtitle_contour_texture(native_width, native_height, native_float_format,
+                                             subtitle_contour_previous_features) &&
+             ensure_subtitle_contour_texture(native_width, native_height, native_float_format,
+                                             subtitle_contour_next_features) &&
+             ensure_subtitle_contour_texture(native_width, native_height, DXGI_FORMAT_R32_UINT,
+                                             subtitle_contour_support) &&
+             (!subtitle_legacy_matte_required() ||
+              ensure_subtitle_contour_texture(native_width, native_height, DXGI_FORMAT_R32_UINT,
+                                              subtitle_glyph_matte));
+    }
+
+    bool ensure_subtitle_dump_matte() {
+      // Admission has already sized support for this source, including ineligible placeholders.
+      D3D11_TEXTURE2D_DESC support {};
+      subtitle_contour_support.texture->GetDesc(&support);
+      return ensure_subtitle_contour_texture(support.Width, support.Height, DXGI_FORMAT_R32_UINT,
+                                             subtitle_glyph_matte);
     }
 
     bool reset_subtitle_state() {
@@ -7017,75 +7166,72 @@ namespace models {
       for (auto *uav : {
              ocr_box_record_uav.Get(), subtitle_locator_state_uav.Get(),
              subtitle_condition_params_uav.Get(), subtitle_contour_identity.uav.Get(),
-             subtitle_contour_probability_snapshot.uav.Get(), subtitle_gaussian_control.uav.Get(),
+             subtitle_contour_probability_snapshot.uav.Get(),
              subtitle_contour_source.uav.Get(), subtitle_contour_source_snapshot.uav.Get(),
              subtitle_contour_previous_features.uav.Get(), subtitle_contour_next_features.uav.Get(),
-             subtitle_contour_support.uav.Get(), subtitle_glyph_matte.uav.Get(),
-             subtitle_contour_field_mask.uav.Get(),
-             subtitle_contour_horizontal_distance.uav.Get(), subtitle_contour_distance.uav.Get(),
-             subtitle_gaussian_weight.uav.Get(), subtitle_gaussian_blend.uav.Get(),
-             subtitle_gaussian_vertical_conditioned.uav.Get(),
+             subtitle_contour_support.uav.Get(),
+             subtitle_legacy_matte_required() ? subtitle_glyph_matte.uav.Get() : nullptr,
            }) {
         if (uav) {
           context->ClearUnorderedAccessViewUint(uav, zero);
         }
       }
-      const float zero_float[4] = {};
-      if (subtitle_conditioned_uav) {
-        context->ClearUnorderedAccessViewFloat(subtitle_conditioned_uav.Get(), zero_float);
+      if (const auto &diagnostics = subtitle_conditioning_diagnostics) {
+        clear_subtitle_conditioning_diagnostics(*diagnostics);
       }
       completed_subtitle_conditioning_diagnostics = false;
       // Disabled completions may expose these initialized views only as unused diagnostics.
       // Reentry cannot retain snapshots belonging to a prior source extent or subtitle context.
       completed_contour = {
-        subtitle_contour_support.srv, subtitle_contour_field_mask.srv,
-        subtitle_contour_distance.srv, subtitle_contour_identity.srv,
+        subtitle_contour_support.srv, subtitle_contour_identity.srv,
         subtitle_contour_previous_features.srv, subtitle_contour_source_snapshot.srv,
         subtitle_contour_probability_snapshot.srv,
-        subtitle_gaussian_weight.srv, subtitle_gaussian_blend.srv,
-        subtitle_gaussian_vertical_conditioned.srv, subtitle_gaussian_control.srv,
-        subtitle_glyph_matte.srv, subtitle_condition_params_srv
+        subtitle_legacy_matte_required() ? subtitle_glyph_matte.srv : nullptr,
+        subtitle_condition_params_srv
       };
       return true;
     }
 
+    bool create_shader_uint_buffer(
+      const std::uint32_t word_count,
+      Microsoft::WRL::ComPtr<ID3D11Buffer> &buffer,
+      Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> &srv,
+      Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> &uav,
+      const std::uint32_t words_per_element = 1u
+    ) {
+      D3D11_BUFFER_DESC desc {};
+      desc.Usage = D3D11_USAGE_DEFAULT;
+      desc.ByteWidth = word_count * sizeof(std::uint32_t);
+      desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+      desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+      desc.StructureByteStride = words_per_element * sizeof(std::uint32_t);
+      return SUCCEEDED(device->CreateBuffer(&desc, nullptr, &buffer)) &&
+             SUCCEEDED(device->CreateShaderResourceView(buffer.Get(), nullptr, &srv)) &&
+             SUCCEEDED(device->CreateUnorderedAccessView(buffer.Get(), nullptr, &uav));
+    }
+
+    bool ensure_subtitle_constant_buffer(
+      const UINT byte_width,
+      Microsoft::WRL::ComPtr<ID3D11Buffer> &buffer
+    ) {
+      if (buffer) {
+        return true;
+      }
+      D3D11_BUFFER_DESC desc {};
+      desc.Usage = D3D11_USAGE_DEFAULT;
+      desc.ByteWidth = byte_width;
+      desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+      return SUCCEEDED(device->CreateBuffer(&desc, nullptr, &buffer));
+    }
+
     bool ensure_subtitle_resources() {
       invalidate_publication();
-      auto create_uint_buffer = [&](
-                                  const std::uint32_t word_count,
-                                  Microsoft::WRL::ComPtr<ID3D11Buffer> &buffer,
-                                  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> &srv,
-                                  Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> &uav
-                                ) {
-        D3D11_BUFFER_DESC desc {};
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.ByteWidth = word_count * sizeof(std::uint32_t);
-        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-        desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-        desc.StructureByteStride = sizeof(std::uint32_t);
-        return SUCCEEDED(device->CreateBuffer(&desc, nullptr, &buffer)) &&
-               SUCCEEDED(device->CreateShaderResourceView(buffer.Get(), nullptr, &srv)) &&
-               SUCCEEDED(device->CreateUnorderedAccessView(buffer.Get(), nullptr, &uav));
-      };
-      auto create_constant_buffer = [&](
-                                      const UINT byte_width,
-                                      Microsoft::WRL::ComPtr<ID3D11Buffer> &buffer
-                                    ) {
-        if (buffer) {
-          return true;
-        }
-        D3D11_BUFFER_DESC desc {};
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.ByteWidth = byte_width;
-        desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        return SUCCEEDED(device->CreateBuffer(&desc, nullptr, &buffer));
-      };
       bool resources_ok = true;
       if (!ocr_box_record_buf || !ocr_box_record_srv || !ocr_box_record_uav) {
         ocr_box_record_buf.Reset();
         ocr_box_record_srv.Reset();
         ocr_box_record_uav.Reset();
-        resources_ok = create_uint_buffer(
+        resources_ok = create_shader_uint_buffer(
           ocr_box_record_word_count,
           ocr_box_record_buf,
           ocr_box_record_srv,
@@ -7097,7 +7243,7 @@ namespace models {
         subtitle_locator_state_buf.Reset();
         subtitle_locator_state_srv.Reset();
         subtitle_locator_state_uav.Reset();
-        resources_ok = resources_ok && create_uint_buffer(
+        resources_ok = resources_ok && create_shader_uint_buffer(
           subtitle_locator_state_word_count,
           subtitle_locator_state_buf,
           subtitle_locator_state_srv,
@@ -7109,52 +7255,35 @@ namespace models {
         subtitle_condition_params_buf.Reset();
         subtitle_condition_params_srv.Reset();
         subtitle_condition_params_uav.Reset();
-        resources_ok = resources_ok && create_uint_buffer(
+        resources_ok = resources_ok && create_shader_uint_buffer(
           subtitle_condition_param_word_count,
           subtitle_condition_params_buf,
           subtitle_condition_params_srv,
           subtitle_condition_params_uav
         );
       }
-      if (!subtitle_conditioned_tex || !subtitle_conditioned_srv ||
-          !subtitle_conditioned_uav) {
-        D3D11_TEXTURE2D_DESC desc {};
-        desc.Width = static_cast<UINT>(field_w);
-        desc.Height = static_cast<UINT>(field_h);
-        desc.MipLevels = 1;
-        desc.ArraySize = 1;
-        desc.Format = DXGI_FORMAT_R32_FLOAT;
-        desc.SampleDesc.Count = 1;
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-        resources_ok = resources_ok &&
-          SUCCEEDED(device->CreateTexture2D(&desc, nullptr, &subtitle_conditioned_tex)) &&
-          SUCCEEDED(device->CreateShaderResourceView(
-            subtitle_conditioned_tex.Get(), nullptr,
-                         &subtitle_conditioned_srv
-                       )) &&
-          SUCCEEDED(device->CreateUnorderedAccessView(
-            subtitle_conditioned_tex.Get(), nullptr,
-                         &subtitle_conditioned_uav
-                       ));
-      }
+      // One observation header, plus three rectangles and the palette for each cover.
+      constexpr auto contour_observation_records = 1u + depth_coordinate_v2::subtitle_plane_cover_capacity *
+                                                   (4u + depth_coordinate_v2::subtitle_contour_palette_max_modes);
       // An exact-current abstention needs the OCR identity constants even when the optional
       // detector never acquired an engine or its interop buffers.
       resources_ok = resources_ok &&
-        create_constant_buffer(sizeof(ocr_resolve_constants_t), ocr_resolve_cbuffer) &&
-        create_constant_buffer(80u, subtitle_locator_cbuffer) &&
-        create_constant_buffer(96u, subtitle_contour_cbuffer) &&
-        create_constant_buffer(48u, subtitle_contour_distance_cbuffer) &&
-        create_uint_buffer(depth_coordinate_v2::subtitle_contour_history_word_count,
-                           subtitle_contour_identity.buffer,
-                           subtitle_contour_identity.srv, subtitle_contour_identity.uav) &&
-        create_uint_buffer(depth_coordinate_v2::subtitle_ocr_output_width *
-                             depth_coordinate_v2::subtitle_ocr_output_height,
-                           subtitle_contour_probability_snapshot.buffer,
-                           subtitle_contour_probability_snapshot.srv,
-                           subtitle_contour_probability_snapshot.uav) &&
-        create_uint_buffer(1u, subtitle_gaussian_control.buffer,
-                           subtitle_gaussian_control.srv, subtitle_gaussian_control.uav) &&
+        ensure_subtitle_constant_buffer(sizeof(ocr_resolve_constants_t), ocr_resolve_cbuffer) &&
+        ensure_subtitle_constant_buffer(80u, subtitle_locator_cbuffer) &&
+        ensure_subtitle_constant_buffer(96u, subtitle_contour_cbuffer) &&
+        create_shader_uint_buffer(depth_coordinate_v2::subtitle_contour_history_word_count,
+                                    subtitle_contour_identity.buffer,
+                                    subtitle_contour_identity.srv, subtitle_contour_identity.uav) &&
+        create_shader_uint_buffer(depth_coordinate_v2::subtitle_ocr_output_width *
+                                      depth_coordinate_v2::subtitle_ocr_output_height,
+                                    subtitle_contour_probability_snapshot.buffer,
+                                    subtitle_contour_probability_snapshot.srv,
+                                    subtitle_contour_probability_snapshot.uav) &&
+        (subtitle_contour_observation.ready() ||
+         create_shader_uint_buffer(4u * contour_observation_records,
+                                     subtitle_contour_observation.buffer,
+                                     subtitle_contour_observation.srv,
+                                     subtitle_contour_observation.uav, 4u)) &&
         ensure_subtitle_contour_textures(1u, 1u);
       if (!resources_ok) {
         return false;
@@ -7229,13 +7358,13 @@ namespace models {
                                 &ocr_output_srv,
                                 nullptr
                               ) &&
-                              create_uint_buffer(
+                              create_shader_uint_buffer(
                                 ocr_cell_stats_word_count,
                                 ocr_cell_stats_buf,
                                 ocr_cell_stats_srv,
                                 ocr_cell_stats_uav
                               ) &&
-                              create_constant_buffer(32u, ocr_preprocess_cbuffer);
+                              ensure_subtitle_constant_buffer(32u, ocr_preprocess_cbuffer);
       auto &cuda = cuda_driver_api::get();
       bool ocr_interop_teardown_failed = false;
       const auto unregister_ocr_interop = [&]() {
@@ -7519,8 +7648,8 @@ namespace models {
         .joint_plane_reserved0 = 0u,
         .joint_plane_reserved1 = 0u,
         .joint_plane_reserved2 = 0u,
-        .joint_observation_timestamp_low = static_cast<std::uint32_t>(pending_observation_timestamp_us),
-        .joint_observation_timestamp_high = static_cast<std::uint32_t>(pending_observation_timestamp_us >> 32u),
+        .joint_observation_timestamp_low = static_cast<std::uint32_t>(pending_root->observation_timestamp_us),
+        .joint_observation_timestamp_high = static_cast<std::uint32_t>(pending_root->observation_timestamp_us >> 32u),
         .joint_observation_reserved0 = 0u,
         .joint_observation_reserved1 = 0u,
       };
@@ -7528,7 +7657,7 @@ namespace models {
       return true;
     }
 
-    bool dispatch_parallax_v2_frame_stats(d3d_perf_slot *perf_slot) {
+    bool dispatch_parallax_v2_frame_publication(d3d_perf_slot *perf_slot) {
       if (!parallax_v2_producer_active) {
         return false;
       }
@@ -7545,7 +7674,7 @@ namespace models {
         .moments_shader = depth_coordinate_v2_moments_cs.Get(),
         .frame_resolve_shader = depth_coordinate_v2_frame_resolve_cs.Get(),
         .raw_depth = tensor_out_srv.Get(),
-        .tensor_exclusion = tensor_exclusion_srv.Get(),
+        .analysis_domain = analysis_domain.srv.Get(),
         .partials_output = depth_coordinate_v2_partials_uav.Get(),
         .partials = depth_coordinate_v2_partials_srv.Get(),
         .frame_stats_output = depth_coordinate_v2_frame_stats_uav.Get(),
@@ -7553,11 +7682,15 @@ namespace models {
         .moments_dispatch = parallax_v2_dispatch_command(reduce_groups, 1u, 1u, near_identical_gpu_infer_reduce_byte_offset),
         .frame_resolve_dispatch = parallax_v2_dispatch_command(1u, 1u, 1u, near_identical_gpu_infer_one_byte_offset),
         .histogram_shader = depth_coordinate_v2_histogram_cs.Get(),
-        .quantile_shader = depth_coordinate_v2_quantiles_cs.Get(),
+        .quantile_shader = depth_coordinate_v2_publish_cs.Get(),
         .frame_stats = depth_coordinate_v2_frame_stats_srv.Get(),
         .histogram_output = depth_coordinate_v2_histogram_uav.Get(),
         .histogram = depth_coordinate_v2_histogram_srv.Get(),
-        .normalization_histogram_output = hist_uav.Get(),
+        .publication_outputs = host_sbs_v2_gpu::frame_publication_outputs_t {
+          .minmax_ema = minmax_ema_uav.Get(),
+          .depth_health = depth_health_state_uav.Get(),
+          .camera_state = depth_coordinate_v2_state_uav.Get(),
+        },
       };
       const bool recorded = host_sbs_v2_gpu::record_moments_frame(
         context.Get(),
@@ -7567,126 +7700,81 @@ namespace models {
       return recorded;
     }
 
-    bool dispatch_parallax_v2_producer(d3d_perf_slot *perf_slot) {
-      if (!parallax_v2_producer_active || !depth_coordinate_v2_map_cs ||
-          !near_identical_cbuffer || !near_identical_history_owner.uav ||
-          !tensor_out_srv || !depth_coordinate_v2_state_srv ||
-          !tensor_exclusion_srv || !minmax_ema_srv || !tensor_in_srv ||
-          !appearance_ordinal_srv || !depth_health_state_srv ||
-          !depth_coordinate_v2_candidate_uav || !tensor_previous_input_uav ||
-          !previous_appearance_ordinal_uav || !tensor_previous_exclusion_uav) {
+    bool dispatch_parallax_v2_producer(d3d_perf_slot *perf_slot, const bool skip_input_history) {
+      if (!parallax_v2_producer_active) {
         return false;
       }
 
-      const host_sbs_v2_gpu::base_constants_t base_constants {
-        .depth = cbuffer.Get(),
-        .coordinate_v2 = depth_coordinate_v2_cbuffer.Get(),
-      };
+      const auto content = live_field_content(pending_root->input_region);
+      const bool use_compact_limiters =
+        depth_coordinate_v2_vertical_limit_compact_cs && depth_coordinate_v2_limit_compact_cs &&
+        !receipt_gated_postprocess_pending() && !base_diagnostics_always() &&
+        !subtitle_conditioning_diagnostics_requested() && pending_root->input_region.is_video_region() &&
+        content && content->valid(live_field_shape()) &&
+        content->right - content->left > depth_coordinate_v2::limiter_serial_max_lines &&
+        (content->left != 0u || content->right < static_cast<std::uint32_t>(field_w));
 
-      // Acquire the first usable camera on startup and follow it continuously. An unusable
-      // frame publishes flat without erasing the retained camera.
-      const host_sbs_v2_gpu::state_command_t state_command {
-        .constants = base_constants,
-        .shader = depth_coordinate_v2_state_resolve_cs.Get(),
-        .frame_stats = depth_coordinate_v2_frame_stats_srv.Get(),
-        .depth_health_state = depth_health_state_srv.Get(),
-        .state_output = depth_coordinate_v2_state_uav.Get(),
-        .dispatch = parallax_v2_dispatch_command(
-          1u,
-          1u,
-          1u,
-          near_identical_gpu_infer_one_byte_offset
-        ),
-      };
-      if (!host_sbs_v2_gpu::record_state(context.Get(), state_command)) {
-        return false;
-      }
+      const bool use_compact_map = use_compact_limiters && depth_coordinate_v2_map_compact_cs;
+      const auto map_width = use_compact_map && skip_input_history ?
+                               content->width() :
+                               static_cast<UINT>(target_w);
 
-      mark_d3d_parallax_map_start(perf_slot);
-
-      // Raw depth -> immutable pre-limiter candidate, while the same infer-grid dispatch advances
-      // the complete raw padded appearance history and publishes its narrower authenticated
-      // owner. normalize_depth_output uploaded the exact b2 words consumed here; no host update
-      // occurs between that upload and this dispatch. The full-size canonical-coordinate
-      // field is deliberately absent from production; an explicit Dump 3D dispatches it separately.
-      const host_sbs_v2_gpu::map_history_command_t map_history_command {
-        .constants = base_constants,
+      // Mapping publishes the history owner and may copy NCHW input. An explicit Dump 3D
+      // separately materializes the full-size canonical-coordinate field.
+      const host_sbs_v2_gpu::base_geometry_command_t command {
+        .constants = {
+          .depth = cbuffer.Get(),
+          .coordinate_v2 = depth_coordinate_v2_cbuffer.Get(),
+        },
         .near_identical_constants = near_identical_cbuffer.Get(),
-        .shader = depth_coordinate_v2_map_cs.Get(),
+        .map_shader = use_compact_map ? depth_coordinate_v2_map_compact_cs.Get() : depth_coordinate_v2_map_cs.Get(),
+        .vertical_shader = use_compact_limiters ? depth_coordinate_v2_vertical_limit_compact_cs.Get() :
+                                                  depth_coordinate_v2_vertical_limit_cs.Get(),
+        .horizontal_shader = use_compact_limiters ? depth_coordinate_v2_limit_compact_cs.Get() :
+                                                    depth_coordinate_v2_limit_cs.Get(),
         .raw_depth = tensor_out_srv.Get(),
         .state = depth_coordinate_v2_state_srv.Get(),
-        .tensor_exclusion = tensor_exclusion_srv.Get(),
+        .analysis_domain = analysis_domain.srv.Get(),
         .minmax_ema = minmax_ema_srv.Get(),
         .current_model_input = tensor_in_srv.Get(),
-        .current_appearance_ordinal = appearance_ordinal_srv.Get(),
         .depth_health_state = depth_health_state_srv.Get(),
+        .candidate = depth_coordinate_v2_candidate_srv.Get(),
+        .vertical_conditioned = depth_coordinate_v2_vertical_conditioned_srv.Get(),
         .candidate_output = depth_coordinate_v2_candidate_uav.Get(),
         .previous_model_input_output = tensor_previous_input_uav.Get(),
-        .previous_appearance_ordinal_output = previous_appearance_ordinal_uav.Get(),
-        .previous_tensor_exclusion_output = tensor_previous_exclusion_uav.Get(),
         .history_owner_output = near_identical_history_owner.uav.Get(),
-        .dispatch = parallax_v2_dispatch_command(
-          (target_w + 15) / 16,
+        .vertical_majorant_output = depth_coordinate_v2_vertical_majorant_uav.Get(),
+        .vertical_conditioned_output = depth_coordinate_v2_vertical_conditioned_uav.Get(),
+        .final_output = depth_coordinate_v2_final_uav.Get(),
+        .map_dispatch = parallax_v2_dispatch_command(
+          (map_width + 15u) / 16u,
           (target_h + 15) / 16,
           1u,
           near_identical_gpu_infer_grid16_byte_offset
         ),
-      };
-      if (!host_sbs_v2_gpu::record_map_history(
-            context.Get(),
-            map_history_command
-          )) {
-        return false;
-      }
-      if (perf_slot) {
-        perf_slot->has_parallax_limits_start = true;
-        context->End(perf_slot->parallax_limits_start.Get());
-      }
-
-      const host_sbs_v2_gpu::base_constants_t geometry_constants {
-        .depth = cbuffer.Get(),
-        .coordinate_v2 = depth_coordinate_v2_cbuffer.Get(),
-      };
-
-      // Produce the exact column upper envelope plus the fixed 75/25 vertical share. The upper
-      // remains diagnostic evidence; only the neutral conditioned field feeds live geometry.
-      const host_sbs_v2_gpu::vertical_command_t vertical_command {
-        .constants = geometry_constants,
-        .shader = depth_coordinate_v2_vertical_limit_cs.Get(),
-        .candidate = depth_coordinate_v2_candidate_srv.Get(),
-        .vertical_majorant_output = depth_coordinate_v2_vertical_majorant_uav.Get(),
-        .vertical_conditioned_output =
-          depth_coordinate_v2_vertical_conditioned_uav.Get(),
-        .dispatch = parallax_v2_dispatch_command(
+        .vertical_dispatch = parallax_v2_dispatch_command(
           host_sbs_v2_gpu::limiter_groups(static_cast<UINT>(field_w)),
           1u,
           1u,
           near_identical_gpu_infer_columns_byte_offset
         ),
-      };
-      if (!host_sbs_v2_gpu::record_vertical(context.Get(), vertical_command)) {
-        return false;
-      }
-
-      // Apply one pure horizontal majorant to the vertically conditioned field. There is no
-      // horizontal minorant or completed-2D-envelope blend, so lateral lowering is not added.
-      const host_sbs_v2_gpu::horizontal_command_t horizontal_command {
-        .constants = geometry_constants,
-        .shader = depth_coordinate_v2_limit_cs.Get(),
-        .vertical_conditioned = depth_coordinate_v2_vertical_conditioned_srv.Get(),
-        .final_output = depth_coordinate_v2_final_uav.Get(),
-        .dispatch = parallax_v2_dispatch_command(
+        .horizontal_dispatch = parallax_v2_dispatch_command(
           host_sbs_v2_gpu::limiter_groups(static_cast<UINT>(field_h)),
           1u,
           1u,
           near_identical_gpu_infer_rows_byte_offset
         ),
+        .map_start = perf_slot && perf_slot->has_parallax ? perf_slot->parallax_map_start.Get() : nullptr,
+        .limits_start = perf_slot ? perf_slot->parallax_limits_start.Get() : nullptr,
       };
-      if (!host_sbs_v2_gpu::record_horizontal(
-            context.Get(),
-            horizontal_command
-          )) {
+      if (!host_sbs_v2_gpu::record_base_geometry(context.Get(), command)) {
         return false;
+      }
+      if (command.map_start) {
+        perf_slot->has_parallax_map_start = true;
+      }
+      if (command.limits_start) {
+        perf_slot->has_parallax_limits_start = true;
       }
 
       mark_d3d_parallax_subtitle_start(perf_slot);
@@ -7697,15 +7785,15 @@ namespace models {
     }
 
     bool update_pending_ocr_constants(const bool input_domain_reset) {
-      const auto tensor_content = live_field_content(pending_input_region);
-      if (!ocr_resolve_cbuffer || pending_frame_id == 0u || target_w <= 0 || target_h <= 0 ||
+      const auto tensor_content = live_field_content(pending_root->input_region);
+      if (!ocr_resolve_cbuffer || pending_root->frame_id == 0u || target_w <= 0 || target_h <= 0 ||
           !tensor_content || !tensor_content->valid(live_field_shape()) ||
           !depth_coordinate_v2::subtitle_ocr_field_is_calibrated(
             static_cast<std::uint32_t>(field_w), static_cast<std::uint32_t>(field_h))) {
         return false;
       }
-      const std::uint32_t source_width = pending_input_region.width();
-      const std::uint32_t source_height = pending_input_region.height();
+      const std::uint32_t source_width = pending_root->input_region.width();
+      const std::uint32_t source_height = pending_root->input_region.height();
       const auto roi = fit_subtitle_analysis_geometry(
         source_width,
         source_height,
@@ -7715,7 +7803,7 @@ namespace models {
       // A legal unprojectable OCR crop still owes this frame an exact abstention header.
       // It cannot authorize an optional detector child or manufacture a search region.
       if (!roi.valid() &&
-          pending_subtitle_work != cuda_conditional_graph::work_flag_e::subtitle_observation) {
+          pending_root->subtitle_work != cuda_conditional_graph::work_flag_e::subtitle_observation) {
         return false;
       }
       const std::uint32_t crop_height = subtitle_ocr_source_crop_height(
@@ -7727,12 +7815,12 @@ namespace models {
       }
       auto line_reference = subtitle_ocr_line_reference(
         source_width, source_height,
-        pending_input_region.source_width, pending_input_region.source_height,
-        pending_input_region.left, pending_input_region.top,
-        pending_input_region.is_video_region()
+        pending_root->input_region.source_width, pending_root->input_region.source_height,
+        pending_root->input_region.left, pending_root->input_region.top,
+        pending_root->input_region.is_video_region()
       );
       if (!line_reference) {
-        if (pending_subtitle_work != cuda_conditional_graph::work_flag_e::subtitle_observation) {
+        if (pending_root->subtitle_work != cuda_conditional_graph::work_flag_e::subtitle_observation) {
           return false;
         }
         // The finalizer's abstention consumes only the exact source/field identity prefix.
@@ -7740,10 +7828,10 @@ namespace models {
         line_reference.emplace();
       }
       const ocr_resolve_constants_t constants {
-        static_cast<std::uint32_t>(pending_frame_id),
-        static_cast<std::uint32_t>(pending_frame_id >> 32u),
-        static_cast<std::uint32_t>(pending_input_region.analysis_generation),
-        static_cast<std::uint32_t>(pending_input_region.analysis_generation >> 32u),
+        static_cast<std::uint32_t>(pending_root->frame_id),
+        static_cast<std::uint32_t>(pending_root->frame_id >> 32u),
+        static_cast<std::uint32_t>(pending_root->input_region.analysis_generation),
+        static_cast<std::uint32_t>(pending_root->input_region.analysis_generation >> 32u),
         source_width,
         source_height,
         static_cast<std::uint32_t>(target_w),
@@ -7759,9 +7847,9 @@ namespace models {
         std::bit_cast<std::uint32_t>(line_reference->center_twice_source),
         line_reference->width,
         std::bit_cast<std::uint32_t>(line_reference->search_top_source),
-        static_cast<std::uint32_t>(pending_subtitle_line_policy),
-        static_cast<std::uint32_t>(pending_observation_timestamp_us),
-        static_cast<std::uint32_t>(pending_observation_timestamp_us >> 32u),
+        static_cast<std::uint32_t>(pending_root->subtitle_line_policy),
+        static_cast<std::uint32_t>(pending_root->observation_timestamp_us),
+        static_cast<std::uint32_t>(pending_root->observation_timestamp_us >> 32u),
         input_domain_reset ? 1u : 0u,
         0u,
       };
@@ -7772,7 +7860,7 @@ namespace models {
     }
 
     bool dispatch_ocr_postprocess() {
-      const bool optional_child_armed = std::exchange(pending_ocr_submitted, false);
+      const bool optional_child_armed = std::exchange(pending_root->ocr_armed, false);
       if (!near_identical_transaction.dispatch || !ocr_box_record_uav ||
           !ocr_resolve_cbuffer) {
         return false;
@@ -7827,40 +7915,42 @@ namespace models {
     bool dispatch_subtitle_contours(
       const bool ocr_record_submitted,
       const bool input_domain_reset,
+      const bool conditioning_diagnostics,
+      const bool legacy_matte,
       d3d_perf_slot *perf_slot = nullptr
     ) {
-      if (!subtitle_contour_temporal_cs || !subtitle_glyph_matte_cs || !subtitle_contour_project_cs || !subtitle_contour_history_cs ||
+      if (!subtitle_contour_palette_cs || !subtitle_contour_observation.ready() ||
+          !subtitle_contour_temporal_cs || !subtitle_contour_history_cs ||
           !subtitle_contour_history_identity_cs ||
-          !subtitle_contour_horizontal_cs || !subtitle_contour_vertical_cs || !subtitle_contour_snapshot_cs ||
-          !subtitle_contour_cbuffer || !subtitle_contour_distance_cbuffer || !subtitle_contour_identity.ready() ||
+          !subtitle_contour_snapshot_cs || !subtitle_contour_cbuffer || !subtitle_contour_identity.ready() ||
           !subtitle_contour_source.ready() || !subtitle_contour_previous_features.ready() ||
           !subtitle_contour_next_features.ready() ||
-          !subtitle_contour_support.ready() || !subtitle_glyph_matte.ready() || !subtitle_contour_field_mask.ready() ||
-          !subtitle_contour_horizontal_distance.ready() || !subtitle_contour_distance.ready() ||
+          !subtitle_contour_support.ready() ||
+          (legacy_matte && (!subtitle_glyph_matte_cs || !subtitle_glyph_matte.ready())) ||
           !subtitle_contour_source_snapshot.ready() || !subtitle_contour_probability_snapshot.ready()) {
         return false;
       }
-      const auto content = live_field_content(pending_input_region)
+      const auto content = live_field_content(pending_root->input_region)
                              .value_or(depth_tensor_content_rect_t {});
       const auto roi = fit_subtitle_analysis_geometry(
-        pending_input_region.width(), pending_input_region.height(), live_field_shape(), content
+        pending_root->input_region.width(), pending_root->input_region.height(), live_field_shape(), content
       );
       const auto crop_height = subtitle_ocr_source_crop_height(
-        pending_input_region.width(), pending_input_region.height()
+        pending_root->input_region.width(), pending_root->input_region.height()
       );
       std::array<std::uint32_t, 24u> constants {
-        pending_input_region.width(), pending_input_region.height(),
-        pending_input_region.height() - std::min(crop_height, pending_input_region.height()),
+        pending_root->input_region.width(), pending_root->input_region.height(),
+        pending_root->input_region.height() - std::min(crop_height, pending_root->input_region.height()),
         crop_height,
         static_cast<std::uint32_t>(field_w), static_cast<std::uint32_t>(field_h),
         roi.roi_top, roi.roi_bottom,
         content.left, content.top, content.right, content.bottom,
-        static_cast<std::uint32_t>(pending_frame_id),
-        static_cast<std::uint32_t>(pending_frame_id >> 32u),
-        static_cast<std::uint32_t>(pending_input_region.analysis_generation),
-        static_cast<std::uint32_t>(pending_input_region.analysis_generation >> 32u),
-        static_cast<std::uint32_t>(pending_observation_timestamp_us),
-        static_cast<std::uint32_t>(pending_observation_timestamp_us >> 32u),
+        static_cast<std::uint32_t>(pending_root->frame_id),
+        static_cast<std::uint32_t>(pending_root->frame_id >> 32u),
+        static_cast<std::uint32_t>(pending_root->input_region.analysis_generation),
+        static_cast<std::uint32_t>(pending_root->input_region.analysis_generation >> 32u),
+        static_cast<std::uint32_t>(pending_root->observation_timestamp_us),
+        static_cast<std::uint32_t>(pending_root->observation_timestamp_us >> 32u),
         input_domain_reset ? 1u : 0u, 0u,
         ocr_record_submitted ? 1u : 0u,
         depth_coordinate_v2::subtitle_contour_recipe, 0u, 0u
@@ -7879,6 +7969,17 @@ namespace models {
         depth_coordinate_v2_state_srv.Get(), nullptr, nullptr
       };
       context->CSSetShaderResources(0u, 13u, srvs);
+      // Prepare current evidence for the same fresh observation that runs the contour grid.
+      // An OCR abstention must publish its own verdict even when palette learning has no work.
+      ID3D11UnorderedAccessView *observation_output = subtitle_contour_observation.uav.Get();
+      ID3D11UnorderedAccessView *null_uav = nullptr;
+      context->CSSetUnorderedAccessViews(7u, 1u, &observation_output, nullptr);
+      context->CSSetShader(subtitle_contour_palette_cs.Get(), nullptr, 0u);
+      context->DispatchIndirect(near_identical_transaction.dispatch.Get(),
+                               near_identical_gpu_observation_one_byte_offset);
+      context->CSSetUnorderedAccessViews(7u, 1u, &null_uav, nullptr);
+      ID3D11ShaderResourceView *observation_input = subtitle_contour_observation.srv.Get();
+      context->CSSetShaderResources(12u, 1u, &observation_input);
       // Reuse submits zero groups for every pass. Do not clear or copy the published support
       // unconditionally: its backing holds the previous complete tuple until fresh completion.
       ID3D11UnorderedAccessView *output = subtitle_contour_support.uav.Get();
@@ -7888,25 +7989,24 @@ namespace models {
       context->CSSetShader(subtitle_contour_temporal_cs.Get(), nullptr, 0u);
       context->DispatchIndirect(near_identical_transaction.dispatch.Get(),
                                near_identical_gpu_subtitle_condition_grid16_byte_offset);
-      ID3D11UnorderedAccessView *null_uav = nullptr;
       context->CSSetUnorderedAccessViews(0u, 1u, &null_uav, nullptr);
       context->CSSetUnorderedAccessViews(2u, 1u, &null_uav, nullptr);
 
       srvs[5] = subtitle_contour_support.srv.Get();
       context->CSSetShaderResources(5u, 1u, &srvs[5u]);
-      // Dense completion reads immutable same-frame support and RGB. Its native-resolution
-      // tiles stride over this already authenticated indirect field grid; reuse submits zero
-      // groups and preserves the complete prior tuple. Empty observations write literal zero.
-      output = subtitle_glyph_matte.uav.Get();
-      context->CSSetUnorderedAccessViews(6u, 1u, &output, nullptr);
-      context->CSSetShader(subtitle_glyph_matte_cs.Get(), nullptr, 0u);
-      context->DispatchIndirect(near_identical_transaction.dispatch.Get(),
-                               near_identical_gpu_subtitle_condition_grid16_byte_offset);
-      context->CSSetUnorderedAccessViews(6u, 1u, &null_uav, nullptr);
+      if (legacy_matte) {
+        // Reuse submits zero groups and holds the previous dense output. Fresh observations
+        // write the full native band, including literal zero for empty observations.
+        output = subtitle_glyph_matte.uav.Get();
+        context->CSSetUnorderedAccessViews(6u, 1u, &output, nullptr);
+        context->CSSetShader(subtitle_glyph_matte_cs.Get(), nullptr, 0u);
+        context->DispatchIndirect(near_identical_transaction.dispatch.Get(),
+                                 near_identical_gpu_subtitle_condition_grid16_byte_offset);
+        context->CSSetUnorderedAccessViews(6u, 1u, &null_uav, nullptr);
+      }
 
-      const bool conditioning_diagnostics = subtitle_conditioning_diagnostics_requested();
       if (conditioning_diagnostics) {
-        output = subtitle_contour_field_mask.uav.Get();
+        output = subtitle_conditioning_diagnostics->field_mask.uav.Get();
         context->CSSetUnorderedAccessViews(1u, 1u, &output, nullptr);
         context->CSSetShader(subtitle_contour_project_cs.Get(), nullptr, 0u);
         context->DispatchIndirect(near_identical_transaction.dispatch.Get(),
@@ -7959,36 +8059,39 @@ namespace models {
         dispatch_subtitle_inner_colour_research();
       }
 
-      if (subtitle_selected_matte_enabled) dispatch_subtitle_selected_matte_research(perf_slot);
+      if (subtitle_selected_matte_enabled) {
+        dispatch_subtitle_selected_matte_research(legacy_matte ? subtitle_glyph_matte.srv.Get() : nullptr, perf_slot);
+      }
 
       // The native distance transform is consumed only by the diagnostic Gaussian proposal.
       if (!conditioning_diagnostics) {
         return true;
       }
+      const auto &diagnostics = *subtitle_conditioning_diagnostics;
       const std::array<std::uint32_t, 12u> distance_constants {
-        pending_input_region.width(), pending_input_region.height(),
-        pending_input_region.height() - std::min(crop_height, pending_input_region.height()),
+        pending_root->input_region.width(), pending_root->input_region.height(),
+        pending_root->input_region.height() - std::min(crop_height, pending_root->input_region.height()),
         crop_height,
         static_cast<std::uint32_t>(field_w), static_cast<std::uint32_t>(field_h), 0u, 0u,
         content.left, content.top, content.right, content.bottom
       };
-      context->UpdateSubresource(subtitle_contour_distance_cbuffer.Get(), 0u, nullptr,
+      context->UpdateSubresource(diagnostics.distance_constants.Get(), 0u, nullptr,
                                  distance_constants.data(), 0u, 0u);
-      context->CSSetConstantBuffers(0u, 1u, subtitle_contour_distance_cbuffer.GetAddressOf());
+      context->CSSetConstantBuffers(0u, 1u, diagnostics.distance_constants.GetAddressOf());
       // q is measured from native source-pixel centers, including the four offset centers.
       // Projected field pins remain a separate diagnostic and do not seed this transform.
       ID3D11ShaderResourceView *seed = subtitle_contour_support.srv.Get();
       context->CSSetShaderResources(0u, 1u, &seed);
-      output = subtitle_contour_horizontal_distance.uav.Get();
+      output = diagnostics.horizontal_distance.uav.Get();
       context->CSSetUnorderedAccessViews(0u, 1u, &output, nullptr);
       context->CSSetShader(subtitle_contour_horizontal_cs.Get(), nullptr, 0u);
       context->DispatchIndirect(near_identical_transaction.dispatch.Get(),
                                near_identical_gpu_subtitle_condition_grid16_byte_offset);
       context->CSSetUnorderedAccessViews(0u, 1u, &null_uav, nullptr);
       context->CSSetShaderResources(0u, 1u, null_srvs);
-      ID3D11ShaderResourceView *horizontal = subtitle_contour_horizontal_distance.srv.Get();
+      ID3D11ShaderResourceView *horizontal = diagnostics.horizontal_distance.srv.Get();
       context->CSSetShaderResources(1u, 1u, &horizontal);
-      output = subtitle_contour_distance.uav.Get();
+      output = diagnostics.distance.uav.Get();
       context->CSSetUnorderedAccessViews(0u, 1u, &output, nullptr);
       context->CSSetShader(subtitle_contour_vertical_cs.Get(), nullptr, 0u);
       context->DispatchIndirect(near_identical_transaction.dispatch.Get(),
@@ -7998,41 +8101,109 @@ namespace models {
       return true;
     }
 
+    void clear_subtitle_conditioning_diagnostics(const subtitle_conditioning_diagnostics_t &diagnostics) {
+      const UINT zero[4] {};
+      for (auto *uav : {
+             diagnostics.field_mask.uav.Get(), diagnostics.horizontal_distance.uav.Get(), diagnostics.distance.uav.Get(),
+             diagnostics.weight.uav.Get(), diagnostics.blend.uav.Get(), diagnostics.vertical_conditioned.uav.Get(),
+             diagnostics.control.uav.Get(),
+           }) {
+        context->ClearUnorderedAccessViewUint(uav, zero);
+      }
+      const float zero_float[4] {};
+      context->ClearUnorderedAccessViewFloat(diagnostics.final.uav.Get(), zero_float);
+    }
+
+    bool ensure_subtitle_conditioning_diagnostics() {
+      if (!subtitle_contour_project_cs || !subtitle_contour_horizontal_cs || !subtitle_contour_vertical_cs ||
+          !subtitle_condition_cs || !subtitle_gaussian_vertical_limit_cs || !subtitle_gaussian_horizontal_limit_cs ||
+          !subtitle_contour_source.ready()) {
+        return false;
+      }
+      // The field shape belongs to the estimator resource epoch. The native crop may resize
+      // within that epoch, so only the horizontal-distance scratch depends on this texture.
+      D3D11_TEXTURE2D_DESC native {};
+      subtitle_contour_source.texture->GetDesc(&native);
+      const auto horizontal_height = native.Height + 4u;
+      const auto width = static_cast<UINT>(field_w);
+      const auto height = static_cast<UINT>(field_h);
+      if (auto &diagnostics = subtitle_conditioning_diagnostics) {
+        if (diagnostics->horizontal_distance_height != horizontal_height) {
+          d3d_texture_views_t horizontal_distance;
+          if (!create_shader_texture(width, horizontal_height, DXGI_FORMAT_R32_FLOAT, horizontal_distance)) {
+            return false;
+          }
+          const UINT zero[4] {};
+          context->ClearUnorderedAccessViewUint(horizontal_distance.uav.Get(), zero);
+          diagnostics->horizontal_distance = std::move(horizontal_distance);
+          diagnostics->horizontal_distance_height = horizontal_height;
+        }
+        return true;
+      }
+
+      subtitle_conditioning_diagnostics_t next;
+      if (!create_shader_texture(width, height, DXGI_FORMAT_R32_UINT, next.field_mask) ||
+          !create_shader_texture(width, horizontal_height, DXGI_FORMAT_R32_FLOAT, next.horizontal_distance) ||
+          !create_shader_texture(width, height, DXGI_FORMAT_R32_FLOAT, next.distance) ||
+          !create_shader_texture(width, height, DXGI_FORMAT_R32_FLOAT, next.weight) ||
+          !create_shader_texture(width, height, DXGI_FORMAT_R32_FLOAT, next.blend) ||
+          !create_shader_texture(width, height, DXGI_FORMAT_R32_FLOAT, next.vertical_conditioned) ||
+          !create_shader_texture(width, height, DXGI_FORMAT_R32_FLOAT, next.final) ||
+          !create_shader_uint_buffer(1u, next.control.buffer, next.control.srv, next.control.uav) ||
+          !ensure_subtitle_constant_buffer(48u, next.distance_constants)) {
+        return false;
+      }
+      next.horizontal_distance_height = horizontal_height;
+      // Commit only the complete set. A failed optional allocation cannot expose partial views
+      // or make a later request mistake them for initialized scratch.
+      clear_subtitle_conditioning_diagnostics(next);
+      subtitle_conditioning_diagnostics.emplace(std::move(next));
+      return true;
+    }
+
     bool dispatch_subtitle_conditioner(
       const bool ocr_record_submitted,
       const bool input_domain_reset,
       d3d_perf_slot *perf_slot = nullptr
     ) {
       // An authenticated abstention has no detector probability buffer. Its inactive OCR8
-      // record still advances the current identity and clears support before copying exact Base.
-      if (!subtitle_locator_resolve_cs || !subtitle_condition_cs ||
-          !subtitle_gaussian_vertical_limit_cs || !subtitle_gaussian_horizontal_limit_cs ||
+      // record still advances current identity and clears support while rendering from Base.
+      if (!subtitle_locator_resolve_cs ||
           !subtitle_locator_cbuffer || !subtitle_locator_state_srv ||
-          !subtitle_locator_state_uav || !subtitle_conditioned_srv ||
-          !subtitle_conditioned_uav || !depth_coordinate_v2_state_srv ||
+          !subtitle_locator_state_uav || !depth_coordinate_v2_state_srv ||
           !depth_coordinate_v2_final_srv ||
           !depth_coordinate_v2_final_uav ||
-          !depth_coordinate_v2_final_tex || !subtitle_conditioned_tex ||
           !subtitle_condition_params_srv || !subtitle_condition_params_uav ||
-          !subtitle_gaussian_weight.ready() || !subtitle_gaussian_blend.ready() ||
-          !subtitle_gaussian_vertical_conditioned.ready() || !subtitle_gaussian_control.ready() ||
           !ocr_box_record_srv ||
-          (pending_subtitle_work == cuda_conditional_graph::work_flag_e::optional_ocr &&
+          (pending_root->subtitle_work == cuda_conditional_graph::work_flag_e::optional_ocr &&
            !ocr_output_srv) || !subtitle_contour_identity.ready() ||
-          !subtitle_contour_probability_snapshot.ready() ||
+          !subtitle_contour_probability_snapshot.ready() || !subtitle_contour_support.ready() ||
           !depth_health_state_srv || !near_identical_transaction.dispatch) {
         return false;
       }
 
-      const std::uint32_t source_width = pending_input_region.width();
-      const std::uint32_t source_height = pending_input_region.height();
+      const bool legacy_matte_required = subtitle_legacy_matte_required();
+      bool conditioning_diagnostics = subtitle_conditioning_diagnostics_requested();
+      if (conditioning_diagnostics &&
+          !(ensure_subtitle_conditioning_diagnostics() &&
+            (legacy_matte_required || ensure_subtitle_dump_matte()))) {
+        BOOST_LOG(warning) << "Host SBS conditioned parallax diagnostic resources are unavailable.";
+        if (subtitle_conditioning_diagnostics_always) {
+          return false;
+        }
+        // A live dump can wait for a qualified observation while rendering continues.
+        conditioning_diagnostics = false;
+      }
+      const bool legacy_matte = legacy_matte_required || conditioning_diagnostics;
+      const std::uint32_t source_width = pending_root->input_region.width();
+      const std::uint32_t source_height = pending_root->input_region.height();
       const std::uint32_t field_width = field_w > 0 ?
                                           static_cast<std::uint32_t>(field_w) :
                                           0u;
       const std::uint32_t field_height = field_h > 0 ?
                                            static_cast<std::uint32_t>(field_h) :
                                            0u;
-      const auto tensor_content = live_field_content(pending_input_region);
+      const auto tensor_content = live_field_content(pending_root->input_region);
       const auto roi = fit_subtitle_analysis_geometry(
         source_width,
         source_height,
@@ -8040,8 +8211,8 @@ namespace models {
         tensor_content.value_or(depth_tensor_content_rect_t {})
       );
       // Direct OCR8 coverage follows the current authenticated analysis field. An unsupported tensor or an
-      // unprojectable bottom crop has no subtitle authority; the complete condition writer still
-      // publishes Base exactly into the distinct live output texture.
+      // unprojectable bottom crop has no subtitle authority. If requested, diagnostics
+      // still produce a complete field with exact Base bits.
       const auto field_content = tensor_content.value_or(depth_tensor_content_rect_t {});
       const std::array<std::uint32_t, 20> constants {
         field_width,
@@ -8052,16 +8223,16 @@ namespace models {
         source_height,
         ocr_record_submitted ? 1u : 0u,
         input_domain_reset ? 1u : 0u,
-        static_cast<std::uint32_t>(pending_frame_id),
-        static_cast<std::uint32_t>(pending_frame_id >> 32u),
-        static_cast<std::uint32_t>(pending_input_region.analysis_generation),
-        static_cast<std::uint32_t>(pending_input_region.analysis_generation >> 32u),
+        static_cast<std::uint32_t>(pending_root->frame_id),
+        static_cast<std::uint32_t>(pending_root->frame_id >> 32u),
+        static_cast<std::uint32_t>(pending_root->input_region.analysis_generation),
+        static_cast<std::uint32_t>(pending_root->input_region.analysis_generation >> 32u),
         field_content.left,
         field_content.top,
         field_content.right,
         field_content.bottom,
-        static_cast<std::uint32_t>(pending_observation_timestamp_us),
-        static_cast<std::uint32_t>(pending_observation_timestamp_us >> 32u),
+        static_cast<std::uint32_t>(pending_root->observation_timestamp_us),
+        static_cast<std::uint32_t>(pending_root->observation_timestamp_us >> 32u),
         0u,
         0u,
       };
@@ -8110,33 +8281,31 @@ namespace models {
       ID3D11UnorderedAccessView *null_resolve_uavs[3] = {};
       context->CSSetUnorderedAccessViews(2, 3, null_resolve_uavs, nullptr);
 
-      if (!dispatch_subtitle_contours(ocr_record_submitted, input_domain_reset, perf_slot)) {
+      if (!dispatch_subtitle_contours(
+            ocr_record_submitted, input_domain_reset, conditioning_diagnostics, legacy_matte, perf_slot
+          )) {
         return false;
       }
       const auto retain_completed_contour = [&]() {
         // Retain completed backing views before estimate() can allocate the next source extent.
         // Working OCR inputs may change immediately; the joined completed snapshots cannot.
         completed_contour = {
-          subtitle_contour_support.srv, subtitle_contour_field_mask.srv,
-          subtitle_contour_distance.srv, subtitle_contour_identity.srv,
+          subtitle_contour_support.srv, subtitle_contour_identity.srv,
           subtitle_contour_previous_features.srv, subtitle_contour_source_snapshot.srv,
           subtitle_contour_probability_snapshot.srv,
-          subtitle_gaussian_weight.srv, subtitle_gaussian_blend.srv,
-          subtitle_gaussian_vertical_conditioned.srv, subtitle_gaussian_control.srv,
-          subtitle_glyph_matte.srv, subtitle_condition_params_srv
+          legacy_matte ? subtitle_glyph_matte.srv : nullptr, subtitle_condition_params_srv
         };
         if(subtitle_selected_matte_commands){const auto v=selected_matte_views();completed_contour.research_selected_matte=v.matte;completed_contour.research_selected_matte_receipt=v.receipt;}
       };
-      if (!subtitle_conditioning_diagnostics_requested()) {
-        // No renderer consumes the conditioned field. Publish exact Base through the distinct
-        // Final texture, as suppressed observations do, and leave the diagnostic tuple unclaimed.
+      if (!conditioning_diagnostics) {
+        // No renderer consumes the conditioned field. The effective Final remains Base.
         ID3D11Buffer *null_constants[3] = {};
         context->CSSetConstantBuffers(0, 3, null_constants);
-        context->CopyResource(subtitle_conditioned_tex.Get(), depth_coordinate_v2_final_tex.Get());
         completed_subtitle_conditioning_diagnostics = false;
         retain_completed_contour();
         return true;
       }
+      const auto &diagnostics = *subtitle_conditioning_diagnostics;
       context->CSSetConstantBuffers(0, 3, constant_buffers);
 
       // Base remains immutable. Every diagnostic subtitle observation writes the complete
@@ -8148,14 +8317,13 @@ namespace models {
         depth_coordinate_v2_final_srv.Get(),
         subtitle_locator_state_srv.Get(),
         subtitle_condition_params_srv.Get(),
-        subtitle_contour_distance.srv.Get(),
+        diagnostics.distance.srv.Get(),
         subtitle_contour_identity.srv.Get(),
         ocr_box_record_srv.Get(),
       };
       context->CSSetShaderResources(0, 8, condition_srvs);
       ID3D11UnorderedAccessView *condition_outputs[3] = {
-        subtitle_gaussian_blend.uav.Get(), subtitle_gaussian_control.uav.Get(),
-        subtitle_gaussian_weight.uav.Get(),
+        diagnostics.blend.uav.Get(), diagnostics.control.uav.Get(), diagnostics.weight.uav.Get(),
       };
       context->CSSetUnorderedAccessViews(3, 3, condition_outputs, nullptr);
       context->CSSetShader(subtitle_condition_cs.Get(), nullptr, 0);
@@ -8171,12 +8339,12 @@ namespace models {
       // entry copies the proposal; unchanged rows and disabled control preserve immutable Base
       // bits. Private resources keep the original scene-stage diagnostics intact.
       ID3D11ShaderResourceView *vertical_srvs[4] = {
-        subtitle_gaussian_blend.srv.Get(), nullptr, subtitle_gaussian_control.srv.Get(),
+        diagnostics.blend.srv.Get(), nullptr, diagnostics.control.srv.Get(),
         depth_coordinate_v2_final_srv.Get(),
       };
       ID3D11UnorderedAccessView *vertical_outputs[2] = {
         nullptr,
-        subtitle_gaussian_vertical_conditioned.uav.Get(),
+        diagnostics.vertical_conditioned.uav.Get(),
       };
       context->CSSetShaderResources(0u, 4u, vertical_srvs);
       context->CSSetUnorderedAccessViews(0u, 2u, vertical_outputs, nullptr);
@@ -8189,10 +8357,10 @@ namespace models {
       context->CSSetShaderResources(0u, 4u, null_srvs);
 
       ID3D11ShaderResourceView *horizontal_srvs[4] = {
-        subtitle_gaussian_vertical_conditioned.srv.Get(), nullptr,
-        subtitle_gaussian_control.srv.Get(), depth_coordinate_v2_final_srv.Get(),
+        diagnostics.vertical_conditioned.srv.Get(), nullptr,
+        diagnostics.control.srv.Get(), depth_coordinate_v2_final_srv.Get(),
       };
-      ID3D11UnorderedAccessView *final_output = subtitle_conditioned_uav.Get();
+      ID3D11UnorderedAccessView *final_output = diagnostics.final.uav.Get();
       context->CSSetShaderResources(0u, 4u, horizontal_srvs);
       context->CSSetUnorderedAccessViews(0u, 1u, &final_output, nullptr);
       context->CSSetShader(subtitle_gaussian_horizontal_limit_cs.Get(), nullptr, 0u);
@@ -8219,7 +8387,7 @@ namespace models {
       if (append.input_domain_reset) {
         flags |= host_sbs_gpu_trace::record_flag_e::input_domain_reset;
       }
-      if (pending_dump_forced) {
+      if (pending_root->dump_forced) {
         flags |= host_sbs_gpu_trace::record_flag_e::dump_forced;
       }
       if (append.ocr_record_submitted) {
@@ -8238,35 +8406,36 @@ namespace models {
     }
 
     [[nodiscard]] publication_receipt::expected_t pending_publication_expected() const {
-      const auto content = live_field_content(pending_input_region).value_or(depth_tensor_content_rect_t {});
-      const auto subtitle_roi = fit_subtitle_analysis_geometry(pending_input_region.width(),
-        pending_input_region.height(), live_field_shape(), content);
+      const auto content = live_field_content(pending_root->input_region).value_or(depth_tensor_content_rect_t {});
+      const auto subtitle_roi = fit_subtitle_analysis_geometry(pending_root->input_region.width(),
+        pending_root->input_region.height(), live_field_shape(), content);
       return {
         .estimator_generation = publication_generation,
         .publication_sequence = publication_sequence,
-        .analysis_generation = pending_input_region.analysis_generation,
-        .frame_id = pending_frame_id,
-        .transaction_token = pending_wrapper_transaction_token,
+        .analysis_generation = pending_root->input_region.analysis_generation,
+        .frame_id = pending_root->frame_id,
+        .transaction_token = pending_root->transaction_token,
         .domain_tag = near_identical_input_domain_tag(
-          pending_input_region, pending_color_space,
+          pending_root->input_region, pending_root->color_space,
           static_cast<std::uint32_t>(target_w), static_cast<std::uint32_t>(target_h)
         ),
-        .observation_timestamp_us = pending_observation_timestamp_us,
-        .baseline_frame_id = pending_gpu_transaction_baseline_frame_id,
+        .observation_timestamp_us = pending_root->observation_timestamp_us,
+        .baseline_frame_id = pending_root->baseline_frame_id,
         .width = static_cast<std::uint32_t>(target_w),
         .height = static_cast<std::uint32_t>(target_h),
-        .subtitle_domain = {pending_input_region.width(), pending_input_region.height(),
+        .subtitle_domain = {pending_root->input_region.width(), pending_root->input_region.height(),
           static_cast<std::uint32_t>(field_w), static_cast<std::uint32_t>(field_h),
           subtitle_roi.roi_top, subtitle_roi.roi_bottom,
           content.left, content.top, content.right, content.bottom},
         .raw_coordinate_scale = parallax_v2_raw_coordinate_scale,
         .joint_plane_mode = joint_plane_mode,
-        .expected_work = cuda_conditional_graph::work_flags_value(pending_subtitle_work),
+        .expected_work = cuda_conditional_graph::work_flags_value(pending_root->subtitle_work),
         .submission_class = gpu_undecided_postprocess_pending() ?
                               publication_receipt::submission_class_e::gpu_undecided :
                               publication_receipt::submission_class_e::force_infer,
         .flags = pending_gpu_completion_flags(pending_gpu_trace_append),
         .host_subtitle_outcome = pending_gpu_trace_append.host_subtitle_outcome,
+        .depth_only_history = pending_root->depth_only_history,
       };
     }
 
@@ -8302,7 +8471,7 @@ namespace models {
       }
       // A receipt for B may arrive after C was already accepted. It still describes B's final
       // views, but cannot supply admission authority across the pending C transaction.
-      if (!has_previous_frame && !result.transport_failed) {
+      if (!pending_root && !result.transport_failed) {
         for (std::size_t index = 0u; index < result.count; ++index) {
           const auto &receipt = result.receipts[index];
           if (publication_is_current(receipt.expected)) {
@@ -8334,35 +8503,35 @@ namespace models {
       // raw SRV is safe to borrow here after finalization has unbound the transaction UAV.
 
       const auto domain_tag = near_identical_input_domain_tag(
-        pending_input_region,
-        pending_color_space,
+        pending_root->input_region,
+        pending_root->color_space,
         static_cast<std::uint32_t>(target_w),
         static_cast<std::uint32_t>(target_h)
       );
       const auto flags = pending_gpu_completion_flags(append);
       const auto submission_class =
-        pending_submission_class == pending_submission_class_e::gpu_undecided ?
+        pending_root->submission_class == submission_class_e::gpu_undecided ?
           host_sbs_gpu_trace::submission_class_e::gpu_undecided :
           host_sbs_gpu_trace::submission_class_e::force_infer;
       const std::array<std::uint32_t, host_sbs_gpu_trace::constant_word_count> constants {
-        static_cast<std::uint32_t>(pending_frame_id),
-        static_cast<std::uint32_t>(pending_frame_id >> 32u),
-        static_cast<std::uint32_t>(pending_input_region.analysis_generation),
-        static_cast<std::uint32_t>(pending_input_region.analysis_generation >> 32u),
+        static_cast<std::uint32_t>(pending_root->frame_id),
+        static_cast<std::uint32_t>(pending_root->frame_id >> 32u),
+        static_cast<std::uint32_t>(pending_root->input_region.analysis_generation),
+        static_cast<std::uint32_t>(pending_root->input_region.analysis_generation >> 32u),
         static_cast<std::uint32_t>(domain_tag),
         static_cast<std::uint32_t>(domain_tag >> 32u),
-        static_cast<std::uint32_t>(pending_wrapper_transaction_token),
-        static_cast<std::uint32_t>(pending_wrapper_transaction_token >> 32u),
-        cuda_conditional_graph::work_flags_value(pending_subtitle_work),
+        static_cast<std::uint32_t>(pending_root->transaction_token),
+        static_cast<std::uint32_t>(pending_root->transaction_token >> 32u),
+        cuda_conditional_graph::work_flags_value(pending_root->subtitle_work),
         static_cast<std::uint32_t>(submission_class),
         flags,
         static_cast<std::uint32_t>(append.host_subtitle_outcome),
-        pending_input_region.width(),
-        pending_input_region.height(),
+        pending_root->input_region.width(),
+        pending_root->input_region.height(),
         static_cast<std::uint32_t>(field_w),
         static_cast<std::uint32_t>(field_h),
-        static_cast<std::uint32_t>(pending_observation_timestamp_us),
-        static_cast<std::uint32_t>(pending_observation_timestamp_us >> 32u),
+        static_cast<std::uint32_t>(pending_root->observation_timestamp_us),
+        static_cast<std::uint32_t>(pending_root->observation_timestamp_us >> 32u),
         0u,
         0u,
       };
@@ -8470,7 +8639,7 @@ namespace models {
       ID3D11ShaderResourceView *inputs[3] = {
         tensor_out_srv.Get(),
         depth_coordinate_v2_state_srv.Get(),
-        tensor_exclusion_srv.Get(),
+        analysis_domain.srv.Get(),
       };
       context->CSSetShader(
         depth_coordinate_v2_coordinate_diagnostic_cs.Get(),
@@ -8500,15 +8669,12 @@ namespace models {
       return true;
     }
 
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> output_srv() {
-      return depth_srv;
-    }
-
     struct completion_snapshot_validity_t {
       bool raw_model_depth = false;
       bool model_input = false;
       bool composite = false;
       bool coordinate = false;
+      bool base_diagnostics = false;
     };
 
     struct completed_depth_metadata_t {
@@ -8530,29 +8696,25 @@ namespace models {
     ) {
       completed_depth_metadata_t completed {
         .valid = true,
-        .frame_id = pending_frame_id,
-        .input_region = pending_input_region,
-        .color_space = pending_color_space,
+        .frame_id = pending_root->frame_id,
+        .input_region = pending_root->input_region,
+        .color_space = pending_root->color_space,
         .input_domain_reset = input_domain_reset,
-        .subtitle_work_suppressed = depth_optional_work_suppresses_subtitle(pending_optional_work),
+        .subtitle_work_suppressed = depth_optional_work_suppresses_subtitle(pending_root->optional_work),
         .gpu_undecided = gpu_undecided_postprocess_pending(),
         .snapshots = snapshots,
       };
       if (!completed.gpu_undecided) {
         gpu_undecided_requires_force_infer_refresh = false;
       }
-      clear_queued_same_source_gpu_continuation();
-      has_previous_frame = false;  // actual root ACK; never fold queued output twice
+      completed_input = {
+        .frame_id = pending_root->frame_id,
+        .region = pending_root->input_region,
+        .subtitle_context = pending_root->subtitle_context,
+        .source_observation = pending_root->source_observation,
+      };
+      pending_root.reset();
       clear_pending_inference_event_state();
-      pending_optional_work = depth_optional_work_mode_e::ordinary;
-      pending_subtitle_work = cuda_conditional_graph::work_flag_e::none;
-      pending_submission_class = pending_submission_class_e::force_infer;
-      pending_wrapper_transaction_token = 0u;
-      pending_dump_forced = false;
-      pending_gpu_transaction_token = 0u;
-      pending_gpu_transaction_current_frame_id = 0u;
-      pending_gpu_transaction_baseline_frame_id = 0u;
-      pending_observation_timestamp_us = 0u;
       if (diagnostics_enabled) {
         throughput_stats_completions++;
       }
@@ -8564,11 +8726,18 @@ namespace models {
       const depth_submission_t &submission = {}
     ) {
       depth_step_result_t step;
+      step.submission = submission;
+      step.status.cuda_graph_active = depth_conditional_graph.ready() &&
+                                      !depth_inference_graph.policy.capture_failed;
+      if (!completed.valid) {
+        return step;
+      }
+
       auto &r = step.observation;
-      r.depth = output_srv();
+      r.depth = normalized_depth.srv;
       r.depth_health_state = depth_health_state_srv;
       r.depth_frame_state = minmax_ema_srv;
-      r.ema_motion_mask = ema_motion_mask_srv;
+      r.ema_motion_mask = ema_motion_mask.srv;
       r.raw_model_depth = tensor_out_srv;
       if (completed.snapshots.raw_model_depth) {
         r.raw_model_depth_snapshot = raw_snapshot_srv;
@@ -8592,12 +8761,17 @@ namespace models {
         if (completed.snapshots.coordinate) {
           r.shadow_coordinate = depth_coordinate_v2_coordinate_srv;
         }
-        r.shadow_candidate_parallax = depth_coordinate_v2_candidate_srv;
-        r.shadow_vertical_majorant = depth_coordinate_v2_vertical_majorant_srv;
-        r.shadow_vertical_conditioned = depth_coordinate_v2_vertical_conditioned_srv;
+        r.base_diagnostics_omitted = !completed.snapshots.base_diagnostics;
+        if (!r.base_diagnostics_omitted) {
+          r.shadow_candidate_parallax = depth_coordinate_v2_candidate_srv;
+          r.shadow_vertical_majorant = depth_coordinate_v2_vertical_majorant_srv;
+          r.shadow_vertical_conditioned = depth_coordinate_v2_vertical_conditioned_srv;
+        }
         r.shadow_base_final_parallax = depth_coordinate_v2_final_srv;
-        r.shadow_final_parallax = subtitle_conditioned_srv;
         r.subtitle_conditioning_diagnostics_current = completed_subtitle_conditioning_diagnostics;
+        if (r.subtitle_conditioning_diagnostics_current) {
+          r.shadow_conditioned_final_parallax = subtitle_conditioning_diagnostics->final.srv;
+        }
         r.shadow_state = depth_coordinate_v2_state_srv;
         r.shadow_frame_stats = depth_coordinate_v2_frame_stats_srv;
         const auto calibration_shape = calibrated_dav2_shape();
@@ -8606,20 +8780,29 @@ namespace models {
           r.ocr_box_record = ocr_box_record_srv;
           r.subtitle_locator_state = subtitle_locator_state_srv;
           r.subtitle_contour_support = completed_contour.support;
-          r.subtitle_glyph_matte = completed_contour.glyph_matte;
+          if (!completed.subtitle_work_suppressed || subtitle_legacy_matte_required()) {
+            r.subtitle_glyph_matte = completed_contour.glyph_matte;
+          }
           r.research_selected_matte = completed_contour.research_selected_matte;
           r.research_selected_matte_receipt = completed_contour.research_selected_matte_receipt;
           r.subtitle_condition_params = completed_contour.condition_params;
-          r.subtitle_contour_field_pin = completed_contour.field_pin;
-          r.subtitle_contour_distance = completed_contour.distance;
           r.subtitle_contour_identity = completed_contour.identity;
           r.subtitle_contour_history = completed_contour.history;
           r.subtitle_contour_source = completed_contour.source;
           r.subtitle_ocr_probability = completed_contour.probability;
-          r.subtitle_gaussian_weight = completed_contour.gaussian_weight;
-          r.subtitle_gaussian_blend = completed_contour.gaussian_blend;
-          r.subtitle_gaussian_vertical_conditioned = completed_contour.gaussian_vertical_conditioned;
-          r.subtitle_gaussian_control = completed_contour.gaussian_control;
+          // Always-on evaluation can inspect the held or cleared auxiliary fields when
+          // suppression produced no new conditioning observation. Final still comes from Base.
+          if (subtitle_conditioning_diagnostics &&
+              (r.subtitle_conditioning_diagnostics_current ||
+               (completed.subtitle_work_suppressed && subtitle_conditioning_diagnostics_always))) {
+            const auto &diagnostics = *subtitle_conditioning_diagnostics;
+            r.subtitle_contour_field_pin = diagnostics.field_mask.srv;
+            r.subtitle_contour_distance = diagnostics.distance.srv;
+            r.subtitle_gaussian_weight = diagnostics.weight.srv;
+            r.subtitle_gaussian_blend = diagnostics.blend.srv;
+            r.subtitle_gaussian_vertical_conditioned = diagnostics.vertical_conditioned.srv;
+            r.subtitle_gaussian_control = diagnostics.control.srv;
+          }
         }
         r.parallax_v2_shader_provenance = parallax_v2_shader_provenance;
         if (gpu_trace_ring_srv && gpu_trace_provenance) {
@@ -8637,22 +8820,17 @@ namespace models {
       r.field_width = field_w;
       r.field_height = field_h;
       r.refined_live_geometry_active = refined_live_geometry_active;
-      r.completed_frame_valid = completed.valid;
+      r.completed_frame_valid = true;
       r.completed_frame_id = completed.frame_id;
       r.gpu_undecided_completion = completed.gpu_undecided;
-      if (completed.valid && current_publication.frame_id == completed.frame_id) {
+      if (current_publication.frame_id == completed.frame_id) {
         r.publication = current_publication;
       }
-      step.submission = submission;
-      step.status.cuda_graph_active = depth_conditional_graph.ready() &&
-                                      !depth_inference_graph.policy.capture_failed;
-      if (completed.valid) {
-        r.input_region = completed.input_region;
-        r.color_space = completed.color_space;
-        step.completion.input_domain_reset = completed.input_domain_reset;
-        r.subtitle_work_suppressed = completed.subtitle_work_suppressed;
-        r.field_content = live_field_content(completed.input_region).value_or(depth_tensor_content_rect_t {});
-      }
+      r.input_region = completed.input_region;
+      r.color_space = completed.color_space;
+      step.completion.input_domain_reset = completed.input_domain_reset;
+      r.subtitle_work_suppressed = completed.subtitle_work_suppressed;
+      r.field_content = live_field_content(completed.input_region).value_or(depth_tensor_content_rect_t {});
       return step;
     }
 
@@ -8737,10 +8915,10 @@ namespace models {
       ) {
       error.clear();
       if (!queued_same_source_gpu_continuation_research_enabled || !is_operational() ||
-          !has_previous_frame || !source || source != pending_same_source_gpu_source.Get() ||
-          frame == 0u || frame != pending_frame_id || observation == 0u ||
-          observation != pending_observation_timestamp_us || pending_dump_forced ||
-          pending_wrapper_transaction_token == 0u || !pending_input_region.valid() ||
+          !pending_root || !source || source != pending_root->submitted_source.Get() ||
+          frame == 0u || frame != pending_root->frame_id || observation == 0u ||
+          observation != pending_root->observation_timestamp_us || pending_root->dump_forced ||
+          pending_root->transaction_token == 0u || !pending_root->input_region.valid() ||
           !near_identical_transaction.ready() || !parallax_v2_producer_active) {
         error = "Same-source queued research owner unavailable";
         return std::nullopt;
@@ -8756,20 +8934,20 @@ namespace models {
         error = "Same-source queued continuation rejects predication";
         return std::nullopt;
       }
-      if (!pending_same_source_gpu_postprocess_queued) {
-        ensure_cbuffers(pending_color_space, pending_input_region);
-        ensure_source_region_cbuffer(pending_input_region);
+      if (!pending_root->queued_input_domain_reset.has_value()) {
+        ensure_cbuffers(pending_root->color_space, pending_root->input_region);
+        ensure_source_region_cbuffer(pending_root->input_region);
         if (!cbuffer || !source_region_cbuffer) {
           error = "Same-source pending constants unavailable";
           mark_terminal_failure();
           return std::nullopt;
         }
-        pending_same_source_gpu_input_domain_reset = prepare_pending_input_domain();
+        const bool input_domain_reset = prepare_pending_input_domain();
         // Activates receipt-gated indirect work and queued-force mode4 BEFORE any mutation.
         // normalize invalidates old borrowed publication; no completed authority is installed.
-        pending_same_source_gpu_postprocess_queued = true;
+        pending_root->queued_input_domain_reset = input_domain_reset;
         completion_dump_snapshot_requested = false;
-        if (!normalize_depth_output(nullptr, pending_same_source_gpu_input_domain_reset)) {
+        if (!normalize_depth_output(nullptr, input_domain_reset)) {
           error = "Same-source GPU continuation submission failed";
           mark_terminal_failure();
           return std::nullopt;
@@ -8778,21 +8956,22 @@ namespace models {
       }
       queued_same_source_gpu_continuation_research_views_t view;
       view.ticket_sequence = queued_same_source_gpu_ticket_sequence;
-      view.submitted_frame_id = pending_frame_id;
-      view.observation_timestamp_us = pending_observation_timestamp_us;
-      view.transaction_token = pending_wrapper_transaction_token;
-      view.subtitle_context_generation = accepted_subtitle_context_generation;
-      view.expected_work = cuda_conditional_graph::work_flags_value(pending_subtitle_work);
+      view.submitted_frame_id = pending_root->frame_id;
+      view.observation_timestamp_us = pending_root->observation_timestamp_us;
+      view.transaction_token = pending_root->transaction_token;
+      view.subtitle_context_generation = pending_root->subtitle_context.generation;
+      view.expected_work = cuda_conditional_graph::work_flags_value(pending_root->subtitle_work);
       view.postprocess_request_flags = gpu_undecided_postprocess_pending() ? 1u : 4u;
-      view.both_unmap_calls_succeeded = true; // has_previous_frame set only after successful calls
+      view.both_unmap_calls_succeeded = true; // The root is accepted after successful unmap calls.
       view.postprocess_queued = true;
-      view.input_region = pending_input_region;
-      view.color_space = pending_color_space;
+      view.refined_live_geometry_active = refined_live_geometry_active;
+      view.input_region = pending_root->input_region;
+      view.color_space = pending_root->color_space;
       view.field_width = static_cast<std::uint32_t>(field_w);
       view.field_height = static_cast<std::uint32_t>(field_h);
-      view.field_content = live_field_content(pending_input_region).value_or(depth_tensor_content_rect_t {});
+      view.field_content = live_field_content(pending_root->input_region).value_or(depth_tensor_content_rect_t {});
       view.planned_publication = pending_publication_expected(); // value only, not published
-      view.submitted_source = pending_same_source_gpu_source;
+      view.submitted_source = pending_root->submitted_source;
       view.base = depth_coordinate_v2_final_srv;
       view.state = depth_coordinate_v2_state_srv;
       view.glyph_matte = completed_contour.glyph_matte;
@@ -8807,25 +8986,77 @@ namespace models {
       view.depth_constants = cbuffer;
       view.source_region_constants = source_region_cbuffer;
       view.contour_constants = subtitle_contour_cbuffer;
-      // has_previous_frame/event/pending owner remain intact. No query, sync, snapshot,
+      // Keep the accepted root and its completion event. No query, sync, snapshot,
       // current_publication assignment or completed_frame_valid return occurs here.
       return view;
     }
 
+    // The caller has proved the root ready and prepared its constants. Retire that observation
+    // before a later submission changes either the constants or the raw tensors.
+    completed_depth_metadata_t complete_ready_pending(
+      d3d_perf_slot *d3d_timer,
+      const bool snapshot_requested
+    ) {
+      const bool postprocess_queued = pending_root->queued_input_domain_reset.has_value();
+      const bool input_domain_reset = postprocess_queued ?
+        *pending_root->queued_input_domain_reset : prepare_pending_input_domain();
+      completion_dump_snapshot_requested = snapshot_requested;
+      if (!postprocess_queued && !normalize_depth_output(
+            d3d_timer,
+            input_domain_reset
+          )) {
+        mark_d3d_post_end(d3d_timer);
+        return {};
+      }
+
+      dispatch_pending_gpu_completion_trace();
+      snapshot_pending_publication_receipt();
+      pending_gpu_trace_append = {};
+      mark_d3d_post_end(d3d_timer);
+
+      // Dump 3D copies the exact completed input and output, outside the live postprocess interval.
+      // For ROI this uses the pending crop-local domain and its exact tensor-content rectangle.
+      completion_snapshot_validity_t snapshots;
+      // An indirect dispatch can preserve padding from an earlier compact completion. Expose
+      // the diagnostic fields only when their writer is known to have filled the full grid.
+      snapshots.base_diagnostics = base_diagnostics_always() ||
+                                   (snapshot_requested && !receipt_gated_postprocess_pending());
+      if (snapshot_requested && !gpu_undecided_postprocess_pending()) {
+        snapshots.coordinate = dispatch_parallax_v2_coordinate_diagnostic();
+        snapshots.raw_model_depth = snapshot_buffer(
+          tensor_out_buf.Get(),
+          raw_snapshot_buf,
+          raw_snapshot_srv,
+          raw_snapshot_error_logged,
+          raw_snapshot_retry_frames,
+          "raw-depth",
+          static_cast<UINT>(target_w * target_h)
+        );
+        snapshots.model_input = snapshot_buffer(
+          tensor_in_buf.Get(),
+          model_input_snapshot_buf,
+          model_input_snapshot_srv,
+          model_input_snapshot_error_logged,
+          model_input_snapshot_retry_frames,
+          "model-input"
+        );
+        snapshots.composite = composite_depth_runtime_provenance &&
+                              snapshots.raw_model_depth && snapshots.model_input;
+      }
+      return consume_pending_completion(input_domain_reset, snapshots);
+    }
+
     depth_step_result_t finish_pending(
       input_color_space color_space,
-      bool snapshot_debug_inputs = false,
+      const bool snapshot_debug_inputs = false,
       const bool root_completion_proven = false
     ) {
       // A caller may first prove nonblocking readiness with can_accept(). Consuming instead of
       // enqueueing must retire that admission token so a later estimate cannot skip its own query.
       readiness_preflighted = false;
       auto &cuda = cuda_driver_api::get();
-      if (!has_previous_frame) {
+      if (!pending_root) {
         return make_result();
-      }
-      if (gpu_undecided_postprocess_pending()) {
-        snapshot_debug_inputs = false;
       }
       if (cuda_ctx && cuda.cuCtxSetCurrent(cuda_ctx) != CUDA_SUCCESS) {
         BOOST_LOG(error) << "cuCtxSetCurrent failed while finishing pending depth.";
@@ -8847,8 +9078,8 @@ namespace models {
         }
       }
       (void) color_space;  // the pending frame owns its transfer mode
-      ensure_cbuffers(pending_color_space, pending_input_region);
-      ensure_source_region_cbuffer(pending_input_region);
+      ensure_cbuffers(pending_root->color_space, pending_root->input_region);
+      ensure_source_region_cbuffer(pending_root->input_region);
       if (!cbuffer || !source_region_cbuffer) {
         // A persistent constant-buffer allocation failure must latch terminal like every other
         // resource failure; returning empty without latching leaves the caller retrying at the
@@ -8859,63 +9090,11 @@ namespace models {
         return make_result();
       }
       auto *d3d_timer = diagnostics_enabled ? begin_d3d_perf(true, false) : nullptr;
-      const bool input_domain_reset = pending_same_source_gpu_postprocess_queued ?
-        pending_same_source_gpu_input_domain_reset : prepare_pending_input_domain();
-      completion_dump_snapshot_requested = snapshot_debug_inputs;
-      if (!pending_same_source_gpu_postprocess_queued && !normalize_depth_output(
-            d3d_timer,
-            input_domain_reset
-          )) {
-        mark_d3d_post_end(d3d_timer);
-        mark_d3d_pre_start(d3d_timer);
-        end_d3d_perf(d3d_timer);
-        return make_result();
-      }
-      dispatch_pending_gpu_completion_trace();
-      snapshot_pending_publication_receipt();
-      pending_gpu_trace_append = {};
-      mark_d3d_post_end(d3d_timer);
-      bool raw_snapshot_valid = false;
-      bool model_input_snapshot_valid = false;
-      bool composite_snapshots_valid = false;
-      bool coordinate_snapshot_valid = false;
-      // Dump 3D binds these immutable tensors to pending_input_region. For a video ROI they are
-      // bound to the logical crop-local analysis domain and its exact tensor content rectangle;
-      // the package separately records the full-source embedding.
-      if (snapshot_debug_inputs) {
-        coordinate_snapshot_valid = dispatch_parallax_v2_coordinate_diagnostic();
-        raw_snapshot_valid = snapshot_buffer(
-          tensor_out_buf.Get(),
-          raw_snapshot_buf,
-          raw_snapshot_srv,
-          raw_snapshot_error_logged,
-          raw_snapshot_retry_frames,
-          "raw-depth",
-          static_cast<UINT>(target_w * target_h)
-        );
-        model_input_snapshot_valid = snapshot_buffer(
-          tensor_in_buf.Get(),
-          model_input_snapshot_buf,
-          model_input_snapshot_srv,
-          model_input_snapshot_error_logged,
-          model_input_snapshot_retry_frames,
-          "model-input"
-        );
-        composite_snapshots_valid = composite_depth_runtime_provenance &&
-                                    raw_snapshot_valid &&
-                                    model_input_snapshot_valid;
-      }
+      const auto completed = complete_ready_pending(
+        d3d_timer, snapshot_debug_inputs && !gpu_undecided_postprocess_pending()
+      );
       mark_d3d_pre_start(d3d_timer);
       end_d3d_perf(d3d_timer);
-      const auto completed = consume_pending_completion(
-        input_domain_reset,
-        {
-          .raw_model_depth = raw_snapshot_valid,
-          .model_input = model_input_snapshot_valid,
-          .composite = composite_snapshots_valid,
-          .coordinate = coordinate_snapshot_valid,
-        }
-      );
       return make_result(completed);
     }
 
@@ -8924,7 +9103,9 @@ namespace models {
       bool snapshot_debug_inputs,
       const bool allow_wait,
       const std::chrono::steady_clock::time_point deadline,
-      const std::uint32_t max_queries
+      const std::uint32_t max_queries,
+      const bool allow_completion_notification,
+      const pending_depth_source_access_t source_access
     ) {
       readiness_preflighted = false;
       auto &cuda = cuda_driver_api::get();
@@ -8932,7 +9113,10 @@ namespace models {
       const bool use_inference_events = inference_event_poll_available;
       const bool repeated_wait_allowed = allow_wait && use_inference_events;
       pending_depth_poll_result polled;
-      if (!has_previous_frame) {
+#ifdef SUNSHINE_TESTS
+      polled.notification_callback_pending = root_completion_notification.callback_pending();
+#endif
+      if (!pending_root) {
         polled.result = make_result();
         polled.ready = true;
         return polled;
@@ -8946,6 +9130,7 @@ namespace models {
 
       const auto query_limit = std::max<std::uint32_t>(1u, max_queries);
       constexpr auto repeated_query_interval = std::chrono::microseconds {50};
+      constexpr auto deadline_poll_tail = std::chrono::milliseconds {1};
       while (true) {
         // The first joined query is always immediate. Before every repeated query, preserve the
         // absolute deadline even if the thread was descheduled beyond its intended poll interval.
@@ -8980,13 +9165,38 @@ namespace models {
               return polled;
             }
             polled.wait_attempted = true;
-            // Do not burn the query fuse faster than the GPU can make useful progress. Yield until
-            // the next 50 us query point, capped by the absolute deadline; no sleeping primitive
-            // can overshoot the budget unnoticed because steady_clock is checked every turn.
+            // Keep the final portion of the budget on the 50 us query cadence. The notification
+            // is a wake hint; only another literal joined query can prove release of the root.
             const auto next_query_at = std::min(
               deadline,
               now + repeated_query_interval
             );
+            const auto notification_cutoff = deadline - deadline_poll_tail;
+            if (
+              allow_completion_notification && !completion_notification_disabled &&
+              polled.query_count == 1u && next_query_at < notification_cutoff &&
+              !independent_depth_release_frame && platf::host_sbs_completion_wait_available()
+            ) {
+              const auto armed = root_completion_notification.arm(cuda, depth_inference_done_event);
+#ifdef SUNSHINE_TESTS
+              polled.notification_callback_pending |= root_completion_notification.callback_pending();
+              polled.notification_armed = armed == CUDA_SUCCESS;
+#endif
+              if (armed && *armed != CUDA_SUCCESS) {
+                (void) observe_joined_cuda_failure("completion notification", *armed, true);
+                polled.result = make_result();
+                polled.ready = true;
+                polled.wait_duration = std::chrono::steady_clock::now() - started;
+                return polled;
+              }
+              if (armed && std::chrono::steady_clock::now() < notification_cutoff) {
+#ifdef SUNSHINE_TESTS
+                polled.notification_waited = true;
+#endif
+                const bool waited = root_completion_notification.wait_until(notification_cutoff);
+                completion_notification_disabled = !waited || std::chrono::steady_clock::now() >= deadline;
+              }
+            }
             while (std::chrono::steady_clock::now() < next_query_at) {
               std::this_thread::yield();
             }
@@ -9003,6 +9213,9 @@ namespace models {
         }
         break;
       }
+      if (source_access.acquire && !source_access.acquire(source_access.owner)) {
+        return polled;
+      }
       polled.result = finish_pending(
         color_space,
         snapshot_debug_inputs,
@@ -9014,14 +9227,17 @@ namespace models {
 
     pending_depth_poll_result try_finish_pending_nonblocking(
       input_color_space color_space,
-      bool snapshot_debug_inputs = false
+      const bool snapshot_debug_inputs,
+      const pending_depth_source_access_t source_access
     ) {
       return try_finish_pending(
         color_space,
         snapshot_debug_inputs,
         false,
         std::chrono::steady_clock::time_point {},
-        1u
+        1u,
+        false,
+        source_access
       );
     }
 
@@ -9029,14 +9245,18 @@ namespace models {
       input_color_space color_space,
       const std::chrono::steady_clock::time_point deadline,
       const std::uint32_t max_queries,
-      bool snapshot_debug_inputs = false
+      bool snapshot_debug_inputs,
+      bool allow_completion_notification,
+      const pending_depth_source_access_t source_access
     ) {
       return try_finish_pending(
         color_space,
         snapshot_debug_inputs,
         true,
         deadline,
-        max_queries
+        max_queries,
+        allow_completion_notification,
+        source_access
       );
     }
 
@@ -9149,15 +9369,11 @@ namespace models {
       const std::uint32_t raw_identity[4] = {0xFFFFFFFFu, 0u, 0u, 0u};
       const float zero4[4] = {0.0f, 0.0f, 0.0f, 0.0f};
       const UINT zero_uint4[4] = {0u, 0u, 0u, 0u};
-      const std::array<std::uint32_t, 256> zero_hist {};
       if (minmax_raw_buf) {
         context->UpdateSubresource(minmax_raw_buf.Get(), 0, nullptr, raw_identity, 0, 0);
       }
       if (minmax_ema_buf) {
         context->UpdateSubresource(minmax_ema_buf.Get(), 0, nullptr, zero4, 0, 0);
-      }
-      if (hist_buf) {
-        context->UpdateSubresource(hist_buf.Get(), 0, nullptr, zero_hist.data(), 0, 0);
       }
       if (depth_health_state_buf) {
         context->UpdateSubresource(
@@ -9177,24 +9393,7 @@ namespace models {
           near_identical_history_owner.uav.Get(), zero_uint4
         );
       }
-      if (previous_appearance_ordinal_uav) {
-        context->ClearUnorderedAccessViewUint(
-          previous_appearance_ordinal_uav.Get(), zero_uint4
-        );
-      }
-      if (depth_uav) {
-        context->ClearUnorderedAccessViewFloat(depth_uav.Get(), zero4);
-      }
-      if (depth_previous_uav) {
-        context->ClearUnorderedAccessViewFloat(depth_previous_uav.Get(), zero4);
-      }
-      if (ema_motion_mask_uav) {
-        context->ClearUnorderedAccessViewUint(ema_motion_mask_uav.Get(), zero_uint4);
-      }
-      if (tensor_previous_exclusion_uav) {
-        context->ClearUnorderedAccessViewUint(
-          tensor_previous_exclusion_uav.Get(), zero_uint4);
-      }
+      clear_normalized_depth_diagnostics();
       if (subtitle_locator_state_uav) {
         context->ClearUnorderedAccessViewUint(
           subtitle_locator_state_uav.Get(),
@@ -9225,18 +9424,21 @@ namespace models {
              depth_coordinate_v2_vertical_majorant_uav.Get(),
              depth_coordinate_v2_vertical_conditioned_uav.Get(),
              depth_coordinate_v2_final_uav.Get(),
-             subtitle_conditioned_uav.Get(),
            }) {
         if (uav) {
           context->ClearUnorderedAccessViewFloat(uav, zero4);
         }
       }
+      if (const auto &diagnostics = subtitle_conditioning_diagnostics) {
+        context->ClearUnorderedAccessViewFloat(diagnostics->final.uav.Get(), zero4);
+      }
+      completed_subtitle_conditioning_diagnostics = false;
     }
 
     bool prepare_pending_input_domain() {
       const bool changed = processed_input_domain.update(
-        pending_input_region,
-        pending_color_space
+        pending_root->input_region,
+        pending_root->color_space
       );
       if (changed) {
         reset_temporal_state_for_input_domain();
@@ -9244,9 +9446,80 @@ namespace models {
       return changed;
     }
 
-    // Normalize the finished raw disparity in tensor_out_buf into depth_tex: the scale
-    // passes (min/max reduction, permanent percentile histogram, EMA fold) followed by the
-    // mapping/temporal-EMA pass. GPU-resident throughout, no CPU readback.
+    void clear_normalized_depth_diagnostics() {
+      if (!normalized_depth.ready() || !previous_normalized_depth.ready() || !ema_motion_mask.ready()) {
+        return;
+      }
+      const float zero_depth[4] {};
+      const UINT zero_mask[4] {};
+      context->ClearUnorderedAccessViewFloat(normalized_depth.uav.Get(), zero_depth);
+      context->ClearUnorderedAccessViewFloat(previous_normalized_depth.uav.Get(), zero_depth);
+      context->ClearUnorderedAccessViewUint(ema_motion_mask.uav.Get(), zero_mask);
+    }
+
+    void dispatch_normalized_depth_diagnostics() {
+      // Rotate the two identically provisioned depth textures. The old current side becomes the
+      // immutable previous-frame SRV, while the older side becomes this completion's UAV target.
+      // This preserves the exact EMA history without a full-field CopyResource every frame.
+      std::swap(normalized_depth, previous_normalized_depth);
+
+      // Buffer to Texture: normalize disparity, classify the deterministic moving-edge
+      // stencil, apply temporal EMA, and publish the diagnostic mask in one content dispatch.
+      // Consuming the mask decision in-register removes the R32 mask round trip while retaining
+      // the exact independently observable mask. Contain-fit padding is filled afterward by a
+      // lightweight UAV copy entry point, avoiding repeated boundary-stencil work. Full-content
+      // fields remain one dispatch. MinMaxEma.frame_state makes the first valid frame snap and
+      // makes an all-invalid frame hold entirely on the GPU.
+      context->CSSetShader(buffer_to_tex_cs.Get(), nullptr, 0);
+      context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
+      ID3D11ShaderResourceView *bt_srvs[4] = {
+        tensor_out_srv.Get(),
+        minmax_ema_srv.Get(),
+        previous_normalized_depth.srv.Get(),
+        analysis_domain.srv.Get(),
+      };
+      ID3D11UnorderedAccessView *bt_uavs[2] = {
+        normalized_depth.uav.Get(),
+        ema_motion_mask.uav.Get(),
+      };
+      context->CSSetShaderResources(0, 4, bt_srvs);
+      context->CSSetUnorderedAccessViews(0, 2, bt_uavs, nullptr);
+
+      dispatch_infer_postprocess(
+        (target_w + 15) / 16,
+        (target_h + 15) / 16,
+        1u,
+        near_identical_gpu_infer_grid16_byte_offset
+      );
+
+      const auto &tensor_content = pending_root->input_region.tensor_content;
+      const bool has_synthetic_padding =
+        tensor_content.left != 0u || tensor_content.top != 0u ||
+        tensor_content.right != target_w || tensor_content.bottom != target_h;
+      if (has_synthetic_padding) {
+        // The preceding dispatch has completed its UAV accesses before this dispatch begins.
+        // pad_main reads only an already-written admitted boundary texel and writes one excluded
+        // destination, so no cross-thread or cross-group dependency exists inside this pass.
+        context->CSSetShader(buffer_to_tex_pad_cs.Get(), nullptr, 0);
+        dispatch_infer_postprocess(
+          (target_w + 15) / 16,
+          (target_h + 15) / 16,
+          1u,
+          near_identical_gpu_infer_grid16_byte_offset
+        );
+      }
+
+      ID3D11UnorderedAccessView *null_uav2[2] = {nullptr, nullptr};
+      ID3D11ShaderResourceView *null_srvs[4] = {
+        nullptr, nullptr, nullptr, nullptr
+      };
+      context->CSSetUnorderedAccessViews(0, 2, null_uav2, nullptr);
+      context->CSSetShaderResources(0, 4, null_srvs);
+      dispatch_near_identical_reuse_depth();
+    }
+
+    // Publish the live V2 depth and subtitle state from finished raw disparity. The shared
+    // scale passes also supply the evaluator's optional normalized texture and motion mask.
     bool normalize_depth_output(
       d3d_perf_slot *perf_slot,
       const bool input_domain_reset
@@ -9271,7 +9544,7 @@ namespace models {
       // event follows both children and every interop-unmap tail, so both outputs are safe before
       // any next-frame mapping reuses the fixed buffers.
       const bool subtitle_work_suppressed =
-        depth_optional_work_suppresses_subtitle(pending_optional_work);
+        depth_optional_work_suppresses_subtitle(pending_root->optional_work);
       // Native move/resize and ineligible video contexts keep depth/camera live and publish
       // fresh Base. Move/resize freezes same-context subtitle memory; context admission separately
       // clears subtitle state when entering/leaving hard disable or changing the scope epoch.
@@ -9279,7 +9552,7 @@ namespace models {
       auto trace_host_subtitle_outcome =
         host_sbs_gpu_trace::host_subtitle_outcome_e::suppressed;
       if (subtitle_work_suppressed) {
-        pending_ocr_submitted = false;
+        pending_root->ocr_armed = false;
       } else {
         ocr_record_submitted = dispatch_ocr_postprocess();
         if (ocr_record_submitted) {
@@ -9300,90 +9573,21 @@ namespace models {
         }
         return false;
       }
-      // 3a. One shared traversal produces V2 finite-value moments and the older non-negative
-      // normalization reduction. Frame resolve publishes both FrameStats and MinMaxRaw before the
-      // histogram consumes the latter. This remains GPU-resident and introduces no readback.
-      const bool frame_stats_ready = dispatch_parallax_v2_frame_stats(perf_slot);
-      if (frame_stats_ready && depth_minmax_ema_cs && minmax_raw_uav && minmax_ema_uav) {
-        // The shared raw scan already overwrote this independent normalization histogram.
-        // Pass B: fold into the EMA'd bounds and reset the accumulators (1 thread).
-        context->CSSetShader(depth_minmax_ema_cs.Get(), nullptr, 0);
-        ID3D11UnorderedAccessView *ema_uavs[4] = {
-          minmax_ema_uav.Get(),
-          minmax_raw_uav.Get(),
-          hist_uav.Get(),
-          depth_health_state_uav.Get(),
-        };
-        context->CSSetUnorderedAccessViews(0, 4, ema_uavs, nullptr);
-        dispatch_infer_postprocess(
-          1u, 1u, 1u, near_identical_gpu_infer_one_byte_offset
-        );
-
-        ID3D11UnorderedAccessView *null_uav2[4] = {nullptr, nullptr, nullptr, nullptr};
-        context->CSSetUnorderedAccessViews(0, 4, null_uav2, nullptr);
+      // Resolve quantiles, normalization and camera state from the shared scan before mapping.
+      // The authenticated zero-group argument preserves all three on depth reuse.
+      if (!dispatch_parallax_v2_frame_publication(perf_slot)) {
+        mark_terminal_failure();
+        return false;
       }
 
-      // Rotate the two identically provisioned depth textures. The old current side becomes the
-      // immutable previous-frame SRV, while the older side becomes this completion's UAV target.
-      // This preserves the exact EMA history without a full-field CopyResource every frame.
-      std::swap(depth_tex, depth_previous_tex);
-      std::swap(depth_uav, depth_previous_uav);
-      std::swap(depth_srv, depth_previous_srv);
-
-      // 3b. Buffer to Texture: normalize disparity, classify the deterministic moving-edge
-      // stencil, apply temporal EMA, and publish the diagnostic mask in one content dispatch.
-      // Consuming the mask decision in-register removes the R32 mask round trip while retaining
-      // the exact independently observable mask. Contain-fit padding is filled afterward by a
-      // lightweight UAV copy entry point, avoiding repeated boundary-stencil work. Full-content
-      // fields remain one dispatch. MinMaxEma.frame_state makes the first valid frame snap and
-      // makes an all-invalid frame hold entirely on the GPU.
-      context->CSSetShader(buffer_to_tex_cs.Get(), nullptr, 0);
-      context->CSSetConstantBuffers(0, 1, cbuffer.GetAddressOf());
-      ID3D11ShaderResourceView *bt_srvs[4] = {
-        tensor_out_srv.Get(),
-        minmax_ema_srv.Get(),
-        depth_previous_srv.Get(),
-        tensor_exclusion_srv.Get(),
-      };
-      ID3D11UnorderedAccessView *bt_uavs[2] = {
-        depth_uav.Get(),
-        ema_motion_mask_uav.Get(),
-      };
-      context->CSSetShaderResources(0, 4, bt_srvs);
-      context->CSSetUnorderedAccessViews(0, 2, bt_uavs, nullptr);
-
-      dispatch_infer_postprocess(
-        (target_w + 15) / 16,
-        (target_h + 15) / 16,
-        1u,
-        near_identical_gpu_infer_grid16_byte_offset
-      );
-
-      const auto &tensor_content = pending_input_region.tensor_content;
-      const bool has_synthetic_padding =
-        tensor_content.left != 0u || tensor_content.top != 0u ||
-        tensor_content.right != target_w || tensor_content.bottom != target_h;
-      if (has_synthetic_padding) {
-        // The preceding dispatch has completed its UAV accesses before this dispatch begins.
-        // pad_main reads only an already-written admitted boundary texel and writes one excluded
-        // destination, so no cross-thread or cross-group dependency exists inside this pass.
-        context->CSSetShader(buffer_to_tex_pad_cs.Get(), nullptr, 0);
-        dispatch_infer_postprocess(
-          (target_w + 15) / 16,
-          (target_h + 15) / 16,
-          1u,
-          near_identical_gpu_infer_grid16_byte_offset
-        );
+      if (normalized_depth_diagnostics_enabled) {
+        dispatch_normalized_depth_diagnostics();
       }
-
-      ID3D11UnorderedAccessView *null_uav2[2] = {nullptr, nullptr};
-      ID3D11ShaderResourceView *null_srvs[4] = {
-        nullptr, nullptr, nullptr, nullptr
-      };
-      context->CSSetUnorderedAccessViews(0, 2, null_uav2, nullptr);
-      context->CSSetShaderResources(0, 4, null_srvs);
-      dispatch_near_identical_reuse_depth();
-      if (!upload_near_identical_history_owner_constants()) {
+      // Only an explicitly maintained depth-only baseline needs the suppressed input tensor.
+      // The depth receipt still needs its owner even when the map skips the copy.
+      const bool skip_input_history =
+        subtitle_work_suppressed && !pending_root->depth_only_history && !subtitle_publication_branch_opaque;
+      if (!upload_near_identical_history_owner_constants(skip_input_history)) {
         fail_gpu_conditional_bridge_once(
           "GPU inference-observation history-owner constants failed"
         );
@@ -9391,44 +9595,23 @@ namespace models {
       }
 
       if (parallax_v2_producer_active) {
-        // Together with the earlier fused frame-stats query pair, this interval covers the same
-        // V2 stats/state/geometry work as before. Both remain inside depth_postprocess_gpu, and the
-        // diagnostics resolver sums the discontiguous intervals so benchmark semantics do not move.
+        // Join this mapping interval with the earlier frame-publication interval. Normalized
+        // diagnostic textures are outside the sum. Both intervals sit inside depth_postprocess_gpu.
         mark_d3d_parallax_start(perf_slot);
       }
-      const bool base_ready = frame_stats_ready && dispatch_parallax_v2_producer(perf_slot);
-      bool trace_condition_executed = false;
-      if (base_ready) {
-        bool conditioner_ready = false;
-        if (!subtitle_work_suppressed) {
-          conditioner_ready = dispatch_subtitle_conditioner(
-            ocr_record_submitted,
-            input_domain_reset,
-            perf_slot
-          );
-          if (!conditioner_ready) {
-            mark_terminal_failure();
-            return false;
-          }
-          // For an opaque root this call submits only receipt-gated indirect work. The CPU must
-          // not claim that the device executed it; the trace shader derives that from CBRG.
-          trace_condition_executed = !subtitle_publication_branch_opaque;
+      if (!dispatch_parallax_v2_producer(perf_slot, skip_input_history)) {
+        mark_terminal_failure();
+        return false;
+      }
+      if (subtitle_work_suppressed) {
+        // Preserve subtitle history and expose the new Base without a duplicate texture write.
+        completed_subtitle_conditioning_diagnostics = false;
+        if (subtitle_conditioning_diagnostics_always && !ensure_subtitle_conditioning_diagnostics()) {
+          BOOST_LOG(warning) << "Host SBS conditioned parallax diagnostic resources are unavailable.";
+          mark_terminal_failure();
+          return false;
         }
-        if (!conditioner_ready) {
-          // Suppressed/disabled work skips the conditioner and advances no OCR/SLR state.
-          // Publish the fresh immutable Base through the same complete out-of-place texture used
-          // by every transaction class. Non-suppressed conditioner failure returned terminal above.
-          if (subtitle_conditioned_tex && depth_coordinate_v2_final_tex) {
-            context->CopyResource(
-              subtitle_conditioned_tex.Get(), depth_coordinate_v2_final_tex.Get()
-            );
-            completed_subtitle_conditioning_diagnostics = false;
-          } else {
-            mark_terminal_failure();
-            return false;
-          }
-        }
-      } else {
+      } else if (!dispatch_subtitle_conditioner(ocr_record_submitted, input_domain_reset, perf_slot)) {
         mark_terminal_failure();
         return false;
       }
@@ -9441,7 +9624,8 @@ namespace models {
         .ocr_record_submitted =
           !subtitle_publication_branch_opaque && ocr_record_submitted,
         .subtitle_work_suppressed = subtitle_work_suppressed,
-        .condition_executed = trace_condition_executed,
+        // For opaque roots the trace shader derives execution from the device receipt.
+        .condition_executed = !subtitle_publication_branch_opaque && !subtitle_work_suppressed,
         .subtitle_branch_gated =
           subtitle_publication_branch_opaque && !subtitle_work_suppressed,
         .input_domain_reset = input_domain_reset,
@@ -9489,7 +9673,7 @@ namespace models {
       throughput_stats_calls++;
     }
 
-    // Query-only producer preflight. It deliberately leaves has_previous_frame and the finished
+    // Query-only producer preflight. It leaves the accepted root and the finished
     // output buffer untouched; estimate() consumes that result after the caller has copied the
     // exact color frame that will own the next inference.
     bool can_accept() {
@@ -9554,12 +9738,6 @@ namespace models {
         return {};
       }
       completed_depth_metadata_t completed;
-      bool raw_snapshot_valid = false;
-      bool model_input_snapshot_valid = false;
-      bool composite_snapshots_valid = false;
-      bool coordinate_snapshot_valid = false;
-      bool completed_input_domain_reset = false;
-      bool completed_gpu_undecided = false;
       // Dump may override temporary move/size suppression, but never enables an ineligible
       // subtitle context. Suppressed dump sections remain explicitly unused in the package.
       const auto accepted_optional_work =
@@ -9756,43 +9934,6 @@ namespace models {
                          &tensor_previous_input_uav
                        ));
 
-        // One capture-domain point maxRGB scalar per model texel. Keeping it outside TensorRT's
-        // three-plane input preserves a pre-tone-map exposure ordinal without changing the engine
-        // binding size. Current/history are copied in lockstep with the valid NCHW/depth pair.
-        auto appearance_desc = buf_desc;
-        appearance_desc.ByteWidth = target_w * target_h * sizeof(float);
-        resources_ok = resources_ok &&
-                       SUCCEEDED(device->CreateBuffer(
-                         &appearance_desc,
-                         nullptr,
-                         &appearance_ordinal_buf
-                       )) &&
-                       SUCCEEDED(device->CreateShaderResourceView(
-                         appearance_ordinal_buf.Get(),
-                         nullptr,
-                         &appearance_ordinal_srv
-                       )) &&
-                       SUCCEEDED(device->CreateUnorderedAccessView(
-                         appearance_ordinal_buf.Get(),
-                         nullptr,
-                         &appearance_ordinal_uav
-                       )) &&
-                       SUCCEEDED(device->CreateBuffer(
-                         &appearance_desc,
-                         nullptr,
-                         &previous_appearance_ordinal_buf
-                       )) &&
-                       SUCCEEDED(device->CreateShaderResourceView(
-                         previous_appearance_ordinal_buf.Get(),
-                         nullptr,
-                         &previous_appearance_ordinal_srv
-                       )) &&
-                       SUCCEEDED(device->CreateUnorderedAccessView(
-                         previous_appearance_ordinal_buf.Get(),
-                         nullptr,
-                         &previous_appearance_ordinal_uav
-                       ));
-
         const std::size_t output_logical_bytes =
           static_cast<std::size_t>(target_w) * target_h * sizeof(float);
         const std::optional<std::size_t> output_allocation_bytes =
@@ -9817,44 +9958,18 @@ namespace models {
                          &tensor_out_srv
                        ));
 
-        D3D11_TEXTURE2D_DESC tex_desc = {};
-        tex_desc.Width = target_w;
-        tex_desc.Height = target_h;
-        tex_desc.MipLevels = 1;
-        tex_desc.ArraySize = 1;
-        tex_desc.Format = DXGI_FORMAT_R32_FLOAT;
-        tex_desc.SampleDesc.Count = 1;
-        tex_desc.Usage = D3D11_USAGE_DEFAULT;
-        tex_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-        resources_ok = resources_ok &&
-                       SUCCEEDED(device->CreateTexture2D(&tex_desc, nullptr, &depth_tex)) &&
-                       SUCCEEDED(device->CreateUnorderedAccessView(depth_tex.Get(), nullptr, &depth_uav)) &&
-                       SUCCEEDED(device->CreateShaderResourceView(depth_tex.Get(), nullptr, &depth_srv));
+        if (normalized_depth_diagnostics_enabled) {
+          resources_ok = resources_ok &&
+                         create_shader_texture(target_w, target_h, DXGI_FORMAT_R32_FLOAT, normalized_depth) &&
+                         create_shader_texture(target_w, target_h, DXGI_FORMAT_R32_FLOAT, previous_normalized_depth) &&
+                         create_shader_texture(target_w, target_h, DXGI_FORMAT_R32_UINT, ema_motion_mask);
+        }
 
-        // The two ordinary depth fields rotate roles after every completed inference. Give both
-        // identical views so rotation replaces a full-field copy without changing shader bindings.
-        resources_ok = resources_ok &&
-                       SUCCEEDED(device->CreateTexture2D(&tex_desc, nullptr, &depth_previous_tex)) &&
-                       SUCCEEDED(device->CreateUnorderedAccessView(
-                         depth_previous_tex.Get(),
-                         nullptr,
-                         &depth_previous_uav
-                       )) &&
-                       SUCCEEDED(device->CreateShaderResourceView(depth_previous_tex.Get(), nullptr, &depth_previous_srv));
-
-        auto mask_desc = tex_desc;
-        mask_desc.Format = DXGI_FORMAT_R32_UINT;
-        mask_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-        resources_ok = resources_ok &&
-                       SUCCEEDED(device->CreateTexture2D(&mask_desc, nullptr, &ema_motion_mask_tex)) &&
-                       SUCCEEDED(device->CreateUnorderedAccessView(ema_motion_mask_tex.Get(), nullptr, &ema_motion_mask_uav)) &&
-                       SUCCEEDED(device->CreateShaderResourceView(ema_motion_mask_tex.Get(), nullptr, &ema_motion_mask_srv)) &&
-                       SUCCEEDED(device->CreateTexture2D(&mask_desc, nullptr, &tensor_exclusion_tex)) &&
-                       SUCCEEDED(device->CreateUnorderedAccessView(tensor_exclusion_tex.Get(), nullptr, &tensor_exclusion_uav)) &&
-                       SUCCEEDED(device->CreateShaderResourceView(tensor_exclusion_tex.Get(), nullptr, &tensor_exclusion_srv)) &&
-                       SUCCEEDED(device->CreateTexture2D(&mask_desc, nullptr, &tensor_previous_exclusion_tex)) &&
-                       SUCCEEDED(device->CreateUnorderedAccessView(tensor_previous_exclusion_tex.Get(), nullptr, &tensor_previous_exclusion_uav)) &&
-                       SUCCEEDED(device->CreateShaderResourceView(tensor_previous_exclusion_tex.Get(), nullptr, &tensor_previous_exclusion_srv));
+        constexpr auto domain_words =
+          sizeof(host_sbs_v2_gpu::analysis_domain_record_t) / sizeof(std::uint32_t);
+        resources_ok = resources_ok && create_shader_uint_buffer(
+          domain_words, analysis_domain.buffer, analysis_domain.srv, analysis_domain.uav, domain_words
+        );
 
         if (!resources_ok) {
           BOOST_LOG(error)
@@ -9871,19 +9986,11 @@ namespace models {
           return {};
         }
 
-        // Clear depth and model-input history so the sole fused preprocess always observes
-        // initialized storage, including the first force/bootstrap frame. Force mode exits before
-        // reading history; this clear remains defense in depth and defines first compare state.
-        const float clear_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-        const UINT clear_uint[4] = {0u, 0u, 0u, 0u};
-        context->ClearUnorderedAccessViewUint(
-          tensor_previous_input_uav.Get(), clear_uint
-        );
-        context->ClearUnorderedAccessViewFloat(depth_uav.Get(), clear_color);
-        context->ClearUnorderedAccessViewFloat(depth_previous_uav.Get(), clear_color);
-        context->ClearUnorderedAccessViewUint(ema_motion_mask_uav.Get(), clear_uint);
-        context->ClearUnorderedAccessViewUint(tensor_exclusion_uav.Get(), clear_uint);
-        context->ClearUnorderedAccessViewUint(tensor_previous_exclusion_uav.Get(), clear_uint);
+        // Initialize the comparison history before the first eligible fused preprocess.
+        const UINT clear_uint[4] {};
+        context->ClearUnorderedAccessViewUint(tensor_previous_input_uav.Get(), clear_uint);
+        clear_normalized_depth_diagnostics();
+        context->ClearUnorderedAccessViewUint(analysis_domain.uav.Get(), clear_uint);
 
         auto res1 = cuda.cuGraphicsD3D11RegisterResource(&cuda_in_res, tensor_in_buf.Get(), 0);
         auto res2 = cuda.cuGraphicsD3D11RegisterResource(&cuda_out_res, tensor_out_buf.Get(), 0);
@@ -9907,17 +10014,14 @@ namespace models {
         }
       }
 
-      // Shared constants for buffer_to_tex_cs, the min/max passes and rgb_to_nchw_cs.
-      // Session-constant, so the buffer is built once (immutable), not mapped per frame.
-      // The caller's color_space can already describe a new mode while the pending raw field and
-      // retained source still belong to the previous one. Always interpret that completed pair
-      // with the mode accepted alongside it.
+      // Keep the pending transfer and crop constants through its publication and Dump copies.
+      // With no preceding observation, prepare the first submission's constants directly.
       ensure_cbuffers(
-        has_previous_frame ? pending_color_space : color_space,
-        has_previous_frame ? pending_input_region : input_region
+        pending_root ? pending_root->color_space : color_space,
+        pending_root ? pending_root->input_region : input_region
       );
       ensure_source_region_cbuffer(
-        has_previous_frame ? pending_input_region : input_region
+        pending_root ? pending_root->input_region : input_region
       );
       if (!cbuffer || !source_region_cbuffer) {
         mark_terminal_failure();
@@ -9925,95 +10029,28 @@ namespace models {
       }
 
       auto *d3d_timer = diagnostics_enabled ?
-                          begin_d3d_perf(has_previous_frame, true) :
+                          begin_d3d_perf(pending_root.has_value(), true) :
                           nullptr;
 
       // tensor_out_buf holds the finished raw disparity from the previous asynchronous submit
       // (fully unmapped from CUDA), so consuming it here never blocks the encode thread. The
       // caller uses completed_frame_id to select the color slot that produced this exact result.
-      if (has_previous_frame) {
-        completed_gpu_undecided = gpu_undecided_postprocess_pending();
-        completed_input_domain_reset = pending_same_source_gpu_postprocess_queued ?
-          pending_same_source_gpu_input_domain_reset : prepare_pending_input_domain();
-        completion_dump_snapshot_requested = snapshot_raw_model_depth;
-        if (!pending_same_source_gpu_postprocess_queued && !normalize_depth_output(
-              d3d_timer,
-              completed_input_domain_reset
-            )) {
-          mark_d3d_post_end(d3d_timer);
+      if (pending_root) {
+        completed = complete_ready_pending(d3d_timer, snapshot_raw_model_depth);
+        if (!completed.valid) {
           mark_d3d_pre_start(d3d_timer);
           end_d3d_perf(d3d_timer);
           return {};
         }
-        // Restore the newly supplied frame's transfer mode before its full-resolution preprocess.
-        ensure_cbuffers(color_space, input_region);
-        ensure_source_region_cbuffer(input_region);
-        if (!cbuffer || !source_region_cbuffer) {
-          mark_terminal_failure();
-          return {};
-        }
-        // Measure the complete publication, including enabled counter/trace production and the
-        // single routine readback snapshot. Explicit Dump 3D exports remain outside this interval.
-        dispatch_pending_gpu_completion_trace();
-        snapshot_pending_publication_receipt();
-        pending_gpu_trace_append = {};
-        mark_d3d_post_end(d3d_timer);
-        if (snapshot_raw_model_depth && !completed_gpu_undecided) {
-          // The diagnostic map belongs to the completed raw tensor, including its exact content
-          // rectangle. The current-frame preprocess has not run yet, so the exclusion texture is
-          // still the same completed authority as well.
-          ensure_cbuffers(pending_color_space, pending_input_region);
-          coordinate_snapshot_valid =
-            dispatch_parallax_v2_coordinate_diagnostic();
-          // tensor_in_buf and tensor_out_buf still own the exact completed frame here. Preserve
-          // both before the current frame's preprocess and CUDA mapping reuse those allocations.
-          raw_snapshot_valid = snapshot_buffer(
-            tensor_out_buf.Get(),
-            raw_snapshot_buf,
-            raw_snapshot_srv,
-            raw_snapshot_error_logged,
-            raw_snapshot_retry_frames,
-            "raw-depth",
-            static_cast<UINT>(target_w * target_h)
-          );
-          model_input_snapshot_valid = snapshot_buffer(
-            tensor_in_buf.Get(),
-            model_input_snapshot_buf,
-            model_input_snapshot_srv,
-            model_input_snapshot_error_logged,
-            model_input_snapshot_retry_frames,
-            "model-input"
-          );
-          composite_snapshots_valid = composite_depth_runtime_provenance &&
-                                      raw_snapshot_valid &&
-                                      model_input_snapshot_valid;
-          ensure_cbuffers(color_space, input_region);
-          ensure_source_region_cbuffer(input_region);
-          if (!cbuffer || !source_region_cbuffer) {
-            mark_terminal_failure();
-            return {};
-          }
-        }
-        // Every debug copy is now ordered after this completion's consumers and before estimator
-        // working resources can be reused.
-        completed = consume_pending_completion(
-          completed_input_domain_reset,
-          {
-            .raw_model_depth = raw_snapshot_valid,
-            .model_input = model_input_snapshot_valid,
-            .composite = composite_snapshots_valid,
-            .coordinate = coordinate_snapshot_valid,
-          }
-        );
       } else {
         mark_d3d_post_end(d3d_timer);
       }
 
-      const bool subtitle_context_disabled =
-        accepted_optional_work == depth_optional_work_mode_e::disable_subtitle;
-      const bool subtitle_context_changed =
-        subtitle_context_generation != accepted_subtitle_context_generation ||
-        subtitle_context_disabled != accepted_subtitle_context_disabled;
+      const subtitle_context_t subtitle_context {
+        subtitle_context_generation,
+        accepted_optional_work == depth_optional_work_mode_e::disable_subtitle,
+      };
+      const bool subtitle_context_changed = subtitle_context != completed_input.subtitle_context;
       if (completed.valid && subtitle_context_changed) {
         // This call must hand the preceding publication to its caller before clearing any of
         // the singleton subtitle/final resources it owns. Admit the changed context on a later
@@ -10039,6 +10076,17 @@ namespace models {
         mark_d3d_pre_start(d3d_timer);
         end_d3d_perf(d3d_timer);
         return make_result(completed);
+      }
+
+      if (completed.valid) {
+        ensure_cbuffers(color_space, input_region);
+        ensure_source_region_cbuffer(input_region);
+        if (!cbuffer || !source_region_cbuffer) {
+          mark_terminal_failure();
+          mark_d3d_pre_start(d3d_timer);
+          end_d3d_perf(d3d_timer);
+          return {};
+        }
       }
 
       if (!ocr_available) {
@@ -10078,7 +10126,7 @@ namespace models {
       // resumes; it must not resize or discard frozen subtitle memory.
       const bool contour_resources_ready =
         accepted_optional_work == depth_optional_work_mode_e::suppress_subtitle ||
-        (subtitle_context_disabled ?
+        (subtitle_context.disabled ?
            ensure_subtitle_contour_textures(1u, 1u) :
            ensure_subtitle_contour_textures(input_region.width(), input_region.height()));
       if (!contour_resources_ready) {
@@ -10123,6 +10171,8 @@ namespace models {
         accepted_optional_work,
         ocr_frame_eligible
       );
+      const bool depth_only_history = adaptive_reuse_request.depth_only_history &&
+        accepted_optional_work == depth_optional_work_mode_e::disable_subtitle && !snapshot_raw_model_depth;
       // The CPU may only classify a frame as GPU-undecided from host-owned facts. The wrapper is
       // prepared after the exact D3D interop pointers are mapped; no pre-existing source graph is
       // an admission prerequisite and no admitted class may bypass the wrapper.
@@ -10137,19 +10187,19 @@ namespace models {
         gpu_undecided_baseline_authorized(adaptive_reuse_request) &&
         frame_id > adaptive_reuse_request.baseline_frame_id &&
         !gpu_undecided_requires_force_infer_refresh &&
-        !ocr_signature_refresh_required &&
+        (!ocr_signature_refresh_required || depth_only_history) &&
         !subtitle_context_changed &&
         // Every new OCR-eligible source observation runs the joined depth/subtitle path.
         // Similarity reuse would otherwise freeze four-observation pixel confirmation.
         !ocr_frame_eligible &&
-        depth_optional_work_allows_gpu_undecided(accepted_optional_work) &&
+        depth_optional_work_allows_gpu_undecided(accepted_optional_work, adaptive_reuse_request.depth_only_history) &&
         !snapshot_raw_model_depth && current_shape_matches &&
         processed_input_domain.matches_analysis_domain(input_region, color_space) &&
         input_region.tensor_content.valid({target_w, target_h});
       auto accepted_submission_class =
         gpu_undecided_host_candidate ?
-          pending_submission_class_e::gpu_undecided :
-          pending_submission_class_e::force_infer;
+          submission_class_e::gpu_undecided :
+          submission_class_e::force_infer;
       const std::uint64_t accepted_transaction_token =
         gpu_undecided_host_candidate ?
           adaptive_reuse_request.gpu_reuse_decision_token :
@@ -10173,10 +10223,19 @@ namespace models {
       mark_d3d_pre_start(d3d_timer);
       ID3D11ShaderResourceView *analysis_input_srv = input_srv;
 
-      // 1. The one authenticated fused entry point is the only RGB-to-NCHW runtime producer.
-      // Force/bootstrap/debug selects a uniform early exit after canonical preprocessing;
-      // GPU-undecided continues into comparison and tile reduction in the same dispatch.
-      context->CSSetShader(near_identical_fused_preprocess_cs.Get(), nullptr, 0u);
+      // The direct program is faster for small footprints after the area loop was unified.
+      // Use the shared tile for stronger downsampling when both axes fit its 48-cell extent.
+      const auto source_tile_axis_fits = [](std::uint32_t source, std::uint32_t content) {
+        return content != 0u && source > 2ull * content && 16ull * source <= 46ull * content;
+      };
+      const bool use_source_tile = near_identical_tiled_preprocess_cs &&
+        source_tile_axis_fits(input_region.width(), input_region.tensor_content.width()) &&
+        source_tile_axis_fits(input_region.height(), input_region.tensor_content.height());
+      auto *preprocess_shader = use_source_tile ?
+        near_identical_tiled_preprocess_cs.Get() : near_identical_fused_preprocess_cs.Get();
+      context->CSSetShader(preprocess_shader, nullptr, 0u);
+      // Force/bootstrap/debug exits after canonical preprocessing. GPU-undecided also writes
+      // comparison evidence in this dispatch.
       ID3D11Buffer *preprocess_cbuffers[3] = {
         cbuffer.Get(),
         gpu_undecided_host_candidate ?
@@ -10190,26 +10249,25 @@ namespace models {
         tensor_previous_input_srv.Get(),
       };
       context->CSSetShaderResources(0, 2, preprocess_srvs);
-      ID3D11UnorderedAccessView *preprocess_uavs[4] = {
+      ID3D11UnorderedAccessView *preprocess_uavs[3] = {
         tensor_in_uav.Get(),
-        appearance_ordinal_uav.Get(),
-        tensor_exclusion_uav.Get(),
+        analysis_domain.uav.Get(),
         near_identical_tile.uav.Get(),
       };
-      context->CSSetUnorderedAccessViews(0, 4, preprocess_uavs, nullptr);
+      context->CSSetUnorderedAccessViews(0, 3, preprocess_uavs, nullptr);
       context->Dispatch((target_w + 15) / 16, (target_h + 15) / 16, 1);
 
-      ID3D11UnorderedAccessView *null_uavs[4] = {};
+      ID3D11UnorderedAccessView *null_uavs[3] = {};
       ID3D11ShaderResourceView *null_srvs[2] = {};
       ID3D11Buffer *null_preprocess_cbuffers[3] = {};
-      context->CSSetUnorderedAccessViews(0, 4, null_uavs, nullptr);
+      context->CSSetUnorderedAccessViews(0, 3, null_uavs, nullptr);
       context->CSSetShaderResources(0, 2, null_srvs);
       context->CSSetConstantBuffers(0u, 3u, null_preprocess_cbuffers);
       // GPU-undecided publishes its dense proposal. CPU-known force-infer publishes a complete
       // authenticated infer PROP/RQST instead. Both records carry the exact subtitle disposition;
       // only prepared OCR carries the optional-child request, and every completion consumes CBRG.
       const bool transaction_published =
-        accepted_submission_class == pending_submission_class_e::gpu_undecided ?
+        accepted_submission_class == submission_class_e::gpu_undecided ?
           dispatch_near_identical_detector() :
           publish_force_infer_transaction(
             accepted_transaction_token,
@@ -10217,7 +10275,7 @@ namespace models {
           );
       if (!transaction_published) {
         fail_gpu_conditional_bridge_once(
-          accepted_submission_class == pending_submission_class_e::gpu_undecided ?
+          accepted_submission_class == submission_class_e::gpu_undecided ?
             "GPU near-identical proposal dispatch failed" :
             "force-infer transaction publication failed"
         );
@@ -10226,14 +10284,12 @@ namespace models {
         return {};
       }
 
-      // CUDA cannot map the raw transaction buffer while D3D owns it. Copy the proposal-authored
-      // preprocess args to the D3D-only indirect twin, then run the crop for authenticated OCR
-      // only when the shared analysis decision selects inference.
-      // Malformed/missing proposals do not consume stale input.
-      context->CopyResource(
-        near_identical_transaction.dispatch.Get(), near_identical_transaction.buffer.Get()
-      );
       if (ocr_frame_eligible) {
+        // The pre-CUDA crop consumes the proposal's indirect arguments. The finalizer publishes
+        // the postprocess arguments separately after CUDA releases the raw transaction.
+        context->CopyResource(
+          near_identical_transaction.dispatch.Get(), near_identical_transaction.buffer.Get()
+        );
         const std::array<std::uint32_t, 8> ocr_constants {
           input_region.width(),
           input_region.height(),
@@ -10271,32 +10327,50 @@ namespace models {
       // Force-flushing every frame only prevents the driver from interleaving other GPU
       // consumers (DWM / Edge / the Widgets panel), which starves them and can trigger a TDR.
 
-      // 2. CUDA Execution (for CURRENT frame). Depth remains mandatory. Optional OCR interop maps
-      // on the same root stream and its TensorRT graph is embedded as a sibling conditional child;
-      // one completion event after both unmap tails therefore covers the exact transaction.
-      std::array<CUgraphicsResource, 3> depth_resources {
+      // 2. CUDA Execution (for CURRENT frame). Both conditional children share one root stream
+      // and completion event, so transfer their D3D ownership in one batch. Private unmap
+      // experiments retain their original split calls, including warmup and separate receipts.
+      std::array<CUgraphicsResource, 5> interop_resources {
         cuda_in_res,
         cuda_out_res,
         cuda_near_identical_decision_res,
+        cuda_ocr_in_res,
+        cuda_ocr_out_res,
       };
       constexpr unsigned int depth_resource_count = 3u;
-      auto map_res = cuda.cuGraphicsMapResources(
-        depth_resource_count, depth_resources.data(), cu_stream
+      constexpr unsigned int ocr_resource_count = 2u;
+      const unsigned int interop_resource_count =
+        depth_resource_count + (ocr_frame_eligible ? ocr_resource_count : 0u);
+      const bool split_interop_for_benchmark = benchmark_joined_completion_gate != nullptr;
+      const unsigned int primary_interop_count =
+        split_interop_for_benchmark ? depth_resource_count : interop_resource_count;
+      auto *const ocr_resources = interop_resources.data() + depth_resource_count;
+      const auto map_res = cuda.cuGraphicsMapResources(
+        primary_interop_count, interop_resources.data(), cu_stream
       );
       if (map_res != CUDA_SUCCESS) {
+        if (!split_interop_for_benchmark && ocr_frame_eligible) {
+          ocr_available = false;
+          mark_ocr_context_failure(
+            detail::warmed_execution_context_failure_e::pre_enqueue_interop_or_binding
+          );
+        }
+        // A failed multi-resource call does not prove that none of its resources mapped.
+        // Keep the terminal teardown/quarantine policy; never retry individual resources.
         (void) observe_joined_cuda_failure(
-          "depth interop map", map_res, true
+          !split_interop_for_benchmark && ocr_frame_eligible ?
+            "joined depth/OCR interop map" : "depth interop map",
+          map_res, true
         );
         return make_result(completed);
       }
-      CUgraphicsResource ocr_resources[2] = {cuda_ocr_in_res, cuda_ocr_out_res};
-      bool ocr_mapped = false;
+      bool ocr_mapped = !split_interop_for_benchmark && ocr_frame_eligible;
       if (is_terminal()) {
         ocr_frame_eligible = false;
       }
-      if (ocr_frame_eligible) {
+      if (split_interop_for_benchmark && ocr_frame_eligible) {
         const auto ocr_map = cuda.cuGraphicsMapResources(
-          2,
+          ocr_resource_count,
           ocr_resources,
           cu_stream
         );
@@ -10455,7 +10529,7 @@ namespace models {
           selected_profile.value_or(0u),
         };
         bool dropped_for_signature_change =
-          accepted_submission_class == pending_submission_class_e::gpu_undecided &&
+          accepted_submission_class == submission_class_e::gpu_undecided &&
           !detail::cuda_graph_signature_matches(
             depth_inference_graph.policy, depth_signature
           );
@@ -10568,7 +10642,7 @@ namespace models {
         };
         if (
           ocr_bindings_ok &&
-          accepted_submission_class == pending_submission_class_e::gpu_undecided &&
+          accepted_submission_class == submission_class_e::gpu_undecided &&
           !detail::cuda_graph_signature_matches(
             ocr_inference_graph.policy, ocr_signature
           )
@@ -10647,7 +10721,7 @@ namespace models {
           {
             std::lock_guard<std::mutex> lock(g_trt_mutex);
             const bool allow_private_bootstrap =
-              accepted_submission_class == pending_submission_class_e::force_infer;
+              accepted_submission_class == submission_class_e::force_infer;
             bool wrapper_ready = prepare_depth_inference_graph(
               cuda, allow_private_bootstrap
             );
@@ -10738,9 +10812,9 @@ namespace models {
       }
 
       if (independent_ocr_raw_enabled && enqueued && !is_terminal()) {
-        // Do not issue ANY depth/RQST unmap yet: it would fence later graphics behind B.
-        // This event follows the genuine depth graph. The next event also includes the OS gate.
-        independent_depth_release_deferred = true;
+        // Both private schedules record the same graph and pre-release events. The eager
+        // control submits the designated frame's unmaps without waiting for event readiness.
+        independent_depth_release_frame = frame_id;
         independent_depth_events_valid = false;
         ++independent_depth_event_sequence;
         if (ocr_mapped || ocr_armed ||
@@ -10756,6 +10830,14 @@ namespace models {
           }
           if (enqueued && cuda.cuEventRecord(independent_depth_hold_event, cu_stream) == CUDA_SUCCESS) {
             independent_depth_events_valid = true;
+            if (independent_ocr_eager_unmap_frame == frame_id &&
+                independent_depth_release(cuda, frame_id) != CUDA_SUCCESS) {
+              if (benchmark_joined_completion_gate) {
+                benchmark_joined_completion_gate->cancel_and_release();
+              }
+              mark_shared_execution_failure(true);
+              enqueued = false;
+            }
           } else {
             mark_shared_execution_failure(true); enqueued = false;
           }
@@ -10774,25 +10856,28 @@ namespace models {
         }
       }
       CUresult ocr_unmap_res = CUDA_SUCCESS;
-      if (ocr_mapped) {
-        if (benchmark_joined_completion_gate) benchmark_joined_completion_gate->note_unmap_begin(frame_id, joined_completion_gate_benchmark::unmap_e::optional_ocr);
+      if (split_interop_for_benchmark && ocr_mapped) {
+        benchmark_joined_completion_gate->note_unmap_begin(frame_id, joined_completion_gate_benchmark::unmap_e::optional_ocr);
         ocr_unmap_res = cuda.cuGraphicsUnmapResources(
-          2,
+          ocr_resource_count,
           ocr_resources,
           cu_stream
         );
-        if (benchmark_joined_completion_gate) benchmark_joined_completion_gate->note_unmap_return(frame_id, joined_completion_gate_benchmark::unmap_e::optional_ocr, ocr_unmap_res);
+        benchmark_joined_completion_gate->note_unmap_return(frame_id, joined_completion_gate_benchmark::unmap_e::optional_ocr, ocr_unmap_res);
       }
-      if (benchmark_joined_completion_gate) benchmark_joined_completion_gate->note_unmap_begin(frame_id, joined_completion_gate_benchmark::unmap_e::depth);
-      auto unmap_res = cuda.cuGraphicsUnmapResources(
-        depth_resource_count, depth_resources.data(), cu_stream
+      if (split_interop_for_benchmark) benchmark_joined_completion_gate->note_unmap_begin(frame_id, joined_completion_gate_benchmark::unmap_e::depth);
+      const auto unmap_res = cuda.cuGraphicsUnmapResources(
+        primary_interop_count, interop_resources.data(), cu_stream
       );
-      if (benchmark_joined_completion_gate) benchmark_joined_completion_gate->note_unmap_return(frame_id, joined_completion_gate_benchmark::unmap_e::depth, unmap_res);
+      if (split_interop_for_benchmark) benchmark_joined_completion_gate->note_unmap_return(frame_id, joined_completion_gate_benchmark::unmap_e::depth, unmap_res);
       if (unmap_res != CUDA_SUCCESS) {
         (void) observe_joined_cuda_failure(
-          "depth interop unmap", unmap_res, true
+          !split_interop_for_benchmark && ocr_mapped ?
+            "joined depth/OCR interop unmap" : "depth interop unmap",
+          unmap_res, true
         );
         enqueued = false;
+        if (!split_interop_for_benchmark) ocr_armed = false;
       }
       if (ocr_unmap_res != CUDA_SUCCESS) {
         (void) observe_joined_cuda_failure(
@@ -10849,58 +10934,58 @@ namespace models {
             ocr_signature_refresh_required,
             ocr_available,
             enqueued &&
-              accepted_submission_class == pending_submission_class_e::force_infer,
+              accepted_submission_class == submission_class_e::force_infer,
             accepted_optional_work,
             ocr_armed
           )) {
         ocr_signature_refresh_required = false;
       }
 
-      has_previous_frame = enqueued;
-      pending_ocr_submitted = enqueued && ocr_armed;
       if (enqueued) {
+        host_sbs_temporal_source_bridge::certificate_t accepted_source;
+        if (subtitle_temporal_source_enabled && source_observation.valid()) {
+          const auto &domain = source_observation.domain;
+          if (domain.source_width == input_region.source_width &&
+              domain.source_height == input_region.source_height &&
+              domain.analysis_ltrb == std::array {
+                input_region.left, input_region.top, input_region.right, input_region.bottom} &&
+              domain.analysis_generation == input_region.analysis_generation &&
+              domain.context_generation == subtitle_context.generation &&
+              domain.transfer == static_cast<std::uint32_t>(color_space)) {
+            accepted_source = source_observation;
+          }
+        }
+        pending_root = accepted_inference_t {
+          .frame_id = frame_id,
+          .observation_timestamp_us = adaptive_reuse_request.observation_timestamp_us,
+          .transaction_token = accepted_transaction_token,
+          .baseline_frame_id = accepted_submission_class == submission_class_e::gpu_undecided ?
+                                 adaptive_reuse_request.baseline_frame_id : 0u,
+          .input_region = input_region,
+          .color_space = color_space,
+          .subtitle_context = subtitle_context,
+          .subtitle_line_policy = subtitle_line_policy,
+          .source_observation = accepted_source,
+          .optional_work = accepted_optional_work,
+          .submission_class = accepted_submission_class,
+          .subtitle_work = subtitle_work,
+          .ocr_armed = ocr_armed,
+          .depth_only_history = depth_only_history,
+          .dump_forced = snapshot_raw_model_depth,
+          .submitted_source = {},
+          .queued_input_domain_reset = std::nullopt,
+        };
         if (queued_same_source_gpu_continuation_research_enabled || subtitle_current_outline_enabled) {
           // Only the descriptor is needed after admission; immutable RGB is the OCR snapshot.
-          pending_same_source_gpu_source = input_srv;
-          pending_same_source_gpu_postprocess_queued = false;
-          pending_same_source_gpu_input_domain_reset = false;
+          pending_root->submitted_source = input_srv;
         }
-        accepted_subtitle_context_generation = subtitle_context_generation;
-        accepted_subtitle_context_disabled = subtitle_context_disabled;
-        pending_color_space = color_space;
-        pending_frame_id = frame_id;
-        pending_input_region = input_region;
-        pending_subtitle_line_policy = subtitle_line_policy;
-        pending_source_observation={};
-        if(subtitle_temporal_source_enabled&&source_observation.valid()){
-          const auto &d=source_observation.domain;
-          if(d.source_width==input_region.source_width&&d.source_height==input_region.source_height&&
-             d.analysis_ltrb==std::array<std::uint32_t,4>{input_region.left,input_region.top,input_region.right,input_region.bottom}&&
-             d.analysis_generation==input_region.analysis_generation&&d.context_generation==subtitle_context_generation&&
-             d.transfer==static_cast<std::uint32_t>(color_space))pending_source_observation=source_observation;
-        }
-        pending_optional_work = accepted_optional_work;
-        pending_subtitle_work = subtitle_work;
-        pending_submission_class = accepted_submission_class;
-        pending_wrapper_transaction_token = accepted_transaction_token;
-        pending_dump_forced = snapshot_raw_model_depth;
-        pending_gpu_transaction_token =
-          accepted_submission_class == pending_submission_class_e::gpu_undecided ?
-            accepted_transaction_token : 0u;
-        pending_gpu_transaction_current_frame_id =
-          accepted_submission_class == pending_submission_class_e::gpu_undecided ?
-            frame_id : 0u;
-        pending_gpu_transaction_baseline_frame_id =
-          accepted_submission_class == pending_submission_class_e::gpu_undecided ?
-            adaptive_reuse_request.baseline_frame_id : 0u;
-        pending_observation_timestamp_us = adaptive_reuse_request.observation_timestamp_us;
         cached_current_publication.reset();
         if (diagnostics_enabled) {
           throughput_stats_enqueues++;
-          if (accepted_submission_class == pending_submission_class_e::force_infer) {
+          if (accepted_submission_class == submission_class_e::force_infer) {
             throughput_stats_force_infer_enqueues++;
           } else if (
-            accepted_submission_class == pending_submission_class_e::gpu_undecided
+            accepted_submission_class == submission_class_e::gpu_undecided
           ) {
             throughput_stats_gpu_undecided_enqueues++;
           }
@@ -10918,9 +11003,9 @@ namespace models {
       return make_result(
         completed,
         {
-          .inference_enqueued = enqueued && accepted_submission_class == pending_submission_class_e::force_infer,
+          .inference_enqueued = enqueued && accepted_submission_class == submission_class_e::force_infer,
           .gpu_undecided_transaction_enqueued = enqueued &&
-                                                accepted_submission_class == pending_submission_class_e::gpu_undecided,
+                                                accepted_submission_class == submission_class_e::gpu_undecided,
           .subtitle_ocr_inference_enqueued = enqueued && ocr_armed &&
                                              accepted_optional_work == depth_optional_work_mode_e::ordinary,
         }
@@ -10933,14 +11018,18 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> context,
     const std::filesystem::path &assets_dir,
     const config::video_t::sbs_t &cfg,
-    const config::depth_model_info &model
+    const config::depth_model_info &model,
+    normalized_depth_diagnostics_e normalized_depth_diagnostics,
+    subtitle_legacy_matte_e legacy_matte
   ):
       pimpl(std::make_unique<impl>(
         device,
         context,
         assets_dir,
         cfg,
-        model
+        model,
+        normalized_depth_diagnostics,
+        legacy_matte
       )) {}
 
   video_depth_estimator::~video_depth_estimator() = default;
@@ -10952,14 +11041,15 @@ namespace models {
   }
 
 
-  bool video_depth_estimator::set_independent_ocr_raw_probe_enabled(bool enabled) {
+  bool video_depth_estimator::set_independent_ocr_raw_probe_enabled(bool enabled, std::optional<std::uint64_t> eager_unmap_frame) {
     if (!pimpl || !pimpl->is_operational() || pimpl->subtitle_cohort_research_configuration_locked ||
       pimpl->subtitle_cohort_research_enabled || pimpl->subtitle_inner_colour_research_enabled ||
       pimpl->queued_same_source_gpu_continuation_research_enabled ||
       !pimpl->inference_event_poll_available) return false;
-    if (pimpl->independent_ocr_raw_enabled) return enabled;
+    if (pimpl->independent_ocr_raw_enabled) return enabled && eager_unmap_frame == pimpl->independent_ocr_eager_unmap_frame;
     pimpl->independent_ocr_raw_enabled = enabled;
     if (enabled) {
+      pimpl->independent_ocr_eager_unmap_frame = eager_unmap_frame;
       auto &cuda = cuda_driver_api::get();
       if (cuda.cuCtxSetCurrent(pimpl->cuda_ctx) != CUDA_SUCCESS ||
         cuda.cuEventCreate(&pimpl->independent_depth_compute_event, CU_EVENT_DEFAULT) != CUDA_SUCCESS ||
@@ -10985,22 +11075,27 @@ namespace models {
   }
   raw_ocr_probe_depth_events_t video_depth_estimator::independent_ocr_raw_depth_events_for_evaluation() {
     raw_ocr_probe_depth_events_t r;
-    if (!pimpl || !pimpl->independent_depth_release_deferred || pimpl->is_terminal()) return r;
+    if (!pimpl || !pimpl->independent_depth_events_valid || !pimpl->pending_root || pimpl->is_terminal()) return r;
     auto &cuda = cuda_driver_api::get();
     if (cuda.cuCtxSetCurrent(pimpl->cuda_ctx) != CUDA_SUCCESS) {
       pimpl->mark_shared_execution_failure(true); return r;
     }
-    r.deferred_mapped_depth_lease = true;
-    r.depth_frame_id = pimpl->pending_frame_id;
-    r.depth_observation_timestamp_us = pimpl->pending_observation_timestamp_us;
+    r.deferred_mapped_depth_lease = pimpl->independent_depth_release_frame.has_value();
+    r.depth_frame_id = pimpl->pending_root->frame_id;
+    r.depth_observation_timestamp_us = pimpl->pending_root->observation_timestamp_us;
     r.recorded_event_sequence = pimpl->independent_depth_event_sequence;
     r.actual_compute_query = static_cast<std::int32_t>(cuda.cuEventQuery(pimpl->independent_depth_compute_event));
     r.actual_hold_query = static_cast<std::int32_t>(cuda.cuEventQuery(pimpl->independent_depth_hold_event));
+    r.root_event_recorded = pimpl->pending_depth_inference_event_recorded;
+    if (r.root_event_recorded) {
+      r.actual_root_query = static_cast<std::int32_t>(cuda.cuEventQuery(pimpl->depth_inference_done_event));
+    }
     if (pimpl->benchmark_joined_completion_gate)
-      pimpl->benchmark_joined_completion_gate->note_actual_event_query(pimpl->pending_frame_id,
+      pimpl->benchmark_joined_completion_gate->note_actual_event_query(pimpl->pending_root->frame_id,
         static_cast<CUresult>(r.actual_hold_query));
     if ((r.actual_compute_query != CUDA_SUCCESS && r.actual_compute_query != CUDA_ERROR_NOT_READY) ||
-        (r.actual_hold_query != CUDA_SUCCESS && r.actual_hold_query != CUDA_ERROR_NOT_READY))
+        (r.actual_hold_query != CUDA_SUCCESS && r.actual_hold_query != CUDA_ERROR_NOT_READY) ||
+        (r.root_event_recorded && r.actual_root_query != CUDA_SUCCESS && r.actual_root_query != CUDA_ERROR_NOT_READY))
       pimpl->mark_shared_execution_failure(true);
     return r;
   }
@@ -11045,7 +11140,7 @@ namespace models {
       pimpl->subtitle_inner_colour_research_command_frame!=expected||pimpl->subtitle_inner_colour_research_command_time!=current->observation_timestamp_us)return std::nullopt;
     const auto t=pimpl->subtitle_temporal_source_backend.mutable_views();const auto b=pimpl->subtitle_temporal_source_composition.baseline_views();
     return subtitle_temporal_source_working_views_t{.model_frame=expected,.model_observation_us=current->observation_timestamp_us,
-      .source=pimpl->pending_source_observation,.baseline_body=b.body,.baseline_matte=b.matte,.body=t.body,.matte=t.matte,.state=t.state,.receipt=t.receipt,
+      .source=pimpl->completed_input.source_observation,.baseline_body=b.body,.baseline_matte=b.matte,.body=t.body,.matte=t.matte,.state=t.state,.receipt=t.receipt,
       .frame256=pimpl->subtitle_temporal_frame_context.output_view(),.current_constants=pimpl->subtitle_contour_cbuffer,
       .transaction=pimpl->near_identical_transaction.buffer,.dispatch_arguments=pimpl->near_identical_transaction.dispatch};
   }
@@ -11055,6 +11150,12 @@ namespace models {
       pimpl->subtitle_conditioning_diagnostics_always = always;
     }
   }
+
+#ifdef SUNSHINE_TESTS
+  bool video_depth_estimator::subtitle_conditioning_diagnostics_allocated_for_tests() const noexcept {
+    return pimpl && pimpl->subtitle_conditioning_diagnostics.has_value();
+  }
+#endif
 
   bool video_depth_estimator::set_completed_ocr_conditioner_research_enabled(const bool enabled) {
     if (!pimpl || !pimpl->is_operational() || pimpl->subtitle_cohort_research_configuration_locked) return false;
@@ -11081,17 +11182,18 @@ namespace models {
   bool video_depth_estimator::configure_joined_completion_gate_for_benchmark(
     const joined_completion_gate_benchmark::configuration_t &configuration
   ) {
-    if (!pimpl || !pimpl->is_operational() || pimpl->subtitle_cohort_research_configuration_locked ||
-        pimpl->benchmark_joined_completion_gate_configuration_seen || !configuration.valid()) return false;
-    pimpl->benchmark_joined_completion_gate_configuration_seen = true;
-    if (!configuration.enabled) return true;
-    // Event-query fallback is not accepted as evidence for this particular experiment.
-    if (!pimpl->inference_event_poll_available) return false;
-    auto gate = std::make_unique<joined_completion_gate_benchmark::controller_t>(configuration);
-    if (!gate->available(cuda_driver_api::get())) return false;
-    pimpl->benchmark_joined_completion_gate = std::move(gate);
-    return true;
+    return pimpl && !pimpl->subtitle_cohort_research_configuration_locked &&
+           pimpl->install_benchmark_joined_completion_gate(configuration);
   }
+
+#ifdef SUNSHINE_TESTS
+  bool video_depth_estimator::configure_joined_completion_gate_for_native_pacing_test(
+    const joined_completion_gate_benchmark::configuration_t &configuration
+  ) {
+    return pimpl && !pimpl->pending_root && !pimpl->pending_depth_inference_event_recorded &&
+           pimpl->install_benchmark_joined_completion_gate(configuration);
+  }
+#endif
 
   std::optional<joined_completion_gate_benchmark::snapshot_t>
   video_depth_estimator::joined_completion_gate_status_for_benchmark() const noexcept {
@@ -11148,11 +11250,13 @@ namespace models {
 
   pending_depth_poll_result video_depth_estimator::try_finish_pending_depth_nonblocking(
     input_color_space color_space,
-    bool snapshot_debug_inputs
+    bool snapshot_debug_inputs,
+    const pending_depth_source_access_t source_access
   ) {
     return pimpl ? pimpl->try_finish_pending_nonblocking(
                      color_space,
-                     snapshot_debug_inputs
+                      snapshot_debug_inputs,
+                      source_access
                    ) :
                    pending_depth_poll_result {.ready = true};
   }
@@ -11161,13 +11265,17 @@ namespace models {
     input_color_space color_space,
     const std::chrono::steady_clock::time_point deadline,
     const std::uint32_t max_queries,
-    bool snapshot_debug_inputs
+    bool snapshot_debug_inputs,
+    bool allow_completion_notification,
+    const pending_depth_source_access_t source_access
   ) {
     return pimpl ? pimpl->try_finish_pending_until(
                      color_space,
                      deadline,
                      max_queries,
-                     snapshot_debug_inputs
+                     snapshot_debug_inputs,
+                      allow_completion_notification,
+                      source_access
                    ) :
                    pending_depth_poll_result {.ready = true};
   }
@@ -11207,27 +11315,27 @@ namespace models {
   video_depth_estimator::ocr_working_views_for_evaluation(
     const std::uint64_t expected_completed_frame_id
   ) const noexcept {
-    if (!pimpl || pimpl->independent_ocr_raw_enabled || !pimpl->is_operational() || pimpl->has_previous_frame ||
+    if (!pimpl || pimpl->independent_ocr_raw_enabled || !pimpl->is_operational() || pimpl->pending_root ||
         pimpl->pending_depth_inference_event_recorded || expected_completed_frame_id == 0u ||
         !host_sbs_gpu_completion_receipt::valid_expected(pimpl->current_publication) ||
         pimpl->current_publication.frame_id != expected_completed_frame_id ||
-        pimpl->pending_frame_id != expected_completed_frame_id ||
-        !pimpl->pending_input_region.valid() ||
+        pimpl->completed_input.frame_id != expected_completed_frame_id ||
+        !pimpl->completed_input.region.valid() ||
         pimpl->current_publication.analysis_generation !=
-          pimpl->pending_input_region.analysis_generation ||
+          pimpl->completed_input.region.analysis_generation ||
         !pimpl->ocr_output_srv || !pimpl->ocr_cell_stats_srv ||
         !pimpl->subtitle_contour_source.ready() || !pimpl->near_identical_transaction.ready() ||
         !pimpl->ocr_resolve_cbuffer || pimpl->field_w <= 0 || pimpl->field_h <= 0) {
       return std::nullopt;
     }
-    const auto content = pimpl->live_field_content(pimpl->pending_input_region);
+    const auto content = pimpl->live_field_content(pimpl->completed_input.region);
     if (!content || !content->valid(pimpl->live_field_shape())) {
       return std::nullopt;
     }
     return ocr_working_research_views_t {
       .completed_frame_id = pimpl->current_publication.frame_id,
       .observation_timestamp_us = pimpl->current_publication.observation_timestamp_us,
-      .input_region = pimpl->pending_input_region,
+      .input_region = pimpl->completed_input.region,
       .field_width = static_cast<std::uint32_t>(pimpl->field_w),
       .field_height = static_cast<std::uint32_t>(pimpl->field_h),
       .field_content = *content,
@@ -11246,26 +11354,26 @@ namespace models {
     const std::uint64_t observation) const noexcept {
     if(!pimpl || !pimpl->is_operational() || pimpl->independent_ocr_raw_enabled || !pimpl->parallax_v2_producer_active ||
        !pimpl->queued_same_source_gpu_continuation_research_enabled ||
-       !pimpl->has_previous_frame || !pimpl->pending_same_source_gpu_postprocess_queued ||
-       pimpl->pending_dump_forced || pimpl->gpu_undecided_postprocess_pending() ||
-       pimpl->pending_wrapper_transaction_token==0u || sequence==0u ||
-       sequence!=pimpl->queued_same_source_gpu_ticket_sequence || frame!=pimpl->pending_frame_id ||
-       observation!=pimpl->pending_observation_timestamp_us ||
-       pimpl->pending_subtitle_work!=cuda_conditional_graph::work_flag_e::optional_ocr ||
-       !pimpl->pending_input_region.valid() || !pimpl->near_identical_transaction.ready() ||
+       !pimpl->pending_root || !pimpl->pending_root->queued_input_domain_reset.has_value() ||
+       pimpl->pending_root->dump_forced || pimpl->gpu_undecided_postprocess_pending() ||
+       pimpl->pending_root->transaction_token==0u || sequence==0u ||
+       sequence!=pimpl->queued_same_source_gpu_ticket_sequence || frame!=pimpl->pending_root->frame_id ||
+       observation!=pimpl->pending_root->observation_timestamp_us ||
+       pimpl->pending_root->subtitle_work!=cuda_conditional_graph::work_flag_e::optional_ocr ||
+       !pimpl->pending_root->input_region.valid() || !pimpl->near_identical_transaction.ready() ||
        !pimpl->subtitle_contour_source_snapshot.ready() ||
        !pimpl->subtitle_contour_probability_snapshot.ready() || !pimpl->ocr_box_record_srv ||
        !pimpl->subtitle_locator_state_srv || !pimpl->subtitle_contour_identity.ready() ||
        !pimpl->subtitle_contour_cbuffer) return std::nullopt;
-    const auto content=pimpl->live_field_content(pimpl->pending_input_region);
+    const auto content=pimpl->live_field_content(pimpl->pending_root->input_region);
     if(!content)return std::nullopt;
     return pending_ocr_conditioner_research_views_t {
       .ticket_sequence=sequence, .submitted_frame_id=frame, .observation_timestamp_us=observation,
-      .transaction_token=pimpl->pending_wrapper_transaction_token,
-      .subtitle_context_generation=pimpl->accepted_subtitle_context_generation,
-      .expected_work=cuda_conditional_graph::work_flags_value(pimpl->pending_subtitle_work),
+      .transaction_token=pimpl->pending_root->transaction_token,
+      .subtitle_context_generation=pimpl->pending_root->subtitle_context.generation,
+      .expected_work=cuda_conditional_graph::work_flags_value(pimpl->pending_root->subtitle_work),
       .postprocess_request_flags=4u, .planned_owner=pimpl->pending_publication_expected(),
-      .input_region=pimpl->pending_input_region, .color_space=pimpl->pending_color_space,
+      .input_region=pimpl->pending_root->input_region, .color_space=pimpl->pending_root->color_space,
       .field_width=static_cast<std::uint32_t>(pimpl->field_w), .field_height=static_cast<std::uint32_t>(pimpl->field_h),
       .field_content=*content,
       .source_band=pimpl->subtitle_contour_source_snapshot.srv,
@@ -11423,10 +11531,13 @@ namespace models {
       namespace observation_owner=current_outline_observation_v1;
       const auto role=observation_owner::classify(frame,observation,
         {current.frame,current.observation_us,current.analysis_generation,current.token,current.expected_work},
-        {pimpl->pending_frame_id,pimpl->pending_observation_timestamp_us,
-          pimpl->pending_input_region.analysis_generation,pimpl->pending_wrapper_transaction_token,
-          cuda_conditional_graph::work_flags_value(pimpl->pending_subtitle_work)},
-        pimpl->has_previous_frame,pimpl->pending_same_source_gpu_postprocess_queued,
+        pimpl->pending_root ? observation_owner::identity_t {
+          pimpl->pending_root->frame_id, pimpl->pending_root->observation_timestamp_us,
+          pimpl->pending_root->input_region.analysis_generation, pimpl->pending_root->transaction_token,
+          cuda_conditional_graph::work_flags_value(pimpl->pending_root->subtitle_work)
+        } : observation_owner::identity_t {},
+        pimpl->pending_root.has_value(),
+        pimpl->pending_root && pimpl->pending_root->queued_input_domain_reset.has_value(),
         pimpl->queued_same_source_gpu_ticket_sequence,
         {published.frame_id,published.observation_timestamp_us,published.analysis_generation,
           published.transaction_token,published.expected_work},
@@ -11469,8 +11580,12 @@ namespace models {
       // Leave them absent; commands/host identity do not certify GPU freshness or UI.
       return v;
     }
-    const bool queued=pimpl->has_previous_frame&&pimpl->pending_same_source_gpu_postprocess_queued&&pimpl->queued_same_source_gpu_ticket_sequence!=0u&&frame==pimpl->pending_frame_id&&observation==pimpl->pending_observation_timestamp_us;
-    const bool completed=!pimpl->has_previous_frame&&pimpl->publication_is_current(pimpl->current_publication)&&pimpl->current_publication.frame_id==frame&&pimpl->current_publication.observation_timestamp_us==observation;
+    const bool queued = pimpl->pending_root &&
+                        pimpl->pending_root->queued_input_domain_reset.has_value() &&
+                        pimpl->queued_same_source_gpu_ticket_sequence != 0u &&
+                        frame == pimpl->pending_root->frame_id &&
+                        observation == pimpl->pending_root->observation_timestamp_us;
+    const bool completed=!pimpl->pending_root&&pimpl->publication_is_current(pimpl->current_publication)&&pimpl->current_publication.frame_id==frame&&pimpl->current_publication.observation_timestamp_us==observation;
     if(!queued&&!completed)return std::nullopt;
     if(!pimpl->subtitle_contour_probability_snapshot.ready()||!pimpl->subtitle_contour_support.ready()||!pimpl->subtitle_contour_cbuffer)return std::nullopt;
     subtitle_selected_matte_diagnostic_views_t v;v.model_frame=frame;v.model_observation_us=observation;v.pending_queued=queued;
@@ -11478,7 +11593,9 @@ namespace models {
     v.current_probability=pimpl->subtitle_contour_probability_snapshot.srv;v.current_support=pimpl->subtitle_contour_support.srv;v.current_constants=pimpl->subtitle_contour_cbuffer;
     v.baseline_current=pimpl->subtitle_inner_colour_research_available&&pimpl->subtitle_inner_colour_research_command_frame==frame&&pimpl->subtitle_inner_colour_research_command_time==observation;
     if(v.baseline_current){const auto b=pimpl->subtitle_temporal_source_commands?pimpl->subtitle_temporal_source_composition.baseline_views():pimpl->subtitle_inner_colour_research.mutable_views();v.baseline_body=b.body;v.baseline_matte=b.matte;v.numeric_proof=b.validation_receipt;}
-    v.temporal_commands=pimpl->subtitle_temporal_source_commands;v.source_certificate_valid=pimpl->pending_source_observation.valid();
+    v.temporal_commands=pimpl->subtitle_temporal_source_commands;
+    v.source_certificate_valid = queued ? pimpl->pending_root->source_observation.valid() :
+                                         pimpl->completed_input.source_observation.valid();
     if(v.temporal_commands){const auto t=pimpl->subtitle_temporal_source_backend.mutable_views();v.temporal_matte=t.matte;v.temporal_receipt=t.receipt;v.frame256=pimpl->subtitle_temporal_frame_context.output_view();}
     if(!v.selected_matte||!v.selected_receipt)return std::nullopt;
     return v;

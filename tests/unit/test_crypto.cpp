@@ -67,10 +67,7 @@ TEST(CryptoTest, GcmDecryptReinitializationFailureReturnsError) {
   std::vector<std::uint8_t> tagged_cipher(
     crypto::cipher::tag_size + plaintext.size()
   );
-  ASSERT_EQ(
-    cipher.encrypt(plaintext, tagged_cipher.data(), &iv),
-    static_cast<int>(plaintext.size())
-  );
+  ASSERT_TRUE(cipher.encrypt(plaintext, tagged_cipher.data(), &iv));
 
   std::vector<std::uint8_t> decrypted;
   const std::string_view tagged_view {
@@ -97,14 +94,11 @@ TEST(CryptoTest, GcmDecryptCanSplitAuthenticatedPrefixWithoutPayloadMemmove) {
   std::vector<std::uint8_t> tagged_cipher(
     crypto::cipher::tag_size + plaintext.size()
   );
-  ASSERT_EQ(
-    cipher.encrypt(
-      {reinterpret_cast<const char *>(plaintext.data()), plaintext.size()},
-      tagged_cipher.data(),
-      &iv
-    ),
-    static_cast<int>(plaintext.size())
-  );
+  ASSERT_TRUE(cipher.encrypt(
+    {reinterpret_cast<const char *>(plaintext.data()), plaintext.size()},
+    tagged_cipher.data(),
+    &iv
+  ));
 
   std::array<std::uint8_t, 4> header {};
   std::vector<std::uint8_t> payload;
@@ -142,10 +136,7 @@ TEST(CryptoTest, SplitGcmDecryptClearsUnauthenticatedOutputOnTagFailure) {
   std::vector<std::uint8_t> tagged_cipher(
     crypto::cipher::tag_size + plaintext.size()
   );
-  ASSERT_EQ(
-    cipher.encrypt(plaintext, tagged_cipher.data(), &iv),
-    static_cast<int>(plaintext.size())
-  );
+  ASSERT_TRUE(cipher.encrypt(plaintext, tagged_cipher.data(), &iv));
   tagged_cipher.front() ^= 0x80;
 
   std::array<std::uint8_t, 4> header {1, 1, 1, 1};

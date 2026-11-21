@@ -45,6 +45,7 @@ TEST(HostSbsNearIdenticalPolicyTest, RawDecisionLayoutMatchesCudaBridge) {
 }
 
 TEST(HostSbsNearIdenticalPolicyTest, SoleFusedPreprocessIsMandatoryAndNoComparatorRemains) {
+  namespace shader_cache = models::host_sbs_shader_cache;
   const auto read = [](const std::string &path) {
     std::ifstream stream(path, std::ios::binary);
     return std::string {
@@ -94,10 +95,18 @@ TEST(HostSbsNearIdenticalPolicyTest, SoleFusedPreprocessIsMandatoryAndNoComparat
   const auto producer_body = estimator.substr(
     producer_loop, producer_end - producer_loop
   );
+  ASSERT_NE(estimator.find(
+    "const std::array producer_shader_outputs {\n"
+    "        std::addressof(near_identical_fused_preprocess_cs),\n"
+    "        std::addressof(near_identical_tiled_preprocess_cs),"
+  ), std::string::npos);
   const auto mandatory_assignment = producer_body.find(
-    "producer_shaders_ok = create_shader"
+    "producer_shaders_ok = !output || create_shader"
   );
   ASSERT_NE(mandatory_assignment, std::string::npos);
+  const auto optional_tiled = producer_body.find("output == std::addressof(near_identical_tiled_preprocess_cs)");
+  ASSERT_NE(optional_tiled, std::string::npos);
+  EXPECT_LT(optional_tiled, mandatory_assignment);
   EXPECT_EQ(
     estimator.find("parallax_v2_producer_shaders_ready"),
     std::string::npos
@@ -107,14 +116,10 @@ TEST(HostSbsNearIdenticalPolicyTest, SoleFusedPreprocessIsMandatoryAndNoComparat
   EXPECT_EQ(cache.find("prewarm_producer_set"), std::string::npos);
   EXPECT_EQ(cache_header.find("producer_shader_e"), std::string::npos);
   EXPECT_EQ(cache_header.find("producer_shader_binding"), std::string::npos);
-  EXPECT_NE(
-    cache.find("static constexpr std::array production_prewarm_sets"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    cache.find("std::span<const shader_spec> {parallax_v2_producer_specs}"),
-    std::string::npos
-  );
+  const auto &startup_producer = shader_cache::production_prewarm_sets.front();
+  EXPECT_EQ(startup_producer.specs.data(), shader_cache::parallax_v2_producer_specs.data());
+  EXPECT_EQ(startup_producer.specs.size(), shader_cache::parallax_v2_producer_specs.size());
+  EXPECT_EQ(startup_producer.closure, shader_cache::parallax_v2_producer_source_closure_sha256);
 
   const auto route_begin = estimator.find("const bool gpu_undecided_host_candidate =");
   const auto route_end = estimator.find(
@@ -127,10 +132,17 @@ TEST(HostSbsNearIdenticalPolicyTest, SoleFusedPreprocessIsMandatoryAndNoComparat
     << "mandatory producer availability must not silently change a root to force-infer";
   EXPECT_NE(
     estimator.find(
-      "context->CSSetShader(near_identical_fused_preprocess_cs.Get(), nullptr, 0u)"
+      "context->CSSetShader(preprocess_shader, nullptr, 0u)"
     ),
     std::string::npos
   );
+  EXPECT_NE(estimator.find("const bool use_source_tile = near_identical_tiled_preprocess_cs &&"), std::string::npos);
+  EXPECT_NE(estimator.find("near_identical_tiled_preprocess_cs.Get() : near_identical_fused_preprocess_cs.Get()"), std::string::npos);
+  EXPECT_NE(fused.find("void fused_tiled_main("), std::string::npos);
+  EXPECT_NE(fused.find("void fused_domain_main("), std::string::npos);
+  EXPECT_NE(fused.find("void fused_tiled_domain_main("), std::string::npos);
+  EXPECT_EQ(shader_cache::host_sbs_near_identical_fused_preprocess.entrypoint, "fused_domain_main");
+  EXPECT_EQ(shader_cache::host_sbs_near_identical_tiled_preprocess.entrypoint, "fused_tiled_domain_main");
   EXPECT_NE(
     estimator.find(
       "gpu_undecided_host_candidate ?\n          fused_preprocess_compare_cbuffer.Get() :\n"
@@ -175,15 +187,15 @@ TEST(HostSbsNearIdenticalPolicyTest, D3dResourcesUseTypedBundlesWithoutChangingC
     estimator.end()
   );
 
-  EXPECT_NE(estimator.find("struct d3d_buffer_views_t"), std::string::npos);
+  const auto bundle_begin = estimator.find("struct d3d_buffer_views_t");
+  const auto bundle_end = estimator.find("struct d3d_texture_views_t", bundle_begin);
+  ASSERT_NE(bundle_begin, std::string::npos);
+  ASSERT_NE(bundle_end, std::string::npos);
+  const auto buffer_bundle = estimator.substr(bundle_begin, bundle_end - bundle_begin);
+  EXPECT_NE(buffer_bundle.find("near_identical_tile"), std::string::npos);
+  EXPECT_NE(buffer_bundle.find("near_identical_history_owner"), std::string::npos);
   EXPECT_NE(
     estimator.find("struct near_identical_transaction_resources_t : d3d_buffer_views_t"),
-    std::string::npos
-  );
-  EXPECT_NE(
-    estimator.find(
-      "} near_identical_tile, near_identical_history_owner;"
-    ),
     std::string::npos
   );
   EXPECT_NE(estimator.find("} near_identical_transaction;"), std::string::npos);
@@ -288,15 +300,21 @@ TEST(HostSbsNearIdenticalPolicyTest, CompositeRuntimeUsesSingleHighTensorBoundar
     << "single-high geometry must not retain a dormant split-grid authorization path";
 
   const std::string_view preprocess_binding =
-    "context->CSSetShader(near_identical_fused_preprocess_cs.Get(), nullptr, 0u)";
+    "context->CSSetShader(preprocess_shader, nullptr, 0u)";
   const auto preprocess_first = estimator.find(preprocess_binding);
   ASSERT_NE(preprocess_first, std::string::npos);
   EXPECT_EQ(
     estimator.find(preprocess_binding, preprocess_first + preprocess_binding.size()),
     std::string::npos
   ) << "one high input must have exactly one RGB-to-NCHW producer dispatch";
+  const auto preprocess_end = estimator.find("ID3D11UnorderedAccessView *null_uavs[3]", preprocess_first);
+  ASSERT_NE(preprocess_end, std::string::npos);
+  const auto preprocess_dispatch = estimator.substr(preprocess_first, preprocess_end - preprocess_first);
+  const auto dispatch_first = preprocess_dispatch.find("context->Dispatch(");
+  ASSERT_NE(dispatch_first, std::string::npos);
+  EXPECT_EQ(preprocess_dispatch.find("context->Dispatch(", dispatch_first + 1u), std::string::npos);
 
-  const auto interop_begin = estimator.find("std::array<CUgraphicsResource, 3> depth_resources");
+  const auto interop_begin = estimator.find("std::array<CUgraphicsResource, 5> interop_resources");
   const auto interop_end = estimator.find("if (!bindings_ok && !dropped_for_signature_change)", interop_begin);
   ASSERT_NE(interop_begin, std::string::npos);
   ASSERT_NE(interop_end, std::string::npos);
@@ -308,7 +326,7 @@ TEST(HostSbsNearIdenticalPolicyTest, CompositeRuntimeUsesSingleHighTensorBoundar
        }) {
     EXPECT_NE(interop.find(token), std::string::npos) << token;
   }
-  EXPECT_NE(interop.find("depth_resource_count, depth_resources.data(), cu_stream"), std::string::npos);
+  EXPECT_NE(interop.find("primary_interop_count, interop_resources.data(), cu_stream"), std::string::npos);
   EXPECT_EQ(interop.find("guidance_input_mapped_bytes"), std::string::npos);
   EXPECT_EQ(interop.find("refined_output_mapped_bytes"), std::string::npos);
 
@@ -420,25 +438,30 @@ TEST(HostSbsNearIdenticalPolicyTest, ProducerOutputsMatchCanonicalShaderOrder) {
   const std::array expected_bindings {
     std::pair {std::string_view {"host_sbs_near_identical_fused_preprocess"},
                std::string_view {"near_identical_fused_preprocess_cs"}},
+    std::pair {std::string_view {"host_sbs_near_identical_tiled_preprocess"},
+               std::string_view {"near_identical_tiled_preprocess_cs"}},
     std::pair {std::string_view {"buffer_to_tex"}, std::string_view {"buffer_to_tex_cs"}},
     std::pair {std::string_view {"buffer_to_tex_pad"}, std::string_view {"buffer_to_tex_pad_cs"}},
-    std::pair {std::string_view {"depth_minmax_ema"}, std::string_view {"depth_minmax_ema_cs"}},
     std::pair {std::string_view {"depth_coordinate_v2_moments"},
                std::string_view {"depth_coordinate_v2_moments_cs"}},
     std::pair {std::string_view {"depth_coordinate_v2_frame_resolve"},
                std::string_view {"depth_coordinate_v2_frame_resolve_cs"}},
     std::pair {std::string_view {"depth_coordinate_v2_histogram"},
                std::string_view {"depth_coordinate_v2_histogram_cs"}},
-    std::pair {std::string_view {"depth_coordinate_v2_quantiles"},
-               std::string_view {"depth_coordinate_v2_quantiles_cs"}},
-    std::pair {std::string_view {"depth_coordinate_v2_state_resolve"},
-               std::string_view {"depth_coordinate_v2_state_resolve_cs"}},
+    std::pair {std::string_view {"depth_coordinate_v2_publish"},
+               std::string_view {"depth_coordinate_v2_publish_cs"}},
     std::pair {std::string_view {"depth_coordinate_v2_map"},
                std::string_view {"depth_coordinate_v2_map_cs"}},
+    std::pair {std::string_view {"depth_coordinate_v2_map_compact"},
+               std::string_view {"depth_coordinate_v2_map_compact_cs"}},
     std::pair {std::string_view {"depth_coordinate_v2_vertical_limit"},
                std::string_view {"depth_coordinate_v2_vertical_limit_cs"}},
     std::pair {std::string_view {"depth_coordinate_v2_limit"},
                std::string_view {"depth_coordinate_v2_limit_cs"}},
+    std::pair {std::string_view {"depth_coordinate_v2_vertical_limit_compact"},
+               std::string_view {"depth_coordinate_v2_vertical_limit_compact_cs"}},
+    std::pair {std::string_view {"depth_coordinate_v2_limit_compact"},
+               std::string_view {"depth_coordinate_v2_limit_compact_cs"}},
     std::pair {std::string_view {"host_sbs_ocr_preprocess"},
                std::string_view {"ocr_preprocess_cs"}},
     std::pair {std::string_view {"host_sbs_ocr_cells"},
@@ -449,6 +472,8 @@ TEST(HostSbsNearIdenticalPolicyTest, ProducerOutputsMatchCanonicalShaderOrder) {
                std::string_view {"subtitle_locator_resolve_cs"}},
     std::pair {std::string_view {"host_sbs_subtitle_condition"},
                std::string_view {"subtitle_condition_cs"}},
+    std::pair {std::string_view {"host_sbs_subtitle_contour_palette"},
+               std::string_view {"subtitle_contour_palette_cs"}},
     std::pair {std::string_view {"host_sbs_subtitle_contour_temporal"},
                std::string_view {"subtitle_contour_temporal_cs"}},
     std::pair {std::string_view {"host_sbs_subtitle_contour_dense"},
@@ -483,8 +508,13 @@ TEST(HostSbsNearIdenticalPolicyTest, ProducerOutputsMatchCanonicalShaderOrder) {
   std::size_t output_cursor = 0u;
   for (const auto &[spec, output] : expected_bindings) {
     const auto spec_token = "\n    " + std::string {spec} + ",";
-    const auto output_token =
-      "\n        std::addressof(" + std::string {output} + "),";
+    const auto output_address = "std::addressof(" + std::string {output} + ")";
+    auto output_token = "\n        " + output_address + ",";
+    if (spec == "buffer_to_tex" || spec == "buffer_to_tex_pad") {
+      output_token = "\n        normalized_depth_diagnostics_enabled ? " + output_address + " : nullptr,";
+    } else if (spec.ends_with("_compact")) {
+      output_token = "\n        normalized_depth_diagnostics_enabled ? nullptr : " + output_address + ",";
+    }
     const auto spec_position = specs.find(spec_token, spec_cursor);
     const auto output_position = outputs.find(output_token, output_cursor);
     ASSERT_NE(spec_position, std::string::npos) << spec;
@@ -561,10 +591,12 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
   EXPECT_EQ(estimator.find("gpu_decision_resource_requested"), std::string::npos);
   EXPECT_NE(
     estimator.find(
-      "std::array<CUgraphicsResource, 3> depth_resources {\n"
+      "std::array<CUgraphicsResource, 5> interop_resources {\n"
       "        cuda_in_res,\n"
       "        cuda_out_res,\n"
-      "        cuda_near_identical_decision_res,"
+      "        cuda_near_identical_decision_res,\n"
+      "        cuda_ocr_in_res,\n"
+      "        cuda_ocr_out_res,"
     ),
     std::string::npos
   );
@@ -572,18 +604,37 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
     estimator.find("constexpr unsigned int depth_resource_count = 3u;"),
     std::string::npos
   );
-  EXPECT_NE(estimator.find("depth_resource_count"), std::string::npos);
+  EXPECT_NE(estimator.find("constexpr unsigned int ocr_resource_count = 2u;"), std::string::npos);
+  EXPECT_NE(estimator.find("depth_resource_count + (ocr_frame_eligible ? ocr_resource_count : 0u)"), std::string::npos);
+  EXPECT_NE(estimator.find("split_interop_for_benchmark ? depth_resource_count : interop_resource_count"), std::string::npos);
   EXPECT_NE(estimator.find("near_identical_transaction.dispatch"), std::string::npos);
-  const auto dispatch_copy = estimator.find("context->CopyResource(");
-  ASSERT_NE(dispatch_copy, std::string::npos);
-  EXPECT_NE(
-    estimator.find("near_identical_transaction.dispatch.Get()", dispatch_copy),
-    std::string::npos
-  );
-  EXPECT_NE(
-    estimator.find("near_identical_transaction.buffer.Get()", dispatch_copy),
-    std::string::npos
-  );
+  // Only OCR preprocessing consumes the proposal's pre-CUDA indirect arguments. Depth-only
+  // admission must leave the twin alone until the authoritative receipt finalizer copies it.
+  const auto proposal_begin = estimator.find("const bool transaction_published =");
+  const auto map_begin = estimator.find("std::array<CUgraphicsResource, 5> interop_resources", proposal_begin);
+  ASSERT_NE(proposal_begin, std::string::npos);
+  ASSERT_NE(map_begin, std::string::npos);
+  const auto prepare = estimator.substr(proposal_begin, map_begin - proposal_begin);
+  const auto optional_begin = prepare.find("if (ocr_frame_eligible) {");
+  const auto optional_end = prepare.find("\n      }", optional_begin);
+  const auto proposal_copy = prepare.find("context->CopyResource(");
+  const auto optional_dispatch = prepare.find("context->DispatchIndirect(", optional_begin);
+  ASSERT_NE(optional_begin, std::string::npos);
+  ASSERT_NE(optional_end, std::string::npos);
+  ASSERT_NE(proposal_copy, std::string::npos);
+  ASSERT_NE(optional_dispatch, std::string::npos);
+  EXPECT_LT(optional_begin, proposal_copy);
+  EXPECT_LT(proposal_copy, optional_dispatch);
+  EXPECT_LT(optional_dispatch, optional_end);
+  EXPECT_EQ(prepare.find("context->CopyResource(", proposal_copy + 1u), std::string::npos);
+  const auto proposal_copy_end = prepare.find(");", proposal_copy);
+  ASSERT_NE(proposal_copy_end, std::string::npos);
+  const auto proposal_copy_call = prepare.substr(proposal_copy, proposal_copy_end - proposal_copy);
+  EXPECT_NE(proposal_copy_call.find("near_identical_transaction.dispatch.Get()"), std::string::npos);
+  EXPECT_NE(proposal_copy_call.find("near_identical_transaction.buffer.Get()"), std::string::npos);
+  EXPECT_NE(prepare.substr(optional_dispatch, optional_end - optional_dispatch).find(
+              "near_identical_gpu_optional_preprocess_byte_offset"), std::string::npos);
+
   EXPECT_NE(
     estimator.find("desc.MiscFlags = D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS"),
     std::string::npos
@@ -623,7 +674,7 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
   );
   EXPECT_NE(unified_submit.find("ensure_depth_conditional_graph("), std::string::npos);
   EXPECT_NE(unified_submit.find("optional_child"), std::string::npos);
-  EXPECT_NE(estimator.find("if (ocr_frame_eligible)"), std::string::npos);
+  EXPECT_NE(estimator.find("if (split_interop_for_benchmark && ocr_frame_eligible)"), std::string::npos);
   EXPECT_NE(
     unified_submit.find("conditional_optional_child_policy_e::retain_if_present"),
     std::string::npos
@@ -642,7 +693,7 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
     unified_submit.find("subtitle_work == cuda_conditional_graph::work_flag_e::optional_ocr"),
     std::string::npos
   );
-  EXPECT_NE(estimator.find("pending_subtitle_work = subtitle_work"), std::string::npos);
+  EXPECT_NE(estimator.find(".subtitle_work = subtitle_work"), std::string::npos);
   EXPECT_NE(unified_submit.find("depth_conditional_graph.get()"), std::string::npos);
   EXPECT_EQ(unified_submit.find("enqueueV3("), std::string::npos);
   EXPECT_EQ(unified_submit.find("depth_inference_graph.executable"), std::string::npos);
@@ -674,22 +725,32 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
   EXPECT_EQ(estimator.find("last_gpu_opaque_transaction_frame_id"), std::string::npos);
   EXPECT_EQ(estimator.find("GPU-undecided initial roots"), std::string::npos);
   EXPECT_EQ(estimator.find("GPU-undecided follow-up roots"), std::string::npos);
-  std::size_t publication_paths = 0u;
-  for (auto diagnostic_trace = estimator.find("dispatch_pending_gpu_completion_trace();");
-       diagnostic_trace != std::string::npos;
-       diagnostic_trace = estimator.find("dispatch_pending_gpu_completion_trace();", diagnostic_trace + 1u)) {
-    const auto publication = estimator.find("snapshot_pending_publication_receipt();", diagnostic_trace);
-    ASSERT_NE(publication, std::string::npos);
-    const auto production_end = estimator.find("mark_d3d_post_end(d3d_timer);", publication);
-    ASSERT_NE(production_end, std::string::npos);
-    EXPECT_LT(diagnostic_trace, publication);
-    EXPECT_LT(publication, production_end)
-      << "The shared snapshot includes current cumulative outcomes and all copy cost is timed";
-    const auto next_trace = estimator.find("dispatch_pending_gpu_completion_trace();", diagnostic_trace + 1u);
-    EXPECT_TRUE(next_trace == std::string::npos || production_end < next_trace);
-    ++publication_paths;
+  const auto completion_begin = estimator.find("completed_depth_metadata_t complete_ready_pending(");
+  const auto finish_begin = estimator.find("depth_step_result_t finish_pending(", completion_begin);
+  ASSERT_NE(completion_begin, std::string::npos);
+  ASSERT_NE(finish_begin, std::string::npos);
+  const auto completion_body = estimator.substr(completion_begin, finish_begin - completion_begin);
+  const std::string_view publication_steps[] {
+    "dispatch_pending_gpu_completion_trace();",
+    "snapshot_pending_publication_receipt();",
+    "pending_gpu_trace_append = {};",
+    "mark_d3d_post_end(d3d_timer);",
+    "dispatch_parallax_v2_coordinate_diagnostic();",
+    "snapshots.raw_model_depth = snapshot_buffer(",
+    "snapshots.model_input = snapshot_buffer(",
+    "return consume_pending_completion(",
+  };
+  // Time the trace and receipt with production. Dump copies follow that marker and precede
+  // retirement of the pending observation.
+  std::size_t next_step = 0u;
+  for (const auto step : publication_steps) {
+    const auto found = completion_body.find(step, next_step);
+    ASSERT_NE(found, std::string::npos) << step;
+    next_step = found + step.size();
   }
-  EXPECT_EQ(publication_paths, 2u);
+  for (const auto step : {publication_steps[0], publication_steps[1]}) {
+    EXPECT_EQ(estimator.find(step), estimator.rfind(step)) << step;
+  }
   const auto trace_begin = estimator.find("void dispatch_pending_gpu_completion_trace()");
   const auto trace_end = estimator.find("bool ensure_parallax_v2_coordinate_diagnostic_resource()", trace_begin);
   ASSERT_NE(trace_begin, std::string::npos);
@@ -769,20 +830,20 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
   const auto optional_unmap = estimator.find(
     "ocr_unmap_res = cuda.cuGraphicsUnmapResources(", submit_end
   );
-  const auto depth_unmap = estimator.find(
-    "auto unmap_res = cuda.cuGraphicsUnmapResources(", submit_end
+  const auto primary_unmap = estimator.find(
+    "cuda.cuGraphicsUnmapResources(\n        primary_interop_count, interop_resources.data(), cu_stream", submit_end
   );
   const auto joined_event = estimator.find(
-    "record_inference_done_event(\n          cuda,", depth_unmap
+    "record_inference_done_event(\n          cuda,", primary_unmap
   );
   ASSERT_NE(wrapper_launch, std::string::npos);
   ASSERT_NE(optional_unmap, std::string::npos);
-  ASSERT_NE(depth_unmap, std::string::npos);
+  ASSERT_NE(primary_unmap, std::string::npos);
   ASSERT_NE(joined_event, std::string::npos);
   EXPECT_LT(wrapper_launch, optional_unmap);
-  EXPECT_LT(wrapper_launch, depth_unmap);
-  EXPECT_LT(optional_unmap, joined_event);
-  EXPECT_LT(depth_unmap, joined_event);
+  EXPECT_LT(optional_unmap, primary_unmap);
+  EXPECT_LT(primary_unmap, joined_event);
+  EXPECT_NE(estimator.substr(submit_end, optional_unmap - submit_end).find("if (split_interop_for_benchmark && ocr_mapped)"), std::string::npos);
 
   // A CPU-completed force-infer still launches the wrapper. Depth postprocess is direct, but every
   // optional observation is receipt-gated: force failure emits infer-without-optional while an
@@ -801,7 +862,8 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
     std::string::npos
   );
   EXPECT_NE(
-    estimator.find("return gpu_undecided_postprocess_pending() || pending_same_source_gpu_postprocess_queued;"),
+    estimator.find("return gpu_undecided_postprocess_pending() ||\n"
+                   "             (pending_root && pending_root->queued_input_domain_reset.has_value());"),
     std::string::npos
   );
   EXPECT_NE(dispatch_body.find("context->Dispatch(direct_x, direct_y, direct_z)"), std::string::npos);
@@ -823,6 +885,14 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
     finalizer_body.find("context->Dispatch(1u, 1u, 1u)", one_direct_dispatch + 1u),
     std::string::npos
   );
+  const auto unbind = finalizer_body.find("context->CSSetUnorderedAccessViews(0u, 4u, null_outputs, nullptr);", one_direct_dispatch);
+  const auto receipt_copy = finalizer_body.find("context->CopyResource(");
+  ASSERT_NE(unbind, std::string::npos);
+  ASSERT_NE(receipt_copy, std::string::npos);
+  EXPECT_LT(unbind, receipt_copy);
+  EXPECT_EQ(finalizer_body.find("context->CopyResource(", receipt_copy + 1u), std::string::npos);
+  EXPECT_NE(finalizer_body.find("near_identical_transaction.dispatch.Get()", receipt_copy), std::string::npos);
+  EXPECT_NE(finalizer_body.find("near_identical_transaction.buffer.Get()", receipt_copy), std::string::npos);
   EXPECT_NE(
     finalizer_body.find("near_identical_finalize_cs.Get()"),
     std::string::npos
@@ -892,12 +962,12 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
   );
   EXPECT_NE(fused_map.find("DepthValidHistoryAdvances("), std::string::npos);
   EXPECT_NE(fused_map.find("CurrentModelInput : register(t4)"), std::string::npos);
-  EXPECT_NE(fused_map.find("NearIdenticalHistoryOwnerOutput : register(u4)"),
+  EXPECT_NE(fused_map.find("NearIdenticalHistoryOwnerOutput : register(u2)"),
             std::string::npos);
   EXPECT_NE(estimator.find("minmax_ema_srv.Get(),"), std::string::npos);
-  EXPECT_NE(estimator.find("host_sbs_v2_gpu::record_map_history("), std::string::npos);
-  EXPECT_NE(executor.find("CSSetShaderResources(0u, 7u, inputs)"), std::string::npos);
-  EXPECT_NE(executor.find("CSSetUnorderedAccessViews(0u, 5u, outputs"), std::string::npos);
+  EXPECT_NE(estimator.find("host_sbs_v2_gpu::record_base_geometry("), std::string::npos);
+  EXPECT_NE(executor.find("CSSetShaderResources(0u, 6u, map_inputs)"), std::string::npos);
+  EXPECT_NE(executor.find("CSSetUnorderedAccessViews(0u, 3u, map_outputs"), std::string::npos);
   EXPECT_NE(estimator.find("CSSetShaderResources(0u, 4u, resolve_inputs)"), std::string::npos);
   EXPECT_EQ(shader.find("NearIdenticalSubtitleCoherentTransition"), std::string::npos);
   EXPECT_EQ(shader.find("NearIdenticalSubtitleStateSteady"), std::string::npos);
@@ -982,8 +1052,6 @@ namespace {
   struct fused_map_result_t {
     std::vector<float> output;
     std::vector<float> previous_model_input;
-    std::vector<float> previous_appearance;
-    std::vector<std::uint32_t> previous_exclusion;
     std::array<std::uint32_t, models::near_identical_history_owner_word_count> owner {};
   };
 
@@ -1086,6 +1154,9 @@ namespace {
       if (!compile(preprocess_path, "main", preprocess_shader_, error) ||
           !compile_specialized_oracle(error) ||
           !compile(fused_preprocess_path, "fused_main", fused_preprocess_shader_, error) ||
+          !compile(fused_preprocess_path, "fused_tiled_main", tiled_preprocess_shader_, error) ||
+          !compile(fused_preprocess_path, "fused_domain_main", domain_preprocess_shader_, error) ||
+          !compile(fused_preprocess_path, "fused_tiled_domain_main", tiled_domain_preprocess_shader_, error) ||
           !compile(fused_map_path, "main", fused_map_shader_, error) ||
           !compile(fused_map_path, "coordinate_main", coordinate_shader_, error) ||
           !compile(shader_path, "resolve_main", resolve_shader_, error) ||
@@ -1184,15 +1255,14 @@ namespace {
 
     struct preprocess_result_t {
       std::vector<float> tensor;
-      std::vector<float> appearance;
       std::vector<std::uint32_t> exclusion;
+      std::array<std::uint32_t, 8u> domain {};
       tile_records_t tiles {};
     };
 
     bool run_fused_map(
       const std::span<const float> raw,
       const std::span<const float> current_model_input,
-      const std::span<const float> current_appearance,
       const std::span<const std::uint32_t> current_exclusion,
       const std::array<float, sbs_adaptive_state::word_count> &depth_health_state,
       const std::array<float, 4> &minmax_ema,
@@ -1206,10 +1276,10 @@ namespace {
       const UINT dispatch_groups_y = tile_group_height,
       const bool coordinate_only = false,
       const std::uint32_t stream_frame_delta = 0u,
-      const std::uint32_t expected_work = 0u
+      const std::uint32_t expected_work = 0u,
+      const bool skip_input_history = false
     ) {
       if (raw.size() != field_texels || current_model_input.size() != 3u * field_texels ||
-          current_appearance.size() != field_texels ||
           current_exclusion.size() != field_texels ||
           !tensor_content.valid({field_width, field_height})) {
         error = "invalid fused map input shape";
@@ -1220,7 +1290,6 @@ namespace {
       constexpr std::uint32_t held_uint = 0xa5a5c3c3u;
       const std::vector<float> held_model(3u * field_texels, held_float);
       const std::vector<float> held_field(field_texels, held_float);
-      const std::vector<std::uint32_t> held_exclusion(field_texels, held_uint);
       std::array<std::uint32_t, models::near_identical_history_owner_word_count>
         held_owner {};
       held_owner.fill(held_uint);
@@ -1236,9 +1305,6 @@ namespace {
         map_current_model_buffer_.Get(), 0u, nullptr, current_model_input.data(), 0u, 0u
       );
       context_->UpdateSubresource(
-        map_current_appearance_buffer_.Get(), 0u, nullptr, current_appearance.data(), 0u, 0u
-      );
-      context_->UpdateSubresource(
         map_health_buffer_.Get(), 0u, nullptr, depth_health_state.data(), 0u, 0u
       );
       context_->UpdateSubresource(
@@ -1247,13 +1313,6 @@ namespace {
       );
       context_->UpdateSubresource(
         map_previous_model_buffer_.Get(), 0u, nullptr, held_model.data(), 0u, 0u
-      );
-      context_->UpdateSubresource(
-        map_previous_appearance_buffer_.Get(), 0u, nullptr, held_field.data(), 0u, 0u
-      );
-      context_->UpdateSubresource(
-        map_previous_exclusion_texture_.Get(), 0u, nullptr, held_exclusion.data(),
-        field_width * sizeof(std::uint32_t), 0u
       );
       context_->UpdateSubresource(
         map_output_texture_.Get(), 0u, nullptr, held_field.data(),
@@ -1265,51 +1324,42 @@ namespace {
 
       update_depth_constants(tensor_content);
       update_detector_constants(
-        0u, 0u, 0u, frame_id, 0u, 0u, observation_timestamp_us,
+        skip_input_history ? models::near_identical_map_skip_input_history : 0u,
+        0u, 0u, frame_id, 0u, 0u, observation_timestamp_us,
         stream_frame_delta, reduction_group_count, expected_work
       );
       ID3D11Buffer *constants[3] = {
         depth_constants_.Get(), v2_constants_.Get(), detector_constants_.Get(),
       };
-      ID3D11ShaderResourceView *inputs[7] = {
+      ID3D11ShaderResourceView *inputs[6] = {
         map_raw_srv_.Get(),
         map_state_srv_.Get(),
         map_exclusion_srv_.Get(),
         map_minmax_srv_.Get(),
         map_current_model_srv_.Get(),
-        map_current_appearance_srv_.Get(),
         map_health_srv_.Get(),
       };
-      ID3D11UnorderedAccessView *outputs[5] = {
+      ID3D11UnorderedAccessView *outputs[3] = {
         map_output_uav_.Get(),
         map_previous_model_uav_.Get(),
-        map_previous_appearance_uav_.Get(),
-        map_previous_exclusion_uav_.Get(),
         history_owner_uav_.Get(),
       };
       context_->CSSetShader(
         coordinate_only ? coordinate_shader_.Get() : fused_map_shader_.Get(), nullptr, 0u
       );
       context_->CSSetConstantBuffers(0u, coordinate_only ? 2u : 3u, constants);
-      context_->CSSetShaderResources(0u, coordinate_only ? 3u : 7u, inputs);
+      context_->CSSetShaderResources(0u, coordinate_only ? 3u : 6u, inputs);
       context_->CSSetUnorderedAccessViews(
-        0u, coordinate_only ? 1u : 5u, outputs, nullptr
+        0u, coordinate_only ? 1u : 3u, outputs, nullptr
       );
       context_->Dispatch(dispatch_groups_x, dispatch_groups_y, 1u);
-      unbind(coordinate_only ? 3u : 7u, coordinate_only ? 1u : 5u,
+      unbind(coordinate_only ? 3u : 6u, coordinate_only ? 1u : 3u,
              coordinate_only ? 2u : 3u);
 
       return read_texture_float(map_output_texture_.Get(), result.output, error) &&
         read_buffer(
           map_previous_model_buffer_.Get(), result.previous_model_input,
           3u * field_texels, error
-        ) &&
-        read_buffer(
-          map_previous_appearance_buffer_.Get(), result.previous_appearance,
-          field_texels, error
-        ) &&
-        read_texture_u32(
-          map_previous_exclusion_texture_.Get(), result.previous_exclusion, error
         ) &&
         read_buffer(history_owner_buffer_.Get(), result.owner, error);
     }
@@ -1324,10 +1374,14 @@ namespace {
       const std::span<const float> previous,
       preprocess_result_t &result,
       std::string &error,
-      const bool evidence_enabled = true
+      const bool evidence_enabled = true,
+      const bool tiled = false,
+      const bool compact_domain = false,
+      const bool zero_dispatch = false,
+      const bool invalid_content_reserved = false
     ) {
       if (source.size() != static_cast<std::size_t>(source_width) * source_height ||
-          previous.size() != 3u * field_texels) {
+          previous.size() != 3u * field_texels || (compact_domain && !fused)) {
         error = "invalid preprocess parity input size";
         return false;
       }
@@ -1357,9 +1411,6 @@ namespace {
       ComPtr<ID3D11Buffer> tensor_buffer;
       ComPtr<ID3D11ShaderResourceView> tensor_srv;
       ComPtr<ID3D11UnorderedAccessView> tensor_uav;
-      ComPtr<ID3D11Buffer> appearance_buffer;
-      ComPtr<ID3D11ShaderResourceView> appearance_srv;
-      ComPtr<ID3D11UnorderedAccessView> appearance_uav;
       ComPtr<ID3D11Buffer> previous_buffer;
       ComPtr<ID3D11ShaderResourceView> previous_srv;
       if (!create_structured_output(
@@ -1368,13 +1419,6 @@ namespace {
             tensor_buffer,
             tensor_srv,
             tensor_uav
-          ) ||
-          !create_structured_output(
-            field_texels,
-            sizeof(float),
-            appearance_buffer,
-            appearance_srv,
-            appearance_uav
           ) ||
           !create_structured_srv(
             previous, sizeof(float), previous_buffer, previous_srv
@@ -1404,7 +1448,23 @@ namespace {
         return false;
       }
 
-      update_depth_constants(tensor_content);
+      ComPtr<ID3D11Buffer> domain_buffer;
+      ComPtr<ID3D11ShaderResourceView> domain_srv;
+      ComPtr<ID3D11UnorderedAccessView> domain_uav;
+      if (compact_domain) {
+        if (!create_structured_output(1u, 8u * sizeof(UINT), domain_buffer, domain_srv, domain_uav)) {
+          error = "could not create compact preprocessing domain";
+          return false;
+        }
+        std::array<UINT, 8u> stale_domain;
+        stale_domain.fill(0xa5a5a5a5u);
+        context_->UpdateSubresource(domain_buffer.Get(), 0u, nullptr, stale_domain.data(), 0u, 0u);
+      }
+      if (zero_dispatch) {
+        const UINT zeros[4] {};
+        context_->ClearUnorderedAccessViewUint(tensor_uav.Get(), zeros);
+      }
+      update_depth_constants(tensor_content, field_width, field_height, invalid_content_reserved ? 1u : 0u);
       context_->UpdateSubresource(
         source_region_constants_.Get(), 0u, nullptr, source_region.data(), 0u, 0u
       );
@@ -1419,11 +1479,11 @@ namespace {
       ID3D11ShaderResourceView *preprocess_inputs[2] = {
         input_srv.Get(), fused ? previous_srv.Get() : nullptr,
       };
-      ID3D11UnorderedAccessView *preprocess_outputs[4] = {
-        tensor_uav.Get(), appearance_uav.Get(), exclusion_uav.Get(),
+      ID3D11UnorderedAccessView *preprocess_outputs[3] = {
+        tensor_uav.Get(), compact_domain ? domain_uav.Get() : exclusion_uav.Get(),
         fused ? tile_uav_.Get() : nullptr,
       };
-      if (fused && !evidence_enabled) {
+      if (fused && (!evidence_enabled || zero_dispatch)) {
         tile_records_t stale_tiles {};
         for (auto &tile : stale_tiles) {
           tile = {0xA5A5A5A5u, 0x5A5A5A5Au, 0xDEADBEEFu, 0xFFFFFFFFu};
@@ -1434,7 +1494,7 @@ namespace {
       }
       context_->CSSetConstantBuffers(0u, 3u, preprocess_constants);
       context_->CSSetShaderResources(0u, 2u, preprocess_inputs);
-      context_->CSSetUnorderedAccessViews(0u, 4u, preprocess_outputs, nullptr);
+      context_->CSSetUnorderedAccessViews(0u, 3u, preprocess_outputs, nullptr);
       constexpr models::depth_tensor_shape_t shape {field_width, field_height};
       const auto content_area = static_cast<std::uint64_t>(tensor_content.width()) *
                                 tensor_content.height();
@@ -1451,18 +1511,32 @@ namespace {
         context_->CSSetShader(oracle_pad_shader_.Get(), nullptr, 0u);
         context_->Dispatch(tile_group_width, tile_group_height, 1u);
       } else {
+        auto *producer = fused ?
+                           (compact_domain ? (tiled ? tiled_domain_preprocess_shader_.Get() : domain_preprocess_shader_.Get()) :
+                            (tiled ? tiled_preprocess_shader_.Get() : fused_preprocess_shader_.Get())) :
+                           preprocess_shader_.Get();
         context_->CSSetShader(
-          fused ? fused_preprocess_shader_.Get() : preprocess_shader_.Get(), nullptr, 0u
+          producer, nullptr, 0u
         );
-        context_->Dispatch(tile_group_width, tile_group_height, 1u);
+        context_->Dispatch(zero_dispatch ? 0u : tile_group_width, tile_group_height, 1u);
       }
-      unbind(2u, 4u, 3u);
+      unbind(2u, 3u, 3u);
 
-      if (!read_buffer(tensor_buffer.Get(), result.tensor, 3u * field_texels, error) ||
-          !read_buffer(
-            appearance_buffer.Get(), result.appearance, field_texels, error
-          ) ||
-          !read_texture_u32(exclusion_texture.Get(), result.exclusion, error)) {
+      if (!read_buffer(tensor_buffer.Get(), result.tensor, 3u * field_texels, error)) {
+        return false;
+      }
+      if (compact_domain) {
+        if (!read_buffer(domain_buffer.Get(), result.domain, error)) return false;
+        const auto &d = result.domain;
+        const bool valid = d[0u] == 1u && d[1u] == field_width && d[2u] == field_height && d[3u] == 0u &&
+          d[4u] < d[6u] && d[5u] < d[7u] && d[6u] <= field_width && d[7u] <= field_height &&
+          !invalid_content_reserved && d[4u] == tensor_content.left && d[5u] == tensor_content.top &&
+          d[6u] == tensor_content.right && d[7u] == tensor_content.bottom;
+        result.exclusion.resize(field_texels);
+        for (UINT y = 0u; y < field_height; ++y)
+          for (UINT x = 0u; x < field_width; ++x)
+            result.exclusion[y * field_width + x] = valid && x >= d[4u] && y >= d[5u] && x < d[6u] && y < d[7u] ? 0u : 1u;
+      } else if (!read_texture_u32(exclusion_texture.Get(), result.exclusion, error)) {
         return false;
       }
       if (fused) {
@@ -1501,13 +1575,11 @@ namespace {
       initialize_transaction(request_work);
       if (publish_owner) {
         const std::vector<float> raw(field_texels, 0.5f);
-        const std::vector<float> appearance(field_texels, 0.25f);
         const std::vector<std::uint32_t> exclusion(field_texels, 0u);
         fused_map_result_t ignored;
         if (!run_fused_map(
               raw,
               current,
-              appearance,
               exclusion,
               depth_health_state,
               minmax_ema,
@@ -1655,13 +1727,11 @@ namespace {
       const auto state = health_state();
       const std::vector<float> raw(field_texels, 0.5f);
       const std::vector<float> model_input(3u * field_texels, 0.25f);
-      const std::vector<float> appearance(field_texels, 0.75f);
       const std::vector<std::uint32_t> exclusion(field_texels, 0u);
       fused_map_result_t ignored;
       return run_fused_map(
         raw,
         model_input,
-        appearance,
         exclusion,
         state,
         minmax_ema,
@@ -2012,10 +2082,6 @@ namespace {
             map_current_model_srv_, map_current_model_uav_
           ) ||
           !create_structured_output(
-            field_texels, sizeof(float), map_current_appearance_buffer_,
-            map_current_appearance_srv_, map_current_appearance_uav_
-          ) ||
-          !create_structured_output(
             sbs_adaptive_state::vector_count, 4u * sizeof(float), map_health_buffer_,
             map_health_srv_, map_health_uav_
           ) ||
@@ -2023,20 +2089,12 @@ namespace {
             3u * field_texels, sizeof(float), map_previous_model_buffer_,
             map_previous_model_srv_, map_previous_model_uav_
           ) ||
-          !create_structured_output(
-            field_texels, sizeof(float), map_previous_appearance_buffer_,
-            map_previous_appearance_srv_, map_previous_appearance_uav_
-          ) ||
           !create_map_texture(
             DXGI_FORMAT_R32_UINT, map_exclusion_texture_, map_exclusion_srv_,
             map_exclusion_uav_
           ) ||
           !create_map_texture(
             DXGI_FORMAT_R32_FLOAT, map_output_texture_, map_output_srv_, map_output_uav_
-          ) ||
-          !create_map_texture(
-            DXGI_FORMAT_R32_UINT, map_previous_exclusion_texture_,
-            map_previous_exclusion_srv_, map_previous_exclusion_uav_
           )) {
         error = "could not create fused map/history resources";
         return false;
@@ -2108,7 +2166,8 @@ namespace {
     void update_depth_constants(
       const models::depth_tensor_content_rect_t tensor_content = content,
       const UINT width = field_width,
-      const UINT height = field_height
+      const UINT height = field_height,
+      const UINT reserved = 0u
     ) {
       std::array<std::uint32_t, 16> constants {};
       constants[0] = width;
@@ -2117,6 +2176,7 @@ namespace {
       constants[10] = tensor_content.top;
       constants[11] = tensor_content.right;
       constants[12] = tensor_content.bottom;
+      constants[13] = reserved;
       context_->UpdateSubresource(
         depth_constants_.Get(), 0u, nullptr, constants.data(), 0u, 0u
       );
@@ -2410,6 +2470,9 @@ namespace {
     ComPtr<ID3D11ComputeShader> oracle_content_shader_;
     ComPtr<ID3D11ComputeShader> oracle_pad_shader_;
     ComPtr<ID3D11ComputeShader> fused_preprocess_shader_;
+    ComPtr<ID3D11ComputeShader> tiled_preprocess_shader_;
+    ComPtr<ID3D11ComputeShader> domain_preprocess_shader_;
+    ComPtr<ID3D11ComputeShader> tiled_domain_preprocess_shader_;
     ComPtr<ID3D11ComputeShader> fused_map_shader_;
     ComPtr<ID3D11ComputeShader> coordinate_shader_;
     ComPtr<ID3D11ComputeShader> resolve_shader_;
@@ -2446,27 +2509,18 @@ namespace {
     ComPtr<ID3D11Buffer> map_current_model_buffer_;
     ComPtr<ID3D11ShaderResourceView> map_current_model_srv_;
     ComPtr<ID3D11UnorderedAccessView> map_current_model_uav_;
-    ComPtr<ID3D11Buffer> map_current_appearance_buffer_;
-    ComPtr<ID3D11ShaderResourceView> map_current_appearance_srv_;
-    ComPtr<ID3D11UnorderedAccessView> map_current_appearance_uav_;
     ComPtr<ID3D11Buffer> map_health_buffer_;
     ComPtr<ID3D11ShaderResourceView> map_health_srv_;
     ComPtr<ID3D11UnorderedAccessView> map_health_uav_;
     ComPtr<ID3D11Buffer> map_previous_model_buffer_;
     ComPtr<ID3D11ShaderResourceView> map_previous_model_srv_;
     ComPtr<ID3D11UnorderedAccessView> map_previous_model_uav_;
-    ComPtr<ID3D11Buffer> map_previous_appearance_buffer_;
-    ComPtr<ID3D11ShaderResourceView> map_previous_appearance_srv_;
-    ComPtr<ID3D11UnorderedAccessView> map_previous_appearance_uav_;
     ComPtr<ID3D11Texture2D> map_exclusion_texture_;
     ComPtr<ID3D11ShaderResourceView> map_exclusion_srv_;
     ComPtr<ID3D11UnorderedAccessView> map_exclusion_uav_;
     ComPtr<ID3D11Texture2D> map_output_texture_;
     ComPtr<ID3D11ShaderResourceView> map_output_srv_;
     ComPtr<ID3D11UnorderedAccessView> map_output_uav_;
-    ComPtr<ID3D11Texture2D> map_previous_exclusion_texture_;
-    ComPtr<ID3D11ShaderResourceView> map_previous_exclusion_srv_;
-    ComPtr<ID3D11UnorderedAccessView> map_previous_exclusion_uav_;
   };
 
   std::vector<float> uniform_model_input(const float pixel = 0.5f) {
@@ -2487,7 +2541,6 @@ namespace {
   struct fused_map_inputs_t {
     std::vector<float> raw;
     std::vector<float> model_input;
-    std::vector<float> appearance;
     std::vector<float> depth;
     std::vector<std::uint32_t> exclusion;
   };
@@ -2497,12 +2550,10 @@ namespace {
       std::vector<float>(field_texels),
       std::vector<float>(3u * field_texels),
       std::vector<float>(field_texels),
-      std::vector<float>(field_texels),
       std::vector<std::uint32_t>(field_texels),
     };
     for (UINT index = 0u; index < field_texels; ++index) {
       inputs.raw[index] = -0.5f + static_cast<float>(index % 101u) / 100.0f;
-      inputs.appearance[index] = 1000.25f + static_cast<float>(index);
       inputs.depth[index] = 2000.5f + static_cast<float>(index);
       for (UINT plane = 0u; plane < 3u; ++plane) {
         inputs.model_input[index + plane * field_texels] =
@@ -2952,7 +3003,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, LongReuseChainComparesAgainstUnchanged
   const std::vector<float> raw(field_texels, 0.5f);
   fused_map_result_t owner;
   ASSERT_TRUE(fixture.run_fused_map(
-    raw, owner_input.tensor, owner_input.appearance, owner_input.exclusion,
+    raw, owner_input.tensor, owner_input.exclusion,
     health_state(), valid_minmax_ema, authenticated_mapping_state(),
     baseline_frame_id, owner_observation_timestamp_us, owner, error
   )) << error;
@@ -3025,7 +3076,6 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, FusedMapAdvancesCompleteTupleAndOwnerF
     ASSERT_TRUE(fixture.run_fused_map(
       inputs.raw,
       inputs.model_input,
-      inputs.appearance,
       inputs.exclusion,
       health_state(),
       valid_minmax_ema,
@@ -3042,8 +3092,6 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, FusedMapAdvancesCompleteTupleAndOwnerF
       models::near_identical_work_optional_ocr
     )) << error;
     EXPECT_EQ(result.previous_model_input, inputs.model_input);
-    EXPECT_EQ(result.previous_appearance, inputs.appearance);
-    EXPECT_EQ(result.previous_exclusion, inputs.exclusion);
     ASSERT_EQ(result.owner.size(), models::near_identical_history_owner_word_count);
     EXPECT_EQ(result.owner[0], models::near_identical_history_owner_contract_tag);
     EXPECT_EQ(result.owner[1], models::near_identical_history_owner_contract_schema);
@@ -3060,6 +3108,17 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, FusedMapAdvancesCompleteTupleAndOwnerF
     // The last texel lives in the final partial dispatch group and proves that completion, not
     // thread (0,0)'s tag store, is the observable tuple/owner publication boundary.
     EXPECT_EQ(result.previous_model_input.back(), inputs.model_input.back());
+
+    fused_map_result_t suppressed;
+    ASSERT_TRUE(fixture.run_fused_map(
+      inputs.raw, inputs.model_input, inputs.exclusion,
+      health_state(), valid_minmax_ema, authenticated_mapping_state(), baseline_frame_id,
+      owner_observation_timestamp_us, suppressed, error, content, tile_group_width,
+      tile_group_height, false, 0u, 0u, true
+    )) << error;
+    EXPECT_EQ(suppressed.output, result.output);
+    EXPECT_EQ(suppressed.owner, result.owner);
+    EXPECT_EQ(suppressed.previous_model_input, std::vector<float>(inputs.model_input.size(), -73.25f));
   }
 }
 
@@ -3073,27 +3132,18 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, FusedMapHoldsTupleAndClearsOwnerForInv
   ASSERT_EQ(initialized, near_identical_gpu_fixture_t::initialize_result_e::ready) << error;
   const auto inputs = patterned_fused_map_inputs();
   constexpr float held_float = -73.25f;
-  constexpr std::uint32_t held_uint = 0xa5a5c3c3u;
 
   const auto expect_held = [&](const std::array<float, 4> &minmax) {
     SCOPED_TRACE(::testing::Message() << "validity " << minmax[3]);
     fused_map_result_t result;
     ASSERT_TRUE(fixture.run_fused_map(
-      inputs.raw, inputs.model_input, inputs.appearance, inputs.exclusion,
+      inputs.raw, inputs.model_input, inputs.exclusion,
       health_state(), minmax, authenticated_mapping_state(), baseline_frame_id,
       owner_observation_timestamp_us, result, error
     )) << error;
     EXPECT_TRUE(std::all_of(
       result.previous_model_input.begin(), result.previous_model_input.end(),
       [held_float](const float value) { return value == held_float; }
-    ));
-    EXPECT_TRUE(std::all_of(
-      result.previous_appearance.begin(), result.previous_appearance.end(),
-      [held_float](const float value) { return value == held_float; }
-    ));
-    EXPECT_TRUE(std::all_of(
-      result.previous_exclusion.begin(), result.previous_exclusion.end(),
-      [held_uint](const std::uint32_t value) { return value == held_uint; }
     ));
     EXPECT_EQ(result.owner[0], 0u);
     EXPECT_EQ(result.owner[1], models::near_identical_history_owner_contract_schema);
@@ -3121,7 +3171,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, FusedMapHistoryPrecedesCandidateValida
 
   fused_map_result_t invalid_result;
   ASSERT_TRUE(fixture.run_fused_map(
-    inputs.raw, inputs.model_input, inputs.appearance, inputs.exclusion,
+    inputs.raw, inputs.model_input, inputs.exclusion,
     invalid_tag_state, valid_minmax_ema, invalid_mapping, baseline_frame_id,
     owner_observation_timestamp_us, invalid_result, error
   )) << error;
@@ -3146,14 +3196,13 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, FusedMapHistoryPrecedesCandidateValida
   inputs.raw[clamped_index] = 0.375f;
   fused_map_result_t padded_result;
   ASSERT_TRUE(fixture.run_fused_map(
-    inputs.raw, inputs.model_input, inputs.appearance, inputs.exclusion,
+    inputs.raw, inputs.model_input, inputs.exclusion,
     health_state(), valid_minmax_ema, authenticated_mapping_state(), baseline_frame_id,
     owner_observation_timestamp_us, padded_result, error, padded_content
   )) << error;
   EXPECT_FLOAT_EQ(padded_result.output[0], padded_result.output[clamped_index]);
   EXPECT_FLOAT_EQ(padded_result.previous_model_input[0], inputs.model_input[0]);
   EXPECT_NE(padded_result.previous_model_input[0], inputs.model_input[clamped_index]);
-  EXPECT_EQ(padded_result.previous_exclusion[0], 1u);
 }
 
 TEST(HostSbsNearIdenticalDetectorGpuTest, CoordinateAndZeroGroupDispatchDoNotMutateHistoryOwner) {
@@ -3174,14 +3223,6 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, CoordinateAndZeroGroupDispatchDoNotMut
       [held_float](const float value) { return value == held_float; }
     ));
     EXPECT_TRUE(std::all_of(
-      result.previous_appearance.begin(), result.previous_appearance.end(),
-      [held_float](const float value) { return value == held_float; }
-    ));
-    EXPECT_TRUE(std::all_of(
-      result.previous_exclusion.begin(), result.previous_exclusion.end(),
-      [held_uint](const std::uint32_t value) { return value == held_uint; }
-    ));
-    EXPECT_TRUE(std::all_of(
       result.owner.begin(), result.owner.end(),
       [held_uint](const std::uint32_t value) { return value == held_uint; }
     ));
@@ -3189,7 +3230,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, CoordinateAndZeroGroupDispatchDoNotMut
 
   fused_map_result_t coordinate;
   ASSERT_TRUE(fixture.run_fused_map(
-    inputs.raw, inputs.model_input, inputs.appearance, inputs.exclusion,
+    inputs.raw, inputs.model_input, inputs.exclusion,
     health_state(), valid_minmax_ema, authenticated_mapping_state(), baseline_frame_id,
     owner_observation_timestamp_us, coordinate, error, content, tile_group_width,
     tile_group_height, true
@@ -3198,7 +3239,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, CoordinateAndZeroGroupDispatchDoNotMut
 
   fused_map_result_t zero_group;
   ASSERT_TRUE(fixture.run_fused_map(
-    inputs.raw, inputs.model_input, inputs.appearance, inputs.exclusion,
+    inputs.raw, inputs.model_input, inputs.exclusion,
     health_state(), valid_minmax_ema, authenticated_mapping_state(), baseline_frame_id,
     owner_observation_timestamp_us, zero_group, error, content, 0u, 0u, false
   )) << error;
@@ -4068,14 +4109,6 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, FusedModeSwitchesCompareForceCompareWi
       ),
       0
     );
-    ASSERT_EQ(left.appearance.size(), right.appearance.size());
-    EXPECT_EQ(
-      std::memcmp(
-        left.appearance.data(), right.appearance.data(),
-        left.appearance.size() * sizeof(float)
-      ),
-      0
-    );
     EXPECT_EQ(left.exclusion, right.exclusion);
   };
   expect_same_outputs(canonical, force);
@@ -4089,6 +4122,63 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, FusedModeSwitchesCompareForceCompareWi
     compare_before.tiles,
     [](const tile_evidence_t &tile) { return tile[0] != 0u; }
   ));
+}
+
+TEST(HostSbsNearIdenticalDetectorGpuTest, TiledPreprocessMatchesDirectAtExactTwoToOneLetterbox) {
+  near_identical_gpu_fixture_t fixture;
+  std::string error;
+  const auto initialized = fixture.initialize(error, true);
+  if (initialized == near_identical_gpu_fixture_t::initialize_result_e::d3d_unavailable) {
+    GTEST_SKIP() << error;
+  }
+  ASSERT_EQ(initialized, near_identical_gpu_fixture_t::initialize_result_e::ready) << error;
+
+  constexpr UINT source_width = 260u;
+  constexpr UINT source_height = 220u;
+  constexpr std::array<std::uint32_t, 4> source_region {17u, 11u, 161u, 177u};
+  constexpr models::depth_tensor_content_rect_t tensor_content {20u, 6u, 92u, 89u};
+  constexpr std::array<std::uint32_t, 8> expected_domain {
+    1u, field_width, field_height, 0u,
+    tensor_content.left, tensor_content.top, tensor_content.right, tensor_content.bottom,
+  };
+  std::vector<std::array<float, 4>> source(source_width * source_height);
+  for (UINT y = 0u; y < source_height; ++y) {
+    for (UINT x = 0u; x < source_width; ++x) {
+      source[y * source_width + x] = {
+        static_cast<float>((13u * x + 7u * y) % 251u) / 250.0f,
+        static_cast<float>((5u * x + 17u * y) % 241u) / 240.0f,
+        static_cast<float>((19u * x + 3u * y) % 239u) / 238.0f,
+        1.0f,
+      };
+    }
+  }
+  const auto previous = uniform_model_input();
+
+  // Exact 2:1 letterboxing can put a source tap on a shared-tile boundary after rounding.
+  for (const bool evidence_enabled : {false, true}) {
+    SCOPED_TRACE(evidence_enabled ? "compare" : "force");
+    near_identical_gpu_fixture_t::preprocess_result_t direct;
+    near_identical_gpu_fixture_t::preprocess_result_t tiled;
+    ASSERT_TRUE(fixture.run_preprocess_and_tile_evidence(
+      true, source, source_width, source_height, source_region, tensor_content,
+      previous, direct, error, evidence_enabled, false, true
+    )) << error;
+    ASSERT_TRUE(fixture.run_preprocess_and_tile_evidence(
+      true, source, source_width, source_height, source_region, tensor_content,
+      previous, tiled, error, evidence_enabled, true, true
+    )) << error;
+    ASSERT_EQ(direct.tensor.size(), tiled.tensor.size());
+    EXPECT_EQ(std::memcmp(direct.tensor.data(), tiled.tensor.data(), direct.tensor.size() * sizeof(float)), 0)
+      << "exact 2:1 letterboxed NCHW differs at the tiled producer";
+    EXPECT_EQ(direct.domain, expected_domain);
+    EXPECT_EQ(tiled.domain, expected_domain);
+    EXPECT_EQ(tiled.tiles, direct.tiles);
+    if (evidence_enabled) {
+      EXPECT_TRUE(std::ranges::any_of(direct.tiles, [](const auto &tile) { return tile[0] != 0u; }));
+    } else {
+      EXPECT_EQ(direct.tiles, (tile_records_t {}));
+    }
+  }
 }
 
 TEST(HostSbsNearIdenticalDetectorGpuTest, FusedPreprocessMatchesCanonicalAndSpecializedOracle) {
@@ -4156,6 +4246,11 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, FusedPreprocessMatchesCanonicalAndSpec
       {source_width - 1u, 0u, source_width + 1u, source_height},
       {0u, 0u, field_width, field_height},
     },
+    parity_case_t {
+      "zero-area retained source",
+      {0u, 0u, 0u, source_height},
+      {0u, 0u, field_width, field_height},
+    },
   };
 
   ASSERT_TRUE(fixture.publish_history_owner(
@@ -4163,105 +4258,123 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, FusedPreprocessMatchesCanonicalAndSpec
   )) << error;
   for (const auto &test_case : cases) {
     SCOPED_TRACE(test_case.label);
-    near_identical_gpu_fixture_t::preprocess_result_t reference;
-    near_identical_gpu_fixture_t::preprocess_result_t fused;
-    ASSERT_TRUE(fixture.run_preprocess_and_tile_evidence(
-      false,
-      source,
-      source_width,
-      source_height,
-      test_case.source_region,
-      test_case.tensor_content,
-      previous,
-      reference,
-      error
-    )) << error;
-    ASSERT_TRUE(fixture.run_preprocess_and_tile_evidence(
-      true,
-      source,
-      source_width,
-      source_height,
-      test_case.source_region,
-      test_case.tensor_content,
-      previous,
-      fused,
-      error
-    )) << error;
-    ASSERT_EQ(reference.tensor.size(), fused.tensor.size());
-    EXPECT_EQ(
-      std::memcmp(
-        reference.tensor.data(), fused.tensor.data(),
-        reference.tensor.size() * sizeof(float)
-      ),
-      0
-    ) << "calibrated NCHW words changed";
-    ASSERT_EQ(reference.appearance.size(), fused.appearance.size());
-    EXPECT_EQ(
-      std::memcmp(
-        reference.appearance.data(), fused.appearance.data(),
-        reference.appearance.size() * sizeof(float)
-      ),
-      0
-    ) << "appearance ordinal words changed";
-    EXPECT_EQ(reference.exclusion, fused.exclusion)
-      << "tensor exclusion words changed";
-    EXPECT_EQ(reference.tiles, fused.tiles) << "tile evidence changed";
+    for (const bool tiled : {false, true}) {
+      SCOPED_TRACE(tiled ? "tiled fused producer" : "direct fused producer");
+      near_identical_gpu_fixture_t::preprocess_result_t reference;
+      near_identical_gpu_fixture_t::preprocess_result_t fused;
+      ASSERT_TRUE(fixture.run_preprocess_and_tile_evidence(
+        false,
+        source,
+        source_width,
+        source_height,
+        test_case.source_region,
+        test_case.tensor_content,
+        previous,
+        reference,
+        error
+      )) << error;
+      ASSERT_TRUE(fixture.run_preprocess_and_tile_evidence(
+        true,
+        source,
+        source_width,
+        source_height,
+        test_case.source_region,
+        test_case.tensor_content,
+        previous,
+        fused,
+        error,
+        true,
+        tiled
+      )) << error;
+      ASSERT_EQ(reference.tensor.size(), fused.tensor.size());
+      EXPECT_EQ(
+        std::memcmp(
+          reference.tensor.data(), fused.tensor.data(),
+          reference.tensor.size() * sizeof(float)
+        ),
+        0
+      ) << "calibrated NCHW words changed";
+      EXPECT_EQ(reference.exclusion, fused.exclusion)
+        << "tensor exclusion words changed";
+      EXPECT_EQ(reference.tiles, fused.tiles) << "tile evidence changed";
 
-    decision_words_t reference_proposal {};
-    decision_words_t fused_proposal {};
-    ASSERT_TRUE(fixture.resolve_seeded_tiles(
-      reference.tiles, reference_proposal, error
-    )) << error;
-    ASSERT_TRUE(fixture.resolve_seeded_tiles(
-      fused.tiles, fused_proposal, error
-    )) << error;
-    EXPECT_EQ(reference_proposal, fused_proposal) << "proposal changed";
+      near_identical_gpu_fixture_t::preprocess_result_t compact;
+      ASSERT_TRUE(fixture.run_preprocess_and_tile_evidence(
+        true, source, source_width, source_height, test_case.source_region,
+        test_case.tensor_content, previous, compact, error, true, tiled, true
+      )) << error;
+      ASSERT_EQ(reference.tensor.size(), compact.tensor.size());
+      EXPECT_EQ(std::memcmp(reference.tensor.data(), compact.tensor.data(), reference.tensor.size() * sizeof(float)), 0)
+        << "compact-domain NCHW words changed";
+      EXPECT_EQ(reference.exclusion, compact.exclusion) << "expanded compact domain changed canonical exclusion";
+      EXPECT_EQ(reference.tiles, compact.tiles) << "same-dispatch compact evidence changed";
+      const auto &region = test_case.source_region;
+      constexpr models::depth_tensor_shape_t shape {field_width, field_height};
+      const bool domain_valid = region[0u] < region[2u] && region[1u] < region[3u] &&
+        region[2u] <= source_width && region[3u] <= source_height && test_case.tensor_content.valid(shape);
+      const std::array<std::uint32_t, 8u> expected_domain {
+        domain_valid ? 1u : 0u, field_width, field_height, 0u,
+        domain_valid ? test_case.tensor_content.left : 0u, domain_valid ? test_case.tensor_content.top : 0u,
+        domain_valid ? test_case.tensor_content.right : 0u, domain_valid ? test_case.tensor_content.bottom : 0u,
+      };
+      EXPECT_EQ(compact.domain, expected_domain) << "producer must overwrite every descriptor word, including invalid domains";
 
-    const auto branch = static_cast<models::near_identical_gpu_branch_e>(
-      reference_proposal[word(models::near_identical_gpu_decision_word_e::decision)]
-    );
-    decision_words_t reference_receipt {};
-    decision_words_t fused_receipt {};
-    ASSERT_TRUE(fixture.resolve_seeded_tiles(
-      reference.tiles, reference_receipt, error
-    )) << error;
-    ASSERT_TRUE(fixture.finalize_depth_receipt(
-      branch, true, reference_receipt, error
-    )) << error;
-    ASSERT_TRUE(fixture.resolve_seeded_tiles(
-      fused.tiles, fused_receipt, error
-    )) << error;
-    ASSERT_TRUE(fixture.finalize_depth_receipt(
-      branch, true, fused_receipt, error
-    )) << error;
-    EXPECT_EQ(reference_receipt, fused_receipt) << "receipt/indirect args changed";
+      decision_words_t reference_proposal {};
+      decision_words_t fused_proposal {};
+      ASSERT_TRUE(fixture.resolve_seeded_tiles(
+        reference.tiles, reference_proposal, error
+      )) << error;
+      ASSERT_TRUE(fixture.resolve_seeded_tiles(
+        fused.tiles, fused_proposal, error
+      )) << error;
+      EXPECT_EQ(reference_proposal, fused_proposal) << "proposal changed";
 
-    decision_words_t reference_malformed {};
-    decision_words_t fused_malformed {};
-    ASSERT_TRUE(fixture.resolve_seeded_tiles(
-      reference.tiles,
-      reference_malformed,
-      error,
-      reduction_group_count,
-      tile_group_width,
-      tile_group_height,
-      tile_group_count - 1u
-    )) << error;
-    ASSERT_TRUE(fixture.resolve_seeded_tiles(
-      fused.tiles,
-      fused_malformed,
-      error,
-      reduction_group_count,
-      tile_group_width,
-      tile_group_height,
-      tile_group_count - 1u
-    )) << error;
-    EXPECT_EQ(reference_malformed, fused_malformed)
-      << "malformed-shape fail-open transaction changed";
-    EXPECT_EQ(
-      reference_malformed[word(models::near_identical_gpu_decision_word_e::decision)],
-      static_cast<std::uint32_t>(models::near_identical_gpu_branch_e::infer)
-    );
+      const auto branch = static_cast<models::near_identical_gpu_branch_e>(
+        reference_proposal[word(models::near_identical_gpu_decision_word_e::decision)]
+      );
+      decision_words_t reference_receipt {};
+      decision_words_t fused_receipt {};
+      ASSERT_TRUE(fixture.resolve_seeded_tiles(
+        reference.tiles, reference_receipt, error
+      )) << error;
+      ASSERT_TRUE(fixture.finalize_depth_receipt(
+        branch, true, reference_receipt, error
+      )) << error;
+      ASSERT_TRUE(fixture.resolve_seeded_tiles(
+        fused.tiles, fused_receipt, error
+      )) << error;
+      ASSERT_TRUE(fixture.finalize_depth_receipt(
+        branch, true, fused_receipt, error
+      )) << error;
+      EXPECT_EQ(reference_receipt, fused_receipt) << "receipt/indirect args changed";
+
+      decision_words_t reference_malformed {};
+      decision_words_t fused_malformed {};
+      ASSERT_TRUE(fixture.resolve_seeded_tiles(
+        reference.tiles,
+        reference_malformed,
+        error,
+        reduction_group_count,
+        tile_group_width,
+        tile_group_height,
+        tile_group_count - 1u
+      )) << error;
+      ASSERT_TRUE(fixture.resolve_seeded_tiles(
+        fused.tiles,
+        fused_malformed,
+        error,
+        reduction_group_count,
+        tile_group_width,
+        tile_group_height,
+        tile_group_count - 1u
+      )) << error;
+      EXPECT_EQ(reference_malformed, fused_malformed)
+        << "malformed-shape fail-open transaction changed";
+      EXPECT_EQ(
+        reference_malformed[word(models::near_identical_gpu_decision_word_e::decision)],
+        static_cast<std::uint32_t>(models::near_identical_gpu_branch_e::infer)
+      );
+    }
   }
 
   // A malformed retained-source rectangle is outside normal host admission. Canonical
@@ -4293,6 +4406,62 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, FusedPreprocessMatchesCanonicalAndSpec
     malformed_source_proposal[word(models::near_identical_gpu_decision_word_e::decision)],
     static_cast<std::uint32_t>(models::near_identical_gpu_branch_e::infer)
   );
+}
+
+TEST(HostSbsNearIdenticalDetectorGpuTest, CompactPreprocessDomainPreservesForceReservedFaultAndZeroDispatch) {
+  near_identical_gpu_fixture_t fixture;
+  std::string error;
+  const auto initialized = initialize_fixture(fixture, error);
+  if (initialized == near_identical_gpu_fixture_t::initialize_result_e::d3d_unavailable) {
+    GTEST_SKIP() << error;
+  }
+  ASSERT_EQ(initialized, near_identical_gpu_fixture_t::initialize_result_e::ready) << error;
+  constexpr UINT source_width = 144u, source_height = 112u;
+  const std::vector<std::array<float, 4>> source(source_width * source_height, {.25f, .5f, .75f, 1.f});
+  const auto previous = uniform_model_input(.25f);
+  const std::array<std::uint32_t, 4u> region {16u, 8u, 16u + field_width, 8u + field_height};
+  const models::depth_tensor_content_rect_t padded {7u, 5u, 104u, 86u};
+  // This padded source spans many groups. Poison the output descriptor before every
+  // dispatch; comparison must use each producer lane's result, not another group's store.
+  for (const bool tiled : {false, true}) {
+    for (const bool evidence : {false, true}) {
+      for (const bool reserved_fault : {false, true}) {
+        SCOPED_TRACE(tiled);
+        SCOPED_TRACE(evidence);
+        SCOPED_TRACE(reserved_fault);
+        near_identical_gpu_fixture_t::preprocess_result_t legacy, compact;
+        ASSERT_TRUE(fixture.run_preprocess_and_tile_evidence(
+          true, source, source_width, source_height, region, padded, previous,
+          legacy, error, evidence, tiled, false, false, reserved_fault
+        )) << error;
+        ASSERT_TRUE(fixture.run_preprocess_and_tile_evidence(
+          true, source, source_width, source_height, region, padded, previous,
+          compact, error, evidence, tiled, true, false, reserved_fault
+        )) << error;
+        ASSERT_EQ(legacy.tensor.size(), compact.tensor.size());
+        EXPECT_EQ(std::memcmp(legacy.tensor.data(), compact.tensor.data(), legacy.tensor.size() * sizeof(float)), 0);
+        EXPECT_EQ(legacy.exclusion, compact.exclusion);
+        EXPECT_EQ(legacy.tiles, compact.tiles);
+        const std::array<std::uint32_t, 8u> expected_domain {
+          reserved_fault ? 0u : 1u, field_width, field_height, 0u,
+          reserved_fault ? 0u : padded.left, reserved_fault ? 0u : padded.top,
+          reserved_fault ? 0u : padded.right, reserved_fault ? 0u : padded.bottom,
+        };
+        EXPECT_EQ(compact.domain, expected_domain);
+      }
+    }
+    near_identical_gpu_fixture_t::preprocess_result_t held;
+    ASSERT_TRUE(fixture.run_preprocess_and_tile_evidence(
+      true, source, source_width, source_height, region, padded, previous,
+      held, error, true, tiled, true, true
+    )) << error;
+    std::array<std::uint32_t, 8u> poison;
+    poison.fill(0xa5a5a5a5u);
+    EXPECT_EQ(held.domain, poison) << "Zero groups cannot manufacture a fresh domain publication";
+    EXPECT_TRUE(std::ranges::all_of(held.tensor, [](float value) { return std::bit_cast<std::uint32_t>(value) == 0u; }));
+    for (const auto &tile : held.tiles)
+      EXPECT_EQ(tile, (tile_evidence_t {0xa5a5a5a5u, 0x5a5a5a5au, 0xdeadbeefu, 0xffffffffu}));
+  }
 }
 
 #else

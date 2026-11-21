@@ -5,6 +5,7 @@
   #include "src/generated/depth_coordinate_v2_contract.h"
   #include "src/host_sbs_current_black_ring_gpu.h"
   #include "src/host_sbs_shader_cache.h"
+  #include "subtitle_helper_source_pins.h"
 
   #include <algorithm>
   #include <array>
@@ -34,9 +35,9 @@ namespace {
   constexpr UINT probability_height = models::depth_coordinate_v2::subtitle_ocr_output_height;
   constexpr UINT probability_word_count = probability_width * probability_height;
   static_assert(probability_width == 960u && probability_height == 160u);
-  constexpr const char *compiled_ring_helper_pin = "0bda8b195e38e3fc3b5712061448a981e21546838d7f4242a2b41d1d6aca811b";
-  constexpr const char *compiled_enclosure_helper_pin = "7923142f4094410b4d96d56e0d964db5948d5af48361d66f9a9fb3576da4b617";
-  constexpr const char *compiled_baseline_helper_pin = "5cadff739dafce03fdc0b840c42249ca490fa573b85bec276c4fea8798b6942f";
+  constexpr const char *compiled_ring_helper_pin = subtitle_test_source_pins::current_black_ring;
+  constexpr const char *compiled_enclosure_helper_pin = subtitle_test_source_pins::current_black_enclosure;
+  constexpr const char *compiled_baseline_helper_pin = subtitle_test_source_pins::global_colour_validation;
 
   struct texture_t {
     ComPtr<ID3D11Texture2D> resource;
@@ -155,8 +156,7 @@ namespace {
       };
       const std::array espec {
         cache::shader_spec {"host_sbs_current_black_enclosure_cs.hlsl", "begin_main", "cs_5_0"},
-        cache::shader_spec {"host_sbs_current_black_enclosure_cs.hlsl", "clear_main", "cs_5_0"},
-        cache::shader_spec {"host_sbs_current_black_enclosure_cs.hlsl", "validate_encoding_main", "cs_5_0"},
+        cache::shader_spec {"host_sbs_current_black_enclosure_cs.hlsl", "initialize_main", "cs_5_0"},
         cache::shader_spec {"host_sbs_current_black_enclosure_cs.hlsl", "unit_meta_main", "cs_5_0"},
         cache::shader_spec {"host_sbs_current_black_enclosure_cs.hlsl", "collect_main", "cs_5_0"},
         cache::shader_spec {"host_sbs_current_black_enclosure_cs.hlsl", "clear_scratch_main", "cs_5_0"},
@@ -178,10 +178,10 @@ namespace {
       for (std::size_t i = 0; i < espec.size(); ++i) {
         const auto code = cache::get(snapshot, espec[i]);
         require(code && !code->empty());
-        if (i < 12u) {
+        if (i < enclosure::shader_count) {
           require(SUCCEEDED(device_->CreateComputeShader(code->data(), code->size(), nullptr, &enclosure_[i])));
         } else {
-          require(SUCCEEDED(device_->CreateComputeShader(code->data(), code->size(), nullptr, &roi_[i - 12u])));
+          require(SUCCEEDED(device_->CreateComputeShader(code->data(), code->size(), nullptr, &roi_[i - enclosure::shader_count])));
         }
       }
       inner_closure_ = ip;
@@ -192,7 +192,7 @@ namespace {
       if (const auto *hp = std::getenv("SUNSHINE_TEST_BLACK_ENCLOSURE_HEADER_PIN")) {
         require(std::string(hp) == compiled_enclosure_helper_pin);
       }
-      for (std::size_t i = 0; i < 12u; ++i) {
+      for (std::size_t i = 0; i < enclosure::shader_count; ++i) {
         program_.enclosure.shaders[i] = enclosure_[i].Get();
       }
       for (std::size_t i = 0; i < 3u; ++i) {
@@ -618,7 +618,7 @@ namespace {
     ring::program_t program_;
     std::array<ComPtr<ID3D11ComputeShader>, 5u> colour_;
     std::array<ComPtr<ID3D11ComputeShader>, 6u> graph_;
-    std::array<ComPtr<ID3D11ComputeShader>, 12u> enclosure_;
+    std::array<ComPtr<ID3D11ComputeShader>, enclosure::shader_count> enclosure_;
     std::array<ComPtr<ID3D11ComputeShader>, 3u> roi_;
     texture_t rgb_, support_, origin_;
     buffer_t probability_, ocr_, sct_, uip_, cb_, root_;

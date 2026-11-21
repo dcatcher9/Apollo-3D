@@ -224,7 +224,7 @@ namespace pending_current_colour_probe_v1 {
       while(!converter.ensure_depth_estimator()){require(clock_t::now()<prepare_deadline&&converter.host_sbs_renderer!=models::host_sbs_renderer_e::failed_flat,"Estimator preparation unavailable");std::this_thread::sleep_for(std::chrono::milliseconds(1));}
       est=converter.depth_estimator.get();require(est&&est->is_valid(),"Real estimator unavailable");
       require(est->set_completed_ocr_conditioner_research_enabled(true),"Preinput warm descriptors unavailable");
-      if(r.queued)require(converter.initialize_queued_renderer_for_instance(true),"Per-instance queued resources unavailable");
+      if(r.queued)require(converter.initialize_queued_renderer_for_instance(),"Per-instance queued resources unavailable");
       models::joined_completion_gate_benchmark::configuration_t gate;gate.enabled=true;gate.placement=models::joined_completion_gate_benchmark::placement_e::before_interop_unmaps;
       gate.target_frame_id=3;gate.hold_after_callback_enter_ms=120;gate.callback_safety_timeout_ms=500;
       require(est->configure_joined_completion_gate_for_benchmark(gate),"Pre-input gate configuration failed");
@@ -233,34 +233,36 @@ namespace pending_current_colour_probe_v1 {
       hr(converter.device->CreateTexture2D(&td,nullptr,&reference),"Reference target failed");hr(converter.device->CreateRenderTargetView(reference.Get(),nullptr,&reference_rtv),"Reference RTV failed");
       models::host_sbs_subtitle_render_constants_t disabled_subtitle{};D3D11_BUFFER_DESC disabled_desc{};disabled_desc.ByteWidth=sizeof(disabled_subtitle);disabled_desc.Usage=D3D11_USAGE_DEFAULT;disabled_desc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;D3D11_SUBRESOURCE_DATA disabled_init{&disabled_subtitle,0,0};
       hr(converter.device->CreateBuffer(&disabled_desc,&disabled_init,&reference_subtitle_disabled),"Reference UI CB failed");
-      for(std::size_t i=0;i<3;++i){images[i]=display->alloc_img();require(images[i]&&display->complete_img(images[i].get(),false)==0,"Actual shared image allocation failed");auto &img=static_cast<img_d3d_t&>(*images[i]);texture_lock_helper lock(img.capture_mutex.get());require(lock.lock(),"Capture keyed mutex failed");display->device_ctx->UpdateSubresource(img.capture_texture.get(),0,nullptr,r.frames[i].bgra.data(),w*4,0);display->device_ctx->Flush();img.blank=false;}
+      for(std::size_t i=0;i<3;++i){images[i]=display->alloc_img();require(images[i]&&display->complete_img(images[i].get(),false)==0,"Actual shared image allocation failed");auto &img=static_cast<img_d3d_t&>(*images[i]);detail::keyed_mutex_lock_t lock {img.capture_mutex.get()};require(lock.lock() == S_OK,"Capture keyed mutex failed");display->device_ctx->UpdateSubresource(img.capture_texture.get(),0,nullptr,r.frames[i].bgra.data(),w*4,0);display->device_ctx->Flush();img.blank=false;}
       // Open every existing shared-image binding and allocate the existing TWO private slots
       // before input1. Allocation establishes no frame, source clock, pending or publication.
       for(const auto &image:images){auto &img=static_cast<img_d3d_t&>(*image);auto [it,inserted]=converter.img_ctx_map.try_emplace(img.id);(void)inserted;require(converter.initialize_image_context(img,it->second)==0,"Shared image preparation failed");}
-      D3D11_TEXTURE2D_DESC private_desc{};static_cast<img_d3d_t&>(*images[0]).capture_texture->GetDesc(&private_desc);
-      private_desc.Usage=D3D11_USAGE_DEFAULT;private_desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;private_desc.MiscFlags=0;private_desc.CPUAccessFlags=0;
-      for(auto &slot:converter.matched_frame_slots){hr(converter.device->CreateTexture2D(&private_desc,nullptr,&slot.texture),"Private slot preparation failed");hr(converter.device->CreateShaderResourceView(slot.texture.get(),nullptr,&slot.srv),"Private slot SRV failed");}
+      D3D11_TEXTURE2D_DESC source_desc {};
+      static_cast<img_d3d_t &>(*images[0]).capture_texture->GetDesc(&source_desc);
+      for (auto &slot : converter.matched_frame_slots) {
+        require(converter.ensure_private_matched_texture(slot, source_desc), "Private slot preparation failed");
+      }
       records.ctx=converter.device_ctx.get();converter.probe_observer={&records,&recorder_t::record};
       const auto stamp=[&](std::size_t i){const auto t=clock_t::now();images[i]->frame_timestamp=t;images[i]->content_timestamp=t;};
-      const auto convert=[&](std::size_t i){require(converter.convert_rgb(*images[i],target.Get(),target_rtv.Get(),false,clock_t::now()-std::chrono::milliseconds(1))==0,"Actual RGB convert failed");require(!records.overflow&&!records.capture_fault,"Passive observer unavailable");};
+      const auto convert=[&](std::size_t i){require(converter.convert_rgb(*images[i],target.Get(),target_rtv.Get(),false,clock_t::now()-std::chrono::milliseconds(1))==d3d_base_encode_device::rgb_conversion_e::converted,"Actual RGB convert failed");require(!records.overflow&&!records.capture_fault,"Passive observer unavailable");};
       const auto wait_ready=[&](){const auto until=clock_t::now()+std::chrono::seconds(30);while(!est->can_accept_frame()){require(!est->has_terminal_failure()&&clock_t::now()<until,"Real root readiness timeout");std::this_thread::sleep_for(std::chrono::milliseconds(1));}};
       stamp(0);convert(0);wait_ready();convert(0); // exact same img/source/content identity on retry
       const auto *a=records.last_draw();require(a&&a->publication_current&&!a->queued&&a->publication.frame_id==1&&converter.sbs_frame_sequence==2,"A/ACK protocol unavailable; no invented ordinal");
-      require(std::none_of(converter.matched_frame_slots.begin(),converter.matched_frame_slots.end(),[](const auto &s){return s.pending;}),"A retry unexpectedly enqueued; target3 unavailable");
+      require(!converter.pending_matched_frame, "A retry unexpectedly enqueued; target3 unavailable");
       {
         // convert() has released its encoder-side keyed lease. Reacquire that SAME
         // prepared A context before the initial diagnostic reads its shared SRV.
         const auto a_context=converter.img_ctx_map.find(static_cast<img_d3d_t&>(*images[0]).id);
         require(a_context!=converter.img_ctx_map.end()&&a_context->second.encoder_mutex&&
           a_context->second.encoder_input_res.get()==a->current_input.Get(),"Prepared A shared context identity unavailable");
-        texture_lock_helper a_snapshot_lease(a_context->second.encoder_mutex.get());
-        require(a_snapshot_lease.lock(),"Initial A shared diagnostic keyed lease failed");
+        detail::keyed_mutex_lock_t a_snapshot_lease {a_context->second.encoder_mutex.get()};
+        require(a_snapshot_lease.lock() == S_OK,"Initial A shared diagnostic keyed lease failed");
         records.prepare(converter.device.get(),*a,target.Get());records.copy_target(0,target.Get());
         converter.device_ctx->Flush(); // submit every shared read BEFORE ReleaseSync(0)
       }
       const auto a_publication=a->publication;
       require(converter.initialize_pending_current_colour_for_instance(r.pending_current_colour,a_publication,error),"Pending-colour resources unavailable before B");
-      records.prepare_negative(converter.device.get(),converter.pending_colour_lane,reference.Get());
+      records.prepare_negative(converter.device.get(),converter.queued_research->pending_colour->lane,reference.Get());
       // All diagnostic staging/textures/CPU vectors now exist. No Map/hash/JSON until release.
       records.armed=r.queued?1:-1;
       releaser=std::jthread([&](std::stop_token stop){const auto hard_deadline=clock_t::now()+std::chrono::milliseconds(500);while(!stop.stop_requested()){
@@ -279,7 +281,8 @@ namespace pending_current_colour_probe_v1 {
       for(;;){auto q=est->joined_completion_gate_status_for_benchmark();require(q&&!q->released&&clock_t::now()<entered_deadline,"No held B gate window");if(q->callback_entered)break;std::this_thread::sleep_for(std::chrono::milliseconds(1));}
       const auto pending=est->try_finish_pending_depth_nonblocking(models::input_color_space::srgb,false);const auto after_query=us();
       const auto held=est->joined_completion_gate_status_for_benchmark();require(!pending.ready&&held&&held->callback_entered&&!held->released&&held->last_actual_event_query==CUDA_ERROR_NOT_READY,"B must be actual recorded NOT_READY");
-      require(converter.sbs_frame_sequence==3&&std::count_if(converter.matched_frame_slots.begin(),converter.matched_frame_slots.end(),[](const auto &s){return s.pending&&s.frame_id==3;})==1,"Exact pending B source slot lost");
+      require(converter.sbs_frame_sequence == 3 && converter.pending_matched_frame &&
+        converter.pending_matched_frame->attribution.frame_id == 3, "Exact pending B source slot lost");
       const auto b_admission=std::find_if(records.events.begin(),records.events.begin()+records.count,[](const auto &e){return e.kind==event_e::admission&&e.conversion==3;});
       require(b_admission!=records.events.begin()+records.count&&b_admission->model_frame==3&&b_admission->force_infer&&!b_admission->gpu_undecided&&
         b_admission->optional_work==static_cast<std::uint32_t>(models::depth_optional_work_mode_e::ordinary),"B did not take the actual ordinary force-infer admission branch");
@@ -294,7 +297,8 @@ namespace pending_current_colour_probe_v1 {
         const auto still_pending=est->try_finish_pending_depth_nonblocking(models::input_color_space::srgb,false);
         pending_c_query=est->joined_completion_gate_status_for_benchmark();
         require(!timeout_forced_release.load()&&!still_pending.ready&&pending_c_query&&pending_c_query->callback_entered&&!pending_c_query->released&&pending_c_query->last_actual_event_query==CUDA_ERROR_NOT_READY,"No real pending-B window at C return; timeout is unavailable, not success");
-        require(records.captured[4]&&converter.sbs_frame_sequence==4&&std::count_if(converter.matched_frame_slots.begin(),converter.matched_frame_slots.end(),[](const auto&s){return s.pending&&s.frame_id==3;})==1,"C arrival lost actual pending B lease");
+        require(records.captured[4] && converter.sbs_frame_sequence == 4 && converter.pending_matched_frame &&
+          converter.pending_matched_frame->attribution.frame_id == 3, "C arrival lost actual pending B lease");
         require(std::none_of(records.events.begin(),records.events.begin()+records.count,[](const auto &e){return e.kind==event_e::admission&&e.conversion==4;}),"C was admitted while B retained the sole inflight lease");
         require(records.phase_event[4].pending_current_colour&&!records.phase_event[4].repeat&&records.phase_event[4].actual_draw_pixel_source==4u,"Actual current-C negative-only draw unavailable");
         const auto first_c_identity=records.phase_event[4];
@@ -302,7 +306,7 @@ namespace pending_current_colour_probe_v1 {
         require(records.captured[6]&&records.phase_event[6].material_epoch==first_c_identity.material_epoch&&records.phase_event[6].material_serial==first_c_identity.material_serial&&records.phase_event[6].material_capture_clock_us==first_c_identity.material_capture_clock_us,"Same capture retry minted a material observation");
         const auto c_context=converter.img_ctx_map.find(static_cast<img_d3d_t&>(*images[2]).id);
         require(c_context!=converter.img_ctx_map.end()&&c_context->second.encoder_mutex,"Current C encoder binding missing");
-        {texture_lock_helper lease(c_context->second.encoder_mutex.get());require(lease.lock(),"Reference current-C keyed lease failed");
+        {detail::keyed_mutex_lock_t lease {c_context->second.encoder_mutex.get()};require(lease.lock() == S_OK,"Reference current-C keyed lease failed");
           const auto &e=records.phase_event[4];host_sbs_v2_draw_command_t command;
           command.render_targets[0]=reference_rtv.Get();command.vertex_shader=converter.sbs_reprojection_vs.get();command.pixel_shader=converter.sbs_reprojection_v2_live_ps.get();
           command.viewport=converter.sbs_viewport;command.sampler=converter.sampler_linear.get();
@@ -317,7 +321,10 @@ namespace pending_current_colour_probe_v1 {
       const auto released=est->joined_completion_gate_status_for_benchmark();require(released&&released->released,"Release not observed");released_before_readback=true;
       records.armed=3;const auto ack_begin=us();convert(pending_arrival?2:1);const auto ack_return=us();
       require(records.captured[3]&&records.phase_event[3].publication_current&&records.phase_event[3].publication.frame_id==3,"Genuine converter B ACK unavailable");
-      if(!pending_arrival){require(converter.sbs_frame_sequence==4&&std::none_of(converter.matched_frame_slots.begin(),converter.matched_frame_slots.end(),[](const auto&s){return s.pending;}),"B ACK unexpectedly resubmitted");records.copy_target(3,target.Get());}
+      if (!pending_arrival) {
+        require(converter.sbs_frame_sequence == 4 && !converter.pending_matched_frame, "B ACK unexpectedly resubmitted");
+        records.copy_target(3, target.Get());
+      }
       if(!pending_arrival){records.armed=5;stamp(2);convert(2);}
       if(!records.captured[5]){wait_ready();convert(2);}
       require(records.captured[5]&&records.phase_event[5].publication_current,"Genuine C not yet drawn; no synthetic empty proof");

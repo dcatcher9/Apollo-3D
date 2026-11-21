@@ -47,8 +47,14 @@ namespace models::host_sbs_current_black_enclosure_gpu_v1 {
     std::array<UINT, 4u> analysis_roi {};
   };
 
+  enum shader_slot_e : UINT {
+    begin_stage, initialize_stage, unit_meta_stage, collect_stage, clear_scratch_stage,
+    prepare_unit_stage, emit_exterior_stage, resolve_exterior_stage, count_enclosed_stage,
+    select_unit_stage, publish_stage, shader_count,
+  };
+
   struct program_t {
-    std::array<ID3D11ComputeShader *, 12u> shaders {};
+    std::array<ID3D11ComputeShader *, shader_count> shaders {};
     std::array<ID3D11ComputeShader *, 3u> roi_graph {};
     ID3D11ShaderResourceView *current_sct = nullptr;
     ID3D11ShaderResourceView *current_uip = nullptr;
@@ -689,21 +695,23 @@ namespace models::host_sbs_current_black_enclosure_gpu_v1 {
       }
       const std::array<ID3D11ShaderResourceView *, 16u> ei {rgb, ocr, base_views_.validation_receipt.Get(), base_views_.palette.Get(), base_views_.mode_body.Get(), base_views_.cover_clip.Get(), base_views_.parent.Get(), base_views_.root_flags.Get(), all_body_.srv.Get(), cover_bits_.srv.Get(), program.current_sct, program.current_uip, root_mirror_.srv.Get(), program.producer.original_source, base_views_.body.Get(), base_views_.matte.Get()};
       ID3D11Buffer *ec[3] {cb, validation_cb_.Get(), producer_cb_.Get()};
-      auto enc = [&](UINT entry, const std::array<ID3D11UnorderedAccessView *, 8u> &out, ID3D11Buffer *args, UINT offset, bool bits_write = false, bool scratch_write = false) {
+      auto enc = [&](shader_slot_e entry, const std::array<ID3D11UnorderedAccessView *, 8u> &out, ID3D11Buffer *args, UINT offset, bool bits_write = false, bool scratch_write = false) {
         // emit() enters unbound. Every preceding stage or shared mode hook
         // clears its writable/read slots before returning to this owner.
         auto in = ei;
         auto bound_out = out;
-        if (entry == 0u || entry == 3u) bound_out[6] = family_models_.uav.Get();
-        if (entry == 4u) {
+        if (entry == begin_stage || entry == unit_meta_stage) bound_out[6] = family_models_.uav.Get();
+        if (entry == collect_stage) {
           // collect_main reconstructs from this exact current per-mode Seeds plane.
           // publish_main continues to read accumulated baseline BODY at t14.
           in[14] = base_views_.seeds.Get();
         }
-        if (entry == 2u) {
-          // Dedicated input validation aliases: t1=actual P bits, t5=current S.
+        if (entry == initialize_stage) {
+          // Validate current P/S while initializing the bitplanes and baseline accumulators.
           in[1] = p;
           in[5] = s;
+          in[14] = nullptr;
+          in[15] = nullptr;
         }
         if (bits_write) {
           in[8] = nullptr;
@@ -712,13 +720,13 @@ namespace models::host_sbs_current_black_enclosure_gpu_v1 {
         if (bound_out[6]) {
           in[4] = nullptr;
         }
-        if (entry == 10u) {
+        if (entry == select_unit_stage) {
           // CBC4 normalizes the own-pixel pending planes in the shared emit body.
           // Remove the SRV alias before binding the same AllBody storage as u1.
           in[8] = nullptr;
           bound_out[1] = all_body_.uav.Get();
         }
-        if (entry == 8u) {
+        if (entry == resolve_exterior_stage) {
           // Resolve needs passable Eligible at t4, not its Exterior output (ModeBody/u6).
           in[4] = base_views_.eligible.Get();
         }
@@ -734,25 +742,13 @@ namespace models::host_sbs_current_black_enclosure_gpu_v1 {
       };
       u.fill(nullptr);
       u[0] = meta_.uav.Get();
-      enc(0u, u, root, rootOffset);
+      enc(begin_stage, u, root, rootOffset);
       u[1] = all_body_.uav.Get();
       u[2] = cover_bits_.uav.Get();
       u[3] = selected_bits_.uav.Get();
-      u[4] = candidate_body_.uav.Get();
-      u[5] = candidate_matte_.uav.Get();
-      enc(1u, u, native_args_.Get(), 0u, true);
-      u.fill(nullptr);
-      u[0] = meta_.uav.Get();
-      enc(2u, u, native_args_.Get(), 0u);
-      // Original baseline global clear/palette/emit/4CC/BOX3/OR: no replay or changed shader.
-      c->CSSetConstantBuffers(0u, 3u, bc);
-      u.fill(nullptr);
-      u[5] = base_uavs_[6].Get();
-      u[6] = base_uavs_[7].Get();
-      c->CSSetUnorderedAccessViews(0u, 8u, u.data(), nullptr);
-      c->CSSetShader(colour[2], nullptr, 0u);
-      c->DispatchIndirect(base_views_.native_clear_args.Get(), 0u);
-      unbind(c);
+      u[4] = base_uavs_[6].Get();
+      u[5] = base_uavs_[7].Get();
+      enc(initialize_stage, u, native_args_.Get(), 0u, true);
       const std::array<ID3D11ShaderResourceView *, 4u> gi {base_views_.eligible.Get(), base_views_.seeds.Get(), base_views_.domain_tag.Get(), base_views_.cover_clip.Get()};
       namespace colour_commands = host_sbs_subtitle_colour_commands;
       colour_commands::bindings_t bindings;
@@ -782,7 +778,7 @@ namespace models::host_sbs_current_black_enclosure_gpu_v1 {
         ec[1u] = mode_constants_[unit * 8u].Get();
         std::array<ID3D11UnorderedAccessView *, 8u> outputs{};
         outputs[0] = meta_.uav.Get();
-        enc(3u, outputs, root, rootOffset);
+        enc(unit_meta_stage, outputs, root, rootOffset);
       };
       const auto collect_mode = [&](UINT unit, UINT mode, UINT argument_offset) {
         ec[1u] = mode_constants_[unit * 8u + mode].Get();
@@ -791,7 +787,7 @@ namespace models::host_sbs_current_black_enclosure_gpu_v1 {
         outputs[1] = all_body_.uav.Get();
         outputs[2] = cover_bits_.uav.Get();
         outputs[3] = selected_bits_.uav.Get();
-        enc(4u, outputs, base_views_.current_mode_args.Get(), argument_offset, true);
+        enc(collect_stage, outputs, base_views_.current_mode_args.Get(), argument_offset, true);
       };
       colour_commands::emit_modes<colour_commands::enclosure_layout_t>(
           c, colour, graph, bindings, &resources_t::unbind, collect_unit, collect_mode);
@@ -800,21 +796,21 @@ namespace models::host_sbs_current_black_enclosure_gpu_v1 {
       u[2] = base_uavs_[1].Get();
       u[3] = base_uavs_[2].Get();
       u[6] = base_uavs_[3].Get();
-      enc(5u, u, native_args_.Get(), 0u, false, true);
+      enc(clear_scratch_stage, u, native_args_.Get(), 0u, false, true);
       for (UINT slot = 0; slot < 8u; ++slot) {
         ec[1u] = mode_constants_[slot * 8u].Get();
         c->ClearUnorderedAccessViewUint(unit_args_.uav.Get(), zero.data());
         u.fill(nullptr);
         u[0] = meta_.uav.Get();
         u[7] = unit_args_.uav.Get();
-        enc(6u, u, root, rootOffset);
+        enc(prepare_unit_stage, u, root, rootOffset);
         u.fill(nullptr);
         u[0] = meta_.uav.Get();
         u[1] = base_uavs_[0].Get();
         u[2] = base_uavs_[1].Get();
         u[3] = base_uavs_[2].Get();
         u[6] = base_uavs_[3].Get();
-        enc(7u, u, unit_args_.resource.Get(), 0u, false, true);
+        enc(emit_exterior_stage, u, unit_args_.resource.Get(), 0u, false, true);
         ID3D11Buffer *rc[3] {graph_cb_.Get(), mode_constants_[slot * 8u].Get(), nullptr};
         std::array<ID3D11ShaderResourceView *, 16u> ri {};
         for (UINT k = 0; k < 4u; ++k) {
@@ -838,19 +834,19 @@ namespace models::host_sbs_current_black_enclosure_gpu_v1 {
         u.fill(nullptr);
         u[0] = meta_.uav.Get();
         u[6] = base_uavs_[4].Get();
-        enc(8u, u, unit_args_.resource.Get(), 0u);
+        enc(resolve_exterior_stage, u, unit_args_.resource.Get(), 0u);
         u.fill(nullptr);
         u[0] = meta_.uav.Get();
-        enc(9u, u, unit_args_.resource.Get(), 0u);
+        enc(count_enclosed_stage, u, unit_args_.resource.Get(), 0u);
         u[3] = selected_bits_.uav.Get();
-        enc(10u, u, unit_args_.resource.Get(), 16u);
+        enc(select_unit_stage, u, unit_args_.resource.Get(), 16u);
       }
       u.fill(nullptr);
       u[0] = meta_.uav.Get();
       u[3] = selected_bits_.uav.Get();
       u[4] = candidate_body_.uav.Get();
       u[5] = candidate_matte_.uav.Get();
-      enc(11u, u, native_args_.Get(), 0u);
+      enc(publish_stage, u, native_args_.Get(), 0u);
       unbind(c);
     }
 
@@ -868,7 +864,7 @@ namespace models::host_sbs_current_black_enclosure_gpu_v1 {
     std::array<ComPtr<ID3D11Buffer>, 128u> mode_constants_;
     host_sbs_compute_program_lease::group_t<5u> colour_program_lease_;
     host_sbs_compute_program_lease::group_t<6u> graph_program_lease_;
-    host_sbs_compute_program_lease::group_t<12u> enclosure_program_lease_;
+    host_sbs_compute_program_lease::group_t<shader_count> enclosure_program_lease_;
     host_sbs_compute_program_lease::group_t<3u> roi_program_lease_;
     ComPtr<ID3D11DeviceContext> deferred_;
     ComPtr<ID3D11CommandList> commands_;

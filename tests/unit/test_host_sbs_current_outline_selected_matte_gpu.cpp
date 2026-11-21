@@ -84,8 +84,12 @@ namespace {
       for(auto pair:{std::pair{&cb,c.data()},std::pair{&root,root_words.data()},std::pair{&sct,identity.data()},std::pair{&numeric,numeric_words.data()},std::pair{&envelope,source.data()},std::pair{&cbc,enclosure.data()},std::pair{&raw,ring.data()},std::pair{&f2,band.data()}})context->UpdateSubresource(pair.first->b.Get(),0,nullptr,pair.second,0,0);
       context->UpdateSubresource(legacy.t.Get(),0,nullptr,lm.data(),W*4u,0);context->UpdateSubresource(current.t.Get(),0,nullptr,cm.data(),W*4u,0);
     }
-    void queue(UINT mode=2) {
-      selected::inputs_t i;i.current_cb96=cb.b.Get();i.actual_root_args=root.b.Get();i.legacy_matte=legacy.s.Get();i.baseline_matte=baseline.s.Get();i.numeric_proof=numeric.s.Get();i.sct=sct.s.Get();i.mode=static_cast<selected::postprocess_mode_e>(mode);i.expected_work=1;i.transaction_token=Token;i.current_outline_requested=true;i.source_envelope104=envelope.s.Get();i.cbc_meta512=cbc.s.Get();i.raw_meta512=raw.s.Get();i.f2_data=f2.s.Get();i.f2_matte=current.s.Get();
+    selected::inputs_t inputs(UINT mode=2,bool with_legacy=true) {
+      selected::inputs_t i;i.current_cb96=cb.b.Get();i.actual_root_args=root.b.Get();i.legacy_matte=with_legacy?legacy.s.Get():nullptr;i.baseline_matte=baseline.s.Get();i.numeric_proof=numeric.s.Get();i.sct=sct.s.Get();i.mode=static_cast<selected::postprocess_mode_e>(mode);i.expected_work=1;i.transaction_token=Token;i.current_outline_requested=true;i.source_envelope104=envelope.s.Get();i.cbc_meta512=cbc.s.Get();i.raw_meta512=raw.s.Get();i.f2_data=f2.s.Get();i.f2_matte=current.s.Get();
+      return i;
+    }
+    void queue(UINT mode=2,bool with_legacy=true) {
+      const auto i=inputs(mode,with_legacy);
       std::string error;ASSERT_TRUE(output.queue(context.Get(),{shaders[0].Get(),shaders[1].Get()},i,error))<<error;
     }
     void expect(UINT kind,const std::vector<UINT>&mask,UINT fault=0) {
@@ -107,6 +111,48 @@ namespace {
   TEST_F(HostSbsCurrentOutlineSelectedMatteGpuTest, SelectsCurrentCbc5Cfb7ForDirectAndQueuedOwners) {
     for(UINT mode:{2u,4u}){tuple(3,66667,false,mode);upload();queue(mode);expect(3,cm);}
   }
+  TEST_F(HostSbsCurrentOutlineSelectedMatteGpuTest, AbsentLegacySelectsExactCurrentForDirectAndQueuedOwners) {
+    for(UINT mode:{2u,4u}) {
+      tuple(3,66667,false,mode);upload();queue(mode);expect(3,cm);
+      const auto before=read(output.views().receipt.Get());
+      queue(mode,false);expect(3,cm);
+      EXPECT_EQ(read(output.views().receipt.Get()),before);
+    }
+  }
+  TEST_F(HostSbsCurrentOutlineSelectedMatteGpuTest, AbsentLegacyClearsFaultedCurrentAndMarksReceiptUnavailable) {
+    const std::vector<UINT> zero(N);
+    for(UINT mode:{2u,4u})for(UINT fault=0;fault<8u;++fault) {
+      SCOPED_TRACE(mode);
+      SCOPED_TRACE(fault);
+      tuple(3,66667,false,mode);upload();queue(mode,false);expect(3,cm);
+      if(fault==0u)enclosure[16]^=1u;
+      if(fault==1u)ring[0]^=1u;
+      if(fault==2u)band[3]=1u;
+      if(fault==3u)source[50]^=1u;
+      if(fault==4u)band[1]=6u;
+      if(fault==5u)root_words[2]^=1u;
+      if(fault==6u)identity[20]^=1u;
+      if(fault==7u)numeric_words[4]^=1u;
+      upload();queue(mode,false);expect(1,zero,1u);
+    }
+  }
+  TEST_F(HostSbsCurrentOutlineSelectedMatteGpuTest, AbsentLegacyHoldsRootZeroThenPublishesFreshEmpty) {
+    for(UINT mode:{2u,4u}) {
+      tuple(3,66667,false,mode);cm.assign(N,0u);cm[2]=cm[N-1]=1u;upload();queue(mode,false);expect(3,cm);
+      const auto beforeM=read(output.views().matte.Get()),beforeReceipt=read(output.views().receipt.Get());
+      tuple(4,99999,false,mode);cm.assign(N,0u);root_words[60]=root_words[61]=root_words[62]=0u;
+      upload();queue(mode,false);
+      EXPECT_EQ(read(output.views().matte.Get()),beforeM);
+      EXPECT_EQ(read(output.views().receipt.Get()),beforeReceipt);
+      tuple(4,99999,true,mode);upload();queue(mode,false);expect(3,cm);
+    }
+  }
+  TEST_F(HostSbsCurrentOutlineSelectedMatteGpuTest, AlgorithmOneStillRequiresLegacyOperand) {
+    auto i=inputs(2u,false);i.current_outline_requested=false;i.root=root.s.Get();
+    std::string error;
+    EXPECT_FALSE(output.queue(context.Get(),{shaders[0].Get(),shaders[1].Get()},i,error));
+    EXPECT_EQ(error,"Selected matte required operands/context");
+  }
   TEST_F(HostSbsCurrentOutlineSelectedMatteGpuTest, PrepareRootZeroHoldsWholeOutputAcrossFreshBacking) {
     queue();const auto beforeM=read(output.views().matte.Get()),beforeReceipt=read(output.views().receipt.Get());tuple(4,99999);cm.assign(N,0);root_words[60]=root_words[61]=root_words[62]=0;upload();queue();EXPECT_EQ(read(output.views().matte.Get()),beforeM);EXPECT_EQ(read(output.views().receipt.Get()),beforeReceipt);
   }
@@ -121,6 +167,15 @@ namespace {
   }
   TEST_F(HostSbsCurrentOutlineSelectedMatteGpuTest, StaleSctMarksReceiptUnavailableWithoutRelabelingLegacy) {
     identity[20]^=1u;upload();queue();expect(1,lm,1u);
+  }
+  TEST_F(HostSbsCurrentOutlineSelectedMatteGpuTest, RestoresComputeBindingAfterReadingPreparedReceipt) {
+    auto *sentinel=baseline.s.Get();
+    context->CSSetShaderResources(13u,1u,&sentinel);
+    queue(2u,false);
+    expect(3u,cm);
+    ComPtr<ID3D11ShaderResourceView> restored;
+    context->CSGetShaderResources(13u,1u,&restored);
+    EXPECT_EQ(restored.Get(),sentinel);
   }
   TEST_F(HostSbsCurrentOutlineSelectedMatteGpuTest, DrawReceiptScopeRestoresOnlyItsSlotAndLeavesT8Untouched) {
     queue();const auto views=output.views();

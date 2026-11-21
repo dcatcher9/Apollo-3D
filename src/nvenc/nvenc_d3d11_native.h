@@ -7,6 +7,8 @@
   // local includes
   #include "nvenc_d3d11.h"
 
+  #include <optional>
+
 namespace nvenc {
 
   /**
@@ -16,32 +18,35 @@ namespace nvenc {
   public:
     /**
      * @param d3d_device Direct3D11 device used for encoding.
+     * @param allow_p010_chroma_store Request unordered access for P010 inputs when available.
      */
-    explicit nvenc_d3d11_native(ID3D11Device *d3d_device);
+    explicit nvenc_d3d11_native(ID3D11Device *d3d_device, bool allow_p010_chroma_store = false);
     ~nvenc_d3d11_native();
 
     ID3D11Texture2D *get_input_texture() override;
 
+    /** Registration belongs to these surfaces, independently of the output picture slots. */
+    unsigned input_surface_count() const noexcept;
+    ID3D11Texture2D *get_input_texture(unsigned surface);
+
+    /** Submitting thread: select an unmapped output, then publish it after conversion writes. */
+    std::optional<unsigned> begin_input_conversion() noexcept;
+    void set_converted_input(unsigned surface) noexcept;
+    bool input_waits_for_retirement() const noexcept override;
+
   #ifdef SUNSHINE_TESTS
-    /** Commands issued at the actual per-picture CopyResource site; submitting thread only. */
-    std::array<std::uint64_t, max_pipeline_depth> input_copy_counts_for_test() const noexcept {
-      return input_copy_counts_;
-    }
+    std::optional<unsigned> input_surface_for_picture_for_test(unsigned slot) const noexcept;
   #endif
 
   private:
     bool create_and_register_input_buffer() override;
-    void prepare_input(unsigned slot, std::uint64_t input_revision) override;
+    NV_ENC_REGISTERED_PTR prepare_input(unsigned slot) override;
 
     const ID3D11DevicePtr d3d_device;
-    ID3D11Texture2DPtr d3d_input_texture;  ///< Conversion target; registered itself at depth 1.
-    std::array<ID3D11Texture2DPtr, max_pipeline_depth> picture_inputs;  ///< Each picture's copy at depth 2.
-    // Proof belongs to each actual picture texture and advances only when its copy is issued.
-    std::array<std::uint64_t, max_pipeline_depth> picture_input_revisions {};
-    ID3D11DeviceContextPtr copy_context;
-  #ifdef SUNSHINE_TESTS
-    std::array<std::uint64_t, max_pipeline_depth> input_copy_counts_ {};
-#endif
+    const bool allow_p010_chroma_store;
+    // With pictures in flight, one spare keeps the next conversion independent of retrieval.
+    std::array<ID3D11Texture2DPtr, max_pipeline_depth + 1> input_surfaces;
+    unsigned converted_input = 0;
   };
 
 }  // namespace nvenc

@@ -8,19 +8,18 @@
   #include "src/nvenc/nvenc_d3d11_native.h"
   #include "src/platform/windows/misc.h"
 
-  #include <dxgi1_2.h>
-  #include <wrl/client.h>
-  #include <nlohmann/json.hpp>
-
   #include <algorithm>
   #include <array>
   #include <cstdlib>
   #include <cstring>
   #include <deque>
+  #include <dxgi1_2.h>
   #include <filesystem>
   #include <fstream>
+  #include <nlohmann/json.hpp>
   #include <optional>
   #include <stdexcept>
+  #include <wrl/client.h>
 
 namespace {
   using Microsoft::WRL::ComPtr;
@@ -163,12 +162,6 @@ namespace {
     return texture;
   }
 
-  // The original public API has no provenance argument. Keep the authored intent in the ledger;
-  // the treatment changes only this forwarding adapter, not the authored operation sequence.
-  bool submit(nvenc::nvenc_d3d11_native &encoder, std::uint64_t index, bool idr, std::optional<std::uint64_t> revision) {
-    return encoder.submit_frame(index, idr, revision.value_or(0));
-  }
-
   void append(std::ofstream &file, const std::vector<std::uint8_t> &bytes) {
     file.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     require(file.good(), "Cannot write a native content artifact");
@@ -189,7 +182,6 @@ namespace {
     auto upload_a = create_upload(device, format, frame_a, pitch_a);
     auto upload_b = create_upload(device, format, frame_b, pitch_b);
     auto encoder = std::make_unique<nvenc::nvenc_d3d11_native>(device.device.Get());
-    require(encoder->input_copy_counts_for_test() == std::array<std::uint64_t, 2> {}, "A fresh native owner inherited copy observations");
     video::config_t client {};
     client.width = width;
     client.height = height;
@@ -214,17 +206,46 @@ namespace {
     const nvenc::nvenc_colorspace_t colorspace {NV_ENC_VUI_COLOR_PRIMARIES_BT709, NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709, NV_ENC_VUI_MATRIX_COEFFS_BT709, false};
     require(encoder->create_encoder(config, client, colorspace, profile.ten_bit ? NV_ENC_BUFFER_FORMAT_YUV420_10BIT : NV_ENC_BUFFER_FORMAT_NV12, std::nullopt), "The actual native NVENC encoder did not initialize");
     require(encoder->pipeline_depth() == profile.depth, "Native NVENC fell back from the requested pipeline depth");
-    auto *target = encoder->get_input_texture();
-    require(target != nullptr, "Native NVENC did not expose its conversion target");
-    D3D11_TEXTURE2D_DESC target_description {};
-    target->GetDesc(&target_description);
-    require(target_description.Width == width && target_description.Height == height && target_description.Format == format && target_description.ArraySize == 1 && target_description.MipLevels == 1, "Native conversion target dimensions/format differ from the requested profile");
+    const auto surface_count = encoder->input_surface_count();
+    require(surface_count == (profile.depth == 1 ? 1u : 3u), "Native NVENC did not allocate the requested registered surface ring");
+    std::vector<ID3D11Texture2D *> textures;
+    for (unsigned surface = 0; surface < surface_count; ++surface) {
+      auto *texture = encoder->get_input_texture(surface);
+      require(texture != nullptr && std::find(textures.begin(), textures.end(), texture) == textures.end(), "Native input surfaces are missing or alias the same allocation");
+      D3D11_TEXTURE2D_DESC description {};
+      texture->GetDesc(&description);
+      require(description.Width == width && description.Height == height && description.Format == format && description.ArraySize == 1 && description.MipLevels == 1, "Native input surface dimensions/format differ from the requested profile");
+      textures.push_back(texture);
+    }
+    require(encoder->get_input_texture() == textures.front(), "The initial view target is not native surface zero");
+
+    using mappings_t = std::array<std::optional<unsigned>, nvenc::nvenc_base::max_pipeline_depth>;
+    const auto mappings = [&]() {
+      mappings_t result {};
+      for (unsigned slot = 0; slot < profile.depth; ++slot) {
+        result[slot] = encoder->input_surface_for_picture_for_test(slot);
+        require(!result[slot] || *result[slot] < surface_count, "A picture mapped a surface outside its native ring");
+      }
+      require(!result[0] || !result[1] || result[0] != result[1], "Two pictures mapped the same input surface");
+      return result;
+    };
+    const auto mappings_json = [&](const mappings_t &values) {
+      auto result = json::array();
+      for (unsigned slot = 0; slot < profile.depth; ++slot) {
+        result.push_back(values[slot] ? json(*values[slot]) : json(nullptr));
+      }
+      return result;
+    };
+    require(mappings() == mappings_t {}, "A fresh native owner inherited mapped picture surfaces");
 
     json result {
       {"name", name},
       {"initial_pattern", rebuilt ? "B" : "A"},
       {"frame_index_origin", origin},
       {"pipeline_depth", encoder->pipeline_depth()},
+      {"input_storage", "registered-surface-ring-v1"},
+      {"input_surface_count", surface_count},
+      {"copy_path_removed", true},
       {"stream_file", stream_name},
       {"expected_file", expected_name},
       {"upload_row_pitches", {{{"pattern", "A"}, {"row_pitch", pitch_a}}, {{"pattern", "B"}, {"row_pitch", pitch_b}}}},
@@ -237,40 +258,67 @@ namespace {
       std::uint64_t index;
       bool pattern_b;
       bool idr;
+      unsigned slot;
+      unsigned surface;
     };
 
     std::deque<pending_t> pending;
-    unsigned peak = 0, refusals = 0;
+    unsigned peak = 0, refusals = 0, repeat_refusals = 0, submitted = 0;
     std::uint64_t revision = 0;
+    std::optional<unsigned> converted_surface;
+    const auto check_pending_mappings = [&]() {
+      const auto observed = mappings();
+      for (const auto &picture : pending) {
+        require(observed[picture.slot] == picture.surface, "An in-flight picture lost its actual input-surface mapping");
+      }
+    };
     const auto write_target = [&](bool pattern_b) {
       require(profile.depth > 1 || encoder->frames_in_flight() == 0, "A depth-one target rewrite would race a submitted picture");
+      const auto before = mappings();
+      const auto surface = encoder->begin_input_conversion();
+      require(surface && *surface < surface_count, "No unmapped native surface was available for the next conversion");
+      require(std::find(before.begin(), before.end(), surface) == before.end(), "The producer selected a still-mapped native input");
+      auto *target = encoder->get_input_texture(*surface);
+      require(target == textures[*surface], "A native surface allocation changed during its owner lifetime");
       device.context->CopyResource(target, pattern_b ? upload_b.Get() : upload_a.Get());
+      encoder->set_converted_input(*surface);
+      converted_surface = surface;
       ++revision;
-      result["timeline"].push_back({{"event", "write"}, {"pattern", pattern_b ? "B" : "A"}, {"authored_revision", revision}});
+      require(!encoder->input_waits_for_retirement(), "A newly written unmapped surface still waits for an old picture");
+      check_pending_mappings();
+      result["timeline"].push_back({{"event", "write"}, {"pattern", pattern_b ? "B" : "A"}, {"authored_revision", revision}, {"input_surface", *surface}, {"before_in_flight", encoder->frames_in_flight()}, {"mapped_surfaces_before", mappings_json(before)}, {"mapped_surfaces_after", mappings_json(mappings())}});
     };
     const auto submit_one = [&](unsigned frame, bool pattern_b, bool retained, bool accept) {
       const auto index = origin + frame;
       const bool idr = frame == 0 || frame == 10;
       const auto before = encoder->frames_in_flight();
-      const auto copies_before = encoder->input_copy_counts_for_test();
-      const auto proof = frame == 2 || frame == 3 ? std::optional<std::uint64_t> {} : std::optional {revision};
-      const bool accepted = submit(*encoder, index, idr, proof);
+      require(converted_surface.has_value(), "A native submission has no committed producer input");
+      const auto mapped_before = mappings();
+      const bool waits_before = encoder->input_waits_for_retirement();
+      const bool accepted = encoder->submit_frame(index, idr);
       const auto after = encoder->frames_in_flight();
-      const auto copies_after = encoder->input_copy_counts_for_test();
-      result["timeline"].push_back({{"event", "submit"}, {"frame_index", index}, {"retained", retained}, {"authored_revision", revision}, {"input_revision", proof ? json(*proof) : json(nullptr)}, {"force_idr", idr}, {"accepted", accepted}, {"before_in_flight", before}, {"after_in_flight", after}, {"copies_before", copies_before}, {"copies_after", copies_after}});
+      const auto mapped_after = mappings();
+      result["timeline"].push_back({{"event", "submit"}, {"frame_index", index}, {"retained", retained}, {"authored_revision", revision}, {"input_surface", *converted_surface}, {"picture_slot", submitted % profile.depth}, {"force_idr", idr}, {"accepted", accepted}, {"before_in_flight", before}, {"after_in_flight", after}, {"input_waits_before", waits_before}, {"mapped_surfaces_before", mappings_json(mapped_before)}, {"mapped_surfaces_after", mappings_json(mapped_after)}});
       require(accepted == accept, "Actual native submission returned an unexpected result (NEED_MORE_INPUT remains public false)");
       if (accept) {
         require(after == before + 1, "Accepted native submission did not acquire exactly one slot");
-        pending.push_back({index, pattern_b, idr});
+        const auto slot = submitted++ % profile.depth;
+        require(!waits_before, "A native input was accepted while its prior picture was still in flight");
+        require(mapped_after[slot] == converted_surface, "Native submission did not map the exact committed producer surface");
+        pending.push_back({index, pattern_b, idr, slot, *converted_surface});
         peak = std::max(peak, after);
       } else {
         ++refusals;
-        require(before == 2 && after == 2 && copies_before == copies_after, "A busy native refusal changed owned slots or issued a copy");
+        repeat_refusals += retained;
+        require(after == before && (before == profile.depth || waits_before), "A refused native submission changed ownership or had no busy input");
       }
+      check_pending_mappings();
     };
     const auto retrieve_one = [&]() {
       require(!pending.empty(), "Native fixture lost its pending metadata");
       const auto oldest = pending.front();
+      const auto mapped_before = mappings();
+      require(mapped_before[oldest.slot] == oldest.surface, "Native retrieval lost the oldest picture's input surface");
       auto packet = encoder->retrieve_frame();
       require(!packet.data.empty(), "Actual native retrieval failed; target will not be rewritten after empty retrieval");
       require(packet.frame_index == oldest.index, "Actual native output order/timestamp differs from its submission");
@@ -279,21 +327,34 @@ namespace {
       append(expected, oldest.pattern_b ? frame_b.canonical : frame_a.canonical);
       pending.pop_front();
       require(encoder->frames_in_flight() == pending.size(), "Native output and fixture ownership ledgers diverged");
+      check_pending_mappings();
       result["returned_indices"].push_back(packet.frame_index);
       result["returned_idr"].push_back(packet.idr);
-      result["timeline"].push_back({{"event", "retrieve"}, {"frame_index", packet.frame_index}, {"expected_pattern", oldest.pattern_b ? "B" : "A"}, {"idr", packet.idr}, {"bytes", packet.data.size()}, {"after_in_flight", encoder->frames_in_flight()}});
+      result["timeline"].push_back({{"event", "retrieve"}, {"frame_index", packet.frame_index}, {"expected_pattern", oldest.pattern_b ? "B" : "A"}, {"picture_slot", oldest.slot}, {"input_surface", oldest.surface}, {"idr", packet.idr}, {"bytes", packet.data.size()}, {"after_in_flight", encoder->frames_in_flight()}, {"input_waits_after", encoder->input_waits_for_retirement()}, {"mapped_surfaces_before", mappings_json(mapped_before)}, {"mapped_surfaces_after", mappings_json(mappings())}});
     };
     for (unsigned frame = 0; frame < frame_count; ++frame) {
       const bool pattern_b = ((frame / 4) % 2 != 0) != rebuilt;
-      const bool changed = frame % 4 == 0;
+      // New conversions can fill two pictures and their spare even when their authored pixels
+      // match. Repeats deliberately retain one committed surface and must retire its exact owner.
+      const bool changed = frame <= 4 || frame == 8 || frame == 9;
       if (changed) {
         write_target(pattern_b);
       }
       if (profile.depth == 2 && frame == 4) {
-        // The target is separate from both still-owned picture inputs. This is logical fullness,
-        // not a claim that the GPU has not already completed those pictures.
+        // The writable third surface is separate from both still-owned picture inputs. This is
+        // logical fullness, not a claim that the GPU has not already completed those pictures.
         require(encoder->frames_in_flight() == 2, "The authored busy transition was not reached with two owned pictures");
         submit_one(frame, pattern_b, false, false);
+      }
+      if (profile.depth == 2 && !changed) {
+        require(encoder->input_waits_for_retirement(), "The authored repeat did not retain an in-flight input");
+        unsigned retired = 0;
+        while (encoder->input_waits_for_retirement()) {
+          require(retired < profile.depth && !pending.empty(), "Retiring the committed input exceeded the bounded pending ledger");
+          submit_one(frame, pattern_b, true, false);
+          retrieve_one();
+          ++retired;
+        }
       }
       if (encoder->frames_in_flight() == profile.depth) {
         retrieve_one();
@@ -308,16 +369,18 @@ namespace {
     }
     require(encoder->frames_in_flight() == 0, "Native content run did not drain every picture");
     require(result["returned_indices"].size() == frame_count, "Native content run did not return every authored frame");
-    const auto copies = encoder->input_copy_counts_for_test();
+    require(revision == 7, "Native content run lost a committed conversion write");
+    require(refusals == (profile.depth == 2 ? 8u : 0u) && repeat_refusals == (profile.depth == 2 ? 7u : 0u), "Native content run did not exercise the exact capacity and repeat-retirement refusals");
     encoder->destroy_encoder();
-    require(encoder->input_copy_counts_for_test() == copies, "Native drain issued an unexpected input copy");
+    require(mappings() == mappings_t {}, "Native destruction left a registered input mapped");
     encoder.reset();
     stream.close();
     expected.close();
     require(!stream.fail() && !expected.fail(), "Closing a native content artifact failed");
-    result["copy_counts"] = copies;
+    result["conversion_writes"] = revision;
     result["peak_in_flight"] = peak;
     result["busy_refusals"] = refusals;
+    result["repeat_refusals"] = repeat_refusals;
     result["stream_bytes"] = std::filesystem::file_size(root / stream_name);
     result["expected_bytes"] = std::filesystem::file_size(root / expected_name);
     result["destroy_completed"] = true;
@@ -335,7 +398,8 @@ namespace {
     require(root.is_absolute() && std::filesystem::create_directory(root), "Native artifact directory must be absolute and new");
     auto device = create_device();
     json result {
-      {"schema", 1},
+      {"schema", 2},
+      {"input_storage", "registered-surface-ring-v1"},
       {"case", profile.name},
       {"codec", profile.codec == 1 ? "hevc" : "av1"},
       {"input_format", profile.ten_bit ? "P010" : "NV12"},

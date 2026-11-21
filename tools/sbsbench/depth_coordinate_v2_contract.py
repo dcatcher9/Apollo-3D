@@ -54,23 +54,26 @@ SHADER_IMPLEMENTATION_KEYS = {
     "source_closure_sha256",
 }
 SHADER_SOURCE_SPECS = (
-    ("rgb_to_nchw_near_identical_cs.hlsl", "fused_main", "cs_5_0"),
-    ("buffer_to_tex_cs.hlsl", "main", "cs_5_0"),
-    ("buffer_to_tex_cs.hlsl", "pad_main", "cs_5_0"),
-    ("depth_minmax_ema_cs.hlsl", "main", "cs_5_0"),
-    ("depth_coordinate_v2_moments_cs.hlsl", "main", "cs_5_0"),
+    ("rgb_to_nchw_near_identical_cs.hlsl", "fused_domain_main", "cs_5_0"),
+    ("rgb_to_nchw_near_identical_cs.hlsl", "fused_tiled_domain_main", "cs_5_0"),
+    ("buffer_to_tex_cs.hlsl", "domain_main", "cs_5_0"),
+    ("buffer_to_tex_cs.hlsl", "domain_pad_main", "cs_5_0"),
+    ("depth_coordinate_v2_moments_cs.hlsl", "domain_main", "cs_5_0"),
     ("depth_coordinate_v2_frame_resolve_cs.hlsl", "main", "cs_5_0"),
-    ("depth_coordinate_v2_histogram_cs.hlsl", "main", "cs_5_0"),
-    ("depth_coordinate_v2_quantiles_cs.hlsl", "main", "cs_5_0"),
-    ("depth_coordinate_v2_state_resolve_cs.hlsl", "main", "cs_5_0"),
-    ("depth_coordinate_v2_map_cs.hlsl", "main", "cs_5_0"),
+    ("depth_coordinate_v2_histogram_cs.hlsl", "domain_main", "cs_5_0"),
+    ("depth_coordinate_v2_quantiles_cs.hlsl", "publish_main", "cs_5_0"),
+    ("depth_coordinate_v2_map_cs.hlsl", "domain_main", "cs_5_0"),
+    ("depth_coordinate_v2_map_cs.hlsl", "compact_domain_main", "cs_5_0"),
     ("depth_coordinate_v2_vertical_limit_cs.hlsl", "main", "cs_5_0"),
     ("depth_coordinate_v2_limit_cs.hlsl", "main", "cs_5_0"),
+    ("depth_coordinate_v2_vertical_limit_cs.hlsl", "compact_main", "cs_5_0"),
+    ("depth_coordinate_v2_limit_cs.hlsl", "compact_main", "cs_5_0"),
     ("host_sbs_ocr_preprocess_cs.hlsl", "main", "cs_5_0"),
     ("host_sbs_ocr_boxes_cs.hlsl", "cells_main", "cs_5_0"),
     ("host_sbs_ocr_boxes_cs.hlsl", "resolve_main", "cs_5_0"),
     ("host_sbs_subtitle_locator_cs.hlsl", "resolve_main", "cs_5_0"),
     ("host_sbs_subtitle_locator_cs.hlsl", "condition_main", "cs_5_0"),
+    ("host_sbs_subtitle_contour_cs.hlsl", "shared_palette_main", "cs_5_0"),
     ("host_sbs_subtitle_contour_cs.hlsl", "temporal_main", "cs_5_0"),
     ("host_sbs_subtitle_contour_cs.hlsl", "dense_main", "cs_5_0"),
     ("host_sbs_subtitle_contour_cs.hlsl", "project_main", "cs_5_0"),
@@ -796,7 +799,7 @@ def _model_calibrations(contract: dict[str, Any]) -> tuple[ModelCalibration, ...
                 f"{prefix}.preprocess.source_closure_sha256 must be lowercase SHA-256")
         if (preprocess.get("source_closure_schema") != 2 or
                 preprocess.get("source_file") != "rgb_to_nchw_near_identical_cs.hlsl" or
-                preprocess.get("source_entrypoint") != "fused_main" or
+                preprocess.get("source_entrypoint") != "fused_domain_main" or
                 preprocess.get("source_target") != "cs_5_0" or
                 preprocess.get("source_compile_flags") != 0x00008800 or
                 preprocess.get("source_macro_count") != 0):

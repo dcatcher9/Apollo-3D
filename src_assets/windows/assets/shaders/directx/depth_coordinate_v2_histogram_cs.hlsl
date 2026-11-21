@@ -9,14 +9,18 @@ RWStructuredBuffer<uint4> HistogramPartials : register(u0);
 RWByteAddressBuffer MinMaxRaw : register(u1); // read-only existing normalization reduction
 
 #include "include/depth_constants.hlsl"
+#include "include/depth_analysis_domain.hlsl"
+StructuredBuffer<TensorAnalysisDomain> TensorAnalysisDomainRead : register(t1);
+#include "include/depth_analysis_domain_consumer.hlsl"
 #include "include/depth_coordinate_v2_contract.generated.hlsl"
 
 groupshared uint histogram[256];
 groupshared uint normalization_histogram[256];
 
-[numthreads(256, 1, 1)]
-void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
-          uint3 gid : SV_GroupID) {
+void ComputeHistogram(uint3 dtid, uint3 tid, uint3 gid, bool use_domain) {
+    uint4 domain_rectangle = 0u;
+    bool domain_valid = true;
+    if (use_domain) domain_valid = LoadTensorAnalysisDomain(domain_rectangle);
     histogram[tid.x] = 0u;
     normalization_histogram[tid.x] = 0u;
     GroupMemoryBarrierWithGroupSync();
@@ -45,7 +49,7 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
     uint stride_y = reduce_threads / target_w;
     uint stride_x = reduce_threads - stride_y * target_w;
     [loop] for (uint index = dtid.x; index < target_w * target_h; index += reduce_threads) {
-        if (TensorExclusion[uint2(position_x, position_y)] == 0u) {
+        if (TensorAnalysisCellAdmitted(uint2(position_x, position_y), use_domain, domain_valid, domain_rectangle)) {
             float value = InputBuffer[index];
             if (!isnan(value) && !isinf(value)) {
                 if (valid) {
@@ -77,4 +81,14 @@ void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID,
             normalization_histogram[bin], normalization_histogram[bin + 1u],
             normalization_histogram[bin + 2u], normalization_histogram[bin + 3u]);
     }
+}
+
+[numthreads(256, 1, 1)]
+void main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
+    ComputeHistogram(dtid, tid, gid, false);
+}
+
+[numthreads(256, 1, 1)]
+void domain_main(uint3 dtid : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
+    ComputeHistogram(dtid, tid, gid, true);
 }

@@ -14,7 +14,6 @@
 #include <optional>
 #include <string_view>
 #include <utility>
-#include <vector>
 
 // lib includes
 #include <boost/asio.hpp>
@@ -49,7 +48,6 @@ namespace stream {
   // a one-shard data block, the current planner can safely represent at most
   // two minimum parity shards.
   constexpr int MIN_REQUIRED_FEC_PACKETS_MAX = 2;
-  constexpr std::size_t FEC_PACKET_INDEX_MAX = 1023;
   // ANNOUNCE validation normally guarantees a positive encoder bitrate. Keep a modest fallback
   // for defensive callers without forcing valid low-bitrate streams up to a large fixed rate.
   constexpr std::uint64_t VIDEO_PACING_FALLBACK_ENCODED_BPS = 10'000'000;
@@ -61,8 +59,6 @@ namespace stream {
   // host-originated rumble, HDR, depth, telemetry, and acknowledgement queues are observed
   // promptly without moving ENet or cipher ownership off the control thread.
   constexpr std::chrono::milliseconds CONTROL_OUTGOING_MAX_WAIT {10};
-  constexpr std::size_t VIDEO_RS_CONTEXT_CACHE_LIMIT = 8;
-  constexpr std::size_t VIDEO_SEND_WORKSPACE_RETAIN_LIMIT = 16 * 1024 * 1024;
   constexpr std::uint32_t CLIENT_FEATURE_SOURCE_FRAME_ID_V1 = 0x10;
 
   /** Send-channel identity for a proven retained encoder input, never a content-age heuristic. */
@@ -110,35 +106,8 @@ namespace stream {
            min_required_fec_packets <= MIN_REQUIRED_FEC_PACKETS_MAX;
   }
 
-  [[nodiscard]] constexpr std::size_t fec_packet_count(std::size_t payload_size, std::size_t block_size) {
-    return block_size == 0 ? 0 : payload_size / block_size + (payload_size % block_size != 0);
-  }
-
-  [[nodiscard]] constexpr bool is_valid_fec_block_size(std::size_t payload_size, std::size_t block_size) {
-    const auto packet_count = fec_packet_count(payload_size, block_size);
-    return packet_count > 0 && packet_count <= FEC_PACKET_INDEX_MAX;
-  }
-
   [[nodiscard]] constexpr std::uint64_t ceil_div_u64(std::uint64_t numerator, std::uint64_t denominator) {
     return denominator == 0 ? 0 : numerator / denominator + (numerator % denominator != 0);
-  }
-
-  [[nodiscard]] constexpr std::size_t video_fec_shard_count(
-    std::size_t payload_size,
-    std::size_t block_size,
-    int fec_percentage,
-    int min_required_fec_packets
-  ) {
-    const auto data_shards = fec_packet_count(payload_size, block_size);
-    if (data_shards == 0 || fec_percentage <= 0) {
-      return data_shards;
-    }
-
-    const auto parity_shards = std::max<std::size_t>(
-      ceil_div_u64(data_shards * static_cast<std::uint64_t>(fec_percentage), 100),
-      static_cast<std::size_t>(std::max(0, min_required_fec_packets))
-    );
-    return data_shards + parity_shards;
   }
 
   [[nodiscard]] constexpr std::int64_t video_frame_interval_ns(int framerate_millihz) {
@@ -292,19 +261,6 @@ namespace stream {
     return plaintext_size >= CONTROL_HEADER_V2_SIZE &&
            declared_payload_size == plaintext_size - CONTROL_HEADER_V2_SIZE;
   }
-
-  /**
-   * Combine two logical input buffers while reserving and clearing a prefix at every slice.
-   * `storage` is a retained high-watermark workspace; only the returned prefix is valid. This
-   * avoids a full-size allocation and value-initialization on every encoded frame.
-   */
-  [[nodiscard]] std::optional<std::size_t> concat_and_insert_into(
-    std::vector<std::uint8_t> &storage,
-    std::uint64_t insert_size,
-    std::uint64_t slice_size,
-    std::string_view data1,
-    std::string_view data2
-  );
 
   // Sunshine's encrypted Gen-7 protocol uses 0x5502 in both directions for unrelated messages:
   // controller RGB feedback is host->client, while this fixed-size per-frame FEC report is

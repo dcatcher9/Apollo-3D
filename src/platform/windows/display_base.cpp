@@ -137,21 +137,44 @@ namespace platf::dxgi {
                rect.right <= width && rect.bottom <= height;
       }
 
-      [[nodiscard]] std::uint64_t damage_rect_intersection_area(
-        const RECT &a,
-        const RECT &b
+      [[nodiscard]] bool add_copy_bounds(
+        RECT &bounds,
+        const RECT &rect,
+        const LONG width,
+        const LONG height,
+        const bool allow_empty = false
       ) noexcept {
-        const auto width = static_cast<std::int64_t>(
-          std::min(a.right, b.right)
-        ) - std::max(a.left, b.left);
-        const auto height = static_cast<std::int64_t>(
-          std::min(a.bottom, b.bottom)
-        ) - std::max(a.top, b.top);
-        if (width <= 0 || height <= 0) {
-          return 0u;
+        if (allow_empty && rect.left >= 0 && rect.top >= 0 &&
+            rect.right >= rect.left && rect.bottom >= rect.top &&
+            rect.right <= width && rect.bottom <= height &&
+            (rect.left == rect.right || rect.top == rect.bottom)) {
+          return true;
         }
-        return static_cast<std::uint64_t>(width) *
-               static_cast<std::uint64_t>(height);
+        if (!valid_damage_rect(rect, width, height)) {
+          return false;
+        }
+        if (bounds.left == bounds.right || bounds.top == bounds.bottom) {
+          bounds = rect;
+        } else {
+          bounds = {std::min(bounds.left, rect.left), std::min(bounds.top, rect.top),
+                    std::max(bounds.right, rect.right), std::max(bounds.bottom, rect.bottom)};
+        }
+        return true;
+      }
+
+      [[nodiscard]] ddup_capture_copy_plan_t copy_plan_from_bounds(
+        const RECT &bounds,
+        const LONG width,
+        const LONG height
+      ) noexcept {
+        if (bounds.left == bounds.right || bounds.top == bounds.bottom) {
+          return {ddup_capture_copy_kind_e::none, {}};
+        }
+        if (bounds.left == 0 && bounds.top == 0 &&
+            bounds.right == width && bounds.bottom == height) {
+          return {};
+        }
+        return {ddup_capture_copy_kind_e::region, bounds};
       }
     }  // namespace
 
@@ -256,103 +279,163 @@ namespace platf::dxgi {
       };
     }
 
+    bool ddup_damage_history_t::has_complete_interval(
+      const std::uint64_t from_exclusive,
+      const std::uint64_t through_inclusive
+    ) const {
+      if (from_exclusive == through_inclusive) {
+        return from_exclusive != 0u;
+      }
+      std::lock_guard lock {mutex_};
+      return retained_range_locked(from_exclusive, through_inclusive).has_value();
+    }
+
+    std::optional<ddup_damage_history_t::range_t>
+    ddup_damage_history_t::retained_range_locked(
+      const std::uint64_t from_exclusive,
+      const std::uint64_t through_inclusive
+    ) const {
+      if (from_exclusive == 0u || through_inclusive == 0u || from_exclusive > through_inclusive) {
+        return std::nullopt;
+      }
+      if (from_exclusive == through_inclusive) {
+        return range_t {};
+      }
+      if (entries_.empty() || from_exclusive == UINT64_MAX ||
+          from_exclusive + 1u < entries_.front().token || through_inclusive > entries_.back().token) {
+        return std::nullopt;
+      }
+      const auto first_token = from_exclusive + 1u;
+      const auto first = static_cast<std::size_t>(first_token - entries_.front().token);
+      const auto count = static_cast<std::size_t>(through_inclusive - first_token + 1u);
+      if (first > entries_.size() || count > entries_.size() - first) {
+        return std::nullopt;
+      }
+      for (std::size_t offset = 0u; offset < count; ++offset) {
+        const auto &entry = entries_[first + offset];
+        if (entry.token != first_token + offset || !entry.known) {
+          return std::nullopt;
+        }
+      }
+      return range_t {first, count};
+    }
+
     ddup_damage_intersection_e ddup_damage_history_t::query(
       const std::uint64_t from_exclusive,
       const std::uint64_t through_inclusive,
       const RECT &region
     ) const {
-      const auto coverage = query_coverage(
-        from_exclusive,
-        through_inclusive,
-        region
-      );
-      if (!coverage.known) {
+      if (region.left < 0 || region.top < 0 || region.right <= region.left || region.bottom <= region.top) {
         return ddup_damage_intersection_e::unknown;
       }
-      return coverage.potentially_changed_area == 0u ?
-               ddup_damage_intersection_e::unchanged :
-               ddup_damage_intersection_e::changed;
-    }
-
-    ddup_damage_coverage_t ddup_damage_history_t::query_coverage(
-      const std::uint64_t from_exclusive,
-      const std::uint64_t through_inclusive,
-      const RECT &region,
-      const bool collect_max_single_intersection
-    ) const {
-      ddup_damage_coverage_t result;
-      if (
-        from_exclusive == 0u || through_inclusive == 0u ||
-        from_exclusive > through_inclusive || region.left < 0 || region.top < 0 ||
-        region.right <= region.left || region.bottom <= region.top
-      ) {
-        return result;
-      }
-      result.region_area =
-        static_cast<std::uint64_t>(
-          static_cast<std::int64_t>(region.right) - region.left
-        ) *
-        static_cast<std::uint64_t>(
-          static_cast<std::int64_t>(region.bottom) - region.top
-        );
       if (from_exclusive == through_inclusive) {
-        result.known = true;
-        return result;
+        return from_exclusive != 0u ? ddup_damage_intersection_e::unchanged :
+                                      ddup_damage_intersection_e::unknown;
       }
 
       std::lock_guard lock {mutex_};
-      if (
-        entries_.empty() || from_exclusive == UINT64_MAX ||
-        from_exclusive + 1u < entries_.front().token ||
-        through_inclusive > entries_.back().token
-      ) {
-        return result;
+      const auto range = retained_range_locked(from_exclusive, through_inclusive);
+      if (!range) {
+        return ddup_damage_intersection_e::unknown;
       }
-
-      const auto first_token = from_exclusive + 1u;
-      const auto first_index = static_cast<std::size_t>(
-        first_token - entries_.front().token
-      );
-      const auto count = static_cast<std::size_t>(
-        through_inclusive - first_token + 1u
-      );
-      if (first_index > entries_.size() || count > entries_.size() - first_index) {
-        return result;
-      }
-
-      for (std::size_t offset = 0u; offset < count; ++offset) {
-        const auto &entry = entries_[first_index + offset];
-        if (entry.token != first_token + offset) {
-          return result;
-        }
-        if (!entry.known) {
-          return result;
-        }
+      for (std::size_t offset = 0u; offset < range->count; ++offset) {
+        const auto &entry = entries_[range->first + offset];
         for (const auto &rect : entry.rects) {
-          const auto overlap = damage_rect_intersection_area(rect, region);
-          if (collect_max_single_intersection) {
-            result.max_single_intersection_area =
-              std::max(result.max_single_intersection_area, overlap);
+          if (std::max(rect.left, region.left) < std::min(rect.right, region.right) &&
+              std::max(rect.top, region.top) < std::min(rect.bottom, region.bottom)) {
+            return ddup_damage_intersection_e::changed;
           }
-          if (result.potentially_changed_area == result.region_area) {
-            if (!collect_max_single_intersection) {
-              break;
-            }
-            continue;
-          }
-          if (overlap >= result.region_area - result.potentially_changed_area) {
-            result.potentially_changed_area = result.region_area;
-            if (!collect_max_single_intersection) {
-              break;
-            }
-            continue;
-          }
-          result.potentially_changed_area += overlap;
         }
       }
+      return ddup_damage_intersection_e::unchanged;
+    }
 
-      result.known = true;
-      return result;
+    ddup_capture_copy_plan_t ddup_damage_history_t::plan_copy(
+      const std::uint64_t from_exclusive,
+      const std::uint64_t through_inclusive,
+      const ddup_damage_update_t &current_update,
+      const RECT &old_cursor,
+      const LONG width,
+      const LONG height
+    ) const {
+      if (width <= 0 || height <= 0 || !current_update.known ||
+          current_update.rects.size() > ddup_damage_frame_rect_budget) {
+        return {};
+      }
+      RECT bounds {};
+      if (!add_copy_bounds(bounds, old_cursor, width, height, true)) {
+        return {};
+      }
+      for (const auto &rect : current_update.rects) {
+        if (!add_copy_bounds(bounds, rect, width, height)) {
+          return {};
+        }
+        // Full current damage needs neither a history lock nor a retained-range traversal.
+        if (copy_plan_from_bounds(bounds, width, height).kind == ddup_capture_copy_kind_e::full) {
+          return {};
+        }
+      }
+      std::lock_guard lock {mutex_};
+      const auto range = retained_range_locked(from_exclusive, through_inclusive);
+      if (!range) {
+        return {};
+      }
+      for (std::size_t offset = 0u; offset < range->count; ++offset) {
+        for (const auto &rect : entries_[range->first + offset].rects) {
+          if (!add_copy_bounds(bounds, rect, width, height)) {
+            return {};
+          }
+          if (copy_plan_from_bounds(bounds, width, height).kind == ddup_capture_copy_kind_e::full) {
+            return {};
+          }
+        }
+      }
+      return copy_plan_from_bounds(bounds, width, height);
+    }
+
+    ddup_capture_copy_plan_t plan_ddup_capture_copy(
+      const std::uint64_t image_desktop_serial,
+      const std::uint64_t current_desktop_serial,
+      const std::optional<ddup_damage_snapshot_t> &image_damage,
+      const std::optional<ddup_damage_snapshot_t> &previous_damage,
+      const ddup_damage_update_t &current_update,
+      const RECT &old_cursor,
+      const LONG width,
+      const LONG height
+    ) {
+      if (width <= 0 || height <= 0 || image_desktop_serial == 0u ||
+          current_desktop_serial == 0u || image_desktop_serial > current_desktop_serial) {
+        return {};
+      }
+      if (image_desktop_serial == current_desktop_serial) {
+        RECT bounds {};
+        return add_copy_bounds(bounds, old_cursor, width, height, true) ?
+                 copy_plan_from_bounds(bounds, width, height) : ddup_capture_copy_plan_t {};
+      }
+      if (!image_damage || !previous_damage || !image_damage->history ||
+          image_damage->history != previous_damage->history || image_damage->token == 0u ||
+          previous_damage->token < image_damage->token) {
+        return {};
+      }
+      // An uncertain non-present acquisition or re-duplication can retire private texture
+      // serials without committing a history entry. Every intervening serial must therefore
+      // have one retained update; the current acquired present is the one not yet committed.
+      // Subtract the known-positive serial distance first to avoid a token + 1 overflow.
+      if (previous_damage->token - image_damage->token !=
+          current_desktop_serial - image_desktop_serial - 1u) {
+        return {};
+      }
+      return image_damage->history->plan_copy(
+        image_damage->token, previous_damage->token, current_update, old_cursor, width, height
+      );
+    }
+
+    bool has_complete_ddup_damage_between(
+      const std::optional<ddup_damage_snapshot_t> &from,
+      const std::optional<ddup_damage_snapshot_t> &through
+    ) {
+      return from && through && from->history && from->history == through->history &&
+             through->history->has_complete_interval(from->token, through->token);
     }
 
     ddup_damage_intersection_e query_ddup_damage_between(
@@ -367,26 +450,6 @@ namespace platf::dxgi {
         return ddup_damage_intersection_e::unknown;
       }
       return through->history->query(from->token, through->token, region);
-    }
-
-    ddup_damage_coverage_t query_ddup_damage_coverage_between(
-      const std::optional<ddup_damage_snapshot_t> &from,
-      const std::optional<ddup_damage_snapshot_t> &through,
-      const RECT &region,
-      const bool collect_max_single_intersection
-    ) {
-      if (
-        !from || !through || !from->history || !through->history ||
-        from->history.get() != through->history.get()
-      ) {
-        return {};
-      }
-      return through->history->query_coverage(
-        from->token,
-        through->token,
-        region,
-        collect_max_single_intersection
-      );
     }
 
     void ddup_unchanged_roi_proof_t::reset() noexcept {
@@ -768,6 +831,13 @@ namespace platf::dxgi {
     auto clear_display_required = util::fail_guard([]() {
       SetThreadExecutionState(ES_CONTINUOUS);
     });
+    auto release_last_snapshot = util::fail_guard([this]() {
+      (void) release_snapshot();
+    });
+    // Desktop Duplication already releases immediately before its next acquisition. Keep
+    // ownership across the pacing interval so DXGI can accumulate regions without copying
+    // intervening desktop updates. WGC returns each frame to its pool after delivery.
+    const bool retain_snapshot_until_next_acquire = capture_backend() == capture_backend_e::ddup;
 
     sleep_overshoot_logger.reset();
 
@@ -843,11 +913,15 @@ namespace platf::dxgi {
       // Start new frame pacing group if necessary, snapshot() is called with non-zero timeout
       if ((status == capture_e::timeout && wait_policy.retry_after_pacing_timeout()) ||
           (status == capture_e::ok && !frame_pacing_group_start)) {
-        status = snapshot(pull_free_image_cb, img_out, wait_policy.source_timeout(), *cursor);
+        const auto source_timeout = wait_policy.source_timeout();
+        const auto source_deadline = std::chrono::steady_clock::now() + source_timeout;
+        status = snapshot(pull_free_image_cb, img_out, source_timeout, *cursor);
 
         if (status == capture_e::ok && img_out) {
           start_frame_pacing_group(img_out);
-        } else if (status == platf::capture_e::timeout) {
+        } else if (status == platf::capture_e::timeout &&
+                   (wait_policy.pending_local_work || !snapshot_filtered_acquisition() ||
+                    std::chrono::steady_clock::now() >= source_deadline)) {
           // The D3D11 device is protected by an unfair lock that is held the entire time that
           // IDXGIOutputDuplication::AcquireNextFrame() is running. This is normally harmless,
           // however sometimes the encoding thread needs to interact with our ID3D11Device to
@@ -862,9 +936,8 @@ namespace platf::dxgi {
           // AcquireNextFrame(). The starvation caused by this lock contention causes encoder
           // reinitialization to take several seconds instead of a fraction of a second.
           //
-          // To avoid starving the encoding thread, sleep without the lock held for a little
-          // while each time we reach our max frame timeout. This will only happen when nothing
-          // is updating the display, so no visible stutter should be introduced by the sleep.
+          // Yield without the lock after an idle wait. A DDup acquisition filtered promptly
+          // by capture already freed the lock and can proceed to the next source frame.
           std::this_thread::sleep_for(wait_policy.idle_backoff());
         }
       } else if (status == capture_e::timeout && wait_policy.pending_local_work) {
@@ -893,9 +966,11 @@ namespace platf::dxgi {
           return status;
       }
 
-      status = release_snapshot();
-      if (status != platf::capture_e::ok) {
-        return status;
+      if (!retain_snapshot_until_next_acquire) {
+        status = release_snapshot();
+        if (status != platf::capture_e::ok) {
+          return status;
+        }
       }
     }
 

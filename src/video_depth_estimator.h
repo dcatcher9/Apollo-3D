@@ -654,6 +654,8 @@ namespace models {
   inline constexpr std::uint32_t near_identical_history_owner_contract_tag = 0x3142484Eu;
   inline constexpr std::uint32_t near_identical_history_owner_contract_schema = 2u;
   inline constexpr std::size_t near_identical_history_owner_word_count = 10u;
+  /** Request flag used only by the map dispatch's separate constant-buffer upload. */
+  inline constexpr std::uint32_t near_identical_map_skip_input_history = 1u << 3u;
 
   inline constexpr std::uint32_t near_identical_decision_cookie = 0xD1EC15A5u;
   inline constexpr std::uint32_t near_identical_token_low_cookie = 0xA3756C91u;
@@ -889,10 +891,10 @@ namespace models {
    * storage. Consumers must still validate the exact current publication before rendering.
    */
   struct depth_observation_views_t {
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth;  ///< Normalized-depth diagnostics.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_health_state;  ///< Tagged depth-health state shared with telemetry and coordinate production.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_frame_state;  ///< {min,max,initialized,frame_state}; frame_state 0 means an all-invalid completion held the prior depth.
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ema_motion_mask;  ///< Edge-selective EMA snap mask.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ema_motion_mask;  ///< Diagnostic edge-selective EMA snap mask.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_model_depth;  ///< Public model output buffer, before normalization/EMA/curvature; primarily for the offline evaluator.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> raw_model_depth_snapshot;  ///< Optional stable copy of the completed frame's raw output for a live Dump 3D request.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> model_input_snapshot;  ///< Optional stable NCHW/ImageNet-normalized input for the same live Dump 3D frame.
@@ -906,11 +908,11 @@ namespace models {
     // Production V2 outputs. candidate_parallax is immutable pre-conditioner evidence consumed by
     // the vertical pass, vertical_majorant is the upper-envelope diagnostic, and
     // vertical_conditioned is the fixed upper/lower vertical share consumed by the pure row
-    // majorant. base_final_parallax is independently observable as the ordinary post-limiter field
-    // for explicit diagnostics and padded ROI. Subtitle conditioning always writes a separate
-    // complete texture, so base_final_parallax remains immutable. final_parallax is that atomic
-    // OCR-conditioned diagnostic publication. The renderer uses Base plus the joined native
-    // glyph matte and an analytic UI-plane sample. Adaptive reuse holds
+    // majorant. The candidate and both vertical fields are exposed together from full-grid
+    // diagnostics. base_final_parallax is the independently observable post-limiter field for
+    // explicit diagnostics and padded ROI. When requested, subtitle conditioning writes a
+    // separate complete texture, so Base remains immutable. The renderer uses Base plus the
+    // joined native glyph matte and an analytic UI-plane sample. Adaptive reuse holds
     // the complete DAV2/OCR/SLR/final tuple; a shared refresh updates the analysis bundle together.
     // In ROI mode
     // both are crop-local producer q; Base and the glyph tuple become renderer authority through
@@ -922,10 +924,18 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_vertical_majorant;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_vertical_conditioned;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_base_final_parallax;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_final_parallax;
-    /// True only when this completion ran the diagnostic conditioner. Otherwise Final holds exact
-    /// Base and the field-pin, distance and Gaussian views are not current evidence.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_conditioned_final_parallax;
+    /// An authenticated live result may omit all three Base intermediate fields.
+    bool base_diagnostics_omitted = false;
+    /// True only when the completed tuple carries current field-pin, distance and Gaussian evidence.
     bool subtitle_conditioning_diagnostics_current = false;
+
+    /// Use the separate diagnostic field when published, and the immutable Base field otherwise.
+    [[nodiscard]] ID3D11ShaderResourceView *final_parallax() const noexcept {
+      return shadow_conditioned_final_parallax ? shadow_conditioned_final_parallax.Get() :
+                                                 shadow_base_final_parallax.Get();
+    }
+
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_state;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shadow_frame_stats;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ocr_box_record;  ///< Exact-frame OCR8 only when subtitle_evidence_is_exact_frame() succeeds.
@@ -998,8 +1008,8 @@ namespace models {
   };
 
   /** One estimator call may complete observation N and submit N+1 independently.
-   * Observation views retain their existing populated-default semantics even when no new
-   * completion is returned. Completion events must not replay with retained observations.
+   * GPU views and completion events are returned only for an observation completed by the call.
+   * Submission and call status can be reported independently of that completion.
    */
   struct depth_step_result_t {
     depth_observation_views_t observation;
@@ -1022,6 +1032,7 @@ namespace models {
     std::uint32_t expected_work = 0u, postprocess_request_flags = 0u;
     bool both_unmap_calls_succeeded = false; // HOST enqueue boundary, NOT GPU readiness
     bool postprocess_queued = false;
+    bool refined_live_geometry_active = false;
     depth_input_region_t input_region {};
     input_color_space color_space = input_color_space::srgb;
     std::uint32_t field_width = 0u, field_height = 0u;
@@ -1063,13 +1074,24 @@ namespace models {
            result.subtitle_locator_state.Get() != nullptr;
   }
 
+  /** Synchronous owner-thread source guard. Its callback and state are never retained. */
+  struct pending_depth_source_access_t {
+    const void *owner = nullptr;
+    bool (*acquire)(const void *) = nullptr;
+  };
+
   struct pending_depth_poll_result {
     depth_step_result_t result;
-    bool ready = false;  ///< Joined query proved completion; result may still report a failure.
-    bool wait_attempted = false;  ///< At least one yielded repeat was attempted after the initial query.
+    bool ready = false;  ///< The completion was consumed or failed. Denied source access leaves it pending.
+    bool wait_attempted = false;  ///< At least one repeat was attempted after the initial query.
     bool timed_out = false;  ///< The exact pending unit remained busy at the deadline/query fuse.
     std::uint32_t query_count = 0;  ///< Joined DAV2/OCR readiness queries issued by this call.
     std::chrono::steady_clock::duration wait_duration {};  ///< Query time only; excludes completed-depth postprocess.
+#ifdef SUNSHINE_TESTS
+    bool notification_armed = false;
+    bool notification_waited = false;
+    bool notification_callback_pending = false;
+#endif
   };
 
   struct publication_receipt_poll_result {
@@ -1297,7 +1319,9 @@ namespace models {
   };
   struct raw_ocr_probe_depth_events_t {
     bool deferred_mapped_depth_lease = false;
+    bool root_event_recorded = false;
     std::int32_t actual_compute_query = -1, actual_hold_query = -1;
+    std::int32_t actual_root_query = -1;
     std::uint64_t depth_frame_id = 0u, depth_observation_timestamp_us = 0u;
     std::uint64_t recorded_event_sequence = 0u;
     // These private events do NOT establish an interop-release/completed-owner verdict.
@@ -1433,6 +1457,8 @@ namespace models {
 
   class video_depth_estimator {
   public:
+    enum class normalized_depth_diagnostics_e { disabled, enabled };
+    enum class subtitle_legacy_matte_e { always, on_demand };
     /**
      * @brief Construct a new video depth estimator
      *
@@ -1444,13 +1470,19 @@ namespace models {
      *            config::host_sbs_v2_live_calibration values).
      * @param model The selected public DAV2 identity and preprocessing calibration. Production
      *            resolves it to the authenticated fused pixel_values -> refined_depth runtime.
+     * @param normalized_depth_diagnostics Retain the normalized-depth and EMA mask history used by
+     *            the evaluator. Live V2 rendering uses the independently produced parallax fields.
+     * @param legacy_matte Produce the original dense matte on every subtitle observation or only
+     *            when requested by diagnostics or the legacy research selector.
      */
     video_depth_estimator(
       Microsoft::WRL::ComPtr<ID3D11Device> device,
       Microsoft::WRL::ComPtr<ID3D11DeviceContext> context,
       const std::filesystem::path &assets_dir,
       const config::video_t::sbs_t &cfg,
-      const config::depth_model_info &model
+      const config::depth_model_info &model,
+      normalized_depth_diagnostics_e normalized_depth_diagnostics = normalized_depth_diagnostics_e::enabled,
+      subtitle_legacy_matte_e legacy_matte = subtitle_legacy_matte_e::always
     );
 
     ~video_depth_estimator();
@@ -1460,9 +1492,12 @@ namespace models {
     /** The field pin, native distance, Gaussian proposal and compatibility limiters reach only
      * Dump 3D and harness artifacts; rendering binds Base. The default (true) runs them on every
      * subtitle observation. Live streaming passes false so only a dump-forced observation runs
-     * them; every other observation publishes exact Base through the distinct Final texture.
+     * them. Other observations expose the immutable Base view as their effective Final.
      */
     void set_subtitle_conditioning_diagnostics_always(bool always) noexcept;
+#ifdef SUNSHINE_TESTS
+    [[nodiscard]] bool subtitle_conditioning_diagnostics_allocated_for_tests() const noexcept;
+#endif
 
     /** Research harness only, default false; accepted only before the first input.
      * Runs private cohort/filter/M1 diagnostics without replacing production S/M or geometry.
@@ -1497,7 +1532,7 @@ namespace models {
      * Exclusive resident OCR context/stream; depth suppresses subtitle work while enabled.
      * No positive/EMPTY/render authority and no normal queued-depth continuation.
      */
-    bool set_independent_ocr_raw_probe_enabled(bool enabled);
+    bool set_independent_ocr_raw_probe_enabled(bool enabled, std::optional<std::uint64_t> eager_unmap_frame = std::nullopt);
     /** Blocking setup/bootstrap only while no depth is pending, before authored B hold. */
     bool prepare_independent_ocr_raw_probe(ID3D11ShaderResourceView *warm_source,
       const raw_ocr_probe_source_t &identity, std::string &error);
@@ -1506,7 +1541,7 @@ namespace models {
     raw_ocr_probe_poll_t poll_independent_ocr_raw_probe();
     /** All D3D readers must be complete before releasing the exact result contents lease. */
     bool release_independent_ocr_raw_probe(raw_ocr_probe_token_t token);
-    /** Real private compute/hold EventQuery calls; no unmap, ACK or fabricated root completion. */
+    /** Real EventQuery calls for the private compute, hold and recorded root events. */
     raw_ocr_probe_depth_events_t independent_ocr_raw_depth_events_for_evaluation();
 
     /** Queue same-submitted-source postprocess ONCE after successful unmap calls, without
@@ -1529,6 +1564,11 @@ namespace models {
     bool configure_joined_completion_gate_for_benchmark(
       const joined_completion_gate_benchmark::configuration_t &configuration
     );
+#ifdef SUNSHINE_TESTS
+    bool configure_joined_completion_gate_for_native_pacing_test(
+      const joined_completion_gate_benchmark::configuration_t &configuration
+    );
+#endif
     /** Pure CPU gate/query diagnostics, never a source clock or fabricated CUDA verdict. */
     [[nodiscard]] std::optional<joined_completion_gate_benchmark::snapshot_t>
       joined_completion_gate_status_for_benchmark() const noexcept;
@@ -1569,8 +1609,8 @@ namespace models {
      *        submit the changed context again after consuming the returned frame.
      * @param subtitle_line_policy Horizontal position rule for this submission's OCR line
      *        classifier. It may change only together with the subtitle context generation.
-     * @return Separate observation views, submission outcome, completion events and call status.
-     *         Views are owned by the estimator and may be overwritten by later calls.
+     * @return Submission outcome and call status, plus views and events for any completed observation.
+     *         The estimator owns the backed resources, and later calls may overwrite their contents.
      */
     depth_step_result_t estimate_depth(
       ID3D11ShaderResourceView *input_srv,
@@ -1600,7 +1640,8 @@ namespace models {
     /** Query the pending joined DAV2/OCR completion fence once and consume the exact unit when ready. */
     pending_depth_poll_result try_finish_pending_depth_nonblocking(
       input_color_space color_space,
-      bool snapshot_debug_inputs = false
+      bool snapshot_debug_inputs = false,
+      pending_depth_source_access_t source_access = {}
     );
 
     /** Query one pending exact-frame DAV2/OCR unit until ready or an absolute CPU deadline.
@@ -1613,12 +1654,16 @@ namespace models {
      * A timeout preserves the pending inference, event state, and exact owner. If event setup was
      * unavailable before enqueue, this degrades to one full-stream query with no repeated wait;
      * admission and fixed-resource reuse always retain their full-stream query.
+     * The optional source access callback runs after readiness and before any postprocess.
+     * When it returns false, the exact completion remains pending.
      */
     pending_depth_poll_result try_finish_pending_depth_until(
       input_color_space color_space,
       std::chrono::steady_clock::time_point deadline,
       std::uint32_t max_queries,
-      bool snapshot_debug_inputs = false
+      bool snapshot_debug_inputs = false,
+      bool allow_completion_notification = false,
+      pending_depth_source_access_t source_access = {}
     );
 
     /** Latest cached scene telemetry from the shared completion receipt. This accessor has no

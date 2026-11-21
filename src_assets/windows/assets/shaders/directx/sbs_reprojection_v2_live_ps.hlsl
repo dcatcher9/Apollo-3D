@@ -114,7 +114,7 @@ float2 ReprojectFull(float2 destination_uv, float eye_sign) {
     // out(x) = x - eye_sign * parallax(x). The authenticated field is contractive, so this
     // iteration converges to its unique inverse without ownership search or hole filling.
     float source_x = destination_uv.x;
-    [unroll]
+    [loop]
     for (int iteration = 0; iteration < 11; ++iteration) {
         float next_source_x = destination_uv.x + eye_sign * BaseParallax.SampleLevel(
             LinearSampler,
@@ -142,7 +142,7 @@ float2 ReprojectVideoRoi(float2 destination_uv, float eye_sign, uint2 depth_size
     float2 depth_size_f = float2(depth_size);
     float2 content_min = float2(video_roi_tensor_content_rect.xy) / depth_size_f;
     float2 content_max = float2(video_roi_tensor_content_rect.zw) / depth_size_f;
-    // Hoist the ROI-to-tensor affine transform out of the unrolled inverse. Destination V is
+    // Hoist the ROI-to-tensor affine transform out of the inverse loop. Destination V is
     // invariant across all fixed-point steps, so its projection, tensor coordinate, and vertical
     // collar contribution are also one-time work.
     float2 tensor_uv_scale = (content_max - content_min) / roi_extent;
@@ -171,7 +171,7 @@ float2 ReprojectVideoRoi(float2 destination_uv, float eye_sign, uint2 depth_size
     if (destination_collar_budget >= maximum_full_source_parallax) {
         return destination_uv;
     }
-    [unroll]
+    [loop]
     for (int iteration = 0; iteration < 11; ++iteration) {
         float next_source_x = destination_uv.x + eye_sign * SampleVideoRoiParallax(
             source_x,

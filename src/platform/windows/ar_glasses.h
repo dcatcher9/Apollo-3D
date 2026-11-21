@@ -336,6 +336,13 @@ namespace ar_glasses {
       bool is_cloned = false;
       RECT rect {};
       int refresh_millihz = 60000;
+      LUID source_adapter_id {};
+      UINT32 source_id = 0;
+      UINT32 target_id = 0;
+      std::string gdi_name {};
+      std::string desktop_topology {};
+      bool hdr_user_enabled = false;
+      UINT32 hdr_bits_per_color = 0;
     };
 
     /** Return whether a mode transition may retain the existing local SudoVDA desktop.
@@ -345,6 +352,16 @@ namespace ar_glasses {
       const local_session_contract_t &before,
       const local_session_contract_t &after,
       bool exclusive
+    );
+
+    bool local_monitor_source_only_change_for_test(
+      const local_session_contract_t &before,
+      const local_session_contract_t &after
+    );
+
+    bool verify_monitor_source_request_for_test(
+      const std::function<bool()> &current,
+      const std::function<bool()> &verify
     );
 
     /** Reject a new presentation generation after a placement-only topology update. */

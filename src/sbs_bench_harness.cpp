@@ -54,6 +54,7 @@
   #include "crypto.h"
   #include "depth_coordinate_v2.h"
   #include "generated/sbs_adaptive_state_contract.h"
+  #include "host_sbs_contour_history_readback.h"
   #include "host_sbs_current_source_snapshot_gpu.h"
   #include "host_sbs_gpu_trace.h"
   #include "host_sbs_observation_timeline.h"
@@ -238,31 +239,7 @@ namespace sbs_bench {
       return (uint16_t) (sign | ((uint32_t) exp << 10) | (mant >> 13));
     }
 
-    float half_to_float(uint16_t h) {
-      const uint32_t sign = (uint32_t) (h & 0x8000u) << 16;
-      int exp = (h >> 10) & 0x1f;
-      uint32_t mant = h & 0x3ffu;
-      uint32_t bits;
-      if (exp == 0) {
-        if (mant == 0) {
-          bits = sign;
-        } else {
-          exp = 127 - 15 + 1;
-          while (!(mant & 0x400u)) {
-            mant <<= 1;
-            --exp;
-          }
-          bits = sign | ((uint32_t) exp << 23) | ((mant & 0x3ffu) << 13);
-        }
-      } else if (exp == 31) {
-        bits = sign | 0x7f800000u | (mant << 13);
-      } else {
-        bits = sign | ((uint32_t) (exp - 15 + 127) << 23) | (mant << 13);
-      }
-      float value;
-      std::memcpy(&value, &bits, sizeof(value));
-      return value;
-    }
+    using models::contour_history_readback::half_to_float;
 
     // Strict HDR interchange for offline whole-clip conversion. FFmpeg's image2 PFM codec writes
     // this exact standard form reliably: RGB float32, little-endian (negative scale), with rows
@@ -1427,10 +1404,13 @@ namespace sbs_bench {
 
     // Diagnostic-only opaque texture export. Preserve packed contour support, integer distance,
     // and native display/history values exactly; PNG previews cannot authenticate these fields.
+    enum class contour_export_e { native, history_rgba32f };
+
     bool dump_contour_texture(
       ID3D11Device *dev, ID3D11DeviceContext *ctx, ID3D11ShaderResourceView *srv,
       const DXGI_FORMAT expected_format, const std::size_t bytes_per_pixel,
-      const fs::path &path, ComPtr<ID3D11Texture2D> &stage_cache
+      const fs::path &path, ComPtr<ID3D11Texture2D> &stage_cache,
+      const contour_export_e encoding = contour_export_e::native
     ) {
       if (!dev || !ctx || !srv) return false;
       ComPtr<ID3D11Resource> resource;
@@ -1439,7 +1419,10 @@ namespace sbs_bench {
       if (!resource || FAILED(resource.As(&texture))) return false;
       D3D11_TEXTURE2D_DESC desc {};
       texture->GetDesc(&desc);
-      if (desc.Format != expected_format || desc.Width == 0u || desc.Height == 0u ||
+      const bool expand_history = encoding == contour_export_e::history_rgba32f &&
+        expected_format == DXGI_FORMAT_R32G32B32A32_FLOAT && bytes_per_pixel == 16u &&
+        desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+      if ((!expand_history && desc.Format != expected_format) || desc.Width == 0u || desc.Height == 0u ||
           desc.MipLevels != 1u || desc.ArraySize != 1u || desc.SampleDesc.Count != 1u) return false;
       D3D11_TEXTURE2D_DESC previous {};
       if (stage_cache) stage_cache->GetDesc(&previous);
@@ -1454,14 +1437,29 @@ namespace sbs_bench {
         if (FAILED(dev->CreateTexture2D(&stage_desc, nullptr, &stage_cache))) return false;
       }
       ctx->CopyResource(stage_cache.Get(), texture.Get());
+      const std::size_t row_bytes = desc.Width * bytes_per_pixel;
+      const auto storage_row_bytes = expand_history ? row_bytes / 2u : row_bytes;
+      std::vector<std::uint8_t> expanded_row(expand_history ? row_bytes : 0u);
       D3D11_MAPPED_SUBRESOURCE mapped {};
       if (FAILED(ctx->Map(stage_cache.Get(), 0u, D3D11_MAP_READ, 0u, &mapped))) return false;
+      if (!mapped.pData || mapped.RowPitch < storage_row_bytes) {
+        ctx->Unmap(stage_cache.Get(), 0u);
+        return false;
+      }
       std::ofstream out(path, std::ios::binary | std::ios::trunc);
-      const auto row_bytes = static_cast<std::streamsize>(desc.Width * bytes_per_pixel);
       if (out) {
         for (UINT y = 0u; y < desc.Height; ++y) {
-          out.write(static_cast<const char *>(mapped.pData) +
-                      static_cast<std::size_t>(y) * mapped.RowPitch, row_bytes);
+          const auto *source = static_cast<const std::uint8_t *>(mapped.pData) +
+            static_cast<std::size_t>(y) * mapped.RowPitch;
+          if (expand_history) {
+            if (!models::contour_history_readback::expand_rgba16f_row_to_rgba32f(
+                  {source, storage_row_bytes}, expanded_row)) {
+              out.setstate(std::ios::failbit);
+              break;
+            }
+            source = expanded_row.data();
+          }
+          out.write(reinterpret_cast<const char *>(source), static_cast<std::streamsize>(row_bytes));
         }
         out.flush();
       }
@@ -1630,7 +1628,7 @@ namespace sbs_bench {
     // score the geometry the shipped V2 renderer intends, not raw model ordering: on thin
     // structure the raw model and the V2-limited field legitimately disagree. The canonical
     // coordinate SRV (est.shadow_coordinate) is Dump-3D-gated and never published in evaluation
-    // mode, so this dumps est.shadow_candidate_parallax instead -- the always-published signed
+    // mode, so this dumps est.shadow_candidate_parallax instead -- the signed
     // candidate parallax, monotone in the canonical coordinate. Container matches
     // dump_raw_model_depth_png exactly: 16-bit grayscale PNG under an explicit per-frame finite
     // min/max normalization; non-finite and degenerate-range values map to 0.
@@ -3841,19 +3839,21 @@ namespace sbs_bench {
       return 3;
     }
 
-    bool private_current_outline_hdr_probe=false;
+    bool private_hdr_probe=false;
     bool private_fixed6_sdr_probe=false;
     if (!o.joined_completion_probe.empty()) {
       try {
         std::ifstream f(o.joined_completion_probe,std::ios::binary);
         const auto p=nlohmann::json::parse(f);
-        private_current_outline_hdr_probe=p.value("probe_kind",std::string{})=="actual-converter-current-outline-hdr-v1" &&
-          p.value("source_transfer",std::string{})=="scrgb_hdr" && !p.value("queue_enabled",true) &&
-          p.contains("selected_matte") && p.at("selected_matte").value("current_outline",false);
+        const auto kind = p.value("probe_kind", std::string {});
+        private_hdr_probe = p.value("source_transfer", std::string {}) == "scrgb_hdr" && !p.value("queue_enabled", true) &&
+          (kind == "actual-converter-shutter-hdr-v1" || kind == "actual-converter-native-p010-v1" ||
+           (kind == "actual-converter-current-outline-hdr-v1" &&
+            p.contains("selected_matte") && p.at("selected_matte").value("current_outline", false)));
         private_fixed6_sdr_probe=p.value("probe_kind",std::string{})=="actual-converter-current-outline-sequence6-sdr-v1" &&
           p.value("source_transfer",std::string{})=="encoded-srgb" && !p.value("queue_enabled",true) &&
           p.contains("selected_matte") && p.at("selected_matte").value("current_outline",false);
-      } catch (...) { private_current_outline_hdr_probe=false; private_fixed6_sdr_probe=false; }
+      } catch (...) { private_hdr_probe=false; private_fixed6_sdr_probe=false; }
     }
     // Evaluation keeps its established WIC raster contract. Whole-clip adaptive/conversion modes
     // additionally accept strict linear-scRGB PFM frames. A clip is one format family throughout:
@@ -3892,13 +3892,13 @@ namespace sbs_bench {
           found_sdr_raster = true;
           frames.push_back(e.path());
         } else if (ext == ".pfm" &&
-                   (o.artifacts != artifact_mode_e::evaluation || private_current_outline_hdr_probe)) {
+                   (o.artifacts != artifact_mode_e::evaluation || private_hdr_probe)) {
           found_hdr_pfm = true;
           frames.push_back(e.path());
         }
       }
     }
-    if ((o.artifacts != artifact_mode_e::evaluation || private_current_outline_hdr_probe) &&
+    if ((o.artifacts != artifact_mode_e::evaluation || private_hdr_probe) &&
         ((found_sdr_raster && found_hdr_pfm) || found_mixed_sdr_formats)) {
       BOOST_LOG(error) << "sbs-bench: mixed source image formats are not a valid whole clip";
       return 4;
@@ -3937,8 +3937,8 @@ namespace sbs_bench {
       return 4;
     }
     if (!o.joined_completion_probe.empty() && (frames.size() != (private_fixed6_sdr_probe?6u:3u) ||
-        (pfm_input ? !private_current_outline_hdr_probe : sdr_raster_format != "png"))) {
-      BOOST_LOG(error) << "sbs-bench: private joined probe requires exactly3 immutable SDRPNG or explicitly declared current-outline HDR PFM sources";
+        (pfm_input ? !private_hdr_probe : sdr_raster_format != "png"))) {
+      BOOST_LOG(error) << "sbs-bench: private joined probe requires immutable SDR PNG or explicitly declared HDR PFM sources";
       return 4;
     }
     if (o.pfm_joined_diagnostics && (!pfm_input || frames.empty() || frames.size() > 64u)) {
@@ -4110,15 +4110,26 @@ namespace sbs_bench {
           if(code)BOOST_LOG(error)<<"sbs-bench: actual fixed-six converter probe: "<<probe_error;
           return code;
         }
-        if (plan.value("probe_kind",std::string{})=="actual-converter-rgb-v1" || plan.value("probe_kind",std::string{})=="actual-converter-pending-current-colour-v1" || plan.value("probe_kind",std::string{})=="actual-converter-current-outline-hdr-v1" || plan.value("probe_kind",std::string{})=="actual-converter-packed-continuity-v1") {
+        const auto probe_kind = plan.value("probe_kind", std::string {});
+        const bool shutter_hdr = probe_kind == "actual-converter-shutter-hdr-v1";
+        const bool native_p010 = probe_kind == "actual-converter-native-p010-v1";
+        if (probe_kind=="actual-converter-rgb-v1" || probe_kind=="actual-converter-pending-current-colour-v1" || probe_kind=="actual-converter-current-outline-hdr-v1" || probe_kind=="actual-converter-packed-continuity-v1" || shutter_hdr || native_p010) {
           if (plan.at("schema")!=1 || plan.at("context_provider")!="synthetic-video-scheduling-only" ||
               frames.size()!=3 || observation_timestamps.size()!=3 || plan.at("sources").size()!=3) {
             BOOST_LOG(error) << "sbs-bench: invalid actual-converter protocol"; return 7;
           }
           platf::dxgi::actual_converter_probe_v1::request_t request;
           request.enabled=true;request.queued=plan.at("queue_enabled").get<bool>();
-          request.packed_continuity=plan.value("probe_kind",std::string{})=="actual-converter-packed-continuity-v1";
-          request.hdr_input=private_current_outline_hdr_probe;
+          request.packed_continuity=probe_kind=="actual-converter-packed-continuity-v1" || shutter_hdr || native_p010;
+          request.hdr_input=private_hdr_probe;
+          request.native_p010 = native_p010;
+          if (native_p010) {
+            request.p010_chroma_mode = plan.at("p010_chroma_mode").get<std::string>();
+            if (request.p010_chroma_mode != "default" && request.p010_chroma_mode != "raster" && request.p010_chroma_mode != "no-uav") {
+              BOOST_LOG(error) << "sbs-bench: invalid native P010 chroma mode";
+              return 7;
+            }
+          }
           if (request.hdr_input || plan.contains("required_adapter")) {
             request.explicit_adapter=true;
             const auto &adapter=plan.at("required_adapter");
@@ -4127,9 +4138,13 @@ namespace sbs_bench {
             request.hdr_adapter_vendor_id=adapter.at("vendor_id").get<std::uint32_t>();
             request.hdr_adapter_device_id=adapter.at("device_id").get<std::uint32_t>();
           }
-          if ((pfm_input!=request.hdr_input) || (request.hdr_input&&request.queued)) { BOOST_LOG(error)<<"sbs-bench: unsupported private HDR probe declaration";return 7; }
+          if (pfm_input != request.hdr_input || (request.hdr_input && request.queued) ||
+              ((shutter_hdr || native_p010) && (!pfm_input || plan.contains("selected_matte") || plan.contains("temporal_source_bridge")))) {
+            BOOST_LOG(error) << "sbs-bench: unsupported private HDR probe declaration";
+            return 7;
+          }
           request.settings=sbs_cfg;request.output=o.out;request.background_observer=plan.value("require_actual_push_pull_background",false);
-          const bool pending_colour=plan.value("probe_kind",std::string{})=="actual-converter-pending-current-colour-v1";
+          const bool pending_colour=probe_kind=="actual-converter-pending-current-colour-v1";
           if(plan.contains("temporal_source_bridge")) {
             const auto &t=plan.at("temporal_source_bridge");models::subtitle_temporal_source_research_configuration_t cfg;
             cfg.temporal_shader_root=t.at("temporal_shader_root").get<std::string>();cfg.temporal_source_closure_sha256=t.at("temporal_source_closure_sha256").get<std::string>();
@@ -5022,6 +5037,7 @@ namespace sbs_bench {
                                  diagnostic_dir / name, subtitle_plane_buffer_stage);
       };
       const bool exact_subtitle = models::subtitle_evidence_is_exact_frame(result);
+      const bool write_conditioning = exact_subtitle && !o.subtitle_conditioning_live_policy;
       const auto write_contour = [&](ID3D11ShaderResourceView *view,
                                      DXGI_FORMAT format, std::size_t bytes,
                                      const char *name) {
@@ -5031,7 +5047,7 @@ namespace sbs_bench {
       if (!write_field(result.shadow_candidate_parallax.Get(), "candidate.f32") ||
           !write_field(result.shadow_vertical_conditioned.Get(), "vertical.f32") ||
           !write_field(result.shadow_base_final_parallax.Get(), "base.f32") ||
-          !write_field(result.shadow_final_parallax.Get(), "final.f32") ||
+          !write_field(result.final_parallax(), "final.f32") ||
           !write_words(result.shadow_state.Get(), models::depth_coordinate_v2::state_float_count, "state.f32") ||
           !write_words(result.depth_health_state.Get(), sbs_adaptive_state::word_count, "depth_health_state.f32") ||
           (exact_subtitle &&
@@ -5042,14 +5058,19 @@ namespace sbs_bench {
             !write_contour(result.subtitle_contour_support.Get(), DXGI_FORMAT_R32_UINT, 4u, "contour_support.u32") ||
             !write_contour(result.subtitle_glyph_matte.Get(), DXGI_FORMAT_R32_UINT, 4u, "glyph_matte.u32") ||
             !write_words(result.subtitle_condition_params.Get(), models::depth_coordinate_v2::subtitle_condition_param_word_count, "condition_params.u32") ||
+            !dump_contour_texture(dev.Get(), ctx.Get(), result.subtitle_contour_history.Get(),
+                                  DXGI_FORMAT_R32G32B32A32_FLOAT, 16u,
+                                  diagnostic_dir / "contour_history.rgba32f", subtitle_contour_texture_stage,
+                                  contour_export_e::history_rgba32f) ||
+            !write_contour(result.subtitle_contour_source.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, 8u, "contour_source.rgba16f"))) ||
+          (write_conditioning &&
+           (!result.subtitle_conditioning_diagnostics_current ||
             !write_contour(result.subtitle_contour_field_pin.Get(), DXGI_FORMAT_R32_UINT, 4u, "contour_field_pin.u32") ||
             !write_contour(result.subtitle_contour_distance.Get(), DXGI_FORMAT_R32_FLOAT, 4u, "contour_distance.f32") ||
             !write_field(result.subtitle_gaussian_weight.Get(), "gaussian_weight.f32") ||
             !write_field(result.subtitle_gaussian_blend.Get(), "gaussian_blend.f32") ||
             !write_field(result.subtitle_gaussian_vertical_conditioned.Get(), "gaussian_vertical_conditioned.f32") ||
-            !write_words(result.subtitle_gaussian_control.Get(), 1u, "gaussian_control.u32") ||
-            !write_contour(result.subtitle_contour_history.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT, 16u, "contour_history.rgba32f") ||
-            !write_contour(result.subtitle_contour_source.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, 8u, "contour_source.rgba16f")))) {
+            !write_words(result.subtitle_gaussian_control.Get(), 1u, "gaussian_control.u32")))) {
         BOOST_LOG(error) << "sbs-bench: incomplete exact-frame subtitle plane diagnostic export";
         return false;
       }
@@ -5082,6 +5103,7 @@ namespace sbs_bench {
         {"input_domain_reset", completion.input_domain_reset},
         {"subtitle_work_suppressed", result.subtitle_work_suppressed},
         {"exact_subtitle_evidence", exact_subtitle},
+        {"conditioning_diagnostics_current", write_conditioning},
         {"contour_schema", models::depth_coordinate_v2::subtitle_contour_schema},
         {"contour_recipe", models::depth_coordinate_v2::subtitle_contour_recipe},
         {"producer_source_closure_sha256", models::depth_coordinate_v2::shader_source_closure_sha256},
@@ -5171,6 +5193,8 @@ namespace sbs_bench {
       std::error_code error;
       if (!fs::create_directory(directory, error) || error) return false;
       const auto &p = result.publication;
+      // Without a completion, the field and ROI default to zero. The source dimensions below
+      // still identify the attempted input for an UNAVAILABLE record.
       nlohmann::json metadata {
         {"schema", 1u}, {"role", "private-real-pfm-completed-numeric-operands"},
         {"production_dump", false}, {"live_capture", false}, {"source_alpha", "PFM loader constructs alpha=1"},
@@ -6064,9 +6088,6 @@ namespace sbs_bench {
           BOOST_LOG(error) << "sbs-bench: invalid cached glyph tuple for sequence " << sequence;
           return 6;
         }
-        // This alias is diagnostic only during cache replay. Rendering consumes Base and the
-        // separately restored tuple, never a fabricated conditioned field.
-        est.shadow_final_parallax = est.shadow_base_final_parallax;
         est.color_space = input_color;
         est.raw_width = static_cast<int>(replay_cache_metadata.depth_width);
         est.raw_height = static_cast<int>(replay_cache_metadata.depth_height);
@@ -7219,7 +7240,7 @@ namespace sbs_bench {
               const auto final_parallax_path =
                 fs::path(o.out) / ("final_parallax_" + output_id + ".f32");
               if (!dump_replay_field(
-                    est.shadow_final_parallax.Get(),
+                    est.final_parallax(),
                     "final parallax",
                     final_parallax_path,
                     final_parallax_field_stage
@@ -7492,7 +7513,7 @@ namespace sbs_bench {
                                        std::string {};
       const auto copied_timeline = fs::path(o.out) / "current-outline" / "observation.timeline";
       fs::copy_file(o.observation_timeline, copied_timeline, fs::copy_options::none, ec);
-      if (ec || executable_digest.empty() || qualified_composite_frames.size() != completed_frame_count || sha256_file_hex(copied_timeline) != observation_timeline_sha256 || !est.raw_model_provenance || !publish_json_atomically(fs::path(o.out) / "current_outline_qualification.json", {{"schema", 8u}, {"status", "COMPLETE"}, {"role", "file-fed-actual-completed-current-outline-compositor"}, {"ordinary_metric_artifacts", "authenticated-ordinary-base-renderer-v1"}, {"live_capture", false}, {"scheduling_authority", "ordered-authored-full-source-observations"}, {"source_transfer", "encoded-srgb"}, {"frame_count", completed_frame_count}, {"executable_sha256", executable_digest}, {"coordinate_contract_schema", models::depth_coordinate_v2::contract_schema}, {"coordinate_contract_sha256", models::depth_coordinate_v2::contract_canonical_sha256}, {"producer_source_closure_sha256", models::depth_coordinate_v2::shader_source_closure_sha256}, {"selector_source_closure_sha256", models::current_outline_runtime::selector_closure}, {"shared_warp_source_closure_sha256", models::host_sbs_shared_ui_warp::closure}, {"composition_source_closures", {{"source5", models::current_outline_runtime::source5_closure}, {"colour", models::current_outline_runtime::colour_closure}, {"components", models::current_outline_runtime::components_closure}, {"enclosure", models::current_outline_runtime::enclosure_closure}, {"roi", models::current_outline_runtime::roi_closure}, {"outline", models::current_outline_runtime::outline_closure}, {"inside", models::current_outline_runtime::inside_closure}, {"selector", models::current_outline_runtime::selector_closure}, {"stability", models::current_outline_runtime::stability_closure}, {"hole", models::current_outline_runtime::hole_closure}, {"coverage", models::current_outline_runtime::coverage_closure}, {"foreground_edge", models::current_outline_runtime::foreground_edge_closure}, {"trusted_inner", models::current_outline_runtime::trusted_inner_closure}}}, {"hole_program_ready", qualified_hole_program_ready}, {"coverage_program_ready", qualified_coverage_program_ready}, {"foreground_edge_program_ready", qualified_foreground_edge_program_ready}, {"trusted_inner_program_ready", qualified_trusted_inner_program_ready}, {"observation_timeline", {"current-outline/observation.timeline", observation_timeline_sha256}}, {"model", est.raw_model_provenance->depth_model}, {"model_url", est.raw_model_provenance->depth_model_url}, {"onnx_sha256", est.raw_model_provenance->onnx_sha256}, {"raw_coordinate_scale", est.parallax_v2_raw_coordinate_scale}, {"frames", qualified_composite_frames}})) {
+      if (ec || executable_digest.empty() || qualified_composite_frames.size() != completed_frame_count || sha256_file_hex(copied_timeline) != observation_timeline_sha256 || !est.raw_model_provenance || !publish_json_atomically(fs::path(o.out) / "current_outline_qualification.json", {{"schema", 9u}, {"status", "COMPLETE"}, {"role", "file-fed-actual-completed-current-outline-compositor"}, {"ordinary_metric_artifacts", "authenticated-ordinary-base-renderer-v1"}, {"live_capture", false}, {"scheduling_authority", "ordered-authored-full-source-observations"}, {"source_transfer", "encoded-srgb"}, {"frame_count", completed_frame_count}, {"executable_sha256", executable_digest}, {"coordinate_contract_schema", models::depth_coordinate_v2::contract_schema}, {"coordinate_contract_sha256", models::depth_coordinate_v2::contract_canonical_sha256}, {"producer_source_closure_sha256", models::depth_coordinate_v2::shader_source_closure_sha256}, {"selector_source_closure_sha256", models::current_outline_runtime::selector_closure}, {"shared_warp_source_closure_sha256", models::host_sbs_shared_ui_warp::completed_closure}, {"composition_source_closures", {{"source5", models::current_outline_runtime::source5_closure}, {"colour", models::current_outline_runtime::colour_closure}, {"components", models::current_outline_runtime::components_closure}, {"enclosure", models::current_outline_runtime::enclosure_closure}, {"roi", models::current_outline_runtime::roi_closure}, {"outline", models::current_outline_runtime::outline_closure}, {"inside", models::current_outline_runtime::inside_closure}, {"selector", models::current_outline_runtime::selector_closure}, {"stability", models::current_outline_runtime::stability_closure}, {"hole", models::current_outline_runtime::hole_closure}, {"coverage", models::current_outline_runtime::coverage_closure}, {"foreground_edge", models::current_outline_runtime::foreground_edge_closure}, {"trusted_inner", models::current_outline_runtime::trusted_inner_closure}}}, {"hole_program_ready", qualified_hole_program_ready}, {"coverage_program_ready", qualified_coverage_program_ready}, {"foreground_edge_program_ready", qualified_foreground_edge_program_ready}, {"trusted_inner_program_ready", qualified_trusted_inner_program_ready}, {"observation_timeline", {"current-outline/observation.timeline", observation_timeline_sha256}}, {"model", est.raw_model_provenance->depth_model}, {"model_url", est.raw_model_provenance->depth_model_url}, {"onnx_sha256", est.raw_model_provenance->onnx_sha256}, {"raw_coordinate_scale", est.parallax_v2_raw_coordinate_scale}, {"frames", qualified_composite_frames}})) {
         BOOST_LOG(error) << "sbs-bench: cannot publish complete selected-compositor qualification";
         return 8;
       }

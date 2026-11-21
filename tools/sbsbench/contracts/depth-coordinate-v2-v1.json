@@ -1,5 +1,5 @@
 {
-  "schema": 134,
+  "schema": 135,
   "vector_width": 4,
   "capture_provenance": {
     "schema": 3,
@@ -412,27 +412,27 @@
     "source_specs": [
       {
         "source_file": "rgb_to_nchw_near_identical_cs.hlsl",
-        "source_entrypoint": "fused_main",
+        "source_entrypoint": "fused_domain_main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "rgb_to_nchw_near_identical_cs.hlsl",
+        "source_entrypoint": "fused_tiled_domain_main",
         "source_target": "cs_5_0"
       },
       {
         "source_file": "buffer_to_tex_cs.hlsl",
-        "source_entrypoint": "main",
+        "source_entrypoint": "domain_main",
         "source_target": "cs_5_0"
       },
       {
         "source_file": "buffer_to_tex_cs.hlsl",
-        "source_entrypoint": "pad_main",
-        "source_target": "cs_5_0"
-      },
-      {
-        "source_file": "depth_minmax_ema_cs.hlsl",
-        "source_entrypoint": "main",
+        "source_entrypoint": "domain_pad_main",
         "source_target": "cs_5_0"
       },
       {
         "source_file": "depth_coordinate_v2_moments_cs.hlsl",
-        "source_entrypoint": "main",
+        "source_entrypoint": "domain_main",
         "source_target": "cs_5_0"
       },
       {
@@ -442,22 +442,22 @@
       },
       {
         "source_file": "depth_coordinate_v2_histogram_cs.hlsl",
-        "source_entrypoint": "main",
+        "source_entrypoint": "domain_main",
         "source_target": "cs_5_0"
       },
       {
         "source_file": "depth_coordinate_v2_quantiles_cs.hlsl",
-        "source_entrypoint": "main",
-        "source_target": "cs_5_0"
-      },
-      {
-        "source_file": "depth_coordinate_v2_state_resolve_cs.hlsl",
-        "source_entrypoint": "main",
+        "source_entrypoint": "publish_main",
         "source_target": "cs_5_0"
       },
       {
         "source_file": "depth_coordinate_v2_map_cs.hlsl",
-        "source_entrypoint": "main",
+        "source_entrypoint": "domain_main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "depth_coordinate_v2_map_cs.hlsl",
+        "source_entrypoint": "compact_domain_main",
         "source_target": "cs_5_0"
       },
       {
@@ -468,6 +468,16 @@
       {
         "source_file": "depth_coordinate_v2_limit_cs.hlsl",
         "source_entrypoint": "main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "depth_coordinate_v2_vertical_limit_cs.hlsl",
+        "source_entrypoint": "compact_main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "depth_coordinate_v2_limit_cs.hlsl",
+        "source_entrypoint": "compact_main",
         "source_target": "cs_5_0"
       },
       {
@@ -493,6 +503,11 @@
       {
         "source_file": "host_sbs_subtitle_locator_cs.hlsl",
         "source_entrypoint": "condition_main",
+        "source_target": "cs_5_0"
+      },
+      {
+        "source_file": "host_sbs_subtitle_contour_cs.hlsl",
+        "source_entrypoint": "shared_palette_main",
         "source_target": "cs_5_0"
       },
       {
@@ -546,7 +561,7 @@
         "source_target": "cs_5_0"
       }
     ],
-    "source_closure_sha256": "f3e2861b7a6976a42897e9c1523aabf7e2bb120815a5967ddb3472c89acf4614"
+    "source_closure_sha256": "9511d645d89430fe88284b708bfbd12f45a2679f270ae1d83afca4dfd969fcfa"
   },
   "calibrated_defaults": {
     "collapse_abs_epsilon": 1e-06,
@@ -675,11 +690,11 @@
         "profile": "apollo-dav2-centered-integer-contain-edge-pad-area-hdr-srgb-imagenet-v2",
         "source_closure_schema": 2,
         "source_file": "rgb_to_nchw_near_identical_cs.hlsl",
-        "source_entrypoint": "fused_main",
+        "source_entrypoint": "fused_domain_main",
         "source_target": "cs_5_0",
         "source_compile_flags": 34816,
         "source_macro_count": 0,
-        "source_closure_sha256": "23b786200fa4178ef23aa2ca962bad3fbb279100fa6c68a523e08650a72aa6bd",
+        "source_closure_sha256": "8e2de9ed76bd64a38a0c956e75dd7a13c8883d39d0ef0050ffe5aba9f7208672",
         "model_input_schema": 1,
         "dtype": "float32-le",
         "layout": "NCHW",

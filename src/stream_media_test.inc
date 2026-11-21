@@ -68,6 +68,8 @@ namespace testing {
         socket->open(udp::v4());
         socket->bind(udp::endpoint {loopback, 0});
       }
+      // Allow a complete large video frame to arrive before the test drains the socket.
+      video_receiver.set_option(asio::socket_base::receive_buffer_size(1024 * 1024));
       video_receiver.non_blocking(true);
       audio_receiver.non_blocking(true);
 
@@ -118,6 +120,7 @@ namespace testing {
         };
       }
       video_lane.hooks.video_fec_percentage = this->config.video_fec_percentage;
+      video_lane.hooks.video_fail_encryption_at_iv = this->config.video_fail_encryption_at_iv;
     }
 
     ~impl_t() {

@@ -10,6 +10,7 @@
   #include <atomic>
   #include <chrono>
   #include <condition_variable>
+  #include <functional>
   #include <future>
   #include <gtest/gtest.h>
   #include <limits>
@@ -126,6 +127,7 @@ namespace {
     unsigned release_waits = 0;
     manual_event_t topology_entered, topology_release;
     bool hold_topology = false;
+    std::function<platf::capture_e(const platf::display_t::pull_free_image_cb_t &)> capture_images;
     std::atomic<bool> timed_out {false}, unexpected_operation {false};
   };
 
@@ -150,6 +152,9 @@ namespace {
       generation.entered.set();
       if (!hold(generation.emit)) {
         return platf::capture_e::error;
+      }
+      if (state_->capture_images) {
+        return state_->capture_images(pull);
       }
       if (generation.emit_image) {
         std::shared_ptr<platf::img_t> image;
@@ -489,6 +494,46 @@ TEST(VideoCaptureReinitTest, StopJoinsWithoutWaitingForAHeldDisplayAndItsLateDel
   ASSERT_TRUE(fixture.state->generations[0].destroyed.wait());
   EXPECT_EQ(fixture.state->generations[0].destruction_thread, std::this_thread::get_id());
   EXPECT_NE(fixture.state->generations[0].destruction_thread, fixture.state->generations[0].capture_thread);
+}
+
+TEST(VideoCaptureReinitTest, ExhaustedImagePoolReusesAReleasedSlotAndCancelsOnStop) {
+  std::array<std::shared_ptr<platf::img_t>, 12> borrowed;
+  manual_event_t exhausted, exhausted_again;
+  bool reacquired = false, cancelled = false;
+  platf::img_t *recycled = nullptr;
+  fixture_t fixture {1};
+  fixture.state->capture_images = [&](const auto &pull) {
+    for (auto &image : borrowed) {
+      if (!pull(image)) {
+        return platf::capture_e::interrupted;
+      }
+    }
+    exhausted.set();
+    std::shared_ptr<platf::img_t> next;
+    reacquired = pull(next);
+    recycled = next.get();
+    exhausted_again.set();
+    if (reacquired) {
+      std::shared_ptr<platf::img_t> extra;
+      cancelled = !pull(extra);
+    }
+    return platf::capture_e::interrupted;
+  };
+  fixture.start();
+  ASSERT_TRUE(fixture.state->generations[0].entered.wait());
+  fixture.emit(0);
+  ASSERT_TRUE(exhausted.wait());
+  const auto *released = borrowed[5].get();
+  borrowed[5].reset();
+  ASSERT_TRUE(exhausted_again.wait());
+  EXPECT_TRUE(reacquired);
+  EXPECT_EQ(recycled, released);
+
+  scoped_operation_t stop([&] { fixture.worker->stop(); }, [&] { borrowed[6].reset(); });
+  ASSERT_TRUE(stop.returned());
+  stop.finish();
+  EXPECT_TRUE(cancelled);
+  EXPECT_FALSE(fixture.images->running());
 }
 
 TEST(VideoCaptureReinitTest, NoBorrowerPathDiscardsTheOldImageBeforeTheNextCapture) {

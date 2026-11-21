@@ -338,67 +338,6 @@ TEST(PrimaryDisplayRestoreRetryTest, FailedWorkerClaimDelaysRestorationWithoutLo
   EXPECT_EQ(retry.next_action(3, 17, 17, false, true, false), action::stop);
 }
 
-TEST(ConcatAndInsertTests, ConcatNoInsertionTest) {
-  char b1[] = {'a', 'b'};
-  char b2[] = {'c', 'd', 'e'};
-  std::vector<std::uint8_t> res;
-  const auto size = stream::concat_and_insert_into(res, 0, 2, std::string_view {b1, sizeof(b1)}, std::string_view {b2, sizeof(b2)});
-  auto expected = std::vector<uint8_t> {'a', 'b', 'c', 'd', 'e'};
-  ASSERT_EQ(size, expected.size());
-  ASSERT_EQ(res, expected);
-}
-
-TEST(ConcatAndInsertTests, ConcatLargeStrideTest) {
-  char b1[] = {'a', 'b'};
-  char b2[] = {'c', 'd', 'e'};
-  std::vector<std::uint8_t> res;
-  const auto size = stream::concat_and_insert_into(res, 1, sizeof(b1) + sizeof(b2) + 1, std::string_view {b1, sizeof(b1)}, std::string_view {b2, sizeof(b2)});
-  auto expected = std::vector<uint8_t> {0, 'a', 'b', 'c', 'd', 'e'};
-  ASSERT_EQ(size, expected.size());
-  ASSERT_EQ(res, expected);
-}
-
-TEST(ConcatAndInsertTests, ConcatSmallStrideTest) {
-  char b1[] = {'a', 'b'};
-  char b2[] = {'c', 'd', 'e'};
-  std::vector<std::uint8_t> res;
-  const auto size = stream::concat_and_insert_into(res, 1, 1, std::string_view {b1, sizeof(b1)}, std::string_view {b2, sizeof(b2)});
-  auto expected = std::vector<uint8_t> {0, 'a', 0, 'b', 0, 'c', 0, 'd', 0, 'e'};
-  ASSERT_EQ(size, expected.size());
-  ASSERT_EQ(res, expected);
-}
-
-TEST(ConcatAndInsertTests, ConcatAcrossBufferBoundaryAndUnevenFinalSlice) {
-  char b1[] = {'a', 'b', 'c'};
-  char b2[] = {'d', 'e', 'f', 'g'};
-  std::vector<std::uint8_t> res;
-  const auto size = stream::concat_and_insert_into(res, 1, 4, std::string_view {b1, sizeof(b1)}, std::string_view {b2, sizeof(b2)});
-  auto expected = std::vector<uint8_t> {0, 'a', 'b', 'c', 'd', 0, 'e', 'f', 'g'};
-  ASSERT_EQ(size, expected.size());
-  ASSERT_EQ(res, expected);
-}
-
-TEST(ConcatAndInsertTests, RejectsZeroStrideAndSizeOverflow) {
-  constexpr char data[] = {'a'};
-  std::vector<std::uint8_t> res;
-
-  EXPECT_FALSE(stream::concat_and_insert_into(res, 1, 0, std::string_view {data, sizeof(data)}, {}));
-  EXPECT_FALSE(
-    stream::concat_and_insert_into(
-      res,
-      std::numeric_limits<std::uint64_t>::max(),
-      1,
-      std::string_view {data, sizeof(data)},
-      {}
-    )
-  );
-}
-
-TEST(ConcatAndInsertTests, RejectsEmptyInput) {
-  std::vector<std::uint8_t> res;
-  EXPECT_FALSE(stream::concat_and_insert_into(res, 1, 1, {}, {}));
-}
-
 TEST(VideoTransportConfigTests, EnforcesPacketAndFecWireBounds) {
   EXPECT_FALSE(stream::is_valid_video_packet_size(stream::VIDEO_PACKET_SIZE_MIN - 1));
   EXPECT_TRUE(stream::is_valid_video_packet_size(stream::VIDEO_PACKET_SIZE_MIN));
@@ -418,26 +357,6 @@ TEST(VideoTransportConfigTests, EnforcesPacketAndFecWireBounds) {
 TEST(ControlFeedbackPolicyTests, OutgoingQueuesArePolledWithinTenMilliseconds) {
   EXPECT_GT(stream::CONTROL_OUTGOING_MAX_WAIT, 0ms);
   EXPECT_LE(stream::CONTROL_OUTGOING_MAX_WAIT, 10ms);
-}
-
-TEST(VideoTransportConfigTests, EnforcesTenBitFecPacketIndex) {
-  constexpr std::size_t block_size = 1408;
-  constexpr std::size_t largest_valid_payload = stream::FEC_PACKET_INDEX_MAX * block_size;
-
-  EXPECT_EQ(stream::fec_packet_count(largest_valid_payload, block_size), stream::FEC_PACKET_INDEX_MAX);
-  EXPECT_TRUE(stream::is_valid_fec_block_size(largest_valid_payload, block_size));
-  EXPECT_EQ(stream::fec_packet_count(largest_valid_payload + 1, block_size), stream::FEC_PACKET_INDEX_MAX + 1);
-  EXPECT_FALSE(stream::is_valid_fec_block_size(largest_valid_payload + 1, block_size));
-  EXPECT_FALSE(stream::is_valid_fec_block_size(1, 0));
-}
-
-TEST(VideoTransportConfigTests, EstimatesFecShardsIncludingMinimumParity) {
-  constexpr std::size_t block_size = 1000;
-
-  EXPECT_EQ(stream::video_fec_shard_count(10'000, block_size, 20, 0), 12);
-  EXPECT_EQ(stream::video_fec_shard_count(1, block_size, 1, 2), 3);
-  EXPECT_EQ(stream::video_fec_shard_count(1, block_size, 0, 2), 1);
-  EXPECT_EQ(stream::video_fec_shard_count(0, block_size, 20, 2), 0);
 }
 
 TEST(VideoPacingTests, UsesBitrateFecCadenceAndBoundedBatches) {
@@ -479,27 +398,6 @@ TEST(VideoPacingTests, NinetyFpsFrameSpanIsAtMostHalfAnInterval) {
   EXPECT_EQ(plan.frame_interval_ns, 11'111'111);
   EXPECT_EQ(plan.max_frame_span_ns, 5'555'555);
   EXPECT_LE(plan.max_frame_span_ns, 5'555'556);
-}
-
-TEST(VideoPacketizationWorkspaceTests, ReusesCapacityAndClearsOnlyInsertedPrefixes) {
-  std::vector<std::uint8_t> workspace(128, 0xA5);
-  const auto original_capacity = workspace.capacity();
-  const std::array<std::uint8_t, 3> first {1, 2, 3};
-  const std::array<std::uint8_t, 2> second {4, 5};
-
-  const auto size = stream::concat_and_insert_into(
-    workspace,
-    2,
-    3,
-    {reinterpret_cast<const char *>(first.data()), first.size()},
-    {reinterpret_cast<const char *>(second.data()), second.size()}
-  );
-
-  ASSERT_EQ(size, 9u);
-  EXPECT_EQ(workspace.capacity(), original_capacity);
-  const std::array<std::uint8_t, 9> expected {0, 0, 1, 2, 3, 0, 0, 4, 5};
-  EXPECT_TRUE(std::equal(expected.begin(), expected.end(), workspace.begin()));
-  EXPECT_EQ(workspace[9], 0xA5);
 }
 
 TEST(VideoPacingTests, LowBitrateThirtyFpsStreamRemainsNegotiatedRateAware) {

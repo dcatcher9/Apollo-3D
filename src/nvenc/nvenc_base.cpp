@@ -727,6 +727,41 @@ namespace nvenc {
     return true;
   }
 
+  bool nvenc_base::input_registration_is_mapped(NV_ENC_REGISTERED_PTR registration) const noexcept {
+    return registration && std::any_of(slots.begin(), slots.end(), [registration](const auto &slot) {
+      return slot.mapped_registration == registration;
+    });
+  }
+
+  bool nvenc_base::input_registration_in_flight(NV_ENC_REGISTERED_PTR registration) const noexcept {
+    return registration && std::any_of(slots.begin(), slots.end(), [registration](const auto &slot) {
+      if (slot.mapped_registration != registration) {
+        return false;
+      }
+      const auto phase = slot.phase.load(std::memory_order_acquire);
+      return phase == input_phase_t::submitted || phase == input_phase_t::completion_seen ||
+             phase == input_phase_t::locked;
+    });
+  }
+
+  bool nvenc_base::release_input_registration(NV_ENC_REGISTERED_PTR registration) {
+    if (!registration || input_registration_in_flight(registration)) {
+      return false;
+    }
+    for (auto &slot : slots) {
+      if (slot.mapped_registration == registration && !unmap_slot(slot)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+#ifdef SUNSHINE_TESTS
+  NV_ENC_REGISTERED_PTR nvenc_base::mapped_input_registration_for_test(unsigned slot) const noexcept {
+    return slot < slots.size() ? slots[slot].mapped_registration : nullptr;
+  }
+#endif
+
   bool nvenc_base::unmap_slot(picture_slot_t &slot) {
     if (slot.phase.load(std::memory_order_acquire) != input_phase_t::mapped) {
       return slot.phase.load(std::memory_order_acquire) == input_phase_t::unmapped;
@@ -737,6 +772,7 @@ namespace nvenc {
     const auto status = nvenc->nvEncUnmapInputResource(encoder, slot.mapped_input);
     if (status == NV_ENC_SUCCESS) {
       slot.mapped_input = nullptr;
+      slot.mapped_registration = nullptr;
       slot.phase.store(input_phase_t::unmapped, std::memory_order_release);
     }
     if (stage_diagnostics) {
@@ -892,6 +928,7 @@ namespace nvenc {
       // The derived class owns the events themselves until release_async_event().
       slot.completion_event = nullptr;
       slot.mapped_input = nullptr;
+      slot.mapped_registration = nullptr;
       slot.phase.store(input_phase_t::unmapped, std::memory_order_relaxed);
       slot.frame_index = 0;
       slot.after_ref_frame_invalidation = false;
@@ -997,17 +1034,16 @@ namespace nvenc {
   nvenc_encoded_frame nvenc_base::encode_frame(
     uint64_t frame_index,
     bool force_idr,
-    std::vector<std::uint8_t> frame_buffer,
-    std::uint64_t input_revision
+    std::vector<std::uint8_t> frame_buffer
   ) {
-    if (!submit_frame(frame_index, force_idr, input_revision)) {
+    if (!submit_frame(frame_index, force_idr)) {
       return {};
     }
     return retrieve_frame(std::move(frame_buffer));
   }
 
-  bool nvenc_base::submit_frame(uint64_t frame_index, bool force_idr, std::uint64_t input_revision) {
-    if (!encoder || cleanup_blocked.load(std::memory_order_acquire)) {
+  bool nvenc_base::submit_frame(uint64_t frame_index, bool force_idr) {
+    if (!encoder || cleanup_blocked.load(std::memory_order_acquire) || input_waits_for_retirement()) {
       return false;
     }
 
@@ -1023,17 +1059,16 @@ namespace nvenc {
       return false;
     }
 
-    assert(registered_input_buffers[slot_index]);
     assert(slot.output_bitstream);
 
-    // With pictures in flight, each has its own input: refresh it unless its conversion proof
-    // already matches, so the next conversion cannot overwrite a picture NVENC is still reading.
-    if (pipeline_depth_ > 1) {
-      prepare_input(slot_index, input_revision);
+    const auto registered_input = prepare_input(slot_index);
+    if (!registered_input) {
+      BOOST_LOG(error) << "NvEnc: no registered input prepared for picture " << slot_index;
+      return false;
     }
 
     NV_ENC_MAP_INPUT_RESOURCE mapped_input_buffer = {NV_ENC_MAP_INPUT_RESOURCE_VER};
-    mapped_input_buffer.registeredResource = registered_input_buffers[slot_index];
+    mapped_input_buffer.registeredResource = registered_input;
 
     if (stage_diagnostics) {
       stage_diagnostics->input_map.first_point_now();
@@ -1041,6 +1076,7 @@ namespace nvenc {
     const auto map_status = nvenc->nvEncMapInputResource(encoder, &mapped_input_buffer);
     if (map_status == NV_ENC_SUCCESS) {
       slot.mapped_input = mapped_input_buffer.mappedResource;
+      slot.mapped_registration = registered_input;
       slot.phase.store(input_phase_t::mapped, std::memory_order_release);
     }
     if (stage_diagnostics) {
@@ -1291,22 +1327,22 @@ namespace nvenc {
     return plan_ref_frame_invalidation(first_frame, last_frame) == rfi_plan_e::invalidate;
   }
 
-  bool nvenc_base::invalidate_ref_frames(uint64_t first_frame, uint64_t last_frame) {
+  nvenc_base::ref_frame_invalidation_e nvenc_base::invalidate_ref_frames(uint64_t first_frame, uint64_t last_frame) {
     const auto plan = plan_ref_frame_invalidation(first_frame, last_frame);
     if (plan == rfi_plan_e::refused) {
-      return false;
+      return ref_frame_invalidation_e::needs_idr;
     }
 
     if (plan == rfi_plan_e::done) {
       BOOST_LOG(debug) << "NvEnc: rfi request " << first_frame << "-" << last_frame << " already done";
-      return true;
+      return ref_frame_invalidation_e::unchanged;
     }
 
     encoder_state.rfi_needs_confirmation = true;
 
     if (plan == rfi_plan_e::malformed) {
       BOOST_LOG(error) << "NvEnc: invaid rfi request " << first_frame << "-" << last_frame << ", generating IDR";
-      return false;
+      return ref_frame_invalidation_e::needs_idr;
     }
 
     BOOST_LOG(debug) << "NvEnc: rfi request " << first_frame << "-" << last_frame << " expanding to last encoded frame " << encoder_state.last_encoded_frame_index;
@@ -1316,24 +1352,24 @@ namespace nvenc {
 
     if (plan == rfi_plan_e::too_large) {
       BOOST_LOG(debug) << "NvEnc: rfi request too large, generating IDR";
-      return false;
+      return ref_frame_invalidation_e::needs_idr;
     }
 
     // Only the invalidation itself needs no picture in flight (the caller retrieves them first:
     // would_invalidate_ref_frames()). Should one still be in flight, fall back to an IDR.
     if (frames_in_flight() != 0) {
       BOOST_LOG(debug) << "NvEnc: rfi request with a picture in flight, generating IDR";
-      return false;
+      return ref_frame_invalidation_e::needs_idr;
     }
 
     for (auto i = first_frame; i <= last_frame; i++) {
       if (nvenc_failed(nvenc->nvEncInvalidateRefFrames(encoder, i))) {
         BOOST_LOG(error) << "NvEnc: NvEncInvalidateRefFrames() " << i << " failed: " << last_nvenc_error_string;
-        return false;
+        return ref_frame_invalidation_e::needs_idr;
       }
     }
 
-    return true;
+    return ref_frame_invalidation_e::applied;
   }
 
   bool nvenc_base::nvenc_failed(NVENCSTATUS status) {

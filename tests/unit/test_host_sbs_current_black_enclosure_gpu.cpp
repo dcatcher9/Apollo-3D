@@ -149,8 +149,7 @@ namespace {
       };
       const std::array espec {
         cache::shader_spec {"host_sbs_current_black_enclosure_cs.hlsl", "begin_main", "cs_5_0"},
-        cache::shader_spec {"host_sbs_current_black_enclosure_cs.hlsl", "clear_main", "cs_5_0"},
-        cache::shader_spec {"host_sbs_current_black_enclosure_cs.hlsl", "validate_encoding_main", "cs_5_0"},
+        cache::shader_spec {"host_sbs_current_black_enclosure_cs.hlsl", "initialize_main", "cs_5_0"},
         cache::shader_spec {"host_sbs_current_black_enclosure_cs.hlsl", "unit_meta_main", "cs_5_0"},
         cache::shader_spec {"host_sbs_current_black_enclosure_cs.hlsl", "collect_main", "cs_5_0"},
         cache::shader_spec {"host_sbs_current_black_enclosure_cs.hlsl", "clear_scratch_main", "cs_5_0"},
@@ -172,10 +171,10 @@ namespace {
       for (std::size_t i = 0; i < espec.size(); ++i) {
         const auto code = cache::get(snapshot, espec[i]);
         require(code && !code->empty());
-        if (i < 12u) {
+        if (i < enclosure::shader_count) {
           require(SUCCEEDED(device_->CreateComputeShader(code->data(), code->size(), nullptr, &enclosure_[i])));
         } else {
-          require(SUCCEEDED(device_->CreateComputeShader(code->data(), code->size(), nullptr, &roi_[i - 12u])));
+          require(SUCCEEDED(device_->CreateComputeShader(code->data(), code->size(), nullptr, &roi_[i - enclosure::shader_count])));
         }
       }
       inner_closure_ = ip;
@@ -187,7 +186,7 @@ namespace {
       if (const auto *hp = std::getenv("SUNSHINE_TEST_BLACK_ENCLOSURE_HEADER_PIN")) {
         require(std::string(hp) == compiled_enclosure_helper_pin);
       }
-      for (std::size_t i = 0; i < 12u; ++i) {
+      for (std::size_t i = 0; i < enclosure::shader_count; ++i) {
         program_.shaders[i] = enclosure_[i].Get();
       }
       for (std::size_t i = 0; i < 3u; ++i) {
@@ -709,7 +708,7 @@ namespace {
       context_->CSSetConstantBuffers(0u, 3u, cb);
       context_->CSSetShaderResources(0u, 16u, s.data());
       context_->CSSetUnorderedAccessViews(0u, 8u, u.data(), nullptr);
-      context_->CSSetShader(enclosure_[8].Get(), nullptr, 0u);
+      context_->CSSetShader(enclosure_[enclosure::resolve_exterior_stage].Get(), nullptr, 0u);
       context_->Dispatch((W_ + 15u) / 16u, (H_ + 15u) / 16u, 1u);
       u.fill(nullptr);
       s[4] = nullptr;
@@ -721,7 +720,7 @@ namespace {
       u[4] = bo.Get();
       u[5] = ma.Get();
       context_->CSSetUnorderedAccessViews(0u, 8u, u.data(), nullptr);
-      context_->CSSetShader(enclosure_[11].Get(), nullptr, 0u);
+      context_->CSSetShader(enclosure_[enclosure::publish_stage].Get(), nullptr, 0u);
       context_->Dispatch((W_ + 15u) / 16u, (H_ + 15u) / 16u, 1u);
       u.fill(nullptr);
       s.fill(nullptr);
@@ -736,7 +735,7 @@ namespace {
     enclosure::program_t program_;
     std::array<ComPtr<ID3D11ComputeShader>, 5u> colour_;
     std::array<ComPtr<ID3D11ComputeShader>, 6u> graph_;
-    std::array<ComPtr<ID3D11ComputeShader>, 12u> enclosure_;
+    std::array<ComPtr<ID3D11ComputeShader>, enclosure::shader_count> enclosure_;
     std::array<ComPtr<ID3D11ComputeShader>, 3u> roi_;
     texture_t rgb_, support_, origin_;
     buffer_t probability_, ocr_, sct_, uip_, cb_, root_;
@@ -888,6 +887,7 @@ namespace {
     author(false, 2u);
     root_words_[60] = 0u;
     upload();
+    context_->UpdateSubresource(helper_.mutable_views().unit_arguments.Get(), 0u, nullptr, poison.data(), 0u, 0u);
     ASSERT_TRUE(run());
     EXPECT_EQ(body(), b);
     EXPECT_EQ(matte(), m);

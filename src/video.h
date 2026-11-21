@@ -414,10 +414,9 @@ namespace video {
    *
    * The control stream raises IDR, reference-invalidation, stream-gamma, video-mode and shutdown
    * requests on the session's mail, and capture raises a display reinitialization, without
-   * signalling the image wait. An independent provider's encode loop does not poll at stream
-   * cadence (a live Game 3D export wakes it only for new frames), so it would see them only at its
-   * next frame or minimum-FPS keepalive. That loop installs its image wait's wake here while it
-   * runs; other loops keep their bounded waits, and with nothing installed a wake does nothing.
+   * signalling the image wait. The active remote encode loop installs its image wait's wake here
+   * so requests can be serviced during a static desktop or provider frame. The owner clears the
+   * wake on exit.
    */
   class encode_wake_t {
   public:

@@ -27,24 +27,12 @@ void oracle_content_main(uint3 dispatch_thread : SV_DispatchThreadID) {
         OutputBuffer[base_index] = 0.0f;
         OutputBuffer[base_index + invalid_stride] = 0.0f;
         OutputBuffer[base_index + 2u * invalid_stride] = 0.0f;
-        OutputAppearanceOrdinal[base_index] = 0.0f;
         OutputTensorExclusion[output_position] = 1u;
         return;
     }
     uint2 source_size = DepthSourceRegionSize();
-    float3 pixel = SampleLetterboxedModelFootprint(output_position, source_size);
+    float3 pixel = SampleModelFootprint(output_position, source_size, false, false, int2(0, 0), uint2(0u, 0u));
     OutputTensorExclusion[output_position] = 0u;
-
-    float2 appearance_model_uv =
-        (float2(output_position) + 0.5f) / float2(target_w, target_h);
-    float2 appearance_uv = LetterboxSourceUv(appearance_model_uv);
-    uint2 source_point = min(
-        uint2(appearance_uv * float2(source_size)),
-        source_size - 1u);
-    float3 capture_rgb = InputTexture.Load(int3(
-        DepthSourceRegionLoadPosition(int2(source_point), source_size), 0)).rgb;
-    OutputAppearanceOrdinal[base_index] =
-        DepthAppearanceOrdinal(capture_rgb, color_mode);
 
     float r = (pixel.r - 0.485f) / 0.229f;
     float g = (pixel.g - 0.456f) / 0.224f;
@@ -71,6 +59,5 @@ void oracle_pad_main(uint3 dispatch_thread : SV_DispatchThreadID) {
         OutputBuffer[source_index + channel_stride];
     OutputBuffer[destination_index + 2u * channel_stride] =
         OutputBuffer[source_index + 2u * channel_stride];
-    OutputAppearanceOrdinal[destination_index] = OutputAppearanceOrdinal[source_index];
     OutputTensorExclusion[dispatch_thread.xy] = 1u;
 }

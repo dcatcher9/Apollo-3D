@@ -35,6 +35,9 @@ namespace platf::primary_display {
    */
   bool prepare_local_monitor(std::wstring_view sink_device_path);
 
+  /** Verify the active source and sink against their committed monitor replacement. */
+  bool verify_local_monitor_replacement(std::wstring_view source_device_path, std::wstring_view sink_device_path);
+
   /** Serialize local source/sink mode changes with display-notification reconciliation.
    * The callback must not call this namespace. Promotion/verification runs after the callback.
    */
@@ -277,6 +280,7 @@ namespace platf::primary_display {
       explicit manager_t(io_t io, restore_observation_cache_t *restore_observations = nullptr);
       bool prepare(bool exclusive = false, std::wstring_view local_sink = {}, bool monitor_replacement = false);
       bool is_local_exclusive(std::wstring_view source_device_path);
+      bool verify_local_monitor_replacement(std::wstring_view source_device_path, std::wstring_view sink_device_path);
       bool bind_pending(std::wstring_view device_path);
       bool promote(std::wstring_view device_path, bool exclusive = false);
       bool restore(std::wstring_view expected_device_path = {});

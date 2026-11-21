@@ -189,6 +189,20 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             # Application text searches a whole dialogue line: covers bridge the gaps between
             # detected pieces, and across a bridged gap only the text fill colour is evidence.
             134: "f175f90f992f9656efc5dac470d08bd4d405720fe976cff733b304e1deedcf69",
+            # The model-input history retains only its consumed NCHW planes. The subtitle
+            # contour producer learns each palette once per current observation. Direct and
+            # source-color-tiled preprocessing are authenticated equivalent producer programs.
+            # The contour passes share one authenticated current observation and its cover geometry.
+            # Dense glyph growth only runs in tiles with native support in their dependency halo.
+            # CPU-completed suppressed observations skip the comparison tensor copy.
+            # Live frame publication resolves the quantiles, normalization and camera in one entry.
+            # The depth producer and replay share a compact analysis domain instead of a mask.
+            # Full-grid and letterboxed preprocessing share one area-resize loop.
+            # Shared source reads require the complete clipped pixel footprint.
+            # Compact live limiters preserve exact Base on horizontally padded observations.
+            # The compact Map writes only the admitted candidate columns on the same live route.
+            # The horizontal limiter writes each texel once using exact Q30 checkpoints.
+            135: "408afb0d2615f36d82a920b09015f557ba1c56ec5a44cd39ec96e4653ca94a96",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -196,14 +210,14 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             generator.contract_digest(contract),
             "v2 contract or shader identity changed without a reviewed identity pin",
         )
-        self.assertEqual(generator.contract_tag(contract), 0xAE886945)
+        self.assertEqual(generator.contract_tag(contract), 0xC932B35D)
         self.assertEqual(
             generator.contract_tag_semantic_digest(contract),
-            "ae886945c41afa13d0e74d76ac99201ffeee804e10dced23c1c294a443d0ebd9",
+            "c932b35dde631550e24e078a4af292252a2960c4f0a76663d3ec7495c7bda2bc",
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "f3e2861b7a6976a42897e9c1523aabf7e2bb120815a5967ddb3472c89acf4614",
+            "9511d645d89430fe88284b708bfbd12f45a2679f270ae1d83afca4dfd969fcfa",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(
@@ -332,13 +346,13 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertEqual(
             calibration.preprocess.source_file,
             "rgb_to_nchw_near_identical_cs.hlsl")
-        self.assertEqual(calibration.preprocess.source_entrypoint, "fused_main")
+        self.assertEqual(calibration.preprocess.source_entrypoint, "fused_domain_main")
         self.assertEqual(calibration.preprocess.source_target, "cs_5_0")
         self.assertEqual(calibration.preprocess.source_compile_flags, 0x00008800)
         self.assertEqual(calibration.preprocess.source_macro_count, 0)
         self.assertEqual(
             calibration.preprocess.source_closure_sha256,
-            "23b786200fa4178ef23aa2ca962bad3fbb279100fa6c68a523e08650a72aa6bd")
+            "8e2de9ed76bd64a38a0c956e75dd7a13c8883d39d0ef0050ffe5aba9f7208672")
         self.assertEqual(
             calibration.preprocess.source_closure_sha256,
             generator.shader_source_closure_sha256())
@@ -488,7 +502,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         cpp = generator.render_cpp(contract)
         hlsl = generator.render_hlsl(contract)
         for token in (
-                'contract_schema = 134u',
+                'contract_schema = 135u',
                 'final_parallax_contract_schema = 4u',
                 'final_parallax_authority = '
                 '"authenticated-subtitle-conditioned-r32f-diagnostic-only"',
@@ -588,7 +602,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                 'constexpr bool subtitle_ocr_field_is_calibrated('):
             self.assertIn(token, cpp)
         for token in (
-                '#define V2_CONTRACT_SCHEMA 134u',
+                '#define V2_CONTRACT_SCHEMA 135u',
                 '#define V2_SUBTITLE_PLANE_ADAPTIVE_KNOWN_FLAGS 28u',
                 '#define V2_SUBTITLE_PLANE_ADAPTIVE_RETIRED_APPROACH_FLAG 1u',
                 '#define V2_SUBTITLE_CONTOUR_RECIPE 27u',
@@ -1318,7 +1332,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
 
     def test_gpu_counter_updates_preserve_the_reserved_sentinel(self):
         source = (REPO / "src_assets" / "windows" / "assets" / "shaders" / "directx" /
-                  "depth_coordinate_v2_state_resolve_cs.hlsl").read_text(encoding="utf-8")
+                  "include" / "depth_coordinate_v2_state_resolve_common.hlsl").read_text(encoding="utf-8")
         self.assertIn("return min(value, 0xfffffffdu) + 1u;", source)
         # Legacy camera acquisition and completed Game-gain seeding both use the same
         # saturating increment, so neither can manufacture the reserved revision sentinel.
@@ -1484,6 +1498,57 @@ class GeneratedContractWriteTests(unittest.TestCase):
                 self.assertEqual(generator.main(["--check", "--manifest", str(manifest)]), 1)
             self.assertEqual(cpp.read_bytes(), b"stale\r\n")
             self.assertEqual(cpp.stat().st_mtime_ns, before[cpp])
+
+    def test_preprocess_source_edit_refreshes_contract_identity_in_one_pass(self):
+        shader_generator = generator.shader_manifest_generator
+        original = generator.load_contract()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            def staged(path):
+                return root / path.relative_to(REPO)
+
+            runtime_headers = (
+                generator.CURRENT_OUTLINE_RUNTIME_HEADER,
+                generator.CURRENT_BACKGROUND_RUNTIME_HEADER,
+                generator.CURRENT_SHARED_UI_WARP_RUNTIME_HEADER,
+            )
+            for path in (
+                    Path(generator.__file__), Path(shader_generator.__file__),
+                    generator.MANIFEST, shader_generator.MANIFEST,
+                    shader_generator.DOC_TARGET, *runtime_headers):
+                target = staged(path)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(path, target)
+            shader_root = staged(generator.PREPROCESS_SHADER_ROOT)
+            shutil.copytree(generator.PREPROCESS_SHADER_ROOT, shader_root)
+            preprocess = shader_root / "rgb_to_nchw_cs.hlsl"
+            preprocess.write_bytes(preprocess.read_bytes() + b"\n// Preprocess edit for refresh test\n")
+
+            def run(script, flag):
+                result = subprocess.run(
+                    [sys.executable, "-B", str(staged(Path(script.__file__))), flag],
+                    cwd=root, text=True, capture_output=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            run(generator, "--refresh-shader-identity")
+            run(generator, "--check")
+            run(shader_generator, "--check")
+            refreshed = json.loads(staged(generator.MANIFEST).read_text(encoding="utf-8"))
+            self.assertNotEqual(generator.contract_tag(refreshed), generator.contract_tag(original))
+            outputs = tuple(map(staged, (
+                generator.MANIFEST, shader_generator.MANIFEST, generator.CPP_TARGET,
+                shader_generator.CPP_TARGET, shader_generator.PYTHON_TARGET, shader_generator.DOC_TARGET,
+                *runtime_headers, *generator.HLSL_TARGETS, *generator.HLSL_OCR_ASSERT_TARGETS,
+            )))
+            timestamp = 1600000000000000000
+            for path in outputs:
+                os.utime(path, ns=(timestamp, timestamp))
+            before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in outputs}
+            run(generator, "--refresh-shader-identity")
+            self.assertEqual(
+                {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in outputs}, before)
 
 
 if __name__ == "__main__":

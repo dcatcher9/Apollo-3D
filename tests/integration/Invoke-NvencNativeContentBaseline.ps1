@@ -146,7 +146,34 @@ function Get-CopySum($Counts) {
     Assert-That (@($Counts).Count -eq 2) 'Expected two per-slot copy observations'
     return [long]$Counts[0] + [long]$Counts[1]
 }
-function Assert-Ledger($Owner, [int] $Depth) {
+function Assert-RingLedger($Owner, [int] $Depth, $Accepted, $Refused) {
+    $surfaceCount = if ($Depth -eq 2) { 3 } else { 1 }
+    Assert-That ($Owner.input_storage -ceq 'registered-surface-ring-v1' -and $Owner.input_surface_count -eq $surfaceCount -and $Owner.copy_path_removed -eq $true) 'Unexpected native input storage'
+    $writes = @($Owner.timeline | Where-Object event -eq 'write')
+    Assert-That ($writes.Count -eq 7 -and $Owner.conversion_writes -eq $writes.Count) 'Incomplete native input write ledger'
+    for ($index = 0; $index -lt $writes.Count; ++$index) {
+        $write = $writes[$index]
+        Assert-That ($write.authored_revision -eq $index + 1) 'Input producer writes are out of order'
+        Assert-That ($write.input_surface -ge 0 -and $write.input_surface -lt $surfaceCount -and $write.input_surface -notin $write.mapped_surfaces_before) 'Producer selected a mapped or unknown input'
+        Assert-That ((ConvertTo-Json -InputObject $write.mapped_surfaces_before -Compress) -ceq (ConvertTo-Json -InputObject $write.mapped_surfaces_after -Compress)) 'Producer write changed NVENC mappings'
+    }
+    for ($index = 0; $index -lt $Accepted.Count; ++$index) {
+        $attempt = $Accepted[$index]
+        $slot = $index % $Depth
+        Assert-That ($attempt.picture_slot -eq $slot -and $attempt.mapped_surfaces_after[$slot] -eq $attempt.input_surface -and !$attempt.input_waits_before) 'Native picture did not map the committed input'
+    }
+    $expectedFrames = @(if ($Depth -eq 2) { 4,5,5,6,7,10,10,11 })
+    $expectedOwnership = @(2,2,1,1,1,2,1,1)
+    Assert-That ($Refused.Count -eq $expectedFrames.Count -and $Owner.busy_refusals -eq $expectedFrames.Count) 'Unexpected native busy refusals'
+    Assert-That ($Owner.repeat_refusals -eq [math]::Max(0, $expectedFrames.Count - 1)) 'Unexpected repeat-retirement refusals'
+    for ($index = 0; $index -lt $Refused.Count; ++$index) {
+        $attempt = $Refused[$index]
+        Assert-That ($attempt.frame_index -eq $Owner.frame_index_origin + $expectedFrames[$index] -and $attempt.input_waits_before -eq ($index -ne 0)) 'Native refusal did not follow capacity or exact input ownership'
+        Assert-That ($attempt.before_in_flight -eq $expectedOwnership[$index] -and $attempt.after_in_flight -eq $attempt.before_in_flight) 'Native refusal changed picture ownership'
+        Assert-That ((ConvertTo-Json -InputObject $attempt.mapped_surfaces_before -Compress) -ceq (ConvertTo-Json -InputObject $attempt.mapped_surfaces_after -Compress)) 'Native refusal changed input mappings'
+    }
+}
+function Assert-Ledger($Owner, [int] $Depth, [int] $NativeSchema) {
     $origin = [long]$Owner.frame_index_origin
     Assert-That (@($Owner.returned_indices).Count -eq 12 -and @($Owner.returned_idr).Count -eq 12) 'Incomplete native output ledger'
     for ($index = 0; $index -lt 12; ++$index) {
@@ -163,6 +190,7 @@ function Assert-Ledger($Owner, [int] $Depth) {
         $attempt = $accepted[$index]
         Assert-That ([long]$attempt.frame_index -eq $origin + $index) 'Accepted native indices changed order'
         Assert-That ($attempt.after_in_flight -eq $attempt.before_in_flight + 1) 'Accepted submission did not own exactly one slot'
+        if ($NativeSchema -eq 2) { continue }
         $copyDelta = (Get-CopySum $attempt.copies_after) - (Get-CopySum $attempt.copies_before)
         $expectedDelta = if ($Depth -eq 1) { 0 } elseif ($ExpectedDepthTwoCopies -eq 12 -or $index -in @(0,1,2,3,4,5,8,9)) { 1 } else { 0 }
         Assert-That ($copyDelta -eq $expectedDelta) "Unexpected native copy delta at accepted frame $index"
@@ -172,6 +200,10 @@ function Assert-Ledger($Owner, [int] $Depth) {
         } else {
             Assert-That ($attempt.input_revision -eq [math]::Floor($index / 4) + 1) 'Authored input revision does not follow actual writes'
         }
+    }
+    if ($NativeSchema -eq 2) {
+        Assert-RingLedger $Owner $Depth $accepted $refused
+        return
     }
     $requiredRefusals = if ($Depth -eq 2) { 1 } else { 0 }
     Assert-That ($refused.Count -eq $requiredRefusals -and $Owner.busy_refusals -eq $requiredRefusals) 'Incorrect busy-refusal ledger'
@@ -290,7 +322,7 @@ foreach ($caseSpec in $caseSpecs) {
     $nativeHash = Get-Hash $manifestPath
     $pixelFormat = if ($caseSpec.ten) { 'yuv420p10le' } else { 'yuv420p' }
     $inputFormat = if ($caseSpec.ten) { 'P010' } else { 'NV12' }
-    Assert-That ($native.schema -eq 1 -and $native.case -eq $caseSpec.name -and $native.codec -eq $caseSpec.codec -and $native.pixel_format -eq $pixelFormat -and $native.input_format -eq $inputFormat) 'Unexpected native artifact schema/profile'
+    Assert-That ($native.schema -in @(1,2) -and $native.case -eq $caseSpec.name -and $native.codec -eq $caseSpec.codec -and $native.pixel_format -eq $pixelFormat -and $native.input_format -eq $inputFormat) 'Unexpected native artifact schema/profile'
     Assert-That ($native.width -eq 480 -and $native.height -eq 256 -and $native.frames_per_owner -eq 12 -and $native.requested_depth -eq $caseSpec.depth -and $native.all_destroyed -eq $true) 'Native geometry/depth/destruction contract is incomplete'
     Assert-That ($native.adapter.vendor_id -eq 0x10de -and @($native.owners).Count -eq 2) 'Native run did not use NVIDIA and two fresh owners'
     $owners = [Collections.Generic.List[object]]::new()
@@ -298,7 +330,7 @@ foreach ($caseSpec in $caseSpecs) {
         $owner = $native.owners[$ownerIndex]
         $name = if ($ownerIndex -eq 0) { 'first' } else { 'rebuilt' }
         Assert-That ($owner.name -eq $name -and $owner.frame_index_origin -eq (1000 + 1000 * $ownerIndex)) 'Incorrect fresh-owner identity'
-        Assert-Ledger $owner $caseSpec.depth
+        Assert-Ledger $owner $caseSpec.depth $native.schema
         $extension = if ($caseSpec.codec -eq 'hevc') { '.hevc' } else { '.obu' }
         Assert-That ($owner.stream_file -ceq "$name$extension" -and $owner.expected_file -ceq "$name.expected.yuv") 'Unexpected native artifact filename'
         $encoded = Get-ScopedPath $nativeRoot $owner.stream_file
@@ -318,10 +350,12 @@ foreach ($caseSpec in $caseSpecs) {
         Assert-Hash $FFmpeg $ExpectedFFmpegSha256
         $null = Invoke-OwnedChild $FFmpeg @('-hide_banner','-loglevel','error','-nostdin','-hwaccel','none','-threads','1','-i',$encoded,'-map','0:v:0','-an','-sn','-dn','-c:v','rawvideo','-threads','1','-pix_fmt',$pixelFormat,'-fps_mode','passthrough','-f','rawvideo',$decoded) (Join-Path $ownerRoot 'decode') $ToolTimeoutSeconds
         $content = Test-DecodedContent $decoded $expected $caseSpec.ten
-        $owners.Add([ordered]@{name=$name;content=$content;copy_counts=@($owner.copy_counts);decoded_file=[IO.Path]::GetRelativePath($OutputRoot,$decoded);expected_file=[IO.Path]::GetRelativePath($OutputRoot,$expected);encoded_file=[IO.Path]::GetRelativePath($OutputRoot,$encoded);encoded_sha256=(Get-Hash $encoded);native_facts=$owner})
+        $ownerFacts = [ordered]@{name=$name;content=$content;decoded_file=[IO.Path]::GetRelativePath($OutputRoot,$decoded);expected_file=[IO.Path]::GetRelativePath($OutputRoot,$expected);encoded_file=[IO.Path]::GetRelativePath($OutputRoot,$encoded);encoded_sha256=(Get-Hash $encoded);native_facts=$owner}
+        if ($native.schema -eq 1) { $ownerFacts.copy_counts = @($owner.copy_counts) }
+        $owners.Add($ownerFacts)
     }
     Assert-Hash $manifestPath $nativeHash
-    $cases.Add([ordered]@{name=$caseSpec.name;codec=$caseSpec.codec;pixel_format=$pixelFormat;requested_depth=$caseSpec.depth;coverage_directory=$coverage;adapter=$native.adapter;settings=$native.settings;nvenc_api=$native.nvenc_api;native_manifest=[IO.Path]::GetRelativePath($OutputRoot,$manifestPath);native_manifest_sha256=$nativeHash;owners=$owners.ToArray()})
+    $cases.Add([ordered]@{name=$caseSpec.name;codec=$caseSpec.codec;pixel_format=$pixelFormat;requested_depth=$caseSpec.depth;coverage_directory=$coverage;adapter=$native.adapter;settings=$native.settings;nvenc_api=$native.nvenc_api;native_schema=$native.schema;native_manifest=[IO.Path]::GetRelativePath($OutputRoot,$manifestPath);native_manifest_sha256=$nativeHash;owners=$owners.ToArray()})
 }
 Assert-Pins $SourcePins
 Assert-Hash $TestBinary $ExpectedTestBinarySha256
@@ -349,9 +383,12 @@ foreach ($caseResult in $cases) {
     }
 }
 $result = [ordered]@{
-    schema=1;qualified=$true;output_root=$OutputRoot;coverage_root=$coverageRoot;native_binary_sha256=$ExpectedTestBinarySha256.ToUpperInvariant();ffmpeg_sha256=$ExpectedFFmpegSha256.ToUpperInvariant();ffprobe_sha256=$ExpectedFFprobeSha256.ToUpperInvariant();expected_depth_two_copies=$ExpectedDepthTwoCopies
+    schema=1;qualified=$true;output_root=$OutputRoot;coverage_root=$coverageRoot;native_binary_sha256=$ExpectedTestBinarySha256.ToUpperInvariant();ffmpeg_sha256=$ExpectedFFmpegSha256.ToUpperInvariant();ffprobe_sha256=$ExpectedFFprobeSha256.ToUpperInvariant()
     source_pins_sha256=(Get-Hash (Join-Path $OutputRoot 'source-pins.json'));qualifier_sha256=(Get-Hash (Join-Path $OutputRoot 'qualifier-source.ps1'));cases=$cases.ToArray();artifacts=$artifacts.ToArray()
     boundary='Functional authored native NVENC content only. Logical pictures in flight do not establish GPU overlap; no performance or cancellation claim.'
+}
+if ($cases | Where-Object native_schema -eq 1) {
+    $result.expected_depth_two_copies = $ExpectedDepthTwoCopies
 }
 if ($ControlManifest) {
     $ControlManifest = (Resolve-Path -LiteralPath $ControlManifest).Path

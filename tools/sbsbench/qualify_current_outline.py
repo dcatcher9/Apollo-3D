@@ -3,7 +3,7 @@
 
 This is a renderer qualification, not an extension of ordinary metric or live-capture authority.
 The native harness writes ordinary Base metric images and selected shared draws separately.
-Historical schemas retain their original ordinary-renderer label and never qualify current policy.
+Historical schemas retain their original renderer labels and source identities.
 """
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ import depth_coordinate_v2_contract as coordinate
 import depth_coordinate_v2_dump_contract as dump_contract
 import generate_depth_coordinate_v2_contract as generator
 import current_outline_mask_metrics as mask_metrics
+from shared_ui_pin_dump import LEGACY_COMBINED_CLOSURE
 from source_observation_timeline import (
     TimelineError, prepared_observation_timestamps, read_observation_timeline, write_observation_timeline,
 )
@@ -120,8 +121,9 @@ def expected_closures(schema=1):
     # The C++ role/spec lists remain the owner. Check their source pins through the normal
     # generator rather than trusting a digest supplied by a qualification document.
     _require(generator._write_current_outline_runtime_pins(True), "current-outline source pins are stale")
-    if schema >= 5:
-        _require(generator._write_shared_ui_warp_runtime_pin(True), "shared warp source pin is stale")
+    if schema >= 9:
+        _require(generator._write_shared_ui_warp_runtime_pin(True, names=("completed_closure",)),
+                 "completed shared warp source pin is stale")
     elif schema < 4:
         _require(generator._write_current_background_runtime_pin(True), "background source pin is stale")
     source = generator.CURRENT_OUTLINE_RUNTIME_HEADER.read_text(encoding="utf-8")
@@ -135,12 +137,17 @@ def expected_closures(schema=1):
     if schema == 4:
         result["shared_warp_source_closure_sha256"] = RETIRED_SHARED_SOURCE_CLOSURE
         return result
-    header = (generator.CURRENT_SHARED_UI_WARP_RUNTIME_HEADER if schema >= 5
-              else generator.CURRENT_BACKGROUND_RUNTIME_HEADER)
+    if 5 <= schema < 9:
+        result["shared_warp_source_closure_sha256"] = LEGACY_COMBINED_CLOSURE
+        return result
+    header, name, field = (
+        (generator.CURRENT_SHARED_UI_WARP_RUNTIME_HEADER, "completed_closure", "shared_warp_source_closure_sha256")
+        if schema >= 9 else (generator.CURRENT_BACKGROUND_RUNTIME_HEADER, "closure", "background_source_closure_sha256")
+    )
     source = header.read_text(encoding="utf-8")
-    match = re.search(r'inline constexpr std::string_view closure\s*=\s*"([0-9a-f]{64})";', source)
+    match = re.search(rf'inline constexpr std::string_view {name}\s*=\s*"([0-9a-f]{{64}})";', source)
     _require(match is not None, "native renderer closure is absent")
-    result["shared_warp_source_closure_sha256" if schema >= 4 else "background_source_closure_sha256"] = match[1]
+    result[field] = match[1]
     return result
 
 
@@ -406,7 +413,7 @@ def validate_qualification(directory, frames_directory, executable, timeline=Non
     if type(schema) is int and schema >= 8:
         root_fields.add("trusted_inner_program_ready")
     _closed(document, root_fields, "qualification manifest")
-    _require(type(document["schema"]) is int and document["schema"] in {1, 2, 3, 4, 5, 6, 7, 8} and
+    _require(type(document["schema"]) is int and 1 <= document["schema"] <= 9 and
              document["status"] == "COMPLETE" and document["role"] == ROLE and
              document["ordinary_metric_artifacts"] == ("authenticated-ordinary-base-renderer-v1" if schema >= 7 else
                                                         "unchanged-legacy-native-matte-renderer") and
@@ -419,7 +426,7 @@ def validate_qualification(directory, frames_directory, executable, timeline=Non
              document["producer_source_closure_sha256"] == coordinate.SHADER_IMPLEMENTATION.source_closure_sha256,
              "coordinate/producer contract differs")
     for key, digest in expected_closures(document["schema"]).items():
-        _require(document[key] == digest, f"{key} differs from current native sources")
+        _require(document[key] == digest, f"{key} differs from the source identity for schema {schema}")
     if document["schema"] >= 3:
         _require(document["hole_program_ready"] is True, "current mask-hole programs were unavailable")
         _require(document["coverage_program_ready"] is True, "current stroke-coverage programs were unavailable")
@@ -464,7 +471,7 @@ def validate_qualification(directory, frames_directory, executable, timeline=Non
                          if path.is_file()}
         _require(stages == actual_stages, "producer stage artifact coverage differs")
     return {"schema": 1, "status": "PASS", "frame_count": len(outcomes),
-            "renderer_schema": document["schema"], "renderer_policy_current": document["schema"] == 8,
+            "renderer_schema": document["schema"], "renderer_policy_current": document["schema"] >= 8,
             "selected_current_frames": sum(item[3] == 3 for item in outcomes),
             "background_valid_frames": sum(item[4] == 1 for item in outcomes) if document["schema"] < 4 else 0,
             "shared_warp_frames": len(outcomes) if document["schema"] >= 4 else 0,

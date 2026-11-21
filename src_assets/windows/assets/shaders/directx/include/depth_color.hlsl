@@ -13,26 +13,6 @@ float3 DepthLinearToSrgb(float3 c) {
     return (c <= 0.0031308f) ? lo : hi;
 }
 
-float3 DepthSrgbToLinear(float3 color) {
-    color = saturate(color);
-    float3 low = color / 12.92f;
-    float3 high = pow((color + 0.055f) / 1.055f, 2.4f);
-    return color <= 0.04045f ? low : high;
-}
-
-float DepthSrgbToLinear(float value) {
-    return DepthSrgbToLinear(float3(value, value, value)).x;
-}
-
-// Put the point-sampled max-RGB ordinal into one common scene-linear scale. max() commutes with
-// the sRGB transfer because the same monotone curve is applied to every channel, so SDR encoded
-// and SDR linear capture now produce the same ordinal. scRGB is already linear (1.0 = 80 nits).
-float DepthAppearanceOrdinal(float3 capture_rgb, uint color_mode) {
-    float ordinal = max(capture_rgb.r, max(capture_rgb.g, capture_rgb.b));
-    ordinal = max(ordinal, 0.0f);
-    return color_mode == 0u ? DepthSrgbToLinear(ordinal) : ordinal;
-}
-
 float3 DepthHdrScRgbToSrgb(float3 c) {
     c = max(c, 0.0f);  // map Rec.709-out-of-gamut negative components into the model gamut
     float luminance = max(dot(c, float3(0.2126f, 0.7152f, 0.0722f)), 0.0f);

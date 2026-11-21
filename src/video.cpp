@@ -5,7 +5,6 @@
 // standard includes
 #include <atomic>
 #include <functional>
-#include <list>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -14,6 +13,7 @@
 // local includes
 #include "atomic_presentation.h"
 #include "capture_display_retirement.h"
+#include "capture_image_pool.h"
 #include "config.h"
 #include "depth_coordinate_v2.h"
 #include "display_device.h"
@@ -404,32 +404,14 @@ namespace video {
   }
 
   int nvenc_encode_session_t::convert(platf::img_t &img) {
-    const auto previous_revision = std::exchange(input_revision, 0);
-    return finish_conversion(device->convert(img), previous_revision);
+    return device->convert(img);
   }
 
   int nvenc_encode_session_t::convert_with_encode_target(
     platf::img_t &img,
     const std::chrono::steady_clock::time_point next_encode_target
   ) {
-    const auto previous_revision = std::exchange(input_revision, 0);
-    return finish_conversion(device->convert_with_encode_target(img, next_encode_target), previous_revision);
-  }
-
-  int nvenc_encode_session_t::finish_conversion(int result, std::uint64_t previous_revision) {
-    if (result == 0) {
-      if (device->conversion_kept_input()) {
-        input_revision = previous_revision;
-      } else {
-        input_revision = next_input_revision;
-        if (next_input_revision != 0) {
-          ++next_input_revision;
-        }
-      }
-    }
-    // Failure or an exception from the delegate leaves the target unknown. Do not reset the
-    // allocator: a later successful write must never reuse a revision still held by a slot.
-    return result;
+    return device->convert_with_encode_target(img, next_encode_target);
   }
 
   bool nvenc_encode_session_t::needs_conversion_poll() const {
@@ -476,10 +458,13 @@ namespace video {
     force_idr = false;
   }
 
-  void nvenc_encode_session_t::invalidate_ref_frames(int64_t first_frame, int64_t last_frame) {
-    if (!encoder.invalidate_ref_frames(first_frame, last_frame)) {
+  bool nvenc_encode_session_t::invalidate_ref_frames(int64_t first_frame, int64_t last_frame) {
+    using result_e = nvenc::nvenc_base::ref_frame_invalidation_e;
+    const auto result = encoder.invalidate_ref_frames(first_frame, last_frame);
+    if (result == result_e::needs_idr) {
       force_idr = true;
     }
+    return result != result_e::unchanged;
   }
 
   /** With pictures in flight: whether invalidate_ref_frames() must first wait for them, because it
@@ -500,11 +485,10 @@ namespace video {
     auto result = encoder.encode_frame(
       frame_index,
       force_idr,
-      std::move(frame_buffer),
-      input_revision
+      std::move(frame_buffer)
     );
     force_idr = false;
-    device->encoder_consumed_input();
+    retire_input_reads();
     return result;
   }
 
@@ -522,14 +506,21 @@ namespace video {
     return encoder.pipeline_depth();
   }
 
-  /** Encode thread, with pictures in flight: submit the converted input as the next picture.
-   *  NVENC encodes from the picture's own copy, so the next frame may convert at once. */
-  bool nvenc_encode_session_t::submit_frame(uint64_t frame_index) {
-    const bool submitted = encoder.submit_frame(frame_index, force_idr, input_revision);
-    force_idr = false;
-    // Never blocks: the encode thread's fallback for export slots whose conversion reads
-    // completed (the receiver's read-fence wait normally hands them back), and its diagnostics.
+  bool nvenc_encode_session_t::input_waits_for_retirement() const noexcept {
+    return encoder.input_waits_for_retirement();
+  }
+
+  void nvenc_encode_session_t::retire_input_reads() {
+    // Nonblocking fallback for export slots whose conversion reads completed.
+    // The receiver's read-fence wait normally hands them back without this check.
     device->encoder_consumed_input();
+  }
+
+  /** Encode thread, with pictures in flight: hand off the current converted input. */
+  bool nvenc_encode_session_t::submit_frame(uint64_t frame_index) {
+    const bool submitted = encoder.submit_frame(frame_index, force_idr);
+    force_idr = false;
+    retire_input_reads();
     return submitted;
   }
 
@@ -957,99 +948,17 @@ namespace video {
       return;
     }
 
-    constexpr auto capture_buffer_size = 12;
-    std::list<std::shared_ptr<platf::img_t>> imgs(capture_buffer_size);
-
-    std::vector<std::optional<std::chrono::steady_clock::time_point>> imgs_used_timestamps;
-    const std::chrono::seconds trim_timeot = 3s;
-    auto trim_imgs = [&]() {
-      // count allocated and used within current pool
-      size_t allocated_count = 0;
-      size_t used_count = 0;
-      for (const auto &img : imgs) {
-        if (img) {
-          allocated_count += 1;
-          if (img.use_count() > 1) {
-            used_count += 1;
-          }
-        }
-      }
-
-      // remember the timestamp of currently used count
-      const auto now = std::chrono::steady_clock::now();
-      if (imgs_used_timestamps.size() <= used_count) {
-        imgs_used_timestamps.resize(used_count + 1);
-      }
-      imgs_used_timestamps[used_count] = now;
-
-      // decide whether to trim allocated unused above the currently used count
-      // based on last used timestamp and universal timeout
-      size_t trim_target = used_count;
-      for (size_t i = used_count; i < imgs_used_timestamps.size(); i++) {
-        if (imgs_used_timestamps[i] && now - *imgs_used_timestamps[i] < trim_timeot) {
-          trim_target = i;
-        }
-      }
-
-      // trim allocated unused above the newly decided trim target
-      if (allocated_count > trim_target) {
-        size_t to_trim = allocated_count - trim_target;
-        // prioritize trimming least recently used
-        for (auto it = imgs.rbegin(); it != imgs.rend(); it++) {
-          auto &img = *it;
-          if (img && img.use_count() == 1) {
-            img.reset();
-            to_trim -= 1;
-            if (to_trim == 0) {
-              break;
-            }
-          }
-        }
-        // forget timestamps that no longer relevant
-        imgs_used_timestamps.resize(trim_target + 1);
-      }
-    };
-
+    detail::capture_image_pool_t<12> image_pool {detail::capture_image_retention_e::reclaim_idle};
     auto pull_free_image_callback = [&](std::shared_ptr<platf::img_t> &img_out) -> bool {
       img_out.reset();
       while (run_control.running()) {
-        // pick first allocated but unused
-        for (auto it = imgs.begin(); it != imgs.end(); it++) {
-          if (*it && it->use_count() == 1) {
-            img_out = *it;
-            if (it != imgs.begin()) {
-              // Relink the existing node so the per-frame LRU update does not allocate.
-              imgs.splice(imgs.begin(), imgs, it);
-            }
-            break;
-          }
-        }
-        // otherwise pick first unallocated
-        if (!img_out) {
-          for (auto it = imgs.begin(); it != imgs.end(); it++) {
-            if (!*it) {
-              // allocate image
-              *it = disp->alloc_img();
-              img_out = *it;
-              if (it != imgs.begin()) {
-                imgs.splice(imgs.begin(), imgs, it);
-              }
-              break;
-            }
-          }
-        }
+        img_out = image_pool.try_acquire([&] {
+          return disp->alloc_img();
+        });
         if (img_out) {
-          // trim allocated but unused portion of the pool based on timeouts
-          trim_imgs();
-          img_out->frame_timestamp.reset();
-          img_out->content_timestamp.reset();
-          img_out->pixels_skipped = false;
-          img_out->conversion_needed = true;
           return true;
-        } else {
-          // sleep and retry if image pool is full
-          std::this_thread::sleep_for(1ms);
         }
+        std::this_thread::sleep_for(1ms);
       }
       return false;
     };
@@ -1109,16 +1018,13 @@ namespace video {
         case platf::capture_e::reinit:
           {
             (void) generations_.revoke(generation);
-            // The encode loop releases the display only once it sees the reinit. An independent
-            // provider's image wait can last until its keepalive, so end it now.
+            // End the idle wait so the encode loop can release the revoked display now.
             if (config.encode_wake) {
               config.encode_wake->wake();
             }
 
             // Some classes of images contain references to the display --> display won't delete unless img is deleted
-            for (auto &img : imgs) {
-              img.reset();
-            }
+            image_pool.clear();
 
             // Revoke admission before dropping capture's strong reference. The original control
             // block includes ordinary borrowers, partial/retiring encoders and shared_from_this.
@@ -1478,6 +1384,9 @@ namespace video {
     detail::encoder_recovery_t &recovery,
     packet_queue_t packets,
     const std::function<void(const video_mode_change_t &)> &on_bitrate_reconfigured
+#ifdef SUNSHINE_TESTS
+    , const detail::native_encode_loop_test_hooks_t *test_hooks = nullptr
+#endif
   ) {
     const auto &disp = generation.display();
     // All session exits retire their backend through its owner. Failed encoding additionally
@@ -1563,9 +1472,8 @@ namespace video {
     session->set_external_frame_wake([images]() {
       images->wake();
     });
-    // Without stream-cadence polls, control requests (IDR, reference invalidation, stream gamma,
-    // video mode, shutdown) would otherwise wait for the next provider frame or keepalive.
-    if (independent_provider && config.encode_wake) {
+    // A static capture or provider can leave any session waiting until its keepalive.
+    if (config.encode_wake) {
       config.encode_wake->install([images]() {
         images->wake();
       });
@@ -1635,9 +1543,8 @@ namespace video {
     }
     // With pictures in flight (an independent provider or desktop Host SBS;
     // nvenc_base::pipeline_depth()) the next frame converts and its picture starts encoding while
-    // the previous one still encodes. Each picture encodes its own copy of the conversion target,
-    // taken at submission, so a later conversion (a new capture, a retained-source poll of pending
-    // inference, a depth-ready install or a stream-gamma reconversion) never changes it. A
+    // the previous one still encodes. Conversion writes an unmapped input surface and submitted
+    // pictures keep their input until retirement. A
     // thread of their own retrieves the pictures in submission order and publishes each packet as
     // soon as its picture completes, whatever this loop is doing. Declared after everything it
     // uses; its destruction on any exit delivers the pictures still in flight, as returning from
@@ -1647,6 +1554,11 @@ namespace video {
       pipeline.emplace(
         session->pipeline_depth(),
         [&, recovery_gate = detail::recovery_gate_t {}](encoded_frame_context_t &frame) mutable {
+#ifdef SUNSHINE_TESTS
+          if (test_hooks && test_hooks->before_retrieve) {
+            test_hooks->before_retrieve(static_cast<int>(frame.frame_nr), frame.content_timestamp);
+          }
+#endif
           auto encoded_frame = session->retrieve_frame();
           if (!encoded_frame.data.empty() && !recovery_gate.admits(encoded_frame.idr)) {
             // Submitted before the recovery IDR was requested: it references the dropped frame.
@@ -1662,8 +1574,7 @@ namespace video {
           recovery_gate.published(result.request_idr);
           drop_report.record(result, idr_events);
           if (result.request_idr) {
-            // The loop reads the recovery IDR right after its image wait, which nothing else ends
-            // for desktop sources, rather than when the next capture or the idle bound ends it.
+            // Service the recovery IDR at the same wait boundary as session control mail.
             images->wake();
           }
           return true;
@@ -1836,21 +1747,9 @@ namespace video {
       return true;
     };
 
-    while (true) {
-      if (loop_stats) {
-        if (const auto now = std::chrono::steady_clock::now(); now - *loop_stats_since >= 20s) {
-          if (pipeline) {
-            const auto pictures = pipeline->take_stats();
-            loop_stats->pictures(pictures.pushed_behind, pictures.retired, pictures.latency_total, pictures.latency_max);
-          }
-          BOOST_LOG(info) << loop_stats->report(now - *loop_stats_since) << session->video_memory_diagnostics();
-          loop_stats->reset();
-          loop_stats_since = now;
-        }
-        loop_stats->iteration();
-      }
+    const auto poll_encode_requests = [&](bool &requested_idr_frame, bool &invalidated_ref_frames) {
       if (lifecycle_change_requested()) {
-        break;
+        return false;
       }
 
       // Only this encode thread mutates the converter. A setting is acknowledged after a real
@@ -1875,39 +1774,45 @@ namespace video {
         }
       }
 
-      bool requested_idr_frame = false;
-      bool invalidated_ref_frames = false;
-
-      while (invalidate_ref_frames_events->peek()) {
-        if (auto frames = invalidate_ref_frames_events->pop(0ms)) {
-          // The range extends to the pictures in flight, which may reference the lost frames, and
-          // the next picture submitted confirms it. Only an actual invalidation waits for them
-          // first (refused, so an IDR, if one failed); a handled, malformed or too-large range is
-          // decided at once, so its recovery frame converts without that wait.
-          if (pipeline && session->invalidation_needs_drain(frames->first, frames->second)) {
-            pipeline->drain();
-          }
-          session->invalidate_ref_frames(frames->first, frames->second);
-          invalidated_ref_frames = true;
+      while (auto frames = invalidate_ref_frames_events->pop(0ms)) {
+        // Only an actual invalidation waits for pictures in flight that may reference the lost
+        // frames. The next submission confirms the recovery.
+        if (pipeline && session->invalidation_needs_drain(frames->first, frames->second) && !pipeline->drain()) {
+          return false;
         }
+        invalidated_ref_frames |= session->invalidate_ref_frames(frames->first, frames->second);
       }
       if (pipeline && pipeline->failed()) {
-        break;  // While draining for the invalidation; `failed` stays set.
+        return false;
       }
 
-      if (idr_events->peek()) {
+      if (idr_events->pop(0ms)) {
         requested_idr_frame = true;
-        idr_events->pop();
-      }
-
-      if (requested_idr_frame) {
         session->request_idr_frame();
       }
+      return true;
+    };
 
-      // An independent provider encodes no repeats between its frames, so a client recovering
-      // from loss gets its reference-invalidated frame now, like an IDR, rather than at the next
-      // provider frame or keepalive. Other sources keep encoding at capture cadence.
-      const bool recovery_frame_requested = requested_idr_frame || (independent_provider && invalidated_ref_frames);
+    while (true) {
+      if (loop_stats) {
+        if (const auto now = std::chrono::steady_clock::now(); now - *loop_stats_since >= 20s) {
+          if (pipeline) {
+            const auto pictures = pipeline->take_stats();
+            loop_stats->pictures(pictures.pushed_behind, pictures.retired, pictures.latency_total, pictures.latency_max);
+          }
+          BOOST_LOG(info) << loop_stats->report(now - *loop_stats_since) << session->video_memory_diagnostics();
+          loop_stats->reset();
+          loop_stats_since = now;
+        }
+        loop_stats->iteration();
+      }
+
+      bool requested_idr_frame = false;
+      bool invalidated_ref_frames = false;
+      if (!poll_encode_requests(requested_idr_frame, invalidated_ref_frames)) {
+        break;
+      }
+      bool recovery_frame_requested = requested_idr_frame || invalidated_ref_frames;
 
       std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
       bool converted_frame = false;
@@ -1921,6 +1826,24 @@ namespace video {
       };
       processing_started.reset();
       bool consume_sampled_depth_pipeline_ready = false;
+      // One delivery owns the retained source and its schedule through conversion. Sample the
+      // readiness event before converting, and commit cadence only after the converter returns.
+      const auto convert_delivery = [&](
+        std::chrono::steady_clock::time_point presentation_timestamp,
+        std::optional<std::chrono::steady_clock::time_point> next_encode_target = std::nullopt
+      ) {
+        consume_sampled_depth_pipeline_ready =
+          depth_pipeline_ready_event && depth_pipeline_ready_event->peek();
+        if (convert_frame(*last_img, next_encode_target)) {
+          return false;
+        }
+        finish_conversion();
+        frame_timestamp = presentation_timestamp;
+        if (next_encode_target) {
+          encode_frame_timestamp = *next_encode_target;
+        }
+        return true;
+      };
       const auto provider_poll_target = independent_provider ?
                                           encode_frame_timestamp - frame_variation_threshold :
                                           encode_frame_timestamp;
@@ -1933,11 +1856,11 @@ namespace video {
         const bool conversion_poll_pending = last_img && (pending_gamma || session->needs_conversion_poll());
         const bool depth_pipeline_ready = depth_pipeline_ready_event && depth_pipeline_ready_event->peek();
         const auto wait_started = std::chrono::steady_clock::now();
+        const auto keepalive_wait = detail::encode_keepalive_wait(wait_started, last_encode_at, keepalive_interval);
         auto pending_source_wait = source.remaining_wait(wait_started, provider_poll_target, independent_provider && conversion_poll_pending);
         if (independent_provider && last_img) {
           // The export's fence wake, captures and control requests end this wait; a pending frame
           // that is not yet due is held exactly to its poll target instead.
-          const auto keepalive_wait = detail::provider_keepalive_wait(wait_started, last_encode_at, keepalive_interval);
           const auto hold = hold_timer && !hold_startup_input && !recovery_frame_requested && !depth_pipeline_ready ?
                               detail::provider_hold(pending_source_wait, keepalive_wait, encode_frame_threshold) :
                               std::nullopt;
@@ -1946,26 +1869,23 @@ namespace video {
             if (loop_stats) {
               loop_stats->held(*hold, std::chrono::steady_clock::now() - wait_started);
             }
-            // The hold does not end at a control wake. An IDR or reference invalidation that
-            // arrived meanwhile is read at the top of the loop and makes the pending frame the
-            // recovery frame, instead of encoding it as a P-frame the client cannot use first.
-            if (idr_events->peek() || invalidate_ref_frames_events->peek()) {
-              continue;
-            }
-            // Then take whatever arrived meanwhile without waiting.
+            // Take the latest capture without a second wait. Control mail is read before
+            // converting or encoding it.
             pending_source_wait = std::chrono::nanoseconds::zero();
-          } else {
-            pending_source_wait = pending_source_wait ? std::min(*pending_source_wait, keepalive_wait) : keepalive_wait;
           }
         }
         // Nothing is encoded before capture delivers a frame while the startup input is held, so
         // only the hold's deadline bounds this wait: a due poll or keepalive must not spin it.
-        auto idle_wait = max_frametime;
-        if (hold_startup_input) {
-          idle_wait = startup_input_hold.wait(wait_started, idle_wait);
-        }
+        const auto idle_wait = hold_startup_input ?
+                                 startup_input_hold.wait(wait_started, keepalive_interval) :
+                                 keepalive_wait;
         bool captured = false;
         const auto image_wait = detail::encode_image_wait(idle_wait, encode_frame_threshold, last_img && !hold_startup_input, depth_pipeline_ready, conversion_poll_pending, pending_source_wait);
+#ifdef SUNSHINE_TESTS
+        if (test_hooks && test_hooks->before_image_wait) {
+          test_hooks->before_image_wait(static_cast<bool>(last_img), std::chrono::duration_cast<std::chrono::nanoseconds>(image_wait));
+        }
+#endif
         const auto image_wait_started = detail::diagnostic_timestamp(loop_stats.has_value(), std::chrono::steady_clock::now);
         auto img = detail::pop_encode_image(*images, image_wait, image_deadline_waiter.get());
         if (loop_stats && !safe::no_wait(image_wait)) {
@@ -1980,16 +1900,12 @@ namespace video {
         } else if (!images->running()) {
           break;
         }
-        // An IDR requested during the wait (by the client, or by the retrieving thread, which wakes
-        // the wait when the full encoded queue dropped a delta frame) is read at the top of the loop
-        // first, as after a provider hold. The recovery frame is then this capture, still pending in
-        // `source`, or the retained input, rather than a P-frame the client cannot use (with pictures
-        // in flight, recovery_gate_t discards it) followed by the IDR. A held startup input still
-        // converts the capture at once: its wait does not shorten for a pending source.
-        const bool read_recovery_first = !hold_startup_input && idr_events->peek();
-        if (read_recovery_first && !captured) {
-          continue;
+        // The same wake source carries client controls, sender recovery and display reinit.
+        // Read requests raised during the wait before using either the new or retained input.
+        if (!poll_encode_requests(requested_idr_frame, invalidated_ref_frames)) {
+          break;
         }
+        recovery_frame_requested = requested_idr_frame || invalidated_ref_frames;
         if (captured) {
           frame_timestamp = last_img->frame_timestamp;
           if (!frame_timestamp) {
@@ -2002,16 +1918,6 @@ namespace video {
             // exact source identity when a later encode-thread timeout consumes its pending
             // inference; a local-only timestamp would make that safe completion unmatchable.
             last_img->frame_timestamp = frame_timestamp;
-          }
-
-          // Re-check after the potentially blocking image wait and before conversion. On Windows,
-          // conversion can include the full D3D11/TensorRT SBS pipeline, so avoid starting it after
-          // capture teardown or an encode-dimension change has been requested.
-          if (lifecycle_change_requested()) {
-            break;
-          }
-          if (read_recovery_first) {
-            continue;  // With any substitute timestamp persisted on the source it converts.
           }
 
           auto current_timestamp = *frame_timestamp;
@@ -2036,24 +1942,11 @@ namespace video {
             encode_frame_threshold,
             frame_variation_threshold
           );
-          consume_sampled_depth_pipeline_ready =
-            depth_pipeline_ready_event && depth_pipeline_ready_event->peek();
-          if (convert_frame(*last_img, schedule.next_encode_target)) {
+          if (!convert_delivery(schedule.presentation_timestamp, schedule.next_encode_target)) {
             BOOST_LOG(error) << "Could not convert image"sv;
             break;
           }
-          finish_conversion();
-
-          *frame_timestamp = schedule.presentation_timestamp;
-          encode_frame_timestamp = schedule.next_encode_target;
         }
-      } else if (!independent_provider) {
-        // A recovery skips the wait, so the retrieving thread's wake for this IDR, if it came while
-        // nothing waited, is still pending. Left there, it would end the next capture wait at once
-        // and encode a repeat. A failed picture's wake is not needed: the loop checks for that
-        // failure before it encodes. (Such a wake is harmless to an independent provider, which
-        // encodes no repeats, and its provider and control wakes must not be lost.)
-        images->discard_wake();
       }
 
       // A final early capture may never be followed by another image event. Convert it when
@@ -2074,15 +1967,10 @@ namespace video {
             encode_frame_threshold,
             frame_variation_threshold
           );
-          consume_sampled_depth_pipeline_ready =
-            depth_pipeline_ready_event && depth_pipeline_ready_event->peek();
-          if (convert_frame(*last_img, schedule.next_encode_target)) {
+          if (!convert_delivery(schedule.presentation_timestamp, schedule.next_encode_target)) {
             BOOST_LOG(error) << "Could not convert deferred capture image"sv;
             break;
           }
-          finish_conversion();
-          frame_timestamp = schedule.presentation_timestamp;
-          encode_frame_timestamp = schedule.next_encode_target;
         }
       }
 
@@ -2115,13 +2003,10 @@ namespace video {
         if (lifecycle_change_requested()) {
           break;
         }
-        frame_timestamp = std::chrono::steady_clock::now();
-        consume_sampled_depth_pipeline_ready = true;
-        if (convert_frame(*last_img)) {
+        if (!convert_delivery(std::chrono::steady_clock::now())) {
           BOOST_LOG(error) << "Could not activate the initialized Host SBS GPU pipeline"sv;
           break;
         }
-        finish_conversion();
       }
 
       // Host SBS inference may still be pending when capture goes idle. Reconvert the retained
@@ -2144,16 +2029,12 @@ namespace video {
                                     now, encode_frame_timestamp, encode_frame_threshold, frame_variation_threshold
                                   )} :
                                   std::nullopt;
-          frame_timestamp = schedule ? schedule->presentation_timestamp : now;
-          consume_sampled_depth_pipeline_ready =
-            depth_pipeline_ready_event && depth_pipeline_ready_event->peek();
-          if (convert_frame(*last_img, schedule ? std::optional {schedule->next_encode_target} : std::nullopt)) {
+          if (!convert_delivery(
+                schedule ? schedule->presentation_timestamp : now,
+                schedule ? std::optional {schedule->next_encode_target} : std::nullopt
+              )) {
             BOOST_LOG(error) << "Could not consume pending Host SBS depth for retained source"sv;
             break;
-          }
-          finish_conversion();
-          if (schedule) {
-            encode_frame_timestamp = schedule->next_encode_target;
           }
         }
       }
@@ -2173,9 +2054,9 @@ namespace video {
         continue;
       }
 
-      if (independent_provider && !converted_frame && !recovery_frame_requested && std::chrono::steady_clock::now() < last_encode_at + keepalive_interval) {
-        // Woken without new content (a provider frame not yet due, an unchanged metadata capture,
-        // a kept input or a stale wake): wait again instead of encoding a repeat of the input.
+      const bool wake_without_picture = !converted_frame && (!conversion_ran || independent_provider);
+      if (wake_without_picture && !recovery_frame_requested && std::chrono::steady_clock::now() < last_encode_at + keepalive_interval) {
+        // A wake can end the wait without authorizing a picture. Preserve the idle deadline.
         continue;
       }
 
@@ -2186,11 +2067,30 @@ namespace video {
         break;
       }
 
-      const auto content_timestamp = session->rendered_content_timestamp();
-      // New content is told by its identity, as for the packets: a keepalive or poll that
-      // re-renders an unchanged export converts again but encodes a repeat.
-      const bool new_loop_content = loop_stats && loop_content.observe(content_timestamp, !converted_frame) == detail::diagnostic_content_e::new_content;
       const auto encode_started = detail::diagnostic_timestamp(loop_stats.has_value(), std::chrono::steady_clock::now);
+      if (pipeline && session->input_waits_for_retirement()) {
+        // These exact pixels already have a submitted picture. Keep servicing capture and depth
+        // while that picture retires. Recovery, gamma proof and due keepalives still deliver.
+        if (
+          !first_encoder_output && !requested_idr_frame && !invalidated_ref_frames &&
+          !(pending_gamma && config.stream_gamma_state) &&
+          std::chrono::steady_clock::now() < last_encode_at + keepalive_interval
+        ) {
+          session->retire_input_reads();
+#ifdef SUNSHINE_TESTS
+          if (test_hooks && test_hooks->repeat_coalesced) {
+            test_hooks->repeat_coalesced();
+          }
+#endif
+          continue;
+        }
+        if (!pipeline->drain() || lifecycle_change_requested()) {
+          break;
+        }
+      }
+      const auto content_timestamp = session->rendered_content_timestamp();
+      // A keepalive or poll that re-renders an unchanged export still carries the same content.
+      const bool new_loop_content = loop_stats && loop_content.observe(content_timestamp, !converted_frame) == detail::diagnostic_content_e::new_content;
       auto frame = make_encoded_frame_context(
         frame_nr++,
         frame_timestamp,
@@ -2211,6 +2111,11 @@ namespace video {
         const auto completion_finished = detail::diagnostic_timestamp(loop_stats.has_value(), std::chrono::steady_clock::now);
         encoded = encoded && session->submit_frame(frame.frame_nr);
         if (encoded) {
+#ifdef SUNSHINE_TESTS
+          if (test_hooks && test_hooks->after_submit) {
+            test_hooks->after_submit(static_cast<int>(frame.frame_nr), frame.content_timestamp);
+          }
+#endif
           pipeline->push(std::move(frame));
         }
         if (loop_stats) {
@@ -2345,6 +2250,57 @@ namespace video {
 
 #ifdef SUNSHINE_TESTS
   namespace detail {
+    native_encode_loop_test_result_t run_native_encode_loop_for_test(
+      std::shared_ptr<platf::display_t> display,
+      safe::mail_t mail,
+      img_event_t images,
+      config_t config,
+      packet_queue_t packets,
+      const native_encode_loop_test_hooks_t &hooks
+    ) {
+      if (!display || !mail || !images || !packets) {
+        throw std::invalid_argument("The native encode-loop fixture requires its display, mail, images and packet queue");
+      }
+      const auto drain = util::fail_guard([]() {
+        async_teardown_workers().drain_for_test();
+      });
+      capture_generation_handoff_t generations;
+      const auto generation = generations.begin();
+      if (!generation || !platf::arm_capture_display_retirement(display, generation->retirement()) ||
+          !generations.publish(generation, display)) {
+        throw std::logic_error("The native encode-loop fixture requires an original unarmed capture display");
+      }
+      auto lease = generations.acquire();
+      if (!lease) {
+        throw std::logic_error("The native encode-loop fixture could not acquire its published display generation");
+      }
+      auto revoke = util::fail_guard([&]() {
+        generations.stop();
+      });
+      native_encode_loop_test_result_t result;
+      auto session = make_encode_session(*display, config, false);
+      if (!session) {
+        return result;
+      }
+      result.session_created = true;
+      result.pipeline_depth = session->pipeline_depth();
+      encoder_recovery_t recovery;
+      encode_run(
+        result.next_frame_nr,
+        result.awaiting_desktop_after_export,
+        std::move(mail),
+        std::move(images),
+        std::move(config),
+        std::move(lease),
+        std::move(session),
+        recovery,
+        std::move(packets),
+        [](const video_mode_change_t &) {},
+        &hooks
+      );
+      return result;
+    }
+
     std::unique_ptr<nvenc_encode_session_t> make_native_encode_session_for_test(
       platf::display_t &display,
       const config_t &config,

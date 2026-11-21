@@ -35,13 +35,15 @@ namespace video {
     std::optional<std::chrono::steady_clock::time_point> rendered_content_timestamp() const;
     void request_idr_frame();
     void request_normal_frame();
-    void invalidate_ref_frames(int64_t first_frame, int64_t last_frame);
+    [[nodiscard]] bool invalidate_ref_frames(int64_t first_frame, int64_t last_frame);
     bool invalidation_needs_drain(int64_t first_frame, int64_t last_frame) const;
     bool reconfigure_bitrate(int bitrate_kbps);
     nvenc::nvenc_encoded_frame encode_frame(uint64_t frame_index, std::vector<std::uint8_t> &&frame_buffer);
     nvenc::nvenc_base::frame_timing_t last_frame_timing() const;
     std::string video_memory_diagnostics() const;
     unsigned pipeline_depth() const;
+    bool input_waits_for_retirement() const noexcept;
+    void retire_input_reads();
     bool submit_frame(uint64_t frame_index);
     nvenc::nvenc_encoded_frame retrieve_frame();
     std::chrono::nanoseconds last_submit_timing() const;
@@ -52,15 +54,9 @@ namespace video {
     const std::shared_ptr<encoded_frame_buffer_pool_t> &frame_pool() const;
 
   private:
-    int finish_conversion(int result, std::uint64_t previous_revision);
-
     platf::native_encode_owner_t device;
     nvenc::nvenc_base &encoder;
     bool force_idr = false;
-    // Conversion-target content, independent of picture acceptance and packet identity. Zero
-    // means unknown. Exhausting the allocator permanently falls back to unknown, never reuse.
-    std::uint64_t input_revision = 0;
-    std::uint64_t next_input_revision = 1;
     std::shared_ptr<encoded_frame_buffer_pool_t> frame_buffer_pool =
       std::make_shared<encoded_frame_buffer_pool_t>();
   };

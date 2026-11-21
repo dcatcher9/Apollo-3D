@@ -1,6 +1,5 @@
 // Included only inside platf::dxgi AFTER the actual converter class is complete.
 // No duplicate converter policy, CUDA verdict, CPU warp or encoder session.
-int init();
 namespace actual_converter_probe_v1 {
   namespace {
     using Microsoft::WRL::ComPtr;
@@ -50,6 +49,8 @@ namespace actual_converter_probe_v1 {
         {"field_width",e.field_width},{"field_height",e.field_height},{"field_content",{e.field_content.left,e.field_content.top,e.field_content.right,e.field_content.bottom}},
         {"force_infer",e.force_infer},{"gpu_undecided",e.gpu_undecided},{"optional_work",e.optional_work},{"ddup_proof",e.ddup_proof},
         {"queued",e.queued},{"flat",e.flat},{"repeat",e.repeat},{"cached_current_colour",e.cached_current_colour},
+        {"native_planes_written",e.native_planes_written},
+        {"p010_chroma_tiled",e.p010_chroma_tiled},
         {"slot_frames",e.slot_frames},{"slot_pending",e.slot_pending},{"slot_observations",e.slot_observations},{"slot_contexts",e.slot_contexts},
         {"slot_source_addresses",e.slot_source_addresses},{"selected_slot",e.selected_slot},{"pending_slots",e.pending_slots},
         {"publication_current",e.publication_current},{"ticket_publication_current",e.ticket_publication_current},{"publication",pub(e.publication)},
@@ -96,11 +97,14 @@ namespace actual_converter_probe_v1 {
         if(kind==D3D11_RESOURCE_DIMENSION_BUFFER){ComPtr<ID3D11Buffer>b;hr(r->QueryInterface(IID_PPV_ARGS(&b)),"Buffer QI failed");D3D11_BUFFER_DESC bd{};b->GetDesc(&bd);prepare_buffer(d,bd.ByteWidth);}
         else {require(kind==D3D11_RESOURCE_DIMENSION_TEXTURE2D,"Unsupported resource");ComPtr<ID3D11Texture2D>t;hr(r->QueryInterface(IID_PPV_ARGS(&t)),"Texture QI failed");t->GetDesc(&td);
           require(td.MipLevels==1&&td.ArraySize==1&&td.SampleDesc.Count==1,"Unsupported texture layout");
-          const UINT pixel=td.Format==DXGI_FORMAT_R32G32B32A32_FLOAT?16u:td.Format==DXGI_FORMAT_R16G16B16A16_FLOAT?8u:4u;
-          require(pixel==16u||pixel==8u||td.Format==DXGI_FORMAT_R32_FLOAT||td.Format==DXGI_FORMAT_R32_UINT||td.Format==DXGI_FORMAT_B8G8R8A8_UNORM,"Unsupported staging format");
+          const bool nv12 = td.Format == DXGI_FORMAT_NV12;
+          const bool p010 = td.Format == DXGI_FORMAT_P010;
+          const UINT pixel=nv12?1u:p010?2u:td.Format==DXGI_FORMAT_R32G32B32A32_FLOAT?16u:td.Format==DXGI_FORMAT_R16G16B16A16_FLOAT?8u:4u;
+          require(nv12||p010||pixel==16u||pixel==8u||td.Format==DXGI_FORMAT_R32_FLOAT||td.Format==DXGI_FORMAT_R32_UINT||td.Format==DXGI_FORMAT_B8G8R8A8_UNORM,"Unsupported staging format");
           auto desc=td;desc.Usage=D3D11_USAGE_STAGING;desc.BindFlags=0;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;desc.MiscFlags=0;
           ComPtr<ID3D11Texture2D>out;hr(d->CreateTexture2D(&desc,nullptr,&out),"Staging texture allocation failed");staging=out;
-          row_bytes=std::size_t(td.Width)*pixel;rows=td.Height;bytes.resize(row_bytes*rows);}
+          // NV12 maps Y and interleaved UV consecutively with the same row pitch.
+          row_bytes=std::size_t(td.Width)*pixel;rows=td.Height+((nv12||p010)?td.Height/2u:0u);bytes.resize(row_bytes*rows);}
       }
       bool copy(ID3D11DeviceContext *ctx,ID3D11Resource *r) noexcept {
         if(!r||!staging||copied)return false;D3D11_RESOURCE_DIMENSION k{};r->GetType(&k);if(k!=kind)return false;
@@ -123,7 +127,10 @@ namespace actual_converter_probe_v1 {
       std::array<event_t,phase_count> phase_event{};
       std::array<ComPtr<ID3D11ShaderResourceView>,5> old_working;
       int armed=-1;bool prepared=false,pending_arrival=false,selected_enabled=false,selected_outline=false,background_enabled=false;
+      bool legacy_matte_expected = true;
       std::array<ComPtr<ID3D11Buffer>,3> queued_B_constant_aliases;
+      std::uint64_t borrowed_draw_conversion = 0;
+      std::array<stage_t, 2> borrowed_draw_sources;
       void capture(std::size_t phase,const event_t &e) noexcept {
         if(!prepared||captured[phase]){capture_fault=true;return;}
         auto copy=e;
@@ -154,6 +161,15 @@ namespace actual_converter_probe_v1 {
       }
       static void record(void *state,const event_t &e) noexcept {
         auto &s=*static_cast<recorder_t*>(state);if(s.count==s.events.size()){s.overflow=true;return;}s.events[s.count++]=e;
+        if (s.borrowed_draw_conversion == e.conversion && e.kind == event_e::draw) {
+          // The converter still owns both keys here. COM references alone do not pin the pixels.
+          const auto matched = resource(e.views[0].Get());
+          const auto current = resource(e.current_input.Get());
+          if (!s.borrowed_draw_sources[0].copy(s.ctx, matched.Get()) ||
+              !s.borrowed_draw_sources[1].copy(s.ctx, current.Get())) {
+            s.capture_fault = true;
+          }
+        }
         if(e.kind==event_e::draw&&e.publication_current&&!e.queued)for(std::size_t i=7;i<12;++i)s.old_working[i-7]=e.views[i];
         if(s.armed==1&&e.kind==event_e::queue_begin)s.capture(1,e);
         if(s.armed==1&&e.kind==event_e::draw&&e.queued)s.capture(2,e);
@@ -164,8 +180,12 @@ namespace actual_converter_probe_v1 {
       }
       const event_t *last_draw() const {for(std::size_t i=count;i>0;--i)if(events[i-1].kind==event_e::draw)return &events[i-1];return nullptr;}
       void prepare(ID3D11Device *device,const event_t &a,ID3D11Texture2D *target) {
+        require((a.views[3] != nullptr) == legacy_matte_expected, "Unexpected legacy matte availability at A");
         for(auto &phase:stages){
-          for(std::size_t k=0;k<12;++k){auto r=resource(a.views[k].Get());require(r!=nullptr,"A working view missing");phase[k].prepare(device,r.Get());}
+          for(std::size_t k=0;k<12;++k){
+            if(k==3u && !legacy_matte_expected)continue;
+            auto r=resource(a.views[k].Get());require(r!=nullptr,"A working view missing");phase[k].prepare(device,r.Get());
+          }
           for(std::size_t k=0;k<8;++k){if(a.buffers[k])phase[12+k].prepare(device,a.buffers[k].Get());
             else if(k==2)phase[14].prepare_buffer(device,48u);
             else if(k>=5)phase[12+k].prepare_buffer(device,k==5?64u:k==6?16u:96u);
@@ -190,8 +210,11 @@ namespace actual_converter_probe_v1 {
     };
   }
 
-  int run_one(const request_t &r,bool pending_arrival,std::string &error) noexcept {
-    error.clear();std::shared_ptr<fixture_display_t> display;d3d_base_encode_device converter;
+  int run_one(const request_t &r,bool pending_arrival,std::string &error,int native_codec = 1) noexcept {
+    error.clear();std::shared_ptr<fixture_display_t> display;
+    // The converter's borrowed output owner must survive converter teardown.
+    std::unique_ptr<nvenc::nvenc_d3d11_native> native_encoder;
+    d3d_base_encode_device converter;
     recorder_t records;ComPtr<ID3D11Texture2D> target;ComPtr<ID3D11RenderTargetView> target_rtv;
     std::array<std::shared_ptr<platf::img_t>,3> images;
     models::video_depth_estimator *est=nullptr;
@@ -199,15 +222,39 @@ namespace actual_converter_probe_v1 {
     records.pending_arrival=pending_arrival;records.selected_enabled=r.selected_matte.has_value();
     records.selected_outline=r.selected_matte&&r.selected_matte->current_outline;records.background_enabled=r.background_observer;
     json result,adapter_entries=json::array(),selected_adapter=nullptr,capture_device_adapter=nullptr,converter_device_adapter=nullptr;bool created=false,released_before_readback=false;
-    const auto root=r.packed_continuity?r.output/"actual-converter-packed-continuity-v1":
+    const auto *native_nv12_opt_in = std::getenv("SUNSHINE_TEST_HOST_SBS_NATIVE_NV12");
+    const bool native_nv12 = r.packed_continuity && native_nv12_opt_in && std::string_view {native_nv12_opt_in} == "1";
+    const auto *recycle_opt_in = std::getenv("SUNSHINE_TEST_HOST_SBS_BORROWED_CAPTURE_RECYCLE");
+    const bool borrowed_recycle = r.packed_continuity && (r.hdr_input || (recycle_opt_in && std::string_view {recycle_opt_in} == "1"));
+    const bool check_retained_rgb = borrowed_recycle && !native_nv12 && !r.native_p010;
+    const auto *reference_opt_in = std::getenv("SUNSHINE_TEST_HOST_SBS_SHUTTER_COPY_REFERENCE");
+    const bool copy_reference = reference_opt_in && std::string_view {reference_opt_in} == "1";
+    const auto *cached_route_opt_in = std::getenv("SUNSHINE_TEST_HOST_SBS_CACHED_CURRENT_ROUTE");
+    const auto *skip_legacy_matte = std::getenv("SUNSHINE_TEST_HOST_SBS_SKIP_LEGACY_MATTE");
+    records.legacy_matte_expected = !skip_legacy_matte || std::string_view(skip_legacy_matte) != "1";
+    const bool cached_route = cached_route_opt_in && std::string_view {cached_route_opt_in} == "1";
+    const auto root=cached_route ? r.output/"actual-converter-cached-current-route-v1" : r.native_p010 ? r.output/"actual-converter-native-p010-v1"/(native_codec == 1 ? "hevc" : "av1") :
+      borrowed_recycle?r.output/"actual-converter-borrowed-capture-recycle-v1":
+      r.packed_continuity?r.output/(native_nv12 ? "actual-converter-packed-continuity-nv12-v1" : "actual-converter-packed-continuity-v1"):
       r.output/(pending_arrival?"trajectory2-pending-C":"trajectory1-B-parity")/"actual-converter-rgb-probe-v1";
     const auto release=[&](){if(est)est->release_joined_completion_gate_for_benchmark();release_after_draw_query.store(true);if(releaser.joinable()){releaser.request_stop();releaser.join();}};
     try {
       require(r.enabled,"Probe not enabled");require(!std::filesystem::exists(root),"Probe refuses overwrite");
-      require(!r.packed_continuity||(!r.queued&&!r.hdr_input&&!pending_arrival&&!r.pending_current_colour.enabled),"Packed continuity regression requires the ordinary SDR converter");
+      require(records.legacy_matte_expected || (records.selected_outline && !r.packed_continuity),
+        "On-demand legacy matte probe requires the current-outline converter");
+      require(!cached_route || (r.packed_continuity && !r.queued && !native_nv12 && !r.native_p010 &&
+        !pending_arrival && !r.selected_matte && !r.temporal_source_bridge && !r.background_observer),
+        "Cached-current route regression requires ordinary SDR/HDR RGB continuity");
+      require(!r.native_p010 || (r.hdr_input && !native_nv12 && r.packed_continuity &&
+        (native_codec == 1 || native_codec == 2) &&
+        (r.p010_chroma_mode == "default" || r.p010_chroma_mode == "raster" || r.p010_chroma_mode == "no-uav")),
+        "Invalid native P010 fixture declaration");
+      require(!r.packed_continuity || (!r.queued && !pending_arrival && !r.pending_current_colour.enabled &&
+        (!r.hdr_input || check_retained_rgb || r.native_p010)), "Packed continuity regression requires the ordinary converter");
       const UINT w=r.frames[0].width,h=r.frames[0].height;
       require(w&&h&&w<=5120u&&h<=5120u,"Invalid source extent");
-      require(!r.hdr_input||(!r.queued&&r.selected_matte&&r.selected_matte->current_outline),"HDR fixture requires explicit ordinary current-outline route");
+      require(!r.hdr_input || (!r.queued && (check_retained_rgb || r.native_p010 || (r.selected_matte && r.selected_matte->current_outline))),
+        "HDR fixture requires an explicit ordinary shutter or current-outline route");
       const UINT pixel_bytes=r.hdr_input?8u:4u;
       const auto payload=[&](const frame_t &f)->const void* {return r.hdr_input?static_cast<const void*>(f.rgba16.data()):static_cast<const void*>(f.bgra.data());};
       const auto payload_size=[&](const frame_t &f){return r.hdr_input?f.rgba16.size()*2u:f.bgra.size();};
@@ -249,68 +296,302 @@ namespace actual_converter_probe_v1 {
       const D3D_FEATURE_LEVEL levels[]{D3D_FEATURE_LEVEL_11_1,D3D_FEATURE_LEVEL_11_0};
       hr(D3D11CreateDevice(adapter.Get(),D3D_DRIVER_TYPE_UNKNOWN,nullptr,D3D11_CREATE_DEVICE_BGRA_SUPPORT,levels,2,D3D11_SDK_VERSION,&display->device,nullptr,&display->device_ctx),"Capture-side fixture device failed");
       capture_device_adapter=actual_device_adapter(display->device.get());
-      require(converter.init(display,adapter.Get(),pix_fmt_e::nv12)==0,"Real converter init failed");
+      require(converter.init(display,adapter.Get(),r.native_p010 ? pix_fmt_e::p010 : pix_fmt_e::nv12)==0,"Real converter init failed");
       converter_device_adapter=actual_device_adapter(converter.device.get());
-      const context_t context{w,h,0x4356524700000001ull};converter.probe_context=&context;
+      const context_t context{w,h,0x4356524700000001ull,r.packed_continuity,records.legacy_matte_expected};converter.probe_context=&context;
       auto settings=r.settings;settings.reshade=false; // only authored source, not an external provider
-      require(converter.init_rgb_output(w*2,h,::video::SBS_AI,settings)==0,"Real RGB-only initialization failed");
+      D3D11_TEXTURE2D_DESC td {};
+      td.Width = 2u * w;
+      // NV12 requires even dimensions. Keep the archived source extent and its pixels intact.
+      td.Height = native_nv12 ? (h + 1u) & ~1u : h;
+      td.MipLevels = 1;
+      td.ArraySize = 1;
+      td.Format = r.native_p010 ? DXGI_FORMAT_P010 : native_nv12 ? DXGI_FORMAT_NV12 : r.hdr_input ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_B8G8R8A8_UNORM;
+      td.SampleDesc.Count = 1;
+      td.Usage = D3D11_USAGE_DEFAULT;
+      td.BindFlags = native_nv12 ? D3D11_BIND_RENDER_TARGET : D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+      if (r.native_p010) {
+        require(w % 2u == 0u && h % 2u == 0u, "Native P010 fixture requires even source dimensions");
+        if (r.p010_chroma_mode != "raster") {
+          require(converter.prepare_p010_chroma_tiles(), "Native P010 tile program preparation failed");
+        }
+        native_encoder = std::make_unique<nvenc::nvenc_d3d11_native>(converter.device.get(), r.p010_chroma_mode != "no-uav");
+        ::video::config_t client {};
+        client.width = td.Width;client.height = td.Height;
+        client.framerate = 90;client.framerateX100 = 9000;client.encodingFramerate = 90000;
+        client.bitrate = 166170;client.slicesPerFrame = 1;client.numRefFrames = 1;
+        client.encoderCscMode = 2;client.videoFormat = native_codec;client.dynamicRange = 1;client.sbs_mode = ::video::SBS_AI;
+        nvenc::nvenc_config encoder_config;
+        encoder_config.quality_preset = 1;encoder_config.two_pass = nvenc::nvenc_two_pass::disabled;
+        encoder_config.vbv_percentage_increase = 100;encoder_config.adaptive_quantization = false;
+        encoder_config.hevc_unidirectional_b = false;encoder_config.split_encode = false;
+        const nvenc::nvenc_colorspace_t native_colorspace {NV_ENC_VUI_COLOR_PRIMARIES_BT2020,
+          NV_ENC_VUI_TRANSFER_CHARACTERISTIC_SMPTE2084,NV_ENC_VUI_MATRIX_COEFFS_BT2020_NCL,true};
+        require(native_encoder->create_encoder(encoder_config, client, native_colorspace,
+          NV_ENC_BUFFER_FORMAT_YUV420_10BIT, std::nullopt) && native_encoder->pipeline_depth() == 2u &&
+          native_encoder->input_surface_count() == 3u, "Native P010 depth2 owner unavailable");
+        target = native_encoder->get_input_texture(0u);
+        require(converter.apply_colorspace({::video::colorspace_e::bt2020,true,10u}), "Native P010 colorspace setup failed");
+        require(converter.init_output(target.Get(),td.Width,td.Height,::video::SBS_AI,settings,
+          {},{},{},{},0,{},false,{},{},{},false,0,0,native_encoder.get()) == 0,
+          "Actual native P010 converter output setup failed");
+        require(converter.set_stream_gamma(::video::stream_gamma_mode_e::gamma_2_4), "Native P010 gamma2 setup failed");
+      } else if (native_nv12) {
+        hr(converter.device->CreateTexture2D(&td, nullptr, &target), "Native NV12 input target failed");
+        require(converter.apply_colorspace({::video::colorspace_e::rec709, false, 8u}), "Native NV12 colorspace initialization failed");
+        require(converter.init_output(target.Get(), td.Width, td.Height, ::video::SBS_AI, settings) == 0,
+          "Real native NV12 converter initialization failed");
+        const auto &output = converter.active_output_views();
+        require(output.y_or_yuv && output.uv, "Native NV12 converter did not bind both plane render targets");
+      } else {
+        require(converter.init_rgb_output(w*2,h,::video::SBS_AI,settings)==0,"Real RGB-only initialization failed");
+      }
       const auto prepare_deadline=clock_t::now()+std::chrono::seconds(60);
       while(!converter.ensure_depth_estimator()){require(clock_t::now()<prepare_deadline&&converter.host_sbs_renderer!=models::host_sbs_renderer_e::failed_flat,"Estimator preparation unavailable");std::this_thread::sleep_for(std::chrono::milliseconds(1));}
       est=converter.depth_estimator.get();require(est&&est->is_valid(),"Real estimator unavailable");
       if(r.temporal_source_bridge){std::string setup_error;require(converter.configure_temporal_source_bridge_for_instance(*r.temporal_source_bridge,setup_error),("Temporal source bridge pre-input setup: "+setup_error).c_str());}
       if(r.selected_matte){std::string setup_error;require(converter.configure_selected_matte_for_instance(*r.selected_matte,setup_error),("Selected matte pre-input setup: "+setup_error).c_str());}
-      if(r.queued)require(converter.initialize_queued_renderer_for_instance(true),"Per-instance queued resources unavailable");
+      if(r.queued)require(converter.initialize_queued_renderer_for_instance(),"Per-instance queued resources unavailable");
       models::joined_completion_gate_benchmark::configuration_t gate;gate.enabled=true;
       gate.placement=r.packed_continuity?models::joined_completion_gate_benchmark::placement_e::after_interop_unmaps:models::joined_completion_gate_benchmark::placement_e::before_interop_unmaps;
-      gate.target_frame_id=3;gate.hold_after_callback_enter_ms=r.packed_continuity?350u:120u;gate.callback_safety_timeout_ms=500;
+      gate.target_frame_id=cached_route?4u:3u;gate.hold_after_callback_enter_ms=r.packed_continuity&&!borrowed_recycle?350u:120u;gate.callback_safety_timeout_ms=500;
       require(est->configure_joined_completion_gate_for_benchmark(gate),"Pre-input gate configuration failed");
-      D3D11_TEXTURE2D_DESC td{};td.Width=2*w;td.Height=h;td.MipLevels=1;td.ArraySize=1;td.Format=r.hdr_input?DXGI_FORMAT_R16G16B16A16_FLOAT:DXGI_FORMAT_B8G8R8A8_UNORM;td.SampleDesc.Count=1;td.Usage=D3D11_USAGE_DEFAULT;td.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
-      hr(converter.device->CreateTexture2D(&td,nullptr,&target),"RGB target failed");hr(converter.device->CreateRenderTargetView(target.Get(),nullptr,&target_rtv),"RGB target RTV failed");
-      for(std::size_t i=0;i<3;++i){images[i]=display->alloc_img();require(images[i]&&display->complete_img(images[i].get(),false)==0,"Actual shared image allocation failed");auto &img=static_cast<img_d3d_t&>(*images[i]);texture_lock_helper lock(img.capture_mutex.get());require(lock.lock(),"Capture keyed mutex failed");display->device_ctx->UpdateSubresource(img.capture_texture.get(),0,nullptr,payload(r.frames[i]),w*pixel_bytes,0);display->device_ctx->Flush();img.blank=false;}
-      // Open every existing shared-image binding and allocate the existing TWO private slots
-      // before input1. Allocation establishes no frame, source clock, pending or publication.
+      if (!native_nv12 && !r.native_p010) {
+        hr(converter.device->CreateTexture2D(&td,nullptr,&target),"RGB target failed");hr(converter.device->CreateRenderTargetView(target.Get(),nullptr,&target_rtv),"RGB target RTV failed");
+      }
+      for(std::size_t i=0;i<3;++i){images[i]=display->alloc_img();require(images[i]&&display->complete_img(images[i].get(),false)==0,"Actual shared image allocation failed");auto &img=static_cast<img_d3d_t&>(*images[i]);detail::keyed_mutex_lock_t lock {img.capture_mutex.get()};require(lock.lock() == S_OK,"Capture keyed mutex failed");display->device_ctx->UpdateSubresource(img.capture_texture.get(),0,nullptr,payload(r.frames[i]),w*pixel_bytes,0);display->device_ctx->Flush();img.blank=false;}
+      // Open every shared image before input1 without establishing frame or publication ownership.
       for(const auto &image:images){auto &img=static_cast<img_d3d_t&>(*image);auto [it,inserted]=converter.img_ctx_map.try_emplace(img.id);(void)inserted;require(converter.initialize_image_context(img,it->second)==0,"Shared image preparation failed");}
-      D3D11_TEXTURE2D_DESC private_desc{};static_cast<img_d3d_t&>(*images[0]).capture_texture->GetDesc(&private_desc);
-      private_desc.Usage=D3D11_USAGE_DEFAULT;private_desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;private_desc.MiscFlags=0;private_desc.CPUAccessFlags=0;
-      for(auto &slot:converter.matched_frame_slots){hr(converter.device->CreateTexture2D(&private_desc,nullptr,&slot.texture),"Private slot preparation failed");hr(converter.device->CreateShaderResourceView(slot.texture.get(),nullptr,&slot.srv),"Private slot SRV failed");}
+      if (!context.borrow_matched_capture) {
+        D3D11_TEXTURE2D_DESC source_desc {};
+        static_cast<img_d3d_t &>(*images[0]).capture_texture->GetDesc(&source_desc);
+        for (auto &slot : converter.matched_frame_slots) {
+          require(converter.ensure_private_matched_texture(slot, source_desc), "Private slot preparation failed");
+        }
+      }
       records.ctx=converter.device_ctx.get();converter.probe_observer={&records,&recorder_t::record};
       const auto stamp=[&](std::size_t i){const auto t=clock_t::now();images[i]->frame_timestamp=t;images[i]->content_timestamp=t;};
-      const auto convert=[&](std::size_t i){require(converter.convert_rgb(*images[i],target.Get(),target_rtv.Get(),r.hdr_input,clock_t::now()-std::chrono::milliseconds(1))==0,"Actual RGB convert failed");require(!records.overflow&&!records.capture_fault,"Passive observer unavailable");};
+      const auto convert = [&](std::size_t i) {
+        const auto deadline = clock_t::now() - std::chrono::milliseconds(1);
+        const bool converted = (native_nv12 || r.native_p010) ? converter.convert(*images[i], deadline) == 0 :
+                                             converter.convert_rgb(*images[i], target.Get(), target_rtv.Get(), r.hdr_input, deadline) ==
+                                               d3d_base_encode_device::rgb_conversion_e::converted;
+        require(converted, "Actual converter failed");
+        require(!records.overflow && !records.capture_fault, "Passive observer unavailable");
+      };
       const auto wait_ready=[&](){const auto until=clock_t::now()+std::chrono::seconds(30);while(!est->can_accept_frame()){require(!est->has_terminal_failure()&&clock_t::now()<until,"Real root readiness timeout");std::this_thread::sleep_for(std::chrono::milliseconds(1));}};
-      stamp(0);convert(0);wait_ready();convert(0); // exact same img/source/content identity on retry
+      ComPtr<ID3D11Device> shutter_consumer;
+      ComPtr<ID3D11DeviceContext> shutter_context;
+      local_shutter_frame_ring_t shutter_ring;
+      using rgb_result_e = d3d_base_encode_device::rgb_conversion_e;
+      using rgb_destination_e = d3d_base_encode_device::rgb_destination_e;
+      const auto acquire_shutter_pair = [&](ID3D11Texture2D *previous) {
+        const auto limit = clock_t::now() + std::chrono::seconds(2);
+        while (!shutter_ring.failed() && clock_t::now() < limit) {
+          auto *pair = shutter_ring.acquire_pair();
+          if (pair && pair != previous) {
+            return pair;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        throw std::runtime_error("The consumer did not acquire the complete shutter pair");
+      };
+      const auto convert_shutter = [&](std::size_t i, const local_shutter_frame_ring_t::slot_t &slot, rgb_destination_e destination) {
+        const auto outcome = converter.convert_rgb(*images[i], slot.producer_texture.Get(), slot.producer_target.Get(),
+          r.hdr_input, clock_t::now() - std::chrono::milliseconds(1), destination);
+        require(!records.overflow && !records.capture_fault, "Passive observer unavailable");
+        return outcome;
+      };
+      const auto changed_shutter_destination = [&]() {
+        return copy_reference ? rgb_destination_e::backbuffer : shutter_ring.rgb_destination();
+      };
+      ID3D11Texture2D *initial_shutter_pair = nullptr;
+      stage_t initial_rgb_output;
+      stamp(0);
+      if (check_retained_rgb) {
+        hr(D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+          levels, 2, D3D11_SDK_VERSION, &shutter_consumer, nullptr, &shutter_context), "Shutter consumer device failed");
+        require(shutter_ring.init(converter.device.get(), shutter_consumer.Get(), td.Width, td.Height, td.Format),
+          "Actual shutter packet allocation failed");
+        auto *slot = shutter_ring.acquire_producer();
+        require(slot && !shutter_ring.has_published_pair() && !converter.sbs_intermediate_texture,
+          "Initial shutter slot or lazy scratch precondition unavailable");
+        require(convert_shutter(0, *slot, changed_shutter_destination()) == rgb_result_e::converted &&
+          shutter_ring.finish_producer(*slot, true, converter.device_ctx.get()), "Initial shutter frame was not published");
+        require(static_cast<bool>(converter.sbs_intermediate_texture) == copy_reference,
+          "Initial shutter frame used the wrong packed storage");
+        initial_shutter_pair = acquire_shutter_pair(nullptr);
+        initial_rgb_output.prepare(shutter_consumer.Get(), initial_shutter_pair);
+        require(initial_rgb_output.copy(shutter_context.Get(), initial_shutter_pair), "Initial shutter packet copy failed");
+        shutter_context->Flush();
+      } else {
+        convert(0);
+      }
+      wait_ready();
+      convert(0); // exact same img/source/content identity on retry
       const auto *a=records.last_draw();require(a&&a->publication_current&&!a->queued&&a->publication.frame_id==1&&converter.sbs_frame_sequence==2,"A/ACK protocol unavailable; no invented ordinal");
-      require(std::none_of(converter.matched_frame_slots.begin(),converter.matched_frame_slots.end(),[](const auto &s){return s.pending;}),"A retry unexpectedly enqueued; target3 unavailable");
+      require(!converter.pending_matched_frame, "A retry unexpectedly enqueued; target3 unavailable");
       if(!r.packed_continuity) {
         // convert() has released its encoder-side keyed lease. Reacquire that SAME
         // prepared A context before the initial diagnostic reads its shared SRV.
         const auto a_context=converter.img_ctx_map.find(static_cast<img_d3d_t&>(*images[0]).id);
         require(a_context!=converter.img_ctx_map.end()&&a_context->second.encoder_mutex&&
           a_context->second.encoder_input_res.get()==a->current_input.Get(),"Prepared A shared context identity unavailable");
-        texture_lock_helper a_snapshot_lease(a_context->second.encoder_mutex.get());
-        require(a_snapshot_lease.lock(),"Initial A shared diagnostic keyed lease failed");
+        detail::keyed_mutex_lock_t a_snapshot_lease {a_context->second.encoder_mutex.get()};
+        require(a_snapshot_lease.lock() == S_OK,"Initial A shared diagnostic keyed lease failed");
         records.prepare(converter.device.get(),*a,target.Get());records.copy_target(0,target.Get());
         converter.device_ctx->Flush(); // submit every shared read BEFORE ReleaseSync(0)
       }
       const auto a_publication=a->publication;
+      if (cached_route) {
+        require(a->selected_slot < a->slot_source_addresses.size(), "A must select a physical capture slot");
+        require(!a->flat && !a->repeat && !a->region.is_video_region() && images[0]->content_timestamp, "A must establish genuine full-source warped color and content clock");
+        const auto original = *a;
+        const auto owner = est;
+        std::array<stage_t, 6u> output;
+        for (std::size_t i = 0u; i < 4u; ++i) output[i].prepare(converter.device.get(), target.Get());
+        const auto base = resource(original.views[1].Get());require(base != nullptr, "A actual Base binding missing");
+        output[4].prepare(converter.device.get(), base.Get());output[5].prepare(converter.device.get(), base.Get());
+        require(output[0].copy(converter.device_ctx.get(), target.Get()) && output[4].copy(converter.device_ctx.get(), base.Get()), "A reference staging failed");
+        auto &fresh_image = static_cast<img_d3d_t &>(*images[1]);
+        const auto &fresh_context = converter.img_ctx_map.at(fresh_image.id);
+        {
+          detail::keyed_mutex_lock_t lease {fresh_image.capture_mutex.get()};require(lease.lock() == S_OK, "Fresh capture upload key failed");
+          display->device_ctx->UpdateSubresource(fresh_image.capture_texture.get(), 0u, nullptr, payload(r.frames[0]), w * pixel_bytes, 0u);
+          display->device_ctx->Flush();
+        }
+        stamp(1);images[1]->content_timestamp = images[0]->content_timestamp;
+        require(images[1]->frame_timestamp != images[0]->frame_timestamp, "Fresh capture must have a distinct source clock");
+        convert(1);
+        const auto *observed_cached = records.last_draw();require(observed_cached != nullptr, "Cached current draw absent");
+        const auto cached = *observed_cached;
+        require(cached.selected_slot == 0xffffffffu, "Retained geometry must draw without a matched capture slot");
+        require(cached.conversion == 3u && cached.cached_current_colour && !cached.flat && !cached.repeat && !cached.queued &&
+          cached.publication_current && cached.publication == a_publication && cached.model_frame == a_publication.frame_id &&
+          cached.actual_draw_pixel_source == 3u && cached.source_stamp_ticks == images[1]->frame_timestamp->time_since_epoch().count() &&
+          cached.content_stamp_ticks == images[0]->content_timestamp->time_since_epoch().count() &&
+          cached.views[0].Get() == fresh_context.encoder_input_res.get() && cached.current_input.Get() == cached.views[0].Get() &&
+          cached.views[0].Get() != original.views[0].Get() && cached.views[1].Get() == original.views[1].Get() &&
+          std::count_if(records.events.begin(), records.events.begin() + records.count, [](const auto &e) { return e.kind == event_e::admission; }) == 1,
+          "Exact full-source proof did not draw new capture color using A's genuine depth publication");
+        require(output[1].copy(converter.device_ctx.get(), target.Get()) && output[5].copy(converter.device_ctx.get(), base.Get()), "Cached output staging failed");
+        ComPtr<ID3D11Texture2D> flat_reference;ComPtr<ID3D11RenderTargetView> flat_reference_rtv;
+        hr(converter.device->CreateTexture2D(&td, nullptr, &flat_reference), "Route flat reference target failed");
+        hr(converter.device->CreateRenderTargetView(flat_reference.Get(), nullptr, &flat_reference_rtv), "Route flat reference RTV failed");
+        const context_t changed_context {w, h, context.instance + 1u, context.borrow_matched_capture};
+        require(r.hdr_input ? r.frames[0].rgba16 != r.frames[2].rgba16 : r.frames[0].bgra != r.frames[2].bgra, "Changed-route current pixels must differ from A");
+        converter.probe_context = &changed_context;stamp(2);convert(2);
+        require(converter.depth_estimator.get() == owner, "Route transition replaced the warmed estimator");
+        const auto changed_generation = converter.subtitle_context.generation();
+        const auto *observed_flat = records.last_draw();require(observed_flat != nullptr, "Changed-context draw absent");
+        const auto flat = *observed_flat;
+        require(flat.selected_slot == 0xffffffffu, "Changed-route flat draw must drop the matched capture");
+        auto &current_context = converter.img_ctx_map.at(static_cast<img_d3d_t &>(*images[2]).id);
+        require(flat.conversion == 4u && flat.flat && !flat.repeat && !flat.queued && !flat.cached_current_colour &&
+          flat.views[0].Get() == current_context.encoder_input_res.get() && flat.views[0].Get() == flat.current_input.Get() &&
+          flat.current_source_stamp_ticks == images[2]->frame_timestamp->time_since_epoch().count() && flat.watermark_after >= 4u &&
+          changed_generation != cached.context_generation && !converter.latest_v2_lineage.authenticated(),
+          "Changed synthetic route reused old protected pixels or analysis");
+        require(std::any_of(records.events.begin(), records.events.begin() + records.count, [](const auto &e) { return e.kind == event_e::admission && e.conversion == 4u && e.model_frame == 4u && e.force_infer && !e.queued && e.optional_work == static_cast<std::uint32_t>(models::depth_optional_work_mode_e::ordinary); }), "Changed route did not admit its own ordinary force-infer root4");
+        const auto entered_until = clock_t::now() + std::chrono::seconds(2);
+        std::optional<models::joined_completion_gate_benchmark::snapshot_t> held;
+        do { held = est->joined_completion_gate_status_for_benchmark();require(held && !held->released && clock_t::now() < entered_until, "Changed-route root gate unavailable");if (!held->callback_entered) std::this_thread::yield(); } while (!held->callback_entered);
+        const auto color = r.hdr_input ? models::input_color_space::scrgb_hdr : models::input_color_space::srgb;
+        {
+          detail::keyed_mutex_lock_t lease {current_context.encoder_mutex.get()};require(lease.lock() == S_OK, "Changed-route source key failed");
+          require(!est->try_finish_pending_depth_nonblocking(color, false).ready, "Changed-route root unexpectedly completed");
+          held = est->joined_completion_gate_status_for_benchmark();
+          require(held && held->configuration.target_frame_id == 4u && held->last_actual_event_query == CUDA_ERROR_NOT_READY && !held->released, "No literal pending root4 evidence");
+          host_sbs_v2_draw_command_t draw {.render_targets={flat_reference_rtv.Get(),nullptr}, .vertex_shader=converter.sbs_reprojection_vs.get(),
+            .pixel_shader=converter.sbs_flat_identity_ps.get(), .viewport=converter.sbs_viewport, .sampler=converter.sampler_linear.get(),
+            .shader_resources={flat.current_input.Get(),nullptr,nullptr,nullptr,nullptr,nullptr,nullptr}, .geometry_constants=flat.buffers[0].Get()};
+          require(record_host_sbs_v2_draw(converter.device_ctx.get(), draw) && output[2].copy(converter.device_ctx.get(), target.Get()) &&
+            output[3].copy(converter.device_ctx.get(), flat_reference.Get()), "Changed-route flat reference recording failed");
+          converter.device_ctx->Flush();
+        }
+        wait_ready();const auto released = est->joined_completion_gate_status_for_benchmark();
+        require(released && released->released && released->callback_exited && !released->cancelled && !released->callback_timed_out && !released->callback_entry_timed_out, "Changed-route root did not release normally");
+        convert(2);const auto *recovered = records.last_draw();
+        require(recovered && recovered->publication_current && recovered->publication.frame_id == 4u && !recovered->flat &&
+          recovered->selected_slot < recovered->slot_source_addresses.size() &&
+          !recovered->repeat && !recovered->cached_current_colour && recovered->pending_slots == 0u && recovered->context_generation == changed_generation,
+          "Changed-route root did not ACK under its own new context");
+        json artifacts = json::array();constexpr std::array<const char *, 6u> roles {"matched-A", "cached-current-A", "changed-route-flat", "canonical-current-flat", "matched-Base", "cached-Base"};
+        for (std::size_t i = 0u; i < output.size(); ++i) { output[i].read(converter.device_ctx.get());const auto path = root / (std::string(roles[i]) + (i >= 4u ? ".f32" : r.hdr_input ? ".rgba16f" : ".bgra8"));
+          std::ofstream f(path, std::ios::binary);f.write(output[i].bytes.data(), output[i].bytes.size());f.close();require(f.good(), "Cached-route artifact write failed");auto artifact = binding(path);artifact["role"] = roles[i];artifacts.push_back(artifact); }
+        require(output[0].bytes == output[1].bytes && output[4].bytes == output[5].bytes && output[2].bytes == output[3].bytes,
+          "Cached depth/current color or changed-route flat output differs from its literal reference");
+        write_json(root / "result.json", {{"schema",1}, {"status","PASS_FUNCTIONAL_CACHED_CURRENT_ROUTE"}, {"scope","actual converter; synthetic route transition; full-source exact content-clock proof; no live eligibility or latency claim"},
+          {"source_inputs",sources}, {"fresh_capture_payload_parent_index",0}, {"overwritten_archived_input_index",1}, {"cached_depth_publication",pub(cached.publication)},
+          {"A",event_json(original)}, {"cached_current",event_json(cached)}, {"changed_route_flat",event_json(flat)}, {"changed_route_recovered",event_json(*recovered)},
+          {"context_instances",{context.instance,changed_context.instance}}, {"context_generations",{cached.context_generation,changed_generation}}, {"cached_event_observation_us_diagnostic",cached.observation_us},
+          {"cached_model_observation_us",cached.publication.observation_timestamp_us}, {"gate_held",gate_json(held)}, {"gate_released",gate_json(released)}, {"outputs",artifacts}});
+        converter.probe_context = nullptr;converter.probe_observer = {};return 0;
+      }
       if(r.packed_continuity) {
         const auto a_pixel_source_frame=a->actual_draw_pixel_source;
         const auto a_source_stamp=a->source_stamp_ticks;
         require(a_pixel_source_frame!=0u&&a_source_stamp==a->current_source_stamp_ticks,
           "A actual RGB draw/source identity unavailable");
         // Only source arrival and the real joined-event gate are controlled. Every output below
-        // comes from convert_rgb(), its actual observer, and ordered copies of its RGB target.
-        require(r.frames[0].bgra!=r.frames[1].bgra,"A and B must have distinct authenticated source bytes");
-        std::array<stage_t,5> outputs;
-        for(auto &out:outputs)out.prepare(converter.device.get(),target.Get());
-        ComPtr<ID3D11Texture2D> flat_reference;
-        ComPtr<ID3D11RenderTargetView> flat_reference_rtv;
-        hr(converter.device->CreateTexture2D(&td,nullptr,&flat_reference),"Independent flat reference target failed");
-        hr(converter.device->CreateRenderTargetView(flat_reference.Get(),nullptr,&flat_reference_rtv),"Independent flat reference RTV failed");
-        require(outputs[0].copy(converter.device_ctx.get(),target.Get()),"Actual A target copy failed");
-        converter.device_ctx->Flush();
-        const auto idle_begin=clock_t::now();
-        std::this_thread::sleep_until(idle_begin+std::chrono::milliseconds(300));
-        const auto idle_end=clock_t::now();
+        // comes from the actual converter observer and ordered copies of its output target.
+        require(r.hdr_input ? r.frames[0].rgba16 != r.frames[1].rgba16 : r.frames[0].bgra != r.frames[1].bgra,
+          "A and B must have distinct authenticated source bytes");
+        const auto no_private_matched_texture = [&]() {
+          return std::none_of(converter.matched_frame_slots.begin(), converter.matched_frame_slots.end(),
+            [](const auto &slot) { return slot.texture && !slot.capture_image; });
+        };
+        require(a->views[0].Get() == a->current_input.Get() && images[0].use_count() == 1 &&
+          no_private_matched_texture(), "Completed A did not render from and release its shared capture image");
+        auto &b_image = static_cast<img_d3d_t &>(*images[1]);
+        auto &b_context = converter.img_ctx_map.at(b_image.id);
+        const auto free_pool_image = [&]() {
+          return std::find_if(images.begin(), images.end(), [](const auto &image) { return image.use_count() == 1; });
+        };
+        const auto check_pending_b_pin = [&]() {
+          auto *slot = converter.pending_matched_frame;
+          require(slot && slot->attribution.frame_id == 3u &&
+            slot->capture_image.get() == images[1].get() &&
+            slot->texture.get() == b_context.encoder_texture.get() &&
+            slot->srv.get() == b_context.encoder_input_res.get() && images[1].use_count() > 1 &&
+            no_private_matched_texture(), "Pending B did not pin the exact shared capture source");
+          const auto reserve_a = images[0];
+          require(free_pool_image() == images.begin() + 2,
+            "Three-image pool did not skip the pinned B source for C");
+        };
+        const auto check_released_b_pin = [&]() {
+          const auto reserve_a = images[0];
+          const auto reserve_c = images[2];
+          require(free_pool_image() == images.begin() + 1 &&
+            std::none_of(converter.matched_frame_slots.begin(), converter.matched_frame_slots.end(),
+              [&](const auto &slot) { return slot.capture_image.get() == images[1].get(); }) &&
+            no_private_matched_texture(), "Completed B did not release its exact capture image for recycle");
+        };
+        const auto wait_for_b_gate_entry = [&]() {
+          const auto entered_deadline=clock_t::now()+std::chrono::milliseconds(100);
+          for(;;) {
+            const auto status=est->joined_completion_gate_status_for_benchmark();
+            require(status&&!status->released&&clock_t::now()<entered_deadline,"No bounded held B callback window");
+            if(status->callback_entered) return;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          }
+        };
+        const auto real_pending = [&]() {
+          detail::keyed_mutex_lock_t lease {b_context.encoder_mutex.get()};
+          require(lease.lock(0, 100) == S_OK, "Diagnostic B completion query could not acquire its source key");
+          const auto color = r.hdr_input ? models::input_color_space::scrgb_hdr : models::input_color_space::srgb;
+          const auto pending=est->try_finish_pending_depth_nonblocking(color,false);
+          const auto held=est->joined_completion_gate_status_for_benchmark();
+          require(!pending.ready&&held&&held->queued&&held->callback_entered&&!held->released&&
+            !held->cancelled&&!held->callback_timed_out&&!held->callback_entry_timed_out&&
+            held->configuration.placement==models::joined_completion_gate_benchmark::placement_e::after_interop_unmaps&&
+            held->configuration.hold_after_callback_enter_ms==gate.hold_after_callback_enter_ms&&
+            held->configuration.callback_safety_timeout_ms==gate.callback_safety_timeout_ms&&
+            held->last_actual_event_query==CUDA_ERROR_NOT_READY&&held->actual_not_ready_queries>0u,
+            "B is not an actually queried held root; no manufactured pending result");
+          check_pending_b_pin();
+          return *held;
+        };
         const auto last_outcome=[&](std::uint64_t conversion) {
           for(std::size_t i=records.count;i>0;--i) {
             const auto &e=records.events[i-1u];
@@ -318,23 +599,106 @@ namespace actual_converter_probe_v1 {
           }
           throw std::runtime_error("Actual converter outcome missing");
         };
-        const auto real_pending=[&]() {
-          const auto pending=est->try_finish_pending_depth_nonblocking(models::input_color_space::srgb,false);
-          const auto held=est->joined_completion_gate_status_for_benchmark();
-          require(!pending.ready&&held&&held->queued&&held->callback_entered&&!held->released&&
-            !held->cancelled&&!held->callback_timed_out&&!held->callback_entry_timed_out&&
-            held->configuration.placement==models::joined_completion_gate_benchmark::placement_e::after_interop_unmaps&&
-            held->configuration.hold_after_callback_enter_ms==350u&&held->configuration.callback_safety_timeout_ms==500u&&
-            held->last_actual_event_query==CUDA_ERROR_NOT_READY&&held->actual_not_ready_queries>0u,
-            "B is not an actually queried held root; no manufactured pending result");
-          require(std::count_if(converter.matched_frame_slots.begin(),converter.matched_frame_slots.end(),
-            [](const auto &s){return s.pending&&s.frame_id==3u;})==1,"Held B lost its sole pending slot");
-          return *held;
+        stage_t recycled_b_source;
+        if (borrowed_recycle) {
+          records.borrowed_draw_sources[0].prepare(converter.device.get(), b_context.encoder_texture.get());
+          records.borrowed_draw_sources[1].prepare(converter.device.get(), b_context.encoder_texture.get());
+          recycled_b_source.prepare(converter.device.get(), b_context.encoder_texture.get());
+        }
+        std::array<stage_t, 6u> outputs;
+        const auto output_count = native_nv12 ? outputs.size() : outputs.size() - 1u;
+        for (std::size_t i = 0; i < output_count; ++i) {
+          if ((borrowed_recycle && i != 0u && i != 3u) || (check_retained_rgb && i == 3u)) {
+            continue;
+          }
+          outputs[i].prepare(converter.device.get(), target.Get());
+        }
+        const auto snapshot_target = [&](std::size_t index, const char *message) {
+          if (native_nv12 || r.native_p010) {
+            converter.device_ctx->OMSetRenderTargets(0, nullptr, nullptr);
+          }
+          auto *actual = r.native_p010 ? native_encoder->get_input_texture(converter.active_output_surface) : target.Get();
+          require(outputs[index].copy(converter.device_ctx.get(), actual), message);
         };
+        json native_input_proof = json::object();
+        const auto record_native_input = [&](const char *phase, const event_t &output, bool expect_unchanged) {
+          require(output.conversion == converter.sbs_frame_sequence &&
+                  (output.kind == event_e::packed_repeat || output.kind == event_e::convert_end),
+            "Native NV12 input proof does not name the latest successful conversion output");
+          const bool unchanged = !output.native_planes_written;
+          const bool kept = converter.conversion_kept_input();
+          native_input_proof[phase] = {{"encoder_input_pixels_unchanged", unchanged}, {"conversion_kept_input", kept},
+            {"conversion", output.conversion}, {"native_planes_written", output.native_planes_written}};
+          require(unchanged == expect_unchanged && !kept, "Native NV12 pixel identity disagrees with the actual converter phase");
+        };
+        ComPtr<ID3D11Texture2D> flat_reference;
+        ComPtr<ID3D11RenderTargetView> flat_reference_rtv;
+        if (native_nv12 || r.native_p010) {
+          record_native_input("matched_A", last_outcome(2u), false);
+        } else {
+          hr(converter.device->CreateTexture2D(&td,nullptr,&flat_reference),"Independent flat reference target failed");
+          hr(converter.device->CreateRenderTargetView(flat_reference.Get(),nullptr,&flat_reference_rtv),"Independent flat reference RTV failed");
+        }
+        const auto a_content_timestamp = converter.rendered_content_timestamp();
+        snapshot_target(0, "Actual A target copy failed");
+        json native_p010_proof = json::object();
+        unsigned native_a_surface = 0;
+        if (r.native_p010) {
+          const auto a_output = last_outcome(2u);
+          const bool expect_tiles = r.p010_chroma_mode == "default";
+          require(a_output.native_planes_written && a_output.p010_chroma_tiled == expect_tiles,
+            "Matched A used the wrong native P010 conversion program");
+          native_a_surface = converter.active_output_surface;
+          outputs[0].read(converter.device_ctx.get()); // Before mapping A; outside held B interval.
+          D3D11_TEXTURE2D_DESC desc {};
+          native_encoder->get_input_texture(native_a_surface)->GetDesc(&desc);
+          require(((desc.BindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0u) == (r.p010_chroma_mode != "no-uav"),
+            "Native P010 fixture allocation did not exercise the requested UAV policy");
+          require(native_encoder->submit_frame(1u,true) && native_encoder->frames_in_flight() == 1u,
+            "Actual matched A native submission failed");
+          native_p010_proof = {{"mode",r.p010_chroma_mode},{"A_surface",native_a_surface},
+            {"A_tiled",a_output.p010_chroma_tiled},{"A_bind_flags",desc.BindFlags},
+            {"gamma_mode",static_cast<unsigned>(converter.stream_gamma_mode())},
+            {"gamma_white_nits",converter.stream_gamma_white_nits()}};
+        }
+        ID3D11Texture2D *matched_a_shutter_pair = nullptr;
+        stage_t unused_rgb_target, retained_rgb_pair;
+        if (check_retained_rgb) {
+          auto *slot = shutter_ring.acquire_producer();
+          require(slot, "Shutter slot for matched A unavailable");
+          converter.device_ctx->CopyResource(slot->producer_texture.Get(), target.Get());
+          require(shutter_ring.finish_producer(*slot, true, converter.device_ctx.get()), "Matched A shutter publication failed");
+          matched_a_shutter_pair = acquire_shutter_pair(initial_shutter_pair);
+          retained_rgb_pair.prepare(shutter_consumer.Get(), matched_a_shutter_pair);
+          unused_rgb_target.prepare(converter.device.get(), target.Get());
+        }
+        converter.device_ctx->Flush();
+        const auto idle_begin=clock_t::now();
+        std::this_thread::sleep_until(idle_begin+std::chrono::milliseconds(300));
+        const auto idle_end=clock_t::now();
         stamp(1);
         const auto b_begin=clock_t::now();
-        convert(1);
+        if (check_retained_rgb) {
+          auto *slot = shutter_ring.acquire_producer();
+          require(slot != nullptr, "Shutter producer could not reserve a free slot for B");
+          const float canary[4] {};
+          converter.device_ctx->ClearRenderTargetView(slot->producer_target.Get(), canary);
+          require(convert_shutter(1, *slot, shutter_ring.rgb_destination()) == rgb_result_e::retained,
+            "The retained shutter pair unexpectedly rendered to the free slot");
+          require(unused_rgb_target.copy(converter.device_ctx.get(), slot->producer_texture.Get()),
+            "Copy of the unused shutter slot failed");
+          require(shutter_ring.finish_producer(*slot, false, converter.device_ctx.get()) &&
+                    shutter_ring.acquire_pair() == matched_a_shutter_pair &&
+                    retained_rgb_pair.copy(shutter_context.Get(), matched_a_shutter_pair),
+            "The consumer did not retain the original shutter packet");
+          shutter_context->Flush();
+        } else {
+          convert(1);
+        }
         const auto before=last_outcome(3u);
+        require(!r.native_p010 || (!before.native_planes_written && !before.p010_chroma_tiled &&
+          native_encoder->frames_in_flight() == 1u && converter.active_output_surface == native_a_surface),
+          "Held B changed the mapped native A output instead of retaining it");
         const json first_checks{{"repeat",before.repeat},{"not_flat",!before.flat},{"not_queued",!before.queued},
           {"packed_valid",before.packed_valid},{"route_matches",before.route_matches},{"changed_source",!before.source_matches},
           {"actual_A_pixel_source_matches",before.pixel_source_frame==a_pixel_source_frame},
@@ -354,19 +718,255 @@ namespace actual_converter_probe_v1 {
           b_admission->force_infer&&!b_admission->gpu_undecided&&
           b_admission->optional_work==static_cast<std::uint32_t>(models::depth_optional_work_mode_e::ordinary),
           "B did not take the actual ordinary force-infer admission branch");
-        require(outputs[1].copy(converter.device_ctx.get(),target.Get()),"Actual before-cap packed target copy failed");
-        converter.device_ctx->Flush();
-        const auto entered_deadline=clock_t::now()+std::chrono::milliseconds(100);
-        for(;;) {
-          const auto status=est->joined_completion_gate_status_for_benchmark();
-          require(status&&!status->released&&clock_t::now()<entered_deadline,"No bounded held B callback window");
-          if(status->callback_entered)break;
-          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (native_nv12) {
+          record_native_input("packed_A_before_cap", before, true);
+          require(a_content_timestamp && converter.rendered_content_timestamp() == a_content_timestamp,
+            "Copy-free packed repeat changed its rendered content timestamp");
         }
+        if (!borrowed_recycle) {
+          snapshot_target(1, "Actual before-cap packed target copy failed");
+        }
+        converter.device_ctx->Flush();
+        wait_for_b_gate_entry();
         const auto held_before=real_pending();
+        if (borrowed_recycle) {
+          auto &c_image = static_cast<img_d3d_t &>(*images[2]);
+          const auto &c_context = converter.img_ctx_map.at(c_image.id);
+          const auto upload_a_pixels = [&](img_d3d_t &image) {
+            detail::keyed_mutex_lock_t lease {image.capture_mutex.get()};
+            require(lease.lock(0, 100) == S_OK, "Reusable capture image key unavailable");
+            display->device_ctx->UpdateSubresource(image.capture_texture.get(), 0, nullptr, payload(r.frames[0]), w * pixel_bytes, 0);
+            display->device_ctx->Flush();
+          };
+          // Frame 3 of the Continuity recipe can be byte-identical to B. Reuse archived A
+          // bytes on the available third image C so recycling is observable and reproducible.
+          upload_a_pixels(c_image);
+          stamp(2);
+          wait_ready(); // Query-only preflight. The converter still owns the sole B completion.
+          const auto released = est->joined_completion_gate_status_for_benchmark();
+          require(released && released->released && released->callback_exited && !released->cancelled &&
+            !released->callback_timed_out && !released->callback_entry_timed_out,
+            "B did not become ready after its genuine held root");
+          const auto timeout_conversion = converter.sbs_frame_sequence + 1u;
+          {
+            detail::keyed_mutex_lock_t contention {b_image.capture_mutex.get()};
+            require(contention.lock(0, 100) == S_OK, "Could not induce prior-image key contention");
+            convert(2);
+          }
+          const auto key_timeout = last_outcome(timeout_conversion);
+          require(!r.native_p010 || (!key_timeout.native_planes_written && !key_timeout.p010_chroma_tiled &&
+            native_encoder->frames_in_flight() == 1u && converter.active_output_surface == native_a_surface),
+            "Unavailable B source changed the mapped native A output");
+          const auto still_unconsumed = est->joined_completion_gate_status_for_benchmark();
+          require(still_unconsumed && still_unconsumed->actual_event_queries == released->actual_event_queries + 1 &&
+            still_unconsumed->last_actual_event_query == CUDA_SUCCESS &&
+            key_timeout.repeat && !key_timeout.flat && key_timeout.watermark_after == key_timeout.watermark_before &&
+            key_timeout.current_input.Get() == c_context.encoder_input_res.get(),
+            "Unavailable B key did not leave the ready completion pending and repeat packed A");
+          check_pending_b_pin();
+
+          const auto recovery_conversion = converter.sbs_frame_sequence + 1u;
+          records.borrowed_draw_conversion = recovery_conversion;
+          // Current C retains its capture stamp. The ready completion still owns B.
+          if (check_retained_rgb) {
+            auto *slot = shutter_ring.acquire_producer();
+            require(slot && convert_shutter(2, *slot, changed_shutter_destination()) == rgb_result_e::converted &&
+                      shutter_ring.finish_producer(*slot, true, converter.device_ctx.get()),
+              "The joined B completion did not produce a shutter pair");
+          } else {
+            convert(2);
+          }
+          records.borrowed_draw_conversion = 0;
+          const auto recovered = last_outcome(recovery_conversion);
+          require(!check_retained_rgb || recovered.rgb_rendered_directly == !copy_reference,
+            "The qualified matched warp used the wrong packed storage");
+          const auto *draw = records.last_draw();
+          require(draw && draw->conversion == recovery_conversion && draw->publication_current && !draw->flat && !draw->queued &&
+            draw->publication.frame_id == 3u && draw->actual_draw_pixel_source == 3u &&
+            draw->source_stamp_ticks == before.current_source_stamp_ticks &&
+            draw->current_source_stamp_ticks == images[2]->frame_timestamp->time_since_epoch().count() &&
+            draw->current_source_stamp_ticks != draw->source_stamp_ticks &&
+            draw->views[0].Get() == b_context.encoder_input_res.get() &&
+            draw->current_input.Get() == c_context.encoder_input_res.get() &&
+            recovered.publication_current && !recovered.repeat && recovered.query_observed &&
+            recovered.literal_last_query_result == CUDA_SUCCESS && recovered.literal_ready_count > 0u,
+            "Late C conversion did not render the genuine B completion from its separately keyed source");
+          check_released_b_pin();
+          if (check_retained_rgb) {
+            auto *pair = acquire_shutter_pair(matched_a_shutter_pair);
+            outputs[3].prepare(shutter_consumer.Get(), pair);
+            require(outputs[3].copy(shutter_context.Get(), pair), "Direct shutter pair consumer readback failed");
+          } else {
+            snapshot_target(3, "Actual late B target copy failed");
+          }
+
+          if (r.native_p010) {
+            const auto b_surface = converter.active_output_surface;
+            require(recovered.native_planes_written && recovered.p010_chroma_tiled == (r.p010_chroma_mode == "default") &&
+              b_surface != native_a_surface && native_encoder->frames_in_flight() == 1u &&
+              !native_encoder->input_waits_for_retirement(),
+              "B did not convert into a distinct free native P010 owner while A remained mapped");
+            D3D11_TEXTURE2D_DESC desc {};
+            native_encoder->get_input_texture(b_surface)->GetDesc(&desc);
+            require(((desc.BindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0u) == (r.p010_chroma_mode != "no-uav"),
+              "B native P010 allocation differs from the requested UAV policy");
+            require(native_encoder->submit_frame(2u,false) && native_encoder->frames_in_flight() == 2u,
+              "Both actual native pictures were not accepted before retrieval");
+            auto packet_a = native_encoder->retrieve_frame();
+            auto packet_b = native_encoder->retrieve_frame();
+            require(!packet_a.data.empty() && !packet_b.data.empty() && packet_a.frame_index == 1u &&
+              packet_b.frame_index == 2u && packet_a.idr && native_encoder->frames_in_flight() == 0u,
+              "Native HEVC/AV1 packets did not retire the exact A/B owners in FIFO order");
+            const auto stream_path = root / (native_codec == 1 ? "native.hevc" : "native.obu");
+            std::ofstream stream(stream_path,std::ios::binary);
+            stream.write(reinterpret_cast<const char *>(packet_a.data.data()),static_cast<std::streamsize>(packet_a.data.size()));
+            stream.write(reinterpret_cast<const char *>(packet_b.data.data()),static_cast<std::streamsize>(packet_b.data.size()));
+            stream.flush();require(stream.good(),"Native P010 bitstream write failed");stream.close();
+            native_p010_proof["B_surface"] = b_surface;
+            native_p010_proof["B_tiled"] = recovered.p010_chroma_tiled;
+            native_p010_proof["B_bind_flags"] = desc.BindFlags;
+            native_p010_proof["submitted_before_retrieval"] = 2u;
+            native_p010_proof["packets"] = json::array({
+              {{"frame_index",packet_a.frame_index},{"idr",packet_a.idr},{"bytes",packet_a.data.size()}},
+              {{"frame_index",packet_b.frame_index},{"idr",packet_b.idr},{"bytes",packet_b.data.size()}}});
+            native_p010_proof["stream"] = binding(stream_path);
+            native_p010_proof["independent_decode_qualified"] = false;
+          }
+
+          // Only after the actual matched draw and its keyed diagnostic copies are recorded can
+          // the capture pool recycle B. Mutate that same shared surface before mapping any data.
+          upload_a_pixels(b_image);
+          stamp(1);
+          {
+            detail::keyed_mutex_lock_t lease {b_context.encoder_mutex.get()};
+            require(lease.lock(0, 100) == S_OK &&
+              recycled_b_source.copy(converter.device_ctx.get(), b_context.encoder_texture.get()),
+              "Recycled B shared source readback unavailable");
+            converter.device_ctx->Flush();
+          }
+          for (auto &source : records.borrowed_draw_sources) source.read(converter.device_ctx.get());
+          recycled_b_source.read(converter.device_ctx.get());
+          outputs[3].read(check_retained_rgb ? shutter_context.Get() : converter.device_ctx.get());
+          if (check_retained_rgb) {
+            unused_rgb_target.read(converter.device_ctx.get());
+            retained_rgb_pair.read(shutter_context.Get());
+            outputs[0].read(converter.device_ctx.get());
+            initial_rgb_output.read(shutter_context.Get());
+            require(!unused_rgb_target.bytes.empty() &&
+                      std::all_of(unused_rgb_target.bytes.begin(), unused_rgb_target.bytes.end(),
+                        [](char byte) { return byte == 0; }),
+              "Retaining a shutter pair modified the unused RGB target");
+            require(!outputs[0].bytes.empty() && retained_rgb_pair.bytes == outputs[0].bytes,
+              "The consumer's retained packet differs from the full reference A output");
+          }
+          const auto matches_frame = [&](const stage_t &stage, std::size_t index) {
+            return stage.copied && stage.bytes.size() == payload_size(r.frames[index]) &&
+              std::memcmp(stage.bytes.data(), payload(r.frames[index]), stage.bytes.size()) == 0;
+          };
+          const auto &matched_b = records.borrowed_draw_sources[0];
+          const auto &current_c = records.borrowed_draw_sources[1];
+          require(matches_frame(matched_b, 1) && matches_frame(current_c, 0) && matches_frame(recycled_b_source, 0) &&
+            matched_b.actual_resource_address == recycled_b_source.actual_resource_address &&
+            matched_b.actual_resource_address != current_c.actual_resource_address &&
+            (matched_b.source_misc & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX) &&
+            (current_c.source_misc & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX),
+            "Keyed snapshots did not retain literal B pixels across C arrival and B recycle");
+          json artifacts = json::array();
+          const auto save = [&](const std::string &name, const stage_t &stage) {
+            const auto path = root / name;
+            std::ofstream file(path, std::ios::binary);
+            file.write(stage.bytes.data(), static_cast<std::streamsize>(stage.bytes.size()));
+            file.flush();
+            require(file.good(), "Borrowed capture readback artifact write failed");
+            file.close();
+            auto artifact = binding(path);
+            artifact["role"] = name;
+            artifact["resource_address"] = stage.actual_resource_address;
+            return artifact;
+          };
+          const std::string suffix = r.hdr_input ? ".rgba16f" : ".bgra8";
+          artifacts.push_back(save("late-draw-matched-B" + suffix, matched_b));
+          artifacts.push_back(save("late-draw-current-C" + suffix, current_c));
+          artifacts.push_back(save("recycled-B" + suffix, recycled_b_source));
+          artifacts.push_back(save("late-draw-output" + (r.native_p010 ? ".p010" : native_nv12 ? ".nv12" : suffix), outputs[3]));
+          if (r.native_p010) artifacts.push_back(save("matched-A.p010",outputs[0]));
+          // A fresh C may have entered the sole slot during B's successful recovery. Retire
+          // it on the same immutable C source before the diagnostic converter is destroyed.
+          if (converter.pending_matched_frame) {
+            wait_ready();
+            convert(2);
+            require(!converter.pending_matched_frame, "Final C still retains a pending capture source");
+          }
+          if (check_retained_rgb) {
+            auto image = display->alloc_img();
+            image->width = image->height = 16;
+            auto &capture = static_cast<img_d3d_t &>(*image);
+            const auto image_id = capture.id;
+            const auto format = display->capture_format;
+            display->capture_format = DXGI_FORMAT_UNKNOWN;
+            const auto dummy_status = display->complete_img(image.get(), true);
+            display->capture_format = format;
+            d3d_base_encode_device::encoder_img_ctx_t imported;
+            require(dummy_status == 0 && converter.initialize_image_context(capture, imported) == 0,
+              "Dummy source import failed");
+            const auto dummy_desc = imported.encoder_texture.description();
+            ComPtr<ID3D11Texture2D> dummy_texture {imported.encoder_texture.get()};
+            require(dummy_desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM &&
+              display->complete_img(image.get(), false) == 0 && capture.id == image_id &&
+              converter.initialize_image_context(capture, imported) == 0,
+              "Pooled image did not reopen for real capture");
+            auto *real_texture = imported.encoder_texture.get();
+            require(real_texture != dummy_texture.Get(), "Pooled image kept the dummy shared resource");
+            D3D11_TEXTURE2D_DESC actual_desc {};
+            real_texture->GetDesc(&actual_desc);
+            require(actual_desc.Format == format &&
+              converter.source_signatures_match(imported.encoder_texture.description(), actual_desc) &&
+              converter.initialize_image_context(capture, imported) == 0 &&
+              imported.encoder_texture.get() == real_texture,
+              "Reopened capture did not keep its actual description and resource");
+          }
+          write_json(root / "result.json", {{"schema",1},{"status",r.native_p010 ? "PASS_FUNCTIONAL_ACTUAL_CONVERTER_NATIVE_P010" : "PASS_FUNCTIONAL_ACTUAL_CONVERTER_BORROWED_CAPTURE_RECYCLE"},
+            {"context_scope","synthetic-video-scheduling-only; not actual Win32 eligibility"}, {"source_inputs",sources},
+            {"capture_device_adapter",capture_device_adapter},{"converter_device_adapter",converter_device_adapter},
+            {"target_format",static_cast<UINT>(td.Format)},{"target_width",td.Width},{"target_height",td.Height},
+            {"retained_rgb_target_untouched",check_retained_rgb},{"native_p010",native_p010_proof},
+            {"initial_shutter_frame_direct_without_scratch",check_retained_rgb && !copy_reference},
+            {"pooled_dummy_to_real_reimport_verified",check_retained_rgb},
+            {"initial_shutter_output",check_retained_rgb ? save("initial-shutter-output" + suffix, initial_rgb_output) : json(nullptr)},
+            {"late_draw_rgb_rendered_directly",recovered.rgb_rendered_directly},
+            {"B_pending_pinned_source",true},{"B_key_timeout_preserved_ready_owner",true},{"B_released_and_recycled",true},
+            {"C_and_recycled_B_use_archived_A_payload",true},{"private_matched_texture_allocated",false},
+            {"before_cap",event_json(before)},{"key_timeout",event_json(key_timeout)},{"late_draw",event_json(*draw)},
+            {"gate_held",gate_json(held_before)},{"gate_released",gate_json(released)},{"outputs",artifacts}});
+          converter.depth_estimator.reset();est=nullptr;return 0;
+        }
+        std::uint64_t after_cap_conversion = 4u;
+        if (native_nv12) {
+          // Force the same input-cache invalidation used by stream gamma. The dirty input is
+          // private to this fixture; neither packed RGB nor the held B publication is changed.
+          const float overwrite_y[4] {1.0f, 0.0f, 0.0f, 0.0f};
+          const float overwrite_uv[4] {};
+          auto &output = converter.active_output_views();
+          converter.device_ctx->ClearRenderTargetView(output.y_or_yuv.get(), overwrite_y);
+          converter.device_ctx->ClearRenderTargetView(output.uv.get(), overwrite_uv);
+          snapshot_target(4, "Sentinel NV12 input copy failed");
+          converter.host_sbs_encoder_input_state.reset();
+          convert(1);
+          const auto redrawn = last_outcome(4u);
+          require(redrawn.repeat && !redrawn.flat && !redrawn.queued && redrawn.route_matches &&
+                  redrawn.pixel_source_frame == a_pixel_source_frame && redrawn.pixel_source_stamp_ticks == a_source_stamp &&
+                  redrawn.current_source_stamp_ticks == before.current_source_stamp_ticks &&
+                  converter.rendered_content_timestamp() == a_content_timestamp,
+            "Input refresh did not redraw the same packed A while B remained pending");
+          native_input_proof["cache_reset_repeat"] = event_json(redrawn);
+          record_native_input("redrawn_A_after_cache_reset", redrawn, false);
+          snapshot_target(5, "Redrawn NV12 input copy failed");
+          (void) real_pending();
+          ++after_cap_conversion;
+        }
         std::this_thread::sleep_until(b_begin+std::chrono::milliseconds(280));
         convert(1); // The literal same B source; no new capture stamp or new root.
-        const auto after=last_outcome(4u);
+        const auto after=last_outcome(after_cap_conversion);
         const auto held_after=real_pending();
         require(after.flat&&!after.repeat&&!after.queued&&!after.packed_valid&&after.current_input&&
           after.views[0].Get()==after.current_input.Get()&&
@@ -375,15 +975,18 @@ namespace actual_converter_probe_v1 {
           after.slot_source_addresses==before.slot_source_addresses&&
           after.host_event_us-before.host_event_us>250000,
           "After-cap converter output was not actual current-flat B while B remained held");
-        require(outputs[2].copy(converter.device_ctx.get(),target.Get()),"Actual after-cap flat target copy failed");
+        if (native_nv12) {
+          record_native_input("current_flat_B_after_cap", after, false);
+        }
+        snapshot_target(2, "Actual after-cap flat target copy failed");
         // Independent GPU reference uses the production flat PS and recorder. It never writes
         // the converter target, chooses a converter route, or substitutes CPU-authored pixels.
-        const auto b_context=converter.img_ctx_map.find(static_cast<img_d3d_t&>(*images[1]).id);
-        require(b_context!=converter.img_ctx_map.end()&&b_context->second.encoder_mutex&&
-          b_context->second.encoder_input_res.get()==after.current_input.Get(),"Actual B shared source identity unavailable");
-        {
-          texture_lock_helper source_lease(b_context->second.encoder_mutex.get());
-          require(source_lease.lock(),"Independent B flat reference shared-source lease failed");
+        if (!native_nv12) {
+          const auto b_context=converter.img_ctx_map.find(static_cast<img_d3d_t&>(*images[1]).id);
+          require(b_context!=converter.img_ctx_map.end()&&b_context->second.encoder_mutex&&
+            b_context->second.encoder_input_res.get()==after.current_input.Get(),"Actual B shared source identity unavailable");
+          detail::keyed_mutex_lock_t source_lease {b_context->second.encoder_mutex.get()};
+          require(source_lease.lock() == S_OK,"Independent B flat reference shared-source lease failed");
           host_sbs_v2_draw_command_t reference {
             .render_targets={flat_reference_rtv.Get(),nullptr},
             .vertex_shader=converter.sbs_reprojection_vs.get(),
@@ -404,36 +1007,64 @@ namespace actual_converter_probe_v1 {
           !released->callback_timed_out&&!released->callback_entry_timed_out,
           "B release did not follow the independent bounded gate timer");
         convert(1);
-        const auto recovered=last_outcome(5u);
+        const auto recovered=last_outcome(after_cap_conversion+1u);
         require(!recovered.flat&&!recovered.repeat&&!recovered.queued&&recovered.publication_current&&
           recovered.publication.frame_id==3u&&recovered.source_stamp_ticks==before.current_source_stamp_ticks&&
           recovered.current_source_stamp_ticks==before.current_source_stamp_ticks&&recovered.pending_slots==0u&&
           recovered.query_observed&&recovered.literal_last_query_result==CUDA_SUCCESS&&
           recovered.literal_ready_count>0u&&recovered.gate_released,
           "Exact held B did not genuinely ACK and recover without restamping/resubmission");
+        require(recovered.views[0].Get() == b_context.encoder_input_res.get(),
+          "Recovered B did not draw from its pinned shared source");
+        check_released_b_pin();
         require(std::count_if(records.events.begin(),records.events.begin()+records.count,
           [](const auto &e){return e.kind==event_e::admission;})==2,
           "Static/pending/recovery deliveries unexpectedly admitted another root");
-        require(outputs[3].copy(converter.device_ctx.get(),target.Get()),"Actual recovered B target copy failed");
-        for(auto &out:outputs) {
-          out.read(converter.device_ctx.get());
-          require(out.read_complete_us>=released->released_wall_us,"Target readback preceded real B release");
+        if (native_nv12) {
+          record_native_input("recovered_B", recovered, false);
         }
-        require(outputs[0].bytes==outputs[1].bytes,"Actual packed-before-cap RGB differs from retained actual A RGB");
-        require(outputs[2].bytes==outputs[4].bytes,"Actual after-cap RGB differs from independent production flat B GPU draw");
-        require(outputs[0].bytes!=outputs[4].bytes,"A and flat B render identically; fixture cannot distinguish the source");
-        constexpr std::array<const char *,5> output_names{{"matched-A.bgra8","packed-A-before-cap.bgra8","current-flat-B-after-cap.bgra8","recovered-B.bgra8","independent-flat-B-reference.bgra8"}};
+        snapshot_target(3, "Actual recovered B target copy failed");
+        for (std::size_t i = 0; i < output_count; ++i) {
+          outputs[i].read(converter.device_ctx.get());
+          require(outputs[i].read_complete_us>=released->released_wall_us,"Target readback preceded real B release");
+        }
+        require(outputs[0].bytes == outputs[1].bytes, "Actual packed-before-cap output differs from retained A");
+        constexpr std::array<const char *, 5u> rgb_names {{"matched-A.bgra8", "packed-A-before-cap.bgra8",
+          "current-flat-B-after-cap.bgra8", "recovered-B.bgra8", "independent-flat-B-reference.bgra8"}};
+        constexpr std::array<const char *, 6u> nv12_names {{"matched-A.nv12", "packed-A-before-cap.nv12",
+          "current-flat-B-after-cap.nv12", "recovered-B.nv12", "sentinel-before-redraw.nv12", "packed-A-after-cache-reset.nv12"}};
+        if (native_nv12) {
+          const auto luma_bytes = static_cast<std::size_t>(td.Width) * td.Height;
+          const auto &a_bytes = outputs[0].bytes;
+          const auto &sentinel = outputs[4].bytes;
+          require(a_bytes.size() == luma_bytes + luma_bytes / 2u && sentinel.size() == a_bytes.size(),
+            "Native NV12 evidence has an invalid plane layout");
+          require(!std::equal(a_bytes.begin(), a_bytes.begin() + luma_bytes, sentinel.begin()) &&
+                  !std::equal(a_bytes.begin() + luma_bytes, a_bytes.end(), sentinel.begin() + luma_bytes),
+            "Reset sentinel did not change both NV12 planes");
+          require(outputs[5].bytes == a_bytes, "Reset repeat failed to restore both NV12 planes bit-for-bit");
+          require(outputs[2].bytes != a_bytes && outputs[3].bytes != a_bytes,
+            "Flat or recovered B is not distinguishable from retained NV12 A");
+          native_input_proof["luma_bytes"] = luma_bytes;
+          native_input_proof["chroma_bytes"] = luma_bytes / 2u;
+          native_input_proof["repeat_preserved_both_planes"] = true;
+          native_input_proof["cache_reset_redrew_both_planes"] = true;
+        } else {
+          require(outputs[2].bytes==outputs[4].bytes,"Actual after-cap RGB differs from independent production flat B GPU draw");
+          require(outputs[0].bytes!=outputs[4].bytes,"A and flat B render identically; fixture cannot distinguish the source");
+        }
         json artifacts=json::array(),trace=json::array();
-        for(std::size_t i=0;i<outputs.size();++i) {
-          const auto path=root/output_names[i];std::ofstream file(path,std::ios::binary);
+        for (std::size_t i = 0; i < output_count; ++i) {
+          const auto name = native_nv12 ? nv12_names[i] : rgb_names[i];
+          const auto path=root/name;std::ofstream file(path,std::ios::binary);
           file.write(outputs[i].bytes.data(),static_cast<std::streamsize>(outputs[i].bytes.size()));file.flush();
           require(file.good(),"Continuity output artifact write failed");file.close();
-          auto artifact=binding(path);artifact["role"]=output_names[i];
+          auto artifact=binding(path);artifact["role"]=name;
           artifact["copy_issued_us"]=outputs[i].copy_issued_us;artifact["read_complete_us"]=outputs[i].read_complete_us;
           artifacts.push_back(artifact);
         }
         for(std::size_t i=0;i<records.count;++i)trace.push_back(event_json(records.events[i]));
-        write_json(root/"result.json",{{"schema",1},{"status","PASS_FUNCTIONAL_ACTUAL_CONVERTER_PACKED_CONTINUITY_ONLY"},
+        auto qualified = json{{"schema",1},{"status", native_nv12 ? "PASS_FUNCTIONAL_ACTUAL_CONVERTER_NATIVE_NV12_INPUT_STABILITY" : "PASS_FUNCTIONAL_ACTUAL_CONVERTER_PACKED_CONTINUITY_ONLY"},
           {"context_scope","synthetic-video-scheduling-only; not actual Win32 eligibility"},
           {"source_inputs",sources},{"unused_third_source_not_admitted",true},
           {"static_idle_us",std::chrono::duration_cast<std::chrono::microseconds>(idle_end-idle_begin).count()},
@@ -445,10 +1076,19 @@ namespace actual_converter_probe_v1 {
           {"gate_configuration",{{"placement",static_cast<UINT>(held_after.configuration.placement)},
             {"hold_ms",held_after.configuration.hold_after_callback_enter_ms},{"callback_safety_ms",held_after.configuration.callback_safety_timeout_ms}}},
           {"selected_adapter",selected_adapter},{"capture_device_adapter",capture_device_adapter},{"converter_device_adapter",converter_device_adapter},
-          {"target_width",2u*w},{"target_height",h},{"target_format",static_cast<UINT>(td.Format)},
+          {"target_width",td.Width},{"target_height",td.Height},{"target_format",static_cast<UINT>(td.Format)},
           {"outputs",artifacts},{"trace",trace},{"readbacks_only_after_release",true},
+          {"borrowed_capture",{{"A_draw_used_shared_source",true},{"B_pending_pinned_source",true},
+            {"pool_skipped_B_while_pending",true},{"B_recovered_from_shared_source",true},
+            {"pool_can_recycle_B_after_draw",true},{"private_matched_texture_allocated",false}}},
           {"no_CPU_warp_or_fabricated_completion_or_output_substitution",true},
-          {"live_classification_encoder_presenter_latency_or_FPS_qualified",false}});
+          {"live_classification_encoder_presenter_latency_or_FPS_qualified",false}};
+        if (native_nv12) {
+          qualified["source_width"] = w;
+          qualified["source_height"] = h;
+          qualified["native_input_proof"] = std::move(native_input_proof);
+        }
+        write_json(root/"result.json", qualified);
         converter.depth_estimator.reset();est=nullptr;return 0;
       }
       // All diagnostic staging/textures/CPU vectors now exist. No Map/hash/JSON until release.
@@ -469,7 +1109,8 @@ namespace actual_converter_probe_v1 {
       for(;;){auto q=est->joined_completion_gate_status_for_benchmark();require(q&&!q->released&&clock_t::now()<entered_deadline,"No held B gate window");if(q->callback_entered)break;std::this_thread::sleep_for(std::chrono::milliseconds(1));}
       const auto pending=est->try_finish_pending_depth_nonblocking(r.hdr_input?models::input_color_space::scrgb_hdr:models::input_color_space::srgb,false);const auto after_query=us();
       const auto held=est->joined_completion_gate_status_for_benchmark();require(!pending.ready&&held&&held->callback_entered&&!held->released&&held->last_actual_event_query==CUDA_ERROR_NOT_READY,"B must be actual recorded NOT_READY");
-      require(converter.sbs_frame_sequence==3&&std::count_if(converter.matched_frame_slots.begin(),converter.matched_frame_slots.end(),[](const auto &s){return s.pending&&s.frame_id==3;})==1,"Exact pending B source slot lost");
+      require(converter.sbs_frame_sequence == 3 && converter.pending_matched_frame &&
+        converter.pending_matched_frame->attribution.frame_id == 3, "Exact pending B source slot lost");
       const auto b_admission=std::find_if(records.events.begin(),records.events.begin()+records.count,[](const auto &e){return e.kind==event_e::admission&&e.conversion==3;});
       require(b_admission!=records.events.begin()+records.count&&b_admission->model_frame==3&&b_admission->force_infer&&!b_admission->gpu_undecided&&
         b_admission->optional_work==static_cast<std::uint32_t>(models::depth_optional_work_mode_e::ordinary),"B did not take the actual ordinary force-infer admission branch");
@@ -484,7 +1125,8 @@ namespace actual_converter_probe_v1 {
         const auto still_pending=est->try_finish_pending_depth_nonblocking(r.hdr_input?models::input_color_space::scrgb_hdr:models::input_color_space::srgb,false);
         pending_c_query=est->joined_completion_gate_status_for_benchmark();
         require(!timeout_forced_release.load()&&!still_pending.ready&&pending_c_query&&pending_c_query->callback_entered&&!pending_c_query->released&&pending_c_query->last_actual_event_query==CUDA_ERROR_NOT_READY,"No real pending-B window at C return; timeout is unavailable, not success");
-        require(records.captured[4]&&converter.sbs_frame_sequence==4&&std::count_if(converter.matched_frame_slots.begin(),converter.matched_frame_slots.end(),[](const auto&s){return s.pending&&s.frame_id==3;})==1,"C arrival lost actual pending B lease");
+        require(records.captured[4] && converter.sbs_frame_sequence == 4 && converter.pending_matched_frame &&
+          converter.pending_matched_frame->attribution.frame_id == 3, "C arrival lost actual pending B lease");
         require(std::none_of(records.events.begin(),records.events.begin()+records.count,[](const auto &e){return e.kind==event_e::admission&&e.conversion==4;}),"C was admitted while B retained the sole inflight lease");
       }
       require(!timeout_forced_release.load(),"Independent release deadline fired before selection proof");
@@ -492,12 +1134,18 @@ namespace actual_converter_probe_v1 {
       const auto released=est->joined_completion_gate_status_for_benchmark();require(released&&released->released,"Release not observed");released_before_readback=true;
       records.armed=3;const auto ack_begin=us();convert(pending_arrival?2:1);const auto ack_return=us();
       require(records.captured[3]&&records.phase_event[3].publication_current&&records.phase_event[3].publication.frame_id==3,"Genuine converter B ACK unavailable");
-      if(!pending_arrival){require(converter.sbs_frame_sequence==4&&std::none_of(converter.matched_frame_slots.begin(),converter.matched_frame_slots.end(),[](const auto&s){return s.pending;}),"B ACK unexpectedly resubmitted");records.copy_target(3,target.Get());}
+      if (!pending_arrival) {
+        require(converter.sbs_frame_sequence == 4 && !converter.pending_matched_frame, "B ACK unexpectedly resubmitted");
+        records.copy_target(3, target.Get());
+      }
       if(!pending_arrival){records.armed=5;stamp(2);convert(2);}
       if(!records.captured[5]){wait_ready();convert(2);}
       require(records.captured[5]&&records.phase_event[5].publication_current,"Genuine C not yet drawn; no synthetic empty proof");
       records.copy_target(5,target.Get());records.read_all();
-      for(std::size_t k=0;k<12;++k)require(records.stages[5][k].copied,"Genuine C core render tuple missing");
+      for(std::size_t k=0;k<12;++k){
+        if(k==3u && !records.legacy_matte_expected)continue;
+        require(records.stages[5][k].copied,"Genuine C core render tuple missing");
+      }
       if(r.queued){for(std::size_t k=0;k<slot_count;++k)if(records.stages[2][k].copied&&records.stages[3][k].copied){
         if(pending_arrival&&k==22){
           const auto &before=records.stages[2][k].bytes;const auto &after=records.stages[3][k].bytes;
@@ -510,7 +1158,8 @@ namespace actual_converter_probe_v1 {
         require(records.stages[4][20].bytes==records.stages[2][20].bytes&&records.stages[4][21].bytes==records.stages[2][21].bytes,"Pending C did not retain literal queued B pixels");
         require(records.stages[4][22].bytes.size()==r.frames[2].bgra.size()&&std::memcmp(records.stages[4][22].bytes.data(),r.frames[2].bgra.data(),r.frames[2].bgra.size())==0,"Pending-C current input is not literal C");
       }
-      require(std::all_of(records.stages[5][3].bytes.begin(),records.stages[5][3].bytes.end(),[](char v){return v==0;}),"Actual current C M not zero");
+      const auto &c_matte=records.stages[5][records.legacy_matte_expected ? 3u : 23u];
+      require(c_matte.copied && std::all_of(c_matte.bytes.begin(),c_matte.bytes.end(),[](char v){return v==0;}),"Actual current C M not zero");
       const auto word=[&](std::size_t slot,std::size_t offset){const auto &v=records.stages[5][slot].bytes;require(v.size()>=(offset+1)*4,"C typed packet truncated");std::uint32_t n=0;std::memcpy(&n,v.data()+offset*4,4);return n;};
       const auto &ce=records.phase_event[5];
       require(word(6,0)==5&&word(6,1)==0x35544353u&&word(6,22)==27&&word(6,23)==1,"C SCT is not a current valid producer packet");
@@ -547,6 +1196,13 @@ namespace actual_converter_probe_v1 {
     }
   }
   int run(const request_t &r,std::string &error) noexcept {
+    if (r.native_p010) {
+      // One TensorRT/graphics/native owner at a time, with the original A/B gate protocol.
+      for (int codec : {1,2}) {
+        const auto code = run_one(r,false,error,codec);if(code)return code;
+      }
+      return 0;
+    }
     const int first=run_one(r,false,error);if(first)return first;
     if(r.queued)return run_one(r,true,error);
     return 0;
@@ -695,13 +1351,15 @@ namespace actual_converter_probe_v1 {
       td.SampleDesc.Count=1;td.Usage=D3D11_USAGE_DEFAULT;td.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
       hr(converter.device->CreateTexture2D(&td,nullptr,&target),"Fixed-six target failed");hr(converter.device->CreateRenderTargetView(target.Get(),nullptr,&target_rtv),"Fixed-six target RTV failed");
       for(std::size_t i=0;i<6u;++i){images[i]=display->alloc_img();require(images[i]&&display->complete_img(images[i].get(),false)==0,"Shared image allocation failed");
-        auto &img=static_cast<img_d3d_t&>(*images[i]);texture_lock_helper lock(img.capture_mutex.get());require(lock.lock(),"Capture keyed mutex failed");
+        auto &img=static_cast<img_d3d_t&>(*images[i]);detail::keyed_mutex_lock_t lock {img.capture_mutex.get()};require(lock.lock() == S_OK,"Capture keyed mutex failed");
         display->device_ctx->UpdateSubresource(img.capture_texture.get(),0u,nullptr,q.frames[i].bgra.data(),w*4u,0u);display->device_ctx->Flush();img.blank=false;}
       for(const auto &image:images){auto &img=static_cast<img_d3d_t&>(*image);auto [it,inserted]=converter.img_ctx_map.try_emplace(img.id);(void)inserted;
         require(converter.initialize_image_context(img,it->second)==0,"Shared image preparation failed");}
-      D3D11_TEXTURE2D_DESC private_desc{};static_cast<img_d3d_t&>(*images[0]).capture_texture->GetDesc(&private_desc);
-      private_desc.Usage=D3D11_USAGE_DEFAULT;private_desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;private_desc.MiscFlags=0;private_desc.CPUAccessFlags=0;
-      for(auto &slot:converter.matched_frame_slots){hr(converter.device->CreateTexture2D(&private_desc,nullptr,&slot.texture),"Private slot preparation failed");hr(converter.device->CreateShaderResourceView(slot.texture.get(),nullptr,&slot.srv),"Private slot SRV failed");}
+      D3D11_TEXTURE2D_DESC source_desc {};
+      static_cast<img_d3d_t &>(*images[0]).capture_texture->GetDesc(&source_desc);
+      for (auto &slot : converter.matched_frame_slots) {
+        require(converter.ensure_private_matched_texture(slot, source_desc), "Private slot preparation failed");
+      }
       converter.probe_observer={&records,&sequence6_recorder_t::record};
       for(std::size_t i=0;i<6u;++i) {
         const auto stamp=clock_t::now();images[i]->frame_timestamp=stamp;images[i]->content_timestamp=stamp;
@@ -709,18 +1367,17 @@ namespace actual_converter_probe_v1 {
         const auto deadline=clock_t::now()+std::chrono::seconds(30);const event_t *own=nullptr;std::size_t conversions=0;
         while(!own && conversions<8u) {
           require(clock_t::now()<deadline&&!est->has_terminal_failure(),"Fixed-six own ACK timeout or terminal estimator failure");
-          require(converter.convert_rgb(*images[i],target.Get(),target_rtv.Get(),false,clock_t::now()-std::chrono::milliseconds(1))==0,"Actual fixed-six convert failed");++conversions;
+          require(converter.convert_rgb(*images[i],target.Get(),target_rtv.Get(),false,clock_t::now()-std::chrono::milliseconds(1))==d3d_base_encode_device::rgb_conversion_e::converted,"Actual fixed-six convert failed");++conversions;
           require(!records.overflow,"Fixed-six bounded event recorder overflow");own=records.own_draw(first_event,ticks);if(own)break;
           while(!est->can_accept_frame()){require(clock_t::now()<deadline&&!est->has_terminal_failure(),"Fixed-six native readiness timeout");std::this_thread::sleep_for(std::chrono::milliseconds(1));}
         }
         require(own,"Fixed-six own matched draw unavailable after bounded retries");
-        require(std::none_of(converter.matched_frame_slots.begin(),converter.matched_frame_slots.end(),
-          [](const auto &slot){return slot.pending;}),"Own matched draw left another pending source; no next admission");
+        require(!converter.pending_matched_frame, "Own matched draw left another pending source; no next admission");
         const auto actual=*own;auto &img=static_cast<img_d3d_t&>(*images[i]);
         const auto image_context=converter.img_ctx_map.find(img.id);
         require(image_context!=converter.img_ctx_map.end(),"Own matched encoder image context missing");
-        texture_lock_helper lease(image_context->second.encoder_mutex.get());
-        require(lease.lock(),"Own matched encoder-device diagnostic keyed lease failed");
+        detail::keyed_mutex_lock_t lease {image_context->second.encoder_mutex.get()};
+        require(lease.lock() == S_OK,"Own matched encoder-device diagnostic keyed lease failed");
         const auto dir=root/("observation_"+std::to_string(i+1u));
         captures.push_back(sequence6_copy_matched(converter.device.get(),converter.device_ctx.get(),actual,target.Get(),dir,i+1u,q.frames[i]));
         converter.device_ctx->Flush(); // all shared reads submitted before releasing this actual image lease

@@ -62,18 +62,17 @@ namespace video::detail {
 
     /** Reject future workers and join every tracked owner. Idempotent. */
     void seal_and_drain() noexcept {
-      std::vector<worker_t> workers;
-      {
-        std::lock_guard lock(mutex_);
-        sealed_ = true;
-        workers.swap(workers_);
-      }
-      for (auto &worker : workers) {
-        if (worker.thread.joinable()) {
-          worker.thread.join();
-        }
+      join(take_workers(true));
+    }
+
+#ifdef SUNSHINE_TESTS
+    /** Join this fixture's workers, including work handed off by their teardown. */
+    void drain_for_test() noexcept {
+      for (auto workers = take_workers(false); !workers.empty(); workers = take_workers(false)) {
+        join(std::move(workers));
       }
     }
+#endif
 
     [[nodiscard]] bool sealed() const noexcept {
       std::lock_guard lock(mutex_);
@@ -85,6 +84,20 @@ namespace video::detail {
       std::thread thread;
       std::shared_ptr<std::atomic<bool>> completed;
     };
+
+    std::vector<worker_t> take_workers(bool seal) noexcept {
+      std::lock_guard lock(mutex_);
+      sealed_ = sealed_ || seal;
+      return std::exchange(workers_, {});
+    }
+
+    static void join(std::vector<worker_t> workers) noexcept {
+      for (auto &worker : workers) {
+        if (worker.thread.joinable()) {
+          worker.thread.join();
+        }
+      }
+    }
 
     void reap_completed_locked() {
       for (auto worker = workers_.begin(); worker != workers_.end();) {

@@ -629,6 +629,11 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
       if (FAILED(device_->CreateBuffer(&d, &z, &inside_args_.resource)) || FAILED(device_->CreateShaderResourceView(inside_args_.resource.Get(), &srv, &inside_args_.srv)) || FAILED(device_->CreateUnorderedAccessView(inside_args_.resource.Get(), &uav, &inside_args_.uav))) {
         error = "Could not allocate independent Inside16B arguments.";return false;
       }
+      if (FAILED(device_->CreateBuffer(&d, &z, &cache_validation_args_.resource)) ||
+          FAILED(device_->CreateUnorderedAccessView(cache_validation_args_.resource.Get(), &uav, &cache_validation_args_.uav))) {
+        error = "Could not allocate outline cache validation arguments.";
+        return false;
+      }
       d.ByteWidth = data_word_count * 4u;
       d.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
       srv.BufferEx.NumElements = data_word_count;
@@ -742,6 +747,7 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
       add(raw_parent_resource_.Get());add(raw_flags_resource_.Get());
       add(inside_bits_.resource.Get());add(inside_bits_.srv.Get());add(inside_bits_.uav.Get());
       add(inside_args_.resource.Get());add(inside_args_.srv.Get());add(inside_args_.uav.Get());
+      add(cache_validation_args_.resource.Get());add(cache_validation_args_.uav.Get());
       return valid;
     }
 
@@ -750,6 +756,10 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
       unbind(c);
       const D3D11_BOX gate {root_offset, 0u, 0u, root_offset + 4u, 1u, 1u};
       c->CopySubresourceRegion(native_args_.Get(), 0u, 8u, 0u, 0u, root, 0u, &gate);
+      if (stability_enabled_) {
+        // Root zero skips cache begin. Disarm any prior validation grid in that case.
+        c->CopySubresourceRegion(cache_validation_args_.resource.Get(), 0u, 8u, 0u, 0u, root, 0u, &gate);
+      }
       ID3D11Buffer *bc[3] {cb, unit_constants_[0u].Get(), shape_cb_.Get()};
       const std::array<ID3D11ShaderResourceView *, 10u> inputs {rgb, enclosure_views_.all_body_bits.Get(), enclosure_views_.selected_bits.Get(), enclosure_views_.cover_bits.Get(), enclosure_views_.receipt.Get(), scratch_.eligible.Get(), scratch_.parent.Get(), scratch_.root_flags.Get(), inner_.srv.Get(), enclosure_views_.matte.Get()};
       auto stage = [&](UINT entry, const std::array<ID3D11UnorderedAccessView *, 8u> &out, ID3D11Buffer *args, UINT offset) {
@@ -805,6 +815,7 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
         std::array<ID3D11UnorderedAccessView *,8u> out {};
         out[0]=profile_data_.uav.Get();out[4]=stability_header_.uav.Get();out[6]=stability_aa_history_.uav.Get();
         out[7]=weak_aa_enabled_?weak_aa_state_.uav.Get():nullptr;
+        if (entry==0u) out[1]=cache_validation_args_.uav.Get();
         if (entry==1u) out[1]=colour_first_.uav.Get();
         c->CSSetConstantBuffers(0u,3u,bc);c->CSSetShaderResources(0u,15u,in.data());
         c->CSSetUnorderedAccessViews(0u,8u,out.data(),nullptr);
@@ -825,7 +836,7 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
       u[0] = meta_.uav.Get();
       u[7] = profile_data_.uav.Get();
       stage(0u, u, root, root_offset);
-      cache_stage(0u,root,root_offset); // Fresh-only begin; root0 HOLD cannot mutate the cache.
+      cache_stage(0u, root, root_offset);
       u[1] = colour_first_.uav.Get();
       u[2] = root_cache_.uav.Get();
       u[3] = scratch_uavs_[2].Get();
@@ -956,7 +967,7 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
       u[0] = meta_.uav.Get();
       u[6] = matte_.uav.Get();
       stage(7u, u, native_args_.Get(), 0u);
-      cache_stage(1u,native_args_.Get(),0u); // Full geometry validation/invalidate before snapshot overwrite.
+      cache_stage(1u, cache_validation_args_.resource.Get(), 0u);
       // Output-only diagnostics at the real prepublish point. Root0 is not a fresh
       // packed observation: the held temp texture then contains prior final binary M.
       if (p.packed_temp_snapshot) {
@@ -1019,7 +1030,7 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
     bool holes_enabled_ = false;
     bool coverage_enabled_ = false;
     buffer_t weak_aa_state_;
-    buffer_t meta_, unit_args_, profile_data_, inside_args_;
+    buffer_t meta_, unit_args_, profile_data_, inside_args_, cache_validation_args_;
     ComPtr<ID3D11Buffer> hook_cb_, shape_cb_, native_args_;
     std::array<ComPtr<ID3D11Buffer>, 8u> unit_constants_;
     host_sbs_compute_program_lease::group_t<8u> raw_program_lease_;

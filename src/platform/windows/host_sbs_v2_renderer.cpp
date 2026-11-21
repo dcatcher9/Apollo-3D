@@ -5,6 +5,7 @@
 #include "host_sbs_v2_renderer.h"
 
 #ifdef _WIN32
+  #include <algorithm>
   #include <wrl/client.h>
 
 namespace platf::dxgi {
@@ -31,9 +32,34 @@ namespace platf::dxgi {
       }
     }
 
-    // Ordinary override=false preserves all legacy slots and predication. Queued override=true
-    // requires both operands and no predication BEFORE binding/emitting anything. The caller can
-    // then render current flat identity. Strong references preserve the original b5/t10 values.
+    if (command.shared_pin) {
+      if (!command.shared_pin->geometry_constants) {
+        return false;
+      }
+      for (auto *plane : command.shared_pin->planes) {
+        if (!plane) {
+          return false;
+        }
+      }
+    }
+    if (command.queued_guard_override && (!command.queued_guard_constants || !command.queued_guard_transaction)) {
+      // Missing b5 must never read as a disabled/legacy gate for a queued draw.
+      return false;
+    }
+    if (command.shared_pin || command.queued_guard_override) {
+      if (context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE) {
+        return false;
+      }
+      Microsoft::WRL::ComPtr<ID3D11Predicate> predicate;
+      BOOL value = FALSE;
+      context->GetPredication(&predicate, &value);
+      if (predicate) {
+        return false;
+      }
+    }
+
+    // Generic calls preserve caller-owned b5/t10 bindings. Shared-pin calls own these slots,
+    // including their cleanup, and need no snapshot of the previous context state.
     struct guard_scope_t {
       ID3D11DeviceContext *context = nullptr;
       Microsoft::WRL::ComPtr<ID3D11Buffer> cb;
@@ -49,17 +75,7 @@ namespace platf::dxgi {
       }
     } guard_scope;
 
-    if (command.queued_guard_override) {
-      if (context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE || !command.queued_guard_constants || !command.queued_guard_transaction) {
-        // Missing b5 must never read as a disabled/legacy gate for a queued draw.
-        return false;
-      }
-      Microsoft::WRL::ComPtr<ID3D11Predicate> predicate;
-      BOOL value = FALSE;
-      context->GetPredication(&predicate, &value);
-      if (predicate) {
-        return false;
-      }
+    if (command.queued_guard_override && !command.shared_pin) {
       context->PSGetConstantBuffers(5u, 1u, guard_scope.cb.GetAddressOf());
       context->PSGetShaderResources(10u, 1u, guard_scope.srv.GetAddressOf());
       guard_scope.context = context;
@@ -81,29 +97,34 @@ namespace platf::dxgi {
     context->RSSetViewports(1u, &command.viewport);
     auto *sampler = command.sampler;
     context->PSSetSamplers(0u, 1u, &sampler);
-    context->PSSetShaderResources(
-      0u,
-      static_cast<UINT>(command.shader_resources.size()),
-      command.shader_resources.data()
-    );
-    auto *geometry_constants = command.geometry_constants;
-    context->PSSetConstantBuffers(2u, 1u, &geometry_constants);
-    auto *subtitle_constants = command.subtitle_constants;
-    context->PSSetConstantBuffers(3u, 1u, &subtitle_constants);
+    const auto *resources = command.shader_resources.data();
+    auto resource_count = static_cast<UINT>(command.shader_resources.size());
+    UINT constant_count = 2u;
+    std::array<ID3D11ShaderResourceView *, 15u> shared_resources {};
+    std::array<ID3D11Buffer *, 5u> constants {command.geometry_constants, command.subtitle_constants};
+    if (const auto &pin = command.shared_pin) {
+      std::copy(command.shader_resources.begin(), command.shader_resources.end(), shared_resources.begin());
+      shared_resources[7u] = pin->selected_receipt;
+      shared_resources[10u] = command.queued_guard_override ? command.queued_guard_transaction : nullptr;
+      std::copy(pin->planes.begin(), pin->planes.end(), shared_resources.begin() + 12u);
+      constants[3u] = command.queued_guard_override ? command.queued_guard_constants : nullptr;
+      constants[4u] = pin->geometry_constants;
+      resources = shared_resources.data();
+      resource_count = static_cast<UINT>(shared_resources.size());
+      constant_count = static_cast<UINT>(constants.size());
+    }
+    context->PSSetShaderResources(0u, resource_count, resources);
+    context->PSSetConstantBuffers(2u, constant_count, constants.data());
     if (command.observe_bound_draw) {
       command.observe_bound_draw(command.bound_draw_observer_state, context);
     }
     context->Draw(3u, 0u);
 
     context->OMSetRenderTargets(0u, nullptr, nullptr);
-    std::array<ID3D11ShaderResourceView *, 7u> null_resources {};
-    context->PSSetShaderResources(
-      0u,
-      static_cast<UINT>(null_resources.size()),
-      null_resources.data()
-    );
-    ID3D11Buffer *null_constants = nullptr;
-    context->PSSetConstantBuffers(3u, 1u, &null_constants);
+    constexpr std::array<ID3D11ShaderResourceView *, 15u> null_resources {};
+    constexpr std::array<ID3D11Buffer *, 4u> null_constants {};
+    context->PSSetShaderResources(0u, resource_count, null_resources.data());
+    context->PSSetConstantBuffers(3u, constant_count - 1u, null_constants.data());
     return true;
   }
 

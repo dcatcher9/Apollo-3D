@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
-#include <cstdint>
 #include <future>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -19,12 +19,17 @@ namespace platf::video_player {
     explicit registry_t(std::shared_future<std::vector<std::wstring>> executables) noexcept;
 #endif
     [[nodiscard]] bool ready() const noexcept;
-    // The caller owns foreground HWND/PID validation. Never caches a PID or discovers a window.
-    [[nodiscard]] bool contains_process(std::uint32_t process_id) const noexcept;
+    // Borrow the immutable census while the registry is alive. An incomplete census grants nothing.
+    [[nodiscard]] std::span<const std::wstring> executables_if_ready() const noexcept;
 
   private:
     std::shared_future<std::vector<std::wstring>> executables_;
   };
+
+  [[nodiscard]] bool matches_registered_executable(
+    std::span<const std::wstring> registered,
+    std::wstring_view executable
+  ) noexcept;
 
   namespace detail {
     struct association_t {

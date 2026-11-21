@@ -7675,16 +7675,18 @@ which can stall the whole GPU.
 
 The encoder of an independent provider, and of desktop Host SBS, keeps up to two pictures in flight
 (`video::nvenc_pipeline_depth()`, fixed per encoder as `nvenc_base::pipeline_depth()`; plain
-desktop keeps one, and Local AR presents without NVENC). Each picture has its own
-NVENC input, bitstream and completion event: at submission the converted surface is copied into
-the picture's input on the immediate context (about 50 MB each way at 7680x2160 10-bit; the two
-inputs cost about 100 MB of video memory), so the next frame converts and starts encoding while the
-previous picture still encodes. An encoder that cannot create a completion event or an input for
-every picture (video memory short, as with Host SBS beside a GPU-bound game) encodes one picture at a
-time from the conversion target instead of failing the stream
+desktop keeps one, and Local AR presents without NVENC). Each picture slot has its own bitstream
+and completion event. The converter draws the Y/UV planes into an unmapped registered input, which
+the next picture uses directly. Two pictures in flight leave one spare conversion surface so a
+changed frame can draw before the loop waits for a picture slot. A packed repeat that skips the
+RGB-to-YUV draw retains the last converted surface. If its picture is still in flight, the loop
+can continue handling capture and depth without sending another copy of the same picture.
+Recovery, pending gamma proof and due keepalives still wait for retirement and submit the retained
+input. The keepalive deadline runs from the last submitted picture. An encoder that cannot create all its
+completion events or registered inputs encodes one picture at a time from a single surface
 (`NvencPipelineTest.HostSbsEncodesOnePictureAtATimeWhenASecondInputDoesNotFit`). A thread of its own (`encode_pipeline_t`) waits for the pictures in
 submission order and publishes each packet as soon as its picture completes, whatever the loop is
-doing; the loop waits only while two are in flight, and then for the oldest. Before, on 10-06 in
+doing. Before, on 10-06 in
 Stellar Blade at 4K with FG on, `encode_frame()` waited for each picture: NVENC's completion wait
 averaged 8.5-12.2 ms (about 5 ms uncontended; the rest is the conversion's GPU work queued behind
 the game's) and the host took 55-71 new frames/s, against 80-90 with FG off. A bitrate change, and a
@@ -7715,7 +7717,7 @@ flight, Present to packet within 0.5 ms of one picture at a time on the same rin
 Desktop Host SBS (AI depth on desktop capture, a 7680x2160 picture at 4K) keeps its capture
 cadence: it is not an independent provider, so it holds nothing and an image wait that runs out
 still encodes the input again; only its picture now encodes while the next capture converts. A
-conversion writes only the conversion target, which each picture copied at its submission, so the
+conversion writes only the conversion target. Each picture owns its submitted input, so the
 next capture, a retained-source poll of pending inference (busy, it keeps the target and the picture
 repeats it; complete, it redraws the frame with its own depth), a depth-ready install and a
 stream-gamma reconversion never change a picture in flight

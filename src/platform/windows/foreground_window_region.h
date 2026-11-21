@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string>
 
 namespace platf::foreground_window {
   /** A half-open rectangle in physical virtual-screen or capture-pixel coordinates. */
@@ -135,6 +136,9 @@ namespace platf::foreground_window {
    * move/size loop. This path deliberately avoids DWM bounds, styles, and client mapping.
    */
   [[nodiscard]] bool interactive_move_size_active() noexcept;
+
+  /** Resolve one raw Win32 executable path for an already validated foreground process. */
+  [[nodiscard]] std::optional<std::wstring> process_image_path(std::uint32_t process_id) noexcept;
 
   /** Assign continuity and observer generations to successive synchronous observations. */
   class continuity_tracker_t {

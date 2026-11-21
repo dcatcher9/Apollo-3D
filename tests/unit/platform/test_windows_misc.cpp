@@ -6,6 +6,7 @@
 
 #ifdef _WIN32
   #include <algorithm>
+  #include <array>
   #include <boost/filesystem/path.hpp>
   #include <boost/process/v1/child.hpp>
   #include <boost/process/v1/environment.hpp>
@@ -151,74 +152,6 @@ namespace {
     EXPECT_EQ(timestamps.content_timestamp, 300);
   }
 
-  struct captured_ddup_image_t: platf::img_t {
-    platf::dxgi::detail::ddup_damage_snapshot_t damage;
-  };
-
-  TEST(WindowsDdupTimestampTest, InvisiblePointerUpdatesDoNotMutatePublishedImage) {
-    using namespace std::chrono_literals;
-    using platf::dxgi::detail::complete_ddup_image_delivery;
-    const auto captured_at = std::chrono::steady_clock::time_point {1s};
-    auto history = std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
-    auto retained = std::make_shared<captured_ddup_image_t>();
-    retained->damage = history->commit({true, {RECT {0, 0, 1920, 1080}}});
-    const auto damage_token = retained->damage.token;
-    std::shared_ptr<platf::img_t> delivery = retained;
-    ASSERT_EQ(complete_ddup_image_delivery(delivery, false, captured_at, captured_at), platf::capture_e::ok);
-    retained->diagnostic_capture_ready_timestamp = captured_at + 1ms;
-    delivery.reset();
-
-    // DDup can report more pointer updates after a hidden/off-output cursor's last desktop
-    // image was published. The encode owner still holds that same image while capture forwards
-    // it; finalizing the no-op must not republish it for diagnostics or mutate its source clock.
-    for (const auto elapsed : {10ms, 20ms, 30ms}) {
-      delivery = retained;
-      EXPECT_EQ(complete_ddup_image_delivery(delivery, true, captured_at + elapsed, captured_at), platf::capture_e::timeout);
-      EXPECT_FALSE(delivery);
-      EXPECT_EQ(retained.use_count(), 1);
-      EXPECT_EQ(retained->frame_timestamp, captured_at);
-      EXPECT_EQ(retained->content_timestamp, captured_at);
-      EXPECT_EQ(retained->diagnostic_capture_ready_timestamp, captured_at + 1ms);
-      EXPECT_EQ(retained->damage.history, history);
-      EXPECT_EQ(retained->damage.token, damage_token);
-    }
-  }
-
-  TEST(WindowsDdupTimestampTest, FreshCursorRemovalAndDesktopImagesKeepTheirOwnMetadata) {
-    using namespace std::chrono_literals;
-    using platf::dxgi::detail::complete_ddup_image_delivery;
-    const auto captured_at = std::chrono::steady_clock::time_point {1s};
-    auto history = std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
-    auto retained = std::make_shared<captured_ddup_image_t>();
-    retained->damage = history->commit({true, {RECT {0, 0, 1920, 1080}}});
-    std::shared_ptr<platf::img_t> delivery = retained;
-    ASSERT_EQ(complete_ddup_image_delivery(delivery, false, captured_at, captured_at), platf::capture_e::ok);
-
-    // First cursor disappearance copies the cursor-free private surface to a different pooled
-    // image. These changed pixels must still publish, with the same desktop/damage identity.
-    auto cursor_removed = std::make_shared<captured_ddup_image_t>();
-    cursor_removed->damage = retained->damage;
-    delivery = cursor_removed;
-    EXPECT_EQ(complete_ddup_image_delivery(delivery, false, captured_at + 10ms, captured_at), platf::capture_e::ok);
-    EXPECT_EQ(delivery.get(), cursor_removed.get());
-    EXPECT_EQ(cursor_removed->frame_timestamp, captured_at + 10ms);
-    EXPECT_EQ(cursor_removed->content_timestamp, captured_at);
-    EXPECT_EQ(cursor_removed->damage.history, retained->damage.history);
-    EXPECT_EQ(cursor_removed->damage.token, retained->damage.token);
-
-    auto changed_desktop = std::make_shared<captured_ddup_image_t>();
-    changed_desktop->damage = history->commit({true, {RECT {50, 50, 100, 100}}});
-    delivery = changed_desktop;
-    EXPECT_EQ(complete_ddup_image_delivery(delivery, false, captured_at + 20ms, captured_at + 20ms), platf::capture_e::ok);
-    EXPECT_EQ(changed_desktop->frame_timestamp, captured_at + 20ms);
-    EXPECT_EQ(changed_desktop->content_timestamp, captured_at + 20ms);
-    EXPECT_NE(changed_desktop->damage.token, retained->damage.token);
-    EXPECT_EQ(retained->frame_timestamp, captured_at);
-    EXPECT_EQ(retained->content_timestamp, captured_at);
-    EXPECT_EQ(cursor_removed->frame_timestamp, captured_at + 10ms);
-    EXPECT_EQ(cursor_removed->content_timestamp, captured_at);
-  }
-
   TEST(WindowsDdupDroppedDesktopTest, ReleasedExportOnAStaticDesktopDeliversACopiedWholeDesktop) {
     platf::dxgi::detail::ddup_dropped_desktop_t desktop;
     // A live export owns the output: the present that reveals the desktop is forwarded as
@@ -340,6 +273,133 @@ namespace {
     );
   }
 
+  void expect_capture_copy_plan(
+    const platf::dxgi::detail::ddup_capture_copy_plan_t &plan,
+    const platf::dxgi::detail::ddup_capture_copy_kind_e kind,
+    const RECT &region = {}
+  ) {
+    EXPECT_EQ(plan.kind, kind);
+    EXPECT_EQ(plan.region.left, region.left);
+    EXPECT_EQ(plan.region.top, region.top);
+    EXPECT_EQ(plan.region.right, region.right);
+    EXPECT_EQ(plan.region.bottom, region.bottom);
+  }
+
+  TEST(WindowsDdupCaptureCopyTest, AccumulatesEveryRetainedUpdateCurrentMoveAndOldCursor) {
+    using namespace platf::dxgi::detail;
+    auto history = std::make_shared<ddup_damage_history_t>();
+    const auto baseline = history->commit({false, {}});
+    (void) history->commit({true, {{40, 30, 50, 40}}});
+    const auto previous = history->commit({true, {{60, 50, 80, 70}}});
+    const RECT dirty {100, 80, 120, 100};
+    const DXGI_OUTDUPL_MOVE_RECT move {{130, 110}, {160, 140, 180, 160}};
+    const auto current = make_ddup_damage_update({&dirty, 1u}, {&move, 1u}, 640, 480);
+    ASSERT_TRUE(current.known);
+    expect_capture_copy_plan(
+      plan_ddup_capture_copy(1u, 4u, baseline, previous, current, {10, 20, 20, 30}, 640, 480),
+      ddup_capture_copy_kind_e::region, {10, 20, 180, 160}
+    );
+    // The new copy planner never commits the acquired update or changes observation identity.
+    EXPECT_EQ(previous.token, baseline.token + 2u);
+    EXPECT_EQ(history->query(baseline.token, previous.token, {100, 80, 120, 100}),
+      ddup_damage_intersection_e::unchanged);
+  }
+
+  TEST(WindowsDdupCaptureCopyTest, SameDesktopRetainsExistingCursorOnlyBehaviorWithoutDamageAuthority) {
+    using namespace platf::dxgi::detail;
+    expect_capture_copy_plan(plan_ddup_capture_copy(9u, 9u, {}, {}, {}, {}, 640, 480),
+      ddup_capture_copy_kind_e::none);
+    expect_capture_copy_plan(plan_ddup_capture_copy(9u, 9u, {}, {}, {}, {0, 450, 8, 480}, 640, 480),
+      ddup_capture_copy_kind_e::region, {0, 450, 8, 480});
+    expect_capture_copy_plan(plan_ddup_capture_copy(0u, 9u, {}, {}, {}, {}, 640, 480),
+      ddup_capture_copy_kind_e::full);
+    expect_capture_copy_plan(plan_ddup_capture_copy(9u, 8u, {}, {}, {}, {}, 640, 480),
+      ddup_capture_copy_kind_e::full);
+    expect_capture_copy_plan(plan_ddup_capture_copy(9u, 9u, {}, {}, {}, {0, 0, 641, 1}, 640, 480),
+      ddup_capture_copy_kind_e::full);
+  }
+
+  TEST(WindowsDdupCaptureCopyTest, ChangedDesktopRequiresTheCompleteSameHistoryRange) {
+    using namespace platf::dxgi::detail;
+    auto history = std::make_shared<ddup_damage_history_t>();
+    const auto baseline = history->commit({true, {}});
+    const auto previous = history->commit({true, {{2, 2, 4, 4}}});
+    auto unrelated = std::make_shared<ddup_damage_history_t>();
+    const auto foreign = unrelated->commit({true, {}});
+    const ddup_damage_update_t current {true, {{8, 8, 10, 10}}};
+    for (const auto &from : std::array<std::optional<ddup_damage_snapshot_t>, 4u> {
+           std::nullopt, foreign, ddup_damage_snapshot_t {history, 0u},
+           ddup_damage_snapshot_t {history, previous.token + 1u}}) {
+      expect_capture_copy_plan(plan_ddup_capture_copy(1u, 3u, from, previous, current, {}, 640, 480),
+        ddup_capture_copy_kind_e::full);
+    }
+    const auto unknown = history->commit({false, {}});
+    expect_capture_copy_plan(plan_ddup_capture_copy(1u, 4u, baseline, {}, current, {}, 640, 480),
+      ddup_capture_copy_kind_e::full);
+    expect_capture_copy_plan(plan_ddup_capture_copy(1u, 4u, baseline, unknown, current, {}, 640, 480),
+      ddup_capture_copy_kind_e::full);
+    auto latest = unknown;
+    for (std::size_t i = 0u; i < ddup_damage_history_frame_budget; ++i) {
+      latest = history->commit({true, {}});
+    }
+    expect_capture_copy_plan(plan_ddup_capture_copy(1u, latest.token + 1u, baseline, latest, current, {}, 640, 480),
+      ddup_capture_copy_kind_e::full);
+  }
+
+  TEST(WindowsDdupCaptureCopyTest, SerialGapsWithoutMatchingCommittedUpdatesRequireWholeCopy) {
+    using namespace platf::dxgi::detail;
+    auto history = std::make_shared<ddup_damage_history_t>();
+    const auto baseline = history->commit({true, {}});
+    const ddup_damage_update_t current {true, {{8, 8, 10, 10}}};
+    expect_capture_copy_plan(plan_ddup_capture_copy(1u, 2u, baseline, baseline, current, {}, 640, 480),
+      ddup_capture_copy_kind_e::region, {8, 8, 10, 10});
+    // A skipped uncertain acquisition changed the private serial, but supplied no committed
+    // damage record. Same-token history cannot bridge that missing desktop observation.
+    expect_capture_copy_plan(plan_ddup_capture_copy(1u, 3u, baseline, baseline, current, {}, 640, 480),
+      ddup_capture_copy_kind_e::full);
+    const auto previous = history->commit({true, {{2, 2, 4, 4}}});
+    expect_capture_copy_plan(plan_ddup_capture_copy(1u, 4u, baseline, previous, current, {}, 640, 480),
+      ddup_capture_copy_kind_e::full);
+    expect_capture_copy_plan(plan_ddup_capture_copy(1u, 2u, baseline, previous, current, {}, 640, 480),
+      ddup_capture_copy_kind_e::full);
+  }
+
+  TEST(WindowsDdupCaptureCopyTest, UnknownMalformedAndFullDamageKeepTheWholeSurfaceFallback) {
+    using namespace platf::dxgi::detail;
+    auto history = std::make_shared<ddup_damage_history_t>();
+    const auto baseline = history->commit({true, {}});
+    const std::array<ddup_damage_update_t, 5u> updates {{
+      {}, {false, {{1, 1, 2, 2}}}, {true, {{-1, 0, 2, 2}}},
+      {true, {{1, 1, 641, 2}}}, {true, {{0, 0, 640, 480}}},
+    }};
+    for (const auto &current : updates) {
+      expect_capture_copy_plan(plan_ddup_capture_copy(1u, 2u, baseline, baseline, current, {}, 640, 480),
+        ddup_capture_copy_kind_e::full);
+    }
+    ddup_damage_update_t oversized {true, std::vector<RECT>(ddup_damage_frame_rect_budget + 1u, {1, 1, 2, 2})};
+    expect_capture_copy_plan(plan_ddup_capture_copy(1u, 2u, baseline, baseline, oversized, {}, 640, 480),
+      ddup_capture_copy_kind_e::full);
+    const auto malformed = history->commit({true, {{-1, 0, 2, 2}}});
+    expect_capture_copy_plan(plan_ddup_capture_copy(1u, 3u, baseline, malformed, {true, {}}, {}, 640, 480),
+      ddup_capture_copy_kind_e::full);
+    const auto full = history->commit({true, {{0, 0, 640, 480}}});
+    expect_capture_copy_plan(plan_ddup_capture_copy(2u, 4u, malformed, full, {true, {}}, {}, 640, 480),
+      ddup_capture_copy_kind_e::full);
+  }
+
+  TEST(WindowsDdupCaptureCopyTest, KnownEmptyUpdateCanRetainPixelsButStillRestoresTheOldCursor) {
+    using namespace platf::dxgi::detail;
+    auto history = std::make_shared<ddup_damage_history_t>();
+    const auto baseline = history->commit({true, {}});
+    const auto previous = history->commit({true, {}});
+    expect_capture_copy_plan(plan_ddup_capture_copy(1u, 3u, baseline, previous, {true, {}}, {}, 640, 480),
+      ddup_capture_copy_kind_e::none);
+    expect_capture_copy_plan(plan_ddup_capture_copy(1u, 3u, baseline, previous, {true, {}}, {20, 30, 24, 34}, 640, 480),
+      ddup_capture_copy_kind_e::region, {20, 30, 24, 34});
+    expect_capture_copy_plan(plan_ddup_capture_copy(1u, 3u, baseline, previous, {true, {}}, {}, 0, 480),
+      ddup_capture_copy_kind_e::full);
+  }
+
   TEST(WindowsDdupDamageTest, ClassifiesFullContentAndExactRoiProofsSeparately) {
     using enum platf::dxgi::detail::host_sbs_ddup_reuse_proof_e;
     using clock_t = std::chrono::steady_clock;
@@ -424,11 +484,14 @@ namespace {
     }
 
     const RECT roi {0, 0, 100, 100};
+    EXPECT_FALSE(platf::dxgi::detail::has_complete_ddup_damage_between(base, current));
+    EXPECT_TRUE(platf::dxgi::detail::has_complete_ddup_damage_between(base, base));
     EXPECT_EQ(
       platf::dxgi::detail::query_ddup_damage_between(base, current, roi),
       unknown
     );
     const auto recent = history->commit({true, {}});
+    EXPECT_TRUE(platf::dxgi::detail::has_complete_ddup_damage_between(current, recent));
     EXPECT_EQ(
       platf::dxgi::detail::query_ddup_damage_between(current, recent, roi),
       unchanged
@@ -562,75 +625,52 @@ namespace {
     );
   }
 
-  TEST(WindowsDdupDamageTest, CoverageSumsOverlapsAndSaturatesAtRegionArea) {
-    auto history = std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
+  TEST(WindowsDdupDamageTest, IntersectionClipsDamageAndUsesHalfOpenEdges) {
+    using namespace platf::dxgi::detail;
+    using enum ddup_damage_intersection_e;
+
+    auto history = std::make_shared<ddup_damage_history_t>();
     const auto base = history->commit({true, {}});
-    const auto overlap_twice = history->commit({
+    const auto current = history->commit({
       true,
       {
         {10, 10, 20, 20},
         {10, 10, 20, 20},
+        {60, 50, 40, 70},
         {95, 95, 110, 110},
       },
     });
-    const RECT roi {0, 0, 100, 100};
 
-    const auto coverage =
-      platf::dxgi::detail::query_ddup_damage_coverage_between(
-        base,
-        overlap_twice,
-        roi,
-        true
-      );
-    ASSERT_TRUE(coverage.known);
-    EXPECT_EQ(coverage.region_area, 10000u);
-    // The repeated 10x10 rectangle is counted twice on purpose; the clipped corner adds 5x5.
-    EXPECT_EQ(coverage.potentially_changed_area, 225u);
-    EXPECT_EQ(coverage.max_single_intersection_area, 100u);
-
-    const auto saturated = history->commit({
-      true,
-      {
-        {0, 0, 100, 100},
-        {0, 0, 100, 100},
-      },
-    });
-    const auto saturated_coverage =
-      platf::dxgi::detail::query_ddup_damage_coverage_between(
-        overlap_twice,
-        saturated,
-        roi,
-        true
-      );
-    ASSERT_TRUE(saturated_coverage.known);
-    EXPECT_EQ(saturated_coverage.potentially_changed_area, 10000u);
-    EXPECT_EQ(saturated_coverage.max_single_intersection_area, 10000u);
+    EXPECT_EQ(query_ddup_damage_between(base, current, {0, 0, 100, 100}), changed);
+    EXPECT_EQ(query_ddup_damage_between(base, current, {94, 94, 100, 100}), changed);
+    EXPECT_EQ(query_ddup_damage_between(base, current, {20, 20, 95, 95}), unchanged);
+    EXPECT_EQ(query_ddup_damage_between(base, current, {20, 20, 20, 95}), unknown);
   }
 
-  TEST(WindowsDdupDamageTest, CoverageDiscontinuityAndCrossHistoryFailOpen) {
-    auto first_history =
-      std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
-    auto second_history =
-      std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
+  TEST(WindowsDdupDamageTest, ContinuityRejectsUnknownAndCrossHistoryIntervals) {
+    using namespace platf::dxgi::detail;
+    using enum ddup_damage_intersection_e;
+
+    auto first_history = std::make_shared<ddup_damage_history_t>();
+    auto second_history = std::make_shared<ddup_damage_history_t>();
     const auto base = first_history->commit({true, {}});
+    const auto updated = first_history->commit({true, {{0, 0, 100, 100}}});
     const auto discontinuity = first_history->commit({false, {}});
+    const auto resumed = first_history->commit({true, {}});
     const auto unrelated = second_history->commit({true, {}});
     const RECT roi {0, 0, 100, 100};
 
-    EXPECT_FALSE(
-      platf::dxgi::detail::query_ddup_damage_coverage_between(
-        base,
-        discontinuity,
-        roi
-      ).known
-    );
-    EXPECT_FALSE(
-      platf::dxgi::detail::query_ddup_damage_coverage_between(
-        base,
-        unrelated,
-        roi
-      ).known
-    );
+    EXPECT_TRUE(has_complete_ddup_damage_between(base, updated));
+    EXPECT_FALSE(has_complete_ddup_damage_between(base, resumed));
+    EXPECT_FALSE(has_complete_ddup_damage_between(base, unrelated));
+    EXPECT_FALSE(has_complete_ddup_damage_between(resumed, base));
+    EXPECT_FALSE(has_complete_ddup_damage_between(std::nullopt, updated));
+    EXPECT_FALSE(has_complete_ddup_damage_between(ddup_damage_snapshot_t {first_history, 0u}, updated));
+    EXPECT_TRUE(has_complete_ddup_damage_between(discontinuity, resumed));
+    EXPECT_TRUE(has_complete_ddup_damage_between(discontinuity, discontinuity));
+    EXPECT_EQ(query_ddup_damage_between(base, updated, roi), changed);
+    EXPECT_EQ(query_ddup_damage_between(base, resumed, roi), unknown);
+    EXPECT_EQ(query_ddup_damage_between(discontinuity, resumed, roi), unchanged);
   }
 
   TEST(WindowsHostSbsEncoderInputStateTest, FirstRepeatStillInitializesPersistentInput) {
@@ -847,15 +887,14 @@ namespace {
   }
 
   TEST(WindowsDdupDamageTest, AdaptiveCandidateUsesCompleteHistoryNotDamageShape) {
-    using platf::dxgi::detail::ddup_damage_coverage_t;
-    using platf::dxgi::detail::host_sbs_adaptive_motion_damage_candidate;
+    using namespace platf::dxgi::detail;
 
-    auto history = std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
+    auto history = std::make_shared<ddup_damage_history_t>();
     const auto accepted = history->commit({true, {}});
     DXGI_OUTDUPL_MOVE_RECT move {};
     move.SourcePoint = {0, 0};
     move.DestinationRect = {0, 0, 40, 100};
-    const auto overlapping_move = platf::dxgi::detail::make_ddup_damage_update(
+    const auto overlapping_move = make_ddup_damage_update(
       {},
       std::span<const DXGI_OUTDUPL_MOVE_RECT> {&move, 1u},
       100,
@@ -864,64 +903,29 @@ namespace {
     ASSERT_TRUE(overlapping_move.known);
     ASSERT_EQ(overlapping_move.rects.size(), 2u);
     const auto moved = history->commit(overlapping_move);
-    const RECT roi {0, 0, 100, 100};
-    const auto overlap = platf::dxgi::detail::query_ddup_damage_coverage_between(
-      accepted,
-      moved,
-      roi,
-      true
-    );
-    ASSERT_TRUE(overlap.known);
-    EXPECT_EQ(overlap.potentially_changed_area, 8000u);
-    EXPECT_EQ(overlap.max_single_intersection_area, 4000u);
-    EXPECT_TRUE(host_sbs_adaptive_motion_damage_candidate(overlap));
-
+    const auto small = history->commit({true, {{24, 32, 26, 34}}});
     const auto broad = history->commit({true, {{0, 0, 50, 100}}});
-    const auto broad_coverage =
-      platf::dxgi::detail::query_ddup_damage_coverage_between(
-        moved,
-        broad,
-        roi,
-        true
-      );
-    EXPECT_EQ(broad_coverage.max_single_intersection_area, 5000u);
-    EXPECT_TRUE(host_sbs_adaptive_motion_damage_candidate(broad_coverage));
-    EXPECT_FALSE(host_sbs_adaptive_motion_damage_candidate(
-      ddup_damage_coverage_t {1u, 10000u, false}
-    ));
-    EXPECT_FALSE(host_sbs_adaptive_motion_damage_candidate(
-      ddup_damage_coverage_t {0u, 0u, true}
-    ));
+
+    EXPECT_TRUE(has_complete_ddup_damage_between(accepted, moved));
+    EXPECT_TRUE(has_complete_ddup_damage_between(moved, small));
+    EXPECT_TRUE(has_complete_ddup_damage_between(small, broad));
+    EXPECT_TRUE(has_complete_ddup_damage_between(accepted, broad));
   }
 
   TEST(WindowsDdupDamageTest, AdaptiveCandidateCoversBothTopHalfPhases) {
-    auto history = std::make_shared<platf::dxgi::detail::ddup_damage_history_t>();
+    using namespace platf::dxgi::detail;
+
+    auto history = std::make_shared<ddup_damage_history_t>();
     const auto baseline = history->commit({true, {}});
     const RECT top_half {0, 0, 770, 217};
     const auto first_phase = history->commit({true, {top_half}});
     const auto second_phase = history->commit({true, {top_half}});
     const RECT analysis_region {0, 0, 770, 434};
 
-    const auto expect_broad = [&](const auto &from, const auto &to) {
-      const auto coverage =
-        platf::dxgi::detail::query_ddup_damage_coverage_between(
-          from,
-          to,
-          analysis_region,
-          true
-        );
-      ASSERT_TRUE(coverage.known);
-      EXPECT_EQ(coverage.region_area, 770u * 434u);
-      EXPECT_EQ(coverage.max_single_intersection_area, 770u * 217u);
-      EXPECT_TRUE(
-        platf::dxgi::detail::host_sbs_adaptive_motion_damage_candidate(
-          coverage
-        )
-      );
-    };
-
-    expect_broad(baseline, first_phase);
-    expect_broad(first_phase, second_phase);
+    EXPECT_TRUE(has_complete_ddup_damage_between(baseline, first_phase));
+    EXPECT_TRUE(has_complete_ddup_damage_between(first_phase, second_phase));
+    EXPECT_EQ(query_ddup_damage_between(baseline, first_phase, analysis_region), ddup_damage_intersection_e::changed);
+    EXPECT_EQ(query_ddup_damage_between(first_phase, second_phase, analysis_region), ddup_damage_intersection_e::changed);
   }
 
   TEST(WindowsHostSbsSameFramePollTest, CadenceSlackCapsAndFailClosesWaitBudget) {
@@ -1002,6 +1006,37 @@ namespace {
                    true, false, std::nullopt, now
                  )
                    .eligible);
+  }
+
+  TEST(WindowsHostSbsSameFramePollTest, PriorCompletionAndNewSubmissionShareOneDeliveryDeadline) {
+    using namespace std::chrono_literals;
+    using platf::dxgi::detail::host_sbs_same_frame_poll_plan;
+
+    const auto started = std::chrono::steady_clock::time_point {1s};
+    const auto target = started + 20ms;
+    const auto prior = host_sbs_same_frame_poll_plan(true, false, target, started);
+    ASSERT_TRUE(prior.eligible);
+
+    const auto followup = [&](auto elapsed) {
+      return host_sbs_same_frame_poll_plan(true, false, target, started + elapsed, prior);
+    };
+    const auto remaining = followup(6ms);
+    EXPECT_EQ(remaining.deadline, prior.deadline);
+    EXPECT_EQ(remaining.budget, 2ms);
+    EXPECT_TRUE(remaining.eligible);
+    EXPECT_EQ(remaining.limited_by_hard_cap, prior.limited_by_hard_cap);
+
+    EXPECT_TRUE(followup(7750us).eligible);
+    EXPECT_FALSE(followup(7751us).eligible);
+    const auto expired = followup(8ms);
+    EXPECT_EQ(expired.deadline, prior.deadline);
+    EXPECT_EQ(expired.budget, 0us);
+    EXPECT_FALSE(expired.eligible);
+
+    const auto unavailable = host_sbs_same_frame_poll_plan(true, true, target, started);
+    EXPECT_FALSE(host_sbs_same_frame_poll_plan(
+      true, false, target, started + 1ms, unavailable
+    ).eligible);
   }
 
   TEST(WindowsHostSbsSameFramePollTest, HitWaitBucketsKeepExactIntervalBoundaries) {

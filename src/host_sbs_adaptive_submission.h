@@ -15,7 +15,7 @@ namespace models {
 
   /** Host-only prefilter command for the device-owned adaptive reuse transaction. */
   struct gpu_adaptive_reuse_request {
-    // CPU-only prefilters may mark an ordinary, same-domain frame as undecided. The detector then
+    // CPU-only prefilters may mark an eligible same-domain frame as undecided. The detector then
     // publishes a GPU proposal bound to this nonzero transaction token. Conditional launch is
     // separately runtime-gated; setting this field alone can never skip inference.
     bool authorize_gpu_undecided_reuse = false;
@@ -25,6 +25,8 @@ namespace models {
     // Nonzero monotonic observation time. This remains host/D3D metadata; the fixed CUDA
     // RQST/CBRG transaction deliberately does not carry it.
     std::uint64_t observation_timestamp_us = 0u;
+    // Prepare a depth-only baseline on infer, including the first infer in this route.
+    bool depth_only_history = false;
   };
 
   enum class gpu_adaptive_submission_class_e : std::uint8_t {
@@ -32,6 +34,16 @@ namespace models {
     force_infer,
     gpu_undecided,
   };
+
+  [[nodiscard]] inline bool gpu_adaptive_baseline_matches(
+    const host_sbs_gpu_completion_receipt::receipt_t &publication,
+    const bool depth_only_history
+  ) noexcept {
+    const bool suppressed =
+      (publication.expected.flags & host_sbs_gpu_trace::record_flag_e::subtitle_suppressed) != 0u;
+    return publication.depth_cache_authorized() && suppressed == depth_only_history &&
+           (!depth_only_history || publication.expected.depth_only_history);
+  }
 
   /** Form a candidate only from the current completed publication. A missing receipt never
    * authorizes a wait or a guessed owner. Color continuity belongs to the caller; the actual
@@ -43,22 +55,23 @@ namespace models {
     const bool candidate_authorized,
     const host_sbs_gpu_completion_receipt::receipt_t *publication,
     const host_sbs_gpu_completion_receipt::expected_t &current_publication,
-    const std::uint64_t observation_timestamp_us
+    const std::uint64_t observation_timestamp_us,
+    const bool depth_only_history = false
   ) noexcept {
     if (!candidate_authorized || !publication ||
         !host_sbs_gpu_completion_receipt::matches_publication(*publication, current_publication) ||
-        !publication->depth_cache_authorized() ||
-        (publication->expected.flags & host_sbs_gpu_trace::record_flag_e::subtitle_suppressed) != 0u ||
+        !gpu_adaptive_baseline_matches(*publication, depth_only_history) ||
         current_frame_id <= publication->expected.frame_id ||
         observation_timestamp_us == 0u ||
         observation_timestamp_us < publication->expected.observation_timestamp_us) {
-      return {.observation_timestamp_us = observation_timestamp_us};
+      return {.observation_timestamp_us = observation_timestamp_us, .depth_only_history = depth_only_history};
     }
     return {
       .authorize_gpu_undecided_reuse = true,
       .baseline_frame_id = publication->depth_owner_frame_id,
       .gpu_reuse_decision_token = current_frame_id,
       .observation_timestamp_us = observation_timestamp_us,
+      .depth_only_history = depth_only_history,
     };
   }
 
@@ -102,9 +115,11 @@ namespace models {
   }
 
   [[nodiscard]] constexpr bool depth_optional_work_allows_gpu_undecided(
-    const depth_optional_work_mode_e work
+    const depth_optional_work_mode_e work,
+    const bool depth_only_history = false
   ) noexcept {
-    return work == depth_optional_work_mode_e::ordinary;
+    return depth_only_history ? work == depth_optional_work_mode_e::disable_subtitle :
+                                work == depth_optional_work_mode_e::ordinary;
   }
 
   /** Explicit subtitle eligibility is independent of the GPU similarity decision. */

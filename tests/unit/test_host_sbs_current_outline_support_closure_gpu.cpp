@@ -184,8 +184,7 @@ namespace {
       };
       const std::array espec {
         cache::shader_spec {"host_sbs_current_black_enclosure_cs.hlsl", "begin_main", "cs_5_0"},
-        cache::shader_spec {"host_sbs_current_black_enclosure_cs.hlsl", "clear_main", "cs_5_0"},
-        cache::shader_spec {"host_sbs_current_black_enclosure_cs.hlsl", "validate_encoding_main", "cs_5_0"},
+        cache::shader_spec {"host_sbs_current_black_enclosure_cs.hlsl", "initialize_main", "cs_5_0"},
         cache::shader_spec {"host_sbs_current_black_enclosure_cs.hlsl", "unit_meta_main", "cs_5_0"},
         cache::shader_spec {"host_sbs_current_black_enclosure_cs.hlsl", "collect_main", "cs_5_0"},
         cache::shader_spec {"host_sbs_current_black_enclosure_cs.hlsl", "clear_scratch_main", "cs_5_0"},
@@ -204,10 +203,10 @@ namespace {
       for (std::size_t i = 0; i < espec.size(); ++i) {
         const auto code = cache::get(snapshot, espec[i]);
         require(code && !code->empty());
-        if (i < 12u) {
+        if (i < enclosure::shader_count) {
           require(SUCCEEDED(device_->CreateComputeShader(code->data(), code->size(), nullptr, &enclosure_[i])));
         } else {
-          require(SUCCEEDED(device_->CreateComputeShader(code->data(), code->size(), nullptr, &roi_[i - 12u])));
+          require(SUCCEEDED(device_->CreateComputeShader(code->data(), code->size(), nullptr, &roi_[i - enclosure::shader_count])));
         }
       }
       const auto *roi_root = std::getenv("SUNSHINE_TEST_CURRENT_ROI_SHADER_ROOT"), *roi_pin = std::getenv("SUNSHINE_TEST_CURRENT_ROI_SHADER_PIN");require(roi_root&&roi_pin);
@@ -221,7 +220,7 @@ namespace {
       if (const auto *hp = std::getenv("SUNSHINE_TEST_BLACK_ENCLOSURE_HEADER_PIN")) {
         require(std::string(hp) == compiled_enclosure_helper_pin);
       }
-      for (std::size_t i = 0; i < 12u; ++i) {
+      for (std::size_t i = 0; i < enclosure::shader_count; ++i) {
         program_.enclosure.shaders[i] = enclosure_[i].Get();
       }
       for (std::size_t i = 0; i < 3u; ++i) {
@@ -1569,7 +1568,7 @@ namespace {
       context_->CSSetConstantBuffers(0u, 3u, constants);
       context_->CSSetShaderResources(0u, 16u, inputs.data());
       context_->CSSetUnorderedAccessViews(0u, 8u, outputs.data(), nullptr);
-      context_->CSSetShader(enclosure_[11u].Get(), nullptr, 0u);
+      context_->CSSetShader(enclosure_[enclosure::publish_stage].Get(), nullptr, 0u);
       context_->Dispatch((W_ + 15u) / 16u, (H_ + 15u) / 16u, 1u);
       inputs.fill(nullptr);outputs.fill(nullptr);
       context_->CSSetShaderResources(0u, 16u, inputs.data());
@@ -1974,7 +1973,7 @@ namespace {
     ring::program_t program_;
     std::array<ComPtr<ID3D11ComputeShader>, 5u> colour_;
     std::array<ComPtr<ID3D11ComputeShader>, 6u> graph_;
-    std::array<ComPtr<ID3D11ComputeShader>, 12u> enclosure_;
+    std::array<ComPtr<ID3D11ComputeShader>, enclosure::shader_count> enclosure_;
     std::array<ComPtr<ID3D11ComputeShader>, 3u> roi_;
     texture_t rgb_, support_, origin_, packed_snapshot_, cache_snapshot_, pre_inside_snapshot_;
     buffer_t probability_, ocr_, sct_, uip_, cb_, root_, raw_parent_snapshot_, raw_flags_snapshot_;
@@ -2163,6 +2162,10 @@ namespace {
     author(false, 3u, 1u, false, false, false, 64u, 32u);
     root_words_[60] = 0u;
     upload();
+    const auto args = helper_.mutable_views();
+    const std::array<UINT, 16u> poison {1u, 1u, 1u};
+    context_->UpdateSubresource(args.unit_arguments.Get(), 0u, nullptr, poison.data(), 0u, 0u);
+    context_->UpdateSubresource(args.inside_arguments.Get(), 0u, nullptr, poison.data(), 0u, 0u);
     ASSERT_TRUE(run());
     EXPECT_EQ(body(), b);
     EXPECT_EQ(matte(), m);
@@ -2172,6 +2175,8 @@ namespace {
     EXPECT_EQ(outline_matte(), out);
     EXPECT_EQ(calibration(), cd);
     EXPECT_EQ(root_cache(), pc);
+    EXPECT_EQ(words(read(args.unit_arguments.Get())), std::vector<UINT>(16u, 0u));
+    EXPECT_EQ(words(read(args.inside_arguments.Get())), std::vector<UINT>(4u, 0u));
     root_words_[60] = 1u;
     upload();
     ASSERT_TRUE(run());
@@ -3948,7 +3953,7 @@ namespace {
     context_->CSSetConstantBuffers(0u, 3u, constants);
     context_->CSSetShaderResources(0u, 16u, inputs.data());
     context_->CSSetUnorderedAccessViews(0u, 8u, outputs.data(), nullptr);
-    context_->CSSetShader(enclosure_[3u].Get(), nullptr, 0u);context_->Dispatch(1u, 1u, 1u);
+    context_->CSSetShader(enclosure_[enclosure::unit_meta_stage].Get(), nullptr, 0u);context_->Dispatch(1u, 1u, 1u);
     inputs.fill(nullptr);outputs.fill(nullptr);
     context_->CSSetShaderResources(0u, 16u, inputs.data());
     context_->CSSetUnorderedAccessViews(0u, 8u, outputs.data(), nullptr);
@@ -4256,13 +4261,13 @@ namespace {
       request.source.analysis_generation = generation;request.source.token = token;request.source.transfer_mode = sdr?0u:2u;
       request.probability = p_buffer.srv.Get();request.support = support_texture.srv.Get();
       request.ocr_record = o_buffer.srv.Get();request.actual_uip40 = u_buffer.srv.Get();
-      request.original_legacy_matte = legacy_texture.srv.Get();request.postprocess_mode = mode;request.expected_work = 1u;
+      request.postprocess_mode = mode;request.expected_work = 1u;
       ASSERT_TRUE(owner.queue(context_.Get(), effective_composition, request, error_)) << error_;
       const auto bundle = owner.bundle();
       ASSERT_TRUE(bundle.all_stages_issued);
       selector::inputs_t in;
       in.current_cb96 = bundle.current.actual_contour_constants96.Get();in.actual_root_args = bundle.current.actual_final256.Get();
-      in.legacy_matte = bundle.current.original_legacy_matte.Get();in.sct = bundle.current.sct.Get();
+      in.legacy_matte = legacy_texture.srv.Get();in.sct = bundle.current.sct.Get();
       in.mode = static_cast<selector::postprocess_mode_e>(mode);in.expected_work = 1u;in.transaction_token = token;
       in.current_outline_requested = true;in.baseline_matte = bundle.baseline_matte.Get();in.numeric_proof = bundle.numeric_proof.Get();
       in.source_envelope104 = bundle.source.uip_envelope.Get();in.cbc_meta512 = bundle.enclosure.receipt.Get();

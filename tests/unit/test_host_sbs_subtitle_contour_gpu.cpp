@@ -222,6 +222,9 @@ namespace {
 
   class HostSbsSubtitleContourGpuTest: public ::testing::Test {
   protected:
+    static constexpr auto observation_header = v2::subtitle_plane_cover_capacity *
+                                               (1u + v2::subtitle_contour_palette_max_modes);
+
     void SetUp() override {
       constexpr D3D_FEATURE_LEVEL requested[] {D3D_FEATURE_LEVEL_11_0};
       D3D_FEATURE_LEVEL actual {};
@@ -247,7 +250,8 @@ namespace {
         cache::shader_spec {"host_sbs_subtitle_contour_cs.hlsl", "project_main", "cs_5_0"},
         cache::shader_spec {"host_sbs_subtitle_contour_cs.hlsl", "history_main", "cs_5_0"},
         cache::shader_spec {"host_sbs_subtitle_contour_cs.hlsl", "snapshot_main", "cs_5_0"},
-        cache::shader_spec {"host_sbs_subtitle_contour_cs.hlsl", "history_identity_main", "cs_5_0"}
+        cache::shader_spec {"host_sbs_subtitle_contour_cs.hlsl", "history_identity_main", "cs_5_0"},
+        cache::shader_spec {"host_sbs_subtitle_contour_cs.hlsl", "shared_palette_main", "cs_5_0"}
       };
       const auto sources = cache::snapshot_sources(SUNSHINE_SHADERS_DIR, specs);
       for (std::size_t pass = 0u; pass < specs.size(); ++pass) {
@@ -266,6 +270,10 @@ namespace {
       desc.BindFlags = 0u;
       desc.MiscFlags = D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS;
       ASSERT_TRUE(SUCCEEDED(device_->CreateBuffer(&desc, nullptr, &indirect_)));
+      ASSERT_TRUE(SUCCEEDED(device_->CreateBuffer(&desc, nullptr, &palette_indirect_)));
+      constexpr auto observation_records = observation_header + 1u + 3u * v2::subtitle_plane_cover_capacity;
+      ASSERT_TRUE(create_buffer(device_.Get(), observation_records * sizeof(uint4_t), sizeof(uint4_t),
+                                D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, observation_));
       ASSERT_TRUE(resize(160u, 90u));
     }
 
@@ -530,13 +538,12 @@ namespace {
         return;
       }
       std::array<ID3D11ShaderResourceView *, 13u> srvs {};
-      std::array<ID3D11UnorderedAccessView *, 7u> uavs {};
+      std::array<ID3D11UnorderedAccessView *, 8u> uavs {};
       context_->CSSetShaderResources(0u, srvs.size(), srvs.data());
       context_->CSSetUnorderedAccessViews(0u, uavs.size(), uavs.data(), nullptr);
     }
 
-    void bind_inputs(ID3D11ShaderResourceView *baseline_support = nullptr,
-                     ID3D11ShaderResourceView *eligibility = nullptr) {
+    void bind_inputs(ID3D11ShaderResourceView *baseline_support = nullptr) {
       const std::array<ID3D11ShaderResourceView *, 13u> srvs {
         display_.srv.Get(),
         probability_.srv.Get(),
@@ -550,11 +557,22 @@ namespace {
         ocr_.srv.Get(),
         geometry_.srv.Get(),
         nullptr,
-        eligibility
+        nullptr
       };
       context_->CSSetShaderResources(0u, srvs.size(), srvs.data());
       const std::array<ID3D11Buffer *, 2u> cbuffers {contour_cb_.Get(), geometry_cb_.Get()};
       context_->CSSetConstantBuffers(0u, cbuffers.size(), cbuffers.data());
+    }
+
+    void prepare_current_observation(bool zero_groups) {
+      const std::array<std::uint32_t, 3u> args {zero_groups ? 0u : 1u, 1u, 1u};
+      context_->UpdateSubresource(palette_indirect_.Get(), 0u, nullptr, args.data(), 0u, 0u);
+      context_->CSSetShader(shaders_[6u].Get(), nullptr, 0u);
+      context_->CSSetUnorderedAccessViews(7u, 1u, observation_.uav.GetAddressOf(), nullptr);
+      context_->DispatchIndirect(palette_indirect_.Get(), 0u);
+      ID3D11UnorderedAccessView *null_uav = nullptr;
+      context_->CSSetUnorderedAccessViews(7u, 1u, &null_uav, nullptr);
+      context_->CSSetShaderResources(12u, 1u, observation_.srv.GetAddressOf());
     }
 
     bool run(bool zero_groups = false,
@@ -581,18 +599,22 @@ namespace {
         zero_groups ? 0u : 1u
       };
       context_->UpdateSubresource(indirect_.Get(), 0u, nullptr, arguments.data(), 0u, 0u);
-      bind_inputs(baseline_support, eligibility);
+      bind_inputs(baseline_support);
+      prepare_current_observation(zero_groups);
       ID3D11UnorderedAccessView *null_uav = nullptr;
+      // The historical temporal variant still receives its eligibility bitmap at t12.
+      if (eligibility) {
+        context_->CSSetShaderResources(12u, 1u, &eligibility);
+      }
       context_->CSSetShader(shaders_[0u].Get(), nullptr, 0u);
       context_->CSSetUnorderedAccessViews(0u, 1u, support_.uav.GetAddressOf(), nullptr);
       context_->CSSetUnorderedAccessViews(2u, 1u, next_features_.uav.GetAddressOf(), nullptr);
       context_->DispatchIndirect(indirect_.Get(), 0u);
       context_->CSSetUnorderedAccessViews(0u, 1u, &null_uav, nullptr);
       context_->CSSetUnorderedAccessViews(2u, 1u, &null_uav, nullptr);
-      // Experimental inputs exist only during temporal_main. Dense/history/snapshot retain
-      // their production bindings and never read the external eligibility bitmap.
-      ID3D11ShaderResourceView *null_eligibility = nullptr;
-      context_->CSSetShaderResources(12u, 1u, &null_eligibility);
+      if (eligibility) {
+        context_->CSSetShaderResources(12u, 1u, observation_.srv.GetAddressOf());
+      }
       context_->CSSetShaderResources(5u, 1u, support_.srv.GetAddressOf());
       context_->CSSetShader(shaders_[1u].Get(), nullptr, 0u);
       context_->CSSetUnorderedAccessViews(6u, 1u, matte_.uav.GetAddressOf(), nullptr);
@@ -681,15 +703,19 @@ namespace {
     // Authority, FP16 source upload, field-indirect dispatch, native boundaries and poisoned
     // output clearing remain the production mechanisms.
     bool run_dense_only(const std::vector<std::uint32_t> &seeds) {
-      if (seeds.size() != std::size_t(source_w_) * crop_h_) return false;
+      D3D11_TEXTURE2D_DESC support_desc {};
+      support_.texture->GetDesc(&support_desc);
+      if (seeds.size() != std::size_t(support_desc.Width) * support_desc.Height) return false;
       unbind();
       if (!upload()) return false;
-      context_->UpdateSubresource(support_.texture.Get(), 0u, nullptr, seeds.data(), source_w_ * sizeof(std::uint32_t), 0u);
+      context_->UpdateSubresource(support_.texture.Get(), 0u, nullptr, seeds.data(),
+                                  support_desc.Width * sizeof(std::uint32_t), 0u);
       const UINT poison[4] {0xdeadbeefu, 0xdeadbeefu, 0xdeadbeefu, 0xdeadbeefu};
       context_->ClearUnorderedAccessViewUint(matte_.uav.Get(), poison);
       const std::array<std::uint32_t, 3u> arguments {(field_w_ + 15u) / 16u, (field_h_ + 15u) / 16u, 1u};
       context_->UpdateSubresource(indirect_.Get(), 0u, nullptr, arguments.data(), 0u, 0u);
       bind_inputs();
+      prepare_current_observation(false);
       context_->CSSetShaderResources(5u, 1u, support_.srv.GetAddressOf());
       context_->CSSetShader(shaders_[1u].Get(), nullptr, 0u);
       context_->CSSetUnorderedAccessViews(6u, 1u, matte_.uav.GetAddressOf(), nullptr);
@@ -1082,12 +1108,12 @@ namespace {
 
     ComPtr<ID3D11Device> device_;
     ComPtr<ID3D11DeviceContext> context_;
-    std::array<ComPtr<ID3D11ComputeShader>, 6u> shaders_;
+    std::array<ComPtr<ID3D11ComputeShader>, 7u> shaders_;
     bool force_copy_history_ = false;
     ComPtr<ID3D11ComputeShader> probability_probe_;
-    ComPtr<ID3D11Buffer> contour_cb_, geometry_cb_, indirect_;
+    ComPtr<ID3D11Buffer> contour_cb_, geometry_cb_, indirect_, palette_indirect_;
     texture_t display_, support_, matte_, field_, features_, next_features_, completed_display_;
-    buffer_t probability_, plane_, params_, ocr_, health_, geometry_, identity_, completed_probability_;
+    buffer_t probability_, plane_, params_, ocr_, health_, geometry_, identity_, completed_probability_, observation_;
     std::uint32_t source_w_ {}, source_h_ {}, crop_h_ {}, crop_top_ {}, field_w_ {}, field_h_ {};
     uint4_t content_ {}, native_cover_ {}, field_cover_ {};
     contour_constants_t constants_ {};
@@ -1191,6 +1217,28 @@ namespace {
     EXPECT_EQ(result_.matte, std::vector<std::uint32_t> {0u});
   }
 
+  TEST_F(HostSbsSubtitleContourGpuTest, DenseMatteClearsActualOutputForMismatchedExtents) {
+    ASSERT_TRUE(resize(1057u, 595u, 770u, 434u));
+    clear_scene(.5f);
+    const std::vector<std::uint32_t> seeds(pixels_.size(), 1u);
+    ASSERT_TRUE(run_dense_only(seeds));
+    ASSERT_EQ(pin_count(result_.matte), seeds.size());
+
+    constexpr UINT bindings = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+    const UINT output_width = source_w_ + 16u;
+    const UINT output_height = crop_h_ + 4u;
+    auto original_matte = std::move(matte_);
+    ASSERT_TRUE(create_texture(device_.Get(), output_width, output_height, DXGI_FORMAT_R32_UINT, bindings, matte_));
+    ASSERT_TRUE(run_dense_only(seeds));
+    EXPECT_EQ(result_.matte, std::vector<std::uint32_t>(std::size_t(output_width) * output_height, 0u));
+
+    matte_ = std::move(original_matte);
+    support_ = {};
+    ASSERT_TRUE(create_texture(device_.Get(), 1u, 1u, DXGI_FORMAT_R32_UINT, bindings, support_));
+    ASSERT_TRUE(run_dense_only({1u}));
+    EXPECT_EQ(result_.matte, std::vector<std::uint32_t>(seeds.size(), 0u));
+  }
+
   TEST_F(HostSbsSubtitleContourGpuTest, DenseMatteInvalidNativeColorsAndNonbinarySeedsCannotAuthorizePixels) {
     clear_scene(.5f);
     std::vector<std::uint32_t> seeds(pixels_.size());
@@ -1216,6 +1264,10 @@ namespace {
     EXPECT_EQ(result_.matte[native_index(774u, crop_h_ / 2u)], 1u);
     EXPECT_EQ(result_.matte[native_index(1542u, crop_h_ / 2u)], 1u);
     EXPECT_EQ(result_.matte[native_index(1000u, crop_h_ / 2u)], 0u);
+
+    std::fill(seeds.begin(), seeds.end(), 0u);
+    ASSERT_TRUE(run_dense_only(seeds));
+    EXPECT_EQ(result_.matte, seeds);
   }
 
   TEST_F(HostSbsSubtitleContourGpuTest, SavedNativeContourReplay) {
@@ -3061,10 +3113,28 @@ namespace {
           pixel[3u] = std::numeric_limits<float>::quiet_NaN();
           break;
       }
-      ASSERT_TRUE(run());
+      ASSERT_TRUE(run(false, nullptr, nullptr, true));
       EXPECT_EQ(result_.support[point_index()], 0u);
+      EXPECT_EQ(result_.next_features[point_index()], (pixel_t {}));
       EXPECT_EQ(result_.features[point_index()], (pixel_t {}));
     }
+  }
+
+  TEST_F(HostSbsSubtitleContourGpuTest, ReceiptGatedHistoryClearsMismatchedDestination) {
+    texture_t mismatched;
+    ASSERT_TRUE(create_texture(device_.Get(), source_w_ + 1u, crop_h_, DXGI_FORMAT_R32G32B32A32_FLOAT,
+                               D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, mismatched));
+    const float poison[4] {.75f, .75f, .75f, feature_code(4u)};
+    context_->ClearUnorderedAccessViewFloat(mismatched.uav.Get(), poison);
+    features_ = std::move(mismatched);
+    paint_glyph_point();
+
+    ASSERT_TRUE(run(false, nullptr, nullptr, true));
+
+    ASSERT_EQ(result_.next_features[point_index()][3u], feature_code(1u));
+    ASSERT_EQ(result_.features.size(), std::size_t(source_w_ + 1u) * crop_h_);
+    EXPECT_TRUE(std::ranges::all_of(result_.features, [](const auto &feature) { return feature == pixel_t {}; }));
+    EXPECT_EQ(result_.identity[v2::subtitle_contour_history_snapshot_valid_word], 0u);
   }
 
   TEST_F(HostSbsSubtitleContourGpuTest, MalformedPriorRgbAndCountNamespaceCannotForgeFourthObservation) {
@@ -3528,6 +3598,34 @@ namespace {
         }
       }
     }
+  }
+
+  TEST_F(HostSbsSubtitleContourGpuTest, FreshAbstentionReplacesPreparedEvidenceAfterReuse) {
+    paint_glyph_point();
+    ASSERT_TRUE(observe(1u));
+    const auto retained = result_;
+    constexpr auto header_word = 4u * observation_header;
+    std::vector<std::uint32_t> prepared, current;
+    ASSERT_TRUE(read_buffer(device_.Get(), context_.Get(), observation_.buffer.Get(), prepared));
+    ASSERT_EQ(prepared[header_word], 1u);
+    ASSERT_GT(prepared[header_word + 1u], 0u);
+
+    make_authority(2u, 1100001u);
+    without_current_authority(true);
+    ocr_words_[2u] = 0u;
+    ASSERT_TRUE(run(true, nullptr, nullptr, true));
+    expect_tuple_equal(retained);
+    ASSERT_TRUE(read_buffer(device_.Get(), context_.Get(), observation_.buffer.Get(), current));
+    EXPECT_EQ(current, prepared);
+
+    ASSERT_TRUE(run(false, nullptr, nullptr, true));
+    expect_no_mask();
+    EXPECT_EQ(result_.identity[v2::subtitle_contour_history_snapshot_valid_word], 0u);
+    EXPECT_TRUE(std::ranges::all_of(result_.source, [](const auto &pixel) { return pixel == half_pixel_t {}; }));
+    ASSERT_TRUE(read_buffer(device_.Get(), context_.Get(), observation_.buffer.Get(), current));
+    EXPECT_EQ(current[header_word], 0u);
+    EXPECT_EQ(current[header_word + 1u], 0u);
+    EXPECT_EQ(current[header_word + 2u], 1100001u);
   }
 
   TEST_F(HostSbsSubtitleContourGpuTest, OpaqueInferAndPoisonedZeroGroupReuseKeepFeatureOwnersUntilForceObservation) {

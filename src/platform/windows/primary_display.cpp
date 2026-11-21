@@ -1722,6 +1722,29 @@ namespace platf::primary_display {
              same_device(loaded.journal->promoted_primary, source_device_path);
     }
 
+    bool manager_t::verify_local_monitor_replacement(std::wstring_view source_device_path, std::wstring_view sink_device_path) {
+      const auto loaded = io_.load();
+      if (!loaded.success || !loaded.journal || !valid_journal(*loaded.journal)) {
+        return false;
+      }
+      const auto &journal = *loaded.journal;
+      if (!journal.monitor_replacement || journal.prepared || !journal.exclusive_started || !journal.exclusive_topology || journal.pending_restore || !same_device(journal.promoted_primary, source_device_path) || !same_device(journal.local_sink, sink_device_path)) {
+        return false;
+      }
+      const auto &committed = *journal.exclusive_topology;
+      if (!find_path(committed, sink_device_path)) {
+        return false;
+      }
+
+      const auto current = io_.query();
+      // same_colors accepts an absent color in both snapshots. Reuse requires a fresh color
+      // observation for every active path, just like the original replacement verification.
+      return current && same_topology(*current, committed) && same_colors(*current, committed) &&
+             std::ranges::all_of(current->colors, [](const auto &color) {
+               return color.has_value();
+             });
+    }
+
     bool manager_t::bind_pending(std::wstring_view device_path) {
       const auto loaded = io_.load();
       if (!loaded.success || (loaded.journal && !valid_journal(*loaded.journal))) {
@@ -3866,6 +3889,20 @@ namespace platf::primary_display {
       return prepared;
     } catch (const std::exception &exception) {
       BOOST_LOG(error) << "Could not prepare physical-monitor replacement recovery: " << exception.what();
+      return false;
+    }
+  }
+
+  bool verify_local_monitor_replacement(std::wstring_view source_device_path, std::wstring_view sink_device_path) {
+    std::lock_guard lock(transaction_mutex);
+    const auto &active = exclusive_session_state.active_identity();
+    if (!active || exclusive_session_state.pending_identity() || !same_device(*active, source_device_path)) {
+      return false;
+    }
+    try {
+      return manager().verify_local_monitor_replacement(source_device_path, sink_device_path);
+    } catch (const std::exception &exception) {
+      BOOST_LOG(warning) << "Could not verify physical-monitor replacement: " << exception.what();
       return false;
     }
   }

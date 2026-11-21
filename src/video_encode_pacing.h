@@ -161,13 +161,12 @@ namespace video::detail {
     return std::min(target, static_cast<double>(encoding_framerate));
   }
 
-  /** Time left until an independent provider's minimum-FPS keepalive is due.
+  /** Time left until the minimum-FPS keepalive is due.
    *
-   * Such a provider wakes the encode loop itself and is not polled at stream cadence, and its
-   * metadata-only captures do not encode. Measuring from the last encode keeps a steady stream
-   * of those captures from postponing the keepalive indefinitely.
+   * Capture and control wakes can end the image wait without submitting a picture. Measure
+   * from the last submission so those wakes preserve the keepalive deadline.
    */
-  [[nodiscard]] inline std::chrono::nanoseconds provider_keepalive_wait(
+  [[nodiscard]] inline std::chrono::nanoseconds encode_keepalive_wait(
     std::chrono::steady_clock::time_point now,
     std::chrono::steady_clock::time_point last_encode,
     std::chrono::nanoseconds keepalive_interval

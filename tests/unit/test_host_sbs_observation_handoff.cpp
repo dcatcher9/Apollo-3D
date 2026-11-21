@@ -8,13 +8,18 @@
   #include "src/host_sbs_observation_handoff.h"
 
   #include <memory>
+  #include <type_traits>
   #include <utility>
 
 namespace {
   using handoff_t = host_sbs::observation_handoff_t;
+  static_assert(std::is_same_v<decltype(std::declval<handoff_t &>().step()), const models::depth_step_result_t &>);
 
   models::depth_step_result_t step_for(const std::uint64_t frame, const std::uint64_t domain, const bool completed) {
     models::depth_step_result_t step;
+    if (!completed) {
+      return step;
+    }
     auto &observation = step.observation;
     observation.raw_width = 1540;
     observation.raw_height = 868;
@@ -56,21 +61,24 @@ namespace {
     EXPECT_FALSE(submission.subtitle_ocr_inference_enqueued);
   }
 
-  TEST(HostSbsObservationHandoffTest, SelectPreservesPopulatedWorkingViewsWithoutFreshCompletion) {
+  TEST(HostSbsObservationHandoffTest, SelectPreservesAdmissionAndStatusWithoutAnObservation) {
     handoff_t handoff;
-    const auto working = step_for(17u, 7u, false);
+    auto working = step_for(17u, 7u, false);
+    working.submission.inference_enqueued = true;
+    working.submission.subtitle_ocr_inference_enqueued = true;
+    working.status.cuda_graph_active = true;
     handoff.select(working);
 
     const auto &selected = std::as_const(handoff).step();
     EXPECT_FALSE(selected.observation.completed_frame_valid);
-    EXPECT_NE(selected.observation.raw_width, 0);
+    EXPECT_EQ(selected.observation.raw_width, 0);
+    EXPECT_FALSE(selected.observation.raw_model_provenance);
     expect_observation(selected.observation, working.observation);
-    expect_no_submission(selected.submission);
+    EXPECT_TRUE(selected.submission.inference_enqueued);
+    EXPECT_TRUE(selected.submission.subtitle_ocr_inference_enqueued);
+    EXPECT_FALSE(selected.submission.gpu_undecided_transaction_enqueued);
     EXPECT_FALSE(selected.completion.input_domain_reset);
-    EXPECT_FALSE(selected.status.cuda_graph_active);
-
-    handoff.step().status.cuda_graph_active = true;
-    EXPECT_TRUE(std::as_const(handoff).step().status.cuda_graph_active);
+    EXPECT_TRUE(selected.status.cuda_graph_active);
   }
 
   TEST(HostSbsObservationHandoffTest, FinalizedCompletionKeepsItsViewsAndEventWhileSubmissionAdvances) {
@@ -127,13 +135,16 @@ namespace {
     earlier.status.cuda_graph_active = true;
     earlier.completion.input_domain_reset = true;
     earlier.submission.gpu_undecided_transaction_enqueued = true;
-    handoff.select(earlier);
+    const auto metadata = std::weak_ptr {earlier.observation.raw_model_provenance};
+    handoff.select(std::move(earlier));
+    ASSERT_FALSE(metadata.expired());
     auto current = step_for(18u, 8u, false);
     current.submission.inference_enqueued = true;
 
     // The caller has already revoked its finalized verdict. This composer does not
     // authenticate domains or decide whether GPU resources remain current.
     ASSERT_FALSE(handoff.accept_submission(current, false));
+    EXPECT_TRUE(metadata.expired());
     expect_observation(handoff.step().observation, current.observation);
     EXPECT_FALSE(handoff.step().observation.completed_frame_valid);
     EXPECT_FALSE(handoff.step().status.cuda_graph_active);
@@ -185,9 +196,12 @@ namespace {
     source.status.cuda_graph_active = true;
     const auto expected = source.observation;
 
-    const auto repeated = handoff_t::repeat(source.observation, source.status);
-    source.observation = {};
-    source.status = {};
+    handoff_t original;
+    original.select(std::move(source));
+    handoff_t repeat;
+    repeat.select_retained(original);
+    original.reset();
+    const auto &repeated = repeat.step();
 
     expect_observation(repeated.observation, expected);
     EXPECT_TRUE(repeated.status.cuda_graph_active);

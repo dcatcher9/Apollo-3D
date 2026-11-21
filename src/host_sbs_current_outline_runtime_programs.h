@@ -36,7 +36,7 @@ inline constexpr std::array<cache::shader_spec, 5u> colour_specs{{
   cache::shader_spec{"host_sbs_subtitle_inner_colour_cs.hlsl","accumulate_main","cs_5_0"},
   cache::shader_spec{"host_sbs_subtitle_inner_colour_cs.hlsl","validate_main","cs_5_0"},
 }};
-inline constexpr std::string_view colour_closure="3dc3494fba1ec0e265000a762711158fbad809de52751efa9f3d76b8a657a53a";
+inline constexpr std::string_view colour_closure="5b6623142a85512d6180784ffac5876f6e0565f2430505ba927b47a740505956";
 inline constexpr std::array<cache::shader_spec, 6u> components_specs{{
   cache::shader_spec{"host_sbs_subtitle_seeded_components_cs.hlsl","init_main","cs_5_0"},
   cache::shader_spec{"host_sbs_subtitle_seeded_components_cs.hlsl","union_main","cs_5_0"},
@@ -46,10 +46,9 @@ inline constexpr std::array<cache::shader_spec, 6u> components_specs{{
   cache::shader_spec{"host_sbs_subtitle_seeded_components_cs.hlsl","dilate_box_main","cs_5_0"},
 }};
 inline constexpr std::string_view components_closure="3c5884de250262680dff4fb80c67e30335217af90d237fc7b531131ba9b967d1";
-inline constexpr std::array<cache::shader_spec, 12u> enclosure_specs{{
+inline constexpr std::array<cache::shader_spec, 11u> enclosure_specs{{
   cache::shader_spec{"host_sbs_current_black_enclosure_cs.hlsl","begin_main","cs_5_0"},
-  cache::shader_spec{"host_sbs_current_black_enclosure_cs.hlsl","clear_main","cs_5_0"},
-  cache::shader_spec{"host_sbs_current_black_enclosure_cs.hlsl","validate_encoding_main","cs_5_0"},
+  cache::shader_spec{"host_sbs_current_black_enclosure_cs.hlsl","initialize_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_black_enclosure_cs.hlsl","unit_meta_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_black_enclosure_cs.hlsl","collect_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_black_enclosure_cs.hlsl","clear_scratch_main","cs_5_0"},
@@ -60,7 +59,7 @@ inline constexpr std::array<cache::shader_spec, 12u> enclosure_specs{{
   cache::shader_spec{"host_sbs_current_black_enclosure_cs.hlsl","select_unit_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_black_enclosure_cs.hlsl","publish_main","cs_5_0"},
 }};
-inline constexpr std::string_view enclosure_closure="57f6050be0531a15d2bce1a21e2185e8b7c1c2b770493b803d2712cdf401fcf7";
+inline constexpr std::string_view enclosure_closure="5ac8b40c53ee7697ce1551877d3d5f416e2a43a89b71110231dac5ffbdb7ac4f";
 // One canonical ROI owner; the historical enclosure-local file remains for its independently
 // pinned enclosure/ring fixtures. Production loads this group once.
 inline constexpr std::array<cache::shader_spec, 3u> roi_specs{{
@@ -86,13 +85,13 @@ inline constexpr std::array<cache::shader_spec, 15u> outline_specs{{
   cache::shader_spec{"host_sbs_current_outline_support_band_cs.hlsl","aggregate_support_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_outline_support_band_cs.hlsl","publish_closure_main","cs_5_0"},
 }};
-inline constexpr std::string_view outline_closure="77ef293359988b8b6b762b1ff286e299746f244cd237d56874b172eaf563c9a5";
+inline constexpr std::string_view outline_closure="198b489d4cb5b7a63005852d7c464679ab84df0b061f4b138ca51dd1f9404b46";
 inline constexpr std::array<cache::shader_spec, 3u> stability_specs{{
   cache::shader_spec{"host_sbs_current_outline_support_band_cs.hlsl","private_cache_begin_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_outline_support_band_cs.hlsl","private_cache_validate_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_outline_support_band_cs.hlsl","private_cache_commit_main","cs_5_0"},
 }};
-inline constexpr std::string_view stability_closure="e79498f8dadd4ea1c652471241417bc82002d0725246e3de75ee09f045cd5a49";
+inline constexpr std::string_view stability_closure="6e23e79d2b643a8ae34c7f80b67c64f50876ea303c24fdf3ad08d00b2c191ed4";
 inline constexpr std::array<cache::shader_spec, 9u> hole_specs{{
   cache::shader_spec{"host_sbs_current_mask_holes_cs.hlsl","clear_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_mask_holes_cs.hlsl","capture_unit_main","cs_5_0"},
@@ -125,12 +124,12 @@ inline constexpr std::array<cache::shader_spec, 4u> inside_specs{{
   cache::shader_spec{"host_sbs_current_inside_completion_cs.hlsl","publish_inside_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_inside_completion_cs.hlsl","finalize_main","cs_5_0"},
 }};
-inline constexpr std::string_view inside_closure="0a97d8ec59d95af324d41d268634c68431f76fb3e1af924d8dfd14542c468672";
+inline constexpr std::string_view inside_closure="1c7168e189089c88bfdd19b629d9845d12bbe47858db5e48abdb78b30214bafd";
 inline constexpr std::array<cache::shader_spec, 2u> selector_specs{{
   cache::shader_spec{"host_sbs_selected_matte_cs.hlsl","prepare_main","cs_5_0"},
   cache::shader_spec{"host_sbs_selected_matte_cs.hlsl","select_main","cs_5_0"},
 }};
-inline constexpr std::string_view selector_closure="3bb92b4c79c5317ff105e05365a673c5be1d4443d641640aa7b1ba8d27253dec";
+inline constexpr std::string_view selector_closure="76ae7e66aa921e6902b421fdf0621dff2291cf2c119fe3e156928fc2b85254c6";
 inline std::filesystem::path selector_root(const std::filesystem::path&p){return p/"selector";}
 
 // The mandatory roles share one ROI implementation. Each optional role owns a fixed,
@@ -143,8 +142,8 @@ inline constexpr std::size_t coverage_compute_shader_offset=hole_compute_shader_
 inline constexpr std::size_t foreground_edge_compute_shader_offset=coverage_compute_shader_offset+coverage_specs.size();
 inline constexpr std::size_t trusted_inner_compute_shader_offset=foreground_edge_compute_shader_offset+foreground_edge_specs.size();
 inline constexpr std::size_t unique_compute_shader_count=trusted_inner_compute_shader_offset+trusted_inner_specs.size();
-static_assert(required_compute_shader_count==51u&&hole_compute_shader_offset==54u&&
-              coverage_compute_shader_offset==63u&&foreground_edge_compute_shader_offset==66u&&trusted_inner_compute_shader_offset==67u&&unique_compute_shader_count==68u);
+static_assert(required_compute_shader_count==50u&&hole_compute_shader_offset==53u&&
+              coverage_compute_shader_offset==62u&&foreground_edge_compute_shader_offset==65u&&trusted_inner_compute_shader_offset==66u&&unique_compute_shader_count==67u);
 
 namespace detail {
   inline constexpr std::size_t maximum_bytecode_workers = 4u;
@@ -178,6 +177,48 @@ namespace detail {
       requests.push_back({sources, spec, {}, {}});
     }
     return group;
+  }
+
+  struct optional_bytecode_group_t {
+    bytecode_group_t group;
+    std::string error;
+  };
+
+  struct program_sources_t {
+    std::vector<bytecode_request_t> bytecodes;
+    bytecode_group_t source, colour, components, enclosure, roi, outline, inside, selector;
+    optional_bytecode_group_t stability, hole, coverage, foreground_edge, trusted_inner;
+  };
+
+  // Runtime device creation and build-time resource generation share this exact inventory.
+  inline program_sources_t authenticate_program_sources(const std::filesystem::path &parent_root) {
+    program_sources_t sources;
+    sources.bytecodes.reserve(unique_compute_shader_count);
+    const auto authenticate = [&](std::string_view role, std::string_view directory, const auto &specs, std::string_view closure) {
+      return authenticate_group(role, parent_root / directory, specs, closure, sources.bytecodes);
+    };
+    sources.source = authenticate("source5", "source5", source5_specs, source5_closure);
+    sources.colour = authenticate("colour", "colour", colour_specs, colour_closure);
+    sources.components = authenticate("components", "components", components_specs, components_closure);
+    sources.enclosure = authenticate("enclosure", "enclosure", enclosure_specs, enclosure_closure);
+    sources.roi = authenticate("roi", "roi", roi_specs, roi_closure);
+    sources.outline = authenticate("outline", "outline", outline_specs, outline_closure);
+    sources.inside = authenticate("inside", "inside", inside_specs, inside_closure);
+    sources.selector = authenticate("selector", "selector", selector_specs, selector_closure);
+
+    const auto authenticate_optional = [&](std::string_view role, std::string_view directory, const auto &specs, std::string_view closure) {
+      try {
+        return optional_bytecode_group_t {authenticate(role, directory, specs, closure), {}};
+      } catch (const std::exception &e) {
+        return optional_bytecode_group_t {{}, e.what()};
+      }
+    };
+    sources.stability = authenticate_optional("outline", "outline", stability_specs, stability_closure);
+    sources.hole = authenticate_optional("hole", "hole", hole_specs, hole_closure);
+    sources.coverage = authenticate_optional("coverage", "hole", coverage_specs, coverage_closure);
+    sources.foreground_edge = authenticate_optional("foreground_edge", "hole", foreground_edge_specs, foreground_edge_closure);
+    sources.trusted_inner = authenticate_optional("trusted_inner", "hole", trusted_inner_specs, trusted_inner_closure);
+    return sources;
   }
 
   // Every input snapshot is authenticated before this function is called. Only CPU bytecode
@@ -324,84 +365,46 @@ public:
       programs_t next;
       next.device_ = device;
       std::size_t at = 0u;
-      std::vector<detail::bytecode_request_t> bytecodes;
-      bytecodes.reserve(unique_compute_shader_count);
-      const auto authenticate = [&](const char *name, const auto &specs, std::string_view expected) {
-        return detail::authenticate_group(name, parent_root / name, specs, expected, bytecodes);
-      };
-      // Authenticate every mandatory closure before any potentially expensive cache lookup.
-      const auto source = authenticate("source5", source5_specs, source5_closure);
-      const auto colour = authenticate("colour", colour_specs, colour_closure);
-      const auto components = authenticate("components", components_specs, components_closure);
-      const auto enclosure = authenticate("enclosure", enclosure_specs, enclosure_closure);
-      const auto roi = authenticate("roi", roi_specs, roi_closure);
-      const auto outline = authenticate("outline", outline_specs, outline_closure);
-      const auto inside = authenticate("inside", inside_specs, inside_closure);
-      const auto selector = authenticate("selector", selector_specs, selector_closure);
-      detail::bytecode_group_t stability;
-      try {
-        stability = authenticate("outline", stability_specs, stability_closure);
-      } catch (const std::exception &e) {
-        next.stability_error_ = e.what();
-      }
-      detail::bytecode_group_t hole;
-      try {
-        hole = authenticate("hole", hole_specs, hole_closure);
-      } catch (const std::exception &e) {
-        next.hole_error_ = e.what();
-      }
-      detail::bytecode_group_t coverage;
-      try {
-        coverage = detail::authenticate_group("coverage", parent_root / "hole", coverage_specs, coverage_closure, bytecodes);
-      } catch (const std::exception &e) {
-        next.coverage_error_ = e.what();
-      }
-      detail::bytecode_group_t foreground_edge;
-      try {
-        foreground_edge = detail::authenticate_group("foreground_edge", parent_root / "hole", foreground_edge_specs, foreground_edge_closure, bytecodes);
-      } catch (const std::exception &e) {
-        next.foreground_edge_error_ = e.what();
-      }
-      detail::bytecode_group_t trusted_inner;
-      try {
-        trusted_inner = detail::authenticate_group("trusted_inner", parent_root / "hole", trusted_inner_specs, trusted_inner_closure, bytecodes);
-      } catch (const std::exception &e) {
-        next.trusted_inner_error_ = e.what();
-      }
+      auto sources = detail::authenticate_program_sources(parent_root);
+      auto &bytecodes = sources.bytecodes;
       detail::prepare_bytecodes(bytecodes);
       auto compile = [&]<std::size_t N>(const detail::bytecode_group_t &group, const std::array<cache::shader_spec, N> &) {
         return detail::create_compute_group<N>(device, group, bytecodes, next.shaders_, at);
       };
-      const auto s = compile(source, source5_specs);
+      const auto s = compile(sources.source, source5_specs);
       next.composition_.source = {s[0], s[1], s[2], s[3]};
-      next.composition_.colour = compile(colour, colour_specs);
-      next.composition_.components = compile(components, components_specs);
-      const auto e = compile(enclosure, enclosure_specs);
-      std::copy_n(e.begin(), 12u, next.composition_.outline.enclosure.shaders.begin());
-      const auto r = compile(roi, roi_specs);
+      next.composition_.colour = compile(sources.colour, colour_specs);
+      next.composition_.components = compile(sources.components, components_specs);
+      next.composition_.outline.enclosure.shaders = compile(sources.enclosure, enclosure_specs);
+      const auto r = compile(sources.roi, roi_specs);
       std::copy_n(r.begin(), 3u, next.composition_.outline.enclosure.roi_graph.begin());
       std::copy_n(r.begin(), 3u, next.composition_.outline.roi_graph.begin());
-      const auto f = compile(outline, outline_specs);
+      const auto f = compile(sources.outline, outline_specs);
       std::copy_n(f.begin(), 8u, next.composition_.outline.shaders.begin());
       std::copy_n(f.begin() + 8u, 7u, next.composition_.outline.band_shaders.begin());
-      next.composition_.outline.inside_shaders = compile(inside, inside_specs);
+      next.composition_.outline.inside_shaders = compile(sources.inside, inside_specs);
       // Output-only testing snapshots stay null in every production program.
       next.composition_.outline.packed_temp_snapshot = nullptr;
       next.composition_.outline.passable_cache_snapshot = nullptr;
-      const auto q = compile(selector, selector_specs);
+      const auto q = compile(sources.selector, selector_specs);
       next.selector_ = {q[0], q[1]};
       if (at != required_compute_shader_count) {
         throw std::runtime_error("Current outline mandatory shader count mismatch");
       }
-      detail::create_optional_compute_group(device, stability, bytecodes, next.shaders_,
+      next.stability_error_ = std::move(sources.stability.error);
+      next.hole_error_ = std::move(sources.hole.error);
+      next.coverage_error_ = std::move(sources.coverage.error);
+      next.foreground_edge_error_ = std::move(sources.foreground_edge.error);
+      next.trusted_inner_error_ = std::move(sources.trusted_inner.error);
+      detail::create_optional_compute_group(device, sources.stability.group, bytecodes, next.shaders_,
         stability_compute_shader_offset, next.composition_.outline.stability_shaders, next.stability_error_);
-      detail::create_optional_compute_group(device, hole, bytecodes, next.shaders_,
+      detail::create_optional_compute_group(device, sources.hole.group, bytecodes, next.shaders_,
         hole_compute_shader_offset, next.composition_.outline.hole_shaders, next.hole_error_);
-      detail::create_optional_compute_group(device, coverage, bytecodes, next.shaders_,
+      detail::create_optional_compute_group(device, sources.coverage.group, bytecodes, next.shaders_,
         coverage_compute_shader_offset, next.composition_.outline.coverage_shaders, next.coverage_error_);
-      detail::create_optional_compute_group(device, foreground_edge, bytecodes, next.shaders_,
+      detail::create_optional_compute_group(device, sources.foreground_edge.group, bytecodes, next.shaders_,
         foreground_edge_compute_shader_offset, next.composition_.outline.foreground_edge_shaders, next.foreground_edge_error_);
-      detail::create_optional_compute_group(device, trusted_inner, bytecodes, next.shaders_,
+      detail::create_optional_compute_group(device, sources.trusted_inner.group, bytecodes, next.shaders_,
         trusted_inner_compute_shader_offset, next.composition_.outline.trusted_inner_publish_shaders, next.trusted_inner_error_);
       next.ready_ = true;
       *this = std::move(next);

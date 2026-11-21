@@ -24,7 +24,9 @@ namespace platf::dxgi::actual_converter_probe_v1 {
     bool enabled = false, queued = false;
     bool packed_continuity = false; // Explicit idle/held-root/expiry regression; default scheduler unchanged.
     bool background_observer = false; // Explicit V7 HDR qualification only; no default readbacks.
-    bool hdr_input = false; // Explicit three-PFM current-outline probe only; default SDR unchanged.
+    bool hdr_input = false; // Explicit three-PFM current-outline or shutter probe.
+    bool native_p010 = false; // Private actual-converter/native NVENC lane.
+    std::string p010_chroma_mode = "default"; // default, raster, no-uav; no live setting.
     bool explicit_adapter = false; // Private probe plan binding for SDR or HDR; absent SDR keeps its legacy default.
     std::uint32_t hdr_adapter_luid_low=0u,hdr_adapter_vendor_id=0u,hdr_adapter_device_id=0u;
     std::int32_t hdr_adapter_luid_high=0; // Explicit HDR plan identity; no implicit adapter choice.
@@ -43,6 +45,8 @@ namespace platf::dxgi::actual_converter_probe_v1 {
     std::uint32_t width = 0, height = 0;
     std::uint64_t instance = 0;
     // This is a declared synthetic scheduling domain, NEVER actual Win32 video eligibility.
+    bool borrow_matched_capture = false;
+    bool legacy_matte_always = true;
   };
   enum class event_e : std::uint32_t { admission, queue_begin, queued, ack, draw, packed_repeat, convert_end };
   // PRIVATE observed actual draw bindings; this carries no new UI/EMPTY authority.
@@ -81,6 +85,11 @@ namespace platf::dxgi::actual_converter_probe_v1 {
     std::uint32_t selected_slot = 0xffffffffu;
     bool force_infer = false, gpu_undecided = false, ddup_proof = false;
     bool queued = false, flat = false, repeat = false, route_matches = false, source_matches = false;
+    bool native_planes_written = false; // Output-event evidence; independent of packed RGB reuse.
+    bool p010_chroma_tiled = false;
+    bool rgb_rendered_directly = false;
+    bool rgb_output_retained = false;
+    bool current_capture_key = false, prior_capture_key = false;
     bool cached_current_colour = false;
     bool pending_current_colour=false, material_interval_contiguous=false;
     std::uint64_t material_epoch=0,material_serial=0,material_capture_clock_us=0;

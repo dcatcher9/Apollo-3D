@@ -31,8 +31,8 @@ globallycoherent RWStructuredBuffer<uint> Meta : register(u0);
 RWTexture2D<uint> UnitBitsWrite : register(u1);
 RWTexture2D<uint> CoverBitsWrite : register(u2);
 RWTexture2D<uint> SelectedBitsWrite : register(u3);
-RWTexture2D<uint> CandidateBody : register(u4);
-RWTexture2D<uint> CandidateM : register(u5);
+RWTexture2D<uint> BodyOutput : register(u4); // initialize: baseline accumulator; publish: candidate BODY
+RWTexture2D<uint> MatteOutput : register(u5); // initialize: baseline accumulator; publish: candidate M
 RWTexture2D<uint> StageAux : register(u6); // begin/unit_meta:17x8 models; other entries:native exterior. UnitArgs stays rawu7.
 RWByteAddressBuffer UnitArgs : register(u7);
 
@@ -247,22 +247,19 @@ void begin_main(uint3 g:SV_GroupID) {
     if(!typed)Fault(F_CONTEXT);if(!base)Fault(F_BASE);if(!PrivateShape())Fault(F_SHAPE);
 }
 
-[numthreads(16,16,1)]
-void clear_main(uint3 d:SV_DispatchThreadID) {
-    if(d.z!=0u||!Native(d.xy))return;
-    UnitBitsWrite[d.xy]=0u;CoverBitsWrite[d.xy]=0u;SelectedBitsWrite[d.xy]=0u;
-    CandidateBody[d.xy]=0u;CandidateM[d.xy]=0u;
-}
-
 uint3 CanonicalHalfBits(uint3 code) {
     precise float3 v=float3(code)/255.0f;
     uint3 h=f32tof16(v)&0xffffu;float3 rounded=f16tof32(h);
     return h-(uint3)(rounded>v);
 }
 [numthreads(16,16,1)]
-void validate_encoding_main(uint3 d:SV_DispatchThreadID) {
-    if(d.z!=0u||!Native(d.xy)||!MetaShape())return;
-    if(Meta[9u]==0u||Meta[3u]!=0u)return;
+void initialize_main(uint3 d:SV_DispatchThreadID) {
+    if(d.z!=0u||!Native(d.xy))return;
+    // All five planes have the native owner extent. Clear on every fresh root, including
+    // invalid evidence. Final publication overwrites the separate candidate planes.
+    UnitBitsWrite[d.xy]=0u;CoverBitsWrite[d.xy]=0u;SelectedBitsWrite[d.xy]=0u;
+    BodyOutput[d.xy]=0u;MatteOutput[d.xy]=0u;
+    if(!MetaShape()||Meta[9u]==0u||Meta[3u]!=0u)return;
     // Stage aliases t1=P as raw structured uint bits, t5=currentS. One parallel
     // scan strengthens numeric faults without changing the baseline classifier.
     uint pn,ps,sw,sh;CurrentOCR.GetDimensions(pn,ps);ModeCover.GetDimensions(sw,sh);
@@ -867,7 +864,7 @@ void publish_main(uint3 d:SV_DispatchThreadID) {
             }
         }
     }
-    CandidateBody[d.xy]=body;CandidateM[d.xy]=matte;
+    BodyOutput[d.xy]=body;MatteOutput[d.xy]=matte;
     if(all(d.xy==0u)) {
         // All selectors have completed. No other thread in this publication
         // reads the model bank, so K4 cannot be observed partially by a consumer.

@@ -28,7 +28,7 @@
         const auto fg=fg_owner.bundle();ASSERT_TRUE(fg.all_stages_issued);
         auto fi=in;
         fi.current_cb96=fg.current.actual_contour_constants96.Get();fi.actual_root_args=fg.current.actual_final256.Get();
-        fi.legacy_matte=fg.current.original_legacy_matte.Get();fi.sct=fg.current.sct.Get();
+        fi.sct=fg.current.sct.Get();
         fi.baseline_matte=fg.baseline_matte.Get();fi.numeric_proof=fg.numeric_proof.Get();
         fi.source_envelope104=fg.source.uip_envelope.Get();fi.cbc_meta512=fg.enclosure.receipt.Get();
         fi.raw_meta512=fg.ring.receipt.Get();fi.f2_data=fg.outline.calibration_data.Get();fi.f2_matte=fg.outline.matte.Get();

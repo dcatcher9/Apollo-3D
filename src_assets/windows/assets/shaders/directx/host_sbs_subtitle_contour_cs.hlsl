@@ -38,15 +38,33 @@ RWTexture2D<float4> CompletedDisplayBandWrite : register(u4); // same RGBA16F as
 RWStructuredBuffer<float> CompletedProbabilityWrite : register(u5);
 RWTexture2D<uint> DenseGlyphMatteWrite : register(u6); // native R32_UINT literal 0/1, never aliases t5
 
+// The prepass publishes one validity record, three rectangles per cover, and the palettes.
+StructuredBuffer<uint4> CurrentObservationRead : register(t12);
+RWStructuredBuffer<uint4> CurrentObservationWrite : register(u7);
+static const uint PALETTE_RECORDS_PER_COVER = 1u + V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES;
+static const uint OBSERVATION_HEADER = V2_SUBTITLE_PLANE_COVER_CAPACITY * PALETTE_RECORDS_PER_COVER;
+static const uint OBSERVATION_RECORD_COUNT = OBSERVATION_HEADER + 1u + 3u * V2_SUBTITLE_PLANE_COVER_CAPACITY;
+
+uint2 ReadCurrentObservation() {
+    uint records, record_stride;
+    CurrentObservationRead.GetDimensions(records, record_stride);
+    if (records != OBSERVATION_RECORD_COUNT || record_stride != 16u) return 0u;
+    uint4 header = CurrentObservationRead[OBSERVATION_HEADER];
+    return header.x == 1u && header.y <= V2_SUBTITLE_PLANE_COVER_CAPACITY &&
+        all(header.zw == contour_observation.xy) ? header.xy : 0u;
+}
+
+uint ObservationCoverOffset(uint slot) {
+    return OBSERVATION_HEADER + 1u + 3u * slot;
+}
+
 static const uint CONTOUR_SCHEMA = V2_SUBTITLE_CONTOUR_SCHEMA;
 static const uint RECIPE_SCHEMA = V2_SUBTITLE_CONTOUR_RECIPE;
 static const uint HISTORY_TAG = V2_SUBTITLE_CONTOUR_HISTORY_TAG;
 static const uint HISTORY_WORDS = V2_SUBTITLE_CONTOUR_HISTORY_WORD_COUNT;
 static const uint MAX_SOURCE_EXTENT = V2_SUBTITLE_CONTOUR_SOURCE_MAX_EXTENT;
 
-groupshared uint CurrentGate;
 groupshared uint CurrentCount;
-groupshared int CurrentReferenceCenterTwice;
 groupshared uint4 CurrentCovers[V2_SUBTITLE_PLANE_COVER_CAPACITY];
 groupshared uint4 CurrentCores[V2_SUBTITLE_PLANE_COVER_CAPACITY];
 groupshared uint4 CurrentSupportSearch[V2_SUBTITLE_PLANE_COVER_CAPACITY];
@@ -71,6 +89,7 @@ groupshared float4 GlyphTileColors[GLYPH_TILE_PIXELS];
 groupshared uint GlyphTileMask[GLYPH_TILE_PIXELS];
 groupshared uint GlyphTileNext[GLYPH_TILE_PIXELS];
 groupshared uint2 GlyphTileGroupStride;
+groupshared uint GlyphTileHasSeed;
 
 bool ContourFinite(float value) {
     return (asuint(value) & 0x7f800000u) != 0x7f800000u;
@@ -291,16 +310,12 @@ bool CurrentSnapshotEvidenceValid(out int reference_center) {
 }
 
 [numthreads(16, 16, 1)]
-void snapshot_main(uint3 dispatch_id : SV_DispatchThreadID, uint group_index : SV_GroupIndex) {
-    if (group_index == 0u) {
-        int reference_center;
-        SnapshotGate = CurrentSnapshotEvidenceValid(reference_center) ? 1u : 0u;
-    }
-    GroupMemoryBarrierWithGroupSync();
+void snapshot_main(uint3 dispatch_id : SV_DispatchThreadID) {
+    uint2 observation = ReadCurrentObservation();
     uint width, height, words, word_stride;
     CompletedDisplayBandWrite.GetDimensions(width, height);
     CompletedProbabilityWrite.GetDimensions(words, word_stride);
-    bool valid = SnapshotGate != 0u && width == contour_source.x && height == contour_source.w &&
+    bool valid = observation.x != 0u && width == contour_source.x && height == contour_source.w &&
         words == V2_OCR_OUTPUT_WIDTH * V2_OCR_OUTPUT_HEIGHT && word_stride == 4u;
     uint2 stride = SourceDispatchStride();
     [loop]
@@ -356,12 +371,12 @@ bool CurrentAdaptiveTailValid() {
         (((flags & 4u) != 0u) == (conflicts * 5u > covered || conflicts * 50u > area));
 }
 
-bool CurrentAuthorityValid(out uint current_count) {
+bool CurrentAuthorityValid(bool snapshot_valid, out uint current_count) {
     current_count = 0u;
     uint plane_words, plane_stride, param_words, param_stride;
     CurrentPlane.GetDimensions(plane_words, plane_stride);
     CurrentConditionParams.GetDimensions(param_words, param_stride);
-    if (SnapshotGate == 0u ||
+    if (!snapshot_valid ||
         plane_words != V2_SUBTITLE_PLANE_STATE_WORD_COUNT || plane_stride != 4u ||
         param_words != V2_SUBTITLE_CONDITION_PARAM_WORD_COUNT || param_stride != 4u) return false;
     // SnapshotGate already authenticates every current OCR8 pair, source/crop/ROI, and the
@@ -437,7 +452,7 @@ bool CurrentSlotRibbon(uint slot) {
         V2_OCR_BOX_FLAG_RIBBON) != 0u;
 }
 
-uint4 CurrentOrdinarySupportSearch(uint slot) {
+uint4 CurrentOrdinarySupportSearch(uint slot, int reference_center) {
     uint4 cover = CurrentCovers[slot], core = CurrentCores[slot];
     // Ribbon covers have their own producer meaning; none of the ordinary expansion is
     // applied to them. Group only against this fixed core, never a growing/transitive union.
@@ -460,7 +475,7 @@ uint4 CurrentOrdinarySupportSearch(uint slot) {
     uint center_field = left + right - 2u * contour_content.x;
     uint line_low, line_high;
     CurrentWideProduct(center_field * contour_source.x, V2_OCR_OUTPUT_WIDTH, line_low, line_high);
-    int reference_scaled = CurrentReferenceCenterTwice * (int)V2_OCR_OUTPUT_WIDTH;
+    int reference_scaled = reference_center * (int)V2_OCR_OUTPUT_WIDTH;
     int margin = (int)(2u * V2_SUBTITLE_CONTOUR_ORDINARY_SEARCH_CENTER_BIAS_DETECTOR_PIXELS * contour_source.x);
     int upper = reference_scaled + margin, lower = reference_scaled - margin;
     bool right_biased = upper < 0;
@@ -486,27 +501,17 @@ uint4 CurrentOrdinarySupportSearch(uint slot) {
     return cover;
 }
 
-void PrepareCurrentGate(uint group_index) {
+void LoadCurrentGeometry(uint group_index) {
+    uint2 observation = ReadCurrentObservation();
     if (group_index == 0u) {
-        uint count;
-        int reference_center;
-        SnapshotGate = CurrentSnapshotEvidenceValid(reference_center) ? 1u : 0u;
-        CurrentReferenceCenterTwice = reference_center;
-        // Pins and their published snapshot must share the same global source/OCR verdict.
-        // In particular, a rejected ribbon cannot borrow prior valid RGB.
-        CurrentGate = CurrentAuthorityValid(count) && SnapshotGate != 0u ? 1u : 0u;
-        CurrentCount = CurrentGate != 0u ? count : 0u;
-        [unroll]
-        for (uint slot = 0u; slot < V2_SUBTITLE_PLANE_COVER_CAPACITY; ++slot) {
-            CurrentCovers[slot] = CurrentGate != 0u && slot < count ?
-                ReadCurrentRect(slot, V2_OCR_FINAL_BOX_OFFSET) : uint4(0u, 0u, 0u, 0u);
-            CurrentCores[slot] = CurrentGate != 0u && slot < count ?
-                ReadCurrentRect(slot, V2_OCR_RAW_BOX_OFFSET) : uint4(0u, 0u, 0u, 0u);
-            CurrentSupportSearch[slot] = CurrentCovers[slot];
-        }
-        [loop]
-        for (uint active_slot = 0u; active_slot < CurrentCount; ++active_slot)
-            CurrentSupportSearch[active_slot] = CurrentOrdinarySupportSearch(active_slot);
+        SnapshotGate = observation.x;
+        CurrentCount = observation.y;
+    }
+    if (group_index < observation.y) {
+        uint offset = ObservationCoverOffset(group_index);
+        CurrentCovers[group_index] = CurrentObservationRead[offset];
+        CurrentCores[group_index] = CurrentObservationRead[offset + 1u];
+        CurrentSupportSearch[group_index] = CurrentObservationRead[offset + 2u];
     }
     GroupMemoryBarrierWithGroupSync();
 }
@@ -515,7 +520,7 @@ bool PreviousAuthorityValid(out bool duplicate) {
     duplicate = false;
     uint feature_w, feature_h;
     PreviousFeatures.GetDimensions(feature_w, feature_h);
-    return CurrentGate != 0u && feature_w == contour_source.x && feature_h == contour_source.w &&
+    return CurrentCount != 0u && feature_w == contour_source.x && feature_h == contour_source.w &&
         V2SubtitleHistoryCompatible(PreviousIdentity, contour_source, contour_field, contour_content,
             contour_frame, contour_observation.xy, contour_observation.z, duplicate);
 }
@@ -543,7 +548,7 @@ bool LoadDisplayColor(int2 p, out float3 color) {
 }
 
 bool SourcePixelInRect(int2 p, uint4 r) {
-    if (CurrentGate == 0u || !BandPositionValid(p)) return false;
+    if (CurrentCount == 0u || !BandPositionValid(p)) return false;
     // Current source centers and half-open field edges are compared as integer rationals.
     // The supplied rectangle is a current coarse cover, paired core, or derived support search.
     uint2 scaled = uint2(
@@ -681,6 +686,96 @@ uint3 PaletteHue(uint3 color) {
     return (color * V2_SUBTITLE_CONTOUR_PALETTE_HUE_CHANNEL_MAX + peak / 2u) / peak;
 }
 
+// All lanes call this for the same cover. Keep the sampling, integer reductions and
+// scalar mode selection in the single observation-owned palette learner.
+void LearnCurrentPalette(uint slot, uint group_index) {
+    if (group_index < V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT) {
+        PaletteHistogramCount[group_index] = 0u;
+        PaletteHistogramRepresentative[group_index] = 0u;
+    }
+    if (group_index == 0u) PaletteAnchorPeak = 0u;
+    GroupMemoryBarrierWithGroupSync();
+    uint4 core = CurrentCores[slot];
+    [loop]
+    for (uint sample_index = group_index;
+         sample_index < V2_SUBTITLE_CONTOUR_PALETTE_GRID_COLUMNS * V2_SUBTITLE_CONTOUR_PALETTE_GRID_ROWS;
+         sample_index += 256u) {
+        int2 p = CurrentPaletteSamplePosition(core, sample_index);
+        float3 color;
+        float probability;
+        bool color_valid = LoadDisplayColor(p, color);
+        bool probability_valid = CurrentProbabilityEvidence(p, probability);
+        bool anchor = false;
+        if (color_valid && probability_valid) {
+            if (probability > V2_OCR_ACTIVE_PROBABILITY_THRESHOLD) anchor = CurrentSpatialEdge(p, color);
+        }
+        if (anchor) {
+            uint3 q = PaletteQuantize(color);
+            // Bin from actual RGB, not q>>14: RGB.75 rounds to q49151.
+            uint3 bin = min((uint3)(color * 4.0f), uint3(3u, 3u, 3u));
+            uint code = bin.x * 16u + bin.y * 4u + bin.z;
+            uint peak = MaxChannel(q);
+            uint key = (peak << V2_SUBTITLE_CONTOUR_PALETTE_REPRESENTATIVE_INDEX_BITS) |
+                (V2_SUBTITLE_CONTOUR_PALETTE_REPRESENTATIVE_INDEX_MASK - sample_index);
+            InterlockedAdd(PaletteHistogramCount[code], 1u);
+            InterlockedMax(PaletteHistogramRepresentative[code], key);
+            InterlockedMax(PaletteAnchorPeak, peak);
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (group_index == 0u) {
+        // Scalar bitsets avoid FXC forcing an unroll for a dynamically written vector lane.
+        uint visited_low = 0u, visited_high = 0u;
+        [loop]
+        for (uint attempt = 0u; attempt < V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT; ++attempt) {
+            uint best = V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT;
+            uint best_peak = 0u, best_count = 1u;
+            [loop]
+            for (uint bin = 0u; bin < V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT; ++bin) {
+                uint count = PaletteHistogramCount[bin];
+                uint peak = PaletteHistogramRepresentative[bin] >> V2_SUBTITLE_CONTOUR_PALETTE_REPRESENTATIVE_INDEX_BITS;
+                uint visited_word = bin < 32u ? visited_low : visited_high;
+                if (count == 0u || (visited_word & (1u << (bin % 32u))) != 0u ||
+                    V2_SUBTITLE_CONTOUR_PALETTE_BRIGHTNESS_DENOMINATOR * peak <
+                        V2_SUBTITLE_CONTOUR_PALETTE_BRIGHTNESS_NUMERATOR * PaletteAnchorPeak) continue;
+                if (best == V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT || peak > best_peak ||
+                    (peak == best_peak && (count > best_count || (count == best_count && bin < best)))) {
+                    best = bin; best_peak = peak; best_count = count;
+                }
+            }
+            if (best == V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT) break;
+            if (best < 32u) visited_low |= 1u << best;
+            else visited_high |= 1u << (best - 32u);
+            uint representative_index = V2_SUBTITLE_CONTOUR_PALETTE_REPRESENTATIVE_INDEX_MASK -
+                (PaletteHistogramRepresentative[best] & V2_SUBTITLE_CONTOUR_PALETTE_REPRESENTATIVE_INDEX_MASK);
+            float3 representative_color;
+            bool representative_valid = LoadDisplayColor(CurrentPaletteSamplePosition(core, representative_index), representative_color);
+            if (!representative_valid) continue;
+            uint3 representative = PaletteQuantize(representative_color);
+            uint3 hue = PaletteHue(representative);
+            bool represented = false;
+            [loop]
+            for (uint prior_mode = 0u; prior_mode < PaletteCount[slot]; ++prior_mode) {
+                uint4 prior = PaletteMode[slot * V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES + prior_mode];
+                uint3 prior_rounded = (prior.xyz + prior.w / 2u) / prior.w;
+                uint3 prior_hue = PaletteHue(prior_rounded);
+                uint distance = MaxChannel((uint3)abs(int3(hue) - int3(prior_hue)));
+                if (V2_SUBTITLE_CONTOUR_PALETTE_MERGE_HUE_DENOMINATOR * distance <=
+                    V2_SUBTITLE_CONTOUR_PALETTE_MERGE_HUE_NUMERATOR * V2_SUBTITLE_CONTOUR_PALETTE_HUE_CHANNEL_MAX)
+                    represented = true;
+            }
+            if (represented) continue;
+            uint selected_mode = PaletteCount[slot];
+            // Keep the existing exact rational matcher representation: virtual sum/count.
+            PaletteMode[slot * V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES + selected_mode] =
+                uint4(representative * best_count, best_count);
+            PaletteCount[slot] = selected_mode + 1u;
+            if (PaletteCount[slot] == V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES) break;
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+}
+
 void PrepareCurrentPalettes(uint group_index, uint2 dispatch_position) {
     if (group_index < V2_SUBTITLE_PLANE_COVER_CAPACITY) {
         PaletteCount[group_index] = 0u;
@@ -689,7 +784,7 @@ void PrepareCurrentPalettes(uint group_index, uint2 dispatch_position) {
         PaletteNeeded = 0u;
         uint2 first = dispatch_position - uint2(group_index % 16u, group_index / 16u);
         uint2 stride = SourceDispatchStride();
-        if (CurrentGate != 0u) {
+        if (CurrentCount != 0u) {
             // Include every grid-stride tile owned by this group, including a second native
             // tile to the right of the field grid. Outside groups still publish normal history.
             [loop]
@@ -703,93 +798,61 @@ void PrepareCurrentPalettes(uint group_index, uint2 dispatch_position) {
     }
     GroupMemoryBarrierWithGroupSync();
     if (PaletteNeeded == 0u) return;
+    if (group_index < CurrentCount) {
+        uint4 header = CurrentObservationRead[group_index * PALETTE_RECORDS_PER_COVER];
+        if (header.x <= V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES && all(header.yzw == 0u))
+            PaletteCount[group_index] = header.x;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    [loop]
+    for (uint mode_index = group_index;
+         mode_index < CurrentCount * V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES;
+         mode_index += 256u) {
+        uint slot = mode_index / V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES;
+        uint mode = mode_index % V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES;
+        if (mode < PaletteCount[slot])
+            PaletteMode[mode_index] = CurrentObservationRead[slot * PALETTE_RECORDS_PER_COVER + 1u + mode];
+    }
+    GroupMemoryBarrierWithGroupSync();
+}
+
+// A fresh observation publishes even when its OCR evidence is empty or invalid.
+[numthreads(16, 16, 1)]
+void shared_palette_main(uint group_index : SV_GroupIndex) {
+    uint records, record_stride;
+    CurrentObservationWrite.GetDimensions(records, record_stride);
+    if (records != OBSERVATION_RECORD_COUNT || record_stride != 16u) return;
+    if (group_index == 0u) {
+        int reference_center;
+        bool snapshot_valid = CurrentSnapshotEvidenceValid(reference_center);
+        uint count;
+        CurrentCount = CurrentAuthorityValid(snapshot_valid, count) ? count : 0u;
+        CurrentObservationWrite[OBSERVATION_HEADER] =
+            uint4(snapshot_valid ? 1u : 0u, CurrentCount, contour_observation.xy);
+        [loop]
+        for (uint slot = 0u; slot < CurrentCount; ++slot) {
+            CurrentCovers[slot] = ReadCurrentRect(slot, V2_OCR_FINAL_BOX_OFFSET);
+            CurrentCores[slot] = ReadCurrentRect(slot, V2_OCR_RAW_BOX_OFFSET);
+        }
+        [loop]
+        for (uint slot = 0u; slot < CurrentCount; ++slot) {
+            uint offset = ObservationCoverOffset(slot);
+            CurrentObservationWrite[offset] = CurrentCovers[slot];
+            CurrentObservationWrite[offset + 1u] = CurrentCores[slot];
+            CurrentObservationWrite[offset + 2u] = CurrentOrdinarySupportSearch(slot, reference_center);
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (group_index < CurrentCount) PaletteCount[group_index] = 0u;
     [loop]
     for (uint slot = 0u; slot < CurrentCount; ++slot) {
-        if (group_index < V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT) {
-            PaletteHistogramCount[group_index] = 0u;
-            PaletteHistogramRepresentative[group_index] = 0u;
-        }
-        if (group_index == 0u) PaletteAnchorPeak = 0u;
-        GroupMemoryBarrierWithGroupSync();
-        uint4 core = CurrentCores[slot];
-        [loop]
-        for (uint sample_index = group_index;
-             sample_index < V2_SUBTITLE_CONTOUR_PALETTE_GRID_COLUMNS * V2_SUBTITLE_CONTOUR_PALETTE_GRID_ROWS;
-             sample_index += 256u) {
-            int2 p = CurrentPaletteSamplePosition(core, sample_index);
-            float3 color;
-            float probability;
-            bool color_valid = LoadDisplayColor(p, color);
-            bool probability_valid = CurrentProbabilityEvidence(p, probability);
-            bool anchor = false;
-            if (color_valid && probability_valid) {
-                if (probability > V2_OCR_ACTIVE_PROBABILITY_THRESHOLD) anchor = CurrentSpatialEdge(p, color);
-            }
-            if (anchor) {
-                uint3 q = PaletteQuantize(color);
-                // Bin from actual RGB, not q>>14: RGB.75 rounds to q49151.
-                uint3 bin = min((uint3)(color * 4.0f), uint3(3u, 3u, 3u));
-                uint code = bin.x * 16u + bin.y * 4u + bin.z;
-                uint peak = MaxChannel(q);
-                uint key = (peak << V2_SUBTITLE_CONTOUR_PALETTE_REPRESENTATIVE_INDEX_BITS) |
-                    (V2_SUBTITLE_CONTOUR_PALETTE_REPRESENTATIVE_INDEX_MASK - sample_index);
-                InterlockedAdd(PaletteHistogramCount[code], 1u);
-                InterlockedMax(PaletteHistogramRepresentative[code], key);
-                InterlockedMax(PaletteAnchorPeak, peak);
-            }
-        }
-        GroupMemoryBarrierWithGroupSync();
-        if (group_index == 0u) {
-            // Scalar bitsets avoid FXC forcing an unroll for a dynamically written vector lane.
-            uint visited_low = 0u, visited_high = 0u;
-            [loop]
-            for (uint attempt = 0u; attempt < V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT; ++attempt) {
-                uint best = V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT;
-                uint best_peak = 0u, best_count = 1u;
-                [loop]
-                for (uint bin = 0u; bin < V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT; ++bin) {
-                    uint count = PaletteHistogramCount[bin];
-                    uint peak = PaletteHistogramRepresentative[bin] >> V2_SUBTITLE_CONTOUR_PALETTE_REPRESENTATIVE_INDEX_BITS;
-                    uint visited_word = bin < 32u ? visited_low : visited_high;
-                    if (count == 0u || (visited_word & (1u << (bin % 32u))) != 0u ||
-                        V2_SUBTITLE_CONTOUR_PALETTE_BRIGHTNESS_DENOMINATOR * peak <
-                            V2_SUBTITLE_CONTOUR_PALETTE_BRIGHTNESS_NUMERATOR * PaletteAnchorPeak) continue;
-                    if (best == V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT || peak > best_peak ||
-                        (peak == best_peak && (count > best_count || (count == best_count && bin < best)))) {
-                        best = bin; best_peak = peak; best_count = count;
-                    }
-                }
-                if (best == V2_SUBTITLE_CONTOUR_PALETTE_BIN_COUNT) break;
-                if (best < 32u) visited_low |= 1u << best;
-                else visited_high |= 1u << (best - 32u);
-                uint representative_index = V2_SUBTITLE_CONTOUR_PALETTE_REPRESENTATIVE_INDEX_MASK -
-                    (PaletteHistogramRepresentative[best] & V2_SUBTITLE_CONTOUR_PALETTE_REPRESENTATIVE_INDEX_MASK);
-                float3 representative_color;
-                bool representative_valid = LoadDisplayColor(CurrentPaletteSamplePosition(core, representative_index), representative_color);
-                if (!representative_valid) continue;
-                uint3 representative = PaletteQuantize(representative_color);
-                uint3 hue = PaletteHue(representative);
-                bool represented = false;
-                [loop]
-                for (uint prior_mode = 0u; prior_mode < PaletteCount[slot]; ++prior_mode) {
-                    uint4 prior = PaletteMode[slot * V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES + prior_mode];
-                    uint3 prior_rounded = (prior.xyz + prior.w / 2u) / prior.w;
-                    uint3 prior_hue = PaletteHue(prior_rounded);
-                    uint distance = MaxChannel((uint3)abs(int3(hue) - int3(prior_hue)));
-                    if (V2_SUBTITLE_CONTOUR_PALETTE_MERGE_HUE_DENOMINATOR * distance <=
-                        V2_SUBTITLE_CONTOUR_PALETTE_MERGE_HUE_NUMERATOR * V2_SUBTITLE_CONTOUR_PALETTE_HUE_CHANNEL_MAX)
-                        represented = true;
-                }
-                if (represented) continue;
-                uint selected_mode = PaletteCount[slot];
-                // Keep the existing exact rational matcher representation: virtual sum/count.
-                PaletteMode[slot * V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES + selected_mode] =
-                    uint4(representative * best_count, best_count);
-                PaletteCount[slot] = selected_mode + 1u;
-                if (PaletteCount[slot] == V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES) break;
-            }
-        }
-        GroupMemoryBarrierWithGroupSync();
+        LearnCurrentPalette(slot, group_index);
+        uint base = slot * PALETTE_RECORDS_PER_COVER;
+        if (group_index == 0u)
+            CurrentObservationWrite[base] = uint4(PaletteCount[slot], 0u, 0u, 0u);
+        if (group_index < PaletteCount[slot])
+            CurrentObservationWrite[base + 1u + group_index] =
+                PaletteMode[slot * V2_SUBTITLE_CONTOUR_PALETTE_MAX_MODES + group_index];
     }
 }
 
@@ -948,7 +1011,7 @@ float4 AdvanceFeature(int2 p, float3 color, bool candidate) {
 
 [numthreads(16, 16, 1)]
 void temporal_main(uint3 dispatch_id : SV_DispatchThreadID, uint group_index : SV_GroupIndex) {
-    PrepareCurrentGate(group_index);
+    LoadCurrentGeometry(group_index);
     PrepareHistoryGate(group_index);
     PrepareCurrentPalettes(group_index, dispatch_id.xy);
     uint width, height, feature_w, feature_h;
@@ -968,7 +1031,7 @@ void temporal_main(uint3 dispatch_id : SV_DispatchThreadID, uint group_index : S
             if (valid && LoadDisplayColor(p, color)) {
                 bool candidate = false;
                 float probability = 0.0f;
-                if (CurrentGate != 0u) {
+                if (CurrentCount != 0u) {
                     // Current-frame OCR8 covers authorize each pixel independently.
                     // Box count, ordering, splits and merges are not RGB-history reset keys.
                     candidate = CoveredSourcePixel(p) &&
@@ -995,90 +1058,106 @@ void temporal_main(uint3 dispatch_id : SV_DispatchThreadID, uint group_index : S
 [numthreads(16, 16, 1)]
 void dense_main(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupThreadID,
                 uint group_index : SV_GroupIndex) {
-    if (group_index == 0u) GlyphTileGroupStride = max((contour_field.xy + 15u) / 16u, uint2(1u, 1u));
-    GroupMemoryBarrierWithGroupSync();
-    uint2 group_stride = GlyphTileGroupStride;
-    // The group has consumed its immutable loop controls before PrepareCurrentGate's lane-0
-    // reads of the same constant buffer. This also makes their uniform lifetime explicit to
-    // SM5's barrier/race analysis rather than propagating lane-local gate control into loops.
-    GroupMemoryBarrierWithGroupSync();
-    PrepareCurrentGate(group_index);
+    uint2 observation = ReadCurrentObservation();
     uint width, height, support_w, support_h;
     DenseGlyphMatteWrite.GetDimensions(width, height);
     CurrentSupportRead.GetDimensions(support_w, support_h);
-    bool valid = CurrentGate != 0u && CurrentCount != 0u &&
+    bool valid = observation.y != 0u &&
         width == contour_source.x && height == contour_source.w &&
         support_w == width && support_h == height;
-    // Authority is a data gate, never a barrier/loop-control gate. All lanes execute the
-    // same texture-dimension tile loops even for current empty/invalid or canonical 1x1
-    // resources. Invalid authority loads zero membership and overwrites every output zero.
+    // All lanes agree on observation authority and resource extents. When there can be no
+    // glyph membership, clear the actual output extent without loading tile halos.
+    if (!valid) {
+        uint2 first = group_id.xy * GLYPH_TILE_SIDE + thread_id.xy;
+        uint2 stride = SourceDispatchStride();
+        [loop]
+        for (uint y = first.y; y < height; y += stride.y) {
+            [loop]
+            for (uint x = first.x; x < width; x += stride.x)
+                DenseGlyphMatteWrite[uint2(x, y)] = 0u;
+        }
+        return;
+    }
+    if (group_index == 0u) GlyphTileGroupStride = max((contour_field.xy + 15u) / 16u, uint2(1u, 1u));
+    GroupMemoryBarrierWithGroupSync();
+    uint2 group_stride = GlyphTileGroupStride;
     [loop]
     for (uint tile_y = group_id.y * GLYPH_TILE_SIDE; tile_y < height;
          tile_y += group_stride.y * GLYPH_TILE_SIDE) {
         [loop]
         for (uint tile_x = group_id.x * GLYPH_TILE_SIDE; tile_x < width;
              tile_x += group_stride.x * GLYPH_TILE_SIDE) {
+            if (group_index == 0u) GlyphTileHasSeed = 0u;
+            GroupMemoryBarrierWithGroupSync();
+            uint has_seed = 0u;
             [loop]
             for (uint index = group_index; index < GLYPH_TILE_PIXELS; index += 256u) {
                 int2 p = int2(tile_x, tile_y) +
                     int2(index % GLYPH_TILE_EXTENT, index / GLYPH_TILE_EXTENT) - (int)GLYPH_TILE_HALO;
                 float3 color;
-                bool color_valid = LoadDisplayColor(p, color) && valid;
+                bool color_valid = LoadDisplayColor(p, color);
                 GlyphTileColors[index] = color_valid ? float4(color, 1.0f) : 0.0f;
-                GlyphTileMask[index] = color_valid && CurrentSupportRead.Load(int3(p, 0)) == 1u ? 1u : 0u;
+                uint seed = color_valid && CurrentSupportRead.Load(int3(p, 0)) == 1u ? 1u : 0u;
+                GlyphTileMask[index] = seed;
+                has_seed |= seed;
             }
+            if (has_seed != 0u) InterlockedOr(GlyphTileHasSeed, has_seed);
             GroupMemoryBarrierWithGroupSync();
-            [loop]
-            for (uint step = 0u; step < V2_SUBTITLE_GLYPH_MATTE_STEPS; ++step) {
-                [loop]
-                for (uint index = group_index; index < GLYPH_TILE_PIXELS; index += 256u) {
-                    uint admitted = GlyphTileMask[index];
-                    float4 color = GlyphTileColors[index];
-                    if (admitted == 0u && color.a == 1.0f) {
-                        int2 p = int2(index % GLYPH_TILE_EXTENT, index / GLYPH_TILE_EXTENT);
-                        bool bright = max(color.r, max(color.g, color.b)) >= V2_SUBTITLE_GLYPH_MATTE_BRIGHTNESS_SPLIT;
-                        [unroll]
-                        for (int dy = -1; dy <= 1; ++dy) {
-                            [unroll]
-                            for (int dx = -1; dx <= 1; ++dx) {
-                                int2 q = p + int2(dx, dy);
-                                if ((dx == 0 && dy == 0) || any(q < 0) ||
-                                    any(q >= (int)GLYPH_TILE_EXTENT)) continue;
-                                uint neighbor = (uint)q.y * GLYPH_TILE_EXTENT + (uint)q.x;
-                                float4 other = GlyphTileColors[neighbor];
-                                bool other_bright = max(other.r, max(other.g, other.b)) >= V2_SUBTITLE_GLYPH_MATTE_BRIGHTNESS_SPLIT;
-                                if (GlyphTileMask[neighbor] == 1u && other.a == 1.0f && bright == other_bright &&
-                                    ColorDistance(color.rgb, other.rgb) <= V2_SUBTITLE_GLYPH_MATTE_RGB_DISTANCE) admitted = 1u;
-                            }
-                        }
-                    }
-                    GlyphTileNext[index] = admitted;
-                }
-                GroupMemoryBarrierWithGroupSync();
-                [loop]
-                for (uint index = group_index; index < GLYPH_TILE_PIXELS; index += 256u)
-                    GlyphTileMask[index] = GlyphTileNext[index];
-                GroupMemoryBarrierWithGroupSync();
-            }
             uint2 output = uint2(tile_x, tile_y) + thread_id.xy;
-            if (output.x < width && output.y < height) {
-                uint center = (thread_id.y + GLYPH_TILE_HALO) * GLYPH_TILE_EXTENT + thread_id.x + GLYPH_TILE_HALO;
-                uint admitted = 0u;
-                if (GlyphTileColors[center].a == 1.0f) {
-                    const int radius = (int)V2_SUBTITLE_GLYPH_MATTE_COLLAR_RADIUS_SOURCE_PIXELS;
-                    [unroll]
-                    for (int dy = -radius; dy <= radius; ++dy) {
+            uint admitted = 0u;
+            // An empty dependency halo cannot create membership.
+            if (GlyphTileHasSeed != 0u) {
+                [loop]
+                for (uint step = 0u; step < V2_SUBTITLE_GLYPH_MATTE_STEPS; ++step) {
+                    [loop]
+                    for (uint index = group_index; index < GLYPH_TILE_PIXELS; index += 256u) {
+                        uint admitted = GlyphTileMask[index];
+                        float4 color = GlyphTileColors[index];
+                        if (admitted == 0u && color.a == 1.0f) {
+                            int2 p = int2(index % GLYPH_TILE_EXTENT, index / GLYPH_TILE_EXTENT);
+                            bool bright = max(color.r, max(color.g, color.b)) >= V2_SUBTITLE_GLYPH_MATTE_BRIGHTNESS_SPLIT;
+                            [unroll]
+                            for (int dy = -1; dy <= 1; ++dy) {
+                                [unroll]
+                                for (int dx = -1; dx <= 1; ++dx) {
+                                    int2 q = p + int2(dx, dy);
+                                    if ((dx == 0 && dy == 0) || any(q < 0) ||
+                                        any(q >= (int)GLYPH_TILE_EXTENT)) continue;
+                                    uint neighbor = (uint)q.y * GLYPH_TILE_EXTENT + (uint)q.x;
+                                    float4 other = GlyphTileColors[neighbor];
+                                    bool other_bright = max(other.r, max(other.g, other.b)) >= V2_SUBTITLE_GLYPH_MATTE_BRIGHTNESS_SPLIT;
+                                    if (GlyphTileMask[neighbor] == 1u && other.a == 1.0f && bright == other_bright &&
+                                        ColorDistance(color.rgb, other.rgb) <= V2_SUBTITLE_GLYPH_MATTE_RGB_DISTANCE) admitted = 1u;
+                                }
+                            }
+                        }
+                        GlyphTileNext[index] = admitted;
+                    }
+                    GroupMemoryBarrierWithGroupSync();
+                    [loop]
+                    for (uint index = group_index; index < GLYPH_TILE_PIXELS; index += 256u)
+                        GlyphTileMask[index] = GlyphTileNext[index];
+                    GroupMemoryBarrierWithGroupSync();
+                }
+                if (output.x < width && output.y < height) {
+                    uint center = (thread_id.y + GLYPH_TILE_HALO) * GLYPH_TILE_EXTENT + thread_id.x + GLYPH_TILE_HALO;
+                    if (GlyphTileColors[center].a == 1.0f) {
+                        const int radius = (int)V2_SUBTITLE_GLYPH_MATTE_COLLAR_RADIUS_SOURCE_PIXELS;
                         [unroll]
-                        for (int dx = -radius; dx <= radius; ++dx) {
-                            if (dx * dx + dy * dy <= (int)V2_SUBTITLE_GLYPH_MATTE_COLLAR_RADIUS_SQUARED) {
-                                uint neighbor = (uint)((int)center + dy * (int)GLYPH_TILE_EXTENT + dx);
-                                admitted |= GlyphTileMask[neighbor];
+                        for (int dy = -radius; dy <= radius; ++dy) {
+                            [unroll]
+                            for (int dx = -radius; dx <= radius; ++dx) {
+                                if (dx * dx + dy * dy <= (int)V2_SUBTITLE_GLYPH_MATTE_COLLAR_RADIUS_SQUARED) {
+                                    uint neighbor = (uint)((int)center + dy * (int)GLYPH_TILE_EXTENT + dx);
+                                    admitted |= GlyphTileMask[neighbor];
+                                }
                             }
                         }
                     }
                 }
-                DenseGlyphMatteWrite[output] = admitted != 0u ? 1u : 0u;
             }
+            if (output.x < width && output.y < height)
+                DenseGlyphMatteWrite[output] = admitted != 0u ? 1u : 0u;
             // Every lane finishes reading this tile before any lane loads the next one.
             GroupMemoryBarrierWithGroupSync();
         }
@@ -1096,14 +1175,14 @@ int CeilDivide(int numerator, int denominator) {
 }
 
 [numthreads(16, 16, 1)]
-void project_main(uint3 dispatch_id : SV_DispatchThreadID, uint group_index : SV_GroupIndex) {
-    PrepareCurrentGate(group_index);
+void project_main(uint3 dispatch_id : SV_DispatchThreadID) {
+    uint2 observation = ReadCurrentObservation();
     uint width, height, native_width, native_height;
     FieldPinWrite.GetDimensions(width, height);
     CurrentSupportRead.GetDimensions(native_width, native_height);
     if (dispatch_id.x >= width || dispatch_id.y >= height) return;
     uint pin = 0u;
-    if (CurrentGate != 0u && width == contour_field.x && height == contour_field.y &&
+    if (observation.y != 0u && width == contour_field.x && height == contour_field.y &&
         native_width == contour_source.x && native_height == contour_source.w &&
         all(dispatch_id.xy >= contour_content.xy) && all(dispatch_id.xy < contour_content.zw)) {
         int2 local = int2(dispatch_id.xy) - int2(contour_content.xy);
@@ -1135,10 +1214,10 @@ void project_main(uint3 dispatch_id : SV_DispatchThreadID, uint group_index : SV
 
 
 
-uint HistoryWord(uint word, bool valid) {
+uint HistoryWord(uint word, bool valid, bool has_covers) {
     if (word == 0u) return CONTOUR_SCHEMA;
     if (word == 1u) return HISTORY_TAG;
-    if (word == 2u) return valid && CurrentGate != 0u ? 1u : 0u;
+    if (word == 2u) return valid && has_covers ? 1u : 0u;
     if (word >= 4u && word < 8u) return contour_frame[word - 4u];
     if (word >= 8u && word < 12u) return contour_source[word - 8u];
     if (word >= 12u && word < 16u) return contour_field[word - 12u];
@@ -1153,15 +1232,15 @@ uint HistoryWord(uint word, bool valid) {
 }
 
 [numthreads(16, 16, 1)]
-void history_main(uint3 dispatch_id : SV_DispatchThreadID, uint group_index : SV_GroupIndex) {
+void history_main(uint3 dispatch_id : SV_DispatchThreadID) {
     // Unbind both old history SRVs before writing the persistent history UAVs.
-    PrepareCurrentGate(group_index);
+    uint2 observation = ReadCurrentObservation();
     uint width, height, native_width, native_height, words, word_stride, next_w, next_h;
     HistoryFeaturesWrite.GetDimensions(width, height);
     NextFeaturesRead.GetDimensions(next_w, next_h);
     CurrentSupportRead.GetDimensions(native_width, native_height);
     HistoryIdentityWrite.GetDimensions(words, word_stride);
-    bool valid = SnapshotGate != 0u && width == contour_source.x && height == contour_source.w &&
+    bool valid = observation.x != 0u && width == contour_source.x && height == contour_source.w &&
         native_width == width && native_height == height && next_w == width && next_h == height &&
         words == HISTORY_WORDS && word_stride == 4u;
     uint2 stride = SourceDispatchStride();
@@ -1169,20 +1248,14 @@ void history_main(uint3 dispatch_id : SV_DispatchThreadID, uint group_index : SV
     for (uint y = dispatch_id.y; y < height; y += stride.y) {
         [loop]
         for (uint x = dispatch_id.x; x < width; x += stride.x) {
-            float4 feature = 0.0f;
-            float3 color;
-            if (valid && LoadDisplayColor(int2(x, y), color)) {
-                // The immutable next texture carries the chosen reference/count. Reading old
-                // neighbor history while overwriting it would otherwise race across threadgroups.
-                feature = NextFeaturesRead.Load(int3(x, y, 0));
-            }
-            HistoryFeaturesWrite[uint2(x, y)] = feature;
+            // The matching temporal dispatch writes zero for invalid source pixels.
+            HistoryFeaturesWrite[uint2(x, y)] = valid ? NextFeaturesRead.Load(int3(x, y, 0)) : 0.0f;
         }
     }
     if (dispatch_id.y == 0u) {
         [loop]
         for (uint word = dispatch_id.x; word < words; word += stride.x)
-            HistoryIdentityWrite[word] = words == HISTORY_WORDS && word_stride == 4u ? HistoryWord(word, valid) : 0u;
+            HistoryIdentityWrite[word] = words == HISTORY_WORDS && word_stride == 4u ? HistoryWord(word, valid, observation.y != 0u) : 0u;
     }
 }
 
@@ -1191,19 +1264,18 @@ void history_main(uint3 dispatch_id : SV_DispatchThreadID, uint group_index : SV
 // Receipt-gated roots retain history_main: their zero-group reuse must preserve both owners.
 [numthreads(16, 16, 1)]
 void history_identity_main(uint3 group_id : SV_GroupID, uint group_index : SV_GroupIndex) {
-    // Keep the authenticated field-grid indirect ABI. Only its first group needs to validate
-    // the current publication and write the small identity; all lanes agree before the barrier.
+    // Keep the authenticated field-grid indirect ABI. Only its first group writes identity.
     if (any(group_id != uint3(0u, 0u, 0u))) return;
-    PrepareCurrentGate(group_index);
+    uint2 observation = ReadCurrentObservation();
     uint width, height, native_width, native_height, words, word_stride, next_w, next_h;
     HistoryFeaturesWrite.GetDimensions(width, height);
     NextFeaturesRead.GetDimensions(next_w, next_h);
     CurrentSupportRead.GetDimensions(native_width, native_height);
     HistoryIdentityWrite.GetDimensions(words, word_stride);
-    bool valid = SnapshotGate != 0u && width == contour_source.x && height == contour_source.w &&
+    bool valid = observation.x != 0u && width == contour_source.x && height == contour_source.w &&
         native_width == width && native_height == height && next_w == width && next_h == height &&
         words == HISTORY_WORDS && word_stride == 4u;
     [loop]
     for (uint word = group_index; word < words; word += 16u * 16u)
-        HistoryIdentityWrite[word] = words == HISTORY_WORDS && word_stride == 4u ? HistoryWord(word, valid) : 0u;
+        HistoryIdentityWrite[word] = words == HISTORY_WORDS && word_stride == 4u ? HistoryWord(word, valid, observation.y != 0u) : 0u;
 }

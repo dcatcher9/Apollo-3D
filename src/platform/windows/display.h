@@ -125,10 +125,8 @@ namespace platf::dxgi {
 
     /** Tracks whether a persistent encoder input already contains a converted Host-SBS output.
      *
-     * Native NVENC registers one D3D11 input texture for the lifetime of an encode session. A
-     * repeated packed SBS image therefore does not need another RGB-to-YUV draw once that exact
-     * texture has been initialized. Local RGB presentation is deliberately excluded: its
-     * swapchain backbuffer can rotate on every Present().
+     * A repeated packed SBS image can retain its last converted native input without another
+     * RGB-to-YUV draw. Local RGB presentation still draws for each rotating swapchain backbuffer.
      */
     class host_sbs_encoder_input_state_t {
     public:
@@ -264,35 +262,39 @@ namespace platf::dxgi {
                host_sbs_same_frame_poll_outcome_e::wait_unavailable_busy;
     }
 
-    /** Bound a newly submitted matched-frame transaction query by the encode cadence scheduler.
+    /** Bound a matched-frame transaction query by the encode cadence scheduler.
      * Capture/content timestamps are deliberately absent: they identify pixels but do not own the
      * encode deadline. An unavailable, late, or too-small budget fails open to nonblocking output.
+     * A second poll in the same delivery can spend only the remaining part of the first plan.
      */
     [[nodiscard]] constexpr host_sbs_same_frame_poll_plan_t
     host_sbs_same_frame_poll_plan(
       const bool transaction_enqueued,
       const bool snapshot_debug_inputs,
       const std::optional<std::chrono::steady_clock::time_point> next_encode_target,
-      const std::chrono::steady_clock::time_point now
+      const std::chrono::steady_clock::time_point now,
+      const std::optional<host_sbs_same_frame_poll_plan_t> &earlier_poll = std::nullopt
     ) noexcept {
-      if (!transaction_enqueued || snapshot_debug_inputs || !next_encode_target) {
-        return {};
+      host_sbs_same_frame_poll_plan_t plan;
+      if (transaction_enqueued && !snapshot_debug_inputs && next_encode_target) {
+        const auto cadence_deadline =
+          *next_encode_target - host_sbs_same_frame_poll_downstream_reserve;
+        if (cadence_deadline > now &&
+            cadence_deadline - now >= host_sbs_same_frame_poll_min_budget) {
+          const auto hard_deadline = now + host_sbs_same_frame_poll_max_wait;
+          const auto deadline = std::min(hard_deadline, cadence_deadline);
+          plan = {deadline, deadline - now, true, hard_deadline <= cadence_deadline};
+        }
       }
-      const auto cadence_deadline =
-        *next_encode_target - host_sbs_same_frame_poll_downstream_reserve;
-      if (cadence_deadline <= now ||
-          cadence_deadline - now < host_sbs_same_frame_poll_min_budget) {
-        return {};
+      if (earlier_poll) {
+        plan.deadline = std::min(plan.deadline, earlier_poll->deadline);
+        plan.budget = plan.deadline > now ?
+          plan.deadline - now : std::chrono::steady_clock::duration::zero();
+        plan.eligible = plan.eligible && earlier_poll->eligible &&
+          plan.budget >= host_sbs_same_frame_poll_min_budget;
+        plan.limited_by_hard_cap = earlier_poll->limited_by_hard_cap;
       }
-      const auto hard_deadline = now + host_sbs_same_frame_poll_max_wait;
-      const bool limited_by_hard_cap = hard_deadline <= cadence_deadline;
-      const auto deadline = limited_by_hard_cap ? hard_deadline : cadence_deadline;
-      return {
-        deadline,
-        deadline - now,
-        true,
-        limited_by_hard_cap,
-      };
+      return plan;
     }
 
     enum class host_sbs_depth_reuse_kind_e : std::uint8_t {
@@ -473,7 +475,7 @@ namespace platf::dxgi {
     /** Non-owning scope guard for one successful IDXGIKeyedMutex acquisition.
      *
      * Keeping this generic makes the ownership contract testable without a D3D device. The
-     * referenced mutex must outlive the guard, as it does for an image encoder context.
+     * referenced mutex must outlive the guard, as it does for a capture image or encoder context.
      */
     template<typename KeyedMutex>
     class keyed_mutex_lock_t {
@@ -549,30 +551,6 @@ namespace platf::dxgi {
         retained_content_timestamp = present_timestamp;
       }
       return {presentation_timestamp, retained_content_timestamp};
-    }
-
-    /** Publish fresh capture pixels without modifying an image already held by the encoder.
-     *
-     * A pointer-only acquisition can forward the existing cursor-free image without writing any
-     * pixels. Treat that acquisition as idle: neither timestamps nor diagnostic handoff metadata
-     * may be rewritten on the shared image. Cursor removal still publishes its freshly copied
-     * image, as do desktop updates and visible cursor composition.
-     */
-    inline capture_e complete_ddup_image_delivery(
-      std::shared_ptr<platf::img_t> &image,
-      const bool reuses_published_image,
-      const std::optional<std::chrono::steady_clock::time_point> frame_timestamp,
-      const std::optional<std::chrono::steady_clock::time_point> content_timestamp
-    ) {
-      if (reuses_published_image) {
-        image.reset();
-        return capture_e::timeout;
-      }
-      if (image) {
-        image->frame_timestamp = frame_timestamp;
-        image->content_timestamp = content_timestamp;
-      }
-      return capture_e::ok;
     }
 
     /** Desktop Duplication pixels dropped while an external export owned the encoded output.
@@ -669,31 +647,6 @@ namespace platf::dxgi {
       changed,
     };
 
-    /** Saturated upper bound on pixels that may have changed inside one queried region.
-     *
-     * Rectangles are deliberately not unioned: summing clipped overlaps and saturating at the
-     * region area can only overestimate damage, so an accepted small fraction stays conservative.
-     */
-    struct ddup_damage_coverage_t {
-      std::uint64_t potentially_changed_area = 0u;
-      std::uint64_t region_area = 0u;
-      bool known = false;
-      // A lower bound on metadata coverage: unlike the saturated sum above, overlapping dirty
-      // rectangles and a move's source/destination cannot inflate this value.
-      std::uint64_t max_single_intersection_area = 0u;
-    };
-
-    /** Complete DDup history is admission evidence, never a similarity verdict.
-     *
-     * Every authority-valid changed frame may reach the device detector. Localized/broad shape is
-     * deliberately absent: the authenticated current-vs-history tensor comparison owns reuse.
-     */
-    [[nodiscard]] constexpr bool host_sbs_adaptive_motion_damage_candidate(
-      const ddup_damage_coverage_t &coverage
-    ) noexcept {
-      return coverage.known && coverage.region_area != 0u;
-    }
-
     /** One acquired DDup present's normalized dirty coverage.
      *
      * Move rectangles contribute both their source and destination rectangles. `known == false`
@@ -707,13 +660,24 @@ namespace platf::dxgi {
       bool single_desktop_present = false;
     };
 
-    /** Immutable identity of one desktop surface actually committed by CopyResource. */
+    /** Immutable identity of one desktop surface actually committed by capture's copy. */
     class ddup_damage_history_t;
 
     struct ddup_damage_snapshot_t {
       std::shared_ptr<const ddup_damage_history_t> history;
       std::uint64_t token = 0u;
       bool single_desktop_present = false;
+    };
+
+    enum class ddup_capture_copy_kind_e : std::uint8_t {
+      full,
+      none,
+      region,
+    };
+
+    struct ddup_capture_copy_plan_t {
+      ddup_capture_copy_kind_e kind = ddup_capture_copy_kind_e::full;
+      RECT region {};
     };
 
     /** The caller observed two adjacent committed surfaces and DDup reported exactly one
@@ -745,20 +709,41 @@ namespace platf::dxgi {
     public:
       [[nodiscard]] ddup_damage_snapshot_t commit(ddup_damage_update_t update);
 
+      [[nodiscard]] bool has_complete_interval(
+        std::uint64_t from_exclusive,
+        std::uint64_t through_inclusive
+      ) const;
+
       [[nodiscard]] ddup_damage_intersection_e query(
         std::uint64_t from_exclusive,
         std::uint64_t through_inclusive,
         const RECT &region
       ) const;
 
-      [[nodiscard]] ddup_damage_coverage_t query_coverage(
+      /** Copy bounds across an exact retained interval. Unknown/invalid/full coverage all
+       * require the ordinary whole-surface copy; none authorizes retaining unknown pixels.
+       */
+      [[nodiscard]] ddup_capture_copy_plan_t plan_copy(
         std::uint64_t from_exclusive,
         std::uint64_t through_inclusive,
-        const RECT &region,
-        bool collect_max_single_intersection = false
+        const ddup_damage_update_t &current_update,
+        const RECT &old_cursor,
+        LONG width,
+        LONG height
       ) const;
 
     private:
+      struct range_t {
+        std::size_t first = 0u;
+        std::size_t count = 0u;
+      };
+
+      // Caller holds mutex_. A same-token interval contains no intervening update.
+      [[nodiscard]] std::optional<range_t> retained_range_locked(
+        std::uint64_t from_exclusive,
+        std::uint64_t through_inclusive
+      ) const;
+
       struct entry_t {
         std::uint64_t token = 0u;
         bool known = false;
@@ -770,6 +755,27 @@ namespace platf::dxgi {
       std::size_t retained_rects_ = 0u;
       std::uint64_t next_token_ = 1u;
     };
+
+    /** Capture's private texture identity and exact damage history select one conservative
+     * desktop copy. Cursor restoration uses the same acquired current desktop, before drawing
+     * the new cursor. This never supplies Host SBS model/reuse authority.
+     */
+    [[nodiscard]] ddup_capture_copy_plan_t plan_ddup_capture_copy(
+      std::uint64_t image_desktop_serial,
+      std::uint64_t current_desktop_serial,
+      const std::optional<ddup_damage_snapshot_t> &image_damage,
+      const std::optional<ddup_damage_snapshot_t> &previous_damage,
+      const ddup_damage_update_t &current_update,
+      const RECT &old_cursor,
+      LONG width,
+      LONG height
+    );
+
+    /** Verify continuity in one retained history without examining rectangle geometry. */
+    [[nodiscard]] bool has_complete_ddup_damage_between(
+      const std::optional<ddup_damage_snapshot_t> &from,
+      const std::optional<ddup_damage_snapshot_t> &through
+    );
 
     /** Query only when both snapshots belong to the same retained exact history range. */
     [[nodiscard]] ddup_damage_intersection_e query_ddup_damage_between(
@@ -795,14 +801,6 @@ namespace platf::dxgi {
       std::optional<ddup_damage_snapshot_t> anchor_;
       RECT region_ {};
     };
-
-    /** Query conservative accumulated coverage only across one complete retained history range. */
-    [[nodiscard]] ddup_damage_coverage_t query_ddup_damage_coverage_between(
-      const std::optional<ddup_damage_snapshot_t> &from,
-      const std::optional<ddup_damage_snapshot_t> &through,
-      const RECT &region,
-      bool collect_max_single_intersection = false
-    );
 
     enum class host_sbs_ddup_reuse_proof_e : std::uint8_t {
       none,
@@ -1002,6 +1000,8 @@ namespace platf::dxgi {
     }
 
     virtual capture_e snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool cursor_visible) = 0;
+    // Queried immediately after an ordinary source snapshot reports a timeout.
+    virtual bool snapshot_filtered_acquisition() const noexcept { return false; }
     virtual capture_e release_snapshot() = 0;
     virtual int complete_img(img_t *img, bool dummy) = 0;
 
@@ -1072,6 +1072,10 @@ namespace platf::dxgi {
     // Replaces the duplication in place so its first acquisition returns the whole desktop.
     capture_e reduplicate_output();
 
+    // Depth-capable converters may overlap while the same display keeps capturing.
+    void add_damage_observer() noexcept;
+    void remove_damage_observer() noexcept;
+
     duplication_t dup;
     sampler_state_t sampler_linear;
 
@@ -1087,17 +1091,22 @@ namespace platf::dxgi {
     // CPU shape data is immutable after publication and safe to upload on an encoder device.
     std::shared_ptr<const sbs_cursor::shape_t> cursor_shape;
 
-    texture2d_t old_surface_delayed_destruction;
-    std::chrono::steady_clock::time_point old_surface_timestamp;
-    std::variant<std::monostate, texture2d_t, std::shared_ptr<platf::img_t>> last_frame_variant;
     std::optional<std::chrono::steady_clock::time_point> last_content_timestamp;
     std::shared_ptr<detail::ddup_damage_history_t> damage_history;
     std::optional<detail::ddup_damage_snapshot_t> last_ddup_damage;
     bool damage_chain_valid = true;
     // Presents acquired without a copy while external_pixels_owner was set, and their recovery.
     detail::ddup_dropped_desktop_t dropped_desktop;
-    // Cursor of the last delivered image, to tell whether a skipped-pixel update changes anything.
+    // Compare against the last delivered cursor only when its pixel ownership can be reused.
     sbs_cursor::snapshot_t last_delivered_cursor;
+    bool last_delivery_skipped_pixels = false;
+    // The most recent image with desktop pixels may precede a metadata-only delivery.
+    bool last_pixel_cursor_visible = false;
+
+  private:
+    bool snapshot_filtered_acquisition() const noexcept override { return dup.has_frame; }
+    std::atomic<unsigned> damage_observers_ {0};
+    std::uint64_t desktop_serial_ = 0;
   };
 
   /**
@@ -1182,6 +1191,28 @@ namespace platf::dxgi {
     ~local_presenter_cursor_clip_t();
   };
 
+  /**
+   * One in-place source change on a verified physical monitor. Request identity belongs to
+   * this presenter, so an old producer cannot acknowledge another request for the same mode.
+   */
+  struct local_monitor_source_switch_t {
+    enum class state_e {requested, adopted, presented, failed, cancelled};
+
+    struct request_t {
+      const int sbs_mode;
+      const std::uint64_t display_epoch;
+      const std::chrono::steady_clock::time_point expires;
+      std::atomic<state_e> state {state_e::requested};
+
+      request_t(int mode, std::uint64_t epoch, std::chrono::steady_clock::time_point expiration):
+          sbs_mode(mode), display_epoch(epoch), expires(expiration) {}
+    };
+
+    std::atomic<std::shared_ptr<request_t>> request;
+    std::atomic<int> presented_mode {::video::SBS_OFF};
+    std::function<bool(int)> mode_is_requested;
+  };
+
   struct local_presenter_config_t {
     std::string source_display_name;
     RECT target_rect {};
@@ -1202,6 +1233,7 @@ namespace platf::dxgi {
     std::function<bool()> shutter_recovery_allowed;
     config::video_t::local_monitor_t monitor_config {};
     std::shared_ptr<::video::capture_backend_failover_t> capture_failover;
+    std::shared_ptr<local_monitor_source_switch_t> source_switch;
 
     struct target_t {
       std::mutex mutex;
@@ -1245,12 +1277,25 @@ namespace platf::dxgi {
 #ifdef SUNSHINE_TESTS
   struct local_shutter_frame_probe_t {
     bool available = false;
+    bool consumer_progress_during_publication = false;
+    bool retained_pair_not_republished = false;
     bool publication_bounded = false;
     bool current_pair_immutable = false;
     bool next_pair_published = false;
     bool eye_crop_exact = false;
   };
   local_shutter_frame_probe_t probe_local_shutter_frame_ring();
+
+  struct local_shutter_handoff_probe_t {
+    bool available = false;
+    bool used_warp = false;
+    bool unpublished_retained = false;
+    bool unfenced_retained = false;
+    bool denied_retained = false;
+    bool adopted_exact_pair = false;
+  };
+
+  local_shutter_handoff_probe_t probe_local_shutter_pair_handoff();
 
   struct native_capture_release_report_t {
     bool valid = false;

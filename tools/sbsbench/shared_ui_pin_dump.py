@@ -14,6 +14,10 @@ from typing import Any
 
 
 KIND = "shared-ui-pin-v1"
+COMPLETED_KIND = "shared-ui-pin-completed-v2"
+QUEUED_KIND = "shared-ui-pin-queued-v2"
+LEGACY_COMBINED_CLOSURE = "326bf2defe8021e1930f46279fea27ceac12effad2ad9d2a17127d647bcdddef"
+_ROUTE_CLOSURE_KEYS = {COMPLETED_KIND: "completed_closure", QUEUED_KIND: "queued_closure"}
 EVIDENCE = "actual_draw_evidence.json"
 ARTIFACTS = (
     "actual_shared_pin_weights.f32", "actual_shared_pin_field.f32",
@@ -25,12 +29,15 @@ SHARED_ROLE = "independent Base diagnostic; does not describe rendered shared wa
 BASE_ROLE = "authenticated Base inverse diagnostic"
 
 
-def _expected_closure() -> str:
+def _expected_closure(kind: str = KIND) -> str:
+    if kind == KIND:
+        return LEGACY_COMBINED_CLOSURE
     try:
         from . import generate_depth_coordinate_v2_contract as shader_generator
     except ImportError:
         import generate_depth_coordinate_v2_contract as shader_generator
-    return shader_generator.shared_ui_warp_runtime_closures()["closure"]
+    name = _ROUTE_CLOSURE_KEYS[kind]
+    return shader_generator.shared_ui_warp_runtime_closures(names=(name,))[name]
 
 
 def validate_attribution(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -52,18 +59,20 @@ def validate_attribution(manifest: dict[str, Any]) -> dict[str, Any]:
             (current and (type(value["schema"]) is not int or value["schema"] != 2)) or
             (current_dump and not current)):
         raise ValueError("actual draw renderer attribution has an unknown schema")
-    shared = value["kind"] == KIND
+    kind = value["kind"]
+    shared_kinds = (KIND, COMPLETED_KIND, QUEUED_KIND) if current else (KIND,)
+    shared = kind in shared_kinds
     role = SHARED_ROLE if shared else BASE_ROLE
     if not current:
         role = LEGACY_ROLE if shared else "selected analytic renderer diagnostic"
-    if (value["kind"] not in {KIND, "ordinary-base-v1" if current else "legacy-analytic-v1"} or
-            value["source_closure_sha256"] != (_expected_closure() if shared else "") or
+    if ((not shared and kind != ("ordinary-base-v1" if current else "legacy-analytic-v1")) or
+            value["source_closure_sha256"] != (_expected_closure(kind) if shared else "") or
             value["mapping_role" if current else "legacy_mapping_role"] != role or
             value["evidence_artifact"] != EVIDENCE):
         raise ValueError("actual draw renderer has an unknown source or map attribution")
     if shared and manifest["renderer"].get("mapping_artifacts_match_selected_renderer") is not False:
         raise ValueError("ordinary/legacy analytic map cannot claim shared-warp render authority")
-    return {"kind": value["kind"], "shared_pin_selected": shared,
+    return {"kind": kind, "shared_pin_selected": shared,
             "source_closure_sha256": value["source_closure_sha256"],
             "evidence_schema": 2 if current else 1}
 
@@ -125,6 +134,10 @@ def _verify(root: Any, manifest: dict[str, Any]) -> tuple[dict[str, Any], Any]:
     if evidence.get("captured") is False:
         return {**attribution, "actual_map_verified": False,
                 "unavailable_reason": "actual draw binding observation was unavailable"}, None
+    kind = attribution["kind"]
+    if kind in _ROUTE_CLOSURE_KEYS and (
+            evidence.get("program") != kind or evidence.get("queued_geometry") is not (kind == QUEUED_KIND)):
+        raise ValueError("actual draw evidence does not identify its attributed shared pin route")
     shared = evidence.get("shared_pin")
     if (not isinstance(shared, dict) or shared.get("selected") is not True or
             evidence.get("captured") is not True or

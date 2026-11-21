@@ -1,6 +1,6 @@
 /**
  * @file src/video_capture_test.h
- * @brief Private, device-free access to the real capture worker's lifetime.
+ * @brief Private test access to the production capture worker and encode loop.
  */
 #pragma once
 
@@ -15,6 +15,41 @@
   #include <vector>
 
 namespace video::detail {
+  struct native_encode_loop_test_result_t {
+    bool session_created = false;
+    unsigned pipeline_depth = 0;
+    int next_frame_nr = 1;
+    bool awaiting_desktop_after_export = false;
+  };
+
+  struct native_encode_loop_test_hooks_t {
+    using picture_observer_t = std::function<void(
+      int, std::optional<std::chrono::steady_clock::time_point>
+    )>;
+
+    picture_observer_t before_retrieve;
+    picture_observer_t after_submit;
+    std::function<void()> repeat_coalesced;
+    std::function<void(bool has_retained_source, std::chrono::nanoseconds)> before_image_wait;
+  };
+
+  /** Synchronously create a normal native session and run the actual production encode loop.
+   * The supplied display must have its original, unarmed make_unarmed_capture_display control
+   * block. This bridge arms, publishes and acquires one real capture generation; it does not run
+   * a capture worker. The fixture supplies captures/control/packet consumption and stops the loop
+   * through its normal mail or image event. Only the unrelated HTTP launch-HDR check is omitted.
+   * Joins native and per-device teardown before returning. Optional hooks observe the actual
+   * picture lifecycle on its submitting and retrieving threads.
+   */
+  native_encode_loop_test_result_t run_native_encode_loop_for_test(
+    std::shared_ptr<platf::display_t> display,
+    safe::mail_t mail,
+    img_event_t images,
+    config_t config,
+    packet_queue_t packets,
+    const native_encode_loop_test_hooks_t &hooks = {}
+  );
+
   struct capture_worker_test_access;
 
   /** Borrowed for one inert worker callback; no platform capture calls have run. */

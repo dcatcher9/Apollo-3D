@@ -287,28 +287,6 @@ void main(uint3 id : SV_DispatchThreadID) {
              SUCCEEDED(device->CreateUnorderedAccessView(texture.Get(), nullptr, &uav));
     }
 
-    bool create_uint_texture(
-      ID3D11Device *device,
-      const UINT width,
-      const UINT height,
-      ComPtr<ID3D11Texture2D> &texture,
-      ComPtr<ID3D11ShaderResourceView> &srv,
-      ComPtr<ID3D11UnorderedAccessView> &uav
-    ) {
-      D3D11_TEXTURE2D_DESC desc {};
-      desc.Width = width;
-      desc.Height = height;
-      desc.MipLevels = 1u;
-      desc.ArraySize = 1u;
-      desc.Format = DXGI_FORMAT_R32_UINT;
-      desc.SampleDesc.Count = 1u;
-      desc.Usage = D3D11_USAGE_DEFAULT;
-      desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-      return SUCCEEDED(device->CreateTexture2D(&desc, nullptr, &texture)) &&
-             SUCCEEDED(device->CreateShaderResourceView(texture.Get(), nullptr, &srv)) &&
-             SUCCEEDED(device->CreateUnorderedAccessView(texture.Get(), nullptr, &uav));
-    }
-
     std::vector<std::uint32_t> read_buffer_words(
       ID3D11Device *device,
       ID3D11DeviceContext *context,
@@ -454,20 +432,11 @@ void main(uint3 id : SV_DispatchThreadID) {
     ComPtr<ID3D11Buffer> dummy_previous_model_input_buffer;
     ComPtr<ID3D11ShaderResourceView> dummy_previous_model_input_srv;
     ComPtr<ID3D11UnorderedAccessView> dummy_previous_model_input_uav;
-    ComPtr<ID3D11Buffer> dummy_current_appearance_buffer;
-    ComPtr<ID3D11ShaderResourceView> dummy_current_appearance_srv;
-    ComPtr<ID3D11Buffer> dummy_previous_appearance_buffer;
-    ComPtr<ID3D11ShaderResourceView> dummy_previous_appearance_srv;
-    ComPtr<ID3D11UnorderedAccessView> dummy_previous_appearance_uav;
     ComPtr<ID3D11Buffer> dummy_history_owner_buffer;
     ComPtr<ID3D11ShaderResourceView> dummy_history_owner_srv;
     ComPtr<ID3D11UnorderedAccessView> dummy_history_owner_uav;
-    ComPtr<ID3D11Texture2D> dummy_exclusion_texture;
-    ComPtr<ID3D11ShaderResourceView> dummy_exclusion_srv;
-    ComPtr<ID3D11UnorderedAccessView> dummy_exclusion_uav;
-    ComPtr<ID3D11Texture2D> dummy_previous_exclusion_texture;
-    ComPtr<ID3D11ShaderResourceView> dummy_previous_exclusion_srv;
-    ComPtr<ID3D11UnorderedAccessView> dummy_previous_exclusion_uav;
+    ComPtr<ID3D11Buffer> analysis_domain;
+    ComPtr<ID3D11ShaderResourceView> analysis_domain_srv;
     ComPtr<ID3D11Texture2D> coordinate_texture;
     ComPtr<ID3D11ShaderResourceView> coordinate_srv;
     ComPtr<ID3D11UnorderedAccessView> coordinate_uav;
@@ -812,22 +781,33 @@ void main(uint3 id : SV_DispatchThreadID) {
         error = "production V2 shader source closure does not match the generated V2 contract";
         return false;
       }
+      const auto replay_resolve_sources = shader_cache::snapshot_sources(
+        shader_root,
+        shader_cache::parallax_v2_replay_resolve_specs
+      );
+      if (!replay_resolve_sources || shader_cache::source_closure_sha256(replay_resolve_sources) !=
+                                     shader_cache::parallax_v2_replay_resolve_source_closure_sha256) {
+        error = "raw V2 replay resolve source closure does not match its generated pin";
+        return false;
+      }
       struct shader_target {
         const shader_cache::shader_spec *spec;
         ComPtr<ID3D11ComputeShader> *shader;
+        bool replay_resolve = false;
       };
       const std::array<shader_target, 8> targets {{
         {&shader_cache::depth_coordinate_v2_moments, &moments_shader},
         {&shader_cache::depth_coordinate_v2_frame_resolve, &frame_shader},
         {&shader_cache::depth_coordinate_v2_histogram, &histogram_shader},
-        {&shader_cache::depth_coordinate_v2_quantiles, &quantile_shader},
-        {&shader_cache::depth_coordinate_v2_state_resolve, &state_shader},
+        {&shader_cache::depth_coordinate_v2_quantiles, &quantile_shader, true},
+        {&shader_cache::depth_coordinate_v2_state_resolve, &state_shader, true},
         {&shader_cache::depth_coordinate_v2_map, &map_shader},
         {&shader_cache::depth_coordinate_v2_vertical_limit, &vertical_limit_shader},
         {&shader_cache::depth_coordinate_v2_limit, &limit_shader},
       }};
       for (const auto &target : targets) {
-        const auto bytecode = shader_cache::get(shader_sources, *target.spec);
+        const auto &sources = target.replay_resolve ? replay_resolve_sources : shader_sources;
+        const auto bytecode = shader_cache::get(sources, *target.spec);
         if (!bytecode || bytecode->empty() || FAILED(device->CreateComputeShader(
               bytecode->data(), bytecode->size(), nullptr,
               target.shader->ReleaseAndGetAddressOf()
@@ -891,6 +871,10 @@ void main(uint3 id : SV_DispatchThreadID) {
       }
       ComPtr<ID3D11ShaderResourceView> unused_srv;
       ComPtr<ID3D11UnorderedAccessView> unused_uav;
+      // Raw-coordinate replay has no synthetic padding: every supplied depth cell is content.
+      const models::host_sbs_v2_gpu::analysis_domain_record_t full_domain {
+        .valid = 1u, .width = width, .height = height, .right = width, .bottom = height,
+      };
       if (!create_structured_buffer(
             device.Get(), sizeof(float), width * height, nullptr, false,
             raw_buffer, raw_srv, unused_uav
@@ -942,6 +926,8 @@ void main(uint3 id : SV_DispatchThreadID) {
         }
       }
       auto depth_health_state_words = sbs_adaptive_state::initial_words;
+      // Replay starts from saved raw depth. Its inactive MinMaxEma prevents the shared map
+      // from advancing NCHW history, while the dummy bindings preserve the production ABI.
       const std::array<float, 4> invalid_minmax {{0.0f, 0.0f, 0.0f, 0.0f}};
       if (!create_structured_buffer(
             device.Get(), sizeof(float) * 4u,
@@ -962,26 +948,12 @@ void main(uint3 id : SV_DispatchThreadID) {
             dummy_previous_model_input_uav
           ) ||
           !create_structured_buffer(
-            device.Get(), sizeof(float), width * height, nullptr, false,
-            dummy_current_appearance_buffer, dummy_current_appearance_srv, unused_uav
-          ) ||
-          !create_structured_buffer(
-            device.Get(), sizeof(float), width * height, nullptr, true,
-            dummy_previous_appearance_buffer, dummy_previous_appearance_srv,
-            dummy_previous_appearance_uav
-          ) ||
-          !create_structured_buffer(
             device.Get(), sizeof(std::uint32_t), 10u, nullptr, true,
             dummy_history_owner_buffer, dummy_history_owner_srv, dummy_history_owner_uav
           ) ||
-          !create_uint_texture(
-            device.Get(), width, height,
-            dummy_exclusion_texture, dummy_exclusion_srv, dummy_exclusion_uav
-          ) ||
-          !create_uint_texture(
-            device.Get(), width, height,
-            dummy_previous_exclusion_texture, dummy_previous_exclusion_srv,
-            dummy_previous_exclusion_uav
+          !create_structured_buffer(
+            device.Get(), sizeof(full_domain), 1u, &full_domain, false,
+            analysis_domain, analysis_domain_srv, unused_uav
           ) ||
           !create_float_texture(
             device.Get(), width, height,
@@ -1012,10 +984,6 @@ void main(uint3 id : SV_DispatchThreadID) {
         error = "cannot create V2 GPU replay textures or depth-health state buffer";
         return false;
       }
-      const UINT zero_uint[4] = {};
-      const float zero_float[4] = {};
-      context->ClearUnorderedAccessViewUint(dummy_exclusion_uav.Get(), zero_uint);
-      context->ClearUnorderedAccessViewUint(dummy_previous_exclusion_uav.Get(), zero_uint);
       return true;
     }
 
@@ -1087,7 +1055,7 @@ void main(uint3 id : SV_DispatchThreadID) {
         .moments_shader = moments_shader.Get(),
         .frame_resolve_shader = frame_shader.Get(),
         .raw_depth = raw_srv.Get(),
-        .tensor_exclusion = dummy_exclusion_srv.Get(),
+        .analysis_domain = analysis_domain_srv.Get(),
         .partials_output = partial_uav.Get(),
         .partials = partial_srv.Get(),
         .frame_stats_output = frame_uav.Get(),
@@ -1122,7 +1090,7 @@ void main(uint3 id : SV_DispatchThreadID) {
       }
 
       ID3D11ShaderResourceView *coordinate_srvs[] = {
-        raw_srv.Get(), state_srv.Get(), dummy_exclusion_srv.Get(),
+        raw_srv.Get(), state_srv.Get(), analysis_domain_srv.Get(),
       };
 
       // The canonical coordinate is a replay diagnostic, matching the live Dump-3D-only pass.
@@ -1132,55 +1100,36 @@ void main(uint3 id : SV_DispatchThreadID) {
       context->Dispatch((width + 15u) / 16u, (height + 15u) / 16u, 1u);
       unbind(3u, 1u);
 
-      const v2_gpu::map_history_command_t map_history_command {
+      const v2_gpu::base_geometry_command_t base_geometry_command {
         .constants = base_constants,
         .near_identical_constants = near_constants.Get(),
-        .shader = map_shader.Get(),
+        .map_shader = map_shader.Get(),
+        .vertical_shader = vertical_limit_shader.Get(),
+        .horizontal_shader = limit_shader.Get(),
         .raw_depth = raw_srv.Get(),
         .state = state_srv.Get(),
-        .tensor_exclusion = dummy_exclusion_srv.Get(),
+        .analysis_domain = analysis_domain_srv.Get(),
         .minmax_ema = dummy_minmax_srv.Get(),
         .current_model_input = dummy_current_model_input_srv.Get(),
-        .current_appearance_ordinal = dummy_current_appearance_srv.Get(),
         .depth_health_state = depth_health_state_srv.Get(),
+        .candidate = candidate_srv.Get(),
+        .vertical_conditioned = vertical_conditioned_srv.Get(),
         .candidate_output = candidate_uav.Get(),
         .previous_model_input_output = dummy_previous_model_input_uav.Get(),
-        .previous_appearance_ordinal_output = dummy_previous_appearance_uav.Get(),
-        .previous_tensor_exclusion_output = dummy_previous_exclusion_uav.Get(),
         .history_owner_output = dummy_history_owner_uav.Get(),
-        .dispatch = v2_gpu::dispatch_command_t::direct(
+        .vertical_majorant_output = vertical_majorant_uav.Get(),
+        .vertical_conditioned_output = vertical_conditioned_uav.Get(),
+        .final_output = final_uav.Get(),
+        .map_dispatch = v2_gpu::dispatch_command_t::direct(
           (width + 15u) / 16u,
           (height + 15u) / 16u,
           1u
         ),
+        .vertical_dispatch = v2_gpu::dispatch_command_t::direct(v2_gpu::limiter_groups(width), 1u, 1u),
+        .horizontal_dispatch = v2_gpu::dispatch_command_t::direct(v2_gpu::limiter_groups(height), 1u, 1u),
       };
-      if (!v2_gpu::record_map_history(context.Get(), map_history_command)) {
-        error = "shared V2 GPU executor rejected replay map/history operands";
-        return false;
-      }
-
-      const v2_gpu::vertical_command_t vertical_command {
-        .constants = base_constants,
-        .shader = vertical_limit_shader.Get(),
-        .candidate = candidate_srv.Get(),
-        .vertical_majorant_output = vertical_majorant_uav.Get(),
-        .vertical_conditioned_output = vertical_conditioned_uav.Get(),
-        .dispatch = v2_gpu::dispatch_command_t::direct(v2_gpu::limiter_groups(width), 1u, 1u),
-      };
-      if (!v2_gpu::record_vertical(context.Get(), vertical_command)) {
-        error = "shared V2 GPU executor rejected replay vertical operands";
-        return false;
-      }
-
-      const v2_gpu::horizontal_command_t horizontal_command {
-        .constants = base_constants,
-        .shader = limit_shader.Get(),
-        .vertical_conditioned = vertical_conditioned_srv.Get(),
-        .final_output = final_uav.Get(),
-        .dispatch = v2_gpu::dispatch_command_t::direct(v2_gpu::limiter_groups(height), 1u, 1u),
-      };
-      if (!v2_gpu::record_horizontal(context.Get(), horizontal_command)) {
-        error = "shared V2 GPU executor rejected replay horizontal operands";
+      if (!v2_gpu::record_base_geometry(context.Get(), base_geometry_command)) {
+        error = "shared V2 GPU executor rejected replay Base geometry operands";
         return false;
       }
 
@@ -1657,9 +1606,8 @@ void main(uint3 id : SV_DispatchThreadID) {
           {"width", impl_->width},
           {"height", impl_->height},
         }},
-        // Production state/geometry passes. The replay's coordinate_main dispatch is
-        // diagnostic report materialization, exactly like live Dump 3D, and is intentionally
-        // excluded from the authenticated producer source closure.
+        // Shared raw scan, replay-only resolve, then production geometry. The replay's
+        // coordinate_main materializes diagnostics under the same pin as live Dump 3D.
         {"shader_sequence", nlohmann::ordered_json {
           "depth_coordinate_v2_moments_cs.hlsl",
           "depth_coordinate_v2_frame_resolve_cs.hlsl",

@@ -82,7 +82,7 @@ float share_vertical_envelopes(float upper, float lower) {
     return conditioned;
 }
 
-void V2LimitMain(uint3 group_id, uint3 group_thread_id) {
+void V2LimitMain(uint3 group_id, uint3 group_thread_id, bool compact) {
     if (target_h == 0u || target_w == 0u ||
         target_h > V2_LIMIT_MAX_VERTICAL_DIMENSION) {
         return;
@@ -92,6 +92,13 @@ void V2LimitMain(uint3 group_id, uint3 group_thread_id) {
     uint x = group_id.x * V2_LIMIT_GROUP_LINES + column;
     // A partial last group keeps its idle threads until the final group barrier.
     bool active = x < target_w;
+    if (compact && DepthAnalysisContentValid()) {
+        uint group_x = group_id.x * V2_LIMIT_GROUP_LINES;
+        if (group_x >= analysis_content_right || group_x + V2_LIMIT_GROUP_LINES <= analysis_content_left) {
+            return;
+        }
+        active = x >= analysis_content_left && x < analysis_content_right;
+    }
 
     float max_step = v2_max_vertical_shear / DepthAnalysisContentWidthCells();
 
@@ -298,7 +305,7 @@ bool GaussianSmoothingEnabled() {
 
 [numthreads(V2_LIMIT_GROUP_LINES, V2_LIMIT_LINE_CHUNKS, 1)]
 void main(uint3 group_id : SV_GroupID, uint3 group_thread_id : SV_GroupThreadID) {
-    V2LimitMain(group_id, group_thread_id);
+    V2LimitMain(group_id, group_thread_id, false);
 }
 
 [numthreads(V2_LIMIT_GROUP_LINES, V2_LIMIT_LINE_CHUNKS, 1)]
@@ -314,4 +321,9 @@ void subtitle_main(uint3 group_id : SV_GroupID, uint3 group_thread_id : SV_Group
             VerticalConditioned[position] = value;
         }
     }
+}
+
+[numthreads(V2_LIMIT_GROUP_LINES, V2_LIMIT_LINE_CHUNKS, 1)]
+void compact_main(uint3 group_id : SV_GroupID, uint3 group_thread_id : SV_GroupThreadID) {
+    V2LimitMain(group_id, group_thread_id, true);
 }

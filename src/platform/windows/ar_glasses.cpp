@@ -90,6 +90,7 @@ namespace ar_glasses {
     constexpr int source_height = 1080;
     constexpr auto topology_poll_interval = 250ms;
     constexpr auto topology_debounce = 750ms;
+    constexpr auto monitor_source_switch_timeout = 5s;
     constexpr auto incompatible_transition_grace = 5s;
     constexpr auto virtual_display_absence_grace = 5s;
     constexpr unsigned virtual_display_absence_confirmations = 3;
@@ -491,19 +492,22 @@ namespace ar_glasses {
       bool is_primary = false;
       bool is_cloned = false;
 
-      bool operator==(const target_state_t &other) const {
+      bool same_display_observation(const target_state_t &other) const {
         return device_id == other.device_id && device_path == other.device_path &&
                gdi_name == other.gdi_name && desktop_topology == other.desktop_topology &&
                same_luid(adapter_id, other.adapter_id) &&
                rect.left == other.rect.left && rect.top == other.rect.top &&
                rect.right == other.rect.right && rect.bottom == other.rect.bottom &&
-               refresh_millihz == other.refresh_millihz && mode == other.mode &&
-               game_source == other.game_source &&
+               refresh_millihz == other.refresh_millihz &&
                is_primary == other.is_primary && is_cloned == other.is_cloned &&
                hdr.known == other.hdr.known &&
                hdr.supported == other.hdr.supported &&
                hdr.active == other.hdr.active &&
                hdr.limited_by_policy == other.hdr.limited_by_policy;
+      }
+
+      bool operator==(const target_state_t &other) const {
+        return mode == other.mode && game_source == other.game_source && same_display_observation(other);
       }
     };
 
@@ -1052,6 +1056,31 @@ namespace ar_glasses {
              same_presentation_contract(left, right);
     }
 
+    bool same_monitor_scanout_generation(const target_state_t &left, const target_state_t &right) {
+      return is_monitor_mode(left.mode) && is_monitor_mode(right.mode) && !left.is_primary && !left.is_cloned &&
+             left.hdr.known && left.same_display_observation(right) &&
+             same_luid(left.source_adapter_id, right.source_adapter_id) && left.source_id == right.source_id &&
+             left.target_id == right.target_id && left.hdr.user_enabled == right.hdr.user_enabled &&
+             left.hdr.bits_per_color == right.hdr.bits_per_color;
+    }
+
+    bool monitor_source_only_change(const target_state_t &before, const target_state_t &after) {
+      return before.mode != after.mode && same_monitor_scanout_generation(before, after);
+    }
+
+    template<class Current, class Verify>
+    bool verify_monitor_source_request(Current current, Verify verify) {
+      return current() && verify() && current();
+    }
+
+    enum class monitor_source_switch_progress_e {
+      waiting,
+      presented,
+      failed,
+    };
+
+    using monitor_source_switch_t = platf::dxgi::local_monitor_source_switch_t;
+
     bool contains_case_insensitive(std::wstring_view haystack, std::wstring_view needle) {
       return std::search(
                haystack.begin(),
@@ -1345,17 +1374,57 @@ namespace ar_glasses {
       std::string primary_device_path;
     };
 
-    std::optional<target_discovery_snapshot_t> discover_targets() {
-      std::vector<DISPLAYCONFIG_PATH_INFO> paths;
-      std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+    bool query_discovery_paths(
+      std::vector<DISPLAYCONFIG_PATH_INFO> &paths,
+      std::vector<DISPLAYCONFIG_MODE_INFO> &modes
+    ) {
 #ifdef SUNSHINE_TESTS
-      if (!(active_discovery_test ? active_discovery_test->hooks.query_active(paths, modes) : VDISPLAY::queryActiveDisplayConfig(paths, modes))) {
-#else
-      if (!VDISPLAY::queryActiveDisplayConfig(paths, modes)) {
+      if (active_discovery_test) {
+        return active_discovery_test->hooks.query_active(paths, modes);
+      }
 #endif
+      return VDISPLAY::queryActiveDisplayConfig(paths, modes);
+    }
+
+    std::optional<DISPLAYCONFIG_TARGET_DEVICE_NAME> discovery_target_name(const DISPLAYCONFIG_PATH_INFO &path) {
+      DISPLAYCONFIG_TARGET_DEVICE_NAME target {};
+      target.header = {DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, sizeof(target), path.targetInfo.adapterId, path.targetInfo.id};
+#ifdef SUNSHINE_TESTS
+      const auto status = discovery_info_api_for_test().get(&target.header);
+#else
+      const auto status = DisplayConfigGetDeviceInfo(&target.header);
+#endif
+      if (status != ERROR_SUCCESS) {
         return std::nullopt;
       }
+      return target;
+    }
 
+    std::optional<RECT> discovery_source_rect(
+      const DISPLAYCONFIG_PATH_INFO &path,
+      const std::vector<DISPLAYCONFIG_MODE_INFO> &modes
+    ) {
+      const auto index = path.sourceInfo.modeInfoIdx;
+      if (index >= modes.size()) {
+        return std::nullopt;
+      }
+      const auto &mode = modes[index];
+      if (mode.infoType != DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE || mode.id != path.sourceInfo.id || !same_luid(mode.adapterId, path.sourceInfo.adapterId)) {
+        return std::nullopt;
+      }
+      const auto &source = mode.sourceMode;
+      const auto right = static_cast<std::int64_t>(source.position.x) + source.width;
+      const auto bottom = static_cast<std::int64_t>(source.position.y) + source.height;
+      if (!source.width || !source.height || !std::in_range<LONG>(source.width) || !std::in_range<LONG>(source.height) || !std::in_range<LONG>(right) || !std::in_range<LONG>(bottom)) {
+        return std::nullopt;
+      }
+      return RECT {source.position.x, source.position.y, static_cast<LONG>(right), static_cast<LONG>(bottom)};
+    }
+
+    std::optional<target_discovery_snapshot_t> discover_targets(
+      std::vector<DISPLAYCONFIG_PATH_INFO> paths,
+      const std::vector<DISPLAYCONFIG_MODE_INFO> &modes
+    ) {
 #ifdef SUNSHINE_TESTS
       const auto virtual_sources = active_discovery_test ? active_discovery_test->hooks.match_display(virtual_display_driver_name) : VDISPLAY::matchDisplay(virtual_display_driver_name);
 #else
@@ -1389,18 +1458,11 @@ namespace ar_glasses {
           continue;
         }
 
-        DISPLAYCONFIG_TARGET_DEVICE_NAME target_name {};
-        target_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
-        target_name.header.size = sizeof(target_name);
-        target_name.header.adapterId = path.targetInfo.adapterId;
-        target_name.header.id = path.targetInfo.id;
-#ifdef SUNSHINE_TESTS
-        if ((active_discovery_test ? discovery_get_info_for_test(&target_name.header) : DisplayConfigGetDeviceInfo(&target_name.header)) != ERROR_SUCCESS) {
-#else
-        if (DisplayConfigGetDeviceInfo(&target_name.header) != ERROR_SUCCESS) {
-#endif
+        const auto target = discovery_target_name(path);
+        if (!target) {
           return std::nullopt;
         }
+        const auto &target_name = *target;
         if (contains_case_insensitive(target_name.monitorDevicePath, L"SUDOVDA")) {
           continue;
         }
@@ -1410,15 +1472,12 @@ namespace ar_glasses {
           continue;
         }
 
-        if (path.sourceInfo.modeInfoIdx == DISPLAYCONFIG_PATH_MODE_IDX_INVALID || path.sourceInfo.modeInfoIdx >= modes.size()) {
-          return std::nullopt;
-        }
-        const auto &mode_info = modes[path.sourceInfo.modeInfoIdx];
-        if (mode_info.infoType != DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE) {
+        const auto rect = discovery_source_rect(path, modes);
+        if (!rect) {
           return std::nullopt;
         }
 
-        const auto &source_mode = mode_info.sourceMode;
+        const auto &source_mode = modes[path.sourceInfo.modeInfoIdx].sourceMode;
         const auto &refresh = path.targetInfo.refreshRate;
         int refresh_millihz = 60000;
         if (refresh.Numerator && refresh.Denominator) {
@@ -1439,10 +1498,7 @@ namespace ar_glasses {
         state.source_id = path.sourceInfo.id;
         state.adapter_id = path.targetInfo.adapterId;
         state.target_id = path.targetInfo.id;
-        state.rect.left = source_mode.position.x;
-        state.rect.top = source_mode.position.y;
-        state.rect.right = source_mode.position.x + (LONG) source_mode.width;
-        state.rect.bottom = source_mode.position.y + (LONG) source_mode.height;
+        state.rect = *rect;
         state.refresh_millihz = refresh_millihz;
         state.mode = classify_mode(source_mode.width, source_mode.height);
         state.game_source = ar_uses_game_source();
@@ -1494,6 +1550,62 @@ namespace ar_glasses {
         .primary_gdi_name = std::move(primary_gdi_name),
         .primary_device_path = std::move(primary_device_path),
       };
+    }
+
+    std::optional<target_discovery_snapshot_t> discover_targets() {
+      std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+      std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+      if (!query_discovery_paths(paths, modes)) {
+        return std::nullopt;
+      }
+      return discover_targets(std::move(paths), modes);
+    }
+
+    // The desktop safety check only needs the current screen rectangle of the already selected
+    // physical instance. Full target discovery still owns startup and topology decisions.
+    std::optional<RECT> monitor_watchdog_rect(std::wstring_view device_path) {
+      std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+      std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+      if (device_path.empty() || !query_discovery_paths(paths, modes)) {
+        return std::nullopt;
+      }
+
+      std::optional<RECT> rect;
+      for (const auto &path : paths) {
+        if (!(path.flags & DISPLAYCONFIG_PATH_ACTIVE)) {
+          continue;
+        }
+        const auto target = discovery_target_name(path);
+        if (!target) {
+          // A virtual source may lack target metadata. Apply the existing source exclusion
+          // and completeness rules to this same snapshot when a target name is unresolved.
+          const auto snapshot = discover_targets(std::move(paths), modes);
+          if (!snapshot) {
+            return std::nullopt;
+          }
+          rect.reset();
+          for (const auto &row : snapshot->targets) {
+            if (row.device_path == device_path) {
+              if (rect) {
+                return std::nullopt;
+              }
+              rect = row.rect;
+            }
+          }
+          return rect;
+        }
+        if (device_path != target->monitorDevicePath) {
+          continue;
+        }
+        if (rect) {
+          return std::nullopt;
+        }
+        rect = discovery_source_rect(path, modes);
+        if (!rect) {
+          return std::nullopt;
+        }
+      }
+      return rect;
     }
 
     // One call-local snapshot supplies identity, geometry, primary evidence and every clone path.
@@ -3495,6 +3607,7 @@ namespace ar_glasses {
 
       bool suspend_for_resume() {
         presenter_.request_stop();
+        cancel_monitor_source_switch();
         if (presenter_.joinable() && presenter_quiesced_) {
           // The renderer acknowledges that capture and input are stopped before its potentially
           // slow graphics/scheduling destructors. Keep those resources owned until the join below.
@@ -3673,12 +3786,87 @@ namespace ar_glasses {
                now - *virtual_display_absence_started_ >= virtual_display_absence_grace;
       }
 
+      bool has_monitor_source_switch() const {
+        return monitor_source_switch_ && monitor_source_switch_->request.load();
+      }
+
+      monitor_source_switch_progress_e advance_monitor_source_switch(
+        const target_state_t &expected,
+        std::uint64_t display_epoch,
+        std::stop_token controller_stop_token
+      ) {
+        using enum monitor_source_switch_progress_e;
+        if (!monitor_source_switch_ || !desktop_handoff_ || !live_gpu_lease_) {
+          return failed;
+        }
+        const bool game = expected.mode == presentation_mode_e::monitor_game;
+        const int mode = game ? ::video::SBS_GAME_SBS : ::video::SBS_AI;
+        const auto current = [&]() {
+          return !controller_stop_token.stop_requested() && session_requested_() && running() && has_presented() &&
+                 game == monitor_uses_game_source() &&
+                 platf::display_change_epoch() == display_epoch && !remote_virtual_display_blocks_local();
+        };
+        const auto verify = [&]() {
+          const auto sink = find_target(target_device_path_);
+          if (!sink || sink->mode != expected.mode || !same_monitor_scanout_generation(expected, *sink)) {
+            return false;
+          }
+          const auto binding = virtual_display_binding();
+          const auto source = binding.identity ? resolve_virtual_display(*binding.identity, binding.device_path, binding.display_name, nullptr, source_width_, source_height_) : std::nullopt;
+          if (!source || source->device_path != binding.device_path || source->gdi_name != binding.display_name || !same_virtual_display_identity(source->identity, *binding.identity) || !source_refresh_matches(source->refresh_millihz, sink->refresh_millihz)) {
+            return false;
+          }
+          const auto hdr = VDISPLAY::queryDisplayHDR(source->identity.AdapterLuid, source->identity.TargetId);
+          if (!hdr || *hdr != virtual_hdr_active_ || sink->hdr.active != virtual_hdr_active_ || !platf::primary_display::verify_local_monitor_replacement(source->device_path, sink->device_path)) {
+            return false;
+          }
+          if (const auto reason = query_monitor_desktop_block_reason(L"Default", sink->rect); !reason.empty()) {
+            request_monitor_session(false);
+            std::lock_guard lock(physical_monitor_error_mutex);
+            physical_monitor_error = reason;
+            return false;
+          }
+          return true;
+        };
+        const auto request = monitor_source_switch_->request.load();
+        if (!request) {
+          if (!verify_monitor_source_request(current, verify)) {
+            return failed;
+          }
+          // Preparation and scanout happen on their existing owners. The topology controller
+          // keeps watching the desktop and remote admission while the old pair is displayed.
+          const auto expires = std::chrono::steady_clock::now() + monitor_source_switch_timeout;
+          monitor_source_switch_->request.store(std::make_shared<monitor_source_switch_t::request_t>(mode, display_epoch, expires));
+          return waiting;
+        }
+        if (request->sbs_mode != mode || request->display_epoch != display_epoch) {
+          return failed;
+        }
+        switch (request->state.load()) {
+          case monitor_source_switch_t::state_e::requested:
+          case monitor_source_switch_t::state_e::adopted:
+            return current() && std::chrono::steady_clock::now() < request->expires ? waiting : failed;
+          case monitor_source_switch_t::state_e::presented:
+            if (monitor_source_switch_->presented_mode.load() != mode || !verify_monitor_source_request(current, verify)) {
+              return failed;
+            }
+            monitor_source_switch_->request.store({});
+            return presented;
+          case monitor_source_switch_t::state_e::failed:
+          case monitor_source_switch_t::state_e::cancelled:
+            return failed;
+        }
+        return failed;
+      }
+
       std::optional<target_state_t> reconfigure_target(
         const target_state_t &target,
         std::stop_token controller_stop_token
       ) {
-        const auto cancelled = [this, controller_stop_token]() {
-          return controller_stop_token.stop_requested() || !session_requested_();
+        const bool requested_game = target.mode == presentation_mode_e::monitor_game;
+        const auto cancelled = [this, controller_stop_token, requested_game]() {
+          return controller_stop_token.stop_requested() || !session_requested_() ||
+                 (monitor_surface_ && requested_game != monitor_uses_game_source());
         };
         stop_presenter();
         if (cancelled() || target.device_path != target_device_path_ || !same_luid(target.adapter_id, target_adapter_id_) || target.mode == presentation_mode_e::unsupported) {
@@ -3824,7 +4012,7 @@ namespace ar_glasses {
         if (cancelled()) {
           return std::nullopt;
         }
-        if (!activate_monitor_desktop()) {
+        if (!activate_monitor_desktop() || cancelled()) {
           return std::nullopt;
         }
         start_presenter(*presentation_target);
@@ -4283,11 +4471,29 @@ namespace ar_glasses {
         }
       }
 
+      void cancel_monitor_source_switch() {
+        if (!monitor_source_switch_) {
+          return;
+        }
+        const auto request = monitor_source_switch_->request.exchange({});
+        if (request) {
+          using enum monitor_source_switch_t::state_e;
+          auto state = request->state.load();
+          while (state == requested || state == adopted) {
+            if (request->state.compare_exchange_weak(state, cancelled)) {
+              break;
+            }
+          }
+        }
+      }
+
       void stop_presenter() {
         presenter_.request_stop();
+        cancel_monitor_source_switch();
         if (presenter_.joinable()) {
           presenter_.join();
         }
+        monitor_source_switch_.reset();
         running_.store(false);
         if (monitor_surface_) {
           physical_monitor_active.store(false);
@@ -4335,7 +4541,7 @@ namespace ar_glasses {
         return virtual_display_.binding();
       }
 
-      void start_presenter(const target_state_t &presentation_target) {
+      bool start_presenter(const target_state_t &presentation_target) {
         stop_presenter();
         if (!live_target_) {
           live_target_ = std::make_shared<platf::dxgi::local_presenter_config_t::target_t>();
@@ -4347,7 +4553,7 @@ namespace ar_glasses {
           BOOST_LOG(error) << "Local AR presenter refused to open without stable source/sink identities."sv;
           failed_.store(true);
           running_.store(false);
-          return;
+          return false;
         }
         {
           std::lock_guard lock(live_target_->mutex);
@@ -4400,6 +4606,13 @@ namespace ar_glasses {
                                       ::video::SBS_OFF;
         if (monitor_surface_) {
           presenter_config.sbs_mode = presentation_target.mode == presentation_mode_e::monitor_game ? ::video::SBS_GAME_SBS : ::video::SBS_AI;
+          monitor_source_switch_ = std::make_shared<monitor_source_switch_t>();
+          monitor_source_switch_->presented_mode.store(presenter_config.sbs_mode);
+          monitor_source_switch_->mode_is_requested = [](int mode) {
+            return monitor_requested() &&
+                   mode == (monitor_uses_game_source() ? ::video::SBS_GAME_SBS : ::video::SBS_AI);
+          };
+          presenter_config.source_switch = monitor_source_switch_;
         }
         presenter_config.sbs_config = config::video.sbs;
         presenter_config.sbs_config.reshade = !monitor_surface_ && presentation_target.game_source;
@@ -4443,6 +4656,9 @@ namespace ar_glasses {
               } else {
                 BOOST_LOG(error) << "Local AR virtual desktop could not be resolved; pausing for a controller retry."sv;
                 break;
+              }
+              if (presenter_config.source_switch) {
+                presenter_config.sbs_mode = presenter_config.source_switch->presented_mode.load();
               }
             }
             // Stability is per continuous presenter attempt. Do not let several short failed
@@ -4495,6 +4711,7 @@ namespace ar_glasses {
             }
           }
         });
+        return true;
       }
 
       VDISPLAY::session_t virtual_display_;
@@ -4522,6 +4739,7 @@ namespace ar_glasses {
       };
       std::shared_ptr<std::atomic<std::uint64_t>> presented_frames_;
       std::shared_ptr<platf::dxgi::local_presenter_cursor_clip_t> cursor_clip_;
+      std::shared_ptr<monitor_source_switch_t> monitor_source_switch_;
       std::shared_ptr<safe::event_t<bool>> presenter_quiesced_;
       std::jthread presenter_;
       std::atomic<bool> running_ {false};
@@ -4563,8 +4781,8 @@ namespace ar_glasses {
             while (!stop_token.stop_requested()) {
               if (monitor_requested() && std::chrono::steady_clock::now() >= next_desktop_check) {
                 next_desktop_check = std::chrono::steady_clock::now() + 100ms;
-                const auto selected = find_target(platf::from_utf8(config::video.local_monitor.display_id));
-                if (const auto reason = query_monitor_desktop_block_reason(presentation_desktop, selected ? std::make_optional(selected->rect) : std::nullopt); !reason.empty()) {
+                const auto rect = monitor_watchdog_rect(platf::from_utf8(config::video.local_monitor.display_id));
+                if (const auto reason = query_monitor_desktop_block_reason(presentation_desktop, rect); !reason.empty()) {
                   // A private primary source must not hide a sign-in/UAC screen on the secure
                   // desktop, or a lock-screen overlay which Windows can place on Default.
                   request_monitor_session(false);
@@ -5016,6 +5234,15 @@ namespace ar_glasses {
       void run(std::stop_token stop_token) {
         std::optional<target_state_t> pending;
         auto pending_since = std::chrono::steady_clock::now();
+        const auto accept_reconfigured_target = [&](const target_state_t &target, std::chrono::steady_clock::time_point now) {
+          pending = target;
+          applied_ = pending;
+          pending_since = now;
+          session_stability_confirmed_ = false;
+          transition_presenter_paused_ = false;
+          incompatible_transition_started_.reset();
+          arm_presenter_retry();
+        };
 
         while (!stop_token.stop_requested()) {
           suspend_for_remote_if_needed();
@@ -5026,6 +5253,7 @@ namespace ar_glasses {
           const std::wstring_view preferred_device_path = wear_device_path_;
           bool topology_query_succeeded = false;
           std::vector<target_state_t> approved_targets;
+          const auto display_epoch = platf::display_change_epoch();
           auto observed = find_target({}, preferred_device_path, &topology_query_succeeded, &approved_targets);
           if (topology_query_succeeded) {
             if (!wear_device_path_.empty()) {
@@ -5073,6 +5301,10 @@ namespace ar_glasses {
             if (incompatible_transition_started_) {
               incompatible_transition_started_ = indeterminate_at;
             }
+            if (session_ && session_->has_monitor_source_switch()) {
+              session_->pause_presenter(std::nullopt);
+              transition_presenter_paused_ = true;
+            }
             if (suspend_inactive_session(applied_, false)) {
               pending.reset();
               pending_since = std::chrono::steady_clock::now();
@@ -5093,13 +5325,19 @@ namespace ar_glasses {
           if (wear_device_path_.empty() && observed) {
             monitor_target(observed);
           }
-          if (observed != pending) {
+          const bool source_only = session_ && !resume_state_.retained() && !transition_presenter_paused_ &&
+                                   session_->running() && session_->has_presented() && applied_ && observed &&
+                                   monitor_source_only_change(*applied_, *observed) &&
+                                   display_epoch == platf::display_change_epoch();
+          const bool source_switch_revoked = !source_only && session_ && session_->has_monitor_source_switch();
+          if (observed != pending || source_switch_revoked) {
             pending = observed;
             pending_since = now;
             // Stop using old-size textures immediately, but keep SudoVDA attached during the
             // debounce interval. A physical 2D/SBS switch is allowed to pass through transient
             // modes; removing the source here would make Windows migrate all of its windows.
-            if (!resume_state_.retained() && observed != applied_ && !same_presentation_contract(observed, applied_)) {
+            // A reversal can also return to the applied mode with a replacement still in flight.
+            if (source_switch_revoked || (!source_only && !resume_state_.retained() && observed != applied_ && !same_presentation_contract(observed, applied_))) {
               if (session_) {
                 session_->pause_presenter(observed);
                 transition_presenter_paused_ = true;
@@ -5134,6 +5372,29 @@ namespace ar_glasses {
           if (session_ && !wear_allows_session()) {
             // Extended-mode recovery may still need a durable sink-mode rebase. Never restart
             // presentation or mutate to another mode while that off-head teardown is pending.
+            std::this_thread::sleep_for(topology_poll_interval);
+            continue;
+          }
+
+          if (source_only && now >= retry_after_) {
+            switch (session_->advance_monitor_source_switch(*observed, display_epoch, stop_token)) {
+              case monitor_source_switch_progress_e::waiting:
+                break;
+              case monitor_source_switch_progress_e::presented:
+                applied_ = pending = observed;
+                pending_since = now;
+                incompatible_transition_started_.reset();
+                BOOST_LOG(info) << "Local monitor presentation switched to "sv << mode_name(observed->mode)
+                                << " at a complete stereo pair."sv;
+                break;
+              case monitor_source_switch_progress_e::failed:
+                // A stalled conversion or lost proof invalidates this handoff. Re-observe before
+                // running the ordinary repair path on the retained desktop.
+                session_->pause_presenter(std::nullopt);
+                transition_presenter_paused_ = true;
+                pending_since = std::chrono::steady_clock::now();
+                break;
+            }
             std::this_thread::sleep_for(topology_poll_interval);
             continue;
           }
@@ -5195,13 +5456,7 @@ namespace ar_glasses {
                   pending_since = now;
                 }
               } else {
-                pending = reconfigured;
-                applied_ = reconfigured;
-                pending_since = now;
-                session_stability_confirmed_ = false;
-                transition_presenter_paused_ = false;
-                incompatible_transition_started_.reset();
-                arm_presenter_retry();
+                accept_reconfigured_target(*reconfigured, now);
               }
             } else if (!session_ || !incompatible_transition_started_ || now - *incompatible_transition_started_ >= incompatible_transition_grace) {
               if (session_ && pending && applied_ && same_physical_output(applied_, pending)) {
@@ -5235,13 +5490,7 @@ namespace ar_glasses {
                 pending_since = now;
               }
             } else {
-              pending = reconfigured;
-              applied_ = reconfigured;
-              pending_since = now;
-              session_stability_confirmed_ = false;
-              transition_presenter_paused_ = false;
-              incompatible_transition_started_.reset();
-              arm_presenter_retry();
+              accept_reconfigured_target(*reconfigured, now);
             }
           } else if (pending == applied_ && session_ && !session_stability_confirmed_ && session_->stable()) {
             // Construction only proves that a presenter thread was spawned. Reset exponential
@@ -5433,6 +5682,14 @@ namespace ar_glasses {
         return costs_;
       }
 
+      std::optional<RECT> watchdog_rect(std::wstring_view device_path) {
+        std::optional<RECT> result;
+        scoped_call([&]() {
+          result = monitor_watchdog_rect(device_path);
+        });
+        return result;
+      }
+
     private:
       template<class Call>
       void scoped_call(Call &&call) {
@@ -5500,6 +5757,10 @@ namespace ar_glasses {
 
     discovery_result_t discovery_session_t::find(std::wstring_view required, std::wstring_view preferred, bool collect_approved) {
       return impl_->find(required, preferred, collect_approved);
+    }
+
+    std::optional<RECT> discovery_session_t::watchdog_rect(std::wstring_view device_path) {
+      return impl_->watchdog_rect(device_path);
     }
 
     discovery_costs_t discovery_session_t::costs() const {
@@ -5754,6 +6015,13 @@ namespace ar_glasses {
       target.is_cloned = contract.is_cloned;
       target.rect = contract.rect;
       target.refresh_millihz = contract.refresh_millihz;
+      target.source_adapter_id = contract.source_adapter_id;
+      target.source_id = contract.source_id;
+      target.target_id = contract.target_id;
+      target.gdi_name = contract.gdi_name;
+      target.desktop_topology = contract.desktop_topology;
+      target.hdr.user_enabled = contract.hdr_user_enabled;
+      target.hdr.bits_per_color = contract.hdr_bits_per_color;
       return target;
     }
   }  // namespace
@@ -5764,6 +6032,20 @@ namespace ar_glasses {
     bool exclusive
   ) {
     return can_reconfigure_local_session(make_test_target(before), make_test_target(after), exclusive);
+  }
+
+  bool detail::local_monitor_source_only_change_for_test(
+    const local_session_contract_t &before,
+    const local_session_contract_t &after
+  ) {
+    return monitor_source_only_change(make_test_target(before), make_test_target(after));
+  }
+
+  bool detail::verify_monitor_source_request_for_test(
+    const std::function<bool()> &current,
+    const std::function<bool()> &verify
+  ) {
+    return verify_monitor_source_request(current, verify);
   }
 
   bool detail::local_presenter_target_contract_matches_for_test(
@@ -6171,8 +6453,8 @@ namespace ar_glasses {
       return false;
     }
     const bool monitor = surface == config::video_t::local_surface_e::shutter_monitor;
-    // The controller sees the change at its next look at the displays and rebuilds the
-    // presenter on the desktop it already has; a running session does not return to 2D.
+    // The controller handles the request on its next look at the displays. A verified monitor
+    // keeps scanout and switches the source at a complete stereo pair.
     (monitor ? monitor_source_game : ar_source_game).store(game ? 1 : 0);
     // Remember it for the next start. The surface keeps its own saved setting.
     std::lock_guard lock(device_mutex);

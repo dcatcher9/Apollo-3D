@@ -5,6 +5,7 @@ import hashlib
 import html
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1511,10 +1512,14 @@ class EvalContractTests(unittest.TestCase):
 
         with open(os.path.join(repo, "src", "main.cpp"), encoding="utf-8") as fh:
             main = fh.read()
-        self.assertIn("prepare_tensorrt_model", main)
-        self.assertIn("std::jthread model_prepare_thread", main)
+        preparation = "models::live_model_preparation_t model_prepare_thread("
         self.assertLess(main.index("if (!config::sunshine.cmd.name.empty())"),
-                        main.index("std::jthread model_prepare_thread"))
+                        main.index(preparation))
+        self.assertRegex(
+            main,
+            re.escape(preparation) +
+            r"\s*video::host_sbs_v2_depth_model\(\),\s*config::video.adapter_name\s*\);",
+        )
 
     def test_relative_cli_paths_are_resolved_before_subprocess_cwd(self):
         args = argparse.Namespace(build_dir="cmake-build-relwithdebinfo", conf="bench.conf",
@@ -1667,22 +1672,23 @@ class EvalContractTests(unittest.TestCase):
         self.assertNotIn("cbuffer_first_frame", estimator)
         self.assertNotIn("depth_history_valid", estimator)
         self.assertNotIn("depth_valid_history_cs", estimator)
-        self.assertIn("host_sbs_v2_gpu::record_map_history(", estimator)
+        self.assertIn("host_sbs_v2_gpu::record_base_geometry(", estimator)
         self.assertIn(".previous_model_input_output = tensor_previous_input_uav.Get()", estimator)
         self.assertIn("tensor_previous_input_uav", estimator)
         self.assertNotIn("context->CSSetShader(depth_minmax_cs.Get()", estimator)
-        self.assertIn("dispatch_parallax_v2_frame_stats(perf_slot)", estimator)
+        self.assertIn("dispatch_parallax_v2_frame_publication(perf_slot)", estimator)
+        self.assertNotIn("depth_minmax_ema_cs", estimator)
         self.assertIn("static_cast<std::size_t>(reduce_groups) * 3u", estimator)
         self.assertIn("parallax_frame_stats_end -", estimator)
 
         with open(os.path.join(repo, "src", "host_sbs_v2_gpu_executor.cpp"),
                   encoding="utf-8") as fh:
             executor = fh.read()
-        self.assertIn("bool record_map_history(", executor)
-        self.assertIn("ID3D11ShaderResourceView *inputs[7]", executor)
-        self.assertIn("ID3D11UnorderedAccessView *outputs[5]", executor)
-        self.assertIn("CSSetShaderResources(0u, 7u, inputs)", executor)
-        self.assertIn("CSSetUnorderedAccessViews(0u, 5u, outputs, nullptr)", executor)
+        self.assertIn("bool record_base_geometry(", executor)
+        self.assertIn("ID3D11ShaderResourceView *map_inputs[6]", executor)
+        self.assertIn("ID3D11UnorderedAccessView *map_outputs[3]", executor)
+        self.assertIn("CSSetShaderResources(0u, 6u, map_inputs)", executor)
+        self.assertIn("CSSetUnorderedAccessViews(0u, 3u, map_outputs, nullptr)", executor)
 
         shader_dir = os.path.join(repo, "src_assets", "windows", "assets", "shaders",
                                   "directx")
@@ -1711,7 +1717,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("MinMaxRaw.Store(4, normalization_maximum_bits)", frame_resolve)
         self.assertIn("MinMaxRaw.Store(8, normalization_valid_count)", frame_resolve)
         self.assertIn("MinMaxRaw.Store(12, eligible_count)", frame_resolve)
-        with open(os.path.join(shader_dir, "depth_minmax_ema_cs.hlsl"),
+        with open(os.path.join(shader_dir, "include", "depth_minmax_ema_common.hlsl"),
                   encoding="utf-8") as fh:
             bounds = fh.read()
         self.assertIn("eligible_count > 0u && valid_count == eligible_count", bounds)
@@ -1723,7 +1729,7 @@ class EvalContractTests(unittest.TestCase):
                   encoding="utf-8") as fh:
             mapper = fh.read()
         self.assertIn("OutputTexture[DTid.xy] = PreviousDepth[sample_position]", mapper)
-        self.assertIn("DepthAnalysisClampCell(DTid.xy)", mapper)
+        self.assertIn("TensorAnalysisClampCell(DTid.xy, use_domain, domain_rectangle)", mapper)
         self.assertIn("scale.w < 0.5f", mapper)
         self.assertIn("scale.w > 1.5f ? 1.0f : ema_alpha", mapper)
         self.assertFalse(os.path.exists(os.path.join(shader_dir, "depth_ema_motion_cs.hlsl")))
@@ -1764,7 +1770,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn('"mapping_ps"', harness)
         self.assertIn('"warp_map_%s.f32"', harness)
         self.assertIn('fs::path(o.out) / "warp_map_shape.json"', harness)
-        self.assertIn('shadow_final_parallax', harness)
+        self.assertIn('result.final_parallax(), "final.f32"', harness)
         self.assertIn('raw_reproject_source_u_normalized', harness)
         self.assertIn('live_sample_transform', harness)
         self.assertIn('\\"warp_mapping\\"', harness)
@@ -1925,10 +1931,12 @@ class EvalContractTests(unittest.TestCase):
         with open(os.path.join(repo, "src", "video_depth_estimator.cpp"),
                   encoding="utf-8") as fh:
             estimator = fh.read()
-        self.assertIn("std::swap(depth_tex, depth_previous_tex)", estimator)
-        self.assertIn("std::swap(depth_uav, depth_previous_uav)", estimator)
-        self.assertIn("std::swap(depth_srv, depth_previous_srv)", estimator)
-        self.assertIn("ema_motion_mask_srv", estimator)
+        self.assertIn("std::swap(normalized_depth, previous_normalized_depth);", estimator)
+        self.assertIn("previous_normalized_depth.srv.Get()", estimator)
+        self.assertIn("normalized_depth.uav.Get()", estimator)
+        self.assertRegex(estimator, r"if \(normalized_depth_diagnostics_enabled\) \{\s+"
+                                    r"dispatch_normalized_depth_diagnostics\(\);\s+\}")
+        self.assertIn("r.ema_motion_mask = ema_motion_mask.srv;", estimator)
         self.assertNotIn("depth_ema_motion_cs", estimator)
         self.assertIn("ID3D11UnorderedAccessView *bt_uavs[2]", estimator)
         with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"),
@@ -2028,8 +2036,8 @@ class EvalContractTests(unittest.TestCase):
             display = fh.read()
         with open(shader_path, encoding="utf-8") as fh:
             shader = fh.read()
-        self.assertIn("bool rgb_present_target_is_linear = false;", display)
-        self.assertIn("if (input_is_linear != rgb_present_target_is_linear)", display)
+        self.assertIn("struct rgb_output_t {", display)
+        self.assertIn("if (input_is_linear != rgb->linear)", display)
         self.assertIn("rgb_present_srgb_to_linear_ps.get()", display)
         self.assertIn("rgb_present_linear_to_srgb_ps.get()", display)
         self.assertNotIn("frame_is_hdr = d3d_image.format", display)
@@ -2239,13 +2247,12 @@ class EvalContractTests(unittest.TestCase):
         with open(os.path.join(repo, "src", "platform", "windows", "ar_glasses.cpp"),
                   encoding="utf-8") as fh:
             ownership = fh.read()
-        launch_tail = process[process.index("start_hdr_worker(launch_session->enable_hdr);"):
-                              process.index("fg.disable();")]
-        self.assertIn(
-            "remote_virtual_display_awaiting_client(\n"
-            "        *_remote_virtual_display_lease,\n"
-            "        config::stream.ping_timeout",
+        hdr_ready_check = process.index("!request_hdr_state(display_context->enable_hdr, 6s)")
+        launch_tail = process[hdr_ready_check:process.index("fg.disable();", hdr_ready_check)]
+        self.assertRegex(
             launch_tail,
+            r"ar_glasses::remote_virtual_display_awaiting_client\(\s*"
+            r"\*_remote_virtual_display_lease,\s*config::stream.ping_timeout\s*\);",
         )
         self.assertIn("std::chrono::steady_clock::now() + "
                       "detail::remote_pending_duration(connect_timeout)", ownership)

@@ -52,6 +52,14 @@ physical output are transferred automatically. Windows that the user moves onto 
 remain there. Native input goes directly to the application on the virtual source; the presenter
 does not activate itself or reinject keyboard or mouse events.
 
+Switching between **Host 3D** and **Game 3D** can reuse the private desktop, capture, and
+shutter presenter. Sunshine verifies the active display layout, refresh, and color against the
+committed setup before preparing a new converter. The presenter holds the last pair while the
+new converter prepares its first pair. At a left-eye boundary, it can take a GPU-complete pair
+from the new source and present both eyes on the running shutter clock. The controller accepts
+the switch after both eyes are confirmed. Changed display settings, lost verification, or an
+unsuccessful source switch use the ordinary reconfiguration path.
+
 Returning to 2D stops local capture, restores the selected physical monitor, and hands its windows
 and cursor back through the shared display lifecycle. A connecting or active remote session takes
 priority over local presentation. Use borderless fullscreen for games so their windows follow the
@@ -111,6 +119,15 @@ refresh intervals, and QPC intervals within 100 µs of the selected fixed refres
 Cold timeouts and counter-domain changes restart acquisition within a six-second budget; the
 per-present wait scales with the eye interval. Waiting for the first stereo packet has a separate
 five-second limit. No eye commands are sent during this startup phase.
+
+The converter and presenter exchange stereo pairs through two shared textures. The converter
+publishes a slot after submitting its GPU work and releasing the write key. The presenter can
+keep scanning out its current pair during that submission. At a left-eye boundary it may take
+the newest published pair whose GPU fence has completed and whose read key is available.
+When Host SBS repeats the exact packed image, the ring can keep that pair without another
+RGB copy or packet publication. Depth and capture servicing still run on the converter.
+When a new warp matches the shutter slot's full extent, format and transfer, Host SBS can
+draw directly into that slot.
 
 Only unsignalled clock acquisition may use `DwmFlush` to request feedback publication. Armed
 presentation polls exact metadata with cancellable 200 µs waits; it never falls back to this

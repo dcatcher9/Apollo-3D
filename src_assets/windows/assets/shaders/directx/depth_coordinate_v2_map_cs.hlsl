@@ -1,5 +1,5 @@
 // Map raw DAV2 into the desired signed one-eye source-U candidate. The production entrypoint also
-// commits the complete raw padded comparison tuple and its authenticated owner. Completion of
+// updates requested model-input history and publishes the authenticated depth owner. Completion of
 // the direct or indirect dispatch followed by UAV unbinding is the publication boundary; the tag
 // written by thread zero is not a same-dispatch synchronization point. coordinate_main is a
 // Dump-3D-only diagnostic entrypoint over the same authenticated source and has no history or owner
@@ -10,21 +10,23 @@ StructuredBuffer<float4> ShadowState : register(t1);
 Texture2D<uint> TensorExclusion : register(t2);
 StructuredBuffer<float4> MinMaxEma : register(t3);
 StructuredBuffer<float> CurrentModelInput : register(t4);
-StructuredBuffer<float> CurrentAppearanceOrdinal : register(t5);
-StructuredBuffer<float4> DepthHealthState : register(t6);
+StructuredBuffer<float4> DepthHealthState : register(t5);
 RWTexture2D<float> Output : register(u0);
 RWStructuredBuffer<float> PreviousModelInput : register(u1);
-RWStructuredBuffer<float> PreviousAppearanceOrdinal : register(u2);
-RWTexture2D<uint> PreviousTensorExclusion : register(u3);
-RWStructuredBuffer<uint> NearIdenticalHistoryOwnerOutput : register(u4);
+RWStructuredBuffer<uint> NearIdenticalHistoryOwnerOutput : register(u2);
 
 #include "include/depth_constants.hlsl"
+#include "include/depth_analysis_domain.hlsl"
+StructuredBuffer<TensorAnalysisDomain> TensorAnalysisDomainRead : register(t2);
+#include "include/depth_analysis_domain_consumer.hlsl"
 #include "include/depth_coordinate_v2.hlsl"
 #include "include/sbs_adaptive_state_contract.generated.hlsl"
 #include "include/depth_valid_history_contract.hlsl"
 #define HOST_SBS_NEAR_IDENTICAL_CONSTANTS_REGISTER b2
 #include "include/host_sbs_near_identical_constants.hlsl"
 #include "include/host_sbs_near_identical_history_owner.hlsl"
+
+static const uint NEAR_IDENTICAL_MAP_SKIP_INPUT_HISTORY = 1u << 3u;
 
 bool DepthHistoryAdvances() {
     return DepthValidHistoryAdvances(MinMaxEma[0].w);
@@ -99,39 +101,55 @@ bool CanonicalCoordinate(uint index, out float coordinate) {
     return true;
 }
 
-[numthreads(16, 16, 1)]
-void main(uint3 id : SV_DispatchThreadID) {
-    bool history_advances = DepthHistoryAdvances();
+void MapDepth(uint3 id, bool use_domain, bool compact_requested) {
+    uint4 domain_rectangle = 0u;
+    bool domain_valid = true;
+    if (use_domain) domain_valid = LoadTensorAnalysisDomain(domain_rectangle);
+    bool history_advances = DepthHistoryAdvances() && (!use_domain || domain_valid);
+    bool skip_input_history = near_identical_request_flags == NEAR_IDENTICAL_MAP_SKIP_INPUT_HISTORY;
 
-    // Preserve the raw padded inference domain before any coordinate-map clamp or early exit.
-    // Padded NCHW/depth cells are edge-replicated by their producers and exclusion remains 1.
-    // The tuple is target-sized, so every in-bounds texel advances all five values together.
-    if (id.x < target_w && id.y < target_h && history_advances) {
+    // Eligible comparison inputs retain the edge-replicated padding supplied by preprocessing.
+    // The map-specific request flag leaves the authenticated depth owner independent of the copy.
+    if (!skip_input_history &&
+        id.x < target_w && id.y < target_h && history_advances) {
         uint plane = target_w * target_h;
         uint raw_index = id.y * target_w + id.x;
         PreviousModelInput[raw_index] = CurrentModelInput[raw_index];
         PreviousModelInput[raw_index + plane] = CurrentModelInput[raw_index + plane];
         PreviousModelInput[raw_index + 2u * plane] = CurrentModelInput[raw_index + 2u * plane];
-        PreviousAppearanceOrdinal[raw_index] = CurrentAppearanceOrdinal[raw_index];
-        PreviousTensorExclusion[id.xy] = TensorExclusion[id.xy];
     }
 
     if (all(id == uint3(0u, 0u, 0u))) {
         PublishNearIdenticalHistoryOwner(history_advances);
     }
 
-    if (id.x >= target_w || id.y >= target_h) {
+    // The compact dispatch starts at zero as usual. Translate only after publishing the owner
+    // from the physical origin. Use b0 even when the structured domain fails authentication so
+    // every admitted destination still receives this dispatch's invalid-data zero.
+    bool compact = compact_requested && DepthAnalysisContentValid();
+    bool compact_dispatch = compact && skip_input_history;
+    uint map_width = compact_dispatch ? analysis_content_right - analysis_content_left : target_w;
+    if (id.x >= map_width || id.y >= target_h) {
+        return;
+    }
+    uint2 position = uint2(id.x + (compact_dispatch ? analysis_content_left : 0u), id.y);
+    if (compact && !compact_dispatch &&
+        (position.x < analysis_content_left || position.x >= analysis_content_right)) {
         return;
     }
     // Synthetic letterbox cells are a nearest-boundary extension of the real analysis domain.
     // Sanitizing before ownership and both limiters prevents arbitrary model padding output from
     // entering a valid row/column envelope.
-    uint2 sample_position = TensorExclusion[id.xy] != 0u ?
-        DepthAnalysisClampCell(id.xy) : id.xy;
+    if (use_domain && !domain_valid) {
+        Output[position] = 0.0f;
+        return;
+    }
+    uint2 sample_position = !TensorAnalysisCellAdmitted(position, use_domain, domain_valid, domain_rectangle) ?
+        TensorAnalysisClampCell(position, use_domain, domain_rectangle) : position;
     uint index = sample_position.y * target_w + sample_position.x;
     float coordinate;
     if (!CanonicalCoordinate(index, coordinate)) {
-        Output[id.xy] = 0.0f;
+        Output[position] = 0.0f;
         return;
     }
     float4 active = ShadowState[0];
@@ -141,17 +159,38 @@ void main(uint3 id : SV_DispatchThreadID) {
     if (!V2Finite(candidate)) {
         candidate = 0.0f;
     }
-    Output[id.xy] = candidate;
+    Output[position] = candidate;
 }
 
-[numthreads(16, 16, 1)]
-void coordinate_main(uint3 id : SV_DispatchThreadID) {
+void MapCoordinate(uint3 id, bool use_domain) {
+    uint4 domain_rectangle = 0u;
+    bool domain_valid = true;
+    if (use_domain) domain_valid = LoadTensorAnalysisDomain(domain_rectangle);
     if (id.x >= target_w || id.y >= target_h) {
         return;
     }
     float coordinate;
-    uint2 sample_position = TensorExclusion[id.xy] != 0u ?
-        DepthAnalysisClampCell(id.xy) : id.xy;
+    if (use_domain && !domain_valid) {
+        Output[id.xy] = 0.0f;
+        return;
+    }
+    uint2 sample_position = !TensorAnalysisCellAdmitted(id.xy, use_domain, domain_valid, domain_rectangle) ?
+        TensorAnalysisClampCell(id.xy, use_domain, domain_rectangle) : id.xy;
     CanonicalCoordinate(sample_position.y * target_w + sample_position.x, coordinate);
     Output[id.xy] = coordinate;
 }
+
+[numthreads(16, 16, 1)]
+void main(uint3 id : SV_DispatchThreadID) { MapDepth(id, false, false); }
+
+[numthreads(16, 16, 1)]
+void domain_main(uint3 id : SV_DispatchThreadID) { MapDepth(id, true, false); }
+
+[numthreads(16, 16, 1)]
+void compact_domain_main(uint3 id : SV_DispatchThreadID) { MapDepth(id, true, true); }
+
+[numthreads(16, 16, 1)]
+void coordinate_main(uint3 id : SV_DispatchThreadID) { MapCoordinate(id, false); }
+
+[numthreads(16, 16, 1)]
+void domain_coordinate_main(uint3 id : SV_DispatchThreadID) { MapCoordinate(id, true); }

@@ -36,6 +36,10 @@ namespace platf::detail {
       }
     }
 
+    [[nodiscard]] bool owns_native_request_at_most(std::uint32_t resolution) const noexcept {
+      return native_resolution_ && *native_resolution_ != 0u && *native_resolution_ <= resolution;
+    }
+
   private:
     std::optional<std::uint32_t> native_resolution_;
     bool multimedia_requested_ = false;
@@ -102,6 +106,13 @@ namespace platf::detail {
       }
       ++owners_;
       return lease_t {this};
+    }
+
+    /** Inspect acquired platform state without racing the first/last-owner transitions. */
+    template<class Predicate>
+    [[nodiscard]] bool active_satisfies(Predicate predicate) {
+      std::lock_guard lock(mutex_);
+      return owners_ != 0u && predicate(std::as_const(operations_));
     }
 
   private:

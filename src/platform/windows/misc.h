@@ -13,11 +13,30 @@
 #include <system_error>
 #include <utility>
 
+#ifdef SUNSHINE_TESTS
+  #include <memory>
+#endif
+
 // platform includes
 #include <Windows.h>
 #include <winnt.h>
 
 namespace platf {
+  /** Whether the existing active presentation CPU settings support a bounded completion
+   * notification wait on this thread. Read-only; unavailable keeps the yielded-query path.
+   */
+  [[nodiscard]] bool host_sbs_completion_wait_available() noexcept;
+
+#ifdef SUNSHINE_TESTS
+  class deinit_t;
+  namespace testing {
+    /** Own the real presentation timer/process settings without DWM or NVIDIA profile changes.
+     * Does not change the caller's thread priority. Keep alive until every test owner joins.
+     */
+    [[nodiscard]] std::unique_ptr<deinit_t> acquire_presentation_cpu_scheduling_for_test();
+  }
+#endif
+
   enum class explorer_restart_result_e {
     restarted_automatically,
     relaunched,

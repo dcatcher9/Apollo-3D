@@ -3,15 +3,23 @@
 #if defined(_WIN32) && defined(SUNSHINE_TESTS)
   #include "src/video.h"
   #include "src/video_depth_estimator.h"
+  #include "host_sbs_actual_converter_probe.h"
 
+  #include <atomic>
+  #include <chrono>
   #include <cstdint>
   #include <dxgi1_4.h>
   #include <filesystem>
   #include <future>
   #include <memory>
+  #include <span>
   #include <string>
   #include <string_view>
   #include <vector>
+
+namespace platf::dxgi {
+  class display_vram_t;
+}
 
 namespace platf::dxgi::testing {
   struct model_preparation_adapter_t {
@@ -20,6 +28,42 @@ namespace platf::dxgi::testing {
     std::uint32_t vendor_id = 0;
     std::uint32_t device_id = 0;
   };
+
+  struct native_pacing_delivery_t {
+    std::chrono::steady_clock::time_point started, finished;
+    std::optional<std::chrono::steady_clock::time_point> source_timestamp;
+    int result = -1;
+  };
+
+  struct native_pacing_poll_t {
+    std::uint64_t conversion = 0;
+    bool prior = false, eligible = false;
+    std::chrono::steady_clock::time_point deadline;
+    bool ready = false, timed_out = false;
+    std::uint32_t query_count = 0;
+    std::chrono::steady_clock::duration wait_duration;
+    bool notification_armed = false;
+    bool notification_waited = false;
+    bool notification_callback_pending = false;
+  };
+
+  struct native_pacing_probe_t {
+    const std::atomic<std::int64_t> *held_source_stamp_ticks = nullptr;
+    unsigned hold_ms = 120;
+    actual_converter_probe_v1::observer_t converter_observer;
+    void (*record_delivery)(void *, const native_pacing_delivery_t &) noexcept = nullptr;
+    void (*record_poll)(void *, const native_pacing_poll_t &) noexcept = nullptr;
+  };
+
+  // No desktop duplication or output window. The native encoder sees the same shared
+  // capture image and keyed mutex it receives from a normal display.
+  std::shared_ptr<display_vram_t> make_native_pacing_display(
+    const model_preparation_adapter_t &adapter, unsigned width, unsigned height,
+    const native_pacing_probe_t &probe = {}
+  );
+  std::shared_ptr<platf::img_t> upload_native_pacing_image(
+    display_vram_t &display, std::span<const std::uint32_t> bgra
+  );
 
   struct model_preparation_memory_t {
     model_preparation_adapter_t adapter;
@@ -41,6 +85,8 @@ namespace platf::dxgi::testing {
     std::filesystem::path output_root;
     // Opt-in original consumer path for registry readiness; default preserves the B41 fixture.
     bool production_observer_path = false;
+    // TEST-only ineligible synthetic context with real committed DDup damage history.
+    bool hard_disabled_dirty_source = false;
     std::shared_future<std::vector<std::wstring>> registry_executables;
   };
 
@@ -53,6 +99,9 @@ namespace platf::dxgi::testing {
   };
 
   struct model_preparation_converter_snapshot_t {
+    std::optional<models::host_sbs_gpu_completion_receipt::receipt_t> receipt;
+    bool last_admission_gpu_undecided = false;
+    std::uint32_t last_admission_optional_work = 0u;
     std::uint64_t conversions = 0;
     std::uint64_t source_uploads = 0;
     std::int64_t source_stamp_ticks = 0;
@@ -66,6 +115,9 @@ namespace platf::dxgi::testing {
     bool estimator_present = false;
     bool estimator_valid = false;
     bool estimator_terminal = false;
+    bool current_outline_warp_ready = false;
+    bool text_game_warp_ready = false;
+    bool queued_research_active = false;
     bool v2_live_warp_seen = false;
     bool latest_lineage_authenticated = false;
     bool latest_lineage_known_depth = false;
@@ -99,6 +151,7 @@ namespace platf::dxgi::testing {
     bool last_draw_flat = false;
     bool last_draw_repeat = false;
     bool last_draw_publication_current = false;
+    bool last_draw_ema_motion_mask_present = false;
     std::uint64_t last_draw_model_frame = 0;
     std::uint64_t last_draw_observation_us = 0;
     std::uint32_t last_draw_expected_work = 0;
@@ -133,6 +186,8 @@ namespace platf::dxgi::testing {
     bool needs_conversion_poll() const;
     bool pipeline_ready() const;
     model_preparation_artifact_t snapshot_output(std::string_view label);
+    void upload_dirty_source(std::span<const std::uint8_t> bgra, const RECT &damage);
+    bool drawn_source_matches_upload() const;
     model_preparation_artifact_t source_artifact() const;
     model_preparation_memory_t memory() const;
 

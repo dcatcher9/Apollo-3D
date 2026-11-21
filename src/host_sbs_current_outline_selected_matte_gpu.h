@@ -40,6 +40,7 @@ namespace models::research_current_outline_selected_matte_v2 {
   struct inputs_t {
     ID3D11Buffer *current_cb96 = nullptr, *actual_root_args = nullptr;
     UINT observation_one_offset = 240u;
+    // Algorithm2 may omit legacy fallback; algorithm1 still requires this operand.
     ID3D11ShaderResourceView *legacy_matte = nullptr, *baseline_matte = nullptr, *temporal_matte = nullptr;
     ID3D11ShaderResourceView *numeric_proof = nullptr, *temporal_receipt = nullptr, *sct = nullptr, *root = nullptr, *frame256 = nullptr;
     postprocess_mode_e mode = postprocess_mode_e::direct_force;
@@ -225,7 +226,8 @@ namespace models::research_current_outline_selected_matte_v2 {
 
     bool queue(ID3D11DeviceContext *c, const program_t &program, const inputs_t &i, std::string &error) {
       error.clear();
-      if (!c || c->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE || !select_program_lease_.acquire(device_.Get(), {program.select}) || (i.current_outline_requested && !prepare_program_lease_.acquire(device_.Get(), {program.prepare})) || !child(i.current_cb96) || !child(i.actual_root_args) || !child(i.legacy_matte) || !child(i.sct) || (!i.current_outline_requested && !child(i.root)) || !matte_) {
+      const bool legacy_valid = i.legacy_matte ? child(i.legacy_matte) : i.current_outline_requested;
+      if (!c || c->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE || !select_program_lease_.acquire(device_.Get(), {program.select}) || (i.current_outline_requested && !prepare_program_lease_.acquire(device_.Get(), {program.prepare})) || !child(i.current_cb96) || !child(i.actual_root_args) || !legacy_valid || !child(i.sct) || (!i.current_outline_requested && !child(i.root)) || !matte_) {
         error = "Selected matte required operands/context";
         return false;
       }
@@ -275,12 +277,14 @@ namespace models::research_current_outline_selected_matte_v2 {
           ComPtr<ID3D11Resource> r; view->GetResource(&r);
           if (r.Get()==matte_.Get() || r.Get()==receipt_.Get() || r.Get()==native_args_.Get() || r.Get()==root_mirror_.Get()) {error="Selected writable operand alias";return false;}
         }
-        D3D11_SHADER_RESOURCE_VIEW_DESC vd {};i.legacy_matte->GetDesc(&vd);
-        ComPtr<ID3D11Resource> r;ComPtr<ID3D11Texture2D> t;i.legacy_matte->GetResource(&r);
-        if (FAILED(r.As(&t))) {error="Selected original legacy M texture";return false;}
-        D3D11_TEXTURE2D_DESC td {};t->GetDesc(&td);
-        if (vd.Format!=DXGI_FORMAT_R32_UINT || vd.ViewDimension!=D3D11_SRV_DIMENSION_TEXTURE2D || vd.Texture2D.MostDetailedMip!=0u ||
-            td.Format!=DXGI_FORMAT_R32_UINT || td.Width!=width_ || td.Height!=height_ || td.MipLevels!=1u || td.ArraySize!=1u || td.SampleDesc.Count!=1u) {error="Selected literal legacy M descriptor";return false;}
+        if (i.legacy_matte) {
+          D3D11_SHADER_RESOURCE_VIEW_DESC vd {};i.legacy_matte->GetDesc(&vd);
+          ComPtr<ID3D11Resource> r;ComPtr<ID3D11Texture2D> t;i.legacy_matte->GetResource(&r);
+          if (FAILED(r.As(&t))) {error="Selected original legacy M texture";return false;}
+          D3D11_TEXTURE2D_DESC td {};t->GetDesc(&td);
+          if (vd.Format!=DXGI_FORMAT_R32_UINT || vd.ViewDimension!=D3D11_SRV_DIMENSION_TEXTURE2D || vd.Texture2D.MostDetailedMip!=0u ||
+              td.Format!=DXGI_FORMAT_R32_UINT || td.Width!=width_ || td.Height!=height_ || td.MipLevels!=1u || td.ArraySize!=1u || td.SampleDesc.Count!=1u) {error="Selected literal legacy M descriptor";return false;}
+        }
       }
       const saved_t saved(c);
       saved_t::unbind(c);
@@ -291,7 +295,7 @@ namespace models::research_current_outline_selected_matte_v2 {
         initialize_ = false;
       }
       request_t r;
-      r.control = {mode, i.expected_work, i.current_outline_requested ? 0u : (i.temporal_supplied ? 1u : 0u), i.current_outline_requested ? 2u : 1u};
+      r.control = {mode, i.expected_work, i.current_outline_requested ? (i.legacy_matte ? 0u : 1u) : (i.temporal_supplied ? 1u : 0u), i.current_outline_requested ? 2u : 1u};
       r.token = {static_cast<UINT>(i.transaction_token), static_cast<UINT>(i.transaction_token >> 32u), 0u, 0u};
       c->UpdateSubresource(request_.Get(), 0, nullptr, &r, 0, 0);
       ID3D11ShaderResourceView *root = i.root;
@@ -303,7 +307,11 @@ namespace models::research_current_outline_selected_matte_v2 {
       if (i.current_outline_requested) {
         auto *a=native_args_uav_.Get();c->CSSetUnorderedAccessViews(2,1,&a,nullptr);
         c->CSSetShader(program.prepare,nullptr,0);c->Dispatch(1,1,1);
-        ID3D11UnorderedAccessView *z=nullptr;c->CSSetUnorderedAccessViews(2,1,&z,nullptr);
+        // Preparation owns the decision. Bind it read-only for the band pass.
+        ID3D11UnorderedAccessView *null_outputs[2] {};
+        c->CSSetUnorderedAccessViews(1,2,null_outputs,nullptr);
+        auto *prepared_receipt=receipt_srv_.Get();
+        c->CSSetShaderResources(13,1,&prepared_receipt);
       } else {
         // Original algorithm1 copies observationOne.X unchanged.
         const D3D11_BOX box {i.observation_one_offset,0,0,i.observation_one_offset+4u,1,1};

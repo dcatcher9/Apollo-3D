@@ -1,0 +1,120 @@
+// Shared normalization EMA and tagged health publication. The including entry supplies
+// MinMaxEma, MinMaxRaw, DepthHealthState and the normalization-bin load/reset accessors.
+#ifndef DEPTH_MINMAX_EMA_COMMON_HLSL
+#define DEPTH_MINMAX_EMA_COMMON_HLSL
+
+#include "include/depth_constants.hlsl"
+#include "include/sbs_adaptive_state_contract.generated.hlsl"
+
+#define NUM_BINS 256
+
+void ResolveDepthNormalization() {
+    float new_min = asfloat(MinMaxRaw.Load(0));
+    float new_max = asfloat(MinMaxRaw.Load(4));
+    uint valid_count = MinMaxRaw.Load(8);
+    uint eligible_count = MinMaxRaw.Load(12);
+    bool valid_bounds = eligible_count > 0u && valid_count == eligible_count &&
+                        !isnan(new_min) && !isinf(new_min) &&
+                        !isnan(new_max) && !isinf(new_max) && new_max >= new_min;
+    uint4 health_counters =
+        asuint(DepthHealthState[SBS_STATE_VECTOR_EMPTY_RAW_COUNT]);
+    float4 telemetry =
+        DepthHealthState[SBS_STATE_VECTOR_VALID_DEPTH_FRACTION];
+
+    // Robust percentile bounds: replace the raw min/max with the permanent P2/P98 percentiles
+    // scanned from the 256-bin histogram (shared scan, binned over the raw range). Outlier
+    // pixels -- DA-V2's near-spike tail is the classic case -- land in the extreme bins and
+    // are excluded from the normalization range instead of squeezing the whole scene's
+    // parallax. Bin centers quantize the bound to ~0.4% of the frame range, far below the
+    // temporal EMA's smoothing. Values outside [lo,hi] saturate in buffer_to_tex_cs.
+    {
+        float bin_w = valid_bounds ? max(new_max - new_min, 1e-12f) / (float)NUM_BINS : 0.0f;
+        float total = (float)valid_count;
+        float lo_count = 0.02f * total;
+        float hi_count = 0.98f * total;
+        float pct_min = new_min;
+        float pct_max = new_max;
+        bool found_lo = false;
+        bool found_hi = false;
+        float cum = 0.0f;
+        [loop]
+        for (uint b = 0; b < NUM_BINS; b++) {
+            cum += (float)LoadNormalizationHistogram(b);
+            // Take the crossing bin's OUTER EDGE, not its center. A percentile only excludes its
+            // nominal 2% when the distribution is smooth across the crossing bin; when a large
+            // atom sits there -- sky, a far wall, DA-V2's flat background -- a bin-center bound
+            // cuts through the atom and clips a large share of the frame to a single depth. c525
+            // puts 66.1% of its pixels in bin 0, and the centered bound saturated 49.9% of the
+            // frame to exactly 0. An outer edge can only widen the range, so it clips at most the
+            // nominal fraction, and costs at most one bin (~0.4%) of range precision.
+            if (!found_lo && cum >= lo_count) {
+                pct_min = new_min + (float)b * bin_w;
+                found_lo = true;
+            }
+            if (!found_hi && cum >= hi_count) {
+                pct_max = new_min + ((float)b + 1.0f) * bin_w;
+                found_hi = true;
+            }
+            ResetNormalizationHistogramBin(b);  // reset for the next frame's accumulation
+        }
+        if (valid_bounds && pct_max - pct_min > 1e-9f) {
+            new_min = pct_min;
+            new_max = pct_max;
+        }
+    }
+
+    float collapse_scale = max(1.0f, max(abs(new_min), abs(new_max)));
+    bool range_collapsed = valid_bounds &&
+                           new_max - new_min <= collapse_scale * 1.0e-5f;
+    if (!valid_bounds) {
+        SBS_STATE_EMPTY_RAW_COUNT(health_counters) =
+            min(SBS_STATE_EMPTY_RAW_COUNT(health_counters) + 1u,
+                SBS_ADAPTIVE_STATE_COUNTER_MAX);
+    } else if (range_collapsed) {
+        SBS_STATE_COLLAPSED_RAW_COUNT(health_counters) =
+            min(SBS_STATE_COLLAPSED_RAW_COUNT(health_counters) + 1u,
+                SBS_ADAPTIVE_STATE_COUNTER_MAX);
+    }
+    SBS_STATE_VALID_DEPTH_FRACTION(telemetry) =
+        (float)valid_count / (float)max(eligible_count, 1u);
+
+    float4 s = MinMaxEma[0];
+    if (!valid_bounds) {
+        // Preserve the last real normalization state and mark this frame as a hold. In particular,
+        // do not manufacture an initialized [0,1] range when the first TensorRT result is invalid.
+        s.w = 0.0f;
+    } else if (s.z < 0.5f || any(isnan(s.xy)) || any(isinf(s.xy))) {
+        // First frame: seed the EMA with the percentile values.
+        s.x = new_min;
+        s.y = new_max;
+        s.z = 1.0f;
+        s.w = 2.0f;
+    } else {
+        // Attack fast, release slow. A symmetric EMA lags the live percentiles, and whenever the
+        // smoothed range is NARROWER than the frame's, buffer_to_tex_cs saturates the difference
+        // away -- lag becomes clipped depth. Expanding immediately to cover [new_min, new_max]
+        // makes that impossible, while contraction still decays at minmax_alpha. Expansion is also
+        // the safe direction for stability: the range is a multiplicative gain, so growing it
+        // LOWERS the gain, and it is fast SHRINKING that makes the depth scale breathe.
+        s.x = min(lerp(s.x, new_min, minmax_alpha), new_min);
+        s.y = max(lerp(s.y, new_max, minmax_alpha), new_max);
+        s.w = 1.0f;
+    }
+    MinMaxEma[0] = s;
+    SBS_STATE_EFFECTIVE_RAW_RANGE_WIDTH(telemetry) =
+        s.z > 0.5f ? max(s.y - s.x, 0.0f) : 0.0f;
+    SBS_STATE_RANGE_COLLAPSED(telemetry) =
+        range_collapsed ? 1.0f : 0.0f;
+    SBS_STATE_DEPTH_READY(telemetry) = s.z > 0.5f ? 1.0f : 0.0f;
+    DepthHealthState[SBS_STATE_VECTOR_EMPTY_RAW_COUNT] =
+        asfloat(health_counters);
+    DepthHealthState[SBS_STATE_VECTOR_VALID_DEPTH_FRACTION] = telemetry;
+
+    // Leave a safe identity behind; the next fused frame resolve overwrites all four words.
+    MinMaxRaw.Store(0, 0xFFFFFFFFu);
+    MinMaxRaw.Store(4, 0u);
+    MinMaxRaw.Store(8, 0u);
+    MinMaxRaw.Store(12, 0u);
+}
+
+#endif

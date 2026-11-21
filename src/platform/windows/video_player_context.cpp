@@ -238,22 +238,27 @@ namespace platf::video_player {
     }
   }
 
-  bool registry_t::contains_process(const std::uint32_t process_id) const noexcept {
-    if (process_id == 0u || !ready()) {
+  std::span<const std::wstring> registry_t::executables_if_ready() const noexcept {
+    if (!ready()) {
+      return {};
+    }
+    try {
+      return executables_.get();
+    }
+    catch (...) {
+      return {};
+    }
+  }
+
+  bool matches_registered_executable(
+    const std::span<const std::wstring> registered,
+    const std::wstring_view executable
+  ) noexcept {
+    if (registered.empty()) {
       return false;
     }
     try {
-      const auto &registered = executables_.get();
-      if (registered.empty()) {
-        return false;
-      }
-      std::unique_ptr<void, decltype(&CloseHandle)> process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id), CloseHandle);
-      std::array<wchar_t, max_string> image {};
-      DWORD length = static_cast<DWORD>(image.size());
-      if (!process || !QueryFullProcessImageNameW(process.get(), 0u, image.data(), &length)) {
-        return false;
-      }
-      const auto path = normalized_path(std::wstring_view {image.data(), length});
+      const auto path = normalized_path(executable);
       return path && std::any_of(registered.begin(), registered.end(), [&](const auto &candidate) {
                return equal_text(candidate, *path);
              });

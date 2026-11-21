@@ -167,6 +167,12 @@ rule; local AR keeps it for its retained virtual source. Windows.Graphics.Captur
 metadata, so a switch removes the separately composited Game 3D cursor (see
 [Game 3D](reshade-sbs.md)).
 
+For ordinary desktop delivery, Desktop Duplication copies the acquired bitmap directly into the
+shared capture image and blends the visible cursor there. Pointer-only acquisitions supply the
+same desktop bitmap. Cursor movement and removal can therefore publish fresh pixels while
+retaining the content timestamp and damage identity. Hidden pointer updates on an already
+cursor-free desktop leave the published image alone. [Desktop Duplication acquisition](https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_2/nf-dxgi1_2-idxgioutputduplication-acquirenextframe)
+
 ## Display restoration
 
 The host records the original display setup before changing it. Remote disconnect, local glasses
