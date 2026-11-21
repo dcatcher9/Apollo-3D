@@ -19,21 +19,21 @@
 
       <template v-if="canDecide && isTextGame">
         <p v-if="!textGameApproved" class="game3d-hint">
-          This is a 2D text game, so it has no depth of its own. Sunshine 3D converts it with its own depth and uses a small
-          text helper, loaded into the game only while it runs, to keep the game's text readable. Nothing is written into the
+          This looks like a 2D text game, which has no depth of its own. Sunshine 3D converts its picture with its own depth and
+          uses a small text helper, loaded into the game only while it runs, to keep the game's text readable. Nothing is written into the
           game's folder. Choose it only for an application you recognize as a single-player game. It takes effect at once and
           again each time the game starts.
         </p>
         <div class="game3d-actions">
           <button v-if="!textGameApproved" class="btn btn-apollo-primary" type="button" :disabled="Boolean(busy)" @click="decide('install')">
-            {{ busy === 'install' ? 'Saving…' : 'Use the text helper for this game' }}
+            {{ busy === 'install' ? 'Saving…' : 'Convert this game' }}
           </button>
           <button v-if="setup.state !== 'declined'" class="btn btn-apollo-quiet" type="button" :disabled="Boolean(busy)" @click="decide('never')">
             {{ busy === 'never' ? 'Saving…' : textGameApproved ? 'Stop for this game' : 'Never for this game' }}
           </button>
         </div>
         <p v-if="setup.state === 'current'" class="game3d-hint">
-          Stopping applies from the game's next start; the helper already loaded stays until the game closes.
+          Stopping ends the conversion at once; a helper already loaded stays in the game until it closes.
         </p>
         <p v-if="error" class="game3d-error" role="alert">{{ error }}</p>
       </template>
@@ -167,11 +167,11 @@ export default {
       }
       if (this.isTextGame) {
         Object.assign(states, {
-          ready_to_install: { label: 'Ready to set up', tone: 'warning', description: 'Sunshine 3D can use its text helper for this game. Nothing is loaded until you confirm.' },
+          ready_to_install: { label: 'Ready to set up', tone: 'warning', description: 'Sunshine 3D can convert this game and use its text helper for it. Nothing is loaded until you confirm.' },
           declined: { label: 'Not set up', tone: 'neutral', description: 'You chose not to set up this game. Sunshine 3D loads nothing into it.' },
           anti_cheat: { label: 'Not offered', tone: 'neutral', description: 'Anti-cheat detected, so Sunshine 3D loads nothing into this game.' },
-          current: { label: 'Text helper active', tone: 'success', description: 'The text helper is running in this game.' },
-          installed: { label: 'Approved', tone: 'success', description: 'The text helper loads the next time this game starts.' },
+          current: { label: 'Converting', tone: 'success', description: 'Sunshine 3D converts this game while it is in front.' },
+          installed: { label: 'Approved', tone: 'success', description: 'The game is converted the next time it starts.' },
         })
       }
       const status = states[this.setup.state] || { label: 'Checking', tone: 'neutral', description: 'Checking setup for the detected game.' }

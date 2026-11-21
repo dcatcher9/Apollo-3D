@@ -136,6 +136,8 @@ namespace {
     UINT surface_width = 0u, surface_height = 0u;
     std::vector<std::uint32_t> coverage_bgra;  // premultiplied, 0xAARRGGBB
     models::host_sbs_shared_ui_warp::text_game_constants_t constants;
+    std::uint32_t colour_mode = 0u;  // of the picture: 0 display code values, 1 linear, 2 HDR scRGB
+    bool observe_only = false;  // only the verdict: the draw keeps its ordinary geometry
     std::array<UINT, 4u> shape {};
     std::vector<float> field, weights;
     std::vector<std::uint32_t> rows;  // one flag a band row, then the authorization header
@@ -777,8 +779,9 @@ namespace {
       ComPtr<ID3D11Texture2D> text_game_coverage;
       ComPtr<ID3D11ShaderResourceView> text_game_coverage_srv;
       ComPtr<ID3D11Buffer> text_game_constants, text_game_subtitle;
-      const bool text_game_pin = outline && outline->text_game;
-      if (text_game_pin) {
+      const bool text_game_request = outline && outline->text_game;
+      const bool text_game_pin = text_game_request && !outline->text_game->observe_only;
+      if (text_game_request) {
         namespace shared = models::host_sbs_shared_ui_warp;
         auto &text = *outline->text_game;
         if (!production_shared_ui_pin_programs.ready() &&
@@ -790,9 +793,9 @@ namespace {
         constants_desc.Usage = D3D11_USAGE_DEFAULT;
         constants_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         const D3D11_SUBRESOURCE_DATA constants_initial {&text.constants, 0u, 0u};
-        // Without subtitle operands the route still binds the subtitle constants; all zero
-        // selects display code values for the picture.
-        const std::array<std::uint32_t, 8u> no_subtitle {};
+        // Without subtitle operands the route still binds the subtitle constants: only the
+        // picture's colour mode, where zero selects display code values.
+        const std::array<std::uint32_t, 8u> no_subtitle {0u, text.colour_mode};
         auto subtitle_desc = constants_desc;
         subtitle_desc.ByteWidth = sizeof(no_subtitle);
         const D3D11_SUBRESOURCE_DATA subtitle_initial {no_subtitle.data(), 0u, 0u};
@@ -813,12 +816,17 @@ namespace {
         request.text_game = true;
         request.text_game_coverage = text_game_coverage_srv.Get();
         request.text_game_constants = text_game_constants.Get();
+        request.text_game_observe_only = text.observe_only;
         const auto program = production_shared_ui_pin_programs.text_game_program();
         if (!text_game_pin_owner.ensure(device.Get(), text.shape, error) ||
-            !text_game_pin_owner.queue(context.Get(), program, request, error, pin_binding_policy) ||
-            !text_game_pin_owner.matches(context.Get(), request)) return false;
+            !text_game_pin_owner.queue(context.Get(), program, request, error, pin_binding_policy)) return false;
+        // An observation issues nothing for a draw; a pin must match the draw it was queued for.
+        if (text_game_pin_owner.matches(context.Get(), request) == text.observe_only) {
+          error = "text-game pin issued for the wrong kind of request";
+          return false;
+        }
         text_game_views = text_game_pin_owner.views();
-        draw_command.pixel_shader = program.pixel;
+        if (text_game_pin) draw_command.pixel_shader = program.pixel;
         const auto read_plane = [&](ID3D11ShaderResourceView *view, auto &values) {
           ComPtr<ID3D11Resource> resource;
           ComPtr<ID3D11Texture2D> texture;
@@ -836,8 +844,11 @@ namespace {
         verdict_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         ComPtr<ID3D11Buffer> verdict_staging;
         D3D11_MAPPED_SUBRESOURCE verdict_map {};
-        if (!read_plane(text_game_views.field.Get(), text.field) || !read_plane(text_game_views.weights.Get(), text.weights) ||
-            !read_plane(text_game_views.rows.Get(), text.rows) ||
+        text.field.clear();
+        text.weights.clear();
+        text.rows.clear();
+        if ((text_game_pin && (!read_plane(text_game_views.field.Get(), text.field) || !read_plane(text_game_views.weights.Get(), text.weights) ||
+                               !read_plane(text_game_views.rows.Get(), text.rows))) ||
             FAILED(device->CreateBuffer(&verdict_desc, nullptr, &verdict_staging))) {
           error = "text-game pin readback failed";
           return false;
@@ -5304,6 +5315,68 @@ TEST(HostSbsV2LiveWarpGpuTest, TextGamePinFollowsTheGlyphsOnlyWhileThePictureSho
   text.constants.plane = 0.05f;
   (void) render(8u, 8u, grey);
   assert_unpinned("an invalid plane");
+  // An observation alone finds the same text and leaves the draw as it is without text at all.
+  text.constants.plane = plane;
+  text.observe_only = true;
+  const auto observed = render(8u, 8u, grey);
+  EXPECT_EQ((std::array {text.verdict[0], text.verdict[1], text.verdict[2], text.verdict[3]}), (std::array {32u, 32u, 32u, 32u}));
+  EXPECT_TRUE(text.field.empty());
+  operands.text_game = nullptr;
+  EXPECT_EQ(observed, render(8u, 8u, grey));
+  EXPECT_NE(observed, shown);
+}
+
+TEST(HostSbsV2LiveWarpGpuTest, TextGamePinComparesAnHdrCaptureAtTheDesktopsSdrWhite) {
+  constexpr UINT width = 128u, height = 64u, field_width = 24u, field_height = 10u;
+  // An HDR capture of a desktop whose SDR white is 480 nits, 6.0 in scRGB: the game's mid-grey
+  // fill, display code value 0x90, arrives as 1.673, its black outline as 0, and the scene
+  // behind them is 0.5.
+  constexpr rgba16_bits_t fill_shown {0x3eb1u, 0x3eb1u, 0x3eb1u, 0x3c00u}, outline_shown {0u, 0u, 0u, 0x3c00u}, scene_shown {0x3800u, 0x3800u, 0x3800u, 0x3c00u};
+  const auto state = make_live_state(true, true);
+  const std::vector<float> base(field_width * field_height, -1.25f / width);
+  text_game_pin_inputs_t text;
+  text.surface_width = width;
+  text.surface_height = height;
+  text.coverage_bgra.assign(width * height, 0u);
+  std::vector<rgba16_bits_t> source(width * height, scene_shown);
+  for (UINT y = 24u; y < 28u; ++y) {
+    for (UINT x = 40u; x < 56u; ++x) {
+      const bool fill = x >= 44u && x < 52u;
+      text.coverage_bgra[y * width + x] = fill ? 0xff909090u : 0xff000000u;
+      source[y * width + x] = fill ? fill_shown : outline_shown;
+    }
+  }
+  text.constants.inverse_width = 1.0f / width;
+  text.constants.inverse_height = 1.0f / height;
+  text.constants.enabled = 1u;
+  text.constants.plane = 2.0f / width;
+  text.constants.text_top = 22u;
+  text.constants.text_bottom = 30u;
+  text.constants.front_cap = 0.04f;
+  text.constants.sdr_white = 6.0f;
+  text.colour_mode = 2u;
+  text.shape = {width, height, 0u, height};
+  current_outline_inputs_t operands;
+  operands.text_game = &text;
+  operands.converter_owns_pin_bindings = true;
+  std::string error;
+  live_v2_warp_fixture_t fixture;
+  ASSERT_TRUE(fixture.initialize(error)) << error;
+  const auto render = [&] {
+    std::vector<std::byte> output;
+    EXPECT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height, source.data(), base, base,
+      state, {}, output, error, field_width, field_height, {}, nullptr, nullptr, true, &operands)) << error;
+  };
+  render();
+  ASSERT_EQ(text.rows.size(), height + 1u);
+  EXPECT_EQ((std::array {text.verdict[0], text.verdict[1], text.verdict[2], text.verdict[3]}), (std::array {32u, 32u, 32u, 32u}));
+  EXPECT_EQ(text.rows.back(), 1u) << "the game's colours are found in the HDR capture";
+  // The same capture read at another white is another colour: the fill is not recognized.
+  text.constants.sdr_white = 2.0f;
+  render();
+  EXPECT_EQ(text.verdict[0], 32u);
+  EXPECT_EQ(text.verdict[1], 0u);
+  EXPECT_EQ(text.rows.back(), 0u);
 }
 
 TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinProductionRetainsAuthorityAndClearsReusedRows) {

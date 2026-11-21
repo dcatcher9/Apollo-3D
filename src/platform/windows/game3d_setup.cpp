@@ -250,15 +250,15 @@ namespace platf::game3d {
     setup_outcome apply_text_hook_setup(
       const std::filesystem::path &executable,
       setup_decisions &decisions,
-      const std::function<bool(const std::filesystem::path &executable)> &anti_cheat_present,
+      const std::function<std::string(const std::filesystem::path &executable)> &refusal,
       const std::function<text_hook::load_result()> &load
     ) {
       setup_outcome outcome;
       auto &status = outcome.installation;
       status.executable = executable;
-      if (anti_cheat_present(executable)) {
+      if (auto reason = refusal(executable); !reason.empty()) {
         status.state = installation_state_e::anti_cheat;
-        status.detail = "Anti-cheat software was found with this game, so Sunshine 3D does not load anything into it.";
+        status.detail = std::move(reason);
         return outcome;
       }
       outcome.identity = file_identity(executable);
@@ -271,21 +271,30 @@ namespace platf::game3d {
       if (decision == setup_decision_e::never) {
         status.state = installation_state_e::missing_addon;
         outcome.state = "declined";
-        status.detail = "You chose not to set up this game, so Sunshine 3D does not load anything into it. Choose Set up this game to change that.";
+        status.detail = "You chose not to convert this game, so Sunshine 3D does not load anything into it. Choose Convert this game to change that.";
         return outcome;
       }
       if (decision != setup_decision_e::install) {
         status.state = installation_state_e::missing_addon;
         outcome.state = "ready_to_install";
-        status.detail = "This is a 2D text game. Sunshine 3D can load a small text helper into it while it runs, so the game's own text stays readable in 3D. Nothing is written to the game's folder, and nothing is loaded until you confirm this game.";
+        status.detail = "This looks like a 2D text game. Sunshine 3D can convert its picture to 3D itself and load a small text helper into the game while it runs, so the game's own text stays readable. Nothing is written to the game's folder, and nothing is loaded until you confirm this game.";
         return outcome;
       }
       const auto loaded = load();
       status.detail = loaded.detail;
       status.addon_present = loaded.state == text_hook::load_state_e::loaded;
-      status.state = loaded.state == text_hook::load_state_e::loaded      ? installation_state_e::current :
-                     loaded.state == text_hook::load_state_e::not_running ? installation_state_e::installed :
-                                                                            installation_state_e::unavailable;
+      if (loaded.state == text_hook::load_state_e::not_running) {
+        status.state = installation_state_e::installed;
+        return outcome;
+      }
+      // The approval is for converting the game. The helper is how the game's own text is found
+      // exactly; without it the host still finds text in the picture.
+      status.state = installation_state_e::current;
+      outcome.convert = true;
+      if (!status.addon_present) {
+        outcome.retry_load = loaded.state == text_hook::load_state_e::failed;
+        status.detail += " The game is converted without it: its text is found in the picture alone.";
+      }
       return outcome;
     }
   }  // namespace detail
@@ -417,6 +426,7 @@ namespace platf::game3d {
       struct pending_update {
         detected_game game;
         std::chrono::steady_clock::time_point retry_at {};
+        int attempts {};
       };
 
       struct offer_t {
@@ -485,21 +495,18 @@ namespace platf::game3d {
 
       detail::setup_outcome apply(const detected_game &game, bool publish_progress) {
         if (game.kind == game_kind_e::text_hook) {
-          auto outcome = detail::apply_text_hook_setup(
-            game.executable, decisions_,
-            [](const std::filesystem::path &executable) {
-              return inspect_installation(executable).state == installation_state_e::anti_cheat;
-            },
-            [&] {
-              return text_hook::load(game.process_id);
-            }
-          );
+          auto outcome = detail::apply_text_hook_setup(game.executable, decisions_, injection_refusal, [&] {
+            const auto result = text_hook::load(game.process_id, game.creation_time);
+            // Every load is on record, not only the first of a host run.
+            BOOST_LOG(info) << "Game 3D setup: text helper for " << game.name << " pid=" << game.process_id << ": " << result.detail;
+            return result;
+          });
           if (outcome.state.empty()) {
             outcome.state = state_name(outcome.installation.state);
           }
-          // The capture path converts this process only while the owner's approval stands and
-          // the helper is running in it; "never" withdraws it at once, for the running game too.
-          text_hook::set_consent(game.process_id, game.creation_time, outcome.installation.state == installation_state_e::current);
+          // The capture path converts this process only while the owner's approval stands;
+          // "never" withdraws it at once, for the running game too.
+          text_hook::set_consent(game.process_id, game.creation_time, outcome.convert);
           return outcome;
         }
         auto outcome = detail::apply_setup(game.executable, decisions_, [&](const std::string &detail) {
@@ -523,10 +530,19 @@ namespace platf::game3d {
         return state == installation_state_e::update_pending || state == installation_state_e::update_available || state == installation_state_e::unavailable;
       }
 
+      // A text helper that did not come up is tried twice more for this run of the game: the
+      // game may only have been busy starting. An add-on update is retried by its own rules.
+      void retry_text_helper(const detected_game &game, const detail::setup_outcome &outcome) {
+        if (game.kind == game_kind_e::text_hook && outcome.retry_load) {
+          pending_[game.executable] = {game, std::chrono::steady_clock::now() + 5s, 1};
+        }
+      }
+
       void tick(const std::optional<RECT> &capture_rect, std::vector<detected_game> requests) {
         // Explicit Web UI choices first, even after Game 3D or the stream has ended.
         for (const auto &game : requests) {
           const auto outcome = apply(game, true);
+          retry_text_helper(game, outcome);
           publish(game, outcome, outcome.state);
         }
         const auto now = std::chrono::steady_clock::now();
@@ -544,7 +560,14 @@ namespace platf::game3d {
           if (selected) {
             publish(it->second.game, outcome, outcome.state);
           }
-          if (retry(outcome.installation.state) && outcome.state != "ready_to_install" && outcome.state != "declined") {
+          if (it->second.game.kind == game_kind_e::text_hook) {
+            if (outcome.retry_load && ++it->second.attempts < 3) {
+              it->second.retry_at = std::chrono::steady_clock::now() + 5s;
+              ++it;
+            } else {
+              it = pending_.erase(it);
+            }
+          } else if (retry(outcome.installation.state) && outcome.state != "ready_to_install" && outcome.state != "declined") {
             it->second.retry_at = std::chrono::steady_clock::now() + (outcome.installation.state == installation_state_e::unavailable ? 30s : 2s);
             ++it;
           } else {
@@ -566,7 +589,9 @@ namespace platf::game3d {
         const auto outcome = apply(*game, true);
         // Only an existing installation's add-on update is retried automatically. A confirmed
         // fresh installation that failed retries on the game's next launch.
-        if (outcome.installation.state == installation_state_e::update_pending || outcome.installation.state == installation_state_e::update_available) {
+        if (game->kind == game_kind_e::text_hook) {
+          retry_text_helper(*game, outcome);
+        } else if (outcome.installation.state == installation_state_e::update_pending || outcome.installation.state == installation_state_e::update_available) {
           pending_[game->executable] = {*game, std::chrono::steady_clock::now() + 2s};
         }
         publish(*game, outcome, outcome.state);

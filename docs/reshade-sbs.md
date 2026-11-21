@@ -7774,51 +7774,90 @@ Repeated presentation retains the original frame timestamp and matching UI displ
 
 ## Text games
 
-A 2D text game (a visual novel) has no depth buffer and cannot load the add-on. Game 3D still
+A 2D text game (a visual novel) has no depth buffer and cannot use the add-on. Game 3D still
 serves it by the same division of work: the game supplies what it can, and the host supplies the
-rest. An add-on game supplies depth, its UI mask and the finished stereo. A text game supplies only
-where its text is; the host supplies depth from the picture, the stereo, and the text's place in
-depth.
+rest. An add-on game supplies depth, its UI mask and the finished stereo. A text game supplies at
+most where its text is; the host supplies depth from the picture, the stereo, and the text's
+place in depth.
 
-**Detection and consent.** The setup worker offers a 32-bit `.exe` outside the Windows directory
-whose foreground client lies wholly on the selected display (a window is enough: the host converts
-the captured picture) and that has both `dwrite.dll` and `d2d1.dll` loaded, after the same
-two-second confirmation as an add-on game and the same suppression list and anti-cheat refusal.
-Nothing is loaded until the owner confirms that game on the **Game 3D setup** card. The
-confirmation stands for later starts and can be withdrawn there at any time; **Never for this
-game** ends the offers. Nothing is ever written to the game's folder.
+**Detection.** The setup worker offers an `.exe` outside the Windows directory and the
+suppression list whose foreground client lies wholly on the selected display (a window is enough:
+the host converts the captured picture), after the same two-second confirmation as an add-on
+game, when one of these marks it as a text game:
 
-**The text helper.** On every start of a confirmed game the host runs
-`sunshine-text-hook-inject32.exe`, which loads `SunshineTextHook32.dll` into that one process. The
-helper replaces the `DrawText`, `DrawTextLayout`, shared `DrawGlyphRun` and `EndDraw` entries of
-the Direct2D render-target vtables, forwards every call unchanged, and repeats each text draw, in
-the brush's own colour, into a private bitmap. It keeps and reports no text content. It publishes
-the boxes of the drawn pieces and that bitmap through two named sections whose layout
-[`tools/text_hook/text_hook_shared.h`](../tools/text_hook/text_hook_shared.h) owns; a line is
-published as one unit when the game ends the drawing it belongs to, or after 50 ms without a
-further text draw. The helper ends with the process.
+- a 32-bit process with `dwrite.dll` and `d2d1.dll` loaded;
+- a 32-bit process whose executable imports a GDI text function (`TextOut`, `ExtTextOut`,
+  `DrawText`, `DrawTextEx`) and that has loaded a library games load and ordinary programs
+  rarely do: DirectSound, XAudio2, X3DAudio, DirectInput, XInput, Direct3D 8 or 9, DirectDraw,
+  OpenAL, BASS or FMOD;
+- a 64-bit process whose executable itself imports `d2d1.dll` and `dwrite.dll` and that has loaded
+  one of those libraries. Loaded modules alone mark nothing there, since many 64-bit programs
+  load both. Such a process is offered as a text game even where it also qualifies as an add-on
+  game, unless the add-on is already loaded in it.
 
-**Conversion.** The capture path treats the foreground process as a text game only while the
-owner's confirmation for that exact process (id and start time) stands and its helper section is
-current. It then reports the Game source ready, so the client makes its ordinary acknowledged
-transition to mode `3`, and converts the captured picture with the Host depth path instead of the
-flat fallback; any other window in front returns the session to the flat fallback. Earlier depth
-work is retired on each such switch. Dump 3D follows the route: with a text game in front the
-button produces the Host package. The pin itself is described under
+The imports are read from the executable's file, so a game whose protector hides its import table
+is not recognized by the two import rules. None of the rules proves what a program is: they
+decide only what is offered, and the offer says so.
+
+**Consent.** Nothing is loaded and nothing is converted until the owner confirms that game on the
+**Game 3D setup** card. The confirmation stands for later starts and can be withdrawn there at
+any time, which ends the conversion at once; **Never for this game** ends the offers. Nothing is
+ever written to the game's folder. A game with anti-cheat software in its folders, or whose
+folders cannot be checked for it, is refused whatever else those folders hold.
+
+**The text helper.** On every start of a confirmed game the host runs the loader of the game's
+bitness (`sunshine-text-hook-inject32.exe` or `...64.exe`), which loads `SunshineTextHook32.dll`
+or `SunshineTextHook64.dll` into that one process, identified by its id and start time. The helper
+keeps and reports no text content. It forwards every call it watches unchanged, keeps a picture
+of the text the game has drawn, and publishes that picture and the rows of it that hold text
+through two named sections whose layout
+[`tools/text_hook/text_hook_shared.h`](../tools/text_hook/text_hook_shared.h) owns. It publishes a
+complete picture at a time, and nothing when a game draws the same text again. The helper ends
+with the process. It has two parts, and a game is served by whichever sees its text:
+
+- *Direct2D.* The helper replaces the `DrawText`, `DrawTextLayout`, shared `DrawGlyphRun`,
+  `Clear` and `EndDraw` entries of the Direct2D render-target vtables and repeats each text draw,
+  in the brush's own colour, on a render target of its own. Text is published when the game ends
+  the drawing it belongs to, or 50 ms after the last text draw. Text is taken to be gone when the
+  game clears the surface it is on, or draws new text over text that has been there for more than
+  100 ms. Where a game draws text on targets of several sizes, the largest is its picture.
+- *GDI.* The helper points the `TextOut`, `ExtTextOut`, `DrawText` and `DrawTextEx` imports of the
+  game's own modules at itself, together with the calls that move or erase what was drawn:
+  `BitBlt`, `StretchBlt`, `PatBlt`, `FillRect`, `SetDIBitsToDevice`, `StretchDIBits`, `AlphaBlend`,
+  `TransparentBlt`, `BeginPaint` and `DeleteObject`. A game rarely draws its text straight onto
+  its window, so the helper follows the text: each bitmap the game draws text on has a layer
+  holding that text alone, every copy between bitmaps carries the same part of the layer along,
+  every fill or opaque copy erases it, and what arrives in the game's largest visible window is
+  the published picture. It is used only while the game has drawn no text with Direct2D.
+
+**Conversion.** The capture path treats the foreground process as a text game while the owner's
+confirmation for that exact process (id and start time) stands. It then reports the Game source
+ready, so the client makes its ordinary acknowledged transition to mode `3`, and converts the
+captured picture with the Host depth path instead of the flat fallback; any other window in front
+returns the session to the flat fallback. Earlier depth work is retired on each such switch.
+While the game's window is dragged or resized it stays converted, without its text pin. A game
+whose helper could not be loaded, or sees no text, is converted all the same. Dump 3D follows the
+route: with a text game in front the button produces the Host package, whose frame is drawn
+without the text pin. The pin itself is described under
 [Text-game pin](host-sbs.md#text-game-pin).
 
 **Text depth.** The text plane is chosen by the same policy as the add-on's UI
 (`tools/reshade/game3d_ui_adaptive.h`, [UI decision framework](#ui-decision-framework)): screen
 depth unless the scene under the glyphs is nearer, then one of its five levels, with its dwell and
 ramp rules. The host feeds it the scene field under the glyph texels on the policy's own 16-by-16
-grid of the game's picture, read back without waiting.
+grid of the game's picture, read back without waiting. As for the add-on's UI, the outer eighth
+of the picture is not placement evidence, and the plane moves only while frames are converted.
 
-**Limits.** The helper sees Direct2D text only. Anything the game composes by other means, such as
-a small image set among the text, is not in its picture and is held only by the pin's distance
-rule around the neighbouring glyphs. A game that draws its text any other way is detected but
-gets nothing from the helper; the picture-based Host subtitle protection then stays in force for
-it, as it does for every text game until the picture has first shown text in the colours the
-helper reported.
+**Limits.** The helper sees text only where the game hands it to Direct2D or GDI to draw, and
+follows GDI text only through GDI's own copies. Text that a game rasterizes itself, takes as
+glyph bitmaps from `GetGlyphOutline` and composes in its own code, or brings to the screen by
+another interface after drawing it with GDI, is unknown to it; so is anything set among the text
+by other means, such as a small image. Text drawn before the helper was loaded is known from the
+next time the game draws it. Text hidden by a clip the helper does not see is reported, and so is
+text the game paints over instead of clearing; whether reported text is on screen is the host's
+finding, from the picture, taken once for all the text reported. For a game the helper does not
+serve, and for every text game until the picture has first shown text in the colours the helper
+reported, the picture-based Host subtitle protection stays in force.
 
 ## Streamed Game provider contract
 

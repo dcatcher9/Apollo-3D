@@ -58,10 +58,20 @@ void prepare_main(uint3 id : SV_DispatchThreadID) {
 cbuffer TextGamePin : register(b7) {
     float4 TextGameRect;   // the game's picture in source pixels: left, top, 1/width, 1/height
     uint4 TextGameControl; // enabled, UI plane (float bits, full-source U), first and end source row of the current text
-    float4 TextGameScene;  // the scene's positive display bound (full-source U), reserved
+    float4 TextGameScene;  // the scene's positive display bound (full-source U), SDR white of an HDR capture (scRGB), reserved
 };
 Texture2D<float4> TextGameCoverage : register(t11);
 float3 DepthColorToSrgb(float3 c, uint color_mode);
+float3 DepthLinearToSrgb(float3 c);
+// The captured picture as the display code values the game drew. An HDR capture holds SDR
+// content scaled by the desktop's SDR white, which is undone exactly; the tone curve the depth
+// input uses there would move a colour by more than the comparison allows.
+float3 TextGameShownColour(float3 c) {
+    uint mode = subtitle_render_control.y;
+    float white = TextGameScene.y;
+    if (mode == 2u && isfinite(white) && white > 0.0f) return DepthLinearToSrgb(max(c, 0.0f) / white);
+    return DepthColorToSrgb(c, mode);
+}
 // The helper knows when a game draws text, not when the game shows it: an engine draws a whole
 // line at once and reveals it glyph by glyph, and hides its dialogue without drawing anything. So
 // the text is trusted only while the picture shows it. The coverage picture holds the text in its
@@ -102,7 +112,7 @@ void text_game_verify_main(uint3 id : SV_DispatchThreadID) {
     if (coverage < 0.95f) return;
     // Both sides as display code values, whatever the capture's transfer.
     float3 drawn = saturate(text.rgb / coverage);
-    float3 shown = DepthColorToSrgb(SourceColor.Load(int3(pixel, 0)).rgb, subtitle_render_control.y);
+    float3 shown = TextGameShownColour(SourceColor.Load(int3(pixel, 0)).rgb);
     uint kind = dot(drawn, float3(0.2126f, 0.7152f, 0.0722f)) >= 0.5f ? 0u : 2u;
     InterlockedAdd(TextGameVerdictStore[kind], 1u);
     if (all(isfinite(shown)) && all(abs(shown - drawn) <= 0.2f)) InterlockedAdd(TextGameVerdictStore[kind + 1u], 1u);
@@ -115,7 +125,9 @@ bool TextGameKindShown(uint cores, uint shown) {
 bool TextGameTextVisible() {
     uint count, stride; TextGameVerdict.GetDimensions(count, stride);
     if (count != TextGameVerdictWords || stride != 4u) return false;
-    return TextGameKindShown(TextGameVerdict[0u], TextGameVerdict[1u]) && TextGameKindShown(TextGameVerdict[2u], TextGameVerdict[3u]);
+    // Without enough glyph cores of either kind there is nothing to judge, and nothing is pinned.
+    return TextGameVerdict[0u] + TextGameVerdict[2u] >= 16u &&
+        TextGameKindShown(TextGameVerdict[0u], TextGameVerdict[1u]) && TextGameKindShown(TextGameVerdict[2u], TextGameVerdict[3u]);
 }
 bool TextGamePinAuthorized() {
     float plane = asfloat(TextGameControl.y);

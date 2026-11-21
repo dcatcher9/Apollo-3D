@@ -3,10 +3,10 @@
  * @file tools/text_hook/text_hook_shared.h
  * @brief Shared-memory contract between the in-application text helper and the Game 3D host.
  *
- * The helper runs inside a 2D text game its owner confirmed for Game 3D (docs/reshade-sbs.md, Text
- * games). It reports where the game draws text and a picture of that text, both in the pixels of
- * the surface the game draws on. It never reports the text itself. The layout is identical for
- * 32-bit and 64-bit builds.
+ * The helper runs inside a game its owner confirmed for Game 3D (docs/reshade-sbs.md, Text
+ * games). It reports a picture of the text the game has drawn, in the pixels of the surface the
+ * game draws on, and the rows of that picture that hold text. It never reports the text itself.
+ * The layout is identical for 32-bit and 64-bit builds.
  */
 #pragma once
 
@@ -21,36 +21,43 @@ namespace sunshine_text_hook {
    * drew it, in its own colours, on nothing. Alpha is text coverage.
    */
   inline constexpr wchar_t coverage_prefix[] = L"Local\\SunshineTextHookCoverage-";
-  inline constexpr std::uint32_t magic = 0x32485453u;  // "STH2"
-  inline constexpr std::uint32_t version = 3u;
-  inline constexpr std::uint32_t max_boxes = 512u;
+  inline constexpr std::uint32_t magic = 0x34485453u;  // "STH4"
+  inline constexpr std::uint32_t version = 4u;
+  /// Neither side of the picture is longer than this.
+  inline constexpr std::uint32_t max_surface_extent = 8192u;
 
-  /** One drawn piece of text, in pixels of the drawing surface. Half-open: [left, right). */
-  struct box_t {
-    float left;
-    float top;
-    float right;
-    float bottom;
+  /** How the helper saw the text. Informative: the picture means the same either way. */
+  enum source_e : std::uint32_t {
+    source_none = 0u,
+    source_direct2d = 1u,  ///< Direct2D text calls, repeated on the helper's own render target.
+    source_gdi = 2u,  ///< GDI text calls, followed through the game's blits to its window.
   };
 
   /**
    * The text currently drawn. A writer makes `sequence` odd, updates the fields and the coverage
-   * pixels, then makes it even; a reader retries while it is odd or changed. `generation`
-   * increases whenever the text is replaced rather than extended, and never returns to zero.
+   * pixels, then makes it even; a reader retries while it is odd or changed. `magic` and
+   * `version` are written last at start-up, once the helper has installed what it can.
    */
   struct snapshot_t {
     std::uint32_t magic;
     std::uint32_t version;
     volatile std::uint32_t sequence;
-    std::uint32_t generation;
-    std::uint64_t change_tick_ms;  ///< GetTickCount64() of the last change.
-    std::uint32_t surface_width;  ///< Zero until the application's drawing surface is known.
+    std::uint32_t source;  ///< source_e of the text now in the picture.
+    /// Size of the picture. Zero until the application's drawing surface is known; nonzero only
+    /// while the coverage section of exactly this size exists.
+    std::uint32_t surface_width;
     std::uint32_t surface_height;
-    std::uint32_t box_count;
-    std::uint32_t coverage_available;  ///< Nonzero once the coverage section exists for this surface size.
-    box_t boxes[max_boxes];
+    /// The rows of the picture that may hold text, [text_top, text_bottom); equal without text.
+    /// Every text pixel lies at least two rows inside them, or they end at the picture's edge.
+    std::uint32_t text_top;
+    std::uint32_t text_bottom;
+    /// The window whose client area the picture covers, as a handle value, or zero when the
+    /// helper cannot tell (Direct2D draws on a surface, not on a window).
+    std::uint64_t window;
+    /// Creation time of the helper's process (FILETIME as one number). A section that outlived
+    /// its process cannot pass for the helper of a later process with the same id.
+    std::uint64_t process_created;
   };
 
-  static_assert(sizeof(box_t) == 16u);
-  static_assert(sizeof(snapshot_t) == 40u + 16u * max_boxes);
+  static_assert(sizeof(snapshot_t) == 48u);
 }  // namespace sunshine_text_hook

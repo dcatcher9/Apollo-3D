@@ -602,6 +602,22 @@ namespace platf::game3d {
     return result;
   }
 
+  std::string injection_refusal(const fs::path &game_executable) {
+    try {
+      fs::path marker;
+      switch (find_anti_cheat(game_executable, marker)) {
+        case anti_cheat_e::present:
+          return "Anti-cheat detected (" + utf8(marker.filename()) + " in " + utf8(marker.parent_path()) + "), so Sunshine 3D does not load anything into this game.";
+        case anti_cheat_e::unknown:
+          return "The game's folders could not be checked for anti-cheat, so Sunshine 3D does not load anything into this game.";
+        case anti_cheat_e::absent:
+          return {};
+      }
+    } catch (const std::exception &) {
+    }
+    return "The game's folders could not be checked for anti-cheat, so Sunshine 3D does not load anything into this game.";
+  }
+
   installation_status inspect_installation(const fs::path &game_executable, const fs::path &bundle_directory) {
     installation_status status;
     try {

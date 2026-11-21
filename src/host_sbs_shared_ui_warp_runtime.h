@@ -28,26 +28,26 @@ namespace models::host_sbs_shared_ui_warp {
     {"host_sbs_shared_ui_warp.hlsl", "prepare_main", "cs_5_0"},
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_main_ps", "ps_5_0"},
   }};
-  inline constexpr std::string_view completed_closure = "ac8f6a12314847b2523904c82dcb07ae748cdcb3ec32b122ab2929fa7b5bfa47";
+  inline constexpr std::string_view completed_closure = "9f934534eef72b2ad6534d5aac9f05c73af31eec4343989b371ae7f0ce6571bf";
   inline constexpr std::array<cache::shader_spec, 4u> queued_specs {{
     {"host_sbs_shared_ui_warp_queued.hlsl", "initialize_main", "cs_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "SunshineApplyUICS", "cs_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "prepare_main", "cs_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "shared_pin_main_ps", "ps_5_0"},
   }};
-  inline constexpr std::string_view queued_closure = "cd48387901438d727027a76990462261a9bdda597b8336f0ea8d81afa04b4b21";
+  inline constexpr std::string_view queued_closure = "5cf0d1602df030c7c4b11584f7281b035dd378229c6e68d93a1243abe974660b";
   inline constexpr std::array<cache::shader_spec, 3u> completed_diagnostic_specs {{
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_mapping_ps", "ps_5_0"},
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_coverage_ps", "ps_5_0"},
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_boundary_ps", "ps_5_0"},
   }};
-  inline constexpr std::string_view completed_diagnostic_closure = "3ec0108b777d80d0fd62480afa772d6427f07730700fcdfd1b8dcff04525538a";
+  inline constexpr std::string_view completed_diagnostic_closure = "314ecfe54c63505ae4e6daaca38cc1c3bbb6409ae9257043637036c49568c3af";
   inline constexpr std::array<cache::shader_spec, 3u> queued_diagnostic_specs {{
     {"host_sbs_shared_ui_warp_queued.hlsl", "shared_pin_mapping_ps", "ps_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "shared_pin_coverage_ps", "ps_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "shared_pin_boundary_ps", "ps_5_0"},
   }};
-  inline constexpr std::string_view queued_diagnostic_closure = "23ed2f1db4f35b6c3aa4435b8b0f7801e114911a93e38b13b6d684c09de51c6b";
+  inline constexpr std::string_view queued_diagnostic_closure = "1ce925bb13fcd464f1166ad3f9aab2b3f9939518e71ee74f435d64eb53f77159";
 
   inline constexpr std::string_view source_closure(bool queued) noexcept {
     return queued ? queued_closure : completed_closure;
@@ -70,7 +70,7 @@ namespace models::host_sbs_shared_ui_warp {
     {"host_sbs_text_game_ui_warp.hlsl", "text_game_verify_main", "cs_5_0"},
     {"host_sbs_text_game_ui_warp.hlsl", "text_game_columns_main", "cs_5_0"},
   }};
-  inline constexpr std::string_view text_game_closure = "290ea83da91c2da100654d6a51046c8e007dcd57de0bd99868b4f767f4e8c10d";
+  inline constexpr std::string_view text_game_closure = "8ed679277d11ea4760d74094b243450c660bf9ff584d0818cd2c0aa1e3b87ab8";
 
   struct program_t {
     ID3D11ComputeShader *initialize = nullptr, *pin = nullptr, *prepare = nullptr;
@@ -87,7 +87,8 @@ namespace models::host_sbs_shared_ui_warp {
     float plane = 0.0f;  ///< UI plane as a full-source U displacement.
     std::uint32_t text_top = 0u, text_bottom = 0u;  ///< Source rows the coverage picture is current for.
     float front_cap = 0.0f;  ///< The scene's positive display bound, as a full-source U displacement.
-    std::uint32_t reserved[3] {};
+    float sdr_white = 0.0f;  ///< SDR white of an HDR capture in scRGB units; unused otherwise.
+    std::uint32_t reserved[2] {};
   };
   /// Verdict words: light glyph cores and those shown, dark ones and those shown, then
   /// {covered, conflicts at five levels} a tile.
@@ -293,6 +294,9 @@ namespace models::host_sbs_shared_ui_warp {
     bool text_game = false;
     ID3D11ShaderResourceView *text_game_coverage = nullptr;
     ID3D11Buffer *text_game_constants = nullptr;
+    // Text-game route: only observe whether the picture shows the text and what lies under it.
+    // Nothing is issued for a draw; the verdict is the whole result.
+    bool text_game_observe_only = false;
     // Consumers of the raw field or weights require dense output on inactive draws.
     bool materialize_inactive = true;
   };
@@ -316,7 +320,7 @@ namespace models::host_sbs_shared_ui_warp {
     };
     ComPtr<ID3D11Device> device_;
     plane_t field_, weights_, rows_;
-    // Text-game route only: {glyph-core pixels, those still showing their reference colour}.
+    // Text-game route only: the observation of the last queued draw (text_game_verdict_words).
     ComPtr<ID3D11Buffer> verdict_;
     ComPtr<ID3D11ShaderResourceView> verdict_srv_;
     ComPtr<ID3D11UnorderedAccessView> verdict_uav_;
@@ -629,6 +633,10 @@ namespace models::host_sbs_shared_ui_warp {
         context->CSSetShader(program.text_game_verify, nullptr, 0u);
         context->Dispatch((shape_[0] + 15u) / 16u, (shape_[3] + 15u) / 16u, 1u);
         context->CSSetUnorderedAccessViews(3u, 1u, &null_view, nullptr);
+        if (request.text_game_observe_only) {
+          if (binding_policy == binding_policy_e::converter_owned) clear_converter_bindings(context, true);
+          return true;
+        }
         auto *verdict_input = verdict_srv_.Get();
         context->CSSetShaderResources(10u, 1u, &verdict_input);
       } else {
@@ -678,7 +686,7 @@ namespace models::host_sbs_shared_ui_warp {
       for (std::size_t i = 0u; i < inputs_.size(); ++i) if (inputs_[i].Get() != request.draw_srvs[i]) return false;
       return true;
     }
-    /** Text-game route: the verdict of the last queued draw, for diagnostics only. */
+    /** Text-game route: the observation of the last queued draw, for a late CPU readback. */
     [[nodiscard]] ID3D11Buffer *text_game_verdict() const noexcept { return verdict_.Get(); }
     [[nodiscard]] views_t views() const { return issued_ ? views_t {weights_.srv, field_.srv, rows_.srv, geometry_, shape_, serial_} : views_t {}; }
   };

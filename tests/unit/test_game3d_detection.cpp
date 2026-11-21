@@ -202,23 +202,59 @@ namespace {
     const std::array<std::filesystem::path, 2> without_direct2d {L"d3d11.dll", L"dwrite.dll"};
     const std::array<std::filesystem::path, 1> graphics_only {L"d3d11.dll"};
     const std::filesystem::path game = LR"(D:\Games\Novel\novel.exe)";
-    EXPECT_TRUE(is_text_game_candidate(game, direct_write, game_window(), capture));
+    const platf::game3d::detail::executable_imports_t none {};
+    EXPECT_TRUE(is_text_game_candidate(game, direct_write, game_window(), capture, false, none));
     // The host converts a text game from the captured picture, so a window qualifies too,
     // which an add-on game never does.
-    EXPECT_TRUE(is_text_game_candidate(game, direct_write, windowed_game_window(), capture));
+    EXPECT_TRUE(is_text_game_candidate(game, direct_write, windowed_game_window(), capture, false, none));
     EXPECT_FALSE(is_game_candidate(game, direct_write, windowed_game_window(), capture));
     // A window reaching past the captured output is not wholly on it.
     auto off_output = windowed_game_window();
     off_output.client_screen_rect = {1500, 100, 2140, 580};
-    EXPECT_FALSE(is_text_game_candidate(game, direct_write, off_output, capture));
+    EXPECT_FALSE(is_text_game_candidate(game, direct_write, off_output, capture, false, none));
     auto other_output = windowed_game_window();
     other_output.client_screen_rect = {2000, 100, 2640, 580};
-    EXPECT_FALSE(is_text_game_candidate(game, direct_write, other_output, capture));
-    // The helper observes Direct2D text drawing; without both libraries it would see nothing.
-    EXPECT_FALSE(is_text_game_candidate(game, without_direct2d, game_window(), capture));
-    EXPECT_FALSE(is_text_game_candidate(game, graphics_only, game_window(), capture));
+    EXPECT_FALSE(is_text_game_candidate(game, direct_write, other_output, capture, false, none));
+    // Without both libraries and without a GDI text import there is no text to find.
+    EXPECT_FALSE(is_text_game_candidate(game, without_direct2d, game_window(), capture, false, none));
+    EXPECT_FALSE(is_text_game_candidate(game, graphics_only, game_window(), capture, false, none));
     // The exclusion list applies to both kinds.
-    EXPECT_FALSE(is_text_game_candidate(LR"(C:\Program Files (x86)\Steam\steam.exe)", direct_write, game_window(), capture));
+    EXPECT_FALSE(is_text_game_candidate(LR"(C:\Program Files (x86)\Steam\steam.exe)", direct_write, game_window(), capture, false, none));
+  }
+
+  TEST(Game3dDetection, AGdiTextGameIsA32BitProgramWithAGameLibrary) {
+    const std::filesystem::path game = LR"(D:\Games\Novel\novel.exe)";
+    const platf::game3d::detail::executable_imports_t gdi {false, true}, none {};
+    const std::array<std::filesystem::path, 3> with_sound {L"kernel32.dll", L"GDI32.dll", L"DSOUND.dll"};
+    const std::array<std::filesystem::path, 2> without {L"kernel32.dll", L"gdi32.dll"};
+    EXPECT_TRUE(is_text_game_candidate(game, with_sound, windowed_game_window(), capture, false, gdi));
+    // A program that draws text with GDI and loads nothing a game loads is any utility.
+    EXPECT_FALSE(is_text_game_candidate(game, without, windowed_game_window(), capture, false, gdi));
+    // A game library alone does not make a text game.
+    EXPECT_FALSE(is_text_game_candidate(game, with_sound, windowed_game_window(), capture, false, none));
+    // 64-bit programs that draw text with GDI are ordinary applications.
+    EXPECT_FALSE(is_text_game_candidate(game, with_sound, windowed_game_window(), capture, true, gdi));
+    for (const auto *library : {L"XAudio2_9.dll", L"xinput1_4.dll", L"d3d9.dll", L"DDRAW.dll", L"dinput8.dll", L"fmodex.dll", L"OpenAL32.dll"}) {
+      const std::array<std::filesystem::path, 1> loaded {library};
+      EXPECT_TRUE(platf::game3d::detail::game_library_loaded(loaded)) << std::filesystem::path {library}.string();
+    }
+    for (const auto *library : {L"winmm.dll", L"d3d11.dll", L"xaudio.dll", L"dsound.dll.mui"}) {
+      const std::array<std::filesystem::path, 1> loaded {library};
+      EXPECT_FALSE(platf::game3d::detail::game_library_loaded(loaded)) << std::filesystem::path {library}.string();
+    }
+  }
+
+  TEST(Game3dDetection, A64BitTextGameImportsDirect2DItself) {
+    const std::filesystem::path game = LR"(D:\Games\Novel\novel64.exe)";
+    const platf::game3d::detail::executable_imports_t direct2d {true, false}, none {};
+    const std::array<std::filesystem::path, 4> loaded {L"d3d11.dll", L"dwrite.dll", L"d2d1.dll", L"XAudio2_9.dll"};
+    const std::array<std::filesystem::path, 3> silent {L"d3d11.dll", L"dwrite.dll", L"d2d1.dll"};
+    EXPECT_TRUE(is_text_game_candidate(game, loaded, windowed_game_window(), capture, true, direct2d));
+    EXPECT_TRUE(is_text_game_candidate(game, loaded, game_window(), capture, true, direct2d));
+    // Many 64-bit programs have both libraries loaded; that alone marks nothing.
+    EXPECT_FALSE(is_text_game_candidate(game, loaded, game_window(), capture, true, none));
+    // A program that draws with Direct2D and loads nothing a game loads is an application.
+    EXPECT_FALSE(is_text_game_candidate(game, silent, game_window(), capture, true, direct2d));
   }
 
   TEST(Game3dDetection, AKindChangeRestartsConfirmation) {

@@ -148,6 +148,13 @@ add_library(game3d_reshade_version_fixture SHARED fixtures/game3d_reshade_versio
 set_target_properties(game3d_reshade_version_fixture PROPERTIES LINKER_LANGUAGE CXX)
 add_dependencies(${PROJECT_NAME} game3d_reshade_version_fixture)
 target_compile_definitions(${PROJECT_NAME} PRIVATE SUNSHINE_TEST_RESHADE_DLL="$<TARGET_FILE:game3d_reshade_version_fixture>")
+if(TARGET text_hook_samples)
+    # The built text helper and a sample program to load it into: tested as they ship.
+    add_dependencies(${PROJECT_NAME} text_hook_bundle text_hook_samples)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
+            SUNSHINE_TEST_TEXT_HOOK_DIR="${SUNSHINE_TEXT_HOOK_BUILD_DIR}"
+            SUNSHINE_TEST_TEXT_HOOK_SAMPLE_DIR="${SUNSHINE_TEXT_HOOK_SAMPLE_DIR}")
+endif()
 target_compile_options(${PROJECT_NAME} PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
 target_link_options(${PROJECT_NAME} PRIVATE)
 
