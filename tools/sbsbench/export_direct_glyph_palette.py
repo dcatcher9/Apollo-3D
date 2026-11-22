@@ -64,5 +64,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("checkpoint", type=Path)
     parser.add_argument("output", type=Path)
+    parser.add_argument("--outline-gate", type=Path)
+    parser.add_argument("--outline-strength", type=float)
     args = parser.parse_args()
+    if (args.outline_gate is None) != (args.outline_strength is None):
+        parser.error("--outline-gate and --outline-strength must be used together")
     export(args.checkpoint, args.output)
+    if args.outline_gate is not None:
+        from export_direct_glyph_outline_gate import insert
+        insert(args.output, args.outline_gate, args.outline_strength)
