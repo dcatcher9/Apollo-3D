@@ -130,12 +130,14 @@ void confirm_history(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
     GlyphLine record=Lines[slot];
     GlyphLine old=(GlyphLine)0;
     if (record.state.x>0) old=PreviousLines[record.state.x-1];
+    uint4 carried=intersect_rect(uint4(min(record.base.xy,old.base.xy),max(record.base.zw,old.base.zw)),record.cover);
+    // Geometry must be decided before inference. Only search when it can enlarge the crop.
     uint4 r=intersect_rect(old.box,record.base);
     uint2 size=max(r.zw,r.xy)-r.xy;
     uint stride=max(2u,size.x/250u);
     uint2 sites=(max(size,4u)-4u+stride-1u)/stride;
     uint2 votes=0;
-    uint count=record.state.x==0 ? 0u : sites.x*sites.y;
+    uint count=record.state.x!=0 && any(carried!=record.base) ? sites.x*sites.y : 0u;
     for (uint i=lane; i<count; i+=128u) {
         uint2 p=r.xy+2u+stride*uint2(i%sites.x,i/sites.x);
         if (PreviousAlpha[raw_index(old,p)] < 38.0f/255.0f) continue;
@@ -153,8 +155,7 @@ void confirm_history(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
         GroupMemoryBarrierWithGroupSync();
     }
     if (lane==0 && Counts[0].x>=24 && 10u*Counts[0].y>=7u*Counts[0].x) {
-        record.state.z=1;
-        record.box=intersect_rect(uint4(min(record.base.xy,old.base.xy),max(record.base.zw,old.base.zw)),record.cover);
+        record.box=carried;
         Lines[slot]=record;
     }
 }
@@ -172,6 +173,44 @@ void finish_windows() {
             Work.Store4(16+16*slot,record.box);
             offset+=size.x*size.y;
         }
+    }
+}
+
+groupshared uint4 ChangeCounts[128];
+
+[numthreads(128,1,1)]
+void confirm_mask_history(uint lane : SV_GroupIndex) {
+    GlyphLine record=Lines[Slot];
+    GlyphLine old=(GlyphLine)0;
+    if (record.state.x>0) old=PreviousLines[record.state.x-1];
+    uint4 overlap=intersect_rect(old.box,record.box);
+    uint2 size=max(overlap.zw,overlap.xy)-overlap.xy;
+    uint stride=max(2u,size.x/250u);
+    uint2 sites=(max(size,4u)-4u+stride-1u)/stride;
+    uint4 votes=0;
+    for (uint i=lane; i<sites.x*sites.y; i+=128u) {
+        uint2 p=overlap.xy+2u+stride*uint2(i%sites.x,i/sites.x);
+        uint2 local=p-record.box.xy;
+        float current=LineAlpha[local.y*(record.box.z-record.box.x)+local.x];
+        float previous=PreviousAlpha[raw_index(old,p)];
+        uint opacity=uint(round(saturate(max(previous,current))*255.0f));
+        bool ink=opacity>=128u, background=opacity<38u;
+        if (!ink && !background) continue;
+        uint changed=any(abs(rgb8(CurrentSource,p)-rgb8(PreviousSource,p))>32) ? 1u : 0u;
+        votes+=ink ? uint4(1,changed,0,0) : uint4(0,0,1,changed);
+    }
+    ChangeCounts[lane]=votes;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll] for (uint step=64; step>0; step/=2) {
+        if (lane<step) ChangeCounts[lane]+=ChangeCounts[lane+step];
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (lane==0) {
+        uint4 total=ChangeCounts[0];
+        float backgroundSites=max(1u,total.z);
+        // Permit ordinary RGB drift on ink in proportion to motion in the background.
+        record.state.z=total.x>=24u && 100.0f*total.y*backgroundSites<=total.x*(4.0f*backgroundSites+75.0f*total.w);
+        Lines[Slot]=record;
     }
 }
 

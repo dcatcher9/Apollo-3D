@@ -106,7 +106,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | `current_trusted_inner` | 1 | `5fdc9a1be98291902d63ca639f5bcfd80e88821b6df17bd083a23b5e09c32884` |
 | `direct_glyph_plan` | 2 | `3c1df1656492065c62c519ceffd49f3d1bc1d3a4e26c50ba0b8a2eead4dc2844` |
 | `direct_glyph_transport` | 4 | `2df402561c88d7e2b2672660e2f9d5f42b06d9815c87b48511adb05af6226b30` |
-| `direct_glyph_palette` | 16 | `c5da0ad773f4e54d627a1ce563816b9a0fd661e83b8b6006662017195c939e93` |
+| `direct_glyph_palette` | 17 | `96b836f198c80c8d85063aa90de26da3060d4fe10deaeba3fdc8acda42222fcf` |
 | `direct_glyph_prepare` | 1 | `219a6a305c05ca3ac1744286a4e87b83b61128c10e05c61ec517337f279ec940` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->
 
@@ -493,8 +493,14 @@ in the [training provenance](../tools/sbsbench/checkpoints/subtitle-mask-edge-op
 On a unique overlap with the previous observation, the GPU checks at least 24
 previously protected high-gradient samples for agreement in edge direction and RGB.
 At 70% agreement, it retains the union of the two work rectangles within the current
-detector cap and blends the previous raw alpha according to the current pixel’s RGB
-change. Each new history generation stores the original prediction. Current overlapping
+detector cap. After inference, a separate comparison of the two raw masks decides
+whether to blend. It samples the overlap and counts a color change when any RGB8 channel
+differs by more than 32. Sites with either opacity at least 128/255 supply the stroke
+samples. Sites with both opacities below 38/255 supply the background samples. At least
+24 stroke samples are required. Their changed fraction must be at most 0.04 plus 0.75
+times the changed background fraction, taken as zero if there are no background samples.
+The blend weight at each pixel falls with its own RGB change. Each new history generation
+stores the original prediction. Current overlapping
 lines use their maximum protection, quantized at native pixel centers with a cutoff
 of 38/255. Fresh empty OCR clears the mask and history and skips inference.
 

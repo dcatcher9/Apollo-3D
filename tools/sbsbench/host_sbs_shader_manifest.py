@@ -496,6 +496,11 @@ HOST_SBS_DIRECT_GLYPH_FINISH_WINDOWS = ShaderSpec(
     source_entrypoint="finish_windows",
     source_target="cs_5_0",
 )
+HOST_SBS_DIRECT_GLYPH_CONFIRM_MASK_HISTORY = ShaderSpec(
+    source_file="host_sbs_direct_glyph_history_cs.hlsl",
+    source_entrypoint="confirm_mask_history",
+    source_target="cs_5_0",
+)
 HOST_SBS_DIRECT_GLYPH_PUBLISH_LINE = ShaderSpec(
     source_file="host_sbs_direct_glyph_history_cs.hlsl",
     source_entrypoint="publish_line",
@@ -607,6 +612,7 @@ SHADER_SPECS: Dict[str, ShaderSpec] = {
     "host_sbs_direct_glyph_begin_history": HOST_SBS_DIRECT_GLYPH_BEGIN_HISTORY,
     "host_sbs_direct_glyph_confirm_history": HOST_SBS_DIRECT_GLYPH_CONFIRM_HISTORY,
     "host_sbs_direct_glyph_finish_windows": HOST_SBS_DIRECT_GLYPH_FINISH_WINDOWS,
+    "host_sbs_direct_glyph_confirm_mask_history": HOST_SBS_DIRECT_GLYPH_CONFIRM_MASK_HISTORY,
     "host_sbs_direct_glyph_publish_line": HOST_SBS_DIRECT_GLYPH_PUBLISH_LINE,
     "host_sbs_direct_glyph_finish_history": HOST_SBS_DIRECT_GLYPH_FINISH_HISTORY,
     "host_sbs_direct_glyph_prepare": HOST_SBS_DIRECT_GLYPH_PREPARE,
@@ -938,10 +944,11 @@ DIRECT_GLYPH_PALETTE_GROUP = ClosureGroup(
         HOST_SBS_DIRECT_GLYPH_BEGIN_HISTORY,
         HOST_SBS_DIRECT_GLYPH_CONFIRM_HISTORY,
         HOST_SBS_DIRECT_GLYPH_FINISH_WINDOWS,
+        HOST_SBS_DIRECT_GLYPH_CONFIRM_MASK_HISTORY,
         HOST_SBS_DIRECT_GLYPH_PUBLISH_LINE,
         HOST_SBS_DIRECT_GLYPH_FINISH_HISTORY,
     ),
-    source_closure_sha256="c5da0ad773f4e54d627a1ce563816b9a0fd661e83b8b6006662017195c939e93",
+    source_closure_sha256="96b836f198c80c8d85063aa90de26da3060d4fe10deaeba3fdc8acda42222fcf",
 )
 
 DIRECT_GLYPH_PREPARE_GROUP = ClosureGroup(

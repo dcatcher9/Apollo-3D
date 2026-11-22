@@ -789,6 +789,7 @@ TEST_F(HostSbsDirectGlyphPublishGpuTest, NativeHistoryRequiresOneMatchingCueInsi
   const auto begin = load(cache::host_sbs_direct_glyph_begin_history);
   const auto confirm = load(cache::host_sbs_direct_glyph_confirm_history);
   const auto finish = load(cache::host_sbs_direct_glyph_finish_windows);
+  const auto confirm_mask = load(cache::host_sbs_direct_glyph_confirm_mask_history);
   const auto scatter = load(cache::host_sbs_direct_glyph_publish_line);
   const auto structured = [&](UINT count, UINT stride, const void *initial) {
     buf_t b;
@@ -809,6 +810,12 @@ TEST_F(HostSbsDirectGlyphPublishGpuTest, NativeHistoryRequiresOneMatchingCueInsi
   const auto sizes = structured(8, 8, nullptr);
   std::vector<float> past(width * height, 1.0f), raw_now(width * height, 0.0f);
   const auto prior_alpha = structured(width * height, 4, past.data());
+  auto left_ink = past;
+  const UINT old_width = old_box[2] - old_box[0];
+  for (UINT i = 0; i < left_ink.size(); ++i) {
+    left_ink[i] = (old_box[0] + i % old_width < width / 2) ? 1.0f : 0.0f;
+  }
+  const auto prior_left = structured(width * height, 4, left_ink.data());
   const auto new_alpha = structured(width * height, 4, raw_now.data());
   const auto remembered = structured(width * height, 4, past.data());
   const auto output = texture(width, height, DXGI_FORMAT_R32_UINT, true);
@@ -822,7 +829,11 @@ TEST_F(HostSbsDirectGlyphPublishGpuTest, NativeHistoryRequiresOneMatchingCueInsi
   }
   const auto previous_rgb = texture(width, height, DXGI_FORMAT_R16G16B16A16_FLOAT, false, a.data(), width * 8);
   const auto swapped_rgb = texture(width, height, DXGI_FORMAT_R16G16B16A16_FLOAT, false, b.data(), width * 8);
-  const auto exercise = [&](UINT count, UINT cap_token, bool swap, UINT center_twice = 0) {
+  for (UINT y = 0; y < height; ++y) {
+    std::copy_n(a.begin() + 4u * y * width, 2u * width, b.begin() + 4u * y * width);
+  }
+  const auto appended_rgb = texture(width, height, DXGI_FORMAT_R16G16B16A16_FLOAT, false, b.data(), width * 8);
+  const auto exercise = [&](UINT count, UINT cap_token, bool swap, UINT center_twice = 0, bool append = false) {
     const auto cb = constants(std::array<UINT, 8> {width, height, 17, 0, 1, 1, 0, center_twice});
     std::array<UINT, 36> work {count ? 2u : 1u, count}, caps {1u, count, cap_token, 0u};
     for (UINT slot = 0; slot < count; ++slot) {
@@ -831,7 +842,9 @@ TEST_F(HostSbsDirectGlyphPublishGpuTest, NativeHistoryRequiresOneMatchingCueInsi
     }
     const auto current_work = buffer(work.size(), true, false, true, work.data());
     const auto detector = buffer(caps.size(), true, false, false, caps.data());
-    auto *rgb = swap ? swapped_rgb.srv.Get() : previous_rgb.srv.Get();
+    auto *rgb = append ? appended_rgb.srv.Get() : (swap ? swapped_rgb.srv.Get() : previous_rgb.srv.Get());
+    auto *old_mask = append ? prior_left.srv.Get() : prior_alpha.srv.Get();
+    auto *current_mask = append ? prior_alpha.srv.Get() : new_alpha.srv.Get();
     auto pass = [&](ID3D11ComputeShader *shader, UINT gx, UINT gy, std::array<ID3D11ShaderResourceView *, 7> in, std::array<ID3D11UnorderedAccessView *, 5> out) {
       context->CSSetConstantBuffers(0, 1, cb.GetAddressOf());
       context->CSSetShader(shader, nullptr, 0);
@@ -843,9 +856,10 @@ TEST_F(HostSbsDirectGlyphPublishGpuTest, NativeHistoryRequiresOneMatchingCueInsi
     const std::array<UINT, 4> zero {};
     context->ClearUnorderedAccessViewUint(output.uav.Get(), zero.data());
     pass(begin.Get(), 1, 1, {detector.srv.Get(), prior_lines.srv.Get()}, {current_work.uav.Get(), current.uav.Get(), sizes.uav.Get()});
-    pass(confirm.Get(), 8, 1, {nullptr, prior_lines.srv.Get(), previous_rgb.srv.Get(), rgb, prior_alpha.srv.Get()}, {nullptr, current.uav.Get()});
+    pass(confirm.Get(), 8, 1, {nullptr, prior_lines.srv.Get(), previous_rgb.srv.Get(), rgb, old_mask}, {nullptr, current.uav.Get()});
     pass(finish.Get(), 1, 1, {}, {current_work.uav.Get(), current.uav.Get(), sizes.uav.Get()});
-    pass(scatter.Get(), 6, 6, {nullptr, prior_lines.srv.Get(), previous_rgb.srv.Get(), rgb, prior_alpha.srv.Get(), new_alpha.srv.Get(), current.srv.Get()}, {current_work.uav.Get(), nullptr, nullptr, remembered.uav.Get(), output.uav.Get()});
+    pass(confirm_mask.Get(), 1, 1, {nullptr, prior_lines.srv.Get(), previous_rgb.srv.Get(), rgb, old_mask, current_mask}, {nullptr, current.uav.Get()});
+    pass(scatter.Get(), 6, 6, {nullptr, prior_lines.srv.Get(), previous_rgb.srv.Get(), rgb, old_mask, current_mask, current.srv.Get()}, {current_work.uav.Get(), nullptr, nullptr, remembered.uav.Get(), output.uav.Get()});
     return std::array {words(read(current_work.buffer.Get())), words(read(current.buffer.Get())), words(read(output.texture.Get()))};
   };
   const auto same = exercise(1, 17, false);
@@ -858,6 +872,11 @@ TEST_F(HostSbsDirectGlyphPublishGpuTest, NativeHistoryRequiresOneMatchingCueInsi
   EXPECT_EQ((std::vector<UINT>(swap[0].begin() + 4, swap[0].begin() + 8)), (std::vector<UINT> {14, 8, 82, 40}));
   EXPECT_EQ(swap[1][14], 0u);
   EXPECT_EQ(swap[2][24u * width + 35u], 0u);
+  // The previous strokes and RGB agree on the left. New strokes on the right must veto the blend.
+  const auto append = exercise(1, 17, false, 0, true);
+  EXPECT_EQ(append[0], same[0]);
+  EXPECT_EQ(append[1][14], 0u);
+  EXPECT_EQ(append[2][24u * width + 65u], 255u);
   // Swapped RGB prevents history from extending the current box.
   const auto left = exercise(1, 17, true, 90);
   EXPECT_EQ((std::vector<UINT>(left[0].begin() + 4, left[0].begin() + 8)), (std::vector<UINT> {12, 8, 82, 40}));

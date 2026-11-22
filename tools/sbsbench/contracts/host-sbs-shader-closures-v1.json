@@ -569,6 +569,12 @@
       "source_target": "cs_5_0"
     },
     {
+      "name": "host_sbs_direct_glyph_confirm_mask_history",
+      "source_file": "host_sbs_direct_glyph_history_cs.hlsl",
+      "source_entrypoint": "confirm_mask_history",
+      "source_target": "cs_5_0"
+    },
+    {
       "name": "host_sbs_direct_glyph_publish_line",
       "source_file": "host_sbs_direct_glyph_history_cs.hlsl",
       "source_entrypoint": "publish_line",
@@ -846,10 +852,11 @@
         "host_sbs_direct_glyph_begin_history",
         "host_sbs_direct_glyph_confirm_history",
         "host_sbs_direct_glyph_finish_windows",
+        "host_sbs_direct_glyph_confirm_mask_history",
         "host_sbs_direct_glyph_publish_line",
         "host_sbs_direct_glyph_finish_history"
       ],
-      "source_closure_sha256": "c5da0ad773f4e54d627a1ce563816b9a0fd661e83b8b6006662017195c939e93"
+      "source_closure_sha256": "96b836f198c80c8d85063aa90de26da3060d4fe10deaeba3fdc8acda42222fcf"
     },
     {
       "name": "direct_glyph_prepare",

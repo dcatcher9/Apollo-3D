@@ -112,6 +112,7 @@ namespace models::host_sbs_shader_cache {
   inline constexpr shader_spec host_sbs_direct_glyph_begin_history {"host_sbs_direct_glyph_history_cs.hlsl", "begin_history", "cs_5_0"};
   inline constexpr shader_spec host_sbs_direct_glyph_confirm_history {"host_sbs_direct_glyph_history_cs.hlsl", "confirm_history", "cs_5_0"};
   inline constexpr shader_spec host_sbs_direct_glyph_finish_windows {"host_sbs_direct_glyph_history_cs.hlsl", "finish_windows", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_direct_glyph_confirm_mask_history {"host_sbs_direct_glyph_history_cs.hlsl", "confirm_mask_history", "cs_5_0"};
   inline constexpr shader_spec host_sbs_direct_glyph_publish_line {"host_sbs_direct_glyph_history_cs.hlsl", "publish_line", "cs_5_0"};
   inline constexpr shader_spec host_sbs_direct_glyph_finish_history {"host_sbs_direct_glyph_history_cs.hlsl", "finish_history", "cs_5_0"};
   inline constexpr shader_spec host_sbs_direct_glyph_prepare {"host_sbs_shared_ui_warp_direct_glyph.hlsl", "prepare_direct_glyph_main", "cs_5_0"};
@@ -327,11 +328,12 @@ namespace models::host_sbs_shader_cache {
     host_sbs_direct_glyph_begin_history,
     host_sbs_direct_glyph_confirm_history,
     host_sbs_direct_glyph_finish_windows,
+    host_sbs_direct_glyph_confirm_mask_history,
     host_sbs_direct_glyph_publish_line,
     host_sbs_direct_glyph_finish_history,
   };
   inline constexpr std::string_view direct_glyph_palette_source_closure_sha256 =
-    "c5da0ad773f4e54d627a1ce563816b9a0fd661e83b8b6006662017195c939e93";
+    "96b836f198c80c8d85063aa90de26da3060d4fe10deaeba3fdc8acda42222fcf";
 
   inline constexpr std::array direct_glyph_prepare_specs {
     host_sbs_direct_glyph_prepare,
