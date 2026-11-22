@@ -1,0 +1,47 @@
+{
+  "runtime": {
+    "python": "E:\\ApolloDev\\modelopt-py312\\Scripts\\python.exe",
+    "version": "3.12.14 (main, Aug 25 2026, 14:01:42) [MSC v.1944 64 bit (AMD64)]",
+    "numpy": "2.5.1",
+    "Pillow": "12.3.0",
+    "onnx": "1.21.0"
+  },
+  "plan": {
+    "path": "E:\\ApolloDev\\rawmatte-line-palette-1122\\plan.json",
+    "sha256": "77803d7eda20cdbf92606725179dbb091d66d1c085dea4262c24383182aadc8d",
+    "bytes": 1881
+  },
+  "weights": {
+    "path": "E:\\ApolloDev\\rawmatte-line-palette-1122\\palette.pt",
+    "sha256": "f78eebbd678add3bcbaf4310a3479454afabcbc4cedfff13d0bcabf8f10f0633",
+    "bytes": 17685
+  },
+  "features": 42,
+  "sites": 3494635,
+  "counts": {
+    "('en', 'original')": 36,
+    "('en', 'faint-smooth')": 36,
+    "('en', 'faint-texture')": 36,
+    "('en', 'blank')": 7,
+    "('en', 'heavy')": 36,
+    "('en', 'heavy-video')": 18,
+    "('en', 'libass-bold')": 36,
+    "('en', 'similar-ink-rim')": 36,
+    "('ja', 'original')": 36,
+    "('ja', 'faint-smooth')": 36,
+    "('ja', 'faint-texture')": 36,
+    "('ja', 'blank')": 7,
+    "('ja', 'heavy')": 36,
+    "('ja', 'heavy-video')": 18,
+    "('ja', 'libass-bold')": 36,
+    "('ja', 'similar-ink-rim')": 36,
+    "('zh', 'original')": 36,
+    "('zh', 'faint-smooth')": 36,
+    "('zh', 'faint-texture')": 36,
+    "('zh', 'blank')": 7,
+    "('zh', 'heavy')": 36,
+    "('zh', 'heavy-video')": 18,
+    "('zh', 'libass-bold')": 36,
+    "('zh', 'similar-ink-rim')": 36
+  }
+}

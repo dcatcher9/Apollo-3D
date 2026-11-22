@@ -1,0 +1,158 @@
+[
+  {
+    "event": "blank",
+    "source": "https://assets.science.nasa.gov/content/dam/science/psd/mars/downloadable_items/4/6/46272_1-PIA24598.mp4",
+    "work": [],
+    "covers": [],
+    "history": [],
+    "mask_sha256": "bacbc479e2a3f877ad5b0d3a6ec6988cd7ceaac51be0769905d6640be0347459"
+  },
+  {
+    "event": "onset",
+    "source": "https://assets.science.nasa.gov/content/dam/science/psd/mars/downloadable_items/4/6/46272_1-PIA24598.mp4",
+    "native_alpha_q8_sha256": "e395738c460ef5d117f0baae0af48ff0e2439ccef0bbeb5603ba352459f974b6",
+    "work": [
+      [
+        54,
+        9,
+        390,
+        51
+      ]
+    ],
+    "covers": [
+      [
+        0,
+        0,
+        444,
+        61
+      ]
+    ],
+    "history": [
+      [
+        false,
+        false
+      ]
+    ],
+    "mask_sha256": "a6c68041f3b21ca582e5f54df7bd2fa74884544f85871b20104cf0fc53417af8"
+  },
+  {
+    "event": "steady-a",
+    "source": "https://assets.science.nasa.gov/content/dam/science/psd/mars/downloadable_items/4/6/46272_1-PIA24598.mp4",
+    "native_alpha_q8_sha256": "1f502fc5b7b9d1148004b9839dc4ebe613a3250e5c3006d863438ba991a7f5ad",
+    "work": [
+      [
+        54,
+        9,
+        390,
+        51
+      ]
+    ],
+    "covers": [
+      [
+        0,
+        0,
+        444,
+        61
+      ]
+    ],
+    "history": [
+      [
+        true,
+        false
+      ]
+    ],
+    "mask_sha256": "58259e0e84d4ae1b6ebe6f4d47c979d7a4a11b9f5863ad5e2e349bf4c68d26da"
+  },
+  {
+    "event": "steady-b",
+    "source": "https://assets.science.nasa.gov/content/dam/science/psd/mars/downloadable_items/4/6/46272_1-PIA24598.mp4",
+    "native_alpha_q8_sha256": "d819d817534db46e62c7fc0cc45c51f951d96f4415f74be14b73be41847637d4",
+    "work": [
+      [
+        54,
+        9,
+        390,
+        51
+      ]
+    ],
+    "covers": [
+      [
+        0,
+        0,
+        444,
+        61
+      ]
+    ],
+    "history": [
+      [
+        true,
+        false
+      ]
+    ],
+    "mask_sha256": "96665e41b6212e08f88c19e8168de8ba01a3d367539615d3fcf101694578c753"
+  },
+  {
+    "event": "replacement",
+    "source": "https://assets.science.nasa.gov/content/dam/science/psd/mars/downloadable_items/4/6/46272_1-PIA24598.mp4",
+    "native_alpha_q8_sha256": "e724e68876932fdcc4b96bf436ce876538524ed94e8efba14b90fe59d6700e72",
+    "work": [
+      [
+        54,
+        9,
+        390,
+        51
+      ]
+    ],
+    "covers": [
+      [
+        0,
+        0,
+        444,
+        61
+      ]
+    ],
+    "history": [
+      [
+        false,
+        false
+      ]
+    ],
+    "mask_sha256": "120dfbd86ab1365aa3105839468993150dd4844337faf6fb5a020362f3dff326"
+  },
+  {
+    "event": "steady-replacement",
+    "source": "https://assets.science.nasa.gov/content/dam/science/psd/mars/downloadable_items/4/6/46272_1-PIA24598.mp4",
+    "native_alpha_q8_sha256": "d30045e0d577c2f76ffdd07673b8b7b4b60e9fc842386c4e945a3aab2ed85814",
+    "work": [
+      [
+        54,
+        9,
+        390,
+        51
+      ]
+    ],
+    "covers": [
+      [
+        0,
+        0,
+        444,
+        61
+      ]
+    ],
+    "history": [
+      [
+        true,
+        false
+      ]
+    ],
+    "mask_sha256": "2597375325a2aace457ee5fa0eb7d4dd0d35071bf7dabeb4fadd7bbdbc845e39"
+  },
+  {
+    "event": "clear",
+    "source": "https://assets.science.nasa.gov/content/dam/science/psd/mars/downloadable_items/4/6/46272_1-PIA24598.mp4",
+    "work": [],
+    "covers": [],
+    "history": [],
+    "mask_sha256": "bacbc479e2a3f877ad5b0d3a6ec6988cd7ceaac51be0769905d6640be0347459"
+  }
+]

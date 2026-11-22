@@ -1,0 +1,44 @@
+{
+  "fit": [
+    {
+      "path": "E:\\ApolloDev\\rawmatte-normalized-multires-fit-1121\\fit-manifest.json",
+      "sha256": "91f36fd5539f9ac2f239c093942fca6e8dc65f927a5f1cdcc470e793a441c558",
+      "bytes": 193412
+    },
+    {
+      "path": "E:\\ApolloDev\\rawmatte-normalized-polarity-fit-1121\\fit-manifest.json",
+      "sha256": "3dfa62541b2f65f5fa9b3530f5e7880837f33a47047cb704c2de3efd3cf63e5b",
+      "bytes": 171568
+    }
+  ],
+  "encoder": {
+    "path": "E:\\Git\\Repo\\Apollo-3D\\cmake-build-relwithdebinfo\\assets\\models\\direct_glyph_stroke_h144_w512_mixed.onnx",
+    "sha256": "3a19500dfd1bfdc01db0f166cc645c7b83f5799e716cb8d8fb52d1175927115e",
+    "bytes": 40424
+  },
+  "runtime": {
+    "python": "E:\\ApolloDev\\modelopt-py312\\Scripts\\python.exe",
+    "version": "3.12.14 (main, Aug 25 2026, 14:01:42) [MSC v.1944 64 bit (AMD64)]",
+    "numpy": "2.5.1",
+    "Pillow": "12.3.0",
+    "onnx": "1.21.0"
+  },
+  "code": {
+    "path": "E:\\ApolloDev\\rawmatte-line-palette-1122\\palette_fit.py",
+    "sha256": "c84722345f283cc2589a62eef59b5bb3d3563a15f4083d59384aa859054d7e05",
+    "bytes": 5764
+  },
+  "background": {
+    "path": "E:\\ApolloDev\\rawmatte-background-conditioned-1122\\conditioned.py",
+    "sha256": "9bd2a9404a9b1c737ddb11aad93dd6da0cdb721effa9b2061ab82435fd4cb355",
+    "bytes": 8480
+  },
+  "palette": {
+    "path": "E:\\ApolloDev\\rawmatte-native-role-decoder-1121\\decoder.py",
+    "sha256": "12f23fc15b9082ea03bb79dcce5d05952743fd32c0e7712202ec8e10220d48dd",
+    "bytes": 3660
+  },
+  "seed": 45218,
+  "steps": 3800,
+  "design": "A single head with line-wide color-role posterior and local background/texture evidence. Include native bold renderings, fit-only heavy variants, and similar-brightness fill/rim. Consistency loss sees exactly the same native gold on a translated fit-only background. Fixed q38."
+}
