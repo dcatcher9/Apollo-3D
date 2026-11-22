@@ -325,6 +325,27 @@ TEST(DepthCoordinateV2EyeLimitGpuTest, EachEyeGetsItsOwnOneSidedSlopesAndForegro
     ASSERT_NEAR(one_sided.right[index], one_sided_reference.right[index], tolerance) << "one-sided right " << index;
   }
 
+  // The pass splits every row into eight chunks. Widths that are not a multiple of eight, narrower
+  // than the extension, or as wide as the production field must still equal the serial recurrence.
+  for (const std::uint32_t ragged_width : {5u, 9u, 31u, 157u, 1541u}) {
+    constexpr std::uint32_t ragged_height = 3u;
+    std::vector<float> ragged(static_cast<std::size_t>(ragged_width) * ragged_height);
+    for (std::uint32_t y = 0u; y < ragged_height; ++y) {
+      for (std::uint32_t x = 0u; x < ragged_width; ++x) {
+        const bool object = ((x + 7u * y) / 23u) % 3u == 1u;
+        ragged[static_cast<std::size_t>(y) * ragged_width + x] =
+          (object ? 0.03f : -0.02f) + 0.004f * std::sin(0.61f * static_cast<float>(x + 5u * y));
+      }
+    }
+    eye_fields_t chunked;
+    ASSERT_TRUE(dispatch_eye_limit(device.Get(), context.Get(), shader.Get(), ragged_width, ragged_height, ragged, constants, chunked));
+    const auto serial = eye_limit_reference(ragged, ragged_width, ragged_height, constants);
+    for (std::size_t index = 0u; index < ragged.size(); ++index) {
+      ASSERT_NEAR(chunked.left[index], serial.left[index], tolerance) << "width " << ragged_width << " left " << index;
+      ASSERT_NEAR(chunked.right[index], serial.right[index], tolerance) << "width " << ragged_width << " right " << index;
+    }
+  }
+
   // With equal slopes and no extension both eyes equal the symmetric least majorant.
   const eye_limit_constants_t symmetric {v2::max_horizontal_slope, v2::max_horizontal_slope, 0u, 0u};
   eye_fields_t same;

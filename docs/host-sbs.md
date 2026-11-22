@@ -1991,6 +1991,17 @@ Both slopes are below one, so each eye map stays contractive and the unchanged 1
 applies. A max-plus dilation along rows preserves the vertical shear bound of its input, and so
 does a horizontal window maximum.
 
+The pass runs one thread per chunk of a row (32 chunks, eight rows per group). A thread sweeps its
+chunk in both directions as if it stood alone and writes every texel once: the forward sweep only
+keeps a checkpoint per 16-cell block, and the backward sweep rebuilds each block's forward values
+from its checkpoint before writing. The group then resolves the envelope that crosses each chunk
+border, and a thread raises its cells to the envelope entering from its neighbours until that
+envelope is no higher than the input, after which it can never win again. The result equals one
+serial scan per row up to the rounding of the border decay; on the clips compared the eye source
+maps are byte-identical to the serial pass. On a 1540x868 field the limiter stage as a whole
+(`depth_parallax_limits_gpu`, production limiters 0.07 ms) takes 0.10 ms; the serial version first
+committed took 0.67 ms, which a live session's diagnostics showed (2026-11-21, RTX 5080).
+
 The Base field, its statistics, dumps and every other consumer are unchanged; a Dump 3D package
 therefore still records Base, not the eye field. The eye field is one `R32_FLOAT` texture of twice
 the field height (left-eye rows, then right-eye rows), attached to the Base view as private data
