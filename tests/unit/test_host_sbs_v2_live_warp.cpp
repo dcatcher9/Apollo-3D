@@ -29,6 +29,7 @@
   #include <src/host_sbs_queued_render_guard.h>
   #include <src/host_sbs_current_outline_selected_matte_gpu.h>
   #include <src/host_sbs_shared_ui_warp_runtime.h>
+#include <src/host_sbs_subtitle_publication.h>
   #include <src/host_sbs_shader_cache.h>
   #include <src/host_sbs_subtitle_render.h>
   #include <src/host_sbs_v2_geometry.h>
@@ -5827,6 +5828,70 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinSubtitlePreparationPlacesBandAndRevoke
     }
     EXPECT_EQ(read_row(expected_shape[3]), 1u) << "The selected receipt must authenticate this draw";
     fixture.context->Unmap(staging.Get(), 0u);
+
+    if (roi) {
+      namespace publication = models::subtitle_publication;
+      ASSERT_TRUE(programs.load_raw_model_completed(fixture.device.Get(), SUNSHINE_SHADERS_DIR, error, true)) << error;
+      // Producer B may update the contour before its asynchronous glyph score and receipt
+      // finish. Render A through the identical completed production prepare in both orderings.
+      publication::pool_t producer, retained;
+      publication::inputs_t inputs;
+      for (std::size_t i = 0; i < inputs.size(); ++i) inputs[i] = views[i + 1].Get();
+      auto working = producer.publish(fixture.device.Get(), fixture.context.Get(), inputs);
+      ASSERT_TRUE(working);
+      for (std::size_t i = 0; i < inputs.size(); ++i) inputs[i] = working->srv[i].Get();
+      const auto write = [&](publication::operand target, const auto &words) {
+        ComPtr<ID3D11Resource> resource;
+        working->srv[target]->GetResource(&resource);
+        fixture.context->UpdateSubresource(resource.Get(), 0, nullptr, words.data(), 0, 0);
+      };
+      auto receipt = selected.receipt;
+      receipt[2] = 4u;
+      receipt[62] = 4u;
+      write(publication::receipt, receipt);
+      auto publication_a = retained.publish(fixture.device.Get(), fixture.context.Get(), inputs);
+      ASSERT_TRUE(publication_a);
+      const auto check = [&](const publication::views_t &published, ID3D11ShaderResourceView *current,
+                             UINT wanted_header, UINT wanted_glyph_row) {
+        auto draw = request;
+        draw.draw_srvs[0] = current;
+        for (std::size_t i = 0; i < inputs.size(); ++i) draw.draw_srvs[i+1] = published.srv[i].Get();
+        draw.materialize_inactive = false; // normal stream uses indirect dispatch for inactive rows
+        ASSERT_TRUE(owner.prepare_subtitle(fixture.device.Get(), fixture.context.Get(), programs.raw_model_completed_program(),
+          draw, domain, error, shared::resources_t::binding_policy_e::converter_owned)) << error;
+        ComPtr<ID3D11Resource> current_rows;
+        owner.views().rows->GetResource(&current_rows);
+        fixture.context->CopyResource(staging.Get(), current_rows.Get());
+        ASSERT_TRUE(SUCCEEDED(fixture.context->Map(staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped)));
+        EXPECT_EQ(read_row(expected_shape[3]), wanted_header);
+        EXPECT_EQ(read_row(full_y - expected_shape[2]), wanted_glyph_row);
+        fixture.context->Unmap(staging.Get(), 0u);
+      };
+      auto next_identity = subtitle.identity;
+      ++next_identity[4]; // new model frame, same visible subtitle
+      write(publication::identity, next_identity);
+      ASSERT_NO_FATAL_FAILURE(check(*working, views[0].Get(), 0, 0));
+      ASSERT_NO_FATAL_FAILURE(check(*publication_a, views[0].Get(), 1, 1));
+      const auto new_picture = texture(DXGI_FORMAT_R16G16B16A16_FLOAT, width, height,
+                                       std::vector<rgba16_bits_t>(width * height, grey));
+      ASSERT_NO_FATAL_FAILURE(check(*publication_a, new_picture.Get(), 1, 0));
+
+      // Complete B with no text. It cannot borrow the old cue, even while A remains held.
+      receipt[16] = next_identity[4];
+      receipt[28+4] = next_identity[4];
+      write(publication::receipt, receipt);
+      auto no_cue = subtitle.condition;
+      no_cue[v2::subtitle_condition_param_active_word] = 0u;
+      write(publication::condition, no_cue);
+      auto publication_b = retained.publish(fixture.device.Get(), fixture.context.Get(), inputs);
+      ASSERT_TRUE(publication_b);
+      ASSERT_NO_FATAL_FAILURE(check(*publication_b, views[0].Get(), 1, 0));
+      ASSERT_NO_FATAL_FAILURE(check(*publication_a, views[0].Get(), 1, 1));
+      EXPECT_FALSE(retained.publish(fixture.device.Get(), fixture.context.Get(), inputs));
+      publication_a.reset();
+      EXPECT_TRUE(retained.publish(fixture.device.Get(), fixture.context.Get(), inputs));
+      ASSERT_TRUE(prepare(request, domain)) << error;
+    }
 
     auto aliased = request;
     aliased.draw_srvs[roi ? 1u : 0u] = accepted.field.Get();

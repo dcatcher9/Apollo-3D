@@ -432,6 +432,10 @@ palette decoder for subtitle protection. Convolutions run in FP16. The RGB
 interface, log probabilities and native decoder use FP32.
 Setup authenticates the model and its shared-warp programs before the first frame.
 Setup or scoring failure uses ordinary Base stereo without glyph protection.
+Each completed Direct Glyph observation retains its Base field, parallax state, selected
+mask, display band, condition, contour identity and receipt together. Cached draws can
+reuse that set while the next observation is being scored. Each draw still compares
+current source color with the retained display band before applying protection.
 The shared OCR planner expands each native core by three-eighths of the core height, rounded up
 and bounded to 12–64 pixels, while staying inside the original padded OCR cover.
 The earlier adaptive qualification control uses the largest resulting rectangle's native height to select a

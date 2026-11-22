@@ -24,6 +24,9 @@
 #include <wrl/client.h>
 
 namespace models {
+  namespace subtitle_publication {
+    struct views_t;
+  }
 
   /** Immutable identity of the exact model bytes behind raw depth.
    *
@@ -947,6 +950,8 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_glyph_matte;
     // PRIVATE opt-in backing; same source/SCT/publication lease, never an EMPTY certificate.
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> research_selected_matte, research_selected_matte_receipt;
+    // Retained draws hold this lease while sampling a completed Direct Glyph publication.
+    std::shared_ptr<const subtitle_publication::views_t> subtitle_draw_publication;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_condition_params;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_contour_field_pin;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_contour_distance;

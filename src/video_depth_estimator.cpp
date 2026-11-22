@@ -21,6 +21,7 @@
 #include "host_sbs_current_outline_runtime_programs.h"
 #include "host_sbs_current_outline_observation.h"
 #include "host_sbs_direct_glyph_gpu.h"
+#include "host_sbs_subtitle_publication.h"
 #include "host_sbs_v2_gpu_executor.h"
 #include "logging.h"
 #include "model_manager.h"
@@ -3531,6 +3532,9 @@ namespace models {
       Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> glyph_matte, condition_params;
       Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> research_selected_matte, research_selected_matte_receipt;
     } completed_contour;
+    subtitle_publication::pool_t subtitle_draw_pool;
+    std::weak_ptr<const subtitle_publication::views_t> completed_subtitle_draw;
+    bool subtitle_draw_copy_failure_logged = false;
 
     // Entirely private, opt-in working diagnostics. None of these views enter
     // completed_contour, depth_observation_views_t, rendering, or production history.
@@ -9030,6 +9034,7 @@ namespace models {
       bool subtitle_work_suppressed = false;
       bool gpu_undecided = false;
       completion_snapshot_validity_t snapshots;
+      std::shared_ptr<const subtitle_publication::views_t> subtitle_draw_publication;
     };
 
     // Both completion paths call this only after ordered postprocess, receipt and debug copies.
@@ -9051,6 +9056,22 @@ namespace models {
       if (!completed.gpu_undecided) {
         gpu_undecided_requires_force_infer_refresh = false;
       }
+      if (subtitle_direct_glyph_enabled && !completed.subtitle_work_suppressed &&
+          completed_contour.research_selected_matte && completed_contour.research_selected_matte_receipt) {
+        completed.subtitle_draw_publication = subtitle_draw_pool.publish(device.Get(), context.Get(), {
+          depth_coordinate_v2_final_srv.Get(), depth_coordinate_v2_state_srv.Get(),
+          completed_contour.research_selected_matte.Get(), completed_contour.source.Get(),
+          completed_contour.condition_params.Get(), completed_contour.identity.Get(),
+          completed_contour.research_selected_matte_receipt.Get()
+        });
+        if (!completed.subtitle_draw_publication && !subtitle_draw_copy_failure_logged) {
+          BOOST_LOG(warning) << "Could not retain the completed Direct Glyph draw inputs; using ordinary scene depth.";
+          subtitle_draw_copy_failure_logged = true;
+        } else if (completed.subtitle_draw_publication) {
+          subtitle_draw_copy_failure_logged = false;
+        }
+      }
+      completed_subtitle_draw = completed.subtitle_draw_publication;
       completed_input = {
         .frame_id = pending_root->frame_id,
         .region = pending_root->input_region,
@@ -9134,6 +9155,22 @@ namespace models {
           r.subtitle_contour_history = completed_contour.history;
           r.subtitle_contour_source = completed_contour.source;
           r.subtitle_ocr_probability = completed_contour.probability;
+          if (subtitle_direct_glyph_enabled) {
+            r.subtitle_draw_publication = completed.subtitle_draw_publication;
+            if (r.subtitle_draw_publication) {
+              const auto &srv = r.subtitle_draw_publication->srv;
+              r.shadow_base_final_parallax = srv[subtitle_publication::base];
+              r.shadow_state = srv[subtitle_publication::state];
+              r.research_selected_matte = srv[subtitle_publication::matte];
+              r.subtitle_contour_source = srv[subtitle_publication::display_band];
+              r.subtitle_condition_params = srv[subtitle_publication::condition];
+              r.subtitle_contour_identity = srv[subtitle_publication::identity];
+              r.research_selected_matte_receipt = srv[subtitle_publication::receipt];
+            } else {
+              r.research_selected_matte.Reset();
+              r.research_selected_matte_receipt.Reset();
+            }
+          }
           // Always-on evaluation can inspect the held or cleared auxiliary fields when
           // suppression produced no new conditioning observation. Final still comes from Base.
           if (subtitle_conditioning_diagnostics &&
@@ -11889,12 +11926,14 @@ namespace models {
       if (pimpl->pending_root || publication.frame_id != frame || publication.observation_timestamp_us != observation ||
           !pimpl->publication_is_current(publication)) return std::nullopt;
       const auto direct = pimpl->subtitle_current_outline_raw_matte.views();
+      const auto draw = pimpl->completed_subtitle_draw.lock();
+      if (!draw) return std::nullopt;
       subtitle_selected_matte_diagnostic_views_t result;
       result.model_frame = frame;
       result.model_observation_us = observation;
       result.current_constants = pimpl->subtitle_contour_cbuffer;
-      result.selected_matte = direct.matte;
-      result.selected_receipt = direct.receipt;
+      result.selected_matte = draw->srv[subtitle_publication::matte];
+      result.selected_receipt = draw->srv[subtitle_publication::receipt];
       result.current_outline_ocr_record = pimpl->ocr_box_record_srv;
       result.current_outline_raw_matte_alpha8 = direct.alpha8;
       result.current_outline_raw_matte_work = direct.work;
