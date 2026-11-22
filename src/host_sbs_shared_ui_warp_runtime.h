@@ -28,26 +28,30 @@ namespace models::host_sbs_shared_ui_warp {
     {"host_sbs_shared_ui_warp.hlsl", "prepare_main", "cs_5_0"},
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_main_ps", "ps_5_0"},
   }};
-  inline constexpr std::string_view completed_closure = "ac8f6a12314847b2523904c82dcb07ae748cdcb3ec32b122ab2929fa7b5bfa47";
+  inline constexpr std::string_view completed_closure = "50db509da2b32216404aba41fc70095ca7b82e36bc86b0417a98cd32948a1d4f";
+  inline constexpr std::array<cache::shader_spec, 1u> raw_model_prepare_specs {{
+    {"host_sbs_shared_ui_warp_raw_model_bench.hlsl", "prepare_raw_model_bench_main", "cs_5_0"},
+  }};
+  inline constexpr std::string_view raw_model_prepare_closure = "b254eba72ffaca96d899fb48ec44596d217cb8312334bea7544080cf07a4c3ad";
   inline constexpr std::array<cache::shader_spec, 4u> queued_specs {{
     {"host_sbs_shared_ui_warp_queued.hlsl", "initialize_main", "cs_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "SunshineApplyUICS", "cs_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "prepare_main", "cs_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "shared_pin_main_ps", "ps_5_0"},
   }};
-  inline constexpr std::string_view queued_closure = "cd48387901438d727027a76990462261a9bdda597b8336f0ea8d81afa04b4b21";
+  inline constexpr std::string_view queued_closure = "813e5680174a7d4aeffcf434cde666f61774e2329bbc6753d52062f8dbada412";
   inline constexpr std::array<cache::shader_spec, 3u> completed_diagnostic_specs {{
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_mapping_ps", "ps_5_0"},
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_coverage_ps", "ps_5_0"},
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_boundary_ps", "ps_5_0"},
   }};
-  inline constexpr std::string_view completed_diagnostic_closure = "3ec0108b777d80d0fd62480afa772d6427f07730700fcdfd1b8dcff04525538a";
+  inline constexpr std::string_view completed_diagnostic_closure = "1b2844c121132982d31dbf7b37320092c72ae0311c5e5d200ccf454d80aa8386";
   inline constexpr std::array<cache::shader_spec, 3u> queued_diagnostic_specs {{
     {"host_sbs_shared_ui_warp_queued.hlsl", "shared_pin_mapping_ps", "ps_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "shared_pin_coverage_ps", "ps_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "shared_pin_boundary_ps", "ps_5_0"},
   }};
-  inline constexpr std::string_view queued_diagnostic_closure = "23ed2f1db4f35b6c3aa4435b8b0f7801e114911a93e38b13b6d684c09de51c6b";
+  inline constexpr std::string_view queued_diagnostic_closure = "0000886a46c3c250a95902acdbe033d749f0542d2f4559d0a305149c159f8f4a";
 
   inline constexpr std::string_view source_closure(bool queued) noexcept {
     return queued ? queued_closure : completed_closure;
@@ -70,7 +74,7 @@ namespace models::host_sbs_shared_ui_warp {
     {"host_sbs_text_game_ui_warp.hlsl", "text_game_verify_main", "cs_5_0"},
     {"host_sbs_text_game_ui_warp.hlsl", "text_game_columns_main", "cs_5_0"},
   }};
-  inline constexpr std::string_view text_game_closure = "290ea83da91c2da100654d6a51046c8e007dcd57de0bd99868b4f767f4e8c10d";
+  inline constexpr std::string_view text_game_closure = "1b142aa387e8928416e3262e9d0d60d10e626698f0c3c80e73065f97cc00f089";
 
   struct program_t {
     ID3D11ComputeShader *initialize = nullptr, *pin = nullptr, *prepare = nullptr;
@@ -102,6 +106,8 @@ namespace models::host_sbs_shared_ui_warp {
       ComPtr<ID3D11PixelShader> pixel;
     };
     std::array<route_t, 2u> routes_;
+    ComPtr<ID3D11ComputeShader> raw_model_prepare_;
+    std::string_view model_prepare_closure_;
     route_t text_game_;
     ComPtr<ID3D11ComputeShader> text_game_verify_, text_game_columns_;
     using diagnostics_t = std::array<ComPtr<ID3D11PixelShader>, 3u>;
@@ -140,6 +146,40 @@ namespace models::host_sbs_shared_ui_warp {
         return true;
       } catch (const std::exception &exception) {
         error = route_errors_[0] = exception.what();
+        return false;
+      }
+    }
+
+    // Only the completed converter probe opts into this prepare. Initialize, pin and draw
+    // still use the already authenticated completed programs on the same device.
+    bool load_raw_model_completed(ID3D11Device *device, const std::filesystem::path &root, std::string &error,
+                                  bool direct_glyph = false) {
+      error.clear();
+      try {
+        ComPtr<ID3D11Device> completed_device;
+        if (routes_[0].pixel) routes_[0].pixel->GetDevice(&completed_device);
+        if (!device || !ready() || completed_device.Get() != device) {
+          error = "Raw model shared-warp device does not match its completed programs";
+          return false;
+        }
+        const auto &specs = direct_glyph ? cache::direct_glyph_prepare_specs : raw_model_prepare_specs;
+        const auto closure = direct_glyph ? cache::direct_glyph_prepare_source_closure_sha256 : raw_model_prepare_closure;
+        const auto source = cache::snapshot_sources(root, specs);
+        if (!source || cache::source_closure_sha256(source) != closure) {
+          error = "Raw model shared-warp prepare source mismatch";
+          return false;
+        }
+        const auto code = cache::get(source, specs[0]);
+        ComPtr<ID3D11ComputeShader> next;
+        if (!code || code->empty() || FAILED(device->CreateComputeShader(code->data(), code->size(), nullptr, &next))) {
+          error = "Raw model shared-warp prepare creation failed";
+          return false;
+        }
+        raw_model_prepare_ = std::move(next);
+        model_prepare_closure_ = closure;
+        return true;
+      } catch (const std::exception &exception) {
+        error = exception.what();
         return false;
       }
     }
@@ -267,6 +307,14 @@ namespace models::host_sbs_shared_ui_warp {
       const auto route = queued ? 1u : 0u;
       const auto &shaders = routes_[route];
       return {shaders.compute[0].Get(), shaders.compute[1].Get(), shaders.compute[2].Get(), shaders.pixel.Get(), queued};
+    }
+
+    [[nodiscard]] bool raw_model_completed_ready() const noexcept { return ready() && raw_model_prepare_; }
+    [[nodiscard]] std::string_view model_prepare_closure() const noexcept { return model_prepare_closure_; }
+    [[nodiscard]] program_t raw_model_completed_program() const noexcept {
+      auto result = program();
+      result.prepare = raw_model_prepare_.Get();
+      return result;
     }
 
     [[nodiscard]] ID3D11PixelShader *mapping(bool queued = false) const noexcept {

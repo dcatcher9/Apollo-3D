@@ -24,10 +24,12 @@ RWTexture2D<uint> V3M : register(u1); // Packed ownership/AA/closure temp until 
 // Optional standalone diagnostics leave this unbound and keep their direct dispatch.
 RWByteAddressBuffer PrivateCacheValidationArgs : register(u1);
 globallycoherent RWTexture2D<uint> PassableCache : register(u2);
+RWTexture2D<uint> WeakAAOracleTrustedClear : register(u2); // File-fed publish-final diagnostic only.
 // Current own Raw-root witness scratch. Canonical second-graph init clears the
 // borrowed mode-final texture over EVERY ROI pixel before this unit's reduction.
 // Entry5 only accumulates; ordered entry6 consumes before any next-unit reuse.
 globallycoherent RWTexture2D<uint> RawComponentWitness : register(u3);
+RWTexture2D<uint> WeakAAOracleFacts : register(u3); // File-fed publish-final diagnostic only.
 Texture2D<uint> Code1M : register(t12);
 // PRIVATE BBSC1 extension. These optional views never grant current calibration authority.
 Texture2D<uint> StabilityImageRead : register(t13); // RGB24 | SelectedLOW8, one committed epoch
@@ -698,8 +700,9 @@ void WeakAASampleAppearance(uint2 lane){
         if((old&0x00ffffffu)!=StabilityPackRGB(RGB8(int2(q))))InterlockedAdd(WeakAAState[217u+2u*unit],1u,ignored);
     }
 }
-bool WeakAAAdmitAndAdvance(uint2 q,bool directAA,bool independentCurrent,bool retainedAA,bool actualNonUi){
-    if(!WeakAAPlan())return directAA; // Unbound/unavailable/invalid owner preserves legacy behavior.
+bool WeakAAAdmitAndAdvance(uint2 q,bool directAA,bool independentCurrent,bool retainedAA,bool actualNonUi,out bool weakPlan){
+    weakPlan=WeakAAPlan();
+    if(!weakPlan)return directAA; // Unbound/unavailable/invalid owner preserves legacy behavior.
     uint index=WEAK_HEADER+q.y*Shape.x+q.x,old=WeakAAState[index];
     bool anchor=WeakAAState[5u]==1u&&(old&WEAK_RGB_VALID)!=0u;
     bool episode=anchor&&WeakAAState[6u]==1u;
@@ -1138,8 +1141,7 @@ uint ResolvePublishedGlyphProtection(bool publicationInputsValid,
         (literalRawFallback!=0u?1u:0u);
 }
 
-[numthreads(16,16,1)]
-void publish_final_main(uint3 d:SV_DispatchThreadID) {
+void PublishFinal(uint3 d,bool recordWeakAAOracle) {
     if(d.z!=0u||!Native(d.xy))return;
     uint insideW,insideH;CurrentInsideBits.GetDimensions(insideW,insideH);
     bool insideShapeValid=all(uint2(insideW,insideH)==Shape.xy);
@@ -1183,8 +1185,8 @@ void publish_final_main(uint3 d:SV_DispatchThreadID) {
         (CurrentInsideBits.Load(int3(d.xy,0))&(R(79u)&~R(80u)&255u)&CoverBits.Load(int3(d.xy,0)))!=0u;
     if(normalizedInside)independentCurrent=true;
     if(normalizedInside&&R(77u)==0x31444e49u&&R(78u)==1u&&InputReady())actualNonUi=true;
-    bool admittedCurrentAA=directCurrentAA;
-    [branch]if(publicationInputsValid)admittedCurrentAA=WeakAAAdmitAndAdvance(d.xy,directCurrentAA,independentCurrent,retainedAA,actualNonUi);
+    bool admittedCurrentAA=directCurrentAA,weakPlan=false;
+    [branch]if(publicationInputsValid)admittedCurrentAA=WeakAAAdmitAndAdvance(d.xy,directCurrentAA,independentCurrent,retainedAA,actualNonUi,weakPlan);
     if(directCurrentAA&&!independentCurrent&&!admittedCurrentAA)publishedProtection=0u;
     if(privateCachedBlack)publishedProtection=1u;
     if(retainedAA)publishedProtection=1u;
@@ -1212,6 +1214,26 @@ void publish_final_main(uint3 d:SV_DispatchThreadID) {
     // Keep the current opaque Raw offer out of AA decisions, observer exemptions
     // and snapshot/history construction above. It joins positive protection only now.
     if(opaqueCurrentBlack)publishedProtection=1u;
+    if(recordWeakAAOracle){
+        uint tw,th;WeakAAOracleTrustedClear.GetDimensions(tw,th);
+        if(all(uint2(tw,th)==Shape.xy))WeakAAOracleTrustedClear[d.xy]=0u;
+        uint w,h;WeakAAOracleFacts.GetDimensions(w,h);
+        if(all(uint2(w,h)==Shape.xy)){
+            bool freshPlan=false,ownedWeakGlyph=false;
+            uint cover=publicationInputsValid?(CoverBits.Load(int3(d.xy,0))&255u):0u;
+            if(weakPlan){
+                freshPlan=WeakAAState[4u]==1u;
+                ownedWeakGlyph=freshPlan&&(cover&WeakAAState[7u])!=0u;
+            }
+            bool ownedHigh=(cover&SelectedForegroundBits(selectedWord))!=0u;
+            // Bit 9 is exact non-ribbon WeakAA ownership. Bit 8 preserves any same-owner HIGH8.
+            WeakAAOracleFacts[d.xy]=uint(publicationInputsValid)|(uint(freshPlan)<<1u)|
+                (uint(directCurrentAA)<<2u)|(uint(admittedCurrentAA)<<3u)|(uint(independentCurrent)<<4u)|
+                (uint(currentRibbonUi)<<5u)|(uint(opaqueCurrentBlack)<<6u)|(uint(literalRawFallback!=0u)<<7u)|
+                (uint(ownedHigh)<<8u)|(uint(ownedWeakGlyph)<<9u)|(uint(publishedProtection!=0u)<<10u)|
+                (uint(normalizedInside)<<11u);
+        }
+    }
     V3M[d.xy]=publishedProtection;
     if(publicationInputsValid){uint ignored;
         if((packedProtectionEvidence&OLD_AA)!=0u)Data.InterlockedAdd(67u*4u,1u,ignored);
@@ -1231,6 +1253,12 @@ void publish_final_main(uint3 d:SV_DispatchThreadID) {
         if(!publicationInputsValid)W(7u,0u);
     }
 }
+
+[numthreads(16,16,1)]
+void publish_final_main(uint3 d:SV_DispatchThreadID) { PublishFinal(d,false); }
+
+[numthreads(16,16,1)]
+void publish_final_weak_aa_oracle_main(uint3 d:SV_DispatchThreadID) { PublishFinal(d,true); }
 
 bool TrueCoverEdge(int2 p) {
     uint ub=128u+32u*Hook.x;

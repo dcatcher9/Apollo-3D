@@ -92,6 +92,29 @@ namespace models::host_sbs_shader_cache {
   inline constexpr shader_spec host_sbs_current_stroke_coverage_support {"current_outline/hole/host_sbs_current_stroke_coverage_cs.hlsl", "support_main", "cs_5_0"};
   inline constexpr shader_spec host_sbs_current_foreground_edge {"current_outline/hole/host_sbs_current_foreground_edge_cs.hlsl", "foreground_edge_main", "cs_5_0"};
   inline constexpr shader_spec host_sbs_current_trusted_inner {"current_outline/hole/host_sbs_current_foreground_edge_cs.hlsl", "trusted_inner_publish_main", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_direct_glyph_plan {"host_sbs_subtitle_direct_glyph_cs.hlsl", "plan_direct_main", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_direct_glyph_publish {"host_sbs_subtitle_direct_glyph_cs.hlsl", "publish_direct_main", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_direct_glyph_plan_tile {"host_sbs_subtitle_direct_glyph_transport_cs.hlsl", "plan_tile", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_direct_glyph_pack_rgb {"host_sbs_subtitle_direct_glyph_transport_cs.hlsl", "pack_rgb", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_direct_glyph_resolve_matte {"host_sbs_subtitle_direct_glyph_transport_cs.hlsl", "resolve_matte", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_direct_glyph_finish_score {"host_sbs_subtitle_direct_glyph_transport_cs.hlsl", "finish_score", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_direct_glyph_palette_pack_rgb {"host_sbs_direct_glyph_palette_cs.hlsl", "pack_rgb", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_direct_glyph_palette_pack_tile {"host_sbs_direct_glyph_palette_cs.hlsl", "pack_tile", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_direct_glyph_palette_export_roles {"host_sbs_direct_glyph_palette_cs.hlsl", "export_roles", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_direct_glyph_palette_coarse {"host_sbs_direct_glyph_palette_cs.hlsl", "coarse", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_direct_glyph_palette_make_hist {"host_sbs_direct_glyph_palette_cs.hlsl", "make_hist", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_direct_glyph_palette_smooth_hist {"host_sbs_direct_glyph_palette_cs.hlsl", "smooth_hist", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_direct_glyph_palette_choose_colors {"host_sbs_direct_glyph_palette_cs.hlsl", "choose_colors", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_direct_glyph_palette_make_moments {"host_sbs_direct_glyph_palette_cs.hlsl", "make_moments", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_direct_glyph_palette_smooth_moments {"host_sbs_direct_glyph_palette_cs.hlsl", "smooth_moments", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_direct_glyph_palette_prototypes {"host_sbs_direct_glyph_palette_cs.hlsl", "prototypes", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_direct_glyph_palette_decode_palette {"host_sbs_direct_glyph_palette_cs.hlsl", "decode_palette", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_direct_glyph_begin_history {"host_sbs_direct_glyph_history_cs.hlsl", "begin_history", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_direct_glyph_confirm_history {"host_sbs_direct_glyph_history_cs.hlsl", "confirm_history", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_direct_glyph_finish_windows {"host_sbs_direct_glyph_history_cs.hlsl", "finish_windows", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_direct_glyph_publish_line {"host_sbs_direct_glyph_history_cs.hlsl", "publish_line", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_direct_glyph_finish_history {"host_sbs_direct_glyph_history_cs.hlsl", "finish_history", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_direct_glyph_prepare {"host_sbs_shared_ui_warp_direct_glyph.hlsl", "prepare_direct_glyph_main", "cs_5_0"};
 
   inline constexpr std::array preprocess_specs {
     host_sbs_near_identical_fused_preprocess,
@@ -133,7 +156,7 @@ namespace models::host_sbs_shader_cache {
     host_sbs_subtitle_gaussian_horizontal_limit,
   };
   inline constexpr std::string_view parallax_v2_producer_source_closure_sha256 =
-    "9511d645d89430fe88284b708bfbd12f45a2679f270ae1d83afca4dfd969fcfa";
+    "04c861cfed510c9e074aaf430c180b66f5cf308c3df9a4c901a096af3779c744";
 
   inline constexpr std::array parallax_v2_replay_resolve_specs {
     depth_coordinate_v2_quantiles,
@@ -265,12 +288,55 @@ namespace models::host_sbs_shader_cache {
     host_sbs_current_foreground_edge,
   };
   inline constexpr std::string_view current_foreground_edge_source_closure_sha256 =
-    "4c8750b262827356b47a691aafe4cc306e541b691709060d979252635e73436c";
+    "59d4c0f90506ae0e6c042190cdaca7e76a876d0855923b46693da00ff5062a01";
 
   inline constexpr std::array current_trusted_inner_specs {
     host_sbs_current_trusted_inner,
   };
   inline constexpr std::string_view current_trusted_inner_source_closure_sha256 =
-    "86c990d49f0946e1d79730c42f629ef89076cb95b552225847671d0ef5ac47e7";
+    "5fdc9a1be98291902d63ca639f5bcfd80e88821b6df17bd083a23b5e09c32884";
+
+  inline constexpr std::array direct_glyph_plan_specs {
+    host_sbs_direct_glyph_plan,
+    host_sbs_direct_glyph_publish,
+  };
+  inline constexpr std::string_view direct_glyph_plan_source_closure_sha256 =
+    "3c1df1656492065c62c519ceffd49f3d1bc1d3a4e26c50ba0b8a2eead4dc2844";
+
+  inline constexpr std::array direct_glyph_transport_specs {
+    host_sbs_direct_glyph_plan_tile,
+    host_sbs_direct_glyph_pack_rgb,
+    host_sbs_direct_glyph_resolve_matte,
+    host_sbs_direct_glyph_finish_score,
+  };
+  inline constexpr std::string_view direct_glyph_transport_source_closure_sha256 =
+    "2df402561c88d7e2b2672660e2f9d5f42b06d9815c87b48511adb05af6226b30";
+
+  inline constexpr std::array direct_glyph_palette_specs {
+    host_sbs_direct_glyph_palette_pack_rgb,
+    host_sbs_direct_glyph_palette_pack_tile,
+    host_sbs_direct_glyph_palette_export_roles,
+    host_sbs_direct_glyph_palette_coarse,
+    host_sbs_direct_glyph_palette_make_hist,
+    host_sbs_direct_glyph_palette_smooth_hist,
+    host_sbs_direct_glyph_palette_choose_colors,
+    host_sbs_direct_glyph_palette_make_moments,
+    host_sbs_direct_glyph_palette_smooth_moments,
+    host_sbs_direct_glyph_palette_prototypes,
+    host_sbs_direct_glyph_palette_decode_palette,
+    host_sbs_direct_glyph_begin_history,
+    host_sbs_direct_glyph_confirm_history,
+    host_sbs_direct_glyph_finish_windows,
+    host_sbs_direct_glyph_publish_line,
+    host_sbs_direct_glyph_finish_history,
+  };
+  inline constexpr std::string_view direct_glyph_palette_source_closure_sha256 =
+    "7f5aea30bf4fbd655130f36bb690cea131443e1b71b25553decf545fef79fcf7";
+
+  inline constexpr std::array direct_glyph_prepare_specs {
+    host_sbs_direct_glyph_prepare,
+  };
+  inline constexpr std::string_view direct_glyph_prepare_source_closure_sha256 =
+    "219a6a305c05ca3ac1744286a4e87b83b61128c10e05c61ec517337f279ec940";
 
 }  // namespace models::host_sbs_shader_cache

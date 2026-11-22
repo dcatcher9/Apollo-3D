@@ -68,9 +68,15 @@ CURRENT_OUTLINE_RUNTIME_HEADER = ROOT / "src" / "host_sbs_current_outline_runtim
 CURRENT_BACKGROUND_RUNTIME_HEADER = ROOT / "src" / "host_sbs_selected_glyph_push_pull_runtime.h"
 CURRENT_SHARED_UI_WARP_RUNTIME_HEADER = ROOT / "src" / "host_sbs_shared_ui_warp_runtime.h"
 CURRENT_OUTLINE_RUNTIME_ROOTS = {
-    name: ("outline" if name == "stability" else "hole" if name in {"coverage", "foreground_edge", "trusted_inner"} else name)
-    for name in ("source5", "colour", "components", "enclosure", "roi", "outline", "stability",
-                 "inside", "selector", "hole", "coverage", "foreground_edge", "trusted_inner")
+    **{name: name for name in ("source5", "colour", "components", "enclosure", "roi", "outline",
+                               "inside", "selector", "hole")},
+    "direct_source_audit": "source5",
+    "stability": "outline",
+    "coverage": "hole",
+    "foreground_edge": "hole",
+    "trusted_inner": "hole",
+    "weak_aa_oracle_band": "outline",
+    "weak_aa_oracle_trusted": "hole",
 }
 # Lines of LIMITER_SERIAL_MAX_LINES cells or fewer keep the serial float recurrence. Longer
 # lines are scanned in LIMITER_LINE_CHUNKS Q30 chunks, LIMITER_GROUP_LINES adjacent lines per
@@ -2293,7 +2299,7 @@ def shared_ui_warp_runtime_closures(
         *, names: tuple[str, ...] | None = None) -> dict[str, str]:
     """Calculate the selected route pins from their runtime specification owner."""
     source = header.read_text(encoding="utf-8")
-    routes = ("completed", "queued", "completed_diagnostic", "queued_diagnostic", "text_game")
+    routes = ("completed", "queued", "completed_diagnostic", "queued_diagnostic", "text_game", "raw_model_prepare")
     spec_names = {f"{route}_closure": f"{route}_specs" for route in routes}
     result = {}
     for name in spec_names if names is None else names:

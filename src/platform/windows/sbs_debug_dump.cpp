@@ -2655,7 +2655,7 @@ namespace platf::sbs_debug {
       const auto &proof = job.actual_draw_buffers[1];
       const auto &c24 = job.actual_draw_buffers[3];
       const bool c24_comparable = c24.size() == 96u && receipt.size() == 256u;
-      const nlohmann::json metadata {
+      nlohmann::json metadata {
         {"schema", 2u}, {"diagnostic_only", true}, {"captured", e.captured},
         {"unavailable_reason", e.unavailable_reason},
         {"observation_point", "PSGet bindings inside recorder immediately before Draw and cleanup, inside selected/shared scopes"},
@@ -2694,6 +2694,9 @@ namespace platf::sbs_debug {
         {"empty_background_policy", "Proof status2 skips BG; physical BG texels can legitimately retain preceding contents."},
         {"artifacts", entries},
       };
+      if (!e.shared_pin_model_prepare_closure.empty()) {
+        metadata["shared_pin"]["model_prepare_source_closure_sha256"] = e.shared_pin_model_prepare_closure;
+      }
       const auto path = dir / "actual_draw_evidence.json";
       const bool written = write_json(path, metadata);
       const auto digest = written ? models::file_sha256_hex(path) : std::string {};

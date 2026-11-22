@@ -1,0 +1,2 @@
+#define HOST_SBS_DIRECT_SOURCE_AUDIT
+#include "host_sbs_display_snapshot_rgb8_analysis_cs.hlsl"

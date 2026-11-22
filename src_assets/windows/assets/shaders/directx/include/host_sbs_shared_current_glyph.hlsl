@@ -122,9 +122,25 @@ bool CurrentGlyphContributor(int2 full_pixel) {
 StructuredBuffer<uint> SelectedMatteReceipt : register(t7);
 bool SelectedMatteAuthorized() {
     uint n,s;SelectedMatteReceipt.GetDimensions(n,s);
+#if defined(HOST_SBS_RAW_MODEL_SELECTED_MATTE)
+    if(n!=64u||s!=4u||SelectedMatteReceipt[0u]!=0x31534d53u||SelectedMatteReceipt[1u]!=1u||
+       SelectedMatteReceipt[3u]!=0u||SelectedMatteReceipt[63u]!=0u)return false;
+    uint kind=SelectedMatteReceipt[2u],algorithm=SelectedMatteReceipt[62u];
+    bool ordinary=kind>=1u&&kind<=3u&&(algorithm==1u||(algorithm==2u&&kind==3u));
+    if(!ordinary) {
+#if defined(HOST_SBS_DIRECT_GLYPH_SELECTED_MATTE)
+        if(kind!=4u||(algorithm!=3u&&algorithm!=4u))return false;
+#else
+        if(kind!=4u||algorithm!=3u)return false;
+#endif
+        ContourIdentity.GetDimensions(n,s);
+        if(n!=V2_SUBTITLE_CONTOUR_HISTORY_WORD_COUNT||s!=4u)return false;
+    }
+#else
     if(n!=64u||s!=4u||SelectedMatteReceipt[0u]!=0x31534d53u||SelectedMatteReceipt[1u]!=1u||
        SelectedMatteReceipt[2u]<1u||SelectedMatteReceipt[2u]>3u||SelectedMatteReceipt[3u]!=0u||
        !((SelectedMatteReceipt[62u]==1u)||(SelectedMatteReceipt[62u]==2u&&SelectedMatteReceipt[2u]==3u))||SelectedMatteReceipt[63u]!=0u)return false;
+#endif
     [loop]for(uint i=0u;i<32u;++i)if(SelectedMatteReceipt[28u+i]!=ContourIdentity[i])return false;
     // Exact current contourCB geometry/model/clock mirrors; receipt itself grants no presence.
     [loop]for(uint j=0u;j<12u;++j)if(SelectedMatteReceipt[4u+j]!=ContourIdentity[8u+j])return false;

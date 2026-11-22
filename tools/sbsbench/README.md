@@ -106,6 +106,29 @@ not rebuild. `--build-dir` selects another existing native build. Inputs must be
 SDR PNGs named `frame_<id>.png`, and output must be absent or empty. `--observation-timeline`
 binds explicit source clocks; otherwise `--fps NUM/DEN` authors a 30/1 cadence by default.
 
+Add `--native-features` to capture CBC body, ownership and cover bits, and the Raw matte for mask
+model evaluation. `current_outline_native_features.json` binds the feature textures to the exact
+qualified draw and selected mask. Use `--validate-only --native-features` to verify a saved capture.
+
+The reduced hybrid harness writes `current_outline_raw_matte_reduced.json` schema 3. When the GPU
+plans an active model observation, the manifest binds the exact current CBC body, selected bits,
+and cover bits to that draw's native band. Fresh OCR-empty and pre-authentication fallback frames
+carry null CBC fields. The half-context work validator uses each cover bit with its matching OCR
+rectangle, RawM support, and the trusted floor to reconstruct the compact scoring crop and check
+the recorded dispatch and published mask. The CBC planes also support replay of the model with
+its literal current inputs.
+
+Use `--ocr-midpoint-probe` to test a wider midpoint tolerance for independently horizontal
+video caption lines that span the reference center. Qualification records the probe mode.
+Pass the same flag when validating that capture.
+
+Use `--omit-foreground-edge` to capture the selected matte with optional foreground-edge
+recovery disabled. Use `--omit-stroke-coverage` to omit only the optional stroke-coverage
+group while retaining hole completion, foreground-edge recovery and trusted-inner publication.
+The options are mutually exclusive. Qualification records the requested omission and retains
+all current-outline shader availability checks. Pass the same flag when validating a saved
+ablation.
+
 Selected stereo images live separately in `current-outline/sbs_<id>.png`. The atomic
 `current_outline_qualification.json` binds each exact source snapshot, observation clock,
 publication receipt, selected/SCT/SCP/ParallaxState words, draw b3, native pin-band shape,
@@ -178,7 +201,35 @@ with the shared warp's current source closure and an explicit `shared-ui-pin-ban
 Its native row flags may grant pin support only with current selected receipt, SCT and SCP authority;
 they do not prove semantic glyph completeness or a clean hidden background.
 
+The experimental `--current-outline-direct-glyph` route writes schema 3 in
+`current_outline_direct_glyph.json`. It binds the Direct source-audit shader closure and the
+selected draw's 104-word `source-audit.u32` file for each active model observation. Empty and
+legacy observations have a null `source_audit` binding.
+
+Add `--current-outline-direct-glyph-adaptive-context` to that command to test
+adaptive context on large caption boxes. This writes schema 4. For an active
+draw, `execution[3]` records the selected scale factor. `placement[10]` records
+zero for native tiles or the same factor for scaled tiles. In schema 4 the
+placement coordinates are on the selected model lattice, while the work boxes,
+selected mask, alpha and stereo output use their original native coordinates.
+
+Add `--current-outline-direct-glyph-resolved-fringe` alongside adaptive context
+to capture the Live and Convert publication policy in schema 5. Work and
+Placement retain their schema 4 meanings. Outside Work, the selected mask and
+alpha can include pixels with alpha8 of at least 64 inside the bounded OCR strip,
+with every interpolation tap covered by the completed Placement. Omit this
+bench flag to compare both policies with the same executable and model.
+
 ## Subtitle diagnostics
+
+The offline Direct Glyph reference in `direct_glyph_normalization.py` uses one
+expanded native OCR rectangle per line. Pass the same rectangle to RGB and
+label extraction. Its full height sets the scale for both axes. Long lines use
+overlapping tiles at that scale. The reference stitches the continuous opacity
+in model coordinates, then samples it at every native pixel center before
+quantization. The host's adaptive scale is recorded separately in the capture
+manifest. The regression tests run with
+`-m unittest tools.sbsbench.test_direct_glyph_normalization` from the repository root.
 
 For bounded subtitle research, ordinary evaluation can use
 `--subtitle-plane-diagnostics --subtitle-plane-diagnostic-frames 61-78,111-121,143-146`

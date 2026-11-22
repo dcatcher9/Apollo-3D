@@ -24,8 +24,8 @@ struct program_t {
   source5::program_t source;
   std::array<ID3D11ComputeShader *, 5u> colour{};
   std::array<ID3D11ComputeShader *, 6u> components{};
-  // Only shader arrays are consumed. Caller context/producer/snapshot fields
-  // are ignored.
+  // Shader arrays and explicit producer mode. Caller context/producer/snapshot
+  // fields are ignored.
   f2::program_t outline;
 };
 
@@ -40,6 +40,8 @@ struct request_t {
   UINT expected_work =
       0u; // Actual pending work0/1/2. Never relabel non-OOCR work as1.
   const current_outline_stage_observer::observer_t *stage_observer = nullptr;
+  // Reduced route only. Same 256-byte layout, used exclusively for indirect work.
+  ID3D11Buffer *work_root_indirect = nullptr;
 };
 
 struct current_operands_t {
@@ -72,9 +74,8 @@ struct current_operands_t {
 
 struct bundle_t {
   std::uint64_t host_sequence = 0u, owner_epoch = 0u;
-  // True ONLY means all three helper queue calls returned commands-submitted
-  // success. It is not GPU completion/availability, token proof, EMPTY, birth,
-  // DDup or draw authority.
+  // True only when the full Rule schedule was submitted. GPU completion,
+  // token proof and draw authority remain independently checked.
   bool all_stages_issued = false;
   UINT width = 0u, full_height = 0u, crop_top = 0u, band_height = 0u;
   current_operands_t current;
@@ -83,6 +84,10 @@ struct bundle_t {
   raw::mutable_views_t ring;
   f2::mutable_views_t outline;
   ComPtr<ID3D11ShaderResourceView> baseline_matte, numeric_proof; // Exact same queued current baseline.
+  // Reduced schedule submitted: ring.matte is RawM and outline.matte is the
+  // binary Inside|Trusted floor. Root0 holds storage and grants no freshness.
+  // This mode never authenticates as a complete F2 Rule publication.
+  bool raw_model_floor = false;
 };
 
 class resources_t {
@@ -100,11 +105,12 @@ class resources_t {
   std::array<ComPtr<ID3D11ComputeShader>, 1u> trusted_inner_shader_lease_;
   UINT width_ = 0u, full_height_ = 0u, crop_top_ = 0u, band_height_ = 0u;
   std::uint64_t sequence_ = 0u, owner_epoch_ = 0u;
-  bool ready_ = false, recorded_ = true, all_stages_issued_ = false;
-  bool program_validated_ = false;
+  bool ready_ = false, recorded_ = true, all_stages_issued_ = false, raw_model_floor_issued_ = false;
+  bool program_validated_ = false, validated_floor_mode_ = false;
 
   bool matches_program(const program_t &p) const noexcept {
-    if (!program_validated_) return false;
+    const bool floor_mode = p.outline.raw_model_floor;
+    if (!program_validated_ || validated_floor_mode_ != floor_mode) return false;
     UINT at = 0u;
     const auto append = [&](const auto &group) {
       for (auto *shader : group) if (at >= shader_lease_.size() || shader != shader_lease_[at++].Get()) return false;
@@ -113,13 +119,14 @@ class resources_t {
     if (!append(std::array{p.source.prepare, p.source.copy, p.source.finalize, p.source.envelope}) ||
         !append(p.colour) || !append(p.components) || !append(p.outline.enclosure.shaders) ||
         !append(p.outline.enclosure.roi_graph) || !append(p.outline.shaders) ||
-        !append(p.outline.roi_graph) || !append(p.outline.band_shaders) || !append(p.outline.inside_shaders) ||
-        at != shader_lease_.size()) return false;
+        !append(p.outline.roi_graph) || (!floor_mode && !append(p.outline.band_shaders)) || !append(p.outline.inside_shaders) ||
+        at != shader_lease_.size() - (floor_mode ? p.outline.band_shaders.size() : 0u)) return false;
+    for (UINT i = 0u; i < trusted_inner_shader_lease_.size(); ++i) if (p.outline.trusted_inner_publish_shaders[i] != trusted_inner_shader_lease_[i].Get()) return false;
+    if (floor_mode) return true;
     for (UINT i = 0u; i < stability_shader_lease_.size(); ++i) if (p.outline.stability_shaders[i] != stability_shader_lease_[i].Get()) return false;
     for (UINT i = 0u; i < hole_shader_lease_.size(); ++i) if (p.outline.hole_shaders[i] != hole_shader_lease_[i].Get()) return false;
     for (UINT i = 0u; i < coverage_shader_lease_.size(); ++i) if (p.outline.coverage_shaders[i] != coverage_shader_lease_[i].Get()) return false;
     for (UINT i = 0u; i < foreground_edge_shader_lease_.size(); ++i) if (p.outline.foreground_edge_shaders[i] != foreground_edge_shader_lease_[i].Get()) return false;
-    for (UINT i = 0u; i < trusted_inner_shader_lease_.size(); ++i) if (p.outline.trusted_inner_publish_shaders[i] != trusted_inner_shader_lease_[i].Get()) return false;
     return true;
   }
 
@@ -193,6 +200,10 @@ class resources_t {
           "Composition requires an actual prepared same-device pending tuple";
       return false;
     }
+    if (!f2_.matches_storage_mode(p.outline.raw_model_floor)) {
+      error = "Composition storage does not match the requested producer mode";
+      return false;
+    }
     for (auto *view :
          {r.source.display_snapshot_band, r.source.parent_raw_source,
           r.source.actual_sct32, r.probability, r.support, r.ocr_record,
@@ -207,6 +218,10 @@ class resources_t {
       error = "Composition current CB/root missing or on another device";
       return false;
     }
+    if (r.work_root_indirect && !p.outline.raw_model_floor) {
+      error = "Composition private work root requires the reduced producer";
+      return false;
+    }
     constexpr UINT pwords = depth_coordinate_v2::subtitle_ocr_output_width *
                             depth_coordinate_v2::subtitle_ocr_output_height;
     if (!structured_view(r.probability, pwords) ||
@@ -218,6 +233,7 @@ class resources_t {
     // Only immutable shader/device facts are reused. Every request, resource
     // descriptor, context and source identity check above still runs each call.
     if (matches_program(p)) { reused_program = true;return true; }
+    const bool floor_mode = p.outline.raw_model_floor;
     UINT count = 0u;
     auto add = [&](ID3D11ComputeShader *s) {
       if (!same_device(s) || count >= shaders.size())
@@ -260,19 +276,31 @@ class resources_t {
         error = "Composition raw ROI shader unavailable";
         return false;
       }
-    for (auto *s : p.outline.band_shaders)
-      if (!add(s)) {
-        error = "Composition F2 shader unavailable";
-        return false;
-      }
+    if (!floor_mode)
+      for (auto *s : p.outline.band_shaders)
+        if (!add(s)) {
+          error = "Composition F2 shader unavailable";
+          return false;
+        }
     for (auto *s : p.outline.inside_shaders)
       if (!add(s)) {
         error = "Composition independent Inside shader unavailable";
         return false;
       }
-    if (count != shaders.size()) {
+    if (count != shaders.size() - (floor_mode ? p.outline.band_shaders.size() : 0u)) {
       error = "Composition shader bundle shape mismatch";
       return false;
+    }
+    bool trusted_inner_available = true;
+    for (auto *shader : p.outline.trusted_inner_publish_shaders) trusted_inner_available = trusted_inner_available && same_device(shader);
+    if (trusted_inner_available)
+      for (UINT i = 0u; i < trusted_inner_shaders.size(); ++i) trusted_inner_shaders[i] = p.outline.trusted_inner_publish_shaders[i];
+    if (floor_mode) {
+      if (!trusted_inner_available) {
+        error = "Composition raw model floor requires trusted-inner publication";
+        return false;
+      }
+      return true;
     }
     bool holes_available = true;
     for (auto *shader : p.outline.hole_shaders) holes_available = holes_available && same_device(shader);
@@ -286,10 +314,6 @@ class resources_t {
     for (auto *shader : p.outline.foreground_edge_shaders) foreground_edge_available = foreground_edge_available && same_device(shader);
     if (foreground_edge_available)
       for (UINT i = 0u; i < foreground_edge_shaders.size(); ++i) foreground_edge_shaders[i] = p.outline.foreground_edge_shaders[i];
-    bool trusted_inner_available = true;
-    for (auto *shader : p.outline.trusted_inner_publish_shaders) trusted_inner_available = trusted_inner_available && same_device(shader);
-    if (trusted_inner_available)
-      for (UINT i = 0u; i < trusted_inner_shaders.size(); ++i) trusted_inner_shaders[i] = p.outline.trusted_inner_publish_shaders[i];
     bool stability_available = true;
     for (auto *s : p.outline.stability_shaders)
       stability_available = stability_available && same_device(s);
@@ -347,17 +371,19 @@ public:
   bool invalidate_subtitle_history(ID3D11DeviceContext *context) {
     if (!f2_.invalidate_subtitle_history(context)) return false;
     all_stages_issued_ = false;
+    raw_model_floor_issued_ = false;
     current_ = {};
     return true;
   }
 
   bool ensure(ID3D11Device *device, UINT width, UINT full_height, UINT crop_top,
-              UINT band_height, std::string &error) {
+              UINT band_height, std::string &error, bool raw_model_floor = false) {
     error.clear();
     all_stages_issued_ = false;
+    raw_model_floor_issued_ = false;
     if (ready_ && device_.Get() == device && width_ == width &&
         full_height_ == full_height && crop_top_ == crop_top &&
-        band_height_ == band_height)
+        band_height_ == band_height && f2_.matches_storage_mode(raw_model_floor))
       return true;
     if (owner_epoch_ == std::numeric_limits<std::uint64_t>::max()) {
       error = "Composition owner epoch exhausted";
@@ -370,7 +396,7 @@ public:
     next.owner_epoch_ = owner_epoch_ + 1u;
     if (!next.source_.ensure(device, width, full_height, crop_top, band_height,
                              error) ||
-        !next.f2_.ensure(device, width, band_height, error))
+        !next.f2_.ensure(device, width, band_height, error, raw_model_floor))
       return false;
     next.device_ = device;
     next.width_ = width;
@@ -391,6 +417,7 @@ public:
              const request_t &r, std::string &error) {
     error.clear();
     all_stages_issued_ = false;
+    raw_model_floor_issued_ = false;
     shader_lease_t shaders;
     std::array<ComPtr<ID3D11ComputeShader>, 3u> stability_shaders;
     std::array<ComPtr<ID3D11ComputeShader>, 9u> hole_shaders;
@@ -417,10 +444,11 @@ public:
       foreground_edge_shader_lease_ = std::move(foreground_edge_shaders);
       trusted_inner_shader_lease_ = std::move(trusted_inner_shaders);
       program_validated_ = true;
+      validated_floor_mode_ = p.outline.raw_model_floor;
     }
     const auto source_request = current_.source_request();
     if (!source_.queue_current(context, p.source, source_request,
-                               current_.actual_uip40.Get(), error))
+                               current_.actual_uip40.Get(), error, r.work_root_indirect))
       return false;
     if (r.stage_observer) r.stage_observer->mark(context, current_outline_stage_observer::stage_e::source5_end);
     const auto v = source_.views();
@@ -430,6 +458,10 @@ public:
     program.band_shaders = p.outline.band_shaders;
     program.inside_shaders = p.outline.inside_shaders;
     program.coverage_diagnostics = p.outline.coverage_diagnostics;
+    program.raw_model_floor = p.outline.raw_model_floor;
+    // The F2 owner leases these together and binds their observation-only outputs.
+    program.weak_aa_oracle_publish_final = p.outline.weak_aa_oracle_publish_final;
+    program.weak_aa_oracle_trusted_inner_publish = p.outline.weak_aa_oracle_trusted_inner_publish;
     program.stage_observer = r.stage_observer;
     for (UINT i = 0u; i < program.hole_shaders.size(); ++i) program.hole_shaders[i] = hole_shader_lease_[i].Get();
     for (UINT i = 0u; i < program.coverage_shaders.size(); ++i) program.coverage_shaders[i] = coverage_shader_lease_[i].Get();
@@ -441,6 +473,9 @@ public:
     program.enclosure.roi_graph = p.outline.enclosure.roi_graph;
     program.enclosure.current_sct = current_.sct.Get();
     program.enclosure.current_uip = v.uip_envelope.Get();
+    auto *actual_root = current_.actual_final256.Get();
+    auto *work_root = r.work_root_indirect ? r.work_root_indirect : actual_root;
+    if (r.work_root_indirect) program.enclosure.actual_root = actual_root;
     auto &producer = program.enclosure.producer;
     producer.original_source = v.reference_rgb8.Get();
     producer.transfer = cbc::transfer_t::encoded_sdr;
@@ -461,9 +496,10 @@ public:
                       current_.actual_contour_constants96.Get(),
                       v.analysis_band.Get(), current_.probability.Get(),
                       current_.support.Get(), current_.ocr_record.Get(),
-                      current_.actual_final256.Get(), 240u, error, &program))
+                      work_root, 240u, error, &program))
       return false;
-    all_stages_issued_ = true;
+    all_stages_issued_ = !program.raw_model_floor;
+    raw_model_floor_issued_ = program.raw_model_floor;
     return true;
   }
 
@@ -478,7 +514,8 @@ public:
             band_height_,       current_,
             source_.views(),    f2_.enclosure_views(),
             f2_.raw_views(),    f2_.mutable_views(),
-            baseline.matte,    baseline.validation_receipt};
+            baseline.matte,    baseline.validation_receipt,
+            raw_model_floor_issued_};
   }
 };
 } // namespace models::source5_cbc5_f2_composition_gpu_v1

@@ -20,6 +20,7 @@
 #include "host_sbs_selected_matte_gpu.h"
 #include "host_sbs_current_outline_runtime_programs.h"
 #include "host_sbs_current_outline_observation.h"
+#include "host_sbs_direct_glyph_gpu.h"
 #include "host_sbs_v2_gpu_executor.h"
 #include "logging.h"
 #include "model_manager.h"
@@ -28,6 +29,7 @@
 #include "platform/windows/utils.h"
 #include "prod_zipdepth_convex2x.h"
 #include "sbs_perf.h"
+#include "sbs_bench_raw_matte_gpu.h"
 #include "utility.h"
 
 #include <algorithm>
@@ -1636,6 +1638,8 @@ namespace models {
       "PP-OCRv6 tiny engine"
     );
   }
+
+  #include "host_sbs_direct_glyph_engine.inc"
 
   void detail::begin_live_model_preparation(const config::depth_model_info &model) {
     set_model_prepare_status(engine_filename(model), engine_build_status::building);
@@ -3546,9 +3550,40 @@ namespace models {
     host_sbs_subtitle_inner_colour_gpu_global_validation_v2::resources_t subtitle_inner_colour_research;
     bool subtitle_selected_matte_enabled=false,subtitle_selected_matte_commands=false;
     bool subtitle_current_outline_enabled=false;
+    bool subtitle_current_outline_omit_foreground_edge = false;
+    bool subtitle_current_outline_omit_stroke_coverage = false;
+    bool subtitle_current_outline_raw_matte_reduced = false;
     current_outline_runtime::programs_t subtitle_current_outline_programs;
     source5_cbc5_f2_composition_gpu_v1::resources_t subtitle_current_outline_composition;
     research_current_outline_selected_matte_v2::resources_t subtitle_current_outline_selected;
+    sbs_bench::raw_matte_gpu::resources_t subtitle_current_outline_raw_matte;
+    host_sbs_direct_glyph_gpu::resources_t subtitle_direct_glyph_score;
+    display_snapshot_rgb8_analysis_gpu_v1::resources_t subtitle_direct_glyph_source;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_direct_glyph_source_audit;
+    std::array<Microsoft::WRL::ComPtr<ID3D11ComputeShader>, current_outline_runtime::direct_source_audit_specs.size()>
+      subtitle_direct_glyph_source_shaders;
+    std::array<nvinfer1::IExecutionContext *, host_sbs_direct_glyph_gpu::tile_profile_count> subtitle_direct_glyph_contexts {};
+    std::array<std::string, host_sbs_direct_glyph_gpu::tile_profile_count> subtitle_direct_glyph_engine_keys;
+    std::optional<host_sbs_direct_glyph_gpu::tile_profile_e> subtitle_direct_glyph_profile;
+    struct subtitle_direct_glyph_job_t {
+      sbs_bench::raw_matte_gpu::early_request_t publication;
+      host_sbs_direct_glyph_gpu::request_t score;
+      std::chrono::steady_clock::time_point deadline;
+    };
+    std::optional<subtitle_direct_glyph_job_t> subtitle_direct_glyph_job;
+    struct subtitle_direct_glyph_tail_t {
+      bool input_domain_reset;
+      bool snapshot_requested;
+    };
+    std::optional<subtitle_direct_glyph_tail_t> subtitle_direct_glyph_tail;
+    bool subtitle_direct_glyph_enabled = false;
+    bool subtitle_direct_glyph_requested = false;
+    bool subtitle_direct_glyph_late_score = false;
+    bool subtitle_direct_glyph_score_failed = false;
+    bool subtitle_direct_glyph_capture_plan = false;
+    bool subtitle_direct_glyph_adaptive_context = false;
+    bool subtitle_direct_glyph_line_palette = false;
+    bool subtitle_direct_glyph_score_retired = false;
     std::string subtitle_current_outline_error;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_selected_matte_shader;
     research_selected_matte_v1::resources_t subtitle_selected_matte; // independent of temporal epoch
@@ -6186,6 +6221,7 @@ namespace models {
       // Release private callback before any existing bounded CUDA teardown query.
       // Queued userdata owns its state even if the old quarantine/retain path is taken.
       if (benchmark_joined_completion_gate) benchmark_joined_completion_gate->cancel_and_release();
+      release_subtitle_direct_glyph();
       auto &cuda = cuda_driver_api::get();
       bool cleanup_execution_ok = cuda.is_valid() && cuda_ctx;
       const auto retain_all_cuda_backing = [&]() noexcept {
@@ -6602,6 +6638,10 @@ namespace models {
 
     [[nodiscard]] research_selected_matte_v1::views_t selected_matte_views() const {
       if (subtitle_current_outline_enabled) {
+        if (subtitle_current_outline_raw_matte_reduced || subtitle_direct_glyph_enabled) {
+          const auto v = subtitle_current_outline_raw_matte.views();
+          return {v.matte, v.receipt};
+        }
         const auto v=subtitle_current_outline_selected.views();
         return {v.matte,v.receipt};
       }
@@ -6631,6 +6671,143 @@ namespace models {
       request.postprocess_mode=pending_near_identical_postprocess_mode();
       request.expected_work=cuda_conditional_graph::work_flags_value(pending_root->subtitle_work);
       return request;
+    }
+
+    [[nodiscard]] sbs_bench::raw_matte_gpu::early_request_t make_early_subtitle_matte_request(
+      const source5_cbc5_f2_composition_gpu_v1::request_t &request, UINT width, UINT crop,
+      bool allow_lazy_legacy
+    ) const {
+      sbs_bench::raw_matte_gpu::early_request_t model;
+      model.width = width;
+      model.height = crop;
+      model.frame = request.source.frame;
+      model.observation_us = request.source.observation_us;
+      model.analysis_generation = request.source.analysis_generation;
+      model.token = request.source.token;
+      model.current_constants = request.source.actual_contour_constants96;
+      model.ocr = request.ocr_record;
+      model.sct = request.source.actual_sct32;
+      model.condition = subtitle_condition_params_srv.Get();
+      model.root = near_identical_transaction.srv.Get();
+      model.uip = request.actual_uip40;
+      model.postprocess_mode = request.postprocess_mode;
+      model.expected_work = request.expected_work;
+      model.use_empty_gate = true;
+      if (allow_lazy_legacy) {
+        model.legacy_dense_shader = subtitle_glyph_matte_cs.Get();
+        model.legacy_rgb = subtitle_contour_source.srv.Get();
+        model.legacy_support = subtitle_contour_support.srv.Get();
+        model.legacy_observation = subtitle_contour_observation.srv.Get();
+      }
+      return model;
+    }
+
+    void report_subtitle_outline_failure(const std::string &error) {
+      if (subtitle_current_outline_error != error) {
+        BOOST_LOG(warning) << "Subtitle outline unavailable for this observation: " << error;
+        subtitle_current_outline_error = error;
+      }
+    }
+
+    void dispatch_subtitle_direct_glyph(bool input_domain_reset) {
+      namespace glyph = host_sbs_direct_glyph_gpu;
+      namespace source5 = display_snapshot_rgb8_analysis_gpu_v1;
+      subtitle_direct_glyph_score_retired = false;
+      subtitle_direct_glyph_source_audit.Reset();
+      const auto width = pending_root->input_region.width();
+      const auto height = pending_root->input_region.height();
+      const auto crop = subtitle_ocr_source_crop_height(width, height);
+      if (!crop || crop > height) return;
+      const auto request = make_subtitle_current_outline_request();
+      auto publication = make_early_subtitle_matte_request(request, width, crop, !subtitle_direct_glyph_adaptive_context);
+      std::string error;
+      if (subtitle_direct_glyph_late_score) {
+        glyph::result_t discarded;
+        const auto status = subtitle_direct_glyph_score.poll(nullptr, discarded, error);
+        subtitle_direct_glyph_late_score = status == glyph::poll_status_e::pending;
+        subtitle_direct_glyph_score_failed = status == glyph::poll_status_e::failed;
+      }
+      const bool can_score = !subtitle_direct_glyph_late_score && !subtitle_direct_glyph_score_failed;
+      auto *schedule = subtitle_current_outline_raw_matte.prepare_empty_gate(context.Get(), publication, error);
+      publication.use_empty_gate = schedule != nullptr;
+      const auto &shader = subtitle_direct_glyph_source_shaders;
+      const source5::program_t program {shader[0].Get(), shader[1].Get(), shader[2].Get(), shader[3].Get()};
+      std::optional<source5::direct_audit_submission_t> audit;
+      if (can_score && request.source.parent_raw_source && request.source.display_snapshot_band &&
+          subtitle_direct_glyph_source.ensure_direct_audit(device.Get(), width, height, height - crop, crop, error)) {
+        audit = subtitle_direct_glyph_source.queue_current_audit(context.Get(), program, request.source,
+                                                                 request.actual_uip40, error, schedule);
+        if (audit && subtitle_direct_glyph_capture_plan) {
+          subtitle_direct_glyph_source_audit = audit->uip_envelope();
+        }
+      }
+      auto *work = subtitle_current_outline_raw_matte.plan_direct(context.Get(), publication,
+                                                                  audit ? &*audit : nullptr,
+                                                                  subtitle_direct_glyph_adaptive_context, error,
+                                                                  subtitle_direct_glyph_line_palette);
+      if (!work) {
+        report_subtitle_outline_failure(error);
+        return;
+      }
+      const auto profile = subtitle_direct_glyph_line_palette ? glyph::tile_profile_e::common :
+                           glyph::tile_profile_for_band(width, crop, height - crop);
+      subtitle_direct_glyph_profile = profile;
+      const glyph::request_t score {
+        .source_rgb = audit ? audit->display_snapshot_band() : nullptr, .work = work, .width = width, .band_height = crop,
+        .crop_top = height - crop, .token = publication.token, .capture_plan = subtitle_direct_glyph_capture_plan,
+        .adaptive_context = subtitle_direct_glyph_adaptive_context,
+        .profile = profile,
+        .detector_caps = subtitle_direct_glyph_line_palette ? subtitle_current_outline_raw_matte.direct_detector_caps() : nullptr,
+        .generation = publication.analysis_generation, .frame = publication.frame,
+        .origin_x = pending_root->input_region.left, .origin_y = pending_root->input_region.top,
+        .color_domain = static_cast<UINT>(pending_root->color_space),
+        .reset_history = input_domain_reset,
+      };
+      if (can_score) {
+        const auto status = subtitle_direct_glyph_score.try_submit(score, error);
+        if (status == glyph::submit_status_e::accepted) {
+          const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds {250};
+          subtitle_direct_glyph_job.emplace(subtitle_direct_glyph_job_t {publication, score, deadline});
+          return;
+        }
+        subtitle_direct_glyph_score_failed = status == glyph::submit_status_e::failed;
+      }
+      if (!error.empty()) report_subtitle_outline_failure(error);
+      subtitle_selected_matte_commands = subtitle_current_outline_raw_matte.publish_direct(context.Get(), publication, nullptr, nullptr);
+    }
+
+    bool retire_subtitle_direct_glyph(const bool evaluation_wait) {
+      if (!subtitle_direct_glyph_job) return true;
+      namespace glyph = host_sbs_direct_glyph_gpu;
+      auto &job = *subtitle_direct_glyph_job;
+      std::string error;
+      glyph::result_t result;
+      auto status = subtitle_direct_glyph_score.poll(&job.score, result, error);
+      if (evaluation_wait) {
+        // Only the explicit file-fed evaluation entry waits. Live completion keeps the
+        // observation reserved while the next nonblocking poll proves the same lease.
+        while (status == glyph::poll_status_e::pending && std::chrono::steady_clock::now() < job.deadline) {
+          std::this_thread::sleep_for(std::chrono::milliseconds {1});
+          status = subtitle_direct_glyph_score.poll(&job.score, result, error);
+        }
+      }
+      if (status == glyph::poll_status_e::pending) {
+        if (std::chrono::steady_clock::now() < job.deadline) return false;
+        // Publish the observation as unavailable while the late score keeps its private
+        // buffers until a subsequent poll can discard it without copying Work.
+        subtitle_direct_glyph_late_score = true;
+        error = "Direct glyph scoring did not retire before its deadline";
+      }
+      subtitle_direct_glyph_score_failed = status == glyph::poll_status_e::failed;
+      subtitle_direct_glyph_score_retired = status == glyph::poll_status_e::ready;
+      const bool ready = status == glyph::poll_status_e::ready;
+      if (ready) subtitle_current_outline_error.clear();
+      else if (!error.empty()) report_subtitle_outline_failure(error);
+      subtitle_selected_matte_commands = subtitle_current_outline_raw_matte.publish_direct(
+        context.Get(), job.publication, ready ? result.alpha8.Get() : nullptr, ready ? result.completed_placement.Get() : nullptr);
+      subtitle_direct_glyph_score.retire();
+      subtitle_direct_glyph_job.reset();
+      return true;
     }
 
     [[nodiscard]] static research_current_outline_selected_matte_v2::inputs_t
@@ -6664,32 +6841,36 @@ namespace models {
     }
 
     void dispatch_subtitle_current_outline(ID3D11ShaderResourceView *legacy_matte, d3d_perf_slot *perf_slot) {
-      const auto failed=[&](const std::string &why) {
-        if (subtitle_current_outline_error!=why) {
-          BOOST_LOG(warning)<<"Subtitle outline unavailable for this observation: "<<why;
-          subtitle_current_outline_error=why;
-        }
-      };
-      if (!pending_root->submitted_source || !subtitle_contour_source_snapshot.ready() ||
-          !subtitle_contour_probability_snapshot.ready()) {
+      const auto failed = [this](const std::string &why) { report_subtitle_outline_failure(why); };
+      const bool reduced = subtitle_current_outline_raw_matte_reduced;
+      const bool has_source = pending_root->submitted_source && subtitle_contour_source_snapshot.ready() &&
+                              subtitle_contour_probability_snapshot.ready();
+      if (!has_source && !reduced) {
         failed("Current source tuple unavailable");return;
       }
       const auto w=pending_root->input_region.width(),h=pending_root->input_region.height();
       const auto crop=subtitle_ocr_source_crop_height(w,h);
       if (!w || !h || !crop || crop>h) {failed("Invalid source geometry");return;}
       std::string error;
-      if (!subtitle_current_outline_composition.ensure(device.Get(),w,h,h-crop,crop,error) ||
-          !subtitle_current_outline_selected.ensure(device.Get(),w,crop,error)) {
+      const bool composition_ready = has_source &&
+        subtitle_current_outline_composition.ensure(device.Get(),w,h,h-crop,crop,error,reduced);
+      if (!reduced && (!composition_ready || !subtitle_current_outline_selected.ensure(device.Get(),w,crop,error))) {
         failed(error);return;
       }
       auto request=make_subtitle_current_outline_request();
       current_outline_stage_observer::observer_t stage_observer;
+      struct timing_owner_t {
+        d3d_perf_slot *slot;
+        bool reduced;
+      } timing_owner {perf_slot, reduced};
       if (perf_slot) {
         context->End(perf_slot->subtitle_composition[0u].Get());
         perf_slot->subtitle_composition_marks = 1u;
-        stage_observer = {perf_slot,
+        stage_observer = {&timing_owner,
           [](void *user, ID3D11DeviceContext *ctx, current_outline_stage_observer::stage_e stage) noexcept {
-            auto &slot = *static_cast<d3d_perf_slot *>(user);
+            const auto &owner = *static_cast<timing_owner_t *>(user);
+            if (owner.reduced && stage == current_outline_stage_observer::stage_e::f2_end) return;
+            auto &slot = *owner.slot;
             const auto index = static_cast<std::size_t>(stage) + 1u;
             if (index < slot.subtitle_composition.size()) {
               ctx->End(slot.subtitle_composition[index].Get());
@@ -6698,40 +6879,197 @@ namespace models {
           }};
         request.stage_observer = &stage_observer;
       }
-      // Fresh EMPTY follows the same dispatch path and publishes a current zero mask.
       const auto queue_start = diagnostics_enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
-      const bool issued = subtitle_current_outline_composition.queue(context.Get(),subtitle_current_outline_programs.composition_program(),request,error);
+      const auto &program = subtitle_current_outline_programs.composition_program();
+      bool issued = false;
+      sbs_bench::raw_matte_gpu::early_request_t model;
+      // Keep the loaded programs available to the qualification readiness check.
+      if (reduced) {
+        model = make_early_subtitle_matte_request(request, w, crop, true);
+        request.work_root_indirect = subtitle_current_outline_raw_matte.prepare_empty_gate(context.Get(), model, error);
+        model.use_empty_gate = request.work_root_indirect != nullptr;
+        if (composition_ready) {
+          auto reduced_program = program;
+          reduced_program.outline.raw_model_floor = true;
+          issued = subtitle_current_outline_composition.queue(context.Get(), reduced_program, request, error);
+        }
+      } else if (subtitle_current_outline_omit_foreground_edge || subtitle_current_outline_omit_stroke_coverage) {
+        auto ablation = program;
+        if (subtitle_current_outline_omit_foreground_edge) {
+          ablation.outline.foreground_edge_shaders = {};
+        } else {
+          ablation.outline.coverage_shaders = {};
+        }
+        issued = subtitle_current_outline_composition.queue(context.Get(), ablation, request, error);
+      } else {
+        // Fresh EMPTY follows the same dispatch path and publishes a current zero mask.
+        issued = subtitle_current_outline_composition.queue(context.Get(), program, request, error);
+      }
       if (diagnostics_enabled) sbs_perf::add_sample_ms("depth_subtitle_queue_cpu",
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - queue_start).count());
-      if (!issued) {
+      if (!issued && !reduced) {
         failed(error);return;
       }
       const auto bundle=subtitle_current_outline_composition.bundle();
-      if (!bundle.all_stages_issued || bundle.current.frame!=pending_root->frame_id ||
-          bundle.current.observation_us!=pending_root->observation_timestamp_us ||
-          bundle.current.analysis_generation!=pending_root->input_region.analysis_generation ||
-          bundle.current.token!=pending_root->transaction_token) {
+      const bool producer_current = issued && (reduced ? bundle.raw_model_floor : bundle.all_stages_issued) &&
+        bundle.current.frame == pending_root->frame_id &&
+        bundle.current.observation_us == pending_root->observation_timestamp_us &&
+        bundle.current.analysis_generation == pending_root->input_region.analysis_generation &&
+        bundle.current.token == pending_root->transaction_token;
+      if (!producer_current && !reduced) {
         failed("Composition publication identity mismatch");return;
       }
-      const auto in=make_subtitle_current_outline_selector_inputs(
-        bundle,near_identical_transaction.srv.Get(),legacy_matte);
-      subtitle_selected_matte_commands=subtitle_current_outline_selected.queue(context.Get(),subtitle_current_outline_programs.selector_program(),in,error);
+      if (reduced) {
+        // Empty publication and current legacy fallback can succeed even if the model's
+        // optional producer lost an operand. Never substitute previous producer views.
+        if (producer_current) {
+          model.rgb = bundle.source.analysis_band.Get();
+          model.cover = bundle.enclosure.cover_bits.Get();
+          model.body = bundle.enclosure.body.Get();
+          model.selected = bundle.enclosure.selected_bits.Get();
+          model.raw = bundle.ring.matte.Get();
+          model.floor = bundle.outline.matte.Get();
+          model.source_envelope = bundle.source.uip_envelope.Get();
+          model.cbc_meta = bundle.enclosure.receipt.Get();
+          model.raw_meta = bundle.ring.receipt.Get();
+          model.floor_data = bundle.outline.calibration_data.Get();
+        }
+        subtitle_selected_matte_commands = subtitle_current_outline_raw_matte.queue_early(context.Get(), model, error);
+        if (perf_slot && subtitle_selected_matte_commands) {
+          constexpr auto end = static_cast<std::size_t>(current_outline_stage_observer::stage_e::f2_end) + 1u;
+          context->End(perf_slot->subtitle_composition[end].Get());
+          perf_slot->subtitle_composition_marks |= 1u << end;
+        }
+      } else {
+        const auto in=make_subtitle_current_outline_selector_inputs(
+          bundle,near_identical_transaction.srv.Get(),legacy_matte);
+        subtitle_selected_matte_commands=subtitle_current_outline_selected.queue(context.Get(),subtitle_current_outline_programs.selector_program(),in,error);
+      }
       if (!subtitle_selected_matte_commands) failed(error);
       else subtitle_current_outline_error.clear();
     }
 
+    void release_subtitle_direct_glyph() noexcept {
+      if (std::ranges::none_of(subtitle_direct_glyph_contexts, [](auto *execution) { return execution != nullptr; })) return;
+      host_sbs_direct_glyph_gpu::result_t discarded;
+      std::string error;
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds {250};
+      while (subtitle_direct_glyph_score.poll(nullptr, discarded, error) ==
+             host_sbs_direct_glyph_gpu::poll_status_e::pending &&
+             std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds {1});
+      }
+      const bool released = subtitle_direct_glyph_score.release();
+      std::lock_guard lock(g_trt_mutex);
+      for (std::size_t i = 0; i < subtitle_direct_glyph_contexts.size(); ++i) {
+        auto &execution = subtitle_direct_glyph_contexts[i];
+        if (execution) {
+          auto &engine_key = subtitle_direct_glyph_engine_keys[i];
+          recycle_or_quarantine_execution_context_locked(engine_key, execution, true, !released);
+          engine_key.clear();
+        }
+      }
+    }
+
+    bool prepare_subtitle_direct_glyph(const subtitle_selected_matte_research_configuration_t &cfg, std::string &error) {
+      namespace outline = current_outline_runtime;
+      const auto root = std::filesystem::path(cfg.current_outline_shader_root) / "source5";
+      const auto sources = host_sbs_shader_cache::snapshot_sources(root, outline::direct_source_audit_specs);
+      if (!sources || host_sbs_shader_cache::source_closure_sha256(sources) != outline::direct_source_audit_closure) {
+        error = "Direct glyph source audit closure mismatch";
+        return false;
+      }
+      for (std::size_t i = 0; i < subtitle_direct_glyph_source_shaders.size(); ++i) {
+        if (!create_shader(sources, outline::direct_source_audit_specs[i], subtitle_direct_glyph_source_shaders[i])) {
+          error = "Direct glyph source audit shader creation failed";
+          return false;
+        }
+      }
+      const auto &model_shaders = cfg.current_outline_direct_glyph_shader_root;
+      if (!subtitle_current_outline_raw_matte.load_direct(device.Get(), model_shaders, error,
+                                                         cfg.direct_glyph_resolved_fringe || cfg.direct_glyph_line_palette)) return false;
+      auto &cuda = cuda_driver_api::get();
+      const std::size_t profiles = cfg.direct_glyph_line_palette ? 1u : subtitle_direct_glyph_contexts.size();
+      for (std::size_t i = 0; i < profiles; ++i) {
+        const auto profile = static_cast<host_sbs_direct_glyph_gpu::tile_profile_e>(i);
+        nvinfer1::ICudaEngine *engine = nullptr;  // The global engine cache owns its lifetime.
+        if (!acquire_direct_glyph_context(shader_root.parent_path().parent_path(), cuda, cuda_device, engine,
+                                         subtitle_direct_glyph_contexts[i], subtitle_direct_glyph_engine_keys[i], profile)) {
+          release_subtitle_direct_glyph();
+          error = "Direct glyph TensorRT asset or execution context unavailable";
+          return false;
+        }
+      }
+      if (!subtitle_direct_glyph_score.prepare(device.Get(), context.Get(), model_shaders, cuda_ctx,
+                                              subtitle_direct_glyph_contexts, error, cfg.direct_glyph_line_palette)) {
+        release_subtitle_direct_glyph();
+        return false;
+      }
+      subtitle_direct_glyph_enabled = true;
+      subtitle_direct_glyph_capture_plan = cfg.capture_direct_glyph_plan;
+      subtitle_direct_glyph_adaptive_context = cfg.direct_glyph_adaptive_context;
+      subtitle_direct_glyph_line_palette = cfg.direct_glyph_line_palette;
+      subtitle_current_outline_enabled = true;
+      subtitle_selected_matte_enabled = true;
+      return true;
+    }
+
     bool prepare_subtitle_selected_matte_research(const subtitle_selected_matte_research_configuration_t &cfg,std::string &error) {
+      const bool reduced = !cfg.current_outline_raw_matte_reduced_shader_root.empty();
+      const bool direct = !cfg.current_outline_direct_glyph_shader_root.empty();
+      if (cfg.direct_glyph_line_palette && (!direct || !cfg.direct_glyph_adaptive_context || cfg.direct_glyph_resolved_fringe)) {
+        error = "Native glyph decoding requires the adaptive OCR work and original detector caps";
+        return false;
+      }
+      if (cfg.direct_glyph_resolved_fringe && (!direct || !cfg.direct_glyph_adaptive_context)) {
+        error = "Direct glyph fringe requires adaptive context";
+        return false;
+      }
+      if ((reduced || direct) && (!cfg.current_outline || (direct && reduced) || cfg.current_outline_weak_aa_oracle ||
+                                 cfg.current_outline_omit_foreground_edge || cfg.current_outline_omit_stroke_coverage)) {
+        error = "Subtitle models require one route and the canonical outline inputs";
+        return false;
+      }
+      if (direct) return prepare_subtitle_direct_glyph(cfg, error);
+      if (cfg.current_outline_omit_foreground_edge && cfg.current_outline_omit_stroke_coverage) {
+        error = "Current-outline ablations are mutually exclusive";
+        return false;
+      }
       if (cfg.current_outline) {
         if (cfg.current_outline_shader_root.empty() ||
-            !subtitle_current_outline_programs.load(device.Get(),cfg.current_outline_shader_root,error)) return false;
+            !subtitle_current_outline_programs.load(device.Get(),cfg.current_outline_shader_root,error,cfg.current_outline_weak_aa_oracle)) return false;
+        if (reduced && !subtitle_current_outline_programs.trusted_inner_ready()) {
+          error = "Reduced RawMatte requires the current trusted-inner program: " +
+                  subtitle_current_outline_programs.trusted_inner_error();
+          return false;
+        }
+        if (reduced && !subtitle_current_outline_raw_matte.load(
+              device.Get(), cfg.current_outline_raw_matte_reduced_shader_root, error, true)) {
+          return false;
+        }
+        subtitle_current_outline_raw_matte_reduced = reduced;
         const bool stability_available=subtitle_current_outline_programs.stability_ready();
         BOOST_LOG(info) << "Current outline black-band cache program availability: "
                         << (stability_available?"available":"unavailable");
         if (!stability_available)
           BOOST_LOG(warning) << "Current outline black-band cache optional programs unavailable: " << subtitle_current_outline_programs.stability_error();
+        subtitle_current_outline_omit_foreground_edge = cfg.current_outline_omit_foreground_edge;
+        subtitle_current_outline_omit_stroke_coverage = cfg.current_outline_omit_stroke_coverage;
         subtitle_current_outline_enabled=true;
         subtitle_selected_matte_enabled=true;
         return true;
+      }
+      if (cfg.current_outline_omit_foreground_edge) {
+        error = "Foreground-edge ablation requires current outline";
+        return false;
+      }
+      if (cfg.current_outline_omit_stroke_coverage) {
+        error = "Stroke-coverage ablation requires current outline";
+        return false;
+      }
+      if (cfg.current_outline_weak_aa_oracle) {
+        error = "Weak-AA oracle requires current outline";
+        return false;
       }
       namespace cache=host_sbs_shader_cache;
       if(cfg.selector_shader_root.empty()||cfg.selector_source_closure_sha256.size()!=64u){error="Missing selected-matte private source";return false;}
@@ -6742,6 +7080,7 @@ namespace models {
     }
     void dispatch_subtitle_selected_matte_research(ID3D11ShaderResourceView *legacy_matte, d3d_perf_slot *perf_slot) {
       subtitle_selected_matte_commands=false;
+      if (subtitle_direct_glyph_enabled) { subtitle_direct_glyph_requested = true; return; }
       if (subtitle_current_outline_enabled) {dispatch_subtitle_current_outline(legacy_matte,perf_slot);return;}
       if(!subtitle_selected_matte_enabled||!subtitle_selected_matte_shader||!legacy_matte||!subtitle_contour_source_snapshot.ready())return;
       D3D11_TEXTURE2D_DESC desc{};subtitle_contour_source_snapshot.texture->GetDesc(&desc);std::string error;
@@ -8914,7 +9253,7 @@ namespace models {
         const std::uint64_t observation, std::string &error
       ) {
       error.clear();
-      if (!queued_same_source_gpu_continuation_research_enabled || !is_operational() ||
+      if (!queued_same_source_gpu_continuation_research_enabled || subtitle_direct_glyph_enabled || !is_operational() ||
           !pending_root || !source || source != pending_root->submitted_source.Get() ||
           frame == 0u || frame != pending_root->frame_id || observation == 0u ||
           observation != pending_root->observation_timestamp_us || pending_root->dump_forced ||
@@ -8995,18 +9334,36 @@ namespace models {
     // before a later submission changes either the constants or the raw tensors.
     completed_depth_metadata_t complete_ready_pending(
       d3d_perf_slot *d3d_timer,
-      const bool snapshot_requested
+      const bool request_snapshot,
+      const bool evaluation_wait = false
     ) {
-      const bool postprocess_queued = pending_root->queued_input_domain_reset.has_value();
-      const bool input_domain_reset = postprocess_queued ?
-        *pending_root->queued_input_domain_reset : prepare_pending_input_domain();
-      completion_dump_snapshot_requested = snapshot_requested;
-      if (!postprocess_queued && !normalize_depth_output(
-            d3d_timer,
-            input_domain_reset
-          )) {
-        mark_d3d_post_end(d3d_timer);
-        return {};
+      const bool snapshot_requested = subtitle_direct_glyph_tail ? subtitle_direct_glyph_tail->snapshot_requested : request_snapshot;
+      bool input_domain_reset;
+      if (subtitle_direct_glyph_tail) {
+        input_domain_reset = subtitle_direct_glyph_tail->input_domain_reset;
+      } else {
+        const bool postprocess_queued = pending_root->queued_input_domain_reset.has_value();
+        input_domain_reset = postprocess_queued ? *pending_root->queued_input_domain_reset : prepare_pending_input_domain();
+        completion_dump_snapshot_requested = snapshot_requested;
+        subtitle_direct_glyph_requested = false;
+        if (!postprocess_queued && !normalize_depth_output(d3d_timer, input_domain_reset)) {
+          mark_d3d_post_end(d3d_timer);
+          return {};
+        }
+        if (subtitle_direct_glyph_requested) dispatch_subtitle_direct_glyph(input_domain_reset);
+      }
+      if (subtitle_direct_glyph_requested) {
+        if (!retire_subtitle_direct_glyph(evaluation_wait)) {
+          subtitle_direct_glyph_tail.emplace(subtitle_direct_glyph_tail_t {input_domain_reset, snapshot_requested});
+          mark_d3d_post_end(d3d_timer);
+          return {};
+        }
+        subtitle_direct_glyph_tail.reset();
+        if (subtitle_selected_matte_commands) {
+          const auto selected = selected_matte_views();
+          completed_contour.research_selected_matte = selected.matte;
+          completed_contour.research_selected_matte_receipt = selected.receipt;
+        }
       }
 
       dispatch_pending_gpu_completion_trace();
@@ -9091,7 +9448,7 @@ namespace models {
       }
       auto *d3d_timer = diagnostics_enabled ? begin_d3d_perf(true, false) : nullptr;
       const auto completed = complete_ready_pending(
-        d3d_timer, snapshot_debug_inputs && !gpu_undecided_postprocess_pending()
+        d3d_timer, snapshot_debug_inputs && !gpu_undecided_postprocess_pending(), !root_completion_proven
       );
       mark_d3d_pre_start(d3d_timer);
       end_d3d_perf(d3d_timer);
@@ -9221,7 +9578,7 @@ namespace models {
         snapshot_debug_inputs,
         true
       );
-      polled.ready = true;
+      polled.ready = !subtitle_direct_glyph_tail || is_terminal();
       return polled;
     }
 
@@ -11522,6 +11879,29 @@ namespace models {
   video_depth_estimator::subtitle_selected_matte_diagnostic_views_for_evaluation(std::uint64_t frame,std::uint64_t observation) const noexcept {
     if(!pimpl||!pimpl->is_operational()||!pimpl->subtitle_selected_matte_enabled||!pimpl->subtitle_selected_matte_commands||
       frame==0u||observation==0u)return std::nullopt;
+    if (pimpl->subtitle_direct_glyph_enabled) {
+      const auto &publication = pimpl->current_publication;
+      if (pimpl->pending_root || publication.frame_id != frame || publication.observation_timestamp_us != observation ||
+          !pimpl->publication_is_current(publication)) return std::nullopt;
+      const auto direct = pimpl->subtitle_current_outline_raw_matte.views();
+      subtitle_selected_matte_diagnostic_views_t result;
+      result.model_frame = frame;
+      result.model_observation_us = observation;
+      result.current_constants = pimpl->subtitle_contour_cbuffer;
+      result.selected_matte = direct.matte;
+      result.selected_receipt = direct.receipt;
+      result.current_outline_ocr_record = pimpl->ocr_box_record_srv;
+      result.current_outline_raw_matte_alpha8 = direct.alpha8;
+      result.current_outline_raw_matte_work = direct.work;
+      result.direct_glyph_source_audit = pimpl->subtitle_direct_glyph_source_audit;
+      result.direct_glyph_legacy_dispatch = pimpl->subtitle_current_outline_raw_matte.direct_legacy_dispatch_for_evaluation();
+      if (pimpl->subtitle_direct_glyph_capture_plan && pimpl->subtitle_direct_glyph_score_retired) {
+        result.direct_glyph_placement = pimpl->subtitle_direct_glyph_score.placement_for_evaluation();
+        result.direct_glyph_post_plan_work = pimpl->subtitle_direct_glyph_score.post_plan_work_for_evaluation();
+        result.direct_glyph_native_lines = pimpl->subtitle_direct_glyph_score.native_lines_for_evaluation();
+      }
+      return result;
+    }
     if (pimpl->subtitle_current_outline_enabled) {
       // Observer aliases only. A subsequent admission may change working resources;
       // retain the exact completed composition operands, never relabel those inputs.
@@ -11542,10 +11922,11 @@ namespace models {
         {published.frame_id,published.observation_timestamp_us,published.analysis_generation,
           published.transaction_token,published.expected_work},
         pimpl->publication_is_current(published));
-      if (!bundle.all_stages_issued || role==observation_owner::role_e::unavailable ||
+      const bool reduced = pimpl->subtitle_current_outline_raw_matte_reduced;
+      if (!(reduced ? bundle.raw_model_floor : bundle.all_stages_issued) || role==observation_owner::role_e::unavailable ||
           !current.legacy_display_snapshot || !current.probability ||
           !current.support || !current.actual_contour_constants96) return std::nullopt;
-      const auto selected=pimpl->subtitle_current_outline_selected.views();
+      const auto selected=pimpl->selected_matte_views();
       // The completed or queued tuple must still name these exact outputs and original t4.
       if (!selected.matte || !selected.receipt ||
           pimpl->completed_contour.research_selected_matte.Get()!=selected.matte.Get() ||
@@ -11576,6 +11957,17 @@ namespace models {
         bundle.ring.matte,bundle.ring.receipt,
         bundle.outline.calibration_data,bundle.outline.passable_root_cache,
         bundle.outline.stability_header,bundle.outline.stability_image};
+      if (role==observation_owner::role_e::completed) {
+        v.current_outline_weak_aa_facts=bundle.outline.weak_aa_facts;
+        v.current_outline_weak_aa_trusted=bundle.outline.weak_aa_trusted;
+        v.current_outline_ocr_record=current.ocr_record;
+        if (reduced) {
+          const auto model = pimpl->subtitle_current_outline_raw_matte.views();
+          v.current_outline_raw_matte_floor = bundle.outline.matte;
+          v.current_outline_raw_matte_alpha8 = model.alpha8;
+          v.current_outline_raw_matte_work = model.work;
+        }
+      }
       // The existing baseline/temporal/source-certificate slots have different ABIs.
       // Leave them absent; commands/host identity do not certify GPU freshness or UI.
       return v;
@@ -11599,6 +11991,19 @@ namespace models {
     if(v.temporal_commands){const auto t=pimpl->subtitle_temporal_source_backend.mutable_views();v.temporal_matte=t.matte;v.temporal_receipt=t.receipt;v.frame256=pimpl->subtitle_temporal_frame_context.output_view();}
     if(!v.selected_matte||!v.selected_receipt)return std::nullopt;
     return v;
+  }
+
+  std::filesystem::path video_depth_estimator::direct_glyph_engine_path_for_evaluation() const {
+    const auto profile = direct_glyph_profile_for_evaluation();
+    if (!profile) return {};
+    const auto &key = pimpl->subtitle_direct_glyph_engine_keys[static_cast<std::size_t>(*profile)];
+    const auto delimiter = key.find(':');
+    if (delimiter == std::string::npos) return {};
+    return pimpl->shader_root.parent_path().parent_path() / key.substr(delimiter + 1);
+  }
+
+  std::optional<host_sbs_direct_glyph_gpu::tile_profile_e> video_depth_estimator::direct_glyph_profile_for_evaluation() const {
+    return pimpl && pimpl->subtitle_direct_glyph_enabled ? pimpl->subtitle_direct_glyph_profile : std::nullopt;
   }
 
   depth_telemetry_poll_result video_depth_estimator::latest_depth_telemetry() const {

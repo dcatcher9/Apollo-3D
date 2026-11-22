@@ -4,6 +4,7 @@
 #include "src/host_sbs_shared_ui_warp_runtime.h"
 #include "src/logging.h"
 #include "src/platform/windows/display_shader_manifest.h"
+#include "src/sbs_bench_raw_matte_gpu.h"
 
 #include <cstdint>
 #include <filesystem>
@@ -21,6 +22,7 @@ namespace {
   namespace cache = models::host_sbs_shader_cache;
   namespace outline = models::current_outline_runtime;
   namespace shared_ui = models::host_sbs_shared_ui_warp;
+  namespace raw_matte = sbs_bench::raw_matte_gpu;
 
   void finish_output(std::ofstream &output, const fs::path &temporary, const fs::path &destination) {
     output.close();
@@ -101,6 +103,42 @@ namespace {
       shared_ui::completed_specs,
       shared_ui::completed_closure,
       programs.bytecodes
+    );
+    outline::detail::authenticate_group(
+      "hybrid subtitle draw", shader_root, shared_ui::raw_model_prepare_specs,
+      shared_ui::raw_model_prepare_closure, programs.bytecodes
+    );
+    outline::detail::authenticate_group(
+      "hybrid subtitle inference", shader_root, raw_matte::shader_specs,
+      raw_matte::shader_source_closure_sha256, programs.bytecodes
+    );
+    outline::detail::authenticate_group(
+      "hybrid subtitle half-context inference", shader_root, raw_matte::half_context_shader_specs,
+      raw_matte::half_context_shader_source_closure_sha256, programs.bytecodes
+    );
+    outline::detail::authenticate_group(
+      "hybrid subtitle publication", shader_root, raw_matte::early_shader_specs,
+      raw_matte::early_shader_source_closure_sha256, programs.bytecodes
+    );
+    outline::detail::authenticate_group(
+      "hybrid subtitle empty gate", shader_root, raw_matte::empty_gate_shader_specs,
+      raw_matte::empty_gate_shader_source_closure_sha256, programs.bytecodes
+    );
+    outline::detail::authenticate_group(
+      "direct subtitle publication", shader_root, cache::direct_glyph_plan_specs,
+      cache::direct_glyph_plan_source_closure_sha256, programs.bytecodes
+    );
+    outline::detail::authenticate_group(
+      "direct subtitle score transport", shader_root, cache::direct_glyph_transport_specs,
+      cache::direct_glyph_transport_source_closure_sha256, programs.bytecodes
+    );
+    outline::detail::authenticate_group(
+      "native subtitle palette", shader_root, cache::direct_glyph_palette_specs,
+      cache::direct_glyph_palette_source_closure_sha256, programs.bytecodes
+    );
+    outline::detail::authenticate_group(
+      "direct subtitle draw", shader_root, cache::direct_glyph_prepare_specs,
+      cache::direct_glyph_prepare_source_closure_sha256, programs.bytecodes
     );
     outline::detail::authenticate_group(
       "Game 3D text UI",

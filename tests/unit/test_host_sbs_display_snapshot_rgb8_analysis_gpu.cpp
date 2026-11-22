@@ -19,13 +19,15 @@
 #include <dxgi1_2.h>
 #include <src/crypto.h>
 #include <src/host_sbs_display_snapshot_rgb8_analysis_gpu.h>
+#include <src/host_sbs_resolution.h>
 #include <src/host_sbs_shader_cache.h>
+#include <src/sbs_bench_raw_matte_gpu.h>
 namespace {
 namespace cg=models::display_snapshot_rgb8_analysis_gpu_v1;
 namespace cache=models::host_sbs_shader_cache;
 using Microsoft::WRL::ComPtr;using json=nlohmann::json;using bytes=std::vector<std::uint8_t>;
 constexpr const char *helper_pin=subtitle_test_source_pins::display_snapshot_rgb8;
-constexpr const char *producer_pin="291ec723c8259b864e9889bbb8c9fd8b182da6795bd272a0fa97d8edae29f8bb";
+constexpr const char *producer_pin="59ac71657fa3dbe9372da310ab1aaed3f3ff124145192ad8d7d682b162356de6";
 constexpr const char *producer_freeze_pin="a00dae08ecb4f54a22f88edbb62f0dc686c037a9e8777aa801d66529625408a0";
 struct tex_t {ComPtr<ID3D11Texture2D> texture;ComPtr<ID3D11ShaderResourceView> srv;ComPtr<ID3D11UnorderedAccessView> uav;};
 struct buf_t {ComPtr<ID3D11Buffer> buffer;ComPtr<ID3D11ShaderResourceView> srv;ComPtr<ID3D11UnorderedAccessView> uav;};
@@ -234,6 +236,141 @@ TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, RootZeroHoldsPublishedTupleThenFreshTo
  for(auto g:{std::array<UINT,4>{0,1,1,0},std::array<UINT,4>{0,0,0,0},std::array<UINT,4>{1,0,1,0},std::array<UINT,4>{1,1,0,0}}){author(0,false,false,0x100000020ull+n,0xe000000000002000ull+n);std::copy(g.begin(),g.end(),roots.begin()+60);upload();queue();envelope();EXPECT_EQ(reference_band(),r);EXPECT_EQ(readView(owner.views().analysis_band.Get(),8),b);EXPECT_EQ(readView(owner.views().source_proof.Get()),p);EXPECT_EQ(readView(owner.views().uip_envelope.Get()),e);auto row=snapshot("root0-"+std::to_string(n++),"root0_hold");row["envelope"]=save(row["name"].get<std::string>()+"-envelope.bin",readView(owner.views().uip_envelope.Get()));row["held_reference"]=save(row["name"].get<std::string>()+"-held-reference.bin",r);row["held_analysis"]=save(row["name"].get<std::string>()+"-held-analysis.bin",b);row["held_proof"]=save(row["name"].get<std::string>()+"-held-proof.bin",p);row["held_envelope"]=save(row["name"].get<std::string>()+"-held-envelope.bin",e);report["observations"].back()=row;}
  author(1,false,false,0x100000099ull,0xe000000000009999ull);positive("fresh-token");EXPECT_NE(readView(owner.views().source_proof.Get()),p);EXPECT_NE(reference_band(),r);
 }
+TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, RawMatteEmptyGatePreservesSourceAndPublishesCurrentZero) {
+  namespace model = sbs_bench::raw_matte_gpu;
+  namespace v2 = models::depth_coordinate_v2;
+  model::resources_t matte;
+  ASSERT_TRUE(matte.load(device.Get(), SUNSHINE_SHADERS_DIR, error, true)) << error;
+  H = 65u;
+  B = models::subtitle_ocr_source_crop_height(W, H);
+  crop = H - B;
+  constexpr UINT field_w = 770u, field_h = 434u;
+  const auto start = v2::subtitle_ocr_project_row_ceil(W, H, field_w, field_h, v2::subtitle_ocr_safe_row_top);
+  const auto end = v2::subtitle_ocr_project_row_ceil(W, H, field_w, field_h, v2::subtitle_ocr_safe_row_bottom);
+  ASSERT_TRUE(start && end && start.value < end.value);
+  buf_t ocr, condition;
+  model::early_request_t input;
+  const auto author_current = [&](bool empty, std::uint64_t frame) {
+    author(0u, true, empty, frame, 0xf000000000001000ull + frame);
+    const std::array<UINT, 4> field {field_w, field_h, start.value, end.value};
+    const std::array<UINT, 4> content {0u, 0u, field_w, field_h};
+    std::copy(field.begin(), field.end(), cb.begin() + 4u);
+    std::copy(content.begin(), content.end(), cb.begin() + 8u);
+    std::copy_n(cb.begin(), 12u, scts.begin() + 8u);
+    scts[3u] = 0u;
+    std::copy_n(cb.begin() + 4u, 8u, uips.begin() + 12u);
+    uips[3u] = empty ? 0u : 1u;
+    uips[20u] = 0u;
+    roots[44u] = (field_w + 15u) / 16u;
+    roots[45u] = (field_h + 15u) / 16u;
+    upload();
+
+    std::array<UINT, v2::subtitle_ocr_record_word_count> detector {
+      v2::subtitle_ocr_record_schema, v2::subtitle_ocr_record_tag, 1u
+    };
+    detector[3u] = detector[4u] = empty ? 0u : 1u;
+    std::copy_n(cb.begin() + 12u, 4u, detector.begin() + 5u);
+    std::copy_n(cb.begin(), 2u, detector.begin() + 9u);
+    std::copy(field.begin(), field.end(), detector.begin() + 11u);
+    if (!empty) {
+      const std::array<UINT, 8> core {380u, start.value + 8u, 390u, start.value + 12u, std::bit_cast<UINT>(1.0f), 0u, 1u, 0u};
+      const std::array<UINT, 8> cover {370u, start.value + 4u, 400u, start.value + 16u, std::bit_cast<UINT>(1.0f), 0u, 1u, 0u};
+      std::copy(core.begin(), core.end(), detector.begin() + v2::subtitle_ocr_raw_box_offset);
+      std::copy(cover.begin(), cover.end(), detector.begin() + v2::subtitle_ocr_final_box_offset);
+    }
+    const std::array<UINT, v2::subtitle_condition_param_word_count> scp {
+      v2::subtitle_condition_param_schema, v2::subtitle_condition_param_tag, empty ? 0u : 1u
+    };
+    ocr = buffer(detector.size(), false, false, false, detector.data());
+    condition = buffer(scp.size(), false, false, false, scp.data());
+    input = {.width = W, .height = B, .frame = request.frame, .observation_us = request.observation_us,
+      .analysis_generation = request.analysis_generation, .token = request.token, .current_constants = contour.Get(),
+      .ocr = ocr.srv.Get(), .sct = sct.srv.Get(), .condition = condition.srv.Get(), .root = root.srv.Get(),
+      .postprocess_mode = 2u, .expected_work = 1u, .uip = uip.srv.Get(), .use_empty_gate = true};
+  };
+  const auto prepare = [&] { return matte.prepare_empty_gate(context.Get(), input, error); };
+  const auto source_contents = [&] {
+    const auto views = owner.views();
+    return std::array<bytes, 4> {reference_band(), readView(views.analysis_band.Get(), 8u),
+      readView(views.source_proof.Get()), readView(views.uip_envelope.Get())};
+  };
+  const auto capture = [&](ID3D11Buffer *work) { return owner.queue_current(context.Get(), program, request, uip.srv.Get(), error, work); };
+
+  author_current(false, 0x100000007ull);
+  auto *work = prepare();
+  ASSERT_NE(work, nullptr) << error;
+  EXPECT_EQ(read(work), pack(roots));
+  ASSERT_TRUE(capture(work)) << error;
+  check_outputs();
+  const auto positive = source_contents();
+
+  author_current(true, 0x100000008ull);
+  ++input.observation_us;
+  ASSERT_NE(prepare(), nullptr) << error;
+  EXPECT_EQ(read(work), pack(roots));
+  input.observation_us = request.observation_us;
+  const std::array<UINT, v2::subtitle_condition_param_word_count> invalid_scp {};
+  auto invalid_condition = buffer(invalid_scp.size(), false, false, false, invalid_scp.data());
+  input.condition = invalid_condition.srv.Get();
+  ASSERT_NE(prepare(), nullptr) << error;
+  EXPECT_EQ(read(work), pack(roots));
+  input.condition = condition.srv.Get();
+
+  ASSERT_EQ(prepare(), work) << error;
+  auto parked = roots;
+  parked[60u] = 0u;
+  EXPECT_EQ(read(work), pack(parked));
+  EXPECT_EQ(read(root.buffer.Get()), pack(roots));
+  ASSERT_TRUE(capture(work)) << error;
+  EXPECT_EQ(source_contents(), positive);
+  EXPECT_EQ(read(owner.views().final_root_mirror.Get()), pack(roots));
+  EXPECT_EQ(words(read(owner.views().dispatch_arguments.Get())), (std::vector<UINT> {1u, 1u, 0u, 0u}));
+  // The parked producer has no current model inputs. The typed empty witness alone publishes zero.
+  ASSERT_TRUE(matte.queue_early(context.Get(), input, error)) << error;
+  const auto current = matte.views();
+  ASSERT_TRUE(current.matte && current.alpha8 && current.receipt && current.work);
+  const auto receipt = words(readView(current.receipt.Get()));
+  ASSERT_EQ(receipt.size(), 64u);
+  EXPECT_EQ(receipt[2u], 4u);
+  EXPECT_EQ(receipt[3u], 0u);
+  EXPECT_EQ(receipt[60u], static_cast<UINT>(request.token));
+  EXPECT_EQ(receipt[61u], static_cast<UINT>(request.token >> 32u));
+  EXPECT_EQ(receipt[62u], 3u);
+  EXPECT_TRUE(std::equal(cb.begin(), cb.end(), receipt.begin() + 4u));
+  EXPECT_TRUE(std::equal(scts.begin(), scts.end(), receipt.begin() + 28u));
+  EXPECT_EQ(readView(current.matte.Get()), bytes(std::size_t(W) * B * 4u, 0u));
+  EXPECT_EQ(readView(current.alpha8.Get()), bytes(std::size_t(W) * B * 4u, 0u));
+  const auto empty_work = words(read(current.work.Get()));
+  ASSERT_EQ(empty_work.size(), 60u);
+  EXPECT_EQ(empty_work[4u], 1u);
+  EXPECT_EQ(empty_work[16u], 1u);
+  EXPECT_EQ(empty_work[54u], 0u);
+  EXPECT_EQ(empty_work[55u], 0u);
+  EXPECT_EQ(empty_work[57u], 0u);
+  EXPECT_EQ(empty_work[58u], 0u);
+  EXPECT_EQ(empty_work[59u], 0u);
+
+  author_current(false, 0x100000009ull);
+  roots[60u] = 0u;
+  upload();
+  ASSERT_EQ(prepare(), work) << error;
+  EXPECT_EQ(read(work), pack(roots));
+  ASSERT_TRUE(capture(work)) << error;
+  EXPECT_EQ(source_contents(), positive);
+  ASSERT_TRUE(matte.queue_early(context.Get(), input, error)) << error;
+  EXPECT_EQ(words(readView(matte.views().receipt.Get())), receipt);
+  const auto held_work = words(read(matte.views().work.Get()));
+  ASSERT_EQ(held_work.size(), 60u);
+  EXPECT_EQ(held_work[16u], 3u);
+
+  author_current(false, 0x10000000aull);
+  ASSERT_EQ(prepare(), work) << error;
+  EXPECT_EQ(read(work), pack(roots));
+  ASSERT_TRUE(capture(work)) << error;
+  check_outputs();
+  EXPECT_NE(source_contents(), positive);
+  EXPECT_EQ(words(readView(owner.views().uip_envelope.Get()))[43u], 1u);
+}
 TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, CurrentCbSctRootFaultsAndNoOcrAbstentionReject) {
  author();queue();auto C=cb;auto S=scts;auto R=roots;UINT n=0;
  for(UINT k=0;k<24;++k){if(k==18)continue;cb=C;cb[k]^=1u;upload();queue();auto p=words(readView(owner.views().source_proof.Get()));EXPECT_EQ(p[3],0u)<<k;EXPECT_EQ(p[38],3u)<<k;auto row=snapshot("cb-"+std::to_string(k),"join_reject");row["fault_family"]="cb";row["fault_word"]=k;report["observations"].back()=row;++n;}cb=C;
@@ -285,6 +422,375 @@ TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, ActualMalformedCopyGridSeparatesCovera
 }
 TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, ShapeTransitionRetainsOldStorageAndWritesNewBand) {
  author();positive("first");auto held=owner.views();auto old=reference_band(),p=readView(held.source_proof.Get());auto oldpointer=held.reference_rgb8.Get();need(owner.ensure(device.Get(),W,H,crop,B,error),"Stable ensure");EXPECT_EQ(owner.views().reference_rgb8.Get(),oldpointer);W=243;H=37;crop=20;B=17;author(2,true,true,0x1000000aaull,0xe00000000000aaa1ull);positive("second");EXPECT_NE(owner.views().reference_rgb8.Get(),oldpointer);EXPECT_EQ(readView(held.source_proof.Get()),p);report["retired_storage_held"]=true;
+}
+
+TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, DirectAuditUsesOriginalSnapshotAndPreservesSourceValidity) {
+  constexpr std::array audit_specs {
+    cache::shader_spec {"direct_source_audit.hlsl", "prepare_main", "cs_5_0"},
+    cache::shader_spec {"direct_source_audit.hlsl", "copy_main", "cs_5_0"},
+    cache::shader_spec {"direct_source_audit.hlsl", "finalize_main", "cs_5_0"},
+    cache::shader_spec {"direct_source_audit.hlsl", "envelope_main", "cs_5_0"}
+  };
+  const auto sources = cache::snapshot_sources(std::getenv("SUNSHINE_TEST_DISPLAY_RGB8_SHADER_ROOT"), audit_specs);
+  ASSERT_EQ(cache::source_closure_sha256(sources), "a5145b7de00d113a135b1c852e4a244735d08b9211bafad5bc08f4bc70e47261");
+  std::array<ComPtr<ID3D11ComputeShader>, audit_specs.size()> audit_shaders;
+  for (std::size_t i = 0u; i < audit_specs.size(); ++i) {
+    const auto bytecode = cache::get(sources, audit_specs[i]);
+    ASSERT_TRUE(bytecode && !bytecode->empty());
+    hr(device->CreateComputeShader(bytecode->data(), bytecode->size(), nullptr, &audit_shaders[i]));
+  }
+  const cg::program_t audit_program {
+    audit_shaders[0].Get(), audit_shaders[1].Get(), audit_shaders[2].Get(), audit_shaders[3].Get()
+  };
+  cg::resources_t audit_owner;
+  author(0u, true);
+  ASSERT_TRUE(audit_owner.ensure_direct_audit(device.Get(), W, H, crop, B, error)) << error;
+  EXPECT_FALSE(audit_owner.views().reference_rgb8);
+  EXPECT_FALSE(audit_owner.views().analysis_band);
+  EXPECT_FALSE(audit_owner.queue_current(context.Get(), audit_program, request, uip.srv.Get(), error));
+  EXPECT_FALSE(owner.queue_current_audit(context.Get(), program, request, uip.srv.Get(), error));
+  const auto capture = [&](ID3D11Buffer *work_root = nullptr) {
+    const auto audit = audit_owner.queue_current_audit(context.Get(), audit_program, request, uip.srv.Get(), error, work_root);
+    need(audit.has_value(), error.c_str());
+    EXPECT_EQ(audit->display_snapshot_band(), display.srv.Get());
+    EXPECT_EQ(audit->uip_envelope(), audit_owner.views().uip_envelope.Get());
+    return readView(audit->uip_envelope());
+  };
+  const auto expected_envelope = [&](bool invalid = false) {
+    auto proof = expected_proof();
+    proof[0u] = invalid ? 0u : cg::direct_audit_tag;
+    proof[3u] = invalid ? 0u : 1u;
+    proof[31u] = cg::direct_audit_features;
+    if (invalid) {
+      proof[34u] = 1u;
+      --proof[35u];
+      proof[38u] = 4u;
+    }
+    proof[61u] = proof[62u] = 0u;
+    auto envelope = pack(uips);
+    const auto proof_bytes = pack(proof);
+    envelope.insert(envelope.end(), proof_bytes.begin(), proof_bytes.end());
+    EXPECT_EQ(readView(audit_owner.views().source_proof.Get()), proof_bytes);
+    return envelope;
+  };
+
+  const auto positive = capture();
+  EXPECT_EQ(positive, expected_envelope());
+  author(0u, true, false, request.frame + 1u, request.token + 1u);
+  roots[60u] = 0u;
+  upload();
+  EXPECT_EQ(capture(), positive);
+
+  roots[60u] = 1u;
+  upload();
+  auto parked = roots;
+  parked[60u] = 0u;
+  auto work_root = buffer(64u, true, true, false, parked.data());
+  EXPECT_EQ(capture(work_root.buffer.Get()), positive);
+
+  pixels.back() = 0u;
+  context->UpdateSubresource(display.texture.Get(), 0u, nullptr, pixels.data(), W * 8u, 0u);
+  const auto invalid = capture();
+  EXPECT_EQ(invalid, expected_envelope(true));
+  EXPECT_NE(invalid, positive);
+
+  author(0u, true, false, request.frame + 1u, request.token + 1u);
+  const auto recovered = capture();
+  EXPECT_EQ(recovered, expected_envelope());
+  EXPECT_NE(recovered, positive);
+}
+TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, DirectPublishesScaledScoresOnlyInCurrentNativeWork) {
+  const auto &specs = cache::direct_glyph_plan_specs;
+  const auto sources = cache::snapshot_sources(SUNSHINE_SHADERS_DIR, specs);
+  ASSERT_TRUE(sources);
+  ASSERT_EQ(cache::source_closure_sha256(sources), cache::direct_glyph_plan_source_closure_sha256);
+  const auto bytecode = cache::get(sources, specs[1u]);
+  ASSERT_TRUE(bytecode);
+  ComPtr<ID3D11ComputeShader> shader;
+  hr(device->CreateComputeShader(bytecode->data(), bytecode->size(), nullptr, &shader));
+
+  constexpr UINT width = 7u, height = 5u;
+  const auto model_request = constants(std::array<UINT, 12u> {width, height, 38u});
+  const auto contour_constants = constants(std::array<UINT, 24u> {width, height, 0u, height});
+  const auto current_sct = buffer(32u);
+  const auto receipt = buffer(64u, false, false, true);
+  constexpr std::array<UINT, 4u> parked_dispatch {};
+  const auto legacy_dispatch = buffer(parked_dispatch.size(), true, true, true, parked_dispatch.data());
+  const auto matte = texture(width, height, DXGI_FORMAT_R32_UINT, true);
+  const auto output = texture(width, height, DXGI_FORMAT_R32_UINT, true);
+
+  for (const UINT scale : {1u, 2u, 4u, 3u}) {
+    SCOPED_TRACE(scale);
+    const UINT storage_scale = scale == 3u ? 2u : scale;
+    const UINT scaled_width = (width + storage_scale - 1u) / storage_scale;
+    const UINT scaled_height = (height + storage_scale - 1u) / storage_scale;
+    const auto probability = [](auto x, auto y) {
+      return float(1 + x + 2 * y) / 16.0f;
+    };
+    // Only the upper-left score lattice is current. The remaining texels carry poison.
+    std::vector<UINT> codes(width * height, 0xffffffffu);
+    for (UINT y = 0u; y < scaled_height; ++y) {
+      for (UINT x = 0u; x < scaled_width; ++x) {
+        codes[y * width + x] = scale == 1u ? 30u + x + y : std::bit_cast<UINT>(probability(x, y));
+      }
+    }
+    const auto candidate = texture(width, height, DXGI_FORMAT_R32_UINT, false, codes.data(), width * 4u);
+    const std::array<UINT, 36u> work_words {2u, 1u, 0u, scale, 1u, 0u, width, height - 1u};
+    const auto work = buffer(work_words.size(), true, false, false, work_words.data());
+    ID3D11Buffer *const cbuffers[] {model_request.Get(), contour_constants.Get()};
+    std::array<ID3D11ShaderResourceView *, 16u> in {};
+    in[7u] = work.srv.Get();
+    in[13u] = current_sct.srv.Get();
+    in[15u] = candidate.srv.Get();
+    ID3D11UnorderedAccessView *const out[] {matte.uav.Get(), legacy_dispatch.uav.Get(), nullptr,
+                                          output.uav.Get(), nullptr, receipt.uav.Get()};
+    context->CSSetShader(shader.Get(), nullptr, 0u);
+    context->CSSetConstantBuffers(0u, 2u, cbuffers);
+    context->CSSetShaderResources(0u, in.size(), in.data());
+    context->CSSetUnorderedAccessViews(0u, std::size(out), out, nullptr);
+    context->Dispatch(1u, 1u, 1u);
+    unbind(context.Get());
+
+    const auto alpha = words(read(output.texture.Get()));
+    const auto selected = words(read(matte.texture.Get()));
+    const auto receipt_words = words(read(receipt.buffer.Get()));
+    EXPECT_EQ(receipt_words[2u], scale == 3u ? 1u : 4u);
+    EXPECT_EQ(receipt_words[3u], scale == 3u ? 1u : 0u);
+    EXPECT_EQ(receipt_words[62u], 4u);
+    EXPECT_EQ(words(read(legacy_dispatch.buffer.Get())), (std::vector<UINT> {0u, 0u, 0u, 0u}));
+    for (UINT y = 0u; y < height; ++y) {
+      for (UINT x = 0u; x < width; ++x) {
+        UINT expected = 0u;
+        if (scale != 3u && x >= 1u && y < height - 1u) {
+          if (scale == 1u) {
+            expected = codes[y * width + x];
+          } else {
+            const auto mx = std::clamp((x + 0.5f) / scale - 0.5f, 0.0f, float(scaled_width - 1u));
+            const auto my = std::clamp((y + 0.5f) / scale - 0.5f, 0.0f, float(scaled_height - 1u));
+            expected = UINT(std::nearbyint(255.0f * probability(mx, my)));
+          }
+        }
+        EXPECT_EQ(alpha[y * width + x], expected) << x << "," << y;
+        EXPECT_EQ(selected[y * width + x], expected >= 38u ? 1u : 0u) << x << "," << y;
+      }
+    }
+  }
+}
+
+class HostSbsDirectGlyphPublishGpuTest: public HostSbsDisplaySnapshotRgb8GpuTest {
+protected:
+  void SetUp() override {
+    constexpr auto level = D3D_FEATURE_LEVEL_11_0;
+    ASSERT_TRUE(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0u, &level, 1u,
+      D3D11_SDK_VERSION, &device, nullptr, &context)));
+  }
+};
+
+TEST_F(HostSbsDirectGlyphPublishGpuTest, ResolvedFringeRequiresCurrentCompletedTapsAndQ64) {
+  const auto &specs = cache::direct_glyph_plan_specs;
+  const auto sources = cache::snapshot_sources(SUNSHINE_SHADERS_DIR, specs);
+  ASSERT_TRUE(sources);
+  ASSERT_EQ(cache::source_closure_sha256(sources), cache::direct_glyph_plan_source_closure_sha256);
+  const auto bytecode = cache::get(sources, specs[1u]);
+  ASSERT_TRUE(bytecode);
+  ComPtr<ID3D11ComputeShader> shader;
+  hr(device->CreateComputeShader(bytecode->data(), bytecode->size(), nullptr, &shader));
+
+  constexpr UINT width = 32u, height = 16u;
+  constexpr UINT fringe_flag = 32u, token_low = 13u, token_high = 29u;
+  const auto contour_constants = constants(std::array<UINT, 24u> {width, height, 0u, height});
+  constexpr std::array<UINT, 32u> sct_words {};
+  const auto current_sct = buffer(sct_words.size(), false, false, false, sct_words.data());
+  const auto receipt = buffer(64u, false, false, true);
+  const auto matte = texture(width, height, DXGI_FORMAT_R32_UINT, true);
+  const auto alpha = texture(width, height, DXGI_FORMAT_R32_UINT, true);
+
+  for (const UINT scale : {2u, 4u}) {
+    SCOPED_TRACE(scale);
+    const UINT cells_w = width / scale, cells_h = height / scale;
+    // One coarse column is left unowned but retains a high, finite scratch value.
+    const std::array<UINT, 52u> placement_words {
+      2u, 3u, 0u, 0u,
+      0u, 0u, 0u, 0u, 5u, cells_h, scale, 144u,
+      0u, 0u, 6u, 0u, cells_w, cells_h, 0u, 144u
+    };
+    auto partial_words = placement_words;
+    partial_words[1u] = 1u;
+    const auto placement = buffer(placement_words.size(), false, false, false, placement_words.data());
+    const auto partial = buffer(partial_words.size(), false, false, false, partial_words.data());
+
+    const std::array<UINT, 36u> work_words {2u, 1u, 0u, scale, 2u * scale, scale, 3u * scale, 2u * scale};
+    const std::array<UINT, 36u> empty_words {1u};
+    const std::array<UINT, 36u> fringe_words {1u, 1u, token_low, token_high, 2u * scale, 0u, 6u * scale, 3u * scale};
+    auto stale_words = fringe_words;
+    --stale_words[3u];
+    const auto fringe = buffer(fringe_words.size(), true, false, false, fringe_words.data());
+    const auto stale = buffer(stale_words.size(), true, false, false, stale_words.data());
+
+    std::vector<UINT> score_words(width * height, 0xffffffffu);
+    for (UINT y = 0u; y < cells_h; ++y) {
+      for (UINT x = 0u; x < cells_w; ++x) {
+        const UINT q = x == 1u || x == 2u ? 63u : x == 3u || x == 4u ? 64u : 128u;
+        score_words[y * width + x] = std::bit_cast<UINT>(float(q) / 255.0f);
+      }
+    }
+    const auto candidate = texture(width, height, DXGI_FORMAT_R32_UINT, false, score_words.data(), width * 4u);
+
+    const auto publish = [&](UINT flags, const auto &work_record,
+                             ID3D11ShaderResourceView *fringe_bounds, ID3D11ShaderResourceView *completed) {
+      const auto work = buffer(work_record.size(), true, false, false, work_record.data());
+      const auto request = constants(std::array<UINT, 12u> {width, height, 38u, flags, 0u, 0u, 0u, 0u,
+                                                           0u, 0u, token_low, token_high});
+      ID3D11Buffer *const cbuffers[] {request.Get(), contour_constants.Get()};
+      std::array<ID3D11ShaderResourceView *, 24u> in {};
+      in[7u] = work.srv.Get();
+      in[13u] = current_sct.srv.Get();
+      in[15u] = candidate.srv.Get();
+      in[22u] = fringe_bounds;
+      in[23u] = completed;
+      ID3D11UnorderedAccessView *const out[] {matte.uav.Get(), nullptr, nullptr, alpha.uav.Get(), nullptr, receipt.uav.Get()};
+      context->CSSetShader(shader.Get(), nullptr, 0u);
+      context->CSSetConstantBuffers(0u, 2u, cbuffers);
+      context->CSSetShaderResources(0u, in.size(), in.data());
+      context->CSSetUnorderedAccessViews(0u, std::size(out), out, nullptr);
+      context->Dispatch(width / 16u, height / 8u, 1u);
+      context->ClearState();
+      return std::array {words(read(alpha.texture.Get())), words(read(matte.texture.Get())), words(read(receipt.buffer.Get()))};
+    };
+
+    const auto base = publish(0u, work_words, fringe.srv.Get(), placement.srv.Get());
+    const auto accepted = publish(fringe_flag, work_words, fringe.srv.Get(), placement.srv.Get());
+    ASSERT_EQ(base[0].size(), width * height);
+    ASSERT_EQ(accepted[0].size(), width * height);
+    ASSERT_EQ(accepted[1].size(), width * height);
+    ASSERT_EQ(accepted[2].size(), 64u);
+    EXPECT_EQ(accepted[2][2u], 4u);
+    EXPECT_EQ(accepted[2][3u], 0u);
+    EXPECT_EQ(accepted[2][60u], token_low);
+    EXPECT_EQ(accepted[2][61u], token_high);
+    const auto pixel = [](UINT x, UINT y) { return y * width + x; };
+    EXPECT_EQ(base[0][pixel(2u * scale, scale)], 63u);
+    EXPECT_EQ(accepted[0][pixel(2u * scale, 0u)], 0u);
+    EXPECT_EQ(accepted[0][pixel(4u * scale - 1u, 0u)], 64u);
+    EXPECT_EQ(accepted[0][pixel(5u * scale, 0u)], 0u) << "Unowned bilinear tap";
+    EXPECT_EQ(accepted[0][pixel(7u * scale, 0u)], 0u) << "Owned high score outside authorized bounds";
+    EXPECT_EQ(accepted[0][pixel(4u * scale - 1u, 3u * scale)], 0u) << "Half-open bottom edge";
+    EXPECT_EQ(accepted[2], base[2]);
+    for (UINT y = 0u; y < height; ++y) {
+      for (UINT x = 0u; x < width; ++x) {
+        const auto i = pixel(x, y);
+        EXPECT_EQ(accepted[1][i], accepted[0][i] >= 38u ? 1u : 0u) << x << ',' << y;
+        if (x < 2u * scale || x >= 6u * scale || y >= 3u * scale ||
+            (x < 3u * scale && y >= scale && y < 2u * scale)) {
+          EXPECT_EQ(accepted[0][i], base[0][i]) << x << ',' << y;
+        }
+      }
+    }
+
+    EXPECT_EQ(publish(fringe_flag, work_words, stale.srv.Get(), placement.srv.Get()), base);
+    EXPECT_EQ(publish(fringe_flag, work_words, fringe.srv.Get(), partial.srv.Get()), base);
+    EXPECT_EQ(publish(fringe_flag, work_words, fringe.srv.Get(), nullptr), base);
+    const auto empty = publish(fringe_flag, empty_words, fringe.srv.Get(), placement.srv.Get());
+    const std::vector<UINT> zeros(width * height, 0u);
+    EXPECT_EQ(empty[0], zeros);
+    EXPECT_EQ(empty[1], zeros);
+    EXPECT_EQ(empty[2], base[2]);
+  }
+}
+
+TEST_F(HostSbsDirectGlyphPublishGpuTest, NativeHistoryRequiresOneMatchingCueInsideTheCurrentDetectorCap) {
+  constexpr UINT width = 96, height = 48;
+  const auto &specs = cache::direct_glyph_palette_specs;
+  const auto sources = cache::snapshot_sources(SUNSHINE_SHADERS_DIR, specs);
+  ASSERT_TRUE(sources);
+  ASSERT_EQ(cache::source_closure_sha256(sources), cache::direct_glyph_palette_source_closure_sha256);
+  const auto load = [&](const cache::shader_spec &spec) {
+    const auto code = cache::get(sources, spec);
+    need(bool(code), "Missing glyph history shader");
+    ComPtr<ID3D11ComputeShader> shader;
+    hr(device->CreateComputeShader(code->data(), code->size(), nullptr, &shader));
+    return shader;
+  };
+  const auto begin = load(cache::host_sbs_direct_glyph_begin_history);
+  const auto confirm = load(cache::host_sbs_direct_glyph_confirm_history);
+  const auto finish = load(cache::host_sbs_direct_glyph_finish_windows);
+  const auto scatter = load(cache::host_sbs_direct_glyph_publish_line);
+  const auto structured = [&](UINT count, UINT stride, const void *initial) {
+    buf_t b;
+    D3D11_BUFFER_DESC d {count * stride, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, 0u, D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, stride};
+    D3D11_SUBRESOURCE_DATA data {initial, 0, 0};
+    hr(device->CreateBuffer(&d, initial ? &data : nullptr, &b.buffer));
+    hr(device->CreateShaderResourceView(b.buffer.Get(), nullptr, &b.srv));
+    hr(device->CreateUnorderedAccessView(b.buffer.Get(), nullptr, &b.uav));
+    return b;
+  };
+  const auto cb = constants(std::array<UINT, 8> {width, height, 17, 0, 1, 1, 0, 0});
+  const std::array<UINT, 4> old_box {10, 8, 82, 40}, current_box {16, 10, 80, 38}, cap_box {12, 6, 84, 42};
+  std::array<UINT, 8 * 16> old {};
+  for (UINT at : {0u, 4u, 8u}) {
+    std::copy(old_box.begin(), old_box.end(), old.begin() + at);
+  }
+  const auto prior_lines = structured(8, 64, old.data());
+  const auto current = structured(8, 64, nullptr);
+  const auto sizes = structured(8, 8, nullptr);
+  std::vector<float> past(width * height, 1.0f), raw_now(width * height, 0.0f);
+  const auto prior_alpha = structured(width * height, 4, past.data());
+  const auto new_alpha = structured(width * height, 4, raw_now.data());
+  const auto remembered = structured(width * height, 4, past.data());
+  const auto output = texture(width, height, DXGI_FORMAT_R32_UINT, true);
+  std::vector<std::uint16_t> a(width * height * 4u), b(a.size());
+  for (UINT i = 0; i < width * height; ++i) {
+    const bool white = ((i % width) / 4u) % 2u == 0u;
+    for (UINT c = 0; c < 3; ++c) {
+      a[4 * i + c] = white ? 0x3c00u : 0u;
+      b[4 * i + c] = white ? 0u : 0x3c00u;
+    }
+  }
+  const auto previous_rgb = texture(width, height, DXGI_FORMAT_R16G16B16A16_FLOAT, false, a.data(), width * 8);
+  const auto swapped_rgb = texture(width, height, DXGI_FORMAT_R16G16B16A16_FLOAT, false, b.data(), width * 8);
+  const auto exercise = [&](UINT count, UINT cap_token, bool swap) {
+    std::array<UINT, 36> work {count ? 2u : 1u, count}, caps {1u, count, cap_token, 0u};
+    for (UINT slot = 0; slot < count; ++slot) {
+      std::copy(current_box.begin(), current_box.end(), work.begin() + 4u + 4u * slot);
+      std::copy(cap_box.begin(), cap_box.end(), caps.begin() + 4u + 4u * slot);
+    }
+    const auto current_work = buffer(work.size(), true, false, true, work.data());
+    const auto detector = buffer(caps.size(), true, false, false, caps.data());
+    auto *rgb = swap ? swapped_rgb.srv.Get() : previous_rgb.srv.Get();
+    auto pass = [&](ID3D11ComputeShader *shader, UINT gx, UINT gy, std::array<ID3D11ShaderResourceView *, 7> in, std::array<ID3D11UnorderedAccessView *, 5> out) {
+      context->CSSetConstantBuffers(0, 1, cb.GetAddressOf());
+      context->CSSetShader(shader, nullptr, 0);
+      context->CSSetShaderResources(0, in.size(), in.data());
+      context->CSSetUnorderedAccessViews(0, out.size(), out.data(), nullptr);
+      context->Dispatch(gx, gy, 1);
+      unbind(context.Get());
+    };
+    const std::array<UINT, 4> zero {};
+    context->ClearUnorderedAccessViewUint(output.uav.Get(), zero.data());
+    pass(begin.Get(), 1, 1, {detector.srv.Get(), prior_lines.srv.Get()}, {current_work.uav.Get(), current.uav.Get(), sizes.uav.Get()});
+    pass(confirm.Get(), 8, 1, {nullptr, prior_lines.srv.Get(), previous_rgb.srv.Get(), rgb, prior_alpha.srv.Get()}, {nullptr, current.uav.Get()});
+    pass(finish.Get(), 1, 1, {}, {current_work.uav.Get(), current.uav.Get(), sizes.uav.Get()});
+    pass(scatter.Get(), 6, 6, {nullptr, prior_lines.srv.Get(), previous_rgb.srv.Get(), rgb, prior_alpha.srv.Get(), new_alpha.srv.Get(), current.srv.Get()}, {current_work.uav.Get(), nullptr, nullptr, remembered.uav.Get(), output.uav.Get()});
+    return std::array {words(read(current_work.buffer.Get())), words(read(current.buffer.Get())), words(read(output.texture.Get()))};
+  };
+  const auto same = exercise(1, 17, false);
+  EXPECT_EQ((std::vector<UINT>(same[0].begin() + 4, same[0].begin() + 8)), (std::vector<UINT> {12, 8, 82, 40}));
+  EXPECT_EQ(same[1][14], 1u);
+  EXPECT_EQ(same[2][24u * width + 35u], 242u);
+  EXPECT_EQ(same[2][24u * width + 11u], 0u);
+  EXPECT_EQ(words(read(remembered.buffer.Get()))[16u * 70u + 23u], 0u);
+  const auto swap = exercise(1, 17, true);
+  EXPECT_EQ((std::vector<UINT>(swap[0].begin() + 4, swap[0].begin() + 8)), (std::vector<UINT> {14, 8, 82, 40}));
+  EXPECT_EQ(swap[1][14], 0u);
+  EXPECT_EQ(swap[2][24u * width + 35u], 0u);
+  const auto ambiguous = exercise(2, 17, false);
+  EXPECT_EQ(ambiguous[1][12], 0u);
+  EXPECT_EQ(ambiguous[1][16 + 12], 0u);
+  EXPECT_EQ(exercise(0, 17, false)[0][0], 1u);
+  const auto stale = exercise(1, 16, false);
+  EXPECT_EQ(stale[0][0], 0u);
+  EXPECT_NE(stale[0][2], 0u);
+  EXPECT_EQ(stale[1][14], 0u);
 }
 
 TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, EpochAndEmptyAreSourceFactsNotUiAuthority) {

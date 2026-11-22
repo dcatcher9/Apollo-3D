@@ -60,6 +60,8 @@ namespace models::host_sbs_current_black_enclosure_gpu_v1 {
     ID3D11ShaderResourceView *current_uip = nullptr;
     producer_t producer;
     bool trusted_inner = false;
+    // Optional actual proof source when the dispatch root is a private scheduling twin.
+    ID3D11Buffer *actual_root = nullptr;
   };
 
   struct mutable_views_t {
@@ -255,7 +257,8 @@ namespace models::host_sbs_current_black_enclosure_gpu_v1 {
     // Input/output storage must be unbound outside CS0..15/UAV0..7. Serialized immediate owner
     // holds every source/packet/CB/shader immutable until ordered GPU completion; views are mutable.
     // A true return proves command submission only. Enabled root0 holds private output+Meta.
-    // Root is the literal complete256B GPU dispatch twin and root_offset is observationOne240.
+    // Root is the complete256B GPU dispatch twin and root_offset is observationOne240.
+    // The optional actual_root is mirrored for CBC proof and supplies no scheduling work.
     bool dispatch(ID3D11DeviceContext *context, const std::array<ID3D11ComputeShader *, 5u> &colour, const std::array<ID3D11ComputeShader *, 6u> &graph, ID3D11Buffer *constants96, ID3D11ShaderResourceView *rgb, ID3D11ShaderResourceView *probability, ID3D11ShaderResourceView *support, ID3D11ShaderResourceView *ocr, ID3D11Buffer *root, UINT root_offset, std::string &error, const program_t *program = nullptr) {
       error.clear();
       last_enabled_ = false;
@@ -288,6 +291,13 @@ namespace models::host_sbs_current_black_enclosure_gpu_v1 {
       root->GetDesc(&args);
       if (cb.ByteWidth != 96u || !(cb.BindFlags & D3D11_BIND_CONSTANT_BUFFER) || args.ByteWidth < 256u || !(args.MiscFlags & D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS) || root_offset != 240u) {
         return fail(error, "Enabled enclosure requires CB96 and complete root256/observationOne240.");
+      }
+      if (program->actual_root) {
+        if (!same_device(program->actual_root)) return fail(error, "Wrong-device enclosure proof root.");
+        program->actual_root->GetDesc(&args);
+        if (args.ByteWidth != 256u || !(args.MiscFlags & D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS)) {
+          return fail(error, "Enabled enclosure requires complete actual proof root256.");
+        }
       }
       const auto producer = producer_words(program->producer);
       // Preserve the literal unsupported descriptor in b2, but never bind a buffer/array/MS/
@@ -627,6 +637,7 @@ namespace models::host_sbs_current_black_enclosure_gpu_v1 {
       }
       add(cb);
       add(root);
+      add(program.actual_root);
       add(device_.Get());
       for (const auto &u : base_uavs_) {
         add(u.Get());
@@ -665,7 +676,8 @@ namespace models::host_sbs_current_black_enclosure_gpu_v1 {
       std::array<ID3D11UnorderedAccessView *, 8u> u {};
       unbind(c);
       const D3D11_BOX rootBox {0u, 0u, 0u, 256u, 1u, 1u};
-      c->CopySubresourceRegion(root_mirror_.resource.Get(), 0u, 0u, 0u, 0u, root, 0u, &rootBox);
+      c->CopySubresourceRegion(root_mirror_.resource.Get(), 0u, 0u, 0u, 0u,
+                               program.actual_root ? program.actual_root : root, 0u, &rootBox);
       const D3D11_BOX gate {rootOffset, 0u, 0u, rootOffset + 4u, 1u, 1u};
       c->CopySubresourceRegion(native_args_.Get(), 0u, 8u, 0u, 0u, root, 0u, &gate);
       c->CopySubresourceRegion(base_views_.native_clear_args.Get(), 0u, 8u, 0u, 0u, root, 0u, &gate);

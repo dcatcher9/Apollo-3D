@@ -447,6 +447,144 @@
       "source_file": "current_outline/hole/host_sbs_current_foreground_edge_cs.hlsl",
       "source_entrypoint": "trusted_inner_publish_main",
       "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_direct_glyph_plan",
+      "source_file": "host_sbs_subtitle_direct_glyph_cs.hlsl",
+      "source_entrypoint": "plan_direct_main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_direct_glyph_publish",
+      "source_file": "host_sbs_subtitle_direct_glyph_cs.hlsl",
+      "source_entrypoint": "publish_direct_main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_direct_glyph_plan_tile",
+      "source_file": "host_sbs_subtitle_direct_glyph_transport_cs.hlsl",
+      "source_entrypoint": "plan_tile",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_direct_glyph_pack_rgb",
+      "source_file": "host_sbs_subtitle_direct_glyph_transport_cs.hlsl",
+      "source_entrypoint": "pack_rgb",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_direct_glyph_resolve_matte",
+      "source_file": "host_sbs_subtitle_direct_glyph_transport_cs.hlsl",
+      "source_entrypoint": "resolve_matte",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_direct_glyph_finish_score",
+      "source_file": "host_sbs_subtitle_direct_glyph_transport_cs.hlsl",
+      "source_entrypoint": "finish_score",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_direct_glyph_palette_pack_rgb",
+      "source_file": "host_sbs_direct_glyph_palette_cs.hlsl",
+      "source_entrypoint": "pack_rgb",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_direct_glyph_palette_pack_tile",
+      "source_file": "host_sbs_direct_glyph_palette_cs.hlsl",
+      "source_entrypoint": "pack_tile",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_direct_glyph_palette_export_roles",
+      "source_file": "host_sbs_direct_glyph_palette_cs.hlsl",
+      "source_entrypoint": "export_roles",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_direct_glyph_palette_coarse",
+      "source_file": "host_sbs_direct_glyph_palette_cs.hlsl",
+      "source_entrypoint": "coarse",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_direct_glyph_palette_make_hist",
+      "source_file": "host_sbs_direct_glyph_palette_cs.hlsl",
+      "source_entrypoint": "make_hist",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_direct_glyph_palette_smooth_hist",
+      "source_file": "host_sbs_direct_glyph_palette_cs.hlsl",
+      "source_entrypoint": "smooth_hist",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_direct_glyph_palette_choose_colors",
+      "source_file": "host_sbs_direct_glyph_palette_cs.hlsl",
+      "source_entrypoint": "choose_colors",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_direct_glyph_palette_make_moments",
+      "source_file": "host_sbs_direct_glyph_palette_cs.hlsl",
+      "source_entrypoint": "make_moments",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_direct_glyph_palette_smooth_moments",
+      "source_file": "host_sbs_direct_glyph_palette_cs.hlsl",
+      "source_entrypoint": "smooth_moments",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_direct_glyph_palette_prototypes",
+      "source_file": "host_sbs_direct_glyph_palette_cs.hlsl",
+      "source_entrypoint": "prototypes",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_direct_glyph_palette_decode_palette",
+      "source_file": "host_sbs_direct_glyph_palette_cs.hlsl",
+      "source_entrypoint": "decode_palette",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_direct_glyph_begin_history",
+      "source_file": "host_sbs_direct_glyph_history_cs.hlsl",
+      "source_entrypoint": "begin_history",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_direct_glyph_confirm_history",
+      "source_file": "host_sbs_direct_glyph_history_cs.hlsl",
+      "source_entrypoint": "confirm_history",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_direct_glyph_finish_windows",
+      "source_file": "host_sbs_direct_glyph_history_cs.hlsl",
+      "source_entrypoint": "finish_windows",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_direct_glyph_publish_line",
+      "source_file": "host_sbs_direct_glyph_history_cs.hlsl",
+      "source_entrypoint": "publish_line",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_direct_glyph_finish_history",
+      "source_file": "host_sbs_direct_glyph_history_cs.hlsl",
+      "source_entrypoint": "finish_history",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_direct_glyph_prepare",
+      "source_file": "host_sbs_shared_ui_warp_direct_glyph.hlsl",
+      "source_entrypoint": "prepare_direct_glyph_main",
+      "source_target": "cs_5_0"
     }
   ],
   "groups": [
@@ -494,7 +632,7 @@
         "host_sbs_subtitle_gaussian_vertical_limit",
         "host_sbs_subtitle_gaussian_horizontal_limit"
       ],
-      "source_closure_sha256": "9511d645d89430fe88284b708bfbd12f45a2679f270ae1d83afca4dfd969fcfa"
+      "source_closure_sha256": "04c861cfed510c9e074aaf430c180b66f5cf308c3df9a4c901a096af3779c744"
     },
     {
       "name": "parallax_v2_replay_resolve",
@@ -660,7 +798,7 @@
       "specs": [
         "host_sbs_current_foreground_edge"
       ],
-      "source_closure_sha256": "4c8750b262827356b47a691aafe4cc306e541b691709060d979252635e73436c"
+      "source_closure_sha256": "59d4c0f90506ae0e6c042190cdaca7e76a876d0855923b46693da00ff5062a01"
     },
     {
       "name": "current_trusted_inner",
@@ -668,7 +806,58 @@
       "specs": [
         "host_sbs_current_trusted_inner"
       ],
-      "source_closure_sha256": "86c990d49f0946e1d79730c42f629ef89076cb95b552225847671d0ef5ac47e7"
+      "source_closure_sha256": "5fdc9a1be98291902d63ca639f5bcfd80e88821b6df17bd083a23b5e09c32884"
+    },
+    {
+      "name": "direct_glyph_plan",
+      "description": "Projects current OCR cores inside their original covers and publishes the direct glyph matte with its current receipt. Adaptive publication also admits pixels whose original completed score windows own every required tap.",
+      "specs": [
+        "host_sbs_direct_glyph_plan",
+        "host_sbs_direct_glyph_publish"
+      ],
+      "source_closure_sha256": "3c1df1656492065c62c519ceffd49f3d1bc1d3a4e26c50ba0b8a2eead4dc2844"
+    },
+    {
+      "name": "direct_glyph_transport",
+      "description": "Plans bounded, phase-aligned RGB input, packs the fixed TensorRT tensor and resolves current model scores into alpha8.",
+      "specs": [
+        "host_sbs_direct_glyph_plan_tile",
+        "host_sbs_direct_glyph_pack_rgb",
+        "host_sbs_direct_glyph_resolve_matte",
+        "host_sbs_direct_glyph_finish_score"
+      ],
+      "source_closure_sha256": "2df402561c88d7e2b2672660e2f9d5f42b06d9815c87b48511adb05af6226b30"
+    },
+    {
+      "name": "direct_glyph_palette",
+      "description": "Normalizes the full OCR line, stitches mixed encoder tiles and decodes fill-plus-outline alpha at native pixel centers.",
+      "specs": [
+        "host_sbs_direct_glyph_palette_pack_rgb",
+        "host_sbs_direct_glyph_palette_pack_tile",
+        "host_sbs_direct_glyph_palette_export_roles",
+        "host_sbs_direct_glyph_palette_coarse",
+        "host_sbs_direct_glyph_palette_make_hist",
+        "host_sbs_direct_glyph_palette_smooth_hist",
+        "host_sbs_direct_glyph_palette_choose_colors",
+        "host_sbs_direct_glyph_palette_make_moments",
+        "host_sbs_direct_glyph_palette_smooth_moments",
+        "host_sbs_direct_glyph_palette_prototypes",
+        "host_sbs_direct_glyph_palette_decode_palette",
+        "host_sbs_direct_glyph_begin_history",
+        "host_sbs_direct_glyph_confirm_history",
+        "host_sbs_direct_glyph_finish_windows",
+        "host_sbs_direct_glyph_publish_line",
+        "host_sbs_direct_glyph_finish_history"
+      ],
+      "source_closure_sha256": "7f5aea30bf4fbd655130f36bb690cea131443e1b71b25553decf545fef79fcf7"
+    },
+    {
+      "name": "direct_glyph_prepare",
+      "description": "Completed shared-warp preparation for the direct glyph matte receipt.",
+      "specs": [
+        "host_sbs_direct_glyph_prepare"
+      ],
+      "source_closure_sha256": "219a6a305c05ca3ac1744286a4e87b83b61128c10e05c61ec517337f279ec940"
     }
   ]
 }

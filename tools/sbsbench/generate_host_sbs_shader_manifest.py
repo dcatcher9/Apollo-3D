@@ -61,6 +61,10 @@ EXPECTED_GROUP_NAMES = (
     "current_stroke_coverage",
     "current_foreground_edge",
     "current_trusted_inner",
+    "direct_glyph_plan",
+    "direct_glyph_transport",
+    "direct_glyph_palette",
+    "direct_glyph_prepare",
 )
 ANY_INCLUDE = re.compile(rb"^\s*#\s*include\b")
 QUOTED_INCLUDE = re.compile(rb'^\s*#\s*include\s*"([^"]+)"')

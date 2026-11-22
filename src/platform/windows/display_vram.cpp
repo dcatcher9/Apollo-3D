@@ -66,7 +66,7 @@
 #include "src/host_sbs_provider.h"
 #include "src/host_sbs_queued_render_guard.h"
 #include "src/host_sbs_pending_current_colour_lane.h"
-#include "src/host_sbs_current_outline_runtime_programs.h"
+#include "src/host_sbs_completed_subtitle_programs.h"
 #include "src/host_sbs_shared_ui_warp_runtime.h"
 #include "src/host_sbs_resolution.h"
 #include "src/host_sbs_shader_cache.h"
@@ -380,7 +380,6 @@ namespace platf::dxgi {
     models::host_sbs_shared_ui_warp::programs_t shared_warp;
     models::subtitle_selected_matte_research_configuration_t configuration;
     std::string error;
-    bool configured = false;
     bool ready = false;
   };
 
@@ -392,15 +391,10 @@ namespace platf::dxgi {
     ID3D11Device *device,
     const models::subtitle_selected_matte_research_configuration_t &configuration
   ) {
-    selected_matte_programs_t result;result.configuration = configuration;
-    if (!configuration.current_outline) {
-      result.error = "Selected rendering requires the current-outline shared warp";
-      return result;
-    }
-    if (!estimator.configure_subtitle_selected_matte_research(configuration, result.error)) return result;
-    result.configured = true;
-    const auto shader_root = std::filesystem::path(configuration.current_outline_shader_root).parent_path();
-    result.ready = result.shared_warp.load(device, shader_root, result.error);
+    selected_matte_programs_t result;
+    result.configuration = configuration;
+    result.ready = models::host_sbs_completed_subtitle_programs::prepare(
+      device, estimator, configuration, result.shared_warp, result.error);
     return result;
   }
 
@@ -2902,6 +2896,7 @@ namespace platf::dxgi {
             constexpr auto pin_bindings = shared_warp::resources_t::binding_policy_e::converter_owned;
             shared_warp::views_t current_shared_warp;
             bool shared_warp_selected = false;
+            bool raw_model_prepare_selected = false;
             actual_converter_probe_v1::shared_warp_draw_t current_shared_observed;
             // Preparation and the pre-Draw observer derive the same literal request from
             // the recorder command, rather than maintaining a second copy of its operands.
@@ -2920,7 +2915,9 @@ namespace platf::dxgi {
             };
             if (selected_draw && subtitle_constants.enabled == 1u) {
               const auto request = shared_request_for_draw();
-              const auto program = selected_shared_warp_programs.program(queued_geometry_selected);
+              const bool prepare_raw_model = !queued_geometry_selected && selected_shared_warp_programs.raw_model_completed_ready();
+              const auto program = prepare_raw_model ?
+                selected_shared_warp_programs.raw_model_completed_program() : selected_shared_warp_programs.program(queued_geometry_selected);
               std::string shared_error;
               if (selected_shared_warp.prepare_subtitle(
                     device.get(), device_ctx.get(), program, request,
@@ -2929,6 +2926,7 @@ namespace platf::dxgi {
                   ) && selected_shared_warp.matches(device_ctx.get(), request)) {
                 current_shared_warp = selected_shared_warp.views();
                 shared_warp_selected = true;
+                raw_model_prepare_selected = prepare_raw_model;
                 draw_command.pixel_shader = program.pixel;
               }
             }
@@ -3025,6 +3023,9 @@ namespace platf::dxgi {
                     s.serial = current_shared_warp.serial;
                     s.shape = current_shared_warp.shape;
                     s.source_closure = shared_warp::source_closure(s.queued);
+                    if (raw_model_prepare_selected) {
+                      s.raw_model_prepare_source_closure = selected_shared_warp_programs.model_prepare_closure();
+                    }
                     s.pixel_shader_address = reinterpret_cast<std::uintptr_t>(actual_shader.Get());
                     s.weights = actual[12];
                     s.field = actual[13];
@@ -3078,6 +3079,9 @@ namespace platf::dxgi {
                     e.shared_pin_rows = actual[14];
                     e.shared_pin_geometry = constants[4];
                     e.shared_pin_source_closure = e.pixel_shader_closure;
+                    if (raw_model_prepare_selected) {
+                      e.shared_pin_model_prepare_closure = selected_shared_warp_programs.model_prepare_closure();
+                    }
                   }
                   e.geometry_constants = constants[0];
                   e.subtitle_constants = constants[1];
@@ -3784,7 +3788,7 @@ namespace platf::dxgi {
     void fail_depth_pipeline_flat() {
       host_sbs_renderer = models::fail_host_sbs_renderer_flat(host_sbs_renderer);
       retire_depth_estimator(std::move(depth_estimator));
-      selected_matte_configured = selected_matte_ready = false;
+      selected_matte_ready = false;
       pending_matched_frame = nullptr;
       for (auto &slot : matched_frame_slots) {
         slot.attribution.gpu_undecided_transaction = false;
@@ -3829,16 +3833,12 @@ namespace platf::dxgi {
             if (depth_estimator) {
               depth_estimator->set_telemetry_performance(sbs_telemetry_performance);
               if (!probe_context) {
-                if (!pipeline.selected_matte.configured) {
-                  BOOST_LOG(warning) << "Subtitle outline initialization unavailable: "
-                                     << pipeline.selected_matte.error;
-                } else {
+                if (pipeline.selected_matte.ready) {
                   adopt_selected_matte_programs(std::move(pipeline.selected_matte));
-                  if (selected_matte_ready) {
-                    BOOST_LOG(info) << "Current subtitle glyph and black-outline protection active.";
-                  } else {
-                    BOOST_LOG(warning) << "Subtitle shared renderer unavailable; ordinary authenticated Base rendering remains available.";
-                  }
+                  BOOST_LOG(info) << "Adaptive subtitle glyph model active.";
+                } else {
+                  BOOST_LOG(warning) << "Subtitle outline initialization unavailable; retaining ordinary authenticated Base: "
+                                     << pipeline.selected_matte.error;
                 }
               }
             }
@@ -3932,21 +3932,14 @@ namespace platf::dxgi {
         result.estimator->set_subtitle_conditioning_diagnostics_always(false);
         if (prepare_live_outline && result.estimator->is_valid() &&
             !result.estimator->has_terminal_failure()) {
-          namespace outline = models::current_outline_runtime;
-          const auto root = std::filesystem::path(SUNSHINE_SHADERS_DIR) / "current_outline";
-          models::subtitle_selected_matte_research_configuration_t configuration;
-          configuration.current_outline = true;
-          configuration.current_outline_shader_root = root.string();
-          configuration.selector_shader_root = outline::selector_root(root).string();
-          configuration.selector_source_closure_sha256 = std::string(outline::selector_closure);
+          namespace completed_subtitles = models::host_sbs_completed_subtitle_programs;
+          const std::filesystem::path root(SUNSHINE_SHADERS_DIR);
           result.selected_matte = prepare_selected_matte_programs(
-            *result.estimator,
-            dev.Get(),
-            configuration
+            *result.estimator, dev.Get(), completed_subtitles::canonical_configuration(root, true, true)
           );
           // Keep the optional program creation on the background worker for packed Game 3D,
           // including its early local warmup before a text game appears.
-          if (std::string error; prepare_text_game_programs && result.selected_matte.ready && !result.selected_matte.shared_warp.load_text_game(dev.Get(), root.parent_path(), error)) {
+          if (std::string error; prepare_text_game_programs && result.selected_matte.ready && !result.selected_matte.shared_warp.load_text_game(dev.Get(), root, error)) {
             BOOST_LOG(warning) << "Game 3D text-game pin unavailable; a text game keeps the picture-based protection: " << error;
           }
         }
@@ -4881,7 +4874,10 @@ namespace platf::dxgi {
       }
       if(!event.flat&&!event.repeat&&depth_estimator&&event.model_frame!=0u&&event.observation_us!=0u) {
         if(const auto v=depth_estimator->subtitle_selected_matte_diagnostic_views_for_evaluation(event.model_frame,event.observation_us)) {
-          event.current_outline_stages=v->current_outline_stages;
+          if (!v->current_outline_raw_matte_work) {
+            // RawMatte can publish a current empty receipt while its producer textures are parked.
+            event.current_outline_stages = v->current_outline_stages;
+          }
           event.selected_views[0]=v->selected_matte;event.selected_views[1]=v->selected_receipt;
           event.selected_views[3]=v->baseline_body;event.selected_views[4]=v->baseline_matte;event.selected_views[5]=v->numeric_proof;
           event.selected_views[6]=v->current_probability;event.selected_views[7]=v->current_support;
@@ -4983,10 +4979,15 @@ namespace platf::dxgi {
 
     // Explicit current-outline shared-renderer activation before the first input.
     bool configure_selected_matte_for_instance(const models::subtitle_selected_matte_research_configuration_t &cfg,std::string &error) {
-      if (!cfg.current_outline) {error = "Historical selected-render receipt ABI is unsupported; current-outline shared warp required";return false;}
-      if(!depth_estimator||selected_matte_configured||sbs_frame_sequence!=0u){error="Selected matte requires prepared device before first input";return false;}
+      if (!depth_estimator || selected_matte_ready || sbs_frame_sequence != 0u) {
+        error = "Selected matte requires prepared device before first input";
+        return false;
+      }
       auto programs = prepare_selected_matte_programs(*depth_estimator, device.get(), cfg);
-      if (!programs.ready) {error = programs.error;return false;}
+      if (!programs.ready) {
+        error = programs.error;
+        return false;
+      }
       adopt_selected_matte_programs(std::move(programs));
       error.clear();
       return true;
@@ -4995,11 +4996,10 @@ namespace platf::dxgi {
     void adopt_selected_matte_programs(selected_matte_programs_t programs) {
       selected_shared_warp_programs = std::move(programs.shared_warp);
       selected_shared_warp_root = std::filesystem::path(programs.configuration.current_outline_shader_root).parent_path();
-      selected_matte_configured = programs.configured;
-      selected_matte_ready = selected_matte_configured && selected_shared_warp_programs.ready();
-      if (!programs.error.empty()) {
-        BOOST_LOG(warning) << "Host SBS shared UI warp unavailable; preserving ordinary authenticated Base rendering: "
-                           << programs.error;
+      selected_matte_ready = programs.ready;
+      if (selected_matte_ready && selected_shared_warp_programs.raw_model_completed_ready()) {
+        BOOST_LOG(info) << "Host SBS completed RawMatte prepare source closure "
+                        << selected_shared_warp_programs.model_prepare_closure();
       }
     }
 
@@ -8042,7 +8042,6 @@ namespace platf::dxgi {
     buf_t sbs_reprojection_cbuffer;
     buf_t sbs_subtitle_render_cbuffer;
     bool selected_matte_ready = false;
-    bool selected_matte_configured = false;
     models::host_sbs_shared_ui_warp::programs_t selected_shared_warp_programs;
     models::host_sbs_shared_ui_warp::resources_t selected_shared_warp;
     std::filesystem::path selected_shared_warp_root;

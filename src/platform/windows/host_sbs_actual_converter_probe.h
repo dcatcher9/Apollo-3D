@@ -9,6 +9,7 @@
   #include <cstdint>
   #include <filesystem>
   #include <string>
+  #include <string_view>
   #include <vector>
   #include <wrl/client.h>
 
@@ -67,6 +68,7 @@ namespace platf::dxgi::actual_converter_probe_v1 {
     std::uint64_t serial=0u,pixel_shader_address=0u;
     std::array<std::uint32_t,4u> shape{};
     std::string source_closure;
+    std::string_view raw_model_prepare_source_closure;
   };
   struct event_t {
     event_e kind {};

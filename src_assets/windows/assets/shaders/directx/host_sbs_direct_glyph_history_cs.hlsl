@@ -1,0 +1,200 @@
+// Work and Caps have already joined this observation's OCR record and display snapshot.
+// PreviousLines and PreviousAlpha contain the last committed raw model output.
+#include "include/host_sbs_direct_glyph_line.hlsl"
+
+cbuffer Schedule : register(b0) {
+    uint2 Extent;
+    uint2 Token;
+    uint HasSource;
+    uint HasPrevious;
+    uint Slot;
+    uint Reserved;
+};
+ByteAddressBuffer Caps : register(t0);
+StructuredBuffer<GlyphLine> PreviousLines : register(t1);
+Texture2D<float4> PreviousSource : register(t2);
+Texture2D<float4> CurrentSource : register(t3);
+StructuredBuffer<float> PreviousAlpha : register(t4);
+StructuredBuffer<float> LineAlpha : register(t5);
+StructuredBuffer<GlyphLine> Planned : register(t6);
+
+RWByteAddressBuffer Work : register(u0);
+RWStructuredBuffer<GlyphLine> Lines : register(u1);
+RWStructuredBuffer<uint2> Sizes : register(u2);
+RWStructuredBuffer<float> NextAlpha : register(u3);
+RWTexture2D<uint> Protection : register(u4);
+
+bool rectangle(uint4 v) {
+    return all(v.xy < v.zw) && all(v.zw <= Extent);
+}
+uint4 intersect_rect(uint4 a, uint4 b) {
+    return uint4(max(a.xy, b.xy), min(a.zw, b.zw));
+}
+uint area(uint4 r) {
+    return all(r.xy < r.zw) ? (r.z-r.x)*(r.w-r.y) : 0u;
+}
+bool overlaps(uint4 a, uint4 b) {
+    uint common = area(intersect_rect(a,b));
+    return 3u * common > area(a) + area(b);
+}
+uint4 expanded_work(uint index, uint4 cap) {
+    uint4 original = Work.Load4(16u+16u*index);
+    uint margin = (original.w-original.y+15u)/16u;
+    return uint4(max(cap.xy, max(original.xy, margin)-margin), min(cap.zw, original.zw+margin));
+}
+
+[numthreads(1,1,1)]
+void begin_history() {
+    [unroll] for (uint s=0; s<8; ++s) {
+        Lines[s] = (GlyphLine)0;
+        Sizes[s] = 0;
+    }
+    uint4 header = Work.Load4(0);
+    if (header.x != 2u) return;
+    if (HasSource == 0u || header.y == 0 || header.y > 8 || any(header.zw != 0) ||
+        any(Caps.Load4(0) != uint4(1u,header.y,Token))) {
+        Work.Store4(0,uint4(0u,0u,4u,0u));
+        return;
+    }
+    uint4 bases[8], covers[8];
+    [loop] for (uint i=0; i<header.y; ++i) {
+        uint4 cover=Caps.Load4(16+16*i), original=Work.Load4(16+16*i);
+        if (!rectangle(cover) || !rectangle(original) || any(cover.xy>original.xy) || any(cover.zw<original.zw)) {
+            Work.Store4(0,uint4(0u,0u,4u,0u));
+            return;
+        }
+        covers[i]=cover;
+        bases[i]=expanded_work(i,cover);
+    }
+    [loop] for (uint slot=0; slot<header.y; ++slot) {
+        GlyphLine record = (GlyphLine)0;
+        record.base=bases[slot]; record.box=record.base; record.cover=covers[slot];
+        if (HasPrevious != 0) {
+            uint n=0;
+            [loop] for (uint prior=0; prior<8; ++prior) {
+                uint4 p=PreviousLines[prior].base;
+                if (!overlaps(p,record.base)) continue;
+                uint owners=0;
+                [loop] for (uint other=0; other<header.y; ++other)
+                    owners+=overlaps(p,bases[other]) ? 1u : 0u;
+                if (owners==1) { record.state.x=prior+1u; ++n; }
+            }
+            if (n!=1) record.state.x=0;
+        }
+        Lines[slot]=record;
+    }
+}
+
+int3 rgb8(Texture2D<float4> source, int2 p) {
+    return int3(floor(saturate(source.Load(int3(p,0)).rgb)*255.0f+0.5f));
+}
+int luma(Texture2D<float4> source, int2 p) {
+    int3 rgb=rgb8(source,p);
+    return (rgb.x+2*rgb.y+rgb.z)/4;
+}
+int2 edge(Texture2D<float4> source, int2 p) {
+    return int2(luma(source,p+int2(2,0))-luma(source,p-int2(2,0)),
+                luma(source,p+int2(0,2))-luma(source,p-int2(0,2)));
+}
+uint raw_index(GlyphLine record,uint2 p) {
+    return record.state.y+(p.y-record.box.y)*(record.box.z-record.box.x)+p.x-record.box.x;
+}
+// Compare 10*dot^2 >= 7*oldPower*newPower at integer precision.
+uint2 product(uint a,uint b) {
+    uint lo=(a&65535u)*(b&65535u);
+    uint mid=(a>>16)*(b&65535u)+(a&65535u)*(b>>16)+(lo>>16);
+    return uint2((a>>16)*(b>>16)+(mid>>16),(mid<<16)|(lo&65535u));
+}
+bool direction_agrees(int2 a,int2 b,uint oldPower) {
+    int similarity=a.x*b.x+a.y*b.y;
+    if (similarity<=0) return false;
+    uint2 lhs=product(10u*uint(similarity),uint(similarity));
+    uint2 rhs=product(7u*oldPower,uint(b.x*b.x+b.y*b.y));
+    return lhs.x>rhs.x || (lhs.x==rhs.x && lhs.y>=rhs.y);
+}
+groupshared uint2 Counts[128];
+
+[numthreads(128,1,1)]
+void confirm_history(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
+    uint slot=group.x;
+    GlyphLine record=Lines[slot];
+    GlyphLine old=(GlyphLine)0;
+    if (record.state.x>0) old=PreviousLines[record.state.x-1];
+    uint4 r=intersect_rect(old.box,record.base);
+    uint2 size=max(r.zw,r.xy)-r.xy;
+    uint stride=max(2u,size.x/250u);
+    uint2 sites=(max(size,4u)-4u+stride-1u)/stride;
+    uint2 votes=0;
+    uint count=record.state.x==0 ? 0u : sites.x*sites.y;
+    for (uint i=lane; i<count; i+=128u) {
+        uint2 p=r.xy+2u+stride*uint2(i%sites.x,i/sites.x);
+        if (PreviousAlpha[raw_index(old,p)] < 38.0f/255.0f) continue;
+        int2 a=edge(PreviousSource,p);
+        uint power=uint(a.x*a.x+a.y*a.y);
+        if (power<24u*24u) continue;
+        votes.x++;
+        int3 delta=abs(rgb8(PreviousSource,p)-rgb8(CurrentSource,p));
+        if (all(delta<=32) && direction_agrees(a,edge(CurrentSource,p),power)) votes.y++;
+    }
+    Counts[lane]=votes;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll] for (uint step=64; step>0; step/=2) {
+        if (lane<step) Counts[lane]+=Counts[lane+step];
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (lane==0 && Counts[0].x>=24 && 10u*Counts[0].y>=7u*Counts[0].x) {
+        record.state.z=1;
+        record.box=intersect_rect(uint4(min(record.base.xy,old.base.xy),max(record.base.zw,old.base.zw)),record.cover);
+        Lines[slot]=record;
+    }
+}
+
+[numthreads(1,1,1)]
+void finish_windows() {
+    uint offset=0;
+    [unroll] for (uint slot=0; slot<8; ++slot) {
+        GlyphLine record=Lines[slot];
+        uint2 size=record.box.zw-record.box.xy;
+        Sizes[slot]=size;
+        if (all(size>0)) {
+            record.state.y=offset;
+            Lines[slot]=record;
+            Work.Store4(16+16*slot,record.box);
+            offset+=size.x*size.y;
+        }
+    }
+}
+
+[numthreads(16,8,1)]
+void publish_line(uint3 id: SV_DispatchThreadID) {
+    GlyphLine record=Planned[Slot];
+    uint2 size=record.box.zw-record.box.xy;
+    if (any(id.xy>=size)) return;
+    uint2 p=record.box.xy+id.xy;
+    float a=LineAlpha[id.y*size.x+id.x];
+    if (!isfinite(a) || a<0 || a>1) {
+        uint ignored;
+        Work.InterlockedOr(8u, 8u, ignored);
+        return;
+    }
+    NextAlpha[raw_index(record,p)]=a;
+    if (record.state.z!=0) {
+        GlyphLine old=PreviousLines[record.state.x-1];
+        if (all(p>=old.box.xy) && all(p<old.box.zw)) {
+            int3 delta=abs(rgb8(CurrentSource,p)-rgb8(PreviousSource,p));
+            float d=max(delta.x,max(delta.y,delta.z))/24.0f;
+            a+=0.95f*exp(-d*d)*(PreviousAlpha[raw_index(old,p)]-a);
+        }
+    }
+    InterlockedMax(Protection[p],uint(round(saturate(a)*255)));
+}
+
+[numthreads(1,1,1)]
+void finish_history() {
+    uint4 header=Work.Load4(0);
+    if (header.x==2u && header.y>0u && header.y<=8u && header.z==0) {
+        Work.Store(12u,1u);
+    } else {
+        [unroll] for (uint i=0;i<8;++i) Lines[i]=(GlyphLine)0;
+    }
+}

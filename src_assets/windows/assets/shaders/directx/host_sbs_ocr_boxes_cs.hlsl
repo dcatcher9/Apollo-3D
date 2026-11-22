@@ -20,6 +20,8 @@
 #define OCR8_SCHEMA V2_OCR_RECORD_SCHEMA
 #define OCR8_TAG V2_OCR_RECORD_TAG
 #define OCR8_VALID 1u
+static const uint LINE_POLICY_APPLICATION_TEXT = 1u;
+static const uint LINE_POLICY_EXPERIMENTAL_CENTERED_HORIZONTAL = 2u;
 StructuredBuffer<float> ProbabilityMap : register(t0);
 RWStructuredBuffer<uint> CellStatsWrite : register(u0);
 
@@ -111,6 +113,7 @@ cbuffer OcrResolveConstants : register(b0) {
     // has no measurable orientation, so one learned line is enough position memory here and a
     // short piece's envelope shape cannot veto it. The bottom search region, the first line's
     // own proof of horizontality, scene-text rejection and every other rule are unchanged.
+    // 2: file-fed video diagnostic with extra midpoint tolerance for a horizontal fallback.
     uint line_policy;
     uint2 source_clock_us;
     uint input_domain_reset;
@@ -223,7 +226,8 @@ bool ResolveGeometryValid() {
         line_center_twice_source > (int)line_reference_width ||
         line_search_top_source < -(int)V2_SUBTITLE_CONTOUR_SOURCE_MAX_EXTENT ||
         line_search_top_source > (int)V2_SUBTITLE_CONTOUR_SOURCE_MAX_EXTENT ||
-        line_policy > 1u || classifier_reserved != 0u || input_domain_reset > 1u ||
+        line_policy > LINE_POLICY_EXPERIMENTAL_CENTERED_HORIZONTAL ||
+        classifier_reserved != 0u || input_domain_reset > 1u ||
         source_width > V2_SUBTITLE_CONTOUR_SOURCE_MAX_EXTENT ||
         source_height > V2_SUBTITLE_CONTOUR_SOURCE_MAX_EXTENT ||
         source_width == 0u || source_height == 0u || field_width == 0u || field_height == 0u ||
@@ -842,7 +846,7 @@ bool SameTextLine(CandidateStats candidate, uint2 anchor, uint4 bounds) {
 }
 
 bool LineIsCentered(uint4 bounds) {
-    if (line_policy != 0u) return true;
+    if (line_policy == LINE_POLICY_APPLICATION_TEXT) return true;
     // Native extents/reference are bounded to 5120. Even the largest signed difference times
     // the tolerance denominator is <=737,280,000: exact int32 comparison keeps both edges equal.
     int delta = (int)(bounds.x + bounds.z) * (int)source_width -
@@ -853,7 +857,7 @@ bool LineIsCentered(uint4 bounds) {
 }
 
 bool LineSpansReferenceCenter(uint4 bounds) {
-    if (line_policy != 0u) return true;
+    if (line_policy == LINE_POLICY_APPLICATION_TEXT) return true;
     // Position/height memory cannot independently authorize a small fragment merely because
     // its midpoint lies in the broad center tolerance. Require the current bounded line group
     // to contain the signed reference center in its half-open horizontal span. All products
@@ -1042,7 +1046,7 @@ bool CandidateHasQualifiedPrior(uint candidate) {
     // identifies it; video keeps the several-cue vote. The detector rounds both ends of a
     // blob, which makes a single glyph's envelopes diverge without being an object edge, so
     // the envelope veto applies to video only. Scene text never reaches this function.
-    bool application_text = line_policy != 0u;
+    bool application_text = line_policy == LINE_POLICY_APPLICATION_TEXT;
     if ((!application_text && (OcrCandidateScratch[ScratchBase(candidate) + 3u].x &
          CANDIDATE_PRIOR_GEOMETRY_ALLOWED) == 0u) || ClassifierClockValid == 0u ||
         ClassifierHistory[2u] != V2_OCR_CLASSIFIER_HISTORY_KNOWN_FLAGS) return false;
@@ -1139,7 +1143,7 @@ void FinishClassifierHistory(uint final_total) {
 // still reaches no further past the outermost pieces than the ordinary cover pad. Scene text is not part of a line. Video keeps each piece's own extent.
 uint2 CandidateLineSpan(uint candidate, uint candidate_count, CandidateStats stats) {
     uint2 span = uint2(stats.tight_left, stats.tight_right);
-    if (line_policy == 0u) return span;
+    if (line_policy != LINE_POLICY_APPLICATION_TEXT) return span;
     uint2 rows = uint2(stats.tight_top, stats.tight_bottom);
     [loop]
     for (uint other = 0u; other < candidate_count; ++other) {
@@ -1156,6 +1160,15 @@ uint2 CandidateLineSpan(uint candidate, uint candidate_count, CandidateStats sta
         }
     }
     return span;
+}
+
+bool NearbyHorizontalMidpoint(uint4 bounds) {
+    if (line_policy != LINE_POLICY_EXPERIMENTAL_CENTERED_HORIZONTAL ||
+        !LineSpansReferenceCenter(bounds)) return false;
+    int midpoint = (int)((bounds.x + bounds.z) * source_width);
+    int desired = line_center_twice_source * (int)OCR_WIDTH;
+    uint error = (uint)abs(midpoint - desired);
+    return error * 100u <= 2u * line_reference_width * OCR_WIDTH * 3u;
 }
 
 void PublishCenteredLines(uint candidate_count, inout uint raw_total, inout uint final_total) {
@@ -1222,7 +1235,7 @@ void PublishCenteredLines(uint candidate_count, inout uint raw_total, inout uint
             uint4 horizontal_bounds = OcrCandidateScratch[ScratchBase(group) + 2u];
             if (classification != CLASS_HORIZONTAL ||
                 horizontal_bounds.x >= horizontal_bounds.z ||
-                !LineIsCentered(horizontal_bounds)) continue;
+                (!LineIsCentered(horizontal_bounds) && !NearbyHorizontalMidpoint(horizontal_bounds))) continue;
             line_bounds = horizontal_bounds;
         }
         // Ordinary subtitle groups must straddle the actual reference center,

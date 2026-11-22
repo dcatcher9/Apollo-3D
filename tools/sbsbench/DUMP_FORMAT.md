@@ -111,6 +111,12 @@ and `shared-ui-pin-queued-v2` bind their respective production shader closures. 
 `queued_geometry` is the JSON boolean for the selected route. The older `shared-ui-pin-v1`
 kind continues to bind its historical combined closure.
 
+For an observed completed hybrid draw, `shared_pin.model_prepare_source_closure_sha256`
+in `actual_draw_evidence.json` identifies the authenticated model prepare. The draw uses
+the ordinary completed pixel shader. The reader identifies the hybrid or current legacy
+fallback from the literal `actual_selected_receipt.u32` and the GPU's authorization word.
+A hybrid receipt also covers fresh empty publication.
+
 For all shared kinds, `mapping_artifacts_match_selected_renderer` is false because `warp_map.f32`
 remains the independent Base diagnostic. Its geometry-chain and ROI exterior checks cannot score
 or explain the actual shared render. The standalone reader also supports historical schema-50

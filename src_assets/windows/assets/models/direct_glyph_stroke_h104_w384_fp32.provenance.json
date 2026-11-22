@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "model": "direct_glyph",
+  "selection": "small native subtitle tile profile",
+  "artifact": {
+    "path": "models/direct_glyph_stroke_h104_w384_fp32.onnx",
+    "bytes": 67838,
+    "sha256": "43ecf1d3212981dcc866c2aee2b8b68a396f144d1662a3afc3c34e4014cd9a58",
+    "self_contained": true
+  },
+  "checkpoint": {
+    "architecture": "stroke-anchored RGB glyph matte",
+    "parameters": 13796,
+    "sha256": "3fd628f80f777fae490a44a082567e00ecdd7b3a88c8f140931aca94d3ba0b51",
+    "frozen_receipt_sha256": "74ffe05b265218c1ab3a9fd79e32ea2451e28f78c236215ea6a29b4d6f3b241a"
+  },
+  "graph": {
+    "opset": 17,
+    "input": {
+      "name": "rgb",
+      "dtype": "float32",
+      "shape": [1, 3, 104, 384],
+      "layout": "NCHW",
+      "range": "RGB8 / 255"
+    },
+    "output": {
+      "name": "logits",
+      "dtype": "float32",
+      "shape": [1, 4, 104, 384],
+      "layout": "NCHW",
+      "channels": ["background", "visible fill", "visible outline", "visible shadow"]
+    },
+    "receptive_halo_used_by_cpu_export_verifier": 40,
+    "source_phase_px": 4,
+    "cutoff_alpha8": 38
+  },
+  "engine": {
+    "recipe": "stroke-h104-w384-fp32-notf32-v1",
+    "build_precision": "FP32",
+    "tf32": false
+  },
+  "qualification": {
+    "cpu_onnx_parity_report_sha256": "496d54df2825a8a188ec92cb3c1c21aa142a62becd96378e4ccd133a54441d7e",
+    "cpu_onnxruntime_version": "1.22.0",
+    "common_profile_onnx_sha256": "7cbbc4bff5203bf9df46aa9ab1b5139470eba417033a733b8e9e2d263731b10e",
+    "graph_nodes_and_initializers_byte_equal_to_common_profile": true,
+    "evaluated_pixels": 236706,
+    "logits_max_abs_error": 0.0000152587890625,
+    "combined_alpha_codes_different": 3,
+    "alpha_code_max_error": 1,
+    "cutoff_alpha8_decisions_different": 0,
+    "scope": "CPU ONNX Runtime against the pinned RGB model on synthetic, archived fit, and phase-padding fixtures. TensorRT, mask quality and latency remain unqualified for this profile."
+  }
+}

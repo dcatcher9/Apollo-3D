@@ -7,6 +7,7 @@
   #include <array>
   #include <cstdint>
   #include <d3d11.h>
+  #include <optional>
   #include <string>
   #include <utility>
   #include <wrl/client.h>
@@ -14,6 +15,7 @@
 namespace models::display_snapshot_rgb8_analysis_gpu_v1 {
   using Microsoft::WRL::ComPtr;
   inline constexpr UINT tag = 0x35534743u, schema = 1u, recipe = 5u;
+  inline constexpr UINT direct_audit_tag = 0x31415344u, direct_audit_features = 64u;
   inline constexpr UINT proof_words = 64u, uip_words = 40u, envelope_words = 104u;
   inline constexpr UINT request_words_count = 36u, maximum_roi = 5120u;
 
@@ -38,7 +40,23 @@ namespace models::display_snapshot_rgb8_analysis_gpu_v1 {
     ComPtr<ID3D11Buffer> dispatch_arguments, final_root_mirror, request_constants;
   };
 
+  // One queued GPU audit and the exact original snapshot it examined. A submission
+  // retains both views but never implies that the GPU authorized this observation.
+  class direct_audit_submission_t {
+    friend class resources_t;
+    ComPtr<ID3D11ShaderResourceView> display_snapshot_band_, uip_envelope_;
+
+    direct_audit_submission_t(ID3D11ShaderResourceView *display_snapshot_band, ID3D11ShaderResourceView *uip_envelope):
+        display_snapshot_band_(display_snapshot_band), uip_envelope_(uip_envelope) {}
+
+  public:
+    [[nodiscard]] ID3D11ShaderResourceView *display_snapshot_band() const noexcept { return display_snapshot_band_.Get(); }
+    [[nodiscard]] ID3D11ShaderResourceView *uip_envelope() const noexcept { return uip_envelope_.Get(); }
+  };
+
   class resources_t {
+    enum class storage_e { materialized, direct_audit };
+    storage_e storage_ = storage_e::materialized;
     ComPtr<ID3D11Device> device_;
     ComPtr<ID3D11Texture2D> reference_, band_;
     ComPtr<ID3D11ShaderResourceView> reference_srv_, band_srv_, proof_srv_, root_srv_, envelope_srv_;
@@ -191,7 +209,7 @@ namespace models::display_snapshot_rgb8_analysis_gpu_v1 {
     }
 
     bool request_words(const request_t &request, std::array<UINT, request_words_count> &cb, std::string &error) const {
-      if (!reference_ || !same_device(request.actual_contour_constants96) || !same_device(request.actual_final256) || !structured_view(request.actual_sct32, 32u) || !request.frame || !request.observation_us || !request.token || request.transfer_mode > 2u) {
+      if (!proof_ || !same_device(request.actual_contour_constants96) || !same_device(request.actual_final256) || !structured_view(request.actual_sct32, 32u) || !request.frame || !request.observation_us || !request.token || request.transfer_mode > 2u) {
         error = "Display-snapshot source metadata unavailable";
         return false;
       }
@@ -252,9 +270,15 @@ namespace models::display_snapshot_rgb8_analysis_gpu_v1 {
     }
 
     void emit_capture(ID3D11DeviceContext *context, const program_t &program,
-                      const request_t &request, const std::array<UINT, request_words_count> &cb) {
+                      const request_t &request, const std::array<UINT, request_words_count> &cb,
+                      ID3D11Buffer *work_root = nullptr) {
       context->CopyResource(root_.Get(), request.actual_final256);
       context->UpdateSubresource(constants_.Get(), 0u, nullptr, cb.data(), 0u, 0u);
+      if (work_root) {
+        // A parked prepare cannot disarm a previous observation's pixel-copy dispatch.
+        constexpr std::array<UINT, 4u> idle_copy {1u, 1u, 0u, 0u};
+        context->UpdateSubresource(args_.Get(), 0u, nullptr, idle_copy.data(), 0u, 0u);
+      }
       ID3D11Buffer *buffers[2] {request.actual_contour_constants96, constants_.Get()};
       ID3D11ShaderResourceView *srvs[6] {request.display_snapshot_band, root_srv_.Get(), request.actual_sct32, nullptr, nullptr, request.parent_raw_source};
       ID3D11UnorderedAccessView *uavs[4] {reference_uav_.Get(), band_uav_.Get(), proof_uav_.Get(), args_uav_.Get()};
@@ -262,13 +286,14 @@ namespace models::display_snapshot_rgb8_analysis_gpu_v1 {
       context->CSSetShaderResources(0u, 6u, srvs);
       context->CSSetUnorderedAccessViews(0u, 4u, uavs, nullptr);
       context->CSSetShader(program.prepare, nullptr, 0u);
-      context->Dispatch(1u, 1u, 1u);
+      if (work_root) context->DispatchIndirect(work_root, 240u);
+      else context->Dispatch(1u, 1u, 1u);
       ID3D11UnorderedAccessView *null_args = nullptr;
       context->CSSetUnorderedAccessViews(3u, 1u, &null_args, nullptr);
       context->CSSetShader(program.copy, nullptr, 0u);
       context->DispatchIndirect(args_.Get(), 0u);
       context->CSSetShader(program.finalize, nullptr, 0u);
-      context->DispatchIndirect(request.actual_final256, 240u);
+      context->DispatchIndirect(work_root ? work_root : request.actual_final256, 240u);
       submitted_display_ = request.display_snapshot_band;
       submitted_raw_ = request.parent_raw_source;
       submitted_sct_ = request.actual_sct32;
@@ -279,7 +304,8 @@ namespace models::display_snapshot_rgb8_analysis_gpu_v1 {
 
     void emit_envelope(ID3D11DeviceContext *context, const program_t &program,
                        ID3D11ShaderResourceView *actual_uip40, const request_t &request,
-                       const std::array<UINT, request_words_count> &cb, bool rejoin) {
+                       const std::array<UINT, request_words_count> &cb, bool rejoin,
+                       ID3D11Buffer *work_root = nullptr) {
       if (rejoin) {
         // Public separate consumption must rejoin bytes, not trust pointer identity.
         context->CopyResource(root_.Get(), request.actual_final256);
@@ -291,7 +317,7 @@ namespace models::display_snapshot_rgb8_analysis_gpu_v1 {
       context->CSSetShaderResources(0u, 6u, srvs);
       context->CSSetUnorderedAccessViews(4u, 1u, envelope_uav_.GetAddressOf(), nullptr);
       context->CSSetShader(program.envelope, nullptr, 0u);
-      context->DispatchIndirect(request.actual_final256, 240u);
+      context->DispatchIndirect(work_root ? work_root : request.actual_final256, 240u);
     }
 
   public:
@@ -301,16 +327,20 @@ namespace models::display_snapshot_rgb8_analysis_gpu_v1 {
     resources_t(resources_t &&) = default;
     resources_t &operator=(resources_t &&) = default;
 
-    bool ensure(ID3D11Device *device, UINT width, UINT full_height, UINT crop_top, UINT band_height, std::string &error) {
+  private:
+    bool ensure_storage(ID3D11Device *device, UINT width, UINT full_height, UINT crop_top, UINT band_height,
+                        storage_e storage, std::string &error) {
       error.clear();
       if (!device || !width || !full_height || width > maximum_roi || full_height > maximum_roi || crop_top >= full_height || band_height != full_height - crop_top) {
         error = "Display-snapshot analysis shape unavailable";
         return false;
       }
-      if (device_.Get() == device && width_ == width && full_height_ == full_height && crop_top_ == crop_top && band_height_ == band_height && reference_) {
+      if (device_.Get() == device && storage_ == storage && width_ == width && full_height_ == full_height &&
+          crop_top_ == crop_top && band_height_ == band_height && proof_) {
         return true;
       }
       resources_t next;
+      next.storage_ = storage;
       next.device_ = device;
       next.width_ = width;
       next.full_height_ = full_height;
@@ -328,7 +358,14 @@ namespace models::display_snapshot_rgb8_analysis_gpu_v1 {
                SUCCEEDED(device->CreateShaderResourceView(t.Get(), nullptr, s.GetAddressOf())) &&
                SUCCEEDED(device->CreateUnorderedAccessView(t.Get(), nullptr, u.GetAddressOf()));
       };
-      if (!texture(full_height, DXGI_FORMAT_R8G8B8A8_UNORM, next.reference_, next.reference_srv_, next.reference_uav_) || !texture(band_height, DXGI_FORMAT_R16G16B16A16_FLOAT, next.band_, next.band_srv_, next.band_uav_) || !next.structured(proof_words, next.proof_, next.proof_srv_, next.proof_uav_) || !next.structured(envelope_words, next.envelope_, next.envelope_srv_, next.envelope_uav_)) {
+      if (storage == storage_e::materialized &&
+          (!texture(full_height, DXGI_FORMAT_R8G8B8A8_UNORM, next.reference_, next.reference_srv_, next.reference_uav_) ||
+           !texture(band_height, DXGI_FORMAT_R16G16B16A16_FLOAT, next.band_, next.band_srv_, next.band_uav_))) {
+        error = "Display-snapshot texture allocation failed";
+        return false;
+      }
+      if (!next.structured(proof_words, next.proof_, next.proof_srv_, next.proof_uav_) ||
+          !next.structured(envelope_words, next.envelope_, next.envelope_srv_, next.envelope_uav_)) {
         error = "Display-snapshot analysis allocation failed";
         return false;
       }
@@ -374,6 +411,16 @@ namespace models::display_snapshot_rgb8_analysis_gpu_v1 {
       return true;
     }
 
+  public:
+    bool ensure(ID3D11Device *device, UINT width, UINT full_height, UINT crop_top, UINT band_height, std::string &error) {
+      return ensure_storage(device, width, full_height, crop_top, band_height, storage_e::materialized, error);
+    }
+
+    bool ensure_direct_audit(ID3D11Device *device, UINT width, UINT full_height, UINT crop_top, UINT band_height,
+                             std::string &error) {
+      return ensure_storage(device, width, full_height, crop_top, band_height, storage_e::direct_audit, error);
+    }
+
     // Serialized immediate owner. true means submitted, not ready. Caller retains the real
     // pending source/snapshot/CB/SCT/final tuple through consumption before any next queue/ensure
     // or mutation of those resources. Operands must be unbound outside saved CS slots.
@@ -413,27 +460,53 @@ namespace models::display_snapshot_rgb8_analysis_gpu_v1 {
       return true;
     }
 
-    // One caller-owned immutable queue interval. Both public operations keep
-    // their independent checks above; this path validates the complete tuple
-    // before submission and captures root/constants once for both consumers.
-    bool queue_current(ID3D11DeviceContext *context, const program_t &program,
-                       const request_t &request, ID3D11ShaderResourceView *actual_uip40,
-                       std::string &error) {
+  private:
+    // One immutable queue interval captures the actual root/constants once for both consumers.
+    bool queue_current_impl(ID3D11DeviceContext *context, const program_t &program, const request_t &request,
+                            ID3D11ShaderResourceView *actual_uip40, std::string &error, ID3D11Buffer *work_root,
+                            storage_e storage) {
       error.clear();
-      if (!reference_ || !context_ok(context) ||
+      if (storage_ != storage || !proof_ || !context_ok(context) ||
           !capture_program_lease_.acquire(device_.Get(), {program.prepare, program.copy, program.finalize}) ||
           !envelope_program_lease_.acquire(device_.Get(), {program.envelope}) ||
           !structured_view(actual_uip40, uip_words)) {
         error = "Display-snapshot complete source program/UIP unavailable";return false;
       }
+      if (work_root) {
+        if (!same_device(work_root) || work_root == request.actual_final256) {
+          error = "Display-snapshot work root requires separate same-device storage";
+          return false;
+        }
+        D3D11_BUFFER_DESC descriptor {};
+        work_root->GetDesc(&descriptor);
+        if (descriptor.ByteWidth != 256u || !(descriptor.MiscFlags & D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS)) {
+          error = "Display-snapshot work root requires root256/observationOne240";
+          return false;
+        }
+      }
       std::array<UINT, request_words_count> cb{};
       if (!request_words(request, cb, error)) return false;
       saved_t saved(context);
       saved_t::unbind(context);
-      emit_capture(context, program, request, cb);
+      emit_capture(context, program, request, cb, work_root);
       saved_t::unbind(context); // proof changes from UAV producer to SRV consumer.
-      emit_envelope(context, program, actual_uip40, request, cb, false);
+      emit_envelope(context, program, actual_uip40, request, cb, false, work_root);
       return true;
+    }
+
+  public:
+    bool queue_current(ID3D11DeviceContext *context, const program_t &program, const request_t &request,
+                       ID3D11ShaderResourceView *actual_uip40, std::string &error, ID3D11Buffer *work_root = nullptr) {
+      return queue_current_impl(context, program, request, actual_uip40, error, work_root, storage_e::materialized);
+    }
+
+    [[nodiscard]] std::optional<direct_audit_submission_t> queue_current_audit(
+      ID3D11DeviceContext *context, const program_t &program, const request_t &request,
+      ID3D11ShaderResourceView *actual_uip40, std::string &error, ID3D11Buffer *work_root = nullptr
+    ) {
+      if (!queue_current_impl(context, program, request, actual_uip40, error, work_root, storage_e::direct_audit))
+        return std::nullopt;
+      return direct_audit_submission_t {submitted_display_.Get(), envelope_srv_.Get()};
     }
 
     views_t views() const {

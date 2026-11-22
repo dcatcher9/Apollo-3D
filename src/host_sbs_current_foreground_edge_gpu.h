@@ -121,7 +121,8 @@ namespace models::host_sbs_current_foreground_edge_gpu {
     // foreground-edge snapshot allocation or enablement and cannot suppress the old pass.
     static void finish_trusted(ID3D11DeviceContext *context, ID3D11ComputeShader *program,
                                ID3D11Buffer *constants, ID3D11Buffer *shape,
-                               const inputs_t &views, ID3D11Buffer *publication_arguments) {
+                               const inputs_t &views, ID3D11Buffer *publication_arguments,
+                               ID3D11UnorderedAccessView *weak_aa_oracle = nullptr) {
       if (!context || !program || !constants || !shape || !views.trusted_inner ||
           !views.final_m || !views.data || !publication_arguments) return;
       unbind(context);
@@ -132,6 +133,7 @@ namespace models::host_sbs_current_foreground_edge_gpu {
       };
       std::array<ID3D11UnorderedAccessView *, 8u> out{};
       out[4u] = views.final_m;out[5u] = views.data;
+      out[6u] = weak_aa_oracle;
       ID3D11Buffer *buffers[2u] {constants, shape};
       context->CSSetConstantBuffers(0u, 2u, buffers);
       context->CSSetShaderResources(0u, UINT(in.size()), in.data());

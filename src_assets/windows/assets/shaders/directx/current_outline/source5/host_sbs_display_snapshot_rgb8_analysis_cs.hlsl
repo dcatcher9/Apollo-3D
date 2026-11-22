@@ -21,13 +21,24 @@ StructuredBuffer<uint> ActualSCT : register(t2);
 StructuredBuffer<uint> ActualUIP : register(t3);
 StructuredBuffer<uint> ActualProof : register(t4);
 Texture2D<float4> ActualParentRaw : register(t5); // Dimensions only; no source-pixel verdict.
+#if defined(HOST_SBS_DIRECT_SOURCE_AUDIT)
+
+#else
 RWTexture2D<float4> ReferenceRGB8 : register(u0); // Full ROI carrier; ONLY lower band is written.
 RWTexture2D<float4> AnalysisBand : register(u1); // Native band, explicit RTZ-half RGB8/255.
+#endif
 globallycoherent RWStructuredBuffer<uint> SourceProof : register(u2);
 RWByteAddressBuffer CopyArguments : register(u3);
 RWStructuredBuffer<uint> UIPEnvelope : register(u4);
 
-static const uint TAG=0x35534743u,SCHEMA=1u,RECIPE=5u,FEATURES=63u;
+static const uint TAG=0x35534743u,SCHEMA=1u,RECIPE=5u;
+#if defined(HOST_SBS_DIRECT_SOURCE_AUDIT)
+static const uint PROOF_TAG=0x31415344u,FEATURES=64u;
+static const uint REFERENCE_FORMAT=0u,BAND_FORMAT=0u;
+#else
+static const uint PROOF_TAG=TAG,FEATURES=63u;
+static const uint REFERENCE_FORMAT=28u,BAND_FORMAT=10u;
+#endif
 static const uint F_JOIN=1u,F_COVERAGE=2u,F_INVALID=4u;
 
 bool Has64(uint2 v) { return any(v!=0u); }
@@ -72,9 +83,14 @@ bool CurrentInputsKnown() {
     return all(ActualFinal.Load4(240u)==uint4(1u,1u,1u,0u));
 }
 bool SourceOutputsKnown() {
+#if defined(HOST_SBS_DIRECT_SOURCE_AUDIT)
+    uint n,s;SourceProof.GetDimensions(n,s);
+    return n==64u&&s==4u;
+#else
     uint rw,rh,bw,bh,n,s;
     ReferenceRGB8.GetDimensions(rw,rh);AnalysisBand.GetDimensions(bw,bh);SourceProof.GetDimensions(n,s);
     return all(uint2(rw,rh)==Shape.xy)&&all(uint2(bw,bh)==Shape.xw)&&n==64u&&s==4u;
+#endif
 }
 uint ExpectedPixels() { return Shape.x*Shape.w; }
 uint ExpectedGroups() { return ((Shape.x+15u)/16u)*((Shape.w+15u)/16u); }
@@ -101,7 +117,7 @@ void prepare_main(uint3 g:SV_GroupID) {
     SourceProof[28u]=Sample.x;SourceProof[29u]=Sample.y;SourceProof[30u]=Control.w;
     SourceProof[31u]=FEATURES;SourceProof[32u]=ExpectedPixels();SourceProof[36u]=ExpectedGroups();
     uint sn,ss;ActualSCT.GetDimensions(sn,ss);SourceProof[39u]=sn==32u&&ss==4u?ActualSCT[3u]:0u;
-    SourceProof[60u]=10u;SourceProof[61u]=28u;SourceProof[62u]=10u;
+    SourceProof[60u]=10u;SourceProof[61u]=REFERENCE_FORMAT;SourceProof[62u]=BAND_FORMAT;
     SourceProof[63u]=sn==32u&&ss==4u?ActualSCT[23u]:0u;
     CopyArguments.GetDimensions(bytes);
     if(bytes!=16u||!CurrentInputsKnown()||!SourceOutputsKnown()){SourceProof[38u]=F_JOIN;return;}
@@ -122,6 +138,11 @@ void copy_main(uint3 group:SV_GroupID,uint3 id:SV_DispatchThreadID,uint lane:SV_
     if(inside) {
         float4 snapshot=ActualDisplaySnapshot.Load(int3(id.xy,0));
         bool valid=snapshot.a==1.0f&&all(isfinite(snapshot))&&all(snapshot.rgb>=0.0f)&&all(snapshot.rgb<=1.0f);
+#if defined(HOST_SBS_DIRECT_SOURCE_AUDIT)
+        if(!valid) {
+            uint ignored;InterlockedAdd(SourceProof[34u],1u,ignored);
+        }
+#else
         float4 reference=0.0f,band=0.0f;
         if(valid) {
             uint3 code=(uint3)floor(snapshot.rgb*255.0f+0.5f);
@@ -132,6 +153,7 @@ void copy_main(uint3 group:SV_GroupID,uint3 id:SV_DispatchThreadID,uint lane:SV_
         }
         ReferenceRGB8[uint2(id.x,Shape.z+id.y)]=reference;
         AnalysisBand[id.xy]=band;
+#endif
     }
     // No early return or varying barrier flow. Coverage is independent of source validity.
     DeviceMemoryBarrierWithGroupSync();
@@ -158,13 +180,13 @@ void finalize_main(uint3 g:SV_GroupID) {
     SourceProof[38u]=fault;
     if(fault!=0u||SourceProof[35u]!=ExpectedPixels()){SourceProof[0u]=0u;SourceProof[3u]=0u;return;}
     DeviceMemoryBarrier();SourceProof[3u]=1u;
-    DeviceMemoryBarrier();SourceProof[0u]=TAG; // Source availability only, tag LAST.
+    DeviceMemoryBarrier();SourceProof[0u]=PROOF_TAG; // Source availability only, tag LAST.
 }
 
 bool AcceptedPendingJoin() {
     if(!CurrentInputsKnown())return false;
     uint n,s;ActualProof.GetDimensions(n,s);if(n!=64u||s!=4u)return false;
-    if(any(uint4(ActualProof[0u],ActualProof[1u],ActualProof[2u],ActualProof[3u])!=uint4(TAG,SCHEMA,RECIPE,1u)))return false;
+    if(any(uint4(ActualProof[0u],ActualProof[1u],ActualProof[2u],ActualProof[3u])!=uint4(PROOF_TAG,SCHEMA,RECIPE,1u)))return false;
     [unroll]for(uint i=0u;i<4u;++i) {
         if(ActualProof[4u+i]!=Frame[i]||ActualProof[8u+i]!=Identity[i]||ActualProof[12u+i]!=CSource[i]||
            ActualProof[16u+i]!=ROI[i]||ActualProof[20u+i]!=RawShape[i]||ActualProof[24u+i]!=RawStorage[i]||
@@ -174,7 +196,7 @@ bool AcceptedPendingJoin() {
     if(any(uint4(ActualProof[28u],ActualProof[29u],ActualProof[30u],ActualProof[31u])!=uint4(Sample.xy,Control.w,FEATURES)))return false;
     if(any(uint4(ActualProof[32u],ActualProof[33u],ActualProof[34u],ActualProof[35u])!=uint4(ExpectedPixels(),ExpectedPixels(),0u,ExpectedPixels())))return false;
     if(any(uint4(ActualProof[36u],ActualProof[37u],ActualProof[38u],ActualProof[39u])!=uint4(ExpectedGroups(),ExpectedGroups(),0u,ActualSCT[3u])))return false;
-    if(any(uint4(ActualProof[60u],ActualProof[61u],ActualProof[62u],ActualProof[63u])!=uint4(10u,28u,10u,1u)))return false;
+    if(any(uint4(ActualProof[60u],ActualProof[61u],ActualProof[62u],ActualProof[63u])!=uint4(10u,REFERENCE_FORMAT,BAND_FORMAT,1u)))return false;
     ActualUIP.GetDimensions(n,s);if(n!=40u||s!=4u)return false;
     if(any(uint3(ActualUIP[0u],ActualUIP[1u],ActualUIP[2u])!=uint3(4u,0x34504955u,1u))||ActualUIP[3u]>255u||ActualUIP[22u]!=0u||ActualUIP[23u]!=0u)return false;
     return all(uint4(ActualUIP[4u],ActualUIP[5u],ActualUIP[6u],ActualUIP[7u])==CFrame)&&

@@ -3,6 +3,7 @@
 #include "config.h"
 #include "host_sbs_adaptive_submission.h"
 #include "host_sbs_conversion_work.h"
+#include "host_sbs_direct_glyph_tiles.h"
 #include "host_sbs_gpu_completion_receipt.h"
 #include "host_sbs_resolution.h"
 #include "host_sbs_temporal_source_ledger.h"
@@ -1428,6 +1429,15 @@ namespace models {
     bool current_outline = false;
     std::string current_outline_shader_root;
     std::string selector_shader_root, selector_source_closure_sha256;
+    bool current_outline_omit_foreground_edge = false;
+    bool current_outline_omit_stroke_coverage = false;
+    bool current_outline_weak_aa_oracle = false;
+    std::string current_outline_raw_matte_reduced_shader_root;
+    std::string current_outline_direct_glyph_shader_root;
+    bool capture_direct_glyph_plan = false;
+    bool direct_glyph_adaptive_context = false;
+    bool direct_glyph_resolved_fringe = false;
+    bool direct_glyph_line_palette = false;
   };
   // PRIVATE observer aliases only. Exact pending/current model join; not completed authority.
   struct subtitle_selected_matte_diagnostic_views_t {
@@ -1446,6 +1456,14 @@ namespace models {
     // Existing mutable composition stages, exposed only to the explicit probe.
     // Source band, CBC body/meta/all-body/selected/cover, raw M/meta, F2 data/cache.
     std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>,12> current_outline_stages;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> current_outline_weak_aa_facts, current_outline_weak_aa_trusted;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> current_outline_ocr_record;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> current_outline_raw_matte_floor, current_outline_raw_matte_alpha8;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> current_outline_raw_matte_work;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> direct_glyph_source_audit;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> direct_glyph_legacy_dispatch;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> direct_glyph_placement, direct_glyph_post_plan_work;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> direct_glyph_native_lines;
   };
   struct subtitle_temporal_source_working_views_t {
     std::uint64_t model_frame=0,model_observation_us=0;
@@ -1514,6 +1532,8 @@ namespace models {
       const subtitle_temporal_source_research_configuration_t &,std::string &error);
     bool subtitle_temporal_source_research_enabled() const noexcept;
     bool configure_subtitle_selected_matte_research(const subtitle_selected_matte_research_configuration_t &, std::string &error);
+    [[nodiscard]] std::filesystem::path direct_glyph_engine_path_for_evaluation() const;
+    [[nodiscard]] std::optional<host_sbs_direct_glyph_gpu::tile_profile_e> direct_glyph_profile_for_evaluation() const;
     std::optional<subtitle_selected_matte_diagnostic_views_t> subtitle_selected_matte_diagnostic_views_for_evaluation(std::uint64_t frame,std::uint64_t observation) const noexcept;
     std::optional<subtitle_temporal_source_working_views_t>
       subtitle_temporal_source_working_views_for_evaluation(std::uint64_t expected_completed_frame) const noexcept;

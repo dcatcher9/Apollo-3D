@@ -47,11 +47,16 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
     holes::coverage_programs_t coverage_shaders {};
     foreground_edge::programs_t foreground_edge_shaders {};
     std::array<ID3D11ComputeShader *, 1u> trusted_inner_publish_shaders {};
+    // Benchmark-only alternate entries for the existing BAND and trusted publication passes.
+    ID3D11ComputeShader *weak_aa_oracle_publish_final = nullptr;
+    ID3D11ComputeShader *weak_aa_oracle_trusted_inner_publish = nullptr;
     // Early current Inside: prepare, combined init, publish; final OR remains late.
     std::array<ID3D11ComputeShader *, 4u> inside_shaders {};
     // PRIVATE BBSC1 optional all-or-none begin/validate/commit.
     std::array<ID3D11ComputeShader *, 3u> stability_shaders {};
     bool coverage_diagnostics = false;
+    // RawM plus independent Inside|Trusted Inner. No full Rule publication.
+    bool raw_model_floor = false;
     // TEST-ONLY output destinations. Never detector inputs. Default null costs no copies/planes.
     ID3D11Texture2D *packed_temp_snapshot = nullptr;
     ID3D11Texture2D *passable_cache_snapshot = nullptr;
@@ -70,6 +75,7 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
     ComPtr<ID3D11ShaderResourceView> inside_bits, family_models;
     ComPtr<ID3D11Buffer> inside_arguments;
     ComPtr<ID3D11ShaderResourceView> stability_image, stability_header;
+    ComPtr<ID3D11ShaderResourceView> weak_aa_facts, weak_aa_trusted;
   };
 
   using diagnostics_t = enclosure::diagnostics_t;
@@ -153,9 +159,10 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
     struct signature_t {
       std::array<ComPtr<IUnknown>, 160u> values;
       UINT count = 0u, root_offset = 0u;
+      bool raw_model_floor = false;
 
-      bool matches(const std::array<IUnknown *, 160u> &v, UINT n, UINT offset) const noexcept {
-        if (n > values.size() || count != n || root_offset != offset) {
+      bool matches(const std::array<IUnknown *, 160u> &v, UINT n, UINT offset, bool floor_mode) const noexcept {
+        if (n > values.size() || count != n || root_offset != offset || raw_model_floor != floor_mode) {
           return false;
         }
         for (UINT i = 0; i < n; ++i) {
@@ -166,11 +173,12 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
         return true;
       }
 
-      bool retain(const std::array<IUnknown *, 160u> &v, UINT n, UINT offset) {
+      bool retain(const std::array<IUnknown *, 160u> &v, UINT n, UINT offset, bool floor_mode) {
         if (n > values.size()) return false;
         *this = signature_t {};
         count = n;
         root_offset = offset;
+        raw_model_floor = floor_mode;
         for (UINT i = 0; i < n; ++i) {
           values[i] = v[i];
         }
@@ -247,7 +255,9 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
     }
 
     [[nodiscard]] mutable_views_t mutable_views() const {
-      return {width_, height_, enclosure_views_.body, colour_first_.srv, profile_data_.srv, root_cache_.srv, hook_cb_, unit_args_.resource, native_args_, inside_bits_.srv, enclosure_views_.family_models, inside_args_.resource, stability_image_.srv, stability_header_.srv};
+      return {width_, height_, enclosure_views_.body, colour_first_.srv, profile_data_.srv, root_cache_.srv, hook_cb_, unit_args_.resource, native_args_, inside_bits_.srv, enclosure_views_.family_models, inside_args_.resource, stability_image_.srv, stability_header_.srv,
+              weak_aa_oracle_enabled_ ? weak_aa_oracle_facts_.srv : nullptr,
+              weak_aa_oracle_enabled_ ? weak_aa_oracle_trusted_.srv : nullptr};
     }
 
     // The serialized caller must retire the preceding publication's consumers first. Revoke
@@ -288,7 +298,11 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
       return true;
     }
 
-    bool ensure(ID3D11Device *device, UINT width, UINT height, std::string &error) {
+    [[nodiscard]] bool matches_storage_mode(bool raw_model_floor) const noexcept {
+      return ready_ && (root_cache_.resource.Get() == nullptr) == raw_model_floor;
+    }
+
+    bool ensure(ID3D11Device *device, UINT width, UINT height, std::string &error, bool raw_model_floor = false) {
       error.clear();
       constexpr UINT maximum = depth_coordinate_v2::subtitle_contour_source_max_extent;
       const std::uint64_t n = std::uint64_t {width} * height;
@@ -296,7 +310,7 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
         error = "Invalid current-outline-support-closure device/native shape.";
         return false;
       }
-      if (ready_ && device_.Get() == device && width_ == width && height_ == height) {
+      if (matches_storage_mode(raw_model_floor) && device_.Get() == device && width_ == width && height_ == height) {
         return true;
       }
       resources_t next;
@@ -314,7 +328,7 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
       next.height_ = height;
       next.pixels_ = static_cast<UINT>(n);
       try {
-        if (!next.enclosure_.ensure(device, width, height, error) || !next.allocate(error)) {
+        if (!next.enclosure_.ensure(device, width, height, error) || !next.allocate(error, raw_model_floor)) {
           return false;
         }
       } catch (const std::exception &e) {
@@ -334,6 +348,7 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
       last_enabled_ = false;
       foreground_edge_enabled_ = false;
       trusted_inner_enabled_ = false;
+      weak_aa_oracle_enabled_ = false;
       if (!program) {
         invalidate_weak_aa();
         stability_needs_reset_ = true;
@@ -342,11 +357,21 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
       if (!ready_ || !context || context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE || !same_device(context)) {
         return fail(error, "Enabled outline-support-closure requires prepared immediate same-device owner.");
       }
+      const bool floor_mode = program->raw_model_floor;
+      if (!matches_storage_mode(floor_mode)) {
+        return fail(error, "Outline-support-closure storage does not match the requested producer mode.");
+      }
+      const std::array oracle_shaders {program->weak_aa_oracle_publish_final, program->weak_aa_oracle_trusted_inner_publish};
+      const bool oracle_requested = oracle_shaders[0u] || oracle_shaders[1u];
+      if (floor_mode && (oracle_requested || program->coverage_diagnostics || program->packed_temp_snapshot ||
+                         program->passable_cache_snapshot || program->pre_inside_final_snapshot)) {
+        return fail(error, "Raw model floor requires its independent output scope.");
+      }
       if (!raw_program_lease_.acquire(device_.Get(), program->shaders)) return fail(error, "Missing/wrong-device outline-support-closure shader.");
       if (!roi_program_lease_.acquire(device_.Get(), program->roi_graph)) return fail(error, "Missing/wrong-device outline-support-closure graph shader.");
-      if (!band_program_lease_.acquire(device_.Get(), program->band_shaders)) return fail(error, "Missing/wrong-device outline-support band shader.");
+      if (!floor_mode && !band_program_lease_.acquire(device_.Get(), program->band_shaders)) return fail(error, "Missing/wrong-device outline-support band shader.");
       if (!inside_program_lease_.acquire(device_.Get(), program->inside_shaders)) return fail(error, "Missing/wrong-device independent Inside shader.");
-      holes_enabled_ = hole_program_lease_.acquire(device_.Get(), program->hole_shaders);
+      holes_enabled_ = !floor_mode && hole_program_lease_.acquire(device_.Get(), program->hole_shaders);
       try {
         std::string optional_error;
         if (holes_enabled_ && !holes_.ensure(device_.Get(), width_, height_, optional_error)) holes_enabled_ = false;
@@ -356,13 +381,16 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
         std::string optional_error;
         if (coverage_enabled_ && !holes_.ensure_coverage(optional_error, program->coverage_diagnostics)) coverage_enabled_ = false;
       } catch (const std::exception &) { coverage_enabled_ = false; }
-      foreground_edge_enabled_ = foreground_edge_program_lease_.acquire(device_.Get(), program->foreground_edge_shaders);
+      foreground_edge_enabled_ = !floor_mode && foreground_edge_program_lease_.acquire(device_.Get(), program->foreground_edge_shaders);
       trusted_inner_enabled_ = trusted_inner_program_lease_.acquire(device_.Get(), program->trusted_inner_publish_shaders);
+      if (floor_mode && !trusted_inner_enabled_) {
+        return fail(error, "Raw model floor requires the trusted-inner publisher.");
+      }
       try {
         std::string optional_error;
         if (foreground_edge_enabled_ && !foreground_edge_.ensure(device_.Get(), width_, height_, colour_first_.resource.Get(), colour_first_.uav.Get(), optional_error)) foreground_edge_enabled_ = false;
       } catch (const std::exception &) { foreground_edge_enabled_ = false; }
-      stability_enabled_ = stability_program_lease_.acquire(device_.Get(), program->stability_shaders);
+      stability_enabled_ = !floor_mode && stability_program_lease_.acquire(device_.Get(), program->stability_shaders);
       stability_enabled_ = stability_enabled_ && stability_source_format(rgb);
       try { if (stability_enabled_ && !ensure_stability()) stability_enabled_ = false; }
       catch (const std::exception &) { stability_enabled_ = false; } // Optional allocation cannot revoke old output.
@@ -371,7 +399,18 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
       try { if (weak_aa_enabled_ && !ensure_weak_aa()) weak_aa_enabled_ = false; }
       catch (const std::exception &) { weak_aa_enabled_ = false; }
       if (!weak_aa_enabled_) invalidate_weak_aa();
-      if (stability_header_.uav && stability_needs_reset_) {
+      if (oracle_requested) {
+        if (!weak_aa_enabled_ || !trusted_inner_enabled_ ||
+            !weak_aa_oracle_program_lease_.acquire(device_.Get(), oracle_shaders)) {
+          return fail(error, "Weak-AA oracle requires the current weak-AA and trusted-inner programs.");
+        }
+        try {
+          if (!ensure_weak_aa_oracle()) return fail(error, "Could not allocate weak-AA oracle planes.");
+        } catch (const std::exception &) {
+          return fail(error, "Could not allocate weak-AA oracle planes.");
+        }
+      }
+      if (!floor_mode && stability_header_.uav && stability_needs_reset_) {
         const saved_cs_t saved {context};unbind(context);
         constexpr std::array<UINT,4u> zero {};
         context->ClearUnorderedAccessViewUint(stability_header_.uav.Get(),zero.data());
@@ -391,6 +430,11 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
       }
       enclosure_views_ = enclosure_.mutable_views();
       trusted_inner_enabled_ = trusted_inner_enabled_ && enclosure_.trusted_inner_ready();
+      if ((oracle_requested || floor_mode) && !trusted_inner_enabled_) {
+        return fail(error, floor_mode ? "Raw model floor trusted-inner publication is unavailable." :
+                                        "Weak-AA oracle trusted-inner publication is unavailable.");
+      }
+      weak_aa_oracle_enabled_ = oracle_requested;
       if (program->stage_observer) program->stage_observer->mark(context, current_outline_stage_observer::stage_e::cbc_end);
       if (!recorded_) {
         const saved_cs_t saved {context};
@@ -405,7 +449,7 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
       if (!signature_objects(objects, count, constants96, rgb, ocr, root, *program)) {
         return fail(error, "Inside owner recorded signature exceeds checked capacity112.");
       }
-      if (!commands_ || !signature_.matches(objects, count, root_offset)) {
+      if (!commands_ || !signature_.matches(objects, count, root_offset, floor_mode)) {
         commands_.Reset();
         signature_ = signature_t {};
         if (!deferred_ && FAILED(device_->CreateDeferredContext(0u, &deferred_))) {
@@ -419,7 +463,7 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
           deferred_.Reset();
           return fail(error, "Could not finish outline-support-closure command list.");
         }
-        if (!signature_.retain(objects, count, root_offset)) {
+        if (!signature_.retain(objects, count, root_offset, floor_mode)) {
           commands_.Reset();return fail(error, "Inside owner could not retain recorded signature112.");
         }
         ++diagnostics_.recordings;
@@ -533,6 +577,29 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
       weak_aa_state_ = std::move(next);return true;
     }
 
+    bool ensure_weak_aa_oracle() {
+      if (weak_aa_oracle_facts_.srv && weak_aa_oracle_trusted_.srv) return true;
+      D3D11_TEXTURE2D_DESC desc {};
+      desc.Width = width_;
+      desc.Height = height_;
+      desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1u;
+      desc.Format = DXGI_FORMAT_R32_UINT;
+      desc.Usage = D3D11_USAGE_DEFAULT;
+      desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+      const std::vector<UINT> zeros(pixels_, 0u);
+      const D3D11_SUBRESOURCE_DATA initial {zeros.data(), width_ * 4u, 0u};
+      const auto make = [&](texture_t &plane) {
+        return SUCCEEDED(device_->CreateTexture2D(&desc, &initial, &plane.resource)) &&
+               SUCCEEDED(device_->CreateShaderResourceView(plane.resource.Get(), nullptr, &plane.srv)) &&
+               SUCCEEDED(device_->CreateUnorderedAccessView(plane.resource.Get(), nullptr, &plane.uav));
+      };
+      texture_t facts, trusted;
+      if (!make(facts) || !make(trusted)) return false;
+      weak_aa_oracle_facts_ = std::move(facts);
+      weak_aa_oracle_trusted_ = std::move(trusted);
+      return true;
+    }
+
     bool ensure_stability() {
       if (stability_image_.resource && stability_header_.resource && stability_aa_history_.resource) return true;
       texture_t image,header,history;
@@ -551,7 +618,7 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
       return true;
     }
 
-    bool allocate(std::string &error) {
+    bool allocate(std::string &error, bool raw_model_floor) {
       enclosure_views_ = enclosure_.mutable_views();
       scratch_ = enclosure_.baseline_views();
       const std::array<ID3D11ShaderResourceView *, 8u> scratch_views {
@@ -590,7 +657,8 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
                SUCCEEDED(device_->CreateShaderResourceView(t.resource.Get(), nullptr, &t.srv)) &&
                SUCCEEDED(device_->CreateUnorderedAccessView(t.resource.Get(), nullptr, &t.uav));
       };
-      if (!texture(matte_) || !texture(inner_) || !texture(colour_first_) || !texture(root_cache_) || !texture(inside_bits_)) {
+      if (!texture(matte_) || !texture(inner_) || !texture(colour_first_) ||
+          (!raw_model_floor && !texture(root_cache_)) || !texture(inside_bits_)) {
         error = "Could not allocate outline-support-closure planes.";
         return false;
       }
@@ -699,6 +767,12 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
       for (auto *shader : p.coverage_shaders) add(shader);
       for (auto *shader : p.foreground_edge_shaders) add(shader);
       for (auto *shader : p.trusted_inner_publish_shaders) add(shader);
+      if (weak_aa_oracle_enabled_) {
+        add(p.weak_aa_oracle_publish_final);
+        add(p.weak_aa_oracle_trusted_inner_publish);
+        add(weak_aa_oracle_facts_.uav.Get());
+        add(weak_aa_oracle_trusted_.uav.Get());
+      }
       add(trusted_inner_enabled_ ? enclosure_views_.trusted_inner_bits.Get() : nullptr);
       add(enclosure_views_.trusted_publication_arguments.Get());
       add(foreground_edge_enabled_ ? foreground_edge_.original_mask() : nullptr);
@@ -799,10 +873,17 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
           out[4]=stability_header_.uav.Get();out[5]=stability_image_.uav.Get();out[6]=stability_aa_history_.uav.Get();
           out[7]=weak_aa_enabled_?weak_aa_state_.uav.Get():nullptr;
         }
+        auto *shader = p.band_shaders[entry];
+        if (entry == 4u && weak_aa_oracle_enabled_) {
+          // The existing full-band Root1 grid clears trusted offers, then their late pass writes sparsely.
+          out[2] = weak_aa_oracle_trusted_.uav.Get();
+          out[3] = weak_aa_oracle_facts_.uav.Get();
+          shader = p.weak_aa_oracle_publish_final;
+        }
         c->CSSetConstantBuffers(0u, 3u, bc);
         c->CSSetShaderResources(0u, 16u, in.data());
         c->CSSetUnorderedAccessViews(0u, 8u, out.data(), nullptr);
-        c->CSSetShader(p.band_shaders[entry], nullptr, 0u);
+        c->CSSetShader(shader, nullptr, 0u);
         c->DispatchIndirect(args, offset);
         unbind(c);
       };
@@ -833,18 +914,22 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
       };
       constexpr std::array<UINT, 4u> zero {};
       std::array<ID3D11UnorderedAccessView *, 8u> u {};
+      // The reduced graph does not consume the passable-root snapshot. Reuse the
+      // per-mode BODY scratch for those writes. The next graph init clears its ROI;
+      // graph union/reduction and Raw only need the shape of this scratch.
+      auto *passable_root_store = p.raw_model_floor ? scratch_uavs_[6u].Get() : root_cache_.uav.Get();
       u[0] = meta_.uav.Get();
       u[7] = profile_data_.uav.Get();
       stage(0u, u, root, root_offset);
       cache_stage(0u, root, root_offset);
       u[1] = colour_first_.uav.Get();
-      u[2] = root_cache_.uav.Get();
+      u[2] = passable_root_store;
       u[3] = scratch_uavs_[2].Get();
       u[4] = scratch_uavs_[3].Get();
       u[5] = inner_.uav.Get();
       u[6] = matte_.uav.Get();
       stage(1u, u, native_args_.Get(), 0u);
-      band_stage(0u, root, root_offset);
+      if (!p.raw_model_floor) band_stage(0u, root, root_offset);
       if (holes_enabled_) holes_.begin(c, p.hole_shaders, cb, shape_cb_.Get(), hole_views(), native_args_.Get());
       if (coverage_enabled_) holes_.begin_coverage(c, p.coverage_shaders, cb, shape_cb_.Get(), hole_views(), native_args_.Get());
       auto inside_stage = [&](UINT entry, ID3D11Buffer *args) {
@@ -941,12 +1026,14 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
         u.fill(nullptr);
         u[0] = meta_.uav.Get();
         u[5] = inner_.uav.Get();
-        u[4] = root_cache_.uav.Get();
+        u[4] = passable_root_store;
         u[7] = profile_data_.uav.Get();
         stage(4u, u, unit_args_.resource.Get(), 0u);
-        band_stage(1u, unit_args_.resource.Get(), 0u);
-        band_stage(2u, root, root_offset);
-        band_stage(3u, unit_args_.resource.Get(), 0u);
+        if (!p.raw_model_floor) {
+          band_stage(1u, unit_args_.resource.Get(), 0u);
+          band_stage(2u, root, root_offset);
+          band_stage(3u, unit_args_.resource.Get(), 0u);
+        }
         u.fill(nullptr);
         u[0] = meta_.uav.Get();
         u[1] = scratch_uavs_[0].Get();
@@ -959,31 +1046,33 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
         u[0] = meta_.uav.Get();
         u[6] = matte_.uav.Get();
         stage(6u, u, unit_args_.resource.Get(), 0u);
-        band_stage(5u, unit_args_.resource.Get(), 0u);
-        band_stage(6u, unit_args_.resource.Get(), 0u);
+        if (!p.raw_model_floor) {
+          band_stage(5u, unit_args_.resource.Get(), 0u);
+          band_stage(6u, unit_args_.resource.Get(), 0u);
+        }
         if (holes_enabled_) holes_.capture_unit(c, slot, p.hole_shaders, cb, shape_cb_.Get(), hole_views(), unit_args_.resource.Get());
       }
       u.fill(nullptr);
       u[0] = meta_.uav.Get();
       u[6] = matte_.uav.Get();
       stage(7u, u, native_args_.Get(), 0u);
-      cache_stage(1u, cache_validation_args_.resource.Get(), 0u);
-      // Output-only diagnostics at the real prepublish point. Root0 is not a fresh
-      // packed observation: the held temp texture then contains prior final binary M.
-      if (p.packed_temp_snapshot) {
-        c->CopyResource(p.packed_temp_snapshot, colour_first_.resource.Get());
+      if (!p.raw_model_floor) {
+        cache_stage(1u, cache_validation_args_.resource.Get(), 0u);
+        // Output-only diagnostics at the real prepublish point. Root0 holds prior final M.
+        if (p.packed_temp_snapshot) c->CopyResource(p.packed_temp_snapshot, colour_first_.resource.Get());
+        if (p.passable_cache_snapshot) c->CopyResource(p.passable_cache_snapshot, root_cache_.resource.Get());
+        band_stage(4u, native_args_.Get(), 0u);
+        cache_stage(2u,root,root_offset); // Ordered commit after every snapshot-image write.
       }
-      if (p.passable_cache_snapshot) {
-        c->CopyResource(p.passable_cache_snapshot, root_cache_.resource.Get());
-      }
-      band_stage(4u, native_args_.Get(), 0u);
-      cache_stage(2u,root,root_offset); // Ordered commit after every snapshot-image write.
       // All legacy Raw/profile/grow/packed/cache/final141 work has completed.
       // These output-only TEST copies contain fresh Raw graph data only for issued units.
       // Unissued regions retain shared CBC/Inside scratch and have no current Raw authority.
       if (p.pre_inside_final_snapshot) c->CopyResource(p.pre_inside_final_snapshot, colour_first_.resource.Get());
       if (p.raw_parent_snapshot) c->CopyResource(p.raw_parent_snapshot, raw_parent_resource_.Get());
       if (p.raw_flags_snapshot) c->CopyResource(p.raw_flags_snapshot, raw_flags_resource_.Get());
+      // In floor mode the existing root-gated Raw reset left colour_first_ at zero.
+      // This publishes actual normalized Inside and its ready word R83. The later
+      // Trusted Inner pass keeps its existing source and ownership validation.
       inside_stage(3u, native_args_.Get());
       if (holes_enabled_) holes_.finish(c, p.hole_shaders, cb, shape_cb_.Get(), hole_views(), root, root_offset, native_args_.Get(),
                                        p.coverage_shaders, coverage_enabled_);
@@ -1005,8 +1094,10 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
         in.raw_m = matte_.srv.Get();in.code1 = enclosure_views_.matte.Get();
         in.trusted_inner = enclosure_views_.trusted_inner_bits.Get();
         in.final_m = colour_first_.uav.Get();in.data = profile_data_.uav.Get();
-        foreground_edge::resources_t::finish_trusted(c, p.trusted_inner_publish_shaders[0u], cb, shape_cb_.Get(), in,
-                                                   enclosure_views_.trusted_publication_arguments.Get());
+        auto *shader = weak_aa_oracle_enabled_ ? p.weak_aa_oracle_trusted_inner_publish : p.trusted_inner_publish_shaders[0u];
+        foreground_edge::resources_t::finish_trusted(c, shader, cb, shape_cb_.Get(), in,
+                                                   enclosure_views_.trusted_publication_arguments.Get(),
+                                                   weak_aa_oracle_enabled_ ? weak_aa_oracle_trusted_.uav.Get() : nullptr);
       }
       unbind(c);
     }
@@ -1021,8 +1112,10 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
     std::array<ComPtr<ID3D11UnorderedAccessView>, 8u> scratch_uavs_;
     texture_t matte_, inner_, colour_first_, root_cache_, inside_bits_;
     texture_t stability_image_,stability_header_,stability_aa_history_;
+    texture_t weak_aa_oracle_facts_, weak_aa_oracle_trusted_;
     bool stability_enabled_=false,stability_needs_reset_=true;
     bool weak_aa_enabled_=false;
+    bool weak_aa_oracle_enabled_=false;
     holes::resources_t holes_;
     foreground_edge::resources_t foreground_edge_;
     bool foreground_edge_enabled_ = false;
@@ -1040,6 +1133,7 @@ namespace models::host_sbs_current_outline_support_closure_gpu_v2 {
     host_sbs_compute_program_lease::group_t<9u> hole_program_lease_;
     host_sbs_compute_program_lease::group_t<1u> foreground_edge_program_lease_;
     host_sbs_compute_program_lease::group_t<1u> trusted_inner_program_lease_;
+    host_sbs_compute_program_lease::group_t<2u> weak_aa_oracle_program_lease_;
     ComPtr<ID3D11DeviceContext> deferred_;
     ComPtr<ID3D11CommandList> commands_;
     signature_t signature_;

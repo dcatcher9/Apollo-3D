@@ -396,6 +396,121 @@ HOST_SBS_CURRENT_TRUSTED_INNER = ShaderSpec(
     source_entrypoint="trusted_inner_publish_main",
     source_target="cs_5_0",
 )
+HOST_SBS_DIRECT_GLYPH_PLAN = ShaderSpec(
+    source_file="host_sbs_subtitle_direct_glyph_cs.hlsl",
+    source_entrypoint="plan_direct_main",
+    source_target="cs_5_0",
+)
+HOST_SBS_DIRECT_GLYPH_PUBLISH = ShaderSpec(
+    source_file="host_sbs_subtitle_direct_glyph_cs.hlsl",
+    source_entrypoint="publish_direct_main",
+    source_target="cs_5_0",
+)
+HOST_SBS_DIRECT_GLYPH_PLAN_TILE = ShaderSpec(
+    source_file="host_sbs_subtitle_direct_glyph_transport_cs.hlsl",
+    source_entrypoint="plan_tile",
+    source_target="cs_5_0",
+)
+HOST_SBS_DIRECT_GLYPH_PACK_RGB = ShaderSpec(
+    source_file="host_sbs_subtitle_direct_glyph_transport_cs.hlsl",
+    source_entrypoint="pack_rgb",
+    source_target="cs_5_0",
+)
+HOST_SBS_DIRECT_GLYPH_RESOLVE_MATTE = ShaderSpec(
+    source_file="host_sbs_subtitle_direct_glyph_transport_cs.hlsl",
+    source_entrypoint="resolve_matte",
+    source_target="cs_5_0",
+)
+HOST_SBS_DIRECT_GLYPH_FINISH_SCORE = ShaderSpec(
+    source_file="host_sbs_subtitle_direct_glyph_transport_cs.hlsl",
+    source_entrypoint="finish_score",
+    source_target="cs_5_0",
+)
+HOST_SBS_DIRECT_GLYPH_PALETTE_PACK_RGB = ShaderSpec(
+    source_file="host_sbs_direct_glyph_palette_cs.hlsl",
+    source_entrypoint="pack_rgb",
+    source_target="cs_5_0",
+)
+HOST_SBS_DIRECT_GLYPH_PALETTE_PACK_TILE = ShaderSpec(
+    source_file="host_sbs_direct_glyph_palette_cs.hlsl",
+    source_entrypoint="pack_tile",
+    source_target="cs_5_0",
+)
+HOST_SBS_DIRECT_GLYPH_PALETTE_EXPORT_ROLES = ShaderSpec(
+    source_file="host_sbs_direct_glyph_palette_cs.hlsl",
+    source_entrypoint="export_roles",
+    source_target="cs_5_0",
+)
+HOST_SBS_DIRECT_GLYPH_PALETTE_COARSE = ShaderSpec(
+    source_file="host_sbs_direct_glyph_palette_cs.hlsl",
+    source_entrypoint="coarse",
+    source_target="cs_5_0",
+)
+HOST_SBS_DIRECT_GLYPH_PALETTE_MAKE_HIST = ShaderSpec(
+    source_file="host_sbs_direct_glyph_palette_cs.hlsl",
+    source_entrypoint="make_hist",
+    source_target="cs_5_0",
+)
+HOST_SBS_DIRECT_GLYPH_PALETTE_SMOOTH_HIST = ShaderSpec(
+    source_file="host_sbs_direct_glyph_palette_cs.hlsl",
+    source_entrypoint="smooth_hist",
+    source_target="cs_5_0",
+)
+HOST_SBS_DIRECT_GLYPH_PALETTE_CHOOSE_COLORS = ShaderSpec(
+    source_file="host_sbs_direct_glyph_palette_cs.hlsl",
+    source_entrypoint="choose_colors",
+    source_target="cs_5_0",
+)
+HOST_SBS_DIRECT_GLYPH_PALETTE_MAKE_MOMENTS = ShaderSpec(
+    source_file="host_sbs_direct_glyph_palette_cs.hlsl",
+    source_entrypoint="make_moments",
+    source_target="cs_5_0",
+)
+HOST_SBS_DIRECT_GLYPH_PALETTE_SMOOTH_MOMENTS = ShaderSpec(
+    source_file="host_sbs_direct_glyph_palette_cs.hlsl",
+    source_entrypoint="smooth_moments",
+    source_target="cs_5_0",
+)
+HOST_SBS_DIRECT_GLYPH_PALETTE_PROTOTYPES = ShaderSpec(
+    source_file="host_sbs_direct_glyph_palette_cs.hlsl",
+    source_entrypoint="prototypes",
+    source_target="cs_5_0",
+)
+HOST_SBS_DIRECT_GLYPH_PALETTE_DECODE_PALETTE = ShaderSpec(
+    source_file="host_sbs_direct_glyph_palette_cs.hlsl",
+    source_entrypoint="decode_palette",
+    source_target="cs_5_0",
+)
+HOST_SBS_DIRECT_GLYPH_BEGIN_HISTORY = ShaderSpec(
+    source_file="host_sbs_direct_glyph_history_cs.hlsl",
+    source_entrypoint="begin_history",
+    source_target="cs_5_0",
+)
+HOST_SBS_DIRECT_GLYPH_CONFIRM_HISTORY = ShaderSpec(
+    source_file="host_sbs_direct_glyph_history_cs.hlsl",
+    source_entrypoint="confirm_history",
+    source_target="cs_5_0",
+)
+HOST_SBS_DIRECT_GLYPH_FINISH_WINDOWS = ShaderSpec(
+    source_file="host_sbs_direct_glyph_history_cs.hlsl",
+    source_entrypoint="finish_windows",
+    source_target="cs_5_0",
+)
+HOST_SBS_DIRECT_GLYPH_PUBLISH_LINE = ShaderSpec(
+    source_file="host_sbs_direct_glyph_history_cs.hlsl",
+    source_entrypoint="publish_line",
+    source_target="cs_5_0",
+)
+HOST_SBS_DIRECT_GLYPH_FINISH_HISTORY = ShaderSpec(
+    source_file="host_sbs_direct_glyph_history_cs.hlsl",
+    source_entrypoint="finish_history",
+    source_target="cs_5_0",
+)
+HOST_SBS_DIRECT_GLYPH_PREPARE = ShaderSpec(
+    source_file="host_sbs_shared_ui_warp_direct_glyph.hlsl",
+    source_entrypoint="prepare_direct_glyph_main",
+    source_target="cs_5_0",
+)
 
 SHADER_SPECS: Dict[str, ShaderSpec] = {
     "buffer_to_tex": BUFFER_TO_TEX,
@@ -472,6 +587,29 @@ SHADER_SPECS: Dict[str, ShaderSpec] = {
     "host_sbs_current_stroke_coverage_support": HOST_SBS_CURRENT_STROKE_COVERAGE_SUPPORT,
     "host_sbs_current_foreground_edge": HOST_SBS_CURRENT_FOREGROUND_EDGE,
     "host_sbs_current_trusted_inner": HOST_SBS_CURRENT_TRUSTED_INNER,
+    "host_sbs_direct_glyph_plan": HOST_SBS_DIRECT_GLYPH_PLAN,
+    "host_sbs_direct_glyph_publish": HOST_SBS_DIRECT_GLYPH_PUBLISH,
+    "host_sbs_direct_glyph_plan_tile": HOST_SBS_DIRECT_GLYPH_PLAN_TILE,
+    "host_sbs_direct_glyph_pack_rgb": HOST_SBS_DIRECT_GLYPH_PACK_RGB,
+    "host_sbs_direct_glyph_resolve_matte": HOST_SBS_DIRECT_GLYPH_RESOLVE_MATTE,
+    "host_sbs_direct_glyph_finish_score": HOST_SBS_DIRECT_GLYPH_FINISH_SCORE,
+    "host_sbs_direct_glyph_palette_pack_rgb": HOST_SBS_DIRECT_GLYPH_PALETTE_PACK_RGB,
+    "host_sbs_direct_glyph_palette_pack_tile": HOST_SBS_DIRECT_GLYPH_PALETTE_PACK_TILE,
+    "host_sbs_direct_glyph_palette_export_roles": HOST_SBS_DIRECT_GLYPH_PALETTE_EXPORT_ROLES,
+    "host_sbs_direct_glyph_palette_coarse": HOST_SBS_DIRECT_GLYPH_PALETTE_COARSE,
+    "host_sbs_direct_glyph_palette_make_hist": HOST_SBS_DIRECT_GLYPH_PALETTE_MAKE_HIST,
+    "host_sbs_direct_glyph_palette_smooth_hist": HOST_SBS_DIRECT_GLYPH_PALETTE_SMOOTH_HIST,
+    "host_sbs_direct_glyph_palette_choose_colors": HOST_SBS_DIRECT_GLYPH_PALETTE_CHOOSE_COLORS,
+    "host_sbs_direct_glyph_palette_make_moments": HOST_SBS_DIRECT_GLYPH_PALETTE_MAKE_MOMENTS,
+    "host_sbs_direct_glyph_palette_smooth_moments": HOST_SBS_DIRECT_GLYPH_PALETTE_SMOOTH_MOMENTS,
+    "host_sbs_direct_glyph_palette_prototypes": HOST_SBS_DIRECT_GLYPH_PALETTE_PROTOTYPES,
+    "host_sbs_direct_glyph_palette_decode_palette": HOST_SBS_DIRECT_GLYPH_PALETTE_DECODE_PALETTE,
+    "host_sbs_direct_glyph_begin_history": HOST_SBS_DIRECT_GLYPH_BEGIN_HISTORY,
+    "host_sbs_direct_glyph_confirm_history": HOST_SBS_DIRECT_GLYPH_CONFIRM_HISTORY,
+    "host_sbs_direct_glyph_finish_windows": HOST_SBS_DIRECT_GLYPH_FINISH_WINDOWS,
+    "host_sbs_direct_glyph_publish_line": HOST_SBS_DIRECT_GLYPH_PUBLISH_LINE,
+    "host_sbs_direct_glyph_finish_history": HOST_SBS_DIRECT_GLYPH_FINISH_HISTORY,
+    "host_sbs_direct_glyph_prepare": HOST_SBS_DIRECT_GLYPH_PREPARE,
 }
 
 PREPROCESS_GROUP = ClosureGroup(
@@ -523,7 +661,7 @@ PARALLAX_V2_PRODUCER_GROUP = ClosureGroup(
         HOST_SBS_SUBTITLE_GAUSSIAN_VERTICAL_LIMIT,
         HOST_SBS_SUBTITLE_GAUSSIAN_HORIZONTAL_LIMIT,
     ),
-    source_closure_sha256="9511d645d89430fe88284b708bfbd12f45a2679f270ae1d83afca4dfd969fcfa",
+    source_closure_sha256="04c861cfed510c9e074aaf430c180b66f5cf308c3df9a4c901a096af3779c744",
 )
 
 PARALLAX_V2_REPLAY_RESOLVE_GROUP = ClosureGroup(
@@ -740,7 +878,7 @@ CURRENT_FOREGROUND_EDGE_GROUP = ClosureGroup(
     specs=(
         HOST_SBS_CURRENT_FOREGROUND_EDGE,
     ),
-    source_closure_sha256="4c8750b262827356b47a691aafe4cc306e541b691709060d979252635e73436c",
+    source_closure_sha256="59d4c0f90506ae0e6c042190cdaca7e76a876d0855923b46693da00ff5062a01",
 )
 
 CURRENT_TRUSTED_INNER_GROUP = ClosureGroup(
@@ -751,7 +889,70 @@ CURRENT_TRUSTED_INNER_GROUP = ClosureGroup(
     specs=(
         HOST_SBS_CURRENT_TRUSTED_INNER,
     ),
-    source_closure_sha256="86c990d49f0946e1d79730c42f629ef89076cb95b552225847671d0ef5ac47e7",
+    source_closure_sha256="5fdc9a1be98291902d63ca639f5bcfd80e88821b6df17bd083a23b5e09c32884",
+)
+
+DIRECT_GLYPH_PLAN_GROUP = ClosureGroup(
+    name="direct_glyph_plan",
+    description=(
+        "Projects current OCR cores inside their original covers and publishes the direct glyph matte with its current receipt. Adaptive publication also admits pixels whose original completed score windows own every required tap."
+    ),
+    specs=(
+        HOST_SBS_DIRECT_GLYPH_PLAN,
+        HOST_SBS_DIRECT_GLYPH_PUBLISH,
+    ),
+    source_closure_sha256="3c1df1656492065c62c519ceffd49f3d1bc1d3a4e26c50ba0b8a2eead4dc2844",
+)
+
+DIRECT_GLYPH_TRANSPORT_GROUP = ClosureGroup(
+    name="direct_glyph_transport",
+    description=(
+        "Plans bounded, phase-aligned RGB input, packs the fixed TensorRT tensor and resolves current model scores into alpha8."
+    ),
+    specs=(
+        HOST_SBS_DIRECT_GLYPH_PLAN_TILE,
+        HOST_SBS_DIRECT_GLYPH_PACK_RGB,
+        HOST_SBS_DIRECT_GLYPH_RESOLVE_MATTE,
+        HOST_SBS_DIRECT_GLYPH_FINISH_SCORE,
+    ),
+    source_closure_sha256="2df402561c88d7e2b2672660e2f9d5f42b06d9815c87b48511adb05af6226b30",
+)
+
+DIRECT_GLYPH_PALETTE_GROUP = ClosureGroup(
+    name="direct_glyph_palette",
+    description=(
+        "Normalizes the full OCR line, stitches mixed encoder tiles and decodes fill-plus-outline alpha at native pixel centers."
+    ),
+    specs=(
+        HOST_SBS_DIRECT_GLYPH_PALETTE_PACK_RGB,
+        HOST_SBS_DIRECT_GLYPH_PALETTE_PACK_TILE,
+        HOST_SBS_DIRECT_GLYPH_PALETTE_EXPORT_ROLES,
+        HOST_SBS_DIRECT_GLYPH_PALETTE_COARSE,
+        HOST_SBS_DIRECT_GLYPH_PALETTE_MAKE_HIST,
+        HOST_SBS_DIRECT_GLYPH_PALETTE_SMOOTH_HIST,
+        HOST_SBS_DIRECT_GLYPH_PALETTE_CHOOSE_COLORS,
+        HOST_SBS_DIRECT_GLYPH_PALETTE_MAKE_MOMENTS,
+        HOST_SBS_DIRECT_GLYPH_PALETTE_SMOOTH_MOMENTS,
+        HOST_SBS_DIRECT_GLYPH_PALETTE_PROTOTYPES,
+        HOST_SBS_DIRECT_GLYPH_PALETTE_DECODE_PALETTE,
+        HOST_SBS_DIRECT_GLYPH_BEGIN_HISTORY,
+        HOST_SBS_DIRECT_GLYPH_CONFIRM_HISTORY,
+        HOST_SBS_DIRECT_GLYPH_FINISH_WINDOWS,
+        HOST_SBS_DIRECT_GLYPH_PUBLISH_LINE,
+        HOST_SBS_DIRECT_GLYPH_FINISH_HISTORY,
+    ),
+    source_closure_sha256="7f5aea30bf4fbd655130f36bb690cea131443e1b71b25553decf545fef79fcf7",
+)
+
+DIRECT_GLYPH_PREPARE_GROUP = ClosureGroup(
+    name="direct_glyph_prepare",
+    description=(
+        "Completed shared-warp preparation for the direct glyph matte receipt."
+    ),
+    specs=(
+        HOST_SBS_DIRECT_GLYPH_PREPARE,
+    ),
+    source_closure_sha256="219a6a305c05ca3ac1744286a4e87b83b61128c10e05c61ec517337f279ec940",
 )
 
 CLOSURE_GROUPS: Dict[str, ClosureGroup] = {
@@ -775,4 +976,8 @@ CLOSURE_GROUPS: Dict[str, ClosureGroup] = {
     "current_stroke_coverage": CURRENT_STROKE_COVERAGE_GROUP,
     "current_foreground_edge": CURRENT_FOREGROUND_EDGE_GROUP,
     "current_trusted_inner": CURRENT_TRUSTED_INNER_GROUP,
+    "direct_glyph_plan": DIRECT_GLYPH_PLAN_GROUP,
+    "direct_glyph_transport": DIRECT_GLYPH_TRANSPORT_GROUP,
+    "direct_glyph_palette": DIRECT_GLYPH_PALETTE_GROUP,
+    "direct_glyph_prepare": DIRECT_GLYPH_PREPARE_GROUP,
 }

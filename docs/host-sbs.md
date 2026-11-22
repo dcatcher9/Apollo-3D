@@ -74,7 +74,7 @@ as one tuple; the draw-owned pin resources are not a new temporal observation.
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
 schema 135/tag `0xC932B35D`, canonical SHA-256
-`408afb0d2615f36d82a920b09015f557ba1c56ec5a44cd39ec96e4653ca94a96`. It binds the
+`88a17065a56f8677f2c49e376b57e4af32bb6c5e2158f8e8c9bc6b830f88c520`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -85,7 +85,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 2 | `8e2de9ed76bd64a38a0c956e75dd7a13c8883d39d0ef0050ffe5aba9f7208672` |
-| `parallax_v2_producer` | 30 | `9511d645d89430fe88284b708bfbd12f45a2679f270ae1d83afca4dfd969fcfa` |
+| `parallax_v2_producer` | 30 | `04c861cfed510c9e074aaf430c180b66f5cf308c3df9a4c901a096af3779c744` |
 | `parallax_v2_replay_resolve` | 2 | `9a73e8a92ba55e3d99f3e37868918329c0e0d478bd7281319670dd4f2fe55347` |
 | `parallax_v2_coordinate_diagnostic` | 1 | `b895dea87363c1859c16d97c3d79121a2996d5f03ee8c8b56e20e756609e4e59` |
 | `near_identical_detector` | 3 | `c894bfb39134f169638662441024cc234a74faf4eac096a65cefe6487cb35ee5` |
@@ -102,8 +102,12 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | `parallax_v2_queued_renderer` | 1 | `2cf47a4299353b8f7f98f74cc56eb712567371a74a0b5468aa13d6f7db1c15e7` |
 | `current_mask_holes` | 9 | `b4e48d5eecab2404951602ad649980001f21cf5f9768381acadc7c3973ef4668` |
 | `current_stroke_coverage` | 3 | `1f03ba4279f6cadbaddf56b408cf20c0bc37776c4971e8e25830a8ffd3a3d063` |
-| `current_foreground_edge` | 1 | `4c8750b262827356b47a691aafe4cc306e541b691709060d979252635e73436c` |
-| `current_trusted_inner` | 1 | `86c990d49f0946e1d79730c42f629ef89076cb95b552225847671d0ef5ac47e7` |
+| `current_foreground_edge` | 1 | `59d4c0f90506ae0e6c042190cdaca7e76a876d0855923b46693da00ff5062a01` |
+| `current_trusted_inner` | 1 | `5fdc9a1be98291902d63ca639f5bcfd80e88821b6df17bd083a23b5e09c32884` |
+| `direct_glyph_plan` | 2 | `3c1df1656492065c62c519ceffd49f3d1bc1d3a4e26c50ba0b8a2eead4dc2844` |
+| `direct_glyph_transport` | 4 | `2df402561c88d7e2b2672660e2f9d5f42b06d9815c87b48511adb05af6226b30` |
+| `direct_glyph_palette` | 16 | `7f5aea30bf4fbd655130f36bb690cea131443e1b71b25553decf545fef79fcf7` |
+| `direct_glyph_prepare` | 1 | `219a6a305c05ca3ac1744286a4e87b83b61128c10e05c61ec517337f279ec940` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->
 
 The contract admits the following production calibration:
@@ -392,6 +396,83 @@ A missing queued source, queued compile failure, or queued device-creation failu
 route and preserves completed readiness. Current Outline qualification schema 9 records the
 completed production closure and retains the same renderer geometry policy as schema 8.
 
+#### Completed subtitle mask controls
+
+The hybrid qualification control uses a kind-4, algorithm-3 selected receipt. A
+native-resolution model with a half-resolution context branch learns the
+appearance of nearby boundaries, thin strokes and gaps from display RGB and current shape
+evidence. This replaces the Rule path's boundary recovery, stroke coverage and final support
+growth within the model domain. Authenticated OCR ownership and proximity to current RawM bound
+that domain. Inside and Trusted Inner remain a protected glyph floor. The shared warp consumes
+the binary union of that floor and the learned selection. The model's quantized alpha is available
+as separate qualification evidence. The context branch uses the current frame at inference.
+
+For fresh authenticated OCR8 empty, the gate joins the actual transaction with C24, SCT5,
+SCP4 and UIP4. It zeros the observation dispatch in a private scheduling copy used by the
+reduced producer. The publisher joins the empty witness to the original transaction and emits
+a current zero matte and alpha. Producer textures may still contain the previous observation's
+data. Root0 keeps the previous publication. A current legacy fallback retains its kind-1,
+algorithm-1 receipt.
+
+The native Direct qualification control publishes inside each OCR core expanded by 12 pixels
+and intersected with the original padded OCR cover. The model reads 512×144 RGB tiles from the
+subtitle band or uses 384×104 tiles when only the smaller shape fits the aligned band. Both
+shapes use the same weights and native source pixels. Tile placement reserves at least 36 pixels
+of context around its output windows where the band extends that far and follows the model's
+four-pixel pooling grid. The context covers the model's full input dependency. Published
+protection is zero outside the OCR boxes.
+
+Direct audits the entire current FP16 display-snapshot band before packing native RGB8 tiles.
+The audit couples that snapshot with its same-observation source proof. Direct reuses the
+snapshot without allocating the two materialized Source5 color textures. Fresh authenticated
+EMPTY parks the audit and publishes zero protection.
+
+Live Host 3D and Convert Video use the mixed H28 Direct Glyph encoder and native
+palette decoder for subtitle protection. Convolutions run in FP16. The RGB
+interface, log probabilities and native decoder use FP32.
+Setup authenticates the model and its shared-warp programs before the first frame.
+Setup or scoring failure uses ordinary Base stereo without glyph protection.
+The shared OCR planner expands each native core by three-eighths of the core height, rounded up
+and bounded to 12–64 pixels, while staying inside the original padded OCR cover.
+The earlier adaptive qualification control uses the largest resulting rectangle's native height to select a
+starting context scale of 1, 2 or 4 at heights below 80, from 80 through 151, or
+from 152 pixels. It reduces that scale until the profile fits the analysis band.
+For normal-size glyphs, the planner can pad the read lattice to keep native resolution.
+If tile capacity is exceeded, it tries a coarser scale, with a final padded quarter-scale
+attempt. Padding extends only the model input and uses edge-clamped source pixels.
+The pack stage averages encoded RGB8 in band-aligned blocks.
+The publisher interpolates the resulting probabilities at native pixel centers,
+quantizes once, and uses alpha8 values of at least 38 inside the native OCR work
+rectangles. Scale 1 retains the original quantized transport.
+The adaptive publisher can also check a strip up to one-eighth of the native
+OCR core height, rounded up, past each side of the work rectangle. The original
+padded OCR cover bounds the strip. A pixel in the strip must have every needed
+sample in the current completed tile windows and an alpha8 value of at least
+64. These pixels reuse the original tile plan and scores.
+
+The native decoder expands each side of the working rectangle by one sixteenth of its
+height, rounded up and clipped to the original detector cover. The encoder scales the
+entire resulting rectangle to 28 rows,
+preserves its aspect ratio, and processes long lines in 440-column windows of the
+512×144 mixed TensorRT profile. The 36-column horizontal context on each side stays
+outside the window's owned output. Aligned RGB at 84 rows supplies local background color
+and variance. The learned decoder combines those features, the shared line palette and
+the original RGB at each native pixel center into continuous fill-plus-outline protection.
+On a unique overlap with the previous observation, the GPU checks at least 24
+previously protected high-gradient samples for agreement in edge direction and RGB.
+At 70% agreement, it retains the union of the two work rectangles within the current
+detector cap and blends the previous raw alpha according to the current pixel’s RGB
+change. Each new history generation stores the original prediction. Current overlapping
+lines use their maximum protection, quantized at native pixel centers with a cutoff
+of 38/255. Fresh empty OCR clears the mask and history and skips inference.
+
+An estimator reserves one observation until its GPU work completes. It polls a D3D
+event without waiting. A 64-byte scheduling record supplies eight width/height pairs
+for scratch sizing and submission. Locations, image tensors, cue evidence and raw
+opacity stay on the GPU. Each submission processes at most six encoder tiles before
+checking completion. Long lines continue in subsequent submissions under the same
+observation token. Only the completed observation can publish its native mask.
+
 #### Text-game pin
 
 `host_sbs_text_game_ui_warp.hlsl` is the same adapter compiled with `HOST_SBS_TEXT_GAME_PIN` for a
@@ -668,6 +749,8 @@ horizontal members are published and every other member of the group is dropped.
 or weak blob inside the word gap therefore cannot remove a centered caption, and gains no
 admission itself. A group made only of horizontal members has identical unions, so the
 off-center scene pairs the two-percent rule was tightened against stay rejected.
+The opt-in file-fed midpoint probe allows three percent for this independent horizontal
+fallback when its tight union still spans the reference center.
 This position prior does not establish glyph membership or pixel stability. A published ribbon
 never teaches the prior or the single trusted height, because its core is a whole bottom run
 rather than a caption line. Full-width ribbons

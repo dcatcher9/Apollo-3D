@@ -12,6 +12,11 @@ from pathlib import Path
 import struct
 from typing import Any
 
+try:
+    from .host_sbs_shader_manifest import DIRECT_GLYPH_PREPARE_GROUP
+except ImportError:
+    from host_sbs_shader_manifest import DIRECT_GLYPH_PREPARE_GROUP
+
 
 KIND = "shared-ui-pin-v1"
 COMPLETED_KIND = "shared-ui-pin-completed-v2"
@@ -19,6 +24,7 @@ QUEUED_KIND = "shared-ui-pin-queued-v2"
 LEGACY_COMBINED_CLOSURE = "326bf2defe8021e1930f46279fea27ceac12effad2ad9d2a17127d647bcdddef"
 _ROUTE_CLOSURE_KEYS = {COMPLETED_KIND: "completed_closure", QUEUED_KIND: "queued_closure"}
 EVIDENCE = "actual_draw_evidence.json"
+SELECTED_RECEIPT = "actual_selected_receipt.u32"
 ARTIFACTS = (
     "actual_shared_pin_weights.f32", "actual_shared_pin_field.f32",
     "actual_shared_pin_rows.u32", "actual_shared_pin_geometry.u32",
@@ -29,15 +35,16 @@ SHARED_ROLE = "independent Base diagnostic; does not describe rendered shared wa
 BASE_ROLE = "authenticated Base inverse diagnostic"
 
 
-def _expected_closure(kind: str = KIND) -> str:
-    if kind == KIND:
-        return LEGACY_COMBINED_CLOSURE
+def _runtime_closure(name: str) -> str:
     try:
         from . import generate_depth_coordinate_v2_contract as shader_generator
     except ImportError:
         import generate_depth_coordinate_v2_contract as shader_generator
-    name = _ROUTE_CLOSURE_KEYS[kind]
     return shader_generator.shared_ui_warp_runtime_closures(names=(name,))[name]
+
+
+def _expected_closure(kind: str = KIND) -> str:
+    return LEGACY_COMBINED_CLOSURE if kind == KIND else _runtime_closure(_ROUTE_CLOSURE_KEYS[kind])
 
 
 def validate_attribution(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -105,6 +112,31 @@ def _same_source_word(value: Any, expected: Any) -> bool:
     return type(value) is int and type(expected) is int and 0 < value < (1 << 64) and value == expected
 
 
+def _hybrid_receipt_kind(root: Path, manifest: dict, evidence: dict, authorized: bool) -> str | None:
+    descriptor = manifest["artifacts"].get(SELECTED_RECEIPT)
+    if (evidence.get("binding_roles", {}).get("t7") != SELECTED_RECEIPT or not isinstance(descriptor, dict) or
+            evidence["artifacts"].get(SELECTED_RECEIPT) != descriptor):
+        raise ValueError("hybrid selected receipt lacks its exact t7 artifact binding")
+    if descriptor.get("available") is not True:
+        return None
+    payload = _read(root, manifest, SELECTED_RECEIPT)
+    if len(payload) != 64 * 4:
+        raise ValueError("hybrid selected receipt has the wrong byte length")
+    words = struct.unpack("<64I", payload)
+    if (list(words[:4]) != evidence.get("selected_receipt_header") or
+            list(words[60:]) != evidence.get("selected_receipt_token_algorithm")):
+        raise ValueError("hybrid selected receipt disagrees with the draw evidence")
+    if not authorized:
+        return None
+    tag, schema, kind, invalid = words[:4]
+    token_low, token_high, algorithm, reserved = words[60:]
+    roles = {(4, 3): "hybrid", (1, 1): "legacy-fallback"}
+    if ((tag, schema, invalid, reserved) != (0x31534D53, 1, 0, 0) or
+            not (token_low or token_high) or (kind, algorithm) not in roles):
+        raise ValueError("authorized hybrid draw has an unexpected selected receipt")
+    return roles[kind, algorithm]
+
+
 def _verify(root: Any, manifest: dict[str, Any]) -> tuple[dict[str, Any], Any]:
     """Return the summary and its already authenticated map snapshot, when available."""
     attribution = validate_attribution(manifest)
@@ -151,6 +183,12 @@ def _verify(root: Any, manifest: dict[str, Any]) -> tuple[dict[str, Any], Any]:
                 "packed-output row-major float32-le RGBA: sourceU,sourceV,pinnedRow,contentValid") or
             shared.get("boundary_layout") != "packed-output row-major float32-le RGBA: finiteSourceBoundary,0,0,1"):
         raise ValueError("shared pin evidence does not identify its exact draw and source")
+    model_prepare = shared.get("model_prepare_source_closure_sha256")
+    if model_prepare is not None:
+        if kind != COMPLETED_KIND or model_prepare not in (
+                _runtime_closure("raw_model_prepare_closure"), DIRECT_GLYPH_PREPARE_GROUP.source_closure_sha256):
+            raise ValueError("shared pin model prepare has an unknown source or route")
+        attribution["model_prepare_source_closure_sha256"] = model_prepare
     evidence_artifacts = evidence.get("artifacts")
     if not isinstance(evidence_artifacts, dict):
         raise ValueError("actual draw evidence artifacts must be an object")
@@ -222,6 +260,8 @@ def _verify(root: Any, manifest: dict[str, Any]) -> tuple[dict[str, Any], Any]:
     if (not np.array_equal(boundary[..., 0].astype(bool), expected_boundary) or
             np.any(mapping[..., 1][valid] < 0) or np.any(mapping[..., 1][valid] > 1)):
         raise ValueError("shared pin map and finite-source boundary disagree")
+    if model_prepare is not None:
+        attribution["verified_selected_matte_kind"] = _hybrid_receipt_kind(root, manifest, evidence, bool(rows[-1]))
     return {**attribution, "actual_map_verified": True,
             "map_artifact": ARTIFACTS[4], "boundary_artifact": ARTIFACTS[5],
             "width": packed["width"], "height": packed["height"],

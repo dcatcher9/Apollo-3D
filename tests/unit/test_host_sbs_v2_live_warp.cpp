@@ -5667,6 +5667,35 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinProductionRejectsInvalidRowExtentAndDi
   EXPECT_TRUE(error.empty());
 }
 
+TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinRawModelPreparationKeepsTheStockProgram) {
+  namespace shared = models::host_sbs_shared_ui_warp;
+  const std::filesystem::path root(SUNSHINE_SHADERS_DIR);
+  ComPtr<ID3D11Device> device, foreign_device;
+  for (auto *candidate : {std::addressof(device), std::addressof(foreign_device)}) {
+    ASSERT_TRUE(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0u,
+      nullptr, 0u, D3D11_SDK_VERSION, candidate->GetAddressOf(), nullptr, nullptr)));
+  }
+
+  shared::programs_t programs;
+  std::string error;
+  EXPECT_FALSE(programs.load_raw_model_completed(device.Get(), root, error));
+  ASSERT_TRUE(programs.load(device.Get(), root, error)) << error;
+  const auto stock = programs.program();
+  EXPECT_FALSE(programs.raw_model_completed_ready());
+  EXPECT_FALSE(programs.load_raw_model_completed(device.Get(), root / "current_outline", error));
+  ASSERT_TRUE(programs.load_raw_model_completed(device.Get(), root, error)) << error;
+  ASSERT_TRUE(programs.raw_model_completed_ready());
+  const auto model = programs.raw_model_completed_program();
+  EXPECT_EQ(model.initialize, stock.initialize);
+  EXPECT_EQ(model.pin, stock.pin);
+  EXPECT_EQ(model.pixel, stock.pixel);
+  EXPECT_NE(model.prepare, stock.prepare);
+  EXPECT_FALSE(model.queued);
+  EXPECT_FALSE(programs.load_raw_model_completed(foreign_device.Get(), root, error));
+  EXPECT_EQ(programs.raw_model_completed_program().prepare, model.prepare);
+  EXPECT_EQ(programs.program().prepare, stock.prepare);
+}
+
 TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinSubtitlePreparationPlacesBandAndRevokesInvalidRequests) {
   namespace shared = models::host_sbs_shared_ui_warp;
   namespace v2 = models::depth_coordinate_v2;

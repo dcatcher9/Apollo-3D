@@ -22,6 +22,7 @@ Texture2D<uint> RawM : register(t12); // accounting only, never recipient permis
 Texture2D<uint> Code1M : register(t13); // accounting only
 globallycoherent RWTexture2D<uint> MaskWrite : register(u4);
 globallycoherent RWByteAddressBuffer Data : register(u5);
+RWTexture2D<uint> WeakAAOracleTrusted : register(u6); // File-fed trusted-permit diagnostic only.
 uint UB(uint unit) { return 128u+32u*unit; }
 uint R(uint word) { return Data.Load(word*4u); }
 uint CBWord(uint i) {
@@ -174,8 +175,7 @@ bool TrustedCurrentCover(uint2 p,uint unit) {
 
 // Runs after every original completion stage. A trusted inner component neither supplies
 // physical-black adoption nor becomes an outline/AA/history donor for the original pipeline.
-[numthreads(16,16,1)]
-void trusted_inner_publish_main(uint3 d:SV_DispatchThreadID) {
+void PublishTrustedInner(uint3 d,bool recordWeakAAOracle) {
     if(d.z!=0u||any(d.xy>=Shape.xy))return;
     uint w,h;TrustedInnerBits.GetDimensions(w,h);if(any(uint2(w,h)!=Shape.xy))return;
     uint bits=TrustedInnerBits.Load(int3(d.xy,0));if(bits==0u)return;
@@ -192,8 +192,18 @@ void trusted_inner_publish_main(uint3 d:SV_DispatchThreadID) {
     Code1M.GetDimensions(w,h);if(any(uint2(w,h)!=Shape.xy))return;
     uint raw=RawM.Load(int3(d.xy,0)),code1=Code1M.Load(int3(d.xy,0));
     if(raw>1u||code1>1u)return;
+    if(recordWeakAAOracle){
+        WeakAAOracleTrusted.GetDimensions(w,h);
+        if(all(uint2(w,h)==Shape.xy))WeakAAOracleTrusted[d.xy]=1u;
+    }
     PublishCurrentMaskAddition(d.xy,raw,code1);
 }
+
+[numthreads(16,16,1)]
+void trusted_inner_publish_main(uint3 d:SV_DispatchThreadID) { PublishTrustedInner(d,false); }
+
+[numthreads(16,16,1)]
+void trusted_inner_publish_weak_aa_oracle_main(uint3 d:SV_DispatchThreadID) { PublishTrustedInner(d,true); }
 
 
 [numthreads(16,16,1)]

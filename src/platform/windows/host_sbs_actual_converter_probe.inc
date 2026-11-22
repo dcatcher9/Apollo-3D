@@ -39,7 +39,7 @@ namespace actual_converter_probe_v1 {
         {"depth_unmap",{{"issued",q.depth_unmap.issued},{"result",q.depth_unmap.result},{"begin_us",q.depth_unmap.begin_wall_us},{"return_us",q.depth_unmap.return_wall_us}}}};
     }
     json event_json(const event_t &e) {
-      return {{"kind",static_cast<unsigned>(e.kind)},{"conversion",e.conversion},{"model_frame",e.model_frame},{"observation_us",e.observation_us},
+      json result {{"kind",static_cast<unsigned>(e.kind)},{"conversion",e.conversion},{"model_frame",e.model_frame},{"observation_us",e.observation_us},
         {"host_event_us",e.host_event_us},{"copied_at_ticks",e.copied_at_ticks},{"copied_at_us",e.copied_at_us},
         {"source_stamp_ticks",e.source_stamp_ticks},{"content_stamp_ticks",e.content_stamp_ticks},
         {"current_source_stamp_ticks",e.current_source_stamp_ticks},{"current_content_stamp_ticks",e.current_content_stamp_ticks},
@@ -74,6 +74,10 @@ namespace actual_converter_probe_v1 {
           {"field_address",reinterpret_cast<std::uintptr_t>(e.shared_warp.field.Get())},
           {"rows_address",reinterpret_cast<std::uintptr_t>(e.shared_warp.rows.Get())},
           {"geometry_address",reinterpret_cast<std::uintptr_t>(e.shared_warp.geometry.Get())}}}};
+      if (!e.shared_warp.raw_model_prepare_source_closure.empty()) {
+        result["shared_warp"]["raw_model_prepare_source_closure"] = std::string(e.shared_warp.raw_model_prepare_source_closure);
+      }
+      return result;
     }
     struct fixture_display_t final : display_vram_t {
       bool declared_hdr=false;

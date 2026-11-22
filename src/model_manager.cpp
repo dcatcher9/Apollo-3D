@@ -101,6 +101,43 @@ namespace models {
             std::string(ocr_model_name) + ".cache-" + digest + ".engine";
     }
 
+    std::optional<direct_glyph_artifact_t> get_direct_glyph_artifact(
+        const std::filesystem::path& assets_dir, std::string_view compatibility_tag,
+        host_sbs_direct_glyph_gpu::tile_profile_e profile) {
+        const auto preset = direct_glyph_model_preset(profile);
+        if (assets_dir.empty() || compatibility_tag.empty() || preset.asset_path.empty()) {
+            return std::nullopt;
+        }
+        direct_glyph_artifact_t artifact;
+        artifact.source_path = assets_dir / std::filesystem::path {preset.asset_path};
+        std::error_code error;
+        if (!std::filesystem::is_regular_file(artifact.source_path, error) || error) {
+            BOOST_LOG(warning) << "Packaged direct glyph ONNX is unavailable at " << artifact.source_path;
+            return std::nullopt;
+        }
+        artifact.source_sha256 = file_sha256_hex(artifact.source_path);
+        if (artifact.source_sha256 != preset.onnx_sha256) {
+            BOOST_LOG(warning) << "Packaged direct glyph ONNX failed SHA-256 validation at "
+                               << artifact.source_path;
+            return std::nullopt;
+        }
+
+        const auto cache_digest = engine_identity_digest(
+            "sunshine3d/direct-glyph-tensorrt-engine-cache/v1", direct_glyph_model_name,
+            preset.engine_recipe, std::string(compatibility_tag) + "-onnx" + artifact.source_sha256);
+        if (cache_digest.empty()) {
+            return std::nullopt;
+        }
+        artifact.name = std::string(direct_glyph_model_name) + ".cache-" + cache_digest + ".engine";
+        artifact.engine_path = assets_dir / artifact.name;
+        if (!engine_cache_path_fits_native_limit(artifact.engine_path)) {
+            BOOST_LOG(warning) << "Direct glyph engine cache path including .part exceeds the native limit: "
+                               << artifact.engine_path;
+            return std::nullopt;
+        }
+        return artifact;
+    }
+
     bool engine_cache_path_fits_native_limit(const std::filesystem::path& path) {
         if (path.empty()) return false;
 #ifdef _WIN32

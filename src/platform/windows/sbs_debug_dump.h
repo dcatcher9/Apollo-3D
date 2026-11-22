@@ -50,6 +50,7 @@ namespace platf::sbs_debug {
     std::array<std::uint32_t, 4> analysis_source_rect {}, analysis_shape {};
     std::string program = "not-observed", pixel_shader_closure;
     std::string shared_pin_source_closure;
+    std::string shared_pin_model_prepare_closure;
     std::string unavailable_reason = "no successful attributable draw";
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> matte, background;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> selected_receipt, background_proof;

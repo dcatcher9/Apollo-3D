@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import numpy as np
 from PIL import Image
 
 
@@ -56,6 +57,88 @@ def state_words(clock, scale):
     values["camera_center_integrity_bits"] = dump_contract.camera_center_integrity_for_state_values(values)
     return [float_word(values[field["name"]]) if field["gpu_encoding"] == "float"
             else values[field["name"]] for field in fields]
+
+
+class HalfContextWorkTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.output = Path(temporary.name)
+        self.folder = self.output / "current-outline/raw-matte-reduced/frame_00001"
+        self.folder.mkdir(parents=True)
+        work = [0] * 60
+        work[:16] = [2, 3, 1, 0, 17, 1, 55, 25, 4, 5, 1, 0, 6, 0, 64, 35]
+        work[16:20] = [2, 3, 0, 38]
+        work[20:28] = [17, 1, 32, 20, 27, 7, 55, 25]
+        work[53:56] = [2, 20, 6]
+        receipt = [0] * 64
+        receipt[4:8] = [64, 80, 15, 65]
+        receipt[12:16] = [0, 0, 64, 80]
+        self.frame = {"source_file_id": "00001", "selected_receipt": receipt, "execution": work}
+        self.ocr = [0] * 256
+        self.ocr[4] = 2
+        self.ocr[144:148] = [17, 16, 32, 35]
+        self.ocr[152:156] = [27, 22, 55, 40]
+        zeros = np.zeros((65, 64), dtype="<u4")
+        self.save_plane("cbc_body", "cbc-body.u32", zeros)
+        self.save_plane("cbc_selected_bits", "cbc-selected-bits.u32", zeros, "cbc_selected_bits")
+        cover = zeros.copy()
+        cover[11, 24] = 1
+        cover[11, 29] = 2
+        cover[3, 20] = 2  # Inside the first rectangle, but owns the other slot.
+        self.save_plane("cbc_cover_bits", "cbc-cover-bits.u32", cover, "ocr_slot_bits")
+        raw = zeros.copy()
+        raw[11, 27] = raw[3, 20] = 1
+        self.save_plane("raw", "raw.u32", raw)
+        self.floor = zeros.copy()
+        self.floor[11, 24] = 1
+        self.save_plane("floor", "floor.u32", self.floor)
+        self.alpha = zeros.copy()
+        self.alpha[11, 29] = 39
+        self.save_alpha()
+
+    def save_plane(self, key, filename, values, kind="0_or_1"):
+        path = self.folder / filename
+        payload = values.tobytes()
+        path.write_bytes(payload)
+        self.frame[key] = {"file": path.relative_to(self.output).as_posix(), "source_rect": [0, 15, 64, 80],
+                           "size": [64, 65], "format": f"r32_uint_little_endian_{kind}",
+                           "byte_count": len(payload), "sha256": qualification._sha(path)}
+
+    def save_alpha(self):
+        self.save_plane("alpha8", "alpha8.u32", self.alpha, "alpha8")
+        self.save_plane("selected_mask", "selected.u32", self.floor | (self.alpha >= 38))
+
+    def test_compact_work_uses_the_matching_owner_slot(self):
+        self.assertEqual(qualification.validate_half_context_work(self.output, self.frame, self.ocr),
+                         {"geometry": [6, 0, 64, 35], "score_crop": [18, 0, 40, 22]})
+        self.frame["execution"][0] = 3
+        with self.assertRaisesRegex(qualification.QualificationError, "compact dispatch"):
+            qualification.validate_half_context_work(self.output, self.frame, self.ocr)
+
+    def test_wrong_slot_cannot_publish_alpha(self):
+        self.alpha[3, 20] = 40
+        self.save_alpha()
+        with self.assertRaisesRegex(qualification.QualificationError, "owned floor and alpha"):
+            qualification.validate_half_context_work(self.output, self.frame, self.ocr)
+
+    def test_floor_only_frame_has_no_score_dispatch(self):
+        self.save_plane("raw", "raw.u32", np.zeros_like(self.floor))
+        self.alpha.fill(0)
+        self.save_alpha()
+        self.frame["execution"][:4] = [0, 1, 1, 0]
+        self.frame["execution"][55] = 0
+        self.assertIsNone(qualification.validate_half_context_work(self.output, self.frame, self.ocr)["score_crop"])
+
+    def test_inactive_work_rejects_a_retained_producer_plane(self):
+        self.frame["execution"][53] = 1
+        for name in ("cbc_body", "cbc_selected_bits", "cbc_cover_bits"):
+            self.frame[name] = None
+        with self.assertRaisesRegex(qualification.QualificationError, "inactive work exposes CBC feature data"):
+            qualification.validate_half_context_work(self.output, self.frame, self.ocr)
+        for filename in ("cbc-body.u32", "cbc-selected-bits.u32", "cbc-cover-bits.u32"):
+            (self.folder / filename).unlink()
+        self.assertIsNone(qualification.validate_half_context_work(self.output, self.frame, self.ocr))
 
 
 class CurrentOutlineQualificationTests(unittest.TestCase):
@@ -222,6 +305,117 @@ class CurrentOutlineQualificationTests(unittest.TestCase):
             if schema >= 8:
                 frame["trusted_inner_program_ready"] = True
         return document
+
+    def write_native_planes(self, document, manifest_name, subdirectory, manifest_role, roles):
+        self.validate(document)
+        parent = self.output / qualification.MANIFEST
+        feature_frames = []
+        for frame in document["frames"]:
+            matte = frame["selected_mask"]
+            directory = Path("current-outline") / subdirectory / f"frame_{frame['source_file_id']}"
+            (self.output / directory).mkdir(parents=True)
+            textures = {}
+            for name, role in roles.items():
+                relative = directory / f"{name}.u32"
+                path = self.output / relative
+                path.write_bytes(bytes(matte["byte_count"]))
+                textures[name] = {"file": relative.as_posix(), "sha256": qualification._sha(path), "role": role,
+                                  "size": matte["size"], "byte_count": matte["byte_count"],
+                                  "format": "r32_uint_little_endian"}
+            owner_fields = ("observation_ordinal", "source_file", "source_snapshot_sha256", "completed_frame_id",
+                            "observation_timestamp_us", "transaction_token", "analysis_generation")
+            feature_frames.append({**{key: frame[key] for key in owner_fields}, "selected_mask_sha256": matte["sha256"],
+                                   "native_source_rect": matte["source_rect"], "textures": textures})
+        manifest = self.output / manifest_name
+        features = {"schema": 1, "status": "COMPLETE", "role": manifest_role,
+                    "qualification_sha256": qualification._sha(parent), "executable_sha256": document["executable_sha256"],
+                    "frame_count": len(feature_frames), "frames": feature_frames}
+        if manifest_name == qualification.WEAK_AA_MANIFEST:
+            features["diagnostic_source_closures"] = qualification.expected_weak_aa_closures()
+        manifest.write_text(json.dumps(features), encoding="utf-8")
+        return manifest, features
+
+    def test_native_features_require_the_same_draw_owner_and_texture_bytes(self):
+        manifest, features = self.write_native_planes(
+            self.document_for_schema(9), qualification.NATIVE_FEATURES_MANIFEST, "native-features",
+            "file-fed-current-outline-native-features", qualification.NATIVE_FEATURE_ROLES,
+        )
+        feature_frames = features["frames"]
+        self.assertEqual(qualification.validate_native_features(self.output)["frame_count"], len(feature_frames))
+        stale = copy.deepcopy(features)
+        stale["frames"][0]["transaction_token"] += 1
+        manifest.write_text(json.dumps(stale), encoding="utf-8")
+        with self.assertRaisesRegex(qualification.QualificationError, "does not own"):
+            qualification.validate_native_features(self.output)
+        manifest.write_text(json.dumps(features), encoding="utf-8")
+        texture = self.output / feature_frames[0]["textures"]["raw_m"]["file"]
+        texture.write_bytes(b"\x01" + texture.read_bytes()[1:])
+        with self.assertRaisesRegex(qualification.QualificationError, "texture bytes differ"):
+            qualification.validate_native_features(self.output)
+
+    def test_weak_aa_requires_completed_unmodified_selected_rule(self):
+        document = self.document_for_schema(9)
+        manifest, features = self.write_native_planes(
+            document, qualification.WEAK_AA_MANIFEST, "weak-aa",
+            "file-fed-current-outline-weak-aa", qualification.WEAK_AA_ROLES,
+        )
+        self.assertEqual(qualification.validate_weak_aa(self.output)["frame_count"], len(document["frames"]))
+        parent = self.output / qualification.MANIFEST
+        document["ocr_midpoint_probe"] = True
+        parent.write_text(json.dumps(document), encoding="utf-8")
+        features["qualification_sha256"] = qualification._sha(parent)
+        manifest.write_text(json.dumps(features), encoding="utf-8")
+        with self.assertRaisesRegex(qualification.QualificationError, "unmodified Rule"):
+            qualification.validate_weak_aa(self.output)
+        del document["ocr_midpoint_probe"]
+        document["frames"][0]["selected_receipt"][2] = 1
+        parent.write_text(json.dumps(document), encoding="utf-8")
+        features["qualification_sha256"] = qualification._sha(parent)
+        manifest.write_text(json.dumps(features), encoding="utf-8")
+        with self.assertRaisesRegex(qualification.QualificationError, "completed current Rule"):
+            qualification.validate_weak_aa(self.output)
+
+    def test_foreground_edge_omission_is_explicit_and_qualified(self):
+        document = self.document_for_schema(9)
+        self.assertNotIn("foreground_edge_omitted", self.validate(document))
+        omitted = {**document, "foreground_edge_omitted": True}
+        self.assertIs(self.validate(omitted)["foreground_edge_omitted"], True)
+        for invalid in (False, 1, "true"):
+            with self.subTest(value=invalid):
+                with self.assertRaisesRegex(qualification.QualificationError, "foreground-edge omission"):
+                    self.validate({**document, "foreground_edge_omitted": invalid})
+
+    def test_stroke_coverage_omission_requires_schema9_and_explicit_true(self):
+        document = self.document_for_schema(9)
+        self.assertNotIn("stroke_coverage_omitted", self.validate(document))
+        omitted = {**document, "stroke_coverage_omitted": True}
+        result = self.validate(omitted)
+        self.assertIs(result["stroke_coverage_omitted"], True)
+        self.assertNotIn("foreground_edge_omitted", result)
+        for invalid in (False, 1, "true", None):
+            with self.subTest(value=invalid):
+                with self.assertRaisesRegex(qualification.QualificationError, "stroke-coverage omission"):
+                    self.validate({**document, "stroke_coverage_omitted": invalid})
+        with self.assertRaisesRegex(qualification.QualificationError, "stroke-coverage omission"):
+            self.validate({**self.document_for_schema(8), "stroke_coverage_omitted": True})
+        with self.assertRaisesRegex(qualification.QualificationError, "stroke-coverage programs were unavailable"):
+            self.validate({**omitted, "coverage_program_ready": False})
+
+    def test_rejects_combined_omission_markers(self):
+        document = self.document_for_schema(9)
+        with self.assertRaisesRegex(qualification.QualificationError, "omissions are mutually exclusive"):
+            self.validate({**document, "foreground_edge_omitted": True, "stroke_coverage_omitted": True})
+
+    def test_midpoint_probe_marker_requires_explicit_true_and_schema9(self):
+        document = self.document_for_schema(9)
+        self.assertNotIn("ocr_midpoint_probe", self.validate(document))
+        self.assertIs(self.validate({**document, "ocr_midpoint_probe": True})["ocr_midpoint_probe"], True)
+        for invalid in (False, 1, "true", None):
+            with self.subTest(value=invalid):
+                with self.assertRaisesRegex(qualification.QualificationError, "OCR midpoint probe marker"):
+                    self.validate({**document, "ocr_midpoint_probe": invalid})
+        with self.assertRaisesRegex(qualification.QualificationError, "OCR midpoint probe marker"):
+            self.validate({**self.document_for_schema(8), "ocr_midpoint_probe": True})
 
     def test_schema6_requires_current_foreground_edge_source_and_availability(self):
         document = self.document_for_schema(6)
@@ -550,6 +744,119 @@ class CurrentOutlineQualificationTests(unittest.TestCase):
         self.assertEqual(command[0], str((build / "sunshine.exe").resolve()))
         self.assertEqual(run.call_args.kwargs, {"cwd": build.resolve(), "check": True})
         self.assertEqual(validate.call_args.args[:3], (target, self.frames, (build / "sunshine.exe").resolve()))
+
+    def test_launcher_passes_and_checks_foreground_edge_omission(self):
+        build = self.root / "build"
+        build.mkdir()
+        (build / "sunshine.exe").write_bytes(self.executable.read_bytes())
+        arguments = ["--frames", str(self.frames), "--out", str(self.root / "omitted-output"),
+                     "--build-dir", str(build), "--omit-foreground-edge"]
+        with mock.patch.object(qualification.subprocess, "run") as run, \
+                mock.patch.object(qualification, "validate_qualification",
+                                  return_value={"status": "PASS", "foreground_edge_omitted": True}), \
+                mock.patch.object(qualification.mask_metrics, "score_qualification", return_value={"aggregate": None}):
+            self.assertEqual(qualification.main(arguments), 0)
+        self.assertIn("--current-outline-omit-foreground-edge", run.call_args.args[0])
+        with mock.patch.object(qualification, "validate_qualification", return_value={"status": "PASS"}), \
+                mock.patch.object(qualification.mask_metrics, "score_qualification") as score:
+            self.assertEqual(qualification.main([*arguments, "--validate-only"]), 2)
+        score.assert_not_called()
+
+    def test_launcher_passes_and_checks_stroke_coverage_omission(self):
+        build = self.root / "build"
+        build.mkdir()
+        (build / "sunshine.exe").write_bytes(self.executable.read_bytes())
+        arguments = ["--frames", str(self.frames), "--out", str(self.root / "omitted-output"),
+                     "--build-dir", str(build)]
+        omitted = {"status": "PASS", "stroke_coverage_omitted": True}
+        with mock.patch.object(qualification.subprocess, "run") as run, \
+                mock.patch.object(qualification, "validate_qualification", return_value=omitted), \
+                mock.patch.object(qualification.mask_metrics, "score_qualification", return_value={"aggregate": None}):
+            self.assertEqual(qualification.main([*arguments, "--omit-stroke-coverage"]), 0)
+        self.assertIn("--current-outline-omit-stroke-coverage", run.call_args.args[0])
+        self.assertNotIn("--current-outline-omit-foreground-edge", run.call_args.args[0])
+
+        for requested, reported in [([], omitted), (["--omit-stroke-coverage"], {"status": "PASS"}),
+                                    (["--omit-foreground-edge"], omitted)]:
+            with self.subTest(requested=requested), \
+                    mock.patch.object(qualification, "validate_qualification", return_value=reported), \
+                    mock.patch.object(qualification.mask_metrics, "score_qualification") as score:
+                self.assertEqual(qualification.main([*arguments, *requested, "--validate-only"]), 2)
+                score.assert_not_called()
+
+    def test_launcher_rejects_combined_omission_flags_before_capture(self):
+        with self.assertRaises(SystemExit) as error, mock.patch.object(qualification.subprocess, "run") as run:
+            qualification.main(["--frames", str(self.frames), "--out", str(self.output),
+                                "--omit-foreground-edge", "--omit-stroke-coverage"])
+        self.assertEqual(error.exception.code, 2)
+        run.assert_not_called()
+
+    def test_launcher_passes_and_requires_midpoint_probe_mode(self):
+        build = self.root / "build"
+        build.mkdir()
+        (build / "sunshine.exe").write_bytes(self.executable.read_bytes())
+        args = ["--frames", str(self.frames), "--out", str(self.root / "probe-output"),
+                "--build-dir", str(build)]
+        probe = {"status": "PASS", "ocr_midpoint_probe": True}
+        with mock.patch.object(qualification.subprocess, "run") as run, \
+                mock.patch.object(qualification, "validate_qualification", return_value=probe), \
+                mock.patch.object(qualification.mask_metrics, "score_qualification", return_value={"aggregate": None}):
+            self.assertEqual(qualification.main([*args, "--ocr-midpoint-probe"]), 0)
+        self.assertIn("--current-outline-ocr-midpoint-probe", run.call_args.args[0])
+        for flags, reported in (([], probe), (["--ocr-midpoint-probe"], {"status": "PASS"})):
+            with self.subTest(flags=flags), \
+                    mock.patch.object(qualification, "validate_qualification", return_value=reported), \
+                    mock.patch.object(qualification.mask_metrics, "score_qualification") as score:
+                self.assertEqual(qualification.main([*args, *flags, "--validate-only"]), 2)
+                score.assert_not_called()
+
+    def test_launcher_requests_and_verifies_weak_aa_sidecar(self):
+        build = self.root / "build"
+        build.mkdir()
+        (build / "sunshine.exe").write_bytes(self.executable.read_bytes())
+        output = self.root / "weak-aa-output"
+        args = ["--frames", str(self.frames), "--out", str(output), "--build-dir", str(build), "--weak-aa"]
+        with mock.patch.object(qualification.subprocess, "run") as run, \
+                mock.patch.object(qualification, "validate_qualification", return_value={"status": "PASS"}), \
+                mock.patch.object(qualification, "validate_weak_aa", return_value={}) as validate, \
+                mock.patch.object(qualification.mask_metrics, "score_qualification", return_value={"aggregate": None}):
+            self.assertEqual(qualification.main(args), 0)
+        self.assertIn("--current-outline-weak-aa", run.call_args.args[0])
+        validate.assert_called_once_with(output)
+        for incompatible in ("--omit-foreground-edge", "--omit-stroke-coverage", "--ocr-midpoint-probe"):
+            with self.subTest(incompatible=incompatible), self.assertRaises(SystemExit):
+                qualification.main([*args, incompatible])
+
+    def test_launcher_raw_matte_requests_both_current_rule_readbacks(self):
+        build = self.root / "build"
+        build.mkdir()
+        executable = build / "sunshine.exe"
+        executable.write_bytes(self.executable.read_bytes())
+        output = self.root / "raw-matte-output"
+        args = ["--frames", str(self.frames), "--out", str(output), "--build-dir", str(build),
+                "--raw-matte", str(self.root)]
+
+        def write_sidecars(*args, **kwargs):
+            parent = output / qualification.MANIFEST
+            parent.write_bytes(b"test decision receipt")
+            (output / qualification.RAW_MATTE_MANIFEST).write_text(json.dumps({
+                "schema": 1, "status": "COMPLETE", "role": "file-fed-current-outline-raw-matte-stereo",
+                "qualification_sha256": qualification._sha(parent),
+                "executable_sha256": qualification._sha(executable), "frame_count": 2, "frames": [{}, {}],
+            }), encoding="utf-8")
+
+        with mock.patch.object(qualification.subprocess, "run", side_effect=write_sidecars) as run, \
+                mock.patch.object(qualification, "validate_qualification", return_value={"frame_count": 2}), \
+                mock.patch.object(qualification, "validate_native_features", return_value={}) as features, \
+                mock.patch.object(qualification, "validate_weak_aa", return_value={}) as weak, \
+                mock.patch.object(qualification.mask_metrics, "score_qualification", return_value={"aggregate": None}):
+            self.assertEqual(qualification.main(args), 0)
+        command = run.call_args.args[0]
+        self.assertIn("--current-outline-native-features", command)
+        self.assertIn("--current-outline-weak-aa", command)
+        self.assertEqual(command[command.index("--current-outline-raw-matte") + 1], str(self.root.resolve()))
+        features.assert_called_once_with(output)
+        weak.assert_called_once_with(output)
 
 
 if __name__ == "__main__":

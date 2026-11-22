@@ -28,7 +28,14 @@ inline constexpr std::array<cache::shader_spec, 4u> source5_specs{{
   cache::shader_spec{"host_sbs_display_snapshot_rgb8_analysis_cs.hlsl","finalize_main","cs_5_0"},
   cache::shader_spec{"host_sbs_display_snapshot_rgb8_analysis_cs.hlsl","envelope_main","cs_5_0"},
 }};
-inline constexpr std::string_view source5_closure="291ec723c8259b864e9889bbb8c9fd8b182da6795bd272a0fa97d8edae29f8bb";
+inline constexpr std::string_view source5_closure="59ac71657fa3dbe9372da310ab1aaed3f3ff124145192ad8d7d682b162356de6";
+inline constexpr std::array<cache::shader_spec, 4u> direct_source_audit_specs{{
+  cache::shader_spec{"direct_source_audit.hlsl","prepare_main","cs_5_0"},
+  cache::shader_spec{"direct_source_audit.hlsl","copy_main","cs_5_0"},
+  cache::shader_spec{"direct_source_audit.hlsl","finalize_main","cs_5_0"},
+  cache::shader_spec{"direct_source_audit.hlsl","envelope_main","cs_5_0"},
+}};
+inline constexpr std::string_view direct_source_audit_closure="a5145b7de00d113a135b1c852e4a244735d08b9211bafad5bc08f4bc70e47261";
 inline constexpr std::array<cache::shader_spec, 5u> colour_specs{{
   cache::shader_spec{"host_sbs_subtitle_inner_colour_cs.hlsl","palette_main","cs_5_0"},
   cache::shader_spec{"host_sbs_subtitle_inner_colour_cs.hlsl","emit_main","cs_5_0"},
@@ -85,13 +92,13 @@ inline constexpr std::array<cache::shader_spec, 15u> outline_specs{{
   cache::shader_spec{"host_sbs_current_outline_support_band_cs.hlsl","aggregate_support_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_outline_support_band_cs.hlsl","publish_closure_main","cs_5_0"},
 }};
-inline constexpr std::string_view outline_closure="198b489d4cb5b7a63005852d7c464679ab84df0b061f4b138ca51dd1f9404b46";
+inline constexpr std::string_view outline_closure="1d68508001000d1885d5029a306a28dd4d89f6459f33e4748c5cf8f721d67057";
 inline constexpr std::array<cache::shader_spec, 3u> stability_specs{{
   cache::shader_spec{"host_sbs_current_outline_support_band_cs.hlsl","private_cache_begin_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_outline_support_band_cs.hlsl","private_cache_validate_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_outline_support_band_cs.hlsl","private_cache_commit_main","cs_5_0"},
 }};
-inline constexpr std::string_view stability_closure="6e23e79d2b643a8ae34c7f80b67c64f50876ea303c24fdf3ad08d00b2c191ed4";
+inline constexpr std::string_view stability_closure="f84222b707dfc73b780b1ee8f74beb3719ae7a0b5dd6bfabfa1b84099c60d656";
 inline constexpr std::array<cache::shader_spec, 9u> hole_specs{{
   cache::shader_spec{"host_sbs_current_mask_holes_cs.hlsl","clear_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_mask_holes_cs.hlsl","capture_unit_main","cs_5_0"},
@@ -113,11 +120,19 @@ inline constexpr std::string_view coverage_closure="185fbaed311da1c2f55ad6dfa8fb
 inline constexpr std::array<cache::shader_spec, 1u> foreground_edge_specs{{
   cache::shader_spec{"host_sbs_current_foreground_edge_cs.hlsl","foreground_edge_main","cs_5_0"},
 }};
-inline constexpr std::string_view foreground_edge_closure="70df7262ab4819474c8f436682eed0de1832b85898e88809d9045374e891af16";
+inline constexpr std::string_view foreground_edge_closure="06677b6169dbdcb0238a577d1b5edc1f72c77d42fd3ddd5622608fa8c00bff8e";
 inline constexpr std::array<cache::shader_spec, 1u> trusted_inner_specs{{
   cache::shader_spec{"host_sbs_current_foreground_edge_cs.hlsl","trusted_inner_publish_main","cs_5_0"},
 }};
-inline constexpr std::string_view trusted_inner_closure="63b229b7a1a99bd18f7c04795c5429349c411bb6bb15a606987c23330e3125d9";
+inline constexpr std::string_view trusted_inner_closure="ee8985b1a93d781e4336103550d8c05cc2cf2be4750d51b2077d5b4aba32487f";
+inline constexpr std::array<cache::shader_spec, 1u> weak_aa_oracle_band_specs{{
+  cache::shader_spec{"host_sbs_current_outline_support_band_cs.hlsl","publish_final_weak_aa_oracle_main","cs_5_0"},
+}};
+inline constexpr std::string_view weak_aa_oracle_band_closure="168030341bfba37a12bf0bb7b9304f40b55850960406de7f0fb4b16c8cc84ee8";
+inline constexpr std::array<cache::shader_spec, 1u> weak_aa_oracle_trusted_specs{{
+  cache::shader_spec{"host_sbs_current_foreground_edge_cs.hlsl","trusted_inner_publish_weak_aa_oracle_main","cs_5_0"},
+}};
+inline constexpr std::string_view weak_aa_oracle_trusted_closure="52ebc8112c4af6af7c4f2fb3818a4025802ceed1bfc7a4385213a78354caa0ce";
 inline constexpr std::array<cache::shader_spec, 4u> inside_specs{{
   cache::shader_spec{"host_sbs_current_inside_completion_cs.hlsl","prepare_unit_main","cs_5_0"},
   cache::shader_spec{"host_sbs_current_inside_completion_cs.hlsl","emit_init_main","cs_5_0"},
@@ -344,6 +359,7 @@ namespace detail {
 
 class programs_t {
   std::array<ComPtr<ID3D11ComputeShader>, unique_compute_shader_count> shaders_ {};
+  std::array<ComPtr<ID3D11ComputeShader>, 2u> weak_aa_oracle_shaders_ {};
   composition::program_t composition_ {};
   selector::program_t selector_ {};
   ComPtr<ID3D11Device> device_;
@@ -355,7 +371,7 @@ class programs_t {
   std::string trusted_inner_error_;
 
 public:
-  bool load(ID3D11Device *device, const std::filesystem::path &parent_root, std::string &error) {
+  bool load(ID3D11Device *device, const std::filesystem::path &parent_root, std::string &error, bool weak_aa_oracle = false) {
     error.clear();
     if (!device || parent_root.empty()) {
       error = "Current outline program device/root missing";
@@ -367,6 +383,13 @@ public:
       std::size_t at = 0u;
       auto sources = detail::authenticate_program_sources(parent_root);
       auto &bytecodes = sources.bytecodes;
+      detail::bytecode_group_t oracle_band, oracle_trusted;
+      if (weak_aa_oracle) {
+        oracle_band = detail::authenticate_group("weak AA oracle band", parent_root / "outline",
+          weak_aa_oracle_band_specs, weak_aa_oracle_band_closure, bytecodes);
+        oracle_trusted = detail::authenticate_group("weak AA oracle trusted", parent_root / "hole",
+          weak_aa_oracle_trusted_specs, weak_aa_oracle_trusted_closure, bytecodes);
+      }
       detail::prepare_bytecodes(bytecodes);
       auto compile = [&]<std::size_t N>(const detail::bytecode_group_t &group, const std::array<cache::shader_spec, N> &) {
         return detail::create_compute_group<N>(device, group, bytecodes, next.shaders_, at);
@@ -406,6 +429,16 @@ public:
         foreground_edge_compute_shader_offset, next.composition_.outline.foreground_edge_shaders, next.foreground_edge_error_);
       detail::create_optional_compute_group(device, sources.trusted_inner.group, bytecodes, next.shaders_,
         trusted_inner_compute_shader_offset, next.composition_.outline.trusted_inner_publish_shaders, next.trusted_inner_error_);
+      if (weak_aa_oracle) {
+        if (!next.stability_ready() || !next.trusted_inner_ready()) {
+          throw std::runtime_error("Weak AA oracle needs the ordinary stability and trusted-inner programs");
+        }
+        std::size_t oracle_at = 0u;
+        next.composition_.outline.weak_aa_oracle_publish_final = detail::create_compute_group<1u>(
+          device, oracle_band, bytecodes, next.weak_aa_oracle_shaders_, oracle_at)[0];
+        next.composition_.outline.weak_aa_oracle_trusted_inner_publish = detail::create_compute_group<1u>(
+          device, oracle_trusted, bytecodes, next.weak_aa_oracle_shaders_, oracle_at)[0];
+      }
       next.ready_ = true;
       *this = std::move(next);
       return true;

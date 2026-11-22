@@ -31,7 +31,14 @@ from source_observation_timeline import (
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = "current_outline_qualification.json"
+NATIVE_FEATURES_MANIFEST = "current_outline_native_features.json"
+WEAK_AA_MANIFEST = "current_outline_weak_aa.json"
+RAW_MATTE_MANIFEST = "current_outline_raw_matte.json"
 ROLE = "file-fed-actual-completed-current-outline-compositor"
+OPTIONAL_STAGE_OMISSIONS = {
+    "foreground-edge": "foreground_edge_omitted",
+    "stroke-coverage": "stroke_coverage_omitted",
+}
 FRAME_NAME = re.compile(r"frame_(\d+)\.png\Z")
 HASH = re.compile(r"[0-9a-f]{64}\Z")
 MAXIMUM_FRAMES = 64
@@ -44,6 +51,16 @@ PRODUCER_STAGES = {
     "cbc_meta": (512, "current_outline_stages[2]:CBCMeta512", "BUFFER", "UNKNOWN", 4),
     "raw_meta": (512, "current_outline_stages[7]:RawMeta512", "BUFFER", "UNKNOWN", 4),
     "f2_data": (68608, "current_outline_stages[8]:F2data68608", "BUFFEREX", "R32_TYPELESS", 0),
+}
+NATIVE_FEATURE_ROLES = {
+    "cbc_body": "current_outline_stages[1]:CBCBody",
+    "cbc_selected_bits": "current_outline_stages[4]:CBCSelectedBits",
+    "cbc_cover_bits": "current_outline_stages[5]:CBCCoverBits",
+    "raw_m": "current_outline_stages[6]:RawM",
+}
+WEAK_AA_ROLES = {
+    "facts": "current_outline_weak_aa_facts",
+    "trusted": "current_outline_weak_aa_trusted",
 }
 
 
@@ -412,6 +429,20 @@ def validate_qualification(directory, frames_directory, executable, timeline=Non
         root_fields.add("foreground_edge_program_ready")
     if type(schema) is int and schema >= 8:
         root_fields.add("trusted_inner_program_ready")
+    omissions = {}
+    if isinstance(document, dict):
+        for stage, field in OPTIONAL_STAGE_OMISSIONS.items():
+            if field in document:
+                _require(type(schema) is int and schema >= 9 and document[field] is True,
+                         f"qualification {stage} omission is malformed")
+                omissions[field] = True
+    _require(len(omissions) <= 1, "qualification omissions are mutually exclusive")
+    root_fields.update(omissions)
+    midpoint_probe = isinstance(document, dict) and "ocr_midpoint_probe" in document
+    if midpoint_probe:
+        _require(type(schema) is int and schema >= 9 and document["ocr_midpoint_probe"] is True,
+                 "qualification OCR midpoint probe marker is malformed")
+        root_fields.add("ocr_midpoint_probe")
     _closed(document, root_fields, "qualification manifest")
     _require(type(document["schema"]) is int and 1 <= document["schema"] <= 9 and
              document["status"] == "COMPLETE" and document["role"] == ROLE and
@@ -470,7 +501,7 @@ def validate_qualification(directory, frames_directory, executable, timeline=Non
         actual_stages = {path.relative_to(output).as_posix() for path in (output / "current-outline/producer-stages").rglob("*")
                          if path.is_file()}
         _require(stages == actual_stages, "producer stage artifact coverage differs")
-    return {"schema": 1, "status": "PASS", "frame_count": len(outcomes),
+    result = {"schema": 1, "status": "PASS", "frame_count": len(outcomes),
             "renderer_schema": document["schema"], "renderer_policy_current": document["schema"] >= 8,
             "selected_current_frames": sum(item[3] == 3 for item in outcomes),
             "background_valid_frames": sum(item[4] == 1 for item in outcomes) if document["schema"] < 4 else 0,
@@ -479,7 +510,211 @@ def validate_qualification(directory, frames_directory, executable, timeline=Non
             "scope": ROLE, "selected_mask_evidence_available": document["schema"] >= 2,
             "producer_stage_evidence_available": document["schema"] >= 3,
             "producer_stage_current_frames": sum(item[5] for item in outcomes),
-            "ordinary_metrics_qualify_selected_composite": False}
+            "ordinary_metrics_qualify_selected_composite": False, **omissions}
+    if midpoint_probe:
+        result["ocr_midpoint_probe"] = True
+    return result
+
+
+def validate_native_features(output):
+    """Validate feature readbacks against the already qualified completed draws."""
+    return _validate_native_planes(output, NATIVE_FEATURES_MANIFEST, "native-features",
+                                   "file-fed-current-outline-native-features", NATIVE_FEATURE_ROLES)
+
+
+def validate_weak_aa(output):
+    """Validate the opt-in F2 evidence against the completed, unmodified Rule draw."""
+    return _validate_native_planes(output, WEAK_AA_MANIFEST, "weak-aa",
+                                   "file-fed-current-outline-weak-aa", WEAK_AA_ROLES, require_rule=True)
+
+
+def validate_half_context_work(output, frame, ocr):
+    """Check schema 3 work geometry after authenticating the draw, model and OCR."""
+    import numpy as np
+
+    output = Path(output)
+    work = _words(frame["execution"], 60, "half-context work")
+    frame_id = frame["source_file_id"]
+    _require(isinstance(frame_id, str) and frame_id.isascii() and frame_id.isdigit(),
+             "half-context frame id is malformed")
+    folder = f"current-outline/raw-matte-reduced/frame_{frame_id}"
+    features = {
+        "cbc_body": ("cbc-body.u32", "r32_uint_little_endian_0_or_1", 1),
+        "cbc_selected_bits": ("cbc-selected-bits.u32", "r32_uint_little_endian_cbc_selected_bits", 65535),
+        "cbc_cover_bits": ("cbc-cover-bits.u32", "r32_uint_little_endian_ocr_slot_bits", 255),
+    }
+    if work[53] != 2:
+        _require(all(name in frame and frame[name] is None and not (output / folder / file).exists()
+                     for name, (file, _, _) in features.items()),
+                 "half-context inactive work exposes CBC feature data")
+        return None
+
+    receipt = _words(frame["selected_receipt"], 64, "half-context selected receipt")
+    width, height, top, band = receipt[4:8]
+    rect = [0, top, width, height]
+    _require(0 < width <= 5120 and 0 <= top < height <= 5120 and band == height - top,
+             "half-context native band is invalid")
+
+    def plane(name, filename, encoding, maximum):
+        desc = frame[name]
+        _closed(desc, {"file", "source_rect", "size", "format", "byte_count", "sha256"}, name)
+        file = f"{folder}/{filename}"
+        size = width * band * 4
+        _require(desc["file"] == file and desc["source_rect"] == rect and desc["size"] == [width, band] and
+                 desc["format"] == encoding and desc["byte_count"] == size, f"{name} layout differs")
+        path = _within(output, file)
+        _require(path.stat().st_size == size, f"{name} byte count differs")
+        payload = path.read_bytes()
+        _require(len(payload) == size and hashlib.sha256(payload).hexdigest() == desc["sha256"],
+                 f"{name} payload differs")
+        values = np.frombuffer(payload, dtype="<u4").reshape(band, width)
+        _require(not (values > maximum).any(), f"{name} contains an invalid value")
+        return values
+
+    plane("cbc_body", *features["cbc_body"])
+    selected_bits = plane("cbc_selected_bits", *features["cbc_selected_bits"])
+    cover_bits = plane("cbc_cover_bits", *features["cbc_cover_bits"])
+    raw = plane("raw", "raw.u32", "r32_uint_little_endian_0_or_1", 1).astype(bool)
+    floor = plane("floor", "floor.u32", "r32_uint_little_endian_0_or_1", 1).astype(bool)
+    alpha = plane("alpha8", "alpha8.u32", "r32_uint_little_endian_alpha8", 255)
+    selected = plane("selected_mask", "selected.u32", "r32_uint_little_endian_0_or_1", 1).astype(bool)
+
+    ocr = _words(ocr, 256, "half-context OCR8")
+    count = ocr[4]
+    active = (1 << count) - 1 if 0 < count <= 8 else 0
+    _require(active and work[17] == active and work[19] == 38 and not (cover_bits & np.uint32(255 ^ active)).any()
+             and not ((selected_bits & 255) & ~cover_bits).any(), "half-context CBC owners or cutoff differ")
+    content_left, content_top, content_right, content_bottom = receipt[12:16]
+
+    def project(boundary, start, end, extent):
+        span = end - start
+        twice = 2 * (boundary - start) * extent
+        return 0 if twice <= span else (twice + span - 1) // (2 * span)
+
+    boxes = []
+    owned = np.zeros((band, width), dtype=bool)
+    for slot in range(count):
+        l, t, r, b = ocr[144 + 8 * slot:148 + 8 * slot]
+        _require(content_left <= l < r <= content_right and content_top <= t < b <= content_bottom,
+                 "half-context OCR slot exceeds content")
+        l = project(l, content_left, content_right, width)
+        r = project(r, content_left, content_right, width)
+        t = max(0, project(t, content_top, content_bottom, height) - top)
+        b = max(0, project(b, content_top, content_bottom, height) - top)
+        _require(l < r and t < b, "half-context OCR slot has no native area")
+        boxes.append([l, t, r, b])
+        owned[t:b, l:r] |= (cover_bits[t:b, l:r] & (1 << slot)) != 0
+    _require(work[20:52] == [v for box in boxes for v in box] + [0] * (4 * (8 - count)),
+             "half-context prepared boxes differ from current OCR")
+
+    def context(rectangle):
+        l, t, r, b = rectangle
+        return [max(0, l - 10) & ~1, max(0, t - 10) & ~1, min(width, r + 10), min(band, b + 10)]
+
+    def groups(rectangle):
+        l, t, r, b = rectangle
+        return [(r - l + 15) // 16, (b - t + 7) // 8, 1, 0]
+
+    roi = [min(x[0] for x in boxes), min(x[1] for x in boxes), max(x[2] for x in boxes), max(x[3] for x in boxes)]
+    geometry = context(roi)
+    geometry_grid = groups(geometry)
+    _require(work[4:8] == roi and work[8:16] == geometry_grid + geometry,
+             "half-context feature dispatch differs from OCR geometry")
+
+    padded = np.pad(raw, 3)
+    nearby = np.zeros_like(raw)
+    for y in range(7):
+        for x in range(7):
+            nearby |= padded[y:y + band, x:x + width]
+    editable = owned & nearby & ~floor
+    ys, xs = np.nonzero(editable)
+    crop = context([int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1]) if xs.size else None
+    exceeded = crop is not None and (crop[2] - crop[0]) * (crop[3] - crop[1]) > 98304
+    score_grid = groups(crop) if crop and not exceeded else [0, 1, 1, 0]
+    _require(work[:4] == score_grid and work[54:56] == [geometry_grid[0] * geometry_grid[1], score_grid[0] * score_grid[1]],
+             "half-context compact dispatch differs from native owned support")
+    if exceeded:
+        _require(work[16] == 0 and work[18] == 4 and work[56] & 16 and not alpha.any(),
+                 "half-context oversized crop did not use current fallback")
+    elif work[16] == 2:
+        _require(work[18] == 0 and work[56] == 0 and not ((alpha != 0) & ~editable).any() and
+                 np.array_equal(selected, (owned & floor) | (alpha >= 38)),
+                 "half-context publication differs from its owned floor and alpha")
+    else:
+        _require(work[16] == 0 and work[18] == 4 and work[56] != 0 and not alpha.any(),
+                 "half-context fault did not clear model alpha")
+    return {"geometry": geometry, "score_crop": crop}
+
+
+def expected_weak_aa_closures():
+    source = generator.CURRENT_OUTLINE_RUNTIME_HEADER.read_text(encoding="utf-8")
+    closures = {}
+    for role in ("band", "trusted"):
+        match = re.search(rf'inline constexpr std::string_view weak_aa_oracle_{role}_closure="([0-9a-f]{{64}})";', source)
+        _require(match is not None, f"native weak-AA {role} closure is absent")
+        closures[role] = match[1]
+    return closures
+
+
+def _validate_native_planes(output, filename, directory, role, texture_roles, *, require_rule=False):
+    output = Path(output)
+    manifest = output / MANIFEST
+    parent = manifest.read_bytes()
+    digest = hashlib.sha256(parent).hexdigest()
+    qualification = json.loads(parent, object_pairs_hook=_unique_object)
+    if require_rule:
+        _require(qualification["schema"] == 9 and "ocr_midpoint_probe" not in qualification and
+                 not any(field in qualification for field in OPTIONAL_STAGE_OMISSIONS.values()),
+                 "weak-AA evidence requires the unmodified Rule")
+    feature_path = _within(output, filename)
+    _require(feature_path.stat().st_size <= 16 * 1024 * 1024, "native feature manifest is oversized")
+    payload = feature_path.read_bytes()
+    features = json.loads(payload, object_pairs_hook=_unique_object)
+    header_fields = {"schema", "status", "role", "qualification_sha256", "executable_sha256", "frame_count", "frames"}
+    if require_rule:
+        header_fields.add("diagnostic_source_closures")
+    _closed(features, header_fields, "native feature manifest")
+    if require_rule:
+        _require(features["diagnostic_source_closures"] == expected_weak_aa_closures(),
+                 "native weak-AA shader source identity differs")
+    fields = {"observation_ordinal", "source_file", "source_snapshot_sha256", "completed_frame_id",
+              "observation_timestamp_us", "transaction_token", "analysis_generation"}
+    _require(type(features["schema"]) is int and features["schema"] == 1 and features["status"] == "COMPLETE" and
+             features["role"] == role and
+             features["qualification_sha256"] == digest and
+             features["executable_sha256"] == qualification["executable_sha256"], "native feature owner differs")
+    frames = features["frames"]
+    source_frames_qualified = qualification["frames"]
+    _require(isinstance(frames, list) and _uint(features["frame_count"], "native feature frame count") ==
+             len(frames) == len(source_frames_qualified) <= MAXIMUM_FRAMES, "native feature coverage differs")
+    for frame, owner in zip(frames, source_frames_qualified, strict=True):
+        _closed(frame, fields | {"selected_mask_sha256", "native_source_rect", "textures"}, "native feature frame")
+        matte = owner["selected_mask"]
+        _require(all(type(frame[key]) is type(owner[key]) and frame[key] == owner[key] for key in fields) and
+                 frame["selected_mask_sha256"] == matte["sha256"] and
+                 _words(frame["native_source_rect"], 4, "feature source rect") == matte["source_rect"],
+                 "native feature frame does not own the qualified observation")
+        if require_rule:
+            _require(owner["selected_receipt"][2:4] == [3, 0] and owner["contour_identity"][23] == 1,
+                     "weak-AA evidence lacks the completed current Rule")
+        textures = frame["textures"]
+        _closed(textures, texture_roles, "native feature textures")
+        for name, texture_role in texture_roles.items():
+            texture = textures[name]
+            _closed(texture, {"file", "sha256", "role", "size", "byte_count", "format"}, "native feature texture")
+            expected_file = f"current-outline/{directory}/frame_{owner['source_file_id']}/{name}.u32"
+            size = _words(texture["size"], 2, "feature size")
+            expected_bytes = size[0] * size[1] * 4
+            _require(texture["file"] == expected_file and texture["role"] == texture_role and size == matte["size"] and
+                     _uint(texture["byte_count"], "feature bytes") == expected_bytes and
+                     texture["format"] == "r32_uint_little_endian", "native feature texture layout differs")
+            path = _within(output, expected_file)
+            _require(path.stat().st_size == expected_bytes and _sha(path) == texture["sha256"],
+                     "native feature texture bytes differ")
+    feature_digest = hashlib.sha256(payload).hexdigest()
+    _require(_sha(manifest) == digest and _sha(feature_path) == feature_digest,
+             "native feature manifests changed during validation")
+    return {"frame_count": len(frames), "sha256": feature_digest}
 
 
 def main(argv=None):
@@ -490,8 +725,22 @@ def main(argv=None):
     parser.add_argument("--conf", type=Path, default=Path(__file__).with_name("bench.conf"))
     parser.add_argument("--observation-timeline", type=Path)
     parser.add_argument("--fps", default="30/1", help="authored cadence when no explicit timeline is supplied")
+    parser.add_argument("--native-features", action="store_true", help="capture and verify native rule features")
+    parser.add_argument("--weak-aa", action="store_true", help="capture exact native weak-AA decision facts")
+    parser.add_argument("--raw-matte", type=Path, help="draw a second stereo image with the frozen RawMatte package")
+    parser.add_argument("--ocr-midpoint-probe", action="store_true",
+                        help="test wider midpoint tolerance on independently horizontal caption lines")
+    ablation = parser.add_mutually_exclusive_group()
+    for stage, field in OPTIONAL_STAGE_OMISSIONS.items():
+        ablation.add_argument(f"--omit-{stage}", dest=field, action="store_true",
+                              help=f"isolate the rule mask with optional {stage} omitted")
     parser.add_argument("--validate-only", action="store_true")
     args = parser.parse_args(argv)
+    if args.raw_matte is not None:
+        args.weak_aa = True
+        args.native_features = True
+    if args.weak_aa and (args.ocr_midpoint_probe or any(getattr(args, field) for field in OPTIONAL_STAGE_OMISSIONS.values())):
+        parser.error("--weak-aa requires the unmodified Rule")
     try:
         executable = (args.build_dir / "sunshine.exe").resolve()
         sources = source_frames(args.frames)
@@ -511,12 +760,42 @@ def main(argv=None):
             command = [str(executable), str(args.conf.resolve()), "--sbs-bench", "--frames", str(args.frames.resolve()),
                        "--out", str(args.out.resolve()), "--observation-timeline", str(timeline.resolve()),
                        "--current-outline-qualification"]
+            if args.native_features:
+                command.append("--current-outline-native-features")
+            if args.weak_aa:
+                command.append("--current-outline-weak-aa")
+            if args.raw_matte is not None:
+                command.extend(("--current-outline-raw-matte", str(args.raw_matte.resolve())))
+            if args.ocr_midpoint_probe:
+                command.append("--current-outline-ocr-midpoint-probe")
+            command.extend(f"--current-outline-omit-{stage}" for stage, field in OPTIONAL_STAGE_OMISSIONS.items()
+                           if getattr(args, field))
             subprocess.run(command, cwd=args.build_dir.resolve(), check=True)
             _require(binary == _sha(executable) and before == {path.name: _sha(path) for path in sources},
                      "qualification source or executable changed during capture")
             _require(truth_before == mask_metrics.truth_input_identity(args.frames, sources),
                      "source metadata/tight overlay GT changed during capture")
         result = validate_qualification(args.out, args.frames, executable, timeline)
+        _require(result.get("ocr_midpoint_probe", False) == args.ocr_midpoint_probe,
+                 "qualification OCR midpoint mode differs from the requested mode")
+        for stage, field in OPTIONAL_STAGE_OMISSIONS.items():
+            _require(result.get(field, False) == getattr(args, field),
+                     f"qualification {stage} mode differs from the requested mode")
+        if args.native_features:
+            result["native_features"] = validate_native_features(args.out)
+        if args.weak_aa:
+            result["weak_aa"] = validate_weak_aa(args.out)
+        if args.raw_matte is not None:
+            sidecar = _within(args.out, RAW_MATTE_MANIFEST)
+            _require(sidecar.stat().st_size <= 16 * 1024 * 1024, "raw-matte sidecar is oversized")
+            doc = json.loads(sidecar.read_text(encoding="utf-8"), object_pairs_hook=_unique_object)
+            _require(type(doc["schema"]) is int and doc["schema"] == 1 and doc["status"] == "COMPLETE" and
+                     doc["role"] == "file-fed-current-outline-raw-matte-stereo" and
+                     doc["qualification_sha256"] == _sha(args.out / MANIFEST) and
+                     doc["executable_sha256"] == _sha(executable) and
+                     doc["frame_count"] == len(doc["frames"]) == result["frame_count"],
+                     "raw-matte sidecar does not own the Rule qualification")
+            result["raw_matte"] = {"frame_count": doc["frame_count"], "sha256": _sha(sidecar)}
         scores = mask_metrics.score_qualification(args.out, args.frames, executable, timeline)
         result["mask_diagnostics"] = scores["aggregate"]
         print(json.dumps(result, sort_keys=True))
