@@ -100,9 +100,9 @@ class ProdZipDepthExporterTests(unittest.TestCase):
         fused_contract = contract_api.load_contract()["sources"]["fused_onnx"]
         self.assertEqual(
             fused_contract["sha256"],
-            "26684c5da8fdd4bdc5f1c9cf919cec8d1e2d027fbe95705a454f85d31eee2c23",
+            "134d92fa67ca746c4e03a42cc85666a7802bf459ae2245edc70d16d398d6ea05",
         )
-        self.assertEqual(fused_contract["bytes"], 62438471)
+        self.assertEqual(fused_contract["bytes"], 62344826)
 
     def test_tensorrt_arguments_preserve_all_24_fixed_profile_shapes_and_order(self):
         command = exporter.point_profile_build_arguments(

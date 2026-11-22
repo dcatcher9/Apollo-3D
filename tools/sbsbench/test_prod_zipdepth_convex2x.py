@@ -45,17 +45,27 @@ class ProdZipDepthConvex2xTests(unittest.TestCase):
             ("dav2_pixel_values", "predicted_depth"),
         )
         downsample = contract["operator"]["input_downsample"]
-        self.assertEqual(downsample["operator"], "AveragePool")
+        self.assertEqual(downsample["operator"], "Resize")
         self.assertEqual(downsample["dtype"], "float32")
-        self.assertEqual(downsample["kernel"], [2, 2])
-        self.assertEqual(downsample["stride"], [2, 2])
+        self.assertEqual(downsample["mode"], "linear")
+        self.assertEqual(downsample["scale"], 0.6875)
+        self.assertEqual(downsample["patch"], 14)
+        self.assertEqual(contract["operator"]["output_gain"], 1.0258)
+        tuning = contract["sources"]["tuning"]
+        self.assertEqual(tuning["name"], "bt7")
+        self.assertEqual(tuning["vit_input_scale"], downsample["scale"])
+        self.assertEqual(tuning["output_gain"], contract["operator"]["output_gain"])
+        self.assertEqual(
+            tuning["checkpoint_sha256"],
+            "a08834f278e516f4ecfe179e9901d1633a318b97781a8d8f5aae7499d88f5f95",
+        )
         self.assertEqual(contract["operator"]["pixel_gate"], "none")
         self.assertEqual(contract["sources"]["zipdepth"]["variant"], "base")
         self.assertEqual(contract["operator"]["temperature"], 1.0)
         self.assertIs(contract["operator"]["zipdepth_use_unfold"], True)
         self.assertEqual(
             contract["sources"]["fused_onnx"]["sha256"],
-            "26684c5da8fdd4bdc5f1c9cf919cec8d1e2d027fbe95705a454f85d31eee2c23",
+            "134d92fa67ca746c4e03a42cc85666a7802bf459ae2245edc70d16d398d6ea05",
         )
         optimization = contract["export"]["model_optimization"]
         self.assertEqual(

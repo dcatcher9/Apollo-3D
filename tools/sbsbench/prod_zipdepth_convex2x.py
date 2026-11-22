@@ -141,7 +141,25 @@ def _validate_contract(value: object) -> dict[str, object]:
     _nonempty_string(contract.get("purpose"), "purpose")
 
     sources = _exact_object(
-        contract.get("sources"), {"dav2", "zipdepth", "fused_onnx"}, "sources")
+        contract.get("sources"), {"dav2", "zipdepth", "tuning", "fused_onnx"}, "sources")
+    tuning = _exact_object(
+        sources.get("tuning"),
+        {"name", "checkpoint", "checkpoint_bytes", "checkpoint_sha256",
+         "dav2_torch_checkpoint", "dav2_torch_checkpoint_sha256", "vit_input_scale",
+         "output_gain", "head_tensors", "vit_linear_tensors", "semantics"},
+        "tuning source")
+    for key in ("name", "checkpoint", "dav2_torch_checkpoint", "semantics"):
+        _nonempty_string(tuning.get(key), f"tuning {key}")
+    _positive_int(tuning.get("checkpoint_bytes"), "tuned checkpoint byte count")
+    _hash(tuning.get("checkpoint_sha256"), _SHA256, "tuned checkpoint hash")
+    _hash(tuning.get("dav2_torch_checkpoint_sha256"), _SHA256, "stock DAV2 PyTorch weights hash")
+    _positive_int(tuning.get("head_tensors"), "tuned head tensor count")
+    _positive_int(tuning.get("vit_linear_tensors"), "tuned ViT tensor count")
+    if (type(tuning.get("vit_input_scale")) is not float or
+            not 0.0 < tuning["vit_input_scale"] <= 1.0 or
+            type(tuning.get("output_gain")) is not float or
+            not 0.5 < tuning["output_gain"] < 2.0):
+        raise ValueError("prod ZipDepth convex2x contract has invalid tuning source")
     dav2 = _exact_object(
         sources.get("dav2"), {"logical_model", "onnx_sha256"}, "DAV2 source")
     _nonempty_string(dav2.get("logical_model"), "DAV2 logical model")
@@ -240,25 +258,27 @@ def _validate_contract(value: object) -> dict[str, object]:
         contract.get("operator"),
         {"input_downsample", "scale", "neighborhood", "boundary", "weight_layout",
          "weight_normalization", "temperature", "zipdepth_use_unfold",
-         "subpixel_layout", "output_activation", "pixel_gate"},
+         "subpixel_layout", "output_activation", "output_gain", "pixel_gate"},
         "operator")
     downsample = _exact_object(
         operator.get("input_downsample"),
-        {"operator", "dtype", "kernel", "stride", "padding", "ceil_mode",
-         "count_include_pad", "semantics"},
+        {"operator", "dtype", "mode", "coordinate_transformation_mode", "antialias",
+         "scale", "patch", "semantics"},
         "input downsample")
-    if (downsample.get("operator") != "AveragePool" or
+    if (downsample.get("operator") != "Resize" or
             downsample.get("dtype") != "float32" or
-            downsample.get("kernel") != [2, 2] or
-            downsample.get("stride") != [2, 2] or
-            downsample.get("padding") != [0, 0, 0, 0] or
-            downsample.get("ceil_mode") is not False or
-            downsample.get("count_include_pad") is not False or
+            downsample.get("mode") != "linear" or
+            downsample.get("coordinate_transformation_mode") != "half_pixel" or
+            downsample.get("antialias") is not False or
+            type(downsample.get("scale")) is not float or
+            downsample["scale"] != tuning["vit_input_scale"] or
+            type(downsample.get("patch")) is not int or downsample["patch"] != 14 or
             not isinstance(downsample.get("semantics"), str) or
-            not downsample["semantics"] or
-            any(type(item) is not int for key in ("kernel", "stride", "padding")
-                for item in downsample[key])):
+            not downsample["semantics"]):
         raise ValueError("prod ZipDepth convex2x contract has invalid input downsample")
+    if (type(operator.get("output_gain")) is not float or
+            operator["output_gain"] != tuning["output_gain"]):
+        raise ValueError("prod ZipDepth convex2x contract has invalid output gain")
     if (type(operator.get("scale")) is not int or operator["scale"] != 2 or
             operator.get("neighborhood") != [3, 3] or
             any(type(item) is not int for item in operator.get("neighborhood", [])) or
@@ -294,7 +314,7 @@ def _validate_contract(value: object) -> dict[str, object]:
         label="engine output")
     _validate_tensor_entry(
         internal[0], keys={"name", "dtype", "layout", "shape"},
-        name="dav2_pixel_values", layout="NCHW", shape=[1, 3, "H", "W"],
+        name="dav2_pixel_values", layout="NCHW", shape=[1, 3, "Hv", "Wv"],
         label="internal DAV2 input")
     _validate_tensor_entry(
         internal[1], keys={"name", "dtype", "layout", "shape"},

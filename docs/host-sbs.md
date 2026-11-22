@@ -113,7 +113,7 @@ The contract admits the following production calibration:
 | Calibrated depth estimator | Depth Anything V2 Small FP16 |
 | Calibrated model key | `depth_anything_v2_fp16` |
 | Production composite | `prod_dav2_zipdepth_c2x_high_opset18` |
-| Internal DAV2 shapes | 12 landscape shapes and their portrait transposes in [Authenticated resolution fitting](#authenticated-resolution-fitting) |
+| Internal DAV2 output shapes | 12 landscape shapes and their portrait transposes in [Authenticated resolution fitting](#authenticated-resolution-fitting); DAV2's input is a 0.6875x bilinear resize of the fused grid ([fine-tuned weights](host-sbs-prod-zipdepth-convex2x.md#fine-tuned-weights-bt7)) |
 | Fused public/analysis/live shapes | Exactly twice each internal width and height |
 | Raw coordinate scale | `2.25` DAV2 units |
 | Gain per pop unit | `0.00375` source U |

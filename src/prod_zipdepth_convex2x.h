@@ -28,7 +28,7 @@ namespace models::prod_zipdepth_convex2x {
   inline constexpr std::string_view zipdepth_checkpoint_sha256 =
     "a55910bb0b99c8c5e641cb9206e810b269690ad94e8a2ef08c827c4679391a65";
   inline constexpr std::string_view fused_onnx_sha256 =
-    "26684c5da8fdd4bdc5f1c9cf919cec8d1e2d027fbe95705a454f85d31eee2c23";
+    "134d92fa67ca746c4e03a42cc85666a7802bf459ae2245edc70d16d398d6ea05";
 
   inline constexpr std::string_view input = "pixel_values";
   inline constexpr std::string_view refined_output = "refined_depth";
