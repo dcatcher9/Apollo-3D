@@ -1,0 +1,35 @@
+{
+  "runtime": {
+    "python": "E:\\ApolloDev\\modelopt-py312\\Scripts\\python.exe",
+    "version": "3.12.14 (main, Aug 25 2026, 14:01:42) [MSC v.1944 64 bit (AMD64)]",
+    "numpy": "2.5.1",
+    "Pillow": "12.3.0",
+    "onnx": "1.21.0"
+  },
+  "plan": {
+    "path": "E:\\ApolloDev\\rawmatte-background-conditioned-1122\\plan.json",
+    "sha256": "126870ccfaaeba3731cdcfe05f026be1f94ceb44ef0fd27b8f57ae1e504d5dc1",
+    "bytes": 1921
+  },
+  "weights": {
+    "path": "E:\\ApolloDev\\rawmatte-background-conditioned-1122\\background-native.pt",
+    "sha256": "5757d7a49ee149922f8c8acbc893d78e0fea5dd33877d49687cbfb703d8a1a5b",
+    "bytes": 17165
+  },
+  "features": 37,
+  "sites": 982483,
+  "counts": {
+    "('en', 'original')": 36,
+    "('en', 'faint-smooth')": 36,
+    "('en', 'faint-texture')": 36,
+    "('en', 'blank')": 7,
+    "('ja', 'original')": 36,
+    "('ja', 'faint-smooth')": 36,
+    "('ja', 'faint-texture')": 36,
+    "('ja', 'blank')": 7,
+    "('zh', 'original')": 36,
+    "('zh', 'faint-smooth')": 36,
+    "('zh', 'faint-texture')": 36,
+    "('zh', 'blank')": 7
+  }
+}

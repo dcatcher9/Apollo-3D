@@ -1,0 +1,32 @@
+{
+  "runtime": {
+    "python": "E:\\ApolloDev\\modelopt-py312\\Scripts\\python.exe",
+    "version": "3.12.14 (main, Aug 25 2026, 14:01:42) [MSC v.1944 64 bit (AMD64)]",
+    "numpy": "2.5.1",
+    "Pillow": "12.3.0",
+    "onnx": "1.21.0"
+  },
+  "source": "b142-f2126-s0",
+  "native_shape": [
+    102,
+    667
+  ],
+  "tiles": 1,
+  "n": 15,
+  "p50_ms": [
+    157.4045000015758,
+    10.875699983444065,
+    168.8780999975279
+  ],
+  "p95_ms": [
+    161.32022000092547,
+    13.34029000427108,
+    172.95245000277646
+  ],
+  "columns": [
+    "mixed CNN plus CPU feature construction plus GPU native decoder",
+    "TensorRT transition including Python, copies and synchronization",
+    "entire one-line offline inference"
+  ],
+  "scope": "Idle host, 2 warmups, 15 sequential samples on actual marked line. No OCR, causal tracking, warp or capture. This is the offline reference pipeline."
+}

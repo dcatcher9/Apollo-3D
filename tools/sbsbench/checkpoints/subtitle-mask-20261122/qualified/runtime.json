@@ -1,0 +1,12 @@
+{
+  "python": "E:\\ApolloDev\\modelopt-py312\\Scripts\\python.exe",
+  "version": "3.12.14 (main, Aug 25 2026, 14:01:42) [MSC v.1944 64 bit (AMD64)]",
+  "numpy": "2.5.1",
+  "Pillow": "12.3.0",
+  "onnx": "1.21.0",
+  "torch": "2.13.0+cpu",
+  "scipy": "1.18.0",
+  "onnxruntime": "1.22.0",
+  "geometry": "H28 per whole extended OCR box",
+  "q8": 38
+}

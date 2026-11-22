@@ -1,0 +1,12 @@
+{
+  "authored-verified.json": "d327c85e1971366e01cccdfc0df91491162e8b2d63d1bdcab5240f5811435353",
+  "background-native.pt": "5757d7a49ee149922f8c8acbc893d78e0fea5dd33877d49687cbfb703d8a1a5b",
+  "camera-verified.json": "bee145a5cd33d3a7d68ef1daf7a03abe7e2c6384ab62253a3da8bc3af6b0441c",
+  "captured-verified.json": "d18e10fe588f0f529324808e5e9c660bc10d1873f5365944f3cd97c1a3281c6d",
+  "conditioned.py": "9bd2a9404a9b1c737ddb11aad93dd6da0cdb721effa9b2061ab82435fd4cb355",
+  "diagnosis.json": "149b40893eeea8a35ebb1f8a3ee7ef67e8a69d20c073a512099e9090a6ef9905",
+  "evaluate.py": "4585253135f70c7c01837f3329e7c4d3edadc9f540b590cdd849267c7289dfcc",
+  "plan.json": "126870ccfaaeba3731cdcfe05f026be1f94ceb44ef0fd27b8f57ae1e504d5dc1",
+  "sequence-verified.json": "1a80eb91be407583f29ea628667949401ec780191f47a16ba9a10ee1333cdbe8",
+  "trained.json": "a94c96145b4300b58d5f1ef9af6dff72395af100a8ad206b0b6df4ec26d8bd8d"
+}

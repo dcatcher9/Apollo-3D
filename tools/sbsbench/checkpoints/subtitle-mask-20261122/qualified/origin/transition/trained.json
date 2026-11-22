@@ -1,0 +1,30 @@
+{
+  "runtime": {
+    "python": "E:\\ApolloDev\\modelopt-py312\\Scripts\\python.exe",
+    "version": "3.12.14 (main, Aug 25 2026, 14:01:42) [MSC v.1944 64 bit (AMD64)]",
+    "numpy": "2.5.1",
+    "Pillow": "12.3.0",
+    "onnx": "1.21.0"
+  },
+  "plan": {
+    "path": "E:\\ApolloDev\\rawmatte-stroke-continuity-1121\\video\\fit-plan.json",
+    "sha256": "1140fcccf50ccb45bce65057a6c1fce3671027e47fa4951c029fb862e792cc8c",
+    "bytes": 2596
+  },
+  "weights": {
+    "path": "E:\\ApolloDev\\rawmatte-stroke-continuity-1121\\video\\transition.pt",
+    "sha256": "5b6b848dfc52117f4e59601f1013b20196872a14d3b739f32bbbcbb625f850ef",
+    "bytes": 1917
+  },
+  "samples": 413161,
+  "counts": {
+    "('en', 'rgb')": 36,
+    "('en', 'video')": 36,
+    "('ja', 'rgb')": 36,
+    "('ja', 'video')": 36,
+    "('zh', 'rgb')": 36,
+    "('zh', 'video')": 36
+  },
+  "span": 4.169765949249268,
+  "noise": 11.314870834350586
+}

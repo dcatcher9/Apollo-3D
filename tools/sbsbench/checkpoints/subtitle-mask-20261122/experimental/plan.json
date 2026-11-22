@@ -1,0 +1,39 @@
+{
+  "runtime": {
+    "python": "E:\\ApolloDev\\modelopt-py312\\Scripts\\python.exe",
+    "version": "3.12.14 (main, Aug 25 2026, 14:01:42) [MSC v.1944 64 bit (AMD64)]",
+    "numpy": "2.5.1",
+    "Pillow": "12.3.0",
+    "onnx": "1.21.0"
+  },
+  "baseline": {
+    "path": "E:\\ApolloDev\\rawmatte-final-qualification-1122\\summary.json",
+    "sha256": "5a8f81ae19986191222b220abdb6d4fd54e435ba7e0f908021ea84d7b9f20c0f",
+    "bytes": 12909
+  },
+  "fit": [
+    {
+      "path": "E:\\ApolloDev\\rawmatte-normalized-multires-fit-1121\\fit-manifest.json",
+      "sha256": "91f36fd5539f9ac2f239c093942fca6e8dc65f927a5f1cdcc470e793a441c558",
+      "bytes": 193412
+    },
+    {
+      "path": "E:\\ApolloDev\\rawmatte-normalized-polarity-fit-1121\\fit-manifest.json",
+      "sha256": "3dfa62541b2f65f5fa9b3530f5e7880837f33a47047cb704c2de3efd3cf63e5b",
+      "bytes": 171568
+    }
+  ],
+  "encoder": {
+    "path": "E:\\Git\\Repo\\Apollo-3D\\cmake-build-relwithdebinfo\\assets\\models\\direct_glyph_stroke_h144_w512_mixed.onnx",
+    "sha256": "3a19500dfd1bfdc01db0f166cc645c7b83f5799e716cb8d8fb52d1175927115e",
+    "bytes": 40424
+  },
+  "script": {
+    "path": "E:\\ApolloDev\\rawmatte-background-conditioned-1122\\conditioned.py",
+    "sha256": "9bd2a9404a9b1c737ddb11aad93dd6da0cdb721effa9b2061ab82435fd4cb355",
+    "bytes": 8480
+  },
+  "seed": 44877,
+  "steps": 3000,
+  "design": "Frozen mixed H28 CNN, one native shared feature decoder predicting combined protection and two auxiliary visible layers. Train on fit-only native RGB and exact layers, with plain/outline/shadow/both; synthesize low-contrast outline, reverse-polarity fill, translucent decoration, flat, textured, drifting and clean backgrounds. No validation image or label enters training. Evaluate standalone and evidence-gated addition to frozen baseline at q38. All four prior cohorts and genuine glyph counters are retained."
+}

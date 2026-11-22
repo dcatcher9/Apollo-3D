@@ -1,0 +1,35 @@
+{
+  "runtime": {
+    "python": "E:\\ApolloDev\\modelopt-py312\\Scripts\\python.exe",
+    "version": "3.12.14 (main, Aug 25 2026, 14:01:42) [MSC v.1944 64 bit (AMD64)]",
+    "numpy": "2.5.1",
+    "Pillow": "12.3.0",
+    "onnx": "1.21.0"
+  },
+  "plan": {
+    "path": "E:\\ApolloDev\\rawmatte-stroke-propagation-1121\\fit-plan-v2.json",
+    "sha256": "f9c3a0fad9fa85b02bb3083dbe8097eea6a6d452455a1fc860fd2903c575cb80",
+    "bytes": 2209
+  },
+  "model": {
+    "path": "E:\\ApolloDev\\rawmatte-stroke-propagation-1121\\residual.pt",
+    "sha256": "eeb0d2d9a22d1a632d84ac161921789187b69de0d19b9256d40a29df837abca3",
+    "bytes": 4071
+  },
+  "parameters": 386,
+  "fit_pixels": 716542,
+  "composition": {
+    "('en', 'original')": 36,
+    "('en', 'heavy')": 36,
+    "('en', 'very-heavy')": 36,
+    "('en', 'blank')": 16,
+    "('ja', 'original')": 36,
+    "('ja', 'heavy')": 36,
+    "('ja', 'very-heavy')": 36,
+    "('ja', 'blank')": 12,
+    "('zh', 'original')": 36,
+    "('zh', 'heavy')": 36,
+    "('zh', 'very-heavy')": 36,
+    "('zh', 'blank')": 8
+  }
+}

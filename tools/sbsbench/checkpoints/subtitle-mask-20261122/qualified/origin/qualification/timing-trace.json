@@ -1,0 +1,30 @@
+{
+  "runtime": {
+    "python": "E:\\ApolloDev\\modelopt-py312\\Scripts\\python.exe",
+    "version": "3.12.14 (main, Aug 25 2026, 14:01:42) [MSC v.1944 64 bit (AMD64)]",
+    "numpy": "2.5.1",
+    "Pillow": "12.3.0",
+    "onnx": "1.21.0"
+  },
+  "samples": 15,
+  "native_shape": [
+    102,
+    667
+  ],
+  "scope": "Single offline native line including CPU features, synchronous transfers and three engine stages. The middle column times every actual Windows process-list check in this harness. The last column subtracts this measured check duration per observation. Excludes capture, OCR, history and warp.",
+  "columns": [
+    "wall_ms",
+    "process_check_ms",
+    "wall_minus_check_ms"
+  ],
+  "median": [
+    208.60610000090674,
+    46.254799992311746,
+    157.1220999758225
+  ],
+  "p95": [
+    242.21790999581572,
+    65.63331999059301,
+    179.996719994233
+  ]
+}
