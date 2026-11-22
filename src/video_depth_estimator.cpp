@@ -3575,6 +3575,7 @@ namespace models {
       std::chrono::steady_clock::time_point deadline;
     };
     std::optional<subtitle_direct_glyph_job_t> subtitle_direct_glyph_job;
+    std::unique_ptr<platf::high_precision_timer> subtitle_file_poll_timer;
     struct subtitle_direct_glyph_tail_t {
       bool input_domain_reset;
       bool snapshot_requested;
@@ -6792,11 +6793,18 @@ namespace models {
       std::string error;
       glyph::result_t result;
       auto status = subtitle_direct_glyph_score.poll(&job.score, result, error);
-      if (evaluation_wait) {
+      if (evaluation_wait && status == glyph::poll_status_e::pending) {
         // Only the explicit file-fed evaluation entry waits. Live completion keeps the
         // observation reserved while the next nonblocking poll proves the same lease.
+        if (!subtitle_file_poll_timer) {
+          subtitle_file_poll_timer = platf::create_high_precision_timer();
+        }
         while (status == glyph::poll_status_e::pending && std::chrono::steady_clock::now() < job.deadline) {
-          std::this_thread::sleep_for(std::chrono::milliseconds {1});
+          if (subtitle_file_poll_timer && *subtitle_file_poll_timer) {
+            subtitle_file_poll_timer->sleep_for(std::chrono::microseconds {250});
+          } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds {1});
+          }
           status = subtitle_direct_glyph_score.poll(&job.score, result, error);
         }
       }
@@ -7003,7 +7011,8 @@ namespace models {
         const auto profile = static_cast<host_sbs_direct_glyph_gpu::tile_profile_e>(i);
         nvinfer1::ICudaEngine *engine = nullptr;  // The global engine cache owns its lifetime.
         if (!acquire_direct_glyph_context(shader_root.parent_path().parent_path(), cuda, cuda_device, engine,
-                                         subtitle_direct_glyph_contexts[i], subtitle_direct_glyph_engine_keys[i], profile)) {
+                                         subtitle_direct_glyph_contexts[i], subtitle_direct_glyph_engine_keys[i], profile,
+                                         cfg.direct_glyph_line_palette)) {
           release_subtitle_direct_glyph();
           error = "Direct glyph TensorRT asset or execution context unavailable";
           return false;

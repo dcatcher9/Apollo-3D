@@ -127,7 +127,8 @@ namespace models {
     /** Authenticate the packaged ONNX and derive its device/runtime-specific cache path. */
     std::optional<direct_glyph_artifact_t> get_direct_glyph_artifact(
         const std::filesystem::path& assets_dir, std::string_view compatibility_tag,
-        host_sbs_direct_glyph_gpu::tile_profile_e profile = host_sbs_direct_glyph_gpu::tile_profile_e::common);
+        host_sbs_direct_glyph_gpu::tile_profile_e profile = host_sbs_direct_glyph_gpu::tile_profile_e::common,
+        bool batched_tiles = false);
 
     /**
      * @brief Bounded cached depth filename binding recipe, runtime, device and ONNX identity.

@@ -123,7 +123,7 @@ class palette_transport_t {
     height_ = h;
   }
 
-  void dispatch(stage_e stage, const std::array<UINT, 8> &cb, UINT gx, UINT gy, std::initializer_list<binding_t> inputs, targets_t outputs) {
+  void dispatch(stage_e stage, const std::array<UINT, 8> &cb, UINT gx, UINT gy, std::initializer_list<binding_t> inputs, targets_t outputs, UINT gz = 1) {
     sources_t reads {};
     for (const auto &[index, srv] : inputs) {
       reads[index] = srv;
@@ -136,7 +136,7 @@ class palette_transport_t {
     ctx_->CSSetShaderResources(0, UINT(reads.size()), reads.data());
     ctx_->CSSetUnorderedAccessViews(0, UINT(outputs.size()), outputs.data(), nullptr);
     ctx_->CSSetShader(shaders_[stage].Get(), nullptr, 0);
-    ctx_->Dispatch(gx, gy, 1);
+    ctx_->Dispatch(gx, gy, gz);
     reads.fill(nullptr);
     outputs.fill(nullptr);
     ctx_->CSSetShaderResources(0, UINT(reads.size()), reads.data());
@@ -147,8 +147,8 @@ class palette_transport_t {
     return {width_, height_, UINT(job_.token), UINT(job_.token >> 32u), UINT(source_ != nullptr), UINT(history_valid_), slot_, job_.line_center_twice_source};
   }
 
-  void stage(stage_e entry, UINT arg, UINT gx, UINT gy, std::initializer_list<binding_t> inputs, field_t &destination, field_t *second = nullptr) {
-    dispatch(entry, {slot_, w28_, w84_, arg, hist_scale_, 0, 0, 0}, gx, gy, inputs, {destination.uav.Get(), second ? second->uav.Get() : nullptr});
+  void stage(stage_e entry, UINT arg, UINT gx, UINT gy, std::initializer_list<binding_t> inputs, field_t &destination, field_t *second = nullptr, UINT tiles = 1) {
+    dispatch(entry, {slot_, w28_, w84_, arg, hist_scale_, 0, 0, 0}, gx, gy, inputs, {destination.uav.Get(), second ? second->uav.Get() : nullptr}, tiles);
   }
 
   void fence() {
@@ -157,17 +157,19 @@ class palette_transport_t {
     ctx_->Flush();
   }
 
-  void encode() {
+  void encode(UINT tiles) {
     constexpr UINT count = 2;
+    require(execution_->setInputShape("rgb", nvinfer1::Dims4 {int(tiles), 3, int(tile_height), int(tile_width)}), "Select native glyph tile batch");
     cuda_outstanding_ = true;
     check_cuda(cuda_.cuGraphicsMapResources(count, interop_.data(), stream_), "Map native glyph encoder bindings");
     std::array<CUdeviceptr, count> addr {};
     for (UINT i = 0; i < count; ++i) {
       std::size_t bytes = 0;
       check_cuda(cuda_.cuGraphicsResourceGetMappedPointer(&addr[i], &bytes, interop_[i]), "Map native glyph tensor");
-      require(addr[i] && bytes == sizeof(float) * (i == 0 ? tile_input_words : tile_output_words), "Native glyph encoder tensor extent mismatch");
+      require(addr[i] && bytes == sizeof(float) * (i == 0 ? input_atlas_words : output_atlas_words), "Native glyph encoder tensor extent mismatch");
     }
-    require(execution_->setTensorAddress("rgb", reinterpret_cast<void *>(addr[0])) && execution_->setTensorAddress("logits", reinterpret_cast<void *>(addr[1])) && execution_->enqueueV3(stream_), "Submit mixed native glyph encoder");
+    require(execution_->setTensorAddress("rgb", reinterpret_cast<void *>(addr[0])) && execution_->setTensorAddress("logits", reinterpret_cast<void *>(addr[1])), "Bind mixed native glyph encoder");
+    require(execution_->enqueueV3(stream_), "Submit mixed native glyph tile batch");
     check_cuda(cuda_.cuGraphicsUnmapResources(count, interop_.data(), stream_), "Return native glyph tensors to D3D");
   }
 
@@ -226,8 +228,7 @@ class palette_transport_t {
   void score_chunk() {
     const current_cuda_context_t guard(cuda_, primary_);
     const compute_state_t<16, 5> saved(ctx_.Get());
-    UINT budget = tile_capacity;
-    while (slot_ < sizes_cpu_.size() && budget) {
+    while (slot_ < sizes_cpu_.size()) {
       const auto [w, h] = sizes_cpu_[slot_];
       if (!w) {
         ++slot_;
@@ -236,16 +237,19 @@ class palette_transport_t {
       if (tile_start_ == 0) {
         begin_line(w, h);
       }
-      stage(pack_tile, tile_start_, 32, 18, {{7, low_.srv.Get()}}, input_);
-      encode();
-      stage(export_roles, tile_start_, div_up(std::min(440u, w28_ - tile_start_), 16), 4, {{12, logits_.srv.Get()}}, roles_);
-      tile_start_ += 440u;
-      --budget;
+      const UINT remaining = w28_ - tile_start_;
+      const UINT tiles = std::min(tile_capacity, div_up(remaining, 440u));
+      stage(pack_tile, tile_start_, 32, 18, {{7, low_.srv.Get()}}, input_, nullptr, tiles);
+      encode(tiles);
+      stage(export_roles, tile_start_, div_up(std::min(440u, remaining), 16), 4, {{12, logits_.srv.Get()}}, roles_, nullptr, tiles);
+      tile_start_ += tiles * 440u;
       if (tile_start_ >= w28_) {
         finish_line(w, h);
         ++slot_;
         tile_start_ = 0;
       }
+      // Retire this batch's GPU fence before changing the execution context's shape.
+      break;
     }
     while (slot_ < sizes_cpu_.size() && sizes_cpu_[slot_][0] == 0) {
       ++slot_;
@@ -295,7 +299,8 @@ public:
       require(code && SUCCEEDED(device->CreateComputeShader(code->data(), code->size(), nullptr, &shaders_[i])), "Prepare native glyph shader program");
     }
     execution_ = execution;
-    require(execution_->getMaxOutputSize("logits") == sizeof(float) * tile_output_words, "Native glyph requires the mixed H144 W512 encoder");
+    require(execution_->setInputShape("rgb", nvinfer1::Dims4 {int(tile_capacity), 3, int(tile_height), int(tile_width)}) &&
+            execution_->getMaxOutputSize("logits") == sizeof(float) * output_atlas_words, "Native glyph requires the bounded mixed tile batch");
     require(cuda_.is_valid() && cuda_.cuD3D11GetDevice && cuda_.cuDevicePrimaryCtxRetain && cuda_.cuDevicePrimaryCtxRelease, "Native glyph CUDA interop is unavailable");
     ComPtr<IDXGIDevice> dx;
     ComPtr<IDXGIAdapter> adapter;
@@ -305,8 +310,8 @@ public:
     require(primary_ == primary, "Native glyph context belongs to a different CUDA primary");
     const current_cuda_context_t guard(cuda_, primary_);
     check_cuda(cuda_.cuStreamCreate(&stream_, CU_STREAM_NON_BLOCKING), "Create bounded native glyph stream");
-    ensure(input_, tile_input_words, 4);
-    ensure(logits_, tile_output_words, 4);
+    ensure(input_, input_atlas_words, 4);
+    ensure(logits_, output_atlas_words, 4);
     check_cuda(cuda_.cuGraphicsD3D11RegisterResource(&interop_[0], input_.buffer.Get(), 0), "Register native glyph RGB");
     check_cuda(cuda_.cuGraphicsD3D11RegisterResource(&interop_[1], logits_.buffer.Get(), 0), "Register native glyph logits");
     constants_ = make_buffer({32, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0});

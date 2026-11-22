@@ -3,7 +3,7 @@
 // Included by video_depth_estimator.cpp inside namespace models after the shared
 // TensorRT cache and serialization helpers.
 
-static bool build_direct_glyph_engine(const direct_glyph_artifact_t &artifact) {
+static bool build_direct_glyph_engine(const direct_glyph_artifact_t &artifact, bool batched_tiles) {
   auto builder = TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(gLogger));
   if (!builder) {
     return false;
@@ -40,6 +40,23 @@ static bool build_direct_glyph_engine(const direct_glyph_artifact_t &artifact) {
     return false;
   }
 
+  if (batched_tiles) {
+    using namespace host_sbs_direct_glyph_gpu;
+    static_assert(tile_capacity == 6u);
+    auto *input = network->getInput(0);
+    const auto shape = [](int tiles) {
+      return nvinfer1::Dims4 {tiles, 3, int(tile_height), int(tile_width)};
+    };
+    input->setDimensions(shape(-1));
+    auto *profile = builder->createOptimizationProfile();
+    using point = nvinfer1::OptProfileSelector;
+    if (!profile || !profile->setDimensions(input->getName(), point::kMIN, shape(1)) ||
+        !profile->setDimensions(input->getName(), point::kOPT, shape(4)) ||
+        !profile->setDimensions(input->getName(), point::kMAX, shape(int(tile_capacity))) ||
+        config->addOptimizationProfile(profile) < 0) {
+      return false;
+    }
+  }
   auto serialized = TrtUniquePtr<nvinfer1::IHostMemory>(builder->buildSerializedNetwork(*network, *config));
   return serialized && publish_serialized_engine(artifact.engine_path, *serialized, "direct glyph engine");
 }
@@ -67,14 +84,22 @@ static bool validate_direct_glyph_io_locked(nvinfer1::ICudaEngine *engine, engin
 }
 
 static bool bind_direct_glyph_shape(
-  nvinfer1::IExecutionContext &context, host_sbs_direct_glyph_gpu::tile_shape_t profile
+  nvinfer1::IExecutionContext &context, host_sbs_direct_glyph_gpu::tile_shape_t profile, bool batched_tiles
 ) {
   // Send Dims by reference only. Returning Dims by value from the MSVC DLL is
   // incompatible with the MinGW host ABI.
   const auto shape = make_input_dims(profile.height, profile.width);
   const auto bytes = static_cast<std::int64_t>(profile.output_words() * sizeof(float));
+  if (batched_tiles) {
+    auto largest = shape;
+    largest.d[0] = host_sbs_direct_glyph_gpu::tile_capacity;
+    if (!context.setInputShape(direct_glyph_engine_input_name.data(), largest) ||
+        context.getMaxOutputSize(direct_glyph_engine_output_name.data()) != bytes * largest.d[0]) {
+      return false;
+    }
+  }
   return context.setInputShape(direct_glyph_engine_input_name.data(), shape) &&
-         context.getMaxOutputSize(direct_glyph_engine_output_name.data()) == bytes;
+         (batched_tiles || context.getMaxOutputSize(direct_glyph_engine_output_name.data()) == bytes);
 }
 
 static bool warmup_direct_glyph_context(
@@ -125,7 +150,8 @@ static bool warmup_direct_glyph_context(
 static bool acquire_direct_glyph_context(
   const std::filesystem::path &assets_dir, cuda_driver_api &cuda, CUdevice device,
   nvinfer1::ICudaEngine *&engine, nvinfer1::IExecutionContext *&context, std::string &engine_key,
-  host_sbs_direct_glyph_gpu::tile_profile_e profile = host_sbs_direct_glyph_gpu::tile_profile_e::common
+  host_sbs_direct_glyph_gpu::tile_profile_e profile = host_sbs_direct_glyph_gpu::tile_profile_e::common,
+  bool batched_tiles = false
 ) {
   if (engine || context || !engine_key.empty() || !cuda.is_valid()) {
     return false;
@@ -135,7 +161,7 @@ static bool acquire_direct_glyph_context(
     return false;
   }
 
-  auto artifact = get_direct_glyph_artifact(assets_dir, engine_compatibility_tag(cuda, device), profile);
+  auto artifact = get_direct_glyph_artifact(assets_dir, engine_compatibility_tag(cuda, device), profile, batched_tiles);
   if (!artifact) {
     return false;
   }
@@ -180,7 +206,7 @@ static bool acquire_direct_glyph_context(
           return false;
         }
       }
-      if (!build_direct_glyph_engine(*artifact)) {
+      if (!build_direct_glyph_engine(*artifact, batched_tiles)) {
         return false;
       }
       std::lock_guard lock(g_trt_mutex);
@@ -210,7 +236,7 @@ static bool acquire_direct_glyph_context(
     }
   }
   const auto shape = host_sbs_direct_glyph_gpu::tile_shape(profile);
-  if (!bind_direct_glyph_shape(*leased_context, shape) ||
+  if (!bind_direct_glyph_shape(*leased_context, shape, batched_tiles) ||
       (reserved && !warmup_direct_glyph_context(cuda, *leased_context, shape))) {
     std::lock_guard lock(g_trt_mutex);
     quarantine_execution_context_locked(key, leased_context, !reserved);

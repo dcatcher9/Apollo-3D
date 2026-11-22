@@ -264,19 +264,20 @@ float4 ColorOdds(float3 source)
 [numthreads(16, 8, 1)] void pack_tile(uint3 p : SV_DispatchThreadID) {
     if (p.x >= 512 || p.y >= 144)
         return;
-    int2 pos = int2(int(StageValue) + int(p.x) - 36, int(p.y) - 56);
+    int2 pos = int2(int(StageValue + 440u * p.z) + int(p.x) - 36, int(p.y) - 56);
     float3 rgb = Unpack(Rgb28[At(pos, Width28, 28)]) / 255;
-    uint index = p.y * 512 + p.x;
     uint cells = 512 * 144;
+    uint index = 3u * cells * p.z + p.y * 512 + p.x;
     FloatOut[index] = rgb.x;
     FloatOut[index + cells] = rgb.y;
     FloatOut[index + 2 * cells] = rgb.z;
 }[numthreads(16, 8, 1)] void export_roles(uint3 p : SV_DispatchThreadID)
 {
-    uint x = StageValue + p.x;
+    uint x = StageValue + 440u * p.z + p.x;
     if (x >= Width28 || p.x >= 440 || p.y >= 28)
         return;
-    uint i = (p.y + 56) * 512 + p.x + 36, cells = 512 * 144;
+    uint cells = 512 * 144;
+    uint i = 4u * cells * p.z + (p.y + 56) * 512 + p.x + 36;
     float4 v = float4(Scores[i], Scores[i + cells], Scores[i + 2 * cells], Scores[i + 3 * cells]);
     float4 mass = exp(v - max(max(v.x, v.y), max(v.z, v.w)));
     Float4Out[p.y * Width28 + x] = mass / dot(mass, 1.0f);

@@ -106,7 +106,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | `current_trusted_inner` | 1 | `5fdc9a1be98291902d63ca639f5bcfd80e88821b6df17bd083a23b5e09c32884` |
 | `direct_glyph_plan` | 2 | `3c1df1656492065c62c519ceffd49f3d1bc1d3a4e26c50ba0b8a2eead4dc2844` |
 | `direct_glyph_transport` | 4 | `2df402561c88d7e2b2672660e2f9d5f42b06d9815c87b48511adb05af6226b30` |
-| `direct_glyph_palette` | 17 | `099da798f2aeb707785c3d33e500b7fa9761a14b6fa25d20b9686729e13c2879` |
+| `direct_glyph_palette` | 17 | `3bad98fb00ca1bbf244235ae7d42b01ff7569d2ebb327acee9f8b1507e249796` |
 | `direct_glyph_prepare` | 1 | `219a6a305c05ca3ac1744286a4e87b83b61128c10e05c61ec517337f279ec940` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->
 
@@ -461,7 +461,9 @@ side toward symmetry by at most one working-rectangle height, within the same co
 This includes isolated strokes near the ends of centered lines. The encoder scales the
 entire resulting rectangle to 28 rows,
 preserves its aspect ratio, and processes long lines in 440-column windows of the
-512×144 mixed TensorRT profile. The 36-column horizontal context on each side stays
+512×144 mixed TensorRT profile. Up to six windows from a line share one TensorRT
+batch. Each observation owns its execution context until the GPU has consumed the
+batch and exported its scores. The 36-column horizontal context on each side stays
 outside the window's owned output. Aligned RGB at 84 rows supplies local background color
 and variance. At each native pixel the decoder also estimates how much of the line’s
 fill or outline color would explain the observed color over each background estimate,

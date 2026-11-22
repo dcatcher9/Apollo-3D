@@ -586,6 +586,49 @@ protected:
   }
 };
 
+TEST_F(HostSbsDirectGlyphPublishGpuTest, BatchedRolesKeepTheOwnedColumnsAndPartialLastTile) {
+  const auto sources = cache::snapshot_sources(SUNSHINE_SHADERS_DIR, cache::direct_glyph_palette_specs);
+  ASSERT_TRUE(sources);
+  const auto code = cache::get(sources, cache::host_sbs_direct_glyph_palette_export_roles);
+  ASSERT_TRUE(code);
+  ComPtr<ID3D11ComputeShader> shader;
+  hr(device->CreateComputeShader(code->data(), code->size(), nullptr, &shader));
+
+  constexpr UINT width = 881, cells = 144 * 512;
+  std::vector<float> logits(2 * 4 * cells, -12.0f);
+  for (UINT y = 0; y < 28; ++y) {
+    for (UINT x = 0; x < 440; ++x) {
+      const UINT index = (56 + y) * 512 + 36 + x;
+      logits[cells + index] = 12.0f;
+      logits[4 * cells + 2 * cells + index] = 12.0f;
+    }
+  }
+  const auto input = buffer(UINT(logits.size()), false, false, false, logits.data());
+  using roles_t = std::array<float, 4>;
+  const std::vector<roles_t> zero(width * 28 + 1);
+  D3D11_BUFFER_DESC desc {UINT(zero.size() * sizeof(roles_t)), D3D11_USAGE_DEFAULT, D3D11_BIND_UNORDERED_ACCESS,
+    0, D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, sizeof(roles_t)};
+  D3D11_SUBRESOURCE_DATA data {zero.data(), 0, 0};
+  ComPtr<ID3D11Buffer> output;
+  ComPtr<ID3D11UnorderedAccessView> target;
+  hr(device->CreateBuffer(&desc, &data, &output));
+  hr(device->CreateUnorderedAccessView(output.Get(), nullptr, &target));
+  const auto cb = constants(std::array<UINT, 8> {0, width, 0, 440});
+  context->CSSetShader(shader.Get(), nullptr, 0);
+  context->CSSetConstantBuffers(0, 1, cb.GetAddressOf());
+  context->CSSetShaderResources(12, 1, input.srv.GetAddressOf());
+  context->CSSetUnorderedAccessViews(0, 1, target.GetAddressOf(), nullptr);
+  context->Dispatch(28, 4, 2);
+  context->ClearState();
+  const auto values = words(read(output.Get()));
+  for (UINT y : {0u, 27u}) {
+    EXPECT_EQ(values[(y * width + 439) * 4 + 1], 0u);
+    for (UINT x : {440u, 879u}) EXPECT_GT(std::bit_cast<float>(values[(y * width + x) * 4 + 1]), .99f);
+    EXPECT_GT(std::bit_cast<float>(values[(y * width + 880) * 4 + 2]), .99f);
+  }
+  EXPECT_EQ(values[width * 28 * 4], 0u);
+}
+
 TEST_F(HostSbsDirectGlyphPublishGpuTest, CommonBackdropDoesNotDisplaceAnOutlineColor) {
   const auto sources = cache::snapshot_sources(SUNSHINE_SHADERS_DIR, cache::direct_glyph_palette_specs);
   ASSERT_TRUE(sources);
