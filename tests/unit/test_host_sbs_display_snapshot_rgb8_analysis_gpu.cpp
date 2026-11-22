@@ -611,17 +611,22 @@ TEST_F(HostSbsDirectGlyphPublishGpuTest, CommonBackdropDoesNotDisplaceAnOutlineC
     return result;
   };
 
-  const auto check_backdrop = [&](UINT glyph, bool use_padding) {
+  enum class PaintCase { common_backdrop, equal_role_fractions, bright_backdrop, broad_outline };
+  const auto check_backdrop = [&](UINT glyph, PaintCase paint_case) {
     SCOPED_TRACE(glyph);
-    SCOPED_TRACE(use_padding);
+    SCOPED_TRACE(static_cast<int>(paint_case));
     const UINT backdrop = 4912u - glyph;
     std::vector<RoleVotes> votes(2 * 4913), posterior(4913);
-    if (use_padding) {
-      // Equal role fractions. Only the spatial distribution distinguishes the ink.
-      votes[backdrop] = {800, 100, 100, 0};
+    if (paint_case == PaintCase::equal_role_fractions || paint_case == PaintCase::bright_backdrop) {
+      // Bright background can collect stronger fill votes than the thin ink itself.
+      votes[backdrop] = paint_case == PaintCase::bright_backdrop ? RoleVotes {400, 500, 100, 0} : RoleVotes {800, 100, 100, 0};
       votes[glyph] = {320, 40, 40, 0};
       votes[4913 + backdrop] = {390, 610, 0, 0};
       votes[4913 + glyph] = {0, 400, 0, 0};
+    } else if (paint_case == PaintCase::broad_outline) {
+      // The more frequent outline receives more total fill votes, even though their fraction is low.
+      votes[backdrop] = {612, 48, 130, 10};
+      votes[glyph] = {50, 28, 1, 1};
     } else {
       votes[backdrop] = {9950, 10, 40, 0};
       votes[glyph] = {984, 1000, 16, 0};
@@ -646,11 +651,13 @@ TEST_F(HostSbsDirectGlyphPublishGpuTest, CommonBackdropDoesNotDisplaceAnOutlineC
     context->CSSetUnorderedAccessViews(0, 1, winners.uav.GetAddressOf(), nullptr);
     context->Dispatch(1, 1, 1);
     context->ClearState();
-    EXPECT_EQ(words(read(winners.buffer.Get())), (std::vector<UINT> {glyph, glyph}));
+    const UINT outline = paint_case == PaintCase::broad_outline ? backdrop : glyph;
+    EXPECT_EQ(words(read(winners.buffer.Get())), (std::vector<UINT> {glyph, outline}));
   };
   for (const UINT glyph : {0u, 4912u}) {
-    check_backdrop(glyph, false);
-    check_backdrop(glyph, true);
+    for (const auto paint_case : {PaintCase::common_backdrop, PaintCase::equal_role_fractions, PaintCase::bright_backdrop, PaintCase::broad_outline}) {
+      check_backdrop(glyph, paint_case);
+    }
   }
 }
 

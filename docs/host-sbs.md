@@ -106,7 +106,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | `current_trusted_inner` | 1 | `5fdc9a1be98291902d63ca639f5bcfd80e88821b6df17bd083a23b5e09c32884` |
 | `direct_glyph_plan` | 2 | `3c1df1656492065c62c519ceffd49f3d1bc1d3a4e26c50ba0b8a2eead4dc2844` |
 | `direct_glyph_transport` | 4 | `2df402561c88d7e2b2672660e2f9d5f42b06d9815c87b48511adb05af6226b30` |
-| `direct_glyph_palette` | 16 | `175b3a7220a8735ac2c115d86dd6f64625a8b70326015c2147eb5c596059d071` |
+| `direct_glyph_palette` | 16 | `c5da0ad773f4e54d627a1ce563816b9a0fd661e83b8b6006662017195c939e93` |
 | `direct_glyph_prepare` | 1 | `219a6a305c05ca3ac1744286a4e87b83b61128c10e05c61ec517337f279ec940` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->
 
@@ -479,7 +479,11 @@ The same pass counts each observed color separately in the work-box interior and
 border one eighth of the box height on all four sides, with a minimum of one pixel.
 The three RGB smoothing passes also smooth these counts. After estimating each color's
 frequency in both regions, the decoder favors colors concentrated inside the line when
-choosing its two representative inks. The four role probabilities used per pixel retain
+choosing its two representative inks. It ranks each fill color by its accumulated fill
+votes times the square root of its fill probability and the square of its interior weight.
+These powers were fitted to native glyph masks on paired backgrounds. They give
+thin fill on a bright backdrop more influence while retaining evidence that distinguishes
+the fill from a broad outline. The four role probabilities used per pixel retain
 their original normalization. The encoder trains on the same libass caption over two
 different backgrounds. A calibration loss constrains the two line-average colors used
 by the decoder. The final opacity layer trains on stroke interiors, edges, gaps and

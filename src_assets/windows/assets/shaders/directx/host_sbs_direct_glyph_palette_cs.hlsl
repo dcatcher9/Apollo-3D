@@ -193,7 +193,8 @@ groupshared float2 OutlineAndTotal[256];
     [loop] for (uint p = lane; p < 4913; p += 256)
     {
         float4 votes = PreviousHistogram[p];
-        float2 rank = votes.yz * Palette[p].yz;
+        float2 roleFraction = Palette[p].yz;
+        float2 rank = votes.yz * float2(sqrt(roleFraction.x), roleFraction.y);
         // A frequent backdrop can collect many weak outline votes. Discount colors whose
         // observed outline rate falls below the line's rate before picking the outline ink.
         float observedOutlineRate = votes.z / (dot(votes, 1.0f) + .48f);
@@ -204,7 +205,10 @@ groupshared float2 OutlineAndTotal[256];
         float2 counts = PreviousHistogram[4913 + p].xy;
         float pooled = (counts.x + counts.y + .05f) / (area.x + area.y + 1.0f);
         float2 rate = (counts + 12.0f * pooled) / (area + 12.0f);
-        rank *= .15f + .85f * saturate(1.0f - rate.x / max(rate.y, 1.e-9f));
+        float interiorWeight = .15f + .85f * saturate(1.0f - rate.x / max(rate.y, 1.e-9f));
+        // Fill on a bright backdrop can have a low role fraction. Its concentration inside
+        // the caption helps distinguish it; its role fraction still separates it from a broad outline.
+        rank *= float2(interiorWeight * interiorWeight, interiorWeight);
         if (rank.x > best.x)
         {
             best.x = rank.x;

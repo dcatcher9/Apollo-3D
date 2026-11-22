@@ -132,5 +132,48 @@
       "2160/candidate": "ef574866afa9367c30dfe7db0b239d7e2bc7af94ef703feb0ea3a26096055182"
     }
   },
-  "inference_qualification": "Offline mixed ONNX on CPU and exported decoder on D3D11 WARP. TensorRT end-to-end parity and device latency pending."
+  "inference_qualification": "Offline mixed ONNX on CPU and exported decoder on D3D11 WARP. TensorRT end-to-end parity and device latency pending.",
+  "representative_fill": {
+    "fill_posterior_exponent": 0.5,
+    "interior_weight_exponent": 2,
+    "fit_caption_pairs": 330,
+    "validation_caption_pairs": 90,
+    "selection_objective": "Mean language/style mask F1 minus 0.5 times the worst-decile mean per-caption regression and 0.25 times the paired-background glyph decision flip rate. The cutoff is 38/255.",
+    "validation_mask_f1": {
+      "previous": 0.798749253937566,
+      "selected": 0.8129902388907371
+    },
+    "evaluation_sha256": {
+      "plan.json": "1ed02ece7da2fe1c313888140866074543094552e241458b1d941ba6b97ccfd8",
+      "fit.json": "28ae2b2839a80af3c661c10f8b040b12ade8bd7e01a9be3f9b60bd4e18f27885",
+      "validation.json": "d784654b57ff9e5d2d275810cd9fb31224d9cbb3a9de87914e3d45007ed45865",
+      "qualification.json": "03770edc66928c7ad60977cd6fd3e2bccfc86f3b584317c97e60425d614fa596"
+    },
+    "held_out_F1": {
+      "Original SD": {
+        "edge_readout": 0.8197089701818053,
+        "mask_fit_fill": 0.8445007456920561
+      },
+      "New SD": {
+        "edge_readout": 0.8537385349966738,
+        "mask_fit_fill": 0.8613575594739477
+      },
+      "New UHD": {
+        "edge_readout": 0.8986540934376336,
+        "mask_fit_fill": 0.9068107577023229
+      },
+      "720p": {
+        "edge_readout": 0.8743564097805091,
+        "mask_fit_fill": 0.8747949906293723
+      },
+      "1080p": {
+        "edge_readout": 0.9021347824171776,
+        "mask_fit_fill": 0.902384116150728
+      },
+      "2160p": {
+        "edge_readout": 0.8846063844025128,
+        "mask_fit_fill": 0.8848879411111972
+      }
+    }
+  }
 }
