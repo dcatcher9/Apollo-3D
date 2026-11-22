@@ -319,7 +319,21 @@ groupshared float4 TempFill[128], TempOutline[128];
         Float4Out[2 * part] = StageValue == 0 ? fill : fill / (fill.w + 1e-5f);
         Float4Out[2 * part + 1] = StageValue == 0 ? outline : outline / (outline.w + 1e-5f);
     }
-}[numthreads(16, 8, 1)] void decode_palette(uint3 id : SV_DispatchThreadID)
+}
+
+float2 InkMixEvidence(float3 color, float3 ink, float4 background)
+{
+    float3 inkOffset = ink - background.xyz;
+    float3 pixelOffset = color - background.xyz;
+    float contrast = dot(inkOffset, inkOffset);
+    float noise = .025f + background.w;
+    float fraction = saturate(dot(pixelOffset, inkOffset) / (contrast + .0001f));
+    float3 residual = pixelOffset - fraction * inkOffset;
+    float reliability = contrast / (contrast + 3.0f * noise * noise);
+    return float2(fraction, min(6.0f, sqrt(dot(residual, residual) / 3.0f) / noise)) * reliability;
+}
+
+[numthreads(16, 8, 1)] void decode_palette(uint3 id : SV_DispatchThreadID)
 {
     uint2 size = NativeSize();
     if (any(id.xy >= size))
@@ -338,7 +352,7 @@ groupshared float4 TempFill[128], TempOutline[128];
     float3 odds = ColorOdds(rgb).yzw;
     // Encoder roles and context, native RGB detail, two estimates of background,
     // shared line colors, local gradients and color posterior, in training order.
-    float f[42];
+    float f[50];
     [unroll] for (int i = 0; i < 4; ++i) f[i] = role[i];
     f[4] = peak.x;
     f[5] = peak.y;
@@ -363,5 +377,17 @@ groupshared float4 TempFill[128], TempOutline[128];
     f[40] = dot(abs(rgb - PalColor(Winners[0])), 1.0f / 192.0f);
     f[41] = dot(abs(rgb - PalColor(Winners[1])), 1.0f / 192.0f);
     [unroll] for (int k = 0; k < 42; ++k) f[k] = clamp(f[k], -12, 12);
+    // Compare the observed pixel with blends of each recurring ink and the nearby background.
+    // Low contrast reduces the influence of both the opacity estimate and its color error.
+    float3 fillInk = PalColor(Winners[0]) / 255.0f;
+    float3 outlineInk = PalColor(Winners[1]) / 255.0f;
+    float2 nearFill = InkMixEvidence(color, fillInk, nearby);
+    float2 nearOutline = InkMixEvidence(color, outlineInk, nearby);
+    float2 wideFill = InkMixEvidence(color, fillInk, wide);
+    float2 wideOutline = InkMixEvidence(color, outlineInk, wide);
+    f[42] = nearFill.x;    f[43] = nearFill.y;
+    f[44] = nearOutline.x; f[45] = nearOutline.y;
+    f[46] = wideFill.x;    f[47] = wideFill.y;
+    f[48] = wideOutline.x; f[49] = wideOutline.y;
     FloatOut[id.y * size.x + id.x] = PaletteMask(f);
 }

@@ -3177,10 +3177,10 @@ namespace {
       }
     }
     {
-      // An unknown policy value is an invalid request, never a third rule.
+      // An unassigned policy value must invalidate the request.
       ocr_warp_fixture_t fixture;
       ASSERT_TRUE(fixture.initialize(error, false, true, false)) << error;
-      ASSERT_TRUE(run(fixture, 2u));
+      ASSERT_TRUE(run(fixture, std::numeric_limits<std::uint32_t>::max()));
       EXPECT_EQ(fixture.record()[2u], 0u);
     }
   }

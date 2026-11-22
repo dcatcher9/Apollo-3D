@@ -106,7 +106,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | `current_trusted_inner` | 1 | `5fdc9a1be98291902d63ca639f5bcfd80e88821b6df17bd083a23b5e09c32884` |
 | `direct_glyph_plan` | 2 | `3c1df1656492065c62c519ceffd49f3d1bc1d3a4e26c50ba0b8a2eead4dc2844` |
 | `direct_glyph_transport` | 4 | `2df402561c88d7e2b2672660e2f9d5f42b06d9815c87b48511adb05af6226b30` |
-| `direct_glyph_palette` | 16 | `7f5aea30bf4fbd655130f36bb690cea131443e1b71b25553decf545fef79fcf7` |
+| `direct_glyph_palette` | 16 | `6addb664ce6a74d2126a67286ccf740652afae60e065c487b4a2f978ee7a9b77` |
 | `direct_glyph_prepare` | 1 | `219a6a305c05ca3ac1744286a4e87b83b61128c10e05c61ec517337f279ec940` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->
 
@@ -456,8 +456,10 @@ entire resulting rectangle to 28 rows,
 preserves its aspect ratio, and processes long lines in 440-column windows of the
 512×144 mixed TensorRT profile. The 36-column horizontal context on each side stays
 outside the window's owned output. Aligned RGB at 84 rows supplies local background color
-and variance. The learned decoder combines those features, the shared line palette and
-the original RGB at each native pixel center into continuous fill-plus-outline protection.
+and variance. At each native pixel the decoder also estimates how much of the line’s
+fill or outline color would explain the observed color over each background estimate,
+and measures the remaining RGB error. The decoder weights this evidence by the
+contrast between ink and background and predicts continuous fill-plus-outline protection.
 On a unique overlap with the previous observation, the GPU checks at least 24
 previously protected high-gradient samples for agreement in edge direction and RGB.
 At 70% agreement, it retains the union of the two work rectangles within the current

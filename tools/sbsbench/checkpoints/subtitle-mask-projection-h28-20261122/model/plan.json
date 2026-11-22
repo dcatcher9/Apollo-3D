@@ -1,0 +1,47 @@
+{
+  "runtime": {
+    "python": "E:\\ApolloDev\\modelopt-py312\\Scripts\\python.exe",
+    "version": "3.12.14 (main, Aug 25 2026, 14:01:42) [MSC v.1944 64 bit (AMD64)]",
+    "numpy": "2.5.1",
+    "Pillow": "12.3.0",
+    "onnx": "1.21.0"
+  },
+  "source": {
+    "path": "E:\\ApolloDev\\rawmatte-matte-projection-1122\\train.py",
+    "sha256": "725757720ee68d8ebcf82c3b51018d1eaa4fa43aa48488666bcd79369dad8aad",
+    "bytes": 8603
+  },
+  "fit": [
+    {
+      "path": "E:\\ApolloDev\\rawmatte-normalized-multires-fit-1121\\fit-manifest.json",
+      "sha256": "91f36fd5539f9ac2f239c093942fca6e8dc65f927a5f1cdcc470e793a441c558",
+      "bytes": 193412
+    },
+    {
+      "path": "E:\\ApolloDev\\rawmatte-normalized-polarity-fit-1121\\fit-manifest.json",
+      "sha256": "3dfa62541b2f65f5fa9b3530f5e7880837f33a47047cb704c2de3efd3cf63e5b",
+      "bytes": 171568
+    }
+  ],
+  "base": {
+    "path": "E:\\ApolloDev\\rawmatte-line-palette-1122\\trained.json",
+    "sha256": "5aa031a9a139e8aa3625681ab5b552589426bc0e94c9122036c46bd1b201a0c8",
+    "bytes": 1483
+  },
+  "cue_impl": {
+    "path": "E:\\ApolloDev\\rawmatte-matte-projection-1122\\cues.py",
+    "sha256": "69efd54b4ec272274ddc5c7e6a76b542d2b42e0219333e1d69ac421b9f531f1c",
+    "bytes": 1898
+  },
+  "seed": 318122,
+  "iterations": 1800,
+  "candidates": [
+    0,
+    0.25,
+    0.5,
+    0.75,
+    1
+  ],
+  "threshold": 38,
+  "change": "Train eight new first-layer columns for fill and outline color projection and residual at both background scales. Every original weight is fixed. Counterfactual pairs share glyph, OCR geometry and encoder output. Only the clean background texture differs. Supervise confirmed texture-induced errors and preserve already correct glyph sites and background. Choose interpolation on uniformly sampled held-out fit rows before opening fresh, 4K or marked-capture metrics."
+}
