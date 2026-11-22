@@ -849,7 +849,7 @@
         "host_sbs_direct_glyph_publish_line",
         "host_sbs_direct_glyph_finish_history"
       ],
-      "source_closure_sha256": "782597e12630d49614b28aa4349c997601b65a43c432f54b6f08c141c53a9e58"
+      "source_closure_sha256": "175b3a7220a8735ac2c115d86dd6f64625a8b70326015c2147eb5c596059d071"
     },
     {
       "name": "direct_glyph_prepare",

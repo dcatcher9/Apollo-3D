@@ -4,13 +4,13 @@
   "artifact": {
     "path": "models/direct_glyph_stroke_h144_w512_mixed.onnx",
     "bytes": 40424,
-    "sha256": "3a19500dfd1bfdc01db0f166cc645c7b83f5799e716cb8d8fb52d1175927115e"
+    "sha256": "40f6b99cc3748014c1965875835bced2a1220ebf071a27305b2c3f9aa61e92f1"
   },
   "source_onnx": {
     "file": "direct_glyph_stroke_h144_w512_fp32.onnx",
-    "sha256": "7cbbc4bff5203bf9df46aa9ab1b5139470eba417033a733b8e9e2d263731b10e"
+    "sha256": "d30ddc9f381a59efb0ccbade075eb6e73f785b798e51536a36b257dcafc7def8"
   },
-  "checkpoint_sha256": "3fd628f80f777fae490a44a082567e00ecdd7b3a88c8f140931aca94d3ba0b51",
+  "checkpoint_sha256": "bdbeb15730ffe0c7a9d0cdac67ec6baa691156cf4a0ed20e38772a760c2ee4b8",
   "exporter": "tools/sbsbench/export_direct_glyph_mixed_precision.py",
   "input": {
     "name": "rgb",
@@ -41,10 +41,11 @@
   "precision": "FP16 convolutions and feature activations; FP32 log probabilities and external I/O",
   "engine_recipe": "stroke-h144-w512-fp16conv-fp32scores-notf32-v1",
   "qualification": {
-    "device": "RTX 5080",
-    "tensorrt": "11.2.1",
-    "latency_sha256": "7392878f487254012ef2c7a05e8599867b2ad0ee0b9740986a9af9d405a59d08",
-    "native_4k_replay_sha256": "167f026b04703407a7c11bc966aecb0e0992d6df06fc772c8e86e19f744e54e2",
-    "small_native_replay_sha256": "e2e2d6a06a6c03ef8214b47bf9b555f83dca9ac5d3f97ac232290f7e6d56f992"
+    "scope": "Offline CPU ONNX Runtime parity between common and small tiles. This candidate awaits RTX TensorRT replay and timing.",
+    "cpu_onnxruntime_version": "1.22.0",
+    "profile_comparison_sha256": "93fbdacdae595e57e830fb9a1dd39eb22c6b4d6157542ecbfb1344f9d10e8971",
+    "decoded_pixels": 1899688,
+    "cross_profile_alpha8_max_difference": 0,
+    "cross_profile_cutoff_decisions_different": 0
   }
 }

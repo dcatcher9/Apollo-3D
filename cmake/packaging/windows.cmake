@@ -83,9 +83,16 @@ install(DIRECTORY "${SUNSHINE_SOURCE_ASSETS_DIR}/windows/assets/"
         DESTINATION "${SUNSHINE_ASSETS_DIR}"
         COMPONENT assets)
 
-# copy assets (excluding shaders) to build directory, for running without install
+# Stage bundled models with their provenance when either changes in an incremental build.
+set(model_assets_dir "${SUNSHINE_SOURCE_ASSETS_DIR}/windows/assets/models")
+file(GLOB_RECURSE bundled_models CONFIGURE_DEPENDS RELATIVE "${model_assets_dir}" "${model_assets_dir}/*")
+foreach(model IN LISTS bundled_models)
+    configure_file("${model_assets_dir}/${model}" "${CMAKE_BINARY_DIR}/assets/models/${model}" COPYONLY)
+endforeach()
+# Copy the remaining assets for running without install.
 file(COPY "${SUNSHINE_SOURCE_ASSETS_DIR}/windows/assets/"
         DESTINATION "${CMAKE_BINARY_DIR}/assets"
+        PATTERN "models" EXCLUDE
         PATTERN "shaders" EXCLUDE)
 # use junction for shaders directory
 cmake_path(CONVERT "${SUNSHINE_SOURCE_ASSETS_DIR}/windows/assets/shaders"

@@ -80,11 +80,11 @@ namespace models {
     // The static graph uses FP16 convolutions and exposes FP32 RGB and log scores.
     inline constexpr std::string_view direct_glyph_model_name = "direct_glyph";
     inline constexpr std::string_view direct_glyph_checkpoint_sha256 =
-        "3fd628f80f777fae490a44a082567e00ecdd7b3a88c8f140931aca94d3ba0b51";
+        "bdbeb15730ffe0c7a9d0cdac67ec6baa691156cf4a0ed20e38772a760c2ee4b8";
     inline constexpr std::string_view direct_glyph_model_asset_path =
         "models/direct_glyph_stroke_h144_w512_mixed.onnx";
     inline constexpr std::string_view direct_glyph_model_onnx_sha256 =
-        "3a19500dfd1bfdc01db0f166cc645c7b83f5799e716cb8d8fb52d1175927115e";
+        "40f6b99cc3748014c1965875835bced2a1220ebf071a27305b2c3f9aa61e92f1";
     inline constexpr std::string_view direct_glyph_engine_recipe =
         "stroke-h144-w512-fp16conv-fp32scores-notf32-v1";
     inline constexpr std::string_view direct_glyph_engine_input_name = "rgb";
@@ -105,7 +105,7 @@ namespace models {
             case tile_profile_e::small:
                 return {
                     "models/direct_glyph_stroke_h104_w384_mixed.onnx",
-                    "36f3b6921490723fbd1c2ca9a094c758051fcd984ad48e8b4025c01281275fad",
+                    "13880f4ecf5438421881272192dce7692568393c1ceb29a14c3fecf8dadbdfd5",
                     "stroke-h104-w384-fp16conv-fp32scores-notf32-v1",
                 };
         }

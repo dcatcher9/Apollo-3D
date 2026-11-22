@@ -106,7 +106,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | `current_trusted_inner` | 1 | `5fdc9a1be98291902d63ca639f5bcfd80e88821b6df17bd083a23b5e09c32884` |
 | `direct_glyph_plan` | 2 | `3c1df1656492065c62c519ceffd49f3d1bc1d3a4e26c50ba0b8a2eead4dc2844` |
 | `direct_glyph_transport` | 4 | `2df402561c88d7e2b2672660e2f9d5f42b06d9815c87b48511adb05af6226b30` |
-| `direct_glyph_palette` | 16 | `782597e12630d49614b28aa4349c997601b65a43c432f54b6f08c141c53a9e58` |
+| `direct_glyph_palette` | 16 | `175b3a7220a8735ac2c115d86dd6f64625a8b70326015c2147eb5c596059d071` |
 | `direct_glyph_prepare` | 1 | `219a6a305c05ca3ac1744286a4e87b83b61128c10e05c61ec517337f279ec940` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->
 
@@ -480,8 +480,12 @@ border one eighth of the box height on all four sides, with a minimum of one pix
 The three RGB smoothing passes also smooth these counts. After estimating each color's
 frequency in both regions, the decoder favors colors concentrated inside the line when
 choosing its two representative inks. The four role probabilities used per pixel retain
-their original normalization. The opacity weights were fitted with a penalty on losing
-previously correct glyph and background decisions, while preserving the trained outline gate.
+their original normalization. The encoder trains on the same libass caption over two
+different backgrounds. A calibration loss constrains the two line-average colors used
+by the decoder. The final opacity layer trains on stroke interiors, edges, gaps and
+nearby background while preserving correctly classified pixels. Both tile profiles
+share the trained weights. The model checkpoint and offline comparisons are recorded
+in the [training provenance](../tools/sbsbench/checkpoints/subtitle-mask-edge-opacity-h28-20261122/model/provenance.json).
 On a unique overlap with the previous observation, the GPU checks at least 24
 previously protected high-gradient samples for agreement in edge direction and RGB.
 At 70% agreement, it retains the union of the two work rectangles within the current

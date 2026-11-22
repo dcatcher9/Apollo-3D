@@ -1,0 +1,136 @@
+{
+  "encoder_sha256": "40f6b99cc3748014c1965875835bced2a1220ebf071a27305b2c3f9aa61e92f1",
+  "encoder_checkpoint_sha256": "bdbeb15730ffe0c7a9d0cdac67ec6baa691156cf4a0ed20e38772a760c2ee4b8",
+  "profiles": {
+    "common": {
+      "fp32": "d30ddc9f381a59efb0ccbade075eb6e73f785b798e51536a36b257dcafc7def8",
+      "mixed": "40f6b99cc3748014c1965875835bced2a1220ebf071a27305b2c3f9aa61e92f1"
+    },
+    "small": {
+      "fp32": "2df3e0f2873a98d1b128cf5a92b6a9496acbd18498c3802f53b4603f87cd0fe0",
+      "mixed": "13880f4ecf5438421881272192dce7692568393c1ceb29a14c3fecf8dadbdfd5"
+    }
+  },
+  "decoder_sha256": "2b9219eb108ec93d945f99a36b28d606f74efefa5c2b45cb9c2a558608d6e003",
+  "native_shader_sha256": "0a80210d466dd03447b7e9884bf5708ee21edb89a57eb10d2aeff3916c43637a",
+  "gate_checkpoint": "subtitle-mask-outline-gate-h28-20261122/model/gate.pt",
+  "gate_sha256": "1143345c7cf3617fddf31515efed098951ca794d4e1e4d520fb7303270421801",
+  "gate_strength": 0.75,
+  "feature_count": 50,
+  "cutoff_alpha8": 38,
+  "training": {
+    "lines": 330,
+    "validation_lines": 90,
+    "training_views": 660,
+    "fit_sites": 1692482,
+    "validation_sites": 324000,
+    "readout_parameters": 33,
+    "method": "Use exact libass layers and two photos per cue. Calibrate spatial roles and line-average colors, then refit the native opacity output on sampled strokes, narrow gaps and nearby background. Keep the deployed cutoff, renderer and previous-caption confirmation.",
+    "seed": 183124,
+    "steps": 1000,
+    "selected_weight_fraction": 1
+  },
+  "offline": {
+    "encoder_profile_parity": {
+      "common-mixed vs small-mixed": {
+        "q38": 0,
+        "q8_max": 0,
+        "max_role_difference": 0.0
+      },
+      "common-fp32 vs small-fp32": {
+        "q38": 0,
+        "q8_max": 0,
+        "max_role_difference": 0.0
+      },
+      "common-mixed vs common-fp32": {
+        "q38": 30,
+        "q8_max": 1,
+        "max_role_difference": 0.001082777976989746
+      }
+    },
+    "profile_pixels": 1899688,
+    "d3d11_warp_readout": {
+      "n": 23076,
+      "near_q38": 116,
+      "q38_mismatch": 0,
+      "q8_max": 0
+    },
+    "measurements": {
+      "native-SD": {
+        "release": {
+          "fill_outline_f1": 0.7997541,
+          "recall": 0.879726,
+          "stable_flips": 6455,
+          "stable_sites": 104607,
+          "background_selected": 67004
+        },
+        "candidate": {
+          "fill_outline_f1": 0.819709,
+          "recall": 0.8874597,
+          "stable_flips": 5529,
+          "stable_sites": 104607,
+          "background_selected": 58129
+        }
+      },
+      "720": {
+        "release": {
+          "fill_outline_f1": 0.8746249,
+          "recall": 0.9442848,
+          "stable_flips": 1316,
+          "stable_sites": 270411,
+          "background_selected": 116280
+        },
+        "candidate": {
+          "fill_outline_f1": 0.8743564,
+          "recall": 0.940755,
+          "stable_flips": 1351,
+          "stable_sites": 270411,
+          "background_selected": 114181
+        }
+      },
+      "1080": {
+        "release": {
+          "fill_outline_f1": 0.9006042,
+          "recall": 0.966706,
+          "stable_flips": 1353,
+          "stable_sites": 584144,
+          "background_selected": 210395
+        },
+        "candidate": {
+          "fill_outline_f1": 0.9021348,
+          "recall": 0.9641544,
+          "stable_flips": 1256,
+          "stable_sites": 584144,
+          "background_selected": 202512
+        }
+      },
+      "2160": {
+        "release": {
+          "fill_outline_f1": 0.8750464,
+          "recall": 0.9717127,
+          "stable_flips": 3008,
+          "stable_sites": 2190414,
+          "background_selected": 1091821
+        },
+        "candidate": {
+          "fill_outline_f1": 0.8846064,
+          "recall": 0.9716417,
+          "stable_flips": 2799,
+          "stable_sites": 2190414,
+          "background_selected": 986281
+        }
+      }
+    },
+    "replay_sha256": {
+      "native-SD/release": "ad33a23278c8ef07467e0497a1cfab5abb21cae2b6e3765c01f37b9c024e5e3f",
+      "native-SD/candidate": "b522e52dab047e796364ced31cc69a14d6f8f138f40175a5dfae10f9f02e50b9",
+      "720/release": "14b96c245dc0d23debdf98f2f70aa320d53f2049f058701ed69ccad8ca21b7a4",
+      "720/candidate": "6c1b28ab8ccdb9ce5c808c0a60d5e08a196d5398f61a50f35abcdc85d2d2e386",
+      "1080/release": "135c99182a73de6a16dea61ba6cb6bfed73b35487a9d88d277f487910d5e7141",
+      "1080/candidate": "2ef79d8198ecd329d4d1f34dce053f053881800b226bfba0482832eb111ee228",
+      "2160/release": "8ce45cf312e3b0e4d408c46f0abb7d83eadbef4c3f24c99f0a938d22c8f867e0",
+      "2160/candidate": "ef574866afa9367c30dfe7db0b239d7e2bc7af94ef703feb0ea3a26096055182"
+    }
+  },
+  "inference_qualification": "Offline mixed ONNX on CPU and exported decoder on D3D11 WARP. TensorRT end-to-end parity and device latency pending."
+}
