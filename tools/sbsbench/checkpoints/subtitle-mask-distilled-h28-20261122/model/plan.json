@@ -1,0 +1,39 @@
+{
+  "runtime": {
+    "python": "E:\\ApolloDev\\modelopt-py312\\Scripts\\python.exe",
+    "version": "3.12.14 (main, Aug 25 2026, 14:01:42) [MSC v.1944 64 bit (AMD64)]",
+    "numpy": "2.5.1",
+    "Pillow": "12.3.0",
+    "onnx": "1.21.0"
+  },
+  "trainer": {
+    "path": "E:\\ApolloDev\\rawmatte-encoder-roles-1122\\distill_roles.py",
+    "sha256": "75a5e4a82647666258b73b1812ac47bd59acc9675e7df5649a5d89f8eedcb41a",
+    "bytes": 5082
+  },
+  "parents": {
+    "head-stock": {
+      "path": "E:\\ApolloDev\\rawmatte-encoder-roles-1122\\head-stock\\trained.json",
+      "sha256": "6a28c23e456b5840f6ba77a0d90e1bb9847e6b9f5a6960929ce58a54903ad03d",
+      "bytes": 5772
+    },
+    "head-trained": {
+      "path": "E:\\ApolloDev\\rawmatte-encoder-roles-1122\\head-trained\\trained.json",
+      "sha256": "632a3395071469a12c0dcb4b8127f698b14142240cb2438b105e1e9785b1e7b5",
+      "bytes": 5763
+    },
+    "head-data-only": {
+      "path": "E:\\ApolloDev\\rawmatte-encoder-roles-1122\\head-data-only\\trained.json",
+      "sha256": "57660705e692030ed143866fa91bda7d6600d24c4d2b6bc3eb40069fdfce3e8d",
+      "bytes": 27457
+    },
+    "head-balanced": {
+      "path": "E:\\ApolloDev\\rawmatte-encoder-roles-1122\\head-balanced\\trained.json",
+      "sha256": "01ab061665d40128ff7b2c92a17d526cdfe2ffc75bbcfa8b8d64a1d74d2fd64d",
+      "bytes": 27384
+    }
+  },
+  "steps": 2900,
+  "seed": 121122,
+  "design": "One native opacity head uses the original deployed encoder. Train with two role-encoder teachers on the same pixels. Transfer a teacher's confidence only when consistent with the exact libass target. Preserve older correct outputs on native fill, clear and gaps. Select by balanced score across both held-out-phrase cohorts. Teachers run only during training."
+}
