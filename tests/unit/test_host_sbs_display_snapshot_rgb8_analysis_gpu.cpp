@@ -724,7 +724,6 @@ TEST_F(HostSbsDirectGlyphPublishGpuTest, NativeHistoryRequiresOneMatchingCueInsi
     hr(device->CreateUnorderedAccessView(b.buffer.Get(), nullptr, &b.uav));
     return b;
   };
-  const auto cb = constants(std::array<UINT, 8> {width, height, 17, 0, 1, 1, 0, 0});
   const std::array<UINT, 4> old_box {10, 8, 82, 40}, current_box {16, 10, 80, 38}, cap_box {12, 6, 84, 42};
   std::array<UINT, 8 * 16> old {};
   for (UINT at : {0u, 4u, 8u}) {
@@ -748,7 +747,8 @@ TEST_F(HostSbsDirectGlyphPublishGpuTest, NativeHistoryRequiresOneMatchingCueInsi
   }
   const auto previous_rgb = texture(width, height, DXGI_FORMAT_R16G16B16A16_FLOAT, false, a.data(), width * 8);
   const auto swapped_rgb = texture(width, height, DXGI_FORMAT_R16G16B16A16_FLOAT, false, b.data(), width * 8);
-  const auto exercise = [&](UINT count, UINT cap_token, bool swap) {
+  const auto exercise = [&](UINT count, UINT cap_token, bool swap, UINT center_twice = 0) {
+    const auto cb = constants(std::array<UINT, 8> {width, height, 17, 0, 1, 1, 0, center_twice});
     std::array<UINT, 36> work {count ? 2u : 1u, count}, caps {1u, count, cap_token, 0u};
     for (UINT slot = 0; slot < count; ++slot) {
       std::copy(current_box.begin(), current_box.end(), work.begin() + 4u + 4u * slot);
@@ -783,6 +783,12 @@ TEST_F(HostSbsDirectGlyphPublishGpuTest, NativeHistoryRequiresOneMatchingCueInsi
   EXPECT_EQ((std::vector<UINT>(swap[0].begin() + 4, swap[0].begin() + 8)), (std::vector<UINT> {14, 8, 82, 40}));
   EXPECT_EQ(swap[1][14], 0u);
   EXPECT_EQ(swap[2][24u * width + 35u], 0u);
+  // Swapped RGB prevents history from extending the current box.
+  const auto left = exercise(1, 17, true, 90);
+  EXPECT_EQ((std::vector<UINT>(left[0].begin() + 4, left[0].begin() + 8)), (std::vector<UINT> {12, 8, 82, 40}));
+  const auto right = exercise(1, 17, true, 102);
+  EXPECT_EQ((std::vector<UINT>(right[0].begin() + 4, right[0].begin() + 8)), (std::vector<UINT> {14, 8, 84, 40}));
+  EXPECT_EQ(exercise(1, 17, true, 20)[0], swap[0]);
   const auto ambiguous = exercise(2, 17, false);
   EXPECT_EQ(ambiguous[1][12], 0u);
   EXPECT_EQ(ambiguous[1][16 + 12], 0u);

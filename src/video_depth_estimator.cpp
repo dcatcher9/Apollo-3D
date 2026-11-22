@@ -6752,12 +6752,17 @@ namespace models {
       const auto profile = subtitle_direct_glyph_line_palette ? glyph::tile_profile_e::common :
                            glyph::tile_profile_for_band(width, crop, height - crop);
       subtitle_direct_glyph_profile = profile;
+      const auto &region = pending_root->input_region;
+      const auto line_reference = subtitle_direct_glyph_line_palette && pending_root->subtitle_line_policy == subtitle_line_policy_e::video_caption ?
+        subtitle_ocr_line_reference(width, height, region.source_width, region.source_height, region.left, region.top, region.is_video_region()) :
+        std::nullopt;
       const glyph::request_t score {
         .source_rgb = audit ? audit->display_snapshot_band() : nullptr, .work = work, .width = width, .band_height = crop,
         .crop_top = height - crop, .token = publication.token, .capture_plan = subtitle_direct_glyph_capture_plan,
         .adaptive_context = subtitle_direct_glyph_adaptive_context,
         .profile = profile,
         .detector_caps = subtitle_direct_glyph_line_palette ? subtitle_current_outline_raw_matte.direct_detector_caps() : nullptr,
+        .line_center_twice_source = line_reference ? static_cast<UINT>(std::max(0, line_reference->center_twice_source)) : 0u,
         .generation = publication.analysis_generation, .frame = publication.frame,
         .origin_x = pending_root->input_region.left, .origin_y = pending_root->input_region.top,
         .color_domain = static_cast<UINT>(pending_root->color_space),

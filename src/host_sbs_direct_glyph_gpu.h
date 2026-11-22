@@ -38,6 +38,7 @@ namespace models::host_sbs_direct_glyph_gpu {
     bool adaptive_context = false;
     tile_profile_e profile = tile_profile_e::common;
     ID3D11ShaderResourceView *detector_caps = nullptr;
+    UINT line_center_twice_source = 0;
     std::uint64_t generation = 0, frame = 0;
     UINT origin_x = 0, origin_y = 0, color_domain = 0;
     bool reset_history = false;

@@ -8,7 +8,7 @@ cbuffer Schedule : register(b0) {
     uint HasSource;
     uint HasPrevious;
     uint Slot;
-    uint Reserved;
+    uint LineCenterTwice;
 };
 ByteAddressBuffer Caps : register(t0);
 StructuredBuffer<GlyphLine> PreviousLines : register(t1);
@@ -40,7 +40,17 @@ bool overlaps(uint4 a, uint4 b) {
 uint4 expanded_work(uint index, uint4 cap) {
     uint4 original = Work.Load4(16u+16u*index);
     uint margin = (original.w-original.y+15u)/16u;
-    return uint4(max(cap.xy, max(original.xy, margin)-margin), min(cap.zw, original.zw+margin));
+    uint4 box = uint4(max(cap.xy, max(original.xy, margin)-margin), min(cap.zw, original.zw+margin));
+    // A detector can trim an isolated stroke at one end of a centered caption.
+    if (LineCenterTwice > 0u && 2u * box.x <= LineCenterTwice && LineCenterTwice < 2u * box.z) {
+        int offset = int(box.x + box.z) - int(LineCenterTwice);
+        uint extension = min(box.w - box.y, uint(abs(offset)));
+        if (offset > 0)
+            box.x -= min(extension, box.x - cap.x);
+        else
+            box.z += min(extension, cap.z - box.z);
+    }
+    return box;
 }
 
 [numthreads(1,1,1)]

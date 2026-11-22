@@ -331,7 +331,7 @@ namespace models::host_sbs_shader_cache {
     host_sbs_direct_glyph_finish_history,
   };
   inline constexpr std::string_view direct_glyph_palette_source_closure_sha256 =
-    "47f71136c93f0201a01cadbe2f86eef84d30aa7412f18201b98c19a611676209";
+    "13187d9714490230b852814ea35442fcaf567044b7733140fe3cc85687d04e99";
 
   inline constexpr std::array direct_glyph_prepare_specs {
     host_sbs_direct_glyph_prepare,

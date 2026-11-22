@@ -106,7 +106,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | `current_trusted_inner` | 1 | `5fdc9a1be98291902d63ca639f5bcfd80e88821b6df17bd083a23b5e09c32884` |
 | `direct_glyph_plan` | 2 | `3c1df1656492065c62c519ceffd49f3d1bc1d3a4e26c50ba0b8a2eead4dc2844` |
 | `direct_glyph_transport` | 4 | `2df402561c88d7e2b2672660e2f9d5f42b06d9815c87b48511adb05af6226b30` |
-| `direct_glyph_palette` | 16 | `47f71136c93f0201a01cadbe2f86eef84d30aa7412f18201b98c19a611676209` |
+| `direct_glyph_palette` | 16 | `13187d9714490230b852814ea35442fcaf567044b7733140fe3cc85687d04e99` |
 | `direct_glyph_prepare` | 1 | `219a6a305c05ca3ac1744286a4e87b83b61128c10e05c61ec517337f279ec940` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->
 
@@ -451,7 +451,10 @@ sample in the current completed tile windows and an alpha8 value of at least
 64. These pixels reuse the original tile plan and scores.
 
 The native decoder expands each side of the working rectangle by one sixteenth of its
-height, rounded up and clipped to the original detector cover. The encoder scales the
+height, rounded up and clipped to the original detector cover. When an accepted video
+caption spans the OCR reference center, the decoder extends its shorter horizontal
+side toward symmetry by at most one working-rectangle height, within the same cover.
+This includes isolated strokes near the ends of centered lines. The encoder scales the
 entire resulting rectangle to 28 rows,
 preserves its aspect ratio, and processes long lines in 440-column windows of the
 512×144 mixed TensorRT profile. The 36-column horizontal context on each side stays

@@ -85,7 +85,8 @@ class palette_transport_t {
   static bool same_geometry(const request_t &a, const request_t &b) {
     return a.width == b.width && a.band_height == b.band_height && a.crop_top == b.crop_top &&
            a.origin_x == b.origin_x && a.origin_y == b.origin_y && a.generation == b.generation &&
-           a.color_domain == b.color_domain && a.frame > b.frame;
+           a.color_domain == b.color_domain && a.line_center_twice_source == b.line_center_twice_source &&
+           a.frame > b.frame;
   }
 
   void ensure(field_t &f, UINT count, UINT stride) {
@@ -142,7 +143,7 @@ class palette_transport_t {
   }
 
   std::array<UINT, 8> schedule() const {
-    return {width_, height_, UINT(job_.token), UINT(job_.token >> 32u), UINT(source_ != nullptr), UINT(history_valid_), slot_, 0};
+    return {width_, height_, UINT(job_.token), UINT(job_.token >> 32u), UINT(source_ != nullptr), UINT(history_valid_), slot_, job_.line_center_twice_source};
   }
 
   void stage(stage_e entry, UINT arg, UINT gx, UINT gy, std::initializer_list<binding_t> inputs, field_t &destination, field_t *second = nullptr) {
