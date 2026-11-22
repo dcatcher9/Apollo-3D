@@ -586,6 +586,58 @@ protected:
   }
 };
 
+TEST_F(HostSbsDirectGlyphPublishGpuTest, CommonBackdropDoesNotDisplaceAnOutlineColor) {
+  const auto sources = cache::snapshot_sources(SUNSHINE_SHADERS_DIR, cache::direct_glyph_palette_specs);
+  ASSERT_TRUE(sources);
+  ASSERT_EQ(cache::source_closure_sha256(sources), cache::direct_glyph_palette_source_closure_sha256);
+  const auto code = cache::get(sources, cache::host_sbs_direct_glyph_palette_choose_colors);
+  ASSERT_TRUE(code);
+  ComPtr<ID3D11ComputeShader> shader;
+  hr(device->CreateComputeShader(code->data(), code->size(), nullptr, &shader));
+
+  using RoleVotes = std::array<float, 4>;
+  const auto view = [&](const std::vector<RoleVotes> &values) {
+    D3D11_BUFFER_DESC desc {};
+    desc.ByteWidth = static_cast<UINT>(values.size() * sizeof(RoleVotes));
+    desc.StructureByteStride = sizeof(RoleVotes);
+    desc.Usage = D3D11_USAGE_IMMUTABLE;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    const D3D11_SUBRESOURCE_DATA data {values.data(), 0, 0};
+    ComPtr<ID3D11Buffer> resource;
+    hr(device->CreateBuffer(&desc, &data, &resource));
+    ComPtr<ID3D11ShaderResourceView> result;
+    hr(device->CreateShaderResourceView(resource.Get(), nullptr, &result));
+    return result;
+  };
+
+  for (const UINT glyph : {0u, 4912u}) {
+    const UINT backdrop = 4912u - glyph;
+    std::vector<RoleVotes> votes(4913), posterior(votes.size());
+    votes[backdrop] = {9950, 10, 40, 0};
+    votes[glyph] = {984, 1000, 16, 0};
+    for (UINT bin = 1; bin <= 200; ++bin)
+      votes[bin] = {9.87f, 0, .13f, 0};
+    for (size_t bin = 0; bin < votes.size(); ++bin) {
+      const auto &v = votes[bin];
+      const auto total = v[0] + v[1] + v[2] + v[3];
+      for (size_t role = 0; role < v.size(); ++role)
+        posterior[bin][role] = (v[role] + .12f) / (total + .48f);
+    }
+    ASSERT_GT(votes[backdrop][2] * posterior[backdrop][2], votes[glyph][2] * posterior[glyph][2]);
+    const auto histogram = view(votes);
+    const auto palette = view(posterior);
+    const auto winners = buffer(2, false, false, true);
+    context->CSSetShader(shader.Get(), nullptr, 0);
+    context->CSSetShaderResources(4, 1, palette.GetAddressOf());
+    context->CSSetShaderResources(10, 1, histogram.GetAddressOf());
+    context->CSSetUnorderedAccessViews(0, 1, winners.uav.GetAddressOf(), nullptr);
+    context->Dispatch(1, 1, 1);
+    context->ClearState();
+    EXPECT_EQ(words(read(winners.buffer.Get())), (std::vector<UINT> {glyph, glyph}));
+  }
+}
+
 TEST_F(HostSbsDirectGlyphPublishGpuTest, ResolvedFringeRequiresCurrentCompletedTapsAndQ64) {
   const auto &specs = cache::direct_glyph_plan_specs;
   const auto sources = cache::snapshot_sources(SUNSHINE_SHADERS_DIR, specs);

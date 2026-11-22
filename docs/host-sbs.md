@@ -106,7 +106,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | `current_trusted_inner` | 1 | `5fdc9a1be98291902d63ca639f5bcfd80e88821b6df17bd083a23b5e09c32884` |
 | `direct_glyph_plan` | 2 | `3c1df1656492065c62c519ceffd49f3d1bc1d3a4e26c50ba0b8a2eead4dc2844` |
 | `direct_glyph_transport` | 4 | `2df402561c88d7e2b2672660e2f9d5f42b06d9815c87b48511adb05af6226b30` |
-| `direct_glyph_palette` | 16 | `13187d9714490230b852814ea35442fcaf567044b7733140fe3cc85687d04e99` |
+| `direct_glyph_palette` | 16 | `4b7731b63430ed76e001603b798ff13e9376829300cde83ec128e928113ddeae` |
 | `direct_glyph_prepare` | 1 | `219a6a305c05ca3ac1744286a4e87b83b61128c10e05c61ec517337f279ec940` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->
 
@@ -467,6 +467,10 @@ The native opacity decoder trains on libass fill, outline and shadow layers, inc
 light and dark glyphs with the same geometry. Its protection target is the union of fill
 and visible outline. The training uses the same mixed-precision encoder as inference.
 A learned per-pixel correction uses local stroke evidence to adjust the line-wide RGB outline vote before opacity decoding. It shares the native decode dispatch and the mixed encoder.
+When choosing the representative outline color, the GPU compares each RGB bin's observed
+outline fraction with the outline fraction across the line. A bin below that rate receives
+a proportional discount. This keeps a frequent background color with weak outline evidence
+from displacing the glyph color. The same histogram supplies both fractions.
 On a unique overlap with the previous observation, the GPU checks at least 24
 previously protected high-gradient samples for agreement in edge direction and RGB.
 At 70% agreement, it retains the union of the two work rectangles within the current

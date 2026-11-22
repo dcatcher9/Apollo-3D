@@ -157,12 +157,33 @@ float4 Lift(StructuredBuffer<float4> field, Taps t)
 // Break exact ties by the first RGB bin, matching the training palette.
 groupshared float2 Rank[256];
 groupshared uint2 RankId[256];
+groupshared float2 OutlineAndTotal[256];
 [numthreads(256, 1, 1)] void choose_colors(uint lane : SV_GroupIndex) {
+    float2 support = 0;
+    [loop] for (uint p = lane; p < 4913; p += 256)
+    {
+        float4 votes = PreviousHistogram[p];
+        support += float2(votes.z, dot(votes, 1.0f));
+    }
+    OutlineAndTotal[lane] = support;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll] for (uint stride = 128; stride > 0; stride >>= 1)
+    {
+        if (lane < stride)
+            OutlineAndTotal[lane] += OutlineAndTotal[lane + stride];
+        GroupMemoryBarrierWithGroupSync();
+    }
+    float lineOutlineRate = OutlineAndTotal[0].x / max(OutlineAndTotal[0].y, 1.e-8f);
     float2 best = -1;
     uint2 bestId = 0;
     [loop] for (uint p = lane; p < 4913; p += 256)
     {
-        float2 rank = PreviousHistogram[p].yz * Palette[p].yz;
+        float4 votes = PreviousHistogram[p];
+        float2 rank = votes.yz * Palette[p].yz;
+        // A frequent backdrop can collect many weak outline votes. Discount colors whose
+        // observed outline rate falls below the line's rate before picking the outline ink.
+        float observedOutlineRate = votes.z / (dot(votes, 1.0f) + .48f);
+        rank.y *= saturate(observedOutlineRate / max(lineOutlineRate, 1.e-8f));
         if (rank.x > best.x)
         {
             best.x = rank.x;
