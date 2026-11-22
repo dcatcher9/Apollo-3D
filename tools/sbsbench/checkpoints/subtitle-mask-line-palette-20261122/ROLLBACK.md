@@ -22,7 +22,7 @@ The local tag is `subtitle-mask/line-palette-h28-20261122`. The checkpoint also 
 $Recovered = 'E:\ApolloDev\recovered-line-palette-git'
 $Packed = 'E:\ApolloDev\recovered-line-palette-git.zip'
 $Tree = 'tools/sbsbench/checkpoints/subtitle-mask-line-palette-20261122'
-git -C 'E:\Git\Repo\Apollo-3D' archive --format=zip -o $Packed "subtitle-mask/line-palette-h28-20261122:$Tree"
+git -C 'E:\Git\Repo\Apollo-3D' -c core.autocrlf=false archive --format=zip -o $Packed "subtitle-mask/line-palette-h28-20261122:$Tree"
 if ($LASTEXITCODE -ne 0) { throw 'Git archive failed' }
 Expand-Archive -LiteralPath $Packed -DestinationPath $Recovered -ErrorAction Stop
 & 'E:\ApolloDev\modelopt-py312\Scripts\python.exe' -B "$Recovered\run.py" verify
