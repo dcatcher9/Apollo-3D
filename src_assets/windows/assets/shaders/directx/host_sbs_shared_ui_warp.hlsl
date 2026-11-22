@@ -33,11 +33,12 @@ void prepare_main(uint3 id : SV_DispatchThreadID) {
     uint2 source_size; float plane;
     uint subtitle_authorized = SubtitleRenderAuthorized(source_size, plane) &&
         selected_receipt != 0u && all(source_size == PinSourceShape.xy) ? 1u : 0u;
+    // The field and weight planes hold the band once per eye, so both grids cover twice its rows.
     SharedPinPreparationStore.Store4(0u,
-        uint4((PinSourceShape.x + 15u) / 16u, (PinSourceShape.w + 15u) / 16u,
+        uint4((PinSourceShape.x + 15u) / 16u, (2u * PinSourceShape.w + 15u) / 16u,
               subtitle_authorized, 0u));
     SharedPinPreparationStore.Store4(16u,
-        uint4((PinSourceShape.w + 7u) / 8u, 1u, subtitle_authorized, 0u));
+        uint4((2u * PinSourceShape.w + 7u) / 8u, 1u, subtitle_authorized, 0u));
     SharedPinPreparationStore.Store4(32u,
         uint4(selected_receipt, subtitle_authorized, warp_authorized, 0u));
     // The owner has cleared every row. Keep this literal receipt header even when no
@@ -77,7 +78,7 @@ RWStructuredBuffer<uint> TextGameVerdictStore : register(u3);
 // scene is the field before any pinning, so the plane never measures its own correction.
 static const uint TextGameVerdictWords = 4u + 256u * 6u;
 static const float TextGamePlaneLevels[5] = {0.0f, 0.001f, 0.002f, 0.003f, 0.0035f};
-float SharedOriginalParallax(float2 uv);
+float SharedOriginalParallax(float2 uv, uint eye);
 [numthreads(16,16,1)]
 void text_game_verify_main(uint3 id : SV_DispatchThreadID) {
     if (id.x >= PinSourceShape.x || id.y >= PinSourceShape.w) return;
@@ -93,7 +94,8 @@ void text_game_verify_main(uint3 id : SV_DispatchThreadID) {
     if (coverage >= 0.125f && isfinite(cap) && cap >= 0.0f) {
         uint2 tile = min(uint2(uv * 16.0f), uint2(15u, 15u));
         uint base = 4u + (tile.y * 16u + tile.x) * 6u;
-        float scene = SharedOriginalParallax((float2(pixel) + 0.5f) / float2(PinSourceShape.xy));
+        // The plane policy measures Base, the one field that is the same for both eyes.
+        float scene = SharedOriginalParallax((float2(pixel) + 0.5f) / float2(PinSourceShape.xy), 2u);
         InterlockedAdd(TextGameVerdictStore[base], 1u);
         [unroll] for (uint level = 0u; level < 5u; ++level)
             if (scene + 0.05f * cap > min(TextGamePlaneLevels[level], 0.5f * cap))
@@ -133,8 +135,8 @@ float TextGameCoverageAt(uint2 pixel) {
 }
 static const float TextGameNoGlyph = 1.0e6f;
 // One thread walks one column of the pinned rows down and back up, and leaves in the field plane
-// the number of rows from each texel to the nearest glyph texel of its column. The initializer
-// reads that distance and replaces it with the field.
+// the number of rows from each texel to the nearest glyph texel of its column, once in each eye's
+// rows. The initializer reads its own texel's distance and replaces it with that eye's field.
 [numthreads(64,1,1)]
 void text_game_columns_main(uint3 id : SV_DispatchThreadID) {
     if (id.x >= PinSourceShape.x) return;
@@ -143,30 +145,44 @@ void text_game_columns_main(uint3 id : SV_DispatchThreadID) {
         bool glyph = TextGameCoverageAt(uint2(id.x, row + PinSourceShape.z)) >= 0.5f;
         distance = glyph ? 0.0f : min(distance + 1.0f, TextGameNoGlyph);
         SunshineHostFinalStore[uint2(id.x, row)] = distance;
+        SunshineHostFinalStore[uint2(id.x, row + PinSourceShape.w)] = distance;
     }
     distance = TextGameNoGlyph;
     [loop] for (uint back = PinSourceShape.w; back > 0u; --back) {
         uint2 at = uint2(id.x, back - 1u);
         float down = SunshineHostFinalStore[at];
         distance = down == 0.0f ? 0.0f : min(distance + 1.0f, TextGameNoGlyph);
-        if (distance < down) SunshineHostFinalStore[at] = distance;
+        if (distance < down) {
+            SunshineHostFinalStore[at] = distance;
+            SunshineHostFinalStore[uint2(at.x, at.y + PinSourceShape.w)] = distance;
+        }
     }
 }
 #endif
 
-float SharedNativeBaseSample(float2 uv) {
+// The scene field of one eye (0 left, 1 right) from the eye-specific limiter's store, whose rows
+// are the left eye's and then the right eye's. Eye 2, or a draw without that store, reads Base.
+float SharedSceneFieldLoad(int2 texel, int row_offset, bool eye_field) {
+    if (eye_field) return EyeParallax.Load(int3(texel.x, texel.y + row_offset, 0));
+    return BaseParallax.Load(int3(texel, 0));
+}
+float SharedNativeBaseSample(float2 uv, uint eye) {
     // Building a second sampled field needs FP32 coefficients: hardware bilinear's
     // quantized fractions can make a source 0.5-pixel slope become >0.5 on this grid.
     uint2 size;BaseParallax.GetDimensions(size.x,size.y);
+    uint2 eye_size;EyeParallax.GetDimensions(eye_size.x,eye_size.y);
+    bool eye_field=eye<2u&&eye_size.y>=2u;
+    if(eye_field)size=uint2(eye_size.x,eye_size.y/2u);
+    int row_offset=eye_field?(int)(eye*size.y):0;
     float2 position=saturate(uv)*float2(size)-0.5f;
     int2 low=int2(floor(position)),last=int2(size)-1;float2 fraction=position-float2(low);
-    float a=BaseParallax.Load(int3(clamp(low,int2(0,0),last),0));
-    float b=BaseParallax.Load(int3(clamp(low+int2(1,0),int2(0,0),last),0));
-    float c=BaseParallax.Load(int3(clamp(low+int2(0,1),int2(0,0),last),0));
-    float d=BaseParallax.Load(int3(clamp(low+int2(1,1),int2(0,0),last),0));
+    float a=SharedSceneFieldLoad(clamp(low,int2(0,0),last),row_offset,eye_field);
+    float b=SharedSceneFieldLoad(clamp(low+int2(1,0),int2(0,0),last),row_offset,eye_field);
+    float c=SharedSceneFieldLoad(clamp(low+int2(0,1),int2(0,0),last),row_offset,eye_field);
+    float d=SharedSceneFieldLoad(clamp(low+int2(1,1),int2(0,0),last),row_offset,eye_field);
     return lerp(lerp(a,b,fraction.x),lerp(c,d,fraction.x),fraction.y);
 }
-float SharedOriginalParallax(float2 uv) {
+float SharedOriginalParallax(float2 uv, uint eye) {
 #if defined(HOST_SBS_TEXT_GAME_PIN)
     if (!WarpAuthorized()) return 0.0f;
 #else
@@ -174,7 +190,7 @@ float SharedOriginalParallax(float2 uv) {
     // evaluate their independent live authorization, including the queued transaction.
     if (SharedPinGroupWarpAuthorized == 0u) return 0.0f;
 #endif
-    if (video_roi_active == 0.0f) return SharedNativeBaseSample(uv);
+    if (video_roi_active == 0.0f) return SharedNativeBaseSample(uv, eye);
     uint2 field_size; BaseParallax.GetDimensions(field_size.x, field_size.y);
     if (!VideoRoiRectValid() || !VideoRoiContentValid(field_size)) return 0.0f;
     float2 extent = video_roi_source_uv.zw - video_roi_source_uv.xy;
@@ -188,7 +204,7 @@ float SharedOriginalParallax(float2 uv) {
         ((float)content_extent.y / (float)content_extent.x);
     float projected_x=clamp(uv.x,video_roi_source_uv.x,video_roi_source_uv.z);
     float collar=VIDEO_ROI_MAX_HORIZONTAL_SLOPE*abs(uv.x-projected_x)+budget_per_v*abs(uv.y-projected_y);
-    float p=extent.x*SharedNativeBaseSample(float2(projected_x*scale.x+bias.x,projected_y*scale.y+bias.y));
+    float p=extent.x*SharedNativeBaseSample(float2(projected_x*scale.x+bias.x,projected_y*scale.y+bias.y),eye);
     float magnitude=abs(p);
     if(collar<magnitude){float retained=magnitude-collar;return p<0.0f?-retained:retained;}
     return 0.0f;
@@ -213,14 +229,18 @@ void initialize_main(uint3 id : SV_DispatchThreadID, uint3 lane : SV_GroupThread
 #endif
     }
     GroupMemoryBarrierWithGroupSync();
-    if (id.x >= PinSourceShape.x || id.y >= PinSourceShape.w) return;
+    if (id.x >= PinSourceShape.x || id.y >= 2u * PinSourceShape.w) return;
+    // The field and weight planes hold the band once per eye: the left eye's rows, then the right
+    // eye's, each built from that eye's scene field. Row marks are shared.
+    uint eye = id.y >= PinSourceShape.w ? 1u : 0u;
+    uint band_row = id.y - eye * PinSourceShape.w;
     // One owned per-draw header avoids repeating the long immutable receipt check in the PS.
     if (all(id.xy == 0u)) SharedPinRowStore[uint2(0u,PinSourceShape.w)] = SharedPinGroupSelectedReceipt;
-    uint2 pixel = uint2(id.x, id.y + PinSourceShape.z);
+    uint2 pixel = uint2(id.x, band_row + PinSourceShape.z);
     float2 uv = (float2(pixel) + 0.5f) / float2(PinSourceShape.xy);
 #if defined(HOST_SBS_TEXT_GAME_PIN)
     float rows_to_glyph = SunshineHostFinalStore[id.xy];
-    float original = SharedOriginalParallax(uv);
+    float original = SharedOriginalParallax(uv, eye);
     float bounded = original, weight = 0.0f;
     if (SharedPinGroupAuthorized != 0u) {
         float text_plane = asfloat(TextGameControl.y);
@@ -234,15 +254,17 @@ void initialize_main(uint3 id : SV_DispatchThreadID, uint3 lane : SV_GroupThread
     }
     SunshineHostFinalStore[id.xy] = bounded;
 #else
-    SunshineHostFinalStore[id.xy] = SharedOriginalParallax(uv);
+    SunshineHostFinalStore[id.xy] = SharedOriginalParallax(uv, eye);
     float weight = SharedPinGroupAuthorized != 0u && CurrentGlyphContributor(int2(pixel)) ? 1.0f : 0.0f;
 #endif
     SharedPinWeightStore[id.xy] = weight;
-    if (weight > 0.0f) InterlockedOr(SharedPinRowStore[uint2(0u,id.y)], 1u);
+    if (weight > 0.0f) InterlockedOr(SharedPinRowStore[uint2(0u,band_row)], 1u);
 }
 
 #define BUFFER_WIDTH PinSourceShape.x
 #define BUFFER_HEIGHT PinSourceShape.w
+// Both eyes' rows are pinned; each store row has its own weight row.
+#define SUNSHINE_UI_PIN_FIELD_ROWS (2u * PinSourceShape.w)
 static const uint Sunshine_SourceAlphaUI = 1u;
 float SunshineUIPinWeight(uint x, uint y) { return SharedPinWeights.Load(int3(x,y,0)); }
 float SunshineUIPlaneParallax() {
@@ -267,10 +289,13 @@ float2 SharedPinSourceUV(float2 destination_uv, float eye_sign) {
     // The queued transaction/state remains a draw-time gate as well as a preparation gate.
     if (!WarpAuthorized()) return destination_uv;
     if (SharedPinRows.Load(int3(0,PinSourceShape.w,0)) == 0u) return ReprojectIfAuthorized(destination_uv,eye_sign);
-    // Empty rows and missing/stale/revoked masks retain the exact original Base inverse.
+    // Empty rows and missing/stale/revoked masks retain the exact ordinary inverse.
     if (!SharedPinRowContributes(destination_uv.y)) return ReprojectIfAuthorized(destination_uv,eye_sign);
     float x = destination_uv.x;
-    float v = (destination_uv.y * (float)PinSourceShape.y - (float)PinSourceShape.z) / (float)PinSourceShape.w;
+    // This eye's rows of the field plane. The clamp is the sampler's edge clamp on one eye's band.
+    float band_rows = (float)PinSourceShape.w;
+    float band_row = clamp(destination_uv.y * (float)PinSourceShape.y - (float)PinSourceShape.z, 0.5f, band_rows - 0.5f);
+    float v = (band_row + (eye_sign > 0.0f ? band_rows : 0.0f)) / (2.0f * band_rows);
     [loop] for (int iteration=0; iteration<11; ++iteration) {
         float next = destination_uv.x + eye_sign * SharedPinField.SampleLevel(LinearSampler,float2(x,v),0);
         bool settled = asuint(next) == asuint(x); x = next; if (settled) break;
@@ -283,7 +308,7 @@ float4 shared_pin_main_ps(PS_INPUT input) : SV_TARGET {
     float native_y=uv.y*(float)PinSourceShape.y-0.5f;
     if (native_y <= (float)PinSourceShape.z-1.0f || native_y >= (float)(PinSourceShape.z+PinSourceShape.w))
         return BackgroundOriginalSample(ReprojectIfAuthorized(uv,eye_sign));
-    // Missing selected authority retains only the canonical ordinary Base inverse.
+    // Missing selected authority retains only the canonical ordinary inverse.
     if (SharedPinRows.Load(int3(0,PinSourceShape.w,0)) == 0u)
         return BackgroundOriginalSample(ReprojectIfAuthorized(uv,eye_sign));
     return BackgroundOriginalSample(SharedPinSourceUV(uv,eye_sign));

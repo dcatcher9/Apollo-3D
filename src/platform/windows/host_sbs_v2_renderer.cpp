@@ -4,6 +4,8 @@
  */
 #include "host_sbs_v2_renderer.h"
 
+#include "src/host_sbs_eye_field.h"
+
 #ifdef _WIN32
   #include <algorithm>
   #include <wrl/client.h>
@@ -114,6 +116,13 @@ namespace platf::dxgi {
       constant_count = static_cast<UINT>(constants.size());
     }
     context->PSSetShaderResources(0u, resource_count, resources);
+    // A Base view carries its eye-specific limiter field. It rides in its own slot, outside
+    // t0..t14, and is absent for views the producer attached none to (flat, replay, tests).
+    const auto eye_field = models::host_sbs_eye_field::companion(command.shader_resources[1]);
+    if (eye_field) {
+      auto *eye_view = eye_field.Get();
+      context->PSSetShaderResources(models::host_sbs_eye_field::pixel_slot, 1u, &eye_view);
+    }
     context->PSSetConstantBuffers(2u, constant_count, constants.data());
     if (command.observe_bound_draw) {
       command.observe_bound_draw(command.bound_draw_observer_state, context);
@@ -124,6 +133,10 @@ namespace platf::dxgi {
     constexpr std::array<ID3D11ShaderResourceView *, 15u> null_resources {};
     constexpr std::array<ID3D11Buffer *, 4u> null_constants {};
     context->PSSetShaderResources(0u, resource_count, null_resources.data());
+    if (eye_field) {
+      ID3D11ShaderResourceView *null_view = nullptr;
+      context->PSSetShaderResources(models::host_sbs_eye_field::pixel_slot, 1u, &null_view);
+    }
     context->PSSetConstantBuffers(3u, constant_count - 1u, null_constants.data());
     return true;
   }

@@ -84,6 +84,35 @@ namespace models::host_sbs_v2_gpu {
     return depth && coordinate_v2;
   }
 
+  bool record_eye_limit(
+    ID3D11DeviceContext *context,
+    const eye_limit_command_t &command
+  ) noexcept {
+    if (!context || !command.constants.valid() || !command.near_identical_constants ||
+        !command.eye_constants || !command.shader || !command.vertical_conditioned ||
+        !command.eye_output || !command.dispatch.valid()) {
+      return false;
+    }
+    ID3D11Buffer *constants[4] = {
+      command.constants.depth,
+      command.constants.coordinate_v2,
+      command.near_identical_constants,
+      command.eye_constants,
+    };
+    context->CSSetConstantBuffers(0u, 4u, constants);
+    context->CSSetShader(command.shader, nullptr, 0u);
+    context->CSSetShaderResources(0u, 1u, &command.vertical_conditioned);
+    context->CSSetUnorderedAccessViews(0u, 1u, &command.eye_output, nullptr);
+    record_validated_dispatch(context, command.dispatch);
+    ID3D11Buffer *null_constants = nullptr;
+    ID3D11ShaderResourceView *null_input = nullptr;
+    ID3D11UnorderedAccessView *null_output = nullptr;
+    context->CSSetConstantBuffers(3u, 1u, &null_constants);
+    context->CSSetShaderResources(0u, 1u, &null_input);
+    context->CSSetUnorderedAccessViews(0u, 1u, &null_output, nullptr);
+    return true;
+  }
+
   bool record_moments_frame(
     ID3D11DeviceContext *context,
     const moments_frame_command_t &command

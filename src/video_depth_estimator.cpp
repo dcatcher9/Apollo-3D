@@ -11,6 +11,7 @@
 #include "depth_coordinate_v2.h"
 #include "generated/sbs_adaptive_state_contract.h"
 #include "host_sbs_gpu_outcomes.h"
+#include "host_sbs_eye_field.h"
 #include "host_sbs_gpu_trace.h"
 #include "host_sbs_shader_cache.h"
 #include "host_sbs_subtitle_cohort.h"
@@ -36,6 +37,7 @@
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
@@ -48,6 +50,7 @@
 #include <NvInfer.h>
 #include <NvInferPlugin.h>
 #include <NvOnnxParser.h>
+#include <span>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -3449,6 +3452,9 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_limit_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_vertical_limit_compact_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_limit_compact_cs;
+    // Eye-specific horizontal limiter; indexed by the compact-limiter flag.
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> depth_coordinate_v2_eye_limit_cs;
+    std::array<Microsoft::WRL::ComPtr<ID3D11Buffer>, 2u> depth_coordinate_v2_eye_limit_cbuffers;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> ocr_preprocess_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> ocr_box_cells_cs;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> ocr_box_resolve_cs;
@@ -3693,6 +3699,9 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_coordinate_v2_final_tex;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_coordinate_v2_final_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_coordinate_v2_final_srv;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> depth_coordinate_v2_eye_final_tex;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> depth_coordinate_v2_eye_final_uav;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_coordinate_v2_eye_final_srv;
     Microsoft::WRL::ComPtr<ID3D11Buffer> subtitle_locator_state_buf;
     Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> subtitle_locator_state_uav;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_locator_state_srv;
@@ -4636,6 +4645,55 @@ namespace models {
         }
       }
       service_gpu_outcome_logging();
+    }
+
+    /**
+     * Eye-specific horizontal limiter (constants in host_sbs_eye_field.h). The shader lies outside
+     * the authenticated producer closure, and the Base field never depends on it: any failure here
+     * leaves Base as the only field and the renderer on its ordinary route.
+     */
+    void initialize_eye_limiter() {
+      static constexpr host_sbs_shader_cache::shader_spec eye_spec {
+        "depth_coordinate_v2_eye_limit_cs.hlsl",
+        "main",
+        "cs_5_0"
+      };
+      const auto sources = host_sbs_shader_cache::snapshot_sources(shader_root, std::span {&eye_spec, 1u});
+      bool ready = sources && create_shader(sources, eye_spec, depth_coordinate_v2_eye_limit_cs);
+      const std::uint32_t covered_cells = host_sbs_eye_field::covered_extension_cells;
+      const std::uint32_t uncovered_cells = host_sbs_eye_field::uncovered_extension_cells;
+      for (std::uint32_t compact = 0u; ready && compact < 2u; ++compact) {
+        struct constants_t {
+          float occlusion_slope;
+          float hole_slope;
+          std::uint32_t extension_cells;
+          std::uint32_t compact;
+        } constants {
+          host_sbs_eye_field::covered_side_slope,
+          depth_coordinate_v2::max_horizontal_slope,
+          host_sbs_eye_field::extension_word(covered_cells, uncovered_cells),
+          compact,
+        };
+        D3D11_BUFFER_DESC desc {};
+        desc.Usage = D3D11_USAGE_IMMUTABLE;
+        desc.ByteWidth = static_cast<UINT>(sizeof(constants));
+        desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_SUBRESOURCE_DATA data {&constants, 0u, 0u};
+        ready = SUCCEEDED(device->CreateBuffer(
+          &desc,
+          &data,
+          depth_coordinate_v2_eye_limit_cbuffers[compact].ReleaseAndGetAddressOf()
+        ));
+      }
+      if (!ready) {
+        depth_coordinate_v2_eye_limit_cs.Reset();
+        BOOST_LOG(warning) << "Host SBS per-eye limiter shader unavailable; using the Base field.";
+        return;
+      }
+      BOOST_LOG(info) << "Host SBS eye-specific limiter active: covered-side slope "
+                      << host_sbs_eye_field::covered_side_slope << ", uncovered-side slope "
+                      << depth_coordinate_v2::max_horizontal_slope << ", foreground extension "
+                      << covered_cells << " covered-side and " << uncovered_cells << " uncovered-side cell(s).";
     }
 
     void initialize_gpu_trace() {
@@ -5982,6 +6040,7 @@ namespace models {
              "Host SBS will fail flat.";
         return;
       }
+      initialize_eye_limiter();
 
       // One fused preprocess dispatch runs for every root. Two immutable mode buffers make the
       // comparison decision explicit at b1 without rebuilding per-frame state: force/bootstrap
@@ -6522,6 +6581,9 @@ namespace models {
       depth_coordinate_v2_final_tex.Reset();
       depth_coordinate_v2_final_uav.Reset();
       depth_coordinate_v2_final_srv.Reset();
+      depth_coordinate_v2_eye_final_tex.Reset();
+      depth_coordinate_v2_eye_final_uav.Reset();
+      depth_coordinate_v2_eye_final_srv.Reset();
       subtitle_locator_state_buf.Reset();
       subtitle_locator_state_uav.Reset();
       subtitle_locator_state_srv.Reset();
@@ -7571,6 +7633,31 @@ namespace models {
                        &depth_coordinate_v2_final_srv,
                        depth_coordinate_v2_final_uav
                      );
+      if (resources_ok && depth_coordinate_v2_eye_limit_cs) {
+        // Twice the field height: left-eye rows, then right-eye rows. A failure here only loses
+        // the research field; the Base view then has no companion and renders as before.
+        auto eye_desc = texture_desc;
+        eye_desc.Height *= 2u;
+        const bool eye_ok =
+          SUCCEEDED(device->CreateTexture2D(&eye_desc, nullptr, &depth_coordinate_v2_eye_final_tex)) &&
+          SUCCEEDED(device->CreateShaderResourceView(
+            depth_coordinate_v2_eye_final_tex.Get(),
+            nullptr,
+            &depth_coordinate_v2_eye_final_srv
+          )) &&
+          SUCCEEDED(device->CreateUnorderedAccessView(
+            depth_coordinate_v2_eye_final_tex.Get(),
+            nullptr,
+            &depth_coordinate_v2_eye_final_uav
+          )) &&
+          host_sbs_eye_field::attach(depth_coordinate_v2_final_srv.Get(), depth_coordinate_v2_eye_final_srv.Get());
+        if (!eye_ok) {
+          depth_coordinate_v2_eye_final_tex.Reset();
+          depth_coordinate_v2_eye_final_uav.Reset();
+          depth_coordinate_v2_eye_final_srv.Reset();
+          BOOST_LOG(warning) << "Host SBS per-eye limiter resources unavailable; using the Base field.";
+        }
+      }
 
       const constants_t constants {
         .raw_coordinate_scale = parallax_v2_raw_coordinate_scale,
@@ -7614,6 +7701,9 @@ namespace models {
         clear
       );
       context->ClearUnorderedAccessViewFloat(depth_coordinate_v2_final_uav.Get(), clear);
+      if (depth_coordinate_v2_eye_final_uav) {
+        context->ClearUnorderedAccessViewFloat(depth_coordinate_v2_eye_final_uav.Get(), clear);
+      }
       parallax_v2_producer_active = true;
       BOOST_LOG(info)
         << "Host SBS adaptive plane: continuous mean zero, robust Host depth scale, "
@@ -7719,6 +7809,9 @@ namespace models {
                                content->width() :
                                static_cast<UINT>(target_w);
 
+      const bool eye_pass = depth_coordinate_v2_eye_limit_cs && depth_coordinate_v2_eye_final_uav &&
+                            depth_coordinate_v2_eye_limit_cbuffers[0u] && depth_coordinate_v2_eye_limit_cbuffers[1u];
+
       // Mapping publishes the history owner and may copy NCHW input. An explicit Dump 3D
       // separately materializes the full-size canonical-coordinate field.
       const host_sbs_v2_gpu::base_geometry_command_t command {
@@ -7769,6 +7862,22 @@ namespace models {
       };
       if (!host_sbs_v2_gpu::record_base_geometry(context.Get(), command)) {
         return false;
+      }
+      if (eye_pass) {
+        // Same vertical share and the same (possibly GPU-gated) dispatch as the horizontal
+        // majorant just recorded, so both fields always describe the same frame.
+        const host_sbs_v2_gpu::eye_limit_command_t eye_command {
+          .constants = command.constants,
+          .near_identical_constants = command.near_identical_constants,
+          .eye_constants = depth_coordinate_v2_eye_limit_cbuffers[use_compact_limiters ? 1u : 0u].Get(),
+          .shader = depth_coordinate_v2_eye_limit_cs.Get(),
+          .vertical_conditioned = depth_coordinate_v2_vertical_conditioned_srv.Get(),
+          .eye_output = depth_coordinate_v2_eye_final_uav.Get(),
+          .dispatch = command.horizontal_dispatch,
+        };
+        if (!host_sbs_v2_gpu::record_eye_limit(context.Get(), eye_command)) {
+          return false;
+        }
       }
       if (command.map_start) {
         perf_slot->has_parallax_map_start = true;
@@ -9424,6 +9533,7 @@ namespace models {
              depth_coordinate_v2_vertical_majorant_uav.Get(),
              depth_coordinate_v2_vertical_conditioned_uav.Get(),
              depth_coordinate_v2_final_uav.Get(),
+             depth_coordinate_v2_eye_final_uav.Get(),
            }) {
         if (uav) {
           context->ClearUnorderedAccessViewFloat(uav, zero4);

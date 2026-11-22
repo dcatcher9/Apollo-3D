@@ -90,16 +90,16 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | `parallax_v2_coordinate_diagnostic` | 1 | `b895dea87363c1859c16d97c3d79121a2996d5f03ee8c8b56e20e756609e4e59` |
 | `near_identical_detector` | 3 | `c894bfb39134f169638662441024cc234a74faf4eac096a65cefe6487cb35ee5` |
 | `gpu_trace` | 1 | `bcfab2a5da6361c9142c82b05d47503b27acbfcac010d25bd012cf30051ce3ef` |
-| `parallax_v2_live_renderer` | 2 | `b094a4b4e2bd25c9ecf3ea6ec704404c6241510034206db6ee4bb5aeee8d35a7` |
-| `parallax_v2_p010_y` | 1 | `92075e2e9e10cb9d3334492741d6b43ef5872cd78a9d57fda070c17e257b53e9` |
+| `parallax_v2_live_renderer` | 2 | `5f0b627588a7886bb557e5aab87a56934b587aa501d80437326bd6805ac440ac` |
+| `parallax_v2_p010_y` | 1 | `af9ce2210c86f8072b2e21d2d9da42a3b6ac381be34ee459b9debd9ddb24610c` |
 | `sbs_flat_fallback` | 2 | `7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4` |
-| `parallax_v2_live_diagnostic` | 2 | `9355e83a84ef9c2b94300c20bfc72160aa3820f575585fc639003b3e76a36fe8` |
+| `parallax_v2_live_diagnostic` | 2 | `9755c6c32eb928a0743aac49bd3829eb504eb24977e5ae6398d385f623a75051` |
 | `subtitle_cohort_prototype_research` | 3 | `e23004ab90035382849409bcf4ecf67d8433fd1310ff1d0bacde665fdbeb256a` |
 | `subtitle_cohort_research` | 4 | `3c6226ff2de686d0e21f550b2b1fcb9827fe3edb1c29f6134bc47114a9c7e687` |
 | `subtitle_inner_colour_research` | 5 | `d96f30ddd0e71b92cab2dde6b7b1b4d5523827ff6d296e73ce963dee0914f6de` |
 | `subtitle_inner_components_research` | 6 | `7e2f44690d64cebe3261133a3642fa558c8c25c7086bf19551f284a4cb13ebe0` |
 | `subtitle_matte_guard_research` | 1 | `50b7458e44cd1983fc6e2bbee3bf4624b1b62110fa478f48a2dec1c491d6d3b2` |
-| `parallax_v2_queued_renderer` | 1 | `2cf47a4299353b8f7f98f74cc56eb712567371a74a0b5468aa13d6f7db1c15e7` |
+| `parallax_v2_queued_renderer` | 1 | `04fcd38a6f470ebdb25883e160ab999aa43864915d597d29c51be5f7d21ea8bf` |
 | `current_mask_holes` | 9 | `b4e48d5eecab2404951602ad649980001f21cf5f9768381acadc7c3973ef4668` |
 | `current_stroke_coverage` | 3 | `1f03ba4279f6cadbaddf56b408cf20c0bc37776c4971e8e25830a8ffd3a3d063` |
 | `current_foreground_edge` | 1 | `4c8750b262827356b47a691aafe4cc306e541b691709060d979252635e73436c` |
@@ -1965,6 +1965,80 @@ A previously tested post-warp collar blur was removed because it introduced a tr
 a hand boundary. More inverse iterations do not solve the crown trade-off; they only solve the
 already selected field more precisely. Any replacement must be qualified on hair, shoulders,
 transparent rims, thin structures, and ordinary non-edge content rather than one witness frame.
+
+### Eye-specific horizontal limiter
+
+The horizontal majorant above uses one slope for both eyes. At a foreground edge the geometry is
+not symmetric: in each eye the object moves over the background on one side (those pixels should
+disappear) and away from it on the other (that background is stretched over the uncovered region).
+A second pass, `depth_coordinate_v2_eye_limit_cs.hlsl`, therefore builds one horizontal field per
+eye from the same vertical share and the same (possibly GPU-gated) dispatch:
+
+- on the covered side the slope is `host_sbs_eye_field::covered_side_slope` (0.9);
+- on the uncovered side the slope is the production slope above.
+
+Before either ramp starts, the foreground value is carried unchanged over
+`host_sbs_eye_field::covered_extension_cells` and `uncovered_extension_cells` field cells (4 each).
+A depth edge from a monocular model usually lies a few cells inside the object it belongs to, most
+of all at tips and soft fringes. A ramp that starts there lies on the object's own pixels: the eye
+in which that side is covered squeezes them and the other eye stretches them, so a tip is drawn
+rounded in one eye and smeared in the other, and a soft hair fringe is cut to a hard line. With the
+extension the object is drawn rigid and the ramp lies on the background beside it. The price is a
+rim of background that many cells wide that moves with the object. The extension is horizontal
+only; it does not change the vertical envelopes or the crown trade-off above.
+
+Both slopes are below one, so each eye map stays contractive and the unchanged 11-step inverse
+applies. A max-plus dilation along rows preserves the vertical shear bound of its input, and so
+does a horizontal window maximum.
+
+The Base field, its statistics, dumps and every other consumer are unchanged; a Dump 3D package
+therefore still records Base, not the eye field. The eye field is one `R32_FLOAT` texture of twice
+the field height (left-eye rows, then right-eye rows), attached to the Base view as private data
+(`src/host_sbs_eye_field.h`) and bound at pixel slot `t15` by `record_host_sbs_v2_draw`. The
+reprojection shaders, full-frame and window-region, sample it whenever it is bound and query only
+its own size, so the ordinary route still issues no dimension query on Base. The pass is recorded
+by `host_sbs_v2_gpu::record_eye_limit` directly after `record_base_geometry`. Its shader is outside
+the authenticated producer closure: if it cannot be created, Base is the only field and rendering
+is exactly as before.
+
+A pinned subtitle or text band, including the Game 3D text-game route, is built per eye as well:
+the shared pin's field and weight planes hold the band twice (the left eye's rows, then the right
+eye's), each copy starts from that eye's scene field, the shared pin pass pins both, and the pixel
+shader reads its eye's rows. A band row therefore joins the rows above and below it without a
+change of field. A draw whose Base view carries no eye field builds both copies from Base and
+renders as before. The Game 3D add-on has the same limiter in its own shader
+([Game 3D](reshade-sbs.md)), with a one-texel extension on the covered side only: its depth edges
+come from the game and lie on the silhouette.
+
+Evidence (model `bt6`, 2026-11-21): with the eye field absent the eye source maps are bit-identical
+to the previous binary; with it, `run_eval.py` is `screen_neutral` in the core and extended suites
+with no conformance failures, and the rendered eye images on the six ground-truth clips are about
+2% closer to the geometrically correct views at thin objects. With exact depth the same change
+removes 13-24% of that error in the Python replica, so its value grows with depth quality. It has
+not been checked in a headset.
+
+Evidence for the extension (2026-11-21, six ground-truth clips of the extended suite, real estimator
+and shaders, research model `bt7`). Deformation is the mean of `|d x_src / d x - 1|` over the
+pixels of an object in both eye source maps: 0 means the object is drawn rigid.
+
+| Extension, both sides | Thin-object tips | Thin-object shafts | 6 px inside silhouettes | 6 px of background outside | Colour error at thin objects |
+| --- | --- | --- | --- | --- | --- |
+| 1 covered, 0 uncovered (before) | 0.097 | 0.068 | 0.080 | 0.149 | 8.24 |
+| 2 | 0.070 | 0.035 | 0.064 | 0.160 | 8.26 |
+| 3 | 0.058 | 0.024 | 0.056 | 0.164 | 8.28 |
+| 4 (chosen) | 0.051 | 0.018 | 0.050 | 0.164 | 8.34 |
+| 6 | 0.046 | 0.015 | 0.043 | 0.157 | 8.50 |
+| 8 | 0.043 | 0.014 | 0.039 | 0.145 | 8.67 |
+
+Colour error is in 8-bit levels against the geometrically correct eye views; it rises because the
+rim of background is drawn at the object's parallax. With the former setting the eye source maps
+are bit-identical to the previous shader. On two film clips of that suite the squeezed tip of a
+pointed object and the hard cut of a hair fringe are visibly reduced at 4 cells and further at 8.
+Colour-gated variants that stop the extension at the object's own colour edge had no effect in the
+replica: thin objects are too small and too textured for colour to guide it. With the production
+model, the limiter with this extension and the per-eye band is `screen_neutral` in the core and
+extended suites against the binary with the symmetric limiter, with no conformance failures. Not
+checked in a headset.
 
 ## Inverse warp and source sampling
 

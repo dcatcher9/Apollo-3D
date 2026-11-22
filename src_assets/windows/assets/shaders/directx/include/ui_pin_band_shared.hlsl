@@ -5,6 +5,11 @@
 // Sunshine_SourceAlphaUI enables the pass; SunshineUIPinWeight(x,y) and
 // SunshineUIPlaneParallax() supply current authorized mask weight and plane.
 // Dispatch ceil(BUFFER_HEIGHT / 8) groups in X, one in Y and Z.
+// A store may hold the field more than once (one copy per eye): an adapter then
+// defines SUNSHINE_UI_PIN_FIELD_ROWS, the rows of the store to pin, and
+// SUNSHINE_UI_PIN_MASK_ROW(y), the mask row of store row y, and dispatches
+// ceil(SUNSHINE_UI_PIN_FIELD_ROWS / 8) groups. Rows are independent, so every
+// copy is pinned exactly as a single field is.
 // Keep arithmetic and scan/carry order exact: binary pinning preserves the
 // existing Game 3D float32 distance rule, including its non-precise bounds.
 
@@ -34,6 +39,12 @@ groupshared float2 SunshineUIPinCarrySlack[8u][8u];
 // the scans but move the carries' float comparisons, so the field would not
 // stay bit-identical.
 #define SUNSHINE_UI_PIN_BLOCK 16u
+#ifndef SUNSHINE_UI_PIN_FIELD_ROWS
+#define SUNSHINE_UI_PIN_FIELD_ROWS BUFFER_HEIGHT
+#endif
+#ifndef SUNSHINE_UI_PIN_MASK_ROW
+#define SUNSHINE_UI_PIN_MASK_ROW(y) (y)
+#endif
 
 float SunshineUIPinRamp(uint distance) {
     return 0.5 * float(distance) / float(BUFFER_WIDTH);
@@ -70,7 +81,9 @@ void SunshineApplyUICS(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupTh
     uint row = thread_id.x, lane = thread_id.y;
     uint y = group_id.x * 8u + row;
     // A partial last group keeps its idle threads until the final barrier.
-    bool active = y < BUFFER_HEIGHT;
+    bool active = y < SUNSHINE_UI_PIN_FIELD_ROWS;
+    // The mask row this store row is pinned by.
+    uint mask_y = SUNSHINE_UI_PIN_MASK_ROW(y);
     uint chunk_start = lane * BUFFER_WIDTH / 8u;
     uint chunk_end = (lane + 1u) * BUFFER_WIDTH / 8u;
     float plane = SunshineUIPlaneParallax();
@@ -85,7 +98,7 @@ void SunshineApplyUICS(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupTh
             float weights[SUNSHINE_UI_PIN_BLOCK], values[SUNSHINE_UI_PIN_BLOCK];
             [unroll] for (uint i = 0u; i < SUNSHINE_UI_PIN_BLOCK; ++i) {
                 const uint at = min(block + i, chunk_end - 1u);
-                weights[i] = SunshineUIPinWeight(at, y);
+                weights[i] = SunshineUIPinWeight(at, mask_y);
                 values[i] = SunshineHostFinalStore[int2(uint2(at, y))];
             }
             [unroll] for (uint j = 0u; j < SUNSHINE_UI_PIN_BLOCK; ++j) {
@@ -156,7 +169,7 @@ void SunshineApplyUICS(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupTh
     bool flat = true;
     if (chunk_start < chunk_end) {
         value = SunshineHostFinalStore[int2(uint2(chunk_end - 1u, y))];
-        r_here = SunshineUIPinSlackOf(value, SunshineUIPinWeight(chunk_end - 1u, y), plane);
+        r_here = SunshineUIPinSlackOf(value, SunshineUIPinWeight(chunk_end - 1u, mask_y), plane);
     }
     // Blocks from the chunk's end: texel top - j reads its left neighbor
     // top - j - 1, which the scan writes only after it.
@@ -165,7 +178,7 @@ void SunshineApplyUICS(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupTh
         float previous_weights[SUNSHINE_UI_PIN_BLOCK], previous_values[SUNSHINE_UI_PIN_BLOCK];
         [unroll] for (uint i = 0u; i < SUNSHINE_UI_PIN_BLOCK; ++i) {
             const uint at = (uint)max(top - (int)i - 1, (int)chunk_start);
-            previous_weights[i] = SunshineUIPinWeight(at, y);
+            previous_weights[i] = SunshineUIPinWeight(at, mask_y);
             previous_values[i] = SunshineHostFinalStore[int2(uint2(at, y))];
         }
         [unroll] for (uint j = 0u; j < SUNSHINE_UI_PIN_BLOCK; ++j) {
@@ -199,14 +212,14 @@ void SunshineApplyUICS(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupTh
     // the backward bound or than h itself (h changes by at most 0.5/W a texel).
     anchor = carry_anchor.x;
     best = carry_slack.x;
-    float w_previous = 0.0, w_here = chunk_start < chunk_end ? SunshineUIPinWeight(chunk_start, y) : 0.0;
+    float w_previous = 0.0, w_here = chunk_start < chunk_end ? SunshineUIPinWeight(chunk_start, mask_y) : 0.0;
     // Blocks from the chunk's start: texel x is read (as the backward pass
     // left it) before the scan writes it, and the scan writes only behind.
     [loop]
     for (uint block = chunk_start; block < chunk_end; block += SUNSHINE_UI_PIN_BLOCK) {
         float next_weights[SUNSHINE_UI_PIN_BLOCK], currents[SUNSHINE_UI_PIN_BLOCK];
         [unroll] for (uint i = 0u; i < SUNSHINE_UI_PIN_BLOCK; ++i) {
-            next_weights[i] = SunshineUIPinWeight(min(block + i + 1u, chunk_end - 1u), y);
+            next_weights[i] = SunshineUIPinWeight(min(block + i + 1u, chunk_end - 1u), mask_y);
             currents[i] = SunshineHostFinalStore[int2(uint2(min(block + i, chunk_end - 1u), y))];
         }
         [unroll] for (uint j = 0u; j < SUNSHINE_UI_PIN_BLOCK; ++j) {

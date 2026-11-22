@@ -132,11 +132,34 @@ namespace models::host_sbs_v2_gpu {
     ID3D11Query *limits_start = nullptr;
   };
 
+  /**
+   * Eye-specific limiter over the vertical share that the horizontal majorant
+   * of the same frame just consumed. `dispatch` must be that frame's horizontal dispatch, so a
+   * GPU-gated frame that keeps its Base field keeps its eye field too.
+   */
+  struct eye_limit_command_t {
+    base_constants_t constants;
+    /** Exact Host-SBS near-identical constants at b2. */
+    ID3D11Buffer *near_identical_constants = nullptr;
+    /** EyeLimiter constants at b3. */
+    ID3D11Buffer *eye_constants = nullptr;
+    ID3D11ComputeShader *shader = nullptr;
+    ID3D11ShaderResourceView *vertical_conditioned = nullptr;
+    ID3D11UnorderedAccessView *eye_output = nullptr;
+    dispatch_command_t dispatch;
+  };
+
   /** Direct group count for a limiter pass over `lines` columns (vertical) or rows (horizontal). */
   [[nodiscard]] constexpr UINT limiter_groups(const UINT lines) noexcept {
     constexpr UINT group_lines = depth_coordinate_v2::limiter_group_lines;
     return (lines + group_lines - 1u) / group_lines;
   }
+
+  /** Record the eye-specific limiter. Leaves b0-b2 bound and clears b3, t0 and u0. */
+  [[nodiscard]] bool record_eye_limit(
+    ID3D11DeviceContext *context,
+    const eye_limit_command_t &command
+  ) noexcept;
 
   /** Record the shared raw scan and either replay quantiles or the complete live publication. */
   [[nodiscard]] bool record_moments_frame(

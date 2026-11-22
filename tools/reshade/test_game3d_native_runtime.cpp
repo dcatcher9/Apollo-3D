@@ -165,6 +165,53 @@ namespace {
     require(maximum <= (color == 1 ? 1.01 / 1023 : .002), "Native GPU rendering differs from frozen FX beyond export quantization");
   }
 
+  // The production shader without its eye limiter: the scene field alone, as the frozen FX has it.
+  std::string scene_field_shader() {
+    std::string source(sunshine_game3d::renderer::shader_source());
+    const std::string_view marker = "#define SUNSHINE_EYE_LIMITER 1";
+    const auto at = source.find(marker);
+    require(at != std::string::npos && source.find(marker, at + 1) == std::string::npos, "The production shader has no single eye-limiter marker");
+    source.replace(at, marker.size(), "// (eye limiter off: frozen-FX parity render)");
+    return source;
+  }
+
+  // The eye limiter's store against the fields it is built from (docs/host-sbs.md, eye-specific
+  // horizontal limiter). vertical is the limiter's input, scene the symmetric final field.
+  void check_eye_fields(const std::string &name, const std::vector<std::uint8_t> &vertical_bytes,
+      const std::vector<std::uint8_t> &scene_bytes, const std::vector<std::uint8_t> &eye_bytes, bool cliffs) {
+    const size_t count = size_t(width) * height;
+    require(vertical_bytes.size() == count * 4 && scene_bytes.size() == count * 4 && eye_bytes.size() == count * 8,
+      "Eye field store is not twice the scene field");
+    const auto field = [](const std::vector<std::uint8_t> &bytes, size_t index) {
+      float value; std::memcpy(&value, bytes.data() + index * 4, 4); return value;
+    };
+    const float hole = 0.5f / float(width), covered = 0.9f / float(width), slack = 2.0e-6f;
+    size_t left_below = 0, right_below = 0, apart = 0;
+    for (unsigned y = 0; y < height; ++y) {
+      for (unsigned x = 0; x < width; ++x) {
+        const size_t at = size_t(y) * width + x;
+        const float v = field(vertical_bytes, at), m = field(scene_bytes, at);
+        const float l = field(eye_bytes, at), r = field(eye_bytes, count + at);
+        require(std::isfinite(l) && std::isfinite(r), "Eye field holds a non-finite value");
+        // Each is a majorant of the vertical field inside the display bound, and at most one
+        // gentle step above the scene field (the one-texel foreground extension).
+        require(l >= std::min(v, m) - slack && r >= std::min(v, m) - slack, "An eye field fell below its input");
+        require(l <= m + hole + slack && r <= m + hole + slack, "An eye field rose above the scene field's reach");
+        if (x) {
+          const float dl = l - field(eye_bytes, at - 1), dr = r - field(eye_bytes, count + at - 1);
+          // Left eye: falls rightwards at most at the covered-side slope, rises at most at the
+          // scene slope. The right eye is the mirror image.
+          require(dl <= hole + slack && -dl <= covered + slack && dr <= covered + slack && -dr <= hole + slack,
+            "An eye field broke its one-sided slope");
+        }
+        left_below += l < m - 1.0e-5f; right_below += r < m - 1.0e-5f; apart += std::abs(l - r) > 1.0e-5f;
+      }
+    }
+    std::printf("MEASURE eye fields %s: left below scene %zu, right below scene %zu, eyes apart %zu texels\n",
+      name.c_str(), left_below, right_below, apart);
+    if (cliffs) require(left_below && right_below && apart, "The eye limiter left a depth cliff as the scene field has it");
+  }
+
   void write_native_source(fixture_t &fixture, ID3D12Resource *backbuffer) {
     fixture.begin_commands();
     transition(fixture.commands.p, backbuffer, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -1769,11 +1816,24 @@ namespace {
     sunshine_game3d::renderer renderer;
     sunshine_game3d_test::dump_fixture dump;
     auto *owner_queue = observed.runtime->get_command_queue();
+    const std::string scene_field_source = scene_field_shader();
     for (const auto &test : tests) {
       prepare_depth(fixture, test);
       auto *backbuffer = fixture.backbuffers[fixture.swapchain->GetCurrentBackBufferIndex()].p;
       write_native_source(fixture, backbuffer);
       const api::resource source{reinterpret_cast<std::uint64_t>(backbuffer)};
+      // The frozen FX warps both eyes with the scene field. The same shader without its eye
+      // limiter must still match it; the production render below is checked on its own terms.
+      require(renderer.configure(observed.runtime, source, static_cast<api::color_space>(fixture.color), scene_field_source),
+        "Native renderer cannot configure the scene-field shader");
+      require(sunshine_game3d::test::render_frame(renderer, owner_queue->get_immediate_command_list(), source,
+        test.parameters.depth_ready ? fixture.depth_view : api::resource_view{}, test.parameters), "Native renderer rejected the scene-field parity frame");
+      owner_queue->flush_immediate_command_list();
+      renderer.finish_present();
+      owner_queue->wait_idle();
+      require(renderer.output().handle != 0 && renderer.diagnostics().eye_field.handle == 0, "The scene-field shader built an eye field");
+      const auto scene_pixels = fixture.read(reinterpret_cast<ID3D12Resource *>(renderer.output().handle));
+      compare_pixels(test, fixture.color, load_pixels(results / (test.name + ".fx.bin")), scene_pixels, report);
       require(renderer.configure(observed.runtime, source, static_cast<api::color_space>(fixture.color)), "Native renderer configure failed");
       require(sunshine_game3d::test::render_frame(renderer, owner_queue->get_immediate_command_list(), source,
         test.parameters.depth_ready ? fixture.depth_view : api::resource_view{}, test.parameters), "Native renderer rejected ready parity frame");
@@ -1797,7 +1857,19 @@ namespace {
         "Native packed dimensions/format changed");
       const auto pixels = fixture.read(texture);
       sunshine_parity::write_bytes(results / (test.name + ".native.bin"), pixels.data(), pixels.size());
-      compare_pixels(test, fixture.color, load_pixels(results / (test.name + ".fx.bin")), pixels, report);
+      {
+        // The production render: each eye is warped with its own field. A frame that shows the
+        // source (no depth, zero strength) or the depth preview records no conditioning.
+        const auto fields = renderer.diagnostics();
+        const bool shows_source = !test.parameters.depth_ready || !test.parameters.camera_ready || test.parameters.depth_view == 2 ||
+          !(test.parameters.strength > 0.f) || !(test.parameters.strength_blend > 0.f);
+        require(fields.eye_field.handle != 0, "The production shader built no eye field");
+        if (shows_source) require(pixels == scene_pixels, "A frame without stereo differs between the scene-field and production shaders");
+        else check_eye_fields(test.name,
+          fixture.read(reinterpret_cast<ID3D12Resource *>(fields.vertical_field.handle)),
+          fixture.read(reinterpret_cast<ID3D12Resource *>(fields.final_field.handle)),
+          fixture.read(reinterpret_cast<ID3D12Resource *>(fields.eye_field.handle)), test.name == "raw-cliffs-strength50");
+      }
       require(fixture.read(backbuffer, D3D12_RESOURCE_STATE_PRESENT) == fixture.source_bytes,
         "Native renderer changed the game's mono backbuffer");
       // The immediate render recorded the full vertical pass; an armed owed

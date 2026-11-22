@@ -116,9 +116,30 @@ namespace {
     const api::resource backbuffer{reinterpret_cast<std::uint64_t>(fixture.backbuffer.p)};
     require(renderer.configure(observed.runtime, backbuffer, static_cast<api::color_space>(fixture.color)), "D3D11 native renderer configure failed");
     std::ofstream report(directory / "native-parity.txt");
+    // The frozen FX warps both eyes with the scene field: the production shader without its eye
+    // limiter must still match it. The production render below keeps every other check.
+    std::string scene_field_source(sunshine_game3d::renderer::shader_source());
+    {
+      const std::string_view marker = "#define SUNSHINE_EYE_LIMITER 1";
+      const auto at = scene_field_source.find(marker);
+      require(at != std::string::npos, "The production shader has no eye-limiter marker");
+      scene_field_source.replace(at, marker.size(), "// (eye limiter off: frozen-FX parity render)");
+    }
     unsigned index = 0;
     for (const auto &test : native11_cases) {
       p.strength = test.strength; p.depth_view = test.view; p.depth_ready = test.ready;
+      fixture.context->CopyResource(fixture.backbuffer.p, fixture.source_pattern.p);
+      require(renderer.configure(observed.runtime, backbuffer, static_cast<api::color_space>(fixture.color), scene_field_source),
+        "D3D11 native renderer cannot configure the scene-field shader");
+      require(sunshine_game3d::test::render_frame(renderer, queue->get_immediate_command_list(), backbuffer, test.ready ? observed.depth_view : api::resource_view{}, p), "D3D11 native renderer rejected the scene-field frame");
+      queue->flush_immediate_command_list(); renderer.finish_present();
+      queue->wait_idle();
+      require(renderer.output().handle != 0 && renderer.diagnostics().eye_field.handle == 0, "The D3D11 scene-field shader built an eye field");
+      com_ptr<ID3D11Texture2D> scene_texture;
+      checked(reinterpret_cast<ID3D11Resource *>(renderer.output().handle)->QueryInterface(IID_PPV_ARGS(scene_texture.put())), "D3D11 scene-field export is not a texture");
+      const auto scene_pixels = fixture.read(scene_texture.p);
+      scene_texture = {};
+      require(renderer.configure(observed.runtime, backbuffer, static_cast<api::color_space>(fixture.color)), "D3D11 native renderer configure failed");
       fixture.context->CopyResource(fixture.backbuffer.p, fixture.source_pattern.p);
       require(sunshine_game3d::test::render_frame(renderer, queue->get_immediate_command_list(), backbuffer, test.ready ? observed.depth_view : api::resource_view{}, p), "D3D11 native renderer rejected frame");
       const bool dump_case = std::strcmp(test.name,"strength50")==0 || std::strcmp(test.name,"depth-unavailable")==0;
@@ -134,8 +155,10 @@ namespace {
       require(output.handle != 0, "D3D11 native renderer output missing");
       com_ptr<ID3D11Texture2D> texture;
       checked(reinterpret_cast<ID3D11Resource *>(output.handle)->QueryInterface(IID_PPV_ARGS(texture.put())), "D3D11 native export is not a texture");
-      const auto pixels = fixture.read(texture.p);
-      require(pixels.size() == reference[index].size(), "D3D11 native/FX export sizes differ");
+      const auto production_pixels = fixture.read(texture.p);
+      require(renderer.diagnostics().eye_field.handle != 0, "The D3D11 production shader built no eye field");
+      const auto &pixels = scene_pixels;
+      require(pixels.size() == reference[index].size() && production_pixels.size() == pixels.size(), "D3D11 native/FX export sizes differ");
       double maximum = 0;
       for (size_t pixel = 0; pixel < size_t(width) * height * 2; ++pixel) for (unsigned channel = 0; channel < 4; ++channel) {
         float a, b;
@@ -171,7 +194,7 @@ namespace {
         require(renderer.render(commands, frame, true) && renderer.pack(commands), "D3D11 native renderer rejected an owed pack");
         queue->flush_immediate_command_list(); renderer.finish_present();
         queue->wait_idle();
-        require(fixture.read(texture.p) == pixels, (std::string("D3D11 owed pack differs from the immediate pack of ") + test.name).c_str());
+        require(fixture.read(texture.p) == production_pixels, (std::string("D3D11 owed pack differs from the immediate pack of ") + test.name).c_str());
         const auto after = renderer.conditioning_activity();
         const bool mono = !p.depth_ready || !p.camera_ready || p.depth_view == 2 || !(p.strength > 0.f) || !(p.strength_blend > 0.f);
         require(after.recorded - before.recorded == (mono ? 0u : 1u) && after.mono - before.mono == (mono ? 1u : 0u),
