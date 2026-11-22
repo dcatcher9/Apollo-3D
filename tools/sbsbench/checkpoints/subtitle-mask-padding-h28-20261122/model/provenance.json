@@ -1,0 +1,15 @@
+{
+  "encoder_sha256": "3a19500dfd1bfdc01db0f166cc645c7b83f5799e716cb8d8fb52d1175927115e",
+  "gate_checkpoint": "subtitle-mask-outline-gate-h28-20261122/model/gate.pt",
+  "gate_sha256": "1143345c7cf3617fddf31515efed098951ca794d4e1e4d520fb7303270421801",
+  "gate_strength": 0.75,
+  "decoder_sha256": "1398eea5f8481d68b3cd595b8555cf47a299f66b8bc97841b4cb9ba326b4602a",
+  "native_shader_sha256": "88db80f628966e9400234cb637bd90877e23d44983f6e39828abfe385b928a82",
+  "feature_count": 50,
+  "cutoff_alpha8": 38,
+  "training_views": 1011,
+  "fit_seed": 81741,
+  "selected_margin_penalty": 2,
+  "selected_steps": 1600,
+  "weight_fraction": 1.0
+}

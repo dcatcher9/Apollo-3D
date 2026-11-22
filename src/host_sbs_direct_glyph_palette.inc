@@ -194,12 +194,20 @@ class palette_transport_t {
   }
 
   void finish_line(UINT w, UINT h) {
+    // Use the same sampled pixel centers for the color counts and their areas.
+    const UINT pad = std::max(1u, UINT(std::nearbyint(double(h) / 8.0)));
+    const auto interior_extent = [&](UINT length) {
+      return length > 2u * pad ? div_up(length - pad, step_) - div_up(pad, step_) : 0u;
+    };
+    const UINT inside = interior_extent(w) * interior_extent(h);
+    const UINT total = div_up(w, step_) * div_up(h, step_);
     stage(coarse, 0, div_up(w28_, 16), 4, {{1, roles_.srv.Get()}}, peak_, &mean_);
-    stage(make_hist, 0, div_up(div_up(w, step_), 16), div_up(div_up(h, step_), 8), {{0, source_.Get()}, {1, roles_.srv.Get()}}, hist_);
+    stage(make_hist, pad, div_up(div_up(w, step_), 16), div_up(div_up(h, step_), 8), {{0, source_.Get()}, {1, roles_.srv.Get()}}, hist_);
     stage(smooth_hist, 0, 39, 1, {{9, hist_.srv.Get()}}, lut_);
     stage(smooth_hist, 1, 39, 1, {{10, lut_.srv.Get()}}, temp_);
     stage(smooth_hist, 2, 39, 1, {{10, temp_.srv.Get()}}, lut_, &palette_);
-    stage(choose_colors, 0, 1, 1, {{4, palette_.srv.Get()}, {10, lut_.srv.Get()}}, winner_);
+    dispatch(choose_colors, {slot_, w28_, w84_, 0, hist_scale_, total - inside, inside, 0},
+      1, 1, {{4, palette_.srv.Get()}, {10, lut_.srv.Get()}}, {winner_.uav.Get()});
     stage(make_moments, 0, div_up(w84_, 16), 11, {{1, roles_.srv.Get()}, {8, fine_.srv.Get()}}, moment_, &squared_);
     for (UINT radius : {6u, 17u}) {
       stage(smooth_moments, radius, div_up(w84_, 16), 11, {{12, moment_.srv.Get()}, {13, squared_.srv.Get()}}, h1_, &h2_);
@@ -315,9 +323,10 @@ public:
       ensure(generation.lines, 8, 64);
       ensure(generation.raw, 1, 4);
     }
-    ensure(hist_, 4 * 4913, 4);
-    ensure(lut_, 4913, 16);
-    ensure(temp_, 4913, 16);
+    // Four role-vote counts and two spatial counts per RGB bin.
+    ensure(hist_, 6 * 4913, 4);
+    ensure(lut_, 2 * 4913, 16);
+    ensure(temp_, 2 * 4913, 16);
     ensure(palette_, 4913, 16);
     ensure(winner_, 2, 4);
     ensure(proto_, 2, 16);

@@ -13,6 +13,8 @@ cbuffer Setup : register(b0)
     uint Width84;
     uint StageValue; // Canonical height, tile offset, filter radius or reduction pass.
     uint HistScale;
+    uint OutsideSamples;
+    uint InsideSamples;
 }
 StructuredBuffer<GlyphLine> LinePlan : register(t11);
 #define Box (LinePlan[Slot].box)
@@ -113,10 +115,13 @@ float4 Lift(StructuredBuffer<float4> field, Taps t)
     if (any(p >= size))
         return;
     uint3 bin = uint3(round(Source8(int2(p)) / 16));
-    uint base = (bin.x * 289 + bin.y * 17 + bin.z) * 4;
+    uint index = bin.x * 289 + bin.y * 17 + bin.z;
+    uint base = index * 4;
     float4 roles = Lift(Roles, GetTaps(p, size.y, 28, Width28));
     uint4 v = uint4(round(saturate(roles) * HistScale));
     [unroll] for (uint k = 0; k < 4; ++k) InterlockedAdd(UintOut[base + k], v[k]);
+    bool inside = all(p >= StageValue) && all(p + StageValue < size);
+    InterlockedAdd(UintOut[4 * 4913 + index * 2 + uint(inside)], 1u);
 } uint PalIndex(int3 p)
 {
     return uint(p.x * 289 + p.y * 17 + p.z);
@@ -127,6 +132,7 @@ float4 Lift(StructuredBuffer<float4> field, Taps t)
         return;
     int3 p = int3(at / 289, (at / 17) % 17, at % 17);
     float4 sum = 0;
+    float2 areas = 0;
     [unroll] for (int k = -3; k <= 3; ++k)
     {
         int3 other = p;
@@ -140,17 +146,25 @@ float4 Lift(StructuredBuffer<float4> field, Taps t)
             continue;
         uint ix = PalIndex(other);
         float4 v;
+        float2 counts;
         if (StageValue == 0)
         {
             uint start = ix * 4;
             v = float4(Histogram[start], Histogram[start + 1], Histogram[start + 2], Histogram[start + 3]) /
                 HistScale;
+            uint area = 4 * 4913 + 2 * ix;
+            counts = float2(Histogram[area], Histogram[area + 1]);
         }
         else
+        {
             v = PreviousHistogram[ix];
+            counts = PreviousHistogram[4913 + ix].xy;
+        }
         sum += v * Gaussian[k + 3];
+        areas += counts * Gaussian[k + 3];
     }
     Float4Out[at] = sum;
+    Float4Out[4913 + at] = float4(areas, 0, 0);
     if (StageValue == 2)
         SecondOut[at] = (sum + .12f) / (dot(sum, 1.0f) + .48f);
 }
@@ -184,6 +198,13 @@ groupshared float2 OutlineAndTotal[256];
         // observed outline rate falls below the line's rate before picking the outline ink.
         float observedOutlineRate = votes.z / (dot(votes, 1.0f) + .48f);
         rank.y *= saturate(observedOutlineRate / max(lineOutlineRate, 1.e-8f));
+        // The padded exterior provides background observations. Colors that concentrate
+        // inside the line receive more weight for both representative inks.
+        float2 area = max(float2(OutsideSamples, InsideSamples), 1.0f);
+        float2 counts = PreviousHistogram[4913 + p].xy;
+        float pooled = (counts.x + counts.y + .05f) / (area.x + area.y + 1.0f);
+        float2 rate = (counts + 12.0f * pooled) / (area + 12.0f);
+        rank *= .15f + .85f * saturate(1.0f - rate.x / max(rate.y, 1.e-9f));
         if (rank.x > best.x)
         {
             best.x = rank.x;

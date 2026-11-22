@@ -611,14 +611,24 @@ TEST_F(HostSbsDirectGlyphPublishGpuTest, CommonBackdropDoesNotDisplaceAnOutlineC
     return result;
   };
 
-  for (const UINT glyph : {0u, 4912u}) {
+  const auto check_backdrop = [&](UINT glyph, bool use_padding) {
+    SCOPED_TRACE(glyph);
+    SCOPED_TRACE(use_padding);
     const UINT backdrop = 4912u - glyph;
-    std::vector<RoleVotes> votes(4913), posterior(votes.size());
-    votes[backdrop] = {9950, 10, 40, 0};
-    votes[glyph] = {984, 1000, 16, 0};
-    for (UINT bin = 1; bin <= 200; ++bin)
-      votes[bin] = {9.87f, 0, .13f, 0};
-    for (size_t bin = 0; bin < votes.size(); ++bin) {
+    std::vector<RoleVotes> votes(2 * 4913), posterior(4913);
+    if (use_padding) {
+      // Equal role fractions. Only the spatial distribution distinguishes the ink.
+      votes[backdrop] = {800, 100, 100, 0};
+      votes[glyph] = {320, 40, 40, 0};
+      votes[4913 + backdrop] = {390, 610, 0, 0};
+      votes[4913 + glyph] = {0, 400, 0, 0};
+    } else {
+      votes[backdrop] = {9950, 10, 40, 0};
+      votes[glyph] = {984, 1000, 16, 0};
+      for (UINT bin = 1; bin <= 200; ++bin)
+        votes[bin] = {9.87f, 0, .13f, 0};
+    }
+    for (size_t bin = 0; bin < posterior.size(); ++bin) {
       const auto &v = votes[bin];
       const auto total = v[0] + v[1] + v[2] + v[3];
       for (size_t role = 0; role < v.size(); ++role)
@@ -628,13 +638,19 @@ TEST_F(HostSbsDirectGlyphPublishGpuTest, CommonBackdropDoesNotDisplaceAnOutlineC
     const auto histogram = view(votes);
     const auto palette = view(posterior);
     const auto winners = buffer(2, false, false, true);
+    const auto setup = constants(std::array<UINT, 8> {0, 0, 0, 0, 1, 390, 1010, 0});
     context->CSSetShader(shader.Get(), nullptr, 0);
+    context->CSSetConstantBuffers(0, 1, setup.GetAddressOf());
     context->CSSetShaderResources(4, 1, palette.GetAddressOf());
     context->CSSetShaderResources(10, 1, histogram.GetAddressOf());
     context->CSSetUnorderedAccessViews(0, 1, winners.uav.GetAddressOf(), nullptr);
     context->Dispatch(1, 1, 1);
     context->ClearState();
     EXPECT_EQ(words(read(winners.buffer.Get())), (std::vector<UINT> {glyph, glyph}));
+  };
+  for (const UINT glyph : {0u, 4912u}) {
+    check_backdrop(glyph, false);
+    check_backdrop(glyph, true);
   }
 }
 
