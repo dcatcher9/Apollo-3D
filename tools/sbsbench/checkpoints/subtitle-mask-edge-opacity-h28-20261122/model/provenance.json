@@ -132,7 +132,7 @@
       "2160/candidate": "ef574866afa9367c30dfe7db0b239d7e2bc7af94ef703feb0ea3a26096055182"
     }
   },
-  "inference_qualification": "Offline mixed ONNX on CPU and exported decoder on D3D11 WARP. TensorRT end-to-end parity and device latency pending.",
+  "inference_qualification": "Mixed ONNX CPU and exported decoder WARP checks, followed by standalone RTX 5080 validation of the production D3D11/CUDA/TensorRT subtitle publisher using recorded work rectangles. Full streaming latency and physical headset playback were not measured in this qualification.",
   "representative_fill": {
     "fill_posterior_exponent": 0.5,
     "interior_weight_exponent": 2,
@@ -173,6 +173,44 @@
       "2160p": {
         "edge_readout": 0.8846063844025128,
         "mask_fit_fill": 0.8848879411111972
+      }
+    },
+    "device_qualification": {
+      "source_commit": "16e72a4772a9dfbbf817566df2943128ee08aa23",
+      "host_executable_sha256": "595bf837fd47c6defb092ea027079e685f05ba29ec21579c35793b974b7cd9df",
+      "publisher_device": "NVIDIA GeForce RTX 5080",
+      "frames": 60,
+      "native_pixels": 2271402,
+      "cpu_gpu_mask_disagreements": 46,
+      "actual_capture_frames": 24,
+      "actual_capture_resets": 24,
+      "native_and_cpu_landmark_disagreements": 0,
+      "verification_sha256": "e7efe6951573ad0ab4c0cc5e2b819bde3118adcedaf127a01433ffc63ab2310e",
+      "publisher_time_ms": {
+        "empty": {
+          "median_ms": 0.0797,
+          "p95_ms": 0.251
+        },
+        "en-onset": {
+          "median_ms": 1.2436,
+          "p95_ms": 2.4173
+        },
+        "en-steady": {
+          "median_ms": 1.3189,
+          "p95_ms": 1.5777
+        },
+        "ja-steady": {
+          "median_ms": 1.4345,
+          "p95_ms": 1.6339
+        },
+        "zh-steady": {
+          "median_ms": 2.4452,
+          "p95_ms": 2.6702
+        },
+        "long-overlap": {
+          "median_ms": 10.1555,
+          "p95_ms": 10.653
+        }
       }
     }
   }
