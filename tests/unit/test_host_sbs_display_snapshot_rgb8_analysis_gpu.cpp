@@ -802,6 +802,9 @@ TEST_F(HostSbsDirectGlyphPublishGpuTest, NativeHistoryRequiresOneMatchingCueInsi
   };
   const std::array<UINT, 4> old_box {10, 8, 82, 40}, current_box {16, 10, 80, 38}, cap_box {12, 6, 84, 42};
   std::array<UINT, 8 * 16> old {};
+  const std::array<UINT, 2> ink_bins {0u, 4912u}; // Black fill and white outline.
+  old[15] = ink_bins[1] << 13;
+  const auto palette = structured(2, sizeof(UINT), ink_bins.data());
   for (UINT at : {0u, 4u, 8u}) {
     std::copy(old_box.begin(), old_box.end(), old.begin() + at);
   }
@@ -833,8 +836,8 @@ TEST_F(HostSbsDirectGlyphPublishGpuTest, NativeHistoryRequiresOneMatchingCueInsi
     std::copy_n(a.begin() + 4u * y * width, 2u * width, b.begin() + 4u * y * width);
   }
   const auto appended_rgb = texture(width, height, DXGI_FORMAT_R16G16B16A16_FLOAT, false, b.data(), width * 8);
-  const auto exercise = [&](UINT count, UINT cap_token, bool swap, UINT center_twice = 0, bool append = false) {
-    const auto cb = constants(std::array<UINT, 8> {width, height, 17, 0, 1, 1, 0, center_twice});
+  const auto exercise = [&](UINT count, UINT cap_token, bool swap, UINT center_twice = 0, bool append = false, UINT has_previous = 1) {
+    const auto cb = constants(std::array<UINT, 8> {width, height, 17, 0, 1, has_previous, 0, center_twice});
     std::array<UINT, 36> work {count ? 2u : 1u, count}, caps {1u, count, cap_token, 0u};
     for (UINT slot = 0; slot < count; ++slot) {
       std::copy(current_box.begin(), current_box.end(), work.begin() + 4u + 4u * slot);
@@ -845,7 +848,7 @@ TEST_F(HostSbsDirectGlyphPublishGpuTest, NativeHistoryRequiresOneMatchingCueInsi
     auto *rgb = append ? appended_rgb.srv.Get() : (swap ? swapped_rgb.srv.Get() : previous_rgb.srv.Get());
     auto *old_mask = append ? prior_left.srv.Get() : prior_alpha.srv.Get();
     auto *current_mask = append ? prior_alpha.srv.Get() : new_alpha.srv.Get();
-    auto pass = [&](ID3D11ComputeShader *shader, UINT gx, UINT gy, std::array<ID3D11ShaderResourceView *, 7> in, std::array<ID3D11UnorderedAccessView *, 5> out) {
+    auto pass = [&](ID3D11ComputeShader *shader, UINT gx, UINT gy, std::array<ID3D11ShaderResourceView *, 8> in, std::array<ID3D11UnorderedAccessView *, 5> out) {
       context->CSSetConstantBuffers(0, 1, cb.GetAddressOf());
       context->CSSetShader(shader, nullptr, 0);
       context->CSSetShaderResources(0, in.size(), in.data());
@@ -858,7 +861,7 @@ TEST_F(HostSbsDirectGlyphPublishGpuTest, NativeHistoryRequiresOneMatchingCueInsi
     pass(begin.Get(), 1, 1, {detector.srv.Get(), prior_lines.srv.Get()}, {current_work.uav.Get(), current.uav.Get(), sizes.uav.Get()});
     pass(confirm.Get(), 8, 1, {nullptr, prior_lines.srv.Get(), previous_rgb.srv.Get(), rgb, old_mask}, {nullptr, current.uav.Get()});
     pass(finish.Get(), 1, 1, {}, {current_work.uav.Get(), current.uav.Get(), sizes.uav.Get()});
-    pass(confirm_mask.Get(), 1, 1, {nullptr, prior_lines.srv.Get(), previous_rgb.srv.Get(), rgb, old_mask, current_mask}, {nullptr, current.uav.Get()});
+    pass(confirm_mask.Get(), 1, 1, {nullptr, prior_lines.srv.Get(), previous_rgb.srv.Get(), rgb, old_mask, current_mask, nullptr, palette.srv.Get()}, {nullptr, current.uav.Get()});
     pass(scatter.Get(), 6, 6, {nullptr, prior_lines.srv.Get(), previous_rgb.srv.Get(), rgb, old_mask, current_mask, current.srv.Get()}, {current_work.uav.Get(), nullptr, nullptr, remembered.uav.Get(), output.uav.Get()});
     return std::array {words(read(current_work.buffer.Get())), words(read(current.buffer.Get())), words(read(output.texture.Get()))};
   };
@@ -868,6 +871,9 @@ TEST_F(HostSbsDirectGlyphPublishGpuTest, NativeHistoryRequiresOneMatchingCueInsi
   EXPECT_EQ(same[2][24u * width + 35u], 242u);
   EXPECT_EQ(same[2][24u * width + 11u], 0u);
   EXPECT_EQ(words(read(remembered.buffer.Get()))[16u * 70u + 23u], 0u);
+  const auto onset = exercise(1, 17, false, 0, false, 0);
+  EXPECT_EQ(onset[1][14], 0u);
+  EXPECT_EQ(onset[1][15], ink_bins[1] << 13);
   const auto swap = exercise(1, 17, true);
   EXPECT_EQ((std::vector<UINT>(swap[0].begin() + 4, swap[0].begin() + 8)), (std::vector<UINT> {14, 8, 82, 40}));
   EXPECT_EQ(swap[1][14], 0u);

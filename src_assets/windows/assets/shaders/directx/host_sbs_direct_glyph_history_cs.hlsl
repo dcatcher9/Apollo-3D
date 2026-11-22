@@ -17,6 +17,7 @@ Texture2D<float4> CurrentSource : register(t3);
 StructuredBuffer<float> PreviousAlpha : register(t4);
 StructuredBuffer<float> LineAlpha : register(t5);
 StructuredBuffer<GlyphLine> Planned : register(t6);
+StructuredBuffer<uint> PaletteWinners : register(t7);
 
 RWByteAddressBuffer Work : register(u0);
 RWStructuredBuffer<GlyphLine> Lines : register(u1);
@@ -177,39 +178,76 @@ void finish_windows() {
 }
 
 groupshared uint4 ChangeCounts[128];
+// With stride max(2, width/250), the widest sample grid is 373 columns (width 749).
+groupshared uint4 ColumnCounts[375];
+groupshared uint WindowRejected;
+
+bool matches_ink(int3 rgb, int3 fill, int3 outline) {
+    return all(abs(rgb-fill)<=16) || all(abs(rgb-outline)<=16);
+}
+
+bool ink_changed(uint4 counts, uint allowance, uint limit) {
+    float background=max(1u,counts.z);
+    return 100u*counts.y>limit*counts.x ||
+           100.0f*counts.y*background>counts.x*(allowance*background+50.0f*counts.w);
+}
 
 [numthreads(128,1,1)]
 void confirm_mask_history(uint lane : SV_GroupIndex) {
     GlyphLine record=Lines[Slot];
+    uint fill=PaletteWinners[0], outline=PaletteWinners[1];
+    record.state.w=fill|(outline<<13);
+    if (HasPrevious==0) {
+        if (lane==0) Lines[Slot]=record;
+        return;
+    }
     GlyphLine old=(GlyphLine)0;
     if (record.state.x>0) old=PreviousLines[record.state.x-1];
+    int3 fillNow=int3(PalColor(fill)), outlineNow=int3(PalColor(outline));
+    int3 fillThen=int3(PalColor(old.state.w&8191u)), outlineThen=int3(PalColor(old.state.w>>13));
     uint4 overlap=intersect_rect(old.box,record.box);
     uint2 size=max(overlap.zw,overlap.xy)-overlap.xy;
     uint stride=max(2u,size.x/250u);
     uint2 sites=(max(size,4u)-4u+stride-1u)/stride;
+    uint2 extent=record.box.zw-record.box.xy;
     uint4 votes=0;
-    for (uint i=lane; i<sites.x*sites.y; i+=128u) {
-        uint2 p=overlap.xy+2u+stride*uint2(i%sites.x,i/sites.x);
-        uint2 local=p-record.box.xy;
-        float current=LineAlpha[local.y*(record.box.z-record.box.x)+local.x];
-        float previous=PreviousAlpha[raw_index(old,p)];
-        uint opacity=uint(round(saturate(max(previous,current))*255.0f));
-        bool ink=opacity>=128u, background=opacity<38u;
-        if (!ink && !background) continue;
-        uint changed=any(abs(rgb8(CurrentSource,p)-rgb8(PreviousSource,p))>32) ? 1u : 0u;
-        votes+=ink ? uint4(1,changed,0,0) : uint4(0,0,1,changed);
+    for (uint x=lane; x<sites.x; x+=128u) {
+        uint4 column=0;
+        for (uint y=0; y<sites.y; ++y) {
+            uint2 p=overlap.xy+2u+stride*uint2(x,y);
+            uint2 local=p-record.box.xy;
+            uint now=uint(round(saturate(LineAlpha[local.y*extent.x+local.x])*255.0f));
+            uint then=uint(round(saturate(PreviousAlpha[raw_index(old,p)])*255.0f));
+            int3 rgbNow=rgb8(CurrentSource,p), rgbThen=rgb8(PreviousSource,p);
+            uint changed=any(abs(rgbNow-rgbThen)>32) ? 1u : 0u;
+            if (max(then,now)<38u) column+=uint4(0,0,1,changed);
+            else if ((now>=128u && matches_ink(rgbNow,fillNow,outlineNow)) ||
+                     (then>=128u && matches_ink(rgbThen,fillThen,outlineThen))) column+=uint4(1,changed,0,0);
+        }
+        ColumnCounts[x]=column;
+        votes+=column;
     }
     ChangeCounts[lane]=votes;
+    if (lane==0) WindowRejected=0;
     GroupMemoryBarrierWithGroupSync();
+    uint height=max(1u,extent.y);
+    uint firstX=overlap.x+2u;
+    // Evaluate overlapping two-height windows so a local replacement among many unchanged letters can veto reuse.
+    for (uint cell=lane; cell*height<extent.x; cell+=128u) {
+        uint left=record.box.x+cell*height, right=left+2u*height;
+        uint begin=min(sites.x,(max(left,firstX)-firstX+stride-1u)/stride);
+        uint end=min(sites.x,(max(right,firstX)-firstX+stride-1u)/stride);
+        uint4 localCounts=0;
+        for (uint x=begin; x<end; ++x) localCounts+=ColumnCounts[x];
+        if (localCounts.x>=8u && ink_changed(localCounts,14u,50u)) InterlockedOr(WindowRejected,1u);
+    }
     [unroll] for (uint step=64; step>0; step/=2) {
         if (lane<step) ChangeCounts[lane]+=ChangeCounts[lane+step];
         GroupMemoryBarrierWithGroupSync();
     }
     if (lane==0) {
         uint4 total=ChangeCounts[0];
-        float backgroundSites=max(1u,total.z);
-        // Permit ordinary RGB drift on ink in proportion to motion in the background.
-        record.state.z=total.x>=24u && 100.0f*total.y*backgroundSites<=total.x*(4.0f*backgroundSites+75.0f*total.w);
+        record.state.z=total.x>=24u && WindowRejected==0u && !ink_changed(total,4u,40u);
         Lines[Slot]=record;
     }
 }

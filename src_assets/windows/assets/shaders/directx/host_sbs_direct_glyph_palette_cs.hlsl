@@ -261,10 +261,6 @@ float4 ColorOdds(float3 source)
     }
     return odds;
 }
-float3 PalColor(uint i)
-{
-    return min(255.0f, 16 * float3(i / 289, (i / 17) % 17, i % 17));
-}
 [numthreads(16, 8, 1)] void pack_tile(uint3 p : SV_DispatchThreadID) {
     if (p.x >= 512 || p.y >= 144)
         return;

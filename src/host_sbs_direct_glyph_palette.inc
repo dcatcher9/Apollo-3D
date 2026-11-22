@@ -219,9 +219,7 @@ class palette_transport_t {
     stage(prototypes, 1, 1, 1, {{15, parts_.srv.Get()}}, proto_);
     stage(decode_palette, 0, div_up(w, 16), div_up(h, 8), {{0, source_.Get()}, {1, roles_.srv.Get()}, {2, peak_.srv.Get()}, {3, mean_.srv.Get()}, {4, palette_.srv.Get()}, {5, winner_.srv.Get()}, {6, near_.srv.Get()}, {8, fine_.srv.Get()}, {14, far_.srv.Get()}, {15, proto_.srv.Get()}}, alpha_);
     auto &old = history_[previous_];
-    if (history_valid_) {
-      dispatch(confirm_mask_history, schedule(), 1, 1, {{1, old.lines.srv.Get()}, {2, old_rgb_srv_.Get()}, {3, source_.Get()}, {4, old.raw.srv.Get()}, {5, alpha_.srv.Get()}}, {nullptr, next().lines.uav.Get()});
-    }
+    dispatch(confirm_mask_history, schedule(), 1, 1, {{1, old.lines.srv.Get()}, {2, old_rgb_srv_.Get()}, {3, source_.Get()}, {4, old.raw.srv.Get()}, {5, alpha_.srv.Get()}, {7, winner_.srv.Get()}}, {nullptr, next().lines.uav.Get()});
     dispatch(publish_line, schedule(), div_up(w, 16), div_up(h, 8), {{1, old.lines.srv.Get()}, {2, old_rgb_srv_.Get()}, {3, source_.Get()}, {4, old.raw.srv.Get()}, {5, alpha_.srv.Get()}, {6, next().lines.srv.Get()}}, {work_.uav.Get(), nullptr, nullptr, next().raw.uav.Get(), protection_uav_.Get()});
   }
 
