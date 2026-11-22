@@ -169,6 +169,17 @@ class WeightSwapTests(unittest.TestCase):
             stored["anon_2"], stock["pretrained.blocks.0.mlp.fc1.weight"].T.astype(np.float16))
         self.assertEqual(stored["anon_1"].dtype, np.float16)
 
+    def test_a_changed_vit_tensor_the_export_cannot_carry_is_an_error(self):
+        model, stock = self.make_dav2()
+        tuned = dict(stock)
+        tuned["pretrained.blocks.0.attn.qkv.bias"] = stock["pretrained.blocks.0.attn.qkv.bias"] + 1
+        with self.assertRaisesRegex(ValueError, "cannot carry"):
+            tuning.swap_vit_linear_initializers(model, stock, tuned)
+        tuned = dict(stock)
+        tuned["pretrained.pos_embed"] = np.zeros((1, 2, 4), np.float32)
+        with self.assertRaisesRegex(ValueError, "cannot carry"):
+            tuning.swap_vit_linear_initializers(model, stock, tuned)
+
     def test_a_weight_without_exactly_one_home_is_an_error(self):
         model, stock = self.make_dav2()
         tuned = dict(stock)

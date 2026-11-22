@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Export the frozen production DAV2 + ZipDepth convex-2x TensorRT artifact.
 
-The script intentionally writes the large ONNX and TensorRT products outside
-the repository. Source identities and the fixed point-profile order come from
+The script writes its ONNX and TensorRT products to the output directory it
+is given. The released fused ONNX is checked in under
+``src_assets/windows/assets``; an export must reproduce it byte for byte.
+Source identities and the fixed point-profile order come from
 ``contracts/prod-zipdepth-convex2x-v2.json``; callers cannot silently substitute
 another DAV2 graph, ZipDepth commit, or checkpoint under the production name.
 """

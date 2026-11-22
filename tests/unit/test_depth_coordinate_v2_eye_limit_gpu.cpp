@@ -45,16 +45,37 @@ namespace {
     std::vector<float> right;
   };
 
-  /** The shader's own recurrences, in the same operation order. */
+  /** Content columns [left, right) of the field; the whole width when empty. */
+  struct content_columns_t {
+    std::uint32_t left = 0u;
+    std::uint32_t right = 0u;
+  };
+
+  /**
+   * The shader's own recurrences, in the same operation order. The slopes are per content width;
+   * with `compact` set, a column outside the content reads the nearest content column.
+   */
   eye_fields_t eye_limit_reference(
-    const std::vector<float> &share,
+    const std::vector<float> &field,
     const std::uint32_t width,
     const std::uint32_t height,
-    const eye_limit_constants_t &constants
+    const eye_limit_constants_t &constants,
+    const content_columns_t content = {}
   ) {
+    const std::uint32_t left = content.right ? content.left : 0u;
+    const std::uint32_t right = content.right ? content.right : width;
+    std::vector<float> share = field;
+    if (constants.compact) {
+      for (std::uint32_t y = 0u; y < height; ++y) {
+        for (std::uint32_t x = 0u; x < width; ++x) {
+          share[static_cast<std::size_t>(y) * width + x] =
+            field[static_cast<std::size_t>(y) * width + std::clamp(x, left, right - 1u)];
+        }
+      }
+    }
     eye_fields_t result {std::vector<float>(share.size()), std::vector<float>(share.size())};
-    const float hole_step = constants.hole_slope / static_cast<float>(width);
-    const float covered_step = constants.occlusion_slope / static_cast<float>(width);
+    const float hole_step = constants.hole_slope / static_cast<float>(right - left);
+    const float covered_step = constants.occlusion_slope / static_cast<float>(right - left);
     const std::uint32_t covered_cells = constants.extension_cells & 0xffffu;
     const std::uint32_t hole_cells = constants.extension_cells >> 16u;
     for (std::uint32_t y = 0u; y < height; ++y) {
@@ -92,7 +113,8 @@ namespace {
     const std::uint32_t height,
     const std::vector<float> &share,
     const eye_limit_constants_t &eye_constants,
-    eye_fields_t &result
+    eye_fields_t &result,
+    const content_columns_t content = {}
   ) {
     namespace v2 = models::depth_coordinate_v2;
     D3D11_TEXTURE2D_DESC share_desc {};
@@ -124,7 +146,8 @@ namespace {
     std::array<std::uint32_t, 16> constants {};
     constants[0] = width;
     constants[1] = height;
-    constants[11] = width;
+    constants[9] = content.right ? content.left : 0u;
+    constants[11] = content.right ? content.right : width;
     constants[12] = height;
     const v2::constants_t v2_constants {
       v2::model_calibrations.front().raw_coordinate_scale,
@@ -343,6 +366,33 @@ TEST(DepthCoordinateV2EyeLimitGpuTest, EachEyeGetsItsOwnOneSidedSlopesAndForegro
     for (std::size_t index = 0u; index < ragged.size(); ++index) {
       ASSERT_NEAR(chunked.left[index], serial.left[index], tolerance) << "width " << ragged_width << " left " << index;
       ASSERT_NEAR(chunked.right[index], serial.right[index], tolerance) << "width " << ragged_width << " right " << index;
+    }
+  }
+
+  // Cropped content (the compact limiter path): columns outside the content read its edge column
+  // and the slopes are per content width, for the whole width and across chunk borders.
+  for (const std::uint32_t cropped_width : {160u, 157u}) {
+    constexpr std::uint32_t cropped_height = 3u;
+    const content_columns_t content {11u, cropped_width - 23u};
+    std::vector<float> cropped(static_cast<std::size_t>(cropped_width) * cropped_height);
+    for (std::uint32_t y = 0u; y < cropped_height; ++y) {
+      for (std::uint32_t x = 0u; x < cropped_width; ++x) {
+        const bool object = ((x + 5u * y) / 19u) % 3u == 1u;
+        // Values outside the content are deliberately different: they must not be read.
+        const bool outside = x < content.left || x >= content.right;
+        cropped[static_cast<std::size_t>(y) * cropped_width + x] =
+          outside ? 0.039f : (object ? 0.03f : -0.02f) + 0.004f * std::sin(0.47f * static_cast<float>(x + 3u * y));
+      }
+    }
+    auto compact_constants = constants;
+    compact_constants.compact = 1u;
+    eye_fields_t compact;
+    ASSERT_TRUE(dispatch_eye_limit(device.Get(), context.Get(), shader.Get(), cropped_width, cropped_height, cropped, compact_constants, compact, content));
+    const auto compact_reference = eye_limit_reference(cropped, cropped_width, cropped_height, compact_constants, content);
+    for (std::size_t index = 0u; index < cropped.size(); ++index) {
+      ASSERT_NEAR(compact.left[index], compact_reference.left[index], tolerance) << "cropped width " << cropped_width << " left " << index;
+      ASSERT_NEAR(compact.right[index], compact_reference.right[index], tolerance) << "cropped width " << cropped_width << " right " << index;
+      ASSERT_LT(compact.left[index], 0.039f) << "a value outside the content was read";
     }
   }
 

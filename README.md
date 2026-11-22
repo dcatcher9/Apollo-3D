@@ -29,7 +29,7 @@
 
 Sunshine 3D is the Windows host and host-side 2D-to-3D engine. Its AI path works on captured frames
 without requiring game mods, player plug-ins, or application-specific stereo support. It can estimate
-depth with Depth Anything V2 Small and frozen ZipDepth convex-2x refinement, then use its Depth
+depth with Depth Anything V2 Small and fine-tuned ZipDepth convex-2x refinement, then use its Depth
 Coordinate V2 renderer to create stereo for Moonlight 3D, supported local glasses, or a converted
 video file.
 
@@ -232,7 +232,7 @@ views are available.
 |---|---|
 | **Private virtual display** | An on-demand SudoVDA desktop negotiated from the client’s selected resolution, refresh rate, HDR state, and scale |
 | **Virtual-display-only streaming** | A client-controlled desktop mode that disables ordinary physical monitors, handles cursor bounds automatically, and restores displays on disconnect |
-| **Host AI 3D** | Matched-frame DAV2 Small depth with frozen ZipDepth convex-2x refinement, rendered through D3D11/TensorRT and encoded with NVENC |
+| **Host AI 3D** | Matched-frame DAV2 Small depth with fine-tuned ZipDepth convex-2x refinement, rendered through D3D11/TensorRT and encoded with NVENC |
 | **Window-aware Host AI 3D** | On supported Desktop Duplication captures, focuses depth analysis on eligible foreground video or app content; eligible subtitles receive dedicated plane conditioning |
 | **Game 3D** | Discovers a compatible game export while streaming mono, then presents exact full SBS through a guarded transition; source loss retains packed duplicate-eye fallback |
 | **Movie 3D** | Interprets existing 2D, Half SBS or Full SBS pictures through an explicit format choice without changing transport geometry |

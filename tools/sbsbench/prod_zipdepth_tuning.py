@@ -38,6 +38,7 @@ PUBLIC_INPUT = "pixel_values"
 PUBLIC_OUTPUT = "refined_depth"
 UNGAINED_OUTPUT = "refined_depth_before_gain"
 HEAD_PREFIX = "depth_head."
+VIT_PREFIX = "pretrained."
 VIT_BLOCK_PREFIX = "pretrained.blocks."
 FINAL_CONV_WEIGHT = "depth_head.scratch.output_conv2.0.weight"
 _PREFIX = "single_high_io_vit_"
@@ -121,7 +122,13 @@ def swap_vit_linear_initializers(
             by_shape.setdefault(tuple(initializer.dims), []).append(name)
     written = 0
     for name, new in tuned.items():
+        if not name.startswith(VIT_PREFIX):
+            continue
         if not (name.startswith(VIT_BLOCK_PREFIX) and name.endswith(".weight") and new.ndim == 2):
+            # Biases, norms, layer scales, embeddings: this exporter does not write them, so a
+            # checkpoint that changed one would export as a different model than was trained.
+            if name not in stock or not np.array_equal(stock[name], new):
+                raise ValueError(f"{name}: the tuned checkpoint changes a ViT tensor the export cannot carry")
             continue
         if name not in stock:
             raise ValueError(f"{name}: the stock checkpoint has no such weight")

@@ -59,7 +59,17 @@ step. The tuned composite differs from the stock one in four ways, all applied b
 | Weights | 60 DAV2 decoder-head tensors written by name, 48 ViT linear weights (folded rank-8 adapters) written over the stock weight they replace, and a tuned ZipDepth branch |
 | Output gain | `refined_depth` is multiplied by `1.0258`, which keeps the stock composite's raw range and therefore the depth-coordinate calibration |
 
-Inputs, all outside git: the tuned checkpoint `ckpt_bt7.pt` (126,531,328 bytes, SHA-256
+The exported composite is checked in as
+`src_assets/windows/assets/prod_dav2_zipdepth_c2x_high_opset18.onnx`, with
+`prod_dav2_zipdepth_c2x_high_opset18.provenance.json` beside it and the Depth Anything V2 Small
+(Apache-2.0) and ZipDepth (MIT) licence texts under `assets/licenses`. The build copies it into its
+assets and the installer packages it, so a host needs no separate model step.
+`tools/sbsbench/test_prod_zipdepth_composite_asset.py` holds the file, the contract, the C++
+identity and the provenance record together. The provenance record also states what the weights
+were tuned with: the teacher was Depth Anything V2 Base, a CC-BY-NC-4.0 model whose depth output
+served as a training target; none of its weights are in the file.
+
+The export's inputs stay outside git: the tuned checkpoint `ckpt_bt7.pt` (126,531,328 bytes, SHA-256
 `a08834f278e516f4ecfe179e9901d1633a318b97781a8d8f5aae7499d88f5f95`) and the stock DAV2 PyTorch
 weights `depth_anything_v2_vits.pth` (SHA-256
 `715fade13be8f229f8a70cc02066f656f2423a59effd0579197bbf57860e1378`), next to the stock DAV2 ONNX and

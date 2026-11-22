@@ -1987,9 +1987,17 @@ extension the object is drawn rigid and the ramp lies on the background beside i
 rim of background that many cells wide that moves with the object. The extension is horizontal
 only; it does not change the vertical envelopes or the crown trade-off above.
 
-Both slopes are below one, so each eye map stays contractive and the unchanged 11-step inverse
-applies. A max-plus dilation along rows preserves the vertical shear bound of its input, and so
-does a horizontal window maximum.
+Both slopes are below one, so each eye map stays contractive and has a unique inverse. The
+renderer's 11 fixed-point steps shrink the remaining error by the local slope each step, so they
+are exact at the production slope (`0.5^11` = 0.05% left) but not where the whole path lies on a
+covered-side ramp (`0.9^11` = 31% left). With model depth that is rare, because its edges are
+soft: on unseen frames at the production field width 0.009% of pixels end more than half a pixel
+from the exact inverse, the worst by 2.8 px, and the covered sliver is compressed 2.7x where the
+exact inverse compresses 2.8x. A hard depth cliff, as exact game depth has, would leave up to about
+a third of its parallax unresolved in that sliver; a covered-side slope of 0.7 converges
+(`0.7^11` = 2%) and measured the same on the real pipeline (tip deformation 0.050 against 0.051,
+colour error at thin objects 8.39 against 8.37). A max-plus dilation along rows preserves the
+vertical shear bound of its input, and so does a horizontal window maximum.
 
 The pass runs one thread per chunk of a row (32 chunks, eight rows per group). A thread sweeps its
 chunk in both directions as if it stood alone and writes every texel once: the forward sweep only
