@@ -8214,7 +8214,7 @@ namespace sbs_bench {
               {"role", "file-fed-actual-completed-current-outline-direct-glyph"},
               {"source_transfer", "encoded-srgb"}, {"frame_count", completed_frame_count}, {"executable_sha256", executable_digest},
               {"observation_timeline", {"current-outline/observation.timeline", observation_timeline_sha256}},
-              {"model", {{"checkpoint", models::direct_glyph_checkpoint_sha256}, {"onnx", models::direct_glyph_onnx_sha256(profile)},
+              {"model", {{"checkpoint", models::direct_glyph_checkpoint_sha256}, {"onnx", models::direct_glyph_onnx_sha256(profile, o.current_outline_direct_glyph_palette)},
                          {"engine", engine_digest}, {"cutoff_alpha8", raw_matte_gpu::cutoff_alpha8}}},
               {"profile_width_height", {tile.width, tile.height}},
               {o.current_outline_direct_glyph_palette ? "tiles_per_submission" : "tile_capacity",

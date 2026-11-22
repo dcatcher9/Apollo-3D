@@ -47,7 +47,6 @@ static bool build_direct_glyph_engine(const direct_glyph_artifact_t &artifact, b
     const auto shape = [](int tiles) {
       return nvinfer1::Dims4 {tiles, 3, int(tile_height), int(tile_width)};
     };
-    input->setDimensions(shape(-1));
     auto *profile = builder->createOptimizationProfile();
     using point = nvinfer1::OptProfileSelector;
     if (!profile || !profile->setDimensions(input->getName(), point::kMIN, shape(1)) ||

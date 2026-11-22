@@ -104,7 +104,7 @@ namespace models {
     std::optional<direct_glyph_artifact_t> get_direct_glyph_artifact(
         const std::filesystem::path& assets_dir, std::string_view compatibility_tag,
         host_sbs_direct_glyph_gpu::tile_profile_e profile, bool batched_tiles) {
-        const auto preset = direct_glyph_model_preset(profile);
+        const auto preset = direct_glyph_model_preset(profile, batched_tiles);
         if (assets_dir.empty() || compatibility_tag.empty() || preset.asset_path.empty()) {
             return std::nullopt;
         }
@@ -124,7 +124,7 @@ namespace models {
 
         const auto cache_digest = engine_identity_digest(
             "sunshine3d/direct-glyph-tensorrt-engine-cache/v1", direct_glyph_model_name,
-            std::string(preset.engine_recipe) + (batched_tiles ? "-batch1-4-6-v1" : ""),
+            preset.engine_recipe,
             std::string(compatibility_tag) + "-onnx" + artifact.source_sha256);
         if (cache_digest.empty()) {
             return std::nullopt;

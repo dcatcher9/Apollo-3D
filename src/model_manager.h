@@ -77,7 +77,7 @@ namespace models {
     inline constexpr std::string_view ocr_engine_recipe =
         depth_coordinate_v2::subtitle_ocr_engine_recipe;
 
-    // The static graph uses FP16 convolutions and exposes FP32 RGB and log scores.
+    // The encoder uses FP16 convolutions and exposes FP32 RGB and log scores.
     inline constexpr std::string_view direct_glyph_model_name = "direct_glyph";
     inline constexpr std::string_view direct_glyph_checkpoint_sha256 =
         "bdbeb15730ffe0c7a9d0cdac67ec6baa691156cf4a0ed20e38772a760c2ee4b8";
@@ -97,8 +97,16 @@ namespace models {
     };
 
     inline constexpr direct_glyph_model_preset_t direct_glyph_model_preset(
-        host_sbs_direct_glyph_gpu::tile_profile_e profile) noexcept {
+        host_sbs_direct_glyph_gpu::tile_profile_e profile, bool batched_tiles = false) noexcept {
         using host_sbs_direct_glyph_gpu::tile_profile_e;
+        if (batched_tiles) {
+            if (profile != tile_profile_e::common) return {};
+            return {
+                "models/direct_glyph_stroke_h144_w512_mixed_batch.onnx",
+                "bd43d5d947193c0e7c628f53b3a912ea9b379d95bde00f91ae03240c3d46832e",
+                "stroke-h144-w512-fp16conv-fp32scores-notf32-batch1-4-6-v1",
+            };
+        }
         switch (profile) {
             case tile_profile_e::common:
                 return {direct_glyph_model_asset_path, direct_glyph_model_onnx_sha256, direct_glyph_engine_recipe};
@@ -113,8 +121,8 @@ namespace models {
     }
 
     inline constexpr std::string_view direct_glyph_onnx_sha256(
-        host_sbs_direct_glyph_gpu::tile_profile_e profile) noexcept {
-        return direct_glyph_model_preset(profile).onnx_sha256;
+        host_sbs_direct_glyph_gpu::tile_profile_e profile, bool batched_tiles = false) noexcept {
+        return direct_glyph_model_preset(profile, batched_tiles).onnx_sha256;
     }
 
     struct direct_glyph_artifact_t {

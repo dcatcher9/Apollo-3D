@@ -461,7 +461,8 @@ side toward symmetry by at most one working-rectangle height, within the same co
 This includes isolated strokes near the ends of centered lines. The encoder scales the
 entire resulting rectangle to 28 rows,
 preserves its aspect ratio, and processes long lines in 440-column windows of the
-512×144 mixed TensorRT profile. Up to six windows from a line share one TensorRT
+512×144 mixed TensorRT profile. Its ONNX export declares a symbolic batch axis
+with the same weights and operations. Up to six windows from a line share one TensorRT
 batch. Each observation owns its execution context until the GPU has consumed the
 batch and exported its scores. The 36-column horizontal context on each side stays
 outside the window's owned output. Aligned RGB at 84 rows supplies local background color
