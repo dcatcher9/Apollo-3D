@@ -8,6 +8,7 @@
 #include "host_sbs_direct_glyph_tiles.h"
 #include "host_sbs_shader_cache.h"
 
+#include <d3d11_4.h>
 #include <wrl/client.h>
 
 #include <array>
@@ -40,6 +41,7 @@ namespace models::host_sbs_direct_glyph_gpu {
     ID3D11ShaderResourceView *detector_caps = nullptr;
     UINT line_center_twice_source = 0;
     std::uint64_t generation = 0, frame = 0;
+    std::uint64_t subtitle_context_generation = 0;
     UINT origin_x = 0, origin_y = 0, color_domain = 0;
     bool reset_history = false;
 

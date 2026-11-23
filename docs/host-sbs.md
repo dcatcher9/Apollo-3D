@@ -106,7 +106,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | `current_trusted_inner` | 1 | `5fdc9a1be98291902d63ca639f5bcfd80e88821b6df17bd083a23b5e09c32884` |
 | `direct_glyph_plan` | 2 | `3c1df1656492065c62c519ceffd49f3d1bc1d3a4e26c50ba0b8a2eead4dc2844` |
 | `direct_glyph_transport` | 4 | `2df402561c88d7e2b2672660e2f9d5f42b06d9815c87b48511adb05af6226b30` |
-| `direct_glyph_palette` | 17 | `3bad98fb00ca1bbf244235ae7d42b01ff7569d2ebb327acee9f8b1507e249796` |
+| `direct_glyph_palette` | 17 | `7b4d16cace20e85c23475fbb1a934d9711833c269eb6ab17475e7ac0d166f7c1` |
 | `direct_glyph_prepare` | 1 | `219a6a305c05ca3ac1744286a4e87b83b61128c10e05c61ec517337f279ec940` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->
 
@@ -509,11 +509,15 @@ samples exist. An empty background sample contributes zero to its changed fracti
 The blend weight at each pixel falls with its own RGB change. Each new history generation
 stores the original prediction. Current overlapping
 lines use their maximum protection, quantized at native pixel centers with a cutoff
-of 38/255. Fresh empty OCR clears the mask and history and skips inference.
+of 38/255. A GPU-held observation preserves the last inferred lines, source RGB and raw
+opacity. Fresh empty OCR clears the mask and history and skips inference. A change of
+subtitle owner invalidates the history even when the input geometry stays the same.
 
 An estimator reserves one observation until its GPU work completes. It polls a D3D
-event without waiting. A 64-byte scheduling record supplies eight width/height pairs
-for scratch sizing and submission. Locations, image tensors, cue evidence and raw
+fence without waiting. The render thread signals each submission. The teardown worker
+can check that fence while the renderer continues using its immediate context.
+A 72-byte scheduling record supplies eight width/height pairs and the hold flag.
+Locations, image tensors, cue evidence and raw
 opacity stay on the GPU. Each submission processes at most six encoder tiles before
 checking completion. Long lines continue in subsequent submissions under the same
 observation token. Only the completed observation can publish its native mask.

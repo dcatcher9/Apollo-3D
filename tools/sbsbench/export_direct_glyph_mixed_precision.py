@@ -8,7 +8,7 @@ import onnx
 from onnx import TensorProto, helper, numpy_helper
 
 
-def export(source: Path, destination: Path) -> None:
+def export(source: Path, destination: Path, *, dynamic_batch: bool = False) -> None:
     if source.resolve() == destination.resolve():
         raise ValueError("Choose a separate destination for the mixed-precision graph")
     model = onnx.load(source)
@@ -54,6 +54,9 @@ def export(source: Path, destination: Path) -> None:
     del graph.node[:]
     graph.node.extend(updated)
     del graph.value_info[:]
+    if dynamic_batch:
+        for tensor in (graph.input[0], graph.output[0]):
+            tensor.type.tensor_type.shape.dim[0].dim_param = "tiles"
     onnx.checker.check_model(model, full_check=True)
     onnx.save(model, destination)
 
@@ -62,5 +65,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path)
     parser.add_argument("destination", type=Path)
+    parser.add_argument("--dynamic-batch", action="store_true", help="Export the shipping encoder with a symbolic tile batch axis")
     args = parser.parse_args()
-    export(args.source, args.destination)
+    export(args.source, args.destination, dynamic_batch=args.dynamic_batch)

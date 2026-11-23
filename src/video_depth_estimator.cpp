@@ -6769,6 +6769,7 @@ namespace models {
         .detector_caps = subtitle_direct_glyph_line_palette ? subtitle_current_outline_raw_matte.direct_detector_caps() : nullptr,
         .line_center_twice_source = line_reference ? static_cast<UINT>(std::max(0, line_reference->center_twice_source)) : 0u,
         .generation = publication.analysis_generation, .frame = publication.frame,
+        .subtitle_context_generation = pending_root->subtitle_context.generation,
         .origin_x = pending_root->input_region.left, .origin_y = pending_root->input_region.top,
         .color_domain = static_cast<UINT>(pending_root->color_space),
         .reset_history = input_domain_reset,
@@ -6971,6 +6972,8 @@ namespace models {
       host_sbs_direct_glyph_gpu::result_t discarded;
       std::string error;
       const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds {250};
+      // Retirement may run alongside flat rendering. A null request only checks the
+      // device fence (or the CUDA event) and discards the finished submission.
       while (subtitle_direct_glyph_score.poll(nullptr, discarded, error) ==
              host_sbs_direct_glyph_gpu::poll_status_e::pending &&
              std::chrono::steady_clock::now() < deadline) {

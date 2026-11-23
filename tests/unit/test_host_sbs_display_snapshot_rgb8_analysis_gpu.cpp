@@ -853,7 +853,7 @@ TEST_F(HostSbsDirectGlyphPublishGpuTest, NativeHistoryRequiresOneMatchingCueInsi
   }
   const auto prior_lines = structured(8, 64, old.data());
   const auto current = structured(8, 64, nullptr);
-  const auto sizes = structured(8, 8, nullptr);
+  const auto sizes = structured(9, 8, nullptr);
   std::vector<float> past(width * height, 1.0f), raw_now(width * height, 0.0f);
   const auto prior_alpha = structured(width * height, 4, past.data());
   auto left_ink = past;
@@ -879,9 +879,10 @@ TEST_F(HostSbsDirectGlyphPublishGpuTest, NativeHistoryRequiresOneMatchingCueInsi
     std::copy_n(a.begin() + 4u * y * width, 2u * width, b.begin() + 4u * y * width);
   }
   const auto appended_rgb = texture(width, height, DXGI_FORMAT_R16G16B16A16_FLOAT, false, b.data(), width * 8);
-  const auto exercise = [&](UINT count, UINT cap_token, bool swap, UINT center_twice = 0, bool append = false, UINT has_previous = 1) {
+  const auto exercise = [&](UINT count, UINT cap_token, bool swap, UINT center_twice = 0, bool append = false, UINT has_previous = 1, bool held = false) {
     const auto cb = constants(std::array<UINT, 8> {width, height, 17, 0, 1, has_previous, 0, center_twice});
     std::array<UINT, 36> work {count ? 2u : 1u, count}, caps {1u, count, cap_token, 0u};
+    if (held) work[0] = 3u;
     for (UINT slot = 0; slot < count; ++slot) {
       std::copy(current_box.begin(), current_box.end(), work.begin() + 4u + 4u * slot);
       std::copy(cap_box.begin(), cap_box.end(), caps.begin() + 4u + 4u * slot);
@@ -936,8 +937,12 @@ TEST_F(HostSbsDirectGlyphPublishGpuTest, NativeHistoryRequiresOneMatchingCueInsi
   EXPECT_EQ(ambiguous[1][12], 0u);
   EXPECT_EQ(ambiguous[1][16 + 12], 0u);
   EXPECT_EQ(exercise(0, 17, false)[0][0], 1u);
+  EXPECT_EQ(words(read(sizes.buffer.Get()))[16], 0u);
+  EXPECT_EQ(exercise(0, 17, false, 0, false, 1, true)[0][0], 3u);
+  EXPECT_EQ(words(read(sizes.buffer.Get()))[16], 1u);
   const auto stale = exercise(1, 16, false);
   EXPECT_EQ(stale[0][0], 0u);
+  EXPECT_EQ(words(read(sizes.buffer.Get()))[16], 0u);
   EXPECT_NE(stale[0][2], 0u);
   EXPECT_EQ(stale[1][14], 0u);
 }

@@ -1,15 +1,19 @@
 #include "src/cuda_conditional_graph.h"
+#include "src/host_sbs_direct_glyph_gpu.h"
 #include "src/model_manager.h"
+#include "src/utility.h"
 #include "src/video_depth_estimator.h"
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <gtest/gtest.h>
 #include <iostream>
 #include <iterator>
@@ -17,6 +21,7 @@
 #include <NvInfer.h>
 #include <NvInferPlugin.h>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -2486,6 +2491,129 @@ namespace {
 #endif
     value = nullptr;
   }
+}
+
+TEST(DirectGlyphHardware, HoldsClearsOwnerChangesAndWorkerRetirement) {
+  namespace glyph = models::host_sbs_direct_glyph_gpu;
+  using Microsoft::WRL::ComPtr;
+  const char *path = std::getenv("SUNSHINE_TEST_DIRECT_GLYPH_ENGINE");
+  if (!path || !*path) GTEST_SKIP() << "Set SUNSHINE_TEST_DIRECT_GLYPH_ENGINE to the native batch engine";
+  std::ifstream input(path, std::ios::binary);
+  ASSERT_TRUE(input) << path;
+  const std::vector<char> bytes {std::istreambuf_iterator<char>(input), {}};
+  ComPtr<ID3D11Device> device;
+  ComPtr<ID3D11DeviceContext> context;
+  ASSERT_HRESULT_SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0,
+                                             D3D11_SDK_VERSION, &device, nullptr, &context));
+  ComPtr<IDXGIDevice> dx;
+  ComPtr<IDXGIAdapter> adapter;
+  ASSERT_HRESULT_SUCCEEDED(device.As(&dx));
+  ASSERT_HRESULT_SUCCEEDED(dx->GetAdapter(&adapter));
+  auto &cuda = cuda_driver_api::get();
+  ASSERT_TRUE(cuda.is_valid() && cuda.cuD3D11GetDevice);
+  ASSERT_EQ(cuda.cuInit(0), CUDA_SUCCESS);
+  CUdevice ordinal {};
+  CUcontext primary = nullptr;
+  ASSERT_EQ(cuda.cuD3D11GetDevice(&ordinal, adapter.Get()), CUDA_SUCCESS);
+  ASSERT_EQ(cuda.cuDevicePrimaryCtxRetain(&primary, ordinal), CUDA_SUCCESS);
+  const auto release_primary = util::fail_guard([&] { cuda.cuDevicePrimaryCtxRelease(ordinal); });
+  glyph::detail::current_cuda_context_t current(cuda, primary);
+  topology_test_logger_t logger;
+  auto *runtime = nvinfer1::createInferRuntime(logger);
+  ASSERT_NE(runtime, nullptr);
+  auto *engine = runtime->deserializeCudaEngine(bytes.data(), bytes.size());
+  ASSERT_NE(engine, nullptr);
+  auto *execution = engine->createExecutionContext();
+  ASSERT_NE(execution, nullptr);
+  glyph::resources_t score;
+  const auto cleanup = util::fail_guard([&] {
+    if (score.release()) {
+      release_trt_test_interface(execution);
+      release_trt_test_interface(engine);
+      release_trt_test_interface(runtime);
+    }
+  });
+  std::string error;
+  ASSERT_TRUE(score.prepare(device.Get(), context.Get(), SUNSHINE_SHADERS_DIR, primary, {execution, nullptr}, error, true)) << error;
+
+  constexpr UINT w = 64, h = 32;
+  const std::array<std::uint16_t, w * h * 4> rgb {};
+  D3D11_TEXTURE2D_DESC texture {w, h, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, {1, 0}, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE};
+  D3D11_SUBRESOURCE_DATA initial {rgb.data(), w * 8, 0};
+  ComPtr<ID3D11Texture2D> source;
+  ComPtr<ID3D11ShaderResourceView> source_view, cap_view;
+  ASSERT_HRESULT_SUCCEEDED(device->CreateTexture2D(&texture, &initial, &source));
+  ASSERT_HRESULT_SUCCEEDED(device->CreateShaderResourceView(source.Get(), nullptr, &source_view));
+  D3D11_BUFFER_DESC raw {glyph::work_bytes, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+                         0, D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS};
+  ComPtr<ID3D11Buffer> work, caps, staging;
+  ASSERT_HRESULT_SUCCEEDED(device->CreateBuffer(&raw, nullptr, &work));
+  ASSERT_HRESULT_SUCCEEDED(device->CreateBuffer(&raw, nullptr, &caps));
+  D3D11_SHADER_RESOURCE_VIEW_DESC view {};
+  view.Format = DXGI_FORMAT_R32_TYPELESS;
+  view.ViewDimension = D3D11_SRV_DIMENSION_BUFFEREX;
+  view.BufferEx.NumElements = glyph::work_bytes / sizeof(UINT);
+  view.BufferEx.Flags = D3D11_BUFFEREX_SRV_FLAG_RAW;
+  ASSERT_HRESULT_SUCCEEDED(device->CreateShaderResourceView(caps.Get(), &view, &cap_view));
+  glyph::request_t job {.source_rgb = source_view.Get(), .work = work.Get(), .width = w, .band_height = h,
+                        .detector_caps = cap_view.Get(), .generation = 1};
+  const auto submit = [&](UINT state, UINT64 owner) {
+    job.frame = ++job.token;
+    job.subtitle_context_generation = owner;
+    std::array<UINT, glyph::work_bytes / sizeof(UINT)> packet {state};
+    if (state == 2) packet = {2, 1, 0, 0, 0, 0, w, h};
+    context->UpdateSubresource(work.Get(), 0, nullptr, packet.data(), 0, 0);
+    packet = {1, 1, UINT(job.token), 0, 0, 0, w, h};
+    context->UpdateSubresource(caps.Get(), 0, nullptr, packet.data(), 0, 0);
+    return score.try_submit(job, error);
+  };
+  const auto poll = [&](const glyph::request_t *request) {
+    glyph::result_t result;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    glyph::poll_status_e status;
+    do {
+      status = score.poll(request, result, error);
+      if (status != glyph::poll_status_e::pending) break;
+      std::this_thread::yield();
+    } while (std::chrono::steady_clock::now() < deadline);
+    return status;
+  };
+  D3D11_BUFFER_DESC readback {16 * sizeof(UINT), D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ};
+  ASSERT_HRESULT_SUCCEEDED(device->CreateBuffer(&readback, nullptr, &staging));
+  // state.x is the matched previous slot + 1. A held observation keeps its last line record.
+  const auto check_line = [&](UINT state, UINT64 owner, UINT expected_previous) {
+    ASSERT_EQ(submit(state, owner), glyph::submit_status_e::accepted) << error;
+    ASSERT_EQ(poll(&job), glyph::poll_status_e::ready) << error;
+    score.retire();
+    const D3D11_BOX first_line {0, 0, 0, readback.ByteWidth, 1, 1};
+    context->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, score.native_lines_for_evaluation(), 0, &first_line);
+    D3D11_MAPPED_SUBRESOURCE map {};
+    ASSERT_HRESULT_SUCCEEDED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &map));
+    EXPECT_EQ(static_cast<const UINT *>(map.pData)[12], expected_previous) << job.frame;
+    context->Unmap(staging.Get(), 0);
+  };
+  check_line(2, 1, 0);
+  check_line(2, 1, 1);
+  check_line(3, 1, 1);
+  check_line(3, 1, 1);
+  check_line(2, 1, 1);
+  check_line(2, 2, 0);
+  check_line(1, 2, 0);
+  check_line(2, 2, 0);
+  check_line(3, 3, 0);
+  check_line(2, 3, 0);
+
+  ASSERT_EQ(submit(2, 3), glyph::submit_status_e::accepted) << error;
+  ComPtr<ID3D11Multithread> immediate_lock;
+  ASSERT_HRESULT_SUCCEEDED(context.As(&immediate_lock));
+  immediate_lock->SetMultithreadProtected(TRUE);
+  immediate_lock->Enter();
+  auto discarded = std::async(std::launch::async, [&] { return poll(nullptr); });
+  const auto ready = discarded.wait_for(std::chrono::seconds(2));
+  immediate_lock->Leave();
+  EXPECT_EQ(ready, std::future_status::ready) << "Worker needed the render thread's immediate context";
+  EXPECT_EQ(discarded.get(), glyph::poll_status_e::discarded) << error;
+  EXPECT_TRUE(score.release());
 }
 
 // Opt-in hardware evidence for a real serialized OCR plan. The environment variable keeps this

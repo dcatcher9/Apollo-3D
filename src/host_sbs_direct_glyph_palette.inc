@@ -48,10 +48,11 @@ class palette_transport_t {
   };
   phase_e phase_ = phase_e::idle;
   ComPtr<ID3D11Device> device_;
-  ComPtr<ID3D11DeviceContext> ctx_;
+  ComPtr<ID3D11DeviceContext4> ctx_;
   std::array<ComPtr<ID3D11ComputeShader>, stage_count> shaders_;
   buffer_ptr constants_, staged_sizes_;
-  ComPtr<ID3D11Query> event_;
+  ComPtr<ID3D11Fence> completion_;
+  UINT64 submitted_fence_value_ = 0;
   field_t work_, sizes_, input_, logits_, roles_, low_, fine_, peak_, mean_;
   field_t hist_, lut_, temp_, palette_, winner_, moment_, squared_, h1_, h2_, near_, far_, parts_, proto_, alpha_;
   std::array<history_t, 2> history_;
@@ -64,7 +65,12 @@ class palette_transport_t {
   request_t job_ {}, prior_job_ {};
   buffer_ptr submitted_work_;
   srv_ptr source_, caps_;
-  std::array<std::array<UINT, 2>, 8> sizes_cpu_ {};
+  struct schedule_readback_t {
+    std::array<std::array<UINT, 2>, 8> lines;
+    UINT hold_history, reserved;
+  };
+  static_assert(sizeof(schedule_readback_t) == 72);
+  schedule_readback_t plan_ {};
   UINT slot_ = 0, tile_start_ = 0, w28_ = 0, w84_ = 0, step_ = 1, hist_scale_ = 0;
   bool has_lines_ = false;
   cuda_driver_api &cuda_ = cuda_driver_api::get();
@@ -86,6 +92,7 @@ class palette_transport_t {
   static bool same_geometry(const request_t &a, const request_t &b) {
     return a.width == b.width && a.band_height == b.band_height && a.crop_top == b.crop_top &&
            a.origin_x == b.origin_x && a.origin_y == b.origin_y && a.generation == b.generation &&
+           a.subtitle_context_generation == b.subtitle_context_generation &&
            a.color_domain == b.color_domain && a.line_center_twice_source == b.line_center_twice_source &&
            a.frame > b.frame;
   }
@@ -152,7 +159,7 @@ class palette_transport_t {
   }
 
   void fence() {
-    ctx_->End(event_.Get());
+    require(SUCCEEDED(ctx_->Signal(completion_.Get(), ++submitted_fence_value_)), "Signal native glyph completion");
     // The file worker may have no further D3D commands to submit until the scheduler wakes.
     ctx_->Flush();
   }
@@ -228,8 +235,8 @@ class palette_transport_t {
   void score_chunk() {
     const current_cuda_context_t guard(cuda_, primary_);
     const compute_state_t<16, 5> saved(ctx_.Get());
-    while (slot_ < sizes_cpu_.size()) {
-      const auto [w, h] = sizes_cpu_[slot_];
+    while (slot_ < plan_.lines.size()) {
+      const auto [w, h] = plan_.lines[slot_];
       if (!w) {
         ++slot_;
         continue;
@@ -251,10 +258,10 @@ class palette_transport_t {
       // Retire this batch's GPU fence before changing the execution context's shape.
       break;
     }
-    while (slot_ < sizes_cpu_.size() && sizes_cpu_[slot_][0] == 0) {
+    while (slot_ < plan_.lines.size() && plan_.lines[slot_][0] == 0) {
       ++slot_;
     }
-    if (slot_ == sizes_cpu_.size()) {
+    if (slot_ == plan_.lines.size()) {
       dispatch(finish_history, schedule(), 1, 1, {}, {work_.uav.Get(), next().lines.uav.Get()});
       if (has_lines_) {
         ComPtr<ID3D11Resource> src;
@@ -286,7 +293,10 @@ public:
   void prepare(ID3D11Device *device, ID3D11DeviceContext *context, const std::filesystem::path &root, CUcontext primary, nvinfer1::IExecutionContext *execution) {
     require(device && context && primary && execution, "Native glyph transport requires an execution lease");
     device_ = device;
-    ctx_ = context;
+    ComPtr<ID3D11Device5> device5;
+    require(SUCCEEDED(device_.As(&device5)) && SUCCEEDED(context->QueryInterface(IID_PPV_ARGS(&ctx_))) &&
+            SUCCEEDED(device5->CreateFence(0, D3D11_FENCE_FLAG_NONE, IID_PPV_ARGS(&completion_))),
+            "Create native glyph D3D11 completion fence");
     ComPtr<ID3D11DeviceContext> immediate;
     device->GetImmediateContext(&immediate);
     require(context == immediate.Get(), "Native glyph transport requires its device's immediate context");
@@ -315,7 +325,7 @@ public:
     check_cuda(cuda_.cuGraphicsD3D11RegisterResource(&interop_[0], input_.buffer.Get(), 0), "Register native glyph RGB");
     check_cuda(cuda_.cuGraphicsD3D11RegisterResource(&interop_[1], logits_.buffer.Get(), 0), "Register native glyph logits");
     constants_ = make_buffer({32, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0});
-    staged_sizes_ = make_buffer({64, D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ, 0, 0});
+    staged_sizes_ = make_buffer({sizeof(schedule_readback_t), D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ, 0, 0});
     work_.buffer = make_buffer({work_bytes, D3D11_USAGE_DEFAULT, D3D11_BIND_UNORDERED_ACCESS, 0, D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS, 0});
     D3D11_UNORDERED_ACCESS_VIEW_DESC v {};
     v.Format = DXGI_FORMAT_R32_TYPELESS;
@@ -323,9 +333,7 @@ public:
     v.Buffer.NumElements = work_bytes / 4u;
     v.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
     require(SUCCEEDED(device->CreateUnorderedAccessView(work_.buffer.Get(), &v, &work_.uav)), "Create native glyph Work view");
-    D3D11_QUERY_DESC event {D3D11_QUERY_EVENT, 0};
-    require(SUCCEEDED(device->CreateQuery(&event, &event_)), "Create native glyph nonblocking completion fence");
-    ensure(sizes_, 8, 8);
+    ensure(sizes_, sizeof(schedule_readback_t) / (2 * sizeof(UINT)), 2 * sizeof(UINT));
     for (auto &generation : history_) {
       ensure(generation.lines, 8, 64);
       ensure(generation.raw, 1, 4);
@@ -395,11 +403,12 @@ public:
     if (phase_ == phase_e::idle || phase_ == phase_e::leased) {
       return poll_status_e::idle;
     }
-    const HRESULT query = ctx_->GetData(event_.Get(), nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH);
-    if (query == S_FALSE) {
+    // This check also runs on the teardown worker, which cannot use the immediate context.
+    const UINT64 completed = completion_->GetCompletedValue();
+    require(completed != UINT64_MAX, "Native glyph D3D device removed");
+    if (completed < submitted_fence_value_) {
       return poll_status_e::pending;
     }
-    require(query == S_OK, "Native glyph D3D completion failed");
     // Every issued CUDA operation is followed by an unmap, a D3D logits consumer and this fence.
     cuda_outstanding_ = false;
     if (!current || *current != job_) {
@@ -417,10 +426,10 @@ public:
         return poll_status_e::pending;
       }
       require(SUCCEEDED(status), "Read native glyph dispatch extents");
-      std::memcpy(sizes_cpu_.data(), map.pData, sizeof(sizes_cpu_));
+      std::memcpy(&plan_, map.pData, sizeof(plan_));
       ctx_->Unmap(staged_sizes_.Get(), 0);
       UINT pixels = 0;
-      for (const auto &[w, h] : sizes_cpu_) {
+      for (const auto &[w, h] : plan_.lines) {
         require(w <= width_ && h <= height_ && (w == 0) == (h == 0), "Invalid native glyph dispatch extent");
         pixels += w * h;
       }
@@ -440,8 +449,10 @@ public:
       return;
     }
     prior_job_ = job_;
-    history_valid_ = has_lines_;
-    previous_ = 1u - previous_;
+    if (!plan_.hold_history || !history_valid_) {
+      history_valid_ = has_lines_;
+      previous_ = 1u - previous_;
+    }
     drop();
   }
 

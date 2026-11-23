@@ -163,6 +163,10 @@ void confirm_history(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
 
 [numthreads(1,1,1)]
 void finish_windows() {
+    // The ninth pair accompanies the extents in the same nonblocking readback.
+    // A held root preserves the last inferred lines, raw alpha and source RGB.
+    bool held = all(Work.Load4(0) == uint4(3u, 0u, 0u, 0u));
+    Sizes[8] = uint2(held ? 1u : 0u, 0u);
     uint offset=0;
     [unroll] for (uint slot=0; slot<8; ++slot) {
         GlyphLine record=Lines[slot];
