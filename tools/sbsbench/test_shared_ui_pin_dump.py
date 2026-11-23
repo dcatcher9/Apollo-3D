@@ -89,9 +89,9 @@ class SharedUiPinDumpTests(unittest.TestCase):
     def test_legacy_packages_keep_their_original_attribution(self):
         self.assertFalse(pin.verify(self.root, {"renderer": {}})["shared_pin_selected"])
 
-    def current_attribution(self, kind=pin.KIND, *, single_band_split=False):
-        closure = pin.SINGLE_BAND_SPLIT_CLOSURES[kind] if single_band_split else pin._expected_closure(kind)
-        eyes = 1 if single_band_split or kind == pin.KIND else 2
+    def current_attribution(self, kind=pin.KIND, *, archived_closures=None):
+        closure = archived_closures[kind] if archived_closures else pin._expected_closure(kind)
+        eyes = 1 if archived_closures == pin.SINGLE_BAND_SPLIT_CLOSURES or kind == pin.KIND else 2
         for name in pin.ARTIFACTS[:2]:
             band = (self.root / name).read_bytes()[:2 * 8 * 4]
             self.save(name, band * eyes, (8, 2 * eyes, 41))
@@ -136,31 +136,36 @@ class SharedUiPinDumpTests(unittest.TestCase):
         previous = (pin.SINGLE_BAND_RAW_PREPARE, pin.SINGLE_BAND_DIRECT_PREPARE)
         current = (pin._runtime_closure("raw_model_prepare_closure"),
                    pin.DIRECT_GLYPH_PREPARE_GROUP.source_closure_sha256)
-        for archived, (raw, direct), other_generation in ((True, previous, current), (False, current, previous)):
-            with self.subTest(archived=archived):
-                self.current_attribution(pin.COMPLETED_KIND, single_band_split=archived)
+        generations = ((pin.SINGLE_BAND_SPLIT_CLOSURES, previous, 1),
+                       (pin.FIRST_PER_EYE_CLOSURES, pin.FIRST_PER_EYE_PREPARES, 2),
+                       (None, current, 2))
+        for closures, prepares, eyes in generations:
+            with self.subTest(closures=closures):
+                self.current_attribution(pin.COMPLETED_KIND, archived_closures=closures)
+                raw, direct = prepares
                 for prepare, algorithm, role in ((raw, 3, "hybrid"), (direct, 4, "direct-glyph")):
                     self.use_hybrid_prepare(algorithm=algorithm, prepare=prepare)
                     result = pin.verify(self.root, self.manifest)
-                    self.assertEqual(result["eye_copies"], 1 if archived else 2)
+                    self.assertEqual(result["eye_copies"], eyes)
                     self.assertEqual(result["verified_selected_matte_kind"], role)
                 self.use_hybrid_prepare(algorithm=4, prepare=raw)
                 with self.assertRaisesRegex(ValueError, "unexpected selected receipt"):
                     pin.verify(self.root, self.manifest)
-                for prepare in (*other_generation, "0" * 64):
+                wrong_prepares = [p for _, other, _ in generations if other != prepares for p in other]
+                for prepare in [*wrong_prepares, "0" * 64]:
                     self.use_hybrid_prepare(prepare=prepare)
                     with self.assertRaisesRegex(ValueError, "unknown source or route"):
                         pin.verify(self.root, self.manifest)
 
     def test_queued_draw_binds_the_field_layout_and_own_shader_in_each_generation(self):
-        for archived in (True, False):
-            with self.subTest(archived=archived):
-                self.current_attribution(pin.QUEUED_KIND, single_band_split=archived)
-                self.assertEqual(pin.verify(self.root, self.manifest)["eye_copies"], 1 if archived else 2)
+        for closures, eyes in ((pin.SINGLE_BAND_SPLIT_CLOSURES, 1), (pin.FIRST_PER_EYE_CLOSURES, 2), (None, 2)):
+            with self.subTest(closures=closures):
+                self.current_attribution(pin.QUEUED_KIND, archived_closures=closures)
+                self.assertEqual(pin.verify(self.root, self.manifest)["eye_copies"], eyes)
                 for name in pin.ARTIFACTS[:2]:
                     band = (self.root / name).read_bytes()[:2 * 8 * 4]
-                    eyes = 2 if archived else 1
-                    self.save(name, band * eyes, (8, 2 * eyes, 41))
+                    wrong_eyes = 2 if eyes == 1 else 1
+                    self.save(name, band * wrong_eyes, (8, 2 * wrong_eyes, 41))
                 self.seal()
                 with self.assertRaisesRegex(ValueError, "exact texture layout"):
                     pin.verify(self.root, self.manifest)

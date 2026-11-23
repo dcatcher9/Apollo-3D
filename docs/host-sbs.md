@@ -107,7 +107,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | `direct_glyph_plan` | 2 | `3c1df1656492065c62c519ceffd49f3d1bc1d3a4e26c50ba0b8a2eead4dc2844` |
 | `direct_glyph_transport` | 4 | `2df402561c88d7e2b2672660e2f9d5f42b06d9815c87b48511adb05af6226b30` |
 | `direct_glyph_palette` | 17 | `7b4d16cace20e85c23475fbb1a934d9711833c269eb6ab17475e7ac0d166f7c1` |
-| `direct_glyph_prepare` | 1 | `b7c40c53fc3d589edac22d86fb9c124eb1215947d149850b885ece78003004b4` |
+| `direct_glyph_prepare` | 1 | `ebd78fb4d5a30345166f4dcbfb990817a41910172288cba9d7e90926c7764ffe` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->
 
 The contract admits the following production calibration:
@@ -525,22 +525,29 @@ observation token. Only the completed observation can publish its native mask.
 #### Text-game pin
 
 `host_sbs_text_game_ui_warp.hlsl` is the same adapter compiled with `HOST_SBS_TEXT_GAME_PIN` for a
-[Game 3D text game](reshade-sbs.md#text-games). It reads rendered native color, ordinary Base and
-ParallaxState only; t3..t7 must be absent. Its pin weight is the coverage picture a game's text
-helper publishes (t11, premultiplied BGRA in the game's own colours, mapped onto the game's client
-rectangle by the 48-byte b7 constants), and only in the source rows the host read for the current
-text. `text_game_specs` and `text_game_closure` in the runtime header are its separately pinned
-programs; a failure to prepare them leaves the subtitle routes unchanged.
+[Game 3D text game](reshade-sbs.md#text-games). Its compute passes read rendered native color,
+ordinary Base and ParallaxState only; their t3..t7 must be absent. Its pin weight is the coverage
+picture a game's text helper publishes (t11, premultiplied BGRA in the game's own colours, mapped
+onto the game's client rectangle by the 48-byte b7 constants), and only in the source rows whose
+samples lie wholly inside the rows the host read for the current text. `text_game_specs` and
+`text_game_closure` in the runtime header are its separately pinned programs; a failure to
+prepare them leaves the subtitle routes unchanged.
 
-Three compute passes precede the shared pin pass on each draw:
+Whenever the helper reports text, `text_game_verify_main` observes the draw. It counts the
+glyph-core texels (coverage 0.95 or more), light and dark ones apart, and how many of each the
+picture shows within 0.2 of the drawn colour as display code values; an HDR capture is first
+divided by the desktop's SDR white. The text counts as shown when there are at least 16 cores and
+a sixteenth of each kind that has at least 16 is shown, so text the game has drawn but not yet
+revealed, or has hidden, does not, and neither a bright nor a dark scene alone passes for text.
+The same pass counts, per tile of a 16-by-16 grid of the game's picture, the glyph texels and
+those with scene in front of each plane level. The host reads these words back without waiting.
+They feed the plane policy, and they select the route of the following draws: while the text is
+not shown, a draw only makes this observation and keeps its ordinary geometry, with the subtitle
+pin where that is in force; while it is shown, the draw is pinned, and its own observation
+decides once more for that very frame. A frame taken for a Dump 3D package is never pinned.
 
-- `text_game_verify_main` counts the glyph-core texels (coverage 0.95 or more), light and dark
-  ones apart, and how many of each the picture shows within 0.2 of the drawn colour as display
-  code values. The initializer pins only when a sixteenth of each kind that has at least 16
-  texels is shown, so text the game has drawn but not yet revealed, or has hidden, is not pinned,
-  and neither a bright nor a dark scene alone passes for text. The same pass counts, per tile of a
-  16-by-16 grid of the game's picture, the glyph texels and those with scene in front of each
-  plane level; the host reads these words back without waiting and feeds the plane policy.
+Two more compute passes precede the shared pin pass on a pinned draw:
+
 - `text_game_columns_main` leaves, for every texel of the band, the number of rows to the nearest
   glyph texel (coverage 0.5 or more) of its column.
 - `initialize_main` clamps the scene field to within `0.5 * max(rows - 1, 0) / W` of the plane,
@@ -551,8 +558,9 @@ Three compute passes precede the shared pin pass on each draw:
   the text.
 
 The band is the text rows and, above and below, twice the sum of the display bound and the
-plane ceiling in pixels, which is as far as the rule can still bound the scene. It only grows
-while the game's picture stays in place, so lines of different height share one set of planes.
+plane ceiling in pixels, which is as far as the rule can still bound the scene. It grows while
+the game's picture stays in place, so lines of different height share one set of planes, and is
+given up once the text has needed less than half of it for three seconds.
 
 Field construction uses explicit FP32 interpolation of Base, including the existing continuous
 ROI embedding. Hardware-filtered coarse-to-native construction is not equivalent: quantised

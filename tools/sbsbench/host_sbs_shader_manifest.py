@@ -959,7 +959,7 @@ DIRECT_GLYPH_PREPARE_GROUP = ClosureGroup(
     specs=(
         HOST_SBS_DIRECT_GLYPH_PREPARE,
     ),
-    source_closure_sha256="b7c40c53fc3d589edac22d86fb9c124eb1215947d149850b885ece78003004b4",
+    source_closure_sha256="ebd78fb4d5a30345166f4dcbfb990817a41910172288cba9d7e90926c7764ffe",
 )
 
 CLOSURE_GROUPS: Dict[str, ClosureGroup] = {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 /**
  * @file src/platform/windows/game3d_text_hook.h
- * @brief Host side of the in-application text hook for Game 3D text games.
+ * @brief Host side of the in-application text helper for Game 3D text games.
  */
 #pragma once
 
@@ -12,10 +12,10 @@
 
 namespace platf::game3d::text_hook {
   enum class load_state_e {
-    loaded,  ///< The hook is running in the process and publishing.
-    not_running,  ///< The process has ended; the hook loads when the game is started again.
-    unavailable,  ///< The bundled hook for this process is missing or the process cannot be opened.
-    failed,  ///< The injector ran and the hook did not come up.
+    loaded,  ///< The helper is running in the process and publishing.
+    not_running,  ///< The process has ended; the helper loads when the game is started again.
+    unavailable,  ///< This build has no helper for a game of this kind.
+    failed,  ///< The loader ran and the helper did not come up.
   };
 
   struct load_result {
@@ -28,40 +28,35 @@ namespace platf::game3d::text_hook {
 
   /**
    * The owner's standing decision for one running game, as the setup worker last applied it.
-   * The capture path converts a game only while this is true: a helper section alone proves
-   * neither that the owner approved the game nor that the approval still stands.
+   * The capture path converts a game only while this is true. A helper section proves neither
+   * that the owner approved the game nor that the approval still stands, and a game the helper
+   * could not be loaded into is still one the owner asked to have converted.
    */
   void set_consent(std::uint32_t process_id, std::uint64_t creation_time, bool consented);
   [[nodiscard]] bool consented(std::uint32_t process_id, std::uint64_t creation_time);
 
-  /** True when the hook's state section for this process exists and carries the current contract. */
-  [[nodiscard]] bool loaded(std::uint32_t process_id);
+  /**
+   * True when the helper's state section for this process exists, carries the current contract
+   * and was written by the process created at this time.
+   */
+  [[nodiscard]] bool loaded(std::uint32_t process_id, std::uint64_t creation_time);
 
   /**
-   * Load the hook into one running 32-bit process. Nothing is written to the game's folder: the
-   * hook lives only in that process and ends with it, so this runs again at every game start.
-   * The caller owns the user's consent and the anti-cheat refusal. Worker thread only.
+   * Load the helper into one running process, 32-bit or 64-bit. Nothing is written to the game's
+   * folder: the helper lives only in that process and ends with it, so this runs again at every
+   * game start. The caller owns the user's consent and the anti-cheat refusal. Worker thread only.
    */
-  [[nodiscard]] load_result load(std::uint32_t process_id, const std::filesystem::path &bundle_directory = bundled_directory());
+  [[nodiscard]] load_result load(std::uint32_t process_id, std::uint64_t creation_time, const std::filesystem::path &bundle_directory = bundled_directory());
 
-  /** Where the text is on the game's drawing surface. Empty (bottom <= top) without text. */
-  struct text_bounds_t {
-    float left = 0.0f, top = 0.0f, right = 0.0f, bottom = 0.0f;  ///< Around every piece of text.
-    float line_height = 0.0f;  ///< Height of the shortest piece: about one line of text.
-
-    [[nodiscard]] bool empty() const {
-      return !(bottom > top) || !(right > left);
-    }
-  };
-
-  /** The text on the game's drawing surface, and the picture of that text. */
+  /** The text on the game's drawing surface, as a picture of it. */
   struct text_t {
     std::uint32_t sequence = 0u;  ///< Changes whenever the text or its picture changes.
     std::uint32_t surface_width = 0u;
     std::uint32_t surface_height = 0u;
-    text_bounds_t bounds;
-    std::uint32_t top = 0u;  ///< First surface row with text.
-    std::uint32_t bottom = 0u;  ///< One past the last surface row with text; equal to top without text.
+    std::uint32_t top = 0u;  ///< First surface row that may hold text.
+    std::uint32_t bottom = 0u;  ///< One past the last such row; equal to top without text.
+    /// The window whose client area the surface is, or zero when the helper cannot tell.
+    std::uint64_t window = 0u;
     /// surface_width * surface_height BGRA pixels, top row first; alpha is text coverage. The
     /// game keeps drawing into them, so a copy is only as consistent as `still_current` says.
     const std::uint8_t *pixels = nullptr;
@@ -79,10 +74,10 @@ namespace platf::game3d::text_hook {
     ~reader_t();
 
     /**
-     * The text of this process now. While the game is in the middle of drawing, which a line
-     * typed out glyph by glyph is most of the time, this is the last complete state instead.
+     * The text of this process now. While the helper is in the middle of publishing, this is
+     * the last complete state instead. False without a helper of this very process.
      */
-    [[nodiscard]] bool read(std::uint32_t process_id, text_t &text);
+    [[nodiscard]] bool read(std::uint32_t process_id, std::uint64_t creation_time, text_t &text);
     /** True when nothing changed since `text` was read, so pixels copied meanwhile belong to it. */
     [[nodiscard]] bool still_current(const text_t &text) const;
     void close();
@@ -99,20 +94,15 @@ namespace platf::game3d::text_hook {
   };
 
   namespace detail {
-    /**
-     * The rectangle around the helper's boxes (left, top, right, bottom each), clipped to the
-     * surface. A damaged or empty box, or one off the surface, is skipped.
-     */
-    [[nodiscard]] text_bounds_t text_bounds(const float *boxes, std::uint32_t box_count, std::uint32_t surface_width, std::uint32_t surface_height);
-
-    /** Injector exit codes of tools/text_hook/text_hook_inject.cpp. */
+    /** Loader exit codes of tools/text_hook/text_hook_inject.cpp. */
     [[nodiscard]] std::string injector_failure(std::uint32_t exit_code);
 
     /**
-     * The decision around one load, without process access: skip a loaded hook, run the injector
-     * once, then require the hook to report in.
+     * The decision around one load, without process access: skip a loaded helper, run the loader
+     * once, then require the helper to report in. `bits` is the game's, for the messages.
      */
     [[nodiscard]] load_result load_with(
+      unsigned bits,
       const std::function<bool()> &is_loaded,
       const std::function<bool()> &bundle_present,
       const std::function<std::uint32_t()> &run_injector,

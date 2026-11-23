@@ -3,7 +3,9 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <string_view>
+#include <mutex>
 #include <tlhelp32.h>
 #include <vector>
 
@@ -259,15 +261,178 @@ namespace platf::game3d {
     }
   }  // namespace
 
+  namespace {
+    // The import table of an executable mapped as an image, every offset checked against the
+    // image's size. The file is whatever the game's publisher shipped: nothing in it is trusted.
+    class image_t {
+    public:
+      image_t(const std::uint8_t *base, const std::size_t size):
+          base_(base),
+          size_(size) {}
+
+      template<class T>
+      [[nodiscard]] const T *at(const std::uint64_t rva, const std::size_t count = 1) const {
+        return rva <= size_ && count <= (size_ - rva) / sizeof(T) ? reinterpret_cast<const T *>(base_ + rva) : nullptr;
+      }
+
+      // A zero-terminated name of at most 255 characters, or an empty view.
+      [[nodiscard]] std::string_view name(const std::uint64_t rva) const {
+        if (rva >= size_) {
+          return {};
+        }
+        const auto *text = reinterpret_cast<const char *>(base_ + rva);
+        const auto length = strnlen(text, std::min<std::size_t>(size_ - rva, 256));
+        return length < std::min<std::size_t>(size_ - rva, 256) ? std::string_view {text, length} : std::string_view {};
+      }
+
+    private:
+      const std::uint8_t *base_;
+      std::size_t size_;
+    };
+
+    [[nodiscard]] bool equal_ascii(const std::string_view left, const std::string_view right) noexcept {
+      return left.size() == right.size() && _strnicmp(left.data(), right.data(), left.size()) == 0;
+    }
+
+    [[nodiscard]] detail::executable_imports_t image_imports(const image_t &image) {
+      const auto *dos = image.at<IMAGE_DOS_HEADER>(0);
+      if (!dos || dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0) {
+        return {};
+      }
+      const auto header = static_cast<std::uint64_t>(dos->e_lfanew);
+      const auto *signature = image.at<DWORD>(header);
+      const auto *magic = image.at<WORD>(header + sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER));
+      if (!signature || *signature != IMAGE_NT_SIGNATURE || !magic) {
+        return {};
+      }
+      const bool wide = *magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC;
+      IMAGE_DATA_DIRECTORY directory {};
+      if (wide) {
+        const auto *nt = image.at<IMAGE_NT_HEADERS64>(header);
+        if (!nt || nt->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_IMPORT) {
+          return {};
+        }
+        directory = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+      } else if (*magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
+        const auto *nt = image.at<IMAGE_NT_HEADERS32>(header);
+        if (!nt || nt->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_IMPORT) {
+          return {};
+        }
+        directory = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+      } else {
+        return {};
+      }
+      constexpr std::array<std::string_view, 4> gdi_text {"TextOut", "ExtTextOut", "DrawText", "DrawTextEx"};
+      bool direct2d = false, directwrite = false, gdi = false;
+      const std::size_t descriptors = std::min<std::size_t>(directory.Size / sizeof(IMAGE_IMPORT_DESCRIPTOR), 4096);
+      for (std::size_t index = 0; index < descriptors; ++index) {
+        const auto *descriptor = image.at<IMAGE_IMPORT_DESCRIPTOR>(directory.VirtualAddress + index * sizeof(IMAGE_IMPORT_DESCRIPTOR));
+        if (!descriptor || descriptor->Name == 0) {
+          break;
+        }
+        const auto library = image.name(descriptor->Name);
+        direct2d = direct2d || equal_ascii(library, "d2d1.dll");
+        directwrite = directwrite || equal_ascii(library, "dwrite.dll");
+        if (gdi || (!equal_ascii(library, "gdi32.dll") && !equal_ascii(library, "user32.dll"))) {
+          continue;
+        }
+        // The names are listed where the loader has not replaced them with addresses.
+        const std::uint64_t thunks = descriptor->OriginalFirstThunk ? descriptor->OriginalFirstThunk : descriptor->FirstThunk;
+        for (std::size_t entry = 0; entry < 65536 && !gdi; ++entry) {
+          std::uint64_t value = 0;
+          if (wide) {
+            const auto *thunk = image.at<std::uint64_t>(thunks + entry * 8);
+            if (!thunk || *thunk == 0 || (*thunk >> 63) != 0) {
+              if (thunk && *thunk != 0) {
+                continue;  // imported by number
+              }
+              break;
+            }
+            value = *thunk;
+          } else {
+            const auto *thunk = image.at<std::uint32_t>(thunks + entry * 4);
+            if (!thunk || *thunk == 0 || (*thunk >> 31) != 0) {
+              if (thunk && *thunk != 0) {
+                continue;
+              }
+              break;
+            }
+            value = *thunk;
+          }
+          // Past the two-byte hint; the A and W forms count alike.
+          auto function = image.name(value + 2);
+          if (function.ends_with('A') || function.ends_with('W')) {
+            function.remove_suffix(1);
+          }
+          gdi = std::find(gdi_text.begin(), gdi_text.end(), function) != gdi_text.end();
+        }
+      }
+      return {direct2d && directwrite, gdi};
+    }
+
+    [[nodiscard]] bool name_starts_with(const std::wstring_view name, const std::wstring_view prefix) noexcept {
+      return name.size() >= prefix.size() && equal_name(name.substr(0, prefix.size()), prefix);
+    }
+  }  // namespace
+
+  detail::executable_imports_t detail::inspect_imports(const std::filesystem::path &executable) noexcept {
+    // Mapped as an image, so that the offsets in the file's headers apply as they are, and
+    // without execute access: nothing of the file runs here.
+    const handle_t file {CreateFileW(executable.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
+    if (file.get() == INVALID_HANDLE_VALUE) {
+      return {};
+    }
+    const handle_t mapping {CreateFileMappingW(file.get(), nullptr, PAGE_READONLY | SEC_IMAGE_NO_EXECUTE, 0, 0, nullptr)};
+    if (!mapping.get()) {
+      return {};
+    }
+    const auto *base = static_cast<const std::uint8_t *>(MapViewOfFile(mapping.get(), FILE_MAP_READ, 0, 0, 0));
+    if (!base) {
+      return {};
+    }
+    executable_imports_t imports {};
+    // The view is as long as the image the headers describe; no more than that is read.
+    const image_t headers {base, 4096};
+    const auto *dos = headers.at<IMAGE_DOS_HEADER>(0);
+    const auto *nt = dos && dos->e_magic == IMAGE_DOS_SIGNATURE && dos->e_lfanew > 0 ? headers.at<IMAGE_NT_HEADERS32>(static_cast<std::uint64_t>(dos->e_lfanew)) : nullptr;
+    if (nt && nt->Signature == IMAGE_NT_SIGNATURE) {
+      // SizeOfImage sits at the same offset in the 32-bit and 64-bit optional headers.
+      imports = image_imports({base, nt->OptionalHeader.SizeOfImage});
+    }
+    UnmapViewOfFile(base);
+    return imports;
+  }
+
+  bool detail::game_library_loaded(const std::span<const std::filesystem::path> loaded_modules) {
+    constexpr std::array exact {L"dsound.dll", L"dinput.dll", L"dinput8.dll", L"d3d8.dll", L"d3d9.dll", L"ddraw.dll", L"openal32.dll", L"soft_oal.dll", L"bass.dll"};
+    constexpr std::array prefixes {L"xaudio2_", L"x3daudio", L"xinput", L"fmod"};
+    return std::any_of(loaded_modules.begin(), loaded_modules.end(), [&](const auto &module) {
+      const auto name = module.filename().wstring();
+      return std::any_of(exact.begin(), exact.end(), [&](const auto candidate) {
+        return equal_name(name, candidate);
+      }) || std::any_of(prefixes.begin(), prefixes.end(), [&](const auto prefix) {
+        return name_starts_with(name, prefix);
+      });
+    });
+  }
+
   bool detail::is_text_game_candidate(
     const std::filesystem::path &executable,
     const std::span<const std::filesystem::path> loaded_modules,
     const foreground_window::observation_t &foreground,
-    const RECT capture_rect
+    const RECT capture_rect,
+    const bool native,
+    const executable_imports_t &imports
   ) {
-    // The text hook observes Direct2D text drawing, which always goes through DirectWrite.
-    return client_on_capture_output(executable, foreground, capture_rect) &&
-           module_loaded(loaded_modules, L"dwrite.dll") && module_loaded(loaded_modules, L"d2d1.dll");
+    if (!client_on_capture_output(executable, foreground, capture_rect)) {
+      return false;
+    }
+    if (native) {
+      return imports.direct2d_text && game_library_loaded(loaded_modules);
+    }
+    // Direct2D text drawing always goes through DirectWrite.
+    return (module_loaded(loaded_modules, L"dwrite.dll") && module_loaded(loaded_modules, L"d2d1.dll")) ||
+           (imports.gdi_text && game_library_loaded(loaded_modules));
   }
 
   bool detail::is_game_candidate(
@@ -276,13 +441,10 @@ namespace platf::game3d {
     const foreground_window::observation_t &foreground,
     const RECT capture_rect
   ) {
-    if (!foreground_window::carries_geometry(foreground.status) || !foreground.window || !foreground.process_id || !executable.is_absolute() || !equal_name(executable.extension().wstring(), L".exe") || excluded_executable(executable)) {
+    if (!client_on_capture_output(executable, foreground, capture_rect)) {
       return false;
     }
     const auto client = foreground.client_screen_rect;
-    if (!client.valid() || capture_rect.right <= capture_rect.left || capture_rect.bottom <= capture_rect.top) {
-      return false;
-    }
     // Use the client, not the outer frame, and require it to cover exactly this output: that is
     // the presentation Game 3D export itself requires. Maximized application chrome, windows
     // spanning several outputs and ordinary windows do not qualify. A windowed (e.g. >=75%
@@ -351,7 +513,6 @@ namespace platf::game3d {
       if (!native && process_machine != IMAGE_FILE_MACHINE_I386) {
         return std::nullopt;
       }
-      const auto kind = native ? game_kind_e::addon : game_kind_e::text_hook;
       const auto creation_time = process_creation_time(process.get());
       const auto executable = process_executable(process.get());
       if (!creation_time || !executable || in_windows_directory(*executable) || excluded_executable(*executable)) {
@@ -361,8 +522,27 @@ namespace platf::game3d {
       if (!modules) {
         return std::nullopt;
       }
-      if (!(native ? detail::is_game_candidate(*executable, *modules, foreground, capture_rect) :
-                     detail::is_text_game_candidate(*executable, *modules, foreground, capture_rect))) {
+      // A game that already runs the add-on is an add-on game, whatever else it loads.
+      const bool addon_loaded = native && module_loaded(*modules, L"SunshineSBS.addon64");
+      // The executable's file is read once per process, not at every poll.
+      static std::mutex imports_mutex;
+      static std::uint32_t imports_process = 0;
+      static std::uint64_t imports_created = 0;
+      static detail::executable_imports_t imports;
+      {
+        std::lock_guard lock(imports_mutex);
+        if (imports_process != foreground.process_id || imports_created != creation_time) {
+          imports = detail::inspect_imports(*executable);
+          imports_process = foreground.process_id;
+          imports_created = creation_time;
+        }
+      }
+      game_kind_e kind;
+      if (!addon_loaded && detail::is_text_game_candidate(*executable, *modules, foreground, capture_rect, native, imports)) {
+        kind = game_kind_e::text_hook;
+      } else if (native && detail::is_game_candidate(*executable, *modules, foreground, capture_rect)) {
+        kind = game_kind_e::addon;
+      } else {
         return std::nullopt;
       }
       const auto after = foreground_window::sample();

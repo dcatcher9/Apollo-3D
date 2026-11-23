@@ -45,6 +45,11 @@ namespace platf::game3d {
   // A folder that holds ReShade.ini or a proxy DLL without being a recognized ReShade
   // installation (another injector, or a partial ReShade) also returns unavailable: the runtime
   // installer never replaces those files, so a fresh setup is not offered there.
+  // Why nothing may be loaded into this game while it runs: anti-cheat software was found with
+  // it, or its folders could not be checked for it. Empty when neither. Unlike an installation
+  // this does not depend on what else is in the folder.
+  [[nodiscard]] std::string injection_refusal(const std::filesystem::path &game_executable);
+
   installation_status inspect_installation(
     const std::filesystem::path &game_executable,
     const std::filesystem::path &bundle_directory = bundled_addon_directory()

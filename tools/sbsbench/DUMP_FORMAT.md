@@ -112,7 +112,9 @@ and `shared-ui-pin-queued-v2` bind their respective production shader closures. 
 kind continues to bind its historical combined closure. For schema-52 captures from before the
 per-eye limiter, the reader recognizes the recorded Base and diagnostic shaders, split draw
 shader, and composite ONNX together. Those draws carry one displacement band. The per-eye
-shaders require two bands in left-then-right order.
+shaders require two bands in left-then-right order. The reader accepts recordings from
+before and after the 64-bit/GDI text-game update and checks each build's draw and prepare
+shader hashes as a pair.
 
 For an observed completed hybrid draw, `shared_pin.model_prepare_source_closure_sha256`
 in `actual_draw_evidence.json` identifies the authenticated model prepare. The draw uses

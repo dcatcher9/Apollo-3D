@@ -79,6 +79,11 @@ namespace platf::game3d {
       std::string state;
       // Identity of the executable a ready_to_install or declined state offers.
       std::string identity;
+      // Text game: the owner's approval stands and the game is running, so it is converted,
+      // with the helper's text or, where the helper is not running, with the picture's alone.
+      bool convert {};
+      // Text game: the helper did not come up this time and loading it is worth another try.
+      bool retry_load {};
     };
 
     // One confirmed detection. Writes only what the folder's state and the user's choice
@@ -95,13 +100,15 @@ namespace platf::game3d {
 
     // One confirmed detection of a text game. Nothing is ever written to its folder: the text
     // helper is loaded into the running process and ends with it. It is loaded only after the
-    // user confirmed this executable, and never where anti-cheat software was found. Unlike an
-    // add-on installation the confirmation is kept, because the helper must be loaded again at
-    // every start of the game; "never" withdraws it.
+    // user confirmed this executable, and never where `refusal` names a reason, which is where
+    // anti-cheat software was found or could not be ruled out. Unlike an add-on installation
+    // the confirmation is kept, because the helper must be loaded again at every start of the
+    // game; "never" withdraws it. A game the helper cannot be loaded into is converted all the
+    // same: the helper only adds the game's own text to what the host finds in the picture.
     [[nodiscard]] setup_outcome apply_text_hook_setup(
       const std::filesystem::path &executable,
       setup_decisions &decisions,
-      const std::function<bool(const std::filesystem::path &executable)> &anti_cheat_present,
+      const std::function<std::string(const std::filesystem::path &executable)> &refusal,
       const std::function<text_hook::load_result()> &load
     );
   }  // namespace detail

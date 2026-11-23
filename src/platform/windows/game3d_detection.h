@@ -18,7 +18,7 @@ namespace platf::game3d {
    */
   enum class game_kind_e {
     addon,  ///< 64-bit D3D11/D3D12 game: the ReShade add-on supplies depth, UI mask and stereo.
-    text_hook,  ///< 32-bit DirectWrite text game: the in-application text hook supplies a text mask.
+    text_hook,  ///< 2D text game: the host converts its picture; its text helper supplies a text mask.
   };
 
   struct detected_game {
@@ -30,11 +30,13 @@ namespace platf::game3d {
     game_kind_e kind {game_kind_e::addon};
   };
 
-  // Worker-thread observation of the foreground application on the captured display. One
-  // general rule, without store-library or engine-layout lists: a verified, live native x64
-  // process outside the Windows directory and the non-game suppression list, with D3D11/12
-  // loaded, whose foreground client exactly covers the captured output. A candidate only selects
-  // what setup may offer; this never injects into the process or changes presentation mode.
+  // Worker-thread observation of the foreground application on the captured display. General
+  // rules, without store-library or engine-layout lists, for a verified, live process outside the
+  // Windows directory and the non-game suppression list. An add-on game is a native x64 process
+  // with D3D11/12 loaded whose foreground client exactly covers the captured output. A text game
+  // is one the rules of detail::is_text_game_candidate describe; a 64-bit process that fits both
+  // is a text game unless the add-on is already loaded in it. A candidate only selects what
+  // setup may offer; this never injects into the process or changes presentation mode.
   // Process access/enumeration failure and a changing foreground identity return no candidate.
   [[nodiscard]] std::optional<detected_game> detect_game(RECT capture_rect) noexcept;
 
@@ -66,15 +68,33 @@ namespace platf::game3d {
       RECT capture_rect
     );
 
-    // A 32-bit process can never load the add-on. It is a text-game candidate when DirectWrite
-    // and Direct2D are loaded, which is how such a game draws its dialogue, and its whole client
-    // area is on the captured output. It may be a window: the host converts a text game from the
-    // captured picture, so unlike an add-on game it need not cover the output.
+    /** What a game's executable itself imports, read from its file. */
+    struct executable_imports_t {
+      bool direct2d_text {};  ///< Direct2D and DirectWrite: it draws its picture and text with them.
+      bool gdi_text {};  ///< A GDI function that draws text.
+    };
+
+    // Reads the import table of an executable file, 32-bit or 64-bit, without loading it. A file
+    // that cannot be read, or whose imports a protector has hidden, imports nothing.
+    [[nodiscard]] executable_imports_t inspect_imports(const std::filesystem::path &executable) noexcept;
+
+    // A sound, input or older graphics library that games load and ordinary programs rarely do.
+    [[nodiscard]] bool game_library_loaded(std::span<const std::filesystem::path> loaded_modules);
+
+    // A text game is converted by the host from the captured picture, so unlike an add-on game it
+    // may be a window: its whole client area must be on the captured output. What marks it as one:
+    // - 32-bit, which can never load the add-on, with DirectWrite and Direct2D loaded: this is how
+    //   such a game draws its dialogue;
+    // - 32-bit, its executable importing a GDI text function, with a game library loaded;
+    // - 64-bit, its executable itself importing Direct2D and DirectWrite, with a game library
+    //   loaded. Loaded modules alone say nothing there: many 64-bit programs load both.
     [[nodiscard]] bool is_text_game_candidate(
       const std::filesystem::path &executable,
       std::span<const std::filesystem::path> loaded_modules,
       const foreground_window::observation_t &foreground,
-      RECT capture_rect
+      RECT capture_rect,
+      bool native,
+      const executable_imports_t &imports
     );
   }  // namespace detail
 }  // namespace platf::game3d

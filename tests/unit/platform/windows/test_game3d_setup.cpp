@@ -312,7 +312,7 @@ namespace {
     game3d::detail::setup_decisions decisions(choices);
     int loads = 0;
     const auto no_anti_cheat = [](const fs::path &) {
-      return false;
+      return std::string {};
     };
     const auto load = [&] {
       ++loads;
@@ -323,6 +323,7 @@ namespace {
     auto offered = game3d::detail::apply_text_hook_setup(game, decisions, no_anti_cheat, load);
     EXPECT_EQ(offered.state, "ready_to_install");
     EXPECT_FALSE(offered.identity.empty());
+    EXPECT_FALSE(offered.convert);
     EXPECT_EQ(loads, 0);
 
     ASSERT_TRUE(decisions.record(game, offered.identity, decision::install));
@@ -331,6 +332,9 @@ namespace {
       const auto active = game3d::detail::apply_text_hook_setup(game, decisions, no_anti_cheat, load);
       EXPECT_TRUE(active.state.empty());
       EXPECT_EQ(active.installation.state, state::current);
+      EXPECT_TRUE(active.convert);
+      EXPECT_TRUE(active.installation.addon_present);
+      EXPECT_FALSE(active.retry_load);
       EXPECT_EQ(loads, start);
       EXPECT_EQ(decisions.lookup(game, offered.identity), decision::install);
     }
@@ -338,138 +342,71 @@ namespace {
     ASSERT_TRUE(decisions.record(game, offered.identity, decision::never));
     const auto declined = game3d::detail::apply_text_hook_setup(game, decisions, no_anti_cheat, load);
     EXPECT_EQ(declined.state, "declined");
+    EXPECT_FALSE(declined.convert);
     EXPECT_EQ(loads, 2);
     // Nothing was written beside the game at any point.
     EXPECT_EQ(read(game), before);
     EXPECT_EQ(std::distance(fs::directory_iterator(game.parent_path()), fs::directory_iterator {}), 1);
   }
 
-  TEST_F(Game3DSetup, TextGameIsRefusedWithAntiCheatAndReportsAFailedLoad) {
+  TEST_F(Game3DSetup, TextGameIsRefusedWithAntiCheatAndConvertedWithoutAHelperThatFails) {
+    using load_state = game3d::text_hook::load_state_e;
     game3d::detail::setup_decisions decisions(choices);
     int loads = 0;
+    auto outcome_of_load = load_state::failed;
     const auto load = [&] {
       ++loads;
-      return game3d::text_hook::load_result {game3d::text_hook::load_state_e::failed, "refused"};
+      return game3d::text_hook::load_result {outcome_of_load, "refused."};
+    };
+    const auto clear = [](const fs::path &) {
+      return std::string {};
     };
     const auto identity = game3d::file_identity(game);
     ASSERT_TRUE(decisions.record(game, identity, decision::install));
-    // A confirmation never overrides the anti-cheat refusal.
+    // A confirmation never overrides the refusal, and the reason given is the one shown.
     const auto refused = game3d::detail::apply_text_hook_setup(game, decisions, [](const fs::path &) {
-      return true;
+      return std::string {"anti-cheat here"};
     }, load);
     EXPECT_EQ(refused.installation.state, state::anti_cheat);
+    EXPECT_EQ(refused.installation.detail, "anti-cheat here");
+    EXPECT_FALSE(refused.convert);
     EXPECT_EQ(loads, 0);
-    const auto failed = game3d::detail::apply_text_hook_setup(game, decisions, [](const fs::path &) {
-      return false;
-    }, load);
-    EXPECT_EQ(failed.installation.state, state::unavailable);
-    EXPECT_EQ(failed.installation.detail, "refused");
+    // The approval is for converting the game: a helper that does not come up is tried again,
+    // and the game is converted meanwhile with the text the picture shows.
+    const auto failed = game3d::detail::apply_text_hook_setup(game, decisions, clear, load);
+    EXPECT_EQ(failed.installation.state, state::current);
+    EXPECT_TRUE(failed.convert);
+    EXPECT_TRUE(failed.retry_load);
+    EXPECT_FALSE(failed.installation.addon_present);
+    EXPECT_EQ(failed.installation.detail.rfind("refused.", 0), 0u);
     EXPECT_EQ(loads, 1);
+    // A build without a helper for this kind of game converts it too, with nothing to retry.
+    outcome_of_load = load_state::unavailable;
+    const auto without = game3d::detail::apply_text_hook_setup(game, decisions, clear, load);
+    EXPECT_EQ(without.installation.state, state::current);
+    EXPECT_TRUE(without.convert);
+    EXPECT_FALSE(without.retry_load);
+    // A game that was closed before its approval is converted from its next start.
+    outcome_of_load = load_state::not_running;
+    const auto closed = game3d::detail::apply_text_hook_setup(game, decisions, clear, load);
+    EXPECT_EQ(closed.installation.state, state::installed);
+    EXPECT_FALSE(closed.convert);
+    EXPECT_FALSE(closed.retry_load);
+    EXPECT_EQ(loads, 3);
     // A changed executable is a different file: its confirmation no longer applies.
     write(game, "a different build of the game, with a different size");
-    const auto changed = game3d::detail::apply_text_hook_setup(game, decisions, [](const fs::path &) {
-      return false;
-    }, load);
+    const auto changed = game3d::detail::apply_text_hook_setup(game, decisions, clear, load);
     EXPECT_EQ(changed.state, "ready_to_install");
-    EXPECT_EQ(loads, 1);
+    EXPECT_FALSE(changed.convert);
+    EXPECT_EQ(loads, 3);
   }
 
-  TEST(Game3DTextHook, LoadSkipsARunningHelperAndRequiresItToReportIn) {
-    namespace hook = game3d::text_hook;
-    int runs = 0;
-    const auto yes = [] {
-      return true;
-    };
-    const auto no = [] {
-      return false;
-    };
-    // Already running: the injector is not started again.
-    auto result = hook::detail::load_with(yes, yes, [&] {
-      ++runs;
-      return 0u;
-    });
-    EXPECT_EQ(result.state, hook::load_state_e::loaded);
-    EXPECT_EQ(runs, 0);
-    // A build without the 32-bit helper offers nothing to run.
-    result = hook::detail::load_with(no, no, [&] {
-      ++runs;
-      return 0u;
-    });
-    EXPECT_EQ(result.state, hook::load_state_e::unavailable);
-    EXPECT_EQ(runs, 0);
-    // An injector failure is reported with its reason.
-    result = hook::detail::load_with(no, yes, [&] {
-      ++runs;
-      return 3u;
-    });
-    EXPECT_EQ(result.state, hook::load_state_e::failed);
-    EXPECT_EQ(result.detail, hook::detail::injector_failure(3u));
-    EXPECT_EQ(runs, 1);
-    // The helper reports in shortly after the injector returns.
-    int polls = 0;
-    result = hook::detail::load_with([&] {
-      return ++polls >= 3;
-    }, yes, [&] {
-      ++runs;
-      return 0u;
-    });
-    EXPECT_EQ(result.state, hook::load_state_e::loaded);
-    EXPECT_EQ(runs, 2);
-    // A game closed before its approval is not a failure, and nothing is started for it.
-    result = hook::detail::load_with(no, yes, [&] {
-      ++runs;
-      return 0u;
-    }, no);
-    EXPECT_EQ(result.state, hook::load_state_e::not_running);
-    EXPECT_EQ(runs, 2);
-  }
-
-  TEST(Game3DTextHook, ConsentNamesOneRunningProcessAndCanBeWithdrawn) {
-    namespace hook = platf::game3d::text_hook;
-    constexpr std::uint32_t process = 0x7ffffff1u;
-    EXPECT_FALSE(hook::consented(process, 100u));
-    hook::set_consent(process, 100u, true);
-    EXPECT_TRUE(hook::consented(process, 100u));
-    // Another process that reuses the id later is a different game.
-    EXPECT_FALSE(hook::consented(process, 101u));
-    EXPECT_FALSE(hook::consented(process + 1u, 100u));
-    hook::set_consent(process, 101u, true);
-    EXPECT_FALSE(hook::consented(process, 100u));
-    EXPECT_TRUE(hook::consented(process, 101u));
-    hook::set_consent(process, 101u, false);
-    EXPECT_FALSE(hook::consented(process, 101u));
-    // No process and no start time are never a consent.
-    hook::set_consent(0u, 100u, true);
-    hook::set_consent(process, 0u, true);
-    EXPECT_FALSE(hook::consented(0u, 100u));
-    EXPECT_FALSE(hook::consented(process, 0u));
-  }
-
-  TEST(Game3DTextHook, TextBoundsCoverEveryUsableBoxAndStayOnTheSurface) {
-    namespace hook = platf::game3d::text_hook;
-    EXPECT_TRUE(hook::detail::text_bounds(nullptr, 0u, 1920u, 1080u).empty());
-    // Two lines; an empty box and a damaged one are skipped.
-    const float nan = std::numeric_limits<float>::quiet_NaN();
-    const float boxes[] {
-      100.0f, 900.5f, 400.0f, 940.0f,
-      120.0f, 950.0f, 300.0f, 989.25f,
-      0.0f, 500.0f, 10.0f, 500.0f,
-      0.0f, nan, 10.0f, 20.0f,
-    };
-    auto bounds = hook::detail::text_bounds(boxes, 4u, 1920u, 1080u);
-    EXPECT_FLOAT_EQ(bounds.left, 100.0f);
-    EXPECT_FLOAT_EQ(bounds.top, 900.5f);
-    EXPECT_FLOAT_EQ(bounds.right, 400.0f);
-    EXPECT_FLOAT_EQ(bounds.bottom, 989.25f);
-    EXPECT_FLOAT_EQ(bounds.line_height, 39.25f);
-    // Text partly off the surface is clipped to it; text wholly outside is no text.
-    const float edges[] {-20.0f, -30.0f, 10.0f, 1.0f, 1900.0f, 1079.0f, 2000.0f, 1200.0f};
-    bounds = hook::detail::text_bounds(edges, 2u, 1920u, 1080u);
-    EXPECT_FLOAT_EQ(bounds.left, 0.0f);
-    EXPECT_FLOAT_EQ(bounds.top, 0.0f);
-    EXPECT_FLOAT_EQ(bounds.right, 1920.0f);
-    EXPECT_FLOAT_EQ(bounds.bottom, 1080.0f);
-    const float outside[] {0.0f, 1100.0f, 10.0f, 1150.0f};
-    EXPECT_TRUE(hook::detail::text_bounds(outside, 1u, 1920u, 1080u).empty());
+  TEST_F(Game3DSetup, NothingIsLoadedIntoAGameWithAntiCheatWhateverElseIsInItsFolder) {
+    EXPECT_TRUE(game3d::injection_refusal(game).empty());
+    // An existing ReShade installation lifts the refusal for an add-on installation, which only
+    // adds a file beside it. It lifts nothing for loading a helper into the running game.
+    write(game.parent_path() / "ReShade.ini", "[ADDON]\n");
+    write(game.parent_path() / "EasyAntiCheat_EOS_Setup.exe", "marker");
+    EXPECT_FALSE(game3d::injection_refusal(game).empty());
   }
 }  // namespace
