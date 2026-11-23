@@ -18,6 +18,7 @@
 #include <vector>
 #include <dxgi1_2.h>
 #include <src/crypto.h>
+#include <src/host_sbs_direct_glyph_tiles.h>
 #include <src/host_sbs_display_snapshot_rgb8_analysis_gpu.h>
 #include <src/host_sbs_resolution.h>
 #include <src/host_sbs_shader_cache.h>
@@ -594,39 +595,44 @@ TEST_F(HostSbsDirectGlyphPublishGpuTest, BatchedRolesKeepTheOwnedColumnsAndParti
   ComPtr<ID3D11ComputeShader> shader;
   hr(device->CreateComputeShader(code->data(), code->size(), nullptr, &shader));
 
-  constexpr UINT width = 881, cells = 144 * 512;
-  std::vector<float> logits(2 * 4 * cells, -12.0f);
-  for (UINT y = 0; y < 28; ++y) {
-    for (UINT x = 0; x < 440; ++x) {
-      const UINT index = (56 + y) * 512 + 36 + x;
-      logits[cells + index] = 12.0f;
-      logits[4 * cells + 2 * cells + index] = 12.0f;
+  constexpr auto tile = models::host_sbs_direct_glyph_gpu::palette_tile;
+  constexpr UINT width = 881, cells = tile.height * tile.width;
+  for (const UINT rows : {28u, 37u, tile.height}) {
+    SCOPED_TRACE(rows);
+    const UINT top = (tile.height - rows) / 2u;
+    std::vector<float> logits(2 * 4 * cells, -12.0f);
+    for (UINT y = 0; y < rows; ++y) {
+      for (UINT x = 0; x < 440; ++x) {
+        const UINT index = (top + y) * tile.width + 36 + x;
+        logits[cells + index] = 12.0f;
+        logits[4 * cells + 2 * cells + index] = 12.0f;
+      }
     }
+    const auto input = buffer(UINT(logits.size()), false, false, false, logits.data());
+    using roles_t = std::array<float, 4>;
+    const std::vector<roles_t> zero(width * rows + 1);
+    D3D11_BUFFER_DESC desc {UINT(zero.size() * sizeof(roles_t)), D3D11_USAGE_DEFAULT, D3D11_BIND_UNORDERED_ACCESS,
+      0, D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, sizeof(roles_t)};
+    D3D11_SUBRESOURCE_DATA data {zero.data(), 0, 0};
+    ComPtr<ID3D11Buffer> output;
+    ComPtr<ID3D11UnorderedAccessView> target;
+    hr(device->CreateBuffer(&desc, &data, &output));
+    hr(device->CreateUnorderedAccessView(output.Get(), nullptr, &target));
+    const auto cb = constants(std::array<UINT, 8> {0, width, 0, 440, 0, 0, 0, rows});
+    context->CSSetShader(shader.Get(), nullptr, 0);
+    context->CSSetConstantBuffers(0, 1, cb.GetAddressOf());
+    context->CSSetShaderResources(12, 1, input.srv.GetAddressOf());
+    context->CSSetUnorderedAccessViews(0, 1, target.GetAddressOf(), nullptr);
+    context->Dispatch(28, (rows + 7u) / 8u, 2);
+    context->ClearState();
+    const auto values = words(read(output.Get()));
+    for (UINT y : {0u, rows - 1u}) {
+      EXPECT_EQ(values[(y * width + 439) * 4 + 1], 0u);
+      for (UINT x : {440u, 879u}) EXPECT_GT(std::bit_cast<float>(values[(y * width + x) * 4 + 1]), .99f);
+      EXPECT_GT(std::bit_cast<float>(values[(y * width + 880) * 4 + 2]), .99f);
+    }
+    EXPECT_EQ(values[width * rows * 4], 0u);
   }
-  const auto input = buffer(UINT(logits.size()), false, false, false, logits.data());
-  using roles_t = std::array<float, 4>;
-  const std::vector<roles_t> zero(width * 28 + 1);
-  D3D11_BUFFER_DESC desc {UINT(zero.size() * sizeof(roles_t)), D3D11_USAGE_DEFAULT, D3D11_BIND_UNORDERED_ACCESS,
-    0, D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, sizeof(roles_t)};
-  D3D11_SUBRESOURCE_DATA data {zero.data(), 0, 0};
-  ComPtr<ID3D11Buffer> output;
-  ComPtr<ID3D11UnorderedAccessView> target;
-  hr(device->CreateBuffer(&desc, &data, &output));
-  hr(device->CreateUnorderedAccessView(output.Get(), nullptr, &target));
-  const auto cb = constants(std::array<UINT, 8> {0, width, 0, 440});
-  context->CSSetShader(shader.Get(), nullptr, 0);
-  context->CSSetConstantBuffers(0, 1, cb.GetAddressOf());
-  context->CSSetShaderResources(12, 1, input.srv.GetAddressOf());
-  context->CSSetUnorderedAccessViews(0, 1, target.GetAddressOf(), nullptr);
-  context->Dispatch(28, 4, 2);
-  context->ClearState();
-  const auto values = words(read(output.Get()));
-  for (UINT y : {0u, 27u}) {
-    EXPECT_EQ(values[(y * width + 439) * 4 + 1], 0u);
-    for (UINT x : {440u, 879u}) EXPECT_GT(std::bit_cast<float>(values[(y * width + x) * 4 + 1]), .99f);
-    EXPECT_GT(std::bit_cast<float>(values[(y * width + 880) * 4 + 2]), .99f);
-  }
-  EXPECT_EQ(values[width * 28 * 4], 0u);
 }
 
 TEST_F(HostSbsDirectGlyphPublishGpuTest, CommonBackdropDoesNotDisplaceAnOutlineColor) {
@@ -853,17 +859,20 @@ TEST_F(HostSbsDirectGlyphPublishGpuTest, NativeHistoryRequiresOneMatchingCueInsi
   }
   const auto prior_lines = structured(8, 64, old.data());
   const auto current = structured(8, 64, nullptr);
-  const auto sizes = structured(9, 8, nullptr);
-  std::vector<float> past(width * height, 1.0f), raw_now(width * height, 0.0f);
-  const auto prior_alpha = structured(width * height, 4, past.data());
+  const auto sizes = structured(17, 2 * sizeof(UINT), nullptr);
+  using opacity_t = std::array<float, 2>; // Raw model alpha, then published alpha.
+  const std::vector<opacity_t> past(width * height, {1.0f, 1.0f});
+  const auto prior_alpha = structured(width * height, sizeof(opacity_t), past.data());
   auto left_ink = past;
   const UINT old_width = old_box[2] - old_box[0];
   for (UINT i = 0; i < left_ink.size(); ++i) {
-    left_ink[i] = (old_box[0] + i % old_width < width / 2) ? 1.0f : 0.0f;
+    if (old_box[0] + i % old_width >= width / 2) left_ink[i] = {0.0f, 0.0f};
   }
-  const auto prior_left = structured(width * height, 4, left_ink.data());
-  const auto new_alpha = structured(width * height, 4, raw_now.data());
-  const auto remembered = structured(width * height, 4, past.data());
+  const auto prior_left = structured(width * height, sizeof(opacity_t), left_ink.data());
+  const std::vector<float> clear(width * height, 0.0f), solid(width * height, 1.0f);
+  const auto new_alpha = structured(width * height, sizeof(float), clear.data());
+  const auto solid_alpha = structured(width * height, sizeof(float), solid.data());
+  const auto remembered = structured(width * height, sizeof(opacity_t), past.data());
   const auto output = texture(width, height, DXGI_FORMAT_R32_UINT, true);
   std::vector<std::uint16_t> a(width * height * 4u), b(a.size());
   for (UINT i = 0; i < width * height; ++i) {
@@ -891,7 +900,7 @@ TEST_F(HostSbsDirectGlyphPublishGpuTest, NativeHistoryRequiresOneMatchingCueInsi
     const auto detector = buffer(caps.size(), true, false, false, caps.data());
     auto *rgb = append ? appended_rgb.srv.Get() : (swap ? swapped_rgb.srv.Get() : previous_rgb.srv.Get());
     auto *old_mask = append ? prior_left.srv.Get() : prior_alpha.srv.Get();
-    auto *current_mask = append ? prior_alpha.srv.Get() : new_alpha.srv.Get();
+    auto *current_mask = append ? solid_alpha.srv.Get() : new_alpha.srv.Get();
     auto pass = [&](ID3D11ComputeShader *shader, UINT gx, UINT gy, std::array<ID3D11ShaderResourceView *, 8> in, std::array<ID3D11UnorderedAccessView *, 5> out) {
       context->CSSetConstantBuffers(0, 1, cb.GetAddressOf());
       context->CSSetShader(shader, nullptr, 0);
@@ -910,28 +919,38 @@ TEST_F(HostSbsDirectGlyphPublishGpuTest, NativeHistoryRequiresOneMatchingCueInsi
     return std::array {words(read(current_work.buffer.Get())), words(read(current.buffer.Get())), words(read(output.texture.Get()))};
   };
   const auto same = exercise(1, 17, false);
-  EXPECT_EQ((std::vector<UINT>(same[0].begin() + 4, same[0].begin() + 8)), (std::vector<UINT> {12, 8, 82, 40}));
+  EXPECT_EQ((std::vector<UINT>(same[0].begin() + 4, same[0].begin() + 8)), (std::vector<UINT> {12, 6, 82, 42}));
   EXPECT_EQ(same[1][14], 1u);
   EXPECT_EQ(same[2][24u * width + 35u], 242u);
   EXPECT_EQ(same[2][24u * width + 11u], 0u);
-  EXPECT_EQ(words(read(remembered.buffer.Get()))[16u * 70u + 23u], 0u);
+  const auto stored = words(read(remembered.buffer.Get()));
+  const UINT pixel = (24u - cap_box[1]) * 70u + (35u - 12u);
+  EXPECT_FLOAT_EQ(std::bit_cast<float>(stored[2u * pixel]), 0.0f);
+  EXPECT_FLOAT_EQ(std::bit_cast<float>(stored[2u * pixel + 1u]), .95f);
   const auto onset = exercise(1, 17, false, 0, false, 0);
+  EXPECT_EQ(onset[0][5], cap_box[1]);
+  EXPECT_EQ(onset[0][7], cap_box[3]);
+  const auto schedule = words(read(sizes.buffer.Get()));
+  EXPECT_EQ(schedule[1], cap_box[3] - cap_box[1]);
+  EXPECT_EQ(schedule[18], 32u); // The expanded OCR work height still sets the sampling scale.
   EXPECT_EQ(onset[1][14], 0u);
   EXPECT_EQ(onset[1][15], ink_bins[1] << 13);
   const auto swap = exercise(1, 17, true);
-  EXPECT_EQ((std::vector<UINT>(swap[0].begin() + 4, swap[0].begin() + 8)), (std::vector<UINT> {14, 8, 82, 40}));
+  EXPECT_EQ((std::vector<UINT>(swap[0].begin() + 4, swap[0].begin() + 8)), (std::vector<UINT> {14, 6, 82, 42}));
   EXPECT_EQ(swap[1][14], 0u);
   EXPECT_EQ(swap[2][24u * width + 35u], 0u);
   // The previous strokes and RGB agree on the left. New strokes on the right must veto the blend.
   const auto append = exercise(1, 17, false, 0, true);
   EXPECT_EQ(append[0], same[0]);
   EXPECT_EQ(append[1][14], 0u);
-  EXPECT_EQ(append[2][24u * width + 65u], 255u);
+  for (UINT y : {cap_box[1], 24u, cap_box[3] - 1u}) {
+    EXPECT_EQ(append[2][y * width + 65u], 255u);
+  }
   // Swapped RGB prevents history from extending the current box.
   const auto left = exercise(1, 17, true, 90);
-  EXPECT_EQ((std::vector<UINT>(left[0].begin() + 4, left[0].begin() + 8)), (std::vector<UINT> {12, 8, 82, 40}));
+  EXPECT_EQ((std::vector<UINT>(left[0].begin() + 4, left[0].begin() + 8)), (std::vector<UINT> {12, 6, 82, 42}));
   const auto right = exercise(1, 17, true, 102);
-  EXPECT_EQ((std::vector<UINT>(right[0].begin() + 4, right[0].begin() + 8)), (std::vector<UINT> {14, 8, 84, 40}));
+  EXPECT_EQ((std::vector<UINT>(right[0].begin() + 4, right[0].begin() + 8)), (std::vector<UINT> {14, 6, 84, 42}));
   EXPECT_EQ(exercise(1, 17, true, 20)[0], swap[0]);
   const auto ambiguous = exercise(2, 17, false);
   EXPECT_EQ(ambiguous[1][12], 0u);
