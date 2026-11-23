@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Export the frozen production DAV2 + ZipDepth convex-2x TensorRT artifact.
 
-The script intentionally writes the large ONNX and TensorRT products outside
-the repository. Source identities and the fixed point-profile order come from
+The script writes its ONNX and TensorRT products to the output directory it
+is given. The released fused ONNX is checked in under
+``src_assets/windows/assets``; an export must reproduce it byte for byte.
+Source identities and the fixed point-profile order come from
 ``contracts/prod-zipdepth-convex2x-v2.json``; callers cannot silently substitute
 another DAV2 graph, ZipDepth commit, or checkpoint under the production name.
 """
@@ -29,6 +31,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 import prod_zipdepth_convex2x as contract_api  # noqa: E402
+import prod_zipdepth_tuning as tuning  # noqa: E402
 
 
 EXPORTER_NAME = "apollo-prod-zipdepth-convex2x-exporter"
@@ -38,6 +41,7 @@ OPSET_VERSION = 18
 RAW_BRANCH_FILENAME = "zipdepth_mask_convex2x_dynamic_opset18.raw.onnx"
 BRANCH_FILENAME = "zipdepth_mask_convex2x_dynamic_opset18.onnx"
 FUSED_FILENAME = "prod_dav2_zipdepth_c2x_high_opset18.onnx"
+TUNED_ZIPDEPTH_STATE_FILENAME = "zipdepth_tuned_state.pth"
 PLAN_FILENAME = "prod_dav2_zipdepth_c2x_high_24_profiles.plan"
 MODEL_OPTIMIZATION_RECIPE = (
     "zipdepth-selective-fp16-project-before-resize-dense-group4-v1"
@@ -1324,6 +1328,16 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--zipdepth-repo", type=Path, required=True)
     parser.add_argument("--zipdepth-checkpoint", type=Path, required=True)
     parser.add_argument(
+        "--tuned-checkpoint",
+        type=Path,
+        help="fine-tuned DAV2 + ZipDepth checkpoint named by the contract's tuning section",
+    )
+    parser.add_argument(
+        "--dav2-torch-checkpoint",
+        type=Path,
+        help="stock DAV2 PyTorch weights; locate the ViT weights the tuned checkpoint replaces",
+    )
+    parser.add_argument(
         "--torch-site-packages",
         type=Path,
         help="optional site-packages directory containing the required PyTorch build",
@@ -1337,6 +1351,8 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--trtexec and --skip-engine are mutually exclusive")
     if not args.skip_engine and args.trtexec is None:
         parser.error("--trtexec is required unless --skip-engine is selected")
+    if (args.tuned_checkpoint is None) != (args.dav2_torch_checkpoint is None):
+        parser.error("--tuned-checkpoint and --dav2-torch-checkpoint go together")
     return args
 
 
@@ -1372,6 +1388,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     repository_identity = git_identity(
         zip_repository, str(zip_contract["repository_commit"])
     )
+    tuning_contract = source_contract.get("tuning")
+    if (tuning_contract is None) != (args.tuned_checkpoint is None):
+        raise ValueError(
+            "the contract "
+            + ("requires" if tuning_contract is not None else "does not allow")
+            + " --tuned-checkpoint and --dav2-torch-checkpoint"
+        )
+    tuned_checkpoint = stock_torch_checkpoint = None
+    if tuning_contract is not None:
+        tuned_checkpoint = args.tuned_checkpoint.resolve()
+        stock_torch_checkpoint = args.dav2_torch_checkpoint.resolve()
+        for path, key, label in (
+            (tuned_checkpoint, "checkpoint", "tuned checkpoint"),
+            (stock_torch_checkpoint, "dav2_torch_checkpoint", "stock DAV2 PyTorch weights"),
+        ):
+            if path.name != str(tuning_contract[key]):
+                raise ValueError(f"{label} filename must be {tuning_contract[key]}: {path}")
+            require_file_hash(path, str(tuning_contract[key + "_sha256"]), label)
 
     report: dict[str, object] = {
         "schema": 1,
@@ -1396,12 +1430,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     if license_path.is_file():
         report["sources"]["zipdepth_license"] = file_record(license_path)
 
+    torch_site_packages = args.torch_site_packages.resolve() if args.torch_site_packages else None
+    branch_checkpoint = checkpoint
+    tuned_dav2_state = None
+    if tuning_contract is not None:
+        report["sources"]["tuned_checkpoint"] = file_record(tuned_checkpoint)
+        report["sources"]["dav2_torch_checkpoint"] = file_record(stock_torch_checkpoint)
+        if torch_site_packages is not None:
+            if not torch_site_packages.is_dir():
+                raise FileNotFoundError(f"missing torch site-packages: {torch_site_packages}")
+            sys.path.insert(0, os.fspath(torch_site_packages))
+        # The branch exporter loads a ZipDepth state from a file of its own.
+        branch_checkpoint = output / TUNED_ZIPDEPTH_STATE_FILENAME
+        tuned_dav2_state = tuning.split_checkpoint(tuned_checkpoint, branch_checkpoint)
+
     raw_branch_path = output / RAW_BRANCH_FILENAME
     report["raw_zipdepth_branch"] = export_zipdepth_branch(
         zip_repository,
-        checkpoint,
+        branch_checkpoint,
         raw_branch_path,
-        args.torch_site_packages.resolve() if args.torch_site_packages else None,
+        torch_site_packages,
     )
     report["raw_zipdepth_branch"]["frozen_identity"] = require_artifact_identity(
         raw_branch_path,
@@ -1432,7 +1480,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         "optimized ZipDepth branch ONNX",
     )
     dav2_model = onnx.load(os.fspath(dav2_path))
+    if tuning_contract is not None:
+        head_tensors, absent_head_tensors = tuning.swap_head_initializers(dav2_model, tuned_dav2_state)
+        vit_tensors = tuning.swap_vit_linear_initializers(
+            dav2_model, tuning.load_state(stock_torch_checkpoint), tuned_dav2_state
+        )
+        if (head_tensors, vit_tensors) != (
+            int(tuning_contract["head_tensors"]),
+            int(tuning_contract["vit_linear_tensors"]),
+        ):
+            raise ValueError(
+                f"tuned weights written ({head_tensors} head, {vit_tensors} ViT) do not match the "
+                f"contract ({tuning_contract['head_tensors']}, {tuning_contract['vit_linear_tensors']})"
+            )
+        report["tuning"] = {
+            "head_tensors": head_tensors,
+            "head_tensors_not_in_graph": absent_head_tensors,
+            "vit_linear_tensors": vit_tensors,
+        }
     fused = compose_fused_models(dav2_model, branch_model)
+    if tuning_contract is not None:
+        report["tuning"]["vit_input"] = tuning.retarget_vit_input(
+            fused, float(tuning_contract["vit_input_scale"])
+        )
+        tuning.apply_output_gain(fused, float(tuning_contract["output_gain"]))
+        report["tuning"]["output_gain"] = float(tuning_contract["output_gain"])
+        onnx.checker.check_model(fused, full_check=True)
     fused_path = output / FUSED_FILENAME
     fused = save_deterministic_model(fused, fused_path)
     report["fused"] = {

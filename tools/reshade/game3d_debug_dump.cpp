@@ -223,6 +223,26 @@ namespace sunshine_game3d {
           if (pass["entry"] == "SunshineHostHorizontalCS") pass["srvs"]["t0"] = "ui_source_color";
         }
       }
+      // The eye limiter builds one horizontal field per eye after the scene
+      // field (and its pin); the pack reads that store. The package records the
+      // scene field (final_field); the store is recomputed by a replay.
+      if (conditioning && shader_marker(captured_shader, "SUNSHINE_LIMITER_LINE_GROUPS") &&
+          captured_shader.find("#define SUNSHINE_PACKED_EYES 1") != std::string_view::npos &&
+          captured_shader.find("#define SUNSHINE_EYE_LIMITER 1") != std::string_view::npos) {
+        auto &passes = result["passes"];
+        for (auto pass = passes.begin(); pass != passes.end(); ++pass) {
+          if ((*pass)["entry"] != "SunshineApplyUICS") continue;
+          auto eye_pin = *pass;
+          eye_pin["uavs"] = {{"u3", "eye_field:R32_FLOAT, twice the buffer height (both halves pinned in place)"}};
+          auto next = passes.insert(pass + 1, json {{"entry", "SunshineHostEyeLimitCS"}, {"target", "cs_5_0"}, {"enabled", true},
+            {"srvs", {{"t4", "vertical_field"}}},
+            {"uavs", {{"u3", "eye_field:R32_FLOAT, twice the buffer height: left-eye rows, then right-eye rows; not an artifact"}}}});
+          passes.insert(next + 1, eye_pin);
+          break;
+        }
+        for (auto &pass : passes)
+          if (pass["entry"] == "SunshineRenderPackedPS" || pass["entry"] == "SunshineRenderPackedPQPS") pass["srvs"]["t5"] = "eye_field";
+      }
       const auto &detection = f.ui_detection;
       result["ui_detection"] = {{"ran_or_held", name(detection.state)}, {"candidates", detection.candidates},
         {"threshold_bits", detection.threshold_bits}, {"accepted", detection.accepted}, {"flags", detection.flags},

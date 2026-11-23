@@ -38,6 +38,12 @@
 #define SUNSHINE_VERTICAL_LIVE_ENTRY 1
 // UI pinning groups own eight adjacent rows.
 #define SUNSHINE_UI_PIN_LINE_GROUPS 8
+// SunshineHostEyeLimitCS builds one horizontal field per eye from the vertical
+// field (docs/host-sbs.md, eye-specific horizontal limiter) into a store of
+// twice the buffer height: the left eye's rows, then the right eye's.
+// SunshineApplyUICS pins both halves of that store as it pins the scene field,
+// and the pack reads each eye's own rows.
+#define SUNSHINE_EYE_LIMITER 1
 // UI mask alpha pins with weight saturate(gain * alpha) through a soft band
 // (docs/reshade-sbs.md, UI pin band).
 #define SUNSHINE_UI_SOFT_PIN_GAIN 8
@@ -1792,6 +1798,17 @@ float SunshineUIPlaneParallax() {
     return SunshineBoundFinalParallax(parallax);
 }
 
+// The pin pass serves the scene field and the store of both eye fields: the
+// bound store's own height is the number of rows to pin, and rows past the
+// buffer height are the right eye's, pinned by the same mask rows.
+uint SunshineUIPinStoreRows() {
+    uint store_width, store_height;
+    SunshineHostFinalStore.GetDimensions(store_width, store_height);
+    return store_height;
+}
+#define SUNSHINE_UI_PIN_FIELD_ROWS SunshineUIPinStoreRows()
+#define SUNSHINE_UI_PIN_MASK_ROW(y) ((y) >= (uint)BUFFER_HEIGHT ? (y) - (uint)BUFFER_HEIGHT : (y))
+
 // BEGIN GENERATED SHARED UI PIN BAND
 // SPDX-License-Identifier: GPL-3.0-only
 // Shared Game 3D / Host native-mask UI pin band.
@@ -1800,6 +1817,11 @@ float SunshineUIPlaneParallax() {
 // Sunshine_SourceAlphaUI enables the pass; SunshineUIPinWeight(x,y) and
 // SunshineUIPlaneParallax() supply current authorized mask weight and plane.
 // Dispatch ceil(BUFFER_HEIGHT / 8) groups in X, one in Y and Z.
+// A store may hold the field more than once (one copy per eye): an adapter then
+// defines SUNSHINE_UI_PIN_FIELD_ROWS, the rows of the store to pin, and
+// SUNSHINE_UI_PIN_MASK_ROW(y), the mask row of store row y, and dispatches
+// ceil(SUNSHINE_UI_PIN_FIELD_ROWS / 8) groups. Rows are independent, so every
+// copy is pinned exactly as a single field is.
 // Keep arithmetic and scan/carry order exact: binary pinning preserves the
 // existing Game 3D float32 distance rule, including its non-precise bounds.
 
@@ -1829,6 +1851,12 @@ groupshared float2 SunshineUIPinCarrySlack[8u][8u];
 // the scans but move the carries' float comparisons, so the field would not
 // stay bit-identical.
 #define SUNSHINE_UI_PIN_BLOCK 16u
+#ifndef SUNSHINE_UI_PIN_FIELD_ROWS
+#define SUNSHINE_UI_PIN_FIELD_ROWS BUFFER_HEIGHT
+#endif
+#ifndef SUNSHINE_UI_PIN_MASK_ROW
+#define SUNSHINE_UI_PIN_MASK_ROW(y) (y)
+#endif
 
 float SunshineUIPinRamp(uint distance) {
     return 0.5 * float(distance) / float(BUFFER_WIDTH);
@@ -1865,7 +1893,9 @@ void SunshineApplyUICS(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupTh
     uint row = thread_id.x, lane = thread_id.y;
     uint y = group_id.x * 8u + row;
     // A partial last group keeps its idle threads until the final barrier.
-    bool active = y < BUFFER_HEIGHT;
+    bool active = y < SUNSHINE_UI_PIN_FIELD_ROWS;
+    // The mask row this store row is pinned by.
+    uint mask_y = SUNSHINE_UI_PIN_MASK_ROW(y);
     uint chunk_start = lane * BUFFER_WIDTH / 8u;
     uint chunk_end = (lane + 1u) * BUFFER_WIDTH / 8u;
     float plane = SunshineUIPlaneParallax();
@@ -1880,7 +1910,7 @@ void SunshineApplyUICS(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupTh
             float weights[SUNSHINE_UI_PIN_BLOCK], values[SUNSHINE_UI_PIN_BLOCK];
             [unroll] for (uint i = 0u; i < SUNSHINE_UI_PIN_BLOCK; ++i) {
                 const uint at = min(block + i, chunk_end - 1u);
-                weights[i] = SunshineUIPinWeight(at, y);
+                weights[i] = SunshineUIPinWeight(at, mask_y);
                 values[i] = SunshineHostFinalStore[int2(uint2(at, y))];
             }
             [unroll] for (uint j = 0u; j < SUNSHINE_UI_PIN_BLOCK; ++j) {
@@ -1951,7 +1981,7 @@ void SunshineApplyUICS(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupTh
     bool flat = true;
     if (chunk_start < chunk_end) {
         value = SunshineHostFinalStore[int2(uint2(chunk_end - 1u, y))];
-        r_here = SunshineUIPinSlackOf(value, SunshineUIPinWeight(chunk_end - 1u, y), plane);
+        r_here = SunshineUIPinSlackOf(value, SunshineUIPinWeight(chunk_end - 1u, mask_y), plane);
     }
     // Blocks from the chunk's end: texel top - j reads its left neighbor
     // top - j - 1, which the scan writes only after it.
@@ -1960,7 +1990,7 @@ void SunshineApplyUICS(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupTh
         float previous_weights[SUNSHINE_UI_PIN_BLOCK], previous_values[SUNSHINE_UI_PIN_BLOCK];
         [unroll] for (uint i = 0u; i < SUNSHINE_UI_PIN_BLOCK; ++i) {
             const uint at = (uint)max(top - (int)i - 1, (int)chunk_start);
-            previous_weights[i] = SunshineUIPinWeight(at, y);
+            previous_weights[i] = SunshineUIPinWeight(at, mask_y);
             previous_values[i] = SunshineHostFinalStore[int2(uint2(at, y))];
         }
         [unroll] for (uint j = 0u; j < SUNSHINE_UI_PIN_BLOCK; ++j) {
@@ -1994,14 +2024,14 @@ void SunshineApplyUICS(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupTh
     // the backward bound or than h itself (h changes by at most 0.5/W a texel).
     anchor = carry_anchor.x;
     best = carry_slack.x;
-    float w_previous = 0.0, w_here = chunk_start < chunk_end ? SunshineUIPinWeight(chunk_start, y) : 0.0;
+    float w_previous = 0.0, w_here = chunk_start < chunk_end ? SunshineUIPinWeight(chunk_start, mask_y) : 0.0;
     // Blocks from the chunk's start: texel x is read (as the backward pass
     // left it) before the scan writes it, and the scan writes only behind.
     [loop]
     for (uint block = chunk_start; block < chunk_end; block += SUNSHINE_UI_PIN_BLOCK) {
         float next_weights[SUNSHINE_UI_PIN_BLOCK], currents[SUNSHINE_UI_PIN_BLOCK];
         [unroll] for (uint i = 0u; i < SUNSHINE_UI_PIN_BLOCK; ++i) {
-            next_weights[i] = SunshineUIPinWeight(min(block + i + 1u, chunk_end - 1u), y);
+            next_weights[i] = SunshineUIPinWeight(min(block + i + 1u, chunk_end - 1u), mask_y);
             currents[i] = SunshineHostFinalStore[int2(uint2(min(block + i, chunk_end - 1u), y))];
         }
         [unroll] for (uint j = 0u; j < SUNSHINE_UI_PIN_BLOCK; ++j) {
@@ -2172,6 +2202,63 @@ void SunshineHostHorizontalCS(
     }
 }
 
+// Eye-specific horizontal limiter (docs/host-sbs.md). The renderer solves
+// out(x) = x - eyeSign * parallax(x), so in each eye a nearer object moves over
+// the background on one side and away from it on the other. On the covered
+// side the field may fall at SunshineEyeCoveredSlope, after the foreground
+// value has been extended by one texel so the silhouette's own colour
+// transition stays with the foreground; on the uncovered side it keeps the
+// scene field's slope. Both are below one, so each eye map keeps a unique
+// contractive inverse. One thread owns one row of both halves of the store
+// bound at u3: it writes the forward envelopes and completes them in place.
+//   left eye  (eyeSign -1), rows [0, H):   max(forward steep, backward gentle)
+//   right eye (eyeSign +1), rows [H, 2H):  max(forward gentle, backward steep)
+static const float SunshineEyeCoveredSlope = 0.9;
+float SunshineEyeLimitInput(uint x, uint y) {
+    float value = SunshineHostVerticalConditionedSampler.Load(int3(int2(uint2(x, y)), 0));
+    return SunshineCameraFinite(value) ? clamp(value, -SunshineHostContainer, SunshineHostContainer) : 0.0;
+}
+[numthreads(8u, 1u, 1)]
+void SunshineHostEyeLimitCS(
+    uint3 group_id : SV_GroupID,
+    uint3 group_thread_id : SV_GroupThreadID) {
+    uint y = group_id.x * 8u + group_thread_id.x;
+    if (y >= BUFFER_HEIGHT) return;
+    float hole_step = 0.5 / float(BUFFER_WIDTH);
+    float covered_step = SunshineEyeCoveredSlope / float(BUFFER_WIDTH);
+    uint left_y = y, right_y = y + BUFFER_HEIGHT;
+
+    float previous = SunshineEyeLimitInput(0u, y);
+    float gentle = previous, steep = previous;
+    SunshineHostFinalStore[int2(uint2(0u, left_y))] = steep;
+    SunshineHostFinalStore[int2(uint2(0u, right_y))] = gentle;
+    [loop]
+    for (uint forward_x = 1u; forward_x < BUFFER_WIDTH; ++forward_x) {
+        float value = SunshineEyeLimitInput(forward_x, y);
+        gentle = max(value, gentle - hole_step);
+        steep = max(max(value, previous), steep - covered_step);
+        SunshineHostFinalStore[int2(uint2(forward_x, left_y))] = steep;
+        SunshineHostFinalStore[int2(uint2(forward_x, right_y))] = gentle;
+        previous = value;
+    }
+    AllMemoryBarrier();
+    previous = SunshineEyeLimitInput(BUFFER_WIDTH - 1u, y);
+    gentle = previous; steep = previous;
+    [loop]
+    for (int backward_x = (int)BUFFER_WIDTH - 1; backward_x >= 0; --backward_x) {
+        uint x = (uint)backward_x;
+        if (x + 1u < BUFFER_WIDTH) {
+            float value = SunshineEyeLimitInput(x, y);
+            gentle = max(value, gentle - hole_step);
+            steep = max(max(value, previous), steep - covered_step);
+            previous = value;
+        }
+        int2 left_position = int2(uint2(x, left_y)), right_position = int2(uint2(x, right_y));
+        SunshineHostFinalStore[left_position] = SunshineBoundFinalParallax(max(SunshineHostFinalStore[left_position], gentle));
+        SunshineHostFinalStore[right_position] = SunshineBoundFinalParallax(max(SunshineHostFinalStore[right_position], steep));
+    }
+}
+
 // Exact tile counts from the selected mask and the unprotected, conditioned
 // scene. Only texels the mask pins exactly (pin weight one) count: fainter
 // tails blend toward scene depth and never place the plane. Each tile writes
@@ -2236,16 +2323,30 @@ void SunshineUIConflictCS(uint3 group_id : SV_GroupID, uint3 thread_id : SV_Grou
     }
 }
 
+// The field bound at t5 is the scene field or, with the eye limiter, the store
+// of both eyes' fields; its height tells which. The clamp keeps a sample inside
+// its eye's rows and equals the sampler's own edge clamp on the scene field.
+float SunshineEyeFieldV(float v, bool rightEye)
+{
+    uint fieldWidth, fieldHeight;
+    SunshineHostFinalSampler.GetDimensions(fieldWidth, fieldHeight);
+    if (fieldHeight != 2u * (uint)BUFFER_HEIGHT) return v;
+    float rows = float(BUFFER_HEIGHT);
+    float row = clamp(v * rows, 0.5, rows - 0.5);
+    return (row + (rightEye ? rows : 0.0)) / (2.0 * rows);
+}
+
 float4 SunshineHostRender(float2 eyeUV, bool rightEye)
 {
     float eyeSign = rightEye ? 1.0 : -1.0;
     float sourceX = eyeUV.x;
+    float fieldV = SunshineEyeFieldV(eyeUV.y, rightEye);
     // FX translates for-loops to while-loops; forcing unroll fails FXC for this
     // exact-equality break. A dynamic loop keeps the same 11-step upper bound.
     [loop]
     for (int iteration = 0; iteration < 11; ++iteration)
     {
-        float nextSourceX = eyeUV.x + eyeSign * SunshineHostFinalSampler.SampleLevel(SunshineLinearClampState, (float4(sourceX, eyeUV.y, 0, 0)).xy, (float4(sourceX, eyeUV.y, 0, 0)).w);
+        float nextSourceX = eyeUV.x + eyeSign * SunshineHostFinalSampler.SampleLevel(SunshineLinearClampState, (float4(sourceX, fieldV, 0, 0)).xy, (float4(sourceX, fieldV, 0, 0)).w);
         bool settled = asuint(nextSourceX) == asuint(sourceX);
         sourceX = nextSourceX;
         if (settled) break;
@@ -2253,7 +2354,7 @@ float4 SunshineHostRender(float2 eyeUV, bool rightEye)
     // Diagnostic corresponds to the actual conditioned field, near bright.
     if (Depth_Map_View == 1)
     {
-        float p = SunshineHostFinalSampler.SampleLevel(SunshineLinearClampState, (float4(eyeUV, 0, 0)).xy, (float4(eyeUV, 0, 0)).w);
+        float p = SunshineHostFinalSampler.SampleLevel(SunshineLinearClampState, (float4(eyeUV.x, fieldV, 0, 0)).xy, (float4(eyeUV.x, fieldV, 0, 0)).w);
         return float4((0.5 + 0.5 * p / SunshineHostContainer).xxx, 1.0);
     }
     float2 sourceUV = float2(saturate(sourceX), eyeUV.y);

@@ -26,6 +26,7 @@
   #include <src/crypto.h>
   #include <src/depth_coordinate_v2.h>
   #include <src/host_sbs_current_outline_runtime_programs.h>
+  #include <src/host_sbs_eye_field.h>
   #include <src/host_sbs_queued_render_guard.h>
   #include <src/host_sbs_current_outline_selected_matte_gpu.h>
   #include <src/host_sbs_shared_ui_warp_runtime.h>
@@ -54,6 +55,16 @@ class HostSbsV2LiveWarpGpuTest_SharedUiPinCompletedProtectionDoesNotRequireQueue
 class HostSbsV2LiveWarpGpuTest_SharedUiPinInactiveDispatchPreservesReusedPlanesAndDiagnostics_Test;
 
 namespace {
+  // The pin field and weight planes hold the band once per eye. A fixture that attaches no eye
+  // field builds both copies from Base, so they must agree bit for bit; the checks then read the
+  // left eye's copy.
+  bool first_eye_copy(std::vector<float> &plane) {
+    if (plane.size() % 2u != 0u) return false;
+    const auto half = plane.size() / 2u;
+    if (std::memcmp(plane.data(), plane.data() + half, half * sizeof(float)) != 0) return false;
+    plane.resize(half);
+    return true;
+  }
   using Microsoft::WRL::ComPtr;
 
   struct rgba32f_t {
@@ -838,6 +849,7 @@ namespace {
         ComPtr<ID3D11Buffer> verdict_staging;
         D3D11_MAPPED_SUBRESOURCE verdict_map {};
         if (!read_plane(text_game_views.field.Get(), text.field) || !read_plane(text_game_views.weights.Get(), text.weights) ||
+            !first_eye_copy(text.field) || !first_eye_copy(text.weights) ||
             !read_plane(text_game_views.rows.Get(), text.rows) ||
             FAILED(device->CreateBuffer(&verdict_desc, nullptr, &verdict_staging))) {
           error = "text-game pin readback failed";
@@ -896,8 +908,9 @@ namespace {
             SUCCEEDED(device->CreateShaderResourceView(p.texture.Get(),nullptr,&p.srv)) &&
             SUCCEEDED(device->CreateUnorderedAccessView(p.texture.Get(),nullptr,&p.uav));
         };
-        if (!plane(source_width,pin_shape[3u],DXGI_FORMAT_R32_FLOAT,pin_field) ||
-            !plane(source_width,pin_shape[3u],DXGI_FORMAT_R32_FLOAT,pin_weights) ||
+        // Field and weights hold the band once per eye, as the production owner allocates them.
+        if (!plane(source_width,pin_shape[3u]*2u,DXGI_FORMAT_R32_FLOAT,pin_field) ||
+            !plane(source_width,pin_shape[3u]*2u,DXGI_FORMAT_R32_FLOAT,pin_weights) ||
             !plane(1u,pin_shape[3u]+1u,DXGI_FORMAT_R32_UINT,pin_rows)) {
           error="shared UI pin native planes unavailable";return false;
         }
@@ -940,12 +953,12 @@ namespace {
         srvs[8u]=prepared_srv.Get();context->CSSetShaderResources(8u,1u,&srvs[8u]);
         uavs[0u]=pin_field.uav.Get();uavs[1u]=pin_weights.uav.Get();uavs[3u]=nullptr;
         context->CSSetUnorderedAccessViews(0u,4u,uavs,nullptr);context->CSSetShader(shared_ui_pin_cs[1].Get(),nullptr,0u);
-        context->Dispatch((source_width+15u)/16u,(pin_shape[3u]+15u)/16u,1u);
+        context->Dispatch((source_width+15u)/16u,(pin_shape[3u]*2u+15u)/16u,1u);
         context->CSSetUnorderedAccessViews(0u,4u,null_uavs,nullptr);
         if (!outline->shared_ui_pin_resample_only) {
           srvs[12u]=pin_weights.srv.Get();context->CSSetShaderResources(0u,15u,srvs);
           uavs[1u]=uavs[2u]=nullptr;context->CSSetUnorderedAccessViews(0u,4u,uavs,nullptr);
-          context->CSSetShader(shared_ui_pin_cs[2].Get(),nullptr,0u);context->Dispatch((pin_shape[3u]+7u)/8u,1u,1u);
+          context->CSSetShader(shared_ui_pin_cs[2].Get(),nullptr,0u);context->Dispatch((pin_shape[3u]*2u+7u)/8u,1u,1u);
           context->CSSetUnorderedAccessViews(0u,4u,null_uavs,nullptr);
         }
         ID3D11ShaderResourceView *null_srvs[15] {};context->CSSetShaderResources(0u,15u,null_srvs);
@@ -1016,6 +1029,7 @@ namespace {
         out.field.resize(bytes.size()/4u);std::memcpy(out.field.data(),bytes.data(),bytes.size());
         if (!read_diagnostic_texture(pin_weights.texture.Get(),4u,bytes)) {error="shared UI pin weights diagnostic readback failed";return false;}
         out.authorized_weights.resize(bytes.size()/4u);std::memcpy(out.authorized_weights.data(),bytes.data(),bytes.size());
+        if (!first_eye_copy(out.field) || !first_eye_copy(out.authorized_weights)) {error="shared UI pin eye copies differ without an eye field";return false;}
         if (!read_diagnostic_texture(pin_rows.texture.Get(),4u,bytes)) {error="shared UI pin rows diagnostic readback failed";return false;}
         out.active_rows.resize(bytes.size()/4u);std::memcpy(out.active_rows.data(),bytes.data(),bytes.size());
         out.selected_receipt_header[0u]=out.active_rows.back();out.selected_receipt_authorized=out.active_rows.back()!=0u;out.active_rows.pop_back();
@@ -3778,8 +3792,12 @@ TEST(HostSbsV2LiveWarpGpuTest, OrdinaryShaderBytecodeHasNoSubtitleBindings) {
       if (resource.Type == D3D_SIT_CBUFFER) {
         EXPECT_NE(resource.BindPoint, 3u) << resource.Name;
       } else if (resource.Type != D3D_SIT_SAMPLER) {
-        // Queued transaction authentication at t10 is independent of subtitles.
-        EXPECT_TRUE(resource.BindPoint < 3u || resource.BindPoint == 10u) << resource.Name;
+        // Queued transaction authentication at t10 is independent of subtitles, and so is the
+        // eye-specific limiter field at its own slot.
+        EXPECT_TRUE(
+          resource.BindPoint < 3u || resource.BindPoint == 10u ||
+          resource.BindPoint == models::host_sbs_eye_field::pixel_slot
+        ) << resource.Name;
       }
     }
   }
@@ -5473,7 +5491,7 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinInactiveDispatchPreservesReusedPlanesA
         ComPtr<ID3D11Resource> resource;
         srvs[index]->GetResource(&resource);
         if (index < 2u) {
-          const std::vector<float> values(width * height, index == 0u ? field_poison : weight_poison);
+          const std::vector<float> values(width * height * 2u, index == 0u ? field_poison : weight_poison);
           optimized.context->UpdateSubresource(resource.Get(), 0u, nullptr, values.data(), width * 4u, 0u);
         } else {
           const std::vector<UINT> values(height + 1u, 1u);
@@ -5562,13 +5580,13 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinProductionOwnerRestoresContextAndRejec
   D3D11_BUFFER_DESC desc {};desc.ByteWidth = 48u;desc.Usage = D3D11_USAGE_DEFAULT;desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
   ComPtr<ID3D11Buffer> sentinel_constants;
   ASSERT_TRUE(SUCCEEDED(fixture.device->CreateBuffer(&desc, nullptr, &sentinel_constants)));
-  std::array<ID3D11ShaderResourceView *, 15u> old_srvs;old_srvs.fill(sentinel_srv.Get());
+  std::array<ID3D11ShaderResourceView *, 16u> old_srvs;old_srvs.fill(sentinel_srv.Get());
   std::array<ID3D11Buffer *, 7u> old_constants;old_constants.fill(sentinel_constants.Get());
   ID3D11UnorderedAccessView *old_uavs[4] {sentinel_uav.Get(), nullptr, nullptr, sentinel_prepare_uav.Get()};
   ID3D11ShaderResourceView *old_pixel[3] {sentinel_srv.Get(), sentinel_srv.Get(), sentinel_srv.Get()};
   auto *old_buffer = sentinel_constants.Get();auto *old_sampler = fixture.sampler.Get();
   auto *old_shader = fixture.production_shared_ui_pin_programs.program().initialize;
-  fixture.context->CSSetShaderResources(0u, 15u, old_srvs.data());
+  fixture.context->CSSetShaderResources(0u, 16u, old_srvs.data());
   fixture.context->CSSetConstantBuffers(0u, 7u, old_constants.data());
   fixture.context->CSSetUnorderedAccessViews(0u, 4u, old_uavs, nullptr);
   fixture.context->CSSetSamplers(0u, 1u, &old_sampler);fixture.context->CSSetShader(old_shader, nullptr, 0u);
@@ -5580,15 +5598,15 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinProductionOwnerRestoresContextAndRejec
   std::vector<std::byte> output;
   ASSERT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height,
     source.data(), base, base, state, {}, output, error, 0u, 0u, {}, &subtitle, nullptr, true, &operands)) << error;
-  ID3D11ShaderResourceView *restored_srvs[15] {}, *restored_pixel[3] {};
+  ID3D11ShaderResourceView *restored_srvs[16] {}, *restored_pixel[3] {};
   ID3D11Buffer *restored_constants[7] {}, *restored_pixel_constant = nullptr;
   ID3D11UnorderedAccessView *restored_uavs[4] {};
   ComPtr<ID3D11SamplerState> restored_sampler;ComPtr<ID3D11ComputeShader> restored_shader;
-  fixture.context->CSGetShaderResources(0u, 15u, restored_srvs);fixture.context->CSGetConstantBuffers(0u, 7u, restored_constants);
+  fixture.context->CSGetShaderResources(0u, 16u, restored_srvs);fixture.context->CSGetConstantBuffers(0u, 7u, restored_constants);
   fixture.context->CSGetUnorderedAccessViews(0u, 4u, restored_uavs);fixture.context->CSGetSamplers(0u, 1u, &restored_sampler);
   fixture.context->CSGetShader(&restored_shader, nullptr, nullptr);fixture.context->PSGetShaderResources(12u, 3u, restored_pixel);
   fixture.context->PSGetConstantBuffers(6u, 1u, &restored_pixel_constant);
-  for (UINT i = 0u; i < 15u; ++i) {EXPECT_EQ(restored_srvs[i], old_srvs[i]);if(restored_srvs[i])restored_srvs[i]->Release();}
+  for (UINT i = 0u; i < old_srvs.size(); ++i) {EXPECT_EQ(restored_srvs[i], old_srvs[i]);if(restored_srvs[i])restored_srvs[i]->Release();}
   for (UINT i = 0u; i < 7u; ++i) {EXPECT_EQ(restored_constants[i], old_constants[i]);if(restored_constants[i])restored_constants[i]->Release();}
   for (UINT i = 0u; i < 4u; ++i) {
     EXPECT_EQ(restored_uavs[i], old_uavs[i]);if(restored_uavs[i])restored_uavs[i]->Release();
@@ -5612,10 +5630,10 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinProductionOwnerRestoresContextAndRejec
   ASSERT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height,
     source.data(), base, base, state, {}, owned_output, error, 0u, 0u, {}, &subtitle, nullptr, true, &operands)) << error;
   EXPECT_EQ(owned_output, output);
-  ID3D11ShaderResourceView *owned_srvs[15] {};
+  ID3D11ShaderResourceView *owned_srvs[16] {};
   ID3D11UnorderedAccessView *owned_uavs[4] {};
   ID3D11Buffer *owned_constants[8] {};
-  fixture.context->CSGetShaderResources(0u, 15u, owned_srvs);
+  fixture.context->CSGetShaderResources(0u, 16u, owned_srvs);
   fixture.context->CSGetUnorderedAccessViews(0u, 4u, owned_uavs);
   fixture.context->CSGetConstantBuffers(0u, 8u, owned_constants);
   for (auto *view : owned_srvs) {
@@ -5893,6 +5911,50 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinSubtitlePreparationPlacesBandAndRevoke
       ASSERT_TRUE(prepare(request, domain)) << error;
     }
 
+    {
+      // With an eye field on the Base view, each copy of the band starts from its own eye's scene
+      // field, and the pin holds the glyph on the same plane in both.
+      std::vector<float> eyes(field_width * field_height * 2u, -1.25f / domain.width);
+      std::fill(eyes.begin() + field_width * field_height, eyes.end(), -0.5f / domain.width);
+      const auto eye_view = texture(DXGI_FORMAT_R32_FLOAT, field_width, field_height * 2u, eyes);
+      ASSERT_TRUE(eye_view && models::host_sbs_eye_field::attach(views[1].Get(), eye_view.Get()));
+      ASSERT_TRUE(prepare(request, domain)) << error;
+      const auto per_eye = owner.views();
+      EXPECT_EQ(per_eye.field.Get(), accepted.field.Get());
+      ComPtr<ID3D11Resource> field_resource;
+      per_eye.field->GetResource(&field_resource);
+      const UINT band = expected_shape[3];
+      auto field_desc = D3D11_TEXTURE2D_DESC {width, band * 2u, 1u, 1u, DXGI_FORMAT_R32_FLOAT,
+        {1u, 0u}, D3D11_USAGE_STAGING, 0u, D3D11_CPU_ACCESS_READ, 0u};
+      ComPtr<ID3D11Texture2D> field_staging;
+      ASSERT_TRUE(SUCCEEDED(fixture.device->CreateTexture2D(&field_desc, nullptr, &field_staging)));
+      fixture.context->CopyResource(field_staging.Get(), field_resource.Get());
+      D3D11_MAPPED_SUBRESOURCE field_map {};
+      ASSERT_TRUE(SUCCEEDED(fixture.context->Map(field_staging.Get(), 0u, D3D11_MAP_READ, 0u, &field_map)));
+      const auto at = [&](UINT eye, UINT row, UINT x) {
+        float value;
+        std::memcpy(&value, static_cast<const std::byte *>(field_map.pData) + (eye * band + row) * field_map.RowPitch + x * sizeof(float), sizeof(value));
+        return value;
+      };
+      std::size_t scene_texels = 0u;
+      for (UINT row = 0u; row < band; ++row) {
+        const UINT source_row = row + expected_shape[2];
+        // A row with a glyph is pinned; outside the window region the collar is not proportional.
+        if (source_row == full_y || (roi && (source_row < height / 4u || source_row + 1u > height * 3u / 4u))) continue;
+        for (UINT x = roi ? width / 4u : 0u; x < (roi ? width * 3u / 4u : width); ++x) {
+          const float left = at(0u, row, x), right = at(1u, row, x);
+          ASSERT_NEAR(right, left * 0.4f, 1.0e-7f) << "row " << row << ", x " << x;
+          scene_texels += left != 0.0f ? 1u : 0u;
+        }
+      }
+      EXPECT_GT(scene_texels, 0u) << "No scene texel of the band was compared";
+      const UINT glyph_row = full_y - expected_shape[2], glyph_column = source_left + glyph_x;
+      EXPECT_EQ(at(0u, glyph_row, glyph_column), at(1u, glyph_row, glyph_column)) << "The glyph keeps one plane in both eyes";
+      fixture.context->Unmap(field_staging.Get(), 0u);
+      ASSERT_TRUE(models::host_sbs_eye_field::attach(views[1].Get(), nullptr));
+      ASSERT_TRUE(prepare(request, domain)) << error;
+    }
+
     auto aliased = request;
     aliased.draw_srvs[roi ? 1u : 0u] = accepted.field.Get();
     auto foreign = request;
@@ -6150,7 +6212,7 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinQueuedProductionRequiresCurrentGuardAt
     ComPtr<ID3D11Resource> resource;
     poison_views[index]->GetResource(&resource);
     if (index < 2u) {
-      const std::vector<float> values(width * height, index == 0u ? 0.75f : 0.875f);
+      const std::vector<float> values(width * height * 2u, index == 0u ? 0.75f : 0.875f);
       fixture.context->UpdateSubresource(resource.Get(), 0u, nullptr, values.data(), width * 4u, 0u);
     } else {
       const std::vector<UINT> values(height + 1u, 1u);

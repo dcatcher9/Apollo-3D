@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "artifact": {
+    "path": "prod_dav2_zipdepth_c2x_high_opset18.onnx",
+    "bytes": 62344826,
+    "sha256": "134d92fa67ca746c4e03a42cc85666a7802bf459ae2245edc70d16d398d6ea05",
+    "self_contained": true
+  },
+  "contract": "tools/sbsbench/contracts/prod-zipdepth-convex2x-v2.json",
+  "exporter": "tools/sbsbench/export_prod_zipdepth_convex2x.py",
+  "sources": {
+    "dav2": {
+      "logical_model": "depth_anything_v2_fp16",
+      "url": "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx",
+      "sha256": "2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04",
+      "license": "Apache-2.0"
+    },
+    "dav2_torch_checkpoint": {
+      "file": "depth_anything_v2_vits.pth",
+      "sha256": "715fade13be8f229f8a70cc02066f656f2423a59effd0579197bbf57860e1378",
+      "license": "Apache-2.0",
+      "use": "locates the ViT weights that the tuned checkpoint replaces"
+    },
+    "zipdepth": {
+      "repository_commit": "91f3fd21e131641f51e8d35736d1958350180e3a",
+      "checkpoint": "zipdepth_base.pth",
+      "checkpoint_sha256": "a55910bb0b99c8c5e641cb9206e810b269690ad94e8a2ef08c827c4679391a65",
+      "license": "MIT"
+    },
+    "tuned_checkpoint": {
+      "name": "bt7",
+      "file": "ckpt_bt7.pt",
+      "bytes": 126531328,
+      "sha256": "a08834f278e516f4ecfe179e9901d1633a318b97781a8d8f5aae7499d88f5f95",
+      "held": "outside the repository"
+    }
+  },
+  "tuning": {
+    "date": "2026-11-21",
+    "changed_tensors": {
+      "dav2_decoder_head": 60,
+      "dav2_vit_linear_weights": 48,
+      "zipdepth_branch": "all"
+    },
+    "vit_input_scale": 0.6875,
+    "output_gain": 1.0258,
+    "method": "low-rank adapters (rank 8) on the ViT linear layers, folded into the weights; decoder head and ZipDepth branch fine-tuned; target = teacher relief laid on ground-truth silhouettes with the stock composite's low frequencies",
+    "teacher": {
+      "model": "Depth Anything V2 Base, full-resolution input",
+      "license": "CC-BY-NC-4.0",
+      "role": "its depth output was a training target; none of its weights are in this file"
+    },
+    "data": [
+      {"name": "TartanAir V2, 18 environments (images and depth)", "license": "CC BY 4.0"},
+      {"name": "Big Buck Bunny, 317 frames (images only)", "license": "CC BY 3.0, (c) Blender Foundation"},
+      {"name": "40 photographs (images only)", "license": "origin not recorded"}
+    ]
+  },
+  "graph": {
+    "opset": 18,
+    "input": {"name": "pixel_values", "dtype": "float32", "shape": [1, 3, "2H", "2W"]},
+    "output": {"name": "refined_depth", "dtype": "float32", "shape": [1, "2H", "2W"]},
+    "weights": "float16",
+    "nodes": 1169,
+    "initializers": 633
+  }
+}

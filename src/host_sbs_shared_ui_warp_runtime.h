@@ -3,6 +3,7 @@
 
 #ifdef _WIN32
   #include "host_sbs_compute_program_lease.h"
+  #include "host_sbs_eye_field.h"
   #include "host_sbs_shader_cache.h"
 
   #include <algorithm>
@@ -28,30 +29,30 @@ namespace models::host_sbs_shared_ui_warp {
     {"host_sbs_shared_ui_warp.hlsl", "prepare_main", "cs_5_0"},
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_main_ps", "ps_5_0"},
   }};
-  inline constexpr std::string_view completed_closure = "50db509da2b32216404aba41fc70095ca7b82e36bc86b0417a98cd32948a1d4f";
+  inline constexpr std::string_view completed_closure = "87edbb3b36c27c32e6d8d684c72984a8c5e5764335f38f72911687965119a458";
   inline constexpr std::array<cache::shader_spec, 1u> raw_model_prepare_specs {{
     {"host_sbs_shared_ui_warp_raw_model_bench.hlsl", "prepare_raw_model_bench_main", "cs_5_0"},
   }};
-  inline constexpr std::string_view raw_model_prepare_closure = "b254eba72ffaca96d899fb48ec44596d217cb8312334bea7544080cf07a4c3ad";
+  inline constexpr std::string_view raw_model_prepare_closure = "c216566913f8ddbde702699d2387502c43aea9a7187fce2dc7f234985c2eeb98";
   inline constexpr std::array<cache::shader_spec, 4u> queued_specs {{
     {"host_sbs_shared_ui_warp_queued.hlsl", "initialize_main", "cs_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "SunshineApplyUICS", "cs_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "prepare_main", "cs_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "shared_pin_main_ps", "ps_5_0"},
   }};
-  inline constexpr std::string_view queued_closure = "813e5680174a7d4aeffcf434cde666f61774e2329bbc6753d52062f8dbada412";
+  inline constexpr std::string_view queued_closure = "ee3fb0365f85b910ee828f16a385c142259730ca55815f8864381397833b391f";
   inline constexpr std::array<cache::shader_spec, 3u> completed_diagnostic_specs {{
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_mapping_ps", "ps_5_0"},
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_coverage_ps", "ps_5_0"},
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_boundary_ps", "ps_5_0"},
   }};
-  inline constexpr std::string_view completed_diagnostic_closure = "1b2844c121132982d31dbf7b37320092c72ae0311c5e5d200ccf454d80aa8386";
+  inline constexpr std::string_view completed_diagnostic_closure = "39bdcd2679714dfc819963770cb1e7ebc81f88355a02ee32c258bdcefa691d9b";
   inline constexpr std::array<cache::shader_spec, 3u> queued_diagnostic_specs {{
     {"host_sbs_shared_ui_warp_queued.hlsl", "shared_pin_mapping_ps", "ps_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "shared_pin_coverage_ps", "ps_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "shared_pin_boundary_ps", "ps_5_0"},
   }};
-  inline constexpr std::string_view queued_diagnostic_closure = "0000886a46c3c250a95902acdbe033d749f0542d2f4559d0a305149c159f8f4a";
+  inline constexpr std::string_view queued_diagnostic_closure = "7573139a0eaa0c6d199d1013b6ab3fd0c3b1ae2fc097862da55c056ec39ccca5";
 
   inline constexpr std::string_view source_closure(bool queued) noexcept {
     return queued ? queued_closure : completed_closure;
@@ -74,7 +75,7 @@ namespace models::host_sbs_shared_ui_warp {
     {"host_sbs_text_game_ui_warp.hlsl", "text_game_verify_main", "cs_5_0"},
     {"host_sbs_text_game_ui_warp.hlsl", "text_game_columns_main", "cs_5_0"},
   }};
-  inline constexpr std::string_view text_game_closure = "1b142aa387e8928416e3262e9d0d60d10e626698f0c3c80e73065f97cc00f089";
+  inline constexpr std::string_view text_game_closure = "63b40f9cf7429a8dc5b1d041a96d6c6a8f4e0ba3e713b003511d8d77e6878b40";
 
   struct program_t {
     ID3D11ComputeShader *initialize = nullptr, *pin = nullptr, *prepare = nullptr;
@@ -409,10 +410,12 @@ namespace models::host_sbs_shared_ui_warp {
       return desc.ByteWidth == bytes && desc.BindFlags == D3D11_BIND_CONSTANT_BUFFER;
     }
 
+    static constexpr UINT compute_srv_count = host_sbs_eye_field::pixel_slot + 1u;
+
     static void unbind_compute_resources(ID3D11DeviceContext *context) {
-      ID3D11ShaderResourceView *srvs[15] {};
+      ID3D11ShaderResourceView *srvs[compute_srv_count] {};
       ID3D11UnorderedAccessView *uavs[4] {};
-      context->CSSetShaderResources(0u, 15u, srvs);
+      context->CSSetShaderResources(0u, compute_srv_count, srvs);
       context->CSSetUnorderedAccessViews(0u, 4u, uavs, nullptr);
     }
 
@@ -436,7 +439,7 @@ namespace models::host_sbs_shared_ui_warp {
     // Standalone preparation restores every touched slot, sampler, shader and class instance.
     struct saved_t {
       ID3D11DeviceContext *context;
-      std::array<ComPtr<ID3D11ShaderResourceView>, 15u> srvs;
+      std::array<ComPtr<ID3D11ShaderResourceView>, compute_srv_count> srvs;
       std::array<ComPtr<ID3D11UnorderedAccessView>, 4u> uavs;
       std::array<ComPtr<ID3D11Buffer>, 8u> constants;
       std::array<ComPtr<ID3D11ShaderResourceView>, 3u> pixel;
@@ -446,11 +449,11 @@ namespace models::host_sbs_shared_ui_warp {
       UINT count = 256u;
 
       explicit saved_t(ID3D11DeviceContext *c): context(c) {
-        ID3D11ShaderResourceView *s[15] {}, *p[3] {};
+        ID3D11ShaderResourceView *s[compute_srv_count] {}, *p[3] {};
         ID3D11UnorderedAccessView *u[4] {};
         ID3D11Buffer *b[8] {};
         ID3D11ClassInstance *ci[256] {};
-        c->CSGetShaderResources(0u, 15u, s); c->CSGetUnorderedAccessViews(0u, 4u, u);
+        c->CSGetShaderResources(0u, compute_srv_count, s); c->CSGetUnorderedAccessViews(0u, 4u, u);
         c->CSGetConstantBuffers(0u, 8u, b); c->CSGetSamplers(0u, 1u, &sampler);
         c->CSGetShader(&shader, ci, &count); c->PSGetShaderResources(12u, 3u, p);
         for (std::size_t i = 0u; i < srvs.size(); ++i) srvs[i].Attach(s[i]);
@@ -461,7 +464,7 @@ namespace models::host_sbs_shared_ui_warp {
       }
       ~saved_t() {
         unbind_preparation_resources(context);
-        ID3D11ShaderResourceView *s[15] {}, *p[3] {};
+        ID3D11ShaderResourceView *s[compute_srv_count] {}, *p[3] {};
         ID3D11UnorderedAccessView *u[4] {};
         ID3D11Buffer *b[8] {};
         ID3D11ClassInstance *ci[256] {};
@@ -470,7 +473,7 @@ namespace models::host_sbs_shared_ui_warp {
         for (std::size_t i = 0u; i < constants.size(); ++i) b[i] = constants[i].Get();
         for (std::size_t i = 0u; i < pixel.size(); ++i) p[i] = pixel[i].Get();
         for (UINT i = 0u; i < count; ++i) ci[i] = instances[i].Get();
-        context->CSSetShaderResources(0u, 15u, s); context->CSSetUnorderedAccessViews(0u, 4u, u, nullptr);
+        context->CSSetShaderResources(0u, compute_srv_count, s); context->CSSetUnorderedAccessViews(0u, 4u, u, nullptr);
         context->CSSetConstantBuffers(0u, 8u, b);
         auto *old_sampler = sampler.Get(); context->CSSetSamplers(0u, 1u, &old_sampler);
         context->CSSetShader(shader.Get(), ci, count); context->PSSetShaderResources(12u, 3u, p);
@@ -528,7 +531,7 @@ namespace models::host_sbs_shared_ui_warp {
       if (!device || shape[0] < 8u || shape[0] > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
           shape[1] == 0u || shape[1] > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
           shape[2] >= shape[1] || shape[3] == 0u || shape[3] > shape[1] - shape[2] ||
-          shape[3] >= D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION) {
+          shape[3] > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION / 2u) {
         error = "Shared UI warp native source domain unavailable"; return false;
       }
       if (device_.Get() == device && shape_ == shape && geometry_) return true;
@@ -546,8 +549,9 @@ namespace models::host_sbs_shared_ui_warp {
       D3D11_BUFFER_DESC desc {};
       desc.ByteWidth = sizeof(shape); desc.Usage = D3D11_USAGE_IMMUTABLE; desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
       const D3D11_SUBRESOURCE_DATA initial {shape.data(), 0u, 0u};
-      if (!plane(shape[0], shape[3], DXGI_FORMAT_R32_FLOAT, next.field_) ||
-          !plane(shape[0], shape[3], DXGI_FORMAT_R32_FLOAT, next.weights_) ||
+      // Field and weights hold the band once per eye: the left eye's rows, then the right eye's.
+      if (!plane(shape[0], shape[3] * 2u, DXGI_FORMAT_R32_FLOAT, next.field_) ||
+          !plane(shape[0], shape[3] * 2u, DXGI_FORMAT_R32_FLOAT, next.weights_) ||
           !plane(1u, shape[3] + 1u, DXGI_FORMAT_R32_UINT, next.rows_) ||
           FAILED(device->CreateBuffer(&desc, &initial, &next.geometry_))) {
         error = "Shared UI warp native allocation failed"; return false;
@@ -572,6 +576,14 @@ namespace models::host_sbs_shared_ui_warp {
       if (!describe_texture(inputs.source, inputs.source_desc) || !describe_texture(inputs.matte, matte_desc)) {
         error = "Shared UI warp source or subtitle matte texture unavailable";
         return false;
+      }
+      // A plane of this owner is never an input. Refuse it before its size can place a new band:
+      // the field plane is twice the band, so as a source it would describe another shape.
+      for (ID3D11Resource *input : {inputs.source.Get(), inputs.matte.Get()}) {
+        if (input == field_.texture.Get() || input == weights_.texture.Get() || input == rows_.texture.Get()) {
+          error = "Shared UI warp writable input alias";
+          return false;
+        }
       }
       const auto &source = inputs.source_desc;
       if (matte_desc.Width != domain.width || matte_desc.Height == 0u || matte_desc.Height > domain.height ||
@@ -652,7 +664,7 @@ namespace models::host_sbs_shared_ui_warp {
       if (binding_policy != binding_policy_e::converter_owned) saved.emplace(context);
       unbind_preparation_resources(context);
       const UINT clear[4] {}; context->ClearUnorderedAccessViewUint(rows_.uav.Get(), clear);
-      ID3D11ShaderResourceView *srvs[15] {};
+      ID3D11ShaderResourceView *srvs[compute_srv_count] {};
       std::copy(request.draw_srvs.begin(), request.draw_srvs.end(), srvs);
       if (request.queued) srvs[10u] = request.queued_guard_transaction;
       if (request.text_game) {
@@ -666,7 +678,10 @@ namespace models::host_sbs_shared_ui_warp {
       context->CSSetConstantBuffers(2u, 1u, &geometry); context->CSSetConstantBuffers(3u, 1u, &subtitle);
       context->CSSetConstantBuffers(5u, 1u, &guard); context->CSSetConstantBuffers(6u, 1u, &pin_geometry);
       context->CSSetSamplers(0u, 1u, &sampler);
-      context->CSSetShaderResources(0u, 15u, srvs);
+      // Each eye's band starts from that eye's scene field, when the producer attached one to Base.
+      const auto eye_field = host_sbs_eye_field::companion(request.draw_srvs[1]);
+      srvs[host_sbs_eye_field::pixel_slot] = eye_field.Get();
+      context->CSSetShaderResources(0u, compute_srv_count, srvs);
       ID3D11UnorderedAccessView *null_view = nullptr;
       if (request.text_game) {
         // A fresh observation for this draw: whether the picture shows the text, and the scene
@@ -697,13 +712,13 @@ namespace models::host_sbs_shared_ui_warp {
       }
       const bool dense = request.text_game || request.materialize_inactive;
       context->CSSetShader(program.initialize, nullptr, 0u);
-      if (dense) context->Dispatch((shape_[0] + 15u) / 16u, (shape_[3] + 15u) / 16u, 1u);
+      if (dense) context->Dispatch((shape_[0] + 15u) / 16u, (shape_[3] * 2u + 15u) / 16u, 1u);
       else context->DispatchIndirect(preparation_.Get(), 0u);
       ID3D11UnorderedAccessView *null_uavs[3] {}; context->CSSetUnorderedAccessViews(0u, 3u, null_uavs, nullptr);
       auto *weights = weights_.srv.Get(); context->CSSetShaderResources(12u, 1u, &weights);
       uavs[1u] = uavs[2u] = nullptr; context->CSSetUnorderedAccessViews(0u, 3u, uavs, nullptr);
       context->CSSetShader(program.pin, nullptr, 0u);
-      if (dense) context->Dispatch((shape_[3] + 7u) / 8u, 1u, 1u);
+      if (dense) context->Dispatch((shape_[3] * 2u + 7u) / 8u, 1u, 1u);
       else context->DispatchIndirect(preparation_.Get(), 16u);
       for (std::size_t i = 0u; i < inputs_.size(); ++i) inputs_[i] = request.draw_srvs[i];
       draw_geometry_ = geometry; draw_subtitle_ = subtitle; sampler_ = sampler;

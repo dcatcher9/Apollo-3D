@@ -142,7 +142,10 @@ no diagnostic readback or additional queue wait.
 | `actual_shared_pin_map.rgba32f` | Dump-only invocation of the actual shared inverse, packed-output RGBA: pre-clamp source U, source V, contributing pin row, content-valid bit |
 | `actual_shared_pin_boundary.rgba32f` | Same inverse's finite-source boundary, RGBA: boundary bit, zero, zero, one |
 
-Fields and weights are `R32_FLOAT` at full-source width by native band height. Rows are
+Fields and weights are `R32_FLOAT` at full-source width by twice the native band height: the
+band as the left eye is drawn, then as the right eye is drawn, each built from that eye's field of
+the eye-specific limiter ([Host SBS](../../docs/host-sbs.md)). Dumps written before that limiter
+hold the band once; the reader accepts both and reports `eye_copies`. Rows are
 `R32_UINT`, width one by band-height-plus-one. Map and boundary are `RGBA32F` at the exact packed
 output dimensions. Invalid content map pixels carry `(-1,-1,0,0)`; boundary pixels always have
 alpha one. The row header records selected-receipt validity for that immutable draw; it does not

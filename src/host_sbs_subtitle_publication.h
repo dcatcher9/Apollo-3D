@@ -1,6 +1,7 @@
 #pragma once
 
 #ifdef _WIN32
+#include "host_sbs_eye_field.h"
 #include <array>
 #include <cstddef>
 #include <memory>
@@ -20,18 +21,22 @@ namespace models::subtitle_publication {
   };
 
   class pool_t {
+    struct resource_copy_t {
+      ComPtr<ID3D11ShaderResourceView> source, view;
+      ComPtr<ID3D11Resource> original, copy;
+    };
     struct slot_t {
       std::shared_ptr<views_t> views;
-      std::array<ComPtr<ID3D11ShaderResourceView>, count> source;
-      std::array<ComPtr<ID3D11Resource>, count> original, copy;
+      std::array<resource_copy_t, count> operands;
+      resource_copy_t eye_field;
     };
     // On the converter thread one publication may still be retained while its successor is
     // completed. A reader holding its lease keeps that slot out of the writer's rotation.
     std::array<slot_t, 2> slots_;
 
-    static bool prepare(ID3D11Device *device, slot_t &slot, std::size_t i, ID3D11ShaderResourceView *source) {
+    static bool prepare(ID3D11Device *device, resource_copy_t &snapshot, ID3D11ShaderResourceView *source) {
       if (!source) return false;
-      if (slot.source[i].Get() == source) return true;
+      if (snapshot.source.Get() == source) return true;
       ComPtr<ID3D11Device> owner;
       source->GetDevice(&owner);
       if (owner.Get() != device) return false;
@@ -68,10 +73,10 @@ namespace models::subtitle_publication {
       source->GetDesc(&view);
       ComPtr<ID3D11ShaderResourceView> srv;
       if (FAILED(device->CreateShaderResourceView(copy.Get(), &view, &srv))) return false;
-      slot.original[i] = std::move(original);
-      slot.copy[i] = std::move(copy);
-      slot.views->srv[i] = std::move(srv);
-      slot.source[i] = source;
+      snapshot.original = std::move(original);
+      snapshot.copy = std::move(copy);
+      snapshot.view = std::move(srv);
+      snapshot.source = source;
       return true;
     }
 
@@ -82,11 +87,23 @@ namespace models::subtitle_publication {
         if (slot.views && slot.views.use_count() != 1) continue;
         if (!slot.views) slot.views = std::make_shared<views_t>();
         for (std::size_t i = 0; i < count; ++i) {
-          if (!prepare(device, slot, i, sources[i])) return {};
+          if (!prepare(device, slot.operands[i], sources[i])) return {};
+          slot.views->srv[i] = slot.operands[i].view;
+        }
+        // The companion is private data on the Base SRV. CopyResource only copies texels.
+        // Snapshot both fields before the producer can advance to another frame.
+        const auto eye = host_sbs_eye_field::companion(sources[base]);
+        if (eye) {
+          if (!prepare(device, slot.eye_field, eye.Get()) ||
+              !host_sbs_eye_field::attach(slot.views->srv[base].Get(), slot.eye_field.view.Get())) return {};
+          context->CopyResource(slot.eye_field.copy.Get(), slot.eye_field.original.Get());
+        } else if (slot.eye_field.view) {
+          if (!host_sbs_eye_field::attach(slot.views->srv[base].Get(), nullptr)) return {};
+          slot.eye_field = {};
         }
         // Ordered on the same immediate context as the producer's writes. No CPU wait,
         // query, flush, or transfer across the PCIe bus is required to close a publication.
-        for (std::size_t i = 0; i < count; ++i) context->CopyResource(slot.copy[i].Get(), slot.original[i].Get());
+        for (const auto &operand : slot.operands) context->CopyResource(operand.copy.Get(), operand.original.Get());
         return slot.views;
       }
       return {};

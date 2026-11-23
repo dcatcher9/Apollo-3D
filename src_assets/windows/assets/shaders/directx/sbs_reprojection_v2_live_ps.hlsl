@@ -9,6 +9,9 @@
 Texture2D<float4> SourceColor : register(t0);
 Texture2D<float> BaseParallax : register(t1);
 StructuredBuffer<float4> ParallaxState : register(t2);
+// Eye-specific limiter field of twice the Base height (left-eye rows first, then right-eye rows),
+// produced with Base from the same vertical share. Unbound reads as zero-sized and selects Base.
+Texture2D<float> EyeParallax : register(t15);
 SamplerState LinearSampler : register(s0);
 
 cbuffer HostSbsV2Geometry : register(b2) {
@@ -74,6 +77,39 @@ bool ContentToSourceUV(float2 output_uv, out float2 source_uv) {
     return true;
 }
 
+// {rows per eye, 1 / (2 * rows), 1 when an eye field is bound}. The producer creates the field
+// with the Base width and twice the Base height and attaches it to that Base view only, so its own
+// size is the only query needed and the ordinary route issues none on Base. Without one, Base is
+// the scene field of both eyes.
+float3 EyeFieldState() {
+    uint eye_width;
+    uint eye_height;
+    EyeParallax.GetDimensions(eye_width, eye_height);
+    if (eye_height < 2u) {
+        return float3(0.0f, 0.0f, 0.0f);
+    }
+    float rows = 0.5f * (float)eye_height;
+    return float3(rows, 0.5f / rows, 1.0f);
+}
+
+// Row coordinate inside this eye's half. The clamp reproduces the sampler's edge clamp on Base.
+float EyeFieldV(float3 eye, float field_v, float eye_sign) {
+    float row = clamp(field_v * eye.x, 0.5f, eye.x - 0.5f);
+    return (row + (eye_sign > 0.0f ? eye.x : 0.0f)) * eye.y;
+}
+
+// The scene's one-eye displacement.
+float SceneParallax(float2 field_uv, float eye_v, float eye_field) {
+    float parallax;
+    [branch]
+    if (eye_field != 0.0f) {
+        parallax = EyeParallax.SampleLevel(LinearSampler, float2(field_uv.x, eye_v), 0);
+    } else {
+        parallax = BaseParallax.SampleLevel(LinearSampler, field_uv, 0);
+    }
+    return parallax;
+}
+
 float SampleVideoRoiParallax(
     float source_x,
     float roi_min_x,
@@ -82,7 +118,9 @@ float SampleVideoRoiParallax(
     float tensor_u_scale,
     float tensor_u_bias,
     float tensor_v,
-    float vertical_collar_budget
+    float vertical_collar_budget,
+    float eye_v,
+    float eye_field
 ) {
     // The ROI-local field occupies its authenticated integer content rectangle within the fixed
     // DAV2 grid. Convert its local-U displacement to full-source U before constructing the
@@ -95,11 +133,7 @@ float SampleVideoRoiParallax(
         VIDEO_ROI_MAX_HORIZONTAL_SLOPE * abs(source_x - projected_x) +
         vertical_collar_budget;
     float tensor_u = projected_x * tensor_u_scale + tensor_u_bias;
-    float roi_local_parallax = BaseParallax.SampleLevel(
-        LinearSampler,
-        float2(tensor_u, tensor_v),
-        0
-    );
+    float roi_local_parallax = SceneParallax(float2(tensor_u, tensor_v), eye_v, eye_field);
     float full_source_parallax = roi_width * roi_local_parallax;
     float magnitude = abs(full_source_parallax);
     if (collar_budget < magnitude) {
@@ -110,17 +144,15 @@ float SampleVideoRoiParallax(
     return 0.0f;
 }
 
-float2 ReprojectFull(float2 destination_uv, float eye_sign) {
+float2 ReprojectFull(float2 destination_uv, float eye_sign, float3 eye) {
     // out(x) = x - eye_sign * parallax(x). The authenticated field is contractive, so this
     // iteration converges to its unique inverse without ownership search or hole filling.
     float source_x = destination_uv.x;
+    float eye_v = EyeFieldV(eye, destination_uv.y, eye_sign);
     [loop]
     for (int iteration = 0; iteration < 11; ++iteration) {
-        float next_source_x = destination_uv.x + eye_sign * BaseParallax.SampleLevel(
-            LinearSampler,
-            float2(source_x, destination_uv.y),
-            0
-        );
+        float parallax = SceneParallax(float2(source_x, destination_uv.y), eye_v, eye.z);
+        float next_source_x = destination_uv.x + eye_sign * parallax;
         bool exactly_settled = asuint(next_source_x) == asuint(source_x);
         source_x = next_source_x;
 #if !defined(HOST_SBS_TEST_FIXED_ELEVEN_REFERENCE)
@@ -132,7 +164,7 @@ float2 ReprojectFull(float2 destination_uv, float eye_sign) {
     return float2(source_x, destination_uv.y);
 }
 
-float2 ReprojectVideoRoi(float2 destination_uv, float eye_sign, uint2 depth_size) {
+float2 ReprojectVideoRoi(float2 destination_uv, float eye_sign, uint2 depth_size, float3 eye) {
     float source_x = destination_uv.x;
     float2 roi_min = video_roi_source_uv.xy;
     float2 roi_max = video_roi_source_uv.zw;
@@ -164,6 +196,7 @@ float2 ReprojectVideoRoi(float2 destination_uv, float eye_sign, uint2 depth_size
     // exactly the destination again and every later step is identical. Skip all eleven fetches.
     // Equality also reduced to zero in the original soft-threshold rule.
     float projected_destination_x = clamp(destination_uv.x, roi_min.x, roi_max.x);
+    float eye_v = EyeFieldV(eye, tensor_v, eye_sign);
     float destination_collar_budget =
         VIDEO_ROI_MAX_HORIZONTAL_SLOPE *
             abs(destination_uv.x - projected_destination_x) +
@@ -181,7 +214,9 @@ float2 ReprojectVideoRoi(float2 destination_uv, float eye_sign, uint2 depth_size
             tensor_uv_scale.x,
             tensor_uv_bias.x,
             tensor_v,
-            vertical_collar_budget
+            vertical_collar_budget,
+            eye_v,
+            eye.z
         );
         bool exactly_settled = asuint(next_source_x) == asuint(source_x);
         source_x = next_source_x;
@@ -205,15 +240,16 @@ bool PackedToSource(float2 packed_uv, out float2 source_uv, out float eye_sign) 
 float2 ReprojectIfAuthorized(float2 source_uv, float eye_sign) {
     float2 sample_uv = source_uv;
     if (WarpAuthorized()) {
+        float3 eye = EyeFieldState();
         if (video_roi_active == 0.0f) {
-            sample_uv = ReprojectFull(source_uv, eye_sign);
+            sample_uv = ReprojectFull(source_uv, eye_sign, eye);
         } else if (VideoRoiRectValid()) {
             uint depth_width;
             uint depth_height;
             BaseParallax.GetDimensions(depth_width, depth_height);
             uint2 depth_size = uint2(depth_width, depth_height);
             if (VideoRoiContentValid(depth_size)) {
-                sample_uv = ReprojectVideoRoi(source_uv, eye_sign, depth_size);
+                sample_uv = ReprojectVideoRoi(source_uv, eye_sign, depth_size, eye);
             }
         }
     }

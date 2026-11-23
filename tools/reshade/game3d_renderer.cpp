@@ -59,7 +59,7 @@ namespace sunshine_game3d {
     api::pipeline_layout layout{};
     enum pass { pq, candidate, vertical, ui_tiles, ui_reduce, horizontal, eyes, pack, ui_conflict, ui_apply,
       detection_tiles, detection_reduce, detection_mask, scene_cells, scene_compare, scene_evidence, pack_pq, vertical_live,
-      pass_count };
+      eye_limit, pass_count };
     std::array<api::pipeline, pass_count> pipelines{};
     std::array<api::sampler, 3> samplers{};
     api::resource_view null_srv{}, null_uav{};
@@ -67,7 +67,9 @@ namespace sunshine_game3d {
     enum texture_id { source, empty_depth, linear, raw, vertical_majorant, vertical_field, field,
       ui_plane_tiles, ui_plane_resolved, left, right, packed, ui_conflict_statistics, detection_statistics, detection_decision, detected_mask, scene_cell_sums, ui_counter_words,
       detection_hold, retained_color,
-      retained_color_last = retained_color + ui_detection_inputs::max_retained_presents - 1, packed_pq, texture_count };
+      retained_color_last = retained_color + ui_detection_inputs::max_retained_presents - 1, packed_pq,
+      // Both eyes' horizontal fields, twice the buffer height (SUNSHINE_EYE_LIMITER).
+      eye_field, texture_count };
     std::array<texture, texture_count> textures{};
     std::vector<std::pair<api::resource, api::resource_view>> backbuffers;
     // Render-target views of the current export generation's slot textures.
@@ -186,6 +188,8 @@ namespace sunshine_game3d {
     // dump reads (SUNSHINE_VERTICAL_LIVE_ENTRY); older replay shaders always
     // write it.
     bool vertical_live_supported = false;
+    // The shader builds one horizontal field per eye and its pack reads them.
+    bool eye_limiter_supported = false;
     // Candidates bound directly this Present (renderer::bind_ui_candidate):
     // the caller's view and its texture, which device::get_resource_from_view
     // cannot resolve for a leased snapshot's raw descriptor.
@@ -442,6 +446,8 @@ namespace sunshine_game3d {
       pq_per_tap = packed_eyes && shader_source().find("#define SUNSHINE_PQ_PER_TAP 1") != std::string_view::npos;
       scrgb_pq_pack = packed_eyes && shader_source().find("#define SUNSHINE_SCRGB_PQ_PACK 1") != std::string_view::npos;
       vertical_live_supported = shader_source().find("#define SUNSHINE_VERTICAL_LIVE_ENTRY 1") != std::string_view::npos;
+      eye_limiter_supported = limiter_lines && packed_eyes && fits() &&
+        shader_source().find("#define SUNSHINE_EYE_LIMITER 1") != std::string_view::npos;
       pin_lines = shader_marker(shader_source(), "SUNSHINE_UI_PIN_LINE_GROUPS");
       const auto texels = shader_marker(shader_source(), ui_detection::decision_texels_marker);
       const auto images = shader_marker(shader_source(), ui_detection::scene_evidence_images_marker);
@@ -518,6 +524,8 @@ namespace sunshine_game3d {
           api::resource_usage::unordered_access);
         add_texture("vertical field texture", vertical_field, width, height, api::format::r32_float, api::resource_usage::unordered_access);
         add_texture("field texture", field, width, height, api::format::r32_float, api::resource_usage::unordered_access);
+        if (eye_limiter_supported)
+          add_texture("eye field texture", eye_field, width, height * 2, api::format::r32_float, api::resource_usage::unordered_access);
       }
       if (!packed_eyes) {
         add_texture("left eye texture", left, width, height, api::format::r16g16b16a16_float, api::resource_usage::render_target);
@@ -537,6 +545,7 @@ namespace sunshine_game3d {
         add_pipeline(horizontal, "SunshineHostHorizontalCS", true);
         if (limiter_lines) add_pipeline(ui_apply, "SunshineApplyUICS", true);
         if (vertical_live_supported) add_pipeline(vertical_live, "SunshineHostVerticalLiveCS", true);
+        if (eye_limiter_supported) add_pipeline(eye_limit, "SunshineHostEyeLimitCS", true);
       }
       if (packed_eyes) add_pipeline(pack, "SunshineRenderPackedPS", false);
       else {
@@ -838,6 +847,14 @@ namespace sunshine_game3d {
           const uint32_t pin_groups = std::max(pin_lines, 1u);
           if (pin_apart && c.apply_ui)
             dispatch(cmd, ui_apply, (height + pin_groups - 1) / pin_groups, 1, p, field_inputs, {field});
+          if (eye_limiter_supported) {
+            // One field per eye from the same vertical field, then the same UI
+            // pin on both halves: the store takes the scene field's slot, and
+            // an exact repeat keeps it with the scene field.
+            dispatch_as(cmd, eye_limit, (height + 7) / 8, p, field_inputs, eye_field, field);
+            if (c.apply_ui)
+              dispatch_as(cmd, ui_apply, (2 * height + pin_groups - 1) / pin_groups, p, field_inputs, eye_field, field);
+          }
         }
         field_memo_valid = memo_valid && !c.armed && !c.probe && !nearest_ui_rendered;
         field_memo_words = ui_words;
@@ -853,7 +870,7 @@ namespace sunshine_game3d {
       cmd->bind_pipeline(api::pipeline_stage::all_graphics, pipelines[pq_output ? pack_pq : pack]);
       if (packed_eyes)
         bindings(cmd, api::shader_stage::all_graphics, pack_parameters,
-          {textures[source].srv, pack_depth, textures[linear].srv, {}, {}, textures[field].srv});
+          {textures[source].srv, pack_depth, textures[linear].srv, {}, {}, textures[eye_limiter_supported ? eye_field : field].srv});
       else
         bindings(cmd, api::shader_stage::all_graphics, pack_parameters,
           {textures[source].srv, {}, {}, {}, {}, {}, textures[left].srv, textures[right].srv});
@@ -898,6 +915,19 @@ namespace sunshine_game3d {
       uavs.fill(null_uav);
       cmd->push_descriptors(api::shader_stage::compute, layout, 3, {{}, 0, 0, uint32_t(uavs.size()), api::descriptor_type::unordered_access_view, uavs.data()});
       for (auto target : targets) cmd->barrier(textures[target].resource, api::resource_usage::unordered_access, api::resource_usage::shader_resource);
+    }
+    // A compute pass whose one output takes another texture's UAV slot.
+    void dispatch_as(api::command_list *cmd, pass id, uint32_t x, const render_parameters &p,
+        const std::array<api::resource_view, 15> &srvs, texture_id target, texture_id slot) {
+      std::array<api::resource_view, 8> uavs{};
+      cmd->barrier(textures[target].resource, api::resource_usage::shader_resource, api::resource_usage::unordered_access);
+      uavs[unsigned(slot) - unsigned(raw)] = textures[target].uav;
+      cmd->bind_pipeline(api::pipeline_stage::compute_shader, pipelines[id]);
+      bindings(cmd, api::shader_stage::compute, p, srvs, uavs);
+      cmd->dispatch(x, 1, 1);
+      uavs.fill(null_uav);
+      cmd->push_descriptors(api::shader_stage::compute, layout, 3, {{}, 0, 0, uint32_t(uavs.size()), api::descriptor_type::unordered_access_view, uavs.data()});
+      cmd->barrier(textures[target].resource, api::resource_usage::unordered_access, api::resource_usage::shader_resource);
     }
     bool prepare_detection() {
       if (detection_attempted) return detection_ready;
@@ -1618,6 +1648,9 @@ namespace sunshine_game3d {
       if (shader_marker(source, "SUNSHINE_LIMITER_LINE_GROUPS") || has("#define SUNSHINE_UI_ABSOLUTE_LEVEL_PROBE 1"))
         entries.push_back({"SunshineApplyUICS", "cs_5_0"});
       if (has("#define SUNSHINE_VERTICAL_LIVE_ENTRY 1")) entries.push_back({"SunshineHostVerticalLiveCS", "cs_5_0"});
+      if (shader_marker(source, "SUNSHINE_LIMITER_LINE_GROUPS") && has("#define SUNSHINE_PACKED_EYES 1") &&
+          has("#define SUNSHINE_EYE_LIMITER 1"))
+        entries.push_back({"SunshineHostEyeLimitCS", "cs_5_0"});
       if (has("#define SUNSHINE_UI_ABSOLUTE_LEVEL_PROBE 1")) entries.push_back({"SunshineUIConflictCS", "cs_5_0"});
       if (has("#define SUNSHINE_UI_NEAREST_PLANE 1"))
         entries.insert(entries.end(), {{"SunshineUINearestTilesCS", "cs_5_0"}, {"SunshineUINearestReduceCS", "cs_5_0"}});
@@ -2227,6 +2260,7 @@ namespace sunshine_game3d {
       data_->nearest_ui_rendered ? t[impl::ui_plane_tiles].resource : api::resource{},
       data_->nearest_ui_rendered ? t[impl::ui_plane_resolved].resource : api::resource{}};
     result.sbs_pq = data_->pq_output;
+    if (data_->eye_limiter_supported) result.eye_field = t[impl::eye_field].resource;
     return result;
   }
   api::resource_view renderer::native_rtv(api::resource backbuffer) {

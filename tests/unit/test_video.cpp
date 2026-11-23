@@ -4480,15 +4480,20 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
     EXPECT_FALSE(models::parallax_v2_result_is_authenticated(tampered_result));
   };
   expect_rejected_composite([](auto &identity) { identity.model += "-wrong"; });
-  expect_rejected_composite([](auto &identity) { identity.onnx_sha256[0] = '1'; });
-  expect_rejected_composite([](auto &identity) {
-    identity.embedded_dav2_onnx_sha256[0] = '0';
+  // Change the first digit whatever it is: a fixed replacement is no tampering when the frozen
+  // hash happens to start with that digit.
+  const auto change_first_digit = [](std::string &digest) {
+    digest[0] = digest[0] == '0' ? '1' : '0';
+  };
+  expect_rejected_composite([&](auto &identity) { change_first_digit(identity.onnx_sha256); });
+  expect_rejected_composite([&](auto &identity) {
+    change_first_digit(identity.embedded_dav2_onnx_sha256);
   });
-  expect_rejected_composite([](auto &identity) {
-    identity.zipdepth_checkpoint_sha256[0] = '0';
+  expect_rejected_composite([&](auto &identity) {
+    change_first_digit(identity.zipdepth_checkpoint_sha256);
   });
-  expect_rejected_composite([](auto &identity) {
-    identity.guidance_preprocess_source_closure_sha256[0] = '0';
+  expect_rejected_composite([&](auto &identity) {
+    change_first_digit(identity.guidance_preprocess_source_closure_sha256);
   });
   expect_rejected_composite([](auto &identity) { identity.engine_recipe += "-wrong"; });
   expect_rejected_composite([](auto &identity) { identity.engine_artifact += ".wrong"; });

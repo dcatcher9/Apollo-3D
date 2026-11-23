@@ -1,4 +1,9 @@
-# Production DAV2 + frozen ZipDepth convex 2x
+# Production DAV2 + ZipDepth convex 2x
+
+Since 2026-11-21 the composite carries fine-tuned weights (`bt7`) and feeds DAV2 a larger input;
+[Fine-tuned weights](#fine-tuned-weights-bt7) owns that change. Sections below that describe the
+stock composite's export, timing and promotion evidence are kept as the record of the topology,
+which is unchanged.
 
 Status: single-high-I/O implementation candidate with the model-only optimization recipe integrated.
 The original deterministic ONNX export, six-profile TensorRT build, authenticated model parity,
@@ -22,7 +27,7 @@ DAV2 depth at exactly twice its calibrated width and height. ZipDepth's own dept
 
 This integration has:
 
-- no training or fine-tuning;
+- no new layers: the fine-tune changes weights, the ViT input size and one output gain only;
 - no graph cut or adaptive-J;
 - no hard foreground mask or per-pixel model switch;
 - no synthetic hidden-background fill; and
@@ -40,6 +45,70 @@ widths are `[288,192,144,96,32]`, and the mask head emits 36 logits. The two 1x1
 global mean pooling form channel attention on a `[1,192,1,1]` tensor; they are not a spatial
 attention convolution. ZipDepth's depth head remains absent.
 
+## Fine-tuned weights (`bt7`)
+
+The stock composite flattens thin objects: on unseen synthetic scenes it recovers about 8% of the
+true relief of a 5-8 px wide object. The cause is DAV2's input resolution, not the reconstruction
+step. The tuned composite differs from the stock one in four ways, all applied by
+`tools/sbsbench/prod_zipdepth_tuning.py` during the export:
+
+| Change | Detail |
+| --- | --- |
+| DAV2 input | bilinear resize of the high grid to `round(extent * 0.6875 / 14) * 14` per axis (1064x602 for 1540x868) instead of the 2x2 average; computed inside the graph from the bound shape, so one graph serves all 24 profiles |
+| DAV2 final feature resize | targets the half grid, so `predicted_depth` and everything after it keep their shapes |
+| Weights | 60 DAV2 decoder-head tensors written by name, 48 ViT linear weights (folded rank-8 adapters) written over the stock weight they replace, and a tuned ZipDepth branch |
+| Output gain | `refined_depth` is multiplied by `1.0258`, which keeps the stock composite's raw range and therefore the depth-coordinate calibration |
+
+The exported composite is checked in as
+`src_assets/windows/assets/prod_dav2_zipdepth_c2x_high_opset18.onnx`, with
+`prod_dav2_zipdepth_c2x_high_opset18.provenance.json` beside it and the Depth Anything V2 Small
+(Apache-2.0) and ZipDepth (MIT) licence texts under `assets/licenses`. The build copies it into its
+assets and the installer packages it, so a host needs no separate model step.
+`tools/sbsbench/test_prod_zipdepth_composite_asset.py` holds the file, the contract, the C++
+identity and the provenance record together. The provenance record also states what the weights
+were tuned with: the teacher was Depth Anything V2 Base, a CC-BY-NC-4.0 model whose depth output
+served as a training target; none of its weights are in the file.
+
+The export's inputs stay outside git: the tuned checkpoint `ckpt_bt7.pt` (126,531,328 bytes, SHA-256
+`a08834f278e516f4ecfe179e9901d1633a318b97781a8d8f5aae7499d88f5f95`) and the stock DAV2 PyTorch
+weights `depth_anything_v2_vits.pth` (SHA-256
+`715fade13be8f229f8a70cc02066f656f2423a59effd0579197bbf57860e1378`), next to the stock DAV2 ONNX and
+ZipDepth repository named above. The contract records them under `sources.tuning`, and the exporter
+refuses any other file:
+
+```text
+python tools/sbsbench/export_prod_zipdepth_convex2x.py --dav2-onnx <depth_anything_v2_fp16.onnx>
+  --zipdepth-repo <ZipDepth> --zipdepth-checkpoint <zipdepth_base.pth>
+  --tuned-checkpoint <ckpt_bt7.pt> --dav2-torch-checkpoint <depth_anything_v2_vits.pth>
+  --output <dir> --skip-engine
+```
+
+The export is deterministic: it reproduces the fused file of the identity table byte for byte.
+
+Measured against the stock composite (evidence and method in
+`reports/thin-object-depth-2026-11-20.md` of the development checkout):
+
+- thin-object relief on 160 unseen frames: 5-8 px objects `0.078` to `0.180`, under 5 px `0.009`
+  to `0.039`; depth-edge F1 `0.41` to `0.52`;
+- black bars: a pillarboxed or letterboxed picture is as deep as the same picture without bars
+  (the stock composite read a bar as a near wall and halved the relief);
+- TensorRT time at 1540x868: `2.5 ms` to `4.1 ms` (live session p50 `4.1 ms`, p95 `5.1-5.5 ms`);
+- `run_eval.py` against the stock composite with the same warp: core suite `screen_candidate`
+  (static jitter lower on seven clips, nothing regressed); extended suite `tradeoff` (depth-edge F1
+  `58.8` to `76.8`, `54.1` to `64.6` and `47.5` to `54.9` on three clips, error on
+  `tartanair_house_motion` `10.6%` to `8.8%`, error on `sintel_ambush` `13.1%` to `15.3%`); no
+  conformance failures. `vkitti_drive_clone` measures `3.94%` in `exact_negative_disparity_pct`,
+  for which the bound was relaxed from `3.5` to `4.25`;
+- native tests with `APOLLO_RUN_TENSORRT_TESTS=1`: all pass, including
+  `TensorRtConditionalWrapperGpuTest.AllAuthenticatedShapesBuildAndExecute` for the 24 profiles;
+- the released file has the same initializer payloads and operations as the research export that
+  was viewed live on a Galaxy XR on 2026-11-21, and its TensorRT output differs from that export's
+  by less than two engine builds of one file differ.
+
+Known limits: bright far regions seen through an opening (windows, sky) are judged too near, a
+bias learned from the fine-tune's teacher; relief of objects under 5 px stays low in absolute
+terms; training and scoring data are rendered 3D and film animation, not 2D art.
+
 ## Single-high model boundary
 
 One TensorRT engine and one enqueue expose only the high-resolution tensors:
@@ -47,14 +116,14 @@ One TensorRT engine and one enqueue expose only the high-resolution tensors:
 | Tensor | Direction | FP32 shape | Meaning |
 | --- | --- | --- | --- |
 | `pixel_values` | input | `[1,3,2H,2W]` | Authenticated native-source RGB on the high grid |
-| `refined_depth` | output | `[1,2H,2W]` | DAV2 depth reconstructed by frozen ZipDepth convex weights |
+| `refined_depth` | output | `[1,2H,2W]` | DAV2 depth reconstructed by ZipDepth convex weights, times the output gain |
 
 FP32 is the public I/O contract, not a claim that every internal node uses FP32. Inside the graph:
 
 ```text
 high RGB [1,3,2H,2W]
-  +-> FP32 AveragePool(2x2, stride 2, no padding) -> DAV2 -> coarse depth [1,H,W]
-  +-> frozen ZipDepth feature/mask branch -----------------------------+
+  +-> FP32 bilinear Resize to the ViT grid [1,3,Hv,Wv] -> DAV2 -> coarse depth [1,H,W]
+  +-> ZipDepth feature/mask branch ------------------------------------+
                                                                       |
 coarse depth + 36 logits/cell -> 3x3 convex reconstruction -> high depth [1,2H,2W]
 ```
@@ -83,12 +152,12 @@ convex hull; ZipDepth selects weights but cannot invent an unrelated depth value
 
 The host preprocesses the retained native source directly onto the high grid with the authenticated
 transfer conversion, source-cell-overlap resize or bilinear-upscale rule, ImageNet normalization,
-ROI rectangle, and edge padding. For a source at least as large as the high grid, every coarse
-footprint is exactly partitioned by four high cells, so FP32 2x2 averaging is mathematically the
-same direct area sample up to floating-point summation order. If either native/ROI dimension is
-smaller than the high target, the high preprocess uses its bilinear-upscale path; averaging that
-result is not generally identical to the retired independently sampled coarse input. Small-source
-and ROI cases are therefore explicit evaluation gates rather than assumed parity.
+ROI rectangle, and edge padding. In the stock composite, for a source at least as large as the
+high grid, every coarse footprint was exactly partitioned by four high cells, so FP32 2x2 averaging
+was mathematically the same direct area sample up to floating-point summation order. The tuned
+composite instead resizes the high grid bilinearly to the ViT grid, without an antialiasing
+prefilter; that is the input the weights were tuned with, and it is not an area sample of the
+source. Small-source and ROI cases remain explicit evaluation gates.
 
 ## Frozen identity and profiles
 
@@ -96,10 +165,11 @@ and ROI cases are therefore explicit evaluation gates rather than assumed parity
 | --- | --- |
 | Logical model | `prod_dav2_zipdepth_c2x_high_opset18` |
 | Engine recipe | `trt-24high-point-l5-v3` |
-| Raw ZipDepth branch bytes / SHA-256 | `24,637,932` / `e24779358ed042255036da6d7e0f90783d592f7fd7c5c6d4eac7cb37effafdd2` |
-| Optimized ZipDepth branch bytes / SHA-256 | `12,796,840` / `65e0f0aba0248a29715d99fd32a24014a98a21cca67e00a47af20f37528b3989` |
-| Fused ONNX bytes | `62,438,471` |
-| Fused ONNX SHA-256 | `26684c5da8fdd4bdc5f1c9cf919cec8d1e2d027fbe95705a454f85d31eee2c23` |
+| Raw ZipDepth branch bytes / SHA-256 | `24,637,932` / `2c257b721fc4c6f13cd83be7cd03a7d012b1b77cb50fc82599b5938592ceb252` |
+| Optimized ZipDepth branch bytes / SHA-256 | `12,796,840` / `c4278ba6f5b9a82a5e5a4d6f644b9eed7e2350e62e7e22136113c95313886c4c` |
+| Fused ONNX bytes | `62,344,826` |
+| Fused ONNX SHA-256 | `134d92fa67ca746c4e03a42cc85666a7802bf459ae2245edc70d16d398d6ea05` |
+| Stock composite before the fine-tune (fused bytes / SHA-256) | `62,438,471` / `26684c5da8fdd4bdc5f1c9cf919cec8d1e2d027fbe95705a454f85d31eee2c23` |
 | Six-profile development plan bytes | `108,190,812` |
 | Historical six-profile development plan SHA-256 | `a16421b2972165efc88bf12f5740826f5769abcf832ed8fba2def6efc64b4fba` |
 
@@ -181,6 +251,10 @@ recurrence therefore fits the D3D11 shared-memory limit at height `2072` without
 tile seams.
 
 ## Current evidence and remaining promotion gates
+
+The list below is the evidence of the stock composite and its topology. Evidence for the tuned
+weights is in [Fine-tuned weights](#fine-tuned-weights-bt7); the parity items about the 2x2 average
+do not apply to the tuned input path.
 
 Completed evidence includes:
 

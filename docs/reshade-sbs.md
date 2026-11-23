@@ -2784,6 +2784,24 @@ into one R32 float on the rendering queue. Its crop/jitter mapping matches the s
 every covered valid pixel contributes, and empty coverage retains the submitted floor. These
 resources are overwritten on each mode-2 render, with no CPU readback or additional queue wait.
 
+**Eye-specific horizontal limiter.** `SunshineHostEyeLimitCS` (marker `SUNSHINE_EYE_LIMITER`)
+follows the horizontal pass and its UI pin. From the same vertical field it builds one horizontal
+field per eye, as [Host SBS](host-sbs.md#eye-specific-horizontal-limiter) does: on the side of a
+nearer object that the object covers in that eye the field may fall at 0.9 per source width, after
+the foreground value has been extended by one texel; on the uncovered side it keeps the scene
+field's 0.5. The store has twice the buffer height (the left eye's rows, then the right eye's) and
+takes the scene field's slot `u3` for this pass. `SunshineApplyUICS` then pins both halves of that
+store exactly as it pins the scene field (the store's own height is the number of rows, and a row
+past the buffer height reads the mask row of its eye), and the pack binds the store at `t5`: its
+height tells the pack to read each eye's own rows. The scene field itself, the adaptive probe, the
+Dump 3D artifacts and a shader without the marker are unchanged, and an exact repeat that keeps the
+scene field keeps the store. The store is not a dump artifact; a replay recomputes it.
+`reshade_game3d_native_runtime_test` renders the production shader without its marker against the
+frozen FX (the FX has the scene field alone) and checks the production render's eye fields against
+their one-sided slopes. The pin band below keeps its 0.5 ramp in both eyes; with a partly
+transparent mask on a covered-side ramp the forward scan can pin slightly more than the closed form
+`b`, never less.
+
 The UI pin scan and arithmetic have one [shared shader owner](../src_assets/windows/assets/shaders/directx/include/ui_pin_band_shared.hlsl).
 The embedded `game3d_native.hlsl` carries a generated copy so its compiler remains self-contained.
 `tools/reshade/generate_ui_pin_band.py` updates that copy; CMake rejects drift before embedding it.

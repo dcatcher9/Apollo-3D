@@ -224,7 +224,7 @@ namespace {
     );
     EXPECT_EQ(
       fused_onnx_sha256,
-      "26684c5da8fdd4bdc5f1c9cf919cec8d1e2d027fbe95705a454f85d31eee2c23"
+      "134d92fa67ca746c4e03a42cc85666a7802bf459ae2245edc70d16d398d6ea05"
     );
   }
 

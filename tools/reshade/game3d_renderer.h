@@ -175,6 +175,9 @@ namespace sunshine_game3d {
   struct diagnostic_resources {
     reshade::api::resource source{}, linear_color{}, candidate{}, vertical_majorant{},
       vertical_field{}, final_field{}, sbs{}, ui_source{}, ui_plane_tiles{}, ui_plane_resolved{};
+    // Both eyes' horizontal fields, twice the field height (left-eye rows, then
+    // right-eye rows), when the shader has the eye limiter; not a dump artifact.
+    reshade::api::resource eye_field{};
     // sbs holds 10-bit PQ code values (renderer::set_pq_output: Rec.2020,
     // ST 2084, R10G10B10A2_UNORM) instead of FP16 scRGB.
     bool sbs_pq{};

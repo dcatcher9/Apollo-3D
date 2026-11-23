@@ -223,7 +223,15 @@ def _verify(root: Any, manifest: dict[str, Any]) -> tuple[dict[str, Any], Any]:
             not isinstance(source_shape, list) or any(type(word) is not int for word in source_shape) or
             source_shape != [width, height, top, band]):
         raise ValueError("shared pin b6/source shape disagrees")
-    shapes = ((width, band, 41, 4), (width, band, 41, 4),
+    # The field and weight planes hold the band once (dumps before the eye-specific limiter) or
+    # once per eye: the left eye's rows, then the right eye's.
+    plane_heights = {manifest["artifacts"][name].get("texture", {}).get("height")
+                     if isinstance(manifest["artifacts"][name].get("texture"), dict) else None
+                     for name in ARTIFACTS[:2]}
+    if len(plane_heights) != 1 or not plane_heights <= {band, 2 * band}:
+        raise ValueError("shared pin weight/field planes are neither one band nor one band per eye")
+    eye_copies = plane_heights.pop() // band
+    shapes = ((width, band * eye_copies, 41, 4), (width, band * eye_copies, 41, 4),
               (1, band + 1, 42, 4), None,
               (packed["width"], packed["height"], 2, 16),
               (packed["width"], packed["height"], 2, 16))
@@ -236,12 +244,12 @@ def _verify(root: Any, manifest: dict[str, Any]) -> tuple[dict[str, Any], Any]:
                 desc.get("format_value") != fmt or
                 len(payloads[name]) != w * h * stride):
             raise ValueError(f"{name} exact texture layout disagrees")
-    weights = np.frombuffer(payloads[ARTIFACTS[0]], dtype="<f4").reshape(band, width)
-    field = np.frombuffer(payloads[ARTIFACTS[1]], dtype="<f4").reshape(band, width)
+    weights = np.frombuffer(payloads[ARTIFACTS[0]], dtype="<f4").reshape(eye_copies, band, width)
+    field = np.frombuffer(payloads[ARTIFACTS[1]], dtype="<f4").reshape(eye_copies, band, width)
     rows = np.frombuffer(payloads[ARTIFACTS[2]], dtype="<u4")
     if (not np.isfinite(field).all() or not np.isin(weights, (0.0, 1.0)).all() or
             not np.isin(rows, (0, 1)).all() or
-            not np.array_equal(rows[:-1].astype(bool), np.any(weights > 0, axis=1)) or
+            not np.array_equal(rows[:-1].astype(bool), np.any(weights > 0, axis=(0, 2))) or
             (rows[-1] == 0 and np.any(weights))):
         raise ValueError("shared pin authorized weights/rows/header are noncanonical")
     map_shape = (packed["height"], packed["width"], 4)
@@ -265,7 +273,8 @@ def _verify(root: Any, manifest: dict[str, Any]) -> tuple[dict[str, Any], Any]:
     return {**attribution, "actual_map_verified": True,
             "map_artifact": ARTIFACTS[4], "boundary_artifact": ARTIFACTS[5],
             "width": packed["width"], "height": packed["height"],
-            "authorized_native_pixels": int(np.count_nonzero(weights)),
+            "authorized_native_pixels": int(np.count_nonzero(weights[0])),
+            "eye_copies": eye_copies,
             "pinned_native_rows": int(np.count_nonzero(rows[:-1])),
             "selected_receipt_authorized": bool(rows[-1]),
             "legacy_map_has_render_authority": False,
