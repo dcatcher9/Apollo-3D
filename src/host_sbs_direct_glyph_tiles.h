@@ -34,8 +34,8 @@ namespace models::host_sbs_direct_glyph_gpu {
 
   inline constexpr auto common_tile = tile_shape(tile_profile_e::common);
   inline constexpr auto small_tile = tile_shape(tile_profile_e::small);
-  // The mixed batch encoder needs 36 rows of context on each side of its 28 owned rows.
-  inline constexpr tile_shape_t palette_tile {common_tile.width, 36u + 28u + 36u};
+  // The encoder reconstructs the remaining vertical context at quarter resolution.
+  inline constexpr tile_shape_t palette_tile {common_tile.width, 12u + 28u + 12u};
   static_assert(small_tile.input_words() <= common_tile.input_words() &&
                 small_tile.output_words() <= common_tile.output_words());
   static_assert(tile_profile_for_band(640u, 107u, 253u) == tile_profile_e::small);
