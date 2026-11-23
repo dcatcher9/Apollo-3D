@@ -1,5 +1,5 @@
 // Mixed Direct Glyph RGB encoder and native fill-plus-outline decoder.
-// Every lattice uses the height of the same native, extended OCR rectangle.
+// All lattices sample the same real detector rows at the selected line scale.
 #include "include/host_sbs_direct_glyph_normalization.hlsl"
 #include "include/host_sbs_direct_glyph_palette_weights.generated.hlsl"
 #include "include/host_sbs_direct_glyph_line.hlsl"
@@ -9,13 +9,16 @@ static const float Gaussian[7] = {1.452672208e-05f, 5.394577810e-03f, 1.87858721
 cbuffer Setup : register(b0)
 {
     uint Slot;
-    uint Width28;
-    uint Width84;
+    uint EncoderWidth;
+    uint DetailWidth;
     uint StageValue; // Canonical height, tile offset, filter radius or reduction pass.
     uint HistScale;
     uint OutsideSamples;
     uint InsideSamples;
+    uint Rows;
 }
+#define DetailRows (3u * Rows)
+#define EncoderTopPad ((52u - Rows) / 2u)
 StructuredBuffer<GlyphLine> LinePlan : register(t11);
 #define Box (LinePlan[Slot].box)
 Texture2D<float4> Source : register(t0);
@@ -25,8 +28,8 @@ StructuredBuffer<float4> LocalMean : register(t3);
 StructuredBuffer<float4> Palette : register(t4);
 StructuredBuffer<uint> Winners : register(t5);
 StructuredBuffer<float4> NearbyBackground : register(t6);
-StructuredBuffer<uint> Rgb28 : register(t7);
-StructuredBuffer<uint> Rgb84 : register(t8);
+StructuredBuffer<uint> EncoderRgb : register(t7);
+StructuredBuffer<uint> DetailRgb : register(t8);
 StructuredBuffer<uint> Histogram : register(t9);
 StructuredBuffer<float4> PreviousHistogram : register(t10);
 
@@ -90,23 +93,23 @@ float4 Lift(StructuredBuffer<float4> field, Taps t)
 }
 
 [numthreads(16, 8, 1)] void pack_rgb(uint3 id : SV_DispatchThreadID) {
-    uint height = StageValue, width = height == 28u ? Width28 : Width84;
+    uint height = StageValue, width = height == Rows ? EncoderWidth : DetailWidth;
     if (id.x >= width || id.y >= height)
         return;
     UintOut[id.y * width + id.x] = Pack(CanonicalRgb(Source, Box, id.xy, height));
 }[numthreads(16, 8, 1)] void coarse(uint3 id : SV_DispatchThreadID)
 {
-    if (id.x >= Width28 || id.y >= 28u)
+    if (id.x >= EncoderWidth || id.y >= Rows)
         return;
     float4 peak = 0, sum = 0;
     [unroll] for (int j = -2; j <= 2; ++j)[unroll] for (int i = -2; i <= 2; ++i)
     {
-        float4 value = Roles[At(int2(id.xy) + int2(i, j), Width28, 28)];
+        float4 value = Roles[At(int2(id.xy) + int2(i, j), EncoderWidth, Rows)];
         peak = max(peak, value);
         sum += value;
     }
-    Float4Out[id.y * Width28 + id.x] = peak;
-    SecondOut[id.y * Width28 + id.x] = sum / 25;
+    Float4Out[id.y * EncoderWidth + id.x] = peak;
+    SecondOut[id.y * EncoderWidth + id.x] = sum / 25;
 }
 [numthreads(16, 8, 1)] void make_hist(uint3 id : SV_DispatchThreadID) {
     uint2 size = NativeSize();
@@ -117,7 +120,7 @@ float4 Lift(StructuredBuffer<float4> field, Taps t)
     uint3 bin = uint3(round(Source8(int2(p)) / 16));
     uint index = bin.x * 289 + bin.y * 17 + bin.z;
     uint base = index * 4;
-    float4 roles = Lift(Roles, GetTaps(p, size.y, 28, Width28));
+    float4 roles = Lift(Roles, GetTaps(p, size.y, Rows, EncoderWidth));
     uint4 v = uint4(round(saturate(roles) * HistScale));
     [unroll] for (uint k = 0; k < 4; ++k) InterlockedAdd(UintOut[base + k], v[k]);
     bool inside = all(p >= StageValue) && all(p + StageValue < size);
@@ -264,8 +267,8 @@ float4 ColorOdds(float3 source)
 [numthreads(16, 8, 1)] void pack_tile(uint3 p : SV_DispatchThreadID) {
     if (p.x >= 512 || p.y >= 52)
         return;
-    int2 pos = int2(int(StageValue + 440u * p.z) + int(p.x) - 36, int(p.y) - 12);
-    float3 rgb = Unpack(Rgb28[At(pos, Width28, 28)]) / 255;
+    int2 pos = int2(int(StageValue + 440u * p.z) + int(p.x) - 36, int(p.y) - int(EncoderTopPad));
+    float3 rgb = Unpack(EncoderRgb[At(pos, EncoderWidth, Rows)]) / 255;
     uint cells = 512 * 52;
     uint index = 3u * cells * p.z + p.y * 512 + p.x;
     FloatOut[index] = rgb.x;
@@ -274,38 +277,38 @@ float4 ColorOdds(float3 source)
 }[numthreads(16, 8, 1)] void export_roles(uint3 p : SV_DispatchThreadID)
 {
     uint x = StageValue + 440u * p.z + p.x;
-    if (x >= Width28 || p.x >= 440 || p.y >= 28)
+    if (x >= EncoderWidth || p.x >= 440 || p.y >= Rows)
         return;
     uint cells = 512 * 52;
-    uint i = 4u * cells * p.z + (p.y + 12) * 512 + p.x + 36;
+    uint i = 4u * cells * p.z + (p.y + EncoderTopPad) * 512 + p.x + 36;
     float4 v = float4(Scores[i], Scores[i + cells], Scores[i + 2 * cells], Scores[i + 3 * cells]);
     float4 mass = exp(v - max(max(v.x, v.y), max(v.z, v.w)));
-    Float4Out[p.y * Width28 + x] = mass / dot(mass, 1.0f);
+    Float4Out[p.y * EncoderWidth + x] = mass / dot(mass, 1.0f);
 }
 
 [numthreads(16, 8, 1)] void make_moments(uint3 p : SV_DispatchThreadID) {
-    if (p.x >= Width84 || p.y >= 84)
+    if (p.x >= DetailWidth || p.y >= DetailRows)
         return;
-    uint idx = p.y * Width84 + p.x;
-    float3 color = Unpack(Rgb84[idx]) / 255;
-    float bg = Lift(Roles, GetTaps(p.xy, 84, 28, Width28)).x;
+    uint idx = p.y * DetailWidth + p.x;
+    float3 color = Unpack(DetailRgb[idx]) / 255;
+    float bg = Lift(Roles, GetTaps(p.xy, DetailRows, Rows, EncoderWidth)).x;
     float mass = .015f + bg * bg * bg;
     Float4Out[idx] = float4(color * mass, mass);
     SecondOut[idx] = float4(color * color * mass, 0);
 }[numthreads(16, 8, 1)] void smooth_moments(uint3 p : SV_DispatchThreadID)
 {
-    if (p.x >= Width84 || p.y >= 84)
+    if (p.x >= DetailWidth || p.y >= DetailRows)
         return;
     bool vertical = (StageValue & 64u) != 0;
     int radius = int(StageValue & 63u);
     float4 a = 0, b = 0;
     [loop] for (int i = -radius; i <= radius; ++i)
     {
-        uint ix = At(int2(p.xy) + (vertical ? int2(0, i) : int2(i, 0)), Width84, 84);
+        uint ix = At(int2(p.xy) + (vertical ? int2(0, i) : int2(i, 0)), DetailWidth, DetailRows);
         a += MomentA[ix];
         b += MomentB[ix];
     }
-    uint at = p.y * Width84 + p.x;
+    uint at = p.y * DetailWidth + p.x;
     if (vertical)
     {
         float3 mu = a.xyz / a.w;
@@ -321,7 +324,7 @@ float4 ColorOdds(float3 source)
 }
 groupshared float4 TempFill[128], TempOutline[128];
 [numthreads(128, 1, 1)] void prototypes(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
-    const uint count = Width84 * 84;
+    const uint count = DetailWidth * DetailRows;
     uint n = (count + 127) / 128;
     uint part = group.x + 65535u * group.y;
     float4 a = 0, b = 0;
@@ -330,8 +333,8 @@ groupshared float4 TempFill[128], TempOutline[128];
         uint i = part * 128 + lane;
         if (i < count)
         {
-            float2 weights = Lift(Roles, GetTaps(uint2(i % Width84, i / Width84), 84, 28, Width28)).yz;
-            float4 rgb = float4(Unpack(Rgb84[i]) / 255, 1);
+            float2 weights = Lift(Roles, GetTaps(uint2(i % DetailWidth, i / DetailWidth), DetailRows, Rows, EncoderWidth)).yz;
+            float4 rgb = float4(Unpack(DetailRgb[i]) / 255, 1);
             a = rgb * (weights.x * weights.x);
             b = rgb * (weights.y * weights.y);
         }
@@ -383,12 +386,12 @@ float2 InkMixEvidence(float3 color, float3 ink, float4 background)
         return;
     int2 p = int2(id.xy);
     float3 rgb = Source8(p), color = rgb / 255;
-    Taps low = GetTaps(id.xy, size.y, 28, Width28), hi = GetTaps(id.xy, size.y, 84, Width84);
+    Taps low = GetTaps(id.xy, size.y, Rows, EncoderWidth), hi = GetTaps(id.xy, size.y, DetailRows, DetailWidth);
     float4 role = Lift(Roles, low);
     float2 peak = Lift(LocalMax, low).yz;
     float3 avg = Lift(LocalMean, low).yzw;
-    float3 soft = Blend(float4(Unpack(Rgb84[hi.i.x]), 0), float4(Unpack(Rgb84[hi.i.y]), 0),
-                        float4(Unpack(Rgb84[hi.i.z]), 0), float4(Unpack(Rgb84[hi.i.w]), 0), hi.weight)
+    float3 soft = Blend(float4(Unpack(DetailRgb[hi.i.x]), 0), float4(Unpack(DetailRgb[hi.i.y]), 0),
+                        float4(Unpack(DetailRgb[hi.i.z]), 0), float4(Unpack(DetailRgb[hi.i.w]), 0), hi.weight)
                       .rgb /
                   255;
     float4 nearby = Lift(NearbyBackground, hi), wide = Lift(LargeBackground, hi);
@@ -414,7 +417,7 @@ float2 InkMixEvidence(float3 color, float3 ink, float4 background)
     }
     f[21] = nearby.w * 5;
     f[28] = wide.w * 5;
-    int step = max(1, int(round(float(size.y) / 84)));
+    int step = max(1, int(round(float(size.y) / DetailRows)));
     f[35] = Range(abs(Source8(p + int2(step, 0)) - Source8(p - int2(step, 0)))) / 255;
     f[36] = Range(abs(Source8(p + int2(0, step)) - Source8(p - int2(0, step)))) / 255;
     f[40] = dot(abs(rgb - PalColor(Winners[0])), 1.0f / 192.0f);

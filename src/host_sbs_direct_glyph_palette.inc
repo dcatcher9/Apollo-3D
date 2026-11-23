@@ -68,10 +68,12 @@ class palette_transport_t {
   struct schedule_readback_t {
     std::array<std::array<UINT, 2>, 8> lines;
     UINT hold_history, reserved;
+    std::array<std::array<UINT, 2>, 8> reference;
   };
-  static_assert(sizeof(schedule_readback_t) == 72);
+  static_assert(sizeof(schedule_readback_t) == 136);
   schedule_readback_t plan_ {};
-  UINT slot_ = 0, tile_start_ = 0, w28_ = 0, w84_ = 0, step_ = 1, hist_scale_ = 0;
+  UINT slot_ = 0, tile_start_ = 0, encoder_width_ = 0, detail_width_ = 0, step_ = 1, hist_scale_ = 0;
+  UINT encoder_rows_ = 28, detail_rows_ = 84;
   bool has_lines_ = false;
   cuda_driver_api &cuda_ = cuda_driver_api::get();
   CUcontext primary_ = nullptr;
@@ -155,7 +157,7 @@ class palette_transport_t {
   }
 
   void stage(stage_e entry, UINT arg, UINT gx, UINT gy, std::initializer_list<binding_t> inputs, field_t &destination, field_t *second = nullptr, UINT tiles = 1) {
-    dispatch(entry, {slot_, w28_, w84_, arg, hist_scale_, 0, 0, 0}, gx, gy, inputs, {destination.uav.Get(), second ? second->uav.Get() : nullptr}, tiles);
+    dispatch(entry, {slot_, encoder_width_, detail_width_, arg, hist_scale_, 0, 0, encoder_rows_}, gx, gy, inputs, {destination.uav.Get(), second ? second->uav.Get() : nullptr}, tiles);
   }
 
   void fence() {
@@ -181,16 +183,20 @@ class palette_transport_t {
   }
 
   void begin_line(UINT w, UINT h) {
-    w28_ = div_up(w * 28u, h);
-    w84_ = div_up(w * 84u, h);
+    const UINT reference_height = plan_.reference[slot_][0];
+    require(reference_height && reference_height <= h, "Invalid native glyph scale reference");
+    encoder_rows_ = std::clamp((28u * h + reference_height / 2u) / reference_height, 28u, palette_tile.height);
+    detail_rows_ = 3u * encoder_rows_;
+    encoder_width_ = div_up(w * encoder_rows_, h);
+    detail_width_ = div_up(w * detail_rows_, h);
     // Match the reference's ties-to-even integer sampling step.
     step_ = std::max(1u, UINT(std::nearbyint(double(h) / 96.0)));
     hist_scale_ = std::min(65536u, 0x7fffffffu / (div_up(w, step_) * div_up(h, step_)));
-    const UINT n = w84_ * 84u;
-    ensure(low_, w28_ * 28u, 4);
-    ensure(roles_, w28_ * 28u, 16);
-    ensure(peak_, w28_ * 28u, 16);
-    ensure(mean_, w28_ * 28u, 16);
+    const UINT n = detail_width_ * detail_rows_;
+    ensure(low_, encoder_width_ * encoder_rows_, 4);
+    ensure(roles_, encoder_width_ * encoder_rows_, 16);
+    ensure(peak_, encoder_width_ * encoder_rows_, 16);
+    ensure(mean_, encoder_width_ * encoder_rows_, 16);
     ensure(fine_, n, 4);
     for (auto *field : {&moment_, &squared_, &h1_, &h2_, &near_, &far_}) {
       ensure(*field, n, 16);
@@ -199,8 +205,8 @@ class palette_transport_t {
     ensure(alpha_, w * h, 4);
     const std::array<UINT, 4> zero {};
     ctx_->ClearUnorderedAccessViewUint(hist_.uav.Get(), zero.data());
-    stage(pack_rgb, 28, div_up(w28_, 16), 4, {{0, source_.Get()}}, low_);
-    stage(pack_rgb, 84, div_up(w84_, 16), 11, {{0, source_.Get()}}, fine_);
+    stage(pack_rgb, encoder_rows_, div_up(encoder_width_, 16), div_up(encoder_rows_, 8), {{0, source_.Get()}}, low_);
+    stage(pack_rgb, detail_rows_, div_up(detail_width_, 16), div_up(detail_rows_, 8), {{0, source_.Get()}}, fine_);
   }
 
   void finish_line(UINT w, UINT h) {
@@ -211,19 +217,19 @@ class palette_transport_t {
     };
     const UINT inside = interior_extent(w) * interior_extent(h);
     const UINT total = div_up(w, step_) * div_up(h, step_);
-    stage(coarse, 0, div_up(w28_, 16), 4, {{1, roles_.srv.Get()}}, peak_, &mean_);
+    stage(coarse, 0, div_up(encoder_width_, 16), div_up(encoder_rows_, 8), {{1, roles_.srv.Get()}}, peak_, &mean_);
     stage(make_hist, pad, div_up(div_up(w, step_), 16), div_up(div_up(h, step_), 8), {{0, source_.Get()}, {1, roles_.srv.Get()}}, hist_);
     stage(smooth_hist, 0, 39, 1, {{9, hist_.srv.Get()}}, lut_);
     stage(smooth_hist, 1, 39, 1, {{10, lut_.srv.Get()}}, temp_);
     stage(smooth_hist, 2, 39, 1, {{10, temp_.srv.Get()}}, lut_, &palette_);
-    dispatch(choose_colors, {slot_, w28_, w84_, 0, hist_scale_, total - inside, inside, 0},
+    dispatch(choose_colors, {slot_, encoder_width_, detail_width_, 0, hist_scale_, total - inside, inside, encoder_rows_},
       1, 1, {{4, palette_.srv.Get()}, {10, lut_.srv.Get()}}, {winner_.uav.Get()});
-    stage(make_moments, 0, div_up(w84_, 16), 11, {{1, roles_.srv.Get()}, {8, fine_.srv.Get()}}, moment_, &squared_);
+    stage(make_moments, 0, div_up(detail_width_, 16), div_up(detail_rows_, 8), {{1, roles_.srv.Get()}, {8, fine_.srv.Get()}}, moment_, &squared_);
     for (UINT radius : {6u, 17u}) {
-      stage(smooth_moments, radius, div_up(w84_, 16), 11, {{12, moment_.srv.Get()}, {13, squared_.srv.Get()}}, h1_, &h2_);
-      stage(smooth_moments, 64u + radius, div_up(w84_, 16), 11, {{12, h1_.srv.Get()}, {13, h2_.srv.Get()}}, radius == 6u ? near_ : far_);
+      stage(smooth_moments, radius, div_up(detail_width_, 16), div_up(detail_rows_, 8), {{12, moment_.srv.Get()}, {13, squared_.srv.Get()}}, h1_, &h2_);
+      stage(smooth_moments, 64u + radius, div_up(detail_width_, 16), div_up(detail_rows_, 8), {{12, h1_.srv.Get()}, {13, h2_.srv.Get()}}, radius == 6u ? near_ : far_);
     }
-    const UINT groups = div_up(w84_ * 84u, 128);
+    const UINT groups = div_up(detail_width_ * detail_rows_, 128);
     stage(prototypes, 0, std::min(groups, 65535u), div_up(groups, 65535u), {{1, roles_.srv.Get()}, {8, fine_.srv.Get()}}, parts_);
     stage(prototypes, 1, 1, 1, {{15, parts_.srv.Get()}}, proto_);
     stage(decode_palette, 0, div_up(w, 16), div_up(h, 8), {{0, source_.Get()}, {1, roles_.srv.Get()}, {2, peak_.srv.Get()}, {3, mean_.srv.Get()}, {4, palette_.srv.Get()}, {5, winner_.srv.Get()}, {6, near_.srv.Get()}, {8, fine_.srv.Get()}, {14, far_.srv.Get()}, {15, proto_.srv.Get()}}, alpha_);
@@ -244,16 +250,16 @@ class palette_transport_t {
       if (tile_start_ == 0) {
         begin_line(w, h);
       }
-      const UINT remaining = w28_ - tile_start_;
+      const UINT remaining = encoder_width_ - tile_start_;
       // Balance the tiles across the fewest submissions to avoid a small final batch.
       const UINT remaining_tiles = div_up(remaining, 440u);
       const UINT batches = div_up(remaining_tiles, tile_capacity);
       const UINT tiles = div_up(remaining_tiles, batches);
       stage(pack_tile, tile_start_, div_up(palette_tile.width, 16), div_up(palette_tile.height, 8), {{7, low_.srv.Get()}}, input_, nullptr, tiles);
       encode(tiles);
-      stage(export_roles, tile_start_, div_up(std::min(440u, remaining), 16), 4, {{12, logits_.srv.Get()}}, roles_, nullptr, tiles);
+      stage(export_roles, tile_start_, div_up(std::min(440u, remaining), 16), div_up(encoder_rows_, 8), {{12, logits_.srv.Get()}}, roles_, nullptr, tiles);
       tile_start_ += tiles * 440u;
-      if (tile_start_ >= w28_) {
+      if (tile_start_ >= encoder_width_) {
         finish_line(w, h);
         ++slot_;
         tile_start_ = 0;

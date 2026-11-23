@@ -106,7 +106,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | `current_trusted_inner` | 1 | `5fdc9a1be98291902d63ca639f5bcfd80e88821b6df17bd083a23b5e09c32884` |
 | `direct_glyph_plan` | 2 | `3c1df1656492065c62c519ceffd49f3d1bc1d3a4e26c50ba0b8a2eead4dc2844` |
 | `direct_glyph_transport` | 4 | `2df402561c88d7e2b2672660e2f9d5f42b06d9815c87b48511adb05af6226b30` |
-| `direct_glyph_palette` | 17 | `83879f032bcedd285a77588d7c2beb371fea63f0a39348b1b07206c0fd2c8872` |
+| `direct_glyph_palette` | 17 | `3e7590236eea6e22352658c29600a3ff0ef955e48382ca77049b988ee08c346a` |
 | `direct_glyph_prepare` | 1 | `ebd78fb4d5a30345166f4dcbfb990817a41910172288cba9d7e90926c7764ffe` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->
 
@@ -463,18 +463,19 @@ height, rounded up and clipped to the original detector cover. When an accepted 
 caption spans the OCR reference center, the decoder extends its shorter horizontal
 side toward symmetry by at most one working-rectangle height, within the same cover.
 This includes isolated strokes near the ends of centered lines. The encoder scales the
-entire resulting rectangle to 28 rows,
-preserves its aspect ratio, and processes long lines in 440-column windows of the
-512×52 mixed TensorRT profile. Twelve copies of each edge row surround the 28 normalized
-rows. After the second pooling layer, the encoder extends the first and last fully replicated
-feature rows to restore the 25-row coarse feature map. It crops the middle 13 rows before
-upsampling, so the decoder and its skip features stay aligned. This preserves the original
-36-row vertical receptive-field margin with fewer full-resolution convolutions. The ONNX
+line using its extended OCR work height as the 28-row scale reference. The actual input
+includes the entire vertical detector cover from the first inference. If the cover is
+taller than the scale reference, extra real rows occupy the available space in the 52-row
+encoder tile. The encoder uses the nearest whole number of rows, capped at 52. Wider
+covers in the vertical dimension fit those 52 rows at a coarser scale. Any remaining rows
+are filled by replicating the boundary pixels. The decoder uses a detail lattice three
+times the encoder density and publishes only inside the rectangle read by the encoder.
+The 512-column tile owns 440 columns and retains horizontal context. The ONNX
 export declares a symbolic batch axis. The scheduler divides each line evenly across the fewest
 TensorRT batches that fit up to six windows each. A nine-window line runs in batches of five and four.
 Each observation owns its execution context until the GPU has consumed the
 batch and exported its scores. The 36-column horizontal context on each side stays
-outside the window's owned output. Aligned RGB at 84 rows supplies local background color
+outside the window's owned output. Aligned RGB on the detail lattice supplies local background color
 and variance. At each native pixel the decoder also estimates how much of the line’s
 fill or outline color would explain the observed color over each background estimate,
 and measures the remaining RGB error. The decoder weights this evidence by the
@@ -483,11 +484,6 @@ The native opacity decoder trains on libass fill, outline and shadow layers, inc
 light and dark glyphs with the same geometry. Its protection target is the union of fill
 and visible outline. The training uses the same mixed-precision encoder as inference.
 A learned per-pixel correction uses local stroke evidence to adjust the line-wide RGB outline vote before opacity decoding. It shares the native decode dispatch and the mixed encoder.
-When a high-confidence stroke meets the top of the inference rectangle, the publisher checks
-the same column for a continuation of the predicted ink color. It looks up to one eighth of
-the line rectangle's height, within the original detector cover. A transition to a contrasting
-background bounds the tip and sets its antialiased coverage. Only columns with that evidence
-gain protected pixels. The inference rectangle and tile count stay the same.
 When choosing the representative outline color, the GPU compares each RGB bin's observed
 outline fraction with the outline fraction across the line. A bin below that rate receives
 a proportional discount. This keeps a frequent background color with weak outline evidence
