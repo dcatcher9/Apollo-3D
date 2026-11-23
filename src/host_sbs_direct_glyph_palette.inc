@@ -16,7 +16,7 @@ class palette_transport_t {
   };
 
   struct history_t {
-    field_t lines, raw;
+    field_t lines, opacity;
   };
 
   enum stage_e {
@@ -234,8 +234,8 @@ class palette_transport_t {
     stage(prototypes, 1, 1, 1, {{15, parts_.srv.Get()}}, proto_);
     stage(decode_palette, 0, div_up(w, 16), div_up(h, 8), {{0, source_.Get()}, {1, roles_.srv.Get()}, {2, peak_.srv.Get()}, {3, mean_.srv.Get()}, {4, palette_.srv.Get()}, {5, winner_.srv.Get()}, {6, near_.srv.Get()}, {8, fine_.srv.Get()}, {14, far_.srv.Get()}, {15, proto_.srv.Get()}}, alpha_);
     auto &old = history_[previous_];
-    dispatch(confirm_mask_history, schedule(), 1, 1, {{1, old.lines.srv.Get()}, {2, old_rgb_srv_.Get()}, {3, source_.Get()}, {4, old.raw.srv.Get()}, {5, alpha_.srv.Get()}, {7, winner_.srv.Get()}}, {nullptr, next().lines.uav.Get()});
-    dispatch(publish_line, schedule(), div_up(w, 16), div_up(h, 8), {{1, old.lines.srv.Get()}, {2, old_rgb_srv_.Get()}, {3, source_.Get()}, {4, old.raw.srv.Get()}, {5, alpha_.srv.Get()}, {6, next().lines.srv.Get()}}, {work_.uav.Get(), nullptr, nullptr, next().raw.uav.Get(), protection_uav_.Get()});
+    dispatch(confirm_mask_history, schedule(), 1, 1, {{1, old.lines.srv.Get()}, {2, old_rgb_srv_.Get()}, {3, source_.Get()}, {4, old.opacity.srv.Get()}, {5, alpha_.srv.Get()}, {7, winner_.srv.Get()}}, {nullptr, next().lines.uav.Get()});
+    dispatch(publish_line, schedule(), div_up(w, 16), div_up(h, 8), {{1, old.lines.srv.Get()}, {2, old_rgb_srv_.Get()}, {3, source_.Get()}, {4, old.opacity.srv.Get()}, {5, alpha_.srv.Get()}, {6, next().lines.srv.Get()}}, {work_.uav.Get(), nullptr, nullptr, next().opacity.uav.Get(), protection_uav_.Get()});
   }
 
   void score_chunk() {
@@ -345,7 +345,7 @@ public:
     ensure(sizes_, sizeof(schedule_readback_t) / (2 * sizeof(UINT)), 2 * sizeof(UINT));
     for (auto &generation : history_) {
       ensure(generation.lines, 8, 64);
-      ensure(generation.raw, 1, 4);
+      ensure(generation.opacity, 1, 2 * sizeof(float));
     }
     // Four role-vote counts and two spatial counts per RGB bin.
     ensure(hist_, 6 * 4913, 4);
@@ -401,7 +401,7 @@ public:
     ctx_->ClearUnorderedAccessViewUint(protection_uav_.Get(), zero.data());
     auto &old = history_[previous_];
     dispatch(begin_history, schedule(), 1, 1, {{0, caps_.Get()}, {1, old.lines.srv.Get()}}, {work_.uav.Get(), next().lines.uav.Get(), sizes_.uav.Get()});
-    dispatch(confirm_history, schedule(), 8, 1, {{1, old.lines.srv.Get()}, {2, old_rgb_srv_.Get()}, {3, source_.Get()}, {4, old.raw.srv.Get()}}, {nullptr, next().lines.uav.Get()});
+    dispatch(confirm_history, schedule(), 8, 1, {{1, old.lines.srv.Get()}, {2, old_rgb_srv_.Get()}, {3, source_.Get()}, {4, old.opacity.srv.Get()}}, {nullptr, next().lines.uav.Get()});
     dispatch(finish_windows, schedule(), 1, 1, {}, {work_.uav.Get(), next().lines.uav.Get(), sizes_.uav.Get()});
     ctx_->CopyResource(staged_sizes_.Get(), sizes_.buffer.Get());
     phase_ = phase_e::plan;
@@ -446,7 +446,7 @@ public:
       if (pixels == 0) {
         return publish(result);
       }
-      ensure(next().raw, pixels, 4);
+      ensure(next().opacity, pixels, 2 * sizeof(float));
       has_lines_ = true;
     }
     score_chunk();

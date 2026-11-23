@@ -106,7 +106,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | `current_trusted_inner` | 1 | `5fdc9a1be98291902d63ca639f5bcfd80e88821b6df17bd083a23b5e09c32884` |
 | `direct_glyph_plan` | 2 | `3c1df1656492065c62c519ceffd49f3d1bc1d3a4e26c50ba0b8a2eead4dc2844` |
 | `direct_glyph_transport` | 4 | `2df402561c88d7e2b2672660e2f9d5f42b06d9815c87b48511adb05af6226b30` |
-| `direct_glyph_palette` | 17 | `3e7590236eea6e22352658c29600a3ff0ef955e48382ca77049b988ee08c346a` |
+| `direct_glyph_palette` | 17 | `29d3f839af3ffe68e480e12a909e8cd850461dabbf0622bd3aa7ce7786e9f0a9` |
 | `direct_glyph_prepare` | 1 | `ebd78fb4d5a30345166f4dcbfb990817a41910172288cba9d7e90926c7764ffe` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->
 
@@ -466,8 +466,8 @@ This includes isolated strokes near the ends of centered lines. The encoder scal
 line using its extended OCR work height as the 28-row scale reference. The actual input
 includes the entire vertical detector cover from the first inference. If the cover is
 taller than the scale reference, extra real rows occupy the available space in the 52-row
-encoder tile. The encoder uses the nearest whole number of rows, capped at 52. Wider
-covers in the vertical dimension fit those 52 rows at a coarser scale. Any remaining rows
+encoder tile. The encoder uses the nearest whole number of rows, capped at 52. Exceptionally tall
+covers fit those 52 rows at a coarser scale. Any remaining rows
 are filled by replicating the boundary pixels. The decoder uses a detail lattice three
 times the encoder density and publishes only inside the rectangle read by the encoder.
 The 512-column tile owns 440 columns and retains horizontal context. The ONNX
@@ -516,8 +516,16 @@ must be at most 0.04 plus half the changed background fraction, with a ceiling o
 Overlapping windows two work-box heights wide, stepped by one height, apply the same
 test locally with a 0.10 higher allowance and ceiling wherever at least eight stroke
 samples exist. An empty background sample contributes zero to its changed fraction.
-The blend weight at each pixel falls with its own RGB change. Each new history generation
-stores the original prediction. Current overlapping
+The blend weight at each pixel falls with its own RGB change. When a confirmed subtitle's
+vertical input bounds move and either input contains extra detector rows, a change in the
+sampling grid can move a translucent edge across the cutoff. At a disputed pixel with
+some predicted ink in both frames, the GPU compares eight nearby sites for a solid
+stroke with matching ink and stable RGB. A newly appearing or disappearing strong
+stroke in that neighborhood vetoes the extra history. A strong new prediction at a
+previously unprotected pixel follows the ordinary blend. Otherwise, stable nearby ink
+can support the last published line opacity. Each generation stores the measured and
+blended opacities separately. Cue confirmation always uses the raw model measurement.
+Current overlapping
 lines use their maximum protection, quantized at native pixel centers with a cutoff
 of 38/255. A GPU-held observation preserves the last inferred lines, source RGB and raw
 opacity. Fresh empty OCR clears the mask and history and skips inference. A change of

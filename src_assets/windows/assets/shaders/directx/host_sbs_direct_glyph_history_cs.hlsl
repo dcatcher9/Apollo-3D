@@ -1,5 +1,5 @@
 // Work and Caps have already joined this observation's OCR record and display snapshot.
-// PreviousLines and PreviousAlpha contain the last committed raw model output.
+// History keeps raw predictions for cue confirmation and the last blended per-line opacity for display continuity.
 #include "include/host_sbs_direct_glyph_line.hlsl"
 
 cbuffer Schedule : register(b0) {
@@ -14,7 +14,11 @@ ByteAddressBuffer Caps : register(t0);
 StructuredBuffer<GlyphLine> PreviousLines : register(t1);
 Texture2D<float4> PreviousSource : register(t2);
 Texture2D<float4> CurrentSource : register(t3);
-StructuredBuffer<float> PreviousAlpha : register(t4);
+struct GlyphOpacity {
+    float measured;
+    float published;
+};
+StructuredBuffer<GlyphOpacity> PreviousAlpha : register(t4);
 StructuredBuffer<float> LineAlpha : register(t5);
 StructuredBuffer<GlyphLine> Planned : register(t6);
 StructuredBuffer<uint> PaletteWinners : register(t7);
@@ -22,7 +26,7 @@ StructuredBuffer<uint> PaletteWinners : register(t7);
 RWByteAddressBuffer Work : register(u0);
 RWStructuredBuffer<GlyphLine> Lines : register(u1);
 RWStructuredBuffer<uint2> Sizes : register(u2);
-RWStructuredBuffer<float> NextAlpha : register(u3);
+RWStructuredBuffer<GlyphOpacity> NextAlpha : register(u3);
 RWTexture2D<uint> Protection : register(u4);
 
 bool rectangle(uint4 v) {
@@ -141,7 +145,7 @@ void confirm_history(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
     uint count=record.state.x!=0 && any(carried!=record.base) ? sites.x*sites.y : 0u;
     for (uint i=lane; i<count; i+=128u) {
         uint2 p=r.xy+2u+stride*uint2(i%sites.x,i/sites.x);
-        if (PreviousAlpha[raw_index(old,p)] < 38.0f/255.0f) continue;
+        if (PreviousAlpha[raw_index(old,p)].measured < 38.0f/255.0f) continue;
         int2 a=edge(PreviousSource,p);
         uint power=uint(a.x*a.x+a.y*a.y);
         if (power<24u*24u) continue;
@@ -227,7 +231,7 @@ void confirm_mask_history(uint lane : SV_GroupIndex) {
             uint2 p=overlap.xy+2u+stride*uint2(x,y);
             uint2 local=p-record.box.xy;
             uint now=uint(round(saturate(LineAlpha[local.y*extent.x+local.x])*255.0f));
-            uint then=uint(round(saturate(PreviousAlpha[raw_index(old,p)])*255.0f));
+            uint then=uint(round(saturate(PreviousAlpha[raw_index(old,p)].measured)*255.0f));
             int3 rgbNow=rgb8(CurrentSource,p), rgbThen=rgb8(PreviousSource,p);
             uint changed=any(abs(rgbNow-rgbThen)>32) ? 1u : 0u;
             if (max(then,now)<38u) column+=uint4(0,0,1,changed);
@@ -262,6 +266,33 @@ void confirm_mask_history(uint lane : SV_GroupIndex) {
     }
 }
 
+// Backdrop motion may change a translucent edge while nearby solid ink stays in place.
+float stroke_motion(GlyphLine current, GlyphLine old, int2 p) {
+    int step = max(1, int((current.base.w - current.base.y + 16u) / 32u));
+    float motion = 100.0f;
+    bool changed_stroke = false;
+    uint4 overlap = intersect_rect(current.box, old.box);
+    int3 fill = int3(PalColor(current.state.w & 8191u));
+    int3 outline = int3(PalColor(current.state.w >> 13));
+    [unroll] for (int y = -1; y <= 1; ++y) {
+        [unroll] for (int x = -1; x <= 1; ++x) {
+            if (x == 0 && y == 0) continue;
+            int2 q = p + step * int2(x, y);
+            if (any(q < int2(overlap.xy)) || any(q >= int2(overlap.zw))) continue;
+            uint2 local = uint2(q) - current.box.xy;
+            float now = LineAlpha[local.y * (current.box.z - current.box.x) + local.x];
+            float then = PreviousAlpha[raw_index(old, uint2(q))].measured;
+            changed_stroke = changed_stroke || (min(now, then) < 38.0f / 255.0f && max(now, then) >= 0.85f);
+            if (min(now, then) < 0.85f) continue;
+            int3 rgb = rgb8(CurrentSource, q);
+            if (!matches_ink(rgb, fill, outline)) continue;
+            int3 delta = abs(rgb - rgb8(PreviousSource, q));
+            motion = min(motion, max(delta.r, max(delta.g, delta.b)) / 24.0f);
+        }
+    }
+    return changed_stroke ? 100.0f : motion;
+}
+
 [numthreads(16,8,1)]
 void publish_line(uint3 id: SV_DispatchThreadID) {
     GlyphLine record=Planned[Slot];
@@ -274,15 +305,34 @@ void publish_line(uint3 id: SV_DispatchThreadID) {
         Work.InterlockedOr(8u, 8u, ignored);
         return;
     }
-    NextAlpha[raw_index(record,p)]=a;
+    GlyphOpacity opacity;
+    opacity.measured = a;
     if (record.state.z!=0) {
         GlyphLine old=PreviousLines[record.state.x-1];
         if (all(p>=old.box.xy) && all(p<old.box.zw)) {
             int3 delta=abs(rgb8(CurrentSource,p)-rgb8(PreviousSource,p));
             float d=max(delta.x,max(delta.y,delta.z))/24.0f;
-            a+=0.95f*exp(-d*d)*(PreviousAlpha[raw_index(old,p)]-a);
+            GlyphOpacity previous = PreviousAlpha[raw_index(old,p)];
+            float prior = previous.measured;
+            bool moved = any(record.box.yw != old.box.yw) &&
+                         (any(record.box.yw != record.base.yw) || any(old.box.yw != old.base.yw));
+            float current_code = round(255.0f * a);
+            bool disputed = (current_code >= 38.0f) != (round(255.0f * prior) >= 38.0f);
+            // Strong new ink uses the normal current-frame path even near an unchanged stroke.
+            bool new_ink = current_code >= 76.0f && round(255.0f * previous.published) < 38.0f;
+            [branch] if (moved && disputed && !new_ink && min(a, prior) >= 2.0f / 255.0f &&
+                         max(a, prior) < 0.85f && d > 0.0f) {
+                float nearby = stroke_motion(record, old, int2(p));
+                if (nearby < d) {
+                    prior = previous.published;
+                    d = nearby;
+                }
+            }
+            a += 0.95f * exp(-d*d) * (prior-a);
         }
     }
+    opacity.published = a;
+    NextAlpha[raw_index(record,p)] = opacity;
     InterlockedMax(Protection[p],uint(round(saturate(a)*255)));
 }
 
