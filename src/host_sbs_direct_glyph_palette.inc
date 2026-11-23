@@ -153,7 +153,8 @@ class palette_transport_t {
   }
 
   std::array<UINT, 8> schedule() const {
-    return {width_, height_, UINT(job_.token), UINT(job_.token >> 32u), UINT(source_ != nullptr), UINT(history_valid_), slot_, job_.line_center_twice_source};
+    const UINT source_flags = UINT(source_ != nullptr) | (job_.video_caption_ocr ? 2u : 0u);
+    return {width_, height_, UINT(job_.token), UINT(job_.token >> 32u), source_flags, UINT(history_valid_), slot_, job_.line_center_twice_source};
   }
 
   void stage(stage_e entry, UINT arg, UINT gx, UINT gy, std::initializer_list<binding_t> inputs, field_t &destination, field_t *second = nullptr, UINT tiles = 1) {
@@ -223,7 +224,7 @@ class palette_transport_t {
     stage(smooth_hist, 1, 39, 1, {{10, lut_.srv.Get()}}, temp_);
     stage(smooth_hist, 2, 39, 1, {{10, temp_.srv.Get()}}, lut_, &palette_);
     dispatch(choose_colors, {slot_, encoder_width_, detail_width_, 0, hist_scale_, total - inside, inside, encoder_rows_},
-      1, 1, {{4, palette_.srv.Get()}, {10, lut_.srv.Get()}}, {winner_.uav.Get()});
+      1, 1, {{1, roles_.srv.Get()}, {4, palette_.srv.Get()}, {10, lut_.srv.Get()}}, {winner_.uav.Get()});
     stage(make_moments, 0, div_up(detail_width_, 16), div_up(detail_rows_, 8), {{1, roles_.srv.Get()}, {8, fine_.srv.Get()}}, moment_, &squared_);
     for (UINT radius : {6u, 17u}) {
       stage(smooth_moments, radius, div_up(detail_width_, 16), div_up(detail_rows_, 8), {{12, moment_.srv.Get()}, {13, squared_.srv.Get()}}, h1_, &h2_);
@@ -400,7 +401,7 @@ public:
     const std::array<UINT, 4> zero {};
     ctx_->ClearUnorderedAccessViewUint(protection_uav_.Get(), zero.data());
     auto &old = history_[previous_];
-    dispatch(begin_history, schedule(), 1, 1, {{0, caps_.Get()}, {1, old.lines.srv.Get()}}, {work_.uav.Get(), next().lines.uav.Get(), sizes_.uav.Get()});
+    dispatch(begin_history, schedule(), 1, 1, {{0, caps_.Get()}, {1, old.lines.srv.Get()}, {8, request.video_caption_ocr}}, {work_.uav.Get(), next().lines.uav.Get(), sizes_.uav.Get()});
     dispatch(confirm_history, schedule(), 8, 1, {{1, old.lines.srv.Get()}, {2, old_rgb_srv_.Get()}, {3, source_.Get()}, {4, old.opacity.srv.Get()}}, {nullptr, next().lines.uav.Get()});
     dispatch(finish_windows, schedule(), 1, 1, {}, {work_.uav.Get(), next().lines.uav.Get(), sizes_.uav.Get()});
     ctx_->CopyResource(staged_sizes_.Get(), sizes_.buffer.Get());

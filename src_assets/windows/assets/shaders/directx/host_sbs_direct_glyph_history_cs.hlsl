@@ -5,7 +5,7 @@
 cbuffer Schedule : register(b0) {
     uint2 Extent;
     uint2 Token;
-    uint HasSource;
+    uint SourceFlags; // Display snapshot (bit 0) and current video-caption OCR8 (bit 1).
     uint HasPrevious;
     uint Slot;
     uint LineCenterTwice;
@@ -22,6 +22,7 @@ StructuredBuffer<GlyphOpacity> PreviousAlpha : register(t4);
 StructuredBuffer<float> LineAlpha : register(t5);
 StructuredBuffer<GlyphLine> Planned : register(t6);
 StructuredBuffer<uint> PaletteWinners : register(t7);
+StructuredBuffer<uint> VideoCaptionOcr : register(t8);
 
 RWByteAddressBuffer Work : register(u0);
 RWStructuredBuffer<GlyphLine> Lines : register(u1);
@@ -66,7 +67,7 @@ void begin_history() {
     }
     uint4 header = Work.Load4(0);
     if (header.x != 2u) return;
-    if (HasSource == 0u || header.y == 0 || header.y > 8 || any(header.zw != 0) ||
+    if ((SourceFlags & 1u) == 0u || header.y == 0 || header.y > 8 || any(header.zw != 0) ||
         any(Caps.Load4(0) != uint4(1u,header.y,Token))) {
         Work.Store4(0,uint4(0u,0u,4u,0u));
         return;
@@ -84,10 +85,17 @@ void begin_history() {
     [loop] for (uint slot=0; slot<header.y; ++slot) {
         GlyphLine record = (GlyphLine)0;
         record.base=bases[slot]; record.box=record.base; record.cover=covers[slot];
+        if ((SourceFlags & 2u) != 0u) {
+            // The work planner authenticated these OCR8 cores and their matching detector caps.
+            uint core = 16u + 8u * slot;
+            record.state.w = uint(VideoCaptionOcr[core + 5u] == 0u && asfloat(VideoCaptionOcr[core + 4u]) < 0.90f);
+        }
         if (HasPrevious != 0) {
             uint n=0;
             [loop] for (uint prior=0; prior<8; ++prior) {
-                uint4 p=PreviousLines[prior].base;
+                GlyphLine previous=PreviousLines[prior];
+                if (previous.state.w==NoGlyphInk) continue;
+                uint4 p=previous.base;
                 if (!overlaps(p,record.base)) continue;
                 uint owners=0;
                 [loop] for (uint other=0; other<header.y; ++other)
@@ -210,6 +218,14 @@ bool ink_changed(uint4 counts, uint allowance, uint limit) {
 void confirm_mask_history(uint lane : SV_GroupIndex) {
     GlyphLine record=Lines[Slot];
     uint fill=PaletteWinners[0], outline=PaletteWinners[1];
+    if (fill==NoGlyphInk) {
+        if (lane==0) {
+            record.state.w=NoGlyphInk;
+            record.state.z=0u;
+            Lines[Slot]=record;
+        }
+        return;
+    }
     record.state.w=fill|(outline<<13);
     if (HasPrevious==0) {
         if (lane==0) Lines[Slot]=record;

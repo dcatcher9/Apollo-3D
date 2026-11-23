@@ -6829,6 +6829,7 @@ namespace models {
         .adaptive_context = subtitle_direct_glyph_adaptive_context,
         .profile = profile,
         .detector_caps = subtitle_direct_glyph_line_palette ? subtitle_current_outline_raw_matte.direct_detector_caps() : nullptr,
+        .video_caption_ocr = line_reference ? publication.ocr : nullptr,
         .line_center_twice_source = line_reference ? static_cast<UINT>(std::max(0, line_reference->center_twice_source)) : 0u,
         .generation = publication.analysis_generation, .frame = publication.frame,
         .subtitle_context_generation = pending_root->subtitle_context.generation,

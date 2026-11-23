@@ -174,23 +174,35 @@ float4 Lift(StructuredBuffer<float4> field, Taps t)
 // Break exact ties by the first RGB bin, matching the training palette.
 groupshared float2 Rank[256];
 groupshared uint2 RankId[256];
-groupshared float2 OutlineAndTotal[256];
+groupshared float3 LineEvidence[256];
 [numthreads(256, 1, 1)] void choose_colors(uint lane : SV_GroupIndex) {
-    float2 support = 0;
+    float3 support = 0;
     [loop] for (uint p = lane; p < 4913; p += 256)
     {
         float4 votes = PreviousHistogram[p];
-        support += float2(votes.z, dot(votes, 1.0f));
+        support.xy += float2(votes.z, dot(votes, 1.0f));
     }
-    OutlineAndTotal[lane] = support;
+    // Confirm a weak OCR line from the encoder before native color decoding can
+    // turn a textured background into ink. One supported site admits the whole line.
+    support.z = LinePlan[Slot].state.w == 0u ? 1.0f : 0.0f;
+    if (support.z == 0.0f) {
+        [loop] for (uint at = lane; at < EncoderWidth * Rows; at += 256u) {
+            float2 ink = Roles[at].yz;
+            if (ink.x + ink.y >= 0.4f) {
+                support.z = 1.0f;
+                break;
+            }
+        }
+    }
+    LineEvidence[lane] = support;
     GroupMemoryBarrierWithGroupSync();
     [unroll] for (uint stride = 128; stride > 0; stride >>= 1)
     {
         if (lane < stride)
-            OutlineAndTotal[lane] += OutlineAndTotal[lane + stride];
+            LineEvidence[lane] += LineEvidence[lane + stride];
         GroupMemoryBarrierWithGroupSync();
     }
-    float lineOutlineRate = OutlineAndTotal[0].x / max(OutlineAndTotal[0].y, 1.e-8f);
+    float lineOutlineRate = LineEvidence[0].x / max(LineEvidence[0].y, 1.e-8f);
     float2 best = -1;
     uint2 bestId = 0;
     [loop] for (uint p = lane; p < 4913; p += 256)
@@ -243,7 +255,7 @@ groupshared float2 OutlineAndTotal[256];
     }
     if (lane == 0)
     {
-        UintOut[0] = RankId[0].x;
+        UintOut[0] = LineEvidence[0].z > 0 ? RankId[0].x : NoGlyphInk;
         UintOut[1] = RankId[0].y;
     }
 } float Range(float3 v)
@@ -384,6 +396,10 @@ float2 InkMixEvidence(float3 color, float3 ink, float4 background)
     uint2 size = NativeSize();
     if (any(id.xy >= size))
         return;
+    if (Winners[0] == NoGlyphInk) {
+        FloatOut[id.y * size.x + id.x] = 0;
+        return;
+    }
     int2 p = int2(id.xy);
     float3 rgb = Source8(p), color = rgb / 255;
     Taps low = GetTaps(id.xy, size.y, Rows, EncoderWidth), hi = GetTaps(id.xy, size.y, DetailRows, DetailWidth);

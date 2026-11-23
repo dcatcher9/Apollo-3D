@@ -39,6 +39,7 @@ namespace models::host_sbs_direct_glyph_gpu {
     bool adaptive_context = false;
     tile_profile_e profile = tile_profile_e::common;
     ID3D11ShaderResourceView *detector_caps = nullptr;
+    ID3D11ShaderResourceView *video_caption_ocr = nullptr;
     UINT line_center_twice_source = 0;
     std::uint64_t generation = 0, frame = 0;
     std::uint64_t subtitle_context_generation = 0;

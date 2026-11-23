@@ -106,7 +106,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | `current_trusted_inner` | 1 | `5fdc9a1be98291902d63ca639f5bcfd80e88821b6df17bd083a23b5e09c32884` |
 | `direct_glyph_plan` | 2 | `3c1df1656492065c62c519ceffd49f3d1bc1d3a4e26c50ba0b8a2eead4dc2844` |
 | `direct_glyph_transport` | 4 | `2df402561c88d7e2b2672660e2f9d5f42b06d9815c87b48511adb05af6226b30` |
-| `direct_glyph_palette` | 17 | `29d3f839af3ffe68e480e12a909e8cd850461dabbf0622bd3aa7ce7786e9f0a9` |
+| `direct_glyph_palette` | 17 | `c955485dc93ba40eccb88dad2ac66b512876265326fcc83c903cd089ae1c0941` |
 | `direct_glyph_prepare` | 1 | `ebd78fb4d5a30345166f4dcbfb990817a41910172288cba9d7e90926c7764ffe` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->
 
@@ -436,6 +436,13 @@ On a fresh observation, depth inference and eligible OCR detection are sibling C
 The estimator waits for their joint completion and prepares the Base geometry and OCR work boxes
 before submitting Direct Glyph. The glyph model uses the source RGB inside those boxes.
 Its mask publication is on the path to delivering the new stereo geometry.
+For an ordinary video caption with an OCR8 mean score below 0.90, the palette
+pass checks the current line's encoder output. At least one owned encoder cell
+must assign a combined probability of 0.40 to glyph fill and outline. A line
+that passes receives the usual native opacity decoding, including its faint
+edges. A line that fails publishes zero opacity and cannot supply history to
+the next cue. The decision also applies on the first observation. Higher-scoring
+lines, bottom ribbons and application text retain their usual decoding.
 Each completed Direct Glyph observation retains its Base field and accompanying per-eye field, parallax state, selected
 mask, display band, condition, contour identity and receipt together. Cached draws can
 reuse that set while the next observation is being scored. Each draw still compares

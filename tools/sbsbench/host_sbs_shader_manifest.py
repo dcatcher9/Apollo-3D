@@ -948,7 +948,7 @@ DIRECT_GLYPH_PALETTE_GROUP = ClosureGroup(
         HOST_SBS_DIRECT_GLYPH_PUBLISH_LINE,
         HOST_SBS_DIRECT_GLYPH_FINISH_HISTORY,
     ),
-    source_closure_sha256="29d3f839af3ffe68e480e12a909e8cd850461dabbf0622bd3aa7ce7786e9f0a9",
+    source_closure_sha256="c955485dc93ba40eccb88dad2ac66b512876265326fcc83c903cd089ae1c0941",
 )
 
 DIRECT_GLYPH_PREPARE_GROUP = ClosureGroup(

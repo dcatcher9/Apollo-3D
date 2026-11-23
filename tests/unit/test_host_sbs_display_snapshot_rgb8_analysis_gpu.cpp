@@ -580,6 +580,16 @@ TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, DirectPublishesScaledScoresOnlyInCurre
 
 class HostSbsDirectGlyphPublishGpuTest: public HostSbsDisplaySnapshotRgb8GpuTest {
 protected:
+  buf_t structured(UINT count, UINT stride, const void *initial) {
+    buf_t b;
+    D3D11_BUFFER_DESC d {count * stride, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, 0u, D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, stride};
+    D3D11_SUBRESOURCE_DATA data {initial, 0, 0};
+    hr(device->CreateBuffer(&d, initial ? &data : nullptr, &b.buffer));
+    hr(device->CreateShaderResourceView(b.buffer.Get(), nullptr, &b.srv));
+    hr(device->CreateUnorderedAccessView(b.buffer.Get(), nullptr, &b.uav));
+    return b;
+  }
+
   void SetUp() override {
     constexpr auto level = D3D_FEATURE_LEVEL_11_0;
     ASSERT_TRUE(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0u, &level, 1u,
@@ -660,6 +670,8 @@ TEST_F(HostSbsDirectGlyphPublishGpuTest, CommonBackdropDoesNotDisplaceAnOutlineC
     return result;
   };
 
+  const std::array<UINT, 16> line {};
+  const auto plan = structured(1, sizeof(line), line.data());
   enum class PaintCase { common_backdrop, equal_role_fractions, bright_backdrop, broad_outline };
   const auto check_backdrop = [&](UINT glyph, PaintCase paint_case) {
     SCOPED_TRACE(glyph);
@@ -697,6 +709,7 @@ TEST_F(HostSbsDirectGlyphPublishGpuTest, CommonBackdropDoesNotDisplaceAnOutlineC
     context->CSSetConstantBuffers(0, 1, setup.GetAddressOf());
     context->CSSetShaderResources(4, 1, palette.GetAddressOf());
     context->CSSetShaderResources(10, 1, histogram.GetAddressOf());
+    context->CSSetShaderResources(11, 1, plan.srv.GetAddressOf());
     context->CSSetUnorderedAccessViews(0, 1, winners.uav.GetAddressOf(), nullptr);
     context->Dispatch(1, 1, 1);
     context->ClearState();
@@ -708,6 +721,44 @@ TEST_F(HostSbsDirectGlyphPublishGpuTest, CommonBackdropDoesNotDisplaceAnOutlineC
       check_backdrop(glyph, paint_case);
     }
   }
+}
+
+TEST_F(HostSbsDirectGlyphPublishGpuTest, WeakLineCanBeConfirmedByInkAnywhereInItsOwnedEncoderCells) {
+  const auto sources = cache::snapshot_sources(SUNSHINE_SHADERS_DIR, cache::direct_glyph_palette_specs);
+  ASSERT_TRUE(sources);
+  const auto code = cache::get(sources, cache::host_sbs_direct_glyph_palette_choose_colors);
+  ASSERT_TRUE(code);
+  ComPtr<ID3D11ComputeShader> shader;
+  hr(device->CreateComputeShader(code->data(), code->size(), nullptr, &shader));
+
+  using Roles = std::array<float, 4>; // background, fill, outline, shadow
+  constexpr UINT count = 512;
+  const std::vector<Roles> bins(2 * 4913);
+  const auto histogram = structured(static_cast<UINT>(bins.size()), sizeof(Roles), bins.data());
+  const auto classify = [&](bool weak, float last_outline) {
+    std::array<UINT, 16> line {};
+    line[15] = weak;
+    const auto plan = structured(1, sizeof(line), line.data());
+    std::vector<Roles> predictions(count + 1, {0.05f, 0.10f, 0.10f, 0.75f});
+    predictions[count - 1] = {0.5f - last_outline, 0.2f, last_outline, 0.3f};
+    predictions[count] = {0, 1, 0, 0}; // Stale capacity past the end of this line.
+    const auto roles = structured(count + 1, sizeof(Roles), predictions.data());
+    const auto winners = buffer(2, false, false, true);
+    const auto setup = constants(std::array<UINT, 8> {0, count / 2, 0, 0, 1, 1, 1, 2});
+    context->CSSetShader(shader.Get(), nullptr, 0);
+    context->CSSetConstantBuffers(0, 1, setup.GetAddressOf());
+    context->CSSetShaderResources(1, 1, roles.srv.GetAddressOf());
+    context->CSSetShaderResources(4, 1, histogram.srv.GetAddressOf());
+    context->CSSetShaderResources(10, 1, histogram.srv.GetAddressOf());
+    context->CSSetShaderResources(11, 1, plan.srv.GetAddressOf());
+    context->CSSetUnorderedAccessViews(0, 1, winners.uav.GetAddressOf(), nullptr);
+    context->Dispatch(1, 1, 1);
+    context->ClearState();
+    return words(read(winners.buffer.Get()))[0];
+  };
+  EXPECT_EQ(classify(true, 0.19f), 0xffffffffu);
+  EXPECT_EQ(classify(true, 0.20f), 0u);
+  EXPECT_EQ(classify(false, 0.19f), 0u);
 }
 
 TEST_F(HostSbsDirectGlyphPublishGpuTest, ResolvedFringeRequiresCurrentCompletedTapsAndQ64) {
@@ -840,15 +891,6 @@ TEST_F(HostSbsDirectGlyphPublishGpuTest, NativeHistoryRequiresOneMatchingCueInsi
   const auto finish = load(cache::host_sbs_direct_glyph_finish_windows);
   const auto confirm_mask = load(cache::host_sbs_direct_glyph_confirm_mask_history);
   const auto scatter = load(cache::host_sbs_direct_glyph_publish_line);
-  const auto structured = [&](UINT count, UINT stride, const void *initial) {
-    buf_t b;
-    D3D11_BUFFER_DESC d {count * stride, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, 0u, D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, stride};
-    D3D11_SUBRESOURCE_DATA data {initial, 0, 0};
-    hr(device->CreateBuffer(&d, initial ? &data : nullptr, &b.buffer));
-    hr(device->CreateShaderResourceView(b.buffer.Get(), nullptr, &b.srv));
-    hr(device->CreateUnorderedAccessView(b.buffer.Get(), nullptr, &b.uav));
-    return b;
-  };
   const std::array<UINT, 4> old_box {10, 8, 82, 40}, current_box {16, 10, 80, 38}, cap_box {12, 6, 84, 42};
   std::array<UINT, 8 * 16> old {};
   const std::array<UINT, 2> ink_bins {0u, 4912u}; // Black fill and white outline.
