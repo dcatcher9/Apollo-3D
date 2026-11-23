@@ -166,14 +166,14 @@ class palette_transport_t {
 
   void encode(UINT tiles) {
     constexpr UINT count = 2;
-    require(execution_->setInputShape("rgb", nvinfer1::Dims4 {int(tiles), 3, int(tile_height), int(tile_width)}), "Select native glyph tile batch");
+    require(execution_->setInputShape("rgb", nvinfer1::Dims4 {int(tiles), 3, int(palette_tile.height), int(palette_tile.width)}), "Select native glyph tile batch");
     cuda_outstanding_ = true;
     check_cuda(cuda_.cuGraphicsMapResources(count, interop_.data(), stream_), "Map native glyph encoder bindings");
     std::array<CUdeviceptr, count> addr {};
     for (UINT i = 0; i < count; ++i) {
       std::size_t bytes = 0;
       check_cuda(cuda_.cuGraphicsResourceGetMappedPointer(&addr[i], &bytes, interop_[i]), "Map native glyph tensor");
-      require(addr[i] && bytes == sizeof(float) * (i == 0 ? input_atlas_words : output_atlas_words), "Native glyph encoder tensor extent mismatch");
+      require(addr[i] && bytes == sizeof(float) * (i == 0 ? palette_input_words : palette_output_words), "Native glyph encoder tensor extent mismatch");
     }
     require(execution_->setTensorAddress("rgb", reinterpret_cast<void *>(addr[0])) && execution_->setTensorAddress("logits", reinterpret_cast<void *>(addr[1])), "Bind mixed native glyph encoder");
     require(execution_->enqueueV3(stream_), "Submit mixed native glyph tile batch");
@@ -249,7 +249,7 @@ class palette_transport_t {
       const UINT remaining_tiles = div_up(remaining, 440u);
       const UINT batches = div_up(remaining_tiles, tile_capacity);
       const UINT tiles = div_up(remaining_tiles, batches);
-      stage(pack_tile, tile_start_, 32, 18, {{7, low_.srv.Get()}}, input_, nullptr, tiles);
+      stage(pack_tile, tile_start_, div_up(palette_tile.width, 16), div_up(palette_tile.height, 8), {{7, low_.srv.Get()}}, input_, nullptr, tiles);
       encode(tiles);
       stage(export_roles, tile_start_, div_up(std::min(440u, remaining), 16), 4, {{12, logits_.srv.Get()}}, roles_, nullptr, tiles);
       tile_start_ += tiles * 440u;
@@ -312,8 +312,8 @@ public:
       require(code && SUCCEEDED(device->CreateComputeShader(code->data(), code->size(), nullptr, &shaders_[i])), "Prepare native glyph shader program");
     }
     execution_ = execution;
-    require(execution_->setInputShape("rgb", nvinfer1::Dims4 {int(tile_capacity), 3, int(tile_height), int(tile_width)}) &&
-            execution_->getMaxOutputSize("logits") == sizeof(float) * output_atlas_words, "Native glyph requires the bounded mixed tile batch");
+    require(execution_->setInputShape("rgb", nvinfer1::Dims4 {int(tile_capacity), 3, int(palette_tile.height), int(palette_tile.width)}) &&
+            execution_->getMaxOutputSize("logits") == sizeof(float) * palette_output_words, "Native glyph requires the bounded mixed tile batch");
     require(cuda_.is_valid() && cuda_.cuD3D11GetDevice && cuda_.cuDevicePrimaryCtxRetain && cuda_.cuDevicePrimaryCtxRelease, "Native glyph CUDA interop is unavailable");
     ComPtr<IDXGIDevice> dx;
     ComPtr<IDXGIAdapter> adapter;
@@ -323,8 +323,8 @@ public:
     require(primary_ == primary, "Native glyph context belongs to a different CUDA primary");
     const current_cuda_context_t guard(cuda_, primary_);
     check_cuda(cuda_.cuStreamCreate(&stream_, CU_STREAM_NON_BLOCKING), "Create bounded native glyph stream");
-    ensure(input_, input_atlas_words, 4);
-    ensure(logits_, output_atlas_words, 4);
+    ensure(input_, palette_input_words, 4);
+    ensure(logits_, palette_output_words, 4);
     check_cuda(cuda_.cuGraphicsD3D11RegisterResource(&interop_[0], input_.buffer.Get(), 0), "Register native glyph RGB");
     check_cuda(cuda_.cuGraphicsD3D11RegisterResource(&interop_[1], logits_.buffer.Get(), 0), "Register native glyph logits");
     constants_ = make_buffer({32, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0});

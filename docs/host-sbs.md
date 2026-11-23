@@ -106,7 +106,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | `current_trusted_inner` | 1 | `5fdc9a1be98291902d63ca639f5bcfd80e88821b6df17bd083a23b5e09c32884` |
 | `direct_glyph_plan` | 2 | `3c1df1656492065c62c519ceffd49f3d1bc1d3a4e26c50ba0b8a2eead4dc2844` |
 | `direct_glyph_transport` | 4 | `2df402561c88d7e2b2672660e2f9d5f42b06d9815c87b48511adb05af6226b30` |
-| `direct_glyph_palette` | 17 | `7b4d16cace20e85c23475fbb1a934d9711833c269eb6ab17475e7ac0d166f7c1` |
+| `direct_glyph_palette` | 17 | `d534135465ef22982027a21650764a6e1b1ab31f8705111f81466ddf5835be1a` |
 | `direct_glyph_prepare` | 1 | `ebd78fb4d5a30345166f4dcbfb990817a41910172288cba9d7e90926c7764ffe` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->
 
@@ -465,7 +465,9 @@ side toward symmetry by at most one working-rectangle height, within the same co
 This includes isolated strokes near the ends of centered lines. The encoder scales the
 entire resulting rectangle to 28 rows,
 preserves its aspect ratio, and processes long lines in 440-column windows of the
-512×144 mixed TensorRT profile. Its ONNX export declares a symbolic batch axis
+512×100 mixed TensorRT profile. The 28 normalized rows are centered between 36 replicated
+rows on either side, covering the encoder's receptive field and preserving its pooling alignment.
+Its ONNX export declares a symbolic batch axis
 with the same weights and operations. The scheduler divides each line evenly across the fewest
 TensorRT batches that fit up to six windows each. A nine-window line runs in batches of five and four.
 Each observation owns its execution context until the GPU has consumed the

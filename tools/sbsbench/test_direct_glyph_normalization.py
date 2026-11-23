@@ -3,9 +3,9 @@ import unittest
 import numpy as np
 
 try:
-    from .direct_glyph_normalization import normalize_region, score_region
+    from .direct_glyph_normalization import normalize_region, normalized_tiles, score_region
 except ImportError:
-    from direct_glyph_normalization import normalize_region, score_region
+    from direct_glyph_normalization import normalize_region, normalized_tiles, score_region
 
 
 def echo_alpha(rgb):
@@ -15,6 +15,16 @@ def echo_alpha(rgb):
 
 
 class ExpandedBoxNormalizationTests(unittest.TestCase):
+    def test_compact_encoder_preserves_the_owned_rows_and_their_halo_across_tiles(self):
+        source = np.arange(28 * 881).reshape(28, 881)
+        original = normalized_tiles(source, 512, 144)
+        compact = normalized_tiles(source, 512, 100)
+        for (left, right, owned, tile), (new_left, new_right, new_owned, cropped) in zip(original, compact, strict=True):
+            self.assertEqual((new_left, new_right), (left, right))
+            self.assertEqual(new_owned[0], slice(36, 64))
+            np.testing.assert_array_equal(cropped[new_owned], tile[owned])
+            np.testing.assert_array_equal(cropped, tile[20:120])
+
     def test_every_native_pixel_including_last_row_and_long_tile_seams(self):
         for h, w, target in [(1, 1, 28), (23, 997, 49), (107, 3840, 28), (179, 973, 49)]:
             with self.subTest(shape=(h, w), target=target):

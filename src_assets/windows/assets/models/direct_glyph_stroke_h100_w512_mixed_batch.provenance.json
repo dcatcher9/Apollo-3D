@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "model": "direct_glyph",
+  "artifact": {
+    "path": "models/direct_glyph_stroke_h100_w512_mixed_batch.onnx",
+    "bytes": 40432,
+    "sha256": "815536c2c23974fb0c73c7f72e5a55cf4691d5319ed8dcaecaf684901c3b44f2"
+  },
+  "source_onnx": {
+    "file": "direct_glyph_stroke_h144_w512_fp32.onnx",
+    "sha256": "d30ddc9f381a59efb0ccbade075eb6e73f785b798e51536a36b257dcafc7def8"
+  },
+  "exporter": "tools/sbsbench/export_direct_glyph_mixed_precision.py",
+  "export_args": ["--dynamic-batch", "--tile-height", "100"],
+  "input": {"name": "rgb", "type": "FP32", "shape": ["tiles", 3, 100, 512]},
+  "output": {"name": "logits", "type": "FP32", "shape": ["tiles", 4, 100, 512]}
+}

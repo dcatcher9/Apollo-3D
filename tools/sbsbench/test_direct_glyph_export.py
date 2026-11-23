@@ -12,9 +12,9 @@ class DirectGlyphExportTests(unittest.TestCase):
         repo = Path(__file__).resolve().parents[2]
         assets = repo / "src_assets/windows/assets"
         with tempfile.TemporaryDirectory() as directory:
-            for variant in ("mixed", "mixed_batch"):
-                with self.subTest(variant=variant):
-                    receipt = assets / "models" / f"direct_glyph_stroke_h144_w512_{variant}.provenance.json"
+            for height, variant in ((144, "mixed"), (100, "mixed_batch")):
+                with self.subTest(height=height, variant=variant):
+                    receipt = assets / "models" / f"direct_glyph_stroke_h{height}_w512_{variant}.provenance.json"
                     spec = json.loads(receipt.read_text(encoding="utf-8"))
                     source = receipt.parent / spec["source_onnx"]["file"]
                     self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), spec["source_onnx"]["sha256"])
@@ -23,4 +23,5 @@ class DirectGlyphExportTests(unittest.TestCase):
                                     *spec.get("export_args", [])], check=True)
                     model = output.read_bytes()
                     self.assertEqual(model, (assets / spec["artifact"]["path"]).read_bytes())
+                    self.assertEqual(len(model), spec["artifact"]["bytes"])
                     self.assertEqual(hashlib.sha256(model).hexdigest(), spec["artifact"]["sha256"])

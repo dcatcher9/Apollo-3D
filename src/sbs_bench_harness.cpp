@@ -8205,7 +8205,8 @@ namespace sbs_bench {
         namespace shader = models::host_sbs_shader_cache;
         if (!qualified_direct_glyph_profile) return 8;
         const auto profile = *qualified_direct_glyph_profile;
-        const auto tile = models::host_sbs_direct_glyph_gpu::tile_shape(profile);
+        const auto tile = o.current_outline_direct_glyph_palette ? models::host_sbs_direct_glyph_gpu::palette_tile :
+                          models::host_sbs_direct_glyph_gpu::tile_shape(profile);
         const auto engine_digest = sha256_file_hex(estimator->direct_glyph_engine_path_for_evaluation());
         const UINT schema = o.current_outline_direct_glyph_palette ? 6u : o.current_outline_direct_glyph_resolved_fringe ? 5u :
           o.current_outline_direct_glyph_adaptive_context ? 4u : 3u;

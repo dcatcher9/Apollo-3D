@@ -45,7 +45,7 @@ static bool build_direct_glyph_engine(const direct_glyph_artifact_t &artifact, b
     static_assert(tile_capacity == 6u);
     auto *input = network->getInput(0);
     const auto shape = [](int tiles) {
-      return nvinfer1::Dims4 {tiles, 3, int(tile_height), int(tile_width)};
+      return nvinfer1::Dims4 {tiles, 3, int(palette_tile.height), int(palette_tile.width)};
     };
     auto *profile = builder->createOptimizationProfile();
     using point = nvinfer1::OptProfileSelector;
@@ -234,7 +234,7 @@ static bool acquire_direct_glyph_context(
       return false;
     }
   }
-  const auto shape = host_sbs_direct_glyph_gpu::tile_shape(profile);
+  const auto shape = batched_tiles ? host_sbs_direct_glyph_gpu::palette_tile : host_sbs_direct_glyph_gpu::tile_shape(profile);
   if (!bind_direct_glyph_shape(*leased_context, shape, batched_tiles) ||
       (reserved && !warmup_direct_glyph_context(cuda, *leased_context, shape))) {
     std::lock_guard lock(g_trt_mutex);

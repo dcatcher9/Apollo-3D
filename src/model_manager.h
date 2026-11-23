@@ -102,9 +102,9 @@ namespace models {
         if (batched_tiles) {
             if (profile != tile_profile_e::common) return {};
             return {
-                "models/direct_glyph_stroke_h144_w512_mixed_batch.onnx",
-                "bd43d5d947193c0e7c628f53b3a912ea9b379d95bde00f91ae03240c3d46832e",
-                "stroke-h144-w512-fp16conv-fp32scores-notf32-batch1-4-6-v1",
+                "models/direct_glyph_stroke_h100_w512_mixed_batch.onnx",
+                "815536c2c23974fb0c73c7f72e5a55cf4691d5319ed8dcaecaf684901c3b44f2",
+                "stroke-h100-w512-fp16conv-fp32scores-notf32-batch1-4-6-v1",
             };
         }
         switch (profile) {

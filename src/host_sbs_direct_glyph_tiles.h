@@ -34,6 +34,8 @@ namespace models::host_sbs_direct_glyph_gpu {
 
   inline constexpr auto common_tile = tile_shape(tile_profile_e::common);
   inline constexpr auto small_tile = tile_shape(tile_profile_e::small);
+  // The mixed batch encoder needs 36 rows of context on each side of its 28 owned rows.
+  inline constexpr tile_shape_t palette_tile {common_tile.width, 36u + 28u + 36u};
   static_assert(small_tile.input_words() <= common_tile.input_words() &&
                 small_tile.output_words() <= common_tile.output_words());
   static_assert(tile_profile_for_band(640u, 107u, 253u) == tile_profile_e::small);
@@ -41,6 +43,8 @@ namespace models::host_sbs_direct_glyph_gpu {
   inline constexpr unsigned int tile_width = common_tile.width;
   inline constexpr unsigned int tile_height = common_tile.height;
   inline constexpr unsigned int tile_capacity = 6u;
+  inline constexpr unsigned int palette_input_words = tile_capacity * palette_tile.input_words();
+  inline constexpr unsigned int palette_output_words = tile_capacity * palette_tile.output_words();
   inline constexpr unsigned int tile_input_words = common_tile.input_words();
   inline constexpr unsigned int tile_output_words = common_tile.output_words();
   inline constexpr unsigned int placement_words = 4u + 8u * tile_capacity;

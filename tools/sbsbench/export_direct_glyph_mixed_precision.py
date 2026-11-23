@@ -8,7 +8,7 @@ import onnx
 from onnx import TensorProto, helper, numpy_helper
 
 
-def export(source: Path, destination: Path, *, dynamic_batch: bool = False) -> None:
+def export(source: Path, destination: Path, *, dynamic_batch: bool = False, tile_height: int | None = None) -> None:
     if source.resolve() == destination.resolve():
         raise ValueError("Choose a separate destination for the mixed-precision graph")
     model = onnx.load(source)
@@ -57,6 +57,13 @@ def export(source: Path, destination: Path, *, dynamic_batch: bool = False) -> N
     if dynamic_batch:
         for tensor in (graph.input[0], graph.output[0]):
             tensor.type.tensor_type.shape.dim[0].dim_param = "tiles"
+    if tile_height is not None:
+        # The H28 output needs a 36-row halo and the two pooling layers need four-row alignment.
+        for tensor in (graph.input[0], graph.output[0]):
+            height = tensor.type.tensor_type.shape.dim[2]
+            if tile_height < 100 or tile_height % 4 or tile_height > height.dim_value:
+                raise ValueError("Tile height must preserve the H28 receptive field and pooling alignment")
+            height.dim_value = tile_height
     onnx.checker.check_model(model, full_check=True)
     onnx.save(model, destination)
 
@@ -66,5 +73,6 @@ if __name__ == "__main__":
     parser.add_argument("source", type=Path)
     parser.add_argument("destination", type=Path)
     parser.add_argument("--dynamic-batch", action="store_true", help="Export the shipping encoder with a symbolic tile batch axis")
+    parser.add_argument("--tile-height", type=int, help="Crop vertically replicated context to this input height")
     args = parser.parse_args()
-    export(args.source, args.destination, dynamic_batch=args.dynamic_batch)
+    export(args.source, args.destination, dynamic_batch=args.dynamic_batch, tile_height=args.tile_height)
