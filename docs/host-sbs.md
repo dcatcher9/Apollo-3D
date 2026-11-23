@@ -432,6 +432,10 @@ palette decoder for subtitle protection. Convolutions run in FP16. The RGB
 interface, log probabilities and native decoder use FP32.
 Setup authenticates the model and its shared-warp programs before the first frame.
 Setup or scoring failure uses ordinary Base stereo without glyph protection.
+On a fresh observation, depth inference and eligible OCR detection are sibling CUDA graph nodes.
+The estimator waits for their joint completion and prepares the Base geometry and OCR work boxes
+before submitting Direct Glyph. The glyph model uses the source RGB inside those boxes.
+Its mask publication is on the path to delivering the new stereo geometry.
 Each completed Direct Glyph observation retains its Base field and accompanying per-eye field, parallax state, selected
 mask, display band, condition, contour identity and receipt together. Cached draws can
 reuse that set while the next observation is being scored. Each draw still compares
@@ -462,8 +466,9 @@ This includes isolated strokes near the ends of centered lines. The encoder scal
 entire resulting rectangle to 28 rows,
 preserves its aspect ratio, and processes long lines in 440-column windows of the
 512×144 mixed TensorRT profile. Its ONNX export declares a symbolic batch axis
-with the same weights and operations. Up to six windows from a line share one TensorRT
-batch. Each observation owns its execution context until the GPU has consumed the
+with the same weights and operations. The scheduler divides each line evenly across the fewest
+TensorRT batches that fit up to six windows each. A nine-window line runs in batches of five and four.
+Each observation owns its execution context until the GPU has consumed the
 batch and exported its scores. The 36-column horizontal context on each side stays
 outside the window's owned output. Aligned RGB at 84 rows supplies local background color
 and variance. At each native pixel the decoder also estimates how much of the line’s

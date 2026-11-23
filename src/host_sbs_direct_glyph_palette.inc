@@ -245,7 +245,10 @@ class palette_transport_t {
         begin_line(w, h);
       }
       const UINT remaining = w28_ - tile_start_;
-      const UINT tiles = std::min(tile_capacity, div_up(remaining, 440u));
+      // Balance the tiles across the fewest submissions to avoid a small final batch.
+      const UINT remaining_tiles = div_up(remaining, 440u);
+      const UINT batches = div_up(remaining_tiles, tile_capacity);
+      const UINT tiles = div_up(remaining_tiles, batches);
       stage(pack_tile, tile_start_, 32, 18, {{7, low_.srv.Get()}}, input_, nullptr, tiles);
       encode(tiles);
       stage(export_roles, tile_start_, div_up(std::min(440u, remaining), 16), 4, {{12, logits_.srv.Get()}}, roles_, nullptr, tiles);
