@@ -256,6 +256,44 @@ void confirm_mask_history(uint lane : SV_GroupIndex) {
     }
 }
 
+void publish_upper_tip(GlyphLine record, uint2 p, float alpha) {
+    if (alpha < 0.85f || p.y <= record.cover.y) return;
+    int3 ink = rgb8(CurrentSource, p);
+    if (!matches_ink(ink, int3(PalColor(record.state.w & 8191u)), int3(PalColor(record.state.w >> 13u)))) return;
+
+    uint allowance = min((record.box.w - record.box.y + 7u) / 8u, p.y - record.cover.y);
+    // Stop at the first transition away from the ink colour. A uniform background
+    // reaching beyond the allowance provides no evidence of a stroke ending here.
+    uint distance = 1;
+    [loop] for (; distance <= allowance; ++distance) {
+        int3 delta = abs(rgb8(CurrentSource, p - uint2(0, distance)) - ink);
+        if (max(delta.r, max(delta.g, delta.b)) > 32) break;
+    }
+    if (distance == 1 || distance > allowance) return;
+
+    uint outside = min(distance + 1u, p.y - record.cover.y);
+    int3 delta = abs(rgb8(CurrentSource, p - uint2(0, outside)) - ink);
+    int contrast = max(delta.r, max(delta.g, delta.b));
+    if (contrast < 48) return;
+
+    uint top = p.y;
+    [loop] for (uint dy = 1; dy <= distance; ++dy) {
+        int3 diff = abs(rgb8(CurrentSource, p - uint2(0, dy)) - ink);
+        float coverage = saturate(1.0f - float(max(diff.r, max(diff.g, diff.b))) / float(contrast));
+        uint q = uint(round(255.0f * alpha * coverage));
+        if (q >= 38u) {
+            InterlockedMax(Protection[p - uint2(0, dy)], q);
+            top = p.y - dy;
+        }
+    }
+    if (top < p.y) {
+        uint ignored;
+        Work.InterlockedMin(20u + 16u * Slot, top, ignored);
+    }
+}
+
+
+
 [numthreads(16,8,1)]
 void publish_line(uint3 id: SV_DispatchThreadID) {
     GlyphLine record=Planned[Slot];
@@ -278,6 +316,7 @@ void publish_line(uint3 id: SV_DispatchThreadID) {
         }
     }
     InterlockedMax(Protection[p],uint(round(saturate(a)*255)));
+    if (id.y == 0u) publish_upper_tip(record, p, min(a, LineAlpha[id.x]));
 }
 
 [numthreads(1,1,1)]

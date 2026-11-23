@@ -106,7 +106,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | `current_trusted_inner` | 1 | `5fdc9a1be98291902d63ca639f5bcfd80e88821b6df17bd083a23b5e09c32884` |
 | `direct_glyph_plan` | 2 | `3c1df1656492065c62c519ceffd49f3d1bc1d3a4e26c50ba0b8a2eead4dc2844` |
 | `direct_glyph_transport` | 4 | `2df402561c88d7e2b2672660e2f9d5f42b06d9815c87b48511adb05af6226b30` |
-| `direct_glyph_palette` | 17 | `a6bc9577a2564e369e33237bf3fef1b760e585ca4abbc5c10a255d1af42588b5` |
+| `direct_glyph_palette` | 17 | `83879f032bcedd285a77588d7c2beb371fea63f0a39348b1b07206c0fd2c8872` |
 | `direct_glyph_prepare` | 1 | `ebd78fb4d5a30345166f4dcbfb990817a41910172288cba9d7e90926c7764ffe` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->
 
@@ -483,6 +483,11 @@ The native opacity decoder trains on libass fill, outline and shadow layers, inc
 light and dark glyphs with the same geometry. Its protection target is the union of fill
 and visible outline. The training uses the same mixed-precision encoder as inference.
 A learned per-pixel correction uses local stroke evidence to adjust the line-wide RGB outline vote before opacity decoding. It shares the native decode dispatch and the mixed encoder.
+When a high-confidence stroke meets the top of the inference rectangle, the publisher checks
+the same column for a continuation of the predicted ink color. It looks up to one eighth of
+the line rectangle's height, within the original detector cover. A transition to a contrasting
+background bounds the tip and sets its antialiased coverage. Only columns with that evidence
+gain protected pixels. The inference rectangle and tile count stay the same.
 When choosing the representative outline color, the GPU compares each RGB bin's observed
 outline fraction with the outline fraction across the line. A bin below that rate receives
 a proportional discount. This keeps a frequent background color with weak outline evidence
