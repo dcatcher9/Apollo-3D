@@ -84,14 +84,18 @@ install(DIRECTORY "${SUNSHINE_SOURCE_ASSETS_DIR}/windows/assets/"
         COMPONENT assets)
 
 # Stage bundled models with their provenance when either changes in an incremental build.
-set(model_assets_dir "${SUNSHINE_SOURCE_ASSETS_DIR}/windows/assets/models")
-file(GLOB_RECURSE bundled_models CONFIGURE_DEPENDS RELATIVE "${model_assets_dir}" "${model_assets_dir}/*")
+set(windows_assets_dir "${SUNSHINE_SOURCE_ASSETS_DIR}/windows/assets")
+set(depth_model prod_dav2_zipdepth_c2x_high_opset18)
+file(GLOB_RECURSE bundled_models CONFIGURE_DEPENDS RELATIVE "${windows_assets_dir}" "${windows_assets_dir}/models/*")
+list(APPEND bundled_models "${depth_model}.onnx" "${depth_model}.provenance.json")
 foreach(model IN LISTS bundled_models)
-    configure_file("${model_assets_dir}/${model}" "${CMAKE_BINARY_DIR}/assets/models/${model}" COPYONLY)
+    configure_file("${windows_assets_dir}/${model}" "${CMAKE_BINARY_DIR}/assets/${model}" COPYONLY)
 endforeach()
 # Copy the remaining assets for running without install.
-file(COPY "${SUNSHINE_SOURCE_ASSETS_DIR}/windows/assets/"
+file(COPY "${windows_assets_dir}/"
         DESTINATION "${CMAKE_BINARY_DIR}/assets"
+        PATTERN "${depth_model}.onnx" EXCLUDE
+        PATTERN "${depth_model}.provenance.json" EXCLUDE
         PATTERN "models" EXCLUDE
         PATTERN "shaders" EXCLUDE)
 # use junction for shaders directory

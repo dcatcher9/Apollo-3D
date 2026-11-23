@@ -89,9 +89,13 @@ class SharedUiPinDumpTests(unittest.TestCase):
     def test_legacy_packages_keep_their_original_attribution(self):
         self.assertFalse(pin.verify(self.root, {"renderer": {}})["shared_pin_selected"])
 
-    def current_attribution(self, kind=pin.KIND):
-        closure = pin._expected_closure(kind)
-        self.manifest["schema"] = 51
+    def current_attribution(self, kind=pin.KIND, *, single_band_split=False):
+        closure = pin.SINGLE_BAND_SPLIT_CLOSURES[kind] if single_band_split else pin._expected_closure(kind)
+        eyes = 1 if single_band_split or kind == pin.KIND else 2
+        for name in pin.ARTIFACTS[:2]:
+            band = (self.root / name).read_bytes()[:2 * 8 * 4]
+            self.save(name, band * eyes, (8, 2 * eyes, 41))
+        self.manifest["schema"] = 52
         self.manifest["renderer"]["actual_draw_renderer"] = {
             "schema": 2, "kind": kind, "source_closure_sha256": closure,
             "mapping_role": pin.SHARED_ROLE, "evidence_artifact": pin.EVIDENCE}
@@ -107,11 +111,12 @@ class SharedUiPinDumpTests(unittest.TestCase):
         self.assertTrue(summary["actual_map_verified"])
         self.assertEqual(summary["evidence_schema"], 2)
 
-    def use_hybrid_prepare(self, kind=4, algorithm=3):
+    def use_hybrid_prepare(self, kind=4, algorithm=3, prepare=None):
         receipt = [0] * 64
         receipt[:4] = (0x31534D53, 1, kind, 0)
         receipt[60:] = (7, 8, algorithm, 0)
-        self.evidence["shared_pin"]["model_prepare_source_closure_sha256"] = pin._runtime_closure("raw_model_prepare_closure")
+        self.evidence["shared_pin"]["model_prepare_source_closure_sha256"] = (
+            prepare if prepare is not None else pin._runtime_closure("raw_model_prepare_closure"))
         self.evidence["binding_roles"]["t7"] = pin.SELECTED_RECEIPT
         self.evidence["selected_receipt_header"] = receipt[:4]
         self.evidence["selected_receipt_token_algorithm"] = receipt[60:]
@@ -126,6 +131,43 @@ class SharedUiPinDumpTests(unittest.TestCase):
                 summary = pin.verify(self.root, self.manifest)
                 self.assertTrue(summary["actual_map_verified"])
                 self.assertEqual(summary["verified_selected_matte_kind"], expected)
+
+    def test_completed_draw_binds_prepare_generation_and_receipt_algorithm(self):
+        previous = (pin.SINGLE_BAND_RAW_PREPARE, pin.SINGLE_BAND_DIRECT_PREPARE)
+        current = (pin._runtime_closure("raw_model_prepare_closure"),
+                   pin.DIRECT_GLYPH_PREPARE_GROUP.source_closure_sha256)
+        for archived, (raw, direct), other_generation in ((True, previous, current), (False, current, previous)):
+            with self.subTest(archived=archived):
+                self.current_attribution(pin.COMPLETED_KIND, single_band_split=archived)
+                for prepare, algorithm, role in ((raw, 3, "hybrid"), (direct, 4, "direct-glyph")):
+                    self.use_hybrid_prepare(algorithm=algorithm, prepare=prepare)
+                    result = pin.verify(self.root, self.manifest)
+                    self.assertEqual(result["eye_copies"], 1 if archived else 2)
+                    self.assertEqual(result["verified_selected_matte_kind"], role)
+                self.use_hybrid_prepare(algorithm=4, prepare=raw)
+                with self.assertRaisesRegex(ValueError, "unexpected selected receipt"):
+                    pin.verify(self.root, self.manifest)
+                for prepare in (*other_generation, "0" * 64):
+                    self.use_hybrid_prepare(prepare=prepare)
+                    with self.assertRaisesRegex(ValueError, "unknown source or route"):
+                        pin.verify(self.root, self.manifest)
+
+    def test_queued_draw_binds_the_field_layout_and_own_shader_in_each_generation(self):
+        for archived in (True, False):
+            with self.subTest(archived=archived):
+                self.current_attribution(pin.QUEUED_KIND, single_band_split=archived)
+                self.assertEqual(pin.verify(self.root, self.manifest)["eye_copies"], 1 if archived else 2)
+                for name in pin.ARTIFACTS[:2]:
+                    band = (self.root / name).read_bytes()[:2 * 8 * 4]
+                    eyes = 2 if archived else 1
+                    self.save(name, band * eyes, (8, 2 * eyes, 41))
+                self.seal()
+                with self.assertRaisesRegex(ValueError, "exact texture layout"):
+                    pin.verify(self.root, self.manifest)
+                draw = self.manifest["renderer"]["actual_draw_renderer"]
+                draw["source_closure_sha256"] = pin.SINGLE_BAND_SPLIT_CLOSURES[pin.COMPLETED_KIND]
+                with self.assertRaisesRegex(ValueError, "unknown source or map"):
+                    pin.verify(self.root, self.manifest)
 
     def test_hybrid_prepare_rejects_another_route_or_another_receipt_kind(self):
         self.current_attribution(pin.QUEUED_KIND)

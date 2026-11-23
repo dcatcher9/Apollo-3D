@@ -779,6 +779,34 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
                 dump_contract.validate_v2_dump_manifest_document(changed)
 
 
+    def test_schema52_binds_archived_renderer_draw_and_fused_model_as_one_capture(self):
+        pin = dump_contract.shared_ui_pin_dump
+        archived = copy.deepcopy(self.manifest)
+        self._set_manifest_capture_grid(archived, 1540, 868)
+        renderer = archived["renderer"]
+        live = renderer["live_shader_source"]
+        live["source_closure_sha256"], live["diagnostic_source_closure_sha256"] = (
+            dump_contract._SINGLE_BAND_RENDERER_SOURCES)
+        draw = renderer["actual_draw_renderer"]
+        draw.update(kind=pin.COMPLETED_KIND, mapping_role=pin.SHARED_ROLE,
+                    source_closure_sha256=pin.SINGLE_BAND_SPLIT_CLOSURES[pin.COMPLETED_KIND])
+        proof = self._composite_runtime_provenance()
+        current_model = proof["onnx_sha256"]
+        proof["onnx_sha256"] = dump_contract._SINGLE_BAND_FUSED_ONNX
+        archived["composite_runtime_provenance"] = proof
+        self.assertEqual(dump_contract.validate_v2_dump_manifest_document(archived)["capture_grid_kind"],
+                         "single-high-convex2x")
+        with self.assertRaisesRegex(ValueError, "unauthenticated.*composite"):
+            dump_contract.validate_composite_runtime_provenance(proof)
+        for obj, key, replacement, reason in (
+                (live, "source_closure_sha256", dump_contract.LIVE_RENDERER_SOURCE_CLOSURE_SHA256, "conditioner attribution"),
+                (live, "diagnostic_source_closure_sha256", dump_contract.DIAGNOSTIC_SOURCE_CLOSURE_SHA256, "conditioner attribution"),
+                (draw, "source_closure_sha256", pin._expected_closure(pin.COMPLETED_KIND), "generations"),
+                (proof, "onnx_sha256", current_model, "unauthenticated.*composite")):
+            with self.subTest(key=key), mock.patch.dict(obj, {key: replacement}):
+                with self.assertRaisesRegex(ValueError, reason):
+                    dump_contract.validate_v2_dump_manifest_document(archived)
+
     def test_schema46_accepts_exact_single_high_grid_and_rejects_split_or_arbitrary_high(self):
         high = copy.deepcopy(self.manifest)
         self._set_manifest_capture_grid(high, 1540, 868)

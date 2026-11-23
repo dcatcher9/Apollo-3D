@@ -305,7 +305,8 @@ def inspect_dump(dump: Path) -> RawModelProvenance:
             composite_runtime,
             expected_dav2_onnx_sha256=onnx_digest,
             expected_preprocess_source_closure_sha256=
-                preprocess_source_closure_sha256)
+                preprocess_source_closure_sha256,
+            capture_manifest=manifest)
     elif composite_runtime is not None:
         raise ValueError(
             "legacy DAV2 raw capture must not claim fused composite runtime provenance")

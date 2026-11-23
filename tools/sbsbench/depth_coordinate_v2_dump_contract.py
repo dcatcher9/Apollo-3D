@@ -115,6 +115,12 @@ LIVE_RENDERER_SOURCE_CLOSURE_SHA256 = (
     shader_manifest.PARALLAX_V2_LIVE_RENDERER_GROUP.source_closure_sha256)
 DIAGNOSTIC_SOURCE_CLOSURE_SHA256 = (
     shader_manifest.PARALLAX_V2_LIVE_DIAGNOSTIC_GROUP.source_closure_sha256)
+# Capture identities from 23a4d95e, immediately before the per-eye limiter and bt7.
+_SINGLE_BAND_RENDERER_SOURCES = (
+    "b094a4b4e2bd25c9ecf3ea6ec704404c6241510034206db6ee4bb5aeee8d35a7",
+    "9355e83a84ef9c2b94300c20bfc72160aa3820f575585fc639003b3e76a36fe8",
+)
+_SINGLE_BAND_FUSED_ONNX = "26684c5da8fdd4bdc5f1c9cf919cec8d1e2d027fbe95705a454f85d31eee2c23"
 _CONTRACT = coordinate_contract.load_contract()
 _CONTRACT_TAG = generator.contract_tag(_CONTRACT)
 _STATE_FIELDS = tuple(_CONTRACT["shadow_state"]["fields"])
@@ -1092,9 +1098,49 @@ def composite_engine_filename_matches(engine_name, model, recipe, onnx_sha256):
     return bool(re.fullmatch(current, engine_name) or re.fullmatch(legacy, engine_name))
 
 
+def _live_shader_source(live_closure: str, diagnostic_closure: str) -> dict:
+    return {
+        "source_closure_schema": generator.SOURCE_CLOSURE_SCHEMA,
+        "source_compile_flags": generator.SHADER_COMPILE_FLAGS,
+        "source_macro_count": 0,
+        "source_closure_sha256": live_closure,
+        "source_file": "sbs_reprojection_v2_live_ps.hlsl",
+        "entrypoint": "main_ps",
+        "target": "ps_5_0",
+        "diagnostic_source_closure_sha256": diagnostic_closure,
+        "mapping_source_file": "sbs_reprojection_v2_diagnostics_ps.hlsl",
+        "mapping_entrypoint": "mapping_ps",
+        "mask_source_file": "sbs_reprojection_v2_diagnostics_ps.hlsl",
+        "mask_entrypoint": "mask_ps",
+    }
+
+
+def _single_band_capture(manifest: dict) -> bool:
+    renderer = manifest.get("renderer", {})
+    if not isinstance(renderer, dict):
+        raise ValueError("dump_manifest.json has malformed capture renderer attribution")
+    source = renderer.get("live_shader_source")
+    archived = source is not None and source == _live_shader_source(*_SINGLE_BAND_RENDERER_SOURCES)
+    if source is not None and not archived and source != _live_shader_source(
+            LIVE_RENDERER_SOURCE_CLOSURE_SHA256, DIAGNOSTIC_SOURCE_CLOSURE_SHA256):
+        raise ValueError("dump_manifest.json has unknown V2 conditioner attribution")
+    draw = renderer.get("actual_draw_renderer")
+    if isinstance(draw, dict) and draw.get("kind") in (
+            shared_ui_pin_dump.COMPLETED_KIND, shared_ui_pin_dump.QUEUED_KIND):
+        if archived != shared_ui_pin_dump.is_single_band_split_draw(draw):
+            raise ValueError("dump_manifest.json mixes shared draw and Base renderer generations")
+    if archived:
+        if manifest.get("schema") != 52 or renderer.get("parallax_v2_render_selected") is not True:
+            raise ValueError("archived renderer requires a selected schema-52 capture")
+        if shared_ui_pin_dump.validate_attribution(manifest)["kind"] == shared_ui_pin_dump.KIND:
+            raise ValueError("dump_manifest.json mixes combined draw and split renderer generations")
+    return archived
+
+
 def validate_composite_runtime_provenance(
         value: Any, *, expected_dav2_onnx_sha256: str | None = None,
-        expected_preprocess_source_closure_sha256: str | None = None) -> Dict[str, Any]:
+        expected_preprocess_source_closure_sha256: str | None = None,
+        capture_manifest: dict | None = None) -> Dict[str, Any]:
     """Authenticate schema-2 fused runtime evidence against the frozen production contract."""
 
     if not isinstance(value, dict) or set(value) != _COMPOSITE_RUNTIME_PROVENANCE_KEYS:
@@ -1107,7 +1153,9 @@ def validate_composite_runtime_provenance(
     zipdepth = sources["zipdepth"]
     tensorrt = contract["tensorrt"]
     model = str(fused["logical_model"])
-    onnx_sha256 = str(fused["sha256"])
+    onnx_sha256 = (_SINGLE_BAND_FUSED_ONNX
+                   if capture_manifest is not None and _single_band_capture(capture_manifest)
+                   else str(fused["sha256"]))
     dav2_sha256 = str(dav2["onnx_sha256"])
     zipdepth_sha256 = str(zipdepth["checkpoint_sha256"])
     engine_recipe = str(tensorrt["engine_recipe"])
@@ -2683,22 +2731,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
         "shadow_coordinate is diagnostic only; it has no renderer authority"
         if selected else None
     )
-    expected_live_renderer_source_closure = LIVE_RENDERER_SOURCE_CLOSURE_SHA256
-    expected_diagnostic_source_closure = DIAGNOSTIC_SOURCE_CLOSURE_SHA256
-    expected_live_shader_source = ({
-        "source_closure_schema": generator.SOURCE_CLOSURE_SCHEMA,
-        "source_compile_flags": generator.SHADER_COMPILE_FLAGS,
-        "source_macro_count": 0,
-        "source_closure_sha256": expected_live_renderer_source_closure,
-        "source_file": "sbs_reprojection_v2_live_ps.hlsl",
-        "entrypoint": "main_ps",
-        "target": "ps_5_0",
-        "diagnostic_source_closure_sha256": expected_diagnostic_source_closure,
-        "mapping_source_file": "sbs_reprojection_v2_diagnostics_ps.hlsl",
-        "mapping_entrypoint": "mapping_ps",
-        "mask_source_file": "sbs_reprojection_v2_diagnostics_ps.hlsl",
-        "mask_entrypoint": "mask_ps",
-    } if selected else None)
+    _single_band_capture(document)
     expected_vertical_role = (
         "least column-wise upper envelope v+ >= candidate with adjacent-row source-U change <= "
         "max_vertical_shear/content_width; diagnostic evidence only"
@@ -2719,7 +2752,7 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
     } if selected else None)
     if (renderer.get("authority") != expected_authority or
             renderer.get("parallax_v2_inverse") != expected_inverse or
-            renderer.get("live_shader_source") != expected_live_shader_source or
+            (renderer.get("live_shader_source") is not None) != selected or
             renderer.get("parallax_v2_coordinate_role") != expected_coordinate_role or
             renderer.get("parallax_v2_position_field") != expected_position or
             renderer.get("parallax_v2_vertical_majorant_role") != expected_vertical_role or
@@ -2801,7 +2834,8 @@ def validate_v2_dump_manifest_document(document: Any) -> Dict[str, Any]:
             validate_composite_runtime_provenance(
                 composite_runtime,
                 expected_dav2_onnx_sha256=expected_dav2,
-                expected_preprocess_source_closure_sha256=expected_preprocess)
+                expected_preprocess_source_closure_sha256=expected_preprocess,
+                capture_manifest=document)
         elif composite_runtime is not None:
             raise ValueError(
                 "legacy DAV2 dump must not claim fused composite runtime provenance")

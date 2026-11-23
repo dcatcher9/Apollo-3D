@@ -109,12 +109,17 @@ kind names the authenticated ordinary Base diagnostic. The kinds `shared-ui-pin-
 and `shared-ui-pin-queued-v2` bind their respective production shader closures. When
 `actual_draw_evidence.json` captures the draw, its schema-2 `program` repeats the kind and its
 `queued_geometry` is the JSON boolean for the selected route. The older `shared-ui-pin-v1`
-kind continues to bind its historical combined closure.
+kind continues to bind its historical combined closure. For schema-52 captures from before the
+per-eye limiter, the reader recognizes the recorded Base and diagnostic shaders, split draw
+shader, and composite ONNX together. Those draws carry one displacement band. The per-eye
+shaders require two bands in left-then-right order.
 
 For an observed completed hybrid draw, `shared_pin.model_prepare_source_closure_sha256`
 in `actual_draw_evidence.json` identifies the authenticated model prepare. The draw uses
-the ordinary completed pixel shader. The reader identifies the hybrid or current legacy
-fallback from the literal `actual_selected_receipt.u32` and the GPU's authorization word.
+the ordinary completed pixel shader. The prepare must match the draw's shader generation.
+The reader identifies Direct Glyph, hybrid, or legacy fallback from the literal
+`actual_selected_receipt.u32` and the GPU's authorization word. Algorithm 4 requires the
+Direct Glyph prepare.
 A hybrid receipt also covers fresh empty publication.
 
 For all shared kinds, `mapping_artifacts_match_selected_renderer` is false because `warp_map.f32`

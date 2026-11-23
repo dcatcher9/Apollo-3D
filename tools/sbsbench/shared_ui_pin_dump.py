@@ -23,6 +23,13 @@ COMPLETED_KIND = "shared-ui-pin-completed-v2"
 QUEUED_KIND = "shared-ui-pin-queued-v2"
 LEGACY_COMBINED_CLOSURE = "326bf2defe8021e1930f46279fea27ceac12effad2ad9d2a17127d647bcdddef"
 _ROUTE_CLOSURE_KEYS = {COMPLETED_KIND: "completed_closure", QUEUED_KIND: "queued_closure"}
+# Recorded by the last producer with one displacement band shared by both eyes (23a4d95e).
+SINGLE_BAND_SPLIT_CLOSURES = {
+    COMPLETED_KIND: "50db509da2b32216404aba41fc70095ca7b82e36bc86b0417a98cd32948a1d4f",
+    QUEUED_KIND: "813e5680174a7d4aeffcf434cde666f61774e2329bbc6753d52062f8dbada412",
+}
+SINGLE_BAND_RAW_PREPARE = "b254eba72ffaca96d899fb48ec44596d217cb8312334bea7544080cf07a4c3ad"
+SINGLE_BAND_DIRECT_PREPARE = "219a6a305c05ca3ac1744286a4e87b83b61128c10e05c61ec517337f279ec940"
 EVIDENCE = "actual_draw_evidence.json"
 SELECTED_RECEIPT = "actual_selected_receipt.u32"
 ARTIFACTS = (
@@ -45,6 +52,12 @@ def _runtime_closure(name: str) -> str:
 
 def _expected_closure(kind: str = KIND) -> str:
     return LEGACY_COMBINED_CLOSURE if kind == KIND else _runtime_closure(_ROUTE_CLOSURE_KEYS[kind])
+
+
+def is_single_band_split_draw(draw: dict) -> bool:
+    kind = draw.get("kind")
+    return (kind in (COMPLETED_KIND, QUEUED_KIND) and
+            draw.get("source_closure_sha256") == SINGLE_BAND_SPLIT_CLOSURES[kind])
 
 
 def validate_attribution(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -73,7 +86,8 @@ def validate_attribution(manifest: dict[str, Any]) -> dict[str, Any]:
     if not current:
         role = LEGACY_ROLE if shared else "selected analytic renderer diagnostic"
     if ((not shared and kind != ("ordinary-base-v1" if current else "legacy-analytic-v1")) or
-            value["source_closure_sha256"] != (_expected_closure(kind) if shared else "") or
+            (not is_single_band_split_draw(value) and
+             value["source_closure_sha256"] != (_expected_closure(kind) if shared else "")) or
             value["mapping_role" if current else "legacy_mapping_role"] != role or
             value["evidence_artifact"] != EVIDENCE):
         raise ValueError("actual draw renderer has an unknown source or map attribution")
@@ -112,7 +126,8 @@ def _same_source_word(value: Any, expected: Any) -> bool:
     return type(value) is int and type(expected) is int and 0 < value < (1 << 64) and value == expected
 
 
-def _hybrid_receipt_kind(root: Path, manifest: dict, evidence: dict, authorized: bool) -> str | None:
+def _hybrid_receipt_kind(root: Path, manifest: dict, evidence: dict, authorized: bool,
+                         direct_glyph: bool) -> str | None:
     descriptor = manifest["artifacts"].get(SELECTED_RECEIPT)
     if (evidence.get("binding_roles", {}).get("t7") != SELECTED_RECEIPT or not isinstance(descriptor, dict) or
             evidence["artifacts"].get(SELECTED_RECEIPT) != descriptor):
@@ -131,6 +146,8 @@ def _hybrid_receipt_kind(root: Path, manifest: dict, evidence: dict, authorized:
     tag, schema, kind, invalid = words[:4]
     token_low, token_high, algorithm, reserved = words[60:]
     roles = {(4, 3): "hybrid", (1, 1): "legacy-fallback"}
+    if direct_glyph:
+        roles[4, 4] = "direct-glyph"
     if ((tag, schema, invalid, reserved) != (0x31534D53, 1, 0, 0) or
             not (token_low or token_high) or (kind, algorithm) not in roles):
         raise ValueError("authorized hybrid draw has an unexpected selected receipt")
@@ -184,9 +201,12 @@ def _verify(root: Any, manifest: dict[str, Any]) -> tuple[dict[str, Any], Any]:
             shared.get("boundary_layout") != "packed-output row-major float32-le RGBA: finiteSourceBoundary,0,0,1"):
         raise ValueError("shared pin evidence does not identify its exact draw and source")
     model_prepare = shared.get("model_prepare_source_closure_sha256")
+    single_band_split = is_single_band_split_draw(attribution)
+    direct_prepare = (SINGLE_BAND_DIRECT_PREPARE if single_band_split else
+                      DIRECT_GLYPH_PREPARE_GROUP.source_closure_sha256)
     if model_prepare is not None:
-        if kind != COMPLETED_KIND or model_prepare not in (
-                _runtime_closure("raw_model_prepare_closure"), DIRECT_GLYPH_PREPARE_GROUP.source_closure_sha256):
+        raw_prepare = SINGLE_BAND_RAW_PREPARE if single_band_split else _runtime_closure("raw_model_prepare_closure")
+        if kind != COMPLETED_KIND or model_prepare not in (raw_prepare, direct_prepare):
             raise ValueError("shared pin model prepare has an unknown source or route")
         attribution["model_prepare_source_closure_sha256"] = model_prepare
     evidence_artifacts = evidence.get("artifacts")
@@ -225,12 +245,7 @@ def _verify(root: Any, manifest: dict[str, Any]) -> tuple[dict[str, Any], Any]:
         raise ValueError("shared pin b6/source shape disagrees")
     # The field and weight planes hold the band once (dumps before the eye-specific limiter) or
     # once per eye: the left eye's rows, then the right eye's.
-    plane_heights = {manifest["artifacts"][name].get("texture", {}).get("height")
-                     if isinstance(manifest["artifacts"][name].get("texture"), dict) else None
-                     for name in ARTIFACTS[:2]}
-    if len(plane_heights) != 1 or not plane_heights <= {band, 2 * band}:
-        raise ValueError("shared pin weight/field planes are neither one band nor one band per eye")
-    eye_copies = plane_heights.pop() // band
+    eye_copies = 1 if kind == KIND or single_band_split else 2
     shapes = ((width, band * eye_copies, 41, 4), (width, band * eye_copies, 41, 4),
               (1, band + 1, 42, 4), None,
               (packed["width"], packed["height"], 2, 16),
@@ -269,7 +284,8 @@ def _verify(root: Any, manifest: dict[str, Any]) -> tuple[dict[str, Any], Any]:
             np.any(mapping[..., 1][valid] < 0) or np.any(mapping[..., 1][valid] > 1)):
         raise ValueError("shared pin map and finite-source boundary disagree")
     if model_prepare is not None:
-        attribution["verified_selected_matte_kind"] = _hybrid_receipt_kind(root, manifest, evidence, bool(rows[-1]))
+        attribution["verified_selected_matte_kind"] = _hybrid_receipt_kind(
+            root, manifest, evidence, bool(rows[-1]), model_prepare == direct_prepare)
     return {**attribution, "actual_map_verified": True,
             "map_artifact": ARTIFACTS[4], "boundary_artifact": ARTIFACTS[5],
             "width": packed["width"], "height": packed["height"],
