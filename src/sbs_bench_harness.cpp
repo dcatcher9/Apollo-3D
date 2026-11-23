@@ -7236,6 +7236,7 @@ namespace sbs_bench {
               BOOST_LOG(error) << "sbs-bench: native glyph selection lacks its current line records";
               return 6;
             }
+            std::vector<std::uint32_t> published_mask;
             UINT offset=0;
             for (unsigned i=0; i<records.size(); ++i) {
               const auto &v=records[i];
@@ -7243,10 +7244,31 @@ namespace sbs_bench {
                 if (v!=std::array<UINT,16>{}) return 6;
               } else {
                 const auto &box=work_boxes[i];
-                if (!std::equal(box.begin(),box.end(),v.begin()+4) || box[0]>=box[2] || box[1]>=box[3] ||
+                const UINT inference_top = v[5];
+                if (box[0]!=v[4] || box[2]!=v[6] || box[3]!=v[7] ||
+                    box[0]>=box[2] || box[1]>inference_top || inference_top>=box[3] ||
                     box[2]>frame_width || box[3]>mask_height || v[8]>box[0] || v[9]>box[1] ||
                     v[10]<box[2] || v[11]<box[3] || v[12]>8 || v[13]!=offset || v[14]>1 || (v[14] && !v[12])) return 6;
-                offset+=(box[2]-box[0])*(box[3]-box[1]);
+                const UINT inference_height = box[3] - inference_top;
+                if (box[1] < inference_top) {
+                  if (inference_top - box[1] > (inference_height + 7u) / 8u) {
+                    BOOST_LOG(error) << "sbs-bench: published subtitle tip exceeds the inference-height allowance";
+                    return 6;
+                  }
+                  if (published_mask.empty()) {
+                    published_mask.resize(std::size_t(frame_width) * mask_height);
+                    if (!read_exact_file(fs::path(o.out) / relative_mask, published_mask.data(),
+                                         published_mask.size() * sizeof(published_mask[0]))) return 6;
+                  }
+                  for (UINT y = box[1]; y < inference_top; ++y) {
+                    const auto row = published_mask.begin() + std::size_t(y) * frame_width;
+                    if (std::find(row + box[0], row + box[2], 1u) == row + box[2]) {
+                      BOOST_LOG(error) << "sbs-bench: published subtitle tip contains an unsupported row";
+                      return 6;
+                    }
+                  }
+                }
+                offset+=(box[2]-box[0])*inference_height;
               }
             }
             native_lines=binding(path,sizeof(records));
