@@ -16,13 +16,27 @@
       <p v-if="setup?.detected && setup.executable" class="game3d-executable">{{ setup.executable }}</p>
       <p v-if="gameDirectory && !isTextGame" class="game3d-executable">Setup folder: <code>{{ gameDirectory }}</code></p>
       <p>{{ status.description }}</p>
+      <p v-if="textProtection" class="game3d-text-protection" :class="`is-${textProtection}`" role="status">
+        <span class="game3d-text-protection-label">{{ textProtection === 'game' ? 'Game text' : 'Fallback' }}</span>
+        {{ setup.text_protection_detail }}
+      </p>
 
       <template v-if="canDecide && isTextGame">
-        <p v-if="!textGameApproved" class="game3d-hint">
+        <p v-if="!textGameApproved && setup.chosen" class="game3d-hint">
+          You chose this application for conversion. Sunshine 3D converts its picture with its own depth and keeps its text
+          readable{{ usesTextHelper ? ', with a small text helper loaded into it only while it runs' : ' from the picture alone' }}.
+          Nothing is written into its folder. It takes effect at once and again each time the application starts.
+        </p>
+        <p v-else-if="!textGameApproved && usesTextHelper" class="game3d-hint">
           This looks like a 2D text game, which has no depth of its own. Sunshine 3D converts its picture with its own depth and
           uses a small text helper, loaded into the game only while it runs, to keep the game's text readable. Nothing is written into the
           game's folder. Choose it only for an application you recognize as a single-player game. It takes effect at once and
           again each time the game starts.
+        </p>
+        <p v-else-if="!textGameApproved" class="game3d-hint">
+          This looks like a 2D text game, which has no depth of its own and composes its text itself. Sunshine 3D converts its
+          picture with its own depth and keeps the text readable from the picture alone. Nothing is loaded into the game or
+          written into its folder. It takes effect at once and again each time the game starts.
         </p>
         <div class="game3d-actions">
           <button v-if="!textGameApproved" class="btn btn-apollo-primary" type="button" :disabled="Boolean(busy)" @click="decide('install')">
@@ -33,7 +47,7 @@
           </button>
         </div>
         <p v-if="setup.state === 'current'" class="game3d-hint">
-          Stopping ends the conversion at once; a helper already loaded stays in the game until it closes.
+          {{ usesTextHelper ? 'Stopping ends the conversion at once; a helper already loaded stays in the game until it closes.' : 'Stopping ends the conversion at once.' }}
         </p>
         <p v-if="error" class="game3d-error" role="alert">{{ error }}</p>
       </template>
@@ -88,6 +102,33 @@
         If the game remains 2D after its next launch, confirm ReShade has full add-on support and Enable Game 3D is selected under Add-ons → Sunshine 3D.
       </p>
     </article>
+
+    <article v-if="choosable.length" class="apollo-readiness-card game3d-setup-card game3d-choosable">
+      <h3>Convert a 2D game yourself</h3>
+      <p>
+        {{ choosable.length === 1 ? 'This application was' : 'These applications were' }} in front on the streamed display, and
+        Sunshine 3D does not take {{ choosable.length === 1 ? 'it' : 'them' }} for a 2D game by itself. If you are playing a 2D game
+        there, such as a visual novel, you can have it converted all the same.
+      </p>
+      <p class="game3d-hint">
+        Sunshine 3D then converts the application's picture with its own depth while it is in front and keeps its text readable.
+        Where the text helper can follow the text, it is loaded into the application only while it runs. Nothing is written into
+        its folder. Choose only an application you recognize as a single-player game. It takes effect at once and again each
+        time the application starts, and you can stop it here at any time.
+      </p>
+      <ul class="game3d-choosable-list">
+        <li v-for="application in choosable" :key="application.executable">
+          <div>
+            <strong>{{ application.game_name || 'Application' }}</strong>
+            <p class="game3d-executable">{{ application.executable }}</p>
+          </div>
+          <button class="btn btn-apollo-quiet" type="button" :disabled="Boolean(busy)" @click="choose(application)">
+            {{ busy === application.executable ? 'Saving…' : 'Convert this application' }}
+          </button>
+        </li>
+      </ul>
+      <p v-if="chooseError" class="game3d-error" role="alert">{{ chooseError }}</p>
+    </article>
   </section>
 </template>
 
@@ -98,11 +139,22 @@ export default {
   },
   emits: ['update'],
   data() {
-    return { busy: '', error: '' }
+    return { busy: '', error: '', chooseError: '' }
   },
   computed: {
     isTextGame() {
       return this.setup?.detected && this.setup.kind === 'text_hook'
+    },
+    choosable() {
+      // Applications lately in front on the streamed display that no rule offers.
+      return Array.isArray(this.setup?.choosable) ? this.setup.choosable : []
+    },
+    textProtection() {
+      // Reported only while the game is in front on a stream and being converted.
+      return this.isTextGame && this.setup.state === 'current' ? this.setup.text_protection || '' : ''
+    },
+    usesTextHelper() {
+      return this.setup?.text_helper !== false
     },
     textGameApproved() {
       return this.isTextGame && ['current', 'installed'].includes(this.setup.state)
@@ -167,7 +219,7 @@ export default {
       }
       if (this.isTextGame) {
         Object.assign(states, {
-          ready_to_install: { label: 'Ready to set up', tone: 'warning', description: 'Sunshine 3D can convert this game and use its text helper for it. Nothing is loaded until you confirm.' },
+          ready_to_install: { label: 'Ready to set up', tone: 'warning', description: 'Sunshine 3D can convert this game. Nothing is loaded or converted until you confirm.' },
           declined: { label: 'Not set up', tone: 'neutral', description: 'You chose not to set up this game. Sunshine 3D loads nothing into it.' },
           anti_cheat: { label: 'Not offered', tone: 'neutral', description: 'Anti-cheat detected, so Sunshine 3D loads nothing into this game.' },
           current: { label: 'Converting', tone: 'success', description: 'Sunshine 3D converts this game while it is in front.' },
@@ -200,6 +252,26 @@ export default {
         if (body.setup) this.$emit('update', body.setup)
       } catch (reason) {
         this.error = `Could not save this choice: ${reason.message || reason}`
+      } finally {
+        this.busy = ''
+      }
+    },
+    async choose(application) {
+      if (this.busy) return
+      this.busy = application.executable
+      this.chooseError = ''
+      try {
+        const response = await fetch('./api/game3d/setup/decision', {
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          method: 'POST',
+          body: JSON.stringify({ executable: application.executable, identity: application.identity, decision: 'convert' }),
+        })
+        const body = await response.json().catch(() => ({}))
+        if (!response.ok || !body.status) throw new Error(body.error || `Sunshine 3D returned HTTP ${response.status}`)
+        if (body.setup) this.$emit('update', body.setup)
+      } catch (reason) {
+        this.chooseError = `Could not save this choice: ${reason.message || reason}`
       } finally {
         this.busy = ''
       }
@@ -248,6 +320,54 @@ export default {
 }
 
 .game3d-hint {
+  font-size: var(--apollo-text-caption);
+}
+
+.game3d-text-protection {
+  font-size: var(--apollo-text-caption);
+}
+
+.game3d-text-protection-label {
+  display: inline-block;
+  margin-right: 0.4rem;
+  padding: 0.05rem 0.5rem;
+  border-radius: var(--apollo-radius-pill);
+  font-weight: 600;
+  color: var(--bs-success-text-emphasis);
+  background: var(--bs-success-bg-subtle);
+}
+
+.game3d-text-protection.is-fallback .game3d-text-protection-label {
+  color: var(--bs-warning-text-emphasis);
+  background: var(--bs-warning-bg-subtle);
+}
+
+.game3d-choosable {
+  margin-top: 1rem;
+}
+
+.game3d-choosable-list {
+  margin: 0.8rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.game3d-choosable-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.6rem 0;
+  border-top: 1px solid var(--bs-border-color);
+}
+
+.game3d-choosable-list li > div {
+  min-width: 0;
+}
+
+.game3d-choosable-list .game3d-executable {
+  margin: 0;
   font-size: var(--apollo-text-caption);
 }
 

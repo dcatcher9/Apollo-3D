@@ -8271,7 +8271,7 @@ TEST(EncodeWakeLifecycleSourceTests, KeptInputGammaConversionAdvancesTheProvider
   ASSERT_FALSE(scope.empty());
   const auto gamma = scope.find("if (!conversion_ran && pending_gamma && last_img) {");
   const auto failure = scope.find("Could not convert the retained source with stream gamma", gamma);
-  const auto kept = scope.find("if (independent_provider && !converted_frame) {", failure);
+  const auto kept = scope.find("if (provider_paced && !converted_frame) {", failure);
   const auto advance = scope.find("encode_frame_timestamp = schedule.next_encode_target;", kept);
   const auto next_branch = scope.find("if (!conversion_ran && depth_pipeline_ready_event", gamma);
   ASSERT_NE(gamma, std::string::npos);

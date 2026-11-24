@@ -29,9 +29,11 @@ function(sunshine_text_hook bits gcc gxx compiler_dir)
     set(_helper_sources
         "${_source_dir}/text_hook.cpp"
         "${_source_dir}/text_hook_d2d.cpp"
+        "${_source_dir}/text_hook_d3d11.cpp"
         "${_source_dir}/text_hook_gdi.cpp")
     set(_helper_headers
         "${_source_dir}/text_hook_core.h"
+        "${_source_dir}/text_hook_image.h"
         "${_source_dir}/text_hook_shared.h")
 
     # Loaded into another application, so it must not need a C++ runtime DLL there: it is
@@ -53,7 +55,7 @@ function(sunshine_text_hook bits gcc gxx compiler_dir)
     add_custom_command(OUTPUT "${_sample}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${SUNSHINE_TEXT_HOOK_SAMPLE_DIR}"
         COMMAND ${_env} "${gxx}" ${_flags} -static -mwindows -o "${_sample}" "${_source_dir}/text_hook_sample.cpp"
-            -ld2d1 -ldwrite -lgdi32 -luser32 -lmsimg32 -luuid
+            -ld2d1 -ld3d11 -ldwrite -lgdi32 -luser32 -lmsimg32 -luuid
         DEPENDS "${_source_dir}/text_hook_sample.cpp"
         COMMENT "Building the ${bits}-bit Game 3D text helper sample"
         VERBATIM)

@@ -71,7 +71,54 @@ namespace platf::game3d::text_hook {
     std::mutex consent_mutex;
     // One game is in front at a time; a short list of the processes approved in this host run.
     std::vector<std::pair<std::uint32_t, std::uint64_t>> consents;
+
+    std::mutex protection_mutex;
+
+    struct {
+      std::uint32_t process_id {};
+      std::uint64_t creation_time {};
+      protection_t state;
+      std::chrono::steady_clock::time_point at;
+    } reported_protection;
   }  // namespace
+
+  void report_protection(const std::uint32_t process_id, const std::uint64_t creation_time, const protection_t state) {
+    std::lock_guard lock(protection_mutex);
+    reported_protection = {process_id, creation_time, state, std::chrono::steady_clock::now()};
+  }
+
+  protection_t protection(const std::uint32_t process_id, const std::uint64_t creation_time) {
+    std::lock_guard lock(protection_mutex);
+    const auto &last = reported_protection;
+    if (last.process_id != process_id || last.creation_time != creation_time || process_id == 0u || std::chrono::steady_clock::now() - last.at > 3s) {
+      return {};
+    }
+    return last.state;
+  }
+
+  std::string describe(const protection_t state) {
+    if (state.protection == protection_e::game_text) {
+      return "Text protection: the game's own text, reported by its helper.";
+    }
+    if (state.protection != protection_e::picture) {
+      return {};
+    }
+    switch (state.fallback) {
+      case fallback_e::no_helper:
+        return "Text protection: fallback. No text helper answers in this game, so its text is found in the picture.";
+      case fallback_e::no_text:
+        return "Text protection: fallback. The helper reports no text, so text is searched for in the picture.";
+      case fallback_e::unsure:
+        return "Text protection: fallback. The helper is not sure that what it follows is text, so the text is found in the picture.";
+      case fallback_e::not_shown:
+        return "Text protection: fallback. The picture does not show the text the helper reports, so the text is found in the picture.";
+      case fallback_e::unavailable:
+        return "Text protection: fallback. The helper's text cannot be used on this stream now, so the text is found in the picture.";
+      case fallback_e::none:
+        break;
+    }
+    return "Text protection: fallback. The text is found in the picture.";
+  }
 
   std::filesystem::path bundled_directory() {
     std::wstring path(32768, L'\0');
@@ -167,11 +214,13 @@ namespace platf::game3d::text_hook {
     const std::uint32_t top = state->text_top;
     const std::uint32_t bottom = state->text_bottom;
     const std::uint64_t window = state->window;
+    const std::uint32_t source = state->source;
     if (state->sequence != sequence) {
       return last_complete();
     }
     text.sequence = sequence;
     text.window = window;
+    text.unsure = source == shared::source_unsure;
     // A helper that has not seen the game draw yet is running all the same.
     if (width == 0u || height == 0u) {
       last_ = {};
@@ -244,7 +293,7 @@ namespace platf::game3d::text_hook {
     // The user can approve a game after closing it. That is not a failure: the approval stands
     // and the helper is loaded when the game is next detected.
     if (!process_running()) {
-      return {load_state_e::not_running, "Approved. The game is converted the next time it starts."};
+      return {load_state_e::not_running, approved_for_next_start};
     }
     if (is_loaded()) {
       return {load_state_e::loaded, "The text helper is running in this game."};
@@ -269,13 +318,18 @@ namespace platf::game3d::text_hook {
     return {load_state_e::loaded, "The text helper is running in this game."};
   }
 
-  load_result load(const std::uint32_t process_id, const std::uint64_t creation_time, const std::filesystem::path &bundle_directory) {
+  bool running(const std::uint32_t process_id, const std::uint64_t creation_time) {
     // A process id alone may by now name another program: the process must be the one created
     // at the time the owner's approval was given for.
     const std::unique_ptr<void, handle_closer> process {OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, process_id)};
+    return process && creation_time != 0u && creation_time_of(process.get()) == creation_time && WaitForSingleObject(process.get(), 0u) == WAIT_TIMEOUT;
+  }
+
+  load_result load(const std::uint32_t process_id, const std::uint64_t creation_time, const std::filesystem::path &bundle_directory) {
+    const std::unique_ptr<void, handle_closer> process {OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, process_id)};
     USHORT process_machine = IMAGE_FILE_MACHINE_UNKNOWN, native_machine = IMAGE_FILE_MACHINE_UNKNOWN;
-    const bool running = process && creation_time != 0u && creation_time_of(process.get()) == creation_time &&
-                         WaitForSingleObject(process.get(), 0u) == WAIT_TIMEOUT && IsWow64Process2(process.get(), &process_machine, &native_machine);
+    const bool identified = process && creation_time != 0u && creation_time_of(process.get()) == creation_time &&
+                            IsWow64Process2(process.get(), &process_machine, &native_machine);
     const unsigned bits = process_machine == IMAGE_FILE_MACHINE_UNKNOWN ? 64u : 32u;
     return detail::load_with(
       bits,
@@ -291,7 +345,8 @@ namespace platf::game3d::text_hook {
         return run_injector(bundle_directory, bits, process_id, creation_time);
       },
       [&] {
-        return running;
+        // Asked again while the helper starts, so a game that closes meanwhile is seen to.
+        return identified && WaitForSingleObject(process.get(), 0u) == WAIT_TIMEOUT;
       }
     );
   }

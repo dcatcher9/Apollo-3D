@@ -28,6 +28,7 @@ namespace video {
     void set_external_frame_wake(std::function<void()> wake);
     bool conversion_kept_input() const;
     bool external_frame_held() const;
+    bool capture_paced() const;
     bool set_stream_gamma(stream_gamma_mode_e mode);
     stream_gamma_mode_e stream_gamma_mode() const;
     float stream_gamma_white_nits() const;

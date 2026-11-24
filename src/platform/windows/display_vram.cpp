@@ -557,6 +557,11 @@ namespace platf::dxgi {
       return reshade_receiver && ::video::is_packed_mode(sbs_mode) && external_frame_wake && reshade_receiver->frame_held();
     }
 
+    // A text game in front is converted from its captured picture by the Host AI path.
+    bool capture_paced() const {
+      return text_game_ai_active;
+    }
+
     void encoder_consumed_input() {
       // A replaced export slot returns to the producer when the GPU completes the conversion's
       // reads of it (the receiver's read-fence wait), which with pictures in flight can come after
@@ -670,7 +675,10 @@ namespace platf::dxgi {
         // A text game is converted by the Host AI path, whose completed depth must be drawn even
         // while the game shows a still picture. Without such a game in front this stays false,
         // so the flat fallback is never repeated at stream cadence.
-        return text_game_ai_active && depth_work_needs_service();
+        // Its picture comes from capture, and a still one would otherwise never be converted
+        // again: a few times a second the conversion looks again at which window is in front
+        // and at the owner's consent, and reports what protects the text.
+        return text_game_ai_active && (depth_work_needs_service() || std::chrono::steady_clock::now() - text_game_serviced_at >= std::chrono::milliseconds(250));
       }
       if (white_query_due) {
         return true;
@@ -775,6 +783,9 @@ namespace platf::dxgi {
         text_game_helper_identity = identity;
         text_game_helper_sees_text = false;
         text_game_text_shown = false;
+        text_game_unshown_since.reset();
+        text_game_fallback = {};
+        text_game_protection = {};
         text_game_verdict_staged = false;
         text_game_coverage_uploaded = false;
         text_game_band = {};
@@ -800,6 +811,9 @@ namespace platf::dxgi {
                                kind_shown(text_game_verdict[2], text_game_verdict[3]);
         if (text_game_text_shown) {
           text_game_helper_sees_text = true;
+          text_game_unshown_since.reset();
+        } else {
+          text_game_not_shown();
         }
         // The policy asks for at most one observation every 100 ms.
         const auto &origin = text_game_plane_staged;
@@ -851,6 +865,47 @@ namespace platf::dxgi {
       }
     }
 
+    /** One more finding that the picture does not show the helper's text, or that it has none. */
+    void text_game_not_shown() {
+      if (!text_game_unshown_since) {
+        text_game_unshown_since = std::chrono::steady_clock::now();
+      }
+    }
+
+    /**
+     * The helper's text counts as serving the game from the first time the picture shows it, and
+     * until three seconds of findings that it does not: a line that fades or a pause between two
+     * lines keeps it. Past that the picture-based search covers the game again, as it does before
+     * the helper has shown anything, so a helper that loses the text, or is not sure of it,
+     * costs no protection. Only findings count: a still picture, which is not looked at, says
+     * nothing against the helper.
+     */
+    [[nodiscard]] bool text_game_helper_serves() const {
+      return text_game_helper_sees_text && (!text_game_unshown_since || std::chrono::steady_clock::now() - *text_game_unshown_since <= std::chrono::seconds(3));
+    }
+
+    /** Tell the setup card what protects the text of the game in front. */
+    void note_text_protection(const bool usable, const bool prepared, const bool pinned) {
+      namespace hook = platf::game3d::text_hook;
+      if (!text_game_source) {
+        return;
+      }
+      const bool helper = pinned || text_game_helper_serves();
+      const hook::protection_t state {
+        helper ? hook::protection_e::game_text : hook::protection_e::picture,
+        helper ? hook::fallback_e::none : !usable ? hook::fallback_e::unavailable :
+                                        prepared  ? hook::fallback_e::not_shown :
+                                                    text_game_fallback,
+      };
+      const auto now = std::chrono::steady_clock::now();
+      // Told at once when it changes, which a change of the game in front makes it do.
+      if (state != text_game_protection || now - text_game_protection_at >= std::chrono::seconds(1)) {
+        text_game_protection = state;
+        text_game_protection_at = now;
+        hook::report_protection(text_game_source->process_id, text_game_source->creation_time, state);
+      }
+    }
+
     void reset_text_game_pin() {
       text_game_reader.close();
       text_game_helper_sees_text = false;
@@ -881,11 +936,23 @@ namespace platf::dxgi {
         return false;
       }
       hook::text_t text;
+      // Any refusal below that names no reason of its own is the host's.
+      text_game_fallback = hook::fallback_e::unavailable;
       // A helper that knows its window reports for that one only: the game's own dialog in front
       // is not the picture its text was drawn on. Window handles are 32 bits in either process.
-      if (!text_game_reader.read(text_game_source->process_id, text_game_source->creation_time, text) || text.top >= text.bottom ||
-          (text.window != 0u && static_cast<std::uint32_t>(text.window) != static_cast<std::uint32_t>(text_game_window))) {
+      const bool answered = text_game_reader.read(text_game_source->process_id, text_game_source->creation_time, text);
+      if (!answered || text.unsure || text.top >= text.bottom || (text.window != 0u && static_cast<std::uint32_t>(text.window) != static_cast<std::uint32_t>(text_game_window))) {
+        text_game_fallback = !answered ? hook::fallback_e::no_helper : text.unsure ? hook::fallback_e::unsure :
+                                                                                     hook::fallback_e::no_text;
         text_game_text_shown = false;
+        // A verdict still on its way is of a draw made before this: it is not taken later.
+        text_game_verdict_staged = false;
+        if (answered && text.unsure) {
+          // The helper itself asks for the picture-based search: no waiting for its text to age.
+          text_game_helper_sees_text = false;
+        } else {
+          text_game_not_shown();
+        }
         return false;
       }
       D3D11_TEXTURE2D_DESC current {};
@@ -1117,6 +1184,7 @@ namespace platf::dxgi {
           ensure_depth_estimator();
         }
         text_game_ai_active = sbs_mode == ::video::SBS_GAME_SBS && text_game_in_front;
+        text_game_serviced_at = std::chrono::steady_clock::now();
         if (sbs_mode == ::video::SBS_GAME_SBS) {
           // The client stays in packed Game 3D while games come and go, so one encoder session
           // moves between the Host AI path and the export or flat path. Both draw into the same
@@ -2883,6 +2951,9 @@ namespace platf::dxgi {
               }
             }
             bool text_pin_selected = text_pin_prepared && text_game_text_shown;
+            if (text_game_ai_active && !predicate) {
+              note_text_protection(text_pin_candidate, text_pin_prepared, text_pin_selected);
+            }
             auto *selected_receipt = subtitle_pin_candidate && !text_pin_selected && !predicate ?
                                        geometry.selected_receipt : nullptr;
             bool selected_draw = selected_receipt != nullptr;
@@ -5861,8 +5932,9 @@ namespace platf::dxgi {
         // A Game 3D text game is an application its owner approved for exactly this purpose. The
         // approval names that process: the game's answer is refreshed a few times a second, so
         // another window that has just come in front must not inherit it meanwhile.
-        // Until its helper has shown that it sees the text, the picture-based search covers it.
-        const bool approved_text_game = text_game_ai_active && !text_game_helper_sees_text && text_game_source &&
+        // Unless its helper has lately shown that it sees the text, the picture-based search
+        // covers it.
+        const bool approved_text_game = text_game_ai_active && !text_game_helper_serves() && text_game_source &&
                                         text_game_source->process_id == foreground.process_id;
         const auto registered_executables = video_player_registry ?
           video_player_registry->executables_if_ready() : std::span<const std::wstring> {};
@@ -8025,6 +8097,13 @@ namespace platf::dxgi {
     // The latest observation found the helper's text in the picture: it is pinned. Otherwise the
     // helper's report is only observed, and the draw keeps its ordinary geometry.
     bool text_game_text_shown = false;
+    /// Since when every finding has been that the picture does not show the helper's text.
+    std::optional<std::chrono::steady_clock::time_point> text_game_unshown_since;
+    /// The latest conversion that looked at which window is in front; see needs_conversion_poll().
+    std::chrono::steady_clock::time_point text_game_serviced_at {};
+    platf::game3d::text_hook::fallback_e text_game_fallback {};  ///< Why the helper's text was not prepared, last time.
+    platf::game3d::text_hook::protection_t text_game_protection {};  ///< As last told to the setup card.
+    std::chrono::steady_clock::time_point text_game_protection_at {};
     std::optional<::video::game_source_identity_t> text_game_helper_identity;
     platf::game3d::text_hook::reader_t text_game_reader;
     texture2d_t text_game_coverage_texture;
@@ -12453,6 +12532,10 @@ namespace platf::dxgi {
 
     bool external_frame_held() const override {
       return base.external_frame_held();
+    }
+
+    bool capture_paced() const override {
+      return base.capture_paced();
     }
 
     void encoder_consumed_input() override {

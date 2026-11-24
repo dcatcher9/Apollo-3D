@@ -7805,33 +7805,62 @@ game, when one of these marks it as a text game:
 
 - a 32-bit process with `dwrite.dll` and `d2d1.dll` loaded;
 - a 32-bit process whose executable imports a GDI text function (`TextOut`, `ExtTextOut`,
-  `DrawText`, `DrawTextEx`) and that has loaded a library games load and ordinary programs
-  rarely do: DirectSound, XAudio2, X3DAudio, DirectInput, XInput, Direct3D 8 or 9, DirectDraw,
-  OpenAL, BASS or FMOD;
-- a 64-bit process whose executable itself imports `d2d1.dll` and `dwrite.dll` and that has loaded
-  one of those libraries. Loaded modules alone mark nothing there, since many 64-bit programs
-  load both. Such a process is offered as a text game even where it also qualifies as an add-on
-  game, unless the add-on is already loaded in it.
+  `DrawText`, `DrawTextEx`) or the GDI glyph function (`GetGlyphOutline`) and that has loaded a
+  library games load and ordinary programs rarely do: DirectSound, XAudio2, X3DAudio,
+  DirectInput, XInput, Direct3D 8 or 9, DirectDraw, OpenAL, BASS or FMOD;
+- a 64-bit process whose executable itself imports `d2d1.dll` and `dwrite.dll`, or the GDI glyph
+  function, and that has loaded one of those libraries. Loaded modules alone mark nothing there,
+  since many 64-bit programs load Direct2D, and neither does a GDI text function, which ordinary
+  3D games import too. Such a process is offered as a text game even where it also qualifies as
+  an add-on game, unless the add-on is already loaded in it.
 
 The imports are read from the executable's file, so a game whose protector hides its import table
-is not recognized by the two import rules. None of the rules proves what a program is: they
-decide only what is offered, and the offer says so.
+is not recognized by the import rules. None of the rules proves what a program is: they decide
+only what is offered, and the offer says so.
+
+The same marks say whether the text helper can follow the game's text. A game known by Direct2D
+or by a GDI text function draws its text by calls the helper watches, and a game that has
+Direct3D 11 loaded is followed there whatever it composes its text with. A game known only by
+the glyph function that draws by other means composes its text where the helper cannot follow:
+it is offered and converted like every text game, nothing is loaded into it, and its text is
+found in the picture.
+
+**Chosen by the owner.** The rules above cannot know every 2D game. One with a font renderer
+of its own imports no text or glyph function of Windows, so nothing marks it; run fullscreen
+with Direct3D 11 it is even offered as an add-on game, which it is not. For these the **Game 3D
+setup** card lists, under **Convert a 2D game yourself**, the applications that were lately in
+front on the streamed display and that no rule takes for a text game: an `.exe` outside the
+Windows directory and the suppression list whose foreground client lies wholly on the selected
+display, in which the add-on is not loaded. No mark of a game is asked for, since the owner's
+choice is the mark. The list holds one entry per executable, the four latest, for as long as
+their processes run. **Convert this application** sends the listed path and file identity with
+the decision `convert` to the same authenticated `POST /api/game3d/setup/decision`, which
+accepts only an entry the host itself lists. From then on the application is a text game like
+any the rules find: converted at once and at every later start, with the helper where the
+helper can follow its text, refused where anti-cheat software is found, and stopped on the
+card. The choice is kept with the others in `game3d_setup.json` and follows the executable's
+path, because nothing else makes the host look at that application; a changed file is still
+confirmed again before anything is loaded or converted. Stopping it ends the choice: the
+application is listed again when it is next in front.
 
 **Consent.** Nothing is loaded and nothing is converted until the owner confirms that game on the
 **Game 3D setup** card. The confirmation stands for later starts and can be withdrawn there at
 any time, which ends the conversion at once; **Never for this game** ends the offers. Nothing is
 ever written to the game's folder. A game with anti-cheat software in its folders, or whose
-folders cannot be checked for it, is refused whatever else those folders hold.
+folders cannot be checked for it, is refused whatever else those folders hold, unless nothing
+would be loaded into it. The card shows a game as being converted only while it runs: once the
+game has closed, it shows the standing approval instead.
 
-**The text helper.** On every start of a confirmed game the host runs the loader of the game's
-bitness (`sunshine-text-hook-inject32.exe` or `...64.exe`), which loads `SunshineTextHook32.dll`
+**The text helper.** On every start of a confirmed game whose text it can follow, the host runs
+the loader of the game's bitness (`sunshine-text-hook-inject32.exe` or `...64.exe`), which loads
+`SunshineTextHook32.dll`
 or `SunshineTextHook64.dll` into that one process, identified by its id and start time. The helper
 keeps and reports no text content. It forwards every call it watches unchanged, keeps a picture
 of the text the game has drawn, and publishes that picture and the rows of it that hold text
 through two named sections whose layout
 [`tools/text_hook/text_hook_shared.h`](../tools/text_hook/text_hook_shared.h) owns. It publishes a
 complete picture at a time, and nothing when a game draws the same text again. The helper ends
-with the process. It has two parts, and a game is served by whichever sees its text:
+with the process. It has three parts, and a game is served by whichever sees its text:
 
 - *Direct2D.* The helper replaces the `DrawText`, `DrawTextLayout`, shared `DrawGlyphRun`,
   `Clear` and `EndDraw` entries of the Direct2D render-target vtables and repeats each text draw,
@@ -7839,6 +7868,14 @@ with the process. It has two parts, and a game is served by whichever sees its t
   the drawing it belongs to, or 50 ms after the last text draw. Text is taken to be gone when the
   game clears the surface it is on, or draws new text over text that has been there for more than
   100 ms. Where a game draws text on targets of several sizes, the largest is its picture.
+  Most games clear their surface and draw the same text again for every frame they show. The
+  helper keeps the text draws its picture is made of, and only compares such a frame with them,
+  draw by draw: nothing is drawn or published for a frame that repeats them. A frame that adds
+  to them draws what it adds; one that stops short or differs is redone from the kept draws
+  that were repeated. A `DrawText` is kept as a layout of the helper's own, made when the draw
+  was measured, so it is redone as it was drawn whatever the game does to its format since; a
+  layout or glyph run of the game's is redone only while it still measures as it did. Up to
+  4096 draws are kept; a busier frame is drawn in full every time.
 - *GDI.* The helper points the `TextOut`, `ExtTextOut`, `DrawText` and `DrawTextEx` imports of the
   game's own modules at itself, together with the calls that move or erase what was drawn:
   `BitBlt`, `StretchBlt`, `PatBlt`, `FillRect`, `SetDIBitsToDevice`, `StretchDIBits`, `AlphaBlend`,
@@ -7847,17 +7884,77 @@ with the process. It has two parts, and a game is served by whichever sees its t
   holding that text alone, every copy between bitmaps carries the same part of the layer along,
   every fill or opaque copy erases it, and what arrives in the game's largest visible window is
   the published picture. It is used only while the game has drawn no text with Direct2D.
+- *Direct3D 11.* A game that composes its own text makes no text call, so the helper follows the
+  text from the texture it is loaded into.
+  - *Which textures hold text.* An image the game loads into a texture, by `UpdateSubresource`,
+    by a mapping, by `CreateTexture2D` or by a copy from such a texture, looks like text on
+    nothing by three measures that
+    [`tools/text_hook/text_hook_image.h`](../tools/text_hook/text_hook_image.h) owns: it is
+    mostly clear, what is covered is solid at its core, and what is solid is no larger than a
+    glyph along the row or down the column. Strokes are not asked for: an outline joins the
+    strokes of a glyph into one solid shape, and a heavy one the glyphs of a line. It is a text
+    texture once there is a reason to think of text: the game took a glyph with
+    `GetGlyphOutline` in the same frame or the one before, or did so for an earlier such image,
+    since a game takes a glyph once and keeps it; the texture holds text already; the texture
+    has been loaded with such an image in two frames; or a texture of its size and format
+    became a text texture that way, as the next store of glyphs is when one is full. The last
+    two follow a game that renders its glyphs with a library of its own: its text layer or its
+    store of glyphs is loaded line after line or again for every frame, where a sprite is
+    loaded once. The first line such a texture shows is therefore drawn before the texture is
+    known. New textures alone never make a size one of text, however many are loaded with
+    such images: the parts of a figure's face are as small as glyphs, and a game loads each
+    into a new texture of one size whenever it shows the figure. A game with a font renderer
+    of its own that makes a new texture for every line is therefore not followed, and its
+    text is found in the picture. A text texture is asked the last two measures
+    only: a game that keeps its glyphs in one texture and draws each line from parts of it
+    sets down more of them as the text goes on, until the texture is fuller than any text
+    layer. It is no longer a text texture after three images in a row that are not glyphs by
+    those two measures, or at once after one that is besides more than mostly covered, as a
+    picture is.
+  - *Where the text lands.* Every render target that text is drawn on has a mask of its own
+    size. A draw that samples a text texture is issued once more onto the mask of its target; a
+    draw that samples a target which has a mask is issued once more with that mask in the
+    texture's place; any other draw onto a masked target is issued once more so that it wipes
+    the mask where it covers it, unless it writes no colour or only shades what is there; a
+    clear of the target empties the mask, and a copy or resolve carries it along. The game's
+    own shaders, geometry, viewport and scissor place every one of these, with only the target
+    and the blending the helper's.
+  - *What is published.* One swap chain is followed, the one with the largest picture that is
+    presenting. The mask of its back buffer is read back without waiting when the game
+    presents: every second frame while the text changes, otherwise every sixth. A mask that
+    covers more than 15% of the picture is not text; the helper then publishes no text and says
+    that it is unsure.
+  - *How it stays hooked.* Direct3D keeps a device context's function table in memory of the
+    context's own and rewrites the entries of every call that submits work whenever it flushes.
+    The helper hooks every such entry and puts its hooks back after each call that finds them
+    gone. A context that other code wraps, as an overlay does, has a table that cannot be
+    written, and is not followed.
 
 **Conversion.** The capture path treats the foreground process as a text game while the owner's
 confirmation for that exact process (id and start time) stands. It then reports the Game source
 ready, so the client makes its ordinary acknowledged transition to mode `3`, and converts the
 captured picture with the Host depth path instead of the flat fallback; any other window in front
 returns the session to the flat fallback. Earlier depth work is retired on each such switch.
+While the text game is in front the stream is paced as a Host 3D stream is: every captured frame
+and every completed depth is served at once. The Game stream's own pacing, which polls an add-on
+game's export at stream cadence, would hold each captured frame for several stream intervals.
 While the game's window is dragged or resized it stays converted, without its text pin. A game
 whose helper could not be loaded, or sees no text, is converted all the same. Dump 3D follows the
 route: with a text game in front the button produces the Host package, whose frame is drawn
 without the text pin. The pin itself is described under
 [Text-game pin](host-sbs.md#text-game-pin).
+
+**Fallback.** The helper's text is used only while the picture confirms it. The picture-based
+Host subtitle protection is the fallback. It is in force before the helper has shown anything
+and in a game no helper answers in; it returns after three seconds of findings that the picture
+does not show the helper's text, or that the helper reports none; and it returns at once when
+the helper reports that it is unsure of what it follows. Only findings count: a still picture,
+which is not looked at, says nothing against the helper. A helper that loses the text therefore
+costs a game no protection it had without one. While a confirmed game is in front on a stream,
+the **Game 3D setup** card says which of the two is in force, and for the fallback why. The
+capture path reports it about once a second, also for a still picture, which it looks at four
+times a second for this, for the window in front and for the owner's consent; the card shows
+nothing once the report is three seconds old.
 
 **Text depth.** The text plane is chosen by the same policy as the add-on's UI
 (`tools/reshade/game3d_ui_adaptive.h`, [UI decision framework](#ui-decision-framework)): screen
@@ -7866,16 +7963,28 @@ ramp rules. The host feeds it the scene field under the glyph texels on the poli
 grid of the game's picture, read back without waiting. As for the add-on's UI, the outer eighth
 of the picture is not placement evidence, and the plane moves only while frames are converted.
 
-**Limits.** The helper sees text only where the game hands it to Direct2D or GDI to draw, and
-follows GDI text only through GDI's own copies. Text that a game rasterizes itself, takes as
-glyph bitmaps from `GetGlyphOutline` and composes in its own code, or brings to the screen by
-another interface after drawing it with GDI, is unknown to it; so is anything set among the text
-by other means, such as a small image. Text drawn before the helper was loaded is known from the
+**Limits.** The helper sees text only where the game hands it to Direct2D or GDI to draw, or
+loads it into a texture and draws it with Direct3D 11. It follows GDI text only through GDI's
+own copies. Text that a game composes itself and draws by another interface than Direct3D 11,
+or brings to the screen by another interface after drawing it with GDI, is unknown to it; so is
+anything set among the text by other means, such as a small image. The Direct3D 11 part knows a
+text texture by how its image looks. It does not follow a game that composes its whole frame in
+memory, keeps its text on the same image as a plate or a picture, draws it glyph by glyph from
+an atlas it filled before the helper was there or fills a glyph at a time by partial loads,
+makes a new texture for every line without ever taking a glyph from GDI, or draws from a
+deferred context. Once a game has taken a glyph from GDI for a text image, any later image that
+looks like text is taken for it, the parts of a figure's face included. It takes what is as
+small as a glyph and is not text, a frame or a rule, a narrow bar, a small button or figure,
+for text where its image is loaded as often as text is. It cannot tell whether a draw samples a texture or merely has it bound, so a draw of
+plain colour made while a text texture is still bound is taken for text; one that fills the
+picture makes the helper unsure for as long as it lasts. It follows the first four textures of
+a draw and the first render target, ignores depth testing, and does not put back unordered
+access views. Text drawn before the helper was loaded is known from the
 next time the game draws it. Text hidden by a clip the helper does not see is reported, and so is
 text the game paints over instead of clearing; whether reported text is on screen is the host's
-finding, from the picture, taken once for all the text reported. For a game the helper does not
-serve, and for every text game until the picture has first shown text in the colours the helper
-reported, the picture-based Host subtitle protection stays in force.
+finding, from the picture, taken once for all the text reported. A 64-bit 3D game that
+imports the glyph function and is not yet set up for the add-on is offered as a text game; the
+add-on can still be installed for it with the bundled script, after which it is an add-on game.
 
 ## Streamed Game provider contract
 

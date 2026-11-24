@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
+#include "game3d_detection.h"
 #include "game3d_installation.h"
 #include "game3d_text_hook.h"
 
@@ -27,6 +28,9 @@ namespace platf::game3d {
   // Authenticated Web UI choice for the executable the status currently offers: "install"
   // or "never". The executable path and identity must match that offer exactly. The choice
   // persists across host restarts; installation itself runs on the setup worker.
+  // "convert" is the owner's own choice of an application no rule offers: one of those the
+  // status lists as lately in front on the streamed display, named by the path and identity
+  // listed. It is converted as a text game from then on, at every start, until it is stopped.
   // Returns an error message when the offer no longer matches or the choice cannot be saved.
   [[nodiscard]] std::optional<std::string> decide_setup(std::string_view executable, std::string_view identity, std::string_view decision);
 
@@ -47,19 +51,26 @@ namespace platf::game3d {
     // choices, so it can only cause a new offer, never a write. It is read again on the next
     // use, and the next choice saved first moves it aside (game3d_setup.json.bad-<time>)
     // instead of replacing it; when it cannot be moved, that choice is not saved.
+    // An "install" may carry the mark that the owner chose the executable where no rule offered
+    // it. That mark is what makes the host take the application for a text game at all, so it
+    // follows the executable path alone: after a game update the application is still found,
+    // and the changed file is offered for confirmation like any other.
     class setup_decisions {
     public:
       explicit setup_decisions(std::filesystem::path file);
 
       [[nodiscard]] setup_decision_e lookup(const std::filesystem::path &executable, std::string_view identity);
+      // True for an executable its owner chose for conversion and has not stopped since.
+      [[nodiscard]] bool chosen(const std::filesystem::path &executable);
       // none removes the executable's choice. False when the file cannot be written.
-      [[nodiscard]] bool record(const std::filesystem::path &executable, std::string_view identity, setup_decision_e decision);
+      [[nodiscard]] bool record(const std::filesystem::path &executable, std::string_view identity, setup_decision_e decision, bool chosen = false);
 
     private:
       struct entry_t {
         std::filesystem::path executable;
         std::string identity;
         setup_decision_e decision {};
+        bool chosen {};
       };
 
       void load_locked();
@@ -70,6 +81,34 @@ namespace platf::game3d {
       std::filesystem::path file_;
       bool loaded_ {};
       bool unreadable_ {};
+      std::vector<entry_t> entries_;
+    };
+
+    // The applications an owner may choose for conversion: those lately in front on the
+    // streamed display that no rule offers. One entry per executable, the latest first, and no
+    // more than `most`: a list to pick a game from, not a history. Not thread-safe.
+    class choosable_applications {
+    public:
+      static constexpr std::size_t most = 4;
+
+      struct entry_t {
+        detected_game game;  ///< As it is once chosen.
+        std::string executable;  ///< The path as the status lists it.
+        std::string identity;  ///< Of the executable's file when it was last in front.
+      };
+
+      // An application is in front. One whose file cannot be identified is not listed.
+      void observe(const detected_game &game, std::string executable, std::string identity);
+      void forget(const std::filesystem::path &executable);
+      void keep_if(const std::function<bool(const detected_game &game)> &keep);
+      // The entry listed under exactly this path and identity.
+      [[nodiscard]] std::optional<entry_t> find(std::string_view executable, std::string_view identity) const;
+
+      [[nodiscard]] const std::vector<entry_t> &entries() const {
+        return entries_;
+      }
+
+    private:
       std::vector<entry_t> entries_;
     };
 
@@ -105,11 +144,14 @@ namespace platf::game3d {
     // the confirmation is kept, because the helper must be loaded again at every start of the
     // game; "never" withdraws it. A game the helper cannot be loaded into is converted all the
     // same: the helper only adds the game's own text to what the host finds in the picture.
+    // A game that composes its text itself (`helper` false) has nothing the helper could watch:
+    // nothing is loaded into it, so nothing refuses it, and `load` only tells whether it runs.
     [[nodiscard]] setup_outcome apply_text_hook_setup(
       const std::filesystem::path &executable,
       setup_decisions &decisions,
       const std::function<std::string(const std::filesystem::path &executable)> &refusal,
-      const std::function<text_hook::load_result()> &load
+      const std::function<text_hook::load_result()> &load,
+      bool helper = true
     );
   }  // namespace detail
 }  // namespace platf::game3d

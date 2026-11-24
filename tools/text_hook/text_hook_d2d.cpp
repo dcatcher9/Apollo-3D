@@ -5,10 +5,12 @@
  *
  * It patches the text-drawing slots of the Direct2D render-target vtables, repeats each text
  * draw of the application on a render target of its own that draws into the published picture,
- * and forwards the call unchanged.
+ * and forwards the call unchanged. A frame that only draws the text of the frame before again is
+ * compared with it instead, and costs the application next to nothing.
  */
 #include "text_hook_core.h"
 
+#include <cstring>
 #include <d2d1.h>
 #include <d2d1_1.h>
 #include <dwrite.h>
@@ -30,6 +32,10 @@ namespace sunshine_text_hook::helper::d2d {
     constexpr std::uint64_t rebind_after_ms = 2000u;
     /// Text drawn fainter than this is not on screen: a layout pass, or the first step of a fade.
     constexpr float least_visible_alpha = 1.0f / 16.0f;
+    /// How many text draws of one frame are kept for comparison, and the room for their strings
+    /// and glyph runs. Past either, every draw is repeated on the picture, as all once were.
+    constexpr unsigned max_frame_draws = 4096u;
+    constexpr std::uint32_t frame_pool_bytes = 1u << 20u;
 
     /** One drawn piece of text, in pixels of the picture. Half-open. */
     struct box_t {
@@ -40,6 +46,38 @@ namespace sunshine_text_hook::helper::d2d {
       box_t box;
       std::uint64_t first_tick;
       std::uint32_t batch;
+    };
+
+    enum class kind_e : std::uint8_t {
+      text,
+      layout,
+      glyph_run,
+    };
+
+    /** One text draw of the application: what it drew, and the state it drew it in. */
+    struct draw_t {
+      kind_e kind;
+      bool have_box;
+      box_t box;  ///< Where it landed, in pixels of the picture.
+      std::uint64_t signature;
+      std::uint32_t pool_mark;  ///< Where the frame's pool stood before this draw's own data.
+      D2D1_MATRIX_3X2_F transform;
+      FLOAT dpi_x, dpi_y;
+      D2D1_TEXT_ANTIALIAS_MODE antialias;
+      D2D1_COLOR_F colour;
+      D2D1_DRAW_TEXT_OPTIONS options;
+      DWRITE_MEASURING_MODE mode;
+      D2D1_POINT_2F origin;  ///< A layout's origin, or a glyph run's baseline.
+      const WCHAR *string;
+      UINT32 length;
+      IDWriteTextFormat *format;
+      D2D1_RECT_F rect;
+      IDWriteTextLayout *layout;
+      DWRITE_GLYPH_RUN run;
+      /// For a text draw: the helper's own layout of the string as it was drawn, made when the
+      /// draw was measured. A kept draw is repeated from it, since the application may change
+      /// its format, or release it, at any time after the draw.
+      IDWriteTextLayout *own_layout;
     };
 
     using draw_text_fn = void(STDMETHODCALLTYPE *)(ID2D1RenderTarget *, const WCHAR *, UINT32, IDWriteTextFormat *, const D2D1_RECT_F *, ID2D1Brush *, D2D1_DRAW_TEXT_OPTIONS, DWRITE_MEASURING_MODE);
@@ -91,6 +129,146 @@ namespace sunshine_text_hook::helper::d2d {
     std::uint32_t published_top = 0u, published_bottom = 0u;  ///< The text rows last published.
     std::uint64_t batch_tick = 0u;
     std::uint64_t last_draw_tick = 0u;  ///< The latest text draw on the picture.
+
+    // The text draws the helper's picture is made of, in order, each with its own copy of what
+    // it drew. Most applications wipe their surface and draw the same text again for every frame
+    // they show. While the picture is exactly these draws (`frame_exact`), such a frame is only
+    // compared with them, draw by draw, and nothing is drawn or published for it: repeating
+    // every draw took a busy application several times its own frame time.
+    draw_t frame[max_frame_draws];
+    unsigned frame_count = 0u;
+    std::uint8_t *frame_pool = nullptr;
+    std::uint32_t frame_pool_used = 0u;
+    bool frame_exact = false;
+    bool matching = false;  ///< The surface was wiped: draws are being compared with the frame.
+    unsigned match_index = 0u;  ///< How many of the frame's draws have been drawn again.
+    bool match_ended = false;  ///< The application ended its drawing before all were.
+    std::uint64_t match_ended_tick = 0u;
+    // For the diagnostic log.
+    unsigned draws_seen = 0u, draws_compared = 0u, frames_repeated = 0u, frames_redone = 0u;
+    std::uint64_t counted_tick = 0u;
+
+    std::uint64_t mix(std::uint64_t hash, const void *data, const std::size_t bytes) {
+      const auto *byte = static_cast<const std::uint8_t *>(data);
+      for (std::size_t index = 0u; index < bytes; ++index) {
+        hash = (hash ^ byte[index]) * 1099511628211ull;
+      }
+      return hash;
+    }
+
+    template<class T>
+    std::uint64_t mix_value(const std::uint64_t hash, const T &value) {
+      return mix(hash, &value, sizeof(value));
+    }
+
+    void release_kept(const draw_t &draw) {
+      if (draw.kind == kind_e::text) {
+        if (draw.own_layout) {
+          draw.own_layout->Release();
+        }
+        if (draw.format) {
+          draw.format->Release();
+        }
+      } else if (draw.kind == kind_e::layout && draw.layout) {
+        draw.layout->Release();
+      } else if (draw.kind == kind_e::glyph_run && draw.run.fontFace) {
+        draw.run.fontFace->Release();
+      }
+    }
+
+    /** Keep only the first `count` draws of the frame. */
+    void truncate_frame(const unsigned count) {
+      if (count >= frame_count) {
+        return;
+      }
+      for (unsigned index = count; index < frame_count; ++index) {
+        release_kept(frame[index]);
+      }
+      frame_pool_used = frame[count].pool_mark;
+      frame_count = count;
+    }
+
+    /** The picture is no longer known draw by draw. */
+    void forget_frame() {
+      truncate_frame(0u);
+      frame_pool_used = 0u;
+      frame_exact = false;
+      matching = false;
+    }
+
+    /** Room in the frame's pool, aligned for anything kept there. Null when it is full. */
+    void *pool_room(const std::size_t bytes) {
+      const std::uint32_t start = (frame_pool_used + 7u) & ~7u;
+      if (!frame_pool || bytes > frame_pool_bytes || start > frame_pool_bytes - bytes) {
+        return nullptr;
+      }
+      frame_pool_used = start + static_cast<std::uint32_t>(bytes);
+      return frame_pool + start;
+    }
+
+    /**
+     * Keep a draw that was just repeated on the picture, with its own copy of what it drew.
+     * False where it is not kept: the draw's own layout is then the caller's to release.
+     */
+    bool keep(const draw_t &draw) {
+      if (!frame_exact) {
+        return false;
+      }
+      if (!frame_pool) {
+        frame_pool = static_cast<std::uint8_t *>(HeapAlloc(GetProcessHeap(), 0u, frame_pool_bytes));
+      }
+      draw_t kept = draw;
+      kept.pool_mark = frame_pool_used;
+      bool room = frame_count < max_frame_draws && frame_pool;
+      if (room && draw.kind == kind_e::text && draw.own_layout) {
+        // The layout holds the string and the format as they were; nothing of the application's
+        // is kept.
+        kept.string = nullptr;
+        kept.format = nullptr;
+      } else if (room && draw.kind == kind_e::text) {
+        auto *string = static_cast<WCHAR *>(pool_room(static_cast<std::size_t>(draw.length) * sizeof(WCHAR)));
+        room = string != nullptr;
+        if (room) {
+          std::memcpy(string, draw.string, static_cast<std::size_t>(draw.length) * sizeof(WCHAR));
+          kept.string = string;
+        }
+      } else if (room && draw.kind == kind_e::glyph_run) {
+        const std::size_t count = draw.run.glyphCount;
+        auto *indices = draw.run.glyphIndices ? static_cast<UINT16 *>(pool_room(count * sizeof(UINT16))) : nullptr;
+        auto *advances = draw.run.glyphAdvances ? static_cast<FLOAT *>(pool_room(count * sizeof(FLOAT))) : nullptr;
+        auto *offsets = draw.run.glyphOffsets ? static_cast<DWRITE_GLYPH_OFFSET *>(pool_room(count * sizeof(DWRITE_GLYPH_OFFSET))) : nullptr;
+        room = indices && (advances || !draw.run.glyphAdvances) && (offsets || !draw.run.glyphOffsets);
+        if (room) {
+          std::memcpy(indices, draw.run.glyphIndices, count * sizeof(UINT16));
+          if (advances) {
+            std::memcpy(advances, draw.run.glyphAdvances, count * sizeof(FLOAT));
+          }
+          if (offsets) {
+            std::memcpy(offsets, draw.run.glyphOffsets, count * sizeof(DWRITE_GLYPH_OFFSET));
+          }
+          kept.run.glyphIndices = indices;
+          kept.run.glyphAdvances = advances;
+          kept.run.glyphOffsets = offsets;
+        }
+      }
+      if (!room) {
+        // More than is kept for one frame: every draw is repeated again from here on.
+        forget_frame();
+        return false;
+      }
+      // The application may release these at once; the kept draw may be repeated much later.
+      if (kept.kind == kind_e::text) {
+        if (kept.format) {
+          kept.format->AddRef();
+        }
+      } else if (kept.kind == kind_e::layout) {
+        kept.layout->AddRef();
+      } else if (kept.run.fontFace) {
+        kept.run.fontFace->AddRef();
+      }
+      frame[frame_count++] = kept;
+      return true;
+    }
 
     const patched_vtable_t *originals_of(ID2D1RenderTarget *self) {
       void **vtable = *reinterpret_cast<void ***>(self);
@@ -190,6 +368,17 @@ namespace sunshine_text_hook::helper::d2d {
       batch_draws = 0u;
     }
 
+    bool fits(const D2D1_SIZE_U size) {
+      return surface.pixels && size.width == surface.width && size.height == surface.height;
+    }
+
+    /** Whether text on a render target of this size belongs in the picture: see bind(). */
+    bool takes(const D2D1_SIZE_U size, const std::uint64_t tick) {
+      return fits(size) || !own_target || !surface.pixels ||
+             static_cast<std::uint64_t>(size.width) * size.height >= static_cast<std::uint64_t>(surface.width) * surface.height ||
+             tick - last_draw_tick >= rebind_after_ms;
+    }
+
     /**
      * Make the published picture the one of this render target. An application may also draw
      * text on smaller targets of its own, which are not its picture; following each in turn
@@ -197,17 +386,15 @@ namespace sunshine_text_hook::helper::d2d {
      */
     bool bind(ID2D1RenderTarget *target, const std::uint64_t tick) {
       const D2D1_SIZE_U size = target->GetPixelSize();
-      const bool same = surface.pixels && size.width == surface.width && size.height == surface.height;
-      if (same && own_target) {
+      if (fits(size) && own_target) {
         return true;
       }
-      if (!same && own_target && surface.pixels &&
-          static_cast<std::uint64_t>(size.width) * size.height < static_cast<std::uint64_t>(surface.width) * surface.height &&
-          tick - last_draw_tick < rebind_after_ms) {
+      if (!takes(size, tick)) {
         return false;
       }
       // The helper's render target must not be mid-draw when its picture is replaced.
       flush_batch();
+      forget_frame();
       release_own();
       box_count = 0u;
       if (!ensure_surface(size.width, size.height)) {
@@ -240,6 +427,7 @@ namespace sunshine_text_hook::helper::d2d {
       // Whatever another source left in the published picture is not this text.
       publish(own_pixels, 0u, surface.height, source_direct2d, 0u, 0u, nullptr);
       published_top = published_bottom = 0u;
+      frame_exact = true;  // an empty picture and no draws
       return true;
     }
 
@@ -280,6 +468,11 @@ namespace sunshine_text_hook::helper::d2d {
       own_target->SetTransform(D2D1::Matrix3x2F::Identity());
       if (batch_draws == 0u) {
         own_target->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+        truncate_frame(0u);
+        frame_exact = true;
+      } else {
+        // Parts of the picture are wiped below: it is no longer the kept draws.
+        forget_frame();
       }
       for (std::uint32_t index = 0u; index < box_count; ++index) {
         const auto &existing = boxes[index];
@@ -293,86 +486,6 @@ namespace sunshine_text_hook::helper::d2d {
         }
       }
       box_count = kept;
-    }
-
-    /**
-     * Common path of the three hooks: note where the text lands, then repeat the same draw, in
-     * the application's colour, on the helper's render target. `local` is the text's rectangle
-     * in the target's own coordinates; `replay` issues the draw.
-     */
-    template<class Replay>
-    void observe(ID2D1RenderTarget *target, const box_t *local, ID2D1Brush *brush, Replay replay) {
-      EnterCriticalSection(&state_lock);
-      const std::uint64_t tick = GetTickCount64();
-      if (!seen) {
-        seen = true;
-        gdi::retire();
-      }
-      // The same colour as the application's brush, so the picture shows the text as the
-      // application's own surface does: an outline pass dark, the fill over it light. Its alpha
-      // is left out: whether faint text is on screen is the host's finding, from the picture.
-      D2D1_COLOR_F colour {1.0f, 1.0f, 1.0f, 1.0f};
-      float alpha = brush ? brush->GetOpacity() : 1.0f;
-      ID2D1SolidColorBrush *solid = nullptr;
-      if (brush && SUCCEEDED(brush->QueryInterface(__uuidof(ID2D1SolidColorBrush), reinterpret_cast<void **>(&solid))) && solid) {
-        colour = solid->GetColor();
-        alpha *= colour.a;
-        colour.a = 1.0f;
-        solid->Release();
-      }
-      if (alpha < least_visible_alpha || !bind(target, tick)) {
-        LeaveCriticalSection(&state_lock);
-        return;
-      }
-      D2D1_MATRIX_3X2_F transform;
-      target->GetTransform(&transform);
-      FLOAT dpi_x = 96.0f, dpi_y = 96.0f;
-      target->GetDpi(&dpi_x, &dpi_y);
-      box_t box {1e30f, 1e30f, -1e30f, -1e30f};
-      bool have_box = false;
-      if (local) {
-        const float xs[4] {local->left, local->right, local->left, local->right}, ys[4] {local->top, local->top, local->bottom, local->bottom};
-        for (int corner = 0; corner < 4; ++corner) {
-          const float x = (xs[corner] * transform._11 + ys[corner] * transform._21 + transform._31) * dpi_x / 96.0f;
-          const float y = (xs[corner] * transform._12 + ys[corner] * transform._22 + transform._32) * dpi_y / 96.0f;
-          box = {min_of(box.left, x), min_of(box.top, y), max_of(box.right, x), max_of(box.bottom, y)};
-        }
-        have_box = box.right > box.left && box.bottom > box.top && box.right - box.left < 16384.0f && box.bottom - box.top < 16384.0f;
-      }
-      if (!batch_open) {
-        batch_open = true;
-        batch_tick = tick;
-      }
-      last_draw_tick = tick;
-      text_target = target;
-      text_bitmap = bitmap_of(target);
-      enter_call();
-      if (!own_drawing) {
-        own_target->BeginDraw();
-        own_drawing = true;
-      }
-      if (have_box) {
-        if (replaces_older(box, tick)) {
-          retire_older();
-        }
-        record(box, tick);
-      }
-      own_target->SetDpi(dpi_x, dpi_y);
-      own_target->SetTransform(&transform);
-      own_target->SetTextAntialiasMode(target->GetTextAntialiasMode());
-      own_brush->SetColor(colour);
-      replay(own_target, own_brush);
-      ++batch_draws;
-      leave_call();
-      if (have_box) {
-        log_line("text %.1f,%.1f-%.1f,%.1f batch %u", box.left, box.top, box.right, box.bottom, batch);
-      }
-      // The application's EndDraw publishes. An application that keeps one drawing open for long
-      // is still published in steps.
-      if (tick - batch_tick >= longest_batch_ms) {
-        flush_batch();
-      }
-      LeaveCriticalSection(&state_lock);
     }
 
     /** The rectangle of a glyph run from its font's metrics: there is no layout to measure. */
@@ -412,19 +525,280 @@ namespace sunshine_text_hook::helper::d2d {
       return box.right > box.left && box.bottom > box.top;
     }
 
-    void STDMETHODCALLTYPE draw_text_hook(ID2D1RenderTarget *self, const WCHAR *string, UINT32 length, IDWriteTextFormat *format, const D2D1_RECT_F *rect, ID2D1Brush *brush, D2D1_DRAW_TEXT_OPTIONS options, DWRITE_MEASURING_MODE mode) {
-      if (!nested() && string && length != 0u && format && rect && own_dwrite) {
-        // Direct2D lays this string out inside the rectangle; measure it the same way.
+    /**
+     * What tells one draw from another: everything that decides what lands where. A text format
+     * goes in by its properties, since an application may make a new one for every frame; a
+     * layout and a font face can only go in as the objects they are, which stay the same objects
+     * for as long as a kept draw holds them.
+     */
+    std::uint64_t sign(const draw_t &draw, const ID2D1RenderTarget *target) {
+      std::uint64_t hash = 14695981039346656037ull;
+      hash = mix_value(hash, draw.kind);
+      hash = mix_value(hash, target);
+      hash = mix_value(hash, draw.transform);
+      hash = mix_value(hash, draw.dpi_x);
+      hash = mix_value(hash, draw.dpi_y);
+      hash = mix_value(hash, draw.antialias);
+      hash = mix_value(hash, draw.colour);
+      hash = mix_value(hash, draw.options);
+      hash = mix_value(hash, draw.mode);
+      if (draw.kind == kind_e::text) {
+        hash = mix(hash, draw.string, static_cast<std::size_t>(draw.length) * sizeof(WCHAR));
+        hash = mix_value(hash, draw.rect);
+        WCHAR family[64] {};
+        draw.format->GetFontFamilyName(family, 64u);
+        hash = mix(hash, family, sizeof(family));
+        hash = mix_value(hash, draw.format->GetFontSize());
+        hash = mix_value(hash, draw.format->GetFontWeight());
+        hash = mix_value(hash, draw.format->GetFontStyle());
+        hash = mix_value(hash, draw.format->GetFontStretch());
+        hash = mix_value(hash, draw.format->GetTextAlignment());
+        hash = mix_value(hash, draw.format->GetParagraphAlignment());
+        hash = mix_value(hash, draw.format->GetWordWrapping());
+      } else if (draw.kind == kind_e::layout) {
+        hash = mix_value(hash, draw.layout);
+        hash = mix_value(hash, draw.origin);
+        hash = mix_value(hash, draw.layout->GetMaxWidth());
+        hash = mix_value(hash, draw.layout->GetMaxHeight());
+        // An application may restyle a layout it keeps; what it then measures tells.
+        DWRITE_TEXT_METRICS metrics {};
+        if (SUCCEEDED(draw.layout->GetMetrics(&metrics))) {
+          hash = mix_value(hash, metrics.width);
+          hash = mix_value(hash, metrics.height);
+          hash = mix_value(hash, metrics.lineCount);
+        }
+      } else {
+        const auto &run = draw.run;
+        hash = mix_value(hash, draw.origin);
+        hash = mix_value(hash, run.fontFace);
+        hash = mix_value(hash, run.fontEmSize);
+        hash = mix_value(hash, run.glyphCount);
+        hash = mix_value(hash, run.isSideways);
+        hash = mix_value(hash, run.bidiLevel);
+        if (run.glyphIndices) {
+          hash = mix(hash, run.glyphIndices, static_cast<std::size_t>(run.glyphCount) * sizeof(UINT16));
+        }
+        if (run.glyphAdvances) {
+          hash = mix(hash, run.glyphAdvances, static_cast<std::size_t>(run.glyphCount) * sizeof(FLOAT));
+        }
+        if (run.glyphOffsets) {
+          hash = mix(hash, run.glyphOffsets, static_cast<std::size_t>(run.glyphCount) * sizeof(DWRITE_GLYPH_OFFSET));
+        }
+      }
+      return hash;
+    }
+
+    /** Where a draw lands, in pixels of the picture. False where that cannot be told. */
+    bool measure(draw_t &draw, box_t &box) {
+      box_t local {};
+      bool measured = false;
+      if (draw.kind == kind_e::text) {
+        // Direct2D lays this string out inside the rectangle; measure it the same way. The
+        // layout is the draw's own from here on: it is what a kept draw is repeated from.
         IDWriteTextLayout *layout = nullptr;
         DWRITE_TEXT_METRICS metrics {};
-        if (SUCCEEDED(own_dwrite->CreateTextLayout(string, length, format, max_of(rect->right - rect->left, 0.0f), max_of(rect->bottom - rect->top, 0.0f), &layout)) && layout) {
-          const bool measured = SUCCEEDED(layout->GetMetrics(&metrics)) && metrics.width > 0.0f && metrics.height > 0.0f;
-          layout->Release();
-          const box_t local {rect->left + metrics.left, rect->top + metrics.top, rect->left + metrics.left + metrics.width, rect->top + metrics.top + metrics.height};
-          observe(self, measured ? &local : nullptr, brush, [&](ID2D1RenderTarget *own, ID2D1Brush *same) {
-            own->DrawText(string, length, format, rect, same, options, mode);
-          });
+        const auto &rect = draw.rect;
+        if (SUCCEEDED(own_dwrite->CreateTextLayout(draw.string, draw.length, draw.format, max_of(rect.right - rect.left, 0.0f), max_of(rect.bottom - rect.top, 0.0f), &layout)) && layout) {
+          measured = SUCCEEDED(layout->GetMetrics(&metrics)) && metrics.width > 0.0f && metrics.height > 0.0f;
+          // Direct2D measures a GDI-compatible draw otherwise than this layout does: such a
+          // draw is repeated from the application's own string and format.
+          if (draw.mode == DWRITE_MEASURING_MODE_NATURAL) {
+            draw.own_layout = layout;
+          } else {
+            layout->Release();
+          }
+          local = {rect.left + metrics.left, rect.top + metrics.top, rect.left + metrics.left + metrics.width, rect.top + metrics.top + metrics.height};
         }
+      } else if (draw.kind == kind_e::layout) {
+        DWRITE_TEXT_METRICS metrics {};
+        measured = SUCCEEDED(draw.layout->GetMetrics(&metrics)) && metrics.width > 0.0f && metrics.height > 0.0f;
+        local = {draw.origin.x + metrics.left, draw.origin.y + metrics.top, draw.origin.x + metrics.left + metrics.width, draw.origin.y + metrics.top + metrics.height};
+      } else {
+        measured = glyph_run_box(draw.origin, draw.run, local);
+      }
+      if (!measured) {
+        return false;
+      }
+      box = {1e30f, 1e30f, -1e30f, -1e30f};
+      const auto &transform = draw.transform;
+      const float xs[4] {local.left, local.right, local.left, local.right}, ys[4] {local.top, local.top, local.bottom, local.bottom};
+      for (int corner = 0; corner < 4; ++corner) {
+        const float x = (xs[corner] * transform._11 + ys[corner] * transform._21 + transform._31) * draw.dpi_x / 96.0f;
+        const float y = (xs[corner] * transform._12 + ys[corner] * transform._22 + transform._32) * draw.dpi_y / 96.0f;
+        box = {min_of(box.left, x), min_of(box.top, y), max_of(box.right, x), max_of(box.bottom, y)};
+      }
+      return box.right > box.left && box.bottom > box.top && box.right - box.left < 16384.0f && box.bottom - box.top < 16384.0f;
+    }
+
+    /** The picture is about to change: open the batch and the helper's own drawing. */
+    void open_batch(const std::uint64_t tick) {
+      if (!batch_open) {
+        batch_open = true;
+        batch_tick = tick;
+      }
+      if (!own_drawing) {
+        own_target->BeginDraw();
+        own_drawing = true;
+      }
+    }
+
+    /**
+     * Repeat a draw on the helper's picture, which is mid-draw, in the application's colour, so
+     * the picture shows the text as the application's own surface does: an outline pass dark,
+     * the fill over it light.
+     */
+    void issue(const draw_t &draw) {
+      own_target->SetDpi(draw.dpi_x, draw.dpi_y);
+      own_target->SetTransform(&draw.transform);
+      own_target->SetTextAntialiasMode(draw.antialias);
+      own_brush->SetColor(draw.colour);
+      if (draw.kind == kind_e::text && !draw.string) {
+        // A kept draw: from the helper's own layout of it.
+        own_target->DrawTextLayout(D2D1::Point2F(draw.rect.left, draw.rect.top), draw.own_layout, own_brush, draw.options);
+      } else if (draw.kind == kind_e::text) {
+        own_target->DrawText(draw.string, draw.length, draw.format, &draw.rect, own_brush, draw.options, draw.mode);
+      } else if (draw.kind == kind_e::layout) {
+        own_target->DrawTextLayout(draw.origin, draw.layout, own_brush, draw.options);
+      } else {
+        own_target->DrawGlyphRun(draw.origin, &draw.run, own_brush, draw.mode);
+      }
+      ++batch_draws;
+    }
+
+    /**
+     * The comparison is over. Where the application drew every kept draw again, the picture
+     * stands as it is. Where it stopped short, or drew something else, the picture is redone as
+     * the draws that were drawn again, from their kept copies.
+     */
+    void settle_match(const std::uint64_t tick) {
+      matching = false;
+      if (match_index >= frame_count) {
+        ++frames_repeated;
+        // The application has just drawn all of this again: its text is of now, not text that
+        // a draw laid over it would replace.
+        for (std::uint32_t index = 0u; index < box_count; ++index) {
+          boxes[index].first_tick = tick;
+          boxes[index].batch = batch;
+        }
+        return;
+      }
+      ++frames_redone;
+      truncate_frame(match_index);
+      enter_call();
+      open_batch(tick);
+      own_target->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+      box_count = 0u;
+      batch_draws = 0u;
+      for (unsigned index = 0u; index < frame_count; ++index) {
+        // A draw kept by the application's own objects is repeated only while they are as they
+        // were. From one that has changed on, the draws are given up: the application draws
+        // them again, or they are gone.
+        if (!(frame[index].kind == kind_e::text && !frame[index].string) && sign(frame[index], text_target) != frame[index].signature) {
+          truncate_frame(index);
+          break;
+        }
+        if (frame[index].have_box) {
+          record(frame[index].box, tick);
+        }
+        issue(frame[index]);
+      }
+      leave_call();
+    }
+
+    /**
+     * Common path of the three hooks. A draw that repeats the kept one in its place is only
+     * counted. Any other is repeated on the helper's render target, where it lands is noted,
+     * and it is kept for the frames to come.
+     */
+    void observe(ID2D1RenderTarget *target, ID2D1Brush *brush, draw_t &draw) {
+      EnterCriticalSection(&state_lock);
+      const std::uint64_t tick = GetTickCount64();
+      if (!seen) {
+        seen = true;
+        gdi::retire();
+      }
+      // The brush's alpha is left out of the colour: whether faint text is on screen is the
+      // host's finding, from the picture.
+      draw.colour = {1.0f, 1.0f, 1.0f, 1.0f};
+      float alpha = brush ? brush->GetOpacity() : 1.0f;
+      ID2D1SolidColorBrush *solid = nullptr;
+      if (brush && SUCCEEDED(brush->QueryInterface(__uuidof(ID2D1SolidColorBrush), reinterpret_cast<void **>(&solid))) && solid) {
+        draw.colour = solid->GetColor();
+        alpha *= draw.colour.a;
+        draw.colour.a = 1.0f;
+        solid->Release();
+      }
+      if (alpha < least_visible_alpha) {
+        LeaveCriticalSection(&state_lock);
+        return;
+      }
+      target->GetTransform(&draw.transform);
+      target->GetDpi(&draw.dpi_x, &draw.dpi_y);
+      draw.antialias = target->GetTextAntialiasMode();
+      draw.signature = sign(draw, target);
+      ++draws_seen;
+      if (matching) {
+        if (target == text_target && match_index < frame_count && frame[match_index].signature == draw.signature) {
+          ++match_index;
+          ++draws_compared;
+          match_ended = false;
+          last_draw_tick = tick;
+          LeaveCriticalSection(&state_lock);
+          return;
+        }
+        // Text on a target that is not the picture's is no part of the frame, nor its end.
+        if (!takes(target->GetPixelSize(), tick)) {
+          LeaveCriticalSection(&state_lock);
+          return;
+        }
+        settle_match(tick);
+      }
+      if (!bind(target, tick)) {
+        LeaveCriticalSection(&state_lock);
+        return;
+      }
+      draw.have_box = measure(draw, draw.box);
+      last_draw_tick = tick;
+      text_target = target;
+      text_bitmap = bitmap_of(target);
+      enter_call();
+      open_batch(tick);
+      if (draw.have_box) {
+        if (replaces_older(draw.box, tick)) {
+          retire_older();
+        }
+        record(draw.box, tick);
+      }
+      issue(draw);
+      leave_call();
+      if (!keep(draw) && draw.own_layout) {
+        draw.own_layout->Release();
+      }
+      // The first draws show how the application draws its text; the log is for more than them.
+      static unsigned logged_draws = 0u;
+      if (draw.have_box && logged_draws < 600u) {
+        ++logged_draws;
+        log_line("text %.1f,%.1f-%.1f,%.1f batch %u kind %u", draw.box.left, draw.box.top, draw.box.right, draw.box.bottom, batch, static_cast<unsigned>(draw.kind));
+      }
+      // The application's EndDraw publishes. An application that keeps one drawing open for long
+      // is still published in steps.
+      if (tick - batch_tick >= longest_batch_ms) {
+        flush_batch();
+      }
+      LeaveCriticalSection(&state_lock);
+    }
+
+    void STDMETHODCALLTYPE draw_text_hook(ID2D1RenderTarget *self, const WCHAR *string, UINT32 length, IDWriteTextFormat *format, const D2D1_RECT_F *rect, ID2D1Brush *brush, D2D1_DRAW_TEXT_OPTIONS options, DWRITE_MEASURING_MODE mode) {
+      if (!nested() && string && length != 0u && length <= 65536u && format && rect && own_dwrite) {
+        draw_t draw {};
+        draw.kind = kind_e::text;
+        draw.string = string;
+        draw.length = length;
+        draw.format = format;
+        draw.rect = *rect;
+        draw.options = options;
+        draw.mode = mode;
+        observe(self, brush, draw);
       }
       enter_call();
       original_draw_text(self, string, length, format, rect, brush, options, mode);
@@ -433,12 +807,12 @@ namespace sunshine_text_hook::helper::d2d {
 
     void STDMETHODCALLTYPE draw_text_layout_hook(ID2D1RenderTarget *self, D2D1_POINT_2F origin, IDWriteTextLayout *layout, ID2D1Brush *brush, D2D1_DRAW_TEXT_OPTIONS options) {
       if (!nested() && layout) {
-        DWRITE_TEXT_METRICS metrics {};
-        const bool measured = SUCCEEDED(layout->GetMetrics(&metrics)) && metrics.width > 0.0f && metrics.height > 0.0f;
-        const box_t local {origin.x + metrics.left, origin.y + metrics.top, origin.x + metrics.left + metrics.width, origin.y + metrics.top + metrics.height};
-        observe(self, measured ? &local : nullptr, brush, [&](ID2D1RenderTarget *own, ID2D1Brush *same) {
-          own->DrawTextLayout(origin, layout, same, options);
-        });
+        draw_t draw {};
+        draw.kind = kind_e::layout;
+        draw.layout = layout;
+        draw.origin = origin;
+        draw.options = options;
+        observe(self, brush, draw);
       }
       enter_call();
       original_draw_text_layout(self, origin, layout, brush, options);
@@ -446,12 +820,13 @@ namespace sunshine_text_hook::helper::d2d {
     }
 
     void STDMETHODCALLTYPE draw_glyph_run_hook(ID2D1RenderTarget *self, D2D1_POINT_2F baseline, const DWRITE_GLYPH_RUN *run, ID2D1Brush *brush, DWRITE_MEASURING_MODE mode) {
-      if (!nested() && run) {
-        box_t local {};
-        const bool measured = glyph_run_box(baseline, *run, local);
-        observe(self, measured ? &local : nullptr, brush, [&](ID2D1RenderTarget *own, ID2D1Brush *same) {
-          own->DrawGlyphRun(baseline, run, same, mode);
-        });
+      if (!nested() && run && run->glyphCount != 0u && run->glyphCount <= 65536u && run->glyphIndices) {
+        draw_t draw {};
+        draw.kind = kind_e::glyph_run;
+        draw.run = *run;
+        draw.origin = baseline;
+        draw.mode = mode;
+        observe(self, brush, draw);
       }
       enter_call();
       original_draw_glyph_run(self, baseline, run, brush, mode);
@@ -464,20 +839,32 @@ namespace sunshine_text_hook::helper::d2d {
         EnterCriticalSection(&state_lock);
         // The application wiped the surface its text is on: that text is gone, whatever it draws
         // next. This is the only erasure Direct2D names; text painted over is not noticed here.
-        if (self == text_target && own_target && box_count != 0u && bitmap_of(self) == text_bitmap) {
-          if (!batch_open) {
-            batch_open = true;
-            batch_tick = GetTickCount64();
+        if (self == text_target && own_target && bitmap_of(self) == text_bitmap) {
+          const std::uint64_t tick = GetTickCount64();
+          // Wiped again with nothing drawn since the last wipe: still the same wipe, also where
+          // the application ended a drawing in between, unless that was long enough ago for the
+          // text to be gone.
+          const bool same_wipe = matching && match_index == 0u && !(match_ended && tick - match_ended_tick >= longest_batch_ms);
+          if (matching && !same_wipe) {
+            settle_match(tick);  // the frame before ended short of its text
           }
-          enter_call();
-          if (!own_drawing) {
-            own_target->BeginDraw();
-            own_drawing = true;
+          if (same_wipe) {
+            // The comparison goes on from where it stands.
+          } else if (frame_exact && frame_count != 0u && fits(self->GetPixelSize())) {
+            // Most likely the same text follows: compare before wiping anything.
+            matching = true;
+            match_index = 0u;
+            match_ended = false;
+          } else if (!frame_exact || frame_count != 0u || box_count != 0u) {
+            enter_call();
+            open_batch(tick);
+            own_target->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+            leave_call();
+            box_count = 0u;
+            batch_draws = 0u;
+            truncate_frame(0u);
+            frame_exact = true;
           }
-          own_target->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
-          leave_call();
-          box_count = 0u;
-          batch_draws = 0u;
         }
         LeaveCriticalSection(&state_lock);
       }
@@ -492,6 +879,11 @@ namespace sunshine_text_hook::helper::d2d {
         EnterCriticalSection(&state_lock);
         // The application finished the drawing its text was part of: publish that text as one.
         if (seen && self == text_target) {
+          if (matching && match_index < frame_count && !match_ended) {
+            // It may go on drawing the rest in another step; the idle check tells if it does not.
+            match_ended = true;
+            match_ended_tick = GetTickCount64();
+          }
           flush_batch();
         }
         LeaveCriticalSection(&state_lock);
@@ -597,10 +989,25 @@ namespace sunshine_text_hook::helper::d2d {
   }
 
   void idle(const std::uint64_t tick) {
+    // The application wiped its surface, ended its drawing and has not drawn all its text
+    // again since: the rest is gone. An application that draws in several steps continues at
+    // once, and a slow frame has not ended its drawing, so neither is cut short here.
+    if (matching && match_ended && tick - match_ended_tick >= longest_batch_ms) {
+      settle_match(tick);
+      flush_batch();
+    }
     // A clear may precede the same text in a slow frame. Only EndDraw can publish a clear
     // on its own. The idle timeout still bounds publication of glyphs drawn in long batches.
     if (batch_open && batch_draws != 0u && tick - last_draw_tick >= longest_batch_ms) {
       flush_batch();
+    }
+    counted_tick = counted_tick ? counted_tick : tick;
+    if (tick - counted_tick >= 5000u) {
+      if (draws_seen != 0u) {
+        log_line("5 s: %u text draws, %u only compared; %u frames repeated, %u redone", draws_seen, draws_compared, frames_repeated, frames_redone);
+      }
+      draws_seen = draws_compared = frames_repeated = frames_redone = 0u;
+      counted_tick = tick;
     }
   }
 }  // namespace sunshine_text_hook::helper::d2d
