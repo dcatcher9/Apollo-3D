@@ -249,6 +249,96 @@ namespace {
     EXPECT_EQ(again.lookup(other, {}), decision::never);
   }
 
+  // An application its owner chose where no rule offered it is found again by its path alone,
+  // since nothing else makes the host look at it; its file is still confirmed like any other.
+  TEST_F(Game3DSetup, AChosenApplicationStaysChosenByItsPathUntilItIsStopped) {
+    const auto identity = game3d::file_identity(game);
+    const auto other = game.parent_path() / "Other.exe";
+    {
+      game3d::detail::setup_decisions decisions {choices};
+      EXPECT_FALSE(decisions.chosen(game));
+      ASSERT_TRUE(decisions.record(game, identity, decision::install, true));
+      // An offer a rule made and the owner confirmed is no choice of this kind.
+      ASSERT_TRUE(decisions.record(other, "other identity", decision::install));
+      EXPECT_TRUE(decisions.chosen(game));
+      EXPECT_FALSE(decisions.chosen(other));
+    }
+    {
+      game3d::detail::setup_decisions restarted {choices};
+      EXPECT_TRUE(restarted.chosen(game));
+      EXPECT_FALSE(restarted.chosen(other));
+      std::wstring upper = game.wstring();
+      std::transform(upper.begin(), upper.end(), upper.begin(), towupper);
+      EXPECT_TRUE(restarted.chosen(upper));
+      // After a game update it is still found, and the new file is not yet confirmed.
+      EXPECT_EQ(restarted.lookup(game, "changed identity"), decision::none);
+      EXPECT_EQ(restarted.lookup(game, identity), decision::install);
+      // Confirming the new file keeps it chosen.
+      ASSERT_TRUE(restarted.record(game, "changed identity", decision::install, true));
+      EXPECT_TRUE(restarted.chosen(game));
+      // Stopped: it is no game to the host any more, and the refusal carries no mark.
+      ASSERT_TRUE(restarted.record(game, {}, decision::never, true));
+      EXPECT_FALSE(restarted.chosen(game));
+    }
+    game3d::detail::setup_decisions again {choices};
+    EXPECT_FALSE(again.chosen(game));
+    EXPECT_EQ(again.lookup(game, identity), decision::never);
+    // A file written before this mark existed holds none.
+    write(choices, R"({"version": 1, "executables": [{"path": ")" + game.generic_string() + R"(", "identity": "x", "decision": "install"}]})");
+    game3d::detail::setup_decisions older {choices};
+    EXPECT_EQ(older.lookup(game, "x"), decision::install);
+    EXPECT_FALSE(older.chosen(game));
+  }
+
+  TEST_F(Game3DSetup, TheApplicationsToChooseFromAreTheLatestInFrontOnePerExecutable) {
+    using list_t = game3d::detail::choosable_applications;
+    list_t list;
+    const auto application = [&](const wchar_t *name, const std::uint32_t process) {
+      game3d::detected_game result;
+      result.executable = game.parent_path() / name;
+      result.process_id = process;
+      result.creation_time = process * 10u;
+      result.name = fs::path {name}.stem().string();
+      result.kind = game3d::game_kind_e::text_hook;
+      result.chosen = true;
+      return result;
+    };
+    const auto observe = [&](const game3d::detected_game &seen, const std::string &identity) {
+      list.observe(seen, seen.executable.string(), identity);
+    };
+    observe(application(L"One.exe", 1u), "identity one");
+    observe(application(L"Two.exe", 2u), "identity two");
+    // A file that cannot be identified cannot be confirmed either: it is not listed.
+    observe(application(L"Unknown.exe", 3u), {});
+    ASSERT_EQ(list.entries().size(), 2u);
+    EXPECT_EQ(list.entries()[0].game.name, "Two");
+    // In front again, as a new process: one entry, the latest, first.
+    observe(application(L"ONE.exe", 4u), "identity one, updated");
+    ASSERT_EQ(list.entries().size(), 2u);
+    EXPECT_EQ(list.entries()[0].game.process_id, 4u);
+    EXPECT_EQ(list.entries()[1].game.name, "Two");
+    // Only the path and identity the list shows name an entry.
+    const auto one = (game.parent_path() / L"ONE.exe").string();
+    EXPECT_TRUE(list.find(one, "identity one, updated"));
+    EXPECT_FALSE(list.find(one, "identity one"));
+    EXPECT_FALSE(list.find((game.parent_path() / "One.exe").string(), "identity one, updated"));
+    EXPECT_FALSE(list.find((game.parent_path() / "Three.exe").string(), "identity one, updated"));
+    // A list to pick from, not a history.
+    for (std::uint32_t process = 10u; process < 10u + list_t::most; ++process) {
+      observe(application((L"More" + std::to_wstring(process) + L".exe").c_str(), process), "identity");
+    }
+    ASSERT_EQ(list.entries().size(), list_t::most);
+    EXPECT_EQ(list.entries()[0].game.process_id, 10u + list_t::most - 1u);
+    EXPECT_FALSE(list.find(one, "identity one, updated"));
+    // Closed applications go, and so does one that has been chosen.
+    list.keep_if([](const game3d::detected_game &seen) {
+      return seen.process_id != 10u;
+    });
+    EXPECT_EQ(list.entries().size(), list_t::most - 1u);
+    list.forget(game.parent_path() / L"more11.EXE");
+    EXPECT_EQ(list.entries().size(), list_t::most - 2u);
+  }
+
   TEST_F(Game3DSetup, UnreadableChoicesCauseAnOfferNotAWrite) {
     write(choices, "{\"version\": 1, \"executables\": [{\"path\": \"relative.exe\", \"decision\": \"install\", \"identity\": \"x\"}]}");
     game3d::detail::setup_decisions decisions {choices};
@@ -399,6 +489,42 @@ namespace {
     EXPECT_EQ(changed.state, "ready_to_install");
     EXPECT_FALSE(changed.convert);
     EXPECT_EQ(loads, 3);
+  }
+
+  // A game that composes its text itself has nothing the helper could watch: approving it
+  // converts it, and nothing is loaded into it, so the anti-cheat refusal has nothing to refuse.
+  TEST_F(Game3DSetup, TextGameWithoutAHelperIsConvertedWithNothingLoadedOrRefused) {
+    using load_state = game3d::text_hook::load_state_e;
+    game3d::detail::setup_decisions decisions(choices);
+    int refusals = 0;
+    auto running = load_state::unavailable;
+    const auto refusal = [&](const fs::path &) {
+      ++refusals;
+      return std::string {"anti-cheat here"};
+    };
+    const auto state_of = [&] {
+      return game3d::text_hook::load_result {running, "composes its text itself."};
+    };
+    const auto offered = game3d::detail::apply_text_hook_setup(game, decisions, refusal, state_of, false);
+    EXPECT_EQ(offered.state, "ready_to_install");
+    EXPECT_FALSE(offered.convert);
+    // The offer says what will happen to this game: no helper is mentioned as being loaded.
+    EXPECT_NE(offered.installation.detail.find("Nothing is loaded into the game"), std::string::npos);
+
+    ASSERT_TRUE(decisions.record(game, offered.identity, decision::install));
+    const auto active = game3d::detail::apply_text_hook_setup(game, decisions, refusal, state_of, false);
+    EXPECT_EQ(active.installation.state, state::current);
+    EXPECT_TRUE(active.convert);
+    EXPECT_FALSE(active.retry_load);
+    EXPECT_FALSE(active.installation.addon_present);
+    EXPECT_EQ(active.installation.detail, "composes its text itself. Its text is found in the picture alone.");
+    // Once the game has closed it is no longer converted, and the approval stands.
+    running = load_state::not_running;
+    const auto closed = game3d::detail::apply_text_hook_setup(game, decisions, refusal, state_of, false);
+    EXPECT_EQ(closed.installation.state, state::installed);
+    EXPECT_FALSE(closed.convert);
+    EXPECT_EQ(decisions.lookup(game, offered.identity), decision::install);
+    EXPECT_EQ(refusals, 0);
   }
 
   TEST_F(Game3DSetup, NothingIsLoadedIntoAGameWithAntiCheatWhateverElseIsInItsFolder) {

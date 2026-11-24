@@ -430,6 +430,10 @@ namespace video {
     return device->external_frame_held();
   }
 
+  bool nvenc_encode_session_t::capture_paced() const {
+    return device->capture_paced();
+  }
+
   bool nvenc_encode_session_t::set_stream_gamma(stream_gamma_mode_e mode) {
     return device->set_stream_gamma(mode);
   }
@@ -1844,7 +1848,11 @@ namespace video {
         }
         return true;
       };
-      const auto provider_poll_target = independent_provider ?
+      // A Game 3D session whose converter draws the captured picture itself for now, as it does
+      // with a text game in front, is paced like desktop Host SBS for as long as that lasts:
+      // served on every capture and on every completion of its depth, not at poll targets.
+      const bool provider_paced = independent_provider && !session->capture_paced();
+      const auto provider_poll_target = provider_paced ?
                                           encode_frame_timestamp - frame_variation_threshold :
                                           encode_frame_timestamp;
 
@@ -1857,8 +1865,8 @@ namespace video {
         const bool depth_pipeline_ready = depth_pipeline_ready_event && depth_pipeline_ready_event->peek();
         const auto wait_started = std::chrono::steady_clock::now();
         const auto keepalive_wait = detail::encode_keepalive_wait(wait_started, last_encode_at, keepalive_interval);
-        auto pending_source_wait = source.remaining_wait(wait_started, provider_poll_target, independent_provider && conversion_poll_pending);
-        if (independent_provider && last_img) {
+        auto pending_source_wait = source.remaining_wait(wait_started, provider_poll_target, provider_paced && conversion_poll_pending);
+        if (provider_paced && last_img) {
           // The export's fence wake, captures and control requests end this wait; a pending frame
           // that is not yet due is held exactly to its poll target instead.
           const auto hold = hold_timer && !hold_startup_input && !recovery_frame_requested && !depth_pipeline_ready ?
@@ -1985,7 +1993,7 @@ namespace video {
           break;
         }
         finish_conversion();
-        if (independent_provider && !converted_frame) {
+        if (provider_paced && !converted_frame) {
           // Kept input: pending_gamma stays armed for the next real source. Poll for it at stream
           // cadence; with the past target left as it was, the next wait would be zero.
           const auto schedule = detail::select_encode_frame_schedule(
@@ -2014,17 +2022,17 @@ namespace video {
       // blocking and keep D3D rendering on its normal owner. A busy poll keeps the exact slot
       // pending and suppresses duplicate inference for those same pixels. An independent provider
       // also converts for its keepalive, which re-checks the export while no frame arrives.
-      const bool provider_keepalive_due = independent_provider && std::chrono::steady_clock::now() >= last_encode_at + keepalive_interval;
+      const bool provider_keepalive_due = provider_paced && std::chrono::steady_clock::now() >= last_encode_at + keepalive_interval;
       if (!conversion_ran && last_img && (provider_keepalive_due || session->needs_conversion_poll())) {
         const auto now = std::chrono::steady_clock::now();
         // A faster minimum-FPS heartbeat may encode retained output before this deadline,
         // but must not advance an independent provider's schedule ahead of actual time.
         // Host AI completion retains its existing immediate timeout service.
-        if (!independent_provider || source.due(now, provider_poll_target, recovery_frame_requested, true)) {
+        if (!provider_paced || source.due(now, provider_poll_target, recovery_frame_requested, true)) {
           if (lifecycle_change_requested()) {
             break;
           }
-          const auto schedule = independent_provider ?
+          const auto schedule = provider_paced ?
                                   std::optional {detail::select_encode_frame_schedule(
                                     now, encode_frame_timestamp, encode_frame_threshold, frame_variation_threshold
                                   )} :

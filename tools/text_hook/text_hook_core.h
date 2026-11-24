@@ -33,6 +33,8 @@ namespace sunshine_text_hook::helper {
 
   /** One line into the diagnostic log, which exists only where its owner asked for it. */
   void log_line(const char *format, ...);
+  /** True where there is such a log, for work that is done only to fill it. */
+  bool logging();
 
   /**
    * Per thread: true inside an application's text call the helper is forwarding, and inside the
@@ -76,6 +78,14 @@ namespace sunshine_text_hook::helper {
     /// Publish a batch that has seen no text draw for a while.
     void idle(std::uint64_t tick);
   }  // namespace d2d
+
+  namespace d3d11 {
+    /// Patch the Direct3D 11 vtables. False while the application has not loaded Direct3D 11;
+    /// worth calling again later.
+    bool install();
+    /// The application took a glyph's bitmap or outline from GDI: text is being composed.
+    void glyphs_taken();
+  }  // namespace d3d11
 
   namespace gdi {
     /// Point the GDI imports of the application's modules at the hooks. Modules loaded since the

@@ -906,6 +906,30 @@ namespace sunshine_text_hook::helper::gdi {
       return original_delete_object(object);
     }
 
+    // --- glyphs an application takes to compose its text itself ---------------------------------
+
+    using get_glyph_outline_fn = DWORD(WINAPI *)(HDC, UINT, UINT, LPGLYPHMETRICS, DWORD, LPVOID, const MAT2 *);
+    get_glyph_outline_fn original_get_glyph_outline_a = nullptr, original_get_glyph_outline_w = nullptr;
+
+    /** A glyph's bitmap or outline was handed out, not only its measurements. */
+    void glyph_taken(const UINT format, const DWORD size, const void *buffer, const DWORD result) {
+      if (buffer && size != 0u && result != GDI_ERROR && result != 0u && (format & ~static_cast<UINT>(GGO_GLYPH_INDEX | GGO_UNHINTED)) != GGO_METRICS) {
+        d3d11::glyphs_taken();
+      }
+    }
+
+    DWORD WINAPI get_glyph_outline_a_hook(HDC dc, UINT character, UINT format, LPGLYPHMETRICS metrics, DWORD size, LPVOID buffer, const MAT2 *matrix) {
+      const DWORD result = original_get_glyph_outline_a(dc, character, format, metrics, size, buffer, matrix);
+      glyph_taken(format, size, buffer, result);
+      return result;
+    }
+
+    DWORD WINAPI get_glyph_outline_w_hook(HDC dc, UINT character, UINT format, LPGLYPHMETRICS metrics, DWORD size, LPVOID buffer, const MAT2 *matrix) {
+      const DWORD result = original_get_glyph_outline_w(dc, character, format, metrics, size, buffer, matrix);
+      glyph_taken(format, size, buffer, result);
+      return result;
+    }
+
     // --- installation ---------------------------------------------------------------------------
 
     struct hook_t {
@@ -939,6 +963,8 @@ namespace sunshine_text_hook::helper::gdi {
       SUNSHINE_TEXT_HOOK(L"msimg32.dll", "TransparentBlt", transparent_blt),
       SUNSHINE_TEXT_HOOK(L"gdi32.dll", "DeleteObject", delete_object),
       SUNSHINE_TEXT_HOOK(L"user32.dll", "BeginPaint", begin_paint),
+      SUNSHINE_TEXT_HOOK(L"gdi32.dll", "GetGlyphOutlineA", get_glyph_outline_a),
+      SUNSHINE_TEXT_HOOK(L"gdi32.dll", "GetGlyphOutlineW", get_glyph_outline_w),
     };
 #undef SUNSHINE_TEXT_HOOK
 

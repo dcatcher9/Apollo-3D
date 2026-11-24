@@ -512,6 +512,16 @@ namespace platf {
       return false;
     }
 
+    /** True while a converter with an independent external source draws the captured picture with
+     * the host's own asynchronous work instead, as it does for a Game 3D text game. The encode
+     * loop then serves every capture and every finished piece of that work at once, as it does
+     * for desktop Host SBS, and not at the provider's poll targets, which would hold each frame
+     * for several stream intervals. Others are never.
+     */
+    virtual bool capture_paced() const {
+      return false;
+    }
+
     /** The encoder finished consuming the most recent conversion; release its inputs early. */
     virtual void encoder_consumed_input() {}
 

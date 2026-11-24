@@ -93,6 +93,49 @@ namespace {
     }
   }
 
+  // What its owner may choose for conversion needs no mark of a game at all: only a window that
+  // lies wholly on the streamed display and an executable outside the suppression list.
+  TEST(Game3dDetection, AnApplicationNoRuleDescribesMayBeChosenWhereItsClientIsOnTheOutput) {
+    using platf::game3d::detail::is_choosable;
+    const std::filesystem::path executable = LR"(D:\Games\Own Engine\Novel.exe)";
+    auto window = game_window();
+    EXPECT_TRUE(is_choosable(executable, window, capture));
+    // A window is enough, as for every text game.
+    window.client_screen_rect = {100, 100, 1380, 820};
+    EXPECT_TRUE(is_choosable(executable, window, capture));
+    // Partly on another display, or on none of this one.
+    window.client_screen_rect = {-100, 100, 1180, 820};
+    EXPECT_FALSE(is_choosable(executable, window, capture));
+    window.client_screen_rect = {1920, 0, 3840, 1080};
+    EXPECT_FALSE(is_choosable(executable, window, capture));
+    // The browser that shows the setup card is never listed on it, nor is any other program of
+    // the suppression list, a file that is no program, or a window that is not there.
+    EXPECT_FALSE(is_choosable(LR"(C:\Program Files\Browser\msedge.exe)", game_window(), capture));
+    EXPECT_FALSE(is_choosable(LR"(C:\Tools\explorer.exe)", game_window(), capture));
+    EXPECT_FALSE(is_choosable(LR"(D:\Games\Own Engine\Novel.dll)", game_window(), capture));
+    EXPECT_FALSE(is_choosable(L"Novel.exe", game_window(), capture));
+    window = game_window();
+    window.status = foreground::status_e::minimized;
+    EXPECT_FALSE(is_choosable(executable, window, capture));
+  }
+
+  TEST(Game3dDetection, AChosenApplicationIsATextGameWithTheHelperWhereItCanFollow) {
+    platf::game3d::foreground_application application;
+    application.game = {LR"(D:\Games\Own Engine\Novel.exe)", 42u, 7u, "Novel", 0x1234u, platf::game3d::game_kind_e::addon, false};
+    application.recognised = true;  // as a fullscreen Direct3D application is, wrongly here
+    application.choosable = true;
+    application.text_helper = true;
+    const auto game = platf::game3d::as_chosen(application);
+    EXPECT_EQ(game.kind, platf::game3d::game_kind_e::text_hook);
+    EXPECT_TRUE(game.text_helper);
+    EXPECT_TRUE(game.chosen);
+    EXPECT_EQ(game.process_id, 42u);
+    EXPECT_EQ(game.creation_time, 7u);
+    EXPECT_EQ(game.executable, application.game.executable);
+    application.text_helper = false;
+    EXPECT_FALSE(platf::game3d::as_chosen(application).text_helper);
+  }
+
   TEST(Game3dDetection, RejectsInvalidForegroundAndExecutableEvidence) {
     const std::array<std::filesystem::path, 1> modules {L"d3d11.dll"};
     const std::filesystem::path executable = LR"(D:\Games\Example\Example.exe)";
@@ -255,6 +298,39 @@ namespace {
     EXPECT_FALSE(is_text_game_candidate(game, loaded, game_window(), capture, true, none));
     // A program that draws with Direct2D and loads nothing a game loads is an application.
     EXPECT_FALSE(is_text_game_candidate(game, silent, game_window(), capture, true, direct2d));
+  }
+
+  // An engine that takes glyph bitmaps from GDI and composes its text itself. Where it draws
+  // with Direct3D 11 the helper follows the texture its text is loaded into; elsewhere nothing
+  // the helper watches ever carries that text.
+  TEST(Game3dDetection, AGameThatComposesItsTextFromGdiGlyphsIsATextGameFollowedOnlyThroughDirect3D11) {
+    using platf::game3d::detail::text_helper_serves;
+    const std::filesystem::path game = LR"(D:\Games\Novel\novel64.exe)";
+    const platf::game3d::detail::executable_imports_t glyphs {false, false, true}, gdi {false, true, false}, both {false, true, true}, direct2d {true, false, false}, none {};
+    const std::array<std::filesystem::path, 4> loaded {L"d3d9.dll", L"gdi32.dll", L"DSOUND.dll", L"DINPUT.dll"};
+    const std::array<std::filesystem::path, 4> direct3d11 {L"D3D11.dll", L"gdi32.dll", L"DSOUND.dll", L"DINPUT.dll"};
+    const std::array<std::filesystem::path, 2> silent {L"d3d11.dll", L"gdi32.dll"};
+    const std::array<std::filesystem::path, 3> direct_write {L"dwrite.dll", L"d2d1.dll", L"DSOUND.dll"};
+    for (const bool native : {true, false}) {
+      EXPECT_TRUE(is_text_game_candidate(game, loaded, windowed_game_window(), capture, native, glyphs)) << native;
+      EXPECT_TRUE(is_text_game_candidate(game, loaded, game_window(), capture, native, glyphs)) << native;
+      // Without a game library it is any program that measures or renders glyphs.
+      EXPECT_FALSE(is_text_game_candidate(game, silent, windowed_game_window(), capture, native, glyphs)) << native;
+      EXPECT_FALSE(text_helper_serves(loaded, native, glyphs)) << native;
+      EXPECT_FALSE(text_helper_serves(loaded, native, none)) << native;
+      EXPECT_TRUE(is_text_game_candidate(game, direct3d11, windowed_game_window(), capture, native, glyphs)) << native;
+      EXPECT_TRUE(text_helper_serves(direct3d11, native, glyphs)) << native;
+      // The Direct3D 11 part needs no glyph call: it serves any text game that draws with it.
+      EXPECT_TRUE(text_helper_serves(direct3d11, native, none)) << native;
+      // A drawing call the helper watches is worth loading it for.
+      EXPECT_TRUE(text_helper_serves(loaded, native, gdi)) << native;
+      EXPECT_TRUE(text_helper_serves(loaded, native, both)) << native;
+      EXPECT_TRUE(text_helper_serves(loaded, native, direct2d)) << native;
+    }
+    // Loaded Direct2D marks a 32-bit text game, and there the helper watches it; in a 64-bit
+    // process it marks nothing.
+    EXPECT_TRUE(text_helper_serves(direct_write, false, glyphs));
+    EXPECT_FALSE(text_helper_serves(direct_write, true, glyphs));
   }
 
   TEST(Game3dDetection, AKindChangeRestartsConfirmation) {

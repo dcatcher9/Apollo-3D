@@ -85,6 +85,10 @@ namespace sunshine_text_hook::helper {
     std::fflush(log_file);
   }
 
+  bool logging() {
+    return log_file != nullptr && log_lines < 4000u;
+  }
+
   bool nested() {
     return nesting_slot != TLS_OUT_OF_INDEXES && TlsGetValue(nesting_slot) != nullptr;
   }
@@ -192,6 +196,9 @@ namespace sunshine_text_hook::helper {
       shared->magic = magic;
       LeaveCriticalSection(&state_lock);
       log_line("helper started, Direct2D %s", direct2d ? "hooked" : "not loaded yet");
+      // Learned from a window and a device of the helper's own, which load libraries: not under
+      // the lock that the application's threads wait for inside the helper's hooks.
+      bool direct3d = d3d11::install();
 
       // The application's own end of drawing normally publishes its text. Text that no such call
       // follows is published from here once it has been quiet for a moment. The same thread
@@ -207,9 +214,13 @@ namespace sunshine_text_hook::helper {
           if (!direct2d && (direct2d = d2d::install())) {
             log_line("Direct2D hooked");
           }
+
           gdi::install();
         }
         LeaveCriticalSection(&state_lock);
+        if (step % 40u == 0u) {
+          direct3d = direct3d || d3d11::install();
+        }
       }
     }
   }  // namespace

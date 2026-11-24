@@ -35,6 +35,12 @@ namespace platf::game3d::text_hook {
   void set_consent(std::uint32_t process_id, std::uint64_t creation_time, bool consented);
   [[nodiscard]] bool consented(std::uint32_t process_id, std::uint64_t creation_time);
 
+  /** The setup card's words for an approved game that is not running. */
+  inline constexpr char approved_for_next_start[] = "Approved. The game is converted the next time it starts.";
+
+  /** True while the process with this id is the one created at this time and has not ended. */
+  [[nodiscard]] bool running(std::uint32_t process_id, std::uint64_t creation_time);
+
   /**
    * True when the helper's state section for this process exists, carries the current contract
    * and was written by the process created at this time.
@@ -48,9 +54,43 @@ namespace platf::game3d::text_hook {
    */
   [[nodiscard]] load_result load(std::uint32_t process_id, std::uint64_t creation_time, const std::filesystem::path &bundle_directory = bundled_directory());
 
+  /** How a converted text game's text is kept readable, as the capture path last found it. */
+  enum class protection_e : std::uint8_t {
+    unknown,  ///< The game is not being converted now.
+    game_text,  ///< The picture of the text that the game's helper reports is in use.
+    picture,  ///< The fallback: the host finds the text in the captured picture.
+  };
+
+  /** Why the fallback is in force. */
+  enum class fallback_e : std::uint8_t {
+    none,
+    no_helper,  ///< No helper answers in this game: none runs, or what it published cannot be read.
+    no_text,  ///< The helper reports no text.
+    unsure,  ///< The helper follows something it does not take for text.
+    not_shown,  ///< The picture does not show the text the helper reports.
+    unavailable,  ///< The host cannot use a helper's text on this stream now.
+  };
+
+  struct protection_t {
+    protection_e protection {};
+    fallback_e fallback {};
+
+    bool operator==(const protection_t &) const = default;
+  };
+
+  /// Capture thread: what protects this game's text now. Cheap; worth calling about once a second.
+  void report_protection(std::uint32_t process_id, std::uint64_t creation_time, protection_t state);
+  /// The last report for this game, or unknown when there is none from the last three seconds.
+  [[nodiscard]] protection_t protection(std::uint32_t process_id, std::uint64_t creation_time);
+  /// One sentence for the setup card; empty for unknown.
+  [[nodiscard]] std::string describe(protection_t state);
+
   /** The text on the game's drawing surface, as a picture of it. */
   struct text_t {
     std::uint32_t sequence = 0u;  ///< Changes whenever the text or its picture changes.
+    /// The helper follows something it does not take for text, and reports none: the text is
+    /// to be found in the picture.
+    bool unsure = false;
     std::uint32_t surface_width = 0u;
     std::uint32_t surface_height = 0u;
     std::uint32_t top = 0u;  ///< First surface row that may hold text.

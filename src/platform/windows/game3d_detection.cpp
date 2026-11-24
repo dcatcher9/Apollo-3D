@@ -323,7 +323,7 @@ namespace platf::game3d {
         return {};
       }
       constexpr std::array<std::string_view, 4> gdi_text {"TextOut", "ExtTextOut", "DrawText", "DrawTextEx"};
-      bool direct2d = false, directwrite = false, gdi = false;
+      bool direct2d = false, directwrite = false, gdi = false, glyphs = false;
       const std::size_t descriptors = std::min<std::size_t>(directory.Size / sizeof(IMAGE_IMPORT_DESCRIPTOR), 4096);
       for (std::size_t index = 0; index < descriptors; ++index) {
         const auto *descriptor = image.at<IMAGE_IMPORT_DESCRIPTOR>(directory.VirtualAddress + index * sizeof(IMAGE_IMPORT_DESCRIPTOR));
@@ -333,12 +333,12 @@ namespace platf::game3d {
         const auto library = image.name(descriptor->Name);
         direct2d = direct2d || equal_ascii(library, "d2d1.dll");
         directwrite = directwrite || equal_ascii(library, "dwrite.dll");
-        if (gdi || (!equal_ascii(library, "gdi32.dll") && !equal_ascii(library, "user32.dll"))) {
+        if ((gdi && glyphs) || (!equal_ascii(library, "gdi32.dll") && !equal_ascii(library, "user32.dll"))) {
           continue;
         }
         // The names are listed where the loader has not replaced them with addresses.
         const std::uint64_t thunks = descriptor->OriginalFirstThunk ? descriptor->OriginalFirstThunk : descriptor->FirstThunk;
-        for (std::size_t entry = 0; entry < 65536 && !gdi; ++entry) {
+        for (std::size_t entry = 0; entry < 65536 && !(gdi && glyphs); ++entry) {
           std::uint64_t value = 0;
           if (wide) {
             const auto *thunk = image.at<std::uint64_t>(thunks + entry * 8);
@@ -364,10 +364,11 @@ namespace platf::game3d {
           if (function.ends_with('A') || function.ends_with('W')) {
             function.remove_suffix(1);
           }
-          gdi = std::find(gdi_text.begin(), gdi_text.end(), function) != gdi_text.end();
+          gdi = gdi || std::find(gdi_text.begin(), gdi_text.end(), function) != gdi_text.end();
+          glyphs = glyphs || function == "GetGlyphOutline";
         }
       }
-      return {direct2d && directwrite, gdi};
+      return {direct2d && directwrite, gdi, glyphs};
     }
 
     [[nodiscard]] bool name_starts_with(const std::wstring_view name, const std::wstring_view prefix) noexcept {
@@ -428,11 +429,29 @@ namespace platf::game3d {
       return false;
     }
     if (native) {
-      return imports.direct2d_text && game_library_loaded(loaded_modules);
+      return (imports.direct2d_text || imports.gdi_glyphs) && game_library_loaded(loaded_modules);
     }
     // Direct2D text drawing always goes through DirectWrite.
     return (module_loaded(loaded_modules, L"dwrite.dll") && module_loaded(loaded_modules, L"d2d1.dll")) ||
-           (imports.gdi_text && game_library_loaded(loaded_modules));
+           ((imports.gdi_text || imports.gdi_glyphs) && game_library_loaded(loaded_modules));
+  }
+
+  bool detail::text_helper_serves(
+    const std::span<const std::filesystem::path> loaded_modules,
+    const bool native,
+    const executable_imports_t &imports
+  ) {
+    return imports.direct2d_text || imports.gdi_text ||
+           (!native && module_loaded(loaded_modules, L"dwrite.dll") && module_loaded(loaded_modules, L"d2d1.dll")) ||
+           module_loaded(loaded_modules, L"d3d11.dll");
+  }
+
+  bool detail::is_choosable(
+    const std::filesystem::path &executable,
+    const foreground_window::observation_t &foreground,
+    const RECT capture_rect
+  ) {
+    return client_on_capture_output(executable, foreground, capture_rect);
   }
 
   bool detail::is_game_candidate(
@@ -495,6 +514,19 @@ namespace platf::game3d {
   }
 
   std::optional<detected_game> detect_game(const RECT capture_rect) noexcept {
+    const auto application = observe_foreground(capture_rect);
+    return application && application->recognised ? std::optional(application->game) : std::nullopt;
+  }
+
+  detected_game as_chosen(const foreground_application &application) {
+    auto game = application.game;
+    game.kind = game_kind_e::text_hook;
+    game.text_helper = application.text_helper;
+    game.chosen = true;
+    return game;
+  }
+
+  std::optional<foreground_application> observe_foreground(const RECT capture_rect) noexcept {
     try {
       const auto foreground = foreground_window::sample();
       if (!foreground_window::carries_geometry(foreground.status) || !foreground.process_id) {
@@ -537,12 +569,12 @@ namespace platf::game3d {
           imports_created = creation_time;
         }
       }
-      game_kind_e kind;
-      if (!addon_loaded && detail::is_text_game_candidate(*executable, *modules, foreground, capture_rect, native, imports)) {
-        kind = game_kind_e::text_hook;
-      } else if (native && detail::is_game_candidate(*executable, *modules, foreground, capture_rect)) {
-        kind = game_kind_e::addon;
-      } else {
+      const bool text = !addon_loaded && detail::is_text_game_candidate(*executable, *modules, foreground, capture_rect, native, imports);
+      const bool addon = !text && native && detail::is_game_candidate(*executable, *modules, foreground, capture_rect);
+      // An application no rule takes for a text game is its owner's to choose for conversion,
+      // unless it already supplies stereo of its own.
+      const bool choosable = !text && !addon_loaded && detail::is_choosable(*executable, foreground, capture_rect);
+      if (!text && !addon && !choosable) {
         return std::nullopt;
       }
       const auto after = foreground_window::sample();
@@ -550,7 +582,13 @@ namespace platf::game3d {
       if (!foreground_window::carries_geometry(after.status) || after.window != foreground.window || after.process_id != foreground.process_id || after.client_screen_rect != foreground.client_screen_rect || !executable_after || !equal_name(executable->wstring(), executable_after->wstring()) || process_creation_time(process.get()) != creation_time || WaitForSingleObject(process.get(), 0) != WAIT_TIMEOUT) {
         return std::nullopt;
       }
-      return detected_game {*executable, foreground.process_id, creation_time, display_name(*executable), foreground.window, kind};
+      const bool serves = detail::text_helper_serves(*modules, native, imports);
+      return foreground_application {
+        detected_game {*executable, foreground.process_id, creation_time, display_name(*executable), foreground.window, text ? game_kind_e::text_hook : game_kind_e::addon, text && serves},
+        text || addon,
+        choosable,
+        serves,
+      };
     } catch (...) {
       // This advisory must not break an active stream on a path conversion/allocation failure.
       return std::nullopt;

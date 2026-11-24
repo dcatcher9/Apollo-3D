@@ -9,6 +9,7 @@
 #include <fstream>
 #include <functional>
 #include <gtest/gtest.h>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -85,6 +86,41 @@ namespace {
     EXPECT_EQ(closed.state, hook::load_state_e::not_running);
   }
 
+  // The setup card shows what the capture path last reported for the very game it shows, and
+  // says nothing once that is not this game.
+  TEST(Game3DTextHook, TheProtectionReportIsForOneGameAndSaysWhyTheFallbackIsInForce) {
+    using hook::fallback_e;
+    using hook::protection_e;
+    hook::report_protection(4242u, 77u, {protection_e::picture, fallback_e::unsure});
+    EXPECT_EQ(hook::protection(4242u, 77u), (hook::protection_t {protection_e::picture, fallback_e::unsure}));
+    EXPECT_EQ(hook::protection(4242u, 78u).protection, protection_e::unknown);
+    EXPECT_EQ(hook::protection(4243u, 77u).protection, protection_e::unknown);
+    hook::report_protection(4242u, 77u, {protection_e::game_text, fallback_e::none});
+    EXPECT_EQ(hook::protection(4242u, 77u).protection, protection_e::game_text);
+
+    EXPECT_TRUE(hook::describe({}).empty());
+    EXPECT_NE(hook::describe({protection_e::game_text, fallback_e::none}).find("game's own text"), std::string::npos);
+    std::set<std::string> sentences;
+    for (const auto reason : {fallback_e::none, fallback_e::no_helper, fallback_e::no_text, fallback_e::unsure, fallback_e::not_shown, fallback_e::unavailable}) {
+      const auto sentence = hook::describe({protection_e::picture, reason});
+      EXPECT_NE(sentence.find("fallback"), std::string::npos) << sentence;
+      sentences.insert(sentence);
+    }
+    // Every reason reads differently.
+    EXPECT_EQ(sentences.size(), 6u);
+  }
+
+  TEST(Game3DTextHook, RunningNamesOneProcessByItsIdAndStartTime) {
+    FILETIME created {}, unused {};
+    ASSERT_TRUE(GetProcessTimes(GetCurrentProcess(), &created, &unused, &unused, &unused));
+    const auto creation_time = (static_cast<std::uint64_t>(created.dwHighDateTime) << 32u) | created.dwLowDateTime;
+    EXPECT_TRUE(hook::running(GetCurrentProcessId(), creation_time));
+    // The same id given to another program since, and no process at all.
+    EXPECT_FALSE(hook::running(GetCurrentProcessId(), creation_time + 1u));
+    EXPECT_FALSE(hook::running(GetCurrentProcessId(), 0u));
+    EXPECT_FALSE(hook::running(0u, creation_time));
+  }
+
   TEST(Game3DTextHook, LoadRefusesAProcessThatIsNotTheApprovedOne) {
     // This test's own process, named with another creation time: a process id that has been
     // given to a different program since the approval. Nothing is started for it.
@@ -159,6 +195,34 @@ namespace {
     HANDLE section_ = nullptr;
     HANDLE coverage_ = nullptr;
   };
+
+  // A helper that does not take what it follows for text publishes no rows and says so; the
+  // reader hands that on, so the capture path falls back at once instead of waiting.
+  TEST(Game3DTextHook, ReaderTellsWhenTheHelperIsNotSureOfItsText) {
+    constexpr std::uint32_t process = 0x7ffffff4u;
+    fake_helper_t helper(process);
+    ASSERT_NE(helper.state, nullptr);
+    helper.picture(64u, 32u, 64u * 32u * 4u);
+    hook::reader_t reader;
+    hook::text_t text;
+    helper.state->source = shared::source_direct3d11;
+    helper.state->sequence = 2u;
+    ASSERT_TRUE(reader.read(process, fake_helper_t::created, text));
+    EXPECT_FALSE(text.unsure);
+    helper.state->source = shared::source_unsure;
+    helper.state->sequence = 4u;
+    ASSERT_TRUE(reader.read(process, fake_helper_t::created, text));
+    EXPECT_TRUE(text.unsure);
+    EXPECT_EQ(text.top, text.bottom);
+    // Sure again, with text.
+    helper.state->source = shared::source_direct3d11;
+    helper.state->text_top = 4u;
+    helper.state->text_bottom = 20u;
+    helper.state->sequence = 6u;
+    ASSERT_TRUE(reader.read(process, fake_helper_t::created, text));
+    EXPECT_FALSE(text.unsure);
+    EXPECT_EQ(text.bottom, 20u);
+  }
 
   TEST(Game3DTextHook, ReaderTrustsOnlyACompleteStateOfTheSameProcess) {
     constexpr std::uint32_t process = 0x7ffffff2u;
@@ -313,8 +377,44 @@ namespace {
       PostMessageW(window_, WM_APP + 1u, show ? 1u : 0u, 0);
     }
 
+    void show_second_line() const {
+      PostMessageW(window_, WM_APP + 1u, 2u, 0);
+    }
+
     bool read(hook::text_t &text) {
       return reader_.read(process_.dwProcessId, created_, text);
+    }
+
+    /** Count what the published picture holds: solid texels, those in the line's own colour, and texels outside the published rows. */
+    bool count_picture(hook::text_t &text, unsigned &cores, unsigned &coloured, unsigned &outside) {
+      std::vector<std::uint8_t> pixels;
+      const bool copied = wait_until([&] {
+        if (!read(text) || text.bottom <= text.top) {
+          return false;
+        }
+        pixels.resize(static_cast<std::size_t>(text.surface_width) * text.surface_height * 4u);
+        std::memcpy(pixels.data(), text.pixels, pixels.size());
+        return reader_.still_current(text);
+      });
+      cores = coloured = outside = 0u;
+      if (!copied) {
+        return false;
+      }
+      for (std::uint32_t y = 0u; y < text.surface_height; ++y) {
+        for (std::uint32_t x = 0u; x < text.surface_width; ++x) {
+          const std::uint8_t *pixel = &pixels[(static_cast<std::size_t>(y) * text.surface_width + x) * 4u];
+          if (pixel[3] == 0u) {
+            continue;
+          }
+          outside += y < text.top || y >= text.bottom;
+          if (pixel[3] >= 250u) {
+            ++cores;
+            // BGRA, premultiplied: RGB(240, 232, 224) at full coverage.
+            coloured += std::abs(pixel[2] - 240) <= 6 && std::abs(pixel[1] - 232) <= 6 && std::abs(pixel[0] - 224) <= 6;
+          }
+        }
+      }
+      return true;
     }
 
     PROCESS_INFORMATION process_ {};
@@ -362,29 +462,8 @@ namespace {
     EXPECT_GE(text.bottom, sample.last_row);
     EXPECT_LE(text.bottom - text.top, 80u);
     // The picture holds the line in the sample's own colour, inside the published rows only.
-    std::vector<std::uint8_t> pixels(static_cast<std::size_t>(text.surface_width) * text.surface_height * 4u);
-    ASSERT_TRUE(wait_until([&] {
-      if (!has_text()) {
-        return false;
-      }
-      std::memcpy(pixels.data(), text.pixels, pixels.size());
-      return reader_.still_current(text);
-    }));
     unsigned cores = 0u, coloured = 0u, outside = 0u;
-    for (std::uint32_t y = 0u; y < text.surface_height; ++y) {
-      for (std::uint32_t x = 0u; x < text.surface_width; ++x) {
-        const std::uint8_t *pixel = &pixels[(static_cast<std::size_t>(y) * text.surface_width + x) * 4u];
-        if (pixel[3] == 0u) {
-          continue;
-        }
-        outside += y < text.top || y >= text.bottom;
-        if (pixel[3] >= 250u) {
-          ++cores;
-          // BGRA, premultiplied: RGB(240, 232, 224) at full coverage.
-          coloured += std::abs(pixel[2] - 240) <= 6 && std::abs(pixel[1] - 232) <= 6 && std::abs(pixel[0] - 224) <= 6;
-        }
-      }
-    }
+    ASSERT_TRUE(count_picture(text, cores, coloured, outside));
     EXPECT_GT(cores, 500u);
     EXPECT_EQ(coloured, cores);
     EXPECT_EQ(outside, 0u);
@@ -402,6 +481,82 @@ namespace {
     EXPECT_TRUE(wait_until(has_text));
   }
 
+  // A program that keeps its glyphs in one texture fills it as the text goes on, until more of
+  // it is covered than of any text layer. It is the text's texture all the same: the line stays
+  // published, and none of the other glyphs in the cache is taken for a part of it.
+  class Game3DTextHookSampleGlyphCache: public Game3DTextHookSample {};
+
+  TEST_P(Game3DTextHookSampleGlyphCache, KeepsTheLineWhenTheCacheHasFilled) {
+    const auto sample = GetParam();
+    if (!start(sample)) {
+      GTEST_SKIP() << "the text helper sample for this bitness is not built, or no window can be shown";
+    }
+    const auto loaded = hook::load(process_.dwProcessId, created_, fs::path {SUNSHINE_TEST_TEXT_HOOK_DIR});
+    ASSERT_EQ(loaded.state, hook::load_state_e::loaded) << loaded.detail;
+    hook::text_t text;
+    const auto has_text = [&] {
+      return read(text) && text.bottom > text.top;
+    };
+    // The cache is begun anew when the text is shown again, so the helper sees it from its start.
+    show_text(false);
+    std::this_thread::sleep_for(300ms);
+    show_text(true);
+    ASSERT_TRUE(wait_until(has_text));
+    // Seven more frames fill it, at ten frames a second.
+    std::this_thread::sleep_for(2000ms);
+    unsigned cores = 0u, coloured = 0u, outside = 0u;
+    ASSERT_TRUE(count_picture(text, cores, coloured, outside));
+    EXPECT_LE(text.top, sample.first_row);
+    EXPECT_GE(text.bottom, sample.last_row);
+    EXPECT_LE(text.bottom - text.top, 80u);
+    EXPECT_GT(cores, 500u);
+    EXPECT_EQ(coloured, cores);
+    EXPECT_EQ(outside, 0u);
+    // And it stays so while the full cache is drawn from.
+    std::this_thread::sleep_for(500ms);
+    EXPECT_TRUE(has_text());
+  }
+
+  INSTANTIATE_TEST_SUITE_P(
+    Sources,
+    Game3DTextHookSampleGlyphCache,
+    testing::Values(
+      sample_case_t {32u, "d3d11-atlas", 76u, 98u, true},
+      sample_case_t {64u, "d3d11-atlas", 76u, 98u, true}
+    )
+  );
+
+  // A game loads the parts of a figure's face, as small as glyphs, each into a new texture of
+  // one size whenever it shows the figure. New textures alone are no reason to think of text,
+  // however many of them look like it: the helper publishes none of it.
+  class Game3DTextHookSampleParts: public Game3DTextHookSample {};
+
+  TEST_P(Game3DTextHookSampleParts, NewTexturesOfOneSizeAreNotTextByThemselves) {
+    const auto sample = GetParam();
+    if (!start(sample)) {
+      GTEST_SKIP() << "the text helper sample for this bitness is not built, or no window can be shown";
+    }
+    const auto loaded = hook::load(process_.dwProcessId, created_, fs::path {SUNSHINE_TEST_TEXT_HOOK_DIR});
+    ASSERT_EQ(loaded.state, hook::load_state_e::loaded) << loaded.detail;
+    hook::text_t text;
+    show_text(false);
+    std::this_thread::sleep_for(300ms);
+    show_text(true);
+    // Twenty frames, a new texture with every third.
+    std::this_thread::sleep_for(2000ms);
+    EXPECT_FALSE(read(text) && text.bottom > text.top);
+    EXPECT_TRUE(hook::loaded(process_.dwProcessId, created_));
+  }
+
+  INSTANTIATE_TEST_SUITE_P(
+    Sources,
+    Game3DTextHookSampleParts,
+    testing::Values(
+      sample_case_t {32u, "d3d11-parts", 76u, 98u, true},
+      sample_case_t {64u, "d3d11-parts", 76u, 98u, true}
+    )
+  );
+
   INSTANTIATE_TEST_SUITE_P(
     Sources, Game3DTextHookSample,
     testing::Values(
@@ -409,13 +564,85 @@ namespace {
       sample_case_t {32u, "gdi-buffer", 76u, 98u, true},
       sample_case_t {32u, "gdi-layer", 226u, 248u, true},
       sample_case_t {32u, "gdi-bits", 76u, 98u, true},
+      sample_case_t {32u, "d3d11-layer", 76u, 98u, true},
+      sample_case_t {32u, "d3d11-direct", 76u, 98u, true},
+      sample_case_t {32u, "d3d11-own", 76u, 98u, true},
+      sample_case_t {32u, "d3d11-cache", 76u, 98u, true},
       sample_case_t {32u, "d2d", 76u, 98u, false},
       sample_case_t {64u, "gdi-window", 76u, 98u, true},
       sample_case_t {64u, "gdi-buffer", 76u, 98u, true},
       sample_case_t {64u, "gdi-layer", 226u, 248u, true},
       sample_case_t {64u, "gdi-bits", 76u, 98u, true},
+      sample_case_t {64u, "d3d11-layer", 76u, 98u, true},
+      sample_case_t {64u, "d3d11-direct", 76u, 98u, true},
+      sample_case_t {64u, "d3d11-own", 76u, 98u, true},
+      sample_case_t {64u, "d3d11-cache", 76u, 98u, true},
       sample_case_t {64u, "d2d", 76u, 98u, false}
     )
+  );
+
+  // A Direct2D frame that repeats the one before is only compared with it. A frame that then
+  // adds a line draws that line alone, and one that drops it again is redone from what the
+  // helper kept of the lines that stayed, which the sample has by then drawn only for comparison.
+  class Game3DTextHookDirect2DSample: public Game3DTextHookSample {};
+
+  TEST_P(Game3DTextHookDirect2DSample, FollowsALineAddedToARepeatedFrameAndTakenAwayAgain) {
+    const auto sample = GetParam();
+    if (!start(sample)) {
+      GTEST_SKIP() << "the text helper sample for this bitness is not built, or no window can be shown";
+    }
+    const auto loaded = hook::load(process_.dwProcessId, created_, fs::path {SUNSHINE_TEST_TEXT_HOOK_DIR});
+    ASSERT_EQ(loaded.state, hook::load_state_e::loaded) << loaded.detail;
+    hook::text_t text;
+    const auto rows_end_between = [&](const std::uint32_t least, const std::uint32_t most) {
+      return read(text) && text.bottom > text.top && text.bottom >= least && text.bottom <= most;
+    };
+    // The glyphs of the second line lie 80 rows below those of the first.
+    const std::uint32_t one_line = sample.last_row + 40u, two_lines = sample.last_row + 80u;
+    show_text(false);
+    std::this_thread::sleep_for(300ms);
+    show_text(true);
+    ASSERT_TRUE(wait_until([&] {
+      return rows_end_between(sample.last_row, one_line);
+    }));
+    // Let the frame repeat before it changes.
+    std::this_thread::sleep_for(400ms);
+    const auto cores_in = [&](const std::uint32_t first, const std::uint32_t end) {
+      std::vector<std::uint8_t> pixels(static_cast<std::size_t>(text.surface_width) * text.surface_height * 4u);
+      unsigned cores = 0u;
+      EXPECT_TRUE(wait_until([&] {
+        if (!read(text) || !text.pixels) {
+          return false;
+        }
+        std::memcpy(pixels.data(), text.pixels, pixels.size());
+        return reader_.still_current(text);
+      }));
+      for (std::uint32_t y = first; y < end && y < text.surface_height; ++y) {
+        for (std::uint32_t x = 0u; x < text.surface_width; ++x) {
+          cores += pixels[(static_cast<std::size_t>(y) * text.surface_width + x) * 4u + 3u] >= 250u;
+        }
+      }
+      return cores;
+    };
+    show_second_line();
+    ASSERT_TRUE(wait_until([&] {
+      return rows_end_between(two_lines, two_lines + 40u);
+    }));
+    EXPECT_GT(cores_in(0u, one_line), 500u);
+    EXPECT_GT(cores_in(one_line, text.surface_height), 500u);
+    std::this_thread::sleep_for(400ms);
+    show_text(true);
+    ASSERT_TRUE(wait_until([&] {
+      return rows_end_between(sample.last_row, one_line);
+    }));
+    EXPECT_GT(cores_in(0u, one_line), 500u);
+    EXPECT_EQ(cores_in(one_line, text.surface_height), 0u);
+  }
+
+  INSTANTIATE_TEST_SUITE_P(
+    Sources,
+    Game3DTextHookDirect2DSample,
+    testing::Values(sample_case_t {32u, "d2d", 76u, 98u, false}, sample_case_t {64u, "d2d", 76u, 98u, false})
   );
 
   TEST(Game3DTextHookSampleImports, AnExecutablesOwnImportsTellHowItDrawsText) {
@@ -425,13 +652,16 @@ namespace {
       if (!fs::is_regular_file(executable, error)) {
         continue;
       }
-      // The sample links Direct2D and DirectWrite and calls TextOutW; the loader does neither.
+      // The sample links Direct2D and DirectWrite and calls TextOutW and GetGlyphOutlineW; the
+      // loader does none of that.
       const auto sample = platf::game3d::detail::inspect_imports(executable);
       EXPECT_TRUE(sample.direct2d_text) << bits;
       EXPECT_TRUE(sample.gdi_text) << bits;
+      EXPECT_TRUE(sample.gdi_glyphs) << bits;
       const auto loader = platf::game3d::detail::inspect_imports(fs::path {SUNSHINE_TEST_TEXT_HOOK_DIR} / ("sunshine-text-hook-inject" + std::to_string(bits) + ".exe"));
       EXPECT_FALSE(loader.direct2d_text) << bits;
       EXPECT_FALSE(loader.gdi_text) << bits;
+      EXPECT_FALSE(loader.gdi_glyphs) << bits;
     }
   }
 #endif
@@ -445,6 +675,7 @@ namespace {
     const auto imports = platf::game3d::detail::inspect_imports(file);
     EXPECT_FALSE(imports.direct2d_text);
     EXPECT_FALSE(imports.gdi_text);
+    EXPECT_FALSE(imports.gdi_glyphs);
     std::error_code error;
     fs::remove(file, error);
     const auto missing = platf::game3d::detail::inspect_imports(file);

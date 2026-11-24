@@ -561,7 +561,8 @@ The same pass counts, per tile of a 16-by-16 grid of the game's picture, the gly
 those with scene in front of each plane level. The host reads these words back without waiting.
 They feed the plane policy, and they select the route of the following draws: while the text is
 not shown, a draw only makes this observation and keeps its ordinary geometry, with the subtitle
-pin where that is in force; while it is shown, the draw is pinned, and its own observation
+pin where that is in force, which it is again after three seconds of findings that the text is
+not shown ([Fallback](reshade-sbs.md#text-games)); while it is shown, the draw is pinned, and its own observation
 decides once more for that very frame. A frame taken for a Dump 3D package is never pinned.
 
 Two more compute passes precede the shared pin pass on a pinned draw:

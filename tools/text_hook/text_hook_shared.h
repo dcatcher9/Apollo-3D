@@ -31,6 +31,12 @@ namespace sunshine_text_hook {
     source_none = 0u,
     source_direct2d = 1u,  ///< Direct2D text calls, repeated on the helper's own render target.
     source_gdi = 2u,  ///< GDI text calls, followed through the game's blits to its window.
+    /// Text the game composed itself from GDI glyphs, followed from its texture through the
+    /// game's Direct3D 11 draws to its back buffer.
+    source_direct3d11 = 3u,
+    /// The helper follows something it does not take for text, and reports no text: the host
+    /// is to find the text in the picture.
+    source_unsure = 4u,
   };
 
   /**

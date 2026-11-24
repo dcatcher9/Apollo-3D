@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "game3d_setup.h"
 
-#include "game3d_detection.h"
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/system_tray.h"
@@ -77,6 +76,7 @@ namespace platf::game3d {
         for (const auto &item : document.at("executables")) {
           const auto decision = item.at("decision").get<std::string>();
           entry_t entry {from_utf8(item.at("path").get<std::string>()), item.value("identity", std::string {})};
+          entry.chosen = item.value("chosen", false);
           if (decision == "install") {
             entry.decision = setup_decision_e::install;
           } else if (decision == "never") {
@@ -124,11 +124,15 @@ namespace platf::game3d {
     bool setup_decisions::save_locked(const std::vector<entry_t> &entries) const {
       auto document = nlohmann::json {{"version", 1}, {"executables", nlohmann::json::array()}};
       for (const auto &entry : entries) {
-        document["executables"].push_back({
+        nlohmann::json item {
           {"path", utf8(entry.executable)},
           {"identity", entry.identity},
           {"decision", entry.decision == setup_decision_e::install ? "install" : "never"},
-        });
+        };
+        if (entry.chosen) {
+          item["chosen"] = true;
+        }
+        document["executables"].push_back(std::move(item));
       }
       const auto text = document.dump(2);
       auto temporary = file_;
@@ -164,7 +168,45 @@ namespace platf::game3d {
       return entry->decision;
     }
 
-    bool setup_decisions::record(const std::filesystem::path &executable, const std::string_view identity, const setup_decision_e decision) {
+    bool setup_decisions::chosen(const std::filesystem::path &executable) {
+      std::lock_guard lock(mutex_);
+      load_locked();
+      return std::any_of(entries_.begin(), entries_.end(), [&](const auto &candidate) {
+        return candidate.chosen && candidate.decision == setup_decision_e::install && same_executable(candidate.executable, executable);
+      });
+    }
+
+    void choosable_applications::observe(const detected_game &game, std::string executable, std::string identity) {
+      if (identity.empty()) {
+        return;
+      }
+      forget(game.executable);
+      entries_.insert(entries_.begin(), entry_t {game, std::move(executable), std::move(identity)});
+      if (entries_.size() > most) {
+        entries_.resize(most);
+      }
+    }
+
+    void choosable_applications::forget(const std::filesystem::path &executable) {
+      std::erase_if(entries_, [&](const auto &entry) {
+        return same_executable(entry.game.executable, executable);
+      });
+    }
+
+    void choosable_applications::keep_if(const std::function<bool(const detected_game &game)> &keep) {
+      std::erase_if(entries_, [&](const auto &entry) {
+        return !keep(entry.game);
+      });
+    }
+
+    std::optional<choosable_applications::entry_t> choosable_applications::find(const std::string_view executable, const std::string_view identity) const {
+      const auto entry = std::find_if(entries_.begin(), entries_.end(), [&](const auto &candidate) {
+        return candidate.executable == executable && candidate.identity == identity;
+      });
+      return entry == entries_.end() ? std::nullopt : std::optional(*entry);
+    }
+
+    bool setup_decisions::record(const std::filesystem::path &executable, const std::string_view identity, const setup_decision_e decision, const bool chosen) {
       std::lock_guard lock(mutex_);
       load_locked();
       if (!executable.is_absolute() || (decision == setup_decision_e::install && identity.empty())) {
@@ -182,7 +224,8 @@ namespace platf::game3d {
         if (entries.size() >= max_decisions) {
           return false;
         }
-        entries.push_back({executable.lexically_normal(), std::string {identity}, decision});
+        // Only a standing approval makes an application a game; a refusal needs no such mark.
+        entries.push_back({executable.lexically_normal(), std::string {identity}, decision, chosen && decision == setup_decision_e::install});
       }
       if (!save_locked(entries)) {
         return false;
@@ -251,12 +294,13 @@ namespace platf::game3d {
       const std::filesystem::path &executable,
       setup_decisions &decisions,
       const std::function<std::string(const std::filesystem::path &executable)> &refusal,
-      const std::function<text_hook::load_result()> &load
+      const std::function<text_hook::load_result()> &load,
+      const bool helper
     ) {
       setup_outcome outcome;
       auto &status = outcome.installation;
       status.executable = executable;
-      if (auto reason = refusal(executable); !reason.empty()) {
+      if (auto reason = helper ? refusal(executable) : std::string {}; !reason.empty()) {
         status.state = installation_state_e::anti_cheat;
         status.detail = std::move(reason);
         return outcome;
@@ -277,7 +321,8 @@ namespace platf::game3d {
       if (decision != setup_decision_e::install) {
         status.state = installation_state_e::missing_addon;
         outcome.state = "ready_to_install";
-        status.detail = "This looks like a 2D text game. Sunshine 3D can convert its picture to 3D itself and load a small text helper into the game while it runs, so the game's own text stays readable. Nothing is written to the game's folder, and nothing is loaded until you confirm this game.";
+        status.detail = helper ? "This looks like a 2D text game. Sunshine 3D can convert its picture to 3D itself and load a small text helper into the game while it runs, so the game's own text stays readable. Nothing is written to the game's folder, and nothing is loaded until you confirm this game." :
+                                 "This looks like a 2D text game that composes its text itself. Sunshine 3D can convert its picture to 3D itself and keep the text readable from the picture alone. Nothing is loaded into the game or written to its folder, and nothing is converted until you confirm this game.";
         return outcome;
       }
       const auto loaded = load();
@@ -292,8 +337,8 @@ namespace platf::game3d {
       status.state = installation_state_e::current;
       outcome.convert = true;
       if (!status.addon_present) {
-        outcome.retry_load = loaded.state == text_hook::load_state_e::failed;
-        status.detail += " The game is converted without it: its text is found in the picture alone.";
+        outcome.retry_load = helper && loaded.state == text_hook::load_state_e::failed;
+        status.detail += helper ? " The game is converted without it: its text is found in the picture alone." : " Its text is found in the picture alone.";
       }
       return outcome;
     }
@@ -365,18 +410,77 @@ namespace platf::game3d {
       }
 
       nlohmann::json status() {
-        std::lock_guard lock(mutex_);
-        auto result = status_;
-        result["active"] = !watches_.empty();
+        nlohmann::json result;
+        std::vector<detail::choosable_applications::entry_t> choosable;
+        {
+          std::lock_guard lock(mutex_);
+          result = status_;
+          result["active"] = !watches_.empty();
+          // What keeps the converted game's text readable, as the capture path found it within
+          // the last seconds: the game's own text, or the fallback and why. Empty when the game
+          // is not being converted now.
+          if (status_game_) {
+            const auto state = text_hook::protection(status_game_->first, status_game_->second);
+            result["text_protection"] = state.protection == text_hook::protection_e::game_text ? "game" : state.protection == text_hook::protection_e::picture ? "fallback" :
+                                                                                                                                                                 "";
+            result["text_protection_detail"] = text_hook::describe(state);
+          }
+          choosable = choosable_.entries();
+        }
+        // The applications the owner may choose for conversion, as long as they run. The worker
+        // drops the closed ones only while a stream is watched. A text game the card itself
+        // shows, as one that was stopped is, is chosen again there.
+        const bool shown_as_text_game = result.value("detected", false) && result.value("kind", std::string {}) == "text_hook";
+        result["choosable"] = nlohmann::json::array();
+        for (const auto &entry : choosable) {
+          if (!(shown_as_text_game && result.value("executable", std::string {}) == entry.executable) && text_hook::running(entry.game.process_id, entry.game.creation_time)) {
+            result["choosable"].push_back({{"game_name", entry.game.name}, {"executable", entry.executable}, {"identity", entry.identity}, {"text_helper", entry.game.text_helper}});
+          }
+        }
         return result;
       }
 
+      // The owner's own choice of an application that no rule offers.
+      std::optional<std::string> choose(std::string_view executable, std::string_view identity) {
+        std::optional<detail::choosable_applications::entry_t> entry;
+        {
+          std::lock_guard lock(mutex_);
+          if (stopping_) {
+            return "Sunshine 3D is shutting down.";
+          }
+          // Only an application the host itself saw in front on the streamed display can be
+          // chosen, and only while its file is the one listed.
+          entry = choosable_.find(executable, identity);
+        }
+        if (!entry) {
+          return "The application is no longer listed. Bring it to the front on the streamed display, refresh the page and choose it again.";
+        }
+        if (!decisions_.record(entry->game.executable, entry->identity, detail::setup_decision_e::install, true)) {
+          return "The setup choice could not be saved in the host's configuration directory.";
+        }
+        BOOST_LOG(info) << "Game 3D setup: user chose to convert \"" << utf8(entry->game.executable) << "\", which no rule offers";
+        std::lock_guard lock(mutex_);
+        if (stopping_) {
+          return std::nullopt;
+        }
+        choosable_.forget(entry->game.executable);
+        // The worker applies the choice as it applies a confirmed offer.
+        requests_.push_back(entry->game);
+        start_locked();
+        changed_ = true;
+        wake_.notify_one();
+        return std::nullopt;
+      }
+
       std::optional<std::string> decide(std::string_view executable, std::string_view identity, std::string_view decision_name) {
+        if (decision_name == "convert") {
+          return choose(executable, identity);
+        }
         const auto decision = decision_name == "install" ? detail::setup_decision_e::install :
                               decision_name == "never"   ? detail::setup_decision_e::never :
                                                            detail::setup_decision_e::none;
         if (decision == detail::setup_decision_e::none) {
-          return "Choose install or never.";
+          return "Choose install, never or convert.";
         }
         std::optional<offer_t> offer;
         {
@@ -391,7 +495,8 @@ namespace platf::game3d {
           }
           offer = offered_;
         }
-        if (!decisions_.record(offer->installation_executable, offer->identity, decision)) {
+        // An application its owner chose stays chosen when a changed file is confirmed again.
+        if (!decisions_.record(offer->installation_executable, offer->identity, decision, offer->game.chosen)) {
           return "The setup choice could not be saved in the host's configuration directory.";
         }
         BOOST_LOG(info) << "Game 3D setup: user chose " << decision_name << " for \"" << utf8(offer->installation_executable) << '"';
@@ -444,20 +549,26 @@ namespace platf::game3d {
         }
       }
 
-      void publish(const detected_game &game, const detail::setup_outcome &outcome, const std::string &state) {
+      // `announce` false updates the card alone: no log line and no tray notification.
+      void publish(const detected_game &game, const detail::setup_outcome &outcome, const std::string &state, const bool announce = true) {
         const auto &installation = outcome.installation;
         const auto executable = utf8(game.executable);
         // An add-on installation consumes its confirmation. A text game's confirmation stands
         // for every later start, so its active state stays an offer the user can withdraw.
         const bool offer = state == "ready_to_install" || state == "declined" ||
                            (game.kind == game_kind_e::text_hook && (state == "current" || state == "installed"));
+        // Worker-owned. Only a running text game is shown as being converted.
+        converting_ = game.kind == game_kind_e::text_hook && state == "current" ? std::optional(game) : std::nullopt;
         {
           std::lock_guard lock(mutex_);
+          status_game_ = converting_ ? std::optional(std::pair {game.process_id, game.creation_time}) : std::nullopt;
           status_ = {
             {"detected", true},
             {"game_name", game.name},
             {"executable", executable},
             {"kind", game.kind == game_kind_e::text_hook ? "text_hook" : "addon"},
+            {"text_helper", game.text_helper},
+            {"chosen", game.chosen},
             {"state", state},
             {"detail", installation.detail},
             {"reshade_present", installation.reshade_present},
@@ -477,7 +588,7 @@ namespace platf::game3d {
         // occasion to decide, and "never" ends it.
         const auto notification_key = executable + "\n" + state +
                                       (state == "ready_to_install" ? "\n" + std::to_string(game.creation_time) : std::string {});
-        if (announced_.contains(notification_key)) {
+        if (!announce || announced_.contains(notification_key)) {
           return;
         }
         announced_.emplace(notification_key, true);
@@ -495,14 +606,25 @@ namespace platf::game3d {
 
       detail::setup_outcome apply(const detected_game &game, bool publish_progress) {
         if (game.kind == game_kind_e::text_hook) {
-          auto outcome = detail::apply_text_hook_setup(game.executable, decisions_, injection_refusal, [&] {
+          auto outcome = detail::apply_text_hook_setup(game.executable, decisions_, injection_refusal, [&]() -> text_hook::load_result {
+            if (!game.text_helper) {
+              if (!text_hook::running(game.process_id, game.creation_time)) {
+                return {text_hook::load_state_e::not_running, text_hook::approved_for_next_start};
+              }
+              return {text_hook::load_state_e::unavailable, "This game composes its text itself, so nothing is loaded into it."};
+            }
             const auto result = text_hook::load(game.process_id, game.creation_time);
             // Every load is on record, not only the first of a host run.
             BOOST_LOG(info) << "Game 3D setup: text helper for " << game.name << " pid=" << game.process_id << ": " << result.detail;
             return result;
-          });
+          },
+                                                       game.text_helper);
           if (outcome.state.empty()) {
             outcome.state = state_name(outcome.installation.state);
+          }
+          if (game.chosen && outcome.state == "ready_to_install") {
+            // Found by its path, which the owner chose; this file is not the one confirmed.
+            outcome.installation.detail = "You chose to convert this application, and its file has changed since then. Nothing is loaded or converted until you confirm it again.";
           }
           // The capture path converts this process only while the owner's approval stands;
           // "never" withdraws it at once, for the running game too.
@@ -545,6 +667,16 @@ namespace platf::game3d {
           retry_text_helper(game, outcome);
           publish(game, outcome, outcome.state);
         }
+        // A text game that has closed is no longer being converted. Applying it once more
+        // finds it gone, withdraws its consent and shows it as approved for its next start.
+        if (converting_ && !text_hook::running(converting_->process_id, converting_->creation_time)) {
+          const auto game = *converting_;
+          converting_.reset();
+          const auto outcome = apply(game, false);
+          BOOST_LOG(info) << "Game 3D setup: " << game.name << " pid=" << game.process_id << " has closed.";
+          // Closing a game is not an occasion to notify its owner about it.
+          publish(game, outcome, outcome.state, false);
+        }
         const auto now = std::chrono::steady_clock::now();
         // Once a detected installation needs an update, keep retrying after the
         // stream ends. The updater independently checks every process using the
@@ -578,7 +710,37 @@ namespace platf::game3d {
           confirmation_.reset();
           return;
         }
-        const auto game = confirmation_.observe(detect_game(*capture_rect), *capture_rect, std::chrono::steady_clock::now());
+        // An application its owner chose is a text game wherever the rules say nothing of it,
+        // or take it for an add-on game it is not. Any other application the rules do not take
+        // for a text game is listed as one the owner may choose.
+        const auto application = observe_foreground(*capture_rect);
+        const bool chosen = application && application->choosable && decisions_.chosen(application->game.executable);
+        const auto candidate = chosen ? std::optional(as_chosen(*application)) : application && application->recognised ? std::optional(application->game) :
+                                                                                                                          std::nullopt;
+        const auto listed = application && application->choosable && !chosen ? std::optional(as_chosen(*application)) : std::nullopt;
+        const auto listed_identity = listed ? file_identity(listed->executable) : std::string {};
+        std::vector<detail::choosable_applications::entry_t> known;
+        {
+          std::lock_guard lock(mutex_);
+          known = choosable_.entries();
+        }
+        std::erase_if(known, [](const auto &entry) {
+          return text_hook::running(entry.game.process_id, entry.game.creation_time);
+        });
+        {
+          std::lock_guard lock(mutex_);
+          for (const auto &closed : known) {
+            choosable_.keep_if([&](const detected_game &game) {
+              return game.process_id != closed.game.process_id || game.creation_time != closed.game.creation_time;
+            });
+          }
+          if (listed) {
+            choosable_.observe(*listed, utf8(listed->executable), listed_identity);
+          } else if (chosen) {
+            choosable_.forget(application->game.executable);
+          }
+        }
+        const auto game = confirmation_.observe(candidate, *capture_rect, std::chrono::steady_clock::now());
         if (!game) {
           return;
         }
@@ -601,7 +763,8 @@ namespace platf::game3d {
         std::unique_lock lock(mutex_);
         std::uint64_t observed_watch_revision = 0;
         while (!stopping_) {
-          if (watches_.empty() && pending_.empty() && requests_.empty()) {
+          // A text game shown as being converted is watched until it closes, stream or not.
+          if (watches_.empty() && pending_.empty() && requests_.empty() && !converting_) {
             wake_.wait(lock, [this]() {
               return stopping_ || !watches_.empty() || !requests_.empty();
             });
@@ -641,11 +804,14 @@ namespace platf::game3d {
       std::map<std::uint64_t, RECT> watches_;
       std::vector<detected_game> requests_;
       std::optional<offer_t> offered_;
+      detail::choosable_applications choosable_;  ///< Guarded by mutex_.
       nlohmann::json status_ {{"detected", false}};
+      std::optional<std::pair<std::uint32_t, std::uint64_t>> status_game_;  ///< The text game `status_` shows as converted.
       // Thread-safe; written by the request thread (choices) and the worker (completion).
       detail::setup_decisions decisions_ {decisions_file()};
       // Worker-owned state: no filesystem/process operation holds mutex_.
       std::optional<detected_game> last_game_;
+      std::optional<detected_game> converting_;
       detection_confirmation confirmation_;
       std::map<std::filesystem::path, pending_update> pending_;
       std::map<std::string, bool> announced_;
