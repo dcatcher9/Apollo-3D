@@ -111,7 +111,6 @@ namespace sunshine_text_hook::helper::d3d11 {
     const GUID image_sum_id {0x6a0c4f51u, 0x8f0du, 0x4c4eu, {0x9bu, 0x8du, 0x53u, 0x75u, 0x6eu, 0x33u, 0x44u, 0x06u}};
     const GUID image_rest_id {0x6a0c4f51u, 0x8f0du, 0x4c4eu, {0x9bu, 0x8du, 0x53u, 0x75u, 0x6eu, 0x33u, 0x44u, 0x07u}};
     const GUID image_loads_id {0x6a0c4f51u, 0x8f0du, 0x4c4eu, {0x9bu, 0x8du, 0x53u, 0x75u, 0x6eu, 0x33u, 0x44u, 0x08u}};
-    const GUID image_traced_id {0x6a0c4f51u, 0x8f0du, 0x4c4eu, {0x9bu, 0x8du, 0x53u, 0x75u, 0x6eu, 0x33u, 0x44u, 0x09u}};
 
     using draw_indexed_fn = void(STDMETHODCALLTYPE *)(ID3D11DeviceContext *, UINT, UINT, INT);
     using draw_fn = void(STDMETHODCALLTYPE *)(ID3D11DeviceContext *, UINT, UINT);
@@ -222,50 +221,7 @@ namespace sunshine_text_hook::helper::d3d11 {
     unsigned logged_images = 0u;
     const void *logged_texture = nullptr;
     int logged_verdict = -1;
-    unsigned dumped_candidates = 0u;
-
-    struct dumped_t {
-      const void *texture;
-      std::uint32_t frame;
-    };
-
-    dumped_t dumped[24];
-    std::uint32_t traced_frame = 0u;  ///< Every draw of this frame goes into the log.
-    unsigned dumped_textures = 0u, dumped_masks = 0u, dumped_repeated = 0u;
-    std::uint64_t dumped_tick = 0u;
-
-    /** For the log's owner: a picture beside the log, 32-bit BGRA, top row first. */
-    void dump(const char *name, const unsigned index, const void *data, const std::uint32_t pitch, const std::uint32_t width, const std::uint32_t height) {
-      wchar_t path[MAX_PATH];
-      const DWORD length = GetTempPathW(MAX_PATH, path);
-      if (length == 0u || length + 64u >= MAX_PATH || !data || width == 0u || height == 0u) {
-        return;
-      }
-      std::swprintf(path + length, MAX_PATH - length, L"SunshineTextHook-%hs-%u.bmp", name, index);
-      const HANDLE file = CreateFileW(path, GENERIC_WRITE, 0u, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-      if (file == INVALID_HANDLE_VALUE) {
-        return;
-      }
-      BITMAPFILEHEADER header {};
-      BITMAPINFOHEADER info {};
-      info.biSize = sizeof(info);
-      info.biWidth = static_cast<LONG>(width);
-      info.biHeight = -static_cast<LONG>(height);
-      info.biPlanes = 1;
-      info.biBitCount = 32;
-      header.bfType = 0x4d42;
-      header.bfOffBits = sizeof(header) + sizeof(info);
-      header.bfSize = header.bfOffBits + width * height * 4u;
-      DWORD written = 0u;
-      WriteFile(file, &header, sizeof(header), &written, nullptr);
-      WriteFile(file, &info, sizeof(info), &written, nullptr);
-      for (std::uint32_t y = 0u; y < height; ++y) {
-        WriteFile(file, static_cast<const std::uint8_t *>(data) + static_cast<std::size_t>(y) * pitch, width * 4u, &written, nullptr);
-      }
-      CloseHandle(file);
-    }
-
-    std::uint64_t counted_tick = 0u;
+    std::uint64_t counted_tick = 0u, mask_logged_tick = 0u;
 
     template<class T>
     void release(T *&object) {
@@ -521,20 +477,6 @@ namespace sunshine_text_hook::helper::d3d11 {
       // The log tells how an application loads its images, also where none is taken for text.
       const bool told = logging() && logged_images < 400u;
 
-      // For the log's owner: how often this texture has been loaded, and how often a picture of
-      // it was kept. A texture that is loaded again and again is where text is looked for.
-      struct traced_t {
-        std::uint32_t loads, pictures;
-      } traced {};
-
-      if (logging() && whole) {
-        UINT size = sizeof(traced);
-        if (FAILED(texture->GetPrivateData(image_traced_id, &size, &traced)) || size != sizeof(traced)) {
-          traced = {};
-        }
-        ++traced.loads;
-        texture->SetPrivateData(image_traced_id, sizeof(traced), &traced);
-      }
       if (!was_text && !recent && !counted && !told) {
         return;
       }
@@ -583,36 +525,10 @@ namespace sunshine_text_hook::helper::d3d11 {
         logged_verdict = static_cast<int>(measure.verdict);
         log_line("Direct3D 11: frame %u %s %ux%u%s into texture %p %ux%u format %u usage %u bind %x: %s%s%s%s (covered %u%%, solid %u%% of that, narrow %u%% of the solid)", frame, how, width, height, whole ? "" : " (part)", static_cast<void *>(texture), desc.Width, desc.Height, static_cast<unsigned>(desc.Format), static_cast<unsigned>(desc.Usage), static_cast<unsigned>(desc.BindFlags), verdict, recent ? ", glyphs just taken" : "", was_text ? ", was text" : "", reason && text ? ", taken for text" : "", measure.covered_percent, measure.solid_percent, measure.narrow_percent);
       }
-      // For the log's owner: the mostly clear images that were not taken for text, a few of each
-      // texture, some seconds apart.
-      if (logging() && counted && measure.verdict != image::verdict_e::empty && !(reason && text) && !measure.dense && dumped_candidates < 24u && desc.Format != DXGI_FORMAT_A8_UNORM && desc.Format != DXGI_FORMAT_R8_UNORM) {
-        bool known = false;
-        for (unsigned index = 0u; index < dumped_candidates && !known; ++index) {
-          known = dumped[index].texture == texture && frame - dumped[index].frame < 270u;
-        }
-        if (!known) {
-          dumped[dumped_candidates] = {texture, frame};
-          log_line("Direct3D 11: frame %u texture %p %s is picture candidate-%u (covered %u%%, solid %u%% of that, narrow %u%% of the solid)", frame, static_cast<void *>(texture), verdict, dumped_candidates, measure.covered_percent, measure.solid_percent, measure.narrow_percent);
-          dump("candidate", dumped_candidates++, data, pitch, width, height);
-        }
-      }
-      // And the image of a texture that is loaded again and again without being taken for text:
-      // after its thirtieth load, and once more after its three hundredth. Not a plain picture,
-      // as a film's frames are.
-      if (traced.loads >= (traced.pictures == 0u ? 30u : 300u) && traced.pictures < 2u && !(reason && text) && measure.verdict != image::verdict_e::empty && !measure.dense && dumped_repeated < 12u && texel_bytes == 4u) {
-        ++traced.pictures;
-        texture->SetPrivateData(image_traced_id, sizeof(traced), &traced);
-        log_line("Direct3D 11: frame %u texture %p, loaded %u times, %s, is picture repeated-%u (covered %u%%, solid %u%% of that, narrow %u%% of the solid%s)", frame, static_cast<void *>(texture), traced.loads, verdict, dumped_repeated, measure.covered_percent, measure.solid_percent, measure.narrow_percent, measure.faint ? ", faint" : "");
-        dump("repeated", dumped_repeated++, data, pitch, width, height);
-      }
       if (!reason) {
         return;
       }
       if (text) {
-        if (!was_text && logging() && dumped_textures < 16u && whole && desc.Format != DXGI_FORMAT_A8_UNORM && desc.Format != DXGI_FORMAT_R8_UNORM) {
-          log_line("Direct3D 11: texture %p is picture texture-%u", static_cast<void *>(texture), dumped_textures);
-          dump("texture", dumped_textures++, data, pitch, width, height);
-        }
         mark_text(texture, desc, measure.sum);
       } else if (!was_text) {
         return;
@@ -783,15 +699,6 @@ namespace sunshine_text_hook::helper::d3d11 {
         const bool adds = effect == effect_e::add || effect == effect_e::add_premultiplied || effect == effect_e::copy;
         if (adds && !have) {
           have = make_mask(onto, view.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB || view.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, mask);
-        }
-        if (traced_frame == frame) {
-          D3D11_TEXTURE2D_DESC onto_desc {};
-          onto->GetDesc(&onto_desc);
-          log_line("Direct3D 11: frame %u draw onto %p %ux%u: samples %s, effect %u, mask %s", frame, static_cast<void *>(onto), onto_desc.Width, onto_desc.Height, text ? "a text texture" : masked_slot >= 0 ? "a masked target" :
-                                                                                                                                                                                                                 "neither",
-                   static_cast<unsigned>(effect),
-                   !have ? "none" : mask.active ? "active" :
-                                                  "idle");
         }
         if (have && effect != effect_e::none && (adds || mask.active)) {
           if (adds) {
@@ -1335,10 +1242,9 @@ namespace sunshine_text_hook::helper::d3d11 {
           std::memset(own, 0, static_cast<std::size_t>(width) * 4u);
         }
       }
-      if (data && logging() && GetTickCount64() - dumped_tick >= 2500u) {
-        dumped_tick = GetTickCount64();
-        log_line("Direct3D 11: frame %u the mask is picture mask-%u, text rows %u to %u, %u%% covered", frame, dumped_masks % 12u, top, bottom, static_cast<unsigned>(covered * 100u / (static_cast<std::uint64_t>(width) * height)));
-        dump("mask", dumped_masks++ % 12u, data, pitch, width, height);
+      if (logging() && GetTickCount64() - mask_logged_tick >= 2500u) {
+        mask_logged_tick = GetTickCount64();
+        log_line("Direct3D 11: frame %u the mask has text rows %u to %u, %u%% covered", frame, top, bottom, static_cast<unsigned>(covered * 100u / (static_cast<std::uint64_t>(width) * height)));
       }
       publish(own_pixels, from, to, unsure ? source_unsure : source_direct3d11, top, bottom, window);
       published_top = top;
@@ -1374,7 +1280,6 @@ namespace sunshine_text_hook::helper::d3d11 {
         counted_frames = counted_draws = counted_text_draws = counted_wipes = counted_reads = counted_all_draws = counted_images = 0u;
         counted_glyphs = 0u;
         counted_tick = tick;
-        traced_frame = logging() ? frame + 1u : 0u;
       }
       const unsigned text_draws = frame_text_draws;
       const bool draws_changed = text_draws != last_frame_text_draws;
