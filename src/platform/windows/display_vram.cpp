@@ -1583,6 +1583,19 @@ namespace platf::dxgi {
           const bool perf = diagnostics_enabled && sbs_perf::enabled();
           const auto perf_t0 = perf ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
           const bool snapshot_debug_inputs = sbs_dumper.snapshot_requested();
+          if (!snapshot_debug_inputs && sbs_debug_mapping_texture) {
+            // Dump 3D copied what it needed from these full-size targets into its own staging
+            // textures before maybe_dump() returned. Without a request they hold only memory
+            // (8 bytes per packed pixel); the next request creates them again.
+            sbs_debug_mapping_texture.Reset();
+            sbs_debug_mapping_rtv.Reset();
+            sbs_debug_mapping_srv.Reset();
+            sbs_debug_mask_texture.Reset();
+            sbs_debug_mask_rtv.Reset();
+            sbs_debug_mask_srv.Reset();
+            sbs_debug_geometry_ready = false;
+            sbs_debug_geometry_init_attempted = false;
+          }
 
           // Lazy-create the depth estimator on the first SBS frame.
           if (models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer)) {
