@@ -552,8 +552,10 @@ namespace system_tray {
 
     auto ended = std::make_shared<std::promise<void>>();
     auto ended_future = ended->get_future();
-    std::thread joiner([ended]() {
-      tray_thread.join();
+    // The joiner owns the thread from here: left behind on a timeout, it must not leave the
+    // static handle joinable, whose destruction at exit would end the process.
+    std::thread joiner([ended, thread = std::move(tray_thread)]() mutable {
+      thread.join();
       ended->set_value();
     });
     if (ended_future.wait_for(patience) != std::future_status::ready) {
