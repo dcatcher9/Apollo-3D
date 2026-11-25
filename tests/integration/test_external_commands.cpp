@@ -145,25 +145,12 @@ TEST_P(ExternalCommandTest, RunExternalCommand) {
 // Platform-specific command strings
 constexpr auto SIMPLE_COMMAND = IS_WINDOWS ? "where cmd" : "which sh";
 
-#ifdef UDEVADM_EXECUTABLE
-  #define UDEV_TESTS \
-    ExternalCommandTestData { \
-      std::format("{} verify {}/src_assets/linux/misc/60-sunshine.rules", UDEVADM_EXECUTABLE, SUNSHINE_TEST_BIN_DIR), \
-      "linux", \
-      true, \
-      "Test udev rules file" \
-    },
-#else
-  #define UDEV_TESTS
-#endif
-
 // Test data
 INSTANTIATE_TEST_SUITE_P(
   ExternalCommands,
   ExternalCommandTest,
   ::testing::Values(
-    UDEV_TESTS
-      // Cross-platform tests with xfail on Windows CI
+    // Cross-platform tests with xfail on Windows CI
       ExternalCommandTestData {
         SIMPLE_COMMAND,
         "all",

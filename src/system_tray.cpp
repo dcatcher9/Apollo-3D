@@ -12,15 +12,6 @@
     #define TRAY_ICON WEB_DIR "images/sunshine3d.ico"
     #define TRAY_ICON_PLAYING WEB_DIR "images/sunshine3d-playing.ico"
     #define TRAY_ICON_LOCKED WEB_DIR "images/sunshine3d-locked.ico"
-  #elif defined(__linux__) || defined(linux) || defined(__linux)
-    #define TRAY_ICON SUNSHINE_TRAY_PREFIX "-tray"
-    #define TRAY_ICON_PLAYING SUNSHINE_TRAY_PREFIX "-playing"
-    #define TRAY_ICON_LOCKED SUNSHINE_TRAY_PREFIX "-locked"
-  #elif defined(__APPLE__) || defined(__MACH__)
-    #define TRAY_ICON WEB_DIR "images/logo-sunshine3d-16.png"
-    #define TRAY_ICON_PLAYING WEB_DIR "images/sunshine3d-playing-16.png"
-    #define TRAY_ICON_LOCKED WEB_DIR "images/sunshine3d-locked-16.png"
-    #include <dispatch/dispatch.h>
   #endif
 
   #define TRAY_MSG_NO_APP_RUNNING "Reload Apps"

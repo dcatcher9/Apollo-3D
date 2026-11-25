@@ -1,6 +1,6 @@
 # Troubleshooting Sunshine 3D
 
-Sunshine 3D supports Windows 11 with NVIDIA NVENC. Advice for Linux, macOS, AMD, Intel, and
+Sunshine 3D supports Windows 11 24H2 or later with NVIDIA NVENC. Advice for Linux, macOS, AMD, Intel, and
 software encoding does not apply to this fork.
 
 ## Start with the log

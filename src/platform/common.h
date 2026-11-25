@@ -1004,6 +1004,15 @@ namespace platf {
    */
   std::string get_host_name();
 
+  /** The oldest supported Windows: Windows 11 24H2. */
+  inline constexpr std::uint32_t minimum_windows_build = 26100;
+
+  /**
+   * @brief Returns the running Windows build number, as the system itself reports it.
+   * @return Build number, or zero when it cannot be read.
+   */
+  std::uint32_t windows_build_number();
+
   /**
    * @brief Gets the supported gamepads for this platform backend.
    * @details This may be called prior to `platf::input()`!

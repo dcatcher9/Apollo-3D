@@ -16,10 +16,7 @@ import process from 'process'
 let assetsSrcPath = 'src_assets/common/assets/web';
 let assetsDstPath = 'build/assets/web';
 
-if (process.env.SUNSHINE_BUILD_HOMEBREW) {
-    console.log("Building for homebrew, using default paths")
-}
-else {
+{
     // If the paths supplied in the environment variables contain any symbolic links
     // at any point in the series of directories, the entire build will fail with
     // a cryptic error message like this:

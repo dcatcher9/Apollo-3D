@@ -505,6 +505,17 @@ int main(int argc, char *argv[]) {
   BOOST_LOG(info) << "Runtime performance diagnostics: "sv
                   << (config::sunshine.diagnostics_enabled ? "enabled"sv : "disabled"sv);
 
+  // Older Windows is refused here, by name, instead of failing later in capture, display or
+  // audio setup. An unreadable build number (zero) is not a reason to refuse.
+  if (const auto build = platf::windows_build_number(); build != 0) {
+    BOOST_LOG(info) << "Windows build: "sv << build;
+    if (build < platf::minimum_windows_build) {
+      BOOST_LOG(fatal) << PROJECT_DISPLAY_NAME << " requires Windows 11 24H2 (build "sv
+                       << platf::minimum_windows_build << ") or later; this is build "sv << build;
+      return 1;
+    }
+  }
+
   // Log publisher metadata
   log_publisher_data();
 

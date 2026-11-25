@@ -1399,38 +1399,16 @@ namespace {
     std::wstring_view learnedDevicePath
   ) {
     detach_snapshot_t snapshot;
-    constexpr UINT32 base_query_flags =
-      QDC_ONLY_ACTIVE_PATHS | QDC_VIRTUAL_MODE_AWARE;
-    LONG refresh_aware_status = ERROR_SUCCESS;
-    if (queryDisplayConfig(
-          base_query_flags | QDC_VIRTUAL_REFRESH_RATE_AWARE,
-          snapshot.paths,
-          snapshot.modes,
-          &refresh_aware_status
-        )) {
-      snapshot.set_display_config_awareness_flags =
-        SDC_VIRTUAL_MODE_AWARE | SDC_VIRTUAL_REFRESH_RATE_AWARE;
-    } else if (refresh_aware_status == ERROR_INVALID_PARAMETER || refresh_aware_status == ERROR_NOT_SUPPORTED) {
-      // Windows 10 understands virtual modes but not virtual refresh-rate awareness.
-      LONG fallback_status = ERROR_SUCCESS;
-      if (!queryDisplayConfig(
-            base_query_flags,
-            snapshot.paths,
-            snapshot.modes,
-            &fallback_status
-          )) {
-        BOOST_LOG(warning) << "Virtual-display detach snapshot: CCD query failed (flags "
-                           << base_query_flags << ", status " << fallback_status
-                           << "; refresh-aware status " << refresh_aware_status << ").";
-        return std::nullopt;
-      }
-      snapshot.set_display_config_awareness_flags = SDC_VIRTUAL_MODE_AWARE;
-    } else {
+    constexpr UINT32 query_flags =
+      QDC_ONLY_ACTIVE_PATHS | QDC_VIRTUAL_MODE_AWARE | QDC_VIRTUAL_REFRESH_RATE_AWARE;
+    LONG query_status = ERROR_SUCCESS;
+    if (!queryDisplayConfig(query_flags, snapshot.paths, snapshot.modes, &query_status)) {
       BOOST_LOG(warning) << "Virtual-display detach snapshot: CCD query failed (flags "
-                         << (base_query_flags | QDC_VIRTUAL_REFRESH_RATE_AWARE)
-                         << ", status " << refresh_aware_status << ").";
+                         << query_flags << ", status " << query_status << ").";
       return std::nullopt;
     }
+    snapshot.set_display_config_awareness_flags =
+      SDC_VIRTUAL_MODE_AWARE | SDC_VIRTUAL_REFRESH_RATE_AWARE;
 
     std::vector<std::wstring> candidate_device_paths;
     candidate_device_paths.reserve(snapshot.paths.size());

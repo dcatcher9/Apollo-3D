@@ -1,7 +1,7 @@
 # Building Sunshine 3D
 
-Sunshine 3D builds and runs on **Windows 11 with NVIDIA NVENC**. CMake rejects non-Windows
-targets. Historical platform source remains only for upstream comparison.
+Sunshine 3D builds and runs on **Windows 11 24H2 (build 26100) or later with NVIDIA NVENC**.
+CMake rejects non-Windows targets, and the host refuses to start on an older Windows build.
 
 ## Requirements
 

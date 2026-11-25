@@ -3451,16 +3451,27 @@ namespace platf {
     return to_utf8(hostname);
   }
 
+  std::uint32_t windows_build_number() {
+    // GetVersionEx answers for the version the executable's manifest names; this one does not.
+    using rtl_get_version_fn = LONG(WINAPI *)(OSVERSIONINFOW *);
+    const auto ntdll = GetModuleHandleW(L"ntdll.dll");
+    const auto rtl_get_version = ntdll ?
+                                   reinterpret_cast<rtl_get_version_fn>(reinterpret_cast<void *>(GetProcAddress(ntdll, "RtlGetVersion"))) :
+                                   nullptr;
+    OSVERSIONINFOW version {};
+    version.dwOSVersionInfoSize = sizeof(version);
+    if (!rtl_get_version || rtl_get_version(&version) != 0) {
+      return 0;
+    }
+    return version.dwBuildNumber;
+  }
+
   class win32_high_precision_timer: public high_precision_timer {
   public:
     win32_high_precision_timer() {
-      // Use CREATE_WAITABLE_TIMER_HIGH_RESOLUTION if supported (Windows 10 1809+)
       timer = CreateWaitableTimerEx(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
       if (!timer) {
-        timer = CreateWaitableTimerEx(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
-        if (!timer) {
-          BOOST_LOG(error) << "Unable to create high_precision_timer, CreateWaitableTimerEx() failed: " << GetLastError();
-        }
+        BOOST_LOG(error) << "Unable to create high_precision_timer, CreateWaitableTimerEx() failed: " << GetLastError();
       }
     }
 

@@ -1765,16 +1765,6 @@ namespace proc {
   }
 
   bool proc_t::stream_process_exited_locked() {
-#ifndef _WIN32
-    // On POSIX OSes, we must periodically wait for our children to avoid
-    // them becoming zombies. This must be synchronized carefully with
-    // calls to bp::wait() and platf::process_group_running() which both
-    // invoke waitpid() under the hood.
-    auto reaper = util::fail_guard([]() {
-      while (waitpid(-1, nullptr, WNOHANG) > 0);
-    });
-#endif
-
     if (_app_id <= 0 || placebo) {
       return false;
     } else if (_app.wait_all && _process_group && platf::process_group_running((std::uintptr_t) _process_group.native_handle())) {

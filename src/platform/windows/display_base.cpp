@@ -523,10 +523,15 @@ namespace platf::dxgi {
 
     // FIXME: Duplicate output on RX580 in combination with DOOM (2016) --> BSOD
     {
-      // IDXGIOutput5 is optional, but can provide improved performance and wide color support
+      // Every supported Windows provides IDXGIOutput5: the format list it takes is what
+      // gives wide colour capture.
       dxgi::output5_t output5 {};
       status = display->output->QueryInterface(IID_IDXGIOutput5, (void **) &output5);
-      if (SUCCEEDED(status)) {
+      if (FAILED(status)) {
+        BOOST_LOG(error) << "Failed to query IDXGIOutput5 from the output [0x"sv << util::hex(status).to_string_view() << ']';
+        return -1;
+      }
+      {
         // Ask the display implementation which formats it supports
         auto supported_formats = display->get_supported_capture_formats();
         if (supported_formats.empty()) {
@@ -551,31 +556,6 @@ namespace platf::dxgi {
         // we get unlucky and succeed below.
         if (FAILED(status)) {
           BOOST_LOG(warning) << "DuplicateOutput1 Failed [0x"sv << util::hex(status).to_string_view() << ']';
-          return -1;
-        }
-      } else {
-        BOOST_LOG(warning) << "IDXGIOutput5 is not supported by your OS. Capture performance may be reduced."sv;
-
-        dxgi::output1_t output1 {};
-        status = display->output->QueryInterface(IID_IDXGIOutput1, (void **) &output1);
-        if (FAILED(status)) {
-          BOOST_LOG(error) << "Failed to query IDXGIOutput1 from the output"sv;
-          return -1;
-        }
-
-        for (int x = 0; x < 2; ++x) {
-          // Ensure we can duplicate the current display
-          syncThreadDesktop();
-
-          status = output1->DuplicateOutput((IUnknown *) display->device.get(), &dup);
-          if (SUCCEEDED(status)) {
-            break;
-          }
-          std::this_thread::sleep_for(200ms);
-        }
-
-        if (FAILED(status)) {
-          BOOST_LOG(error) << "DuplicateOutput Failed [0x"sv << util::hex(status).to_string_view() << ']';
           return -1;
         }
       }

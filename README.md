@@ -10,7 +10,7 @@
 </p>
 
 > [!IMPORTANT]
-> **Current host support: Windows 11 with an NVIDIA GPU only.**
+> **Current host support: Windows 11 24H2 or later with an NVIDIA GPU only.**
 > AMD and Intel GPUs, software encoding, Linux, and macOS hosts are not supported.
 
 <p align="center">
@@ -249,7 +249,7 @@ views are available.
 
 ## Requirements and intentional limits
 
-- **Host:** Windows 11.
+- **Host:** Windows 11 24H2 (build 26100) or later.
 - **GPU:** Native H.264 NVENC and a current NVIDIA driver. HEVC, AV1, and 10-bit support are
   optional capabilities. Host AI 3D additionally requires a CUDA/TensorRT-capable NVIDIA device that
   maps to the selected D3D capture adapter.

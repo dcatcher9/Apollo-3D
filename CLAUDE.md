@@ -19,7 +19,7 @@ Sunshine 3D is a Windows XR-streaming host paired with modern Moonlight 3D/Artem
 Android XR. It is a hard fork of Apollo and LizardByte Sunshine. The supported product contract is
 intentionally narrow:
 
-- Windows 11;
+- Windows 11 24H2 (build 26100) or later;
 - native NVIDIA NVENC;
 - encrypted Artemis protocol 13;
 - one active remote session per host; and
@@ -160,8 +160,8 @@ Use a scoped localhost HTTP server for rendered testing. Do not ask browser auto
 - Host SBS model, state, shaders, and harness: `src/video_depth_estimator.*`,
   `src_assets/windows/assets/shaders/directx/`, and `src/sbs_bench_harness.*`.
 
-Historical non-Windows source remains only for upstream comparison; CMake rejects non-Windows
-builds. Vendored dependencies are submodules under `third-party/`; clone recursively.
+There is no non-Windows source; CMake rejects non-Windows builds. Vendored dependencies are
+submodules under `third-party/`; clone recursively.
 
 ## Conventions
 
