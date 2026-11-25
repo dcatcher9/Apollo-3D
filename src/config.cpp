@@ -214,20 +214,36 @@ namespace config {
     return result;
   }
 
+  // Returns the position after the ']' that closes a list entered just before `skipper`, or
+  // `end` when it never closes. Brackets inside a double-quoted string (a command such as
+  // "echo ]") are text, with the same quote and escape rules as find_inline_comment(); a
+  // quote does not continue past its line.
   template<class It>
-  It skip_list(It skipper, It end) {
+  It skip_list(It skipper, It end, bool *closed = nullptr) {
     int stack = 1;
+    bool quoted = false;
+    bool escaped = false;
     while (skipper != end && stack) {
-      if (*skipper == '[') {
+      if (endline(*skipper)) {
+        quoted = escaped = false;
+      } else if (quoted && escaped) {
+        escaped = false;
+      } else if (quoted && *skipper == '\\') {
+        escaped = true;
+      } else if (*skipper == '"') {
+        quoted = !quoted;
+      } else if (!quoted && *skipper == '[') {
         ++stack;
-      }
-      if (*skipper == ']') {
+      } else if (!quoted && *skipper == ']') {
         --stack;
       }
 
       ++skipper;
     }
 
+    if (closed) {
+      *closed = stack == 0;
+    }
     return skipper;
   }
 
@@ -260,16 +276,15 @@ namespace config {
 
     // Lists might contain newlines
     if (*begin_val == '[') {
-      endl = skip_list(begin_val + 1, end);
-
-      // Check if we reached the end of the file without finding a closing bracket
-      // We know we have a valid closing bracket if:
-      // 1. We didn't reach the end, or
-      // 2. We reached the end but the last character was the matching closing bracket
-      if (endl == end && end == begin_val + 1) {
+      bool closed = false;
+      const auto list_end = skip_list(begin_val + 1, end, &closed);
+      if (!closed) {
+        // Without its ']' the list would take the rest of the file as its value. Drop this
+        // option alone and continue with the next line.
         BOOST_LOG(warning) << "config: Missing ']' in config option: " << to_string(begin, end_name);
         return std::make_pair(endl, std::nullopt);
       }
+      endl = list_end;
       val_end = endl;
     }
 
@@ -291,7 +306,8 @@ namespace config {
 
       pos = endl;
       if (pos != end) {
-        pos += (*pos == '\r') ? 2 : 1;
+        // A line break is "\r\n", "\n" or a lone "\r"; only the pair is two characters.
+        pos += (*pos == '\r' && pos + 1 != end && *(pos + 1) == '\n') ? 2 : 1;
       }
 
       if (!var || is_retired_config_option(var->first)) {
@@ -521,7 +537,8 @@ namespace config {
     auto pos = begin;
     while (pos < std::cend(string)) {
       if (*pos == '[') {
-        pos = skip_list(pos + 1, std::cend(string)) + 1;
+        const auto after = skip_list(pos + 1, std::cend(string));
+        pos = after == std::cend(string) ? after : after + 1;
       } else if (*pos == ']') {
         break;
       } else if (*pos == ',') {
