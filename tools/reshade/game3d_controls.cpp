@@ -373,7 +373,7 @@ namespace sunshine_game3d {
           // Forget learned UI sources (A3), laid out like the Reset buttons
           // so the recorded control positions do not move.
           ImGui::SameLine();
-          ImGui::BeginDisabled(!data->alpha_session || data->alpha_session->stored().empty());
+          ImGui::BeginDisabled(!data->alpha_session || !data->alpha_session->has_stored());
           if (ImGui::Button("Forget##UIProtection", ImVec2(forget_width, 0))) {
             std::string cleared;
             if (forget_learned_ui_sources(*data, &cleared)) {

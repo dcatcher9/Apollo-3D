@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <memory>
 #include <new>
+#include <type_traits>
 #include "game3d_clock.h"
 
 namespace sunshine_streamline::native_observer {
@@ -179,7 +180,11 @@ namespace sunshine_streamline::native_observer {
       // Keep ordinary calls allocation-free, without treating inline storage
       // size as an API limit. Each invocation owns its snapshot independently
       // so nested proxy forwarding cannot overwrite an outer call's evidence.
-      std::array<T, Inline> local;
+      // Raw storage: constructing Inline elements with member initialisers
+      // cleared kilobytes on every hooked call, and every element a caller
+      // reads was first written whole by its copy.
+      static_assert(std::is_trivially_copyable_v<T> && std::is_trivially_destructible_v<T>);
+      alignas(T) std::byte local[Inline * sizeof(T)];
       std::unique_ptr<T[]> overflow;
       bool prepare(std::size_t count) noexcept {
         if (count <= Inline) return true;
@@ -188,7 +193,7 @@ namespace sunshine_streamline::native_observer {
         catch (...) { return false; }
         return bool(overflow);
       }
-      T *data() noexcept { return overflow ? overflow.get() : local.data(); }
+      T *data() noexcept { return overflow ? overflow.get() : reinterpret_cast<T *>(local); }
     };
     template<class T> bool read_elements(const T *source, std::size_t offset, std::size_t count, T *output) {
       const auto address = reinterpret_cast<std::uintptr_t>(source);

@@ -550,12 +550,36 @@ namespace platf::game3d {
       if (!creation_time || !executable || in_windows_directory(*executable) || excluded_executable(*executable)) {
         return std::nullopt;
       }
-      const auto modules = process_modules(foreground.process_id);
+      // A module snapshot reads the other process's loader data, so the running game is not
+      // snapshotted again at every poll once its list shows the add-on. The add-on pins itself
+      // for the life of its process, which makes that list final for every decision below; a
+      // process without it is read afresh, because the libraries the rules look for load late.
+      static std::mutex modules_mutex;
+      static std::uint32_t modules_process = 0;
+      static std::uint64_t modules_created = 0;
+      static std::vector<std::filesystem::path> modules_with_addon;
+      std::optional<std::vector<std::filesystem::path>> modules;
+      {
+        std::lock_guard lock(modules_mutex);
+        if (modules_process == foreground.process_id && modules_created == creation_time) {
+          modules = modules_with_addon;
+        }
+      }
+      const bool remembered = modules.has_value();
+      if (!remembered) {
+        modules = process_modules(foreground.process_id);
+      }
       if (!modules) {
         return std::nullopt;
       }
       // A game that already runs the add-on is an add-on game, whatever else it loads.
       const bool addon_loaded = native && module_loaded(*modules, L"SunshineSBS.addon64");
+      if (addon_loaded && !remembered) {
+        std::lock_guard lock(modules_mutex);
+        modules_process = foreground.process_id;
+        modules_created = creation_time;
+        modules_with_addon = *modules;
+      }
       // The executable's file is read once per process, not at every poll.
       static std::mutex imports_mutex;
       static std::uint32_t imports_process = 0;

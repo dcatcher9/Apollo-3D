@@ -557,6 +557,12 @@ namespace sunshine_streamline::depth_capture {
     // current one); reset: the previous one ends and the next opens. native is
     // the list object itself, whose private data holds its recording.
     void lifecycle_recording(std::uint64_t native, list_event event) {
+      // A pass end samples no dispatch coverage: skip that query on this
+      // per-pass recording-thread path.
+      if (event == list_event::pass_end) {
+        render_pass(native, native_observer::get_recording_cookie(native), false);
+        return;
+      }
       const auto dispatch = native_observer::states_coverage(native);
       const auto cookie = native_observer::get_recording_cookie(native);
       switch (event) {
@@ -572,7 +578,6 @@ namespace sunshine_streamline::depth_capture {
         case list_event::reset: reset(native, cookie, S_OK, true); break;
         case list_event::closed: close(native, cookie, S_OK); break;
         case list_event::pass_begin: render_pass(native, cookie, true); break;
-        case list_event::pass_end: render_pass(native, cookie, false); return;
         default: return;
       }
       // The recording the event left open (created and reset open a new one).

@@ -12,15 +12,6 @@
 #endif
         return sunshine_depth::copy_selected_depth(runtime, commands, packet, target->texture, captured, &consumer); }();
       if (!copied) display = display_status::waiting_capture;
-      else {
-        // Its entry is the display from this copy on (prepare_display).
-        activate_display(*data, *target);
-        if (!(packet.metadata.projection.supplied || packet.metadata.projection.direction_supplied) &&
-            captured.detected_orientation != sunshine_depth::depth_orientation::automatic) {
-          // Reuse the existing repeated clear-value evidence only when the API
-          // supplies no direction. This never creates projection coefficients.
-          data->frame.metadata.projection.direction_supplied = true;
-          data->frame.metadata.projection.reversed = captured.detected_orientation == sunshine_depth::depth_orientation::reversed;
-        }
-      }
+      // Its entry is the display from this copy on (prepare_display).
+      else activate_display(*data, *target);
     }

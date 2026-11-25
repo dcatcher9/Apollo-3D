@@ -56,9 +56,10 @@ namespace sunshine_streamline {
     constexpr unsigned slot_count = frame_generation::viewport_slots, tag_chunk = 32, frame_count = 32;
     // Canonical buffer types this observer keeps, depth kinds first. Every
     // tag array below is indexed by position in this list.
-    constexpr std::array<std::uint32_t, 9> observed_tag_types{buffers::depth, buffers::high_resolution_depth,
-      buffers::linear_depth, buffers::hudless_color, buffers::scaling_input_color, buffers::scaling_output_color,
-      buffers::backbuffer, buffers::ui_color_and_alpha, buffers::ui_alpha};
+    // Scaling input/output colors are not observed (tag_index), so they hold
+    // no slot: every snapshot copy carries only kinds a reader can use.
+    constexpr std::array<std::uint32_t, 7> observed_tag_types{buffers::depth, buffers::high_resolution_depth,
+      buffers::linear_depth, buffers::hudless_color, buffers::backbuffer, buffers::ui_color_and_alpha, buffers::ui_alpha};
     constexpr unsigned slot_of(std::uint32_t type) {
       for (unsigned i = 0; i != observed_tag_types.size(); ++i) if (observed_tag_types[i] == type) return i;
       return static_cast<unsigned>(observed_tag_types.size());
@@ -122,7 +123,7 @@ namespace sunshine_streamline {
     constexpr std::uint32_t steady_projection_frames = 8;
     struct targets { void *constants{}, *tag{}, *tag_for_frame{}, *evaluate{}, *new_frame_token{}, *get_feature_function{}; };
     struct batch {
-      std::array<tag_record, observed_tag_types.size()> tags{}; // Three depth and six independently tagged UI/color kinds.
+      std::array<tag_record, observed_tag_types.size()> tags{}; // Three depth and four independently tagged UI/color kinds.
       unsigned count{};
       std::uint32_t viewport{};
       std::uint64_t observation{};
@@ -378,7 +379,8 @@ namespace sunshine_streamline {
         out.valid_viewport = true;
         const auto canonical_type = buffers::canonical(installed_contract, type);
         const unsigned index = tag_index(canonical_type);
-        if (index < 6) {
+        // The v1 call observes the depth kinds and the HUD-less color only.
+        if (index <= slot_of(buffers::hudless_color)) {
           abi_v1::resource copy{};
           extent copied_area{};
           if (abi_v1::read_resource(resource, resource_has_state, copy, read_bytes) && (!area || read(area, copied_area))) {

@@ -469,9 +469,21 @@ namespace sunshine_game3d {
       value.address = reinterpret_cast<std::uint64_t>(module);
       std::snprintf(value.provider, sizeof(value.provider), "%s", provider);
       std::snprintf(value.abi, sizeof(value.abi), "%s", abi);
-      wchar_t path[32768] {};
-      const auto length = GetModuleFileNameW(module, path, DWORD(std::size(path)));
-      if (length && length < std::size(path)) {
+      // Hook installers call this on whichever game thread loaded the module,
+      // so the common case stays on a small buffer; only a long path takes the
+      // heap for the full extended-length limit.
+      wchar_t short_path[MAX_PATH] {};
+      std::vector<wchar_t> long_path;
+      wchar_t *path = short_path;
+      DWORD capacity = DWORD(std::size(short_path));
+      auto length = GetModuleFileNameW(module, path, capacity);
+      if (length >= capacity) {
+        long_path.resize(32768);
+        path = long_path.data();
+        capacity = DWORD(long_path.size());
+        length = GetModuleFileNameW(module, path, capacity);
+      }
+      if (length && length < capacity) {
         const int required = WideCharToMultiByte(CP_UTF8, 0, path, int(length), nullptr, 0, nullptr, nullptr);
         value.path_truncated = required >= int(sizeof(value.path));
         if (!value.path_truncated) {

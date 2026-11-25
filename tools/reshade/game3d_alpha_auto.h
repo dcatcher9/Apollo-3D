@@ -325,11 +325,12 @@ namespace sunshine_game3d {
       {
         std::lock_guard<std::mutex> lock(mutex_);
         if (manual_) return;
-        const auto before = stored_locked();
+        // accept() and revoke() mark a change of the accepted set, so a sample
+        // that changes nothing builds no key list.
+        accepted_changed_ = false;
         observe_locked(evidence, pixels, tick_ms, signatures);
-        if (!change_listener_) return;
+        if (!accepted_changed_ || !change_listener_) return;
         changed_to = stored_locked();
-        if (changed_to == before) return;
         listener = change_listener_;
       }
       // Outside the lock: the owner may persist the new set.
@@ -381,6 +382,11 @@ namespace sunshine_game3d {
     std::string stored() {
       std::lock_guard<std::mutex> lock(mutex_);
       return stored_locked();
+    }
+    // Whether stored() names any signature, without building the value.
+    bool has_stored() {
+      std::lock_guard<std::mutex> lock(mutex_);
+      return std::any_of(entries_.begin(), entries_.end(), [](const entry &e) { return e.accepted; });
     }
 
     // Called with stored() whenever samples earn or revoke acceptance (never
@@ -516,10 +522,12 @@ namespace sunshine_game3d {
 
     void accept(entry &e) {
       if (!e.accepted || e.provisional) ++counters_[ui_counter::trust_earned];
+      if (!e.accepted) accepted_changed_ = true;
       e.accepted = true;
       e.provisional = false;
     }
     void revoke(entry &e, std::size_t event) {
+      if (e.accepted) accepted_changed_ = true;
       e.accepted = e.provisional = false;
       e.last_testable = e.testable_ms = 0;
       e.doubt = {};
@@ -655,6 +663,9 @@ namespace sunshine_game3d {
     std::optional<bool> manual_; // Empty in Auto.
     std::vector<entry> entries_;
     std::function<void(const std::string &)> change_listener_;
+    // Set by accept() and revoke() when an entry's acceptance flips; observe()
+    // clears it before a sample and notifies the listener only when it is set.
+    bool accepted_changed_{};
     ui_counters counters_;
   };
 }

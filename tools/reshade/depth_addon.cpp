@@ -599,9 +599,14 @@ static void on_destroy_resource(device *device, resource resource)
 
 			sunshine_log::message(reshade::log::level::warning, "A depth-stencil resource was destroyed while still in use.");
 
-			// This is bad ... the resource may still be in use by an effect on the GPU and destroying it would crash it
-			// Try to mitigate that somehow by delaying this thread a little to hopefully give the GPU enough time to catch up before the resource memory is deallocated
-			Sleep(500);
+			// On Direct3D a tracked backup holds its own reference on the source
+			// (track_depth_stencil_for_backup), so the game cannot destroy it while a backup
+			// names it; reaching this there means that reference was lost, and stalling the
+			// game's thread would not repair it. Vulkan and OpenGL take no such reference:
+			// there the resource may still be in use by an effect on the GPU, so keep
+			// ReShade's delay to let the GPU catch up before the memory is deallocated.
+			if (device->get_api() > device_api::d3d12)
+				Sleep(500);
 		}
 	}
 }
@@ -673,12 +678,14 @@ static void on_present(command_queue *presenting_queue, swapchain *swapchain, co
 	// Declared before the lock, so its destructor emits only after unlocking.
 	std::optional<activity_present_trace> trace;
 	if (s_frame_activity_trace) trace.emplace(swapchain, presenting_queue);
+	// Also before the lock: its map is allocated and freed outside the exclusive
+	// section that game-thread recording waits for.
+	state_tracking queue_state(true);
 	std::unique_lock<std::shared_mutex> lock(s_mutex);
 	++device_data->native_present_index;
 	const auto demand = tracking_demand(*device_data);
 	if (trace) trace->begin(*device_data);
 
-	state_tracking queue_state(true);
 	// Copies are judged against their sources in each queue's execution order.
 	const bool content_selection = device->get_api() == device_api::d3d11 || device->get_api() == device_api::d3d12;
 	// Merge state from all graphics queues

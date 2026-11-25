@@ -238,8 +238,9 @@ namespace sunshine_streamline {
         std::uint64_t frame, bool explicit_frame, std::uintptr_t token, std::uint64_t ticket,
         const frame_identity &identity, std::uint64_t serial, std::uint64_t loss, std::uint64_t entry_tick) {
       if (!current(ticket)) return;
+      const auto checked = validate(camera);
       const bool invalid_camera = decoded != decode_status::ok || camera.reset > 1 ||
-        (explicit_frame && camera.not_rendering_game_frames != 0) || !validate(camera).valid();
+        (explicit_frame && camera.not_rendering_game_frames != 0) || !checked.valid();
       auto details = loss_context;
       details.sequence = serial; details.viewport = viewport;
       details.reset = decoded == decode_status::ok ? camera.reset : UINT32_MAX;
@@ -257,7 +258,6 @@ namespace sunshine_streamline {
       if (!invalid_camera && camera.reset == 1) ++record.history;
       if (invalid_camera) record.steady_frames = 0;
       else {
-        const auto checked = validate(camera);
         // Engines that rebuild the matrix every frame differ in the last bits.
         const auto close = [](double a, double b) { return std::abs(a - b) <= 1e-6 * std::max(std::abs(a), std::abs(b)); };
         const bool same = record.steady_frames && close(checked.depth_offset, record.steady_projection.depth_offset) &&
@@ -477,6 +477,10 @@ namespace sunshine_streamline {
       if (!success) {
         lose(loss_diagnostics::reason::sdk_failure, __func__, 1486, details);
       }
+      // A tag call ends no tag (the loop below stops at once for it), and its
+      // store_tags already marked the viewport's record: no second snapshot
+      // transaction.
+      if (value.tag_boundary) return;
       // The game never repeats an evaluation: a writer busy for a moment
       // (another thread's camera or FG update) must not lose it (RE
       // Requiem 10-22 lost one as records_busy).

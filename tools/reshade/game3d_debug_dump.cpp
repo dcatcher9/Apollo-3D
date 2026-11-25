@@ -643,15 +643,25 @@ namespace sunshine_game3d {
           "Texture2D<float> Input : register(t0); RWTexture2D<float> Output : register(u0);"
           "[numthreads(8,8,1)] void main(uint3 id:SV_DispatchThreadID){uint w,h;Output.GetDimensions(w,h);"
           "if(id.x<w&&id.y<h)Output[id.xy]=Input.Load(int3(id.xy,0));}";
-        ComPtr<ID3DBlob> code, errors;
-        if (FAILED(D3DCompile(shader, sizeof(shader) - 1, "Game3D diagnostic raw depth", nullptr, nullptr, "main", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors))) {
+        // Compiled once per process: a later dump's Present does not pay for
+        // it again. The bytes are copied so no compiler object outlives the
+        // call into add-on unload.
+        static const std::vector<std::uint8_t> code = [] {
+          ComPtr<ID3DBlob> compiled, errors;
+          if (FAILED(D3DCompile(shader, sizeof(shader) - 1, "Game3D diagnostic raw depth", nullptr, nullptr, "main", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &compiled, &errors))) {
+            return std::vector<std::uint8_t> {};
+          }
+          const auto *bytes = static_cast<const std::uint8_t *>(compiled->GetBufferPointer());
+          return std::vector<std::uint8_t>(bytes, bytes + compiled->GetBufferSize());
+        }();
+        if (code.empty()) {
           return false;
         }
         const api::pipeline_layout_param ranges[] {
           api::descriptor_range {0, 0, 0, 1, api::shader_stage::compute, 1, api::descriptor_type::shader_resource_view},
           api::descriptor_range {0, 0, 0, 1, api::shader_stage::compute, 1, api::descriptor_type::unordered_access_view}
         };
-        api::shader_desc s {code->GetBufferPointer(), code->GetBufferSize()};
+        api::shader_desc s {code.data(), code.size()};
         const api::pipeline_subobject part {api::pipeline_subobject_type::compute_shader, 1, &s};
         return device->create_pipeline_layout(2, ranges, &layout) && device->create_pipeline(layout, 1, &part, &pipeline) &&
                device->create_resource_view(depth.resource(), api::resource_usage::unordered_access, api::resource_view_desc(api::format::r32_float), &depth_uav) &&
@@ -993,7 +1003,9 @@ namespace sunshine_game3d {
     if (!p->complete()) {
       p->response.result = wire::status::unavailable;
       p->response.texture_count = 0;
-      auto metadata = nlohmann::json::parse(p->json);
+      // This runs inside ReShade's destroy callback, which must not throw.
+      auto metadata = nlohmann::json::parse(p->json, nullptr, false);
+      if (!metadata.is_object()) metadata = nlohmann::json::object();
       metadata["unavailable"] = "Runtime destroyed before snapshot GPU completion was confirmed; no pixel artifacts published.";
       p->json = metadata.dump();
     }

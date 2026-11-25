@@ -893,9 +893,11 @@ namespace sunshine_game3d::ui_layer {
         api::resource_view view, const float color[4], std::uint32_t rect_count, const api::rect *rects) {
       try {
         const auto desc = device->get_resource_desc(resource);
-        // The copy's format follows the view the game cleared (layer_format).
-        const auto format = layer_format(desc.texture.format, device->get_resource_view_desc(view).format);
-        if (format == api::format::unknown) return;
+        // Whatever the output's extent, a layer is a whole transparent-black
+        // clear of a plain single-sample alpha target: checked against the
+        // target's own extent, this refuses every other clear before the view
+        // query and the lock.
+        if (!qualifies(desc, color, desc.texture.width, desc.texture.height, rect_count, rects)) return;
         live_allocation live;
         census_allocation dump;
         const auto layer_target = [&] {
@@ -907,6 +909,9 @@ namespace sunshine_game3d::ui_layer {
           std::lock_guard<std::mutex> lock(s.mutex);
           if (!layer_target()) return;
         }
+        // The copy's format follows the view the game cleared (layer_format).
+        const auto format = layer_format(desc.texture.format, device->get_resource_view_desc(view).format);
+        if (format == api::format::unknown) return;
         // Clearing requires the render-target state on every API, so the
         // previous frame's layer can be copied here before the clear erases it.
         // On D3D12 the capture owner says how the copy leaves and restores

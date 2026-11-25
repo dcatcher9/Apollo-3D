@@ -1090,8 +1090,12 @@ namespace sunshine_game3d {
         detection_pending = counters_pending = false;
         return;
       }
-      std::vector<uint32_t> counts(4 * size_t(detection_decision_texels));
-      const auto bytes = counts.size() * sizeof(uint32_t);
+      // The shader's marker sets the texel count (configure refuses any other
+      // than the contract's); the bound keeps the copy inside the array.
+      std::array<uint32_t, 4 * ui_detection::decision_texels> counts{};
+      const auto count = 4 * size_t(detection_decision_texels);
+      if (count > counts.size()) { detection_pending = counters_pending = false; return; }
+      const auto bytes = count * sizeof(uint32_t);
       bool read = false;
       ++detection_mapped;
       if (context11.p) {
@@ -1113,7 +1117,7 @@ namespace sunshine_game3d {
       auto &latest = decision.temporal.latest;
       latest = {};
       if (!read) { counters_pending = false; return; }
-      const auto observed = decision.observe_sample(counts.data(), counts.size(), detection_submitted, input.session);
+      const auto observed = decision.observe_sample(counts.data(), count, detection_submitted, input.session);
       commit_counters(latest, input.session, observed);
       counters_pending = false;
     }
