@@ -343,6 +343,7 @@ namespace ar_glasses {
       std::string desktop_topology {};
       bool hdr_user_enabled = false;
       UINT32 hdr_bits_per_color = 0;
+      bool game_source = false;
     };
 
     /** Return whether a mode transition may retain the existing local SudoVDA desktop.

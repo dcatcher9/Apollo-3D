@@ -1819,6 +1819,23 @@ TEST(ArGlassesModeTransition, FailedPlacementRoutesToRetainedModeAndColorRepair)
   EXPECT_TRUE(ar_glasses::detail::local_session_can_reconfigure_for_test(before, moved, true));
 }
 
+TEST(ArGlassesModeTransition, SwitchingTheSourceOnRunningGlassesRebuildsThePresenter) {
+  ar_glasses::detail::local_session_contract_t host;
+  host.device_path = LR"(\\?\DISPLAY#TCL03D4#test)";
+  host.adapter_id.LowPart = 42;
+  host.mode = ar_glasses::presentation_mode_e::normal;
+  host.rect = {1920, 0, 3840, 1080};
+
+  // The presenter converts one source. Updating placement alone would keep showing the old
+  // one, so a source change on an unchanged sink must take the retained reconfiguration.
+  auto game = host;
+  game.game_source = true;
+  EXPECT_FALSE(ar_glasses::detail::local_session_can_re_isolate_for_test(host, game, false));
+  EXPECT_FALSE(ar_glasses::detail::local_session_can_re_isolate_for_test(game, host, false));
+  EXPECT_TRUE(ar_glasses::detail::local_session_can_reconfigure_for_test(host, game, false));
+  EXPECT_TRUE(ar_glasses::detail::local_session_can_re_isolate_for_test(game, game, false));
+}
+
 TEST(ArGlassesModeTransition, RetirementDoesNotFollowAReusedPhysicalTargetId) {
   ar_glasses::detail::virtual_display_identity_contract_t retiring;
   retiring.adapter_id.LowPart = 42;

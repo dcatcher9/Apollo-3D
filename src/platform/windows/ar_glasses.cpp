@@ -1036,6 +1036,9 @@ namespace ar_glasses {
              same_luid(left->adapter_id, right->adapter_id) &&
              left_width == right_width && left_height == right_height &&
              left->refresh_millihz == right->refresh_millihz && left->mode == right->mode &&
+             // The presenter is started for one source (Host 3D or a game's own stereo). A
+             // placement-only update keeps that presenter, so it cannot serve the other source.
+             left->game_source == right->game_source &&
              left->is_primary == right->is_primary && left->is_cloned == right->is_cloned &&
              left->desktop_topology == right->desktop_topology &&
              left->hdr.known == right->hdr.known &&
@@ -5968,6 +5971,7 @@ namespace ar_glasses {
       target.desktop_topology = contract.desktop_topology;
       target.hdr.user_enabled = contract.hdr_user_enabled;
       target.hdr.bits_per_color = contract.hdr_bits_per_color;
+      target.game_source = contract.game_source;
       return target;
     }
   }  // namespace
