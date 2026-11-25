@@ -469,8 +469,10 @@
         this.actionBusy = 'end'
         this.actionError = ''
         try {
+          // Closing the app ends its session and disconnects the device, so a disconnect
+          // after it finds nobody and reports a failure. Disconnect only without an app.
           if (this.currentApp) await this.postJson('./api/apps/close')
-          if (this.activeClient) await this.postJson('./api/clients/disconnect', { uuid: this.activeClient.uuid })
+          else if (this.activeClient) await this.postJson('./api/clients/disconnect', { uuid: this.activeClient.uuid })
           window.setTimeout(() => this.loadOverview(false), 750)
         } catch (error) {
           this.actionError = error.message
