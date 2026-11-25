@@ -12,6 +12,21 @@
 
 namespace platf::display_config {
 
+  /** Whether two adapter identifiers name the same adapter. */
+  [[nodiscard]] inline bool same_luid(const LUID &left, const LUID &right) noexcept {
+    return left.HighPart == right.HighPart && left.LowPart == right.LowPart;
+  }
+
+  /**
+   * Whether two monitor device paths name the same device. Windows does not keep the case of
+   * these paths stable between its APIs, so the comparison ignores it; an empty path names
+   * no device and matches nothing.
+   */
+  [[nodiscard]] inline bool same_device_path(std::wstring_view left, std::wstring_view right) noexcept {
+    return left.size() == right.size() && !left.empty() &&
+           CompareStringOrdinal(left.data(), static_cast<int>(left.size()), right.data(), static_cast<int>(right.size()), TRUE) == CSTR_EQUAL;
+  }
+
   struct query_api_t {
     decltype(&::GetDisplayConfigBufferSizes) get_buffer_sizes =
       &::GetDisplayConfigBufferSizes;

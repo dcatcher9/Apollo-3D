@@ -255,9 +255,7 @@ namespace ar_glasses {
       }
     }
 
-    bool same_luid(const LUID &left, const LUID &right) {
-      return left.HighPart == right.HighPart && left.LowPart == right.LowPart;
-    }
+    using platf::display_config::same_luid;
 
     bool same_virtual_display_identity(
       const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &left,

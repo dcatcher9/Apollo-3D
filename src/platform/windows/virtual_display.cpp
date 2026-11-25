@@ -89,10 +89,6 @@ namespace VDISPLAY {
              containsCaseInsensitive(devicePath, L"SUDOVDA");
     }
 
-    bool sameLuid(const LUID &left, const LUID &right) {
-      return left.HighPart == right.HighPart && left.LowPart == right.LowPart;
-    }
-
     bool matchesVirtualDisplayIdentity(
       const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &expectedIdentity,
       std::wstring_view learnedDevicePath,
@@ -102,9 +98,8 @@ namespace VDISPLAY {
     ) {
       // A path learned from the exact AddVirtualDisplay result remains stable when Windows renumbers
       // DISPLAY names or target IDs. It is therefore the strongest available post-publication key.
-      const bool learnedPath = !learnedDevicePath.empty() &&
-                               learnedDevicePath == candidateDevicePath;
-      const bool exactVirtualIdentity = sameLuid(expectedIdentity.AdapterLuid, candidateAdapter) &&
+      const bool learnedPath = platf::display_config::same_device_path(learnedDevicePath, candidateDevicePath);
+      const bool exactVirtualIdentity = platf::display_config::same_luid(expectedIdentity.AdapterLuid, candidateAdapter) &&
                                         expectedIdentity.TargetId == candidateTargetId &&
                                         isSudoVirtualDisplayPath(candidateDevicePath);
       // Do not fall back to a matching GDI name or to "the only SudoVDA output". DISPLAY numbers
@@ -143,7 +138,7 @@ namespace VDISPLAY {
         }
 
         const bool exact_driver_identity =
-          sameLuid(identity.AdapterLuid, path.targetInfo.adapterId) &&
+          platf::display_config::same_luid(identity.AdapterLuid, path.targetInfo.adapterId) &&
           identity.TargetId == path.targetInfo.id;
         if (candidateDevicePaths[index].empty() &&
             (exact_driver_identity || !learnedDevicePath.empty())) {
@@ -218,7 +213,7 @@ namespace VDISPLAY {
         }
         const auto &mode = modes[mode_index];
         if (mode.infoType != DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE ||
-            !sameLuid(mode.adapterId, path.sourceInfo.adapterId) ||
+            !platf::display_config::same_luid(mode.adapterId, path.sourceInfo.adapterId) ||
             mode.id != path.sourceInfo.id) {
           return false;
         }
@@ -387,7 +382,7 @@ namespace VDISPLAY {
           coalesced.begin(),
           coalesced.end(),
           [&](const retirement_candidate_t &entry) {
-            return sameLuid(entry.identity.AdapterLuid, candidate.identity.AdapterLuid) &&
+            return platf::display_config::same_luid(entry.identity.AdapterLuid, candidate.identity.AdapterLuid) &&
                    entry.identity.TargetId == candidate.identity.TargetId;
           }
         );
@@ -419,7 +414,7 @@ namespace VDISPLAY {
         }
 
         const bool exact_driver_identity =
-          sameLuid(identity.AdapterLuid, candidate.identity.AdapterLuid) &&
+          platf::display_config::same_luid(identity.AdapterLuid, candidate.identity.AdapterLuid) &&
           identity.TargetId == candidate.identity.TargetId;
         const bool has_usable_device_path =
           candidate.device_info_available && !candidate.device_path.empty();
@@ -1521,7 +1516,7 @@ namespace {
       }
 
       for (std::size_t index = 0; index < expected_states.size(); ++index) {
-        if (expected_states[index].device_path != target_name.monitorDevicePath) {
+        if (!platf::display_config::same_device_path(expected_states[index].device_path, target_name.monitorDevicePath)) {
           continue;
         }
         if (matched[index]) {
