@@ -3589,15 +3589,31 @@ namespace stream {
       });
     });
 
-    auto start_time = std::chrono::steady_clock::now();
-    auto current_time = start_time;
-
-    while (current_time - start_time < timeout) {
-      auto delta_time = current_time - start_time;
-
-      auto msg_opt = messages->pop(timeout - delta_time);
-      if (!msg_opt) {
+    // Nothing raises this queue when the session stops, so wait in short slices and look at
+    // the session's own stop event between them: a session ended before its ping arrived
+    // must not hold its teardown for the whole ping timeout.
+    constexpr auto stop_poll_interval = 50ms;
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    for (;;) {
+      if (session->shutdown_event->peek()) {
+        BOOST_LOG(info) << "Session stopped before its initial "sv
+                        << (type == socket_e::video ? "video"sv : "audio"sv) << " ping."sv;
+        return -1;
+      }
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= deadline) {
         break;
+      }
+      const auto slice = std::min(
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now) + 1ms,
+        std::chrono::milliseconds {stop_poll_interval}
+      );
+      auto msg_opt = messages->pop(slice);
+      if (!msg_opt) {
+        if (!messages->running()) {
+          break;
+        }
+        continue;
       }
 
       auto &recv_peer = msg_opt->first;
