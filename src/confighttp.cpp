@@ -1620,8 +1620,14 @@ namespace confighttp {
         }
       } else {
         auto data = SimpleWeb::Crypto::Base64::decode(input_tree.value("data", ""));
-        std::ofstream imgfile(path);
-        imgfile.write(data.data(), static_cast<int>(data.size()));
+        // Binary: a text-mode stream would write every 0x0A of the image as 0x0D 0x0A.
+        std::ofstream imgfile(path, std::ios::binary | std::ios::trunc);
+        imgfile.write(data.data(), static_cast<std::streamsize>(data.size()));
+        imgfile.close();
+        if (!imgfile) {
+          bad_request(response, request, "Failed to save cover");
+          return;
+        }
       }
       output_tree["status"] = true;
       output_tree["path"] = path;
