@@ -814,9 +814,9 @@ Manual setup and presentation requirements:
    or external Depth3D checkout is required. The installer migrates saved strength and depth-view
    settings into `[SUNSHINE_GAME3D]` in ReShade.ini, preserving existing native preferences.
    Obsolete owned Game3D shader/include files are backed up before removal, and old stereo
-   techniques are disabled. Original SuperDepth3D reference files/settings remain available.
-   An explicit `-ShaderDirectory` installs a reference renderer and disables native Game 3D;
-   this is for comparison testing, not ordinary setup.
+   techniques are disabled, as is the reference effect an earlier `-ShaderDirectory` installation
+   copied (`reshade-shaders\Shaders\Sunshine3D\SunshineDepth3D.fx`, backed up and removed).
+   Original SuperDepth3D files/settings remain available.
    `install.ps1` and `install-runtime.ps1` also run in a Windows PowerShell 5.1 started from a
    PowerShell 7 window. Such a 5.1 inherits PowerShell 7's `PSModulePath`, whose
    `Microsoft.PowerShell.Utility` would hide 5.1's `Get-FileHash` ("not recognized"), so both load
@@ -3043,9 +3043,8 @@ The installer migrates the old `Depth_Adjustment` and `Depth_Map_View` preset va
 explicit zero strength, into native `Strength` and `DepthView` settings when no saved native value
 exists. It backs up and removes the owned Game3D FX/support files and disables competing stereo
 techniques. Native Game 3D requires no user preprocessor definitions and has no Home-tab shader
-entry. Original SuperDepth3D files, profiles and settings remain in their separate reference
-installation. The earlier independent `SunshineDepth3D.fx` experiment also remains a reference,
-not a Game3D rendering branch.
+entry. Original SuperDepth3D files, profiles and settings remain in their separate
+installation.
 
 The following component-removal results are historical evidence for the previous ray renderer.
 
@@ -3079,7 +3078,7 @@ the same startup and capture sequence. A combined production add-on plus shader 
 also preserves complete source/depth, mono and final AA0/AA1 output bytes. These bounded regressions
 are historical evidence for that removal, not acceptance of later shader changes. They do not
 establish halo improvement or a frame-rate gain; most removed modes were already inactive
-in full-SBS export. See the [comparison evidence](native-stereo-comparison.md).
+in full-SBS export.
 
 Use **Normal Depth View** to check that the selected buffer contains recognizable scene depth.
 The exported diagnostic shows prepared scene depth before artistic stereo controls;
@@ -3141,12 +3140,11 @@ stays 2D. A fitting size requests a fresh ring under a new nonce. Until the 10-0
 nonce was written first, and an aspect-mismatched stream kept the game packing and fencing
 every Present into a ring nobody read. Until 10-23 every aspect difference above 0.5% was refused.
 
-Normal installation omits `-ShaderDirectory` and uses the GPU renderer embedded in the add-on.
-For comparison testing only, the exporter also accepts annotated SuperDepth3D and independent
-SunshineDepth3D reference exports. These require an explicit `-ShaderDirectory` with their matching
-sources; the installer disables native Game 3D and enables only the selected reference technique.
-To return to native rendering, rerun the installer without `-ShaderDirectory`, then enable Game 3D
-in the add-on panel if it was previously disabled. Existing native preferences are preserved.
+Installation uses the GPU renderer embedded in the add-on: it is the only producer. With Game 3D
+disabled in the add-on panel nothing is exported and the stream shows the game in 2D; the panel
+says "2D: Game 3D is disabled". The exporter no longer accepts a ReShade effect's export texture
+(the former SuperDepth3D and SunshineDepth3D reference exports and the installer's
+`-ShaderDirectory` were removed).
 
 ### UI decision framework
 
@@ -3692,77 +3690,13 @@ cannot establish or replace a reference. Linear depth has no supplied near-clip 
 pixel's reciprocal and scaled displacement must remain finite. Equivalent world-unit changes
 cancel through the shared gain. Device-depth decoding and its endpoint policy remain unchanged.
 
-### Native depth calibration and rendering
+### Depth orientation evidence
 
-The remainder of this section documents the **independent SunshineDepth3D reference renderer**.
-Its percentile calibration and rendering equation do not replace SunshineGame3D's source-owned
-camera/raw depth preparation. See the [comparison decision record](native-stereo-comparison.md)
-for historical milestones and their evidence scope.
-
-For ordinary perspective hardware depth, `d = A + B/z`. Relative stereo disparity is affine
-in the same coordinate, so the independent effect needs no near/far plane guesses. The add-on
-maintains a raw median anchor and the reciprocal of a robust 10–90% raw span, using three fresh
-useful sample captures. Those values stay fixed for that resource lifetime and capture layout;
-they do not stretch every newly visible scene to a constant depth range. A source or capture
-rectangle change discards its calibration. This initial version does not recover projection
-matrices or detect a changed projection within an otherwise unchanged buffer.
-
-Normal/reversed orientation requires three distinct frames of unambiguous exact clear-one or
-clear-zero evidence respectively. Mixed and non-endpoint clears remain unknown. This is an
-inference from clear behavior, not proof of the camera projection or depth-test function.
-The **Depth direction** override handles ambiguous cases. Unknown direction keeps stereo flat.
+Normal/reversed orientation (`depth_orientation.h`) requires three distinct frames of unambiguous
+exact clear-one or clear-zero evidence respectively. Mixed and non-endpoint clears remain unknown.
+This is an inference from clear behavior, not proof of the camera projection or depth-test function.
 The histogram log coordinate used to select buffers never becomes the rendering coordinate.
 Raw depth stays FP32 through subtraction; standard-Z values near one must not collapse in FP16.
-
-The add-on updates `Sunshine_Calibrated`, `Sunshine_RawAnchor`, `Sunshine_RawGain` and
-`Sunshine_DepthRect` together after its depth-capture callback and before the effect runs.
-`Sunshine_DepthReady` (`bufready_depth`) comes from the shared readiness cache
-([Streamline depth selection](#streamline-depth-selection)), written only when readiness changes
-and again into an effect rebuilt by a reload. A separate per-present proof prevents a missed update
-from exporting stale calibration. Current-frame capture readiness and older calibration evidence
-are distinct.
-The raw gain is signed so `nearness = (raw - anchor) * gain` increases toward the viewer.
-The rectangle stores normalized `scale.xy, offset.zw` into the captured depth texture.
-
-The shader subtracts Screen plane, bounds this nearness to [-1,1], then multiplies by
-`0.005 * clamp(Strength,0,2)` of source width per eye. Strength defaults to 1 and acts after
-automatic calibration; zero bypasses geometry exactly. Left-eye foreground moves right;
-right-eye foreground moves left. The independently authored backward search traces each destination
-ray from near disparity to far disparity. For disparity `q` in source pixels, its source coordinate
-is `destination - eye_sign*q`; a hit satisfies `q = disparity(depth(source))`. The first validated
-intersection owns the pixel. It does not forward-project source segments or scatter source pixels.
-
-Smooth neighbors whose disparities differ by at most one source pixel are interpolated after
-the disparity clamp. Larger discontinuities keep their native pixel footprints. The ray visits every
-knot and edge of that reconstructed field, including one-pixel objects. The three subpixel rays
-share a traversal of at most 168 source-center pairs at the supported maximum dimensions/strength.
-Smooth pairs use one affine interval; cliffs split into two constant half-pixel intervals. Each
-new source depth is fetched once and shared by the rays. Within an interval, a residual
-bracket is refined with up to six secant landings, each checked against a fresh depth sample with
-a 0.002-source-pixel residual tolerance. Depth-edge sign jumps between intervals are recorded as
-uncovered gaps rather than accepted as surface intersections. This is the general inverse
-ray-search approach used by parallax-occlusion stereo, with our own depth coordinate and code.
-
-Gaps use the farther surface with
-zero confidence. To avoid stretching a TAA/upscaling color fringe into a horizontal spike, the
-fill donor moves into that background by one active depth-texel footprint plus one source-color
-pixel, rounded up and capped at eight source pixels. Each intervening sample must be valid,
-no nearer than the original background and at most one pixel farther in disparity; otherwise the search
-stops at the last supported sample. The footprint uses the actual depth texture and captured
-viewport. Fractional ray samples are snapped to a validated background color-texel center before
-the donor search. This changes only uncovered-pixel donors, preserving observed surfaces and thin
-foreground. It remains an approximation of unseen background, with no guarantee for wider
-temporal-filter fringes or missing depth/color alignment. A background sloping nearer to the
-camera can retain the boundary donor rather than borrowing a closer surface.
-Color interpolation decodes SDR/PQ before filtering and preserves signed linear scRGB.
-
-The first implementation assumes a perspective depth buffer that aligns with the displayed
-color through its viewport rectangle. It does not infer DLSS jitter, frame-generated depth,
-custom logarithmic depth, orthographic projection, HUD layers or separate weapon projections.
-Matching resolution alone does not establish alignment. Calibration currently requires a sampled
-backup. Physical game/headset acceptance
-is separate from synthetic buffer, shader and transport validation.
-
 ### Streamline ABI compatibility
 
 Streamline discovery selects a public ABI family from consistent DLL version metadata, then checks
@@ -3895,8 +3829,7 @@ latch stay in the shell; internal, worker-anonymous and public namespace context
 and their shared lock at their original private-namespace position, including global lifetimes.
 
 The `SUNSHINE_DEPTH` INI readers live in `addon_config.{h,cpp}`. Streamline initialization
-reads its source, call-trace, NGX-source and queue-order flags in that order; the
-FrameActivityTrace reader stays at Generic's event-registration latch. Each owner
+reads its source, call-trace, NGX-source and queue-order flags in that order. Each owner
 keeps its flag state, defaults and lifecycle policy.
 
 Capture pool, queue-place and observation state have separate owners in the capture shell.
@@ -4275,8 +4208,7 @@ started:
   end-of-frame copy, those whose ready capture was the end-of-frame copy, and the Presents that
   held the previous Present's capture within the source age ([Selecting scene
   depth](#selecting-scene-depth)). No copy is made at a clear, unbind or clear-like draw any more,
-  so `boundary` counts only Presents that sampled the source directly (D3D9, D3D10 and OpenGL) and
-  is always 0 on D3D11 and D3D12; the field keeps its name so the line keeps its shape.
+  so `boundary` is always 0; the field keeps its name so the line keeps its shape.
 - `end_of_frame_refused=R last=<stage>`: end-of-frame copies the capture owner refused, with the
   latest refusal's stage (`missing_state` when nothing proves the state).
 - `proven tracked=T unobserved={unrecorded=.. unreported=.. invalidated=.. missed_reset=..
@@ -6532,7 +6464,7 @@ classifier: thin geometry between representative points must not be discarded. C
 and layout checks still apply; grid-only challenger results cannot supply geometry statistics,
 and malformed full-image measurements invalidate prior evidence. Central pixels have no special
 gain or zero authority. The standalone `raw_reference_statistics.h` utility and the
-[comparison record](native-stereo-comparison.md) describe earlier research candidates, not
+earlier comparison records describe earlier research candidates, not
 the current bounded range policy. A menu with useful depth can still initialize a reference;
 the policy does not identify menus. Representative moving-game comfort remains acceptance work.
 
@@ -6820,18 +6752,6 @@ change. Until 11-01 the header was `exporter_test_access.h`, included in seven
 stages that kept the refactor's original definition order for its identity
 proof.
 
-### FX reference
-
-`exporter/fx_reference.inl` contains the same-TU reference-effect discovery,
-readiness, preparation, publication and technique-priority path. Its
-`fx_reference_types.inl` state occupies the original consecutive `runtime_t`
-field slot, with the same field/default and string-leaf lifetime order.
-Native effects reload keeps its selective handle reset: the prepared-depth
-flag and effect name retain their prior values. The separate
-`generic_fx_reference.inl` holds the request/calibration/status fragments at
-their original Generic call points. The two parts name each other; Generic
-and exporter types keep internal linkage and their own resource/lock owners.
-
 ### Selecting scene depth
 
 If **Normal Depth View** shows a white field, stripes or dots during gameplay, the selected source
@@ -6845,8 +6765,7 @@ SunshineGame3D's status describes source-associated projection decoding when ava
 the explicit relative-depth assumption otherwise. Both maintain an independent stereo gain and
 place the screen plane within the measured disparity budget. Changing the selected source does
 not change that interpretation.
-The independent reference effect has separate calibration. The selected buffer and current-frame
-depth readiness remain shared acquisition responsibilities.
+The selected buffer and current-frame depth readiness remain shared acquisition responsibilities.
 
 Historical note, recorded on 2026-09-13 with a manual Generic Depth selection that no longer
 exists: in one reported game, changing the selection by hand replaced flat or saturated shader
@@ -6860,7 +6779,9 @@ recorded calls than another candidate. DLSS also separates render and output res
 do not require scene depth to match the final color size or encode a universal low/high
 draw-count rule. See the [Generic Depth implementation](https://github.com/crosire/reshade/blob/v6.8.0/examples/09-depth/generic_depth_addon.cpp)
 and [NVIDIA's DLSS integration guide](https://github.com/NVIDIA-RTX/Streamline/blob/main/docs/ProgrammingGuideDLSS.md).
-On Vulkan, OpenGL, D3D9 and D3D10 the add-on keeps that ranking as its only selector.
+The add-on works on Direct3D 11 and Direct3D 12 only. On any other device API (Vulkan, OpenGL,
+D3D9, D3D10) it creates no tracking state, changes none of the game's depth formats and exports
+nothing; the panel names the cause ("2D: the game does not use Direct3D 11 or 12").
 
 The unified `SunshineSBS.addon64` includes the scene-depth selector and replaces Generic Depth for
 this game. On D3D11 and D3D12 its selection is always content-based: it allows native and
@@ -6954,15 +6875,12 @@ history copy (fail-safe; see [Copies of scene depth](#scene-depth-selection-limi
 relationship to the swapchain buffer index is assumed.
 
 Capture layout follows the actual captured crop: the largest viewport drawn into the source since
-its last full depth clear in the frame, in execution order across command lists. On D3D10, D3D11
-and D3D12 a clear of the sampled plane without rectangles (`ClearDepthStencilView`, or a D3D12
+its last full depth clear in the frame, in execution order across command lists. A clear of the
+sampled plane without rectangles (`ClearDepthStencilView`, or a D3D12
 render pass's depth `CLEAR`) covers the whole view and erases what was drawn before it, so a larger
 pass that the game clears before drawing the scene in a smaller viewport does not widen the
 scene's crop; a clear with nothing drawn after it keeps the earlier extent, and a clear limited to
-rectangles does not restart it. D3D9's `Clear` covers only the current viewport and scissor,
-`glClear` the scissor and a Vulkan render pass's `CLEAR` its render area, and ReShade reports
-none of them, so on those APIs no clear restarts the crop: it stays the largest viewport drawn in
-the frame.
+rectangles does not restart it.
 Aggregate activity and off-turn writes cannot change that identity without a new usable capture;
 a real captured-crop change advances the layout and invalidates the corresponding numeric basis.
 
@@ -6988,8 +6906,7 @@ crop restarted at the next draw (a later quarter-view part of the pass narrowed 
 it), and the cleared gate and the lineage saw an overwrite (the alternating fixture's
 `--resume-pass` case). The discard also overwrites the plane for the
 transfer lineage and the cleared gate, as a `DISCARD` at a pass's start does. Until 11-01 the
-ending access was not read, and the copy of such a frame read undefined depth. Vulkan's
-`DONT_CARE` store is not judged, as its load is not (the draw-statistics picker).
+ending access was not read, and the copy of such a frame read undefined depth.
 
 Closed gap (11-01, traced and fixed 11-03): in the alternating fixture's `--resume-pass` case the
 proven-state table counted the list that suspends the pass as `uncovered` on about every Present,
@@ -7210,24 +7127,20 @@ similar spatial coverage, and a clear endpoint is not proof that depth is missin
 does not know the semantic role of every sample, and there is no manual fallback. These are the
 accepted consequences:
 
-- **A confirmed non-scene buffer on D3D11 and D3D12.** When the selector confirms a spatially
+- **A confirmed non-scene buffer.** When the selector confirms a spatially
   varying buffer that is not scene depth (another camera's pass or a shadow map, for example),
   nothing in the automatic path flags it. The **Status** row names the buffer's size and format
   and the `Sunshine 3D depth:` log line adds its id and selection reason, but the selector cannot
   know a buffer's semantic role. This is the one accepted case that can give a visibly wrong
   result, and it has no in-game recovery: turn Game 3D off for that game.
 - **Depth cleared before Present.** Generic copies only at the end of the frame, so it sees the
-  cleared buffer. On D3D11 and D3D12 that copy is flat, the content checks refuse it, and the
+  cleared buffer. That copy is flat, the content checks refuse it, and the
   frame stays mono; the log shows a waiting binding state with its reason, or a growing
-  `end_of_frame_refused`. On D3D9, D3D10, OpenGL and Vulkan there is no content check: the add-on
-  reads the flat buffer (directly, or through its end-of-frame copy), so the frame shows zero
-  parallax. That is effectively 2D rather than wrong geometry, and nothing flags it. A buffer that
+  `end_of_frame_refused`. A buffer that
   the game reuses for other content before Present is judged by that content, which is the first
   case above when it is spatially varying.
-- **Vulkan, OpenGL, D3D9 and D3D10.** ReShade's draw-statistics ranking is the only selector. A
-  wrong pick, such as a shadow map that passes the aspect test, can no longer be corrected in the
-  panel or the ini, and nothing flags it.
-- **Saved non-default `[DEPTH]` values.** The add-on reads only `DisableINTZ` from `[DEPTH]`.
+- **Vulkan, OpenGL, D3D9 and D3D10.** Not supported: the game stays 2D and the panel says why.
+- **Saved non-default `[DEPTH]` values.** The add-on reads nothing from `[DEPTH]`.
   A game whose `ReShade.ini` holds a non-default copy, clear-index, draw-statistics, aspect or
   format/resolution filter value there (including values left from earlier use of ReShade's
   Generic Depth, which installation disables) loses that behavior on its next launch, because the
@@ -7345,8 +7258,7 @@ accepted consequences:
 ## Activation and recovery
 
 The native add-on publishes its completed stereo texture, with the settings overlay composed
-into both eyes when it is open. Explicit reference renderers publish their annotated export
-texture only after the selected technique has run.
+into both eyes when it is open.
 Sunshine accepts it only from the foreground fullscreen game on the captured virtual display.
 It validates the process creation time, window identity, GPU adapter, output dimensions, eye
 layout and color transfer. A fullscreen image alone does not prove that it is stereo; there is
@@ -7390,7 +7302,7 @@ Before the first compatible export, streamed Game 3D remains an ordinary mono W 
 After stereo activation, Sunshine duplicates the current desktop into both eyes whenever the
 publisher becomes unavailable. Alt-Tab, game exit, disabling Game 3D and resolution changes
 invalidate the old publication. Unrelated shader reloads and ReShade's global effects toggle do
-not disable native Game 3D; reference renderers follow their own effect lifecycle.
+not disable native Game 3D.
 These temporary losses keep the packed 2W × H stream;
 they do not repeatedly resize the encoder or desktop. Local AR uses the same duplicate-eye
 fallback in the glasses' hardware 3D display mode. The add-on and receiver negotiate a new
@@ -7463,8 +7375,7 @@ implies acceptance). Any other consumer gets FP16 scRGB. The native render choos
 from the consumer it reads before rendering, so a consumer attached, replaced or detached between
 a Present's render and its export whose answer differs, in either direction, gets the next
 Present's export, rendered for it (`transfer_current`, export reason
-`consumer_transfer_changed`); a reference export cannot render again and only refuses PQ output to
-a consumer without PQ (`consumer_without_pq`). Until the final review only that PQ direction was
+`consumer_transfer_changed`). Until the final review only the PQ direction was
 checked, so a PQ host attaching during an HDR10 render made with no consumer got an FP16 ring that
 the next Present replaced, two generations and up to two ring allocations on the Present thread
 for one attach. For an HDR stream the host would
@@ -8118,9 +8029,7 @@ The remaining evidence below also describes earlier independent shader and trans
 it is not a substitute for that live acceptance.
 
 Native tests exercise protocol rejection and the real D3D11 shared-resource/fence receiver with
-separate devices. Independent shader fixtures load the packaged SunshineDepth3D shader
-in the official ReShade 6.8 D3D11 and D3D12 runtimes. They inspect the actual full-SBS
-texture and native mono presentation. The standalone add-on build and interop smoke tests
+separate devices. The standalone add-on build and interop smoke tests
 are documented alongside its source.
 
 HDR checks exercise the independent renderer with native scRGB and PQ input, including negative
@@ -8183,9 +8092,9 @@ ReShade reads each one back, and requires the same automatic result as the defau
 auto-select, draw-statistics, size and format values would change that result if they still
 applied; the copy-mode and clear-index values are read-back checks only, because the fixture's
 scene is static, so a copy before its clear would read the same gradient.
-The separately supplied full-pipeline fixtures can select SuperDepth3D or SunshineGame3D.
-Their source is not packaged with the add-on. The [add-on guide](../tools/reshade/README.md)
-describes the explicit effect selector and baseline comparison workflow.
+The native runtime fixtures boot with a separately supplied, frozen `SunshineGame3D.fx`; its
+source is not packaged with the add-on, and the add-on exports nothing from it
+([add-on guide](../tools/reshade/README.md)).
 
 The physical acceptance check is a game on the virtual display: verify depth-buffer selection,
 stereo comfort, frame pacing, overlay use, Alt-Tab, effect reload, resolution change and host

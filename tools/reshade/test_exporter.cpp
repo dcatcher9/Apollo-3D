@@ -614,30 +614,6 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
         "An unobserved native snapshot inherited or invented preservation provenance");
     }
 
-    static void jitter_publication() {
-      struct runtime : runtime_fixture::empty_runtime {
-        std::array<float, 2> offset{};
-        void set_uniform_value_float(api::effect_uniform_variable uniform, const float *values,
-            size_t count, size_t) override {
-          if (uniform.handle == 101 && count == 2) std::copy_n(values, 2, offset.begin());
-          else require(false, "Jitter publication touched an unrelated uniform");
-        }
-      } runtime;
-      runtime_t proof;
-      proof.fx.depth_jitter = {101};
-      frame_decision_t frame;
-      frame.jitter = sunshine_depth_jitter::make({.5f, -.25f, 1920, 1080, true},
-        2048, 1152, {32, 16, 1920, 1080});
-      publisher_t::publish_frame(&runtime, proof, frame);
-      require(runtime.offset == frame.jitter.offset,
-        "Captured-depth jitter was not published");
-      frame.reused_depth = true;
-      publisher_t::publish_frame(&runtime, proof, frame);
-      require(runtime.offset == frame.jitter.offset, "FG reuse did not retain the captured-depth offset");
-      publisher_t::publish_frame(&runtime, proof, {});
-      require(runtime.offset == std::array<float, 2>{}, "Missing/current generic depth retained previous API jitter");
-    }
-
     static void pending_scene_identity() {
       frame_decision_t previous;
       previous.depth_ready = previous.scene.ready = previous.scene.owned = true;
@@ -740,76 +716,6 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       refused([](auto &f, auto &, auto &) { ++f.scene_source[0]; }, 1100, "Another epoch's scene was held");
     }
 
-    static void cached_scene_strength_publication() {
-      struct runtime : runtime_fixture::empty_runtime {
-        float scale{}, blend{};
-        bool ready{};
-        int basis{};
-        std::array<float, 2> projection{}, zero{};
-        void set_uniform_value_bool(api::effect_uniform_variable variable, const bool *values,
-            size_t count, size_t) override {
-          require(variable.handle == 101 && count == 4, "Strength publication touched an unrelated bool uniform");
-          ready = values[0];
-        }
-        void set_uniform_value_int(api::effect_uniform_variable variable, const int *values,
-            size_t count, size_t) override {
-          require(variable.handle == 102 && count == 4, "Strength publication touched an unrelated int uniform");
-          basis = values[0];
-        }
-        void set_uniform_value_float(api::effect_uniform_variable variable, const float *values,
-            size_t count, size_t) override {
-          if (variable.handle == 103 && count == 2) std::copy_n(values, 2, projection.begin());
-          else if (variable.handle == 104 && count == 4) scale = values[0];
-          else if (variable.handle == 105 && count == 2) std::copy_n(values, 2, zero.begin());
-          else if (variable.handle == 106 && count == 4) blend = values[0];
-          else require(false, "Strength publication touched an unrelated float uniform");
-        }
-      } runtime;
-      runtime_t proof;
-      proof.fx.camera_ready = {101}; proof.fx.camera_basis = {102}; proof.fx.camera_projection = {103};
-      proof.fx.camera_scale = {104}; proof.fx.camera_zero = {105}; proof.fx.camera_blend = {106};
-      proof.frame_strength = 50.f;
-      frame_decision_t fresh;
-      fresh.depth_ready = fresh.diagnostics.frame_generation_active = true;
-      fresh.scene.owned = fresh.scene.ready = true;
-      fresh.scene.basis = 1;
-      fresh.scene.scale = 4.f;
-      fresh.scene.projection = {0.f, 1.f};
-      fresh.scene.zero = {.05f, .25f};
-      fresh.scene.blend = 1.f;
-      fresh.scene.admitted_strength = 50.f;
-      publisher_t::publish_frame(&runtime, proof, fresh);
-      require(runtime.ready && runtime.basis == 1 && runtime.scale == 4.f,
-        "Fresh reference publication changed its admitted geometry");
-      for (const float strength : {100.f, 100.f, 25.f, 0.f, 75.f, 0.f, 100.f, 50.f}) {
-        auto reused = proof.frame;
-        reused.reused_depth = true;
-        proof.frame_strength = strength;
-        publisher_t::publish_frame(&runtime, proof, reused);
-        const float effective = runtime.scale * runtime.blend * strength;
-        require(std::isfinite(runtime.scale) && std::abs(effective - 4.f * std::min(strength, 50.f)) < 1e-5f,
-          "Cached FG scene exceeded its admitted strength or delayed an immediate decrease");
-        require(runtime.zero == fresh.scene.zero && runtime.projection == fresh.scene.projection && runtime.scale == fresh.scene.scale,
-          "FG strength cap changed convergence, normalized depth or its diagnostic geometry");
-        require(proof.frame.scene.scale == fresh.scene.scale && proof.frame.scene.admitted_strength == 50.f,
-          "FX strength publication modified its cached scene and compounded repeated attenuation");
-      }
-      // A fresh real-depth decision authorizes the new strength independently;
-      // the previous cached cap cannot remain latched after that decision.
-      auto resumed = proof.frame;
-      resumed.reused_depth = false;
-      resumed.scene.admitted_strength = proof.frame_strength = 100.f;
-      resumed.scene.scale = 3.f;
-      publisher_t::publish_frame(&runtime, proof, resumed);
-      require(runtime.scale == 3.f && runtime.blend == 1.f && proof.frame.scene.admitted_strength == 100.f,
-        "Fresh real-depth scene retained the previous FG strength cap");
-      resumed.scene.admitted_strength = 0.f;
-      resumed.reused_depth = true;
-      publisher_t::publish_frame(&runtime, proof, resumed);
-      require(runtime.scale == 3.f && runtime.blend == 0.f,
-        "Scene admitted at zero strength authorized nonzero FG disparity");
-    }
-
     static void automatic_raw_and_matrix_resolver(bool native_cropped = false) {
       runtime_fixture::empty_runtime runtime;
       publisher_t publisher;
@@ -825,7 +731,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       depth.ready = true;
       if (native_cropped) {
         // DLSS may pad an allocation while tagging a slightly shorter active
-        // extent. Native constants must carry this rect without any FX handle.
+        // extent. Native constants must carry this rect.
         depth.width = depth.active_width = 2228;
         depth.height = 1256;
         depth.active_height = 1253;
@@ -838,27 +744,16 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       const std::array<float, 4> active_rect{0.f, 0.f, 1.f, 1253.f / 1256.f};
       const auto check_native_crop = [&](const scene_parameters_t &scene, std::uint64_t now) {
         if (!native_cropped) return;
-        require(!proof.fx.camera_rect.handle && scene.rect == active_rect,
-          "Native scene ignored the active depth rect because no FX camera-rect uniform exists");
+        require(scene.rect == active_rect, "Native scene ignored the active depth rect");
         frame_decision_t frame;
         frame.depth_ready = depth.ready;
         frame.scene = scene;
         // The empty runtime rejects all uniform calls. Native publication must
-        // retain the normalized crop and current status without FX reflection.
+        // retain the normalized crop and current status.
         publisher_t::publish_frame(&runtime, proof, frame);
         require(proof.frame.prepared && proof.frame.scene.rect == active_rect &&
             sunshine_game3d::query_automatic(&runtime).phase == scene.ui.phase,
           "Native publication dropped the resolved depth crop or calibration status");
-        proof.addon_native = false;
-        const auto unsupported_fx = publisher.resolve_raw_scene(&runtime, proof, depth, sunshine_game3d::depth_output::describe(depth), true, true, now);
-        require(!unsupported_fx.ready && unsupported_fx.ui.phase == sunshine_game3d::automatic_phase::unavailable,
-          "Legacy FX without camera-rect support accepted padded scene depth");
-        proof.fx.camera_rect = {991};
-        const auto supported_fx = publisher.resolve_raw_scene(&runtime, proof, depth, sunshine_game3d::depth_output::describe(depth), true, true, now);
-        require(supported_fx.ready == (scene.basis != 2) && supported_fx.rect == active_rect,
-          "Legacy FX crop support changed affine readiness or admitted unsupported linear depth");
-        proof.fx.camera_rect = {};
-        proof.addon_native = true;
       };
       {
         const auto pending = publisher.resolve_raw_scene(&runtime, proof, depth, sunshine_game3d::depth_output::describe(depth), true, true, 1000);
@@ -992,15 +887,14 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
           matrix.ui.scale.mean_square_inverse > 0.,
         "Camera resolver did not publish captured projection statistics in zero-plane units");
       check_native_crop(matrix, 2751);
-      // Explicit linear distance routes independently of camera evidence. Old
-      // FX has no reciprocal basis and cannot silently treat it as raw depth.
+      // Explicit linear distance routes independently of camera evidence.
       depth.projection.supplied = false;
       depth.projection.encoding = sunshine_scene_depth::depth_encoding::linear_distance;
       depth.projection.A = depth.projection.B = NAN;
       auto linear = publisher.resolve_raw_scene(&runtime, proof, depth, sunshine_game3d::depth_output::describe(depth), true, true, 3000);
       require(!linear.ready && linear.basis == 2 &&
           linear.ui.scale.basis == sunshine_game3d::automatic_scale_basis::linear_distance &&
-          linear.ui.phase == (native_cropped ? sunshine_game3d::automatic_phase::calibrating : sunshine_game3d::automatic_phase::suspended),
+          linear.ui.phase == sunshine_game3d::automatic_phase::calibrating,
         "Linear input required a fake camera or entered the affine raw fallback");
       if (native_cropped) {
         const auto logical_domain = proof.projection_domain;
@@ -1385,36 +1279,6 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       std::puts("PASS: window owner on native windows (child, two children, resize, hide, re-parent, popup) and exporter ambiguity");
     }
 
-    static void seed_fx_proof(runtime_t &proof) {
-      proof.fx.texture = {101};
-      proof.fx.effect_name = "RetiredReference.fx";
-      proof.fx.game_technique = {102};
-      proof.fx.native_technique = {103};
-      std::uint64_t handle = 104;
-      for (auto *uniform : {&proof.fx.depth_ready, &proof.fx.calibrated, &proof.fx.raw_anchor,
-          &proof.fx.raw_gain, &proof.fx.depth_rect, &proof.fx.direction, &proof.fx.camera_ready,
-          &proof.fx.camera_basis, &proof.fx.camera_projection, &proof.fx.camera_scale,
-          &proof.fx.camera_zero, &proof.fx.camera_blend, &proof.fx.camera_rect,
-          &proof.fx.camera_raw_range, &proof.fx.depth_jitter, &proof.fx.effect_strength})
-        uniform->handle = handle++;
-      proof.fx.native_uniforms_checked = proof.proof_checked = true;
-    }
-
-    static void require_fx_proof_cleared(const publisher_t &publisher, api::effect_runtime *runtime) {
-      const auto found = publisher.runtimes_.find(runtime);
-      require(found != publisher.runtimes_.end(), "Effect reload erased the live runtime owner");
-      const auto &proof = found->second;
-      require(!proof.fx.texture.handle && !proof.fx.game_technique.handle && !proof.fx.native_technique.handle &&
-          !proof.fx.native_uniforms_checked && !proof.proof_checked,
-        "Effect reload retained cached FX texture, technique or proof");
-      for (const auto uniform : {proof.fx.depth_ready, proof.fx.calibrated, proof.fx.raw_anchor,
-          proof.fx.raw_gain, proof.fx.depth_rect, proof.fx.direction, proof.fx.camera_ready,
-          proof.fx.camera_basis, proof.fx.camera_projection, proof.fx.camera_scale,
-          proof.fx.camera_zero, proof.fx.camera_blend, proof.fx.camera_rect,
-          proof.fx.camera_raw_range, proof.fx.depth_jitter, proof.fx.effect_strength})
-        require(!uniform.handle, "Effect reload retained a stale FX uniform handle");
-    }
-
     static void activate(publisher_t &publisher, bool rendered = true) {
       auto metadata = publisher.ring_.identity_;
       metadata.window = reinterpret_cast<std::uint64_t>(GetForegroundWindow());
@@ -1459,7 +1323,6 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       publisher_t publisher;
       require(publisher.init(), "mapping creation failed");
       activate(publisher);
-      seed_fx_proof(publisher.runtimes_.at(owner()));
       std::promise<void> entered;
       auto started = entered.get_future();
       std::unique_lock<std::mutex> lock(publisher.mutex_);
@@ -1471,7 +1334,6 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       require(invalidation.wait_for(std::chrono::milliseconds(25)) == std::future_status::timeout, "contended reload silently dropped its invalidation");
       lock.unlock();
       invalidation.get();
-      require_fx_proof_cleared(publisher, owner());
       require(!publisher.ring_.published_runtime_, "reload retained published runtime proof");
       require(!publisher.ring_.shared_->metadata.generation, "reload retained published metadata");
     }
@@ -1480,7 +1342,6 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       publisher_t publisher;
       require(publisher.init(), "mapping creation failed");
       activate(publisher);
-      seed_fx_proof(publisher.runtimes_.at(owner()));
       const auto before_open = publisher.ring_.shared_->metadata_sequence;
       publisher.set_overlay_open(owner(), true);
       require(publisher.overlay_open(owner()) && publisher.ring_.shared_->metadata.generation == 1, "overlay opening discarded live stereo proof");
@@ -1491,7 +1352,6 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       publisher.set_overlay_open(owner(), true);
       publisher.invalidate(owner(), false);
       require(publisher.overlay_open(owner()), "shader reload forgot that the overlay is open");
-      require_fx_proof_cleared(publisher, owner());
       require(!publisher.ring_.shared_->metadata.generation, "shader reload retained stale stereo proof while overlay was open");
       publisher.set_overlay_open(owner(), false);
       require(!publisher.overlay_open(owner()) && !publisher.ring_.shared_->metadata.generation, "overlay close must permit a fresh technique rather than restore stale metadata");
@@ -1794,13 +1654,11 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       auto &proof = publisher.runtimes_.at(&runtime);
       proof.renderer = std::make_unique<sunshine_game3d::renderer>();
       const auto *renderer = proof.renderer.get();
-      seed_fx_proof(proof);
       // Exercise the real disabled Present branch. Controls are uninitialized
       // in this isolated fixture, so it must not touch a device or GPU queue.
       publisher.render_present(&swapchain);
       require(!publisher.native_enabled(&runtime), "Disabled native path was reported enabled");
       publisher.invalidate(&runtime, false);
-      require_fx_proof_cleared(publisher, &runtime);
       auto &reloaded = publisher.runtimes_.at(&runtime);
       require(reloaded.swapchain == runtime.get_native() && reloaded.renderer.get() == renderer,
         "Disabled reload lost the swapchain mapping or native renderer needed for re-enable");
@@ -1822,7 +1680,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
         "Runtime destruction retained a disabled/re-enabled native owner");
     }
 
-    static void native_reload_clears_fx_handles() {
+    static void native_effects_reload_keeps_owner() {
       using phase = sunshine_game3d::automatic_phase;
       publisher_t publisher;
       require(publisher.init(), "mapping creation failed");
@@ -1833,23 +1691,21 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       proof.renderer = std::make_unique<sunshine_game3d::renderer>();
       const auto *renderer = proof.renderer.get();
       proof.native_output = {777};
-      proof.fx.native_depth_prepared = proof.frame.prepared = proof.frame.depth_ready = true;
+      proof.frame.prepared = proof.frame.depth_ready = true;
       proof.frame.scene.ready = true;
       proof.frame.scene.scale = 4.f;
       proof.frame.scene_source = {1, 2, 3, 4};
       proof.raw_supported = true;
       proof.raw_basis_epoch = 77;
-      seed_fx_proof(proof);
       publish_automatic_ui(owner(), {phase::ready, true});
       publisher.set_overlay_open(owner(), true);
       const auto before_reload = publisher.ring_.shared_->metadata_sequence;
       publisher.invalidate(owner(), false);
-      require_fx_proof_cleared(publisher, owner());
       const auto &reloaded = publisher.runtimes_.at(owner());
       require(reloaded.addon_native && reloaded.swapchain == 99 && reloaded.renderer.get() == renderer &&
           reloaded.native_output.handle == 777 && reloaded.rendered_since_present,
         "Native effects reload invalidated its runtime, renderer or published output");
-      require(reloaded.fx.native_depth_prepared && reloaded.frame.prepared && reloaded.frame.depth_ready &&
+      require(reloaded.frame.prepared && reloaded.frame.depth_ready &&
           reloaded.frame.scene.ready && reloaded.frame.scene.scale == 4.f &&
           reloaded.frame.scene_source == std::array<std::uint64_t, 4>{1, 2, 3, 4} &&
           reloaded.raw_supported && reloaded.raw_basis_epoch == 77,
@@ -1960,24 +1816,15 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
     }
 
     static void color_contract() {
-      for (std::uint32_t input = 0; input <= 5; ++input) {
-        for (const char *output : {"srgb", "scrgb", "pq", ""}) {
-          export_color_t color;
-          const bool expected = (input == 1 && std::strcmp(output, "srgb") == 0) ||
-                                ((input == 2 || input == 3) && std::strcmp(output, "scrgb") == 0) ||
-                                (input == 3 && std::strcmp(output, "pq") == 0);
-          require(decode_export_color(output, input, color) == expected, "export transfer declaration accepted a contradictory or unknown color space");
-        }
-      }
       publisher_t publisher;
       require(publisher.init(), "mapping creation failed");
       activate(publisher);
       runtime_t proof;
-      require(decode_export_color("scrgb", 3, proof.color), "PQ export contract rejected");
+      proof.color = {api::color_space::hdr10_pq, wire::transfer::scrgb};
       require(publisher.source_color_matches(owner(), proof, api::color_space::hdr10_pq), "matching PQ source rejected");
       require(!publisher.source_color_matches(owner(), proof, api::color_space::scrgb), "stale PQ decoder accepted a scRGB source");
       require(!publisher.ring_.shared_->metadata.generation, "changed game transfer retained stale HDR publication");
-      require(decode_export_color("srgb", 1, proof.color), "SDR source contract rejected");
+      proof.color = {api::color_space::srgb, wire::transfer::srgb};
       require(publisher.source_color_matches(owner(), proof, api::color_space::srgb), "SDR game requires an SDR desktop");
 
       wire::metadata_t metadata;
@@ -1986,12 +1833,12 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       source.color = proof.color;
       export_ring::set_source(metadata, source);
       require(metadata.color_transfer == wire::transfer::srgb, "floating point format incorrectly implied HDR");
-      require(decode_export_color("scrgb", 2, source.color), "native scRGB contract rejected");
+      source.color = {api::color_space::scrgb, wire::transfer::scrgb};
       export_ring::set_source(metadata, source);
       require(metadata.color_transfer == wire::transfer::scrgb && metadata.dxgi_format == 10, "explicit scRGB metadata lost its transfer");
       require(metadata.protocol_version == wire::version, "an FP16 export left protocol 4");
       // The 10-bit PQ export (docs/reshade-sbs.md, PQ wire transfer): the same protocol, R10G10B10A2 only.
-      require(decode_export_color("pq", 3, source.color), "PQ export declaration rejected");
+      source.color = {api::color_space::hdr10_pq, wire::transfer::pq};
       source.format = DXGI_FORMAT_R10G10B10A2_UNORM;
       export_ring::set_source(metadata, source);
       require(metadata.color_transfer == wire::transfer::pq && metadata.dxgi_format == 24 &&
@@ -2029,19 +1876,16 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       // an HDR10 render made with no consumer (FP16) and its export, and
       // takes PQ, gets the next Present's PQ render rather than an FP16 ring
       // that the next Present would replace; the reverse holds too.
-      require(!transfer_current(true, false, wire::transfer::scrgb, exports_pq(cs::hdr10_pq, wire::consumer_accepts_pq)),
+      require(!transfer_current(false, exports_pq(cs::hdr10_pq, wire::consumer_accepts_pq)),
         "an FP16 render made before a PQ consumer attached was exported to it");
-      require(!transfer_current(true, true, wire::transfer::pq, exports_pq(cs::hdr10_pq, 0)),
+      require(!transfer_current(true, exports_pq(cs::hdr10_pq, 0)),
         "a PQ render was exported to a consumer without PQ");
-      require(transfer_current(true, true, wire::transfer::pq, true) && transfer_current(true, false, wire::transfer::scrgb, false) &&
-          transfer_current(true, false, wire::transfer::srgb, exports_pq(cs::srgb, both)),
-        "a render was refused for the consumer it was made for");
       // A requested PQ render that fell back to FP16 (no PQ pack, or its
-      // texture failed) still exports FP16 to that consumer.
-      require(transfer_current(true, true, wire::transfer::scrgb, true), "a PQ request's FP16 fallback was refused");
-      // A reference export cannot render again: only PQ output needs PQ.
-      require(!transfer_current(false, false, wire::transfer::pq, false) && transfer_current(false, false, wire::transfer::scrgb, true) &&
-          transfer_current(false, false, wire::transfer::pq, true), "the reference export's PQ check changed");
+      // texture failed) still exports FP16 to that consumer: only the request
+      // is compared, not the transfer the render ended with.
+      require(transfer_current(true, true) && transfer_current(false, false) &&
+          transfer_current(false, exports_pq(cs::srgb, both)),
+        "a render was refused for the consumer it was made for");
     }
 
     // Each export pause is logged with its class (export_pause_class): the
@@ -2740,7 +2584,6 @@ int main(int argc, char **argv) {
       publisher_tests::retained_depth_decision();
       publisher_tests::pending_scene_identity();
       publisher_tests::camera_missing_holds_projection_scene();
-      publisher_tests::cached_scene_strength_publication();
       publisher_tests::automatic_raw_and_matrix_resolver();
       publisher_tests::automatic_raw_and_matrix_resolver(true);
       std::puts("PASS: current scene strength and cached FG publication (CPU only)");
@@ -2780,8 +2623,6 @@ int main(int argc, char **argv) {
     publisher_tests::retained_depth_decision();
     publisher_tests::frame_record_mirrors_depth_decisions();
     publisher_tests::automatic_ui_lifetime();
-    publisher_tests::jitter_publication();
-    publisher_tests::cached_scene_strength_publication();
     publisher_tests::pending_scene_identity();
     publisher_tests::camera_missing_holds_projection_scene();
     publisher_tests::automatic_raw_and_matrix_resolver();
@@ -2794,7 +2635,7 @@ int main(int argc, char **argv) {
     publisher_tests::contended_reload();
     publisher_tests::overlay_reload();
     publisher_tests::disabled_native_reload_lifetime();
-    publisher_tests::native_reload_clears_fx_handles();
+    publisher_tests::native_effects_reload_keeps_owner();
     publisher_tests::runtime_reset_keeps_toggle_rings();
     publisher_tests::timing_window_length();
     publisher_tests::present_gap_measurement();

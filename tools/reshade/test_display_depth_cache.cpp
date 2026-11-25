@@ -41,9 +41,7 @@ namespace {
     value.command_queue = 113; value.ready = true; value.frame_generation_active = true;
     value.detected_orientation = sunshine_depth::depth_orientation::reversed;
     value.orientation = sunshine_depth::depth_orientation::normal;
-    value.orientation_agreeing_frames = 127; value.calibrated = true;
-    value.calibration_samples = 131; value.calibration_frame = 137;
-    value.raw_anchor = 0.25f; value.raw_gain = 0.75f;
+    value.orientation_agreeing_frames = 127;
     return value;
   }
   display_cache_context context() { return {3840, 2160, true, 113, 53, 59, 1016}; }
@@ -93,9 +91,7 @@ namespace {
       a.command_queue == b.command_queue && a.ready == b.ready && a.frame_generation_active == b.frame_generation_active,
       "hold changed private copy identity, crop or source policy");
     require(a.detected_orientation == b.detected_orientation && a.orientation == b.orientation &&
-      a.orientation_agreeing_frames == b.orientation_agreeing_frames && a.calibrated == b.calibrated &&
-      a.calibration_samples == b.calibration_samples && a.calibration_frame == b.calibration_frame &&
-      a.raw_anchor == b.raw_anchor && a.raw_gain == b.raw_gain, "hold changed calibration or gain");
+      a.orientation_agreeing_frames == b.orientation_agreeing_frames, "hold changed the depth orientation");
   }
   void cleared(const display_depth_cache &cache, const frame_depth &out) {
     require(!cache.depth().ready && !cache.reference().capture_id && !cache.reference().metadata.tick,

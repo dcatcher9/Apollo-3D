@@ -626,7 +626,7 @@ namespace {
     check(label() == "Depth preview: stereo depth", "Stereo depth was labeled as the game image");
     for (auto phase : {automatic_phase::unavailable, automatic_phase::waiting_for_depth,
         automatic_phase::calibrating, automatic_phase::suspended, automatic_phase::unsupported_resolution,
-        automatic_phase::renderer_unavailable, automatic_phase::renderer_preparing}) {
+        automatic_phase::renderer_unavailable, automatic_phase::renderer_preparing, automatic_phase::unsupported_api}) {
       status.phase = phase;
       for (int view = 0; view < 3; ++view) {
         settings.depth_view = view;
@@ -642,6 +642,16 @@ namespace {
       "The unsupported-resolution warning did not name the size, what is off and the fix");
     check(std::string_view(unsupported_resolution_ui_text) == "inactive above 3840 x 3840",
       "UI protection above 3840 x 3840 did not read inactive");
+    // Any device API but Direct3D 11 and 12 stays 2D; the panel names the cause.
+    status.phase = automatic_phase::unsupported_api;
+    settings.depth_view = 0;
+    check(label() == "2D: the game does not use Direct3D 11 or 12", "An unsupported device API was not named in the status");
+    const std::string_view api_warning = unsupported_api_warning;
+    check(api_warning.find("Direct3D 11") != std::string_view::npos && api_warning.find("Direct3D 12") != std::string_view::npos &&
+        api_warning.find("UI protection") != std::string_view::npos,
+      "The unsupported-API warning did not name the supported APIs and what is off");
+    check(std::string_view(unsupported_api_ui_text) == "inactive without Direct3D 11 or 12",
+      "UI protection on an unsupported device API did not read inactive");
   }
 
   void automatic_scale_tracks_applied_basis() {

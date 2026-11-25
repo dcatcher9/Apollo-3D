@@ -200,37 +200,11 @@ namespace sunshine_streamline {
       auto camera_pin = now >= camera_report_at ? read_metadata() : metadata_owner::read_pin{};
       if (camera_pin) {
         unsigned cameras = 0, valid_recent = 0;
-        camera_data camera_sample;
-        camera_key camera_sample_key;
-        camera_validation camera_sample_validation;
-        std::uint64_t camera_sample_tick{};
-        struct depth_tag_sample {
-          depth_tag value;
-          std::uint64_t tick{};
-          origin scope{};
-          bool present{}, supported{};
-        };
-        std::array<depth_tag_sample, 3> depth_samples{};
         for (const auto &record : camera_pin->records) if (record.used && record.has_camera) {
           ++cameras;
           const auto checked = validate(record.camera);
           valid_recent += sunshine_freshness::fresh_le(record.camera_tick, now, sunshine_freshness::camera_age_ms) &&
             record.decoded == decode_status::ok && checked.valid();
-          if (record.decoded == decode_status::ok && record.camera_tick >= camera_sample_tick) {
-            camera_sample = record.camera;
-            camera_sample_key = record.key;
-            camera_sample_validation = checked;
-            camera_sample_tick = record.camera_tick;
-            depth_samples = {};
-            for (const auto *group : {&record.active_tags, &record.global_tags, &record.local_tags}) {
-              for (const auto &tag : *group) {
-                if (!tag.present || !buffers::is_depth(tag.value.type)) continue;
-                auto &sample = depth_samples[slot_of(tag.value.type)];
-                if (!sample.present || tag.tick > sample.tick)
-                  sample = {tag.value, tag.tick, tag.source, tag.present, tag.supported};
-              }
-            }
-          }
         }
         const auto calls = constant_calls.load(std::memory_order_relaxed);
         camera_pin.reset();
@@ -244,39 +218,6 @@ namespace sunshine_streamline {
             static_cast<unsigned long long>(calls), cameras, valid_recent,
             static_cast<unsigned long long>(vram_warnings.load(std::memory_order_relaxed)));
           message(availability);
-          if (camera_sample_tick) {
-            char detail[1800]{};
-            std::snprintf(detail, sizeof(detail),
-              "Sunshine Streamline camera sample: viewport=%u frame=%llu explicit_frame=%u age_ms=%llu projection=%s A=%.9g B=%.9g matrix_near=%.9g matrix_far=%.9g infinite_far=%u checked_fov_rad=%.9g checked_aspect=%.9g declared_near=%.9g declared_far=%.9g declared_fov_rad=%.9g declared_aspect=%.9g inverted=%u orthographic=%u reset=%u; checked fields may be incomplete on failure; observation only, NGX_frame_match=unproven",
-              camera_sample_key.viewport, static_cast<unsigned long long>(camera_sample_key.frame_key),
-              camera_sample_key.explicit_frame ? 1u : 0u,
-              static_cast<unsigned long long>(camera_sample_tick <= now ? now - camera_sample_tick : 0),
-              name(camera_sample_validation.status), camera_sample_validation.depth_offset,
-              camera_sample_validation.depth_scale, camera_sample_validation.near_from_matrix,
-              camera_sample_validation.far_from_matrix, camera_sample_validation.infinite_far ? 1u : 0u,
-              camera_sample_validation.fov_from_matrix, camera_sample_validation.aspect_from_matrix,
-              camera_sample.near_plane, camera_sample.far_plane, camera_sample.fov, camera_sample.aspect,
-              unsigned(camera_sample.depth_inverted), unsigned(camera_sample.orthographic),
-              unsigned(camera_sample.reset));
-            message(detail);
-            char tag_details[3][480]{};
-            for (unsigned i = 0; i < depth_samples.size(); ++i) {
-              const auto &sample = depth_samples[i];
-              const auto &tag = sample.value;
-              std::snprintf(tag_details[i], sizeof(tag_details[i]),
-                "type=%u present=%u supported=%u scope=%u native=0x%llx declared_size=%ux%u area_xywh=%u,%u,%u,%u lifetime=%u age_ms=%llu tag_viewport=%u frame=%llu explicit_frame=%u",
-                observed_tag_types[i], sample.present ? 1u : 0u,
-                sample.supported ? 1u : 0u, static_cast<unsigned>(sample.scope),
-                static_cast<unsigned long long>(tag.native_resource), tag.resource_width, tag.resource_height,
-                tag.area.left, tag.area.top, tag.area.width, tag.area.height, tag.lifecycle,
-                static_cast<unsigned long long>(sample.present && sample.tick <= now ? now - sample.tick : UINT64_MAX),
-                tag.viewport, static_cast<unsigned long long>(tag.frame_key), tag.explicit_frame ? 1u : 0u);
-            }
-            std::snprintf(detail, sizeof(detail),
-              "Sunshine Streamline depth tag sample: camera_viewport=%u depth={%s} highres_depth={%s} linear_depth={%s}; observation only, NGX_resource_overlap=unproven",
-              camera_sample_key.viewport, tag_details[0], tag_details[1], tag_details[2]);
-            message(detail);
-          }
           camera_report_count = calls;
         }
       }

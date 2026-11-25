@@ -11,7 +11,7 @@
 # anything else as a new entry.
 #
 # Scanned: every .cpp, .h and .inl under SOURCE_DIR except the fixtures
-# (test_*), experiments/ and the replay tools, whose clocks are their own; and
+# (test_*) and the replay tools, whose clocks are their own; and
 # the test add-on's own sources (TEST_ADDON_SOURCES, CMakeLists.txt's
 # sunshine_test_addon_sources), which run in the game process as add-on code
 # although their names start with test_. Comments, string literals and
@@ -237,7 +237,7 @@ set(replay_tools replay_game3d_dump.cpp preview_game3d_dump.cpp ui_detection_rep
 set(scanned "")
 foreach(source IN LISTS sources)
   get_filename_component(name "${source}" NAME)
-  if(source MATCHES "^experiments/" OR source MATCHES "(^|/)(cmake-build-[^/]*|CMakeFiles)/"
+  if(source MATCHES "(^|/)(cmake-build-[^/]*|CMakeFiles)/"
       OR (name MATCHES "^test_" AND NOT source IN_LIST test_addon_sources) OR source IN_LIST replay_tools)
     continue()
   endif()

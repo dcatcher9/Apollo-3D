@@ -24,11 +24,7 @@ namespace sunshine_game3d::depth_input {
   // Borrowed handles are valid only inside the depth owner's current read lease.
   // The projection and provenance belong to these exact captured pixels. This
   // does not perform a second camera query or infer a source from a loaded SDK.
-  // The ordinary Game 3D path is passive; only the independent reference effect
-  // explicitly requests the legacy raw-depth calibration.
-  bool query(reshade::api::effect_runtime *runtime, sunshine_depth::frame_depth &out,
-    sunshine_depth::depth_orientation orientation = sunshine_depth::depth_orientation::automatic,
-    bool request_calibration = false);
+  bool query(reshade::api::effect_runtime *runtime, sunshine_depth::frame_depth &out);
 
   // Provider ownership and readiness are deliberately distinct. A selected API
   // source with pending pixels must not silently enter Generic calibration.
@@ -41,5 +37,4 @@ namespace sunshine_game3d::depth_input {
   // Focus/technique/runtime invalidation ends reuse eligibility, while keeping
   // the existing capture-owner lifetime and numerical-history rules unchanged.
   void invalidate_reuse(reshade::api::effect_runtime *runtime);
-  void set_ready(reshade::api::effect_runtime *runtime, bool ready);
 }

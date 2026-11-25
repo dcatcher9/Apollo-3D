@@ -83,7 +83,6 @@ SUNSHINE_DEPTH_ADDON_INTERNAL void observe_candidate(generic_depth_data &data, c
 	if (previous != data.observed_regions.end() && !(previous->second == region))
 	{
 		data.selection.erase(info.identity); // Content crop changes do not recreate the tracked resource.
-		data.native_calibrations.erase(info.identity);
 	}
 	data.observed_regions[info.identity] = region;
 	data.selection.observe({ info.identity, info.desc.texture.width, info.desc.texture.height,
@@ -98,7 +97,6 @@ SUNSHINE_DEPTH_ADDON_INTERNAL void prune_depth_selection(generic_depth_data &dat
 		{
 			data.selection.erase(previous_id);
 			data.observed_regions.erase(previous_id);
-			data.native_calibrations.erase(previous_id);
 		}
 	data.observed_ids = eligible_ids;
 }
@@ -158,7 +156,7 @@ SUNSHINE_DEPTH_ADDON_INTERNAL sunshine_depth::selection_result choose_generic_so
 // locals under their names, inputs first; it assigns every output (selected
 // .. any_warming) in the order begin_depth_frame declared them.
 static void select_depth_candidate(effect_runtime *runtime, device *const device,
-	generic_depth_device_data *const device_data, generic_depth_data &data, const bool automatic,
+	generic_depth_device_data *const device_data, generic_depth_data &data,
 	const std::optional<sunshine_depth::sample_result> &completed_sample,
 	const sunshine_depth::depth_quality &completed_quality, const bool completed_other_raw_sample,
 	resource &selected_depth_stencil, const depth_selection_resource *&selected_depth_stencil_info,
@@ -173,11 +171,6 @@ static void select_depth_candidate(effect_runtime *runtime, device *const device
 
 	std::shared_lock<std::shared_mutex> lock(s_mutex);
 	native_present_index = device_data->native_present_index;
-	if (s_frame_activity_trace)
-	{
-		data.trace_snapshot_present = native_present_index;
-		data.trace_snapshot_frame = device_data->frame_index;
-	}
 	current_depth_stencil_resources = snapshot_depth_selection(device_data->depth_stencil_resources);
 	// Unlock before calling into device below, since device may hold a lock itself and that then can deadlock another thread that calls into 'on_destroy_resource' from the device holding that lock
 	lock.unlock();
@@ -214,17 +207,17 @@ static void select_depth_candidate(effect_runtime *runtime, device *const device
 
 		// Inactivity affects current preference, not the lifetime of content
 		// evidence or completed numeric observations for a retained allocation.
-		if (automatic && info.first_used_in_frame != std::numeric_limits<uint64_t>::max())
+		if (info.first_used_in_frame != std::numeric_limits<uint64_t>::max())
 		{
 			eligible_ids.push_back(info.identity);
 			observe_candidate(data, info, frame_width, frame_height);
 		}
-		if (!info.last_frame_stats.total.has_work() || (!automatic && info.last_frame_stats.total.vertices <= 3 && info.last_frame_stats.total.drawcalls_indirect == 0 && info.last_frame_stats.total.scene_writes == 0))
+		if (!info.last_frame_stats.total.has_work())
 			continue; // Skip unused
 
 		if (info.last_used_in_frame == std::numeric_limits<uint64_t>::max() ||
 			info.first_used_in_frame == std::numeric_limits<uint64_t>::max() ||
-			info.last_used_in_frame + (automatic ? 3 : 0) < device_data->frame_index || device_data->frame_index <= (info.first_used_in_frame + 1))
+			info.last_used_in_frame + 3 < device_data->frame_index || device_data->frame_index <= (info.first_used_in_frame + 1))
 			continue; // Content policy preserves its short activity grace; fresh resources still warm up.
 
 		if (info.last_used_in_frame < device_data->frame_index)
@@ -236,14 +229,6 @@ static void select_depth_candidate(effect_runtime *runtime, device *const device
 			selected_depth_stencil = depth_stencil;
 			selected_depth_stencil_info = &info;
 		}
-	}
-	if (!automatic && (data.native_depth_requested || data.raw_scene_requested) && selected_depth_stencil_info != nullptr)
-	{
-		// Other APIs keep the original statistics choice, but its native
-		// calibration still needs current capture-region metadata. Observe only
-		// that choice; never admit a challenger.
-		eligible_ids.push_back(selected_depth_stencil_info->identity);
-		observe_candidate(data, *selected_depth_stencil_info, frame_width, frame_height);
 	}
 	// Every eligible ID came from this live snapshot. This one pass therefore
 	// removes destroyed and filtered candidates before consuming readbacks or
@@ -257,42 +242,21 @@ static void select_depth_candidate(effect_runtime *runtime, device *const device
 			completed_sample->viewport_x == region->second.x && completed_sample->viewport_y == region->second.y &&
 			completed_sample->viewport_width == region->second.width && completed_sample->viewport_height == region->second.height;
 		if (completed_sample->valid && region_matches)
-		{
 			data.selection.sample(completed_sample->token, completed_quality, data.sampled_frame);
-			// Only the independent reference renderer consumes this calibration.
-			if (data.native_depth_requested)
-			{
-				if (data.native_calibrations.find(completed_sample->token) == data.native_calibrations.end() && data.native_calibrations.size() >= 64)
-				{
-					const auto oldest = std::min_element(data.native_calibrations.begin(), data.native_calibrations.end(),
-						[](const auto &a, const auto &b) { return a.second.last_sample_frame() < b.second.last_sample_frame(); });
-					data.native_calibrations.erase(oldest);
-				}
-				const sunshine_depth::depth_calibration_key key { completed_sample->token, region->second.layout_epoch,
-					completed_sample->source_width, completed_sample->source_height,
-					region->second.x, region->second.y, region->second.width, region->second.height };
-				data.native_calibrations[completed_sample->token].sample(key, data.sampled_frame,
-					completed_sample->values.data(), completed_sample->values.size(), completed_quality.kind == sunshine_depth::content_kind::useful);
-			}
-		}
 	}
 
 	const char *selection_reason = "draw statistics";
-	sunshine_depth::selection_result choice;
-	if (automatic)
+	const sunshine_depth::selection_result choice = choose_generic_source(data.selection, *device_data, current_depth_stencil_resources, current_id,
+		device_data->native_depth_present_index == native_present_index);
+	for (const auto &[candidate, info] : current_depth_stencil_resources)
 	{
-		choice = choose_generic_source(data.selection, *device_data, current_depth_stencil_resources, current_id,
-			device_data->native_depth_present_index == native_present_index);
-		for (const auto &[candidate, info] : current_depth_stencil_resources)
+		if (info.identity == choice.id || (!choice.id && info.identity == current_id &&
+			std::find(eligible_ids.begin(), eligible_ids.end(), current_id) != eligible_ids.end()))
 		{
-			if (info.identity == choice.id || (!choice.id && info.identity == current_id &&
-				std::find(eligible_ids.begin(), eligible_ids.end(), current_id) != eligible_ids.end()))
-			{
-				selected_depth_stencil = candidate;
-				selected_depth_stencil_info = &info;
-				selection_reason = choice.id ? choice.reason : "retained capture budget; waiting for current depth";
-				break;
-			}
+			selected_depth_stencil = candidate;
+			selected_depth_stencil_info = &info;
+			selection_reason = choice.id ? choice.reason : "retained capture budget; waiting for current depth";
+			break;
 		}
 	}
 
@@ -302,15 +266,15 @@ static void select_depth_candidate(effect_runtime *runtime, device *const device
 		// existing backup while fresh paired wins finish, rather than restarting
 		// after a full round through unrelated sources. Do not reset the original
 		// probe deadline: an incomplete comparison must still yield to others.
-		// Automatic raw sampling independently refreshes the incumbent while
-		// this probe holds the challenger. Other modes retain their old cadence.
+		// Raw sampling independently refreshes the incumbent while this probe
+		// holds the challenger.
 		// A won comparison keeps the visit until the takeover, which adopts its
 		// backup with the takeover Present's own copy (select_captured_depth);
 		// prepare_probe_target then releases the probe, as for any selected
 		// source.
-		const bool comparison_pending = automatic && data.raw_scene_requested &&
+		const bool comparison_pending = data.raw_scene_requested &&
 			choice.id == current_id && data.selection.pending_challenger_id() == data.challenger_id;
-		const bool won = automatic && data.challenger_id != 0 && data.selection.won_challenger_id() == data.challenger_id;
+		const bool won = data.challenger_id != 0 && data.selection.won_challenger_id() == data.challenger_id;
 		const bool own = completed_sample->token == data.challenger_id;
 		if (own) ++data.challenger_samples;
 		if (!sunshine_depth_probe::keep_probe_after_sample(own, data.challenger_samples, comparison_pending, won,
@@ -322,7 +286,7 @@ static void select_depth_candidate(effect_runtime *runtime, device *const device
 
 	data.selection_reason = selection_reason;
 
-	if (!automatic || (data.probe_target_id != 0 &&
-		std::find(eligible_ids.begin(), eligible_ids.end(), data.probe_target_id) == eligible_ids.end()))
+	if (data.probe_target_id != 0 &&
+		std::find(eligible_ids.begin(), eligible_ids.end(), data.probe_target_id) == eligible_ids.end())
 		release_challenger(runtime, data);
 }

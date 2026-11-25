@@ -346,7 +346,7 @@ LINE_KIND = re.compile(r"'[^']*'|\"[^\"]*\"|\b(?:0x)?[0-9A-Fa-f]*\d[0-9A-Fa-f]*\
 # without a render or changing its colour space, and a swapchain or frame not yet prepared. Since 10-23 each line
 # names its class; this set classes the pauses of older lines.
 ROUTINE_INACTIVE = frozenset((
-    'no_consumer', 'ring_replaced', 'consumer_transfer_changed', 'consumer_without_pq', 'not_foreground',
+    'no_consumer', 'ring_replaced', 'consumer_transfer_changed', 'not_foreground',
     'runtime_reset', 'runtime_gone', 'present_without_render', 'color_space_changed', 'swapchain_unknown',
     'frame_not_prepared'))
 # Routine pauses more often than once per 10 s for a minute (this many within ROUTINE_STORM_S) are a storm: the host

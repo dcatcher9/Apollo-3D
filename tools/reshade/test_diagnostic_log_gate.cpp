@@ -41,36 +41,7 @@ int main() {
     require(!ready.due(10002, false), "Unchanged state was repeated");
     require(ready.due(10003, true, true), "Binding failure with a source change was delayed");
     require(ready.due(1, true), "Clock rollback suppressed future logs");
-
-    sunshine_diagnostics::family_gap_observer family;
-    for (std::uint64_t present = 1; present <= 16; ++present) {
-      const bool frame_ready = present % 2 != 0;
-      const bool recurring = family.observe(present, 7, true, frame_ready);
-      require(recurring == (present == 16), "Alternating member gaps did not trigger at16 native presents");
-      const auto count = family.observations(), misses = family.misses();
-      for (unsigned repeat = 0; repeat < 4; ++repeat)
-        family.observe(present, 7, true, !frame_ready);
-      require(family.observations() == count && family.misses() == misses,
-        "Repeated effect/accessor calls changed present-based gap evidence");
-    }
-    require(family.misses() == 8, "Alternating selected/zero source gaps were not retained by family");
-    for (std::uint64_t present = 17; present <= 32; ++present) family.observe(present, 7, true, true);
-    require(!family.recurring() && family.misses() == 0 && family.observations() == 16,
-      "Recovered ready frames did not age gaps out of the rolling window");
-    require(!family.observe(33, 8, true, false) && family.observations() == 1 && family.misses() == 1,
-      "A new family inherited old gap evidence");
-    family.observe(34, 8, false, false);
-    require(family.observations() == 0 && family.misses() == 0, "Ineligible startup retained a trigger window");
-    family.observe(34, 8, true, false);
-    require(family.observations() == 0, "A repeated ineligible present was later counted twice");
-    for (std::uint64_t present = 35; present < 51; ++present) family.observe(present, 8, true, false);
-    require(family.recurring() && family.misses() == 16, "Persistent current-unavailable frames were not diagnosed");
-    family.observe(1, 8, true, true);
-    require(!family.recurring() && family.observations() == 1 && family.misses() == 0,
-      "Present rollback retained an old device window");
-    family.observe(2, 0, true, false);
-    require(!family.recurring() && family.observations() == 0, "Missing family identity accumulated trigger evidence");
-    std::cout << "Startup log bound, recovery, adaptive snapshots, immediate events and family gap diagnostics passed\n";
+    std::cout << "Startup log bound, recovery, adaptive snapshots, immediate events passed\n";
     return 0;
   } catch (const std::exception &error) {
     std::cerr << error.what() << '\n';

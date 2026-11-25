@@ -227,6 +227,13 @@ namespace sunshine_game3d {
       "and the depth preview are off. Set the game to 3840x2160 with a 100%% resolution scale (and no DSR).", width, height);
     return text;
   }
+  // A game that renders with anything but Direct3D 11 or 12 stays 2D
+  // (automatic_phase::unsupported_api): the add-on tracks no depth and exports
+  // nothing there. The panel names the cause and what the user can change.
+  inline constexpr const char *unsupported_api_ui_text = "inactive without Direct3D 11 or 12";
+  inline constexpr const char *unsupported_api_warning = "This game renders with a graphics API other than Direct3D 11 or "
+    "Direct3D 12. Game 3D supports only those two, so 3D, UI protection and the depth preview are off. If the game "
+    "offers a DirectX 11 or DirectX 12 mode, select it.";
   // The tooltip states the span from alpha_trust_span_ms, its one owner.
   inline const char *ui_protection_warning_tooltip() {
     static const std::string text = [] {
@@ -261,6 +268,7 @@ namespace sunshine_game3d {
       case automatic_phase::unsupported_resolution: return "2D: source resolution exceeds 3840 x 3840";
       case automatic_phase::renderer_unavailable: return "2D: Game 3D renderer unavailable for this display mode";
       case automatic_phase::renderer_preparing: return "2D: preparing Game 3D shaders";
+      case automatic_phase::unsupported_api: return "2D: the game does not use Direct3D 11 or 12";
       case automatic_phase::ready: break;
     }
     // Normal depth remains visible at zero strength. Stereo depth follows the

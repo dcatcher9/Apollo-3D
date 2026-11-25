@@ -7,7 +7,7 @@
 #include <Windows.h>
 #include <Unknwn.h>
 #include <reshade_api.hpp>
-#include "native_depth_calibration.h"
+#include "depth_orientation.h"
 #include "scene_depth_source.h"
 
 #include <cstdint>
@@ -46,10 +46,5 @@ namespace sunshine_depth {
     depth_orientation detected_orientation = depth_orientation::automatic;
     depth_orientation orientation = depth_orientation::automatic;
     unsigned orientation_agreeing_frames = 0;
-    bool calibrated = false;
-    unsigned calibration_samples = 0;
-    std::uint64_t calibration_frame = 0;
-    // Positive nearness is toward the viewer: (raw - raw_anchor) * raw_gain.
-    float raw_anchor = 0, raw_gain = 0;
   };
 }  // namespace sunshine_depth

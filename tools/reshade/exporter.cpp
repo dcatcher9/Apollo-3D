@@ -92,21 +92,6 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
     });
   }
 
-  void on_technique(api::effect_runtime *runtime, api::effect_technique technique, api::command_list *commands, api::resource_view rtv, api::resource_view) {
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-    const depth_events::phase_scope phase(depth_events::handler::render_technique);
-#endif
-    try {
-      if (publisher) {
-        publisher->frame(runtime, technique, commands, rtv);
-      }
-    } catch (...) {
-      if (publisher) {
-        publisher->invalidate(runtime, false);
-      }
-      log(reshade::log::level::error, "Sunshine SBS: exporter callback failed; skipping frame");
-    }
-  }
 
   void on_reload(api::effect_runtime *runtime) {
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
@@ -138,17 +123,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
     }
   }
 
-  void on_begin_effects(api::effect_runtime *runtime, api::command_list *commands, api::resource_view rtv, api::resource_view) {
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-    const depth_events::phase_scope phase(depth_events::handler::begin_effects);
-#endif
-    try {
-      if (publisher && !publisher->native_enabled(runtime)) publisher->prepare_native_depth(runtime, commands, rtv);
-    } catch (...) {
-      if (publisher) publisher->invalidate(runtime, false);
-      log(reshade::log::level::error, "Sunshine SBS: depth calibration update failed; skipping source");
-    }
-  }
+
 
   void on_destroy(api::effect_runtime *runtime) {
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
@@ -297,8 +272,7 @@ extern "C" {
       sunshine_game3d::hook_host::initialize(addon);
       sunshine_depth::initialize(addon);
       reshade::register_event<reshade::addon_event::init_effect_runtime>(sunshine_addon_lifetime::guarded<on_init_runtime>);
-      reshade::register_event<reshade::addon_event::reshade_begin_effects>(sunshine_addon_lifetime::guarded<on_begin_effects>);
-      reshade::register_event<reshade::addon_event::reshade_render_technique>(sunshine_addon_lifetime::guarded<on_technique>);
+
       reshade::register_event<reshade::addon_event::reshade_reloaded_effects>(sunshine_addon_lifetime::guarded<on_reload>);
       reshade::register_event<reshade::addon_event::destroy_effect_runtime>(sunshine_addon_lifetime::guarded<on_destroy>);
       reshade::register_event<reshade::addon_event::destroy_swapchain>(sunshine_addon_lifetime::guarded<on_destroy_swapchain>);

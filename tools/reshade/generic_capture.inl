@@ -11,197 +11,11 @@
 
 // Generic depth's capture routing, a part of depth_addon.cpp (included where
 // these definitions stood, after the candidate-selection declarations, in the
-// same translation unit): the FrameActivityTrace text and Present/access
-// trace types, member views, capture records and their validation, the hold
-// gates (judge_hold_gate) and hold (hold_shown_capture), Present coverage, the
-// end-of-frame copies (preserve_depth_at_effects) and select_captured_depth,
-// whose FrameActivityTrace route block is generic_trace.inl.
+// same translation unit): member views, capture records and their validation,
+// the hold gates (judge_hold_gate) and hold (hold_shown_capture), Present
+// coverage, the end-of-frame copies (preserve_depth_at_effects) and
+// select_captured_depth.
 #pragma once
-
-// Temporary, bounded metadata diagnostics. No resource is read, retained or
-// transitioned here. Logging happens after the caller's resource-map lock exits.
-struct activity_trace_text
-{
-	char text[4096] {};
-	size_t size = 0;
-	template <typename... Args> void append(const char *format, Args... args)
-	{
-		if (size >= std::size(text) - 1) return;
-		const int count = std::snprintf(text + size, std::size(text) - size, format, args...);
-		if (count > 0) size += std::min(static_cast<size_t>(count), std::size(text) - size - 1);
-	}
-};
-
-struct activity_present_trace
-{
-	struct row
-	{
-		uint64_t queue = 0, queue_native = 0, source = 0, handle = 0, backup = 0;
-		uint32_t width = 0, height = 0, draws = 0, writes = 0;
-		bool copied = false, ambiguous = false;
-	};
-	swapchain *chain;
-	command_queue *presenting_queue;
-	std::array<row, 16> rows {};
-	size_t used = 0, total_rows = 0, queues = 0;
-	uint64_t device_epoch = 0, present = 0, frame_before = 0, frame_after = 0, depth_present = 0, focus = 0;
-	unsigned burst = 0, previous_dropped_events = 0;
-	bool enabled = false;
-	activity_present_trace(swapchain *value, command_queue *queue) : chain(value), presenting_queue(queue) {}
-
-	void begin(const generic_depth_device_data &device_data)
-	{
-		const auto &trace = device_data.activity_trace;
-		enabled = s_frame_activity_trace && trace.bursts &&
-			device_data.native_present_index > trace.first_present && device_data.native_present_index <= trace.last_present;
-		if (!enabled) return;
-		device_epoch = device_data.device_epoch; burst = trace.bursts;
-		present = device_data.native_present_index; frame_before = device_data.frame_index;
-		frame_after = frame_before; depth_present = device_data.native_depth_present_index;
-		focus = trace.focus_source; previous_dropped_events = trace.dropped_events;
-	}
-	void add(command_queue *queue, const state_tracking &state, generic_depth_device_data &device_data)
-	{
-		if (!enabled || state.stats_per_used_depth_stencil.empty()) return;
-		++queues;
-		for (const auto &[resource, stats] : state.stats_per_used_depth_stencil)
-		{
-			++total_rows;
-			const auto found = device_data.depth_stencil_resources.find(resource);
-			const uint64_t id = found == device_data.depth_stencil_resources.end() ? 0 : found->second.identity;
-			size_t slot = used;
-			if (slot == rows.size())
-			{
-				if (id != focus) continue;
-				for (slot = 0; slot != rows.size() && rows[slot].source == focus; ++slot) {}
-				if (slot == rows.size()) continue;
-			}
-			else ++used;
-			auto &out = rows[slot];
-			out = {};
-			out.queue = queue->get_private_data<state_tracking>()->command_identity;
-			out.queue_native = queue->get_native();
-			out.source = id; out.handle = resource.handle;
-			if (found != device_data.depth_stencil_resources.end())
-			{
-				out.width = found->second.desc.texture.width; out.height = found->second.desc.texture.height;
-			}
-			if (const auto *backup = device_data.find_depth_stencil_backup(resource)) out.backup = backup->content_identity;
-			out.draws = stats.total.drawcalls; out.writes = stats.total.scene_writes;
-			out.copied = stats.copied_during_frame; out.ambiguous = stats.copy_provenance_ambiguous;
-		}
-	}
-	~activity_present_trace()
-	{
-		if (!enabled) return;
-		activity_trace_text out;
-		out.append("Sunshine frame activity: present burst=%u device=%llu p=%llu f=%llu->%llu depth_p=%llu tick=%llu thread=%lu swap=%llx queue=%llx bb_index=%u focus=%llu queues=%zu rows=%zu dropped_rows=%zu previous_dropped_events=%u;",
-			burst, device_epoch, present, frame_before, frame_after, depth_present, sunshine_game3d::clock::game_now(), GetCurrentThreadId(),
-			chain->get_native(), presenting_queue ? presenting_queue->get_native() : 0,
-			chain->get_current_back_buffer_index(), focus,
-			queues, used, total_rows - used, previous_dropped_events);
-		for (size_t i = 0; i != used; ++i)
-		{
-			const auto &r = rows[i];
-			out.append(" q%llu@%llx:s%llu@%llx,%ux%u,d%u,w%u,c%d,a%d,b%llu;", r.queue, r.queue_native, r.source, r.handle,
-				r.width, r.height, r.draws, r.writes, r.copied ? 1 : 0, r.ambiguous ? 1 : 0, r.backup);
-		}
-		sunshine_log::message(reshade::log::level::info, out.text);
-	}
-};
-
-static void trace_activity_effect(effect_runtime *runtime, generic_depth_data &data,
-	generic_depth_device_data &device_data, bool access, const char *reason,
-	uint64_t decision_present = 0, uint64_t decision_frame = 0)
-{
-	if (!s_frame_activity_trace) return;
-	const auto *evidence = data.selection.evidence(data.anchor_identity);
-	const bool confirmed = evidence && evidence->confirmed_good && evidence->quality.kind == sunshine_depth::content_kind::useful;
-	activity_trace_text out;
-	{
-		const std::unique_lock<std::shared_mutex> lock(s_mutex);
-		auto &trace = device_data.activity_trace;
-		const auto now = sunshine_game3d::clock::game_now(), present = device_data.native_present_index;
-		// A physical member change (or selected=0 on rejection) is not a new
-		// capture set. Observe gaps against the stable budget generation and anchor.
-		if (!access)
-			data.trace_gaps.observe(present, data.raw_roster.routing_epoch,
-				data.raw_scene_requested && confirmed && data.anchor_identity != 0, data.capture_ready);
-		const unsigned misses = data.trace_gaps.misses();
-		bool started = false;
-		if (!access && data.raw_scene_requested && confirmed && data.anchor_identity && !data.capture_ready &&
-			data.trace_gaps.recurring() &&
-			present > trace.last_present && trace.bursts < 4 && now >= trace.next_start_tick)
-		{
-			++trace.bursts;
-			trace.first_present = present; trace.last_present = present + 96;
-			trace.next_start_tick = now + 15000;
-			started = true;
-		}
-		if (!trace.bursts || present < trace.first_present || present > trace.last_present) return;
-		if (trace.event_present != present)
-		{
-			trace.event_present = present;
-			trace.effects = trace.accesses = trace.dropped_events = 0;
-		}
-		auto &last = access ? data.trace_access_present : data.trace_effect_present;
-		if (last == present) return; // Only the first accessor/effects call per runtime/present.
-		last = present;
-		auto &count = access ? trace.accesses : trace.effects;
-		if (count++ >= 2) { ++trace.dropped_events; return; }
-		trace.focus_source = data.anchor_identity;
-		uint64_t last_frame = 0, work = 0, backup = 0, layout = 0;
-		bool copied = false, ambiguous = false;
-		if (const auto found = device_data.depth_stencil_resources.find(data.selected_depth_stencil);
-			found != device_data.depth_stencil_resources.end() && found->second.identity == data.selected_identity)
-		{
-			last_frame = found->second.last_used_in_frame; work = found->second.last_frame_stats.total.work_count();
-			layout = found->second.layout_epoch;
-			copied = found->second.last_frame_stats.copied_during_frame; ambiguous = found->second.last_frame_stats.copy_provenance_ambiguous;
-		}
-		if (const auto *tracked = device_data.find_depth_stencil_backup(data.selected_depth_stencil)) backup = tracked->content_identity;
-		out.append("Sunshine frame activity: %s burst=%u start=%d device=%llu runtime=%llu snapshot=%llu/%llu decision=%llu/%llu final=%llu/%llu depth_p=%llu access_p=%llu tick=%llu thread=%lu source=%llu layout=%llu last_f=%llu work=%llu copy=%d ambiguous=%d backup=%llu pending=%llu probe=%llu ready=%d open=%d confirmed=%d misses16=%u reason=%s",
-			access ? "access" : "effects", trace.bursts, started ? 1 : 0, device_data.device_epoch, data.runtime_epoch,
-			data.trace_snapshot_present, data.trace_snapshot_frame, decision_present, decision_frame, present, device_data.frame_index,
-			device_data.native_depth_present_index, data.native_access_present, now, GetCurrentThreadId(), data.selected_identity,
-			layout, last_frame, work, copied ? 1 : 0, ambiguous ? 1 : 0, backup, data.selection.pending_challenger_id(), data.probe_target_id,
-			data.capture_ready ? 1 : 0, data.native_access_open ? 1 : 0, confirmed ? 1 : 0, misses, reason);
-		out.append(" challenger=%llu probe_age_ms=%llu challenger_samples=%u retirement_remaining_frames=%llu",
-			data.challenger_id, data.probe_target_id && now >= data.probe_started_tick ? now - data.probe_started_tick : 0,
-			data.challenger_samples, data.challenger_retired_until > device_data.frame_index ?
-				data.challenger_retired_until - device_data.frame_index : 0);
-		const auto &routing = data.trace_capture;
-		out.append(" route=%llu/%llu anchor=%llu budget=%llu members=%u raster_mask=%x copy_mask=%x ambiguous_mask=%x confirmed_mask=%x view_mask=%x floor_mask=%x route_reason=%s;",
-			routing.present, routing.frame, routing.anchor, routing.epoch, routing.count, routing.raster, routing.copied,
-			routing.ambiguous, routing.confirmed, routing.views, routing.floors, routing.reason);
-		for (unsigned i = 0; i != routing.count; ++i)
-		{
-			const auto &region = routing.regions[i];
-			out.append(" m%u=s%llu/l%llu/f%llu/d%llu/w%llu/crop%u,%u,%u,%u;", i, routing.members[i], region.layout_epoch,
-				routing.last_used[i], routing.draws[i], routing.writes[i], region.x, region.y, region.width, region.height);
-		}
-	}
-	// Use scalar SDK getters only: aggregate-by-value resource getters cross
-	// the MSVC/MinGW ABI. Back-buffer index is sufficient for this passive trace.
-	out.append(" swap=%llx queue=%llx bb_index=%u", runtime->get_native(), runtime->get_command_queue()->get_native(),
-		runtime->get_current_back_buffer_index());
-	sunshine_log::message(reshade::log::level::info, out.text);
-}
-
-struct activity_access_trace
-{
-	effect_runtime *runtime;
-	generic_depth_data *data;
-	generic_depth_device_data *device_data;
-	const char *reason = "ready";
-	uint64_t decision_present = 0, decision_frame = 0;
-	bool reject(const char *value) { reason = value; return false; }
-	~activity_access_trace()
-	{
-		if (s_frame_activity_trace && data && device_data)
-			trace_activity_effect(runtime, *data, *device_data, true, reason, decision_present, decision_frame);
-	}
-};
 
 static bool owns_member_view(const generic_depth_data &data, resource_view view)
 {
@@ -362,9 +176,9 @@ static bool hold_shown_capture(effect_runtime *runtime, const generic_depth_data
 // source alive while it may be copied, is then the last one, so ReShade never
 // reports the destruction and the source stays in the device's map although
 // it can never work again.
-static bool released_by_game(device *device, generic_depth_device_data &device_data, resource source)
+static bool released_by_game(device *, generic_depth_device_data &device_data, resource source)
 {
-	if (device->get_api() > device_api::d3d12 || device_data.find_depth_stencil_backup(source) == nullptr) return false;
+	if (device_data.find_depth_stencil_backup(source) == nullptr) return false;
 	auto *const object = reinterpret_cast<IUnknown *>(source.handle);
 	object->AddRef();
 	return object->Release() == 1;
@@ -639,7 +453,7 @@ static void observe_uncopied_member(generic_depth_device_data &device_data, reso
 }
 
 static generic_depth_data::member_view *select_captured_depth(effect_runtime *runtime, command_list *cmd_list, generic_depth_data &data,
-	generic_depth_device_data &device_data, const depth_selection_snapshot &snapshot, bool automatic,
+	generic_depth_device_data &device_data, const depth_selection_snapshot &snapshot,
 	resource &selected, const depth_selection_resource *&selected_info)
 {
 	data.capture_wait_detail = nullptr;
@@ -654,7 +468,7 @@ static generic_depth_data::member_view *select_captured_depth(effect_runtime *ru
 	// selector moves on, so a recreated scene can still take over as its peer.
 	const released_sources routing {runtime->get_device(), device_data, anchor};
 	const auto observations = capture_observations(data, device_data.frame_index, snapshot, &routing);
-	const auto group = data.capture_budget.update(anchor, observations, !automatic);
+	const auto group = data.capture_budget.update(anchor, observations, false);
 	data.anchor_depth_stencil = selected;
 	data.anchor_identity = anchor;
 	data.rotating = group.count > 1;
@@ -667,8 +481,7 @@ static generic_depth_data::member_view *select_captured_depth(effect_runtime *ru
 	}
 	// Capture allocation precedes qualification/current selection. Otherwise a
 	// new source could never produce the evidence needed to become selectable.
-	if (automatic || data.raw_scene_requested)
-		for (unsigned i = 0; i != group.count; ++i)
+	for (unsigned i = 0; i != group.count; ++i)
 		{
 			if (std::any_of(data.member_views.begin(), data.member_views.end(), [&](const auto &entry) {
 				return entry.identity == group.members[i] && entry.view != 0;
@@ -711,7 +524,7 @@ static generic_depth_data::member_view *select_captured_depth(effect_runtime *ru
 		{
 			preserve_depth_at_effects(runtime, cmd_list, device_data, member.source, member.identity, member.capture_after);
 			const auto observed = std::find_if(observations.begin(), observations.end(), [anchor](const auto &o) { return o.id == anchor; });
-			anchor_shown = (!automatic || (observed != observations.end() && observed->qualified)) &&
+			anchor_shown = observed != observations.end() && observed->qualified &&
 				capture_record(runtime, data, device_data, member.source, member.identity, member.view, true, member.capture_after)
 					.record.renderable(device_data.native_present_index, device_data.frame_index, data.runtime_epoch);
 			break;
@@ -765,7 +578,7 @@ static generic_depth_data::member_view *select_captured_depth(effect_runtime *ru
 	data.captures.frame = device_data.frame_index;
 	data.captures.runtime = data.runtime_epoch;
 	sunshine_depth_capture::preference preferred;
-	preferred.anchor = anchor; preferred.single_anchor = !automatic;
+	preferred.anchor = anchor;
 	for (unsigned i = 0; i != group.count; ++i)
 	{
 		const auto observed = std::find_if(observations.begin(), observations.end(), [&](const auto &o) { return o.id == group.members[i]; });
@@ -791,7 +604,7 @@ static generic_depth_data::member_view *select_captured_depth(effect_runtime *ru
 	// round robin returns here. The hint changes only the next probe visit: the
 	// candidate still needs its own preserved copies and ordinary content checks.
 	uint64_t discovery_id = 0, discovery_layout = 0, discovery_draws = 0;
-	if (automatic && data.raw_scene_requested &&
+	if (data.raw_scene_requested &&
 		decision.reason == sunshine_depth_capture::selection_status::no_current_copy)
 	{
 		const auto primary = std::find_if(observations.begin(), observations.end(),
@@ -816,8 +629,7 @@ static generic_depth_data::member_view *select_captured_depth(effect_runtime *ru
 			}
 	}
 	data.discovery_hint.observe(anchor, device_data.frame_index, discovery_id, discovery_layout);
-#include "generic_trace.inl"
-	if (data.raw_scene_requested || (automatic && group.count > 1))
+	if (data.raw_scene_requested || group.count > 1)
 	{
 		const depth_selection_resource *current_info = nullptr;
 		resource current_source {};
@@ -844,13 +656,6 @@ static generic_depth_data::member_view *select_captured_depth(effect_runtime *ru
 		data.hold_only = current_info && !decision.source;
 		if (!current_info)
 			data.capture_wait_detail = "Waiting for a qualified current depth capture.";
-		if (s_frame_activity_trace)
-		{
-			auto &trace = data.trace_capture;
-			trace.reason = current_info ? sunshine_depth_capture::name(decision.reason) : !current_id ?
-				sunshine_depth_capture::name(decision.reason) :
-				(trace.raster & trace.floors) ? "new_assignment_floor" : "missing_cached_view";
-		}
 	}
 	for (auto &entry : data.member_views)
 		if (!entry.retire_after && entry.view != 0 && selected_info && entry.identity == selected_info->identity)
@@ -859,7 +664,6 @@ static generic_depth_data::member_view *select_captured_depth(effect_runtime *ru
 			{
 				selected = {}; selected_info = nullptr;
 				data.capture_wait_detail = "The depth backup is newly assigned; waiting for its first current capture.";
-				if (s_frame_activity_trace) data.trace_capture.reason = "new_assignment_floor";
 				return nullptr; // Repeated selection or effects changes cannot bypass the new-assignment floor.
 			}
 			return &entry;

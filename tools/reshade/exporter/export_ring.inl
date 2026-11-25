@@ -81,26 +81,25 @@
   // transfer from the consumer it read before rendering (pq_requested), so
   // it is exported only while the consumer answers the same, in either
   // direction; otherwise the next Present renders for the new consumer and
-  // no ring of the other transfer is created. A reference export cannot
-  // render again: only its PQ output needs a consumer that takes PQ.
+  // no ring of the other transfer is created.
 #if defined(SUNSHINE_EXPORTER_IMPLEMENTATION)
-  bool transfer_current(bool native_render, bool pq_requested, wire::transfer output, bool consumer_pq) {
-    return native_render ? consumer_pq == pq_requested : output != wire::transfer::pq || consumer_pq;
+  bool transfer_current(bool pq_requested, bool consumer_pq) {
+    return consumer_pq == pq_requested;
   }
 #else
-  bool transfer_current(bool native_render, bool pq_requested, wire::transfer output, bool consumer_pq);
+  bool transfer_current(bool pq_requested, bool consumer_pq);
 #endif
 
   // The export pauses whose origin is the host, the game or the player rather
   // than a fault (tools/reshade/README.md, the readiness report): a host that
-  // is absent, attached, replaced or without PQ, a game out of focus, reset,
+  // is absent, attached or replaced, a game out of focus, reset,
   // presenting without a render or changing its colour space, and a
   // swapchain or frame not yet prepared. Each pause is logged as
   // "export inactive (reason, routine|fault)"; every other reason, a new one
   // included, is a fault. game3d_log_report.py reads the class and mirrors
   // this list for logs without it; its test reads the list from here.
-  SUNSHINE_EXPORTER_CONSTANT constexpr std::array<std::string_view, 11> routine_export_pauses{
-    "no_consumer", "ring_replaced", "consumer_transfer_changed", "consumer_without_pq", "not_foreground",
+  SUNSHINE_EXPORTER_CONSTANT constexpr std::array<std::string_view, 10> routine_export_pauses{
+    "no_consumer", "ring_replaced", "consumer_transfer_changed", "not_foreground",
     "runtime_reset", "runtime_gone", "present_without_render", "color_space_changed", "swapchain_unknown",
     "frame_not_prepared"};
   constexpr const char *export_pause_class(std::string_view reason) {

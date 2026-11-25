@@ -40,12 +40,9 @@ namespace sunshine_game3d::depth_output {
 // Binding/readiness writers keep their private caches and definitions in place.
 // bind_api is internal to provider depth_display.inl; bind_generic is static
 // in depth_addon.cpp. The rebind_api_on_reload site keeps the existing external
-// name provider::reload_effect_bindings. The other external writer names are
-// provider::set_depth_ready and the FX path's depth_input::set_ready.
+// name provider::reload_effect_bindings. The other external writer name is
+// provider::set_depth_ready.
 namespace sunshine_streamline::provider {
   void reload_effect_bindings(reshade::api::effect_runtime *runtime);
   void set_depth_ready(reshade::api::effect_runtime *runtime, bool ready);
-}
-namespace sunshine_game3d::depth_input {
-  void set_ready(reshade::api::effect_runtime *runtime, bool ready);
 }

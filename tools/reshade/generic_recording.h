@@ -86,18 +86,15 @@ struct depth_stencil_frame_stats
 	}
 	void observe_full_clear() { viewport_restart_pending = true; }
 	// A depth clear of the sampled plane, with or without rectangles, overwrites
-	// it (last_overwrite). Only without rectangles, and only on D3D10, D3D11
-	// and D3D12 (ClearDepthStencilView, and a D3D12 render pass's CLEAR), does it
-	// cover the whole view and so erase the extent drawn so far. D3D9's Clear
-	// covers the current viewport and scissor, glClear the scissor and a Vulkan
-	// render pass's CLEAR its render area, none of which ReShade reports: there
-	// the crop keeps the largest viewport drawn in the frame.
-	void observe_depth_clear(device_api api, uint32_t rect_count, bool sampled_plane, uint64_t position = 0)
+	// it (last_overwrite). Only without rectangles (ClearDepthStencilView, and a
+	// D3D12 render pass's CLEAR) does it cover the whole view and so erase the
+	// extent drawn so far.
+	void observe_depth_clear(uint32_t rect_count, bool sampled_plane, uint64_t position = 0)
 	{
 		if (!sampled_plane)
 			return;
 		last_overwrite = position;
-		if (rect_count == 0 && (api == device_api::d3d10 || api == device_api::d3d11 || api == device_api::d3d12))
+		if (rect_count == 0)
 		{
 			observe_full_clear();
 			last_rewrite = position;

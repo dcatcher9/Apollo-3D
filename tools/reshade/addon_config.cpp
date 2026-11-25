@@ -30,10 +30,4 @@ namespace sunshine_game3d::addon_config {
     reshade::get_config_value(nullptr, "SUNSHINE_DEPTH", "QueueFenceOrder", enabled);
     return enabled;
   }
-
-  bool frame_activity_trace() {
-    bool enabled = false;
-    reshade::get_config_value(nullptr, "SUNSHINE_DEPTH", "FrameActivityTrace", enabled);
-    return enabled;
-  }
 }

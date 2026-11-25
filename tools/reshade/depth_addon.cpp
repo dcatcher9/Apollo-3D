@@ -82,7 +82,7 @@ SUNSHINE_DEPTH_ADDON_INTERNAL void observe_preserved_layout(depth_stencil_resour
 template <typename DepthInfo>
 SUNSHINE_DEPTH_ADDON_INTERNAL bool candidate_matches_shape(const DepthInfo &info, uint32_t width, uint32_t height);
 static void select_depth_candidate(effect_runtime *runtime, device *const device,
-	generic_depth_device_data *const device_data, generic_depth_data &data, const bool automatic,
+	generic_depth_device_data *const device_data, generic_depth_data &data,
 	const std::optional<sunshine_depth::sample_result> &completed_sample,
 	const sunshine_depth::depth_quality &completed_quality, const bool completed_other_raw_sample,
 	resource &selected_depth_stencil, const depth_selection_resource *&selected_depth_stencil_info,
@@ -90,15 +90,9 @@ static void select_depth_candidate(effect_runtime *runtime, device *const device
 	depth_selection_snapshot &current_depth_stencil_resources,
 	bool &any_recent_activity, bool &any_filtered, bool &any_warming);
 
-// FX-reference request/calibration fragments; definitions in generic_fx_reference.inl.
-namespace sunshine_depth {
-  static void begin_fx_reference_query(generic_depth_data *data, bool request_calibration);
-  static void resolve_fx_reference_calibration(generic_depth_data *data, frame_depth &output, depth_orientation orientation_override);
-  static void finish_fx_reference_query(generic_depth_data *data, const frame_depth &output);
-}
 
 // Generic depth's capture routing, defined in generic_capture.inl (included
-// here): the FrameActivityTrace types, member views, capture records, the hold
+// here): member views, capture records, the hold
 // gates and hold, Present coverage, the end-of-frame copies and
 // select_captured_depth.
 #include "generic_capture.inl"
@@ -213,8 +207,6 @@ static bool copy_stable_binding(effect_runtime *runtime, command_list *cmd_list,
 	const generic_depth_device_data &device_data, resource source)
 {
 	device *const device = runtime->get_device();
-	if (device->get_api() != device_api::d3d11 && device->get_api() != device_api::d3d12)
-		return false;
 	const resource_desc desc = device->get_resource_desc(source);
 	auto &stable = data.stable;
 	if (stable.texture != 0 && (stable.desc.texture.width != desc.texture.width ||
@@ -276,7 +268,7 @@ static void on_reload_effect_runtime(effect_runtime *runtime)
 #endif
 	if (auto *data = runtime->get_private_data<generic_depth_data>(); data && data->native_driver)
 	{
-		// FX handles are recreated, but the native capture/scale owner is not.
+		// The user's effects are recreated, but the native capture/scale owner is not.
 		// Do not throw away a live capture epoch or retained real FG depth.
 		sunshine_streamline::provider::reload_effect_bindings(runtime);
 		data->effects_bound = false; // New effect descriptor tables.
@@ -291,11 +283,7 @@ static void on_reload_effect_runtime(effect_runtime *runtime)
 		data->effects_read_depth_dirty = true;
 		clear_raw_sample_request(*data);
 		data->runtime_epoch = s_next_sample_scope.fetch_add(1, std::memory_order_relaxed);
-		data->native_depth_requested = false;
 		data->native_access_open = false;
-		data->native_ui_state = native_depth_ui_state::inactive;
-		data->native_ui_samples = 0;
-		data->native_ui_present = 0;
 		bind_generic(runtime);
 	}
 }
@@ -327,6 +315,8 @@ static void refresh_effects_read_depth(effect_runtime *runtime, generic_depth_da
 
 static void on_init_device(device *device)
 {
+	if (!supported_api(device))
+		return;
 	device->create_private_data<generic_depth_device_data>();
 	if (device->get_api() == device_api::d3d12)
 	{
@@ -341,13 +331,12 @@ static void on_init_device(device *device)
 		sunshine_upscaler_trace::poll();
 	// The content sampler's shader compiles off the first sample's Present.
 	sunshine_depth::warm();
-
-	reshade::get_config_value(nullptr, "DEPTH", "DisableINTZ", s_disable_intz);
 }
 static void on_destroy_device(device *device)
 {
 	const generic_depth_device_data *const device_data = device->get_private_data<generic_depth_device_data>();
-
+	if (device_data == nullptr)
+		return;
 	// Destroy any remaining resources
 	for (const depth_stencil_backup &backup : device_data->depth_stencil_backups)
 	{
@@ -372,18 +361,24 @@ static void on_destroy_device(device *device)
 
 static void on_init_command_list(command_list *cmd_list)
 {
+	if (!supported_api(cmd_list->get_device()))
+		return;
 	cmd_list->create_private_data<state_tracking>(false);
 	capture_inputs::list_event(cmd_list, sunshine_streamline::depth_capture::list_event::created);
 	capture_inputs::observe_command(cmd_list);
 }
 static void on_destroy_command_list(command_list *cmd_list)
 {
+	if (cmd_list->get_private_data<state_tracking>() == nullptr)
+		return;
 	capture_inputs::list_event(cmd_list, sunshine_streamline::depth_capture::list_event::destroyed); // Retires its recording.
 	cmd_list->destroy_private_data<state_tracking>();
 }
 
 static void on_init_command_queue(command_queue *cmd_queue)
 {
+	if (!supported_api(cmd_queue->get_device()))
+		return;
 	cmd_queue->create_private_data<state_tracking>(true);
 	capture_inputs::observe_queue(cmd_queue);
 
@@ -395,24 +390,20 @@ static void on_init_command_queue(command_queue *cmd_queue)
 }
 static void on_destroy_command_queue(command_queue *cmd_queue)
 {
+	if (cmd_queue->get_private_data<state_tracking>() == nullptr)
+		return;
 	capture_inputs::retire_queue(cmd_queue);
 	cmd_queue->destroy_private_data<state_tracking>();
 
 	device *const device = cmd_queue->get_device();
 	generic_depth_device_data *const device_data = device->get_private_data<generic_depth_device_data>();
 	device_data->queues.erase(std::remove(device_data->queues.begin(), device_data->queues.end(), cmd_queue), device_data->queues.end());
-
-	// All resources must be destroyed before a device reset in D3D9
-	if (device->get_api() == device_api::d3d9)
-	{
-		for (const depth_stencil_backup &backup : device_data->depth_stencil_backups)
-			device->destroy_resource(backup.backup_texture);
-		device_data->depth_stencil_backups.clear();
-	}
 }
 
 static void on_init_effect_runtime(effect_runtime *runtime)
 {
+	if (!supported_api(runtime->get_device()))
+		return;
 	runtime->create_private_data<generic_depth_data>();
 	set_generic_capture_enabled(runtime, *runtime->get_private_data<generic_depth_data>(), true);
 	sunshine_game3d::frame_record_store::initialize(runtime);
@@ -420,6 +411,8 @@ static void on_init_effect_runtime(effect_runtime *runtime)
 }
 static void on_destroy_effect_runtime(effect_runtime *runtime)
 {
+	if (runtime->get_private_data<generic_depth_data>() == nullptr)
+		return;
 	auto &data = *runtime->get_private_data<generic_depth_data>();
 	set_generic_capture_enabled(runtime, data, false);
 	clear_raw_sample_request(data);
@@ -454,46 +447,30 @@ static void on_destroy_effect_runtime(effect_runtime *runtime)
 
 static bool on_create_resource(device *device, resource_desc &desc, subresource_data *, resource_usage)
 {
+	// Another device API's resources are never changed (supported_api).
+	const device_api api = device->get_api();
+	if (api != device_api::d3d11 && api != device_api::d3d12)
+		return false;
+
 	if (desc.type != resource_type::surface && desc.type != resource_type::texture_2d)
 		return false; // Skip resources that are not 2D textures
 
 	if ((desc.texture.samples > 1 && !device->check_capability(device_caps::resolve_depth_stencil)) || (desc.usage & resource_usage::depth_stencil) == 0 || desc.texture.format == format::s8_uint)
 		return false; // Skip multisampled textures and resources that are not used as depth buffers
 
-	switch (device->get_api())
+	if (api == device_api::d3d11)
 	{
-	case device_api::d3d9:
-		if (s_disable_intz || desc.texture.samples > 1)
-			return false;
-		// Skip textures that are sampled as PCF shadow maps (see https://aras-p.info/texts/D3D9GPUHacks.html#shadowmap) using hardware support, since changing format would break that
-		if (desc.type == resource_type::texture_2d && (desc.texture.format == format::d16_unorm || desc.texture.format == format::d24_unorm_x8_uint || desc.texture.format == format::d24_unorm_s8_uint))
-			return false;
-		// Skip small textures that are likely just shadow maps too (fixes a hang in Dragon's Dogma: Dark Arisen when changing areas)
-		if (desc.texture.width <= 512)
-			return false;
-		if (desc.texture.format == format::d32_float || desc.texture.format == format::d32_float_s8_uint)
-			sunshine_log::message(reshade::log::level::warning, "Replacing high bit depth depth-stencil format with a lower bit depth format");
-		// Replace texture format with special format that supports normal sampling (see https://aras-p.info/texts/D3D9GPUHacks.html#depth)
-		desc.texture.format = format::intz;
-		desc.usage |= resource_usage::shader_resource;
-		break;
-	case device_api::d3d10:
-	case device_api::d3d11:
 		// Allow shader access to textures that are used as depth-stencil attachments
 		desc.texture.format = format_to_typeless(desc.texture.format);
 		desc.usage |= resource_usage::shader_resource;
-		break;
-	case device_api::d3d12:
-	case device_api::vulkan:
-		// D3D12 and Vulkan always use backup texture, but need to be able to copy to it
+	}
+	else
+	{
+		// D3D12 always uses a backup texture, but needs to be able to copy to it
 		if (desc.texture.samples > 1)
 			desc.usage |= resource_usage::resolve_source;
 		else
 			desc.usage |= resource_usage::copy_source;
-		break;
-	case device_api::opengl:
-		// No need to change anything in OpenGL
-		return false;
 	}
 
 	return true;
@@ -501,7 +478,7 @@ static bool on_create_resource(device *device, resource_desc &desc, subresource_
 static bool on_create_resource_view(device *device, resource resource, resource_usage usage_type, resource_view_desc &desc)
 {
 	// A view cannot be created with a typeless format (which was set in 'on_create_resource' above), so fix it in case defaults are used
-	if ((device->get_api() != device_api::d3d10 && device->get_api() != device_api::d3d11) || (desc.format != format::unknown && desc.format != format_to_typeless(desc.format)))
+	if (device->get_api() != device_api::d3d11 || (desc.format != format::unknown && desc.format != format_to_typeless(desc.format)))
 		return false;
 
 	const resource_desc texture_desc = device->get_resource_desc(resource);
@@ -539,13 +516,14 @@ static void on_init_resource(device *device, const resource_desc &desc, const su
 	if ((desc.usage & resource_usage::depth_stencil) == 0)
 		return;
 
+	generic_depth_device_data *const device_data = device->get_private_data<generic_depth_device_data>();
+	if (device_data == nullptr)
+		return; // Not a Direct3D 11 or 12 device (supported_api).
+
 	// The end-of-frame copy needs its state proven (record_preserved); the
 	// capture owner tracks it from this creation state.
 	if (device->get_api() == device_api::d3d12)
 		capture_inputs::resource_created(resource, initial_state);
-
-	generic_depth_device_data *const device_data = device->get_private_data<generic_depth_device_data>();
-
 	const std::unique_lock<std::shared_mutex> lock(s_mutex);
 
 	depth_stencil_resource info;
@@ -581,21 +559,16 @@ static void on_destroy_resource(device *device, resource resource)
 			capture_inputs::resource_destroyed(it->second.identity);
 		device_data->depth_stencil_resources.erase(it);
 
-		// A backup resource is always created in D3D12 and Vulkan, so to find out if an effect runtime references this depth-stencil resource, can simply check if a backup resource was created for it
+		// A backup resource is always created, so to find out if an effect runtime references this depth-stencil resource, can simply check if a backup resource was created for it
 		if (device_data->find_depth_stencil_backup(resource) != nullptr)
 		{
 			lock.unlock();
 
-			sunshine_log::message(reshade::log::level::warning, "A depth-stencil resource was destroyed while still in use.");
-
-			// On Direct3D a tracked backup holds its own reference on the source
+			// A tracked backup holds its own reference on the source
 			// (track_depth_stencil_for_backup), so the game cannot destroy it while a backup
-			// names it; reaching this there means that reference was lost, and stalling the
-			// game's thread would not repair it. Vulkan and OpenGL take no such reference:
-			// there the resource may still be in use by an effect on the GPU, so keep
-			// ReShade's delay to let the GPU catch up before the memory is deallocated.
-			if (device->get_api() > device_api::d3d12)
-				Sleep(500);
+			// names it; reaching this means that reference was lost, and stalling the
+			// game's thread would not repair it.
+			sunshine_log::message(reshade::log::level::warning, "A depth-stencil resource was destroyed while still in use.");
 		}
 	}
 }
@@ -643,6 +616,8 @@ static void submit_deferred_copies(command_queue *queue, command_list *immediate
 
 static void on_present(command_queue *presenting_queue, swapchain *swapchain, const rect *, const rect *, uint32_t, const rect *)
 {
+	if (!supported_api(swapchain->get_device()))
+		return;
 	// This Present's one FG snapshot, read before anything of the Present
 	// reads the FG mode: present_deferred here, then the exporter's UI and
 	// the provider, whose present event runs after this one on this thread.
@@ -664,25 +639,19 @@ static void on_present(command_queue *presenting_queue, swapchain *swapchain, co
 	device *const device = swapchain->get_device();
 	generic_depth_device_data *const device_data = device->get_private_data<generic_depth_device_data>();
 
-	// Declared before the lock, so its destructor emits only after unlocking.
-	std::optional<activity_present_trace> trace;
-	if (s_frame_activity_trace) trace.emplace(swapchain, presenting_queue);
 	// Also before the lock: its map is allocated and freed outside the exclusive
 	// section that game-thread recording waits for.
 	state_tracking queue_state(true);
 	std::unique_lock<std::shared_mutex> lock(s_mutex);
 	++device_data->native_present_index;
 	const auto demand = tracking_demand(*device_data);
-	if (trace) trace->begin(*device_data);
 
-	// Copies are judged against their sources in each queue's execution order.
-	const bool content_selection = device->get_api() == device_api::d3d11 || device->get_api() == device_api::d3d12;
 	// Merge state from all graphics queues
 	for (command_queue *const queue : device_data->queues)
 	{
 		auto &state = *queue->get_private_data<state_tracking>();
-		if (content_selection) resolve_transfer_lineage(state, *device_data);
-		if (trace) trace->add(queue, state, *device_data);
+		// Copies are judged against their sources in each queue's execution order.
+		resolve_transfer_lineage(state, *device_data);
 		queue_state.merge(state, demand);
 
 		state.reset_on_present();
@@ -694,11 +663,6 @@ static void on_present(command_queue *presenting_queue, swapchain *swapchain, co
 
 	device_data->frame_index++;
 	device_data->native_depth_present_index = device_data->native_present_index;
-	if (trace)
-	{
-		trace->frame_after = device_data->frame_index;
-		trace->depth_present = device_data->native_depth_present_index;
-	}
 
 	for (const auto &[depth_stencil, frame_stats] : queue_state.stats_per_used_depth_stencil)
 	{
@@ -780,8 +744,6 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 		return;
 
 	auto &data = *runtime->get_private_data<generic_depth_data>();
-	// D3D11/12 select by content; other APIs keep ReShade's draw-statistics picker.
-	const bool automatic = device->get_api() == device_api::d3d11 || device->get_api() == device_api::d3d12;
 	// Native mode runs this every Present, also while ReShade skips its effects
 	// (globally disabled, none loaded) and so never recounts the technique flag.
 	const bool effects_may_read_depth = data.effects_read_depth && runtime->get_effects_state();
@@ -811,7 +773,7 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 	const bool api_selected = [&] {
 		const slow_step step("Streamline depth acquisition");
 		return sunshine_game3d::depth_output::begin(runtime, cmd_list, device_data->native_present_index,
-			automatic && s_streamline_source_events);
+			s_streamline_source_events);
 	}();
 	// A native API snapshot needs no Generic work. Fallback resumes capture
 	// before entering the selector.
@@ -862,14 +824,14 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 	uint64_t native_present_index;
 	depth_selection_snapshot current_depth_stencil_resources;
 	bool any_recent_activity, any_filtered, any_warming;
-	select_depth_candidate(runtime, device, device_data, data, automatic, completed_sample, completed_quality,
+	select_depth_candidate(runtime, device, device_data, data, completed_sample, completed_quality,
 		completed_other_raw_sample, selected_depth_stencil, selected_depth_stencil_info, frame_width, frame_height,
 		native_present_index, current_depth_stencil_resources, any_recent_activity, any_filtered, any_warming);
 
 	const resource_view prev_shader_resource = data.selected_shader_resource;
 	data.stable_current = false; // Set again below by this Present's stable copy.
 	auto *member_binding = select_captured_depth(runtime, cmd_list, data, *device_data, current_depth_stencil_resources,
-		automatic, selected_depth_stencil, selected_depth_stencil_info);
+		selected_depth_stencil, selected_depth_stencil_info);
 	// Judged once per depth frame, from its work, on this runtime's first Present
 	// that sees it: the Present that advanced it, or this runtime's next one when
 	// another swapchain's Present took that frame's work. A later Present without
@@ -930,54 +892,35 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 			data.selected_desc = {};
 
 			// Create two-dimensional resource view to the first level and layer of the depth-stencil resource
-			resource_view_desc srv_desc(api != device_api::opengl && api != device_api::vulkan ? format_to_default_typed(selected_depth_stencil_info->desc.texture.format) : selected_depth_stencil_info->desc.texture.format);
+			resource_view_desc srv_desc(format_to_default_typed(selected_depth_stencil_info->desc.texture.format));
 
-			// Need to create backup texture only if doing backup copies or original resource does not support shader access (which is necessary for binding it to effects)
-			// Also always create a backup texture in D3D12 or Vulkan to circument problems in case application makes use of resource aliasing
-			if (automatic || data.raw_scene_requested || (selected_depth_stencil_info->desc.usage & resource_usage::shader_resource) == 0 || selected_depth_stencil_info->desc.texture.samples > 1 || (api == device_api::d3d12 || api == device_api::vulkan))
+			// Content selection always samples a backup copy, never the game's own resource.
+			depth_stencil_backup = device_data->track_depth_stencil_for_backup(device, selected_depth_stencil, selected_depth_stencil_info->desc);
+
+			// Abort in case backup texture creation failed
+			if (depth_stencil_backup == nullptr)
 			{
-				depth_stencil_backup = device_data->track_depth_stencil_for_backup(device, selected_depth_stencil, selected_depth_stencil_info->desc);
+				data.binding_state = depth_binding_state::binding_failed;
+				data.binding_detail = "The chosen buffer could not create a depth backup; no depth is currently bound.";
+				break;
+			}
+			assert(depth_stencil_backup->backup_texture != 0);
 
-				// Abort in case backup texture creation failed
-				if (depth_stencil_backup == nullptr)
+			// Avoid recreating shader resource view when the backup texture did not change
+			if (prev_shader_resource == 0 || device->get_resource_from_view(prev_shader_resource) != depth_stencil_backup->backup_texture)
+			{
+				if (!device->create_resource_view(depth_stencil_backup->backup_texture, resource_usage::shader_resource, srv_desc, &data.selected_shader_resource))
 				{
+					device_data->untrack_depth_stencil(device, selected_depth_stencil);
 					data.binding_state = depth_binding_state::binding_failed;
-					data.binding_detail = "The chosen buffer could not create a depth backup; no depth is currently bound.";
+					data.binding_detail = "The chosen buffer could not create a shader view; no depth is currently bound.";
 					break;
 				}
-				assert(depth_stencil_backup->backup_texture != 0);
-
-				// Avoid recreating shader resource view when the backup texture did not change
-				if (prev_shader_resource == 0 || device->get_resource_from_view(prev_shader_resource) != depth_stencil_backup->backup_texture)
-				{
-					if (api == device_api::d3d9)
-						srv_desc.format = format::r32_float; // Same format as backup texture, as set in 'track_depth_stencil_for_backup'
-
-					if (!device->create_resource_view(depth_stencil_backup->backup_texture, resource_usage::shader_resource, srv_desc, &data.selected_shader_resource))
-					{
-						device_data->untrack_depth_stencil(device, selected_depth_stencil);
-						data.binding_state = depth_binding_state::binding_failed;
-						data.binding_detail = "The chosen buffer could not create a shader view; no depth is currently bound.";
-						break;
-					}
-				}
-				else
-					data.selected_shader_resource = prev_shader_resource;
-
-				data.using_backup_texture = true;
 			}
 			else
-			{
-				if (!device->create_resource_view(selected_depth_stencil, resource_usage::shader_resource, srv_desc, &data.selected_shader_resource))
-				{
-					data.binding_state = depth_binding_state::binding_failed;
-					data.binding_detail = "The chosen buffer cannot be sampled; no depth is currently bound.";
-					break;
-				}
+				data.selected_shader_resource = prev_shader_resource;
 
-				assert(!data.using_backup_texture);
-			}
-
+			data.using_backup_texture = true;
 			data.selected_depth_stencil = selected_depth_stencil;
 			data.selected_identity = selected_id;
 			data.selected_desc = selected_depth_stencil_info->desc;
@@ -1083,7 +1026,7 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 	else if (!data.held)
 		data.shown = {};
 	// Evidence for later choices, once per Present that advanced the depth frame.
-	if (automatic && device_data->native_depth_present_index == native_present_index)
+	if (device_data->native_depth_present_index == native_present_index)
 		observe_present_coverage(data, device_data->frame_index, current_depth_stencil_resources);
 
 	// Rebinds only when the effects view changed; a readiness flip only
@@ -1096,8 +1039,6 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 	data.native_access_present = native_present_index;
 	data.native_access_open = true;
 	record_generic_row(runtime, data, native_present_index, false);
-	if (s_frame_activity_trace)
-		trace_activity_effect(runtime, data, *device_data, false, data.binding_detail);
 }
 static void set_generic_sampling_state(effect_runtime *runtime, command_list *commands, const generic_depth_data &data, bool reading)
 {
@@ -1167,6 +1108,8 @@ static void on_finish_render_effects(effect_runtime *runtime, command_list *comm
 // it (it would leave every proven state unproven, proven_state.h).
 static void finish_sampler_present(command_queue *queue, swapchain *swapchain)
 {
+	if (!supported_api(swapchain->get_device()))
+		return;
 	const sunshine_streamline::native_observer::suppression_scope add_on_work;
 	sunshine_depth::finish_present(queue, swapchain);
 	// The Present's FG snapshot ends with it.
@@ -1216,8 +1159,6 @@ static void register_depth_events()
 {
 	s_streamline_source_events = sunshine_streamline::source_enabled() || sunshine_upscaler_trace::capture_enabled();
 	sunshine_streamline::depth_capture::initialize(true); // Shared D3D12 capture also serves Generic fallback.
-	s_frame_activity_trace = false;
-	s_frame_activity_trace = sunshine_game3d::addon_config::frame_activity_trace();
 	// reshade_reloaded_effects: the texture binding must be set again after a reload.
 #define SUNSHINE_REGISTER_DEPTH_EVENT(event, handler) \
 	reshade::register_event<reshade::addon_event::event>(sunshine_addon_lifetime::guarded<handler>);
@@ -1435,7 +1376,7 @@ template void observe_candidate(generic_depth_data &, const depth_stencil_resour
 template void observe_candidate(generic_depth_data &, const depth_selection_resource &, uint32_t, uint32_t);
 #endif
 
-bool sunshine_depth::get_frame_depth(effect_runtime *runtime, frame_depth &output, depth_orientation orientation_override, bool request_calibration)
+bool sunshine_depth::get_frame_depth(effect_runtime *runtime, frame_depth &output)
 {
 	output = {};
 	if (!s_registered || runtime == nullptr)
@@ -1444,35 +1385,22 @@ bool sunshine_depth::get_frame_depth(effect_runtime *runtime, frame_depth &outpu
 	device *const device = runtime->get_device();
 	auto *data = runtime->get_private_data<generic_depth_data>();
 	auto *device_data = device->get_private_data<generic_depth_device_data>();
-	// This scope outlives the inner resource-map lock; diagnostics never log
-	// while that lock is held and preserve all existing return conditions.
-	activity_access_trace trace { runtime, data, device_data };
-	if (data != nullptr)
-	{
-		begin_fx_reference_query(data, request_calibration);
-	}
-	if (data == nullptr || device_data == nullptr) return trace.reject("missing_state");
-	if (!data->native_access_open) return trace.reject("access_closed");
-	if (!data->capture_ready && !data->held) return trace.reject("capture_unavailable");
-	if (data->selected_shader_resource == 0) return trace.reject("missing_view");
+	if (data == nullptr || device_data == nullptr) return false;
+	if (!data->native_access_open) return false;
+	if (!data->capture_ready && !data->held) return false;
+	if (data->selected_shader_resource == 0) return false;
 
 	// Binding, rendering and sampling share the immutable capture result. The
 	// validation only checks that its lifetime/assignment/present is still live;
 	// it never substitutes another source or newer copy into this frame.
-	if (s_frame_activity_trace)
-	{
-		const std::shared_lock<std::shared_mutex> lock(s_mutex);
-		trace.decision_present = device_data->native_present_index;
-		trace.decision_frame = device_data->frame_index;
-	}
 	uint32_t frame_width = 0, frame_height = 0;
 	runtime->get_screenshot_width_and_height(&frame_width, &frame_height);
 	if (data->native_access_present != device_data->native_present_index ||
 		!(data->held ? hold_shown_capture(runtime, *data, *device_data, frame_width, frame_height, false) :
 			validate_capture_record(runtime, *data, *device_data, data->selected_record)))
-		return trace.reject("capture_changed");
+		return false;
 	output = data->selected_capture;
-	resolve_fx_reference_calibration(data, output, orientation_override);
+	output.orientation = output.detected_orientation;
 	// The runtime owns this view until finish_effects; the lookup cannot outlive
 	// that callback. Do not hold the resource map lock while calling the device.
 	output.shader_resource = data->selected_shader_resource;
@@ -1484,15 +1412,11 @@ bool sunshine_depth::get_frame_depth(effect_runtime *runtime, frame_depth &outpu
 	if (output.resource == 0)
 	{
 		output = {};
-		return trace.reject("missing_view_resource");
+		return false;
 	}
 	output.ready = true;
 	if (device->get_api() == device_api::d3d12)
 		output.command_queue = runtime->get_command_queue()->get_native();
-	if (request_calibration)
-	{
-		finish_fx_reference_query(data, output);
-	}
 	return true;
 }
 
@@ -1501,4 +1425,3 @@ bool sunshine_depth::get_frame_depth(effect_runtime *runtime, frame_depth &outpu
 #include "generic_selection.inl"
 #include "depth_panel.inl"
 #include "generic_raw_evidence.inl"
-#include "generic_fx_reference.inl"

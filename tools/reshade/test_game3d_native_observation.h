@@ -200,10 +200,12 @@ namespace {
           out.rank(identity, row.key.id), out.rank(epoch, row.epoch));
       }
       const auto &depth = render.depth;
-      out.add(" rdy=%u reu=%u src=%u geo=%ux%u+%u+%u/%ux%u fga=%u cal=%u ori=%u", unsigned(depth.ready),
+      // cal: always 0 (the removed FX reference's calibration flag); the field
+      // stays so the line keeps its shape for recorded traces.
+      out.add(" rdy=%u reu=%u src=%u geo=%ux%u+%u+%u/%ux%u fga=%u cal=0 ori=%u", unsigned(depth.ready),
         unsigned(depth.reused_depth), out.rank(source, depth.source_id), unsigned(depth.width), unsigned(depth.height),
         unsigned(depth.x), unsigned(depth.y), unsigned(depth.active_width), unsigned(depth.active_height),
-        unsigned(depth.frame_generation_active), unsigned(depth.calibrated), unsigned(depth.orientation));
+        unsigned(depth.frame_generation_active), unsigned(depth.orientation));
       const auto &parameters = render.parameters;
       out.add(" pdr=%u pcr=%u pcb=%d pdv=%d", unsigned(parameters.depth_ready), unsigned(parameters.camera_ready),
         int(parameters.coordinate_basis), int(parameters.depth_view));

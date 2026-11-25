@@ -138,45 +138,6 @@ namespace {
     ++observation.finishes;
   }
 
-  const char *fixture_effect = R"FX(
-#if BUFFER_COLOR_SPACE == 1
-#define EXPORT_FORMAT RGB10A2
-#define EXPORT_TRANSFER "srgb"
-#else
-#define EXPORT_FORMAT RGBA16F
-#define EXPORT_TRANSFER "scrgb"
-#endif
-texture DoubleTex <
-  sunshine_sbs_export = 1;
-  sunshine_sbs_layout = "sbs_lr";
-  sunshine_sbs_color_space = EXPORT_TRANSFER;
-  sunshine_sbs_source_color_space = BUFFER_COLOR_SPACE;
-  sunshine_sbs_source_width = BUFFER_WIDTH;
-  sunshine_sbs_source_height = BUFFER_HEIGHT;
-> { Width = BUFFER_WIDTH * 2; Height = BUFFER_HEIGHT; Format = EXPORT_FORMAT; };
-texture GameBackBuffer : COLOR;
-sampler GameSampler { Texture = GameBackBuffer; };
-uniform float StereoGain < ui_type = "slider"; ui_min = 0.25; ui_max = 1.0; > = 1.0;
-void VS(uint vertex : SV_VertexID, out float4 position : SV_Position, out float2 uv : TEXCOORD0) {
-  uv = float2((vertex << 1) & 2, vertex & 2);
-  position = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1);
-}
-float4 Stereo(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
-#if BUFFER_COLOR_SPACE == 1
-  return float4((uv.x < 0.5 ? float3(1, 0.25, 0) : float3(0, 0.5, 1)) * StereoGain, 1);
-#else
-  return float4((uv.x < 0.5 ? float3(4, 0.5, -0.125) : float3(0.125, 2, 8)) * StereoGain, 1);
-#endif
-}
-float4 Mono(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
-  return tex2D(GameSampler, uv);
-}
-technique SuperDepth3D {
-  pass DoubleOut { VertexShader = VS; PixelShader = Stereo; RenderTarget = DoubleTex; }
-  pass StereoOut { VertexShader = VS; PixelShader = Mono; }
-}
-)FX";
-
   void write_file(const fs::path &path, const std::string &text) {
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     output << text;
@@ -209,7 +170,8 @@ technique SuperDepth3D {
     bool interactive = false;
     bool controlled = false;
     // Native Game 3D without any FX: the add-on packs stereo straight into export slots.
-    bool native_only = false;
+    // Game 3D renders natively with no effect installed: the only export path.
+    static constexpr bool native_only = true;
     fs::path output_directory;
     HMODULE receiver_module = nullptr;
     void *receiver_state = nullptr;
@@ -258,11 +220,7 @@ technique SuperDepth3D {
       expected_color = color;
       controlled = !receiver_dll.empty();
       output_directory = directory;
-      const char *native_flag = std::getenv("SUNSHINE_GAME3D_NATIVE_ONLY");
-      require(!native_flag || !*native_flag || !std::strcmp(native_flag, "0") || !std::strcmp(native_flag, "1"),
-        "SUNSHINE_GAME3D_NATIVE_ONLY must be 0 or 1");
-      native_only = native_flag && !std::strcmp(native_flag, "1");
-      require(!native_only || controlled, "The native D3D11 fixture requires the production-receiver facade");
+      require(controlled, "The native D3D11 fixture requires the production-receiver facade");
       const char *child_flag = std::getenv("SUNSHINE_RUNTIME_CHILD_WINDOW");
       require(!child_flag || !*child_flag || !std::strcmp(child_flag, "0") || !std::strcmp(child_flag, "1"),
         "SUNSHINE_RUNTIME_CHILD_WINDOW must be 0 or 1");
@@ -285,15 +243,9 @@ technique SuperDepth3D {
       fs::create_directories(directory / "addons");
       fs::copy_file(runtime, directory / "dxgi.dll", fs::copy_options::overwrite_existing);
       fs::copy_file(addon, directory / "addons" / "SunshineSBS.addon64", fs::copy_options::overwrite_existing);
-      if (native_only) {
-        write_file(directory / "preset.ini", "");
-      } else {
-        write_file(directory / "effects" / "SuperDepth3D.fx", fixture_effect);
-        write_file(directory / "preset.ini", "Techniques=SuperDepth3D@SuperDepth3D.fx\nTechniqueSorting=SuperDepth3D@SuperDepth3D.fx\n");
-      }
+      write_file(directory / "preset.ini", "");
       write_file(directory / "ReShade.ini", "[ADDON]\nAddonPath=.\\addons\nDisabledAddons=Generic Depth\n[GENERAL]\nEffectSearchPaths=.\\effects\nPresetPath=.\\preset.ini\nPerformanceMode=0\nSkipLoadingDisabledEffects=0\nEffectCachePath=.\\cache\n[OVERLAY]\nTutorialProgress=4\nShowFPS=0\nShowClock=0\nShowPresetName=0\n[STYLE]\nHdrOverlayBrightness=203\n"
-        // Native Game 3D is on by default; the reference-effect transport turns it off.
-        + std::string("[SUNSHINE_GAME3D]\nEnabled=") + (native_only ? "1\n" : "0\n"));
+        "[SUNSHINE_GAME3D]\nEnabled=1\n");
       SetEnvironmentVariableW(L"RESHADE_BASE_PATH_OVERRIDE", directory.c_str());
 
       // Create the receiver before loading ReShade so it is a separate native D3D11 device.
@@ -553,20 +505,6 @@ technique SuperDepth3D {
       return correct;
     }
 
-    void set_gain(float value) {
-      api::effect_uniform_variable gain {};
-      observation.runtime->enumerate_uniform_variables("SuperDepth3D.fx", [&](api::effect_runtime *runtime, api::effect_uniform_variable variable) {
-        char name[128] {};
-        runtime->get_uniform_variable_name(variable, name);
-        if (std::strcmp(name, "StereoGain") == 0) {
-          gain = variable;
-        }
-      });
-      require(gain.handle != 0, "Actual effect is missing its live StereoGain control");
-      observation.runtime->set_uniform_value_float(gain, &value, 1);
-      expected_gain = value;
-    }
-
     bool set_test_focus(bool focused) {
       if (!set_exporter_foreground) {
         return false;
@@ -576,137 +514,6 @@ technique SuperDepth3D {
         receiver_focus(receiver_state, focused);
       }
       return true;
-    }
-
-    std::uint64_t exercise_overlay(std::uint64_t generation) {
-      if (set_overlay_patch) {
-        set_overlay_patch(TRUE);
-      } else {
-        std::puts("SKIP deterministic GUI patch checks: they require the distinct runtime-test add-on");
-      }
-      expect_overlay = true;
-      require(observation.runtime->open_overlay(true, api::input_source::keyboard), "Official ReShade overlay did not open");
-      auto prior_sequence = last_sequence;
-      auto prior_timestamp = last_timestamp;
-      wait_pixels(0, generation, prior_sequence);
-      require(last_timestamp > prior_timestamp, "Opening the overlay did not produce a fresh source frame");
-
-      // The real uniform is also a visible native ReShade slider. Changing it while the
-      // menu is open must update both authored eyes without changing the IPC generation.
-      prior_sequence = last_sequence;
-      prior_timestamp = last_timestamp;
-      set_gain(0.5f);
-      wait_pixels(0, generation, prior_sequence);
-      require(last_timestamp > prior_timestamp, "Live overlay adjustment reused the old source timestamp");
-
-      // GUI activity never replaces proof that the authored technique actually executed.
-      observation.runtime->set_effects_state(false);
-      step();
-      wire::metadata_t metadata;
-      require(snapshot(*shared, metadata) && !metadata.generation, "Visible GUI kept export active after effects disable");
-      require_receiver_inactive("Receiver retained stereo with GUI visible but effects disabled");
-      observation.runtime->set_effects_state(true);
-      generation = wait_pixels(generation);
-      prior_sequence = last_sequence;
-      set_gain(1.0f);
-      wait_pixels(0, generation, prior_sequence);
-
-      if (set_test_focus(false)) {
-        step();
-        require(snapshot(*shared, metadata) && !metadata.generation, "Open GUI bypassed the publisher focus gate");
-        require_receiver_inactive("Receiver retained stereo after focus loss with GUI open");
-        set_test_focus(true);
-        generation = wait_pixels(generation);
-      }
-
-      const auto previous_reloads = observation.reloads;
-      const auto previous_techniques = observation.techniques;
-      observation.runtime->reload_effect_next_frame(nullptr);
-      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(6);
-      do {
-        step();
-        if (observation.techniques == previous_techniques) {
-          require(snapshot(*shared, metadata) && !metadata.generation, "Reload retained an old stereo publication before a new technique executed");
-          require_receiver_inactive("Receiver retained stale stereo during overlay reload");
-        }
-      } while ((observation.reloads == previous_reloads || observation.techniques == previous_techniques) && std::chrono::steady_clock::now() < deadline);
-      require(observation.reloads > previous_reloads && observation.techniques > previous_techniques, "Official runtime did not complete effect reload");
-      generation = wait_pixels(generation);
-
-      prior_sequence = last_sequence;
-      if (set_overlay_patch) {
-        set_overlay_patch(FALSE);
-      }
-      expect_overlay = false;
-      require(observation.runtime->open_overlay(false, api::input_source::keyboard), "Official ReShade overlay did not close");
-      require(observation.overlay_opens == 1 && observation.overlay_closes == 1, "Actual overlay transition callbacks were not delivered");
-      wait_pixels(0, generation, prior_sequence);
-      std::puts(set_overlay_patch ? "PASS actual GUI pixels in both eyes: native controls, opaque/translucent patches, live gain, close cleanup and overlay reload" : "PASS actual GUI pixels: native controls, distinct stereo backgrounds, live gain, close cleanup and overlay reload; deterministic patch checks skipped");
-      return generation;
-    }
-
-    void inspect_runtime_texture() {
-      api::effect_texture_variable variable {};
-      observation.runtime->enumerate_texture_variables("SuperDepth3D.fx", [&](api::effect_runtime *runtime, api::effect_texture_variable texture) {
-        int marker = 0;
-        if (runtime->get_annotation_int_from_texture_variable(texture, "sunshine_sbs_export", &marker, 1) && marker == 1) {
-          variable = texture;
-        }
-      });
-      require(variable.handle != 0, "Actual runtime did not expose annotated export texture");
-      unsigned source_color = 0;
-      require(observation.runtime->get_annotation_uint_from_texture_variable(variable, "sunshine_sbs_source_color_space", &source_color, 1) && source_color == expected_color, "Actual FX annotation does not match native swapchain color");
-      unsigned width = 0, height = 0;
-      char layout[32] {}, transfer[32] {};
-      require(observation.runtime->get_annotation_uint_from_texture_variable(variable, "sunshine_sbs_source_width", &width, 1) && width == source_width && observation.runtime->get_annotation_uint_from_texture_variable(variable, "sunshine_sbs_source_height", &height, 1) && height == source_height && observation.runtime->get_annotation_string_from_texture_variable(variable, "sunshine_sbs_layout", layout) && std::strcmp(layout, "sbs_lr") == 0 && observation.runtime->get_annotation_string_from_texture_variable(variable, "sunshine_sbs_color_space", transfer) && std::strcmp(transfer, expected_color == 1 ? "srgb" : "scrgb") == 0, "Actual FX export layout, dimensions or transfer annotation differs from the contract");
-      api::resource_view view {};
-      observation.runtime->get_texture_binding(variable, &view, nullptr);
-      require(view.handle != 0, "Actual runtime export texture has no shader resource view");
-      // ReShade's C++ handle-return getter is not MSVC/MinGW ABI compatible, even though
-      // the handle occupies only eight bytes. Native COM provides a real output parameter.
-      com_ptr<ID3D11Resource> resource;
-      reinterpret_cast<ID3D11View *>(view.handle)->GetResource(resource.put());
-      com_ptr<ID3D11Texture2D> texture;
-      require(resource.p != nullptr, "Actual runtime did not expose export texture resource");
-      checked(resource->QueryInterface(IID_PPV_ARGS(texture.put())), "Export resource is not a texture");
-      const auto sdk_resource = observation.runtime->get_device()->get_resource_from_view(view);
-      require(sdk_resource.handle == reinterpret_cast<std::uint64_t>(resource.p), "Adapted SDK getter differs from native COM resource");
-      require(inspect_texture(game.p, game_context.p, texture.p, expected_color == 1 ? 24 : 10), "Actual FX texture pixels differ from the shader output");
-      std::puts("actual runtime texture pixels and SDK/native COM resource identity PASS");
-    }
-
-    void run_background() {
-      std::puts("SKIP foreground publication checks: fixture window is not foreground; validating real runtime/background rejection only");
-      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(6);
-      do {
-        step();
-      } while (!observation.techniques && std::chrono::steady_clock::now() < deadline);
-      require(observation.runtime && observation.techniques, "Actual runtime did not compile/execute the fixture");
-      inspect_runtime_texture();
-      wire::metadata_t metadata;
-      require(snapshot(*shared, metadata) && !metadata.generation, "Background game bypassed production foreground gate");
-      const auto before_disable = observation.techniques;
-      observation.runtime->set_effects_state(false);
-      step();
-      require(observation.techniques == before_disable, "Actual runtime ignored effects disable");
-      observation.runtime->set_effects_state(true);
-      step();
-      require(observation.techniques > before_disable, "Actual runtime ignored effects enable");
-      require(observation.runtime->open_overlay(true, api::input_source::keyboard), "Actual runtime overlay did not open");
-      const auto before_reload = observation.reloads;
-      const auto before_reload_techniques = observation.techniques;
-      observation.runtime->reload_effect_next_frame(nullptr);
-      const auto reload_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(6);
-      do {
-        step();
-      } while ((observation.reloads == before_reload || observation.techniques == before_reload_techniques) && std::chrono::steady_clock::now() < reload_deadline);
-      require(observation.reloads > before_reload && observation.techniques > before_reload_techniques, "Actual runtime did not reload effects");
-      require(observation.runtime->open_overlay(false, api::input_source::keyboard), "Actual runtime overlay did not close");
-      require(observation.overlay_opens == 1 && observation.overlay_closes == 1, "Actual overlay transition callbacks were not delivered");
-      step();
-      inspect_runtime_texture();
-      require(snapshot(*shared, metadata) && !metadata.generation, "Background reload/overlay bypassed foreground gate");
-      std::printf("PASS partial actual runtime color=%u: present=%u technique=%u finish=%u reload=%u; FX pixels/ABI/color/events/background rejection. Full shared publication SKIPPED.\n", expected_color, observation.presents, observation.techniques, observation.finishes, observation.reloads);
     }
 
     // The add-on writes its log lines asynchronously; allow the writer a moment.
@@ -753,6 +560,18 @@ technique SuperDepth3D {
       wait_pixels(generation);
       require(read64(shared->consumer_nonce) != previous_nonce, "Native D3D11 receiver restart reused its old nonce");
       exercise_resize_toggle();
+      if (child_window) {
+        // The child stops covering the root: the exporter and the receiver both withdraw.
+        // Covering it exactly again exports a new generation.
+        generation = wait_pixels();
+        SetWindowPos(window, nullptr, 0, 0, source_width, source_height - 2, SWP_NOZORDER | SWP_NOACTIVATE);
+        for (int i = 0; i < 3; ++i) step();
+        require(snapshot(*shared, metadata) && metadata.generation == 0, "A partial child swapchain window kept its export");
+        require_receiver_inactive("Production receiver retained stereo from a partial child swapchain window");
+        SetWindowPos(window, nullptr, 0, 0, source_width, source_height, SWP_NOZORDER | SWP_NOACTIVATE);
+        wait_pixels(generation);
+        std::puts("PASS WS_CHILD swapchain window covering a borderless root: exported while exact, withdrawn while partial");
+      }
       require(observation.presents == observation.finishes && observation.techniques == 0,
         "Native D3D11 presentation lifecycle is incomplete");
       std::printf("PASS native add-on-only D3D11 color=%u: direct slot export, overlay copy path, effects toggle, focus recovery, receiver restart, ResizeBuffers colour toggle\n",
@@ -823,58 +642,14 @@ technique SuperDepth3D {
         original, other, original);
     }
 
-    void run() {
-      if (native_only) {
-        run_native_only();
-        return;
-      }
-      if (!interactive && !controlled) {
-        run_background();
-        return;
-      }
-      auto generation = wait_pixels();
-      if (receiver_state) {
-        sunshine_receiver_test_frame retained;
-        require(receiver_poll(receiver_state, &retained) == 1 && retained.sequence == last_received.sequence && retained.timestamp_ns == last_received.timestamp_ns, "A retained frame changed its source sequence or timestamp without another game Present");
-      }
-      require(observation.runtime && observation.techniques, "Official runtime did not execute the fixture technique");
-      inspect_runtime_texture();
-      observation.runtime->set_effects_state(false);
-      step();
-      wire::metadata_t metadata;
-      require(snapshot(*shared, metadata) && metadata.generation == 0, "Effect disable retained a stale publication");
-      require_receiver_inactive("Production receiver retained stereo after effect disable");
-      observation.runtime->set_effects_state(true);
-      generation = wait_pixels(generation);
-      generation = exercise_overlay(generation);
-      if (controlled) {
-        const auto previous_nonce = read64(shared->consumer_nonce);
-        receiver_destroy(receiver_state);
-        receiver_state = receiver_create(receiver.p, receiver_context.p, root, GetCurrentProcessId(), &source_rect);
-        require(receiver_state != nullptr, "Could not restart production receiver");
-        generation = wait_pixels(generation);
-        require(read64(shared->consumer_nonce) != previous_nonce, "Receiver restart reused the old consumer nonce");
-      }
-      if (child_window) {
-        // The child stops covering the root: the exporter and the receiver both withdraw.
-        // Covering it exactly again exports a new generation.
-        SetWindowPos(window, nullptr, 0, 0, source_width, source_height - 2, SWP_NOZORDER | SWP_NOACTIVATE);
-        for (int i = 0; i < 3; ++i) step();
-        require(snapshot(*shared, metadata) && metadata.generation == 0, "A partial child swapchain window kept its export");
-        require_receiver_inactive("Production receiver retained stereo from a partial child swapchain window");
-        SetWindowPos(window, nullptr, 0, 0, source_width, source_height, SWP_NOZORDER | SWP_NOACTIVATE);
-        generation = wait_pixels(generation);
-        std::puts("PASS WS_CHILD swapchain window covering a borderless root: exported while exact, withdrawn while partial");
-      }
-      std::printf("PASS actual ReShade6.8 DX11 color=%u: present=%u technique=%u finish=%u reload=%u; pixels, effect disable, overlay/reload/close%s\n", expected_color, observation.presents, observation.techniques, observation.finishes, observation.reloads, controlled ? "; controlled focus, production receiver and receiver restart" : "");
-    }
+    void run() { run_native_only(); }
   };
 }  // namespace
 
 int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
-  if (argc != 5 && argc != 6) {
-    std::fprintf(stderr, "usage: reshade_runtime_test <official-ReShade64.dll> <SunshineSBS.addon64> <isolated-output-directory> <srgb|scrgb|pq> [production-receiver-test.dll]\nThe optional receiver facade requires the distinct SunshineSBSTest.addon64 and supplies controlled foreground observations.\nWith it, SUNSHINE_RUNTIME_CHILD_WINDOW=1 presents to a WS_CHILD window covering an off-screen borderless root.\n");
+  if (argc != 6) {
+    std::fprintf(stderr, "usage: reshade_runtime_test <official-ReShade64.dll> <SunshineSBSTest.addon64> <isolated-output-directory> <srgb|scrgb|pq> <production-receiver-test.dll>\nThe receiver facade supplies controlled foreground observations.\nSUNSHINE_RUNTIME_CHILD_WINDOW=1 presents to a WS_CHILD window covering an off-screen borderless root.\n");
     return 2;
   }
   // A broken presentation hook must never leave the synthetic window running indefinitely.
@@ -889,9 +664,9 @@ int main(int argc, char **argv) {
                                                                                                         0;
     require(color != 0, "Unknown game color-space argument");
     fixture_t fixture;
-    fixture.initialize(fs::absolute(argv[1]), fs::absolute(argv[2]), fs::absolute(argv[3]), color, argc == 6 ? fs::absolute(argv[5]) : fs::path {});
+    fixture.initialize(fs::absolute(argv[1]), fs::absolute(argv[2]), fs::absolute(argv[3]), color, fs::absolute(argv[5]));
     fixture.run();
-    return fixture.interactive || fixture.controlled ? 0 : 77;
+    return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "FAIL: %s\n", error.what());
     return 1;

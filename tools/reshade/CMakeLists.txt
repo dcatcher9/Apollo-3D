@@ -275,8 +275,6 @@ add_custom_target(Sunshine3DPackage ALL
   COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/install.ps1" "${CMAKE_CURRENT_BINARY_DIR}/package/install.ps1"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/install-runtime.ps1" "${CMAKE_CURRENT_BINARY_DIR}/package/install-runtime.ps1"
   COMMAND ${CMAKE_COMMAND} -E rm -f "${CMAKE_CURRENT_BINARY_DIR}/package/Shaders/SunshineDepth3D.fx"
-  COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/Shaders"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/Shaders/SunshineDepth3D.fx" "${CMAKE_CURRENT_BINARY_DIR}/Shaders/SunshineDepth3D.fx"
   DEPENDS SunshineSBS
   COMMENT "Staging one production Sunshine 3D add-on and its installer")
 # The test add-on's exports, which reach depth_addon.cpp's and the probe's
@@ -613,13 +611,13 @@ if(BUILD_TESTING)
     "${CMAKE_CURRENT_SOURCE_DIR}/provider_log_goldens/status_lines.txt")
   set_tests_properties(reshade_provider_log_lines PROPERTIES TIMEOUT 15 LABELS "characterization")
 
-  add_executable(reshade_native_depth_calibration_tests test_native_depth_calibration.cpp)
-  target_compile_features(reshade_native_depth_calibration_tests PRIVATE cxx_std_17)
+  add_executable(reshade_depth_orientation_tests test_depth_orientation.cpp)
+  target_compile_features(reshade_depth_orientation_tests PRIVATE cxx_std_17)
   if(MINGW)
-    target_link_options(reshade_native_depth_calibration_tests PRIVATE -static)
+    target_link_options(reshade_depth_orientation_tests PRIVATE -static)
   endif()
-  add_test(NAME reshade_native_depth_calibration COMMAND reshade_native_depth_calibration_tests)
-  set_tests_properties(reshade_native_depth_calibration PROPERTIES TIMEOUT 15)
+  add_test(NAME reshade_depth_orientation COMMAND reshade_depth_orientation_tests)
+  set_tests_properties(reshade_depth_orientation PROPERTIES TIMEOUT 15)
   add_executable(reshade_depth_selection_tests test_depth_selection.cpp)
   target_compile_features(reshade_depth_selection_tests PRIVATE cxx_std_17)
   if(MINGW)
@@ -684,34 +682,6 @@ if(BUILD_TESTING)
   endif()
 
   if(SUNSHINE_SBS_RUNTIME_TESTS)
-    add_executable(reshade_native_stereo_runtime_d3d11_test test_native_stereo_runtime_d3d11.cpp)
-    target_compile_features(reshade_native_stereo_runtime_d3d11_test PRIVATE cxx_std_17)
-    target_include_directories(reshade_native_stereo_runtime_d3d11_test SYSTEM PRIVATE "${SUNSHINE_RESHADE_INCLUDE_DIR}")
-    target_link_libraries(reshade_native_stereo_runtime_d3d11_test PRIVATE d3d11 dxgi dxguid user32)
-    if(MINGW)
-      target_link_options(reshade_native_stereo_runtime_d3d11_test PRIVATE -static)
-    endif()
-    add_executable(reshade_native_selection_runtime_test test_native_selection_runtime.cpp)
-    target_compile_features(reshade_native_selection_runtime_test PRIVATE cxx_std_17)
-    target_include_directories(reshade_native_selection_runtime_test SYSTEM PRIVATE "${SUNSHINE_RESHADE_INCLUDE_DIR}")
-    target_link_libraries(reshade_native_selection_runtime_test PRIVATE d3d12 dxgi dxguid d3dcompiler user32)
-    if(MINGW)
-      target_link_options(reshade_native_selection_runtime_test PRIVATE -static)
-    endif()
-    add_executable(reshade_native_stereo_runtime_test test_native_stereo_runtime.cpp)
-    target_compile_features(reshade_native_stereo_runtime_test PRIVATE cxx_std_17)
-    target_include_directories(reshade_native_stereo_runtime_test SYSTEM PRIVATE "${SUNSHINE_RESHADE_INCLUDE_DIR}")
-    add_executable(reshade_native_halo_runtime_test test_native_halo_runtime.cpp)
-    target_compile_features(reshade_native_halo_runtime_test PRIVATE cxx_std_17)
-    target_include_directories(reshade_native_halo_runtime_test SYSTEM PRIVATE "${SUNSHINE_RESHADE_INCLUDE_DIR}")
-    target_link_libraries(reshade_native_halo_runtime_test PRIVATE d3d12 dxgi dxguid user32)
-    if(MINGW)
-      target_link_options(reshade_native_halo_runtime_test PRIVATE -static)
-    endif()
-    target_link_libraries(reshade_native_stereo_runtime_test PRIVATE d3d12 dxgi dxguid user32)
-    if(MINGW)
-      target_link_options(reshade_native_stereo_runtime_test PRIVATE -static)
-    endif()
     # Native sampler validation is opt-in GPU execution, never an automatic CTest. It
     # compiles its production file (depth_content_sampler.cpp) itself, outside every
     # view (README, Test builds).
@@ -853,26 +823,6 @@ if(BUILD_TESTING)
     if(MINGW)
       target_link_options(reshade_depth_alternating_runtime_test PRIVATE -static)
     endif()
-    # Loads a separately supplied Depth3D checkout and official runtime; execution
-    # remains manual and never becomes an automatic desktop or download test.
-    add_executable(reshade_depth3d_runtime_test test_depth3d_runtime.cpp)
-    target_compile_features(reshade_depth3d_runtime_test PRIVATE cxx_std_17)
-    set_target_properties(reshade_depth3d_runtime_test PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES)
-    target_include_directories(reshade_depth3d_runtime_test SYSTEM PRIVATE "${SUNSHINE_RESHADE_INCLUDE_DIR}")
-    target_link_libraries(reshade_depth3d_runtime_test PRIVATE dxguid user32 d3d12 dxgi)
-    if(MINGW)
-      target_link_options(reshade_depth3d_runtime_test PRIVATE -static)
-    endif()
-
-    add_executable(reshade_depth3d_runtime_d3d12_test test_depth3d_runtime_d3d12.cpp)
-    target_compile_features(reshade_depth3d_runtime_d3d12_test PRIVATE cxx_std_17)
-    set_target_properties(reshade_depth3d_runtime_d3d12_test PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES)
-    target_include_directories(reshade_depth3d_runtime_d3d12_test SYSTEM PRIVATE "${SUNSHINE_RESHADE_INCLUDE_DIR}")
-    target_link_libraries(reshade_depth3d_runtime_d3d12_test PRIVATE d3d12 dxgi dxguid user32)
-    if(MINGW)
-      target_link_options(reshade_depth3d_runtime_d3d12_test PRIVATE -static)
-    endif()
-
     # The renderer's background-build hooks (test_game3d_renderer_build.h),
     # and the test clock's seam (sunshine_view_clock).
     sunshine_game3d_core_view(sunshine_game3d_core_renderer_test SEAMS SUNSHINE_GAME3D_RENDERER_TEST SUNSHINE_GAME3D_TEST_CLOCK)
@@ -990,7 +940,7 @@ if(BUILD_TESTING)
       target_link_options(reshade_game3d_native_runtime_d3d11_test PRIVATE -static)
     endif()
 
-    foreach(transport_target IN ITEMS reshade_runtime_present_d3d12_test reshade_native_present_d3d12_test reshade_game_present_d3d12_test)
+    foreach(transport_target IN ITEMS reshade_game_present_d3d12_test)
       add_executable(${transport_target} test_runtime_present_d3d12.cpp)
       target_compile_features(${transport_target} PRIVATE cxx_std_17)
       set_target_properties(${transport_target} PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES)
@@ -1001,7 +951,6 @@ if(BUILD_TESTING)
         target_link_options(${transport_target} PRIVATE -static)
       endif()
     endforeach()
-    target_compile_definitions(reshade_native_present_d3d12_test PRIVATE SUNSHINE_NATIVE_EXPORT_FIXTURE)
     target_compile_definitions(reshade_game_present_d3d12_test PRIVATE SUNSHINE_GAME_EXPORT_FIXTURE)
 
     # The add-on's lifecycle under ReShade (README, Session-level tests): in

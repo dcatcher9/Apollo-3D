@@ -18,8 +18,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
   // At the start of each Present of a runtime, under the lock: the previous
   // Present, if no scene told the ramp about it, was shown without Game 3D
   // stereo (Game 3D disabled, the renderer unavailable or preparing, a
-  // failed native lease, an FX path that cannot place the scene: no FX
-  // uniforms, or cropped depth an older FX cannot sample), and the ramp
+  // failed native lease), and the ramp
   // hears it now as not ready at its own time, before this Present's scene
   // does. Presents shown without ready depth for more than 250 ms then
   // restart the 500 ms fade (owner ruling 10-27), while a pause with no
@@ -122,16 +121,10 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
     if (!proof.raw_supported) {
       return scene; // No competing camera-uniform writer.
     }
-    const bool cropped = depth.ready && (depth.x || depth.y || depth.active_width != depth.width || depth.active_height != depth.height);
-    // Native constants always carry the active rectangle. Only reference
-    // effects need to prove that their older uniform interface supports it.
-    if (proof.addon_native || fx_reference_has_rect(proof)) {
-      if (depth.ready && depth.width && depth.height) {
-        scene.rect = {float(depth.x) / depth.width, float(depth.y) / depth.height,
-          float(depth.active_width) / depth.width, float(depth.active_height) / depth.height};
-      }
-    } else if (cropped) {
-      return scene; // An older shader must not sample allocation padding as scene depth.
+    // The render constants always carry the active rectangle.
+    if (depth.ready && depth.width && depth.height) {
+      scene.rect = {float(depth.x) / depth.width, float(depth.y) / depth.height,
+        float(depth.active_width) / depth.width, float(depth.active_height) / depth.height};
     }
     if (projection_provided) {
       // A raw encoding returning from here must see a fresh target first.
@@ -251,10 +244,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       }
       coefficients = projection::make(depth.projection.encoding, depth.projection.A, depth.projection.B,
         depth.projection.raw_scale, depth.projection.raw_bias);
-      if (fx_reference_rejects_linear(proof, linear)) coefficients = {}; // Legacy FX has no reciprocal input basis.
       proof.projection_policy.configure(budget);
-      if (!proof.addon_native && !fx_reference_has_raw_range(proof) &&
-          (depth.projection.raw_scale != 1.0 || depth.projection.raw_bias != 0.0)) coefficients = {};
       proof.projection_policy.synchronize_feedback(depth.provided.feedback);
       sunshine_game3d::depth_input::sample measured;
       if (sunshine_game3d::depth_input::latest_sample(runtime, measured) && measured.moments.supplied) {

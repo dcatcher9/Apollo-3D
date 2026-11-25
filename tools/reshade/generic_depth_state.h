@@ -65,7 +65,6 @@ SUNSHINE_DEPTH_ADDON_SHARED bool s_registered = false;
 SUNSHINE_DEPTH_ADDON_SHARED bool s_initialized = false;
 // Fixed for each add-on registration; changing the diagnostic requires restart.
 SUNSHINE_DEPTH_ADDON_SHARED bool s_streamline_source_events = false;
-SUNSHINE_DEPTH_ADDON_SHARED bool s_frame_activity_trace = false; // Opt-in metadata only; never changes capture policy.
 SUNSHINE_DEPTH_ADDON_SHARED const char *s_status_message = "Depth selection has not been initialized.";
 SUNSHINE_DEPTH_ADDON_SHARED constexpr const char *s_overlay_title = "Sunshine 3D";
 SUNSHINE_DEPTH_ADDON_SHARED std::atomic<uint64_t> s_next_command_identity { 1 };
@@ -83,7 +82,7 @@ SUNSHINE_DEPTH_ADDON_SHARED bool content_supported(const resource_desc &desc)
 SUNSHINE_DEPTH_ADDON_SHARED effect_runtime *s_challenger_owner = nullptr;
 SUNSHINE_DEPTH_ADDON_SHARED std::mutex s_challenger_mutex;
 
-SUNSHINE_DEPTH_ADDON_SHARED bool s_disable_intz = false;
+
 
 struct depth_tracking_demand
 {
@@ -133,7 +132,6 @@ struct capture_region
 
 enum class depth_binding_state { waiting_game, waiting_activity, filtered, binding_failed, waiting_capture, ready };
 using sunshine_game3d::depth_output::hold_gate;
-enum class native_depth_ui_state { inactive, waiting_depth, calibrating, waiting_orientation, ready };
 
 struct __declspec(uuid("c072221d-786d-4b6d-8f0b-52e0f325903e")) generic_depth_data
 {
@@ -200,12 +198,7 @@ struct __declspec(uuid("c072221d-786d-4b6d-8f0b-52e0f325903e")) generic_depth_da
 	bool native_access_open = false;
 	bool native_driver = false;
 	bool native_effects_lease = false;
-	bool native_depth_requested = false;
 	uint64_t native_access_present = 0;
-	// Presentation-only snapshot: no borrowed GPU handles survive get_frame_depth.
-	native_depth_ui_state native_ui_state = native_depth_ui_state::inactive;
-	unsigned native_ui_samples = 0;
-	uint64_t native_ui_present = 0;
 	depth_binding_state binding_state = depth_binding_state::waiting_game;
 	const char *binding_detail = "Waiting for the game to create a depth buffer.";
 	const char *selection_reason = "waiting for depth";
@@ -262,8 +255,7 @@ struct __declspec(uuid("c072221d-786d-4b6d-8f0b-52e0f325903e")) generic_depth_da
 	uint64_t last_current_sample_tick = 0;
 	std::vector<uint64_t> observed_ids;
 	std::unordered_map<uint64_t, capture_region> observed_regions;
-	// Raw calibration summaries only; no textures or native pointers are cached.
-	std::unordered_map<uint64_t, sunshine_depth::native_depth_calibration> native_calibrations;
+
 	uint64_t last_logged_id = 0;
 	depth_binding_state last_logged_state = depth_binding_state::waiting_game;
 	sunshine_diagnostics::log_gate status_log;
@@ -276,19 +268,6 @@ struct __declspec(uuid("c072221d-786d-4b6d-8f0b-52e0f325903e")) generic_depth_da
 	sunshine_streamline::depth_capture::record_stage end_of_frame_refusal = sunshine_streamline::depth_capture::record_stage::not_attempted;
 	// Observation only: these fields never participate in routing or readiness.
 	const char *capture_wait_detail = nullptr;
-	struct capture_trace_record
-	{
-		uint64_t present = 0, frame = 0, anchor = 0, epoch = 0;
-		unsigned count = 0, raster = 0, copied = 0, ambiguous = 0, confirmed = 0, views = 0, floors = 0;
-		std::array<uint64_t, 4> members {};
-		std::array<uint64_t, 4> last_used {}, draws {}, writes {};
-		std::array<capture_region, 4> regions {};
-		const char *reason = "not_observed";
-	} trace_capture;
-	uint64_t trace_effect_present = std::numeric_limits<uint64_t>::max();
-	uint64_t trace_access_present = std::numeric_limits<uint64_t>::max();
-	uint64_t trace_snapshot_frame = 0, trace_snapshot_present = 0;
-	sunshine_diagnostics::family_gap_observer trace_gaps;
 	// The depth frame this runtime last judged the hold gate on (hold_verdict;
 	// zero: none).
 	uint64_t hold_judged_frame = 0;
@@ -410,14 +389,6 @@ struct __declspec(uuid("94e283ef-6714-4d50-b936-71d6308a4be4")) generic_depth_de
 	// Source of depth_stencil_backup::content_serial.
 	uint64_t next_content_serial = 0;
 	uint64_t native_present_index = 0, native_depth_present_index = 0;
-	// Callback ordinals, NOT game/frame-generation IDs. At most four short
-	// diagnostic bursts; a scene-confirmed failure is required to start one.
-	struct activity_trace_state
-	{
-		unsigned bursts = 0, effects = 0, accesses = 0, dropped_events = 0;
-		uint64_t first_present = 0, last_present = 0, next_start_tick = 0;
-		uint64_t event_present = 0, focus_source = 0;
-	} activity_trace;
 
 	// List of queues created for this device
 	std::vector<command_queue *> queues;
@@ -450,8 +421,6 @@ struct __declspec(uuid("94e283ef-6714-4d50-b936-71d6308a4be4")) generic_depth_de
 			return &backup;
 		}
 
-		const device_api api = device->get_api();
-		if (api <= device_api::d3d12)
 		{
 			std::shared_lock<std::shared_mutex> lock(s_mutex);
 			if (depth_stencil_resources.find(depth_stencil) == depth_stencil_resources.end())
@@ -471,11 +440,7 @@ struct __declspec(uuid("94e283ef-6714-4d50-b936-71d6308a4be4")) generic_depth_de
 			desc.usage |= resource_usage::resolve_dest;
 		}
 
-		if (api == device_api::d3d9)
-			desc.texture.format = format::r32_float; // D3DFMT_R32F, since INTZ does not support D3DUSAGE_RENDERTARGET which is required for copying
-		// Use depth format as-is in OpenGL and Vulkan, since those are valid for shader resource views there
-		else if (api != device_api::opengl && api != device_api::vulkan)
-			desc.texture.format = format_to_typeless(desc.texture.format);
+		desc.texture.format = format_to_typeless(desc.texture.format);
 
 		// First try to revive a backup resource that was previously enqueued for delayed destruction
 		for (depth_stencil_backup &backup : depth_stencil_backups)
@@ -520,8 +485,7 @@ struct __declspec(uuid("94e283ef-6714-4d50-b936-71d6308a4be4")) generic_depth_de
 		}
 		else
 		{
-			if (api <= device_api::d3d12)
-				reinterpret_cast<IUnknown *>(depth_stencil.handle)->Release();
+			reinterpret_cast<IUnknown *>(depth_stencil.handle)->Release();
 			sunshine_log::message(reshade::log::level::error, "Failed to create backup depth-stencil texture!");
 
 			return nullptr;
@@ -531,7 +495,7 @@ struct __declspec(uuid("94e283ef-6714-4d50-b936-71d6308a4be4")) generic_depth_de
 	// Frames an unreferenced backup stays revivable before its delayed destruction.
 	static constexpr uint64_t backup_retirement_frames = 50;
 
-	void untrack_depth_stencil(device *device, resource depth_stencil, uint64_t retire_frames = backup_retirement_frames)
+	void untrack_depth_stencil(device *, resource depth_stencil, uint64_t retire_frames = backup_retirement_frames)
 	{
 		assert(depth_stencil != 0);
 
@@ -551,12 +515,8 @@ struct __declspec(uuid("94e283ef-6714-4d50-b936-71d6308a4be4")) generic_depth_de
 		// Instead mark it for delayed destruction in the future
 		backup.destroy_after_frame = frame_index + retire_frames;
 
-		const device_api api = device->get_api();
-		if (api <= device_api::d3d12)
-		{
-			// Release the reference that was added above
-			reinterpret_cast<IUnknown *>(depth_stencil.handle)->Release();
-		}
+		// Release the reference that was added above
+		reinterpret_cast<IUnknown *>(depth_stencil.handle)->Release();
 	}
 };
 
@@ -566,9 +526,19 @@ __CRT_UUID_DECL(generic_depth_data, 0xc072221d, 0x786d, 0x4b6d, 0x8f, 0x0b, 0x52
 __CRT_UUID_DECL(generic_depth_device_data, 0x94e283ef, 0x6714, 0x4d50, 0xb9, 0x36, 0x71, 0xd6, 0x30, 0x8a, 0x4b, 0xe4)
 #endif
 
+// Game 3D supports Direct3D 11 and Direct3D 12 only. On any other device API
+// the add-on creates no device, queue, list or runtime state: it records and
+// tracks nothing there and changes none of the game's resources. Handlers find
+// that state absent (null) and return.
+SUNSHINE_DEPTH_ADDON_SHARED bool supported_api(device *device)
+{
+	const device_api api = device->get_api();
+	return api == device_api::d3d11 || api == device_api::d3d12;
+}
+
 SUNSHINE_DEPTH_ADDON_SHARED depth_tracking_demand tracking_demand(const generic_depth_device_data &data)
 {
-	return {s_frame_activity_trace || data.generic_capture_users.load(std::memory_order_relaxed) != 0};
+	return {data.generic_capture_users.load(std::memory_order_relaxed) != 0};
 }
 
 SUNSHINE_DEPTH_ADDON_SHARED depth_tracking_demand tracking_demand(device *device)

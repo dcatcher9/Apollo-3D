@@ -163,8 +163,6 @@ namespace {
     SUNSHINE_HOOK(register_event, reshade_reloaded_effects),
     SUNSHINE_HOOK(register_event, reshade_set_technique_state),
     SUNSHINE_HOOK(register_event, init_effect_runtime),
-    SUNSHINE_HOOK(register_event, reshade_begin_effects),
-    SUNSHINE_HOOK(register_event, reshade_render_technique),
     SUNSHINE_HOOK(register_event, reshade_reloaded_effects),
     SUNSHINE_HOOK(register_event, destroy_effect_runtime),
     SUNSHINE_HOOK(register_event, destroy_swapchain),

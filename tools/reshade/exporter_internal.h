@@ -260,7 +260,6 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
   }
 
 #include "exporter/scene_placement.inl"
-#include "exporter/fx_reference_types.inl"
 
   struct runtime_t {
     bool addon_native = false;
@@ -283,7 +282,6 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
     sunshine_depth::frame_depth test_depth;
     sunshine_game3d::test::last_render test_render;
 #endif
-    fx_reference_state fx;
     bool raw_supported = false;
     std::uint64_t raw_basis_epoch = 0;
     sunshine_raw_scene::pool raw_policy;
@@ -332,7 +330,6 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
     std::int64_t last_present_qpc = 0;
     std::uint64_t gap_window_start = 0;
     unsigned gap_lines = 0, gap_suppressed = 0;
-    bool proof_checked = false;
     bool rendered_since_present = false;
     frame_decision_t frame;
     // Every Game 3D publication, with or without frame generation.
@@ -563,8 +560,15 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       const auto backend = device->get_api();
       sunshine_game3d::ui_input::configure(runtime, source_alpha, backend);
       auto *queue = runtime->get_command_queue();
-      if (!queue || (backend != api::device_api::d3d11 && backend != api::device_api::d3d12)) {
+      const bool other_api = backend != api::device_api::d3d11 && backend != api::device_api::d3d12;
+      if (!queue || other_api) {
         if (diagnostic_owner) debug_dump_.unavailable("The foreground runtime has no supported D3D11/D3D12 render queue.");
+        if (other_api) {
+          // The panel names the cause (game3d_controls_model.h, unsupported_api_warning).
+          sunshine_game3d::automatic_status unsupported;
+          unsupported.phase = sunshine_game3d::automatic_phase::unsupported_api;
+          publish_automatic_ui(runtime, unsupported);
+        }
         return;
       }
       auto *commands = queue->get_immediate_command_list();
@@ -643,8 +647,8 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       } restore{renderer};
       timer.mark();
       renderer->begin_gpu_profile(commands); // Depth and UI input copies follow.
-      // The owner brackets the same capture used by the FX reference path. No
-      // raw resource pointer is retained once this lease closes.
+      // The depth owner brackets this Present's capture. No raw resource
+      // pointer is retained once this lease closes.
       if (![&] { const sunshine_game3d::slow_step step("native depth frame"); return sunshine_depth::begin_native_frame(runtime, commands); }()) {
         if (diagnostic_owner) debug_dump_.unavailable("The depth owner cannot open this runtime's native render lease.");
         return;
@@ -733,7 +737,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       // a consumer, a free slot or a dump, the SBS pack is skipped.
       if (rendered) {
         const sunshine_game3d::slow_step step("stereo export");
-        frame(runtime, {}, commands, rtv, true);
+        frame(runtime, commands, rtv);
       }
       {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -768,13 +772,8 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       const auto current = runtimes_.find(runtime);
       if (destroy) sunshine_game3d::ui_input::invalidate(runtime);
       if (destroy) debug_dump_.retire_runtime(runtime);
-      if (!destroy && current != runtimes_.end() && current->second.addon_native) {
-        // Effects can disappear while the native owner and scene continue.
-        // Any later return to a reference must rediscover all FX handles.
-        auto &proof = current->second;
-        reset_fx_reference(proof);
-        return;
-      }
+      // The user's effects can reload while the native owner and scene continue.
+      if (!destroy && current != runtimes_.end() && current->second.addon_native) return;
       // The reset discards the runtime's timing window: its partial window is
       // logged now (before the renderer, whose GPU timing it takes, is parked).
       if (current != runtimes_.end() && current->second.timing.presents) {
@@ -801,8 +800,8 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       ring_.deactivate(runtime, "runtime_reset");
       if (destroy) runtimes_.erase(runtime);
       else {
-        // FX reload invalidates FX handles, not the runtime identity or native
-        // GPU owner. Native can be re-enabled even after a disabled reload.
+        // An effect reload while Game 3D is disabled keeps the runtime identity
+        // and the native GPU owner: Game 3D can be enabled again after it.
         auto &proof = runtimes_[runtime];
         auto renderer = std::move(proof.renderer);
         const auto swapchain = proof.swapchain;
@@ -920,7 +919,6 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       ring_.release_idle_rings(export_views{*this});
       if (found != runtimes_.end()) {
         found->second.rendered_since_present = false;
-        found->second.fx.native_depth_prepared = false;
         found->second.frame.prepared = false;
       }
     }
@@ -942,16 +940,18 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       if (!lock.owns_lock()) return;
       auto &proof = runtimes_[runtime];
       const auto previous_frame = proof.frame;
-      proof.fx.native_depth_prepared = false;
       proof.frame = {};
-      if (proof.addon_native) proof.raw_supported = true;
-      refresh_fx_reference(runtime, proof);
-      // The selector's begin-effects callback runs first. Its current capture is
-      // shader-readable now; calibration history never substitutes for readiness.
+      proof.raw_supported = true;
+      proof.frame_strength = std::isfinite(proof.frame_strength) ? std::clamp(proof.frame_strength, 0.f, 100.f) : 0.f;
+      // The depth owner's native frame began first (begin_native_frame). Its
+      // current capture is shader-readable now.
       sunshine_depth::frame_depth depth;
-      const bool game_enabled = query_fx_reference(runtime, proof, depth);
-      proof.borrowed_depth = proof.addon_native && depth.ready ? depth.shader_resource : api::resource_view{};
-      proof.diagnostic_armed = proof.addon_native && debug_dump_.requested();
+      {
+        const sunshine_game3d::slow_step step("depth input query");
+        sunshine_game3d::depth_input::query(runtime, depth);
+      }
+      proof.borrowed_depth = depth.ready ? depth.shader_resource : api::resource_view{};
+      proof.diagnostic_armed = debug_dump_.requested();
       proof.diagnostic_depth = proof.diagnostic_armed ? depth : sunshine_depth::frame_depth{};
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
       proof.test_depth = depth;
@@ -962,7 +962,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       }
       const auto now = sunshine_game3d::clock::game_now();
       frame_decision_t frame;
-      decide_scene_frame(runtime, proof, frame, previous_frame, depth, game_enabled, now);
+      decide_scene_frame(runtime, proof, frame, previous_frame, depth, true, now);
       const sunshine_game3d::slow_step step("frame publication");
       publish_frame(runtime, proof, std::move(frame));
     }
@@ -976,10 +976,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
         const sunshine_scene_gain::limits &budget, scene_parameters_t &scene);
 
     static void publish_frame(api::effect_runtime *runtime, runtime_t &proof, frame_decision_t frame) {
-      publish_fx_reference_jitter(runtime, proof, frame);
-      const auto &scene = frame.scene;
-      publish_fx_reference_scene(runtime, proof, scene);
-      auto ui = scene.ui;
+      auto ui = frame.scene.ui;
       if (proof.addon_native && (proof.width > 3840 || proof.height > 3840))
         ui.phase = sunshine_game3d::automatic_phase::unsupported_resolution;
       publish_automatic_ui(runtime, ui);
@@ -1023,19 +1020,18 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       ring_.signal_pending(nullptr, output_counts{*this});
     }
 
-    void frame(api::effect_runtime *runtime, api::effect_technique technique, api::command_list *commands, api::resource_view native_rtv, bool addon_render = false) {
+    // Exports this Present's native render (render_present).
+    void frame(api::effect_runtime *runtime, api::command_list *commands, api::resource_view native_rtv) {
       std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
       if (!lock.owns_lock()) {
         return;
       }
-      char effect[128] {}, name[128] {};
-      const auto kind = classify_fx_reference(runtime, technique, addon_render, effect, name);
-      const bool native = kind.native, legacy = kind.legacy, game = kind.game;
-      if (!native && !legacy && !game) {
+      auto &proof = runtimes_[runtime];
+      ring_.release_idle_rings(export_views{*this});
+      if (proof.raw_supported && !proof.frame.prepared) {
+        ring_.deactivate(runtime, "frame_not_prepared");
         return;
       }
-      auto &proof = runtimes_[runtime];
-      if (!prepare_fx_reference_frame(runtime, proof, effect, addon_render, native, legacy, game)) return;
       // Diagnostics also cover unfocused/consumer-free frames and failed export
       // validation. A successful publication is not evidence of useful depth.
       const HWND window = static_cast<HWND>(runtime->get_hwnd());
@@ -1056,7 +1052,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
         ring_.deactivate(runtime, "swapchain_unknown");
         return;
       }
-      // Add-ons may render techniques into deferred lists. Never signal an unrelated queue here.
+      // Never signal an unrelated queue here.
       auto *queue = runtime->get_command_queue();
       if (!queue || commands != queue->get_immediate_command_list()) {
         ring_.deactivate(runtime, "deferred_command_list");
@@ -1070,7 +1066,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
 
       // The compiled input transfer must match the current game swapchain, including PQ to
       // scRGB switches that keep the exported FP16 format and transfer unchanged.
-      if ((addon_render ? !proof.native_output.handle : !proof.fx.texture.handle) || !source_color_matches(runtime, proof, color->second)) {
+      if (!proof.native_output.handle || !source_color_matches(runtime, proof, color->second)) {
         ring_.deactivate(runtime, "output_unavailable");
         return;
       }
@@ -1100,9 +1096,8 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       // C3 (transfer_current): a consumer attached, replaced or detached
       // between this Present's render and its export with another transfer
       // gets the next Present's export, rendered for it.
-      if (!transfer_current(addon_render, proof.pq_requested, source.color.output,
-            exports_pq(source.color.input, read_capabilities(*ring_.shared_, nonce)))) {
-        ring_.deactivate(runtime, addon_render ? "consumer_transfer_changed" : "consumer_without_pq");
+      if (!transfer_current(proof.pq_requested, exports_pq(source.color.input, read_capabilities(*ring_.shared_, nonce)))) {
+        ring_.deactivate(runtime, "consumer_transfer_changed");
         return;
       }
       if (!ring_.serve(runtime, source, nonce, backend, export_views{*this})) return;
@@ -1116,9 +1111,9 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       }
       // The owed native pack renders straight into the slot. The overlay and
       // dumps read the internal SBS image, so they pack it there first.
-      auto *renderer = addon_render ? proof.renderer.get() : nullptr;
+      auto *renderer = proof.renderer.get();
       // The dump mailbox is read once per exported Present.
-      const bool dump = addon_render && proof.diagnostic_armed && debug_dump_.requested();
+      const bool dump = proof.diagnostic_armed && debug_dump_.requested();
       const bool direct = renderer && !overlay_open(runtime) && !dump;
       bool overwrote = false;
       const auto index = ring_.acquire_slot(completed, &overwrote);
@@ -1144,8 +1139,8 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
         ring_.generation_->pending_qpc = static_cast<std::uint64_t>(timestamp.QuadPart);
         // The scalar belongs to this exact packed texture, including retained
         // exports. ReShade's own controls and cursor are at screen disparity.
-        ring_.generation_->pending_ui_parallax_uv = addon_render && !overlay_open(runtime) ? proof.native_ui_parallax_uv : 0.f;
-        ring_.generation_->pending_output = game ? std::optional(classify_output(proof.frame)) : std::nullopt;
+        ring_.generation_->pending_ui_parallax_uv = !overlay_open(runtime) ? proof.native_ui_parallax_uv : 0.f;
+        ring_.generation_->pending_output = classify_output(proof.frame);
         if (direct) ring_.generation_->adopt_rendered(index, sequence);
         if (direct && renderer->pack(commands, ring_.generation_->texture(index), ring_.generation_->id)) {
           if (!ring_.generation_->rendered_directly) {
@@ -1155,8 +1150,8 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
         } else {
           if (renderer) renderer->pack(commands);
           // With the overlay open its composite writes the whole slot from the
-          // source in reshade_present, so nothing is copied first; a dump, a
-          // reference export or a failed direct pack copies the source.
+          // source in reshade_present, so nothing is copied first; a dump or a
+          // failed direct pack copies the source.
           ring_.generation_->submit(commands, source.resource, index, sequence, !overlay_open(runtime));
         }
         if (dump) capture_diagnostic(runtime, proof, commands, ring_.generation_->id, sequence);
@@ -1210,20 +1205,6 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
 #ifdef SUNSHINE_SBS_TEST
     friend struct publisher_tests;
 #endif
-    static void reset_fx_reference(runtime_t &proof);
-    static void refresh_fx_reference(api::effect_runtime *runtime, runtime_t &proof);
-    static bool query_fx_reference(api::effect_runtime *runtime, runtime_t &proof, sunshine_depth::frame_depth &depth);
-    static void publish_fx_reference_jitter(api::effect_runtime *runtime, runtime_t &proof, const frame_decision_t &frame);
-    static void publish_fx_reference_scene(api::effect_runtime *runtime, runtime_t &proof, const scene_parameters_t &scene);
-    static fx_technique_kind classify_fx_reference(api::effect_runtime *runtime, api::effect_technique technique,
-      bool addon_render, char (&effect)[128], char (&name)[128]);
-    bool prepare_fx_reference_frame(api::effect_runtime *runtime, runtime_t &proof, const char *effect,
-      bool addon_render, bool native, bool legacy, bool game);
-    static bool fx_reference_has_rect(const runtime_t &proof);
-    static bool fx_reference_rejects_linear(const runtime_t &proof, bool linear);
-    static bool fx_reference_has_raw_range(const runtime_t &proof);
-
-    static void apply_native_depth(api::effect_runtime *runtime, runtime_t &proof, const sunshine_depth::frame_depth &depth);
 
     bool source_color_matches(api::effect_runtime *runtime, const runtime_t &proof, api::color_space current) {
       if (proof.color.input == api::color_space::unknown || proof.color.input != current) {
@@ -1321,8 +1302,6 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       }
     };
 
-    static void discover(api::effect_runtime *runtime, runtime_t &proof, const char *effect = "SuperDepth3D.fx");
-
     static bool describe(api::effect_runtime *runtime, runtime_t &proof, source_t &source);
 
     handle_t mapping_;
@@ -1362,7 +1341,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
 // explicit-inline member bodies; their free bodies are declarations there.
 #include "exporter/present_diagnostics.inl"
 #include "exporter/scene_placement_impl.inl"
-#include "exporter/fx_reference.inl"
+#include "exporter/export_source.inl"
 #ifdef SUNSHINE_SBS_TEST
 using sunshine_game3d::exporter_test_access::publisher;
 #endif

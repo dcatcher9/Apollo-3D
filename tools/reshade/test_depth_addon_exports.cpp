@@ -230,27 +230,17 @@ static void check_capture_extent()
 	trailing.observe_viewport(quarter);
 	require_snapshot(same(trailing.total.last_viewport, quarter), "A merged pending clear did not restart at the next draw");
 
-	// A rect-less depth clear covers the whole view only on D3D10/11/12. D3D9's
-	// Clear(0, NULL) clears the current viewport (a HUD model panel after the
-	// scene), glClear the scissor and a Vulkan render pass's CLEAR its render
-	// area: there the crop keeps the largest viewport drawn in the frame.
-	for (const auto api : { device_api::d3d9, device_api::d3d10, device_api::d3d11, device_api::d3d12,
-		device_api::opengl, device_api::vulkan })
-	{
-		const bool whole_view = api == device_api::d3d10 || api == device_api::d3d11 || api == device_api::d3d12;
-		depth_stencil_frame_stats panel;
-		panel.observe_depth_clear(api, 0, true); panel.observe_viewport(full);
-		panel.observe_depth_clear(api, 0, true); panel.observe_viewport(quarter);
-		require_snapshot(same(panel.total.last_viewport, whole_view ? quarter : full),
-			whole_view ? "A whole-view depth clear did not restart the capture crop" :
-				"A viewport-limited depth clear narrowed the scene's capture crop to a later small pass");
-		depth_stencil_frame_stats rects;
-		rects.observe_viewport(full); rects.observe_depth_clear(api, 1, true); rects.observe_viewport(quarter);
-		depth_stencil_frame_stats other_plane;
-		other_plane.observe_viewport(full); other_plane.observe_depth_clear(api, 0, false); other_plane.observe_viewport(quarter);
-		require_snapshot(same(rects.total.last_viewport, full) && same(other_plane.total.last_viewport, full),
-			"A clear limited to rectangles or another plane restarted the capture crop");
-	}
+	// A rect-less depth clear of the sampled plane covers the whole view.
+	depth_stencil_frame_stats panel;
+	panel.observe_depth_clear(0, true); panel.observe_viewport(full);
+	panel.observe_depth_clear(0, true); panel.observe_viewport(quarter);
+	require_snapshot(same(panel.total.last_viewport, quarter), "A whole-view depth clear did not restart the capture crop");
+	depth_stencil_frame_stats rects;
+	rects.observe_viewport(full); rects.observe_depth_clear(1, true); rects.observe_viewport(quarter);
+	depth_stencil_frame_stats other_plane;
+	other_plane.observe_viewport(full); other_plane.observe_depth_clear(0, false); other_plane.observe_viewport(quarter);
+	require_snapshot(same(rects.total.last_viewport, full) && same(other_plane.total.last_viewport, full),
+		"A clear limited to rectangles or another plane restarted the capture crop");
 }
 
 // A D3D12 render pass that DISCARDs the sampled plane's depth at its end
@@ -264,8 +254,8 @@ static void check_end_discard()
 	using step_t = void (*)(depth_stencil_frame_stats &, uint64_t);
 	static constexpr step_t discard_end = +[](depth_stencil_frame_stats &s, uint64_t p) { s.observe_depth_discard(p, true); };
 	static constexpr step_t discard_start = +[](depth_stencil_frame_stats &s, uint64_t p) { s.observe_depth_discard(p); };
-	static constexpr step_t clear = +[](depth_stencil_frame_stats &s, uint64_t p) { s.observe_depth_clear(device_api::d3d12, 0, true, p); };
-	static constexpr step_t rect_clear = +[](depth_stencil_frame_stats &s, uint64_t p) { s.observe_depth_clear(device_api::d3d12, 1, true, p); };
+	static constexpr step_t clear = +[](depth_stencil_frame_stats &s, uint64_t p) { s.observe_depth_clear(0, true, p); };
+	static constexpr step_t rect_clear = +[](depth_stencil_frame_stats &s, uint64_t p) { s.observe_depth_clear(1, true, p); };
 	static constexpr step_t whole_copy = +[](depth_stencil_frame_stats &s, uint64_t p) { s.observe_transfer({ 2 }, p, true); };
 	static constexpr step_t part_copy = +[](depth_stencil_frame_stats &s, uint64_t p) { s.observe_transfer({ 2 }, p, false); };
 	static constexpr step_t draw = +[](depth_stencil_frame_stats &s, uint64_t p) { s.observe_draw(p); };
@@ -332,8 +322,8 @@ static void check_transfer_lineage()
 			{
 				auto &stats = list.stats_per_used_depth_stencil[s.target];
 				if (s.kind == op::draw) { stats.total.observed_work = true; ++stats.total.drawcalls; stats.observe_draw(list.position()); }
-				else if (s.kind == op::clear) { stats.clear_zero = true; stats.observe_depth_clear(device_api::d3d12, 0, true, list.position()); }
-				else if (s.kind == op::rect_clear) { stats.clear_zero = true; stats.observe_depth_clear(device_api::d3d12, 1, true, list.position()); }
+				else if (s.kind == op::clear) { stats.clear_zero = true; stats.observe_depth_clear(0, true, list.position()); }
+				else if (s.kind == op::rect_clear) { stats.clear_zero = true; stats.observe_depth_clear(1, true, list.position()); }
 				else if (s.kind == op::discard) stats.observe_depth_discard(list.position());
 				else
 				{
@@ -664,9 +654,9 @@ static void check_depth_snapshot_contract()
 	check_hold_gates();
 	check_won_challenger_takeover();
 
-	// Candidate counters follow the capture-owner count (or the opt-in trace).
+	// Candidate counters follow the capture-owner count.
 	generic_depth_device_data demand_device;
-	require_snapshot(tracking_demand(demand_device).counters == s_frame_activity_trace,
+	require_snapshot(!tracking_demand(demand_device).counters,
 		"Hidden API-native path retained candidate demand");
 	demand_device.generic_capture_users.store(1);
 	require_snapshot(tracking_demand(demand_device).counters,
@@ -759,12 +749,10 @@ static void check_depth_snapshot_contract()
 	recropped.last_frame_stats.copied_during_frame = true;
 	recropped.last_frame_stats.copy_provenance_ambiguous = false;
 	recropped.last_frame_stats.copied_viewport = { 64, 32, 1280, 720, 0, 1 };
-	old_data.native_calibrations[original.identity] = {}; new_data.native_calibrations[original.identity] = {};
 	observe_candidate(old_data, recropped, 3840, 2160);
 	observe_candidate(new_data, depth_selection_resource(recropped), 3840, 2160);
 	require_snapshot(old_data.observed_regions.at(original.identity) == new_data.observed_regions.at(original.identity) &&
-		new_data.observed_regions.at(original.identity).x == 64 && !old_data.native_calibrations.count(original.identity) &&
-		!new_data.native_calibrations.count(original.identity), "Snapshot retained calibration across a changed content crop");
+		new_data.observed_regions.at(original.identity).x == 64, "Snapshot lost a changed content crop");
 	resources.clear();
 	for (const auto &[handle, info] : compact)
 		check_snapshot_row(info, legacy.at(handle)); // No borrowed rows/history after unlock.
@@ -796,7 +784,6 @@ static void check_depth_snapshot_contract()
 		observe_candidate(before, info, 3840, 2160);
 		observe_candidate(after, depth_selection_resource(info), 3840, 2160);
 		before.observed_ids.push_back(id); after.observed_ids.push_back(id);
-		before.native_calibrations[id] = {}; after.native_calibrations[id] = {};
 		for (uint64_t frame : { 98u, 99u, 100u })
 		{
 			before.selection.sample(id, quality, frame);
@@ -807,7 +794,7 @@ static void check_depth_snapshot_contract()
 	for (const auto id : before.observed_ids)
 		if (std::find(live.begin(), live.end(), id) == live.end())
 		{
-			before.selection.erase(id); before.observed_regions.erase(id); before.native_calibrations.erase(id);
+			before.selection.erase(id); before.observed_regions.erase(id);
 		}
 	prune_depth_selection(before, eligible);
 	prune_depth_selection(after, eligible);
@@ -815,14 +802,13 @@ static void check_depth_snapshot_contract()
 	{
 		const bool retained = id <= 2;
 		require_snapshot((after.selection.evidence(id) != nullptr) == retained &&
-			after.observed_regions.count(id) == retained && after.native_calibrations.count(id) == retained &&
-			before.observed_regions.count(id) == after.observed_regions.count(id) &&
-			before.native_calibrations.count(id) == after.native_calibrations.count(id), "Single prune pass changed candidate lifetime");
+			after.observed_regions.count(id) == retained &&
+			before.observed_regions.count(id) == after.observed_regions.count(id), "Single prune pass changed candidate lifetime");
 		after.selection.sample(id, quality, 101);
 		require_snapshot((after.selection.evidence(id) != nullptr) == retained, "Late readback resurrected a removed source");
 	}
-	require_snapshot(after.selection.evidence(1)->confirmed_good && after.native_calibrations.count(1),
-		"Live inactive candidate lost its retained histogram or calibration");
+	require_snapshot(after.selection.evidence(1)->confirmed_good,
+		"Live inactive candidate lost its retained histogram");
 	observe_candidate(after, fresh->second, 3840, 2160);
 	require_snapshot(!after.selection.evidence(replacement.identity)->confirmed_good,
 		"Recycled resource inherited the prior lifetime's content evidence");
@@ -1067,7 +1053,6 @@ extern "C" __declspec(dllexport) BOOL SunshineDepthTestActivityAccounting(effect
 		copied.total.drawcalls == 0 && copied.total.vertices == 0 && copied.total.last_viewport.width == 0 &&
 		copied.total.mesh_dispatches == 0 && !copied.total.drew(); // A transfer is activity, not a drawn Present.
 	if (!checkpoint("Depth activity test: base-depth copy accounting failed")) return FALSE;
-	if (!s_frame_activity_trace)
 	{
 		auto *device_data = runtime->get_device()->get_private_data<generic_depth_device_data>();
 		if (device_data == nullptr) return FALSE;

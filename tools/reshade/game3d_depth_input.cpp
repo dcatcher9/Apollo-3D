@@ -6,9 +6,8 @@
 namespace sunshine_game3d::depth_input {
   namespace api = reshade::api;
 
-  bool query(api::effect_runtime *runtime, sunshine_depth::frame_depth &out,
-      sunshine_depth::depth_orientation orientation, bool request_calibration) {
-    return sunshine_depth::get_frame_depth(runtime, out, orientation, request_calibration);
+  bool query(api::effect_runtime *runtime, sunshine_depth::frame_depth &out) {
+    return sunshine_depth::get_frame_depth(runtime, out);
   }
 
   bool provider_selected(api::effect_runtime *runtime) {
@@ -21,9 +20,5 @@ namespace sunshine_game3d::depth_input {
 
   void invalidate_reuse(api::effect_runtime *runtime) {
     sunshine_streamline::provider::invalidate_reused_depth(runtime);
-  }
-
-  void set_ready(api::effect_runtime *runtime, bool ready) {
-    sunshine_streamline::provider::set_depth_ready(runtime, ready);
   }
 }

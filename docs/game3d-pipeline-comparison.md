@@ -268,7 +268,7 @@ occluded background: Sunshine's conditioning trades local geometry fidelity for 
 
 The earlier AA motion comparison measured approximately **10–20% less registered temporal
 variation**, but **25–31% less fine-texture contrast** and worse thin-object coverage; the user chose
-removal. These [historical measurements](native-stereo-comparison.md) do not evaluate the new warp.
+removal. These historical measurements do not evaluate the new warp.
 
 The September 18 live test reported reduced halos, not artifact-free output across games or FG modes.
 

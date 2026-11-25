@@ -4,7 +4,7 @@
 #include <Windows.h>
 #include <Unknwn.h>
 #include <reshade_api.hpp>
-#include "native_depth_calibration.h"
+#include "depth_orientation.h"
 #include "raw_scene_policy.h"
 #include "raw_scene_pool.h"
 #include "camera_sample_binding.h"
@@ -33,16 +33,12 @@ namespace sunshine_depth {
   // before reshade_finish_effects. Handles are borrowed for that callback only;
   // the selected resource is then in shader_resource state. False clears all
   // handles; ready means safe to sample in THIS pass. reused_depth distinguishes
-  // bounded FG reuse from fresh depth; calibrated describes older raw samples.
-  // Set request_calibration=false for passive capture-identity observation. This
-  // releases any earlier independent-renderer request and clears its status UI;
-  // scene selection, histogram evidence and capture state remain unchanged.
-  bool get_frame_depth(reshade::api::effect_runtime *runtime, frame_depth &output,
-    depth_orientation orientation_override = depth_orientation::automatic,
-    bool request_calibration = true);
+  // bounded FG reuse from fresh depth. The query is passive: scene selection,
+  // histogram evidence and capture state remain unchanged.
+  bool get_frame_depth(reshade::api::effect_runtime *runtime, frame_depth &output);
 
-  // Exporter-owned opt-in basis. Call each begin_effects; disabled releases only
-  // this raw-scene request, preserving legacy selector/calibration sampling.
+  // Exporter-owned opt-in basis. Call each native frame; disabled releases only
+  // this raw-scene request, preserving the selector's own sampling.
   void set_raw_scene_request(reshade::api::effect_runtime *runtime, std::uint64_t basis_epoch, bool enabled);
   // Completed immutable CPU evidence, independent of current rendering. Each
   // sample keeps its own source/basis/layout/runtime and authenticated readback.

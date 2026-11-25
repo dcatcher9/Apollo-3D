@@ -22,8 +22,8 @@ namespace sunshine_game3d::test::depth_events {
   enum class handler : std::uint8_t {
     none = 0,  // Outside every marked handler.
     present = 1,  // addon_event::present: exporter on_begin_present (the native render).
-    begin_effects = 2,  // reshade_begin_effects: depth_addon on_begin_render_effects, exporter on_begin_effects.
-    render_technique = 3,  // reshade_render_technique: exporter on_technique.
+    begin_effects = 2,  // reshade_begin_effects: depth_addon on_begin_render_effects.
+    render_technique = 3,  // No longer raised (the removed FX reference export); the value stays for recorded traces.
     reload = 4,  // reshade_reloaded_effects: depth_addon on_reload_effect_runtime, exporter on_reload.
     init = 5,  // init_effect_runtime: exporter on_init_runtime.
     destroy = 6,  // destroy_effect_runtime: exporter on_destroy.
@@ -40,7 +40,7 @@ namespace sunshine_game3d::test::depth_events {
     provider_reuse_ready = 5,  // invalidate_reused_depth(): false for a reused copy.
     generic_bind = 6,  // depth_addon.cpp update_effect_runtime(): the binding of a changed view.
     generic_ready = 7,  // update_effect_runtime(): its readiness.
-    native_ready = 8,  // exporter.cpp apply_native_depth(): depth_input::set_ready.
+    native_ready = 8,  // No longer raised (the removed FX reference's readiness write); the value stays for recorded traces.
     // streamline_depth_provider.cpp reload(): the runtime reload's reset of
     // the provider's binding and readiness caches (it calls neither), which
     // depth_addon.cpp on_reload_effect_runtime makes only with Game 3D off.

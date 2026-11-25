@@ -2,7 +2,7 @@
 #pragma once
 
 #include "camera_scene_policy.h"
-#include "native_depth_calibration.h"
+#include "depth_orientation.h"
 #include "scene_gain.h"
 
 // Relative controls for the selected depth/color pair. No camera matrices,

@@ -870,7 +870,7 @@ class ReadinessReport(unittest.TestCase):
         for reason in ('ring_replaced', 'color_space_changed', 'consumer_transfer_changed'):
             self.assertEqual(run(BASE + [pause('10:00:06', reason, 'routine')])['Export'].status, 'PASS', reason)
         # Lines before the class tag: the same reasons by the report's copy of the routine list, the rest faults.
-        for reason in ('ring_replaced', 'color_space_changed', 'consumer_without_pq', 'swapchain_unknown'):
+        for reason in ('ring_replaced', 'color_space_changed', 'swapchain_unknown'):
             self.assertEqual(run(BASE + [pause('10:00:06', reason)])['Export'].status, 'PASS', reason)
         old = run(BASE + [pause('10:00:06', 'generation_limit')])['Export']
         self.assertEqual((old.status, old.times), ('WARN', ['10:00:06 generation_limit']))
@@ -3217,7 +3217,7 @@ def source(name):
 
 # exporter.cpp and its parts (tools/reshade/exporter/), one translation unit. Each exporter move that creates a part
 # adds it here.
-EXPORTER_PARTS = ('exporter/export_ring.inl', 'exporter/export_ring_class.inl', 'exporter/present_diagnostics.inl', 'exporter/ui_status.inl', 'exporter/scene_placement.inl', 'exporter/scene_placement_impl.inl', 'exporter/fx_reference_types.inl', 'exporter/fx_reference.inl')
+EXPORTER_PARTS = ('exporter/export_ring.inl', 'exporter/export_ring_class.inl', 'exporter/present_diagnostics.inl', 'exporter/ui_status.inl', 'exporter/scene_placement.inl', 'exporter/scene_placement_impl.inl', 'exporter/export_source.inl')
 
 
 def exporter_sources():
@@ -3243,7 +3243,7 @@ class SchemaMirrors(unittest.TestCase):
         'unsupported_lifetime', 'unsupported_resource', 'unsupported_queue', 'exhausted', 'failed'))
     FAULT_PAUSES = frozenset((
         'consumer_protocol', 'consumer_undeclared', 'deferred_command_list', 'device_removed', 'fence_signal_failed',
-        'generation_limit', 'native_depth_unprepared', 'output_unavailable', 'overlay_capture_failed',
+        'generation_limit', 'output_unavailable', 'overlay_capture_failed',
         'overlay_prepare_failed', 'present_not_finished', 'renderer_unavailable', 'ring_creation_failed',
         'source_unavailable', 'unsupported_api'))
 

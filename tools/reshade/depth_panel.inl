@@ -81,8 +81,7 @@ static const char *const format_to_string(format format)
 	case format::d32_float_s8_uint:
 	case format::r32_g8_typeless:
 		return "D32S8";
-	case format::intz:
-		return "INTZ ";
+
 	default:
 		return "     ";
 	}
@@ -104,6 +103,11 @@ static void draw_depth_panel(effect_runtime *runtime, bool troubleshooting)
 	if (!s_registered)
 	{
 		ImGui::TextWrapped("%s", s_status_message);
+		return;
+	}
+	if (runtime != nullptr && !supported_api(runtime->get_device()))
+	{
+		ImGui::TextWrapped("Depth: unavailable. This game does not render with Direct3D 11 or Direct3D 12, which Game 3D needs.");
 		return;
 	}
 	if (runtime == nullptr || runtime->get_private_data<generic_depth_data>() == nullptr)
@@ -169,50 +173,6 @@ static void draw_depth_panel(effect_runtime *runtime, bool troubleshooting)
 			if (ImGui::IsItemHovered())
 				ImGui::SetTooltip("Updates once per second. Fresh = newly copied depth; Previous = reused depth; Unavailable = no usable depth.\n"
 					"All observed presentations are counted. This does not identify rendered or generated color frames.");
-		}
-		bool native_effect_enabled = false;
-		if (data.native_depth_requested && runtime->get_effects_state())
-		{
-			bool game_effect_enabled = false;
-			runtime->enumerate_techniques("SunshineGame3D.fx", [&game_effect_enabled](effect_runtime *owner, effect_technique technique) {
-				char name[128] {};
-				owner->get_technique_name(technique, name);
-				if (std::strcmp(name, "SunshineGame3D") == 0 && owner->get_technique_state(technique))
-					game_effect_enabled = true;
-			});
-			// Match the exporter's primary-effect priority even if the user toggled
-			// techniques after this frame's capture-identity observation.
-			if (!game_effect_enabled)
-				runtime->enumerate_techniques("SunshineDepth3D.fx", [&native_effect_enabled](effect_runtime *owner, effect_technique technique) {
-					char name[128] {};
-					owner->get_technique_name(technique, name);
-					if (std::strcmp(name, "SunshineDepth3D") == 0 && owner->get_technique_state(technique))
-						native_effect_enabled = true;
-				});
-		}
-		if (native_effect_enabled)
-		{
-			native_depth_ui_state status = data.native_ui_state;
-			{
-				const std::shared_lock<std::shared_mutex> status_lock(s_mutex);
-				if (device_data == nullptr || data.native_ui_present != device_data->native_present_index)
-					status = native_depth_ui_state::waiting_depth;
-			}
-			switch (status)
-			{
-			case native_depth_ui_state::calibrating:
-				ImGui::Text("Game 3D: calibrating depth (%u/3 samples).", data.native_ui_samples);
-				break;
-			case native_depth_ui_state::waiting_orientation:
-				ImGui::TextWrapped("Game 3D: depth direction is unknown. In Sunshine 3D's shader controls, set Depth direction to Normal depth or Reversed depth.");
-				break;
-			case native_depth_ui_state::ready:
-				ImGui::TextUnformatted("Game 3D: depth is calibrated and ready.");
-				break;
-			default:
-				ImGui::TextUnformatted("Game 3D: waiting for current depth.");
-				break;
-			}
 		}
 		return;
 	}

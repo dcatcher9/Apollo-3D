@@ -7,5 +7,4 @@ namespace sunshine_game3d::addon_config {
   bool upscaler_call_trace();
   bool ngx_depth_source();
   bool queue_fence_order();
-  bool frame_activity_trace();
 }

@@ -4,7 +4,6 @@
 param(
     [Parameter(Mandatory)][string] $GameExecutable,
     [string] $AddonDirectory,
-    [string] $ShaderDirectory,
     [switch] $AllowRunningGame
 )
 $ErrorActionPreference = 'Stop'
@@ -128,20 +127,6 @@ function Resolve-GamePath([string] $Path) {
     return [IO.Path]::GetFullPath((Join-Path $gameDirectory $expanded))
 }
 
-function Enable-SunshineExport([string] $Text, [string] $Section, [bool] $Create) {
-    $definitions = @(Split-ReShadeList (Get-IniValue $Text $Section 'PreprocessorDefinitions'))
-    $found = $false
-    $updated = @(foreach ($definition in $definitions) {
-        if ($definition -cmatch '^\s*SUNSHINE_SBS_EXPORT(?:\s*=.*)?\s*$') {
-            if (-not $found) { 'SUNSHINE_SBS_EXPORT=1' }
-            $found = $true
-        } else { $definition }
-    })
-    if (-not $found -and -not $Create) { return $Text }
-    if (-not $found) { $updated += 'SUNSHINE_SBS_EXPORT=1' }
-    return Set-IniValue $Text $Section 'PreprocessorDefinitions' (Join-ReShadeList $updated)
-}
-
 function Remove-Game3DDefinitions([string] $Text, [string] $Section) {
     $value = Get-IniValue $Text $Section 'PreprocessorDefinitions'
     if (-not $value) { return $Text }
@@ -153,21 +138,6 @@ function Remove-Game3DDefinitions([string] $Text, [string] $Section) {
          $_ -cnotmatch '^\s*(?:SUNSHINE_SBS_EXPORT|DoubleBuffer_Mode|EX_DLP_FS_Mode|Virtual_Reality_Mode|Anaglyph_Mode|Inficolor_3D_Emulator|Reconstruction_Mode|REST_UI_Mode|Super3D_Mode|Use_2D_Plus_Depth|Frame_Packed_Mode)(?:\s*=.*)?\s*$')
     })
     return Set-IniValue $Text $Section 'PreprocessorDefinitions' (Join-ReShadeList $definitions)
-}
-
-function Get-EffectTechniqueBody([string] $Code, [string] $Name) {
-    $declaration = [regex]::Match($Code, '\btechnique(?:11)?\s+' + [regex]::Escape($Name) + '\b[^{}]*\{')
-    if (-not $declaration.Success) { return '' }
-    $start = $declaration.Index + $declaration.Length
-    $depth = 1
-    for ($index = $start; $index -lt $Code.Length; ++$index) {
-        if ($Code[$index] -ceq '{') { ++$depth }
-        elseif ($Code[$index] -ceq '}') {
-            --$depth
-            if ($depth -eq 0) { return $Code.Substring($start, $index - $start) }
-        }
-    }
-    return ''
 }
 
 $gameExe = (Get-Item -LiteralPath $GameExecutable -ErrorAction Stop).FullName
@@ -185,7 +155,6 @@ $addonSearch = Get-IniScalarValue $iniBefore 'ADDON' 'AddonPath'
 if (-not $addonSearch) { $addonSearch = '.' }
 $addonDestination = Resolve-GamePath $addonSearch
 if ($AllowRunningGame) {
-    if ($ShaderDirectory) { throw 'AllowRunningGame supports only a fresh native Game 3D installation.' }
     foreach ($existingName in @('SunshineSBS.addon64','SunshineDepth.addon64','SunshineDepthProbe.addon64')) {
         if (Test-Path -LiteralPath (Join-Path $addonDestination $existingName)) {
             throw 'An existing Sunshine add-on must be updated while the game is closed.'
@@ -209,56 +178,6 @@ Assert-UnambiguousIni $presetBefore $presetPath
 $copies = [Collections.Generic.List[object]]::new()
 $copies.Add(@{Source=$addonSource; Destination=(Join-Path $addonDestination 'SunshineSBS.addon64')})
 $copies.Add(@{Source=$licenseSource; Destination=(Join-Path $addonDestination 'SunshineSBS-LICENSES.txt')})
-$nativeGame3D = [string]::IsNullOrWhiteSpace($ShaderDirectory)
-$original = $false
-$effectName = 'native Game 3D'
-# ShaderDirectory is an explicit reference-renderer opt-in. Shipping Game 3D
-# owns its GPU passes inside the DLL and never discovers/copies external FX.
-if (-not $nativeGame3D) {
-    $original = -not (Test-Path -LiteralPath (Join-Path $ShaderDirectory 'SunshineDepth3D.fx') -PathType Leaf) -and
-        (Test-Path -LiteralPath (Join-Path $ShaderDirectory 'SuperDepth3D.fx') -PathType Leaf)
-    $effectName = if ($original) { 'SuperDepth3D' } else { 'SunshineDepth3D' }
-    $effectPath = Join-Path $ShaderDirectory ($effectName + '.fx')
-    if (-not (Test-Path -LiteralPath $effectPath -PathType Leaf)) {
-        throw 'Game 3D now runs in the add-on. Omit -ShaderDirectory for normal installation; supply an original SuperDepth3D or independent SunshineDepth3D directory only for reference testing.'
-    }
-    $shaderRelativePath = if ($original) { '.\reshade-shaders\Shaders\Depth3D' } else { '.\reshade-shaders\Shaders\Sunshine3D' }
-    $shaderDestination = Resolve-GamePath $shaderRelativePath
-    $effectCode = [regex]::Replace([IO.File]::ReadAllText($effectPath), '(?m)//[^\r\n]*|(?s)/\*.*?\*/', '')
-    $shaderFiles = if ($original) { @('SuperDepth3D.fx','Overwatch.fxh','AXAA.fxh','SunshineIntegration.fxh','SunshinePost.fxh') } else { @('SunshineDepth3D.fx') }
-    foreach ($name in $shaderFiles) {
-        $source = Join-Path $ShaderDirectory $name
-        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
-            throw "$name is missing. Use the complete matching reference shader source and all its integration/support includes."
-        }
-        $source = (Get-Item -LiteralPath $source).FullName
-        $destination = Join-Path $shaderDestination $name
-        if ($source -ieq $destination) { throw 'Use a shader source separate from the game installation.' }
-        $copies.Add(@{Source=$source; Destination=$destination})
-    }
-    $techniqueBody = Get-EffectTechniqueBody $effectCode $effectName
-    if (-not $techniqueBody -or
-        $effectCode -notmatch '\bsunshine_sbs_export\s*=\s*1\s*;' -or
-        $effectCode -notmatch '\bsunshine_sbs_layout\s*=\s*"sbs_lr"\s*;') {
-        throw "$effectName.fx does not expose the expected Sunshine stereo technique and export interface."
-    }
-    if ($original) {
-        if ($effectCode -notmatch '\btexture(?:2D)?\s+DoubleTex\s*<[^>]*\bsunshine_sbs_export\s*=\s*1\s*;' -or
-            $techniqueBody -notmatch '\bRenderTarget(?:0)?\s*=\s*DoubleTex\s*;') {
-            throw 'SuperDepth3D.fx must render its annotated export texture from its own technique.'
-        }
-        if ($effectCode -notmatch '#\s*include\s+"SunshineIntegration\.fxh"' -or
-            $effectCode -notmatch '#\s*include\s+"SunshinePost\.fxh"') {
-            throw 'SuperDepth3D.fx must include the matching Sunshine integration/post files.'
-        }
-    } else {
-        foreach ($uniform in @('Sunshine_DepthReady','Sunshine_RawAnchor','Sunshine_RawGain','Sunshine_Calibrated')) {
-            if ($effectCode -notmatch ('\buniform\s+(?:bool|float)\s+' + $uniform + '\b')) {
-                throw "SunshineDepth3D.fx is missing the $uniform calibration input. Use the complete matching package."
-            }
-        }
-    }
-}
 $iniAfter = $iniBefore
 $disabled = @(Split-ReShadeList (Get-IniValue $iniAfter 'ADDON' 'DisabledAddons') | Where-Object {
     $_ -and $_ -notmatch '^Sunshine (3D|SBS)(@SunshineSBS\.addon64)?$'
@@ -270,81 +189,49 @@ foreach ($name in @('Generic Depth','Sunshine Depth')) {
 }
 $iniAfter = Set-IniValue $iniAfter 'ADDON' 'DisabledAddons' (Join-ReShadeList $disabled)
 $iniAfter = Set-IniValue $iniAfter 'GENERAL' 'PresetPath' (Join-ReShadeList @($presetSetting))
-if (-not $nativeGame3D) {
-    $searchPaths = @(Split-ReShadeList (Get-IniValue $iniAfter 'GENERAL' 'EffectSearchPaths'))
-    $shaderDiscovered = $false
-    foreach ($searchPath in $searchPaths) {
-        try {
-            $recursive = $searchPath -match '[\\/]\*\*$'
-            $searchRoot = Resolve-GamePath ($searchPath -replace '[\\/]\*\*$', '')
-            if ($searchRoot -ieq $shaderDestination -or
-                ($recursive -and $shaderDestination.StartsWith($searchRoot.TrimEnd('\','/') + '\', [StringComparison]::OrdinalIgnoreCase))) {
-                $shaderDiscovered = $true
-            }
-        } catch { } # Preserve search entries we do not understand and add our path.
-    }
-    if (-not $shaderDiscovered) {
-        $searchPaths += $shaderRelativePath
-        $iniAfter = Set-IniValue $iniAfter 'GENERAL' 'EffectSearchPaths' (Join-ReShadeList $searchPaths)
-    }
-}
 $presetAfter = $presetBefore
-if ($nativeGame3D) {
-    # Native settings take precedence on every reinstall. A current FX section
-    # with omitted values uses the same defaults as native Game 3D; only a
-    # wholly absent section may inherit the prior original reference settings.
-    $migrationSection = if (Find-IniSection $presetBefore 'SunshineGame3D.fx') { 'SunshineGame3D.fx' } else { 'SuperDepth3D.fx' }
-    if ((Get-IniValue $iniBefore 'SUNSHINE_GAME3D' 'Strength') -ceq '') {
-        $value = Get-IniValue $presetBefore $migrationSection 'Depth_Adjustment'
-        $numeric = [single]0
-        if ([single]::TryParse($value,[Globalization.NumberStyles]::Float,[Globalization.CultureInfo]::InvariantCulture,[ref]$numeric) -and
-            -not [single]::IsNaN($numeric) -and -not [single]::IsInfinity($numeric)) {
-            $iniAfter = Set-IniValue $iniAfter 'SUNSHINE_GAME3D' 'Strength' $value
-        }
+# Saved Game 3D settings take precedence on every reinstall. A current FX section
+# with omitted values uses the same defaults as Game 3D; only a wholly absent
+# section may inherit the settings of an earlier effect-based installation.
+$migrationSection = if (Find-IniSection $presetBefore 'SunshineGame3D.fx') { 'SunshineGame3D.fx' } else { 'SuperDepth3D.fx' }
+if ((Get-IniValue $iniBefore 'SUNSHINE_GAME3D' 'Strength') -ceq '') {
+    $value = Get-IniValue $presetBefore $migrationSection 'Depth_Adjustment'
+    $numeric = [single]0
+    if ([single]::TryParse($value,[Globalization.NumberStyles]::Float,[Globalization.CultureInfo]::InvariantCulture,[ref]$numeric) -and
+        -not [single]::IsNaN($numeric) -and -not [single]::IsInfinity($numeric)) {
+        $iniAfter = Set-IniValue $iniAfter 'SUNSHINE_GAME3D' 'Strength' $value
     }
-    if ((Get-IniValue $iniBefore 'SUNSHINE_GAME3D' 'DepthView') -ceq '') {
-        $value = Get-IniValue $presetBefore $migrationSection 'Depth_Map_View'
-        if ($value -cmatch '^[012]$') { $iniAfter = Set-IniValue $iniAfter 'SUNSHINE_GAME3D' 'DepthView' $value }
-    }
-    if ((Get-IniValue $iniBefore 'SUNSHINE_GAME3D' 'Enabled') -ceq '') {
-        $iniAfter = Set-IniValue $iniAfter 'SUNSHINE_GAME3D' 'Enabled' '1'
-    }
-} else {
-    # Explicit reference testing owns stereo output; preserve native preferences
-    # for returning to Game 3D, while disabling its renderer to avoid two writers.
-    $iniAfter = Set-IniValue $iniAfter 'SUNSHINE_GAME3D' 'Enabled' '0'
 }
-# Techniques is a preset-wide key before any named shader section.
+if ((Get-IniValue $iniBefore 'SUNSHINE_GAME3D' 'DepthView') -ceq '') {
+    $value = Get-IniValue $presetBefore $migrationSection 'Depth_Map_View'
+    if ($value -cmatch '^[012]$') { $iniAfter = Set-IniValue $iniAfter 'SUNSHINE_GAME3D' 'DepthView' $value }
+}
+if ((Get-IniValue $iniBefore 'SUNSHINE_GAME3D' 'Enabled') -ceq '') {
+    $iniAfter = Set-IniValue $iniAfter 'SUNSHINE_GAME3D' 'Enabled' '1'
+}
+# Techniques is a preset-wide key before any named shader section. The stereo
+# techniques of earlier effect-based installations are disabled: Game 3D renders
+# in the add-on.
 $techniques = @(Split-ReShadeList (Get-IniValue $presetAfter '' 'Techniques') | Where-Object {
     $_ -and $_ -cnotin @('SuperDepth3D','SuperDepth3D@SuperDepth3D.fx','SunshineDepth3D','SunshineDepth3D@SunshineDepth3D.fx',
         'SunshineGame3D','SunshineGame3D@SunshineGame3D.fx')
 })
-if (-not $nativeGame3D) { $techniques += ($effectName + '@' + $effectName + '.fx') }
 $presetAfter = Set-IniValue $presetAfter '' 'Techniques' (Join-ReShadeList $techniques)
-if ($original) {
-    # Global and preset-wide definitions have different precedence in ReShade.
-    # Set only our export flag; retain every unrelated macro and shader uniform.
-    $iniAfter = Enable-SunshineExport $iniAfter 'GENERAL' $true
-    $iniAfter = Enable-SunshineExport $iniAfter ($effectName + '.fx') $false
-    $presetAfter = Enable-SunshineExport $presetAfter '' $true
-    $presetAfter = Enable-SunshineExport $presetAfter ($effectName + '.fx') $false
+foreach ($scope in @('GENERAL','SunshineGame3D.fx')) {
+    $iniAfter = Remove-Game3DDefinitions $iniAfter $scope
 }
-if ($nativeGame3D) {
-    foreach ($scope in @('GENERAL','SunshineGame3D.fx')) {
-        $iniAfter = Remove-Game3DDefinitions $iniAfter $scope
-    }
-    foreach ($scope in @('','SunshineGame3D.fx')) {
-        $presetAfter = Remove-Game3DDefinitions $presetAfter $scope
-    }
+foreach ($scope in @('','SunshineGame3D.fx')) {
+    $presetAfter = Remove-Game3DDefinitions $presetAfter $scope
 }
 
 $legacyPaths = @('SunshineDepth.addon64','SunshineDepthProbe.addon64') | ForEach-Object { Join-Path $addonDestination $_ }
-# Retired support files are removed only from the owned Game 3D directory. The
-# original reference's files and settings remain available in its separate path.
-if ($nativeGame3D) {
-    $shaderDestination = Resolve-GamePath '.\reshade-shaders\Shaders\SunshineGame3D'
-    $legacyPaths += @('SunshineGame3D.fx','SunshineHostWarp.fxh','SunshineCamera.fxh','SunshineGenericConfig.fxh','SunshineWarpConfig.fxh','Overwatch.fxh','AXAA.fxh','SunshineIntegration.fxh','SunshinePost.fxh') | ForEach-Object { Join-Path $shaderDestination $_ }
-}
+# Retired effect files are removed only from the directories earlier Sunshine
+# installations owned: the Game 3D effect's, and the reference effect an
+# explicit -ShaderDirectory installation copied. A user's own SuperDepth3D
+# files and settings stay in their separate path.
+$shaderDestination = Resolve-GamePath '.\reshade-shaders\Shaders\SunshineGame3D'
+$legacyPaths += @('SunshineGame3D.fx','SunshineHostWarp.fxh','SunshineCamera.fxh','SunshineGenericConfig.fxh','SunshineWarpConfig.fxh','Overwatch.fxh','AXAA.fxh','SunshineIntegration.fxh','SunshinePost.fxh') | ForEach-Object { Join-Path $shaderDestination $_ }
+$legacyPaths += Join-Path (Resolve-GamePath '.\reshade-shaders\Shaders\Sunshine3D') 'SunshineDepth3D.fx'
 $destinationSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 foreach ($destination in (@($copies | ForEach-Object { $_.Destination }) + @($iniPath,$presetPath) + @($legacyPaths))) {
     if (Test-Path -LiteralPath $destination -PathType Container) {
@@ -394,7 +281,7 @@ try {
     }
     throw $installationFailure
 }
-Write-Output "Installed Sunshine 3D for $([IO.Path]::GetFileName($gameExe)) using $effectName."
+Write-Output "Installed Sunshine 3D for $([IO.Path]::GetFileName($gameExe)) using native Game 3D."
 if ($runningGame) { Write-Output 'Installation is ready for the next game launch; the current game has not loaded the new add-on.' }
 Write-Output 'On the next game launch, open ReShade > Add-ons > Sunshine 3D, then choose Game 3D in Moonlight.'
 Write-Output "Backup: $backupDirectory"

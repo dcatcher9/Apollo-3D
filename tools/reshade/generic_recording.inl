@@ -14,12 +14,17 @@
 // render pass, transfer and execute events that fill state_tracking
 // (generic_recording.h), and resolve_transfer_lineage, which on_present runs
 // on the queue's merged recording. Declared in depth_addon.cpp.
+//
+// A list or queue of a device that is not Direct3D 11 or 12 has no
+// state_tracking (supported_api): every handler returns there.
 #pragma once
 
 SUNSHINE_DEPTH_ADDON_INTERNAL bool on_draw(command_list *cmd_list, uint32_t vertices, uint32_t instances, uint32_t, uint32_t)
 {
 	if (!vertices || !instances) return false;
-	auto &state = *cmd_list->get_private_data<state_tracking>();
+	auto *const recording = cmd_list->get_private_data<state_tracking>();
+	if (recording == nullptr) return false;
+	auto &state = *recording;
 	if (state.current_depth_stencil == 0)
 		return false; // This is a draw call with no depth-stencil bound
 
@@ -53,7 +58,9 @@ SUNSHINE_DEPTH_ADDON_INTERNAL bool on_draw_indirect(command_list *cmd_list, indi
 	// ReShade 6.8 reports D3D12 ExecuteIndirect as 'unknown' even for raster draws.
 	// Preserve that existing activity evidence until the backend exposes its signature.
 
-	auto &state = *cmd_list->get_private_data<state_tracking>();
+	auto *const recording = cmd_list->get_private_data<state_tracking>();
+	if (recording == nullptr) return false;
+	auto &state = *recording;
 	if (state.current_depth_stencil == 0)
 		return false; // This is a draw call with no depth-stencil bound
 
@@ -82,15 +89,17 @@ static void on_bind_viewport(command_list *cmd_list, uint32_t first, uint32_t co
 	if (first != 0 || count == 0)
 		return; // Only interested in the main viewport
 
-	auto &state = *cmd_list->get_private_data<state_tracking>();
-	state.current_viewport = viewport[0];
+	if (auto *const state = cmd_list->get_private_data<state_tracking>())
+		state->current_viewport = viewport[0];
 }
 // No binding is a copy point (Generic depth copies at the end of the frame),
 // so the binding kind, an actual OMSetRenderTargets or a render pass's
 // synthesized one, is unused.
 SUNSHINE_DEPTH_ADDON_INTERNAL void on_bind_depth_stencil_impl(command_list *cmd_list, resource_view depth_stencil_view, bool)
 {
-	auto &state = *cmd_list->get_private_data<state_tracking>();
+	auto *const recording = cmd_list->get_private_data<state_tracking>();
+	if (recording == nullptr) return;
+	auto &state = *recording;
 
 	const resource depth_stencil = (depth_stencil_view != 0) ? cmd_list->get_device()->get_resource_from_view(depth_stencil_view) : resource { 0 };
 
@@ -135,14 +144,13 @@ static void observe_clear_content(command_list *cmd_list, const depth_view_targe
 	stats.clear_other |= depth != 0.0f && depth != 1.0f;
 	stats.depth_erased |= target.sampled_plane;
 	// A full clear of the sampled plane erases the extent drawn so far; the
-	// next draw starts the capture crop again (observe_viewport). Only the
-	// D3D10/11/12 clears are known to cover the whole view.
-	stats.observe_depth_clear(cmd_list->get_device()->get_api(), rect_count, target.sampled_plane, state.position());
+	// next draw starts the capture crop again (observe_viewport).
+	stats.observe_depth_clear(rect_count, target.sampled_plane, state.position());
 }
 static bool on_clear_depth_stencil(command_list *cmd_list, resource_view dsv, const float *depth, const uint8_t *, uint32_t rect_count, const rect *)
 {
 	// Ignore clears that do not affect the depth buffer (stencil clears)
-	if (dsv != 0 && depth != nullptr)
+	if (dsv != 0 && depth != nullptr && cmd_list->get_private_data<state_tracking>() != nullptr)
 	{
 		const auto target = depth_view_target_of(cmd_list->get_device(), dsv);
 		prove_depth_clear(cmd_list, target);
@@ -153,6 +161,7 @@ static bool on_clear_depth_stencil(command_list *cmd_list, resource_view dsv, co
 }
 static bool on_begin_render_pass_with_depth_stencil(command_list *cmd_list, uint32_t, const render_pass_render_target_desc *, const render_pass_depth_stencil_desc *depth_stencil_desc, render_pass_flags flags)
 {
+	if (cmd_list->get_private_data<state_tracking>() == nullptr) return false;
 	// A resuming pass continues the pass a suspending one left in an earlier
 	// recording: the pair declares the same accesses, and its boundary renders
 	// as ending and beginning PRESERVE, so only the first pass of the chain
@@ -175,8 +184,7 @@ static bool on_begin_render_pass_with_depth_stencil(command_list *cmd_list, uint
 	else if (!resuming && depth_stencil_desc != nullptr && depth_stencil_desc->view != 0 &&
 		depth_stencil_desc->depth_load_op == render_pass_load_op::discard && cmd_list->get_device()->get_api() == device_api::d3d12)
 	{
-		// A D3D12 depth DISCARD (observe_depth_discard). Vulkan's DONT_CARE is
-		// left to the draw-statistics picker as before.
+		// A D3D12 depth DISCARD (observe_depth_discard).
 		const auto target = depth_view_target_of(cmd_list->get_device(), depth_stencil_desc->view);
 		if (target.sampled_plane)
 		{
@@ -217,8 +225,10 @@ static bool on_begin_render_pass_with_depth_stencil(command_list *cmd_list, uint
 
 static bool on_end_render_pass(command_list *cmd_list)
 {
+	auto *const recording = cmd_list->get_private_data<state_tracking>();
+	if (recording == nullptr) return false;
 	capture_inputs::list_event(cmd_list, sunshine_streamline::depth_capture::list_event::pass_end);
-	auto &state = *cmd_list->get_private_data<state_tracking>();
+	auto &state = *recording;
 	// The pass's depth ending access DISCARDs it now (render_pass_depth).
 	if (state.render_pass_depth != 0)
 	{
@@ -297,9 +307,6 @@ static void record_copied_depth(command_list *cmd_list, resource source, resourc
 // order the copy against, so the copy is treated as above: never a lost pass,
 // never current depth of its destination (fail-safe; a pass that queue drew
 // and then cleared is not kept; check_transfer_lineage's no-work case).
-// Generic content
-// selection only (D3D11 and D3D12); the other APIs' draw-statistics picker
-// keeps ReShade's accounting.
 SUNSHINE_DEPTH_ADDON_INTERNAL void resolve_transfer_lineage(state_tracking &state, const generic_depth_device_data &device_data)
 {
 	std::array<resource, 8> untouched {};
@@ -336,7 +343,9 @@ SUNSHINE_DEPTH_ADDON_INTERNAL void resolve_transfer_lineage(state_tracking &stat
 
 SUNSHINE_DEPTH_ADDON_INTERNAL bool on_dispatch_mesh(command_list *cmd_list, uint32_t groups_x, uint32_t groups_y, uint32_t groups_z)
 {
-	auto &state = *cmd_list->get_private_data<state_tracking>();
+	auto *const recording = cmd_list->get_private_data<state_tracking>();
+	if (recording == nullptr) return false;
+	auto &state = *recording;
 	if (!groups_x || !groups_y || !groups_z || state.current_depth_stencil == 0) return false;
 	std::shared_lock<std::shared_mutex> lock(s_mutex, std::defer_lock);
 	if (state.is_queue) lock.lock();
@@ -375,9 +384,10 @@ SUNSHINE_DEPTH_ADDON_INTERNAL bool on_resolve_texture_region(command_list *cmd_l
 }
 static void on_reset(command_list *cmd_list)
 {
+	auto *const target_state = cmd_list->get_private_data<state_tracking>();
+	if (target_state == nullptr) return;
 	capture_inputs::list_event(cmd_list, sunshine_streamline::depth_capture::list_event::reset);
-	auto &target_state = *cmd_list->get_private_data<state_tracking>();
-	target_state.reset();
+	target_state->reset();
 }
 static void on_close(command_list *cmd_list)
 {
@@ -389,6 +399,8 @@ static void on_execute_primary(command_queue *queue, command_list *cmd_list)
 	if (cmd_list == queue->get_immediate_command_list())
 		return;
 
+	if (queue->get_private_data<state_tracking>() == nullptr)
+		return;
 	auto &target_state = *queue->get_private_data<state_tracking>();
 	const auto &source_state = *cmd_list->get_private_data<state_tracking>();
 	assert(target_state.is_queue && !source_state.is_queue);
@@ -400,6 +412,8 @@ static void on_execute_primary(command_queue *queue, command_list *cmd_list)
 }
 static void on_execute_secondary(command_list *cmd_list, command_list *secondary_cmd_list)
 {
+	if (cmd_list->get_private_data<state_tracking>() == nullptr)
+		return;
 	auto &target_state = *cmd_list->get_private_data<state_tracking>();
 	const auto &source_state = *secondary_cmd_list->get_private_data<state_tracking>();
 
