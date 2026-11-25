@@ -86,6 +86,8 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/video_player_context.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/sbs_debug_dump.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/sbs_debug_dump.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/sbs_debug_dump_validate.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/sbs_debug_dump_validate.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/audio.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/ar_glasses.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/ar_glasses.cpp"

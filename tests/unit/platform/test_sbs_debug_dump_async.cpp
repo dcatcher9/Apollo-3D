@@ -38,6 +38,7 @@
   #include <src/host_sbs_shader_cache.h>
   #include <src/platform/windows/sbs_debug_dump.h>
   #include <src/platform/windows/sbs_debug_dump_async.h>
+  #include <src/platform/windows/sbs_debug_dump_validate.h>
   #include <src/prod_zipdepth_convex2x.h>
 
 namespace {

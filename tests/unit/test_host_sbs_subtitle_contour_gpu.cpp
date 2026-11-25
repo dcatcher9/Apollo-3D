@@ -15,6 +15,7 @@
   #include "src/host_sbs_shader_cache.h"
   #include "src/host_sbs_subtitle_glyph.h"
   #include "src/platform/windows/sbs_debug_dump.h"
+  #include "src/platform/windows/sbs_debug_dump_validate.h"
 
   #include <algorithm>
   #include <array>
