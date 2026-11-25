@@ -175,6 +175,12 @@ namespace confighttp {
     http::log_request_debug(*request);
   }
 
+  /** No Web UI response may be shown inside another page's frame. Every reply carries both headers. */
+  void add_frame_guard(SimpleWeb::CaseInsensitiveMultimap &headers) {
+    headers.emplace("X-Frame-Options", "DENY");
+    headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
+  }
+
   /**
    * @brief Send a response.
    * @param response The HTTP response object.
@@ -183,8 +189,7 @@ namespace confighttp {
   void send_response(resp_https_t response, const nlohmann::json &output_tree) {
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "application/json");
-    headers.emplace("X-Frame-Options", "DENY");
-    headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
+    add_frame_guard(headers);
     response->write(output_tree.dump(), headers);
   }
 
@@ -193,13 +198,12 @@ namespace confighttp {
     SimpleWeb::StatusCode status,
     const nlohmann::json &body
   ) {
-    const SimpleWeb::CaseInsensitiveMultimap headers {
+    SimpleWeb::CaseInsensitiveMultimap headers {
       {"Content-Type", "application/json"},
       {"Cache-Control", "no-store"},
       {"X-Content-Type-Options", "nosniff"},
-      {"X-Frame-Options", "DENY"},
-      {"Content-Security-Policy", "frame-ancestors 'none';"}
     };
+    add_frame_guard(headers);
     response->write(status, body.dump(), headers);
   }
 
@@ -216,11 +220,10 @@ namespace confighttp {
     tree["status_code"] = code;
     tree["status"] = false;
     tree["error"] = "Unauthorized";
-    const SimpleWeb::CaseInsensitiveMultimap headers {
+    SimpleWeb::CaseInsensitiveMultimap headers {
       {"Content-Type", "application/json"},
-      {"X-Frame-Options", "DENY"},
-      {"Content-Security-Policy", "frame-ancestors 'none';"}
     };
+    add_frame_guard(headers);
     response->write(code, tree.dump(), headers);
   }
 
@@ -233,11 +236,10 @@ namespace confighttp {
   void send_redirect(resp_https_t response, req_https_t request, const char *path) {
     auto address = net::addr_to_normalized_string(request->remote_endpoint().address());
     BOOST_LOG(info) << "Web UI: ["sv << address << "] -- redirecting"sv;
-    const SimpleWeb::CaseInsensitiveMultimap headers {
+    SimpleWeb::CaseInsensitiveMultimap headers {
       {"Location", path},
-      {"X-Frame-Options", "DENY"},
-      {"Content-Security-Policy", "frame-ancestors 'none';"}
     };
+    add_frame_guard(headers);
     response->write(SimpleWeb::StatusCode::redirection_temporary_redirect, headers);
   }
 
@@ -402,8 +404,7 @@ namespace confighttp {
     tree["error"] = "Not Found";
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "application/json");
-    headers.emplace("X-Frame-Options", "DENY");
-    headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
+    add_frame_guard(headers);
 
     response->write(code, tree.dump(), headers);
   }
@@ -426,8 +427,7 @@ namespace confighttp {
     constexpr SimpleWeb::StatusCode code = SimpleWeb::StatusCode::client_error_bad_request;
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "application/json");
-    headers.emplace("X-Frame-Options", "DENY");
-    headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
+    add_frame_guard(headers);
 
     response->write(code, make_bad_request_body(error_message), headers);
   }
@@ -541,8 +541,7 @@ namespace confighttp {
     std::string content = file_handler::read_file(WEB_DIR "index.html");
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "text/html; charset=utf-8");
-    headers.emplace("X-Frame-Options", "DENY");
-    headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
+    add_frame_guard(headers);
     response->write(content, headers);
   }
 
@@ -561,8 +560,7 @@ namespace confighttp {
     std::string content = file_handler::read_file(WEB_DIR "pin.html");
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "text/html; charset=utf-8");
-    headers.emplace("X-Frame-Options", "DENY");
-    headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
+    add_frame_guard(headers);
     response->write(content, headers);
   }
 
@@ -581,8 +579,7 @@ namespace confighttp {
     std::string content = file_handler::read_file(WEB_DIR "apps.html");
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "text/html; charset=utf-8");
-    headers.emplace("X-Frame-Options", "DENY");
-    headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
+    add_frame_guard(headers);
     headers.emplace("Access-Control-Allow-Origin", "https://images.igdb.com/");
     response->write(content, headers);
   }
@@ -602,8 +599,7 @@ namespace confighttp {
     std::string content = file_handler::read_file(WEB_DIR "config.html");
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "text/html; charset=utf-8");
-    headers.emplace("X-Frame-Options", "DENY");
-    headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
+    add_frame_guard(headers);
     response->write(content, headers);
   }
 
@@ -622,8 +618,7 @@ namespace confighttp {
     std::string content = file_handler::read_file(WEB_DIR "password.html");
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "text/html; charset=utf-8");
-    headers.emplace("X-Frame-Options", "DENY");
-    headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
+    add_frame_guard(headers);
     response->write(content, headers);
   }
 
@@ -654,8 +649,7 @@ namespace confighttp {
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "text/html; charset=utf-8");
     headers.emplace("Cache-Control", "no-store");
-    headers.emplace("X-Frame-Options", "DENY");
-    headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
+    add_frame_guard(headers);
     response->write(content, headers);
   }
 
@@ -679,8 +673,7 @@ namespace confighttp {
     std::string content = file_handler::read_file(WEB_DIR "welcome.html");
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "text/html; charset=utf-8");
-    headers.emplace("X-Frame-Options", "DENY");
-    headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
+    add_frame_guard(headers);
     response->write(content, headers);
   }
 
@@ -699,8 +692,7 @@ namespace confighttp {
     std::string content = file_handler::read_file(WEB_DIR "troubleshooting.html");
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "text/html; charset=utf-8");
-    headers.emplace("X-Frame-Options", "DENY");
-    headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
+    add_frame_guard(headers);
     response->write(content, headers);
   }
 
@@ -732,8 +724,7 @@ namespace confighttp {
     std::ifstream in(WEB_DIR "images/sunshine3d.ico", std::ios::binary);
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "image/x-icon");
-    headers.emplace("X-Frame-Options", "DENY");
-    headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
+    add_frame_guard(headers);
     response->write(SimpleWeb::StatusCode::success_ok, in, headers);
   }
 
@@ -751,8 +742,7 @@ namespace confighttp {
     std::ifstream in(WEB_DIR "images/logo-sunshine3d-45.png", std::ios::binary);
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "image/png");
-    headers.emplace("X-Frame-Options", "DENY");
-    headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
+    add_frame_guard(headers);
     response->write(SimpleWeb::StatusCode::success_ok, in, headers);
   }
 
@@ -803,8 +793,7 @@ namespace confighttp {
     }
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", mimeType->second);
-    headers.emplace("X-Frame-Options", "DENY");
-    headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
+    add_frame_guard(headers);
     std::ifstream in(filePath.string(), std::ios::binary);
     response->write(SimpleWeb::StatusCode::success_ok, in, headers);
   }
@@ -1659,8 +1648,7 @@ namespace confighttp {
     contentType += currentCodePageToCharset();
 #endif
     headers.emplace("Content-Type", contentType);
-    headers.emplace("X-Frame-Options", "DENY");
-    headers.emplace("Content-Security-Policy", "frame-ancestors 'none';");
+    add_frame_guard(headers);
     response->write(SimpleWeb::StatusCode::success_ok, content, headers);
   }
 
