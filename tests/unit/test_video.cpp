@@ -9381,11 +9381,13 @@ TEST(CaptureBackendFailoverTest, CaptureLoopsBracketEachAttemptWithDisplayChange
   const auto capture_thread = video_source.find("void capture_session_t::run()");
   ASSERT_NE(capture_thread, std::string::npos);
   const auto initial_epoch_assignment = video_source.find("display_epoch_at_open =", capture_thread);
-  const auto initial_epoch = video_source.find("platf::display_change_epoch();", initial_epoch_assignment);
-  const auto initial_open = video_source.find("disp = platf::display(", capture_thread);
+  // The worker reaches the platform through its operations (capture_platform_t), whose
+  // production values are platf::display_change_epoch, platf::display and reset_display.
+  const auto initial_epoch = video_source.find("platform_.display_change_epoch();", initial_epoch_assignment);
+  const auto initial_open = video_source.find("disp = platform_.open_display(", capture_thread);
   const auto reopen_epoch_assignment = video_source.find("display_epoch_at_open =", initial_open);
-  const auto reopen_epoch = video_source.find("platf::display_change_epoch();", reopen_epoch_assignment);
-  const auto reopen = video_source.find("reset_display(", reopen_epoch);
+  const auto reopen_epoch = video_source.find("platform_.display_change_epoch();", reopen_epoch_assignment);
+  const auto reopen = video_source.find("platform_.reopen_display(", reopen_epoch);
   ASSERT_NE(initial_epoch_assignment, std::string::npos);
   ASSERT_NE(initial_epoch, std::string::npos);
   ASSERT_NE(initial_open, std::string::npos);

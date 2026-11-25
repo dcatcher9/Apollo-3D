@@ -566,6 +566,36 @@ namespace video {
     return frame_buffer_pool;
   }
 
+  namespace detail {
+    /**
+     * What the capture worker asks of the machine: which display the session wants, opening
+     * it, and the topology around it. Production uses real_capture_platform(); a test runs
+     * the same worker against inert operations (capture_reinit_test_t).
+     */
+    struct capture_platform_t {
+      using open_display_t = std::function<std::shared_ptr<platf::display_t>(
+        const std::string &, const config_t &, platf::capture_backend_e, std::weak_ptr<platf::capture_display_retirement_t>
+      )>;
+
+      std::function<std::string()> preferred_display_name;
+      std::function<void(const std::string &)> set_display_name;
+      /// Re-enumerate the displays, keeping the index on the preferred (or else the current) one.
+      std::function<void(std::vector<std::string> &, int &, const std::string &)> refresh_displays;
+      open_display_t open_display;
+      /// Open after a reinitialization, where a first failure is retried.
+      open_display_t reopen_display;
+      std::function<void()> adjust_thread_priority;
+      std::function<std::uint64_t()> display_change_epoch;
+      /// Complete an owned topology repair before outputs are probed. The argument tells whether
+      /// the worker is still wanted; false ends the worker.
+      std::function<bool(const std::function<bool()> &)> reconcile_topology;
+      /// Optional: called on each pass of the wait for the previous display's release.
+      std::function<void()> waited_for_display_release;
+    };
+  }  // namespace detail
+
+  static detail::capture_platform_t real_capture_platform();
+
   class capture_session_t {
   public:
     capture_session_t(
@@ -576,17 +606,22 @@ namespace video {
       detail::capture_worker_test_callback_t test_callback = nullptr,
       void *test_state = nullptr,
       detail::capture_worker_test_callback_t test_before_admission = nullptr,
-      std::shared_ptr<const detail::capture_reinit_test_hooks_t> test_platform = nullptr
+      std::optional<detail::capture_platform_t> test_platform = std::nullopt
 #endif
     ):
         images_(std::move(images)),
-        config_(config)
+        config_(config),
+        platform_(
+#ifdef SUNSHINE_TESTS
+          test_platform ? std::move(*test_platform) :
+#endif
+                          real_capture_platform()
+        )
 #ifdef SUNSHINE_TESTS
         ,
         test_callback_(test_callback),
         test_state_(test_state),
-        test_before_admission_(test_before_admission),
-        test_platform_(std::move(test_platform))
+        test_before_admission_(test_before_admission)
 #endif
         ,
         thread_(&capture_session_t::run, this) {
@@ -649,11 +684,12 @@ namespace video {
     // retuned through display_t::set_client_frame_rate() rather than through this copy.
     sync_util::sync_t<std::optional<video_mode_change_t>> live_video_mode_;
 
+    const detail::capture_platform_t platform_;
+
 #ifdef SUNSHINE_TESTS
     detail::capture_worker_test_callback_t test_callback_;
     void *test_state_;
     detail::capture_worker_test_callback_t test_before_admission_;
-    std::shared_ptr<const detail::capture_reinit_test_hooks_t> test_platform_;
 #endif
 
     std::thread thread_;  ///< Last: run() starts only after all referenced state exists.
@@ -835,6 +871,65 @@ namespace video {
     refresh_displays(display_names, current_display_index, empty_str);
   }
 
+  static detail::capture_platform_t real_capture_platform() {
+    detail::capture_platform_t platform;
+    platform.preferred_display_name = []() {
+      return proc::proc.get_display_name();
+    };
+    platform.set_display_name = [](const std::string &name) {
+      proc::proc.set_display_name(name);
+    };
+    platform.refresh_displays = [](std::vector<std::string> &display_names, int &current_display_index, const std::string &preferred) {
+      auto preferred_display_name = preferred;
+      refresh_displays(display_names, current_display_index, preferred_display_name);
+    };
+    platform.open_display = [](const std::string &name, const config_t &config, platf::capture_backend_e backend, std::weak_ptr<platf::capture_display_retirement_t> retirement) {
+      return platf::display(name, config, backend, std::move(retirement));
+    };
+    platform.reopen_display = [](const std::string &name, const config_t &config, platf::capture_backend_e backend, std::weak_ptr<platf::capture_display_retirement_t> retirement) {
+      // reset_display() sleeps between its retries.
+      std::shared_ptr<platf::display_t> display;
+      reset_display(display, name, config, backend, std::move(retirement));
+      return display;
+    };
+    platform.adjust_thread_priority = []() {
+      platf::adjust_thread_priority(platf::thread_priority_e::critical);
+    };
+    platform.display_change_epoch = []() {
+      return platf::display_change_epoch();
+    };
+    platform.reconcile_topology = [](const std::function<bool()> &still_wanted) {
+#ifdef _WIN32
+      const auto topology_generation = platf::primary_display::exclusive_session_generation();
+      const auto topology = platf::primary_display::detail::reconcile_before_capture(
+        [topology_generation]() {
+          return platf::primary_display::reconcile_exclusive_display_topology(topology_generation).result;
+        },
+        [&]() {
+          return still_wanted() &&
+                 platf::primary_display::exclusive_session_generation() == topology_generation;
+        },
+        []() {
+          return std::chrono::steady_clock::now();
+        },
+        [](auto delay) {
+          std::this_thread::sleep_for(delay);
+        }
+      );
+      if (topology == platf::primary_display::detail::capture_reconcile_result_e::cancelled) {
+        return false;
+      }
+      if (topology == platf::primary_display::detail::capture_reconcile_result_e::exhausted) {
+        BOOST_LOG(warning) << "Exclusive display topology is still settling; continuing normal capture recovery."sv;
+      }
+#else
+      (void) still_wanted;
+#endif
+      return true;
+    };
+    return platform;
+  }
+
   void capture_session_t::run() {
     auto &images = images_;
     auto &config = config_;
@@ -880,30 +975,12 @@ namespace video {
     });
     capture_backend_failover_t capture_failover;
     // Display-change evidence starts before a duplication opens: a change after open invalidates it.
-    auto display_epoch_at_open =
-#ifdef SUNSHINE_TESTS
-      test_platform_ ? test_platform_->display_change_epoch() :
-#endif
-      platf::display_change_epoch();
+    auto display_epoch_at_open = platform_.display_change_epoch();
     std::string active_display_name;
-    const auto initial_display_name =
-#ifdef SUNSHINE_TESTS
-      test_platform_ ? test_platform_->preferred_display_name() :
-#endif
-      proc::proc.get_display_name();
+    const auto initial_display_name = platform_.preferred_display_name();
     if (!initial_display_name.empty()) {
       active_display_name = initial_display_name;
-#ifdef SUNSHINE_TESTS
-      if (test_platform_) {
-        disp = test_platform_->open_display(initial_display_name, config, capture_failover.preferred_backend(), generation->retirement());
-      } else
-#endif
-        disp = platf::display(
-          initial_display_name,
-          config,
-          capture_failover.preferred_backend(),
-          generation->retirement()
-        );
+      disp = platform_.open_display(initial_display_name, config, capture_failover.preferred_backend(), generation->retirement());
       if (disp) {
         capture_failover.note_backend_opened(disp->capture_backend());
       }
@@ -914,35 +991,15 @@ namespace video {
     if (!disp) {
       // Get all the monitor names now, rather than at boot, to
       // get the most up-to-date list available monitors
-#ifdef SUNSHINE_TESTS
-      if (test_platform_) {
-        test_platform_->refresh_displays(display_names, display_p, {});
-      } else
-#endif
-      refresh_displays(display_names, display_p);
+      platform_.refresh_displays(display_names, display_p, {});
       if (active_display_name != display_names[display_p]) {
         capture_failover.reset();
         active_display_name = display_names[display_p];
       }
-#ifdef SUNSHINE_TESTS
-      if (test_platform_) {
-        disp = test_platform_->open_display(active_display_name, config, capture_failover.preferred_backend(), generation->retirement());
-      } else
-#endif
-        disp = platf::display(
-          active_display_name,
-          config,
-          capture_failover.preferred_backend(),
-          generation->retirement()
-        );
+      disp = platform_.open_display(active_display_name, config, capture_failover.preferred_backend(), generation->retirement());
       if (disp) {
         capture_failover.note_backend_opened(disp->capture_backend());
-#ifdef SUNSHINE_TESTS
-        if (test_platform_) {
-          test_platform_->set_display_name(active_display_name);
-        } else
-#endif
-        proc::proc.set_display_name(active_display_name);
+        platform_.set_display_name(active_display_name);
       } else {
         return;
       }
@@ -968,12 +1025,7 @@ namespace video {
     };
 
     // Capture takes place on this thread
-#ifdef SUNSHINE_TESTS
-    if (test_platform_) {
-      test_platform_->adjust_thread_priority();
-    } else
-#endif
-    platf::adjust_thread_priority(platf::thread_priority_e::critical);
+    platform_.adjust_thread_priority();
 
     bool capture_cursor = true;
     auto capture_diagnostics = detail::make_diagnostic_state<capture_stage_diagnostics_t>(
@@ -1006,10 +1058,7 @@ namespace video {
             captured_frames,
             std::chrono::steady_clock::now() - capture_started,
             display_epoch_at_open,
-#ifdef SUNSHINE_TESTS
-            test_platform_ ? test_platform_->display_change_epoch() :
-#endif
-            platf::display_change_epoch(),
+            platform_.display_change_epoch(),
           })) {
         BOOST_LOG(warning) << "Desktop Duplication failed repeatedly before stable capture without a "sv
                               "display-mode change; using Windows.Graphics.Capture for the rest of this session."sv;
@@ -1039,11 +1088,9 @@ namespace video {
               while (images->try_pop()) {
               }
 
-#ifdef SUNSHINE_TESTS
-              if (test_platform_ && test_platform_->waited_for_display_release) {
-                test_platform_->waited_for_display_release();
+              if (platform_.waited_for_display_release) {
+                platform_.waited_for_display_release();
               }
-#endif
 
               if (detail::capture_display_release_wait_cancelled(run_control.running(), images->running())) {
                 return;
@@ -1079,72 +1126,25 @@ namespace video {
             // The old DDUP/NVENC references are gone. Complete the owned topology
             // repair before probing outputs, rather than racing a game-exit repair
             // on the session-monitor worker and then opening a transient display.
-#ifdef _WIN32
-#ifdef SUNSHINE_TESTS
-            if (test_platform_) {
-              if (!test_platform_->reconcile_topology()) {
-                return;
-              }
-            } else {
-#endif
-            const auto topology_generation = platf::primary_display::exclusive_session_generation();
-            const auto topology = platf::primary_display::detail::reconcile_before_capture(
-              [topology_generation]() {
-                return platf::primary_display::reconcile_exclusive_display_topology(topology_generation).result;
-              },
-              [&]() {
-                return run_control.running() && images->running() &&
-                       platf::primary_display::exclusive_session_generation() == topology_generation;
-              },
-              []() {
-                return std::chrono::steady_clock::now();
-              },
-              [](auto delay) {
-                std::this_thread::sleep_for(delay);
-              }
-            );
-            if (topology == platf::primary_display::detail::capture_reconcile_result_e::cancelled) {
+            if (!platform_.reconcile_topology([&]() {
+                  return run_control.running() && images->running();
+                })) {
               return;
             }
-            if (topology == platf::primary_display::detail::capture_reconcile_result_e::exhausted) {
-              BOOST_LOG(warning) << "Exclusive display topology is still settling; continuing normal capture recovery."sv;
-            }
-#ifdef SUNSHINE_TESTS
-            }
-#endif
-#endif
             auto next_generation = generations_.begin();
             if (!next_generation) {
               return;
             }
             generation = std::move(next_generation);
-            display_epoch_at_open =
-#ifdef SUNSHINE_TESTS
-              test_platform_ ? test_platform_->display_change_epoch() :
-#endif
-              platf::display_change_epoch();
+            display_epoch_at_open = platform_.display_change_epoch();
             // Reopen the display this session was already capturing before looking for another
             // one, as the first open of the session does. Enumerating the outputs probes every
             // adapter and output while the viewer waits, and is only needed when that display is
             // gone or cannot be opened.
             {
-              const auto session_display_name =
-#ifdef SUNSHINE_TESTS
-                test_platform_ ? test_platform_->preferred_display_name() :
-#endif
-                proc::proc.get_display_name();
+              const auto session_display_name = platform_.preferred_display_name();
               if (!session_display_name.empty() && session_display_name == active_display_name) {
-#ifdef SUNSHINE_TESTS
-                if (test_platform_) {
-                  disp = test_platform_->open_display(active_display_name, config, capture_failover.preferred_backend(), generation->retirement());
-                } else
-#endif
-                  disp = platf::display(
-                    active_display_name,
-                    config,
-                    capture_failover.preferred_backend(),
-                    generation->retirement()
-                  );
+                disp = platform_.open_display(active_display_name, config, capture_failover.preferred_backend(), generation->retirement());
                 if (disp) {
                   capture_failover.note_backend_opened(disp->capture_backend());
                 }
@@ -1156,44 +1156,19 @@ namespace video {
               disp.reset();
 
               // Refresh display names since a display removal might have caused the reinitialization
-              auto preferred_display_name =
-#ifdef SUNSHINE_TESTS
-                test_platform_ ? test_platform_->preferred_display_name() :
-#endif
-                proc::proc.get_display_name();
-#ifdef SUNSHINE_TESTS
-              if (test_platform_) {
-                test_platform_->refresh_displays(display_names, display_p, preferred_display_name);
-              } else
-#endif
-              refresh_displays(display_names, display_p, preferred_display_name);
+              const auto preferred_display_name = platform_.preferred_display_name();
+              platform_.refresh_displays(display_names, display_p, preferred_display_name);
 
               if (active_display_name != display_names[display_p]) {
                 capture_failover.reset();
                 active_display_name = display_names[display_p];
               }
 
-              // reset_display() will sleep between retries
-#ifdef SUNSHINE_TESTS
-              if (test_platform_) {
-                disp = test_platform_->open_display(active_display_name, config, capture_failover.preferred_backend(), generation->retirement());
-              } else
-#endif
-                reset_display(
-                  disp,
-                  active_display_name,
-                  config,
-                  capture_failover.preferred_backend(),
-                  generation->retirement()
-                );
+              // The production reopen sleeps between its retries.
+              disp = platform_.reopen_display(active_display_name, config, capture_failover.preferred_backend(), generation->retirement());
               if (disp) {
                 capture_failover.note_backend_opened(disp->capture_backend());
-#ifdef SUNSHINE_TESTS
-                if (test_platform_) {
-                  test_platform_->set_display_name(active_display_name);
-                } else
-#endif
-                proc::proc.set_display_name(active_display_name);
+                platform_.set_display_name(active_display_name);
                 break;
               }
             }
@@ -2995,12 +2970,27 @@ namespace video {
     }
 
     struct capture_reinit_test_t::impl_t {
-      std::shared_ptr<const capture_reinit_test_hooks_t> platform;
       capture_session_t capture;
 
+      // A test opens and reopens through the same operation, and its repair takes no argument.
+      static capture_platform_t platform_of(capture_reinit_test_hooks_t hooks) {
+        capture_platform_t platform;
+        platform.preferred_display_name = std::move(hooks.preferred_display_name);
+        platform.set_display_name = std::move(hooks.set_display_name);
+        platform.refresh_displays = std::move(hooks.refresh_displays);
+        platform.reopen_display = hooks.open_display;
+        platform.open_display = std::move(hooks.open_display);
+        platform.adjust_thread_priority = std::move(hooks.adjust_thread_priority);
+        platform.display_change_epoch = std::move(hooks.display_change_epoch);
+        platform.reconcile_topology = [reconcile = std::move(hooks.reconcile_topology)](const std::function<bool()> &) {
+          return reconcile();
+        };
+        platform.waited_for_display_release = std::move(hooks.waited_for_display_release);
+        return platform;
+      }
+
       impl_t(config_t config, img_event_t images, capture_reinit_test_hooks_t hooks):
-          platform(std::make_shared<capture_reinit_test_hooks_t>(std::move(hooks))),
-          capture(std::move(images), config, nullptr, nullptr, nullptr, platform) {
+          capture(std::move(images), config, nullptr, nullptr, nullptr, platform_of(std::move(hooks))) {
       }
     };
 
