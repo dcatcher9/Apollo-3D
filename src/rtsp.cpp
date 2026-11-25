@@ -445,6 +445,14 @@ namespace rtsp_stream {
         respond(socket->sock, *socket->session, nullptr, 400, "BAD REQUEST", 0, {});
         return;
       }
+      if (req->type != TYPE_REQUEST) {
+        // The parser also accepts a response, whose status code shares storage with a
+        // request's target pointer. Only requests are dispatched.
+        BOOST_LOG(error) << "Rejecting an RTSP response sent to the server."sv;
+
+        respond(socket->sock, *socket->session, nullptr, 400, "BAD REQUEST", 0, {});
+        return;
+      }
 
       sock_close.disable();
 
