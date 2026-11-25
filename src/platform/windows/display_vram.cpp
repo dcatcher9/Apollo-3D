@@ -7141,50 +7141,54 @@ namespace platf::dxgi {
       matched_stats_age_max_ms = 0.0;
     }
 
-    int init_output(
-      ID3D11Texture2D *frame_texture,
-      int width,
-      int height,
-      int sbs_mode_param = ::video::SBS_OFF,
-      const config::video_t::sbs_t &settings = {},
-      safe::mail_raw_t::event_t<int> depth_status_event = {},
-      std::shared_ptr<safe::event_t<bool>> depth_pipeline_ready_event = {},
-      safe::mail_raw_t::event_t<::video::sbs_telemetry_snapshot_t> telemetry_event = {},
-      std::shared_ptr<::video::sbs_telemetry_subscription_t> telemetry_subscription = {},
-      std::uint32_t telemetry_generation = 0,
-      std::shared_ptr<std::atomic<bool>> sbs_debug_dump_request = {},
-      bool rgb_only = false,
-      std::shared_ptr<host_sbs_telemetry::collector> telemetry_performance = {},
-      safe::mail_raw_t::event_t<::video::game_source_state_t> game_status_event = {},
-      std::shared_ptr<::video::effective_video_mode_publisher_t> effective_mode = {},
-      bool game_transport_supported = false,
-      int game_width = 0,
-      int game_height = 0,
-      nvenc::nvenc_d3d11_native *native_input = nullptr
-    ) {
+    // What init_output() sets a converter up for. Named fields: several neighbours share a type,
+    // and a local presenter leaves most of them at their defaults.
+    struct output_setup_t {
+      ID3D11Texture2D *frame_texture = nullptr;
+      int width = 0;
+      int height = 0;
+      int sbs_mode_param = ::video::SBS_OFF;
+      config::video_t::sbs_t settings {};
+      safe::mail_raw_t::event_t<int> depth_status_event {};
+      std::shared_ptr<safe::event_t<bool>> depth_pipeline_ready_event {};
+      safe::mail_raw_t::event_t<::video::sbs_telemetry_snapshot_t> telemetry_event {};
+      std::shared_ptr<::video::sbs_telemetry_subscription_t> telemetry_subscription {};
+      std::uint32_t telemetry_generation = 0;
+      std::shared_ptr<std::atomic<bool>> sbs_debug_dump_request {};
+      bool rgb_only = false;
+      std::shared_ptr<host_sbs_telemetry::collector> telemetry_performance {};
+      safe::mail_raw_t::event_t<::video::game_source_state_t> game_status_event {};
+      std::shared_ptr<::video::effective_video_mode_publisher_t> effective_mode {};
+      bool game_transport_supported = false;
+      int game_width = 0;
+      int game_height = 0;
+      nvenc::nvenc_d3d11_native *native_input = nullptr;
+    };
+
+    int init_output(output_setup_t setup) {
       capture_damage_observer.reset();
-      native_input_owner = rgb_only ? nullptr : native_input;
+      native_input_owner = setup.rgb_only ? nullptr : setup.native_input;
       output_surface_views.clear();
       active_output_surface = 0;
-      if (frame_texture) {
+      if (setup.frame_texture) {
         // The underlying frame pool owns the texture, so we must reference it for ourselves.
-        frame_texture->AddRef();
-        output_texture.reset(frame_texture);
-      } else if (!rgb_only) {
+        setup.frame_texture->AddRef();
+        output_texture.reset(setup.frame_texture);
+      } else if (!setup.rgb_only) {
         BOOST_LOG(error) << "Missing encoder output texture."sv;
         return -1;
       }
-      sbs_mode = sbs_mode_param;
-      sbs_config = settings;
-      local_presentation = rgb_only;
-      game_source_status_event = std::move(game_status_event);
-      game_effective_mode = std::move(effective_mode);
-      game_source_width = game_width;
-      game_source_height = game_height;
-      game_output_width = width;
-      game_output_height = height;
+      sbs_mode = setup.sbs_mode_param;
+      sbs_config = setup.settings;
+      local_presentation = setup.rgb_only;
+      game_source_status_event = std::move(setup.game_status_event);
+      game_effective_mode = std::move(setup.effective_mode);
+      game_source_width = setup.game_width;
+      game_source_height = setup.game_height;
+      game_output_width = setup.width;
+      game_output_height = setup.height;
       game_source_tracker = {};
-      game_source_supported = game_transport_supported &&
+      game_source_supported = setup.game_transport_supported &&
                               (display->display_rotation == DXGI_MODE_ROTATION_UNSPECIFIED ||
                                display->display_rotation == DXGI_MODE_ROTATION_IDENTITY);
 #ifdef SUNSHINE_TESTS
@@ -7208,7 +7212,7 @@ namespace platf::dxgi {
       if (reshade_receiver) {
         // An HDR stream is encoded as HDR10 PQ, so the producer may pack an scRGB game in that
         // format directly. Local presentation keeps the producer's own choice.
-        reshade_receiver->set_stream_pq(!rgb_only && output_is_hdr);
+        reshade_receiver->set_stream_pq(!setup.rgb_only && output_is_hdr);
       }
       if (reshade_receiver && ::video::is_packed_mode(sbs_mode) && external_frame_wake) {
         reshade_receiver->set_frame_wake(external_frame_wake);
@@ -7234,14 +7238,14 @@ namespace platf::dxgi {
       v2_live_warp_seen = false;
       v2_live_warp_loss_logged = false;
       diagnostics_enabled = config::sunshine.diagnostics_enabled;
-      sbs_depth_status_event = std::move(depth_status_event);
-      sbs_depth_pipeline_ready_event = std::move(depth_pipeline_ready_event);
-      sbs_telemetry_event = std::move(telemetry_event);
-      sbs_telemetry_subscription = std::move(telemetry_subscription);
-      sbs_telemetry_performance = diagnostics_enabled ? std::move(telemetry_performance) : nullptr;
-      game_dumper.set_button_request(::video::is_game_mode(sbs_mode) ? sbs_debug_dump_request : nullptr);
-      sbs_dumper.set_button_request(::video::is_game_mode(sbs_mode) ? nullptr : sbs_debug_dump_request);
-      dump_button_request = std::move(sbs_debug_dump_request);
+      sbs_depth_status_event = std::move(setup.depth_status_event);
+      sbs_depth_pipeline_ready_event = std::move(setup.depth_pipeline_ready_event);
+      sbs_telemetry_event = std::move(setup.telemetry_event);
+      sbs_telemetry_subscription = std::move(setup.telemetry_subscription);
+      sbs_telemetry_performance = diagnostics_enabled ? std::move(setup.telemetry_performance) : nullptr;
+      game_dumper.set_button_request(::video::is_game_mode(sbs_mode) ? setup.sbs_debug_dump_request : nullptr);
+      sbs_dumper.set_button_request(::video::is_game_mode(sbs_mode) ? nullptr : setup.sbs_debug_dump_request);
+      dump_button_request = std::move(setup.sbs_debug_dump_request);
       sbs_flat_identity_ps.reset();
       sbs_packed_resample_ps.reset();
       sbs_packed_resample_pq_ps.reset();
@@ -7261,7 +7265,7 @@ namespace platf::dxgi {
       sbs_debug_mask_srv.Reset();
       sbs_debug_geometry_init_attempted = false;
       sbs_debug_geometry_ready = false;
-      sbs_telemetry_generation = telemetry_generation;
+      sbs_telemetry_generation = setup.telemetry_generation;
       sbs_telemetry_sequence = 0;
       sbs_telemetry_sample_gate.reset();
       sbs_telemetry_min_frame_id = 0;
@@ -7326,11 +7330,11 @@ namespace platf::dxgi {
       const bool ai_on = sbs_mode == ::video::SBS_AI && !reshade_receiver;
       if (sbs_mode == ::video::SBS_GAME_SBS &&
           (!game_source_supported ||
-           !::video::external_sbs_dimensions_match(game_width, game_height, width, height))) {
+           !::video::external_sbs_dimensions_match(setup.game_width, setup.game_height, setup.width, setup.height))) {
         BOOST_LOG(error) << "Game 3D requires an unrotated source and supported exact full-SBS output raster."sv;
         return -1;
       }
-      if (reshade_receiver && sbs_on && !::video::is_game_mode(sbs_mode) && !::video::external_sbs_dimensions_match(display->width, display->height, width, height)) {
+      if (reshade_receiver && sbs_on && !::video::is_game_mode(sbs_mode) && !::video::external_sbs_dimensions_match(display->width, display->height, setup.width, setup.height)) {
         BOOST_LOG(error) << "ReShade Host 3D requires exact full-SBS output at twice the source width; refusing resizing."sv;
         return -1;
       }
@@ -7346,7 +7350,7 @@ namespace platf::dxgi {
         video_dom_lease.reset();
       }
 #endif
-      const bool downscaling = display->width > width || display->height > height;
+      const bool downscaling = display->width > setup.width || display->height > setup.height;
       if (sbs_on && display->display_rotation != DXGI_MODE_ROTATION_UNSPECIFIED && display->display_rotation != DXGI_MODE_ROTATION_IDENTITY) {
         BOOST_LOG(error) << "Host SBS requires an identity-oriented source display. "
                          << "Use an explicit portrait resolution instead of Windows display "
@@ -7389,7 +7393,7 @@ namespace platf::dxgi {
       // FP16 capture is linear for both HDR and Advanced Color SDR. Runtime shader selection uses
       // the actual input transfer plus the negotiated display mode; resource format alone is not
       // an HDR-mode signal.
-      if (rgb_only) {
+      if (setup.rgb_only) {
         create_pixel_shader_helper(cursor_ps_hlsl, rgb_present_ps);
         create_pixel_shader_helper(
           rgb_present_linear_to_srgb_ps_hlsl,
@@ -7517,7 +7521,7 @@ namespace platf::dxgi {
         }
       }
 
-      if (!rgb_only) {
+      if (!setup.rgb_only) {
         switch (format) {
           case DXGI_FORMAT_NV12:
             // Semi-planar 8-bit YUV 4:2:0
@@ -7582,8 +7586,8 @@ namespace platf::dxgi {
 #undef create_pixel_shader_helper
 #undef create_compute_shader_helper
 
-      auto out_width = width;
-      auto out_height = height;
+      auto out_width = setup.width;
+      auto out_height = setup.height;
       rgb_present_viewport = {0.0f, 0.0f, (float) out_width, (float) out_height, 0.0f, 1.0f};
 
       // When SBS is on the source content is a double-width side-by-side frame; otherwise it
@@ -7642,13 +7646,13 @@ namespace platf::dxgi {
         // RGB sinks can draw directly into the shutter packet. Allocate their scratch
         // texture only when conversion actually needs it. DDup also defers until its
         // first real frame reveals the capture format.
-        if (!rgb_only && display->capture_format != DXGI_FORMAT_UNKNOWN &&
+        if (!setup.rgb_only && display->capture_format != DXGI_FORMAT_UNKNOWN &&
             !ensure_sbs_intermediate_storage(display->capture_format == DXGI_FORMAT_R16G16B16A16_FLOAT)) {
           return -1;
         }
       }
 
-      if (rgb_only) {
+      if (setup.rgb_only) {
         // Local AR presents RGB directly. It needs the common capture/SBS resources above, but
         // no encoder output texture, chroma shaders, planar RTVs, or YUV conversion constants.
         if (depth_path_on) {
@@ -7791,26 +7795,17 @@ namespace platf::dxgi {
       const config::video_t::sbs_t &settings,
       std::shared_ptr<safe::event_t<bool>> depth_pipeline_ready_event = {}
     ) {
-      return init_output(
-        nullptr,
-        width,
-        height,
-        sbs_mode_param,
-        settings,
-        {},
-        std::move(depth_pipeline_ready_event),
-        {},
-        {},
-        0,
-        {},
-        true,
-        {},
-        {},
-        {},
-        ::video::is_game_mode(sbs_mode_param),
-        width / 2,
-        height
-      );
+      return init_output({
+        .width = width,
+        .height = height,
+        .sbs_mode_param = sbs_mode_param,
+        .settings = settings,
+        .depth_pipeline_ready_event = std::move(depth_pipeline_ready_event),
+        .rgb_only = true,
+        .game_transport_supported = ::video::is_game_mode(sbs_mode_param),
+        .game_width = width / 2,
+        .game_height = height,
+      });
     }
 
     int init(std::shared_ptr<platf::display_t> display, adapter_t::pointer adapter_p, pix_fmt_e pix_fmt) {
@@ -12509,27 +12504,26 @@ namespace platf::dxgi {
       if (!base.apply_colorspace(colorspace)) {
         return false;
       }
-      return base.init_output(
-               nvenc_d3d->get_input_texture(),
-               client_config.width,
-               client_config.height,
-               client_config.sbs_mode,
-               client_config.sbs_config,
-               client_config.sbs_depth_status_event,
-               client_config.sbs_depth_pipeline_ready_event,
-               client_config.sbs_telemetry_event,
-               client_config.sbs_telemetry_subscription,
-               client_config.sbs_telemetry_generation,
-               client_config.sbs_debug_dump_pending,
-               false,
-               client_config.sbs_telemetry_performance,
-               client_config.game_source_status_event,
-               client_config.effective_mode,
-               client_config.game_source_transport_supported,
-               client_config.game_source_width,
-               client_config.game_source_height,
-               nvenc_d3d.get()
-             ) == 0;
+      return base.init_output({
+               .frame_texture = nvenc_d3d->get_input_texture(),
+               .width = client_config.width,
+               .height = client_config.height,
+               .sbs_mode_param = client_config.sbs_mode,
+               .settings = client_config.sbs_config,
+               .depth_status_event = client_config.sbs_depth_status_event,
+               .depth_pipeline_ready_event = client_config.sbs_depth_pipeline_ready_event,
+               .telemetry_event = client_config.sbs_telemetry_event,
+               .telemetry_subscription = client_config.sbs_telemetry_subscription,
+               .telemetry_generation = client_config.sbs_telemetry_generation,
+               .sbs_debug_dump_request = client_config.sbs_debug_dump_pending,
+               .telemetry_performance = client_config.sbs_telemetry_performance,
+               .game_status_event = client_config.game_source_status_event,
+               .effective_mode = client_config.effective_mode,
+               .game_transport_supported = client_config.game_source_transport_supported,
+               .game_width = client_config.game_source_width,
+               .game_height = client_config.game_source_height,
+               .native_input = nvenc_d3d.get(),
+             }) == 0;
     }
 
   public:

@@ -336,14 +336,14 @@ namespace actual_converter_probe_v1 {
           native_encoder->input_surface_count() == 3u, "Native P010 depth2 owner unavailable");
         target = native_encoder->get_input_texture(0u);
         require(converter.apply_colorspace({::video::colorspace_e::bt2020,true,10u}), "Native P010 colorspace setup failed");
-        require(converter.init_output(target.Get(),td.Width,td.Height,::video::SBS_AI,settings,
-          {},{},{},{},0,{},false,{},{},{},false,0,0,native_encoder.get()) == 0,
+        require(converter.init_output({.frame_texture = target.Get(), .width = int(td.Width), .height = int(td.Height),
+          .sbs_mode_param = ::video::SBS_AI, .settings = settings, .native_input = native_encoder.get()}) == 0,
           "Actual native P010 converter output setup failed");
         require(converter.set_stream_gamma(::video::stream_gamma_mode_e::gamma_2_4), "Native P010 gamma2 setup failed");
       } else if (native_nv12) {
         hr(converter.device->CreateTexture2D(&td, nullptr, &target), "Native NV12 input target failed");
         require(converter.apply_colorspace({::video::colorspace_e::rec709, false, 8u}), "Native NV12 colorspace initialization failed");
-        require(converter.init_output(target.Get(), td.Width, td.Height, ::video::SBS_AI, settings) == 0,
+        require(converter.init_output({.frame_texture = target.Get(), .width = int(td.Width), .height = int(td.Height), .sbs_mode_param = ::video::SBS_AI, .settings = settings}) == 0,
           "Real native NV12 converter initialization failed");
         const auto &output = converter.active_output_views();
         require(output.y_or_yuv && output.uv, "Native NV12 converter did not bind both plane render targets");
