@@ -1588,17 +1588,16 @@ namespace platf {
         gamepad.pointer_id_map[touch.pointerId] = pointerIndex = 0;
         gamepad.available_pointers &= ~(1 << pointerIndex);
 
-        // Set pointer 0 down
-        report.sCurrentTouch.bIsUpTrackingNum1 &= ~0x80;
-        report.sCurrentTouch.bIsUpTrackingNum1++;
+        // Set pointer 0 down with the next tracking number. The number has seven bits: bit 7
+        // is "finger up", which a plain increment would set again on every 128th touch.
+        report.sCurrentTouch.bIsUpTrackingNum1 = (report.sCurrentTouch.bIsUpTrackingNum1 + 1) & 0x7F;
       } else if (gamepad.available_pointers & 0x2) {
         // Reserve pointer index 1 for this touch
         gamepad.pointer_id_map[touch.pointerId] = pointerIndex = 1;
         gamepad.available_pointers &= ~(1 << pointerIndex);
 
         // Set pointer 1 down
-        report.sCurrentTouch.bIsUpTrackingNum2 &= ~0x80;
-        report.sCurrentTouch.bIsUpTrackingNum2++;
+        report.sCurrentTouch.bIsUpTrackingNum2 = (report.sCurrentTouch.bIsUpTrackingNum2 + 1) & 0x7F;
       } else {
         BOOST_LOG(warning) << "No more free pointer indices! Did the client miss an touch up event?"sv;
         return;
