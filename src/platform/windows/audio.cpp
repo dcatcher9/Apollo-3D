@@ -363,15 +363,17 @@ namespace platf::audio {
     AudioClientProperties properties {};
     properties.cbSize = sizeof(properties);
     properties.bIsOffload = FALSE;
-    properties.eCategory = AudioCategory_Media;
+    // A loopback stream must keep the default category: Initialize() rejects any loopback client
+    // given AudioCategory_Media (E_INVALIDARG), which sent every session to the software mirror.
+    properties.eCategory = AudioCategory_Other;
     // MinGW's audioclient.h currently stops at AMBISONICS (0x4). Windows 11 24H2 defines
     // POST_VOLUME_LOOPBACK as the next bit (0x8), so keep the compatibility value local until
     // the toolchain header catches up.
     properties.Options = static_cast<AUDCLNT_STREAMOPTIONS>(0x8);
     status = audio_client2->SetClientProperties(&properties);
     if (FAILED(status)) {
-      BOOST_LOG(debug) << "Post-volume loopback is unsupported; using endpoint-volume mirroring [0x"sv
-                       << util::hex(status).to_string_view() << ']';
+      BOOST_LOG(info) << "Post-volume loopback is unsupported on this endpoint; using endpoint-volume mirroring [0x"sv
+                      << util::hex(status).to_string_view() << ']';
       return false;
     }
 
@@ -423,8 +425,8 @@ namespace platf::audio {
 
     status = initialize(audio_client.get());
     if (FAILED(status) && post_volume_loopback) {
-      BOOST_LOG(debug) << "Post-volume loopback initialization failed; retrying pre-volume [0x"sv
-                       << util::hex(status).to_string_view() << ']';
+      BOOST_LOG(warning) << "Post-volume loopback initialization failed; retrying pre-volume [0x"sv
+                         << util::hex(status).to_string_view() << ']';
       audio_client = activate_audio_client(device);
       post_volume_loopback = false;
       if (!audio_client) {
