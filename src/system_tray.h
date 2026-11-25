@@ -75,6 +75,14 @@ namespace system_tray {
   void update_tray_paired(std::string device_name);
 
   void update_tray_client_connected(std::string client_name);
+
+  /**
+   * @brief Tells the user, once, that something works in a reduced way for this session.
+   * @param title Short notification title.
+   * @param text One sentence saying what is reduced and why.
+   * @return True when the notification was shown.
+   */
+  bool update_tray_notice(std::string title, std::string text);
   /**
    * @brief Initializes and runs the system tray in a separate thread.
    * @return 0 if initialization was successful, non-zero otherwise.

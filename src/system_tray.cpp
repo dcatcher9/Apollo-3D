@@ -455,6 +455,31 @@ namespace system_tray {
     tray_update(&tray);
   }
 
+  bool update_tray_notice(std::string title, std::string text) {
+    auto lock = std::lock_guard(tray_lifecycle_mutex);
+    if (!tray_initialized) {
+      return false;
+    }
+
+    tray.notification_title = nullptr;
+    tray.notification_text = nullptr;
+    tray.notification_cb = nullptr;
+    tray.notification_icon = nullptr;
+    tray_update(&tray);
+    tray.notification_title = title.c_str();
+    tray.notification_text = text.c_str();
+    tray.notification_icon = TRAY_ICON;
+    tray.tooltip = product_display_name;
+    tray.notification_cb = []() {
+      launch_ui("/troubleshooting");
+    };
+    tray_update(&tray);
+    // The strings above end with this call: nothing may read them afterwards.
+    tray.notification_title = nullptr;
+    tray.notification_text = nullptr;
+    return true;
+  }
+
   // Threading functions available on all platforms
   static void tray_thread_worker() {
     BOOST_LOG(info) << "System tray thread started"sv;

@@ -80,6 +80,7 @@
 #include "src/nvenc/nvenc_d3d11_native.h"
 #include "src/nvenc/nvenc_utils.h"
 #include "src/sbs_perf.h"
+#include "src/system_tray.h"
 #include "src/video.h"
 #include "src/video_depth_estimator.h"
 #include "video_dom_client.h"
@@ -3919,6 +3920,14 @@ namespace platf::dxgi {
     }
 
     void fail_depth_pipeline_flat() {
+      // The picture stays 2D for the rest of this stream: say so once, where the user sees it.
+      if (!flat_fallback_notified) {
+        flat_fallback_notified = true;
+        system_tray::update_tray_notice(
+          "Host 3D is off for this session",
+          "Host 3D could not start, so the picture is 2D. Click to open the log."
+        );
+      }
       host_sbs_renderer = models::fail_host_sbs_renderer_flat(host_sbs_renderer);
       retire_depth_estimator(std::move(depth_estimator));
       selected_matte_ready = false;
@@ -8203,6 +8212,7 @@ namespace platf::dxgi {
     buf_t sbs_reprojection_cbuffer;
     buf_t sbs_subtitle_render_cbuffer;
     bool selected_matte_ready = false;
+    bool flat_fallback_notified = false;
     models::host_sbs_shared_ui_warp::programs_t selected_shared_warp_programs;
     models::host_sbs_shared_ui_warp::resources_t selected_shared_warp;
     std::filesystem::path selected_shared_warp_root;

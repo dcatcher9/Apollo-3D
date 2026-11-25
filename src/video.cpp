@@ -25,6 +25,7 @@
 #include "nvenc/nvenc_base.h"
 #include "platform/common.h"
 #include "process.h"
+#include "system_tray.h"
 #include "sync.h"
 #include "tracked_async_worker.h"
 #include "video.h"
@@ -1062,6 +1063,10 @@ namespace video {
           })) {
         BOOST_LOG(warning) << "Desktop Duplication failed repeatedly before stable capture without a "sv
                               "display-mode change; using Windows.Graphics.Capture for the rest of this session."sv;
+        system_tray::update_tray_notice(
+          "Screen capture changed for this session",
+          "Desktop Duplication kept failing, so Windows.Graphics.Capture is used until the session ends."
+        );
       }
 
       switch (status) {

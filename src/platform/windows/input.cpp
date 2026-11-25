@@ -24,6 +24,7 @@
 #include "src/globals.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
+#include "src/system_tray.h"
 
 #ifdef __MINGW32__
 // DECLARE_HANDLE(HSYNTHETICPOINTERDEVICE);
@@ -1243,6 +1244,10 @@ namespace platf {
         return 0;
       }
       BOOST_LOG(warning) << "DualSense runtime is unavailable; using the existing ViGEm controller backend"sv;
+      system_tray::update_tray_notice(
+        "DualSense features are off",
+        "The DualSense driver could not start, so the controller works as an ordinary gamepad."
+      );
     }
     return alloc_vigem_gamepad(raw, id, metadata, std::move(feedback_queue));
   }
@@ -1250,6 +1255,10 @@ namespace platf {
   static ds5::sidecar_client_t *sidecar_for_input(input_raw_t *raw, int nr) {
     return raw->ds5_sidecars[nr].sidecar_for_input([raw](const gamepad_id_t &id, const gamepad_arrival_t &metadata, feedback_queue_t feedback) {
       BOOST_LOG(warning) << "DualSense recovery failed for gamepad " << id.globalIndex << "; switching to ViGEm"sv;
+      system_tray::update_tray_notice(
+        "DualSense features are off",
+        "The DualSense driver stopped, so the controller now works as an ordinary gamepad."
+      );
       return alloc_vigem_gamepad(raw, id, metadata, std::move(feedback));
     });
   }
