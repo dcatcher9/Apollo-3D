@@ -464,6 +464,19 @@ namespace input {
 
       return;
     }
+    if (button == BUTTON_LEFT && !release) {
+      const auto pending_release = input->mouse_left_button_timeout.load();
+      if (pending_release && pending_release != DISABLE_LEFT_BUTTON_DELAY) {
+        // A second press arrived while the previous release was still waiting (packets
+        // bunched by the network). Send that release now, as the relative-move path does:
+        // otherwise the delayed task finds the button pressed again and drops it, and the
+        // two clicks reach the OS as one long press.
+        ++input->mouse_left_button_generation;
+        task_pool.cancel(pending_release);
+        input->mouse_left_button_timeout = nullptr;
+        platf::button_mouse(platf_input, BUTTON_LEFT, true);
+      }
+    }
     const auto left_release_timer = input->mouse_left_button_timeout.load();
     if (
       button == BUTTON_RIGHT && !release &&
