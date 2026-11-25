@@ -1757,8 +1757,11 @@ namespace proc {
   }
 
   bool proc_t::stream_process_exited() {
-    std::lock_guard lock(process_state_mutex);
-    return stream_process_exited_locked();
+    // The control thread asks this on every pass. A live display-mode change holds the
+    // process lock across its whole Windows transaction, and waiting for it here would stop
+    // input admission and every acknowledgement for that long. The next pass asks again.
+    std::unique_lock lock(process_state_mutex, std::try_to_lock);
+    return lock.owns_lock() && stream_process_exited_locked();
   }
 
   bool proc_t::stream_process_exited_locked() {

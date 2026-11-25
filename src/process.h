@@ -248,7 +248,10 @@ namespace proc {
      */
     int running();
 
-    /** True when the command-backed app ended; does not tear down display/process state. */
+    /** True when the command-backed app ended; does not tear down display/process state.
+     * Never waits for the process lock: while another thread holds it the answer is false,
+     * and the caller's next poll decides.
+     */
     bool stream_process_exited();
 
     /** Coherent process/session snapshot; never tears down an exited app's active media. */
