@@ -1493,7 +1493,10 @@
         if (!this.editForm.name) {
           return;
         }
-        this.editForm["exit-timeout"] = parseInt(this.editForm["exit-timeout"]) || 5
+        // Zero is a valid choice (end the app at once); only a missing or unreadable value
+        // falls back to the default.
+        const exitTimeout = parseInt(this.editForm["exit-timeout"])
+        this.editForm["exit-timeout"] = Number.isFinite(exitTimeout) ? exitTimeout : 5
         this.editForm["image-path"] = this.editForm["image-path"].toString().trim().replace(/"/g, '');
         delete this.editForm.id;
         delete this.editForm.builtin;
