@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+#include "game3d_win32_util.h"
 #include "reshade_bridge.h"
 
 #include "src/logging.h"
@@ -22,32 +23,7 @@ namespace platf::reshade_bridge {
     namespace wire = ::reshade_bridge;
     using Microsoft::WRL::ComPtr;
 
-    class handle_t {
-    public:
-      explicit handle_t(HANDLE value = nullptr):
-          value_(value) {}
-
-      ~handle_t() {
-        reset();
-      }
-
-      handle_t(const handle_t &) = delete;
-      handle_t &operator=(const handle_t &) = delete;
-
-      HANDLE get() const {
-        return value_;
-      }
-
-      void reset(HANDLE value = nullptr) {
-        if (value_) {
-          CloseHandle(value_);
-        }
-        value_ = value;
-      }
-
-    private:
-      HANDLE value_;
-    };
+    using game3d::win32::handle_t;
 
     LONG read32(std::uint32_t &value) {
       return InterlockedCompareExchange(reinterpret_cast<volatile LONG *>(&value), 0, 0);
@@ -75,13 +51,7 @@ namespace platf::reshade_bridge {
       return before == read32(shared.metadata_sequence);
     }
 
-    std::uint64_t creation_time(HANDLE process) {
-      FILETIME created {}, exited {}, kernel {}, user {};
-      if (!GetProcessTimes(process, &created, &exited, &kernel, &user)) {
-        return 0;
-      }
-      return (static_cast<std::uint64_t>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
-    }
+    using game3d::win32::process_creation_time;
 
     std::uint64_t new_nonce() {
       static std::atomic<std::uint64_t> counter {[] {
@@ -613,7 +583,7 @@ namespace platf::reshade_bridge {
 
     bool attach() {
       process_.reset(OpenProcess(PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid_));
-      if (!process_.get() || !(process_creation_ = creation_time(process_.get()))) {
+      if (!process_.get() || !(process_creation_ = process_creation_time(process_.get()))) {
         return false;
       }
       const auto name = std::wstring(wire::mapping_prefix) + std::to_wstring(pid_);

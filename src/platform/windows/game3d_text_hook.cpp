@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+#include "game3d_win32_util.h"
 #include "game3d_text_hook.h"
 
 #include "tools/text_hook/text_hook_shared.h"
@@ -36,14 +37,6 @@ namespace platf::game3d::text_hook {
 
     std::wstring section_name(const std::uint32_t process_id) {
       return std::wstring {sunshine_text_hook::section_prefix} + std::to_wstring(process_id);
-    }
-
-    std::uint64_t creation_time_of(HANDLE process) {
-      FILETIME created {}, exited {}, kernel {}, user {};
-      if (!GetProcessTimes(process, &created, &exited, &kernel, &user)) {
-        return 0u;
-      }
-      return (static_cast<std::uint64_t>(created.dwHighDateTime) << 32u) | created.dwLowDateTime;
     }
 
     /** Run the bundled loader and return its exit code, or a code it never uses on failure. */
@@ -322,13 +315,13 @@ namespace platf::game3d::text_hook {
     // A process id alone may by now name another program: the process must be the one created
     // at the time the owner's approval was given for.
     const std::unique_ptr<void, handle_closer> process {OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, process_id)};
-    return process && creation_time != 0u && creation_time_of(process.get()) == creation_time && WaitForSingleObject(process.get(), 0u) == WAIT_TIMEOUT;
+    return process && creation_time != 0u && game3d::win32::process_creation_time(process.get()) == creation_time && WaitForSingleObject(process.get(), 0u) == WAIT_TIMEOUT;
   }
 
   load_result load(const std::uint32_t process_id, const std::uint64_t creation_time, const std::filesystem::path &bundle_directory) {
     const std::unique_ptr<void, handle_closer> process {OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, process_id)};
     USHORT process_machine = IMAGE_FILE_MACHINE_UNKNOWN, native_machine = IMAGE_FILE_MACHINE_UNKNOWN;
-    const bool identified = process && creation_time != 0u && creation_time_of(process.get()) == creation_time &&
+    const bool identified = process && creation_time != 0u && game3d::win32::process_creation_time(process.get()) == creation_time &&
                             IsWow64Process2(process.get(), &process_machine, &native_machine);
     const unsigned bits = process_machine == IMAGE_FILE_MACHINE_UNKNOWN ? 64u : 32u;
     return detail::load_with(

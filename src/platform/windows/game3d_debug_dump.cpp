@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+#include "game3d_win32_util.h"
 #include "game3d_debug_dump.h"
 
 #include "game3d_debug_preview.h"
@@ -41,12 +42,7 @@ namespace platf::game3d_debug {
       InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(&value), static_cast<LONG64>(next));
     }
 
-    std::uint64_t creation_time(HANDLE process) {
-      FILETIME created {}, exited {}, kernel {}, user {};
-      return GetProcessTimes(process, &created, &exited, &kernel, &user) ?
-               (static_cast<std::uint64_t>(created.dwHighDateTime) << 32) | created.dwLowDateTime :
-               0;
-    }
+    using game3d::win32::process_creation_time;
 
     std::uint64_t unique_id() {
       static std::atomic<std::uint64_t> next {[] {
@@ -58,32 +54,7 @@ namespace platf::game3d_debug {
       return id ? id : next.fetch_add(1, std::memory_order_relaxed);
     }
 
-    class handle_t {
-    public:
-      explicit handle_t(HANDLE value = nullptr):
-          value_(value) {}
-
-      ~handle_t() {
-        reset();
-      }
-
-      handle_t(const handle_t &) = delete;
-      handle_t &operator=(const handle_t &) = delete;
-
-      HANDLE get() const {
-        return value_;
-      }
-
-      void reset(HANDLE value = nullptr) {
-        if (value_) {
-          CloseHandle(value_);
-        }
-        value_ = value;
-      }
-
-    private:
-      HANDLE value_;
-    };
+    using game3d::win32::handle_t;
 
     const char *artifact_name(wire::artifact kind) {
       switch (kind) {
@@ -435,7 +406,7 @@ namespace platf::game3d_debug {
       package_->name = "game3d_" + std::to_string(GetCurrentProcessId()) + "_" + std::to_string(request_id_);
       LARGE_INTEGER frequency {};
       QueryPerformanceFrequency(&frequency);
-      package_->manifest = {{"schema", "sunshine.game3d.dump.v1"}, {"request_id", request_id_}, {"consumer_nonce", nonce_}, {"consumer_pid", GetCurrentProcessId()}, {"consumer_creation_time", creation_time(GetCurrentProcess())}, {"source_width", width}, {"source_height", height}, {"wire_mode", mode}, {"qpc_ticks_per_second", frequency.QuadPart}, {"units", {{"raw_depth", "exact provider depth values; projection/conversion in producer_metadata"}, {"color", "native DXGI encoded values; no gamma, exposure, clipping, or tone mapping applied"}, {"fields", "native shader values; producer_metadata defines stage interpretation"}, {"capture_qpc", "QueryPerformanceCounter ticks"}, {"process_creation_time", "Windows FILETIME: 100ns ticks since 1601-01-01 UTC"}}}};
+      package_->manifest = {{"schema", "sunshine.game3d.dump.v1"}, {"request_id", request_id_}, {"consumer_nonce", nonce_}, {"consumer_pid", GetCurrentProcessId()}, {"consumer_creation_time", process_creation_time(GetCurrentProcess())}, {"source_width", width}, {"source_height", height}, {"wire_mode", mode}, {"qpc_ticks_per_second", frequency.QuadPart}, {"units", {{"raw_depth", "exact provider depth values; projection/conversion in producer_metadata"}, {"color", "native DXGI encoded values; no gamma, exposure, clipping, or tone mapping applied"}, {"fields", "native shader values; producer_metadata defines stage interpretation"}, {"capture_qpc", "QueryPerformanceCounter ticks"}, {"process_creation_time", "Windows FILETIME: 100ns ticks since 1601-01-01 UTC"}}}};
       if (!device || !context || width <= 0 || height <= 0 || (mode != 2 && mode != 3)) {
         finish("unavailable", "invalid Game presentation or D3D context");
         return;
@@ -455,7 +426,7 @@ namespace platf::game3d_debug {
       producer_pid_ = foreground.process_id;
       package_->manifest["producer_pid"] = producer_pid_;
       process_.reset(OpenProcess(PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, producer_pid_));
-      producer_creation_ = process_.get() ? creation_time(process_.get()) : 0;
+      producer_creation_ = process_.get() ? process_creation_time(process_.get()) : 0;
       if (!producer_creation_) {
         finish("unavailable", "cannot verify producer process");
         return;
@@ -477,7 +448,7 @@ namespace platf::game3d_debug {
       started_ = clock_t::now();
       pending_ = true;
       shared_->consumer_pid = GetCurrentProcessId();
-      shared_->consumer_creation_time = creation_time(GetCurrentProcess());
+      shared_->consumer_creation_time = process_creation_time(GetCurrentProcess());
       write64(shared_->consumer_nonce, nonce_);
       write64(shared_->request_id, request_id_);
     }

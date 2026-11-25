@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+#include "game3d_win32_util.h"
 #include "game3d_detection.h"
 
 #include <algorithm>
@@ -11,27 +12,7 @@
 
 namespace platf::game3d {
   namespace {
-    class handle_t {
-    public:
-      explicit handle_t(HANDLE value):
-          value_(value) {}
-
-      ~handle_t() {
-        if (value_ && value_ != INVALID_HANDLE_VALUE) {
-          CloseHandle(value_);
-        }
-      }
-
-      handle_t(const handle_t &) = delete;
-      handle_t &operator=(const handle_t &) = delete;
-
-      [[nodiscard]] HANDLE get() const noexcept {
-        return value_;
-      }
-
-    private:
-      HANDLE value_;
-    };
+    using win32::handle_t;
 
     [[nodiscard]] bool equal_name(std::wstring_view left, std::wstring_view right) noexcept {
       return left.size() == right.size() &&
@@ -160,13 +141,7 @@ namespace platf::game3d {
       });
     }
 
-    [[nodiscard]] std::uint64_t process_creation_time(HANDLE process) noexcept {
-      FILETIME created {}, exited {}, kernel {}, user {};
-      if (!GetProcessTimes(process, &created, &exited, &kernel, &user)) {
-        return 0;
-      }
-      return (static_cast<std::uint64_t>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
-    }
+    using win32::process_creation_time;
 
     [[nodiscard]] std::optional<std::filesystem::path> process_executable(HANDLE process) {
       std::array<wchar_t, 32768> buffer {};
