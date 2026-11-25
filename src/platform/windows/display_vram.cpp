@@ -5897,6 +5897,23 @@ namespace platf::dxgi {
       };
     }
 
+    // The image path of the process that owns the foreground window. A window belongs to one
+    // process for its whole life, so the path is asked for again only for another window or
+    // process, and once a second in case both identifiers were reused together. Only the path
+    // is kept: who may have subtitle protection is still decided on every observation.
+    const std::optional<std::wstring> &subtitle_process_image_path(
+      const foreground_window::snapshot_t &foreground,
+      const std::chrono::steady_clock::time_point now
+    ) {
+      auto &cached = subtitle_process_image;
+      if (cached.window != foreground.window || cached.process_id != foreground.process_id ||
+          now - cached.queried_at >= std::chrono::seconds(1)) {
+        cached = {foreground.window, foreground.process_id, now,
+                  foreground_window::process_image_path(foreground.process_id)};
+      }
+      return cached.path;
+    }
+
     // Subtitle permission is independent of the generic foreground depth ROI. Fullscreen keeps
     // its semantic video identity even when depth analysis canonicalizes to the whole source.
     subtitle_context_policy::evaluation_t observe_subtitle_context(
@@ -5943,7 +5960,7 @@ namespace platf::dxgi {
         const auto registered_executables = video_player_registry ?
           video_player_registry->executables_if_ready() : std::span<const std::wstring> {};
         const auto executable = !registered_executables.empty() || !approved_text_game ?
-          foreground_window::process_image_path(foreground.process_id) : std::nullopt;
+          subtitle_process_image_path(foreground, now) : std::nullopt;
         // Registration keeps precedence. Both policies inspect the same process image while
         // the owner's current settings still take effect on every authority observation.
         const bool registered = executable && video_player::matches_registered_executable(registered_executables, *executable);
@@ -8217,6 +8234,13 @@ namespace platf::dxgi {
 #endif
     std::unique_ptr<video_player::registry_t> video_player_registry;
     bool video_player_registry_ready_observed = false;
+    /// See subtitle_process_image_path().
+    struct {
+      std::uintptr_t window = 0;
+      std::uint32_t process_id = 0;
+      std::chrono::steady_clock::time_point queried_at {};
+      std::optional<std::wstring> path;
+    } subtitle_process_image;
     models::host_subtitle_context::tracker_t subtitle_context;
     std::optional<subtitle_admission_diagnostic_key_t> last_subtitle_admission_diagnostic;
     std::chrono::steady_clock::time_point last_subtitle_admission_diagnostic_at {};
