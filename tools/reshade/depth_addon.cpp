@@ -1184,96 +1184,63 @@ static void finish_sampler_present(command_queue *queue, swapchain *swapchain)
 	sunshine_streamline::end_present_fg();
 }
 
+// Every ReShade event this add-on handles, with its handler. Registration and removal both
+// walk this one list, so neither can name an event the other lacks.
+#define SUNSHINE_DEPTH_EVENTS(X) \
+	X(init_device, on_init_device) \
+	X(init_command_list, on_init_command_list) \
+	X(init_command_queue, on_init_command_queue) \
+	X(init_effect_runtime, on_init_effect_runtime) \
+	X(destroy_device, on_destroy_device) \
+	X(destroy_command_list, on_destroy_command_list) \
+	X(destroy_command_queue, on_destroy_command_queue) \
+	X(destroy_effect_runtime, on_destroy_effect_runtime) \
+	X(create_resource, on_create_resource) \
+	X(create_resource_view, on_create_resource_view) \
+	X(init_resource, on_init_resource) \
+	X(destroy_resource, on_destroy_resource) \
+	X(draw, on_draw) \
+	X(draw_indexed, on_draw_indexed) \
+	X(draw_or_dispatch_indirect, on_draw_indirect) \
+	X(dispatch_mesh, on_dispatch_mesh) \
+	X(copy_resource, on_copy_resource) \
+	X(copy_texture_region, on_copy_texture_region) \
+	X(copy_buffer_to_texture, on_copy_buffer_to_texture) \
+	X(resolve_texture_region, on_resolve_texture_region) \
+	X(end_render_pass, on_end_render_pass) \
+	X(close_command_list, on_close) \
+	X(bind_viewports, on_bind_viewport) \
+	X(begin_render_pass, on_begin_render_pass_with_depth_stencil) \
+	X(bind_render_targets_and_depth_stencil, on_bind_depth_stencil) \
+	X(clear_depth_stencil_view, on_clear_depth_stencil) \
+	X(reset_command_list, on_reset) \
+	X(execute_command_list, on_execute_primary) \
+	X(execute_secondary_command_list, on_execute_secondary) \
+	X(present, on_present) \
+	X(finish_present, finish_sampler_present) \
+	X(reshade_begin_effects, on_begin_render_effects) \
+	X(reshade_finish_effects, on_finish_render_effects) \
+	X(reshade_reloaded_effects, on_reload_effect_runtime) \
+	X(reshade_set_technique_state, on_set_technique_state)
+
 static void register_depth_events()
 {
 	s_streamline_source_events = sunshine_streamline::source_enabled() || sunshine_upscaler_trace::capture_enabled();
 	sunshine_streamline::depth_capture::initialize(true); // Shared D3D12 capture also serves Generic fallback.
 	s_frame_activity_trace = false;
 	s_frame_activity_trace = sunshine_game3d::addon_config::frame_activity_trace();
-	reshade::register_event<reshade::addon_event::init_device>(sunshine_addon_lifetime::guarded<on_init_device>);
-	reshade::register_event<reshade::addon_event::init_command_list>(sunshine_addon_lifetime::guarded<on_init_command_list>);
-	reshade::register_event<reshade::addon_event::init_command_queue>(sunshine_addon_lifetime::guarded<on_init_command_queue>);
-	reshade::register_event<reshade::addon_event::init_effect_runtime>(sunshine_addon_lifetime::guarded<on_init_effect_runtime>);
-	reshade::register_event<reshade::addon_event::destroy_device>(sunshine_addon_lifetime::guarded<on_destroy_device>);
-	reshade::register_event<reshade::addon_event::destroy_command_list>(sunshine_addon_lifetime::guarded<on_destroy_command_list>);
-	reshade::register_event<reshade::addon_event::destroy_command_queue>(sunshine_addon_lifetime::guarded<on_destroy_command_queue>);
-	reshade::register_event<reshade::addon_event::destroy_effect_runtime>(sunshine_addon_lifetime::guarded<on_destroy_effect_runtime>);
-
-	reshade::register_event<reshade::addon_event::create_resource>(sunshine_addon_lifetime::guarded<on_create_resource>);
-	reshade::register_event<reshade::addon_event::create_resource_view>(sunshine_addon_lifetime::guarded<on_create_resource_view>);
-	reshade::register_event<reshade::addon_event::init_resource>(sunshine_addon_lifetime::guarded<on_init_resource>);
-	reshade::register_event<reshade::addon_event::destroy_resource>(sunshine_addon_lifetime::guarded<on_destroy_resource>);
-
-	reshade::register_event<reshade::addon_event::draw>(sunshine_addon_lifetime::guarded<on_draw>);
-	reshade::register_event<reshade::addon_event::draw_indexed>(sunshine_addon_lifetime::guarded<on_draw_indexed>);
-	reshade::register_event<reshade::addon_event::draw_or_dispatch_indirect>(sunshine_addon_lifetime::guarded<on_draw_indirect>);
-	reshade::register_event<reshade::addon_event::dispatch_mesh>(sunshine_addon_lifetime::guarded<on_dispatch_mesh>);
-	reshade::register_event<reshade::addon_event::copy_resource>(sunshine_addon_lifetime::guarded<on_copy_resource>);
-	reshade::register_event<reshade::addon_event::copy_texture_region>(sunshine_addon_lifetime::guarded<on_copy_texture_region>);
-	reshade::register_event<reshade::addon_event::copy_buffer_to_texture>(sunshine_addon_lifetime::guarded<on_copy_buffer_to_texture>);
-	reshade::register_event<reshade::addon_event::resolve_texture_region>(sunshine_addon_lifetime::guarded<on_resolve_texture_region>);
-	reshade::register_event<reshade::addon_event::end_render_pass>(sunshine_addon_lifetime::guarded<on_end_render_pass>);
-	reshade::register_event<reshade::addon_event::close_command_list>(sunshine_addon_lifetime::guarded<on_close>);
-	reshade::register_event<reshade::addon_event::bind_viewports>(sunshine_addon_lifetime::guarded<on_bind_viewport>);
-	reshade::register_event<reshade::addon_event::begin_render_pass>(sunshine_addon_lifetime::guarded<on_begin_render_pass_with_depth_stencil>);
-	reshade::register_event<reshade::addon_event::bind_render_targets_and_depth_stencil>(sunshine_addon_lifetime::guarded<on_bind_depth_stencil>);
-	reshade::register_event<reshade::addon_event::clear_depth_stencil_view>(sunshine_addon_lifetime::guarded<on_clear_depth_stencil>);
-
-	reshade::register_event<reshade::addon_event::reset_command_list>(sunshine_addon_lifetime::guarded<on_reset>);
-	reshade::register_event<reshade::addon_event::execute_command_list>(sunshine_addon_lifetime::guarded<on_execute_primary>);
-	reshade::register_event<reshade::addon_event::execute_secondary_command_list>(sunshine_addon_lifetime::guarded<on_execute_secondary>);
-
-	reshade::register_event<reshade::addon_event::present>(sunshine_addon_lifetime::guarded<on_present>);
-	reshade::register_event<reshade::addon_event::finish_present>(sunshine_addon_lifetime::guarded<finish_sampler_present>);
-
-	reshade::register_event<reshade::addon_event::reshade_begin_effects>(sunshine_addon_lifetime::guarded<on_begin_render_effects>);
-	reshade::register_event<reshade::addon_event::reshade_finish_effects>(sunshine_addon_lifetime::guarded<on_finish_render_effects>);
-	// Need to set texture binding again after reloading
-	reshade::register_event<reshade::addon_event::reshade_reloaded_effects>(sunshine_addon_lifetime::guarded<on_reload_effect_runtime>);
-	reshade::register_event<reshade::addon_event::reshade_set_technique_state>(sunshine_addon_lifetime::guarded<on_set_technique_state>);
+	// reshade_reloaded_effects: the texture binding must be set again after a reload.
+#define SUNSHINE_REGISTER_DEPTH_EVENT(event, handler) \
+	reshade::register_event<reshade::addon_event::event>(sunshine_addon_lifetime::guarded<handler>);
+	SUNSHINE_DEPTH_EVENTS(SUNSHINE_REGISTER_DEPTH_EVENT)
+#undef SUNSHINE_REGISTER_DEPTH_EVENT
 }
 static void unregister_depth_events()
 {
-	reshade::unregister_event<reshade::addon_event::init_device>(sunshine_addon_lifetime::guarded<on_init_device>);
-	reshade::unregister_event<reshade::addon_event::init_command_list>(sunshine_addon_lifetime::guarded<on_init_command_list>);
-	reshade::unregister_event<reshade::addon_event::init_command_queue>(sunshine_addon_lifetime::guarded<on_init_command_queue>);
-	reshade::unregister_event<reshade::addon_event::init_effect_runtime>(sunshine_addon_lifetime::guarded<on_init_effect_runtime>);
-	reshade::unregister_event<reshade::addon_event::destroy_device>(sunshine_addon_lifetime::guarded<on_destroy_device>);
-	reshade::unregister_event<reshade::addon_event::destroy_command_list>(sunshine_addon_lifetime::guarded<on_destroy_command_list>);
-	reshade::unregister_event<reshade::addon_event::destroy_command_queue>(sunshine_addon_lifetime::guarded<on_destroy_command_queue>);
-	reshade::unregister_event<reshade::addon_event::destroy_effect_runtime>(sunshine_addon_lifetime::guarded<on_destroy_effect_runtime>);
-
-	reshade::unregister_event<reshade::addon_event::create_resource>(sunshine_addon_lifetime::guarded<on_create_resource>);
-	reshade::unregister_event<reshade::addon_event::create_resource_view>(sunshine_addon_lifetime::guarded<on_create_resource_view>);
-	reshade::unregister_event<reshade::addon_event::init_resource>(sunshine_addon_lifetime::guarded<on_init_resource>);
-	reshade::unregister_event<reshade::addon_event::destroy_resource>(sunshine_addon_lifetime::guarded<on_destroy_resource>);
-
-	reshade::unregister_event<reshade::addon_event::draw>(sunshine_addon_lifetime::guarded<on_draw>);
-	reshade::unregister_event<reshade::addon_event::draw_indexed>(sunshine_addon_lifetime::guarded<on_draw_indexed>);
-	reshade::unregister_event<reshade::addon_event::draw_or_dispatch_indirect>(sunshine_addon_lifetime::guarded<on_draw_indirect>);
-	reshade::unregister_event<reshade::addon_event::dispatch_mesh>(sunshine_addon_lifetime::guarded<on_dispatch_mesh>);
-	reshade::unregister_event<reshade::addon_event::copy_resource>(sunshine_addon_lifetime::guarded<on_copy_resource>);
-	reshade::unregister_event<reshade::addon_event::copy_texture_region>(sunshine_addon_lifetime::guarded<on_copy_texture_region>);
-	reshade::unregister_event<reshade::addon_event::copy_buffer_to_texture>(sunshine_addon_lifetime::guarded<on_copy_buffer_to_texture>);
-	reshade::unregister_event<reshade::addon_event::resolve_texture_region>(sunshine_addon_lifetime::guarded<on_resolve_texture_region>);
-	reshade::unregister_event<reshade::addon_event::end_render_pass>(sunshine_addon_lifetime::guarded<on_end_render_pass>);
-	reshade::unregister_event<reshade::addon_event::close_command_list>(sunshine_addon_lifetime::guarded<on_close>);
-	reshade::unregister_event<reshade::addon_event::bind_viewports>(sunshine_addon_lifetime::guarded<on_bind_viewport>);
-	reshade::unregister_event<reshade::addon_event::begin_render_pass>(sunshine_addon_lifetime::guarded<on_begin_render_pass_with_depth_stencil>);
-	reshade::unregister_event<reshade::addon_event::bind_render_targets_and_depth_stencil>(sunshine_addon_lifetime::guarded<on_bind_depth_stencil>);
-	reshade::unregister_event<reshade::addon_event::clear_depth_stencil_view>(sunshine_addon_lifetime::guarded<on_clear_depth_stencil>);
-
-	reshade::unregister_event<reshade::addon_event::reset_command_list>(sunshine_addon_lifetime::guarded<on_reset>);
-	reshade::unregister_event<reshade::addon_event::execute_command_list>(sunshine_addon_lifetime::guarded<on_execute_primary>);
-	reshade::unregister_event<reshade::addon_event::execute_secondary_command_list>(sunshine_addon_lifetime::guarded<on_execute_secondary>);
-
-	reshade::unregister_event<reshade::addon_event::present>(sunshine_addon_lifetime::guarded<on_present>);
-	reshade::unregister_event<reshade::addon_event::finish_present>(sunshine_addon_lifetime::guarded<finish_sampler_present>);
-
-	reshade::unregister_event<reshade::addon_event::reshade_begin_effects>(sunshine_addon_lifetime::guarded<on_begin_render_effects>);
-	reshade::unregister_event<reshade::addon_event::reshade_finish_effects>(sunshine_addon_lifetime::guarded<on_finish_render_effects>);
-	reshade::unregister_event<reshade::addon_event::reshade_reloaded_effects>(sunshine_addon_lifetime::guarded<on_reload_effect_runtime>);
-	reshade::unregister_event<reshade::addon_event::reshade_set_technique_state>(sunshine_addon_lifetime::guarded<on_set_technique_state>);
+#define SUNSHINE_UNREGISTER_DEPTH_EVENT(event, handler) \
+	reshade::unregister_event<reshade::addon_event::event>(sunshine_addon_lifetime::guarded<handler>);
+	SUNSHINE_DEPTH_EVENTS(SUNSHINE_UNREGISTER_DEPTH_EVENT)
+#undef SUNSHINE_UNREGISTER_DEPTH_EVENT
 }
 
 static bool read_disabled_addons(std::vector<std::string> &names)
