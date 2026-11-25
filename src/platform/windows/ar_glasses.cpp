@@ -4562,7 +4562,12 @@ namespace ar_glasses {
           presenter_config.source_switch = monitor_source_switch_;
         }
         presenter_config.sbs_config = config::video.sbs;
-        presenter_config.sbs_config.reshade = !monitor_surface_ && presentation_target.game_source;
+        // The saved switch only chooses the source here. A game's own stereo takes the same
+        // Game 3D route on glasses as on the shutter monitor and in a remote stream.
+        presenter_config.sbs_config.reshade = false;
+        if (!monitor_surface_ && presentation_target.game_source && presenter_config.sbs_mode == ::video::SBS_AI) {
+          presenter_config.sbs_mode = ::video::SBS_GAME_SBS;
+        }
         presenter_config.capture_failover = capture_failover_;
         presenter_config.live_target = live_target_;
         presented_frames_ = std::make_shared<std::atomic<std::uint64_t>>(0);

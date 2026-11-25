@@ -563,10 +563,10 @@ namespace video {
     std::shared_ptr<stream::detail::atomic_presentation_t> atomic_presentation;
   };
 
-  /** Game 3D, and Host SBS fed by the ReShade export, convert an independent provider's frames as
-   *  they finish rather than at stream cadence (encode_run()). */
+  /** Game 3D converts an independent provider's frames as they finish rather than at stream
+   *  cadence (encode_run()). */
   inline bool converts_independent_provider(const config_t &config) noexcept {
-    return is_game_mode(config.sbs_mode) || (config.sbs_mode == SBS_AI && config.sbs_config.reshade);
+    return is_game_mode(config.sbs_mode);
   }
 
   /** NVENC pictures that may be in flight at once. An independent provider's next frame, and desktop

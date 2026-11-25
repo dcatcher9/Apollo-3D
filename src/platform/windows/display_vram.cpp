@@ -7205,8 +7205,7 @@ namespace platf::dxgi {
       // A fullscreen game may render at the negotiated resolution while Windows presents it at
       // another desktop resolution. The receiver checks fullscreen ownership independently from
       // the exact authored stereo raster; missing exports retain the packed flat fallback.
-      reshade_receiver = ((::video::is_game_mode(sbs_mode) && game_source_supported) ||
-                          (sbs_mode == ::video::SBS_AI && sbs_config.reshade)) ?
+      reshade_receiver = ::video::is_game_mode(sbs_mode) && game_source_supported ?
                            std::make_unique<platf::reshade_bridge::receiver_t>(device.get(), device_ctx.get()) :
                            nullptr;
       if (reshade_receiver) {
@@ -12486,7 +12485,7 @@ namespace platf::dxgi {
     }
 
     bool init_encoder(const ::video::config_t &client_config, const ::video::sunshine_colorspace_t &colorspace) {
-      const bool tiled_chroma = client_config.sbs_mode == ::video::SBS_AI && !client_config.sbs_config.reshade &&
+      const bool tiled_chroma = client_config.sbs_mode == ::video::SBS_AI &&
                                 ::video::colorspace_is_hdr(colorspace) && base.prepare_p010_chroma_tiles();
       nvenc_d3d = std::make_unique<nvenc::nvenc_d3d11_native>(base.device.get(), tiled_chroma);
 

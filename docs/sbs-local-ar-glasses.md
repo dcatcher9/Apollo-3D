@@ -48,8 +48,11 @@ A local surface is only where the picture is shown; each one has its own **3D so
 Game 3D, chosen with the switch beside **Start 3D** and changeable while 3D is running. For glasses
 it is saved as `sbs_reshade`.
 
-The default provider is Sunshine's AI renderer. With `sbs_reshade = enabled`, the same presenter
-receives the game's final stereo texture and retains the normal 1920x1080 virtual source.
+The default provider is Sunshine's AI renderer. With `sbs_reshade = enabled`, the presenter is
+started in the Game 3D mode that the shutter monitor and a remote stream use (`SBS_GAME_SBS`):
+it receives the game's final stereo texture, watches Game 3D setup for the display, converts an
+approved 2D text game, and retains the normal 1920x1080 virtual source. The saved switch only
+chooses the source; it selects no separate route in the converter.
 See [ReShade SBS setup](reshade-sbs.md) for the shader, add-on and activation contract.
 
 ## Lifecycle

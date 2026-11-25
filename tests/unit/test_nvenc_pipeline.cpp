@@ -552,9 +552,11 @@ TEST(NvencPipelineTest, DesktopHostSbsKeepsItsCaptureCadenceWithTwoPicturesInFli
   config.sbs_mode = video::SBS_AI;
   EXPECT_EQ(video::nvenc_pipeline_depth(config), 2u);
   EXPECT_FALSE(video::converts_independent_provider(config));
-  config.sbs_config.reshade = true;  // Fed by the ReShade export: an independent provider.
+  // The saved glasses source switch selects no route by itself: only a game mode is an
+  // independent provider.
+  config.sbs_config.reshade = true;
   EXPECT_EQ(video::nvenc_pipeline_depth(config), 2u);
-  EXPECT_TRUE(video::converts_independent_provider(config));
+  EXPECT_FALSE(video::converts_independent_provider(config));
   config.sbs_config.reshade = false;
   for (const int mode : {video::SBS_GAME_MONO, video::SBS_GAME_SBS}) {
     config.sbs_mode = mode;
