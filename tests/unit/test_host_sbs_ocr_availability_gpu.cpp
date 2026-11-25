@@ -14,6 +14,7 @@
   #include <memory>
   #include <optional>
   #include <src/depth_coordinate_v2.h>
+  #include <src/host_sbs_completed_subtitle_programs.h>
   #include <src/host_sbs_shader_cache.h>
   #include <src/model_manager.h>
   #include <src/prod_zipdepth_convex2x.h>
@@ -68,12 +69,15 @@ namespace {
         return false;
       }
       const std::string model {models::prod_zipdepth_convex2x::logical_model};
+      // The Direct Glyph decoder is packaged apart from the OCR detector; only the detector is withheld.
+      const std::string glyph {models::direct_glyph_model_name};
       for (const auto &entry : std::filesystem::directory_iterator(source)) {
         if (!entry.is_regular_file()) {
           continue;
         }
         const auto name = entry.path().filename().string();
-        if (name != model + ".onnx" && !(name.starts_with(model + ".") && entry.path().extension() == ".engine")) {
+        const bool engine = entry.path().extension() == ".engine";
+        if (name != model + ".onnx" && !(engine && (name.starts_with(model + ".") || name.starts_with(glyph + ".")))) {
           continue;
         }
         std::filesystem::create_hard_link(entry.path(), path / entry.path().filename(), ec);
@@ -84,6 +88,15 @@ namespace {
       }
       if (!std::filesystem::is_regular_file(path / (model + ".onnx"))) {
         error = "Missing packaged fused depth model";
+        return false;
+      }
+      const std::filesystem::path glyph_model {models::direct_glyph_model_preset(models::host_sbs_direct_glyph_gpu::tile_profile_e::common, true).asset_path};
+      std::filesystem::create_directory(path / glyph_model.parent_path(), ec);
+      if (!ec) {
+        std::filesystem::create_hard_link(source / glyph_model, path / glyph_model, ec);
+      }
+      if (ec) {
+        error = "Missing packaged Direct Glyph model: " + ec.message();
         return false;
       }
       return !std::filesystem::exists(path / std::filesystem::path {models::ocr_model_asset_path});
@@ -214,10 +227,8 @@ TEST_F(TensorRtOcrAvailabilityGpuTest, MissingPackagedOcrPreservesJoinedDepthAnd
                          estimator_t::normalized_depth_diagnostics_e::enabled,
                          estimator_t::subtitle_legacy_matte_e::on_demand};
   ASSERT_TRUE(estimator.is_valid());
-  models::subtitle_selected_matte_research_configuration_t outline;
-  outline.current_outline = true;
-  outline.current_outline_shader_root = (assets.path / "shaders" / "directx" / "current_outline").string();
-  ASSERT_TRUE(estimator.configure_subtitle_selected_matte_research(outline, error)) << error;
+  const auto glyph = models::host_sbs_completed_subtitle_programs::canonical_configuration(assets.path / "shaders" / "directx");
+  ASSERT_TRUE(estimator.configure_subtitle_direct_glyph(glyph, error)) << error;
 
   const auto expect_diagnostic_views = [](const models::depth_observation_views_t &observation, bool expected) {
     EXPECT_FALSE(observation.base_diagnostics_omitted);

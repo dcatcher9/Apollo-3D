@@ -1,10 +1,10 @@
 /** @file Build the resources for Windows display and production Host SBS shaders. */
 
-#include "src/host_sbs_current_outline_runtime_programs.h"
+#include "src/host_sbs_bytecode_groups.h"
+#include "src/host_sbs_direct_glyph_publication_gpu.h"
 #include "src/host_sbs_shared_ui_warp_runtime.h"
 #include "src/logging.h"
 #include "src/platform/windows/display_shader_manifest.h"
-#include "src/sbs_bench_raw_matte_gpu.h"
 
 #include <cstdint>
 #include <filesystem>
@@ -14,15 +14,16 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <vector>
 #include <system_error>
 #include <windows.h>
 
 namespace {
   namespace fs = std::filesystem;
   namespace cache = models::host_sbs_shader_cache;
-  namespace outline = models::current_outline_runtime;
+  namespace groups = models::host_sbs_bytecode_groups;
   namespace shared_ui = models::host_sbs_shared_ui_warp;
-  namespace raw_matte = sbs_bench::raw_matte_gpu;
+  namespace glyph_publication = models::host_sbs_direct_glyph_publication;
 
   void finish_output(std::ofstream &output, const fs::path &temporary, const fs::path &destination) {
     output.close();
@@ -81,71 +82,52 @@ namespace {
   }
 
   void embed_shaders(const fs::path &shader_root, const fs::path &resource, const fs::path &depfile) {
-    auto programs = outline::detail::authenticate_program_sources(shader_root / "current_outline");
-    if (programs.bytecodes.size() != outline::unique_compute_shader_count) {
-      throw std::runtime_error("The production Current Outline shader set is incomplete");
-    }
+    std::vector<groups::bytecode_request_t> bytecodes;
     for (const auto &set : cache::production_prewarm_sets) {
-      outline::detail::authenticate_group(set.name, shader_root, set.specs, set.closure, programs.bytecodes);
+      groups::authenticate_group(set.name, shader_root, set.specs, set.closure, bytecodes);
     }
     // P010 remains independent of startup readiness. Its existing runtime loader resolves this
     // distinct resource only when creating the optional HDR luma program.
-    outline::detail::authenticate_group(
+    groups::authenticate_group(
       "P010 luma",
       shader_root,
       cache::parallax_v2_p010_y_specs,
       cache::parallax_v2_p010_y_source_closure_sha256,
-      programs.bytecodes
+      bytecodes
     );
-    outline::detail::authenticate_group(
+    groups::authenticate_group(
       "completed shared UI",
       shader_root,
       shared_ui::completed_specs,
       shared_ui::completed_closure,
-      programs.bytecodes
+      bytecodes
     );
-    outline::detail::authenticate_group(
-      "hybrid subtitle draw", shader_root, shared_ui::raw_model_prepare_specs,
-      shared_ui::raw_model_prepare_closure, programs.bytecodes
+    groups::authenticate_group(
+      "subtitle empty gate", shader_root, glyph_publication::empty_gate_shader_specs,
+      glyph_publication::empty_gate_shader_source_closure_sha256, bytecodes
     );
-    outline::detail::authenticate_group(
-      "hybrid subtitle inference", shader_root, raw_matte::shader_specs,
-      raw_matte::shader_source_closure_sha256, programs.bytecodes
-    );
-    outline::detail::authenticate_group(
-      "hybrid subtitle half-context inference", shader_root, raw_matte::half_context_shader_specs,
-      raw_matte::half_context_shader_source_closure_sha256, programs.bytecodes
-    );
-    outline::detail::authenticate_group(
-      "hybrid subtitle publication", shader_root, raw_matte::early_shader_specs,
-      raw_matte::early_shader_source_closure_sha256, programs.bytecodes
-    );
-    outline::detail::authenticate_group(
-      "hybrid subtitle empty gate", shader_root, raw_matte::empty_gate_shader_specs,
-      raw_matte::empty_gate_shader_source_closure_sha256, programs.bytecodes
-    );
-    outline::detail::authenticate_group(
+    groups::authenticate_group(
       "direct subtitle publication", shader_root, cache::direct_glyph_plan_specs,
-      cache::direct_glyph_plan_source_closure_sha256, programs.bytecodes
+      cache::direct_glyph_plan_source_closure_sha256, bytecodes
     );
-    outline::detail::authenticate_group(
+    groups::authenticate_group(
       "direct subtitle score transport", shader_root, cache::direct_glyph_transport_specs,
-      cache::direct_glyph_transport_source_closure_sha256, programs.bytecodes
+      cache::direct_glyph_transport_source_closure_sha256, bytecodes
     );
-    outline::detail::authenticate_group(
+    groups::authenticate_group(
       "native subtitle palette", shader_root, cache::direct_glyph_palette_specs,
-      cache::direct_glyph_palette_source_closure_sha256, programs.bytecodes
+      cache::direct_glyph_palette_source_closure_sha256, bytecodes
     );
-    outline::detail::authenticate_group(
+    groups::authenticate_group(
       "direct subtitle draw", shader_root, cache::direct_glyph_prepare_specs,
-      cache::direct_glyph_prepare_source_closure_sha256, programs.bytecodes
+      cache::direct_glyph_prepare_source_closure_sha256, bytecodes
     );
-    outline::detail::authenticate_group(
+    groups::authenticate_group(
       "Game 3D text UI",
       shader_root,
       shared_ui::text_game_specs,
       shared_ui::text_game_closure,
-      programs.bytecodes
+      bytecodes
     );
     // Display shaders use the build's source closure as their resource key. Runtime can
     // still compile an edited display shader without changing any pinned Host SBS contract.
@@ -154,9 +136,9 @@ namespace {
       throw std::runtime_error("Could not snapshot Windows display shader sources");
     }
     for (const auto &spec : platf::dxgi::display_shader_specs) {
-      programs.bytecodes.push_back({display_sources, spec, {}, {}});
+      bytecodes.push_back({display_sources, spec, {}, {}});
     }
-    outline::detail::prepare_bytecodes(programs.bytecodes);
+    groups::prepare_bytecodes(bytecodes);
 
     auto temporary = resource;
     temporary += L".tmp";
@@ -167,12 +149,12 @@ namespace {
     output << std::hex;
     std::set<std::string> names;
     std::set<fs::path> dependencies;
-    for (const auto &request : programs.bytecodes) {
+    for (const auto &request : bytecodes) {
       const auto name = cache::bytecode_resource_name(request.sources, request.spec);
       if (name.size() != 64u || !names.insert(name).second) {
         throw std::runtime_error("Invalid or duplicate shader resource name");
       }
-      const auto &code = outline::detail::prepared_bytecode(request, request.spec.filename);
+      const auto &code = groups::prepared_bytecode(request, request.spec.filename);
       write_shader(output, name, *code);
       const auto paths = cache::source_paths(request.sources);
       dependencies.insert(paths.begin(), paths.end());

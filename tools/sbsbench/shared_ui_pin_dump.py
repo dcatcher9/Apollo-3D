@@ -223,11 +223,13 @@ def _verify(root: Any, manifest: dict[str, Any]) -> tuple[dict[str, Any], Any]:
         raise ValueError("shared pin evidence does not identify its exact draw and source")
     model_prepare = shared.get("model_prepare_source_closure_sha256")
     if model_prepare is not None:
-        prepares = _archived_prepares(attribution) or (
-            _runtime_closure("raw_model_prepare_closure"), DIRECT_GLYPH_PREPARE_GROUP.source_closure_sha256)
-        if kind != COMPLETED_KIND or model_prepare not in prepares:
+        # Archived generations recorded a RawMatte prepare beside their Direct Glyph prepare.
+        # The current producer has only the Direct Glyph prepare.
+        archived = _archived_prepares(attribution)
+        direct_prepare = archived[1] if archived else DIRECT_GLYPH_PREPARE_GROUP.source_closure_sha256
+        if kind != COMPLETED_KIND or model_prepare not in (archived or (direct_prepare,)):
             raise ValueError("shared pin model prepare has an unknown source or route")
-        direct_glyph = model_prepare == prepares[1]
+        direct_glyph = model_prepare == direct_prepare
         attribution["model_prepare_source_closure_sha256"] = model_prepare
     evidence_artifacts = evidence.get("artifacts")
     if not isinstance(evidence_artifacts, dict):

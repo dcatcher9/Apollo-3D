@@ -37,7 +37,7 @@
 #include <src/host_sbs_shader_cache.h>
 #include <src/host_sbs_v2_geometry.h>
 #include <src/host_sbs_subtitle_render.h>
-#include <src/host_sbs_current_outline_selected_matte_gpu.h>
+#include <src/host_sbs_selected_matte_receipt.h>
 #include <src/host_sbs_shared_ui_warp_runtime.h>
 #include <src/platform/windows/host_sbs_v2_renderer.h>
 #include <tests/fixtures/host_sbs_adaptive_camera_state.h>
@@ -465,7 +465,7 @@ namespace {
         if (shared_subtitle_route) {
           // Authored current selector receipt, mirroring this fixture's complete SCT.
           // The actual shared shader remains responsible for clock, geometry and RGB revocation.
-          namespace selected = models::research_current_outline_selected_matte_v2;
+          namespace selected = models::selected_matte_receipt_v1;
           std::array<std::uint32_t, 64u> receipt {};
           receipt[0u] = selected::tag;receipt[1u] = selected::schema;receipt[2u] = 3u;
           std::copy_n(subtitle->identity.begin() + 8u, 12u, receipt.begin() + 4u);
@@ -473,7 +473,7 @@ namespace {
           std::copy_n(subtitle->identity.begin() + 20u, 2u, receipt.begin() + 20u);
           receipt[24u] = 1u;receipt[25u] = models::depth_coordinate_v2::subtitle_contour_recipe;
           std::copy(subtitle->identity.begin(), subtitle->identity.end(), receipt.begin() + 28u);
-          receipt[60u] = 71u;receipt[61u] = 9u;receipt[62u] = selected::algorithm;
+          receipt[60u] = 71u;receipt[61u] = 9u;receipt[62u] = selected::current_outline_algorithm;
           if (!words_srv(receipt, receipt_buffer, receipt_srv)) {
             error = "could not create authored current selected-mask receipt";return false;
           }
@@ -583,7 +583,7 @@ namespace {
       }
       bool submitted = false;
       {
-        models::research_current_outline_selected_matte_v2::scoped_receipt_t receipt_scope;
+        models::host_sbs_shared_ui_warp::scoped_receipt_t receipt_scope;
         models::host_sbs_shared_ui_warp::scoped_binding_t shared_scope;
         if (shared_draw && (!receipt_scope.bind(context.Get(), receipt_srv.Get()) ||
             !shared_scope.bind(context.Get(), &shared_views))) {

@@ -365,90 +365,6 @@
       "source_target": "cs_5_0"
     },
     {
-      "name": "host_sbs_current_mask_holes_clear",
-      "source_file": "current_outline/hole/host_sbs_current_mask_holes_cs.hlsl",
-      "source_entrypoint": "clear_main",
-      "source_target": "cs_5_0"
-    },
-    {
-      "name": "host_sbs_current_mask_holes_capture_unit",
-      "source_file": "current_outline/hole/host_sbs_current_mask_holes_cs.hlsl",
-      "source_entrypoint": "capture_unit_main",
-      "source_target": "cs_5_0"
-    },
-    {
-      "name": "host_sbs_current_mask_holes_prepare_holes",
-      "source_file": "current_outline/hole/host_sbs_current_mask_holes_cs.hlsl",
-      "source_entrypoint": "prepare_holes_main",
-      "source_target": "cs_5_0"
-    },
-    {
-      "name": "host_sbs_current_mask_holes_freeze_final",
-      "source_file": "current_outline/hole/host_sbs_current_mask_holes_cs.hlsl",
-      "source_entrypoint": "freeze_final_main",
-      "source_target": "cs_5_0"
-    },
-    {
-      "name": "host_sbs_current_mask_holes_init",
-      "source_file": "current_outline/hole/host_sbs_current_mask_holes_cs.hlsl",
-      "source_entrypoint": "init_main",
-      "source_target": "cs_5_0"
-    },
-    {
-      "name": "host_sbs_current_mask_holes_union",
-      "source_file": "current_outline/hole/host_sbs_current_mask_holes_cs.hlsl",
-      "source_entrypoint": "union_main",
-      "source_target": "cs_5_0"
-    },
-    {
-      "name": "host_sbs_current_mask_holes_reduce",
-      "source_file": "current_outline/hole/host_sbs_current_mask_holes_cs.hlsl",
-      "source_entrypoint": "reduce_main",
-      "source_target": "cs_5_0"
-    },
-    {
-      "name": "host_sbs_current_mask_holes_publish",
-      "source_file": "current_outline/hole/host_sbs_current_mask_holes_cs.hlsl",
-      "source_entrypoint": "publish_main",
-      "source_target": "cs_5_0"
-    },
-    {
-      "name": "host_sbs_current_mask_holes_counter",
-      "source_file": "current_outline/hole/host_sbs_current_mask_holes_cs.hlsl",
-      "source_entrypoint": "counter_main",
-      "source_target": "cs_5_0"
-    },
-    {
-      "name": "host_sbs_current_stroke_coverage_clear_offers",
-      "source_file": "current_outline/hole/host_sbs_current_stroke_coverage_cs.hlsl",
-      "source_entrypoint": "clear_offers_main",
-      "source_target": "cs_5_0"
-    },
-    {
-      "name": "host_sbs_current_stroke_coverage_prepare",
-      "source_file": "current_outline/hole/host_sbs_current_stroke_coverage_cs.hlsl",
-      "source_entrypoint": "prepare_main",
-      "source_target": "cs_5_0"
-    },
-    {
-      "name": "host_sbs_current_stroke_coverage_support",
-      "source_file": "current_outline/hole/host_sbs_current_stroke_coverage_cs.hlsl",
-      "source_entrypoint": "support_main",
-      "source_target": "cs_5_0"
-    },
-    {
-      "name": "host_sbs_current_foreground_edge",
-      "source_file": "current_outline/hole/host_sbs_current_foreground_edge_cs.hlsl",
-      "source_entrypoint": "foreground_edge_main",
-      "source_target": "cs_5_0"
-    },
-    {
-      "name": "host_sbs_current_trusted_inner",
-      "source_file": "current_outline/hole/host_sbs_current_foreground_edge_cs.hlsl",
-      "source_entrypoint": "trusted_inner_publish_main",
-      "source_target": "cs_5_0"
-    },
-    {
       "name": "host_sbs_direct_glyph_plan",
       "source_file": "host_sbs_subtitle_direct_glyph_cs.hlsl",
       "source_entrypoint": "plan_direct_main",
@@ -745,7 +661,7 @@
     },
     {
       "name": "subtitle_inner_components_research",
-      "description": "Opt-in inner-colour six-pass component diagnostic dependency; separate from production current-outline ROI graphs.",
+      "description": "Opt-in inner-colour six-pass component diagnostic dependency; never production drawing authority.",
       "specs": [
         "host_sbs_subtitle_inner_components_research_init",
         "host_sbs_subtitle_inner_components_research_union",
@@ -771,48 +687,6 @@
         "parallax_v2_queued_renderer"
       ],
       "source_closure_sha256": "04fcd38a6f470ebdb25883e160ab999aa43864915d597d29c51be5f7d21ea8bf"
-    },
-    {
-      "name": "current_mask_holes",
-      "description": "Optional current-source mask-hole refinement; independently authenticated and unavailable on any optional failure. Separate from the mandatory producer closure.",
-      "specs": [
-        "host_sbs_current_mask_holes_clear",
-        "host_sbs_current_mask_holes_capture_unit",
-        "host_sbs_current_mask_holes_prepare_holes",
-        "host_sbs_current_mask_holes_freeze_final",
-        "host_sbs_current_mask_holes_init",
-        "host_sbs_current_mask_holes_union",
-        "host_sbs_current_mask_holes_reduce",
-        "host_sbs_current_mask_holes_publish",
-        "host_sbs_current_mask_holes_counter"
-      ],
-      "source_closure_sha256": "b4e48d5eecab2404951602ad649980001f21cf5f9768381acadc7c3973ef4668"
-    },
-    {
-      "name": "current_stroke_coverage",
-      "description": "Optional current-source stroke-coverage experiment; independently authenticated, with original-source proof and separate offers. Unavailable on optional failure and separate from the mandatory producer closure.",
-      "specs": [
-        "host_sbs_current_stroke_coverage_clear_offers",
-        "host_sbs_current_stroke_coverage_prepare",
-        "host_sbs_current_stroke_coverage_support"
-      ],
-      "source_closure_sha256": "1f03ba4279f6cadbaddf56b408cf20c0bc37776c4971e8e25830a8ffd3a3d063"
-    },
-    {
-      "name": "current_foreground_edge",
-      "description": "Optional current-source foreground antialias recovery from an immutable post-completion mask, current qualified foreground seeds and a common foreground/outline RGB interval. Failure preserves the existing mask.",
-      "specs": [
-        "host_sbs_current_foreground_edge"
-      ],
-      "source_closure_sha256": "59d4c0f90506ae0e6c042190cdaca7e76a876d0855923b46693da00ff5062a01"
-    },
-    {
-      "name": "current_trusted_inner",
-      "description": "Optional current-source repeated-colour inner-fill recovery, independently accumulated and published after existing outline and foreground-edge completion. Failure preserves the existing mask.",
-      "specs": [
-        "host_sbs_current_trusted_inner"
-      ],
-      "source_closure_sha256": "5fdc9a1be98291902d63ca639f5bcfd80e88821b6df17bd083a23b5e09c32884"
     },
     {
       "name": "direct_glyph_plan",

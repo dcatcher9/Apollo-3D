@@ -33,51 +33,9 @@ HLSL_OCR_ASSERT_TARGET = (
     ROOT / "src_assets" / "windows" / "assets" / "shaders" / "directx" /
     "include" / "depth_coordinate_v2_ocr_assert.generated.hlsl"
 )
-# Current-outline snapshots compile with their own include directories. They consume the same
-# authenticated contract as the root producer and must change before closure pins are refreshed.
 SHADER_ROOT = HLSL_TARGET.parent.parent
-HLSL_TARGETS = (
-    HLSL_TARGET,
-    *(SHADER_ROOT / "current_outline" / variant / "include" / HLSL_TARGET.name
-      for variant in ("colour", "enclosure")),
-)
-HLSL_OCR_ASSERT_TARGETS = (
-    HLSL_OCR_ASSERT_TARGET,
-    *(SHADER_ROOT / "current_outline" / variant / "include" / HLSL_OCR_ASSERT_TARGET.name
-      for variant in ("colour", "enclosure")),
-)
-# CBC owns the physical-black model predicates. Each independently authenticated shader group
-# must keep includes inside its own root, so F2 consumes a byte-identical generated mirror rather
-# than a second editable algorithm or an include escaping to the CBC group. Materialize the
-# mirror before refreshing any closure, and reject drift during ordinary contract checks.
-PHYSICAL_BLACK_MODEL_SOURCE = SHADER_ROOT / "current_outline" / "enclosure" / "physical_black_model_shared.hlsl"
-PHYSICAL_BLACK_MODEL_MIRRORS = (
-    SHADER_ROOT / "current_outline" / "outline" / PHYSICAL_BLACK_MODEL_SOURCE.name,
-    SHADER_ROOT / "current_outline" / "hole" / PHYSICAL_BLACK_MODEL_SOURCE.name,
-)
-CURRENT_STROKE_MATH_SOURCE = SHADER_ROOT / "current_outline" / "inside" / "current_stroke_math_shared.hlsl"
-CURRENT_STROKE_MATH_TARGETS = tuple(
-    SHADER_ROOT / "current_outline" / variant / CURRENT_STROKE_MATH_SOURCE.name
-    for variant in ("outline", "hole")
-)
-CBC_UNIT_STATE_SOURCE = SHADER_ROOT / "current_outline" / "outline" / "cbc_unit_state_shared.hlsl"
-CBC_UNIT_STATE_MIRRORS = (
-    SHADER_ROOT / "current_outline" / "hole" / CBC_UNIT_STATE_SOURCE.name,
-)
-CURRENT_OUTLINE_RUNTIME_HEADER = ROOT / "src" / "host_sbs_current_outline_runtime_programs.h"
-CURRENT_BACKGROUND_RUNTIME_HEADER = ROOT / "src" / "host_sbs_selected_glyph_push_pull_runtime.h"
+DIRECT_GLYPH_SOURCE_HEADER = ROOT / "src" / "host_sbs_direct_glyph_source_programs.h"
 CURRENT_SHARED_UI_WARP_RUNTIME_HEADER = ROOT / "src" / "host_sbs_shared_ui_warp_runtime.h"
-CURRENT_OUTLINE_RUNTIME_ROOTS = {
-    **{name: name for name in ("source5", "colour", "components", "enclosure", "roi", "outline",
-                               "inside", "selector", "hole")},
-    "direct_source_audit": "source5",
-    "stability": "outline",
-    "coverage": "hole",
-    "foreground_edge": "hole",
-    "trusted_inner": "hole",
-    "weak_aa_oracle_band": "outline",
-    "weak_aa_oracle_trusted": "hole",
-}
 # Lines of LIMITER_SERIAL_MAX_LINES cells or fewer keep the serial float recurrence. Longer
 # lines are scanned in LIMITER_LINE_CHUNKS Q30 chunks, LIMITER_GROUP_LINES adjacent lines per
 # group, so neighboring threads read and write neighboring texels.
@@ -2209,88 +2167,27 @@ def _write_or_check(path: Path, expected: str, check: bool) -> bool:
 
 
 def _write_hlsl_outputs(hlsl: str, ocr_assertions: str, check: bool) -> bool:
-    valid = True
-    for target in HLSL_TARGETS:
-        valid &= _write_or_check(target, hlsl, check)
-    for target in HLSL_OCR_ASSERT_TARGETS:
-        valid &= _write_or_check(target, ocr_assertions, check)
+    valid = _write_or_check(HLSL_TARGET, hlsl, check)
+    valid &= _write_or_check(HLSL_OCR_ASSERT_TARGET, ocr_assertions, check)
     return valid
 
 
-def _write_byte_mirrors(source: Path, targets: tuple[Path, ...], check: bool, label: str) -> bool:
-    expected = source.read_bytes()
-    valid = True
-    for target in targets:
-        current = target.read_bytes() if target.exists() else None
-        if current == expected:
-            continue
-        if check:
-            print(f"stale {label} mirror: {target}", file=sys.stderr)
-            valid = False
-        else:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(expected)
-    return valid
-
-
-def _write_physical_black_model_mirrors(check: bool) -> bool:
-    return _write_byte_mirrors(
-        PHYSICAL_BLACK_MODEL_SOURCE, PHYSICAL_BLACK_MODEL_MIRRORS, check, "physical-black model")
-
-
-def _write_cbc_unit_state_mirrors(check: bool) -> bool:
-    return _write_byte_mirrors(
-        CBC_UNIT_STATE_SOURCE, CBC_UNIT_STATE_MIRRORS, check, "CBC unit-state")
-
-
-def _write_current_stroke_math_mirrors(check: bool) -> bool:
-    return _write_byte_mirrors(
-        CURRENT_STROKE_MATH_SOURCE, CURRENT_STROKE_MATH_TARGETS, check, "current stroke math")
-
-
-def _write_current_outline_runtime_pins(
+def _write_direct_glyph_source_pin(
         check: bool, shader_root: Path = SHADER_ROOT,
-        header: Path = CURRENT_OUTLINE_RUNTIME_HEADER) -> bool:
-    source = header.read_text(encoding="utf-8")
-    arrays = re.findall(
-        r"inline constexpr std::array<cache::shader_spec,\s*(\d+)u>\s+(\w+)_specs\s*"
-        r"\{\{(.*?)\}\};", source, re.DOTALL)
-    pins = re.findall(r'inline constexpr std::string_view (\w+)_closure="([0-9a-f]{64})";', source)
-    if (len(arrays) != len(CURRENT_OUTLINE_RUNTIME_ROOTS) or
-            {name for _, name, _ in arrays} != set(CURRENT_OUTLINE_RUNTIME_ROOTS) or
-            len(pins) != len(CURRENT_OUTLINE_RUNTIME_ROOTS) or
-            {name for name, _ in pins} != set(CURRENT_OUTLINE_RUNTIME_ROOTS)):
-        raise ValueError("current-outline runtime shader groups and pins are incomplete")
-    for count, name, body in arrays:
-        specs = tuple(re.findall(r'cache::shader_spec\{"([^"]+)","([^"]+)","([^"]+)"\}', body))
-        if len(specs) != int(count):
-            raise ValueError(f"current-outline runtime {name} shader specification is malformed")
-        digest = shader_source_closure_sha256(
-            shader_root / "current_outline" / CURRENT_OUTLINE_RUNTIME_ROOTS[name], specs,
-            shader_compile_flags=SHADER_COMPILE_FLAGS)
-        source = re.sub(
-            rf'(inline constexpr std::string_view {name}_closure=")[0-9a-f]{{64}}(";)',
-            rf'\g<1>{digest}\g<2>', source)
-    return _write_or_check(header, source, check)
-
-
-def _write_current_background_runtime_pin(
-        check: bool, shader_root: Path = SHADER_ROOT,
-        header: Path = CURRENT_BACKGROUND_RUNTIME_HEADER) -> bool:
+        header: Path = DIRECT_GLYPH_SOURCE_HEADER) -> bool:
     source = header.read_text(encoding="utf-8")
     array = re.search(
-        r"inline constexpr std::array<cache::shader_spec,\s*(\d+)u>\s+specs\s*\{\{(.*?)\}\};",
-        source, re.DOTALL)
-    pin = re.search(r'inline constexpr std::string_view closure="[0-9a-f]{64}";', source)
-    if array is None or pin is None:
-        raise ValueError("current background runtime shader group or pin is missing")
-    specs = tuple(re.findall(r'\{"([^"]+)","([^"]+)","([^"]+)"\}', array[2]))
+        r"inline constexpr std::array<cache::shader_spec,\s*(\d+)u>\s+direct_source_audit_specs\s*"
+        r"\{\{(.*?)\}\};", source, re.DOTALL)
+    pin = r'(inline constexpr std::string_view direct_source_audit_closure=")[0-9a-f]{64}(";)'
+    if array is None or len(re.findall(pin, source)) != 1:
+        raise ValueError("Direct Glyph source audit shader group or pin is missing or duplicated")
+    specs = tuple(re.findall(r'cache::shader_spec\{"([^"]+)","([^"]+)","([^"]+)"\}', array[2]))
     if len(specs) != int(array[1]):
-        raise ValueError("current background runtime shader specification is malformed")
+        raise ValueError("Direct Glyph source audit shader specification is malformed")
     digest = shader_source_closure_sha256(
-        shader_root / "current_outline" / "background", specs, shader_compile_flags=SHADER_COMPILE_FLAGS)
-    source = source[:pin.start()] + f'inline constexpr std::string_view closure="{digest}";' + source[pin.end():]
-    return _write_or_check(header, source, check)
+        shader_root / "direct_glyph_source", specs, shader_compile_flags=SHADER_COMPILE_FLAGS)
+    return _write_or_check(header, re.sub(pin, rf'\g<1>{digest}\g<2>', source), check)
 
 
 def shared_ui_warp_runtime_closures(
@@ -2299,7 +2196,7 @@ def shared_ui_warp_runtime_closures(
         *, names: tuple[str, ...] | None = None) -> dict[str, str]:
     """Calculate the selected route pins from their runtime specification owner."""
     source = header.read_text(encoding="utf-8")
-    routes = ("completed", "queued", "completed_diagnostic", "queued_diagnostic", "text_game", "raw_model_prepare")
+    routes = ("completed", "queued", "completed_diagnostic", "queued_diagnostic", "text_game")
     spec_names = {f"{route}_closure": f"{route}_specs" for route in routes}
     result = {}
     for name in spec_names if names is None else names:
@@ -2349,11 +2246,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.check and args.refresh_shader_identity:
         parser.error("--check and --refresh-shader-identity are mutually exclusive")
-    mirrors_valid = _write_physical_black_model_mirrors(args.check)
-    mirrors_valid &= _write_cbc_unit_state_mirrors(args.check)
-    mirrors_valid &= _write_current_stroke_math_mirrors(args.check)
-    if not mirrors_valid:
-        return 1
     if args.refresh_shader_identity:
         # First discard any hand-edited shader projection. The named closure manifest owns every
         # ordered root and pin; the DVC JSON stores only its generated semantic projection. Do not
@@ -2388,8 +2280,7 @@ def main(argv: list[str] | None = None) -> int:
         first_hlsl = render_hlsl(contract)
         first_ocr_assertions = render_hlsl_ocr_assertions()
         _write_hlsl_outputs(first_hlsl, first_ocr_assertions, False)
-        _write_current_outline_runtime_pins(False)
-        _write_current_background_runtime_pin(False)
+        _write_direct_glyph_source_pin(False)
         _write_shared_ui_warp_runtime_pin(False)
         if not shader_manifest_generator.generate(False, True):
             raise RuntimeError("could not refresh the named Host SBS shader closures")
@@ -2416,8 +2307,7 @@ def main(argv: list[str] | None = None) -> int:
     valid = _write_or_check(CPP_TARGET, render_cpp(contract), args.check)
     valid &= _write_hlsl_outputs(
         render_hlsl(contract), render_hlsl_ocr_assertions(), args.check)
-    valid &= _write_current_outline_runtime_pins(True)
-    valid &= _write_current_background_runtime_pin(True)
+    valid &= _write_direct_glyph_source_pin(True)
     valid &= _write_shared_ui_warp_runtime_pin(True)
     try:
         validate_renderer_source_closure_pins()

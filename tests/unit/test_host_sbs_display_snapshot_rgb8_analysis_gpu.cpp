@@ -22,7 +22,7 @@
 #include <src/host_sbs_display_snapshot_rgb8_analysis_gpu.h>
 #include <src/host_sbs_resolution.h>
 #include <src/host_sbs_shader_cache.h>
-#include <src/sbs_bench_raw_matte_gpu.h>
+#include <src/host_sbs_direct_glyph_publication_gpu.h>
 namespace {
 namespace cg=models::display_snapshot_rgb8_analysis_gpu_v1;
 namespace cache=models::host_sbs_shader_cache;
@@ -237,11 +237,11 @@ TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, RootZeroHoldsPublishedTupleThenFreshTo
  for(auto g:{std::array<UINT,4>{0,1,1,0},std::array<UINT,4>{0,0,0,0},std::array<UINT,4>{1,0,1,0},std::array<UINT,4>{1,1,0,0}}){author(0,false,false,0x100000020ull+n,0xe000000000002000ull+n);std::copy(g.begin(),g.end(),roots.begin()+60);upload();queue();envelope();EXPECT_EQ(reference_band(),r);EXPECT_EQ(readView(owner.views().analysis_band.Get(),8),b);EXPECT_EQ(readView(owner.views().source_proof.Get()),p);EXPECT_EQ(readView(owner.views().uip_envelope.Get()),e);auto row=snapshot("root0-"+std::to_string(n++),"root0_hold");row["envelope"]=save(row["name"].get<std::string>()+"-envelope.bin",readView(owner.views().uip_envelope.Get()));row["held_reference"]=save(row["name"].get<std::string>()+"-held-reference.bin",r);row["held_analysis"]=save(row["name"].get<std::string>()+"-held-analysis.bin",b);row["held_proof"]=save(row["name"].get<std::string>()+"-held-proof.bin",p);row["held_envelope"]=save(row["name"].get<std::string>()+"-held-envelope.bin",e);report["observations"].back()=row;}
  author(1,false,false,0x100000099ull,0xe000000000009999ull);positive("fresh-token");EXPECT_NE(readView(owner.views().source_proof.Get()),p);EXPECT_NE(reference_band(),r);
 }
-TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, RawMatteEmptyGatePreservesSourceAndPublishesCurrentZero) {
-  namespace model = sbs_bench::raw_matte_gpu;
+TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, EmptyGatePreservesSourceAndPublishesCurrentZero) {
+  namespace model = models::host_sbs_direct_glyph_publication;
   namespace v2 = models::depth_coordinate_v2;
   model::resources_t matte;
-  ASSERT_TRUE(matte.load(device.Get(), SUNSHINE_SHADERS_DIR, error, true)) << error;
+  ASSERT_TRUE(matte.load_direct(device.Get(), SUNSHINE_SHADERS_DIR, error, false)) << error;
   H = 65u;
   B = models::subtitle_ocr_source_crop_height(W, H);
   crop = H - B;
@@ -250,7 +250,7 @@ TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, RawMatteEmptyGatePreservesSourceAndPub
   const auto end = v2::subtitle_ocr_project_row_ceil(W, H, field_w, field_h, v2::subtitle_ocr_safe_row_bottom);
   ASSERT_TRUE(start && end && start.value < end.value);
   buf_t ocr, condition;
-  model::early_request_t input;
+  model::request_t input;
   const auto author_current = [&](bool empty, std::uint64_t frame) {
     author(0u, true, empty, frame, 0xf000000000001000ull + frame);
     const std::array<UINT, 4> field {field_w, field_h, start.value, end.value};
@@ -290,6 +290,10 @@ TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, RawMatteEmptyGatePreservesSourceAndPub
       .postprocess_mode = 2u, .expected_work = 1u, .uip = uip.srv.Get(), .use_empty_gate = true};
   };
   const auto prepare = [&] { return matte.prepare_empty_gate(context.Get(), input, error); };
+  const auto publish = [&] {
+    return matte.plan_direct(context.Get(), input, nullptr, false, error) &&
+           matte.publish_direct(context.Get(), input, nullptr, nullptr);
+  };
   const auto source_contents = [&] {
     const auto views = owner.views();
     return std::array<bytes, 4> {reference_band(), readView(views.analysis_band.Get(), 8u),
@@ -327,7 +331,7 @@ TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, RawMatteEmptyGatePreservesSourceAndPub
   EXPECT_EQ(read(owner.views().final_root_mirror.Get()), pack(roots));
   EXPECT_EQ(words(read(owner.views().dispatch_arguments.Get())), (std::vector<UINT> {1u, 1u, 0u, 0u}));
   // The parked producer has no current model inputs. The typed empty witness alone publishes zero.
-  ASSERT_TRUE(matte.queue_early(context.Get(), input, error)) << error;
+  ASSERT_TRUE(publish()) << error;
   const auto current = matte.views();
   ASSERT_TRUE(current.matte && current.alpha8 && current.receipt && current.work);
   const auto receipt = words(readView(current.receipt.Get()));
@@ -336,20 +340,12 @@ TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, RawMatteEmptyGatePreservesSourceAndPub
   EXPECT_EQ(receipt[3u], 0u);
   EXPECT_EQ(receipt[60u], static_cast<UINT>(request.token));
   EXPECT_EQ(receipt[61u], static_cast<UINT>(request.token >> 32u));
-  EXPECT_EQ(receipt[62u], 3u);
+  EXPECT_EQ(receipt[62u], 4u);
   EXPECT_TRUE(std::equal(cb.begin(), cb.end(), receipt.begin() + 4u));
   EXPECT_TRUE(std::equal(scts.begin(), scts.end(), receipt.begin() + 28u));
   EXPECT_EQ(readView(current.matte.Get()), bytes(std::size_t(W) * B * 4u, 0u));
   EXPECT_EQ(readView(current.alpha8.Get()), bytes(std::size_t(W) * B * 4u, 0u));
-  const auto empty_work = words(read(current.work.Get()));
-  ASSERT_EQ(empty_work.size(), 60u);
-  EXPECT_EQ(empty_work[4u], 1u);
-  EXPECT_EQ(empty_work[16u], 1u);
-  EXPECT_EQ(empty_work[54u], 0u);
-  EXPECT_EQ(empty_work[55u], 0u);
-  EXPECT_EQ(empty_work[57u], 0u);
-  EXPECT_EQ(empty_work[58u], 0u);
-  EXPECT_EQ(empty_work[59u], 0u);
+  EXPECT_EQ(read(current.work.Get()).size(), std::size_t(model::direct_work_word_count) * 4u);
 
   author_current(false, 0x100000009ull);
   roots[60u] = 0u;
@@ -358,11 +354,8 @@ TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, RawMatteEmptyGatePreservesSourceAndPub
   EXPECT_EQ(read(work), pack(roots));
   ASSERT_TRUE(capture(work)) << error;
   EXPECT_EQ(source_contents(), positive);
-  ASSERT_TRUE(matte.queue_early(context.Get(), input, error)) << error;
+  ASSERT_TRUE(publish()) << error;
   EXPECT_EQ(words(readView(matte.views().receipt.Get())), receipt);
-  const auto held_work = words(read(matte.views().work.Get()));
-  ASSERT_EQ(held_work.size(), 60u);
-  EXPECT_EQ(held_work[16u], 3u);
 
   author_current(false, 0x10000000aull);
   ASSERT_EQ(prepare(), work) << error;

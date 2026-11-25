@@ -116,13 +116,14 @@ shaders require two bands in left-then-right order. The reader accepts recording
 before and after the 64-bit/GDI text-game update and checks each build's draw and prepare
 shader hashes as a pair.
 
-For an observed completed hybrid draw, `shared_pin.model_prepare_source_closure_sha256`
+For an observed completed Direct Glyph draw, `shared_pin.model_prepare_source_closure_sha256`
 in `actual_draw_evidence.json` identifies the authenticated model prepare. The draw uses
 the ordinary completed pixel shader. The prepare must match the draw's shader generation.
-The reader identifies Direct Glyph, hybrid, or legacy fallback from the literal
-`actual_selected_receipt.u32` and the GPU's authorization word. Algorithm 4 requires the
-Direct Glyph prepare.
-A hybrid receipt also covers fresh empty publication.
+For the current generation the only accepted model prepare is the Direct Glyph prepare.
+Archived generations keep their stored closure literals and still verify with their RawMatte
+("hybrid") or Direct Glyph prepare. The reader identifies the selected-matte kind from the literal
+`actual_selected_receipt.u32` and the GPU's authorization word: Direct Glyph, an archived hybrid
+receipt, or the legacy fallback. Algorithm 4 requires the Direct Glyph prepare.
 
 For all shared kinds, `mapping_artifacts_match_selected_renderer` is false because `warp_map.f32`
 remains the independent Base diagnostic. Its geometry-chain and ROI exterior checks cannot score
@@ -131,7 +132,7 @@ exports and their unversioned analytic attribution. The canonical reader require
 dump schema.
 
 Schema-2 draw evidence removes the unused `t8` role and `actual_original_legacy_M.u32` artifact.
-Raw and legacy masks required by mask construction or independent diagnostics remain available.
+The original dense matte required by independent diagnostics remains available.
 Failure to prepare shared subtitles, or invalid selected authority, preserves usable ordinary Base
 with subtitle permission disabled. Invalid or unavailable depth retains the independent flat path.
 

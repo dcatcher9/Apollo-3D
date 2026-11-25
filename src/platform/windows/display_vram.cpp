@@ -379,18 +379,18 @@ namespace platf::dxgi {
 
   struct selected_matte_programs_t {
     models::host_sbs_shared_ui_warp::programs_t shared_warp;
-    models::subtitle_selected_matte_research_configuration_t configuration;
+    models::subtitle_direct_glyph_configuration_t configuration;
     std::string error;
     bool ready = false;
   };
 
   // Device-object preparation only, before the estimator's first input. The
-  // shared warp is the only current-outline selected renderer. Historical
-  // selector receipt ABIs do not authorize this renderer.
+  // shared subtitle warp is the only renderer of the Direct Glyph matte.
+  // Historical selector receipt ABIs do not authorize this renderer.
   selected_matte_programs_t prepare_selected_matte_programs(
     models::video_depth_estimator &estimator,
     ID3D11Device *device,
-    const models::subtitle_selected_matte_research_configuration_t &configuration
+    const models::subtitle_direct_glyph_configuration_t &configuration
   ) {
     selected_matte_programs_t result;
     result.configuration = configuration;
@@ -3027,7 +3027,7 @@ namespace platf::dxgi {
             constexpr auto pin_bindings = shared_warp::resources_t::binding_policy_e::converter_owned;
             shared_warp::views_t current_shared_warp;
             bool shared_warp_selected = false;
-            bool raw_model_prepare_selected = false;
+            bool direct_glyph_prepare_selected = false;
             actual_converter_probe_v1::shared_warp_draw_t current_shared_observed;
             // Preparation and the pre-Draw observer derive the same literal request from
             // the recorder command, rather than maintaining a second copy of its operands.
@@ -3046,9 +3046,9 @@ namespace platf::dxgi {
             };
             if (selected_draw && subtitle_constants.enabled == 1u) {
               const auto request = shared_request_for_draw();
-              const bool prepare_raw_model = !queued_geometry_selected && selected_shared_warp_programs.raw_model_completed_ready();
-              const auto program = prepare_raw_model ?
-                selected_shared_warp_programs.raw_model_completed_program() : selected_shared_warp_programs.program(queued_geometry_selected);
+              const bool prepare_direct_glyph = !queued_geometry_selected && selected_shared_warp_programs.direct_glyph_completed_ready();
+              const auto program = prepare_direct_glyph ?
+                selected_shared_warp_programs.direct_glyph_completed_program() : selected_shared_warp_programs.program(queued_geometry_selected);
               std::string shared_error;
               if (selected_shared_warp.prepare_subtitle(
                     device.get(), device_ctx.get(), program, request,
@@ -3057,7 +3057,7 @@ namespace platf::dxgi {
                   ) && selected_shared_warp.matches(device_ctx.get(), request)) {
                 current_shared_warp = selected_shared_warp.views();
                 shared_warp_selected = true;
-                raw_model_prepare_selected = prepare_raw_model;
+                direct_glyph_prepare_selected = prepare_direct_glyph;
                 draw_command.pixel_shader = program.pixel;
               }
             }
@@ -3157,8 +3157,8 @@ namespace platf::dxgi {
                     s.serial = current_shared_warp.serial;
                     s.shape = current_shared_warp.shape;
                     s.source_closure = shared_warp::source_closure(s.queued);
-                    if (raw_model_prepare_selected) {
-                      s.raw_model_prepare_source_closure = selected_shared_warp_programs.model_prepare_closure();
+                    if (direct_glyph_prepare_selected) {
+                      s.direct_glyph_prepare_source_closure = selected_shared_warp_programs.model_prepare_closure();
                     }
                     s.pixel_shader_address = reinterpret_cast<std::uintptr_t>(actual_shader.Get());
                     s.weights = actual[12];
@@ -3213,7 +3213,7 @@ namespace platf::dxgi {
                     e.shared_pin_rows = actual[14];
                     e.shared_pin_geometry = constants[4];
                     e.shared_pin_source_closure = e.pixel_shader_closure;
-                    if (raw_model_prepare_selected) {
+                    if (direct_glyph_prepare_selected) {
                       e.shared_pin_model_prepare_closure = selected_shared_warp_programs.model_prepare_closure();
                     }
                   }
@@ -3310,9 +3310,7 @@ namespace platf::dxgi {
               e.watermark_after=drawn_source_order.last_drawn(); e.actual_draw_pixel_source=draw_colour.pixel_source_frame_id;
               // Literal operands of the actual successful normal-recorder command, not a
               // post-hoc choice from the result views. Recorder source is frozen separately.
-              e.selected_draw=selected_draw&&!queued_attempt_failed_flat;
-              if(e.selected_draw&&shared_warp_selected)e.shared_warp=current_shared_observed;
-              if(e.selected_draw){e.selected_views[2]=draw_command.shader_resources[3];Microsoft::WRL::ComPtr<ID3D11Resource> r;selected_receipt->GetResource(&r);e.actual_draw_selected_receipt_address=reinterpret_cast<std::uintptr_t>(r.Get());}
+              if(selected_draw&&!queued_attempt_failed_flat&&shared_warp_selected)e.shared_warp=current_shared_observed;
               emit_converter_probe(std::move(e),draw_source_attribution,queued_attempt_failed_flat ? nullptr:&est,
                 queued_geometry_selected && !queued_attempt_failed_flat ? queued_geometry:nullptr,
                 draw_colour.srv,img_ctx->encoder_input_res.get(),frame_id, cached_current_color_warp ? &draw_colour : nullptr);
@@ -3978,7 +3976,7 @@ namespace platf::dxgi {
                 if (pipeline.selected_matte.ready) {
                   BOOST_LOG(info) << "Adaptive subtitle glyph model active.";
                 } else {
-                  BOOST_LOG(warning) << "Subtitle outline initialization unavailable; retaining ordinary authenticated Base: "
+                  BOOST_LOG(warning) << "Subtitle glyph initialization unavailable;retaining ordinary authenticated Base: "
                                      << pipeline.selected_matte.error;
                 }
                 adopt_selected_matte_programs(std::move(pipeline.selected_matte));
@@ -4043,14 +4041,13 @@ namespace platf::dxgi {
                       << "\" in the background (streaming flat until ready)..."sv;
       Microsoft::WRL::ComPtr<ID3D11Device> dev(device.get());
       Microsoft::WRL::ComPtr<ID3D11DeviceContext> ctx(device_ctx.get());
-      const bool prepare_live_outline = !probe_context;
+      const bool prepare_live_subtitles = !probe_context;
       using normalized_depth_diagnostics_e = models::video_depth_estimator::normalized_depth_diagnostics_e;
       const auto normalized_depth_diagnostics = probe_context ?
                                                   normalized_depth_diagnostics_e::enabled :
                                                   normalized_depth_diagnostics_e::disabled;
       using subtitle_legacy_matte_e = models::video_depth_estimator::subtitle_legacy_matte_e;
-      const auto legacy_matte = probe_context && probe_context->legacy_matte_always ?
-                                  subtitle_legacy_matte_e::always : subtitle_legacy_matte_e::on_demand;
+      const auto legacy_matte = probe_context ? subtitle_legacy_matte_e::always : subtitle_legacy_matte_e::on_demand;
       const bool prepare_text_game_programs = sbs_mode == ::video::SBS_GAME_SBS && text_game_eligible;
       depth_estimator_build_task_t build_task([dev = std::move(dev),
                                                ctx = std::move(ctx),
@@ -4058,7 +4055,7 @@ namespace platf::dxgi {
                                                sbs_cfg,
                                                normalized_depth_diagnostics,
                                                legacy_matte,
-                                               prepare_live_outline,
+                                               prepare_live_subtitles,
                                                prepare_text_game_programs]() mutable {
         depth_pipeline_build_result_t result;
         result.estimator = std::make_unique<models::video_depth_estimator>(
@@ -4072,12 +4069,12 @@ namespace platf::dxgi {
         );
         // Live rendering binds Base. Conditioned-field diagnostics run only for Dump 3D.
         result.estimator->set_subtitle_conditioning_diagnostics_always(false);
-        if (prepare_live_outline && result.estimator->is_valid() &&
+        if (prepare_live_subtitles && result.estimator->is_valid() &&
             !result.estimator->has_terminal_failure()) {
           namespace completed_subtitles = models::host_sbs_completed_subtitle_programs;
           const std::filesystem::path root(SUNSHINE_SHADERS_DIR);
           result.selected_matte = prepare_selected_matte_programs(
-            *result.estimator, dev.Get(), completed_subtitles::canonical_configuration(root, true, true)
+            *result.estimator, dev.Get(), completed_subtitles::canonical_configuration(root)
           );
           // Keep the optional program creation on the background worker for packed Game 3D,
           // including its early local warmup before a text game appears.
@@ -5014,20 +5011,6 @@ namespace platf::dxgi {
         event.buffers[3]=ticket->transaction; event.buffers[4]=ticket->dispatch_arguments;
         event.buffers[5]=ticket->depth_constants; event.buffers[6]=ticket->source_region_constants; event.buffers[7]=ticket->contour_constants;
       }
-      if(!event.flat&&!event.repeat&&depth_estimator&&event.model_frame!=0u&&event.observation_us!=0u) {
-        if(const auto v=depth_estimator->subtitle_selected_matte_diagnostic_views_for_evaluation(event.model_frame,event.observation_us)) {
-          if (!v->current_outline_raw_matte_work) {
-            // RawMatte can publish a current empty receipt while its producer textures are parked.
-            event.current_outline_stages = v->current_outline_stages;
-          }
-          event.selected_views[0]=v->selected_matte;event.selected_views[1]=v->selected_receipt;
-          event.selected_views[3]=v->baseline_body;event.selected_views[4]=v->baseline_matte;event.selected_views[5]=v->numeric_proof;
-          event.selected_views[6]=v->current_probability;event.selected_views[7]=v->current_support;
-          event.selected_views[8]=v->temporal_matte;event.selected_views[9]=v->temporal_receipt;event.selected_views[10]=v->frame256;
-          event.selected_contour_constants=v->current_constants;event.selected_baseline_current=v->baseline_current;
-          event.selected_temporal_commands=v->temporal_commands;event.selected_source_certificate_valid=v->source_certificate_valid;
-        }
-      }
       if (depth_estimator) if (const auto q=depth_estimator->joined_completion_gate_status_for_benchmark()) {
         event.query_observed=q->actual_event_queries!=0u; event.literal_last_query_result=q->last_actual_event_query;
         event.literal_query_count=q->actual_event_queries; event.literal_not_ready_count=q->actual_not_ready_queries;
@@ -5119,28 +5102,13 @@ namespace platf::dxgi {
       return slot.texture && source_signatures_match(slot.texture.description(), source_desc);
     }
 
-    // Explicit current-outline shared-renderer activation before the first input.
-    bool configure_selected_matte_for_instance(const models::subtitle_selected_matte_research_configuration_t &cfg,std::string &error) {
-      if (!depth_estimator || selected_matte_ready || sbs_frame_sequence != 0u) {
-        error = "Selected matte requires prepared device before first input";
-        return false;
-      }
-      auto programs = prepare_selected_matte_programs(*depth_estimator, device.get(), cfg);
-      if (!programs.ready) {
-        error = programs.error;
-        return false;
-      }
-      adopt_selected_matte_programs(std::move(programs));
-      error.clear();
-      return true;
-    }
-
+    // Shared subtitle warp activation for Direct Glyph, before the first input.
     void adopt_selected_matte_programs(selected_matte_programs_t programs) {
       selected_shared_warp_programs = std::move(programs.shared_warp);
-      selected_shared_warp_root = std::filesystem::path(programs.configuration.current_outline_shader_root).parent_path();
+      selected_shared_warp_root = std::filesystem::path(programs.configuration.shader_root);
       selected_matte_ready = programs.ready;
-      if (selected_matte_ready && selected_shared_warp_programs.raw_model_completed_ready()) {
-        BOOST_LOG(info) << "Host SBS completed RawMatte prepare source closure "
+      if (selected_matte_ready && selected_shared_warp_programs.direct_glyph_completed_ready()) {
+        BOOST_LOG(info) << "Host SBS Direct Glyph prepare source closure "
                         << selected_shared_warp_programs.model_prepare_closure();
       }
     }
@@ -8603,7 +8571,7 @@ namespace platf::dxgi {
         result.estimator_present = static_cast<bool>(converter_->depth_estimator);
         result.estimator_valid = result.estimator_present && converter_->depth_estimator->is_valid();
         result.estimator_terminal = result.estimator_present && converter_->depth_estimator->has_terminal_failure();
-        result.current_outline_warp_ready = converter_->selected_matte_ready;
+        result.subtitle_warp_ready =converter_->selected_matte_ready;
         result.text_game_warp_ready = converter_->selected_shared_warp_programs.text_game_ready();
         result.queued_research_active = static_cast<bool>(converter_->queued_research);
         result.v2_live_warp_seen = converter_->v2_live_warp_seen;

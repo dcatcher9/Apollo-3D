@@ -1429,46 +1429,20 @@ namespace models {
     std::string frame_shader_root,frame_source_closure_sha256;
     bool recorded_execution=true;
   };
-  // Separate private renderer/producer ABI; no ordinary setting and no implicit activation.
-  struct subtitle_selected_matte_research_configuration_t {
-    bool current_outline = false;
-    std::string current_outline_shader_root;
-    std::string selector_shader_root, selector_source_closure_sha256;
-    bool current_outline_omit_foreground_edge = false;
-    bool current_outline_omit_stroke_coverage = false;
-    bool current_outline_weak_aa_oracle = false;
-    std::string current_outline_raw_matte_reduced_shader_root;
-    std::string current_outline_direct_glyph_shader_root;
-    bool capture_direct_glyph_plan = false;
-    bool direct_glyph_adaptive_context = false;
-    bool direct_glyph_resolved_fringe = false;
-    bool direct_glyph_line_palette = false;
+  /** Direct Glyph subtitle publication, configured once before the first input. */
+  struct subtitle_direct_glyph_configuration_t {
+    std::string shader_root;
+    bool capture_plan = false;
+    bool adaptive_context = false;
+    bool resolved_fringe = false;
+    bool line_palette = false;
   };
-  // PRIVATE observer aliases only. Exact pending/current model join; not completed authority.
-  struct subtitle_selected_matte_diagnostic_views_t {
-    std::uint64_t model_frame=0u,model_observation_us=0u;
-    bool pending_queued=false,baseline_current=false,temporal_commands=false,source_certificate_valid=false;
-    bool current_outline_hole_program_ready=false; // Shader availability only, never GPU execution proof.
-    bool current_outline_coverage_program_ready=false; // Shader availability only, never GPU execution proof.
-    bool current_outline_foreground_edge_program_ready=false; // Shader availability only, never GPU execution proof.
-    bool current_outline_trusted_inner_program_ready=false; // Availability only; zero indirect work is a valid observation.
-    std::uint64_t current_outline_cbc_recordings=0u,current_outline_cbc_replays=0u,current_outline_cbc_allocations=0u;
-    std::uint64_t current_outline_f2_recordings=0u,current_outline_f2_replays=0u,current_outline_f2_allocations=0u;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> selected_matte,selected_receipt;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> baseline_body,baseline_matte,numeric_proof,current_probability,current_support;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> temporal_matte,temporal_receipt,frame256;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> current_constants;
-    // Existing mutable composition stages, exposed only to the explicit probe.
-    // Source band, CBC body/meta/all-body/selected/cover, raw M/meta, F2 data/cache.
-    std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>,12> current_outline_stages;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> current_outline_weak_aa_facts, current_outline_weak_aa_trusted;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> current_outline_ocr_record;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> current_outline_raw_matte_floor, current_outline_raw_matte_alpha8;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> current_outline_raw_matte_work;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> direct_glyph_source_audit;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> direct_glyph_legacy_dispatch;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> direct_glyph_placement, direct_glyph_post_plan_work;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> direct_glyph_native_lines;
+  /** Evaluation aliases of the completed Direct Glyph observation; never drawing authority. */
+  struct subtitle_direct_glyph_diagnostic_views_t {
+    std::uint64_t model_frame = 0u, model_observation_us = 0u;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> selected_matte, selected_receipt;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ocr_record, alpha8, source_audit;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> work, legacy_dispatch, placement, post_plan_work, native_lines;
   };
   struct subtitle_temporal_source_working_views_t {
     std::uint64_t model_frame=0,model_observation_us=0;
@@ -1536,10 +1510,10 @@ namespace models {
     bool configure_subtitle_temporal_source_research(
       const subtitle_temporal_source_research_configuration_t &,std::string &error);
     bool subtitle_temporal_source_research_enabled() const noexcept;
-    bool configure_subtitle_selected_matte_research(const subtitle_selected_matte_research_configuration_t &, std::string &error);
+    bool configure_subtitle_direct_glyph(const subtitle_direct_glyph_configuration_t &, std::string &error);
     [[nodiscard]] std::filesystem::path direct_glyph_engine_path_for_evaluation() const;
     [[nodiscard]] std::optional<host_sbs_direct_glyph_gpu::tile_profile_e> direct_glyph_profile_for_evaluation() const;
-    std::optional<subtitle_selected_matte_diagnostic_views_t> subtitle_selected_matte_diagnostic_views_for_evaluation(std::uint64_t frame,std::uint64_t observation) const noexcept;
+    std::optional<subtitle_direct_glyph_diagnostic_views_t> subtitle_direct_glyph_diagnostic_views_for_evaluation(std::uint64_t frame, std::uint64_t observation) const noexcept;
     std::optional<subtitle_temporal_source_working_views_t>
       subtitle_temporal_source_working_views_for_evaluation(std::uint64_t expected_completed_frame) const noexcept;
 

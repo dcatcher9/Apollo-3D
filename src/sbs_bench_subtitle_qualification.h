@@ -1,9 +1,10 @@
-/** @file File-fed qualification of the actual completed current-outline draw. */
+/** @file File-fed qualification of the actual completed Direct Glyph subtitle draw. */
 #pragma once
 
 #ifdef _WIN32
   #include "host_sbs_completed_subtitle_programs.h"
   #include "host_sbs_resolution.h"
+  #include "host_sbs_selected_matte_receipt.h"
   #include "host_sbs_shared_ui_warp_runtime.h"
   #include "platform/windows/host_sbs_v2_renderer.h"
   #include "video_depth_estimator.h"
@@ -14,10 +15,9 @@
   #include <cstring>
   #include <vector>
 
-namespace sbs_bench::current_outline_qualification {
+namespace sbs_bench::subtitle_qualification {
   using Microsoft::WRL::ComPtr;
   namespace shared_warp = models::host_sbs_shared_ui_warp;
-  using shared_warp::raw_model_prepare_closure;
 
   struct producer_stage_spec_t {
     std::size_t slot;
@@ -26,50 +26,6 @@ namespace sbs_bench::current_outline_qualification {
     UINT words;
     bool raw;
   };
-
-  inline constexpr std::array producer_stage_specs {
-    producer_stage_spec_t {2u, "cbc_meta", "current_outline_stages[2]:CBCMeta512", 512u, false},
-    producer_stage_spec_t {7u, "raw_meta", "current_outline_stages[7]:RawMeta512", 512u, false},
-    producer_stage_spec_t {8u, "f2_data", "current_outline_stages[8]:F2data68608", 68608u, true}
-  };
-
-  struct native_feature_spec_t {
-    std::size_t slot;
-    const char *name;
-    const char *role;
-  };
-
-  inline constexpr std::array native_feature_specs {
-    native_feature_spec_t {1u, "cbc_body", "current_outline_stages[1]:CBCBody"},
-    native_feature_spec_t {4u, "cbc_selected_bits", "current_outline_stages[4]:CBCSelectedBits"},
-    native_feature_spec_t {5u, "cbc_cover_bits", "current_outline_stages[5]:CBCCoverBits"},
-    native_feature_spec_t {6u, "raw_m", "current_outline_stages[6]:RawM"}
-  };
-
-  /** Match the whole native feature texture from the completed composition lease. */
-  inline bool native_feature_texture_matches(ID3D11Device *device, ID3D11ShaderResourceView *view, UINT width, UINT height) {
-    if (!device || !view) {
-      return false;
-    }
-    ComPtr<ID3D11Device> actual_device;
-    view->GetDevice(&actual_device);
-    D3D11_SHADER_RESOURCE_VIEW_DESC srv {};
-    view->GetDesc(&srv);
-    if (actual_device.Get() != device || srv.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D ||
-        srv.Format != DXGI_FORMAT_R32_UINT || srv.Texture2D.MostDetailedMip != 0u || srv.Texture2D.MipLevels != 1u) {
-      return false;
-    }
-    ComPtr<ID3D11Resource> resource;
-    ComPtr<ID3D11Texture2D> texture;
-    view->GetResource(&resource);
-    if (!resource || FAILED(resource.As(&texture))) {
-      return false;
-    }
-    D3D11_TEXTURE2D_DESC desc {};
-    texture->GetDesc(&desc);
-    return desc.Width == width && desc.Height == height && desc.Format == DXGI_FORMAT_R32_UINT &&
-           desc.MipLevels == 1u && desc.ArraySize == 1u && desc.SampleDesc.Count == 1u;
-  }
 
   /** Diagnostic storage validation only; these aliases never grant draw or model authority. */
   inline bool producer_stage_buffer(ID3D11Device *device, ID3D11ShaderResourceView *view, const producer_stage_spec_t &spec, ComPtr<ID3D11Buffer> &buffer) {
@@ -128,8 +84,6 @@ namespace sbs_bench::current_outline_qualification {
     ComPtr<ID3D11Device> device_;
     shared_warp::programs_t programs_;
     shared_warp::resources_t shared_warp_;
-    shared_warp::resources_t raw_model_warp_;
-    bool reduced_ = false;
 
     template<std::size_t N>
     bool read_words(ID3D11DeviceContext *context, ID3D11Buffer *source, std::array<std::uint32_t, N> &words) const {
@@ -236,117 +190,19 @@ namespace sbs_bench::current_outline_qualification {
     };
 
   public:
-    bool prepare(ID3D11Device *device, models::video_depth_estimator &estimator, const std::filesystem::path &shader_root,
-                 bool omit_foreground_edge, bool omit_stroke_coverage, bool weak_aa_oracle, std::string &error,
-                 const std::string &reduced_shader_root = {}, bool direct_glyph = false,
-                 bool capture_direct_plan = false, bool adaptive_direct_context = false,
-                 bool direct_resolved_fringe = false, bool line_palette = false) {
-      namespace completed = models::host_sbs_completed_subtitle_programs;
-      auto config = completed::canonical_configuration(shader_root, direct_glyph, adaptive_direct_context);
-      config.capture_direct_glyph_plan = capture_direct_plan;
-      config.direct_glyph_line_palette = line_palette;
-      config.direct_glyph_resolved_fringe = direct_resolved_fringe;
-      config.current_outline_omit_foreground_edge = omit_foreground_edge;
-      config.current_outline_omit_stroke_coverage = omit_stroke_coverage;
-      config.current_outline_weak_aa_oracle = weak_aa_oracle;
-      config.current_outline_raw_matte_reduced_shader_root = reduced_shader_root;
-      if (!completed::prepare(device, estimator, config, programs_, error)) {
+    bool prepare(ID3D11Device *device, models::video_depth_estimator &estimator,
+                 const models::subtitle_direct_glyph_configuration_t &configuration, std::string &error) {
+      if (!models::host_sbs_completed_subtitle_programs::prepare(device, estimator, configuration, programs_, error)) {
         return false;
       }
       device_ = device;
-      reduced_ = direct_glyph || !reduced_shader_root.empty();
       return true;
-    }
-
-    bool prepare_raw_model(const std::filesystem::path &shader_root, std::string &error) {
-      return programs_.load_raw_model_completed(device_.Get(), shader_root, error);
     }
 
     bool record(ID3D11DeviceContext *context, const platf::dxgi::host_sbs_v2_draw_command_t &ordinary, ID3D11RenderTargetView *output, const models::depth_observation_views_t &result, ID3D11Buffer *subtitle_constants, evidence_t *evidence, std::string &error) {
-      const auto program = reduced_ ? programs_.raw_model_completed_program() : programs_.program();
       return record_draw(context, ordinary, output, result, subtitle_constants, result.research_selected_matte.Get(),
-                         result.research_selected_matte_receipt.Get(), shared_warp_, program, evidence, error);
-    }
-
-    bool record_raw_model(ID3D11DeviceContext *context, const platf::dxgi::host_sbs_v2_draw_command_t &ordinary,
-                          ID3D11RenderTargetView *output, const models::depth_observation_views_t &result,
-                          ID3D11Buffer *subtitle_constants, ID3D11ShaderResourceView *candidate_matte,
-                          ID3D11ShaderResourceView *candidate_receipt, evidence_t *evidence, std::string &error) {
-      namespace receipt_abi = models::selected_matte_receipt_v1;
-      const UINT width = result.input_region.width(), height = result.input_region.height();
-      const UINT band = models::subtitle_ocr_source_crop_height(width, height);
-      constexpr producer_stage_spec_t receipt_spec {0u, "selected_receipt", "raw-model-draw", receipt_abi::word_count, false};
-      ComPtr<ID3D11Device> context_device;
-      if (context) context->GetDevice(&context_device);
-      ComPtr<ID3D11Buffer> receipt_buffer;
-      if (!context || !evidence || !programs_.raw_model_completed_ready() || !device_ || context_device.Get() != device_.Get() ||
-          !native_feature_texture_matches(device_.Get(), candidate_matte, width, band) ||
-          !producer_stage_buffer(device_.Get(), candidate_receipt, receipt_spec, receipt_buffer)) {
-        error = "Raw model shared-warp draw has incomplete native inputs";
-        return false;
-      }
-      auto *rule_matte = result.research_selected_matte.Get();
-      auto *rule_receipt = result.research_selected_matte_receipt.Get();
-      const bool fallback = candidate_matte == rule_matte && candidate_receipt == rule_receipt;
-      if (!fallback && (candidate_matte == rule_matte || candidate_receipt == rule_receipt)) {
-        error = "Raw model shared-warp draw has mismatched Rule and model bindings";
-        return false;
-      }
-      receipt_abi::words_t rule_words, candidate_words;
-      const auto token = result.publication.transaction_token;
-      ComPtr<ID3D11Buffer> rule_receipt_buffer;
-      if (!producer_stage_buffer(device_.Get(), rule_receipt, receipt_spec, rule_receipt_buffer) ||
-          !read_words(context, rule_receipt_buffer.Get(), rule_words) || rule_words[0u] != receipt_abi::tag ||
-          rule_words[1u] != receipt_abi::schema || rule_words[2u] != 3u || rule_words[3u] != 0u ||
-          rule_words[60u] != static_cast<std::uint32_t>(token) ||
-          rule_words[61u] != static_cast<std::uint32_t>(token >> 32u) || token == 0u ||
-          rule_words[62u] != receipt_abi::current_outline_algorithm || rule_words[63u] != 0u) {
-        error = "Raw model shared-warp draw lacks its exact current Rule authority";
-        return false;
-      }
-      if (fallback) {
-        candidate_words = rule_words;
-      } else {
-        auto expected = rule_words;
-        expected[2u] = 4u;
-        expected[62u] = 3u;
-        if (!read_words(context, receipt_buffer.Get(), candidate_words) || candidate_words != expected) {
-          error = "Raw model shared-warp receipt differs from its current Rule tuple";
-          return false;
-        }
-      }
-      const auto program = programs_.raw_model_completed_program();
-      if (!record_draw(context, ordinary, output, result, subtitle_constants, candidate_matte, candidate_receipt,
-                       raw_model_warp_, program, evidence, error)) {
-        return false;
-      }
-      if (evidence->selected != candidate_words || evidence->shared_warp_selected_receipt_header != 1u) {
-        error = "Raw model shared-warp prepare did not authenticate the selected draw pair";
-        return false;
-      }
-      return true;
-    }
-
-    bool record_reduced_raw_model(ID3D11DeviceContext *context, const platf::dxgi::host_sbs_v2_draw_command_t &ordinary,
-                                  ID3D11RenderTargetView *output, const models::depth_observation_views_t &result,
-                                  ID3D11Buffer *subtitle_constants, evidence_t &evidence, std::string &error) {
-      if (!programs_.raw_model_completed_ready()) {
-        error = "Reduced RawMatte draw has no typed shared-warp prepare";
-        return false;
-      }
-      const auto program = programs_.raw_model_completed_program();
-      if (!record_draw(context, ordinary, output, result, subtitle_constants, result.research_selected_matte.Get(),
-            result.research_selected_matte_receipt.Get(), raw_model_warp_, program, &evidence, error)) {
-        return false;
-      }
-      const auto &selected = evidence.selected;
-      const bool model = selected[2u] == 4u && selected[62u] == 3u;
-      const bool legacy = selected[2u] == 1u && selected[62u] == 1u;
-      if (selected[3u] != 0u || (!model && !legacy) || evidence.shared_warp_selected_receipt_header != 1u) {
-        error = "Reduced RawMatte draw did not bind a current model or current legacy pair";
-        return false;
-      }
-      return true;
+                         result.research_selected_matte_receipt.Get(), shared_warp_, programs_.direct_glyph_completed_program(),
+                         evidence, error);
     }
 
   private:
@@ -405,21 +261,21 @@ namespace sbs_bench::current_outline_qualification {
         draw.observe_bound_draw = &observer_t::observe;
       }
       {
-        models::research_current_outline_selected_matte_v2::scoped_receipt_t selected;
+        shared_warp::scoped_receipt_t selected;
         shared_warp::scoped_binding_t shared;
         if (!selected.bind(context, receipt) || !shared.bind(context, &views) || !platf::dxgi::record_host_sbs_v2_draw(context, draw) || (evidence && !observer.matched)) {
-          error = "current-outline qualification did not observe exact selected/shared-warp draw bindings";
+          error = "subtitle qualification did not observe exact selected/shared-warp draw bindings";
           return false;
         }
       }
       if (!evidence) return true; // Follow conversion adds no observer or diagnostic readback.
       evidence->bindings_observed = observer.matched;
       if (!read_words(context, receipt, evidence->selected) || !read_words(context, result.subtitle_contour_identity.Get(), evidence->contour) || !read_words(context, result.subtitle_condition_params.Get(), evidence->condition) || !read_words(context, result.shadow_state.Get(), evidence->state) || !read_words(context, draw.subtitle_constants, evidence->subtitle_constants) || !read_rows(context, views, *evidence)) {
-        error = "current-outline qualification cannot read its exact post-draw evidence";
+        error = "subtitle qualification cannot read its exact post-draw evidence";
         return false;
       }
       return true;
     }
   };
-}  // namespace sbs_bench::current_outline_qualification
+}  // namespace sbs_bench::subtitle_qualification
 #endif

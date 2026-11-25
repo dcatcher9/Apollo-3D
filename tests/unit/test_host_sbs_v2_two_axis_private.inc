@@ -56,7 +56,7 @@ TEST(HostSbsV2LiveWarpGpuTest, PrivateTwoAxisPinDistanceGeometry) {
     std::vector<float> base(W*H,-2.0f/W);
     if(kind=="mixed-base")for(UINT y=0u;y<H;++y)for(UINT x=0u;x<W;++x)
       base[y*W+x]=(0.01f*(int(x)-64)+0.8f*std::clamp(int(y)-16,-3,3))/W;
-    auto operands=make_current_outline_inputs(ui);operands.private_two_axis_ui_pin=true;
+    auto operands=make_selected_warp_inputs(ui);operands.private_two_axis_ui_pin=true;
     shared_ui_pin_diagnostics_t diagnostic;operands.shared_ui_pin_diagnostic_output=&diagnostic;
     std::vector<std::byte> pixels;
     ASSERT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT,8u,W,H,source.data(),base,base,state,{},pixels,error,W,H,{},&ui,nullptr,true,&operands))<<error;
@@ -103,7 +103,7 @@ TEST(HostSbsV2LiveWarpGpuTest, PrivateTwoAxisPinColourAndCurrentAuthority) {
     for(UINT y=ah/2u-3u;y<ah/2u+4u;++y)for(UINT x=aw/2u-5u;x<aw/2u+6u;++x) {
       ui.matte[y*aw+x]=1u;ui.snapshot[y*aw+x]={display,display,display,0x3c00u};source[(y+top)*W+x+left]={raw,raw,raw,0x3c00u};
     }
-    auto selected=make_current_outline_inputs(ui);selected.private_two_axis_ui_pin=true;
+    auto selected=make_selected_warp_inputs(ui);selected.private_two_axis_ui_pin=true;
     shared_ui_pin_diagnostics_t diagnostic;selected.shared_ui_pin_diagnostic_output=&diagnostic;
     std::vector<std::byte> actual,reference,ordinary;
     ASSERT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT,8u,W,H,source.data(),base,base,state,{},actual,error,W,H,geometry,&ui,nullptr,true,&selected))<<error;
@@ -138,8 +138,8 @@ TEST(HostSbsV2LiveWarpGpuTest, PrivateTwoAxisPinQueuedGuardRemainsCurrent) {
   const auto state=make_live_state(true,true);auto ui=make_subtitle_inputs(W,H,state,2.5f/W);
   ui.matte[8u*W+64u]=1u;ui.snapshot[8u*W+64u]={0x3c00u,0x3c00u,0x3c00u,0x3c00u};
   std::vector<rgba16_bits_t> source(W*H,{0x3400u,0x3400u,0x3400u,0x3c00u});source[8u*W+64u]=ui.snapshot[8u*W+64u];
-  const std::vector<float> base(W*H,-1.25f/W);auto selected=make_current_outline_inputs(ui);selected.private_two_axis_ui_pin=true;
-  const auto render=[&](live_v2_warp_fixture_t &renderer,const current_outline_inputs_t *operands) {
+  const std::vector<float> base(W*H,-1.25f/W);auto selected=make_selected_warp_inputs(ui);selected.private_two_axis_ui_pin=true;
+  const auto render=[&](live_v2_warp_fixture_t &renderer,const selected_warp_inputs_t *operands) {
     std::vector<std::byte> pixels;EXPECT_TRUE(renderer.render(DXGI_FORMAT_R16G16B16A16_FLOAT,8u,W,H,source.data(),base,base,state,{},pixels,error,W,H,{},&ui,nullptr,true,operands))<<error;return pixels;
   };
   const auto completed=render(fixture,&selected),identity=render(flat,nullptr);ASSERT_NE(completed,identity);
@@ -214,7 +214,7 @@ TEST(HostSbsV2LiveWarpGpuTest, PrivateTwoAxisPinKnownLayerComparison) {
         ui.snapshot=files::load<rgba16_bits_t>(bindings.at("snapshot"),std::size_t(ui.width)*ui.height);
         ui.matte=files::load<std::uint32_t>(bindings.at(mask_role=="control_mask"?"control_matte":"candidate_matte"),ui.snapshot.size());
         files::require(std::all_of(ui.matte.begin(),ui.matte.end(),[](auto v){return v<=1u;}),"Private two-axis mask must remain actual literal binary support");
-        auto selected=make_current_outline_inputs(ui);selected.matte=ui.matte;std::copy(receipt.begin(),receipt.end(),selected.receipt.begin());reference_ui=ui;
+        auto selected=make_selected_warp_inputs(ui);selected.matte=ui.matte;std::copy(receipt.begin(),receipt.end(),selected.receipt.begin());reference_ui=ui;
         for(bool two_axis:{false,true}) {
           const std::string name=mask_role+(two_axis?"_two_axis":"_row_only");auto operands=selected;
           operands.production_shared_ui_pin=!two_axis;operands.private_two_axis_ui_pin=two_axis;

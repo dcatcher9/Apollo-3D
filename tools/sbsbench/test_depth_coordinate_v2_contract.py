@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
-import contextlib
 import copy
 import hashlib
-import io
 import json
 import os
 import shutil
@@ -964,146 +962,48 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_generation_owns_every_production_hlsl_contract_copy(self):
+    def test_generation_owns_the_only_production_hlsl_contract_copy(self):
         contract = generator.load_contract()
-        for name, targets, expected in (
-                (generator.HLSL_TARGET.name, generator.HLSL_TARGETS,
-                 generator.render_hlsl(contract)),
-                (generator.HLSL_OCR_ASSERT_TARGET.name, generator.HLSL_OCR_ASSERT_TARGETS,
-                 generator.render_hlsl_ocr_assertions())):
-            with self.subTest(name=name):
-                self.assertEqual(set(generator.SHADER_ROOT.rglob(name)), set(targets))
-                for target in targets:
-                    self.assertEqual(target.read_text(encoding="utf-8"), expected, str(target))
+        for target, expected in (
+                (generator.HLSL_TARGET, generator.render_hlsl(contract)),
+                (generator.HLSL_OCR_ASSERT_TARGET, generator.render_hlsl_ocr_assertions())):
+            with self.subTest(name=target.name):
+                self.assertEqual(set(generator.SHADER_ROOT.rglob(target.name)), {target})
+                self.assertEqual(target.read_text(encoding="utf-8"), expected, str(target))
 
-    def test_generated_hlsl_check_rejects_drift_in_each_snapshot(self):
+    def test_generated_hlsl_check_rejects_drift_in_each_output(self):
         contract = generator.load_contract()
         hlsl = generator.render_hlsl(contract)
         assertions = generator.render_hlsl_ocr_assertions()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            targets = tuple(root / target.relative_to(generator.SHADER_ROOT)
-                            for target in generator.HLSL_TARGETS)
-            assertion_targets = tuple(root / target.relative_to(generator.SHADER_ROOT)
-                                      for target in generator.HLSL_OCR_ASSERT_TARGETS)
-            with mock.patch.object(generator, "HLSL_TARGETS", targets), \
-                    mock.patch.object(generator, "HLSL_OCR_ASSERT_TARGETS", assertion_targets):
+            target = root / generator.HLSL_TARGET.relative_to(generator.SHADER_ROOT)
+            assertion_target = root / generator.HLSL_OCR_ASSERT_TARGET.relative_to(generator.SHADER_ROOT)
+            with mock.patch.object(generator, "HLSL_TARGET", target), \
+                    mock.patch.object(generator, "HLSL_OCR_ASSERT_TARGET", assertion_target):
                 self.assertTrue(generator._write_hlsl_outputs(hlsl, assertions, False))
-                for target in (*targets, *assertion_targets):
-                    with self.subTest(target=str(target)), mock.patch("sys.stderr"):
-                        target.write_text("// stale generated contract\n", encoding="utf-8")
+                for output in (target, assertion_target):
+                    with self.subTest(target=str(output)), mock.patch("sys.stderr"):
+                        output.write_text("// stale generated contract\n", encoding="utf-8")
                         self.assertFalse(generator._write_hlsl_outputs(hlsl, assertions, True))
                         self.assertTrue(generator._write_hlsl_outputs(hlsl, assertions, False))
                         self.assertTrue(generator._write_hlsl_outputs(hlsl, assertions, True))
 
-    def test_current_outline_runtime_pins_cover_local_generated_includes(self):
-        self.assertTrue(generator._write_current_outline_runtime_pins(True))
+    def test_direct_glyph_source_pin_covers_its_own_shader_root(self):
+        self.assertTrue(generator._write_direct_glyph_source_pin(True))
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "directx"
-            shutil.copytree(generator.SHADER_ROOT / "current_outline", root / "current_outline")
-            header = Path(temporary) / generator.CURRENT_OUTLINE_RUNTIME_HEADER.name
-            header.write_bytes(generator.CURRENT_OUTLINE_RUNTIME_HEADER.read_bytes())
-            self.assertTrue(generator._write_current_outline_runtime_pins(True, root, header))
-            for variant in ("colour", "enclosure"):
-                with self.subTest(variant=variant), mock.patch("sys.stderr"):
-                    include = root / "current_outline" / variant / "include" / generator.HLSL_TARGET.name
-                    include.write_bytes(include.read_bytes() + b"\n// simulated contract drift\n")
-                    self.assertFalse(generator._write_current_outline_runtime_pins(True, root, header))
-                    self.assertTrue(generator._write_current_outline_runtime_pins(False, root, header))
-                    self.assertTrue(generator._write_current_outline_runtime_pins(True, root, header))
-
-    def test_physical_black_model_has_one_authority_and_checked_group_mirror(self):
-        owner = generator.PHYSICAL_BLACK_MODEL_SOURCE
-        mirrors = generator.PHYSICAL_BLACK_MODEL_MIRRORS
-        self.assertEqual(
-            set(generator.SHADER_ROOT.rglob(owner.name)), {owner, *mirrors})
-        self.assertTrue(generator._write_physical_black_model_mirrors(True))
-        for mirror in mirrors:
-            self.assertEqual(mirror.read_bytes(), owner.read_bytes())
-
-    def test_physical_black_model_mirror_rejects_drift_and_materializes_exact_bytes(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            owner = root / "enclosure" / "physical_black_model_shared.hlsl"
-            mirror = root / "outline" / owner.name
-            owner.parent.mkdir()
-            owner.write_bytes(b"// canonical CBC predicates\r\n#define MODEL 1\r\n")
-            with mock.patch.object(generator, "PHYSICAL_BLACK_MODEL_SOURCE", owner), \
-                    mock.patch.object(generator, "PHYSICAL_BLACK_MODEL_MIRRORS", (mirror,)):
-                with mock.patch("sys.stderr"):
-                    self.assertFalse(generator._write_physical_black_model_mirrors(True))
-                self.assertFalse(mirror.exists())
-                self.assertTrue(generator._write_physical_black_model_mirrors(False))
-                self.assertEqual(mirror.read_bytes(), owner.read_bytes())
-                mirror.write_bytes(mirror.read_bytes() + b"// unintended fork\n")
-                drifted = mirror.read_bytes()
-                with mock.patch("sys.stderr"):
-                    self.assertFalse(generator._write_physical_black_model_mirrors(True))
-                self.assertEqual(mirror.read_bytes(), drifted)
-                self.assertTrue(generator._write_physical_black_model_mirrors(False))
-                owner.write_bytes(b"// revised canonical predicates\n#define MODEL 2\n")
-                with mock.patch("sys.stderr"):
-                    self.assertFalse(generator._write_physical_black_model_mirrors(True))
-                self.assertTrue(generator._write_physical_black_model_mirrors(False))
-                self.assertEqual(mirror.read_bytes(), owner.read_bytes())
-                self.assertTrue(generator._write_physical_black_model_mirrors(True))
-
-    def test_current_stroke_math_has_one_owner_and_checked_group_mirrors(self):
-        owner = generator.CURRENT_STROKE_MATH_SOURCE
-        mirrors = generator.CURRENT_STROKE_MATH_TARGETS
-        self.assertEqual(set(generator.SHADER_ROOT.rglob(owner.name)), {owner, *mirrors})
-        self.assertTrue(generator._write_current_stroke_math_mirrors(True))
-        with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory) / "inside" / owner.name
-            mirror = Path(directory) / "hole" / owner.name
-            source.parent.mkdir()
-            source.write_bytes(b"// exact shared arithmetic\n")
-            with mock.patch.object(generator, "CURRENT_STROKE_MATH_SOURCE", source), \
-                    mock.patch.object(generator, "CURRENT_STROKE_MATH_TARGETS", (mirror,)), \
-                    contextlib.redirect_stderr(io.StringIO()):
-                self.assertFalse(generator._write_current_stroke_math_mirrors(True))
-                self.assertFalse(mirror.exists())
-                self.assertTrue(generator._write_current_stroke_math_mirrors(False))
-                mirror.write_bytes(b"// forked classifier\n")
-                self.assertFalse(generator._write_current_stroke_math_mirrors(True))
-                self.assertTrue(generator._write_current_stroke_math_mirrors(False))
-                self.assertEqual(mirror.read_bytes(), source.read_bytes())
-
-    def test_cbc_unit_state_has_one_owner_and_an_exact_hole_mirror(self):
-        owner = generator.CBC_UNIT_STATE_SOURCE
-        mirrors = generator.CBC_UNIT_STATE_MIRRORS
-        self.assertEqual(set(generator.SHADER_ROOT.rglob(owner.name)), {owner, *mirrors})
-        self.assertTrue(generator._write_cbc_unit_state_mirrors(True))
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            source, mirror = root / "owner.hlsl", root / "hole" / owner.name
-            expected = b"// canonical unit-state predicates\r\n#define UNIT 1\r\n"
-            source.write_bytes(expected)
-            with mock.patch.object(generator, "CBC_UNIT_STATE_SOURCE", source), \
-                    mock.patch.object(generator, "CBC_UNIT_STATE_MIRRORS", (mirror,)), \
-                    mock.patch("sys.stderr"):
-                self.assertFalse(generator._write_cbc_unit_state_mirrors(True))
-                self.assertTrue(generator._write_cbc_unit_state_mirrors(False))
-                self.assertEqual(mirror.read_bytes(), expected)
-                mirror.write_bytes(expected + b"// unauthorized fork\n")
-                self.assertFalse(generator._write_cbc_unit_state_mirrors(True))
-                self.assertTrue(generator._write_cbc_unit_state_mirrors(False))
-                self.assertEqual(mirror.read_bytes(), expected)
-
-    def test_current_background_runtime_pin_covers_its_source(self):
-        self.assertTrue(generator._write_current_background_runtime_pin(True))
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary) / "directx"
-            background = root / "current_outline" / "background"
-            shutil.copytree(generator.SHADER_ROOT / "current_outline" / "background", background)
-            header = Path(temporary) / generator.CURRENT_BACKGROUND_RUNTIME_HEADER.name
-            header.write_bytes(generator.CURRENT_BACKGROUND_RUNTIME_HEADER.read_bytes())
-            source = background / "host_sbs_selected_glyph_push_pull_bg_cs.hlsl"
-            source.write_bytes(source.read_bytes() + b"\n// simulated background drift\n")
+            audit_root = root / "direct_glyph_source"
+            shutil.copytree(generator.SHADER_ROOT / "direct_glyph_source", audit_root)
+            header = Path(temporary) / generator.DIRECT_GLYPH_SOURCE_HEADER.name
+            header.write_bytes(generator.DIRECT_GLYPH_SOURCE_HEADER.read_bytes())
+            self.assertTrue(generator._write_direct_glyph_source_pin(True, root, header))
+            source = audit_root / "direct_source_audit.hlsl"
+            source.write_bytes(source.read_bytes() + b"\n// simulated source audit drift\n")
             with mock.patch("sys.stderr"):
-                self.assertFalse(generator._write_current_background_runtime_pin(True, root, header))
-            self.assertTrue(generator._write_current_background_runtime_pin(False, root, header))
-            self.assertTrue(generator._write_current_background_runtime_pin(True, root, header))
+                self.assertFalse(generator._write_direct_glyph_source_pin(True, root, header))
+            self.assertTrue(generator._write_direct_glyph_source_pin(False, root, header))
+            self.assertTrue(generator._write_direct_glyph_source_pin(True, root, header))
 
     def test_host_sbs_identity_paragraph_matches_generated_contract(self):
         contract = generator.load_contract()
@@ -1445,18 +1345,14 @@ class GeneratedContractWriteTests(unittest.TestCase):
             manifest = root / "custom-manifest.json"
             manifest.write_text(manifest_text, encoding="utf-8", newline="\n")
             cpp = root / "view.h"
-            hlsl = (root / "base.hlsl", root / "private" / "view.hlsl")
-            assertions = (root / "assert.hlsl", root / "private" / "assert.hlsl")
+            hlsl = root / "base.hlsl"
+            assertions = root / "assert.hlsl"
             # Exercise the real refresh writer orchestration with temporary targets only.
             # Rendering/source authentication have separate tests; they do not belong to IO.
             replacements = {
-                "CPP_TARGET": cpp, "HLSL_TARGETS": hlsl, "HLSL_OCR_ASSERT_TARGETS": assertions,
+                "CPP_TARGET": cpp, "HLSL_TARGET": hlsl, "HLSL_OCR_ASSERT_TARGET": assertions,
                 "SHADER_MANIFEST": copy.deepcopy(generator.SHADER_MANIFEST),
-                "_write_physical_black_model_mirrors": lambda check: True,
-                "_write_cbc_unit_state_mirrors": lambda check: True,
-                "_write_current_stroke_math_mirrors": lambda check: True,
-                "_write_current_outline_runtime_pins": lambda check: True,
-                "_write_current_background_runtime_pin": lambda check: True,
+                "_write_direct_glyph_source_pin": lambda check: True,
                 "_write_shared_ui_warp_runtime_pin": lambda check: True,
                 "validate_renderer_source_closure_pins": lambda: None,
                 "load_contract": lambda *args, **kwargs: {},
@@ -1482,7 +1378,7 @@ class GeneratedContractWriteTests(unittest.TestCase):
                 shader_generator, "_write_utf8_if_changed", side_effect=write_temporary_output))
             refresh = ["--refresh-shader-identity", "--manifest", str(manifest)]
             self.assertEqual(generator.main(refresh), 0)
-            paths = (manifest, cpp, *hlsl, *assertions)
+            paths = (manifest, cpp, hlsl, assertions)
             expected = {path: path.read_bytes() for path in paths}
             for path in paths:
                 os.utime(path, ns=(1600000000000000000, 1600000000000000000))
@@ -1509,8 +1405,7 @@ class GeneratedContractWriteTests(unittest.TestCase):
                 return root / path.relative_to(REPO)
 
             runtime_headers = (
-                generator.CURRENT_OUTLINE_RUNTIME_HEADER,
-                generator.CURRENT_BACKGROUND_RUNTIME_HEADER,
+                generator.DIRECT_GLYPH_SOURCE_HEADER,
                 generator.CURRENT_SHARED_UI_WARP_RUNTIME_HEADER,
             )
             for path in (
@@ -1540,7 +1435,7 @@ class GeneratedContractWriteTests(unittest.TestCase):
             outputs = tuple(map(staged, (
                 generator.MANIFEST, shader_generator.MANIFEST, generator.CPP_TARGET,
                 shader_generator.CPP_TARGET, shader_generator.PYTHON_TARGET, shader_generator.DOC_TARGET,
-                *runtime_headers, *generator.HLSL_TARGETS, *generator.HLSL_OCR_ASSERT_TARGETS,
+                *runtime_headers, generator.HLSL_TARGET, generator.HLSL_OCR_ASSERT_TARGET,
             )))
             timestamp = 1600000000000000000
             for path in outputs:

@@ -82,143 +82,82 @@ long-form temporal behavior. Native raw/field/cache replay uses its own existing
 Host SBS has one adaptive zero/scale and subtitle UI-plane pipeline; the former experiment/mode
 selectors are rejected before launch.
 
-## Actual selected compositor qualification
+## Direct Glyph qualification
 
-Ordinary `run_eval.py` metric images retain the legacy native matte compositor. They do not
-qualify the live completed current-outline shared warp.
-Use the separate bounded qualification command to exercise those actual production programs,
-selected receipt, native pin-band owner and shared draw recorder:
+Ordinary `run_eval.py` metric images use only authenticated Base and pass no subtitle flag. They
+do not qualify the live subtitle route. The harness's Direct Glyph qualification is the only
+file-fed qualifier of that route. It runs the real estimator, Direct Glyph, the shared UI warp
+and its draw recorder on fixed sources. There is no Python launcher or validator for it; run the
+harness directly:
 
 ```powershell
-& $SbsbenchPython tools/sbsbench/qualify_current_outline.py `
-  --frames tools/sbsbench/clips/subtitle_cjk_highres_transitions `
-  --out cmake-build-relwithdebinfo/sbs_eval/current-outline-qualification
-
-# Independently recheck the saved evidence against the current sources and native binary.
-& $SbsbenchPython tools/sbsbench/qualify_current_outline.py --validate-only `
-  --frames tools/sbsbench/clips/subtitle_cjk_highres_transitions `
-  --out cmake-build-relwithdebinfo/sbs_eval/current-outline-qualification
+cmake-build-relwithdebinfo/sunshine.exe <conf> --sbs-bench `
+  --frames <frames-dir> --out <out-dir> --observation-timeline <timeline> `
+  --direct-glyph-qualification --direct-glyph-adaptive-context --direct-glyph-palette
 ```
 
 Build first and retain the build/test DLL `PATH` documented in [AGENTS.md](../../AGENTS.md).
-The launcher directly runs `sunshine.exe --sbs-bench --current-outline-qualification`; it does
-not rebuild. `--build-dir` selects another existing native build. Inputs must be 1..64 immutable
-SDR PNGs named `frame_<id>.png`, and output must be absent or empty. `--observation-timeline`
-binds explicit source clocks; otherwise `--fps NUM/DEN` authors a 30/1 cadence by default.
+Inputs must be 1..64 immutable SDR PNGs. The run requires an explicit observation timeline,
+ordinary evaluation artifacts and `--output-every 1`. It rejects follow mode, scene or render
+caches, replay inputs, simulated HDR, the application-text line policy and the other subtitle
+diagnostic protocols. `<out-dir>` must not already contain a `direct-glyph` directory.
 
-Add `--native-features` to capture CBC body, ownership and cover bits, and the Raw matte for mask
-model evaluation. `current_outline_native_features.json` binds the feature textures to the exact
-qualified draw and selected mask. Use `--validate-only --native-features` to verify a saved capture.
+The flags select the variant and the manifest schema:
 
-The reduced hybrid harness writes `current_outline_raw_matte_reduced.json` schema 3. When the GPU
-plans an active model observation, the manifest binds the exact current CBC body, selected bits,
-and cover bits to that draw's native band. Fresh OCR-empty and pre-authentication fallback frames
-carry null CBC fields. The half-context work validator uses each cover bit with its matching OCR
-rectangle, RawM support, and the trusted floor to reconstruct the compact scoring crop and check
-the recorded dispatch and published mask. The CBC planes also support replay of the model with
-its literal current inputs.
+| Flags after `--direct-glyph-qualification` | Schema | Variant |
+|---|---:|---|
+| none | 3 | Native tiles with the fixed OCR-core expansion |
+| `--direct-glyph-adaptive-context` | 4 | Adaptive context on large caption boxes |
+| `--direct-glyph-adaptive-context --direct-glyph-resolved-fringe` | 5 | Adaptive context with the resolved fringe strip |
+| `--direct-glyph-adaptive-context --direct-glyph-palette` | 6 | Live Host 3D and Convert Video: adaptive OCR work with the native palette decoder |
 
-Use `--ocr-midpoint-probe` to test a wider midpoint tolerance for independently horizontal
-video caption lines that span the reference center. Qualification records the probe mode.
-Pass the same flag when validating that capture.
+`--direct-glyph-palette` cannot be combined with `--direct-glyph-resolved-fringe`, and the fringe
+requires adaptive context. Harness `--follow` conversion always uses the live configuration and
+takes none of these flags.
 
-Use `--omit-foreground-edge` to capture the selected matte with optional foreground-edge
-recovery disabled. Use `--omit-stroke-coverage` to omit only the optional stroke-coverage
-group while retaining hole completion, foreground-edge recovery and trusted-inner publication.
-The options are mutually exclusive. Qualification records the requested omission and retains
-all current-outline shader availability checks. Pass the same flag when validating a saved
-ablation.
+The run writes `direct_glyph_qualification.json` atomically, with role
+`file-fed-actual-completed-direct-glyph`. It binds the executable, the copied
+`direct-glyph/observation.timeline`, the model checkpoint, ONNX and engine digests, the tile
+profile, and the plan, transport, prepare and source-audit shader closures. Each frame record
+binds its exact source snapshot, observation clock, transaction token, selected receipt, SCT and
+SCP words, the branch (`active`, `empty` or `legacy`), the work boxes, and the shared-warp draw
+record. Per-frame evidence lives under `direct-glyph/frame_<id>/`:
 
-Selected stereo images live separately in `current-outline/sbs_<id>.png`. The atomic
-`current_outline_qualification.json` binds each exact source snapshot, observation clock,
-publication receipt, selected/SCT/SCP/ParallaxState words, draw b3, native pin-band shape,
-per-draw serial, literal GPU row/header flags, output digest, executable and current source-closure
-pins. A pre-Draw observer verifies the actual shader, consumed t0..t7/t12..t14 and b2/b3/b6
-bindings, including the absence of background RGB/proof bindings. The unused t8 alias no longer
-participates in rendering or binding acceptance. The Python reader independently validates those
-joins and rejects stale owners, corrupt hashes, unknown fields and incomplete frame coverage.
-It reports selected-current, shared-warp and active-pin frame counts, including explicit unavailable
-fallbacks. This file-fed full-source check establishes renderer wiring and provenance; it does
+| File | Content |
+|---|---|
+| `sbs.png` | The actual selected stereo output |
+| `selected.u32` | The literal selected matte bound at t3, little-endian R32_UINT, native source crop |
+| `alpha8.u32` | The published alpha8 plane |
+| `work.u32` | The Direct Glyph Work header and line boxes |
+| `legacy-dispatch.u32` | The four-word fallback dispatch |
+| `ocr.u32` | The completed OCR8 record |
+| `source-audit.u32` | The source audit envelope of an active model observation |
+| `placement.u32`, `post-plan-work.u32` | Plan evidence, when the variant produces it |
+| `native-lines.u32` | Schema 6 only: eight 16-word native line records |
+
+This file-fed full-source check establishes renderer wiring and provenance. It does
 not establish live capture eligibility, window-region behavior, visual quality or live timing.
+No maintained script scores these masks against authored truth.
 Ordinary metric PNGs, schemas and scores remain separate.
 
-Qualification schema8 records `authenticated-ordinary-base-renderer-v1` for the ordinary metric
-artifacts, which now use only authenticated Base without an analytic subtitle selector. Selected
-shared output remains separate. Schema8 retains all thirteen composition closures and requires
-foreground-edge and trusted-inner shader availability at the root and every frame. Availability is
-not evidence of GPU execution. The shared renderer has no retired completed-pixel-shader field. Schemas1â€“7 remain
-read-only formats and never qualify the current rendering policy. Each original ordinary metric
-label is preserved; source, coordinate-contract and executable checks still apply, so older
-captures require their authenticated frozen contract/source reader. No captured evidence is retagged.
+Schema 3 binds the selected draw's `source-audit.u32` file for each active model observation.
+Empty and legacy observations have a null `source_audit` binding. Only this variant offers the
+original dense matte as the `legacy` fallback.
 
-Schema2 added a binding for
-`current-outline/selected_matte_<id>.u32`, the exact post-draw selected t3 input in little-endian
-binary R32_UINT form, with its native source rectangle and dimensions. The independent reader
-still accepts schema1 captures; they provide no literal-mask score evidence. The launcher writes
-`current_outline_mask_scores.json` automatically. To independently regenerate that diagnostic:
-
-```powershell
-& $SbsbenchPython tools/sbsbench/current_outline_mask_metrics.py `
-  --frames tools/sbsbench/clips/subtitle_cjk_highres_transitions `
-  --out cmake-build-relwithdebinfo/sbs_eval/current-outline-qualification
-```
-
-When optional `gt_subtitle_overlay_mask` exists, its exact frame set must match the source PNGs.
-Each truth image must be a source-sized 8-bit L PNG containing only 0/255. Declared tight-mask or
-sanitizer requirements in `meta.json` are enforced; required missing truth is rejected. The report
-binds current `meta.json` and tight-mask hashes, source snapshots, native qualification manifest,
-executable, authored observation timeline, reader/scorer implementations and numeric runtime.
-The literal crop occupies its source rectangle directly; source pixels outside that crop have
-zero selected protection. Full-source truth is never cropped to improve recall.
-
-Diagnostic precision, recall and IoU come from source-pixel confusion counts; aggregate ratios
-use pooled counts. Empty truth frames add their false-protected pixel count. Consecutive
-matched-size frames also measure mask toggles
-only where all three source RGB codes and the truth bit are unchanged; overall, glyph and
-background denominators are reported separately. These are fractions of eligible pixels, not
-rates per second. Missing masks or truth yield null scores, and every zero denominator yields
-null rather than an invented perfect result. These diagnostics have no release quality gate and
-do not establish final stereo RGB retention, recovered alpha, capture eligibility or live timing.
-
-The current native manifest is schema4. Each observation retains schema3's three small producer
-snapshots under `current-outline/producer-stages/frame_<id>/`: `cbc_meta.u32` (512 words),
-`raw_meta.u32` (512 words), and `f2_data.u32` (68,608 words). These are exact existing GPU buffer
-contents, about 272 KiB per observation, copied after the completed selected draw. The observer
-must return that same selected-M/receipt pair and completed frame/clock, with `pending_queued=false`.
-Native descriptor checks require full same-device buffers: structured CBC/Raw views have stride
-four and unknown format; F2 is a stride-zero RAW BUFFEREX view with R32_TYPELESS format. Subranges,
-oversized underlying buffers and role/type mismatches are rejected before the diagnostic copies.
-
-Schema3 records symbolic buffer roles, source owner, whole-view shapes, file hashes and the exact
-current composition source-closure pins. The reader verifies complete artifact coverage and the
-positive kind3 selector's existing current headers, embedded C24, source envelope and transaction
-token joins. It does not invent a physical-black model-bank proof or require a KNOWN model.
-Fallback bytes remain diagnostic and do not become current producer authority. These mutable
-aliases establish no rendering authority and do not alter mask scores. Schema1/2 reading remains
-supported, with producer-stage evidence unavailable there. Schema1--3 preserve their historical
-background proof/lease requirements. Schema4 replaces those fields and the background source pin
-with the shared warp's current source closure and an explicit `shared-ui-pin-band` draw record.
-Its native row flags may grant pin support only with current selected receipt, SCT and SCP authority;
-they do not prove semantic glyph completeness or a clean hidden background.
-
-The experimental `--current-outline-direct-glyph` route writes schema 3 in
-`current_outline_direct_glyph.json`. It binds the Direct source-audit shader closure and the
-selected draw's 104-word `source-audit.u32` file for each active model observation. Empty and
-legacy observations have a null `source_audit` binding.
-
-Add `--current-outline-direct-glyph-adaptive-context` to that command to test
-adaptive context on large caption boxes. This writes schema 4. For an active
-draw, `execution[3]` records the selected scale factor. `placement[10]` records
-zero for native tiles or the same factor for scaled tiles. In schema 4 the
+In schema 4, `execution[3]` of an active draw records the selected scale factor.
+`placement[10]` records
+zero for native tiles or the same factor for scaled tiles. The
 placement coordinates are on the selected model lattice, while the work boxes,
 selected mask, alpha and stereo output use their original native coordinates.
 
-Add `--current-outline-direct-glyph-resolved-fringe` alongside adaptive context
-to capture the Live and Convert publication policy in schema 5. Work and
+In schema 5, Work and
 Placement retain their schema 4 meanings. Outside Work, the selected mask and
 alpha can include pixels with alpha8 of at least 64 inside the bounded OCR strip,
-with every interpolation tap covered by the completed Placement. Omit this
-bench flag to compare both policies with the same executable and model.
+with every interpolation tap covered by the completed Placement.
+
+In schema 6, every frame is `active` or `empty`, `execution[3]` is `1` for an active draw, and
+the fallback dispatch is all zero. Each used line record repeats its work box and stays inside
+the native band.
 
 ## Subtitle diagnostics
 

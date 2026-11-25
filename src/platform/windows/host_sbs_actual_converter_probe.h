@@ -24,8 +24,7 @@ namespace platf::dxgi::actual_converter_probe_v1 {
   struct request_t {
     bool enabled = false, queued = false;
     bool packed_continuity = false; // Explicit idle/held-root/expiry regression; default scheduler unchanged.
-    bool background_observer = false; // Explicit V7 HDR qualification only; no default readbacks.
-    bool hdr_input = false; // Explicit three-PFM current-outline or shutter probe.
+    bool hdr_input = false; // Explicit three-PFM shutter or native P010 probe.
     bool native_p010 = false; // Private actual-converter/native NVENC lane.
     std::string p010_chroma_mode = "default"; // default, raster, no-uav; no live setting.
     bool explicit_adapter = false; // Private probe plan binding for SDR or HDR; absent SDR keeps its legacy default.
@@ -34,7 +33,6 @@ namespace platf::dxgi::actual_converter_probe_v1 {
     models::research_pending_current_colour_v1::configuration_t pending_current_colour {};
     // Explicit source-bridge activation only; native-image fixtures without DDup remain UNKNOWN.
     std::optional<models::subtitle_temporal_source_research_configuration_t> temporal_source_bridge;
-    std::optional<models::subtitle_selected_matte_research_configuration_t> selected_matte;
     std::array<frame_t, 3> frames; // immutable A, B, C inputs, NOT presence labels
     config::video_t::sbs_t settings;
     std::filesystem::path output;
@@ -47,20 +45,9 @@ namespace platf::dxgi::actual_converter_probe_v1 {
     std::uint64_t instance = 0;
     // This is a declared synthetic scheduling domain, NEVER actual Win32 video eligibility.
     bool borrow_matched_capture = false;
-    bool legacy_matte_always = true;
   };
   enum class event_e : std::uint32_t { admission, queue_begin, queued, ack, draw, packed_repeat, convert_end };
   // PRIVATE observed actual draw bindings; this carries no new UI/EMPTY authority.
-  struct background_draw_t {
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> field,proof;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> expected,source_c24;
-    bool queue_issued=false,role_matched=false,bound=false,ps_observed_after_draw=false;
-    std::uint64_t owner_serial=0,transport_serial=0,context_address=0,pixel_shader_address=0;
-    std::array<std::uint64_t,4> colour_key{};
-    std::array<std::uint64_t,7> actual_role_pointers{};
-    std::array<std::uint32_t,4> analysis_shape{};
-    std::string pixel_shader_closure;
-  };
   struct shared_warp_draw_t {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> weights, field, rows;
     Microsoft::WRL::ComPtr<ID3D11Buffer> geometry;
@@ -68,7 +55,7 @@ namespace platf::dxgi::actual_converter_probe_v1 {
     std::uint64_t serial=0u,pixel_shader_address=0u;
     std::array<std::uint32_t,4u> shape{};
     std::string source_closure;
-    std::string_view raw_model_prepare_source_closure;
+    std::string_view direct_glyph_prepare_source_closure;
   };
   struct event_t {
     event_e kind {};
@@ -114,16 +101,7 @@ namespace platf::dxgi::actual_converter_probe_v1 {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> current_input;
     // b2,b3,b5,raw,args,depthCB,sourceRegionCB,contourCB. Export ACTUAL GetDesc byte lengths.
     std::array<Microsoft::WRL::ComPtr<ID3D11Buffer>, 8> buffers;
-    // Selected-sidecar observer contract, appended; original views/buffers keep their roles.
-    // selected_views: M,receipt,actualDrawM,baseBody,baseM,numeric32,P,S,T_M,T_receipt,Frame256.
-    std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>,11> selected_views;
-    // Diagnostic references only; the recorder snapshots before the next queue.
-    std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>,12> current_outline_stages;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> selected_contour_constants;
-    bool selected_draw=false,selected_baseline_current=false,selected_temporal_commands=false,selected_source_certificate_valid=false;
-    std::uint64_t actual_draw_selected_receipt_address=0u;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> packed;
-    background_draw_t background;
     shared_warp_draw_t shared_warp;
   };
   struct observer_t {
@@ -134,17 +112,5 @@ namespace platf::dxgi::actual_converter_probe_v1 {
 }
 namespace platf::dxgi::pending_current_colour_probe_v1 {
   int run(const actual_converter_probe_v1::request_t &request,std::string &error) noexcept;
-}
-#endif
-
-// PRIVATE fixed-six sequence protocol. The original three-source request and scheduler above
-// remain unchanged. No authored P/S/OCR/C24 or draw-mask input is accepted here.
-#ifdef _WIN32
-namespace platf::dxgi::actual_converter_probe_v1 {
-  struct sequence6_request_t {
-    request_t common;
-    std::array<frame_t,6> frames;
-  };
-  int run_sequence6(const sequence6_request_t &,std::string &error) noexcept;
 }
 #endif

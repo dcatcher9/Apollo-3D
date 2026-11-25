@@ -75,8 +75,9 @@
   #include "prod_zipdepth_convex2x.h"
   #include "sbs_bench_async_caption_probe_driver.h"
   #include "sbs_bench_current_cue_pipeline.h"
-  #include "sbs_bench_current_outline_qualification.h"
-  #include "sbs_bench_raw_matte_gpu.h"
+  #include "host_sbs_direct_glyph_publication_gpu.h"
+  #include "host_sbs_direct_glyph_source_programs.h"
+  #include "sbs_bench_subtitle_qualification.h"
   #include "sbs_bench_depth_coordinate_v2.h"
   #include "sbs_bench_pre_unmap_feasibility.h"
   #include "sbs_perf.h"
@@ -1472,7 +1473,7 @@ namespace sbs_bench {
       return succeeded;
     }
 
-    bool export_raw_matte_texture(ID3D11Device *device, ID3D11DeviceContext *context, ID3D11ShaderResourceView *view,
+    bool export_native_band_texture(ID3D11Device *device, ID3D11DeviceContext *context, ID3D11ShaderResourceView *view,
                                   DXGI_FORMAT format, const char *encoding, const fs::path &directory,
                                   const fs::path &relative, std::array<UINT, 4u> rect,
                                   ComPtr<ID3D11Texture2D> &staging, nlohmann::json &output) {
@@ -3333,20 +3334,12 @@ namespace sbs_bench {
       // This opt-in experiment never supplies the rendered subtitle mask.
       bool subtitle_cohort_research = false;
       bool subtitle_inner_colour_research = false;
-      // Separate actual selected-compositor sidecars; ordinary metric images retain their
-      // existing renderer and attestation until the evaluator contract is deliberately migrated.
-      bool current_outline_qualification = false;
-      bool current_outline_native_features = false;
-      bool current_outline_weak_aa = false;
-      std::string current_outline_raw_matte;
-      std::string current_outline_raw_matte_reduced;
-      bool current_outline_direct_glyph = false;
-      bool current_outline_direct_glyph_adaptive_context = false;
-      bool current_outline_direct_glyph_resolved_fringe = false;
-      bool current_outline_direct_glyph_palette = false;
-      bool current_outline_ocr_midpoint_probe = false;
-      bool current_outline_omit_foreground_edge = false;
-      bool current_outline_omit_stroke_coverage = false;
+      // Separate actual Direct Glyph subtitle sidecars; ordinary metric images retain the Base
+      // renderer and its attestation.
+      bool direct_glyph_qualification = false;
+      bool direct_glyph_adaptive_context = false;
+      bool direct_glyph_resolved_fringe = false;
+      bool direct_glyph_palette = false;
       // Private bounded real-PFM export. Copies existing completed operands; never renders a
       // replacement mask or reconstructs a publication, contour CB, or final dispatch buffer.
       bool pfm_joined_diagnostics = false;
@@ -3420,64 +3413,18 @@ namespace sbs_bench {
           o.subtitle_cohort_research = true;
         } else if (a == "--subtitle-inner-colour-research") {
           o.subtitle_inner_colour_research = true;
-        } else if (a == "--current-outline-qualification") {
-          if (o.current_outline_qualification) {
-            return false;
-          }
-          o.current_outline_qualification = true;
-        } else if (a == "--current-outline-native-features") {
-          if (o.current_outline_native_features) {
-            return false;
-          }
-          o.current_outline_native_features = true;
-        } else if (a == "--current-outline-weak-aa") {
-          if (o.current_outline_weak_aa) {
-            return false;
-          }
-          o.current_outline_weak_aa = true;
-        } else if (a == "--current-outline-raw-matte") {
-          if (!o.current_outline_raw_matte.empty()) {
-            return false;
-          }
-          o.current_outline_raw_matte = next("--current-outline-raw-matte");
-          if (o.current_outline_raw_matte.empty()) {
-            return false;
-          }
-        } else if (a == "--current-outline-raw-matte-reduced") {
-          if (!o.current_outline_raw_matte_reduced.empty()) {
-            return false;
-          }
-          o.current_outline_raw_matte_reduced = next("--current-outline-raw-matte-reduced");
-          if (o.current_outline_raw_matte_reduced.empty()) {
-            return false;
-          }
-        } else if (a == "--current-outline-direct-glyph") {
-          if (o.current_outline_direct_glyph) return false;
-          o.current_outline_direct_glyph = true;
-        } else if (a == "--current-outline-direct-glyph-adaptive-context") {
-          if (o.current_outline_direct_glyph_adaptive_context) return false;
-          o.current_outline_direct_glyph_adaptive_context = true;
-        } else if (a == "--current-outline-direct-glyph-resolved-fringe") {
-          if (o.current_outline_direct_glyph_resolved_fringe) return false;
-          o.current_outline_direct_glyph_resolved_fringe = true;
-        } else if (a == "--current-outline-direct-glyph-palette") {
-          if (o.current_outline_direct_glyph_palette) return false;
-          o.current_outline_direct_glyph_palette = true;
-        } else if (a == "--current-outline-ocr-midpoint-probe") {
-          if (o.current_outline_ocr_midpoint_probe) {
-            return false;
-          }
-          o.current_outline_ocr_midpoint_probe = true;
-        } else if (a == "--current-outline-omit-foreground-edge") {
-          if (o.current_outline_omit_foreground_edge) {
-            return false;
-          }
-          o.current_outline_omit_foreground_edge = true;
-        } else if (a == "--current-outline-omit-stroke-coverage") {
-          if (o.current_outline_omit_stroke_coverage) {
-            return false;
-          }
-          o.current_outline_omit_stroke_coverage = true;
+        } else if (a == "--direct-glyph-qualification") {
+          if (o.direct_glyph_qualification) return false;
+          o.direct_glyph_qualification = true;
+        } else if (a == "--direct-glyph-adaptive-context") {
+          if (o.direct_glyph_adaptive_context) return false;
+          o.direct_glyph_adaptive_context = true;
+        } else if (a == "--direct-glyph-resolved-fringe") {
+          if (o.direct_glyph_resolved_fringe) return false;
+          o.direct_glyph_resolved_fringe = true;
+        } else if (a == "--direct-glyph-palette") {
+          if (o.direct_glyph_palette) return false;
+          o.direct_glyph_palette = true;
         } else if (a == "--pfm-joined-diagnostics") {
           o.pfm_joined_diagnostics = true;
         } else if (a == "--subtitle-conditioning-live-policy") {
@@ -3579,61 +3526,24 @@ namespace sbs_bench {
     }
 
     bool validate_opts(const opts &o) {
-      if (o.current_outline_direct_glyph_palette &&
-          (!o.current_outline_direct_glyph || o.current_outline_direct_glyph_resolved_fringe)) {
-        BOOST_LOG(error) << "sbs-bench: native palette qualification requires Direct Glyph and the original detector caps";
+      if (o.direct_glyph_palette && (!o.direct_glyph_qualification || o.direct_glyph_resolved_fringe)) {
+        BOOST_LOG(error) << "sbs-bench: native palette qualification requires --direct-glyph-qualification and the original detector caps";
         return false;
       }
-      if (o.current_outline_direct_glyph_adaptive_context && !o.current_outline_direct_glyph) {
-        BOOST_LOG(error) << "sbs-bench: adaptive glyph context requires --current-outline-direct-glyph";
+      if (o.direct_glyph_adaptive_context && !o.direct_glyph_qualification) {
+        BOOST_LOG(error) << "sbs-bench: adaptive glyph context requires --direct-glyph-qualification";
         return false;
       }
-      if (o.current_outline_direct_glyph_resolved_fringe && !o.current_outline_direct_glyph_adaptive_context) {
-        BOOST_LOG(error) << "sbs-bench: glyph fringe requires --current-outline-direct-glyph-adaptive-context";
+      if (o.direct_glyph_resolved_fringe && !o.direct_glyph_adaptive_context) {
+        BOOST_LOG(error) << "sbs-bench: glyph fringe requires --direct-glyph-adaptive-context";
         return false;
       }
-      if ((o.current_outline_direct_glyph || !o.current_outline_raw_matte_reduced.empty()) &&
-          (!o.current_outline_qualification || !o.current_outline_raw_matte.empty() ||
-           (o.current_outline_direct_glyph && !o.current_outline_raw_matte_reduced.empty()) ||
-           o.current_outline_weak_aa || o.current_outline_native_features ||
-           o.current_outline_omit_foreground_edge || o.current_outline_omit_stroke_coverage ||
-           o.current_outline_ocr_midpoint_probe || o.subtitle_application_text)) {
-        BOOST_LOG(error) << "sbs-bench: one model route requires canonical file-fed outline qualification";
-        return false;
-      }
-      if (!o.current_outline_raw_matte.empty() &&
-          (!o.current_outline_qualification || !o.current_outline_weak_aa || !o.current_outline_native_features)) {
-        BOOST_LOG(error) << "sbs-bench: --current-outline-raw-matte requires current-outline qualification, native features and weak-AA facts";
-        return false;
-      }
-      if (o.current_outline_weak_aa &&
-          (!o.current_outline_qualification || o.subtitle_application_text || o.current_outline_ocr_midpoint_probe ||
-           o.current_outline_omit_foreground_edge || o.current_outline_omit_stroke_coverage)) {
-        BOOST_LOG(error) << "sbs-bench: --current-outline-weak-aa requires unmodified video caption qualification";
-        return false;
-      }
-      if (o.current_outline_ocr_midpoint_probe && (!o.current_outline_qualification || o.subtitle_application_text)) {
-        BOOST_LOG(error) << "sbs-bench: --current-outline-ocr-midpoint-probe requires video caption qualification";
-        return false;
-      }
-      if (o.current_outline_native_features && !o.current_outline_qualification) {
-        BOOST_LOG(error) << "sbs-bench: --current-outline-native-features requires --current-outline-qualification";
-        return false;
-      }
-      if (o.current_outline_omit_foreground_edge && o.current_outline_omit_stroke_coverage) {
-        BOOST_LOG(error) << "sbs-bench: --current-outline-omit-foreground-edge and --current-outline-omit-stroke-coverage are mutually exclusive";
-        return false;
-      }
-      if (o.current_outline_omit_foreground_edge && !o.current_outline_qualification) {
-        BOOST_LOG(error) << "sbs-bench: --current-outline-omit-foreground-edge requires --current-outline-qualification";
-        return false;
-      }
-      if (o.current_outline_omit_stroke_coverage && !o.current_outline_qualification) {
-        BOOST_LOG(error) << "sbs-bench: --current-outline-omit-stroke-coverage requires --current-outline-qualification";
+      if (o.direct_glyph_qualification && o.subtitle_application_text) {
+        BOOST_LOG(error) << "sbs-bench: --direct-glyph-qualification requires video caption qualification";
         return false;
       }
       if (!o.capabilities.empty()) {
-        if (!o.frames.empty() || !o.out.empty() || o.subtitle_plane_diagnostic_ranges || o.subtitle_plane_diagnostic_render_selected || o.ocr_working_diagnostics || o.subtitle_cohort_research || o.subtitle_inner_colour_research || o.pfm_joined_diagnostics || o.current_outline_qualification) {
+        if (!o.frames.empty() || !o.out.empty() || o.subtitle_plane_diagnostic_ranges || o.subtitle_plane_diagnostic_render_selected || o.ocr_working_diagnostics || o.subtitle_cohort_research || o.subtitle_inner_colour_research || o.pfm_joined_diagnostics || o.direct_glyph_qualification) {
           BOOST_LOG(error) << "sbs-bench: --capabilities is a standalone query";
           return false;
         }
@@ -3650,8 +3560,8 @@ namespace sbs_bench {
       const unsigned direct_geometry_input_count =
         (!o.direct_parallax_root.empty() ? 1u : 0u) +
         (!o.depth_coordinate_v2_manifest.empty() ? 1u : 0u);
-      if (o.current_outline_qualification && (o.observation_timeline.empty() || o.follow || !o.scene_cache.empty() || !o.render_cache.empty() || !o.scene_plan.empty() || direct_geometry_input_count != 0u || o.device_conditional_replay || o.device_conditional_replay_control || o.simulate_hdr || o.artifacts != artifact_mode_e::evaluation || o.output_every != 1 || o.subtitle_plane_diagnostics || o.ocr_working_diagnostics || o.subtitle_cohort_research || o.subtitle_inner_colour_research || o.pfm_joined_diagnostics || !o.joined_completion_probe.empty())) {
-        BOOST_LOG(error) << "sbs-bench: --current-outline-qualification requires ordinary SDR evaluation, "
+      if (o.direct_glyph_qualification && (o.observation_timeline.empty() || o.follow || !o.scene_cache.empty() || !o.render_cache.empty() || !o.scene_plan.empty() || direct_geometry_input_count != 0u || o.device_conditional_replay || o.device_conditional_replay_control || o.simulate_hdr || o.artifacts != artifact_mode_e::evaluation || o.output_every != 1 || o.subtitle_plane_diagnostics || o.ocr_working_diagnostics || o.subtitle_cohort_research || o.subtitle_inner_colour_research || o.pfm_joined_diagnostics || !o.joined_completion_probe.empty())) {
+        BOOST_LOG(error) << "sbs-bench: --direct-glyph-qualification requires ordinary SDR evaluation, "
                             "an explicit timeline, cadence1, and no replay/cache/follow/other diagnostic protocol";
         return false;
       }
@@ -3984,20 +3894,21 @@ namespace sbs_bench {
     }
 
     bool private_hdr_probe=false;
-    bool private_fixed6_sdr_probe=false;
     if (!o.joined_completion_probe.empty()) {
+      bool removed_probe_request=false;
       try {
         std::ifstream f(o.joined_completion_probe,std::ios::binary);
         const auto p=nlohmann::json::parse(f);
         const auto kind = p.value("probe_kind", std::string {});
+        removed_probe_request = kind == "actual-converter-current-outline-hdr-v1" || kind == "actual-converter-current-outline-sequence6-sdr-v1" ||
+          p.contains("selected_matte") || p.contains("require_actual_push_pull_background");
         private_hdr_probe = p.value("source_transfer", std::string {}) == "scrgb_hdr" && !p.value("queue_enabled", true) &&
-          (kind == "actual-converter-shutter-hdr-v1" || kind == "actual-converter-native-p010-v1" ||
-           (kind == "actual-converter-current-outline-hdr-v1" &&
-            p.contains("selected_matte") && p.at("selected_matte").value("current_outline", false)));
-        private_fixed6_sdr_probe=p.value("probe_kind",std::string{})=="actual-converter-current-outline-sequence6-sdr-v1" &&
-          p.value("source_transfer",std::string{})=="encoded-srgb" && !p.value("queue_enabled",true) &&
-          p.contains("selected_matte") && p.at("selected_matte").value("current_outline",false);
-      } catch (...) { private_hdr_probe=false; private_fixed6_sdr_probe=false; }
+          (kind == "actual-converter-shutter-hdr-v1" || kind == "actual-converter-native-p010-v1");
+      } catch (...) { private_hdr_probe=false; }
+      if (removed_probe_request) {
+        BOOST_LOG(error) << "sbs-bench: probe plan requests the removed selected-matte converter probe (probe kinds actual-converter-current-outline-*, keys selected_matte and require_actual_push_pull_background)";
+        return 7;
+      }
     }
     // Evaluation keeps its established WIC raster contract. Whole-clip adaptive/conversion modes
     // additionally accept strict linear-scRGB PFM frames. A clip is one format family throughout:
@@ -4076,11 +3987,11 @@ namespace sbs_bench {
                        << " frames in " << o.frames;
       return 4;
     }
-    if (o.current_outline_qualification && (frames.empty() || frames.size() > 64u || pfm_input || sdr_raster_format != "png")) {
-      BOOST_LOG(error) << "sbs-bench: current-outline qualification requires 1..64 immutable SDR PNG sources";
+    if (o.direct_glyph_qualification && (frames.empty() || frames.size() > 64u || pfm_input || sdr_raster_format != "png")) {
+      BOOST_LOG(error) << "sbs-bench: Direct Glyph qualification requires 1..64 immutable SDR PNG sources";
       return 4;
     }
-    if (!o.joined_completion_probe.empty() && (frames.size() != (private_fixed6_sdr_probe?6u:3u) ||
+    if (!o.joined_completion_probe.empty() && (frames.size() != 3u ||
         (pfm_input ? !private_hdr_probe : sdr_raster_format != "png"))) {
       BOOST_LOG(error) << "sbs-bench: private joined probe requires immutable SDR PNG or explicitly declared HDR PFM sources";
       return 4;
@@ -4131,10 +4042,10 @@ namespace sbs_bench {
       BOOST_LOG(error) << "sbs-bench: cannot create output directory " << o.out;
       return 4;
     }
-    if (o.current_outline_qualification) {
-      const auto directory = fs::path(o.out) / "current-outline";
+    if (o.direct_glyph_qualification) {
+      const auto directory = fs::path(o.out) / "direct-glyph";
       if (fs::exists(directory, ec) || ec || !fs::create_directory(directory, ec) || ec) {
-        BOOST_LOG(error) << "sbs-bench: current-outline qualification requires a fresh sidecar directory";
+        BOOST_LOG(error) << "sbs-bench: Direct Glyph qualification requires a fresh sidecar directory";
         return 4;
       }
     }
@@ -4205,62 +4116,10 @@ namespace sbs_bench {
         if (!f) { BOOST_LOG(error) << "sbs-bench: converter probe plan unavailable"; return 7; }
         const std::string bytes((std::istreambuf_iterator<char>(f)),std::istreambuf_iterator<char>());
         const auto plan=nlohmann::json::parse(bytes);
-        if (plan.value("probe_kind",std::string{})=="actual-converter-current-outline-sequence6-sdr-v1") {
-          if(plan.at("schema")!=1 || plan.at("context_provider")!="synthetic-video-scheduling-only" ||
-             frames.size()!=6 || observation_timestamps.size()!=6 || plan.at("sources").size()!=6 ||
-             pfm_input || plan.at("queue_enabled").get<bool>() || !plan.contains("required_adapter") ||
-             plan.value("source_transfer",std::string{})!="encoded-srgb") {
-            BOOST_LOG(error)<<"sbs-bench: invalid fixed-six SDR converter protocol";return 7;
-          }
-          platf::dxgi::actual_converter_probe_v1::sequence6_request_t sequence;
-          auto &request=sequence.common;request.enabled=true;request.queued=false;request.hdr_input=false;
-          request.explicit_adapter=true;request.settings=sbs_cfg;request.output=o.out;
-          const auto &adapter=plan.at("required_adapter");
-          request.hdr_adapter_luid_low=adapter.at("luid_low").get<std::uint32_t>();
-          request.hdr_adapter_luid_high=adapter.at("luid_high").get<std::int32_t>();
-          request.hdr_adapter_vendor_id=adapter.at("vendor_id").get<std::uint32_t>();
-          request.hdr_adapter_device_id=adapter.at("device_id").get<std::uint32_t>();
-          const auto &source_binding=plan.at("source_plan");
-          const auto source_plan_path=source_binding.at("path").get<std::string>();
-          if(source_binding.at("sha256")!="63cd12dabcc38a9f538aa087907e2aa4534b5148efa1a02d29ca75b502bd072d" ||
-             models::file_sha256_hex(source_plan_path)!=source_binding.at("sha256").get<std::string>()) {
-            BOOST_LOG(error)<<"sbs-bench: fixed-six original source contract mismatch";return 7;
-          }
-          std::ifstream source_plan_file(source_plan_path);nlohmann::json source_plan;source_plan_file>>source_plan;
-          if(!source_plan_file || source_plan.at("frames").size()!=6u) {BOOST_LOG(error)<<"sbs-bench: fixed-six source contract unavailable";return 7;}
-          const auto &t=plan.at("selected_matte");models::subtitle_selected_matte_research_configuration_t cfg;
-          if(!t.at("current_outline").get<bool>() || t.contains("current_outline_raw_matte_reduced_shader_root") ||
-             plan.contains("temporal_source_bridge") ||
-             plan.value("require_actual_push_pull_background",false)) {
-            BOOST_LOG(error)<<"sbs-bench: fixed-six requires current outline without other probe actors";return 7;
-          }
-          cfg.current_outline=true;cfg.current_outline_shader_root=t.at("current_outline_shader_root").get<std::string>();
-          cfg.selector_shader_root=t.at("selector_shader_root").get<std::string>();
-          cfg.selector_source_closure_sha256=t.at("selector_source_closure_sha256").get<std::string>();
-          request.selected_matte=cfg;
-          for(std::size_t i=0;i<6;++i) {
-            const auto digest=models::file_sha256_hex(frames[i]);
-            if(digest.empty() || digest!=plan.at("sources").at(i).at("sha256").get<std::string>() ||
-               digest!=source_plan.at("frames").at(i).at("source").at("sha256").get<std::string>() ||
-               observation_timestamps[i]!=plan.at("sources").at(i).at("declared_timeline_us").get<std::uint64_t>() ||
-               observation_timestamps[i]!=source_plan.at("frames").at(i).at("time_us").get<std::uint64_t>()) {
-              BOOST_LOG(error)<<"sbs-bench: fixed-six immutable source/order/timeline mismatch";return 7;
-            }
-            rgba_image image;if(!load_png(frames[i],image)) {BOOST_LOG(error)<<"sbs-bench: fixed-six PNG decode failed";return 7;}
-            auto &f=sequence.frames[i];f.width=image.w;f.height=image.h;f.bgra=std::move(image.bgra);
-            f.source_file_sha256=digest;f.declared_timeline_us=observation_timestamps[i];
-          }
-          // This is an actual-converter functional sequence. Its clocks are created natively;
-          // source timeline values above remain declarations, never fabricated model clocks.
-          sbs_perf::set_enabled(false);std::string probe_error;
-          const int code=platf::dxgi::actual_converter_probe_v1::run_sequence6(sequence,probe_error);
-          if(code)BOOST_LOG(error)<<"sbs-bench: actual fixed-six converter probe: "<<probe_error;
-          return code;
-        }
         const auto probe_kind = plan.value("probe_kind", std::string {});
         const bool shutter_hdr = probe_kind == "actual-converter-shutter-hdr-v1";
         const bool native_p010 = probe_kind == "actual-converter-native-p010-v1";
-        if (probe_kind=="actual-converter-rgb-v1" || probe_kind=="actual-converter-pending-current-colour-v1" || probe_kind=="actual-converter-current-outline-hdr-v1" || probe_kind=="actual-converter-packed-continuity-v1" || shutter_hdr || native_p010) {
+        if (probe_kind=="actual-converter-rgb-v1" || probe_kind=="actual-converter-pending-current-colour-v1" || probe_kind=="actual-converter-packed-continuity-v1" || shutter_hdr || native_p010) {
           if (plan.at("schema")!=1 || plan.at("context_provider")!="synthetic-video-scheduling-only" ||
               frames.size()!=3 || observation_timestamps.size()!=3 || plan.at("sources").size()!=3) {
             BOOST_LOG(error) << "sbs-bench: invalid actual-converter protocol"; return 7;
@@ -4286,11 +4145,11 @@ namespace sbs_bench {
             request.hdr_adapter_device_id=adapter.at("device_id").get<std::uint32_t>();
           }
           if (pfm_input != request.hdr_input || (request.hdr_input && request.queued) ||
-              ((shutter_hdr || native_p010) && (!pfm_input || plan.contains("selected_matte") || plan.contains("temporal_source_bridge")))) {
+              ((shutter_hdr || native_p010) && (!pfm_input || plan.contains("temporal_source_bridge")))) {
             BOOST_LOG(error) << "sbs-bench: unsupported private HDR probe declaration";
             return 7;
           }
-          request.settings=sbs_cfg;request.output=o.out;request.background_observer=plan.value("require_actual_push_pull_background",false);
+          request.settings=sbs_cfg;request.output=o.out;
           const bool pending_colour=probe_kind=="actual-converter-pending-current-colour-v1";
           if(plan.contains("temporal_source_bridge")) {
             const auto &t=plan.at("temporal_source_bridge");models::subtitle_temporal_source_research_configuration_t cfg;
@@ -4298,22 +4157,6 @@ namespace sbs_bench {
             cfg.frame_shader_root=t.at("frame_shader_root").get<std::string>();cfg.frame_source_closure_sha256=t.at("frame_source_closure_sha256").get<std::string>();
             cfg.recorded_execution=t.value("recorded_execution",true);request.temporal_source_bridge=cfg;
           }
-          if(plan.contains("selected_matte")) {
-            const auto &t=plan.at("selected_matte");models::subtitle_selected_matte_research_configuration_t cfg;
-            cfg.current_outline=t.value("current_outline",false);
-            cfg.current_outline_shader_root=t.value("current_outline_shader_root",std::string{});
-            cfg.selector_shader_root=t.at("selector_shader_root").get<std::string>();cfg.selector_source_closure_sha256=t.at("selector_source_closure_sha256").get<std::string>();
-            if(!cfg.current_outline) {BOOST_LOG(error)<<"sbs-bench: retired literal selected-matte renderer is unsupported";return 7;}
-            if (t.contains("current_outline_raw_matte_reduced_shader_root")) {
-              cfg.current_outline_raw_matte_reduced_shader_root = t.at("current_outline_raw_matte_reduced_shader_root").get<std::string>();
-              if (cfg.current_outline_raw_matte_reduced_shader_root.empty() || request.queued || pending_colour) {
-                BOOST_LOG(error) << "sbs-bench: RawMatte requires a shader root and the completed converter probe";
-                return 7;
-              }
-            }
-            request.selected_matte=cfg;
-          }
-          if(request.background_observer&&(!request.hdr_input||request.queued||!request.selected_matte||!request.selected_matte->current_outline)){BOOST_LOG(error)<<"sbs-bench: BGobserver requires explicit completed HDR currentoutline";return 7;}
           if(pending_colour){const auto &candidate=plan.at("pending_current_colour");request.pending_current_colour.enabled=candidate.at("enabled").get<bool>();request.pending_current_colour.shader_root=candidate.at("shader_root").get<std::string>();request.pending_current_colour.exact_source_closure=candidate.at("source_closure_sha256").get<std::string>();}
 
           for (std::size_t i=0;i<3;++i) {
@@ -4703,10 +4546,7 @@ namespace sbs_bench {
     std::unique_ptr<models::video_depth_estimator> estimator;
     const bool conversion_subtitle_model = transport && o.artifacts == artifact_mode_e::conversion;
     if (!replay_mode && !depth_coordinate_v2_gpu_mode) {
-      const bool reduced_outline = !o.current_outline_raw_matte_reduced.empty() || o.current_outline_direct_glyph;
-      const bool live_outline_work =
-        reduced_outline || conversion_subtitle_model ||
-        (o.current_outline_qualification && o.subtitle_conditioning_live_policy);
+      const bool live_subtitle_work = o.direct_glyph_qualification || o.follow || conversion_subtitle_model;
       using legacy_matte_e = models::video_depth_estimator::subtitle_legacy_matte_e;
       estimator = std::make_unique<models::video_depth_estimator>(
         dev,
@@ -4715,7 +4555,7 @@ namespace sbs_bench {
         sbs_cfg,
         model,
         models::video_depth_estimator::normalized_depth_diagnostics_e::enabled,
-        live_outline_work ? legacy_matte_e::on_demand : legacy_matte_e::always
+        live_subtitle_work ? legacy_matte_e::on_demand : legacy_matte_e::always
       );
       if (o.subtitle_cohort_research &&
           !estimator->set_subtitle_cohort_research_enabled(true)) {
@@ -4727,7 +4567,7 @@ namespace sbs_bench {
         BOOST_LOG(error) << "sbs-bench: cannot enable private subtitle inner-colour research";
         return 5;
       }
-      if (o.subtitle_conditioning_live_policy || reduced_outline || conversion_subtitle_model) {
+      if (o.subtitle_conditioning_live_policy || live_subtitle_work) {
         estimator->set_subtitle_conditioning_diagnostics_always(false);
       }
       if (o.pfm_joined_diagnostics &&
@@ -4742,40 +4582,31 @@ namespace sbs_bench {
         return 5;
       }
     }
-    current_outline_qualification::draw_t current_outline_draw;
-    raw_matte_gpu::resources_t current_outline_raw_matte;
-    bool current_outline_draw_ready = false;
+    subtitle_qualification::draw_t subtitle_draw;
+    bool subtitle_draw_ready = false;
     bool follow_subtitle_fallback_logged = false;
-    if (o.follow || o.current_outline_qualification) {
+    if (o.follow || o.direct_glyph_qualification) {
       std::string qualification_error;
-      const fs::path shader_root(SUNSHINE_SHADERS_DIR);
-      const bool direct_glyph = o.current_outline_direct_glyph || conversion_subtitle_model;
-      const bool palette = o.current_outline_direct_glyph_palette || conversion_subtitle_model;
-      const bool adaptive_direct_context = o.current_outline_direct_glyph_adaptive_context || palette;
-      const bool direct_resolved_fringe = o.current_outline_direct_glyph_resolved_fringe || conversion_subtitle_model;
-      current_outline_draw_ready = estimator && current_outline_draw.prepare(
-        dev.Get(), *estimator, shader_root, o.current_outline_omit_foreground_edge,
-        o.current_outline_omit_stroke_coverage, o.current_outline_weak_aa, qualification_error,
-        o.current_outline_raw_matte_reduced, direct_glyph, o.current_outline_direct_glyph, adaptive_direct_context,
-        direct_resolved_fringe && !palette, palette);
-      if (current_outline_draw_ready && conversion_subtitle_model) {
+      // Follow conversion takes the live route. Qualification selects its own Direct Glyph variant
+      // and captures the plan evidence.
+      auto configuration = models::host_sbs_completed_subtitle_programs::canonical_configuration(fs::path(SUNSHINE_SHADERS_DIR));
+      if (o.direct_glyph_qualification) {
+        configuration.capture_plan = true;
+        configuration.line_palette = o.direct_glyph_palette;
+        configuration.adaptive_context = o.direct_glyph_adaptive_context || o.direct_glyph_palette;
+        configuration.resolved_fringe = o.direct_glyph_resolved_fringe;
+      }
+      subtitle_draw_ready = estimator && subtitle_draw.prepare(dev.Get(), *estimator, configuration, qualification_error);
+      if (subtitle_draw_ready && conversion_subtitle_model) {
         BOOST_LOG(info) << "Offline conversion uses the mixed H28 native subtitle glyph model";
       }
-      if (!current_outline_draw_ready) {
-        if (o.current_outline_qualification) {
-          BOOST_LOG(error) << "sbs-bench: current-outline qualification setup failed: " << qualification_error;
+      if (!subtitle_draw_ready) {
+        if (o.direct_glyph_qualification) {
+          BOOST_LOG(error) << "sbs-bench: Direct Glyph qualification setup failed: " << qualification_error;
           return 5;
         }
         BOOST_LOG(warning) << "sbs-bench: shared subtitles unavailable; follow conversion retains ordinary Base: " << qualification_error;
         follow_subtitle_fallback_logged = true;
-      }
-    }
-    if (!o.current_outline_raw_matte.empty()) {
-      std::string raw_matte_error;
-      if (!current_outline_draw.prepare_raw_model(fs::path(SUNSHINE_SHADERS_DIR), raw_matte_error) ||
-          !current_outline_raw_matte.load(dev.Get(), fs::path(o.current_outline_raw_matte), raw_matte_error)) {
-        BOOST_LOG(error) << "sbs-bench: raw-matte stereo probe setup failed: " << raw_matte_error;
-        return 5;
       }
     }
 
@@ -4802,20 +4633,10 @@ namespace sbs_bench {
     ComPtr<ID3D11ShaderResourceView> sbs_srv;
     ComPtr<ID3D11Texture2D> qualified_sbs_tex, qualified_sbs_stage, qualified_mask_stage;
     ComPtr<ID3D11RenderTargetView> qualified_sbs_rtv;
-    ComPtr<ID3D11Texture2D> raw_matte_sbs, raw_matte_sbs_stage, raw_matte_field_stage;
-    ComPtr<ID3D11RenderTargetView> raw_matte_sbs_rtv;
-    ComPtr<ID3D11Buffer> raw_matte_buffer_stage;
-    nlohmann::json qualified_composite_frames = nlohmann::json::array();
-    nlohmann::json qualified_native_feature_frames = nlohmann::json::array();
-    nlohmann::json qualified_weak_aa_frames = nlohmann::json::array();
-    nlohmann::json qualified_raw_matte_frames = nlohmann::json::array();
-    nlohmann::json qualified_reduced_raw_matte_frames = nlohmann::json::array();
+    ComPtr<ID3D11Texture2D> evidence_field_stage;
+    ComPtr<ID3D11Buffer> evidence_buffer_stage;
     nlohmann::json qualified_direct_glyph_frames = nlohmann::json::array();
     std::optional<models::host_sbs_direct_glyph_gpu::tile_profile_e> qualified_direct_glyph_profile;
-    bool qualified_hole_program_ready = true;
-    bool qualified_coverage_program_ready = true;
-    bool qualified_foreground_edge_program_ready = true;
-    bool qualified_trusted_inner_program_ready = true;
     ComPtr<ID3D11Texture2D> warp_mask_tex, warp_mask_stage;
     ComPtr<ID3D11RenderTargetView> warp_mask_rtv;
     ComPtr<ID3D11Texture2D> warp_mapping_tex, warp_mapping_stage;
@@ -5836,7 +5657,7 @@ namespace sbs_bench {
       std::uint64_t source_raster_bytes = 0;
       bool loaded = false;
       const bool snapshot_source = o.follow || depth_coordinate_v2_gpu_mode || o.pfm_joined_diagnostics ||
-                                   o.current_outline_qualification;
+                                   o.direct_glyph_qualification;
       if (transport) {
         const auto &header = raw_source->header;
         source_raster_bytes = raw_source->bytes();
@@ -5892,7 +5713,7 @@ namespace sbs_bench {
                      load_pfm(std::string_view(exact_source_snapshot), hdr_img) :
                      load_png(std::string_view(exact_source_snapshot), img);
         }
-        if (loaded && (depth_coordinate_v2_gpu_mode || o.pfm_joined_diagnostics || o.current_outline_qualification)) {
+        if (loaded && (depth_coordinate_v2_gpu_mode || o.pfm_joined_diagnostics || o.direct_glyph_qualification)) {
           exact_source_sha256 = sha256_hex(exact_source_snapshot);
         }
       } else {
@@ -6336,8 +6157,6 @@ namespace sbs_bench {
         auto line_policy = models::subtitle_line_policy_e::video_caption;
         if (o.subtitle_application_text) {
           line_policy = models::subtitle_line_policy_e::application_text;
-        } else if (o.current_outline_ocr_midpoint_probe) {
-          line_policy = models::subtitle_line_policy_e::experimental_centered_horizontal;
         }
         const auto submitted = estimator->estimate_depth(
           in_srv.Get(),
@@ -6943,9 +6762,9 @@ namespace sbs_bench {
         .source_width = frame_width, .source_height = frame_height,
       };
       Microsoft::WRL::ComPtr<ID3D11Buffer> subtitle_render_cb;
-      if (current_outline_draw_ready) {
+      if (subtitle_draw_ready) {
         subtitle_render_cb = const_buffer(dev.Get(), subtitle_render);
-        if (!subtitle_render_cb && o.current_outline_qualification) return 6;
+        if (!subtitle_render_cb && o.direct_glyph_qualification) return 6;
       }
       const platf::dxgi::host_sbs_v2_draw_command_t draw_command {
         .render_targets = {sbs_rtv.Get(), nullptr},
@@ -6964,9 +6783,9 @@ namespace sbs_bench {
         .subtitle_constants = nullptr,
       };
       bool follow_shared_draw = false;
-      if (o.follow && current_outline_draw_ready && subtitle_render_cb) {
+      if (o.follow && subtitle_draw_ready && subtitle_render_cb) {
         std::string shared_error;
-        follow_shared_draw = current_outline_draw.record(ctx.Get(), draw_command, sbs_rtv.Get(), est, subtitle_render_cb.Get(), nullptr, shared_error);
+        follow_shared_draw = subtitle_draw.record(ctx.Get(), draw_command, sbs_rtv.Get(), est, subtitle_render_cb.Get(), nullptr, shared_error);
         if (!follow_shared_draw && !follow_subtitle_fallback_logged) {
           BOOST_LOG(warning) << "sbs-bench: follow subtitle authority unavailable; retaining ordinary Base: " << shared_error;
           follow_subtitle_fallback_logged = true;
@@ -7032,7 +6851,7 @@ namespace sbs_bench {
       }
       sbs_perf::tick();
 
-      if (o.current_outline_qualification) {
+      if (o.direct_glyph_qualification) {
         if (!est.completed_frame_valid || est.completed_frame_id != global_sequence || est.publication.frame_id != global_sequence || est.publication.observation_timestamp_us != observation_timestamps.at(global_sequence - 1u) || exact_source_sha256.empty()) {
           BOOST_LOG(error) << "sbs-bench: selected-compositor qualification cannot attribute the current source";
           return 6;
@@ -7045,15 +6864,10 @@ namespace sbs_bench {
             return 6;
           }
         }
-        current_outline_qualification::evidence_t evidence;
+        subtitle_qualification::evidence_t evidence;
         std::string qualification_error;
-        const bool reduced = !o.current_outline_raw_matte_reduced.empty();
-        const bool direct = o.current_outline_direct_glyph;
-        const bool rendered = reduced ?
-          current_outline_draw.record_reduced_raw_model(ctx.Get(), draw_command, qualified_sbs_rtv.Get(), est,
-            subtitle_render_cb.Get(), evidence, qualification_error) :
-          current_outline_draw.record(ctx.Get(), draw_command, qualified_sbs_rtv.Get(), est,
-            subtitle_render_cb.Get(), &evidence, qualification_error);
+        const bool rendered = subtitle_draw.record(ctx.Get(), draw_command, qualified_sbs_rtv.Get(), est,
+          subtitle_render_cb.Get(), &evidence, qualification_error);
         if (!rendered) {
           BOOST_LOG(error) << "sbs-bench: selected-compositor draw qualification failed: " << qualification_error;
           return 6;
@@ -7065,15 +6879,12 @@ namespace sbs_bench {
           BOOST_LOG(error) << "sbs-bench: selected-compositor evidence lacks its current authenticated completion receipt";
           return 6;
         }
-        const auto reduced_directory = fs::path("current-outline") / (direct ? "direct-glyph" : "raw-matte-reduced") / ("frame_" + output_id);
-        if (reduced || direct) {
-          fs::create_directories(fs::path(o.out) / reduced_directory, ec);
-          if (ec) {
-            return 6;
-          }
+        const auto evidence_directory = fs::path("direct-glyph") / ("frame_" + output_id);
+        fs::create_directories(fs::path(o.out) / evidence_directory, ec);
+        if (ec) {
+          return 6;
         }
-        const auto relative_output = reduced || direct ? reduced_directory / "sbs.png" :
-          fs::path("current-outline") / ("sbs_" + output_id + ".png");
+        const auto relative_output = evidence_directory / "sbs.png";
         dump_bgra8_texture(dev.Get(), ctx.Get(), qualified_sbs_tex.Get(), fs::path(o.out) / relative_output, qualified_sbs_stage);
         const auto output_digest = sha256_file_hex(fs::path(o.out) / relative_output);
         if (output_digest.empty()) {
@@ -7081,8 +6892,7 @@ namespace sbs_bench {
         }
         // Preserve the literal selected t3 input after that exact authenticated draw.
         // This is the native source crop, with no projection, filtering or CPU mask recreation.
-        const auto relative_mask = reduced || direct ? reduced_directory / "selected.u32" :
-          fs::path("current-outline") / ("selected_matte_" + output_id + ".u32");
+        const auto relative_mask = evidence_directory / "selected.u32";
         const auto mask_height = models::subtitle_ocr_source_crop_height(frame_width, frame_height);
         ComPtr<ID3D11Resource> mask_resource;
         ComPtr<ID3D11Texture2D> mask_texture;
@@ -7104,15 +6914,15 @@ namespace sbs_bench {
         }
         // Observe existing producer buffers only after this exact selected completed draw.
         // AddRef retains storage, so serialize copies before another source is admitted.
-        const auto stages = estimator->subtitle_selected_matte_diagnostic_views_for_evaluation(
+        const auto stages = estimator->subtitle_direct_glyph_diagnostic_views_for_evaluation(
           est.completed_frame_id,
           est.publication.observation_timestamp_us
         );
-        if (!stages || stages->pending_queued || stages->model_frame != est.completed_frame_id || stages->model_observation_us != est.publication.observation_timestamp_us || stages->selected_matte.Get() != est.research_selected_matte.Get() || stages->selected_receipt.Get() != est.research_selected_matte_receipt.Get()) {
+        if (!stages || stages->model_frame != est.completed_frame_id || stages->model_observation_us != est.publication.observation_timestamp_us || stages->selected_matte.Get() != est.research_selected_matte.Get() || stages->selected_receipt.Get() != est.research_selected_matte_receipt.Get()) {
           BOOST_LOG(error) << "sbs-bench: producer diagnostics lost their exact completed selected role";
           return 6;
         }
-        if (direct) {
+        {
           const auto profile = estimator->direct_glyph_profile_for_evaluation();
           if (!profile || (qualified_direct_glyph_profile && profile != qualified_direct_glyph_profile)) {
             BOOST_LOG(error) << "sbs-bench: direct glyph profile changed within the fixed-source capture";
@@ -7121,23 +6931,23 @@ namespace sbs_bench {
           qualified_direct_glyph_profile = profile;
           const auto dump_buffer = [&](ID3D11Buffer *buffer, UINT bytes, const fs::path &file) {
             return buffer && publish_file_atomically(fs::path(o.out) / file, [&](const fs::path &temporary) {
-              return dump_ocr_working_buffer(dev.Get(), ctx.Get(), buffer, bytes, temporary, raw_matte_buffer_stage);
+              return dump_ocr_working_buffer(dev.Get(), ctx.Get(), buffer, bytes, temporary, evidence_buffer_stage);
             });
           };
-          const auto work_path = reduced_directory / "work.u32";
-          const auto dispatch_path = reduced_directory / "legacy-dispatch.u32";
-          const auto ocr_path = reduced_directory / "ocr.u32";
-          constexpr current_outline_qualification::producer_stage_spec_t ocr_spec {
+          const auto work_path = evidence_directory / "work.u32";
+          const auto dispatch_path = evidence_directory / "legacy-dispatch.u32";
+          const auto ocr_path = evidence_directory / "ocr.u32";
+          constexpr subtitle_qualification::producer_stage_spec_t ocr_spec {
             0u, "ocr", "completed-current-ocr8", 256u, false
           };
           ComPtr<ID3D11Buffer> ocr;
-          std::array<std::uint32_t, raw_matte_gpu::direct_work_word_count> work {};
+          std::array<std::uint32_t, models::host_sbs_direct_glyph_publication::direct_work_word_count> work {};
           std::array<std::uint32_t, 4u> legacy_dispatch {};
-          if (!dump_buffer(stages->current_outline_raw_matte_work.Get(), sizeof(work), work_path) ||
+          if (!dump_buffer(stages->work.Get(), sizeof(work), work_path) ||
               !read_exact_file(fs::path(o.out) / work_path, work.data(), sizeof(work)) || work[1u] > 8u ||
-              !dump_buffer(stages->direct_glyph_legacy_dispatch.Get(), sizeof(legacy_dispatch), dispatch_path) ||
+              !dump_buffer(stages->legacy_dispatch.Get(), sizeof(legacy_dispatch), dispatch_path) ||
               !read_exact_file(fs::path(o.out) / dispatch_path, legacy_dispatch.data(), sizeof(legacy_dispatch)) ||
-              !current_outline_qualification::producer_stage_buffer(dev.Get(), stages->current_outline_ocr_record.Get(), ocr_spec, ocr) ||
+              !subtitle_qualification::producer_stage_buffer(dev.Get(), stages->ocr_record.Get(), ocr_spec, ocr) ||
               !dump_buffer(ocr.Get(), 1024u, ocr_path)) {
             BOOST_LOG(error) << "sbs-bench: direct glyph literal Work, fallback dispatch or OCR is unavailable";
             return 6;
@@ -7145,7 +6955,7 @@ namespace sbs_bench {
           const auto &selected = evidence.selected;
           const bool model = selected[2u] == 4u && selected[62u] == 4u;
           const bool legacy = selected[2u] == 1u && selected[62u] == 1u;
-          const bool ready = work[3u] == 1u || (o.current_outline_direct_glyph_adaptive_context &&
+          const bool ready = work[3u] == 1u || (o.direct_glyph_adaptive_context &&
                                               (work[3u] == 2u || work[3u] == 4u));
           const bool active = model && work[0u] == 2u && work[1u] != 0u && work[2u] == 0u && ready;
           const bool empty = model && work[0u] == 1u && work[1u] == 0u && work[2u] == 0u && work[3u] == 0u;
@@ -7155,8 +6965,8 @@ namespace sbs_bench {
           }
           const std::array<UINT, 4u> rect {0u, frame_height - mask_height, frame_width, frame_height};
           nlohmann::json alpha8;
-          if (!export_raw_matte_texture(dev.Get(), ctx.Get(), stages->current_outline_raw_matte_alpha8.Get(), DXGI_FORMAT_R32_UINT,
-                "r32_uint_little_endian_alpha8", fs::path(o.out), reduced_directory / "alpha8.u32", rect, raw_matte_field_stage, alpha8)) {
+          if (!export_native_band_texture(dev.Get(), ctx.Get(), stages->alpha8.Get(), DXGI_FORMAT_R32_UINT,
+                "r32_uint_little_endian_alpha8", fs::path(o.out), evidence_directory / "alpha8.u32", rect, evidence_field_stage, alpha8)) {
             BOOST_LOG(error) << "sbs-bench: direct glyph alpha export failed";
             return 6;
           }
@@ -7169,13 +6979,13 @@ namespace sbs_bench {
           // EMPTY parks that producer and can retain older bytes in its private buffer.
           if (active) {
             namespace snapshot = models::display_snapshot_rgb8_analysis_gpu_v1;
-            constexpr current_outline_qualification::producer_stage_spec_t audit_spec {
+            constexpr subtitle_qualification::producer_stage_spec_t audit_spec {
               0u, "source_audit", "direct-glyph-current-source-audit", snapshot::envelope_words, false
             };
-            const auto audit_path = reduced_directory / "source-audit.u32";
+            const auto audit_path = evidence_directory / "source-audit.u32";
             ComPtr<ID3D11Buffer> audit_buffer;
             std::array<std::uint32_t, snapshot::envelope_words> audit {};
-            if (!current_outline_qualification::producer_stage_buffer(dev.Get(), stages->direct_glyph_source_audit.Get(), audit_spec, audit_buffer) ||
+            if (!subtitle_qualification::producer_stage_buffer(dev.Get(), stages->source_audit.Get(), audit_spec, audit_buffer) ||
                 !dump_buffer(audit_buffer.Get(), sizeof(audit), audit_path) ||
                 !read_exact_file(fs::path(o.out) / audit_path, audit.data(), sizeof(audit))) {
               BOOST_LOG(error) << "sbs-bench: active Direct glyph source audit evidence unavailable";
@@ -7198,14 +7008,14 @@ namespace sbs_bench {
             }
           }
           nlohmann::json placement, placement_binding, post_plan, post_plan_binding;
-          if (stages->direct_glyph_placement || stages->direct_glyph_post_plan_work) {
-            const auto placement_path = reduced_directory / "placement.u32";
-            const auto post_plan_path = reduced_directory / "post-plan-work.u32";
+          if (stages->placement || stages->post_plan_work) {
+            const auto placement_path = evidence_directory / "placement.u32";
+            const auto post_plan_path = evidence_directory / "post-plan-work.u32";
             std::array<std::int32_t, models::host_sbs_direct_glyph_gpu::placement_words> placement_words {};
-            std::array<std::uint32_t, raw_matte_gpu::direct_work_word_count> post_plan_words {};
-            if (!dump_buffer(stages->direct_glyph_placement.Get(), sizeof(placement_words), placement_path) ||
+            std::array<std::uint32_t, models::host_sbs_direct_glyph_publication::direct_work_word_count> post_plan_words {};
+            if (!dump_buffer(stages->placement.Get(), sizeof(placement_words), placement_path) ||
                 !read_exact_file(fs::path(o.out) / placement_path, placement_words.data(), sizeof(placement_words)) ||
-                !dump_buffer(stages->direct_glyph_post_plan_work.Get(), sizeof(post_plan_words), post_plan_path) ||
+                !dump_buffer(stages->post_plan_work.Get(), sizeof(post_plan_words), post_plan_path) ||
                 !read_exact_file(fs::path(o.out) / post_plan_path, post_plan_words.data(), sizeof(post_plan_words))) {
               BOOST_LOG(error) << "sbs-bench: direct glyph plan evidence readback failed";
               return 6;
@@ -7215,7 +7025,7 @@ namespace sbs_bench {
             post_plan = post_plan_words;
             post_plan_binding = binding(post_plan_path, sizeof(post_plan_words));
           }
-          if (active && o.current_outline_direct_glyph_adaptive_context && !o.current_outline_direct_glyph_palette &&
+          if (active && o.direct_glyph_adaptive_context && !o.direct_glyph_palette &&
               (placement.is_null() ||
                placement[models::host_sbs_direct_glyph_gpu::placement_scale_word] != (work[3u] == 1u ? 0u : work[3u]))) {
             BOOST_LOG(error) << "sbs-bench: adaptive placement and published score lattice disagree";
@@ -7228,12 +7038,12 @@ namespace sbs_bench {
           }
           const auto &publication = est.publication;
           nlohmann::json native_lines;
-          if (o.current_outline_direct_glyph_palette) {
-            const auto path = reduced_directory / "native-lines.u32";
+          if (o.direct_glyph_palette) {
+            const auto path = evidence_directory / "native-lines.u32";
             std::array<std::array<UINT,16>,8> records {};
             if ((!active && !empty) || work[3] != (active ? 1u : 0u) ||
                 legacy_dispatch != std::array<UINT,4>{} ||
-                !dump_buffer(stages->direct_glyph_native_lines.Get(),sizeof(records),path) ||
+                !dump_buffer(stages->native_lines.Get(),sizeof(records),path) ||
                 !read_exact_file(fs::path(o.out)/path,records.data(),sizeof(records))) {
               BOOST_LOG(error) << "sbs-bench: native glyph selection lacks its current line records";
               return 6;
@@ -7275,403 +7085,7 @@ namespace sbs_bench {
                 {"draw_serial", evidence.shared_warp_serial}, {"selected_receipt_header", evidence.shared_warp_selected_receipt_header},
                 {"active_rows", evidence.shared_warp_rows}}}
           });
-          if (o.current_outline_direct_glyph_palette) qualified_direct_glyph_frames.back()["native_lines"] = native_lines;
-        } else if (reduced) {
-          const std::array<UINT, 4u> rect {0u, frame_height - mask_height, frame_width, frame_height};
-          const auto &shape = evidence.shared_warp_shape;
-          const std::array<UINT, 4u> pin_rect {0u, shape[2u], shape[0u], shape[1u]};
-          const auto work_path = fs::path(o.out) / reduced_directory / "work.u32";
-          std::array<std::uint32_t, raw_matte_gpu::work_word_count> work {};
-          if (!stages->current_outline_raw_matte_work ||
-              !publish_file_atomically(work_path, [&](const fs::path &temporary) {
-                return dump_ocr_working_buffer(dev.Get(), ctx.Get(), stages->current_outline_raw_matte_work.Get(),
-                                               sizeof(work), temporary, raw_matte_buffer_stage);
-              }) || !read_exact_file(work_path, work.data(), sizeof(work)) || work[16u] > 2u ||
-              evidence.selected[2u] != (work[16u] == 0u ? 1u : 4u)) {
-            BOOST_LOG(error) << "sbs-bench: reduced RawMatte work does not match the selected receipt";
-            return 6;
-          }
-          // Fresh EMPTY can park the producer without publishing any of its textures.
-          const bool producer_skipped = work[16u] == 1u && work[4u] == 1u;
-          const auto dump_plane = [&](const char *name, ID3D11ShaderResourceView *view, DXGI_FORMAT format,
-                                      const char *encoding, std::array<UINT, 4u> source, nlohmann::json &output) {
-            return export_raw_matte_texture(dev.Get(), ctx.Get(), view, format, encoding, fs::path(o.out),
-                                           reduced_directory / name, source, raw_matte_field_stage, output);
-          };
-          nlohmann::json raw, floor, alpha8, source_rgb, model_field, cbc_body, cbc_selected_bits, cbc_cover_bits;
-          if ((!producer_skipped &&
-               (!dump_plane("raw.u32", stages->current_outline_stages[6u].Get(), DXGI_FORMAT_R32_UINT,
-                 "r32_uint_little_endian_0_or_1", rect, raw) ||
-                !dump_plane("floor.u32", stages->current_outline_raw_matte_floor.Get(), DXGI_FORMAT_R32_UINT,
-                 "r32_uint_little_endian_0_or_1", rect, floor) ||
-                !dump_plane("source-rgba16.f16", stages->current_outline_stages[0u].Get(), DXGI_FORMAT_R16G16B16A16_FLOAT,
-                 "rgba16_float_little_endian", rect, source_rgb))) ||
-              (work[53u] == 2u &&
-               (!dump_plane("cbc-body.u32", stages->current_outline_stages[1u].Get(), DXGI_FORMAT_R32_UINT,
-                 "r32_uint_little_endian_0_or_1", rect, cbc_body) ||
-                !dump_plane("cbc-selected-bits.u32", stages->current_outline_stages[4u].Get(), DXGI_FORMAT_R32_UINT,
-                 "r32_uint_little_endian_cbc_selected_bits", rect, cbc_selected_bits) ||
-                !dump_plane("cbc-cover-bits.u32", stages->current_outline_stages[5u].Get(), DXGI_FORMAT_R32_UINT,
-                 "r32_uint_little_endian_ocr_slot_bits", rect, cbc_cover_bits))) ||
-              !dump_plane("alpha8.u32", stages->current_outline_raw_matte_alpha8.Get(), DXGI_FORMAT_R32_UINT,
-                "r32_uint_little_endian_alpha8", rect, alpha8) ||
-              (evidence.shared_warp_field && !dump_plane("model-field.f32", evidence.shared_warp_field.Get(),
-                DXGI_FORMAT_R32_FLOAT, "r32_float_little_endian", pin_rect, model_field))) {
-            BOOST_LOG(error) << "sbs-bench: reduced RawMatte texture evidence export failed";
-            return 6;
-          }
-          constexpr current_outline_qualification::producer_stage_spec_t ocr_spec {
-            0u, "ocr", "completed-current-ocr8", 256u, false
-          };
-          ComPtr<ID3D11Buffer> ocr;
-          const auto relative_ocr = reduced_directory / "ocr.u32";
-          const auto ocr_path = fs::path(o.out) / relative_ocr;
-          if (!current_outline_qualification::producer_stage_buffer(dev.Get(), stages->current_outline_ocr_record.Get(), ocr_spec, ocr) ||
-              !publish_file_atomically(ocr_path, [&](const fs::path &temporary) {
-                return dump_ocr_working_buffer(dev.Get(), ctx.Get(), ocr.Get(), 1024u, temporary, raw_matte_buffer_stage);
-              })) {
-            return 6;
-          }
-          const auto ocr_digest = sha256_file_hex(ocr_path);
-          if (ocr_digest.empty()) {
-            return 6;
-          }
-          const auto &publication = est.publication;
-          const auto &receipt = *device_conditional_publication;
-          qualified_reduced_raw_matte_frames.push_back({
-            {"producer_mode", "raw-matte-floor"}, {"producer_skipped", producer_skipped},
-            {"observation_ordinal", global_sequence},
-            {"source_file", current_frame.filename().string()}, {"source_file_id", output_id},
-            {"source_snapshot_sha256", exact_source_sha256}, {"source_size", {frame_width, frame_height}},
-            {"completed_frame_id", est.completed_frame_id}, {"observation_timestamp_us", publication.observation_timestamp_us},
-            {"transaction_token", publication.transaction_token}, {"analysis_generation", publication.analysis_generation},
-            {"bindings_observed", evidence.bindings_observed}, {"selected_receipt", evidence.selected},
-            {"contour_identity", evidence.contour}, {"condition_params", evidence.condition},
-            {"execution", work}, {"model_gpu_ms", nullptr}, {"raw", raw}, {"floor", floor}, {"alpha8", alpha8},
-            {"source_rgb", source_rgb}, {"cbc_body", cbc_body}, {"cbc_selected_bits", cbc_selected_bits},
-            {"cbc_cover_bits", cbc_cover_bits}, {"warp_field", model_field},
-            {"selected_mask", {{"file", relative_mask.generic_string()}, {"sha256", mask_digest},
-                               {"size", {frame_width, mask_height}}, {"source_rect", rect},
-                               {"byte_count", static_cast<std::uint64_t>(frame_width) * mask_height * 4u},
-                               {"format", "r32_uint_little_endian_0_or_1"}}},
-            {"output_file", relative_output.generic_string()}, {"output_sha256", output_digest}, {"output_size", {sbs_w, sbs_h}},
-            {"ocr", {{"file", relative_ocr.generic_string()}, {"sha256", ocr_digest}, {"word_count", 256u},
-                     {"byte_count", 1024u}, {"format", "uint32-little-endian"}}},
-            {"shared_warp", {{"renderer", "shared-ui-pin-band"}, {"shape", shape}, {"draw_serial", evidence.shared_warp_serial},
-                             {"selected_receipt_header", evidence.shared_warp_selected_receipt_header},
-                             {"active_rows", evidence.shared_warp_rows}}},
-            {"publication_receipt", {{"estimator_generation", publication.estimator_generation},
-               {"publication_sequence", publication.publication_sequence}, {"domain_tag", publication.domain_tag},
-               {"expected_work", publication.expected_work}, {"depth", static_cast<std::uint32_t>(receipt.depth)},
-               {"depth_owner_frame_id", receipt.depth_owner_frame_id}, {"depth_owner_timestamp_us", receipt.depth_owner_timestamp_us},
-               {"subtitle", static_cast<std::uint32_t>(receipt.subtitle)}, {"subtitle_frame_id", receipt.subtitle_frame_id},
-               {"subtitle_domain_tag", receipt.subtitle_domain_tag}}}
-          });
-        } else {
-        const auto relative_stages = fs::path("current-outline") / "producer-stages" / ("frame_" + output_id);
-        fs::create_directories(fs::path(o.out) / relative_stages, ec);
-        if (ec) {
-          return 6;
-        }
-        nlohmann::json stage_buffers = nlohmann::json::object();
-        for (const auto &spec : current_outline_qualification::producer_stage_specs) {
-          ComPtr<ID3D11Buffer> buffer, staging;
-          if (!current_outline_qualification::producer_stage_buffer(dev.Get(), stages->current_outline_stages[spec.slot].Get(), spec, buffer)) {
-            BOOST_LOG(error) << "sbs-bench: producer diagnostic whole-buffer role unavailable: " << spec.name;
-            return 6;
-          }
-          const auto relative_file = relative_stages / (std::string(spec.name) + ".u32");
-          const UINT bytes = spec.words * sizeof(std::uint32_t);
-          if (!publish_file_atomically(fs::path(o.out) / relative_file, [&](const fs::path &temporary) {
-                return dump_ocr_working_buffer(dev.Get(), ctx.Get(), buffer.Get(), bytes, temporary, staging);
-              })) {
-            return 6;
-          }
-          const auto digest = sha256_file_hex(fs::path(o.out) / relative_file);
-          if (digest.empty()) {
-            return 6;
-          }
-          stage_buffers[spec.name] = {
-            {"file", relative_file.generic_string()},
-            {"sha256", digest},
-            {"role", spec.role},
-            {"word_count", spec.words},
-            {"byte_count", bytes},
-            {"format", "uint32-little-endian"},
-            {"view_dimension", spec.raw ? "BUFFEREX" : "BUFFER"},
-            {"view_format", spec.raw ? "R32_TYPELESS" : "UNKNOWN"},
-            {"view_first_element", 0u},
-            {"view_word_count", spec.words},
-            {"resource_byte_count", bytes},
-            {"structure_stride_bytes", spec.raw ? 0u : 4u}
-          };
-        }
-        const auto &publication = est.publication;
-        const auto &receipt = *device_conditional_publication;
-        // These readbacks share the completed producer lease with the buffer exports above.
-        const auto export_planes = [&](const char *directory, const auto &specs, const auto &view_for_slot,
-                                       nlohmann::json &frames) {
-          const auto relative_features = fs::path("current-outline") / directory / ("frame_" + output_id);
-          fs::create_directories(fs::path(o.out) / relative_features, ec);
-          if (ec) {
-            return false;
-          }
-          const auto bytes = static_cast<std::uint64_t>(frame_width) * mask_height * sizeof(std::uint32_t);
-          nlohmann::json textures = nlohmann::json::object();
-          for (const auto &spec : specs) {
-            auto *view = view_for_slot(spec.slot);
-            const auto relative_file = relative_features / (std::string(spec.name) + ".u32");
-            const auto path = fs::path(o.out) / relative_file;
-            if (!current_outline_qualification::native_feature_texture_matches(dev.Get(), view, frame_width, mask_height) ||
-                !publish_file_atomically(path, [&](const fs::path &temporary) {
-                  return dump_contour_texture(dev.Get(), ctx.Get(), view, DXGI_FORMAT_R32_UINT, sizeof(std::uint32_t), temporary, qualified_mask_stage);
-                }) || fs::file_size(path, ec) != bytes || ec) {
-              BOOST_LOG(error) << "sbs-bench: native feature texture export failed: " << spec.name;
-              return false;
-            }
-            const auto digest = sha256_file_hex(path);
-            if (digest.empty()) {
-              return false;
-            }
-            textures[spec.name] = {
-              {"file", relative_file.generic_string()}, {"sha256", digest}, {"role", spec.role},
-              {"size", {frame_width, mask_height}}, {"byte_count", bytes}, {"format", "r32_uint_little_endian"}
-            };
-          }
-          frames.push_back({
-            {"observation_ordinal", global_sequence}, {"source_file", current_frame.filename().string()},
-            {"source_snapshot_sha256", exact_source_sha256}, {"completed_frame_id", est.completed_frame_id},
-            {"observation_timestamp_us", publication.observation_timestamp_us}, {"transaction_token", publication.transaction_token},
-            {"analysis_generation", publication.analysis_generation}, {"selected_mask_sha256", mask_digest},
-            {"native_source_rect", {0u, frame_height - mask_height, frame_width, frame_height}}, {"textures", std::move(textures)}
-          });
-          return true;
-        };
-        if (o.current_outline_native_features &&
-            !export_planes("native-features", current_outline_qualification::native_feature_specs,
-                           [&](std::size_t slot) { return stages->current_outline_stages[slot].Get(); },
-                           qualified_native_feature_frames)) {
-          return 6;
-        }
-        if (o.current_outline_weak_aa) {
-          if (evidence.selected[2u] != 3u || evidence.selected[3u] != 0u || evidence.contour[23u] != 1u) {
-            BOOST_LOG(error) << "sbs-bench: weak-AA diagnostics require the completed current Rule";
-            return 6;
-          }
-          constexpr std::array specs {
-            current_outline_qualification::native_feature_spec_t {0u, "facts", "current_outline_weak_aa_facts"},
-            current_outline_qualification::native_feature_spec_t {1u, "trusted", "current_outline_weak_aa_trusted"}
-          };
-          const std::array views {stages->current_outline_weak_aa_facts.Get(), stages->current_outline_weak_aa_trusted.Get()};
-          if (!export_planes("weak-aa", specs, [&](std::size_t slot) { return views[slot]; }, qualified_weak_aa_frames)) {
-            return 6;
-          }
-        }
-        qualified_composite_frames.push_back({{"observation_ordinal", global_sequence}, {"source_file", current_frame.filename().string()}, {"source_file_id", output_id}, {"source_snapshot_sha256", exact_source_sha256}, {"source_size", {frame_width, frame_height}}, {"output_file", relative_output.generic_string()}, {"output_sha256", output_digest}, {"output_size", {sbs_w, sbs_h}}, {"completed_frame_id", est.completed_frame_id}, {"observation_timestamp_us", publication.observation_timestamp_us}, {"transaction_token", publication.transaction_token}, {"analysis_generation", publication.analysis_generation}, {"bindings_observed", evidence.bindings_observed}, {"selected_receipt", evidence.selected}, {"contour_identity", evidence.contour}, {"condition_params", evidence.condition}, {"parallax_state", evidence.state}, {"subtitle_constants", evidence.subtitle_constants}, {"publication_receipt", {{"estimator_generation", publication.estimator_generation}, {"publication_sequence", publication.publication_sequence}, {"domain_tag", publication.domain_tag}, {"expected_work", publication.expected_work}, {"depth", static_cast<std::uint32_t>(receipt.depth)}, {"depth_owner_frame_id", receipt.depth_owner_frame_id}, {"depth_owner_timestamp_us", receipt.depth_owner_timestamp_us}, {"subtitle", static_cast<std::uint32_t>(receipt.subtitle)}, {"subtitle_frame_id", receipt.subtitle_frame_id}, {"subtitle_domain_tag", receipt.subtitle_domain_tag}}}});
-        qualified_composite_frames.back()["shared_warp"] = {
-          {"renderer", "shared-ui-pin-band"},
-          {"shape", evidence.shared_warp_shape},
-          {"draw_serial", evidence.shared_warp_serial},
-          {"selected_receipt_header", evidence.shared_warp_selected_receipt_header},
-          {"active_rows", evidence.shared_warp_rows}
-        };
-        qualified_hole_program_ready = qualified_hole_program_ready && stages->current_outline_hole_program_ready;
-        if (!qualified_hole_program_ready) {
-          BOOST_LOG(error) << "sbs-bench: optional current mask-hole programs unavailable for qualification";
-          return 6;
-        }
-        qualified_composite_frames.back()["hole_program_ready"] = stages->current_outline_hole_program_ready;
-        qualified_coverage_program_ready = qualified_coverage_program_ready && stages->current_outline_coverage_program_ready;
-        if (!qualified_coverage_program_ready) {
-          BOOST_LOG(error) << "sbs-bench: optional current stroke-coverage programs unavailable for qualification";
-          return 6;
-        }
-        qualified_composite_frames.back()["coverage_program_ready"] = stages->current_outline_coverage_program_ready;
-        qualified_foreground_edge_program_ready = qualified_foreground_edge_program_ready && stages->current_outline_foreground_edge_program_ready;
-        if (!qualified_foreground_edge_program_ready) {
-          BOOST_LOG(error) << "sbs-bench: optional current foreground-edge program unavailable for qualification";
-          return 6;
-        }
-        qualified_composite_frames.back()["foreground_edge_program_ready"] = stages->current_outline_foreground_edge_program_ready;
-        qualified_trusted_inner_program_ready = qualified_trusted_inner_program_ready && stages->current_outline_trusted_inner_program_ready;
-        if (!qualified_trusted_inner_program_ready) {
-          BOOST_LOG(error) << "sbs-bench: current trusted-inner program is unavailable";
-          return 8;
-        }
-        qualified_composite_frames.back()["trusted_inner_program_ready"] = stages->current_outline_trusted_inner_program_ready;
-        qualified_composite_frames.back()["selected_mask"] = {
-          {"file", relative_mask.generic_string()},
-          {"sha256", mask_digest},
-          {"size", {frame_width, mask_height}},
-          {"source_rect", {0u, frame_height - mask_height, frame_width, frame_height}},
-          {"byte_count", static_cast<std::uint64_t>(frame_width) * mask_height * sizeof(std::uint32_t)},
-          {"format", "r32_uint_little_endian_0_or_1"}
-        };
-        qualified_composite_frames.back()["producer_stages"] = {
-          {"scope", "diagnostic-only-exact-completed-composition"},
-          {"pending_queued", false},
-          {"selected_matte_matches_draw", true},
-          {"selected_receipt_matches_draw", true},
-          {"completed_frame_id", est.completed_frame_id},
-          {"observation_timestamp_us", est.publication.observation_timestamp_us},
-          {"analysis_generation", est.publication.analysis_generation},
-          {"transaction_token", est.publication.transaction_token},
-          {"source_snapshot_sha256", exact_source_sha256},
-          {"buffers", stage_buffers}
-        };
-        if (!o.current_outline_raw_matte.empty()) {
-          const auto folder = fs::path("current-outline") / "raw-matte" / ("frame_" + output_id);
-          fs::create_directories(fs::path(o.out) / folder, ec);
-          if (ec) {
-            return 6;
-          }
-          if (!raw_matte_sbs) {
-            D3D11_TEXTURE2D_DESC desc {};
-            qualified_sbs_tex->GetDesc(&desc);
-            if (FAILED(dev->CreateTexture2D(&desc, nullptr, &raw_matte_sbs)) ||
-                FAILED(dev->CreateRenderTargetView(raw_matte_sbs.Get(), nullptr, &raw_matte_sbs_rtv))) {
-              return 6;
-            }
-          }
-          const auto &planes = stages->current_outline_stages;
-          raw_matte_gpu::request_t request;
-          request.width = frame_width;
-          request.height = mask_height;
-          request.frame = est.completed_frame_id;
-          request.observation_us = publication.observation_timestamp_us;
-          request.analysis_generation = publication.analysis_generation;
-          request.token = publication.transaction_token;
-          request.current_constants = stages->current_constants.Get();
-          request.rgb = planes[0u].Get();
-          request.body = planes[1u].Get();
-          request.selected = planes[4u].Get();
-          request.cover = planes[5u].Get();
-          request.raw = planes[6u].Get();
-          request.facts = stages->current_outline_weak_aa_facts.Get();
-          request.trusted = stages->current_outline_weak_aa_trusted.Get();
-          request.rule = stages->selected_matte.Get();
-          request.rule_receipt = stages->selected_receipt.Get();
-          request.ocr = stages->current_outline_ocr_record.Get();
-          request.sct = est.subtitle_contour_identity.Get();
-          request.condition = est.subtitle_condition_params.Get();
-          std::string raw_error;
-          const bool time_model = warp_disjoint && warp_start && warp_end;
-          if (time_model) {
-            ctx->Begin(warp_disjoint.Get());
-            ctx->End(warp_start.Get());
-          }
-          const bool model_queued = current_outline_raw_matte.queue(ctx.Get(), request, raw_error);
-          if (time_model) {
-            ctx->End(warp_end.Get());
-            ctx->End(warp_disjoint.Get());
-          }
-          if (!model_queued) {
-            BOOST_LOG(error) << "sbs-bench: raw-matte model could not bind the current tuple: " << raw_error;
-            return 6;
-          }
-          const auto candidate = current_outline_raw_matte.views();
-          if (!candidate.work) {
-            return 6;
-          }
-          D3D11_BUFFER_DESC work_desc {};
-          candidate.work->GetDesc(&work_desc);
-          if (work_desc.ByteWidth != raw_matte_gpu::work_word_count * sizeof(std::uint32_t)) {
-            return 6;
-          }
-          const auto work_path = fs::path(o.out) / folder / "work.u32";
-          std::array<std::uint32_t, raw_matte_gpu::work_word_count> work {};
-          if (!publish_file_atomically(work_path, [&](const fs::path &temporary) {
-                return dump_ocr_working_buffer(dev.Get(), ctx.Get(), candidate.work.Get(), work_desc.ByteWidth, temporary, raw_matte_buffer_stage);
-              }) || !read_exact_file(work_path, work.data(), work_desc.ByteWidth) || work[16u] > 2u) {
-            return 6;
-          }
-          nlohmann::json model_gpu_ms;
-          if (time_model) {
-            D3D11_QUERY_DATA_TIMESTAMP_DISJOINT clock {};
-            UINT64 start = 0u, end = 0u;
-            constexpr UINT no_flush = D3D11_ASYNC_GETDATA_DONOTFLUSH;
-            if (ctx->GetData(warp_disjoint.Get(), &clock, sizeof(clock), no_flush) == S_OK &&
-                ctx->GetData(warp_start.Get(), &start, sizeof(start), no_flush) == S_OK &&
-                ctx->GetData(warp_end.Get(), &end, sizeof(end), no_flush) == S_OK &&
-                !clock.Disjoint && clock.Frequency != 0u && end >= start) {
-              model_gpu_ms = static_cast<double>(end - start) * 1000.0 / static_cast<double>(clock.Frequency);
-            }
-          }
-          auto *model_mask = work[16u] == 0u ? request.rule : candidate.matte.Get();
-          auto *model_receipt = work[16u] == 0u ? request.rule_receipt : candidate.receipt.Get();
-          current_outline_qualification::evidence_t candidate_evidence;
-          if (!current_outline_draw.record_raw_model(ctx.Get(), draw_command, raw_matte_sbs_rtv.Get(),
-                est, subtitle_render_cb.Get(), model_mask, model_receipt, &candidate_evidence, raw_error) ||
-              !candidate_evidence.bindings_observed || candidate_evidence.contour != evidence.contour ||
-              candidate_evidence.condition != evidence.condition || candidate_evidence.state != evidence.state ||
-              candidate_evidence.subtitle_constants != evidence.subtitle_constants ||
-              candidate_evidence.shared_warp_shape != evidence.shared_warp_shape) {
-            BOOST_LOG(error) << "sbs-bench: raw-matte draw did not retain the completed Rule tuple: " << raw_error;
-            return 6;
-          }
-          const auto relative_sbs = folder / "sbs.png";
-          const auto sbs_path = fs::path(o.out) / relative_sbs;
-          dump_bgra8_texture(dev.Get(), ctx.Get(), raw_matte_sbs.Get(), sbs_path, raw_matte_sbs_stage);
-          const auto sbs_digest = sha256_file_hex(sbs_path);
-          if (sbs_digest.empty()) {
-            return 6;
-          }
-          const auto export_plane = [&](const char *name, ID3D11ShaderResourceView *view, DXGI_FORMAT format,
-                                        const char *encoding, std::array<UINT, 4u> rect,
-                                        ComPtr<ID3D11Texture2D> &staging, nlohmann::json &output) {
-            return export_raw_matte_texture(dev.Get(), ctx.Get(), view, format, encoding, fs::path(o.out),
-                                           folder / name, rect, staging, output);
-          };
-          const std::array<UINT, 4u> band {0u, frame_height - mask_height, frame_width, frame_height};
-          const auto &shape = evidence.shared_warp_shape;
-          const std::array<UINT, 4u> pin_band {0u, shape[2u], shape[0u], shape[1u]};
-          nlohmann::json selected_mask, alpha8, rule_field, model_field, source_rgb;
-          if (!export_plane("selected.u32", model_mask, DXGI_FORMAT_R32_UINT,
-                "r32_uint_little_endian_0_or_1", band, qualified_mask_stage, selected_mask) ||
-              !export_plane("alpha8.u32", candidate.alpha8.Get(), DXGI_FORMAT_R32_UINT,
-                "r32_uint_little_endian_alpha8", band, qualified_mask_stage, alpha8) ||
-              !export_plane("source-rgba16.f16", request.rgb, DXGI_FORMAT_R16G16B16A16_FLOAT,
-                "rgba16_float_little_endian", band, raw_matte_field_stage, source_rgb) ||
-              (evidence.shared_warp_field && !export_plane("rule-field.f32", evidence.shared_warp_field.Get(),
-                DXGI_FORMAT_R32_FLOAT, "r32_float_little_endian", pin_band, raw_matte_field_stage, rule_field)) ||
-              (candidate_evidence.shared_warp_field && !export_plane("model-field.f32", candidate_evidence.shared_warp_field.Get(),
-                DXGI_FORMAT_R32_FLOAT, "r32_float_little_endian", pin_band, raw_matte_field_stage, model_field))) {
-            BOOST_LOG(error) << "sbs-bench: raw-matte draw evidence export failed";
-            return 6;
-          }
-          constexpr current_outline_qualification::producer_stage_spec_t ocr_spec {
-            0u, "ocr", "completed-current-ocr8", 256u, false
-          };
-          ComPtr<ID3D11Buffer> ocr_buffer;
-          const auto relative_ocr = folder / "ocr.u32";
-          const auto ocr_path = fs::path(o.out) / relative_ocr;
-          if (!current_outline_qualification::producer_stage_buffer(dev.Get(), request.ocr, ocr_spec, ocr_buffer) ||
-              !publish_file_atomically(ocr_path, [&](const fs::path &temporary) {
-                return dump_ocr_working_buffer(dev.Get(), ctx.Get(), ocr_buffer.Get(), 1024u, temporary, raw_matte_buffer_stage);
-              })) {
-            return 6;
-          }
-          const auto ocr_digest = sha256_file_hex(ocr_path);
-          if (ocr_digest.empty()) {
-            return 6;
-          }
-          qualified_raw_matte_frames.push_back({
-            {"observation_ordinal", global_sequence}, {"source_file", current_frame.filename().string()},
-            {"source_snapshot_sha256", exact_source_sha256}, {"completed_frame_id", est.completed_frame_id},
-            {"observation_timestamp_us", publication.observation_timestamp_us}, {"transaction_token", publication.transaction_token},
-            {"analysis_generation", publication.analysis_generation}, {"selected_mask", selected_mask}, {"alpha8", alpha8},
-            {"source_rgb", source_rgb},
-            {"output_file", relative_sbs.generic_string()}, {"output_sha256", sbs_digest}, {"output_size", {sbs_w, sbs_h}},
-            {"selected_receipt", candidate_evidence.selected}, {"execution", work}, {"model_gpu_ms", model_gpu_ms},
-            {"ocr", {{"file", relative_ocr.generic_string()}, {"sha256", ocr_digest}, {"word_count", 256u},
-                       {"byte_count", 1024u}, {"format", "uint32-little-endian"}}},
-            {"rule_warp_field", rule_field}, {"warp_field", model_field},
-            {"shared_warp", {{"renderer", "shared-ui-pin-band"}, {"shape", candidate_evidence.shared_warp_shape},
-                             {"draw_serial", candidate_evidence.shared_warp_serial},
-                             {"selected_receipt_header", candidate_evidence.shared_warp_selected_receipt_header},
-                             {"active_rows", candidate_evidence.shared_warp_rows}}}
-          });
-        }
+          if (o.direct_glyph_palette) qualified_direct_glyph_frames.back()["native_lines"] = native_lines;
         }
       }
 
@@ -8187,130 +7601,47 @@ namespace sbs_bench {
     }
     const std::size_t completed_frame_count =
       o.follow ? processed_frame_count : frames.size();
-    if (o.current_outline_qualification) {
+    if (o.direct_glyph_qualification) {
       wchar_t module[32768] {};
       const auto length = GetModuleFileNameW(nullptr, module, static_cast<DWORD>(std::size(module)));
       const auto executable_digest = length != 0u && length < std::size(module) ?
                                        sha256_file_hex(fs::path(module)) :
                                        std::string {};
-      const auto copied_timeline = fs::path(o.out) / "current-outline" / "observation.timeline";
+      const auto copied_timeline = fs::path(o.out) / "direct-glyph" / "observation.timeline";
       fs::copy_file(o.observation_timeline, copied_timeline, fs::copy_options::none, ec);
-      const bool reduced = !o.current_outline_raw_matte_reduced.empty();
-      const bool direct = o.current_outline_direct_glyph;
-      const auto &frame_evidence = direct ? qualified_direct_glyph_frames :
-        reduced ? qualified_reduced_raw_matte_frames : qualified_composite_frames;
-      if (ec || executable_digest.empty() || frame_evidence.size() != completed_frame_count || sha256_file_hex(copied_timeline) != observation_timeline_sha256 || !est.raw_model_provenance) {
+      if (ec || executable_digest.empty() || qualified_direct_glyph_frames.size() != completed_frame_count || sha256_file_hex(copied_timeline) != observation_timeline_sha256 || !est.raw_model_provenance) {
         BOOST_LOG(error) << "sbs-bench: cannot publish incomplete selected-compositor qualification";
         return 8;
       }
-      if (direct) {
+      {
         namespace shader = models::host_sbs_shader_cache;
         if (!qualified_direct_glyph_profile) return 8;
         const auto profile = *qualified_direct_glyph_profile;
-        const auto tile = o.current_outline_direct_glyph_palette ? models::host_sbs_direct_glyph_gpu::palette_tile :
+        const auto tile = o.direct_glyph_palette ? models::host_sbs_direct_glyph_gpu::palette_tile :
                           models::host_sbs_direct_glyph_gpu::tile_shape(profile);
         const auto engine_digest = sha256_file_hex(estimator->direct_glyph_engine_path_for_evaluation());
-        const UINT schema = o.current_outline_direct_glyph_palette ? 6u : o.current_outline_direct_glyph_resolved_fringe ? 5u :
-          o.current_outline_direct_glyph_adaptive_context ? 4u : 3u;
-        if (engine_digest.empty() || !publish_json_atomically(fs::path(o.out) / "current_outline_direct_glyph.json", {
+        const UINT schema = o.direct_glyph_palette ? 6u : o.direct_glyph_resolved_fringe ? 5u :
+          o.direct_glyph_adaptive_context ? 4u : 3u;
+        if (engine_digest.empty() || !publish_json_atomically(fs::path(o.out) / "direct_glyph_qualification.json", {
               {"schema", schema}, {"status", "COMPLETE"},
-              {"role", "file-fed-actual-completed-current-outline-direct-glyph"},
+              {"role", "file-fed-actual-completed-direct-glyph"},
               {"source_transfer", "encoded-srgb"}, {"frame_count", completed_frame_count}, {"executable_sha256", executable_digest},
-              {"observation_timeline", {"current-outline/observation.timeline", observation_timeline_sha256}},
-              {"model", {{"checkpoint", models::direct_glyph_checkpoint_sha256}, {"onnx", models::direct_glyph_onnx_sha256(profile, o.current_outline_direct_glyph_palette)},
-                         {"engine", engine_digest}, {"cutoff_alpha8", raw_matte_gpu::cutoff_alpha8}}},
+              {"observation_timeline", {"direct-glyph/observation.timeline", observation_timeline_sha256}},
+              {"model", {{"checkpoint", models::direct_glyph_checkpoint_sha256}, {"onnx", models::direct_glyph_onnx_sha256(profile, o.direct_glyph_palette)},
+                         {"engine", engine_digest}, {"cutoff_alpha8", models::host_sbs_direct_glyph_publication::cutoff_alpha8}}},
               {"profile_width_height", {tile.width, tile.height}},
-              {o.current_outline_direct_glyph_palette ? "tiles_per_submission" : "tile_capacity",
+              {o.direct_glyph_palette ? "tiles_per_submission" : "tile_capacity",
                models::host_sbs_direct_glyph_gpu::tile_capacity},
               {"shader_source_closures", {{"plan", shader::direct_glyph_plan_source_closure_sha256},
-                   {"transport", o.current_outline_direct_glyph_palette ? shader::direct_glyph_palette_source_closure_sha256 :
+                   {"transport", o.direct_glyph_palette ? shader::direct_glyph_palette_source_closure_sha256 :
                                   shader::direct_glyph_transport_source_closure_sha256},
                    {"prepare", shader::direct_glyph_prepare_source_closure_sha256},
-                   {"source_audit", models::current_outline_runtime::direct_source_audit_closure}}},
+                   {"source_audit", models::host_sbs_direct_glyph_source::direct_source_audit_closure}}},
               {"frames", qualified_direct_glyph_frames}
             })) {
           BOOST_LOG(error) << "sbs-bench: cannot publish complete direct glyph evidence";
           return 8;
         }
-      } else if (reduced) {
-        namespace programs = models::current_outline_runtime;
-        if (!publish_json_atomically(fs::path(o.out) / "current_outline_raw_matte_reduced.json", {
-              {"schema", 3u}, {"status", "COMPLETE"}, {"role", "file-fed-actual-completed-current-outline-raw-matte-reduced"},
-              {"source_transfer", "encoded-srgb"}, {"producer_mode", "raw-matte-floor"},
-              {"frame_count", completed_frame_count}, {"executable_sha256", executable_digest},
-              {"observation_timeline", {"current-outline/observation.timeline", observation_timeline_sha256}},
-              {"model", {{"weights_sha256", raw_matte_gpu::half_context_weights_sha256},
-                         {"checkpoint_sha256", raw_matte_gpu::half_context_checkpoint_sha256},
-                         {"shader_source_closure_sha256", raw_matte_gpu::half_context_shader_source_closure_sha256},
-                         {"cutoff_alpha8", raw_matte_gpu::cutoff_alpha8}}},
-              {"early_shader_source_closure_sha256", raw_matte_gpu::early_shader_source_closure_sha256},
-              {"empty_gate_shader_source_closure_sha256", raw_matte_gpu::empty_gate_shader_source_closure_sha256},
-              {"prepare_source_closure_sha256", current_outline_qualification::raw_model_prepare_closure},
-              {"composition_source_closures", {{"source5", programs::source5_closure}, {"colour", programs::colour_closure},
-                 {"components", programs::components_closure}, {"enclosure", programs::enclosure_closure},
-                 {"roi", programs::roi_closure}, {"outline", programs::outline_closure}, {"inside", programs::inside_closure},
-                 {"trusted_inner", programs::trusted_inner_closure}}},
-              {"frames", qualified_reduced_raw_matte_frames}
-            })) {
-          BOOST_LOG(error) << "sbs-bench: cannot publish complete reduced RawMatte evidence";
-          return 8;
-        }
-      } else {
-      nlohmann::json qualification_manifest {{"schema", 9u}, {"status", "COMPLETE"}, {"role", "file-fed-actual-completed-current-outline-compositor"}, {"ordinary_metric_artifacts", "authenticated-ordinary-base-renderer-v1"}, {"live_capture", false}, {"scheduling_authority", "ordered-authored-full-source-observations"}, {"source_transfer", "encoded-srgb"}, {"frame_count", completed_frame_count}, {"executable_sha256", executable_digest}, {"coordinate_contract_schema", models::depth_coordinate_v2::contract_schema}, {"coordinate_contract_sha256", models::depth_coordinate_v2::contract_canonical_sha256}, {"producer_source_closure_sha256", models::depth_coordinate_v2::shader_source_closure_sha256}, {"selector_source_closure_sha256", models::current_outline_runtime::selector_closure}, {"shared_warp_source_closure_sha256", models::host_sbs_shared_ui_warp::completed_closure}, {"composition_source_closures", {{"source5", models::current_outline_runtime::source5_closure}, {"colour", models::current_outline_runtime::colour_closure}, {"components", models::current_outline_runtime::components_closure}, {"enclosure", models::current_outline_runtime::enclosure_closure}, {"roi", models::current_outline_runtime::roi_closure}, {"outline", models::current_outline_runtime::outline_closure}, {"inside", models::current_outline_runtime::inside_closure}, {"selector", models::current_outline_runtime::selector_closure}, {"stability", models::current_outline_runtime::stability_closure}, {"hole", models::current_outline_runtime::hole_closure}, {"coverage", models::current_outline_runtime::coverage_closure}, {"foreground_edge", models::current_outline_runtime::foreground_edge_closure}, {"trusted_inner", models::current_outline_runtime::trusted_inner_closure}}}, {"hole_program_ready", qualified_hole_program_ready}, {"coverage_program_ready", qualified_coverage_program_ready}, {"foreground_edge_program_ready", qualified_foreground_edge_program_ready}, {"trusted_inner_program_ready", qualified_trusted_inner_program_ready}, {"observation_timeline", {"current-outline/observation.timeline", observation_timeline_sha256}}, {"model", est.raw_model_provenance->depth_model}, {"model_url", est.raw_model_provenance->depth_model_url}, {"onnx_sha256", est.raw_model_provenance->onnx_sha256}, {"raw_coordinate_scale", est.parallax_v2_raw_coordinate_scale}, {"frames", qualified_composite_frames}};
-      if (o.current_outline_omit_foreground_edge) {
-        qualification_manifest["foreground_edge_omitted"] = true;
-      } else if (o.current_outline_omit_stroke_coverage) {
-        qualification_manifest["stroke_coverage_omitted"] = true;
-      }
-      if (o.current_outline_ocr_midpoint_probe) {
-        qualification_manifest["ocr_midpoint_probe"] = true;
-      }
-      if (!publish_json_atomically(fs::path(o.out) / "current_outline_qualification.json", qualification_manifest)) {
-        BOOST_LOG(error) << "sbs-bench: cannot publish complete selected-compositor qualification";
-        return 8;
-      }
-      if (o.current_outline_native_features || o.current_outline_weak_aa) {
-        const auto qualification_digest = sha256_file_hex(fs::path(o.out) / "current_outline_qualification.json");
-        const auto publish_planes = [&](const char *filename, const char *role, const nlohmann::json &frames, bool weak_aa) {
-          nlohmann::json document {
-            {"schema", 1u}, {"status", "COMPLETE"}, {"role", role},
-            {"qualification_sha256", qualification_digest}, {"executable_sha256", executable_digest},
-            {"frame_count", completed_frame_count}, {"frames", frames}
-          };
-          if (weak_aa) {
-            document["diagnostic_source_closures"] = {
-              {"band", models::current_outline_runtime::weak_aa_oracle_band_closure},
-              {"trusted", models::current_outline_runtime::weak_aa_oracle_trusted_closure}
-            };
-          }
-          return !qualification_digest.empty() && frames.size() == completed_frame_count &&
-            publish_json_atomically(fs::path(o.out) / filename, document);
-        };
-        if ((o.current_outline_native_features &&
-             !publish_planes("current_outline_native_features.json", "file-fed-current-outline-native-features",
-                             qualified_native_feature_frames, false)) ||
-            (o.current_outline_weak_aa &&
-             !publish_planes("current_outline_weak_aa.json", "file-fed-current-outline-weak-aa", qualified_weak_aa_frames, true))) {
-          BOOST_LOG(error) << "sbs-bench: cannot publish complete current-outline diagnostic planes";
-          return 8;
-        }
-      }
-      if (!o.current_outline_raw_matte.empty()) {
-        const auto qualification_digest = sha256_file_hex(fs::path(o.out) / "current_outline_qualification.json");
-        if (qualification_digest.empty() || qualified_raw_matte_frames.size() != completed_frame_count ||
-            !publish_json_atomically(fs::path(o.out) / "current_outline_raw_matte.json", {
-              {"schema", 1u}, {"status", "COMPLETE"}, {"role", "file-fed-current-outline-raw-matte-stereo"},
-              {"qualification_sha256", qualification_digest}, {"executable_sha256", executable_digest},
-              {"frame_count", completed_frame_count}, {"frames", qualified_raw_matte_frames},
-              {"model", {{"weights_sha256", raw_matte_gpu::weights_sha256}, {"checkpoint_sha256", raw_matte_gpu::checkpoint_sha256},
-                         {"shader_source_closure_sha256", raw_matte_gpu::shader_source_closure_sha256},
-                         {"cutoff_alpha8", raw_matte_gpu::cutoff_alpha8}}},
-              {"prepare_source_closure_sha256", current_outline_qualification::raw_model_prepare_closure}
-            })) {
-          BOOST_LOG(error) << "sbs-bench: cannot publish complete raw-matte stereo evidence";
-          return 8;
-        }
-      }
       }
     }
     if (o.pfm_joined_diagnostics) {

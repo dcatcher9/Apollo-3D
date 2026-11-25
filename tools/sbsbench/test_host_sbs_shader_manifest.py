@@ -168,36 +168,6 @@ class HostSbsShaderManifestTests(unittest.TestCase):
             if group is not guard:
                 self.assertNotIn("host_sbs_subtitle_matte_guard", group["specs"])
 
-    def test_optional_current_mask_holes_do_not_change_the_mandatory_producer(self):
-        manifest = generator.load_manifest()
-        holes = generator.closure_group(manifest, "current_mask_holes")
-        entries = ("clear_main", "capture_unit_main", "prepare_holes_main", "freeze_final_main",
-                   "init_main", "union_main", "reduce_main", "publish_main", "counter_main")
-        self.assertEqual(tuple(generator.group_specs(manifest, "current_mask_holes")), tuple(
-            ("current_outline/hole/host_sbs_current_mask_holes_cs.hlsl", entry, "cs_5_0")
-            for entry in entries
-        ))
-        for group in manifest["groups"]:
-            if group is not holes:
-                self.assertTrue(set(holes["specs"]).isdisjoint(group["specs"]))
-        original = json.loads(generator.DVC_MANIFEST.read_text(encoding="utf-8"))
-        projected = json.loads(generator.render_dvc_manifest(manifest, json.dumps(original)))
-        self.assertEqual(original["shader_implementation"], projected["shader_implementation"])
-
-    def test_optional_stroke_coverage_has_separate_specs_and_preserves_producer_identity(self):
-        manifest = generator.load_manifest()
-        coverage = generator.closure_group(manifest, "current_stroke_coverage")
-        self.assertEqual(tuple(generator.group_specs(manifest, "current_stroke_coverage")), tuple(
-            ("current_outline/hole/host_sbs_current_stroke_coverage_cs.hlsl", entry, "cs_5_0")
-            for entry in ("clear_offers_main", "prepare_main", "support_main")
-        ))
-        for group in manifest["groups"]:
-            if group is not coverage:
-                self.assertTrue(set(coverage["specs"]).isdisjoint(group["specs"]))
-        original = json.loads(generator.DVC_MANIFEST.read_text(encoding="utf-8"))
-        projected = json.loads(generator.render_dvc_manifest(manifest, json.dumps(original)))
-        self.assertEqual(original["shader_implementation"], projected["shader_implementation"])
-
     def test_order_or_pin_change_requires_closure_refresh(self):
         manifest = generator.load_manifest()
         reordered = copy.deepcopy(manifest)

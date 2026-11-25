@@ -111,49 +111,51 @@ class SharedUiPinDumpTests(unittest.TestCase):
         self.assertTrue(summary["actual_map_verified"])
         self.assertEqual(summary["evidence_schema"], 2)
 
-    def use_hybrid_prepare(self, kind=4, algorithm=3, prepare=None):
+    def use_model_prepare(self, kind=4, algorithm=4, prepare=None):
         receipt = [0] * 64
         receipt[:4] = (0x31534D53, 1, kind, 0)
         receipt[60:] = (7, 8, algorithm, 0)
         self.evidence["shared_pin"]["model_prepare_source_closure_sha256"] = (
-            prepare if prepare is not None else pin._runtime_closure("raw_model_prepare_closure"))
+            prepare if prepare is not None else pin.DIRECT_GLYPH_PREPARE_GROUP.source_closure_sha256)
         self.evidence["binding_roles"]["t7"] = pin.SELECTED_RECEIPT
         self.evidence["selected_receipt_header"] = receipt[:4]
         self.evidence["selected_receipt_token_algorithm"] = receipt[60:]
         self.save(pin.SELECTED_RECEIPT, struct.pack("<64I", *receipt))
         self.seal()
 
-    def test_hybrid_prepare_binds_the_drawn_receipt_and_distinguishes_fallback(self):
+    def test_model_prepare_binds_the_drawn_receipt_and_distinguishes_fallback(self):
         self.current_attribution(pin.COMPLETED_KIND)
-        for kind, algorithm, expected in ((4, 3, "hybrid"), (1, 1, "legacy-fallback")):
+        for kind, algorithm, expected in ((4, 4, "direct-glyph"), (1, 1, "legacy-fallback")):
             with self.subTest(kind=kind):
-                self.use_hybrid_prepare(kind, algorithm)
+                self.use_model_prepare(kind, algorithm)
                 summary = pin.verify(self.root, self.manifest)
                 self.assertTrue(summary["actual_map_verified"])
                 self.assertEqual(summary["verified_selected_matte_kind"], expected)
 
     def test_completed_draw_binds_prepare_generation_and_receipt_algorithm(self):
+        # Archived generations pair a RawMatte prepare with a Direct Glyph prepare; the current
+        # one has the Direct Glyph prepare only.
         previous = (pin.SINGLE_BAND_RAW_PREPARE, pin.SINGLE_BAND_DIRECT_PREPARE)
-        current = (pin._runtime_closure("raw_model_prepare_closure"),
-                   pin.DIRECT_GLYPH_PREPARE_GROUP.source_closure_sha256)
+        current = (pin.DIRECT_GLYPH_PREPARE_GROUP.source_closure_sha256,)
         generations = ((pin.SINGLE_BAND_SPLIT_CLOSURES, previous, 1),
                        (pin.FIRST_PER_EYE_CLOSURES, pin.FIRST_PER_EYE_PREPARES, 2),
                        (None, current, 2))
         for closures, prepares, eyes in generations:
             with self.subTest(closures=closures):
                 self.current_attribution(pin.COMPLETED_KIND, archived_closures=closures)
-                raw, direct = prepares
-                for prepare, algorithm, role in ((raw, 3, "hybrid"), (direct, 4, "direct-glyph")):
-                    self.use_hybrid_prepare(algorithm=algorithm, prepare=prepare)
+                *raw, direct = prepares
+                for prepare, algorithm, role in (*((p, 3, "hybrid") for p in raw), (direct, 4, "direct-glyph")):
+                    self.use_model_prepare(algorithm=algorithm, prepare=prepare)
                     result = pin.verify(self.root, self.manifest)
                     self.assertEqual(result["eye_copies"], eyes)
                     self.assertEqual(result["verified_selected_matte_kind"], role)
-                self.use_hybrid_prepare(algorithm=4, prepare=raw)
-                with self.assertRaisesRegex(ValueError, "unexpected selected receipt"):
-                    pin.verify(self.root, self.manifest)
+                for prepare in raw:
+                    self.use_model_prepare(algorithm=4, prepare=prepare)
+                    with self.assertRaisesRegex(ValueError, "unexpected selected receipt"):
+                        pin.verify(self.root, self.manifest)
                 wrong_prepares = [p for _, other, _ in generations if other != prepares for p in other]
                 for prepare in [*wrong_prepares, "0" * 64]:
-                    self.use_hybrid_prepare(prepare=prepare)
+                    self.use_model_prepare(prepare=prepare)
                     with self.assertRaisesRegex(ValueError, "unknown source or route"):
                         pin.verify(self.root, self.manifest)
 
@@ -174,19 +176,19 @@ class SharedUiPinDumpTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "unknown source or map"):
                     pin.verify(self.root, self.manifest)
 
-    def test_hybrid_prepare_rejects_another_route_or_another_receipt_kind(self):
+    def test_model_prepare_rejects_another_route_or_another_receipt_kind(self):
         self.current_attribution(pin.QUEUED_KIND)
-        self.use_hybrid_prepare()
+        self.use_model_prepare()
         with self.assertRaisesRegex(ValueError, "model prepare has an unknown source or route"):
             pin.verify(self.root, self.manifest)
         self.current_attribution(pin.COMPLETED_KIND)
-        self.use_hybrid_prepare(3, 2)
+        self.use_model_prepare(3, 2)
         with self.assertRaisesRegex(ValueError, "unexpected selected receipt"):
             pin.verify(self.root, self.manifest)
 
-    def test_hybrid_requires_the_exact_literal_receipt(self):
+    def test_model_prepare_requires_the_exact_literal_receipt(self):
         self.current_attribution(pin.COMPLETED_KIND)
-        self.use_hybrid_prepare()
+        self.use_model_prepare()
         self.evidence["selected_receipt_token_algorithm"][0] ^= 1
         self.seal()
         with self.assertRaisesRegex(ValueError, "receipt disagrees"):

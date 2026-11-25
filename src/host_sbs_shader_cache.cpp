@@ -836,7 +836,7 @@ namespace models::host_sbs_shader_cache {
       << statistics_after.embedded_hits - statistics_before.embedded_hits
       << ", compiled="
       << statistics_after.compiled - statistics_before.compiled
-      << "; live current-outline device programs prepare separately; diagnostics remain lazy).";
+      << "; live subtitle device programs prepare separately; diagnostics remain lazy).";
     if (all_ready) {
       prune_persistent_artifacts();
     }

@@ -18,10 +18,9 @@
 #include "host_sbs_subtitle_inner_colour_gpu_global_validation.h"
 #include "host_sbs_body_witness_temporal_recorded.h"
 #include "host_sbs_temporal_frame_context_gpu.h"
-#include "host_sbs_selected_matte_gpu.h"
-#include "host_sbs_current_outline_runtime_programs.h"
-#include "host_sbs_current_outline_observation.h"
 #include "host_sbs_direct_glyph_gpu.h"
+#include "host_sbs_direct_glyph_publication_gpu.h"
+#include "host_sbs_direct_glyph_source_programs.h"
 #include "host_sbs_subtitle_publication.h"
 #include "host_sbs_v2_gpu_executor.h"
 #include "logging.h"
@@ -31,7 +30,6 @@
 #include "platform/windows/utils.h"
 #include "prod_zipdepth_convex2x.h"
 #include "sbs_perf.h"
-#include "sbs_bench_raw_matte_gpu.h"
 #include "utility.h"
 
 #include <algorithm>
@@ -2591,10 +2589,6 @@ namespace models {
       bool has_parallax_map_start = false;
       bool has_parallax_limits_start = false;
       bool has_parallax_subtitle_start = false;
-      // Composition boundaries sit outside cached command lists. Each in-flight
-      // observation owns its own queries; collection never forces a flush.
-      std::array<Microsoft::WRL::ComPtr<ID3D11Query>, 4u> subtitle_composition;
-      std::uint32_t subtitle_composition_marks = 0u;
       bool has_pre = false;
       std::uint64_t perf_generation = 0;
     };
@@ -2628,15 +2622,6 @@ namespace models {
             FAILED(device->CreateQuery(&desc, &slot.pre_end))) {
           BOOST_LOG(warning) << "Depth D3D11 timing unavailable: could not create timestamp queries.";
           return;
-        }
-      }
-      for (auto &slot : d3d_perf_slots) {
-        const D3D11_QUERY_DESC desc {D3D11_QUERY_TIMESTAMP, 0};
-        for (auto &query : slot.subtitle_composition) {
-          if (FAILED(device->CreateQuery(&desc, &query))) {
-            BOOST_LOG(warning) << "Subtitle composition timing unavailable: could not create timestamp queries.";
-            return;
-          }
         }
       }
       d3d_perf_ready = true;
@@ -2748,18 +2733,7 @@ namespace models {
             nonblocking
           );
         }
-        std::array<UINT64, 4u> subtitle_composition_ticks {};
-        bool subtitle_composition_pending = false;
-        bool subtitle_composition_valid = slot.subtitle_composition_marks == 15u;
-        for (std::size_t i = 0; i < subtitle_composition_ticks.size(); ++i) {
-          if ((slot.subtitle_composition_marks & (1u << i)) == 0u) continue;
-          const auto status = context->GetData(slot.subtitle_composition[i].Get(),
-            &subtitle_composition_ticks[i], sizeof(UINT64), nonblocking);
-          subtitle_composition_pending = subtitle_composition_pending || status == S_FALSE;
-          subtitle_composition_valid = subtitle_composition_valid && status == S_OK;
-        }
         const bool any_pending =
-          subtitle_composition_pending ||
           post_start_status == S_FALSE || post_end_status == S_FALSE ||
           pre_start_status == S_FALSE || pre_end_status == S_FALSE ||
           parallax_frame_stats_start_status == S_FALSE ||
@@ -2860,25 +2834,6 @@ namespace models {
               slot.perf_generation
             );
           }
-          if (subtitle_composition_valid && slot.has_parallax_subtitle_start &&
-              subtitle_composition_ticks.front() >= parallax_subtitle_start &&
-              subtitle_composition_ticks.back() <= parallax_end &&
-              std::is_sorted(subtitle_composition_ticks.begin(), subtitle_composition_ticks.end())) {
-            static constexpr std::array<const char *, 3u> stages {
-              "depth_subtitle_source5_gpu", "depth_subtitle_cbc_gpu", "depth_subtitle_f2_gpu"
-            };
-            for (std::size_t i = 0; i < stages.size(); ++i) {
-              sbs_perf::add_sample_ms_if_current(stages[i],
-                static_cast<double>(subtitle_composition_ticks[i + 1u] - subtitle_composition_ticks[i]) * to_ms,
-                slot.perf_generation);
-            }
-            sbs_perf::add_sample_ms_if_current("depth_subtitle_legacy_gpu",
-              static_cast<double>(subtitle_composition_ticks.front() - parallax_subtitle_start) * to_ms,
-              slot.perf_generation);
-            sbs_perf::add_sample_ms_if_current("depth_subtitle_conditioning_gpu",
-              static_cast<double>(parallax_end - subtitle_composition_ticks.back()) * to_ms,
-              slot.perf_generation);
-          }
           if (slot.has_pre) {
             if (telemetry_performance) {
               telemetry_performance->record(host_sbs_telemetry::stage::preprocess, static_cast<double>(pre_end - pre_start) * to_ms, std::chrono::steady_clock::now());
@@ -2912,7 +2867,6 @@ namespace models {
         slot.has_parallax_map_start = false;
         slot.has_parallax_limits_start = false;
         slot.has_parallax_subtitle_start = false;
-        slot.subtitle_composition_marks = 0u;
         slot.has_pre = has_pre;
         slot.perf_generation = sbs_perf::generation();
         context->Begin(slot.disjoint.Get());
@@ -3559,25 +3513,18 @@ namespace models {
     std::array<Microsoft::WRL::ComPtr<ID3D11ComputeShader>, 5u> subtitle_inner_colour_research_shaders;
     std::array<Microsoft::WRL::ComPtr<ID3D11ComputeShader>, 6u> subtitle_inner_components_research_shaders;
     host_sbs_subtitle_inner_colour_gpu_global_validation_v2::resources_t subtitle_inner_colour_research;
-    bool subtitle_selected_matte_enabled=false,subtitle_selected_matte_commands=false;
-    bool subtitle_current_outline_enabled=false;
-    bool subtitle_current_outline_omit_foreground_edge = false;
-    bool subtitle_current_outline_omit_stroke_coverage = false;
-    bool subtitle_current_outline_raw_matte_reduced = false;
-    current_outline_runtime::programs_t subtitle_current_outline_programs;
-    source5_cbc5_f2_composition_gpu_v1::resources_t subtitle_current_outline_composition;
-    research_current_outline_selected_matte_v2::resources_t subtitle_current_outline_selected;
-    sbs_bench::raw_matte_gpu::resources_t subtitle_current_outline_raw_matte;
+    bool subtitle_selected_matte_commands = false;
+    host_sbs_direct_glyph_publication::resources_t subtitle_direct_glyph_publication;
     host_sbs_direct_glyph_gpu::resources_t subtitle_direct_glyph_score;
     display_snapshot_rgb8_analysis_gpu_v1::resources_t subtitle_direct_glyph_source;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_direct_glyph_source_audit;
-    std::array<Microsoft::WRL::ComPtr<ID3D11ComputeShader>, current_outline_runtime::direct_source_audit_specs.size()>
+    std::array<Microsoft::WRL::ComPtr<ID3D11ComputeShader>, host_sbs_direct_glyph_source::direct_source_audit_specs.size()>
       subtitle_direct_glyph_source_shaders;
     std::array<nvinfer1::IExecutionContext *, host_sbs_direct_glyph_gpu::tile_profile_count> subtitle_direct_glyph_contexts {};
     std::array<std::string, host_sbs_direct_glyph_gpu::tile_profile_count> subtitle_direct_glyph_engine_keys;
     std::optional<host_sbs_direct_glyph_gpu::tile_profile_e> subtitle_direct_glyph_profile;
     struct subtitle_direct_glyph_job_t {
-      sbs_bench::raw_matte_gpu::early_request_t publication;
+      host_sbs_direct_glyph_publication::request_t publication;
       host_sbs_direct_glyph_gpu::request_t score;
       std::chrono::steady_clock::time_point deadline;
     };
@@ -3596,9 +3543,7 @@ namespace models {
     bool subtitle_direct_glyph_adaptive_context = false;
     bool subtitle_direct_glyph_line_palette = false;
     bool subtitle_direct_glyph_score_retired = false;
-    std::string subtitle_current_outline_error;
-    Microsoft::WRL::ComPtr<ID3D11ComputeShader> subtitle_selected_matte_shader;
-    research_selected_matte_v1::resources_t subtitle_selected_matte; // independent of temporal epoch
+    std::string subtitle_direct_glyph_error;
     bool subtitle_temporal_source_enabled=false,subtitle_temporal_source_commands=false;
     std::uint64_t subtitle_temporal_source_epoch=0;
     subtitle_temporal_source_research_configuration_t subtitle_temporal_source_configuration;
@@ -3840,8 +3785,7 @@ namespace models {
              completion_dump_snapshot_requested;
     }
     [[nodiscard]] bool subtitle_legacy_matte_required() const noexcept {
-      return subtitle_legacy_matte == subtitle_legacy_matte_e::always ||
-             (subtitle_selected_matte_enabled && !subtitle_current_outline_enabled);
+      return subtitle_legacy_matte == subtitle_legacy_matte_e::always;
     }
     std::uint64_t force_infer_transaction_sequence = 0u;
     bool gpu_undecided_requires_force_infer_refresh = false;
@@ -6581,10 +6525,7 @@ namespace models {
       subtitle_conditioning_diagnostics.reset();
       completed_contour = {};
       completed_subtitle_conditioning_diagnostics = false;
-      subtitle_selected_matte = {};
-      subtitle_current_outline_composition = {};
-      subtitle_current_outline_selected = {};
-      subtitle_current_outline_error.clear();
+      subtitle_direct_glyph_error.clear();
       subtitle_selected_matte_commands = false;
       subtitle_cohort_research = {};
       subtitle_cohort_research_available = false;
@@ -6710,62 +6651,43 @@ namespace models {
     }
 
 
-    [[nodiscard]] research_selected_matte_v1::views_t selected_matte_views() const {
-      if (subtitle_current_outline_enabled) {
-        if (subtitle_current_outline_raw_matte_reduced || subtitle_direct_glyph_enabled) {
-          const auto v = subtitle_current_outline_raw_matte.views();
-          return {v.matte, v.receipt};
-        }
-        const auto v=subtitle_current_outline_selected.views();
-        return {v.matte,v.receipt};
-      }
-      return subtitle_selected_matte.views();
-    }
-
-    [[nodiscard]] source5_cbc5_f2_composition_gpu_v1::request_t
-    make_subtitle_current_outline_request() const {
-      namespace composition=source5_cbc5_f2_composition_gpu_v1;
-      composition::request_t request;
-      request.source.display_snapshot_band=subtitle_contour_source_snapshot.srv.Get();
+    [[nodiscard]] display_snapshot_rgb8_analysis_gpu_v1::request_t make_subtitle_direct_glyph_source_request() const {
+      display_snapshot_rgb8_analysis_gpu_v1::request_t source;
+      source.display_snapshot_band=subtitle_contour_source_snapshot.srv.Get();
       // Descriptor-only parent reference; source pixels come from the joined snapshot above.
-      request.source.parent_raw_source=pending_root->submitted_source.Get();
-      request.source.actual_contour_constants96=subtitle_contour_cbuffer.Get();
-      request.source.actual_sct32=subtitle_contour_identity.srv.Get();
-      request.source.actual_final256=near_identical_transaction.dispatch.Get();
-      request.source.roi_ltrb={pending_root->input_region.left,pending_root->input_region.top,pending_root->input_region.right,pending_root->input_region.bottom};
-      request.source.frame=pending_root->frame_id;
-      request.source.observation_us=pending_root->observation_timestamp_us;
-      request.source.analysis_generation=pending_root->input_region.analysis_generation;
-      request.source.token=pending_root->transaction_token;
-      request.source.transfer_mode=static_cast<UINT>(pending_root->color_space);
-      request.probability=subtitle_contour_probability_snapshot.srv.Get();
-      request.support=subtitle_contour_support.srv.Get();
-      request.ocr_record=ocr_box_record_srv.Get();
-      request.actual_uip40=subtitle_locator_state_srv.Get();
-      request.postprocess_mode=pending_near_identical_postprocess_mode();
-      request.expected_work=cuda_conditional_graph::work_flags_value(pending_root->subtitle_work);
-      return request;
+      source.parent_raw_source=pending_root->submitted_source.Get();
+      source.actual_contour_constants96=subtitle_contour_cbuffer.Get();
+      source.actual_sct32=subtitle_contour_identity.srv.Get();
+      source.actual_final256=near_identical_transaction.dispatch.Get();
+      source.roi_ltrb={pending_root->input_region.left,pending_root->input_region.top,pending_root->input_region.right,pending_root->input_region.bottom};
+      source.frame=pending_root->frame_id;
+      source.observation_us=pending_root->observation_timestamp_us;
+      source.analysis_generation=pending_root->input_region.analysis_generation;
+      source.token=pending_root->transaction_token;
+      source.transfer_mode=static_cast<UINT>(pending_root->color_space);
+      return source;
     }
 
-    [[nodiscard]] sbs_bench::raw_matte_gpu::early_request_t make_early_subtitle_matte_request(
-      const source5_cbc5_f2_composition_gpu_v1::request_t &request, UINT width, UINT crop,
+    [[nodiscard]] host_sbs_direct_glyph_publication::request_t make_subtitle_direct_glyph_publication_request(
+      const display_snapshot_rgb8_analysis_gpu_v1::request_t &source, UINT width, UINT crop,
       bool allow_lazy_legacy
     ) const {
-      sbs_bench::raw_matte_gpu::early_request_t model;
+      host_sbs_direct_glyph_publication::request_t model;
       model.width = width;
       model.height = crop;
-      model.frame = request.source.frame;
-      model.observation_us = request.source.observation_us;
-      model.analysis_generation = request.source.analysis_generation;
-      model.token = request.source.token;
-      model.current_constants = request.source.actual_contour_constants96;
-      model.ocr = request.ocr_record;
-      model.sct = request.source.actual_sct32;
+      model.frame = source.frame;
+      model.observation_us = source.observation_us;
+      model.analysis_generation = source.analysis_generation;
+      model.token = source.token;
+      model.current_constants = source.actual_contour_constants96;
+      model.ocr = ocr_box_record_srv.Get();
+      model.sct = source.actual_sct32;
       model.condition = subtitle_condition_params_srv.Get();
       model.root = near_identical_transaction.srv.Get();
-      model.uip = request.actual_uip40;
-      model.postprocess_mode = request.postprocess_mode;
-      model.expected_work = request.expected_work;
+      model.uip = subtitle_locator_state_srv.Get();
+      // Actual pending function result and work, never guessed from the root.
+      model.postprocess_mode = pending_near_identical_postprocess_mode();
+      model.expected_work = cuda_conditional_graph::work_flags_value(pending_root->subtitle_work);
       model.use_empty_gate = true;
       if (allow_lazy_legacy) {
         model.legacy_dense_shader = subtitle_glyph_matte_cs.Get();
@@ -6776,24 +6698,25 @@ namespace models {
       return model;
     }
 
-    void report_subtitle_outline_failure(const std::string &error) {
-      if (subtitle_current_outline_error != error) {
-        BOOST_LOG(warning) << "Subtitle outline unavailable for this observation: " << error;
-        subtitle_current_outline_error = error;
+    void report_subtitle_direct_glyph_failure(const std::string &error) {
+      if (subtitle_direct_glyph_error != error) {
+        BOOST_LOG(warning) << "Subtitle glyph protection unavailable for this observation: " << error;
+        subtitle_direct_glyph_error = error;
       }
     }
 
     void dispatch_subtitle_direct_glyph(bool input_domain_reset) {
       namespace glyph = host_sbs_direct_glyph_gpu;
-      namespace source5 = display_snapshot_rgb8_analysis_gpu_v1;
+      namespace snapshot = display_snapshot_rgb8_analysis_gpu_v1;
       subtitle_direct_glyph_score_retired = false;
       subtitle_direct_glyph_source_audit.Reset();
       const auto width = pending_root->input_region.width();
       const auto height = pending_root->input_region.height();
       const auto crop = subtitle_ocr_source_crop_height(width, height);
       if (!crop || crop > height) return;
-      const auto request = make_subtitle_current_outline_request();
-      auto publication = make_early_subtitle_matte_request(request, width, crop, !subtitle_direct_glyph_adaptive_context);
+      const auto source_request = make_subtitle_direct_glyph_source_request();
+      auto publication = make_subtitle_direct_glyph_publication_request(
+        source_request, width, crop, !subtitle_direct_glyph_adaptive_context);
       std::string error;
       if (subtitle_direct_glyph_late_score) {
         glyph::result_t discarded;
@@ -6802,25 +6725,25 @@ namespace models {
         subtitle_direct_glyph_score_failed = status == glyph::poll_status_e::failed;
       }
       const bool can_score = !subtitle_direct_glyph_late_score && !subtitle_direct_glyph_score_failed;
-      auto *schedule = subtitle_current_outline_raw_matte.prepare_empty_gate(context.Get(), publication, error);
+      auto *schedule = subtitle_direct_glyph_publication.prepare_empty_gate(context.Get(), publication, error);
       publication.use_empty_gate = schedule != nullptr;
       const auto &shader = subtitle_direct_glyph_source_shaders;
-      const source5::program_t program {shader[0].Get(), shader[1].Get(), shader[2].Get(), shader[3].Get()};
-      std::optional<source5::direct_audit_submission_t> audit;
-      if (can_score && request.source.parent_raw_source && request.source.display_snapshot_band &&
+      const snapshot::program_t program {shader[0].Get(), shader[1].Get(), shader[2].Get(), shader[3].Get()};
+      std::optional<snapshot::direct_audit_submission_t> audit;
+      if (can_score && source_request.parent_raw_source && source_request.display_snapshot_band &&
           subtitle_direct_glyph_source.ensure_direct_audit(device.Get(), width, height, height - crop, crop, error)) {
-        audit = subtitle_direct_glyph_source.queue_current_audit(context.Get(), program, request.source,
-                                                                 request.actual_uip40, error, schedule);
+        audit = subtitle_direct_glyph_source.queue_current_audit(context.Get(), program, source_request,
+                                                                 publication.uip, error, schedule);
         if (audit && subtitle_direct_glyph_capture_plan) {
           subtitle_direct_glyph_source_audit = audit->uip_envelope();
         }
       }
-      auto *work = subtitle_current_outline_raw_matte.plan_direct(context.Get(), publication,
+      auto *work = subtitle_direct_glyph_publication.plan_direct(context.Get(), publication,
                                                                   audit ? &*audit : nullptr,
                                                                   subtitle_direct_glyph_adaptive_context, error,
                                                                   subtitle_direct_glyph_line_palette);
       if (!work) {
-        report_subtitle_outline_failure(error);
+        report_subtitle_direct_glyph_failure(error);
         return;
       }
       const auto profile = subtitle_direct_glyph_line_palette ? glyph::tile_profile_e::common :
@@ -6835,7 +6758,7 @@ namespace models {
         .crop_top = height - crop, .token = publication.token, .capture_plan = subtitle_direct_glyph_capture_plan,
         .adaptive_context = subtitle_direct_glyph_adaptive_context,
         .profile = profile,
-        .detector_caps = subtitle_direct_glyph_line_palette ? subtitle_current_outline_raw_matte.direct_detector_caps() : nullptr,
+        .detector_caps = subtitle_direct_glyph_line_palette ? subtitle_direct_glyph_publication.direct_detector_caps() : nullptr,
         .video_caption_ocr = line_reference ? publication.ocr : nullptr,
         .line_center_twice_source = line_reference ? static_cast<UINT>(std::max(0, line_reference->center_twice_source)) : 0u,
         .generation = publication.analysis_generation, .frame = publication.frame,
@@ -6853,8 +6776,8 @@ namespace models {
         }
         subtitle_direct_glyph_score_failed = status == glyph::submit_status_e::failed;
       }
-      if (!error.empty()) report_subtitle_outline_failure(error);
-      subtitle_selected_matte_commands = subtitle_current_outline_raw_matte.publish_direct(context.Get(), publication, nullptr, nullptr);
+      if (!error.empty()) report_subtitle_direct_glyph_failure(error);
+      subtitle_selected_matte_commands = subtitle_direct_glyph_publication.publish_direct(context.Get(), publication, nullptr, nullptr);
     }
 
     bool retire_subtitle_direct_glyph(const bool evaluation_wait) {
@@ -6889,152 +6812,13 @@ namespace models {
       subtitle_direct_glyph_score_failed = status == glyph::poll_status_e::failed;
       subtitle_direct_glyph_score_retired = status == glyph::poll_status_e::ready;
       const bool ready = status == glyph::poll_status_e::ready;
-      if (ready) subtitle_current_outline_error.clear();
-      else if (!error.empty()) report_subtitle_outline_failure(error);
-      subtitle_selected_matte_commands = subtitle_current_outline_raw_matte.publish_direct(
+      if (ready) subtitle_direct_glyph_error.clear();
+      else if (!error.empty()) report_subtitle_direct_glyph_failure(error);
+      subtitle_selected_matte_commands = subtitle_direct_glyph_publication.publish_direct(
         context.Get(), job.publication, ready ? result.alpha8.Get() : nullptr, ready ? result.completed_placement.Get() : nullptr);
       subtitle_direct_glyph_score.retire();
       subtitle_direct_glyph_job.reset();
       return true;
-    }
-
-    [[nodiscard]] static research_current_outline_selected_matte_v2::inputs_t
-    make_subtitle_current_outline_selector_inputs(
-      const source5_cbc5_f2_composition_gpu_v1::bundle_t &bundle,
-      ID3D11ShaderResourceView *root_view,
-      ID3D11ShaderResourceView *legacy_matte
-    ) {
-      namespace selector=research_current_outline_selected_matte_v2;
-      // Reuse the operands leased by this exact composition publication. The
-      // dispatcher separately checks its identity against the pending observation.
-      const auto &current=bundle.current;
-      selector::inputs_t in;
-      in.current_cb96=current.actual_contour_constants96.Get();
-      in.actual_root_args=current.actual_final256.Get();
-      in.legacy_matte=legacy_matte;
-      in.sct=current.sct.Get();
-      in.root=root_view;
-      in.mode=static_cast<selector::postprocess_mode_e>(current.postprocess_mode);
-      in.expected_work=current.expected_work;
-      in.transaction_token=current.token;
-      in.current_outline_requested=true;
-      in.baseline_matte=bundle.baseline_matte.Get();
-      in.numeric_proof=bundle.numeric_proof.Get();
-      in.source_envelope104=bundle.source.uip_envelope.Get();
-      in.cbc_meta512=bundle.enclosure.receipt.Get();
-      in.raw_meta512=bundle.ring.receipt.Get();
-      in.f2_data=bundle.outline.calibration_data.Get();
-      in.f2_matte=bundle.outline.matte.Get();
-      return in;
-    }
-
-    void dispatch_subtitle_current_outline(ID3D11ShaderResourceView *legacy_matte, d3d_perf_slot *perf_slot) {
-      const auto failed = [this](const std::string &why) { report_subtitle_outline_failure(why); };
-      const bool reduced = subtitle_current_outline_raw_matte_reduced;
-      const bool has_source = pending_root->submitted_source && subtitle_contour_source_snapshot.ready() &&
-                              subtitle_contour_probability_snapshot.ready();
-      if (!has_source && !reduced) {
-        failed("Current source tuple unavailable");return;
-      }
-      const auto w=pending_root->input_region.width(),h=pending_root->input_region.height();
-      const auto crop=subtitle_ocr_source_crop_height(w,h);
-      if (!w || !h || !crop || crop>h) {failed("Invalid source geometry");return;}
-      std::string error;
-      const bool composition_ready = has_source &&
-        subtitle_current_outline_composition.ensure(device.Get(),w,h,h-crop,crop,error,reduced);
-      if (!reduced && (!composition_ready || !subtitle_current_outline_selected.ensure(device.Get(),w,crop,error))) {
-        failed(error);return;
-      }
-      auto request=make_subtitle_current_outline_request();
-      current_outline_stage_observer::observer_t stage_observer;
-      struct timing_owner_t {
-        d3d_perf_slot *slot;
-        bool reduced;
-      } timing_owner {perf_slot, reduced};
-      if (perf_slot) {
-        context->End(perf_slot->subtitle_composition[0u].Get());
-        perf_slot->subtitle_composition_marks = 1u;
-        stage_observer = {&timing_owner,
-          [](void *user, ID3D11DeviceContext *ctx, current_outline_stage_observer::stage_e stage) noexcept {
-            const auto &owner = *static_cast<timing_owner_t *>(user);
-            if (owner.reduced && stage == current_outline_stage_observer::stage_e::f2_end) return;
-            auto &slot = *owner.slot;
-            const auto index = static_cast<std::size_t>(stage) + 1u;
-            if (index < slot.subtitle_composition.size()) {
-              ctx->End(slot.subtitle_composition[index].Get());
-              slot.subtitle_composition_marks |= 1u << index;
-            }
-          }};
-        request.stage_observer = &stage_observer;
-      }
-      const auto queue_start = diagnostics_enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
-      const auto &program = subtitle_current_outline_programs.composition_program();
-      bool issued = false;
-      sbs_bench::raw_matte_gpu::early_request_t model;
-      // Keep the loaded programs available to the qualification readiness check.
-      if (reduced) {
-        model = make_early_subtitle_matte_request(request, w, crop, true);
-        request.work_root_indirect = subtitle_current_outline_raw_matte.prepare_empty_gate(context.Get(), model, error);
-        model.use_empty_gate = request.work_root_indirect != nullptr;
-        if (composition_ready) {
-          auto reduced_program = program;
-          reduced_program.outline.raw_model_floor = true;
-          issued = subtitle_current_outline_composition.queue(context.Get(), reduced_program, request, error);
-        }
-      } else if (subtitle_current_outline_omit_foreground_edge || subtitle_current_outline_omit_stroke_coverage) {
-        auto ablation = program;
-        if (subtitle_current_outline_omit_foreground_edge) {
-          ablation.outline.foreground_edge_shaders = {};
-        } else {
-          ablation.outline.coverage_shaders = {};
-        }
-        issued = subtitle_current_outline_composition.queue(context.Get(), ablation, request, error);
-      } else {
-        // Fresh EMPTY follows the same dispatch path and publishes a current zero mask.
-        issued = subtitle_current_outline_composition.queue(context.Get(), program, request, error);
-      }
-      if (diagnostics_enabled) sbs_perf::add_sample_ms("depth_subtitle_queue_cpu",
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - queue_start).count());
-      if (!issued && !reduced) {
-        failed(error);return;
-      }
-      const auto bundle=subtitle_current_outline_composition.bundle();
-      const bool producer_current = issued && (reduced ? bundle.raw_model_floor : bundle.all_stages_issued) &&
-        bundle.current.frame == pending_root->frame_id &&
-        bundle.current.observation_us == pending_root->observation_timestamp_us &&
-        bundle.current.analysis_generation == pending_root->input_region.analysis_generation &&
-        bundle.current.token == pending_root->transaction_token;
-      if (!producer_current && !reduced) {
-        failed("Composition publication identity mismatch");return;
-      }
-      if (reduced) {
-        // Empty publication and current legacy fallback can succeed even if the model's
-        // optional producer lost an operand. Never substitute previous producer views.
-        if (producer_current) {
-          model.rgb = bundle.source.analysis_band.Get();
-          model.cover = bundle.enclosure.cover_bits.Get();
-          model.body = bundle.enclosure.body.Get();
-          model.selected = bundle.enclosure.selected_bits.Get();
-          model.raw = bundle.ring.matte.Get();
-          model.floor = bundle.outline.matte.Get();
-          model.source_envelope = bundle.source.uip_envelope.Get();
-          model.cbc_meta = bundle.enclosure.receipt.Get();
-          model.raw_meta = bundle.ring.receipt.Get();
-          model.floor_data = bundle.outline.calibration_data.Get();
-        }
-        subtitle_selected_matte_commands = subtitle_current_outline_raw_matte.queue_early(context.Get(), model, error);
-        if (perf_slot && subtitle_selected_matte_commands) {
-          constexpr auto end = static_cast<std::size_t>(current_outline_stage_observer::stage_e::f2_end) + 1u;
-          context->End(perf_slot->subtitle_composition[end].Get());
-          perf_slot->subtitle_composition_marks |= 1u << end;
-        }
-      } else {
-        const auto in=make_subtitle_current_outline_selector_inputs(
-          bundle,near_identical_transaction.srv.Get(),legacy_matte);
-        subtitle_selected_matte_commands=subtitle_current_outline_selected.queue(context.Get(),subtitle_current_outline_programs.selector_program(),in,error);
-      }
-      if (!subtitle_selected_matte_commands) failed(error);
-      else subtitle_current_outline_error.clear();
     }
 
     void release_subtitle_direct_glyph() noexcept {
@@ -7061,135 +6845,57 @@ namespace models {
       }
     }
 
-    bool prepare_subtitle_direct_glyph(const subtitle_selected_matte_research_configuration_t &cfg, std::string &error) {
-      namespace outline = current_outline_runtime;
-      const auto root = std::filesystem::path(cfg.current_outline_shader_root) / "source5";
-      const auto sources = host_sbs_shader_cache::snapshot_sources(root, outline::direct_source_audit_specs);
-      if (!sources || host_sbs_shader_cache::source_closure_sha256(sources) != outline::direct_source_audit_closure) {
+    bool prepare_subtitle_direct_glyph(const subtitle_direct_glyph_configuration_t &cfg, std::string &error) {
+      if (cfg.shader_root.empty()) {
+        error = "Direct glyph shader root missing";
+        return false;
+      }
+      if (cfg.line_palette && (!cfg.adaptive_context || cfg.resolved_fringe)) {
+        error = "Native glyph decoding requires the adaptive OCR work and original detector caps";
+        return false;
+      }
+      if (cfg.resolved_fringe && !cfg.adaptive_context) {
+        error = "Direct glyph fringe requires adaptive context";
+        return false;
+      }
+      namespace audit = host_sbs_direct_glyph_source;
+      const std::filesystem::path model_shaders(cfg.shader_root);
+      const auto sources = host_sbs_shader_cache::snapshot_sources(audit::root(model_shaders), audit::direct_source_audit_specs);
+      if (!sources || host_sbs_shader_cache::source_closure_sha256(sources) != audit::direct_source_audit_closure) {
         error = "Direct glyph source audit closure mismatch";
         return false;
       }
       for (std::size_t i = 0; i < subtitle_direct_glyph_source_shaders.size(); ++i) {
-        if (!create_shader(sources, outline::direct_source_audit_specs[i], subtitle_direct_glyph_source_shaders[i])) {
+        if (!create_shader(sources, audit::direct_source_audit_specs[i], subtitle_direct_glyph_source_shaders[i])) {
           error = "Direct glyph source audit shader creation failed";
           return false;
         }
       }
-      const auto &model_shaders = cfg.current_outline_direct_glyph_shader_root;
-      if (!subtitle_current_outline_raw_matte.load_direct(device.Get(), model_shaders, error,
-                                                         cfg.direct_glyph_resolved_fringe || cfg.direct_glyph_line_palette)) return false;
+      if (!subtitle_direct_glyph_publication.load_direct(device.Get(), model_shaders, error,
+                                                         cfg.resolved_fringe || cfg.line_palette)) return false;
       auto &cuda = cuda_driver_api::get();
-      const std::size_t profiles = cfg.direct_glyph_line_palette ? 1u : subtitle_direct_glyph_contexts.size();
+      const std::size_t profiles = cfg.line_palette ? 1u : subtitle_direct_glyph_contexts.size();
       for (std::size_t i = 0; i < profiles; ++i) {
         const auto profile = static_cast<host_sbs_direct_glyph_gpu::tile_profile_e>(i);
         nvinfer1::ICudaEngine *engine = nullptr;  // The global engine cache owns its lifetime.
         if (!acquire_direct_glyph_context(shader_root.parent_path().parent_path(), cuda, cuda_device, engine,
                                          subtitle_direct_glyph_contexts[i], subtitle_direct_glyph_engine_keys[i], profile,
-                                         cfg.direct_glyph_line_palette)) {
+                                         cfg.line_palette)) {
           release_subtitle_direct_glyph();
           error = "Direct glyph TensorRT asset or execution context unavailable";
           return false;
         }
       }
       if (!subtitle_direct_glyph_score.prepare(device.Get(), context.Get(), model_shaders, cuda_ctx,
-                                              subtitle_direct_glyph_contexts, error, cfg.direct_glyph_line_palette)) {
+                                              subtitle_direct_glyph_contexts, error, cfg.line_palette)) {
         release_subtitle_direct_glyph();
         return false;
       }
       subtitle_direct_glyph_enabled = true;
-      subtitle_direct_glyph_capture_plan = cfg.capture_direct_glyph_plan;
-      subtitle_direct_glyph_adaptive_context = cfg.direct_glyph_adaptive_context;
-      subtitle_direct_glyph_line_palette = cfg.direct_glyph_line_palette;
-      subtitle_current_outline_enabled = true;
-      subtitle_selected_matte_enabled = true;
+      subtitle_direct_glyph_capture_plan = cfg.capture_plan;
+      subtitle_direct_glyph_adaptive_context = cfg.adaptive_context;
+      subtitle_direct_glyph_line_palette = cfg.line_palette;
       return true;
-    }
-
-    bool prepare_subtitle_selected_matte_research(const subtitle_selected_matte_research_configuration_t &cfg,std::string &error) {
-      const bool reduced = !cfg.current_outline_raw_matte_reduced_shader_root.empty();
-      const bool direct = !cfg.current_outline_direct_glyph_shader_root.empty();
-      if (cfg.direct_glyph_line_palette && (!direct || !cfg.direct_glyph_adaptive_context || cfg.direct_glyph_resolved_fringe)) {
-        error = "Native glyph decoding requires the adaptive OCR work and original detector caps";
-        return false;
-      }
-      if (cfg.direct_glyph_resolved_fringe && (!direct || !cfg.direct_glyph_adaptive_context)) {
-        error = "Direct glyph fringe requires adaptive context";
-        return false;
-      }
-      if ((reduced || direct) && (!cfg.current_outline || (direct && reduced) || cfg.current_outline_weak_aa_oracle ||
-                                 cfg.current_outline_omit_foreground_edge || cfg.current_outline_omit_stroke_coverage)) {
-        error = "Subtitle models require one route and the canonical outline inputs";
-        return false;
-      }
-      if (direct) return prepare_subtitle_direct_glyph(cfg, error);
-      if (cfg.current_outline_omit_foreground_edge && cfg.current_outline_omit_stroke_coverage) {
-        error = "Current-outline ablations are mutually exclusive";
-        return false;
-      }
-      if (cfg.current_outline) {
-        if (cfg.current_outline_shader_root.empty() ||
-            !subtitle_current_outline_programs.load(device.Get(),cfg.current_outline_shader_root,error,cfg.current_outline_weak_aa_oracle)) return false;
-        if (reduced && !subtitle_current_outline_programs.trusted_inner_ready()) {
-          error = "Reduced RawMatte requires the current trusted-inner program: " +
-                  subtitle_current_outline_programs.trusted_inner_error();
-          return false;
-        }
-        if (reduced && !subtitle_current_outline_raw_matte.load(
-              device.Get(), cfg.current_outline_raw_matte_reduced_shader_root, error, true)) {
-          return false;
-        }
-        subtitle_current_outline_raw_matte_reduced = reduced;
-        const bool stability_available=subtitle_current_outline_programs.stability_ready();
-        BOOST_LOG(info) << "Current outline black-band cache program availability: "
-                        << (stability_available?"available":"unavailable");
-        if (!stability_available)
-          BOOST_LOG(warning) << "Current outline black-band cache optional programs unavailable: " << subtitle_current_outline_programs.stability_error();
-        subtitle_current_outline_omit_foreground_edge = cfg.current_outline_omit_foreground_edge;
-        subtitle_current_outline_omit_stroke_coverage = cfg.current_outline_omit_stroke_coverage;
-        subtitle_current_outline_enabled=true;
-        subtitle_selected_matte_enabled=true;
-        return true;
-      }
-      if (cfg.current_outline_omit_foreground_edge) {
-        error = "Foreground-edge ablation requires current outline";
-        return false;
-      }
-      if (cfg.current_outline_omit_stroke_coverage) {
-        error = "Stroke-coverage ablation requires current outline";
-        return false;
-      }
-      if (cfg.current_outline_weak_aa_oracle) {
-        error = "Weak-AA oracle requires current outline";
-        return false;
-      }
-      namespace cache=host_sbs_shader_cache;
-      if(cfg.selector_shader_root.empty()||cfg.selector_source_closure_sha256.size()!=64u){error="Missing selected-matte private source";return false;}
-      const std::array specs{cache::shader_spec{"host_sbs_selected_matte_cs.hlsl","select_main","cs_5_0"}};
-      const auto sources=cache::snapshot_sources(cfg.selector_shader_root,specs);
-      if(!sources||cache::source_closure_sha256(sources)!=cfg.selector_source_closure_sha256||!create_shader(sources,specs[0],subtitle_selected_matte_shader)){error="Selected-matte private closure/compilation";return false;}
-      subtitle_selected_matte_enabled=true;subtitle_inner_colour_research_enabled=true;return true;
-    }
-    void dispatch_subtitle_selected_matte_research(ID3D11ShaderResourceView *legacy_matte, d3d_perf_slot *perf_slot) {
-      subtitle_selected_matte_commands=false;
-      if (subtitle_direct_glyph_enabled) { subtitle_direct_glyph_requested = true; return; }
-      if (subtitle_current_outline_enabled) {dispatch_subtitle_current_outline(legacy_matte,perf_slot);return;}
-      if(!subtitle_selected_matte_enabled||!subtitle_selected_matte_shader||!legacy_matte||!subtitle_contour_source_snapshot.ready())return;
-      D3D11_TEXTURE2D_DESC desc{};subtitle_contour_source_snapshot.texture->GetDesc(&desc);std::string error;
-      if(!subtitle_selected_matte.ensure(device.Get(),desc.Width,desc.Height,error))return;
-      research_selected_matte_v1::inputs_t in;
-      in.current_cb96=subtitle_contour_cbuffer.Get();in.actual_root_args=near_identical_transaction.dispatch.Get();
-      in.observation_one_offset=near_identical_gpu_observation_one_byte_offset;
-      in.legacy_matte=legacy_matte;in.sct=subtitle_contour_identity.srv.Get();in.root=near_identical_transaction.srv.Get();
-      in.mode=static_cast<research_selected_matte_v1::postprocess_mode_e>(pending_near_identical_postprocess_mode());
-      in.expected_work=cuda_conditional_graph::work_flags_value(pending_root->subtitle_work);in.transaction_token=pending_root->transaction_token;
-      const bool current_private=subtitle_inner_colour_research_available&&subtitle_inner_colour_research_command_frame==pending_root->frame_id&&subtitle_inner_colour_research_command_time==pending_root->observation_timestamp_us;
-      if(current_private){
-        const auto b=subtitle_temporal_source_commands?subtitle_temporal_source_composition.baseline_views():subtitle_inner_colour_research.mutable_views();
-        in.baseline_matte=b.matte.Get();in.numeric_proof=b.validation_receipt.Get();
-        if(subtitle_temporal_source_commands){const auto t=subtitle_temporal_source_backend.mutable_views();in.temporal_matte=t.matte.Get();in.temporal_receipt=t.receipt.Get();in.frame256=subtitle_temporal_frame_context.output_view().Get();in.temporal_supplied=true;}
-      }
-      // Raw views above are backed by the owned resources through this same-context call.
-      subtitle_selected_matte_commands=subtitle_selected_matte.queue(context.Get(),subtitle_selected_matte_shader.Get(),in,error);
     }
 
     void dispatch_subtitle_inner_colour_research() {
@@ -7583,12 +7289,6 @@ namespace models {
     bool reset_subtitle_state() {
       invalidate_publication();
       reset_subtitle_cohort_research_state();
-      // Revoke optional current-outline history now, even if this context's first accepted
-      // root suppresses subtitle work or repeats the preceding source clock.
-      if (!subtitle_current_outline_composition.invalidate_subtitle_history(context.Get())) {
-        mark_terminal_failure();
-        return false;
-      }
       subtitle_selected_matte_commands = false;
       // The preceding joined root and its consumers must be retired first. These are the same
       // zero-initialized subtitle resources used at startup; depth and camera stay intact.
@@ -8536,9 +8236,9 @@ namespace models {
         dispatch_subtitle_inner_colour_research();
       }
 
-      if (subtitle_selected_matte_enabled) {
-        dispatch_subtitle_selected_matte_research(legacy_matte ? subtitle_glyph_matte.srv.Get() : nullptr, perf_slot);
-      }
+      // Direct Glyph publishes after the contour passes, from the completion poll.
+      subtitle_selected_matte_commands = false;
+      subtitle_direct_glyph_requested = subtitle_direct_glyph_enabled;
 
       // The native distance transform is consumed only by the diagnostic Gaussian proposal.
       if (!conditioning_diagnostics) {
@@ -8772,7 +8472,6 @@ namespace models {
           subtitle_contour_probability_snapshot.srv,
           legacy_matte ? subtitle_glyph_matte.srv : nullptr, subtitle_condition_params_srv
         };
-        if(subtitle_selected_matte_commands){const auto v=selected_matte_views();completed_contour.research_selected_matte=v.matte;completed_contour.research_selected_matte_receipt=v.receipt;}
       };
       if (!conditioning_diagnostics) {
         // No renderer consumes the conditioned field. The effective Final remains Base.
@@ -9531,7 +9230,7 @@ namespace models {
         }
         subtitle_direct_glyph_tail.reset();
         if (subtitle_selected_matte_commands) {
-          const auto selected = selected_matte_views();
+          const auto selected = subtitle_direct_glyph_publication.views();
           completed_contour.research_selected_matte = selected.matte;
           completed_contour.research_selected_matte_receipt = selected.receipt;
         }
@@ -11505,7 +11204,7 @@ namespace models {
           .submitted_source = {},
           .queued_input_domain_reset = std::nullopt,
         };
-        if (queued_same_source_gpu_continuation_research_enabled || subtitle_current_outline_enabled) {
+        if (queued_same_source_gpu_continuation_research_enabled || subtitle_direct_glyph_enabled) {
           // Only the descriptor is needed after admission; immutable RGB is the OCR snapshot.
           pending_root->submitted_source = input_srv;
         }
@@ -11655,9 +11354,14 @@ namespace models {
     return pimpl->prepare_subtitle_temporal_source_research(cfg,error);
   }
 
-  bool video_depth_estimator::configure_subtitle_selected_matte_research(const subtitle_selected_matte_research_configuration_t &cfg,std::string &error) {
-    error.clear();if(!pimpl||!pimpl->is_operational()||pimpl->subtitle_cohort_research_configuration_locked||pimpl->independent_ocr_raw_enabled||pimpl->subtitle_selected_matte_enabled){error="Selected matte must configure once before first input";return false;}
-    return pimpl->prepare_subtitle_selected_matte_research(cfg,error);
+  bool video_depth_estimator::configure_subtitle_direct_glyph(const subtitle_direct_glyph_configuration_t &cfg, std::string &error) {
+    error.clear();
+    if (!pimpl || !pimpl->is_operational() || pimpl->subtitle_cohort_research_configuration_locked ||
+        pimpl->independent_ocr_raw_enabled || pimpl->subtitle_direct_glyph_enabled) {
+      error = "Direct glyph must configure once before first input";
+      return false;
+    }
+    return pimpl->prepare_subtitle_direct_glyph(cfg, error);
   }
 
   bool video_depth_estimator::subtitle_temporal_source_research_enabled() const noexcept {
@@ -12048,124 +11752,32 @@ namespace models {
   }
 
 
-  std::optional<subtitle_selected_matte_diagnostic_views_t>
-  video_depth_estimator::subtitle_selected_matte_diagnostic_views_for_evaluation(std::uint64_t frame,std::uint64_t observation) const noexcept {
-    if(!pimpl||!pimpl->is_operational()||!pimpl->subtitle_selected_matte_enabled||!pimpl->subtitle_selected_matte_commands||
-      frame==0u||observation==0u)return std::nullopt;
-    if (pimpl->subtitle_direct_glyph_enabled) {
-      const auto &publication = pimpl->current_publication;
-      if (pimpl->pending_root || publication.frame_id != frame || publication.observation_timestamp_us != observation ||
-          !pimpl->publication_is_current(publication)) return std::nullopt;
-      const auto direct = pimpl->subtitle_current_outline_raw_matte.views();
-      const auto draw = pimpl->completed_subtitle_draw.lock();
-      if (!draw) return std::nullopt;
-      subtitle_selected_matte_diagnostic_views_t result;
-      result.model_frame = frame;
-      result.model_observation_us = observation;
-      result.current_constants = pimpl->subtitle_contour_cbuffer;
-      result.selected_matte = draw->srv[subtitle_publication::matte];
-      result.selected_receipt = draw->srv[subtitle_publication::receipt];
-      result.current_outline_ocr_record = pimpl->ocr_box_record_srv;
-      result.current_outline_raw_matte_alpha8 = direct.alpha8;
-      result.current_outline_raw_matte_work = direct.work;
-      result.direct_glyph_source_audit = pimpl->subtitle_direct_glyph_source_audit;
-      result.direct_glyph_legacy_dispatch = pimpl->subtitle_current_outline_raw_matte.direct_legacy_dispatch_for_evaluation();
-      if (pimpl->subtitle_direct_glyph_capture_plan && pimpl->subtitle_direct_glyph_score_retired) {
-        result.direct_glyph_placement = pimpl->subtitle_direct_glyph_score.placement_for_evaluation();
-        result.direct_glyph_post_plan_work = pimpl->subtitle_direct_glyph_score.post_plan_work_for_evaluation();
-        result.direct_glyph_native_lines = pimpl->subtitle_direct_glyph_score.native_lines_for_evaluation();
-      }
-      return result;
+  std::optional<subtitle_direct_glyph_diagnostic_views_t>
+  video_depth_estimator::subtitle_direct_glyph_diagnostic_views_for_evaluation(std::uint64_t frame, std::uint64_t observation) const noexcept {
+    if (!pimpl || !pimpl->is_operational() || !pimpl->subtitle_direct_glyph_enabled || !pimpl->subtitle_selected_matte_commands ||
+        frame == 0u || observation == 0u) return std::nullopt;
+    const auto &publication = pimpl->current_publication;
+    if (pimpl->pending_root || publication.frame_id != frame || publication.observation_timestamp_us != observation ||
+        !pimpl->publication_is_current(publication)) return std::nullopt;
+    const auto direct = pimpl->subtitle_direct_glyph_publication.views();
+    const auto draw = pimpl->completed_subtitle_draw.lock();
+    if (!draw) return std::nullopt;
+    subtitle_direct_glyph_diagnostic_views_t result;
+    result.model_frame = frame;
+    result.model_observation_us = observation;
+    result.selected_matte = draw->srv[subtitle_publication::matte];
+    result.selected_receipt = draw->srv[subtitle_publication::receipt];
+    result.ocr_record = pimpl->ocr_box_record_srv;
+    result.alpha8 = direct.alpha8;
+    result.work = direct.work;
+    result.source_audit = pimpl->subtitle_direct_glyph_source_audit;
+    result.legacy_dispatch = pimpl->subtitle_direct_glyph_publication.direct_legacy_dispatch_for_evaluation();
+    if (pimpl->subtitle_direct_glyph_capture_plan && pimpl->subtitle_direct_glyph_score_retired) {
+      result.placement = pimpl->subtitle_direct_glyph_score.placement_for_evaluation();
+      result.post_plan_work = pimpl->subtitle_direct_glyph_score.post_plan_work_for_evaluation();
+      result.native_lines = pimpl->subtitle_direct_glyph_score.native_lines_for_evaluation();
     }
-    if (pimpl->subtitle_current_outline_enabled) {
-      // Observer aliases only. A subsequent admission may change working resources;
-      // retain the exact completed composition operands, never relabel those inputs.
-      const auto bundle=pimpl->subtitle_current_outline_composition.bundle();
-      const auto &published=pimpl->current_publication;
-      const auto &current=bundle.current;
-      namespace observation_owner=current_outline_observation_v1;
-      const auto role=observation_owner::classify(frame,observation,
-        {current.frame,current.observation_us,current.analysis_generation,current.token,current.expected_work},
-        pimpl->pending_root ? observation_owner::identity_t {
-          pimpl->pending_root->frame_id, pimpl->pending_root->observation_timestamp_us,
-          pimpl->pending_root->input_region.analysis_generation, pimpl->pending_root->transaction_token,
-          cuda_conditional_graph::work_flags_value(pimpl->pending_root->subtitle_work)
-        } : observation_owner::identity_t {},
-        pimpl->pending_root.has_value(),
-        pimpl->pending_root && pimpl->pending_root->queued_input_domain_reset.has_value(),
-        pimpl->queued_same_source_gpu_ticket_sequence,
-        {published.frame_id,published.observation_timestamp_us,published.analysis_generation,
-          published.transaction_token,published.expected_work},
-        pimpl->publication_is_current(published));
-      const bool reduced = pimpl->subtitle_current_outline_raw_matte_reduced;
-      if (!(reduced ? bundle.raw_model_floor : bundle.all_stages_issued) || role==observation_owner::role_e::unavailable ||
-          !current.legacy_display_snapshot || !current.probability ||
-          !current.support || !current.actual_contour_constants96) return std::nullopt;
-      const auto selected=pimpl->selected_matte_views();
-      // The completed or queued tuple must still name these exact outputs and original t4.
-      if (!selected.matte || !selected.receipt ||
-          pimpl->completed_contour.research_selected_matte.Get()!=selected.matte.Get() ||
-          pimpl->completed_contour.research_selected_matte_receipt.Get()!=selected.receipt.Get() ||
-          pimpl->completed_contour.source.Get()!=current.legacy_display_snapshot.Get()) return std::nullopt;
-      subtitle_selected_matte_diagnostic_views_t v;
-      v.model_frame=frame;v.model_observation_us=observation;
-      // A queued role proves command ownership only, never GPU completion/publication.
-      v.pending_queued=role==observation_owner::role_e::queued;
-      v.selected_matte=selected.matte;v.selected_receipt=selected.receipt;
-      v.current_probability=current.probability;v.current_support=current.support;
-      v.current_constants=current.actual_contour_constants96;
-      v.current_outline_hole_program_ready=pimpl->subtitle_current_outline_programs.hole_ready();
-      v.current_outline_coverage_program_ready=pimpl->subtitle_current_outline_programs.coverage_ready();
-      v.current_outline_foreground_edge_program_ready=pimpl->subtitle_current_outline_programs.foreground_edge_ready();
-      v.current_outline_trusted_inner_program_ready=pimpl->subtitle_current_outline_programs.trusted_inner_ready();
-      const auto cbc_diagnostics = pimpl->subtitle_current_outline_composition.parent_diagnostics();
-      const auto f2_diagnostics = pimpl->subtitle_current_outline_composition.diagnostics();
-      v.current_outline_cbc_recordings=cbc_diagnostics.recordings;
-      v.current_outline_cbc_replays=cbc_diagnostics.replays;
-      v.current_outline_cbc_allocations=cbc_diagnostics.allocation_replacements;
-      v.current_outline_f2_recordings=f2_diagnostics.recordings;
-      v.current_outline_f2_replays=f2_diagnostics.replays;
-      v.current_outline_f2_allocations=f2_diagnostics.allocation_replacements;
-      v.current_outline_stages={bundle.source.analysis_band,
-        bundle.enclosure.body,bundle.enclosure.receipt,bundle.enclosure.all_body_bits,
-        bundle.enclosure.selected_bits,bundle.enclosure.cover_bits,
-        bundle.ring.matte,bundle.ring.receipt,
-        bundle.outline.calibration_data,bundle.outline.passable_root_cache,
-        bundle.outline.stability_header,bundle.outline.stability_image};
-      if (role==observation_owner::role_e::completed) {
-        v.current_outline_weak_aa_facts=bundle.outline.weak_aa_facts;
-        v.current_outline_weak_aa_trusted=bundle.outline.weak_aa_trusted;
-        v.current_outline_ocr_record=current.ocr_record;
-        if (reduced) {
-          const auto model = pimpl->subtitle_current_outline_raw_matte.views();
-          v.current_outline_raw_matte_floor = bundle.outline.matte;
-          v.current_outline_raw_matte_alpha8 = model.alpha8;
-          v.current_outline_raw_matte_work = model.work;
-        }
-      }
-      // The existing baseline/temporal/source-certificate slots have different ABIs.
-      // Leave them absent; commands/host identity do not certify GPU freshness or UI.
-      return v;
-    }
-    const bool queued = pimpl->pending_root &&
-                        pimpl->pending_root->queued_input_domain_reset.has_value() &&
-                        pimpl->queued_same_source_gpu_ticket_sequence != 0u &&
-                        frame == pimpl->pending_root->frame_id &&
-                        observation == pimpl->pending_root->observation_timestamp_us;
-    const bool completed=!pimpl->pending_root&&pimpl->publication_is_current(pimpl->current_publication)&&pimpl->current_publication.frame_id==frame&&pimpl->current_publication.observation_timestamp_us==observation;
-    if(!queued&&!completed)return std::nullopt;
-    if(!pimpl->subtitle_contour_probability_snapshot.ready()||!pimpl->subtitle_contour_support.ready()||!pimpl->subtitle_contour_cbuffer)return std::nullopt;
-    subtitle_selected_matte_diagnostic_views_t v;v.model_frame=frame;v.model_observation_us=observation;v.pending_queued=queued;
-    const auto selected=pimpl->selected_matte_views();v.selected_matte=selected.matte;v.selected_receipt=selected.receipt;
-    v.current_probability=pimpl->subtitle_contour_probability_snapshot.srv;v.current_support=pimpl->subtitle_contour_support.srv;v.current_constants=pimpl->subtitle_contour_cbuffer;
-    v.baseline_current=pimpl->subtitle_inner_colour_research_available&&pimpl->subtitle_inner_colour_research_command_frame==frame&&pimpl->subtitle_inner_colour_research_command_time==observation;
-    if(v.baseline_current){const auto b=pimpl->subtitle_temporal_source_commands?pimpl->subtitle_temporal_source_composition.baseline_views():pimpl->subtitle_inner_colour_research.mutable_views();v.baseline_body=b.body;v.baseline_matte=b.matte;v.numeric_proof=b.validation_receipt;}
-    v.temporal_commands=pimpl->subtitle_temporal_source_commands;
-    v.source_certificate_valid = queued ? pimpl->pending_root->source_observation.valid() :
-                                         pimpl->completed_input.source_observation.valid();
-    if(v.temporal_commands){const auto t=pimpl->subtitle_temporal_source_backend.mutable_views();v.temporal_matte=t.matte;v.temporal_receipt=t.receipt;v.frame256=pimpl->subtitle_temporal_frame_context.output_view();}
-    if(!v.selected_matte||!v.selected_receipt)return std::nullopt;
-    return v;
+    return result;
   }
 
   std::filesystem::path video_depth_estimator::direct_glyph_engine_path_for_evaluation() const {

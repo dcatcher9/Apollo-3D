@@ -326,76 +326,6 @@ HOST_SBS_SUBTITLE_INNER_COMPONENTS_RESEARCH_DILATE_BOX = ShaderSpec(
     source_entrypoint="dilate_box_main",
     source_target="cs_5_0",
 )
-HOST_SBS_CURRENT_MASK_HOLES_CLEAR = ShaderSpec(
-    source_file="current_outline/hole/host_sbs_current_mask_holes_cs.hlsl",
-    source_entrypoint="clear_main",
-    source_target="cs_5_0",
-)
-HOST_SBS_CURRENT_MASK_HOLES_CAPTURE_UNIT = ShaderSpec(
-    source_file="current_outline/hole/host_sbs_current_mask_holes_cs.hlsl",
-    source_entrypoint="capture_unit_main",
-    source_target="cs_5_0",
-)
-HOST_SBS_CURRENT_MASK_HOLES_PREPARE_HOLES = ShaderSpec(
-    source_file="current_outline/hole/host_sbs_current_mask_holes_cs.hlsl",
-    source_entrypoint="prepare_holes_main",
-    source_target="cs_5_0",
-)
-HOST_SBS_CURRENT_MASK_HOLES_FREEZE_FINAL = ShaderSpec(
-    source_file="current_outline/hole/host_sbs_current_mask_holes_cs.hlsl",
-    source_entrypoint="freeze_final_main",
-    source_target="cs_5_0",
-)
-HOST_SBS_CURRENT_MASK_HOLES_INIT = ShaderSpec(
-    source_file="current_outline/hole/host_sbs_current_mask_holes_cs.hlsl",
-    source_entrypoint="init_main",
-    source_target="cs_5_0",
-)
-HOST_SBS_CURRENT_MASK_HOLES_UNION = ShaderSpec(
-    source_file="current_outline/hole/host_sbs_current_mask_holes_cs.hlsl",
-    source_entrypoint="union_main",
-    source_target="cs_5_0",
-)
-HOST_SBS_CURRENT_MASK_HOLES_REDUCE = ShaderSpec(
-    source_file="current_outline/hole/host_sbs_current_mask_holes_cs.hlsl",
-    source_entrypoint="reduce_main",
-    source_target="cs_5_0",
-)
-HOST_SBS_CURRENT_MASK_HOLES_PUBLISH = ShaderSpec(
-    source_file="current_outline/hole/host_sbs_current_mask_holes_cs.hlsl",
-    source_entrypoint="publish_main",
-    source_target="cs_5_0",
-)
-HOST_SBS_CURRENT_MASK_HOLES_COUNTER = ShaderSpec(
-    source_file="current_outline/hole/host_sbs_current_mask_holes_cs.hlsl",
-    source_entrypoint="counter_main",
-    source_target="cs_5_0",
-)
-HOST_SBS_CURRENT_STROKE_COVERAGE_CLEAR_OFFERS = ShaderSpec(
-    source_file="current_outline/hole/host_sbs_current_stroke_coverage_cs.hlsl",
-    source_entrypoint="clear_offers_main",
-    source_target="cs_5_0",
-)
-HOST_SBS_CURRENT_STROKE_COVERAGE_PREPARE = ShaderSpec(
-    source_file="current_outline/hole/host_sbs_current_stroke_coverage_cs.hlsl",
-    source_entrypoint="prepare_main",
-    source_target="cs_5_0",
-)
-HOST_SBS_CURRENT_STROKE_COVERAGE_SUPPORT = ShaderSpec(
-    source_file="current_outline/hole/host_sbs_current_stroke_coverage_cs.hlsl",
-    source_entrypoint="support_main",
-    source_target="cs_5_0",
-)
-HOST_SBS_CURRENT_FOREGROUND_EDGE = ShaderSpec(
-    source_file="current_outline/hole/host_sbs_current_foreground_edge_cs.hlsl",
-    source_entrypoint="foreground_edge_main",
-    source_target="cs_5_0",
-)
-HOST_SBS_CURRENT_TRUSTED_INNER = ShaderSpec(
-    source_file="current_outline/hole/host_sbs_current_foreground_edge_cs.hlsl",
-    source_entrypoint="trusted_inner_publish_main",
-    source_target="cs_5_0",
-)
 HOST_SBS_DIRECT_GLYPH_PLAN = ShaderSpec(
     source_file="host_sbs_subtitle_direct_glyph_cs.hlsl",
     source_entrypoint="plan_direct_main",
@@ -578,20 +508,6 @@ SHADER_SPECS: Dict[str, ShaderSpec] = {
     "host_sbs_subtitle_inner_components_research_resolve": HOST_SBS_SUBTITLE_INNER_COMPONENTS_RESEARCH_RESOLVE,
     "host_sbs_subtitle_inner_components_research_dilate": HOST_SBS_SUBTITLE_INNER_COMPONENTS_RESEARCH_DILATE,
     "host_sbs_subtitle_inner_components_research_dilate_box": HOST_SBS_SUBTITLE_INNER_COMPONENTS_RESEARCH_DILATE_BOX,
-    "host_sbs_current_mask_holes_clear": HOST_SBS_CURRENT_MASK_HOLES_CLEAR,
-    "host_sbs_current_mask_holes_capture_unit": HOST_SBS_CURRENT_MASK_HOLES_CAPTURE_UNIT,
-    "host_sbs_current_mask_holes_prepare_holes": HOST_SBS_CURRENT_MASK_HOLES_PREPARE_HOLES,
-    "host_sbs_current_mask_holes_freeze_final": HOST_SBS_CURRENT_MASK_HOLES_FREEZE_FINAL,
-    "host_sbs_current_mask_holes_init": HOST_SBS_CURRENT_MASK_HOLES_INIT,
-    "host_sbs_current_mask_holes_union": HOST_SBS_CURRENT_MASK_HOLES_UNION,
-    "host_sbs_current_mask_holes_reduce": HOST_SBS_CURRENT_MASK_HOLES_REDUCE,
-    "host_sbs_current_mask_holes_publish": HOST_SBS_CURRENT_MASK_HOLES_PUBLISH,
-    "host_sbs_current_mask_holes_counter": HOST_SBS_CURRENT_MASK_HOLES_COUNTER,
-    "host_sbs_current_stroke_coverage_clear_offers": HOST_SBS_CURRENT_STROKE_COVERAGE_CLEAR_OFFERS,
-    "host_sbs_current_stroke_coverage_prepare": HOST_SBS_CURRENT_STROKE_COVERAGE_PREPARE,
-    "host_sbs_current_stroke_coverage_support": HOST_SBS_CURRENT_STROKE_COVERAGE_SUPPORT,
-    "host_sbs_current_foreground_edge": HOST_SBS_CURRENT_FOREGROUND_EDGE,
-    "host_sbs_current_trusted_inner": HOST_SBS_CURRENT_TRUSTED_INNER,
     "host_sbs_direct_glyph_plan": HOST_SBS_DIRECT_GLYPH_PLAN,
     "host_sbs_direct_glyph_publish": HOST_SBS_DIRECT_GLYPH_PUBLISH,
     "host_sbs_direct_glyph_plan_tile": HOST_SBS_DIRECT_GLYPH_PLAN_TILE,
@@ -809,7 +725,7 @@ SUBTITLE_INNER_COLOUR_RESEARCH_GROUP = ClosureGroup(
 SUBTITLE_INNER_COMPONENTS_RESEARCH_GROUP = ClosureGroup(
     name="subtitle_inner_components_research",
     description=(
-        "Opt-in inner-colour six-pass component diagnostic dependency; separate from production current-outline ROI graphs."
+        "Opt-in inner-colour six-pass component diagnostic dependency; never production drawing authority."
     ),
     specs=(
         HOST_SBS_SUBTITLE_INNER_COMPONENTS_RESEARCH_INIT,
@@ -842,60 +758,6 @@ PARALLAX_V2_QUEUED_RENDERER_GROUP = ClosureGroup(
         PARALLAX_V2_QUEUED_RENDERER,
     ),
     source_closure_sha256="04fcd38a6f470ebdb25883e160ab999aa43864915d597d29c51be5f7d21ea8bf",
-)
-
-CURRENT_MASK_HOLES_GROUP = ClosureGroup(
-    name="current_mask_holes",
-    description=(
-        "Optional current-source mask-hole refinement; independently authenticated and unavailable on any optional failure. Separate from the mandatory producer closure."
-    ),
-    specs=(
-        HOST_SBS_CURRENT_MASK_HOLES_CLEAR,
-        HOST_SBS_CURRENT_MASK_HOLES_CAPTURE_UNIT,
-        HOST_SBS_CURRENT_MASK_HOLES_PREPARE_HOLES,
-        HOST_SBS_CURRENT_MASK_HOLES_FREEZE_FINAL,
-        HOST_SBS_CURRENT_MASK_HOLES_INIT,
-        HOST_SBS_CURRENT_MASK_HOLES_UNION,
-        HOST_SBS_CURRENT_MASK_HOLES_REDUCE,
-        HOST_SBS_CURRENT_MASK_HOLES_PUBLISH,
-        HOST_SBS_CURRENT_MASK_HOLES_COUNTER,
-    ),
-    source_closure_sha256="b4e48d5eecab2404951602ad649980001f21cf5f9768381acadc7c3973ef4668",
-)
-
-CURRENT_STROKE_COVERAGE_GROUP = ClosureGroup(
-    name="current_stroke_coverage",
-    description=(
-        "Optional current-source stroke-coverage experiment; independently authenticated, with original-source proof and separate offers. Unavailable on optional failure and separate from the mandatory producer closure."
-    ),
-    specs=(
-        HOST_SBS_CURRENT_STROKE_COVERAGE_CLEAR_OFFERS,
-        HOST_SBS_CURRENT_STROKE_COVERAGE_PREPARE,
-        HOST_SBS_CURRENT_STROKE_COVERAGE_SUPPORT,
-    ),
-    source_closure_sha256="1f03ba4279f6cadbaddf56b408cf20c0bc37776c4971e8e25830a8ffd3a3d063",
-)
-
-CURRENT_FOREGROUND_EDGE_GROUP = ClosureGroup(
-    name="current_foreground_edge",
-    description=(
-        "Optional current-source foreground antialias recovery from an immutable post-completion mask, current qualified foreground seeds and a common foreground/outline RGB interval. Failure preserves the existing mask."
-    ),
-    specs=(
-        HOST_SBS_CURRENT_FOREGROUND_EDGE,
-    ),
-    source_closure_sha256="59d4c0f90506ae0e6c042190cdaca7e76a876d0855923b46693da00ff5062a01",
-)
-
-CURRENT_TRUSTED_INNER_GROUP = ClosureGroup(
-    name="current_trusted_inner",
-    description=(
-        "Optional current-source repeated-colour inner-fill recovery, independently accumulated and published after existing outline and foreground-edge completion. Failure preserves the existing mask."
-    ),
-    specs=(
-        HOST_SBS_CURRENT_TRUSTED_INNER,
-    ),
-    source_closure_sha256="5fdc9a1be98291902d63ca639f5bcfd80e88821b6df17bd083a23b5e09c32884",
 )
 
 DIRECT_GLYPH_PLAN_GROUP = ClosureGroup(
@@ -979,10 +841,6 @@ CLOSURE_GROUPS: Dict[str, ClosureGroup] = {
     "subtitle_inner_components_research": SUBTITLE_INNER_COMPONENTS_RESEARCH_GROUP,
     "subtitle_matte_guard_research": SUBTITLE_MATTE_GUARD_RESEARCH_GROUP,
     "parallax_v2_queued_renderer": PARALLAX_V2_QUEUED_RENDERER_GROUP,
-    "current_mask_holes": CURRENT_MASK_HOLES_GROUP,
-    "current_stroke_coverage": CURRENT_STROKE_COVERAGE_GROUP,
-    "current_foreground_edge": CURRENT_FOREGROUND_EDGE_GROUP,
-    "current_trusted_inner": CURRENT_TRUSTED_INNER_GROUP,
     "direct_glyph_plan": DIRECT_GLYPH_PLAN_GROUP,
     "direct_glyph_transport": DIRECT_GLYPH_TRANSPORT_GROUP,
     "direct_glyph_palette": DIRECT_GLYPH_PALETTE_GROUP,

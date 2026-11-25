@@ -30,10 +30,6 @@ namespace models::host_sbs_shared_ui_warp {
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_main_ps", "ps_5_0"},
   }};
   inline constexpr std::string_view completed_closure = "87c2eb4d7a383f039436568433e2ff562ac001cc5b9aff64cf42ce4636496082";
-  inline constexpr std::array<cache::shader_spec, 1u> raw_model_prepare_specs {{
-    {"host_sbs_shared_ui_warp_raw_model_bench.hlsl", "prepare_raw_model_bench_main", "cs_5_0"},
-  }};
-  inline constexpr std::string_view raw_model_prepare_closure = "20bf88f387c4ae231f0bdc0d971423f962e4e7ba71c77da9a2f77e83c248997b";
   inline constexpr std::array<cache::shader_spec, 4u> queued_specs {{
     {"host_sbs_shared_ui_warp_queued.hlsl", "initialize_main", "cs_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "HostBinaryPinCS", "cs_5_0"},
@@ -108,7 +104,7 @@ namespace models::host_sbs_shared_ui_warp {
       ComPtr<ID3D11PixelShader> pixel;
     };
     std::array<route_t, 2u> routes_;
-    ComPtr<ID3D11ComputeShader> raw_model_prepare_;
+    ComPtr<ID3D11ComputeShader> direct_glyph_prepare_;
     std::string_view model_prepare_closure_;
     route_t text_game_;
     ComPtr<ID3D11ComputeShader> text_game_verify_, text_game_columns_;
@@ -152,32 +148,31 @@ namespace models::host_sbs_shared_ui_warp {
       }
     }
 
-    // Only the completed converter probe opts into this prepare. Initialize, pin and draw
+    // The Direct Glyph route replaces only the prepare stage. Initialize, pin and draw
     // still use the already authenticated completed programs on the same device.
-    bool load_raw_model_completed(ID3D11Device *device, const std::filesystem::path &root, std::string &error,
-                                  bool direct_glyph = false) {
+    bool load_direct_glyph_completed(ID3D11Device *device, const std::filesystem::path &root, std::string &error) {
       error.clear();
       try {
         ComPtr<ID3D11Device> completed_device;
         if (routes_[0].pixel) routes_[0].pixel->GetDevice(&completed_device);
         if (!device || !ready() || completed_device.Get() != device) {
-          error = "Raw model shared-warp device does not match its completed programs";
+          error = "Direct glyph shared-warp device does not match its completed programs";
           return false;
         }
-        const auto &specs = direct_glyph ? cache::direct_glyph_prepare_specs : raw_model_prepare_specs;
-        const auto closure = direct_glyph ? cache::direct_glyph_prepare_source_closure_sha256 : raw_model_prepare_closure;
+        const auto &specs = cache::direct_glyph_prepare_specs;
+        const auto closure = cache::direct_glyph_prepare_source_closure_sha256;
         const auto source = cache::snapshot_sources(root, specs);
         if (!source || cache::source_closure_sha256(source) != closure) {
-          error = "Raw model shared-warp prepare source mismatch";
+          error = "Direct glyph shared-warp prepare source mismatch";
           return false;
         }
         const auto code = cache::get(source, specs[0]);
         ComPtr<ID3D11ComputeShader> next;
         if (!code || code->empty() || FAILED(device->CreateComputeShader(code->data(), code->size(), nullptr, &next))) {
-          error = "Raw model shared-warp prepare creation failed";
+          error = "Direct glyph shared-warp prepare creation failed";
           return false;
         }
-        raw_model_prepare_ = std::move(next);
+        direct_glyph_prepare_ = std::move(next);
         model_prepare_closure_ = closure;
         return true;
       } catch (const std::exception &exception) {
@@ -311,11 +306,11 @@ namespace models::host_sbs_shared_ui_warp {
       return {shaders.compute[0].Get(), shaders.compute[1].Get(), shaders.compute[2].Get(), shaders.pixel.Get(), queued};
     }
 
-    [[nodiscard]] bool raw_model_completed_ready() const noexcept { return ready() && raw_model_prepare_; }
+    [[nodiscard]] bool direct_glyph_completed_ready() const noexcept { return ready() && direct_glyph_prepare_; }
     [[nodiscard]] std::string_view model_prepare_closure() const noexcept { return model_prepare_closure_; }
-    [[nodiscard]] program_t raw_model_completed_program() const noexcept {
+    [[nodiscard]] program_t direct_glyph_completed_program() const noexcept {
       auto result = program();
-      result.prepare = raw_model_prepare_.Get();
+      result.prepare = direct_glyph_prepare_.Get();
       return result;
     }
 
@@ -796,6 +791,43 @@ namespace models::host_sbs_shared_ui_warp {
       auto *background = background_.Get(), *proof = background_proof_.Get(); auto *constants = background_constants_.Get();
       context_->PSSetShaderResources(9u, 1u, &background); context_->PSSetShaderResources(11u, 1u, &proof);
       context_->PSSetConstantBuffers(4u, 1u, &constants);
+    }
+  };
+
+  // One private readonly PS slot7 for the selected receipt; the normal recorder owns literal
+  // t0..6/b2/b3. Scope ends before any next estimator mutation. No readback, predicate change
+  // or completed-authority grant.
+  class scoped_receipt_t {
+    ID3D11DeviceContext *context_ = nullptr;
+    ComPtr<ID3D11ShaderResourceView> previous_;
+
+  public:
+    scoped_receipt_t() = default;
+    scoped_receipt_t(const scoped_receipt_t &) = delete;
+    scoped_receipt_t &operator=(const scoped_receipt_t &) = delete;
+
+    bool bind(ID3D11DeviceContext *context, ID3D11ShaderResourceView *receipt) {
+      if (!context || !receipt || context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE) return false;
+      ComPtr<ID3D11Device> context_device, receipt_device;
+      context->GetDevice(&context_device);
+      receipt->GetDevice(&receipt_device);
+      if (context_device.Get() != receipt_device.Get()) return false;
+      ComPtr<ID3D11Predicate> predicate;
+      BOOL predicate_value = FALSE;
+      context->GetPredication(&predicate, &predicate_value);
+      if (predicate) return false;
+      ID3D11ShaderResourceView *old = nullptr;
+      context->PSGetShaderResources(7u, 1u, &old);
+      previous_.Attach(old);
+      context_ = context;
+      context->PSSetShaderResources(7u, 1u, &receipt);
+      return true;
+    }
+    ~scoped_receipt_t() {
+      if (context_) {
+        auto *previous = previous_.Get();
+        context_->PSSetShaderResources(7u, 1u, &previous);
+      }
     }
   };
 } // namespace models::host_sbs_shared_ui_warp
