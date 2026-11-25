@@ -51,6 +51,7 @@
 #include "packed_output_fit.h"
 #include "reshade_bridge.h"
 #include "sbs_debug_dump.h"
+#include "text_game_pin_controller.h"
 #include "utils.h"
 #include "src/capture_image_pool.h"
 #include "src/config.h"
@@ -729,341 +730,6 @@ namespace platf::dxgi {
       return rendered_content_timestamp_;
     }
 
-    /**
-     * The text game in front on this display, as a game source identity: an application its
-     * owner approved for conversion. The foreground is sampled a few times a second; the stream
-     * converts at up to its frame rate.
-     */
-    std::optional<::video::game_source_identity_t> observe_text_game() {
-      using namespace std::chrono_literals;
-      const auto now = std::chrono::steady_clock::now();
-      if (text_game_checked_at != std::chrono::steady_clock::time_point {} && now - text_game_checked_at < 250ms) {
-        return text_game_source;
-      }
-      text_game_checked_at = now;
-      const auto previous = std::exchange(text_game_source, std::nullopt);
-      const auto foreground = foreground_window::sample();
-      const auto &client = foreground.client_screen_rect;
-      // While its window is dragged or resized, and for a sample that could not be completed,
-      // the game is still the one in front: only where its picture lies is unknown. It stays
-      // converted and its text is left unpinned, instead of the session dropping to flat eyes
-      // and reporting the game gone for the length of a drag.
-      const bool geometry_pending = foreground.status == foreground_window::status_e::interactive_move_size ||
-                                    foreground.status == foreground_window::status_e::geometry_unavailable ||
-                                    foreground.status == foreground_window::status_e::foreground_changed;
-      if (geometry_pending && previous && foreground.process_id == previous->process_id) {
-        text_game_client = {};
-        text_game_source = previous;
-        return text_game_source;
-      }
-      std::uint64_t creation_time = 0u;
-      if (foreground_window::carries_geometry(foreground.status) && foreground.process_id && client.valid() &&
-          client.left >= display->screen_x && client.top >= display->screen_y &&
-          client.right <= display->screen_x + display->width && client.bottom <= display->screen_y + display->height) {
-        if (HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, foreground.process_id)) {
-          FILETIME created {}, exited {}, kernel {}, user {};
-          if (GetProcessTimes(process, &created, &exited, &kernel, &user)) {
-            creation_time = (static_cast<std::uint64_t>(created.dwHighDateTime) << 32u) | created.dwLowDateTime;
-          }
-          CloseHandle(process);
-        }
-      }
-      // The owner's approval for this very process decides. Its helper adds the game's own text
-      // where it runs; a game without one is converted all the same.
-      if (creation_time == 0u || !platf::game3d::text_hook::consented(foreground.process_id, creation_time)) {
-        // The reader's own handles would keep an exited game's sections alive.
-        text_game_reader.close();
-        text_game_coverage_uploaded = false;
-        return std::nullopt;
-      }
-      text_game_client = {client.left - display->screen_x, client.top - display->screen_y, client.right - display->screen_x, client.bottom - display->screen_y};
-      text_game_window = foreground.window;
-      const ::video::game_source_identity_t identity {foreground.process_id, creation_time, 0u};
-      if (!text_game_helper_identity || *text_game_helper_identity != identity) {
-        // Nothing learned about one game, or still on its way back from the GPU, is another's.
-        text_game_helper_identity = identity;
-        text_game_helper_sees_text = false;
-        text_game_text_shown = false;
-        text_game_unshown_since.reset();
-        text_game_fallback = {};
-        text_game_protection = {};
-        text_game_verdict_staged = false;
-        text_game_coverage_uploaded = false;
-        text_game_band = {};
-      }
-      text_game_source = identity;
-      return text_game_source;
-    }
-
-    /** Collect the verdict of an earlier draw if it is ready, and stage the one just queued. */
-    void service_text_game_verdict() {
-      namespace adaptive = sunshine_game3d::ui_adaptive;
-      D3D11_MAPPED_SUBRESOURCE mapped {};
-      if (text_game_verdict_staged && SUCCEEDED(device_ctx->Map(text_game_verdict_staging.get(), 0u, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped))) {
-        const auto *words = static_cast<const std::uint32_t *>(mapped.pData);
-        std::memcpy(text_game_verdict.data(), words, sizeof(text_game_verdict));
-        // The same rule as the shader's. The text is pinned only while the picture shows it in
-        // the helper's colours, and only text it has shown once proves that the helper serves
-        // this game; until then the picture-based search and its pin stay.
-        const auto kind_shown = [](const std::uint32_t cores, const std::uint32_t shown) {
-          return cores < 16u || shown * 16u >= cores;
-        };
-        text_game_text_shown = text_game_verdict[0] + text_game_verdict[2] >= 16u && kind_shown(text_game_verdict[0], text_game_verdict[1]) &&
-                               kind_shown(text_game_verdict[2], text_game_verdict[3]);
-        if (text_game_text_shown) {
-          text_game_helper_sees_text = true;
-          text_game_unshown_since.reset();
-        } else {
-          text_game_not_shown();
-        }
-        // The policy asks for at most one observation every 100 ms.
-        const auto &origin = text_game_plane_staged;
-        if (origin.eligible && origin.tick_ms >= text_game_plane_observed_ms + adaptive::probe_interval_ms) {
-          adaptive::sample sample;
-          sample.provenance = origin;
-          sample.width = origin.viewport >> 16u;
-          sample.height = origin.viewport & 0xffffu;
-          for (unsigned index = 0u; index < sample.tiles.size(); ++index) {
-            const unsigned x = index % 16u, y = index / 16u;
-            auto &tile = sample.tiles[index];
-            tile.pixels = ((x + 1u) * sample.width / 16u - x * sample.width / 16u) * ((y + 1u) * sample.height / 16u - y * sample.height / 16u);
-            const auto *counts = words + 4u + index * 6u;
-            // Tiles are counted in source pixels and sized here by integer division, so a count
-            // can exceed its tile by the rounding at a tile's edge. Scale all six alike; only
-            // their ratios are judged.
-            const std::uint32_t covered = counts[0];
-            const double scale = covered > tile.pixels && covered != 0u ? static_cast<double>(tile.pixels) / covered : 1.0;
-            tile.covered = static_cast<std::uint32_t>(covered * scale);
-            std::uint32_t previous = tile.covered;
-            for (unsigned level = 0u; level < tile.bad.size(); ++level) {
-              previous = tile.bad[level] = std::min(previous, static_cast<std::uint32_t>(counts[1u + level] * scale));
-            }
-          }
-          const auto read_ms = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
-          if (text_game_plane.observe(sample, read_ms)) {
-            text_game_plane_observed_ms = origin.tick_ms;
-          }
-        }
-        device_ctx->Unmap(text_game_verdict_staging.get(), 0u);
-        text_game_verdict_staged = false;
-      }
-      if (text_game_verdict_staged) {
-        return;
-      }
-      if (!text_game_verdict_staging) {
-        D3D11_BUFFER_DESC desc {};
-        desc.ByteWidth = static_cast<UINT>(models::host_sbs_shared_ui_warp::text_game_verdict_words * 4u);
-        desc.Usage = D3D11_USAGE_STAGING;
-        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        if (FAILED(device->CreateBuffer(&desc, nullptr, &text_game_verdict_staging))) {
-          return;
-        }
-      }
-      if (auto *verdict = text_game_shared_warp.text_game_verdict()) {
-        device_ctx->CopyResource(text_game_verdict_staging.get(), verdict);
-        text_game_verdict_staged = true;
-        text_game_plane_staged = text_game_plane_live;
-      }
-    }
-
-    /** One more finding that the picture does not show the helper's text, or that it has none. */
-    void text_game_not_shown() {
-      if (!text_game_unshown_since) {
-        text_game_unshown_since = std::chrono::steady_clock::now();
-      }
-    }
-
-    /**
-     * The helper's text counts as serving the game from the first time the picture shows it, and
-     * until three seconds of findings that it does not: a line that fades or a pause between two
-     * lines keeps it. Past that the picture-based search covers the game again, as it does before
-     * the helper has shown anything, so a helper that loses the text, or is not sure of it,
-     * costs no protection. Only findings count: a still picture, which is not looked at, says
-     * nothing against the helper.
-     */
-    [[nodiscard]] bool text_game_helper_serves() const {
-      return text_game_helper_sees_text && (!text_game_unshown_since || std::chrono::steady_clock::now() - *text_game_unshown_since <= std::chrono::seconds(3));
-    }
-
-    /** Tell the setup card what protects the text of the game in front. */
-    void note_text_protection(const bool usable, const bool prepared, const bool pinned) {
-      namespace hook = platf::game3d::text_hook;
-      if (!text_game_source) {
-        return;
-      }
-      const bool helper = pinned || text_game_helper_serves();
-      const hook::protection_t state {
-        helper ? hook::protection_e::game_text : hook::protection_e::picture,
-        helper ? hook::fallback_e::none : !usable ? hook::fallback_e::unavailable :
-                                        prepared  ? hook::fallback_e::not_shown :
-                                                    text_game_fallback,
-      };
-      const auto now = std::chrono::steady_clock::now();
-      // Told at once when it changes, which a change of the game in front makes it do.
-      if (state != text_game_protection || now - text_game_protection_at >= std::chrono::seconds(1)) {
-        text_game_protection = state;
-        text_game_protection_at = now;
-        hook::report_protection(text_game_source->process_id, text_game_source->creation_time, state);
-      }
-    }
-
-    void reset_text_game_pin() {
-      text_game_reader.close();
-      text_game_helper_sees_text = false;
-      text_game_text_shown = false;
-      text_game_helper_identity.reset();
-      text_game_band = {};
-      text_game_coverage_srv.reset();
-      text_game_coverage_texture.reset();
-      text_game_coverage_uploaded = false;
-      text_game_pin_cbuffer.reset();
-      text_game_verdict_staging.reset();
-      text_game_verdict_staged = false;
-      text_game_plane.reset();
-      text_game_plane_observed_ms = 0u;
-      text_game_shared_warp = {};
-    }
-
-    /**
-     * Bring the text the game's helper reports onto this device and describe where it lies in the
-     * source about to be drawn. Returns false, changing nothing that is drawn, whenever there is
-     * no text or any part of it cannot be trusted; the draw then keeps its ordinary geometry.
-     */
-    bool prepare_text_game_pin(const D3D11_TEXTURE2D_DESC &colour, std::array<UINT, 4u> &shape) {
-      namespace hook = platf::game3d::text_hook;
-      const auto &client = text_game_client;
-      if (!text_game_source || !client.valid() || client.left < 0 || client.top < 0 ||
-          client.right > static_cast<LONG>(colour.Width) || client.bottom > static_cast<LONG>(colour.Height)) {
-        return false;
-      }
-      hook::text_t text;
-      // Any refusal below that names no reason of its own is the host's.
-      text_game_fallback = hook::fallback_e::unavailable;
-      // A helper that knows its window reports for that one only: the game's own dialog in front
-      // is not the picture its text was drawn on. Window handles are 32 bits in either process.
-      const bool answered = text_game_reader.read(text_game_source->process_id, text_game_source->creation_time, text);
-      if (!answered || text.unsure || text.top >= text.bottom || (text.window != 0u && static_cast<std::uint32_t>(text.window) != static_cast<std::uint32_t>(text_game_window))) {
-        text_game_fallback = !answered ? hook::fallback_e::no_helper : text.unsure ? hook::fallback_e::unsure :
-                                                                                     hook::fallback_e::no_text;
-        text_game_text_shown = false;
-        // A verdict still on its way is of a draw made before this: it is not taken later.
-        text_game_verdict_staged = false;
-        if (answered && text.unsure) {
-          // The helper itself asks for the picture-based search: no waiting for its text to age.
-          text_game_helper_sees_text = false;
-        } else {
-          text_game_not_shown();
-        }
-        return false;
-      }
-      D3D11_TEXTURE2D_DESC current {};
-      if (text_game_coverage_texture) {
-        text_game_coverage_texture->GetDesc(&current);
-      }
-      if (!text_game_coverage_srv || current.Width != text.surface_width || current.Height != text.surface_height) {
-        text_game_coverage_srv.reset();
-        text_game_coverage_texture.reset();
-        text_game_coverage_uploaded = false;
-        D3D11_TEXTURE2D_DESC desc {};
-        desc.Width = text.surface_width;
-        desc.Height = text.surface_height;
-        desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1u;
-        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        if (FAILED(device->CreateTexture2D(&desc, nullptr, &text_game_coverage_texture)) ||
-            FAILED(device->CreateShaderResourceView(text_game_coverage_texture.get(), nullptr, &text_game_coverage_srv))) {
-          text_game_coverage_srv.reset();
-          text_game_coverage_texture.reset();
-          return false;
-        }
-      }
-      const auto now = std::chrono::steady_clock::now();
-      if (!text_game_coverage_uploaded || text_game_coverage_sequence != text.sequence) {
-        // Only the rows with text are read from the game and only those rows are consulted below.
-        const D3D11_BOX rows {0u, text.top, 0u, text.surface_width, text.bottom, 1u};
-        const UINT pitch = text.surface_width * 4u;
-        device_ctx->UpdateSubresource(text_game_coverage_texture.get(), 0u, &rows, text.pixels + static_cast<std::size_t>(text.top) * pitch, pitch, 0u);
-        // The game may have drawn meanwhile. Those pixels are then a mix of two moments: usable
-        // for this frame, and read again for the next one.
-        text_game_coverage_uploaded = true;
-        text_game_coverage_sequence = text_game_reader.still_current(text) ? text.sequence : text.sequence - 1u;
-      }
-      const float scale_y = static_cast<float>(client.bottom - client.top) / static_cast<float>(text.surface_height);
-      models::host_sbs_shared_ui_warp::text_game_constants_t constants;
-      // The coverage picture was read for the surface rows [top, bottom) only, and a source row
-      // samples the two surface rows around its centre. The source rows kept are those whose
-      // sample lies wholly inside the rows that were read, at any scale of the picture.
-      const float text_first = std::ceil(static_cast<float>(client.top) + (static_cast<float>(text.top) + 0.5f) * scale_y - 0.5f);
-      const float text_end = std::ceil(static_cast<float>(client.top) + (static_cast<float>(text.bottom) - 0.5f) * scale_y - 0.5f);
-      if (!(text_end > text_first) || text_first < 0.0f) {
-        return false;
-      }
-      constants.text_top = static_cast<std::uint32_t>(text_first);
-      constants.text_bottom = static_cast<std::uint32_t>(text_end);
-      // The scene's positive display bound in the scale of the game's picture.
-      constants.front_cap = 0.04f * static_cast<float>(client.right - client.left) / static_cast<float>(colour.Width);
-      // What SDR white is in an HDR capture, so that the picture compares with the game's colours.
-      constants.sdr_white = default_source_sdr_white_scrgb;
-      // The pinned rows are the text and as far above and below it as the distance rule can still
-      // bound the scene. The field lies within the display bound of zero and the plane within
-      // the policy's ceiling, so they differ by at most their sum, which the rule's slope of half
-      // a pixel per pixel covers in twice that many pixels.
-      const float reach = 2.0f * (constants.front_cap + sunshine_game3d::ui_adaptive::comfort_cap_uv) * static_cast<float>(colour.Width) + 2.0f;
-      const auto first = static_cast<LONG>(std::floor(text_first - reach)) - 1;
-      const auto last = static_cast<LONG>(std::ceil(text_end + reach)) + 1;
-      UINT band_top = static_cast<UINT>(std::clamp<LONG>(first, client.top, client.bottom)) / 16u * 16u;
-      UINT band_end = std::min<UINT>(colour.Height, (static_cast<UINT>(std::clamp<LONG>(last, client.top, client.bottom)) + 15u) / 16u * 16u);
-      if (band_top >= band_end) {
-        return false;
-      }
-      // The band grows while the game's picture stays where it is: one, two and three lines of
-      // dialogue then share one set of pin planes instead of reallocating them line by line. A
-      // band more than twice what the text has needed for some seconds, as a page of text or a
-      // menu leaves behind, is given up, so that one such page does not cost every later frame.
-      if (text_game_band.client == client && text_game_band.width == colour.Width && text_game_band.height == colour.Height) {
-        const bool oversized = (band_end - band_top) * 2u < text_game_band.end - text_game_band.top;
-        if (!oversized) {
-          text_game_band_needed_at = now;
-        }
-        if (!oversized || now - text_game_band_needed_at < std::chrono::seconds(3)) {
-          band_top = std::min(band_top, text_game_band.top);
-          band_end = std::max(band_end, text_game_band.end);
-        }
-      } else {
-        text_game_band_needed_at = now;
-      }
-      text_game_band = {client, colour.Width, colour.Height, band_top, band_end};
-      shape = {colour.Width, colour.Height, band_top, band_end - band_top};
-      constants.left = static_cast<float>(client.left);
-      constants.top = static_cast<float>(client.top);
-      constants.inverse_width = 1.0f / static_cast<float>(client.right - client.left);
-      constants.inverse_height = 1.0f / static_cast<float>(client.bottom - client.top);
-      constants.enabled = 1u;
-      // The policy holds the text at screen depth and moves it forward only as far as the scene
-      // under it requires.
-      auto &live = text_game_plane_live;
-      live = {};
-      live.now_ms = live.tick_ms = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count());
-      live.epoch = 1u;
-      live.source_id = (static_cast<std::uint64_t>(text_game_source->process_id) << 32u) ^ text_game_source->creation_time;
-      live.sequence = ++text_game_plane_sequence;
-      live.viewport = (static_cast<std::uint32_t>(client.right - client.left) << 16u) ^ static_cast<std::uint32_t>(client.bottom - client.top);
-      live.eligible = true;
-      live.front_cap_uv = constants.front_cap;
-      constants.plane = text_game_plane.prepare(live).applied_uv;
-      if (!text_game_pin_cbuffer) {
-        D3D11_BUFFER_DESC desc {};
-        desc.ByteWidth = sizeof(constants);
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        const D3D11_SUBRESOURCE_DATA initial {&constants, 0u, 0u};
-        return SUCCEEDED(device->CreateBuffer(&desc, &initial, &text_game_pin_cbuffer));
-      }
-      device_ctx->UpdateSubresource(text_game_pin_cbuffer.get(), 0u, nullptr, &constants, 0u, 0u);
-      return true;
-    }
-
     void publish_game_source_status(const std::optional<::video::game_source_identity_t> &source) {
       if (!::video::is_game_mode(sbs_mode) || !game_source_status_event || !game_effective_mode || game_source_width < 2 || game_source_width > 32767 || game_source_height < 2 || game_source_height > 65535) {
         return;
@@ -1163,7 +829,10 @@ namespace platf::dxgi {
         // only while this session can really convert it, so the client never widens for nothing.
         bool text_game_in_front = false;
         if (!game_source && text_game_eligible && models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer)) {
-          game_source = observe_text_game();
+          game_source = text_game_pin.observe(
+            std::chrono::steady_clock::now(),
+            {display->screen_x, display->screen_y, display->screen_x + display->width, display->screen_y + display->height}
+          );
           text_game_in_front = game_source.has_value();
         }
         // Building the depth pipeline is a burst of GPU work. Local presentation follows the
@@ -1179,8 +848,7 @@ namespace platf::dxgi {
           // moves between the Host AI path and the export or flat path. Both draw into the same
           // packed intermediate and encoder input: pixels and geometry of one route must never
           // be repeated or reused as the other's.
-          const auto route = text_game_ai_active ? packed_route_e::depth : packed_route_e::external_or_flat;
-          if (route != packed_route) {
+          if (text_game_pin.switch_route(text_game_ai_active)) {
             matched_presentation_cache.reset();
             latest_v2_lineage.reset();
             host_sbs_encoder_input_state.reset();
@@ -1188,7 +856,6 @@ namespace platf::dxgi {
             // draws. Whatever completes meanwhile is retired, not shown, when this route resumes.
             subtitle_context.revoke();
             subtitle_context_reprocess_pending = true;
-            packed_route = route;
             // Dump 3D follows the route: a text game is converted by the Host path, so its dump
             // is the Host package; an add-on game's is the add-on's own.
             game_dumper.set_button_request(text_game_ai_active ? nullptr : dump_button_request);
@@ -2885,12 +2552,12 @@ namespace platf::dxgi {
               if (SUCCEEDED(colour_resource.As(&colour_texture))) {
                 D3D11_TEXTURE2D_DESC colour_desc {};
                 colour_texture->GetDesc(&colour_desc);
-                text_pin_prepared = prepare_text_game_pin(colour_desc, text_pin_shape);
+                text_pin_prepared = text_game_pin.prepare(device.get(), device_ctx.get(), colour_desc, default_source_sdr_white_scrgb, text_pin_shape);
               }
             }
-            bool text_pin_selected = text_pin_prepared && text_game_text_shown;
+            bool text_pin_selected = text_pin_prepared && text_game_pin.text_shown();
             if (text_game_ai_active && !predicate) {
-              note_text_protection(text_pin_candidate, text_pin_prepared, text_pin_selected);
+              text_game_pin.note_protection(text_pin_candidate, text_pin_prepared, text_pin_selected, std::chrono::steady_clock::now());
             }
             // The shared pin is prepared only for an enabled subtitle band (below). Without one
             // this is the ordinary draw from the start, so it keeps the fused P010 luma target
@@ -3001,38 +2668,12 @@ namespace platf::dxgi {
               request.geometry_constants = draw_command.geometry_constants;
               request.subtitle_constants = draw_command.subtitle_constants;
               request.sampler = draw_command.sampler;
-              request.text_game = true;
-              request.text_game_coverage = text_game_coverage_srv.get();
-              request.text_game_constants = text_game_pin_cbuffer.get();
-              // Text the picture does not show is only observed: one pass over its rows.
-              const bool observe_only = !text_pin_selected;
-              request.text_game_observe_only = observe_only;
               const auto program = selected_shared_warp_programs.text_game_program();
-              std::string text_pin_error;
-              const bool queued = text_game_shared_warp.ensure(device.get(), text_pin_shape, text_pin_error) &&
-                                  text_game_shared_warp.queue(device_ctx.get(), program, request, text_pin_error, pin_bindings);
-              text_pin_selected = text_pin_selected && queued && text_game_shared_warp.matches(device_ctx.get(), request);
+              auto text_pin_draw = text_game_pin.queue(device.get(), device_ctx.get(), program, request, text_pin_shape, text_pin_selected, diagnostics_enabled);
+              text_pin_selected = text_pin_draw.selected;
               if (text_pin_selected) {
-                text_pin_views = text_game_shared_warp.views();
+                text_pin_views = std::move(text_pin_draw.views);
                 draw_command.pixel_shader = program.pixel;
-              }
-              if (queued) {
-                service_text_game_verdict();
-              }
-              if (diagnostics_enabled) {
-                ++(text_pin_selected ? text_game_pin_draws : queued && observe_only ? text_game_pin_probes : text_game_pin_misses);
-                const auto log_now = std::chrono::steady_clock::now();
-                if (log_now - text_game_logged_at >= std::chrono::seconds(5)) {
-                  text_game_logged_at = log_now;
-                  BOOST_LOG(info) << "Game 3D text pin: draws="sv << text_game_pin_draws << " observed="sv << text_game_pin_probes << " failed="sv << text_game_pin_misses
-                                  << " rows="sv << text_pin_shape[2] << '+' << text_pin_shape[3]
-                                  << " plane="sv << text_game_plane.current().applied_uv << '>' << text_game_plane.current().target_uv
-                                  << '(' << text_game_plane.current().status << ')'
-                                  << " shown light="sv << text_game_verdict[1] << '/' << text_game_verdict[0]
-                                  << " dark="sv << text_game_verdict[3] << '/' << text_game_verdict[2]
-                                  << (text_pin_error.empty() ? ""s : " error="s + text_pin_error);
-                  text_game_pin_draws = text_game_pin_probes = text_game_pin_misses = 0u;
-                }
               }
             }
             if (shared_warp_selected || text_pin_selected) {
@@ -5538,8 +5179,8 @@ namespace platf::dxgi {
         // another window that has just come in front must not inherit it meanwhile.
         // Unless its helper has lately shown that it sees the text, the picture-based search
         // covers it.
-        const bool approved_text_game = text_game_ai_active && !text_game_helper_serves() && text_game_source &&
-                                        text_game_source->process_id == foreground.process_id;
+        const bool approved_text_game = text_game_ai_active &&
+                                        text_game_pin.picture_search_covers(foreground.process_id, std::chrono::steady_clock::now());
         const auto registered_executables = video_player_registry ?
           video_player_registry->executables_if_ready() : std::span<const std::wstring> {};
         const auto executable = !registered_executables.empty() || !approved_text_game ?
@@ -6818,7 +6459,7 @@ namespace platf::dxgi {
       cursor_scissor_raster.Reset();
       sbs_reprojection_v2_live_ps.reset();
       selected_shared_warp={};
-      reset_text_game_pin();
+      text_game_pin.reset();
       sbs_reprojection_v2_p010_y_ps.reset();
       sbs_debug_v2_mapping_ps.Reset();
       sbs_debug_v2_mask_ps.Reset();
@@ -6933,9 +6574,7 @@ namespace platf::dxgi {
       // makes this Game 3D session unable to convert one; it stays valid for add-on games.
       text_game_eligible = ::video::is_game_mode(sbs_mode) && game_source_supported && host_sbs_rejection.empty() && !probe_context;
       text_game_ai_active = false;
-      text_game_source.reset();
-      text_game_checked_at = {};
-      packed_route = packed_route_e::none;
+      text_game_pin.restart_session();
       const bool depth_path_on = ai_on || (sbs_mode == ::video::SBS_GAME_SBS && text_game_eligible);
       if (ai_on && !host_sbs_rejection.empty()) {
         // Launch, RTSP, and live controls have already preflighted the negotiated mode. Reaching
@@ -7665,66 +7304,10 @@ namespace platf::dxgi {
     bool text_game_eligible = false;  ///< This session can convert a text game; decided at init.
     bool text_game_ai_active = false;  ///< The current frame takes the Host AI path for one.
     bool local_presentation = false;  ///< Output goes to a local display, not to an encoder.
-    std::optional<::video::game_source_identity_t> text_game_source;
-    std::chrono::steady_clock::time_point text_game_checked_at {};
-    enum class packed_route_e : std::uint8_t {
-      none,
-      depth,  ///< Host AI path for a text game.
-      external_or_flat,  ///< An add-on export, or duplicate flat eyes without one.
-    };
-    packed_route_e packed_route = packed_route_e::none;
     std::shared_ptr<std::atomic<bool>> dump_button_request;
-    // Where the text game's picture is in the captured source, and the text its helper reports.
-    // The rectangle is empty while the game is in front but its place is not known.
-    foreground_window::rect_t text_game_client {};
-    std::uintptr_t text_game_window = 0u;  ///< The game's window in front.
-    struct text_game_band_t {
-      foreground_window::rect_t client {};
-      UINT width = 0u, height = 0u;
-      UINT top = 0u, end = 0u;
-    };
-    text_game_band_t text_game_band;  ///< The pinned rows used so far for this picture.
-    std::chrono::steady_clock::time_point text_game_band_needed_at {};  ///< When the text last needed half of them.
-    // The picture has shown text in the colours the helper reported, so the helper serves this
-    // game. From then on the picture-based subtitle search has nothing to add and is not run for
-    // it: it costs more GPU time than the depth model itself.
-    bool text_game_helper_sees_text = false;
-    // The latest observation found the helper's text in the picture: it is pinned. Otherwise the
-    // helper's report is only observed, and the draw keeps its ordinary geometry.
-    bool text_game_text_shown = false;
-    /// Since when every finding has been that the picture does not show the helper's text.
-    std::optional<std::chrono::steady_clock::time_point> text_game_unshown_since;
     /// The latest conversion that looked at which window is in front; see needs_conversion_poll().
     std::chrono::steady_clock::time_point text_game_serviced_at {};
-    platf::game3d::text_hook::fallback_e text_game_fallback {};  ///< Why the helper's text was not prepared, last time.
-    platf::game3d::text_hook::protection_t text_game_protection {};  ///< As last told to the setup card.
-    std::chrono::steady_clock::time_point text_game_protection_at {};
-    std::optional<::video::game_source_identity_t> text_game_helper_identity;
-    platf::game3d::text_hook::reader_t text_game_reader;
-    texture2d_t text_game_coverage_texture;
-    shader_res_t text_game_coverage_srv;
-    std::uint32_t text_game_coverage_sequence = 0u;
-    bool text_game_coverage_uploaded = false;
-    buf_t text_game_pin_cbuffer;
-    // The GPU's observation of each draw with text, read back a frame or two late and never
-    // waited for: whether the picture shows the text, which selects the pin for the following
-    // draws (the shader of a pinned draw decides it again for that very frame), and the scene
-    // under the text, which places the text plane.
-    buf_t text_game_verdict_staging;
-    bool text_game_verdict_staged = false;
-    std::array<std::uint32_t, 4u> text_game_verdict {};  ///< light cores, of them shown, dark cores, of them shown
-    // Where the text sits in depth: the Game 3D add-on's own UI plane policy, fed with the scene
-    // under the glyphs. Screen depth unless the scene there is nearer; then one of its levels.
-    sunshine_game3d::ui_adaptive::policy text_game_plane;
-    sunshine_game3d::ui_adaptive::source text_game_plane_live;  ///< Provenance of the draw being prepared.
-    sunshine_game3d::ui_adaptive::source text_game_plane_staged;  ///< Provenance of the staged observation.
-    std::uint64_t text_game_plane_sequence = 0u;
-    std::uint64_t text_game_plane_observed_ms = 0u;
-    std::chrono::steady_clock::time_point text_game_logged_at {};
-    unsigned text_game_pin_draws = 0u;
-    unsigned text_game_pin_probes = 0u;
-    unsigned text_game_pin_misses = 0u;
-    models::host_sbs_shared_ui_warp::resources_t text_game_shared_warp;
+    text_game_pin_controller_t text_game_pin;  ///< The game in front, its helper's text and its pin.
     int game_source_width = 0;
     int game_source_height = 0;
     int game_output_width = 0;

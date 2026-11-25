@@ -559,7 +559,9 @@ picture a game's text helper publishes (t11, premultiplied BGRA in the game's ow
 onto the game's client rectangle by the 48-byte b7 constants), and only in the source rows whose
 samples lie wholly inside the rows the host read for the current text. `text_game_specs` and
 `text_game_closure` in the runtime header are its separately pinned programs; a failure to
-prepare them leaves the subtitle routes unchanged.
+prepare them leaves the subtitle routes unchanged. On the host, `text_game_pin_controller_t`
+(`src/platform/windows/text_game_pin_controller.h`) owns the game in front, the helper's text, the
+verdict readback, the band and the plane; the converter selects the route and records the draw.
 
 Whenever the helper reports text, `text_game_verify_main` observes the draw. It counts the
 glyph-core texels (coverage 0.95 or more), light and dark ones apart, and how many of each the

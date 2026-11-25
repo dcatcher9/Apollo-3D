@@ -60,6 +60,8 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/local_presenter_window.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/local_presenter_window.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/local_shutter_slot_timing.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/text_game_pin_controller.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/text_game_pin_controller.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/reshade_bridge.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/reshade_bridge.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/game3d_installation.h"
