@@ -1138,6 +1138,12 @@ namespace platf::dxgi {
             continue;
           }
 
+          // Only an attached output can be selected below. Probing a detached one costs a
+          // device and two failed duplications with their waits, for nothing.
+          if (!desc.AttachedToDesktop) {
+            continue;
+          }
+
           device_t tested_device;
           const bool backend_available = backend == capture_backend_e::wgc ||
                                          test_dxgi_duplication(adapter_tmp, output_tmp, false, std::addressof(tested_device));
