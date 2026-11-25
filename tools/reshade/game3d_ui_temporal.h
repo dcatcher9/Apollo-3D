@@ -140,35 +140,43 @@ namespace sunshine_game3d::ui_temporal {
     sample.source_kind = words[word::source];
     sample.enabled = words[word::source] != 0;
     sample.state = words[word::source] ? alpha_auto_state::automatic_on : alpha_auto_state::automatic_off;
-    sample.covered = words[word::covered]; sample.pixels = words[word::pixels];
+    // The pixel counts are the ones the shader's CPU oracle decides from
+    // (ui_selection::counts_from_words): one reading of the words serves both,
+    // so the shipped decoder and the oracle cannot come to read them differently.
+    const auto counts = ui_selection::counts_from_words(words, count);
+    using ui_selection::alpha_index;
+    using ui_selection::kind;
+    const auto alpha_kinds = [](const std::array<std::uint32_t, 5> &by_kind) {
+      return std::array<std::uint32_t, 4> {by_kind[alpha_index(kind::ui_alpha)], by_kind[alpha_index(kind::ui_color)],
+        by_kind[alpha_index(kind::backbuffer)], by_kind[alpha_index(kind::current)]};
+    };
+    sample.covered = words[word::covered]; sample.pixels = counts.pixels;
     sample.sample_sequence = sequence;
     sample.sample_tick_ms = tick_ms;
     auto &evidence = sample.evidence;
-    evidence.matching_tiles = words[word::matching_tiles];
-    evidence.candidates = words[word::candidates]; evidence.hudless_changed = words[word::hudless_changed];
-    evidence.hudless_unchanged = words[word::hudless_unchanged]; evidence.hudless_invalid = words[word::hudless_invalid];
-    std::copy_n(words + word::alpha_covered, 4, evidence.alpha_covered.begin());
-    std::copy_n(words + word::alpha_invalid, 4, evidence.alpha_invalid.begin());
-    evidence.hudless_lit = words[word::hudless_lit];
+    evidence.matching_tiles = counts.matching_tiles;
+    evidence.candidates = words[word::candidates]; evidence.hudless_changed = counts.changed;
+    evidence.hudless_unchanged = counts.unchanged; evidence.hudless_invalid = counts.nonfinite;
+    evidence.alpha_covered = alpha_kinds(counts.covered);
+    evidence.alpha_invalid = alpha_kinds(counts.invalid);
+    evidence.hudless_lit = counts.lit;
     evidence.accepted = words[word::accepted];
-    evidence.alpha_opaque = {words[word::alpha_opaque], words[word::alpha_opaque + 1]};
-    evidence.layer_covered = words[word::layer_covered];
-    evidence.layer_invalid = words[word::layer_invalid];
-    evidence.layer_opaque = words[word::layer_opaque];
+    evidence.alpha_opaque = {counts.opaque_ui_alpha, counts.opaque_ui_color};
+    evidence.layer_covered = counts.covered[alpha_index(kind::ui_layer)];
+    evidence.layer_invalid = counts.invalid[alpha_index(kind::ui_layer)];
+    evidence.layer_opaque = counts.opaque_layer;
     evidence.valid_bits = words[word::valid_bits];
-    evidence.strong = {words[word::strong_ui_alpha], words[word::strong_ui_color], words[word::strong_backbuffer],
-      words[word::strong_current]};
-    evidence.contradicted = {words[word::contradicted_ui_alpha], words[word::contradicted_ui_color],
-      words[word::contradicted_backbuffer], words[word::contradicted_current]};
+    evidence.strong = counts.strong;
+    evidence.contradicted = counts.contradicted;
     evidence.refused = words[word::refused];
     evidence.frame_reason = words[word::frame_reason] & ui_detection::frame_reason_reason_mask;
     evidence.reused = (words[word::frame_reason] & ui_detection::frame_reason_reused) != 0;
-    evidence.inferred_opaque = {words[word::opaque_backbuffer], words[word::opaque_current]};
+    evidence.inferred_opaque = {counts.opaque_backbuffer, counts.opaque_current};
     evidence.claims = words[word::claims];
     evidence.s1_source = words[word::h1] & ui_detection::h1_winner_mask;
     evidence.h1_applied = (words[word::h1] & ui_detection::h1_applied) != 0;
-    evidence.pre_ui_match = words[word::pre_ui_match];
-    evidence.pre_ui_image_lit = words[word::pre_ui_image_lit];
+    evidence.pre_ui_match = counts.pre_ui_match;
+    evidence.pre_ui_image_lit = counts.pre_ui_lit;
     const auto decode = [&](std::size_t n, std::size_t d, std::size_t state) {
       alpha_auto_decision::scene_evidence result;
       result.n = words[n];
