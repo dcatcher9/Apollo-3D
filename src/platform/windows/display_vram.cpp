@@ -2954,7 +2954,11 @@ namespace platf::dxgi {
             if (text_game_ai_active && !predicate) {
               note_text_protection(text_pin_candidate, text_pin_prepared, text_pin_selected);
             }
-            auto *selected_receipt = subtitle_pin_candidate && !text_pin_selected && !predicate ?
+            // The shared pin is prepared only for an enabled subtitle band (below). Without one
+            // this is the ordinary draw from the start, so it keeps the fused P010 luma target
+            // instead of giving it up for a pin that is then never prepared.
+            auto *selected_receipt = subtitle_pin_candidate && subtitle_constants.enabled == 1u &&
+                                         !text_pin_selected && !predicate ?
                                        geometry.selected_receipt : nullptr;
             bool selected_draw = selected_receipt != nullptr;
             // Only an authenticated V2 stream selects the production warp. Awaiting, stale, and
