@@ -5852,14 +5852,20 @@ namespace models {
         // Pool empty. On a back-to-back session rebuild the previous estimator is often
         // still tearing down on the async-teardown thread and will return its context to
         // the pool momentarily -- wait briefly for that before paying seconds (and ~1.3 GB
-        // of device scratch) for a fresh context.
-        for (int i = 0; i < 10 && !exec_context; i++) {
-          std::this_thread::sleep_for(std::chrono::milliseconds(100));
-          std::lock_guard<std::mutex> lock(g_trt_mutex);
-          auto &pool = g_engines[engine_key].context_pool;
-          if (!pool.empty()) {
-            exec_context = pool.back();
-            pool.pop_back();
+        // of device scratch) for a fresh context. Only a usable context that someone still
+        // holds can come back: the first owner in a process (the offline worker, a harness
+        // run) has none to wait for.
+        {
+          std::unique_lock<std::mutex> lock(g_trt_mutex);
+          auto &slot = g_engines[engine_key];
+          if (slot.context_accounting.usable() != 0u) {
+            g_trt_context_available.wait_for(lock, std::chrono::seconds(1), [&slot]() {
+              return !slot.context_pool.empty();
+            });
+          }
+          if (!slot.context_pool.empty()) {
+            exec_context = slot.context_pool.back();
+            slot.context_pool.pop_back();
             depth_context_pooled = true;
             context_warmed = true;
             BOOST_LOG(info) << "Reusing pooled TensorRT execution context (freed by a racing teardown).";
