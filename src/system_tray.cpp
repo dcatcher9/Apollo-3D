@@ -73,10 +73,19 @@ namespace system_tray {
     launch_ui();
   }
 
+  // Ending the session waits for the launch and process locks, and their holders update the
+  // tray with a message this thread must answer. Waiting for them here would stop both: a
+  // "Force close" during a launch hung the host. The tray thread only starts the work.
+  static void terminate_active_session_off_tray_thread() {
+    std::thread([]() {
+      nvhttp::terminate_active_session();
+    }).detach();
+  }
+
   void
     tray_force_stop_cb(struct tray_menu *item) {
     BOOST_LOG(info) << "Force stop from system tray"sv;
-    nvhttp::terminate_active_session();
+    terminate_active_session_off_tray_thread();
   }
 
   void tray_restart_cb([[maybe_unused]] struct tray_menu *item) {
@@ -330,7 +339,7 @@ namespace system_tray {
     tray.notification_text = msg;
     tray.notification_cb = []() {
       BOOST_LOG(info) << "Force stop from notification"sv;
-      nvhttp::terminate_active_session();
+      terminate_active_session_off_tray_thread();
     };
     tray.tooltip = product_display_name;
     tray_update(&tray);
