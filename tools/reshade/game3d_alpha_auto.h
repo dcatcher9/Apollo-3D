@@ -45,7 +45,7 @@ namespace sunshine_game3d {
     alpha_auto_policy *session{}; // Caller-owned game session; never owned by a renderer.
   };
 
-  enum class alpha_auto_state { waiting_for_source, collecting, automatic_on, automatic_off, manual_on, manual_off, dedicated_ui };
+  enum class alpha_auto_state { waiting_for_source, collecting, automatic_on, automatic_off, manual_on, manual_off };
 
   inline const char *name(alpha_auto_state value) {
     switch (value) {
@@ -54,7 +54,6 @@ namespace sunshine_game3d {
       case alpha_auto_state::automatic_off: return "no_usable_mask";
       case alpha_auto_state::manual_on: return "manual_on";
       case alpha_auto_state::manual_off: return "manual_off";
-      case alpha_auto_state::dedicated_ui: return "dedicated_ui";
       default: return "checking";
     }
   }

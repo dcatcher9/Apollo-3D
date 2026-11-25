@@ -537,7 +537,7 @@ namespace {
     presented.fg = {true, true, false, 1, 0, 7, 41};
     presented.coverage = generic;
     presented.coverage.enabled = true;
-    presented.coverage.state = alpha_auto_state::dedicated_ui;
+    presented.coverage.state = alpha_auto_state::automatic_on;
     presented.rendered = presented.applied = true;
     for (const auto input : {source_alpha_input::sl_ui_color_alpha, source_alpha_input::sl_ui_alpha}) {
       presented.input = input;

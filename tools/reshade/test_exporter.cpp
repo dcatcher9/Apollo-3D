@@ -1669,11 +1669,11 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       presented.input = sunshine_game3d::source_alpha_input::sl_ui_alpha;
       presented.rendered = presented.applied = presented.retained_alpha_ready = true;
       presented.automatic = presented.coverage.enabled = true;
-      presented.coverage.state = sunshine_game3d::alpha_auto_state::dedicated_ui;
+      presented.coverage.state = sunshine_game3d::alpha_auto_state::automatic_on;
       publish_source_alpha_ui(owner(), presented);
       const auto active = sunshine_game3d::query_source_alpha_ui(owner());
       require(active.rendered && active.applied && active.input == sunshine_game3d::source_alpha_input::sl_ui_alpha &&
-        active.coverage.state == sunshine_game3d::alpha_auto_state::dedicated_ui &&
+        active.coverage.state == sunshine_game3d::alpha_auto_state::automatic_on &&
         active.dedicated_ui_active(sunshine_game3d::source_alpha_mode::automatic, true),
         "UI did not receive the renderer's dedicated input and applied decision");
       publisher.invalidate(owner(), false);
