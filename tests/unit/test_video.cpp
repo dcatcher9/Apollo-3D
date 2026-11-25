@@ -673,7 +673,7 @@ TEST(DirectxShaderTest, LoadsPackagedDisplayShadersBitForBitWithoutRuntimeCompil
   };
   const auto before = cache::cache_statistics();
   constexpr auto optimized_flags = D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3;
-  static_assert(display_shader_specs.size() == 29u);
+  static_assert(display_shader_specs.size() == 30u);
   for (const auto &spec : display_shader_specs) {
     SCOPED_TRACE(std::string {spec.filename});
     const auto embedded = cache::get_embedded(sources, spec);

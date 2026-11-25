@@ -33,7 +33,8 @@
   X(rgb_present_linear_to_srgb_ps, ps) \
   X(rgb_present_hdr_to_srgb_ps, ps) \
   X(rgb_present_srgb_to_linear_ps, ps) \
-  X(cursor_vs, vs)
+  X(cursor_vs, vs) \
+  X(p010_uv_tile_cs, cs)
 
 namespace platf::dxgi {
   inline constexpr std::array display_shader_specs {

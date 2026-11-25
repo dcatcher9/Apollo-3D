@@ -5443,8 +5443,9 @@ namespace platf::dxgi {
         return false;
       }
 
-      // Compile only for an eligible encoder. Failure leaves raster chroma available.
-      static auto bytecode = compile_shader(SUNSHINE_SHADERS_DIR "/p010_uv_tile_cs.hlsl", "main_cs", "cs_5_0");
+      // Loaded with the display shaders at startup, from the packaged bytecode where the
+      // installed source matches it. Without it raster chroma stays available.
+      auto *const bytecode = p010_uv_tile_cs_hlsl.get();
       return bytecode && SUCCEEDED(device->CreateComputeShader(
         bytecode->GetBufferPointer(), bytecode->GetBufferSize(), nullptr, &p010_chroma_shader
       ));
@@ -13367,7 +13368,8 @@ namespace platf::dxgi {
       if (!bytecode) {
         const auto path = SUNSHINE_SHADERS_DIR "/" + std::string {spec.filename};
         bytecode = compile_shader(path.c_str(), spec.entrypoint.data(), spec.target.data());
-        if (!bytecode) {
+        // The tiled P010 chroma program is optional: its encoder falls back to raster chroma.
+        if (!bytecode && spec.filename != "p010_uv_tile_cs.hlsl"sv) {
           return -1;
         }
       }
