@@ -185,7 +185,12 @@ namespace sunshine_text_hook::helper {
 
       EnterCriticalSection(&state_lock);
       nesting_slot = TlsAlloc();
-      // A section of this name may be one the host still holds from an earlier process.
+      // A section of this name may be one the host still holds from an earlier process. One
+      // that ended in the middle of a publication left the sequence odd, and it would stay
+      // odd ("being written") for this process too: start from an even value.
+      if (shared->sequence & 1u) {
+        InterlockedIncrement(reinterpret_cast<volatile LONG *>(&shared->sequence));
+      }
       begin_publication();
       shared->process_created = (static_cast<std::uint64_t>(created.dwHighDateTime) << 32u) | created.dwLowDateTime;
       end_publication(source_none, 0u, 0u, nullptr);
