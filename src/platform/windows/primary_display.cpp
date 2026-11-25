@@ -627,22 +627,40 @@ namespace platf::primary_display {
       return true;
     }
 
-    bool monitor_desktop_connected(const std::vector<display_spec_t> &wanted) {
-      if (wanted.empty()) {
-        return false;
-      }
+    /** True when two desktop rectangles share any area. Touching edges do not overlap. */
+    bool sources_overlap(const display_spec_t &first, const display_spec_t &second) {
+      const auto &a = first.source;
+      const auto &b = second.source;
+      return static_cast<std::int64_t>(a.position.x) < static_cast<std::int64_t>(b.position.x) + b.width &&
+             static_cast<std::int64_t>(b.position.x) < static_cast<std::int64_t>(a.position.x) + a.width &&
+             static_cast<std::int64_t>(a.position.y) < static_cast<std::int64_t>(b.position.y) + b.height &&
+             static_cast<std::int64_t>(b.position.y) < static_cast<std::int64_t>(a.position.y) + a.height;
+    }
+
+    bool any_sources_overlap(const std::vector<display_spec_t> &wanted) {
       for (size_t i = 0; i < wanted.size(); ++i) {
-        const auto &a = wanted[i].source;
         for (size_t j = 0; j < i; ++j) {
-          const auto &b = wanted[j].source;
-          if (static_cast<std::int64_t>(a.position.x) < static_cast<std::int64_t>(b.position.x) + b.width && static_cast<std::int64_t>(b.position.x) < static_cast<std::int64_t>(a.position.x) + a.width && static_cast<std::int64_t>(a.position.y) < static_cast<std::int64_t>(b.position.y) + b.height && static_cast<std::int64_t>(b.position.y) < static_cast<std::int64_t>(a.position.y) + a.height) {
-            return false;
+          if (sources_overlap(wanted[i], wanted[j])) {
+            return true;
           }
         }
       }
-      std::vector<bool> reached(wanted.size());
+      return false;
+    }
+
+    /**
+     * True when every desktop can be reached from the first one through shared edge segments, as
+     * Windows needs for one desktop. Corner contact alone does not connect. Empty is not connected.
+     */
+    bool sources_edge_connected(const std::vector<display_spec_t> &wanted) {
+      if (wanted.empty()) {
+        return false;
+      }
+      std::vector<bool> reached(wanted.size(), false);
       reached.front() = true;
-      for (size_t pass = 0; pass < wanted.size(); ++pass) {
+      bool progress = true;
+      while (progress) {
+        progress = false;
         for (size_t i = 0; i < wanted.size(); ++i) {
           if (reached[i]) {
             continue;
@@ -657,9 +675,13 @@ namespace platf::primary_display {
             const auto &b = wanted[j].source;
             const auto right_b = static_cast<std::int64_t>(b.position.x) + b.width;
             const auto bottom_b = static_cast<std::int64_t>(b.position.y) + b.height;
-            reached[i] = ((right_a == b.position.x || right_b == a.position.x) && std::max(a.position.y, b.position.y) < std::min(bottom_a, bottom_b)) ||
-                         ((bottom_a == b.position.y || bottom_b == a.position.y) && std::max(a.position.x, b.position.x) < std::min(right_a, right_b));
-            if (reached[i]) {
+            const bool horizontal = (right_a == b.position.x || right_b == a.position.x) &&
+                                    std::max(a.position.y, b.position.y) < std::min(bottom_a, bottom_b);
+            const bool vertical = (bottom_a == b.position.y || bottom_b == a.position.y) &&
+                                  std::max(a.position.x, b.position.x) < std::min(right_a, right_b);
+            if (horizontal || vertical) {
+              reached[i] = true;
+              progress = true;
               break;
             }
           }
@@ -668,6 +690,10 @@ namespace platf::primary_display {
       return std::ranges::all_of(reached, [](bool value) {
         return value;
       });
+    }
+
+    bool monitor_desktop_connected(const std::vector<display_spec_t> &wanted) {
+      return !any_sources_overlap(wanted) && sources_edge_connected(wanted);
     }
 
     // A verified user arrangement becomes the existing recovery baseline, not another journal
@@ -3066,12 +3092,7 @@ namespace platf::primary_display {
         const auto *original = find_position(journal.original, journal.promoted_primary);
         virtual_spec.source.position = {original->x, original->y};
         const auto overlaps = [&](const display_spec_t &physical) {
-          const auto &v = virtual_spec.source;
-          const auto &p = physical.source;
-          return static_cast<int64_t>(v.position.x) < static_cast<int64_t>(p.position.x) + p.width &&
-                 static_cast<int64_t>(p.position.x) < static_cast<int64_t>(v.position.x) + v.width &&
-                 static_cast<int64_t>(v.position.y) < static_cast<int64_t>(p.position.y) + p.height &&
-                 static_cast<int64_t>(p.position.y) < static_cast<int64_t>(v.position.y) + v.height;
+          return sources_overlap(virtual_spec, physical);
         };
         if (std::ranges::any_of(wanted, overlaps)) {
           int64_t right = std::numeric_limits<LONG>::min();
@@ -3108,57 +3129,12 @@ namespace platf::primary_display {
         origin = {};
         BOOST_LOG(info) << "Preserving the user's current desktop while restoring available disabled outputs.";
       }
-      bool restore_overlap = false;
-      if (!journal.local_sink.empty() || !owned) {
-        for (size_t i = 0; i < wanted.size(); ++i) {
-          for (size_t j = 0; j < i; ++j) {
-            const auto &a = wanted[i].source;
-            const auto &b = wanted[j].source;
-            restore_overlap = restore_overlap ||
-                              (static_cast<std::int64_t>(a.position.x) < static_cast<std::int64_t>(b.position.x) + b.width &&
-                               static_cast<std::int64_t>(b.position.x) < static_cast<std::int64_t>(a.position.x) + a.width &&
-                               static_cast<std::int64_t>(a.position.y) < static_cast<std::int64_t>(b.position.y) + b.height &&
-                               static_cast<std::int64_t>(b.position.y) < static_cast<std::int64_t>(a.position.y) + a.height);
-          }
-        }
-      }
-      bool restore_disconnected = false;
-      if ((local_sink_resized || !owned) && !wanted.empty()) {
-        std::vector<bool> connected(wanted.size(), false);
-        connected.front() = true;
-        bool progress = true;
-        while (progress) {
-          progress = false;
-          for (size_t i = 0; i < wanted.size(); ++i) {
-            if (connected[i]) {
-              continue;
-            }
-            const auto &a = wanted[i].source;
-            const auto ar = static_cast<std::int64_t>(a.position.x) + a.width;
-            const auto ab = static_cast<std::int64_t>(a.position.y) + a.height;
-            for (size_t j = 0; j < wanted.size(); ++j) {
-              if (!connected[j]) {
-                continue;
-              }
-              const auto &b = wanted[j].source;
-              const auto br = static_cast<std::int64_t>(b.position.x) + b.width;
-              const auto bb = static_cast<std::int64_t>(b.position.y) + b.height;
-              const bool horizontal = (ar == b.position.x || br == a.position.x) &&
-                                      std::max(a.position.y, b.position.y) < std::min(ab, bb);
-              const bool vertical = (ab == b.position.y || bb == a.position.y) &&
-                                    std::max(a.position.x, b.position.x) < std::min(ar, br);
-              if (horizontal || vertical) {
-                connected[i] = true;
-                progress = true;
-                break;
-              }
-            }
-          }
-        }
-        restore_disconnected = std::ranges::any_of(connected, [](bool reached) {
-          return !reached;
-        });
-      }
+      // The local sink comes back at its saved position but in its current mode. Overlap is checked
+      // whenever there is a sink; a gap needs its size to have changed, so connectivity is checked
+      // only then. A desktop this host did not arrange is checked both ways.
+      const bool restore_overlap = (!journal.local_sink.empty() || !owned) && any_sources_overlap(wanted);
+      const bool restore_disconnected =
+        (local_sink_resized || !owned) && !wanted.empty() && !sources_edge_connected(wanted);
       if ((owned && (missing || missing_local_sink)) || restore_overlap || restore_disconnected) {
         // Removing an unavailable monitor from the saved arrangement can leave a hole between
         // survivors. Restore a contiguous usable desktop; absent originals do not retain
