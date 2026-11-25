@@ -985,9 +985,11 @@ namespace platf {
         float majorAxisAngle = rotationAngleDegs * (M_PI / 180);
         float minorAxisAngle = majorAxisAngle + (M_PI / 2);
 
-        // Estimate the contact rectangle
-        float contactWidth = (std::cos(majorAxisAngle) * touch.contactAreaMajor) + (std::cos(minorAxisAngle) * touch.contactAreaMinor);
-        float contactHeight = (std::sin(majorAxisAngle) * touch.contactAreaMajor) + (std::sin(minorAxisAngle) * touch.contactAreaMinor);
+        // Estimate the contact rectangle: the bounding box of the rotated contact. Each axis
+        // contributes its extent, whatever its direction; signed terms gave a negative or
+        // zero size beyond a quarter turn, and so a rectangle with left > right.
+        float contactWidth = std::abs(std::cos(majorAxisAngle) * touch.contactAreaMajor) + std::abs(std::cos(minorAxisAngle) * touch.contactAreaMinor);
+        float contactHeight = std::abs(std::sin(majorAxisAngle) * touch.contactAreaMajor) + std::abs(std::sin(minorAxisAngle) * touch.contactAreaMinor);
 
         // Convert into screen coordinates centered at the touch location and constrained by screen dimensions
         touchInfo.rcContact.left = std::max<LONG>(touch_port.offset_x, touchInfo.pointerInfo.ptPixelLocation.x - std::floor(contactWidth / 2));
@@ -1012,6 +1014,9 @@ namespace platf {
     if (!inject_synthetic_pointer_input(raw->touch, raw->touchInfo, raw->activeTouchSlots)) {
       auto err = GetLastError();
       BOOST_LOG(warning) << "Failed to inject virtual touch input: "sv << err;
+      // The one-frame flags must not survive a failed injection: a stale DOWN would turn the
+      // next update into DOWN|UPDATE and fail every later injection of the whole array.
+      touchInfo.pointerInfo.pointerFlags &= ~EDGE_TRIGGERED_POINTER_FLAGS;
       return;
     }
 
@@ -1123,6 +1128,7 @@ namespace platf {
     if (!inject_synthetic_pointer_input(raw->pen, &raw->penInfo, 1)) {
       auto err = GetLastError();
       BOOST_LOG(warning) << "Failed to inject virtual pen input: "sv << err;
+      penInfo.pointerInfo.pointerFlags &= ~EDGE_TRIGGERED_POINTER_FLAGS;
       return;
     }
 
