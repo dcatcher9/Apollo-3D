@@ -729,9 +729,16 @@ namespace platf {
     } context {physical_sink_rect, virtual_source_rect};
     bool completed = EnumWindows([](HWND hwnd, LPARAM parameter) -> BOOL {
       auto &context = *reinterpret_cast<context_t *>(parameter);
-      if (const auto window = observe_window(hwnd);
+      // Place the window first: that takes a few USER32 calls, while eligibility asks DWM and
+      // opens the owning process. Most windows are hidden or on another monitor, and the
+      // same rectangle (a minimized window's included) and the same eligibility decide as before.
+      if (!IsWindowVisible(hwnd)) {
+        return TRUE;
+      }
+      if (const auto window = observe_window(hwnd, false);
           window && monitor_desktop_detail::contains_center(context.sink, window->desktop_rect) &&
-          !monitor_desktop_detail::contains_center(context.source, window->desktop_rect)) {
+          !monitor_desktop_detail::contains_center(context.source, window->desktop_rect) &&
+          eligible_window(hwnd)) {
         context.candidates.push_back(*window);
       }
       return TRUE;
