@@ -138,8 +138,7 @@ namespace sunshine_game3d {
   // Trust events are the session acceptance ledger's (alpha_auto_policy):
   // signatures earned, revoked (A2) by an exact change set's one-way test or
   // by a declared alpha's coverage, lapsed, restored from an earlier session,
-  // legacy TrustedUISources entries discarded, and accepted signatures the
-  // overlay's Forget cleared; uncovered_color counts the selective layer
+  // and accepted signatures the overlay's Forget cleared; uncovered_color counts the selective layer
   // samples that earned nothing because their colour without coverage
   // outnumbered their opaque pixels (ui_selection::layer_uncovered_color).
   namespace ui_counter {
@@ -155,7 +154,7 @@ namespace sunshine_game3d {
     inline constexpr std::size_t full_alpha = contradicted + 1;
     inline constexpr std::size_t trust_earned = full_alpha + 1, trust_revoked_exact = trust_earned + 1,
       trust_revoked_declared = trust_earned + 2, trust_lapsed = trust_earned + 3, trust_restored = trust_earned + 4,
-      trust_discarded = trust_earned + 5, trust_forgotten = trust_earned + 6, trust_uncovered_color = trust_earned + 7;
+      trust_forgotten = trust_earned + 5, trust_uncovered_color = trust_earned + 6;
     inline constexpr std::size_t samples = trust_uncovered_color + 1;
     inline constexpr std::size_t scene_entered = samples + 1, scene_released = samples + 2, scene_refuted = samples + 3;
     inline constexpr std::size_t count = scene_refuted + 1;
@@ -269,7 +268,6 @@ namespace sunshine_game3d {
       field("revoked_declared", c[n::trust_revoked_declared]);
       field("lapsed", c[n::trust_lapsed]);
       field("restored", c[n::trust_restored]);
-      field("discarded", c[n::trust_discarded]);
       field("forgotten", c[n::trust_forgotten]);
       field("uncovered_color", c[n::trust_uncovered_color]);
     });

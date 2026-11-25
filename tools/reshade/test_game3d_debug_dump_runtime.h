@@ -277,9 +277,6 @@ namespace sunshine_game3d_test {
       constexpr char digits[] = "0123456789abcdef";
       const auto ui_words = sunshine_game3d::ui_parameter_words(frame_.source_alpha_ui, frame_.ui_plane, frame_.ui_channel);
       const auto ui_hex = replay.at("ui_parameter_hex").get<std::string>();
-      const bool nearest_plane = frame_.ui_plane.mode == sunshine_game3d::ui_plane_mode::depth_midpoint_nearest_ui;
-      const bool front_plane = frame_.ui_plane.mode == sunshine_game3d::ui_plane_mode::front_limit;
-      const bool shallow_plane = frame_.ui_plane.mode == sunshine_game3d::ui_plane_mode::shallow_front;
       const bool fraction_plane = frame_.ui_plane.mode == sunshine_game3d::ui_plane_mode::display_fraction;
       check(replay.at("ui_parameter_abi") == "sunshine_game3d.ui_parameters.v7" &&
           replay.at("ui_parameter_bytes") == sizeof(ui_words) && ui_hex.size() == sizeof(ui_words) * 2 &&
@@ -287,24 +284,12 @@ namespace sunshine_game3d_test {
           replay.at("ui_constant_binding").at("mask_channel") ==
             (frame_.ui_channel == sunshine_game3d::ui_mask_channel::red ? "red" : "alpha"),
         "Dump lost exact consumed independent UI plane words");
-      check(replay.at("ui_plane_resolution").at("reduction_ran") == bool(frame_.resources.ui_plane_resolved.handle) &&
-          replay.at("ui_plane_resolution").at("inverse_depth_role") == (fraction_plane || shallow_plane || front_plane || frame_.ui_plane.mode == sunshine_game3d::ui_plane_mode::screen ? "unused" : nearest_plane ? "midpoint_floor" : "explicit_plane"),
-        "Dump confused the submitted UI base with the GPU-resolved plane");
-      if (shallow_plane) {
-        check(replay.at("ui_constant_binding").at("mode_name") == "shallow_front" &&
-            replay.at("ui_constant_binding").at("inverse_depth_role") == "unused" &&
-            replay.at("ui_constant_binding").at("front_limit_fraction") == 0.25 &&
-            replay.at("ui_plane_resolution").at("policy") == "fixed_shallow_front" &&
-            replay.at("ui_plane_resolution").at("front_limit_fraction") == 0.25 &&
-            !replay.at("ui_plane_resolution").at("reduction_ran").get<bool>(),
-          "Dump lost the fixed quarter-front contract or claimed an unused reduction");
-      }
+      check(!replay.contains("ui_plane_resolution"), "Dump described a UI plane resolution beside its b1 words");
       if (fraction_plane) {
         const auto &binding = replay.at("ui_constant_binding");
         check(binding.at("mode_name") == "display_fraction" && binding.at("word2_role") == "front_limit_fraction" &&
             binding.at("front_limit_fraction_bits") == ui_words[2] && !binding.contains("inverse_depth") &&
-            !binding.contains("inverse_depth_bits") && replay.at("ui_plane_resolution").at("policy") == "resolved_display_fraction" &&
-            !replay.at("ui_plane_resolution").at("reduction_ran").get<bool>(),
+            !binding.contains("inverse_depth_bits"),
           "Dump changed the resolved fraction into a depth or recomputed plane");
         if (std::isfinite(frame_.ui_plane.inverse_depth))
           check(binding.at("front_limit_fraction") == frame_.ui_plane.inverse_depth,
@@ -367,7 +352,7 @@ namespace sunshine_game3d_test {
         "Dump UI pin markers differ from the captured shader");
       bool apply_ui = false;
       for (const auto &pass : replay.at("passes")) {
-        if (pass.at("entry") == "SunshineHostHorizontalCS" && marker("SUNSHINE_LIMITER_LINE_GROUPS"))
+        if (pass.at("entry") == "SunshineHostHorizontalCS")
           check(!pass.at("srvs").contains("t0"), "Dump claims the horizontal limiter reads UI");
         if (pass.at("entry") == "SunshineApplyUICS") {
           apply_ui = true;
@@ -376,7 +361,7 @@ namespace sunshine_game3d_test {
             "Dump UI pinning pass differs from the render");
         }
       }
-      check(apply_ui == (marker("SUNSHINE_LIMITER_LINE_GROUPS") != 0), "Dump pass table omitted UI pinning");
+      check(apply_ui, "Dump pass table omitted UI pinning");
       std::vector<Microsoft::WRL::ComPtr<IUnknown>> held;
       std::vector<Microsoft::WRL::ComPtr<ID3D11Texture2D>> held_d3d11;
       std::vector<std::vector<std::uint8_t>> bytes;
@@ -413,9 +398,6 @@ namespace sunshine_game3d_test {
           case wire::artifact::sbs:
             original = r.sbs;
             has_sbs = true;
-            break;
-          case wire::artifact::linear_color:
-            original = r.linear_color;
             break;
           case wire::artifact::candidate:
             original = r.candidate;

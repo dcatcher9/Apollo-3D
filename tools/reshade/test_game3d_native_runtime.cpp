@@ -165,16 +165,6 @@ namespace {
     require(maximum <= (color == 1 ? 1.01 / 1023 : .002), "Native GPU rendering differs from frozen FX beyond export quantization");
   }
 
-  // The production shader without its eye limiter: the scene field alone, as the frozen FX has it.
-  std::string scene_field_shader() {
-    std::string source(sunshine_game3d::renderer::shader_source());
-    const std::string_view marker = "#define SUNSHINE_EYE_LIMITER 1";
-    const auto at = source.find(marker);
-    require(at != std::string::npos && source.find(marker, at + 1) == std::string::npos, "The production shader has no single eye-limiter marker");
-    source.replace(at, marker.size(), "// (eye limiter off: frozen-FX parity render)");
-    return source;
-  }
-
   // The eye limiter's store against the fields it is built from (docs/host-sbs.md, eye-specific
   // horizontal limiter). vertical is the limiter's input, scene the symmetric final field.
   void check_eye_fields(const std::string &name, const std::vector<std::uint8_t> &vertical_bytes,
@@ -233,7 +223,7 @@ namespace {
     const api::resource source{reinterpret_cast<std::uint64_t>(backbuffer)};
     const auto original = fixture.source_bytes;
     const auto parameters = native_cases().front().parameters;
-    const ui_plane_parameters plane{ui_plane_mode::shallow_front, 0.f};
+    const ui_plane_parameters plane{ui_plane_mode::display_fraction, .25f};
     const auto upload = [&] {
       void *mapped = nullptr;
       const D3D12_RANGE no_read{0, 0};
@@ -435,7 +425,7 @@ namespace {
     const api::resource source{reinterpret_cast<std::uint64_t>(backbuffer)};
     const auto original = fixture.source_bytes;
     const auto parameters = native_cases().front().parameters;
-    const ui_plane_parameters plane{ui_plane_mode::shallow_front, 0.f};
+    const ui_plane_parameters plane{ui_plane_mode::display_fraction, .25f};
     const auto count = size_t(width) * height;
     const auto stride = bytes_per_pixel(fixture.source_format);
     std::vector<float> mask(count);
@@ -1833,24 +1823,12 @@ namespace {
     sunshine_game3d::renderer renderer;
     sunshine_game3d_test::dump_fixture dump;
     auto *owner_queue = observed.runtime->get_command_queue();
-    const std::string scene_field_source = scene_field_shader();
+    std::size_t fx_matched = 0;
     for (const auto &test : tests) {
       prepare_depth(fixture, test);
       auto *backbuffer = fixture.backbuffers[fixture.swapchain->GetCurrentBackBufferIndex()].p;
       write_native_source(fixture, backbuffer);
       const api::resource source{reinterpret_cast<std::uint64_t>(backbuffer)};
-      // The frozen FX warps both eyes with the scene field. The same shader without its eye
-      // limiter must still match it; the production render below is checked on its own terms.
-      require(renderer.configure(observed.runtime, source, static_cast<api::color_space>(fixture.color), scene_field_source),
-        "Native renderer cannot configure the scene-field shader");
-      require(sunshine_game3d::test::render_frame(renderer, owner_queue->get_immediate_command_list(), source,
-        test.parameters.depth_ready ? fixture.depth_view : api::resource_view{}, test.parameters), "Native renderer rejected the scene-field parity frame");
-      owner_queue->flush_immediate_command_list();
-      renderer.finish_present();
-      owner_queue->wait_idle();
-      require(renderer.output().handle != 0 && renderer.diagnostics().eye_field.handle == 0, "The scene-field shader built an eye field");
-      const auto scene_pixels = fixture.read(reinterpret_cast<ID3D12Resource *>(renderer.output().handle));
-      compare_pixels(test, fixture.color, load_pixels(results / (test.name + ".fx.bin")), scene_pixels, report);
       require(renderer.configure(observed.runtime, source, static_cast<api::color_space>(fixture.color)), "Native renderer configure failed");
       require(sunshine_game3d::test::render_frame(renderer, owner_queue->get_immediate_command_list(), source,
         test.parameters.depth_ready ? fixture.depth_view : api::resource_view{}, test.parameters), "Native renderer rejected ready parity frame");
@@ -1876,13 +1854,16 @@ namespace {
       sunshine_parity::write_bytes(results / (test.name + ".native.bin"), pixels.data(), pixels.size());
       {
         // The production render: each eye is warped with its own field. A frame that shows the
-        // source (no depth, zero strength) or the depth preview records no conditioning.
+        // source (no depth, zero strength) or the depth preview matches the frozen FX, which warps
+        // both eyes with the scene field alone; a stereo frame is checked on its own terms.
         const auto fields = renderer.diagnostics();
         const bool shows_source = !test.parameters.depth_ready || !test.parameters.camera_ready || test.parameters.depth_view == 2 ||
           !(test.parameters.strength > 0.f) || !(test.parameters.strength_blend > 0.f);
         require(fields.eye_field.handle != 0, "The production shader built no eye field");
-        if (shows_source) require(pixels == scene_pixels, "A frame without stereo differs between the scene-field and production shaders");
-        else check_eye_fields(test.name,
+        if (shows_source) {
+          compare_pixels(test, fixture.color, load_pixels(results / (test.name + ".fx.bin")), pixels, report);
+          ++fx_matched;
+        } else check_eye_fields(test.name,
           fixture.read(reinterpret_cast<ID3D12Resource *>(fields.vertical_field.handle)),
           fixture.read(reinterpret_cast<ID3D12Resource *>(fields.final_field.handle)),
           fixture.read(reinterpret_cast<ID3D12Resource *>(fields.eye_field.handle)), test.name == "raw-cliffs-strength50");
@@ -2211,159 +2192,10 @@ namespace {
       require(fixture.read(backbuffer, D3D12_RESOURCE_STATE_PRESENT) == fixture.source_bytes,
         "UI protection changed the original color allocation");
     }
-    // Actual D3D12 u4/u5 -> t8/t9 reduction and UI pinning. The fixture source
-    // is fully opaque, so every final-field texel must use one global plane.
-    // Exact binary depths put the maximum in the partial bottom-right tile.
-    struct nearest_case {
-      const char *name;
-      float maximum, floor, strength, blend;
-      bool reverse;
-      bool linear = false;
-    };
-    const std::array<nearest_case, 4> nearest_tests {{
-      {"normal", .75f, .25f, 100.f, 1.f, false},
-      {"reversed", .625f, .25f, 100.f, 1.f, true},
-      {"floor-partial-strength", .5f, .875f, 50.f, .5f, false},
-      {"linear-distance", .5f, .25f, 100.f, 1.f, false, true},
-    }};
-    for (const auto &test : nearest_tests) {
-      std::vector<float> raw(size_t(width) * height, .125f);
-      raw[size_t(height / 2) * width + width / 2] = .375f;
-      raw.back() = test.maximum;
-      if (test.reverse) for (auto &value : raw) value = 1.f - value;
-      if (test.linear) {
-        for (auto &value : raw) value = 1.f / value;
-        raw.front() = NAN; // Invalid sky must not poison the covered maximum.
-      }
-      fixture.upload_depth(raw);
-      const auto frozen_depth = fixture.read(fixture.depth.p);
-      auto parameters = tests.front().parameters;
-      parameters.coordinate_basis = test.linear ? 2 : 0;
-      parameters.strength = test.strength;
-      parameters.strength_blend = test.blend;
-      parameters.depth_scale = 432.f / height;
-      parameters.convergence = {.05f, .125f};
-      parameters.projection = test.reverse ? std::array<float, 2>{1.f, -1.f} : std::array<float, 2>{0.f, 1.f};
-      const sunshine_game3d::ui_plane_parameters plane {
-        sunshine_game3d::ui_plane_mode::depth_midpoint_nearest_ui, test.floor};
-      auto *backbuffer = fixture.backbuffers[fixture.swapchain->GetCurrentBackBufferIndex()].p;
-      write_native_source(fixture, backbuffer);
-      const api::resource source{reinterpret_cast<std::uint64_t>(backbuffer)};
-      const bool dump_case = !test.reverse && test.maximum == .75f;
-      // An HDR10 dump packs the 10-bit PQ export, so its replay manifest
-      // names the PQ pack (SunshineRenderPackedPQPS).
-      const bool pq_dump = dump_case && fixture.color == 3;
-      if (pq_dump) require(renderer.set_pq_output(true), "An HDR10 renderer refused the PQ export for its dump");
-      require(sunshine_game3d::test::render_frame(renderer, owner_queue->get_immediate_command_list(), source, fixture.depth_view,
-        parameters, true, {}, plane), "Nearest-UI D3D12 render failed");
-      require(sunshine_game3d::ui_parameter_words(true, renderer.consumed_ui_plane()) ==
-          sunshine_game3d::ui_parameter_words(true, plane), "Nearest-UI D3D12 changed submitted floor/mode bits");
-      if (dump_case) dump.begin(observed.runtime, renderer, parameters, fixture.depth_view, false,
-        static_cast<api::color_space>(fixture.color));
-      owner_queue->flush_immediate_command_list();
-      renderer.finish_present();
-      if (dump_case) dump.submitted(observed.runtime);
-      owner_queue->wait_idle(); // Test-only GPU evidence; no production readback.
-      const auto resources = renderer.diagnostics();
-      require(resources.ui_plane_tiles.handle && resources.ui_plane_resolved.handle && resources.final_field.handle,
-        "Nearest-UI D3D12 omitted current-render reduction resources");
-      auto *tiles = reinterpret_cast<ID3D12Resource *>(resources.ui_plane_tiles.handle);
-      auto *resolved = reinterpret_cast<ID3D12Resource *>(resources.ui_plane_resolved.handle);
-      const auto tiles_desc = tiles->GetDesc(), resolved_desc = resolved->GetDesc();
-      require(tiles_desc.Width == (width + 15) / 16 && tiles_desc.Height == (height + 15) / 16 &&
-          tiles_desc.Format == DXGI_FORMAT_R32_FLOAT && resolved_desc.Width == 1 && resolved_desc.Height == 1 &&
-          resolved_desc.Format == DXGI_FORMAT_R32_FLOAT, "Nearest-UI D3D12 reduction dimensions/format changed");
-      const auto tile_bytes = fixture.read(tiles), scalar_bytes = fixture.read(resolved);
-      require(tile_bytes.size() == size_t(tiles_desc.Width) * tiles_desc.Height * sizeof(float) &&
-          scalar_bytes.size() == sizeof(float), "Nearest-UI D3D12 readback lost float32 reduction values");
-      float tile_maximum = 0, resolved_q = 0;
-      for (size_t offset = 0; offset != tile_bytes.size(); offset += sizeof(float)) {
-        float value;
-        std::memcpy(&value, tile_bytes.data() + offset, sizeof(value));
-        require(std::isfinite(value) && value >= 0 && value <= test.maximum,
-          "Nearest-UI D3D12 tile contained invalid decoded depth");
-        tile_maximum = std::max(tile_maximum, value);
-      }
-      std::memcpy(&resolved_q, scalar_bytes.data(), sizeof(resolved_q));
-      const float expected_q = std::max(test.floor, test.maximum);
-      require(tile_maximum == test.maximum && resolved_q == expected_q,
-        "Nearest-UI D3D12 missed current corner depth, reversed decoding or midpoint floor");
-
-      // Closed-form projection of a constant plane, not a simulated warp.
-      const double strength = double(parameters.strength) * .01 * parameters.strength_blend;
-      const double unit_uv = double(height) * 100. / (2160. * width);
-      const double displacement = double(parameters.convergence[0]) * parameters.depth_scale *
-        (double(expected_q) - parameters.convergence[1]) * strength * unit_uv;
-      const double budget = double(parameters.disparity_limit_uv) * strength;
-      const double expected_parallax = std::clamp(std::clamp(displacement, -2.5 * unit_uv, 1.5 * unit_uv), -budget, budget);
-      const float rounded = static_cast<float>(expected_parallax);
-      const double tolerance = 8. * (double(std::nextafter(rounded, std::numeric_limits<float>::infinity())) - rounded);
-      const auto field = fixture.read(reinterpret_cast<ID3D12Resource *>(resources.final_field.handle));
-      require(field.size() == size_t(width) * height * sizeof(float), "Nearest-UI final field is not full-resolution R32");
-      float first = 0;
-      for (size_t offset = 0; offset != field.size(); offset += sizeof(float)) {
-        float actual;
-        std::memcpy(&actual, field.data() + offset, sizeof(actual));
-        require(std::isfinite(actual) && std::abs(double(actual) - expected_parallax) <= tolerance,
-          "Nearest-UI D3D12 final field did not use the GPU-resolved global plane");
-        if (!offset) first = actual;
-        else require(actual == first, "Nearest-UI D3D12 gave different pixels different planes");
-      }
-      if (dump_case) {
-        const auto destination = directory / "dump-source-alpha-nearest-ui";
-        dump.verify(observed.runtime, [&](api::resource texture, bool common) {
-          return fixture.read(reinterpret_cast<ID3D12Resource *>(texture.handle),
-            common ? D3D12_RESOURCE_STATE_COMMON : D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
-        }, destination);
-        std::ifstream input(destination / "manifest.json");
-        require(input.good(), "Nearest-UI D3D12 dump manifest missing");
-        const auto manifest = nlohmann::json::parse(input);
-        const auto &replay = manifest.at("producer_metadata").at("replay");
-        require(replay.at("ui_parameter_abi") == "sunshine_game3d.ui_parameters.v7" &&
-            replay.at("ui_constant_binding").at("mode") == 2 &&
-            replay.at("ui_constant_binding").at("inverse_depth") == test.floor &&
-            replay.at("ui_plane_resolution").at("reduction_ran") == true &&
-            replay.at("ui_plane_resolution").at("resolved_value").is_null(),
-          "Nearest-UI D3D12 dump confused submitted floor with asynchronous GPU result");
-        bool tile_pass = false, reduce_pass = false, field_pass = false, pin_pass = false;
-        for (const auto &pass : replay.at("passes")) {
-          if (pass.at("entry") == "SunshineUINearestTilesCS") tile_pass = pass.at("enabled") == true &&
-            pass.at("uavs").at("u4") == "ui_plane_tiles:R32_FLOAT";
-          if (pass.at("entry") == "SunshineUINearestReduceCS") reduce_pass = pass.at("enabled") == true &&
-            pass.at("srvs").at("t8") == "ui_plane_tiles" && pass.at("uavs").at("u5") == "ui_plane_resolved:R32_FLOAT";
-          // The scene limiter reads no UI input; the separate pin pass reads the resolved plane.
-          if (pass.at("entry") == "SunshineHostHorizontalCS") field_pass = !pass.at("srvs").contains("t9");
-          if (pass.at("entry") == "SunshineApplyUICS") pin_pass = pass.at("enabled") == true &&
-            pass.at("srvs").at("t9") == "ui_plane_resolved";
-        }
-        require(tile_pass && reduce_pass && field_pass && pin_pass, "Nearest-UI D3D12 dump lost actual u4/u5/t8/t9 bindings");
-        // The pack the dump names is the one that ran: the PQ pack for a PQ
-        // export, and no linearized input (t2) when the source is decoded per
-        // tap or needs no decoding.
-        const auto sbs_transfer = manifest.at("producer_metadata").at("sbs_transfer").get<unsigned>();
-        unsigned packs = 0;
-        for (const auto &pass : replay.at("passes")) {
-          const auto entry = pass.at("entry").get<std::string>();
-          if (entry.rfind("SunshineRenderPacked", 0)) continue;
-          ++packs;
-          require(entry == (sbs_transfer == 3 ? "SunshineRenderPackedPQPS" : "SunshineRenderPackedPS") &&
-              !pass.at("srvs").contains("t2") && sbs_transfer == (pq_dump ? 3u : fixture.color == 1 ? 1u : 2u) &&
-              pass.at("rtvs").at(0) == (sbs_transfer == 2 ? "sbs:RGBA16_FLOAT" : "sbs:R10G10B10A2_UNORM"),
-            "The D3D12 dump manifest names another pack, input or target than the pack that ran");
-        }
-        require(packs == 1, "The D3D12 dump manifest lists no single pack pass");
-      }
-      if (pq_dump) renderer.set_pq_output(false);
-      require(fixture.read(fixture.depth.p) == frozen_depth, "Nearest-UI reduction changed source depth");
-      require(fixture.read(backbuffer, D3D12_RESOURCE_STATE_PRESENT) == fixture.source_bytes,
-        "Nearest-UI D3D12 changed source color");
-      report << "nearest-ui " << test.name << " q=" << resolved_q << " floor=" << test.floor <<
-        " rigid_parallax_uv=" << first << " expected_uv=" << expected_parallax << '\n';
-      std::printf("MEASURE nearest-ui D3D12 %s q=%.9g floor=%.9g rigid_parallax_uv=%.9g expected_uv=%.9g\n",
-        test.name, resolved_q, test.floor, first, expected_parallax);
-    }
-    // Actual D3D12 front-limit placement is stateless. Vary the inputs that
-    // moved mode2 while requiring one identical UI field at the current cap.
+    // Actual D3D12 display-fraction placement is stateless. The fixture source
+    // is fully opaque, so every final-field texel must use one rigid plane;
+    // vary the inputs that move the scene while requiring one identical UI
+    // field at the fraction of the current cap.
     struct front_case {
       const char *name;
       float maximum, gain, zero, strength, blend, budget;
@@ -2387,8 +2219,9 @@ namespace {
       {"zero-gain", .875f, 0.f, .75f, 100.f, 1.f, .01f, true, true, false},
       {"invalid-zero", .875f, 128.f, std::numeric_limits<float>::quiet_NaN(), 100.f, 1.f, .01f, true, true, false},
     }};
-    const sunshine_game3d::ui_plane_parameters front_plane{sunshine_game3d::ui_plane_mode::front_limit, 0.f};
-    std::vector<std::uint8_t> first_front_field, first_shallow_field, first_scene_candidate;
+    const sunshine_game3d::ui_plane_parameters front_plane{sunshine_game3d::ui_plane_mode::display_fraction, .75f},
+      quarter_plane{sunshine_game3d::ui_plane_mode::display_fraction, .25f};
+    std::vector<std::uint8_t> first_front_field, first_quarter_field, first_scene_candidate;
     bool scene_changed = false;
     for (size_t case_index = 0; case_index != front_tests.size(); ++case_index) {
       const auto &test = front_tests[case_index];
@@ -2412,11 +2245,13 @@ namespace {
       const api::resource source{reinterpret_cast<std::uint64_t>(backbuffer)};
       const auto render = [&](bool protect, const sunshine_game3d::ui_plane_parameters &plane) {
         write_native_source(fixture, backbuffer);
+        const bool dump_case = protect && case_index == 0 && plane.inverse_depth == front_plane.inverse_depth;
+        // An HDR10 dump packs the 10-bit PQ export, so its replay manifest
+        // names the PQ pack (SunshineRenderPackedPQPS).
+        const bool pq_dump = dump_case && fixture.color == 3;
+        if (pq_dump) require(renderer.set_pq_output(true), "An HDR10 renderer refused the PQ export for its dump");
         require(sunshine_game3d::test::render_frame(renderer, owner_queue->get_immediate_command_list(), source, fixture.depth_view,
-          parameters, protect, {}, plane), "Front-limit D3D12 render failed");
-        const bool shallow = plane.mode == sunshine_game3d::ui_plane_mode::shallow_front;
-        const bool dump_case = protect && case_index == 0 &&
-          (plane.mode == sunshine_game3d::ui_plane_mode::front_limit || shallow);
+          parameters, protect, {}, plane), "Display-fraction D3D12 render failed");
         if (dump_case) dump.begin(observed.runtime, renderer, parameters, fixture.depth_view, false,
           static_cast<api::color_space>(fixture.color));
         owner_queue->flush_immediate_command_list();
@@ -2424,33 +2259,39 @@ namespace {
         if (dump_case) dump.submitted(observed.runtime);
         owner_queue->wait_idle(); // Test-only GPU evidence; no production readback.
         const auto resources = renderer.diagnostics();
-        require(resources.candidate.handle && resources.vertical_field.handle && resources.final_field.handle &&
-            !resources.ui_plane_tiles.handle && !resources.ui_plane_resolved.handle,
-          "Front-limit D3D12 used stale/active nearest-depth reduction resources");
+        require(resources.candidate.handle && resources.vertical_field.handle && resources.final_field.handle,
+          "Display-fraction D3D12 lost its conditioning resources");
         if (dump_case) {
-          const auto destination = directory / (shallow ? "dump-source-alpha-shallow-ui" : "dump-source-alpha-front-ui");
+          const auto destination = directory / "dump-source-alpha-fraction-ui";
           dump.verify(observed.runtime, [&](api::resource texture, bool common) {
             return fixture.read(reinterpret_cast<ID3D12Resource *>(texture.handle),
               common ? D3D12_RESOURCE_STATE_COMMON : D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
           }, destination);
           std::ifstream input(destination / "manifest.json");
-          require(input.good(), "Front-limit D3D12 dump manifest missing");
+          require(input.good(), "Display-fraction D3D12 dump manifest missing");
           const auto manifest = nlohmann::json::parse(input);
           const auto &replay = manifest.at("producer_metadata").at("replay");
-          require(replay.at("ui_parameter_abi") == "sunshine_game3d.ui_parameters.v7" &&
-              replay.at("ui_constant_binding").at("mode") == (shallow ? 4 : 3) &&
-              replay.at("ui_constant_binding").at("mode_name") == (shallow ? "shallow_front" : "front_limit") &&
-              replay.at("ui_constant_binding").at("inverse_depth") == 0.f &&
-              replay.at("ui_plane_resolution").at("policy") == (shallow ? "fixed_shallow_front" : "fixed_current_front_limit") &&
-              replay.at("ui_plane_resolution").at("inverse_depth_role") == "unused" &&
-              replay.at("ui_plane_resolution").at("reduction_ran") == false,
-            "Front-limit D3D12 dump did not preserve its stateless display-cap policy");
-          if (shallow) require(replay.at("ui_plane_resolution").at("front_limit_fraction") == .25f,
-            "Shallow UI dump lost its quarter-cap placement policy");
-          for (const auto &pass : replay.at("passes"))
-            if (pass.at("entry") == "SunshineUINearestTilesCS" || pass.at("entry") == "SunshineUINearestReduceCS")
-              require(pass.at("enabled") == false, "Front-limit dump incorrectly enabled nearest-depth reduction");
+          const auto &binding = replay.at("ui_constant_binding");
+          require(replay.at("ui_parameter_abi") == "sunshine_game3d.ui_parameters.v7" && binding.at("mode") == 5 &&
+              binding.at("mode_name") == "display_fraction" && binding.at("word2_role") == "front_limit_fraction" &&
+              binding.at("front_limit_fraction") == front_plane.inverse_depth && !replay.contains("ui_plane_resolution"),
+            "Display-fraction D3D12 dump did not preserve its stateless display-cap policy");
+          // The pack the dump names is the one that ran: the PQ pack for a PQ
+          // export, reading no linearized input (t2).
+          const auto sbs_transfer = manifest.at("producer_metadata").at("sbs_transfer").get<unsigned>();
+          unsigned packs = 0;
+          for (const auto &pass : replay.at("passes")) {
+            const auto entry = pass.at("entry").get<std::string>();
+            if (entry.rfind("SunshineRenderPacked", 0)) continue;
+            ++packs;
+            require(entry == (sbs_transfer == 3 ? "SunshineRenderPackedPQPS" : "SunshineRenderPackedPS") &&
+                !pass.at("srvs").contains("t2") && sbs_transfer == (pq_dump ? 3u : fixture.color == 1 ? 1u : 2u) &&
+                pass.at("rtvs").at(0) == (sbs_transfer == 2 ? "sbs:RGBA16_FLOAT" : "sbs:R10G10B10A2_UNORM"),
+              "The D3D12 dump manifest names another pack, input or target than the pack that ran");
+          }
+          require(packs == 1, "The D3D12 dump manifest lists no single pack pass");
         }
+        if (pq_dump) renderer.set_pq_output(false);
         return resources;
       };
       const auto read = [&](api::resource resource) {
@@ -2464,69 +2305,66 @@ namespace {
         const auto disabled_field = read(unprotected.final_field), disabled_sbs = read(unprotected.sbs);
         const auto screen = render(false, {});
         require(read(screen.final_field) == disabled_field && read(screen.sbs) == disabled_sbs,
-          "Disabled front-limit metadata changed ordinary scene rendering");
+          "Disabled display-fraction metadata changed ordinary scene rendering");
       } else if (case_index < 4) scene_changed = scene_changed || candidate != first_scene_candidate;
       const auto protected_resources = render(true, front_plane);
       require(sunshine_game3d::ui_parameter_words(true, renderer.consumed_ui_plane()) ==
-          sunshine_game3d::ui_parameter_words(true, front_plane), "Front-limit D3D12 changed submitted mode/unused-depth bits");
+          sunshine_game3d::ui_parameter_words(true, front_plane), "Display-fraction D3D12 changed submitted mode/fraction bits");
       require(read(protected_resources.candidate) == candidate && read(protected_resources.vertical_field) == vertical,
-        "Front-limit UI placement changed scene candidate or vertical geometry");
+        "Display-fraction UI placement changed scene candidate or vertical geometry");
       const double expected = test.depth_ready && test.camera_ready && test.calibration_valid ?
-        double(test.budget) * (double(test.strength) / 100.) * test.blend : 0.;
+        double(front_plane.inverse_depth) * double(test.budget) * (double(test.strength) / 100.) * test.blend : 0.;
       const float rounded = static_cast<float>(expected);
       const double tolerance = expected == 0 ? 0. :
         4. * (double(std::nextafter(rounded, std::numeric_limits<float>::infinity())) - rounded);
       const auto field = read(protected_resources.final_field);
-      require(field.size() == size_t(width) * height * sizeof(float), "Front-limit field lost full-resolution R32 storage");
+      require(field.size() == size_t(width) * height * sizeof(float), "Display-fraction field lost full-resolution R32 storage");
       float first = 0;
       for (size_t offset = 0; offset != field.size(); offset += sizeof(float)) {
         float value;
         std::memcpy(&value, field.data() + offset, sizeof(value));
         require(std::isfinite(value) && std::abs(double(value) - expected) <= tolerance,
-          "Front-limit D3D12 did not apply the current positive display cap/strength/mono state");
+          "Display-fraction D3D12 did not apply the current positive display cap/strength/mono state");
         if (!offset) first = value;
-        else require(value == first, "Opaque UI did not form one rigid front-limit plane");
+        else require(value == first, "Opaque UI did not form one rigid display-fraction plane");
       }
       if (case_index == 0) first_front_field = field;
       else if (case_index < 4) require(field == first_front_field,
-        "Fixed front UI moved when only current depth, scene gain or zero changed");
-      // The actual mode-3 GPU field is the authoritative cap oracle. Scaling
-      // that readback by an exact binary quarter checks mode 4 without a CPU
-      // copy of the scene or warp algorithms, including the float-order case.
-      const float unused_depth = case_index == 1 ? std::numeric_limits<float>::quiet_NaN() :
-        case_index == 2 ? std::numeric_limits<float>::infinity() : case_index == 3 ? -1.f : 0.f;
-      const sunshine_game3d::ui_plane_parameters shallow_plane{sunshine_game3d::ui_plane_mode::shallow_front, unused_depth};
-      const auto shallow_disabled = render(false, shallow_plane);
-      require(read(shallow_disabled.final_field) == unprotected_field && read(shallow_disabled.sbs) == unprotected_sbs,
-        "Disabled shallow UI metadata changed ordinary scene rendering");
-      const auto shallow_resources = render(true, shallow_plane);
+        "Display-fraction UI moved when only current depth, scene gain or zero changed");
+      // The three-quarter GPU field is the cap oracle: the quarter fraction
+      // is exactly one third of it (both are the cap times 3/4 or 1/4 rounded
+      // once), without a CPU copy of the scene or warp algorithms, including
+      // the float-order case.
+      const auto quarter_disabled = render(false, quarter_plane);
+      require(read(quarter_disabled.final_field) == unprotected_field && read(quarter_disabled.sbs) == unprotected_sbs,
+        "Disabled quarter-fraction UI metadata changed ordinary scene rendering");
+      const auto quarter_resources = render(true, quarter_plane);
       require(sunshine_game3d::ui_parameter_words(true, renderer.consumed_ui_plane()) ==
-          sunshine_game3d::ui_parameter_words(true, shallow_plane), "Shallow UI changed submitted mode/unused-depth bits");
-      require(read(shallow_resources.candidate) == candidate && read(shallow_resources.vertical_field) == vertical,
-        "Shallow UI changed scene candidate or vertical geometry");
-      const auto shallow_field = read(shallow_resources.final_field);
-      require(shallow_field.size() == field.size(), "Shallow UI field lost full-resolution R32 storage");
-      const float quarter_cap = .25f * first;
-      for (size_t offset = 0; offset != shallow_field.size(); offset += sizeof(float)) {
-        float value;
-        std::memcpy(&value, shallow_field.data() + offset, sizeof(value));
-        require(std::isfinite(value) && value == quarter_cap,
-          "Shallow UI is not exactly one quarter of the authoritative current GPU cap");
+          sunshine_game3d::ui_parameter_words(true, quarter_plane), "Quarter-fraction UI changed submitted mode/fraction bits");
+      require(read(quarter_resources.candidate) == candidate && read(quarter_resources.vertical_field) == vertical,
+        "Quarter-fraction UI changed scene candidate or vertical geometry");
+      const auto quarter_field = read(quarter_resources.final_field);
+      require(quarter_field.size() == field.size(), "Quarter-fraction UI field lost full-resolution R32 storage");
+      float quarter = 0;
+      for (size_t offset = 0; offset != quarter_field.size(); offset += sizeof(float)) {
+        std::memcpy(&quarter, quarter_field.data() + offset, sizeof(quarter));
+        require(std::isfinite(quarter) && 3.f * quarter == first,
+          "Quarter-fraction UI is not exactly one third of the three-quarter fraction of the current GPU cap");
       }
-      if (case_index == 0) first_shallow_field = shallow_field;
-      else if (case_index < 4) require(shallow_field == first_shallow_field,
-        "Shallow UI moved with depth/gain/zero or interpreted its unused inverse-depth word");
-      require(fixture.read(fixture.depth.p) == frozen_depth, "Front-limit UI changed source depth");
+      if (case_index == 0) first_quarter_field = quarter_field;
+      else if (case_index < 4) require(quarter_field == first_quarter_field,
+        "Quarter-fraction UI moved with depth/gain/zero");
+      require(fixture.read(fixture.depth.p) == frozen_depth, "Display-fraction UI changed source depth");
       require(fixture.read(backbuffer, D3D12_RESOURCE_STATE_PRESENT) == fixture.source_bytes,
-        "Front-limit UI changed the game's source color");
-      report << "front-ui " << test.name << " rigid_parallax_uv=" << first << " expected_uv=" << expected << '\n';
-      std::printf("MEASURE front-ui D3D12 %s rigid_parallax_uv=%.9g expected_uv=%.9g\n", test.name, first, expected);
-      report << "shallow-ui " << test.name << " rigid_parallax_uv=" << quarter_cap << " cap_uv=" << first << '\n';
-      std::printf("MEASURE shallow-ui D3D12 %s rigid_parallax_uv=%.9g cap_uv=%.9g\n", test.name, quarter_cap, first);
+        "Display-fraction UI changed the game's source color");
+      report << "fraction-ui " << test.name << " three_quarter_uv=" << first << " quarter_uv=" << quarter <<
+        " expected_three_quarter_uv=" << expected << '\n';
+      std::printf("MEASURE fraction-ui D3D12 %s three_quarter_uv=%.9g quarter_uv=%.9g expected_three_quarter_uv=%.9g\n",
+        test.name, first, quarter, expected);
     }
-    require(scene_changed, "Front-limit invariance fixture did not actually change the scene geometry");
-    std::puts("PASS fixed-front D3D12 UI remains invariant across depth/gain/zero; current strength/blend/budget/mono and unchanged scene/input fields verified");
-    std::puts("PASS shallow-front D3D12 UI is exactly one quarter of the current GPU front cap; unchanged scene/off path, depth/gain/zero stability, unused malformed depth and admission verified");
+    require(scene_changed, "Display-fraction invariance fixture did not actually change the scene geometry");
+    std::puts("PASS display-fraction D3D12 UI remains invariant across depth/gain/zero at three quarters and one quarter of "
+      "the current GPU cap; current strength/blend/budget/mono, unchanged scene/off path and the v7 dump's pack verified");
     std::vector<float> restored_depth(size_t(width) * height);
     require(original_depth.size() == restored_depth.size() * sizeof(float), "Original depth readback size changed");
     std::memcpy(restored_depth.data(), original_depth.data(), original_depth.size());
@@ -2537,7 +2375,6 @@ namespace {
     check_typed_ui_masks_d3d12(fixture, renderer, dump, report, directory);
     check_ui_pin_band_d3d12(fixture, renderer, report);
     check_pre_ui_proof_d3d12(fixture, renderer, report);
-    std::puts("PASS nearest-UI D3D12 current GPU scalar, corner coverage, both depth directions, floor/strength and v3 dump bindings");
     require(observed.renders == effect_renders, "An FX technique ran during native parity");
     // A UI layer reader's claimed completion value (ui_layer::bound) is
     // signalled by its Present's finish_present though nothing rendered, and
@@ -2566,7 +2403,7 @@ namespace {
       std::puts("PASS completion claim D3D12: signalled without a render, and on release after a missed finish_present");
     }
     require(report.good(), "Could not write native parity report");
-    std::printf("PASS native D3D12 renderer: %zu FX-matched cases; no installed FX; HDR/SDR, depth loss, both diagnostics, camera/raw modes, jitter/crop and full-resolution recovery\n", tests.size());
+    std::printf("PASS native D3D12 renderer: %zu cases, %zu without stereo FX-matched; no installed FX; HDR/SDR, depth loss, both diagnostics, camera/raw modes, jitter/crop and full-resolution recovery\n", tests.size(), fx_matched);
   }
 }
 

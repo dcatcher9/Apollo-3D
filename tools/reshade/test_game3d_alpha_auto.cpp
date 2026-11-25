@@ -374,27 +374,25 @@ namespace {
       require(!ui_selection::signature::parse(legacy), "A legacy or malformed entry parsed as a signature");
   }
 
-  // A3 and the legacy discard: restored entries decide at once but lapse
-  // unless earned again within alpha_trust_reconfirm_ms of testable time,
-  // which counts only the capped gaps between samples that could earn or
-  // refute the source; anything that is not a key is discarded and counted.
-  void restore_is_provisional_and_legacy_entries_are_discarded() {
+  // A3: restored entries decide at once but lapse unless earned again within
+  // alpha_trust_reconfirm_ms of testable time, which counts only the capped
+  // gaps between samples that could earn or refute the source; anything that
+  // is not a key is ignored.
+  void restore_is_provisional_and_other_entries_are_ignored() {
     alpha_auto_policy legacy;
     for (const char *stored : {"4", "16", "0x1f"}) {
       alpha_auto_policy one;
       const auto result = one.restore(stored);
-      require(!result.restored && result.discarded == 1 && result.discarded_text == stored &&
-          one.counters()[ui_counter::trust_discarded] == 1 && one.stored().empty(), "A legacy entry was not discarded");
+      require(!result.restored && one.stored().empty(), "An entry that is not a key was restored");
     }
     // ReShade returns an array's elements separated by '\0', with the end
-    // padded; a mix of legacy and new entries keeps the new ones, once.
+    // padded; a mix of other and key entries keeps the keys, once.
     const char mixed[] = "4\0ui_color:87:srgb,backbuffer:24:pq\0 ui_color:87:srgb \0\0";
     std::vector<std::string> heard;
     legacy.on_change([&](const std::string &stored) { heard.push_back(stored); });
     const auto result = legacy.restore(std::string_view(mixed, sizeof(mixed)));
-    require(result.restored == 2 && result.discarded == 1 && result.discarded_text == "4" &&
-        legacy.counters()[ui_counter::trust_restored] == 2 && legacy.counters()[ui_counter::trust_discarded] == 1,
-      "A mix of legacy and new entries was not restored and discarded");
+    require(result.restored == 2 && legacy.counters()[ui_counter::trust_restored] == 2,
+      "A mix of other and key entries was not restored");
     require(legacy.stored() == "ui_color:87:srgb,backbuffer:24:pq" && heard.empty(),
       "Restored keys were not kept, or the restore was reported");
     require(legacy.accepted(candidate::ui_color | candidate::backbuffer, signatures(1)) == candidate::ui_color &&
@@ -1257,8 +1255,7 @@ namespace {
         decoded.presented.verdict == H && decoded.presented.d == d && decoded.pre_ui.valid && decoded.pre_ui.d == pre_ui_d &&
         decoded.pre_ui.verdict == V && decoded.pre_ui_image == ui_detection::pre_ui_image::layer,
       "The scene guard did not read a decoded sample");
-    // Only the current revision's texture decodes (ui_detection_replay maps
-    // older shaders' words itself).
+    // Only the current revision's texture decodes.
     const auto older = ui_temporal::guard_sample(ui_temporal::decode_detection_sample(t.data(),
       4 * ui_detection::h1_decision_texels, 1234, 1));
     require(!older.pixels && !older.offered && !older.claims && !older.presented.valid && !older.pre_ui_image,
@@ -1426,7 +1423,7 @@ namespace {
     c[n::none + ui_no_mask::difference_failed] = 1; c[n::none + ui_no_mask::gate_no_hold] = 1;
     c[n::none + ui_no_mask::unaccepted] = 2;
     c[n::depth_not_current] = 1; c[n::full_d_hidden] = 1; c[n::inexact_difference] = 3; c[n::trust_earned] = 1;
-    c[n::trust_discarded] = 2; c[n::trust_revoked_exact] = 1; c[n::trust_forgotten] = 3; c[n::contradicted] = 2;
+    c[n::trust_revoked_exact] = 1; c[n::trust_forgotten] = 3; c[n::contradicted] = 2;
     c[n::trust_uncovered_color] = 5;
     c[n::full_alpha] = 2;
     c[n::scene_entered] = 1; c[n::scene_released] = 1; c[n::scene_refuted] = 2;
@@ -1443,7 +1440,7 @@ namespace {
         "none={layer_aside=0 trusted_invalid=0 presented_blocked=0 ambiguous=0 difference_failed=1 gate_no_hold=1 "
         "no_candidate=0 other=0 unaccepted=2} full={6=1 8=0 depth_not_current=1} full_d={hidden=1 ambiguous=0 visible=0 invalid=0} "
         "scene={entered=1 released=1 refuted=2} inexact_difference=3 contradicted=2 full_alpha=2 trust={earned=1 revoked_exact=1 "
-        "revoked_declared=0 lapsed=0 restored=0 discarded=2 forgotten=3 uncovered_color=5} samples=4 through_ms=12345",
+        "revoked_declared=0 lapsed=0 restored=0 forgotten=3 uncovered_color=5} samples=4 through_ms=12345",
       "The UI counters log text changed");
     ++c[n::auto_frames];
     require(!c.reconciled(), "An unaccounted frame reconciled");
@@ -1551,7 +1548,7 @@ namespace {
         e.h1_applied, "Texel 10 did not decode");
     require(e.pre_ui_match == 960 && e.pre_ui_image_lit == 880, "Texel 11 did not decode");
     // Fewer words than the current revision's decode as no sample: the
-    // renderer refuses other revisions and ui_detection_replay maps them.
+    // renderer and ui_detection_replay refuse other revisions.
     for (const std::uint32_t texels : {ui_detection::h1_decision_texels, ui_detection::judgment_decision_texels,
            ui_detection::layer_decision_texels}) {
       const auto older = ui_temporal::decode_detection_sample(t.data(), 4 * texels, 1500, 9);
@@ -1666,7 +1663,7 @@ int main() {
     a_layer_earns_only_where_its_colour_is_covered();
     an_invalid_declared_alpha_voids_earning();
     acceptance_is_per_signature();
-    restore_is_provisional_and_legacy_entries_are_discarded();
+    restore_is_provisional_and_other_entries_are_ignored();
     forget_clears_the_ledger();
     revocation_is_per_signature();
     change_sets_earn();

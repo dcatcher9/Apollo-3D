@@ -242,11 +242,10 @@ namespace sunshine_game3d::ui_detection {
     layer_detection_flags(float_layer_format(11u)) == 1u && *recorded_layer_flags(2u, 0x48u, 0x4005u) == 1u &&
     !recorded_layer_flags(2u, 0x08u, 3u) && !recorded_layer_flags(1u, 0x48u, 3u));
 
-  // Shader markers sizing the detection resources. The renderer and the
-  // live decoders (ui_selection::counts_from_words,
-  // ui_temporal::decode_detection_sample) read only the current revision's
-  // full texture; ui_detection_replay alone sizes the resources of older
-  // shaders and maps their decision words to this layout.
+  // Shader markers sizing the detection resources. The renderer, the live
+  // decoders (ui_selection::counts_from_words,
+  // ui_temporal::decode_detection_sample) and ui_detection_replay read only
+  // the current revision's full texture.
   inline constexpr std::string_view decision_texels_marker = "SUNSHINE_UI_DECISION_TEXELS";
   inline constexpr std::string_view scene_evidence_images_marker = "SUNSHINE_UI_SCENE_EVIDENCE_IMAGES";
   // The decision texels of each layout in turn: 0-4 (min), 5-6 the scene
@@ -256,7 +255,7 @@ namespace sunshine_game3d::ui_detection {
   // 11 from selection revision 4. A statistics cell holds the luma of two
   // images (presented, and the pre-UI scene image: HUD-less, else the UI
   // layer). Selection revision 11 writes 12 texels, every word a count or a
-  // decision word; older layouts are ui_detection_replay's alone.
+  // decision word; nothing reads an older layout.
   inline constexpr std::uint32_t min_decision_texels = 5, max_scene_evidence_images = 2;
   inline constexpr std::uint32_t scene_decision_texels = 7, layer_decision_texels = 8, judgment_decision_texels = 10,
     h1_decision_texels = 11, pre_ui_decision_texels = 12;

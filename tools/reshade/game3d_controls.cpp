@@ -70,9 +70,7 @@ namespace sunshine_game3d {
     // Whether a source carries UI coverage is a property of the game, so
     // acceptance outlives the session in this game's ReShade.ini
     // (docs/reshade-sbs.md): TrustedUISources holds the accepted signature
-    // keys (alpha_auto_policy::stored), which ReShade keeps as an array. The
-    // integer bitmasks of earlier versions in it, and the older TrustedUIAlpha
-    // key, are no longer read as acceptance: each source earns it again.
+    // keys (alpha_auto_policy::stored), which ReShade keeps as an array.
     constexpr const char *accepted_sources_key = "TrustedUISources";
 
     // The stored value: ReShade returns an array's elements separated by '\0'.
@@ -100,12 +98,6 @@ namespace sunshine_game3d {
         // The add-on's Diagnostics switch (game3d_diagnostics.h), process-wide.
         global_config_backend global;
         sunshine_log::message(reshade::log::level::info, diagnostics_log_text(load_diagnostics(global)).c_str());
-        if (restored.discarded) {
-          const auto message = "Sunshine UI protection: discarded " + std::to_string(restored.discarded) +
-            " legacy UI trust entries (" + restored.discarded_text +
-            "); each source is accepted again by its own evidence";
-          sunshine_log::message(reshade::log::level::info, message.c_str());
-        }
         if (restored.restored) {
           const auto message = "Sunshine UI protection: restored accepted UI sources " + policy->stored() +
             " from an earlier session of this game";

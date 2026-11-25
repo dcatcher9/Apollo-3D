@@ -204,8 +204,7 @@ namespace sunshine_game3d::ui_selection {
     std::uint32_t pre_ui_match{}, pre_ui_lit{};
   };
   // Counts from the current revision's decision words (texel t, component c
-  // is word 4 t + c); fewer than 4 decision_texels words give no counts
-  // (ui_detection_replay maps an older shader's words to this layout).
+  // is word 4 t + c); fewer than 4 decision_texels words give no counts.
   inline counts counts_from_words(const std::uint32_t *words, std::size_t n) {
     namespace word = ui_detection::decision_word;
     counts c;

@@ -169,17 +169,16 @@ namespace sunshine_game3d {
 
   // Borrowed only during the current render lease. Diagnostic copies must be
   // recorded before the next render reuses these textures. The conditioning
-  // textures (linear color, candidate, vertical, final field, nearest UI
-  // plane) hold the last RECORDED conditioning: a render whose pack is owed
-  // records it with that pack, and an owed pack that shows the source mono
-  // records none unless Dump 3D is armed (render_frame_input::diagnostic_armed).
-  // The vertical majorant is complete only where Dump 3D is armed or render()
-  // recorded the conditioning; an owed pack otherwise leaves its intermediate.
+  // textures (candidate, vertical, final field, eye field) hold the last
+  // RECORDED conditioning: a render whose pack is owed records it with that
+  // pack, and an owed pack that shows the source mono records none unless
+  // Dump 3D is armed (render_frame_input::diagnostic_armed). The vertical
+  // majorant is complete only where Dump 3D is armed or render() recorded the
+  // conditioning; an owed pack otherwise leaves its intermediate.
   struct diagnostic_resources {
-    reshade::api::resource source{}, linear_color{}, candidate{}, vertical_majorant{},
-      vertical_field{}, final_field{}, sbs{}, ui_source{}, ui_plane_tiles{}, ui_plane_resolved{};
+    reshade::api::resource source{}, candidate{}, vertical_majorant{}, vertical_field{}, final_field{}, sbs{}, ui_source{};
     // Both eyes' horizontal fields, twice the field height (left-eye rows, then
-    // right-eye rows), when the shader has the eye limiter; not a dump artifact.
+    // right-eye rows), up to 3840 pixels per side; not a dump artifact.
     reshade::api::resource eye_field{};
     // sbs holds 10-bit PQ code values (renderer::set_pq_output: Rec.2020,
     // ST 2084, R10G10B10A2_UNORM) instead of FP16 scRGB.
@@ -299,6 +298,11 @@ namespace sunshine_game3d {
 #endif
     static std::string_view shader_source();
     std::string_view active_shader_source() const;
+    // The first capability marker the renderer requires that this shader
+    // source does not declare (empty when it declares all of them, as the
+    // embedded shader does). configure refuses a source override without one,
+    // such as the embedded shader of a Dump 3D package from an older add-on.
+    static std::string_view missing_shader_marker(std::string_view source);
     // Mode-5 live adaptation uses caller-owned source identity only. Omitting
     // adaptive freezes the submitted fraction for deterministic replay.
     // defer_pack leaves the final SBS pack owed until a consumer calls pack(),
@@ -306,10 +310,9 @@ namespace sunshine_game3d {
     // output() then keeps an earlier image. Detection and every CPU decision
     // happen here; the depth conditioning only the pack, a dump or the
     // adaptive probe read is owed with the pack (recorded here for a probe
-    // frame, an older two-pass replay shader or without defer_pack, in full),
-    // and an owed pack that shows the source mono records none unless Dump 3D
-    // is armed. A Present's owed work is dropped by the next render or
-    // begin_present.
+    // frame or without defer_pack, in full), and an owed pack that shows the
+    // source mono records none unless Dump 3D is armed. A Present's owed work
+    // is dropped by the next render or begin_present.
     bool render(reshade::api::command_list *commands, const render_frame_input &input, bool defer_pack = false);
     // Records the owed pack. A null target writes output(); an export target
     // receives the SBS image directly, avoiding a full-frame copy. Views of
@@ -372,9 +375,8 @@ namespace sunshine_game3d {
     // The export transfer (docs/reshade-sbs.md, PQ wire transfer): true packs
     // an HDR source as 10-bit PQ code values (Rec.2020, ST 2084, encoded as
     // the host's scRGBTo2100PQ of the FP16 eye) into an R10G10B10A2_UNORM
-    // target, output() included; false packs FP16 scRGB. An HDR10 swapchain
-    // with a per-tap PQ shader and a native scRGB one with a shader declaring
-    // SUNSHINE_SCRGB_PQ_PACK support it; returns the transfer now in effect.
+    // target, output() included; false packs FP16 scRGB. HDR10 and native
+    // scRGB swapchains support it; returns the transfer now in effect.
     bool set_pq_output(bool pq);
     bool pq_output() const;
     bool pq_output_supported() const;
@@ -393,10 +395,8 @@ namespace sunshine_game3d {
     ui_adaptive::decision consumed_ui_adaptive() const;
     // Recorded conflict probes, independent of readback acceptance or scope.
     std::uint64_t ui_probe_submissions() const;
-    // Submitted bits. In nearest-UI mode inverse_depth is the floor; only the
-    // current-render diagnostic GPU scalar contains the resolved global plane.
-    // Front-limit mode ignores this depth word and dispatches no UI reduction.
-    // Display-fraction mode freezes the resolved fraction in the same word.
+    // Submitted bits. Display-fraction mode freezes the resolved fraction in
+    // the inverse_depth word.
     ui_plane_parameters consumed_ui_plane() const;
     reshade::api::resource_view native_rtv(reshade::api::resource backbuffer);
     // Also bracket capture's D3D11 unbinds, not only our draw calls. D3D12

@@ -177,14 +177,13 @@ Normal automatic UI detection requires neither a review file nor a panel approva
    edition's own `Microsoft.PowerShell.Utility` from `$PSHOME`, so PowerShell 7's inherited module
    path cannot hide `Get-FileHash` ([Setup](../../docs/reshade-sbs.md#setup)).
 
-   The installer installs one DLL, backs up replaced files, keeps Generic Depth disabled,
-   enables native Game 3D for a new setup, and removes the old separate depth/probe add-ons.
-   Saved SunshineGame3D strength/depth-view values migrate into `[SUNSHINE_GAME3D]` in ReShade.ini;
-   existing native settings win, including zero strength or an explicitly disabled renderer.
-   If no prior SunshineGame3D section exists, matching SuperDepth3D settings may seed the migration.
-   The obsolete SunshineGame3D FX and support files are backed up and removed only from their
-   owned `reshade-shaders\Shaders\SunshineGame3D` directory. Original SuperDepth3D files/settings,
-   other effects and add-on preferences remain available. Competing stereo techniques are disabled.
+   The installer installs one DLL, backs up replaced files, keeps Generic Depth disabled and
+   enables native Game 3D for a new setup; existing native settings in `[SUNSHINE_GAME3D]` win,
+   including zero strength or an explicitly disabled renderer. It removes the reference effect an
+   earlier `-ShaderDirectory` installation copied into `reshade-shaders\Shaders\Sunshine3D`.
+   Original SuperDepth3D files/settings, other effects and add-on preferences remain available.
+   Competing stereo techniques are disabled. Installations from before 09-18 (separate depth and
+   probe add-ons, the `SunshineGame3D` effect) are no longer migrated.
 3. Start the game and open **ReShade → Add-ons → Sunshine 3D**. Depth selection is automatic;
    there is nothing to enable or choose.
 4. Finish the [Sunshine setup](../../docs/reshade-sbs.md#setup): choose Game 3D on the streamed
@@ -199,7 +198,7 @@ until it disconnects. Opening the panel does not change ReShade presets. Explici
 save automatically in ReShade.ini; legacy VR output is not enabled.
 If the DLL is copied manually while Generic Depth is still enabled, it saves the required disabled
 entry and asks for one game restart; it cannot remove ReShade's already-registered built-in callbacks.
-Use the installer to configure this before the first launch and migrate old separate DLLs safely.
+Use the installer to configure this before the first launch.
 
 Native Game 3D stores `Strength` (percent, default 50), `DepthView` (0 game, 1 stereo depth,
 2 normal depth), `Enabled` (default 1), and `SourceAlphaUIMode` (0 Auto, 1 On, 2 Off;
@@ -221,9 +220,8 @@ renderer runtime tests (D3D12 and D3D11) also print the present-thread cost of a
 start (`MEASURE <api> startup`) and check every path of its background build: cancellation,
 park, device teardown, failure without retry and the present-thread executor
 ([renderer start](../../docs/reshade-sbs.md#native-renderer-ownership)).
-No editable shader definitions are required. Obsolete Game3D/debug definitions are removed from
-their saved scopes; shared definitions belonging to other effects remain unchanged. Original
-SuperDepth3D controls and includes remain in their separate installation.
+No editable shader definitions are required. Original SuperDepth3D controls and includes remain in
+their separate installation.
 The integrated selector supplies a borrowed shader-readable depth view and readiness directly to
 the renderer.
 The game stays mono at normal resolution while the add-on produces a
@@ -290,20 +288,14 @@ Separate GPU source-validation passes evaluate alpha and paired HUD-less candida
 Their bounded asynchronous diagnostic readback (the decision texels) cannot authorize protection; selection
 and mask generation remain on the GPU with no full-frame CPU readback or startup deadline.
 No new probe artifact is required. `--ui-front-fraction 0..0.75` supplies an explicit offline
-fraction and preserves historical 75% renders despite the lower live ceiling;
-`--ui-plane adaptive` is invalid without history. Invalid captured fraction words retain
-their bits and exercise the shader's screen-disparity fallback.
+fraction and preserves historical 75% renders despite the lower live ceiling; a fraction of 0
+is the screen plane. Invalid captured fraction words retain their bits and exercise the shader's
+screen-disparity fallback.
 
-Replay's `--ui-inverse-depth` selects historical mode 1 with an explicit depth. Modes 0 (screen/v2),
-1 (inverse-depth plane/v2), 2 (nearest covered depth with a submitted floor/v3), 3 (maximum front
-display limit/v4) and 4 (fixed quarter-limit/v5) retain their replay behavior. Mode 2 alone
-dispatches the nearest-depth tile/reduction passes. Mode 3 requires
-`#define SUNSHINE_UI_FRONT_LIMIT_PLANE 1` and ignores its inverse-depth word; it is available via
-`--ui-plane front-limit` with a compatible shader. Mode 4 requires
-`#define SUNSHINE_UI_SHALLOW_FRONT_PLANE 1`, ignores its inverse-depth word, records the required
-`front_limit_fraction: 0.25` metadata, and is available via `--ui-plane shallow-front`.
-Modes 0 through 4 are historical replay choices rather than the live adaptive policy.
-The 80-byte geometry `b0` ABI and default numeric parallax limit are unchanged.
+Mode 0 is the screen plane; every other mode word pins at screen depth too. Modes 1-4 (the
+midpoint, nearest-covered-depth, front-limit and shallow-front planes) were removed on 11-25:
+replay refuses a package that recorded one. The 80-byte geometry `b0` ABI and default numeric
+parallax limit are unchanged.
 
 The sampler covers every texel in the active depth crop, including hardware endpoints, without
 percentile trimming. It obtains tile extrema, then scans each tile again for centered moments
@@ -489,8 +481,7 @@ camera projection or only the raw controller places the scene (the latter while 
 exists is a warning); UI acceptance changes and Forget; inferred alpha
 deciding beside an accepted UIAlpha or UI color tag; an accepted alpha (inferred, and since
 selection revision 10 UIAlpha or the UI color tag captured in the pair's tag batch) that a valid
-exact HUD-less pair contradicted one way three times within 2 s without a revocation (in logs
-before S2a, an accepted source covering the whole frame while an exact pair shows the scene; shorter
+exact HUD-less pair contradicted one way three times within 2 s without a revocation (shorter
 contradictions, which A2 never revokes, are noted); and accepted sources that disagree as often,
 with the revocation that resolved them named by its kind (by the selection and A2 revocation rules of
 [UI protection](../../docs/reshade-sbs.md#setup)); selective UI channels rejected for invalid pixels
@@ -499,22 +490,17 @@ on more than 1% of the frame (V1) while no mask protected it (`UI channel admiss
 outside settle times in which Auto rendered frames without a UI mask (no UI source offered, or no
 usable mask while no UI channel was offered clean and empty, which means no UI on screen), so HUD
 and menus took the scene's depth, with each window's time and the reason each offered channel gave
-no mask, and in logs since S2a the add-on's own reason and refused candidate (gaps shorter than the overlay warning's minimum, defined in the
+no mask, and the add-on's own reason and refused candidate (gaps shorter than the overlay warning's minimum, defined in the
 [UI protection panel](../../docs/reshade-sbs.md#setup), are counted, not listed; a runtime's
 `Sunshine depth readiness` loss is left out, from its line to its recovery, and its length named only
 when the `Sunshine SBS output` counters around it count as many publications without depth as it had
 Presents, so every frame there was flat and no HUD took depth; a loss that never recovered still
 counts); how many samples were
-full-frame UI over a hidden scene (H1, source 8; in logs before S2b source 8 or 9), by the pre-UI
+full-frame UI over a hidden scene (H1, source 8), by the pre-UI
 scene image whose claim acted (HUD-less image or UI layer), with the hidden-scene guard's entered,
 released and refuted counts from the last counter line, and how many hidden samples had a pre-UI
-layer whose signature was not yet proven the pre-UI scene image (since fix 1 by matching pixels, in
-S2b logs by D; in logs before S2b, how many were a
-route's exit, whose own evidence read the presented frame visible: each hidden scene that ends
-shows one, so they are counted rather than judged); in logs before selection revision 9, a
-warning when the removed first-run shadow measured the presented frame hidden, not blank, for at
-least 500 ms while no UI source decided (`shadow_hidden_ms`, listed once per run by its start); in
-logs since fix 1, `Pre-UI proof` for each layer proof key (`pre_ui:<format>:<space>`) restored,
+layer whose signature was not yet proven the pre-UI scene image by matching pixels; `Pre-UI proof`
+for each layer proof key (`pre_ui:<format>:<space>`) restored,
 earned, lapsed or forgotten ([hidden-scene evidence](../../docs/reshade-sbs.md#setup) defines it);
 observation losses, capture statuses and export pauses, each judged by its origin (below);
 present-thread hitches, named by their step, and, from each timing line, a window whose slowest Present took the hitch threshold
@@ -537,11 +523,10 @@ published like any other. A gap longer than one stream frame interval in a windo
 streamed span warns (streamed frames could read a UI layer that missed a whole stream frame of UI changes,
 however fast the game presented), and so does a gap of 250 ms or more in any window (the layer was no
 longer offered at all: a ring that stayed full). Shorter gaps (one skip at an uncapped ~590 clears a
-second costs about 3 ms), skips that were not streamed or without `--host-log`, and skips on lines
-before 10-07, which log no gap, are INFO. The gap is a maximum, so neither a window's placement nor its
-average rates can hide a burst of skips. The once-per-ring full-ring line (a WARN before 10-07) belongs
-to this check, not to `Log warnings`, and one after the last timing line is named as uncounted, its
-cost unknown; `UI layer targets` (INFO, since C12) counts the qualifying clears the layer tracker
+second costs about 3 ms), and skips that were not streamed or without `--host-log` are INFO. The gap
+is a maximum, so neither a window's placement nor its average rates can hide a burst of skips. The
+once-per-ring full-ring line belongs to this check, and one after the last timing line is named as
+uncounted, its cost unknown; `UI layer targets` (INFO, since C12) counts the qualifying clears the layer tracker
 dropped with all 32 of its entries taken (the timing group's `targets_dropped`: the targets cleared
 first in a frame, beyond the 32 cleared last); and, from the host log, the Game 3D link,
 size fit and encoder stalls (one per stalled frame, classified by its last line and listed with its length and
@@ -575,36 +560,32 @@ Since 10-23 these checks judge each event by its origin rather than warning at a
   `runtime_reset`, `runtime_gone`, `present_without_render`, `color_space_changed`,
   `swapchain_unknown`, `frame_not_prepared`) and warns only as a storm: 7 or more within 60 s, more
   than one per 10 s for a minute. Every other reason, a new one included, is a `fault` and warns;
-  `device_removed` fails. Lines from before the class tag are classed by the report's copy of that
-  list.
+  `device_removed` fails.
 - `Capture status`: every status of a depth provider fails except `inactive`, `unavailable`,
   `recorded`, `submitted`, `ready`, `stale` and `ambiguous`, so `unsupported_queue`, `malformed`,
   `exhausted`, `unknown` and a status added later fail by default. A failing status within the
   settle time after an export start, FG switch or reset is INFO, as before.
 - `Observation losses` (sampled on `Sunshine depth observation evidence` lines): a capacity loss
-  (`tokens_busy`, `records_busy`, `commands_busy`, `resource_table_full`, `metadata_storage_busy`: a
-  full bounded table, which a burst of game work explains; `commands_busy` and
-  `resource_table_full` appear only in logs of add-ons from before the 10-31 structure refactor)
-  warns only by rate: all of them more than
+  (`tokens_busy`, `records_busy`, `metadata_storage_busy`: a full bounded table, which a burst of game
+  work explains) warns only by rate: all of them more than
   once per 2 minutes of the session (counted as at least 2 minutes), or one cause more than 3 times
   within 60 s. `lifecycle` and `token_replaced` are the game's own and never warn. `invalid_input`,
   `sdk_failure`, `test_injected` and a cause the report does not know warn at any count. The depth a
   loss cost is the `Depth` check's to judge.
 - `Log warnings`: only WARN and ERROR lines the add-on owns warn: its own `[Sunshine 3D] ` (or
-  `[Sunshine SBS TEST ONLY] `) lines, except its hitch, display-scaling and full-ring lines that
-  their own checks report, and ReShade's lines about it: one naming the add-on or its module, a
+  `[Sunshine SBS TEST ONLY] `) lines, except its hitch, display-scaling and UI layer refusal lines
+  that their own checks report, and ReShade's lines about it: one naming the add-on or its module, a
   failed add-on load, or a failed effect-runtime creation. Every other WARN or ERROR line (shader
   compile warnings, reference-count notes, DirectInput, another add-on) is counted as INFO
   `Other log warnings`, with one example per kind of line.
 - `Host size`: game eyes scaled to the stream's (the same aspect) or fitted into it (letterboxed or
   pillarboxed) are INFO; eyes the host refuses, which stay 2D, fail.
 
-The test's `SchemaMirrors` reads these names from the C++ that owns them (`routine_export_pauses`
-and every `deactivate` reason, `depth_capture::status`, `loss_diagnostics::reason` and
-`format_ui_counters`), so a reason, status, cause or counter added there fails the test until it is
-classified: the report's routine pauses and OK statuses beside the test's own lists of fault pauses
-and failing statuses (the report itself still fails an unknown status and warns on an unknown pause
-by default). A `Sunshine UI
+The test's `SchemaMirrors` reads these names from the C++ that owns them (`depth_capture::status`,
+`loss_diagnostics::reason` and `format_ui_counters`), so a status, cause or counter added there fails
+the test until it is classified: the report's OK statuses beside the test's own list of failing
+statuses (the report itself still fails an unknown status by default). It also fills in the pause
+line's format from the exporter, whose class the report reads as logged. A `Sunshine UI
 counters` reason for frames without detection that the report does not know still counts in the
 accounting and is listed after the known ones.
 
@@ -615,32 +596,23 @@ invariants from the last counter line (the holds check from every counter line),
 
 - `UI counters`: the add-on's own accounting (Auto frames are detection frames, generated Presents
   that held a real frame's decision or had none, and frames without detection).
-- `UI protection`: inferred alpha beside an accepted declared UI channel (`presented_over_dedicated`,
-  counter lines through dc7e3c77 only), and the frames in which a
+- `UI protection`: the frames in which a
   valid exact pair contradicted a deciding accepted alpha one way (`contradicted`; inferred alpha per frame, since selection revision 10 an accepted UIAlpha, UI color tag, Backbuffer or current alpha (never the one-frame-late layer copy), per sample), which
   fail only with a sampled run of three such contradictions within 2 s that no revocation followed:
-  A2 never revokes shorter ones, and the counter cannot tell them apart. Counter lines logged
-  before S2a keep the older rule: accepted full coverage of a visible scene (`trusted_full`) that no
-  revocation of that source resolved.
+  A2 never revokes shorter ones, and the counter cannot tell them apart.
 - `UI full frame`: H1 samples (8) whose scene read visible, against the hidden-scene guard's
-  releases (`scene={entered released refuted}`, since S2b). The sample that releases a held hidden
+  releases (`scene={entered released refuted}`). The sample that releases a held hidden
   verdict decided 8 and read visible, and counts as a release, so this passes while
   `full_d.visible` is at most `scene.released` and warns that an H1 hold acted over a visible
-  scene otherwise. Counter lines logged before S2b keep the older rule: each release of a held
-  route (8 or 9) counted one, so it warns when such a route decided, and an exact full change-set
-  (6) alone is INFO.
-- `UI full alpha`: accepted whole-frame decisions, a whole-frame mask from alpha or (since S2b) an
-  exact full change-set (6), and, in logs before selection revision 9, whether their samples read
-  the scene visible. It is INFO: an accepted source pins its alpha at any coverage, so a full one is
+  scene otherwise.
+- `UI full alpha`: accepted whole-frame decisions, a whole-frame mask from alpha or an exact full
+  change-set (6). It is INFO: an accepted source pins its alpha at any coverage, so a full one is
   flat even over a visible scene, as the
   [opacity ruling](../../docs/reshade-sbs.md#ui-decision-framework) intends.
 - `UI full frame pairing`: a failure when the whole frame was decided flat (6) in a session whose UI
   capture gate offered HUD-less pairs but never a same-batch Backbuffer pair. Only a same-batch pair
   is exact (rule E2); a Present-counted pair can belong to another frame and then differs everywhere
   (Hogwarts Legacy 10-05, which tagged only `HUDLessColor`).
-- `UI inferred alpha`: a failure when an unaccepted inferred alpha decided, which only accepted
-  candidates do since S1 (a warning on counter lines logged before S1). Only counter lines through
-  dc7e3c77 carry the count, so later logs have no such check.
 - `UI inexact difference`: INFO, the frames whose HUD-less difference came from a Present-counted
   (inexact) pair, validated by its own pixels (V2); expected wherever a game offers no same-batch
   pair.
@@ -657,26 +629,10 @@ invariants from the last counter line (the holds check from every counter line),
   Forget.
 
 Logs without counter lines use the sampled checks above. The report reads the UI and counter lines
-of logs written before S2b, before S2a and before S1 too, each with the checks of its time; a UI
-layer logged before S1 is read as the layer candidate. UI lines since S2b carry the pre-UI scene
-image's evidence (`sampled_pre_ui_scene`), the informative claims and the H1 word
-(`sampled_claims`, `sampled_h1`) and the guard's pushed verdicts and layer proof (`scene_guard`) in place of
-`sampled_hudless_scene` and `scene_hold`; UI lines since fix 1 add the layer's pixels against the
-presented frame (`sampled_pre_ui_pixels`), and lines without them read as before;
-[UI protection](../../docs/reshade-sbs.md#setup) defines them. Lines of removed features still parse
-and add no check of their own: the first-run shadow's session line, which is ignored (the `shadow`
-and `shadow_hidden_ms` fields of UI lines written before selection revision 9 still feed the
-hidden-scene warning above), rule H2's still screens (`still` groups, `decided.11`, `Sunshine
-UI still screen` lines), the S3 identity shadow (`Sunshine UI identity`, `Sunshine FG interposers`),
-and the dark pre-UI statistics. Fields the add-on logged as 0 are gone from later lines: on counter
-lines through dc7e3c77 `full_alpha_d` (0 from selection revision 9) and the S1 invariants
-`untrusted_inferred` and `presented_over_dedicated` (0 from selection revision 10); on UI lines
-through be7788bf `shadow`, `shadow_hidden_ms`, `presented_lit` and `presented_lit_differs` (0 from
-selection revision 9) and the one-way layer column (0 on every line since S2a, which added it: every
-layer was the one-frame-late copy, which no judge reads). UI lines from S2a through 180f1842 also
-carry `sampled_late_layer`, which only repeated that a layer was offered and is skipped. The
-[UI counters](../../docs/reshade-sbs.md#setup) table and the UI line description there own these
-ranges.
+of add-ons built since 10-31, as [UI protection](../../docs/reshade-sbs.md#setup) and the
+[UI counters](../../docs/reshade-sbs.md#setup) table define them; a UI line in an older form does not
+parse and adds no sample. Until 11-25 it also read the lines of add-ons from before S1 to 10-07, each
+with the checks of its time.
 Logs since 10-22 carry the game process's video memory
 ([Diagnostics switch and per-Present cost](../../docs/reshade-sbs.md#diagnostics-switch-and-per-present-cost)).
 `VRAM pressure` warns for each depth loss, hitch or Present gap line whose own sample put the game's local usage
@@ -806,8 +762,7 @@ ready, stays a warning that names the controller's state. The add-on's diagnosti
 hold a controller line, so run ends are approximate and a cause may lead its run by that gate.
 From `Sunshine SBS: export inactive` until the next `Sunshine SBS: generation` nothing is
 streamed, and depth losses there are not counted. The stop's own `explicit_reuse_invalidation`
-follows its pause line; add-ons before 10-23 logged it just before, in the same millisecond, and
-the report counts that one with the pause too.
+follows its pause line.
 
 To see what a build changed for one game, keep each report and compare a new session with that
 game's last good one:
@@ -846,8 +801,7 @@ session, is INFO. The thresholds (`COMPARE_RULES`, least counts `COMPARE_MINIMUM
 The layer share is taken with FG off only: a game whose UI source depends on FG (W3: UI alpha with
 FG on, the layer with FG off) would otherwise move it with the time the player kept FG on. Without
 these options the output is unchanged. A report that cannot be saved says so on stderr and keeps
-its exit code. The golden test compares the saved Witcher 3 10-22 session with its 11-02 session,
-which flags the FG-off UI layer share, the UI protection gaps and the no-mask share.
+its exit code.
 
 A failing check is a bug report: fix the rule at its root (see
 [the generalization rules](../../docs/reshade-sbs.md#rules-for-new-game-behaviour)), then add a
@@ -865,7 +819,10 @@ and addresses with placeholders and keeps only the session's host lines. The mac
 computer names are replaced only in that scrub, so the golden test and `--rescrub` give the same
 result on any machine. The golden test fails on anything left to scrub; the raw logs are not
 kept, so a new scrub rule reaches the committed fixtures through `scrub_game3d_log.py --rescrub`,
-and their goldens should not move.
+and their goldens should not move. Since the report reads only logs of add-ons built since 10-31, a
+fixture from an older add-on is replaced by a newer recording of its game or deleted: on 11-25
+Assassin's Creed Shadows, Battlefield 6, Dead Space, Hogwarts Legacy and Resident Evil Requiem lost
+theirs and need a new recording.
 
 UI decision changes have two offline gates; [UI protection](../../docs/reshade-sbs.md#setup)
 owns their contracts. The first is the single-frame replay of the labelled dumps. Run it from

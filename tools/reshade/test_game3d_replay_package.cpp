@@ -176,7 +176,7 @@ namespace {
     // inputs: replay must exercise the shader guards without rewriting bytes.
     for (const auto bits : {0u, 0x80000000u, 1u, 0x3f000001u, 0x7f7fffffu, 0xbf000000u,
            0x7f800000u, 0xff800000u, 0x7fc01234u}) {
-      for (const auto mode : {0u, 1u, UINT32_MAX}) {
+      for (const auto mode : {0u, UINT32_MAX}) {
         for (const bool enabled : {false, true}) {
           auto m = valid();
           const auto original = parse(m).parameters;
@@ -200,137 +200,40 @@ namespace {
 
   void malformed_independent_ui_metadata() {
     const auto reject_ui = [](const std::function<void(json &)> &change) {
-      reject([&](json &m) { set_ui(m, true, 1, 0x3f000000u); change(m["producer_metadata"]["replay"]); });
+      // A malformed mode word (kept for the shader's screen fallback) needs a
+      // shader that consumes the UI plane.
+      reject([&](json &m) { set_ui(m, true, UINT32_MAX, 0x3f000000u); change(m["producer_metadata"]["replay"]); });
     };
     reject_ui([](json &r) { r["ui_parameter_abi"] = "sunshine_game3d.ui_parameters.v7"; });
     reject_ui([](json &r) { r["ui_parameter_bytes"] = 20; });
     reject_ui([](json &r) { r["ui_parameter_hex"] = std::string(30, '0'); });
     reject_ui([](json &r) { r["ui_parameter_hex"] = std::string(32, 'x'); });
-    reject_ui([](json &r) { r["ui_parameter_hex"] = "02000000010000000000003f00000000"; });
+    reject_ui([](json &r) { r["ui_parameter_hex"] = "02000000ffffffff0000003f00000000"; });
     reject_ui([](json &r) { r["source_alpha_ui"] = false; });
-    reject_ui([](json &r) { r["ui_parameter_hex"] = "01000000010000000000003f01000000"; });
+    reject_ui([](json &r) { r["ui_parameter_hex"] = "01000000ffffffff0000003f01000000"; });
     reject_ui([](json &r) { r["shader_source"] = "legacy shader"; });
     reject_ui([](json &r) { r.erase("ui_constant_binding"); });
     reject_ui([](json &r) { r["ui_constant_binding"]["register"] = "b0"; });
-    reject_ui([](json &r) { r["ui_constant_binding"]["uint32"] = {1, 1, 0}; });
+    reject_ui([](json &r) { r["ui_constant_binding"]["uint32"] = {1, 0, 0}; });
     reject_ui([](json &r) { r["ui_constant_binding"]["uint32"][2] = 0; });
-    reject_ui([](json &r) { r["ui_constant_binding"]["mode"] = 0; });
+    reject_ui([](json &r) { r["ui_constant_binding"]["mode"] = 5; });
     reject_ui([](json &r) { r["ui_constant_binding"]["mode"] = 1.5; });
     reject_ui([](json &r) { r["ui_constant_binding"]["inverse_depth_bits"] = 0; });
     reject_ui([](json &r) { r["ui_constant_binding"]["inverse_depth"] = .25f; });
     reject_ui([](json &r) { r["ui_constant_binding"]["inverse_depth"] = nullptr; });
     reject_ui([](json &r) { r["ui_constant_binding"]["inverse_depth"] = "0.5"; });
-    reject([](json &m) { set_ui(m, true, 1, 0x7f800000u); m["producer_metadata"]["replay"]["ui_constant_binding"]["inverse_depth"] = 1.f; });
+    reject([](json &m) { set_ui(m, true, 0, 0x7f800000u); m["producer_metadata"]["replay"]["ui_constant_binding"]["inverse_depth"] = 1.f; });
   }
 
-  void exact_nearest_ui_plane_contract() {
-    for (const bool enabled : {false, true}) {
-      auto m = valid();
-      set_ui(m, enabled, 2, 0x3f000001u);
-      auto &record = m["producer_metadata"]["replay"];
-      record["ui_parameter_abi"] = "sunshine_game3d.ui_parameters.v3";
-      record["shader_source"] = "#define SUNSHINE_UI_NEAREST_PLANE 1\nSunshine_SourceAlphaUI Sunshine_UIPlaneMode";
-      const auto p = parse(json::parse(m.dump()));
-      require(p.ui_plane.mode == ui_plane_mode::depth_midpoint_nearest_ui &&
-          p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v3" &&
-          ui_parameter<std::uint32_t>(p, 8) == 0x3f000001u && p.source_alpha_ui == enabled,
-        "Nearest UI replay changed the exact submitted floor or protection flag");
-    }
-    reject([](json &m) { set_ui(m, true, 2, 0x3f000000u); });
-    reject([](json &m) {
-      set_ui(m, true, 2, 0x3f000000u);
-      m["producer_metadata"]["replay"]["ui_parameter_abi"] = "sunshine_game3d.ui_parameters.v3";
-    });
-  }
-
-  void exact_front_limit_ui_plane_contract() {
-    for (const bool enabled : {false, true}) {
-      for (const auto unused_bits : {0u, 0x3f000001u, 0x7fc12345u}) {
-        auto m = valid();
-        set_ui(m, enabled, 3, unused_bits);
-        auto &record = m["producer_metadata"]["replay"];
-        record["ui_parameter_abi"] = "sunshine_game3d.ui_parameters.v4";
-        record["shader_source"] = "#define SUNSHINE_UI_FRONT_LIMIT_PLANE 1\nSunshine_SourceAlphaUI Sunshine_UIPlaneMode";
-        const auto p = parse(json::parse(m.dump()));
-        require(p.ui_plane.mode == ui_plane_mode::front_limit && p.source_alpha_ui == enabled &&
-            p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v4" &&
-            ui_parameter<std::uint32_t>(p, 8) == unused_bits,
-          "Front-limit replay changed consumed mode, protection flag, or unused q bytes");
+  void retired_ui_plane_modes_are_refused() {
+    for (const auto mode : {1u, 2u, 3u, 4u}) {
+      for (const auto *abi : {"sunshine_game3d.ui_parameters.v2", "sunshine_game3d.ui_parameters.v3",
+             "sunshine_game3d.ui_parameters.v4", "sunshine_game3d.ui_parameters.v5", "sunshine_game3d.ui_parameters.v6"}) {
+        reject([&](json &m) {
+          set_ui(m, true, mode, 0x3f000001u);
+          m["producer_metadata"]["replay"]["ui_parameter_abi"] = abi;
+        });
       }
-    }
-    for (const auto *abi : {"sunshine_game3d.ui_parameters.v2", "sunshine_game3d.ui_parameters.v3"}) {
-      reject([&](json &m) {
-        set_ui(m, true, 3, 0u);
-        auto &record = m["producer_metadata"]["replay"];
-        record["ui_parameter_abi"] = abi;
-        record["shader_source"] = "#define SUNSHINE_UI_FRONT_LIMIT_PLANE 1\nSunshine_SourceAlphaUI Sunshine_UIPlaneMode";
-      });
-    }
-    reject([](json &m) {
-      set_ui(m, true, 3, 0u);
-      m["producer_metadata"]["replay"]["ui_parameter_abi"] = "sunshine_game3d.ui_parameters.v4";
-    });
-  }
-
-  void exact_shallow_front_ui_plane_contract() {
-    const auto set_shallow = [](json &m, bool enabled, std::uint32_t bits) {
-      set_ui(m, enabled, 4, bits);
-      auto &record = m["producer_metadata"]["replay"];
-      record["ui_parameter_abi"] = "sunshine_game3d.ui_parameters.v5";
-      record["ui_constant_binding"]["front_limit_fraction"] = 0.25;
-      record["shader_source"] = "#define SUNSHINE_UI_SHALLOW_FRONT_PLANE 1\nSunshine_SourceAlphaUI Sunshine_UIPlaneMode";
-    };
-    // The inverse-depth word is unused in this mode, but remains exact capture
-    // evidence even when its bits would be invalid for a depth-based UI plane.
-    for (const bool enabled : {false, true}) {
-      for (const auto bits : {0u, 0x80000000u, 1u, 0x3f000001u, 0x7f7fffffu,
-             0xbf000000u, 0x7f800000u, 0xff800000u, 0x7fc12345u}) {
-        auto m = valid();
-        const auto original = parse(m).parameters;
-        set_shallow(m, enabled, bits);
-        const auto p = parse(json::parse(m.dump()));
-        const auto expected = ui_parameter_words(enabled, p.ui_plane);
-        require(p.parameters == original && p.ui_plane.mode == ui_plane_mode::shallow_front &&
-            p.source_alpha_ui == enabled && p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v5" &&
-            expected[2] == bits && expected[3] == 0 &&
-            hex(p.ui_parameters.data(), p.ui_parameters.size()) == hex(expected.data(), sizeof(expected)),
-          "Shallow-front replay changed b0, the mode, protection flag or unused q bits");
-        auto changed = original;
-        const float value = .125f;
-        for (const unsigned offset : {0u, 20u, 52u}) std::memcpy(changed.data() + offset, &value, sizeof(value));
-        m["producer_metadata"]["replay"]["parameter_hex"] = hex(changed.data(), changed.size());
-        require(parse(m).ui_parameters == p.ui_parameters,
-          "Scene strength/gain/zero rewrote the fixed shallow-front plane words");
-      }
-    }
-    const auto reject_shallow = [&](const std::function<void(json &)> &change) {
-      reject([&](json &m) { set_shallow(m, true, 0u); change(m["producer_metadata"]["replay"]); });
-    };
-    for (const auto *abi : {"sunshine_game3d.ui_parameters.v2", "sunshine_game3d.ui_parameters.v3", "sunshine_game3d.ui_parameters.v4"})
-      reject_shallow([&](json &r) { r["ui_parameter_abi"] = abi; });
-    for (const auto *shader : {"Sunshine_SourceAlphaUI Sunshine_UIPlaneMode",
-           "#define SUNSHINE_UI_FRONT_LIMIT_PLANE 1\n#define SUNSHINE_UI_NEAREST_PLANE 1\nSunshine_SourceAlphaUI Sunshine_UIPlaneMode",
-           "#define SUNSHINE_UI_SHALLOW_FRONT_PLANE 0\nSunshine_SourceAlphaUI Sunshine_UIPlaneMode",
-           "#define SUNSHINE_UI_SHALLOW_FRONT_PLANE 1\nSunshine_SourceAlphaUI"})
-      reject_shallow([&](json &r) { r["shader_source"] = shader; });
-    reject_shallow([](json &r) { r["ui_constant_binding"].erase("front_limit_fraction"); });
-    for (const auto &fraction : json::array({0, 1, -0.25, 0.5, "0.25", true, nullptr}))
-      reject_shallow([&](json &r) { r["ui_constant_binding"]["front_limit_fraction"] = fraction; });
-    reject_shallow([](json &r) { r["ui_parameter_hex"] = "01000000040000000000000001000000"; });
-    reject_shallow([](json &r) { r["ui_constant_binding"]["mode"] = 3; });
-    reject_shallow([](json &r) { r["ui_constant_binding"]["inverse_depth"] = .5f; });
-    reject_shallow([](json &r) { r["ui_constant_binding"]["inverse_depth_bits"] = 1; });
-    // v5 still carries older modes unchanged and does not retroactively require
-    // a fraction or the new shader marker for their historical semantics.
-    for (const auto mode : {0u, 1u, 2u, 3u}) {
-      auto m = valid();
-      set_ui(m, true, mode, 0x3f000001u);
-      auto &record = m["producer_metadata"]["replay"];
-      record["ui_parameter_abi"] = "sunshine_game3d.ui_parameters.v5";
-      record["shader_source"] = "#define SUNSHINE_UI_FRONT_LIMIT_PLANE 1\n#define SUNSHINE_UI_NEAREST_PLANE 1\nSunshine_SourceAlphaUI Sunshine_UIPlaneMode";
-      require(static_cast<std::uint32_t>(parse(m).ui_plane.mode) == mode &&
-          ui_parameter<std::uint32_t>(parse(m), 8) == 0x3f000001u,
-        "v5 changed an earlier UI mode or required shallow-front metadata for it");
     }
   }
 
@@ -381,7 +284,7 @@ namespace {
            "sunshine_game3d.ui_parameters.v4", "sunshine_game3d.ui_parameters.v5"})
       reject_fraction([&](json &r) { r["ui_parameter_abi"] = abi; });
     for (const auto *shader : {"Sunshine_SourceAlphaUI Sunshine_UIPlaneMode",
-           "#define SUNSHINE_UI_SHALLOW_FRONT_PLANE 1\nSunshine_SourceAlphaUI Sunshine_UIPlaneMode",
+           "#define SUNSHINE_UI_MASK_CHANNEL 1\nSunshine_SourceAlphaUI Sunshine_UIPlaneMode",
            "#define SUNSHINE_UI_DISPLAY_FRACTION_PLANE 0\nSunshine_SourceAlphaUI Sunshine_UIPlaneMode",
            "#define SUNSHINE_UI_DISPLAY_FRACTION_PLANE 1\nSunshine_SourceAlphaUI"})
       reject_fraction([&](json &r) { r["shader_source"] = shader; });
@@ -398,18 +301,15 @@ namespace {
     reject_fraction([](json &r) { r["ui_constant_binding"]["mode"] = 4; });
     reject_fraction([](json &r) { r["ui_parameter_hex"] = "0100000005000000abaaaa3e01000000"; });
     reject([&](json &m) { set_fraction(m, true, 0x7fc12345u); m["producer_metadata"]["replay"]["ui_constant_binding"]["front_limit_fraction"] = .25; });
-    // v6 does not reinterpret historical modes' third word or require the
-    // new marker/field names when their original contracts are sufficient.
-    for (const auto mode : {0u, 1u, 2u, 3u, 4u}) {
+    // v6 does not reinterpret the screen mode's third word or require the
+    // display-fraction marker and field names for it.
+    {
       auto m = valid();
-      set_ui(m, true, mode, 0x3f000001u);
-      auto &record = m["producer_metadata"]["replay"];
-      record["ui_parameter_abi"] = "sunshine_game3d.ui_parameters.v6";
-      record["shader_source"] = "#define SUNSHINE_UI_FRONT_LIMIT_PLANE 1\n#define SUNSHINE_UI_NEAREST_PLANE 1\n#define SUNSHINE_UI_SHALLOW_FRONT_PLANE 1\nSunshine_SourceAlphaUI Sunshine_UIPlaneMode";
-      if (mode == 4) record["ui_constant_binding"]["front_limit_fraction"] = .25;
+      set_ui(m, true, 0, 0x3f000001u);
+      m["producer_metadata"]["replay"]["ui_parameter_abi"] = "sunshine_game3d.ui_parameters.v6";
       const auto p = parse(m);
-      require(static_cast<std::uint32_t>(p.ui_plane.mode) == mode && ui_parameter<std::uint32_t>(p, 8) == 0x3f000001u,
-        "v6 reinterpreted a historical UI mode's word2");
+      require(p.ui_plane.mode == ui_plane_mode::screen && ui_parameter<std::uint32_t>(p, 8) == 0x3f000001u,
+        "v6 reinterpreted the screen mode's word2");
     }
   }
 
@@ -636,9 +536,7 @@ int main() {
     legacy_ui_screen_compatibility();
     exact_independent_ui_plane();
     malformed_independent_ui_metadata();
-    exact_nearest_ui_plane_contract();
-    exact_front_limit_ui_plane_contract();
-    exact_shallow_front_ui_plane_contract();
+    retired_ui_plane_modes_are_refused();
     exact_display_fraction_ui_plane_contract();
     exact_external_ui_source_is_required();
     optional_catalog_stays_out_of_renderer_inputs();
@@ -649,7 +547,7 @@ int main() {
     path_and_duplicates();
     missing_and_partial();
     explicit_typed_ui_mask();
-    std::puts("PASS: nineteen Game 3D replay package regression groups");
+    std::puts("PASS: seventeen Game 3D replay package regression groups");
     return 0;
   } catch (const std::exception &e) {
     std::fprintf(stderr, "FAIL: %s\n", e.what());

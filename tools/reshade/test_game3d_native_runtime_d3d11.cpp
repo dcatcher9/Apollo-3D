@@ -116,30 +116,12 @@ namespace {
     const api::resource backbuffer{reinterpret_cast<std::uint64_t>(fixture.backbuffer.p)};
     require(renderer.configure(observed.runtime, backbuffer, static_cast<api::color_space>(fixture.color)), "D3D11 native renderer configure failed");
     std::ofstream report(directory / "native-parity.txt");
-    // The frozen FX warps both eyes with the scene field: the production shader without its eye
-    // limiter must still match it. The production render below keeps every other check.
-    std::string scene_field_source(sunshine_game3d::renderer::shader_source());
-    {
-      const std::string_view marker = "#define SUNSHINE_EYE_LIMITER 1";
-      const auto at = scene_field_source.find(marker);
-      require(at != std::string::npos, "The production shader has no eye-limiter marker");
-      scene_field_source.replace(at, marker.size(), "// (eye limiter off: frozen-FX parity render)");
-    }
-    unsigned index = 0;
+    // The frozen FX warps both eyes with the scene field alone: a frame the
+    // production pack shows without stereo (no depth, zero strength or the
+    // depth preview) matches it; a stereo frame keeps every other check.
+    unsigned index = 0, fx_matched = 0;
     for (const auto &test : native11_cases) {
       p.strength = test.strength; p.depth_view = test.view; p.depth_ready = test.ready;
-      fixture.context->CopyResource(fixture.backbuffer.p, fixture.source_pattern.p);
-      require(renderer.configure(observed.runtime, backbuffer, static_cast<api::color_space>(fixture.color), scene_field_source),
-        "D3D11 native renderer cannot configure the scene-field shader");
-      require(sunshine_game3d::test::render_frame(renderer, queue->get_immediate_command_list(), backbuffer, test.ready ? observed.depth_view : api::resource_view{}, p), "D3D11 native renderer rejected the scene-field frame");
-      queue->flush_immediate_command_list(); renderer.finish_present();
-      queue->wait_idle();
-      require(renderer.output().handle != 0 && renderer.diagnostics().eye_field.handle == 0, "The D3D11 scene-field shader built an eye field");
-      com_ptr<ID3D11Texture2D> scene_texture;
-      checked(reinterpret_cast<ID3D11Resource *>(renderer.output().handle)->QueryInterface(IID_PPV_ARGS(scene_texture.put())), "D3D11 scene-field export is not a texture");
-      const auto scene_pixels = fixture.read(scene_texture.p);
-      scene_texture = {};
-      require(renderer.configure(observed.runtime, backbuffer, static_cast<api::color_space>(fixture.color)), "D3D11 native renderer configure failed");
       fixture.context->CopyResource(fixture.backbuffer.p, fixture.source_pattern.p);
       require(sunshine_game3d::test::render_frame(renderer, queue->get_immediate_command_list(), backbuffer, test.ready ? observed.depth_view : api::resource_view{}, p), "D3D11 native renderer rejected frame");
       const bool dump_case = std::strcmp(test.name,"strength50")==0 || std::strcmp(test.name,"depth-unavailable")==0;
@@ -157,27 +139,31 @@ namespace {
       checked(reinterpret_cast<ID3D11Resource *>(output.handle)->QueryInterface(IID_PPV_ARGS(texture.put())), "D3D11 native export is not a texture");
       const auto production_pixels = fixture.read(texture.p);
       require(renderer.diagnostics().eye_field.handle != 0, "The D3D11 production shader built no eye field");
-      const auto &pixels = scene_pixels;
-      require(pixels.size() == reference[index].size() && production_pixels.size() == pixels.size(), "D3D11 native/FX export sizes differ");
-      double maximum = 0;
-      for (size_t pixel = 0; pixel < size_t(width) * height * 2; ++pixel) for (unsigned channel = 0; channel < 4; ++channel) {
-        float a, b;
-        if (fixture.color == 1) {
-          std::uint32_t av, bv;
-          std::memcpy(&av, reference[index].data() + pixel * 4, 4); std::memcpy(&bv, pixels.data() + pixel * 4, 4);
-          const unsigned mask = channel == 3 ? 3 : 1023;
-          a = float((av >> (channel * 10)) & mask) / mask; b = float((bv >> (channel * 10)) & mask) / mask;
-        } else {
-          std::uint16_t av, bv;
-          std::memcpy(&av, reference[index].data() + pixel * 8 + channel * 2, 2); std::memcpy(&bv, pixels.data() + pixel * 8 + channel * 2, 2);
-          a = half_float(av); b = half_float(bv);
+      const bool mono = !p.depth_ready || !p.camera_ready || p.depth_view == 2 || !(p.strength > 0.f) || !(p.strength_blend > 0.f);
+      if (mono) {
+        const auto &pixels = production_pixels;
+        require(pixels.size() == reference[index].size(), "D3D11 native/FX export sizes differ");
+        double maximum = 0;
+        for (size_t pixel = 0; pixel < size_t(width) * height * 2; ++pixel) for (unsigned channel = 0; channel < 4; ++channel) {
+          float a, b;
+          if (fixture.color == 1) {
+            std::uint32_t av, bv;
+            std::memcpy(&av, reference[index].data() + pixel * 4, 4); std::memcpy(&bv, pixels.data() + pixel * 4, 4);
+            const unsigned mask = channel == 3 ? 3 : 1023;
+            a = float((av >> (channel * 10)) & mask) / mask; b = float((bv >> (channel * 10)) & mask) / mask;
+          } else {
+            std::uint16_t av, bv;
+            std::memcpy(&av, reference[index].data() + pixel * 8 + channel * 2, 2); std::memcpy(&bv, pixels.data() + pixel * 8 + channel * 2, 2);
+            a = half_float(av); b = half_float(bv);
+          }
+          require(std::isfinite(a) && std::isfinite(b), "D3D11 native/FX has non-finite color");
+          maximum = std::max(maximum, double(std::abs(a - b) / std::max({1.f, std::abs(a), std::abs(b)})));
         }
-        require(std::isfinite(a) && std::isfinite(b), "D3D11 native/FX has non-finite color");
-        maximum = std::max(maximum, double(std::abs(a - b) / std::max({1.f, std::abs(a), std::abs(b)})));
+        report << test.name << " byte_exact=" << (pixels == reference[index]) << " max_relative_error=" << maximum << '\n';
+        std::printf("MEASURE D3D11 native/FX %s byte_exact=%u max_relative_error=%.9g\n", test.name, unsigned(pixels == reference[index]), maximum);
+        require(maximum <= (fixture.color == 1 ? 1.01 / 1023 : .002), "D3D11 native/FX parity exceeded export quantization");
+        ++fx_matched;
       }
-      report << test.name << " byte_exact=" << (pixels == reference[index]) << " max_relative_error=" << maximum << '\n';
-      std::printf("MEASURE D3D11 native/FX %s byte_exact=%u max_relative_error=%.9g\n", test.name, unsigned(pixels == reference[index]), maximum);
-      require(maximum <= (fixture.color == 1 ? 1.01 / 1023 : .002), "D3D11 native/FX parity exceeded export quantization");
       require(fixture.read(fixture.backbuffer.p) == source, "D3D11 native renderer changed mono game color");
       {
         // Owed conditioning (C2): with the pack owed, pack() records the
@@ -196,7 +182,6 @@ namespace {
         queue->wait_idle();
         require(fixture.read(texture.p) == production_pixels, (std::string("D3D11 owed pack differs from the immediate pack of ") + test.name).c_str());
         const auto after = renderer.conditioning_activity();
-        const bool mono = !p.depth_ready || !p.camera_ready || p.depth_view == 2 || !(p.strength > 0.f) || !(p.strength_blend > 0.f);
         require(after.recorded - before.recorded == (mono ? 0u : 1u) && after.mono - before.mono == (mono ? 1u : 0u),
           (std::string("D3D11 owed pack recorded the wrong conditioning for ") + test.name).c_str());
       }
@@ -345,7 +330,7 @@ namespace {
     require(observed.renders == effects, "An FX technique ran during native D3D11 phase");
     queue->wait_idle(); renderer.reset_after_runtime_drain();
     require(report.good(), "Cannot write native D3D11 parity report");
-    std::puts("PASS D3D11 native renderer: six frozen-FX-matched cases, no installed/loaded FX, exact native mono preservation");
+    std::printf("PASS D3D11 native renderer: six cases, %u without stereo frozen-FX-matched, no installed/loaded FX, exact native mono preservation\n", fx_matched);
   }
 }
 

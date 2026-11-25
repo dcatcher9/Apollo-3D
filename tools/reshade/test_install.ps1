@@ -35,9 +35,7 @@ function New-Fixture([string] $Name, [string] $Configuration, [string] $Preset, 
     [IO.File]::WriteAllText((Join-Path $directory 'ReShade.ini'),$Configuration)
     [IO.File]::WriteAllText((Join-Path $directory 'custom preset.ini'),$Preset)
     if ($Legacy) {
-        foreach ($name in @('SunshineDepth.addon64','SunshineDepthProbe.addon64','Other.addon64')) {
-            [IO.File]::WriteAllText((Join-Path $directory "custom addons\$name"),"OLD $name")
-        }
+        [IO.File]::WriteAllText((Join-Path $directory 'custom addons\Other.addon64'),'OLD Other.addon64')
         $oldShaderDirectory = Join-Path $directory 'reshade-shaders\Shaders\Depth3D'
         New-Item -ItemType Directory -Path (Join-Path $oldShaderDirectory 'HostSBS') -Force | Out-Null
         foreach ($name in @('SuperDepth3D.fx','Overwatch.fxh','AXAA.fxh','SunshineIntegration.fxh','SunshinePost.fxh',
@@ -57,8 +55,8 @@ foreach ($name in @('SunshineSBS.addon64','SunshineSBS-LICENSES.txt')) {
 
 $preset = "Techniques=Curves@Curves.fx,SuperDepth3D@SuperDepth3D.fx,SunshineDepth3D@SunshineDepth3D.fx`nPreprocessorDefinitions=USER_MACRO=7`n`n[SuperDepth3D.fx]`nDepth_Adjustment=37.250000`nDepth_Map=1`nUSE_AA=1`nHostSBS_Algorithm=1`nHostSBS_Baseline=0.064`nStereo_Warp_Algorithm=1`nPreprocessorDefinitions=SUNSHINE_SBS_EXPORT=0,SUNSHINE_DEPTH_PROBE=1,HOST_SBS_TEST_FIXED_ELEVEN_REFERENCE=1,KEEP_ME=5`n[SunshineDepth3D.fx]`nSunshine_Strength=0.375000`nSunshine_ScreenPlane=0.120000`n[Other.fx]`nHostSBS_Algorithm=99`n"
 $config = "[ADDON]`nAddonPath=.\custom addons`nDisabledAddons=Other Addon,Sunshine SBS`n[GENERAL]`nPresetPath=.\custom preset.ini`nEffectSearchPaths=.\reshade-shaders\Shaders\**`nPreprocessorDefinitions=SUNSHINE_DEPTH_PROBE=1,KEEP_GLOBAL=9`n[SUNSHINE_DEPTH]`nAutoSelectSceneDepth=0`n"
-# An installation from before Game 3D ran in the add-on: its stereo techniques
-# leave the preset, its add-ons and its own reference effect are removed with a
+# A game with effect-based stereo: its stereo techniques leave the preset, the
+# reference effect an earlier Sunshine installation copied is removed with a
 # backup, and everything else stays as the user left it.
 $game = New-Fixture 'migration with spaces' $config $preset
 $oldShaders = File-Hashes (Join-Path $game 'reshade-shaders\Shaders\Depth3D')
@@ -71,26 +69,22 @@ $exeBefore = (Get-FileHash -LiteralPath (Join-Path $game 'Test Game.exe')).Hash
 $ini = [IO.File]::ReadAllText((Join-Path $game 'ReShade.ini'))
 $afterPreset = [IO.File]::ReadAllText((Join-Path $game 'custom preset.ini'))
 Require ($ini.Contains("[SUNSHINE_DEPTH]`nAutoSelectSceneDepth=0`n")) 'The installer changed the stale [SUNSHINE_DEPTH] line; it must be left byte-for-byte untouched.'
-Require ($ini -match 'DisabledAddons=Other Addon,Generic Depth,Sunshine Depth') 'Other disabled add-ons were lost or legacy depth was not disabled by name.'
+Require ($ini -match '(?m)^DisabledAddons=Other Addon,Generic Depth\r?$') 'Other disabled add-ons were lost or Generic Depth was not disabled by name.'
 Require ($afterPreset -match '(?m)^Techniques=Curves@Curves.fx$') 'An old stereo technique remains active.'
 Require ($afterPreset.Replace('Techniques=Curves@Curves.fx',
     'Techniques=Curves@Curves.fx,SuperDepth3D@SuperDepth3D.fx,SunshineDepth3D@SunshineDepth3D.fx') -ceq $preset) 'Migration changed shader profiles or unrelated preset entries.'
-Require ($ini -match '(?m)^PreprocessorDefinitions=KEEP_GLOBAL=9$') 'Unrelated global preprocessor settings changed.'
+Require ($ini -match '(?m)^PreprocessorDefinitions=SUNSHINE_DEPTH_PROBE=1,KEEP_GLOBAL=9$') 'Global preprocessor settings changed.'
 Require-Unchanged $oldShaders
 Require (-not (Test-Path -LiteralPath $oldReference)) 'The old reference effect still loads.'
-Require (-not (Test-Path -LiteralPath (Join-Path $game 'custom addons\SunshineDepth.addon64'))) 'Legacy selector still loads.'
-Require (-not (Test-Path -LiteralPath (Join-Path $game 'custom addons\SunshineDepthProbe.addon64'))) 'Legacy probe still loads.'
 Require ((Get-FileHash -LiteralPath (Join-Path $game 'custom addons\Other.addon64')).Hash -eq $otherBefore) 'Unrelated add-on changed.'
 Require ((Get-FileHash -LiteralPath (Join-Path $game 'Test Game.exe')).Hash -eq $exeBefore) 'Game executable changed.'
 Require ((Get-FileHash -LiteralPath (Join-Path $game 'custom addons\SunshineSBS.addon64')).Hash -eq (Get-FileHash -LiteralPath (Join-Path $fixturePackage 'SunshineSBS.addon64')).Hash) 'Unified DLL did not reach the configured add-on directory.'
 $manifests = @(Get-ChildItem -LiteralPath (Join-Path $game 'Sunshine3D-backups') -Filter manifest.json -Recurse)
 Require ($manifests.Count -eq 1) 'Migration backup manifest missing.'
 $manifest = Get-Content -LiteralPath $manifests[0].FullName -Raw | ConvertFrom-Json
-$oldSelector = $manifest | Where-Object { $_.path -like '*SunshineDepth.addon64' }
-Require ([IO.File]::ReadAllText($oldSelector.backup) -eq 'OLD SunshineDepth.addon64') 'Original selector was not backed up.'
 $oldEffect = $manifest | Where-Object { $_.path -like '*SunshineDepth3D.fx' }
 Require ([IO.File]::ReadAllText($oldEffect.backup) -eq 'OLD REFERENCE EFFECT') 'The old reference effect was not backed up.'
-Write-Output 'PASS migration disables the old stereo techniques, preserves all old shader files/profiles, and backs up legacy add-ons and the old reference effect.'
+Write-Output 'PASS migration disables the old stereo techniques, preserves all old shader files/profiles, and backs up the old reference effect.'
 
 & $installer -GameExecutable (Join-Path $game 'Test Game.exe') -AddonDirectory $fixturePackage
 Require ([IO.File]::ReadAllText((Join-Path $game 'ReShade.ini')) -ceq $ini) 'Second installation changed the configured INI.'
@@ -122,7 +116,7 @@ $commaGame = New-Fixture 'commas' $commaConfig '' $false
 $commaIni = [IO.File]::ReadAllText((Join-Path $commaGame 'ReShade.ini'))
 $commaAfter = [IO.File]::ReadAllText((Join-Path $commaGame 'custom, preset.ini'))
 Require (Test-Path -LiteralPath (Join-Path $commaGame 'custom, addons\SunshineSBS.addon64')) 'Escaped comma in AddonPath was not decoded.'
-Require ($commaIni -match 'DisabledAddons=Other,, Addon,Generic Depth,Sunshine Depth') 'An escaped comma in a disabled add-on name changed.'
+Require ($commaIni -match '(?m)^DisabledAddons=Other,, Addon,Generic Depth\r?$') 'An escaped comma in a disabled add-on name changed.'
 Require ($commaIni -match '(?m)^EffectSearchPaths=\.\\custom,, shaders$') 'Existing escaped effect paths were not preserved.'
 Require ($commaAfter -match '(?m)^Techniques=Custom,,Effect@Custom.fx$') 'Technique migration mishandled comma escapes or unqualified legacy techniques.'
 Write-Output 'PASS ReShade comma escapes and legacy unqualified technique names are migrated correctly.'
@@ -162,42 +156,10 @@ Require (-not (Test-Path -LiteralPath (Join-Path $rollbackGame 'custom addons\Su
 Require (@(Get-ChildItem -LiteralPath (Join-Path $rollbackGame 'Sunshine3D-backups') -Filter manifest.json -Recurse).Count -eq 1) 'Rollback evidence is missing.'
 Write-Output 'PASS a failure after partial installation restores prior files and removes new files.'
 
-# Native Game 3D requires only the DLL. Migration preserves user settings and
-# removes old FX only from the directory owned by previous Game 3D installs.
+# Native Game 3D requires only the DLL. An effect section of an earlier
+# installation is not migrated: the add-on's defaults apply, and saved native
+# settings take precedence.
 $nativePreset = $preset + "`n[SunshineGame3D.fx]`nDepth_Adjustment=0.000000`nDepth_Map_View=2`nPreprocessorDefinitions=SUNSHINE_GAME3D_AUTOMATIC=0,USER_GAME3D=3`n"
-$nativeGame = New-Fixture 'native migration without shaders' $config $nativePreset
-$nativeReference = File-Hashes (Join-Path $nativeGame 'reshade-shaders\Shaders\Depth3D')
-$ownedFolder = Join-Path $nativeGame 'reshade-shaders\Shaders\SunshineGame3D'
-New-Item -ItemType Directory -Path $ownedFolder -Force | Out-Null
-$ownedNames = @('SunshineGame3D.fx','SunshineHostWarp.fxh','SunshineCamera.fxh','SunshineGenericConfig.fxh',
-    'SunshineWarpConfig.fxh','Overwatch.fxh','AXAA.fxh','SunshineIntegration.fxh','SunshinePost.fxh')
-foreach ($name in ($ownedNames + @('UserNotes.fxh'))) { [IO.File]::WriteAllText((Join-Path $ownedFolder $name), 'OLD OWNED FILE ' + $name) }
-$ownedBefore = File-Hashes $ownedFolder
-& $installer -GameExecutable (Join-Path $nativeGame 'Test Game.exe') -AddonDirectory $fixturePackage
-$nativeIni = [IO.File]::ReadAllText((Join-Path $nativeGame 'ReShade.ini'))
-$nativeAfter = [IO.File]::ReadAllText((Join-Path $nativeGame 'custom preset.ini'))
-Require ($nativeIni -match '(?m)^Strength=0\.000000\r?$') 'Native migration did not preserve explicit zero strength.'
-Require ($nativeIni -match '(?m)^DepthView=2\r?$') 'Native migration did not preserve the selected depth view.'
-Require ($nativeIni -match '(?m)^Enabled=1\r?$') 'Native Game 3D was not enabled.'
-Require ($nativeIni -match '(?m)^EffectSearchPaths=\.\\reshade-shaders\\Shaders\\\*\*\r?$') 'Native setup changed existing effect search paths.'
-Require ($nativeAfter -match '(?m)^Techniques=Curves@Curves.fx\r?$') 'Native migration left competing stereo effects active.'
-Require ($nativeAfter -notmatch 'SUNSHINE_GAME3D_AUTOMATIC=') 'Owned retired macro survived.'
-Require ($nativeAfter -match 'USER_GAME3D=3') 'Unrelated effect definition was lost.'
-Require-Unchanged $nativeReference
-Require ((Get-FileHash -LiteralPath (Join-Path $ownedFolder 'UserNotes.fxh')).Hash -eq $ownedBefore[(Join-Path $ownedFolder 'UserNotes.fxh')]) 'Unrelated file in Game3D folder changed.'
-$manifestPath = @(Get-ChildItem -LiteralPath (Join-Path $nativeGame 'Sunshine3D-backups') -Filter manifest.json -Recurse)[0].FullName
-$manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-foreach ($name in $ownedNames) {
-    $path = Join-Path $ownedFolder $name
-    Require (-not (Test-Path -LiteralPath $path)) ('Retired Game 3D file remains: ' + $name)
-    $entry = @($manifest | Where-Object { $_.path -ieq $path })
-    Require ($entry.Count -eq 1 -and $entry[0].existed -and (Get-FileHash -LiteralPath $entry[0].backup).Hash -eq $ownedBefore[$path]) ('Removed file lacks a restorable backup: ' + $name)
-}
-& $installer -GameExecutable (Join-Path $nativeGame 'Test Game.exe') -AddonDirectory $fixturePackage
-Require ([IO.File]::ReadAllText((Join-Path $nativeGame 'ReShade.ini')) -ceq $nativeIni) 'Reinstallation changed native preferences.'
-Require ([IO.File]::ReadAllText((Join-Path $nativeGame 'custom preset.ini')) -ceq $nativeAfter) 'Reinstallation changed the preset.'
-Write-Output 'PASS addon-only migration preserves zero strength/view, removes and backs up owned FX, retains reference/user files, and is idempotent.'
-
 $existingNativeConfig = $config + "`n[SUNSHINE_GAME3D]`nStrength=71.500000`nDepthView=0`nEnabled=0`n"
 $existingNative = New-Fixture 'existing native preferences' $existingNativeConfig $nativePreset
 & $installer -GameExecutable (Join-Path $existingNative 'Test Game.exe') -AddonDirectory $fixturePackage
@@ -208,34 +170,31 @@ foreach ($line in @('Strength=71.500000','DepthView=0','Enabled=0')) {
 Write-Output 'PASS saved native settings take precedence, including explicit disabled and game view.'
 
 foreach ($case in @(
-    @{Name='fresh native'; Config="[GENERAL]`n"; Preset=''; Strength=$null; View=$null; File='ReShadePreset.ini'},
-    @{Name='missing current strength'; Config=$config; Preset=$preset+"`n[SunshineGame3D.fx]`nDepth_Map_View=1`n"; Strength=$null; View='1'; File='custom preset.ini'},
-    @{Name='original settings migrate'; Config=$config; Preset=$preset.Replace('Depth_Adjustment=37.250000','Depth_Adjustment=350.000000').Replace('Depth_Map=1','Depth_Map_View=2'); Strength='350.000000'; View='2'; File='custom preset.ini'},
-    @{Name='invalid settings ignored'; Config=$config; Preset=$preset+"`n[SunshineGame3D.fx]`nDepth_Adjustment=NaN`nDepth_Map_View=99`n"; Strength=$null; View=$null; File='custom preset.ini'}
+    @{Name='fresh native'; Config="[GENERAL]`n"; Preset=''; File='ReShadePreset.ini'},
+    @{Name='effect section'; Config=$config; Preset=$nativePreset; File='custom preset.ini'},
+    @{Name='original settings'; Config=$config; Preset=$preset.Replace('Depth_Map=1','Depth_Map_View=2'); File='custom preset.ini'}
 )) {
     $game = New-Fixture $case.Name $case.Config $case.Preset $false
     & $installer -GameExecutable (Join-Path $game 'Test Game.exe') -AddonDirectory $fixturePackage
     $ini = [IO.File]::ReadAllText((Join-Path $game 'ReShade.ini'))
-    foreach ($setting in @(@{Key='Strength'; Value=$case.Strength},@{Key='DepthView'; Value=$case.View})) {
-        if ($null -eq $setting.Value) {
-            Require ($ini -notmatch ('(?m)^' + $setting.Key + '=')) ('Missing/invalid setting should retain native default: ' + $case.Name + '/' + $setting.Key)
-        } else {
-            Require ($ini -match ('(?m)^' + $setting.Key + '=' + [regex]::Escape($setting.Value) + '\r?$')) ('Migration changed a valid setting: ' + $case.Name + '/' + $setting.Key)
-        }
+    foreach ($key in @('Strength','DepthView')) {
+        Require ($ini -notmatch ('(?m)^' + $key + '=')) ('An effect setting was migrated instead of the native default: ' + $case.Name + '/' + $key)
     }
+    Require ($ini -match '(?m)^Enabled=1\r?$') ('Native Game 3D was not enabled: ' + $case.Name)
     Require (-not (Test-Path -LiteralPath (Join-Path $game 'reshade-shaders'))) 'Addon-only install created a shader directory.'
     $after = [IO.File]::ReadAllText((Join-Path $game $case.File))
     Require ($after -notmatch '(?m)^Techniques=.*(?:Sunshine|SuperDepth)') 'Native setup enabled an external stereo technique.'
+    if ($case.Preset) {
+        Require (($after -replace '(?m)^Techniques=[^\r\n]*', '') -ceq ($case.Preset -replace '(?m)^Techniques=[^\r\n]*', '')) ('Native setup changed effect settings: ' + $case.Name)
+    }
 }
-Write-Output 'PASS fresh addon-only setup, omitted current defaults, prior reference migration, and invalid setting handling.'
+Write-Output 'PASS fresh addon-only setup keeps the native defaults and leaves effect sections as they were.'
 
 foreach ($badCase in @(
     @{Name='duplicate native key'; Config=$existingNativeConfig.Replace('Strength=71.500000',"Strength=71.500000`nStrength=2")},
-    @{Name='duplicate native section'; Config=$existingNativeConfig+"`n[SUNSHINE_GAME3D]`nEnabled=1`n"},
-    @{Name='owned shader path directory'; Config=$config; Directory='reshade-shaders\Shaders\SunshineGame3D\SunshineGame3D.fx'}
+    @{Name='duplicate native section'; Config=$existingNativeConfig+"`n[SUNSHINE_GAME3D]`nEnabled=1`n"}
 )) {
     $game = New-Fixture $badCase.Name $badCase.Config $nativePreset
-    if ($badCase.Directory) { New-Item -ItemType Directory -Path (Join-Path $game $badCase.Directory) -Force | Out-Null }
     $before = File-Hashes $game
     $rejected = $false
     try { & $installer -GameExecutable (Join-Path $game 'Test Game.exe') -AddonDirectory $fixturePackage } catch { $rejected = $true }
@@ -243,12 +202,9 @@ foreach ($badCase in @(
     Require-Unchanged $before
     Require (@(Get-ChildItem -LiteralPath $game -File -Recurse).Count -eq $before.Count) 'Native preflight failure wrote files.'
 }
-Write-Output 'PASS native migration rejects conflicting settings and non-file owned paths before mutation.'
+Write-Output 'PASS native setup rejects conflicting settings before mutation.'
 
 $nativeRollback = New-Fixture 'native rollback after partial write' $config $nativePreset
-$rollbackOwned = Join-Path $nativeRollback 'reshade-shaders\Shaders\SunshineGame3D'
-New-Item -ItemType Directory -Path $rollbackOwned -Force | Out-Null
-foreach ($name in $ownedNames) { [IO.File]::WriteAllText((Join-Path $rollbackOwned $name), 'OLD ' + $name) }
 $before = File-Hashes $nativeRollback
 $presetLock = [IO.File]::Open((Join-Path $nativeRollback 'custom preset.ini'), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
 $rejected = $false
@@ -258,39 +214,38 @@ finally { $presetLock.Dispose() }
 Require $rejected 'Native partial-write fixture did not fail.'
 Require-Unchanged $before
 Require (-not (Test-Path -LiteralPath (Join-Path $nativeRollback 'custom addons\SunshineSBS.addon64'))) 'Rollback left a new add-on installed.'
-Write-Output 'PASS native partial-write rollback preserves old FX and restores INI/preset/addon files.'
+Write-Output 'PASS native partial-write rollback restores INI/preset/addon files.'
 
-# Force failure after some owned files have already been removed. The existing
-# locked final file stays intact; earlier removals must be restored from backup.
+# Force failure at the removal of the old reference effect, after the add-on,
+# INI and preset were written. The locked file stays intact; every earlier
+# write must be restored from backup.
 $removeRollback = New-Fixture 'native rollback during removal' $config $nativePreset
-$removeOwned = Join-Path $removeRollback 'reshade-shaders\Shaders\SunshineGame3D'
-New-Item -ItemType Directory -Path $removeOwned -Force | Out-Null
-foreach ($name in $ownedNames) { [IO.File]::WriteAllText((Join-Path $removeOwned $name), 'RESTORE ' + $name) }
+$removeReference = Join-Path $removeRollback 'reshade-shaders\Shaders\Sunshine3D\SunshineDepth3D.fx'
+New-Item -ItemType Directory -Path (Split-Path -Parent $removeReference) -Force | Out-Null
+[IO.File]::WriteAllText($removeReference, 'RESTORE REFERENCE EFFECT')
 $before = File-Hashes $removeRollback
-$removeLock = [IO.File]::Open((Join-Path $removeOwned 'SunshinePost.fxh'), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+$removeLock = [IO.File]::Open($removeReference, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
 $rejected = $false
 try { & $installer -GameExecutable (Join-Path $removeRollback 'Test Game.exe') -AddonDirectory $fixturePackage }
 catch { $rejected = $true }
 finally { $removeLock.Dispose() }
-Require $rejected 'Locked owned-file removal did not fail.'
+Require $rejected 'Locked reference-effect removal did not fail.'
 Require-Unchanged $before
 Require (-not (Test-Path -LiteralPath (Join-Path $removeRollback 'custom addons\SunshineSBS.addon64'))) 'Removal rollback left a new add-on installed.'
-Write-Output 'PASS failure midway through owned-file removal restores the old files and configuration.'
+Write-Output 'PASS failure at the reference-effect removal restores the old files and configuration.'
 
-foreach ($existingName in @('SunshineSBS.addon64','SunshineDepth.addon64','SunshineDepthProbe.addon64')) {
-    $guardGame = New-Fixture ('running fresh guard ' + $existingName) $config $nativePreset $false
-    [IO.File]::WriteAllText((Join-Path $guardGame "custom addons\$existingName"), 'EXISTING ADDON')
-    $before = File-Hashes $guardGame
-    $rejected = $false
-    try { & $installer -GameExecutable (Join-Path $guardGame 'Test Game.exe') -AddonDirectory $fixturePackage -AllowRunningGame }
-    catch { $rejected = $_.Exception.Message.Contains('must be updated while the game is closed') }
-    Require $rejected ('AllowRunningGame replaced an existing add-on: ' + $existingName)
-    Require-Unchanged $before
-}
+$guardGame = New-Fixture 'running fresh guard' $config $nativePreset $false
+[IO.File]::WriteAllText((Join-Path $guardGame 'custom addons\SunshineSBS.addon64'), 'EXISTING ADDON')
+$before = File-Hashes $guardGame
+$rejected = $false
+try { & $installer -GameExecutable (Join-Path $guardGame 'Test Game.exe') -AddonDirectory $fixturePackage -AllowRunningGame }
+catch { $rejected = $_.Exception.Message.Contains('must be updated while the game is closed') }
+Require $rejected 'AllowRunningGame replaced an existing add-on.'
+Require-Unchanged $before
 $freshGame = New-Fixture 'running fresh allowed' $config $nativePreset $false
 & $installer -GameExecutable (Join-Path $freshGame 'Test Game.exe') -AddonDirectory $fixturePackage -AllowRunningGame
 Require (Test-Path -LiteralPath (Join-Path $freshGame 'custom addons\SunshineSBS.addon64') -PathType Leaf) 'Fresh installation with AllowRunningGame did not install the add-on.'
-Write-Output 'PASS AllowRunningGame only permits a missing native add-on and preserves existing add-ons.'
+Write-Output 'PASS AllowRunningGame only permits a missing native add-on and preserves an existing one.'
 
 # The automatic host path runs as another account (SYSTEM for the service), where the game
 # user's %LOCALAPPDATA% or %USERPROFILE% would name a different profile.

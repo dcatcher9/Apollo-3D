@@ -127,19 +127,6 @@ function Resolve-GamePath([string] $Path) {
     return [IO.Path]::GetFullPath((Join-Path $gameDirectory $expanded))
 }
 
-function Remove-Game3DDefinitions([string] $Text, [string] $Section) {
-    $value = Get-IniValue $Text $Section 'PreprocessorDefinitions'
-    if (-not $value) { return $Text }
-    $definitions = @(Split-ReShadeList $value | Where-Object {
-        $_ -cnotmatch '^\s*(?:SUNSHINE_GAME3D_(?:AUTOMATIC|CAMERA_DEPTH|GENERIC_CONFIG|COLOR_FIXES|FUSED_POST|NATIVE_WARP)|SUNSHINE_SOURCE_OWNED_DEPTH|SUNSHINE_HOST_WARP_SUPPORTED|SUNSHINE_DEPTH_PROBE|HOST_SBS_TEST_FIXED_ELEVEN_REFERENCE)(?:\s*=.*)?\s*$' -and
-        # Shared global definitions may still belong to the original reference.
-        # Only the owned effect's obsolete display/export definitions are removed.
-        ($Section -cne 'SunshineGame3D.fx' -or
-         $_ -cnotmatch '^\s*(?:SUNSHINE_SBS_EXPORT|DoubleBuffer_Mode|EX_DLP_FS_Mode|Virtual_Reality_Mode|Anaglyph_Mode|Inficolor_3D_Emulator|Reconstruction_Mode|REST_UI_Mode|Super3D_Mode|Use_2D_Plus_Depth|Frame_Packed_Mode)(?:\s*=.*)?\s*$')
-    })
-    return Set-IniValue $Text $Section 'PreprocessorDefinitions' (Join-ReShadeList $definitions)
-}
-
 $gameExe = (Get-Item -LiteralPath $GameExecutable -ErrorAction Stop).FullName
 if ([IO.Path]::GetExtension($gameExe) -ine '.exe') { throw 'GameExecutable must name the actual game EXE beside ReShade.ini.' }
 $gameDirectory = Split-Path -Parent $gameExe
@@ -154,12 +141,8 @@ Assert-UnambiguousIni $iniBefore $iniPath
 $addonSearch = Get-IniScalarValue $iniBefore 'ADDON' 'AddonPath'
 if (-not $addonSearch) { $addonSearch = '.' }
 $addonDestination = Resolve-GamePath $addonSearch
-if ($AllowRunningGame) {
-    foreach ($existingName in @('SunshineSBS.addon64','SunshineDepth.addon64','SunshineDepthProbe.addon64')) {
-        if (Test-Path -LiteralPath (Join-Path $addonDestination $existingName)) {
-            throw 'An existing Sunshine add-on must be updated while the game is closed.'
-        }
-    }
+if ($AllowRunningGame -and (Test-Path -LiteralPath (Join-Path $addonDestination 'SunshineSBS.addon64'))) {
+    throw 'An existing Sunshine add-on must be updated while the game is closed.'
 }
 $addonSource = (Get-Item -LiteralPath (Join-Path $AddonDirectory 'SunshineSBS.addon64')).FullName
 $licenseSource = (Get-Item -LiteralPath (Join-Path $AddonDirectory 'SunshineSBS-LICENSES.txt')).FullName
@@ -182,30 +165,14 @@ $iniAfter = $iniBefore
 $disabled = @(Split-ReShadeList (Get-IniValue $iniAfter 'ADDON' 'DisabledAddons') | Where-Object {
     $_ -and $_ -notmatch '^Sunshine (3D|SBS)(@SunshineSBS\.addon64)?$'
 })
-# ReShade checks the exported name, so this also prevents renamed legacy copies
-# from registering before the integrated add-on on the first launch after install.
-foreach ($name in @('Generic Depth','Sunshine Depth')) {
-    if ($disabled -cnotcontains $name) { $disabled += $name }
-}
+# ReShade's built-in Generic Depth add-on would otherwise compete with the
+# integrated depth selector on the first launch after install.
+if ($disabled -cnotcontains 'Generic Depth') { $disabled += 'Generic Depth' }
 $iniAfter = Set-IniValue $iniAfter 'ADDON' 'DisabledAddons' (Join-ReShadeList $disabled)
 $iniAfter = Set-IniValue $iniAfter 'GENERAL' 'PresetPath' (Join-ReShadeList @($presetSetting))
 $presetAfter = $presetBefore
-# Saved Game 3D settings take precedence on every reinstall. A current FX section
-# with omitted values uses the same defaults as Game 3D; only a wholly absent
-# section may inherit the settings of an earlier effect-based installation.
-$migrationSection = if (Find-IniSection $presetBefore 'SunshineGame3D.fx') { 'SunshineGame3D.fx' } else { 'SuperDepth3D.fx' }
-if ((Get-IniValue $iniBefore 'SUNSHINE_GAME3D' 'Strength') -ceq '') {
-    $value = Get-IniValue $presetBefore $migrationSection 'Depth_Adjustment'
-    $numeric = [single]0
-    if ([single]::TryParse($value,[Globalization.NumberStyles]::Float,[Globalization.CultureInfo]::InvariantCulture,[ref]$numeric) -and
-        -not [single]::IsNaN($numeric) -and -not [single]::IsInfinity($numeric)) {
-        $iniAfter = Set-IniValue $iniAfter 'SUNSHINE_GAME3D' 'Strength' $value
-    }
-}
-if ((Get-IniValue $iniBefore 'SUNSHINE_GAME3D' 'DepthView') -ceq '') {
-    $value = Get-IniValue $presetBefore $migrationSection 'Depth_Map_View'
-    if ($value -cmatch '^[012]$') { $iniAfter = Set-IniValue $iniAfter 'SUNSHINE_GAME3D' 'DepthView' $value }
-}
+# Saved Game 3D settings take precedence on every reinstall; a new installation
+# enables Game 3D and leaves strength and view at the add-on's defaults.
 if ((Get-IniValue $iniBefore 'SUNSHINE_GAME3D' 'Enabled') -ceq '') {
     $iniAfter = Set-IniValue $iniAfter 'SUNSHINE_GAME3D' 'Enabled' '1'
 }
@@ -217,21 +184,11 @@ $techniques = @(Split-ReShadeList (Get-IniValue $presetAfter '' 'Techniques') | 
         'SunshineGame3D','SunshineGame3D@SunshineGame3D.fx')
 })
 $presetAfter = Set-IniValue $presetAfter '' 'Techniques' (Join-ReShadeList $techniques)
-foreach ($scope in @('GENERAL','SunshineGame3D.fx')) {
-    $iniAfter = Remove-Game3DDefinitions $iniAfter $scope
-}
-foreach ($scope in @('','SunshineGame3D.fx')) {
-    $presetAfter = Remove-Game3DDefinitions $presetAfter $scope
-}
 
-$legacyPaths = @('SunshineDepth.addon64','SunshineDepthProbe.addon64') | ForEach-Object { Join-Path $addonDestination $_ }
-# Retired effect files are removed only from the directories earlier Sunshine
-# installations owned: the Game 3D effect's, and the reference effect an
-# explicit -ShaderDirectory installation copied. A user's own SuperDepth3D
-# files and settings stay in their separate path.
-$shaderDestination = Resolve-GamePath '.\reshade-shaders\Shaders\SunshineGame3D'
-$legacyPaths += @('SunshineGame3D.fx','SunshineHostWarp.fxh','SunshineCamera.fxh','SunshineGenericConfig.fxh','SunshineWarpConfig.fxh','Overwatch.fxh','AXAA.fxh','SunshineIntegration.fxh','SunshinePost.fxh') | ForEach-Object { Join-Path $shaderDestination $_ }
-$legacyPaths += Join-Path (Resolve-GamePath '.\reshade-shaders\Shaders\Sunshine3D') 'SunshineDepth3D.fx'
+# The reference effect an explicit -ShaderDirectory installation copied is
+# removed from the directory those installations owned. A user's own
+# SuperDepth3D files and settings stay in their separate path.
+$legacyPaths = @(Join-Path (Resolve-GamePath '.\reshade-shaders\Shaders\Sunshine3D') 'SunshineDepth3D.fx')
 $destinationSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 foreach ($destination in (@($copies | ForEach-Object { $_.Destination }) + @($iniPath,$presetPath) + @($legacyPaths))) {
     if (Test-Path -LiteralPath $destination -PathType Container) {

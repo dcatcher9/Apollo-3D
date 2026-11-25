@@ -19,7 +19,7 @@ namespace sunshine_depth {
   // Call after the containing Sunshine 3D module has registered with ReShade.
   // An inactive selector still exposes its setup message in the overlay; keep
   // the containing add-on loaded when this returns false.
-  bool initialize(HMODULE addon_module);
+  bool initialize();
   void shutdown();
   bool active();
 

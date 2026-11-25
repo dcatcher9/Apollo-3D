@@ -74,8 +74,9 @@ class GoldenReports(unittest.TestCase):
 
     def test_local_names_keep_words_of_the_logs(self):
         # A full scrub replaces the user and computer names of the machine that wrote the log, but not a word the logs
-        # already use: an account named Owner keeps the add-on's 'shared copy owner', one named dev 'gyan.dev'.
-        with mock.patch.dict(os.environ, {'USERNAME': 'Owner', 'USER': 'dev', 'COMPUTERNAME': 'Q7-WORKSTATION'}):
+        # already use: an account named Owner keeps the add-on's 'shared copy owner', one named apollo the host's
+        # 'ClassicOldSong/Apollo'.
+        with mock.patch.dict(os.environ, {'USERNAME': 'Owner', 'USER': 'apollo', 'COMPUTERNAME': 'Q7-WORKSTATION'}):
             names = scrub.local_names()
         self.assertEqual(names, (('Q7-WORKSTATION', '<MACHINE>'),))
         self.assertEqual(scrub.scrub_line(r'share \\q7-workstation\games owner', None, names),
@@ -103,42 +104,6 @@ class GoldenReports(unittest.TestCase):
                              sorted(path.name for path in scrub.GOLDENS.iterdir()))
             for path in scrub.GOLDENS.iterdir():
                 self.assertEqual((copy / path.name).read_bytes(), path.read_bytes(), path.name)
-
-    def test_comparison_flags_the_witcher3_ui_layer_regression(self):
-        # The Witcher 3 with FG off: on 10-22 its offscreen UI layer decided 74% of the FG-off Auto samples (84% of
-        # detection frames); from 10-24 (f45f1bb9) the add-on refused the layer's clear-boundary copy, and on 11-02
-        # every FG-off frame had no usable UI source. Compared with the saved 10-22 session, the 11-02 report flags
-        # the layer share and the gaps.
-        if UPDATE:
-            self.skipTest('--update writes the goldens this compares with')
-        fixtures = {fixture['name']: fixture for fixture in self.fixtures}
-        with TemporaryDirectory() as directory:
-            saved = Path(directory) / 'reports'
-            good = run_report(fixtures['witcher3_1022'], Path(directory), '--save-dir', str(saved))
-            self.assertEqual(good, (scrub.GOLDENS / 'witcher3_1022.txt').read_text(encoding='utf-8'))
-            text = run_report(fixtures['witcher3_1102'], Path(directory), '--save-dir', str(saved), '--compare')
-            self.assertEqual(sorted(path.name for path in (saved / 'witcher3.exe').iterdir()),
-                             ['20261022-144527.json', '20261022-144527.txt', '20261102-232608.json',
-                              '20261102-232608.txt'])
-        golden = (scrub.GOLDENS / 'witcher3_1102.txt').read_text(encoding='utf-8')
-        own, compared = text.split('Compared with ', 1)
-        # The session's own rows are its golden's; the comparison follows them, before the overall line.
-        self.assertEqual(own, golden[:golden.index('Overall: ')])
-        self.assertTrue(compared.startswith('the 2026-10-22 14:45 session of witcher3.exe (Overall WARN): '), compared)
-        rows = compared.splitlines()[1:]
-        self.assertIn('[WARN] Compared: UI layer share of FG-off Auto samples: 74% -> 0%; down 74 points, a regression '
-                      '(its threshold: down 25 points)', rows)
-        self.assertIn('[WARN] Compared: UI protection gaps (s per streamed minute): 0.0 -> 14.6 (0 s in 3.1 min -> '
-                      '108 s in 7.4 min); up 14.6, a regression (its threshold: up 2.0)', rows)
-        self.assertIn('[WARN] Compared: UI no-mask share of Auto frames: 0.05% -> 32%; up 32 points, a regression (its '
-                      'threshold: up 10 points)', rows)
-        # 10-22 switched FG four times, too few to compare; the other metrics stayed within their thresholds.
-        self.assertIn('[INFO] Compared: FG switches with depth lost: not compared (fewer than 5 FG switches in the '
-                      'earlier session)', rows)
-        self.assertEqual([row.split(': ')[1] for row in rows if row.startswith('[WARN]')],
-                         ['UI layer share of FG-off Auto samples', 'UI protection gaps (s per streamed minute)',
-                          'UI no-mask share of Auto frames'])
-        self.assertEqual(rows[-2:], ['Overall: WARN (0 fail, 10 warn)', 'Exit code: 0'])
 
     def test_every_file_belongs_to_a_fixture(self):
         if UPDATE:

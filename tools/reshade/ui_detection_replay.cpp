@@ -5,9 +5,9 @@
 // file of candidate layout 2 on the candidate textures saved in Dump 3D
 // packages and compares each decision with a labelled expectation. It replaces
 // live trial and error when a detection rule changes: every labelled screen of
-// every game is judged at once. With a shader of the current selection
-// revision, each decision is also checked against ui_selection::decide
-// (mirror=match). A replay is a
+// every game is judged at once. Only a shader of the current selection
+// revision replays, and each decision is also checked against
+// ui_selection::decide (mirror=match). A replay is a
 // single real frame without a previous decision: nothing is bound at the T1
 // hold store (u5), so the reduce reads none and never reuses, and a dump taken
 // on a reused frame replays as its own decision. A label pushes the
@@ -245,91 +245,23 @@ namespace {
     return shader;
   }
 
-  // Resource sizes from the shader's markers. Every shader of candidate
-  // layout 2 has them and scene evidence: it measures both images in decision
-  // texels 5 and 6 and has the layer's statistics rows 64-79 and decision
-  // texel 7 (8 texels). Selection revision 2 adds the one-way judgment rows
-  // 80-111 (the scene rows follow from 112, 121 rows in all, which every
-  // revision before 4 fits) and decision texels 8 and 9, and
-  // selection revision 4 (12 decision texels) the pre-UI pixel rows 128-143
-  // (144 rows in all) and decision texel 11; selection revisions 5 to 8 (13
-  // decision texels) added H2's stillness rows from 144 (160 rows in all)
-  // and decision texel 12, both removed by revision 9 (12 texels again). A
-  // shader with the tile-parts marker counts each tile in
-  // that many groups (the dispatch's z) at columns 16 apart.
-  // Selection revision 10 (17 decision texels) added the declared alphas'
-  // one-way counts in texel 16 and the layer's pixels beyond the
-  // premultiplied bound in rows 208-223 (224 rows in all, after rows 144-207
-  // that it left unused). Selection revision 11 (12 decision texels again)
-  // moved those counts into the words no count used (texels 8 and 9 .x,
-  // texel 11 .z and .w) and the bound rows to 144-159 (160 rows in all). A
-  // shader with SUNSHINE_UI_LAYER_BOUND_ROW ends its statistics with those 16
-  // rows. The live headers read the current revision only: this replay alone
-  // sizes older shaders and maps their decision words to the current layout
-  // (current_words) for the decoders and the result lines.
+  // Resource sizes from the shader's markers, as the renderer sizes them: the
+  // current selection revision's decision texels and statistics rows.
   struct sizes_t {
     UINT statistics_rows, decision_texels, tile_parts;
-    std::uint32_t revision;
   };
-  // Selection revision 10, the last with the declared alphas' one-way counts
-  // in texel 16 (words 64-67: strong UIAlpha, strong UI color tag,
-  // contradicted UIAlpha, contradicted UI color tag).
-  inline constexpr std::uint32_t texel16_revision = 10, texel16_decision_texels = 17, texel16_word = 64;
-  inline constexpr std::string_view layer_bound_row_marker = "SUNSHINE_UI_LAYER_BOUND_ROW";
-  // The statistics rows of a shader with this many decision texels and this
-  // layer bound row (0 without the marker, before selection revision 10).
-  constexpr std::uint32_t statistics_rows_of(std::uint32_t texels, std::uint32_t bound_row) {
-    return bound_row ? bound_row + 16u : texels >= contract::pre_ui_decision_texels ? contract::pre_ui_statistics_row + 16u :
-      contract::scene_partial_row + contract::scene::cells_y / 16u;
-  }
-  static_assert(statistics_rows_of(contract::layer_decision_texels, 0) == 121u &&
-    statistics_rows_of(contract::h1_decision_texels, 0) == 121u && statistics_rows_of(contract::pre_ui_decision_texels, 0) == 144u &&
-    statistics_rows_of(13, 0) == 144u && statistics_rows_of(texel16_decision_texels, 208) == 224u &&
-    statistics_rows_of(contract::decision_texels, contract::layer_bound_statistics_row) == contract::statistics_row_count);
   sizes_t detection_sizes(const std::string &source) {
     const auto texels = sunshine_game3d::shader_marker(source, contract::decision_texels_marker);
     const auto images = sunshine_game3d::shader_marker(source, contract::scene_evidence_images_marker);
     const auto parts = sunshine_game3d::shader_marker(source, contract::tile_parts_marker);
-    const auto bound_row = sunshine_game3d::shader_marker(source, layer_bound_row_marker);
-    const auto revision = sunshine_game3d::shader_marker(source, selection::revision_marker);
-    if (texels < contract::layer_decision_texels || texels > texel16_decision_texels ||
-        images != contract::max_scene_evidence_images || parts > contract::max_tile_parts ||
-        (revision >= selection::revision && texels != contract::decision_texels) ||
-        (revision == texel16_revision && texels != texel16_decision_texels))
+    if (texels != contract::decision_texels || images != contract::max_scene_evidence_images || parts > contract::max_tile_parts)
       throw std::runtime_error("unsupported detection size markers in the shader");
-    return {statistics_rows_of(texels, bound_row), texels, std::max(parts, 1u), revision};
-  }
-  // A shader's decision words in the current layout, at most the current
-  // count, so that a shader of selection revision 1 to 3 keeps its smaller
-  // count (its missing texels read as absent in the result lines). Selection
-  // revision 10's texel 16 moves to words 32, 46, 36 and 47; before it words
-  // 32 and 36 held the layer's one-way counts, which no judge reads since,
-  // and selection revisions 4 to 8 kept shadow statistics in words 46 and 47,
-  // so those revisions read as no declared counts, as they measured none.
-  // Texels 12-15 (selection revisions 5 to 8 and 10) were removed.
-  std::vector<std::uint32_t> current_words(std::vector<std::uint32_t> words, std::uint32_t revision) {
-    if (revision >= selection::revision) return words;
-    std::array<std::uint32_t, 4> declared{};
-    if (revision == texel16_revision && words.size() >= texel16_word + declared.size())
-      std::copy_n(words.begin() + texel16_word, declared.size(), declared.begin());
-    if (words.size() > 4u * contract::decision_texels) words.resize(4u * contract::decision_texels);
-    const std::array<std::size_t, 4> moved{word::strong_ui_alpha, word::strong_ui_color, word::contradicted_ui_alpha,
-      word::contradicted_ui_color};
-    for (std::size_t i = 0; i != moved.size(); ++i)
-      if (moved[i] < words.size()) words[moved[i]] = declared[i];
-    return words;
-  }
-  // Decision words in the current layout padded with zeros to the current
-  // count, for the live decoders (as missing texels read before).
-  std::vector<std::uint32_t> padded(std::vector<std::uint32_t> words) {
-    if (words.size() < 4u * contract::decision_texels) words.resize(4u * contract::decision_texels);
-    return words;
+    return {contract::statistics_row_count, texels, std::max(parts, 1u)};
   }
 
   struct outcome {
-    // The decision words in the current layout (current_words), and as the
-    // shader wrote them (--verbose, --write-mask).
-    std::vector<std::uint32_t> decision, written;
+    // The decision words as the shader wrote them.
+    std::vector<std::uint32_t> decision;
     std::uint64_t ui_pixels = 0, pixels = 0, mask_hash = 1469598103934665603ull;
     std::string mask_exact; // Empty unless the label asks for it.
     std::vector<float> mask;
@@ -401,10 +333,6 @@ namespace {
     std::array<const artifact_t *, 4> inputs{}; // t11..t14
     const artifact_t *layer_input = nullptr;    // t7
     unsigned bits = 0, flags = 0;
-    // Selection revisions 2-9 read the one-frame-late layer bit 0x4, which
-    // every layer copy carried through 180f1842 (now reserved): a shader that
-    // still defines it gets it with the layer's flags, so it replays as before.
-    const bool late_layer_bit = shader_source.find("#define SUNSHINE_UI_STORED_LATE_LAYER ") != std::string::npos;
     // The live layer's stored bits as the package recorded them
     // (contract::recorded_layer_flags) replay for the census candidate the
     // live tracker chose (active), so a layer whose format rule changed since
@@ -441,9 +369,8 @@ namespace {
           flags |= contract::stored_ui_alpha_in_alpha;
       }
       if (layer) {
-        flags |= (!recorded_layer.empty() && name == recorded_layer ? *recorded_layer_flags :
-          contract::layer_detection_flags(contract::float_layer_format(artifacts.at(name).at("dxgi_format").get<unsigned>()))) |
-          (late_layer_bit ? 0x4u : 0u);
+        flags |= !recorded_layer.empty() && name == recorded_layer ? *recorded_layer_flags :
+          contract::layer_detection_flags(contract::float_layer_format(artifacts.at(name).at("dxgi_format").get<unsigned>()));
       }
     }
     // V2: the threshold from the pair's own encodings, and a HUD-less image
@@ -506,9 +433,8 @@ namespace {
     }
     // A "sample" key is accepted and ignored: its flag 0x20000 is reserved and
     // the shader never read it. Every replay is a status sample, so it pushes
-    // per_frame_sample (selection revision 10: the one-way judgment and the
-    // pre-UI pixels are counted on samples only; older shaders read that bit
-    // as an unused stored bit).
+    // per_frame_sample (the one-way judgment and the pre-UI pixels are counted
+    // on samples only).
     flags |= contract::per_frame_sample;
     if (label.value("depth_not_current", false)) flags |= contract::per_frame_depth_not_current;
 
@@ -544,12 +470,10 @@ namespace {
     auto decision = target(gpu, sizes.decision_texels, 1, DXGI_FORMAT_R32G32B32A32_UINT);
     auto mask = target(gpu, width, height, DXGI_FORMAT_R32_FLOAT);
     // Detection constants b2: candidate bits, difference threshold, accepted
-    // candidates, flags and (selection revision 4)
-    // the offscreen UI layer's pair threshold with the presented color, from
-    // the two artifacts' own encodings (zero without a layer or when not
-    // comparable), padded with zeros to the 16-byte constant buffer
-    // granularity: shaders of selection revisions 5 to 9 read their word 5
-    // there as zero, as the renderer pushed it.
+    // candidates, flags and the offscreen UI layer's pair threshold with the
+    // presented color, from the two artifacts' own encodings (zero without a
+    // layer or when not comparable), padded with zeros to the 16-byte
+    // constant buffer granularity.
     const float threshold = pair_threshold ? *pair_threshold :
       selection::comparable(encoding_of(paired), encoding_of(paired)).value_or(2.f / 255.f);
     float pre_ui_threshold = 0.f;
@@ -615,7 +539,7 @@ namespace {
     // sequence replay owns temporal behaviour.
     std::uint32_t guard_bits = 0;
     if (measured) {
-      const auto words = padded(current_words(download<std::uint32_t>(gpu, decision), sizes.revision));
+      const auto words = download<std::uint32_t>(gpu, decision);
       sunshine_game3d::scene_guard::state guard;
       guard.enter_scope(1, 0);
       const bool proven_image = pre_ui_proven && selection::pre_ui_image_of(bits) == contract::pre_ui_image::layer;
@@ -635,8 +559,7 @@ namespace {
     outcome result;
     result.measured = measured;
     result.guard_bits = guard_bits;
-    result.written = download<std::uint32_t>(gpu, decision);
-    result.decision = current_words(result.written, sizes.revision);
+    result.decision = download<std::uint32_t>(gpu, decision);
     result.mask = download<float>(gpu, mask);
     result.width = width; result.height = height;
     result.offered = bits; result.accepted = accepted; result.flags = flags;
@@ -666,10 +589,6 @@ namespace {
   // Evidence that did not run fails the check.
   constexpr std::array<const char *, 3> pre_ui_image_names{"none", "hudless", "layer"};
   bool scene_matches(const std::vector<std::uint32_t> &d, const json &expected, bool pre_ui, std::string &text) {
-    if (d.size() <= word::pre_ui_scene_image) {
-      text = "no-reference(" + std::to_string(d.size() / 4) + " decision texels)";
-      return false;
-    }
     const auto n = d[pre_ui ? word::pre_ui_scene_n : word::scene_n], state = d[pre_ui ? word::pre_ui_scene_state : word::scene_state];
     float value;
     std::memcpy(&value, &d[pre_ui ? word::pre_ui_scene_d : word::scene_d], 4);
@@ -699,12 +618,7 @@ namespace {
   // expect.pre_ui_match: whether this sample would count toward the
   // acceptance ledger's pre-UI proof of the offered layer (H1 d): the layer
   // without coverage and ui_selection::pre_ui_match on decision texel 11.
-  // A shader without texel 11 fails the check.
   bool pre_ui_match_matches(const std::vector<std::uint32_t> &d, bool expected, std::string &text) {
-    if (d.size() < 4 * contract::pre_ui_decision_texels) {
-      text = "no-reference(" + std::to_string(d.size() / 4) + " decision texels)";
-      return false;
-    }
     const bool match = !d[word::layer_covered] &&
       selection::pre_ui_match(d[word::pre_ui_match], d[word::pre_ui_image_lit], d[word::pixels]);
     char buffer[96];
@@ -803,10 +717,9 @@ namespace {
   // hold store unbound): "match" when the GPU's
   // source, coverage, accepted
   // word, valid bits, refused candidate, frame reason, claims and h1 word
-  // agree, "n/a" for a shader of another selection revision.
-  std::string mirror_of(const outcome &result, bool mirrored) {
+  // agree.
+  std::string mirror_of(const outcome &result) {
     const auto &d = result.decision;
-    if (!mirrored || d.size() <= word::h1) return "n/a";
     const auto expected = selection::decide(selection::counts_from_words(d.data(), d.size()), result.offered, result.accepted,
       result.flags, selection::hold_state{});
     if (expected.source == d[word::source] && expected.covered == d[word::covered] && expected.valid_bits == d[word::valid_bits] &&
@@ -844,7 +757,7 @@ namespace {
       else fs::copy_file(dump / file, directory / file);
     }
     manifest["ui_detection_replay_mask"] = {{"source_dump", dump.string()}, {"label", name}, {"shader", shader.string()},
-      {"decision", result.written}, {"flags", result.flags},
+      {"decision", result.decision}, {"flags", result.flags},
       {"meaning", "ui_source_color is the R32 mask ui_detection_replay resolved with this shader; every other artifact and the "
         "metadata are the captured ones. flags are the detection flags it pushed."}};
     const auto text = manifest.dump(2) + '\n';
@@ -877,7 +790,8 @@ int main(int argc, char **argv) {
         "Binds each dump's candidates (t0 paired color, t11-t14, and a census ui_layer_candidate_N at t7 with the layer\n"
         "flags: the recorded ones for the live layer, else its format's), raw depth (t1; a 1x1 placeholder without it),\n"
         "presented color (t6) and its exact 80-byte b0, and runs the\n"
-        "shader's scene evidence passes as on a sample frame. Only shaders of candidate layout 2 (since S1) replay.\n"
+        "shader's scene evidence passes as on a sample frame. Only a shader of candidate layout 2 and the current\n"
+        "selection revision (the current game3d_native.hlsl) replays.\n"
         "accepted names the candidate kinds the game session accepts (A1); the retired trusted key fails\n"
         "its case. The hidden-scene guard's per-frame bits (H1): scene_hold true pushes its held hidden verdict,\n"
         "pre_ui_visible its held visible pre-UI image, refuted the named kinds' refuted signatures; scene_hold \"measured\"\n"
@@ -887,8 +801,8 @@ int main(int argc, char **argv) {
         "it pushes per_frame_pre_ui_proven with any scene_hold form and, when measured, is the guard's layer_proven.\n"
         "The retired scene_hold_hudless and hudless_scene keys fail their case.\n"
         "A HUD-less image not comparable with its pair (ui_selection::comparable, from the two artifact formats\n"
-        "and the manifest color_space) is not offered, and the pair's threshold comes from the same function. With a\n"
-        "shader of the current selection revision, every decision is checked against ui_selection::decide on\n"
+        "and the manifest color_space) is not offered, and the pair's threshold comes from the same function. Every\n"
+        "decision is checked against ui_selection::decide on\n"
         "the GPU's counts with no previous decision, as nothing is bound at the T1 hold store (mirror=match); a\n"
         "mirror that differs fails its case. A case\n"
         "whose dump directory is gone, or whose needs_dump names what its dump lacks, is skipped; the run fails when no\n"
@@ -906,25 +820,23 @@ int main(int argc, char **argv) {
         "colour within 8 times the layer/presented pair threshold on 90% of pixels, lit on half). --write-mask\n"
         "copies each dump that consumed an automatic R32 mask into <new-dir>/<NN>_<dump> (NN: the case's position in\n"
         "cases.json) with ui_source_color replaced by the resolved mask, for replay_game3d_dump --shader; any other dump\n"
-        "fails its case. Each line shows the frame reason, the refused candidate and the one-way judgment counts\n"
-        "(strong/contradicted pixels of Backbuffer and current alpha) from selection revision 2, those of UIAlpha\n"
-        "and the UI color tag (declared_one_way; every case is a status sample: per_frame_sample) from selection\n"
-        "revision 4 (zero before revision 10, which first counted them), the H1\n"
-        "claims and h1 word (applied, S1 winner) from selection revision 3, and the layer's pre-UI pixel counts\n"
-        "(texel 11: match and image_lit) from selection revision 4, all read in the current decision layout.\n"
-        "--verbose prints every decision word as the shader wrote it.\n");
+        "fails its case. Each line shows the frame reason, the refused candidate, the one-way judgment counts\n"
+        "(strong/contradicted pixels of Backbuffer and current alpha), those of UIAlpha and the UI color tag\n"
+        "(declared_one_way; every case is a status sample: per_frame_sample), the H1 claims and h1 word (applied,\n"
+        "S1 winner) and the layer's pre-UI pixel counts (texel 11: match and image_lit).\n"
+        "--verbose prints every decision word.\n");
       return 2;
     }
     const auto shader_path = fs::absolute(positional[0]);
     const auto shader_source = read_text(shader_path);
-    // Only candidate layout 2 (UI framework S1, 10-02), the layout the
-    // renderer requires, is replayed: an older shader took the layer in the
-    // UI color slot.
-    if (sunshine_game3d::shader_marker(shader_source, contract::candidate_layout_marker) != contract::candidate_layout)
-      throw std::runtime_error("a shader without SUNSHINE_UI_CANDIDATE_LAYOUT 2 (before S1, 10-02) is not replayed");
-    // Shaders of the current selection revision are checked against
-    // ui_selection::decide.
-    const bool mirrored = sunshine_game3d::shader_marker(shader_source, selection::revision_marker) == selection::revision;
+    // Only the candidate layout and selection revision the renderer requires
+    // replay: the decoders and ui_selection::decide read that decision layout.
+    const auto layout = sunshine_game3d::shader_marker(shader_source, contract::candidate_layout_marker);
+    const auto revision = sunshine_game3d::shader_marker(shader_source, selection::revision_marker);
+    if (layout != contract::candidate_layout || revision != selection::revision)
+      throw std::runtime_error("the shader has candidate layout " + std::to_string(layout) + " and selection revision " +
+        std::to_string(revision) + "; only layout " + std::to_string(contract::candidate_layout) + " and revision " +
+        std::to_string(selection::revision) + " (the current game3d_native.hlsl) replay");
     const auto cases_path = fs::absolute(positional[1]);
     const auto document = json::parse(read_text(cases_path));
     fs::path root = document.value("dump_root", cases_path.parent_path().string());
@@ -975,7 +887,7 @@ int main(int argc, char **argv) {
       const char *status = target.okay ? (xfail ? "XPASS" : "PASS") : xfail && today.okay ? "XFAIL" : "FAIL";
       bool okay = target.okay || (xfail && today.okay);
       // The GPU decision against ui_selection::decide on the GPU's own counts.
-      const auto mirror = mirror_of(result, mirrored);
+      const auto mirror = mirror_of(result);
       if (mirror.rfind("differs", 0) == 0) {
         okay = false;
         status = "FAIL";
@@ -1008,42 +920,32 @@ int main(int argc, char **argv) {
           xfail->at("reason").get<std::string>() + (target.okay ? "; remove xfail" : "");
       }
       // The layer's own counts (texel 7).
-      char layer[96] = "";
-      if (d.size() > word::valid_bits)
-        std::snprintf(layer, sizeof(layer), " layer={covered=%u invalid=%u opaque=%u} valid=0x%x", d[word::layer_covered],
-          d[word::layer_invalid], d[word::layer_opaque], d[word::valid_bits]);
+      char layer[96];
+      std::snprintf(layer, sizeof(layer), " layer={covered=%u invalid=%u opaque=%u} valid=0x%x", d[word::layer_covered],
+        d[word::layer_invalid], d[word::layer_opaque], d[word::valid_bits]);
       // The frame reason, refused candidate and one-way counts of Backbuffer
-      // and current alpha from selection revision 2 (texels 8 and 9), and of
-      // UIAlpha and the UI color tag (declared_one_way, zero before selection
-      // revision 10) with texel 11.
-      char judgment[280] = "";
-      if (d.size() > word::frame_reason) {
-        const auto reason = selection::frame_reason_name(d[word::frame_reason]);
-        const auto refused = selection::candidate_name(d[word::refused]);
-        char declared[96] = "";
-        if (d.size() > word::contradicted_ui_color)
-          std::snprintf(declared, sizeof(declared), " declared_one_way={strong=%u/%u contradicted=%u/%u}", d[word::strong_ui_alpha],
-            d[word::strong_ui_color], d[word::contradicted_ui_alpha], d[word::contradicted_ui_color]);
-        std::snprintf(judgment, sizeof(judgment), " reason=%.*s%s refused=%.*s one_way={strong=%u/%u contradicted=%u/%u}%s",
-          int(reason.size()), reason.data(), (d[word::frame_reason] & contract::frame_reason_reused) ? "(reused)" : "",
-          int(refused.size()), refused.data(), d[word::strong_backbuffer], d[word::strong_current],
-          d[word::contradicted_backbuffer], d[word::contradicted_current], declared);
-      }
-      // H1 from selection revision 3 (texel 10): the raw claims, whether H1
-      // applied and the S1 winner; a measured case also shows the bits the
-      // scene guard pushed.
-      char h1[128] = "";
-      if (d.size() > word::h1)
-        std::snprintf(h1, sizeof(h1), " claims=0x%x h1={applied=%d,winner=%u}", d[word::claims],
-          (d[word::h1] & contract::h1_applied) ? 1 : 0, d[word::h1] & contract::h1_winner_mask);
+      // and current alpha (texels 8 and 9), and of UIAlpha and the UI color
+      // tag (declared_one_way) with texel 11.
+      char judgment[280];
+      const auto reason = selection::frame_reason_name(d[word::frame_reason]);
+      const auto refused = selection::candidate_name(d[word::refused]);
+      std::snprintf(judgment, sizeof(judgment), " reason=%.*s%s refused=%.*s one_way={strong=%u/%u contradicted=%u/%u}"
+        " declared_one_way={strong=%u/%u contradicted=%u/%u}",
+        int(reason.size()), reason.data(), (d[word::frame_reason] & contract::frame_reason_reused) ? "(reused)" : "",
+        int(refused.size()), refused.data(), d[word::strong_backbuffer], d[word::strong_current],
+        d[word::contradicted_backbuffer], d[word::contradicted_current], d[word::strong_ui_alpha],
+        d[word::strong_ui_color], d[word::contradicted_ui_alpha], d[word::contradicted_ui_color]);
+      // H1 (texel 10): the raw claims, whether H1 applied and the S1 winner;
+      // a measured case also shows the bits the scene guard pushed.
+      char h1[128];
+      std::snprintf(h1, sizeof(h1), " claims=0x%x h1={applied=%d,winner=%u}", d[word::claims],
+        (d[word::h1] & contract::h1_applied) ? 1 : 0, d[word::h1] & contract::h1_winner_mask);
       char guard[64] = "";
       if (result.measured) std::snprintf(guard, sizeof(guard), " measured(per_frame=0x%x)", result.guard_bits);
-      // H1 (d) from selection revision 4 (texel 11): the layer against the
-      // presented frame.
-      char pre_ui_pixels[128] = "";
-      if (d.size() >= 4 * contract::pre_ui_decision_texels)
-        std::snprintf(pre_ui_pixels, sizeof(pre_ui_pixels), " pre_ui_pixels={match=%u image_lit=%u}", d[word::pre_ui_match],
-          d[word::pre_ui_image_lit]);
+      // H1 (d) (texel 11): the layer against the presented frame.
+      char pre_ui_pixels[128];
+      std::snprintf(pre_ui_pixels, sizeof(pre_ui_pixels), " pre_ui_pixels={match=%u image_lit=%u}", d[word::pre_ui_match],
+        d[word::pre_ui_image_lit]);
       std::printf("%s %-44s source=%u covered=%u/%u ui=%.2f%% mask=%s (want %s) candidates=0x%x accepted=0x%x "
         "alpha_covered=%u/%u/%u/%u%s%s%s%s%s hudless={changed=%u unchanged=%u invalid=%u tiles=%u lit=%u} "
         "mirror=%s%s%s%s%s%s%s%s%s\n",
@@ -1056,8 +958,7 @@ int main(int argc, char **argv) {
         pre_ui_scene.empty() ? "" : " pre_ui_scene=", pre_ui_scene.c_str(), pre_ui_match.empty() ? "" : " pre_ui_match=",
         pre_ui_match.c_str());
       if (verbose) {
-        // The words as the shader wrote them, in its own layout.
-        const auto &w = result.written;
+        const auto &w = result.decision;
         std::printf("  words=");
         for (size_t i = 0; i < w.size(); ++i) std::printf("%u%s", w[i], i + 1 < w.size() ? "," : "");
         std::printf(" mask_fnv=%016llx\n", static_cast<unsigned long long>(result.mask_hash));

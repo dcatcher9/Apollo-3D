@@ -120,15 +120,6 @@ namespace sunshine_game3d::replay {
   inline bool supports_ui_plane(const std::string &shader) {
     return shader.find("Sunshine_UIPlaneMode") != std::string::npos;
   }
-  inline bool supports_nearest_ui_plane(const std::string &shader) {
-    return shader.find("#define SUNSHINE_UI_NEAREST_PLANE 1") != std::string::npos;
-  }
-  inline bool supports_front_ui_plane(const std::string &shader) {
-    return shader.find("#define SUNSHINE_UI_FRONT_LIMIT_PLANE 1") != std::string::npos;
-  }
-  inline bool supports_shallow_ui_plane(const std::string &shader) {
-    return shader.find("#define SUNSHINE_UI_SHALLOW_FRONT_PLANE 1") != std::string::npos;
-  }
   inline bool supports_display_fraction_ui_plane(const std::string &shader) {
     return shader.find("#define SUNSHINE_UI_DISPLAY_FRACTION_PLANE 1") != std::string::npos;
   }
@@ -188,18 +179,12 @@ namespace sunshine_game3d::replay {
     const bool channel_abi = p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v7";
     require(words[3] <= (channel_abi ? 1u : 0u), "Unknown UI mask channel or legacy reserved bits");
     p.ui_channel = static_cast<ui_mask_channel>(words[3]);
+    // Modes 1-4 (midpoint, nearest-UI, front-limit and shallow-front planes)
+    // were removed on 11-25: the current shader would pin such a package's UI
+    // at zero disparity, which is not what it rendered.
+    require(words[1] < 1u || words[1] > 4u, "The package's UI plane mode " + std::to_string(words[1]) +
+      " (midpoint, nearest-UI, front-limit or shallow-front) was removed on 11-25 and no longer replays");
     p.ui_plane.mode = static_cast<ui_plane_mode>(words[1]);
-    require(words[1] != static_cast<std::uint32_t>(ui_plane_mode::depth_midpoint_nearest_ui) ||
-        p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v3" || p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v4" ||
-        p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v5" || p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v6" || channel_abi,
-      "Nearest-covered UI mode requires the v3 or newer UI parameter contract");
-    require(words[1] != static_cast<std::uint32_t>(ui_plane_mode::front_limit) ||
-        p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v4" || p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v5" ||
-        p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v6" || channel_abi,
-      "Fixed front-limit UI mode requires the v4 or newer UI parameter contract");
-    require(words[1] != static_cast<std::uint32_t>(ui_plane_mode::shallow_front) ||
-        p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v5" || p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v6" || channel_abi,
-      "Fixed shallow-front UI mode requires the v5 or newer UI parameter contract");
     const bool fraction_mode = p.ui_plane.mode == ui_plane_mode::display_fraction;
     require(!fraction_mode || p.ui_parameter_abi == "sunshine_game3d.ui_parameters.v6" || channel_abi,
       "Display-fraction UI mode requires the v6 UI parameter contract");
@@ -219,11 +204,6 @@ namespace sunshine_game3d::replay {
     if (fraction_mode) {
       require(binding.at("word2_role") == "front_limit_fraction" && !binding.contains("inverse_depth") &&
           !binding.contains("inverse_depth_bits"), "Display-fraction UI word must not describe an inverse depth");
-    }
-    if (p.ui_plane.mode == ui_plane_mode::shallow_front) {
-      require(binding.contains("front_limit_fraction") && binding.at("front_limit_fraction").is_number() &&
-          binding.at("front_limit_fraction").get<double>() == 0.25,
-        "Fixed shallow-front UI mode requires a one-quarter front-limit fraction");
     }
     // Invalid production-domain bits are part of diagnostic replay. Preserve
     // them so the production shader's zero-disparity guards are exercised.
@@ -268,12 +248,6 @@ namespace sunshine_game3d::replay {
     require(!p.shader.empty() && p.shader.size() <= 256 * 1024 && p.shader.find('\0') == std::string::npos, "Missing or invalid embedded shader");
     require(p.ui_plane.mode == ui_plane_mode::screen || supports_ui_plane(p.shader),
       "Captured independent UI plane requires a shader that consumes its parameters");
-    require(p.ui_plane.mode != ui_plane_mode::depth_midpoint_nearest_ui || supports_nearest_ui_plane(p.shader),
-      "Captured nearest-covered UI plane requires its GPU reduction shader");
-    require(p.ui_plane.mode != ui_plane_mode::front_limit || supports_front_ui_plane(p.shader),
-      "Captured fixed front-limit UI plane requires its shader contract");
-    require(p.ui_plane.mode != ui_plane_mode::shallow_front || supports_shallow_ui_plane(p.shader),
-      "Captured fixed shallow-front UI plane requires its shader contract");
     require(p.ui_plane.mode != ui_plane_mode::display_fraction || supports_display_fraction_ui_plane(p.shader),
       "Captured display-fraction UI plane requires its shader contract");
     require(p.ui_channel != ui_mask_channel::red || p.shader.find("Sunshine_UIMaskChannel") != std::string::npos,

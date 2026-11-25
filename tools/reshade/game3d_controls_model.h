@@ -27,11 +27,7 @@ namespace sunshine_game3d {
     config.read("Strength", result.strength);
     config.read("DepthView", result.depth_view);
     config.read("Enabled", result.enabled);
-    // The old checkbox enabled heuristics, so legacy true migrates to Auto.
-    // Preserve an explicitly disabled old checkbox until a three-way edit.
-    bool legacy_alpha = true;
-    config.read("SourceAlphaUI", legacy_alpha);
-    int alpha_mode = legacy_alpha ? 0 : 2;
+    int alpha_mode = 0;
     config.read("SourceAlphaUIMode", alpha_mode);
     result.ui_protection = alpha_mode >= 0 && alpha_mode <= 2 ? source_alpha_mode(alpha_mode) : source_alpha_mode::automatic;
     result.source_alpha_ui = result.ui_protection == source_alpha_mode::on;

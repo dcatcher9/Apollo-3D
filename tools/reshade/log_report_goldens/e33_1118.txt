@@ -1,0 +1,66 @@
+Game 3D readiness: SandFall-Win64-Shipping.exe  10:37:15 to 10:39:25 (2m10s, exited)
+[PASS] Add-on: loaded; output 7680x2160 sRGB D3D12 (generation 6)
+[WARN] Depth: fresh from 10:37:23; 2.3% of later publications without depth; gaps outside export starts and resets
+         10:37:54.928-10:37:58.304 (3375 ms) retained_depth_expired, Streamline selection=no_completed_snapshot; the game froze 210 ms (6 Present gaps)
+         10:38:03.945-10:38:04.881 (938 ms) retained_depth_expired, Streamline selection=no_completed_snapshot
+         10:38:05.176-10:38:05.686 (500 ms) retained_depth_expired, Streamline selection=no_completed_snapshot
+         10:38:05.762-10:38:06.196 (437 ms) retained_depth_expired, Streamline selection=no_completed_snapshot
+         10:38:08.050-10:38:09.990 (1937 ms) retained_depth_expired, Streamline selection=no_completed_snapshot
+         10:38:12.473-10:38:14.255 (1781 ms) retained_depth_expired, Streamline selection=no_completed_snapshot; the game froze 199 ms (8 Present gaps)
+[PASS] Depth at FG switches: 1 FG switch, no depth lost
+         10:37:24.737 FG on: 1 Present to fresh depth (0 ms)
+[PASS] Placement flat: 53.7% of publications showed the colour frame with depth, 2.6% faded stereo back in
+[INFO] Placement calibration: 1 flat run was a calibration with depth for at most 3 s
+         10:38:03.946-10:38:05.688 after depth loss
+[INFO] Placement waited for the scene: 1 flat run waited for a depth reference until the game's own scene reset and placed within 3 s of it: the depth before the reset (a title or menu scene) gave none, the next scene did at once; its length is how long the game stayed there
+         10:37:23.509-10:37:46.876 projection waiting_for_depth_range (22.3 s with depth), game scene reset 10:37:45.983
+[PASS] Capture coverage: 22276 covered (22271 observed, 5 declared states); not open: unknown 0, closed 0, render pass 0
+[PASS] Placement: camera projection drives placement
+[INFO] UI trust: 10:37:16 restored accepted UI sources backbuffer:24:srgb,current:24:srgb,hudless:24:srgb
+[PASS] UI channel admission: no selective UI channel rejected for invalid pixels
+[PASS] UI counters: 12041 Auto frames through the last of 763 committed samples: 6526 detected, 5296 held, 219 without detection
+[PASS] UI protection: decided no mask (0) 0.81%, Backbuffer alpha (3) 94%, current alpha (4) 0.67%, full frame over a hidden scene (H1) (8) 5.0% of detection frames
+[PASS] UI full frame: 324 full-frame frames (6: 0, 8: 324; 5.0% of detection frames); H1 samples (8) read the scene hidden 24, ambiguous 0, visible 0, invalid or unmeasured 7; scene guard entered 3, released 1, refuted 2; depth not current on 974 detection frames
+[INFO] UI full alpha: 3660 frames decided a whole-frame alpha and 0 an exact full change-set (6) (56% of detection frames)
+[PASS] UI inexact difference: no HUD-less difference decided from an inexact pair
+[INFO] UI holds: generated 5296, none 0 (44% of Auto frames); 11 detection frames (0.17%) reused the previous real frame's decision (T1)
+[INFO] UI no mask: 2.3% of Auto frames had no mask; decided none: no candidate 0.44%; without detection: no candidates 1.8%
+[INFO] UI trust events: earned 2, revoked one way by an exact pair 0, revoked by a declared alpha's coverage 0, lapsed 0, restored 3, forgotten 0; 0 selective layer samples earned nothing for colour without coverage (A1)
+[PASS] UI holds without a decision: no window held most Auto frames without a decision
+[WARN] UI protection gaps: no usable UI mask for 3 s in 1 window; HUD and menus took the scene's depth there; 6 gaps shorter than 2 s (2.7 s) not listed; 9.8 s without a mask while depth was lost (every frame flat by the output counters) not counted
+         10:38:03-10:38:06 (3 s) FG on: no UI source offered
+[INFO] Hidden scene: H1 hidden scene (8) in 2 samples (pre-UI image: hudless 2, layer 0), entered 3, released 1, refuted 2; 8 of 47 samples measured
+[PASS] Observation losses: lifecycle 1
+[INFO] Depth losses: 13 episodes (1 counted but not logged), 7.5 per streamed minute, 13.7 s without depth in the logged ones; retained_depth_expired 12
+[PASS] Queue order: 10 queues, 39 fences (17 settled), 535350 signals, 338523 waits; 0 ordered verdicts, proofs inflight 0; poisoned shared 5, unobserved 1; refused poisoned 19105, pending_hooks 78, unsettled 6, uncovered 2
+[INFO] Capture lock: 11 windows (114 s): game p99 up to 10 us, largest game wait 4.449 ms, 3 game waits of 1 ms or more, present p99 up to 10 us: between parked and the split trigger, so the named holder is shortened first: holders g+0x133023:306/8.816,g+0x13e40a:203/4.492,g+0x12be1a:332/2.135,g+0x0:109/0.518 at 10:38:13
+[INFO] Barrier coverage: lists no barrier hook covered (their executions count as uncovered): module table D3D12Core.dll+0x306040, ResourceBarrier in D3D12Core.dll, Barrier in D3D12Core.dll
+         10:37:46 module table D3D12Core.dll+0x306040, ResourceBarrier in D3D12Core.dll, Barrier in D3D12Core.dll
+[WARN] Export: renderer_unavailable 4, runtime_reset 4, no_consumer 2; faults: renderer_unavailable
+         10:37:23 renderer_unavailable
+[WARN] Present hitches: 3 not explained by a reset, FG switch or overlay opening, worst 15.5 ms
+         10:39:07 export section (no step named; the slowest Present of 10:38:57-10:39:07) 15.5 ms
+         10:38:54 stereo render 14.0 ms
+         10:38:38 stereo render 8.1 ms
+[INFO] Diagnostics: Diagnostics=1: per-pass GPU timing is recorded
+[INFO] Game 3D cost: CPU 0.21 ms mean (54.8 max) over 12550 Presents; GPU 0.62 ms mean (48.8 max)
+[INFO] Video memory: game local usage peaked at 10754 MiB; its budget was as low as 11177 MiB and its headroom as low as 913 MiB; 0 ms over budget (no depth loss, hitch or Present gap under pressure)
+[PASS] Stream delivery: the host took 70.7 new frames/s of a target 72.3/s (what the game offered, capped at the stream 90 fps)
+[INFO] Frame generation: 10:37:24 on
+[INFO] Other log warnings: 15 WARN/ERROR lines from ReShade, the game or another add-on, none about the Sunshine 3D add-on
+         10:37:22 WARN Successfully compiled '<GAME>\Sandfall\Binaries\Win64\reshade-shaders\Shaders\SweetFX\Nostalgia.fx' in 0.034000 s with warnings: (13 such lines)
+         10:39:19 WARN Reference count for ID3D12CommandQueue0 object 00000156A2464580 (00000156A1E02910) is inconsistent (9).
+         10:39:24 WARN Add-ons are still loaded! Application may crash on exit.
+[PASS] Host link: ReShade SBS connected 6 time(s)
+[INFO] Host size: 10:39:12 ReShade SBS: game eyes 3200x1800 are scaled to the stream's 3840x2160 eyes. Run the game at 3840x2160 for native sharpness.
+[INFO] Host size: 10:39:12 ReShade SBS: game eyes 3200x1800 are scaled to the stream's 3840x2160 eyes. Run the game at 3840x2160 for native sharpness.
+[WARN] Encoder stalls: 50; 8 more upstream GPU during the game's own freezes
+         10:37:55 encoder-side 158 ms
+         10:37:56 upstream GPU 172 ms
+         10:37:56 upstream GPU 173 ms
+         10:37:56 upstream GPU 203 ms
+         10:37:56 upstream GPU + encoder-side 204 ms
+         10:37:57 upstream GPU + encoder-side 204 ms
+[INFO] Host video memory: host local usage peaked at 1402 MiB; its headroom was as low as 9842 MiB (1402/11244 MiB at 10:39:03)
+Overall: WARN (0 fail, 5 warn)
+Exit code: 0

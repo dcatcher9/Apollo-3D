@@ -1197,86 +1197,7 @@ static bool read_disabled_addons(std::vector<std::string> &names)
 	return true;
 }
 
-enum class legacy_depth_state { absent, present, unknown };
-
-static bool readable_module_range(HMODULE module, size_t image_size, const void *address, size_t size)
-{
-	const auto base = reinterpret_cast<uintptr_t>(module);
-	const auto begin = reinterpret_cast<uintptr_t>(address);
-	if (begin < base || begin - base >= image_size || size > image_size - (begin - base))
-		return false;
-	for (uintptr_t cursor = begin; cursor < begin + size;)
-	{
-		MEMORY_BASIC_INFORMATION info = {};
-		if (VirtualQuery(reinterpret_cast<const void *>(cursor), &info, sizeof(info)) != sizeof(info) ||
-			info.AllocationBase != module || info.State != MEM_COMMIT || (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0 ||
-			(info.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) == 0)
-			return false;
-		const auto region = reinterpret_cast<uintptr_t>(info.BaseAddress);
-		if (region > cursor || info.RegionSize <= cursor - region)
-			return false;
-		cursor += std::min(size_t(begin + size - cursor), info.RegionSize - size_t(cursor - region));
-	}
-	return true;
-}
-
-static bool module_names_legacy_depth(HMODULE module, size_t image_size)
-{
-	// ReShade's public NAME export is a pointer variable, not a function or an
-	// inline character array. Read only committed readable ranges of the held
-	// module image; unrelated exports and forwarded addresses are not trusted.
-	const auto exported_name = reinterpret_cast<const void *>(GetProcAddress(module, "NAME"));
-	if (!readable_module_range(module, image_size, exported_name, sizeof(const char *)))
-		return false;
-	const char *name = nullptr;
-	std::memcpy(&name, exported_name, sizeof(name));
-	static constexpr char legacy_name[] = "Sunshine Depth";
-	return readable_module_range(module, image_size, name, sizeof(legacy_name)) &&
-		std::memcmp(name, legacy_name, sizeof(legacy_name)) == 0;
-}
-
-static legacy_depth_state legacy_depth_is_loaded(HMODULE addon_module)
-{
-	for (const wchar_t *name : {L"SunshineDepth.addon64", L"SunshineDepth.addon32", L"SunshineDepth.addon"})
-	{
-		const HMODULE legacy = GetModuleHandleW(name);
-		if (legacy != nullptr && legacy != addon_module)
-			return legacy_depth_state::present;
-	}
-	HANDLE snapshot = INVALID_HANDLE_VALUE;
-	for (unsigned attempt = 0; attempt < 3; ++attempt)
-	{
-		snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
-		if (snapshot != INVALID_HANDLE_VALUE || GetLastError() != ERROR_BAD_LENGTH)
-			break;
-	}
-	if (snapshot == INVALID_HANDLE_VALUE)
-		return legacy_depth_state::unknown;
-	MODULEENTRY32W entry = {};
-	entry.dwSize = sizeof(entry);
-	for (BOOL more = Module32FirstW(snapshot, &entry); more; more = Module32NextW(snapshot, &entry))
-	{
-		if (entry.hModule == addon_module)
-			continue;
-		HMODULE held = nullptr;
-		// Snapshot entries do not hold a loader reference. Keep the image mapped
-		// while reading the NAME export if another thread unloads a module.
-		if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(entry.modBaseAddr), &held))
-			continue;
-		const bool found = module_names_legacy_depth(held, entry.modBaseSize);
-		FreeLibrary(held);
-		if (found)
-		{
-			CloseHandle(snapshot);
-			return legacy_depth_state::present;
-		}
-	}
-	const DWORD enumeration_error = GetLastError();
-	CloseHandle(snapshot);
-	return enumeration_error == ERROR_NO_MORE_FILES ? legacy_depth_state::absent : legacy_depth_state::unknown;
-}
-
-bool sunshine_depth::initialize(HMODULE addon_module)
+bool sunshine_depth::initialize()
 {
 	if (s_initialized)
 		return s_registered;
@@ -1287,21 +1208,14 @@ bool sunshine_depth::initialize(HMODULE addon_module)
 	std::vector<std::string> disabled_addons;
 	if (!read_disabled_addons(disabled_addons))
 	{
-		s_status_message = "Depth selection could not read the existing add-on settings. Add Generic Depth to [ADDON] DisabledAddons in ReShade.ini, remove the old SunshineDepth.addon64, and restart the game.";
+		s_status_message = "Depth selection could not read the existing add-on settings. Add Generic Depth to [ADDON] DisabledAddons in ReShade.ini and restart the game.";
 		sunshine_log::message(reshade::log::level::error, s_status_message);
 		return false;
 	}
 	const bool builtin_disabled = std::find(disabled_addons.begin(), disabled_addons.end(), "Generic Depth") != disabled_addons.end();
-	const legacy_depth_state legacy = legacy_depth_is_loaded(addon_module);
-	bool changed = false;
-	for (const char *name : {"Generic Depth", "Sunshine Depth"})
-		if (std::find(disabled_addons.begin(), disabled_addons.end(), name) == disabled_addons.end())
-		{
-			disabled_addons.emplace_back(name);
-			changed = true;
-		}
-	if (changed)
+	if (!builtin_disabled)
 	{
+		disabled_addons.emplace_back("Generic Depth");
 		std::vector<char> value;
 		for (const std::string &name : disabled_addons)
 		{
@@ -1310,33 +1224,16 @@ bool sunshine_depth::initialize(HMODULE addon_module)
 		}
 		if (value.size() > 65536)
 		{
-			s_status_message = "Depth selection could not update the existing add-on settings. Add Generic Depth to [ADDON] DisabledAddons in ReShade.ini, remove the old SunshineDepth.addon64, and restart the game.";
+			s_status_message = "Depth selection could not update the existing add-on settings. Add Generic Depth to [ADDON] DisabledAddons in ReShade.ini and restart the game.";
 			sunshine_log::message(reshade::log::level::error, s_status_message);
 			return false;
 		}
-		// Preserve every existing disabled entry. ReShade checks this current list
-		// when an external add-on registers, so a legacy selector encountered later
-		// in the directory scan is rejected even on this launch. Already registered
-		// callbacks, including the built-in depth add-on, remain untouched.
+		// Preserve every existing disabled entry. Already registered callbacks,
+		// including the built-in depth add-on, remain untouched: ReShade 6.8
+		// registers its built-ins before calling external AddonInit, and its
+		// public API cannot remove them.
 		reshade::set_config_value(nullptr, "ADDON", "DisabledAddons", value.data(), value.size());
-	}
-	if (!builtin_disabled)
-	{
-		// ReShade 6.8 registers its built-ins before calling external AddonInit.
-		// Its public API cannot remove the already registered built-in callbacks.
 		s_status_message = "Depth setup has been updated. Restart the game to enable Sunshine 3D automatic depth selection. Existing ReShade depth selection remains available for this launch.";
-		sunshine_log::message(reshade::log::level::warning, s_status_message);
-		return false;
-	}
-	if (legacy == legacy_depth_state::unknown)
-	{
-		s_status_message = "Depth selection could not verify the loaded add-ons. Restart the game after removing old Sunshine Depth add-ons; export remains available for this launch.";
-		sunshine_log::message(reshade::log::level::warning, s_status_message);
-		return false;
-	}
-	if (legacy == legacy_depth_state::present)
-	{
-		s_status_message = "The old Sunshine Depth add-on is already loaded, possibly under a renamed file. Close the game, remove that old add-on, and restart. Keep only the Sunshine 3D add-on; automatic selection will then use its integrated depth selector.";
 		sunshine_log::message(reshade::log::level::warning, s_status_message);
 		return false;
 	}

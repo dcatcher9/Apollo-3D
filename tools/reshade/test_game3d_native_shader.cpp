@@ -38,16 +38,11 @@ namespace {
     {"SunshineUIDetectionConstants", D3D_SIT_CBUFFER, 2},
     {"SunshineSourceSampler", D3D_SIT_TEXTURE, 0},
     {"DepthBuffer", D3D_SIT_TEXTURE, 1},
-    {"SunshineLinearClamp", D3D_SIT_TEXTURE, 2},
     {"SunshineHostCandidateSampler", D3D_SIT_TEXTURE, 3},
     {"SunshineHostVerticalConditionedSampler", D3D_SIT_TEXTURE, 4},
     {"SunshineHostFinalSampler", D3D_SIT_TEXTURE, 5},
-    {"SunshineEyeLeftSampler", D3D_SIT_TEXTURE, 6},
     {"SunshinePresentedColor", D3D_SIT_TEXTURE, 6},
-    {"SunshineEyeRightSampler", D3D_SIT_TEXTURE, 7},
     {"SunshineUILayer", D3D_SIT_TEXTURE, 7},
-    {"SunshineUIPlaneTilesSampler", D3D_SIT_TEXTURE, 8},
-    {"SunshineUIPlaneResolvedSampler", D3D_SIT_TEXTURE, 9},
     {"SunshineUIDetectionSampler", D3D_SIT_TEXTURE, 10},
     {"SunshineUIDedicatedAlpha", D3D_SIT_TEXTURE, 11},
     {"SunshineUIColorAlpha", D3D_SIT_TEXTURE, 12},
@@ -57,8 +52,6 @@ namespace {
     {"SunshineHostVerticalMajorantStore", D3D_SIT_UAV_RWTYPED, 1},
     {"SunshineHostVerticalConditionedStore", D3D_SIT_UAV_RWTYPED, 2},
     {"SunshineHostFinalStore", D3D_SIT_UAV_RWTYPED, 3},
-    {"SunshineUIPlaneTilesStore", D3D_SIT_UAV_RWTYPED, 4},
-    {"SunshineUIPlaneResolvedStore", D3D_SIT_UAV_RWTYPED, 5},
     {"SunshineAlphaCoverageStore", D3D_SIT_UAV_RWTYPED, 6},
     {"SunshineUIConflictStore", D3D_SIT_UAV_RWTYPED, 7},
     {"SunshineUICountersStore", D3D_SIT_UAV_RWTYPED, 7}, // Detection reduce only.
@@ -233,8 +226,7 @@ namespace {
       require(known, std::string("Unrecognized native shader resource: ") + actual.Name);
       manifest << "  binding " << actual.Name << ' ' << actual.Type << ' ' << actual.BindPoint << '\n';
     }
-    if (std::string(entry.name) == "SunshineApplyUICS" ||
-        std::string(entry.name) == "SunshineUINearestTilesCS" || std::string(entry.name) == "SunshineUINearestReduceCS")
+    if (std::string(entry.name) == "SunshineApplyUICS")
       require(has_ui_binding, "UI plane pass lost its independent b1 binding");
     // The scene cells read the pre-UI scene image: the HUD-less image (t14),
     // else the offscreen UI layer's colour (t7), on frames the 256 x 144
@@ -282,24 +274,22 @@ namespace {
       require(shared <= 32768, std::string(entry.name) + " exceeds 32 KiB of group-shared memory");
       manifest << "  groupshared " << shared << '\n';
     }
-    // The exact UI counters share u7 with the conflict probe's statistics, and
-    // the T1 hold store shares u5 with the resolved UI plane: only the
-    // detection reduce binds the counters and the hold store, and no entry
-    // binds both resources of one register.
+    // The exact UI counters share u7 with the conflict probe's statistics:
+    // only the detection reduce binds the counters and the T1 hold store
+    // (u5), and no entry binds both resources of u7.
     {
-      bool counters = false, conflict = false, hold = false, plane = false;
+      bool counters = false, conflict = false, hold = false;
       for (unsigned index = 0; index < shader.BoundResources; ++index) {
         D3D11_SHADER_INPUT_BIND_DESC actual {};
         require(SUCCEEDED(reflection->GetResourceBindingDesc(index, &actual)), "Binding reflection failed");
         counters |= std::string(actual.Name) == "SunshineUICountersStore";
         conflict |= std::string(actual.Name) == "SunshineUIConflictStore";
         hold |= std::string(actual.Name) == "SunshineUIHoldStore";
-        plane |= std::string(actual.Name) == "SunshineUIPlaneResolvedStore";
       }
       const bool reduce = std::string(entry.name) == "SunshineUIDetectionReduceCS";
       require(counters == reduce && !(counters && conflict),
         std::string(entry.name) + ": only the detection reduce may add to the UI counters at u7");
-      require(hold == reduce && !(hold && plane),
+      require(hold == reduce,
         std::string(entry.name) + ": only the detection reduce may bind the UI hold store at u5");
     }
     if (std::string(entry.name) == "SunshineApplyUICS") {
@@ -412,8 +402,6 @@ int main(int argc, char **argv) {
           entries.push_back({"SunshineHostVerticalLiveCS", "cs_5_0", limiter_lines, 8, 1});
           entries.push_back({"SunshineHostHorizontalCS", "cs_5_0", limiter_lines, 8, 1});
           entries.push_back({"SunshineHostEyeLimitCS", "cs_5_0", limiter_lines, 32, 1});
-          entries.push_back({"SunshineUINearestTilesCS", "cs_5_0", 16, 16, 1});
-          entries.push_back({"SunshineUINearestReduceCS", "cs_5_0", 256, 1, 1});
           entries.push_back({"SunshineUIConflictCS", "cs_5_0", 8, 8, 1});
           entries.push_back({"SunshineApplyUICS", "cs_5_0", pin_lines, 8, 1});
           entries.push_back({"SunshineUIDetectionTilesCS", "cs_5_0", 16, 16, 1});

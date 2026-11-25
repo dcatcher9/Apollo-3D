@@ -160,8 +160,8 @@ display latency. A `Sunshine Game 3D timing` log line every 10 seconds reports t
 CPU time and GPU stage times (mean/max ms: inputs, source copy, UI detection, depth conditioning,
 eyes, pack, total) from timestamp queries read after each frame's completion fence, without a
 wait. Inputs covers the depth and UI captures recorded before rendering. Eyes is the one pass
-that renders both eyes into the side-by-side target; pack is used only by older embedded replay
-shaders. Both are zero on frames nothing consumed. `gpu_profile` says whether the timestamp
+that renders both eyes into the side-by-side target; pack stays zero (the separate pack pass of
+the former two-pass renderer was removed). Eyes is zero on frames nothing consumed. `gpu_profile` says whether the timestamp
 queries started (`no_timestamp_frequency` and `no_query_heap` name a failed start), and frames
 that did not count are split into `dropped_fence_pending` (the slot was reused before the frame's
 completion fence passed), `dropped_unresolved` (the fence passed but the results were not
@@ -316,9 +316,16 @@ the 4K vertical pass went from 0.44 to 0.17 ms on an idle GPU and the horizontal
 the UI pass, from 0.35 to 0.24 ms; the whole renderer went from 1.38 to 0.91 ms. The shader declares the lines per group as
 `SUNSHINE_LIMITER_LINE_GROUPS` and `SUNSHINE_UI_PIN_LINE_GROUPS`; the renderer sizes its dispatches
 from those values, and the shader test requires them to match the reflected thread-group shapes.
-A dump whose embedded shader predates them replays with one group per line and in-limiter UI
-pinning. Replaying two Hogwarts Legacy dumps with either shader reproduced every captured
-artifact byte-exactly.
+
+**Shader capability markers.** The renderer draws only with a shader that declares every marker
+of `renderer::missing_shader_marker` (the display-fraction plane, the adaptive probe, the mask
+channel, the limiter and pin line groups, packed eyes, the mono skip, per-tap PQ, the scRGB PQ
+pack, the live vertical entry and the eye limiter); the embedded shader declares all of them, and
+configure refuses a source override without one. Until 11-25 the renderer kept the earlier
+passes for older embedded replay shaders (two-pass eyes and pack, the PQ linearization pass and
+its FP16 texture, UI pinning inside the horizontal pass, one group per line, the full vertical
+pass on every pack and the symmetric field in the pack); a package whose embedded shader lacks a
+marker is now refused as too old to replay, and replays only with `--shader`.
 
 All rendering stays on the runtime's graphics queue. Native passes add no CPU fence wait or full
 frame CPU readback. A completion fence protects replacement of the renderer's working set;
@@ -357,10 +364,10 @@ evidence passes, both removed, and with it on candidates were copied rather than
 
 **Owed conditioning.** `render()` records the source copy, UI detection, retained colour and every
 CPU decision. The depth conditioning that only the pack, a dump or the adaptive probe read (depth
-candidate, vertical, nearest-UI tiles and reduce, horizontal, UI pinning) is owed with the pack,
+candidate, vertical, horizontal, eye limiter, UI pinning) is owed with the pack,
 and `pack()` records it first (into an export slot, `output()` or a Dump 3D, inside the pack's
-isolated D3D11 state). A render records it at once for an adaptive-probe frame, an older two-pass
-replay shader or an immediate pack; a probe frame records it only while a consumer is attached or
+isolated D3D11 state). A render records it at once for an adaptive-probe frame or an immediate
+pack; a probe frame records it only while a consumer is attached or
 Dump 3D is armed (`render_frame_input::adaptive_probe`): without one nothing reads that
 conditioning, so no probe is submitted (until the 10-05 review a monitor-only session spent about
 0.6-0.9 ms of 4K conditioning ten times a second on it) and placement holds until a consumer
@@ -376,8 +383,8 @@ bytes} (a generated Present reusing its real frame's depth) keeps the last depth
 vertical field. When that repeat also has the same UI words (`b1`: UI on, plane mode and depth or
 fraction, channel) and, with UI applied, the same detected mask, which no detection rewrote since
 (a held generated Present), it also keeps the final field: neither the horizontal nor the UI pin
-pass is recorded (`conditioning_activity().field_memo`). A probe frame, an armed dump and the
-nearest-UI plane always record both. Until the 10-05 review every held generated Present
+pass is recorded (`conditioning_activity().field_memo`). A probe frame and an armed dump always
+record both. Until the 10-05 review every held generated Present
 re-recorded them on unchanged inputs (about 0.25-0.4 ms at 3840x2160). Packed and dumped outputs
 are byte-identical to always conditioning. An owed pack
 without an armed dump runs the live vertical pass (`SunshineHostVerticalLiveCS`, declared by
@@ -767,10 +774,14 @@ applies its ordinary settings migration.
 Confirmed setup of a folder that already contains ReShade installs only the Sunshine add-on and
 never creates a proxy DLL. The add-on installer copies `SunshineSBS.addon64` and its license into
 the folder that `[ADDON] AddonPath` names, which can lie outside the game folder. In `ReShade.ini`
-it disables ReShade's own Generic Depth add-on and the retired Sunshine Depth add-on, turns on
-Game 3D unless already set, and records the preset path; it creates
-or migrates that preset and keeps the files it changes under `Sunshine3D-backups` in the game
-folder. An add-on that is already installed, by a confirmed or a manual setup, is kept matched to
+it disables ReShade's own Generic Depth add-on, turns on Game 3D unless already set, and records
+the preset path; it creates that preset or turns off the stereo techniques of effect-based stereo
+in it, removes the reference effect an earlier `-ShaderDirectory` installation copied, and keeps
+the files it changes under `Sunshine3D-backups` in the game folder. Until 11-25 it also removed the
+add-ons and effect files of installations from before 09-18 (`SunshineDepth.addon64`, its probe and
+the `SunshineGame3D` effect folder), copied their strength and view into the Game 3D settings and
+stripped their preprocessor definitions; the add-on no longer looks for the old Sunshine Depth
+add-on at start either. An add-on that is already installed, by a confirmed or a manual setup, is kept matched to
 this host without a new confirmation, as described below; a declined executable is not updated. An
 `AddonPath` or `PresetPath` that uses environment
 variables (`%LOCALAPPDATA%` and similar) needs manual setup, because Sunshine's worker would
@@ -882,8 +893,8 @@ does not produce a suggestion to enable a mode that may already be enabled.
 **UI protection** offers **On / Off / Auto**, saved per game in ReShade.ini as
 `SourceAlphaUIMode` (0 Auto, 1 On, 2 Off). All runtimes in the game share this choice and its
 per-game configuration file. Auto is the default. On and Off are persistent manual
-overrides, including across game restarts. The previous `SourceAlphaUI=false` migrates to Off;
-the old enabled heuristic migrates to Auto. An explicit new mode takes precedence over the old key.
+overrides, including across game restarts. The checkbox `SourceAlphaUI` of earlier versions is not
+read (until 11-25 its `false` migrated to Off).
 No game-specific detection profile is used. When protection is enabled, mask alpha at or above
 1/8 (32/255 in 8 bits) pins already-composited UI exactly to one global plane selected by the adaptive
 display-fraction policy below. Fainter alpha pins in proportion, so faint halo and vignette tails
@@ -1027,9 +1038,10 @@ format>:<colour space>` such as `ui_layer:28:srgb` or `backbuffer:24:pq` (kinds 
 `pre_ui:<layer format>:<colour space>` such as `pre_ui:87:srgb` records that an offscreen UI layer of
 that signature was proven the pre-UI scene image (H1 (d), **The layer's pre-UI proof** below). It is
 never a UI source: it neither decides, blocks nor judges. The next session starts with those sources accepted. Entries in any
-other form, the integer bitmask written before S1 included, are discarded on load with the log line
-`discarded N legacy UI trust entries`, and the older `TrustedUIAlpha` key is no longer read: neither
-can say which signature earned it, so each source is accepted again once by its own evidence.
+other form, such as the integer bitmask written before S1, are ignored on load (until 11-25 they
+were counted and logged as `discarded N legacy UI trust entries`), and the older `TrustedUIAlpha`
+key is not read: neither can say which signature earned it, so each source is accepted again once
+by its own evidence.
 Without remembered acceptance, a launch's title screen and menus would stay 3D until a selective
 frame had been on screen for 2 s; Expedition 33's first screen covers every pixel, and leaving its
 main menu within 2 s left the Load Game menu unprotected until play. Only a game's first session,
@@ -2046,24 +2058,9 @@ with `applied` and `winner`, `layer`, `accepted`, `valid_bits`,
 `reused`, with the render's `scene_guard` beside it; dumps before selection revision 9 also have
 `shadow_hidden_ms`, `scene_shadow` and the last two `pre_ui_pixels`) report it, so a
 rejection names the failing check. `sampled_source` and `sampled_covered` are the applied decision,
-which the T1 grace may have reused. Logs before S1 wrote `trusted_alpha` (slot bits) and
-`sampled_ui_layer` (the layer in the UI color slot) instead of `accepted` and `sampled_layer`; logs
-before S2a have no `sampled_one_way`, `sampled_reason`, `sampled_refused` or `sampled_reused`; logs
-from S2a through 180f1842 also have `sampled_late_layer` after `sampled_reused` (a layer was offered:
-every layer was the one-frame-late copy, which no A2 judge reads, so the report never judges the
-layer whether or not the field is there); logs
-before S2b have `sampled_hudless_scene` (the HUD-less image's evidence) and `scene_hold` (1 layer
-route, 2 HUD-less route) instead of `sampled_pre_ui_scene` and `scene_guard`, and no
-`sampled_inferred_opaque`, `sampled_claims` or `sampled_h1`; logs before fix 1 have no
-`sampled_pre_ui_pixels`, their `proven` is the guard's D proof, and in them a V1-invalid layer
-claims `0x80` without a proof (since fix 1 an unproven layer adds nothing to `sampled_claims`);
-logs of fix 2 to selection revision 8 end with H2's `still` group (**Still screens without a UI
-source (H2, fix 2): removed**), and their dumps carry `still_short_ms` and `still_screen`; logs
-through be7788bf also have `shadow` and `shadow_hidden_ms` (the removed first-run shadow's fields, 0
-since selection revision 9) before `sampled_pre_ui_pixels`, and `presented_lit` and
-`presented_lit_differs` (texel 11's removed shadow statistics, 0 since selection revision 9) after
-its `image_lit`. A presented verdict entering or leaving hidden logs within a second, like a change
-of source; turns between ambiguous and visible, frequent near the visible bound, wait for the next
+which the T1 grace may have reused. UI lines of add-ons through 10-07 had earlier forms (until 11-25
+listed here and read by the log report). A presented verdict entering or leaving hidden logs within
+a second, like a change of source; turns between ambiguous and visible, frequent near the visible bound, wait for the next
 periodic line.
 Without a mask the panel's status names the reason and the refused candidate: "No usable UI mask
 (learning the real-input alpha)" for an unaccepted Backbuffer (`ui_protection_reason_text` in
@@ -2111,11 +2108,9 @@ since revision 10. The renderer runs automatic detection only with that layout, 
 11, its 12 decision texels and both scene-evidence images; otherwise its frames count as
 `inactive.unprepared`. The live decoders (`ui_selection::counts_from_words`,
 `ui_temporal::decode_detection_sample`, which the hidden-scene guard and the acceptance ledger read
-once decoded) read only that revision's texture. `ui_detection_replay` alone still replays a shader
-of an older selection revision, sizing its statistics rows and mapping its decision words to the
-current layout itself,
-without the mirror check; it refuses a shader without the layout marker (layout 1, before S1, which
-took the layer in the UI color slot).
+once decoded) read only that revision's texture, and so does `ui_detection_replay`, which refuses a
+shader of another candidate layout or selection revision (until 11-25 it sized the resources of
+selection revisions 1-10 and mapped their decision words to the current layout).
 `Sunshine_UIDifferenceThreshold` (`b2` word 1) is the HUD-less pair's difference threshold. Since
 fix 1 `b2` has five words (a 32-byte constant buffer): `Sunshine_UIPreUIThreshold` (word 4, float) is the
 pair threshold of the offscreen UI layer and the presented colour (`ui_selection::comparable` of the
@@ -2137,7 +2132,7 @@ its lit pixels still count for A1's uncovered-colour refusal.
 | --- | --- | --- |
 | `0x1` | stored | The offscreen UI layer must pass the premultiplied bound (V1). |
 | `0x2` | stored | A float layer: the bound's HDR headroom, and since 10-23 the step `.005` of the layer's own lit pixels in texel 11 (`2/255` without it). |
-| `0x4` | stored | Reserved and never reused; the shader defines nothing for it. Through 180f1842 every layer copy carried it, marking the one-frame-late copy, which is never judged (A2, E2); selection revisions 2-9 read it, and `ui_detection_replay` pushes it to a shader that still defines `SUNSHINE_UI_STORED_LATE_LAYER`, so those revisions replay as before. |
+| `0x4` | stored | Reserved and never reused; the shader defines nothing for it. Through 180f1842 every layer copy carried it, marking the one-frame-late copy, which is never judged (A2, E2); selection revisions 2-9 read it. |
 | `0x8` | stored | Reserved and never reused; the shader defines nothing for it. Since selection revision 10 stored bits end at `0x800` (`0x20`-`0x800` never used) and per-frame bits start at `0x1000`. |
 | `0x10` | stored | `SUNSHINE_UI_STORED_UI_ALPHA_IN_ALPHA`: the offered UIAlpha (`t11`) is an `A8_UNORM` image, so the tiles and mask passes read its opacity from alpha instead of red. Pushed with an offered UIAlpha of that format only; `ui_detection_replay` derives it from the UIAlpha artifact's format. |
 | `0x1000`, `0x2000` | per-frame | Since selection revision 10 (A2): the offered UIAlpha (`0x1000`) or UI color tag (`0x2000`), its candidate bit shifted by `SUNSHINE_UI_PER_FRAME_UNALIGNED_SHIFT` (12), was not captured in the exact HUD-less pair's tag batch. The tiles pass counts no strong or contradicted pixel of it, so the one-way test does not judge it on that frame. Pushed only beside an exact pair. |
@@ -2188,8 +2183,8 @@ bounded summary above is that whole texture, 192 bytes:
 | 10 | Pixels of Backbuffer alpha at least 254/255 | Of current alpha | The informative full claims before refutation (candidate bits, `0x80` the pre-UI scene image) | The h1 word: bits 0-7 the S1 winner's source, `0x100` H1 applied |
 | 11 | Pixels where the offscreen UI layer's RGB equals the presented colour (words 44-47; since fix 1) | Lit layer pixels | Strong pixels of the UI color tag (since selection revision 11; zero when pushed unaligned, `0x2000`) | Of them, those an offered exact pair contradicts as in texel 9 |
 
-Every word is a count or a decision word. Older layouts, which only `ui_detection_replay` reads:
-texels 8 and 9 `.x` held the layer's one-way counts in selection revisions 2 to 9 (0 for the
+Every word is a count or a decision word. Older layouts, which nothing reads now (packages keep
+their recorded words): texels 8 and 9 `.x` held the layer's one-way counts in selection revisions 2 to 9 (0 for the
 one-frame-late copy, which no judge reads) and were zero in revision 10; texel 11 `.z` and `.w`
 held lit presented pixels and those that differ from the layer in selection revisions 4 to 8 and
 were zero in revisions 9 and 10; selection revisions 5 to 8 wrote H2's still and compared cells in
@@ -2287,29 +2282,23 @@ from a shader with `SUNSHINE_UI_IDENTITY`) were removed with S3.
 | `held.none` | Generated Presents (offering nothing within the reported generated count of the last Present that offered a UI tag, or under FG re-offering exactly the snapshots of the last detecting Present) without such a decision in their identity scope: no mask, and the chain ends. A Present that offers a HUD-less image, a re-offered snapshot included, is real and never counts here: it detects, and when mispaired it reuses the held decision (`reused`). Counter lines before the 10-05 pairing change also count Presents the old HUD-less pairing held as generated. |
 | `reused` | Detection frames without a decision of their own that applied the held decision and mask (decision texel 9 bit 16): the T1 grace once after a real decision, and since selection revision 10 every HUD-less re-offer (`0x8000`) while a decision is held. |
 | `inactive.no_candidates`, `inactive.size`, `inactive.unprepared` | Requested renders without detection: no usable candidate, a frame larger than 3840, or detection resources that could not be prepared. |
-| `decided.N` | Detection frames by applied source 0-6, 8 and 10, a reused decision included. 7 and 9 are retired: no decision applies them, they have no counter word and they are not logged. Counter lines of fix 2 to selection revision 8 also have 11 (H2's still screen). |
+| `decided.N` | Detection frames by applied source 0-6, 8 and 10, a reused decision included. 7 and 9 are retired: no decision applies them, they have no counter word and they are not logged. |
 | `none.R` | Frames whose own decision was source 0 and that applied no mask, each by the first reason that applies: `gate_no_hold` (an informative full claim acted but H1 did not apply: no held hidden verdict; the name is kept for log compatibility), `presented_blocked` (an offered, accepted UIAlpha or UI color tag, invalid itself, kept an accepted, valid inferred alpha out), `trusted_invalid` (an offered, accepted alpha had more than 1% invalid pixels), `layer_aside` (the offered layer was V1-invalid, such as a layer without alpha), `unaccepted` (an offered, unaccepted candidate was valid and selective: its acceptance is still being earned), `difference_failed` (a HUD-less image was offered, including an inexact one that changed nearly everywhere without the pre-UI hold), `ambiguous` (an unaccepted valid alpha empty or nearly full), `no_candidate` (no alpha offered), then `other`. |
-| `full.6`, `full.8` | Repeat `decided.6` and `.8`. Counter lines before S2b also have `full.9`. |
+| `full.6`, `full.8` | Repeat `decided.6` and `.8`. |
 | `full.depth_not_current` | Detection frames pushed with `0x40000`, whatever they decided. |
-| `full_d.hidden`, `.ambiguous`, `.visible`, `.invalid` | Committed samples that decided H1 (source 8), by the hidden-scene verdict measured on that same sample. `invalid` includes evidence that was not measured. These count samples, not frames. Counter lines before S2b count sources 6, 8 and 9 here. |
-| `scene.entered`, `.released`, `.refuted` | The hidden-scene guard's observations of committed samples (since S2b): its hidden verdict entered; a held verdict released by a visible sample, every visible sample that decided 8 included; source signatures newly refuted. |
-| `untrusted_inferred` | Counter lines through dc7e3c77 only. Frames decided from an inferred source (Backbuffer 3, current alpha 4 or the offscreen UI layer 10) that was not accepted: zero by construction since S1, where only accepted candidates decide, and logged as 0 from selection revision 10, when the shader stopped counting it. The selection contract and sequence tests assert the invariant on every case. |
-| `inexact_difference` | Source 5 decided from an inexact HUD-less pair (before S2b also 9). |
-| `contradicted` | An accepted alpha (since selection revision 10 UIAlpha 1, the UI color tag 2, Backbuffer 3 or current alpha 4; before it Backbuffer, current alpha or the layer 10) decided by the frame's own decision, not overridden by H1, while the same frame's valid exact pair contradicted it one way (A2). It keeps deciding until the ledger revokes it. Since selection revision 10 the one-way counts exist on status samples only, so it counts samples rather than frames. Counter lines before S2a have `trusted_full` instead: an accepted alpha source (1-4, 10) covering at least 99% of pixels while an exact pair without invalid pixels left at least half of the frame unchanged. |
-| `presented_over_dedicated` | Counter lines through dc7e3c77 only. Inferred alpha (3, 4, 10) decided while an accepted UIAlpha or UI color tag was offered: the declared-alpha block keeps it 0, and it was logged as 0 from selection revision 10, when the shader stopped counting it. The selection contract and sequence tests assert the invariant on every case. |
+| `full_d.hidden`, `.ambiguous`, `.visible`, `.invalid` | Committed samples that decided H1 (source 8), by the hidden-scene verdict measured on that same sample. `invalid` includes evidence that was not measured. These count samples, not frames. |
+| `scene.entered`, `.released`, `.refuted` | The hidden-scene guard's observations of committed samples: its hidden verdict entered; a held verdict released by a visible sample, every visible sample that decided 8 included; source signatures newly refuted. |
+| `inexact_difference` | Source 5 decided from an inexact HUD-less pair. |
+| `contradicted` | An accepted alpha (since selection revision 10 UIAlpha 1, the UI color tag 2, Backbuffer 3 or current alpha 4; before it Backbuffer, current alpha or the layer 10) decided by the frame's own decision, not overridden by H1, while the same frame's valid exact pair contradicted it one way (A2). It keeps deciding until the ledger revokes it. Since selection revision 10 the one-way counts exist on status samples only, so it counts samples rather than frames. |
 | `full_alpha` | An applied alpha source (1-4, 10) covering at least 99% of pixels: a whole-frame mask from alpha, with or without a HUD-less pair. Only accepted sources decide. |
-| `full_alpha_d.hidden`, `.ambiguous`, `.visible`, `.invalid` | Counter lines through dc7e3c77 only, logged as 0 from selection revision 9. Before it: committed samples that decided an accepted whole-frame decision, such a whole-frame alpha or (since S2b) an exact full change-set (6), by the hidden-scene verdict that a diagnostic evidence run, now removed, measured on that same sample from the sample after one that decided it. |
-| `trust.earned`, `.revoked_exact`, `.revoked_declared`, `.lapsed`, `.restored`, `.discarded`, `.forgotten`, `.uncovered_color` | Session acceptance events. `earned`: a signature accepted, or a restored one confirmed, by this session's samples. `revoked_exact`: revoked when the one-way test of an exact pair contradicted it in the revoking sample (A2). `revoked_declared`: revoked by an accepted declared alpha's coverage. `lapsed`: a provisional restore lapsed. `restored`: restored entries. `discarded`: legacy `TrustedUISources` entries discarded on load. `forgotten`: accepted signatures that Forget cleared. `uncovered_color` (since 10-22, not an acceptance event): selective layer samples that earned nothing because their colour without coverage outnumbered their opaque pixels (A1). Since fix 1 the layers' pre-UI proof keys (`pre_ui`) count with the accepted signatures: earned by matching samples, restored, lapsed and forgotten. Counter lines of S1 have `revoked_full` (a full claim over a visible exact pair) and `revoked_presented` (presented alpha disagreeing with an accepted UI channel) instead of `revoked_exact` and `revoked_declared`, and no `forgotten`; counter lines before S1 have `opaque_set` and `opaque_cleared` (the retired opaque-tag proof) instead of `discarded`. |
+| `trust.earned`, `.revoked_exact`, `.revoked_declared`, `.lapsed`, `.restored`, `.forgotten`, `.uncovered_color` | Session acceptance events. `earned`: a signature accepted, or a restored one confirmed, by this session's samples. `revoked_exact`: revoked when the one-way test of an exact pair contradicted it in the revoking sample (A2). `revoked_declared`: revoked by an accepted declared alpha's coverage. `lapsed`: a provisional restore lapsed. `restored`: restored entries. Counter lines before 11-25 also have `discarded`: legacy `TrustedUISources` entries discarded on load. `forgotten`: accepted signatures that Forget cleared. `uncovered_color` (since 10-22, not an acceptance event): selective layer samples that earned nothing because their colour without coverage outnumbered their opaque pixels (A1). Since fix 1 the layers' pre-UI proof keys (`pre_ui`) count with the accepted signatures: earned by matching samples, restored, lapsed and forgotten. |
 | `samples`, `through_ms` | Committed samples, and the sample tick through which the totals are exact. |
 
 The totals are exact per frame through the last committed sample. A frame rendered after it (at most
 one sample interval plus the pending copy) is counted by a later commit, or lost when its renderer
 is destroyed first. A discarded or unreadable sample commits nothing; the next commit catches up.
 At every commit `auto_frames` equals `detection_frames` plus `held.generated` and `held.none` plus
-the three inactive reasons; a reused frame is a detection frame. Counter lines of S1 instead hold
-`held.generated`, `held.inexact_after_exact` and `held.trusted_missing` (the three S1 hold kinds,
-which entered the identity) and `held.cap` (frames that wanted a hold past three Presents and
-detected instead, part of `detection_frames`), and no `reused`. The totals sum all runtimes of the
+the three inactive reasons; a reused frame is a detection frame. The totals sum all runtimes of the
 game session. While every Present reads as generated, as with a misreported multiplier, nothing
 detects and no sample commits, so the `held.none` frames appear only once a real Present detects
 again.
@@ -2319,7 +2308,8 @@ protection` status line once a render of that runtime has reached UI detection, 
 was written for a change or periodically. It writes one more when a runtime that wrote one resets
 or is destroyed, so the session's totals end the log. Fields are space-separated `key=value` in
 the order of the table above, and a group is written `key={key=value ...}`. The values are
-cumulative, so the last line holds the session's totals.
+cumulative, so the last line holds the session's totals. Counter lines of add-ons through 10-07 had
+other fields and ranges (until 11-25 listed here and read by the log report).
 
 **Readiness-report invariants.** When a log has counter lines,
 `tools/reshade/game3d_log_report.py` reads the last one instead of the sampled lines; the holds
@@ -2329,58 +2319,40 @@ check below reads every counter line, and the pairing check also sums the `hudle
 | Check | Status |
 | --- | --- |
 | The accounting identity above does not hold | FAIL `UI counters` |
-| `presented_over_dedicated` is above zero (counter lines through dc7e3c77) | FAIL `UI protection` |
-| `contradicted` is above zero | `UI protection`: PASS with the count: A2 revokes on the third contradiction within 2 s and never on shorter ones, which the counter cannot tell apart, so a handled case and a short one both count `contradicted`. The sampled lines decide: three sampled lines within 2 s in which a valid exact pair contradicts the same accepted alpha one way (an inferred alpha, or since selection revision 10 UIAlpha or the UI color tag from `sampled_declared_one_way`; decided or not, the T1 reuse included, never the one-frame-late layer), with no revocation of that kind within 10 s of the first, FAIL; the same run of declared-coverage contradictions alone WARNs; shorter sampled contradictions are noted. Counter lines of S1 keep the S1 rule: `trusted_full` with `trust.revoked_full`, and sampled lines of a full claim over an exact pair that shows the scene. |
-| `full_alpha` is above zero, or since S2b `decided.6` | INFO `UI full alpha` (accepted whole-frame decisions: alpha, or an exact full change-set 6), with the hidden-scene verdicts of their samples on counter lines before selection revision 9 (`full_alpha_d`, logged as 0 from it through dc7e3c77). An accepted source's whole-frame alpha pins flat even over a visible scene, as the [opacity ruling](#ui-decision-framework) intends (P1); its wrong case, an accepted source a valid exact pair contradicts, is counted by `contradicted`. |
+| `contradicted` is above zero | `UI protection`: PASS with the count: A2 revokes on the third contradiction within 2 s and never on shorter ones, which the counter cannot tell apart, so a handled case and a short one both count `contradicted`. The sampled lines decide: three sampled lines within 2 s in which a valid exact pair contradicts the same accepted alpha one way (an inferred alpha, or since selection revision 10 UIAlpha or the UI color tag from `sampled_declared_one_way`; decided or not, the T1 reuse included, never the one-frame-late layer), with no revocation of that kind within 10 s of the first, FAIL; the same run of declared-coverage contradictions alone WARNs; shorter sampled contradictions are noted. |
+| `full_alpha` or `decided.6` is above zero | INFO `UI full alpha` (accepted whole-frame decisions: alpha, or an exact full change-set 6). An accepted source's whole-frame alpha pins flat even over a visible scene, as the [opacity ruling](#ui-decision-framework) intends (P1); its wrong case, an accepted source a valid exact pair contradicts, is counted by `contradicted`. |
 | `decided.6` is above zero in a session whose capture gate lines counted Present-counted HUD-less pairings (`real`, `late` or `reoffered`) but never a same-batch one (`batch`) | FAIL `UI full frame pairing`: only a same-batch Backbuffer pair is exact (E2). A Present-counted pair can belong to another frame and then differs everywhere, so these frames were flattened from pairs that need not be their own (Hogwarts Legacy 10-05, which tagged only HUDLessColor, showed whole seconds of gameplay flat). |
-| `full_d.visible` exceeds `scene.released` (counter lines since S2b) | `UI full frame`: WARN: an H1 hold acted over a visible scene. The sample that releases a held hidden verdict decided 8 before its own evidence read the scene visible, and the guard counts it as a release, so `full_d.visible` never exceeds `scene.released` otherwise; PASS with the H1 samples' verdicts and the guard's entered, released and refuted counts. |
-| `full_d.visible` is above zero (counter lines before S2b) | `UI full frame`: WARN when the layer or HUD-less route (8 or 9) decided: each release of a held route counted one, and those lines cannot tell a release from a held route over a visible scene. INFO when only source 6 decided: an exact full change-set decided without a hold, as intended for an accepted exact pair (P1). |
-| `untrusted_inferred` is above zero (counter lines through dc7e3c77) | `UI inferred alpha`: FAIL: zero by construction since S1. WARN on counter lines before S1 (with `trust.opaque_set` rather than `trust.discarded`), whose untrusted pass could decide. PASS when it is zero; a later line, which no longer measures it, has no such check. |
+| `full_d.visible` exceeds `scene.released` | `UI full frame`: WARN: an H1 hold acted over a visible scene. The sample that releases a held hidden verdict decided 8 before its own evidence read the scene visible, and the guard counts it as a release, so `full_d.visible` never exceeds `scene.released` otherwise; PASS with the H1 samples' verdicts and the guard's entered, released and refuted counts. |
 | `inexact_difference` is above zero | INFO `UI inexact difference`: source 5 from a Present-counted pair, which only proposes the frame; its own pixels validated the difference (V2), so it is expected wherever a game offers no same-batch pair. Before the 10-05 pairing change this warned pending S3's frame identity. |
 | A counter window (from one counter line whose `auto_frames` advanced to the next; windows less than 1 s apart merge) in which `held.none` was at least half of the Auto frames for at least 2 s | WARN `UI holds without a decision`, each window with its time, length, FG state and share: those Presents had no real-frame decision to show (T1) and so no UI mask. FAIL when a window held at least 90% for at least 10 s: UI detection effectively never ran (Hogwarts Legacy 10-05 at 4x frame generation, before the pairing change). PASS without such a window. |
-| Holds by kind (`held.generated`, `held.none`) and `reused`; on S1 lines the three hold kinds and the cap | INFO `UI holds` |
+| Holds by kind (`held.generated`, `held.none`) and `reused` | INFO `UI holds` |
 | Frames without a mask by reason, as a share of `auto_frames` (`held.none` included), with the sampled lines' reasons and refused candidates | INFO `UI no mask` |
-| Acceptance events, `forgotten` included, and since 10-22 the selective layer samples refused for colour without coverage | INFO `UI trust events` |
+| Acceptance events, `forgotten` included, and the selective layer samples refused for colour without coverage | INFO `UI trust events` |
 | A pre-UI proof key (`pre_ui:<format>:<space>`, since fix 1) restored, added or removed by the acceptance lines | INFO `Pre-UI proof` with the key: restored (provisional), earned, lapsed, or forgotten when a Forget line beside the change names it. The key is never counted as a UI source of its kind in the dispute checks. |
 | A `Sunshine Game 3D: diagnostics on/off` line | INFO `Diagnostics` with the switch; with it off the per-pass GPU stage times are absent by design, and `Game 3D cost` reads `GPU timing off (Diagnostics=0)` (INFO, not WARN) when the timing line says `gpu_profile=disabled`. Unexpected hitches name the depth-source flip steps listed under [Diagnostics switch and per-Present cost](#diagnostics-switch-and-per-present-cost). |
 
-The checks of removed features are gone, and their lines still parse without a check: the
-first-run shadow (`UI first-run shadow`), the dark pre-UI image statistics (`Dark pre-UI image
-(shadow)`), H2's still screens (`UI still screen`, from `Sunshine UI still screen` lines and the
-`still` groups) and S3's identity shadow (`UI identity (S3)`, from `Sunshine UI identity` and
-`Sunshine FG interposers` lines). From selection revision 9 the add-on logged their remaining
-fields as 0: `full_alpha_d` through dc7e3c77 and `shadow`, `shadow_hidden_ms`, `presented_lit` and
-`presented_lit_differs` through be7788bf. Later lines omit them, and the report reads them when
-present.
+The checks of removed features (the first-run shadow, the dark pre-UI image statistics, H2's still
+screens and S3's identity shadow) went with them.
 
 The acceptance-dispute and time-based checks (`UI protection gaps`, hidden scene) still read the
-sampled lines; on lines since S2b the hidden-scene check lists the H1 samples by the pre-UI image
-whose claim acted with the guard's counts from the last counter line, and source 8 is protected. It
-also counts hidden samples whose layer could not act for want of a proof: on lines since fix 1 an
-offered layer without coverage, the pre-UI image, while `proven=0` (no proof yet: three samples over
-2 s in which the layer equals the presented frame on at least 90% of pixels and is lit on at least
-half); on S2b lines a layer claim (`0x80`) without the guard's D proof. In logs before selection
-revision 9 it also warns where the removed first-run shadow measured the presented frame hidden for
-at least 500 ms while no UI source decided (`shadow_hidden_ms`). A `UI protection gaps` window lists
+sampled lines; the hidden-scene check lists the H1 samples by the pre-UI image whose claim acted with
+the guard's counts from the last counter line, and source 8 is protected. It also counts hidden
+samples whose layer could not act for want of a proof: an offered layer without coverage, the pre-UI
+image, while `proven=0` (no proof yet: three samples over 2 s in which the layer equals the presented
+frame on at least 90% of pixels and is lit on at least half). A `UI protection gaps` window lists
 its pieces, each labelled with its own line's FG state; a line whose status sample was still
 pending (`checking` or `searching`), or one that did not render, continues a run, labelled with that
 state after the last sample's reason, as the panel's warning run does. `UI channel admission` warns
 on samples that decided no source while a selective UIAlpha, UI color tag or layer was rejected for
 invalid pixels on more than 1% of the frame (V1). Logs without counter lines keep the sampled checks unchanged. A dispute is judged as
-the ledger judges it: on lines since S2a an accepted, valid inferred alpha (a layer that is not the
+the ledger judges it: an accepted, valid inferred alpha (a layer that is not the
 one-frame-late copy included) whose coverage differs by at least 10% of the frame from each
 accepted, valid UIAlpha or UI color tag, as a run of three within 2 s (shorter ones are noted), and
-a resolving revocation is named by its A2 kind (declared coverage, or one way by an exact pair); on
-older lines presented alpha against any accepted UI channel, the layer included. The
+a resolving revocation is named by its A2 kind (declared coverage, or one way by an exact pair). The
 report derives V1 and V2 validity from the logged counts, since the line carries no validity bits. A
-gap on a line since S2a also names the add-on's own reason and refused candidate. The report reads
-`Sunshine UI protection` lines of every candidate layout: a line before S1 (`trusted_alpha`,
-`sampled_ui_layer`) is read with its UI layer moved to the layer candidate (bit `0x40`, source 10),
-and acceptance changes from both `accepted UI sources are now <keys>` and the older `alpha trust is
-now <bits>`. It lists the Forget line as INFO; the first-run shadow's session line is ignored. UI
-lines since fix 1 end the hidden-scene fields with `sampled_pre_ui_pixels`; lines of fix 2 to
-selection revision 8 add H2's `still` group after it, which is ignored, and a counter line's
-`decided.11` is named as H2's removed still screen. Since selection revision 10 the UI line's
+gap also names the add-on's own reason and refused candidate. The report reads `Sunshine UI
+protection` lines in the form described above and acceptance changes from `restored accepted UI
+sources` and `accepted UI sources are now <keys>`, and lists the Forget line as INFO. The UI line's
 `sampled_declared_one_way` feeds the A2 run check above, and capture gate lines count `reoffered`
 pairings with the Present-counted ones.
 
@@ -2430,9 +2402,8 @@ receives it, and binds the raw depth artifact at `t1` and the presented color at
 the color HUD-less is paired with; current alpha reads `t6`) for the scene-evidence passes, which it runs after the decision
 as on a sample frame and which read the pre-UI scene image from `t14` or the layer slot `t7`; they
 write only decision texels 5 and 6. Its `b2` has the renderer's five words, zero-padded to 32
-bytes, so a shader of selection revisions 5 to 9 reads its word 5 as zero: word 4 is
-`ui_selection::comparable` of the layer artifact's encoding and the presented one, so texel 11
-counts the captured layer against the captured presented colour.
+bytes: word 4 is `ui_selection::comparable` of the layer artifact's encoding and the presented one,
+so texel 11 counts the captured layer against the captured presented colour.
 A package of selection revisions 5 to 8 also records H2's flag (`still_bits`) and S3's stamps and
 proposals; the replay ignores them, and the `--identity` option is gone.
 Without a raw depth artifact
@@ -2455,8 +2426,8 @@ the sequence replay owns. The keys
 `scene_hold_hudless` and `hudless_scene` (in `expect` or `xfail.today`) are retired since S2b and
 fail their case, as do a malformed `scene_hold` and an unknown `refuted` kind. A `sample` key is
 accepted and ignored, because `0x20000` is reserved. It sizes the
-statistics and decision textures from the shader's markers, which every layout-2 shader has, so
-older selection revisions still replay. `expect.mask_exact`
+statistics and decision textures as the renderer does, and refuses a shader of another candidate
+layout or selection revision. `expect.mask_exact`
 compares the resolved R32 mask bit for bit with a CPU reference: the selected candidate's raw alpha
 (red for UIAlpha, the offscreen UI layer included), all zeros without a source, or all ones for a
 full-frame decision (sources 6 and 8); a HUD-less difference has no reference and fails the
@@ -2479,19 +2450,12 @@ with its `ui_source_color` replaced by the mask this replay resolved, for
 `replay_game3d_dump --shader`; any other package fails its case, and the captured package is never
 changed. The copy's `ui_detection_replay_mask` records the decision and the detection `flags` this
 replay pushed, which describe the replaced mask, as the shader wrote them. `--verbose`
-prints every decision word as the shader wrote it (48 with selection revisions 4, 9 and 11, 52
-with revisions 5 to 8, 68 with revision 10). Each line reads the words in the current layout
-(selection revision 10's texel 16 in words 32, 46, 36 and 47; older revisions, which measured no
-declared one-way counts, read zero there) and shows the own decision's
+prints every decision word (48). Each line shows the own decision's
 reason (`(reused)` when the grace applied), the refused candidate, the one-way counts (Backbuffer's
-and current alpha's as `one_way`, and from a shader with texel 11 UIAlpha's and the UI color tag's
-as `declared_one_way`; every case pushes the status-sample bit `0x4000`; lines before selection
-revision 11 led `one_way` with the layer's column, always 0, as every replayed layer was the
-one-frame-late copy), the
-informative claims (`claims=`), the h1 word (`h1={applied=,winner=}`) and, since selection
-revision 4, texel 11 (`pre_ui_pixels={match= image_lit=}`).
-With a shader of the current layout and selection revision (11, **UI detection flags and decision
-texels** above), every decision, its claims and its h1 word
+and current alpha's as `one_way`, and UIAlpha's and the UI color tag's as `declared_one_way`; every
+case pushes the status-sample bit `0x4000`), the informative claims (`claims=`), the h1 word
+(`h1={applied=,winner=}`) and texel 11 (`pre_ui_pixels={match= image_lit=}`).
+Every decision, its claims and its h1 word
 are checked against `decide()` on the GPU's counts with the pushed bits and no previous decision
 (`mirror=match`; a mirror that differs fails its case). A single-frame replay binds nothing at the hold store, so the T1 grace never
 fires: a dump taken on a frame whose decision the grace reused replays as its own decision (no
@@ -2759,9 +2723,6 @@ A cap can leave scene geometry in front of UI; fresh geometry can also arrive be
 probe or before a ramp finishes. The existing local UI conditioner continues to adjust adjacent
 scene pixels; no additional scene-wide compression is added. These correctness and work bounds
 do not establish headset comfort or a measured frame-time improvement.
-Historical nearest-depth mode 2 creates its reduction textures and pipelines only when first
-requested. Normal adaptive mode 5 does not allocate or compile those legacy resources; mode-2
-preparation failure occurs before command recording and leaves ordinary rendering usable.
 The switch can disable automatic protection because arbitrary
 game backbuffer alpha is not universally a UI mask and selective coverage can still be a false positive.
 
@@ -2780,12 +2741,8 @@ host remain immutable even after acknowledgement. Both use the same bounded capt
 The renderer copies each admitted capture into its private UI texture once, then reuses those
 bytes for later presentations while that capture remains valid. Renderer replacement clears this
 copy identity; failed replacement copies never authorize stale pixels.
-Live adaptive placement uses conflict counts, not a nearest-covered-depth maximum. Historical mode 2
-remains available for replay: a 16-by-16 tile pass and a 256-thread reduction resolve
-`max(submitted midpoint floor, nearest valid decoded q under finite positive selected alpha)`
-into one R32 float on the rendering queue. Its crop/jitter mapping matches the scene candidate;
-every covered valid pixel contributes, and empty coverage retains the submitted floor. These
-resources are overwritten on each mode-2 render, with no CPU readback or additional queue wait.
+Live adaptive placement uses conflict counts, not a nearest-covered-depth maximum (the
+nearest-covered-depth mode 2 and its reduction passes were removed on 11-25).
 
 **Eye-specific horizontal limiter.** `SunshineHostEyeLimitCS` (marker `SUNSHINE_EYE_LIMITER`)
 builds one horizontal field per eye directly from the vertical field, as [Host SBS](host-sbs.md#eye-specific-horizontal-limiter) does: on the side of a
@@ -2799,12 +2756,13 @@ the buffer height (the left eye's rows, then the right eye's) and
 takes the scene field's slot `u3` for this pass. `SunshineApplyUICS` then pins both halves of that
 store exactly as it pins the scene field (the store's own height is the number of rows, and a row
 past the buffer height reads the mask row of its eye), and the pack binds the store at `t5`: its
-height tells the pack to read each eye's own rows. The scene field itself, the adaptive probe, the
-Dump 3D artifacts and a shader without the marker are unchanged, and an exact repeat that keeps the
-scene field keeps the store. The store is not a dump artifact; a replay recomputes it.
-`reshade_game3d_native_runtime_test` renders the production shader without its marker against the
-frozen FX (the FX has the scene field alone) and checks the production render's eye fields against
-their one-sided slopes. The pin band below keeps its 0.5 ramp in both eyes; with a partly
+height tells the pack to read each eye's own rows. The scene field itself, the adaptive probe and
+the Dump 3D artifacts are unchanged, and an exact repeat that keeps the scene field keeps the
+store. The store is not a dump artifact; a replay recomputes it. The renderer requires the marker
+(**Shader capability markers**). `reshade_game3d_native_runtime_test` checks the production
+render's eye fields against their one-sided slopes and the frames it shows without stereo against
+the frozen FX (the FX has the scene field alone); until 11-25 it also rendered the production
+shader without the marker against the frozen FX. The pin band below keeps its 0.5 ramp in both eyes; with a partly
 transparent mask on a covered-side ramp the forward scan can pin slightly more than the closed form
 `b`, never less.
 
@@ -2859,34 +2817,16 @@ rectangle; full-screen alpha-enable detection retains its separate counts. These
 measurement of the dumped frame. Replay freezes the exact applied fraction, including intermediate
 ramp values, without rerunning the classifier, its history or its observational probe. No new
 GPU artifact is required for replay.
-Historical mode 4, `shallow_front`, retains v5 and requires `#define SUNSHINE_UI_SHALLOW_FRONT_PLANE 1`.
-It uses one quarter of `C`; its inverse-depth word is unused and its binding retains the required
-`front_limit_fraction: 0.25` metadata without adding another constant-buffer word.
-Historical mode 1 retains the applied inverse-depth plane in
-`sunshine_game3d.ui_parameters.v2`; the shader must consume `Sunshine_UIPlaneMode` and the supplied
-inverse depth. Historical mode 0 retains the screen plane and the same v2 ABI. Historical mode 2
-uses the submitted depth as a floor for the GPU maximum and retains the v3 ABI; its shader requires
-`#define SUNSHINE_UI_NEAREST_PLANE 1` and the reduction entry points. Historical mode 3,
-`front_limit`, retains v4 and requires `#define SUNSHINE_UI_FRONT_LIMIT_PLANE 1`. It places UI at
-the current positive `b0` display budget times strength and stereo blend, subject to warp
-readiness; its inverse-depth word is unused, including malformed bits preserved for replay.
-Mode 2 requires v3 or newer, mode 3 requires v4 or newer, mode 4 requires v5 or newer, and mode 5 requires v6 or newer.
-Unknown modes,
-invalid depth in modes 1/2, and unavailable stereo resolve to zero UI parallax.
+Mode 0 is the screen plane (`sunshine_game3d.ui_parameters.v2`, its third word unused). Mode 5
+requires v6 or newer. Unknown modes and unavailable stereo resolve to zero UI parallax. Modes 1-4
+(the midpoint inverse-depth plane, the nearest covered depth with its GPU reduction, the front
+limit and the shallow quarter front) were removed on 11-25 with their shader markers and replay
+options; replay refuses a package that recorded one of them.
 Dump 3D records the exact submitted UI constants, separate from diagnostic targets. Old packages
-without these constants retain mode 0. Replay's `--ui-inverse-depth` selects mode 1;
-`--ui-nearest-floor` selects mode 2; `--ui-plane screen` selects mode 0;
-`--ui-plane front-limit` selects mode 3; `--ui-plane shallow-front` selects mode 4; and
-`--ui-front-fraction 0..0.75` selects mode 5 with an explicit frozen fraction.
-`--ui-plane adaptive` is invalid because a single-frame package has no policy history to replay.
-Depth-mode geometry overrides recompute UI displacement on the GPU. Front-limit and shallow-front
-placement respond to the applied display budget, strength, blend and readiness, without deriving
-a displacement from scene gain or zero. Mode 5 keeps the consumed fraction fixed while applying
-the current display bound; geometry overrides do not rerun its classifier.
-Mode-3 and mode-4 dumps mark the inverse-depth word unused
-and the reduction inactive. Historical mode-2 dumps distinguish the
-submitted floor from the GPU-resolved plane; replay additionally saves that resolved scalar.
-Live rendering never waits to read it back.
+without these constants retain mode 0. Replay's `--ui-front-fraction 0..0.75` selects mode 5 with
+an explicit frozen fraction (0 is the screen plane); a single-frame package has no policy history
+for an adaptive replay. Mode 5 keeps the consumed fraction fixed while applying the current
+display bound; geometry overrides do not rerun its classifier.
 `replay.ui_alpha_source` identifies `none`, `source_color`, or `ui_source_color`. When a retained
 input was consumed, required artifact 33 (`ui_source_color.bin`) preserves its exact typed pixels.
 For automatic detection this artifact is the resolved full-resolution `R32_FLOAT` mask, consumed
@@ -3539,7 +3479,8 @@ report's `alpha` names.
 With the Diagnostics switch off a dump records the same artifacts and fields. A dump armed on a
 mono Present still records the full depth
 conditioning. In an HDR10 session exporting the PQ transfer, the `sbs` artifact is R10G10B10A2 PQ
-code values (`sbs_transfer` 3) and there is no `linear_color` artifact.
+code values (`sbs_transfer` 3). No dump has a `linear_color` artifact: the HDR10 source is decoded
+per tap in the pack.
 
 ### UI source discovery and snapshot qualification
 
@@ -3634,7 +3575,10 @@ The inspector/qualification regression tests run without a game or GPU:
 ### Native frame replay
 
 The add-on build also produces `replay_game3d_dump.exe`. It uses an official ReShade runtime
-and the production native renderer, with the package's embedded shader and exact constants:
+and the production native renderer, with the package's embedded shader and exact constants. A
+package whose embedded shader lacks a capability marker the renderer requires (**Shader
+capability markers**) is refused as too old to replay; it replays only with `--shader`, and a
+package that recorded a removed UI plane mode (1-4) does not replay:
 
 ```powershell
 .\replay_game3d_dump.exe '<dump-directory>' '<official-ReShade64.dll>' '<new-output-directory>' --verify
@@ -3645,18 +3589,13 @@ the reconstructed conditioning fields and SBS against the captured production ar
 reporting byte equality and numeric errors in `replay.json`. `--verify` returns failure when
 errors exceed the reported format tolerance; source color copying must remain byte-exact.
 An optional `--strength 30`, `--shader '<experimental.hlsl>'`,
-`--depth-gain 500`, `--source-alpha-ui on|off`, `--zero-inverse-depth 0.001`,
-`--ui-inverse-depth 0.002`, `--ui-nearest-floor 0.002`, `--ui-front-fraction 0.25`, or
-`--ui-plane screen|front-limit|shallow-front` creates a clearly labeled experiment using
+`--depth-gain 500`, `--source-alpha-ui on|off`, `--zero-inverse-depth 0.001` or
+`--ui-front-fraction 0.25` creates a clearly labeled experiment using
 the same pass/constant ABI. Gain and zero overrides are independent: moving the zero changes
 only `convergence[1] = q0`, preserving the captured gain unless separately overridden.
-Historical midpoint UI maps the captured applied UI depth through the overridden geometry; its
-target is not recomputed by a single-frame replay. Mode 5 freezes the consumed display fraction
-without rerunning adaptive observations or history. Historical shallow-front UI uses one quarter
-of the applied positive display limit; historical front-limit UI uses that full limit. All include
-strength, blend and warp readiness; gain and zero overrides do not directly position them. A legacy
-captured shader needs a compatible `--shader` override to select a mode it does not support.
-Gain must be positive and representable; zero must be finite and nonnegative.
+Mode 5 freezes the consumed display fraction without rerunning adaptive observations or history;
+it includes strength, blend and warp readiness, and gain and zero overrides do not directly
+position it. Gain must be positive and representable; zero must be finite and nonnegative.
 Its argument and resulting values are recorded alongside the unchanged captured parameter bytes
 in `replay.json`. It does not change the live zero-plane policy. Inputs remain unchanged and each
 run needs a fresh output directory. Alternate source must provide the recorded entry points and bindings.
@@ -6363,7 +6302,8 @@ controller's accepted evidence, clock, reset, hold and expiry rules. It adds no 
 or sampling pass. Positive flat depth updates both plane targets to that depth while holding gain;
 all-zero depth clears both targets and holds both tracked values. The applied UI base travels with the
 resolved real-depth scene, including FG reuse, instead of being recomputed from newer statistics.
-This tracking remains available for diagnostics and historical depth-mode replay. Live mode 5
+This tracking remains available for diagnostics (the depth-plane UI modes that used it were
+removed on 11-25). Live mode 5
 instead applies a fraction of the current positive display-parallax limit, including strength and
 stereo blend, subject to warp readiness. Its independent temporal policy observes scene/UI overlap
 as described in the setup contract above; it does not map this historical midpoint to parallax.
@@ -6372,8 +6312,8 @@ the existing source-alpha conditioner moves UI and its horizontal support to one
 locally changing adjacent geometry as described above. The scene's positive and negative display
 limits stay unchanged, so foreground can be nearer than UI even at the 50% live cap. Fullscreen UI may
 encounter the existing edge-sampling limits. Depth/alpha registration
-and bounded FG reuse limitations still apply. Historical modes 0 through 4 retain their replay
-behavior but are not selected for live placement.
+and bounded FG reuse limitations still apply. Mode 0 (the screen plane) is not selected for live
+placement; modes 1-4 were removed on 11-25.
 A change of nearest depth can change gain and hence separation between otherwise unchanged
 depths. The exact maximum deliberately includes even a single nearest particle or surface:
 if it persists, its smaller gain target can flatten the distant background. Large depth contrasts
@@ -7438,8 +7378,7 @@ exports use that copy too. While the ReShade overlay is visible the pass also wr
 renderer's own image, and the overlay's composite then writes every slot pixel from it (the image
 itself wherever the controls are transparent), so nothing is copied into the slot first.
 Without a consumer, a free slot or an armed dump, no eye is rendered at all. The shader declares
-`SUNSHINE_PACKED_EYES`; a dump whose embedded shader predates it replays with the former eye and
-pack passes.
+`SUNSHINE_PACKED_EYES`, which the renderer requires (**Shader capability markers**).
 Slot render-target views are cached for one export generation and dropped when their ring is
 released. The slot rests in the shared
 common state between owners, and the pass reads only the renderer's working set, which the

@@ -270,7 +270,7 @@ extern "C" {
       // Generic Depth is registered before external add-ons. On a first manual
       // installation the module can request a restart while export stays available.
       sunshine_game3d::hook_host::initialize(addon);
-      sunshine_depth::initialize(addon);
+      sunshine_depth::initialize();
       reshade::register_event<reshade::addon_event::init_effect_runtime>(sunshine_addon_lifetime::guarded<on_init_runtime>);
 
       reshade::register_event<reshade::addon_event::reshade_reloaded_effects>(sunshine_addon_lifetime::guarded<on_reload>);

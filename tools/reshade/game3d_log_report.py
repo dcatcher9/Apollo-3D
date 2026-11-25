@@ -51,89 +51,62 @@ COVERAGE = re.compile(
     r'Sunshine list lifecycle: admissions covered=(\d+) \(states observed=(\d+) declared=(\d+)\) '
     r'not_open=\{unknown=(\d+) closed=(\d+) pass=(\d+)')
 GENERATION = re.compile(r'Sunshine SBS: generation (\d+), (\d+)x(\d+) full SBS, DXGI (\d+), (\w+), (\w+)')
-# Since 10-23 each export pause names its class after its reason (routine or fault, export_pause_class in
-# exporter/export_ring.inl); older lines name the reason only.
-INACTIVE = re.compile(r'Sunshine SBS: export inactive \((\w+)(?:, (\w+))?\)')
+# Each export pause names its class after its reason (routine or fault, export_pause_class in
+# exporter/export_ring.inl).
+INACTIVE = re.compile(r'Sunshine SBS: export inactive \((\w+), (\w+)\)')
 FG_MODE = re.compile(r'Sunshine Streamline frame generation: viewport=\d+ mode=(\d+)')
 SCALE = re.compile(r'Sunshine 3D Streamline scale: (\w+);')
 RAW = re.compile(r'Sunshine 3D raw automation: (\w+);.*?stereo_scale=([0-9.e+-]+)')
 CAMERA = re.compile(r'Sunshine Streamline camera availability: .*recent_valid_projection=(\d+)')
+# A 'Sunshine UI protection' line (exporter/ui_status.inl): the presentation state; the sampled decision, its
+# candidate bits (ui_detection::candidate) and the covered and invalid pixels of UIAlpha, the UI colour tag, Backbuffer
+# and current alpha; the accepted candidate bits and the offscreen UI layer's own counts; the one-way judgment counts of
+# Backbuffer and current alpha (A2), the sample's own-decision reason, the candidate it refused and whether the T1
+# grace reused the previous real frame's decision (F1); the HUD-less pair's counts; the hidden-scene evidence
+# (docs/reshade-sbs.md, hidden-scene evidence): the Backbuffer and current alpha's opaque pixels, the informative full
+# claims, the H1 word, the presented frame's D, the pre-UI scene image's D, the scene guard's holds and the offscreen UI
+# layer against the presented frame (decision texel 11: matching and lit layer pixels, which prove the layer's
+# signature the pre-UI scene image); and the one-way judgment counts of the declared alphas, UIAlpha and the UI colour
+# tag.
 UI = re.compile(
-    r'Sunshine UI protection: runtime=\S+ .*?detection=(?P<detection>\w+) .*?sampled_source=(?P<source>\d+) '
-    r'sampled_covered=(?P<covered>\d+) sampled_pixels=(?P<pixels>\d+) '
+    r'Sunshine UI protection: runtime=(?P<runtime>\S+) mode=(?P<mode>\w+) rendered=(?P<rendered>\d) .*?'
+    r'\bfg=(?P<fg>\d) .*?detection=(?P<detection>\w+) .*?source_availability=(?P<availability>\w+) '
+    r'sampled_source=(?P<source>\d+) sampled_covered=(?P<covered>\d+) sampled_pixels=(?P<pixels>\d+) '
     r'sampled_candidates=(?P<candidates>0x[0-9a-fA-F]+) sampled_alpha_covered=(?P<alpha>\d+/\d+/\d+/\d+) '
-    r'(?:sampled_alpha_invalid=(?P<invalid>\d+/\d+/\d+/\d+) )?'
-    # Since S1 the accepted candidate bits and the offscreen UI layer's own counts; before it the trusted alpha slot
-    # bits, with the layer in the UI colour slot when sampled_ui_layer=1.
-    r'(?:accepted=(?P<accepted>0x[0-9a-fA-F]+) sampled_layer=\{covered=(?P<layer_covered>\d+) '
-    r'invalid=(?P<layer_invalid>\d+) opaque=\d+\}'
-    r'|trusted_alpha=(?P<trusted>0x[0-9a-fA-F]+)(?: sampled_ui_layer=(?P<layer>\d))?) '
-    # Since S2a the one-way judgment counts of the layer, Backbuffer and current alpha (A2; after be7788bf only
-    # Backbuffer and current alpha: the layer's column was 0 on every line, as every layer was the never-judged
-    # one-frame-late copy), the sample's own-decision reason, the candidate it refused and whether the T1 grace reused
-    # the previous real frame's decision (F1). Lines from S2a through 180f1842 also carry sampled_late_layer, which
-    # only repeated that a layer was offered and is skipped.
-    r'(?:sampled_one_way=\{strong=(?P<strong>\d+/\d+(?:/\d+)?) contradicted=(?P<contradicted>\d+/\d+(?:/\d+)?)\} '
+    r'sampled_alpha_invalid=(?P<invalid>\d+/\d+/\d+/\d+) accepted=(?P<accepted>0x[0-9a-fA-F]+) '
+    r'sampled_layer=\{covered=(?P<layer_covered>\d+) invalid=(?P<layer_invalid>\d+) opaque=\d+\} '
+    r'sampled_one_way=\{strong=(?P<strong>\d+/\d+) contradicted=(?P<contradicted>\d+/\d+)\} '
     r'sampled_reason=(?P<reason>\w+) sampled_refused=(?P<refused>\w+) sampled_reused=(?P<reused>\d) '
-    r'(?:sampled_late_layer=\d )?)?'
-    r'sampled_hudless=\{changed=(?P<changed>\d+) unchanged=(?P<unchanged>\d+) invalid=(?P<hudless_invalid>\d+)'
-    r'(?: matching_tiles=(?P<tiles>\d+) lit=(?P<lit>\d+))?')
-# Hidden-scene fields of the same line, absent from older logs. Before S2b the HUD-less image's D and the held routes
-# (scene_hold); since S2b (SCENE_S2B) the Backbuffer and current alpha's opaque pixels, the informative full claims, the
-# H1 word, the pre-UI scene image's D and the scene guard's holds (docs/reshade-sbs.md, hidden-scene evidence); since
-# fix 1 (selection revision 4) also the offscreen UI layer against the presented frame (decision texel 11): matching and
-# lit layer pixels, which prove the layer's signature the pre-UI scene image. Logs of fix 1 to revision 8 also carry
-# lit presented pixels and those that differ from the layer, and the first-run shadow's fields (shadow,
-# shadow_hidden_ms); both were shadow statistics, removed in selection revision 9 and logged as 0 from it through
-# be7788bf, so they are optional here.
-SCENE = re.compile(
-    r'sampled_alpha_opaque=(?P<opaque>\d+/\d+) sampled_scene=\{n=(?P<n>\d+) d=(?P<d>-?[0-9.]+) valid=(?P<valid>\d) '
-    r'ran=(?P<ran>\d) verdict=(?P<verdict>\w+)\} sampled_hudless_scene=\{n=\d+ d=(?P<hudless_d>-?[0-9.]+) '
-    r'valid=(?P<hudless_valid>\d)\} scene_hold=(?P<hold>\d+)'
-    r'(?: shadow=(?P<shadow>\d) shadow_hidden_ms=(?P<hidden_ms>\d+))?')
-SCENE_S2B = re.compile(
+    r'sampled_hudless=\{changed=(?P<changed>\d+) unchanged=(?P<unchanged>\d+) invalid=(?P<hudless_invalid>\d+) '
+    r'matching_tiles=(?P<tiles>\d+) lit=(?P<lit>\d+)\} '
     r'sampled_alpha_opaque=(?P<opaque>\d+/\d+) sampled_inferred_opaque=(?P<inferred>\d+/\d+) '
     r'sampled_claims=(?P<claims>0x[0-9a-fA-F]+) sampled_h1=\{applied=(?P<applied>\d) winner=(?P<winner>\d+)\} '
     r'sampled_scene=\{n=(?P<n>\d+) d=(?P<d>-?[0-9.]+) valid=(?P<valid>\d) ran=(?P<ran>\d) verdict=(?P<verdict>\w+)\} '
     r'sampled_pre_ui_scene=\{image=(?P<image>\w+) n=\d+ d=(?P<pre_ui_d>-?[0-9.]+) valid=(?P<pre_ui_valid>\d)\} '
-    r'scene_guard=\{hidden=(?P<hidden>\d) pre_ui=(?P<pre_ui>\d) refuted=(?P<refuted>\d+)(?: proven=(?P<proven>\d))?\}'
-    r'(?: shadow=(?P<shadow>\d) shadow_hidden_ms=(?P<hidden_ms>\d+))?'
-    r'(?: sampled_pre_ui_pixels=\{match=(?P<match>\d+) image_lit=(?P<image_lit>\d+)'
-    r'(?: presented_lit=(?P<presented_lit>\d+) presented_lit_differs=(?P<differs>\d+))?\})?')
-# Presentation fields of the same line; older logs lack some of them.
-UI_RUNTIME = re.compile(r'Sunshine UI protection: runtime=(\S+)')
-UI_MODE = re.compile(r'\bmode=(\w+)')
-UI_RENDERED = re.compile(r'\brendered=(\d)')
-UI_FG = re.compile(r'\bfg=(\d)')
-UI_AVAILABILITY = re.compile(r'\bsource_availability=(\w+)')
-# Acceptance changes: since S1 the accepted source signatures (docs/reshade-sbs.md, UI decision framework, A1), before
-# it trusted source bits.
-TRUST = re.compile(r'Sunshine UI protection: (restored accepted UI sources|accepted UI sources are now|'
-                   r'restored alpha trust|alpha trust is now) ([^\s;]+)')
-# Since fix 1 the same ledger also holds, per offscreen layer signature, the proof that the layer is the pre-UI scene
-# image (H1 d): the key 'pre_ui:<format>:<space>', listed with the accepted sources but never a UI coverage source.
+    r'scene_guard=\{hidden=(?P<hidden>\d) pre_ui=(?P<pre_ui>\d) refuted=(?P<refuted>\d+) proven=(?P<proven>\d)\} '
+    r'sampled_pre_ui_pixels=\{match=(?P<match>\d+) image_lit=(?P<image_lit>\d+)\} '
+    r'sampled_declared_one_way=\{strong=(?P<declared_strong>\d+/\d+) '
+    r'contradicted=(?P<declared_contradicted>\d+/\d+)\}')
+# Acceptance changes: the accepted source signatures (docs/reshade-sbs.md, UI decision framework, A1).
+TRUST = re.compile(r'Sunshine UI protection: (restored accepted UI sources|accepted UI sources are now) ([^\s;]+)')
+# The same ledger also holds, per offscreen layer signature, the proof that the layer is the pre-UI scene image (H1 d):
+# the key 'pre_ui:<format>:<space>', listed with the accepted sources but never a UI coverage source.
 PRE_UI_KIND = 'pre_ui'
-LEGACY_TRUST = re.compile(r'Sunshine UI protection: discarded (\d+) legacy UI trust entries')
-# Since S2a: the panel's Forget action (A3). Lines of removed features (the first-run shadow, rule H2's still screens,
-# the S3 identity shadow and its interposer lines) are ignored.
+# The panel's Forget action (A3).
 FORGET = re.compile(r'Sunshine UI protection: forgot learned UI sources (\S+) for this game')
-# The session's cumulative exact UI counters (docs/reshade-sbs.md, UI counters), absent from older logs.
+# The session's cumulative exact UI counters (docs/reshade-sbs.md, UI counters).
 COUNTERS = re.compile(r'Sunshine UI counters: (.*)$')
 COUNTER_FIELD = re.compile(r'(\w+)=(?:\{([^}]*)\}|(\S+))')
 # The UI capture gate's HUD-less pairings per log interval (game3d_ui_input_provider.cpp): batch is a same-batch
-# Backbuffer pair, the only exact one; real and late are Present-counted proposals.
-GATE = re.compile(r'Sunshine UI capture gate: .*?hudless_presents=\{batch=(\d+) real=(\d+) late=(\d+) generated=(\d+)'
-                  r'(?: reoffered=(\d+))?')
-# Since selection revision 10 the exact one-way judge (A2) also reads the declared alphas, UIAlpha and the UI colour
-# tag, logged as their own group before status_revision.
-DECLARED_ONE_WAY = re.compile(r'sampled_declared_one_way=\{strong=(\d+)/(\d+) contradicted=(\d+)/(\d+)\}')
-LOSS = re.compile(r'sampled_only=\{revision=(\d+) found=1 cause=(\w+)(?: site=(\w+))?(?:[^}]*? tick_ms=(\d+))?')
+# Backbuffer pair, the only exact one; real, late and reoffered are Present-counted proposals.
+GATE = re.compile(r'Sunshine UI capture gate: .*?hudless_presents=\{batch=(\d+) real=(\d+) late=(\d+) generated=(\d+) '
+                  r'reoffered=(\d+)')
+LOSS = re.compile(r'sampled_only=\{revision=(\d+) found=1 cause=(\w+) site=(\w+)[^}]*? tick_ms=(\d+)')
 # The SDK result an observation loss carries, when the call returned one.
 LOSS_SDK = re.compile(r'sampled_only=\{[^}]*?\bsdk_known=1 sdk_result=(-?\d+)')
-# sl::Result::eWarnOutOfVRAM, Streamline's only warning: the process is over its video-memory budget and the call
-# still ran. Since 10-22 the add-on accepts it (streamline_camera_data.h) and counts it on the camera availability
-# line; an older add-on lost the observation on every such call (BF6 10-22: 70 s of mono).
-SL_WARN_OUT_OF_VRAM = 39
+# Streamline calls answered sl::Result::eWarnOutOfVRAM, Streamline's only warning (the process is over its video-memory
+# budget and the call still ran): the add-on accepts them (streamline_camera_data.h) and counts them on the camera
+# availability line.
 SL_VRAM_WARNINGS = re.compile(r'Sunshine Streamline camera availability: .*\bvram_warnings=(\d+)')
 # The evidence line's own tick: a loss sampled with a later depth loss happened tick_ms earlier than its line.
 SAMPLED_TICK = re.compile(r'\bsampled_tick_ms=(\d+)')
@@ -160,9 +133,9 @@ GENERATION_FIELD = re.compile(r'\bgeneration=(\d+)')
 PLACEMENT = re.compile(r'Sunshine 3D (raw automation|Streamline scale): (\w+);')
 # Every API depth provider's status line (streamline_depth_provider.cpp): Streamline, NGX and the API fallback.
 DEPTH_STATUS = re.compile(r'Sunshine (Streamline|NGX|API) depth: (\w+);')
-# Since 10-27 a hitch line also says when its step began (QueryPerformanceCounter, in ms): the steps of one stall nest
-# exactly by their intervals.
-HITCH = re.compile(r'Game 3D hitch: (.+?) took ([0-9.]+) ms(?: on the present thread \(began ([0-9.]+) ms\))?')
+# A hitch line says when its step began (QueryPerformanceCounter, in ms): the steps of one stall nest exactly by their
+# intervals.
+HITCH = re.compile(r'Game 3D hitch: (.+?) took ([0-9.]+) ms on the present thread \(began ([0-9.]+) ms\)')
 # A step logs its hitch line from this long on (game3d_slow_step.h); the timing line's slowest Present (cpu_ms max,
 # split into its sections) shows a hitch in a section without a named step.
 HITCH_MS = 8.0
@@ -180,7 +153,7 @@ PRESENT_GAP = re.compile(r'Sunshine Game 3D present gap: ([0-9.]+) ms since the 
 # depth readiness, hitch and present-gap line; the host's own on each stalled picture's lines (nvenc_base.cpp).
 VRAM_WINDOW = re.compile(r'Sunshine Game 3D VRAM: local_mib=\{usage=(\d+) budget=(\d+)\} nonlocal_mib=\{usage=(\d+) '
                          r'budget=(\d+)\} window=\{samples=(\d+) max_usage_mib=(\d+) min_budget_mib=(\d+) '
-                         r'min_headroom_mib=(-?\d+) over_budget_ms=(\d+) budget_changes=(\d+)\}')
+                         r'min_headroom_mib=(-?\d+) over_budget_ms=(\d+) budget_changes=(\d+)\} window_ms=(\d+)')
 VRAM_POINT = re.compile(r'\bvram_local_mib=(\d+)/(\d+)')
 HOST_VRAM = re.compile(r'host_vram_mib=\{local=(\d+)/(\d+) nonlocal=(\d+)\}')
 # Local video memory this close to its budget, or over it, is pressure: the OS demotes the process's allocations to
@@ -198,9 +171,9 @@ DEPTH_FLIP_STEPS = frozenset((
 # The add-on's Diagnostics switch (game3d_diagnostics.h): off by default, which records no per-pass GPU timing.
 DIAGNOSTICS = re.compile(r'Sunshine Game 3D: diagnostics (on|off) \(Diagnostics=(\d)\)')
 GPU_PROFILE = re.compile(r'\bgpu_profile=(\w+)')
-# fg_owned (since the final add-on review): evaluations that copied nothing while Streamline FG owned depth.
+# fg_owned: evaluations that copied nothing while Streamline FG owned depth.
 NGX = re.compile(r'Sunshine NGX depth: .*?evaluations=(\d+) nominations=(\d+) copy_recorded=(\d+) '
-                 r'metadata_only=(\d+)(?: fg_owned=(\d+))?')
+                 r'metadata_only=(\d+) fg_owned=(\d+)')
 # DLSS-G's own NGX evaluation (feature 11) since 10-23: copies of DLSSG.Depth made as FG-scope depth on its own command
 # list, inner frames of multi frame generation skipped, and refusals as reason:count (capture stages such as
 # missing_state: the list observed no state for the depth); its HUD-less/Backbuffer/UI inputs offered to the live UI
@@ -250,24 +223,21 @@ Q5_PARKED_P99_US, Q5_PARKED_MAX_MS = 50, 0.5
 TIMING = re.compile(r'Sunshine Game 3D timing: presents=(\d+) cpu_ms=\{mean=([0-9.]+) max=([0-9.]+)\}'
                     r'.*?gpu_frames=(\d+)'
                     r' gpu_ms mean/max=\{total=([0-9.]+)/([0-9.]+)')
-# The timing line's offscreen UI layer group (since 10-06): live copies recorded, skipped by a full ring and offered.
-# Since 10-07 the group ends with the longest time the layer went unrefreshed across skipped copies (skip_gap_ms,
-# ui_layer::skip_gap), and the line with its window's length; a runtime reset logs its last, shorter window. Older lines
-# cover the periodic 10 s (exporter.cpp) and have no gap. Since C12 the group also counts targets_dropped, the
-# qualifying clears the layer tracker dropped with all of its ui_layer::tracker_capacity (32) entries taken. Since the
-# 11-03 layer-refusal contract the group also counts the clear-boundary copies refused (refused=, by reason in
-# refused_by={...}) and the admitted copies recorded with enhanced barriers (copies_enhanced=). The group is read field
-# by field (layer_group), so a field a later add-on adds anywhere in it leaves the known ones readable; a group without
-# copies, skipped, offers and presents_since_copy is no layer window, as before.
+# The timing line's offscreen UI layer group: live copies recorded, skipped by a full ring and offered, the longest
+# time the layer went unrefreshed across skipped copies (skip_gap_ms, ui_layer::skip_gap) and targets_dropped, the
+# qualifying clears the layer tracker dropped with all of its ui_layer::tracker_capacity (32) entries taken; then the
+# line's window length (window_ms; a runtime reset logs its last, shorter window). Since the 11-03 layer-refusal
+# contract the group also counts the clear-boundary copies refused (refused=, by reason in refused_by={...}) and the
+# admitted copies recorded with enhanced barriers (copies_enhanced=). The group is read field by field (layer_group),
+# so a field a later add-on adds anywhere in it leaves the known ones readable.
 LAYER_GROUP = ' ui_layer={'
 LAYER_FIELD = re.compile(r'(\w+)=(?:\{([^{}]*)\}|([^\s{}]+))')
 LAYER_REQUIRED = ('copies', 'skipped', 'offers')
-TIMING_WINDOW_S = 10.0
 WINDOW_MS = re.compile(r'\bwindow_ms=(\d+)')
 # The layer's recency gate (game3d_ui_layer.h max_clear_gap_ms): this long without a recorded copy, the layer is no
 # longer offered at all.
 LAYER_RECENCY_MS = 250.0
-# Logged once per ring when a copy is first skipped: a WARN before 10-07, INFO since. UI layer copies judges it.
+# Logged once per ring when a copy is first skipped. UI layer copies judges it.
 LAYER_SATURATED = 'Sunshine UI layer: every live copy is offered, held or still being read'
 # The native observer's barrier coverage diagnostic (since 11-03, streamline_native_observer.cpp coverage_line): once
 # per method-table class, the first list no barrier hook covered, its table (a module image's, or the list's own,
@@ -335,22 +305,14 @@ CORE_ABOUT_ADDON = re.compile(
     r'No add-on was registered by|Skipped loading add-on|Failed to create (?:back buffer render targets|resolve '
     r'texture|resolve shader resource view|copy pipeline|empty texture|ImGui))')
 # The add-on's own warnings that another check reports: its hitches (Present hitches), display scaling and the UI
-# layer's full ring (UI layer copies) and its refused clear-boundary copies (UI layer refused).
-OWNED_BENIGN = ('Game 3D hitch', 'display scaling limits the game', LAYER_SATURATED,
-                'Sunshine UI layer: clear-boundary copy refused', LAYER_REFUSED_ONCE)
+# layer's refused clear-boundary copies (UI layer refused).
+OWNED_BENIGN = ('Game 3D hitch', 'display scaling limits the game', 'Sunshine UI layer: clear-boundary copy refused',
+                LAYER_REFUSED_ONCE)
 # What tells two lines of one kind apart: quoted names (files, objects) and numbers (addresses, times, counts).
 LINE_KIND = re.compile(r"'[^']*'|\"[^\"]*\"|\b(?:0x)?[0-9A-Fa-f]*\d[0-9A-Fa-f]*\b")
-# Export pauses whose origin is the host, the game or the player rather than a fault (routine_export_pauses in
-# exporter/export_ring.inl): a host that is absent, attached, replaced or without PQ (consumer_transfer_changed: between a
-# Present's render and its export, which the next Present renders for), a game out of focus, reset, presenting
-# without a render or changing its colour space, and a swapchain or frame not yet prepared. Since 10-23 each line
-# names its class; this set classes the pauses of older lines.
-ROUTINE_INACTIVE = frozenset((
-    'no_consumer', 'ring_replaced', 'consumer_transfer_changed', 'not_foreground',
-    'runtime_reset', 'runtime_gone', 'present_without_render', 'color_space_changed', 'swapchain_unknown',
-    'frame_not_prepared'))
-# Routine pauses more often than once per 10 s for a minute (this many within ROUTINE_STORM_S) are a storm: the host
-# or the game restarting the export over and over.
+# Routine pauses (the class a pause line names when its origin is the host, the game or the player rather than a
+# fault) more often than once per 10 s for a minute (this many within ROUTINE_STORM_S) are a storm: the host or the
+# game restarting the export over and over.
 ROUTINE_STORM, ROUTINE_STORM_S = 7, 60.0
 # Capture statuses (depth_capture::status, streamline_depth_capture.h) that are no failure: no source or no capture,
 # one in flight or delivered, and an older or ambiguous selection. Every other status fails, a new one by default.
@@ -359,10 +321,8 @@ CAPTURE_OK = frozenset(('inactive', 'unavailable', 'recorded', 'submitted', 'rea
 # add-on's bounded tables was full, which a burst of game work explains, so it warns by rate: all of them more than
 # once per two minutes, or one more than LOSS_BURST times within LOSS_BURST_S. Routine: the game ended a resource's
 # lifecycle or reused an address for a new token. Faults (input the SDK contract refuses, an SDK failure, a test
-# injection) and unknown causes warn at any count. LOSS_LEGACY: capacity causes only add-ons built before the 10-31
-# structure refactor raise (it removed their tables); the report still reads them in those add-ons' logs.
-LOSS_LEGACY = ('commands_busy', 'resource_table_full')
-LOSS_CAPACITY = ('tokens_busy', 'records_busy', 'commands_busy', 'resource_table_full', 'metadata_storage_busy')
+# injection) and unknown causes warn at any count.
+LOSS_CAPACITY = ('tokens_busy', 'records_busy', 'metadata_storage_busy')
 LOSS_ROUTINE = ('lifecycle', 'token_replaced')
 LOSS_FAULT = ('invalid_input', 'sdk_failure', 'test_injected')
 LOSS_BURST, LOSS_BURST_S = 3, 60.0
@@ -378,12 +338,8 @@ SETTLE_HITCH_STEPS = frozenset(('stereo export',))
 # The timing line's section those steps run in: a window's slowest Present there may be one of their repeats, which
 # the one-line-a-second throttle of a step name leaves unlogged.
 SETTLE_HITCH_SECTION = 'export'
-# Every step over its threshold logs, an enclosing one after its inner one (game3d_slow_step.h). A line that says when
-# its step began encloses the stall's previous line when its interval contains that line's (the slack covers the
-# 0.1 ms rounding of both). An older line without it: a hitch line this soon after the previous one of a stall, at
-# least as long, is taken as an enclosing step (the slack is the async log writer's stamping); it may merge two
-# consecutive stalls, which the interval rule never does.
-NESTED_HITCH_S = 0.1
+# Every step over its threshold logs, an enclosing one after its inner one (game3d_slow_step.h). A line encloses the
+# stall's previous line when its interval contains that line's (the slack covers the 0.1 ms rounding of both).
 NESTED_HITCH_SLACK_MS = 0.2
 SWITCH_LEAD_S = 0.25  # A switch's own depth loss may be logged this long before the switch line (async log order).
 CALIBRATION_MIN_S = 0.1  # A run without placement that had less depth than this calibrated nothing.
@@ -405,13 +361,12 @@ ALPHA_SOURCES = (1, 2, 3, 4, 10)
 DRAW_ORDER = (0, 1, 4, 2, 3)  # S1: declared before inferred (ui_selection::draw_order).
 DECLARED, INFERRED = (0, 1), (2, 3, 4)  # The game's own UI contract, and guesses.
 DEDICATED, PRESENTED = (0, 1, 4), (2, 3)  # UI channels, whose clean empty pixels show no UI, and presented alpha.
-# Trusted source bits of logs before S1, by acceptance kind.
-LEGACY_TRUST_KINDS = {0x1: 'ui_alpha', 0x2: 'ui_color', 0x4: 'backbuffer', 0x8: 'current', 0x10: 'ui_layer'}
 HUDLESS_PAIR = 48  # Candidate bits of the HUD-less pair.
 HUDLESS = 0x10  # The HUD-less candidate bit; 0x20 marks the pair exact.
-# The inferred alpha kinds the one-way test judges (A2), in the order of sampled_one_way (ui_selection::judged_kinds):
-# the UI layer, Backbuffer and current alpha, by their index in ALPHA_NAMES.
-JUDGED = (4, 2, 3)
+# The inferred alpha kinds the one-way test judges (A2), in the order of sampled_one_way (ui_selection::judged_kinds,
+# whose declared kinds the line logs as sampled_declared_one_way): Backbuffer and current alpha, by their index in
+# ALPHA_NAMES. The UI layer, the one-frame-late copy, is never judged (E2).
+JUDGED = (2, 3)
 # Candidate kind names of sampled_refused (ui_selection::kind_names) and how the report names them.
 KIND_NAMES = dict(zip(ALPHA_KINDS, ALPHA_NAMES)) | {'hudless': 'HUD-less difference'}
 # Unprotected time shorter than this is counted, not listed: alpha_trust_span_ms (game3d_alpha_auto.h), the span over
@@ -426,32 +381,23 @@ DELIVERY_SHARE, DELIVERY_WARN_S = 0.85, 10.0
 # the window is listed, and a share and length at which it fails (UI detection effectively never ran).
 HELD_NONE_WARN, HELD_NONE_FAIL, HELD_NONE_FAIL_S = 0.5, 0.9, 10.0
 UI_LINE_PERIOD_S = 10.0  # An unchanged UI protection state is logged again this often while presenting (exporter.cpp).
-# Hidden-scene evidence (docs/reshade-sbs.md): a hidden run without a decided source this long is an uncovered hidden
-# scene.
-SHADOW_HIDDEN_WARN_MS = 500
-# Since fix 1 an offscreen layer without coverage is proven the pre-UI scene image by A2_SAMPLES samples over A2_SPAN_S
+# An offscreen layer without coverage is proven the pre-UI scene image by A2_SAMPLES samples over A2_SPAN_S
 # (alpha_trust_samples and alpha_trust_span_ms) in which it equals the presented frame on at least 90% of pixels
 # (ui_selection::full) and is lit on at least half (ui_selection::pre_ui_match); a restored proof lapses after
 # alpha_trust_reconfirm_ms of testable time without one (game3d_alpha_auto.h).
 PRE_UI_PROOF_RULE = ('3 samples over 2 s whose layer equals the presented frame on at least 90% of pixels and is lit '
                      'on at least half')
 PRE_UI_RECONFIRM_S = 60
-# Decided sources by number (decision texel 0, docs/reshade-sbs.md); 7 is retired. Before S2b 8 and 9 were the
-# hidden-scene layer and HUD-less routes; since S2b 8 is H1 and 9 is retired. 11 (rule H2's still screen, fix 2) and
-# 12 (fix 3's pre-UI change set) were removed and are reserved; logs of those builds may still carry their counter
-# words.
+# Decided sources by number (decision texel 0, docs/reshade-sbs.md; decided_sources in game3d_ui_counters.h); the
+# numbers between them are retired or reserved.
 SOURCE_NAMES = {0: 'no mask', 1: 'UI alpha', 2: 'UI colour', 3: 'Backbuffer alpha', 4: 'current alpha',
-                5: 'HUD-less difference', 6: 'full frame (exact pair)', 8: 'full frame (layer route)',
-                9: 'HUD-less route (before S2b)', 10: 'UI layer'}
-S2B_SOURCE_NAMES = SOURCE_NAMES | {8: 'full frame over a hidden scene (H1)',
-                                   11: 'still screen without a UI source (H2, removed)'}
-CLAIM_PRE_UI = 0x80  # The pre-UI scene image's informative claim (ui_detection::claim_pre_ui), since S2b.
+                5: 'HUD-less difference', 6: 'full frame (exact pair)', 8: 'full frame over a hidden scene (H1)',
+                10: 'UI layer'}
+CLAIM_PRE_UI = 0x80  # The pre-UI scene image's informative claim (ui_detection::claim_pre_ui).
 NO_MASK_REASONS = ('layer_aside', 'trusted_invalid', 'presented_blocked', 'ambiguous', 'difference_failed',
                    'gate_no_hold', 'no_candidate', 'other', 'unaccepted')
-# Held frames by kind: since S2a a generated Present showing a real frame's decision, or one without such a decision
-# (T1); before it three hold kinds and a cap of three Presents.
+# Held frames by kind: a generated Present showing a real frame's decision, or one without such a decision (T1).
 HOLD_KINDS = ('generated', 'none')
-S1_HOLD_KINDS = ('generated', 'inexact_after_exact', 'trusted_missing')
 INACTIVE_REASONS = ('no_candidates', 'size', 'unprepared')
 
 
@@ -471,11 +417,8 @@ def percent(n: int, total: int) -> str:
 
 
 def accepted_keys(value: str) -> tuple[str, ...]:
-    """The accepted source keys of a logged acceptance value: since S1 'kind:format:space' signatures joined by
-    commas, or 'none'; before it trusted source bits, read as their kinds."""
-    if value.startswith('0x'):
-        bits = int(value, 16)
-        return tuple(kind for bit, kind in LEGACY_TRUST_KINDS.items() if bits & bit)
+    """The accepted source keys of a logged acceptance value: 'kind:format:space' signatures joined by commas, or
+    'none'."""
     return () if value == 'none' else tuple(value.split(','))
 
 
@@ -492,10 +435,10 @@ def counter_fields(text: str) -> dict[str, int]:
     return values
 
 
-def layer_group(text: str) -> tuple[dict[str, str], dict[str, dict[str, str]], str | None] | None:
+def layer_group(text: str) -> tuple[dict[str, str], dict[str, dict[str, str]], str] | None:
     """A timing line's ui_layer={...} group as its plain fields, its nested groups (presents_since_copy, refused_by)
-    and the window_ms after it; None without a group holding copies, skipped, offers and presents_since_copy's mean
-    and max (no layer window, as on lines before 10-06)."""
+    and the window_ms after it; None without a group holding copies, skipped, offers, presents_since_copy's mean and
+    max and skip_gap_ms, followed by window_ms (no layer window)."""
     start = text.find(LAYER_GROUP)
     if start < 0:
         return None
@@ -514,10 +457,11 @@ def layer_group(text: str) -> tuple[dict[str, str], dict[str, dict[str, str]], s
         else:
             groups[key] = {inner: number for inner, _, number in LAYER_FIELD.findall(group) if number}
     since = groups.get('presents_since_copy', {})
-    if not all(fields.get(k, '').isdigit() for k in LAYER_REQUIRED) or not {'mean', 'max'} <= since.keys():
-        return None
     window = WINDOW_MS.search(text, end)
-    return fields, groups, window.group(1) if window else None
+    if (not all(fields.get(k, '').isdigit() for k in LAYER_REQUIRED) or not {'mean', 'max'} <= since.keys()
+            or 'skip_gap_ms' not in fields or not window):
+        return None
+    return fields, groups, window.group(1)
 
 
 class Scene(NamedTuple):
@@ -528,89 +472,64 @@ class Scene(NamedTuple):
     valid: bool
     ran: bool
     verdict: str  # Presented image: none, hidden, ambiguous or visible.
-    hudless_d: float  # The second image's D: before S2b the HUD-less image's, since S2b the pre-UI scene image's.
-    hudless_valid: bool
-    hold: int  # Before S2b the routes held by the render that logged: 1 layer (source 8), 2 HUD-less (source 9).
-    # Logs before selection revision 9 only (the removed first-run shadow): whether it measured with the gates closed,
-    # and the longest hidden run without a decided source since the previous line; False and 0 otherwise.
-    shadow: bool
-    hidden_ms: int
-    # Since S2b (absent before): the scene guard's holds this render (hidden, pre-UI) and its refuted signatures, the
-    # pre-UI scene image (none, hudless or layer), the informative full claims (candidate bits, 0x80 the pre-UI
-    # image), whether H1 applied over the S1 winner and that winner's source, and the Backbuffer and current alpha's
-    # opaque pixels.
-    guard: tuple[int, int, int] | None = None
-    pre_ui_image: str = ''
-    claims: int = 0
-    h1: bool = False
-    winner: int = 0
-    inferred_opaque: tuple[int, ...] = ()
-    # Whether the offered layer was proven the presented frame without its UI, so that its pre-UI image may act
-    # (H1 d): in S2b by the scene guard's D similarity, since fix 1 the ledger's key pre_ui:<format>:<space>; None on
-    # lines without the field.
-    proven: bool | None = None
-    # Since fix 1 (absent before): the layer against the presented frame (decision texel 11): matching pixels and lit
-    # layer pixels.
-    pre_ui_pixels: tuple[int, int] | None = None
-
-    @property
-    def s2b(self) -> bool:
-        return self.guard is not None
-
-    @property
-    def fix1(self) -> bool:
-        """Logged since fix 1, whose layer proof is by pixels and a ledger key."""
-        return self.pre_ui_pixels is not None
+    pre_ui_d: float  # The pre-UI scene image's D.
+    pre_ui_valid: bool
+    # The scene guard's holds this render (hidden, pre-UI) and its refuted signatures, the pre-UI scene image (none,
+    # hudless or layer), the informative full claims (candidate bits, 0x80 the pre-UI image), whether H1 applied over
+    # the S1 winner and that winner's source, and the Backbuffer and current alpha's opaque pixels.
+    guard: tuple[int, int, int]
+    pre_ui_image: str
+    claims: int
+    h1: bool
+    winner: int
+    inferred_opaque: tuple[int, ...]
+    # Whether the offered layer was proven the presented frame without its UI (the ledger's key
+    # pre_ui:<format>:<space>), so that its pre-UI image may act (H1 d).
+    proven: bool
+    # The layer against the presented frame (decision texel 11): matching pixels and lit layer pixels.
+    pre_ui_pixels: tuple[int, int]
 
     def pre_ui_claim(self) -> bool:
         """The pre-UI image's claim could act: claimed this sample while the scene guard held its pre-UI hold."""
-        return bool(self.claims & CLAIM_PRE_UI) and bool(self.guard and self.guard[1])
+        return bool(self.claims & CLAIM_PRE_UI) and bool(self.guard[1])
 
 
 class UISample(NamedTuple):
     t: float
     detection: str
     # 1-4: UI alpha, UI colour tag, Backbuffer or current alpha decided, 10: the UI layer, 5: HUD-less difference, 6:
-    # full frame flat (exact pair), 8: full frame over a hidden scene by the layer route, 9: by the HUD-less route, 11
-    # (fix 2 to revision 8): a still screen without a UI source shown flat (H2, removed). 7 is retired. Before S1 the
-    # layer decided as 2; parse() reads it as 10.
+    # full frame flat (exact pair), 8: full frame over a hidden scene (H1).
     source: int
     covered: int
     pixels: int
-    candidates: int  # Candidate bits (ui_detection::candidate), the layer as 0x40 also before S1.
+    candidates: int  # Candidate bits (ui_detection::candidate).
     alpha: tuple[int, ...]  # Covered pixels in ALPHA_NAMES order.
-    accepted: int  # Accepted candidate bits pushed with the detection; before S1 the trusted alpha channels.
+    accepted: int  # Accepted candidate bits pushed with the detection.
     hudless: tuple[int, ...]  # changed, unchanged, invalid.
-    invalid: tuple[int, ...] | None = None  # In ALPHA_NAMES order; absent in older logs.
-    scene: Scene | None = None  # Absent in older logs.
-    runtime: str = ''
-    mode: str = 'auto'
-    rendered: bool = True
-    availability: str = ''  # source_availability; absent in older logs.
-    fg: bool = False  # Frame generation active.
-    legacy: bool = False  # Logged before S1, when a trusted UI channel, the layer included, kept presented alpha out.
-    # Since S2a (absent before): strong and one-way contradicted pixels in JUDGED order (A2), the own decision's
-    # ui_no_mask reason or 'decided', the refused candidate's kind or 'none', and whether the T1 grace reused the
-    # previous real frame's decision (then source and covered are that decision's).
-    strong: tuple[int, ...] | None = None
-    contradicted: tuple[int, ...] | None = None
-    reason: str = ''
-    refused: str = ''
-    reused: bool = False
-    tiles: int = 0  # HUD-less matching tiles and lit pixels (V2).
-    lit: int = 0
-    # Since selection revision 10: the declared alphas' (UIAlpha, UI colour tag) strong and one-way contradicted
-    # pixels, ((strong...), (contradicted...)); None before.
-    declared_one_way: tuple[tuple[int, int], tuple[int, int]] | None = None
-
-    @property
-    def s2a(self) -> bool:
-        """Logged since S2a, whose ledger judges by provenance (A2)."""
-        return self.strong is not None
+    invalid: tuple[int, ...]  # In ALPHA_NAMES order.
+    scene: Scene
+    runtime: str
+    mode: str
+    rendered: bool
+    availability: str  # source_availability.
+    fg: bool  # Frame generation active.
+    # Strong and one-way contradicted pixels in JUDGED order (A2), the own decision's ui_no_mask reason or 'decided',
+    # the refused candidate's kind or 'none', and whether the T1 grace reused the previous real frame's decision (then
+    # source and covered are that decision's).
+    strong: tuple[int, ...]
+    contradicted: tuple[int, ...]
+    reason: str
+    refused: str
+    reused: bool
+    tiles: int  # HUD-less matching tiles and lit pixels (V2).
+    lit: int
+    # The declared alphas' (UIAlpha, UI colour tag) strong and one-way contradicted pixels, ((strong...),
+    # (contradicted...)).
+    declared_one_way: tuple[tuple[int, ...], tuple[int, ...]]
 
     def change_set_valid(self) -> bool:
-        """V2 from the logged HUD-less counts, as ui_selection::change_set_selective, change_set_full and (since
-        selection revision 8) change_set_empty: a lit pair without any changed pixel in clean tiles."""
+        """V2 from the logged HUD-less counts, as ui_selection::change_set_selective, change_set_full and
+        change_set_empty: a lit pair without any changed pixel in clean tiles."""
         changed, unchanged, nonfinite = self.hudless
         if nonfinite or not self.candidates & HUDLESS:
             return False
@@ -627,17 +546,17 @@ class UISample(NamedTuple):
     def one_way(self, c: int) -> bool:
         """A2: at least a tenth of judged alpha c's strong pixels lie where the exact pair's HUD-less image is lit and
         unchanged (ui_selection::one_way_contradicted); only with a valid exact pair."""
-        if not self.s2a or not self.exact_judge():
+        if not self.exact_judge():
             return False
         strong, contradicted = self.one_way_counts(c)
         return bool(strong) and contradicted * 10 >= strong
 
     def one_way_counts(self, c: int) -> tuple[int, int]:
-        """Strong and one-way contradicted pixels of alpha c: the judged inferred kinds since S2a, the declared ones
-        since selection revision 10; (0, 0) where the line has none."""
-        if c in JUDGED and self.strong is not None:
+        """Strong and one-way contradicted pixels of alpha c: the judged inferred kinds and the declared ones; (0, 0)
+        for the UI layer, which is never judged."""
+        if c in JUDGED:
             return self.strong[JUDGED.index(c)], self.contradicted[JUDGED.index(c)]
-        if c in DECLARED and self.declared_one_way is not None:
+        if c in DECLARED:
             return self.declared_one_way[0][c], self.declared_one_way[1][c]
         return 0, 0
 
@@ -648,35 +567,22 @@ class UISample(NamedTuple):
         return bool(self.accepted & ALPHA_BITS[c])
 
     def valid(self, c: int) -> bool:
-        """V1: at most 1% invalid pixels (unknown in older logs)."""
-        return self.invalid is None or self.invalid[c] * 100 <= self.pixels
+        """V1: at most 1% invalid pixels."""
+        return self.invalid[c] * 100 <= self.pixels
 
     def layer_without_alpha(self) -> bool:
         """An offscreen UI layer with no alpha anywhere but colour on more than 1% of pixels: premultiplied UI over
         transparent black cannot have colour without alpha, so V1 rejects it (Stellar Blade's SDR scene image).
         Mirrors source_alpha_ui_decision::layer_without_alpha (game3d_controls.h)."""
-        return self.offered(4) and self.invalid is not None and not self.alpha[4] and not self.valid(4)
+        return self.offered(4) and not self.alpha[4] and not self.valid(4)
 
-    def blocking(self, admitted: bool = False) -> bool:
-        """An offered, accepted declared alpha keeps inferred alpha out (S1). Before S1 any trusted UI channel did;
-        a layer without alpha was then set aside, and with admitted it does not count."""
-        if not self.legacy:
-            return any(self.offered(c) and self.is_accepted(c) for c in DECLARED)
-        return any(self.offered(c) and self.is_accepted(c) and not (admitted and c == 4 and self.layer_without_alpha())
-                   for c in DEDICATED)
-
-    def kept_out(self) -> tuple[int, ...]:
-        """The alpha candidates a blocking UI channel keeps out."""
-        return PRESENTED if self.legacy else INFERRED
+    def blocking(self) -> bool:
+        """An offered, accepted declared alpha keeps inferred alpha out (S1)."""
+        return any(self.offered(c) and self.is_accepted(c) for c in DECLARED)
 
     def shows_no_ui(self, c: int) -> bool:
         """A UI channel offered clean and empty: the game's UI channel says there is no UI on screen."""
-        if not self.offered(c) or self.alpha[c]:
-            return False
-        if self.invalid is not None:
-            return not self.invalid[c]
-        # Older logs lack invalid counts. A clean accepted channel at 0 decides, so with no source it was rejected.
-        return not self.is_accepted(c)
+        return self.offered(c) and not self.alpha[c] and not self.invalid[c]
 
     def unprotected(self) -> bool:
         """Auto rendered this frame without a UI mask, and no UI channel of the game showed that there was no UI.
@@ -730,14 +636,13 @@ class UISample(NamedTuple):
         for c in DRAW_ORDER:
             if not self.offered(c):
                 continue
-            covered, name = self.alpha[c], ALPHA_NAMES[c]
-            invalid = self.invalid[c] if self.invalid is not None else 0
+            covered, name, invalid = self.alpha[c], ALPHA_NAMES[c], self.invalid[c]
             if c == 4 and self.layer_without_alpha():
                 parts.append(f'UI layer has colour but no alpha ({percent(invalid, self.pixels)} of pixels)')
             elif invalid:
                 parts.append(f'{name} rejected ({percent(covered, self.pixels)} covered, '
                              f'{percent(invalid, self.pixels)} invalid)')
-            elif c in self.kept_out() and blocking and (not self.legacy or covered * 10 < self.pixels * 9):
+            elif c in INFERRED and blocking:
                 parts.append(f'{name} kept out beside an accepted UI channel')
             else:
                 parts.append(f'{name} covers {percent(covered, self.pixels)}'
@@ -753,56 +658,32 @@ class UISample(NamedTuple):
 
     def hidden(self) -> bool:
         """The presented frame's valid evidence read hidden."""
-        return bool(self.scene and self.scene.valid and self.scene.verdict == 'hidden')
+        return self.scene.valid and self.scene.verdict == 'hidden'
 
     def named_reason(self) -> str:
-        """The add-on's own reason for a sample without a mask and the candidate it refused (F1), since S2a."""
-        if not self.s2a or self.reason in ('', 'decided'):
+        """The add-on's own reason for a sample without a mask and the candidate it refused (F1)."""
+        if self.reason == 'decided':
             return ''
         refused = KIND_NAMES.get(self.refused)
         return f' (reason {self.reason.replace("_", " ")}' + (f': {refused})' if refused else ')')
 
 
-def ui_sample(t: float, text: str, g: dict[str, str | None], scene: Scene | None) -> UISample:
-    """One 'Sunshine UI protection' line; a line logged before S1 is normalized to the S1 candidates."""
+def ui_sample(t: float, g: dict[str, str]) -> UISample:
+    """One 'Sunshine UI protection' line (UI's groups)."""
     def counts(value: str) -> tuple[int, ...]:
         return tuple(int(v) for v in value.split('/'))
-
-    def judged(value: str) -> tuple[int, ...]:
-        # JUDGED order; a line after be7788bf omits the layer's column, which no build has counted since revision 10.
-        found = counts(value)
-        return (0,) * (len(JUDGED) - len(found)) + found
-
-    def field_of(pattern: re.Pattern, default: str) -> str:
-        return hit.group(1) if (hit := pattern.search(text)) else default
-    alpha = counts(g['alpha'])
-    invalid = counts(g['invalid']) if g['invalid'] else None
-    candidates, source = int(g['candidates'], 16), int(g['source'])
-    legacy = g['accepted'] is None
-    if not legacy:
-        accepted = int(g['accepted'], 16)
-        alpha += (int(g['layer_covered']),)
-        invalid = invalid + (int(g['layer_invalid']),) if invalid is not None else None
-    elif g['layer'] == '1':
-        # Before S1 the layer filled the UI colour slot: slot 1, candidate bit 2, source 2.
-        def moved(bits: int) -> int:
-            return bits & ~0x2 | (0x40 if bits & 0x2 else 0)
-        alpha = (alpha[0], 0, alpha[2], alpha[3], alpha[1])
-        invalid = (invalid[0], 0, invalid[2], invalid[3], invalid[1]) if invalid is not None else None
-        candidates, accepted = moved(candidates), moved(int(g['trusted'], 16))
-        source = 10 if source == 2 else source
-    else:
-        accepted = int(g['trusted'], 16)
-        alpha += (0,)
-        invalid = invalid + (0,) if invalid is not None else None
-    s2a = g['strong'] is not None
-    return UISample(t, g['detection'], source, int(g['covered']), int(g['pixels']), candidates, alpha, accepted,
-                    (int(g['changed']), int(g['unchanged']), int(g['hudless_invalid'])), invalid, scene,
-                    field_of(UI_RUNTIME, ''), field_of(UI_MODE, 'auto'), field_of(UI_RENDERED, '1') == '1',
-                    field_of(UI_AVAILABILITY, ''), field_of(UI_FG, '0') == '1', legacy,
-                    judged(g['strong']) if s2a else None, judged(g['contradicted']) if s2a else None,
-                    g['reason'] or '', g['refused'] or '', g['reused'] == '1', int(g['tiles'] or 0),
-                    int(g['lit'] or 0))
+    scene = Scene(counts(g['opaque']), int(g['n']), float(g['d']), g['valid'] == '1', g['ran'] == '1', g['verdict'],
+                  float(g['pre_ui_d']), g['pre_ui_valid'] == '1',
+                  (int(g['hidden']), int(g['pre_ui']), int(g['refuted'])), g['image'], int(g['claims'], 16),
+                  g['applied'] == '1', int(g['winner']), counts(g['inferred']), g['proven'] == '1',
+                  (int(g['match']), int(g['image_lit'])))
+    return UISample(t, g['detection'], int(g['source']), int(g['covered']), int(g['pixels']), int(g['candidates'], 16),
+                    counts(g['alpha']) + (int(g['layer_covered']),), int(g['accepted'], 16),
+                    (int(g['changed']), int(g['unchanged']), int(g['hudless_invalid'])),
+                    counts(g['invalid']) + (int(g['layer_invalid']),), scene, g['runtime'], g['mode'],
+                    g['rendered'] == '1', g['availability'], g['fg'] == '1', counts(g['strong']),
+                    counts(g['contradicted']), g['reason'], g['refused'], g['reused'] == '1', int(g['tiles']),
+                    int(g['lit']), (counts(g['declared_strong']), counts(g['declared_contradicted'])))
 
 
 @dataclass
@@ -928,8 +809,8 @@ class Session:
     raw_scales: list[float] = field(default_factory=list)
     camera_valid: bool = False
     ui: list[UISample] = field(default_factory=list)
-    # Time, logged event, logged value and the accepted source keys after it (None for a discard of legacy entries).
-    # A Forget is listed with None too: the acceptance line logged just before it records the change.
+    # Time, logged event, logged value and the accepted source keys after it (None for a Forget: the acceptance line
+    # logged just before it records the change).
     trust_events: list[tuple[float, str, str, tuple[str, ...] | None]] = field(default_factory=list)
     # The last 'Sunshine UI counters' line: the session's totals are cumulative over all its runtimes. Every line is
     # kept with its time for the per-interval checks.
@@ -939,9 +820,9 @@ class Session:
     gate_batch: int = 0
     gate_counted: int = 0
     # Per loss revision: when it happened (its own tick, else the line logging it), its cause and site.
-    losses: dict[int, tuple[float, str, str | None]] = field(default_factory=dict)
+    losses: dict[int, tuple[float, str, str]] = field(default_factory=dict)
     loss_sdk: dict[int, int] = field(default_factory=dict)  # Per loss revision: the SDK result it carried.
-    sl_vram_warnings: int = 0  # Since 10-22: Streamline calls answered eWarnOutOfVRAM (cumulative).
+    sl_vram_warnings: int = 0  # Streamline calls answered eWarnOutOfVRAM (cumulative).
     readiness: Counter = field(default_factory=Counter)  # Losses while the export streamed.
     # Loss episodes the add-on did not log while the export streamed (its readiness trace logs at most four a second
     # and counts the rest on its next line as suppressed_episodes).
@@ -954,8 +835,8 @@ class Session:
     streamed: list[list] = field(default_factory=list)  # From a generation to the next export inactive.
     placement: list[tuple[float, bool, str, str]] = field(default_factory=list)  # t, placed, state, provider.
     statuses: list[tuple[float, str, str]] = field(default_factory=list)  # Each depth status: time, status, provider.
-    # Each hitch line: time, step, ms, and when the step began (QPC ms; None before 10-27).
-    hitches: list[tuple[float, str, float, float | None]] = field(default_factory=list)
+    # Each hitch line: time, step, ms, and when the step began (QPC ms).
+    hitches: list[tuple[float, str, float, float]] = field(default_factory=list)
     timings: list[tuple] = field(default_factory=list)  # Every timing line's window.
     # Each timing line's end, length in s, slowest Present (cpu_ms max) and that Present's sections.
     timing_worst: list[tuple[float, float, float, tuple[float, ...]]] = field(default_factory=list)
@@ -967,7 +848,7 @@ class Session:
     vram_windows: list[tuple[float, float, int, int, int, int]] = field(default_factory=list)
     vram_points: list[tuple[float, int, int, str]] = field(default_factory=list)
     # Each timing line's UI layer group: (end, length s, Presents, copies, skipped, offers, presents_since_copy mean
-    # and max, longest skip gap in ms or None before 10-07); and each logged-once full-ring line.
+    # and max, longest skip gap in ms); and each logged-once full-ring line.
     layer_windows: list[tuple] = field(default_factory=list)
     # (time, count): timing windows whose layer tracker dropped qualifying clears with every entry taken.
     layer_targets_dropped: list[tuple] = field(default_factory=list)
@@ -1024,14 +905,6 @@ def parse(lines) -> Session:
         if s.streamed and s.streamed[-1][1] is None:
             s.streamed[-1][1] = t
         for episode in open_episodes.values():
-            if episode.reason == 'explicit_reuse_invalidation' and episode.start == t:
-                # The export stop's own reuse invalidation, which add-ons before 10-23 logged just before its pause
-                # line (since then it follows it): no publication lacked depth, so it is the pause, not a loss.
-                s.depth_episodes.remove(episode)
-                s.readiness[episode.reason] -= 1
-                if s.readiness[episode.reason] <= 0:
-                    del s.readiness[episode.reason]
-                continue
             episode.end, episode.ending = t, ending
         open_episodes.clear()
 
@@ -1077,7 +950,7 @@ def parse(lines) -> Session:
             pause(t, 'paused')  # Nothing is streamed from here until the next generation.
             reason, kind = found.groups()
             s.inactive[reason] += 1
-            s.pauses.append((t, reason, kind == 'routine' if kind else reason in ROUTINE_INACTIVE))
+            s.pauses.append((t, reason, kind == 'routine'))
             if reason == 'runtime_reset':
                 s.settle.append(t)
                 s.settle_resets.append(t)
@@ -1120,35 +993,13 @@ def parse(lines) -> Session:
         if found := SL_VRAM_WARNINGS.search(text):
             s.sl_vram_warnings = max(s.sl_vram_warnings, int(found.group(1)))
         if found := UI.search(text):
-            scene = None
-            if evidence := SCENE.search(text):
-                e = evidence.groupdict()
-                scene = Scene(tuple(int(v) for v in e['opaque'].split('/')), int(e['n']), float(e['d']),
-                              e['valid'] == '1', e['ran'] == '1', e['verdict'], float(e['hudless_d']),
-                              e['hudless_valid'] == '1', int(e['hold']), e['shadow'] == '1', int(e['hidden_ms'] or 0))
-            elif evidence := SCENE_S2B.search(text):
-                e = evidence.groupdict()
-                scene = Scene(tuple(int(v) for v in e['opaque'].split('/')), int(e['n']), float(e['d']),
-                              e['valid'] == '1', e['ran'] == '1', e['verdict'], float(e['pre_ui_d']),
-                              e['pre_ui_valid'] == '1', 0, e['shadow'] == '1', int(e['hidden_ms'] or 0),
-                              (int(e['hidden']), int(e['pre_ui']), int(e['refuted'])), e['image'],
-                              int(e['claims'], 16), e['applied'] == '1', int(e['winner']),
-                              tuple(int(v) for v in e['inferred'].split('/')),
-                              None if e['proven'] is None else e['proven'] == '1',
-                              None if e['match'] is None else (int(e['match']), int(e['image_lit'])))
-            sample = ui_sample(t, text, found.groupdict(), scene)
-            if declared := DECLARED_ONE_WAY.search(text):
-                strong0, strong1, against0, against1 = (int(v) for v in declared.groups())
-                sample = sample._replace(declared_one_way=((strong0, strong1), (against0, against1)))
-            s.ui.append(sample)
+            s.ui.append(ui_sample(t, found.groupdict()))
         if found := GATE.search(text):
-            batch, real, late, _, reoffered = (int(v or 0) for v in found.groups())
+            batch, real, late, _, reoffered = (int(v) for v in found.groups())
             s.gate_batch += batch
             s.gate_counted += real + late + reoffered
         if found := TRUST.search(text):
             s.trust_events.append((t, found.group(1), found.group(2), accepted_keys(found.group(2))))
-        if found := LEGACY_TRUST.search(text):
-            s.trust_events.append((t, 'discarded legacy UI trust entries', found.group(1), None))
         if found := FORGET.search(text):
             s.trust_events.append((t, 'forgot learned UI sources', found.group(1), None))
         if (found := COUNTERS.search(text)) and 'auto_frames' in (values := counter_fields(found.group(1))):
@@ -1158,7 +1009,7 @@ def parse(lines) -> Session:
             revision, cause, site, tick = found.groups()
             sampled = SAMPLED_TICK.search(text)
             at = t
-            if tick and sampled and 0 <= int(sampled.group(1)) - int(tick) < 86_400_000:
+            if sampled and 0 <= int(sampled.group(1)) - int(tick) < 86_400_000:
                 # Logged with a later depth loss (RE Requiem 10-22: a records_busy 7.8 s before the FG switch's loss).
                 at = t - (int(sampled.group(1)) - int(tick)) / 1000
             s.losses.setdefault(int(revision), (at, cause, site))
@@ -1206,7 +1057,7 @@ def parse(lines) -> Session:
         if found := DEPTH_STATUS.search(text):
             s.statuses.append((t, found.group(2), found.group(1)))
         if found := NGX.search(text):
-            s.ngx = tuple(int(v or 0) for v in found.groups())
+            s.ngx = tuple(int(v) for v in found.groups())
         if found := DLSSG.search(text):
             g = found.groups()
             s.dlssg = (int(g[0]), int(g[1]), int(g[2]), g[3], int(g[4]), int(g[5]), g[6])
@@ -1232,15 +1083,12 @@ def parse(lines) -> Session:
                                        'game_waits_1ms': int(g[8]), 'present_p99_us': int(g[12]),
                                        'present_max_ms': float(g[13]), 'holders': g[14]}))
         if found := HITCH.search(text):
-            s.hitches.append((t, found.group(1), float(found.group(2)),
-                              float(found.group(3)) if found.group(3) else None))
+            s.hitches.append((t, found.group(1), float(found.group(2)), float(found.group(3))))
         if found := PRESENT_GAP.search(text):
             s.present_gaps.append((t, float(found.group(1)), found.group(2) == '1', found.group(3) == '1'))
         if found := VRAM_WINDOW.search(text):
-            window = WINDOW_MS.search(text)
-            length = int(window.group(1)) / 1000.0 if window else TIMING_WINDOW_S
             values = [int(v) for v in found.groups()]
-            s.vram_windows.append((t, length, values[5], values[6], values[7], values[8]))
+            s.vram_windows.append((t, values[10] / 1000.0, values[5], values[6], values[7], values[8]))
         if found := VRAM_POINT.search(text):
             readiness = READINESS.search(text)
             what = (('depth loss' if readiness.group(1) == 'lost' else 'depth recovery') if readiness else
@@ -1249,22 +1097,19 @@ def parse(lines) -> Session:
         if found := TIMING.search(text):
             s.timings.append((int(found.group(1)), float(found.group(2)), float(found.group(3)),
                               int(found.group(4)), float(found.group(5)), float(found.group(6))))
-            if worst := TIMING_WORST.search(text):
-                length = WINDOW_MS.search(text)
-                s.timing_worst.append((t, int(length.group(1)) / 1000.0 if length else TIMING_WINDOW_S,
-                                       float(found.group(3)), tuple(float(v) for v in worst.groups())))
+            if (worst := TIMING_WORST.search(text)) and (length := WINDOW_MS.search(text)):
+                s.timing_worst.append((t, int(length.group(1)) / 1000.0, float(found.group(3)),
+                                       tuple(float(v) for v in worst.groups())))
             profile = GPU_PROFILE.search(text)
             s.timing_profile = profile.group(1) if profile else ''
             if (layer := layer_group(text)) is not None:
                 fields, groups, window_ms = layer
                 copies, skipped, offers = (int(fields[k]) for k in LAYER_REQUIRED)
                 since = groups['presents_since_copy']
-                gap, dropped = fields.get('skip_gap_ms'), fields.get('targets_dropped')
-                if dropped and int(dropped):
-                    s.layer_targets_dropped.append((t, int(dropped)))
-                s.layer_windows.append((t, int(window_ms) / 1000.0 if window_ms else TIMING_WINDOW_S,
-                                        int(found.group(1)), copies, skipped, offers, float(since['mean']),
-                                        int(since['max']), float(gap) if gap is not None else None))
+                if dropped := int(fields.get('targets_dropped', 0)):
+                    s.layer_targets_dropped.append((t, dropped))
+                s.layer_windows.append((t, int(window_ms) / 1000.0, int(found.group(1)), copies, skipped, offers,
+                                        float(since['mean']), int(since['max']), float(fields['skip_gap_ms'])))
                 s.layer_counts_refusals = s.layer_counts_refusals or 'refused' in fields
                 if refused := int(fields.get('refused', 0)):
                     s.layer_refusals.append((t, refused, {k: int(v) for k, v in groups.get('refused_by', {}).items()
@@ -1726,11 +1571,8 @@ def evaluate(s: Session) -> list[Check]:
     unexpected = [h for h in s.hitches if h not in expected]
 
     def encloses(outer: tuple, inner: tuple) -> bool:
-        if outer[3] is not None and inner[3] is not None:
-            return (outer[3] <= inner[3] + NESTED_HITCH_SLACK_MS and
-                    inner[3] + inner[2] <= outer[3] + outer[2] + NESTED_HITCH_SLACK_MS)
-        return (outer[3] is None and inner[3] is None and outer[0] - inner[0] <= NESTED_HITCH_S and
-                outer[2] >= inner[2] - 0.1)
+        return (outer[3] <= inner[3] + NESTED_HITCH_SLACK_MS and
+                inner[3] + inner[2] <= outer[3] + outer[2] + NESTED_HITCH_SLACK_MS)
     # One entry per stall: its steps nest, each logged after the one inside it. The entry names the innermost step and
     # the stall's length (its outermost logged step's); where that is a millisecond or more longer than the innermost
     # step, the step it was spent within is named too, so a short inner line never stands for a long stall.
@@ -1983,8 +1825,8 @@ def capture_lock_checks(s: Session, add) -> None:
 
 
 def export_checks(s: Session, add) -> None:
-    """'Export': each pause by the class its line names (or ROUTINE_INACTIVE on older lines). A fault warns, a removed
-    device fails; routine pauses warn only as a storm, more often than once per 10 s for a minute."""
+    """'Export': each pause by the class its line names. A fault warns, a removed device fails; routine pauses warn
+    only as a storm, more often than once per 10 s for a minute."""
     faults: dict[str, float] = {}
     for t, reason, routine in s.pauses:
         if not routine:
@@ -2049,11 +1891,9 @@ def ui_checks(s: Session, add) -> None:
         layer_refusal_checks(s, add)
         return
     # Inferred alpha (Backbuffer, current alpha and the UI layer) must never decide while an accepted declared UI
-    # channel is offered (S1): that flattens scene as UI. Nor may an accepted alpha cover the whole frame while an
-    # exact HUD-less pair shows the scene (Stellar Blade's opaque tagged UI color, before 2026-10); since S2a, nor may
-    # an accepted inferred alpha stay accepted once contradictions met A2's revocation condition.
-    overrides, flattened, contradicted, disputes, handled, short = [], [], [], [], [], []
-    s2a = any(u.s2a for u in s.ui)
+    # channel is offered (S1): that flattens scene as UI. Nor may an accepted alpha stay accepted once contradictions
+    # met A2's revocation condition.
+    overrides, contradicted, disputes, handled, short = [], [], [], [], []
 
     def revoked(t: float, kind: str) -> float | None:
         """When an acceptance change within RESOLVE_S after t left fewer accepted sources of this kind."""
@@ -2072,55 +1912,30 @@ def ui_checks(s: Session, add) -> None:
             before = n
         return None
 
-    def judge(sample: UISample, text: str, c: int, unresolved: list, a2: str = '') -> None:
-        """A revocation within RESOLVE_S handles the sample; since S2a it names the A2 contradiction kind."""
-        when = revoked(sample.t, ALPHA_KINDS[c])
-        (handled if when is not None else unresolved).append(
-            text + (f', acceptance revoked {clock(when)}' + (f' ({a2})' if a2 else '') if when is not None else ''))
-
-    # Since S2a each accepted inferred alpha's sampled contradictions, as the ledger judges them (A2), and since
-    # selection revision 10 the declared alphas' one-way contradictions too: (time, text, judge, one way).
+    # Each accepted alpha's sampled contradictions, as the ledger judges them (A2): (time, text, judge, one way).
     a2: dict[int, list[tuple[float, str, str, bool]]] = {c: [] for c in DECLARED + INFERRED}
     for u in s.ui:
         if not u.pixels:
             continue
-        if u.blocking(admitted=True) and u.source in tuple(ALPHA_SOURCES[c] for c in u.kept_out()):
+        if u.blocking() and u.source in tuple(ALPHA_SOURCES[c] for c in INFERRED):
             overrides.append(f'{clock(u.t)} source {u.source} covered {100 * u.covered / u.pixels:.0f}%')
-        if u.s2a:
-            # A2 as the ledger judges it since S2a: an accepted, V1-valid inferred alpha (Backbuffer or current alpha;
-            # never the layer, the one-frame-late copy, E2) offered in the sample, contradicted (a) one way
-            # by a valid exact pair or (b) by coverage differing by at least 10% of the frame from every accepted,
-            # valid UIAlpha or UI color tag offered in the same sample.
-            masks = [u.alpha[c] for c in DECLARED if u.offered(c) and u.is_accepted(c) and u.valid(c)]
-            judged = INFERRED + (DECLARED if u.declared_one_way is not None else ())
-            for c in judged:
-                if not (u.offered(c) and u.is_accepted(c) and u.valid(c)) or c == 4:
-                    continue
-                if u.one_way(c):
-                    strong, against = u.one_way_counts(c)
-                    state = 'decided' if u.source == ALPHA_SOURCES[c] and not u.reused else 'accepted'
-                    a2[c].append((u.t, f'{clock(u.t)} {ALPHA_NAMES[c]} {state} while an exact HUD-less pair showed '
-                                  f'{percent(against, strong)} of its strong pixels as lit, unchanged scene',
-                                  'A2, one-way by an exact pair', True))
-                elif c in INFERRED and masks and min(abs(u.alpha[c] - d) for d in masks) * 10 >= u.pixels:
-                    a2[c].append((u.t, f'{clock(u.t)} {ALPHA_NAMES[c]} {100 * u.alpha[c] / u.pixels:.0f}% vs declared '
-                                  f'UI {100 * masks[0] / u.pixels:.1f}%', 'A2, declared coverage', False))
-            continue
-        # As the ledger's disagreement before S2a (A2): only an accepted UI channel with at most 1% invalid pixels
-        # and clean accepted presented alpha dispute.
-        masks = [u.alpha[c] for c in DEDICATED if u.offered(c) and u.is_accepted(c) and u.valid(c)]
-        for c in PRESENTED:
-            if (masks and u.offered(c) and u.is_accepted(c) and (u.invalid is None or not u.invalid[c])
-                    and min(abs(u.alpha[c] - d) for d in masks) * 10 >= u.pixels):
-                judge(u, f'{clock(u.t)} {ALPHA_NAMES[c]} {100 * u.alpha[c] / u.pixels:.0f}% vs UI '
-                         f'{100 * masks[0] / u.pixels:.1f}%', c, disputes)
-        _, unchanged, invalid = u.hudless
-        exact_pair = u.candidates & HUDLESS_PAIR == HUDLESS_PAIR and not invalid
-        if u.source in ALPHA_SOURCES:
-            c = ALPHA_SOURCES.index(u.source)
-            if u.is_accepted(c) and u.covered * 100 >= u.pixels * 99 and exact_pair and unchanged * 2 >= u.pixels:
-                judge(u, f'{clock(u.t)} {ALPHA_NAMES[c]} covered {100 * u.covered / u.pixels:.0f}% while HUD-less '
-                         f'showed {100 * unchanged / u.pixels:.0f}% of the scene', c, flattened)
+        # A2 as the ledger judges it: an accepted, V1-valid alpha (never the layer, the one-frame-late copy, E2)
+        # offered in the sample, contradicted (a) one way by a valid exact pair or, for Backbuffer and current alpha,
+        # (b) by coverage differing by at least 10% of the frame from every accepted, valid UIAlpha or UI color tag
+        # offered in the same sample.
+        masks = [u.alpha[c] for c in DECLARED if u.offered(c) and u.is_accepted(c) and u.valid(c)]
+        for c in INFERRED + DECLARED:
+            if not (u.offered(c) and u.is_accepted(c) and u.valid(c)) or c == 4:
+                continue
+            if u.one_way(c):
+                strong, against = u.one_way_counts(c)
+                state = 'decided' if u.source == ALPHA_SOURCES[c] and not u.reused else 'accepted'
+                a2[c].append((u.t, f'{clock(u.t)} {ALPHA_NAMES[c]} {state} while an exact HUD-less pair showed '
+                              f'{percent(against, strong)} of its strong pixels as lit, unchanged scene',
+                              'A2, one-way by an exact pair', True))
+            elif c in INFERRED and masks and min(abs(u.alpha[c] - d) for d in masks) * 10 >= u.pixels:
+                a2[c].append((u.t, f'{clock(u.t)} {ALPHA_NAMES[c]} {100 * u.alpha[c] / u.pixels:.0f}% vs declared '
+                              f'UI {100 * masks[0] / u.pixels:.1f}%', 'A2, declared coverage', False))
     # A2 revokes on its third contradiction within 2 s, so only such a run of sampled contradictions (a subset of the
     # ledger's samples) that no revocation of the kind followed is a defect: FAIL when it holds a one-way
     # contradiction, WARN for declared coverage alone. A contradiction a revocation followed is handled; a shorter one
@@ -2155,50 +1970,48 @@ def ui_checks(s: Session, add) -> None:
     # UI layer with colour but no alpha); the time such frames went unprotected is 'UI protection gaps'.
     rejected = []
     for u in s.ui:
-        if u.invalid is None or u.source or not u.pixels:
+        if u.source or not u.pixels:
             continue
         for c in DEDICATED:
             if u.offered(c) and not u.valid(c) and 0 < u.alpha[c] and u.alpha[c] * 10 < u.pixels * 9:
                 rejected.append(f'{clock(u.t)} {ALPHA_NAMES[c]} {100 * u.alpha[c] / u.pixels:.1f}% covered, '
                                 f'{u.invalid[c]} invalid pixels{", accepted" if u.is_accepted(c) else ""}')
-    if any(u.invalid is not None for u in s.ui):
+    if s.ui:
         add(Check('WARN' if rejected else 'PASS', 'UI channel admission',
                   f'{len(rejected)} samples left the frame unprotected after rejecting a selective UI channel '
                   'for invalid pixels' if rejected else 'no selective UI channel rejected for invalid pixels',
                   rejected[:6]))
     dispute_text = ('; accepted inferred alpha disagreed with an accepted UI alpha or UI color tag 3 times within 2 s '
-                    'without a revocation (A2)' if s2a else
-                    '; accepted presented alpha disagrees with an accepted UI channel')
+                    'without a revocation (A2)')
     short_text = (f'; {len(short)} sampled A2 contradictions shorter than the revocation condition (3 within 2 s) '
                   'were not revoked, as designed' if short else '')
     if s.counters is not None:
-        counter_checks(s.counters, add, overrides, flattened, contradicted, disputes, handled, dispute_text,
-                       refusals(s), short, short_text, s)
+        counter_checks(s.counters, add, overrides, contradicted, disputes, handled, dispute_text, refusals(s), short,
+                       short_text, s)
         held_none_checks(s, add)
         gap_checks(s, add)
         layer_refusal_checks(s, add)
         scene_checks(s, add)
         return
     states = Counter(u.detection for u in s.ui)
-    add(Check('FAIL' if overrides or flattened or contradicted else 'WARN' if disputes else 'PASS', 'UI protection',
+    add(Check('FAIL' if overrides or contradicted else 'WARN' if disputes else 'PASS', 'UI protection',
               ', '.join(f'{k} {v}' for k, v in states.most_common())
               + ('; inferred alpha decided beside an accepted declared UI channel' if overrides else '')
-              + ('; an accepted UI source flattened the visible scene' if flattened else '')
               + ('; an exact HUD-less pair contradicted an accepted alpha one way 3 times within 2 s without '
                  'a revocation (A2)' if contradicted else '')
               + (dispute_text if disputes else '') + short_text
               + ('; a contradicted source lost its acceptance'
-                 if handled and not disputes and not flattened and not contradicted else ''),
-              (overrides + flattened + contradicted or disputes or handled or short)[:6]))
+                 if handled and not disputes and not contradicted else ''),
+              (overrides + contradicted or disputes or handled or short)[:6]))
     gap_checks(s, add)
     layer_refusal_checks(s, add)
     scene_checks(s, add)
 
 
 def pre_ui_proofs(s: Session) -> list[tuple[float, str, str]]:
-    """Since fix 1: each pre-UI proof key (pre_ui:<format>:<space>) that the logged acceptance changes restored,
-    added (earned) or removed (lapsed, or forgotten when the Forget line beside the change names it: Forget logs the
-    change first, then the cleared keys)."""
+    """Each pre-UI proof key (pre_ui:<format>:<space>) that the logged acceptance changes restored, added (earned) or
+    removed (lapsed, or forgotten when the Forget line beside the change names it: Forget logs the change first, then
+    the cleared keys)."""
     held: set[str] = set()
     events = []
     for t, kind, _, keys in s.trust_events:
@@ -2216,29 +2029,25 @@ def pre_ui_proofs(s: Session) -> list[tuple[float, str, str]]:
 
 
 def refusals(s: Session) -> Counter:
-    """Sampled Auto samples without a mask by the add-on's own reason and refused candidate (F1), since S2a."""
-    return Counter((u.reason, u.refused) for u in s.ui
-                   if u.s2a and u.mode == 'auto' and not u.source and u.reason not in ('', 'decided'))
+    """Sampled Auto samples without a mask by the add-on's own reason and refused candidate (F1)."""
+    return Counter((u.reason, u.refused) for u in s.ui if u.mode == 'auto' and not u.source and u.reason != 'decided')
 
 
-def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flattened_sampled: list[str],
-                   contradicted_sampled: list[str], disputes: list[str], handled: list[str], dispute_text: str,
-                   refused: Counter, short: list[str] = (), short_text: str = '', s: Session | None = None) -> None:
+def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], contradicted_sampled: list[str],
+                   disputes: list[str], handled: list[str], dispute_text: str, refused: Counter, short: list[str] = (),
+                   short_text: str = '', s: Session | None = None) -> None:
     """Checks from the add-on's exact per-frame UI counters (docs/reshade-sbs.md, UI counters).
 
     They replace the sampled invariants: every Auto frame is counted, not one per 100 ms sample. Sampled lines still
-    give the times of examples, acceptance disputes, which no counter records, whether a contradicted accepted source
-    (since S2a one-way by an exact pair, before it a full-frame claim over the scene) was resolved by a revocation,
-    the refused candidates, and the time-based gap and scene checks. Stages (S1-S6) and rule IDs (such as H1 and P1)
-    named in the output are the UI decision framework's (docs/reshade-sbs.md, UI decision framework)."""
+    give the times of examples, acceptance disputes, which no counter records, whether an accepted source an exact pair
+    contradicted one way was resolved by a revocation, the refused candidates, and the time-based gap and scene checks.
+    Stages (S1-S6) and rule IDs (such as H1 and P1) named in the output are the UI decision framework's
+    (docs/reshade-sbs.md, UI decision framework)."""
     def get(key: str) -> int:
         return c.get(key, 0)
 
-    # Counter lines since S2a hold held={generated none}, reused and contradicted (T1, A2); before it three hold kinds
-    # with a cap and trusted_full. Since S2b they hold the scene guard's group scene={entered released refuted} (H1).
-    s2a, s2b = 'held.none' in c, 'scene.entered' in c
     auto, detected = get('auto_frames'), get('detection_frames')
-    held = sum(get(f'held.{k}') for k in (HOLD_KINDS if s2a else S1_HOLD_KINDS))
+    held = sum(get(f'held.{k}') for k in HOLD_KINDS)
     # Every reason of the inactive group counts, one a later add-on adds too: the known ones first, the rest by name.
     later = (key.split('.', 1)[1] for key in c if key.startswith('inactive.'))
     inactive_reasons = INACTIVE_REASONS + tuple(sorted(k for k in later if k not in INACTIVE_REASONS))
@@ -2251,118 +2060,50 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
                                        f'{detected + held + inactive} detected, held or inactive)')))
 
     # A contradicted accepted source keeps deciding until repeated contradictions revoke its acceptance, so a handled
-    # case counts its frames first. Since S2a the counter is contradicted: an accepted inferred alpha (3, 4 or 10)
-    # decided by itself while the same frame's valid exact pair contradicted it one way. A2 revokes on the third
-    # contradiction within 2 s and, by design, never on shorter ones, which the counter cannot tell apart; so the
-    # counted frames only fail with a sampled run of three within 2 s that no revocation followed. Before S2a
-    # trusted_full: an accepted alpha covering the frame over an exact pair that showed the scene, failing when a
-    # sample of them was not resolved by a revocation (trust.revoked_full), or when nothing of that kind was revoked.
-    # presented_over_dedicated (an inferred alpha deciding beside an accepted declared one, zero by construction since
-    # S1) is on counter lines through dc7e3c77 only, so a current line reads it as 0.
-    overrides = get('presented_over_dedicated')
-    if s2a:
-        flattened, revoked, sampled = get('contradicted'), get('trust.revoked_exact'), contradicted_sampled
-        # Inferred alpha per frame; since selection revision 10 any accepted alpha, declared included, per sample.
-        contradiction = (f'; an exact HUD-less pair contradicted a deciding accepted alpha one way (A2) in '
-                         f'{flattened} frames')
-        resolution = (f' before {revoked} one-way revocations' if revoked else
-                      ', no sampled run reaching the revocation condition (3 within 2 s)')
-        unresolved = bool(sampled)
-    else:
-        flattened, revoked, sampled = get('trusted_full'), get('trust.revoked_full'), flattened_sampled
-        contradiction = (f'; an accepted UI source covered the frame while an exact HUD-less pair showed the scene in '
-                         f'{flattened} frames')
-        resolution = f' before {revoked} revocations of such a source'
-        unresolved = flattened and (sampled or not revoked)
-    names = S2B_SOURCE_NAMES if s2b else SOURCE_NAMES
-    sources = [(source, get(f'decided.{source}')) for source in names]
-    add(Check('FAIL' if overrides or unresolved else 'WARN' if disputes else 'PASS', 'UI protection',
-              'decided ' + (', '.join(f'{names[k]} ({k}) {percent(n, detected)}' for k, n in sources if n)
+    # case counts its frames first: contradicted counts the frames an accepted alpha decided by itself while the same
+    # frame's valid exact pair contradicted it one way. A2 revokes on the third contradiction within 2 s and, by
+    # design, never on shorter ones, which the counter cannot tell apart; so the counted frames only fail with a
+    # sampled run of three within 2 s that no revocation followed.
+    counted, revoked, sampled = get('contradicted'), get('trust.revoked_exact'), contradicted_sampled
+    contradiction = (f'; an exact HUD-less pair contradicted a deciding accepted alpha one way (A2) in {counted} '
+                     'frames')
+    resolution = (f' before {revoked} one-way revocations' if revoked else
+                  ', no sampled run reaching the revocation condition (3 within 2 s)')
+    sources = [(source, get(f'decided.{source}')) for source in SOURCE_NAMES]
+    add(Check('FAIL' if sampled else 'WARN' if disputes else 'PASS', 'UI protection',
+              'decided ' + (', '.join(f'{SOURCE_NAMES[k]} ({k}) {percent(n, detected)}' for k, n in sources if n)
                             or 'nothing') + ' of detection frames'
-              + (f'; inferred alpha decided beside an accepted declared UI channel in {overrides} frames'
-                 if overrides else '')
-              + (contradiction + ('' if unresolved else resolution) if flattened else
+              + (contradiction + ('' if sampled else resolution) if counted else
                  '; an exact HUD-less pair contradicted an accepted alpha one way 3 times within 2 s without '
                  'a revocation (A2)' if sampled else '')
               + (dispute_text if disputes else '') + short_text
-              + ('; a contradicted source lost its acceptance' if handled and not disputes and not unresolved else ''),
+              + ('; a contradicted source lost its acceptance' if handled and not disputes and not sampled else ''),
               (overrides_sampled + sampled or disputes or handled or list(short))[:6]))
 
-    if s2b:
-        full_frame_s2b(c, add, detected)
-    else:
-        full = {k: get(f'decided.{k}') for k in (6, 8, 9)}
-        visible, routes = get('full_d.visible'), full[8] + full[9]
-        # Before S2b full_d counts the exact full change-set (6) with the held routes (8, 9). An exact full set decides
-        # without a hold, and over a visible scene it is intended for an accepted exact pair (P1); it is wrong only
-        # before the pair's first selective sample, which was an open question of the framework. So visible samples
-        # warn only when a held route decided: the sample that releases a held route decided under the hold before its
-        # own evidence read the scene visible, so each release counts one, and these counters cannot tell a release
-        # from a held route over a visible scene (H1); only since S2b are releases counted.
-        exact_note = ('an exact full change-set (6) over a visible scene is intended for an accepted exact pair (P1); '
-                      'whether a pair decides one before its first selective sample is an open question')
-        add(Check('WARN' if visible and routes else 'INFO' if visible else 'PASS', 'UI full frame',
-                  f'{sum(full.values())} full-frame frames (6: {full[6]}, 8: {full[8]}, 9: {full[9]}); samples that '
-                  f'decided one read the scene hidden {get("full_d.hidden")}, ambiguous {get("full_d.ambiguous")}, '
-                  f'visible {visible}, invalid or unmeasured {get("full_d.invalid")}; depth not current on '
-                  f'{get("full.depth_not_current")} detection frames'
-                  + ('' if not visible else
-                     f'; {visible} full-frame samples read the scene visible: each release of a held hidden-scene '
-                     'route (8, 9) shows one, more than one per hidden scene is a held route over a visible scene '
-                     '(H1); logs before S2b do not count releases' + (f'; samples of source 6 are counted with them, '
-                                                                      f'and {exact_note}' if full[6] else '')
-                     if routes else f'; {visible} samples of source 6 read the scene visible: {exact_note}')))
+    full_frame_checks(c, add, detected)
 
     # A whole-frame mask from alpha (an accepted source 1-4 or 10 covering at least 99%; only accepted sources decide)
     # pins the frame flat even over a visible scene: an accepted source's pin weight is saturate(8 alpha) at any
-    # coverage (P1, the opacity ruling), so it is reported, not warned. The wrong cases have their own checks: an
-    # accepted source an exact pair contradicts and no revocation resolved (UI protection; one way since S2a, a full
-    # claim over the scene before it), and unaccepted inferred alpha (UI inferred alpha). Dims and tints over dark or
-    # changed pixels never meet the one-way test. Since S2b an exact full change-set (6) is counted with these accepted
-    # whole-frame decisions. Builds before selection revision 9 measured D on the samples after such a decision
-    # (full_alpha_d, listed when it measured something); builds from revision 9 through dc7e3c77 logged it as 0 and
-    # later lines omit it.
+    # coverage (P1, the opacity ruling), so it is reported, not warned, with the exact full change-sets (6). The wrong
+    # case has its own check: an accepted source an exact pair contradicts one way and no revocation resolved (UI
+    # protection). Dims and tints over dark or changed pixels never meet the one-way test.
     #
     # Only a same-batch Backbuffer pair is exact (E2): a Present-counted pair can belong to another frame and then
     # differs everywhere, so a session whose gate offered HUD-less pairs but never a same-batch one cannot have decided
     # 6 correctly (Hogwarts Legacy 10-05, which tagged only HUDLessColor: whole gameplay seconds flat).
-    full_alpha, alpha_visible = get('full_alpha'), get('full_alpha_d.visible')
-    measured = sum(get(f'full_alpha_d.{k}') for k in ('hidden', 'ambiguous', 'visible', 'invalid'))
-    exact = get('decided.6') if s2b else 0
-    counted_only = bool(exact and s is not None and s.gate_counted and not s.gate_batch)
-    intended = (f'; {alpha_visible} samples pinned an accepted whole-frame decision flat over a visible scene, as '
-                'intended (P1)' if alpha_visible and not counted_only else '')
-    breakdown = (f'; samples of them read the scene hidden {get("full_alpha_d.hidden")}, ambiguous '
-                 f'{get("full_alpha_d.ambiguous")}, visible {alpha_visible}, invalid or unmeasured '
-                 f'{get("full_alpha_d.invalid")}{intended}' if measured else '')
-    if counted_only:
+    full_alpha, exact = get('full_alpha'), get('decided.6')
+    if exact and s is not None and s.gate_counted and not s.gate_batch:
         add(Check('FAIL', 'UI full frame pairing',
                   f'{exact} frames ({percent(exact, detected)} of detection frames) decided the whole frame flat (6) '
                   f'while the game offered no same-batch Backbuffer pair ({s.gate_counted} Present-counted HUD-less '
                   'pairings, 0 same-batch): only a same-batch pair is exact (E2), so these flattened frames whose '
                   'pair may belong to another frame'))
-    if s2b and full_alpha + exact:
+    if full_alpha + exact:
         add(Check('INFO', 'UI full alpha',
                   f'{full_alpha} frames decided a whole-frame alpha and {exact} an exact full change-set (6) '
-                  f'({percent(full_alpha + exact, detected)} of detection frames)' + breakdown))
-    elif full_alpha:
-        add(Check('INFO', 'UI full alpha',
-                  f'{full_alpha} frames ({percent(full_alpha, detected)} of detection frames) decided a whole-frame '
-                  'alpha' + breakdown))
-    elif 'full_alpha' in c:
-        add(Check('PASS', 'UI full alpha', 'no frame decided a whole-frame alpha'
-                  + (' or an exact full change-set (6)' if s2b else '')))
-
-    # Since S1 only accepted candidates decide, so the word is zero by construction: a count is a defect. Counters
-    # from before S1 (trust.opaque_set rather than trust.discarded) still let the untrusted pass decide. Only counter
-    # lines through dc7e3c77 carry the word; a later line no longer measures it, so it has no check.
-    if 'untrusted_inferred' in c:
-        inferred, s1 = get('untrusted_inferred'), 'trust.discarded' in c
-        add(Check(('FAIL' if s1 else 'WARN') if inferred else 'PASS', 'UI inferred alpha',
-                  f'{inferred} frames ({percent(inferred, detected)} of detection frames) decided from unaccepted '
-                  'inferred alpha (UI layer, Backbuffer or current alpha)'
-                  + ('; only accepted candidates decide since S1' if s1 else '; expected before S1') if inferred else
-                  'no frame decided from unaccepted inferred alpha'))
+                  f'({percent(full_alpha + exact, detected)} of detection frames)'))
+    else:
+        add(Check('PASS', 'UI full alpha', 'no frame decided a whole-frame alpha or an exact full change-set (6)'))
     # A Present-counted (inexact) pair proposes the frame; its pixels decide whether the difference is UI (V2: a partial
     # change set within broad unchanged scene in clean tiles), so a partial difference from it is expected wherever a
     # game offers no same-batch pair. Only its whole-frame claim needs the hidden-scene guard (H1 d).
@@ -2372,25 +2113,20 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
               'from a Present-counted pair, validated by its own pixels (V2)' if inexact else
               'no HUD-less difference decided from an inexact pair'))
 
-    if s2a:
-        # T1: a generated Present shows the decision of the real frame it shows (generated) or has none (none); a real
-        # frame without a decision of its own reuses the previous real frame's once, counted as a detection frame.
-        reused = get('reused')
-        add(Check('INFO', 'UI holds',
-                  f'generated {get("held.generated")}, none {get("held.none")} ({percent(held, auto)} of Auto frames); '
-                  f'{reused} detection frames ({percent(reused, detected)}) reused the previous real frame\'s decision '
-                  '(T1)'))
-    else:
-        add(Check('INFO', 'UI holds',
-                  ', '.join(f'{k.replace("_", " ")} {get(f"held.{k}")}' for k in S1_HOLD_KINDS)
-                  + f' ({percent(held, auto)} of Auto frames); {get("held.cap")} frames wanted a hold past the cap'))
+    # T1: a generated Present shows the decision of the real frame it shows (generated) or has none (none); a real
+    # frame without a decision of its own reuses the previous real frame's once, counted as a detection frame.
+    reused = get('reused')
+    add(Check('INFO', 'UI holds',
+              f'generated {get("held.generated")}, none {get("held.none")} ({percent(held, auto)} of Auto frames); '
+              f'{reused} detection frames ({percent(reused, detected)}) reused the previous real frame\'s decision '
+              '(T1)'))
     none = [(reason.replace('_', ' '), get(f'none.{reason}')) for reason in NO_MASK_REASONS]
     skipped = [(reason.replace('_', ' '), get(f'inactive.{reason}')) for reason in inactive_reasons]
-    unheld = [('generated Presents without a decision', get('held.none'))] if s2a else []
+    unheld = [('generated Presents without a decision', get('held.none'))]
 
     def shares(parts: list[tuple[str, int]]) -> str:
         return ', '.join(f'{name} {percent(n, auto)}' for name, n in parts if n)
-    # Since S2a the sampled lines name each own decision's refused candidate (F1); the counters count reasons only.
+    # The sampled lines name each own decision's refused candidate (F1); the counters count reasons only.
     named = ', '.join(f'{reason.replace("_", " ")}' + (f' ({KIND_NAMES[kind]})' if kind in KIND_NAMES else '')
                       + f' {n}' for (reason, kind), n in refused.most_common(6))
     if s is not None and auto:
@@ -2403,23 +2139,13 @@ def counter_checks(c: dict[str, int], add, overrides_sampled: list[str], flatten
               + (f'; {shares(unheld)}' if shares(unheld) else '')
               + (f'; sampled reasons with the refused candidate: {named}' if named else '')
               + (f'; no UI layer all session: {cause}' if cause else '')))
-    if s2a:
-        add(Check('INFO', 'UI trust events',
-                  f'earned {get("trust.earned")}, revoked one way by an exact pair {get("trust.revoked_exact")}, '
-                  f'revoked by a declared alpha\'s coverage {get("trust.revoked_declared")}, lapsed '
-                  f'{get("trust.lapsed")}, restored {get("trust.restored")}, legacy entries discarded '
-                  f'{get("trust.discarded")}, forgotten {get("trust.forgotten")}'
-                  # Since 10-22: selective layer samples that earned nothing because their colour without coverage
-                  # outnumbered their opaque pixels (ui_selection::layer_uncovered_color).
-                  + (f'; {get("trust.uncovered_color")} selective layer samples earned nothing for colour without '
-                     'coverage (A1)' if 'trust.uncovered_color' in c else '')))
-    else:
-        add(Check('INFO', 'UI trust events',
-                  f'earned {get("trust.earned")}, revoked by a full claim over the scene {get("trust.revoked_full")}, '
-                  f'revoked by presented disagreement {get("trust.revoked_presented")}, lapsed {get("trust.lapsed")}, '
-                  f'restored {get("trust.restored")}, '
-                  + (f'legacy entries discarded {get("trust.discarded")}' if 'trust.discarded' in c else
-                     f'opaque proof set {get("trust.opaque_set")} and cleared {get("trust.opaque_cleared")}')))
+    # uncovered_color: selective layer samples that earned nothing because their colour without coverage outnumbered
+    # their opaque pixels (ui_selection::layer_uncovered_color).
+    add(Check('INFO', 'UI trust events',
+              f'earned {get("trust.earned")}, revoked one way by an exact pair {get("trust.revoked_exact")}, '
+              f'revoked by a declared alpha\'s coverage {get("trust.revoked_declared")}, lapsed {get("trust.lapsed")}, '
+              f'restored {get("trust.restored")}, forgotten {get("trust.forgotten")}; {get("trust.uncovered_color")} '
+              'selective layer samples earned nothing for colour without coverage (A1)'))
 
 
 def stream_fps_at(s: Session, t: float) -> float:
@@ -2437,22 +2163,14 @@ def pressured(usage: int, budget: int) -> bool:
 
 
 def sdk_note(result: int | None) -> str:
-    """An observation loss's non-zero SDK result, named when it is Streamline's out-of-VRAM warning."""
-    if not result:
-        return ''
-    return f' sdk_result={result}' + (' (eWarnOutOfVRAM)' if result == SL_WARN_OUT_OF_VRAM else '')
+    """An observation loss's non-zero SDK result."""
+    return f' sdk_result={result}' if result else ''
 
 
 def vram_checks(s: Session, add) -> None:
-    """Since 10-22: the game's local video memory against its budget. A depth loss, hitch or Present gap whose own
-    sample (the latest, taken on that Present before its depth preparation) shows pressure warns; otherwise the
-    windows' extremes are INFO. Older logs have no samples and no check. Streamline's out-of-VRAM warnings are INFO
-    when accepted (since 10-22) and WARN when an older add-on lost depth on them."""
-    warned = sum(1 for result in s.loss_sdk.values() if result == SL_WARN_OUT_OF_VRAM)
-    if warned:
-        add(Check('WARN', 'Streamline VRAM warnings', f'{warned} sampled observation loss(es) came from '
-                  'eWarnOutOfVRAM, a warning this add-on treated as an SDK failure: every such call lost its depth '
-                  '(fixed 10-22)'))
+    """The game's local video memory against its budget. A depth loss, hitch or Present gap whose own sample (the
+    latest, taken on that Present before its depth preparation) shows pressure warns; otherwise the windows' extremes
+    are INFO. Streamline's out-of-VRAM warnings, which the add-on accepts, are INFO."""
     if s.sl_vram_warnings:
         add(Check('INFO', 'Streamline VRAM warnings', f'Streamline answered {s.sl_vram_warnings} call(s) with '
                   'eWarnOutOfVRAM (the game over its video-memory budget); each was accepted and kept its depth'))
@@ -2682,10 +2400,10 @@ def layer_copy_checks(s: Session, add) -> None:
     frames could read a UI layer that missed a whole stream frame of UI changes (a UI distortion risk). A gap of
     LAYER_RECENCY_MS or more warns in any window: the layer was then no longer offered at all (a ring that stayed
     full, which backpressure never causes). Shorter gaps (The Witcher 3's ~590 Presents/s exit screen 10-07: one skip
-    costs about 3 ms), skips outside the streamed export or without the host log's stream rate, and skips on lines
-    before 10-07, whose gap is not logged, are INFO. A full-ring line after the last timing line names copies whose
-    count was never logged (before 10-07 a runtime reset dropped its partial window). The gap is a maximum per window,
-    so neither the window's other play nor its average rates can hide a burst of skips."""
+    costs about 3 ms) and skips outside the streamed export or without the host log's stream rate are INFO. A
+    full-ring line after the last timing line names copies whose count was never logged (the process ended before
+    another timing line). The gap is a maximum per window, so neither the window's other play nor its average rates
+    can hide a burst of skips."""
     if s.layer_targets_dropped:
         # More qualifying targets were cleared within the clear gap than the tracker holds: those cleared first in a
         # frame are not tracked (bounded by design; the layer is the confirmed target cleared last). INFO: a UI
@@ -2702,7 +2420,7 @@ def layer_copy_checks(s: Session, add) -> None:
 
     def windows_of(n: int) -> str:
         return f'{n} timing {"window" if n == 1 else "windows"}'
-    stale, stuck, bounded, unstreamed, unjudged, unlogged_gap = [], [], [], [], [], []
+    stale, stuck, bounded, unstreamed, unjudged = [], [], [], [], []
     for end, length, presents, copies, skipped, _, mean, peak, gap in windows:
         if not skipped:
             continue
@@ -2710,13 +2428,12 @@ def layer_copy_checks(s: Session, add) -> None:
         start = end - length
         frame_ms = 1000.0 / stream_fps_at(s, start) if s.stream_fps else None
         streamed = any(a < end and (b is None or b > start) for a, b in s.streamed)
-        cost = ('refresh gap not logged' if gap is None else
-                f'longest refresh gap {gap:.1f} ms' + (f' of a {frame_ms:.1f} ms stream frame' if frame_ms else ''))
+        cost = f'longest refresh gap {gap:.1f} ms' + (f' of a {frame_ms:.1f} ms stream frame' if frame_ms else '')
         row = (f'{span(start, end)} ({length:.1f} s): skipped {skipped} of {copies + skipped} copies, {cost} '
                f'({presents / length:.0f} Presents/s, presents_since_copy mean {mean:.2f} max {peak})'
                + ('' if streamed else ', not streamed'))
-        (unlogged_gap if gap is None else stuck if gap >= LAYER_RECENCY_MS else unstreamed if not streamed else
-         unjudged if not frame_ms else stale if gap > frame_ms else bounded).append(row)
+        (stuck if gap >= LAYER_RECENCY_MS else unstreamed if not streamed else unjudged if not frame_ms else
+         stale if gap > frame_ms else bounded).append(row)
     if stale or stuck:
         parts = []
         if stale:
@@ -2726,21 +2443,18 @@ def layer_copy_checks(s: Session, add) -> None:
             parts.append(f'{windows_of(len(stuck))} with skipped layer copies leaving the layer unrefreshed for '
                          f'{LAYER_RECENCY_MS:.0f} ms or more, after which it is no longer offered (a ring that stayed '
                          'full)')
-        add(Check('WARN', 'UI layer copies', '; '.join(parts),
-                  (stuck + stale + unjudged + unstreamed + bounded + unlogged_gap)[:6]))
+        add(Check('WARN', 'UI layer copies', '; '.join(parts), (stuck + stale + unjudged + unstreamed + bounded)[:6]))
         return
-    kept = unjudged + unstreamed + bounded + unlogged_gap
+    kept = unjudged + unstreamed + bounded
     groups = [(bounded, 'every refresh gap within a stream frame'), (unstreamed, 'outside the streamed export'),
-              (unjudged, 'stream rate unknown (pass --host-log to judge them)'),
-              (unlogged_gap, 'refresh gap not logged (an add-on before 10-07)')]
+              (unjudged, 'stream rate unknown (pass --host-log to judge them)')]
     parts = ['no logged timing window counted layer copies' if not windows else
              f'no layer copy skipped in {windows_of(len(windows))}' if not kept else
              f'{windows_of(len(kept))} skipped layer copies (a full ring): '
              + ', '.join(f'{len(rows)} {label}' for rows, label in groups if rows)]
     if unlogged:
         parts.append(f'copies skipped from {clock(unlogged[0])}, after the last timing line, were not counted in any '
-                     "logged window, so their refresh gap is unknown (an add-on before 10-07 dropped a runtime "
-                     "reset's partial window, or the process ended first)")
+                     'logged window, so their refresh gap is unknown (the process ended first)')
     add(Check('INFO' if kept or unlogged else 'PASS', 'UI layer copies', '; '.join(parts), kept[:6]))
 
 
@@ -2752,7 +2466,7 @@ def held_none_checks(s: Session, add) -> None:
     generation, every Present classified generated before the HUD-less fix)."""
     changed = [(t, c) for i, (t, c) in enumerate(s.counter_history)
                if i == 0 or c.get('auto_frames', 0) != s.counter_history[i - 1][1].get('auto_frames', 0)]
-    if not changed or 'held.none' not in changed[-1][1]:
+    if not changed:
         return
     windows: list[list] = []
     for (a, before), (b, after) in zip(changed, changed[1:]):
@@ -2784,9 +2498,9 @@ def held_none_checks(s: Session, add) -> None:
                'decision' for a, b, n, auto in listed][:6]))
 
 
-def full_frame_s2b(c: dict[str, int], add, detected: int) -> None:
-    """'UI full frame' from counter lines since S2b: H1 (source 8) and its scene guard (docs/reshade-sbs.md, UI
-    decision framework, H1 and M5).
+def full_frame_checks(c: dict[str, int], add, detected: int) -> None:
+    """'UI full frame' from the counter line: H1 (source 8) and its scene guard (docs/reshade-sbs.md, UI decision
+    framework, H1 and M5).
 
     full_d counts H1 samples only. H1 shows the frame flat only under a held hidden verdict, and one valid visible
     sample releases that hold at once: the releasing sample decided 8 under the hold before its own evidence read the
@@ -2947,59 +2661,25 @@ def gap_checks(s: Session, add) -> None:
 
 
 def scene_checks(s: Session, add) -> None:
-    """Hidden-scene evidence: how often full-frame UI covered a hidden scene, and runs of the presented frame
-    reading hidden while no UI source decided, which nothing protected (reported by the first-run shadow of builds
-    before selection revision 9, removed since).
-
-    Before S2b a sample whose frame was full-frame UI (8 or 9) and whose own evidence read the presented frame
-    visible is a route's exit: that verdict releases the hold at once, so each hidden scene that ends shows one, and a
-    false hidden verdict shows one too. Exits are counted, not judged; many short episodes deserve a look. Since S2b
-    the H1 samples (8) are listed with the pre-UI scene image whose claim acted (H1 (d)), and the scene guard's
-    entries, releases and refutations come from the counter line (M5); hidden samples whose layer pre-UI claim could
-    not act because the layer was not proven are counted: in S2b lines a layer claim (0x80) without the guard's D
-    proof, since fix 1 an offered layer without coverage whose signature has no ledger proof yet (an unproven layer no
-    longer claims)."""
-    scenes = [u for u in s.ui if u.scene]
-    if not scenes:
+    """Hidden-scene evidence: how often full-frame UI covered a hidden scene (H1). The H1 samples (8) are listed with
+    the pre-UI scene image whose claim acted (H1 (d)), and the scene guard's entries, releases and refutations come
+    from the counter line (M5); hidden samples with an offered layer without coverage whose signature has no ledger
+    proof yet (an unproven layer does not claim) are counted."""
+    if not s.ui:
         return
-    # Logs before selection revision 9: the first-run shadow's hidden runs without a decided source. Consecutive lines
-    # report the same run with a growing length, so each run is listed once, by its start, at its longest.
-    runs: dict[float, tuple[float, UISample]] = {}
-    for u in scenes:
-        if not u.source and u.scene.hidden_ms >= SHADOW_HIDDEN_WARN_MS:
-            start = u.t - u.scene.hidden_ms / 1000.0
-            key = next((k for k in runs if abs(k - start) <= UI_LINE_PERIOD_S / 10), start)
-            if key not in runs or u.scene.hidden_ms > runs[key][1].scene.hidden_ms:
-                runs[key] = (start, u)
-    uncovered = [f'{clock(start)} {u.scene.hidden_ms} ms{" (first-run shadow)" if u.scene.shadow else ""}'
-                 for start, u in sorted(runs.values(), key=lambda r: r[0])]
-    guarded = [u for u in scenes if u.scene.s2b]
-    if guarded:
-        h1 = [u for u in guarded if u.source == 8]
-        pre_ui = Counter(u.scene.pre_ui_image for u in h1 if u.scene.pre_ui_claim())
-        c = s.counters if s.counters is not None and 'scene.entered' in s.counters else None
-        guard = (f'entered {c["scene.entered"]}, released {c["scene.released"]}, refuted {c["scene.refuted"]}' if c
-                 else f'hidden hold held in {sum(1 for u in guarded if u.scene.guard[0])} samples (no counter line)')
-        detail = (f'H1 hidden scene (8) in {len(h1)} samples (pre-UI image: hudless {pre_ui["hudless"]}, layer '
-                  f'{pre_ui["layer"]}), {guard}; {sum(u.scene.ran for u in scenes)} of {len(scenes)} samples '
-                  'measured')
-        unproven = [u for u in guarded if u.scene.pre_ui_image == 'layer' and u.scene.proven is False and u.hidden()
-                    and (u.bare_layer() if u.scene.fix1 else u.scene.claims & CLAIM_PRE_UI)]
-        fix1 = sum(1 for u in unproven if u.scene.fix1)
-        if fix1:
-            detail += (f'; {fix1} hidden samples had an unproven pre-UI layer (no proof yet: {PRE_UI_PROOF_RULE})')
-        if len(unproven) > fix1:
-            detail += (f'; {len(unproven) - fix1} hidden samples had an unproven pre-UI layer (no gameplay sample had '
-                       'read it within 0.03 of the presented frame, the proof of S2b lines)')
-    else:
-        covered = Counter(u.source for u in scenes if u.source in (8, 9))
-        exits = sum(1 for u in scenes if u.source in (8, 9) and u.scene.valid and u.scene.verdict == 'visible')
-        detail = (f'layer route (8) in {covered[8]} samples, HUD-less route (9) in {covered[9]}, '
-                  f'{exits} released by a visible verdict; {sum(u.scene.ran for u in scenes)} of {len(scenes)} '
-                  'samples measured')
-    if uncovered:
-        detail += f'; the presented frame read hidden for at least {SHADOW_HIDDEN_WARN_MS} ms with no UI source'
-    add(Check('WARN' if uncovered else 'INFO', 'Hidden scene', detail, uncovered[:6]))
+    h1 = [u for u in s.ui if u.source == 8]
+    pre_ui = Counter(u.scene.pre_ui_image for u in h1 if u.scene.pre_ui_claim())
+    c = s.counters
+    guard = (f'entered {c.get("scene.entered", 0)}, released {c.get("scene.released", 0)}, refuted '
+             f'{c.get("scene.refuted", 0)}' if c is not None
+             else f'hidden hold held in {sum(1 for u in s.ui if u.scene.guard[0])} samples (no counter line)')
+    detail = (f'H1 hidden scene (8) in {len(h1)} samples (pre-UI image: hudless {pre_ui["hudless"]}, layer '
+              f'{pre_ui["layer"]}), {guard}; {sum(u.scene.ran for u in s.ui)} of {len(s.ui)} samples measured')
+    unproven = sum(1 for u in s.ui
+                   if u.scene.pre_ui_image == 'layer' and not u.scene.proven and u.hidden() and u.bare_layer())
+    if unproven:
+        detail += f'; {unproven} hidden samples had an unproven pre-UI layer (no proof yet: {PRE_UI_PROOF_RULE})'
+    add(Check('INFO', 'Hidden scene', detail))
 
 
 def host_stream_fps(path: Path, start: datetime, end: datetime) -> list[tuple[datetime, float]]:

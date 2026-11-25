@@ -223,7 +223,7 @@ def rescrub() -> int:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-    parser.add_argument('name', nargs='?', help='fixture name, for example stellar_blade_1022')
+    parser.add_argument('name', nargs='?', help='fixture name, for example stellar_blade_1124')
     parser.add_argument('game', nargs='?', help='the game, for example "Stellar Blade"')
     parser.add_argument('log', nargs='?', type=Path,
                         help="the game's saved ReShade.log, with its original modification time")

@@ -148,7 +148,7 @@ namespace {
   // Acceptance an earlier session of the game remembered (provisional).
   void restore(alpha_auto_policy &session, const std::string &stored, std::size_t expected) {
     const auto result = session.restore(stored);
-    require(result.restored == expected && !result.discarded, "Restoring " + stored + " did not restore " + std::to_string(expected) + " entries");
+    require(result.restored == expected, "Restoring " + stored + " did not restore " + std::to_string(expected) + " entries");
   }
 
   // ---------------------------------------------------------------- decision texels
@@ -1429,11 +1429,10 @@ namespace {
       }
       check_counters(s, reconfirm ? "reconfirmed restore" : "lapsed restore");
     }
-    // A legacy TrustedUISources bitmask is discarded and counted; keys of
-    // this format beside it are restored (A1).
+    // Entries that are not keys are ignored; a key beside them is restored (A1).
     alpha_auto_policy session;
     const auto result = session.restore("4,0x1f," + backbuffer);
-    require(result.restored == 1 && result.discarded == 2 && session.counters()[ui_counter::trust_discarded] == 2 && session.stored() == backbuffer, "Legacy acceptance entries were not discarded beside a key");
+    require(result.restored == 1 && session.stored() == backbuffer, "A key was not restored beside entries that are not keys");
   }
 
   void invalid_declared_source_never_lapses_and_forget_clears() {
@@ -1778,7 +1777,7 @@ namespace {
     }
     const auto c = session.counters();
     require(heard.empty() && session.stored().empty() && s.trust.empty() && session.decision().state == alpha_auto_state::manual_on, "Manual On touched the ledger");
-    for (const auto event : {ui_counter::trust_earned, ui_counter::trust_revoked_exact, ui_counter::trust_revoked_declared, ui_counter::trust_lapsed, ui_counter::trust_restored, ui_counter::trust_discarded, ui_counter::trust_forgotten}) {
+    for (const auto event : {ui_counter::trust_earned, ui_counter::trust_revoked_exact, ui_counter::trust_revoked_declared, ui_counter::trust_lapsed, ui_counter::trust_restored, ui_counter::trust_forgotten}) {
       require(!c[event], "Manual On counted an acceptance event");
     }
     check_counters(s, "manual On");
@@ -3538,7 +3537,7 @@ namespace {
     const auto c = session.counters();
     require(c[ui_counter::scene_entered] == 3 && c[ui_counter::scene_released] == 3 && c[ui_counter::full_d_visible] == 3 && c[ui_counter::full_d_visible] <= c[ui_counter::scene_released] && !c[ui_counter::scene_refuted], "The three visits were not counted entered and released three times");
     require(session.stored() == proof && session.pre_ui_proven(p.signatures.of(kind::ui_layer)) && !session.accepts(p.signatures.of(kind::ui_layer)) && c[ui_counter::trust_earned] == 1, "The session did not end with the layer's proof as its only key");
-    for (const auto event : {ui_counter::trust_revoked_exact, ui_counter::trust_revoked_declared, ui_counter::trust_lapsed, ui_counter::trust_restored, ui_counter::trust_discarded, ui_counter::trust_forgotten}) {
+    for (const auto event : {ui_counter::trust_revoked_exact, ui_counter::trust_revoked_declared, ui_counter::trust_lapsed, ui_counter::trust_restored, ui_counter::trust_forgotten}) {
       require(!c[event], "The Stellar Blade SDR stream counted an acceptance event other than the proof");
     }
     check_counters(s, "Stellar Blade SDR menu visits");
@@ -4439,20 +4438,6 @@ namespace {
         }
         if (const auto at = line.find("accepted UI sources are now "); at != std::string::npos) {
           std::printf("%s logged    %s\n", stamp.c_str(), text_after(line, at + 28, ";").c_str());
-          ++logged;
-          continue;
-        }
-        if (const auto at = line.find("discarded "); at != std::string::npos && line.find("legacy UI trust entries") != std::string::npos) {
-          std::printf("%s discarded %s\n", stamp.c_str(), text_after(line, at + 10, ";").c_str());
-          continue;
-        }
-        // Earlier versions: a trust bitmask, discarded by this one.
-        if (const auto at = line.find("restored alpha trust "); at != std::string::npos) {
-          std::printf("%s legacy    restored %s (discarded since S1)\n", stamp.c_str(), text_after(line, at + 21, " ").c_str());
-          continue;
-        }
-        if (const auto at = line.find("alpha trust is now "); at != std::string::npos) {
-          std::printf("%s legacy    logged %s\n", stamp.c_str(), text_after(line, at + 19, ";").c_str());
           ++logged;
           continue;
         }

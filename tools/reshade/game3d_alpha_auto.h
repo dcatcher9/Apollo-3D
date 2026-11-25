@@ -340,12 +340,10 @@ namespace sunshine_game3d {
     // (a TrustedUISources value): keys separated by ',' or '\0', at most
     // max_stored_ui_sources, duplicates once. Restored entries decide from the
     // first frame and are revoked by the same contradiction, but they are
-    // provisional (see observe). Anything that is not a signature key, such as
-    // the integer bitmask of earlier versions, is discarded: each source is
-    // accepted again by its own evidence. Never reported to the listener.
+    // provisional (see observe). An entry that is not a signature key is
+    // ignored. Never reported to the listener.
     struct restore_result {
-      std::size_t restored{}, discarded{};
-      std::string discarded_text; // The discarded entries, ',' separated.
+      std::size_t restored{};
     };
     restore_result restore(std::string_view stored) {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -356,14 +354,7 @@ namespace sunshine_game3d {
         const auto text = stored.substr(0, end);
         stored.remove_prefix(end == std::string_view::npos ? stored.size() : end + 1);
         const auto parsed = ui_selection::signature::parse(text);
-        if (!parsed) {
-          if (text.find_first_not_of(" \t\r\n") == std::string_view::npos) continue;
-          ++result.discarded;
-          ++counters_[ui_counter::trust_discarded];
-          if (!result.discarded_text.empty()) result.discarded_text += ',';
-          result.discarded_text.append(text);
-          continue;
-        }
+        if (!parsed) continue;
         if (seen == max_stored_ui_sources) break;
         ++seen;
         auto &entry = at(*parsed);
@@ -423,8 +414,7 @@ namespace sunshine_game3d {
     // session counts its own acceptance events: a signature earned (or a
     // restored one confirmed) by this session's samples, revoked (A2) by an
     // exact change set's one-way test or by a declared alpha's coverage,
-    // lapsed while provisional, restored, legacy entries discarded, and
-    // accepted signatures forgotten.
+    // lapsed while provisional, restored, and accepted signatures forgotten.
     void add_counters(const ui_counters &delta) {
       std::lock_guard<std::mutex> lock(mutex_);
       counters_ += delta;

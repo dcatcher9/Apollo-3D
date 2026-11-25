@@ -153,96 +153,43 @@ namespace sunshine_game3d {
       const unsigned color = f.color == api::color_space::srgb ? 1 : f.color == api::color_space::scrgb ? 2 :
                                                                                                           3;
       const bool conditioning = source.texture.width <= 3840 && source.texture.height <= 3840;
-      json result {{"schema", "sunshine.game3d.replay.v1"}, {"parameter_abi", "sunshine_game3d.render_parameters.v2"}, {"parameter_bytes", sizeof(render_parameters)}, {"parameter_hex", parameter_hex(f.parameters)}, {"parameter_encoding", "little-endian; IEEE754 float32 and 32-bit integers; exact b0 bytes"}, {"parameter_layout", json::array({layout("strength", offsetof(render_parameters, strength), 1, "float32"), layout("depth_view", offsetof(render_parameters, depth_view), 1, "int32"), layout("depth_ready", offsetof(render_parameters, depth_ready), 1, "uint32"), layout("camera_ready", offsetof(render_parameters, camera_ready), 1, "uint32"), layout("coordinate_basis", offsetof(render_parameters, coordinate_basis), 1, "int32"), layout("depth_scale", offsetof(render_parameters, depth_scale), 1, "float32"), layout("strength_blend", offsetof(render_parameters, strength_blend), 1, "float32"), layout("disparity_limit_uv", offsetof(render_parameters, disparity_limit_uv), 1, "float32"), layout("projection", offsetof(render_parameters, projection), 2, "float32"), layout("raw_depth_range", offsetof(render_parameters, raw_depth_range), 2, "float32"), layout("convergence", offsetof(render_parameters, convergence), 2, "float32"), layout("jitter", offsetof(render_parameters, jitter), 2, "float32"), layout("depth_rect", offsetof(render_parameters, depth_rect), 4, "float32")})}, {"shader_source", std::string(f.shader_source.empty() ? renderer::shader_source() : f.shader_source)}, {"compiler", "D3DCompile"}, {"compile_flags", D3DCOMPILE_OPTIMIZATION_LEVEL3}, {"compile_flags2", 0}, {"defines", {{"BUFFER_WIDTH", source.texture.width}, {"BUFFER_HEIGHT", source.texture.height}, {"BUFFER_COLOR_SPACE", color}}}, {"constant_binding", "b0; 80 exact bytes shared by all passes; v2 assigns byte28 to disparity_limit_uv"}, {"samplers", json::array({{{"register", "s0"}, {"filter", "min_mag_mip_point"}, {"address_uvw", "clamp"}}, {{"register", "s1"}, {"filter", "min_mag_linear_mip_point"}, {"address_uvw", "clamp"}}, {{"register", "s2"}, {"filter", "min_mag_mip_point"}, {"address_uvw", "border"}, {"border_rgba", {0, 0, 0, 0}}}})}, {"vertex_shader", {{"entry", "PostProcessVS"}, {"target", "vs_5_0"}, {"draw", "triangle list, 3 vertices, no vertex buffer"}}}, {"passes", json::array({{{"entry", "SunshinePreparePQPS"}, {"target", "ps_5_0"}, {"enabled", color == 3 && f.resources.linear_color.handle != 0}, {"srvs", {{"t0", "source_color"}}}, {"rtvs", {"linear_color:RGBA16_FLOAT"}}}, {{"entry", "SunshineHostCandidateCS"}, {"target", "cs_5_0"}, {"enabled", conditioning}, {"srvs", {{"t1", "raw_depth"}}}, {"uavs", {{"u0", "candidate:R32_FLOAT"}}}}, {{"entry", "SunshineHostVerticalCS"}, {"target", "cs_5_0"}, {"enabled", conditioning}, {"srvs", {{"t3", "candidate"}}}, {"uavs", {{"u1", "vertical_majorant:R32_FLOAT"}, {"u2", "vertical_field:R32_FLOAT"}}}}, {{"entry", "SunshineHostHorizontalCS"}, {"target", "cs_5_0"}, {"enabled", conditioning}, {"srvs", {{"t0", "source_color"}, {"t4", "vertical_field"}}}, {"uavs", {{"u3", "final_field:R32_FLOAT"}}}}, {{"entry", "SunshineRenderEyesPS"}, {"target", "ps_5_0"}, {"enabled", true}, {"srvs", {{"t0", "source_color"}, {"t1", "raw_depth"}, {"t2", "linear_color"}, {"t5", "final_field"}}}, {"rtvs", {"left:RGBA16_FLOAT", "right:RGBA16_FLOAT"}}}, {{"entry", "SunshinePackEyesPS"}, {"target", "ps_5_0"}, {"enabled", true}, {"srvs", {{"t0", "source_color"}, {"t6", "left"}, {"t7", "right"}}}, {"rtvs", {color == 1 || f.resources.sbs_pq ? "sbs:R10G10B10A2_UNORM" : "sbs:RGBA16_FLOAT"}}}})}, {"binding_notes", "Absent textures bind null; missing depth uses a 1x1 placeholder with depth_ready=camera_ready=0. Raw depth artifact is the full consumed Texture2D SRV at mip0, layer0. Replay uploads it unchanged and retains depth_rect/jitter constants."}};
+      json result {{"schema", "sunshine.game3d.replay.v1"}, {"parameter_abi", "sunshine_game3d.render_parameters.v2"}, {"parameter_bytes", sizeof(render_parameters)}, {"parameter_hex", parameter_hex(f.parameters)}, {"parameter_encoding", "little-endian; IEEE754 float32 and 32-bit integers; exact b0 bytes"}, {"parameter_layout", json::array({layout("strength", offsetof(render_parameters, strength), 1, "float32"), layout("depth_view", offsetof(render_parameters, depth_view), 1, "int32"), layout("depth_ready", offsetof(render_parameters, depth_ready), 1, "uint32"), layout("camera_ready", offsetof(render_parameters, camera_ready), 1, "uint32"), layout("coordinate_basis", offsetof(render_parameters, coordinate_basis), 1, "int32"), layout("depth_scale", offsetof(render_parameters, depth_scale), 1, "float32"), layout("strength_blend", offsetof(render_parameters, strength_blend), 1, "float32"), layout("disparity_limit_uv", offsetof(render_parameters, disparity_limit_uv), 1, "float32"), layout("projection", offsetof(render_parameters, projection), 2, "float32"), layout("raw_depth_range", offsetof(render_parameters, raw_depth_range), 2, "float32"), layout("convergence", offsetof(render_parameters, convergence), 2, "float32"), layout("jitter", offsetof(render_parameters, jitter), 2, "float32"), layout("depth_rect", offsetof(render_parameters, depth_rect), 4, "float32")})}, {"shader_source", std::string(f.shader_source.empty() ? renderer::shader_source() : f.shader_source)}, {"compiler", "D3DCompile"}, {"compile_flags", D3DCOMPILE_OPTIMIZATION_LEVEL3}, {"compile_flags2", 0}, {"defines", {{"BUFFER_WIDTH", source.texture.width}, {"BUFFER_HEIGHT", source.texture.height}, {"BUFFER_COLOR_SPACE", color}}}, {"constant_binding", "b0; 80 exact bytes shared by all passes; v2 assigns byte28 to disparity_limit_uv"}, {"samplers", json::array({{{"register", "s0"}, {"filter", "min_mag_mip_point"}, {"address_uvw", "clamp"}}, {{"register", "s1"}, {"filter", "min_mag_linear_mip_point"}, {"address_uvw", "clamp"}}, {{"register", "s2"}, {"filter", "min_mag_mip_point"}, {"address_uvw", "border"}, {"border_rgba", {0, 0, 0, 0}}}})}, {"vertex_shader", {{"entry", "PostProcessVS"}, {"target", "vs_5_0"}, {"draw", "triangle list, 3 vertices, no vertex buffer"}}}, {"passes", json::array({{{"entry", "SunshineHostCandidateCS"}, {"target", "cs_5_0"}, {"enabled", conditioning}, {"srvs", {{"t1", "raw_depth"}}}, {"uavs", {{"u0", "candidate:R32_FLOAT"}}}}, {{"entry", "SunshineHostVerticalCS"}, {"target", "cs_5_0"}, {"enabled", conditioning}, {"srvs", {{"t3", "candidate"}}}, {"uavs", {{"u1", "vertical_majorant:R32_FLOAT"}, {"u2", "vertical_field:R32_FLOAT"}}}}, {{"entry", "SunshineHostHorizontalCS"}, {"target", "cs_5_0"}, {"enabled", conditioning}, {"srvs", {{"t4", "vertical_field"}}}, {"uavs", {{"u3", "final_field:R32_FLOAT"}}}}})}, {"binding_notes", "Absent textures bind null; missing depth uses a 1x1 placeholder with depth_ready=camera_ready=0. Raw depth artifact is the full consumed Texture2D SRV at mip0, layer0. Replay uploads it unchanged and retains depth_rect/jitter constants."}};
       result["source_alpha_ui"] = f.source_alpha_ui;
       const bool external_ui = f.source_alpha_ui && f.resources.ui_source.handle;
       result["ui_alpha_source"] = !f.source_alpha_ui ? "none" : external_ui ? "ui_source_color" : "source_color";
-      const bool nearest_mode = f.ui_plane.mode == ui_plane_mode::depth_midpoint_nearest_ui;
-      const bool front_mode = f.ui_plane.mode == ui_plane_mode::front_limit;
-      const bool shallow_mode = f.ui_plane.mode == ui_plane_mode::shallow_front;
       const bool fraction_mode = f.ui_plane.mode == ui_plane_mode::display_fraction;
-      const auto fraction = fraction_mode ? (std::isfinite(f.ui_plane.inverse_depth) ? json(f.ui_plane.inverse_depth) : json(nullptr)) :
-        shallow_mode ? json(0.25) : front_mode ? json(1.0) : json(nullptr);
+      const auto fraction = fraction_mode && std::isfinite(f.ui_plane.inverse_depth) ? json(f.ui_plane.inverse_depth) : json(nullptr);
       const auto captured_shader = f.shader_source.empty() ? renderer::shader_source() : f.shader_source;
-      if (captured_shader.find("#define SUNSHINE_PACKED_EYES 1") != std::string_view::npos) {
-        // Both eyes are rendered straight into the side-by-side target: the
-        // 10-bit PQ export by its own pack (SunshineRenderPackedPQPS). Without
-        // a linearized texture (the HDR10 source decoded per tap, or SDR and
-        // scRGB sources) t2 is unbound.
-        auto &passes = result["passes"];
-        passes.erase(passes.size() - 1);
-        passes.erase(passes.size() - 1);
-        json pack {{"entry", f.resources.sbs_pq ? "SunshineRenderPackedPQPS" : "SunshineRenderPackedPS"}, {"target", "ps_5_0"},
-          {"enabled", true}, {"srvs", {{"t0", "source_color"}, {"t1", "raw_depth"}, {"t5", "final_field"}}},
-          {"rtvs", {color == 1 || f.resources.sbs_pq ? "sbs:R10G10B10A2_UNORM" : "sbs:RGBA16_FLOAT"}}};
-        if (f.resources.linear_color.handle) pack["srvs"]["t2"] = "linear_color";
-        passes.push_back(pack);
-      }
-      if (captured_shader.find("#define SUNSHINE_UI_NEAREST_PLANE 1") != std::string_view::npos) {
-        const bool reduced = f.resources.ui_plane_resolved.handle != 0;
-        auto &passes = result["passes"];
-        passes.insert(passes.begin() + 3, json {{"entry", "SunshineUINearestTilesCS"}, {"target", "cs_5_0"},
-          {"enabled", reduced}, {"srvs", {{"t0", external_ui ? "ui_source_color" : "source_color"}, {"t1", "raw_depth"}}},
-          {"uavs", {{"u4", "ui_plane_tiles:R32_FLOAT"}}}});
-        passes.insert(passes.begin() + 4, json {{"entry", "SunshineUINearestReduceCS"}, {"target", "cs_5_0"},
-          {"enabled", reduced}, {"srvs", {{"t8", "ui_plane_tiles"}}}, {"uavs", {{"u5", "ui_plane_resolved:R32_FLOAT"}}}});
-        if (reduced) passes[5]["srvs"]["t9"] = "ui_plane_resolved";
-        result["ui_plane_resolution"] = {{"reduction_ran", reduced},
-          {"policy", fraction_mode ? "resolved_display_fraction" : shallow_mode ? "fixed_shallow_front" : front_mode ? "fixed_current_front_limit" : nearest_mode ? "max(submitted midpoint floor, maximum valid decoded q under finite positive selected alpha); one scalar for the entire UI in this render" : f.ui_plane.mode == ui_plane_mode::depth_midpoint ? "explicit_inverse_depth_plane" : "screen_plane"},
-          {"inverse_depth_role", fraction_mode || shallow_mode || front_mode || f.ui_plane.mode == ui_plane_mode::screen ? "unused" : nearest_mode ? "midpoint_floor" : "explicit_plane"},
-          {"word2_role", fraction_mode ? "front_limit_fraction" : "inverse_depth"},
-          {"front_limit_fraction", fraction},
-          {"resolved_value", nullptr},
-          {"resolved_value_note", fraction_mode ? "Replay freezes the exact consumed front-limit fraction, including ramp values, and does not rerun the temporal adaptive classifier or its observational probe. The shader multiplies a finite fraction in [0,0.75] by the authoritative current positive display bound; invalid values fall back to screen disparity." : shallow_mode ? "No depth reduction. UI parallax is one quarter of the current positive b0 display bound after strength, stereo blend and warp-readiness guards; depth/gain/zero do not place this plane." : front_mode ? "No depth reduction. UI parallax is the current positive b0 display bound times strength and stereo blend when warp is active; depth/gain/zero do not place this plane." : nearest_mode ? "GPU result; no CPU readback in the live producer. Replay recomputes it from the exact captured depth, alpha, crop/jitter and constants." : "No depth reduction. Replay uses the exact captured UI mode and inverse-depth word."}};
-      }
-      // Shaders with limiter line groups pin UI in SunshineApplyUICS after the
-      // complete scene field, so the horizontal limiter reads no UI input; older
-      // ones pin inside the horizontal pass. A mode-5 probe frame observes the
-      // unpinned field in between.
+      // UI pinning (SunshineApplyUICS) follows the complete scene field, so
+      // the horizontal limiter reads no UI input; a mode-5 probe frame
+      // observes the unpinned field in between. The eye limiter then builds
+      // one horizontal field per eye from the vertical field and pins it the
+      // same way; the pack reads that store and renders both eyes straight
+      // into the side-by-side target (the 10-bit PQ export by its own pack).
+      // The package records the scene field (final_field); the store is
+      // recomputed by a replay.
       const auto ui_input = external_ui ? "ui_source_color" : "source_color";
-      if (shader_marker(captured_shader, "SUNSHINE_LIMITER_LINE_GROUPS")) {
-        auto &passes = result["passes"];
-        for (auto pass = passes.begin(); pass != passes.end(); ++pass) {
-          if ((*pass)["entry"] != "SunshineHostHorizontalCS") continue;
-          auto apply = json {{"entry", "SunshineApplyUICS"}, {"target", "cs_5_0"}, {"enabled", conditioning && f.source_alpha_ui},
-            {"srvs", {{"t0", ui_input}}}, {"uavs", {{"u3", "final_field:R32_FLOAT (pinned in place)"}}}};
-          if ((*pass)["srvs"].contains("t9")) apply["srvs"]["t9"] = (*pass)["srvs"]["t9"];
-          (*pass)["srvs"].erase("t0");
-          (*pass)["srvs"].erase("t9");
-          auto next = passes.insert(pass + 1, apply);
-          if (captured_shader.find("#define SUNSHINE_UI_ABSOLUTE_LEVEL_PROBE 1") != std::string_view::npos)
-            passes.insert(next, json {{"entry", "SunshineUIConflictCS"}, {"target", "cs_5_0"},
-              {"enabled", conditioning && f.source_alpha_ui && fraction_mode},
-              {"frequency", "mode-5 probe frames only; replay freezes the fraction and does not run it"},
-              {"srvs", {{"t0", ui_input}, {"t5", "final_field before UI pinning"}}},
-              {"uavs", {{"u7", "ui_conflict_statistics:R32G32B32A32_UINT 16x32, live readback only"}}}});
-          break;
-        }
-      } else if (external_ui) {
-        for (auto &pass : result["passes"]) {
-          if (pass["entry"] == "SunshineHostHorizontalCS") pass["srvs"]["t0"] = "ui_source_color";
-        }
+      auto &passes = result["passes"];
+      passes.push_back(json {{"entry", "SunshineUIConflictCS"}, {"target", "cs_5_0"},
+        {"enabled", conditioning && f.source_alpha_ui && fraction_mode},
+        {"frequency", "mode-5 probe frames only; replay freezes the fraction and does not run it"},
+        {"srvs", {{"t0", ui_input}, {"t5", "final_field before UI pinning"}}},
+        {"uavs", {{"u7", "ui_conflict_statistics:R32G32B32A32_UINT 16x32, live readback only"}}}});
+      const json apply {{"entry", "SunshineApplyUICS"}, {"target", "cs_5_0"}, {"enabled", conditioning && f.source_alpha_ui},
+        {"srvs", {{"t0", ui_input}}}, {"uavs", {{"u3", "final_field:R32_FLOAT (pinned in place)"}}}};
+      passes.push_back(apply);
+      if (conditioning) {
+        passes.push_back(json {{"entry", "SunshineHostEyeLimitCS"}, {"target", "cs_5_0"}, {"enabled", true},
+          {"srvs", {{"t4", "vertical_field"}}},
+          {"uavs", {{"u3", "eye_field:R32_FLOAT, twice the buffer height: left-eye rows, then right-eye rows; not an artifact"}}}});
+        auto eye_pin = apply;
+        eye_pin["uavs"] = {{"u3", "eye_field:R32_FLOAT, twice the buffer height (both halves pinned in place)"}};
+        passes.push_back(eye_pin);
       }
-      // The eye limiter builds one horizontal field per eye after the scene
-      // field (and its pin); the pack reads that store. The package records the
-      // scene field (final_field); the store is recomputed by a replay.
-      if (conditioning && shader_marker(captured_shader, "SUNSHINE_LIMITER_LINE_GROUPS") &&
-          captured_shader.find("#define SUNSHINE_PACKED_EYES 1") != std::string_view::npos &&
-          captured_shader.find("#define SUNSHINE_EYE_LIMITER 1") != std::string_view::npos) {
-        auto &passes = result["passes"];
-        for (auto pass = passes.begin(); pass != passes.end(); ++pass) {
-          if ((*pass)["entry"] != "SunshineApplyUICS") continue;
-          auto eye_pin = *pass;
-          eye_pin["uavs"] = {{"u3", "eye_field:R32_FLOAT, twice the buffer height (both halves pinned in place)"}};
-          auto next = passes.insert(pass + 1, json {{"entry", "SunshineHostEyeLimitCS"}, {"target", "cs_5_0"}, {"enabled", true},
-            {"srvs", {{"t4", "vertical_field"}}},
-            {"uavs", {{"u3", "eye_field:R32_FLOAT, twice the buffer height: left-eye rows, then right-eye rows; not an artifact"}}}});
-          passes.insert(next + 1, eye_pin);
-          break;
-        }
-        for (auto &pass : passes)
-          if (pass["entry"] == "SunshineRenderPackedPS" || pass["entry"] == "SunshineRenderPackedPQPS") pass["srvs"]["t5"] = "eye_field";
-      }
+      passes.push_back(json {{"entry", f.resources.sbs_pq ? "SunshineRenderPackedPQPS" : "SunshineRenderPackedPS"},
+        {"target", "ps_5_0"}, {"enabled", true},
+        {"srvs", {{"t0", "source_color"}, {"t1", "raw_depth"}, {"t5", conditioning ? "eye_field" : "final_field"}}},
+        {"rtvs", {color == 1 || f.resources.sbs_pq ? "sbs:R10G10B10A2_UNORM" : "sbs:RGBA16_FLOAT"}}});
       const auto &detection = f.ui_detection;
       result["ui_detection"] = {{"ran_or_held", name(detection.state)}, {"candidates", detection.candidates},
         {"threshold_bits", detection.threshold_bits}, {"accepted", detection.accepted}, {"flags", detection.flags},
@@ -319,14 +266,12 @@ namespace sunshine_game3d {
       result["ui_constant_binding"] = {{"register", "b1"}, {"uint32", ui},
         {"mask_channel", f.ui_channel == ui_mask_channel::red ? "red" : "alpha"},
         {"mode", static_cast<std::uint32_t>(f.ui_plane.mode)},
-        {"mode_name", f.ui_plane.mode == ui_plane_mode::screen ? "screen" : f.ui_plane.mode == ui_plane_mode::depth_midpoint ? "depth_midpoint" :
-          nearest_mode ? "depth_midpoint_nearest_ui" : front_mode ? "front_limit" : shallow_mode ? "shallow_front" : fraction_mode ? "display_fraction" : "unknown"},
+        {"mode_name", f.ui_plane.mode == ui_plane_mode::screen ? "screen" : fraction_mode ? "display_fraction" : "unknown"},
         {"inverse_depth", std::isfinite(f.ui_plane.inverse_depth) ? json(f.ui_plane.inverse_depth) : json(nullptr)},
         {"inverse_depth_bits", ui[2]},
-        {"inverse_depth_role", fraction_mode || shallow_mode || front_mode || f.ui_plane.mode == ui_plane_mode::screen ? "unused" : nearest_mode ? "midpoint_floor" : "explicit_plane"},
         {"word2_role", fraction_mode ? "front_limit_fraction" : "inverse_depth"},
         {"front_limit_fraction", fraction},
-        {"meaning", "When source_alpha_ui is enabled, alpha from ui_alpha_source supplies UI coverage. The UI pinning pass (SunshineApplyUICS, or the horizontal pass of older shaders) reads that input at t0; eye RGB remains current source_color. Mode 4 pins UI at one quarter of the current positive display bound after strength, stereo blend and warp-readiness guards. Mode 3 uses that full bound. Both fixed modes ignore scene depth/gain/zero and their inverse-depth word is unused. Screen mode pins at zero disparity. Mode 1 uses the submitted independent depth. Mode 2 reduces max(submitted midpoint floor, nearest valid decoded depth under finite positive alpha). Both depth modes use b0 geometry. Pinning is a band around the UI plane: mask alpha at or above 1/replay.ui_pin.soft_pin_gain pins exactly, fainter alpha in proportion, with a one-texel collar for the bilinear color footprint and a 0.5/source_width ramp beyond it; a shader without that marker pins every finite positive alpha exactly. With protection enabled all-white masks are entirely UI; all-black masks have no UI constraints."}};
+        {"meaning", "When source_alpha_ui is enabled, alpha from ui_alpha_source supplies UI coverage. The UI pinning pass (SunshineApplyUICS) reads that input at t0; eye RGB remains current source_color. Screen mode pins at zero disparity, and so does any mode word other than 5; its inverse-depth word is unused. Pinning is a band around the UI plane: mask alpha at or above 1/replay.ui_pin.soft_pin_gain pins exactly, fainter alpha in proportion, with a one-texel collar for the bilinear color footprint and a 0.5/source_width ramp beyond it. With protection enabled all-white masks are entirely UI; all-black masks have no UI constraints."}};
       if (fraction_mode) {
         auto &binding = result["ui_constant_binding"];
         binding.erase("inverse_depth");
@@ -380,7 +325,6 @@ namespace sunshine_game3d {
         {"sbs_transfer", f.resources.sbs_pq ? 3u : f.color == api::color_space::srgb ? 1u : 2u},
         {"artifact_semantics", {{"source_color", f.color == api::color_space::hdr10_pq ? "Unmodified game color: ST.2084 PQ, Rec.2020 primaries, encoded absolute luminance." : f.color == api::color_space::scrgb ? "Unmodified game color: linear scRGB, Rec.709 primaries, 1.0 = 80 nits; negative and greater-than-one values preserved." :
                                                                                                                                                                                                                      "Unmodified game color: encoded sRGB SDR, Rec.709 primaries."},
-                                {"linear_color", "Optional PQ-decoded game color: linear scRGB, Rec.709 primaries, 1.0 = 80 nits."},
                                 {"raw_depth", "Full allocation of unfiltered float32 depth samples. Device or linear-distance encoding and active rectangle belong to consumed_depth; no normalization or clamp applied."},
                                 {"candidate", "Signed full-source-U parallax before spatial conditioning."},
                                 {"vertical_majorant", "Signed full-source-U vertical upper envelope of candidate parallax."},
@@ -436,9 +380,6 @@ namespace sunshine_game3d {
       }
       if (!f.resources.final_field.handle) {
         result["missing_conditioning_fields"] = "Conditioning passes did not run for this render extent; retained fields are not exported.";
-      }
-      if (!f.resources.linear_color.handle) {
-        result["missing_linear_color"] = "This input does not require the separate HDR10-PQ decoding pass.";
       }
       const auto &scale = f.scene_status.scale;
       const bool camera = scale.basis == automatic_scale_basis::camera_matrix;
@@ -942,7 +883,7 @@ namespace sunshine_game3d {
       if (frame.source_alpha_ui && r.ui_source.handle && !next->add(wire::artifact::ui_source_color, r.ui_source)) {
         throw std::runtime_error("Cannot snapshot the exact consumed UI-alpha source");
       }
-      if (!r.source.handle || !r.sbs.handle || !next->add(wire::artifact::source_color, r.source) || !next->add(wire::artifact::linear_color, r.linear_color) || !next->add(wire::artifact::candidate, r.candidate) || !next->add(wire::artifact::vertical_majorant, r.vertical_majorant) || !next->add(wire::artifact::vertical_field, r.vertical_field) || !next->add(wire::artifact::final_field, r.final_field) || !next->add(wire::artifact::sbs, r.sbs)) {
+      if (!r.source.handle || !r.sbs.handle || !next->add(wire::artifact::source_color, r.source) || !next->add(wire::artifact::candidate, r.candidate) || !next->add(wire::artifact::vertical_majorant, r.vertical_majorant) || !next->add(wire::artifact::vertical_field, r.vertical_field) || !next->add(wire::artifact::final_field, r.final_field) || !next->add(wire::artifact::sbs, r.sbs)) {
         throw std::runtime_error("Cannot allocate the bounded shared diagnostic textures");
       }
       metadata["ui_layer_census"] = ui_layer_census(*next, runtime->get_device(), sunshine_game3d::clock::game_now() - d.armed_tick);

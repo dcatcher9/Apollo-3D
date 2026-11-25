@@ -621,7 +621,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       previous.scene.basis = 2;
       previous.scene.scale = 300.f;
       previous.scene.zero = {.01f, .25f};
-      previous.scene.ui_plane = {sunshine_game3d::ui_plane_mode::depth_midpoint, .375f};
+      previous.scene.ui_plane = {sunshine_game3d::ui_plane_mode::screen, .375f};
       previous.scene.raw_range = {.001f, .08f};
       previous.scene.blend = .75f;
       previous.scene.admitted_strength = 40.f;

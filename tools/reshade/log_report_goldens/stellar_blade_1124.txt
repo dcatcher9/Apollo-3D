@@ -1,0 +1,43 @@
+Game 3D readiness: SB-Win64-Shipping.exe  14:17:01 to 14:21:45 (4m43s, exited (the process ended before ReShade logged its exit))
+[PASS] Add-on: loaded; output 7680x2160 PQ D3D12 (generation 3)
+[PASS] Depth: fresh from 14:17:15; 0.5% of later publications without depth
+[INFO] Depth paused by the game: 1 depth loss in which the game ran no DLSS (no active depth view: a menu or loading screen) and resumed it with its own scene reset; those frames were flat
+         14:17:28.342-14:17:30.756 (2328 ms) retained_depth_expired, NGX selection=inactive_views (the game supplied no depth); the game froze 389 ms (2 Present gaps)
+[PASS] Placement flat: 0.5% of publications showed the colour frame with depth, 0.4% faded stereo back in
+[PASS] Capture coverage: 29259 covered (29250 observed, 9 declared states); not open: unknown 0, closed 0, render pass 0
+[INFO] Placement: raw controller only; its gain varied 2x
+[INFO] UI trust: 14:17:04 restored accepted UI sources ui_layer:87:pq,hudless:24:pq
+[PASS] UI channel admission: no selective UI channel rejected for invalid pixels
+[PASS] UI counters: 29360 Auto frames through the last of 2448 committed samples: 29360 detected, 0 held, 0 without detection
+[PASS] UI protection: decided no mask (0) 24%, full frame over a hidden scene (H1) (8) 9.4%, UI layer (10) 67% of detection frames
+[PASS] UI full frame: 2754 full-frame frames (6: 0, 8: 2754; 9.4% of detection frames); H1 samples (8) read the scene hidden 203, ambiguous 0, visible 0, invalid or unmeasured 2; scene guard entered 4, released 1, refuted 2; depth not current on 8 detection frames
+[INFO] UI full alpha: 815 frames decided a whole-frame alpha and 0 an exact full change-set (6) (2.8% of detection frames)
+[PASS] UI inexact difference: no HUD-less difference decided from an inexact pair
+[INFO] UI holds: generated 0, none 0 (0% of Auto frames); 10 detection frames (0.03%) reused the previous real frame's decision (T1)
+[INFO] UI no mask: 24% of Auto frames had no mask; decided none: ambiguous 24%; sampled reasons with the refused candidate: ambiguous (current alpha) 7
+[INFO] UI trust events: earned 1, revoked one way by an exact pair 0, revoked by a declared alpha's coverage 0, lapsed 0, restored 2, forgotten 0; 0 selective layer samples earned nothing for colour without coverage (A1)
+[PASS] UI holds without a decision: no window held most Auto frames without a decision
+[PASS] UI protection gaps: every streamed Auto frame had a UI mask or a UI channel showing no UI
+[INFO] Hidden scene: H1 hidden scene (8) in 6 samples (pre-UI image: hudless 0, layer 0), entered 4, released 1, refuted 2; 15 of 46 samples measured
+[PASS] Observation losses: lifecycle 1
+[INFO] Depth losses: 2 episodes, 0.6 per streamed minute, 2.5 s without depth in the logged ones; retained_depth_expired 2
+[PASS] Queue order: 3 queues, 13 fences (11 settled), 465513 signals, 246324 waits; 58422 ordered verdicts, proofs inflight 29209; poisoned shared 1, unobserved 1; refused pending_hooks 20, unsettled 2
+[WARN] Capture lock: 1 of 27 windows met the capture-lock split trigger (owner ruling Q5): game waits 1.03% of wall time at 14:18:05, holders g+0x103cda:7539/96.015,g+0x0:718/7.226,g+0x1056a9:150/0.120,p+0x1056a9:24/0.097; the split needs it over a 60 s steady window and dominant holders that perf items 1 and 2 do not remove (map the offsets with the add-on symbols); 27 windows (270 s): game p99 up to 50 us, largest game wait 1.096 ms, 1 game waits of 1 ms or more, present p99 up to 0 us
+         14:18:05
+[PASS] Export: not_foreground 2, runtime_reset 1
+[PASS] Present hitches: 1 at resets, FG switches or overlay opening
+[INFO] Diagnostics: Diagnostics=1: per-pass GPU timing is recorded
+[INFO] Game 3D cost: CPU 0.31 ms mean (8.5 max) over 29391 Presents; GPU 2.14 ms mean (8.3 max)
+[INFO] Video memory: game local usage peaked at 9814 MiB; its budget was as low as 11475 MiB and its headroom as low as 1733 MiB; 0 ms over budget (no depth loss, hitch or Present gap under pressure)
+[PASS] Stream delivery: the host took 86.7 new frames/s of a target 87.2/s (what the game offered, capped at the stream 90 fps)
+[PASS] UI layer copies: no layer copy skipped in 24 timing windows
+[INFO] Frame generation: 14:17:15 off
+[INFO] Other log warnings: 4 WARN/ERROR lines from ReShade, the game or another add-on, none about the Sunshine 3D add-on
+         14:17:11 WARN Failed to resolve search path '<PATH>\' with error code 3. (2 such lines)
+         14:17:13 WARN IDirectInput8W::CreateDevice failed with error code E_FAIL.
+         14:21:45 WARN Reference count for ID3D12CommandQueue0 object 000000005A539EB0 (000000005A27B1C0) is inconsistent (10).
+[PASS] Host link: ReShade SBS connected 3 time(s)
+[PASS] Encoder stalls: none
+[INFO] Host video memory: host local usage peaked at 1402 MiB; its headroom was as low as 10077 MiB (1402/11479 MiB at 14:18:14)
+Overall: WARN (0 fail, 1 warn)
+Exit code: 0

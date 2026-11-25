@@ -94,7 +94,7 @@ extern "C" __declspec(dllexport) bool ReShadeGetBasePath(char *, size_t *) {
 // setting is absent, so each keeps its default. Like ReShade, a size query
 // counts the array's final terminator, and a read returns the array's size.
 extern "C" __declspec(dllexport) bool ReShadeGetConfigValue(void *, reshade::api::effect_runtime *, const char *section, const char *key, char *value, size_t *size) {
-  static constexpr char disabled[] = "Generic Depth\0Sunshine Depth";  // Each name ends in a NUL.
+  static constexpr char disabled[] = "Generic Depth";  // The name ends in a NUL.
   if (!size || std::strcmp(section, "ADDON") != 0 || std::strcmp(key, "DisabledAddons") != 0) {
     return false;
   }

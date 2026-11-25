@@ -90,11 +90,11 @@ namespace {
 
   void source_alpha_modes_are_persistent_and_game_scoped() {
     fake_config config, other_config;
-    config.values = {{"Strength", 23.5f}, {"DepthView", 2}, {"Enabled", false}, {"SourceAlphaUI", false}, {"Unrelated", 17}};
+    config.values = {{"Strength", 23.5f}, {"DepthView", 2}, {"Enabled", false}, {"SourceAlphaUIMode", 2}, {"Unrelated", 17}};
     const auto original = config.values;
     settings_state settings {load_settings(config)};
     check(settings.values.ui_protection == source_alpha_mode::off && !settings.values.source_alpha_ui && config.writes.empty(),
-      "Legacy disabled source alpha did not migrate to Off without rewriting config");
+      "A saved Off source alpha mode did not load without rewriting config");
     unsigned writes = 0;
     for (const auto mode : {source_alpha_mode::on, source_alpha_mode::off, source_alpha_mode::automatic}) {
       check(edit_source_alpha_mode(settings, mode, config), "Source alpha mode edit did not apply");
@@ -103,7 +103,7 @@ namespace {
         std::get<int>(config.values.at("SourceAlphaUIMode")) == int(mode) && config.writes.size() == writes &&
         config.writes.back() == "SourceAlphaUIMode", "Source alpha mode was not saved to its owned integer setting");
       for (const auto &[key, value] : original)
-        check(config.values.at(key) == value, "Source alpha mode edit changed a legacy or unrelated setting");
+        if (key != "SourceAlphaUIMode") check(config.values.at(key) == value, "Source alpha mode edit changed an unrelated setting");
       check(settings.values.strength == 23.5f && settings.values.depth_view == 2 && !settings.values.enabled &&
         !edit_source_alpha_mode(settings, mode, config) && config.writes.size() == writes,
         "Source alpha edit changed rendering controls or saved redundantly");
@@ -122,25 +122,24 @@ namespace {
       "Destroyed runtime accepted a source alpha mode edit");
   }
 
-  void source_alpha_mode_migration_and_precedence() {
-    for (bool legacy : {false, true}) {
-      fake_config config;
-      config.values["SourceAlphaUI"] = legacy;
-      const auto migrated = load_settings(config);
-      check(migrated.ui_protection == (legacy ? source_alpha_mode::automatic : source_alpha_mode::off) &&
-        !migrated.source_alpha_ui && config.writes.empty(), "Legacy source alpha migration changed meaning or rewrote settings");
-      for (int mode : {0, 1, 2}) {
-        config.values["SourceAlphaUIMode"] = mode;
-        const auto explicit_mode = load_settings(config);
-        check(explicit_mode.ui_protection == source_alpha_mode(mode) && explicit_mode.source_alpha_ui == (mode == 1) &&
-          config.writes.empty(), "Legacy checkbox overrode the saved three-way source alpha mode");
-      }
-      for (int invalid : {-1, 3, 99}) {
-        config.values["SourceAlphaUIMode"] = invalid;
-        const auto fallback = load_settings(config);
-        check(fallback.ui_protection == source_alpha_mode::automatic && !fallback.source_alpha_ui && config.writes.empty(),
-          "Invalid source alpha configuration enabled protection or caused a passive write");
-      }
+  void source_alpha_mode_loading() {
+    fake_config config;
+    // The retired SourceAlphaUI checkbox is not read: without a saved mode, Auto.
+    config.values["SourceAlphaUI"] = false;
+    const auto unset = load_settings(config);
+    check(unset.ui_protection == source_alpha_mode::automatic && !unset.source_alpha_ui && config.writes.empty(),
+      "The retired source alpha checkbox changed the mode or rewrote settings");
+    for (int mode : {0, 1, 2}) {
+      config.values["SourceAlphaUIMode"] = mode;
+      const auto explicit_mode = load_settings(config);
+      check(explicit_mode.ui_protection == source_alpha_mode(mode) && explicit_mode.source_alpha_ui == (mode == 1) &&
+        config.writes.empty(), "The saved three-way source alpha mode did not load");
+    }
+    for (int invalid : {-1, 3, 99}) {
+      config.values["SourceAlphaUIMode"] = invalid;
+      const auto fallback = load_settings(config);
+      check(fallback.ui_protection == source_alpha_mode::automatic && !fallback.source_alpha_ui && config.writes.empty(),
+        "Invalid source alpha configuration enabled protection or caused a passive write");
     }
   }
 
@@ -874,7 +873,7 @@ int main() {
     edits_save_exactly_one_owned_setting();
     invalid_edits_do_not_reach_config();
     source_alpha_modes_are_persistent_and_game_scoped();
-    source_alpha_mode_migration_and_precedence();
+    source_alpha_mode_loading();
     source_alpha_mode_persistence_failure_does_not_commit();
     source_alpha_mode_edits_control_the_session();
     source_alpha_fg_mode_survives_observation_gaps();

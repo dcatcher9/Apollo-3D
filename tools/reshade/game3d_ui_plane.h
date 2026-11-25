@@ -7,20 +7,15 @@
 
 namespace sunshine_game3d {
   enum class ui_mask_channel : std::uint32_t { alpha = 0, red = 1 };
-  enum class ui_plane_mode : std::uint32_t {
-    screen = 0, depth_midpoint = 1, depth_midpoint_nearest_ui = 2, front_limit = 3, shallow_front = 4,
-    display_fraction = 5
-  };
+  // Values 1-4 named the midpoint, nearest-UI, front-limit and shallow-front
+  // planes, removed on 11-25; replay refuses a package that recorded one, and
+  // the values are never reused.
+  enum class ui_plane_mode : std::uint32_t { screen = 0, display_fraction = 5 };
 
   // The scene owner resolves this plane independently of the scene's zero.
-  // Screen is the compatibility default for callers and historical dumps.
-  // In nearest-UI mode inverse_depth is the midpoint floor; the GPU resolves
-  // max(floor, nearest decoded depth under current selected UI coverage).
-  // Front-limit mode uses the current positive display-disparity budget and
-  // ignores inverse_depth, including malformed bits preserved for replay.
-  // Shallow-front mode uses one quarter of that same authoritative bound.
+  // Screen is the default for callers and pins UI at zero disparity.
   // Display-fraction mode freezes the independently resolved UI fraction in
-  // the legacy inverse_depth word; valid fractions range from zero to 0.75.
+  // the inverse_depth word; valid fractions range from zero to 0.75.
   struct ui_plane_parameters {
     ui_plane_mode mode = ui_plane_mode::screen;
     float inverse_depth = 0.f;
