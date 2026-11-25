@@ -1799,7 +1799,7 @@ Ordinary subtitle work consumes OCR output with complete `RQST`/`CBRG`/`OOCR` pr
 its requested abstention, then advances UIP4 and writes the complete conditioned Final diagnostic
 from immutable Base together with the native matte.
 
-Direct evaluation and converter research retain normalized depth and the EMA motion mask by
+Harness runs, including Convert Video, retain normalized depth and the EMA motion mask by
 default. Ordinary live sessions, including Dump 3D, omit these diagnostic textures and passes.
 
 A reuse receipt preserves the raw-depth range, camera, model-input history, DAV2/V2 Base, OCR8,
@@ -2020,7 +2020,7 @@ GPU trace must identify that owner's original observation, whose clock remains i
 state. The current transaction clock never relabels reused geometry as a new depth observation.
 The retained frame identity must be older; its positive source clock may equal the current clock
 under the nondecreasing timestamp ABI, but cannot be newer. Equal-clock reuse still freezes the
-tuple and supplies no new pixel confirmation or UI time.
+tuple and supplies no new subtitle observation or UI time.
 
 The manual Dump 3D button works independently of performance diagnostics. File-trigger polling
 requires diagnostics to be enabled; a manual dump does not enable it.
@@ -2101,8 +2101,9 @@ notification when it has elevated process and thread priorities, an active nativ
 timer request, and requested and effective periods of at most `1 ms`. An independent stream
 signals the owner after the joined event. The wait targets the start of the final `1 ms` of the original
 budget, which uses the yielded query cadence. A signal left by an earlier callback is consumed
-and the notifier continues waiting to its current cutoff. Local presentation and remote
-conversions without these conditions use the yielded cadence for the full wait. A failed or
+and the notifier continues waiting to its current cutoff. The notification wait was measured
+and qualified for remote streams only; local presentation was not measured and, like remote
+conversions without these conditions, uses the yielded cadence for the full wait. A failed or
 over-budget Windows wait disables notification waiting for that estimator. Only a joined query
 within the same cadence deadline and query fuse proves completion.
 
