@@ -2335,6 +2335,9 @@ namespace nvhttp {
     https_server.resource["^/actions/clipboard$"]["POST"] = setClipboard;
 
     https_server.config.reuse_address = true;
+    // The library's default accepts a request of any size into memory. Only paired clients
+    // get past the TLS handshake here; their largest request is a clipboard text.
+    https_server.config.max_request_streambuf_size = 8u * 1024u * 1024u;
     const auto bind_address = net::get_bind_address(address_family);
     if (!bind_address) {
       BOOST_LOG(fatal) << "GameStream servers refused invalid bind_address ["sv << config::sunshine.bind_address << ']';
@@ -2349,6 +2352,9 @@ namespace nvhttp {
     http_server.resource["^/pair$"]["GET"] = pair<SimpleWeb::HTTP>;
 
     http_server.config.reuse_address = true;
+    // Anyone on the network reaches this server. It serves only GET requests whose largest
+    // query carries a client certificate.
+    http_server.config.max_request_streambuf_size = 64u * 1024u;
     http_server.config.address = *bind_address;
     http_server.config.port = port_http;
 
