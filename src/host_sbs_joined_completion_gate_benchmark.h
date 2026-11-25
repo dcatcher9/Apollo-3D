@@ -1,5 +1,5 @@
 #pragma once
-// PRIVATE BENCHMARK ONLY. Default-off, immutable pre-input configuration.
+// Native pacing test gate only. Default-off, immutable pre-input configuration.
 // Not a producer receipt, renderer authority, CPU mock, or model-performance measurement.
 #include "cuda_driver_api.h"
 #include <atomic>
@@ -11,25 +11,15 @@
 #include <windows.h>
 
 namespace models::joined_completion_gate_benchmark {
-  enum class placement_e : std::uint32_t { after_interop_unmaps = 0u, before_interop_unmaps = 1u };
-  enum class unmap_e : std::uint32_t { optional_ocr = 0u, depth = 1u };
-  struct unmap_probe_t {
-    bool issued = false;
-    int result = 0;
-    std::int64_t begin_wall_us = 0, return_wall_us = 0;
-    bool callback_entered_when_return_observed = false, callback_released_when_return_observed = false;
-  };
   struct configuration_t {
     bool enabled = false;
-    placement_e placement = placement_e::after_interop_unmaps;
     std::uint64_t target_frame_id = 0;
     std::uint32_t hold_after_callback_enter_ms = 120;
     std::uint32_t callback_entry_timeout_ms = 30000;
     std::uint32_t callback_safety_timeout_ms = 500;
     bool valid() const noexcept {
-      // The explicit packed-continuity regression crosses its 250 ms presentation cap with a
-      // 350 ms gate. This private allowance stays below the independent 500 ms callback fuse.
-      return !enabled || ((placement == placement_e::after_interop_unmaps || placement == placement_e::before_interop_unmaps) && target_frame_id != 0 && hold_after_callback_enter_ms > 0 &&
+      // Every hold stays below the independent 500 ms callback fuse.
+      return !enabled || (target_frame_id != 0 && hold_after_callback_enter_ms > 0 &&
         hold_after_callback_enter_ms <= 400 && callback_entry_timeout_ms > 0 &&
         callback_entry_timeout_ms <= 30000 && callback_safety_timeout_ms > hold_after_callback_enter_ms &&
         callback_safety_timeout_ms <= 500);
@@ -37,17 +27,13 @@ namespace models::joined_completion_gate_benchmark {
   };
   struct snapshot_t {
     configuration_t configuration;
-    unmap_probe_t optional_ocr_unmap, depth_unmap;
-    bool post_unmap_query_recorded = false;
-    int post_unmap_query_result = CUDA_ERROR_NOT_READY;
-    std::int64_t post_unmap_query_wall_us = 0;
     bool attempted = false, queued = false, callback_entered = false, callback_exited = false;
     bool released = false, cancelled = false, callback_timed_out = false, callback_entry_timed_out = false;
     int enqueue_result = 0, last_actual_event_query = CUDA_ERROR_NOT_READY;
     bool capture_state_checked = false;
     int capture_state_query_result = 0, capture_state = -1;
     std::uint32_t actual_event_queries = 0, actual_not_ready_queries = 0, actual_ready_queries = 0, actual_failed_queries = 0;
-    // CPU benchmark walltime only. NEVER observation/capture/geometry clock authority.
+    // CPU walltime only. NEVER observation/capture/geometry clock authority.
     std::int64_t entered_wall_us = 0, released_wall_us = 0, exited_wall_us = 0;
   };
 
@@ -66,15 +52,6 @@ namespace models::joined_completion_gate_benchmark {
     struct state_t {
       explicit state_t(configuration_t value): config(value) {}
       configuration_t config;
-      struct unmap_atomic_t {
-        std::atomic<bool> issued {false}, entered {false}, released {false};
-        std::atomic<int> result {0};
-        std::atomic<std::int64_t> begin {0}, returned {0};
-      };
-      unmap_atomic_t ocr_unmap, depth_unmap;
-      std::atomic<bool> post_query_recorded {false};
-      std::atomic<int> post_query_result {CUDA_ERROR_NOT_READY};
-      std::atomic<std::int64_t> post_query_wall {0};
       event_t entered, release, exited;
       std::atomic<bool> attempted {false}, queued {false}, entered_flag {false}, exited_flag {false};
       std::atomic<bool> released {false}, cancelled {false}, callback_timeout {false}, entry_timeout {false};
@@ -110,7 +87,7 @@ namespace models::joined_completion_gate_benchmark {
     struct callback_payload_t { std::shared_ptr<state_t> state; };
     inline void __stdcall host_callback(void *opaque) noexcept {
       // The callback owns this payload. If a CUDA context error prevents callback invocation,
-      // this ONE private benchmark payload is intentionally retained: never free queued userdata
+      // this ONE private payload is intentionally retained: never free queued userdata
       // on the assumption that a failed root/teardown made it safe. Existing context quarantine
       // remains unchanged. Normal callback exit releases every handle through shared ownership.
       std::unique_ptr<callback_payload_t> payload(static_cast<callback_payload_t *>(opaque));
@@ -140,17 +117,9 @@ namespace models::joined_completion_gate_benchmark {
     bool targets(std::uint64_t frame) const noexcept {
       return state_->config.enabled && frame == state_->config.target_frame_id && !state_->attempted.load();
     }
-    bool is_pre_unmap_probe(std::uint64_t frame) const noexcept {
-      return state_->config.enabled && state_->config.placement == placement_e::before_interop_unmaps && frame == state_->config.target_frame_id;
-    }
-    CUresult enqueue_before_interop_unmaps(cuda_driver_api &api, CUstream stream, std::uint64_t frame) noexcept {
-      return enqueue_at_placement(api, stream, frame, placement_e::before_interop_unmaps);
-    }
+    // Enqueued after the root's interop-unmap tail and before its joined completion event.
     CUresult enqueue_after_interop_unmaps(cuda_driver_api &api, CUstream stream, std::uint64_t frame) noexcept {
-      return enqueue_at_placement(api, stream, frame, placement_e::after_interop_unmaps);
-    }
-    CUresult enqueue_at_placement(cuda_driver_api &api, CUstream stream, std::uint64_t frame, placement_e actual_site) noexcept {
-      if (state_->config.placement != actual_site || !targets(frame)) return CUDA_SUCCESS;
+      if (!targets(frame)) return CUDA_SUCCESS;
       state_->attempted.store(true);
       const auto launch = detail::resolve_launch(api);
       if (!launch || !stream || !state_->valid_events()) {
@@ -194,24 +163,6 @@ namespace models::joined_completion_gate_benchmark {
         delete payload;state_->enqueue_result.store(-1);state_->signal_release();return static_cast<CUresult>(-1);
       }
     }
-    void note_unmap_begin(std::uint64_t frame, unmap_e kind) noexcept {
-      if (!is_pre_unmap_probe(frame)) return;
-      auto &u = kind == unmap_e::optional_ocr ? state_->ocr_unmap : state_->depth_unmap;
-      u.begin.store(detail::now_us()); u.issued.store(true);
-    }
-    void note_unmap_return(std::uint64_t frame, unmap_e kind, CUresult result) noexcept {
-      if (!is_pre_unmap_probe(frame)) return;
-      auto &u = kind == unmap_e::optional_ocr ? state_->ocr_unmap : state_->depth_unmap;
-      u.returned.store(detail::now_us()); u.result.store(result);
-      u.entered.store(state_->entered_flag.load()); u.released.store(state_->released.load());
-    }
-    void query_after_successful_unmap_calls(cuda_driver_api &api, CUevent actual_done_event, std::uint64_t frame) noexcept {
-      if (!is_pre_unmap_probe(frame) || !actual_done_event || !api.cuEventQuery) return;
-      // Real query only; result never changes admission, completion, or branch state.
-      const auto result = api.cuEventQuery(actual_done_event);
-      state_->post_query_result.store(result); state_->post_query_wall.store(detail::now_us());
-      state_->post_query_recorded.store(true);
-    }
     void note_actual_event_query(std::uint64_t frame, CUresult result) noexcept {
       if (frame != state_->config.target_frame_id || !state_->queued.load()) return;
       state_->last_query.store(result);++state_->queries;
@@ -224,14 +175,7 @@ namespace models::joined_completion_gate_benchmark {
       if (timer_.joinable()) timer_.join();
     }
     snapshot_t snapshot() const noexcept {
-      const auto read_unmap = [](const detail::state_t::unmap_atomic_t &u) {
-        unmap_probe_t p; p.issued=u.issued.load(); p.result=u.result.load();
-        p.begin_wall_us=u.begin.load(); p.return_wall_us=u.returned.load();
-        p.callback_entered_when_return_observed=u.entered.load(); p.callback_released_when_return_observed=u.released.load(); return p;
-      };
-      snapshot_t s;s.optional_ocr_unmap=read_unmap(state_->ocr_unmap);s.depth_unmap=read_unmap(state_->depth_unmap);
-      s.post_unmap_query_recorded=state_->post_query_recorded.load();s.post_unmap_query_result=state_->post_query_result.load();
-      s.post_unmap_query_wall_us=state_->post_query_wall.load();s.configuration=state_->config;s.attempted=state_->attempted.load();s.queued=state_->queued.load();
+      snapshot_t s;s.configuration=state_->config;s.attempted=state_->attempted.load();s.queued=state_->queued.load();
       s.callback_entered=state_->entered_flag.load();s.callback_exited=state_->exited_flag.load();s.released=state_->released.load();
       s.cancelled=state_->cancelled.load();s.callback_timed_out=state_->callback_timeout.load();s.callback_entry_timed_out=state_->entry_timeout.load();
       s.enqueue_result=state_->enqueue_result.load();s.last_actual_event_query=state_->last_query.load();

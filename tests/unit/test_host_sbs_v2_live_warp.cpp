@@ -3773,7 +3773,6 @@ TEST(HostSbsV2LiveWarpGpuTest, OrdinaryShaderBytecodeHasNoSubtitleBindings) {
   namespace fs = std::filesystem;
   for (const auto &[file, entry] : {
          std::pair {"sbs_reprojection_v2_live_ps.hlsl", "main_ps"},
-         std::pair {"sbs_reprojection_v2_queued_ps.hlsl", "main_ps"},
          std::pair {"sbs_reprojection_v2_diagnostics_ps.hlsl", "mapping_ps"},
          std::pair {"sbs_reprojection_v2_diagnostics_ps.hlsl", "mask_ps"},
          std::pair {"sbs_reprojection_v2_p010_y_ps.hlsl", "main_p010_y_ps"},

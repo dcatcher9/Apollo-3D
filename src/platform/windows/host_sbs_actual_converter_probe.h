@@ -1,116 +1,48 @@
 #pragma once
-// PRIVATE opt-in scheduling fixture. No generic encoder/config/capture API is changed.
+// Observer and synthetic scheduling context for the converter test fixtures
+// (model_preparation_converter_test.h). Ordinary streaming sets neither.
 #ifdef _WIN32
-  #include "src/config.h"
   #include "src/video_depth_estimator.h"
-  #include "src/host_sbs_pending_current_colour_lane.h"
   #include <array>
-  #include <chrono>
   #include <cstdint>
-  #include <filesystem>
-  #include <string>
-  #include <string_view>
-  #include <vector>
   #include <wrl/client.h>
 
 namespace platf::dxgi::actual_converter_probe_v1 {
-  struct frame_t {
-    std::uint32_t width = 0, height = 0;
-    std::vector<std::uint8_t> bgra;
-    std::vector<std::uint16_t> rgba16; // Private HDR source payload; never quantized to BGRA8.
-    std::string source_file_sha256;
-    std::uint64_t declared_timeline_us = 0; // metadata only, never the model clock
-  };
-  struct request_t {
-    bool enabled = false, queued = false;
-    bool packed_continuity = false; // Explicit idle/held-root/expiry regression; default scheduler unchanged.
-    bool hdr_input = false; // Explicit three-PFM shutter or native P010 probe.
-    bool native_p010 = false; // Private actual-converter/native NVENC lane.
-    std::string p010_chroma_mode = "default"; // default, raster, no-uav; no live setting.
-    bool explicit_adapter = false; // Private probe plan binding for SDR or HDR; absent SDR keeps its legacy default.
-    std::uint32_t hdr_adapter_luid_low=0u,hdr_adapter_vendor_id=0u,hdr_adapter_device_id=0u;
-    std::int32_t hdr_adapter_luid_high=0; // Explicit HDR plan identity; no implicit adapter choice.
-    models::research_pending_current_colour_v1::configuration_t pending_current_colour {};
-    // Explicit source-bridge activation only; native-image fixtures without DDup remain UNKNOWN.
-    std::optional<models::subtitle_temporal_source_research_configuration_t> temporal_source_bridge;
-    std::array<frame_t, 3> frames; // immutable A, B, C inputs, NOT presence labels
-    config::video_t::sbs_t settings;
-    std::filesystem::path output;
-  };
-  // Same-TU implementation owns the actual d3d_base_encode_device RGB path.
-  int run(const request_t &request, std::string &error) noexcept;
-
   struct context_t {
     std::uint32_t width = 0, height = 0;
     std::uint64_t instance = 0;
     // This is a declared synthetic scheduling domain, NEVER actual Win32 video eligibility.
     bool borrow_matched_capture = false;
   };
-  enum class event_e : std::uint32_t { admission, queue_begin, queued, ack, draw, packed_repeat, convert_end };
-  // PRIVATE observed actual draw bindings; this carries no new UI/EMPTY authority.
-  struct shared_warp_draw_t {
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> weights, field, rows;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> geometry;
-    bool selected=false,queued=false,role_matched=false,bindings_observed=false,no_background=false;
-    std::uint64_t serial=0u,pixel_shader_address=0u;
-    std::array<std::uint32_t,4u> shape{};
-    std::string source_closure;
-    std::string_view direct_glyph_prepare_source_closure;
-  };
+  enum class event_e : std::uint32_t { admission, ack, draw, packed_repeat, convert_end };
   struct event_t {
     event_e kind {};
     std::uint64_t conversion = 0, model_frame = 0, observation_us = 0;
-    std::int64_t host_event_us = 0;
-    std::int64_t copied_at_ticks = 0, copied_at_us = 0;
     std::int64_t source_stamp_ticks = 0, content_stamp_ticks = 0;
     std::int64_t current_source_stamp_ticks = 0, current_content_stamp_ticks = 0;
-    std::uint64_t context_generation = 0, transaction_token = 0;
-    std::uint64_t watermark_before = 0, watermark_after = 0, pixel_source_frame = 0;
+    std::uint64_t watermark_before = 0, watermark_after = 0;
     std::uint64_t actual_draw_pixel_source = 0;
-    std::int64_t pixel_source_stamp_ticks = 0, packed_age_us = 0;
-    std::uint32_t pending_slots = 0, optional_work = 0, request_flags = 0;
-    std::array<std::uint64_t, 2> slot_frames {}, slot_observations {}, slot_contexts {}, slot_source_addresses {};
+    std::int64_t pixel_source_stamp_ticks = 0;
+    std::uint32_t pending_slots = 0, optional_work = 0;
+    std::array<std::uint64_t, 2> slot_frames {};
     std::array<bool, 2> slot_pending {};
-    std::uint32_t selected_slot = 0xffffffffu;
-    bool force_infer = false, gpu_undecided = false, ddup_proof = false;
-    bool queued = false, flat = false, repeat = false, route_matches = false, source_matches = false;
+    bool force_infer = false, gpu_undecided = false;
+    bool flat = false, repeat = false, route_matches = false;
     bool native_planes_written = false; // Output-event evidence; independent of packed RGB reuse.
-    bool p010_chroma_tiled = false;
-    bool rgb_rendered_directly = false;
-    bool rgb_output_retained = false;
     bool current_capture_key = false, prior_capture_key = false;
     bool cached_current_colour = false;
-    bool pending_current_colour=false, material_interval_contiguous=false;
-    std::uint64_t material_epoch=0,material_serial=0,material_capture_clock_us=0;
-    std::uint32_t negative_bank=0xffffffffu;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> negative_current_source,negative_current_receipt,negative_receipt;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> negative_current_constants,negative_expected;
-    std::array<std::array<Microsoft::WRL::ComPtr<ID3D11Resource>,16>,2> negative_owner_resources;
     bool packed_valid = false, query_observed = false, gate_entered = false, gate_released = false;
     std::int32_t literal_last_query_result = 0;
-    std::uint32_t literal_query_count = 0, literal_not_ready_count = 0, literal_ready_count = 0;
     std::uint64_t literal_query_target_frame = 0;
-    bool publication_current = false, ticket_publication_current = false;
+    bool publication_current = false;
     models::host_sbs_gpu_completion_receipt::expected_t publication {};
-    models::host_sbs_gpu_completion_receipt::expected_t planned_publication {}; // value only, never proof
-    models::depth_input_region_t region {};
-    models::depth_tensor_content_rect_t field_content {};
-    std::uint32_t field_width = 0, field_height = 0;
-    // Selected DRAW source (null for packed-repeat), Base,state,M,RGB,SCP,SCT,OCR,UIP,depth health,frame,EMA.
-    std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, 12> views;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> current_input;
-    // b2,b3,b5,raw,args,depthCB,sourceRegionCB,contourCB. Export ACTUAL GetDesc byte lengths.
-    std::array<Microsoft::WRL::ComPtr<ID3D11Buffer>, 8> buffers;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> packed;
-    shared_warp_draw_t shared_warp;
+    // The selected draw source (null for a packed repeat) and the completed EMA motion mask.
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> draw_source, ema_motion_mask;
   };
   struct observer_t {
     void *state = nullptr;
     void (*record)(void *, const event_t &) noexcept = nullptr;
     void emit(const event_t &event) const noexcept { if (record) record(state, event); }
   };
-}
-namespace platf::dxgi::pending_current_colour_probe_v1 {
-  int run(const actual_converter_probe_v1::request_t &request,std::string &error) noexcept;
 }
 #endif

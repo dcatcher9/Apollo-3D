@@ -60,24 +60,7 @@ namespace models::host_sbs_shader_cache {
   inline constexpr shader_spec parallax_v2_live_mapping {"sbs_reprojection_v2_diagnostics_ps.hlsl", "mapping_ps", "ps_5_0"};
   inline constexpr shader_spec parallax_v2_live_mask {"sbs_reprojection_v2_diagnostics_ps.hlsl", "mask_ps", "ps_5_0"};
   inline constexpr shader_spec sbs_reprojection_vertex {"sbs_reprojection_vs.hlsl", "main_vs", "vs_5_0"};
-  inline constexpr shader_spec host_sbs_subtitle_cohort_prepare {"host_sbs_subtitle_cohort_cs.hlsl", "prepare_main", "cs_5_0"};
-  inline constexpr shader_spec host_sbs_subtitle_cohort_members {"host_sbs_subtitle_cohort_cs.hlsl", "members_main", "cs_5_0"};
-  inline constexpr shader_spec host_sbs_subtitle_cohort_filter {"host_sbs_subtitle_cohort_cs.hlsl", "filter_main", "cs_5_0"};
-  inline constexpr shader_spec host_sbs_subtitle_cohort_snapshot {"host_sbs_subtitle_cohort_snapshot_cs.hlsl", "snapshot_main", "cs_5_0"};
-  inline constexpr shader_spec host_sbs_subtitle_matte_guard {"host_sbs_subtitle_matte_guard_cs.hlsl", "guard_main", "cs_5_0"};
   inline constexpr shader_spec sbs_flat_identity {"sbs_flat_identity_ps.hlsl", "main_ps", "ps_5_0"};
-  inline constexpr shader_spec parallax_v2_queued_renderer {"sbs_reprojection_v2_queued_ps.hlsl", "main_ps", "ps_5_0"};
-  inline constexpr shader_spec host_sbs_subtitle_inner_colour_research_palette {"host_sbs_subtitle_inner_colour_global_validation_cs.hlsl", "palette_main", "cs_5_0"};
-  inline constexpr shader_spec host_sbs_subtitle_inner_colour_research_emit {"host_sbs_subtitle_inner_colour_global_validation_cs.hlsl", "emit_main", "cs_5_0"};
-  inline constexpr shader_spec host_sbs_subtitle_inner_colour_research_clear {"host_sbs_subtitle_inner_colour_global_validation_cs.hlsl", "clear_main", "cs_5_0"};
-  inline constexpr shader_spec host_sbs_subtitle_inner_colour_research_accumulate {"host_sbs_subtitle_inner_colour_global_validation_cs.hlsl", "accumulate_main", "cs_5_0"};
-  inline constexpr shader_spec host_sbs_subtitle_inner_colour_research_validate {"host_sbs_subtitle_inner_colour_global_validation_cs.hlsl", "validate_main", "cs_5_0"};
-  inline constexpr shader_spec host_sbs_subtitle_inner_components_research_init {"host_sbs_subtitle_seeded_components_cs.hlsl", "init_main", "cs_5_0"};
-  inline constexpr shader_spec host_sbs_subtitle_inner_components_research_union {"host_sbs_subtitle_seeded_components_cs.hlsl", "union_main", "cs_5_0"};
-  inline constexpr shader_spec host_sbs_subtitle_inner_components_research_reduce {"host_sbs_subtitle_seeded_components_cs.hlsl", "reduce_main", "cs_5_0"};
-  inline constexpr shader_spec host_sbs_subtitle_inner_components_research_resolve {"host_sbs_subtitle_seeded_components_cs.hlsl", "resolve_main", "cs_5_0"};
-  inline constexpr shader_spec host_sbs_subtitle_inner_components_research_dilate {"host_sbs_subtitle_seeded_components_cs.hlsl", "dilate_main", "cs_5_0"};
-  inline constexpr shader_spec host_sbs_subtitle_inner_components_research_dilate_box {"host_sbs_subtitle_seeded_components_cs.hlsl", "dilate_box_main", "cs_5_0"};
   inline constexpr shader_spec host_sbs_direct_glyph_plan {"host_sbs_subtitle_direct_glyph_cs.hlsl", "plan_direct_main", "cs_5_0"};
   inline constexpr shader_spec host_sbs_direct_glyph_publish {"host_sbs_subtitle_direct_glyph_cs.hlsl", "publish_direct_main", "cs_5_0"};
   inline constexpr shader_spec host_sbs_direct_glyph_plan_tile {"host_sbs_subtitle_direct_glyph_transport_cs.hlsl", "plan_tile", "cs_5_0"};
@@ -198,56 +181,6 @@ namespace models::host_sbs_shader_cache {
   };
   inline constexpr std::string_view parallax_v2_live_diagnostic_source_closure_sha256 =
     "9755c6c32eb928a0743aac49bd3829eb504eb24977e5ae6398d385f623a75051";
-
-  inline constexpr std::array subtitle_cohort_prototype_research_specs {
-    host_sbs_subtitle_cohort_prepare,
-    host_sbs_subtitle_cohort_members,
-    host_sbs_subtitle_cohort_filter,
-  };
-  inline constexpr std::string_view subtitle_cohort_prototype_research_source_closure_sha256 =
-    "e23004ab90035382849409bcf4ecf67d8433fd1310ff1d0bacde665fdbeb256a";
-
-  inline constexpr std::array subtitle_cohort_research_specs {
-    host_sbs_subtitle_cohort_prepare,
-    host_sbs_subtitle_cohort_members,
-    host_sbs_subtitle_cohort_filter,
-    host_sbs_subtitle_cohort_snapshot,
-  };
-  inline constexpr std::string_view subtitle_cohort_research_source_closure_sha256 =
-    "3c6226ff2de686d0e21f550b2b1fcb9827fe3edb1c29f6134bc47114a9c7e687";
-
-  inline constexpr std::array subtitle_inner_colour_research_specs {
-    host_sbs_subtitle_inner_colour_research_palette,
-    host_sbs_subtitle_inner_colour_research_emit,
-    host_sbs_subtitle_inner_colour_research_clear,
-    host_sbs_subtitle_inner_colour_research_accumulate,
-    host_sbs_subtitle_inner_colour_research_validate,
-  };
-  inline constexpr std::string_view subtitle_inner_colour_research_source_closure_sha256 =
-    "d96f30ddd0e71b92cab2dde6b7b1b4d5523827ff6d296e73ce963dee0914f6de";
-
-  inline constexpr std::array subtitle_inner_components_research_specs {
-    host_sbs_subtitle_inner_components_research_init,
-    host_sbs_subtitle_inner_components_research_union,
-    host_sbs_subtitle_inner_components_research_reduce,
-    host_sbs_subtitle_inner_components_research_resolve,
-    host_sbs_subtitle_inner_components_research_dilate,
-    host_sbs_subtitle_inner_components_research_dilate_box,
-  };
-  inline constexpr std::string_view subtitle_inner_components_research_source_closure_sha256 =
-    "7e2f44690d64cebe3261133a3642fa558c8c25c7086bf19551f284a4cb13ebe0";
-
-  inline constexpr std::array subtitle_matte_guard_research_specs {
-    host_sbs_subtitle_matte_guard,
-  };
-  inline constexpr std::string_view subtitle_matte_guard_research_source_closure_sha256 =
-    "50b7458e44cd1983fc6e2bbee3bf4624b1b62110fa478f48a2dec1c491d6d3b2";
-
-  inline constexpr std::array parallax_v2_queued_renderer_specs {
-    parallax_v2_queued_renderer,
-  };
-  inline constexpr std::string_view parallax_v2_queued_renderer_source_closure_sha256 =
-    "04fcd38a6f470ebdb25883e160ab999aa43864915d597d29c51be5f7d21ea8bf";
 
   inline constexpr std::array direct_glyph_plan_specs {
     host_sbs_direct_glyph_plan,

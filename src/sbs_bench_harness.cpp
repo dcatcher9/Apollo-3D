@@ -57,29 +57,22 @@
   #include "depth_coordinate_v2.h"
   #include "generated/sbs_adaptive_state_contract.h"
   #include "host_sbs_contour_history_readback.h"
-  #include "host_sbs_current_source_snapshot_gpu.h"
   #include "host_sbs_display_snapshot_rgb8_analysis_gpu.h"
   #include "host_sbs_gpu_trace.h"
   #include "host_sbs_observation_timeline.h"
-  #include "host_sbs_queued_render_guard.h"
   #include "host_sbs_shader_cache.h"
-  #include "host_sbs_source_pattern_retirement_gpu.h"
   #include "host_sbs_subtitle_render.h"
   #include "host_sbs_v2_geometry.h"
   #include "logging.h"
   #include "offline_sbs_contract.h"
   #include "offline_sbs_wire_contract.h"
   #include "offline_sbs_worker.h"
-  #include "platform/windows/host_sbs_actual_converter_probe.h"
   #include "platform/windows/host_sbs_v2_renderer.h"
   #include "prod_zipdepth_convex2x.h"
-  #include "sbs_bench_async_caption_probe_driver.h"
-  #include "sbs_bench_current_cue_pipeline.h"
   #include "host_sbs_direct_glyph_publication_gpu.h"
   #include "host_sbs_direct_glyph_source_programs.h"
   #include "sbs_bench_subtitle_qualification.h"
   #include "sbs_bench_depth_coordinate_v2.h"
-  #include "sbs_bench_pre_unmap_feasibility.h"
   #include "sbs_perf.h"
   #include "video.h"
   #include "video_depth_estimator.h"
@@ -3330,10 +3323,6 @@ namespace sbs_bench {
       // Borrow mutable working OCR resources only for an explicitly completed offline frame.
       // They diagnose detector/resolve admission and never supply rendering authority.
       bool ocr_working_diagnostics = false;
-      // Private same-device cohort state and masks, copied before the next input.
-      // This opt-in experiment never supplies the rendered subtitle mask.
-      bool subtitle_cohort_research = false;
-      bool subtitle_inner_colour_research = false;
       // Separate actual Direct Glyph subtitle sidecars; ordinary metric images retain the Base
       // renderer and its attestation.
       bool direct_glyph_qualification = false;
@@ -3347,7 +3336,6 @@ namespace sbs_bench {
       // only for Dump 3D. Final then equals Base, so this is not an evaluator configuration.
       bool subtitle_conditioning_live_policy = false;
       bool subtitle_application_text = false;  // replay the owner-enabled foreground-app line rule
-      std::string joined_completion_probe; // PRIVATE default-off three-source async experiment
       std::optional<std::vector<detail::subtitle_diagnostic_observation_range>>
         subtitle_plane_diagnostic_ranges;
       std::string follow_format;
@@ -3409,10 +3397,6 @@ namespace sbs_bench {
           o.subtitle_plane_diagnostic_render_selected = true;
         } else if (a == "--ocr-working-diagnostics") {
           o.ocr_working_diagnostics = true;
-        } else if (a == "--subtitle-cohort-research") {
-          o.subtitle_cohort_research = true;
-        } else if (a == "--subtitle-inner-colour-research") {
-          o.subtitle_inner_colour_research = true;
         } else if (a == "--direct-glyph-qualification") {
           if (o.direct_glyph_qualification) return false;
           o.direct_glyph_qualification = true;
@@ -3431,9 +3415,6 @@ namespace sbs_bench {
           o.subtitle_conditioning_live_policy = true;
         } else if (a == "--subtitle-application-text") {
           o.subtitle_application_text = true;
-        } else if (a == "--joined-completion-probe") {
-          if (!o.joined_completion_probe.empty()) { BOOST_LOG(error) << "sbs-bench: private probe plan must appear once"; return false; }
-          o.joined_completion_probe = next("--joined-completion-probe");
         } else if (a == "--subtitle-plane-diagnostic-frames") {
           if (o.subtitle_plane_diagnostic_ranges) {
             BOOST_LOG(error) << "sbs-bench: diagnostic frame selection must appear once";
@@ -3543,7 +3524,7 @@ namespace sbs_bench {
         return false;
       }
       if (!o.capabilities.empty()) {
-        if (!o.frames.empty() || !o.out.empty() || o.subtitle_plane_diagnostic_ranges || o.subtitle_plane_diagnostic_render_selected || o.ocr_working_diagnostics || o.subtitle_cohort_research || o.subtitle_inner_colour_research || o.pfm_joined_diagnostics || o.direct_glyph_qualification) {
+        if (!o.frames.empty() || !o.out.empty() || o.subtitle_plane_diagnostic_ranges || o.subtitle_plane_diagnostic_render_selected || o.ocr_working_diagnostics || o.pfm_joined_diagnostics || o.direct_glyph_qualification) {
           BOOST_LOG(error) << "sbs-bench: --capabilities is a standalone query";
           return false;
         }
@@ -3560,7 +3541,7 @@ namespace sbs_bench {
       const unsigned direct_geometry_input_count =
         (!o.direct_parallax_root.empty() ? 1u : 0u) +
         (!o.depth_coordinate_v2_manifest.empty() ? 1u : 0u);
-      if (o.direct_glyph_qualification && (o.observation_timeline.empty() || o.follow || !o.scene_cache.empty() || !o.render_cache.empty() || !o.scene_plan.empty() || direct_geometry_input_count != 0u || o.device_conditional_replay || o.device_conditional_replay_control || o.simulate_hdr || o.artifacts != artifact_mode_e::evaluation || o.output_every != 1 || o.subtitle_plane_diagnostics || o.ocr_working_diagnostics || o.subtitle_cohort_research || o.subtitle_inner_colour_research || o.pfm_joined_diagnostics || !o.joined_completion_probe.empty())) {
+      if (o.direct_glyph_qualification && (o.observation_timeline.empty() || o.follow || !o.scene_cache.empty() || !o.render_cache.empty() || !o.scene_plan.empty() || direct_geometry_input_count != 0u || o.device_conditional_replay || o.device_conditional_replay_control || o.simulate_hdr || o.artifacts != artifact_mode_e::evaluation || o.output_every != 1 || o.subtitle_plane_diagnostics || o.ocr_working_diagnostics || o.pfm_joined_diagnostics)) {
         BOOST_LOG(error) << "sbs-bench: --direct-glyph-qualification requires ordinary SDR evaluation, "
                             "an explicit timeline, cadence1, and no replay/cache/follow/other diagnostic protocol";
         return false;
@@ -3570,10 +3551,9 @@ namespace sbs_bench {
            o.bounded_adaptive_state || !o.render_cache.empty() || !o.scene_plan.empty() ||
            direct_geometry_input_count != 0u || o.device_conditional_replay ||
            o.device_conditional_replay_control || o.simulate_hdr ||
-           !o.joined_completion_probe.empty() || o.subtitle_plane_diagnostics ||
+           o.subtitle_plane_diagnostics ||
            o.subtitle_plane_diagnostic_ranges || o.subtitle_plane_diagnostic_render_selected ||
-           o.ocr_working_diagnostics || o.subtitle_cohort_research ||
-           o.subtitle_inner_colour_research || o.artifacts == artifact_mode_e::evaluation)) {
+           o.ocr_working_diagnostics || o.artifacts == artifact_mode_e::evaluation)) {
         BOOST_LOG(error)
           << "sbs-bench: private --pfm-joined-diagnostics requires real PFM, an explicit "
              "timeline, a new scene cache, adaptive/conversion output, and no other "
@@ -3585,33 +3565,6 @@ namespace sbs_bench {
         BOOST_LOG(error)
           << "sbs-bench: --ocr-working-diagnostics requires --subtitle-plane-diagnostics "
              "and an explicit --observation-timeline";
-        return false;
-      }
-      if (o.subtitle_cohort_research &&
-          (!o.subtitle_plane_diagnostics || !o.ocr_working_diagnostics ||
-           o.observation_timeline.empty())) {
-        BOOST_LOG(error)
-          << "sbs-bench: --subtitle-cohort-research requires --subtitle-plane-diagnostics, "
-             "--ocr-working-diagnostics and an explicit --observation-timeline";
-        return false;
-      }
-      if (!o.joined_completion_probe.empty() &&
-          (o.observation_timeline.empty() || o.follow || !o.scene_cache.empty() || !o.render_cache.empty() ||
-           !o.scene_plan.empty() || direct_geometry_input_count != 0u || o.device_conditional_replay ||
-           o.device_conditional_replay_control || o.simulate_hdr || o.artifacts != artifact_mode_e::evaluation ||
-           o.output_every != 1 || o.limit != 0 || o.subtitle_plane_diagnostics || o.ocr_working_diagnostics ||
-           o.subtitle_cohort_research || o.subtitle_inner_colour_research)) {
-        BOOST_LOG(error) << "sbs-bench: private --joined-completion-probe requires a real estimator, explicit timeline, exactly3 SDRPNG files, evaluation outputcadence1, and forbids replay/follow/caches/HDR/other diagnostic protocols";
-        return false;
-      }
-      if (o.subtitle_inner_colour_research &&
-          (!o.subtitle_plane_diagnostics || !o.ocr_working_diagnostics ||
-           o.observation_timeline.empty() || !o.scene_cache.empty() || !o.render_cache.empty() ||
-           direct_geometry_input_count != 0u)) {
-        BOOST_LOG(error)
-          << "sbs-bench: --subtitle-inner-colour-research requires the real estimator, "
-             "--subtitle-plane-diagnostics, --ocr-working-diagnostics and an explicit "
-             "--observation-timeline";
         return false;
       }
       if (o.subtitle_plane_diagnostic_ranges &&
@@ -3767,9 +3720,6 @@ namespace sbs_bench {
       return true;
     }
 
-    #include "sbs_bench_joined_completion_probe.inc"
-    #include "sbs_bench_independent_ocr_raw_probe.inc"
-
     struct native_pass_counts_t {
       std::uint64_t source = 0;
       std::uint64_t adaptive = 0;
@@ -3893,23 +3843,6 @@ namespace sbs_bench {
       return 3;
     }
 
-    bool private_hdr_probe=false;
-    if (!o.joined_completion_probe.empty()) {
-      bool removed_probe_request=false;
-      try {
-        std::ifstream f(o.joined_completion_probe,std::ios::binary);
-        const auto p=nlohmann::json::parse(f);
-        const auto kind = p.value("probe_kind", std::string {});
-        removed_probe_request = kind == "actual-converter-current-outline-hdr-v1" || kind == "actual-converter-current-outline-sequence6-sdr-v1" ||
-          p.contains("selected_matte") || p.contains("require_actual_push_pull_background");
-        private_hdr_probe = p.value("source_transfer", std::string {}) == "scrgb_hdr" && !p.value("queue_enabled", true) &&
-          (kind == "actual-converter-shutter-hdr-v1" || kind == "actual-converter-native-p010-v1");
-      } catch (...) { private_hdr_probe=false; }
-      if (removed_probe_request) {
-        BOOST_LOG(error) << "sbs-bench: probe plan requests the removed selected-matte converter probe (probe kinds actual-converter-current-outline-*, keys selected_matte and require_actual_push_pull_background)";
-        return 7;
-      }
-    }
     // Evaluation keeps its established WIC raster contract. Whole-clip adaptive/conversion modes
     // additionally accept strict linear-scRGB PFM frames. A clip is one format family throughout:
     // silently mixing SDR raster and HDR float interchange would corrupt both color semantics and
@@ -3946,14 +3879,13 @@ namespace sbs_bench {
           sdr_raster_format = format;
           found_sdr_raster = true;
           frames.push_back(e.path());
-        } else if (ext == ".pfm" &&
-                   (o.artifacts != artifact_mode_e::evaluation || private_hdr_probe)) {
+        } else if (ext == ".pfm" && o.artifacts != artifact_mode_e::evaluation) {
           found_hdr_pfm = true;
           frames.push_back(e.path());
         }
       }
     }
-    if ((o.artifacts != artifact_mode_e::evaluation || private_hdr_probe) &&
+    if (o.artifacts != artifact_mode_e::evaluation &&
         ((found_sdr_raster && found_hdr_pfm) || found_mixed_sdr_formats)) {
       BOOST_LOG(error) << "sbs-bench: mixed source image formats are not a valid whole clip";
       return 4;
@@ -3989,11 +3921,6 @@ namespace sbs_bench {
     }
     if (o.direct_glyph_qualification && (frames.empty() || frames.size() > 64u || pfm_input || sdr_raster_format != "png")) {
       BOOST_LOG(error) << "sbs-bench: Direct Glyph qualification requires 1..64 immutable SDR PNG sources";
-      return 4;
-    }
-    if (!o.joined_completion_probe.empty() && (frames.size() != 3u ||
-        (pfm_input ? !private_hdr_probe : sdr_raster_format != "png"))) {
-      BOOST_LOG(error) << "sbs-bench: private joined probe requires immutable SDR PNG or explicitly declared HDR PFM sources";
       return 4;
     }
     if (o.pfm_joined_diagnostics && (!pfm_input || frames.empty() || frames.size() > 64u)) {
@@ -4108,81 +4035,6 @@ namespace sbs_bench {
       sbs_perf::reset();
     }
     const auto model = video::host_sbs_v2_depth_model();
-    // PRIVATE opt-in connection to the ACTUAL converter, before another estimator/device is
-    // created by this harness. The ordinary frame loop and existing probe kinds are unchanged.
-    if (!o.joined_completion_probe.empty()) {
-      try {
-        std::ifstream f(o.joined_completion_probe,std::ios::binary);
-        if (!f) { BOOST_LOG(error) << "sbs-bench: converter probe plan unavailable"; return 7; }
-        const std::string bytes((std::istreambuf_iterator<char>(f)),std::istreambuf_iterator<char>());
-        const auto plan=nlohmann::json::parse(bytes);
-        const auto probe_kind = plan.value("probe_kind", std::string {});
-        const bool shutter_hdr = probe_kind == "actual-converter-shutter-hdr-v1";
-        const bool native_p010 = probe_kind == "actual-converter-native-p010-v1";
-        if (probe_kind=="actual-converter-rgb-v1" || probe_kind=="actual-converter-pending-current-colour-v1" || probe_kind=="actual-converter-packed-continuity-v1" || shutter_hdr || native_p010) {
-          if (plan.at("schema")!=1 || plan.at("context_provider")!="synthetic-video-scheduling-only" ||
-              frames.size()!=3 || observation_timestamps.size()!=3 || plan.at("sources").size()!=3) {
-            BOOST_LOG(error) << "sbs-bench: invalid actual-converter protocol"; return 7;
-          }
-          platf::dxgi::actual_converter_probe_v1::request_t request;
-          request.enabled=true;request.queued=plan.at("queue_enabled").get<bool>();
-          request.packed_continuity=probe_kind=="actual-converter-packed-continuity-v1" || shutter_hdr || native_p010;
-          request.hdr_input=private_hdr_probe;
-          request.native_p010 = native_p010;
-          if (native_p010) {
-            request.p010_chroma_mode = plan.at("p010_chroma_mode").get<std::string>();
-            if (request.p010_chroma_mode != "default" && request.p010_chroma_mode != "raster" && request.p010_chroma_mode != "no-uav") {
-              BOOST_LOG(error) << "sbs-bench: invalid native P010 chroma mode";
-              return 7;
-            }
-          }
-          if (request.hdr_input || plan.contains("required_adapter")) {
-            request.explicit_adapter=true;
-            const auto &adapter=plan.at("required_adapter");
-            request.hdr_adapter_luid_low=adapter.at("luid_low").get<std::uint32_t>();
-            request.hdr_adapter_luid_high=adapter.at("luid_high").get<std::int32_t>();
-            request.hdr_adapter_vendor_id=adapter.at("vendor_id").get<std::uint32_t>();
-            request.hdr_adapter_device_id=adapter.at("device_id").get<std::uint32_t>();
-          }
-          if (pfm_input != request.hdr_input || (request.hdr_input && request.queued) ||
-              ((shutter_hdr || native_p010) && (!pfm_input || plan.contains("temporal_source_bridge")))) {
-            BOOST_LOG(error) << "sbs-bench: unsupported private HDR probe declaration";
-            return 7;
-          }
-          request.settings=sbs_cfg;request.output=o.out;
-          const bool pending_colour=probe_kind=="actual-converter-pending-current-colour-v1";
-          if(plan.contains("temporal_source_bridge")) {
-            const auto &t=plan.at("temporal_source_bridge");models::subtitle_temporal_source_research_configuration_t cfg;
-            cfg.temporal_shader_root=t.at("temporal_shader_root").get<std::string>();cfg.temporal_source_closure_sha256=t.at("temporal_source_closure_sha256").get<std::string>();
-            cfg.frame_shader_root=t.at("frame_shader_root").get<std::string>();cfg.frame_source_closure_sha256=t.at("frame_source_closure_sha256").get<std::string>();
-            cfg.recorded_execution=t.value("recorded_execution",true);request.temporal_source_bridge=cfg;
-          }
-          if(pending_colour){const auto &candidate=plan.at("pending_current_colour");request.pending_current_colour.enabled=candidate.at("enabled").get<bool>();request.pending_current_colour.shader_root=candidate.at("shader_root").get<std::string>();request.pending_current_colour.exact_source_closure=candidate.at("source_closure_sha256").get<std::string>();}
-
-          for (std::size_t i=0;i<3;++i) {
-            const auto digest=models::file_sha256_hex(frames[i]);
-            if (digest.empty() || digest!=plan.at("sources").at(i).at("sha256").get<std::string>()) { BOOST_LOG(error)<<"sbs-bench: converter immutable source mismatch";return 7; }
-            if (request.hdr_input) {
-              scrgb_image image;if (!load_pfm(frames[i],image)) { BOOST_LOG(error)<<"sbs-bench: converter immutable HDR PFM source decode failed";return 7; }
-              request.frames[i].width=image.w;request.frames[i].height=image.h;request.frames[i].rgba16=std::move(image.rgba16);
-            } else {
-              rgba_image image;if (!load_png(frames[i],image)) { BOOST_LOG(error)<<"sbs-bench: converter immutable PNG source mismatch";return 7; }
-              request.frames[i].width=image.w;request.frames[i].height=image.h;request.frames[i].bgra=std::move(image.bgra);
-            }
-            request.frames[i].source_file_sha256=digest;
-            request.frames[i].declared_timeline_us=observation_timestamps[i];
-          }
-          // This scheduling fixture is not a performance run. Actual source/model clocks are
-          // created by the converter; the CLI timeline is recorded as metadata only.
-          sbs_perf::set_enabled(false);
-          std::string probe_error;const int code=pending_colour?platf::dxgi::pending_current_colour_probe_v1::run(request,probe_error):platf::dxgi::actual_converter_probe_v1::run(request,probe_error);
-          if (code) BOOST_LOG(error) << "sbs-bench: actual converter probe: " << probe_error;
-          return code;
-        }
-      } catch(const std::exception &e) {
-        BOOST_LOG(error) << "sbs-bench: actual converter plan: " << e.what();return 7;
-      }
-    }
     const bool replay_mode = !o.render_cache.empty();
     // Direct replay supplies an authenticated, horizontally contractive final field plus an
     // independent canonical order. Native V2 sequence replay runs
@@ -4557,16 +4409,6 @@ namespace sbs_bench {
         models::video_depth_estimator::normalized_depth_diagnostics_e::enabled,
         live_subtitle_work ? legacy_matte_e::on_demand : legacy_matte_e::always
       );
-      if (o.subtitle_cohort_research &&
-          !estimator->set_subtitle_cohort_research_enabled(true)) {
-        BOOST_LOG(error) << "sbs-bench: cannot enable private subtitle cohort research";
-        return 5;
-      }
-      if (o.subtitle_inner_colour_research &&
-          !estimator->set_subtitle_inner_colour_research_enabled(true)) {
-        BOOST_LOG(error) << "sbs-bench: cannot enable private subtitle inner-colour research";
-        return 5;
-      }
       if (o.subtitle_conditioning_live_policy || live_subtitle_work) {
         estimator->set_subtitle_conditioning_diagnostics_always(false);
       }
@@ -4608,23 +4450,6 @@ namespace sbs_bench {
         BOOST_LOG(warning) << "sbs-bench: shared subtitles unavailable; follow conversion retains ordinary Base: " << qualification_error;
         follow_subtitle_fallback_logged = true;
       }
-    }
-
-    if (!o.joined_completion_probe.empty()) {
-      std::string raw_probe_plan;
-      if (read_file_snapshot(fs::path(o.joined_completion_probe), raw_probe_plan)) {
-        const auto raw_protocol = nlohmann::json::parse(raw_probe_plan, nullptr, false);
-        if (raw_protocol.is_object() && raw_protocol.value("probe_kind", std::string {}) == "independent-ocr-raw-v1") {
-          if (!estimator) return 5;
-          return run_independent_ocr_raw_probe(o, frames, observation_timestamps, dev.Get(), ctx.Get(),
-            *estimator, raw_probe_plan);
-        }
-      }
-    }
-    if (!o.joined_completion_probe.empty()) {
-      if (!estimator) return 5;
-      return run_joined_completion_probe(o, frames, observation_timestamps, dev.Get(), ctx.Get(),
-        *estimator, vs.Get(), ps.Get(), sampler.Get(), max_width);
     }
 
     // Per-run state built lazily on the first frame (once we know the input size).
@@ -4770,251 +4595,6 @@ namespace sbs_bench {
         {"metadata", "ocr-working/frame_" + output_id + "/metadata.json"}
       });
       captured_ocr_working_observations.push_back(global_sequence);
-      return true;
-    };
-    ComPtr<ID3D11Buffer> inner_research_buffer_stage;
-    ComPtr<ID3D11Texture2D> inner_research_texture_stage;
-    nlohmann::json inner_research_frames = nlohmann::json::array();
-    std::vector<std::uint64_t> captured_inner_research_observations;
-    const auto write_subtitle_inner_colour_research = [&](
-      const models::depth_observation_views_t &result, const std::string &output_id,
-      const std::uint64_t ordinal
-    ) {
-      if (!estimator || !result.completed_frame_valid || result.completed_frame_id != ordinal ||
-          !models::parallax_v2_result_is_authenticated(result)) return false;
-      const auto views = estimator->subtitle_inner_colour_working_views_for_evaluation(ordinal);
-      if (!views || !views->provenance || views->completed_frame_id != ordinal ||
-          views->command_frame_id != ordinal ||
-          views->command_observation_timestamp_us != observation_timestamps.at(ordinal - 1u) ||
-          views->input_region != result.input_region ||
-          views->field_width != static_cast<std::uint32_t>(result.field_width) ||
-          views->field_height != static_cast<std::uint32_t>(result.field_height) ||
-          views->field_content != result.field_content) return false;
-      const auto directory = fs::path(o.out) / "subtitle-inner-colour-research" / ("frame_" + output_id);
-      std::error_code error;
-      if (!fs::create_directories(directory, error) || error) return false;
-      nlohmann::json artifacts = nlohmann::json::object();
-      const auto describe = [&](const char *name, const char *dtype,
-                                const nlohmann::json &shape, const std::size_t bytes) {
-        const auto path = directory / name;
-        const auto digest = models::file_sha256_hex(path);
-        if (digest.empty() || fs::file_size(path) != bytes) return false;
-        artifacts[name] = {{"sha256", digest}, {"byte_count", bytes}, {"dtype", dtype},
-                           {"shape", shape}, {"layout", "row-major"}};
-        return true;
-      };
-      const auto write_buffer = [&](ID3D11Buffer *buffer, const char *name, const char *dtype) {
-        if (!buffer) return false;
-        D3D11_BUFFER_DESC desc {};
-        buffer->GetDesc(&desc);
-        if (desc.ByteWidth == 0u || desc.ByteWidth % 4u != 0u ||
-            !dump_ocr_working_buffer(dev.Get(), ctx.Get(), buffer, desc.ByteWidth,
-                                    directory / name, inner_research_buffer_stage) ||
-            !describe(name, dtype, {desc.ByteWidth / 4u}, desc.ByteWidth)) return false;
-        artifacts[name]["d3d11_structure_byte_stride"] = desc.StructureByteStride;
-        return true;
-      };
-      const auto write_view = [&](ID3D11ShaderResourceView *view, const char *name,
-                                  const char *buffer_dtype = "uint32-le") {
-        if (!view) return false;
-        ComPtr<ID3D11Resource> resource;
-        view->GetResource(&resource);
-        ComPtr<ID3D11Buffer> buffer;
-        if (SUCCEEDED(resource.As(&buffer))) return write_buffer(buffer.Get(), name, buffer_dtype);
-        ComPtr<ID3D11Texture2D> texture;
-        if (FAILED(resource.As(&texture))) return false;
-        D3D11_TEXTURE2D_DESC desc {};
-        texture->GetDesc(&desc);
-        const bool rgba16 = desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT;
-        if (!rgba16 && desc.Format != DXGI_FORMAT_R32_UINT) return false;
-        const UINT pixel_bytes = rgba16 ? 8u : 4u;
-        nlohmann::json shape = {desc.Height, desc.Width};
-        if (rgba16) shape.push_back(4u);
-        return dump_contour_texture(dev.Get(), ctx.Get(), view, desc.Format, pixel_bytes,
-                                    directory / name, inner_research_texture_stage) &&
-          describe(name, rgba16 ? "float16-le" : "uint32-le", shape,
-                   static_cast<std::size_t>(desc.Width) * desc.Height * pixel_bytes);
-      };
-      if (!write_view(views->body.Get(), "inner_body.u32") ||
-          !write_view(views->matte.Get(), "inner_matte.u32") ||
-          !write_view(views->validation_receipt.Get(), "numeric_validation_receipt.u32") ||
-          !write_view(views->current_source.Get(), "current_source.rgba16f") ||
-          !write_view(views->current_probability.Get(), "current_probability.f32", "float32-le") ||
-          !write_view(views->current_baseline_support.Get(), "current_baseline_support.u32") ||
-          !write_view(views->current_ocr.Get(), "current_ocr.u32") ||
-          !write_view(views->current_uip.Get(), "current_uip.u32") ||
-          !write_view(views->current_sct.Get(), "current_sct.u32") ||
-          !write_view(views->current_geometry.Get(), "current_geometry.u32") ||
-          !write_buffer(views->constants.Get(), "constants.u32", "uint32-le") ||
-          !write_buffer(views->transaction.Get(), "transaction.u32", "uint32-le") ||
-          !write_buffer(views->dispatch_arguments.Get(), "dispatch_arguments.u32", "uint32-le")) return false;
-      const auto &provenance = *views->provenance;
-      const nlohmann::json metadata = {
-        {"schema", 1u}, {"scope", "private-full-native-inner-colour-research"},
-        {"production_dump", false}, {"rendering_authority", false}, {"geometry_changed", false},
-        {"command_context_is_fresh_GPU_verdict", false},
-        {"observation_ordinal", ordinal}, {"source_file_id", output_id},
-        {"completed_frame_id", views->completed_frame_id}, {"command_frame_id", views->command_frame_id},
-        {"command_observation_timestamp_us", views->command_observation_timestamp_us},
-        {"analysis_region", {result.input_region.left, result.input_region.top,
-                              result.input_region.right, result.input_region.bottom}},
-        {"analysis_generation", result.input_region.analysis_generation},
-        {"field_width", result.field_width}, {"field_height", result.field_height},
-        {"content", {result.field_content.left, result.field_content.top,
-                     result.field_content.right, result.field_content.bottom}},
-        {"private_schema", provenance.private_schema},
-        {"source_closure_schema", provenance.source_closure_schema},
-        {"source_compile_flags", provenance.source_compile_flags},
-        {"source_macro_count", provenance.source_macro_count},
-        {"colour_source_closure_sha256", provenance.colour_source_closure_sha256},
-        {"components_source_closure_sha256", provenance.components_source_closure_sha256},
-        {"helper_source_sha256", provenance.helper_source_sha256},
-        {"recorded_execution_requested", views->recorded_execution_requested},
-        {"helper_execution_path", views->helper_execution_path},
-        {"helper_recordings", views->helper_recordings},
-        {"helper_replays", views->helper_replays},
-        {"producer_source_closure_sha256", models::depth_coordinate_v2::shader_source_closure_sha256},
-        {"artifacts", artifacts}
-      };
-      std::ofstream stream(directory / "metadata.json");
-      stream << metadata.dump(2) << '\n';
-      stream.flush();
-      if (!stream.good()) return false;
-      inner_research_frames.push_back({{"observation_ordinal", ordinal}, {"source_file_id", output_id},
-        {"metadata", "subtitle-inner-colour-research/frame_" + output_id + "/metadata.json"}});
-      captured_inner_research_observations.push_back(ordinal);
-      return true;
-    };
-
-    ComPtr<ID3D11Buffer> cohort_research_buffer_stage;
-    ComPtr<ID3D11Texture2D> cohort_research_texture_stage;
-    nlohmann::json cohort_research_frames = nlohmann::json::array();
-    std::vector<std::uint64_t> captured_cohort_research_observations;
-    const auto write_subtitle_cohort_research = [&](
-      const models::depth_observation_views_t &result, const std::string &output_id,
-      const std::uint64_t ordinal
-    ) {
-      if (!estimator || !result.completed_frame_valid || result.completed_frame_id != ordinal ||
-          !models::parallax_v2_result_is_authenticated(result)) return false;
-      const auto views = estimator->subtitle_cohort_working_views_for_evaluation(ordinal);
-      if (!views || !views->provenance || views->completed_frame_id != ordinal ||
-          views->command_frame_id != ordinal ||
-          views->command_observation_timestamp_us != observation_timestamps.at(ordinal - 1u) ||
-          views->input_region != result.input_region ||
-          views->field_width != static_cast<std::uint32_t>(result.field_width) ||
-          views->field_height != static_cast<std::uint32_t>(result.field_height) ||
-          views->field_content != result.field_content) return false;
-      const auto directory = fs::path(o.out) / "subtitle-cohort-research" / ("frame_" + output_id);
-      std::error_code error;
-      if (!fs::create_directories(directory, error) || error) return false;
-      nlohmann::json artifacts = nlohmann::json::object();
-      const auto describe = [&](const std::string &name, const char *dtype,
-                                const nlohmann::json &shape, std::size_t bytes) {
-        const auto path = directory / name;
-        const auto digest = models::file_sha256_hex(path);
-        if (digest.empty() || fs::file_size(path) != bytes) return false;
-        artifacts[name] = {{"sha256", digest}, {"byte_count", bytes},
-                           {"dtype", dtype}, {"shape", shape}, {"layout", "row-major"}};
-        return true;
-      };
-      const auto write_buffer = [&](ID3D11Buffer *buffer, const char *name, const char *dtype) {
-        if (!buffer) return false;
-        D3D11_BUFFER_DESC desc {};
-        buffer->GetDesc(&desc);
-        if (desc.ByteWidth == 0u || desc.ByteWidth % sizeof(std::uint32_t) != 0u) return false;
-        if (!dump_ocr_working_buffer(dev.Get(), ctx.Get(), buffer, desc.ByteWidth,
-                                    directory / name, cohort_research_buffer_stage) ||
-            !describe(name, dtype, {desc.ByteWidth / sizeof(std::uint32_t)}, desc.ByteWidth)) return false;
-        artifacts[name]["d3d11_structure_byte_stride"] = desc.StructureByteStride;
-        return true;
-      };
-      const auto write_view = [&](ID3D11ShaderResourceView *view, const char *name,
-                                  const char *buffer_dtype = "uint32-le") {
-        if (!view) return false;
-        ComPtr<ID3D11Resource> resource;
-        view->GetResource(&resource);
-        ComPtr<ID3D11Buffer> buffer;
-        if (SUCCEEDED(resource.As(&buffer))) return write_buffer(buffer.Get(), name, buffer_dtype);
-        ComPtr<ID3D11Texture2D> texture;
-        if (FAILED(resource.As(&texture))) return false;
-        D3D11_TEXTURE2D_DESC desc {};
-        texture->GetDesc(&desc);
-        const char *dtype = nullptr;
-        UINT bytes_per_pixel = 0u;
-        nlohmann::json shape = {desc.Height, desc.Width};
-        if (desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
-          dtype = "float16-le";
-          bytes_per_pixel = 8u;
-          shape.push_back(4u);
-        } else if (desc.Format == DXGI_FORMAT_R32_UINT) {
-          dtype = "uint32-le";
-          bytes_per_pixel = 4u;
-        } else if (desc.Format == DXGI_FORMAT_R32_FLOAT) {
-          dtype = "float32-le";
-          bytes_per_pixel = 4u;
-        } else return false;
-        return dump_contour_texture(dev.Get(), ctx.Get(), view, desc.Format, bytes_per_pixel,
-                                    directory / name, cohort_research_texture_stage) &&
-          describe(name, dtype, shape,
-                   static_cast<std::size_t>(desc.Width) * desc.Height * bytes_per_pixel);
-      };
-      if (!write_view(views->state.Get(), "state.u32") ||
-          !write_view(views->next_state.Get(), "next_state.u32") ||
-          !write_view(views->owner.Get(), "owner.u32") ||
-          !write_view(views->birth_rgb.Get(), "birth_rgb.u32") ||
-          !write_view(views->next_owner.Get(), "next_owner.u32") ||
-          !write_view(views->next_birth_rgb.Get(), "next_birth_rgb.u32") ||
-          !write_view(views->eligibility.Get(), "eligibility.u32") ||
-          !write_view(views->filtered_support.Get(), "filtered_support.u32") ||
-          !write_view(views->glyph_matte.Get(), "glyph_matte.u32") ||
-          !write_view(views->guarded_glyph_matte.Get(), "guarded_glyph_matte.u32") ||
-          !write_view(views->current_source.Get(), "current_source.rgba16f") ||
-          !write_view(views->current_probability.Get(), "current_probability.f32", "float32-le") ||
-          !write_view(views->current_ocr.Get(), "current_ocr.u32") ||
-          !write_view(views->current_uip.Get(), "current_uip.u32") ||
-          !write_view(views->current_sct.Get(), "current_sct.u32") ||
-          !write_view(views->current_baseline_support.Get(), "current_baseline_support.u32") ||
-          !write_view(views->current_geometry.Get(), "current_geometry.u32") ||
-          !write_view(views->previous_source.Get(), "published_next_source.rgba16f") ||
-          !write_view(views->previous_probability.Get(), "published_next_probability.f32", "float32-le") ||
-          !write_view(views->previous_sct.Get(), "published_next_sct.u32") ||
-          !write_view(views->previous_baseline_support.Get(), "published_next_baseline_support.u32") ||
-          !write_buffer(views->constants.Get(), "constants.u32", "uint32-le") ||
-          !write_buffer(views->transaction.Get(), "transaction.u32", "uint32-le") ||
-          !write_buffer(views->dispatch_arguments.Get(), "dispatch_arguments.u32", "uint32-le")) return false;
-      const auto &provenance = *views->provenance;
-      const nlohmann::json metadata = {
-        {"schema", 1u}, {"scope", "private-same-device-mutable-cohort-research"},
-        {"production_dump", false}, {"rendering_authority", false}, {"geometry_changed", false},
-        {"previous_tuple_role", "published-for-next-observation-not-consumed-old-inputs"},
-        {"command_context_is_fresh_GPU_verdict", false},
-        {"observation_ordinal", ordinal}, {"source_file_id", output_id},
-        {"completed_frame_id", views->completed_frame_id},
-        {"command_frame_id", views->command_frame_id},
-        {"command_observation_timestamp_us", views->command_observation_timestamp_us},
-        {"analysis_region", {result.input_region.left, result.input_region.top,
-                              result.input_region.right, result.input_region.bottom}},
-        {"analysis_generation", result.input_region.analysis_generation},
-        {"field_width", result.field_width}, {"field_height", result.field_height},
-        {"content", {result.field_content.left, result.field_content.top,
-                     result.field_content.right, result.field_content.bottom}},
-        {"private_schema", provenance.private_schema},
-        {"source_closure_schema", provenance.source_closure_schema},
-        {"source_compile_flags", provenance.source_compile_flags},
-        {"source_macro_count", provenance.source_macro_count},
-        {"prototype_source_closure_sha256", provenance.prototype_source_closure_sha256},
-        {"diagnostic_source_closure_sha256", provenance.diagnostic_source_closure_sha256},
-        {"matte_guard_source_closure_sha256", provenance.matte_guard_source_closure_sha256},
-        {"producer_source_closure_sha256", models::depth_coordinate_v2::shader_source_closure_sha256},
-        {"artifact_digests", artifacts}
-      };
-      std::ofstream stream(directory / "metadata.json");
-      stream << metadata.dump(2) << '\n';
-      stream.flush();
-      if (!stream.good()) return false;
-      cohort_research_frames.push_back({{"observation_ordinal", ordinal}, {"source_file_id", output_id},
-        {"metadata", "subtitle-cohort-research/frame_" + output_id + "/metadata.json"}});
-      captured_cohort_research_observations.push_back(ordinal);
       return true;
     };
     // One native writer serves full legacy exports and selected pre-render snapshots.
@@ -6167,7 +5747,6 @@ namespace sbs_bench {
           replay_optional_work,
           replay_request,
           0u,
-          {},
           line_policy
         );
         const bool submitted_force = submitted.submission.inference_enqueued;
@@ -6681,25 +6260,6 @@ namespace sbs_bench {
           )) {
         BOOST_LOG(error) << "sbs-bench: working OCR diagnostic did not bind the current "
                          << "completed observation " << global_sequence;
-        return 6;
-      }
-
-      if (o.subtitle_cohort_research &&
-          (!o.subtitle_plane_diagnostic_ranges ||
-           detail::subtitle_diagnostic_observation_selected(
-             *o.subtitle_plane_diagnostic_ranges, global_sequence
-           )) && !write_subtitle_cohort_research(est, output_id, global_sequence)) {
-        BOOST_LOG(error) << "sbs-bench: private subtitle cohort diagnostic did not bind "
-                         << "the current completed observation " << global_sequence;
-        return 6;
-      }
-
-      if (o.subtitle_inner_colour_research &&
-          (!o.subtitle_plane_diagnostic_ranges || detail::subtitle_diagnostic_observation_selected(
-            *o.subtitle_plane_diagnostic_ranges, global_sequence
-          )) && !write_subtitle_inner_colour_research(est, output_id, global_sequence)) {
-        BOOST_LOG(error) << "sbs-bench: private subtitle inner-colour diagnostic did not bind "
-                         << "the current completed observation " << global_sequence;
         return 6;
       }
 
@@ -7940,44 +7500,6 @@ namespace sbs_bench {
         BOOST_LOG(error) << "sbs-bench: cannot write working OCR diagnostic manifest";
         return 6;
       }
-    }
-    if (o.subtitle_cohort_research) {
-      if (captured_cohort_research_observations != captured_ocr_working_observations ||
-          cohort_research_frames.size() != captured_cohort_research_observations.size()) {
-        BOOST_LOG(error) << "sbs-bench: private subtitle cohort diagnostics have incomplete selection";
-        return 6;
-      }
-      const nlohmann::json manifest = {
-        {"schema", 1u}, {"scope", "private-same-device-mutable-cohort-research"},
-        {"production_dump", false}, {"rendering_authority", false}, {"geometry_changed", false},
-        {"selection_basis", "one-based-observation-ordinal"},
-        {"processed_frame_count", completed_frame_count},
-        {"captured_observation_ids", captured_cohort_research_observations},
-        {"frames", cohort_research_frames}
-      };
-      std::ofstream stream(fs::path(o.out) / "subtitle_cohort_research.json");
-      stream << manifest.dump(2) << '\n';
-      stream.flush();
-      if (!stream.good()) return 6;
-    }
-    if (o.subtitle_inner_colour_research) {
-      if (captured_inner_research_observations != captured_ocr_working_observations ||
-          inner_research_frames.size() != captured_inner_research_observations.size()) {
-        BOOST_LOG(error) << "sbs-bench: private subtitle inner-colour diagnostics have incomplete selection";
-        return 6;
-      }
-      const nlohmann::json manifest = {
-        {"schema", 1u}, {"scope", "private-full-native-inner-colour-research"},
-        {"production_dump", false}, {"rendering_authority", false}, {"geometry_changed", false},
-        {"selection_basis", "one-based-observation-ordinal"},
-        {"processed_frame_count", completed_frame_count},
-        {"captured_observation_ids", captured_inner_research_observations},
-        {"frames", inner_research_frames}
-      };
-      std::ofstream stream(fs::path(o.out) / "subtitle_inner_colour_research.json");
-      stream << manifest.dump(2) << '\n';
-      stream.flush();
-      if (!stream.good()) return 6;
     }
     sbs_perf::dump_json((fs::path(o.out) / "sbs_perf.json").string());
     if (o.artifacts == artifact_mode_e::evaluation) {

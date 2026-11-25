@@ -63,12 +63,10 @@ add_executable(${PROJECT_NAME}
 
 # Keep test provenance tied to the helper sources actually compiled into this
 # executable. Header edits must regenerate these pins before the fixtures rebuild.
-set(SUBTITLE_BASELINE_HELPER "${CMAKE_SOURCE_DIR}/src/host_sbs_subtitle_inner_colour_gpu_global_validation.h")
 set(SUBTITLE_PROGRAM_LEASE "${CMAKE_SOURCE_DIR}/src/host_sbs_compute_program_lease.h")
 set(SUBTITLE_DISPLAY_RGB8_HELPER "${CMAKE_SOURCE_DIR}/src/host_sbs_display_snapshot_rgb8_analysis_gpu.h")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-    "${SUBTITLE_BASELINE_HELPER}" "${SUBTITLE_PROGRAM_LEASE}" "${SUBTITLE_DISPLAY_RGB8_HELPER}")
-file(SHA256 "${SUBTITLE_BASELINE_HELPER}" SUBTITLE_BASELINE_HELPER_SHA256)
+    "${SUBTITLE_PROGRAM_LEASE}" "${SUBTITLE_DISPLAY_RGB8_HELPER}")
 file(SHA256 "${SUBTITLE_PROGRAM_LEASE}" SUBTITLE_PROGRAM_LEASE_SHA256)
 file(SHA256 "${SUBTITLE_DISPLAY_RGB8_HELPER}" SUBTITLE_DISPLAY_RGB8_HELPER_SHA256)
 configure_file(

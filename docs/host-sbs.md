@@ -94,12 +94,6 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | `parallax_v2_p010_y` | 1 | `af9ce2210c86f8072b2e21d2d9da42a3b6ac381be34ee459b9debd9ddb24610c` |
 | `sbs_flat_fallback` | 2 | `7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4` |
 | `parallax_v2_live_diagnostic` | 2 | `9755c6c32eb928a0743aac49bd3829eb504eb24977e5ae6398d385f623a75051` |
-| `subtitle_cohort_prototype_research` | 3 | `e23004ab90035382849409bcf4ecf67d8433fd1310ff1d0bacde665fdbeb256a` |
-| `subtitle_cohort_research` | 4 | `3c6226ff2de686d0e21f550b2b1fcb9827fe3edb1c29f6134bc47114a9c7e687` |
-| `subtitle_inner_colour_research` | 5 | `d96f30ddd0e71b92cab2dde6b7b1b4d5523827ff6d296e73ce963dee0914f6de` |
-| `subtitle_inner_components_research` | 6 | `7e2f44690d64cebe3261133a3642fa558c8c25c7086bf19551f284a4cb13ebe0` |
-| `subtitle_matte_guard_research` | 1 | `50b7458e44cd1983fc6e2bbee3bf4624b1b62110fa478f48a2dec1c491d6d3b2` |
-| `parallax_v2_queued_renderer` | 1 | `04fcd38a6f470ebdb25883e160ab999aa43864915d597d29c51be5f7d21ea8bf` |
 | `direct_glyph_plan` | 2 | `3c1df1656492065c62c519ceffd49f3d1bc1d3a4e26c50ba0b8a2eead4dc2844` |
 | `direct_glyph_transport` | 4 | `2df402561c88d7e2b2672660e2f9d5f42b06d9815c87b48511adb05af6226b30` |
 | `direct_glyph_palette` | 17 | `c955485dc93ba40eccb88dad2ac66b512876265326fcc83c903cd089ae1c0941` |
@@ -369,7 +363,7 @@ reacquire the camera.
 
 ### Native subtitle contours and UI plane
 
-Live streaming and conversion use `host_sbs_shared_ui_warp.hlsl` and its queued wrapper. Their seven common
+Live streaming and conversion use `host_sbs_shared_ui_warp.hlsl`. Its seven common
 operands are rendered native color, ordinary Base, ParallaxState, the selected native `R32_UINT`
 matte, joined display-sRGB `RGBA16F` source crop, six-word SCP4, and 32-word SCT5. A 64-word selected
 receipt at t7 authenticates that matte. [Direct Glyph](#direct-glyph-subtitle-mask) publishes the
@@ -382,17 +376,16 @@ the existing flat fallback. Shared preparation adds a native full-width subtitle
 weights, row/header storage and draw geometry. The shared runtime derives the band from the
 submitted analysis rectangle and the actual color and matte textures. It uses those same texture
 identities to reject inputs that alias its writable planes. These resources belong to the current immutable
-draw only, are unbound between compute and sampling, and are rebuilt before reuse. The queued
-wrapper retains the exact-source GPU guard independently of subtitle authorisation.
+draw only, are unbound between compute and sampling, and are rebuilt before reuse.
 `src/host_sbs_shared_ui_warp_runtime.h` owns the ordered completed and queued shader specifications.
 The depth-contract generator checks a separate source-closure pin for each route's production and
 diagnostic programs. Each closure authenticates its own three entry points and their transitive
-includes. The queued wrapper includes the common source. Production prepares the selected route
-independently, and actual-map capture prepares that route's diagnostic programs on demand.
-A missing queued source, queued compile failure, or queued device-creation failure disables that
-route and preserves completed readiness. Completed draws of a Direct Glyph matte use the
+includes. The queued wrapper includes the common source and retains an exact-source GPU guard
+independently of subtitle authorisation; no converter path prepares or draws it since the queued
+converter research was removed. Actual-map capture prepares the completed route's diagnostic
+programs on demand. Completed draws of a Direct Glyph matte use the
 separately pinned one-root `direct_glyph_prepare` group, which wraps the completed prepare stage
-and accepts the Direct Glyph receipt; queued draws keep the queued wrapper. The completed
+and accepts the Direct Glyph receipt. The completed
 prepare stage itself still authenticates algorithm-1 and algorithm-2 receipts. Nothing produces
 an algorithm-2 receipt any more; that check stays because the file belongs to the pinned closure
 of the live programs.
@@ -633,7 +626,7 @@ false positive scene support can also expand by that bound. Fresh work without e
 matching native layout clears the actual matte extent. An authorized tile with no literal
 support in its dependency halo writes zero without growth. Reuse dispatches zero groups.
 
-Ordinary live, queued, P010 and diagnostic renderers use the authenticated Base inverse directly.
+Ordinary live, P010 and diagnostic renderers use the authenticated Base inverse directly.
 They contain no analytic subtitle branch and consume no legacy t8 mask. Shared preparation or
 selected-mask validation failure disables subtitle permission while preserving usable Base depth;
 it does not invoke an older subtitle warp. The independent flat renderer remains for invalid or
@@ -909,9 +902,8 @@ Every reuse leaves OCR crop/TensorRT/postprocess/plane/condition work dormant an
 depth/camera/OCR8/UIP4/contour/history/conditioned-final tuple byte-for-byte. Shared pin preparation
 authorizes the selected receipt, subtitle inputs and Base warp once per draw. The GPU schedules the
 field and row pass when subtitle protection is authorized. Exact current native RGB can then revoke
-individual matte contributors. Inactive rows use the Base inverse. Debug snapshots and the draw
-probe request a fully materialized field and weights even for inactive draws. The queued proof is
-also checked when sampling the draw. Failed shared preparation restores ordinary authenticated Base rendering with b3
+individual matte contributors. Inactive rows use the Base inverse. Debug snapshots request a fully
+materialized field and weights even for inactive draws. Failed shared preparation restores ordinary authenticated Base rendering with b3
 subtitle permission disabled and selected-receipt state cleared. An invalid selected receipt in a
 shared draw also selects the canonical Base inverse. Once
 the joined root has submitted work, any asynchronous CUDA error
@@ -1267,7 +1259,7 @@ For a CPU-completed force-infer observation, the same authenticated indirect gri
 SCT5 through an identity-only entry, then the serialized owner exchanges its two feature
 texture/view bundles. This removes the extra native-band feature copy while retaining the exact
 current references and counts. The force finalizer still supplies the grid and exact-current
-abstention; no receipt or geometry check is bypassed. Receipt-gated infer/reuse and queued roots
+abstention; no receipt or geometry check is bypassed. Receipt-gated infer/reuse roots
 keep the copy-and-publish entry, because a zero-group reuse cannot exchange CPU owners. The copy
 uses the whole band written by the preceding temporal dispatch, which zeros invalid source pixels.
 
@@ -1560,8 +1552,8 @@ Local presentation and remote capture both prefer the most recently checked-out 
 Remote capture keeps a twelve-slot pool. While frames arrive it checks about once per second and
 trims unborrowed backing idle for at least three seconds.
 Completed lineage retains the authenticated observation, and the packed presentation cache retains
-its rendered pixels independently of the capture image. Research paths that require private
-sources and inputs without a stable shared image owner use a private matched copy.
+its rendered pixels independently of the capture image. Converter test fixtures whose synthetic
+scheduling context has no stable shared image owner use a private matched copy.
 
 Desktop Duplication has one explicit current-color reuse exception with two conservative
 proofs. For full-source V2, when its non-null desktop-content timestamp is unchanged, the source
@@ -1765,24 +1757,9 @@ authority holds depth and subtitle temporal and ownership state. When the evalua
 normalized-depth diagnostics, the retained-depth copy restores the previous field into the
 rotated diagnostic target.
 
-A private queued-force postprocess mode (`request_flags = 4`, distinct from optional-work flags)
-requires the current post-child receipt for both depth and subtitle indirect shapes. It cannot
-use the completed-force abstention fallback. Missing or malformed authority advances no
-observation; the queued renderer must independently reject retained fields. This mode is a
-research prerequisite, not a live completion or presentation path.
-
-The default-off same-source continuation experiment queues postprocess once after successful
-interop-unmap calls. Its separate ticket retains the submitted source, token, work disposition,
-observation clock and working views; it grants no completed publication or cache authority.
-Queuing invalidates the previous borrowed publication before writing shared fields. The real root
-query and error handling remain mandatory, and both acknowledgment paths skip already-queued
-normalization before publishing the ordinary completed receipt. An independent private pixel
-shader checks the current transaction, finalized shapes and state clock before using Base or UI;
-rejection renders current color through identity. Callers must serialize the immediate context and
-retain source contents until the draw is recorded. The explicit converter probes own the queued
-shader and guard together. The pending-current-colour probe separately acquires its source and
-retirement resources after validating a real completed observation. Ordinary converters construct
-neither research owner.
+The detector shader still accepts a queued-force postprocess request (`request_flags = 4`)
+that requires the current post-child receipt for both depth and subtitle indirect shapes. It
+belonged to the removed same-source continuation experiment; the host issues only flags `1` and `2`.
 
 The conditional executable has one setter followed by two sibling conditional nodes and their
 common receipt-commit kernel. The first conditional
@@ -1917,9 +1894,9 @@ collapsed raw counts, word 3 is reserved zero, and words 4--7 are the valid-dept
 effective raw range width, `range_collapsed` and `depth_ready`. `depth_minmax_ema_cs` is its only
 GPU producer; receipt, harness and Dump 3D readers reject a non-zero reserved word. State resolve,
 the V2 map, the subtitle locator and the contour pass fail closed without the tag. State resolve
-writes the V2 state word `control_reserved_0` as zero. That word, UIP4 word 20, SCT5 word 3 and
-the cohort header word `SBC_H_RESERVED_3` are reserved zero: the locator, contour, matte guard,
-shared current-glyph, receipt and Dump 3D readers require zero.
+writes the V2 state word `control_reserved_0` as zero. That word, UIP4 word 20 and SCT5 word 3
+are reserved zero: the locator, contour, shared current-glyph, receipt and Dump 3D readers require
+zero.
 
 Routine depth-health state is collected with each completion receipt. An external Stats subscription
 throttles publication of new samples at the requested interval. Repeated output with the same
@@ -2017,8 +1994,8 @@ optional Game 3D text programs prepare only for an eligible packed Game 3D sessi
 There is no separate literal selected-matte pixel shader or preparation task. Per-frame shared
 failure disables b3 subtitle permission and clears selected authority before recording an ordinary
 Base draw. The shared shader imports only canonical Base/ROI/packed geometry and current glyph
-authorization; it contains no analytic subtitle inverse or background reconstruction. Explicit queued
-probes still require their authenticated shared source, and optional cache/background program-preparation failures cannot
+authorization; it contains no analytic subtitle inverse or background reconstruction. Optional
+cache/background program-preparation failures cannot
 disable the completed glyph route or a valid depth producer. Dump-only resources are created lazily and cannot prevent a
 stream from starting. A failure in optional diagnostics has no rendering authority. An armed
 schema-52 dump preserves ordinary Base, the protected Final diagnostic, native matte, SCT5,
@@ -2163,13 +2140,13 @@ identity, the conversion retains its pending owner or fails closed; it cannot ad
 readiness still grants no reusable D3D receipt. The query budget bounds polling, not all completion
 postprocess, draw or encoder time; live onset/removal latency remains separately measured.
 
-Ordinary and queued rendering share one source-conversion watermark. Once newer current colour C
+Rendering uses one source-conversion watermark. Once newer current colour C
 has actually been drawn, including flat identity, an older matched B whose source differs from the
 current capture cannot replace it. B's completion is still consumed normally; rejecting its old
 pixels does not cancel inference or supply current EMPTY evidence. Proven same-source redelivery
 remains allowed, and authenticated cached geometry drawn with current colour records the current
 pixel delivery rather than the older model owner. The successful draw command's actual colour SRV
-owns that identity, including a rejected command replaced with current-colour flat. Packed repeats
+owns that identity. Packed repeats
 check their stored pixel-source identity and never advance the watermark. Only the converter's
 explicit source-namespace reset resets it. This adds no mask history or confirmation wait.
 
@@ -2428,9 +2405,8 @@ allowance and retains the original source-age policy.
 The changing-source packed hold remains bounded by `250 ms`; after its effective age exceeds
 that bound, current-frame flat identity is shown until a completion becomes ready. Older matched
 completions retain their separate original source-age limit. Packed pixels grant no geometry,
-subtitle or adaptive-reuse authority. Timeout reporting follows the successfully recorded output,
-including a queued recorder's flat fallback: rejecting a stale completion cannot report flat when
-a packed repeat or queued draw was recorded. Pixel invalidation preserves the one-shot timeout
+subtitle or adaptive-reuse authority. Timeout reporting follows the successfully recorded output:
+rejecting a stale completion cannot report flat when a packed repeat was recorded. Pixel invalidation preserves the one-shot timeout
 log latch; an authenticated completed draw reports recovery. The offline evaluator alone may
 synchronize its private quality transaction before scoring it.
 

@@ -145,13 +145,12 @@ TEST(HostSbsPackedPresentationClockTest, TimeoutReportsActualFlatOnceAndOnlyComp
   EXPECT_EQ(clock.observe_timeout(true, output_e::flat), event_e::expired);
 }
 
-TEST(HostSbsPackedPresentationClockTest, BenchmarkGateAllowsTheRegressionHoldWithinItsIndependentSafetyBound) {
+TEST(HostSbsPackedPresentationClockTest, PacingTestGateHoldStaysWithinItsIndependentSafetyBound) {
   models::joined_completion_gate_benchmark::configuration_t gate;
   EXPECT_EQ(gate.hold_after_callback_enter_ms, 120u);
   EXPECT_EQ(gate.callback_safety_timeout_ms, 500u);
   gate.enabled = true;
   gate.target_frame_id = 3u;
-  gate.placement = models::joined_completion_gate_benchmark::placement_e::after_interop_unmaps;
   gate.hold_after_callback_enter_ms = 350u;
   EXPECT_TRUE(gate.valid());
   gate.hold_after_callback_enter_ms = 400u;

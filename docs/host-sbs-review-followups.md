@@ -40,7 +40,7 @@ calling them production costs or improvements.
 
 | ID | Original | Status and next action |
 |---|---|---|
-| HSR-18 | R | Corrected two active C++ ownership headers that incorrectly claimed DRAFT/non-runtime status. Probe-only queued, pending-color and body-witness paths still share application translation units; broader separation/naming remains maintenance work and does not justify removing their explicit diagnostic callers. |
+| HSR-18 | R | Corrected two active C++ ownership headers that incorrectly claimed DRAFT/non-runtime status. Probe-only queued, pending-color and body-witness paths still share application translation units; broader separation/naming remains maintenance work and does not justify removing their explicit diagnostic callers. The owner later retired these probes; they were deleted on 2026-11-25. |
 | HSR-19 | R | Centralized selected-receipt ABI1 C++ storage and its C24 byte-copy boundary: 64 words/256 bytes, words 4--27 copied as the exact 96-byte constants. The header `src/host_sbs_selected_matte_receipt.h` owns these types/constants. Consumers still independently authenticate freshness and rendering authority. Wider HLSL/Python word maps and SCT/SCP validation remain separate work. |
 | HSR-21 | U | Ordinary `run_eval` images use only Base and pass no subtitle flag, so they do not measure the live subtitle route. The file-fed [Direct Glyph qualification](../tools/sbsbench/README.md#direct-glyph-qualification) is the only harness qualifier of that route; it has no Python launcher or independent reader, and it does not establish live capture scheduling or headset quality. Evaluator/live metric parity remains open. |
 

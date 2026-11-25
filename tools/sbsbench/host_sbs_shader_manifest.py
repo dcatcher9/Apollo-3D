@@ -236,95 +236,10 @@ SBS_REPROJECTION_VERTEX = ShaderSpec(
     source_entrypoint="main_vs",
     source_target="vs_5_0",
 )
-HOST_SBS_SUBTITLE_COHORT_PREPARE = ShaderSpec(
-    source_file="host_sbs_subtitle_cohort_cs.hlsl",
-    source_entrypoint="prepare_main",
-    source_target="cs_5_0",
-)
-HOST_SBS_SUBTITLE_COHORT_MEMBERS = ShaderSpec(
-    source_file="host_sbs_subtitle_cohort_cs.hlsl",
-    source_entrypoint="members_main",
-    source_target="cs_5_0",
-)
-HOST_SBS_SUBTITLE_COHORT_FILTER = ShaderSpec(
-    source_file="host_sbs_subtitle_cohort_cs.hlsl",
-    source_entrypoint="filter_main",
-    source_target="cs_5_0",
-)
-HOST_SBS_SUBTITLE_COHORT_SNAPSHOT = ShaderSpec(
-    source_file="host_sbs_subtitle_cohort_snapshot_cs.hlsl",
-    source_entrypoint="snapshot_main",
-    source_target="cs_5_0",
-)
-HOST_SBS_SUBTITLE_MATTE_GUARD = ShaderSpec(
-    source_file="host_sbs_subtitle_matte_guard_cs.hlsl",
-    source_entrypoint="guard_main",
-    source_target="cs_5_0",
-)
 SBS_FLAT_IDENTITY = ShaderSpec(
     source_file="sbs_flat_identity_ps.hlsl",
     source_entrypoint="main_ps",
     source_target="ps_5_0",
-)
-PARALLAX_V2_QUEUED_RENDERER = ShaderSpec(
-    source_file="sbs_reprojection_v2_queued_ps.hlsl",
-    source_entrypoint="main_ps",
-    source_target="ps_5_0",
-)
-HOST_SBS_SUBTITLE_INNER_COLOUR_RESEARCH_PALETTE = ShaderSpec(
-    source_file="host_sbs_subtitle_inner_colour_global_validation_cs.hlsl",
-    source_entrypoint="palette_main",
-    source_target="cs_5_0",
-)
-HOST_SBS_SUBTITLE_INNER_COLOUR_RESEARCH_EMIT = ShaderSpec(
-    source_file="host_sbs_subtitle_inner_colour_global_validation_cs.hlsl",
-    source_entrypoint="emit_main",
-    source_target="cs_5_0",
-)
-HOST_SBS_SUBTITLE_INNER_COLOUR_RESEARCH_CLEAR = ShaderSpec(
-    source_file="host_sbs_subtitle_inner_colour_global_validation_cs.hlsl",
-    source_entrypoint="clear_main",
-    source_target="cs_5_0",
-)
-HOST_SBS_SUBTITLE_INNER_COLOUR_RESEARCH_ACCUMULATE = ShaderSpec(
-    source_file="host_sbs_subtitle_inner_colour_global_validation_cs.hlsl",
-    source_entrypoint="accumulate_main",
-    source_target="cs_5_0",
-)
-HOST_SBS_SUBTITLE_INNER_COLOUR_RESEARCH_VALIDATE = ShaderSpec(
-    source_file="host_sbs_subtitle_inner_colour_global_validation_cs.hlsl",
-    source_entrypoint="validate_main",
-    source_target="cs_5_0",
-)
-HOST_SBS_SUBTITLE_INNER_COMPONENTS_RESEARCH_INIT = ShaderSpec(
-    source_file="host_sbs_subtitle_seeded_components_cs.hlsl",
-    source_entrypoint="init_main",
-    source_target="cs_5_0",
-)
-HOST_SBS_SUBTITLE_INNER_COMPONENTS_RESEARCH_UNION = ShaderSpec(
-    source_file="host_sbs_subtitle_seeded_components_cs.hlsl",
-    source_entrypoint="union_main",
-    source_target="cs_5_0",
-)
-HOST_SBS_SUBTITLE_INNER_COMPONENTS_RESEARCH_REDUCE = ShaderSpec(
-    source_file="host_sbs_subtitle_seeded_components_cs.hlsl",
-    source_entrypoint="reduce_main",
-    source_target="cs_5_0",
-)
-HOST_SBS_SUBTITLE_INNER_COMPONENTS_RESEARCH_RESOLVE = ShaderSpec(
-    source_file="host_sbs_subtitle_seeded_components_cs.hlsl",
-    source_entrypoint="resolve_main",
-    source_target="cs_5_0",
-)
-HOST_SBS_SUBTITLE_INNER_COMPONENTS_RESEARCH_DILATE = ShaderSpec(
-    source_file="host_sbs_subtitle_seeded_components_cs.hlsl",
-    source_entrypoint="dilate_main",
-    source_target="cs_5_0",
-)
-HOST_SBS_SUBTITLE_INNER_COMPONENTS_RESEARCH_DILATE_BOX = ShaderSpec(
-    source_file="host_sbs_subtitle_seeded_components_cs.hlsl",
-    source_entrypoint="dilate_box_main",
-    source_target="cs_5_0",
 )
 HOST_SBS_DIRECT_GLYPH_PLAN = ShaderSpec(
     source_file="host_sbs_subtitle_direct_glyph_cs.hlsl",
@@ -490,24 +405,7 @@ SHADER_SPECS: Dict[str, ShaderSpec] = {
     "parallax_v2_live_mapping": PARALLAX_V2_LIVE_MAPPING,
     "parallax_v2_live_mask": PARALLAX_V2_LIVE_MASK,
     "sbs_reprojection_vertex": SBS_REPROJECTION_VERTEX,
-    "host_sbs_subtitle_cohort_prepare": HOST_SBS_SUBTITLE_COHORT_PREPARE,
-    "host_sbs_subtitle_cohort_members": HOST_SBS_SUBTITLE_COHORT_MEMBERS,
-    "host_sbs_subtitle_cohort_filter": HOST_SBS_SUBTITLE_COHORT_FILTER,
-    "host_sbs_subtitle_cohort_snapshot": HOST_SBS_SUBTITLE_COHORT_SNAPSHOT,
-    "host_sbs_subtitle_matte_guard": HOST_SBS_SUBTITLE_MATTE_GUARD,
     "sbs_flat_identity": SBS_FLAT_IDENTITY,
-    "parallax_v2_queued_renderer": PARALLAX_V2_QUEUED_RENDERER,
-    "host_sbs_subtitle_inner_colour_research_palette": HOST_SBS_SUBTITLE_INNER_COLOUR_RESEARCH_PALETTE,
-    "host_sbs_subtitle_inner_colour_research_emit": HOST_SBS_SUBTITLE_INNER_COLOUR_RESEARCH_EMIT,
-    "host_sbs_subtitle_inner_colour_research_clear": HOST_SBS_SUBTITLE_INNER_COLOUR_RESEARCH_CLEAR,
-    "host_sbs_subtitle_inner_colour_research_accumulate": HOST_SBS_SUBTITLE_INNER_COLOUR_RESEARCH_ACCUMULATE,
-    "host_sbs_subtitle_inner_colour_research_validate": HOST_SBS_SUBTITLE_INNER_COLOUR_RESEARCH_VALIDATE,
-    "host_sbs_subtitle_inner_components_research_init": HOST_SBS_SUBTITLE_INNER_COMPONENTS_RESEARCH_INIT,
-    "host_sbs_subtitle_inner_components_research_union": HOST_SBS_SUBTITLE_INNER_COMPONENTS_RESEARCH_UNION,
-    "host_sbs_subtitle_inner_components_research_reduce": HOST_SBS_SUBTITLE_INNER_COMPONENTS_RESEARCH_REDUCE,
-    "host_sbs_subtitle_inner_components_research_resolve": HOST_SBS_SUBTITLE_INNER_COMPONENTS_RESEARCH_RESOLVE,
-    "host_sbs_subtitle_inner_components_research_dilate": HOST_SBS_SUBTITLE_INNER_COMPONENTS_RESEARCH_DILATE,
-    "host_sbs_subtitle_inner_components_research_dilate_box": HOST_SBS_SUBTITLE_INNER_COMPONENTS_RESEARCH_DILATE_BOX,
     "host_sbs_direct_glyph_plan": HOST_SBS_DIRECT_GLYPH_PLAN,
     "host_sbs_direct_glyph_publish": HOST_SBS_DIRECT_GLYPH_PUBLISH,
     "host_sbs_direct_glyph_plan_tile": HOST_SBS_DIRECT_GLYPH_PLAN_TILE,
@@ -680,86 +578,6 @@ PARALLAX_V2_LIVE_DIAGNOSTIC_GROUP = ClosureGroup(
     source_closure_sha256="9755c6c32eb928a0743aac49bd3829eb504eb24977e5ae6398d385f623a75051",
 )
 
-SUBTITLE_COHORT_PROTOTYPE_RESEARCH_GROUP = ClosureGroup(
-    name="subtitle_cohort_prototype_research",
-    description=(
-        "Opt-in cohort prototype provenance for the first three cohort passes; never production drawing authority."
-    ),
-    specs=(
-        HOST_SBS_SUBTITLE_COHORT_PREPARE,
-        HOST_SBS_SUBTITLE_COHORT_MEMBERS,
-        HOST_SBS_SUBTITLE_COHORT_FILTER,
-    ),
-    source_closure_sha256="e23004ab90035382849409bcf4ecf67d8433fd1310ff1d0bacde665fdbeb256a",
-)
-
-SUBTITLE_COHORT_RESEARCH_GROUP = ClosureGroup(
-    name="subtitle_cohort_research",
-    description=(
-        "Opt-in private subtitle cohort experiment and coherent previous-observation snapshot; never rendering authority."
-    ),
-    specs=(
-        HOST_SBS_SUBTITLE_COHORT_PREPARE,
-        HOST_SBS_SUBTITLE_COHORT_MEMBERS,
-        HOST_SBS_SUBTITLE_COHORT_FILTER,
-        HOST_SBS_SUBTITLE_COHORT_SNAPSHOT,
-    ),
-    source_closure_sha256="3c6226ff2de686d0e21f550b2b1fcb9827fe3edb1c29f6134bc47114a9c7e687",
-)
-
-SUBTITLE_INNER_COLOUR_RESEARCH_GROUP = ClosureGroup(
-    name="subtitle_inner_colour_research",
-    description=(
-        "Opt-in independent global inner-colour diagnostic; never replaces producer or drawing inputs."
-    ),
-    specs=(
-        HOST_SBS_SUBTITLE_INNER_COLOUR_RESEARCH_PALETTE,
-        HOST_SBS_SUBTITLE_INNER_COLOUR_RESEARCH_EMIT,
-        HOST_SBS_SUBTITLE_INNER_COLOUR_RESEARCH_CLEAR,
-        HOST_SBS_SUBTITLE_INNER_COLOUR_RESEARCH_ACCUMULATE,
-        HOST_SBS_SUBTITLE_INNER_COLOUR_RESEARCH_VALIDATE,
-    ),
-    source_closure_sha256="d96f30ddd0e71b92cab2dde6b7b1b4d5523827ff6d296e73ce963dee0914f6de",
-)
-
-SUBTITLE_INNER_COMPONENTS_RESEARCH_GROUP = ClosureGroup(
-    name="subtitle_inner_components_research",
-    description=(
-        "Opt-in inner-colour six-pass component diagnostic dependency; never production drawing authority."
-    ),
-    specs=(
-        HOST_SBS_SUBTITLE_INNER_COMPONENTS_RESEARCH_INIT,
-        HOST_SBS_SUBTITLE_INNER_COMPONENTS_RESEARCH_UNION,
-        HOST_SBS_SUBTITLE_INNER_COMPONENTS_RESEARCH_REDUCE,
-        HOST_SBS_SUBTITLE_INNER_COMPONENTS_RESEARCH_RESOLVE,
-        HOST_SBS_SUBTITLE_INNER_COMPONENTS_RESEARCH_DILATE,
-        HOST_SBS_SUBTITLE_INNER_COMPONENTS_RESEARCH_DILATE_BOX,
-    ),
-    source_closure_sha256="7e2f44690d64cebe3261133a3642fa558c8c25c7086bf19551f284a4cb13ebe0",
-)
-
-SUBTITLE_MATTE_GUARD_RESEARCH_GROUP = ClosureGroup(
-    name="subtitle_matte_guard_research",
-    description=(
-        "Opt-in private final subtitle matte guard; separate from production drawing and cohort state."
-    ),
-    specs=(
-        HOST_SBS_SUBTITLE_MATTE_GUARD,
-    ),
-    source_closure_sha256="50b7458e44cd1983fc6e2bbee3bf4624b1b62110fa478f48a2dec1c491d6d3b2",
-)
-
-PARALLAX_V2_QUEUED_RENDERER_GROUP = ClosureGroup(
-    name="parallax_v2_queued_renderer",
-    description=(
-        "Optional queued same-source renderer; exact root token and observation guard, never completed publication. Lazy and independent of ordinary renderer/prewarm."
-    ),
-    specs=(
-        PARALLAX_V2_QUEUED_RENDERER,
-    ),
-    source_closure_sha256="04fcd38a6f470ebdb25883e160ab999aa43864915d597d29c51be5f7d21ea8bf",
-)
-
 DIRECT_GLYPH_PLAN_GROUP = ClosureGroup(
     name="direct_glyph_plan",
     description=(
@@ -835,12 +653,6 @@ CLOSURE_GROUPS: Dict[str, ClosureGroup] = {
     "parallax_v2_p010_y": PARALLAX_V2_P010_Y_GROUP,
     "sbs_flat_fallback": SBS_FLAT_FALLBACK_GROUP,
     "parallax_v2_live_diagnostic": PARALLAX_V2_LIVE_DIAGNOSTIC_GROUP,
-    "subtitle_cohort_prototype_research": SUBTITLE_COHORT_PROTOTYPE_RESEARCH_GROUP,
-    "subtitle_cohort_research": SUBTITLE_COHORT_RESEARCH_GROUP,
-    "subtitle_inner_colour_research": SUBTITLE_INNER_COLOUR_RESEARCH_GROUP,
-    "subtitle_inner_components_research": SUBTITLE_INNER_COMPONENTS_RESEARCH_GROUP,
-    "subtitle_matte_guard_research": SUBTITLE_MATTE_GUARD_RESEARCH_GROUP,
-    "parallax_v2_queued_renderer": PARALLAX_V2_QUEUED_RENDERER_GROUP,
     "direct_glyph_plan": DIRECT_GLYPH_PLAN_GROUP,
     "direct_glyph_transport": DIRECT_GLYPH_TRANSPORT_GROUP,
     "direct_glyph_palette": DIRECT_GLYPH_PALETTE_GROUP,

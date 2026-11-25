@@ -6,7 +6,6 @@
 #include "host_sbs_direct_glyph_tiles.h"
 #include "host_sbs_gpu_completion_receipt.h"
 #include "host_sbs_resolution.h"
-#include "host_sbs_temporal_source_ledger.h"
 #include "host_sbs_telemetry_perf.h"
 #include "host_sbs_joined_completion_gate_benchmark.h"
 
@@ -1024,53 +1023,6 @@ namespace models {
     depth_call_status_t status;
   };
 
-  /** PRIVATE bench-only QUEUED working views. Never a completed/publication/cache proof.
-   * Source is the exact submitted private RGB, not a later capture. Keep its contents leased
-   * through the same-context draw. All output views alias estimator singletons and expire on
-   * acknowledgment/next admission; ComPtr preserves lifetime, not immutable bytes.
-   * A renderer MUST independently validate exact post-child CBRG/RQST token/work and
-   * ParallaxState observation clock. No CurrentUI/EMPTY or depth-owner claim is granted.
-   */
-  struct queued_same_source_gpu_continuation_research_views_t {
-    std::uint64_t ticket_sequence = 0u;
-    std::uint64_t submitted_frame_id = 0u, observation_timestamp_us = 0u;
-    std::uint64_t transaction_token = 0u, subtitle_context_generation = 0u;
-    std::uint32_t expected_work = 0u, postprocess_request_flags = 0u;
-    bool both_unmap_calls_succeeded = false; // HOST enqueue boundary, NOT GPU readiness
-    bool postprocess_queued = false;
-    bool refined_live_geometry_active = false;
-    depth_input_region_t input_region {};
-    input_color_space color_space = input_color_space::srgb;
-    std::uint32_t field_width = 0u, field_height = 0u;
-    depth_tensor_content_rect_t field_content {};
-    host_sbs_gpu_completion_receipt::expected_t planned_publication {}; // not published
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> submitted_source;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> base, state, glyph_matte, display_band, condition_params, contour_identity;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> research_selected_matte, research_selected_matte_receipt;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> transaction_raw;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> transaction, dispatch_arguments;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> depth_constants, source_region_constants, contour_constants;
-  };
-
-  /** PRIVATE pending owner operands. Never a completed conditioner or publication proof.
-   * Available only for the exact leased pending ticket AFTER GPU postprocess was queued.
-   * Archive on the same immediate context before acknowledgement/next admission. Root, OCR,
-   * SCT and infer-shape authentication is performed by the pending-owner GPU gate.
-   */
-  struct pending_ocr_conditioner_research_views_t {
-    std::uint64_t ticket_sequence=0, submitted_frame_id=0, observation_timestamp_us=0;
-    std::uint64_t transaction_token=0, subtitle_context_generation=0;
-    std::uint32_t expected_work=0, postprocess_request_flags=0;
-    host_sbs_gpu_completion_receipt::expected_t planned_owner {}; // VALUE ONLY, never completion
-    depth_input_region_t input_region {};
-    input_color_space color_space=input_color_space::srgb;
-    std::uint32_t field_width=0, field_height=0;
-    depth_tensor_content_rect_t field_content {};
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> source_band, probability_snapshot, ocr_record, uip, sct;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> constants, transaction, dispatch_arguments;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> transaction_raw;
-  };
-
   [[nodiscard]] inline bool subtitle_evidence_is_exact_frame(
     const depth_observation_views_t &result
   ) noexcept {
@@ -1299,40 +1251,6 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Buffer> resolve_constants;
   };
 
-
-  // PRIVATE RAW OCR proof. This distinct token/result cannot be supplied to depth publication
-  // or current-UI APIs. Logical P is FP32[160][960]; native band is display RGBA16F.
-  inline constexpr std::uint32_t raw_ocr_probe_width = 960u;
-  inline constexpr std::uint32_t raw_ocr_probe_height = 160u;
-  inline constexpr std::size_t raw_ocr_probe_probability_bytes = 960u * 160u * sizeof(float);
-  struct raw_ocr_probe_token_t { std::uint64_t value = 0u; };
-  struct raw_ocr_probe_source_t {
-    std::uint64_t capture_epoch = 0u, capture_serial = 0u, capture_timestamp_us = 0u;
-    std::uint64_t analysis_generation = 0u;
-    std::uint32_t source_width = 0u, source_height = 0u;
-  };
-  struct raw_ocr_probe_views_t {
-    raw_ocr_probe_token_t token {};
-    raw_ocr_probe_source_t source {};
-    std::uint32_t probability_width = raw_ocr_probe_width, probability_height = raw_ocr_probe_height;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> current_source, source_band, probability;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> transaction, source_identity_constants, preprocess_constants;
-  };
-  struct raw_ocr_probe_poll_t {
-    std::int32_t actual_release_query = -1;
-    bool pending = false;
-    std::optional<raw_ocr_probe_views_t> views;
-  };
-  struct raw_ocr_probe_depth_events_t {
-    bool deferred_mapped_depth_lease = false;
-    bool root_event_recorded = false;
-    std::int32_t actual_compute_query = -1, actual_hold_query = -1;
-    std::int32_t actual_root_query = -1;
-    std::uint64_t depth_frame_id = 0u, depth_observation_timestamp_us = 0u;
-    std::uint64_t recorded_event_sequence = 0u;
-    // These private events do NOT establish an interop-release/completed-owner verdict.
-  };
-
   /** Default-off completed OLD OCR conditioner aliases for synchronous evaluation copying.
    * Publication equality and no-pending checks bind availability, not GPU OCR execution or
    * text presence. The caller must copy BEFORE the next estimator input and authenticate
@@ -1349,86 +1267,6 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Buffer> constants, transaction, dispatch_arguments;
   };
 
-  /** Optional private cohort shader identities; never production drawing provenance. */
-  struct subtitle_cohort_research_provenance_t {
-    std::uint32_t private_schema = 0u;
-    std::uint32_t source_closure_schema = 0u;
-    std::uint32_t source_compile_flags = 0u;
-    std::uint32_t source_macro_count = 0u;
-    std::string prototype_source_closure_sha256;
-    std::string diagnostic_source_closure_sha256;
-    std::string matte_guard_source_closure_sha256;
-  };
-
-  /** MUTABLE research working resources after one estimator completion.
-   * ComPtr retains lifetime, not contents. Copy synchronously before the next input.
-   * The command context is not a CPU infer/reuse verdict: inspect the GPU state/SCT/UIP
-   * and indirect arguments to distinguish fresh work from a held research tuple.
-   * previous_* is the snapshot published FOR THE NEXT observation, not an immutable
-   * copy of the old tuple consumed by this observation. These views never render.
-   */
-  struct subtitle_cohort_working_research_views_t {
-    std::uint64_t completed_frame_id = 0u;
-    std::uint64_t command_frame_id = 0u;
-    std::uint64_t command_observation_timestamp_us = 0u;
-    depth_input_region_t input_region {};
-    std::uint32_t field_width = 0u;
-    std::uint32_t field_height = 0u;
-    depth_tensor_content_rect_t field_content {};
-    std::shared_ptr<const subtitle_cohort_research_provenance_t> provenance;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> state, next_state;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> owner, birth_rgb;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> next_owner, next_birth_rgb;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> eligibility, filtered_support, glyph_matte;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> guarded_glyph_matte;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> current_source, current_probability;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> current_ocr, current_uip, current_sct;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> current_baseline_support, current_geometry;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> previous_source, previous_probability;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> previous_sct, previous_baseline_support;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> constants, transaction, dispatch_arguments;
-  };
-
-  /** Default-off, same-device full inner-fill algorithm; never drawing authority. */
-  struct subtitle_inner_colour_research_provenance_t {
-    std::uint32_t private_schema = 2u;
-    std::uint32_t source_closure_schema = 0u;
-    std::uint32_t source_compile_flags = 0u;
-    std::uint32_t source_macro_count = 0u;
-    std::string colour_source_closure_sha256;
-    std::string components_source_closure_sha256;
-    std::string helper_source_sha256;
-  };
-
-  /** Mutable aliases, to be copied before the next estimator submission.
-   * The command clock is not a CPU infer verdict. Conditional zero dispatches
-   * retain the completed body/matte; inspect transaction and SCT provenance.
-   */
-  struct subtitle_inner_colour_working_research_views_t {
-    std::uint64_t completed_frame_id = 0u;
-    std::uint64_t command_frame_id = 0u;
-    std::uint64_t command_observation_timestamp_us = 0u;
-    depth_input_region_t input_region {};
-    std::uint32_t field_width = 0u, field_height = 0u;
-    depth_tensor_content_rect_t field_content {};
-    std::shared_ptr<const subtitle_inner_colour_research_provenance_t> provenance;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> body, matte;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> validation_receipt;
-    std::uint32_t helper_execution_path = 0u;
-    bool recorded_execution_requested = false;
-    std::uint64_t helper_recordings = 0u, helper_replays = 0u;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> current_source, current_probability;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> current_baseline_support, current_ocr;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> current_uip, current_sct, current_geometry;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> constants, transaction, dispatch_arguments;
-  };
-
-  // PRIVATE default-off runtime experiment; no application configuration or drawing authority.
-  struct subtitle_temporal_source_research_configuration_t {
-    std::string temporal_shader_root,temporal_source_closure_sha256;
-    std::string frame_shader_root,frame_source_closure_sha256;
-    bool recorded_execution=true;
-  };
   /** Direct Glyph subtitle publication, configured once before the first input. */
   struct subtitle_direct_glyph_configuration_t {
     std::string shader_root;
@@ -1444,14 +1282,6 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ocr_record, alpha8, source_audit;
     Microsoft::WRL::ComPtr<ID3D11Buffer> work, legacy_dispatch, placement, post_plan_work, native_lines;
   };
-  struct subtitle_temporal_source_working_views_t {
-    std::uint64_t model_frame=0,model_observation_us=0;
-    host_sbs_temporal_source_bridge::certificate_t source;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> baseline_body,baseline_matte,body,matte,state,receipt,frame256;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> current_constants,transaction,dispatch_arguments;
-    // All are mutable private diagnostics. Neither zero nor nonzero is UI/EMPTY authority.
-  };
-
   class video_depth_estimator {
   public:
     enum class normalized_depth_diagnostics_e { disabled, enabled };
@@ -1496,83 +1326,27 @@ namespace models {
     [[nodiscard]] bool subtitle_conditioning_diagnostics_allocated_for_tests() const noexcept;
 #endif
 
-    /** Research harness only, default false; accepted only before the first input.
-     * Runs private cohort/filter/M1 diagnostics without replacing production S/M or geometry.
-     * Optional initialization failure disables this experiment, not the estimator.
-     */
-    bool set_subtitle_cohort_research_enabled(bool enabled);
-    /** Default-off full GPU inner-fill/closed-component/BOX3 experiment.
-     * Current source, probability, baseline support and OCR are the only inputs;
-     * masks are exported privately and cannot replace the rendered tuple.
-     */
-    bool set_subtitle_inner_colour_research_enabled(bool enabled);
-    // Compile immutable private programs ONCE before first input; normal path stays absent/off.
-    bool configure_subtitle_temporal_source_research(
-      const subtitle_temporal_source_research_configuration_t &,std::string &error);
-    bool subtitle_temporal_source_research_enabled() const noexcept;
     bool configure_subtitle_direct_glyph(const subtitle_direct_glyph_configuration_t &, std::string &error);
     [[nodiscard]] std::filesystem::path direct_glyph_engine_path_for_evaluation() const;
     [[nodiscard]] std::optional<host_sbs_direct_glyph_gpu::tile_profile_e> direct_glyph_profile_for_evaluation() const;
     std::optional<subtitle_direct_glyph_diagnostic_views_t> subtitle_direct_glyph_diagnostic_views_for_evaluation(std::uint64_t frame, std::uint64_t observation) const noexcept;
-    std::optional<subtitle_temporal_source_working_views_t>
-      subtitle_temporal_source_working_views_for_evaluation(std::uint64_t expected_completed_frame) const noexcept;
 
     /** Default-off aliases only; accepted before the first input under the existing lock.
      * No additional resource allocation, shader dispatch or ordinary rendering work.
      */
     bool set_completed_ocr_conditioner_research_enabled(bool enabled);
 
-    /** Default-off, configured before first input. Requires the private post-child commit,
-     * queued-force flags4 shader gates and exact-token renderer package; not a live display path.
-     */
-    bool set_queued_same_source_gpu_continuation_research_enabled(bool enabled);
-
-    /** PRIVATE default-false RAW availability experiment, configured before first input.
-     * Exclusive resident OCR context/stream; depth suppresses subtitle work while enabled.
-     * No positive/EMPTY/render authority and no normal queued-depth continuation.
-     */
-    bool set_independent_ocr_raw_probe_enabled(bool enabled, std::optional<std::uint64_t> eager_unmap_frame = std::nullopt);
-    /** Blocking setup/bootstrap only while no depth is pending, before authored B hold. */
-    bool prepare_independent_ocr_raw_probe(ID3D11ShaderResourceView *warm_source,
-      const raw_ocr_probe_source_t &identity, std::string &error);
-    bool submit_independent_ocr_raw_probe(ID3D11ShaderResourceView *current_source,
-      const raw_ocr_probe_source_t &identity, std::string &error);
-    raw_ocr_probe_poll_t poll_independent_ocr_raw_probe();
-    /** All D3D readers must be complete before releasing the exact result contents lease. */
-    bool release_independent_ocr_raw_probe(raw_ocr_probe_token_t token);
-    /** Real EventQuery calls for the private compute, hold and recorded root events. */
-    raw_ocr_probe_depth_events_t independent_ocr_raw_depth_events_for_evaluation();
-
-    /** Queue same-submitted-source postprocess ONCE after successful unmap calls, without
-     * querying/synchronizing CUDA or declaring CPU completion. Actual root ACK remains mandatory.
-     * Idempotent for the same pending owner. Rejects changed source/clock, predication, dump work.
-     * No cache authority; the returned mutable ticket is usable only by the guarded private bench.
-     */
-    [[nodiscard]] std::optional<queued_same_source_gpu_continuation_research_views_t>
-      queue_pending_same_source_gpu_continuation_for_evaluation(
-        ID3D11ShaderResourceView *exact_submitted_source,
-        std::uint64_t expected_frame_id,
-        std::uint64_t expected_observation_timestamp_us,
-        std::string &error
-      );
-
-    /** PRIVATE offline async benchmark only; default off and accepted once before first input.
-     * Inserts a real stream host gate after interop releases and before the real joined event.
-     * No renderer/depth/OCR authority is granted. Unsupported setup must reject the experiment.
-     */
-    bool configure_joined_completion_gate_for_benchmark(
-      const joined_completion_gate_benchmark::configuration_t &configuration
-    );
 #ifdef SUNSHINE_TESTS
+    /** Native pacing test only: holds one real joined completion after its interop releases.
+     * No renderer/depth/OCR authority is granted. Unsupported setup rejects the hold.
+     */
     bool configure_joined_completion_gate_for_native_pacing_test(
       const joined_completion_gate_benchmark::configuration_t &configuration
     );
 #endif
-    /** Pure CPU gate/query diagnostics, never a source clock or fabricated CUDA verdict. */
+    /** Pure CPU gate/query diagnostics for the converter test observer, never a source clock. */
     [[nodiscard]] std::optional<joined_completion_gate_benchmark::snapshot_t>
       joined_completion_gate_status_for_benchmark() const noexcept;
-    /** Always-release cleanup/cancel; no CUDA/D3D call or GPU-dependent wait. */
-    void release_joined_completion_gate_for_benchmark() noexcept;
 
     /** True only when every mandatory engine, shader, and session resource initialized. */
     bool is_valid() const;
@@ -1620,7 +1394,6 @@ namespace models {
       depth_optional_work_mode_e optional_work = depth_optional_work_mode_e::ordinary,
       gpu_adaptive_reuse_request adaptive_reuse = {},
       std::uint64_t subtitle_context_generation = 0u,
-      host_sbs_temporal_source_bridge::certificate_t source_observation = {},
       subtitle_line_policy_e subtitle_line_policy = subtitle_line_policy_e::video_caption
     );
 
@@ -1701,25 +1474,9 @@ namespace models {
     /** Exact-publication, no-pending mutable OLD conditioner view. Copy synchronously on
      * the owning thread before the next input; the result is not fresh-current OCR authority.
      */
-    // Read-only alias lease; it does not query, normalize, publish, fold history or ACK.
-    [[nodiscard]] std::optional<pending_ocr_conditioner_research_views_t>
-      pending_ocr_conditioner_working_views_for_evaluation(
-        std::uint64_t expected_ticket_sequence, std::uint64_t expected_frame,
-        std::uint64_t expected_observation) const noexcept;
-
     [[nodiscard]] std::optional<completed_ocr_conditioner_research_views_t>
     completed_ocr_conditioner_working_views_for_evaluation(
       const host_sbs_gpu_completion_receipt::expected_t &expected
-    ) const noexcept;
-
-    [[nodiscard]] std::optional<subtitle_cohort_working_research_views_t>
-    subtitle_cohort_working_views_for_evaluation(
-      std::uint64_t expected_completed_frame_id
-    ) const noexcept;
-
-    [[nodiscard]] std::optional<subtitle_inner_colour_working_research_views_t>
-    subtitle_inner_colour_working_views_for_evaluation(
-      std::uint64_t expected_completed_frame_id
     ) const noexcept;
 
   private:

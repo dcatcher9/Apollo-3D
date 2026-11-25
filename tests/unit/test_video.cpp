@@ -6827,11 +6827,7 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
 TEST(DirectxShaderSourceTest, HostSbsLatestV2LineageIsNotCurrentRenderAuthorization) {
   const auto display =
     read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");
-  const auto queued_research = read_source_file(
-    SUNSHINE_SOURCE_DIR "/src/platform/windows/host_sbs_queued_converter_research.inc"
-  );
   ASSERT_FALSE(display.empty());
-  ASSERT_FALSE(queued_research.empty());
 
   const auto retain_begin = display.find("[[nodiscard]] bool retain_latest_v2_lineage(");
   const auto retain_end = display.find("bool ensure_sbs_intermediate_storage", retain_begin);
@@ -6897,19 +6893,7 @@ TEST(DirectxShaderSourceTest, HostSbsLatestV2LineageIsNotCurrentRenderAuthorizat
   for (const auto &boundary : completion_boundaries) {
     expect_reset_between(selection, boundary.name, boundary.begin, boundary.end, "consume_matched_completion(");
   }
-  expect_reset_between(queued_research, "queued continuation may rewrite singleton fields",
-                       "depth_estimator->queue_pending_same_source_gpu_continuation_for_evaluation(",
-                       "queued_ticket_matches(");
-  EXPECT_NE(queued_research.find("ticket.refined_live_geometry_active,"), std::string::npos);
-  EXPECT_NE(display.find(".refined = ticket->refined_live_geometry_active,"), std::string::npos);
-  EXPECT_EQ(queued_research.find("submitted_refined_geometry"), std::string::npos);
-  const auto queue_attempt = selection.find("queued_attempt_failed_flat = !queue_research_observation(");
-  ASSERT_NE(queue_attempt, std::string::npos);
-  const auto clear_after_queue = selection.find("clear_matched_selection();", queue_attempt);
-  const auto discard_completion = selection.find("completion_finalized_before_admission = false;", queue_attempt);
-  ASSERT_NE(clear_after_queue, std::string::npos);
-  ASSERT_NE(discard_completion, std::string::npos);
-  EXPECT_LT(clear_after_queue, discard_completion);
+  EXPECT_NE(display.find(".refined = completed->refined_live_geometry_active,"), std::string::npos);
   EXPECT_EQ(display.find("reusable_v2"), std::string::npos);
 
   expect_reset_between(display, "terminal pipeline failure", "void fail_depth_pipeline_flat()", "matched_presentation_cache.reset();");
@@ -6972,7 +6956,7 @@ TEST(DirectxShaderSourceTest, VideoRoiExactProofIsIndependentOfInferenceAndPrese
   EXPECT_NE(display.find("attribution.unchanged_roi_proof.observe(current_damage, *region)"), std::string::npos);
   EXPECT_EQ(display.find("memoized_input_reuse_kind"), std::string::npos);
 
-  const auto colour_begin = display.find("const auto current_colour =");
+  const auto colour_begin = display.find("const bool uses_current_colour =");
   const auto colour_end = display.find("const bool v2_repeat_age_expired", colour_begin);
   ASSERT_NE(colour_begin, std::string::npos);
   ASSERT_NE(colour_end, std::string::npos);
@@ -6981,7 +6965,7 @@ TEST(DirectxShaderSourceTest, VideoRoiExactProofIsIndependentOfInferenceAndPrese
   EXPECT_NE(colour.find("current_content_timestamp"), std::string::npos);
   EXPECT_NE(colour.find("reuse_now"), std::string::npos);
   EXPECT_NE(colour.find("cached_current_color_warp"), std::string::npos);
-  EXPECT_NE(colour.find("uses_current_colour ? current_colour()"), std::string::npos);
+  EXPECT_NE(colour.find("const auto draw_colour = uses_current_colour ? sbs_draw_colour_t {"), std::string::npos);
   EXPECT_EQ(colour.find("inference_content_timestamp"), std::string::npos);
   EXPECT_EQ(colour.find("inference_ddup_damage"), std::string::npos);
   EXPECT_EQ(colour.find("unchanged_roi_proof"), std::string::npos);
@@ -7106,14 +7090,13 @@ TEST(DirectxShaderSourceTest, Convex2xRoiRendererUsesTheAuthenticatedFieldConten
   ASSERT_NE(convert_begin, std::string::npos);
   ASSERT_NE(convert_end, std::string::npos);
   const auto convert = display.substr(convert_begin, convert_end - convert_begin);
-  // Completed and queued fields have separate owners. Their realized source rectangle and
-  // field content must follow the same selected owner into the renderer constants.
+  // The realized source rectangle and field content must follow the selected completed owner
+  // into the renderer constants.
   const auto plan = display.find("sbs_draw_geometry_t select_sbs_draw_geometry(");
-  const auto plan_end = display.find("[[gnu::noinline]] int convert_with_queued_research(", plan);
+  const auto plan_end = display.find("    void emit_converter_probe(", plan);
   ASSERT_NE(plan, std::string::npos);
   ASSERT_NE(plan_end, std::string::npos);
   const auto selection = display.substr(plan, plan_end - plan);
-  EXPECT_NE(selection.find(".region = &ticket->input_region,\n          .field_content = &ticket->field_content,"), std::string::npos);
   EXPECT_NE(selection.find(".region = &completed->input_region,\n          .field_content = &completed->field_content,"), std::string::npos);
   const auto selected_domain = convert.find("const auto geometry = select_sbs_draw_geometry(");
   ASSERT_NE(selected_domain, std::string::npos);
@@ -7417,14 +7400,11 @@ TEST(DirectxShaderSourceTest, PackedPresentationCannotSeedSemanticLineage) {
   ASSERT_NE(timeout_observation, std::string::npos);
   ASSERT_NE(recorder_failure, std::string::npos);
   EXPECT_LT(recorder_failure, timeout_observation);
-  const auto output_classification = display.rfind("auto presentation_output =", recorder_failure);
+  const auto output_classification = display.rfind("const auto presentation_output =", recorder_failure);
   ASSERT_NE(output_classification, std::string::npos);
   EXPECT_NE(display.substr(output_classification, recorder_failure - output_classification).find(
-              "queued_attempt_failed_flat ? presentation_output_e::flat"),
+              "v2_live_warp_selected ? presentation_output_e::completed"),
             std::string::npos);
-  const auto fallback_classification = display.find("presentation_output = presentation_output_e::flat;", recorder_failure);
-  ASSERT_NE(fallback_classification, std::string::npos);
-  EXPECT_LT(fallback_classification, timeout_observation);
   const auto route_gate = display.rfind(
     "const bool packed_presentation_route_matches =",
     selection
