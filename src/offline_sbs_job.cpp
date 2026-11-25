@@ -41,6 +41,7 @@
 #include "entry_handler.h"
 #include "gpu_workload_arbiter.h"
 #include "offline_sbs_contract.h"
+#include "offline_sbs_digest.h"
 #include "offline_sbs_filesystem.h"
 #include "offline_sbs_wire_contract.h"
 #include "platform/common.h"
@@ -435,18 +436,6 @@ namespace offline_sbs {
         }
       }
       return pins;
-    }
-
-    std::string sha256_hex(const std::string_view bytes) {
-      static constexpr char digits[] = "0123456789abcdef";
-      const auto digest = crypto::hash(bytes);
-      std::string result;
-      result.resize(digest.size() * 2);
-      for (std::size_t index = 0; index < digest.size(); ++index) {
-        result[index * 2] = digits[digest[index] >> 4u];
-        result[index * 2 + 1] = digits[digest[index] & 0x0fu];
-      }
-      return result;
     }
 
     bool run_bound_user_filesystem_action(

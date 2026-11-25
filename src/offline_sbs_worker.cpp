@@ -10,6 +10,7 @@
 #include "offline_frame_transport.h"
 #include "offline_sbs_contract.h"
 #include "offline_sbs_runner.h"
+#include "offline_sbs_digest.h"
 #include "offline_sbs_wire_contract.h"
 #include "offline_sbs_worker.h"
 #ifdef SUNSHINE_TESTS
@@ -280,17 +281,6 @@ namespace offline_sbs {
         }
       );
       return value;
-    }
-
-    std::string sha256_hex(const std::string_view bytes) {
-      static constexpr char digits[] = "0123456789abcdef";
-      const auto digest = crypto::hash(bytes);
-      std::string result(digest.size() * 2, '\0');
-      for (std::size_t index = 0; index < digest.size(); ++index) {
-        result[index * 2] = digits[digest[index] >> 4u];
-        result[index * 2 + 1] = digits[digest[index] & 0x0fu];
-      }
-      return result;
     }
 
     bool constant_time_equal(
