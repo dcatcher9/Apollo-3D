@@ -2740,6 +2740,8 @@ namespace stream {
                 session->control.deferred_live_video_mode_acks.clear();
               }
             }
+            // Stream gamma requests (0x300D) follow the same rule: each is answered exactly once.
+            // An acknowledgement without encoder proof waits here for that proof.
             auto &gamma_acks = session->control.stream_gamma_ack_queue;
             while (server->_session->peer && gamma_acks->peek()) {
               if (auto ack = gamma_acks->pop(0ms)) {
@@ -2750,6 +2752,7 @@ namespace stream {
                     break;
                   }
                   if (session->control.deferred_stream_gamma_acks.size() >= STREAM_GAMMA_QUEUE_LIMIT) {
+                    BOOST_LOG(error) << "Stream gamma acknowledgements waiting for encoder proof exceeded their session bound; closing the session"sv;
                     session::stop(*session);
                     break;
                   }

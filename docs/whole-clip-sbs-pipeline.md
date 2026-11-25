@@ -102,14 +102,17 @@ and encoder-write timings. These measure transfer and backpressure as well as co
 timings remain separate. Compare matched source/output evidence before attributing a throughput
 change. With diagnostics off, a conversion collects no timings.
 
-Legacy cache-limit request fields remain accepted for existing clients and persisted jobs. They
-mean only the transient-raster cap. There is no whole-clip image sequence, depth/state cache,
+Legacy cache-limit request fields remain accepted so that job records persisted by earlier
+versions still load; the Web UI does not send them. They mean only the transient-raster cap. There is no whole-clip image sequence, depth/state cache,
 scene replay, per-scene encoder, or second inference pass.
 
 SDR encoding does not decode the source again. Static HDR keeps a second aligned source decode
-solely to donate per-frame mastering-display and content-light metadata. Every encoded pixel
-comes from the packed raw stream. Replacing this donor requires equivalent HEVC/AV1 evidence at
-every random-access keyframe; a looped single donor frame does not establish that equivalence.
+solely to donate per-frame mastering-display and content-light metadata, because the raw pipe
+carries no frame side data. Every encoded pixel comes from the packed raw stream. The donor was
+chosen against the bundled FFmpeg build, whose frame-loop filters do not keep that side data on
+cloned frames; it is a cost to revisit, not a format requirement. Replacing it requires
+equivalent HEVC/AV1 metadata at every random-access keyframe; a looped single donor frame does
+not establish that equivalence.
 
 ## Retained job documents
 

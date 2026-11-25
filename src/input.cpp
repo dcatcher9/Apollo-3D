@@ -1696,8 +1696,10 @@ namespace input {
     {
       std::lock_guard dispatch_guard {input->input_dispatch_lock};
       const auto admitted = detail::admit_if_live(input->input_reset, [&]() {
-        // The control thread's atomic snapshot may predate an administrator update. Admission
-        // uses the rights serialized with dispatch and the queued release barrier as well.
+        // The control thread's atomic snapshot may predate an administrator update, so the rights
+        // are read again here. update_permissions() writes them and queues the release barrier
+        // under the dispatch lock, so a packet is queued either before that barrier or after the
+        // new rights. A running dispatch holds the same lock: this thread can wait behind it.
         if (!(required_permission & input->permissions)) {
           schedule_drain = false;
           return;

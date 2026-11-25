@@ -1570,8 +1570,9 @@ desktop_detach_result_t deactivateVirtualDisplay(
       return {desktop_detach_state_e::validation_failed, validation_status};
     }
 
-    // Validation does not reserve the desktop topology. Re-query immediately before applying so a
-    // monitor/HDR change that completed during validation is preserved rather than overwritten.
+    // Validation does not reserve the desktop topology. Query and validate again just before
+    // applying: a monitor/HDR change that completed during the first validation is kept. One that
+    // lands during the second validation or the apply can still be overwritten.
     snapshot = buildVirtualDisplayDetachSnapshot(identity, devicePath);
     if (!snapshot) {
       return {desktop_detach_state_e::topology_query_failed, ERROR_GEN_FAILURE};

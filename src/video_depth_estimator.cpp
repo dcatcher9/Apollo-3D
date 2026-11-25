@@ -9855,7 +9855,7 @@ namespace models {
         !subtitle_context_changed &&
         // Every new OCR-eligible source observation runs the joined depth/subtitle path.
         // Depth and subtitle work complete as one tuple, so similarity reuse would also hold
-        // back OCR and its pixel evidence for a caption that appears on a similar frame.
+        // back OCR and the Direct Glyph mask for a caption that appears on a similar frame.
         !ocr_frame_eligible &&
         depth_optional_work_allows_gpu_undecided(accepted_optional_work, adaptive_reuse_request.depth_only_history) &&
         !snapshot_raw_model_depth && current_shape_matches &&

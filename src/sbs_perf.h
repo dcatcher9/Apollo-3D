@@ -22,7 +22,8 @@
 
 namespace sbs_perf {
 
-  /// Turn collection on/off (from config at startup / mode switch). Off = every call is a no-op.
+  /// Turn collection on/off. Live streams and Web UI conversions follow the diagnostics setting;
+  /// benchmark runs always collect. Off = every call is a no-op.
   void set_enabled(bool on);
   bool enabled();
 

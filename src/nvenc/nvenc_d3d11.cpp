@@ -158,7 +158,8 @@ namespace nvenc {
         producer_fence_unavailable = true;
         producer_fence = nullptr;
         producer_context = nullptr;
-        BOOST_LOG(warning) << "NvEnc: input producer diagnostics unavailable; slow pictures cannot name where they waited";
+        BOOST_LOG(warning) << "NvEnc: input producer fence unavailable; a slow picture keeps the plain 250 ms encoder budget "
+                              "even when its input is still being produced, and cannot name where it waited";
         return;
       }
     }

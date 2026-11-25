@@ -235,6 +235,8 @@ namespace offline_sbs {
       ).count();
     }
 
+    // Generic '/' separators, as job records store paths. The worker's path_utf8() keeps native
+    // separators for FFmpeg command lines; do not merge them.
     std::string path_to_utf8(const fs::path &path) {
       const auto value = path.generic_u8string();
       return {

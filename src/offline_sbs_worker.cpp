@@ -225,6 +225,8 @@ namespace offline_sbs {
              additional_bytes <= max_packet_probe_bytes - consumed_bytes;
     }
 
+    // Native separators: these strings go to FFmpeg command lines and Windows logs. The job
+    // manager's path_to_utf8() is the generic-separator form for job records; do not merge them.
     std::string path_utf8(const fs::path &path) {
       const auto wide = path.wstring();
       if (wide.empty()) {
@@ -2786,7 +2788,7 @@ namespace offline_sbs {
       graph.imbue(std::locale::classic());
       if (hdr) {
         graph
-          // HDR10 static side data has no equivalent in a PFM image. Keep the authenticated
+          // HDR10 static side data cannot travel on the raw planar-float pipe. Keep the authenticated
           // source stream aligned one-for-one as a metadata donor; FFmpeg's frame-loop filters
           // do not preserve mastering-display/content-light side data on cloned frames.
           // Pixel values still come exclusively from the direct SBS stream below.
@@ -2838,7 +2840,7 @@ namespace offline_sbs {
       };
       if (hdr) {
         // HDR static side data must accompany every donor frame. Pixel values always come from
-        // the direct causal PFM stream (`blend ... =B`).
+        // the direct causal raw stream (`blend ... =B`).
         command.insert(command.end(), {
                                         "-protocol_whitelist",
                                         "file",
