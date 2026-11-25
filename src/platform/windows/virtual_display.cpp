@@ -1,6 +1,7 @@
 #include "virtual_display.h"
 
 #include "display_config.h"
+#include "misc.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
 
@@ -565,7 +566,7 @@ LONG applyDisplaySettings(const wchar_t *deviceName, int width, int height, int 
   std::vector<DISPLAYCONFIG_MODE_INFO> modeArray;
 
   if (!queryActiveDisplayConfig(pathArray, modeArray)) {
-    wprintf(L"[SUDOVDA] Failed to query display configuration.\n");
+    BOOST_LOG(error) << "[SUDOVDA] Failed to query display configuration.";
     return ERROR_INVALID_PARAMETER;
   }
   const UINT32 pathCount = (UINT32) pathArray.size();
@@ -585,7 +586,7 @@ LONG applyDisplaySettings(const wchar_t *deviceName, int width, int height, int 
     auto *targetInfo = &pathArray[i].targetInfo;
 
     if (std::wstring_view(sourceName.viewGdiDeviceName) == std::wstring_view(deviceName)) {
-      wprintf(L"[SUDOVDA] Display found: %ls\n", deviceName);
+      BOOST_LOG(debug) << "[SUDOVDA] Display found: " << platf::to_utf8(deviceName);
       for (UINT32 j = 0; j < modeCount; j++) {
         if (
           modeArray[j].infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE &&
@@ -595,7 +596,8 @@ LONG applyDisplaySettings(const wchar_t *deviceName, int width, int height, int 
         ) {
           auto *sourceMode = &modeArray[j].sourceMode;
 
-          wprintf(L"[SUDOVDA] Current mode found: [%ux%ux%u/%u]\n", sourceMode->width, sourceMode->height, targetInfo->refreshRate.Numerator, targetInfo->refreshRate.Denominator);
+          BOOST_LOG(debug) << "[SUDOVDA] Current mode found: [" << sourceMode->width << 'x' << sourceMode->height << 'x'
+                            << targetInfo->refreshRate.Numerator << '/' << targetInfo->refreshRate.Denominator << ']';
 
           sourceMode->width = width;
           sourceMode->height = height;
@@ -611,21 +613,22 @@ LONG applyDisplaySettings(const wchar_t *deviceName, int width, int height, int 
             SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | (persist_settings ? SDC_SAVE_TO_DATABASE : 0)
           );
           if (status != ERROR_SUCCESS) {
-            wprintf(L"[SUDOVDA] Failed to apply display settings.\n");
+            BOOST_LOG(error) << "[SUDOVDA] Failed to apply display settings.";
           } else {
-            wprintf(L"[SUDOVDA] Display settings updated successfully.\n");
+            BOOST_LOG(info) << "[SUDOVDA] Display settings updated successfully.";
           }
 
           return status;
         }
       }
 
-      wprintf(L"[SUDOVDA] Mode [%dx%dx%d] not found for display: %ls\n", width, height, refresh_rate, deviceName);
+      BOOST_LOG(warning) << "[SUDOVDA] Mode [" << width << 'x' << height << 'x' << refresh_rate
+                         << "] not found for display: " << platf::to_utf8(deviceName);
       return ERROR_INVALID_PARAMETER;
     }
   }
 
-  wprintf(L"[SUDOVDA] Display not found: %ls\n", deviceName);
+  BOOST_LOG(warning) << "[SUDOVDA] Display not found: " << platf::to_utf8(deviceName);
   return ERROR_DEVICE_NOT_CONNECTED;
 }
 }  // namespace
@@ -644,7 +647,8 @@ LONG changeDisplaySettings(const wchar_t *deviceName, int width, int height, int
   // Capture attempts open across this call restart because the host changed the mode.
   platf::note_display_change();
   const auto refreshRates = baselineRefreshRates(refresh_rate);
-  wprintf(L"[SUDOVDA] Applying baseline display mode [%dx%dx%d] for %ls.\n", width, height, refreshRates.preferred, deviceName);
+  BOOST_LOG(info) << "[SUDOVDA] Applying baseline display mode [" << width << 'x' << height << 'x'
+                   << refreshRates.preferred << "] for " << platf::to_utf8(deviceName) << '.';
   const auto baselineStatus = changeBaselineDisplaySettings(
     deviceName,
     width,
@@ -653,9 +657,9 @@ LONG changeDisplaySettings(const wchar_t *deviceName, int width, int height, int
     persist_settings ? CDS_UPDATEREGISTRY : 0
   );
   if (baselineStatus == DISP_CHANGE_SUCCESSFUL) {
-    wprintf(L"[SUDOVDA] Baseline display mode applied successfully.\n");
+    BOOST_LOG(info) << "[SUDOVDA] Baseline display mode applied successfully.";
   } else {
-    wprintf(L"[SUDOVDA] Failed to apply baseline display mode.\n");
+    BOOST_LOG(error) << "[SUDOVDA] Failed to apply baseline display mode.";
   }
 
   // Apply the exact fractional refresh rate through DisplayConfig.
@@ -747,7 +751,7 @@ DRIVER_STATUS openVDisplayDevice() {
     sudovdaDriverHandle = OpenDevice(&SUVDA_INTERFACE_GUID);
     if (sudovdaDriverHandle == INVALID_HANDLE_VALUE) {
       if (retryInterval > 320) {
-        printf("[SUDOVDA] Open device failed!\n");
+        BOOST_LOG(error) << "[SUDOVDA] Open device failed!";
         return DRIVER_STATUS::FAILED;
       }
       retryInterval *= 2;
@@ -758,7 +762,7 @@ DRIVER_STATUS openVDisplayDevice() {
   }
 
   if (!CheckProtocolCompatible(sudovdaDriverHandle)) {
-    printf("[SUDOVDA] SUDOVDA protocol not compatible with driver!\n");
+    BOOST_LOG(error) << "[SUDOVDA] SUDOVDA protocol not compatible with driver!";
     closeDriverHandleLocked();
     return DRIVER_STATUS::VERSION_INCOMPATIBLE;
   }
@@ -773,28 +777,25 @@ bool startPingThread(std::function<void()> failCb) {
   // avoids delaying a ping behind the process-wide mutation lock during topology transitions.
   const auto watchdogHandle = OpenDevice(&SUVDA_INTERFACE_GUID);
   if (watchdogHandle == INVALID_HANDLE_VALUE) {
-    printf("[SUDOVDA] Failed to open dedicated watchdog heartbeat handle.\n");
+    BOOST_LOG(error) << "[SUDOVDA] Failed to open dedicated watchdog heartbeat handle.";
     return false;
   }
 
   VIRTUAL_DISPLAY_GET_WATCHDOG_OUT watchdogOut {};
   if (!GetWatchdogTimeout(watchdogHandle, watchdogOut)) {
-    printf("[SUDOVDA] Watchdog fetch failed!\n");
+    BOOST_LOG(error) << "[SUDOVDA] Watchdog fetch failed!";
     CloseHandle(watchdogHandle);
     return false;
   }
-  printf("[SUDOVDA] Watchdog: Timeout %d, Countdown %d\n", watchdogOut.Timeout, watchdogOut.Countdown);
+  BOOST_LOG(info) << "[SUDOVDA] Watchdog: Timeout " << watchdogOut.Timeout << ", Countdown " << watchdogOut.Countdown;
   if (!watchdogOut.Timeout) {
     CloseHandle(watchdogHandle);
     return true;
   }
   if (watchdogOut.Timeout < 10) {
-    printf(
-      "[SUDOVDA] Warning: watchdog timeout is only %d seconds. "
-      "Install or configure Sunshine 3D's recommended 30-second timeout to prevent "
-      "the retained virtual display from being removed during GPU initialization.\n",
-      watchdogOut.Timeout
-    );
+    BOOST_LOG(warning) << "[SUDOVDA] Watchdog timeout is only " << watchdogOut.Timeout
+                       << " seconds. Install or configure Sunshine 3D's recommended 30-second timeout to prevent "
+                          "the retained virtual display from being removed during GPU initialization.";
   }
 
   const auto sleepInterval = watchdogPingInterval(watchdogOut.Timeout);
@@ -804,7 +805,7 @@ bool startPingThread(std::function<void()> failCb) {
       // This heartbeat is the lifetime lease for every SudoVDA monitor. Favor it over ordinary
       // application work so a busy encoder startup cannot let the driver remove an active desktop.
       if (!SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST)) {
-        printf("[SUDOVDA] Failed to raise watchdog heartbeat thread priority: %lu\n", GetLastError());
+        BOOST_LOG(warning) << "[SUDOVDA] Failed to raise watchdog heartbeat thread priority: " << GetLastError();
       }
 
       uint8_t fail_count = 0;
@@ -833,7 +834,7 @@ bool startPingThread(std::function<void()> failCb) {
     });
   } catch (...) {
     CloseHandle(watchdogHandle);
-    printf("[SUDOVDA] Failed to start watchdog heartbeat thread.\n");
+    BOOST_LOG(error) << "[SUDOVDA] Failed to start watchdog heartbeat thread.";
     return false;
   }
   return true;
@@ -2290,11 +2291,11 @@ namespace {
         return {};
       }
       if (adapterLuid && !SetRenderAdapter(sudovdaDriverHandle, *adapterLuid)) {
-        printf("[SUDOVDA] Failed to select render adapter for virtual display.\n");
+        BOOST_LOG(error) << "[SUDOVDA] Failed to select render adapter for virtual display.";
         return {};
       }
       if (!AddVirtualDisplay(sudovdaDriverHandle, width, height, fps, guid, s_client_name, s_client_uid, output)) {
-        printf("[SUDOVDA] Failed to add virtual display.\n");
+        BOOST_LOG(error) << "[SUDOVDA] Failed to add virtual display.";
         return {};
       }
     }
@@ -2313,12 +2314,12 @@ namespace {
       }
     );
     if (published.state != display_identity_state_e::present) {
-      printf("[SUDOVDA] Cannot get name for newly added virtual display!\n");
+      BOOST_LOG(error) << "[SUDOVDA] Cannot get name for newly added virtual display!";
       return result;
     }
 
-    wprintf(L"[SUDOVDA] Virtual display added successfully: %ls\n", published.display_name.c_str());
-    printf("[SUDOVDA] Configuration: W: %d, H: %d, FPS: %d\n", width, height, fps);
+    BOOST_LOG(info) << "[SUDOVDA] Virtual display added successfully: " << platf::to_utf8(published.display_name);
+    BOOST_LOG(info) << "[SUDOVDA] Configuration: W: " << width << ", H: " << height << ", FPS: " << fps;
 
     result.display_name = std::move(published.display_name);
     result.device_path = std::move(published.device_path);
@@ -2397,7 +2398,7 @@ creation_result_t createVirtualDisplayOnAdapter(
 ) {
   const auto adapterLuid = adapterLuidByName(adapterName);
   if (!adapterLuid) {
-    printf("[SUDOVDA] Cannot find requested render adapter.\n");
+    BOOST_LOG(error) << "[SUDOVDA] Cannot find requested render adapter.";
     return {};
   }
   return createVirtualDisplayImpl(
@@ -2418,7 +2419,7 @@ bool removeVirtualDisplay(const GUID &guid) {
   }
 
   if (RemoveVirtualDisplay(sudovdaDriverHandle, guid)) {
-    printf("[SUDOVDA] Virtual display removed successfully.\n");
+    BOOST_LOG(info) << "[SUDOVDA] Virtual display removed successfully.";
     return true;
   } else {
     return false;
