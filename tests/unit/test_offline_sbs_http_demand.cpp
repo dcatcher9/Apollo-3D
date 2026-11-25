@@ -36,6 +36,7 @@ namespace confighttp {
   void getOfflineSbsJob(std::shared_ptr<offline_http_base_t::Response>, std::shared_ptr<offline_http_base_t::Request>);
   void cancelOfflineSbsJob(std::shared_ptr<offline_http_base_t::Response>, std::shared_ptr<offline_http_base_t::Request>);
   void clearOfflineSbsJob(std::shared_ptr<offline_http_base_t::Response>, std::shared_ptr<offline_http_base_t::Request>);
+  void add_routes(offline_http_base_t &server);
 }  // namespace confighttp
 
 namespace {
@@ -188,6 +189,23 @@ namespace {
     if (!SimpleWeb::regex::regex_match(request.request_->path, request.request_->path_match, SimpleWeb::regex::regex(route.pattern))) {
       throw std::runtime_error("Fixture path does not match the actual handler route");
     }
+  }
+
+  // Runs the route as the server registers it, with its access check, not the bare handler.
+  void serve(offline_http_request_t &request, const route_t &route) {
+    confighttp::add_routes(request);
+    for (const auto &[pattern, methods] : request.resource) {
+      if (pattern.str != route.pattern) {
+        continue;
+      }
+      const auto handler = methods.find(route.method);
+      if (handler == methods.end()) {
+        break;
+      }
+      handler->second(request.response_, request.request_);
+      return;
+    }
+    throw std::runtime_error("The server registers no such route");
   }
 
   class temporary_tree_t {
@@ -397,7 +415,7 @@ namespace {
       if (route.json_body) {
         request.body(route.handler == confighttp::createOfflineSbsJob ? local.create_body() : "{}");
       }
-      route.handler(request.response_, request.request_);
+      serve(request, route);
       expect_status(request, "HTTP/1.1 401 Unauthorized\r\n");
       local.expect_dormant();
     }
@@ -435,7 +453,7 @@ namespace {
         if (value.length) {
           request.request_->header.emplace("Content-Length", *value.length);
         }
-        route.handler(request.response_, request.request_);
+        serve(request, route);
         expect_status(request, value.status);
         local.expect_dormant();
       }
@@ -448,7 +466,7 @@ namespace {
     {
       offline_http_request_t request(true);
       select_route(request, routes[0]);
-      routes[0].handler(request.response_, request.request_);
+      serve(request, routes[0]);
       expect_status(request, "HTTP/1.1 503 Service Unavailable\r\n");
       EXPECT_FALSE(request.document().at("status").get<bool>());
     }
@@ -459,7 +477,7 @@ namespace {
     for (unsigned repeat = 0; repeat < 3; ++repeat) {
       offline_http_request_t request(true);
       select_route(request, routes[0]);
-      routes[0].handler(request.response_, request.request_);
+      serve(request, routes[0]);
       expect_status(request, "HTTP/1.1 503 Service Unavailable\r\n");
       EXPECT_FALSE(offline_sbs::has_active_job());
       EXPECT_TRUE(offline_sbs::list().empty());
@@ -469,7 +487,7 @@ namespace {
     for (const auto index : {0u, 2u}) {
       offline_http_request_t request(true);
       select_route(request, routes[index]);
-      routes[index].handler(request.response_, request.request_);
+      serve(request, routes[index]);
       expect_status(request, "HTTP/1.1 200 OK\r\n");
       EXPECT_TRUE(request.document().at("status").get<bool>());
     }
@@ -487,7 +505,7 @@ namespace {
       if (route.json_body) {
         request.body(route.handler == confighttp::createOfflineSbsJob ? local.create_body() : "{}");
       }
-      route.handler(request.response_, request.request_);
+      serve(request, route);
       expect_status(request, "HTTP/1.1 503 Service Unavailable\r\n");
       ASSERT_TRUE(local.gate.wait_entered());
       EXPECT_EQ(local.launches.load(), 1);

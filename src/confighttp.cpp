@@ -466,6 +466,29 @@ namespace confighttp {
     return true;
   }
 
+  /** Who may call a route. Routes registered without guarded() are public. */
+  enum class access_e {
+    page,  ///< Signed-in user; anyone else is sent to the login page.
+    api,  ///< Signed-in user; anyone else gets 401.
+    json_api,  ///< A JSON body first, then a signed-in user.
+  };
+
+  using route_handler_t = void (*)(resp_https_t, req_https_t);
+
+  /** Checks a route's access, logs the admitted request, then runs its handler. */
+  auto guarded(const access_e access, const route_handler_t handler) {
+    return [access, handler](resp_https_t response, req_https_t request) {
+      if (access == access_e::json_api && !validateContentType(response, request, "application/json")) {
+        return;
+      }
+      if (!authenticate(response, request, access == access_e::page)) {
+        return;
+      }
+      print_req(request);
+      handler(std::move(response), std::move(request));
+    };
+  }
+
   bool validateOfflineSbsRequestSize(
     resp_https_t response,
     req_https_t request
@@ -532,12 +555,6 @@ namespace confighttp {
    * @param request The HTTP request object.
    */
   void getIndexPage(resp_https_t response, req_https_t request) {
-    if (!authenticate(response, request, true)) {
-      return;
-    }
-
-    print_req(request);
-
     std::string content = file_handler::read_file(WEB_DIR "index.html");
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "text/html; charset=utf-8");
@@ -551,12 +568,6 @@ namespace confighttp {
    * @param request The HTTP request object.
    */
   void getPinPage(resp_https_t response, req_https_t request) {
-    if (!authenticate(response, request, true)) {
-      return;
-    }
-
-    print_req(request);
-
     std::string content = file_handler::read_file(WEB_DIR "pin.html");
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "text/html; charset=utf-8");
@@ -570,12 +581,6 @@ namespace confighttp {
    * @param request The HTTP request object.
    */
   void getAppsPage(resp_https_t response, req_https_t request) {
-    if (!authenticate(response, request, true)) {
-      return;
-    }
-
-    print_req(request);
-
     std::string content = file_handler::read_file(WEB_DIR "apps.html");
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "text/html; charset=utf-8");
@@ -590,12 +595,6 @@ namespace confighttp {
    * @param request The HTTP request object.
    */
   void getConfigPage(resp_https_t response, req_https_t request) {
-    if (!authenticate(response, request, true)) {
-      return;
-    }
-
-    print_req(request);
-
     std::string content = file_handler::read_file(WEB_DIR "config.html");
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "text/html; charset=utf-8");
@@ -609,12 +608,6 @@ namespace confighttp {
    * @param request The HTTP request object.
    */
   void getPasswordPage(resp_https_t response, req_https_t request) {
-    if (!authenticate(response, request, true)) {
-      return;
-    }
-
-    print_req(request);
-
     std::string content = file_handler::read_file(WEB_DIR "password.html");
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "text/html; charset=utf-8");
@@ -683,12 +676,6 @@ namespace confighttp {
    * @param request The HTTP request object.
    */
   void getTroubleshootingPage(resp_https_t response, req_https_t request) {
-    if (!authenticate(response, request, true)) {
-      return;
-    }
-
-    print_req(request);
-
     std::string content = file_handler::read_file(WEB_DIR "troubleshooting.html");
     SimpleWeb::CaseInsensitiveMultimap headers;
     headers.emplace("Content-Type", "text/html; charset=utf-8");
@@ -697,11 +684,6 @@ namespace confighttp {
   }
 
   void getOfflineConversionPage(resp_https_t response, req_https_t request) {
-    if (!authenticate(response, request, true)) {
-      return;
-    }
-
-    print_req(request);
     const std::string content =
       file_handler::read_file(WEB_DIR "offline-conversion.html");
     const SimpleWeb::CaseInsensitiveMultimap headers {
@@ -806,12 +788,6 @@ namespace confighttp {
    * @api_examples{/api/apps| GET| null}
    */
   void getApps(resp_https_t response, req_https_t request) {
-    if (!authenticate(response, request)) {
-      return;
-    }
-
-    print_req(request);
-
     try {
       std::string content = file_handler::read_file(config::stream.file_apps.c_str());
       nlohmann::json file_tree = nlohmann::json::parse(content);
@@ -878,12 +854,6 @@ namespace confighttp {
    * @api_examples{/api/apps| POST| {"name":"Hello, World!","uuid": "aaaa-bbbb"}}
    */
   void saveApp(resp_https_t response, req_https_t request) {
-    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
-      return;
-    }
-
-    print_req(request);
-
     BOOST_LOG(info) << config::stream.file_apps;
     try {
       // TODO: Input Validation
@@ -920,12 +890,6 @@ namespace confighttp {
    * @api_examples{/api/apps/close| POST| null}
    */
   void closeApp(resp_https_t response, req_https_t request) {
-    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
-      return;
-    }
-
-    print_req(request);
-
     nvhttp::terminate_active_session();
     nlohmann::json output_tree;
     output_tree["status"] = true;
@@ -983,12 +947,6 @@ namespace confighttp {
    * @api_examples{/api/apps/reorder| POST| {"order": ["aaaa-bbbb", "cccc-dddd"]}}
    */
   void reorderApps(resp_https_t response, req_https_t request) {
-    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
-      return;
-    }
-
-    print_req(request);
-
     try {
       nlohmann::json input_tree = nlohmann::json::parse(request->content);
       nlohmann::json output_tree;
@@ -1047,12 +1005,6 @@ namespace confighttp {
    * @api_examples{/api/apps/delete | POST| { uuid: 'aaaa-bbbb' }}
    */
   void deleteApp(resp_https_t response, req_https_t request) {
-    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
-      return;
-    }
-
-    print_req(request);
-
     try {
       nlohmann::json input_tree = nlohmann::json::parse(request->content);
 
@@ -1100,12 +1052,6 @@ namespace confighttp {
    * @api_examples{/api/clients/list| GET| null}
    */
   void getClients(resp_https_t response, req_https_t request) {
-    if (!authenticate(response, request)) {
-      return;
-    }
-
-    print_req(request);
-
     nlohmann::json output_tree;
     output_tree["named_certs"] = nvhttp::get_all_clients();
 #ifdef _WIN32
@@ -1132,12 +1078,6 @@ namespace confighttp {
    * @endcode
    */
   void updateClient(resp_https_t response, req_https_t request) {
-    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
-      return;
-    }
-
-    print_req(request);
-
     try {
       nlohmann::json input_tree = nlohmann::json::parse(request->content);
       nlohmann::json output_tree;
@@ -1171,12 +1111,6 @@ namespace confighttp {
    * @api_examples{/api/clients/unpair| POST| {"uuid":"1234"}}
    */
   void unpair(resp_https_t response, req_https_t request) {
-    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
-      return;
-    }
-
-    print_req(request);
-
     try {
       nlohmann::json input_tree = nlohmann::json::parse(request->content);
       nlohmann::json output_tree;
@@ -1197,12 +1131,6 @@ namespace confighttp {
    * @api_examples{/api/clients/unpair-all| POST| null}
    */
   void unpairAll(resp_https_t response, req_https_t request) {
-    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
-      return;
-    }
-
-    print_req(request);
-
     nvhttp::erase_all_clients();
     nlohmann::json output_tree;
     output_tree["status"] = true;
@@ -1211,10 +1139,6 @@ namespace confighttp {
 
 #ifdef _WIN32
   void getGame3dSetup(resp_https_t response, req_https_t request) {
-    if (!authenticate(response, request)) {
-      return;
-    }
-    print_req(request);
     send_response(response, platf::game3d::setup_status());
   }
 
@@ -1225,11 +1149,6 @@ namespace confighttp {
    * offered executable and its identity exactly as the status reported them.
    */
   void decideGame3dSetup(resp_https_t response, req_https_t request) {
-    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
-      return;
-    }
-    print_req(request);
-
     try {
       const auto input = nlohmann::json::parse(request->content);
       const auto failure = platf::game3d::decide_setup(input.at("executable").get<std::string>(), input.at("identity").get<std::string>(), input.at("decision").get<std::string>());
@@ -1244,11 +1163,6 @@ namespace confighttp {
   }
 
   void getArGlassDevices(resp_https_t response, req_https_t request) {
-    if (!authenticate(response, request)) {
-      return;
-    }
-    print_req(request);
-
     nlohmann::json output_tree;
     output_tree["status"] = true;
     output_tree["devices"] = nlohmann::json::array();
@@ -1271,9 +1185,6 @@ namespace confighttp {
   }
 
   void getLocalMonitor(resp_https_t response, req_https_t request) {
-    if (!authenticate(response, request)) {
-      return;
-    }
     nlohmann::json output {
       {"status", true}, {"surface", config::local_surface_name(config::video.local_surface)},
       {"enabled", config::video.local_surface != config::video_t::local_surface_e::off},
@@ -1338,9 +1249,6 @@ namespace confighttp {
   }
 
   void setLocalMonitor(resp_https_t response, req_https_t request) {
-    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
-      return;
-    }
     try {
       std::stringstream body;
       body << request->content.rdbuf();
@@ -1371,11 +1279,6 @@ namespace confighttp {
   }
 
   void setArGlassDevice(resp_https_t response, req_https_t request) {
-    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
-      return;
-    }
-    print_req(request);
-
     try {
       const auto input = nlohmann::json::parse(request->content);
       const auto id = input.value("id", "");
@@ -1402,12 +1305,6 @@ namespace confighttp {
    * @param request The HTTP request object.
    */
   void getConfig(resp_https_t response, req_https_t request) {
-    if (!authenticate(response, request)) {
-      return;
-    }
-
-    print_req(request);
-
     nlohmann::json output_tree;
     output_tree["status"] = true;
     output_tree["platform"] = SUNSHINE_PLATFORM;
@@ -1464,11 +1361,6 @@ namespace confighttp {
    * @api_examples{/api/host3d/subtitle-apps| GET| null}
    */
   void getHost3dSubtitleApps(resp_https_t response, req_https_t request) {
-    if (!authenticate(response, request)) {
-      return;
-    }
-    print_req(request);
-
     nlohmann::json output_tree;
     output_tree["status"] = true;
     output_tree["apps"] = nlohmann::json::array();
@@ -1493,11 +1385,6 @@ namespace confighttp {
    * @api_examples{/api/host3d/subtitle-apps| POST| {"executable":"C:/Games/Example/game.exe","enabled":true}}
    */
   void setHost3dSubtitleApp(resp_https_t response, req_https_t request) {
-    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
-      return;
-    }
-    print_req(request);
-
     try {
       std::stringstream body;
       body << request->content.rdbuf();
@@ -1523,12 +1410,6 @@ namespace confighttp {
 #endif
 
   void saveConfig(resp_https_t response, req_https_t request) {
-    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
-      return;
-    }
-
-    print_req(request);
-
     try {
       // TODO: Input Validation
       std::stringstream config_stream;
@@ -1582,10 +1463,6 @@ namespace confighttp {
    * @api_examples{/api/covers/upload| POST| {"key":"igdb_1234","url":"https://images.igdb.com/igdb/image/upload/t_cover_big_2x/abc123.png"}}
    */
   void uploadCover(resp_https_t response, req_https_t request) {
-    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
-      return;
-    }
-
     try {
       nlohmann::json input_tree = nlohmann::json::parse(request->content);
       nlohmann::json output_tree;
@@ -1635,11 +1512,6 @@ namespace confighttp {
    * @api_examples{/api/logs| GET| null}
    */
   void getLogs(resp_https_t response, req_https_t request) {
-    if (!authenticate(response, request)) {
-      return;
-    }
-
-    print_req(request);
     std::string content = file_handler::read_file(config::sunshine.log_file.c_str());
     SimpleWeb::CaseInsensitiveMultimap headers;
     std::string contentType = "text/plain";
@@ -1734,12 +1606,6 @@ namespace confighttp {
    * @api_examples{/api/otp| GET| null}
    */
   void getOTP(resp_https_t response, req_https_t request) {
-    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
-      return;
-    }
-
-    print_req(request);
-
     nlohmann::json output_tree;
     try {
       nlohmann::json input_tree = nlohmann::json::parse(request->content);
@@ -1781,12 +1647,6 @@ namespace confighttp {
    * @api_examples{/api/pin| POST| {"pin":"1234","name":"My PC"}}
    */
   void savePin(resp_https_t response, req_https_t request) {
-    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
-      return;
-    }
-
-    print_req(request);
-
     try {
       nlohmann::json input_tree = nlohmann::json::parse(request->content);
       nlohmann::json output_tree;
@@ -1808,12 +1668,6 @@ namespace confighttp {
    * @api_examples{/api/restart| POST| null}
    */
   void restart(resp_https_t response, req_https_t request) {
-    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
-      return;
-    }
-
-    print_req(request);
-
     // We may not return from this call
     platf::restart();
   }
@@ -1826,12 +1680,6 @@ namespace confighttp {
    * On Windows, if running in a service, a special shutdown code is returned.
    */
   void quit(resp_https_t response, req_https_t request) {
-    if (!authenticate(response, request)) {
-      return;
-    }
-
-    print_req(request);
-
     BOOST_LOG(warning) << "Requested quit from config page!"sv;
 
     // Complete the handler-owned response before raising shutdown. Retaining this Response beyond
@@ -1854,12 +1702,6 @@ namespace confighttp {
    * @param request The HTTP request object.
    */
   void disconnect(resp_https_t response, req_https_t request) {
-    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
-      return;
-    }
-
-    print_req(request);
-
     try {
       nlohmann::json output_tree;
       nlohmann::json input_tree = nlohmann::json::parse(request->content);
@@ -1953,9 +1795,6 @@ namespace confighttp {
     resp_https_t response,
     req_https_t request
   ) {
-    if (!authenticate(response, request)) {
-      return;
-    }
     offline_sbs::request_initialization();
     const auto capabilities = offline_sbs::capabilities();
     const bool available = capabilities.value("available", false);
@@ -1981,8 +1820,7 @@ namespace confighttp {
     resp_https_t response,
     req_https_t request
   ) {
-    if (!authenticate(response, request) ||
-        !validateContentType(response, request, "application/json") ||
+    if (!validateContentType(response, request, "application/json") ||
         !validateOfflineSbsRequestSize(response, request)) {
       return;
     }
@@ -2066,9 +1904,6 @@ namespace confighttp {
   }
 
   void listOfflineSbsJobs(resp_https_t response, req_https_t request) {
-    if (!authenticate(response, request)) {
-      return;
-    }
     offline_sbs::request_initialization();
     const auto capabilities = offline_sbs::capabilities();
     if (!capabilities.value("available", false)) {
@@ -2105,8 +1940,7 @@ namespace confighttp {
   }
 
   void createOfflineSbsJob(resp_https_t response, req_https_t request) {
-    if (!authenticate(response, request) ||
-        !validateContentType(response, request, "application/json") ||
+    if (!validateContentType(response, request, "application/json") ||
         !validateOfflineSbsRequestSize(response, request)) {
       return;
     }
@@ -2228,9 +2062,6 @@ namespace confighttp {
   }
 
   void getOfflineSbsJob(resp_https_t response, req_https_t request) {
-    if (!authenticate(response, request)) {
-      return;
-    }
     offline_sbs::request_initialization();
     const auto reply = offline_sbs::get(request->path_match[1].str());
     send_json_response(
@@ -2241,9 +2072,6 @@ namespace confighttp {
   }
 
   void cancelOfflineSbsJob(resp_https_t response, req_https_t request) {
-    if (!authenticate(response, request)) {
-      return;
-    }
     offline_sbs::request_initialization();
     const auto reply = offline_sbs::cancel(request->path_match[1].str());
     send_json_response(
@@ -2254,9 +2082,6 @@ namespace confighttp {
   }
 
   void clearOfflineSbsJob(resp_https_t response, req_https_t request) {
-    if (!authenticate(response, request)) {
-      return;
-    }
     offline_sbs::request_initialization();
     const auto reply = offline_sbs::clear(request->path_match[1].str());
     send_json_response(
@@ -2266,14 +2091,8 @@ namespace confighttp {
     );
   }
 
-  /**
-   * @brief Start the HTTPS server.
-   */
-  void start() {
-    auto shutdown_event = mail::man->event<bool>(mail::shutdown);
-    auto port_https = net::map_port(PORT_HTTPS);
-    auto address_family = net::af_from_enum_string(config::sunshine.address_family);
-    https_server_t server {config::nvhttp.cert, config::nvhttp.pkey};
+  /** Registers every Web UI route with its access. Tests register the same table. */
+  void add_routes(SimpleWeb::ServerBase<SimpleWeb::HTTPS> &server) {
     server.default_resource["DELETE"] = [](resp_https_t response, req_https_t request) {
       bad_request(response, request);
     };
@@ -2287,64 +2106,75 @@ namespace confighttp {
       bad_request(response, request);
     };
     server.default_resource["GET"] = not_found;
-    server.resource["^/$"]["GET"] = getIndexPage;
-    server.resource["^/pin/?$"]["GET"] = getPinPage;
-    server.resource["^/apps/?$"]["GET"] = getAppsPage;
-    server.resource["^/config/?$"]["GET"] = getConfigPage;
-    server.resource["^/password/?$"]["GET"] = getPasswordPage;
+    server.resource["^/$"]["GET"] = guarded(access_e::page, getIndexPage);
+    server.resource["^/pin/?$"]["GET"] = guarded(access_e::page, getPinPage);
+    server.resource["^/apps/?$"]["GET"] = guarded(access_e::page, getAppsPage);
+    server.resource["^/config/?$"]["GET"] = guarded(access_e::page, getConfigPage);
+    server.resource["^/password/?$"]["GET"] = guarded(access_e::page, getPasswordPage);
     server.resource["^/welcome/?$"]["GET"] = getWelcomePage;
     server.resource["^/login/?$"]["GET"] = getLoginPage;
-    server.resource["^/troubleshooting/?$"]["GET"] = getTroubleshootingPage;
-    server.resource["^/offline-conversion/?$"]["GET"] = getOfflineConversionPage;
+    server.resource["^/troubleshooting/?$"]["GET"] = guarded(access_e::page, getTroubleshootingPage);
+    server.resource["^/offline-conversion/?$"]["GET"] = guarded(access_e::page, getOfflineConversionPage);
     server.resource["^/api/login"]["POST"] = login;
-    server.resource["^/api/pin$"]["POST"] = savePin;
-    server.resource["^/api/otp$"]["POST"] = getOTP;
-    server.resource["^/api/apps$"]["GET"] = getApps;
-    server.resource["^/api/apps$"]["POST"] = saveApp;
-    server.resource["^/api/apps/reorder$"]["POST"] = reorderApps;
-    server.resource["^/api/apps/delete$"]["POST"] = deleteApp;
-    server.resource["^/api/apps/close$"]["POST"] = closeApp;
-    server.resource["^/api/logs$"]["GET"] = getLogs;
+    server.resource["^/api/pin$"]["POST"] = guarded(access_e::json_api, savePin);
+    server.resource["^/api/otp$"]["POST"] = guarded(access_e::json_api, getOTP);
+    server.resource["^/api/apps$"]["GET"] = guarded(access_e::api, getApps);
+    server.resource["^/api/apps$"]["POST"] = guarded(access_e::json_api, saveApp);
+    server.resource["^/api/apps/reorder$"]["POST"] = guarded(access_e::json_api, reorderApps);
+    server.resource["^/api/apps/delete$"]["POST"] = guarded(access_e::json_api, deleteApp);
+    server.resource["^/api/apps/close$"]["POST"] = guarded(access_e::json_api, closeApp);
+    server.resource["^/api/logs$"]["GET"] = guarded(access_e::api, getLogs);
     server.resource["^/api/offline-sbs/browse$"]["POST"] =
-      browseOfflineSbsFilesystem;
+      guarded(access_e::api, browseOfflineSbsFilesystem);
     server.resource["^/api/offline-sbs/capabilities$"]["GET"] =
-      getOfflineSbsCapabilities;
-    server.resource["^/api/offline-sbs/jobs$"]["GET"] = listOfflineSbsJobs;
-    server.resource["^/api/offline-sbs/jobs$"]["POST"] = createOfflineSbsJob;
+      guarded(access_e::api, getOfflineSbsCapabilities);
+    server.resource["^/api/offline-sbs/jobs$"]["GET"] = guarded(access_e::api, listOfflineSbsJobs);
+    server.resource["^/api/offline-sbs/jobs$"]["POST"] = guarded(access_e::api, createOfflineSbsJob);
     server.resource["^/api/offline-sbs/jobs/([0-9A-Fa-f-]+)/cancel$"]["POST"] =
-      cancelOfflineSbsJob;
+      guarded(access_e::api, cancelOfflineSbsJob);
     server.resource["^/api/offline-sbs/jobs/([0-9A-Fa-f-]+)$"]["DELETE"] =
-      clearOfflineSbsJob;
+      guarded(access_e::api, clearOfflineSbsJob);
     server.resource["^/api/offline-sbs/jobs/([0-9A-Fa-f-]+)$"]["GET"] =
-      getOfflineSbsJob;
-    server.resource["^/api/config$"]["GET"] = getConfig;
-    server.resource["^/api/config$"]["POST"] = saveConfig;
+      guarded(access_e::api, getOfflineSbsJob);
+    server.resource["^/api/config$"]["GET"] = guarded(access_e::api, getConfig);
+    server.resource["^/api/config$"]["POST"] = guarded(access_e::json_api, saveConfig);
 #ifdef _WIN32
-    server.resource["^/api/game3d/setup$"]["GET"] = getGame3dSetup;
-    server.resource["^/api/game3d/setup/decision$"]["POST"] = decideGame3dSetup;
-    server.resource["^/api/ar-glasses$"]["GET"] = getArGlassDevices;
-    server.resource["^/api/ar-glasses$"]["POST"] = setArGlassDevice;
-    server.resource["^/api/local-monitor$"]["GET"] = getLocalMonitor;
-    server.resource["^/api/local-monitor$"]["POST"] = setLocalMonitor;
-    server.resource["^/api/host3d/subtitle-apps$"]["GET"] = getHost3dSubtitleApps;
-    server.resource["^/api/host3d/subtitle-apps$"]["POST"] = setHost3dSubtitleApp;
+    server.resource["^/api/game3d/setup$"]["GET"] = guarded(access_e::api, getGame3dSetup);
+    server.resource["^/api/game3d/setup/decision$"]["POST"] = guarded(access_e::json_api, decideGame3dSetup);
+    server.resource["^/api/ar-glasses$"]["GET"] = guarded(access_e::api, getArGlassDevices);
+    server.resource["^/api/ar-glasses$"]["POST"] = guarded(access_e::json_api, setArGlassDevice);
+    server.resource["^/api/local-monitor$"]["GET"] = guarded(access_e::api, getLocalMonitor);
+    server.resource["^/api/local-monitor$"]["POST"] = guarded(access_e::json_api, setLocalMonitor);
+    server.resource["^/api/host3d/subtitle-apps$"]["GET"] = guarded(access_e::api, getHost3dSubtitleApps);
+    server.resource["^/api/host3d/subtitle-apps$"]["POST"] = guarded(access_e::json_api, setHost3dSubtitleApp);
 #endif
     server.resource["^/api/configLocale$"]["GET"] = getLocale;
-    server.resource["^/api/restart$"]["POST"] = restart;
-    server.resource["^/api/quit$"]["POST"] = quit;
+    server.resource["^/api/restart$"]["POST"] = guarded(access_e::json_api, restart);
+    server.resource["^/api/quit$"]["POST"] = guarded(access_e::api, quit);
     server.resource["^/api/password$"]["POST"] = savePassword;
-    server.resource["^/api/clients/unpair-all$"]["POST"] = unpairAll;
-    server.resource["^/api/clients/list$"]["GET"] = getClients;
-    server.resource["^/api/clients/update$"]["POST"] = updateClient;
-    server.resource["^/api/clients/unpair$"]["POST"] = unpair;
-    server.resource["^/api/clients/disconnect$"]["POST"] = disconnect;
-    server.resource["^/api/covers/upload$"]["POST"] = uploadCover;
+    server.resource["^/api/clients/unpair-all$"]["POST"] = guarded(access_e::json_api, unpairAll);
+    server.resource["^/api/clients/list$"]["GET"] = guarded(access_e::api, getClients);
+    server.resource["^/api/clients/update$"]["POST"] = guarded(access_e::json_api, updateClient);
+    server.resource["^/api/clients/unpair$"]["POST"] = guarded(access_e::json_api, unpair);
+    server.resource["^/api/clients/disconnect$"]["POST"] = guarded(access_e::json_api, disconnect);
+    server.resource["^/api/covers/upload$"]["POST"] = guarded(access_e::json_api, uploadCover);
     server.resource["^/images/sunshine3d.ico$"]["GET"] = getFaviconImage;
     server.resource["^/images/logo-sunshine3d-45.png$"]["GET"] = getProductLogoImage;
     // Preserve the old asset routes for cached pages during in-place upgrades.
     server.resource["^/images/apollo.ico$"]["GET"] = getFaviconImage;
     server.resource["^/images/logo-apollo-45.png$"]["GET"] = getProductLogoImage;
     server.resource["^/assets\\/.+$"]["GET"] = getNodeModules;
+  }
+
+  /**
+   * @brief Start the HTTPS server.
+   */
+  void start() {
+    auto shutdown_event = mail::man->event<bool>(mail::shutdown);
+    auto port_https = net::map_port(PORT_HTTPS);
+    auto address_family = net::af_from_enum_string(config::sunshine.address_family);
+    https_server_t server {config::nvhttp.cert, config::nvhttp.pkey};
+    add_routes(server);
     server.config.reuse_address = true;
     // The finite global ceiling preserves existing app/config/cover payloads. The header-time
     // selector applies the stricter 64 KiB offline contract before declared-body transfer or

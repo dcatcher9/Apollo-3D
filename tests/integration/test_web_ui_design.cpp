@@ -593,7 +593,7 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolated) {
   const auto browse_handler_source =
     http.substr(browse_handler, list_handler - browse_handler);
   EXPECT_NE(
-    browse_handler_source.find("authenticate(response, request)"),
+    http.find("guarded(access_e::api, browseOfflineSbsFilesystem)"),
     std::string::npos
   );
   EXPECT_NE(
@@ -642,7 +642,11 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolated) {
   // behavior. The POST body has both an endpoint-specific limit and a bounded server stream buffer
   // for requests without a trustworthy Content-Length.
   EXPECT_NE(
-    http.find("if (!authenticate(response, request, true))"),
+    http.find("guarded(access_e::page, getOfflineConversionPage)"),
+    std::string::npos
+  );
+  EXPECT_NE(
+    http.find("authenticate(response, request, access == access_e::page)"),
     std::string::npos
   );
   EXPECT_EQ(http.find("authenticateOfflineSbs"), std::string::npos);
