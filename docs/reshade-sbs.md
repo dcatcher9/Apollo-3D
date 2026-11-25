@@ -678,6 +678,11 @@ each printed percentile as its bucket's exclusive upper bound: a p99 of 0.25 ms 
 above 250 us (game), 0.5 ms or more one above 500 us (present), and parked a bound of at most 50 us
 (until the 11-01 fix review the triggers took the bound itself as the wait, one bucket early, F34); the
 60 s steady window and whether the holders are present-thread sections stay the owner's call.
+Two limits of these triggers (design audit of the logged windows, 11-25): a p99 is taken over all
+acquisitions, so it moves only when more than 1% of them wait that long, and in practice only the
+1 ms-per-second and 1%-of-wall-time triggers can fire; and the rare long waits seen so far had
+game-thread holders, which the present-thread condition does not count. Without Diagnostics a
+window is logged only when it had a 1 ms wait, so such logs over-represent bad windows.
 
 ### Frame record
 

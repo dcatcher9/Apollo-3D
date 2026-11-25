@@ -76,17 +76,16 @@ namespace sunshine_streamline {
         observation_generation.load(std::memory_order_acquire) == ticket;
     }
 
-    // briefly: retry a read that failed on every attempt
-    // (observer_snapshot.h: the publication changed under it, or the slot's
-    // reader count changed between its load and its pin, because another
-    // reader pinned or unpinned the slot or a writer pinned its base) a
-    // bounded number of times, like write_metadata, for a call's own camera
-    // evidence, which the game never repeats for its frame (capture_evaluation,
-    // capture_depth_tag). Until 11-01 such a read refused DLSS-G's camera
-    // evidence (scope_changed, no copy), made an SL evaluation's snapshot busy
-    // and dropped a whole depth tag boundary under a burst of camera, tag and
-    // token calls on other threads. A publication of an earlier epoch or
-    // observation reads as none at once.
+    // A read fails when the publication changed under it, or when the slot's
+    // reader count changed between its load and its pin because another reader
+    // pinned or unpinned the slot or a writer pinned its base (observer_snapshot.h).
+    // briefly: retry such a read a bounded number of times, like write_metadata.
+    // Callers pass it for a call's own camera evidence, which the game never
+    // repeats for its frame (capture_evaluation, capture_depth_tag). Until 11-01
+    // such a read refused DLSS-G's camera evidence (scope_changed, no copy), made
+    // an SL evaluation's snapshot busy and dropped a whole depth tag boundary
+    // under a burst of camera, tag and token calls on other threads. A
+    // publication of an earlier epoch or observation reads as none at once.
     metadata_owner::read_pin read_metadata(bool briefly) {
       const auto read = [] {
 #if defined(SUNSHINE_STREAMLINE_PROBE_TEST) || defined(SUNSHINE_SBS_RUNTIME_TEST_ADDON)

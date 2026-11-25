@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Live NGX hook host, included at the end of upscaler_call_trace.cpp.
+// The add-on's one NGX hook host, included at the end of upscaler_call_trace.cpp.
+// Production NGX depth capture runs in these hooks, beside the optional call
+// trace, and both share their thread-local nesting counters; the file and
+// namespace names are historical.
 // Targets, detour table initialization, locks and TLS retain their shell positions.
 
 namespace sunshine_upscaler_trace {

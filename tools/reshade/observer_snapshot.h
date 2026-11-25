@@ -14,8 +14,10 @@ namespace sunshine_streamline::observation {
   enum class write_failure { none, owner_busy, storage_busy };
 
   // Private observer metadata publication. Readers pin an immutable version;
-  // they never own the writer flag. Storage, acquisition attempts and copies
-  // are bounded. The owner must outlive every pin and transaction.
+  // they never own the writer flag, so no reader or writer waits on a lock: a
+  // read or write that loses a race fails, and its caller retries it a bounded
+  // number of times (64 in sl_observation.inl). Storage, acquisition attempts
+  // and copies are bounded. The owner must outlive every pin and transaction.
   //
   // Reclamation destroys T only after releasing the writer flag. A transaction
   // pins its base until commit/abort releases that flag, keeping inherited

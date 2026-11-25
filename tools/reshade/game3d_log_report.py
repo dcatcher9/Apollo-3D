@@ -1786,7 +1786,8 @@ def capture_lock_checks(s: Session, add) -> None:
     for a window with a game thread's wait of a millisecond or more, so such a session is never parked. A printed
     percentile is its histogram bucket's exclusive upper bound (capture_lock_stats.h quantile_us): 250 means a wait
     below 0.25 ms, so a p99 trigger of 0.25 ms or more needs a bound above 250 (500: 0.25 to 0.5 ms), and parked a
-    bound of at most 50 (below 0.05 ms). Until 11-01 the triggers compared the bound with >=, one bucket early."""
+    bound of at most 50 (below 0.05 ms). Until 11-01 the triggers compared the bound with >=, one bucket early.
+    A p99 is over all acquisitions, so its triggers fire only when more than 1% of acquisitions wait that long."""
     if not s.capture_lock:
         return
 

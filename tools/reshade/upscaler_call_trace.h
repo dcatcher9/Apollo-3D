@@ -4,8 +4,9 @@
 #include <cstdint>
 
 namespace sunshine_upscaler_trace {
-  // Shared native entry observation: diagnostics and NGX depth capture are
-  // independent. Owner serializes initialize/poll/shutdown outside loader lock.
+  // The add-on's NGX entry hooks. Despite the name they also carry production
+  // NGX depth capture (`capture`); the call trace (`enabled`) is switched
+  // independently. Owner serializes initialize/poll/shutdown outside loader lock.
   // Hooks are additive and process-pinned, never removed while a game can be
   // inside an original. Shutdown makes them pure pass-through.
   void initialize(HMODULE addon, bool enabled, bool capture = false);
