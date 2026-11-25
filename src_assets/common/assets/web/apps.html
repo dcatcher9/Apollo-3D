@@ -1079,7 +1079,6 @@
         showEditForm: false,
         actionDisabled: false,
         editForm: null,
-        detachedCmd: "",
         coverSearching: false,
         coverFinderBusy: false,
         coverCandidates: [],
@@ -1526,12 +1525,6 @@
         .finally(() => this.actionDisabled = false);
       },
     },
-  });
-
-  app.directive('dropdown-show', {
-    mounted: function (el, binding) {
-      el.addEventListener('show.bs.dropdown', binding.value);
-    }
   });
 
   initApp(app);
