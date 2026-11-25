@@ -3106,12 +3106,8 @@ namespace offline_sbs {
             const auto count = std::min(chunk.size(), pixels - first);
             for (std::size_t x = 0; x < count; ++x) {
               const auto h = frame.rgba16[(first + x) * 4 + channel];
-              const auto exponent = (h >> 10) & 31u;
-              const auto mantissa = h & 1023u;
-              if (exponent == 31u) throw worker_error("non-finite raw HDR SBS output");
-              const float value = exponent == 0 ? std::ldexp(float(mantissa), -24) :
-                                                std::ldexp(float(1024u + mantissa), int(exponent) - 25);
-              chunk[x] = (h & 0x8000u) ? -value : value;
+              if (((h >> 10) & 31u) == 31u) throw worker_error("non-finite raw HDR SBS output");
+              chunk[x] = finite_half_to_float(h);
             }
             process_.write_exact(chunk.data(), count * sizeof(float), deadline);
           }

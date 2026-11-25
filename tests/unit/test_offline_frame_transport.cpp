@@ -88,6 +88,23 @@ TEST(OfflineRawFrameTransport, CancellationReleasesBlockedProducerConsumerAndEvi
   producer.get(); consumer.get(); proof.get();
 }
 
+TEST(OfflineRawFrameTransport, FiniteHalfExpandsToTheExactFloatOfEveryCode) {
+  // The reference is the scaling the encoder feed used before: mantissa * 2^-24 for zero and
+  // subnormal halves, (1024 + mantissa) * 2^(exponent - 25) otherwise, negated by the sign bit.
+  for (std::uint32_t code = 0; code <= 0xffffu; ++code) {
+    const auto exponent = (code >> 10) & 31u;
+    const auto mantissa = code & 1023u;
+    if (exponent == 31u) {
+      continue;
+    }
+    const float magnitude = exponent == 0u ? std::ldexp(float(mantissa), -24) :
+                                             std::ldexp(float(1024u + mantissa), int(exponent) - 25);
+    const float expected = (code & 0x8000u) ? -magnitude : magnitude;
+    ASSERT_EQ(std::bit_cast<std::uint32_t>(finite_half_to_float(std::uint16_t(code))),
+              std::bit_cast<std::uint32_t>(expected)) << "half code " << code;
+  }
+}
+
 TEST(OfflineRawFrameTransport, RasterBudgetCoversHdrUploadAndThreeOverlappingOutputs) {
   const auto source = 1280ull * 720 * 12;
   const auto output = 2560ull * 720 * 8;

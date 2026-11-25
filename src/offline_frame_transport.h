@@ -43,6 +43,20 @@ namespace offline_sbs {
 
   enum class raw_pixel_format : std::uint32_t { bgra8 = 1, gbrpf32le = 2, rgba16f = 3 };
 
+  // The exact float32 value of a finite half float (exponent field below 31), built from its
+  // bits: every half is representable, so no rounding is involved. The caller rejects
+  // exponent 31 (infinities and NaNs).
+  [[nodiscard]] inline float finite_half_to_float(const std::uint16_t half) noexcept {
+    const std::uint32_t sign = std::uint32_t(half & 0x8000u) << 16;
+    const std::uint32_t exponent = (half >> 10) & 31u;
+    const std::uint32_t mantissa = half & 1023u;
+    if (exponent != 0u) {
+      return std::bit_cast<float>(sign | ((exponent + 112u) << 23) | (mantissa << 13));
+    }
+    // Zero and subnormal halves are mantissa * 2^-24, a normal float32.
+    return std::bit_cast<float>(sign | std::bit_cast<std::uint32_t>(float(mantissa) * 0x1p-24f));
+  }
+
   struct raw_frame_header {
     std::uint32_t schema = 1;
     std::uint64_t sequence = 0;
