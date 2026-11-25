@@ -600,7 +600,7 @@ LONG applyDisplaySettings(const wchar_t *deviceName, int width, int height, int 
         ) {
           auto *sourceMode = &modeArray[j].sourceMode;
 
-          wprintf(L"[SUDOVDA] Current mode found: [%dx%dx%d]\n", sourceMode->width, sourceMode->height, targetInfo->refreshRate);
+          wprintf(L"[SUDOVDA] Current mode found: [%ux%ux%u/%u]\n", sourceMode->width, sourceMode->height, targetInfo->refreshRate.Numerator, targetInfo->refreshRate.Denominator);
 
           sourceMode->width = width;
           sourceMode->height = height;
@@ -2500,8 +2500,10 @@ bool removeVirtualDisplay(const GUID &guid) {
 // Result: L"\\\\.\\Display2"
 
 std::vector <std::wstring> matchDisplay(std::wstring sMatch) {
-	DISPLAY_DEVICEW displayDevice;
-	displayDevice.cb = sizeof(DISPLAY_DEVICE);
+	// The size of the structure that is passed: this file is built without UNICODE, where
+	// DISPLAY_DEVICE names the smaller narrow structure.
+	DISPLAY_DEVICEW displayDevice {};
+	displayDevice.cb = sizeof(displayDevice);
 
 	std::wstring matchDeviceName;
 
