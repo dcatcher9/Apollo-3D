@@ -1,9 +1,12 @@
 export const settingEnabled = value => value === true || value === 1 || ['enabled', 'on', 'true', '1'].includes(value)
 
 // The local surface choice and the monitor's settings, compared by meaning. The retired
-// local_monitor_enabled switch is not part of it; local_display_surface replaced it.
+// local_monitor_enabled switch is not part of it; local_display_surface replaced it. Neither
+// is local_monitor_mode: the 3D source is switched live while 3D runs, so the running value
+// differs from the page's copy without anything left to save.
 export const localMonitorFingerprint = config => JSON.stringify(Object.keys(config || {})
-  .filter(key => key === 'local_display_surface' || (key.startsWith('local_monitor_') && key !== 'local_monitor_enabled')).sort().map(key => [key,
+  .filter(key => key === 'local_display_surface' ||
+    (key.startsWith('local_monitor_') && key !== 'local_monitor_enabled' && key !== 'local_monitor_mode')).sort().map(key => [key,
     key === 'local_monitor_flip_eyes' || key === 'local_monitor_emitter_averaging' ? (settingEnabled(config[key]) ? 'enabled' : 'disabled') : String(config[key])]))
 
 export const shutterMonitorSelected = config => config?.local_display_surface === 'shutter_monitor'

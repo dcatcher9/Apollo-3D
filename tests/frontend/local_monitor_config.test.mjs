@@ -99,6 +99,11 @@ test('the running-settings fingerprint ignores value types and unrelated keys', 
   assert.notEqual(localMonitorFingerprint(form), localMonitorFingerprint({...running, local_monitor_frame_delay_us: 501}))
 })
 
+test('a live 3D source switch leaves the running-settings fingerprint unchanged', () => {
+  const form = {...config, local_monitor_mode: 'host'}
+  assert.equal(localMonitorFingerprint(form), localMonitorFingerprint({...form, local_monitor_mode: 'game'}))
+})
+
 test('only a chosen shutter monitor is validated', () => {
   for (const surface of ['off', 'ar_glasses', undefined]) {
     assert.deepEqual(validateLocalMonitorConfig({...config, local_display_surface: surface, local_monitor_emitter_port: ''}, 120000, timing), [])
