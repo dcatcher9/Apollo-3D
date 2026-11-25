@@ -4189,8 +4189,10 @@ namespace sbs_bench {
     if (o.pop_strength >= 0.0) {
       sbs_cfg.pop_strength = o.pop_strength;
     }
-    config::sunshine.diagnostics_enabled = true;  // benchmark processes always measure
     if (!transport) {
+      // Benchmark processes always measure. A Web UI conversion (raw transport) keeps the
+      // user's own diagnostics setting: nobody reads its timings otherwise.
+      config::sunshine.diagnostics_enabled = true;
       sbs_perf::set_enabled(true);
       sbs_perf::reset();
     }

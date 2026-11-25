@@ -521,6 +521,16 @@ namespace platf::video_dom {
 
           try {
             bp::group group;
+            {
+              // Boost's group is a job without this limit: a host that ends without running
+              // the cleanup below would leave the helper behind.
+              JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits {};
+              const auto job = group.native_handle();
+              if (QueryInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits), nullptr)) {
+                limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
+              }
+            }
             auto environment = boost::this_process::environment();
             // Native wide path: a narrow string would be converted through the ANSI code page
             // and mangle (or fail on) an installation folder with other characters.

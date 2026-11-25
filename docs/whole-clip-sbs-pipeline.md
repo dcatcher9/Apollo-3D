@@ -97,9 +97,10 @@ source and synchronous encoder handoff. If the minimum reservation exceeds the c
 fails. The attested peak is this conservative handoff bound, not total process RSS, codec
 internals, TensorRT/D3D allocations, or driver-owned NVENC surfaces.
 
-The retained `sbs_perf.json` snapshot includes decoder-read and encoder-write timings after the
-encoder drains. These measure transfer and backpressure as well as copying; GPU stage timings
-remain separate. Compare matched source/output evidence before attributing a throughput change.
+With `diagnostics = enabled`, the worker log's periodic performance summary includes decoder-read
+and encoder-write timings. These measure transfer and backpressure as well as copying; GPU stage
+timings remain separate. Compare matched source/output evidence before attributing a throughput
+change. With diagnostics off, a conversion collects no timings.
 
 Legacy cache-limit request fields remain accepted for existing clients and persisted jobs. They
 mean only the transient-raster cap. There is no whole-clip image sequence, depth/state cache,

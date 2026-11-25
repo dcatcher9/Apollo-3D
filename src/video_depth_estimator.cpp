@@ -171,8 +171,9 @@ static bool cuda_device_for_d3d(cuda_driver_api &cuda, ID3D11Device *d3d, CUdevi
       dxgi_device->Release();
     }
   }
-  BOOST_LOG(warning) << "Could not map the D3D11 adapter to CUDA; falling back to CUDA device 0.";
-  return cuda.cuDeviceGet && cuda.cuDeviceGet(&out, 0) == CUDA_SUCCESS;
+  // CUDA device 0 may be another card: textures of this adapter could not be shared with it.
+  BOOST_LOG(error) << "Could not map the D3D11 adapter to a CUDA device; Host 3D needs the NVIDIA GPU that captures and encodes.";
+  return false;
 }
 
 // Resolve the same explicitly configured DXGI adapter that the capture pipeline will use. When

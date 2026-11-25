@@ -3,6 +3,7 @@
  * @brief Native causal SBS evaluation/conversion worker.
  */
 
+#include "config.h"
 #include "crypto.h"
 #include "generated/sbs_adaptive_state_contract.h"
 #include "host_sbs_observation_timeline.h"
@@ -5972,7 +5973,8 @@ namespace offline_sbs {
       if (source_raster_bound > spec.transient_raster_hard_cap_bytes)
         throw worker_error("raw source, HDR upload and decoder pipe exceed the transient raster hard cap before allocation");
       // Own the measurement window before either raw transport or the GPU thread starts.
-      sbs_perf::set_enabled(true);
+      // Transfer timings are collected, and summarised in the log, only with diagnostics on.
+      sbs_perf::set_enabled(config::sunshine.diagnostics_enabled);
       sbs_perf::reset();
       streaming_decoder_t analysis_decoder {
         spec,
@@ -6426,9 +6428,6 @@ namespace offline_sbs {
         );
       }
 
-      // The harness snapshot precedes the asynchronous encoder's last write. Snapshot again
-      // after the encoder drains so the transport profile covers every source and output frame.
-      sbs_perf::dump_json(path_utf8(analysis_output / "sbs_perf.json"));
       progress.publish(
         "complete",
         media.frames.size(),

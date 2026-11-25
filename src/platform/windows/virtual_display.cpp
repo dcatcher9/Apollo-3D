@@ -689,39 +689,6 @@ LONG saveSessionModeRecord(const wchar_t *deviceName, const session_mode_record_
   return ChangeDisplaySettingsExW(deviceName, &devMode, nullptr, record.flags, nullptr);
 }
 
-bool findDisplayIds(const wchar_t *displayName, LUID &adapterId, uint32_t &targetId) {
-  std::vector<DISPLAYCONFIG_PATH_INFO> paths;
-  std::vector<DISPLAYCONFIG_MODE_INFO> modes;
-  if (!queryActiveDisplayConfig(paths, modes)) {
-    return false;
-  }
-
-  auto path = std::find_if(paths.begin(), paths.end(), [&displayName](DISPLAYCONFIG_PATH_INFO _path) {
-    DISPLAYCONFIG_PATH_SOURCE_INFO sourceInfo = _path.sourceInfo;
-
-    DISPLAYCONFIG_SOURCE_DEVICE_NAME sourceName = {};
-    sourceName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
-    sourceName.header.size = sizeof(sourceName);
-    sourceName.header.adapterId = sourceInfo.adapterId;
-    sourceName.header.id = sourceInfo.id;
-
-    if (DisplayConfigGetDeviceInfo(&sourceName.header) != ERROR_SUCCESS) {
-      return false;
-    }
-
-    return std::wstring_view(displayName) == sourceName.viewGdiDeviceName;
-  });
-
-  if (path == paths.end()) {
-    return false;
-  }
-
-  adapterId = path->targetInfo.adapterId;
-  targetId = path->targetInfo.id;
-
-  return true;
-}
-
 std::optional<bool> queryDisplayHDR(const LUID &adapterLuid, uint32_t targetId) {
   // Query the display configuration state directly. A virtual HDR desktop is represented as
   // linear scRGB to desktop applications, so its DXGI output color space is not required to be
@@ -748,26 +715,18 @@ bool setDisplayHDR(const LUID& adapterId, const uint32_t& targetId, bool enableA
 }
 
 std::optional<bool> queryDisplayHDRByName(const wchar_t* displayName) {
-	LUID adapterId;
-	uint32_t targetId;
-
-	if (!findDisplayIds(displayName, adapterId, targetId)) {
-		wprintf(L"[SUDOVDA] Failed to find display IDs for %ls!\n", displayName);
-		return std::nullopt;
-	}
-
-  return queryDisplayHDR(adapterId, targetId);
+  // One exact active target: a cloned or ambiguous name has no single HDR state to report.
+  const auto target = platf::display_config::resolve_display_target({}, displayName);
+  if (!target) {
+    BOOST_LOG(warning) << "The named display is not one single active target; its HDR state is unknown.";
+    return std::nullopt;
+  }
+  return queryDisplayHDR(target->adapter_id, target->target_id);
 }
 
 bool setDisplayHDRByName(const wchar_t* displayName, bool enableAdvancedColor) {
-	LUID adapterId;
-	uint32_t targetId;
-
-	if (!findDisplayIds(displayName, adapterId, targetId)) {
-		return false;
-	}
-
-	return setDisplayHDR(adapterId, targetId, enableAdvancedColor);
+  const auto target = platf::display_config::resolve_display_target({}, displayName);
+  return target && setDisplayHDR(target->adapter_id, target->target_id, enableAdvancedColor);
 }
 
 void closeVDisplayDevice() {
