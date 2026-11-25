@@ -5,7 +5,7 @@
 // gathers the values where it decides and logs the rendered text; the log
 // line goldens (test_provider_log_lines.cpp) render fixed values, so a change
 // of how the values are gathered keeps every line byte for byte.
-#include "depth_addon.h"
+#include "depth_frame.h"
 #include "streamline_camera_probe.h"
 #include "streamline_depth_capture.h"
 #include "streamline_native_observer.h"

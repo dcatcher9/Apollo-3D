@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
-#include "depth_addon.h"
+#include "depth_frame.h"
 #include "depth_moments.h"
 
 #include <array>

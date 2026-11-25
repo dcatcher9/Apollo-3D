@@ -10,6 +10,7 @@
 #include "camera_sample_binding.h"
 #include "streamline_camera_probe.h"
 #include "scene_depth_source.h"
+#include "depth_frame.h"
 
 namespace sunshine_streamline::depth_capture { struct packet; struct consumer_diagnostic; }
 
@@ -27,54 +28,6 @@ namespace sunshine_depth {
   void set_native_driver(reshade::api::effect_runtime *runtime, bool enabled);
   bool begin_native_frame(reshade::api::effect_runtime *runtime, reshade::api::command_list *commands);
   void end_native_frame(reshade::api::effect_runtime *runtime, reshade::api::command_list *commands);
-
-  struct frame_depth {
-    // Value-only API metadata, separate from the borrowed rendering resources.
-    sunshine_scene_depth::frame provided;
-    struct projection_t {
-      bool supplied = false;
-      std::uint64_t epoch = 0;
-      std::uint32_t viewport = 0;
-      double A = 0, B = 0;
-      double raw_scale = 1, raw_bias = 0;
-      sunshine_scene_depth::depth_encoding encoding = sunshine_scene_depth::depth_encoding::device;
-    } projection;
-    // Original game resource, not the add-on's backup copy. Identity-only
-    // observation for camera metadata matching; never sampled through this handle.
-    reshade::api::resource source_resource {};
-    reshade::api::resource resource {};
-    reshade::api::resource_view shader_resource {};
-    std::uint32_t width = 0, height = 0;
-    std::uint32_t x = 0, y = 0, active_width = 0, active_height = 0;
-    std::uint64_t source_id = 0, layout_epoch = 0, frame_index = 0;
-    std::uint64_t runtime_epoch = 0;
-    bool aligned_viewport_assumed = false;
-    std::uint64_t backup_id = 0;
-    std::uint64_t command_queue = 0;
-    bool ready = false;
-    // FG may sample the last real frame's private display depth with new color.
-    // Its metadata sequence/tick remain original; this is not fresh depth evidence.
-    bool reused_depth = false;
-    // Provider-resolved FG policy for this source/pass. A busy options query
-    // retains confirmed mode; lost or ambiguous scope cannot authorize reuse.
-    bool frame_generation_active = false;
-    depth_orientation detected_orientation = depth_orientation::automatic;
-    depth_orientation orientation = depth_orientation::automatic;
-    unsigned orientation_agreeing_frames = 0;
-    bool calibrated = false;
-    unsigned calibration_samples = 0;
-    std::uint64_t calibration_frame = 0;
-    // Positive nearness is toward the viewer: (raw - raw_anchor) * raw_gain.
-    float raw_anchor = 0, raw_gain = 0;
-  };
-
-  // Resolve the selected source's capture opportunity, then publish through
-  // the shared owner's read lease. Renderer/calibration never choose a capture
-  // implementation or issue texture transitions. Generic uses the same owner.
-  bool copy_selected_depth(reshade::api::effect_runtime *runtime,
-    reshade::api::command_list *commands, const sunshine_streamline::depth_capture::packet &selection,
-    reshade::api::resource destination, frame_depth &captured,
-    sunshine_streamline::depth_capture::consumer_diagnostic *diagnostic = nullptr);
 
   // Read immediately after this module's reshade_begin_effects callback and
   // before reshade_finish_effects. Handles are borrowed for that callback only;

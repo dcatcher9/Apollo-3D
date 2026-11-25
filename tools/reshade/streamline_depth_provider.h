@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
-#include "depth_addon.h"
+#include "depth_frame.h"
 #include "depth_presentation_stats.h"
 #include "depth_moments.h"
 #include "game3d_depth_input.h"

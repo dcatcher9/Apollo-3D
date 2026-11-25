@@ -103,17 +103,6 @@ namespace sunshine_depth {
 // select_captured_depth.
 #include "generic_capture.inl"
 
-bool sunshine_depth::copy_selected_depth(effect_runtime *runtime, command_list *commands,
-	const sunshine_streamline::depth_capture::packet &selection, resource destination, frame_depth &captured,
-	sunshine_streamline::depth_capture::consumer_diagnostic *diagnostic)
-{
-	captured = {};
-	constexpr uint32_t sampled_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-	return runtime && commands && destination.handle && sunshine_streamline::depth_capture::copy_current(
-		commands->get_native(), selection, destination.handle, sampled_state, diagnostic,
-		commands == runtime->get_command_queue()->get_immediate_command_list());
-}
-
 static void release_sample_reference(effect_runtime *runtime, generic_depth_data &data)
 {
 	if (data.sampled_depth_stencil != 0)
