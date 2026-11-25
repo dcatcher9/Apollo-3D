@@ -922,6 +922,12 @@ TEST(NvencPipelineTest, InvalidationThatNeedsNoDriverCallIsDecidedWithPicturesIn
   // Malformed: an IDR.
   EXPECT_FALSE(probe.would_invalidate_ref_frames(9, 8));
   EXPECT_EQ(probe.invalidate_ref_frames(9, 8), nvenc::nvenc_base::ref_frame_invalidation_e::needs_idr);
+  // After the last submitted picture (6), the very next index included: an IDR, never an
+  // empty invalidation.
+  EXPECT_FALSE(probe.would_invalidate_ref_frames(7, 7));
+  EXPECT_EQ(probe.invalidate_ref_frames(7, 7), nvenc::nvenc_base::ref_frame_invalidation_e::needs_idr);
+  EXPECT_FALSE(probe.would_invalidate_ref_frames(8, 9));
+  EXPECT_EQ(probe.invalidate_ref_frames(8, 9), nvenc::nvenc_base::ref_frame_invalidation_e::needs_idr);
   EXPECT_TRUE(only(probe.operations(), {"invalidate"}).empty());
   EXPECT_EQ(probe.frames_in_flight(), 2u);
 

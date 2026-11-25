@@ -1316,6 +1316,12 @@ namespace nvenc {
     if (last_frame < first_frame) {
       return rfi_plan_e::malformed;
     }
+    // A range that starts after the last submitted picture names nothing this encoder made.
+    // The unsigned count below would wrap to zero for the very next index and "invalidate" an
+    // empty range without recovering anything: answer with an IDR instead.
+    if (first_frame > encoder_state.last_encoded_frame_index) {
+      return rfi_plan_e::too_large;
+    }
     // The range extends to the last submitted picture: those in flight may reference the lost frames.
     if (encoder_state.last_encoded_frame_index - first_frame + 1 >= encoder_params.ref_frames_in_dpb) {
       return rfi_plan_e::too_large;
