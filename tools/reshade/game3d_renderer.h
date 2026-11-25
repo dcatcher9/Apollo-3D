@@ -135,6 +135,9 @@ namespace sunshine_game3d {
     // keeps its scope and held position, so the first frame with a reader
     // probes at once.
     bool adaptive_probe = true;
+    // A deferred pack can omit the symmetric field when only its per-eye
+    // fields will be consumed. Diagnostics and probes require both.
+    bool final_field_required = true;
   };
 
   // Current positive display bound after strength and blend. Scene admission
@@ -292,6 +295,7 @@ namespace sunshine_game3d {
     // probe and (where supported) the PQ export target before its first
     // render.
     bool first_render_prepared() const;
+    bool last_detection_used_compact_tiles() const;
 #endif
     static std::string_view shader_source();
     std::string_view active_shader_source() const;

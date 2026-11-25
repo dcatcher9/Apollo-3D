@@ -28,12 +28,12 @@ namespace {
                                   "[numthreads(1, 1, 1)] void main(uint3 id : SV_DispatchThreadID) { Output[id.xy] = 1.0; }\n";
   const cache::entry_point entry{"main", "cs_5_0"};
 
-  cache::state settle(const cache::configuration &config) {
+  cache::state settle(const cache::configuration &config, const std::vector<cache::entry_point> &entries = {entry}) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
-    auto state = cache::prepare(config, {entry});
+    auto state = cache::prepare(config, entries);
     while (state == cache::state::pending && std::chrono::steady_clock::now() < deadline) {
       std::this_thread::sleep_for(std::chrono::milliseconds(2));
-      state = cache::prepare(config, {entry});
+      state = cache::prepare(config, entries);
     }
     return state;
   }
@@ -137,6 +137,15 @@ namespace {
     forget();
     check(settle(config) == cache::state::ready && cache::find(config, entry) == compiled,
       "A damaged file must be replaced by a fresh compile");
+
+    const cache::entry_point optional{"missing_entry", "cs_5_0", true};
+    check(settle(config, {entry, optional}) == cache::state::ready &&
+        cache::find(config, entry) == compiled && cache::find(config, optional).empty(),
+      "A missing optional entry must leave the required shader ready");
+    check(cache::prepare(config, {entry, optional}) == cache::state::ready,
+      "A missing optional entry must not restart its preparation");
+    check(settle(config, {entry, {"missing_entry", "cs_5_0"}}) == cache::state::failed,
+      "An optional failure must never appear ready to a required entry");
   }
 }
 

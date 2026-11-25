@@ -696,6 +696,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
           ui_input.for_render(scene.ui_plane, ui_observation), !proof.frame.reused_depth};
         // A Dump 3D packs this Present with its full conditioning.
         input.diagnostic_armed = proof.diagnostic_armed;
+        input.final_field_required = false;
         // Without a consumer (or an armed dump) nothing reads the adaptive
         // probe's conditioning: render() keeps running for the depth pool (E4
         // was rejected), but submits no probe.

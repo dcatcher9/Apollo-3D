@@ -964,7 +964,7 @@ namespace {
         srvs[8u]=prepared_srv.Get();context->CSSetShaderResources(8u,1u,&srvs[8u]);
         uavs[0u]=pin_field.uav.Get();uavs[1u]=pin_weights.uav.Get();uavs[3u]=nullptr;
         context->CSSetUnorderedAccessViews(0u,4u,uavs,nullptr);context->CSSetShader(shared_ui_pin_cs[1].Get(),nullptr,0u);
-        context->Dispatch((source_width+15u)/16u,(pin_shape[3u]*2u+15u)/16u,1u);
+        context->Dispatch((source_width+15u)/16u,(pin_shape[3u]+15u)/16u,1u);
         context->CSSetUnorderedAccessViews(0u,4u,null_uavs,nullptr);
         if (!outline->shared_ui_pin_resample_only) {
           srvs[12u]=pin_weights.srv.Get();context->CSSetShaderResources(0u,15u,srvs);

@@ -213,12 +213,15 @@ namespace {
       "Native shader is not Shader Model 5.0");
     manifest << "entry " << entry.name << ' ' << entry.profile << '\n';
     bool has_ui_binding = false, reads_layer = false, reads_hudless = false;
+    bool reads_source = false, reads_backbuffer = false;
     for (unsigned index = 0; index < shader.BoundResources; ++index) {
       D3D11_SHADER_INPUT_BIND_DESC actual {};
       require(SUCCEEDED(reflection->GetResourceBindingDesc(index, &actual)), "Binding reflection failed");
       has_ui_binding |= std::string(actual.Name) == "SunshineUIConstants";
       reads_layer |= std::string(actual.Name) == "SunshineUILayer";
       reads_hudless |= std::string(actual.Name) == "SunshineHUDless";
+      reads_source |= std::string(actual.Name) == "SunshineSourceSampler";
+      reads_backbuffer |= std::string(actual.Name) == "SunshineUIBackbufferAlpha";
       bool known = false;
       for (const auto &expected : bindings) {
         if (std::string(actual.Name) != expected.name) continue;
@@ -238,8 +241,11 @@ namespace {
     // grid fits (smaller ones compile the evidence away).
     if (std::string(entry.name) == "SunshineSceneCellsCS" && width >= 256 && height >= 144)
       require(reads_layer && reads_hudless, "The scene cells pass must read the pre-UI images at t7 and t14");
+    if (std::string(entry.name) == "SunshineUIDetectionCompactExactPairTilesCS")
+      require(reads_backbuffer && reads_hudless && !reads_source && !reads_layer,
+        "Compact exact-pair tiles must read only tagged Backbuffer and HUD-less color");
     // UI pinning is its own pass after the scene field; the limiter never reads UI state.
-    if (std::string(entry.name) == "SunshineHostHorizontalCS")
+    if (std::string(entry.name) == "SunshineHostHorizontalCS" || std::string(entry.name) == "SunshineHostEyeLimitCS")
       require(!has_ui_binding, "Scene limiter must not pin UI");
     for (unsigned index = 0; index < shader.ConstantBuffers; ++index) {
       auto *buffer = reflection->GetConstantBufferByIndex(index);
@@ -405,11 +411,13 @@ int main(int argc, char **argv) {
           entries.push_back({"SunshineHostVerticalCS", "cs_5_0", limiter_lines, 8, 1});
           entries.push_back({"SunshineHostVerticalLiveCS", "cs_5_0", limiter_lines, 8, 1});
           entries.push_back({"SunshineHostHorizontalCS", "cs_5_0", limiter_lines, 8, 1});
+          entries.push_back({"SunshineHostEyeLimitCS", "cs_5_0", limiter_lines, 32, 1});
           entries.push_back({"SunshineUINearestTilesCS", "cs_5_0", 16, 16, 1});
           entries.push_back({"SunshineUINearestReduceCS", "cs_5_0", 256, 1, 1});
           entries.push_back({"SunshineUIConflictCS", "cs_5_0", 8, 8, 1});
           entries.push_back({"SunshineApplyUICS", "cs_5_0", pin_lines, 8, 1});
           entries.push_back({"SunshineUIDetectionTilesCS", "cs_5_0", 16, 16, 1});
+          entries.push_back({"SunshineUIDetectionCompactExactPairTilesCS", "cs_5_0", 32, 8, 1});
           entries.push_back({"SunshineUIDetectionReduceCS", "cs_5_0", 256, 1, 1});
           entries.push_back({"SunshineUIDetectionMaskCS", "cs_5_0", 8, 8, 1});
           entries.push_back({"SunshineSceneCellsCS", "cs_5_0", 16, 16, 1});

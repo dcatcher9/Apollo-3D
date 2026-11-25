@@ -33,12 +33,12 @@ void prepare_main(uint3 id : SV_DispatchThreadID) {
     uint2 source_size; float plane;
     uint subtitle_authorized = SubtitleRenderAuthorized(source_size, plane) &&
         selected_receipt != 0u && all(source_size == PinSourceShape.xy) ? 1u : 0u;
-    // The field and weight planes hold the band once per eye, so both grids cover twice its rows.
+    // The initializer builds both eyes in one thread. The pin grid covers the stacked rows.
     SharedPinPreparationStore.Store4(0u,
-        uint4((PinSourceShape.x + 15u) / 16u, (2u * PinSourceShape.w + 15u) / 16u,
+        uint4((PinSourceShape.x + 15u) / 16u, (PinSourceShape.w + 15u) / 16u,
               subtitle_authorized, 0u));
     SharedPinPreparationStore.Store4(16u,
-        uint4((2u * PinSourceShape.w + 7u) / 8u, 1u, subtitle_authorized, 0u));
+        uint4(2u * PinSourceShape.w, 1u, subtitle_authorized, 0u));
     SharedPinPreparationStore.Store4(32u,
         uint4(selected_receipt, subtitle_authorized, warp_authorized, 0u));
     // The owner has cleared every row. Keep this literal receipt header even when no
@@ -241,11 +241,16 @@ void initialize_main(uint3 id : SV_DispatchThreadID, uint3 lane : SV_GroupThread
 #endif
     }
     GroupMemoryBarrierWithGroupSync();
-    if (id.x >= PinSourceShape.x || id.y >= 2u * PinSourceShape.w) return;
-    // The field and weight planes hold the band once per eye: the left eye's rows, then the right
-    // eye's, each built from that eye's scene field. Row marks are shared.
+    if (id.x >= PinSourceShape.x) return;
+#if defined(HOST_SBS_TEXT_GAME_PIN)
+    if (id.y >= 2u * PinSourceShape.w) return;
+    // The scene-dependent column clamp can produce a different weight for each eye.
     uint eye = id.y >= PinSourceShape.w ? 1u : 0u;
     uint band_row = id.y - eye * PinSourceShape.w;
+#else
+    if (id.y >= PinSourceShape.w) return;
+    uint band_row = id.y;
+#endif
     // One owned per-draw header avoids repeating the long immutable receipt check in the PS.
     if (all(id.xy == 0u)) SharedPinRowStore[uint2(0u,PinSourceShape.w)] = SharedPinGroupSelectedReceipt;
     uint2 pixel = uint2(id.x, band_row + PinSourceShape.z);
@@ -266,8 +271,12 @@ void initialize_main(uint3 id : SV_DispatchThreadID, uint3 lane : SV_GroupThread
     }
     SunshineHostFinalStore[id.xy] = bounded;
 #else
-    SunshineHostFinalStore[id.xy] = SharedOriginalParallax(uv, eye);
+    // Both eyes use the same current glyph witness. Sample their scene fields separately.
+    uint2 right = id.xy + uint2(0u, PinSourceShape.w);
+    SunshineHostFinalStore[id.xy] = SharedOriginalParallax(uv, 0u);
+    SunshineHostFinalStore[right] = SharedOriginalParallax(uv, 1u);
     float weight = SharedPinGroupAuthorized != 0u && CurrentGlyphContributor(int2(pixel)) ? 1.0f : 0.0f;
+    SharedPinWeightStore[right] = weight;
 #endif
     SharedPinWeightStore[id.xy] = weight;
     if (weight > 0.0f) InterlockedOr(SharedPinRowStore[uint2(0u,band_row)], 1u);
@@ -286,7 +295,91 @@ float SunshineUIPlaneParallax() {
     return asfloat(SubtitleCondition[5u]) * ((float)subtitle_render_source.z / (float)PinSourceShape.x);
 #endif
 }
+#if defined(HOST_SBS_TEXT_GAME_PIN)
+// The column pass deliberately produces fractional weights.
+#define SUNSHINE_UI_PIN_SOFT_ONLY
+#endif
 #include "include/ui_pin_band_shared.hlsl"
+
+#if !defined(HOST_SBS_TEXT_GAME_PIN)
+// One group owns a complete row of one eye. Neighboring lanes load and update
+// neighboring texels. Packed occupancy selects the nearest binary anchor.
+#define HOST_PIN_LANES 128u
+// One bit per texel at the D3D11 texture width limit.
+#define HOST_PIN_WORDS 512u
+groupshared uint HostPinPacked[HOST_PIN_WORDS];
+groupshared uint HostPinPresence[HOST_PIN_WORDS / 32u];
+groupshared int2 HostPinNeighbors[HOST_PIN_WORDS];
+
+int HostPinLeftWord(uint block, uint bit) {
+    uint before = HostPinPresence[block] & ((1u << bit) - 1u);
+    if (before != 0u) return int(block * 32u) + firstbithigh(before);
+    [loop] for (int prior = int(block) - 1; prior >= 0; --prior) {
+        before = HostPinPresence[uint(prior)];
+        if (before != 0u) return prior * 32 + firstbithigh(before);
+    }
+    return -1;
+}
+
+int HostPinRightWord(uint block, uint bit, uint blocks) {
+    uint after = HostPinPresence[block] & (~1u << bit);
+    if (after != 0u) return int(block * 32u) + firstbitlow(after);
+    [loop] for (uint next = block + 1u; next < blocks; ++next) {
+        after = HostPinPresence[next];
+        if (after != 0u) return int(next * 32u) + firstbitlow(after);
+    }
+    return -1;
+}
+
+[numthreads(HOST_PIN_LANES, 1, 1)]
+void HostBinaryPinCS(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
+    uint row = group.x;
+    uint width = BUFFER_WIDTH;
+    if (row >= SUNSHINE_UI_PIN_FIELD_ROWS || width == 0u || width > HOST_PIN_WORDS * 32u) return;
+    if (SharedPinRows.Load(int3(0, row % BUFFER_HEIGHT, 0)) == 0u) return;
+
+    uint words = (width + 31u) / 32u;
+    uint blocks = (words + 31u) / 32u;
+    for (uint clear_word = lane; clear_word < words; clear_word += HOST_PIN_LANES) HostPinPacked[clear_word] = 0u;
+    if (lane < blocks) HostPinPresence[lane] = 0u;
+    GroupMemoryBarrierWithGroupSync();
+    [loop] for (uint sample = lane; sample < width; sample += HOST_PIN_LANES) {
+        if (SunshineUIPinWeight(sample, row) >= 1.0f) InterlockedOr(HostPinPacked[sample / 32u], 1u << (sample % 32u));
+    }
+    GroupMemoryBarrierWithGroupSync();
+    for (uint mask_word = lane; mask_word < words; mask_word += HOST_PIN_LANES) {
+        if (HostPinPacked[mask_word] != 0u) InterlockedOr(HostPinPresence[mask_word / 32u], 1u << (mask_word % 32u));
+    }
+    GroupMemoryBarrierWithGroupSync();
+    uint occupied = 0u;
+    [loop] for (uint block = 0u; block < blocks; ++block) occupied |= HostPinPresence[block];
+    if (occupied == 0u) return;
+
+    for (uint neighbor_word = lane; neighbor_word < words; neighbor_word += HOST_PIN_LANES) {
+        uint block = neighbor_word / 32u, bit = neighbor_word % 32u;
+        int left = HostPinLeftWord(block, bit), right = HostPinRightWord(block, bit, blocks);
+        uint left_bits = HostPinPacked[uint(max(left, 0))], right_bits = HostPinPacked[uint(max(right, 0))];
+        HostPinNeighbors[neighbor_word] = int2(left < 0 ? -int(width) : left * 32 + firstbithigh(left_bits),
+            right < 0 ? 2 * int(width) : right * 32 + firstbitlow(right_bits));
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    float plane = SunshineUIPlaneParallax();
+    [loop] for (uint x = lane; x < width; x += HOST_PIN_LANES) {
+        uint word = x / 32u, bit = x % 32u;
+        uint packed = HostPinPacked[word];
+        uint at_or_left = packed & (~0u >> (31u - bit)), at_or_right = packed >> bit;
+        int2 remote = HostPinNeighbors[word];
+        int left = at_or_left != 0u ? int(word * 32u) + firstbithigh(at_or_left) : remote.x;
+        int right = at_or_right != 0u ? int(x) + firstbitlow(at_or_right) : remote.y;
+        uint distance = uint(max(min(int(x) - left, right - int(x)) - 1, 0));
+        uint2 at = uint2(x, row);
+        float original = SunshineHostFinalStore[at];
+        float pinned = SunshineUIPinClamp(original, plane, 0.0f, distance);
+        if (asuint(pinned) != asuint(original)) SunshineHostFinalStore[at] = pinned;
+    }
+}
+#endif
 
 bool SharedPinRowContributes(float source_v) {
     float y = saturate(source_v) * (float)PinSourceShape.y - 0.5f;

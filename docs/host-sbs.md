@@ -107,7 +107,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | `direct_glyph_plan` | 2 | `3c1df1656492065c62c519ceffd49f3d1bc1d3a4e26c50ba0b8a2eead4dc2844` |
 | `direct_glyph_transport` | 4 | `2df402561c88d7e2b2672660e2f9d5f42b06d9815c87b48511adb05af6226b30` |
 | `direct_glyph_palette` | 17 | `c955485dc93ba40eccb88dad2ac66b512876265326fcc83c903cd089ae1c0941` |
-| `direct_glyph_prepare` | 1 | `ebd78fb4d5a30345166f4dcbfb990817a41910172288cba9d7e90926c7764ffe` |
+| `direct_glyph_prepare` | 1 | `f3a07c98df39323c896c20f7801cc4e79867995dd3af844e426e2c3f9505302d` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->
 
 The contract admits the following production calibration:
@@ -595,6 +595,11 @@ filter fractions can exceed the horizontal slope bound. The common owner
 collar, then spreads the bounded transition through each affected row. The field uses native
 pixel centres and the existing ROI width conversion for SCP4. Both positive vertical bilinear
 contributors are considered when choosing between a pin row and the exact Base inverse.
+The subtitle initializer checks each native glyph texel once for both eyes and samples the two
+scene fields independently. Its pin pass skips unmarked rows and packs each marked eye row's
+binary weights in thread-group memory. Each field texel clamps once using the shared distance to
+the nearest covered texel and writes only when its bits change. The text-game route uses the
+shared directional slack scans for its fractional weights.
 The inverse retains the at-most-eleven-step, exact-bit-settle rule and original SDR/HDR sample.
 No generated outline, new matte support, RGB erasure or RGB reconstruction is introduced.
 

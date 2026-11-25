@@ -25,34 +25,34 @@ namespace models::host_sbs_shared_ui_warp {
 
   inline constexpr std::array<cache::shader_spec, 4u> completed_specs {{
     {"host_sbs_shared_ui_warp.hlsl", "initialize_main", "cs_5_0"},
-    {"host_sbs_shared_ui_warp.hlsl", "SunshineApplyUICS", "cs_5_0"},
+    {"host_sbs_shared_ui_warp.hlsl", "HostBinaryPinCS", "cs_5_0"},
     {"host_sbs_shared_ui_warp.hlsl", "prepare_main", "cs_5_0"},
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_main_ps", "ps_5_0"},
   }};
-  inline constexpr std::string_view completed_closure = "18857a9c94958ac3bc3533cb4bf86a563200ef3a1db424dd0eeda5fbffe239e6";
+  inline constexpr std::string_view completed_closure = "87c2eb4d7a383f039436568433e2ff562ac001cc5b9aff64cf42ce4636496082";
   inline constexpr std::array<cache::shader_spec, 1u> raw_model_prepare_specs {{
     {"host_sbs_shared_ui_warp_raw_model_bench.hlsl", "prepare_raw_model_bench_main", "cs_5_0"},
   }};
-  inline constexpr std::string_view raw_model_prepare_closure = "833af0daae381ba81c6737336fc9394440270f3ee937a3916af4379af94bf519";
+  inline constexpr std::string_view raw_model_prepare_closure = "20bf88f387c4ae231f0bdc0d971423f962e4e7ba71c77da9a2f77e83c248997b";
   inline constexpr std::array<cache::shader_spec, 4u> queued_specs {{
     {"host_sbs_shared_ui_warp_queued.hlsl", "initialize_main", "cs_5_0"},
-    {"host_sbs_shared_ui_warp_queued.hlsl", "SunshineApplyUICS", "cs_5_0"},
+    {"host_sbs_shared_ui_warp_queued.hlsl", "HostBinaryPinCS", "cs_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "prepare_main", "cs_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "shared_pin_main_ps", "ps_5_0"},
   }};
-  inline constexpr std::string_view queued_closure = "ae0e7f697f2639a6d76550cc56b42d4248efcc04fe58f6884af7fb9e2586b13c";
+  inline constexpr std::string_view queued_closure = "ece4bb0d34946c8ae8fdfc66ee30e14e0e24d315f14805605034855288694bf2";
   inline constexpr std::array<cache::shader_spec, 3u> completed_diagnostic_specs {{
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_mapping_ps", "ps_5_0"},
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_coverage_ps", "ps_5_0"},
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_boundary_ps", "ps_5_0"},
   }};
-  inline constexpr std::string_view completed_diagnostic_closure = "381b918021f6ee922cd811f96569c160084ae89bed08c2b0b86add86204753bb";
+  inline constexpr std::string_view completed_diagnostic_closure = "8dba98a7055fc714cfd85b8dc9c044cefa45734b95245bc2121b2e838976c1ca";
   inline constexpr std::array<cache::shader_spec, 3u> queued_diagnostic_specs {{
     {"host_sbs_shared_ui_warp_queued.hlsl", "shared_pin_mapping_ps", "ps_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "shared_pin_coverage_ps", "ps_5_0"},
     {"host_sbs_shared_ui_warp_queued.hlsl", "shared_pin_boundary_ps", "ps_5_0"},
   }};
-  inline constexpr std::string_view queued_diagnostic_closure = "0d2f62a6af365f437e022939e56ecc5457d01e2d04c2a8cde08c8a871b6ead0d";
+  inline constexpr std::string_view queued_diagnostic_closure = "039b69af3644aa5635c15436945cb424e5b207231f9d915da2a2257bb802a2d7";
 
   inline constexpr std::string_view source_closure(bool queued) noexcept {
     return queued ? queued_closure : completed_closure;
@@ -75,7 +75,7 @@ namespace models::host_sbs_shared_ui_warp {
     {"host_sbs_text_game_ui_warp.hlsl", "text_game_verify_main", "cs_5_0"},
     {"host_sbs_text_game_ui_warp.hlsl", "text_game_columns_main", "cs_5_0"},
   }};
-  inline constexpr std::string_view text_game_closure = "717cc6dd1071f64b65f73ced5157b95f1f4ca0939201ce380e8bdf1a2ca3df1b";
+  inline constexpr std::string_view text_game_closure = "00034b29a9398722753bc1b35335e69456215aa530ad7f51b2ebb82f849c263d";
 
   struct program_t {
     ID3D11ComputeShader *initialize = nullptr, *pin = nullptr, *prepare = nullptr;
@@ -671,16 +671,14 @@ namespace models::host_sbs_shared_ui_warp {
       ID3D11ShaderResourceView *srvs[compute_srv_count] {};
       std::copy(request.draw_srvs.begin(), request.draw_srvs.end(), srvs);
       if (request.queued) srvs[10u] = request.queued_guard_transaction;
-      if (request.text_game) {
-        srvs[11u] = request.text_game_coverage;
-        auto *text_game = request.text_game_constants;
-        context->CSSetConstantBuffers(7u, 1u, &text_game);
-      }
+      if (request.text_game) srvs[11u] = request.text_game_coverage;
       auto *geometry = request.geometry_constants, *subtitle = request.subtitle_constants;
       auto *pin_geometry = geometry_.Get(), *guard = request.queued ? request.queued_guard_constants : nullptr;
       auto *sampler = request.sampler;
-      context->CSSetConstantBuffers(2u, 1u, &geometry); context->CSSetConstantBuffers(3u, 1u, &subtitle);
-      context->CSSetConstantBuffers(5u, 1u, &guard); context->CSSetConstantBuffers(6u, 1u, &pin_geometry);
+      ID3D11Buffer *draw_constants[]{geometry, subtitle};
+      ID3D11Buffer *pin_constants[]{guard, pin_geometry, request.text_game_constants};
+      context->CSSetConstantBuffers(2u, 2u, draw_constants);
+      context->CSSetConstantBuffers(5u, request.text_game ? 3u : 2u, pin_constants);
       context->CSSetSamplers(0u, 1u, &sampler);
       // Each eye's band starts from that eye's scene field, when the producer attached one to Base.
       const auto eye_field = host_sbs_eye_field::companion(request.draw_srvs[1]);
@@ -720,14 +718,25 @@ namespace models::host_sbs_shared_ui_warp {
       }
       const bool dense = request.text_game || request.materialize_inactive;
       context->CSSetShader(program.initialize, nullptr, 0u);
-      if (dense) context->Dispatch((shape_[0] + 15u) / 16u, (shape_[3] * 2u + 15u) / 16u, 1u);
-      else context->DispatchIndirect(preparation_.Get(), 0u);
+      if (dense) {
+        const auto initialize_rows = request.text_game ? 2u * shape_[3] : shape_[3];
+        context->Dispatch((shape_[0] + 15u) / 16u, (initialize_rows + 15u) / 16u, 1u);
+      } else {
+        context->DispatchIndirect(preparation_.Get(), 0u);
+      }
       ID3D11UnorderedAccessView *null_uavs[3] {}; context->CSSetUnorderedAccessViews(0u, 3u, null_uavs, nullptr);
       auto *weights = weights_.srv.Get(); context->CSSetShaderResources(12u, 1u, &weights);
+      if (!request.text_game) {
+        auto *rows = rows_.srv.Get(); context->CSSetShaderResources(14u, 1u, &rows);
+      }
       uavs[1u] = uavs[2u] = nullptr; context->CSSetUnorderedAccessViews(0u, 3u, uavs, nullptr);
       context->CSSetShader(program.pin, nullptr, 0u);
-      if (dense) context->Dispatch((shape_[3] * 2u + 7u) / 8u, 1u, 1u);
-      else context->DispatchIndirect(preparation_.Get(), 16u);
+      if (dense) {
+        const auto stacked_rows = shape_[3] * 2u;
+        context->Dispatch(request.text_game ? (stacked_rows + 7u) / 8u : stacked_rows, 1u, 1u);
+      } else {
+        context->DispatchIndirect(preparation_.Get(), 16u);
+      }
       for (std::size_t i = 0u; i < inputs_.size(); ++i) inputs_[i] = request.draw_srvs[i];
       draw_geometry_ = geometry; draw_subtitle_ = subtitle; sampler_ = sampler;
       guard_ = request.queued_guard_constants; transaction_ = request.queued_guard_transaction;

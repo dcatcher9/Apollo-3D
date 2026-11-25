@@ -44,6 +44,7 @@ namespace sunshine_game3d {
       T *operator->() const { return p; }
     };
     api::format typed(api::format f) { return api::format_to_default_typed(f, 0); }
+    constexpr shader_cache::entry_point exact_pair_tiles_shader{"SunshineUIDetectionCompactExactPairTilesCS", "cs_5_0", true};
   }
   struct renderer::impl {
     api::device *device = nullptr;
@@ -58,10 +59,11 @@ namespace sunshine_game3d {
     }
     api::pipeline_layout layout{};
     enum pass { pq, candidate, vertical, ui_tiles, ui_reduce, horizontal, eyes, pack, ui_conflict, ui_apply,
-      detection_tiles, detection_reduce, detection_mask, scene_cells, scene_compare, scene_evidence, pack_pq, vertical_live,
+      detection_tiles, detection_exact_pair_tiles, detection_reduce, detection_mask, scene_cells, scene_compare, scene_evidence, pack_pq, vertical_live,
       eye_limit, pass_count };
     std::array<api::pipeline, pass_count> pipelines{};
     std::array<api::sampler, 3> samplers{};
+    bool static_samplers = false;
     api::resource_view null_srv{}, null_uav{};
     struct texture { api::resource resource{}; api::resource_view srv{}, uav{}, rtv{}; };
     enum texture_id { source, empty_depth, linear, raw, vertical_majorant, vertical_field, field,
@@ -125,7 +127,7 @@ namespace sunshine_game3d {
       api::resource_view depth{}, ui_alpha{};
       ui_plane_parameters plane;
       ui_mask_channel channel = ui_mask_channel::alpha;
-      bool apply_ui{}, probe{}, armed{};
+      bool apply_ui{}, probe{}, armed{}, final_field_required{true};
       uint64_t depth_identity{};
     };
     conditioning_input owed;
@@ -145,6 +147,7 @@ namespace sunshine_game3d {
     // mask no detection rewrote, records neither pass. mask_epoch advances
     // whenever detect_ui dispatches the mask pass.
     bool field_memo_valid = false;
+    bool symmetric_field_ready = false;
     std::array<uint32_t, 4> field_memo_words{};
     uint64_t field_memo_view{}, field_memo_epoch{}, mask_epoch{};
     renderer::conditioning_counters conditioning_counts;
@@ -238,6 +241,9 @@ namespace sunshine_game3d {
         detection_decision_texels == ui_detection::decision_texels;
     }
     uint64_t scene_evidence_runs{};
+#ifdef SUNSHINE_GAME3D_RENDERER_TEST
+    bool compact_tiles_used = false;
+#endif
     // The constants of the last detection run, and the run this render's mask
     // came from (fresh, or held on a generated Present).
     ui_detection_snapshot detection_run, consumed_detection;
@@ -295,7 +301,7 @@ namespace sunshine_game3d {
       conditioning_owed = pack_owed = false;
       profile_open = false;
       direct_views = {};
-      memo_valid = field_memo_valid = false;
+      memo_valid = field_memo_valid = symmetric_field_ready = false;
       decision.resume_scope();
       detection_pending = detection_awaiting_signal = decision.detection_pending_actionable = false;
       detection_fence = detection_last_submit = 0;
@@ -496,21 +502,34 @@ namespace sunshine_game3d {
             isolated11.put()));
         });
       add("pipeline layout", [this] {
-        const api::pipeline_layout_param params[]{
+        constexpr api::descriptor_range sampler_range{0, 0, 0, 3, api::shader_stage::all, 1, api::descriptor_type::sampler};
+        api::pipeline_layout_param params[]{
           api::constant_range{0, 0, 0, sizeof(render_parameters) / 4, api::shader_stage::all},
-          api::descriptor_range{0, 0, 0, 3, api::shader_stage::all, 1, api::descriptor_type::sampler},
+          sampler_range,
           api::descriptor_range{0, 0, 0, 15, api::shader_stage::all, 1, api::descriptor_type::shader_resource_view},
           api::descriptor_range{0, 0, 0, 8, api::shader_stage::compute, 1, api::descriptor_type::unordered_access_view},
           api::constant_range{0, 1, 0, 4, api::shader_stage::compute},
           api::constant_range{0, 2, 0, ui_detection::b2_words, api::shader_stage::compute}};
+        if (device->get_api() == api::device_api::d3d12) {
+          const auto descriptions = describe_samplers();
+          api::descriptor_range_with_flags sampler_slot{};
+          static_cast<api::descriptor_range &>(sampler_slot) = sampler_range;
+          sampler_slot.static_samplers = descriptions.data();
+          // ReShade keeps slot 1 as a dummy when these samplers are static.
+          params[1] = sampler_slot;
+          if (device->create_pipeline_layout(uint32_t(std::size(params)), params, &layout)) {
+            static_samplers = true;
+            return true;
+          }
+          params[1] = sampler_range;
+        }
         return device->create_pipeline_layout(uint32_t(std::size(params)), params, &layout);
       });
       add("samplers", [this] {
+        if (static_samplers) return true;
+        const auto descriptions = describe_samplers();
         for (unsigned i = 0; i < samplers.size(); ++i) {
-          api::sampler_desc sampler;
-          sampler.filter = i == 1 ? api::filter_mode::min_mag_linear_mip_point : api::filter_mode::min_mag_mip_point;
-          if (i == 2) { sampler.address_u = sampler.address_v = sampler.address_w = api::texture_address_mode::border; std::memset(sampler.border_color, 0, sizeof(sampler.border_color)); }
-          if (!device->create_sampler(sampler, &samplers[i])) return false;
+          if (!device->create_sampler(descriptions[i], &samplers[i])) return false;
         }
         return true;
       });
@@ -617,10 +636,23 @@ namespace sunshine_game3d {
         const auto ui = ui_parameter_words(source_alpha_ui, consumed_plane, consumed_channel);
         cmd->push_constants(stage, layout, 4, 0, uint32_t(ui.size()), ui.data());
       }
-      cmd->push_descriptors(stage, layout, 1, {{}, 0, 0, uint32_t(samplers.size()), api::descriptor_type::sampler, samplers.data()});
+      if (!static_samplers)
+        cmd->push_descriptors(stage, layout, 1, {{}, 0, 0, uint32_t(samplers.size()), api::descriptor_type::sampler, samplers.data()});
       cmd->push_descriptors(stage, layout, 2, {{}, 0, 0, uint32_t(srvs.size()), api::descriptor_type::shader_resource_view, srvs.data()});
       if (stage == api::shader_stage::compute)
         cmd->push_descriptors(stage, layout, 3, {{}, 0, 0, uint32_t(uavs.size()), api::descriptor_type::unordered_access_view, uavs.data()});
+    }
+    static std::array<api::sampler_desc, 3> describe_samplers() {
+      std::array<api::sampler_desc, 3> descriptions{};
+      for (unsigned i = 0; i < descriptions.size(); ++i) {
+        auto &sampler = descriptions[i];
+        sampler.filter = i == 1 ? api::filter_mode::min_mag_linear_mip_point : api::filter_mode::min_mag_mip_point;
+        if (i == 2) {
+          sampler.address_u = sampler.address_v = sampler.address_w = api::texture_address_mode::border;
+          std::memset(sampler.border_color, 0, sizeof(sampler.border_color));
+        }
+      }
+      return descriptions;
     }
     api::format packed_format() const {
       return color == 1 || pq_output ? api::format::r10g10b10a2_unorm : api::format::r16g16b16a16_float;
@@ -780,6 +812,7 @@ namespace sunshine_game3d {
       mark(cmd, mark_owed);
       // An adaptive probe reads the unpinned field and a dump every texture.
       if (owed_pack && mono_skip_supported && !c.probe && !c.armed && shows_mono(c.p)) {
+        symmetric_field_ready = false;
         ++conditioning_counts.mono;
         mark(cmd, mark_conditioning);
         return;
@@ -834,18 +867,24 @@ namespace sunshine_game3d {
         // mask keeps the final field too: both passes read nothing else, and
         // nothing else writes it (a probe reads it in between, and a dump or
         // the nearest-UI plane needs this render's passes).
-        const bool keep_field = reuse && field_memo_valid && !c.probe && !nearest_ui_rendered &&
+        // The packed eyes only need their own fields. Keep the symmetric
+        // field for legacy, diagnostic, and explicit render callers.
+        const bool eye_only = owed_pack && eye_limiter_supported && !c.final_field_required && !c.armed && !c.probe;
+        const bool keep_field = reuse && field_memo_valid && (eye_only || symmetric_field_ready) && !c.probe && !nearest_ui_rendered &&
           ui_words == field_memo_words && (!c.apply_ui || (c.ui_alpha.handle == t[detected_mask].srv.handle &&
             c.ui_alpha.handle == field_memo_view && mask_epoch == field_memo_epoch));
         if (keep_field) ++conditioning_counts.field_memo;
         else {
           const bool pin_apart = limiter_lines || c.probe;
-          if (pin_apart) source_alpha_ui = false;
-          dispatch(cmd, horizontal, (height + group_lines - 1) / group_lines, 1, p, field_inputs, {field});
-          source_alpha_ui = c.apply_ui;
+          if (!eye_only) {
+            if (pin_apart) source_alpha_ui = false;
+            dispatch(cmd, horizontal, (height + group_lines - 1) / group_lines, 1, p, field_inputs, {field});
+            source_alpha_ui = c.apply_ui;
+          }
+          symmetric_field_ready = !eye_only;
           if (c.probe) submit_adaptive_probe(cmd, c.ui_alpha, p);
           const uint32_t pin_groups = std::max(pin_lines, 1u);
-          if (pin_apart && c.apply_ui)
+          if (!eye_only && pin_apart && c.apply_ui)
             dispatch(cmd, ui_apply, (height + pin_groups - 1) / pin_groups, 1, p, field_inputs, {field});
           if (eye_limiter_supported) {
             // One field per eye from the same vertical field, then the same UI
@@ -902,6 +941,14 @@ namespace sunshine_game3d {
       cmd->bind_render_targets_and_depth_stencil(0, nullptr);
       for (auto target : targets) cmd->barrier(textures[target].resource, api::resource_usage::render_target, api::resource_usage::shader_resource);
     }
+    void unbind_compute_uavs11(api::command_list *cmd) {
+      // D3D11 must unbind outputs before binding them as SRVs. D3D12
+      // transitions handle this and every dispatch pushes a complete table.
+      if (!context11.p) return;
+      const std::array<api::resource_view, 8> uavs{};
+      cmd->push_descriptors(api::shader_stage::compute, layout, 3,
+        {{}, 0, 0, uint32_t(uavs.size()), api::descriptor_type::unordered_access_view, uavs.data()});
+    }
     void dispatch(api::command_list *cmd, pass id, uint32_t x, uint32_t y,
         const render_parameters &p, const std::array<api::resource_view, 15> &srvs, std::initializer_list<texture_id> targets) {
       std::array<api::resource_view, 8> uavs{};
@@ -912,8 +959,7 @@ namespace sunshine_game3d {
       cmd->bind_pipeline(api::pipeline_stage::compute_shader, pipelines[id]);
       bindings(cmd, api::shader_stage::compute, p, srvs, uavs);
       cmd->dispatch(x, y, 1);
-      uavs.fill(null_uav);
-      cmd->push_descriptors(api::shader_stage::compute, layout, 3, {{}, 0, 0, uint32_t(uavs.size()), api::descriptor_type::unordered_access_view, uavs.data()});
+      unbind_compute_uavs11(cmd);
       for (auto target : targets) cmd->barrier(textures[target].resource, api::resource_usage::unordered_access, api::resource_usage::shader_resource);
     }
     // A compute pass whose one output takes another texture's UAV slot.
@@ -925,8 +971,7 @@ namespace sunshine_game3d {
       cmd->bind_pipeline(api::pipeline_stage::compute_shader, pipelines[id]);
       bindings(cmd, api::shader_stage::compute, p, srvs, uavs);
       cmd->dispatch(x, 1, 1);
-      uavs.fill(null_uav);
-      cmd->push_descriptors(api::shader_stage::compute, layout, 3, {{}, 0, 0, uint32_t(uavs.size()), api::descriptor_type::unordered_access_view, uavs.data()});
+      unbind_compute_uavs11(cmd);
       cmd->barrier(textures[target].resource, api::resource_usage::unordered_access, api::resource_usage::shader_resource);
     }
     bool prepare_detection() {
@@ -969,6 +1014,19 @@ namespace sunshine_game3d {
             D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(detection_readback12.put())))) return false;
       }
       if (counter_words && !prepare_counters()) counter_words = 0;
+      if (fits() && source_override.empty()) {
+        // A failed optimization must not make automatic detection unavailable
+        // or trigger compilation on the Present thread after precompiling.
+        if (!precompiled) compute_pipeline(detection_exact_pair_tiles, exact_pair_tiles_shader.name);
+        else {
+          const auto code = shader_cache::find({shader_source(), width, height, color}, exact_pair_tiles_shader);
+          if (!code.empty()) {
+            api::shader_desc shader{code.data(), code.size()};
+            const api::pipeline_subobject part{api::pipeline_subobject_type::compute_shader, 1, &shader};
+            device->create_pipeline(layout, 1, &part, &pipelines[detection_exact_pair_tiles]);
+          }
+        }
+      }
       detection_ready = true;
       return true;
     }
@@ -1139,16 +1197,22 @@ namespace sunshine_game3d {
         static_assert(sizeof(values) == ui_detection::b2_words * sizeof(uint32_t));
         cmd->push_constants(api::shader_stage::compute, layout, 5, 0, ui_detection::b2_words, &values);
         cmd->dispatch(x, y, z);
-        uavs.fill(null_uav);
-        cmd->push_descriptors(api::shader_stage::compute, layout, 3,
-          {{}, 0, 0, uint32_t(uavs.size()), api::descriptor_type::unordered_access_view, uavs.data()});
+        unbind_compute_uavs11(cmd);
         cmd->barrier(t.resource, api::resource_usage::unordered_access, api::resource_usage::shader_resource);
         if (count) cmd->barrier(counter_texture.resource, api::resource_usage::unordered_access, api::resource_usage::shader_resource);
         if (reduce) cmd->barrier(hold_texture.resource, api::resource_usage::unordered_access, api::resource_usage::shader_resource);
       };
       // Each statistics tile in its parts (group z), which the reduce adds.
-      if (bits) dispatch_stage(detection_tiles, detection_statistics, 6, 16, 16, false, false,
-        std::max(detection_tile_parts, 1u));
+      constexpr uint32_t exact_pair_offer = ui_detection::candidate::backbuffer |
+        ui_detection::candidate::hudless | ui_detection::candidate::exact;
+      const bool compact = detection_run.candidates == exact_pair_offer &&
+        !(detection_run.flags & ui_detection::per_frame_sample) &&
+        views[0].handle && views[0].handle == views[13].handle && pipelines[detection_exact_pair_tiles].handle;
+#ifdef SUNSHINE_GAME3D_RENDERER_TEST
+      compact_tiles_used = compact;
+#endif
+      if (bits) dispatch_stage(compact ? detection_exact_pair_tiles : detection_tiles, detection_statistics, 6,
+        16, 16, false, false, std::max(detection_tile_parts, 1u));
       views[10] = textures[detection_statistics].srv;
       dispatch_stage(detection_reduce, detection_decision, 6, 1, 1, true, true);
       views[10] = textures[detection_decision].srv;
@@ -1400,13 +1464,13 @@ namespace sunshine_game3d {
       cmd->bind_pipeline(api::pipeline_stage::compute_shader, pipelines[ui_conflict]);
       bindings(cmd, api::shader_stage::compute, p, {selected, {}, {}, {}, {}, textures[field].srv}, uavs);
       cmd->dispatch(16, 16, 1);
-      uavs.fill(null_uav);
-      cmd->push_descriptors(api::shader_stage::compute, layout, 3,
-        {{}, 0, 0, uint32_t(uavs.size()), api::descriptor_type::unordered_access_view, uavs.data()});
-      // Unbind the pre-UI field SRV before the following UI application writes it.
-      std::array<api::resource_view, 15> srvs{}; srvs.fill(null_srv);
-      cmd->push_descriptors(api::shader_stage::compute, layout, 2,
-        {{}, 0, 0, uint32_t(srvs.size()), api::descriptor_type::shader_resource_view, srvs.data()});
+      unbind_compute_uavs11(cmd);
+      if (context11.p) {
+        // Unbind the pre-UI field SRV before the following UI application writes it.
+        const std::array<api::resource_view, 15> srvs{};
+        cmd->push_descriptors(api::shader_stage::compute, layout, 2,
+          {{}, 0, 0, uint32_t(srvs.size()), api::descriptor_type::shader_resource_view, srvs.data()});
+      }
       cmd->barrier(t.resource, api::resource_usage::unordered_access, api::resource_usage::copy_source);
       if (context11.p) {
         context11->CopyResource(adaptive_readback11.p, reinterpret_cast<ID3D11Resource *>(t.resource.handle));
@@ -1629,6 +1693,7 @@ namespace sunshine_game3d {
     return d.detection_attempted && d.detection_ready && d.adaptive_probe_attempted && d.adaptive_probe_ready &&
       (!pq || d.textures[impl::packed_pq].resource.handle);
   }
+  bool renderer::last_detection_used_compact_tiles() const { return data_ && data_->compact_tiles_used; }
 #endif
   std::string_view renderer::shader_source() { return {game3d_shader_source, sizeof(game3d_shader_source) - 1}; }
   std::string_view renderer::active_shader_source() const { return data_ ? data_->shader_source() : shader_source(); }
@@ -1654,9 +1719,11 @@ namespace sunshine_game3d {
       if (has("#define SUNSHINE_UI_ABSOLUTE_LEVEL_PROBE 1")) entries.push_back({"SunshineUIConflictCS", "cs_5_0"});
       if (has("#define SUNSHINE_UI_NEAREST_PLANE 1"))
         entries.insert(entries.end(), {{"SunshineUINearestTilesCS", "cs_5_0"}, {"SunshineUINearestReduceCS", "cs_5_0"}});
-      if (has("#define SUNSHINE_UI_AUTOMATIC_DETECTION 1"))
+      if (has("#define SUNSHINE_UI_AUTOMATIC_DETECTION 1")) {
         entries.insert(entries.end(), {{"SunshineUIDetectionTilesCS", "cs_5_0"}, {"SunshineUIDetectionReduceCS", "cs_5_0"},
           {"SunshineUIDetectionMaskCS", "cs_5_0"}});
+        if (has("void SunshineUIDetectionCompactExactPairTilesCS(")) entries.push_back(exact_pair_tiles_shader);
+      }
       if (has("#define SUNSHINE_UI_AUTOMATIC_DETECTION 1") &&
           shader_marker(source, ui_detection::scene_evidence_images_marker) == ui_detection::max_scene_evidence_images)
         entries.insert(entries.end(), {{"SunshineSceneCellsCS", "cs_5_0"}, {"SunshineSceneCompareCS", "cs_5_0"},
@@ -2077,6 +2144,7 @@ namespace sunshine_game3d {
     conditioning.apply_ui = d.source_alpha_ui;
     conditioning.probe = probe_ui;
     conditioning.armed = input.diagnostic_armed;
+    conditioning.final_field_required = input.final_field_required;
     conditioning.depth_identity = input.depth_identity;
     // A probe frame reads the unpinned field now, an older two-pass shader
     // renders its eyes now, and an immediate pack follows at once.
@@ -2256,7 +2324,8 @@ namespace sunshine_game3d {
     const auto &t = data_->textures;
     diagnostic_resources result{t[impl::source].resource, t[impl::linear].resource, t[impl::raw].resource,
       t[impl::vertical_majorant].resource, t[impl::vertical_field].resource,
-      t[impl::field].resource, t[data_->packed_texture()].resource, data_->consumed_ui_source,
+      data_->symmetric_field_ready ? t[impl::field].resource : api::resource{},
+      t[data_->packed_texture()].resource, data_->consumed_ui_source,
       data_->nearest_ui_rendered ? t[impl::ui_plane_tiles].resource : api::resource{},
       data_->nearest_ui_rendered ? t[impl::ui_plane_resolved].resource : api::resource{}};
     result.sbs_pq = data_->pq_output;

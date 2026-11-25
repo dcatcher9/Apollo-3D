@@ -543,6 +543,66 @@ void SunshineUIDetectionTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_Grou
         SunshineAlphaCoverageStore[column + uint2(0,SUNSHINE_UI_PRE_UI_ROW)] = 0u;
     }
 }
+#if BUFFER_WIDTH <= 3840 && BUFFER_HEIGHT <= 3840
+groupshared uint4 SunshineUIExactTileCounts[256];
+
+// The renderer proved that t0 and t13 are the same view, the exact HUD-less
+// pair and its Backbuffer alpha are the only offers, and this is no sample.
+[numthreads(32, 8, 1)]
+void SunshineUIDetectionCompactExactPairTilesCS(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID,
+    uint lane : SV_GroupIndex)
+{
+    const uint2 first = group.xy * uint2(BUFFER_WIDTH, BUFFER_HEIGHT) / 16u;
+    const uint2 last = (group.xy + 1u) * uint2(BUFFER_WIDTH, BUFFER_HEIGHT) / 16u;
+    const uint tileHeight = last.y - first.y;
+    const uint period = 16u * SUNSHINE_UI_DETECTION_TILE_PARTS;
+    const uint offset = 16u * group.z;
+    const uint rows = tileHeight / period * 16u + uint(clamp(int(tileHeight % period) - int(offset), 0, 16));
+    // A whole tile is at most 240 * 240 pixels, so two 16-bit counts sum in
+    // one word without carrying between them, including during reduction.
+    uint4 counts = 0u;
+    [loop] for (uint row = thread.y; row < rows; row += 8u) {
+        const uint y = first.y + offset + row / 16u * period + row % 16u;
+        [loop] for (uint x = first.x + thread.x; x < last.x; x += 32u) {
+            const int3 at = int3(x, y, 0);
+            const float4 pair = SunshineUIBackbufferAlpha.Load(at);
+            const float3 hudless = SunshineHUDless.Load(at).rgb;
+            bool finite;
+            const float delta = SunshineHUDlessDifferenceOf(pair.rgb, hudless, finite);
+            const bool validHigh = isfinite(pair.a) && pair.a <= 1.0;
+            const bool alphaOkay = validHigh && pair.a >= 0.0;
+            const bool unchanged = finite && delta <= Sunshine_UIDifferenceThreshold * .5;
+            const bool lit = finite && max(max(abs(hudless.r), abs(hudless.g)), abs(hudless.b)) >
+                Sunshine_UIDifferenceThreshold * 8.0;
+            counts += uint4(uint(validHigh && pair.a > 0.0) | (uint(!alphaOkay) << 16u),
+                uint(finite && delta > Sunshine_UIDifferenceThreshold) | (uint(!finite) << 16u),
+                uint(unchanged) | (uint(lit) << 16u),
+                uint(alphaOkay && pair.a >= 254.0 / 255.0) | 0x10000u);
+        }
+    }
+    SunshineUIExactTileCounts[lane] = counts;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll] for (uint step = 128u; step; step >>= 1u) {
+        if (lane < step) SunshineUIExactTileCounts[lane] += SunshineUIExactTileCounts[lane + step];
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (!lane) {
+        const uint2 column = uint2(group.x + 16u * group.z, group.y);
+        const uint4 tally = SunshineUIExactTileCounts[0];
+        const uint4 low = tally & 0xffffu, high = tally >> 16u;
+        SunshineAlphaCoverageStore[column] = uint4(0u, 0u, low.x, 0u);
+        SunshineAlphaCoverageStore[column + uint2(0u,16u)] = uint4(0u, 0u, high.x, 0u);
+        SunshineAlphaCoverageStore[column + uint2(0u,32u)] = uint4(low.y, high.y, low.z, high.w);
+        SunshineAlphaCoverageStore[column + uint2(0u,48u)] = uint4(high.z, 0u, 0u, low.w);
+        SunshineAlphaCoverageStore[column + uint2(0u,64u)] = 0u;
+        SunshineAlphaCoverageStore[column + uint2(0u,SUNSHINE_UI_LAYER_BOUND_ROW)] = 0u;
+        SunshineAlphaCoverageStore[column + uint2(0u,SUNSHINE_UI_JUDGMENT_ROW)] = 0u;
+        SunshineAlphaCoverageStore[column + uint2(0u,SUNSHINE_UI_JUDGMENT_ROW + 16u)] = 0u;
+        SunshineAlphaCoverageStore[column + uint2(0u,SUNSHINE_UI_PRE_UI_ROW)] = 0u;
+    }
+}
+#endif
+
 // One tile's counts in a statistics row: the sum of its parts (a statistics
 // texture only 16 columns wide reads zero beyond them).
 uint4 SunshineUIDetectionTileCounts(uint2 tile, uint row)
@@ -1835,8 +1895,8 @@ uint SunshineUIPinStoreRows() {
 // unmasked background. A bound is kept as an anchor texel a and a slack r and
 // evaluated in closed form, r + 0.5*|x - a|/W, so a binary mask reproduces the
 // distance rule 0.5*max(d - 1, 0)/W exactly.
-// Each group owns eight adjacent rows split into eight chunks; no row is held
-// in group memory. Per chunk: the anchor and slack reaching furthest right and
+// Each group owns eight adjacent rows split into eight chunks. Per chunk:
+// the anchor and slack reaching furthest right and
 // left, then the incoming {left, right} anchors and slacks; slack -1 is none.
 groupshared int2 SunshineUIPinAnchors[8u][8u];
 groupshared float2 SunshineUIPinSlack[8u][8u];
@@ -1851,6 +1911,12 @@ groupshared float2 SunshineUIPinCarrySlack[8u][8u];
 // the scans but move the carries' float comparisons, so the field would not
 // stay bit-identical.
 #define SUNSHINE_UI_PIN_BLOCK 16u
+#define SUNSHINE_UI_PIN_WORDS 32u
+// Each word holds one block of hard pixels. A word-presence mask fits in a
+// single uint per chunk for widths up to 4096, including ragged chunks.
+groupshared uint SunshineUIPinHardWords[SUNSHINE_UI_PIN_WORDS][8u][8u];
+groupshared uint SunshineUIPinSoftChunks[8u][8u];
+groupshared uint SunshineUIPinSoftRows[8u];
 #ifndef SUNSHINE_UI_PIN_FIELD_ROWS
 #define SUNSHINE_UI_PIN_FIELD_ROWS BUFFER_HEIGHT
 #endif
@@ -1885,6 +1951,48 @@ float SunshineUIPinSlackOf(float value, float weight, float plane) {
     return weight > 0.0 ? (1.0 - weight) * abs(value - plane) : -1.0;
 }
 
+void SunshineUIPinOffer(uint first, uint last, float r, uint start, uint end,
+        inout int2 anchors, inout float2 slack, inout float2 reach) {
+    float right = SunshineUIPinBound(r, end - 1u - last);
+    if (slack.x < 0.0 || right <= reach.x) { anchors.x = (int)last + 1; slack.x = r; reach.x = right; }
+    float left = SunshineUIPinBound(r, first - start);
+    if (slack.y < 0.0 || left < reach.y) { anchors.y = (int)first - 1; slack.y = r; reach.y = left; }
+}
+
+// All anchors on this row have zero slack. The nearest covered texel sets
+// both bounds, so fold the two sweeps into one clamp with the original ramp.
+void SunshineUIPinHardChunk(uint start, uint end, uint y, uint lane, uint row,
+        uint present, int2 carry, float2 carry_slack, float plane) {
+    int previous = carry_slack.x >= 0.0 ? carry.x - 1 : -int(BUFFER_WIDTH);
+    int right_carry = carry_slack.y >= 0.0 ? carry.y + 1 : 2 * int(BUFFER_WIDTH);
+    [loop]
+    for (uint base = start, word = 0u; base < end; base += SUNSHINE_UI_PIN_BLOCK, ++word) {
+        uint bits = SunshineUIPinHardWords[word][lane][row];
+        uint later = present & (~1u << word);
+        int following = right_carry;
+        if (later != 0u) {
+            uint next_word = (uint)firstbitlow(later);
+            following = int(start + next_word * SUNSHINE_UI_PIN_BLOCK) + firstbitlow(SunshineUIPinHardWords[next_word][lane][row]);
+        }
+        uint count = min(SUNSHINE_UI_PIN_BLOCK, end - base);
+        [unroll]
+        for (uint i = 0u; i < SUNSHINE_UI_PIN_BLOCK; ++i) {
+            if (i >= count) break;
+            int x = int(base + i);
+            uint at_or_left = bits & ((2u << i) - 1u);
+            uint at_or_right = bits >> i;
+            int left = at_or_left != 0u ? int(base) + firstbithigh(at_or_left) : previous;
+            int right = at_or_right != 0u ? x + firstbitlow(at_or_right) : following;
+            uint distance = (uint)max(min(x - left, right - x) - 1, 0);
+            int2 position = int2(x, y);
+            float value = SunshineHostFinalStore[position];
+            float pinned = SunshineUIPinClamp(value, plane, 0.0, distance);
+            if (asuint(pinned) != asuint(value)) SunshineHostFinalStore[position] = pinned;
+        }
+        if (bits != 0u) previous = int(base) + firstbithigh(bits);
+    }
+}
+
 // UI pinning runs after the scene field is complete. A probe frame observes
 // the unpinned field first, so it never measures its own pinned field.
 [numthreads(8, 8, 1)]
@@ -1904,14 +2012,47 @@ void SunshineApplyUICS(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupTh
     // where the next chunk starts and where the previous one ends.
     int2 anchors = int2(0, 0);
     float2 slack = float2(-1.0, -1.0), reach = float2(0.0, 0.0);
+#ifdef SUNSHINE_UI_PIN_SOFT_ONLY
+    const bool hard_words_fit = false;
+#else
+    const bool hard_words_fit = BUFFER_WIDTH <= 8u * SUNSHINE_UI_PIN_WORDS * SUNSHINE_UI_PIN_BLOCK;
+#endif
+    uint present = 0u;
+    bool soft_chunk = !hard_words_fit;
     if (active) {
         [loop]
-        for (uint block = chunk_start; block < chunk_end; block += SUNSHINE_UI_PIN_BLOCK) {
+        for (uint block = chunk_start, word = 0u; block < chunk_end; block += SUNSHINE_UI_PIN_BLOCK, ++word) {
             float weights[SUNSHINE_UI_PIN_BLOCK], values[SUNSHINE_UI_PIN_BLOCK];
+            uint bits = 0u;
+            bool soft_block = false;
             [unroll] for (uint i = 0u; i < SUNSHINE_UI_PIN_BLOCK; ++i) {
-                const uint at = min(block + i, chunk_end - 1u);
-                weights[i] = SunshineUIPinWeight(at, mask_y);
-                values[i] = SunshineHostFinalStore[int2(uint2(at, y))];
+                const uint x = block + i;
+                const uint at = min(x, chunk_end - 1u);
+                float weight = SunshineUIPinWeight(at, mask_y);
+                weights[i] = weight;
+                if (!hard_words_fit) values[i] = SunshineHostFinalStore[int2(uint2(at, y))];
+                if (!soft_chunk && x < chunk_end) {
+                    bits |= weight >= 1.0 ? 1u << i : 0u;
+                    soft_block = soft_block || (weight > 0.0 && weight < 1.0);
+                }
+            }
+            if (!soft_chunk && !soft_block) {
+                SunshineUIPinHardWords[word][lane][row] = bits;
+                if (bits != 0u) {
+                    present |= 1u << word;
+                    SunshineUIPinOffer(block + firstbitlow(bits), block + firstbithigh(bits), 0.0,
+                        chunk_start, chunk_end, anchors, slack, reach);
+                }
+                continue;
+            }
+            soft_chunk = true;
+            // Where packing is enabled, delay field reads until a soft weight
+            // needs them. Otherwise retain the interleaved setup loads.
+            if (hard_words_fit) {
+                [unroll] for (uint sample_index = 0u; sample_index < SUNSHINE_UI_PIN_BLOCK; ++sample_index) {
+                    const uint at = min(block + sample_index, chunk_end - 1u);
+                    values[sample_index] = SunshineHostFinalStore[int2(uint2(at, y))];
+                }
             }
             [unroll] for (uint j = 0u; j < SUNSHINE_UI_PIN_BLOCK; ++j) {
                 const uint x = block + j;
@@ -1919,23 +2060,23 @@ void SunshineApplyUICS(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupTh
                 if (x >= chunk_end || weight <= 0.0) continue;
                 // Fully weighted UI has no slack whatever the field.
                 float r = weight >= 1.0 ? 0.0 : SunshineUIPinSlackOf(values[j], weight, plane);
-                float right = SunshineUIPinBound(r, chunk_end - 1u - x);
-                if (slack.x < 0.0 || right <= reach.x) { anchors.x = (int)x + 1; slack.x = r; reach.x = right; }
-                float left = SunshineUIPinBound(r, x - chunk_start);
-                if (slack.y < 0.0 || left < reach.y) { anchors.y = (int)x - 1; slack.y = r; reach.y = left; }
+                SunshineUIPinOffer(x, x, r, chunk_start, chunk_end, anchors, slack, reach);
             }
         }
     }
     SunshineUIPinAnchors[lane][row] = anchors;
     SunshineUIPinSlack[lane][row] = slack;
+    if (hard_words_fit) SunshineUIPinSoftChunks[lane][row] = soft_chunk ? 1u : 0u;
     GroupMemoryBarrierWithGroupSync();
     if (lane == 0u) {
         // Each chunk's left carry is the best rightward anchor of the chunks
         // before it, compared where it starts; ties keep the nearer anchor.
         int anchor = 0;
         float best = -1.0;
+        uint soft_row = 0u;
         [unroll]
         for (uint chunk = 0u; chunk < 8u; ++chunk) {
+            if (hard_words_fit) soft_row |= SunshineUIPinSoftChunks[chunk][row];
             SunshineUIPinCarryAnchors[chunk][row].x = anchor;
             SunshineUIPinCarrySlack[chunk][row].x = best;
             int next = (int)((chunk + 1u) * BUFFER_WIDTH / 8u);
@@ -1946,16 +2087,17 @@ void SunshineApplyUICS(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupTh
                 anchor = offered_anchor; best = offered;
             }
         }
+        if (hard_words_fit) SunshineUIPinSoftRows[row] = soft_row;
         // The right carry: the best leftward anchor of the chunks after it,
         // compared at its last texel.
         anchor = 0; best = -1.0;
         [unroll]
-        for (int chunk = 7; chunk >= 0; --chunk) {
-            SunshineUIPinCarryAnchors[(uint)chunk][row].y = anchor;
-            SunshineUIPinCarrySlack[(uint)chunk][row].y = best;
-            int previous = (int)((uint)chunk * BUFFER_WIDTH / 8u) - 1;
-            int offered_anchor = SunshineUIPinAnchors[(uint)chunk][row].y;
-            float offered = SunshineUIPinSlack[(uint)chunk][row].y;
+        for (int reverse_chunk = 7; reverse_chunk >= 0; --reverse_chunk) {
+            SunshineUIPinCarryAnchors[(uint)reverse_chunk][row].y = anchor;
+            SunshineUIPinCarrySlack[(uint)reverse_chunk][row].y = best;
+            int previous = (int)((uint)reverse_chunk * BUFFER_WIDTH / 8u) - 1;
+            int offered_anchor = SunshineUIPinAnchors[(uint)reverse_chunk][row].y;
+            float offered = SunshineUIPinSlack[(uint)reverse_chunk][row].y;
             if (offered >= 0.0 && (best < 0.0 ||
                     SunshineUIPinBound(offered, (uint)(offered_anchor - previous)) <= SunshineUIPinBound(best, (uint)(anchor - previous)))) {
                 anchor = offered_anchor; best = offered;
@@ -1971,6 +2113,16 @@ void SunshineApplyUICS(uint3 group_id : SV_GroupID, uint3 thread_id : SV_GroupTh
     // arithmetic precise, and the clamps below must stay the multiply-adds of
     // the binary distance rule.
     plane = SunshineUIPlaneParallax();
+    // Keep the sweeps and the hard clamp from diverging within a group.
+    if (hard_words_fit) {
+        uint soft_group = 0u;
+        [unroll] for (uint group_row = 0u; group_row < 8u; ++group_row)
+            soft_group |= SunshineUIPinSoftRows[group_row];
+        if (soft_group == 0u) {
+            SunshineUIPinHardChunk(chunk_start, chunk_end, y, lane, row, present, carry_anchor, carry_slack, plane);
+            return;
+        }
+    }
 
     // Backward: bound each texel by the best anchor at or right of it. In the
     // chunk a texel's collar slack is the least slack of itself and its
@@ -2209,53 +2361,140 @@ void SunshineHostHorizontalCS(
 // value has been extended by one texel so the silhouette's own colour
 // transition stays with the foreground; on the uncovered side it keeps the
 // scene field's slope. Both are below one, so each eye map keeps a unique
-// contractive inverse. One thread owns one row of both halves of the store
-// bound at u3: it writes the forward envelopes and completes them in place.
+// contractive inverse.
 //   left eye  (eyeSign -1), rows [0, H):   max(forward steep, backward gentle)
 //   right eye (eyeSign +1), rows [H, 2H):  max(forward gentle, backward steep)
+// Threads build local envelopes in short row chunks, then apply the envelopes
+// entering from their neighbors. The forward checkpoint at each block lets
+// the backward sweep finish the local output without storing a forward field.
 static const float SunshineEyeCoveredSlope = 0.9;
+static const uint SunshineEyeRows = 8u;
+static const uint SunshineEyeChunks = 32u;
+static const uint SunshineEyeBlock = 16u;
+static const uint SunshineEyeMaxBlocks = 8u; // Up to 3840 pixels wide.
+static const float SunshineEyeNoCarry = -2.0f; // Below any sanitized input.
+groupshared float2 SunshineEyeForwardEnds[SunshineEyeChunks][SunshineEyeRows];
+groupshared float2 SunshineEyeBackwardBegins[SunshineEyeChunks][SunshineEyeRows];
+
 float SunshineEyeLimitInput(uint x, uint y) {
     float value = SunshineHostVerticalConditionedSampler.Load(int3(int2(uint2(x, y)), 0));
     return SunshineCameraFinite(value) ? clamp(value, -SunshineHostContainer, SunshineHostContainer) : 0.0;
 }
-[numthreads(8u, 1u, 1)]
+
+// Only the steep envelope carries the previous input one more texel.
+float2 SunshineEyeAdvance(float2 envelope, float value, float previous, float2 step) {
+    return max(float2(value, max(value, previous)), envelope - step);
+}
+
+[numthreads(SunshineEyeRows, SunshineEyeChunks, 1)]
 void SunshineHostEyeLimitCS(
     uint3 group_id : SV_GroupID,
     uint3 group_thread_id : SV_GroupThreadID) {
-    uint y = group_id.x * 8u + group_thread_id.x;
-    if (y >= BUFFER_HEIGHT) return;
-    float hole_step = 0.5 / float(BUFFER_WIDTH);
-    float covered_step = SunshineEyeCoveredSlope / float(BUFFER_WIDTH);
-    uint left_y = y, right_y = y + BUFFER_HEIGHT;
+    const uint row_in_group = group_thread_id.x, chunk = group_thread_id.y;
+    const uint y = group_id.x * SunshineEyeRows + row_in_group;
+    const uint chunk_cells = (BUFFER_WIDTH + SunshineEyeChunks - 1u) / SunshineEyeChunks;
+    const uint begin = min(chunk * chunk_cells, (uint)BUFFER_WIDTH);
+    const uint end = min(begin + chunk_cells, (uint)BUFFER_WIDTH);
+    const uint blocks = (end - begin + SunshineEyeBlock - 1u) / SunshineEyeBlock;
+    const bool active = y < BUFFER_HEIGHT && begin < end && blocks <= SunshineEyeMaxBlocks;
+    const float2 step = float2(0.5f, SunshineEyeCoveredSlope) / float(BUFFER_WIDTH);
+    const uint left_y = y, right_y = y + BUFFER_HEIGHT;
+    float2 forward = SunshineEyeNoCarry, backward = SunshineEyeNoCarry;
 
-    float previous = SunshineEyeLimitInput(0u, y);
-    float gentle = previous, steep = previous;
-    SunshineHostFinalStore[int2(uint2(0u, left_y))] = steep;
-    SunshineHostFinalStore[int2(uint2(0u, right_y))] = gentle;
-    [loop]
-    for (uint forward_x = 1u; forward_x < BUFFER_WIDTH; ++forward_x) {
-        float value = SunshineEyeLimitInput(forward_x, y);
-        gentle = max(value, gentle - hole_step);
-        steep = max(max(value, previous), steep - covered_step);
-        SunshineHostFinalStore[int2(uint2(forward_x, left_y))] = steep;
-        SunshineHostFinalStore[int2(uint2(forward_x, right_y))] = gentle;
-        previous = value;
-    }
-    AllMemoryBarrier();
-    previous = SunshineEyeLimitInput(BUFFER_WIDTH - 1u, y);
-    gentle = previous; steep = previous;
-    [loop]
-    for (int backward_x = (int)BUFFER_WIDTH - 1; backward_x >= 0; --backward_x) {
-        uint x = (uint)backward_x;
-        if (x + 1u < BUFFER_WIDTH) {
-            float value = SunshineEyeLimitInput(x, y);
-            gentle = max(value, gentle - hole_step);
-            steep = max(max(value, previous), steep - covered_step);
-            previous = value;
+    if (active) {
+        float2 checkpoint[SunshineEyeMaxBlocks];
+        float previous = SunshineEyeLimitInput(max(begin, 1u) - 1u, y);
+        [loop] for (uint block = 0u; block < blocks; ++block) {
+            checkpoint[block] = forward;
+            const uint start = begin + block * SunshineEyeBlock;
+            [unroll] for (uint i = 0u; i < SunshineEyeBlock; ++i) {
+                const uint x = start + i;
+                if (x < end) {
+                    const float value = SunshineEyeLimitInput(x, y);
+                    forward = SunshineEyeAdvance(forward, value, previous, step);
+                    previous = value;
+                }
+            }
         }
-        int2 left_position = int2(uint2(x, left_y)), right_position = int2(uint2(x, right_y));
-        SunshineHostFinalStore[left_position] = SunshineBoundFinalParallax(max(SunshineHostFinalStore[left_position], gentle));
-        SunshineHostFinalStore[right_position] = SunshineBoundFinalParallax(max(SunshineHostFinalStore[right_position], steep));
+
+        // The covered neighbor at a chunk boundary is still part of this
+        // sweep's local input. The carries below transport the longer ramps.
+        float next = SunshineEyeLimitInput(min(end, (uint)BUFFER_WIDTH - 1u), y);
+        [loop] for (uint remaining = blocks; remaining > 0u; --remaining) {
+            const uint block = remaining - 1u;
+            const uint start = begin + block * SunshineEyeBlock;
+            const uint count = min(SunshineEyeBlock, end - start);
+            float3 rebuilt[SunshineEyeBlock];
+            float2 state = checkpoint[block];
+            previous = SunshineEyeLimitInput(max(start, 1u) - 1u, y);
+            [loop] for (uint i = 0u; i < count; ++i) {
+                const uint x = start + i;
+                const float value = SunshineEyeLimitInput(x, y);
+                state = SunshineEyeAdvance(state, value, previous, step);
+                previous = value;
+                rebuilt[i] = float3(value, state);
+            }
+            [loop] for (uint countdown = count; countdown > 0u; --countdown) {
+                const uint i = countdown - 1u;
+                const uint x = start + i;
+                const float3 sample = rebuilt[i];
+                backward = SunshineEyeAdvance(backward, sample.x, next, step);
+                next = sample.x;
+                SunshineHostFinalStore[uint2(x, left_y)] = SunshineBoundFinalParallax(max(sample.z, backward.x));
+                SunshineHostFinalStore[uint2(x, right_y)] = SunshineBoundFinalParallax(max(sample.y, backward.y));
+            }
+        }
+    }
+
+    SunshineEyeForwardEnds[chunk][row_in_group] = forward;
+    SunshineEyeBackwardBegins[chunk][row_in_group] = backward;
+    AllMemoryBarrierWithGroupSync();
+    if (!active) return;
+
+    // Other chunks' endpoints are immutable. Only this thread touches its
+    // eye texels. Once a carry is below the local input it cannot win again.
+    float2 carry = SunshineEyeNoCarry;
+    const float2 decay = step * float(chunk_cells);
+    [loop] for (uint before = 0u; before < chunk; ++before)
+        carry = max(SunshineEyeForwardEnds[before][row_in_group], carry - decay);
+    bool2 alive = true;
+    bool wrote_forward = false;
+    [loop] for (uint x = begin; x < end && any(alive); ++x) {
+        carry -= step;
+        alive = alive && (carry > SunshineEyeLimitInput(x, y));
+        if (alive.y) {
+            const uint2 at = uint2(x, left_y);
+            SunshineHostFinalStore[at] = SunshineBoundFinalParallax(max(SunshineHostFinalStore[at], carry.y));
+        }
+        if (alive.x) {
+            const uint2 at = uint2(x, right_y);
+            SunshineHostFinalStore[at] = SunshineBoundFinalParallax(max(SunshineHostFinalStore[at], carry.x));
+        }
+        wrote_forward = wrote_forward || any(alive);
+    }
+
+    // The two corrections can overlap inside a chunk.
+    if (wrote_forward) DeviceMemoryBarrier();
+    carry = SunshineEyeNoCarry;
+    [loop] for (uint after = SunshineEyeChunks; after > chunk + 1u; --after) {
+        const uint other = after - 1u;
+        const uint other_begin = min(other * chunk_cells, (uint)BUFFER_WIDTH);
+        const uint cells = min(other_begin + chunk_cells, (uint)BUFFER_WIDTH) - other_begin;
+        carry = max(SunshineEyeBackwardBegins[other][row_in_group], carry - step * float(cells));
+    }
+    alive = true;
+    [loop] for (uint reverse = end; reverse > begin && any(alive); --reverse) {
+        const uint x = reverse - 1u;
+        carry -= step;
+        alive = alive && (carry > SunshineEyeLimitInput(x, y));
+        if (alive.x) {
+            const uint2 at = uint2(x, left_y);
+            SunshineHostFinalStore[at] = SunshineBoundFinalParallax(max(SunshineHostFinalStore[at], carry.x));
+        }
+        if (alive.y) {
+            const uint2 at = uint2(x, right_y);
+            SunshineHostFinalStore[at] = SunshineBoundFinalParallax(max(SunshineHostFinalStore[at], carry.y));
+        }
     }
 }
 

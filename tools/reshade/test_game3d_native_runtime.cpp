@@ -491,8 +491,8 @@ namespace {
     for (size_t i = 0; i < count; ++i) pixel(final_color, i, mask[i] > 0.f, false, true);
     upload_source(final_color);
 
-    std::array<com_ptr<ID3D12Resource>, 5> textures;
-    std::array<api::resource_view, 5> views{};
+    std::array<com_ptr<ID3D12Resource>, 6> textures;
+    std::array<api::resource_view, 6> views{};
     auto *device = observed.runtime->get_device();
     const auto create_candidate = [&](unsigned slot, DXGI_FORMAT format, const void *bytes) {
       fixture.texture(textures[slot], format, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -515,6 +515,9 @@ namespace {
     create_candidate(3, DXGI_FORMAT_R32_FLOAT, mask.data());
     const std::vector<float> full(count, 1.f);
     create_candidate(4, DXGI_FORMAT_R32_FLOAT, full.data());
+    auto tagged = final_color;
+    for (size_t i = 0; i < count; ++i) pixel(tagged, i, mask[i] > 0.f, false, mask[i] > 0.f);
+    create_candidate(5, fixture.source_format, tagged.data());
     // The fixture's HUD-less pair is accepted as an earlier session earned it
     // (A1); only accepted candidates decide (S1).
     const auto key = [&](ui_selection::kind kind, DXGI_FORMAT format) {
@@ -528,8 +531,8 @@ namespace {
     observation.session = &policy; observation.now_ms = observation.tick_ms = 40000;
     observation.sequence = 1; observation.epoch = 81; observation.revision = 1;
     ui_render_input ui; ui.kind = ui_input_kind::hudless_difference; ui.view = views[0]; ui.automatic = &observation;
-    const auto run = [&](bool accepted, const char *message, bool inspect = true) {
-      observation.now_ms += 100; observation.tick_ms = observation.now_ms; ++observation.sequence;
+    const auto run = [&](bool accepted, const char *message, bool inspect = true, uint64_t elapsed_ms = 100) {
+      observation.now_ms += elapsed_ms; observation.tick_ms = observation.now_ms; ++observation.sequence;
       const auto actual = render(ui); const auto &expected = accepted ? on : off;
       require(actual.field == expected.field && actual.color == expected.color, message);
       if (inspect) {
@@ -570,6 +573,20 @@ namespace {
     policy.set_manual(false); run(false, "D3D12 Manual Off did not override valid HUDless", false);
     require(renderer.consumed_alpha_auto().state == alpha_auto_state::manual_off, "D3D12 HUDless lost Manual Off state");
     policy.set_automatic(); run(true, "D3D12 Auto resume required manual review");
+    inputs.current_color = false;
+    inputs.masks = {{ {}, {}, views[5] }};
+    inputs.hudless_pair = views[5];
+    inputs.hudless_exact = true;
+    run(true, "D3D12 sampled exact Backbuffer pair differs from explicit protection");
+    require((renderer.consumed_detection().flags & ui_detection::per_frame_sample) &&
+        !renderer.last_detection_used_compact_tiles(), "D3D12 status sample used the compact tile pass");
+    run(true, "D3D12 compact exact Backbuffer pair differs from explicit protection", true, 16);
+    require(renderer.last_detection_used_compact_tiles(), "D3D12 same-view exact pair missed the compact tile pass");
+    inputs.hudless_pair = views[2];
+    run(true, "D3D12 distinct Backbuffer pair differs from explicit protection", true, 16);
+    require(!(renderer.consumed_detection().flags & ui_detection::per_frame_sample) &&
+        !renderer.last_detection_used_compact_tiles(), "D3D12 distinct Backbuffer views used the compact tile pass");
+    std::puts("PASS D3D12 compact UI tile dispatch: same-view non-sample matches explicit mask and stereo, sampled and distinct views fall back");
     queue->wait_idle();
     for (const auto view : views) device->destroy_resource_view(view);
     upload_source(original); write_native_source(fixture, backbuffer);

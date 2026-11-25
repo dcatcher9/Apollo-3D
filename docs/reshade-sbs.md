@@ -392,7 +392,10 @@ pass went from 0.230 to 0.200 ms.
 k modulo 4). Part k of tile (x,y) is stored at column x+16k of a 64-column statistics texture, and
 the reduce sums the parts of every per-tile row before it matches tiles; integer sums make the
 result independent of the split. Unoffered candidates are unbound and their loads are skipped by
-uniform branches. UI pinning walks its three serial scans in 16-texel preloaded blocks with the
+uniform branches. If only an exact HUD-less pair and tagged Backbuffer alpha are offered and
+both refer to the same view, non-sampling frames can count them from one Backbuffer load.
+An optional compact tiles shader writes the same per-part totals. Other inputs and status
+samples use the general tiles pass. UI pinning walks its three serial scans in 16-texel preloaded blocks with the
 same arithmetic and order. A per-row occupancy prepass that skipped rows without UI was measured
 and dropped: the pass time is the slowest group's serial chain, which empty groups already run
 beside. The detected mask stays R32F: R16_UNORM cannot hold FP16 or 10-bit alpha candidates
@@ -2785,11 +2788,14 @@ every covered valid pixel contributes, and empty coverage retains the submitted 
 resources are overwritten on each mode-2 render, with no CPU readback or additional queue wait.
 
 **Eye-specific horizontal limiter.** `SunshineHostEyeLimitCS` (marker `SUNSHINE_EYE_LIMITER`)
-follows the horizontal pass and its UI pin. From the same vertical field it builds one horizontal
-field per eye, as [Host SBS](host-sbs.md#eye-specific-horizontal-limiter) does: on the side of a
+builds one horizontal field per eye directly from the vertical field, as [Host SBS](host-sbs.md#eye-specific-horizontal-limiter) does: on the side of a
 nearer object that the object covers in that eye the field may fall at 0.9 per source width, after
 the foreground value has been extended by one texel; on the uncovered side it keeps the scene
-field's 0.5. The store has twice the buffer height (the left eye's rows, then the right eye's) and
+field's 0.5. Each workgroup processes eight rows in 32 chunks with 16-pixel checkpoints.
+Carries between chunks restore the same envelopes across their borders, with float32 rounding
+that can differ from successive serial subtractions. A deferred live pack can skip the symmetric
+field when no probe or dump needs it and rebuild it for a later consumer. The store has twice
+the buffer height (the left eye's rows, then the right eye's) and
 takes the scene field's slot `u3` for this pass. `SunshineApplyUICS` then pins both halves of that
 store exactly as it pins the scene field (the store's own height is the number of rows, and a row
 past the buffer height reads the mask row of its eye), and the pack binds the store at `t5`: its

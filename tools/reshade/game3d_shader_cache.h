@@ -31,6 +31,7 @@ namespace sunshine_game3d::shader_cache {
   struct entry_point {
     const char *name;
     const char *target;
+    bool optional = false;
   };
   // Everything that changes the bytecode besides the entry point.
   struct configuration {
@@ -208,8 +209,9 @@ namespace sunshine_game3d::shader_cache {
         okay = compile(job.config, task->entry, code);
         if (okay) write_file(path, key, code);
       }
-      if (okay) {
+      if (okay || task->entry.optional) {
         std::lock_guard<std::mutex> lock(store().mutex);
+        // An empty optional entry suppresses retries for this process.
         store().blobs[key] = std::move(code);
       } else {
         job.failed.store(true, std::memory_order_release);
@@ -238,8 +240,10 @@ namespace sunshine_game3d::shader_cache {
         s.jobs.erase(running);
       }
       std::vector<entry_point> missing;
-      for (const auto &entry : entries)
-        if (!s.blobs.count(detail::blob_key(key, entry))) missing.push_back(entry);
+      for (const auto &entry : entries) {
+        const auto found = s.blobs.find(detail::blob_key(key, entry));
+        if (found == s.blobs.end() || (!entry.optional && found->second.empty())) missing.push_back(entry);
+      }
       if (missing.empty()) return state::ready;
       job = std::make_shared<detail::job_t>();
       job->source.assign(config.source);

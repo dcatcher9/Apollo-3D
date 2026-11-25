@@ -339,6 +339,6 @@ namespace models::host_sbs_shader_cache {
     host_sbs_direct_glyph_prepare,
   };
   inline constexpr std::string_view direct_glyph_prepare_source_closure_sha256 =
-    "ebd78fb4d5a30345166f4dcbfb990817a41910172288cba9d7e90926c7764ffe";
+    "f3a07c98df39323c896c20f7801cc4e79867995dd3af844e426e2c3f9505302d";
 
 }  // namespace models::host_sbs_shader_cache

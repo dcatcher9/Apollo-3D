@@ -226,16 +226,40 @@ namespace {
           "Register the D3D11 slot destruction callback");
       }
       const api::resource target{reinterpret_cast<std::uint64_t>(slot.p)};
-      renderer.begin_present();
-      fixture.context->CopyResource(fixture.backbuffer.p, fixture.source_pattern.p);
       sunshine_game3d::render_frame_input frame;
       frame.color = backbuffer;
       frame.depth = observed.depth_view;
       frame.scene = p;
+      frame.scene.depth_view = 0;
+      frame.depth_identity = 7001;
       auto *commands = queue->get_immediate_command_list();
-      require(renderer.render(commands, frame, true) && renderer.pack(commands, target, 7), "D3D11 renderer rejected a slot pack");
-      queue->flush_immediate_command_list(); renderer.finish_present();
-      queue->wait_idle();
+      const auto pack = [&](api::resource destination = {}) {
+        renderer.begin_present();
+        fixture.context->CopyResource(fixture.backbuffer.p, fixture.source_pattern.p);
+        require(renderer.render(commands, frame, true) && renderer.pack(commands, destination, destination.handle ? 7 : 0),
+          "D3D11 renderer rejected a shared deferred pack");
+        queue->flush_immediate_command_list(); renderer.finish_present();
+        queue->wait_idle();
+      };
+      const auto read = [&](api::resource resource) {
+        require(resource.handle, "D3D11 shared pack diagnostic was missing");
+        return fixture.read(reinterpret_cast<ID3D11Texture2D *>(resource.handle));
+      };
+      pack();
+      const auto reference_symmetric = read(renderer.diagnostics().final_field);
+      const auto reference_eyes = read(renderer.diagnostics().eye_field);
+      const auto reference_sbs = fixture.read(output.p);
+      const float original_strength = frame.scene.strength;
+      frame.scene.strength = original_strength * .25f;
+      pack();
+      require(read(renderer.diagnostics().final_field) != reference_symmetric,
+        "D3D11 shared pack control did not seed a different symmetric field");
+      frame.scene.strength = original_strength;
+      frame.final_field_required = false;
+      pack(target);
+      require(!renderer.diagnostics().final_field.handle && read(renderer.diagnostics().eye_field) == reference_eyes &&
+          fixture.read(slot.p) == reference_sbs,
+        "D3D11 direct export did not omit the symmetric field with byte-identical eye and SBS output");
       slot.reset();
       fixture.context->Flush(); queue->wait_idle();
       require(!destroyed, "The cached export view did not hold its D3D11 slot");
@@ -243,6 +267,14 @@ namespace {
       fixture.context->Flush(); queue->wait_idle();
       require(destroyed, "A released D3D11 export slot stayed allocated through the renderer's cached view");
       std::puts("PASS D3D11 export slot release: dropping the renderer's cached view frees the slot texture");
+      const auto before_internal = renderer.conditioning_activity();
+      frame.final_field_required = true;
+      pack();
+      require(renderer.conditioning_activity().memo == before_internal.memo + 1 &&
+          read(renderer.diagnostics().final_field) == reference_symmetric &&
+          read(renderer.diagnostics().eye_field) == reference_eyes && fixture.read(output.p) == reference_sbs,
+        "D3D11 internal pack did not rebuild the required symmetric field on the shared scene memo");
+      std::puts("PASS D3D11 shared direct export: identical eyes and SBS without a symmetric field, restored exactly for the next internal pack");
     }
     const auto original_depth = fixture.read(fixture.depth.p);
     for (const auto &test : sunshine_game3d_test::budget_cases()) {

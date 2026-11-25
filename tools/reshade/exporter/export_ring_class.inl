@@ -306,14 +306,16 @@
     // transfer keeps its own cached_ring_idle.
     template<class Views>
     void release_idle_rings(const Views &release_views) {
+      if ((!generation_ || generation_->runtime) && !cached_ring_) return;
       const auto now = std::chrono::steady_clock::now();
-      if (generation_ && !generation_->runtime && generation_->finished() &&
+      if (generation_ && !generation_->runtime &&
           generation_->inactive_since != std::chrono::steady_clock::time_point{} &&
-          now - generation_->inactive_since >= export_ring_idle) {
+          now - generation_->inactive_since >= export_ring_idle && generation_->finished()) {
         log(reshade::log::level::info, "Sunshine SBS: released the idle export ring");
         release_ring(generation_, release_views);
       }
-      if (cached_ring_ && cached_ring_->finished() && now - cached_ring_since_ >= cached_ring_idle) release_ring(cached_ring_, release_views);
+      if (cached_ring_ && now - cached_ring_since_ >= cached_ring_idle && cached_ring_->finished())
+        release_ring(cached_ring_, release_views);
     }
 
     // Releases a ring that no pack follows. Renderers cache render-target
