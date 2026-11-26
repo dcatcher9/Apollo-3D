@@ -25,6 +25,7 @@
   #include <sddl.h>
   #include <ShlObj.h>
   #include <string>
+  #include <thread>
   #include <vector>
 
 namespace {
@@ -717,6 +718,22 @@ namespace {
         values[6], values[7]
       )) << "missing authority " << missing;
     }
+  }
+
+  TEST(WindowsHostSbsCompletionWaitTest, LeaseQualifiesOnlyAnAboveNormalConversionOwner) {
+    // Remote encoders and local AR and shutter presenters convert on a thread_priority_e::high
+    // owner under the presentation lease, and their depth waits share this one qualification.
+    bool high_owner = false, normal_owner = true;
+    std::thread owner([&]() {
+      const auto cpu_scheduling = platf::testing::acquire_presentation_cpu_scheduling_for_test();
+      platf::adjust_thread_priority(platf::thread_priority_e::high);
+      high_owner = platf::host_sbs_completion_wait_available();
+      platf::adjust_thread_priority(platf::thread_priority_e::normal);
+      normal_owner = platf::host_sbs_completion_wait_available();
+    });
+    owner.join();
+    EXPECT_TRUE(high_owner);
+    EXPECT_FALSE(normal_owner);
   }
 
   TEST(WindowsLocalPresenterScheduleTest, EachDxgiAdmissionReceivesItsOwnBoundedBudget) {

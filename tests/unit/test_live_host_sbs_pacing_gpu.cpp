@@ -5,6 +5,7 @@
   #include "src/globals.h"
   #include "src/live_model_preparation.h"
   #include "src/platform/common.h"
+  #include "src/platform/windows/capture_timing.h"
   #include "src/platform/windows/display.h"
   #include "src/platform/windows/host_sbs_converter_test_observer.h"
   #include "src/platform/windows/misc.h"
@@ -291,6 +292,34 @@ namespace {
     bool packed_valid = false, route_matches = false;
   };
 
+  pacing_event_t copy_event(const probe::event_t &event) noexcept {
+    pacing_event_t copy;
+    copy.kind = event.kind;
+    copy.conversion = event.conversion;
+    copy.model = event.model_frame;
+    copy.target = event.literal_query_target_frame;
+    copy.before = event.watermark_before;
+    copy.after = event.watermark_after;
+    copy.actual_pixels = event.actual_draw_pixel_source;
+    copy.source = event.source_stamp_ticks;
+    copy.current = event.current_source_stamp_ticks;
+    copy.packed_source = event.pixel_source_stamp_ticks;
+    copy.flat = event.flat;
+    copy.repeat = event.repeat;
+    copy.current_capture_key = event.current_capture_key;
+    copy.prior_capture_key = event.prior_capture_key;
+    copy.current_publication = event.publication_current;
+    copy.submitted = event.force_infer || event.gpu_undecided;
+    copy.held = event.gate_entered && !event.gate_released;
+    copy.queried_busy = event.query_observed && event.literal_last_query_result == CUDA_ERROR_NOT_READY;
+    copy.packed_valid = event.packed_valid;
+    copy.route_matches = event.route_matches;
+    for (std::size_t slot = 0; slot < event.slot_frames.size(); ++slot) {
+      copy.pending_target |= event.slot_pending[slot] && event.slot_frames[slot] == copy.target;
+    }
+    return copy;
+  }
+
   struct pacing_delivery_t {
     fixture::native_pacing_delivery_t call;
     clock_t::time_point previous_finished {};
@@ -326,30 +355,7 @@ namespace {
       auto &self = *static_cast<held_pacing_t *>(opaque);
       try {
         std::lock_guard lock {self.mutex};
-        pacing_event_t copy;
-        copy.kind = event.kind;
-        copy.conversion = event.conversion;
-        copy.model = event.model_frame;
-        copy.target = event.literal_query_target_frame;
-        copy.before = event.watermark_before;
-        copy.after = event.watermark_after;
-        copy.actual_pixels = event.actual_draw_pixel_source;
-        copy.source = event.source_stamp_ticks;
-        copy.current = event.current_source_stamp_ticks;
-        copy.packed_source = event.pixel_source_stamp_ticks;
-        copy.flat = event.flat;
-        copy.repeat = event.repeat;
-        copy.current_capture_key = event.current_capture_key;
-        copy.prior_capture_key = event.prior_capture_key;
-        copy.current_publication = event.publication_current;
-        copy.submitted = event.force_infer || event.gpu_undecided;
-        copy.held = event.gate_entered && !event.gate_released;
-        copy.queried_busy = event.query_observed && event.literal_last_query_result == CUDA_ERROR_NOT_READY;
-        copy.packed_valid = event.packed_valid;
-        copy.route_matches = event.route_matches;
-        for (std::size_t slot = 0; slot < event.slot_frames.size(); ++slot) {
-          copy.pending_target |= event.slot_pending[slot] && event.slot_frames[slot] == copy.target;
-        }
+        const auto copy = copy_event(event);
         self.events.push_back(copy);
         if (event.kind != probe::event_e::convert_end && event.kind != probe::event_e::packed_repeat) {
           return;
@@ -714,6 +720,206 @@ namespace {
     [](const ::testing::TestParamInfo<held_pacing_case_t> &info) {
       return std::string {info.param.stop ? "StopWhileHeld" : "Complete"} +
              (info.param.qualified_owner ? "ScheduledOwner" : "NormalOwner");
+    }
+  );
+
+  // A local presenter converts on its own presenter thread, which is also the thread that waits
+  // for depth. Every probe callback therefore runs synchronously on that one owner.
+  struct local_depth_wait_t {
+    std::atomic<std::int64_t> held_source {0};
+    std::vector<pacing_event_t> events;
+    std::vector<fixture::native_pacing_poll_t> polls;
+    pacing_event_t held_output;
+    bool held_observed = false, qualified_owner = false;
+    bool owner_policy_matched = true, callback_failed = false;
+
+    static void record(void *opaque, const probe::event_t &event) noexcept {
+      auto &self = *static_cast<local_depth_wait_t *>(opaque);
+      try {
+        const auto copy = copy_event(event);
+        self.events.push_back(copy);
+        const bool output = event.kind == probe::event_e::convert_end || event.kind == probe::event_e::packed_repeat;
+        if (!self.held_observed && output && copy.current == self.held_source.load() && copy.held && copy.queried_busy && copy.pending_target) {
+          self.held_output = copy;
+          self.held_observed = true;
+        }
+      } catch (...) {
+        self.callback_failed = true;
+      }
+    }
+
+    static void record_poll(void *opaque, const fixture::native_pacing_poll_t &poll) noexcept {
+      auto &self = *static_cast<local_depth_wait_t *>(opaque);
+      try {
+        self.owner_policy_matched &=
+          platf::host_sbs_completion_wait_available() == self.qualified_owner;
+        self.polls.push_back(poll);
+      } catch (...) {
+        self.callback_failed = true;
+      }
+    }
+
+    // An authenticated depth draw of this exact source, from one exact model frame when given.
+    bool drew_depth(std::int64_t source, std::uint64_t model = 0) const {
+      return std::any_of(events.begin(), events.end(), [&](const auto &event) {
+        return event.kind == probe::event_e::convert_end && event.source == source && event.model != 0 &&
+               (model == 0 || event.model == model) && !event.flat && !event.repeat && event.current_publication;
+      });
+    }
+  };
+
+  class LiveHostSbsLocalDepthWaitGpuTest: public ::testing::TestWithParam<bool> {};
+
+  TEST_P(LiveHostSbsLocalDepthWaitGpuTest, HeldRootUsesTheRemoteQualificationAndFallbacks) {
+    const auto *enabled = std::getenv("APOLLO_RUN_TENSORRT_TESTS");
+    if (!enabled || std::string_view {enabled} != "1") {
+      GTEST_SKIP() << "Set APOLLO_RUN_TENSORRT_TESTS=1 for the local NVIDIA/TensorRT integration check.";
+    }
+    const auto adapter = nvidia_adapter();
+    ASSERT_TRUE(adapter);
+    // As in the remote cases, the real CPU timer/process policy is owned throughout, so only the
+    // presenter thread's own priority decides whether it qualifies.
+    const auto cpu_scheduling = platf::testing::acquire_presentation_cpu_scheduling_for_test();
+    ASSERT_TRUE(cpu_scheduling);
+    const bool qualified_owner = GetParam();
+    constexpr unsigned width = 1280, height = 720;
+    local_depth_wait_t observed;
+    observed.qualified_owner = qualified_owner;
+    fixture::native_pacing_fixture_t binding;
+    binding.held_source_stamp_ticks = &observed.held_source;
+    binding.hold_ms = 120;
+    binding.converter_observer = {&observed, local_depth_wait_t::record};
+    binding.record_poll = local_depth_wait_t::record_poll;
+    auto display = fixture::make_native_pacing_display(*adapter, width, height, binding);
+    std::vector<std::uint32_t> pixels(std::size_t(width) * height);
+    for (unsigned y = 0; y < height; ++y) {
+      for (unsigned x = 0; x < width; ++x) {
+        pixels[std::size_t(y) * width + x] = (x / 64 + y / 48) % 2 ? 0xff3853a0u : 0xffa48b45u;
+      }
+    }
+    auto first = fixture::upload_native_pacing_image(*display, pixels);
+    for (auto &pixel : pixels) {
+      pixel ^= 0x00569662u;
+    }
+    auto second = fixture::upload_native_pacing_image(*display, pixels);
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(second);
+    models::live_model_preparation_t preparation(video::host_sbs_v2_depth_model(), {});
+
+    std::exception_ptr owner_error;
+    bool owner_scheduling_available = false, warm = false, completed = false;
+    std::int64_t first_ticks = 0, second_ticks = 0;
+    std::jthread owner([&]() {
+      try {
+        // The local presenter thread runs at platf::thread_priority_e::high (ABOVE_NORMAL).
+        const auto priority = qualified_owner ? THREAD_PRIORITY_ABOVE_NORMAL : THREAD_PRIORITY_NORMAL;
+        if (!SetThreadPriority(GetCurrentThread(), priority)) {
+          throw std::runtime_error("Could not set the local fixture's presenter priority");
+        }
+        owner_scheduling_available = platf::host_sbs_completion_wait_available();
+        fixture::native_pacing_local_converter_t converter(display, video::SBS_AI);
+        // Each admitted draw gets the presenter's own one-refresh render budget at 60 Hz. The
+        // fixture stands in for DXGI's frame-latency gate by waiting out that interval.
+        platf::dxgi::detail::local_presenter_schedule_t schedule {60000};
+        const auto present = [&](platf::img_t &image) {
+          const auto target = schedule.begin_frame(clock_t::now());
+          if (!converter.convert(image, target)) {
+            throw std::runtime_error("Local pacing conversion failed");
+          }
+          schedule.record_presented();
+          std::this_thread::sleep_until(target);
+        };
+        const auto stamp = [](platf::img_t &image) {
+          const auto captured = clock_t::now();
+          image.frame_timestamp = image.content_timestamp = captured;
+          return captured.time_since_epoch().count();
+        };
+        first_ticks = stamp(*first);
+        const auto warm_limit = clock_t::now() + 30s;
+        while (!(warm = observed.drew_depth(first_ticks)) && clock_t::now() < warm_limit) {
+          present(*first);
+        }
+        if (!warm) {
+          return;
+        }
+        // B's joined root is held busy for longer than several render budgets.
+        second_ticks = stamp(*second);
+        observed.held_source.store(second_ticks);
+        const auto complete_limit = clock_t::now() + 5s;
+        while (!(completed = observed.drew_depth(second_ticks, observed.held_output.target)) &&
+               clock_t::now() < complete_limit) {
+          present(*second);
+        }
+      } catch (...) {
+        owner_error = std::current_exception();
+      }
+    });
+    owner.join();
+    if (owner_error) {
+      std::rethrow_exception(owner_error);
+    }
+    ASSERT_TRUE(warm) << "A must reach an authenticated local depth draw before B is held.";
+    EXPECT_EQ(owner_scheduling_available, qualified_owner);
+    EXPECT_FALSE(observed.callback_failed);
+    EXPECT_TRUE(observed.owner_policy_matched);
+    ASSERT_TRUE(observed.held_observed) << "B's local conversion must present while its joined root is busy.";
+    const auto &held = observed.held_output;
+    EXPECT_NE(held.target, 0u);
+    // The held-source fallback presents older output and never draws the busy root.
+    EXPECT_NE(held.model, held.target);
+    if (!held.repeat && !held.flat) {
+      EXPECT_EQ(held.source, first_ticks);
+      EXPECT_GT(held.model, 0u);
+      EXPECT_LT(held.model, held.target);
+      EXPECT_TRUE(held.current_publication);
+    }
+    EXPECT_TRUE(completed) << "B's authentic joined completion must reach a local depth draw.";
+    const auto same_frame = std::find_if(observed.polls.begin(), observed.polls.end(), [&](const auto &poll) {
+      return poll.conversion == held.target && !poll.prior && poll.eligible;
+    });
+    ASSERT_NE(same_frame, observed.polls.end()) << "B's own same-frame poll must have a render budget.";
+    EXPECT_FALSE(same_frame->ready);
+    EXPECT_TRUE(same_frame->timed_out);
+    std::size_t notification_arms = 0, notification_waits = 0, notification_pending_polls = 0;
+    for (const auto &poll : observed.polls) {
+      notification_arms += poll.notification_armed;
+      notification_waits += poll.notification_waited;
+      notification_pending_polls += poll.notification_callback_pending;
+      if (!poll.eligible || !qualified_owner) {
+        EXPECT_FALSE(poll.notification_armed);
+        EXPECT_FALSE(poll.notification_waited);
+      }
+      if (!qualified_owner) {
+        EXPECT_FALSE(poll.notification_callback_pending);
+      }
+    }
+    if (qualified_owner) {
+      EXPECT_TRUE(same_frame->notification_armed && same_frame->notification_waited && same_frame->notification_callback_pending)
+        << "A qualified local presenter must arm and wait on B's real root.";
+      const bool retained = std::any_of(observed.polls.begin(), observed.polls.end(), [&](const auto &poll) {
+        return poll.prior && !poll.ready && poll.notification_callback_pending;
+      });
+      EXPECT_TRUE(retained) << "Later local conversions must retain B's outstanding notification callback.";
+    } else {
+      EXPECT_GT(same_frame->query_count, 1u) << "An unqualified local presenter yield-polls its budget.";
+    }
+    const auto fallback = held.repeat ? "packed-A" : held.flat ? "flat-B" :
+                                                                 "matched-A";
+    std::cout << "Live Host SBS local depth wait: scheduled_owner=" << qualified_owner
+              << " policy_available=" << owner_scheduling_available << " B_model=" << held.target
+              << " fallback=" << fallback
+              << " armed=" << notification_arms << " waited=" << notification_waits
+              << " callback_pending_polls=" << notification_pending_polls
+              << " same_frame_queries=" << same_frame->query_count << " same_frame_wait_us="
+              << std::chrono::duration_cast<std::chrono::microseconds>(same_frame->wait_duration).count() << '\n';
+  }
+
+  INSTANTIATE_TEST_SUITE_P(
+    RealLocalPresenter,
+    LiveHostSbsLocalDepthWaitGpuTest,
+    ::testing::Bool(),
+    [](const ::testing::TestParamInfo<bool> &info) {
+      return std::string {info.param ? "ScheduledOwner" : "NormalOwner"};
     }
   );
 

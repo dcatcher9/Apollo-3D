@@ -2093,16 +2093,16 @@ Repeated queries use all of that post-reserve cadence slack up to an absolute `8
 an independent query-count fuse. Thus a low-rate stream may spend its real extra cadence headroom,
 while a late/high-rate frame remains cadence-limited and every stream retains a bounded latency.
 After the immediate query, queries are spaced by at least `50 us` of steady-clock time so the fuse
-leaves the GPU time to progress. A remote encoder owner can wait once for a CUDA completion
+leaves the GPU time to progress. The conversion owner, either the remote encoder or the local AR
+or shutter presenter thread that converts captures, can wait once for a CUDA completion
 notification when it has elevated process and thread priorities, an active native presentation
 timer request, and requested and effective periods of at most `1 ms`. An independent stream
 signals the owner after the joined event. The wait targets the start of the final `1 ms` of the original
 budget, which uses the yielded query cadence. A signal left by an earlier callback is consumed
-and the notifier continues waiting to its current cutoff. The notification wait was measured
-and qualified for remote streams only; local presentation was not measured and, like remote
-conversions without these conditions, uses the yielded cadence for the full wait. A failed or
-over-budget Windows wait disables notification waiting for that estimator. Only a joined query
-within the same cadence deadline and query fuse proves completion.
+and the notifier continues waiting to its current cutoff. An owner without these conditions uses
+the yielded cadence for the full wait. A failed or over-budget Windows wait disables notification
+waiting for that estimator. Only a joined query within the same cadence deadline and query fuse
+proves completion.
 
 Capture and content timestamps identify pixels. Force-infer and GPU-undecided work both record
 the joined non-timing CUDA event after the conditional root and every unmap tail. The event

@@ -1400,8 +1400,15 @@ namespace platf::dxgi {
           };
           const auto poll_pending_depth = [&](const detail::host_sbs_same_frame_poll_plan_t *plan, bool snapshot = false, models::pending_depth_source_access_t access = {}) {
             if (plan && plan->eligible) {
+              // Remote encoders and local presenters may both wait on the completion
+              // notification; the estimator applies the owner thread's scheduling qualification.
               return depth_estimator->try_finish_pending_depth_until(
-                input_color_space, plan->deadline, detail::host_sbs_same_frame_poll_max_queries, false, !local_presentation, access
+                input_color_space,
+                plan->deadline,
+                detail::host_sbs_same_frame_poll_max_queries,
+                false,
+                true,
+                access
               );
             }
             return depth_estimator->try_finish_pending_depth_nonblocking(input_color_space, snapshot, access);
@@ -7586,6 +7593,62 @@ namespace platf::dxgi {
       display.device_ctx->Flush();
       native.blank = false;
       return image;
+    }
+
+    class native_pacing_local_converter_t::impl_t {
+    public:
+      impl_t(std::shared_ptr<display_vram_t> display, ::video::sbs_mode_e mode) {
+        const auto *fixture = dynamic_cast<const preparation_fixture_display_t *>(display.get());
+        preparation_fixture_require(fixture != nullptr, "Local pacing converter requires a native pacing display");
+        const auto width = mode == ::video::SBS_AI ? 2 * display->width : display->width;
+        const auto height = display->height;
+        config::video_t::sbs_t settings;
+        settings.reshade = false;
+        // The local presenter's own production RGB converter initialization.
+        preparation_fixture_require(
+          converter_.init(display, display->adapter.get(), pix_fmt_e::nv12) == 0 &&
+            converter_.init_rgb_output(width, height, mode, settings, ready_event_) == 0,
+          "Local pacing RGB converter initialization failed"
+        );
+        converter_.test_native_pacing = fixture->native_pacing;
+        converter_.test_observer = fixture->native_pacing.converter_observer;
+        D3D11_TEXTURE2D_DESC description {};
+        description.Width = static_cast<UINT>(width);
+        description.Height = static_cast<UINT>(height);
+        description.MipLevels = description.ArraySize = description.SampleDesc.Count = 1u;
+        description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        description.Usage = D3D11_USAGE_DEFAULT;
+        description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        preparation_fixture_hr(converter_.device->CreateTexture2D(&description, nullptr, &target_), "Local pacing output allocation failed");
+        preparation_fixture_hr(converter_.device->CreateRenderTargetView(target_.Get(), nullptr, &target_rtv_), "Local pacing output RTV failed");
+      }
+
+      bool convert(platf::img_t &image, const std::chrono::steady_clock::time_point presentation_target) {
+        return converter_.convert_rgb(image, target_.Get(), target_rtv_.Get(), false, presentation_target) ==
+               d3d_base_encode_device::rgb_conversion_e::converted;
+      }
+
+    private:
+      std::shared_ptr<safe::event_t<bool>> ready_event_ = std::make_shared<safe::event_t<bool>>();
+      d3d_base_encode_device converter_;
+      ComPtr<ID3D11Texture2D> target_;
+      ComPtr<ID3D11RenderTargetView> target_rtv_;
+    };
+
+    native_pacing_local_converter_t::native_pacing_local_converter_t(
+      std::shared_ptr<display_vram_t> display,
+      ::video::sbs_mode_e mode
+    ):
+        impl_(std::make_unique<impl_t>(std::move(display), mode)) {
+    }
+
+    native_pacing_local_converter_t::~native_pacing_local_converter_t() = default;
+
+    bool native_pacing_local_converter_t::convert(
+      platf::img_t &image,
+      const std::chrono::steady_clock::time_point presentation_target
+    ) {
+      return impl_->convert(image, presentation_target);
     }
 
     model_preparation_memory_t query_model_preparation_memory(const model_preparation_adapter_t &required) {

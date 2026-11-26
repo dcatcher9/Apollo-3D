@@ -65,6 +65,25 @@ namespace platf::dxgi::testing {
     display_vram_t &display, std::span<const std::uint32_t> bgra
   );
 
+  /** Actual local-presentation converter, opened as the AR and shutter presenters open theirs,
+   * on a native pacing display whose probe observes it as it observes the native encoder.
+   * Construct, convert and destroy it on its one conversion-owner thread.
+   */
+  class native_pacing_local_converter_t {
+  public:
+    native_pacing_local_converter_t(std::shared_ptr<display_vram_t> display, video::sbs_mode_e mode);
+    ~native_pacing_local_converter_t();
+    native_pacing_local_converter_t(const native_pacing_local_converter_t &) = delete;
+    native_pacing_local_converter_t &operator=(const native_pacing_local_converter_t &) = delete;
+
+    /** Convert into an owned RGB target within the presenter's render-budget deadline. */
+    bool convert(platf::img_t &image, std::chrono::steady_clock::time_point presentation_target);
+
+  private:
+    class impl_t;
+    std::unique_ptr<impl_t> impl_;
+  };
+
   struct model_preparation_memory_t {
     model_preparation_adapter_t adapter;
     std::string description;
