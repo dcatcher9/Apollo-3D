@@ -424,6 +424,20 @@ if(BUILD_TESTING)
       add_test(NAME reshade_${report_test} COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/test_${report_test}.py")
       set_tests_properties(reshade_${report_test} PROPERTIES TIMEOUT 60 ENVIRONMENT PYTHONUTF8=1)
     endforeach()
+    # The dump preview CLI end to end on small packages. The host build owns the
+    # shipped preview_game3d_dump; this test copy compiles the same two sources.
+    add_executable(reshade_preview_game3d_dump_tool preview_game3d_dump.cpp
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../src/platform/windows/game3d_debug_preview.cpp")
+    target_compile_features(reshade_preview_game3d_dump_tool PRIVATE cxx_std_23)
+    target_include_directories(reshade_preview_game3d_dump_tool PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../..")
+    target_link_libraries(reshade_preview_game3d_dump_tool PRIVATE nlohmann_json::nlohmann_json ole32 windowscodecs)
+    if(MINGW)
+      target_link_options(reshade_preview_game3d_dump_tool PRIVATE -static)
+    endif()
+    add_test(NAME reshade_preview_game3d_dump COMMAND "${Python3_EXECUTABLE}" -B
+      "${CMAKE_CURRENT_SOURCE_DIR}/test_preview_game3d_dump.py"
+      --executable "$<TARGET_FILE:reshade_preview_game3d_dump_tool>")
+    set_tests_properties(reshade_preview_game3d_dump PROPERTIES TIMEOUT 60 ENVIRONMENT PYTHONUTF8=1)
   else()
     message(STATUS "No Python 3.9 interpreter: the Game 3D log report tests are not registered")
   endif()

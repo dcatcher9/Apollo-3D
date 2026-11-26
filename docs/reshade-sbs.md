@@ -3468,7 +3468,8 @@ replay. A 4K HDR raw snapshot can occupy roughly 380 MiB, with previews adding d
 are explicit one-shot actions, not a continuous recording.
 
 `preview_game3d_dump.exe <package>` generates the same human views for an older package, using
-the host's preview implementation. `tools/reshade/inspect_game3d_dump.py <package>` additionally
+the host's preview implementation; the add-on's ctest `reshade_preview_game3d_dump` runs it end to
+end on small packages. `tools/reshade/inspect_game3d_dump.py <package>` additionally
 reports numeric statistics offline (NumPy required); its optional `--previews` writes
 artifact PNGs in a `previews` subdirectory (Pillow required). `--pin-metrics` measures UI pinning
 in the package, or in a replayed `final_field.bin` given with `--pin-field`, against the unpinned

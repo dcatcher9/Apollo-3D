@@ -13,6 +13,11 @@ import unittest
 class PreviewCliTests(unittest.TestCase):
     executable = None
 
+    @classmethod
+    def setUpClass(cls):
+        if cls.executable is None:
+            raise unittest.SkipTest("needs --executable; ctest runs it as reshade_preview_game3d_dump")
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="sunshine-preview-cli-")
         self.root = Path(self.temporary.name)
