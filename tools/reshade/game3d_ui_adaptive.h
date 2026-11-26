@@ -212,44 +212,37 @@ namespace sunshine_game3d::ui_adaptive {
       ramp_armed_ = true;
 
       if (target > output_.target_uv) {
-        clear_release();
+        release_.clear();
         // Only the nearest requirement shared by all confirming samples is
         // sustained evidence. A final one-frame spike cannot choose the target.
-        if (!approaching_) {
-          approaching_ = true;
-          approach_since_ = origin.tick_ms;
-          approach_candidate_ = target;
-        } else approach_candidate_ = std::min(approach_candidate_, target);
-        if (origin.tick_ms - approach_since_ >= approach_dwell_ms) {
-          output_.target_uv = approach_candidate_;
-          clear_approach();
+        approach_.extend(origin.tick_ms, target, [](float held, float value) { return std::min(held, value); });
+        if (approach_.held(origin.tick_ms, approach_dwell_ms)) {
+          output_.target_uv = approach_.candidate;
+          approach_.clear();
           output_.status = "approaching";
         } else {
           ramp_armed_ = false;
           output_.status = "approach_dwell";
         }
       } else if (applied_ != double(output_.target_uv)) {
-        clear_approach();
-        clear_release();
+        approach_.clear();
+        release_.clear();
         output_.status = "transitioning";
       } else {
-        clear_approach();
+        approach_.clear();
         unsigned release{};
         while (release < max_target_index && conflicts(release, true)) ++release;
         const float candidate = level_uv(release, cap_);
         if (candidate < output_.target_uv) {
-          if (!releasing_) {
-            releasing_ = true;
-            release_since_ = origin.tick_ms;
-            release_candidate_ = candidate;
-          } else release_candidate_ = std::max(release_candidate_, candidate);
-          if (origin.tick_ms - release_since_ >= release_dwell_ms) {
-            output_.target_uv = release_candidate_;
-            clear_release();
+          // Only the smallest retreat all confirming samples allow is sustained.
+          release_.extend(origin.tick_ms, candidate, [](float held, float value) { return std::max(held, value); });
+          if (release_.held(origin.tick_ms, release_dwell_ms)) {
+            output_.target_uv = release_.candidate;
+            release_.clear();
             output_.status = "retreating";
           } else output_.status = "release_dwell";
         } else {
-          clear_release();
+          release_.clear();
           output_.status = covered ? "stable" : "no_coverage";
         }
       }
@@ -309,17 +302,35 @@ namespace sunshine_game3d::ui_adaptive {
     void update_age(std::uint64_t now) {
       output_.probe_age_ms = have_accepted_ && now >= output_.accepted_tick ? now - output_.accepted_tick : 0;
     }
-    void clear_release() { releasing_ = false; release_since_ = 0; }
-    void clear_approach() { approaching_ = false; approach_since_ = 0; }
-    void clear_evidence() { clear_release(); clear_approach(); }
+    void clear_evidence() { release_.clear(); approach_.clear(); }
     void suspend(const char *reason) { clear_evidence(); ramp_armed_ = false; output_.status = reason; }
     bool reject(const char *reason) { suspend(reason); return false; }
+
+    // Sustained evidence for one move of the target: active since the first
+    // confirming sample's tick, with the candidate those samples share
+    // (extend combines each new one into it). Clearing keeps the candidate,
+    // which the next first sample replaces.
+    struct dwell {
+      bool active{};
+      std::uint64_t since{};
+      float candidate{};
+      template<class Combine> void extend(std::uint64_t tick, float value, Combine combine) {
+        if (!active) {
+          active = true;
+          since = tick;
+          candidate = value;
+        } else candidate = combine(candidate, value);
+      }
+      bool held(std::uint64_t tick, std::uint64_t dwell_ms) const { return tick - since >= dwell_ms; }
+      void clear() { active = false; since = 0; }
+    };
 
     decision output_;
     source scope_, live_;
     double applied_{};
-    float cap_{}, approach_candidate_{}, release_candidate_{};
-    std::uint64_t clock_{}, accepted_at_{}, last_retained_mask_{}, release_since_{}, approach_since_{}, cap_since_{};
-    bool have_scope_{}, have_live_{}, have_clock_{}, have_accepted_{}, have_cap_{}, ramp_armed_{}, releasing_{}, approaching_{};
+    float cap_{};
+    std::uint64_t clock_{}, accepted_at_{}, last_retained_mask_{}, cap_since_{};
+    bool have_scope_{}, have_live_{}, have_clock_{}, have_accepted_{}, have_cap_{}, ramp_armed_{};
+    dwell approach_, release_;
   };
 }
