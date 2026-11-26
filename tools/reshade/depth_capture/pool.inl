@@ -186,17 +186,8 @@ namespace sunshine_streamline::depth_capture {
       }
     }
 
-    // Teardown (release_device, shutdown). Once ExitProcess has begun, every
-    // other thread (the pool's too) has ended: a job that has not run never
-    // will, and none runs.
-    void wait_storage_releases() {
-      using shutdown_query = BOOLEAN(NTAPI *)();
-      static const auto shutting_down = reinterpret_cast<shutdown_query>(
-        reinterpret_cast<void *>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlDllShutdownInProgress")));
-      if (sunshine_addon_lifetime::stopping() || (shutting_down && shutting_down())) return;
-      std::unique_lock lock(storage_jobs.mutex);
-      storage_jobs.idle.wait(lock, [] { return !storage_jobs.outstanding; });
-    }
+    // Teardown (release_device, shutdown).
+    void wait_storage_releases() { sunshine_game3d::pool::wait_jobs(storage_jobs); }
 
     void collect_diagnostics(storage_list &discard) {
       if (!capture_pool.diagnostic_slots_active) return;

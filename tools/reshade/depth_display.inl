@@ -91,17 +91,6 @@
       release_displays(*job, false);
     }
 
-    // Teardown. Once ExitProcess has begun, every other thread (the pool's
-    // too) has ended: a job that has not run never will, and none runs.
-    void wait_releases(state::release_jobs &jobs) {
-      using shutdown_query = BOOLEAN(NTAPI *)();
-      static const auto shutting_down = reinterpret_cast<shutdown_query>(
-        reinterpret_cast<void *>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlDllShutdownInProgress")));
-      if (sunshine_addon_lifetime::stopping() || (shutting_down && shutting_down())) return;
-      std::unique_lock lock(jobs.mutex);
-      jobs.idle.wait(lock, [&jobs] { return !jobs.outstanding; });
-    }
-
     void retire_display(state &data, state::display_entry &entry, std::uint64_t present) {
       const auto format = static_cast<api::format>(entry.format);
       data.retired_displays.push_back({entry.texture, entry.view, present, 0,
@@ -259,7 +248,7 @@
     if (auto *data = runtime->get_private_data<state>()) {
       if (!sunshine_addon_lifetime::stopping()) hand_over_fg_switch(*data);
       // Every release job of this runtime finished first: none outlives it.
-      wait_releases(*data->releases);
+      sunshine_game3d::pool::wait_jobs(*data->releases);
       const bool owned = std::any_of(data->displays.begin(), data->displays.end(),
         [](const auto &entry) { return entry.texture.handle != 0; }) || !data->retired_displays.empty();
       if (owned) runtime->get_command_queue()->wait_idle();

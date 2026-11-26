@@ -2,6 +2,8 @@
 #pragma once
 
 #include <windows.h>
+#include <mutex>
+#include "addon_lifetime.h"
 #ifdef SUNSHINE_GAME3D_TEST_CLOCK
 #include <atomic>
 #include <new>
@@ -103,4 +105,21 @@ namespace sunshine_game3d::pool {
     return TrySubmitThreadpoolCallback(callback, context, nullptr);
   }
 #endif
+
+  // Teardown's wait until a set of counted pool jobs has none outstanding:
+  // Jobs holds a mutex, an idle condition and an outstanding count, which a
+  // job decrements under the mutex, notifying idle, once it is done (the
+  // capture owner's storage releases, a runtime's display releases). Once
+  // ExitProcess has begun, every other thread (the pool's too) has ended: a
+  // job that has not run never will and none runs, so it returns at once
+  // then, as it does once the add-on is stopping.
+  template<class Jobs>
+  void wait_jobs(Jobs &jobs) {
+    using shutdown_query = BOOLEAN(NTAPI *)();
+    static const auto shutting_down = reinterpret_cast<shutdown_query>(
+      reinterpret_cast<void *>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlDllShutdownInProgress")));
+    if (sunshine_addon_lifetime::stopping() || (shutting_down && shutting_down())) return;
+    std::unique_lock lock(jobs.mutex);
+    jobs.idle.wait(lock, [&jobs] { return !jobs.outstanding; });
+  }
 }

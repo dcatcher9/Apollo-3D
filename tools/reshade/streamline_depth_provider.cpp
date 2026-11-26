@@ -221,7 +221,6 @@ namespace sunshine_streamline::provider {
     void release_displays(display_release &job, bool pooled);
     void CALLBACK release_task(PTP_CALLBACK_INSTANCE, void *context);
     void submit_release(std::unique_ptr<display_release> job);
-    void wait_releases(state::release_jobs &jobs);
     void collect_displays(api::effect_runtime *runtime, state &data, std::uint64_t present);
     // The frame record's API rows (game3d_frame_record.h): this Present's
     // decision as begin() made it. Nothing reads them.
