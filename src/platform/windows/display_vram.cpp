@@ -61,7 +61,7 @@
 #include "src/host_sbs_drawn_source_order.h"
 #include "src/host_sbs_observation_handoff.h"
 #include "src/host_sbs_packed_presentation_clock.h"
-#include "host_sbs_actual_converter_probe.h"
+#include "host_sbs_converter_test_observer.h"
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <cstring>
@@ -913,7 +913,7 @@ namespace platf::dxgi {
         };
         const bool depth_route = sbs_mode == ::video::SBS_AI || text_game_ai_active;
         // Snapshot probes may read the current source even on an otherwise source-free repeat.
-        if (img_ctx && (!depth_route || probe_context) && !acquire_current_capture()) {
+        if (img_ctx && (!depth_route || test_context) && !acquire_current_capture()) {
           return -1;
         }
 
@@ -1343,10 +1343,10 @@ namespace platf::dxgi {
             return left && right && *left == *right;
           };
           const auto frame_id = ++sbs_frame_sequence;
-          const auto probe_watermark_at_entry = probe_observer.record ? drawn_source_order.last_drawn() : 0u;
-          if (probe_observer.record) {
-            probe_current_source_ticks = img_base.frame_timestamp ? img_base.frame_timestamp->time_since_epoch().count() : 0;
-            probe_current_content_ticks = img_base.content_timestamp ? img_base.content_timestamp->time_since_epoch().count() : 0;
+          const auto test_watermark_at_entry = test_observer.record ? drawn_source_order.last_drawn() : 0u;
+          if (test_observer.record) {
+            test_current_source_ticks = img_base.frame_timestamp ? img_base.frame_timestamp->time_since_epoch().count() : 0;
+            test_current_content_ticks = img_base.content_timestamp ? img_base.content_timestamp->time_since_epoch().count() : 0;
           }
           // Cached geometry borrows only the attribution. A completion may also have the
           // physical slot needed for matched color, capture lifetime, and exact Dump 3D inputs.
@@ -1381,10 +1381,10 @@ namespace platf::dxgi {
                 depth_authority_reprocess_pending = false;
               }
               handoff.select(std::move(*polled));
-              if (probe_observer.record) {
-                actual_converter_probe_v1::event_t event;
-                event.kind = actual_converter_probe_v1::event_e::ack;
-                emit_converter_probe(std::move(event), &slot.attribution, &step_observation, slot.srv.get(), frame_id);
+              if (test_observer.record) {
+                converter_test_observer::event_t event;
+                event.kind = converter_test_observer::event_e::ack;
+                emit_test_observation(std::move(event), &slot.attribution, &step_observation, slot.srv.get(), frame_id);
               }
             }
             if (diagnostics_enabled) {
@@ -1922,7 +1922,7 @@ namespace platf::dxgi {
                     current_source_timestamp &&
                     current_source_timestamp->time_since_epoch().count() ==
                       test_native_pacing.held_source_stamp_ticks->load(std::memory_order_acquire)) {
-                  models::joined_completion_gate_benchmark::configuration_t gate {
+                  models::joined_completion_test_gate::configuration_t gate {
                     .enabled = true,
                     .target_frame_id = frame_id,
                     .hold_after_callback_enter_ms = test_native_pacing.hold_ms,
@@ -2020,11 +2020,11 @@ namespace platf::dxgi {
                     gpu_undecided_transaction_enqueued;
                 }
 
-                if (probe_observer.record) {
-                  actual_converter_probe_v1::event_t e; e.kind=actual_converter_probe_v1::event_e::admission;
+                if (test_observer.record) {
+                  converter_test_observer::event_t e; e.kind=converter_test_observer::event_e::admission;
                   e.force_infer=force_infer_transaction_enqueued; e.gpu_undecided=gpu_undecided_transaction_enqueued;
                   e.optional_work=static_cast<std::uint32_t>(optional_work);
-                  emit_converter_probe(std::move(e),&matched_candidate_slot->attribution,nullptr,matched_candidate_slot->srv.get(),frame_id);
+                  emit_test_observation(std::move(e),&matched_candidate_slot->attribution,nullptr,matched_candidate_slot->srv.get(),frame_id);
                 }
                 // Give the just-submitted matched-frame unit one immediate joined query. For a
                 // conditional transaction this queries only root completion; it never reads the
@@ -2807,12 +2807,12 @@ namespace platf::dxgi {
             }
             final_sbs_is_linear = render_input_is_linear;
             (void) drawn_source_order.note_drawn(draw_colour.pixel_source_frame_id);
-            if (probe_observer.record) {
-              actual_converter_probe_v1::event_t e; e.kind=actual_converter_probe_v1::event_e::draw;
+            if (test_observer.record) {
+              converter_test_observer::event_t e; e.kind=converter_test_observer::event_e::draw;
               e.flat=presentation_output == presentation_output_e::flat;
-              e.cached_current_colour=cached_current_color_warp; e.watermark_before=probe_watermark_at_entry;
+              e.cached_current_colour=cached_current_color_warp; e.watermark_before=test_watermark_at_entry;
               e.watermark_after=drawn_source_order.last_drawn(); e.actual_draw_pixel_source=draw_colour.pixel_source_frame_id;
-              emit_converter_probe(std::move(e),draw_source_attribution,&est,
+              emit_test_observation(std::move(e),draw_source_attribution,&est,
                 draw_colour.srv,frame_id, cached_current_color_warp ? &draw_colour : nullptr);
             }
             const bool cache_recorded_warp = presentation_output != presentation_output_e::flat &&
@@ -2893,17 +2893,17 @@ namespace platf::dxgi {
             host_sbs_encoder_input_state.mark_converted();
           }
           end_sbs_gpu_timer(gpu_timer);
-          if (probe_observer.record) {
-            actual_converter_probe_v1::event_t e; e.kind=repeat_matched_output ? actual_converter_probe_v1::event_e::packed_repeat:actual_converter_probe_v1::event_e::convert_end;
+          if (test_observer.record) {
+            converter_test_observer::event_t e; e.kind=repeat_matched_output ? converter_test_observer::event_e::packed_repeat:converter_test_observer::event_e::convert_end;
             e.current_capture_key = encoder_mutex_lock.owns_lock();
             e.prior_capture_key = prior_capture_lock && prior_capture_lock->owns_lock();
             e.native_planes_written = !rgb && output_conversion_required;
-            e.repeat=repeat_matched_output; e.watermark_before=probe_watermark_at_entry;
+            e.repeat=repeat_matched_output; e.watermark_before=test_watermark_at_entry;
             e.actual_draw_pixel_source=repeat_matched_output ? 0u : draw_colour.pixel_source_frame_id; e.flat=presentation_output == presentation_output_e::flat;
             e.cached_current_colour=cached_current_color_warp; e.watermark_after=drawn_source_order.last_drawn();
             e.packed_valid=matched_presentation_cache.has_fresh_pixels();
             e.route_matches=packed_presentation_route_matches;
-            emit_converter_probe(std::move(e),draw_source_attribution,&est,
+            emit_test_observation(std::move(e),draw_source_attribution,&est,
               repeat_matched_output ? nullptr:draw_colour.srv,frame_id,
               cached_current_color_warp ? &draw_colour : nullptr);
           }
@@ -3440,7 +3440,7 @@ namespace platf::dxgi {
         sbs_dumper.cancel_pending_request();
         return false;
       }
-      if (!video_player_registry && !probe_context) {
+      if (!video_player_registry && !test_context) {
 #ifdef SUNSHINE_TESTS
         if (test_registry_executables.valid()) {
           video_player_registry = std::make_unique<video_player::registry_t>(test_registry_executables);
@@ -3465,7 +3465,7 @@ namespace platf::dxgi {
             depth_estimator = std::move(pipeline.estimator);
             if (depth_estimator) {
               depth_estimator->set_telemetry_performance(sbs_telemetry_performance);
-              if (!probe_context) {
+              if (!test_context) {
                 if (pipeline.selected_matte.ready) {
                   BOOST_LOG(info) << "Adaptive subtitle glyph model active.";
                 } else {
@@ -3534,13 +3534,13 @@ namespace platf::dxgi {
                       << "\" in the background (streaming flat until ready)..."sv;
       Microsoft::WRL::ComPtr<ID3D11Device> dev(device.get());
       Microsoft::WRL::ComPtr<ID3D11DeviceContext> ctx(device_ctx.get());
-      const bool prepare_live_subtitles = !probe_context;
+      const bool prepare_live_subtitles = !test_context;
       using normalized_depth_diagnostics_e = models::video_depth_estimator::normalized_depth_diagnostics_e;
-      const auto normalized_depth_diagnostics = probe_context ?
+      const auto normalized_depth_diagnostics = test_context ?
                                                   normalized_depth_diagnostics_e::enabled :
                                                   normalized_depth_diagnostics_e::disabled;
       using subtitle_legacy_matte_e = models::video_depth_estimator::subtitle_legacy_matte_e;
-      const auto legacy_matte = probe_context ? subtitle_legacy_matte_e::always : subtitle_legacy_matte_e::on_demand;
+      const auto legacy_matte = test_context ? subtitle_legacy_matte_e::always : subtitle_legacy_matte_e::on_demand;
       const bool prepare_text_game_programs = sbs_mode == ::video::SBS_GAME_SBS && text_game_eligible;
       depth_estimator_build_task_t build_task([dev = std::move(dev),
                                                ctx = std::move(ctx),
@@ -4219,7 +4219,7 @@ namespace platf::dxgi {
       bool subtitle_context_suppression_eligible = false;
       // Submitted with the same context generation, so it cannot change within one context.
       models::subtitle_line_policy_e subtitle_line_policy = models::subtitle_line_policy_e::video_caption;
-      std::uint64_t probe_instance = 0u;
+      std::uint64_t test_instance = 0u;
       // CPU-owned submission class authenticates matched completion metadata. The exact final
       // publication receipt independently reports the actual infer/reuse branch and depth owner.
       bool gpu_undecided_transaction = false;
@@ -4291,8 +4291,8 @@ namespace platf::dxgi {
           .display_band = completed->subtitle_contour_source.Get(),
           .condition_params = completed->subtitle_condition_params.Get(),
           .contour_identity = completed->subtitle_contour_identity.Get(),
-          .selected_matte = completed->research_selected_matte.Get(),
-          .selected_receipt = completed->research_selected_matte_receipt.Get(),
+          .selected_matte = completed->subtitle_selected_matte.Get(),
+          .selected_receipt = completed->subtitle_selected_matte_receipt.Get(),
           .frame_id = completed->completed_frame_id,
           .field_width = completed->field_width,
           .field_height = completed->field_height,
@@ -4307,11 +4307,11 @@ namespace platf::dxgi {
       };
     }
 
-    void emit_converter_probe(actual_converter_probe_v1::event_t event, const matched_frame_attribution_t *slot, const models::depth_observation_views_t *result, ID3D11ShaderResourceView *selected, std::uint64_t conversion, const sbs_draw_colour_t *colour = nullptr) noexcept {
-      if (!probe_observer.record) { return; }
+    void emit_test_observation(converter_test_observer::event_t event, const matched_frame_attribution_t *slot, const models::depth_observation_views_t *result, ID3D11ShaderResourceView *selected, std::uint64_t conversion, const sbs_draw_colour_t *colour = nullptr) noexcept {
+      if (!test_observer.record) { return; }
       event.conversion = conversion;
-      event.current_source_stamp_ticks=probe_current_source_ticks;
-      event.current_content_stamp_ticks=probe_current_content_ticks;
+      event.current_source_stamp_ticks=test_current_source_ticks;
+      event.current_content_stamp_ticks=test_current_content_ticks;
       if (matched_presentation_cache.source_timestamp()) event.pixel_source_stamp_ticks=matched_presentation_cache.source_timestamp()->time_since_epoch().count();
       event.draw_source = selected;
       for (std::size_t i=0;i<matched_frame_slots.size();++i) {
@@ -4330,14 +4330,14 @@ namespace platf::dxgi {
       if (result && result->completed_frame_valid) {
         event.publication=result->publication;
         event.publication_current=depth_estimator && depth_estimator->publication_is_current(result->publication);
-        if (event.kind!=actual_converter_probe_v1::event_e::draw || !event.flat) event.ema_motion_mask=result->ema_motion_mask;
+        if (event.kind!=converter_test_observer::event_e::draw || !event.flat) event.ema_motion_mask=result->ema_motion_mask;
       }
       if (depth_estimator) if (const auto q=depth_estimator->joined_completion_gate_status_for_benchmark()) {
         event.query_observed=q->actual_event_queries!=0u; event.literal_last_query_result=q->last_actual_event_query;
         event.literal_query_target_frame=q->configuration.target_frame_id;
         event.gate_entered=q->callback_entered; event.gate_released=q->released;
       }
-      probe_observer.emit(event);
+      test_observer.emit(event);
     }
 
     struct latest_v2_lineage_t {
@@ -4928,12 +4928,12 @@ namespace platf::dxgi {
       const foreground_window::snapshot_t *revalidate_expected = nullptr,
       bool sampling_for_attribution = false
     ) {
-      if (probe_context) {
-        if (source_desc.Width != probe_context->width || source_desc.Height != probe_context->height || !probe_context->instance) {
+      if (test_context) {
+        if (source_desc.Width != test_context->width || source_desc.Height != test_context->height || !test_context->instance) {
           subtitle_context.update({});
         } else {
           subtitle_context.update({models::host_subtitle_context::kind_e::registered_video_player,
-            probe_context->instance, GetCurrentProcessId()});
+            test_context->instance, GetCurrentProcessId()});
         }
         // Deliberately no actual USER32/browser/player claim. Only this labelled fixture
         // instance uses the synthetic scheduling domain; source/receipt authority stays real.
@@ -5356,10 +5356,10 @@ namespace platf::dxgi {
     bool window_region_authorized_for_render(
       const matched_frame_attribution_t &slot
     ) const noexcept {
-      if (probe_context) {
-        return slot.probe_instance == probe_context->instance && slot.probe_instance != 0u &&
-          slot.depth_input_region.source_width == probe_context->width &&
-          slot.depth_input_region.source_height == probe_context->height &&
+      if (test_context) {
+        return slot.test_instance == test_context->instance && slot.test_instance != 0u &&
+          slot.depth_input_region.source_width == test_context->width &&
+          slot.depth_input_region.source_height == test_context->height &&
           subtitle_context.matches(slot.subtitle_context_generation);
       }
       if (!slot.window_region || !window_region_matches_live_authority(*slot.window_region) || slot.live_window_authority_generation == 0u) {
@@ -5846,7 +5846,7 @@ namespace platf::dxgi {
         return false;
       }
 
-      const bool borrow_capture = !probe_context || probe_context->borrow_matched_capture;
+      const bool borrow_capture = !test_context || test_context->borrow_matched_capture;
       if (borrow_capture) {
         slot.capture_image = image_context.img_weak.lock();
       }
@@ -6049,13 +6049,13 @@ namespace platf::dxgi {
       attribution.subtitle_context_generation = subtitle_context.generation();
       attribution.subtitle_context_suppression_eligible =
         attribution.observed_authority.interactive_move_size && subtitle_context.eligible();
-      attribution.probe_instance = probe_context ? probe_context->instance : 0u;
+      attribution.test_instance = test_context ? test_context->instance : 0u;
       attribution.subtitle_line_policy =
         models::host_subtitle_context::requires_centered_lines(subtitle_context.kind()) ?
           models::subtitle_line_policy_e::video_caption :
           models::subtitle_line_policy_e::application_text;
-      attribution.subtitle_context_eligible = probe_context ?
-        subtitle_context.eligible() && source_desc.Width == probe_context->width && source_desc.Height == probe_context->height :
+      attribution.subtitle_context_eligible = test_context ?
+        subtitle_context.eligible() && source_desc.Width == test_context->width && source_desc.Height == test_context->height :
         subtitle_context.eligible() && attribution.window_region &&
         window_region_matches_live_authority(*attribution.window_region) &&
         ((subtitle_context.kind() == models::host_subtitle_context::kind_e::browser_video) ==
@@ -6545,7 +6545,7 @@ namespace platf::dxgi {
         return -1;
       }
 #if !defined(SUNSHINE_TESTS)
-      if (ai_on && !probe_context) {
+      if (ai_on && !test_context) {
         // Cross-process accessibility traversal is isolated in the supervised helper. This lease
         // only exposes an atomic snapshot to the matched-frame path and cannot block streaming.
         // A missing, stale, or ambiguous rectangle simply selects ordinary full-frame V2.
@@ -6572,7 +6572,7 @@ namespace platf::dxgi {
           std::string_view {"source extent is empty"};
       // A text game needs the same depth path as Host AI. A surface that path rejects simply
       // makes this Game 3D session unable to convert one; it stays valid for add-on games.
-      text_game_eligible = ::video::is_game_mode(sbs_mode) && game_source_supported && host_sbs_rejection.empty() && !probe_context;
+      text_game_eligible = ::video::is_game_mode(sbs_mode) && game_source_supported && host_sbs_rejection.empty() && !test_context;
       text_game_ai_active = false;
       text_game_pin.restart_session();
       const bool depth_path_on = ai_on || (sbs_mode == ::video::SBS_GAME_SBS && text_game_eligible);
@@ -7393,13 +7393,13 @@ namespace platf::dxgi {
     models::host_subtitle_context::tracker_t subtitle_context;
     std::optional<subtitle_admission_diagnostic_key_t> last_subtitle_admission_diagnostic;
     std::chrono::steady_clock::time_point last_subtitle_admission_diagnostic_at {};
-    const actual_converter_probe_v1::context_t *probe_context = nullptr;
-    actual_converter_probe_v1::observer_t probe_observer {};
+    const converter_test_observer::context_t *test_context = nullptr;
+    converter_test_observer::observer_t test_observer {};
 #ifdef SUNSHINE_TESTS
-    testing::native_pacing_probe_t test_native_pacing;
+    testing::native_pacing_fixture_t test_native_pacing;
     bool test_native_pacing_gate_configured = false;
 #endif
-    std::int64_t probe_current_source_ticks = 0, probe_current_content_ticks = 0;
+    std::int64_t test_current_source_ticks = 0, test_current_content_ticks = 0;
     bool subtitle_context_reprocess_pending = false;
     models::depth_analysis_generation_tracker_t depth_analysis_generation_tracker;
     foreground_window::continuity_tracker_t foreground_window_tracker;
@@ -7476,39 +7476,39 @@ namespace platf::dxgi {
     namespace {
       using Microsoft::WRL::ComPtr;
 
-      void preparation_probe_require(bool condition, const char *message) {
+      void preparation_fixture_require(bool condition, const char *message) {
         if (!condition) {
           throw std::runtime_error(message);
         }
       }
 
-      void preparation_probe_hr(HRESULT status, const char *message) {
+      void preparation_fixture_hr(HRESULT status, const char *message) {
         if (FAILED(status)) {
           throw std::runtime_error(std::string(message) + ": " + std::to_string(static_cast<long>(status)));
         }
       }
 
-      ComPtr<IDXGIAdapter1> preparation_probe_adapter(const model_preparation_adapter_t &required) {
-        preparation_probe_require((required.luid_low || required.luid_high) && required.vendor_id && required.device_id,
+      ComPtr<IDXGIAdapter1> preparation_fixture_adapter(const model_preparation_adapter_t &required) {
+        preparation_fixture_require((required.luid_low || required.luid_high) && required.vendor_id && required.device_id,
           "Preparation probe requires explicit adapter identity");
         ComPtr<IDXGIFactory1> factory;
-        preparation_probe_hr(CreateDXGIFactory1(IID_PPV_ARGS(&factory)), "Preparation DXGI factory failed");
+        preparation_fixture_hr(CreateDXGIFactory1(IID_PPV_ARGS(&factory)), "Preparation DXGI factory failed");
         ComPtr<IDXGIAdapter1> selected;
         unsigned matches = 0;
         for (UINT index = 0; index != 64u; ++index) {
           ComPtr<IDXGIAdapter1> candidate;
           const auto status = factory->EnumAdapters1(index, &candidate);
           if (status == DXGI_ERROR_NOT_FOUND) {
-            preparation_probe_require(matches == 1u, "Preparation adapter identity missing or ambiguous");
+            preparation_fixture_require(matches == 1u, "Preparation adapter identity missing or ambiguous");
             return selected;
           }
-          preparation_probe_hr(status, "Preparation adapter enumeration failed");
+          preparation_fixture_hr(status, "Preparation adapter enumeration failed");
           DXGI_ADAPTER_DESC1 description {};
-          preparation_probe_hr(candidate->GetDesc1(&description), "Preparation adapter description failed");
+          preparation_fixture_hr(candidate->GetDesc1(&description), "Preparation adapter description failed");
           if (description.AdapterLuid.LowPart != required.luid_low || description.AdapterLuid.HighPart != required.luid_high) {
             continue;
           }
-          preparation_probe_require(description.VendorId == required.vendor_id && description.DeviceId == required.device_id &&
+          preparation_fixture_require(description.VendorId == required.vendor_id && description.DeviceId == required.device_id &&
               !(description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE),
             "Preparation adapter hardware identity differs");
           selected = candidate;
@@ -7517,20 +7517,20 @@ namespace platf::dxgi {
         throw std::runtime_error("Preparation adapter census exceeded its finite bound");
       }
 
-      void preparation_probe_device_adapter(ID3D11Device *device, const model_preparation_adapter_t &required) {
+      void preparation_fixture_device_adapter(ID3D11Device *device, const model_preparation_adapter_t &required) {
         ComPtr<IDXGIDevice> dxgi;
         ComPtr<IDXGIAdapter> adapter;
         DXGI_ADAPTER_DESC description {};
-        preparation_probe_hr(device->QueryInterface(IID_PPV_ARGS(&dxgi)), "Preparation device DXGI query failed");
-        preparation_probe_hr(dxgi->GetAdapter(&adapter), "Preparation device adapter query failed");
-        preparation_probe_hr(adapter->GetDesc(&description), "Preparation actual adapter description failed");
-        preparation_probe_require(description.AdapterLuid.LowPart == required.luid_low && description.AdapterLuid.HighPart == required.luid_high &&
+        preparation_fixture_hr(device->QueryInterface(IID_PPV_ARGS(&dxgi)), "Preparation device DXGI query failed");
+        preparation_fixture_hr(dxgi->GetAdapter(&adapter), "Preparation device adapter query failed");
+        preparation_fixture_hr(adapter->GetDesc(&description), "Preparation actual adapter description failed");
+        preparation_fixture_require(description.AdapterLuid.LowPart == required.luid_low && description.AdapterLuid.HighPart == required.luid_high &&
             description.VendorId == required.vendor_id && description.DeviceId == required.device_id,
           "Preparation actual D3D device differs from explicit adapter");
       }
 
-      struct preparation_probe_display_t final: display_vram_t {
-        native_pacing_probe_t native_pacing;
+      struct preparation_fixture_display_t final: display_vram_t {
+        native_pacing_fixture_t native_pacing;
 
         bool is_hdr() override { return false; }
         capture_e snapshot(const pull_free_image_cb_t &, std::shared_ptr<platf::img_t> &, std::chrono::milliseconds, bool) override {
@@ -7544,11 +7544,11 @@ namespace platf::dxgi {
 
     std::shared_ptr<display_vram_t> make_native_pacing_display(
       const model_preparation_adapter_t &required, unsigned width, unsigned height,
-      const native_pacing_probe_t &probe
+      const native_pacing_fixture_t &probe
     ) {
-      const auto adapter = preparation_probe_adapter(required);
-      preparation_probe_require(platf::dxgi::init() == 0, "Native pacing shader initialization failed");
-      auto display = platf::make_unarmed_capture_display<preparation_probe_display_t>();
+      const auto adapter = preparation_fixture_adapter(required);
+      preparation_fixture_require(platf::dxgi::init() == 0, "Native pacing shader initialization failed");
+      auto display = platf::make_unarmed_capture_display<preparation_fixture_display_t>();
       display->native_pacing = probe;
       adapter->AddRef();
       display->adapter.reset(adapter.Get());
@@ -7561,26 +7561,26 @@ namespace platf::dxgi {
       display->capture_format = DXGI_FORMAT_B8G8R8A8_UNORM;
       display->next_image_id = 1u;
       constexpr D3D_FEATURE_LEVEL levels[] {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
-      preparation_probe_hr(
+      preparation_fixture_hr(
         D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
           levels, 2u, D3D11_SDK_VERSION, &display->device, &display->feature_level, &display->device_ctx),
         "Native pacing capture device creation failed"
       );
-      preparation_probe_device_adapter(display->device.get(), required);
+      preparation_fixture_device_adapter(display->device.get(), required);
       return display;
     }
 
     std::shared_ptr<platf::img_t> upload_native_pacing_image(
       display_vram_t &display, std::span<const std::uint32_t> bgra
     ) {
-      preparation_probe_require(bgra.size() == std::size_t(display.width) * display.height,
+      preparation_fixture_require(bgra.size() == std::size_t(display.width) * display.height,
         "Native pacing source shape differs from its capture device");
       auto image = display.alloc_img();
-      preparation_probe_require(image && display.complete_img(image.get(), false) == 0,
+      preparation_fixture_require(image && display.complete_img(image.get(), false) == 0,
         "Native pacing shared image allocation failed");
       auto &native = static_cast<img_d3d_t &>(*image);
       detail::keyed_mutex_lock_t lock {native.capture_mutex.get()};
-      preparation_probe_require(lock.lock() == S_OK, "Native pacing capture image keyed mutex failed");
+      preparation_fixture_require(lock.lock() == S_OK, "Native pacing capture image keyed mutex failed");
       display.device_ctx->UpdateSubresource(native.capture_texture.get(), 0u, nullptr,
         bgra.data(), native.row_pitch, 0u);
       display.device_ctx->Flush();
@@ -7589,14 +7589,14 @@ namespace platf::dxgi {
     }
 
     model_preparation_memory_t query_model_preparation_memory(const model_preparation_adapter_t &required) {
-      const auto adapter = preparation_probe_adapter(required);
+      const auto adapter = preparation_fixture_adapter(required);
       DXGI_ADAPTER_DESC1 description {};
-      preparation_probe_hr(adapter->GetDesc1(&description), "Preparation memory adapter description failed");
+      preparation_fixture_hr(adapter->GetDesc1(&description), "Preparation memory adapter description failed");
       model_preparation_memory_t result;
       result.adapter = required;
       result.description = platf::to_utf8(description.Description);
       ComPtr<IDXGIAdapter3> adapter3;
-      preparation_probe_hr(adapter.As(&adapter3), "Preparation process memory interface unavailable");
+      preparation_fixture_hr(adapter.As(&adapter3), "Preparation process memory interface unavailable");
       result.local_status = adapter3->QueryVideoMemoryInfo(0u, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &result.local);
       result.nonlocal_status = adapter3->QueryVideoMemoryInfo(0u, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &result.nonlocal);
       return result;
@@ -7609,18 +7609,18 @@ namespace platf::dxgi {
           owner_thread_(std::this_thread::get_id()),
           ready_event_(std::make_shared<safe::event_t<bool>>()) {
         const auto width = request_.width, height = request_.height;
-        preparation_probe_require(width && height && width <= 4096u && height <= 4096u &&
+        preparation_fixture_require(width && height && width <= 4096u && height <= 4096u &&
             request_.bgra.size() == std::size_t(width) * height * 4u,
           "Preparation probe source shape or immutable bytes invalid");
         const auto attributes = GetFileAttributesW(request_.output_root.c_str());
-        preparation_probe_require(request_.output_root.is_absolute() && attributes != INVALID_FILE_ATTRIBUTES &&
+        preparation_fixture_require(request_.output_root.is_absolute() && attributes != INVALID_FILE_ATTRIBUTES &&
             (attributes & FILE_ATTRIBUTE_DIRECTORY) && !(attributes & FILE_ATTRIBUTE_REPARSE_POINT),
           "Preparation probe requires an owned absolute ordinary output directory");
         source_artifact_ = write_artifact("source.bgra8", request_.bgra.data(), request_.bgra.size(), width, height);
 
-        const auto adapter = preparation_probe_adapter(request_.adapter);
-        preparation_probe_require(::platf::dxgi::init() == 0, "Preparation platform shader initialization failed");
-        display_ = std::make_shared<preparation_probe_display_t>();
+        const auto adapter = preparation_fixture_adapter(request_.adapter);
+        preparation_fixture_require(::platf::dxgi::init() == 0, "Preparation platform shader initialization failed");
+        display_ = std::make_shared<preparation_fixture_display_t>();
         display_->width = display_->width_before_rotation = width;
         display_->height = display_->height_before_rotation = height;
         display_->env_width = width;
@@ -7630,33 +7630,33 @@ namespace platf::dxgi {
         display_->capture_format = DXGI_FORMAT_B8G8R8A8_UNORM;
         display_->next_image_id = 1u;
         constexpr D3D_FEATURE_LEVEL levels[] {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
-        preparation_probe_hr(D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+        preparation_fixture_hr(D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
           levels, 2u, D3D11_SDK_VERSION, &display_->device, nullptr, &display_->device_ctx), "Preparation source device creation failed");
-        preparation_probe_device_adapter(display_->device.get(), request_.adapter);
+        preparation_fixture_device_adapter(display_->device.get(), request_.adapter);
         converter_ = std::make_unique<d3d_base_encode_device>();
-        preparation_probe_require(converter_->init(display_, adapter.Get(), pix_fmt_e::nv12) == 0, "Preparation actual converter initialization failed");
-        preparation_probe_device_adapter(converter_->device.get(), request_.adapter);
-        probe_context_ = {width, height, 0x5052455041524531ull};
+        preparation_fixture_require(converter_->init(display_, adapter.Get(), pix_fmt_e::nv12) == 0, "Preparation actual converter initialization failed");
+        preparation_fixture_device_adapter(converter_->device.get(), request_.adapter);
+        test_context_ = {width, height, 0x5052455041524531ull};
         if (request_.hard_disabled_dirty_source) {
-          preparation_probe_require(!request_.production_observer_path, "Dirty source probe requires the synthetic context");
+          preparation_fixture_require(!request_.production_observer_path, "Dirty source probe requires the synthetic context");
           // The existing zero-instance branch disables subtitles without native authority.
-          probe_context_.instance = 0u;
-          probe_context_.borrow_matched_capture = true;
+          test_context_.instance = 0u;
+          test_context_.borrow_matched_capture = true;
           damage_history_ = std::make_shared<detail::ddup_damage_history_t>();
         }
         if (request_.production_observer_path) {
-          preparation_probe_require(request_.registry_executables.valid(), "Production-observer probe requires its finite registry future");
+          preparation_fixture_require(request_.registry_executables.valid(), "Production-observer probe requires its finite registry future");
           converter_->test_registry_executables = request_.registry_executables;
         } else {
-          converter_->probe_context = &probe_context_;
+          converter_->test_context = &test_context_;
         }
-        converter_->probe_observer = {this, &impl_t::record};
+        converter_->test_observer = {this, &impl_t::record};
 
         image_ = display_->alloc_img();
-        preparation_probe_require(image_ && display_->complete_img(image_.get(), false) == 0, "Preparation shared source image allocation failed");
+        preparation_fixture_require(image_ && display_->complete_img(image_.get(), false) == 0, "Preparation shared source image allocation failed");
         auto &image = static_cast<img_d3d_t &>(*image_);
-        preparation_probe_require(image.capture_mutex.get() != nullptr, "Preparation source keyed mutex unavailable");
-        preparation_probe_require(image.capture_mutex->AcquireSync(0u, 5000u) == S_OK, "Preparation immutable source mutex failed");
+        preparation_fixture_require(image.capture_mutex.get() != nullptr, "Preparation source keyed mutex unavailable");
+        preparation_fixture_require(image.capture_mutex->AcquireSync(0u, 5000u) == S_OK, "Preparation immutable source mutex failed");
         {
           auto release = util::fail_guard([&image]() { image.capture_mutex->ReleaseSync(0u); });
           display_->device_ctx->UpdateSubresource(image.capture_texture.get(), 0u, nullptr, request_.bgra.data(), width * 4u, 0u);
@@ -7681,7 +7681,7 @@ namespace platf::dxgi {
 
       void set_mode(::video::sbs_mode_e mode) {
         assert_owner();
-        preparation_probe_require(mode == ::video::SBS_OFF || mode == ::video::SBS_GAME_MONO || mode == ::video::SBS_AI,
+        preparation_fixture_require(mode == ::video::SBS_OFF || mode == ::video::SBS_GAME_MONO || mode == ::video::SBS_AI,
           "Preparation probe supports flat, no-provider Game mono and actual Host AI only");
         const auto output_width = mode == ::video::SBS_AI ? request_.width * 2u : request_.width;
         // Only synchronous initialization sees this finite external factory edge. The real
@@ -7691,10 +7691,10 @@ namespace platf::dxgi {
         {
           auto *previous = std::exchange(active_model_preparation_watch_probe, &watch_probe_);
           auto restore_watch = util::fail_guard([previous]() { active_model_preparation_watch_probe = previous; });
-          preparation_probe_require(converter_->init_rgb_output(static_cast<int>(output_width), static_cast<int>(request_.height),
+          preparation_fixture_require(converter_->init_rgb_output(static_cast<int>(output_width), static_cast<int>(request_.height),
             mode, settings, ready_event_) == 0, "Preparation actual RGB mode initialization failed");
         }
-        preparation_probe_require(!converter_->reshade_receiver, "Preparation probe unexpectedly constructed a provider receiver");
+        preparation_fixture_require(!converter_->reshade_receiver, "Preparation probe unexpectedly constructed a provider receiver");
         target_.Reset();
         target_rtv_.Reset();
         D3D11_TEXTURE2D_DESC description {};
@@ -7704,8 +7704,8 @@ namespace platf::dxgi {
         description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
         description.Usage = D3D11_USAGE_DEFAULT;
         description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-        preparation_probe_hr(converter_->device->CreateTexture2D(&description, nullptr, &target_), "Preparation output allocation failed");
-        preparation_probe_hr(converter_->device->CreateRenderTargetView(target_.Get(), nullptr, &target_rtv_), "Preparation output RTV failed");
+        preparation_fixture_hr(converter_->device->CreateTexture2D(&description, nullptr, &target_), "Preparation output allocation failed");
+        preparation_fixture_hr(converter_->device->CreateRenderTargetView(target_.Get(), nullptr, &target_rtv_), "Preparation output RTV failed");
         constexpr float clear[4] {};
         converter_->device_ctx->ClearRenderTargetView(target_rtv_.Get(), clear);
         output_width_ = output_width;
@@ -7751,7 +7751,7 @@ namespace platf::dxgi {
         result.setup_watch_rect = watch_probe_.last_rect;
         result.setup_watch_present = static_cast<bool>(converter_->game_setup_watch);
         result.receiver_present = static_cast<bool>(converter_->reshade_receiver);
-        result.production_observer_path = converter_->probe_context == nullptr;
+        result.production_observer_path = converter_->test_context == nullptr;
         result.registry_present = static_cast<bool>(converter_->video_player_registry);
         result.registry_ready = result.registry_present && converter_->video_player_registry->ready();
         result.registry_ready_observed = converter_->video_player_registry_ready_observed;
@@ -7775,7 +7775,7 @@ namespace platf::dxgi {
       model_preparation_converter_snapshot_t convert_retained() {
         assert_owner();
         const bool sampled_ready = ready_event_->peek();
-        preparation_probe_require(converter_->convert_rgb(*image_, target_.Get(), target_rtv_.Get(), false, std::nullopt) == d3d_base_encode_device::rgb_conversion_e::converted,
+        preparation_fixture_require(converter_->convert_rgb(*image_, target_.Get(), target_rtv_.Get(), false, std::nullopt) == d3d_base_encode_device::rgb_conversion_e::converted,
           "Preparation actual retained-source conversion failed");
         ++conversions_;
         if (sampled_ready) {
@@ -7796,7 +7796,7 @@ namespace platf::dxgi {
 
       model_preparation_artifact_t snapshot_output(std::string_view label) {
         assert_owner();
-        preparation_probe_require(!label.empty() && label.size() <= 48u && std::all_of(label.begin(), label.end(), [](unsigned char value) {
+        preparation_fixture_require(!label.empty() && label.size() <= 48u && std::all_of(label.begin(), label.end(), [](unsigned char value) {
           return (value >= 'a' && value <= 'z') || (value >= '0' && value <= '9') || value == '-';
         }), "Preparation artifact label invalid");
         D3D11_TEXTURE2D_DESC description {};
@@ -7805,14 +7805,14 @@ namespace platf::dxgi {
         description.BindFlags = 0u;
         description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         ComPtr<ID3D11Texture2D> staging;
-        preparation_probe_hr(converter_->device->CreateTexture2D(&description, nullptr, &staging), "Preparation output staging allocation failed");
+        preparation_fixture_hr(converter_->device->CreateTexture2D(&description, nullptr, &staging), "Preparation output staging allocation failed");
         converter_->device_ctx->CopyResource(staging.Get(), target_.Get());
         std::vector<std::uint8_t> bytes(std::size_t(output_width_) * request_.height * 4u);
         D3D11_MAPPED_SUBRESOURCE mapped {};
-        preparation_probe_hr(converter_->device_ctx->Map(staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped), "Preparation explicit output readback failed");
+        preparation_fixture_hr(converter_->device_ctx->Map(staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped), "Preparation explicit output readback failed");
         {
           auto unmap = util::fail_guard([&]() { converter_->device_ctx->Unmap(staging.Get(), 0u); });
-          preparation_probe_require(mapped.RowPitch >= output_width_ * 4u, "Preparation output readback pitch invalid");
+          preparation_fixture_require(mapped.RowPitch >= output_width_ * 4u, "Preparation output readback pitch invalid");
           for (std::uint32_t row = 0; row != request_.height; ++row) {
             std::memcpy(bytes.data() + std::size_t(row) * output_width_ * 4u,
               static_cast<const std::uint8_t *>(mapped.pData) + std::size_t(row) * mapped.RowPitch, output_width_ * 4u);
@@ -7823,24 +7823,24 @@ namespace platf::dxgi {
 
       void upload_dirty_source(std::span<const std::uint8_t> bgra, const RECT &damage) {
         assert_owner();
-        preparation_probe_require(damage_history_ && bgra.size() == request_.bgra.size() && damage.left >= 0 && damage.top >= 0 && damage.right <= static_cast<LONG>(request_.width) && damage.bottom <= static_cast<LONG>(request_.height) && damage.left < damage.right && damage.top < damage.bottom, "Dirty source probe requires bounded known damage");
+        preparation_fixture_require(damage_history_ && bgra.size() == request_.bgra.size() && damage.left >= 0 && damage.top >= 0 && damage.right <= static_cast<LONG>(request_.width) && damage.bottom <= static_cast<LONG>(request_.height) && damage.left < damage.right && damage.top < damage.bottom, "Dirty source probe requires bounded known damage");
         bool changed = false;
         for (std::uint32_t y = 0; y != request_.height; ++y) {
           for (std::uint32_t x = 0; x != request_.width; ++x) {
             const auto offset = (std::size_t(y) * request_.width + x) * 4u;
             if (std::memcmp(bgra.data() + offset, request_.bgra.data() + offset, 4u) != 0) {
-              preparation_probe_require(x >= static_cast<unsigned>(damage.left) && x < static_cast<unsigned>(damage.right) && y >= static_cast<unsigned>(damage.top) && y < static_cast<unsigned>(damage.bottom), "Changed pixels escape declared damage");
+              preparation_fixture_require(x >= static_cast<unsigned>(damage.left) && x < static_cast<unsigned>(damage.right) && y >= static_cast<unsigned>(damage.top) && y < static_cast<unsigned>(damage.bottom), "Changed pixels escape declared damage");
               changed = true;
             }
           }
         }
-        preparation_probe_require(changed, "Dirty source probe refuses identical uploads");
+        preparation_fixture_require(changed, "Dirty source probe refuses identical uploads");
         // Retain A's immutable pool image while the real matched lineage owns it. B is a
         // distinct shared capture allocation, as on the ordinary borrowed-capture path.
         auto replacement = display_->alloc_img();
-        preparation_probe_require(replacement && display_->complete_img(replacement.get(), false) == 0, "Dirty source allocation failed");
+        preparation_fixture_require(replacement && display_->complete_img(replacement.get(), false) == 0, "Dirty source allocation failed");
         auto &image = static_cast<img_d3d_t &>(*replacement);
-        preparation_probe_require(image.capture_mutex->AcquireSync(0u, 5000u) == S_OK, "Dirty source capture mutex failed");
+        preparation_fixture_require(image.capture_mutex->AcquireSync(0u, 5000u) == S_OK, "Dirty source capture mutex failed");
         {
           auto release = util::fail_guard([&image]() {
             image.capture_mutex->ReleaseSync(0u);
@@ -7866,26 +7866,26 @@ namespace platf::dxgi {
         ComPtr<ID3D11Resource> resource;
         drawn_source_->GetResource(&resource);
         ComPtr<ID3D11Texture2D> texture;
-        preparation_probe_hr(resource.As(&texture), "Draw source is not a texture");
+        preparation_fixture_hr(resource.As(&texture), "Draw source is not a texture");
         D3D11_TEXTURE2D_DESC description {};
         texture->GetDesc(&description);
-        preparation_probe_require(description.Width == request_.width && description.Height == request_.height && description.Format == DXGI_FORMAT_B8G8R8A8_UNORM, "Unexpected actual draw source shape");
+        preparation_fixture_require(description.Width == request_.width && description.Height == request_.height && description.Format == DXGI_FORMAT_B8G8R8A8_UNORM, "Unexpected actual draw source shape");
         description.Usage = D3D11_USAGE_STAGING;
         description.BindFlags = description.MiscFlags = 0u;
         description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         ComPtr<ID3D11Texture2D> staging;
-        preparation_probe_hr(converter_->device->CreateTexture2D(&description, nullptr, &staging), "Draw source staging failed");
+        preparation_fixture_hr(converter_->device->CreateTexture2D(&description, nullptr, &staging), "Draw source staging failed");
         ComPtr<IDXGIKeyedMutex> mutex;
-        preparation_probe_hr(texture.As(&mutex), "Borrowed draw source keyed mutex unavailable");
-        preparation_probe_require(mutex->AcquireSync(0u, 5000u) == S_OK, "Draw source readback mutex failed");
+        preparation_fixture_hr(texture.As(&mutex), "Borrowed draw source keyed mutex unavailable");
+        preparation_fixture_require(mutex->AcquireSync(0u, 5000u) == S_OK, "Draw source readback mutex failed");
         auto release = util::fail_guard([&]() { mutex->ReleaseSync(0u); });
         converter_->device_ctx->CopyResource(staging.Get(), texture.Get());
         D3D11_MAPPED_SUBRESOURCE mapped {};
-        preparation_probe_hr(converter_->device_ctx->Map(staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped), "Draw source readback failed");
+        preparation_fixture_hr(converter_->device_ctx->Map(staging.Get(), 0u, D3D11_MAP_READ, 0u, &mapped), "Draw source readback failed");
         auto unmap = util::fail_guard([&]() {
           converter_->device_ctx->Unmap(staging.Get(), 0u);
         });
-        preparation_probe_require(mapped.RowPitch >= request_.width * 4u, "Draw source pitch invalid");
+        preparation_fixture_require(mapped.RowPitch >= request_.width * 4u, "Draw source pitch invalid");
         for (std::uint32_t y = 0; y != request_.height; ++y) {
           if (std::memcmp(static_cast<const std::uint8_t *>(mapped.pData) + std::size_t(y) * mapped.RowPitch, request_.bgra.data() + std::size_t(y) * request_.width * 4u, request_.width * 4u) != 0) {
             return false;
@@ -7906,30 +7906,30 @@ namespace platf::dxgi {
 
     private:
       void assert_owner() const {
-        preparation_probe_require(std::this_thread::get_id() == owner_thread_, "Preparation converter used outside its D3D owner");
+        preparation_fixture_require(std::this_thread::get_id() == owner_thread_, "Preparation converter used outside its D3D owner");
       }
 
       model_preparation_artifact_t write_artifact(const std::string &name, const std::uint8_t *bytes, std::size_t size,
         std::uint32_t width, std::uint32_t height) const {
         const auto path = request_.output_root / name;
-        preparation_probe_require(!std::filesystem::exists(path), "Preparation probe refuses artifact overwrite");
+        preparation_fixture_require(!std::filesystem::exists(path), "Preparation probe refuses artifact overwrite");
         std::ofstream output(path, std::ios::binary);
         output.write(reinterpret_cast<const char *>(bytes), static_cast<std::streamsize>(size));
         output.flush();
-        preparation_probe_require(output.good(), "Preparation probe artifact write failed");
+        preparation_fixture_require(output.good(), "Preparation probe artifact write failed");
         output.close();
         const auto hash = models::file_sha256_hex(path);
-        preparation_probe_require(hash.size() == 64u, "Preparation probe artifact hash failed");
+        preparation_fixture_require(hash.size() == 64u, "Preparation probe artifact hash failed");
         return {path, hash, width, height, width * 4u};
       }
 
-      static void record(void *state, const actual_converter_probe_v1::event_t &event) noexcept {
+      static void record(void *state, const converter_test_observer::event_t &event) noexcept {
         auto &self = *static_cast<impl_t *>(state);
-        if (event.kind == actual_converter_probe_v1::event_e::admission) {
+        if (event.kind == converter_test_observer::event_e::admission) {
           self.draw_.last_admission_gpu_undecided = event.gpu_undecided;
           self.draw_.last_admission_optional_work = event.optional_work;
         }
-        if (event.kind != actual_converter_probe_v1::event_e::draw) {
+        if (event.kind != converter_test_observer::event_e::draw) {
           return;
         }
         if (self.request_.hard_disabled_dirty_source) {
@@ -7954,12 +7954,12 @@ namespace platf::dxgi {
       std::thread::id owner_thread_;
       std::shared_ptr<safe::event_t<bool>> ready_event_;
       model_preparation_watch_probe_t watch_probe_;
-      actual_converter_probe_v1::context_t probe_context_;
+      converter_test_observer::context_t test_context_;
       model_preparation_converter_snapshot_t draw_;
       model_preparation_artifact_t source_artifact_;
       std::shared_ptr<detail::ddup_damage_history_t> damage_history_;
       ComPtr<ID3D11ShaderResourceView> drawn_source_;
-      std::shared_ptr<preparation_probe_display_t> display_;
+      std::shared_ptr<preparation_fixture_display_t> display_;
       std::shared_ptr<platf::img_t> image_;
       ComPtr<ID3D11Texture2D> target_;
       ComPtr<ID3D11RenderTargetView> target_rtv_;
@@ -10376,9 +10376,9 @@ namespace platf::dxgi {
         return {};
       }
 #ifdef SUNSHINE_TESTS
-      if (const auto *fixture = dynamic_cast<const testing::preparation_probe_display_t *>(display.get())) {
+      if (const auto *fixture = dynamic_cast<const testing::preparation_fixture_display_t *>(display.get())) {
         device.base.test_native_pacing = fixture->native_pacing;
-        device.base.probe_observer = fixture->native_pacing.converter_observer;
+        device.base.test_observer = fixture->native_pacing.converter_observer;
       }
 #endif
       return owner;

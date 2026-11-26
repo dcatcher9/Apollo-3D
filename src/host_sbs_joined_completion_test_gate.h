@@ -10,7 +10,7 @@
 #include <thread>
 #include <windows.h>
 
-namespace models::joined_completion_gate_benchmark {
+namespace models::joined_completion_test_gate {
   struct configuration_t {
     bool enabled = false;
     std::uint64_t target_frame_id = 0;

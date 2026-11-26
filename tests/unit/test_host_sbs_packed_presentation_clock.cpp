@@ -146,7 +146,7 @@ TEST(HostSbsPackedPresentationClockTest, TimeoutReportsActualFlatOnceAndOnlyComp
 }
 
 TEST(HostSbsPackedPresentationClockTest, PacingTestGateHoldStaysWithinItsIndependentSafetyBound) {
-  models::joined_completion_gate_benchmark::configuration_t gate;
+  models::joined_completion_test_gate::configuration_t gate;
   EXPECT_EQ(gate.hold_after_callback_enter_ms, 120u);
   EXPECT_EQ(gate.callback_safety_timeout_ms, 500u);
   gate.enabled = true;

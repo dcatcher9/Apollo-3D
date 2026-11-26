@@ -7093,7 +7093,7 @@ TEST(DirectxShaderSourceTest, Convex2xRoiRendererUsesTheAuthenticatedFieldConten
   // The realized source rectangle and field content must follow the selected completed owner
   // into the renderer constants.
   const auto plan = display.find("sbs_draw_geometry_t select_sbs_draw_geometry(");
-  const auto plan_end = display.find("    void emit_converter_probe(", plan);
+  const auto plan_end = display.find("    void emit_test_observation(", plan);
   ASSERT_NE(plan, std::string::npos);
   ASSERT_NE(plan_end, std::string::npos);
   const auto selection = display.substr(plan, plan_end - plan);

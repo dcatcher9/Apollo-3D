@@ -6,7 +6,7 @@
   #include "src/live_model_preparation.h"
   #include "src/platform/common.h"
   #include "src/platform/windows/display.h"
-  #include "src/platform/windows/host_sbs_actual_converter_probe.h"
+  #include "src/platform/windows/host_sbs_converter_test_observer.h"
   #include "src/platform/windows/misc.h"
   #include "src/platform/windows/model_preparation_converter_test.h"
   #include "src/utility.h"
@@ -276,7 +276,7 @@ namespace {
     EXPECT_GT(result.next_frame_nr, 2);
   }
 
-  namespace probe = platf::dxgi::actual_converter_probe_v1;
+  namespace probe = platf::dxgi::converter_test_observer;
 
   // Copy values only: diagnostic resource aliases must not outlive their observed conversion.
   struct pacing_event_t {
@@ -450,7 +450,7 @@ namespace {
     observed.qualified_owner = scenario.qualified_owner;
     observed.mail = std::make_shared<safe::mail_raw_t>();
     observed.images = std::make_shared<video::img_event_t::element_type>();
-    fixture::native_pacing_probe_t binding;
+    fixture::native_pacing_fixture_t binding;
     binding.held_source_stamp_ticks = &observed.held_source;
     binding.hold_ms = 120;
     binding.converter_observer = {&observed, held_pacing_t::record};
@@ -813,7 +813,7 @@ namespace {
     });
     constexpr unsigned width = 1280, height = 720;
     repeat_coalescing_probe_t observed;
-    fixture::native_pacing_probe_t binding;
+    fixture::native_pacing_fixture_t binding;
     binding.converter_observer = {&observed, repeat_coalescing_probe_t::record};
     binding.record_delivery = repeat_coalescing_probe_t::record_delivery;
     auto display = fixture::make_native_pacing_display(*adapter, width, height, binding);

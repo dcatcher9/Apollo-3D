@@ -3486,7 +3486,7 @@ namespace models {
       Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> support, identity;
       Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> history, source, probability;
       Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> glyph_matte, condition_params;
-      Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> research_selected_matte, research_selected_matte_receipt;
+      Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_selected_matte, subtitle_selected_matte_receipt;
     } completed_contour;
     subtitle_publication::pool_t subtitle_draw_pool;
     std::weak_ptr<const subtitle_publication::views_t> completed_subtitle_draw;
@@ -3670,7 +3670,7 @@ namespace models {
     CUevent depth_inference_done_event = nullptr;
     inference_completion_notification_t root_completion_notification;
     bool completion_notification_disabled = false;
-    std::unique_ptr<joined_completion_gate_benchmark::controller_t> benchmark_joined_completion_gate;
+    std::unique_ptr<joined_completion_test_gate::controller_t> completion_test_gate;
     bool benchmark_joined_completion_gate_configuration_seen = false;
     bool near_identical_detector_available = false;
     bool near_identical_detector_error_logged = false;
@@ -3825,8 +3825,8 @@ namespace models {
       return resolved;
     }
 
-    bool install_benchmark_joined_completion_gate(
-      const joined_completion_gate_benchmark::configuration_t &configuration
+    bool install_joined_completion_test_gate(
+      const joined_completion_test_gate::configuration_t &configuration
     ) {
       if (!is_operational() || benchmark_joined_completion_gate_configuration_seen ||
           !configuration.valid()) {
@@ -3840,11 +3840,11 @@ namespace models {
       if (!inference_event_poll_available) {
         return false;
       }
-      auto gate = std::make_unique<joined_completion_gate_benchmark::controller_t>(configuration);
+      auto gate = std::make_unique<joined_completion_test_gate::controller_t>(configuration);
       if (!gate->available(cuda_driver_api::get())) {
         return false;
       }
-      benchmark_joined_completion_gate = std::move(gate);
+      completion_test_gate = std::move(gate);
       return true;
     }
 
@@ -4318,8 +4318,8 @@ namespace models {
       }
 
       const CUresult root_query = cuda.cuEventQuery(depth_inference_done_event);
-      if (benchmark_joined_completion_gate) {
-        benchmark_joined_completion_gate->note_actual_event_query(pending_root->frame_id, root_query);
+      if (completion_test_gate) {
+        completion_test_gate->note_actual_event_query(pending_root->frame_id, root_query);
       }
       switch (normalized_cuda_readiness(root_query)) {
         case detail::async_stream_readiness_e::ready:
@@ -6149,7 +6149,7 @@ namespace models {
     ~impl() {
       // Release private callback before any existing bounded CUDA teardown query.
       // Queued userdata owns its state even if the old quarantine/retain path is taken.
-      if (benchmark_joined_completion_gate) benchmark_joined_completion_gate->cancel_and_release();
+      if (completion_test_gate) completion_test_gate->cancel_and_release();
       release_subtitle_direct_glyph();
       auto &cuda = cuda_driver_api::get();
       bool cleanup_execution_ok = cuda.is_valid() && cuda_ctx;
@@ -8404,12 +8404,12 @@ namespace models {
         gpu_undecided_requires_force_infer_refresh = false;
       }
       if (subtitle_direct_glyph_enabled && !completed.subtitle_work_suppressed &&
-          completed_contour.research_selected_matte && completed_contour.research_selected_matte_receipt) {
+          completed_contour.subtitle_selected_matte && completed_contour.subtitle_selected_matte_receipt) {
         completed.subtitle_draw_publication = subtitle_draw_pool.publish(device.Get(), context.Get(), {
           depth_coordinate_v2_final_srv.Get(), depth_coordinate_v2_state_srv.Get(),
-          completed_contour.research_selected_matte.Get(), completed_contour.source.Get(),
+          completed_contour.subtitle_selected_matte.Get(), completed_contour.source.Get(),
           completed_contour.condition_params.Get(), completed_contour.identity.Get(),
-          completed_contour.research_selected_matte_receipt.Get()
+          completed_contour.subtitle_selected_matte_receipt.Get()
         });
         if (!completed.subtitle_draw_publication && !subtitle_draw_copy_failure_logged) {
           BOOST_LOG(warning) << "Could not retain the completed Direct Glyph draw inputs; using ordinary scene depth.";
@@ -8494,8 +8494,8 @@ namespace models {
           if (!completed.subtitle_work_suppressed || subtitle_legacy_matte_required()) {
             r.subtitle_glyph_matte = completed_contour.glyph_matte;
           }
-          r.research_selected_matte = completed_contour.research_selected_matte;
-          r.research_selected_matte_receipt = completed_contour.research_selected_matte_receipt;
+          r.subtitle_selected_matte = completed_contour.subtitle_selected_matte;
+          r.subtitle_selected_matte_receipt = completed_contour.subtitle_selected_matte_receipt;
           r.subtitle_condition_params = completed_contour.condition_params;
           r.subtitle_contour_identity = completed_contour.identity;
           r.subtitle_contour_history = completed_contour.history;
@@ -8507,14 +8507,14 @@ namespace models {
               const auto &srv = r.subtitle_draw_publication->srv;
               r.shadow_base_final_parallax = srv[subtitle_publication::base];
               r.shadow_state = srv[subtitle_publication::state];
-              r.research_selected_matte = srv[subtitle_publication::matte];
+              r.subtitle_selected_matte = srv[subtitle_publication::matte];
               r.subtitle_contour_source = srv[subtitle_publication::display_band];
               r.subtitle_condition_params = srv[subtitle_publication::condition];
               r.subtitle_contour_identity = srv[subtitle_publication::identity];
-              r.research_selected_matte_receipt = srv[subtitle_publication::receipt];
+              r.subtitle_selected_matte_receipt = srv[subtitle_publication::receipt];
             } else {
-              r.research_selected_matte.Reset();
-              r.research_selected_matte_receipt.Reset();
+              r.subtitle_selected_matte.Reset();
+              r.subtitle_selected_matte_receipt.Reset();
             }
           }
           // Always-on evaluation can inspect the held or cleared auxiliary fields when
@@ -8663,8 +8663,8 @@ namespace models {
         subtitle_direct_glyph_tail.reset();
         if (subtitle_selected_matte_commands) {
           const auto selected = subtitle_direct_glyph_publication.views();
-          completed_contour.research_selected_matte = selected.matte;
-          completed_contour.research_selected_matte_receipt = selected.receipt;
+          completed_contour.subtitle_selected_matte = selected.matte;
+          completed_contour.subtitle_selected_matte_receipt = selected.receipt;
         }
       }
 
@@ -10463,13 +10463,13 @@ namespace models {
 
       // Native pacing test gate: actual CUDA ordering after the unmap tail, before the actual
       // root completion event. Does not change source, observation or Base/SCT clocks.
-      if (enqueued && !is_terminal() && benchmark_joined_completion_gate &&
-          benchmark_joined_completion_gate->targets(frame_id)) {
+      if (enqueued && !is_terminal() && completion_test_gate &&
+          completion_test_gate->targets(frame_id)) {
         const auto gate_result = inference_event_poll_available ?
-          benchmark_joined_completion_gate->enqueue_after_interop_unmaps(cuda, cu_stream, frame_id) :
+          completion_test_gate->enqueue_after_interop_unmaps(cuda, cu_stream, frame_id) :
           CUDA_ERROR_NOT_SUPPORTED;
         if (gate_result != CUDA_SUCCESS) {
-          benchmark_joined_completion_gate->cancel_and_release();
+          completion_test_gate->cancel_and_release();
           (void) observe_joined_cuda_failure("private benchmark completion gate", gate_result, true);
           enqueued = false;
           ocr_armed = false;
@@ -10621,17 +10621,17 @@ namespace models {
 
 #ifdef SUNSHINE_TESTS
   bool video_depth_estimator::configure_joined_completion_gate_for_native_pacing_test(
-    const joined_completion_gate_benchmark::configuration_t &configuration
+    const joined_completion_test_gate::configuration_t &configuration
   ) {
     return pimpl && !pimpl->pending_root && !pimpl->pending_depth_inference_event_recorded &&
-           pimpl->install_benchmark_joined_completion_gate(configuration);
+           pimpl->install_joined_completion_test_gate(configuration);
   }
 #endif
 
-  std::optional<joined_completion_gate_benchmark::snapshot_t>
+  std::optional<joined_completion_test_gate::snapshot_t>
   video_depth_estimator::joined_completion_gate_status_for_benchmark() const noexcept {
-    if (!pimpl || !pimpl->benchmark_joined_completion_gate) return std::nullopt;
-    return pimpl->benchmark_joined_completion_gate->snapshot();
+    if (!pimpl || !pimpl->completion_test_gate) return std::nullopt;
+    return pimpl->completion_test_gate->snapshot();
   }
 
   bool video_depth_estimator::can_accept_frame() {

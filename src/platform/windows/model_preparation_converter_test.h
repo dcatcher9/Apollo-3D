@@ -3,7 +3,7 @@
 #if defined(_WIN32) && defined(SUNSHINE_TESTS)
   #include "src/video.h"
   #include "src/video_depth_estimator.h"
-  #include "host_sbs_actual_converter_probe.h"
+  #include "host_sbs_converter_test_observer.h"
 
   #include <atomic>
   #include <chrono>
@@ -47,10 +47,10 @@ namespace platf::dxgi::testing {
     bool notification_callback_pending = false;
   };
 
-  struct native_pacing_probe_t {
+  struct native_pacing_fixture_t {
     const std::atomic<std::int64_t> *held_source_stamp_ticks = nullptr;
     unsigned hold_ms = 120;
-    actual_converter_probe_v1::observer_t converter_observer;
+    converter_test_observer::observer_t converter_observer;
     void (*record_delivery)(void *, const native_pacing_delivery_t &) noexcept = nullptr;
     void (*record_poll)(void *, const native_pacing_poll_t &) noexcept = nullptr;
   };
@@ -59,7 +59,7 @@ namespace platf::dxgi::testing {
   // capture image and keyed mutex it receives from a normal display.
   std::shared_ptr<display_vram_t> make_native_pacing_display(
     const model_preparation_adapter_t &adapter, unsigned width, unsigned height,
-    const native_pacing_probe_t &probe = {}
+    const native_pacing_fixture_t &probe = {}
   );
   std::shared_ptr<platf::img_t> upload_native_pacing_image(
     display_vram_t &display, std::span<const std::uint32_t> bgra

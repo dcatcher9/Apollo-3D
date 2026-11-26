@@ -106,7 +106,6 @@ namespace models {
   enum class subtitle_line_policy_e : std::uint32_t {
     video_caption = 0u,  ///< Centered on the reference; short pieces need several learned cues.
     application_text = 1u,  ///< Owner-enabled foreground app: any horizontal position; one learned line admits short pieces.
-    experimental_centered_horizontal = 2u,  ///< File-fed diagnostic for slightly off-center horizontal captions.
   };
 
   [[nodiscard]] constexpr bool depth_optional_work_suppresses_subtitle(

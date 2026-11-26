@@ -409,8 +409,8 @@ and publishes the matte, alpha8 and receipt. `src/host_sbs_direct_glyph_gpu.h` r
 and `host_sbs_raw_matte_early_cs.hlsl`, and the publisher uses
 `host_sbs_raw_matte_empty_gate_cs.hlsl` as its empty gate. These three files keep their historical
 names because they belong to the pinned Direct Glyph closures. The receipt ABI constant for
-algorithm 2 is still named `current_outline_algorithm`, and the estimator result fields are still
-named `research_selected_matte` and `research_selected_matte_receipt`.
+algorithm 2 is still named `current_outline_algorithm`. The estimator result fields are
+`subtitle_selected_matte` and `subtitle_selected_matte_receipt`.
 
 For a fresh authenticated OCR8 empty, the empty gate joins the actual transaction with C24, SCT5,
 SCP4 and UIP4, and the publisher emits a current zero matte and alpha. Root0 keeps the previous

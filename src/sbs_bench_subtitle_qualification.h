@@ -200,8 +200,8 @@ namespace sbs_bench::subtitle_qualification {
     }
 
     bool record(ID3D11DeviceContext *context, const platf::dxgi::host_sbs_v2_draw_command_t &ordinary, ID3D11RenderTargetView *output, const models::depth_observation_views_t &result, ID3D11Buffer *subtitle_constants, evidence_t *evidence, std::string &error) {
-      return record_draw(context, ordinary, output, result, subtitle_constants, result.research_selected_matte.Get(),
-                         result.research_selected_matte_receipt.Get(), shared_warp_, programs_.direct_glyph_completed_program(),
+      return record_draw(context, ordinary, output, result, subtitle_constants, result.subtitle_selected_matte.Get(),
+                         result.subtitle_selected_matte_receipt.Get(), shared_warp_, programs_.direct_glyph_completed_program(),
                          evidence, error);
     }
 

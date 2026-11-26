@@ -7,7 +7,7 @@
   #include <cstdint>
   #include <wrl/client.h>
 
-namespace platf::dxgi::actual_converter_probe_v1 {
+namespace platf::dxgi::converter_test_observer {
   struct context_t {
     std::uint32_t width = 0, height = 0;
     std::uint64_t instance = 0;

@@ -7,7 +7,7 @@
 #include "host_sbs_gpu_completion_receipt.h"
 #include "host_sbs_resolution.h"
 #include "host_sbs_telemetry_perf.h"
-#include "host_sbs_joined_completion_gate_benchmark.h"
+#include "host_sbs_joined_completion_test_gate.h"
 
 #include <array>
 #include <chrono>
@@ -948,7 +948,7 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_contour_support;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_glyph_matte;
     // PRIVATE opt-in backing; same source/SCT/publication lease, never an EMPTY certificate.
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> research_selected_matte, research_selected_matte_receipt;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_selected_matte, subtitle_selected_matte_receipt;
     // Retained draws hold this lease while sampling a completed Direct Glyph publication.
     std::shared_ptr<const subtitle_publication::views_t> subtitle_draw_publication;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_condition_params;
@@ -1299,11 +1299,11 @@ namespace models {
      * No renderer/depth/OCR authority is granted. Unsupported setup rejects the hold.
      */
     bool configure_joined_completion_gate_for_native_pacing_test(
-      const joined_completion_gate_benchmark::configuration_t &configuration
+      const joined_completion_test_gate::configuration_t &configuration
     );
 #endif
     /** Pure CPU gate/query diagnostics for the converter test observer, never a source clock. */
-    [[nodiscard]] std::optional<joined_completion_gate_benchmark::snapshot_t>
+    [[nodiscard]] std::optional<joined_completion_test_gate::snapshot_t>
       joined_completion_gate_status_for_benchmark() const noexcept;
 
     /** True only when every mandatory engine, shader, and session resource initialized. */

@@ -4541,14 +4541,14 @@ namespace sbs_bench {
         const auto mask_height = models::subtitle_ocr_source_crop_height(frame_width, frame_height);
         ComPtr<ID3D11Resource> mask_resource;
         ComPtr<ID3D11Texture2D> mask_texture;
-        est.research_selected_matte->GetResource(&mask_resource);
+        est.subtitle_selected_matte->GetResource(&mask_resource);
         D3D11_TEXTURE2D_DESC mask_desc {};
         if (FAILED(mask_resource.As(&mask_texture))) {
           return 6;
         }
         mask_texture->GetDesc(&mask_desc);
         if (mask_desc.Width != frame_width || mask_desc.Height != mask_height || !publish_file_atomically(fs::path(o.out) / relative_mask, [&](const fs::path &temporary) {
-              return dump_contour_texture(dev.Get(), ctx.Get(), est.research_selected_matte.Get(), DXGI_FORMAT_R32_UINT, sizeof(std::uint32_t), temporary, qualified_mask_stage);
+              return dump_contour_texture(dev.Get(), ctx.Get(), est.subtitle_selected_matte.Get(), DXGI_FORMAT_R32_UINT, sizeof(std::uint32_t), temporary, qualified_mask_stage);
             })) {
           BOOST_LOG(error) << "sbs-bench: selected-compositor literal native mask export failed";
           return 6;
@@ -4563,7 +4563,7 @@ namespace sbs_bench {
           est.completed_frame_id,
           est.publication.observation_timestamp_us
         );
-        if (!stages || stages->model_frame != est.completed_frame_id || stages->model_observation_us != est.publication.observation_timestamp_us || stages->selected_matte.Get() != est.research_selected_matte.Get() || stages->selected_receipt.Get() != est.research_selected_matte_receipt.Get()) {
+        if (!stages || stages->model_frame != est.completed_frame_id || stages->model_observation_us != est.publication.observation_timestamp_us || stages->selected_matte.Get() != est.subtitle_selected_matte.Get() || stages->selected_receipt.Get() != est.subtitle_selected_matte_receipt.Get()) {
           BOOST_LOG(error) << "sbs-bench: producer diagnostics lost their exact completed selected role";
           return 6;
         }
