@@ -294,7 +294,7 @@ namespace stream {
            (dimension & 1) == 0;
   }
 
-  [[nodiscard]] constexpr bool is_valid_live_video_mode_framerate_x100(int framerate_x100) {
+  [[nodiscard]] constexpr bool is_valid_live_video_mode_framerate_x100(std::int64_t framerate_x100) {
     return framerate_x100 >= LIVE_VIDEO_MODE_FRAMERATE_X100_MIN &&
            framerate_x100 <= LIVE_VIDEO_MODE_FRAMERATE_X100_MAX;
   }

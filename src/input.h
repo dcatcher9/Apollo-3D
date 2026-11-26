@@ -154,11 +154,6 @@ namespace input {
       return dispatched >= INPUT_DRAIN_QUANTUM;
     }
 
-    /** Continuations yield through the timer queue so already-due timers run before more input. */
-    [[nodiscard]] constexpr bool drain_continuation_uses_timer_queue() noexcept {
-      return true;
-    }
-
     /**
      * @brief Reject a packet removed by a drain before a concurrent reset generation change.
      */

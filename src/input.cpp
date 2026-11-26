@@ -442,11 +442,7 @@ namespace input {
         std::lock_guard dispatch_guard {input->input_dispatch_lock};
         // Clear the completed task ID on every callback path, including a left re-press that makes
         // this delayed release obsolete. Keeping it would leave a dangling task pointer.
-        auto expected_generation = generation;
-        if (!input->mouse_left_button_generation.compare_exchange_strong(
-              expected_generation,
-              generation + 1
-            )) {
+        if (!detail::claim_delayed_generation(input->mouse_left_button_generation, generation)) {
           return;
         }
         auto left_released = mouse_press[BUTTON_LEFT];
@@ -1557,7 +1553,8 @@ namespace input {
 
     // Retain gate ownership across exactly one continuation. Arrivals during the handoff see an
     // active owner and need no task of their own; the continuation either consumes them or makes
-    // the empty-to-idle transition under the queue lock.
+    // the empty-to-idle transition under the queue lock. It yields through the timer queue so
+    // already-due timers run before more input.
     task_pool.pushDelayed(drain_input_queue, 0ms, input);
   }
 

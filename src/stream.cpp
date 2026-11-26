@@ -2399,7 +2399,7 @@ namespace stream {
           return;
         }
       }
-      if (framerate_x100_u32 < LIVE_VIDEO_MODE_FRAMERATE_X100_MIN || framerate_x100_u32 > LIVE_VIDEO_MODE_FRAMERATE_X100_MAX) {
+      if (!is_valid_live_video_mode_framerate_x100(framerate_x100_u32)) {
         reject("v2 frame rate must be within 1..1000 Hz"sv);
         return;
       }
@@ -2530,7 +2530,7 @@ namespace stream {
       );
       type = util::endian::little(type);
       declared_payload_size = util::endian::little(declared_payload_size);
-      if (declared_payload_size != plaintext_payload.size()) {
+      if (!is_valid_decrypted_control_payload(CONTROL_HEADER_V2_SIZE + plaintext_payload.size(), declared_payload_size)) {
         BOOST_LOG(warning) << "Dropping encrypted control message with mismatched inner length: declared "sv
                            << declared_payload_size << " bytes in a "sv
                            << (CONTROL_HEADER_V2_SIZE + plaintext_payload.size())

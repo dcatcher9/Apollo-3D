@@ -398,7 +398,6 @@ TEST(InputDrainGateTests, QuantumYieldsOneContinuationThatRetainsOwnership) {
   EXPECT_FALSE(input::detail::drain_turn_exhausted(0));
   EXPECT_FALSE(input::detail::drain_turn_exhausted(input::detail::INPUT_DRAIN_QUANTUM - 1));
   EXPECT_TRUE(input::detail::drain_turn_exhausted(input::detail::INPUT_DRAIN_QUANTUM));
-  EXPECT_TRUE(input::detail::drain_continuation_uses_timer_queue());
 
   // The continuation retains ownership, including an arrival racing the task handoff.
   EXPECT_TRUE(gate.active());
