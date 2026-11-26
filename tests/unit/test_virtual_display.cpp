@@ -2,8 +2,11 @@
 
   #include "src/platform/windows/virtual_display.h"
 
+  #include <algorithm>
   #include <cstring>
+  #include <functional>
   #include <limits>
+  #include <string_view>
 
   #include <gtest/gtest.h>
 
@@ -829,6 +832,182 @@ TEST(VirtualDisplayDetach, RequiresRepeatedAbsenceAndShellSettleTime) {
   );
   EXPECT_TRUE(settled.path_confirmed_inactive);
   EXPECT_TRUE(settled.shell_settled);
+}
+
+namespace {
+  // An in-memory desktop for deactivateVirtualDisplay: one physical survivor beside the virtual
+  // display, which an applied SetDisplayConfig removes from the active topology.
+  struct fake_detach_desktop_t {
+    SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT survivor = identity(1, 0, 10);
+    SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT virtual_display = identity(2, 0, 20);
+    UINT survivor_width = 1920;
+    bool detached = false;
+    bool survivor_hdr = false;
+    unsigned int ccd_queries = 0;
+    unsigned int target_names = 0;
+    unsigned int color_queries = 0;
+    unsigned int color_requests = 0;
+    unsigned int validations = 0;
+    unsigned int applies = 0;
+    unsigned int sleeps = 0;
+    // Runs at the start of this CCD query, as a change Windows completes just before it.
+    unsigned int change_on_query = 0;
+    std::function<void()> change;
+
+    static DISPLAYCONFIG_MODE_INFO targetMode(const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &target) {
+      DISPLAYCONFIG_MODE_INFO mode {};
+      mode.infoType = DISPLAYCONFIG_MODE_INFO_TYPE_TARGET;
+      mode.id = target.TargetId;
+      mode.adapterId = target.AdapterLuid;
+      return mode;
+    }
+
+    std::vector<DISPLAYCONFIG_PATH_INFO> paths() const {
+      std::vector<DISPLAYCONFIG_PATH_INFO> result {activePath(survivor, 0, 0, 1)};
+      if (!detached) {
+        result.push_back(activePath(virtual_display, 0, 2, 3));
+      }
+      return result;
+    }
+
+    std::vector<DISPLAYCONFIG_MODE_INFO> modes() const {
+      std::vector<DISPLAYCONFIG_MODE_INFO> result {sourceMode(survivor.AdapterLuid, 0, 0, 0, survivor_width), targetMode(survivor)};
+      if (!detached) {
+        result.push_back(sourceMode(virtual_display.AdapterLuid, 0, static_cast<LONG>(survivor_width), 0));
+        result.push_back(targetMode(virtual_display));
+      }
+      return result;
+    }
+  } fake_desktop;
+
+  constexpr std::wstring_view survivor_device_path = LR"(\\?\DISPLAY#PHYSICAL#4&survivor)";
+  constexpr std::wstring_view virtual_device_path = LR"(\\?\DISPLAY#SMKD1CE#4&virtual)";
+
+  LONG WINAPI fake_detach_buffer_sizes(UINT32, UINT32 *path_count, UINT32 *mode_count) {
+    if (++fake_desktop.ccd_queries == fake_desktop.change_on_query && fake_desktop.change) {
+      fake_desktop.change();
+    }
+    *path_count = static_cast<UINT32>(fake_desktop.paths().size());
+    *mode_count = static_cast<UINT32>(fake_desktop.modes().size());
+    return ERROR_SUCCESS;
+  }
+
+  LONG WINAPI fake_detach_query(UINT32, UINT32 *path_count, DISPLAYCONFIG_PATH_INFO *paths, UINT32 *mode_count, DISPLAYCONFIG_MODE_INFO *modes, DISPLAYCONFIG_TOPOLOGY_ID *) {
+    const auto current_paths = fake_desktop.paths();
+    const auto current_modes = fake_desktop.modes();
+    if (*path_count < current_paths.size() || *mode_count < current_modes.size()) {
+      return ERROR_INSUFFICIENT_BUFFER;
+    }
+    std::copy(current_paths.begin(), current_paths.end(), paths);
+    std::copy(current_modes.begin(), current_modes.end(), modes);
+    *path_count = static_cast<UINT32>(current_paths.size());
+    *mode_count = static_cast<UINT32>(current_modes.size());
+    return ERROR_SUCCESS;
+  }
+
+  LONG WINAPI fake_detach_get_info(DISPLAYCONFIG_DEVICE_INFO_HEADER *header) {
+    if (header->type == DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME) {
+      ++fake_desktop.target_names;
+      const auto path = header->id == fake_desktop.survivor.TargetId ? survivor_device_path : virtual_device_path;
+      auto *name = reinterpret_cast<DISPLAYCONFIG_TARGET_DEVICE_NAME *>(header);
+      std::copy(path.begin(), path.end(), name->monitorDevicePath);
+      return ERROR_SUCCESS;
+    }
+    if (header->type == DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO_2) {
+      ++fake_desktop.color_queries;
+      auto *info = reinterpret_cast<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2 *>(header);
+      info->highDynamicRangeSupported = 1;
+      info->highDynamicRangeUserEnabled = fake_desktop.survivor_hdr;
+      info->advancedColorActive = fake_desktop.survivor_hdr;
+      info->activeColorMode = fake_desktop.survivor_hdr ? DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR : DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR;
+      return ERROR_SUCCESS;
+    }
+    return ERROR_INVALID_PARAMETER;
+  }
+
+  LONG WINAPI fake_detach_set_info(DISPLAYCONFIG_DEVICE_INFO_HEADER *header) {
+    ++fake_desktop.color_requests;
+    if (header->type == DISPLAYCONFIG_DEVICE_INFO_SET_HDR_STATE) {
+      fake_desktop.survivor_hdr = reinterpret_cast<DISPLAYCONFIG_SET_HDR_STATE *>(header)->enableHdr;
+    }
+    return ERROR_SUCCESS;
+  }
+
+  LONG WINAPI fake_detach_set_config(UINT32, DISPLAYCONFIG_PATH_INFO *, UINT32, DISPLAYCONFIG_MODE_INFO *, UINT32 flags) {
+    if (flags & SDC_VALIDATE) {
+      ++fake_desktop.validations;
+    }
+    if (flags & SDC_APPLY) {
+      ++fake_desktop.applies;
+      fake_desktop.detached = true;
+    }
+    return ERROR_SUCCESS;
+  }
+
+  void WINAPI fake_detach_sleep(DWORD milliseconds) {
+    ++fake_desktop.sleeps;
+    Sleep(milliseconds);
+  }
+
+  VDISPLAY::desktop_detach_result_t detach_fake_desktop(std::chrono::milliseconds timeout) {
+    std::shared_ptr<VDISPLAY::desktop_detach_context_t> context;
+    return VDISPLAY::deactivateVirtualDisplay(
+      fake_desktop.virtual_display,
+      virtual_device_path,
+      timeout,
+      context,
+      {
+        {fake_detach_buffer_sizes, fake_detach_query, fake_detach_sleep},
+        {fake_detach_get_info, fake_detach_set_info},
+        fake_detach_set_config,
+        fake_detach_sleep,
+      }
+    );
+  }
+}  // namespace
+
+TEST(VirtualDisplayDetach, ValidatesOnceAndQueriesTheTopologyOncePerSettleObservation) {
+  fake_desktop = {};
+  const auto result = detach_fake_desktop(std::chrono::seconds(5));
+  EXPECT_EQ(result.state, VDISPLAY::desktop_detach_state_e::detached);
+  EXPECT_TRUE(result.shell_settled);
+  EXPECT_EQ(fake_desktop.validations, 1u);
+  EXPECT_EQ(fake_desktop.applies, 1u);
+  const auto observations = fake_desktop.sleeps + 1;
+  EXPECT_GE(observations, 3u);
+  // The snapshot and its re-check just before the apply, then one query per observation.
+  EXPECT_EQ(fake_desktop.ccd_queries, 2u + observations);
+  // Each query before the apply names both active targets; after it only the survivor is active.
+  EXPECT_EQ(fake_desktop.target_names, 2u * 2u + observations);
+  // Both snapshots capture the survivor's color, then each observation checks it once.
+  EXPECT_EQ(fake_desktop.color_queries, 2u + observations);
+  EXPECT_EQ(fake_desktop.color_requests, 0u);
+}
+
+TEST(VirtualDisplayDetach, ValidatesAgainWhenTheTopologyChangesBeforeTheApply) {
+  fake_desktop = {};
+  fake_desktop.change_on_query = 2;
+  fake_desktop.change = [] {
+    fake_desktop.survivor_width = 2560;
+  };
+  detach_fake_desktop(std::chrono::milliseconds::zero());
+  EXPECT_EQ(fake_desktop.validations, 2u);
+  EXPECT_EQ(fake_desktop.applies, 1u);
+}
+
+TEST(VirtualDisplayDetach, KeepsAnHdrChangeThatCompletedDuringValidation) {
+  fake_desktop = {};
+  fake_desktop.change_on_query = 2;
+  fake_desktop.change = [] {
+    fake_desktop.survivor_hdr = true;
+  };
+  detach_fake_desktop(std::chrono::milliseconds::zero());
+  // The configuration is unchanged, so the first validation stands, and the survivor's newer HDR
+  // state is the one the detach restores: it never asks Windows to turn HDR back off.
+  EXPECT_EQ(fake_desktop.validations, 1u);
+  EXPECT_EQ(fake_desktop.applies, 1u);
+  EXPECT_EQ(fake_desktop.color_requests, 0u);
+  EXPECT_TRUE(fake_desktop.survivor_hdr);
 }
 
 TEST(VirtualDisplayColorRestore, DoesNotReassertMatchingUserStateForActiveModeLag) {

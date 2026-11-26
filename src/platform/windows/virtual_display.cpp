@@ -10,6 +10,7 @@
 #include <combaseapi.h>
 #include <condition_variable>
 #include <cstdint>
+#include <cstring>
 #include <cwctype>
 #include <dxgi.h>
 #include <dxgi1_6.h>
@@ -836,14 +837,12 @@ uint32_t watchdogPingIntervalMsForTest(uint32_t timeoutSeconds) {
 #endif
 
 namespace {
-bool queryDisplayConfig(
-  UINT32 flags,
-  std::vector<DISPLAYCONFIG_PATH_INFO> &paths,
-  std::vector<DISPLAYCONFIG_MODE_INFO> &modes,
-  LONG *failureStatus = nullptr
-) {
-  const auto result =
-    platf::display_config::query_display_config(
+  bool queryDisplayConfig(
+    UINT32 flags,
+    std::vector<DISPLAYCONFIG_PATH_INFO> &paths,
+    std::vector<DISPLAYCONFIG_MODE_INFO> &modes
+  ) {
+    return static_cast<bool>(platf::display_config::query_display_config(
       flags,
       paths,
       modes,
@@ -851,12 +850,8 @@ bool queryDisplayConfig(
         8,
         platf::display_config::retry_delay_e::exponential_milliseconds,
       }
-    );
-  if (failureStatus) {
-    *failureStatus = result.status;
+    ));
   }
-  return static_cast<bool>(result);
-}
 }  // namespace
 
 bool queryActiveDisplayConfig(
@@ -1053,9 +1048,10 @@ namespace {
 
   std::optional<display_color_contract_t> queryDisplayColorContract(
     const LUID &adapter_id,
-    UINT32 target_id
+    UINT32 target_id,
+    const platf::display_config::device_info_api_t &api
   ) {
-    const auto state = platf::display_config::query_advanced_color(adapter_id, target_id);
+    const auto state = platf::display_config::query_advanced_color(adapter_id, target_id, api);
     if (!state) {
       return std::nullopt;
     }
@@ -1072,9 +1068,10 @@ namespace {
     UINT32 target_id,
     const display_color_contract_t &expected,
     color_setter_attempts_t &attempts,
-    active_mode_settle_state_t &active_mode_settle
+    active_mode_settle_state_t &active_mode_settle,
+    const platf::display_config::device_info_api_t &api
   ) {
-    const auto current = queryDisplayColorContract(adapter_id, target_id);
+    const auto current = queryDisplayColorContract(adapter_id, target_id, api);
     if (!current) {
       return false;
     }
@@ -1088,11 +1085,7 @@ namespace {
       case color_reconcile_action_internal_e::set_hdr_user_state:
         active_mode_settle = {};
         if (colorSetterRetryAvailable(action, attempts, now)) {
-          if (platf::display_config::set_hdr_state(
-                adapter_id,
-                target_id,
-                expected.hdr_user_enabled
-              )) {
+          if (platf::display_config::set_hdr_state(adapter_id, target_id, expected.hdr_user_enabled, api)) {
             consumeColorSetterAttempt(action, attempts);
           } else {
             deferRejectedColorSetter(action, attempts, now);
@@ -1102,11 +1095,7 @@ namespace {
       case color_reconcile_action_internal_e::set_wcg_user_state:
         active_mode_settle = {};
         if (colorSetterRetryAvailable(action, attempts, now)) {
-          if (platf::display_config::set_wcg_state(
-                adapter_id,
-                target_id,
-                expected.wcg_user_enabled
-              )) {
+          if (platf::display_config::set_wcg_state(adapter_id, target_id, expected.wcg_user_enabled, api)) {
             consumeColorSetterAttempt(action, attempts);
           } else {
             deferRejectedColorSetter(action, attempts, now);
@@ -1271,31 +1260,31 @@ namespace {
     return description.str();
   }
 
-  std::optional<detach_snapshot_t> buildVirtualDisplayDetachSnapshot(
-    const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
-    std::wstring_view learnedDevicePath
-  ) {
-    detach_snapshot_t snapshot;
+  // One active-topology observation: a single CCD query and the monitor path of each target.
+  struct detach_topology_t {
+    std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+    std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+    std::vector<std::wstring> device_paths;  // In the same order as paths.
+  };
+
+  std::optional<detach_topology_t> queryDetachTopology(const desktop_detach_api_t &api) {
+    detach_topology_t topology;
     constexpr UINT32 query_flags =
       QDC_ONLY_ACTIVE_PATHS | QDC_VIRTUAL_MODE_AWARE | QDC_VIRTUAL_REFRESH_RATE_AWARE;
-    LONG query_status = ERROR_SUCCESS;
-    if (!queryDisplayConfig(query_flags, snapshot.paths, snapshot.modes, &query_status)) {
+    const auto query = platf::display_config::query_display_config(query_flags, topology.paths, topology.modes, api.ccd);
+    if (!query) {
       BOOST_LOG(warning) << "Virtual-display detach snapshot: CCD query failed (flags "
-                         << query_flags << ", status " << query_status << ").";
+                         << query_flags << ", status " << query.status << ").";
       return std::nullopt;
     }
-    snapshot.set_display_config_awareness_flags =
-      SDC_VIRTUAL_MODE_AWARE | SDC_VIRTUAL_REFRESH_RATE_AWARE;
-
-    std::vector<std::wstring> candidate_device_paths;
-    candidate_device_paths.reserve(snapshot.paths.size());
-    for (const auto &path : snapshot.paths) {
+    topology.device_paths.reserve(topology.paths.size());
+    for (const auto &path : topology.paths) {
       DISPLAYCONFIG_TARGET_DEVICE_NAME target_name {};
       target_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
       target_name.header.size = sizeof(target_name);
       target_name.header.adapterId = path.targetInfo.adapterId;
       target_name.header.id = path.targetInfo.id;
-      const auto target_name_status = DisplayConfigGetDeviceInfo(&target_name.header);
+      const auto target_name_status = api.device_info.get(&target_name.header);
       if (target_name_status != ERROR_SUCCESS || target_name.monitorDevicePath[0] == L'\0') {
         // A failed target query could be the retiring display after a topology renumber. Treat the
         // whole snapshot as indeterminate instead of detaching a merely similar monitor.
@@ -1307,8 +1296,33 @@ namespace {
                            << (target_name.monitorDevicePath[0] == L'\0') << ").";
         return std::nullopt;
       }
-      candidate_device_paths.emplace_back(target_name.monitorDevicePath);
+      topology.device_paths.emplace_back(target_name.monitorDevicePath);
     }
+    return topology;
+  }
+
+  detach_plan_e detachPlanState(
+    const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
+    std::wstring_view learnedDevicePath,
+    const detach_topology_t &topology
+  ) {
+    // The plan marks the retiring path inactive; this question needs only its verdict.
+    auto paths = topology.paths;
+    return prepareVirtualDisplayDetachPaths(identity, learnedDevicePath, topology.device_paths, paths).state;
+  }
+
+  std::optional<detach_snapshot_t> buildVirtualDisplayDetachSnapshot(
+    const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
+    std::wstring_view learnedDevicePath,
+    detach_topology_t topology,
+    const desktop_detach_api_t &api
+  ) {
+    detach_snapshot_t snapshot;
+    snapshot.paths = std::move(topology.paths);
+    snapshot.modes = std::move(topology.modes);
+    snapshot.set_display_config_awareness_flags =
+      SDC_VIRTUAL_MODE_AWARE | SDC_VIRTUAL_REFRESH_RATE_AWARE;
+    const auto &candidate_device_paths = topology.device_paths;
 
     const auto plan = prepareVirtualDisplayDetachPaths(
       identity,
@@ -1330,7 +1344,7 @@ namespace {
           continue;
         }
         const auto color_contract =
-          queryDisplayColorContract(path.targetInfo.adapterId, path.targetInfo.id);
+          queryDisplayColorContract(path.targetInfo.adapterId, path.targetInfo.id, api.device_info);
         if (!color_contract) {
           // SetDisplayConfig can change Advanced Color state. Do not mutate a desktop whose
           // surviving target color contract cannot first be captured.
@@ -1349,29 +1363,26 @@ namespace {
     return snapshot;
   }
 
+  // Whether SetDisplayConfig would be given the same configuration for both snapshots.
+  bool sameDetachConfiguration(const detach_snapshot_t &left, const detach_snapshot_t &right) {
+    return left.state == right.state &&
+           left.set_display_config_awareness_flags == right.set_display_config_awareness_flags &&
+           left.paths.size() == right.paths.size() && left.modes.size() == right.modes.size() &&
+           std::memcmp(left.paths.data(), right.paths.data(), left.paths.size() * sizeof(DISPLAYCONFIG_PATH_INFO)) == 0 &&
+           std::memcmp(left.modes.data(), right.modes.data(), left.modes.size() * sizeof(DISPLAYCONFIG_MODE_INFO)) == 0;
+  }
+
   bool restoreSurvivorColorStatesOnce(
-    std::vector<survivor_color_state_t> &expected_states
+    const detach_topology_t &topology,
+    std::vector<survivor_color_state_t> &expected_states,
+    const desktop_detach_api_t &api
   ) {
-    std::vector<DISPLAYCONFIG_PATH_INFO> paths;
-    std::vector<DISPLAYCONFIG_MODE_INFO> modes;
-    if (!queryActiveDisplayConfig(paths, modes)) {
-      return false;
-    }
     std::vector<bool> matched(expected_states.size(), false);
 
-    for (const auto &path : paths) {
-      DISPLAYCONFIG_TARGET_DEVICE_NAME target_name {};
-      target_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
-      target_name.header.size = sizeof(target_name);
-      target_name.header.adapterId = path.targetInfo.adapterId;
-      target_name.header.id = path.targetInfo.id;
-      if (DisplayConfigGetDeviceInfo(&target_name.header) != ERROR_SUCCESS ||
-          target_name.monitorDevicePath[0] == L'\0') {
-        return false;
-      }
-
+    for (std::size_t path_index = 0; path_index < topology.paths.size(); ++path_index) {
+      const auto &path = topology.paths[path_index];
       for (std::size_t index = 0; index < expected_states.size(); ++index) {
-        if (!platf::display_config::same_device_path(expected_states[index].device_path, target_name.monitorDevicePath)) {
+        if (!platf::display_config::same_device_path(expected_states[index].device_path, topology.device_paths[path_index])) {
           continue;
         }
         if (matched[index]) {
@@ -1388,7 +1399,8 @@ namespace {
               path.targetInfo.id,
               expected_states[index].contract,
               expected_states[index].setter_attempts,
-              expected_states[index].active_mode_settle
+              expected_states[index].active_mode_settle,
+              api.device_info
             )) {
           // Advanced Color can renumber this target. Perform each required user-state setter at
           // most once for the entire detach transition, then resolve every survivor again before
@@ -1452,14 +1464,28 @@ desktop_detach_result_t deactivateVirtualDisplay(
   const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
   std::wstring_view devicePath,
   std::chrono::milliseconds timeout,
-  std::shared_ptr<desktop_detach_context_t> &context
+  std::shared_ptr<desktop_detach_context_t> &context,
+  const desktop_detach_api_t &api
 ) {
   const auto deadline =
     std::chrono::steady_clock::now() + std::max(timeout, std::chrono::milliseconds::zero());
   constexpr UINT32 validate_flags = SDC_VALIDATE | SDC_USE_SUPPLIED_DISPLAY_CONFIG;
   constexpr UINT32 apply_flags = SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG;
   const bool continuing_transition = static_cast<bool>(context);
-  auto snapshot = buildVirtualDisplayDetachSnapshot(identity, devicePath);
+  const auto build_snapshot = [&]() -> std::optional<detach_snapshot_t> {
+    auto topology = queryDetachTopology(api);
+    return topology ? buildVirtualDisplayDetachSnapshot(identity, devicePath, std::move(*topology), api) : std::nullopt;
+  };
+  const auto set_display_config = [&](detach_snapshot_t &supplied, UINT32 flags) {
+    return api.set_display_config(
+      static_cast<UINT32>(supplied.paths.size()),
+      supplied.paths.data(),
+      static_cast<UINT32>(supplied.modes.size()),
+      supplied.modes.data(),
+      flags | supplied.set_display_config_awareness_flags
+    );
+  };
+  auto snapshot = build_snapshot();
   if (!snapshot) {
     return {desktop_detach_state_e::topology_query_failed, ERROR_GEN_FAILURE};
   }
@@ -1476,42 +1502,34 @@ desktop_detach_result_t deactivateVirtualDisplay(
   }
 
   if (snapshot->state == detach_plan_e::ready) {
-    LONG validation_status = SetDisplayConfig(
-      static_cast<UINT32>(snapshot->paths.size()),
-      snapshot->paths.data(),
-      static_cast<UINT32>(snapshot->modes.size()),
-      snapshot->modes.data(),
-      validate_flags | snapshot->set_display_config_awareness_flags
-    );
+    LONG validation_status = set_display_config(*snapshot, validate_flags);
     if (validation_status != ERROR_SUCCESS) {
       return {desktop_detach_state_e::validation_failed, validation_status};
     }
 
-    // Validation does not reserve the desktop topology. Query and validate again just before
-    // applying: a monitor/HDR change that completed during the first validation is kept. One that
-    // lands during the second validation or the apply can still be overwritten.
-    snapshot = buildVirtualDisplayDetachSnapshot(identity, devicePath);
-    if (!snapshot) {
+    // Validation does not reserve the desktop topology. Query again just before applying: a
+    // monitor/HDR change that completed during the validation is kept, and a changed
+    // configuration is validated again. One that lands after this query or during that second
+    // validation can still be overwritten.
+    auto latest = build_snapshot();
+    if (!latest) {
       return {desktop_detach_state_e::topology_query_failed, ERROR_GEN_FAILURE};
     }
-    if (snapshot->state != detach_plan_e::ready &&
-        snapshot->state != detach_plan_e::already_inactive) {
-      if (snapshot->state == detach_plan_e::skipped_only_active) {
+    if (latest->state != detach_plan_e::ready && latest->state != detach_plan_e::already_inactive) {
+      if (latest->state == detach_plan_e::skipped_only_active) {
         context.reset();
       }
-      return detachPlanFailure(snapshot->state);
+      return detachPlanFailure(latest->state);
     }
+    const bool validated = sameDetachConfiguration(*latest, *snapshot);
+    snapshot = std::move(latest);
 
     if (snapshot->state == detach_plan_e::ready) {
-      validation_status = SetDisplayConfig(
-        static_cast<UINT32>(snapshot->paths.size()),
-        snapshot->paths.data(),
-        static_cast<UINT32>(snapshot->modes.size()),
-        snapshot->modes.data(),
-        validate_flags | snapshot->set_display_config_awareness_flags
-      );
-      if (validation_status != ERROR_SUCCESS) {
-        return {desktop_detach_state_e::validation_failed, validation_status};
+      if (!validated) {
+        validation_status = set_display_config(*snapshot, validate_flags);
+        if (validation_status != ERROR_SUCCESS) {
+          return {desktop_detach_state_e::validation_failed, validation_status};
+        }
       }
 
       const bool capture_color_contract = detachRetryMustCaptureColorContract(
@@ -1538,13 +1556,7 @@ desktop_detach_result_t deactivateVirtualDisplay(
       // Each SetDisplayConfig apply is a new color transition. Retain the original user contract,
       // but allow one accepted setter per preference again and require a fresh active-mode grace.
       resetSurvivorColorTransitionState(context->expected_color_states);
-      const LONG apply_status = SetDisplayConfig(
-        static_cast<UINT32>(snapshot->paths.size()),
-        snapshot->paths.data(),
-        static_cast<UINT32>(snapshot->modes.size()),
-        snapshot->modes.data(),
-        apply_flags | snapshot->set_display_config_awareness_flags
-      );
+      const LONG apply_status = set_display_config(*snapshot, apply_flags);
       if (apply_status != ERROR_SUCCESS) {
         if (!continuing_transition) {
           context.reset();
@@ -1568,12 +1580,13 @@ desktop_detach_result_t deactivateVirtualDisplay(
   bool latest_path_inactive = false;
   bool color_states_match = true;
   while (true) {
-    const auto observation = buildVirtualDisplayDetachSnapshot(identity, devicePath);
+    // One topology observation answers both questions of this tick.
+    const auto observation = queryDetachTopology(api);
+    latest_path_inactive =
+      observation && detachPlanState(identity, devicePath, *observation) == detach_plan_e::already_inactive;
     color_states_match =
       context->expected_color_states.empty() ||
-      restoreSurvivorColorStatesOnce(context->expected_color_states);
-    latest_path_inactive =
-      observation && observation->state == detach_plan_e::already_inactive;
+      (observation && restoreSurvivorColorStatesOnce(*observation, context->expected_color_states, api));
     if (latest_path_inactive) {
       ++consecutive_inactive_observations;
     } else {
@@ -1612,10 +1625,11 @@ desktop_detach_result_t deactivateVirtualDisplay(
         anyActiveModeGraceExpired(context->expected_color_states),
       };
     }
-    std::this_thread::sleep_for(std::min(
+    const auto delay = std::min(
       std::chrono::milliseconds(50),
       std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)
-    ));
+    );
+    api.sleep(static_cast<DWORD>(delay.count()));
   }
 }
 

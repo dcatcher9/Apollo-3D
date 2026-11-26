@@ -1,5 +1,6 @@
 #pragma once
 
+#include "display_config.h"
 #include "virtual_display_retirement.h"
 
 #include <chrono>
@@ -68,6 +69,14 @@ namespace VDISPLAY {
   };
 
   struct desktop_detach_context_t;
+
+  /** The Windows calls a desktop detach makes. Tests supply in-memory ones. */
+  struct desktop_detach_api_t {
+    platf::display_config::query_api_t ccd {};
+    platf::display_config::device_info_api_t device_info {};
+    decltype(&::SetDisplayConfig) set_display_config = &::SetDisplayConfig;
+    decltype(&::Sleep) sleep = &::Sleep;
+  };
 
 	LONG getDeviceSettings(const wchar_t* deviceName, DEVMODEW& devMode);
 	LONG testDisplaySettings(const wchar_t* deviceName, int width, int height, int refresh_rate);
@@ -140,7 +149,8 @@ namespace VDISPLAY {
     const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
     std::wstring_view devicePath,
     std::chrono::milliseconds timeout,
-    std::shared_ptr<desktop_detach_context_t> &context
+    std::shared_ptr<desktop_detach_context_t> &context,
+    const desktop_detach_api_t &api = {}
   );
 #ifdef SUNSHINE_TESTS
   enum class desktop_detach_plan_e {
