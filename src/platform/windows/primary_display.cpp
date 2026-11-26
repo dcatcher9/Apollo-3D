@@ -340,7 +340,7 @@ namespace platf::primary_display {
       display_spec_t result {snapshot.device_paths[index], path, snapshot.modes[source_index(path)].sourceMode, snapshot.modes[target_index(path)].targetMode};
       if (path.flags & DISPLAYCONFIG_PATH_SUPPORT_VIRTUAL_MODE) {
         const auto desktop = path.targetInfo.desktopModeInfoIdx;
-        if (desktop != DISPLAYCONFIG_PATH_DESKTOP_IMAGE_IDX_INVALID && desktop < snapshot.modes.size() && static_cast<int>(snapshot.modes[desktop].infoType) == 3) {
+        if (desktop != DISPLAYCONFIG_PATH_DESKTOP_IMAGE_IDX_INVALID && desktop < snapshot.modes.size() && snapshot.modes[desktop].infoType == DISPLAYCONFIG_MODE_INFO_TYPE_DESKTOP_IMAGE) {
           result.desktop = snapshot.modes[desktop];
         }
       }
@@ -1433,7 +1433,7 @@ namespace platf::primary_display {
         }
         if (path.flags & DISPLAYCONFIG_PATH_SUPPORT_VIRTUAL_MODE) {
           const auto desktop_index = path.targetInfo.desktopModeInfoIdx;
-          if (desktop_index != DISPLAYCONFIG_PATH_DESKTOP_IMAGE_IDX_INVALID && (desktop_index >= snapshot.modes.size() || static_cast<int>(snapshot.modes[desktop_index].infoType) != 3 || snapshot.modes[desktop_index].id != path.targetInfo.id || !same_luid(snapshot.modes[desktop_index].adapterId, path.targetInfo.adapterId))) {
+          if (desktop_index != DISPLAYCONFIG_PATH_DESKTOP_IMAGE_IDX_INVALID && (desktop_index >= snapshot.modes.size() || snapshot.modes[desktop_index].infoType != DISPLAYCONFIG_MODE_INFO_TYPE_DESKTOP_IMAGE || snapshot.modes[desktop_index].id != path.targetInfo.id || !same_luid(snapshot.modes[desktop_index].adapterId, path.targetInfo.adapterId))) {
             return std::nullopt;
           }
         }

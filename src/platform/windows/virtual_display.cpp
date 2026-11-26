@@ -86,7 +86,7 @@ namespace VDISPLAY {
 
     bool isSudoVirtualDisplayPath(std::wstring_view devicePath) {
       // Current SudoVDA/IddCx targets publish the SMKD1CE hardware ID. Keep the legacy driver-name
-      // marker as well for already deployed variants and diagnostic/probe builds.
+      // marker as well for already deployed variants.
       return containsCaseInsensitive(devicePath, L"SMKD1CE") ||
              containsCaseInsensitive(devicePath, L"SUDOVDA");
     }

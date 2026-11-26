@@ -1127,7 +1127,7 @@ namespace platf::dxgi {
           device_t tested_device;
           const bool backend_available = backend == capture_backend_e::wgc ||
                                          test_dxgi_duplication(adapter_tmp, output_tmp, false, std::addressof(tested_device));
-          if (desc.AttachedToDesktop && backend_available) {
+          if (backend_available) {
             output = std::move(output_tmp);
             device = std::move(tested_device);
 

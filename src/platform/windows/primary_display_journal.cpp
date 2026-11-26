@@ -57,8 +57,8 @@ namespace platf::primary_display::detail {
     nlohmann::json encode_snapshot(const detail::snapshot_t &snapshot) {
       nlohmann::json result {{"encoding", "windows-ccd-v1"}, {"paths", nlohmann::json::array()}, {"modes", nlohmann::json::array()}, {"devices", nlohmann::json::array()}, {"colors", nlohmann::json::array()}};
       // CCD structures have a fixed Win32 ABI. Preserve all timing/scaling data, including
-      // desktop-image modes absent from older MinGW headers. IDs/indexes are remapped on
-      // recovery; this payload is never sent directly back to SetDisplayConfig.
+      // desktop-image modes. IDs/indexes are remapped on recovery; this payload is never sent
+      // directly back to SetDisplayConfig.
       for (const auto &path : snapshot.paths) {
         result["paths"].push_back(encode_ccd(path));
       }

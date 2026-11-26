@@ -86,8 +86,8 @@ namespace VDISPLAY {
 
   /**
    * One virtual monitor's verified session mode, saved as that device's registry (default) mode.
-   * Hypothesis under live validation: applications that request an unspecified fullscreen refresh
-   * rate resolve it from saved display settings rather than the temporary mode a session applies.
+   * Applications that request an unspecified fullscreen refresh rate resolve it from saved
+   * display settings rather than from the temporary mode a session applies.
    */
   struct session_mode_record_t {
     DWORD width = 0;
