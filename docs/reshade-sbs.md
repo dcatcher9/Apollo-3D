@@ -6447,9 +6447,8 @@ selected, its authenticated full-image statistics reach geometry independently o
 classifier: thin geometry between representative points must not be discarded. Capture, source
 and layout checks still apply; grid-only challenger results cannot supply geometry statistics,
 and malformed full-image measurements invalidate prior evidence. Central pixels have no special
-gain or zero authority. The standalone `raw_reference_statistics.h` utility and the
-earlier comparison records describe earlier research candidates, not
-the current bounded range policy. A menu with useful depth can still initialize a reference;
+gain or zero authority. The earlier comparison records describe earlier research candidates,
+not the current bounded range policy. A menu with useful depth can still initialize a reference;
 the policy does not identify menus. Representative moving-game comfort remains acceptance work.
 
 The GPU constant buffer's coordinate-basis input explicitly distinguishes this raw model from a native
