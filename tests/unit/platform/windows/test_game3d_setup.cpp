@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 #include <limits>
 #include <string>
+#include <utility>
 #include <vector>
 #include <Windows.h>
 
@@ -17,6 +18,7 @@ namespace {
   namespace game3d = platf::game3d;
   using decision = game3d::detail::setup_decision_e;
   using state = game3d::installation_state_e;
+  using published = game3d::detail::published_state_e;
 
   void write(const fs::path &path, const std::string &value) {
     std::ofstream(path, std::ios::binary) << value;
@@ -83,7 +85,7 @@ namespace {
     game3d::detail::setup_decisions decisions {choices};
     const auto before = game_files();
     const auto outcome = apply(decisions);
-    EXPECT_EQ(outcome.state, "ready_to_install");
+    EXPECT_EQ(outcome.state, published::ready_to_install);
     EXPECT_EQ(outcome.installation.state, state::missing_reshade);
     EXPECT_EQ(outcome.identity, game3d::file_identity(game));
     EXPECT_TRUE(progress.empty());
@@ -101,7 +103,7 @@ namespace {
     for (int launch = 0; launch < 2; ++launch) {
       const auto outcome = apply(decisions);
       EXPECT_EQ(outcome.installation.state, state::unavailable);
-      EXPECT_EQ(outcome.state, "");
+      EXPECT_EQ(outcome.state, published::installation);
       EXPECT_NE(outcome.installation.detail.find("dxgi.dll"), std::string::npos) << outcome.installation.detail;
     }
     // No installer ran and nothing was written or replaced.
@@ -114,14 +116,14 @@ namespace {
     ASSERT_TRUE(decisions.record(game, game3d::file_identity(game), decision::never));
     auto before = game_files();
     auto outcome = apply(decisions);
-    EXPECT_EQ(outcome.state, "declined");
+    EXPECT_EQ(outcome.state, published::declined);
     EXPECT_EQ(game_files(), before);
     // A user-installed runtime does not override the choice: the add-on is not installed.
     fs::copy_file(SUNSHINE_TEST_RESHADE_DLL, game.parent_path() / "dxgi.dll");
     write(game.parent_path() / "ReShade.ini", "[GENERAL]\n");
     before = game_files();
     outcome = apply(decisions);
-    EXPECT_EQ(outcome.state, "declined");
+    EXPECT_EQ(outcome.state, published::declined);
     EXPECT_EQ(outcome.installation.state, state::missing_addon);
     EXPECT_EQ(game_files(), before);
   }
@@ -131,7 +133,7 @@ namespace {
     ASSERT_TRUE(decisions.record(game, game3d::file_identity(game), decision::install));
     const auto outcome = apply(decisions);
     EXPECT_EQ(outcome.installation.state, state::installed) << outcome.installation.detail;
-    EXPECT_EQ(outcome.state, "");
+    EXPECT_EQ(outcome.state, published::installation);
     EXPECT_EQ(progress.size(), 1U);
     EXPECT_TRUE(fs::exists(game.parent_path() / "dxgi.dll"));
     EXPECT_EQ(read(game.parent_path() / "SunshineSBS.addon64"), "matching bundled addon");
@@ -139,7 +141,7 @@ namespace {
     // A later removal of ReShade is offered again rather than silently reinstalled.
     fs::remove(game.parent_path() / "dxgi.dll");
     fs::remove(game.parent_path() / "ReShade.ini");
-    EXPECT_EQ(apply(decisions).state, "ready_to_install");
+    EXPECT_EQ(apply(decisions).state, published::ready_to_install);
     EXPECT_FALSE(fs::exists(game.parent_path() / "dxgi.dll"));
   }
 
@@ -149,7 +151,7 @@ namespace {
     write(game, "an updated or replaced executable");
     const auto before = game_files();
     const auto outcome = apply(decisions);
-    EXPECT_EQ(outcome.state, "ready_to_install");
+    EXPECT_EQ(outcome.state, published::ready_to_install);
     EXPECT_EQ(outcome.identity, game3d::file_identity(game));
     EXPECT_EQ(game_files(), before);
   }
@@ -173,7 +175,7 @@ namespace {
     const auto before = game_files();
     const auto outcome = apply(decisions);
     EXPECT_EQ(outcome.installation.state, state::anti_cheat);
-    EXPECT_EQ(outcome.state, "");
+    EXPECT_EQ(outcome.state, published::installation);
     EXPECT_TRUE(outcome.identity.empty());
     EXPECT_EQ(game_files(), before);
   }
@@ -196,7 +198,7 @@ namespace {
     write(game.parent_path() / "ReShade.ini", "[GENERAL]\n");
     const auto before = game_files();
     auto outcome = apply(decisions);
-    EXPECT_EQ(outcome.state, "ready_to_install");
+    EXPECT_EQ(outcome.state, published::ready_to_install);
     EXPECT_EQ(outcome.installation.state, state::missing_addon);
     EXPECT_TRUE(outcome.installation.reshade_present);
     EXPECT_EQ(outcome.identity, game3d::file_identity(game));
@@ -344,11 +346,11 @@ namespace {
     game3d::detail::setup_decisions decisions {choices};
     EXPECT_EQ(decisions.lookup(L"relative.exe", "x"), decision::none);
     const auto before = game_files();
-    EXPECT_EQ(apply(decisions).state, "ready_to_install");
+    EXPECT_EQ(apply(decisions).state, published::ready_to_install);
     EXPECT_EQ(game_files(), before);
     write(choices, "not json");
     game3d::detail::setup_decisions corrupt {choices};
-    EXPECT_EQ(apply(corrupt).state, "ready_to_install");
+    EXPECT_EQ(apply(corrupt).state, published::ready_to_install);
     EXPECT_EQ(game_files(), before);
   }
 
@@ -411,7 +413,7 @@ namespace {
     const auto before = read(game);
 
     auto offered = game3d::detail::apply_text_hook_setup(game, decisions, no_anti_cheat, load);
-    EXPECT_EQ(offered.state, "ready_to_install");
+    EXPECT_EQ(offered.state, published::ready_to_install);
     EXPECT_FALSE(offered.identity.empty());
     EXPECT_FALSE(offered.convert);
     EXPECT_EQ(loads, 0);
@@ -420,7 +422,7 @@ namespace {
     for (int start = 1; start <= 2; ++start) {
       // Every start of the game loads the helper again without asking again.
       const auto active = game3d::detail::apply_text_hook_setup(game, decisions, no_anti_cheat, load);
-      EXPECT_TRUE(active.state.empty());
+      EXPECT_EQ(active.state, published::installation);
       EXPECT_EQ(active.installation.state, state::current);
       EXPECT_TRUE(active.convert);
       EXPECT_TRUE(active.installation.addon_present);
@@ -431,7 +433,7 @@ namespace {
 
     ASSERT_TRUE(decisions.record(game, offered.identity, decision::never));
     const auto declined = game3d::detail::apply_text_hook_setup(game, decisions, no_anti_cheat, load);
-    EXPECT_EQ(declined.state, "declined");
+    EXPECT_EQ(declined.state, published::declined);
     EXPECT_FALSE(declined.convert);
     EXPECT_EQ(loads, 2);
     // Nothing was written beside the game at any point.
@@ -486,7 +488,7 @@ namespace {
     // A changed executable is a different file: its confirmation no longer applies.
     write(game, "a different build of the game, with a different size");
     const auto changed = game3d::detail::apply_text_hook_setup(game, decisions, clear, load);
-    EXPECT_EQ(changed.state, "ready_to_install");
+    EXPECT_EQ(changed.state, published::ready_to_install);
     EXPECT_FALSE(changed.convert);
     EXPECT_EQ(loads, 3);
   }
@@ -506,7 +508,7 @@ namespace {
       return game3d::text_hook::load_result {running, "composes its text itself."};
     };
     const auto offered = game3d::detail::apply_text_hook_setup(game, decisions, refusal, state_of, false);
-    EXPECT_EQ(offered.state, "ready_to_install");
+    EXPECT_EQ(offered.state, published::ready_to_install);
     EXPECT_FALSE(offered.convert);
     // The offer says what will happen to this game: no helper is mentioned as being loaded.
     EXPECT_NE(offered.installation.detail.find("Nothing is loaded into the game"), std::string::npos);
@@ -534,5 +536,32 @@ namespace {
     write(game.parent_path() / "ReShade.ini", "[ADDON]\n");
     write(game.parent_path() / "EasyAntiCheat_EOS_Setup.exe", "marker");
     EXPECT_FALSE(game3d::injection_refusal(game).empty());
+  }
+
+  TEST(Game3DSetupState, PublishedNamesAreTheOnesTheSetupCardReads) {
+    // Game3dSetup.vue compares the published state against these exact names.
+    const auto name = [](const published state_kind, const state installation_state) {
+      game3d::detail::setup_outcome outcome;
+      outcome.state = state_kind;
+      outcome.installation.state = installation_state;
+      return std::string {game3d::detail::published_state_name(outcome)};
+    };
+    EXPECT_EQ(name(published::ready_to_install, state::missing_addon), "ready_to_install");
+    EXPECT_EQ(name(published::declined, state::missing_reshade), "declined");
+    EXPECT_EQ(name(published::installing, state::current), "installing");
+    const std::vector<std::pair<state, std::string>> installation_names {
+      {state::missing_reshade, "missing_reshade"},
+      {state::missing_addon, "missing_addon"},
+      {state::current, "current"},
+      {state::update_available, "update_available"},
+      {state::update_pending, "update_pending"},
+      {state::updated, "updated"},
+      {state::installed, "installed"},
+      {state::anti_cheat, "anti_cheat"},
+      {state::unavailable, "unavailable"},
+    };
+    for (const auto &[installation_state, expected] : installation_names) {
+      EXPECT_EQ(name(published::installation, installation_state), expected);
+    }
   }
 }  // namespace

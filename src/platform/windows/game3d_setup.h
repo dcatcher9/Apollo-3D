@@ -112,10 +112,18 @@ namespace platf::game3d {
       std::vector<entry_t> entries_;
     };
 
+    // What the setup card shows for a game: the installation's own state, the user's open
+    // choice about it, or a confirmed installation in progress.
+    enum class published_state_e {
+      installation,  ///< The installation state, published under its own name.
+      ready_to_install,  ///< Waits for the user's confirmation; nothing is written before it.
+      declined,  ///< The user chose "never" for this executable.
+      installing,  ///< A confirmed installation is running.
+    };
+
     struct setup_outcome {
       installation_status installation;
-      // Published state: an installation_state_e name, or ready_to_install / declined.
-      std::string state;
+      published_state_e state {published_state_e::installation};
       // Identity of the executable a ready_to_install or declined state offers.
       std::string identity;
       // Text game: the owner's approval stands and the game is running, so it is converted,
@@ -153,5 +161,9 @@ namespace platf::game3d {
       const std::function<text_hook::load_result()> &load,
       bool helper = true
     );
+
+    // The state name the Web UI's Game 3D setup card reads: an installation_state_e name,
+    // "ready_to_install", "declined" or "installing".
+    [[nodiscard]] std::string_view published_state_name(const setup_outcome &outcome);
   }  // namespace detail
 }  // namespace platf::game3d

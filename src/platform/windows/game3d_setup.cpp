@@ -257,7 +257,7 @@ namespace platf::game3d {
       }
       const auto decision = decisions.lookup(status.executable, outcome.identity);
       if (decision == setup_decision_e::never) {
-        outcome.state = "declined";
+        outcome.state = published_state_e::declined;
         status.detail = "You chose not to set up this game, so Sunshine 3D does not change its folder. Choose Set up this game to change that.";
         return outcome;
       }
@@ -267,7 +267,7 @@ namespace platf::game3d {
       if (status.state == installation_state_e::missing_reshade || status.state == installation_state_e::missing_addon) {
         const bool fresh = status.state == installation_state_e::missing_reshade;
         if (decision != setup_decision_e::install) {
-          outcome.state = "ready_to_install";
+          outcome.state = published_state_e::ready_to_install;
           status.detail = fresh ? "Sunshine 3D can install ReShade with full add-on support and its Game 3D add-on beside this executable. Nothing is written until you confirm this game." :
                                   "ReShade is installed for this executable. Sunshine 3D can add its Game 3D add-on, which also disables ReShade's Generic Depth add-on and enables Game 3D in ReShade.ini. Nothing is written until you confirm this game.";
           return outcome;
@@ -314,13 +314,13 @@ namespace platf::game3d {
       const auto decision = decisions.lookup(executable, outcome.identity);
       if (decision == setup_decision_e::never) {
         status.state = installation_state_e::missing_addon;
-        outcome.state = "declined";
+        outcome.state = published_state_e::declined;
         status.detail = "You chose not to convert this game, so Sunshine 3D does not load anything into it. Choose Convert this game to change that.";
         return outcome;
       }
       if (decision != setup_decision_e::install) {
         status.state = installation_state_e::missing_addon;
-        outcome.state = "ready_to_install";
+        outcome.state = published_state_e::ready_to_install;
         status.detail = helper ? "This looks like a 2D text game. Sunshine 3D can convert its picture to 3D itself and load a small text helper into the game while it runs, so the game's own text stays readable. Nothing is written to the game's folder, and nothing is loaded until you confirm this game." :
                                  "This looks like a 2D text game that composes its text itself. Sunshine 3D can convert its picture to 3D itself and keep the text readable from the picture alone. Nothing is loaded into the game or written to its folder, and nothing is converted until you confirm this game.";
         return outcome;
@@ -342,18 +342,19 @@ namespace platf::game3d {
       }
       return outcome;
     }
-  }  // namespace detail
 
-  namespace {
-    using namespace std::chrono_literals;
-
-    std::string utf8(const std::filesystem::path &path) {
-      const auto value = path.u8string();
-      return {value.begin(), value.end()};
-    }
-
-    const char *state_name(installation_state_e state) {
-      switch (state) {
+    std::string_view published_state_name(const setup_outcome &outcome) {
+      switch (outcome.state) {
+        case published_state_e::installation:
+          break;
+        case published_state_e::ready_to_install:
+          return "ready_to_install";
+        case published_state_e::declined:
+          return "declined";
+        case published_state_e::installing:
+          return "installing";
+      }
+      switch (outcome.installation.state) {
         case installation_state_e::missing_reshade:
           return "missing_reshade";
         case installation_state_e::missing_addon:
@@ -374,6 +375,16 @@ namespace platf::game3d {
           return "unavailable";
       }
       return "unavailable";
+    }
+  }  // namespace detail
+
+  namespace {
+    using namespace std::chrono_literals;
+    using detail::published_state_e;
+
+    std::string utf8(const std::filesystem::path &path) {
+      const auto value = path.u8string();
+      return {value.begin(), value.end()};
     }
 
     std::filesystem::path decisions_file() {
@@ -550,15 +561,19 @@ namespace platf::game3d {
       }
 
       // `announce` false updates the card alone: no log line and no tray notification.
-      void publish(const detected_game &game, const detail::setup_outcome &outcome, const std::string &state, const bool announce = true) {
+      void publish(const detected_game &game, const detail::setup_outcome &outcome, const bool announce = true) {
         const auto &installation = outcome.installation;
         const auto executable = utf8(game.executable);
+        const auto state = outcome.state;
+        const std::string state_name {detail::published_state_name(outcome)};
+        const bool text_game = game.kind == game_kind_e::text_hook;
+        const bool text_game_current = text_game && state == published_state_e::installation && installation.state == installation_state_e::current;
+        const bool text_game_installed = text_game && state == published_state_e::installation && installation.state == installation_state_e::installed;
         // An add-on installation consumes its confirmation. A text game's confirmation stands
         // for every later start, so its active state stays an offer the user can withdraw.
-        const bool offer = state == "ready_to_install" || state == "declined" ||
-                           (game.kind == game_kind_e::text_hook && (state == "current" || state == "installed"));
+        const bool offer = state == published_state_e::ready_to_install || state == published_state_e::declined || text_game_current || text_game_installed;
         // Worker-owned. Only a running text game is shown as being converted.
-        converting_ = game.kind == game_kind_e::text_hook && state == "current" ? std::optional(game) : std::nullopt;
+        converting_ = text_game_current ? std::optional(game) : std::nullopt;
         {
           std::lock_guard lock(mutex_);
           status_game_ = converting_ ? std::optional(std::pair {game.process_id, game.creation_time}) : std::nullopt;
@@ -569,7 +584,7 @@ namespace platf::game3d {
             {"kind", game.kind == game_kind_e::text_hook ? "text_hook" : "addon"},
             {"text_helper", game.text_helper},
             {"chosen", game.chosen},
-            {"state", state},
+            {"state", state_name},
             {"detail", installation.detail},
             {"reshade_present", installation.reshade_present},
             {"install_script", utf8(bundled_addon_directory() / "install.ps1")},
@@ -586,20 +601,20 @@ namespace platf::game3d {
         // Focus changes and encoder rebuilds must not repeat the same suggestion. An offer that
         // is still unanswered is made again when the game is started again: that is a new
         // occasion to decide, and "never" ends it.
-        const auto notification_key = executable + "\n" + state +
-                                      (state == "ready_to_install" ? "\n" + std::to_string(game.creation_time) : std::string {});
+        const auto notification_key = executable + "\n" + state_name +
+                                      (state == published_state_e::ready_to_install ? "\n" + std::to_string(game.creation_time) : std::string {});
         if (!announce || announced_.contains(notification_key)) {
           return;
         }
         announced_.emplace(notification_key, true);
-        BOOST_LOG(info) << "Game 3D setup: " << game.name << " [" << state << "] executable=\"" << executable
+        BOOST_LOG(info) << "Game 3D setup: " << game.name << " [" << state_name << "] executable=\"" << executable
                         << "\" pid=" << game.process_id << " creation_time=" << game.creation_time << ": " << installation.detail;
 #if defined(SUNSHINE_TRAY) && SUNSHINE_TRAY >= 1
         // The tray only points at the Web UI, where the user confirms; a notification click
         // never installs. Declined and anti-cheat states have nothing to act on.
-        if (installation.state != installation_state_e::current && installation.state != installation_state_e::anti_cheat && state != "declined") {
+        if (installation.state != installation_state_e::current && installation.state != installation_state_e::anti_cheat && state != published_state_e::declined) {
           const auto target_name = game.name + " (" + utf8(game.executable.parent_path().filename()) + ")";
-          system_tray::update_tray_game3d_setup(target_name, state == "ready_to_install" ? "Game 3D can be set up for this game; confirm or decline it in Sunshine 3D." : installation.detail);
+          system_tray::update_tray_game3d_setup(target_name, state == published_state_e::ready_to_install ? "Game 3D can be set up for this game; confirm or decline it in Sunshine 3D." : installation.detail);
         }
 #endif
       }
@@ -619,10 +634,7 @@ namespace platf::game3d {
             return result;
           },
                                                        game.text_helper);
-          if (outcome.state.empty()) {
-            outcome.state = state_name(outcome.installation.state);
-          }
-          if (game.chosen && outcome.state == "ready_to_install") {
+          if (game.chosen && outcome.state == published_state_e::ready_to_install) {
             // Found by its path, which the owner chose; this file is not the one confirmed.
             outcome.installation.detail = "You chose to convert this application, and its file has changed since then. Nothing is loaded or converted until you confirm it again.";
           }
@@ -631,20 +643,17 @@ namespace platf::game3d {
           text_hook::set_consent(game.process_id, game.creation_time, outcome.convert);
           return outcome;
         }
-        auto outcome = detail::apply_setup(game.executable, decisions_, [&](const std::string &detail) {
+        return detail::apply_setup(game.executable, decisions_, [&](const std::string &detail) {
           if (publish_progress) {
-            publish(game, progress_outcome(detail), "installing");
+            publish(game, progress_outcome(detail));
           }
         });
-        if (outcome.state.empty()) {
-          outcome.state = state_name(outcome.installation.state);
-        }
-        return outcome;
       }
 
       static detail::setup_outcome progress_outcome(const std::string &detail) {
         detail::setup_outcome outcome;
         outcome.installation.detail = detail;
+        outcome.state = published_state_e::installing;
         return outcome;
       }
 
@@ -665,7 +674,7 @@ namespace platf::game3d {
         for (const auto &game : requests) {
           const auto outcome = apply(game, true);
           retry_text_helper(game, outcome);
-          publish(game, outcome, outcome.state);
+          publish(game, outcome);
         }
         // A text game that has closed is no longer being converted. Applying it once more
         // finds it gone, withdraws its consent and shows it as approved for its next start.
@@ -675,7 +684,7 @@ namespace platf::game3d {
           const auto outcome = apply(game, false);
           BOOST_LOG(info) << "Game 3D setup: " << game.name << " pid=" << game.process_id << " has closed.";
           // Closing a game is not an occasion to notify its owner about it.
-          publish(game, outcome, outcome.state, false);
+          publish(game, outcome, false);
         }
         const auto now = std::chrono::steady_clock::now();
         // Once a detected installation needs an update, keep retrying after the
@@ -690,7 +699,7 @@ namespace platf::game3d {
           const auto outcome = apply(it->second.game, selected);
           // A background game's update must not replace another game's instructions.
           if (selected) {
-            publish(it->second.game, outcome, outcome.state);
+            publish(it->second.game, outcome);
           }
           if (it->second.game.kind == game_kind_e::text_hook) {
             if (outcome.retry_load && ++it->second.attempts < 3) {
@@ -699,7 +708,7 @@ namespace platf::game3d {
             } else {
               it = pending_.erase(it);
             }
-          } else if (retry(outcome.installation.state) && outcome.state != "ready_to_install" && outcome.state != "declined") {
+          } else if (retry(outcome.installation.state) && outcome.state != published_state_e::ready_to_install && outcome.state != published_state_e::declined) {
             it->second.retry_at = std::chrono::steady_clock::now() + (outcome.installation.state == installation_state_e::unavailable ? 30s : 2s);
             ++it;
           } else {
@@ -756,7 +765,7 @@ namespace platf::game3d {
         } else if (outcome.installation.state == installation_state_e::update_pending || outcome.installation.state == installation_state_e::update_available) {
           pending_[game->executable] = {*game, std::chrono::steady_clock::now() + 2s};
         }
-        publish(*game, outcome, outcome.state);
+        publish(*game, outcome);
       }
 
       void run() {
