@@ -73,7 +73,7 @@
     "sbs_3d_max_encode_width_desc": "Limita a largura da saída com as imagens lado a lado. O tamanho final respeita os limites de largura e altura do NVENC para o codec e preserva a proporção dentro da precisão do alinhamento de pixels. A largura é arredondada para baixo até um múltiplo de quatro, para que as imagens de ambos os olhos tenham larguras pares.",
     "adapter_name": "Nome da GPU",
     "adapter_name_desc_windows": "Especificar manualmente uma GPU a ser usada para captura. Se não for definido, a GPU será escolhida automaticamente. É altamente recomendável deixar esse campo em branco para usar a seleção automática de GPU! Observação: essa GPU deve ter uma tela conectada e ligada. Os valores apropriados podem ser encontrados usando o seguinte comando:",
-    "adapter_name_placeholder_windows": "Série Radeon RX 580",
+    "adapter_name_placeholder_windows": "NVIDIA GeForce RTX 5080",
     "add": "Adicionar",
     "address_family": "Tipo de Endereço IP",
     "address_family_both": "IPv4+IPv6",

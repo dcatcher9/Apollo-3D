@@ -82,7 +82,7 @@
     "sbs_3d_max_encode_width_desc": "限制左右并排输出的合并宽度。最终尺寸遵循编解码器的 NVENC 宽度和高度限制，并在像素对齐允许的精度内保持宽高比。宽度向下取整为四的倍数，使双眼图像的宽度均为偶数。",
     "adapter_name": "适配器名称",
     "adapter_name_desc_windows": "手动指定用于捕获的 GPU 。如果未设置，GPU 将被自动选择。 我们强烈建议将此字段留空以使用自动的 GPU 选择！注意：此GPU 必须连接并开启显示器。 可以使用以下命令找到适当的值：",
-    "adapter_name_placeholder_windows": "Radeon RX 580 Series",
+    "adapter_name_placeholder_windows": "NVIDIA GeForce RTX 5080",
     "add": "添加",
     "address_family": "IP 地址族",
     "address_family_both": "IPv4+IPv6",

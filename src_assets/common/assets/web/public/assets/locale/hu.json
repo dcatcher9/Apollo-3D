@@ -67,7 +67,7 @@
     "sbs_3d_max_encode_width_desc": "Korlátozza az egymás mellé helyezett képeket tartalmazó kimenet szélességét. A végső méret betartja a kodek NVENC-szélesség- és magasságkorlátait, és a képpontigazítás pontosságával megőrzi a képarányt. A szélességet lefelé kerekíti négy többszörösére, hogy mindkét szem képe páros számú képpont széles legyen.",
     "adapter_name": "Adapter neve",
     "adapter_name_desc_windows": "Kézzel adja meg a rögzítéshez használt GPU-t. Ha nincs megadva, a GPU automatikusan kiválasztásra kerül. A GPU automatikus kiválasztásához javasoljuk, hogy hagyja üresen ezt a mezőt! Megjegyzés: Ehhez a GPU-hoz csatlakoztatott és bekapcsolt kijelzőnek kell lennie. A megfelelő értékeket a következő paranccsal találhatja meg:",
-    "adapter_name_placeholder_windows": "Radeon RX 580 sorozat",
+    "adapter_name_placeholder_windows": "NVIDIA GeForce RTX 5080",
     "add": "Hozzáadás",
     "address_family": "Címcsalád",
     "address_family_both": "IPv4+IPv6",

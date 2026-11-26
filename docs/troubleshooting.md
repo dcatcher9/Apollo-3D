@@ -5,8 +5,9 @@ software encoding does not apply to this fork.
 
 ## Start with the log
 
-Open **Troubleshooting** in the Web UI and download the current log. Keep the timestamp of the
-failure and the client mode that was active: **2D**, **Client 3D**, **Raw SBS**, or **Host 3D**.
+Open **Help & Logs** in the Web UI and copy the current debug log. Keep the timestamp of the
+failure and the Moonlight 3D mode that was active: **2D**, **Host AI 3D**, **Client AI 3D**,
+**Game 3D**, or **Movie 3D**.
 Startup encoder probes intentionally try unsupported combinations and can print errors; diagnose
 the later selected encoder and stream, not an isolated probe line.
 
@@ -96,7 +97,7 @@ Raw SBS and negotiated portrait/landscape modes depend on that managed session.
 ### Taskbar running indicators disappear after disconnect
 
 Windows Explorer can fail to rebuild taskbar buttons after a virtual monitor is removed. Enable
-**Restart Explorer after virtual-display removal** in **Configuration > Essentials**, or set:
+**Restore the taskbar after virtual display removal** in **Settings > Essentials**, or set:
 
 ```ini
 virtual_display_restart_explorer = on

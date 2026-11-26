@@ -67,7 +67,7 @@
     "sbs_3d_max_encode_width_desc": "Ogranicza szerokość wyjścia z obrazami ułożonymi obok siebie. Końcowy rozmiar uwzględnia ograniczenia szerokości i wysokości NVENC dla kodeka i zachowuje proporcje z dokładnością wynikającą z wyrównania pikseli. Szerokość jest zaokrąglana w dół do wielokrotności czterech, aby obrazy dla obu oczu miały parzystą szerokość.",
     "adapter_name": "Nazwa adaptera",
     "adapter_name_desc_windows": "Ręczne określenie procesora graficznego używanego do przechwytywania. Jeśli nie zostanie ustawione, procesor graficzny zostanie wybrany automatycznie. Zdecydowanie zalecamy pozostawienie tego pola pustego, aby korzystać z automatycznego wyboru GPU! Uwaga: Ten procesor graficzny musi mieć podłączony i włączony wyświetlacz. Odpowiednie wartości można znaleźć za pomocą następującego polecenia:",
-    "adapter_name_placeholder_windows": "Seria Radeon RX 580",
+    "adapter_name_placeholder_windows": "NVIDIA GeForce RTX 5080",
     "add": "Dodaj",
     "address_family": "Rodzina adresów",
     "address_family_both": "IPv4+IPv6",

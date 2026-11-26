@@ -67,7 +67,7 @@
     "sbs_3d_max_encode_width_desc": "Begrenzt die Breite der Ausgabe mit nebeneinander angeordneten Bildern. Die endgültige Größe berücksichtigt die NVENC-Grenzen des Codecs für Breite und Höhe und erhält das Seitenverhältnis im Rahmen der Pixelausrichtung. Die Breite wird auf ein Vielfaches von vier abgerundet, damit beide Augenbilder eine gerade Pixelbreite haben.",
     "adapter_name": "Adaptername",
     "adapter_name_desc_windows": "Legen Sie eine GPU für die Aufnahme manuell fest. Falls nicht festgelegt, wird die GPU automatisch ausgewählt. Wir empfehlen dringend, dieses Feld leer zu lassen, um die automatische GPU-Auswahl zu verwenden! Hinweis: Diese GPU muss ein Display angeschlossen und eingeschaltet haben. Die passenden Werte finden Sie mit dem folgenden Befehl:",
-    "adapter_name_placeholder_windows": "Radeon RX 580-Serie",
+    "adapter_name_placeholder_windows": "NVIDIA GeForce RTX 5080",
     "add": "Neu",
     "address_family": "Adressfamilie",
     "address_family_both": "IPv4+IPv6",

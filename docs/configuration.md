@@ -99,7 +99,7 @@ eligibility rules.
             @endcode</td>
     </tr>
     <tr>
-        <td rowspan="20">Choices</td>
+        <td rowspan="22">Choices</td>
         <td>bg</td>
         <td>Bulgarian</td>
     </tr>
@@ -130,6 +130,10 @@ eligibility rules.
     <tr>
         <td>fr</td>
         <td>French</td>
+    </tr>
+    <tr>
+        <td>hu</td>
+        <td>Hungarian</td>
     </tr>
     <tr>
         <td>it</td>
@@ -169,7 +173,11 @@ eligibility rules.
     </tr>
     <tr>
         <td>uk</td>
-        <td>Ukranian</td>
+        <td>Ukrainian</td>
+    </tr>
+    <tr>
+        <td>vi</td>
+        <td>Vietnamese</td>
     </tr>
     <tr>
         <td>zh</td>
@@ -651,11 +659,11 @@ ds5_audio_haptics = enabled
     <tr>
         <td>Description</td>
         <td colspan="2">
-            Sometimes it may be useful to map keybindings. Wayland won't allow clients to capture the Win Key
-            for example.
+            Maps a virtual key code received from the client to the key code Sunshine 3D presses on the
+            host. Each pair lists the received code, then the code to press.
             @tip{See [virtual key codes](https://docs.microsoft.com/en-us/windows/win32/inputdev/virtual-key-codes)}
             @hint{keybindings needs to have a multiple of two elements.}
-            @note{This option is not available in the UI. A PR would be welcome.}
+            @note{This option is set in the configuration file; the Web UI does not show it.}
         </td>
     </tr>
     <tr>

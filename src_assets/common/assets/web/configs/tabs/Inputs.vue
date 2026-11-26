@@ -53,7 +53,7 @@ const config = ref(props.config)
                           v-model="config.motion_as_ds4"
                           default="true"
                 ></Checkbox>
-                <!-- Gamepad with touch-capability as DS4(Windows)/DS5(Linux) -->
+                <!-- Gamepad with touch capability as DS4 -->
                 <Checkbox class="mb-3"
                           id="touchpad_as_ds4"
                           locale-prefix="config"

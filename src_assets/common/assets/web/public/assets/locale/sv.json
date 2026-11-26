@@ -73,7 +73,7 @@
     "sbs_3d_max_encode_width_desc": "Begränsar bredden på utdata med bilderna sida vid sida. Den slutliga storleken följer kodekens NVENC-gränser för bredd och höjd och bevarar bildförhållandet med den precision som pixeljusteringen medger. Bredden avrundas nedåt till en multipel av fyra så att båda ögonbilderna får jämna pixelbredder.",
     "adapter_name": "Adapternamn",
     "adapter_name_desc_windows": "Ange manuellt en GPU som ska användas för skärminspelning. Specificeras ingen, väljs GPU automatiskt. Vi rekommenderar starkt att du lämnar det här fältet tomt för att använda automatiskt GPU-val! Obs: Denna GPU måste ha en skärm ansluten och påslagen. Du hittar lämpliga värden med hjälp av följande kommando:",
-    "adapter_name_placeholder_windows": "Radeon RX 580-serien",
+    "adapter_name_placeholder_windows": "NVIDIA GeForce RTX 5080",
     "add": "Lägg till",
     "address_family": "Adressfamilj",
     "address_family_both": "IPv4+IPv6",

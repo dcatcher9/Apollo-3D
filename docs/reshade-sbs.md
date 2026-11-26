@@ -6681,8 +6681,8 @@ the provider ownership result, including a selected mono pass. Capture state,
 clocks, resource operations and locks stay at their existing owners and call sites.
 
 The same header names the binding/readiness writers: provider `bind_api` and
-`reload_effect_bindings`, Generic `bind_generic`, provider `set_depth_ready`,
-and the FX `depth_input::set_ready` call. Internal writers keep internal linkage;
+`reload_effect_bindings`, Generic `bind_generic` and provider `set_depth_ready`.
+Internal writers keep internal linkage;
 external writers keep their existing names and namespaces. Each private cache,
 comparison, reset and readiness write keeps its original call point and order.
 
