@@ -18,9 +18,7 @@
 #include "src/platform/common.h"
 #include "src/utility.h"
 
-#ifdef _WIN32
-  #include <windows.h>
-#endif
+#include <windows.h>
 
 using namespace std::chrono_literals;
 
@@ -104,7 +102,6 @@ namespace {
     return result;
   }
 
-#ifdef _WIN32
   nlohmann::json windows_file_identity(const fs::path &path) {
     const HANDLE handle = CreateFileW(
       path.c_str(),
@@ -136,7 +133,6 @@ namespace {
       },
     };
   }
-#endif
 
   offline_sbs::service_config_t service_config(
     const fs::path &root
@@ -316,10 +312,8 @@ TEST(OfflineSbsJob, CompletesThroughStagingAndPersistsAtomicTerminalState) {
   EXPECT_EQ(terminal.worker_result.at("output"), terminal.output_path->generic_string());
   EXPECT_EQ(terminal.worker_result.at("published"), true);
   EXPECT_EQ(terminal.worker_result.at("staging_cleanup_pending"), false);
-#ifdef _WIN32
   const auto final_identity = windows_file_identity(*terminal.output_path);
   EXPECT_EQ(terminal.worker_result.at("publish_identity"), final_identity);
-#endif
   EXPECT_EQ(read_bytes(*terminal.output_path), "encoded-video");
   EXPECT_EQ(persisted["state"], "complete");
   EXPECT_EQ(persisted["output_location"], "input-directory");
@@ -360,9 +354,7 @@ TEST(OfflineSbsJob, CompletesThroughStagingAndPersistsAtomicTerminalState) {
   EXPECT_TRUE(fs::is_regular_file(*terminal.output_path));
   EXPECT_EQ(fs::file_size(*terminal.output_path), 13u);
   EXPECT_EQ(read_bytes(*terminal.output_path), "encoded-video");
-#ifdef _WIN32
   EXPECT_EQ(windows_file_identity(*terminal.output_path), final_identity);
-#endif
   EXPECT_EQ(
     service.clear(terminal.id).code,
     offline_sbs::error_code_e::not_found
@@ -895,7 +887,6 @@ TEST(OfflineSbsJob, NeverDeletesAnUnattestedFailedStagingPath) {
   service.shutdown();
 }
 
-#ifdef _WIN32
 TEST(OfflineSbsJob, ExactHandlePublicationNeverOverwritesALateDestination) {
   temporary_tree_t tree;
   const auto input = tree.path / "source.mkv";
@@ -1432,9 +1423,6 @@ TEST(OfflineSbsJob, RestartRetriesForcedStagingDispositionFailure) {
 }
 
 TEST(OfflineSbsJob, ClearRetiresAttestedPendingStagingAndKeepsFinalOutput) {
-#ifndef _WIN32
-  GTEST_SKIP() << "exact staging-link retirement is Windows-specific";
-#else
   temporary_tree_t tree;
   auto config = service_config(tree.path);
   config.test_force_staging_disposition_failure = true;
@@ -1501,13 +1489,9 @@ TEST(OfflineSbsJob, ClearRetiresAttestedPendingStagingAndKeepsFinalOutput) {
     offline_sbs::error_code_e::not_found
   );
   service.shutdown();
-#endif
 }
 
 TEST(OfflineSbsJob, ClearAcceptsStalePendingMarkerWhenBothOutputsAreGone) {
-#ifndef _WIN32
-  GTEST_SKIP() << "forced staging disposition failure is Windows-specific";
-#else
   temporary_tree_t tree;
   auto config = service_config(tree.path);
   config.test_force_staging_disposition_failure = true;
@@ -1567,13 +1551,9 @@ TEST(OfflineSbsJob, ClearAcceptsStalePendingMarkerWhenBothOutputsAreGone) {
     offline_sbs::error_code_e::not_found
   );
   service.shutdown();
-#endif
 }
 
 TEST(OfflineSbsJob, ClearPreservesPendingStagingWhenFinalOutputIsGone) {
-#ifndef _WIN32
-  GTEST_SKIP() << "forced staging disposition failure is Windows-specific";
-#else
   temporary_tree_t tree;
   auto config = service_config(tree.path);
   config.test_force_staging_disposition_failure = true;
@@ -1634,7 +1614,6 @@ TEST(OfflineSbsJob, ClearPreservesPendingStagingWhenFinalOutputIsGone) {
   EXPECT_EQ(windows_file_identity(staging_output), staged_identity);
   EXPECT_EQ(read_bytes(staging_output), "encoded-video");
   service.shutdown();
-#endif
 }
 
 TEST(OfflineSbsJob, RecoveryNeverRetiresAReplacementStagingIdentity) {
@@ -1952,7 +1931,6 @@ TEST(OfflineSbsJob, RejectsPersistedInputDirectoryOutputThatWasRedirected) {
   EXPECT_FALSE(fs::exists(state_path.parent_path()));
   recovered.shutdown();
 }
-#endif
 
 TEST(OfflineSbsJob, EnforcesOneActiveJobAndCancelsTheWholeWorkerContract) {
   temporary_tree_t tree;
@@ -2253,7 +2231,6 @@ TEST(OfflineSbsJob, RejectsOutputTraversalAndBuildsOnlyNativeWorkerCommand) {
     reserved_staging_name.code,
     offline_sbs::error_code_e::invalid_request
   );
-#ifdef _WIN32
   const auto remote = service.create({
     .input_path = R"(\\untrusted-host\videos\source.mkv)",
     .operation = offline_sbs::operation_e::evaluate,
@@ -2261,7 +2238,6 @@ TEST(OfflineSbsJob, RejectsOutputTraversalAndBuildsOnlyNativeWorkerCommand) {
   EXPECT_FALSE(remote.ok);
   EXPECT_EQ(remote.code, offline_sbs::error_code_e::invalid_request);
   EXPECT_NE(remote.error.find("local drive"), std::string::npos);
-#endif
   service.shutdown();
 
   const auto command = offline_sbs::build_worker_command_for_test(
@@ -2370,7 +2346,6 @@ TEST(OfflineSbsJob, BrowsesBoundUserFilesWithFilteringAndStableOrdering) {
   EXPECT_EQ(*from_file.path, canonical_media);
   EXPECT_EQ(from_file.entries, expected_files);
 
-#ifdef _WIN32
   const auto relative = service.browse({
     .path = fs::path {"relative"},
     .type = offline_sbs::browse_type_e::any,
@@ -2394,7 +2369,6 @@ TEST(OfflineSbsJob, BrowsesBoundUserFilesWithFilteringAndStableOrdering) {
     }
     previous_drive = name;
   }
-#endif
   service.shutdown();
 }
 
@@ -2583,7 +2557,6 @@ TEST(OfflineSbsJob, NativeWorkerDiagnosticPipeAbortDoesNotWaitForOpenWriter) {
   EXPECT_LT(elapsed, 1s);
 }
 
-#ifdef _WIN32
 TEST(OfflineSbsJob, RefusesAWorkspaceBoundToAnotherInteractiveUser) {
   temporary_tree_t tree;
   auto config = service_config(tree.path);
@@ -2730,7 +2703,6 @@ TEST(OfflineSbsJob, PinsManagedRootsAndRetainedJobDirectoriesByIdentity) {
     MOVEFILE_WRITE_THROUGH
   ));
 }
-#endif
 
 TEST(OfflineSbsJob, PrunesProtectedStateAndUserArtifactsAfterEveryTerminalJob) {
   temporary_tree_t tree;
@@ -3039,7 +3011,6 @@ TEST(OfflineSbsJob, RejectsOverlappingManagedRoots) {
   EXPECT_NE(error.find("disjoint"), std::string::npos);
 }
 
-#ifdef _WIN32
 TEST(OfflineSbsJob, RejectsRemoteOrDeviceManagedRootsBeforeFilesystemAccess) {
   temporary_tree_t tree;
   for (int root_index = 0; root_index < 3; ++root_index) {
@@ -3067,7 +3038,6 @@ TEST(OfflineSbsJob, RejectsRemoteOrDeviceManagedRootsBeforeFilesystemAccess) {
     EXPECT_NE(error.find("local drive"), std::string::npos) << error;
   }
 }
-#endif
 
 TEST(OfflineSbsJob, RefusesAdmissionWhileLiveStreamingOwnsTheGpu) {
   temporary_tree_t tree;

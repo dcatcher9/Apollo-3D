@@ -1,25 +1,24 @@
 /** Actual facade-owner startup/recovery, with finite observers and no media children. */
 #include <gtest/gtest.h>
 
-#if defined(_WIN32) && defined(SUNSHINE_TESTS)
-  #include "src/offline_sbs_service_owner.h"
-  #include "src/offline_sbs_service_test.h"
+#include "src/offline_sbs_service_owner.h"
+#include "src/offline_sbs_service_test.h"
 
-  #include <atomic>
-  #include <chrono>
-  #include <condition_variable>
-  #include <filesystem>
-  #include <fstream>
-  #include <future>
-  #include <memory>
-  #include <mutex>
-  #include <stdexcept>
-  #include <string>
-  #include <thread>
-  #include <utility>
-  #include <vector>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <filesystem>
+#include <fstream>
+#include <future>
+#include <memory>
+#include <mutex>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
 
-  #include <nlohmann/json.hpp>
+#include <nlohmann/json.hpp>
 
 namespace {
   namespace fs = std::filesystem;
@@ -430,9 +429,7 @@ TEST(OfflineSbsServiceLifecycleTest, ActualRecoveryFinishesBeforeTheCatalogBecom
   EXPECT_EQ(counts.exited.load(), 1);
   EXPECT_FALSE(gate.timeout_observed());
 }
-#endif
 
-#if defined(_WIN32) && defined(SUNSHINE_TESTS)
 TEST(OfflineSbsServiceLifecycleTest, DormantFacadeReadsLeaveTheWorkspaceUntouchedUntilExplicitDemand) {
   temporary_tree_t tree;
   const auto config = service_config(tree.path);
@@ -645,4 +642,3 @@ TEST(OfflineSbsServiceLifecycleTest, ServiceAllocationFailureIsCaughtAndNeverPub
   EXPECT_EQ(counts.started.load(), 0);
   EXPECT_EQ(counts.exited.load(), 1);
 }
-#endif

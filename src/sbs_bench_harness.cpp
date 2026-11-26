@@ -13,72 +13,70 @@
 #include "model_manager.h"
 #include "host_sbs_direct_glyph_tiles.h"
 
-#ifdef _WIN32
+// standard includes
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <bit>
+#include <cctype>
+#include <charconv>
+#include <chrono>
+#include <cmath>
+#include <condition_variable>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <iomanip>
+#include <iostream>
+#include <iterator>
+#include <limits>
+#include <locale>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <vector>
 
-  // standard includes
-  #include <algorithm>
-  #include <array>
-  #include <atomic>
-  #include <bit>
-  #include <cctype>
-  #include <charconv>
-  #include <chrono>
-  #include <cmath>
-  #include <condition_variable>
-  #include <cstring>
-  #include <filesystem>
-  #include <fstream>
-  #include <functional>
-  #include <iomanip>
-  #include <iostream>
-  #include <iterator>
-  #include <limits>
-  #include <locale>
-  #include <memory>
-  #include <mutex>
-  #include <optional>
-  #include <sstream>
-  #include <stdexcept>
-  #include <string>
-  #include <string_view>
-  #include <thread>
-  #include <vector>
+// platform includes
+#include <d3d11.h>
+#include <d3dcompiler.h>
+#include <wincodec.h>
+#include <wrl/client.h>
+#include <nlohmann/json.hpp>
 
-  // platform includes
-  #include <d3d11.h>
-  #include <d3dcompiler.h>
-  #include <wincodec.h>
-  #include <wrl/client.h>
-  #include <nlohmann/json.hpp>
+// local includes
+#include "config.h"
+#include "crypto.h"
+#include "depth_coordinate_v2.h"
+#include "generated/sbs_adaptive_state_contract.h"
+#include "host_sbs_contour_history_readback.h"
+#include "host_sbs_display_snapshot_rgb8_analysis_gpu.h"
+#include "host_sbs_gpu_trace.h"
+#include "host_sbs_observation_timeline.h"
+#include "host_sbs_shader_cache.h"
+#include "host_sbs_subtitle_render.h"
+#include "host_sbs_v2_geometry.h"
+#include "logging.h"
+#include "offline_sbs_contract.h"
+#include "offline_sbs_wire_contract.h"
+#include "offline_sbs_worker.h"
+#include "platform/windows/host_sbs_v2_renderer.h"
+#include "prod_zipdepth_convex2x.h"
+#include "host_sbs_direct_glyph_publication_gpu.h"
+#include "sbs_bench_subtitle_qualification.h"
+#include "sbs_bench_depth_coordinate_v2.h"
+#include "sbs_perf.h"
+#include "video.h"
+#include "video_depth_estimator.h"
 
-  // local includes
-  #include "config.h"
-  #include "crypto.h"
-  #include "depth_coordinate_v2.h"
-  #include "generated/sbs_adaptive_state_contract.h"
-  #include "host_sbs_contour_history_readback.h"
-  #include "host_sbs_display_snapshot_rgb8_analysis_gpu.h"
-  #include "host_sbs_gpu_trace.h"
-  #include "host_sbs_observation_timeline.h"
-  #include "host_sbs_shader_cache.h"
-  #include "host_sbs_subtitle_render.h"
-  #include "host_sbs_v2_geometry.h"
-  #include "logging.h"
-  #include "offline_sbs_contract.h"
-  #include "offline_sbs_wire_contract.h"
-  #include "offline_sbs_worker.h"
-  #include "platform/windows/host_sbs_v2_renderer.h"
-  #include "prod_zipdepth_convex2x.h"
-  #include "host_sbs_direct_glyph_publication_gpu.h"
-  #include "sbs_bench_subtitle_qualification.h"
-  #include "sbs_bench_depth_coordinate_v2.h"
-  #include "sbs_perf.h"
-  #include "video.h"
-  #include "video_depth_estimator.h"
-
-  #ifndef SUNSHINE_SHADERS_DIR
-    #define SUNSHINE_SHADERS_DIR SUNSHINE_ASSETS_DIR "/shaders/directx"
-  #endif
+#ifndef SUNSHINE_SHADERS_DIR
+  #define SUNSHINE_SHADERS_DIR SUNSHINE_ASSETS_DIR "/shaders/directx"
+#endif
 
 using Microsoft::WRL::ComPtr;
 using namespace std::literals;
@@ -6018,11 +6016,3 @@ namespace offline_sbs {
     return sbs_bench::publish_native_capabilities(destination, true);
   }
 }  // namespace offline_sbs
-
-#else  // !_WIN32
-namespace sbs_bench {
-  int run(int, char **) {
-    return 1;
-  }
-}  // namespace sbs_bench
-#endif

@@ -4,36 +4,34 @@
  */
 #include "sbs_bench_depth_coordinate_v2.h"
 
-#ifdef _WIN32
+#include <algorithm>
+#include <array>
+#include <bit>
+#include <charconv>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <fstream>
+#include <iomanip>
+#include <limits>
+#include <locale>
+#include <optional>
+#include <sstream>
+#include <utility>
 
-  #include <algorithm>
-  #include <array>
-  #include <bit>
-  #include <charconv>
-  #include <cmath>
-  #include <cstdint>
-  #include <cstring>
-  #include <fstream>
-  #include <iomanip>
-  #include <limits>
-  #include <locale>
-  #include <optional>
-  #include <sstream>
-  #include <utility>
+#include <d3dcompiler.h>
+#include <nlohmann/json.hpp>
 
-  #include <d3dcompiler.h>
-  #include <nlohmann/json.hpp>
+#include "crypto.h"
+#include "depth_coordinate_v2.h"
+#include "generated/sbs_adaptive_state_contract.h"
+#include "host_sbs_shader_cache.h"
+#include "host_sbs_v2_gpu_executor.h"
+#include "prod_zipdepth_convex2x.h"
 
-  #include "crypto.h"
-  #include "depth_coordinate_v2.h"
-  #include "generated/sbs_adaptive_state_contract.h"
-  #include "host_sbs_shader_cache.h"
-  #include "host_sbs_v2_gpu_executor.h"
-  #include "prod_zipdepth_convex2x.h"
-
-  #ifndef SUNSHINE_SHADERS_DIR
-    #define SUNSHINE_SHADERS_DIR SUNSHINE_ASSETS_DIR "/shaders/directx"
-  #endif
+#ifndef SUNSHINE_SHADERS_DIR
+  #define SUNSHINE_SHADERS_DIR SUNSHINE_ASSETS_DIR "/shaders/directx"
+#endif
 
 using Microsoft::WRL::ComPtr;
 
@@ -1655,5 +1653,3 @@ void main(uint3 id : SV_DispatchThreadID) {
 #endif
 
 }  // namespace sbs_bench
-
-#endif  // _WIN32

@@ -17,18 +17,16 @@
  */
 #pragma once
 
-#ifdef _WIN32
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <vector>
 
-  #include <cstddef>
-  #include <cstdint>
-  #include <filesystem>
-  #include <memory>
-  #include <string>
-  #include <string_view>
-  #include <vector>
-
-  #include <d3d11.h>
-  #include <wrl/client.h>
+#include <d3d11.h>
+#include <wrl/client.h>
 
 namespace sbs_bench {
 
@@ -106,13 +104,13 @@ namespace sbs_bench {
 
     bool write_state_trace(const std::filesystem::path &path, std::string &error) const;
 
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
     /** Replace the persistent GPU state before a dispatch to exercise fail-closed recovery. */
     bool overwrite_state_for_testing(
       const std::vector<std::uint32_t> &words,
       std::string &error
     );
-  #endif
+#endif
 
   private:
     depth_coordinate_v2_gpu_replay();
@@ -121,5 +119,3 @@ namespace sbs_bench {
   };
 
 }  // namespace sbs_bench
-
-#endif  // _WIN32

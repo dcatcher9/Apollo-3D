@@ -16,7 +16,6 @@
 #include <string>
 
 namespace sbs_bench {
-#ifdef _WIN32
   namespace detail {
     struct resolved_sbs_geometry {
       std::uint32_t eye_width = 0;
@@ -36,7 +35,6 @@ namespace sbs_bench {
       std::string &error
     );
   }  // namespace detail
-#endif
 
   /// Entry point for the `--sbs-bench` subcommand. argc/argv are the post-flag args
   /// (see config::sunshine.cmd). Returns a process exit code.

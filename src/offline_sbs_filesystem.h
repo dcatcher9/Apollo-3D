@@ -14,10 +14,8 @@ namespace offline_sbs::safe_filesystem {
   /**
    * Access reserved when a tree is pinned.
    *
-   * On Windows, `remove` reserves delete access up front. On POSIX it records
-   * removal intent while retaining descriptor pins; final parent-directory
-   * permissions are evaluated by `unlinkat`. In both cases operations stay
-   * bound to the pinned root rather than resolving its pathname again.
+   * `remove` reserves delete access up front. Operations stay bound to the
+   * pinned root rather than resolving its pathname again.
    */
   enum class tree_access_e {
     measure_only,
@@ -42,7 +40,7 @@ namespace offline_sbs::safe_filesystem {
   /**
    * A move-only identity pin for a tree root.
    *
-   * On Windows, `open()` opens every existing path component with
+   * `open()` opens every existing path component with
    * `FILE_FLAG_OPEN_REPARSE_POINT`. Ancestor pins and removal-access root pins
    * omit `FILE_SHARE_DELETE` to preserve path identity. A measure-only root pin
    * shares delete so an aggregate scan can coexist with retained removal pins,
@@ -51,17 +49,9 @@ namespace offline_sbs::safe_filesystem {
    * object's lifetime. Measurement and removal never recurse through a symlink,
    * junction, or other reparse point.
    *
-   * On POSIX, `open()` walks from the filesystem root with descriptor-relative
-   * no-follow opens and retains descriptors for the final parent and root
-   * object. Measurement is performed only from those descriptors, so renaming
-   * an ancestor or the root does not redirect a pin to a replacement pathname.
-   * Removal validates the retained root identity at its original parent/name
-   * before the final `unlinkat`; a moved or replaced final name fails closed.
-   *
    * The root must be an absolute path below a filesystem root. Opening a volume
    * root itself is deliberately rejected. A reparse point may be accepted only
-   * as the final root object (and only where the platform can open the link
-   * itself) so `remove()` can safely remove the link; `measure()` rejects a
+   * as the final root object so `remove()` can safely remove the link; `measure()` rejects a
    * reparse-point root rather than reporting a misleading zero-byte tree.
    */
   class pinned_tree_t {
@@ -88,8 +78,7 @@ namespace offline_sbs::safe_filesystem {
     /**
      * Measure regular files reachable without crossing a reparse point.
      *
-     * Sizes and identities are queried from the same opened child handles or
-     * descriptors.
+     * Sizes and identities are queried from the same opened child handles.
      * Identity changes observed during traversal, access failure, unsupported
      * identity queries, arithmetic overflow, excessive depth, or excessive
      * entry count fail closed with `std::nullopt`. This is a bounded
@@ -104,12 +93,8 @@ namespace offline_sbs::safe_filesystem {
     /**
      * Remove the pinned root in postorder without following reparse points.
      *
-     * On Windows, every entry is removed by dispositioning the exact no-follow
-     * handle that was inspected. On POSIX, traversal stays descriptor-relative
-     * and each name is identity-validated before `unlinkat`; POSIX does not
-     * provide an atomic identity-conditional unlink, so callers must prevent
-     * adversarial mutation of the pinned parent during the final validation /
-     * unlink interval. A reparse point is removed as a link; its target is
+     * Every entry is removed by dispositioning the exact no-follow handle that
+     * was inspected. A reparse point is removed as a link; its target is
      * never opened. Concurrent mutation, traversal depth, and entry count are
      * bounded and then fail safely. This requires `tree_access_e::remove`.
      */

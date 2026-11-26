@@ -5,7 +5,6 @@
 
 #include <gtest/gtest.h>
 
-#ifdef _WIN32
 namespace {
   TEST(SbsBenchGeometryTest, ResolvesOrdinaryPackedGeometry) {
     std::string error;
@@ -56,4 +55,3 @@ namespace {
     EXPECT_EQ(error, "source dimensions or output controls are invalid");
   }
 }  // namespace
-#endif

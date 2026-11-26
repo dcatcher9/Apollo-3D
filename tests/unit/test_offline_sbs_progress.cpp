@@ -13,9 +13,7 @@
 #include <string_view>
 #include <vector>
 
-#ifdef _WIN32
-  #include <windows.h>
-#endif
+#include <windows.h>
 
 namespace {
   namespace fs = std::filesystem;
@@ -130,7 +128,6 @@ TEST(OfflineSbsProgressTest, PublishesExactProbeFirstFrameLastFrameAndPhaseSnaps
   RecordProperty("successful_publications", static_cast<int>(publisher.successful_publications()));
 }
 
-#ifdef _WIN32
 TEST(OfflineSbsProgressTest, FailedPublicationWhilePreviousReaderIsOpenCanRetryAfterItCloses) {
   progress_files_t files;
   const auto media = timed_media();
@@ -158,7 +155,6 @@ TEST(OfflineSbsProgressTest, FailedPublicationWhilePreviousReaderIsOpenCanRetryA
   EXPECT_FALSE(fs::exists(files.temporary));
   EXPECT_EQ(publisher.successful_publications(), 2u);
 }
-#endif
 
 TEST(OfflineSbsProgressTest, FailedPublicationPreservesThePreviousSnapshotAndCanRetry) {
   progress_files_t files;

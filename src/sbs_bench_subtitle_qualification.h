@@ -1,19 +1,18 @@
 /** @file File-fed qualification of the actual completed Direct Glyph subtitle draw. */
 #pragma once
 
-#ifdef _WIN32
-  #include "host_sbs_completed_subtitle_programs.h"
-  #include "host_sbs_resolution.h"
-  #include "host_sbs_selected_matte_receipt.h"
-  #include "host_sbs_shared_ui_warp_runtime.h"
-  #include "platform/windows/host_sbs_v2_renderer.h"
-  #include "video_depth_estimator.h"
+#include "host_sbs_completed_subtitle_programs.h"
+#include "host_sbs_resolution.h"
+#include "host_sbs_selected_matte_receipt.h"
+#include "host_sbs_shared_ui_warp_runtime.h"
+#include "platform/windows/host_sbs_v2_renderer.h"
+#include "video_depth_estimator.h"
 
-  #include <algorithm>
-  #include <cstddef>
-  #include <cstdint>
-  #include <cstring>
-  #include <vector>
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <vector>
 
 namespace sbs_bench::subtitle_qualification {
   using Microsoft::WRL::ComPtr;
@@ -278,4 +277,3 @@ namespace sbs_bench::subtitle_qualification {
     }
   };
 }  // namespace sbs_bench::subtitle_qualification
-#endif

@@ -23,9 +23,7 @@
 #include <string_view>
 #include <vector>
 
-#ifdef _WIN32
-  #include <windows.h>
-#endif
+#include <windows.h>
 
 namespace {
   namespace fs = std::filesystem;
@@ -262,7 +260,6 @@ TEST(OfflineSbsWorker, ObservationTimelineRoundTripsAndRejectsRegression) {
   fs::remove_all(root, ec);
 }
 
-#ifdef _WIN32
 TEST(OfflineSbsWorker, TreatsClosedNativeStdoutPipeAsEofBeforeProcessSignals) {
   EXPECT_TRUE(offline_sbs::native_stdout_pipe_error_is_eof_for_test(
     ERROR_BROKEN_PIPE
@@ -274,7 +271,6 @@ TEST(OfflineSbsWorker, TreatsClosedNativeStdoutPipeAsEofBeforeProcessSignals) {
     ERROR_ACCESS_DENIED
   ));
 }
-#endif
 
 TEST(OfflineSbsWorker, ConversionUsesOneDirectCausalPass) {
   std::ifstream stream(
@@ -1545,7 +1541,6 @@ TEST(OfflineSbsWorker, RejectsWindowsCommandLinesBeforeCreateProcess) {
       "output.mkv",
     })
   );
-#ifdef _WIN32
   try {
     offline_sbs::validate_windows_command_line_capacity_for_test({
       "ffmpeg.exe",
@@ -1560,5 +1555,4 @@ TEST(OfflineSbsWorker, RejectsWindowsCommandLinesBeforeCreateProcess) {
       "test command exceeds the Windows command-line limit"
     );
   }
-#endif
 }

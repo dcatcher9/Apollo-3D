@@ -1,31 +1,30 @@
 /** Actual offline handlers/authentication with an owned service and finite startup gate. */
 #include <gtest/gtest.h>
 
-#if defined(_WIN32) && defined(SUNSHINE_TESTS)
-  #include "src/config.h"
-  #include "src/confighttp.h"
-  #include "src/httpcommon.h"
-  #include "src/network.h"
-  #include "src/offline_sbs_job.h"
-  #include "src/offline_sbs_service_test.h"
+#include "src/config.h"
+#include "src/confighttp.h"
+#include "src/httpcommon.h"
+#include "src/network.h"
+#include "src/offline_sbs_job.h"
+#include "src/offline_sbs_service_test.h"
 
-  #include <array>
-  #include <atomic>
-  #include <chrono>
-  #include <condition_variable>
-  #include <filesystem>
-  #include <fstream>
-  #include <functional>
-  #include <memory>
-  #include <mutex>
-  #include <nlohmann/json.hpp>
-  #include <optional>
-  #include <Simple-Web-Server/server_https.hpp>
-  #include <sstream>
-  #include <stdexcept>
-  #include <string>
-  #include <string_view>
-  #include <utility>
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <nlohmann/json.hpp>
+#include <optional>
+#include <Simple-Web-Server/server_https.hpp>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
 
 namespace confighttp {
   using offline_http_base_t = SimpleWeb::ServerBase<SimpleWeb::HTTPS>;
@@ -536,4 +535,3 @@ namespace {
     }
   }
 }  // namespace
-#endif

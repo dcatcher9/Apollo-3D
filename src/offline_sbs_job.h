@@ -298,11 +298,9 @@ namespace offline_sbs {
     const std::filesystem::path &worker_spec,
     std::string_view worker_spec_sha256
   );
-#ifdef _WIN32
   bool windows_publish_identity_attributes_accepted_for_test(
     std::uint32_t attributes,
     std::uint64_t size
   );
-#endif
 #endif
 }  // namespace offline_sbs

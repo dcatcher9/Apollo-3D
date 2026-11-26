@@ -10,10 +10,8 @@
 #include <utility>
 #include <vector>
 
-#ifdef _WIN32
-  #include <windows.h>
-  #include <winioctl.h>
-#endif
+#include <windows.h>
+#include <winioctl.h>
 
 namespace {
   namespace fs = std::filesystem;
@@ -49,7 +47,6 @@ namespace {
     output.write(contents.data(), static_cast<std::streamsize>(contents.size()));
   }
 
-#ifdef _WIN32
   struct mount_point_reparse_buffer_t {
     DWORD reparse_tag;
     WORD reparse_data_length;
@@ -177,7 +174,6 @@ namespace {
   private:
     fs::path path_;
   };
-#endif
 }  // namespace
 
 TEST(OfflineSbsFilesystem, MeasuresAndRemovesTheSamePinnedTreeIdentity) {
@@ -193,14 +189,12 @@ TEST(OfflineSbsFilesystem, MeasuresAndRemovesTheSamePinnedTreeIdentity) {
     error
   );
   ASSERT_TRUE(pinned) << error;
-#ifdef _WIN32
   const auto swapped = tree.path / "managed-swapped";
   EXPECT_FALSE(MoveFileExW(
     root.c_str(),
     swapped.c_str(),
     MOVEFILE_WRITE_THROUGH
   ));
-#endif
 
   const auto measurement = pinned->measure(error);
   ASSERT_TRUE(measurement) << error;
@@ -336,174 +330,6 @@ TEST(OfflineSbsFilesystem, RejectsRelativeAndFilesystemRootPaths) {
   EXPECT_NE(error.find("root"), std::string::npos);
 }
 
-#if defined(__linux__)
-TEST(OfflineSbsFilesystem, PosixPinSurvivesAncestorRename) {
-  temporary_tree_t tree;
-  const auto ancestor = tree.path / "ancestor";
-  const auto root = ancestor / "managed";
-  const auto moved_ancestor = tree.path / "ancestor-original";
-  write_bytes(root / "original.bin", 17, 'o');
-
-  std::string error;
-  auto pinned = safe_fs::pinned_tree_t::open(
-    root,
-    safe_fs::tree_access_e::remove,
-    error
-  );
-  ASSERT_TRUE(pinned) << error;
-
-  fs::rename(ancestor, moved_ancestor);
-  write_bytes(root / "replacement.bin", 31, 'r');
-
-  const auto measurement = pinned->measure(error);
-  ASSERT_TRUE(measurement) << error;
-  EXPECT_EQ(measurement->regular_file_bytes, 17u);
-  EXPECT_EQ(measurement->regular_file_count, 1u);
-
-  ASSERT_TRUE(pinned->remove(error)) << error;
-  EXPECT_FALSE(fs::exists(moved_ancestor / "managed"));
-  EXPECT_TRUE(fs::is_regular_file(root / "replacement.bin"));
-  EXPECT_EQ(fs::file_size(root / "replacement.bin"), 31u);
-}
-
-TEST(OfflineSbsFilesystem, PosixPinRefusesReplacementAtRootName) {
-  temporary_tree_t tree;
-  const auto root = tree.path / "managed";
-  const auto moved_root = tree.path / "managed-original";
-  write_bytes(root / "original.bin", 19, 'o');
-
-  std::string error;
-  auto pinned = safe_fs::pinned_tree_t::open(
-    root,
-    safe_fs::tree_access_e::remove,
-    error
-  );
-  ASSERT_TRUE(pinned) << error;
-
-  fs::rename(root, moved_root);
-  write_bytes(root / "replacement.bin", 37, 'r');
-
-  const auto measurement = pinned->measure(error);
-  ASSERT_TRUE(measurement) << error;
-  EXPECT_EQ(measurement->regular_file_bytes, 19u);
-  EXPECT_EQ(measurement->regular_file_count, 1u);
-
-  EXPECT_FALSE(pinned->remove(error));
-  EXPECT_NE(error.find("identity"), std::string::npos) << error;
-  EXPECT_TRUE(fs::is_regular_file(moved_root / "original.bin"));
-  EXPECT_EQ(fs::file_size(moved_root / "original.bin"), 19u);
-  EXPECT_TRUE(fs::is_regular_file(root / "replacement.bin"));
-  EXPECT_EQ(fs::file_size(root / "replacement.bin"), 37u);
-}
-
-TEST(OfflineSbsFilesystem, PosixRegularFilePinRefusesReplacement) {
-  temporary_tree_t tree;
-  const auto root = tree.path / "artifact.bin";
-  const auto moved_root = tree.path / "artifact-original.bin";
-  write_bytes(root, 23, 'o');
-
-  std::string error;
-  auto pinned = safe_fs::pinned_tree_t::open(
-    root,
-    safe_fs::tree_access_e::remove,
-    error
-  );
-  ASSERT_TRUE(pinned) << error;
-
-  fs::rename(root, moved_root);
-  write_bytes(root, 43, 'r');
-
-  const auto measurement = pinned->measure(error);
-  ASSERT_TRUE(measurement) << error;
-  EXPECT_EQ(measurement->regular_file_bytes, 23u);
-  EXPECT_EQ(measurement->regular_file_count, 1u);
-
-  EXPECT_FALSE(pinned->remove(error));
-  EXPECT_NE(error.find("identity"), std::string::npos) << error;
-  EXPECT_EQ(fs::file_size(moved_root), 23u);
-  EXPECT_EQ(fs::file_size(root), 43u);
-}
-
-TEST(OfflineSbsFilesystem, PosixSymlinkTargetsStayOutsideTheTree) {
-  temporary_tree_t tree;
-  const auto root = tree.path / "managed";
-  const auto target = tree.path / "outside";
-  write_bytes(root / "owned.bin", 7, 'o');
-  write_bytes(target / "sentinel.bin", 64 * 1024, 's');
-  fs::create_directory_symlink(target, root / "redirect");
-  fs::create_directory_symlink(root, root / "loop");
-
-  std::string error;
-  auto pinned = safe_fs::pinned_tree_t::open(
-    root,
-    safe_fs::tree_access_e::remove,
-    error
-  );
-  ASSERT_TRUE(pinned) << error;
-
-  for (int repetition = 0; repetition < 2; ++repetition) {
-    const auto measurement = pinned->measure(error);
-    ASSERT_TRUE(measurement) << error;
-    EXPECT_EQ(measurement->regular_file_bytes, 7u);
-    EXPECT_EQ(measurement->regular_file_count, 1u);
-    EXPECT_EQ(measurement->directory_count, 1u);
-    EXPECT_EQ(measurement->reparse_point_count, 2u);
-  }
-
-  ASSERT_TRUE(pinned->remove(error)) << error;
-  EXPECT_FALSE(fs::exists(root));
-  EXPECT_TRUE(fs::is_regular_file(target / "sentinel.bin"));
-  EXPECT_EQ(fs::file_size(target / "sentinel.bin"), 64u * 1024u);
-}
-
-TEST(OfflineSbsFilesystem, PosixRootSymlinkRemovesOnlyTheLink) {
-  temporary_tree_t tree;
-  const auto target = tree.path / "outside";
-  const auto link = tree.path / "root-link";
-  write_bytes(target / "sentinel.bin", 29, 's');
-  fs::create_directory_symlink(target, link);
-
-  std::string error;
-  EXPECT_FALSE(safe_fs::measure_tree_no_follow(link, error));
-  EXPECT_NE(error.find("symbolic link"), std::string::npos) << error;
-  ASSERT_TRUE(safe_fs::remove_tree_no_follow(link, error)) << error;
-  EXPECT_FALSE(fs::exists(link));
-  EXPECT_TRUE(fs::is_regular_file(target / "sentinel.bin"));
-  EXPECT_EQ(fs::file_size(target / "sentinel.bin"), 29u);
-}
-
-TEST(OfflineSbsFilesystem, PosixRejectsSymlinkAncestor) {
-  temporary_tree_t tree;
-  const auto real_parent = tree.path / "real-parent";
-  const auto linked_parent = tree.path / "linked-parent";
-  write_bytes(real_parent / "managed" / "artifact.bin", 13, 'a');
-  fs::create_directory_symlink(real_parent, linked_parent);
-
-  std::string error;
-  EXPECT_FALSE(
-    safe_fs::measure_tree_no_follow(linked_parent / "managed", error)
-  );
-  EXPECT_NE(error.find("plain directory"), std::string::npos) << error;
-}
-
-TEST(OfflineSbsFilesystem, PosixMeasurementEnforcesDepthBound) {
-  temporary_tree_t tree;
-  const auto root = tree.path / "managed";
-  auto current = root;
-  fs::create_directory(current);
-  for (int depth = 0; depth <= 256; ++depth) {
-    current /= "d";
-    fs::create_directory(current);
-  }
-  write_bytes(current / "artifact.bin", 1, 'a');
-
-  std::string error;
-  EXPECT_FALSE(safe_fs::measure_tree_no_follow(root, error));
-  EXPECT_NE(error.find("directory depth"), std::string::npos) << error;
-}
-#endif  // defined(__linux__)
-
-#ifdef _WIN32
 TEST(OfflineSbsFilesystem, MeasurePinPreventsAncestorReplacement) {
   temporary_tree_t tree;
   const auto ancestor = tree.path / "ancestor";
@@ -603,4 +429,3 @@ TEST(OfflineSbsFilesystem, DirectChildJunctionRemovalKeepsTargetAndRoot) {
   EXPECT_EQ(measurement->regular_file_count, 1u);
   EXPECT_EQ(measurement->directory_count, 1u);
 }
-#endif
