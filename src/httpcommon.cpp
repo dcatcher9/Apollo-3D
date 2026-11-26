@@ -229,7 +229,7 @@ namespace http {
     return 0;
   }
 
-  int save_user_creds(const std::string &file, const std::string &username, const std::string &password, bool run_our_mouth) {
+  int save_user_creds(const std::string &file, const std::string &username, const std::string &password) {
     nlohmann::json outputTree;
 
     if (fs::exists(file)) {

@@ -24,8 +24,7 @@ namespace http {
   int save_user_creds(
     const std::string &file,
     const std::string &username,
-    const std::string &password,
-    bool run_our_mouth = false
+    const std::string &password
   );
 
   int reload_user_creds(const std::string &file);

@@ -26,6 +26,7 @@ namespace audio {
 
   static int start_audio_control(audio_ctx_t &ctx);
   static void stop_audio_control(audio_ctx_t &);
+  static audio_ctx_ref_t get_audio_ctx_ref();
 
   constexpr auto SAMPLE_RATE = 48000;
 

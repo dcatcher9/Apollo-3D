@@ -73,16 +73,4 @@ namespace audio {
 
   void capture(safe::mail_t mail, config_t config, packet_queue_t packets);
 
-  /**
-   * @brief Get the reference to the audio context.
-   * @returns A shared pointer reference to audio context.
-   * @note Aside from the configuration purposes, it can be used to extend the
-   *       audio sink lifetime to capture sink earlier and restore it later.
-   *
-   * @examples
-   * audio_ctx_ref_t audio = get_audio_ctx_ref()
-   * @examples_end
-   */
-  audio_ctx_ref_t get_audio_ctx_ref();
-
 }  // namespace audio

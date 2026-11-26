@@ -58,6 +58,7 @@ namespace microphone {
     bool receive(std::span<const std::uint8_t> packet, const std::string &remote_address, std::uint16_t remote_port);
     /** Advance one 20 ms playout slot. Empty means no microphone audio is available. */
     std::vector<std::int16_t> playout();
+    /** Packets waiting for playout; the tests read it to check the bounded jitter buffer. */
     std::size_t queued_packets() const;
 
   private:

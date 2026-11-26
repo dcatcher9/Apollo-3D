@@ -239,8 +239,6 @@ namespace stream {
 
   // Host->client push of the SBS depth-engine state so the client can show a "loading" indicator
   // while a model builds/loads/warms up (Apollo protocol extension 0x3006).
-#pragma pack(push, 1)
-
   struct control_depth_status_t {
     control_header_v2 header;
 
@@ -276,8 +274,6 @@ namespace stream {
     control_header_v2 header;
     std::uint8_t body[STREAM_GAMMA_ACK_PAYLOAD_SIZE];
   };
-
-#pragma pack(pop)
 
   typedef struct control_encrypted_t {
     std::uint16_t encryptedHeaderType;  // Always LE 0x0001

@@ -849,11 +849,6 @@ namespace video {
     }
   }
 
-  void refresh_displays(std::vector<std::string> &display_names, int &current_display_index) {
-    static std::string empty_str = "";
-    refresh_displays(display_names, current_display_index, empty_str);
-  }
-
   static detail::capture_platform_t real_capture_platform() {
     detail::capture_platform_t platform;
     platform.preferred_display_name = []() {
