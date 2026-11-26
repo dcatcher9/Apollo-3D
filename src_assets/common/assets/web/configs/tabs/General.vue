@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref } from 'vue'
 import Checkbox from '../../Checkbox.vue'
 
 const props = defineProps({
@@ -29,13 +29,6 @@ function addCmd(cmdArr, template, idx) {
 function removeCmd(cmdArr, index) {
   cmdArr.splice(index,1)
 }
-
-onMounted(() => {
-  // Set default value for enable_pairing if not present
-  if (config.value.enable_pairing === undefined) {
-    config.value.enable_pairing = "enabled"
-  }
-})
 </script>
 
 <template>

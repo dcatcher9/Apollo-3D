@@ -669,9 +669,6 @@
         }
         return icons[tabId] || 'fas fa-circle'
       },
-      forceUpdate() {
-        this.$forceUpdate()
-      },
       serialize() {
         const packetSize = Number(this.config.packetsize);
         if (!Number.isInteger(packetSize) || (packetSize !== 0 && (packetSize < 200 || packetSize > 65459))) {
@@ -778,10 +775,6 @@
         if (hash) {
           // remove the # from the hash
           let stripped_hash = hash.substring(1);
-          // The two earlier tabs are now one; keep their links and notifications working.
-          if (stripped_hash === 'ar-glasses' || stripped_hash === 'local-monitor') {
-            stripped_hash = 'local-display';
-          }
 
           this.tabs.forEach(tab => {
             if (tab.id === stripped_hash) {

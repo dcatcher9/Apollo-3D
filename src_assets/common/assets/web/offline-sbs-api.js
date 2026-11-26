@@ -19,18 +19,6 @@ function requireJobId(jobId) {
   return encodeURIComponent(normalized)
 }
 
-export function normalizeJobs(payload) {
-  if (Array.isArray(payload)) return payload
-  if (Array.isArray(payload?.jobs)) return payload.jobs
-  if (Array.isArray(payload?.job)) return payload.job
-  if (payload?.job && typeof payload.job === 'object') return [payload.job]
-  return []
-}
-
-export async function listOfflineSbsJobs({ signal } = {}) {
-  return normalizeJobs(await requestJson(OFFLINE_SBS_JOBS_URL, { signal }))
-}
-
 export async function getOfflineSbsOverview({ signal } = {}) {
   let payload
   try {
@@ -48,7 +36,7 @@ export async function getOfflineSbsOverview({ signal } = {}) {
     throw error
   }
   return {
-    jobs: normalizeJobs(payload),
+    jobs: Array.isArray(payload?.jobs) ? payload.jobs : [],
     capabilities:
       payload?.capabilities && typeof payload.capabilities === 'object' ?
         payload.capabilities :

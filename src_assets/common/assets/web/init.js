@@ -5,14 +5,11 @@ import i18n from './locale'
 // https://discourse.aurelia.io/t/bootstrap-import-bootstrap-breaks-dropdown-menu-in-navbar/641/9
 import 'bootstrap/dist/js/bootstrap'
 
-export function initApp(app, config) {
+export function initApp(app) {
     //Wait for locale initialization, then render
     i18n().then(i18n => {
         app.use(i18n);
         app.provide('i18n', i18n.global)
         app.mount('#app');
-        if (config) {
-            config(app)
-        }
     });
 }

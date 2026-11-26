@@ -1348,12 +1348,6 @@
         }
       },
       apiMessage(error) {
-        // A 404 with a JSON body is the job manager answering (for example an unknown or
-        // pruned job); only a bodiless 404 means the route itself is missing.
-        const answered = error?.payload && Object.keys(error.payload).length > 0
-        if (error instanceof ApiError && error.status === 404 && !answered) {
-          return 'This build does not expose the built-in /api/offline-sbs/jobs job manager.'
-        }
         return error?.message || 'The built-in offline job manager could not be reached.'
       },
       requestFromForm() {

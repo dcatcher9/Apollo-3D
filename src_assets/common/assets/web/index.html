@@ -235,11 +235,8 @@
       hostName() {
         return this.config?.sunshine_name || 'Sunshine 3D'
       },
-      connectedClients() {
-        return this.pairedClients.filter(client => client.connected)
-      },
       activeClient() {
-        return this.connectedClients[0] || null
+        return this.pairedClients.find(client => client.connected) || null
       },
       activeApp() {
         return this.apps.find(app => app.uuid === this.currentApp) || null
@@ -367,9 +364,6 @@
         }
         if (this.depthError) {
           return { tone: 'warning', icon: 'fa-cubes', title: 'AI 3D is not ready', message: '2D streaming is still available while the depth engine is checked.', action: 'View diagnostics', href: './troubleshooting#logs' }
-        }
-        if (this.connectedClients.length > 1) {
-          return { tone: 'warning', icon: 'fa-users-viewfinder', title: 'More than one device is connected', message: 'Sunshine 3D is designed around one active remote session per PC.', action: 'Manage devices', href: './pin' }
         }
         return null
       },

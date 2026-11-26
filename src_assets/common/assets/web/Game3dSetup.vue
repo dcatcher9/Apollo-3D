@@ -213,7 +213,6 @@ export default {
         missing_addon: { label: 'Add-on missing', tone: 'warning', description: 'ReShade is installed without the Sunshine 3D add-on.' },
         installing: { label: 'Installing', tone: 'active', description: 'Installing the confirmed components beside this game.' },
         installed: { label: 'Installed for next launch', tone: 'success', description: 'ReShade and the Sunshine 3D add-on are installed. They will activate the next time you launch the game.' },
-        blocked: { label: 'Setup needs attention', tone: 'warning', description: 'Setup could not proceed for this game. Review the detected installation before trying again.' },
         current: { label: 'Add-on up to date', tone: 'success', description: 'The installed Sunshine 3D add-on matches this host.' },
         update_available: { label: 'Update available', tone: 'warning', description: 'A matching bundled add-on update is available for this game.' },
         update_pending: { label: 'Update pending', tone: 'warning', description: 'The matching bundled add-on update will be applied when its files are available. It will activate the next time you launch the game.' },

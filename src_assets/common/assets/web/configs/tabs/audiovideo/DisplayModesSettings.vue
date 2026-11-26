@@ -22,11 +22,3 @@ const config = ref(props.config)
     <div class="form-text">{{ $t("config.minimum_fps_target_desc") }}</div>
   </div>
 </template>
-
-<style scoped>
-.ms-item {
-  background-color: var(--apollo-surface-raised);
-  font-size: var(--apollo-text-caption);
-  font-weight: bold;
-}
-</style>
