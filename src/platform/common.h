@@ -111,7 +111,6 @@ namespace platf {
 
   enum class gamepad_feedback_e {
     rumble,  ///< Rumble
-    rumble_triggers,  ///< Rumble triggers
     set_motion_event_state,  ///< Set motion event state
     set_rgb_led,  ///< Set RGB LED
     set_adaptive_triggers,  ///< Set adaptive triggers
@@ -124,14 +123,6 @@ namespace platf {
       msg.type = gamepad_feedback_e::rumble;
       msg.id = id;
       msg.data.rumble = {lowfreq, highfreq};
-      return msg;
-    }
-
-    static gamepad_feedback_msg_t make_rumble_triggers(std::uint16_t id, std::uint16_t left, std::uint16_t right) {
-      gamepad_feedback_msg_t msg;
-      msg.type = gamepad_feedback_e::rumble_triggers;
-      msg.id = id;
-      msg.data.rumble_triggers = {left, right};
       return msg;
     }
 
@@ -194,11 +185,6 @@ namespace platf {
         std::uint16_t lowfreq;
         std::uint16_t highfreq;
       } rumble;
-
-      struct {
-        std::uint16_t left_trigger;
-        std::uint16_t right_trigger;
-      } rumble_triggers;
 
       struct {
         std::uint16_t report_rate;

@@ -84,7 +84,6 @@ namespace stream {
     constexpr std::uint16_t request_idr = 0x0302;
     constexpr std::uint16_t encrypted = 0x0001;
     constexpr std::uint16_t hdr_mode = 0x010e;
-    constexpr std::uint16_t rumble_triggers = 0x5500;
     constexpr std::uint16_t set_motion_event = 0x5501;
     // Direction-specific reuse: Moonlight sends frame FEC status on this ID, while Sunshine sends
     // controller RGB feedback on it. Name both directions so an inbound FEC report is never
@@ -190,14 +189,6 @@ namespace stream {
     std::uint16_t id;
     std::uint16_t lowfreq;
     std::uint16_t highfreq;
-  };
-
-  struct control_rumble_triggers_t {
-    control_header_v2 header;
-
-    std::uint16_t id;
-    std::uint16_t left;
-    std::uint16_t right;
   };
 
   struct control_set_motion_event_t {
@@ -1902,18 +1893,6 @@ namespace stream {
       plaintext.id = util::endian::little(msg.id);
       plaintext.lowfreq = util::endian::little(data.lowfreq);
       plaintext.highfreq = util::endian::little(data.highfreq);
-
-      send_result = send_control_packet(session, server, plaintext);
-    } else if (msg.type == platf::gamepad_feedback_e::rumble_triggers) {
-      control_rumble_triggers_t plaintext;
-      plaintext.header.type = control_packet::rumble_triggers;
-      plaintext.header.payloadLength = sizeof(plaintext) - sizeof(control_header_v2);
-
-      auto &data = msg.data.rumble_triggers;
-
-      plaintext.id = util::endian::little(msg.id);
-      plaintext.left = util::endian::little(data.left_trigger);
-      plaintext.right = util::endian::little(data.right_trigger);
 
       send_result = send_control_packet(session, server, plaintext);
     } else if (msg.type == platf::gamepad_feedback_e::set_motion_event_state) {
