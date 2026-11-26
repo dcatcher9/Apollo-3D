@@ -1857,26 +1857,30 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       shared.consumer_capabilities = 0;
       shared.consumer_protocol = 0;
       // The export transfer per source and capabilities: an HDR10 source
-      // packs PQ for a consumer that accepts it, native scRGB only for one
-      // that encodes HDR10 PQ (consumer_stream_pq, which implies acceptance).
+      // always packs PQ (every protocol 4 consumer accepts it), native scRGB
+      // only for a consumer that encodes HDR10 PQ (consumer_stream_pq).
       using cs = api::color_space;
       const auto both = wire::consumer_accepts_pq | wire::consumer_stream_pq;
-      require(exports_pq(cs::hdr10_pq, wire::consumer_accepts_pq) && exports_pq(cs::hdr10_pq, wire::consumer_stream_pq) &&
-          exports_pq(cs::hdr10_pq, both) && !exports_pq(cs::hdr10_pq, 0),
+      require(exports_pq(cs::hdr10_pq, wire::consumer_accepts_pq) && exports_pq(cs::hdr10_pq, both) &&
+          exports_pq(cs::hdr10_pq, 0),
         "an HDR10 source chose the wrong export transfer");
       require(!exports_pq(cs::scrgb, wire::consumer_accepts_pq) && exports_pq(cs::scrgb, wire::consumer_stream_pq) &&
           exports_pq(cs::scrgb, both) && !exports_pq(cs::scrgb, 0),
         "a native scRGB source packed PQ without an HDR10 stream, or FP16 for one");
       require(!exports_pq(cs::srgb, both) && !exports_pq(cs::unknown, both), "an SDR source packed PQ");
       // C3: a native render is exported only to a consumer whose transfer
-      // answer matches the one it rendered for. A host that attaches between
-      // an HDR10 render made with no consumer (FP16) and its export, and
-      // takes PQ, gets the next Present's PQ render rather than an FP16 ring
-      // that the next Present would replace; the reverse holds too.
-      require(!transfer_current(false, exports_pq(cs::hdr10_pq, wire::consumer_accepts_pq)),
-        "an FP16 render made before a PQ consumer attached was exported to it");
-      require(!transfer_current(true, exports_pq(cs::hdr10_pq, 0)),
-        "a PQ render was exported to a consumer without PQ");
+      // answer matches the one it rendered for. An HDR10 render is PQ for
+      // every consumer, so a host that attaches between it and its export
+      // takes it. A native scRGB render made for an SDR stream (FP16) is not
+      // exported to an HDR stream that takes PQ, which gets the next
+      // Present's PQ render instead; the reverse holds too.
+      require(transfer_current(true, exports_pq(cs::hdr10_pq, wire::consumer_accepts_pq)) &&
+          transfer_current(exports_pq(cs::hdr10_pq, 0), exports_pq(cs::hdr10_pq, both)),
+        "an HDR10 render made before its consumer attached was refused");
+      require(!transfer_current(false, exports_pq(cs::scrgb, both)),
+        "an FP16 render made before a PQ stream attached was exported to it");
+      require(!transfer_current(true, exports_pq(cs::scrgb, wire::consumer_accepts_pq)),
+        "a PQ render was exported to a consumer without an HDR10 stream");
       // A requested PQ render that fell back to FP16 (no PQ pack, or its
       // texture failed) still exports FP16 to that consumer: only the request
       // is compared, not the transfer the render ended with.

@@ -624,9 +624,9 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
         proof.width = desc.texture.width; proof.height = desc.texture.height;
         proof.frame_strength = settings.strength;
         // The export transfer (docs/reshade-sbs.md, PQ wire transfer): an
-        // HDR10 swapchain exports 10-bit PQ to a consumer that accepts it,
-        // and a native scRGB one to a consumer that encodes HDR10 PQ; any
-        // other consumer gets FP16 scRGB (exports_pq).
+        // HDR10 swapchain exports 10-bit PQ, and a native scRGB one exports
+        // it to a consumer that encodes HDR10 PQ and FP16 scRGB to any other
+        // (exports_pq).
         const auto space = swapchain->get_color_space();
         proof.pq_requested = exports_pq(space, read_capabilities(*ring_.shared_, read_nonce(*ring_.shared_)));
         const bool pq = renderer->set_pq_output(proof.pq_requested);

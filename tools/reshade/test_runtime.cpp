@@ -394,9 +394,9 @@ namespace {
         }
         require(!same_generation || metadata.generation == same_generation, "Overlay or uniform edit replaced the resource generation");
         require(metadata.source_width == source_width && metadata.source_height == source_height && metadata.window == reinterpret_cast<std::uint64_t>(window), "Exporter source identity/dimensions incorrect");
-        // The native HDR10 renderer exports 10-bit PQ to the production
-        // receiver, which accepts it (docs/reshade-sbs.md, PQ wire transfer).
-        const bool pq = native_only && expected_color == 3 && receiver_state;
+        // The native HDR10 renderer exports 10-bit PQ (docs/reshade-sbs.md,
+        // PQ wire transfer).
+        const bool pq = native_only && expected_color == 3;
         require(metadata.color_transfer == (expected_color == 1 ? wire::transfer::srgb : pq ? wire::transfer::pq : wire::transfer::scrgb),
           "Exporter declared wrong transfer");
         require(metadata.dxgi_format == (expected_color == 1 || pq ? 24u : 10u), "Exporter declared wrong resource format");

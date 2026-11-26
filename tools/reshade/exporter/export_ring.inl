@@ -63,14 +63,13 @@
 
   // The export transfer of an HDR swapchain for the answered consumer's
   // capabilities (docs/reshade-sbs.md, PQ wire transfer): 10-bit PQ for an
-  // HDR10 source when the consumer accepts PQ, and for any HDR source, native
-  // scRGB included, when it encodes HDR10 PQ (consumer_stream_pq, which
-  // implies acceptance). Every other consumer gets FP16 scRGB.
+  // HDR10 source, whose every protocol 4 consumer accepts PQ, and for a native
+  // scRGB source when the consumer encodes HDR10 PQ (consumer_stream_pq).
+  // A native scRGB source stays FP16 scRGB for any other consumer.
 #if defined(SUNSHINE_EXPORTER_IMPLEMENTATION)
   bool exports_pq(api::color_space source, std::uint32_t capabilities) {
-    if (source == api::color_space::hdr10_pq)
-      return (capabilities & (wire::consumer_accepts_pq | wire::consumer_stream_pq)) != 0;
-    return source == api::color_space::scrgb && (capabilities & wire::consumer_stream_pq) != 0;
+    return source == api::color_space::hdr10_pq ||
+      (source == api::color_space::scrgb && (capabilities & wire::consumer_stream_pq) != 0);
   }
 #else
   bool exports_pq(api::color_space source, std::uint32_t capabilities);

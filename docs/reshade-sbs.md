@@ -7353,16 +7353,14 @@ applies to another request. Two receivers' requests can interleave so that `cons
 one and `capability_nonce` the other; the receiver that `consumer_nonce` names then finds its
 request unanswered with another's declaration and sends the whole request again under a new nonce
 (the other backs off, as a replaced receiver does). A replaced receiver that finds the connection
-without any receiver (`consumer_nonce` zero, its replacement detached) requests again too. An HDR10 swapchain exports PQ to a consumer that accepts it, and a
-native scRGB swapchain exports PQ to a consumer that encodes HDR10 PQ (`exports_pq`; the bit
-implies acceptance). Any other consumer gets FP16 scRGB. The native render chooses the transfer
-from the consumer it reads before rendering, so a consumer attached, replaced or detached between
-a Present's render and its export whose answer differs, in either direction, gets the next
-Present's export, rendered for it (`transfer_current`, export reason
-`consumer_transfer_changed`). Until the final review only the PQ direction was
-checked, so a PQ host attaching during an HDR10 render made with no consumer got an FP16 ring that
-the next Present replaced, two generations and up to two ring allocations on the Present thread
-for one attach. For an HDR stream the host would
+without any receiver (`consumer_nonce` zero, its replacement detached) requests again too. Every
+protocol 4 consumer sets `consumer_accepts_pq`, so an HDR10 swapchain always exports PQ; the
+add-on does not read that bit, which stays reserved. A native scRGB swapchain exports PQ to a
+consumer that encodes HDR10 PQ (`exports_pq`) and FP16 scRGB to any other. The native render
+chooses the transfer from the consumer it reads before rendering, so a consumer attached, replaced
+or detached between a Present's render and its export whose answer differs, in either direction,
+gets the next Present's export, rendered for it (`transfer_current`, export reason
+`consumer_transfer_changed`); only a native scRGB swapchain's answer can differ. For an HDR stream the host would
 itself encode an FP16 scRGB export with `scRGBTo2100PQ`, so packing it in the game is the same
 encoding at half the shared bytes per frame. An SDR stream and Local AR keep FP16 scRGB from a
 native scRGB swapchain: wide-gamut and over-10000-nit values clip differently in PQ (a negative
@@ -7922,7 +7920,7 @@ The native add-on declares and validates the actual game swapchain color space:
 | --- | --- | --- |
 | SDR sRGB | RGB10A2 | Encoded sRGB |
 | Native HDR scRGB | RGB10A2 to a consumer that encodes HDR10 PQ (`consumer_stream_pq`), else RGBA16F | PQ code values (Rec.2020, ST 2084, encoded as the host's `scRGBTo2100PQ` of the scRGB eye), else linear Rec.709/scRGB, 1.0 = 80 nits |
-| Native HDR10/PQ, Rec.2020 | RGB10A2 to a consumer that accepts the PQ transfer, else RGBA16F | PQ code values (Rec.2020, ST 2084, encoded as the host's `scRGBTo2100PQ` of the scRGB eye), else PQ decoded to linear Rec.709/scRGB, 1.0 = 80 nits |
+| Native HDR10/PQ, Rec.2020 | RGB10A2, else RGBA16F where the PQ pack is unavailable | PQ code values (Rec.2020, ST 2084, encoded as the host's `scRGBTo2100PQ` of the scRGB eye), else PQ decoded to linear Rec.709/scRGB, 1.0 = 80 nits |
 
 The HDR export preserves values above 1.0 and negative scRGB components. It applies no tone map
 to the shared texture. The normal game window retains its original color encoding. A float or
