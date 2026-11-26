@@ -1,7 +1,7 @@
 #pragma once
 
-// Private recipe5 analysis source. The real display snapshot is already tone mapped.
-// Only its current lower band is written; no OCR, UI, EMPTY or renderer authority.
+// Private recipe5 audit of the real, already tone-mapped display snapshot band. It writes only
+// the source proof and the UIP envelope; no pixels, OCR, UI, EMPTY or renderer authority.
 #ifdef _WIN32
   #include "host_sbs_compute_program_lease.h"
   #include "host_sbs_compute_state_guard.h"
@@ -37,7 +37,7 @@ namespace models::display_snapshot_rgb8_analysis_gpu_v1 {
   };
 
   struct views_t {
-    ComPtr<ID3D11ShaderResourceView> reference_rgb8, analysis_band, source_proof, uip_envelope;
+    ComPtr<ID3D11ShaderResourceView> source_proof, uip_envelope;
     ComPtr<ID3D11Buffer> dispatch_arguments, final_root_mirror, request_constants;
   };
 
@@ -59,16 +59,11 @@ namespace models::display_snapshot_rgb8_analysis_gpu_v1 {
   using compute_state_t = host_sbs_compute_state::guard_t<16u, 8u, 3u>;
 
   class resources_t {
-    enum class storage_e { materialized, direct_audit };
-    storage_e storage_ = storage_e::materialized;
     ComPtr<ID3D11Device> device_;
-    ComPtr<ID3D11Texture2D> reference_, band_;
-    ComPtr<ID3D11ShaderResourceView> reference_srv_, band_srv_, proof_srv_, root_srv_, envelope_srv_;
-    ComPtr<ID3D11UnorderedAccessView> reference_uav_, band_uav_, proof_uav_, args_uav_, envelope_uav_;
+    ComPtr<ID3D11ShaderResourceView> proof_srv_, root_srv_, envelope_srv_;
+    ComPtr<ID3D11UnorderedAccessView> proof_uav_, args_uav_, envelope_uav_;
     ComPtr<ID3D11Buffer> proof_, root_, args_, constants_, envelope_;
-    ComPtr<ID3D11ShaderResourceView> submitted_display_, submitted_raw_, submitted_sct_;
-    ComPtr<ID3D11Buffer> submitted_cb_, submitted_final_;
-    std::array<UINT, request_words_count> submitted_words_ {};
+    ComPtr<ID3D11ShaderResourceView> submitted_display_;
     UINT width_ = 0u, full_height_ = 0u, crop_top_ = 0u, band_height_ = 0u;
     host_sbs_compute_program_lease::group_t<3u> capture_program_lease_;
     host_sbs_compute_program_lease::group_t<1u> envelope_program_lease_;
@@ -159,7 +154,7 @@ namespace models::display_snapshot_rgb8_analysis_gpu_v1 {
         return false;
       }
       const auto &r = request.roi_ltrb;
-      if (final_desc.ByteWidth != 256u || !(final_desc.MiscFlags & D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS) || contour_desc.ByteWidth != 96u || !(contour_desc.BindFlags & D3D11_BIND_CONSTANT_BUFFER) || request.actual_final256 == proof_.Get() || request.actual_final256 == root_.Get() || request.actual_final256 == args_.Get() || request.actual_final256 == envelope_.Get() || raw_texture.Get() == reference_.Get() || raw_texture.Get() == band_.Get() || snapshot_texture.Get() == reference_.Get() || snapshot_texture.Get() == band_.Get() || raw_texture.Get() == snapshot_texture.Get() || snapshot_s.Format != DXGI_FORMAT_R16G16B16A16_FLOAT || snapshot_d.Format != DXGI_FORMAT_R16G16B16A16_FLOAT || snapshot_d.Width != width_ || snapshot_d.Height != band_height_ || r[0] >= r[2] || r[1] >= r[3] || r[2] > raw_d.Width || r[3] > raw_d.Height || r[2] - r[0] != width_ || r[3] - r[1] != full_height_) {
+      if (final_desc.ByteWidth != 256u || !(final_desc.MiscFlags & D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS) || contour_desc.ByteWidth != 96u || !(contour_desc.BindFlags & D3D11_BIND_CONSTANT_BUFFER) || request.actual_final256 == proof_.Get() || request.actual_final256 == root_.Get() || request.actual_final256 == args_.Get() || request.actual_final256 == envelope_.Get() || raw_texture.Get() == snapshot_texture.Get() || snapshot_s.Format != DXGI_FORMAT_R16G16B16A16_FLOAT || snapshot_d.Format != DXGI_FORMAT_R16G16B16A16_FLOAT || snapshot_d.Width != width_ || snapshot_d.Height != band_height_ || r[0] >= r[2] || r[1] >= r[3] || r[2] > raw_d.Width || r[3] > raw_d.Height || r[2] - r[0] != width_ || r[3] - r[1] != full_height_) {
         error = "Display-snapshot descriptor, ROI or writable alias unsupported";
         return false;
       }
@@ -216,7 +211,7 @@ namespace models::display_snapshot_rgb8_analysis_gpu_v1 {
       }
       ID3D11Buffer *buffers[2] {request.actual_contour_constants96, constants_.Get()};
       ID3D11ShaderResourceView *srvs[6] {request.display_snapshot_band, root_srv_.Get(), request.actual_sct32, nullptr, nullptr, request.parent_raw_source};
-      ID3D11UnorderedAccessView *uavs[4] {reference_uav_.Get(), band_uav_.Get(), proof_uav_.Get(), args_uav_.Get()};
+      ID3D11UnorderedAccessView *uavs[4] {nullptr, nullptr, proof_uav_.Get(), args_uav_.Get()};
       context->CSSetConstantBuffers(0u, 2u, buffers);
       context->CSSetShaderResources(0u, 6u, srvs);
       context->CSSetUnorderedAccessViews(0u, 4u, uavs, nullptr);
@@ -230,22 +225,11 @@ namespace models::display_snapshot_rgb8_analysis_gpu_v1 {
       context->CSSetShader(program.finalize, nullptr, 0u);
       context->DispatchIndirect(work_root ? work_root : request.actual_final256, 240u);
       submitted_display_ = request.display_snapshot_band;
-      submitted_raw_ = request.parent_raw_source;
-      submitted_sct_ = request.actual_sct32;
-      submitted_cb_ = request.actual_contour_constants96;
-      submitted_final_ = request.actual_final256;
-      submitted_words_ = cb;
     }
 
     void emit_envelope(ID3D11DeviceContext *context, const program_t &program,
                        ID3D11ShaderResourceView *actual_uip40, const request_t &request,
-                       const std::array<UINT, request_words_count> &cb, bool rejoin,
-                       ID3D11Buffer *work_root = nullptr) {
-      if (rejoin) {
-        // Public separate consumption must rejoin bytes, not trust pointer identity.
-        context->CopyResource(root_.Get(), request.actual_final256);
-        context->UpdateSubresource(constants_.Get(), 0u, nullptr, cb.data(), 0u, 0u);
-      }
+                       ID3D11Buffer *work_root) {
       ID3D11Buffer *buffers[2] {request.actual_contour_constants96, constants_.Get()};
       ID3D11ShaderResourceView *srvs[6] {request.display_snapshot_band, root_srv_.Get(), request.actual_sct32, actual_uip40, proof_srv_.Get(), request.parent_raw_source};
       context->CSSetConstantBuffers(0u, 2u, buffers);
@@ -262,43 +246,23 @@ namespace models::display_snapshot_rgb8_analysis_gpu_v1 {
     resources_t(resources_t &&) = default;
     resources_t &operator=(resources_t &&) = default;
 
-  private:
-    bool ensure_storage(ID3D11Device *device, UINT width, UINT full_height, UINT crop_top, UINT band_height,
-                        storage_e storage, std::string &error) {
+    bool ensure_direct_audit(ID3D11Device *device, UINT width, UINT full_height, UINT crop_top, UINT band_height,
+                             std::string &error) {
       error.clear();
       if (!device || !width || !full_height || width > maximum_roi || full_height > maximum_roi || crop_top >= full_height || band_height != full_height - crop_top) {
         error = "Display-snapshot analysis shape unavailable";
         return false;
       }
-      if (device_.Get() == device && storage_ == storage && width_ == width && full_height_ == full_height &&
+      if (device_.Get() == device && width_ == width && full_height_ == full_height &&
           crop_top_ == crop_top && band_height_ == band_height && proof_) {
         return true;
       }
       resources_t next;
-      next.storage_ = storage;
       next.device_ = device;
       next.width_ = width;
       next.full_height_ = full_height;
       next.crop_top_ = crop_top;
       next.band_height_ = band_height;
-      auto texture = [&](UINT h, DXGI_FORMAT format, ComPtr<ID3D11Texture2D> &t, ComPtr<ID3D11ShaderResourceView> &s, ComPtr<ID3D11UnorderedAccessView> &u) {
-        D3D11_TEXTURE2D_DESC d {};
-        d.Width = width;
-        d.Height = h;
-        d.MipLevels = d.ArraySize = d.SampleDesc.Count = 1u;
-        d.Format = format;
-        d.Usage = D3D11_USAGE_DEFAULT;
-        d.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-        return SUCCEEDED(device->CreateTexture2D(&d, nullptr, t.GetAddressOf())) &&
-               SUCCEEDED(device->CreateShaderResourceView(t.Get(), nullptr, s.GetAddressOf())) &&
-               SUCCEEDED(device->CreateUnorderedAccessView(t.Get(), nullptr, u.GetAddressOf()));
-      };
-      if (storage == storage_e::materialized &&
-          (!texture(full_height, DXGI_FORMAT_R8G8B8A8_UNORM, next.reference_, next.reference_srv_, next.reference_uav_) ||
-           !texture(band_height, DXGI_FORMAT_R16G16B16A16_FLOAT, next.band_, next.band_srv_, next.band_uav_))) {
-        error = "Display-snapshot texture allocation failed";
-        return false;
-      }
       if (!next.structured(proof_words, next.proof_, next.proof_srv_, next.proof_uav_) ||
           !next.structured(envelope_words, next.envelope_, next.envelope_srv_, next.envelope_uav_)) {
         error = "Display-snapshot analysis allocation failed";
@@ -346,106 +310,48 @@ namespace models::display_snapshot_rgb8_analysis_gpu_v1 {
       return true;
     }
 
-  public:
-    bool ensure(ID3D11Device *device, UINT width, UINT full_height, UINT crop_top, UINT band_height, std::string &error) {
-      return ensure_storage(device, width, full_height, crop_top, band_height, storage_e::materialized, error);
-    }
-
-    bool ensure_direct_audit(ID3D11Device *device, UINT width, UINT full_height, UINT crop_top, UINT band_height,
-                             std::string &error) {
-      return ensure_storage(device, width, full_height, crop_top, band_height, storage_e::direct_audit, error);
-    }
-
-    // Serialized immediate owner. true means submitted, not ready. Caller retains the real
-    // pending source/snapshot/CB/SCT/final tuple through consumption before any next queue/ensure
-    // or mutation of those resources. Operands must be unbound outside saved CS slots.
-    // No CPU completion or source-pixel decisions are used.
-    bool queue(ID3D11DeviceContext *context, const program_t &program, const request_t &request, std::string &error) {
+    // Serialized immediate owner: the returned submission is queued, not ready. One immutable
+    // queue interval captures the actual root/constants once for both the proof and the
+    // envelope; actual UIP40 is copied literally and the appended proof64 qualifies only this
+    // private source. No UIP, model-completion or EMPTY authority is authored; Root0 holds the
+    // whole envelope. The caller retains the real source/snapshot/CB/SCT/final tuple until the
+    // submission is consumed. No CPU completion or source-pixel decisions are used.
+    [[nodiscard]] std::optional<direct_audit_submission_t> queue_current_audit(
+      ID3D11DeviceContext *context, const program_t &program, const request_t &request,
+      ID3D11ShaderResourceView *actual_uip40, std::string &error, ID3D11Buffer *work_root = nullptr
+    ) {
       error.clear();
-      if (!reference_ || !context_ok(context) || !capture_program_lease_.acquire(device_.Get(), {program.prepare, program.copy, program.finalize})) {
-        error = "Display-snapshot source program unavailable";
-        return false;
-      }
-      std::array<UINT, request_words_count> cb {};
-      if (!request_words(request, cb, error)) {
-        return false;
-      }
-      const compute_state_t saved(context);
-      compute_state_t::unbind(context);
-      emit_capture(context, program, request, cb);
-      return true;
-    }
-
-    // Actual UIP40 is copied literally. Appended proof64 only qualifies a private source;
-    // no UIP, model-completion or EMPTY authority is authored. Root0 holds the whole envelope.
-    bool queue_uip_envelope(ID3D11DeviceContext *context, const program_t &program, ID3D11ShaderResourceView *actual_uip40, const request_t &accepted_pending, std::string &error) {
-      error.clear();
-      if (!reference_ || !context_ok(context) || !envelope_program_lease_.acquire(device_.Get(), {program.envelope}) || !structured_view(actual_uip40, uip_words)) {
-        error = "Display-snapshot UIP envelope unavailable";
-        return false;
-      }
-      std::array<UINT, request_words_count> cb {};
-      if (accepted_pending.display_snapshot_band != submitted_display_.Get() || accepted_pending.parent_raw_source != submitted_raw_.Get() || accepted_pending.actual_sct32 != submitted_sct_.Get() || accepted_pending.actual_contour_constants96 != submitted_cb_.Get() || accepted_pending.actual_final256 != submitted_final_.Get() || !request_words(accepted_pending, cb, error) || cb != submitted_words_) {
-        error = "Display-snapshot pending tuple or source lease mismatch";
-        return false;
-      }
-      const compute_state_t saved(context);
-      compute_state_t::unbind(context);
-      emit_envelope(context, program, actual_uip40, accepted_pending, cb, true);
-      return true;
-    }
-
-  private:
-    // One immutable queue interval captures the actual root/constants once for both consumers.
-    bool queue_current_impl(ID3D11DeviceContext *context, const program_t &program, const request_t &request,
-                            ID3D11ShaderResourceView *actual_uip40, std::string &error, ID3D11Buffer *work_root,
-                            storage_e storage) {
-      error.clear();
-      if (storage_ != storage || !proof_ || !context_ok(context) ||
+      if (!proof_ || !context_ok(context) ||
           !capture_program_lease_.acquire(device_.Get(), {program.prepare, program.copy, program.finalize}) ||
           !envelope_program_lease_.acquire(device_.Get(), {program.envelope}) ||
           !structured_view(actual_uip40, uip_words)) {
-        error = "Display-snapshot complete source program/UIP unavailable";return false;
+        error = "Display-snapshot complete source program/UIP unavailable";
+        return std::nullopt;
       }
       if (work_root) {
         if (!same_device(work_root) || work_root == request.actual_final256) {
           error = "Display-snapshot work root requires separate same-device storage";
-          return false;
+          return std::nullopt;
         }
         D3D11_BUFFER_DESC descriptor {};
         work_root->GetDesc(&descriptor);
         if (descriptor.ByteWidth != 256u || !(descriptor.MiscFlags & D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS)) {
           error = "Display-snapshot work root requires root256/observationOne240";
-          return false;
+          return std::nullopt;
         }
       }
       std::array<UINT, request_words_count> cb{};
-      if (!request_words(request, cb, error)) return false;
+      if (!request_words(request, cb, error)) return std::nullopt;
       const compute_state_t saved(context);
       compute_state_t::unbind(context);
       emit_capture(context, program, request, cb, work_root);
       compute_state_t::unbind(context); // proof changes from UAV producer to SRV consumer.
-      emit_envelope(context, program, actual_uip40, request, cb, false, work_root);
-      return true;
-    }
-
-  public:
-    bool queue_current(ID3D11DeviceContext *context, const program_t &program, const request_t &request,
-                       ID3D11ShaderResourceView *actual_uip40, std::string &error, ID3D11Buffer *work_root = nullptr) {
-      return queue_current_impl(context, program, request, actual_uip40, error, work_root, storage_e::materialized);
-    }
-
-    [[nodiscard]] std::optional<direct_audit_submission_t> queue_current_audit(
-      ID3D11DeviceContext *context, const program_t &program, const request_t &request,
-      ID3D11ShaderResourceView *actual_uip40, std::string &error, ID3D11Buffer *work_root = nullptr
-    ) {
-      if (!queue_current_impl(context, program, request, actual_uip40, error, work_root, storage_e::direct_audit))
-        return std::nullopt;
+      emit_envelope(context, program, actual_uip40, request, work_root);
       return direct_audit_submission_t {submitted_display_.Get(), envelope_srv_.Get()};
     }
 
     views_t views() const {
-      return {reference_srv_, band_srv_, proof_srv_, envelope_srv_, args_, root_, constants_};
+      return {proof_srv_, envelope_srv_, args_, root_, constants_};
     }
   };
 }  // namespace models::display_snapshot_rgb8_analysis_gpu_v1
