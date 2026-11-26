@@ -266,28 +266,8 @@ namespace sunshine_streamline::provider {
     describe_copied_depth(out, packet, captured, display_texture, display_view, present);
   }
 #endif
-  const char *name(display_status value);
-  const char *name(sunshine_game3d::depth_output::display_action action);
-  void format_readiness(char *text, std::size_t size, const readiness_evidence &e, const readiness_line &line);
-  void format_observation_evidence(char *text, std::size_t size, bool ready, std::uint64_t runtime,
-      std::uint64_t loss_tick, const observation_loss_episode &loss);
-  void format_render_size(char *text, std::size_t size, const render_size_state &value);
   // The silent line names the FG scope's silence (freshness.h) in its text.
   static_assert(sunshine_freshness::fg_silent_ms == 1000);
-  void format_frame_generation_scope(char *text, std::size_t size, bool silent, std::uint32_t viewport,
-      std::uint64_t epoch, std::uint64_t changes);
-  void format_fg_switch(char *text, std::size_t size, const fg_switch_line &line);
-  void format_unassociated(char *text, std::size_t size, depth_capture::status status,
-      const depth_capture::capture_diagnostic &capture, bool hold, std::uint64_t hold_ms);
-  void format_selected(char *text, std::size_t size, const selected_line &line, const depth_capture::packet &frame,
-      const depth_capture::consumer_diagnostic &consumer, const depth_capture::capture_diagnostic &capture);
-  void format_held(char *text, std::size_t size, const char *path, depth_capture::status status, bool output_ready,
-      display_status display, const depth_capture::capture_diagnostic &capture, const native_observer::counters &observer);
-  void append_selection(char *text, std::size_t size, const depth_capture::capture_diagnostic &capture,
-      const sunshine_game3d::depth_output::display_decision &update, std::uint64_t prior_depth_age,
-      const sunshine_scene_depth::jitter_offset &jitter);
-  void append_loss(char *text, std::size_t size, bool known, const loss_diagnostics::event &loss, std::uint64_t age_ms,
-      std::uint64_t losses_since);
   namespace {
     sunshine_game3d::record_key recorded_source(const sunshine_scene_depth::frame &value) {
       return {sunshine_scene_depth::reporting_api(value.provider), value.viewport, value.source_id};

@@ -29,7 +29,9 @@ namespace platf::game3d_debug {
     void set_button_request(std::shared_ptr<std::atomic<bool>> request);
     // All GPU work stays on the caller's immediate-context thread. Publication owns only bytes.
     void poll(ID3D11Device *device, ID3D11DeviceContext *context, RECT expected_fullscreen, int source_width, int source_height, int wire_mode);
+#ifdef SUNSHINE_TESTS
     void cancel() noexcept;
+#endif
     bool needs_conversion_poll() const noexcept;
 
   private:

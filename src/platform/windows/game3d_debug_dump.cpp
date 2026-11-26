@@ -407,7 +407,7 @@ namespace platf::game3d_debug {
       LARGE_INTEGER frequency {};
       QueryPerformanceFrequency(&frequency);
       package_->manifest = {{"schema", "sunshine.game3d.dump.v1"}, {"request_id", request_id_}, {"consumer_nonce", nonce_}, {"consumer_pid", GetCurrentProcessId()}, {"consumer_creation_time", process_creation_time(GetCurrentProcess())}, {"source_width", width}, {"source_height", height}, {"wire_mode", mode}, {"qpc_ticks_per_second", frequency.QuadPart}, {"units", {{"raw_depth", "exact provider depth values; projection/conversion in producer_metadata"}, {"color", "native DXGI encoded values; no gamma, exposure, clipping, or tone mapping applied"}, {"fields", "native shader values; producer_metadata defines stage interpretation"}, {"capture_qpc", "QueryPerformanceCounter ticks"}, {"process_creation_time", "Windows FILETIME: 100ns ticks since 1601-01-01 UTC"}}}};
-      if (!device || !context || width <= 0 || height <= 0 || (mode != 2 && mode != 3)) {
+      if (!device || !context || width <= 0 || height <= 0) {
         finish("unavailable", "invalid Game presentation or D3D context");
         return;
       }
@@ -683,9 +683,11 @@ namespace platf::game3d_debug {
     impl_->poll(device, context, fullscreen, width, height, mode);
   }
 
+#ifdef SUNSHINE_TESTS
   void dumper::cancel() noexcept {
     impl_->cancel();
   }
+#endif
 
   bool dumper::needs_conversion_poll() const noexcept {
     return impl_->needed();
