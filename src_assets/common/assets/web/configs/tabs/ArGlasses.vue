@@ -1,5 +1,6 @@
 <script setup>
 import {computed, inject, onMounted, onUnmounted, ref} from 'vue'
+import { getJson, postJson } from '../../api'
 import { startVisibilityPolling } from '../../visibility-polling'
 
 const $t = inject('i18n').t
@@ -39,9 +40,7 @@ const visibleDevices = computed(() => {
 
 const refresh = async () => {
   try {
-    const response = await fetch('./api/ar-glasses', {credentials: 'include'})
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    const body = await response.json()
+    const body = await getJson('./api/ar-glasses')
     devices.value = body.devices || []
     error.value = ''
   } catch (reason) {
@@ -52,13 +51,7 @@ const refresh = async () => {
 const decide = async (device, decision) => {
   savingId.value = device.id
   try {
-    const response = await fetch('./api/ar-glasses', {
-      credentials: 'include',
-      headers: {'Content-Type': 'application/json'},
-      method: 'POST',
-      body: JSON.stringify({id: device.id, decision}),
-    })
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    await postJson('./api/ar-glasses', {id: device.id, decision})
     await refresh()
   } catch (reason) {
     error.value = `Could not save AR display decision: ${reason}`

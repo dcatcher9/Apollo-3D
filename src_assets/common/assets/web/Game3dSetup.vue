@@ -133,6 +133,8 @@
 </template>
 
 <script>
+import { postJson } from './api'
+
 export default {
   props: {
     setup: { type: Object, default: null },
@@ -241,14 +243,7 @@ export default {
       this.busy = decision
       this.error = ''
       try {
-        const response = await fetch('./api/game3d/setup/decision', {
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
-          method: 'POST',
-          body: JSON.stringify({ executable: this.setup.executable, identity: this.setup.identity, decision }),
-        })
-        const body = await response.json().catch(() => ({}))
-        if (!response.ok || !body.status) throw new Error(body.error || `Sunshine 3D returned HTTP ${response.status}`)
+        const body = await postJson('./api/game3d/setup/decision', { executable: this.setup.executable, identity: this.setup.identity, decision })
         if (body.setup) this.$emit('update', body.setup)
       } catch (reason) {
         this.error = `Could not save this choice: ${reason.message || reason}`
@@ -261,14 +256,7 @@ export default {
       this.busy = application.executable
       this.chooseError = ''
       try {
-        const response = await fetch('./api/game3d/setup/decision', {
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
-          method: 'POST',
-          body: JSON.stringify({ executable: application.executable, identity: application.identity, decision: 'convert' }),
-        })
-        const body = await response.json().catch(() => ({}))
-        if (!response.ok || !body.status) throw new Error(body.error || `Sunshine 3D returned HTTP ${response.status}`)
+        const body = await postJson('./api/game3d/setup/decision', { executable: application.executable, identity: application.identity, decision: 'convert' })
         if (body.setup) this.$emit('update', body.setup)
       } catch (reason) {
         this.chooseError = `Could not save this choice: ${reason.message || reason}`

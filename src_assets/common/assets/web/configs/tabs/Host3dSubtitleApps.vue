@@ -1,5 +1,6 @@
 <script setup>
 import {onMounted, onUnmounted, ref} from 'vue'
+import {getJson, postJson} from '../../api'
 
 // Per-application Host 3D subtitle protection. The host applies a change to a running stream at
 // once and saves it itself, so this list is independent of the page's Save button.
@@ -10,9 +11,7 @@ let refreshTimer = null
 
 const refresh = async () => {
   try {
-    const response = await fetch('./api/host3d/subtitle-apps', {credentials: 'include'})
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    const body = await response.json()
+    const body = await getJson('./api/host3d/subtitle-apps')
     apps.value = body.apps || []
     error.value = ''
   } catch (reason) {
@@ -24,14 +23,7 @@ const setEnabled = async (app, event) => {
   const enabled = event.target.checked
   savingExecutable.value = app.executable
   try {
-    const response = await fetch('./api/host3d/subtitle-apps', {
-      credentials: 'include',
-      headers: {'Content-Type': 'application/json'},
-      method: 'POST',
-      body: JSON.stringify({executable: app.executable, enabled}),
-    })
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    const body = await response.json()
+    const body = await postJson('./api/host3d/subtitle-apps', {executable: app.executable, enabled})
     error.value = body.saved === false
       ? 'The change is active now but could not be saved to the configuration file.'
       : ''

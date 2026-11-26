@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import ThemeToggle from './ThemeToggle.vue'
+import { getJson } from './api'
 
 const version = ref('')
 
@@ -26,11 +27,8 @@ const currentPage = computed(() => {
 
 onMounted(async () => {
   try {
-    const response = await fetch('./api/config', { credentials: 'include' })
-    if (response.ok) {
-      const config = await response.json()
-      version.value = config.version || ''
-    }
+    const config = await getJson('./api/config')
+    version.value = config.version || ''
   } catch (error) {
     console.debug('Sunshine 3D version is unavailable', error)
   }

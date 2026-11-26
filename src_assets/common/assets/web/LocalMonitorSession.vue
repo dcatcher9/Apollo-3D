@@ -1,5 +1,6 @@
 <script setup>
 import {computed, onMounted, onUnmounted, ref} from 'vue'
+import {getJson, postJson} from './api'
 
 // inventory: also read the host's monitors and serial ports, on the first read and on a forced
 // refresh only. The periodic read asks for session state alone, which costs the host nothing.
@@ -35,9 +36,7 @@ const refresh = async (force = false) => {
   const withInventory = inventoryWanted || (force && props.inventory)
   inventoryWanted = false
   try {
-    const response = await fetch(withInventory ? './api/local-monitor?inventory=1' : './api/local-monitor', {credentials: 'include'})
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    const body = await response.json()
+    const body = await getJson(withInventory ? './api/local-monitor?inventory=1' : './api/local-monitor')
     // A state-only reply keeps the monitors and ports from the last inventory read.
     status.value = body.devices === undefined && status.value ? {...body, devices: status.value.devices, ports: status.value.ports} : body
     emit('status', status.value)
@@ -72,14 +71,7 @@ const chooseSource = async source => {
   sourceBusy.value = source
   actionError.value = ''
   try {
-    const response = await fetch('./api/local-monitor', {
-      credentials: 'include', method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({action: 'source', source}),
-    })
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({}))
-      throw new Error(body.error || `HTTP ${response.status}`)
-    }
+    await postJson('./api/local-monitor', {action: 'source', source})
     await refresh(true)
   } catch (reason) {
     actionError.value = `Could not switch the 3D source: ${reason}`
@@ -91,14 +83,7 @@ const control = async action => {
   busy.value = action
   actionError.value = ''
   try {
-    const response = await fetch('./api/local-monitor', {
-      credentials: 'include', method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({action}),
-    })
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({}))
-      throw new Error(body.error || `HTTP ${response.status}`)
-    }
+    await postJson('./api/local-monitor', {action})
     await refresh(true)
   } catch (reason) {
     actionError.value = `Could not ${action === 'start' ? 'start 3D' : 'return to 2D'}: ${reason}`
