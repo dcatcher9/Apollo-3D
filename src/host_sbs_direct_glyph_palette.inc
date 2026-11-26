@@ -80,7 +80,6 @@ class palette_transport_t {
   bool has_lines_ = false;
   cuda_driver_api &cuda_ = cuda_driver_api::get();
   CUcontext primary_ = nullptr;
-  CUdevice adapter_ {};
   CUstream stream_ = nullptr;
   nvinfer1::IExecutionContext *execution_ = nullptr;
   std::array<CUgraphicsResource, 2> interop_ {};
@@ -408,13 +407,10 @@ public:
     execution_ = execution;
     require(execution_->setInputShape("rgb", nvinfer1::Dims4 {int(tile_capacity), 3, int(palette_tile.height), int(palette_tile.width)}) &&
             execution_->getMaxOutputSize("logits") == sizeof(float) * palette_output_words, "Native glyph requires the bounded mixed tile batch");
-    require(cuda_.is_valid() && cuda_.cuD3D11GetDevice && cuda_.cuDevicePrimaryCtxRetain && cuda_.cuDevicePrimaryCtxRelease, "Native glyph CUDA interop is unavailable");
-    ComPtr<IDXGIDevice> dx;
-    ComPtr<IDXGIAdapter> adapter;
-    require(SUCCEEDED(device_.As(&dx)) && SUCCEEDED(dx->GetAdapter(&adapter)), "Read native glyph adapter");
-    check_cuda(cuda_.cuD3D11GetDevice(&adapter_, adapter.Get()), "Select native glyph CUDA adapter");
-    check_cuda(cuda_.cuDevicePrimaryCtxRetain(&primary_, adapter_), "Retain native glyph CUDA primary");
-    require(primary_ == primary, "Native glyph context belongs to a different CUDA primary");
+    require(cuda_.is_valid(), "Native glyph CUDA interop is unavailable");
+    // The caller's TensorRT lease runs on this primary context, which the caller keeps retained
+    // for as long as this transport may use it.
+    primary_ = primary;
     const current_cuda_context_t guard(cuda_, primary_);
     check_cuda(cuda_.cuStreamCreate(&stream_, CU_STREAM_NON_BLOCKING), "Create bounded native glyph stream");
     ensure(input_, palette_input_words, 4);
@@ -595,9 +591,6 @@ public:
       }
       stream_ = nullptr;
     } catch (...) {
-      return false;
-    }
-    if (cuda_.cuDevicePrimaryCtxRelease(adapter_) != CUDA_SUCCESS) {
       return false;
     }
     primary_ = nullptr;
