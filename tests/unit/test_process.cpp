@@ -27,6 +27,7 @@
 #endif
 
 // local includes
+#include "src/apps_store.h"
 #include "src/config.h"
 #include "src/process.h"
 #include "src/rtsp.h"

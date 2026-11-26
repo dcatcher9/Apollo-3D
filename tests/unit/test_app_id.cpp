@@ -3,6 +3,7 @@
  * @brief Compatibility contracts for application IDs derived from names and image bytes.
  */
 #include "../tests_common.h"
+#include "src/apps_store.h"
 #include "src/process.h"
 #include "src/uuid.h"
 

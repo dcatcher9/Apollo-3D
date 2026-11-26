@@ -3,8 +3,8 @@
  * @brief Application JSON migration and ordering contracts.
  */
 #include "../tests_common.h"
+#include "src/apps_store.h"
 #include "src/confighttp.h"
-#include "src/process.h"
 
 #include <nlohmann/json.hpp>
 #include <utility>

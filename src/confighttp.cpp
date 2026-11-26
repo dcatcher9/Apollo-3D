@@ -31,6 +31,7 @@
 #include <Simple-Web-Server/server_https.hpp>
 
 // local includes
+#include "apps_store.h"
 #include "config.h"
 #include "confighttp.h"
 #include "crypto.h"

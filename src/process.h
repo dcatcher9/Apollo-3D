@@ -30,7 +30,6 @@
 #include <boost/process/v1/group.hpp>
 #include <boost/process/v1/search_path.hpp>
 #include <boost/property_tree/ptree.hpp>
-#include <nlohmann/json.hpp>
 
 // local includes
 #include "config.h"
@@ -45,9 +44,6 @@ namespace platf::primary_display {
   struct retained_display_t;
 }
 #endif
-
-#define VIRTUAL_DISPLAY_UUID "8902CB19-674A-403D-A587-41B092E900BA"
-#define FALLBACK_DESKTOP_UUID "EAAC6159-089A-46A9-9E24-6436885F6610"
 
 namespace proc {
 #if defined(SUNSHINE_TESTS) && defined(_WIN32)
@@ -459,18 +455,9 @@ namespace proc {
   boost::filesystem::path
     find_working_directory(const std::string &cmd, const boost::process::v1::environment &env);
 
-  /**
-   * @brief Calculate a stable id based on name and image data
-   * @return Tuple of id calculated without index (for use if no collision) and one with.
-   */
-  std::tuple<std::string, std::string> calculate_app_id(const std::string &app_name, std::string app_image_path, int index);
-
-  std::string validate_app_image_path(std::string app_image_path);
   // wait_for_display_driver retries a not-yet-ready virtual-display driver for a few seconds.
   // Host startup wants that; a Web UI save, which runs on the only request thread, does not.
   void refresh(const std::string &file_name, bool needs_terminate = true, bool wait_for_display_driver = true);
-  void migrate_apps(nlohmann::json *fileTree_p, nlohmann::json *inputTree_p);
-  std::optional<proc::proc_t> parse(const std::string &file_name);
 
   /**
    * @brief Initialize proc functions
