@@ -59,13 +59,11 @@ namespace sbs_bench {
       float content_scale_y = 0.0f;
     };
 
-    /** Resolve and authenticate the packed output raster before any per-frame GPU work. */
+    /** Resolve and authenticate the packed output raster before any per-frame GPU work.
+     * Each eye keeps the source raster unless the packed width exceeds max_output_width. */
     std::optional<resolved_sbs_geometry> resolve_sbs_geometry(
       std::uint32_t source_width,
       std::uint32_t source_height,
-      int requested_eye_width,
-      int requested_eye_height,
-      double output_scale,
       int max_output_width,
       std::string &error
     );

@@ -1251,22 +1251,6 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11Buffer> resolve_constants;
   };
 
-  /** Default-off completed OLD OCR conditioner aliases for synchronous evaluation copying.
-   * Publication equality and no-pending checks bind availability, not GPU OCR execution or
-   * text presence. The caller must copy BEFORE the next estimator input and authenticate
-   * transaction/arguments plus the copied OCR/UIP/SCT/CB clocks. ComPtr retains lifetime,
-   * not immutable contents. Probability is the SAME completed raw snapshot; no support or
-   * rendered replacement is exposed. Probability availability is not certified text absence.
-   */
-  struct completed_ocr_conditioner_research_views_t {
-    host_sbs_gpu_completion_receipt::expected_t publication {};
-    depth_input_region_t input_region {};
-    std::uint32_t field_width = 0u, field_height = 0u;
-    depth_tensor_content_rect_t field_content {};
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> source_band, probability_snapshot, ocr_record, uip, sct;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> constants, transaction, dispatch_arguments;
-  };
-
   /** Direct Glyph subtitle publication, configured once before the first input. */
   struct subtitle_direct_glyph_configuration_t {
     std::string shader_root;
@@ -1330,11 +1314,6 @@ namespace models {
     [[nodiscard]] std::filesystem::path direct_glyph_engine_path_for_evaluation() const;
     [[nodiscard]] std::optional<host_sbs_direct_glyph_gpu::tile_profile_e> direct_glyph_profile_for_evaluation() const;
     std::optional<subtitle_direct_glyph_diagnostic_views_t> subtitle_direct_glyph_diagnostic_views_for_evaluation(std::uint64_t frame, std::uint64_t observation) const noexcept;
-
-    /** Default-off aliases only; accepted before the first input under the existing lock.
-     * No additional resource allocation, shader dispatch or ordinary rendering work.
-     */
-    bool set_completed_ocr_conditioner_research_enabled(bool enabled);
 
 #ifdef SUNSHINE_TESTS
     /** Native pacing test only: holds one real joined completion after its interop releases.
@@ -1469,14 +1448,6 @@ namespace models {
      */
     [[nodiscard]] std::optional<ocr_working_research_views_t> ocr_working_views_for_evaluation(
       std::uint64_t expected_completed_frame_id
-    ) const noexcept;
-
-    /** Exact-publication, no-pending mutable OLD conditioner view. Copy synchronously on
-     * the owning thread before the next input; the result is not fresh-current OCR authority.
-     */
-    [[nodiscard]] std::optional<completed_ocr_conditioner_research_views_t>
-    completed_ocr_conditioner_working_views_for_evaluation(
-      const host_sbs_gpu_completion_receipt::expected_t &expected
     ) const noexcept;
 
   private:

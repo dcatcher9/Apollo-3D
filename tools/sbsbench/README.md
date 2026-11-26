@@ -99,8 +99,7 @@ cmake-build-relwithdebinfo/sunshine.exe <conf> --sbs-bench `
 Build first and retain the build/test DLL `PATH` documented in [AGENTS.md](../../AGENTS.md).
 Inputs must be 1..64 immutable SDR PNGs. The run requires an explicit observation timeline,
 ordinary evaluation artifacts and `--output-every 1`. It rejects follow mode, scene or render
-caches, replay inputs, simulated HDR, the application-text line policy and the other subtitle
-diagnostic protocols. `<out-dir>` must not already contain a `direct-glyph` directory.
+caches, replay inputs and the other subtitle diagnostic protocols. `<out-dir>` must not already contain a `direct-glyph` directory.
 
 The flags select the variant and the manifest schema:
 

@@ -1073,33 +1073,6 @@ namespace sbs_bench {
       );
     }
 
-    float srgb_to_linear(float value) {
-      return value <= 0.04045f ? value / 12.92f : std::pow((value + 0.055f) / 1.055f, 2.4f);
-    }
-
-    void hdr_preview_bgra(float r, float g, float b, uint8_t *out) {
-      r = std::max(r, 0.0f);
-      g = std::max(g, 0.0f);
-      b = std::max(b, 0.0f);
-      const float y = std::max(0.2126f * r + 0.7152f * g + 0.0722f * b, 0.0f);
-      r /= 1.0f + y;
-      g /= 1.0f + y;
-      b /= 1.0f + y;
-      const float peak = std::max(1.0f, std::max(r, std::max(g, b)));
-      r /= peak;
-      g /= peak;
-      b /= peak;
-      auto encode = [](float c) {
-        c = std::clamp(c, 0.0f, 1.0f);
-        c = c <= 0.0031308f ? 12.92f * c : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
-        return (uint8_t) std::lround(std::clamp(c, 0.0f, 1.0f) * 255.0f);
-      };
-      out[0] = encode(b);
-      out[1] = encode(g);
-      out[2] = encode(r);
-      out[3] = 255;
-    }
-
     // ---- WIC PNG load/save (32bpp BGRA, matching the SDR B8G8R8A8_UNORM pipeline) ----
 
     ComPtr<IWICImagingFactory> g_wic;
@@ -1950,9 +1923,6 @@ namespace sbs_bench {
     std::optional<resolved_sbs_geometry> resolve_sbs_geometry(
       const std::uint32_t source_width,
       const std::uint32_t source_height,
-      const int requested_eye_width,
-      const int requested_eye_height,
-      const double output_scale,
       const int max_output_width,
       std::string &error
     ) {
@@ -1966,39 +1936,20 @@ namespace sbs_bench {
       if (source_width == 0 || source_height == 0 ||
           source_width > max_wire_raster_dimension ||
           source_height > max_wire_raster_dimension ||
-          !std::isfinite(output_scale) || output_scale <= 0.0 || output_scale > 4.0 ||
           max_output_width <= 0) {
         error = "source dimensions or output controls are invalid";
         return std::nullopt;
       }
 
-      const auto rounded_at_least = [](const double value, const std::int64_t minimum) {
-        return std::max(minimum, static_cast<std::int64_t>(std::llround(value)));
-      };
+      // Each eye keeps the source raster; only the packed width cap can shrink it.
       const std::int64_t eye_height_target =
-        requested_eye_height > 0 ?
-          static_cast<std::int64_t>(requested_eye_height) :
-          rounded_at_least(source_height * output_scale, 2);
-      // Preserve the legacy float aspect/rounding contract used by both rendering and cache
-      // metadata; only the integer range used to carry intermediate dimensions is widened.
+        std::max<std::int64_t>(2, static_cast<std::int64_t>(source_height));
+      // Preserve the float aspect/rounding contract used by both rendering and cache metadata;
+      // only the integer range used to carry intermediate dimensions is widened.
       const float source_aspect =
         static_cast<float>(source_width) / static_cast<float>(source_height);
-      std::int64_t eye_width =
-        requested_eye_width > 0 ?
-          static_cast<std::int64_t>(requested_eye_width) :
-          (requested_eye_height > 0 ?
-             rounded_at_least(
-               static_cast<float>(eye_height_target) * source_aspect,
-               1
-             ) :
-             rounded_at_least(source_width * output_scale, 1));
+      std::int64_t eye_width = static_cast<std::int64_t>(source_width);
       std::int64_t eye_height = eye_height_target;
-      if (requested_eye_width > 0 && requested_eye_height <= 0) {
-        eye_height = rounded_at_least(
-          static_cast<float>(eye_width) / source_aspect,
-          1
-        );
-      }
 
       if (2 * eye_width > static_cast<std::int64_t>(max_output_width)) {
         const double scale =
@@ -3329,23 +3280,14 @@ namespace sbs_bench {
       bool direct_glyph_adaptive_context = false;
       bool direct_glyph_resolved_fringe = false;
       bool direct_glyph_palette = false;
-      // Private bounded real-PFM export. Copies existing completed operands; never renders a
-      // replacement mask or reconstructs a publication, contour CB, or final dispatch buffer.
-      bool pfm_joined_diagnostics = false;
       // Parity probe: use live streaming's policy, where the conditioned-field diagnostics run
       // only for Dump 3D. Final then equals Base, so this is not an evaluator configuration.
       bool subtitle_conditioning_live_policy = false;
-      bool subtitle_application_text = false;  // replay the owner-enabled foreground-app line rule
       std::optional<std::vector<detail::subtitle_diagnostic_observation_range>>
         subtitle_plane_diagnostic_ranges;
       std::string follow_format;
       std::size_t follow_count = 0;  // optional producer frame-count upper bound
-      int eye_w = 0;  // 0 -> derive from source aspect; set with eye_h to test letterboxing
-      int eye_h = 0;  // 0 -> match/derive from the input frame
-      double output_scale = 1.0;  // per-eye linear scale vs source; preserves source aspect
       double pop_strength = -1.0;  // final shared stereo-parallax multiplier; <0 = conf
-      bool simulate_hdr = false;  // decode sRGB frames into linear scRGB FP16 and use HDR paths
-      double hdr_scale = 4.0;  // scRGB multiplier after sRGB EOTF (4.0 = 320-nit diffuse white)
       int max_width = 0;  // 0 -> use config max_encode_width
       int limit = 0;  // 0 -> all
       int output_every = 1;  // process every input for temporal state; dump only every Nth
@@ -3409,12 +3351,8 @@ namespace sbs_bench {
         } else if (a == "--direct-glyph-palette") {
           if (o.direct_glyph_palette) return false;
           o.direct_glyph_palette = true;
-        } else if (a == "--pfm-joined-diagnostics") {
-          o.pfm_joined_diagnostics = true;
         } else if (a == "--subtitle-conditioning-live-policy") {
           o.subtitle_conditioning_live_policy = true;
-        } else if (a == "--subtitle-application-text") {
-          o.subtitle_application_text = true;
         } else if (a == "--subtitle-plane-diagnostic-frames") {
           if (o.subtitle_plane_diagnostic_ranges) {
             BOOST_LOG(error) << "sbs-bench: diagnostic frame selection must appear once";
@@ -3461,18 +3399,8 @@ namespace sbs_bench {
             BOOST_LOG(error) << "sbs-bench: --artifacts must be evaluation, adaptive, or conversion";
             return false;
           }
-        } else if (a == "--eye-w") {
-          o.eye_w = std::stoi(next("--eye-w"));
-        } else if (a == "--eye-h") {
-          o.eye_h = std::stoi(next("--eye-h"));
-        } else if (a == "--output-scale") {
-          o.output_scale = std::stod(next("--output-scale"));
         } else if (a == "--pop-strength") {
           o.pop_strength = std::stod(next("--pop-strength"));
-        } else if (a == "--simulate-hdr") {
-          o.simulate_hdr = true;
-        } else if (a == "--hdr-scale") {
-          o.hdr_scale = std::stod(next("--hdr-scale"));
         } else if (a == "--max-width") {
           o.max_width = std::stoi(next("--max-width"));
         } else if (a == "--limit") {
@@ -3519,12 +3447,8 @@ namespace sbs_bench {
         BOOST_LOG(error) << "sbs-bench: glyph fringe requires --direct-glyph-adaptive-context";
         return false;
       }
-      if (o.direct_glyph_qualification && o.subtitle_application_text) {
-        BOOST_LOG(error) << "sbs-bench: --direct-glyph-qualification requires video caption qualification";
-        return false;
-      }
       if (!o.capabilities.empty()) {
-        if (!o.frames.empty() || !o.out.empty() || o.subtitle_plane_diagnostic_ranges || o.subtitle_plane_diagnostic_render_selected || o.ocr_working_diagnostics || o.pfm_joined_diagnostics || o.direct_glyph_qualification) {
+        if (!o.frames.empty() || !o.out.empty() || o.subtitle_plane_diagnostic_ranges || o.subtitle_plane_diagnostic_render_selected || o.ocr_working_diagnostics || o.direct_glyph_qualification) {
           BOOST_LOG(error) << "sbs-bench: --capabilities is a standalone query";
           return false;
         }
@@ -3541,23 +3465,9 @@ namespace sbs_bench {
       const unsigned direct_geometry_input_count =
         (!o.direct_parallax_root.empty() ? 1u : 0u) +
         (!o.depth_coordinate_v2_manifest.empty() ? 1u : 0u);
-      if (o.direct_glyph_qualification && (o.observation_timeline.empty() || o.follow || !o.scene_cache.empty() || !o.render_cache.empty() || !o.scene_plan.empty() || direct_geometry_input_count != 0u || o.device_conditional_replay || o.device_conditional_replay_control || o.simulate_hdr || o.artifacts != artifact_mode_e::evaluation || o.output_every != 1 || o.subtitle_plane_diagnostics || o.ocr_working_diagnostics || o.pfm_joined_diagnostics)) {
+      if (o.direct_glyph_qualification && (o.observation_timeline.empty() || o.follow || !o.scene_cache.empty() || !o.render_cache.empty() || !o.scene_plan.empty() || direct_geometry_input_count != 0u || o.device_conditional_replay || o.device_conditional_replay_control || o.artifacts != artifact_mode_e::evaluation || o.output_every != 1 || o.subtitle_plane_diagnostics || o.ocr_working_diagnostics)) {
         BOOST_LOG(error) << "sbs-bench: --direct-glyph-qualification requires ordinary SDR evaluation, "
                             "an explicit timeline, cadence1, and no replay/cache/follow/other diagnostic protocol";
-        return false;
-      }
-      if (o.pfm_joined_diagnostics &&
-          (o.observation_timeline.empty() || o.scene_cache.empty() || o.follow ||
-           o.bounded_adaptive_state || !o.render_cache.empty() || !o.scene_plan.empty() ||
-           direct_geometry_input_count != 0u || o.device_conditional_replay ||
-           o.device_conditional_replay_control || o.simulate_hdr ||
-           o.subtitle_plane_diagnostics ||
-           o.subtitle_plane_diagnostic_ranges || o.subtitle_plane_diagnostic_render_selected ||
-           o.ocr_working_diagnostics || o.artifacts == artifact_mode_e::evaluation)) {
-        BOOST_LOG(error)
-          << "sbs-bench: private --pfm-joined-diagnostics requires real PFM, an explicit "
-             "timeline, a new scene cache, adaptive/conversion output, and no other "
-             "replay/follow/diagnostic protocol";
         return false;
       }
       if (o.ocr_working_diagnostics &&
@@ -3667,10 +3577,6 @@ namespace sbs_bench {
           BOOST_LOG(error) << "sbs-bench: --follow forbids --limit and --output-every != 1";
           return false;
         }
-        if (o.follow_format == "pfm" && o.simulate_hdr) {
-          BOOST_LOG(error) << "sbs-bench: --simulate-hdr cannot be combined with PFM follow input";
-          return false;
-        }
       } else if (!o.follow_format.empty() || o.follow_count != 0u) {
         BOOST_LOG(error) << "sbs-bench: --follow-format/--follow-count require --follow";
         return false;
@@ -3692,16 +3598,8 @@ namespace sbs_bench {
           << "sbs-bench: --transient-raster-hard-cap-bytes requires bounded conversion --follow";
         return false;
       }
-      if (!(o.output_scale > 0.0 && o.output_scale <= 4.0)) {
-        BOOST_LOG(error) << "sbs-bench: --output-scale must be greater than 0 and at most 4";
-        return false;
-      }
       if (o.pop_strength >= 0.0 && !(o.pop_strength >= 0.25 && o.pop_strength <= 2.0)) {
         BOOST_LOG(error) << "sbs-bench: --pop-strength must be between 0.25 and 2";
-        return false;
-      }
-      if (!(o.hdr_scale > 0.0 && o.hdr_scale <= 64.0)) {
-        BOOST_LOG(error) << "sbs-bench: --hdr-scale must be greater than 0 and at most 64";
         return false;
       }
       if (o.artifacts == artifact_mode_e::conversion && o.output_every != 1) {
@@ -3891,10 +3789,6 @@ namespace sbs_bench {
       return 4;
     }
     const bool pfm_input = found_hdr_pfm;
-    if (pfm_input && o.simulate_hdr) {
-      BOOST_LOG(error) << "sbs-bench: --simulate-hdr cannot be combined with real linear-scRGB PFM input";
-      return 2;
-    }
     if (!o.follow) {
       std::sort(frames.begin(), frames.end(), numeric_frame_less);
       if (o.limit > 0 && (int) frames.size() > o.limit) {
@@ -3921,10 +3815,6 @@ namespace sbs_bench {
     }
     if (o.direct_glyph_qualification && (frames.empty() || frames.size() > 64u || pfm_input || sdr_raster_format != "png")) {
       BOOST_LOG(error) << "sbs-bench: Direct Glyph qualification requires 1..64 immutable SDR PNG sources";
-      return 4;
-    }
-    if (o.pfm_joined_diagnostics && (!pfm_input || frames.empty() || frames.size() > 64u)) {
-      BOOST_LOG(error) << "sbs-bench: private PFM joined diagnostics requires 1..64 real PFM inputs";
       return 4;
     }
     if (o.subtitle_plane_diagnostic_ranges) {
@@ -3973,13 +3863,6 @@ namespace sbs_bench {
       const auto directory = fs::path(o.out) / "direct-glyph";
       if (fs::exists(directory, ec) || ec || !fs::create_directory(directory, ec) || ec) {
         BOOST_LOG(error) << "sbs-bench: Direct Glyph qualification requires a fresh sidecar directory";
-        return 4;
-      }
-    }
-    if (o.pfm_joined_diagnostics) {
-      const auto directory = fs::path(o.out) / "pfm-joined";
-      if (fs::exists(directory, ec) || ec || !fs::create_directory(directory, ec) || ec) {
-        BOOST_LOG(error) << "sbs-bench: private PFM diagnostics requires a fresh pfm-joined directory";
         return 4;
       }
     }
@@ -4067,7 +3950,6 @@ namespace sbs_bench {
     const bool device_conditional_replay_evidence =
       o.device_conditional_replay || o.device_conditional_replay_control;
     const bool writes_adaptive_state = whole_clip_mode && !replay_mode;
-    const bool hdr_texture_input = pfm_input || o.simulate_hdr;
     const std::string discovered_input_frame_format =
       transport ? (pfm_input ? "linear-scRGB-f32-planar" : "sRGB-BGRA8-raw") :
       pfm_input ?
@@ -4076,9 +3958,9 @@ namespace sbs_bench {
            "sRGB-JPEG-WIC" :
            (sdr_raster_format == "bmp" ? "sRGB-BMP-WIC" : "sRGB-PNG-WIC"));
     const std::string discovered_input_texture_format =
-      hdr_texture_input ? "R16G16B16A16_FLOAT" : "B8G8R8A8_UNORM";
+      pfm_input ? "R16G16B16A16_FLOAT" : "B8G8R8A8_UNORM";
     const std::string discovered_input_color_space =
-      hdr_texture_input ? "linear-scRGB" : "sRGB-SDR";
+      pfm_input ? "linear-scRGB" : "sRGB-SDR";
     scene_cache_metadata replay_cache_metadata;
     std::vector<scene_plan_entry> scene_plan;
     std::size_t replay_first_sequence = 1u;
@@ -4103,20 +3985,16 @@ namespace sbs_bench {
           replay_cache_metadata.input_color_space !=
             discovered_input_color_space ||
           replay_cache_metadata.packed_texture_format !=
-            (hdr_texture_input ?
+            (pfm_input ?
                "R16G16B16A16_FLOAT" :
                "B8G8R8A8_UNORM") ||
           replay_cache_metadata.output_file_extension !=
             (pfm_input ? "pfm" : "png") ||
           replay_cache_metadata.output_frame_format !=
-            (pfm_input ?
-               "linear-scRGB-f32-pfm" :
-               (o.simulate_hdr ?
-                  "tone-mapped-sRGB-BGRA8-PNG-preview" :
-                  "sRGB-BGRA8-PNG")) ||
-          replay_cache_metadata.simulate_hdr != o.simulate_hdr ||
-          (o.simulate_hdr &&
-           replay_cache_metadata.hdr_scale != o.hdr_scale)) {
+            (pfm_input ? "linear-scRGB-f32-pfm" : "sRGB-BGRA8-PNG") ||
+          replay_cache_metadata.simulate_hdr ||
+          replay_cache_metadata.eye_width != 0 || replay_cache_metadata.eye_height != 0 ||
+          replay_cache_metadata.output_scale != 1.0) {
         BOOST_LOG(error)
           << "sbs-bench: cache/source color contract or frame count does not match replay input";
         return 6;
@@ -4161,9 +4039,6 @@ namespace sbs_bench {
         return 6;
       }
       sbs_cfg.pop_strength = replay_cache_metadata.pop_strength;
-      o.eye_w = replay_cache_metadata.eye_width;
-      o.eye_h = replay_cache_metadata.eye_height;
-      o.output_scale = replay_cache_metadata.output_scale;
       o.max_width = replay_cache_metadata.max_output_width;
       effective_depth_every = replay_cache_metadata.depth_reuse_interval;
     }
@@ -4247,9 +4122,7 @@ namespace sbs_bench {
                     << (o.follow ? "following producer frames" :
                                    std::to_string(frames.size()) + " frames")
                     << ", model '" << model.name
-                    << "', eye " << (o.eye_w > 0 ? std::to_string(o.eye_w) : "auto") << 'x'
-                    << (o.eye_h > 0 ? std::to_string(o.eye_h) : "auto")
-                    << ", depth_step current-once"
+                    << "', depth_step current-once"
                     << (replay_mode ? ", cache replay (TensorRT skipped)" : "")
                     << (depth_coordinate_v2_gpu_mode ?
                           ", native depth-coordinate-v2 final-field GPU sequence replay" :
@@ -4411,11 +4284,6 @@ namespace sbs_bench {
       );
       if (o.subtitle_conditioning_live_policy || live_subtitle_work) {
         estimator->set_subtitle_conditioning_diagnostics_always(false);
-      }
-      if (o.pfm_joined_diagnostics &&
-          !estimator->set_completed_ocr_conditioner_research_enabled(true)) {
-        BOOST_LOG(error) << "sbs-bench: cannot enable completed PFM operand copying";
-        return 5;
       }
       if (estimator->has_terminal_failure()) {
         BOOST_LOG(error)
@@ -4734,9 +4602,6 @@ namespace sbs_bench {
     std::size_t convex2x_diagnostic_frame_count = 0u;
     std::string convex2x_diagnostics_sha256;
     bool warp_mapping_shape_written = false;
-    float hdr_output_min = std::numeric_limits<float>::infinity();
-    float hdr_output_max = -std::numeric_limits<float>::infinity();
-    uint64_t hdr_nonfinite = 0;
 
     int written = 0;
     models::depth_observation_views_t est;
@@ -4775,214 +4640,6 @@ namespace sbs_bench {
           ++publication_receipt_stale;
         }
       }
-    };
-    nlohmann::json pfm_joined_frames = nlohmann::json::array();
-    const auto write_pfm_joined_diagnostics = [&](const models::depth_observation_views_t &result,
-      ID3D11ShaderResourceView *raw_source, const fs::path &source_path,
-      const std::string &source_sha256, const std::string &output_id,
-      const std::size_t sequence, const UINT width, const UINT height) {
-      namespace v2 = models::depth_coordinate_v2;
-      const auto directory = fs::path(o.out) / "pfm-joined" / ("frame_" + output_id);
-      std::error_code error;
-      if (!fs::create_directory(directory, error) || error) return false;
-      const auto &p = result.publication;
-      // Without a completion, the field and ROI default to zero. The source dimensions below
-      // still identify the attempted input for an UNAVAILABLE record.
-      nlohmann::json metadata {
-        {"schema", 1u}, {"role", "private-real-pfm-completed-numeric-operands"},
-        {"production_dump", false}, {"live_capture", false}, {"source_alpha", "PFM loader constructs alpha=1"},
-        {"status", "UNAVAILABLE"}, {"unavailable_reasons", nlohmann::json::array()},
-        {"source_file", source_path.string()}, {"source_snapshot_sha256", source_sha256},
-        {"observation_ordinal", sequence}, {"completed_frame_id", result.completed_frame_id},
-        {"coordinate_contract_schema", v2::contract_schema}, {"coordinate_contract_tag", v2::contract_tag},
-        {"coordinate_contract_sha256", v2::contract_canonical_sha256},
-        {"producer_source_closure_sha256", v2::shader_source_closure_sha256},
-        {"source_width", width}, {"source_height", height},
-        {"field_width", result.field_width}, {"field_height", result.field_height},
-        {"content", {result.field_content.left, result.field_content.top,
-                     result.field_content.right, result.field_content.bottom}},
-        {"input_roi_ltrb", {result.input_region.left, result.input_region.top,
-                           result.input_region.right, result.input_region.bottom}},
-        {"publication", {{"estimator_generation", p.estimator_generation},
-          {"publication_sequence", p.publication_sequence}, {"analysis_generation", p.analysis_generation},
-          {"frame_id", p.frame_id}, {"observation_timestamp_us", p.observation_timestamp_us},
-          {"transaction_token", p.transaction_token}, {"domain_tag", p.domain_tag},
-          {"baseline_frame_id", p.baseline_frame_id}, {"width", p.width}, {"height", p.height},
-          {"subtitle_domain", p.subtitle_domain}, {"raw_coordinate_scale", p.raw_coordinate_scale},
-          {"joint_plane_mode", p.joint_plane_mode}, {"expected_work", p.expected_work},
-          {"submission_class", static_cast<std::uint32_t>(p.submission_class)},
-          {"flags", p.flags}, {"host_subtitle_outcome", static_cast<std::uint32_t>(p.host_subtitle_outcome)}}},
-        {"artifacts", nlohmann::json::object()},
-        {"scope", "Literal completed GPU bytes; no reconstructed/resealed state, constants or dispatch. Not a live-capture or subtitle-quality certificate."}
-      };
-      const auto unavailable = [&](const char *reason) { metadata["unavailable_reasons"].push_back(reason); };
-      const auto commit = [&]() {
-        if (!publish_json_atomically(directory / "metadata.json", metadata)) return false;
-        pfm_joined_frames.push_back({{"observation_ordinal", sequence}, {"status", metadata["status"]},
-          {"metadata", "pfm-joined/frame_" + output_id + "/metadata.json"},
-          {"sha256", models::file_sha256_hex(directory / "metadata.json")}});
-        return publish_json_atomically(fs::path(o.out) / "pfm_joined_diagnostics.json",
-          {{"schema", 1u}, {"status", "RUNNING"}, {"frames", pfm_joined_frames}});
-      };
-      if (!estimator || !result.completed_frame_valid || result.completed_frame_id != sequence ||
-          !models::parallax_v2_result_is_authenticated(result) || !models::subtitle_evidence_is_exact_frame(result) ||
-          p.frame_id != sequence || p.observation_timestamp_us != observation_timestamps.at(sequence - 1u) ||
-          !estimator->publication_is_current(p) || source_sha256.empty()) {
-        unavailable("current exact completed geometry/subtitle publication unavailable");
-        return commit();
-      }
-      const auto views = estimator->completed_ocr_conditioner_working_views_for_evaluation(p);
-      if (!views || views->publication != p || views->input_region != result.input_region ||
-          views->field_width != static_cast<UINT>(result.field_width) ||
-          views->field_height != static_cast<UINT>(result.field_height) || views->field_content != result.field_content ||
-          views->ocr_record.Get() != result.ocr_box_record.Get() || views->uip.Get() != result.subtitle_locator_state.Get() ||
-          views->sct.Get() != result.subtitle_contour_identity.Get() || views->source_band.Get() != result.subtitle_contour_source.Get() ||
-          views->probability_snapshot.Get() != result.subtitle_ocr_probability.Get()) {
-        unavailable("completed conditioner aliases missing or not the result's exact publication operands");
-        return commit();
-      }
-      ComPtr<ID3D11Texture2D> texture_stage;
-      ComPtr<ID3D11Buffer> buffer_stage;
-      const auto artifact = [&](const char *name, const nlohmann::json &layout) {
-        const auto path = directory / name;
-        const auto digest = models::file_sha256_hex(path);
-        if (digest.empty()) return false;
-        metadata["artifacts"][name] = layout;
-        metadata["artifacts"][name]["sha256"] = digest;
-        metadata["artifacts"][name]["bytes"] = fs::file_size(path);
-        return true;
-      };
-      const auto buffer = [&](ID3D11Buffer *value, UINT bytes, const char *name) {
-        if (!value) { unavailable(name); return true; }
-        D3D11_BUFFER_DESC desc {}; value->GetDesc(&desc);
-        if (desc.ByteWidth != bytes) { unavailable(name); return true; }
-        return publish_file_atomically(directory / name, [&](const fs::path &temporary) {
-          return dump_ocr_working_buffer(dev.Get(), ctx.Get(), value, bytes, temporary, buffer_stage);
-        }) && artifact(name, {{"word_count", bytes / 4u}, {"encoding", "opaque-u32-le"}});
-      };
-      const auto words = [&](ID3D11ShaderResourceView *value, UINT count, const char *name) {
-        ComPtr<ID3D11Resource> resource; ComPtr<ID3D11Buffer> typed;
-        if (!value || (value->GetResource(&resource), FAILED(resource.As(&typed)))) {
-          unavailable(name); return true;
-        }
-        return buffer(typed.Get(), count * 4u, name);
-      };
-      const auto texture = [&](ID3D11ShaderResourceView *value, DXGI_FORMAT format,
-                                  UINT bytes, const char *name, UINT expected_width, UINT expected_height) {
-        ComPtr<ID3D11Resource> resource; ComPtr<ID3D11Texture2D> typed;
-        if (!value || (value->GetResource(&resource), FAILED(resource.As(&typed)))) {
-          unavailable(name); return true;
-        }
-        D3D11_TEXTURE2D_DESC desc {}; typed->GetDesc(&desc);
-        if (desc.Format != format || desc.Width != expected_width || desc.Height != expected_height ||
-            desc.MipLevels != 1u || desc.ArraySize != 1u || desc.SampleDesc.Count != 1u) {
-          unavailable(name); return true;
-        }
-        return publish_file_atomically(directory / name, [&](const fs::path &temporary) {
-          return dump_contour_texture(dev.Get(), ctx.Get(), value, format, bytes, temporary, texture_stage);
-        }) && artifact(name, {{"width", desc.Width}, {"height", desc.Height}, {"dxgi_format", desc.Format},
-                             {"bytes_per_pixel", bytes}, {"layout", "top-down-row-major-tight"}});
-      };
-      const auto native_width = views->input_region.width();
-      const auto native_height = views->input_region.height();
-      // Copy the actual CB first. Native source-band crop is CB[2:4]; publication domain[4:6]
-      // is the different live-field ROI and must never be used as native source coordinates.
-      if (!buffer(views->constants.Get(), 96u, "actual_contour_cb.u32") ||
-          !buffer(views->transaction.Get(), 256u, "actual_transaction.u32") ||
-          !buffer(views->dispatch_arguments.Get(), 256u, "actual_final_dispatch.u32")) return false;
-      const auto read_words = [&](const char *name, auto &words) {
-        std::ifstream stream(directory / name, std::ios::binary);
-        stream.read(reinterpret_cast<char *>(words.data()), sizeof(words));
-        return stream.good() && stream.peek() == std::char_traits<char>::eof();
-      };
-      std::array<std::uint32_t, 24u> actual_cb {};
-      std::array<std::uint32_t, 64u> actual_final {};
-      const auto low = [](std::uint64_t value) { return static_cast<std::uint32_t>(value); };
-      const auto high = [](std::uint64_t value) { return static_cast<std::uint32_t>(value >> 32u); };
-      if (!read_words("actual_contour_cb.u32", actual_cb) ||
-          !read_words("actual_final_dispatch.u32", actual_final) ||
-          actual_cb[0u] != native_width || actual_cb[1u] != native_height ||
-          actual_cb[2u] >= native_height || actual_cb[3u] != native_height - actual_cb[2u] ||
-          actual_cb[4u] != p.width || actual_cb[5u] != p.height ||
-          actual_cb[6u] != p.subtitle_domain[4u] || actual_cb[7u] != p.subtitle_domain[5u] ||
-          actual_cb[12u] != low(p.frame_id) || actual_cb[13u] != high(p.frame_id) ||
-          actual_cb[14u] != low(p.analysis_generation) || actual_cb[15u] != high(p.analysis_generation) ||
-          actual_cb[16u] != low(p.observation_timestamp_us) || actual_cb[17u] != high(p.observation_timestamp_us) ||
-          actual_cb[18u] > 1u || actual_cb[19u] != 0u || actual_cb[20u] != 1u ||
-          actual_cb[21u] != v2::subtitle_contour_recipe || actual_cb[22u] != 0u || actual_cb[23u] != 0u) {
-        unavailable("actual contour CB/final buffer missing or current clock/geometry mismatch");
-        return commit();
-      }
-      const auto actual_auth = models::host_sbs_gpu_trace::authenticate_receipt(
-        actual_final, p.transaction_token, p.expected_work, p.submission_class);
-      if (!actual_auth.receipt_valid || actual_final[60u] != 1u || actual_final[61u] != 1u ||
-          actual_final[62u] != 1u || actual_final[63u] != 0u) {
-        unavailable("actual final dispatch receipt fault, stale token or inactive final publication");
-      }
-      const auto crop_top = actual_cb[2u];
-      const auto band_height = actual_cb[3u];
-      if (!texture(raw_source, DXGI_FORMAT_R16G16B16A16_FLOAT, 8u, "raw_source.rgba16f", width, height) ||
-          !texture(result.shadow_base_final_parallax.Get(), DXGI_FORMAT_R32_FLOAT, 4u, "base.r32f", p.width, p.height) ||
-          !words(result.shadow_state.Get(), v2::state_float_count, "state.u32") ||
-          !words(views->probability_snapshot.Get(), v2::subtitle_ocr_output_width * v2::subtitle_ocr_output_height, "probability.f32") ||
-          !words(views->ocr_record.Get(), v2::subtitle_ocr_record_word_count, "ocr.u32") ||
-          !words(views->uip.Get(), v2::subtitle_plane_state_word_count, "uip.u32") ||
-          !words(views->sct.Get(), v2::subtitle_contour_history_word_count, "sct.u32") ||
-          !words(result.subtitle_condition_params.Get(), v2::subtitle_condition_param_word_count, "scp.u32") ||
-          !texture(result.subtitle_contour_support.Get(), DXGI_FORMAT_R32_UINT, 4u, "support.u32", native_width, band_height) ||
-          !texture(result.subtitle_glyph_matte.Get(), DXGI_FORMAT_R32_UINT, 4u, "matte.u32", native_width, band_height) ||
-          !texture(views->source_band.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, 8u, "display.rgba16f", native_width, band_height)) return false;
-      std::array<std::uint32_t, v2::subtitle_ocr_record_word_count> actual_ocr {};
-      std::array<std::uint32_t, v2::subtitle_plane_state_word_count> actual_uip {};
-      std::array<std::uint32_t, v2::subtitle_contour_history_word_count> actual_sct {};
-      if (!read_words("ocr.u32", actual_ocr) || !read_words("uip.u32", actual_uip) ||
-          !read_words("sct.u32", actual_sct)) {
-        unavailable("actual OCR/UIP/SCT bytes unavailable");
-      } else {
-        bool clocks_match = actual_ocr[0u] == v2::subtitle_ocr_record_schema &&
-          actual_ocr[1u] == v2::subtitle_ocr_record_tag && actual_ocr[2u] == 1u &&
-          actual_uip[0u] == v2::subtitle_plane_state_schema && actual_uip[1u] == v2::subtitle_plane_state_tag &&
-          actual_uip[2u] == 1u && actual_sct[0u] == v2::subtitle_contour_schema &&
-          actual_sct[1u] == v2::subtitle_contour_history_tag && actual_sct[2u] <= 1u &&
-          actual_sct[22u] == v2::subtitle_contour_recipe && actual_sct[23u] == 1u;
-        for (UINT i = 0u; i < 4u; ++i) {
-          clocks_match = clocks_match && actual_ocr[5u + i] == actual_cb[12u + i] &&
-            actual_uip[4u + i] == actual_cb[12u + i] && actual_sct[4u + i] == actual_cb[12u + i] &&
-            actual_sct[8u + i] == actual_cb[i] && actual_sct[12u + i] == actual_cb[4u + i] &&
-            actual_sct[16u + i] == actual_cb[8u + i] && actual_uip[12u + i] == actual_cb[4u + i] &&
-            actual_uip[16u + i] == actual_cb[8u + i] && actual_cb[8u + i] == p.subtitle_domain[6u + i];
-        }
-        clocks_match = clocks_match && actual_ocr[9u] == native_width && actual_ocr[10u] == native_height &&
-          actual_ocr[11u] == p.width && actual_ocr[12u] == p.height &&
-          actual_ocr[13u] == actual_cb[6u] && actual_ocr[14u] == actual_cb[7u] &&
-          actual_uip[8u] == actual_cb[16u] && actual_uip[9u] == actual_cb[17u] &&
-          actual_uip[10u] == native_width && actual_uip[11u] == native_height &&
-          actual_sct[20u] == actual_cb[16u] && actual_sct[21u] == actual_cb[17u];
-        if (!clocks_match) unavailable("actual OCR/UIP/SCT clock or geometry does not join the copied current CB");
-      }
-      metadata["native_width"] = native_width; metadata["native_height"] = native_height;
-      metadata["source_band_top"] = crop_top; metadata["source_band_height"] = band_height;
-      metadata["probability_shape"] = {v2::subtitle_ocr_output_height, v2::subtitle_ocr_output_width};
-      // Readbacks above finish the queued producer work. This is one existing nonblocking
-      // receipt poll, with no retry, Flush, extra GPU wait, or substitute completion.
-      observe_publications();
-      const auto receipt = device_conditional_publication;
-      if (publication_transport.failed || !receipt || receipt->expected != p || !receipt->geometry_valid ||
-          !receipt->subtitle_is_current() || !estimator->publication_is_current(p)) {
-        unavailable("exact final-publication GPU receipt missing, failed or not current");
-      } else {
-        metadata["receipt"] = {{"geometry_valid", receipt->geometry_valid},
-          {"depth_owner_valid", receipt->depth_owner_valid}, {"subtitle_current", receipt->subtitle_is_current()},
-          {"depth", static_cast<std::uint32_t>(receipt->depth)},
-          {"subtitle", static_cast<std::uint32_t>(receipt->subtitle)}};
-      }
-      metadata["conditioner_admission"] = "Literal CB/root/OCR/UIP/SCT clocks and source readiness must also pass the consumer's existing strict contract; no new authority is created by this exporter.";
-      const auto cache_commit = fs::path(o.scene_cache) / (scene_cache_frame_stem(sequence) + ".tuple.json");
-      const auto cache_digest = models::file_sha256_hex(cache_commit);
-      metadata["scene_cache_commit"] = {{"path", cache_commit.string()}, {"sha256", cache_digest}};
-      if (cache_digest.empty()) unavailable("same-frame scene cache commit unavailable");
-      if (metadata["unavailable_reasons"].empty()) metadata["status"] = "COPIED_CURRENT_COMPLETION_INPUTS";
-      return commit();
     };
     ComPtr<ID3D11Buffer> device_conditional_trace_stage;
     std::vector<std::uint32_t> device_conditional_trace_words;
@@ -5236,8 +4893,7 @@ namespace sbs_bench {
       std::string exact_source_sha256;
       std::uint64_t source_raster_bytes = 0;
       bool loaded = false;
-      const bool snapshot_source = o.follow || depth_coordinate_v2_gpu_mode || o.pfm_joined_diagnostics ||
-                                   o.direct_glyph_qualification;
+      const bool snapshot_source = o.follow || depth_coordinate_v2_gpu_mode || o.direct_glyph_qualification;
       if (transport) {
         const auto &header = raw_source->header;
         source_raster_bytes = raw_source->bytes();
@@ -5293,7 +4949,7 @@ namespace sbs_bench {
                      load_pfm(std::string_view(exact_source_snapshot), hdr_img) :
                      load_png(std::string_view(exact_source_snapshot), img);
         }
-        if (loaded && (depth_coordinate_v2_gpu_mode || o.pfm_joined_diagnostics || o.direct_glyph_qualification)) {
+        if (loaded && (depth_coordinate_v2_gpu_mode || o.direct_glyph_qualification)) {
           exact_source_sha256 = sha256_hex(exact_source_snapshot);
         }
       } else {
@@ -5345,9 +5001,6 @@ namespace sbs_bench {
         resolved_output_geometry = detail::resolve_sbs_geometry(
           source_width,
           source_height,
-          o.eye_w,
-          o.eye_h,
-          o.output_scale,
           max_width,
           geometry_error
         );
@@ -5393,26 +5046,11 @@ namespace sbs_bench {
                       frame_id(current_frame, fi);
 
       // Input texture + SRV.
-      std::vector<uint16_t> hdr_rgba;
       const void *input_pixels = pfm_input ?
                                    static_cast<const void *>(hdr_img.rgba16.data()) :
                                    static_cast<const void *>(img.bgra.data());
-      UINT input_pitch = frame_width * (pfm_input ? 8u : 4u);
-      if (o.simulate_hdr) {
-        hdr_rgba.resize((size_t) frame_width * frame_height * 4);
-        for (size_t p = 0; p < (size_t) frame_width * frame_height; ++p) {
-          const float b = srgb_to_linear(img.bgra[p * 4 + 0] / 255.0f) * (float) o.hdr_scale;
-          const float g = srgb_to_linear(img.bgra[p * 4 + 1] / 255.0f) * (float) o.hdr_scale;
-          const float r = srgb_to_linear(img.bgra[p * 4 + 2] / 255.0f) * (float) o.hdr_scale;
-          hdr_rgba[p * 4 + 0] = float_to_half(r);
-          hdr_rgba[p * 4 + 1] = float_to_half(g);
-          hdr_rgba[p * 4 + 2] = float_to_half(b);
-          hdr_rgba[p * 4 + 3] = float_to_half(1.0f);
-        }
-        input_pixels = hdr_rgba.data();
-        input_pitch = frame_width * 8;
-      }
-      const auto input_format = hdr_texture_input ?
+      const UINT input_pitch = frame_width * (pfm_input ? 8u : 4u);
+      const auto input_format = pfm_input ?
                                   DXGI_FORMAT_R16G16B16A16_FLOAT :
                                   DXGI_FORMAT_B8G8R8A8_UNORM;
       if (!in_tex) {
@@ -5436,9 +5074,9 @@ namespace sbs_bench {
       }
       ctx->UpdateSubresource(in_tex.Get(), 0, nullptr, input_pixels, input_pitch, 0);
 
-      // First frame: size the SBS target. Per eye = the input resolution by default (so the clip
-      // size, not a fixed constant, drives eval cost); --eye-h pins a specific output height.
-      // The width is still capped at max_encode_width like the live path.
+      // First frame: size the SBS target. Per eye = the input resolution (so the clip size, not a
+      // fixed constant, drives eval cost). The width is still capped at max_encode_width like the
+      // live path.
       if (o.artifacts != artifact_mode_e::adaptive && !sbs_tex) {
         const auto &geometry = *resolved_output_geometry;
         sbs_w = geometry.sbs_width;
@@ -5471,7 +5109,7 @@ namespace sbs_bench {
         td.Height = sbs_h;
         td.MipLevels = 1;
         td.ArraySize = 1;
-        td.Format = hdr_texture_input ?
+        td.Format = pfm_input ?
                       DXGI_FORMAT_R16G16B16A16_FLOAT :
                       DXGI_FORMAT_B8G8R8A8_UNORM;
         td.SampleDesc.Count = 1;
@@ -5549,15 +5187,11 @@ namespace sbs_bench {
         }
         BOOST_LOG(info) << "sbs-bench: input " << frame_width << "x" << frame_height << " -> SBS "
                         << sbs_w << "x" << sbs_h
-                        << (pfm_input ?
-                              " (linear scRGB PFM -> FP16)" :
-                              (o.simulate_hdr ?
-                                 " (linear scRGB FP16 HDR simulation)" :
-                                 " (sRGB SDR)"));
+                        << (pfm_input ? " (linear scRGB PFM -> FP16)" : " (sRGB SDR)");
       }
 
       // Submit and consume exactly one inference for this source frame.
-      const auto input_color = hdr_texture_input ?
+      const auto input_color = pfm_input ?
                                  models::input_color_space::scrgb_hdr :
                                  models::input_color_space::srgb;
       // Depth cadence is fixed at one inference per source frame (the replay cache contract
@@ -5734,10 +5368,6 @@ namespace sbs_bench {
             observation_timestamp_us
           );
         }
-        auto line_policy = models::subtitle_line_policy_e::video_caption;
-        if (o.subtitle_application_text) {
-          line_policy = models::subtitle_line_policy_e::application_text;
-        }
         const auto submitted = estimator->estimate_depth(
           in_srv.Get(),
           input_color,
@@ -5745,9 +5375,7 @@ namespace sbs_bench {
           false,
           offline_full_frame_request,
           replay_optional_work,
-          replay_request,
-          0u,
-          line_policy
+          replay_request
         );
         const bool submitted_force = submitted.submission.inference_enqueued;
         const bool submitted_gpu_undecided =
@@ -5779,14 +5407,6 @@ namespace sbs_bench {
         est = std::move(finished.observation);
         completion = finished.completion;
         call_status = finished.status;
-        if (o.pfm_joined_diagnostics &&
-            (!est.completed_frame_valid || est.completed_frame_id != estimator_frame_id ||
-             estimator->has_terminal_failure() || !models::parallax_v2_result_is_authenticated(est)) &&
-            !write_pfm_joined_diagnostics(est, in_srv.Get(), current_frame, exact_source_sha256,
-              output_id, global_sequence, frame_width, frame_height)) {
-          BOOST_LOG(error) << "sbs-bench: cannot record unavailable PFM completion";
-          return 6;
-        }
         if ((whole_clip_mode || o.device_conditional_replay) &&
             (!est.completed_frame_valid ||
              est.completed_frame_id != estimator_frame_id)) {
@@ -6119,13 +5739,8 @@ namespace sbs_bench {
             scene_cache_metadata_value.model_name = model.name;
             scene_cache_metadata_value.model_url = model.url;
             scene_cache_metadata_value.pop_strength = sbs_cfg.pop_strength;
-            scene_cache_metadata_value.simulate_hdr = o.simulate_hdr;
-            scene_cache_metadata_value.hdr_scale = o.hdr_scale;
             scene_cache_metadata_value.depth_reuse_interval =
               effective_depth_every;
-            scene_cache_metadata_value.eye_width = o.eye_w;
-            scene_cache_metadata_value.eye_height = o.eye_h;
-            scene_cache_metadata_value.output_scale = o.output_scale;
             scene_cache_metadata_value.max_output_width = max_width;
             const auto &cache_geometry = *resolved_output_geometry;
             scene_cache_metadata_value.output_eye_width =
@@ -6137,15 +5752,11 @@ namespace sbs_bench {
             scene_cache_metadata_value.output_sbs_height =
               cache_geometry.sbs_height;
             scene_cache_metadata_value.packed_texture_format =
-              hdr_texture_input ?
+              pfm_input ?
                 "R16G16B16A16_FLOAT" :
                 "B8G8R8A8_UNORM";
             scene_cache_metadata_value.output_frame_format =
-              pfm_input ?
-                "linear-scRGB-f32-pfm" :
-                (o.simulate_hdr ?
-                   "tone-mapped-sRGB-BGRA8-PNG-preview" :
-                   "sRGB-BGRA8-PNG");
+              pfm_input ? "linear-scRGB-f32-pfm" : "sRGB-BGRA8-PNG";
             scene_cache_metadata_value.output_file_extension =
               pfm_input ? "pfm" : "png";
             if (!publish_scene_cache_contract(
@@ -6218,13 +5829,6 @@ namespace sbs_bench {
           return 6;
         }
         ++health_state_observations;
-      }
-
-      if (o.pfm_joined_diagnostics &&
-          !write_pfm_joined_diagnostics(est, in_srv.Get(), current_frame, exact_source_sha256,
-            output_id, global_sequence, frame_width, frame_height)) {
-        BOOST_LOG(error) << "sbs-bench: failed to persist private PFM joined diagnostic operands";
-        return 6;
       }
 
       if (o.artifacts == artifact_mode_e::adaptive) {
@@ -6741,28 +6345,8 @@ namespace sbs_bench {
           }
         } else {
           std::vector<uint8_t> buf((size_t) sbs_w * sbs_h * 4);
-          if (o.simulate_hdr) {
-            for (UINT y = 0; y < sbs_h; ++y) {
-              const uint16_t *row = (const uint16_t *) ((const uint8_t *) m.pData + (size_t) y * m.RowPitch);
-              for (UINT x = 0; x < sbs_w; ++x) {
-                const float r = half_to_float(row[x * 4 + 0]);
-                const float g = half_to_float(row[x * 4 + 1]);
-                const float b = half_to_float(row[x * 4 + 2]);
-                for (float value : {r, g, b}) {
-                  if (std::isfinite(value)) {
-                    hdr_output_min = std::min(hdr_output_min, value);
-                    hdr_output_max = std::max(hdr_output_max, value);
-                  } else {
-                    ++hdr_nonfinite;
-                  }
-                }
-                hdr_preview_bgra(r, g, b, &buf[((size_t) y * sbs_w + x) * 4]);
-              }
-            }
-          } else {
-            for (UINT y = 0; y < sbs_h; y++) {
-              memcpy(&buf[(size_t) y * sbs_w * 4], (uint8_t *) m.pData + (size_t) y * m.RowPitch, sbs_w * 4);
-            }
+          for (UINT y = 0; y < sbs_h; y++) {
+            memcpy(&buf[(size_t) y * sbs_w * 4], (uint8_t *) m.pData + (size_t) y * m.RowPitch, sbs_w * 4);
           }
           ctx->Unmap(sbs_stage.Get(), 0);
           char name[64];
@@ -7202,15 +6786,6 @@ namespace sbs_bench {
           BOOST_LOG(error) << "sbs-bench: cannot publish complete direct glyph evidence";
           return 8;
         }
-      }
-    }
-    if (o.pfm_joined_diagnostics) {
-      if (pfm_joined_frames.size() != completed_frame_count ||
-          !publish_json_atomically(fs::path(o.out) / "pfm_joined_diagnostics.json",
-            {{"schema", 1u}, {"status", "COMPLETE"}, {"frame_count", completed_frame_count},
-             {"observation_timeline_sha256", observation_timeline_sha256}, {"frames", pfm_joined_frames}})) {
-        BOOST_LOG(error) << "sbs-bench: private PFM joined export did not cover every input";
-        return 8;
       }
     }
     if (convex2x_runtime_provenance) {
@@ -7754,16 +7329,6 @@ namespace sbs_bench {
                  << "  }\n"
                  << "}\n";
       }
-      if (o.simulate_hdr) {
-        std::ofstream stats(fs::path(o.out) / "hdr_output_stats.json");
-        if (stats) {
-          stats << "{\n  \"format\": \"linear-scRGB-fp16\",\n"
-                << "  \"input_scale\": " << o.hdr_scale << ",\n"
-                << "  \"output_min\": " << hdr_output_min << ",\n"
-                << "  \"output_max\": " << hdr_output_max << ",\n"
-                << "  \"nonfinite_components\": " << hdr_nonfinite << "\n}\n";
-        }
-      }
     } else {
       if (writes_adaptive_state) {
         if (!o.bounded_adaptive_state) {
@@ -7800,17 +7365,14 @@ namespace sbs_bench {
       const std::string &input_frame_format =
         discovered_input_frame_format;
       const std::string input_texture_format =
-        hdr_texture_input ? "R16G16B16A16_FLOAT" : "B8G8R8A8_UNORM";
+        pfm_input ? "R16G16B16A16_FLOAT" : "B8G8R8A8_UNORM";
       const std::string pipeline_color_space =
-        hdr_texture_input ? "linear-scRGB" : "sRGB-SDR";
+        pfm_input ? "linear-scRGB" : "sRGB-SDR";
       const std::string packed_texture_format =
-        hdr_texture_input ? "R16G16B16A16_FLOAT" : "B8G8R8A8_UNORM";
+        pfm_input ? "R16G16B16A16_FLOAT" : "B8G8R8A8_UNORM";
       const std::string output_frame_format =
         transport ? (pfm_input ? "linear-scRGB-f16-raw" : "sRGB-BGRA8-raw") :
-        pfm_input ?
-          "linear-scRGB-f32-pfm" :
-          (o.simulate_hdr ? "tone-mapped-sRGB-BGRA8-PNG-preview" :
-                            "sRGB-BGRA8-PNG");
+        pfm_input ? "linear-scRGB-f32-pfm" : "sRGB-BGRA8-PNG";
       const std::string output_transfer = pfm_input ? "linear" : "sRGB";
       const std::string output_row_order = !transport && pfm_input ? "bottom-up" : "top-down";
 
@@ -7826,21 +7388,19 @@ namespace sbs_bench {
         .parallax_v2_render = true,
         .parallax_v2_live = true,
         .cuda_graph_captured = cuda_graph_captured,
-        .simulate_hdr = o.simulate_hdr,
-        .hdr_scale = o.hdr_scale,
         .input_color_space = pipeline_color_space,
         .input_frame_format = input_frame_format,
         .input_texture_format = input_texture_format,
-        .input_transfer = hdr_texture_input ? "linear" : "sRGB",
-        .input_primaries = hdr_texture_input ? "scRGB/BT.709" : "sRGB/BT.709",
-        .input_reference_white_nits = hdr_texture_input ?
+        .input_transfer = pfm_input ? "linear" : "sRGB",
+        .input_primaries = pfm_input ? "scRGB/BT.709" : "sRGB/BT.709",
+        .input_reference_white_nits = pfm_input ?
                                         std::optional<double> {80.0} :
                                         std::nullopt,
         .packed_texture_format = packed_texture_format,
         .packed_color_space = pipeline_color_space,
-        .packed_transfer = hdr_texture_input ? "linear" : "sRGB",
-        .packed_primaries = hdr_texture_input ? "scRGB/BT.709" : "sRGB/BT.709",
-        .packed_reference_white_nits = hdr_texture_input ?
+        .packed_transfer = pfm_input ? "linear" : "sRGB",
+        .packed_primaries = pfm_input ? "scRGB/BT.709" : "sRGB/BT.709",
+        .packed_reference_white_nits = pfm_input ?
                                          std::optional<double> {80.0} :
                                          std::nullopt,
         .output_frame_format = output_frame_format,
@@ -7853,9 +7413,6 @@ namespace sbs_bench {
         .output_ffmpeg_pixel_format = pfm_input ?
                                         std::optional<std::string> {"gbrpf32le"} :
                                         (transport ? std::optional<std::string> {"bgra"} : std::nullopt),
-        .output_scale = o.output_scale,
-        .requested_eye_width = o.eye_w,
-        .requested_eye_height = o.eye_h,
         .configured_max_encode_width = sbs_cfg.max_encode_width,
         .resolved_max_output_width = max_width,
         .input_limit = o.limit,

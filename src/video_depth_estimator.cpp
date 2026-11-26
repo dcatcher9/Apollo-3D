@@ -3492,10 +3492,6 @@ namespace models {
     std::weak_ptr<const subtitle_publication::views_t> completed_subtitle_draw;
     bool subtitle_draw_copy_failure_logged = false;
 
-    // Entirely private, opt-in working diagnostics. None of these views enter
-    // completed_contour, depth_observation_views_t, rendering, or production history.
-    bool completed_ocr_conditioner_research_enabled = false;
-
     bool subtitle_selected_matte_commands = false;
     host_sbs_direct_glyph_publication::resources_t subtitle_direct_glyph_publication;
     host_sbs_direct_glyph_gpu::resources_t subtitle_direct_glyph_score;
@@ -10623,12 +10619,6 @@ namespace models {
   }
 #endif
 
-  bool video_depth_estimator::set_completed_ocr_conditioner_research_enabled(const bool enabled) {
-    if (!pimpl || !pimpl->is_operational() || pimpl->configuration_locked) return false;
-    pimpl->completed_ocr_conditioner_research_enabled = enabled;
-    return true;
-  }
-
 #ifdef SUNSHINE_TESTS
   bool video_depth_estimator::configure_joined_completion_gate_for_native_pacing_test(
     const joined_completion_gate_benchmark::configuration_t &configuration
@@ -10784,47 +10774,6 @@ namespace models {
     };
   }
 
-  std::optional<completed_ocr_conditioner_research_views_t>
-  video_depth_estimator::completed_ocr_conditioner_working_views_for_evaluation(
-    const host_sbs_gpu_completion_receipt::expected_t &expected
-  ) const noexcept {
-    if (!pimpl || !pimpl->completed_ocr_conditioner_research_enabled ||
-        !pimpl->publication_is_current(expected)) return std::nullopt;
-    // Reuse the existing operational/pending/current-frame/input-domain availability guard.
-    const auto working = ocr_working_views_for_evaluation(expected.frame_id);
-    if (!working || expected.analysis_generation != working->input_region.analysis_generation ||
-        expected.observation_timestamp_us != working->observation_timestamp_us ||
-        !pimpl->subtitle_contour_source_snapshot.ready() ||
-        !pimpl->subtitle_contour_probability_snapshot.ready() || !pimpl->ocr_box_record_srv ||
-        !pimpl->subtitle_locator_state_srv || !pimpl->subtitle_contour_identity.ready() ||
-        !pimpl->subtitle_contour_cbuffer || !working->transaction || !working->dispatch_arguments) return std::nullopt;
-    const auto roi = fit_subtitle_analysis_geometry(
-      working->input_region.width(), working->input_region.height(),
-      pimpl->live_field_shape(), working->field_content
-    );
-    const host_sbs_subtitle_plane::domain_words_t domain {
-      working->input_region.width(), working->input_region.height(),
-      working->field_width, working->field_height, roi.roi_top, roi.roi_bottom,
-      working->field_content.left, working->field_content.top,
-      working->field_content.right, working->field_content.bottom
-    };
-    if (expected.subtitle_domain != domain) return std::nullopt;
-    return completed_ocr_conditioner_research_views_t {
-      .publication = expected,
-      .input_region = working->input_region,
-      .field_width = working->field_width,
-      .field_height = working->field_height,
-      .field_content = working->field_content,
-      .source_band = pimpl->subtitle_contour_source_snapshot.srv,
-      .probability_snapshot = pimpl->subtitle_contour_probability_snapshot.srv,
-      .ocr_record = pimpl->ocr_box_record_srv,
-      .uip = pimpl->subtitle_locator_state_srv,
-      .sct = pimpl->subtitle_contour_identity.srv,
-      .constants = pimpl->subtitle_contour_cbuffer,
-      .transaction = working->transaction,
-      .dispatch_arguments = working->dispatch_arguments,
-    };
-  }
 
 
 
