@@ -86,7 +86,7 @@ namespace platf::sbs_debug {
       bool poll_is_empty
     ) noexcept;
 
-    /** Authenticate the one-grid legacy DAV2 or fused single-high dump tensor geometry. */
+    /** Authenticate the fused single-high dump tensor geometry. */
     bool capture_tensor_grid_is_authenticated(const frame &completed) noexcept;
 
     /** Serialize the exact GPU-trace wire contract used by Dump 3D diagnostics. */
@@ -177,7 +177,6 @@ namespace platf::sbs_debug {
     int field_width = 0;
     int field_height = 0;
     models::depth_tensor_content_rect_t field_content {};
-    bool refined_live_geometry_active = false;
     std::uint64_t matched_frame_id = 0;
     /** Source transaction time from the matched publication; reused geometry retains its own clock. */
     std::uint64_t matched_observation_timestamp_us = 0;

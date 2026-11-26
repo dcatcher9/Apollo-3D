@@ -532,7 +532,6 @@ namespace {
     frame.field_height = 868;
     frame.field_content = {0u, 0u, 1540u, 868u};
     frame.depth_input_region.tensor_content = frame.field_content;
-    frame.refined_live_geometry_active = true;
     const auto ring = canonical_gpu_trace_ring(frame);
     ASSERT_TRUE(dump_detail::gpu_trace_ring_is_canonical(ring, frame));
 
@@ -568,11 +567,11 @@ namespace {
     EXPECT_FALSE(dump_detail::gpu_trace_ring_is_canonical(ring, wrong_field_claim));
   }
 
-  TEST(SbsDebugDumpTensorGridTest, AuthenticatesLegacyAndSingleHighButRejectsSplitGrid) {
-    auto legacy = gpu_trace_frame();
-    EXPECT_TRUE(dump_detail::capture_tensor_grid_is_authenticated(legacy));
+  TEST(SbsDebugDumpTensorGridTest, AuthenticatesSingleHighButRejectsCoarseAndSplitGrid) {
+    auto coarse = gpu_trace_frame();
+    EXPECT_FALSE(dump_detail::capture_tensor_grid_is_authenticated(coarse));
 
-    auto single_high = legacy;
+    auto single_high = coarse;
     single_high.model_width = 1540;
     single_high.model_height = 868;
     single_high.raw_width = 1540;
@@ -581,7 +580,6 @@ namespace {
     single_high.field_height = 868;
     single_high.field_content = {0u, 0u, 1540u, 868u};
     single_high.depth_input_region.tensor_content = single_high.field_content;
-    single_high.refined_live_geometry_active = true;
     EXPECT_TRUE(dump_detail::capture_tensor_grid_is_authenticated(single_high));
 
     struct fused_shape_case_t {
@@ -599,7 +597,7 @@ namespace {
       fused_shape_case_t {1440u, 3440u, 434, 1036},
     };
     for (const auto &test_case : fused_shapes) {
-      auto supported = legacy;
+      auto supported = coarse;
       supported.model_width = 2 * test_case.coarse_width;
       supported.model_height = 2 * test_case.coarse_height;
       supported.raw_width = supported.model_width;
@@ -617,7 +615,6 @@ namespace {
       supported.depth_input_region.right = test_case.source_width;
       supported.depth_input_region.bottom = test_case.source_height;
       supported.depth_input_region.tensor_content = supported.field_content;
-      supported.refined_live_geometry_active = true;
       SCOPED_TRACE(
         std::to_string(test_case.source_width) + "x" +
         std::to_string(test_case.source_height)
@@ -631,12 +628,6 @@ namespace {
     stale_split_grid.raw_width = 770;
     stale_split_grid.raw_height = 434;
     EXPECT_FALSE(dump_detail::capture_tensor_grid_is_authenticated(stale_split_grid));
-
-    auto high_without_fused_authority = single_high;
-    high_without_fused_authority.refined_live_geometry_active = false;
-    EXPECT_FALSE(dump_detail::capture_tensor_grid_is_authenticated(
-      high_without_fused_authority
-    ));
 
     auto unsupported_high_claim = single_high;
     --unsupported_high_claim.model_width;
@@ -652,9 +643,9 @@ namespace {
   }
 
   TEST(SbsDebugDumpTensorGridTest, SingleHighRequiresExactCompositeRuntimeProvenance) {
-    auto legacy = gpu_trace_frame();
+    auto high = gpu_trace_frame();
     const auto &calibration = v2::model_calibrations.front();
-    legacy.raw_model_provenance = std::make_shared<models::raw_model_provenance_t>(
+    high.raw_model_provenance = std::make_shared<models::raw_model_provenance_t>(
       models::raw_model_provenance_t {
         .depth_model = std::string {calibration.depth_model},
         .depth_model_url = std::string {calibration.depth_model_url},
@@ -664,10 +655,6 @@ namespace {
           std::string {calibration.preprocess.source_closure_sha256},
       }
     );
-    EXPECT_TRUE(dump_detail::composite_runtime_provenance_is_authenticated(legacy));
-
-    auto high = legacy;
-    high.refined_live_geometry_active = true;
     EXPECT_FALSE(dump_detail::composite_runtime_provenance_is_authenticated(high));
     const std::string engine_artifact =
       std::string {models::prod_zipdepth_convex2x::logical_model} + "." +
@@ -703,10 +690,6 @@ namespace {
     stale_runtime->engine_recipe = "stale";
     stale.composite_depth_runtime_provenance = std::move(stale_runtime);
     EXPECT_FALSE(dump_detail::composite_runtime_provenance_is_authenticated(stale));
-
-    legacy.composite_depth_runtime_provenance =
-      high.composite_depth_runtime_provenance;
-    EXPECT_FALSE(dump_detail::composite_runtime_provenance_is_authenticated(legacy));
   }
 
   TEST(SbsDebugDumpTensorGridTest, PortraitSingleHighPassesSubtitleCaptureGate) {
@@ -743,7 +726,6 @@ namespace {
       completed.depth_input_region.right = test_case.source_width;
       completed.depth_input_region.bottom = test_case.source_height;
       completed.depth_input_region.tensor_content = completed.field_content;
-      completed.refined_live_geometry_active = true;
       completed.ocr_box_record = resource;
       completed.subtitle_locator_state = resource;
       completed.shadow_base_final_parallax = resource;
@@ -1496,7 +1478,6 @@ namespace {
     frame.field_width = 1540;
     frame.field_height = 868;
     frame.field_content = *high_content;
-    frame.refined_live_geometry_active = true;
     frame.depth_input_region.left = coarse_plan->source_rect.left;
     frame.depth_input_region.top = coarse_plan->source_rect.top;
     frame.depth_input_region.right = coarse_plan->source_rect.right;

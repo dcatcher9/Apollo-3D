@@ -1727,7 +1727,6 @@ namespace {
     EXPECT_EQ(observation.raw_height, 0);
     EXPECT_EQ(observation.field_width, 0);
     EXPECT_EQ(observation.field_height, 0);
-    EXPECT_FALSE(observation.refined_live_geometry_active);
     EXPECT_EQ(observation.field_content, models::depth_tensor_content_rect_t {});
     EXPECT_EQ(observation.input_region, models::depth_input_region_t {});
     EXPECT_EQ(observation.publication, models::host_sbs_gpu_completion_receipt::expected_t {});
@@ -3826,7 +3825,6 @@ TEST(TensorRtConditionalWrapperGpuTest, AllAuthenticatedShapesBuildAndExecute) {
       EXPECT_EQ(completed.observation.field_height, high_shape->height);
       EXPECT_TRUE(completed.observation.field_content.full(*high_shape))
         << "Full-frame phone/tablet inference must not introduce tensor padding";
-      EXPECT_TRUE(completed.observation.refined_live_geometry_active);
       EXPECT_TRUE(models::parallax_v2_result_is_authenticated(completed.observation));
       EXPECT_FALSE(completed.observation.gpu_undecided_completion);
       EXPECT_FALSE(estimator.has_terminal_failure());
@@ -4353,7 +4351,6 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   refined_result.field_height = 868;
   refined_result.field_content = {0u, 0u, 1540u, 868u};
   refined_result.input_region.tensor_content = {0u, 0u, 1540u, 868u};
-  refined_result.refined_live_geometry_active = true;
   EXPECT_TRUE(models::parallax_v2_result_is_authenticated(refined_result));
 
   {
@@ -4470,7 +4467,6 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   fused_portrait_fallback.refined_width = 868;
   fused_portrait_fallback.refined_height = 1540;
   fused_portrait_fallback.field_content = {0u, 0u, 868u, 1540u};
-  fused_portrait_fallback.refined_live_geometry_active = true;
   fused_portrait_fallback.input_region = {
     .source_width = 1080u,
     .source_height = 1920u,
@@ -6906,7 +6902,6 @@ TEST(DirectxShaderSourceTest, HostSbsLatestV2LineageIsNotCurrentRenderAuthorizat
   for (const auto &boundary : completion_boundaries) {
     expect_reset_between(selection, boundary.name, boundary.begin, boundary.end, "consume_matched_completion(");
   }
-  EXPECT_NE(display.find(".refined = completed->refined_live_geometry_active,"), std::string::npos);
   EXPECT_EQ(display.find("reusable_v2"), std::string::npos);
 
   expect_reset_between(display, "terminal pipeline failure", "void fail_depth_pipeline_flat()", "matched_presentation_cache.reset();");
@@ -6944,7 +6939,6 @@ TEST(DirectxShaderSourceTest, HostSbsCompletionBindsTheEstimatorGridToTheSubmitt
     cache.find("depth_analysis_domain_matches_realization("),
     std::string::npos
   );
-  EXPECT_NE(cache.find("refined_live_geometry_active_"), std::string::npos);
   EXPECT_NE(cache.find("field_width_"), std::string::npos);
   EXPECT_NE(cache.find("field_height_"), std::string::npos);
 

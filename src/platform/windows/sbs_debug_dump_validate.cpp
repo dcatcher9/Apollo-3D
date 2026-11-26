@@ -739,9 +739,6 @@ namespace platf::sbs_debug {
 
     bool composite_runtime_provenance_is_authenticated(const frame &completed) noexcept {
       try {
-        if (!completed.refined_live_geometry_active) {
-          return !completed.composite_depth_runtime_provenance;
-        }
         if (!completed.raw_model_provenance ||
             !completed.composite_depth_runtime_provenance) {
           return false;

@@ -996,7 +996,6 @@ namespace models {
         !host_sbs_v2_source_resolution_is_supported(
           input_region.source_width, input_region.source_height) ||
         !fused_shape || *fused_shape != result_shape ||
-        !result.refined_live_geometry_active ||
         !input_region.tensor_content.valid(result_shape)) {
       return false;
     }
@@ -3352,7 +3351,6 @@ namespace models {
     int target_h = 0;
     // The required fused runtime uses one public high-resolution tensor throughout. Every
     // analysis/history/publication resource is target_w/target_h.
-    bool refined_live_geometry_active = false;
     int field_w = 0;
     int field_h = 0;
     UINT reduce_groups = 0;  // threadgroups for the shared moments/range reduction
@@ -7130,8 +7128,7 @@ namespace models {
         fail_parallax_v2_producer(reason.str());
         return false;
       }
-      if (field_w != target_w || field_h != target_h ||
-          !refined_live_geometry_active || !production_depth_runtime_active()) {
+      if (field_w != target_w || field_h != target_h || !production_depth_runtime_active()) {
         fail_parallax_v2_producer("single-grid model/field identity is invalid"sv);
         return false;
       }
@@ -8590,7 +8587,6 @@ namespace models {
       r.raw_height = target_h;
       r.field_width = field_w;
       r.field_height = field_h;
-      r.refined_live_geometry_active = refined_live_geometry_active;
       r.completed_frame_valid = true;
       r.completed_frame_id = completed.frame_id;
       r.gpu_undecided_completion = completed.gpu_undecided;
@@ -9574,7 +9570,6 @@ namespace models {
         // frame. Never let optional textures/state from that abandoned shape survive into the
         // retry (whose source aspect may already have changed).
         release_parallax_v2_resources();
-        refined_live_geometry_active = true;
         field_w = target_w;
         field_h = target_h;
         if (!unregister_near_identical_decision_interop(cuda)) {
@@ -9680,7 +9675,6 @@ namespace models {
             << "Depth estimator D3D11 resource creation failed; Host SBS V2 will fail flat.";
           target_w = target_h = 0;
           field_w = field_h = 0;
-          refined_live_geometry_active = false;
           mark_terminal_failure();
           return {};
         }
@@ -9710,7 +9704,6 @@ namespace models {
           }
           target_w = target_h = 0;
           field_w = field_h = 0;
-          refined_live_geometry_active = false;
           mark_terminal_failure(
             !input_cleanup_ok || !output_cleanup_ok
           );

@@ -979,7 +979,6 @@ namespace models {
     int guidance_height = 0;
     int refined_width = 0;
     int refined_height = 0;
-    bool refined_live_geometry_active = false;  ///< True for the single-high fused runtime.
     // A wrapper transaction completed and its GPU normalization passes were submitted. The associated
     // depth_frame_state decides on-GPU whether this completion contains valid depth or must hold
     // the previous matched color/depth output.

@@ -4081,8 +4081,7 @@ namespace sbs_bench {
               est.guidance_width == est.raw_width &&
               est.guidance_height == est.raw_height &&
               est.refined_width == est.raw_width &&
-              est.refined_height == est.raw_height &&
-              est.refined_live_geometry_active;
+              est.refined_height == est.raw_height;
             const bool diagnostic_aliases_are_exact =
               est.model_input_snapshot && est.raw_model_depth_snapshot &&
               est.guidance_model_input_snapshot &&

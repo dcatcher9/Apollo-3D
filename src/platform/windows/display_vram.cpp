@@ -222,7 +222,6 @@ namespace platf::dxgi {
   [[nodiscard]] static std::optional<models::depth_input_region_t>
     realize_depth_input_region(
       const models::depth_input_region_t &submitted_region,
-      const bool refined_live_geometry_active,
       const int field_width,
       const int field_height
     ) noexcept {
@@ -238,22 +237,18 @@ namespace platf::dxgi {
       return std::nullopt;
     }
 
-    auto realized = submitted_region;
-    auto realized_shape = calibrated_shape;
-    if (refined_live_geometry_active) {
-      const auto high_shape = models::host_sbs_convex2x_field_shape(calibrated_shape);
-      const auto high_content = models::host_sbs_convex2x_content_rect(
-        submitted_region.tensor_content,
-        calibrated_shape
-      );
-      if (!high_shape || !high_content) {
-        return std::nullopt;
-      }
-      realized_shape = *high_shape;
-      realized.tensor_content = *high_content;
+    const auto realized_shape = models::host_sbs_convex2x_field_shape(calibrated_shape);
+    const auto high_content = models::host_sbs_convex2x_content_rect(
+      submitted_region.tensor_content,
+      calibrated_shape
+    );
+    if (!realized_shape || !high_content) {
+      return std::nullopt;
     }
+    auto realized = submitted_region;
+    realized.tensor_content = *high_content;
 
-    if (field_width != realized_shape.width || field_height != realized_shape.height || !realized.tensor_content.valid(realized_shape) || !realized.valid()) {
+    if (field_width != realized_shape->width || field_height != realized_shape->height || !realized.tensor_content.valid(*realized_shape) || !realized.valid()) {
       return std::nullopt;
     }
     return realized;
@@ -264,13 +259,11 @@ namespace platf::dxgi {
     const models::depth_observation_views_t &estimate,
     const models::depth_input_region_t &submitted_region
   ) noexcept {
-    const bool fused_runtime = estimate.composite_depth_runtime_provenance != nullptr;
-    if (!estimate.input_region.valid() || estimate.refined_live_geometry_active != fused_runtime || estimate.raw_width != estimate.field_width || estimate.raw_height != estimate.field_height) {
+    if (!estimate.input_region.valid() || !estimate.composite_depth_runtime_provenance || estimate.raw_width != estimate.field_width || estimate.raw_height != estimate.field_height) {
       return false;
     }
     const auto expected = realize_depth_input_region(
       submitted_region,
-      estimate.refined_live_geometry_active,
       estimate.field_width,
       estimate.field_height
     );
@@ -281,13 +274,11 @@ namespace platf::dxgi {
   [[nodiscard]] static bool depth_analysis_domain_matches_realization(
     const models::depth_input_region_t &submitted_region,
     const models::depth_input_region_t &realized_region,
-    const bool refined_live_geometry_active,
     const int field_width,
     const int field_height
   ) noexcept {
     const auto expected = realize_depth_input_region(
       submitted_region,
-      refined_live_geometry_active,
       field_width,
       field_height
     );
@@ -1582,7 +1573,6 @@ namespace platf::dxgi {
                   << est.parallax_v2_requested_pop_strength
                   << ", model shape "sv << est.raw_width << 'x' << est.raw_height
                   << ", live field "sv << est.field_width << 'x' << est.field_height
-                  << (est.refined_live_geometry_active ? " refined-convex2x"sv : " coarse"sv)
                   << ")."sv;
               } else {
                 BOOST_LOG(warning)
@@ -1593,8 +1583,6 @@ namespace platf::dxgi {
                   << (est.parallax_v2_producer_active ? "true" : "false")
                   << ", model_shape="sv << est.raw_width << 'x' << est.raw_height
                   << ", field_shape="sv << est.field_width << 'x' << est.field_height
-                  << ", refined="sv
-                  << (est.refined_live_geometry_active ? "true" : "false")
                   << ")."sv;
                 clear_matched_selection();
                 fail_depth_pipeline_flat();
@@ -2852,7 +2840,6 @@ namespace platf::dxgi {
                 converted_content_timestamp,
                 *geometry.region,
                 draw_colour.color_space,
-                geometry.refined,
                 geometry.field_width,
                 geometry.field_height,
                 draw_source_attribution->subtitle_context_generation,
@@ -3095,8 +3082,6 @@ namespace platf::dxgi {
                 dump_frame.field_width = est.field_width;
                 dump_frame.field_height = est.field_height;
                 dump_frame.field_content = est.field_content;
-                dump_frame.refined_live_geometry_active =
-                  est.refined_live_geometry_active;
                 dump_frame.matched_frame_id = est.completed_frame_id;
                 dump_frame.matched_observation_timestamp_us =
                   est.publication.observation_timestamp_us;
@@ -4001,7 +3986,6 @@ namespace platf::dxgi {
         content_timestamp_.reset();
         input_region_ = {};
         color_space_ = models::input_color_space::srgb;
-        refined_live_geometry_active_ = false;
         field_width_ = 0;
         field_height_ = 0;
         positioned_subtitles_ = false;
@@ -4021,7 +4005,6 @@ namespace platf::dxgi {
         const std::optional<std::chrono::steady_clock::time_point> &presented_content_timestamp,
         const models::depth_input_region_t &presented_input_region,
         const models::input_color_space presented_color_space,
-        const bool presented_refined_live_geometry_active,
         const int presented_field_width,
         const int presented_field_height,
         const std::uint64_t subtitle_context_generation,
@@ -4040,7 +4023,6 @@ namespace platf::dxgi {
         content_timestamp_ = presented_content_timestamp;
         input_region_ = presented_input_region;
         color_space_ = presented_color_space;
-        refined_live_geometry_active_ = presented_refined_live_geometry_active;
         field_width_ = presented_field_width;
         field_height_ = presented_field_height;
         subtitle_context_generation_ = subtitle_context_generation;
@@ -4139,7 +4121,7 @@ namespace platf::dxgi {
         const models::depth_input_region_t &region,
         const models::input_color_space color_space
       ) const noexcept {
-        return valid_ && depth_analysis_domain_matches_realization(region, input_region_, refined_live_geometry_active_, field_width_, field_height_) &&
+        return valid_ && depth_analysis_domain_matches_realization(region, input_region_, field_width_, field_height_) &&
                color_space == color_space_;
       }
 
@@ -4152,7 +4134,6 @@ namespace platf::dxgi {
       std::optional<std::chrono::steady_clock::time_point> content_timestamp_;
       models::depth_input_region_t input_region_ {};
       models::input_color_space color_space_ = models::input_color_space::srgb;
-      bool refined_live_geometry_active_ = false;
       int field_width_ = 0;
       int field_height_ = 0;
       detail::host_sbs_packed_presentation_clock_t presentation_clock_;
@@ -4292,7 +4273,6 @@ namespace platf::dxgi {
       ID3D11ShaderResourceView *selected_receipt = nullptr;
       std::uint64_t frame_id = 0u;
       int field_width = 0, field_height = 0;
-      bool refined = false;
       bool subtitle_suppressed = false;
 
       [[nodiscard]] bool has_subtitle_inputs() const noexcept {
@@ -4323,7 +4303,6 @@ namespace platf::dxgi {
           .frame_id = completed->completed_frame_id,
           .field_width = completed->field_width,
           .field_height = completed->field_height,
-          .refined = completed->refined_live_geometry_active,
           .subtitle_suppressed = completed->subtitle_work_suppressed,
         };
       }

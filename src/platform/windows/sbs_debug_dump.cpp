@@ -2665,12 +2665,6 @@ namespace platf::sbs_debug {
         completed.model_width,
         completed.model_height,
       };
-      if (!completed.refined_live_geometry_active) {
-        return capture_shape == dav2_shape ?
-                 std::optional<models::depth_tensor_shape_t> {dav2_shape} :
-                 std::nullopt;
-      }
-
       const auto high_shape = models::host_sbs_convex2x_field_shape(dav2_shape);
       if (!high_shape || capture_shape != *high_shape ||
           !models::prod_zipdepth_convex2x::live_geometry_shape_relation(
@@ -2695,9 +2689,7 @@ namespace platf::sbs_debug {
       }
       const auto calibrated_dav2_shape = calibrated_dav2_shape_for_dump(completed);
       if (!calibrated_dav2_shape) {
-        return completed.refined_live_geometry_active ?
-                 "single-high fused tensor is not the exact authenticated convex-2x realization" :
-                 "legacy tensor does not match its authenticated DAV2 calibration shape";
+        return "single-high fused tensor is not the exact authenticated convex-2x realization";
       }
       const models::depth_tensor_shape_t capture_shape {
         completed.model_width,
@@ -2761,19 +2753,13 @@ namespace platf::sbs_debug {
       if (completed.depth_video_plan->tensor_shape != *calibrated_dav2_shape) {
         return "ROI planner tensor does not match the embedded DAV2 calibration grid";
       }
-      const auto expected_capture_content = completed.refined_live_geometry_active ?
-        models::host_sbs_convex2x_content_rect(
-          completed.depth_video_plan->tensor_content,
-          *calibrated_dav2_shape
-        ) :
-        std::optional<models::depth_tensor_content_rect_t> {
-          completed.depth_video_plan->tensor_content
-        };
+      const auto expected_capture_content = models::host_sbs_convex2x_content_rect(
+        completed.depth_video_plan->tensor_content,
+        *calibrated_dav2_shape
+      );
       if (!expected_capture_content || !region.tensor_content.valid(capture_shape) ||
           region.tensor_content != *expected_capture_content) {
-        return completed.refined_live_geometry_active ?
-                 "ROI tensor content is not the exact convex-2x realization of its authenticated DAV2 plan" :
-                 "ROI tensor-content rectangle does not match its authenticated planner";
+        return "ROI tensor content is not the exact convex-2x realization of its authenticated DAV2 plan";
       }
       return {};
     }
@@ -5274,9 +5260,8 @@ namespace platf::sbs_debug {
         retry_not_before_ = std::chrono::steady_clock::now() + retry_backoff;
         return false;
       }
-      // Both supported runtimes expose one common capture/model/depth/geometry raster. Legacy
-      // DAV2 uses its calibrated grid directly; the fused runtime must use exactly the frozen 2x
-      // realization of that same source-selected DAV2 shape. A stale split-grid frame or an
+      // The fused runtime exposes one common capture/model/depth/geometry raster: exactly the
+      // frozen 2x realization of the source-selected DAV2 shape. A stale split-grid frame or an
       // arbitrary high-resolution claim fails closed instead of being mislabeled in Dump 3D.
       const auto calibrated_dav2_shape = calibrated_dav2_shape_for_dump(completed);
       if (!calibrated_dav2_shape ||
@@ -5284,7 +5269,7 @@ namespace platf::sbs_debug {
           !detail::composite_runtime_provenance_is_authenticated(completed)) {
         BOOST_LOG(warning)
           << "SBS debug dump: completed model/depth geometry does not match the authenticated "sv
-             "legacy DAV2 or schema-2 single-high fused runtime contract; dump rejected."sv;
+             "schema-2 single-high fused runtime contract; dump rejected."sv;
         retry_not_before_ = std::chrono::steady_clock::now() + retry_backoff;
         return false;
       }
