@@ -154,6 +154,7 @@ Use a scoped localhost HTTP server for rendered testing. Do not ask browser auto
 - HTTP, pairing, and configuration: `src/nvhttp.cpp`, `src/confighttp.cpp`,
   `src/httpcommon.cpp`, `src/config.cpp`, and `src/crypto.cpp`.
 - NVIDIA encoding: `src/nvenc/`.
+- App library (`apps.json` parsing, validation and migration): `src/apps_store.cpp`.
 - App and display lifecycle: `src/process.cpp`, `src/display_device.cpp`, and
   `src/platform/windows/virtual_display.cpp`.
 - Windows capture, input, audio, local AR, and virtual display: `src/platform/windows/`.
