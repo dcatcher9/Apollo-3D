@@ -19,6 +19,7 @@
   #include <src/model_manager.h>
   #include <src/prod_zipdepth_convex2x.h>
   #include <src/video_depth_estimator.h>
+  #include <tests/fixtures/d3d11_device_release.h>
   #include <string>
   #include <string_view>
   #include <thread>
@@ -175,6 +176,9 @@ namespace {
   protected:
     static constexpr UINT width = 1280u, height = 720u;
     private_assets_t assets;
+    // Declared before the device, so the device is really released after the fixture's other
+    // D3D11 objects.
+    d3d11_device_release_fixture::device_release_t device_release;
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
     ComPtr<ID3D11ShaderResourceView> source;
@@ -192,6 +196,7 @@ namespace {
       D3D_FEATURE_LEVEL actual {};
       constexpr D3D_FEATURE_LEVEL requested[] {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
       ASSERT_TRUE(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, requested, static_cast<UINT>(std::size(requested)), D3D11_SDK_VERSION, &device, &actual, &context)));
+      device_release.watch(context.Get());
 
       std::vector<std::uint32_t> pixels(static_cast<std::size_t>(width) * height);
       for (UINT y = 0u; y < height; ++y) {

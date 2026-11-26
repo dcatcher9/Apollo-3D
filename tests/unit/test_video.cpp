@@ -46,6 +46,7 @@
   #include <wrl/client.h>
   #include <wincodec.h>
 #include <tests/fixtures/host_sbs_adaptive_camera_state.h>
+#include <tests/fixtures/d3d11_device_release.h>
 
 namespace platf::dxgi {
   int init();
@@ -1740,6 +1741,8 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
   }
 
   using Microsoft::WRL::ComPtr;
+  // Declared first, so the device is really released after the test's other D3D11 objects.
+  d3d11_device_release_fixture::device_release_t device_release;
   ComPtr<ID3D11Device> device;
   ComPtr<ID3D11DeviceContext> context;
   D3D_FEATURE_LEVEL actual {};
@@ -1759,6 +1762,7 @@ TEST(TensorRtSameFramePollGpuTest, HotProductionObservationPollsWithinBudgetAndC
     &actual,
     &context
   )));
+  device_release.watch(context.Get());
 
   constexpr UINT width = 1280u;
   constexpr UINT height = 720u;
@@ -2488,6 +2492,8 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedThir
 
   using Microsoft::WRL::ComPtr;
   namespace v2 = models::depth_coordinate_v2;
+  // Declared first, so the device is really released after the test's other D3D11 objects.
+  d3d11_device_release_fixture::device_release_t device_release;
   ComPtr<ID3D11Device> device;
   ComPtr<ID3D11DeviceContext> context;
   D3D_FEATURE_LEVEL actual {};
@@ -2497,6 +2503,7 @@ TEST(TensorRtContourPublicationGpuTest, PipelinedAdmissionPreservesCompletedThir
     requested, static_cast<UINT>(std::size(requested)), D3D11_SDK_VERSION,
     &device, &actual, &context
   )));
+  device_release.watch(context.Get());
 
   constexpr UINT source_width = 1280u;
   constexpr UINT source_height = 720u;
@@ -3027,6 +3034,8 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
     static_cast<UINT>(image_pixels.size() * 4u), reinterpret_cast<BYTE *>(image_pixels.data()))));
   converter.Reset(); image.Reset(); decoder.Reset(); factory.Reset();
 
+  // Declared first, so the device is really released after the test's other D3D11 objects.
+  d3d11_device_release_fixture::device_release_t device_release;
   ComPtr<ID3D11Device> device;
   ComPtr<ID3D11DeviceContext> context;
   D3D_FEATURE_LEVEL actual {};
@@ -3034,6 +3043,7 @@ TEST(TensorRtContourPublicationGpuTest, FreshEligibleObservationsConfirmPixelsHo
   ASSERT_TRUE(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
     D3D11_CREATE_DEVICE_BGRA_SUPPORT, requested, static_cast<UINT>(std::size(requested)),
     D3D11_SDK_VERSION, &device, &actual, &context)));
+  device_release.watch(context.Get());
   constexpr std::uint32_t changed_rgb = 0xff00ff00u;
   const auto create_source = [&](UINT width, UINT height, ComPtr<ID3D11ShaderResourceView> &view,
                                std::optional<std::array<UINT, 2u>> patch_center = std::nullopt) {
@@ -3696,6 +3706,8 @@ TEST(TensorRtConditionalWrapperGpuTest, AllAuthenticatedShapesBuildAndExecute) {
   }
 
   using Microsoft::WRL::ComPtr;
+  // Declared first, so the device is really released after the test's other D3D11 objects.
+  d3d11_device_release_fixture::device_release_t device_release;
   ComPtr<ID3D11Device> device;
   ComPtr<ID3D11DeviceContext> context;
   D3D_FEATURE_LEVEL actual {};
@@ -3715,6 +3727,7 @@ TEST(TensorRtConditionalWrapperGpuTest, AllAuthenticatedShapesBuildAndExecute) {
     &actual,
     &context
   )));
+  device_release.watch(context.Get());
 
   struct wrapper_shape_case_t {
     UINT source_width;
