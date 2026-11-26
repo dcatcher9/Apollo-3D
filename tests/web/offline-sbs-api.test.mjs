@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { ApiError } from '../../src_assets/common/assets/web/api.js'
 import {
   getOfflineSbsOverview,
-  OfflineSbsApiError,
   OFFLINE_SBS_JOBS_URL,
 } from '../../src_assets/common/assets/web/offline-sbs-api.js'
 
@@ -45,7 +45,7 @@ for (const status of [401, 500, 503]) {
     }
     t.mock.method(globalThis, 'fetch', async () => jsonResponse(status, payload))
     await assert.rejects(getOfflineSbsOverview(), error => {
-      assert.ok(error instanceof OfflineSbsApiError)
+      assert.ok(error instanceof ApiError)
       assert.equal(error.status, status)
       assert.equal(error.message, payload.error)
       assert.deepEqual(error.payload, payload)
@@ -57,7 +57,7 @@ for (const status of [401, 500, 503]) {
 test('overview rejects malformed JSON without treating it as preparation', { timeout: 3000 }, async t => {
   t.mock.method(globalThis, 'fetch', async () => new Response('{invalid', { status: 200 }))
   await assert.rejects(getOfflineSbsOverview(), error => {
-    assert.ok(error instanceof OfflineSbsApiError)
+    assert.ok(error instanceof ApiError)
     assert.equal(error.status, 200)
     assert.match(error.message, /invalid JSON/)
     return true

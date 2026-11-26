@@ -408,6 +408,7 @@ TEST(WebUiDesign, LocalArExclusiveDesktopUiMatchesItsDefaultOnNativePolicy) {
 TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolated) {
   const auto page = read_source(web_root / "offline-conversion.html");
   const auto api = read_source(web_root / "offline-sbs-api.js");
+  const auto shared_api = read_source(web_root / "api.js");
   const auto navbar = read_source(web_root / "Navbar.vue");
   const auto vite = read_source(fs::path(SUNSHINE_SOURCE_DIR) / "vite.config.js");
   const auto http = read_source(fs::path(SUNSHINE_SOURCE_DIR) / "src/confighttp.cpp");
@@ -513,7 +514,7 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolated) {
   );
   EXPECT_EQ(page.find("selectionStillExists"), std::string::npos);
   EXPECT_NE(
-    page.find("error instanceof OfflineSbsApiError && error.status === 404"),
+    page.find("error instanceof ApiError && error.status === 404"),
     std::string::npos
   );
   EXPECT_NE(page.find("Interrupted — not resumable in version 1"), std::string::npos);
@@ -537,7 +538,8 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolated) {
     api.find("OFFLINE_SBS_BROWSE_URL = '/api/offline-sbs/browse'"),
     std::string::npos
   );
-  EXPECT_NE(api.find("credentials: 'include'"), std::string::npos);
+  EXPECT_NE(api.find("from './api.js'"), std::string::npos);
+  EXPECT_NE(shared_api.find("credentials: 'include'"), std::string::npos);
   EXPECT_NE(api.find("browseOfflineSbsFiles"), std::string::npos);
   EXPECT_NE(api.find("method: 'POST'"), std::string::npos);
   EXPECT_NE(api.find("body: { path, type }"), std::string::npos);

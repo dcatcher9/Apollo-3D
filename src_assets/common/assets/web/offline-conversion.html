@@ -680,8 +680,8 @@
   import { createApp } from 'vue'
   import { initApp } from './init'
   import Navbar from './Navbar.vue'
+  import { ApiError } from './api'
   import {
-    OfflineSbsApiError,
     browseOfflineSbsFiles,
     cancelOfflineSbsJob,
     clearOfflineSbsJob,
@@ -1324,7 +1324,7 @@
             return
           }
           if (!detail || this.jobId(detail) !== expectedId) {
-            throw new OfflineSbsApiError(
+            throw new ApiError(
               'The offline job manager returned the wrong job detail.',
             )
           }
@@ -1351,7 +1351,7 @@
         // A 404 with a JSON body is the job manager answering (for example an unknown or
         // pruned job); only a bodiless 404 means the route itself is missing.
         const answered = error?.payload && Object.keys(error.payload).length > 0
-        if (error instanceof OfflineSbsApiError && error.status === 404 && !answered) {
+        if (error instanceof ApiError && error.status === 404 && !answered) {
           return 'This build does not expose the built-in /api/offline-sbs/jobs job manager.'
         }
         return error?.message || 'The built-in offline job manager could not be reached.'
@@ -1431,7 +1431,7 @@
           }
           await this.loadJobs(false)
         } catch (error) {
-          if (error instanceof OfflineSbsApiError && error.status === 404) {
+          if (error instanceof ApiError && error.status === 404) {
             if (this.selectedJobId === id) {
               this.selectedJobId = ''
               this.selectedJobDetail = null
