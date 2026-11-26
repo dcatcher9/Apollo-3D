@@ -3892,12 +3892,11 @@ namespace ar_glasses {
           const auto query_source_hdr = [&]() -> std::optional<bool> {
             const auto binding = virtual_display_binding();
             return binding.identity ? VDISPLAY::queryDisplayHDR(binding.identity->AdapterLuid, binding.identity->TargetId) :
-                                      VDISPLAY::queryDisplayHDRByName(binding.display_name.c_str());
+                                      std::nullopt;
           };
           const auto set_source_hdr = [&](bool enabled) {
             const auto binding = virtual_display_binding();
-            return binding.identity ? VDISPLAY::setDisplayHDR(binding.identity->AdapterLuid, binding.identity->TargetId, enabled) :
-                                      VDISPLAY::setDisplayHDRByName(binding.display_name.c_str(), enabled);
+            return binding.identity && VDISPLAY::setDisplayHDR(binding.identity->AdapterLuid, binding.identity->TargetId, enabled);
           };
           const auto current_virtual_hdr = query_source_hdr();
           if (!current_virtual_hdr) {

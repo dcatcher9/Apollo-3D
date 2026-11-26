@@ -116,7 +116,6 @@ namespace VDISPLAY {
   // Stable-target variants avoid resolving a recyclable GDI name during restoration.
   std::optional<bool> queryDisplayHDR(const LUID &adapterLuid, uint32_t targetId);
   bool setDisplayHDR(const LUID &adapterId, const uint32_t &targetId, bool enableAdvancedColor);
-	bool setDisplayHDRByName(const wchar_t* displayName, bool enableAdvancedColor);
 
 	void closeVDisplayDevice();
 	DRIVER_STATUS openVDisplayDevice();

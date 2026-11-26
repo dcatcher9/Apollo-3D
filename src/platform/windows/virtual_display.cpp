@@ -718,11 +718,6 @@ std::optional<bool> queryDisplayHDRByName(const wchar_t* displayName) {
   return queryDisplayHDR(target->adapter_id, target->target_id);
 }
 
-bool setDisplayHDRByName(const wchar_t* displayName, bool enableAdvancedColor) {
-  const auto target = platf::display_config::resolve_display_target({}, displayName);
-  return target && setDisplayHDR(target->adapter_id, target->target_id, enableAdvancedColor);
-}
-
 void closeVDisplayDevice() {
   std::lock_guard lifecycle_lock(driverLifecycleMutex);
   stopWatchdogThread();
