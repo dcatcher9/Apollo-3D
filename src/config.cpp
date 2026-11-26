@@ -172,7 +172,7 @@ namespace config {
 
   bool is_retired_config_option(const std::string_view name) {
     // sbs_3d_foreground_subtitles was a host-wide switch; sbs_3d_subtitle_apps replaces it.
-    return name == "virtual_display_only"sv || name == "sbs_3d_foreground_subtitles"sv;
+    return name == "sbs_3d_foreground_subtitles"sv;
   }
 
   template<class It>

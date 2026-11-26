@@ -82,16 +82,16 @@ TEST(ConfigHttpErrorResponse, SerializesTheRealMalformedInputDiagnostic) {
   }
 }
 
-TEST(ConfigHttpMigration, RetiredVirtualDisplayOnlyCannotBeSaved) {
+TEST(ConfigHttpMigration, RetiredOptionCannotBeSaved) {
   nlohmann::json payload {
     {"sunshine_name", "XR host"},
-    {"virtual_display_only", "on"},
+    {"sbs_3d_foreground_subtitles", "enabled"},
     {"virtual_display_restart_explorer", "enabled"},
   };
 
   confighttp::erase_retired_config_options(payload);
 
-  EXPECT_FALSE(payload.contains("virtual_display_only"));
+  EXPECT_FALSE(payload.contains("sbs_3d_foreground_subtitles"));
   EXPECT_EQ(payload.at("sunshine_name"), "XR host");
   EXPECT_EQ(payload.at("virtual_display_restart_explorer"), "enabled");
 }
