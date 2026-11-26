@@ -140,11 +140,6 @@ namespace VDISPLAY {
     bool requiresActivePathAbsence,
     display_identity_state_e activePathState
   );
-  unsigned int advanceStableAbsenceEvidence(
-    unsigned int priorAbsentObservations,
-    bool evidenceInvalidated,
-    display_identity_state_e latestState
-  );
   desktop_detach_result_t deactivateVirtualDisplay(
     const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
     std::wstring_view devicePath,

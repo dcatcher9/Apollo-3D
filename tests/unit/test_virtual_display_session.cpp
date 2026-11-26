@@ -486,7 +486,7 @@ namespace {
     fake.restore_ok = true;
     fake.retirement_state = display_identity_state_e::present;
     EXPECT_FALSE(owner.retire_until(fake.now + 200ms));
-    EXPECT_TRUE(owner.removal_accepted());
+    EXPECT_EQ(fake.removes, 1u);
     EXPECT_TRUE(owner.owns_display());
     fake.retirement_state = display_identity_state_e::absent;
     EXPECT_TRUE(owner.retire_until(fake.now + 200ms));

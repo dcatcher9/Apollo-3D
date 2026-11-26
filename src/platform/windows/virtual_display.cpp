@@ -1789,18 +1789,6 @@ bool isDriverRemovalSafeAfterDesktopDetach(
          activePathState == display_identity_state_e::absent;
 }
 
-unsigned int advanceStableAbsenceEvidence(
-  unsigned int priorAbsentObservations,
-  bool evidenceInvalidated,
-  display_identity_state_e latestState
-) {
-  if (evidenceInvalidated ||
-      latestState != display_identity_state_e::absent) {
-    return 0;
-  }
-  return priorAbsentObservations + 1;
-}
-
 #ifdef SUNSHINE_TESTS
 bool isSudoVirtualDisplayPathForTest(std::wstring_view devicePath) {
   return isSudoVirtualDisplayPath(devicePath);

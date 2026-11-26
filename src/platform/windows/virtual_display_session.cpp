@@ -160,7 +160,6 @@ namespace VDISPLAY {
   bool session_t::paused() const { return paused_; }
   bool session_t::has_retained() const { return static_cast<bool>(retained_); }
   bool session_t::retiring() const { return retirement_.has_value(); }
-  bool session_t::removal_accepted() const { return removal_accepted_; }
   bool session_t::retirement_complete() const { return retirement_complete_; }
   std::uint64_t session_t::generation() const { return generation_; }
   void session_t::set_exclusive(bool exclusive) { spec_.exclusive = exclusive; }
@@ -299,8 +298,6 @@ namespace VDISPLAY {
     retirement_.emplace(retirement_record_t {was_published_, io_.now ? io_.now() : time_point {}});
     next_remove_attempt_ = retirement_->started;
   }
-
-  void session_t::invalidate_retirement_preparation() { retirement_prepared_ = false; }
 
   display_identity_state_e session_t::retirement_query() const {
     if (retirement_callbacks_.query) {

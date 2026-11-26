@@ -1289,41 +1289,6 @@ TEST(VirtualDisplayRetirement, DriverRemovalRequiresAuthoritativeActivePathAbsen
   ));
 }
 
-TEST(VirtualDisplayRetirement, StableAbsenceEvidenceResetsOnInvalidationOrNonAbsence) {
-  EXPECT_EQ(
-    VDISPLAY::advanceStableAbsenceEvidence(
-      2,
-      false,
-      VDISPLAY::display_identity_state_e::absent
-    ),
-    3u
-  );
-  EXPECT_EQ(
-    VDISPLAY::advanceStableAbsenceEvidence(
-      2,
-      false,
-      VDISPLAY::display_identity_state_e::present
-    ),
-    0u
-  );
-  EXPECT_EQ(
-    VDISPLAY::advanceStableAbsenceEvidence(
-      2,
-      false,
-      VDISPLAY::display_identity_state_e::indeterminate
-    ),
-    0u
-  );
-  EXPECT_EQ(
-    VDISPLAY::advanceStableAbsenceEvidence(
-      2,
-      true,
-      VDISPLAY::display_identity_state_e::absent
-    ),
-    0u
-  );
-}
-
 TEST(VirtualDisplaySessionMode, SavesOnlyResolutionAndRefreshWithoutApplyingAnything) {
   DEVMODEW active {};
   active.dmPelsWidth = 3840;

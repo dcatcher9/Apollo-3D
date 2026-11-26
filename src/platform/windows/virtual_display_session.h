@@ -102,7 +102,6 @@ namespace VDISPLAY {
     bool paused() const;
     bool has_retained() const;
     bool retiring() const;
-    bool removal_accepted() const;
     bool retirement_complete() const;
     std::uint64_t generation() const;
     void set_exclusive(bool exclusive);
@@ -125,7 +124,6 @@ namespace VDISPLAY {
     // Callbacks are stored by value and must not capture the originating session object.
     void begin_retirement(session_retirement_callbacks_t callbacks = {}, session_retirement_policy_t policy = {});
     bool retire_until(time_point deadline);
-    void invalidate_retirement_preparation();
 
   private:
     void clear_moved_state();
