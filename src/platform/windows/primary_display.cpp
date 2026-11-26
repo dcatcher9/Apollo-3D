@@ -35,6 +35,7 @@ namespace platf::primary_display {
     constexpr size_t max_journal_bytes = 1024 * 1024;
     constexpr size_t max_available_paths = 16384;
 
+    using display_config::equal_device_paths;
     using display_config::same_device_path;
     using display_config::same_luid;
 
@@ -2547,7 +2548,7 @@ namespace platf::primary_display {
       if (!loaded.success) {
         return reject("display recovery journal could not be loaded");
       }
-      if (loaded.journal && (!valid_journal(*loaded.journal) || !loaded.journal->exclusive || loaded.journal->local_sink != retained->local_sink || loaded.journal->prepared || !same_device_path(loaded.journal->promoted_primary, identity))) {
+      if (loaded.journal && (!valid_journal(*loaded.journal) || !loaded.journal->exclusive || !equal_device_paths(loaded.journal->local_sink, retained->local_sink) || loaded.journal->prepared || !same_device_path(loaded.journal->promoted_primary, identity))) {
         return reject("display recovery journal does not prove ownership of this retained output and sink");
       }
       const auto current = io_.query();

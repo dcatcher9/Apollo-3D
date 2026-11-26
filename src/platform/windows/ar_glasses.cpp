@@ -255,6 +255,8 @@ namespace ar_glasses {
       }
     }
 
+    using platf::display_config::equal_device_paths;
+    using platf::display_config::same_device_path;
     using platf::display_config::same_luid;
 
     bool same_virtual_display_identity(
@@ -289,7 +291,7 @@ namespace ar_glasses {
       const bool local_friendly_name = is_apollo_ar_virtual_name(friendly_name);
       const bool sudo_hardware_path = contains_case_insensitive(device_path, L"SMKD1CE") ||
                                       contains_case_insensitive(device_path, L"SUDOVDA");
-      const bool learned_path = !retiring.device_path.empty() && retiring.device_path == device_path;
+      const bool learned_path = same_device_path(retiring.device_path, device_path);
       const bool exact_local_identity = retiring.identity && same_luid(retiring.identity->AdapterLuid, adapter_id) &&
                                         retiring.identity->TargetId == target_id &&
                                         (local_friendly_name || sudo_hardware_path);
@@ -479,7 +481,7 @@ namespace ar_glasses {
       bool is_cloned = false;
 
       bool same_display_observation(const target_state_t &other) const {
-        return device_id == other.device_id && device_path == other.device_path &&
+        return device_id == other.device_id && equal_device_paths(device_path, other.device_path) &&
                gdi_name == other.gdi_name && desktop_topology == other.desktop_topology &&
                same_luid(adapter_id, other.adapter_id) &&
                rect.left == other.rect.left && rect.top == other.rect.top &&
@@ -651,7 +653,7 @@ namespace ar_glasses {
         }
         auto recovery = parse_topology_recovery(entry);
         if (std::ranges::any_of(recoveries, [&](const auto &existing) {
-              return existing.device_path == recovery.device_path;
+              return equal_device_paths(existing.device_path, recovery.device_path);
             })) {
           throw std::runtime_error("duplicate monitor identity");
         }
@@ -744,7 +746,7 @@ namespace ar_glasses {
       }
       const auto original_size {recoveries->size()};
       std::erase_if(*recoveries, [&](const auto &recovery) {
-        return recovery.device_path == device_path;
+        return equal_device_paths(recovery.device_path, device_path);
       });
       return recoveries->size() == original_size || write_topology_recoveries_locked(*recoveries);
     }
@@ -760,7 +762,7 @@ namespace ar_glasses {
         return false;
       }
       auto existing {std::ranges::find_if(*recoveries, [&](const auto &recovery) {
-        return recovery.device_path == device_path;
+        return equal_device_paths(recovery.device_path, device_path);
       })};
       if (existing == recoveries->end()) {
         topology_recovery_t recovery;
@@ -794,7 +796,7 @@ namespace ar_glasses {
         return false;
       }
       auto existing {std::ranges::find_if(*recoveries, [&](const auto &recovery) {
-        return recovery.device_path == device_path;
+        return equal_device_paths(recovery.device_path, device_path);
       })};
       if (existing == recoveries->end()) {
         topology_recovery_t recovery;
@@ -823,7 +825,7 @@ namespace ar_glasses {
         return false;
       }
       const auto existing {std::ranges::find_if(*recoveries, [&](const auto &recovery) {
-        return recovery.device_path == device_path;
+        return equal_device_paths(recovery.device_path, device_path);
       })};
       if (existing == recoveries->end()) {
         return true;
@@ -867,7 +869,7 @@ namespace ar_glasses {
         return false;
       }
       const auto recovery = std::ranges::find_if(*recoveries, [&](const auto &candidate) {
-        return candidate.device_path == device_path;
+        return equal_device_paths(candidate.device_path, device_path);
       });
       return recovery != recoveries->end() &&
              same_rect(recovery->original_rect, original_rect) &&
@@ -947,7 +949,7 @@ namespace ar_glasses {
       }
 
       const auto existing = std::ranges::find_if(*recoveries, [&](const auto &recovery) {
-        return recovery.device_path == device_path;
+        return equal_device_paths(recovery.device_path, device_path);
       });
       if (existing == recoveries->end()) {
         // No Apollo move is outstanding. The current mode's exact rectangle is therefore the
@@ -977,7 +979,7 @@ namespace ar_glasses {
       const std::optional<target_state_t> &right
     ) {
       return left && right &&
-             left->device_path == right->device_path &&
+             equal_device_paths(left->device_path, right->device_path) &&
              same_luid(left->adapter_id, right->adapter_id);
     }
 
@@ -998,7 +1000,7 @@ namespace ar_glasses {
     bool presentation_target_contract_matches(const target_state_t &expected, const target_state_t &actual) {
       // Placement may change GDI names and coordinates, but it must not silently adopt a new
       // capture/presentation generation or turn the physical sink into the interactive primary.
-      return actual.device_path == expected.device_path &&
+      return equal_device_paths(actual.device_path, expected.device_path) &&
              same_luid(actual.adapter_id, expected.adapter_id) &&
              actual.mode == expected.mode &&
              actual.refresh_millihz == expected.refresh_millihz &&
@@ -1019,7 +1021,7 @@ namespace ar_glasses {
       const auto left_height = left->rect.bottom - left->rect.top;
       const auto right_width = right->rect.right - right->rect.left;
       const auto right_height = right->rect.bottom - right->rect.top;
-      return left->device_path == right->device_path &&
+      return equal_device_paths(left->device_path, right->device_path) &&
              same_luid(left->adapter_id, right->adapter_id) &&
              left_width == right_width && left_height == right_height &&
              left->refresh_millihz == right->refresh_millihz && left->mode == right->mode &&
@@ -1352,7 +1354,7 @@ namespace ar_glasses {
     ) {
       return !primary_gdi_name.empty() &&
              std::ranges::any_of(active_gdi_names, [&](const auto &active_name) {
-               return active_name == primary_gdi_name;
+               return equal_device_paths(active_name, primary_gdi_name);
              });
     }
 
@@ -1440,8 +1442,7 @@ namespace ar_glasses {
         }
         active_gdi_names.emplace_back(source_name.viewGdiDeviceName);
         const auto virtual_source = std::find_if(virtual_sources.begin(), virtual_sources.end(), [&](const auto &name) {
-          return contains_case_insensitive(source_name.viewGdiDeviceName, name) &&
-                 std::wstring_view(source_name.viewGdiDeviceName).size() == name.size();
+          return equal_device_paths(source_name.viewGdiDeviceName, name);
         });
         if (virtual_source != virtual_sources.end()) {
           continue;
@@ -1491,8 +1492,7 @@ namespace ar_glasses {
         state.refresh_millihz = refresh_millihz;
         state.mode = classify_mode(source_mode.width, source_mode.height);
         state.game_source = ar_uses_game_source();
-        if (config::video.local_monitor.enabled && physical_monitor_requested.load() &&
-            platf::to_utf8(state.device_path) == config::video.local_monitor.display_id) {
+        if (config::video.local_monitor.enabled && physical_monitor_requested.load() && equal_device_paths(state.device_path, platf::from_utf8(config::video.local_monitor.display_id))) {
           state.mode = classify_monitor_mode(source_mode.width, source_mode.height, refresh_millihz,
             monitor_uses_game_source());
           state.game_source = false;
@@ -1524,7 +1524,7 @@ namespace ar_glasses {
       }
       std::string primary_device_path;
       for (const auto &target : targets) {
-        if (platf::from_utf8(target.gdi_name) == primary_gdi_name) {
+        if (equal_device_paths(platf::from_utf8(target.gdi_name), primary_gdi_name)) {
           primary_device_path = platf::to_utf8(target.device_path);
           break;
         }
@@ -1574,7 +1574,7 @@ namespace ar_glasses {
           }
           rect.reset();
           for (const auto &row : snapshot->targets) {
-            if (row.device_path == device_path) {
+            if (equal_device_paths(row.device_path, device_path)) {
               if (rect) {
                 return std::nullopt;
               }
@@ -1583,7 +1583,7 @@ namespace ar_glasses {
           }
           return rect;
         }
-        if (device_path != target->monitorDevicePath) {
+        if (!equal_device_paths(device_path, target->monitorDevicePath)) {
           continue;
         }
         if (rect) {
@@ -1606,7 +1606,7 @@ namespace ar_glasses {
       const auto &targets = snapshot.targets;
       const auto &primary_gdi_name = snapshot.primary_gdi_name;
       const auto &primary_device_path = snapshot.primary_device_path;
-      target.is_primary = platf::from_utf8(target.gdi_name) == primary_gdi_name;
+      target.is_primary = equal_device_paths(platf::from_utf8(target.gdi_name), primary_gdi_name);
       // Inspect every active CCD path, including Apollo/Sudo sources excluded from selection.
       // A physical target cloned with the local virtual source is still unsafe to reconfigure.
       target.is_cloned = std::ranges::any_of(paths, [&](const auto &candidate) {
@@ -1617,7 +1617,7 @@ namespace ar_glasses {
       });
       std::vector<std::string> neighbors;
       for (const auto &neighbor : targets) {
-        if (neighbor.device_path == target.device_path) {
+        if (equal_device_paths(neighbor.device_path, target.device_path)) {
           continue;
         }
         std::ostringstream description;
@@ -1663,7 +1663,7 @@ namespace ar_glasses {
       const auto &targets = snapshot.targets;
       if (!required_device_path.empty()) {
         const auto match = std::find_if(targets.begin(), targets.end(), [&](const auto &target) {
-          return target.device_path == required_device_path;
+          return equal_device_paths(target.device_path, required_device_path);
         });
         return match == targets.end() ? std::nullopt :
                                         std::make_optional(materialize_target(snapshot, static_cast<std::size_t>(std::distance(targets.begin(), match))));
@@ -1673,7 +1673,7 @@ namespace ar_glasses {
       // silently transfer the emitter to another monitor or activate a nearby pair of glasses.
       if (config::video.local_monitor.enabled && physical_monitor_requested.load()) {
         const auto match = std::find_if(targets.begin(), targets.end(), [](const auto &target) {
-          return platf::to_utf8(target.device_path) == config::video.local_monitor.display_id;
+          return equal_device_paths(target.device_path, platf::from_utf8(config::video.local_monitor.display_id));
         });
         if (match == targets.end()) {
           return std::nullopt;
@@ -1698,7 +1698,7 @@ namespace ar_glasses {
           const auto &target = targets[index];
           // A configured shutter monitor is an explicitly activated surface, even if its model
           // was approved as glasses in an older configuration. Stop must remain a 2D exit.
-          if (config::video.local_monitor.enabled && platf::to_utf8(target.device_path) == config::video.local_monitor.display_id) {
+          if (config::video.local_monitor.enabled && equal_device_paths(target.device_path, platf::from_utf8(config::video.local_monitor.display_id))) {
             continue;
           }
           auto known = std::find_if(known_devices.begin(), known_devices.end(), [&](const auto &device) {
@@ -1739,7 +1739,7 @@ namespace ar_glasses {
           if (known->decision == device_decision_e::approved && ar_session_allowed()) {
             // Capture this row's decision now: a later same-model row may promote its policy.
             approved_indices.push_back(index);
-            if (!selected_index || target.device_path == preferred_device_path) {
+            if (!selected_index || equal_device_paths(target.device_path, preferred_device_path)) {
               selected_index = index;
             }
           }
@@ -2006,7 +2006,7 @@ namespace ar_glasses {
       // A path learned while binding the Add result is stronger than recyclable numeric IDs.
       // Never let a reused LUID/target or an Apollo-like friendly name override that path.
       if (!device_path.empty()) {
-        return source.device_path == device_path;
+        return equal_device_paths(source.device_path, device_path);
       }
       return same_luid(source.target.adapter_id, identity.AdapterLuid) &&
              source.target.target_id == identity.TargetId && is_apollo_ar_virtual_name(source.friendly_name);
@@ -2139,12 +2139,12 @@ namespace ar_glasses {
           // This path was learned from the driver-returned identity while Apollo exclusively
           // owned SudoVDA, so it remains valid when Windows renumbers the target during a mode
           // or Advanced Color transition.
-          return source.device_path == device_path;
+          return equal_device_paths(source.device_path, device_path);
         });
       }
       if (require_geometry && matches.empty() && !gdi_name.empty()) {
         matches = select([&](const auto &source) {
-          return source.gdi_name == gdi_name && is_local_virtual_source(source);
+          return equal_device_paths(source.gdi_name, gdi_name) && is_local_virtual_source(source);
         });
       }
 
@@ -2385,13 +2385,13 @@ namespace ar_glasses {
       const active_source_t *physical = nullptr;
       const active_source_t *primary = nullptr;
       for (const auto &source : snapshot->sources) {
-        if (source.device_path == target_device_path) {
+        if (equal_device_paths(source.device_path, target_device_path)) {
           if (physical) {
             return std::nullopt;
           }
           physical = &source;
         }
-        if (source.gdi_name == primary_gdi_name) {
+        if (equal_device_paths(source.gdi_name, primary_gdi_name)) {
           primary = &source;
         }
       }
@@ -2456,7 +2456,7 @@ namespace ar_glasses {
       std::optional<std::size_t> primary_index;
       for (std::size_t index = 0; index < snapshot->sources.size(); ++index) {
         const auto &source = snapshot->sources[index];
-        if (source.device_path == target_device_path) {
+        if (equal_device_paths(source.device_path, target_device_path)) {
           if (physical_index) {
             return std::nullopt;
           }
@@ -2464,14 +2464,14 @@ namespace ar_glasses {
         }
         const bool is_virtual = virtual_identity ?
                                   same_target_identity(source.target, *virtual_identity) :
-                                  source.gdi_name == virtual_gdi_name;
+                                  equal_device_paths(source.gdi_name, virtual_gdi_name);
         if (is_virtual) {
           if (virtual_index) {
             return std::nullopt;
           }
           virtual_index = index;
         }
-        if (source.gdi_name == primary_gdi_name) {
+        if (equal_device_paths(source.gdi_name, primary_gdi_name)) {
           primary_index = index;
         }
       }
@@ -2769,7 +2769,7 @@ namespace ar_glasses {
       }
 
       const auto physical = std::ranges::find_if(snapshot->sources, [&](const auto &source) {
-        return source.device_path == target_device_path;
+        return equal_device_paths(source.device_path, target_device_path);
       });
       if (physical == snapshot->sources.end() || source_is_cloned(snapshot->sources, *physical)) {
         return false;
@@ -2804,7 +2804,7 @@ namespace ar_glasses {
         return false;
       }
       const auto fresh_physical = std::ranges::find_if(fresh_snapshot->sources, [&](const auto &source) {
-        return source.device_path == target_device_path;
+        return equal_device_paths(source.device_path, target_device_path);
       });
       if (fresh_physical == fresh_snapshot->sources.end() || source_is_cloned(fresh_snapshot->sources, *fresh_physical)) {
         return false;
@@ -2857,7 +2857,7 @@ namespace ar_glasses {
           return std::nullopt;
         }
         const auto match = std::ranges::find_if(*recoveries, [&](const auto &candidate) {
-          return candidate.device_path == device_path;
+          return equal_device_paths(candidate.device_path, device_path);
         });
         if (match != recoveries->end()) {
           recovery = *match;
@@ -2978,7 +2978,7 @@ namespace ar_glasses {
           return false;
         }
         const auto match = std::ranges::find_if(*recoveries, [&](const auto &candidate) {
-          return candidate.device_path == device_path;
+          return equal_device_paths(candidate.device_path, device_path);
         });
         if (match != recoveries->end()) {
           recovery = *match;
@@ -3571,7 +3571,7 @@ namespace ar_glasses {
       }
 
       bool same_retained_device(const target_state_t &target) const {
-        return target.device_path == target_device_path_ && same_luid(target.adapter_id, target_adapter_id_) &&
+        return equal_device_paths(target.device_path, target_device_path_) && same_luid(target.adapter_id, target_adapter_id_) &&
                is_monitor_mode(target.mode) == monitor_surface_ &&
                target_source_width(target) == source_width_ && target_source_height(target) == source_height_;
       }
@@ -3784,7 +3784,7 @@ namespace ar_glasses {
           }
           const auto binding = virtual_display_binding();
           const auto source = binding.identity ? resolve_virtual_display(*binding.identity, binding.device_path, binding.display_name, nullptr, source_width_, source_height_) : std::nullopt;
-          if (!source || source->device_path != binding.device_path || source->gdi_name != binding.display_name || !same_virtual_display_identity(source->identity, *binding.identity) || !source_refresh_matches(source->refresh_millihz, sink->refresh_millihz)) {
+          if (!source || !equal_device_paths(source->device_path, binding.device_path) || !equal_device_paths(source->gdi_name, binding.display_name) || !same_virtual_display_identity(source->identity, *binding.identity) || !source_refresh_matches(source->refresh_millihz, sink->refresh_millihz)) {
             return false;
           }
           const auto hdr = VDISPLAY::queryDisplayHDR(source->identity.AdapterLuid, source->identity.TargetId);
@@ -3840,7 +3840,7 @@ namespace ar_glasses {
                  (monitor_surface_ && requested_game != monitor_uses_game_source());
         };
         stop_presenter();
-        if (cancelled() || target.device_path != target_device_path_ || !same_luid(target.adapter_id, target_adapter_id_) || target.mode == presentation_mode_e::unsupported) {
+        if (cancelled() || !equal_device_paths(target.device_path, target_device_path_) || !same_luid(target.adapter_id, target_adapter_id_) || target.mode == presentation_mode_e::unsupported) {
           return std::nullopt;
         }
 
@@ -3999,7 +3999,7 @@ namespace ar_glasses {
       }
 
       bool rebase_teardown_layout(const target_state_t &target) {
-        if (target.device_path != target_device_path_ || !same_luid(target.adapter_id, target_adapter_id_) || !valid_rect(target.rect)) {
+        if (!equal_device_paths(target.device_path, target_device_path_) || !same_luid(target.adapter_id, target_adapter_id_) || !valid_rect(target.rect)) {
           return false;
         }
         if (exclusive_) {
@@ -4456,7 +4456,7 @@ namespace ar_glasses {
         if (!resolved) {
           return std::nullopt;
         }
-        if (!same_virtual_display_identity(*binding.identity, resolved->identity) || binding.display_name != resolved->gdi_name) {
+        if (!same_virtual_display_identity(*binding.identity, resolved->identity) || !equal_device_paths(binding.display_name, resolved->gdi_name)) {
           BOOST_LOG(info) << "Local AR virtual desktop was renumbered ["sv
                           << platf::to_utf8(binding.display_name) << " -> "sv
                           << platf::to_utf8(resolved->gdi_name) << ", target "sv
@@ -4854,7 +4854,7 @@ namespace ar_glasses {
         const auto device_path = target ? target->device_path : std::wstring {};
         const bool previous_monitor_surface = monitor_surface_selected_;
         monitor_surface_selected_ = target && is_monitor_mode(target->mode);
-        if (device_path == wear_device_path_ && previous_monitor_surface == monitor_surface_selected_) {
+        if (equal_device_paths(device_path, wear_device_path_) && previous_monitor_surface == monitor_surface_selected_) {
           return;
         }
         // The physical device owns wear authority. Keep this subscription alive when its virtual
@@ -4943,7 +4943,7 @@ namespace ar_glasses {
         if (!ar_session_allowed()) {
           return false;
         }
-        if (!replacement_target_ || replacement_target_->device_path != target.device_path) {
+        if (!replacement_target_ || !equal_device_paths(replacement_target_->device_path, target.device_path)) {
           replacement_target_ = target;
           replacement_wear_monitor_ = rayneo::create_wear_monitor(target.device_id);
           replacement_activation_ = {};
@@ -5199,7 +5199,7 @@ namespace ar_glasses {
           if (topology_query_succeeded) {
             if (!wear_device_path_.empty()) {
               const bool connected = std::ranges::any_of(approved_targets, [&](const auto &target) {
-                return target.device_path == wear_device_path_;
+                return equal_device_paths(target.device_path, wear_device_path_);
               });
               const bool transport_available = wear_monitor_ &&
                                                wear_monitor_->snapshot().availability == rayneo::wear_availability_e::available;
@@ -5208,14 +5208,16 @@ namespace ar_glasses {
             if (session_ && resume_state_.retained()) {
               const auto arrived = std::ranges::find_if(approved_targets, [&](const auto &target) {
                 return !session_->same_retained_device(target) &&
-                       std::ranges::find(connected_device_paths_, target.device_path) == connected_device_paths_.end();
+                       std::ranges::none_of(connected_device_paths_, [&](const auto &connected) {
+                         return equal_device_paths(connected, target.device_path);
+                       });
               });
               if (arrived != approved_targets.end()) {
                 (void) replacement_requests_session(*arrived);
               }
               if (replacement_target_) {
                 const auto candidate = std::ranges::find_if(approved_targets, [&](const auto &target) {
-                  return target.device_path == replacement_target_->device_path;
+                  return equal_device_paths(target.device_path, replacement_target_->device_path);
                 });
                 if (candidate == approved_targets.end()) {
                   replacement_target_.reset();
@@ -6242,7 +6244,7 @@ namespace ar_glasses {
       return result;
     }
     for (const auto &target : snapshot->targets) {
-      result.push_back({platf::to_utf8(target.device_path), target.friendly_name, static_cast<int>(target.rect.right - target.rect.left), static_cast<int>(target.rect.bottom - target.rect.top), target.refresh_millihz, platf::from_utf8(target.gdi_name) == snapshot->primary_gdi_name});
+      result.push_back({platf::to_utf8(target.device_path), target.friendly_name, static_cast<int>(target.rect.right - target.rect.left), static_cast<int>(target.rect.bottom - target.rect.top), target.refresh_millihz, equal_device_paths(platf::from_utf8(target.gdi_name), snapshot->primary_gdi_name)});
     }
     return result;
   }
@@ -6295,7 +6297,7 @@ namespace ar_glasses {
       }
       const auto &targets = snapshot->targets;
       const auto match = std::find_if(targets.begin(), targets.end(), [&](const auto &candidate) {
-        return platf::to_utf8(candidate.device_path) == settings.display_id;
+        return equal_device_paths(candidate.device_path, platf::from_utf8(settings.display_id));
       });
       const auto target = match == targets.end() ? std::nullopt :
                                                    std::make_optional(materialize_target(*snapshot, static_cast<std::size_t>(std::distance(targets.begin(), match))));

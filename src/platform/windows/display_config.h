@@ -18,13 +18,21 @@ namespace platf::display_config {
   }
 
   /**
-   * Whether two monitor device paths name the same device. Windows does not keep the case of
-   * these paths stable between its APIs, so the comparison ignores it; an empty path names
-   * no device and matches nothing.
+   * Whether two Windows display device names are equal: monitor and adapter device paths
+   * (`\\?\DISPLAY#...`) and GDI device names (`\\.\DISPLAYn`). They are case-insensitive, and
+   * Windows does not keep their case stable between its APIs (CCD, SetupAPI, the registry),
+   * so the comparison ignores it. Two empty names are equal.
+   */
+  [[nodiscard]] inline bool equal_device_paths(std::wstring_view left, std::wstring_view right) noexcept {
+    return left.size() == right.size() &&
+           (left.empty() || CompareStringOrdinal(left.data(), static_cast<int>(left.size()), right.data(), static_cast<int>(right.size()), TRUE) == CSTR_EQUAL);
+  }
+
+  /** Whether two display device names name the same device. An empty name names no device and
+   * matches nothing, not even another empty name.
    */
   [[nodiscard]] inline bool same_device_path(std::wstring_view left, std::wstring_view right) noexcept {
-    return left.size() == right.size() && !left.empty() &&
-           CompareStringOrdinal(left.data(), static_cast<int>(left.size()), right.data(), static_cast<int>(right.size()), TRUE) == CSTR_EQUAL;
+    return !left.empty() && equal_device_paths(left, right);
   }
 
   struct query_api_t {

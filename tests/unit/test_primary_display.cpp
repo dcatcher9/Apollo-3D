@@ -1925,6 +1925,22 @@ TEST(PrimaryDisplayLocalExclusive, PauseRetainsSelectedSinkAndItsCurrentHardware
   EXPECT_TRUE(fake.current.colors[named_index(fake.current, L"physical-left")]->hdr_user_enabled);
 }
 
+TEST(PrimaryDisplayLocalExclusive, ResumeRetryAcceptsTheRecordedSinkSpelledInAnotherCase) {
+  fake_io_t fake;
+  fake.preserved_exclusive.insert(L"physical-left");
+  manager_t manager(fake.io());
+  ASSERT_TRUE(manager.prepare(true, L"physical-left"));
+  ASSERT_TRUE(manager.bind_pending(L"virtual"));
+  ASSERT_TRUE(manager.promote(L"virtual", true));
+  platf::primary_display::retained_display_ptr retained;
+  ASSERT_TRUE(manager.pause(L"virtual", retained));
+  ASSERT_TRUE(manager.reactivate(retained, true));
+  ASSERT_TRUE(fake.journal);
+  // Windows does not keep a monitor path's case stable between its APIs.
+  fake.journal->local_sink = L"PHYSICAL-LEFT";
+  EXPECT_TRUE(manager.reactivate(retained, true));
+}
+
 TEST(PrimaryDisplayLocalExclusive, PauseRestoresOrdinaryMonitorWhenOnlyGlassesRemainActive) {
   fake_io_t fake;
   fake.preserved_exclusive.insert(L"physical-left");

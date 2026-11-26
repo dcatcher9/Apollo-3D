@@ -10,8 +10,7 @@ namespace VDISPLAY {
     std::atomic<std::uint64_t> next_generation {0};
 
     bool same_identity(const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &left, const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &right) {
-      return left.AdapterLuid.HighPart == right.AdapterLuid.HighPart &&
-             left.AdapterLuid.LowPart == right.AdapterLuid.LowPart && left.TargetId == right.TargetId;
+      return platf::display_config::same_luid(left.AdapterLuid, right.AdapterLuid) && left.TargetId == right.TargetId;
     }
 
     session_io_t production_io() {
@@ -172,10 +171,7 @@ namespace VDISPLAY {
   }
 
   bool session_t::update_binding(creation_result_t binding) {
-    if (!owns_display() || !binding.identity ||
-        (!binding_.device_path.empty() && !binding.device_path.empty() && _wcsicmp(binding_.device_path.c_str(), binding.device_path.c_str()) != 0) ||
-        (!same_identity(*binding_.identity, *binding.identity) &&
-         (binding_.device_path.empty() || binding.device_path.empty()))) {
+    if (!owns_display() || !binding.identity || (!binding_.device_path.empty() && !binding.device_path.empty() && !platf::display_config::same_device_path(binding_.device_path, binding.device_path)) || (!same_identity(*binding_.identity, *binding.identity) && (binding_.device_path.empty() || binding.device_path.empty()))) {
       return false;
     }
     if (binding.device_path.empty()) {

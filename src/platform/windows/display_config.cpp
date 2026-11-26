@@ -31,9 +31,6 @@ namespace platf::display_config {
     if (!api.get || (device_path.empty() && display_name.empty())) {
       return std::nullopt;
     }
-    const auto same_name = [](std::wstring_view left, std::wstring_view right) {
-      return CompareStringOrdinal(left.data(), static_cast<int>(left.size()), right.data(), static_cast<int>(right.size()), TRUE) == CSTR_EQUAL;
-    };
     std::optional<display_target_t> found;
     for (const auto &path : paths) {
       if (!(path.flags & DISPLAYCONFIG_PATH_ACTIVE)) {
@@ -47,8 +44,8 @@ namespace platf::display_config {
         // An unresolved active path can make a GDI-name match ambiguous (cloning).
         return std::nullopt;
       }
-      if (!(device_path.empty() ? same_name(display_name, source.viewGdiDeviceName) :
-                                  same_name(device_path, target.monitorDevicePath))) {
+      if (!(device_path.empty() ? same_device_path(display_name, source.viewGdiDeviceName) :
+                                  same_device_path(device_path, target.monitorDevicePath))) {
         continue;
       }
       if (found) {

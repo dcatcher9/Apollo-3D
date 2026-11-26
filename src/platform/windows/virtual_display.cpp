@@ -585,13 +585,12 @@ LONG applyDisplaySettings(const wchar_t *deviceName, int width, int height, int 
     auto *sourceInfo = &pathArray[i].sourceInfo;
     auto *targetInfo = &pathArray[i].targetInfo;
 
-    if (std::wstring_view(sourceName.viewGdiDeviceName) == std::wstring_view(deviceName)) {
+    if (platf::display_config::same_device_path(sourceName.viewGdiDeviceName, deviceName)) {
       BOOST_LOG(debug) << "[SUDOVDA] Display found: " << platf::to_utf8(deviceName);
       for (UINT32 j = 0; j < modeCount; j++) {
         if (
           modeArray[j].infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE &&
-          modeArray[j].adapterId.HighPart == sourceInfo->adapterId.HighPart &&
-          modeArray[j].adapterId.LowPart == sourceInfo->adapterId.LowPart &&
+          platf::display_config::same_luid(modeArray[j].adapterId, sourceInfo->adapterId) &&
           modeArray[j].id == sourceInfo->id
         ) {
           auto *sourceMode = &modeArray[j].sourceMode;
@@ -1199,7 +1198,7 @@ namespace {
         expected_states.begin(),
         expected_states.end(),
         [&](const survivor_color_state_t &expected) {
-          return expected.device_path == current.device_path;
+          return platf::display_config::equal_device_paths(expected.device_path, current.device_path);
         }
       );
       if (existing == expected_states.end()) {
@@ -1628,7 +1627,7 @@ display_identity_query_t queryDisplayIdentity(const LUID &adapterLuid, uint32_t 
   }
 
   for (const auto &path : paths) {
-    if (path.targetInfo.id != targetId || path.targetInfo.adapterId.HighPart != adapterLuid.HighPart || path.targetInfo.adapterId.LowPart != adapterLuid.LowPart) {
+    if (path.targetInfo.id != targetId || !platf::display_config::same_luid(path.targetInfo.adapterId, adapterLuid)) {
       continue;
     }
 
@@ -2069,7 +2068,7 @@ bool colorSurvivorContractMergePreservesExistingForTest() {
   mergeSurvivorColorStates(expected, {changed_original, newly_connected});
   return expected.size() == 2 &&
          expected[0].contract.hdr_user_enabled &&
-         expected[1].device_path == newly_connected.device_path;
+         platf::display_config::equal_device_paths(expected[1].device_path, newly_connected.device_path);
 }
 
 bool wcgSetterSelectedDuringHdrBackoffForTest() {
@@ -2159,7 +2158,7 @@ namespace {
       sourceName.header.size = sizeof(sourceName);
       sourceName.header.adapterId = path.sourceInfo.adapterId;
       sourceName.header.id = path.sourceInfo.id;
-      if (DisplayConfigGetDeviceInfo(&sourceName.header) == ERROR_SUCCESS && std::wstring_view(sourceName.viewGdiDeviceName) == primaryDisplay) {
+      if (DisplayConfigGetDeviceInfo(&sourceName.header) == ERROR_SUCCESS && platf::display_config::same_device_path(sourceName.viewGdiDeviceName, primaryDisplay)) {
         return path.sourceInfo.adapterId;
       }
     }

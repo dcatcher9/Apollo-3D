@@ -138,6 +138,32 @@ namespace {
   }
 }  // namespace
 
+TEST(DisplayConfigDevicePath, NamesCompareWithoutCase) {
+  using namespace platf::display_config;
+  // CCD and SetupAPI spell the same monitor interface path in different cases.
+  EXPECT_TRUE(equal_device_paths(LR"(\\?\DISPLAY#GSM5B7F#5&1a2b&0&UID4352#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7})", LR"(\\?\display#gsm5b7f#5&1a2b&0&uid4352#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7})"));
+  EXPECT_TRUE(same_device_path(LR"(\\.\DISPLAY1)", LR"(\\.\display1)"));
+  EXPECT_FALSE(equal_device_paths(LR"(\\.\DISPLAY1)", LR"(\\.\DISPLAY12)"));
+  EXPECT_FALSE(same_device_path(LR"(\\.\DISPLAY1)", LR"(\\.\DISPLAY2)"));
+}
+
+TEST(DisplayConfigDevicePath, AnEmptyNameIsEqualToAnotherButNamesNoDevice) {
+  using namespace platf::display_config;
+  EXPECT_TRUE(equal_device_paths({}, {}));
+  EXPECT_FALSE(equal_device_paths({}, LR"(\\.\DISPLAY1)"));
+  EXPECT_FALSE(same_device_path({}, {}));
+  EXPECT_FALSE(same_device_path({}, LR"(\\.\DISPLAY1)"));
+  EXPECT_FALSE(same_device_path(LR"(\\.\DISPLAY1)", {}));
+}
+
+TEST(DisplayConfigTarget, GdiNameMatchesWithoutCase) {
+  using namespace platf::display_config;
+  target_names = {{1, L"monitor-a", LR"(\\.\DISPLAY1)"}, {2, L"monitor-b", LR"(\\.\DISPLAY2)"}};
+  const auto found = find_display_target(target_paths(), {}, LR"(\\.\display2)", {get_target_name, nullptr});
+  ASSERT_TRUE(found);
+  EXPECT_EQ(found->target_id, 2u);
+}
+
 TEST(DisplayConfigTarget, LearnedIdentitySurvivesGdiNameAndTargetRenumbering) {
   using namespace platf::display_config;
   const device_info_api_t api {get_target_name, nullptr};
