@@ -978,7 +978,12 @@ namespace platf::primary_display {
         if (!color) {
           result["colors"].push_back(nullptr);
         } else {
-          result["colors"].push_back({{"hdr_supported", color->hdr_supported}, {"hdr", color->hdr_user_enabled}, {"wcg", color->wcg_user_enabled}, {"active", color->advanced_color_active}, {"limited", color->limited_by_policy}, {"bits", color->bits_per_color_channel}, {"mode", static_cast<int>(color->active_mode)}});
+          // "legacy" and "enabled" mean nothing to this build, which ignores them. Older host
+          // builds, such as the installed host or a staged build run beside this one, read every
+          // colour key with .at() and drop the whole recovery record when one is missing, so a
+          // crash journal written here would not restore under them. Keep writing both as those
+          // builds wrote them on Windows 11 24H2: "legacy" false, "enabled" the active state.
+          result["colors"].push_back({{"legacy", false}, {"enabled", color->advanced_color_active}, {"hdr_supported", color->hdr_supported}, {"hdr", color->hdr_user_enabled}, {"wcg", color->wcg_user_enabled}, {"active", color->advanced_color_active}, {"limited", color->limited_by_policy}, {"bits", color->bits_per_color_channel}, {"mode", static_cast<int>(color->active_mode)}});
         }
       }
       return result;
@@ -1007,9 +1012,10 @@ namespace platf::primary_display {
         if (mode < DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR || mode > DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR) {
           throw std::runtime_error("invalid saved display color mode");
         }
-        // Records written before the pre-24H2 query was removed also carry "legacy" and "enabled".
-        // Both are ignored: the fields below hold the HDR/WCG state either way (a "legacy": true
-        // entry recorded HDR on or off with WCG off), so every entry restores through those setters.
+        // "legacy" and "enabled" are written only for older builds (see encode_snapshot) and are
+        // ignored here: the fields below hold the HDR/WCG state either way (a "legacy": true entry
+        // from a build with the pre-24H2 query recorded HDR on or off with WCG off), so every
+        // entry restores through those setters.
         result.colors.push_back(display_config::advanced_color_state_t {entry.at("hdr_supported").get<bool>(), entry.at("hdr").get<bool>(), entry.at("wcg").get<bool>(), entry.at("active").get<bool>(), entry.at("limited").get<bool>(), entry.at("bits").get<UINT32>(), static_cast<DISPLAYCONFIG_ADVANCED_COLOR_MODE>(mode)});
       }
       const bool empty = result.paths.empty() && result.modes.empty() && result.device_paths.empty() && result.colors.empty();

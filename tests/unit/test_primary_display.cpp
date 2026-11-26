@@ -13,7 +13,9 @@
 #include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <set>
+#include <string>
 
 namespace {
   using namespace platf::primary_display::detail;
@@ -2585,11 +2587,28 @@ TEST(PrimaryDisplayExclusive, CapturesAndRestoresHdrAfterReactivationAndRetriesC
   EXPECT_FALSE(fake.journal);
 }
 
-TEST(PrimaryDisplayExclusive, CrashJournalWithRemovedLegacyColorKeysStillRestoresHdr) {
-  // Releases with the pre-24H2 Advanced Color fallback wrote "legacy" and "enabled" in every
-  // saved color. A crash journal from them must still restore the displays and their HDR state.
-  // "legacy": false is what every such release wrote on Windows 11 24H2. A "legacy": true entry
+TEST(PrimaryDisplayExclusive, CrashJournalColorEntriesStayReadableAcrossHostBuilds) {
+  // Older host builds, run beside this one, read every saved colour key with .at() and drop the
+  // whole recovery record when one is missing or has another type. This build ignores "legacy"
+  // and "enabled" but still writes them, as those builds did on Windows 11 24H2: "legacy" false,
+  // "enabled" the active state. A "legacy": true entry, from a build with the pre-24H2 query,
   // held its HDR on/off state in "hdr" and "active" with WCG off; the same setters restore it.
+  const std::set<std::string> older_build_keys {"legacy", "enabled", "hdr_supported", "hdr", "wcg", "active", "limited", "bits", "mode"};
+  struct older_build_color_t {
+    bool legacy;
+    bool enabled;
+    bool active;
+  };
+  // The colour reads of the older builds' decode_snapshot (147d835a5), key for key and type for type.
+  const auto read_as_older_build = [](const nlohmann::json &color) {
+    static_cast<void>(color.at("mode").get<int>());
+    static_cast<void>(color.at("hdr_supported").get<bool>());
+    static_cast<void>(color.at("hdr").get<bool>());
+    static_cast<void>(color.at("wcg").get<bool>());
+    static_cast<void>(color.at("limited").get<bool>());
+    static_cast<void>(color.at("bits").get<UINT32>());
+    return older_build_color_t {color.at("legacy").get<bool>(), color.at("enabled").get<bool>(), color.at("active").get<bool>()};
+  };
   for (const bool legacy : {false, true}) {
     SCOPED_TRACE(legacy);
     fake_io_t fake;
@@ -2602,20 +2621,35 @@ TEST(PrimaryDisplayExclusive, CrashJournalWithRemovedLegacyColorKeysStillRestore
     ASSERT_TRUE(fake.journal);
 
     auto record = nlohmann::json::parse(serialize(*fake.journal));
-    size_t rewritten = 0;
+    size_t colors = 0;
+    size_t active_colors = 0;
     for (const auto *snapshot : {"original_topology", "before_exclusive", "pending_restore", "exclusive_topology"}) {
       if (!record.contains(snapshot) || record[snapshot].is_null()) {
         continue;
       }
       for (auto &color : record[snapshot]["colors"]) {
-        if (!color.is_null()) {
-          color["legacy"] = legacy;
-          color["enabled"] = color.at("active");
-          ++rewritten;
+        if (color.is_null()) {
+          continue;
         }
+        std::set<std::string> keys;
+        for (const auto &[key, value] : color.items()) {
+          keys.insert(key);
+        }
+        EXPECT_EQ(keys, older_build_keys);
+        std::optional<older_build_color_t> older_read;
+        EXPECT_NO_THROW(older_read = read_as_older_build(color));
+        if (older_read) {
+          EXPECT_FALSE(older_read->legacy);
+          EXPECT_EQ(older_read->enabled, older_read->active);
+          active_colors += older_read->active ? 1u : 0u;
+        }
+        color["legacy"] = legacy;
+        ++colors;
       }
     }
-    ASSERT_GE(rewritten, 3u);
+    ASSERT_GE(colors, 3u);
+    // The HDR primary is recorded at least in the original topology, so "enabled" is seen true.
+    EXPECT_GE(active_colors, 1u);
     const auto loaded = deserialize(record.dump());
     ASSERT_TRUE(loaded);
     fake.journal = *loaded;
