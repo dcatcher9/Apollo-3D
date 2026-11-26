@@ -396,10 +396,10 @@ The estimator owns the route in `dispatch_subtitle_direct_glyph` and
 `retire_subtitle_direct_glyph`. `src/host_sbs_direct_glyph_publication_gpu.h` plans the OCR work
 and publishes the matte, alpha8 and receipt. `src/host_sbs_direct_glyph_gpu.h` runs the model.
 The `direct_glyph_source_audit` closure group holds the source audit shaders under their own
-root, `shaders/directx/direct_glyph_source/`. The plan shader includes `host_sbs_bench_raw_matte_cs.hlsl`
-and `host_sbs_raw_matte_early_cs.hlsl`, and the publisher uses
-`host_sbs_raw_matte_empty_gate_cs.hlsl` as its empty gate. These three files keep their historical
-names. The estimator result fields are
+root, `shaders/directx/direct_glyph_source/`. The plan shader takes its bindings and source joins
+from `include/host_sbs_direct_glyph_plan.hlsl`, and the publisher uses
+`host_sbs_raw_matte_empty_gate_cs.hlsl` as its empty gate. That file keeps its historical name.
+The estimator result fields are
 `subtitle_selected_matte` and `subtitle_selected_matte_receipt`.
 
 For a fresh authenticated OCR8 empty, the empty gate joins the actual transaction with C24, SCT5,

@@ -1,5 +1,5 @@
 // Project authenticated OCR8 geometry and publish direct RGB glyph scores.
-#include "host_sbs_raw_matte_early_cs.hlsl"
+#include "include/host_sbs_direct_glyph_plan.hlsl"
 #include "include/host_sbs_direct_glyph_matte.hlsl"
 #include "include/host_sbs_direct_glyph_resolved_fringe.hlsl"
 
