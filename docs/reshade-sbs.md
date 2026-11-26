@@ -701,7 +701,9 @@ or more, within the window or 0.5 s of it. Otherwise it is INFO, naming the game
 shorten (`g+0x0` names no site: the holder released the lock as the wait began). In the live E33
 and Stellar Blade logs of 11-04 to 11-25 every such wait fell in a load, a menu, an FG change or the
 overlay, with game-role holders; the submission hook's section (`submitted`, `observed_submission`)
-held 46% of E33's summed wait and the two waits of about 150 ms and one of 19 ms.
+held 46% of E33's summed wait and the two waits of about 150 ms and one of 19 ms. Since 11-25 that
+section opens and records its copy-out list without the lock ([Copy-out on the producer
+queue](#streamline-depth-selection)); its fence, `ExecuteCommandLists` and `Signal` stay under it.
 
 ### Frame record
 
@@ -4191,7 +4193,7 @@ started:
   copies of a latched source whose recording named nothing, copied from its `SHADER_RESOURCE` proof
   or refused.
 - `copy_out={made=.. ring_busy=.. failed=.. predicted=.. taken=.. unstored=.. released=.. skipped=..
-  reader_moves=.. move_unreadable=..}`: the API copies' copy-out on the producer queue (below),
+  lost=.. reader_moves=.. move_unreadable=..}`: the API copies' copy-out on the producer queue (below),
   which Generic's own end-of-frame copy does not use.
 
 While these counts change, the line repeats at most every 10 s.
@@ -4242,7 +4244,21 @@ allocate no copy-out storage; a source copied on both queues keeps it. At most o
 ring of eight per queue of the queue's type, each reused once its fence value completed; its
 barriers move the snapshot and the copy-out storage only from and back to their rest states,
 both `COMMON` for a copy recorded on a `COMPUTE` list, so DLSS-G's compute copies are copied out on its
-compute queue too. A replay of the game's list is still refused as before. **U-C1b** (10-27)
+compute queue too. A replay of the game's list is still refused as before. Since 11-25 the list is
+reserved under the capture lock (`copy_out`: the copies, their storage and a free ring list, which
+no other submission takes and whose queue place is not reclaimed meanwhile), opened and recorded
+without it (`record_copy_out`: the allocator's and list's `Reset`, or their creation at the list's
+first use, and `Close`, with the add-on's own references to every object it records), then
+executed under it again (`execute_copy_out`): the submission is identified again, and the list
+runs only if every copy it records is still that capture, a producer of this submission, valid,
+unsubmitted and not copied out, with the same snapshot and storage. Otherwise it never runs and
+those copies keep the Reset rule (`lost`; so does a submission whose queue place went meanwhile).
+The fence value, the list's `ExecuteCommandLists` and the producer fence's `Signal` stay in one
+hold: values allocated under the lock are signalled in that order on the queue, so a completed
+value proves every copy-out before it, which no unlocked `Signal` could keep when two threads
+submit on one queue. Until 11-25 the whole copy-out ran under the lock, inside the submission hook's
+section that held the long waits of E33's loads and FG changes ([Capture lock
+waits](#diagnostics-switch-and-per-present-cost)). **U-C1b** (10-27)
 gives a source's first copies that storage too, since the queue a recording executes on is known
 only at its submission while the storage is chosen at record time, without the capture lock: a copy
 on a `COMPUTE` list takes it always (a compute list never executes on the presenting queue that
@@ -4278,13 +4294,13 @@ invalidated (until 11-01 the kept copies held their storage while a live SR copy
 queue went without, `taken=0 unstored=2` in seed dda773a575be6561 at frame 91). With neither it
 keeps the Reset rule (`unstored`, at most the copies in flight across one FG toggle). Storage taken only for that prediction and left unused
 (the list ran on the reader's queue after all) is released by the idle sweep (`released`). A copy
-not copied out (every ring list in flight, a failed list call, an unstored copy) keeps the Reset
-rule, and so does a copy whose copy-out storage could not be allocated (`failed`; until 10-27 the
+not copied out (every ring list in flight, a failed list call, an unstored copy, a lost list) keeps
+the Reset rule, and so does a copy whose copy-out storage could not be allocated (`failed`; until 10-27 the
 copy itself was refused). For the source age after such a failure, a copy of that device, shape and
 format does not try the allocation again on the game's recording thread (`skipped`; until the
 10-27 review every copy of every frame retried it under VRAM pressure); it can still take an idle
 slot's storage at its submission. The counts are on the depth status line as
-`copy_out={made= ring_busy= failed= predicted= taken= unstored= released= skipped= reader_moves=
+`copy_out={made= ring_busy= failed= predicted= taken= unstored= released= skipped= lost= reader_moves=
 move_unreadable=}`. The
 cost is one extra copy of the snapshot on the producer queue per copied-out snapshot and one more
 snapshot-sized allocation per slot for such a source; U-C1b adds one snapshot-sized allocation per

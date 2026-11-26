@@ -162,12 +162,15 @@ namespace sunshine_streamline::depth_capture {
     // type: created at first use, each reused once the fence value signalled
     // after its execution completed. A safety bound, not a budget: with every
     // list still in flight a copy-out is not made and that copy keeps the
-    // Reset rule (counted as ring_busy).
+    // Reset rule (counted as ring_busy). reserved: a submission is opening and
+    // recording the list without the capture lock (record_copy_out); no
+    // other submission takes it, and the queue's place is not reclaimed.
     constexpr unsigned copy_out_lists = 8;
     struct copy_out_list {
       com_ptr<ID3D12CommandAllocator> allocator;
       com_ptr<ID3D12GraphicsCommandList> list;
       std::uint64_t fence{};
+      bool reserved{};
     };
     // Named member groups retain declaration order, including the places where
     // native-place and consumer-ownership fields share a declaration.
@@ -418,9 +421,12 @@ namespace sunshine_streamline::depth_capture {
       // Present moved, with no idle storage of their shape), and predicted
       // storage the idle sweep released unused (released), and copies that sought no storage
       // of their own because an allocation of their shape had just failed
-      // (skipped, copy_out_failure).
+      // (skipped, copy_out_failure). Since 11-25 also the copy-out lists
+      // recorded without the lock that a changed copy or a gone place left
+      // unexecuted (lost, execute_copy_out).
       struct {
         std::atomic<std::uint64_t> made{}, ring_busy{}, failed{}, predicted{}, taken{}, unstored{}, released{}, skipped{};
+        std::atomic<std::uint64_t> lost{};
       } copy_out_counters;
       std::atomic<std::uint64_t> game_execution_count{};
       // The newest game execution (its game_execution_count) per queue, as the

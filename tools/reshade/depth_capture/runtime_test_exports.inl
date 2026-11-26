@@ -88,6 +88,12 @@
       allocation_context.store(context);
       allocation_hook.store(hook);
     }
+    std::atomic<void (*)(void *)> copy_out_hook{};
+    std::atomic<void *> copy_out_context{};
+    void set_copy_out_hook(void (*hook)(void *), void *context) {
+      copy_out_context.store(context);
+      copy_out_hook.store(hook);
+    }
     std::atomic<unsigned> copy_out_allocation_failures{};
     void fail_copy_out_allocations(unsigned count) { copy_out_allocation_failures.store(count); }
     void settle_storage_releases() { wait_storage_releases(); }

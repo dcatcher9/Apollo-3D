@@ -780,9 +780,12 @@ namespace sunshine_streamline::depth_capture {
     // storage at all, left to the Reset rule (unstored), and predicted
     // storage released unused by the idle sweep. Copies that sought no
     // copy-out storage of their own because an allocation of their shape
-    // failed within the source age (skipped).
+    // failed within the source age (skipped). Copy-out lists recorded
+    // without the capture lock and never executed, because a copy they held
+    // or their queue's place changed meanwhile (lost, since 11-25).
     std::uint64_t copied_out{}, copy_out_busy{}, copy_out_failed{};
     std::uint64_t copy_out_predicted{}, copy_out_taken{}, copy_out_unstored{}, copy_out_released{}, copy_out_skipped{};
+    std::uint64_t copy_out_lost{};
     // Changes of the queue that reads depth (Present seen on another queue,
     // as at FG On and Off), and those whose first acquisition there had no
     // ready pixels: a flat Present the copy-outs did not prevent.
@@ -881,6 +884,9 @@ namespace sunshine_streamline::depth_capture {
   namespace testing { void set_allocation_hook(void (*hook)(void *), void *context); }
   // The next count copy-out storage allocations of record calls fail.
   namespace testing { void fail_copy_out_allocations(unsigned count); }
+  // Called once (then cleared) on the submitting thread while its copy-out
+  // list is opened and recorded without the capture lock (submitted).
+  namespace testing { void set_copy_out_hook(void (*hook)(void *), void *context); }
   // Waits until every pooled storage release finished (release_storage).
   namespace testing { void settle_storage_releases(); }
   // Makes idle colour/mask storage older by ms (poll() releases it after 2 s).

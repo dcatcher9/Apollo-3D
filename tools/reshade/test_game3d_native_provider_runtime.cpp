@@ -2797,8 +2797,13 @@ namespace {
     // recorders' acquisitions count in the game role and the Presents' in
     // the present role, every role's histogram holds its waits, each wait has
     // one holder site, and with Diagnostics every present-thread hold is
-    // timed.
-    void run_contention(HMODULE sdk, unsigned threads, unsigned seconds) {
+    // timed. With copy_out (--copy-out) the main thread's depth is SR depth
+    // evaluated on another queue's ring of lists, as fg_other_queue's game
+    // queue, which the presenting queue waits for: the presenting queue
+    // reads it, so each frame's submission on the other queue makes a
+    // copy-out in the submission hook (in live E33 logs the largest holder
+    // of the long waits, 11-25).
+    void run_contention(HMODULE sdk, unsigned threads, unsigned seconds, bool copy_out) {
       using namespace sunshine_streamline;
       using stats_t = BOOL (*)(depth_capture::lock_stats::values *, BOOL);
       const auto stats = reinterpret_cast<stats_t>(GetProcAddress(GetModuleHandleW(L"SunshineSBSTest.addon64"),
@@ -2810,9 +2815,40 @@ namespace {
       require(getter(1000, "slDLSSGSetOptions", function) == 0 && function, "Public SDK did not expose FG options");
       sl.set_options = reinterpret_cast<set_options_t>(function);
       for (unsigned frame = 0; frame < 4; ++frame) step();
-      configure_fg(true);
-      render_tracked_depth = [this] { real_fg_frame(); };
-      settle("contention-FG");
+      queue_ring<16> producer_ring;
+      if (copy_out) {
+        producer_ring.create(game.p, D3D12_COMMAND_LIST_TYPE_DIRECT);
+        configure_fg(false);
+        active_area = {0, 0, selected->width, selected->height};
+        render_tracked_depth = [this] {
+          auto &token = begin_fg_frame("Present-queue SR did not supply a frame token");
+          require(sl.constants(camera_constants(false), token, fg_viewport) == 0, "SR constants changed the SDK result");
+          sr_evaluate(token);
+        };
+        settle("contention-presenting-queue");
+        render_tracked_depth = [this, &producer_ring] {
+          abi_v2::frame_token *token{}; const auto frame = ++fg_frame;
+          require(sl.new_token(token, &frame) == 0 && token, "Other-queue SR did not supply a frame token");
+          last_token = token;
+          require(sl.constants(camera_constants(false), *token, fg_viewport) == 0, "Other-queue SR constants changed the SDK result");
+          std::uint64_t native{};
+          const auto n = producer_ring.open_next(native);
+          write_depth_pixels(true, producer_ring.lists[n].p);
+          const auto resource = depth_resource();
+          const abi_v2::resource_tag tag{{nullptr, tag_guid, 1}, &resource, 0, 1, active_area};
+          const base_structure *inputs[]{&fg_viewport.base, &tag.base};
+          supplied_elsewhere(game3d_continuity::sr_evaluate);
+          require(sl.evaluate(0, *token, inputs, 2, reinterpret_cast<void *>(native)) == 0,
+            "Other-queue SR evaluation changed the SDK result");
+          producer_ring.execute(n, queue.p);
+          completes(game3d_continuity::sr_evaluate, producer_ring.completion());
+        };
+        settle("contention-copy-out");
+      } else {
+        configure_fg(true);
+        render_tracked_depth = [this] { real_fg_frame(); };
+        settle("contention-FG");
+      }
       constexpr unsigned lists_per_frame = 4;
       std::mutex pace_mutex;
       std::condition_variable pace;
@@ -2905,10 +2941,24 @@ namespace {
       stats(&values, FALSE);
       const auto elapsed = clock.wall_now() - start;
       const auto recorded = lists.load(std::memory_order_relaxed) - lists_before;
+      if (copy_out) {
+        // The other queue's newest copy was copied out at its submission.
+        using newest_t = BOOL (*)(std::uint64_t *, BOOL *);
+        using reads_t = BOOL (*)(std::uint64_t, BOOL *);
+        const auto module = GetModuleHandleW(L"SunshineSBSTest.addon64");
+        const auto newest = reinterpret_cast<newest_t>(GetProcAddress(module, "SunshineStreamlineTestNewestCopy"));
+        const auto reads = reinterpret_cast<reads_t>(GetProcAddress(module, "SunshineStreamlineTestCaptureReadsCopyOut"));
+        std::uint64_t id{};
+        BOOL frame_generation{}, copied{};
+        require(newest && reads && newest(&id, &frame_generation) && reads(id, &copied) && copied,
+          "The other queue's newest copy was not copied out");
+      }
       { std::lock_guard lock(pace_mutex); stop = true; }
       pace.notify_all();
       for (auto &worker : workers) worker.join();
       render_tracked_depth = {};
+      // Its recordings retire once their work completed, as a game's do.
+      if (copy_out) producer_ring.drain();
       require(!failed.load(), "A recorder thread failed");
       report_capture_lock("contention", values, elapsed, presents, threads, recorded);
       // At rest: the recorders are joined; two equal reads 5 ms apart show no
@@ -4587,10 +4637,13 @@ int main(int argc, char **argv) {
   // time as before the clock (test_game3d_clock.h).
   sunshine_game3d_fixture::take_wall_clock_option(argc, argv);
   // --recorder-threads N (after the interposer): the capture lock under N
-  // recording threads for 60 s (run_contention), instead of the regressions.
-  const bool contention = argc == 10 && std::string(argv[8]) == "--recorder-threads";
+  // recording threads for 60 s (run_contention), instead of the regressions;
+  // with --copy-out after it, each Present's depth is copied on another
+  // queue, so every frame's submission there makes a copy-out.
+  const bool copy_out = argc == 11 && std::string(argv[10]) == "--copy-out";
+  const bool contention = (argc == 10 || copy_out) && std::string(argv[8]) == "--recorder-threads";
   if (argc != 5 && argc != 7 && argc != 8 && !contention) {
-    std::fputs("usage: test_game3d_native_provider_runtime official.dll frozenShaders test.addon64 freshOutput [width height [frame_generation_interposer.dll [--recorder-threads N]]] [--wall-clock]\n", stderr);
+    std::fputs("usage: test_game3d_native_provider_runtime official.dll frozenShaders test.addon64 freshOutput [width height [frame_generation_interposer.dll [--recorder-threads N [--copy-out]]]] [--wall-clock]\n", stderr);
     return 2;
   }
   constexpr unsigned contention_seconds = 60;
@@ -4659,7 +4712,7 @@ int main(int argc, char **argv) {
     game3d_present_trace::out.open(directory / "trace.txt", "native");
     if (contention) {
       require(sdk, "The contention mode needs the FG metadata SDK");
-      fixture.run_contention(sdk, recorder_threads, contention_seconds);
+      fixture.run_contention(sdk, recorder_threads, contention_seconds, copy_out);
     } else if (public_ui) fixture.run_automatic_ui_tags(sdk);
     else {
       fixture.run_streamline();

@@ -92,6 +92,7 @@ namespace sunshine_streamline::depth_capture {
     out.copy_out_released = capture_queues.copy_out_counters.released.load(relaxed);
     out.copy_out_unstored = capture_queues.copy_out_counters.unstored.load(relaxed);
     out.copy_out_skipped = capture_queues.copy_out_counters.skipped.load(relaxed);
+    out.copy_out_lost = capture_queues.copy_out_counters.lost.load(relaxed);
     out.reader_moves = reader_moves.load(relaxed);
     out.reader_move_unreadable = reader_move_unreadable.load(relaxed);
     return out;

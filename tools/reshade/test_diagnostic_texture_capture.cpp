@@ -877,6 +877,126 @@ namespace {
       gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
   }
 
+  // The submission hook opens and records a copy-out's list without the
+  // capture lock (record_copy_out, 11-25), then executes it under the lock
+  // only if every copy it records is unchanged. While it records, the
+  // reading queue finds the copy pending, never a half-built copy-out. A copy
+  // that changes meanwhile (its source retired, as when an NGX feature is
+  // released, which invalidates it) leaves the list unexecuted (copy_out
+  // lost): its copy-out storage keeps its bytes, it is never copied out, and
+  // the ring's list is free again, so the next copy is copied out. The
+  // shape is this case's own, so its storage is new (zeroed).
+  void copy_out_lost_race(fixture &gpu) {
+    if (gpu.debug_messages) gpu.debug_messages->ClearStoredMessages();
+    consumer_fixture consumer(gpu);
+    texture_case depth(gpu, DXGI_FORMAT_R32_FLOAT, 4, D3D12_RESOURCE_FLAG_NONE, true, 1, 1, 80, 60);
+    gpu.submit(); gpu.wait(); gpu.reset();
+    capture::packet packet;
+    capture::capture_diagnostic acquired;
+    // The independent queue reads depth (acquire's choice).
+    capture::acquire(native(gpu.foreign_queue.Get()), 13000, packet, &acquired);
+    packet = {};
+    auto input = depth.input;
+    input.provider = sunshine_scene_depth::provider_kind::ngx;
+    input.epoch = 78; input.source_id = 96; input.viewport = 0;
+    input.valid_until = sunshine_scene_depth::lifetime::until_evaluation; input.force_snapshot = false;
+    input.source_present_generation = capture::source_present_generation(input.source);
+    input.proof = sunshine_scene_depth::state_proof::sdk_contract;
+    capture::record_diagnostic diagnostic;
+    const auto nominate = [&](std::uint64_t sequence) {
+      input.sequence = sequence; input.tick = fixture_clock().now();
+      const auto ticket = capture::nominate_evaluation(native(gpu.list.Get()), input, UINT64_MAX, &diagnostic);
+      require(ticket && diagnostic.result == capture::status::recorded, "copy-out race: the depth copy was refused");
+      capture::finish(ticket, true);
+      return ticket;
+    };
+    const auto counts = [] { return capture::proven_counts(); };
+    const auto made = counts().copied_out, lost = counts().copy_out_lost;
+    // A Present on the reading queue while the list records.
+    struct pending_present {
+      fixture *gpu{};
+      std::uint64_t capture{}, present{};
+      bool ran{}, read{};
+    };
+    const auto first = nominate(1);
+    require(capture::testing::holds_copy_out_storage(first), "copy-out race: the first copy took no copy-out storage");
+    pending_present during{&gpu, first, 13001};
+    capture::testing::set_copy_out_hook([](void *value) {
+      auto &state = *static_cast<pending_present *>(value);
+      capture::packet seen;
+      capture::capture_diagnostic seen_diagnostic;
+      capture::acquire(native(state.gpu->foreign_queue.Get()), state.present, seen, &seen_diagnostic);
+      state.read = seen.pixel_ready && seen.capture_id == state.capture;
+      state.ran = true;
+    }, &during);
+    gpu.submit(); gpu.wait();
+    capture::testing::set_copy_out_hook(nullptr, nullptr);
+    require(during.ran && !during.read, "copy-out race: a Present while the copy-out list recorded read the copy");
+    require(counts().copied_out == made + 1 && counts().copy_out_lost == lost,
+      "copy-out race: an unchanged copy was not copied out after its list recorded without the lock");
+    require(capture::acquire(native(gpu.foreign_queue.Get()), 13002, packet, &acquired) && packet.pixel_ready &&
+        packet.capture_id == first, "copy-out race: the copied-out copy was unreadable on another queue");
+    packet = {};
+    gpu.reset();
+    // The source is retired while the second copy's list records.
+    const auto second = nominate(2);
+    auto *storage = reinterpret_cast<ID3D12Resource *>(capture::testing::copy_out_resource(second));
+    require(storage, "copy-out race: the second copy took no copy-out storage");
+    storage->AddRef();
+    struct retiring {
+      capture::input *input{};
+      bool ran{};
+    } retire{&input};
+    capture::testing::set_copy_out_hook([](void *value) {
+      auto &state = *static_cast<retiring *>(value);
+      capture::retire_source(state.input->provider, state.input->epoch, state.input->source_id);
+      state.ran = true;
+    }, &retire);
+    gpu.submit(); gpu.wait();
+    capture::testing::set_copy_out_hook(nullptr, nullptr);
+    require(retire.ran && counts().copy_out_lost == lost + 1 && counts().copied_out == made + 1,
+      "copy-out race: a list whose copy changed while it recorded was executed, or not counted as lost");
+    // Never executed: the storage still holds the zeros it was created with.
+    {
+      constexpr auto rest = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+      readback bytes(gpu, storage);
+      transition(consumer.list.Get(), storage, rest, D3D12_RESOURCE_STATE_COPY_SOURCE);
+      D3D12_TEXTURE_COPY_LOCATION from{}, to{};
+      from.pResource = storage; from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+      to.pResource = bytes.bytes.Get(); to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; to.PlacedFootprint = bytes.footprint;
+      consumer.list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+      transition(consumer.list.Get(), storage, D3D12_RESOURCE_STATE_COPY_SOURCE, rest);
+      consumer.submit(); consumer.wait(); consumer.reset();
+      unsigned char *mapped{};
+      check(bytes.bytes->Map(0, nullptr, reinterpret_cast<void **>(&mapped)), "copy-out race readback map");
+      bool zero = true;
+      const auto row = bytes.footprint.Footprint.Width * depth.bpp;
+      for (unsigned y = 0; y != bytes.footprint.Footprint.Height; ++y)
+        for (unsigned x = 0; x != row; ++x) zero &= mapped[y * bytes.footprint.Footprint.RowPitch + x] == 0;
+      D3D12_RANGE no_write{}; bytes.bytes->Unmap(0, &no_write);
+      require(zero, "copy-out race: the list of a copy that changed while it recorded wrote its copy-out storage");
+    }
+    storage->Release();
+    gpu.reset();
+    // The ring's list is free again: a new source's copy is copied out.
+    input.epoch = 79; input.source_id = 97;
+    const auto third = nominate(1);
+    gpu.submit(); gpu.wait();
+    require(counts().copied_out == made + 2 && counts().copy_out_lost == lost + 1,
+      "copy-out race: the copy after a lost race was not copied out");
+    require(capture::acquire(native(gpu.foreign_queue.Get()), 13003, packet, &acquired) && packet.pixel_ready &&
+        packet.capture_id == third, "copy-out race: the copy after a lost race was unreadable on another queue");
+    packet = {};
+    gpu.reset();
+    capture::retire_source(input.provider, input.epoch, input.source_id);
+    capture::command_destroyed(native(consumer.list.Get()));
+    capture::poll();
+    gpu.check_debug_errors();
+    std::printf("PASS copy-out recorded without the capture lock: a Present meanwhile finds the copy pending; a copy "
+      "that changed meanwhile leaves its list unexecuted (lost) and its storage unwritten, and the next copy is copied "
+      "out%s\n", gpu.debug_messages ? "; D3D12 validation clean" : "; D3D12 debug layer unavailable");
+  }
+
   // The queue that reads depth is the newest acquisition's (read_elsewhere),
   // as FG moves Present (Assassin's Creed Shadows 10-26): with FG off the
   // render queue presents and reads its own copies, copying none out; once
@@ -3895,6 +4015,7 @@ int main(int argc, char **argv) {
     proven_state_end_of_frame(gpu);
     ngx_contract_depth_capture(gpu);
     copy_out_replay(gpu);
+    copy_out_lost_race(gpu);
     copy_out_reader_moves(gpu);
     nomination_in_progress(gpu);
     ngx_nomination_in_progress(gpu);

@@ -171,18 +171,24 @@ namespace sunshine_streamline::depth_capture {
       return false;
     }
     void capacity_refused(capacity_bound bound) { capacity_hits.fetch_or(bound, std::memory_order_relaxed); }
+    // Requires mutex. Whether a submission is recording one of the place's
+    // copy-out lists without the lock (record_copy_out).
+    bool copy_out_reserved(const queue_state &owner) {
+      return std::any_of(owner.copy_out.begin(), owner.copy_out.end(), [](const auto &entry) { return entry.reserved; });
+    }
     // Requires mutex. A place for another queue: a free one, else the place of
     // the longest unused idle queue, which no capture names, which owns no
-    // provider and whose signalled fence values have all completed (the
-    // device's removal completes them). The idle queue registers again when
-    // it next carries a copy (register_compute_producer) or presents
-    // (observe_present), so no number of queues created over a session
-    // exhausts the table.
+    // provider, which no submission is recording a copy-out for and whose
+    // signalled fence values have all completed (the device's removal
+    // completes them). The idle queue registers again when it next carries a
+    // copy (register_compute_producer) or presents (observe_present), so no
+    // number of queues created over a session exhausts the table.
     std::unique_ptr<queue_state> *free_place() {
       for (auto &entry : capture_queues.queues) if (!entry) return &entry;
       std::unique_ptr<queue_state> *idle = nullptr;
       for (auto &entry : capture_queues.queues) {
-        if (entry->retiring || entry->provider_established || (idle && (*idle)->last_use <= entry->last_use)) continue;
+        if (entry->retiring || entry->provider_established || copy_out_reserved(*entry) ||
+            (idle && (*idle)->last_use <= entry->last_use)) continue;
         const auto native = reinterpret_cast<std::uint64_t>(entry->queue.p);
         bool used = false;
         for_each_capture([&](const slot &value) { used = used || (value.id && uses_queue(value, native)); });
@@ -280,17 +286,6 @@ namespace sunshine_streamline::depth_capture {
       }
       reader = cookie;
     }
-    // Requires mutex. Copy-out on the producer queue (docs/reshade-sbs.md):
-    // in the submission hook, right after the game's ExecuteCommandLists and
-    // before the producer fence value (fence) is signalled. A first
-    // submission of a copy that another queue reads (read_elsewhere) stamps
-    // its source's foreign_tick, so that its copies recorded within the
-    // source age take copy-out storage (record_impl,
-    // read_elsewhere_recently); each such copy is copied into that storage
-    // with one list of the add-on's own on this queue, at most one per game
-    // submission. Returns the slots copied out; the caller sets copied_out
-    // once the fence after them was signalled. A copy not copied out keeps
-    // the Reset rule (immutable_for_other_queues).
     bool reserved_by_other(const slot &entry, std::uint64_t own);
     // Requires mutex. U-C1b: a copy submitted on a queue other than the
     // reader without copy-out storage (recorded before its source was read
@@ -343,17 +338,55 @@ namespace sunshine_streamline::depth_capture {
       }
       return false;
     }
-    std::array<bool, slot_limit> copy_out(queue_state &owner, const std::array<bool, slot_limit> &producers,
-        std::uint64_t fence) {
-      std::array<bool, slot_limit> out{};
-      if (!fence) return out;
+    // A copy-out list recorded without the capture lock (record_copy_out):
+    // the place (cookie) and ring entry copy_out reserved, the copies it
+    // copies with their capture and storage as copy_out found them, and its
+    // own references to every object it records with, so that none is
+    // released under it (release_device, a retired place). Declared before
+    // the lock, so the references are dropped after it.
+    struct copy_out_plan {
+      std::uint64_t cookie{};
+      unsigned entry{};
+      bool reserved{}, created{}, recorded{};
+      D3D12_COMMAND_LIST_TYPE type{D3D12_COMMAND_LIST_TYPE_DIRECT};
+      std::array<bool, slot_limit> copies{};
+      std::array<std::uint64_t, slot_limit> captures{};
+      std::array<const texture_reference *, slot_limit> snapshots{}, storage{};
+      std::array<com_ptr<ID3D12Resource>, slot_limit> sources, destinations;
+      std::array<D3D12_RESOURCE_STATES, slot_limit> source_rest{}, destination_rest{};
+      com_ptr<ID3D12Device> device;
+      com_ptr<ID3D12CommandAllocator> allocator;
+      com_ptr<ID3D12GraphicsCommandList> list;
+    };
+    template<class T> void hold(com_ptr<T> &out, T *value) {
+      if (value) value->AddRef();
+      out.reset();
+      out.p = value;
+    }
+    // Requires mutex. Copy-out on the producer queue (docs/reshade-sbs.md):
+    // in the submission hook, right after the game's ExecuteCommandLists and
+    // before the producer fence value is signalled. A first submission of a
+    // copy that another queue reads (read_elsewhere) stamps its source's
+    // foreign_tick, so that its copies recorded within the source age take
+    // copy-out storage (record_impl, read_elsewhere_recently); each such
+    // copy is copied into that storage with one list of the add-on's own on
+    // this queue, at most one per game submission. copy_out chooses the
+    // copies and reserves a list of the ring for them (false: no copy-out is
+    // made), record_copy_out opens and records it without the lock, and
+    // execute_copy_out executes it under the lock again once every copy it
+    // records is unchanged (until 11-25 the list's Reset or creation, its
+    // recording and its Close ran under the lock too). The caller sets
+    // copied_out once the fence after them was signalled. A copy not copied
+    // out keeps the Reset rule (immutable_for_other_queues).
+    bool copy_out(queue_state &owner, const std::array<bool, slot_limit> &producers, copy_out_plan &plan) {
       const auto now = sunshine_game3d::clock::game_now();
       // The reader's own queue copies out too while FG may move Present off
       // it (reader_may_move); only a copy read elsewhere stamps its source.
       // Cross-section read: producer copy-out consults current consumer reader,
       // not this place's persistent diagnostic chosen flag.
       const bool elsewhere = read_elsewhere(owner);
-      if (!elsewhere && !(reader == owner.cookie && !owner.compute_producer && reader_may_move(now))) return out;
+      if (!elsewhere && !(reader == owner.cookie && !owner.compute_producer && reader_may_move(now))) return false;
+      auto &out = plan.copies;
       bool any = false;
       for (unsigned i = 0; i != capture_pool.slots.size(); ++i) {
         auto &value = capture_pool.slots[i];
@@ -370,66 +403,142 @@ namespace sunshine_streamline::depth_capture {
             value.published->rest != D3D12_RESOURCE_STATE_COMMON)) continue;
         out[i] = any = true;
       }
-      if (!any) return out;
+      if (!any) return false;
       const auto refuse = [&](std::atomic<std::uint64_t> &counter) {
         counter.fetch_add(1, std::memory_order_relaxed);
         out.fill(false);
-        return out;
+        return false;
       };
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
       if (refuse_copy_outs.load(std::memory_order_acquire)) return refuse(capture_queues.copy_out_counters.ring_busy);
 #endif
-      // A list whose last execution completed (its fence value passed).
+      // A list whose last execution completed (its fence value passed) and
+      // that no other submission is recording.
       const auto completed = owner.fence->GetCompletedValue();
-      copy_out_list *entry = nullptr;
-      for (auto &candidate : owner.copy_out)
-        if (!candidate.list.p || (completed != UINT64_MAX && completed >= candidate.fence)) { entry = &candidate; break; }
-      if (!entry) return refuse(capture_queues.copy_out_counters.ring_busy);
-      const auto type = owner.compute_producer ? D3D12_COMMAND_LIST_TYPE_COMPUTE : D3D12_COMMAND_LIST_TYPE_DIRECT;
-      const bool opened = entry->list.p ?
-        SUCCEEDED(entry->allocator->Reset()) && SUCCEEDED(entry->list->Reset(entry->allocator.p, nullptr)) :
-        SUCCEEDED(owner.device->CreateCommandAllocator(type, __uuidof(ID3D12CommandAllocator),
-          reinterpret_cast<void **>(entry->allocator.put()))) &&
-        SUCCEEDED(owner.device->CreateCommandList(0, type, entry->allocator.p, nullptr, __uuidof(ID3D12GraphicsCommandList),
-          reinterpret_cast<void **>(entry->list.put())));
-      auto *list = entry->list.p;
-      if (opened) for (unsigned i = 0; i != capture_pool.slots.size(); ++i) {
+      unsigned found = copy_out_lists;
+      for (unsigned n = 0; n != copy_out_lists && found == copy_out_lists; ++n) {
+        const auto &candidate = owner.copy_out[n];
+        if (!candidate.reserved && (!candidate.list.p || (completed != UINT64_MAX && completed >= candidate.fence))) found = n;
+      }
+      if (found == copy_out_lists) return refuse(capture_queues.copy_out_counters.ring_busy);
+      auto &entry = owner.copy_out[found];
+      entry.reserved = plan.reserved = true;
+      plan.cookie = owner.cookie;
+      plan.entry = found;
+      plan.type = owner.compute_producer ? D3D12_COMMAND_LIST_TYPE_COMPUTE : D3D12_COMMAND_LIST_TYPE_DIRECT;
+      hold(plan.device, owner.device.p);
+      hold(plan.allocator, entry.allocator.p);
+      hold(plan.list, entry.list.p);
+      for (unsigned i = 0; i != capture_pool.slots.size(); ++i) {
         if (!out[i]) continue;
         const auto &value = capture_pool.slots[i];
+        plan.captures[i] = value.id;
+        plan.snapshots[i] = value.texture.get();
+        plan.storage[i] = value.published.get();
+        hold(plan.sources[i], value.texture->resource.p);
+        hold(plan.destinations[i], value.published->resource.p);
+        plan.source_rest[i] = value.texture->rest;
+        plan.destination_rest[i] = value.published->rest;
+      }
+      return true;
+    }
+    // Without the capture lock (copy_out reserved the list): opens the list,
+    // by its allocator's Reset and its own or by their creation at its first
+    // use, and records each copy, whose barriers move the snapshot and the
+    // copy-out storage only from and back to their rest states. It runs in
+    // the submission callback, whose hooks are suppressed.
+    void record_copy_out(copy_out_plan &plan) {
+#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
+      if (auto *hook = testing::copy_out_hook.exchange(nullptr)) hook(testing::copy_out_context.load());
+#endif
+      plan.created = !plan.list.p;
+      const bool opened = plan.list.p ?
+        SUCCEEDED(plan.allocator->Reset()) && SUCCEEDED(plan.list->Reset(plan.allocator.p, nullptr)) :
+        SUCCEEDED(plan.device->CreateCommandAllocator(plan.type, __uuidof(ID3D12CommandAllocator),
+          reinterpret_cast<void **>(plan.allocator.put()))) &&
+        SUCCEEDED(plan.device->CreateCommandList(0, plan.type, plan.allocator.p, nullptr, __uuidof(ID3D12GraphicsCommandList),
+          reinterpret_cast<void **>(plan.list.put())));
+      if (!opened) return;
+      auto *list = plan.list.p;
+      for (unsigned i = 0; i != plan.copies.size(); ++i) {
+        if (!plan.copies[i]) continue;
         D3D12_RESOURCE_BARRIER transitions[2]{};
         transitions[0].Type = transitions[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        transitions[0].Transition = {value.texture->resource.p, 0, value.texture->rest, D3D12_RESOURCE_STATE_COPY_SOURCE};
-        transitions[1].Transition = {value.published->resource.p, 0, value.published->rest, D3D12_RESOURCE_STATE_COPY_DEST};
+        transitions[0].Transition = {plan.sources[i].p, 0, plan.source_rest[i], D3D12_RESOURCE_STATE_COPY_SOURCE};
+        transitions[1].Transition = {plan.destinations[i].p, 0, plan.destination_rest[i], D3D12_RESOURCE_STATE_COPY_DEST};
         list->ResourceBarrier(2, transitions);
-        list->CopyResource(value.published->resource.p, value.texture->resource.p);
+        list->CopyResource(plan.destinations[i].p, plan.sources[i].p);
         for (auto &transition : transitions) std::swap(transition.Transition.StateBefore, transition.Transition.StateAfter);
         list->ResourceBarrier(2, transitions);
       }
-      if (!opened || FAILED(list->Close())) {
-        entry->list.reset(); entry->allocator.reset(); // Not executed since its last fence completed.
-        return refuse(capture_queues.copy_out_counters.failed);
+      plan.recorded = SUCCEEDED(list->Close());
+    }
+    // Requires mutex, after record_copy_out: owner is the place of
+    // plan.cookie, and producers this submission's copies, identified again
+    // under this hold. The reserved list is free again, and keeps what was
+    // created for it. It runs only if fence follows it and every copy it
+    // records is still the capture copy_out found, a producer of this
+    // submission, valid, unsubmitted and not copied out, with the same
+    // snapshot and copy-out storage; else it is never executed (lost) and
+    // those copies keep the Reset rule, as with every list of the ring in
+    // flight. Returns the slots copied out.
+    std::array<bool, slot_limit> execute_copy_out(queue_state &owner, const std::array<bool, slot_limit> &producers,
+        std::uint64_t fence, copy_out_plan &plan) {
+      std::array<bool, slot_limit> out{};
+      auto &entry = owner.copy_out[plan.entry];
+      entry.reserved = plan.reserved = false;
+      if (plan.created) {
+        std::swap(entry.allocator.p, plan.allocator.p);
+        std::swap(entry.list.p, plan.list.p);
       }
-      ID3D12CommandList *lists[]{list};
+      if (!plan.recorded) {
+        entry.list.reset(); entry.allocator.reset(); // Not executed since its last fence completed.
+        capture_queues.copy_out_counters.failed.fetch_add(1, std::memory_order_relaxed);
+        return out;
+      }
+      for (unsigned i = 0; i != capture_pool.slots.size(); ++i) {
+        if (!plan.copies[i]) continue;
+        const auto &value = capture_pool.slots[i];
+        if (!fence || !producers[i] || value.id != plan.captures[i] || value.invalid || value.producer_submitted ||
+            value.copied_out || value.texture.get() != plan.snapshots[i] || value.published.get() != plan.storage[i] ||
+            value.texture->resource.p != plan.sources[i].p || value.published->resource.p != plan.destinations[i].p) {
+          capture_queues.copy_out_counters.lost.fetch_add(1, std::memory_order_relaxed);
+          return out;
+        }
+      }
+      ID3D12CommandList *lists[]{entry.list.p};
       owner.queue->ExecuteCommandLists(1, lists); // The hooks are suppressed in this callback.
-      entry->fence = fence;
-      return out;
+      entry.fence = fence;
+      return plan.copies;
+    }
+    // Requires mutex. The place whose cookie this is, while it exists.
+    queue_state *place_of(std::uint64_t cookie) {
+      for (auto &value : capture_queues.queues) if (value && value->cookie == cookie) return value.get();
+      return nullptr;
     }
     void submitted(std::uint64_t native, std::uint32_t count, const native_observer::command_identity *values) {
       const auto game_at = game_submission_position();
-      std::lock_guard lock(mutex);
+      copy_out_plan plan;
+      std::unique_lock lock(mutex);
       apply_executed(native, count, values);
       auto *owner = queue(native);
       if (!owner) owner = register_compute_producer(native, count, values);
       if (!owner) return;
       native = reinterpret_cast<std::uint64_t>(owner->queue.p);
       std::array<bool, slot_limit> producers{}, consumers{};
-      const bool depth_used = identify_submissions(capture_pool.slots, count, values, producers, consumers);
       std::array<bool, diagnostic_slot_limit> auxiliary_producers, auxiliary_consumers;
-      bool auxiliary_used = false;
-      if (capture_pool.diagnostic_slots_active) {
-        auxiliary_producers.fill(false); auxiliary_consumers.fill(false);
-        auxiliary_used = identify_submissions(capture_pool.diagnostic_slots, count, values, auxiliary_producers, auxiliary_consumers);
-      }
+      bool depth_used = false, auxiliary_used = false;
+      // The copies this submission carries (producers) and reads (consumers).
+      const auto identify = [&] {
+        producers.fill(false); consumers.fill(false);
+        depth_used = identify_submissions(capture_pool.slots, count, values, producers, consumers);
+        auxiliary_used = false;
+        if (capture_pool.diagnostic_slots_active) {
+          auxiliary_producers.fill(false); auxiliary_consumers.fill(false);
+          auxiliary_used = identify_submissions(capture_pool.diagnostic_slots, count, values, auxiliary_producers, auxiliary_consumers);
+        }
+      };
+      identify();
       if (!depth_used && !auxiliary_used) return;
       // The queue of each list that carried a depth copy, which its next
       // copy's copy-out storage is predicted from (U-C1b, record_impl): one
@@ -443,9 +552,27 @@ namespace sunshine_streamline::depth_capture {
           list->executed_queue = owner->cookie;
         if (!owner->compute_producer) last_direct_copy_queue = owner->cookie;
       }
-      const bool needs_fence = auxiliary_used || needs_submission_fence(producers, consumers);
+      bool needs_fence = auxiliary_used || needs_submission_fence(producers, consumers);
+      // A copy-out's list is recorded without the lock. Other threads change
+      // captures meanwhile, so the submission is identified again once the
+      // lock is held again; a place gone meanwhile (release_device, a retired
+      // queue) ends it, its copies never seen submitted, as when the place
+      // went before the hook took the lock.
+      if (depth_used && needs_fence && copy_out(*owner, producers, plan)) {
+        lock.unlock();
+        record_copy_out(plan);
+        lock.lock();
+        owner = place_of(plan.cookie);
+        if (!owner) {
+          capture_queues.copy_out_counters.lost.fetch_add(1, std::memory_order_relaxed);
+          return;
+        }
+        identify();
+        needs_fence = auxiliary_used || needs_submission_fence(producers, consumers);
+      }
       const auto fence = needs_fence ? ++owner->next_fence : 0;
-      const auto copied = depth_used ? copy_out(*owner, producers, fence) : std::array<bool, slot_limit>{};
+      const auto copied = plan.reserved ? execute_copy_out(*owner, producers, fence, plan) : std::array<bool, slot_limit>{};
+      if (!depth_used && !auxiliary_used) return;
       const auto copy_at = copy_out_position(copied);
       // This callback runs AFTER the actual native ExecuteCommandLists. Signal
       // therefore follows the copied/consumed pixels (and copy-outs) on this queue.

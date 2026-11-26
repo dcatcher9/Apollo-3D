@@ -27,9 +27,10 @@ namespace sunshine_streamline::depth_capture {
       return verdict.ordered;
     }
     // This game submission's queue-order position, read before any list of
-    // the add-on's own runs on this thread (copy_out takes the next one).
+    // the add-on's own runs on this thread (execute_copy_out takes the next
+    // one).
     native_observer::position game_submission_position() { return native_observer::last_execute_position(); }
-    // The copy-out list's queue-order position, if copy_out ran one.
+    // The copy-out list's queue-order position, if execute_copy_out ran one.
     native_observer::position copy_out_position(const std::array<bool, slot_limit> &copied) {
       return std::find(copied.begin(), copied.end(), true) != copied.end() ?
         native_observer::last_execute_position() : native_observer::position{};

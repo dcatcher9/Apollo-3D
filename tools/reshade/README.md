@@ -962,7 +962,10 @@ regressions, the main thread presents FG frames (SL camera, FG tags, DLSS-G's ev
 while N threads each record four lists per Present on the presenting queue (Reset, depth barriers, a
 depth copy, Close, ExecuteCommandLists), and `MEASURE capture lock contention` lines report the
 counters of that window (no timing verdict; it measures, for the owner's capture-lock split ruling
-Q5). Then, at rest (11-01, F91), it checks the counter's own invariants, which hold on any machine:
+Q5). `--copy-out` after N (11-25) evaluates the main thread's SR depth on a ring of lists of another
+queue that the presenting queue waits for, as `sr-other-queue` does, so each frame's submission there
+makes a copy-out in the submission hook, the section that held E33's long waits; it requires the
+newest copy to have been copied out. Then, at rest (11-01, F91), it checks the counter's own invariants, which hold on any machine:
 the recorders' acquisitions count in the game role and at least one per Present in the present
 role, every role's histogram holds its waits (those of 1 ms or more from the 1000 us bucket on),
 each wait has one holder site, and with Diagnostics every present-thread hold is timed (none
@@ -2717,9 +2720,12 @@ closed, and the fix removes the row). Each provider run with an interposer exerc
   source age after FG options turn on, the reader's own queue copies out too, since FG's first
   Present moves Present after that frame's copies were submitted there (until 10-27 those kept the
   Reset rule, so that first FG Present was flat). The
-  capture test pins each case (`copy_out_replay`, `copy_out_reader_moves`,
+  capture test pins each case (`copy_out_replay`, `copy_out_lost_race`, `copy_out_reader_moves`,
   `copy_out_takes_retired_fg_storage`, the compute-list
-  cases; `copy_out_reader_moves` also checks each copy's submission stamp through real
+  cases; `copy_out_lost_race` (11-25) checks the list recorded without the capture lock: a Present
+  while it records finds the copy pending, and a copy whose source is retired meanwhile leaves the
+  list unexecuted (`lost`), its storage unwritten and the ring's list free for the next copy;
+  `copy_out_reader_moves` also checks each copy's submission stamp through real
   submissions, since 11-01: a copy submitted on the reader's queue takes its submission's Present,
   and a render-queue copy after Present moved to DLSS-G's queue keeps its call's stamp, PD9, F61);
   with U-C1b reverted they fail, and the fixed timelines' seed `6e5b9c154ddc34d8` shows its
