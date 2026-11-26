@@ -1103,8 +1103,8 @@ namespace models {
    * sampling geometry. Subtitle-suppressed completions still authenticate their live geometry,
    * but their OCR/SLR views are not exact-frame evidence. A device-conditional completion also
    * cannot expose exact-current CPU OCR lineage before its shared infer/reuse outcome is known.
-   * Reuse holds the complete prior analysis bundle. Callers gate diagnostic and baseline uses on
-   * subtitle_evidence_is_exact_frame(); the completed receipt and GPU trace identify the outcome.
+   * Reuse holds the complete prior analysis bundle; the completed receipt and GPU trace identify
+   * the outcome, and subtitle_evidence_is_exact_frame() tells exact-frame OCR/SLR evidence apart.
    */
   bool parallax_v2_result_is_authenticated(const depth_observation_views_t &result);
 

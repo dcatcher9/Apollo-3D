@@ -1953,7 +1953,7 @@ namespace platf::sbs_debug {
       nlohmann::json metadata {
         {"schema", 2u}, {"diagnostic_only", true}, {"captured", e.captured},
         {"unavailable_reason", e.unavailable_reason},
-        {"observation_point", "PSGet bindings inside recorder immediately before Draw and cleanup, inside selected/shared scopes"},
+        {"observation_point", "PSGet bindings inside the recorder immediately before Draw and cleanup"},
         {"snapshot_order", "same immediate-context conversion; copies precede terminal dump event and next live reuse"},
         {"conversion_frame", e.conversion_frame}, {"model_frame", e.model_frame}, {"observation_us", e.observation_us},
         {"program", e.program}, {"selected_shader", e.selected_shader},

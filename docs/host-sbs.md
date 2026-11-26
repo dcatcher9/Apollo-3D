@@ -1896,8 +1896,9 @@ The tagged 8-word depth-health state (`DepthHealthState`, schema 8, contract
 `tools/sbsbench/contracts/sbs-adaptive-state-v8.json`) is CPU-initialized to its tag and zeros at
 creation and on input-domain reset. Word 0 is the contract tag, words 1 and 2 are the empty and
 collapsed raw counts, word 3 is reserved zero, and words 4--7 are the valid-depth fraction,
-effective raw range width, `range_collapsed` and `depth_ready`. `depth_minmax_ema_cs` is its only
-GPU producer; receipt, harness and Dump 3D readers reject a non-zero reserved word. State resolve,
+effective raw range width, `range_collapsed` and `depth_ready`. The frame publication
+(`publish_main` of `depth_coordinate_v2_quantiles_cs`) is its only GPU producer; receipt, harness
+and Dump 3D readers reject a non-zero reserved word. State resolve,
 the V2 map, the subtitle locator and the contour pass fail closed without the tag. State resolve
 writes the V2 state word `control_reserved_0` as zero. That word, UIP4 word 20 and SCT5 word 3
 are reserved zero: the locator, contour, shared current-glyph, receipt and Dump 3D readers require
