@@ -1119,10 +1119,10 @@ namespace nvenc {
       mark_input_producer_end(slot_index);
     }
     last_submit_ = {};
+    // Timed for the encode loop's 20 s line (last_frame_timing(), last_submit_timing()).
     std::chrono::steady_clock::time_point stage_started;
     if (stage_diagnostics) {
       stage_started = std::chrono::steady_clock::now();
-      stage_diagnostics->submit.first_point(stage_started);
     }
     // Everything the retrieving thread reads about this picture is written before the phase
     // store below hands the slot over.
@@ -1141,9 +1141,7 @@ namespace nvenc {
       slot.phase.store(input_phase_t::submitted, std::memory_order_release);
     }
     if (stage_diagnostics) {
-      const auto stage_ended = std::chrono::steady_clock::now();
-      stage_diagnostics->submit.second_point_and_log(stage_ended);
-      last_submit_ = stage_ended - stage_started;
+      last_submit_ = std::chrono::steady_clock::now() - stage_started;
     }
     if (nvenc_failed(submit_status)) {
       BOOST_LOG(error) << "NvEnc: NvEncEncodePicture() failed: " << last_nvenc_error_string;

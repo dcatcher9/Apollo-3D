@@ -433,7 +433,6 @@ namespace nvenc {
 
     struct stage_diagnostics_t {
       logging::time_delta_periodic_logger input_map {info, "Video NVENC: input map CPU"};
-      logging::time_delta_periodic_logger submit {info, "Video NVENC: picture submission CPU"};
       logging::time_delta_periodic_logger completion_wait {info, "Video NVENC: asynchronous completion wait"};
       logging::time_delta_periodic_logger bitstream_lock {info, "Video NVENC: bitstream lock CPU"};
       logging::time_delta_periodic_logger bitstream_copy {info, "Video NVENC: bitstream copy CPU"};

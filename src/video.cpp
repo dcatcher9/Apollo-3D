@@ -118,16 +118,6 @@ namespace video {
         "Video input: capture handoff to reconversion",
         "ms",
       };
-      logging::min_max_avg_periodic_logger<double> conversion_call {
-        info,
-        "Video conversion: CPU call including requested dump work",
-        "ms",
-      };
-      logging::min_max_avg_periodic_logger<double> nvenc_call {
-        info,
-        "Video NVENC: encode and retrieve call",
-        "ms",
-      };
 
       void begin_conversion(const platf::img_t &img) {
         const auto entered = detail::diagnostic_clock_t::now();
@@ -1238,7 +1228,7 @@ namespace video {
   }
 
   /** Publish one retrieved picture. Runs on whichever thread retrieved it; with pictures in flight
-   *  that is the retrieving thread, which alone uses `diagnostics->nvenc_call` then. */
+   *  that is the retrieving thread. */
   encoded_packet_publish_result_t publish_encoded_frame(
     nvenc::nvenc_encoded_frame &&encoded_frame,
     const encoded_frame_context_t &frame,
@@ -1246,13 +1236,10 @@ namespace video {
     packet_queue_t &packets,
     encode_stage_diagnostics_t *diagnostics
   ) {
-    if (diagnostics) {
+    if (diagnostics && diagnostics->performance) {
       const auto measured_at = detail::diagnostic_clock_t::now();
-      log_diagnostic_elapsed(diagnostics->nvenc_call, frame.encode_started, measured_at);
-      if (diagnostics->performance) {
-        if (const auto elapsed = detail::diagnostic_elapsed_ms(frame.encode_started, measured_at)) {
-          diagnostics->performance->record(host_sbs_telemetry::stage::encode, *elapsed, measured_at);
-        }
+      if (const auto elapsed = detail::diagnostic_elapsed_ms(frame.encode_started, measured_at)) {
+        diagnostics->performance->record(host_sbs_telemetry::stage::encode, *elapsed, measured_at);
       }
     }
     if (encoded_frame.data.empty()) {
@@ -1587,13 +1574,10 @@ namespace video {
       if (loop_stats) {
         loop_stats->converted(std::chrono::steady_clock::now() - *started);
       }
-      if (encode_diagnostics) {
+      if (encode_diagnostics && encode_diagnostics->performance) {
         const auto measured_at = detail::diagnostic_clock_t::now();
-        log_diagnostic_elapsed(encode_diagnostics->conversion_call, started, measured_at);
-        if (encode_diagnostics->performance) {
-          if (const auto elapsed = detail::diagnostic_elapsed_ms(started, measured_at)) {
-            encode_diagnostics->performance->record(host_sbs_telemetry::stage::conversion, *elapsed, measured_at);
-          }
+        if (const auto elapsed = detail::diagnostic_elapsed_ms(started, measured_at)) {
+          encode_diagnostics->performance->record(host_sbs_telemetry::stage::conversion, *elapsed, measured_at);
         }
       }
       return result;

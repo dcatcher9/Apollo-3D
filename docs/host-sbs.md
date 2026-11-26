@@ -2337,7 +2337,9 @@ owned the stream carries only the last copied desktop's timestamps, and the enco
 instead: it records no capture or conversion content age and no handoff to conversion
 (`video::detail::diagnostic_captured_content_timestamp`). Before 10-07 those ages grew by the log
 window, to 115 s, for pixels nothing encoded. The export's own age is the output stage's. Diagnostics report fresh and repeated output separately, along with capture
-handoff, conversion, NVENC encode/retrieve, encoded-packet queue residence, and packetization time.
+handoff, encoded-packet queue residence, and packetization time. Conversion and NVENC
+encode/retrieve time go to Host Stats and to the encode loop's 20 s line (conversion, submission
+and completion-wait totals; submission-to-packet average and maximum).
 The packetization sample adds the frame pacing plan and each FEC block's data-shard packing time.
 It excludes parity encoding, pacing waits, and socket sends.
 The standard video-header processing-latency field measures the current conversion-pass start
@@ -2350,8 +2352,9 @@ diagnostics disabled; diagnostic stage timing, optional outcome readback and con
 remain disabled. Completed-publication receipts and their routine depth-health copy are independent
 of diagnostics. Actual
 source/content timestamps and RTP cadence are unchanged.
-NVENC also reports input mapping, picture submission, completion wait, and bitstream lock/copy/
-unlock/unmap separately. CPU stage summaries use the existing twenty-second min/max/average logs.
+NVENC also reports input mapping, completion wait, and bitstream lock/copy/unlock/unmap separately,
+in the existing twenty-second min/max/average logs; its picture submission is in the encode loop's
+line.
 The completion wait includes any unfinished input-surface GPU work and the host thread's wakeup
 delay as well as encoding; it is not an isolated NVENC hardware timer. The encoder keeps up to two
 pictures in flight with separate input surfaces, bitstreams and events, so the next capture
