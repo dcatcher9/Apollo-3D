@@ -2837,7 +2837,7 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, OptionalPreprocessRequiresAuthenticate
     receipt.decision,
     static_cast<std::uint32_t>(cuda_conditional_graph::branch_e::infer)
   );
-  EXPECT_FALSE(cuda_conditional_graph::authenticated_optional_infer_receipt(
+  EXPECT_FALSE(cuda_conditional_graph::authenticated_optional_ocr_receipt(
     receipt, request
   )) << "The CUDA setter must fail depth open without running OCR";
   EXPECT_EQ(receipt.reserved, 0u);

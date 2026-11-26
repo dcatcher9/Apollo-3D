@@ -2541,7 +2541,7 @@ namespace platf::dxgi {
             }
 
             const bool subtitle_pin_candidate = selected_matte_ready && geometry.selected_matte &&
-              geometry.selected_receipt && selected_shared_warp_programs.ready();
+              geometry.selected_receipt && selected_shared_warp_programs.direct_glyph_completed_ready();
             // A frame taken for a Dump 3D package is drawn without the text pin: the package
             // describes the Host geometry, and its format has no place for this route.
             const bool text_pin_candidate = text_game_ai_active && selected_shared_warp_programs.text_game_ready() &&
@@ -2626,7 +2626,6 @@ namespace platf::dxgi {
             constexpr auto pin_bindings = shared_warp::resources_t::binding_policy_e::converter_owned;
             shared_warp::views_t current_shared_warp;
             bool shared_warp_selected = false;
-            bool direct_glyph_prepare_selected = false;
             // Preparation and the pre-Draw observer derive the same literal request from
             // the recorder command, rather than maintaining a second copy of its operands.
             const auto shared_request_for_draw = [&] {
@@ -2641,9 +2640,7 @@ namespace platf::dxgi {
             };
             if (selected_draw && subtitle_constants.enabled == 1u) {
               const auto request = shared_request_for_draw();
-              const bool prepare_direct_glyph = selected_shared_warp_programs.direct_glyph_completed_ready();
-              const auto program = prepare_direct_glyph ?
-                selected_shared_warp_programs.direct_glyph_completed_program() : selected_shared_warp_programs.program();
+              const auto program = selected_shared_warp_programs.direct_glyph_completed_program();
               std::string shared_error;
               if (selected_shared_warp.prepare_subtitle(
                     device.get(), device_ctx.get(), program, request,
@@ -2652,7 +2649,6 @@ namespace platf::dxgi {
                   ) && selected_shared_warp.matches(device_ctx.get(), request)) {
                 current_shared_warp = selected_shared_warp.views();
                 shared_warp_selected = true;
-                direct_glyph_prepare_selected = prepare_direct_glyph;
                 draw_command.pixel_shader = program.pixel;
               }
             }
@@ -2746,9 +2742,7 @@ namespace platf::dxgi {
                     e.shared_pin_rows = actual[14];
                     e.shared_pin_geometry = constants[4];
                     e.shared_pin_source_closure = e.pixel_shader_closure;
-                    if (direct_glyph_prepare_selected) {
-                      e.shared_pin_model_prepare_closure = selected_shared_warp_programs.model_prepare_closure();
-                    }
+                    e.shared_pin_model_prepare_closure = selected_shared_warp_programs.model_prepare_closure();
                   }
                   e.geometry_constants = constants[0];
                   e.subtitle_constants = constants[1];

@@ -206,21 +206,6 @@ namespace models {
     return depth_tensor_shape_t {2 * coarse.width, 2 * coarse.height};
   }
 
-  inline constexpr bool host_sbs_convex2x_shape_relation(
-    const depth_tensor_shape_t coarse,
-    const depth_tensor_shape_t refined
-  ) noexcept {
-    const auto expected = host_sbs_convex2x_field_shape(coarse);
-    return expected && *expected == refined;
-  }
-
-  /** Operator/engine shape support only; this does not grant live-rendering authority. */
-  inline constexpr bool host_sbs_convex2x_operator_shape_is_supported(
-    const depth_tensor_shape_t coarse
-  ) noexcept {
-    return host_sbs_convex2x_field_shape(coarse).has_value();
-  }
-
   /** Double an authenticated coarse content rectangle without a second aspect-ratio fit.
    *
    * Re-fitting can move an odd content edge and therefore change the 2x pixel-shuffle phase.

@@ -7983,13 +7983,14 @@ namespace models {
         depth_coordinate_v2_cbuffer.Get(),
         subtitle_locator_cbuffer.Get(),
       };
-      ID3D11ShaderResourceView *null_srvs[10] = {};
+      ID3D11ShaderResourceView *null_srvs[8] = {};
       context->CSSetConstantBuffers(0, 3, constant_buffers);
       // Keep OCR ownership and UI timing in the same authenticated observation dispatch.
       // An unusable geometry publication suspends UI timing and publishes Base exactly.
       // Joint depth reuse and explicit subtitle suppression hold the complete subtitle tuple.
       context->CSSetShader(subtitle_locator_resolve_cs.Get(), nullptr, 0);
-      ID3D11ShaderResourceView *resolve_srvs[10] = {
+      // The resolve reads t0..t2, t6 and t7; t3..t5 are the condition pass's inputs.
+      ID3D11ShaderResourceView *resolve_srvs[8] = {
         depth_coordinate_v2_state_srv.Get(),
         depth_health_state_srv.Get(),
         depth_coordinate_v2_final_srv.Get(),
@@ -7998,12 +7999,10 @@ namespace models {
         nullptr,
         subtitle_contour_identity.srv.Get(),
         ocr_box_record_srv.Get(),
-        ocr_output_srv.Get(),
-        subtitle_contour_probability_snapshot.srv.Get(),
       };
-      // The prior completed identity/probability remain immutable through this resolve; the
-      // contour history/snapshot passes overwrite them only after all ten SRVs are unbound.
-      context->CSSetShaderResources(0, 10, resolve_srvs);
+      // The prior completed identity remains immutable through this resolve; the contour
+      // history/snapshot passes overwrite it only after these SRVs are unbound.
+      context->CSSetShaderResources(0, 8, resolve_srvs);
       ID3D11UnorderedAccessView *resolve_uavs[3] = {
         subtitle_locator_state_uav.Get(),
         nullptr,
@@ -8014,7 +8013,7 @@ namespace models {
         near_identical_transaction.dispatch.Get(),
         near_identical_gpu_observation_one_byte_offset
       );
-      context->CSSetShaderResources(0, 10, null_srvs);
+      context->CSSetShaderResources(0, 8, null_srvs);
       ID3D11UnorderedAccessView *null_resolve_uavs[3] = {};
       context->CSSetUnorderedAccessViews(2, 3, null_resolve_uavs, nullptr);
 

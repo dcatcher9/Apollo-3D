@@ -207,7 +207,6 @@ typedef struct CUevent_st* CUevent;
 typedef CUresult(__stdcall* PFN_cuEventCreate)(CUevent* phEvent, unsigned int Flags);
 typedef CUresult(__stdcall* PFN_cuEventRecord)(CUevent hEvent, CUstream hStream);
 typedef CUresult(__stdcall* PFN_cuEventQuery)(CUevent hEvent);
-typedef CUresult(__stdcall* PFN_cuEventSynchronize)(CUevent hEvent);
 typedef CUresult(__stdcall* PFN_cuEventElapsedTime)(float* pMilliseconds, CUevent hStart, CUevent hEnd);
 typedef CUresult(__stdcall* PFN_cuEventDestroy)(CUevent hEvent);
 typedef CUresult(__stdcall* PFN_cuGraphAddEventRecordNode)(CUgraphNode* phGraphNode, CUgraph hGraph, const CUgraphNode* dependencies, size_t numDependencies, CUevent event);
@@ -276,7 +275,6 @@ struct cuda_driver_api {
     PFN_cuEventCreate cuEventCreate = nullptr;
     PFN_cuEventRecord cuEventRecord = nullptr;
     PFN_cuEventQuery cuEventQuery = nullptr;
-    PFN_cuEventSynchronize cuEventSynchronize = nullptr;
     PFN_cuEventElapsedTime cuEventElapsedTime = nullptr;
     PFN_cuEventDestroy cuEventDestroy = nullptr;
     PFN_cuGraphAddEventRecordNode cuGraphAddEventRecordNode = nullptr;
@@ -419,7 +417,6 @@ struct cuda_driver_api {
                 api.cuEventCreate = (PFN_cuEventCreate)GetProcAddress(api.hMod, "cuEventCreate");
                 api.cuEventRecord = (PFN_cuEventRecord)GetProcAddress(api.hMod, "cuEventRecord");
                 api.cuEventQuery = (PFN_cuEventQuery)GetProcAddress(api.hMod, "cuEventQuery");
-                api.cuEventSynchronize = (PFN_cuEventSynchronize)GetProcAddress(api.hMod, "cuEventSynchronize");
                 api.cuEventElapsedTime = (PFN_cuEventElapsedTime)GetProcAddress(api.hMod, "cuEventElapsedTime");
                 api.cuGraphAddEventRecordNode = (PFN_cuGraphAddEventRecordNode)GetProcAddress(api.hMod, "cuGraphAddEventRecordNode");
                 api.cuEventDestroy = (PFN_cuEventDestroy)GetProcAddress(api.hMod, "cuEventDestroy_v2");

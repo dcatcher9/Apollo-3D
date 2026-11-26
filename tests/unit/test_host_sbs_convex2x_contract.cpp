@@ -46,8 +46,6 @@ namespace {
       ASSERT_TRUE(refined.has_value());
       EXPECT_EQ(refined->width, 2 * coarse.width);
       EXPECT_EQ(refined->height, 2 * coarse.height);
-      EXPECT_TRUE(models::host_sbs_convex2x_shape_relation(coarse, *refined));
-      EXPECT_TRUE(models::host_sbs_convex2x_operator_shape_is_supported(coarse));
       EXPECT_TRUE(
         models::prod_zipdepth_convex2x::live_geometry_shape_relation(
           static_cast<std::uint32_t>(coarse.width),
@@ -61,11 +59,11 @@ namespace {
 
   TEST(HostSbsConvex2xContract, RejectsUnauthenticatedShapesAndRelations) {
     EXPECT_FALSE(models::host_sbs_convex2x_field_shape({1008, 434}));
-    EXPECT_FALSE(models::host_sbs_convex2x_operator_shape_is_supported({1008, 434}));
     EXPECT_FALSE(models::host_sbs_convex2x_field_shape({0, 434}));
-    EXPECT_FALSE(models::host_sbs_convex2x_shape_relation(
-      {770, 434}, {1540, 867}
-    ));
+    EXPECT_NE(
+      models::host_sbs_convex2x_field_shape({770, 434}),
+      (models::depth_tensor_shape_t {1540, 867})
+    );
   }
 
   TEST(HostSbsConvex2xContract, DoublesOddContentEdgesWithoutRefitting) {

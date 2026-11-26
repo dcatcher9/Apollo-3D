@@ -128,11 +128,7 @@ bool SelectedMatteAuthorized() {
     uint kind=SelectedMatteReceipt[2u],algorithm=SelectedMatteReceipt[62u];
     bool ordinary=kind>=1u&&kind<=3u&&algorithm==1u;
     if(!ordinary) {
-#if defined(HOST_SBS_DIRECT_GLYPH_SELECTED_MATTE)
         if(kind!=4u||(algorithm!=3u&&algorithm!=4u))return false;
-#else
-        if(kind!=4u||algorithm!=3u)return false;
-#endif
         ContourIdentity.GetDimensions(n,s);
         if(n!=V2_SUBTITLE_CONTOUR_HISTORY_WORD_COUNT||s!=4u)return false;
     }

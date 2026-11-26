@@ -11,10 +11,10 @@
 namespace models::host_sbs_compute_state {
   /**
    * Saves compute SRVs [0, Srvs), UAVs [0, Uavs) and constant buffers [0, Constants), the
-   * compute shader with its class instances and the predicate, then clears the predicate so the
+   * compute shader and the predicate, then clears the predicate so the
    * pass is never skipped. Restoring first unbinds those slots, so a saved view is not refused
    * because the pass still holds its resource on another slot. Slots past the counts are never
-   * read or written.
+   * read or written. No Host SBS shader uses class linkage, so none is saved.
    */
   template<UINT Srvs, UINT Uavs, UINT Constants>
   class guard_t {
@@ -24,13 +24,12 @@ namespace models::host_sbs_compute_state {
       std::array<ID3D11ShaderResourceView *, Srvs> srvs {};
       std::array<ID3D11UnorderedAccessView *, Uavs> uavs {};
       std::array<ID3D11Buffer *, Constants> constants {};
-      std::array<ID3D11ClassInstance *, instance_capacity> instances {};
       ID3D11ComputeShader *shader = nullptr;
       ID3D11Predicate *predicate = nullptr;
       context_->CSGetShaderResources(0u, Srvs, srvs.data());
       context_->CSGetUnorderedAccessViews(0u, Uavs, uavs.data());
       context_->CSGetConstantBuffers(0u, Constants, constants.data());
-      context_->CSGetShader(&shader, instances.data(), &instance_count_);
+      context_->CSGetShader(&shader, nullptr, nullptr);
       context_->GetPredication(&predicate, &predicate_value_);
       context_->SetPredication(nullptr, FALSE);
       for (UINT i = 0u; i < Srvs; ++i) {
@@ -42,9 +41,6 @@ namespace models::host_sbs_compute_state {
       for (UINT i = 0u; i < Constants; ++i) {
         constants_[i].Attach(constants[i]);
       }
-      for (UINT i = 0u; i < instance_count_; ++i) {
-        instances_[i].Attach(instances[i]);
-      }
       shader_.Attach(shader);
       predicate_.Attach(predicate);
     }
@@ -54,7 +50,6 @@ namespace models::host_sbs_compute_state {
       std::array<ID3D11ShaderResourceView *, Srvs> srvs {};
       std::array<ID3D11UnorderedAccessView *, Uavs> uavs {};
       std::array<ID3D11Buffer *, Constants> constants {};
-      std::array<ID3D11ClassInstance *, instance_capacity> instances {};
       for (UINT i = 0u; i < Srvs; ++i) {
         srvs[i] = srvs_[i].Get();
       }
@@ -64,13 +59,10 @@ namespace models::host_sbs_compute_state {
       for (UINT i = 0u; i < Constants; ++i) {
         constants[i] = constants_[i].Get();
       }
-      for (UINT i = 0u; i < instance_count_; ++i) {
-        instances[i] = instances_[i].Get();
-      }
       context_->CSSetShaderResources(0u, Srvs, srvs.data());
       context_->CSSetUnorderedAccessViews(0u, Uavs, uavs.data(), nullptr);
       context_->CSSetConstantBuffers(0u, Constants, constants.data());
-      context_->CSSetShader(shader_.Get(), instance_count_ == 0u ? nullptr : instances.data(), instance_count_);
+      context_->CSSetShader(shader_.Get(), nullptr, 0u);
       context_->SetPredication(predicate_.Get(), predicate_value_);
     }
 
@@ -88,16 +80,12 @@ namespace models::host_sbs_compute_state {
     }
 
   private:
-    static constexpr UINT instance_capacity = 256u;
-
     ID3D11DeviceContext *context_;
     std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>, Srvs> srvs_;
     std::array<Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>, Uavs> uavs_;
     std::array<Microsoft::WRL::ComPtr<ID3D11Buffer>, Constants> constants_;
-    std::array<Microsoft::WRL::ComPtr<ID3D11ClassInstance>, instance_capacity> instances_;
     Microsoft::WRL::ComPtr<ID3D11ComputeShader> shader_;
     Microsoft::WRL::ComPtr<ID3D11Predicate> predicate_;
-    UINT instance_count_ = instance_capacity;
     BOOL predicate_value_ = FALSE;
   };
 }  // namespace models::host_sbs_compute_state

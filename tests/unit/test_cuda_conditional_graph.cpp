@@ -1096,7 +1096,7 @@ probe_sample:
              observed_depth == expected_depth_output &&
              observed_optional == expected_optional_output &&
              authenticated_receipt(receipt, request) == expected_authenticated_receipt &&
-             authenticated_optional_infer_receipt(receipt, request) ==
+             authenticated_optional_ocr_receipt(receipt, request) ==
                expected_optional_receipt &&
              (!expected_authenticated_receipt ||
               receipt.decision == static_cast<std::uint32_t>(expected_branch));
@@ -1422,7 +1422,7 @@ TEST(CudaConditionalGraphContract, MalformedAndStaleInputsFailOpenToInfer) {
 
   const auto zero_request = make_request(0u, work_flag_e::optional_infer);
   EXPECT_FALSE(authenticated_request(zero_request));
-  EXPECT_FALSE(authenticated_optional_infer_receipt(
+  EXPECT_FALSE(authenticated_optional_ocr_receipt(
     resolve_proposal(make_proposal(branch_e::infer, 0u), zero_request),
     zero_request
   ));
@@ -3083,7 +3083,7 @@ TEST(CudaConditionalGraphHardware, AuditsCapturedTensorRtOcrTopology) {
   );
   EXPECT_TRUE(authenticated_receipt(receipt, no_optional_request));
   EXPECT_EQ(receipt.decision, static_cast<std::uint32_t>(branch_e::infer));
-  EXPECT_FALSE(authenticated_optional_infer_receipt(receipt, no_optional_request));
+  EXPECT_FALSE(authenticated_optional_ocr_receipt(receipt, no_optional_request));
   std::uint32_t mandatory_output_word = 0u;
   ASSERT_EQ(
     cuda.cuMemcpyDtoH(

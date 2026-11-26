@@ -238,13 +238,6 @@ namespace cuda_conditional_graph {
            receipt.reserved == optional_ocr_receipt_magic;
   }
 
-  [[nodiscard]] constexpr bool authenticated_optional_infer_receipt(
-    const decision_record_t &receipt,
-    const request_record_t &request
-  ) noexcept {
-    return authenticated_optional_ocr_receipt(receipt, request);
-  }
-
   /** Exact embedded PTX passed to nvcuda.dll's JIT; no toolkit artifact is loaded. */
   [[nodiscard]] std::string_view bridge_ptx_source() noexcept;
 
