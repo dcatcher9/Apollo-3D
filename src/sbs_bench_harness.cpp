@@ -3278,13 +3278,16 @@ namespace sbs_bench {
     if (!depth_coordinate_v2_gpu_mode) {
       const bool live_subtitle_work = o.direct_glyph_qualification || o.follow || conversion_subtitle_model;
       using legacy_matte_e = models::video_depth_estimator::subtitle_legacy_matte_e;
+      using normalized_depth_e = models::video_depth_estimator::normalized_depth_diagnostics_e;
+      // Only evaluation artifacts read the normalized depth and EMA motion mask (ema_mask_*.png
+      // and direct-parallax replay). Whole-clip analysis and Convert Video skip both passes.
       estimator = std::make_unique<models::video_depth_estimator>(
         dev,
         ctx,
         fs::path(SUNSHINE_ASSETS_DIR),
         sbs_cfg,
         model,
-        models::video_depth_estimator::normalized_depth_diagnostics_e::enabled,
+        o.artifacts == artifact_mode_e::evaluation ? normalized_depth_e::enabled : normalized_depth_e::disabled,
         live_subtitle_work ? legacy_matte_e::on_demand : legacy_matte_e::always
       );
       if (o.subtitle_conditioning_live_policy || live_subtitle_work) {

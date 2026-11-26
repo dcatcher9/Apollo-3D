@@ -1800,8 +1800,8 @@ Ordinary subtitle work consumes OCR output with complete `RQST`/`CBRG`/`OOCR` pr
 its requested abstention, then advances UIP4 and writes the complete conditioned Final diagnostic
 from immutable Base together with the native matte.
 
-Harness runs, including Convert Video, retain normalized depth and the EMA motion mask by
-default. Ordinary live sessions, including Dump 3D, omit these diagnostic textures and passes.
+Evaluation harness runs retain normalized depth and the EMA motion mask. Convert Video, Analyze
+Only and ordinary live sessions, including Dump 3D, omit these diagnostic textures and passes.
 
 A reuse receipt preserves the raw-depth range, camera, model-input history, DAV2/V2 Base, OCR8,
 UIP4, condition parameters, conditioned Final diagnostic, native matte, SCT5 and joined source
