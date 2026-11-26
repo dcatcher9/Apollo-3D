@@ -78,6 +78,16 @@ namespace {
     bool ignore_apply = false;
     bool reset_colors_on_apply = false;
     bool color_set_ok = true;
+    // Queries after an accepted color request before the fake reports it, as Windows can.
+    int color_report_delay = 0;
+
+    struct pending_color_t {
+      UINT32 target_id = 0;
+      platf::display_config::advanced_color_state_t color;
+      int queries_left = 0;
+    };
+
+    std::vector<pending_color_t> pending_colors;
     int query_count = 0;
     int mutate_on_query = 0;
     std::set<int> failed_queries;
@@ -91,6 +101,19 @@ namespace {
         [this]() -> std::optional<snapshot_t> {
           events.push_back("query");
           const int current_query = ++query_count;
+          for (auto &pending : pending_colors) {
+            if (--pending.queries_left > 0) {
+              continue;
+            }
+            for (size_t i = 0; i < current.paths.size(); ++i) {
+              if (current.paths[i].targetInfo.id == pending.target_id) {
+                current.colors[i] = pending.color;
+              }
+            }
+          }
+          std::erase_if(pending_colors, [](const auto &pending) {
+            return pending.queries_left <= 0;
+          });
           if (current_query == mutate_on_query && mutation) {
             mutation(current);
           }
@@ -163,7 +186,11 @@ namespace {
           for (size_t i = 0; i < current.paths.size(); ++i) {
             const auto &candidate = current.paths[i];
             if (candidate.targetInfo.id == path.targetInfo.id && candidate.targetInfo.adapterId.HighPart == path.targetInfo.adapterId.HighPart && candidate.targetInfo.adapterId.LowPart == path.targetInfo.adapterId.LowPart) {
-              current.colors[i] = color;
+              if (color_report_delay > 0) {
+                pending_colors.push_back({path.targetInfo.id, color, color_report_delay});
+              } else {
+                current.colors[i] = color;
+              }
               return true;
             }
           }
@@ -2598,6 +2625,56 @@ TEST(PrimaryDisplayExclusive, CapturesAndRestoresHdrAfterReactivationAndRetriesC
   EXPECT_EQ(fake.current.paths.size(), 3u);
   EXPECT_TRUE(fake.journal);
   fake.color_set_ok = true;
+  ASSERT_TRUE(manager.restore());
+  EXPECT_TRUE(fake.current.colors[named_index(fake.current, L"physical-primary")]->hdr_user_enabled);
+  EXPECT_FALSE(fake.journal);
+}
+
+TEST(PrimaryDisplayExclusive, RestoreWaitsForAColorChangeWindowsReportsLate) {
+  fake_io_t fake;
+  auto &hdr = *fake.current.colors[1];
+  hdr.hdr_user_enabled = true;
+  hdr.advanced_color_active = true;
+  hdr.active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
+  fake.reset_colors_on_apply = true;
+  start_exclusive(fake);
+  fake.color_report_delay = 3;
+  std::vector<std::chrono::milliseconds> sleeps;
+  auto io = fake.io();
+  io.sleep = [&](std::chrono::milliseconds delay) {
+    sleeps.push_back(delay);
+  };
+  manager_t manager(io);
+  ASSERT_TRUE(manager.restore());
+  EXPECT_TRUE(fake.current.colors[named_index(fake.current, L"physical-primary")]->hdr_user_enabled);
+  EXPECT_FALSE(fake.journal);
+  // Two looks miss the change and the third sees it; each miss waits one poll interval.
+  EXPECT_EQ(sleeps, (std::vector<std::chrono::milliseconds>(2, std::chrono::milliseconds(50))));
+}
+
+TEST(PrimaryDisplayExclusive, RestoreKeepsRecoveryWhenAColorChangeIsNotReportedWithinTheBound) {
+  fake_io_t fake;
+  auto &hdr = *fake.current.colors[1];
+  hdr.hdr_user_enabled = true;
+  hdr.advanced_color_active = true;
+  hdr.active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
+  fake.reset_colors_on_apply = true;
+  start_exclusive(fake);
+  fake.color_report_delay = 1000;
+  std::vector<std::chrono::milliseconds> sleeps;
+  auto io = fake.io();
+  io.sleep = [&](std::chrono::milliseconds delay) {
+    sleeps.push_back(delay);
+  };
+  manager_t manager(io);
+  EXPECT_FALSE(manager.restore());
+  EXPECT_TRUE(fake.journal);
+  // 500 ms of 50 ms polls after the first look.
+  EXPECT_EQ(sleeps.size(), 10u);
+  EXPECT_FALSE(fake.current.colors[named_index(fake.current, L"physical-primary")]->hdr_user_enabled);
+
+  fake.pending_colors.clear();
+  fake.color_report_delay = 0;
   ASSERT_TRUE(manager.restore());
   EXPECT_TRUE(fake.current.colors[named_index(fake.current, L"physical-primary")]->hdr_user_enabled);
   EXPECT_FALSE(fake.journal);

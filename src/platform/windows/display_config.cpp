@@ -219,4 +219,32 @@ namespace platf::display_config {
     return set_wcg_state(adapter_id, target_id, enabled, device_info_api_t {});
   }
 
+  color_change_result_e change_color_and_settle(
+    const std::function<bool()> &request,
+    const std::function<color_observation_e()> &observe,
+    const color_settle_policy_t policy,
+    const std::function<bool(std::chrono::milliseconds)> &wait
+  ) {
+    if (!request()) {
+      return color_change_result_e::rejected;
+    }
+    const std::chrono::milliseconds::rep polls = policy.poll.count() > 0 ? policy.bound / policy.poll : 0;
+    for (std::chrono::milliseconds::rep poll = 0;; ++poll) {
+      switch (observe()) {
+        case color_observation_e::matched:
+          return color_change_result_e::verified;
+        case color_observation_e::failed:
+          return color_change_result_e::unverified;
+        case color_observation_e::pending:
+          break;
+      }
+      if (poll >= polls) {
+        return color_change_result_e::unverified;
+      }
+      if (!wait(policy.poll)) {
+        return color_change_result_e::interrupted;
+      }
+    }
+  }
+
 }  // namespace platf::display_config

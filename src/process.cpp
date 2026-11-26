@@ -774,35 +774,35 @@ namespace proc {
           // color state of its virtual display, and display-change reconciliation restores what
           // is recorded: a change it does not know about is undone by the next reconciliation,
           // and each such toggle makes Windows re-apply its own remembered layout.
-          enum class change_result_e {
-            rejected,
-            superseded,
-            unverified,
-            verified,
-          };
-          auto result = change_result_e::rejected;
+          using platf::display_config::color_change_result_e;
+          auto result = color_change_result_e::rejected;
           platf::primary_display::change_virtual_display_color(current_device, [&]() {
-            if (!VDISPLAY::setDisplayHDR(current_target->adapter_id, current_target->target_id, desired_hdr)) {
-              return false;
-            }
             // The API can accept the request before the topology reports the new state. Verify
-            // it instead of acknowledging a warm resume with the wrong dynamic-range contract.
-            if (wait_before_retry(100ms)) {
-              result = change_result_e::superseded;
-              return false;
-            }
-            const auto verified_target = platf::display_config::resolve_display_target(current_device);
-            observed_hdr = verified_target ?
-                             VDISPLAY::queryDisplayHDR(verified_target->adapter_id, verified_target->target_id) :
-                             std::nullopt;
-            result = observed_hdr && *observed_hdr == desired_hdr ? change_result_e::verified : change_result_e::unverified;
-            return result == change_result_e::verified;
+            // it instead of acknowledging a warm resume with the wrong dynamic-range contract;
+            // an unverified request is made again by the next pass of this loop.
+            result = platf::display_config::change_color_and_settle(
+              [&]() {
+                return VDISPLAY::setDisplayHDR(current_target->adapter_id, current_target->target_id, desired_hdr);
+              },
+              [&]() {
+                const auto verified_target = platf::display_config::resolve_display_target(current_device);
+                observed_hdr = verified_target ?
+                                 VDISPLAY::queryDisplayHDR(verified_target->adapter_id, verified_target->target_id) :
+                                 std::nullopt;
+                return observed_hdr && *observed_hdr == desired_hdr ? platf::display_config::color_observation_e::matched : platf::display_config::color_observation_e::pending;
+              },
+              {100ms, 100ms},
+              [&](std::chrono::milliseconds delay) {
+                return !wait_before_retry(delay);
+              }
+            );
+            return result == color_change_result_e::verified;
           });
-          if (result == change_result_e::verified) {
+          if (result == color_change_result_e::verified) {
             success = true;
             break;
           }
-          if (result == change_result_e::superseded || (result == change_result_e::rejected && wait_before_retry(100ms))) {
+          if (result == color_change_result_e::interrupted || (result == color_change_result_e::rejected && wait_before_retry(100ms))) {
             break;
           }
         }

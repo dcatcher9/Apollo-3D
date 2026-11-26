@@ -7,6 +7,7 @@
 #include "display_config.h"
 #include "exclusive_cursor_clip.h"
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -269,6 +270,9 @@ namespace platf::primary_display {
       // Optional remote physical recovery path. Forces the supplied mode down to the driver;
       // callers without this adapter retain the ordinary apply behavior.
       std::function<bool(snapshot_t)> apply_physical_restore;
+      // Waits between the looks at a color change that Windows has not reported yet. Without it
+      // the looks follow each other at once, which only an in-memory adapter wants.
+      std::function<void(std::chrono::milliseconds)> sleep;
     };
 
     std::optional<layout_t> inspect(const snapshot_t &snapshot);

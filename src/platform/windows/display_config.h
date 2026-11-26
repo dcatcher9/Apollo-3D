@@ -4,6 +4,8 @@
  */
 #pragma once
 
+#include <chrono>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -145,5 +147,37 @@ namespace platf::display_config {
     const device_info_api_t &api
   );
   bool set_wcg_state(const LUID &adapter_id, UINT32 target_id, bool enabled);
+
+  /** What one look at the display shows after a color request. */
+  enum class color_observation_e {
+    matched,  ///< Windows reports every requested state.
+    pending,  ///< Not yet.
+    failed,  ///< The request can no longer settle, for example because the topology moved.
+  };
+
+  enum class color_change_result_e {
+    rejected,  ///< The request was not accepted.
+    interrupted,  ///< The caller's wait was cut short.
+    unverified,  ///< Windows did not report the requested state within the bound.
+    verified,
+  };
+
+  struct color_settle_policy_t {
+    std::chrono::milliseconds bound;
+    std::chrono::milliseconds poll;
+  };
+
+  /**
+   * Request a color change and wait until Windows reports it. Windows can accept an Advanced
+   * Color request before it reports the new state, so the display is observed at once and then
+   * after every poll interval, for at most bound / poll more observations. `wait` sleeps for one
+   * interval and returns false when the caller's wait was interrupted.
+   */
+  color_change_result_e change_color_and_settle(
+    const std::function<bool()> &request,
+    const std::function<color_observation_e()> &observe,
+    color_settle_policy_t policy,
+    const std::function<bool(std::chrono::milliseconds)> &wait
+  );
 
 }  // namespace platf::display_config

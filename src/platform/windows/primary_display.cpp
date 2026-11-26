@@ -25,6 +25,7 @@
 #include <set>
 #include <sstream>
 #include <string_view>
+#include <thread>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -925,6 +926,83 @@ namespace platf::primary_display {
       return true;
     }
 
+    // Windows can accept an Advanced Color request before CCD reports the new state. Give it the
+    // time the virtual-display detach gives its surviving monitors: a look every 50 ms for 500 ms.
+    constexpr display_config::color_settle_policy_t color_settle {std::chrono::milliseconds(500), std::chrono::milliseconds(50)};
+
+    struct color_request_t {
+      std::wstring_view identity;
+      std::optional<display_config::advanced_color_state_t> color;
+    };
+
+    std::vector<color_request_t> color_requests(const detail::snapshot_t &desired) {
+      std::vector<color_request_t> requests;
+      for (size_t i = 0; i < desired.paths.size(); ++i) {
+        requests.push_back({desired.device_paths[i], i < desired.colors.size() ? desired.colors[i] : std::nullopt});
+      }
+      return requests;
+    }
+
+    std::vector<color_request_t> color_requests(const std::vector<display_spec_t> &specs) {
+      std::vector<color_request_t> requests;
+      for (const auto &spec : specs) {
+        if (spec.color) {
+          requests.push_back({spec.identity, spec.color});
+        }
+      }
+      return requests;
+    }
+
+    /**
+     * Request every color that `observed` does not already show, then wait until a query in
+     * `topology` shows all of them. A request without a color, or for an output whose color
+     * `observed` lacks, is rejected after the other requests are made. On return `observed`
+     * holds the last query.
+     */
+    display_config::color_change_result_e set_colors_and_settle(const detail::io_t &io, const detail::snapshot_t &topology, const std::vector<color_request_t> &requests, std::optional<detail::snapshot_t> &observed) {
+      const auto color_index = [&](std::wstring_view identity) -> std::optional<size_t> {
+        const auto index = find_path(*observed, identity);
+        return index && *index < observed->colors.size() && observed->colors[*index] ? index : std::nullopt;
+      };
+      return display_config::change_color_and_settle(
+        [&]() {
+          bool accepted = true;
+          for (const auto &request : requests) {
+            const auto index = color_index(request.identity);
+            if (!request.color || !index) {
+              accepted = false;
+            } else if (!color_matches(*observed->colors[*index], *request.color)) {
+              accepted = io.set_color && io.set_color(observed->paths[*index], *request.color) && accepted;
+            }
+          }
+          return accepted;
+        },
+        [&]() {
+          observed = io.query();
+          if (!observed || !same_topology(*observed, topology)) {
+            return display_config::color_observation_e::failed;
+          }
+          for (const auto &request : requests) {
+            const auto index = color_index(request.identity);
+            if (!index) {
+              return display_config::color_observation_e::failed;
+            }
+            if (!color_matches(*observed->colors[*index], *request.color)) {
+              return display_config::color_observation_e::pending;
+            }
+          }
+          return display_config::color_observation_e::matched;
+        },
+        color_settle,
+        [&](std::chrono::milliseconds delay) {
+          if (io.sleep) {
+            io.sleep(delay);
+          }
+          return true;
+        }
+      );
+    }
+
     template<class T>
     std::string encode_ccd(const T &value) {
       static_assert(std::is_trivially_copyable_v<T>);
@@ -1319,7 +1397,11 @@ namespace platf::primary_display {
                                 },
                                 [](detail::snapshot_t snapshot) {
                                   return apply_snapshot(std::move(snapshot), true);
-                                }}, &restore_observations);
+                                },
+                                [](std::chrono::milliseconds delay) {
+                                  std::this_thread::sleep_for(delay);
+                                }},
+                               &restore_observations);
     }
   }  // namespace
 
@@ -1949,20 +2031,8 @@ namespace platf::primary_display {
         return false;
       }
       auto observed = io_.query();
-      if (!observed || !same_topology(*observed, desired)) {
-        return false;
-      }
-      for (size_t i = 0; i < desired.paths.size(); ++i) {
-        const auto index = find_path(*observed, desired.device_paths[i]);
-        if (!index || i >= desired.colors.size() || !desired.colors[i] || *index >= observed->colors.size() || !observed->colors[*index]) {
-          return false;
-        }
-        if (!color_matches(*observed->colors[*index], *desired.colors[i]) && (!io_.set_color || !io_.set_color(observed->paths[*index], *desired.colors[i]))) {
-          return false;
-        }
-      }
-      observed = io_.query();
-      return observed && same_topology(*observed, desired) && same_colors(*observed, desired);
+      return observed && same_topology(*observed, desired) &&
+             set_colors_and_settle(io_, desired, color_requests(desired), observed) == display_config::color_change_result_e::verified;
     }
 
     bool manager_t::promote_monitor(std::wstring_view device_path) {
@@ -2288,36 +2358,7 @@ namespace platf::primary_display {
         return false;
       }
       auto observed = io_.query();
-      if (!observed || !same_topology(*observed, *desired)) {
-        return false;
-      }
-      bool colors_ok = true;
-      for (const auto &spec : wanted) {
-        if (!spec.color) {
-          continue;
-        }
-        const auto index = find_path(*observed, spec.identity);
-        if (!index || *index >= observed->colors.size() || !observed->colors[*index]) {
-          colors_ok = false;
-          continue;
-        }
-        if (!color_matches(*observed->colors[*index], *spec.color)) {
-          colors_ok = io_.set_color && io_.set_color(observed->paths[*index], *spec.color) && colors_ok;
-        }
-      }
-      observed = io_.query();
-      if (!observed || !same_topology(*observed, *desired)) {
-        return false;
-      }
-      for (const auto &spec : wanted) {
-        if (!spec.color) {
-          continue;
-        }
-        const auto index = find_path(*observed, spec.identity);
-        colors_ok = index && *index < observed->colors.size() && observed->colors[*index] &&
-                    color_matches(*observed->colors[*index], *spec.color) && colors_ok;
-      }
-      if (!colors_ok) {
+      if (!observed || !same_topology(*observed, *desired) || set_colors_and_settle(io_, *desired, color_requests(wanted), observed) != display_config::color_change_result_e::verified) {
         return false;
       }
       if (wanted.size() == 1) {
@@ -2574,23 +2615,20 @@ namespace platf::primary_display {
         if (!same_topology(*observed, desired)) {
           return reject("observed topology differs from the requested resume topology before color verification");
         }
-        for (size_t i = 0; i < desired.paths.size(); ++i) {
-          const auto index = find_path(*observed, desired.device_paths[i]);
-          if (!index || *index >= observed->colors.size() || !observed->colors[*index] || !desired.colors[i]) {
-            return reject("a resumed output lacks observed or requested color state");
-          }
-          if (!color_matches(*observed->colors[*index], *desired.colors[i]) && !io_.set_color(observed->paths[*index], *desired.colors[i])) {
-            return reject("a resumed output rejected its requested color state");
-          }
+        const auto colors = set_colors_and_settle(io_, desired, color_requests(desired), observed);
+        if (colors == display_config::color_change_result_e::verified) {
+          return true;
         }
-        observed = io_.query();
+        if (colors == display_config::color_change_result_e::rejected) {
+          return reject("a resumed output lacks or rejected its requested color state");
+        }
         if (!observed) {
           return reject("display snapshot could not be queried after resume color setup");
         }
         if (!same_topology(*observed, desired)) {
           return reject("observed topology differs from the requested resume topology after color setup");
         }
-        return same_colors(*observed, desired) || reject("observed color state differs from the requested resume color state");
+        return reject("observed color state differs from the requested resume color state");
       };
       if (find_path(*current, identity)) {
         // Idempotence covers a previous CCD apply whose color verification had to retry, and
@@ -3206,23 +3244,12 @@ namespace platf::primary_display {
         }
         return false;
       }
-      bool color_ok = true;
-      size_t color_changes = 0;
-      for (const auto &spec : wanted) {
-        if (!spec.color) {
-          continue;
-        }
-        const auto index = find_path(*observed, spec.identity);
-        if (!index || *index >= observed->colors.size() || !observed->colors[*index]) {
-          color_ok = false;
-          continue;
-        }
-        if (!color_matches(*observed->colors[*index], *spec.color)) {
-          ++color_changes;
-          color_ok = io_.set_color(observed->paths[*index], *spec.color) && color_ok;
-        }
-      }
-      observed = io_.query();
+      const auto requests = color_requests(wanted);
+      const auto color_changes = std::ranges::count_if(requests, [&](const auto &request) {
+        const auto index = find_path(*observed, request.identity);
+        return index && *index < observed->colors.size() && observed->colors[*index] && !color_matches(*observed->colors[*index], *request.color);
+      });
+      const auto colors = set_colors_and_settle(io_, *desired, requests, observed);
       if (config::sunshine.diagnostics_enabled) {
         const auto now = std::chrono::steady_clock::now();
         BOOST_LOG(info) << "Display restore timing: apply_needed=" << apply_needed
@@ -3234,19 +3261,10 @@ namespace platf::primary_display {
           log_restore_snapshot("observed", *observed);
         }
       }
-      if (!observed || !same_topology(*observed, *desired)) {
-        return false;
-      }
-      for (const auto &spec : wanted) {
-        if (!spec.color) {
-          continue;
+      if (colors != display_config::color_change_result_e::verified) {
+        if (observed && same_topology(*observed, *desired)) {
+          BOOST_LOG(warning) << "Available physical displays are active; retaining exclusive-display recovery until their color settings are restored.";
         }
-        const auto index = find_path(*observed, spec.identity);
-        color_ok = index && *index < observed->colors.size() && observed->colors[*index] &&
-                   color_matches(*observed->colors[*index], *spec.color) && color_ok;
-      }
-      if (!color_ok) {
-        BOOST_LOG(warning) << "Available physical displays are active; retaining exclusive-display recovery until their color settings are restored.";
         return false;
       }
       const bool preserve_verified_pause_recovery = retained && retained->partial_wake_recovery && retained->pause_recovery && missing;
@@ -3420,25 +3438,12 @@ namespace platf::primary_display {
       if (!observed || !same_topology(*observed, *desired)) {
         return false;
       }
-      bool colors_ok = true;
+      std::vector<color_request_t> requests;
       for (const auto &spec : physical) {
-        const auto index = find_path(*observed, spec.identity);
-        if (!index || *index >= observed->colors.size() || !observed->colors[*index] || !spec.color) {
-          colors_ok = false;
-          continue;
-        }
-        if (!color_matches(*observed->colors[*index], *spec.color)) {
-          colors_ok = io_.set_color(observed->paths[*index], *spec.color) && colors_ok;
-        }
+        // Every recovered physical output restores its recorded color; one without it fails.
+        requests.push_back({spec.identity, spec.color});
       }
-      observed = io_.query();
-      if (!observed || !same_topology(*observed, *desired)) {
-        return false;
-      }
-      for (const auto &spec : physical) {
-        const auto index = find_path(*observed, spec.identity);
-        colors_ok = index && *index < observed->colors.size() && observed->colors[*index] && spec.color && color_matches(*observed->colors[*index], *spec.color) && colors_ok;
-      }
+      const bool colors_ok = set_colors_and_settle(io_, *desired, requests, observed) == display_config::color_change_result_e::verified;
       if (!extras.empty() || !colors_ok) {
         return false;
       }

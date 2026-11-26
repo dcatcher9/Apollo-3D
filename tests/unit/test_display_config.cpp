@@ -6,6 +6,7 @@
 #include "src/platform/common.h"
 #include "src/platform/windows/display_config.h"
 
+#include <chrono>
 #include <cstdint>
 #include <cwchar>
 #include <initializer_list>
@@ -309,4 +310,85 @@ TEST(DisplayConfigColorTest, ColorRequestsRecordADisplayChangeBeforeAndAfterTheC
   const auto unchanged = platf::display_change_epoch();
   EXPECT_FALSE(platf::display_config::set_hdr_state(LUID {}, 11, true, {fake_get_device_info, nullptr}));
   EXPECT_EQ(platf::display_change_epoch(), unchanged);
+}
+
+namespace {
+  using namespace std::chrono_literals;
+
+  struct color_settle_probe_t {
+    int looks = 0;
+    int pending_looks = 0;
+    std::vector<std::chrono::milliseconds> waits;
+    bool wait_ok = true;
+
+    platf::display_config::color_change_result_e run(platf::display_config::color_settle_policy_t policy, bool accepted = true, bool fails = false) {
+      using platf::display_config::color_observation_e;
+      return platf::display_config::change_color_and_settle(
+        [accepted]() {
+          return accepted;
+        },
+        [this, fails]() {
+          ++looks;
+          if (fails) {
+            return color_observation_e::failed;
+          }
+          return looks > pending_looks ? color_observation_e::matched : color_observation_e::pending;
+        },
+        policy,
+        [this](std::chrono::milliseconds delay) {
+          waits.push_back(delay);
+          return wait_ok;
+        }
+      );
+    }
+  };
+}  // namespace
+
+TEST(DisplayConfigColorSettle, ARejectedRequestIsNotObserved) {
+  color_settle_probe_t probe;
+  EXPECT_EQ(probe.run({500ms, 50ms}, false), platf::display_config::color_change_result_e::rejected);
+  EXPECT_EQ(probe.looks, 0);
+  EXPECT_TRUE(probe.waits.empty());
+}
+
+TEST(DisplayConfigColorSettle, LooksAtOnceAndAfterEachPollUntilWindowsReportsTheChange) {
+  color_settle_probe_t probe;
+  probe.pending_looks = 2;
+  EXPECT_EQ(probe.run({500ms, 50ms}), platf::display_config::color_change_result_e::verified);
+  EXPECT_EQ(probe.looks, 3);
+  EXPECT_EQ(probe.waits, (std::vector<std::chrono::milliseconds> {50ms, 50ms}));
+
+  color_settle_probe_t immediate;
+  EXPECT_EQ(immediate.run({500ms, 50ms}), platf::display_config::color_change_result_e::verified);
+  EXPECT_EQ(immediate.looks, 1);
+  EXPECT_TRUE(immediate.waits.empty());
+}
+
+TEST(DisplayConfigColorSettle, TheBoundLimitsTheLooksAndAFailedLookEndsThem) {
+  color_settle_probe_t never;
+  never.pending_looks = 1000;
+  EXPECT_EQ(never.run({500ms, 50ms}), platf::display_config::color_change_result_e::unverified);
+  EXPECT_EQ(never.looks, 11);
+  EXPECT_EQ(never.waits.size(), 10u);
+
+  // The HDR worker's single 100 ms wait before it makes its request again.
+  color_settle_probe_t worker;
+  worker.pending_looks = 1000;
+  EXPECT_EQ(worker.run({100ms, 100ms}), platf::display_config::color_change_result_e::unverified);
+  EXPECT_EQ(worker.looks, 2);
+  EXPECT_EQ(worker.waits, (std::vector<std::chrono::milliseconds> {100ms}));
+
+  color_settle_probe_t failed;
+  EXPECT_EQ(failed.run({500ms, 50ms}, true, true), platf::display_config::color_change_result_e::unverified);
+  EXPECT_EQ(failed.looks, 1);
+  EXPECT_TRUE(failed.waits.empty());
+}
+
+TEST(DisplayConfigColorSettle, AnInterruptedWaitEndsTheSettle) {
+  color_settle_probe_t probe;
+  probe.pending_looks = 1000;
+  probe.wait_ok = false;
+  EXPECT_EQ(probe.run({500ms, 50ms}), platf::display_config::color_change_result_e::interrupted);
+  EXPECT_EQ(probe.looks, 1);
+  EXPECT_EQ(probe.waits.size(), 1u);
 }
