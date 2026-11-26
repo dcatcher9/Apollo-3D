@@ -5290,7 +5290,6 @@ TEST(DirectxShaderTest, CompilesGeneratedAdaptiveStateConsumers) {
     std::tuple {"rgb_to_nchw_near_identical_cs.hlsl", "fused_domain_main", "cs_5_0"},
     std::tuple {"rgb_to_nchw_near_identical_cs.hlsl", "fused_tiled_domain_main", "cs_5_0"},
     std::tuple {"buffer_to_tex_cs.hlsl", "domain_pad_main", "cs_5_0"},
-    std::tuple {"depth_minmax_ema_cs.hlsl", "main", "cs_5_0"},
     std::tuple {"depth_coordinate_v2_map_cs.hlsl", "domain_main", "cs_5_0"},
     std::tuple {"depth_coordinate_v2_moments_cs.hlsl", "domain_main", "cs_5_0"},
     std::tuple {"depth_coordinate_v2_frame_resolve_cs.hlsl", "main", "cs_5_0"},

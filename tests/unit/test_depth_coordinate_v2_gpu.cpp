@@ -2064,7 +2064,9 @@ void main(uint3 tid : SV_GroupThreadID) {
   const auto domain_histogram = compile("depth_coordinate_v2_histogram_cs.hlsl", {}, "domain_main");
   const auto quantiles = compile("depth_coordinate_v2_quantiles_cs.hlsl");
   const auto publication = compile("depth_coordinate_v2_quantiles_cs.hlsl", {}, "publish_main");
-  const auto ema = compile("depth_minmax_ema_cs.hlsl");
+  // The split EMA publication is a test-only oracle; it resolves includes from the shader root.
+  const auto ema = compile("depth_minmax_ema_cs.hlsl",
+    read_bytes(fs::path(SUNSHINE_SOURCE_DIR) / "tests/fixtures/depth_minmax_ema_split_oracle_cs.hlsl"));
   const auto state_resolve = compile("depth_coordinate_v2_state_resolve_cs.hlsl");
   const auto old_histogram = compile("depth_coordinate_v2_histogram_cs.hlsl", reference_histogram);
   const auto old_quantiles = compile("depth_coordinate_v2_quantiles_cs.hlsl", reference_quantiles);

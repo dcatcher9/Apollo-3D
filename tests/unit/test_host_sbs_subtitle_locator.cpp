@@ -22,6 +22,10 @@
   #include <cstdlib>
   #include <cstring>
   #include <d3d11.h>
+  #include <d3dcompiler.h>
+  #include <filesystem>
+  #include <fstream>
+  #include <iterator>
   #include <limits>
   #include <iostream>
   #include <numeric>
@@ -454,25 +458,41 @@ namespace {
       const auto production_sources = shader_cache::snapshot_sources(
         SUNSHINE_SHADERS_DIR, shader_cache::parallax_v2_producer_specs
       );
-      static constexpr shader_cache::shader_spec condition_validator_spec {
-        "test/host_sbs_subtitle_locator_condition_validate_test_cs.hlsl",
-        "condition_validate_test_main",
-        "cs_5_0",
-      };
-      const std::array validator_specs {condition_validator_spec};
-      const auto validator_sources = shader_cache::snapshot_sources(
-        SUNSHINE_SHADERS_DIR, validator_specs
+      // The test-only validator joins the production locator source; it compiles from the
+      // shader root so that every production include resolves exactly as it does there.
+      std::ifstream validator_file(
+        std::filesystem::path(SUNSHINE_SOURCE_DIR) /
+          "tests/fixtures/host_sbs_subtitle_locator_condition_validate_test_cs.hlsl",
+        std::ios::binary
       );
+      const std::string validator_source {
+        std::istreambuf_iterator<char>(validator_file), std::istreambuf_iterator<char>()
+      };
+      const auto validator_name = (std::filesystem::path(SUNSHINE_SHADERS_DIR) /
+                                   "host_sbs_subtitle_locator_condition_validate_test_cs.hlsl")
+                                    .string();
+      ComPtr<ID3DBlob> validator_code;
+      ComPtr<ID3DBlob> validator_errors;
+      if (validator_source.empty() ||
+          FAILED(D3DCompile(
+            validator_source.data(), validator_source.size(), validator_name.c_str(), nullptr,
+            D3D_COMPILE_STANDARD_FILE_INCLUDE, "condition_validate_test_main", "cs_5_0",
+            D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3, 0u,
+            &validator_code, &validator_errors
+          )) ||
+          FAILED(device_->CreateComputeShader(
+            validator_code->GetBufferPointer(), validator_code->GetBufferSize(), nullptr,
+            &condition_validate_test_
+          ))) {
+        error = "condition validator test shader compilation failed";
+        if (validator_errors) {
+          error += std::string(": ") + static_cast<const char *>(validator_errors->GetBufferPointer());
+        }
+        return false;
+      }
       if (!create_compute_shader(
             device_.Get(), production_sources,
             shader_cache::host_sbs_subtitle_locator_resolve, resolve_, error
-          ) ||
-          !create_compute_shader(
-            device_.Get(),
-            validator_sources,
-            condition_validator_spec,
-            condition_validate_test_,
-            error
           ) ||
           !create_compute_shader(
             device_.Get(), production_sources,
