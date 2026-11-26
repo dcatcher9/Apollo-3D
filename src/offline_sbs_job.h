@@ -35,11 +35,6 @@ namespace offline_sbs {
     input_directory,
   };
 
-  enum class cache_budget_policy_e {
-    fail,
-    split,
-  };
-
   enum class browse_type_e {
     file,
     directory,
@@ -76,9 +71,6 @@ namespace offline_sbs {
     // never select or supply an arbitrary output directory.
     std::string output_name;
     std::string codec = "hevc_nvenc";
-
-    std::uint64_t scene_cache_max_bytes = 4ull * 1024ull * 1024ull * 1024ull;
-    cache_budget_policy_e cache_budget_policy = cache_budget_policy_e::fail;
   };
 
   struct browse_request_t {
@@ -139,7 +131,6 @@ namespace offline_sbs {
     std::optional<output_location_e> output_location;
     std::string codec;
     std::uint64_t scene_cache_max_bytes = 0;
-    cache_budget_policy_e cache_budget_policy = cache_budget_policy_e::fail;
     progress_t progress;
     std::int64_t created_at_unix_ms = 0;
     std::optional<std::int64_t> started_at_unix_ms;
@@ -202,7 +193,6 @@ namespace offline_sbs {
     std::string ffprobe_version;
     std::string codec;
     std::uint64_t scene_cache_max_bytes = 0;
-    cache_budget_policy_e cache_budget_policy = cache_budget_policy_e::fail;
   };
 
   struct worker_outcome_t {

@@ -1955,8 +1955,6 @@ namespace confighttp {
         "operation",
         "output_name",
         "codec",
-        "scene_cache_max_bytes",
-        "cache_budget_policy",
       };
       for (const auto &[name, value] : input.items()) {
         if (!allowed.contains(name)) {
@@ -2005,45 +2003,6 @@ namespace confighttp {
           return;
         }
         create.codec = input["codec"].get<std::string>();
-      }
-      if (input.contains("scene_cache_max_bytes")) {
-        if (!input["scene_cache_max_bytes"].is_number_unsigned() &&
-            !input["scene_cache_max_bytes"].is_number_integer()) {
-          bad_request(
-            response,
-            request,
-            "scene_cache_max_bytes must be an integer"
-          );
-          return;
-        }
-        const auto cache_bytes =
-          input["scene_cache_max_bytes"].get<std::int64_t>();
-        if (cache_bytes <= 0) {
-          bad_request(
-            response,
-            request,
-            "scene_cache_max_bytes must be positive"
-          );
-          return;
-        }
-        create.scene_cache_max_bytes =
-          static_cast<std::uint64_t>(cache_bytes);
-      }
-      const auto budget_policy =
-        input.value("cache_budget_policy", std::string {"fail"});
-      if (budget_policy == "fail") {
-        create.cache_budget_policy =
-          offline_sbs::cache_budget_policy_e::fail;
-      } else if (budget_policy == "split") {
-        create.cache_budget_policy =
-          offline_sbs::cache_budget_policy_e::split;
-      } else {
-        bad_request(
-          response,
-          request,
-          "cache_budget_policy must be fail or split"
-        );
-        return;
       }
 
       offline_sbs::request_initialization();

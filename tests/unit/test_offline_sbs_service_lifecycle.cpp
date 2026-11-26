@@ -379,7 +379,7 @@ TEST(OfflineSbsServiceLifecycleTest, ActualRecoveryFinishesBeforeTheCatalogBecom
     {"output_path", nullptr},
     {"codec", "hevc_nvenc"},
     {"scene_cache_max_bytes", 4ull * 1024ull * 1024ull * 1024ull},
-    {"cache_budget_policy", "fail"},
+    {"cache_budget_policy", "split"},
     {"progress", {
                    {"phase", "analysis"},
                    {"processed_frames", 19},
@@ -404,6 +404,7 @@ TEST(OfflineSbsServiceLifecycleTest, ActualRecoveryFinishesBeforeTheCatalogBecom
   // The actual start/recover wrote the interrupted result, but the facade has not published it.
   const auto persisted = read_json(state_file);
   EXPECT_EQ(persisted.at("state"), "interrupted");
+  EXPECT_EQ(persisted.at("cache_budget_policy"), "fail");
   EXPECT_EQ(persisted.at("progress").at("phase"), "interrupted");
   EXPECT_EQ(persisted.at("progress").at("processed_frames"), 19);
   EXPECT_FALSE(owner->capabilities().at("available").get<bool>());

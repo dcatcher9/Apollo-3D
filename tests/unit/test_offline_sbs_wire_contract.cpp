@@ -172,8 +172,35 @@ namespace {
     };
   }
 
-  offline_sbs::wire::worker_result_contract_t worker_result() {
-    return {
+  // The worker's raw-memory transport with its in-memory completion evidence.
+  offline_sbs::wire::whole_clip_contract_t memory_whole_clip(const bool conversion) {
+    auto contract = whole_clip(conversion);
+    auto &runtime = contract.resolved_runtime;
+    runtime.frame_transport = offline_sbs::raw_frame_transport::name;
+    runtime.input_frame_format = "sRGB-BGRA8-raw";
+    runtime.output_frame_format = "sRGB-BGRA8-raw";
+    runtime.output_ffmpeg_pixel_format = "bgra";
+    runtime.follow_format = "bgra8";
+    runtime.follow_frame_pattern.reset();
+    runtime.follow_done_sentinel.reset();
+    runtime.follow_failed_sentinel.reset();
+    runtime.follow_progress_file.reset();
+    auto &adaptive = contract.adaptive_state;
+    adaptive.transport = offline_sbs::completion_channel_t::name;
+    adaptive.header_file.reset();
+    adaptive.frame_file.reset();
+    adaptive.file.reset();
+    adaptive.schema = sbs_adaptive_state::schema_version;
+    adaptive.capture = sbs_adaptive_state::capture;
+    auto &sbs = contract.sbs;
+    sbs.file_pattern.reset();
+    sbs.frame_format = "bgra8";
+    sbs.ffmpeg_pixel_format = "bgra";
+    return contract;
+  }
+
+  offline_sbs::wire::worker_result_contract_t worker_result(const bool conversion = true) {
+    offline_sbs::wire::worker_result_contract_t result {
       .job_id = "11111111-2222-3333-4444-555555555555",
       .operation = "convert",
       .codec = "hevc_nvenc",
@@ -187,7 +214,7 @@ namespace {
         .color_mode = "sdr",
         .contract_path = "C:/state/jobs/one/result/source-contract.json",
       },
-      .analysis_contract = whole_clip(true),
+      .analysis_contract = memory_whole_clip(conversion),
       .replay_contracts = {},
       .cache = {
         .hard_cap_bytes = 64 * 1024 * 1024,
@@ -209,13 +236,8 @@ namespace {
       .staging_identity = nlohmann::json {{"schema", 1}},
       .output_path = "C:/media/output.part.mkv",
     };
-  }
-
-  offline_sbs::wire::worker_result_contract_t memory_worker_result(const bool conversion = true) {
-    auto result = worker_result();
     if (!conversion) {
       result.operation = "evaluate";
-      result.analysis_contract = whole_clip(false);
       result.staging_identity.reset();
       result.output_path.reset();
       result.timeline_contract = {
@@ -223,27 +245,6 @@ namespace {
         {"max_output_ticks", nullptr},
       };
     }
-    auto &runtime = result.analysis_contract.resolved_runtime;
-    runtime.frame_transport = offline_sbs::raw_frame_transport::name;
-    runtime.input_frame_format = "sRGB-BGRA8-raw";
-    runtime.output_frame_format = "sRGB-BGRA8-raw";
-    runtime.output_ffmpeg_pixel_format = "bgra";
-    runtime.follow_format = "bgra8";
-    runtime.follow_frame_pattern.reset();
-    runtime.follow_done_sentinel.reset();
-    runtime.follow_failed_sentinel.reset();
-    runtime.follow_progress_file.reset();
-    auto &adaptive = result.analysis_contract.adaptive_state;
-    adaptive.transport = offline_sbs::completion_channel_t::name;
-    adaptive.header_file.reset();
-    adaptive.frame_file.reset();
-    adaptive.file.reset();
-    adaptive.schema = sbs_adaptive_state::schema_version;
-    adaptive.capture = sbs_adaptive_state::capture;
-    auto &sbs = result.analysis_contract.sbs;
-    sbs.file_pattern.reset();
-    sbs.frame_format = "bgra8";
-    sbs.ffmpeg_pixel_format = "bgra";
     return result;
   }
 
@@ -257,7 +258,6 @@ namespace {
       .output_location = "input-directory",
       .codec = "hevc_nvenc",
       .scene_cache_max_bytes = 64 * 1024 * 1024,
-      .cache_budget_policy = "fail",
       .progress = {
         .phase = "analysis",
         .processed_frames = 1,
@@ -363,29 +363,6 @@ TEST(OfflineSbsWireContractTest, WorkerResultRoundTripsThroughOneExactCodec) {
   EXPECT_EQ(offline_sbs::wire::to_json(parsed), encoded);
 }
 
-TEST(OfflineSbsWireContractTest, EvaluationUsesTheSameCausalPassWithoutSbs) {
-  auto original = worker_result();
-  original.operation = "evaluate";
-  original.analysis_contract = whole_clip(false);
-  original.staging_identity.reset();
-  original.output_path.reset();
-  original.timeline_contract = {
-    {"mode", "evaluation-only"},
-    {"max_output_ticks", nullptr},
-  };
-
-  const auto encoded = offline_sbs::wire::to_json(original);
-  const auto parsed =
-    offline_sbs::wire::parse_worker_result_contract(encoded);
-
-  EXPECT_EQ(parsed.operation, "evaluate");
-  EXPECT_EQ(parsed.analysis_contract.artifact_mode, "adaptive");
-  EXPECT_FALSE(parsed.analysis_contract.sbs.enabled);
-  EXPECT_TRUE(parsed.replay_contracts.empty());
-  EXPECT_FALSE(parsed.output_path.has_value());
-  EXPECT_FALSE(parsed.staging_identity.has_value());
-}
-
 TEST(OfflineSbsWireContractTest, ConversionAcceptsExactMp4Timeline) {
   auto original = worker_result();
   original.output_path = "C:/media/output.part.mp4";
@@ -407,18 +384,7 @@ TEST(OfflineSbsWireContractTest, ConversionAcceptsExactMp4Timeline) {
 }
 
 TEST(OfflineSbsWireContractTest, EvaluationRejectsAnySbsAttestation) {
-  const auto encoded_evaluation = [] {
-    auto original = worker_result();
-    original.operation = "evaluate";
-    original.analysis_contract = whole_clip(false);
-    original.staging_identity.reset();
-    original.output_path.reset();
-    original.timeline_contract = {
-      {"mode", "evaluation-only"},
-      {"max_output_ticks", nullptr},
-    };
-    return offline_sbs::wire::to_json(original);
-  }();
+  const auto encoded_evaluation = offline_sbs::wire::to_json(worker_result(false));
 
   auto nonzero_geometry = encoded_evaluation;
   nonzero_geometry["analysis_contract"]["sbs"]["width"] = 3840;
@@ -510,6 +476,21 @@ TEST(OfflineSbsWireContractTest, WorkerResultRejectsCrossContractMismatches) {
   });
   expect_rejected([](auto &encoded) {
     encoded["analysis_contract"]["resolved_runtime"]["parallax_v2_live"] = false;
+  });
+  expect_rejected([](auto &encoded) {
+    // File-transport evidence is a valid evaluator contract but never comes from a worker.
+    encoded["analysis_contract"] = offline_sbs::wire::to_json(whole_clip(true));
+  });
+  expect_rejected([](auto &encoded) {
+    encoded["analysis_contract"]["adaptive_state"] = {
+      {"transport", "atomic-latest-v1"},
+      {"header_file", "adaptive_state_header.json"},
+      {"frame_file", "adaptive_state_frame.json"},
+      {"retained_history", false},
+      {"schema", 1},
+      {"capture", "depth-health-state"},
+      {"frame_count", 2},
+    };
   });
   expect_rejected([](auto &encoded) {
     encoded["cache"]["peak_bytes"] = 1;
@@ -729,19 +710,30 @@ TEST(OfflineSbsWireContractTest, PersistedJobAcceptsAndDiscardsRetiredSceneSumma
   );
 }
 
+TEST(OfflineSbsWireContractTest, PersistedJobReadsTheRetiredSplitBudgetPolicyAsFail) {
+  auto retained = offline_sbs::wire::to_json(persisted_job());
+  EXPECT_EQ(retained.at("cache_budget_policy"), "fail");
+  retained["cache_budget_policy"] = "split";
+  const auto parsed = offline_sbs::wire::parse_persisted_job_contract(retained);
+  EXPECT_EQ(offline_sbs::wire::to_json(parsed).at("cache_budget_policy"), "fail");
+
+  retained["cache_budget_policy"] = "unknown";
+  EXPECT_THROW(
+    offline_sbs::wire::parse_persisted_job_contract(retained),
+    offline_sbs::wire::contract_error
+  );
+
+  // The API snapshot is not a durable document and has no retired variant.
+  auto snapshot = offline_sbs::wire::to_json(job_snapshot());
+  snapshot["cache_budget_policy"] = "split";
+  EXPECT_THROW(
+    offline_sbs::wire::parse_job_snapshot_contract(snapshot, false),
+    offline_sbs::wire::contract_error
+  );
+}
+
 TEST(OfflineSbsWireContractTest, RawTransportRoundTripsWithoutRasterFilenames) {
   auto value = worker_result();
-  auto &runtime = value.analysis_contract.resolved_runtime;
-  runtime.frame_transport = "bounded-raw-memory-v1";
-  runtime.input_frame_format = "sRGB-BGRA8-raw";
-  runtime.output_frame_format = "sRGB-BGRA8-raw";
-  runtime.output_ffmpeg_pixel_format = "bgra";
-  runtime.follow_format = "bgra8";
-  runtime.follow_frame_pattern.reset();
-  auto &sbs = value.analysis_contract.sbs;
-  sbs.file_pattern.reset();
-  sbs.frame_format = "bgra8";
-  sbs.ffmpeg_pixel_format = "bgra";
   auto encoded = offline_sbs::wire::to_json(value);
   EXPECT_EQ(offline_sbs::wire::parse_worker_result_contract(encoded).analysis_contract.sbs.frame_format, "bgra8");
   encoded["analysis_contract"]["resolved_runtime"].erase("frame_transport");
@@ -751,7 +743,7 @@ TEST(OfflineSbsWireContractTest, RawTransportRoundTripsWithoutRasterFilenames) {
 }
 
 TEST(OfflineSbsWireContractTest, MemoryCompletionConversionRoundTripsWithoutEvidencePaths) {
-  const auto encoded = offline_sbs::wire::to_json(memory_worker_result());
+  const auto encoded = offline_sbs::wire::to_json(worker_result());
   const auto &analysis = encoded.at("analysis_contract");
   EXPECT_EQ(encoded.at("schema"), 4);
   EXPECT_EQ(analysis.at("adaptive_state"), (nlohmann::json {
@@ -772,9 +764,11 @@ TEST(OfflineSbsWireContractTest, MemoryCompletionConversionRoundTripsWithoutEvid
 }
 
 TEST(OfflineSbsWireContractTest, MemoryCompletionEvaluationKeepsTheSameCausalEvidenceWithoutSbs) {
-  const auto encoded = offline_sbs::wire::to_json(memory_worker_result(false));
+  const auto encoded = offline_sbs::wire::to_json(worker_result(false));
   const auto parsed = offline_sbs::wire::parse_worker_result_contract(encoded);
   EXPECT_EQ(parsed.operation, "evaluate");
+  EXPECT_EQ(parsed.analysis_contract.artifact_mode, "adaptive");
+  EXPECT_TRUE(parsed.replay_contracts.empty());
   EXPECT_EQ(parsed.analysis_contract.adaptive_state.transport, "bounded-completion-memory-v1");
   EXPECT_FALSE(parsed.analysis_contract.sbs.enabled);
   EXPECT_EQ(parsed.analysis_contract.sbs.frame_count, 0u);
@@ -785,7 +779,7 @@ TEST(OfflineSbsWireContractTest, MemoryCompletionEvaluationKeepsTheSameCausalEvi
 }
 
 TEST(OfflineSbsWireContractTest, MemoryCompletionRejectsUnknownAndFileKeysEvenWhenNull) {
-  const auto valid = offline_sbs::wire::to_json(memory_worker_result().analysis_contract);
+  const auto valid = offline_sbs::wire::to_json(worker_result().analysis_contract);
   for (const auto *key : {"header_file", "frame_file", "file", "unknown_evidence_field"}) {
     auto invalid = valid;
     invalid["adaptive_state"][key] = nullptr;
@@ -799,7 +793,7 @@ TEST(OfflineSbsWireContractTest, MemoryCompletionRejectsUnknownAndFileKeysEvenWh
 }
 
 TEST(OfflineSbsWireContractTest, MemoryCompletionSerializerRejectsContradictoryTypedFilePaths) {
-  auto value = memory_worker_result().analysis_contract;
+  auto value = worker_result().analysis_contract;
   value.adaptive_state.header_file = "header.json";
   EXPECT_THROW(offline_sbs::wire::to_json(value), offline_sbs::wire::contract_error);
   value.adaptive_state.header_file.reset();
@@ -811,7 +805,7 @@ TEST(OfflineSbsWireContractTest, MemoryCompletionSerializerRejectsContradictoryT
 }
 
 TEST(OfflineSbsWireContractTest, MemoryCompletionRequiresNativeRawCausalTransportWithoutFileWakeups) {
-  const auto valid = offline_sbs::wire::to_json(memory_worker_result().analysis_contract);
+  const auto valid = offline_sbs::wire::to_json(worker_result().analysis_contract);
   auto no_raw_transport = valid;
   no_raw_transport["resolved_runtime"].erase("frame_transport");
   EXPECT_THROW(offline_sbs::wire::parse_whole_clip_contract(no_raw_transport), offline_sbs::wire::contract_error);
@@ -836,7 +830,7 @@ TEST(OfflineSbsWireContractTest, MemoryCompletionRequiresNativeRawCausalTranspor
 }
 
 TEST(OfflineSbsWireContractTest, MemoryCompletionRequiresCurrentGeneratedEvidenceForEverySourceFrame) {
-  const auto valid = offline_sbs::wire::to_json(memory_worker_result().analysis_contract);
+  const auto valid = offline_sbs::wire::to_json(worker_result().analysis_contract);
   const nlohmann::json contradictions {
     {"transport", "unknown-completion-transport"},
     {"retained_history", true},
@@ -885,9 +879,11 @@ TEST(OfflineSbsWireContractTest, PersistedWorkerEvidencePreservesLegacyAndNative
     {"analysis_contract", {{"adaptive_state", {{"transport", "atomic-latest-v1"}, {"header_file", "old-header.json"}, {"frame_file", "old-frame.json"}}}}},
     {"retained_extension", {{"opaque", true}}},
   };
-  const auto legacy_current_result = offline_sbs::wire::to_json(worker_result());
-  const auto native_result = offline_sbs::wire::to_json(memory_worker_result());
-  for (const auto &body : {old_result, legacy_current_result, native_result}) {
+  const auto native_result = offline_sbs::wire::to_json(worker_result());
+  // A file-transport worker result retained by an earlier release; no current worker emits it.
+  auto legacy_file_result = native_result;
+  legacy_file_result["analysis_contract"] = offline_sbs::wire::to_json(whole_clip(true));
+  for (const auto &body : {old_result, legacy_file_result, native_result}) {
     auto retained = persisted_job();
     retained.snapshot.worker_result = body;
     const auto encoded = offline_sbs::wire::to_json(retained);

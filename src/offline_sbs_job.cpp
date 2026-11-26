@@ -65,8 +65,8 @@ namespace offline_sbs {
   namespace bp = boost::process::v1;
 
   namespace {
-    constexpr std::uint64_t min_cache_bytes = 16ull * 1024ull * 1024ull;
-    constexpr std::uint64_t max_cache_bytes = 64ull * 1024ull * 1024ull * 1024ull;
+    constexpr std::uint64_t transient_raster_hard_cap_bytes =
+      4ull * 1024ull * 1024ull * 1024ull;
     // Unattested staging files are intentionally never deleted automatically.
     // Charge at least 1 MiB apiece so repeated zero-byte failures cannot grow
     // an unbounded retained staging set while consuming no byte quota.
@@ -111,16 +111,6 @@ namespace offline_sbs {
           return "legacy-managed-exports";
         case output_location_e::input_directory:
           return "input-directory";
-      }
-      return "unknown";
-    }
-
-    const char *to_string(cache_budget_policy_e value) {
-      switch (value) {
-        case cache_budget_policy_e::fail:
-          return "fail";
-        case cache_budget_policy_e::split:
-          return "split";
       }
       return "unknown";
     }
@@ -187,18 +177,6 @@ namespace offline_sbs {
       }
       if (value == "input-directory") {
         return output_location_e::input_directory;
-      }
-      return std::nullopt;
-    }
-
-    std::optional<cache_budget_policy_e> parse_budget_policy(
-      const std::string_view value
-    ) {
-      if (value == "fail") {
-        return cache_budget_policy_e::fail;
-      }
-      if (value == "split") {
-        return cache_budget_policy_e::split;
       }
       return std::nullopt;
     }
@@ -2814,7 +2792,6 @@ namespace offline_sbs {
                            std::nullopt,
       .codec = snapshot.codec,
       .scene_cache_max_bytes = snapshot.scene_cache_max_bytes,
-      .cache_budget_policy = to_string(snapshot.cache_budget_policy),
       .progress = {
         .phase = snapshot.progress.phase,
         .processed_frames = snapshot.progress.processed_frames,
@@ -2989,10 +2966,7 @@ namespace offline_sbs {
         snapshot.id = contract.id;
         const auto state = parse_job_state(contract.state);
         const auto operation = parse_operation(contract.operation);
-        const auto policy = parse_budget_policy(
-          contract.cache_budget_policy
-        );
-        if (!valid_job_id(snapshot.id) || !state || !operation || !policy) {
+        if (!valid_job_id(snapshot.id) || !state || !operation) {
           error = "persisted job enum or identity is invalid";
           return std::nullopt;
         }
@@ -3045,7 +3019,6 @@ namespace offline_sbs {
         }
         snapshot.codec = contract.codec;
         snapshot.scene_cache_max_bytes = contract.scene_cache_max_bytes;
-        snapshot.cache_budget_policy = *policy;
         snapshot.created_at_unix_ms = contract.created_at_unix_ms;
         snapshot.started_at_unix_ms = contract.started_at_unix_ms;
         snapshot.ended_at_unix_ms = contract.ended_at_unix_ms;
@@ -3104,7 +3077,6 @@ namespace offline_sbs {
         .ffprobe_version = ffprobe_version,
         .codec = snapshot.codec,
         .scene_cache_max_bytes = snapshot.scene_cache_max_bytes,
-        .cache_budget_policy = snapshot.cache_budget_policy,
       };
     }
 
@@ -4990,16 +4962,6 @@ namespace offline_sbs {
       }
     }
     if (
-      request.scene_cache_max_bytes < min_cache_bytes ||
-      request.scene_cache_max_bytes > max_cache_bytes
-    ) {
-      return {
-        .code = error_code_e::invalid_request,
-        .error =
-          "transient raster limit must be between 16 MiB and 64 GiB",
-      };
-    }
-    if (
       request.operation == operation_e::convert &&
       !valid_codec(request.codec)
     ) {
@@ -5172,10 +5134,7 @@ namespace offline_sbs {
     // persisted worker schema without making NVENC availability an admission
     // requirement for evaluate-only jobs.
     snapshot.codec = effective_codec;
-    snapshot.scene_cache_max_bytes = request.scene_cache_max_bytes;
-    // Legacy clients may still send the retired cache policy. Direct causal conversion has
-    // no administrative scene split, so normalize persisted state to the only valid behavior.
-    snapshot.cache_budget_policy = cache_budget_policy_e::fail;
+    snapshot.scene_cache_max_bytes = transient_raster_hard_cap_bytes;
     snapshot.progress.phase = "queued";
     snapshot.created_at_unix_ms = unix_time_ms();
     if (request.operation == operation_e::convert) {
@@ -5869,7 +5828,6 @@ namespace offline_sbs {
         .output_location = snapshot.output_location,
         .codec = snapshot.codec,
         .scene_cache_max_bytes = snapshot.scene_cache_max_bytes,
-        .cache_budget_policy = snapshot.cache_budget_policy,
         .progress = snapshot.progress,
         .created_at_unix_ms = snapshot.created_at_unix_ms,
         .started_at_unix_ms = snapshot.started_at_unix_ms,

@@ -460,6 +460,27 @@ namespace {
     }
   }
 
+  TEST_F(OfflineSbsHttpDemandTest, RetiredCacheLimitFieldsAreRejectedBeforeDemand) {
+    local_owner_t local;
+    const auto &create = routes[3];
+    ASSERT_EQ(create.handler, confighttp::createOfflineSbsJob);
+    const json retired {
+      {"scene_cache_max_bytes", 4ull * 1024ull * 1024ull * 1024ull},
+      {"cache_budget_policy", "fail"},
+    };
+    for (const auto &[name, value] : retired.items()) {
+      SCOPED_TRACE(name);
+      auto body = json::parse(local.create_body());
+      body[name] = value;
+      offline_http_request_t request(true);
+      select_route(request, create);
+      request.body(body.dump());
+      serve(request, create);
+      expect_status(request, "HTTP/1.1 400 Bad Request\r\n");
+      local.expect_dormant();
+    }
+  }
+
   TEST_F(OfflineSbsHttpDemandTest, FirstAuthorizedGetStartsOnceReturns503ThenActualReady200) {
     local_owner_t local;
     local.expect_dormant();

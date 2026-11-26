@@ -102,9 +102,9 @@ and encoder-write timings. These measure transfer and backpressure as well as co
 timings remain separate. Compare matched source/output evidence before attributing a throughput
 change. With diagnostics off, a conversion collects no timings.
 
-Legacy cache-limit request fields remain accepted so that job records persisted by earlier
-versions still load; the Web UI does not send them. They mean only the transient-raster cap. There is no whole-clip image sequence, depth/state cache,
-scene replay, per-scene encoder, or second inference pass.
+The manager sets the 4 GiB transient-raster cap; a create request names only the input,
+operation, output name, and codec, and any other field is rejected. There is no whole-clip image
+sequence, depth/state cache, scene replay, per-scene encoder, or second inference pass.
 
 SDR encoding does not decode the source again. Static HDR keeps a second aligned source decode
 solely to donate per-frame mastering-display and content-light metadata, because the raw pipe
@@ -122,7 +122,8 @@ A job retains its worker specification (schema 3), its worker result (schema 4, 
 and the contracts in its result directory: source, native capabilities, and, for a conversion,
 output, timeline, and publication. The specification and result are exact-key documents
 exchanged only between the manager and the worker of the same build; the manager reads a worker
-result once, when that worker exits. No scene list or scene-audit file is produced.
+result once, when that worker exits, and accepts only the raw memory transport and completion
+evidence that worker produces. No scene list or scene-audit file is produced.
 
 New production contracts identify the typed runner, its condition-variable evidence wakeup, and
 its memory transport without snapshot filenames. Retained file-transport contracts remain
@@ -134,7 +135,8 @@ references in its compact worker result. They are accepted and discarded when th
 read and are never written, so such a job stays listed, readable, and clearable. Its
 `scene-audit.json` and `scene-audit-page-*.json` files are not read or served; they stay in the
 job's result directory, counted against the retained-artifact quota, until the job is cleared
-or pruned.
+or pruned. A record from a release that still admitted the retired scene split may say
+`"cache_budget_policy": "split"`; it is read as `fail`, the only value written.
 
 ## Media and publication
 

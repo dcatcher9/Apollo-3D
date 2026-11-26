@@ -514,17 +514,11 @@ namespace offline_sbs::wire {
       const auto &analysis = result.analysis_contract;
       const auto &runtime = analysis.resolved_runtime;
       const bool converting = result.operation == "convert";
-      const bool raw_transport = runtime.frame_transport == raw_frame_transport::name;
-      const auto expected_follow_format =
-        raw_transport ? (source.color_mode == "sdr" ? std::string_view {"bgra8"} : std::string_view {"gbrpf32le"}) :
-          (source.color_mode == "sdr" ? std::string_view {"bmp"} : std::string_view {"pfm"});
-      const auto expected_input_frame_format =
-        raw_transport ?
-          (source.color_mode == "sdr" ? std::string_view {"sRGB-BGRA8-raw"} :
-                                       std::string_view {"linear-scRGB-f32-planar"}) :
-          (source.color_mode == "sdr" ? std::string_view {"sRGB-BMP-WIC"} :
-                                       std::string_view {"linear-scRGB-f32-pfm"});
+      const bool sdr = source.color_mode == "sdr";
+      // The manager reads a worker result only from a worker of its own build, which always
+      // uses the raw memory transport and its completion evidence.
       if (
+        runtime.frame_transport != raw_frame_transport::name ||
         !analysis.observation_timeline ||
         analysis.observation_timeline->count != source.frame_count ||
         analysis.artifact_mode != (converting ? "conversion" : "adaptive") ||
@@ -536,8 +530,7 @@ namespace offline_sbs::wire {
         analysis.source_width != source.width ||
         analysis.source_height != source.height ||
         analysis.source_first_sequence != 1 ||
-        (analysis.adaptive_state.transport != "atomic-latest-v1" &&
-         analysis.adaptive_state.transport != completion_channel_t::name) ||
+        analysis.adaptive_state.transport != completion_channel_t::name ||
         analysis.adaptive_state.retained_history ||
         analysis.adaptive_state.frame_count != source.frame_count ||
         !runtime.parallax_v2_render || !runtime.parallax_v2_live ||
@@ -549,10 +542,9 @@ namespace offline_sbs::wire {
           std::numeric_limits<std::uint32_t>::max()
         ) != 0 ||
         runtime.follow_native_input_deletion ||
-        runtime.follow_format.value_or("") != expected_follow_format ||
-        (raw_transport ? runtime.follow_frame_pattern.has_value() :
-          runtime.follow_frame_pattern.value_or("") != "frame_%010d." + std::string {expected_follow_format}) ||
-        runtime.input_frame_format != expected_input_frame_format ||
+        runtime.follow_format.value_or("") != (sdr ? "bgra8" : "gbrpf32le") ||
+        runtime.follow_frame_pattern.has_value() ||
+        runtime.input_frame_format != (sdr ? "sRGB-BGRA8-raw" : "linear-scRGB-f32-planar") ||
         runtime.scene_cache_write || runtime.scene_cache_replay ||
         runtime.scene_cache_contract_schema || runtime.scene_plan_schema ||
         runtime.scene_plan_version || runtime.scene_start_sequence ||
@@ -576,16 +568,13 @@ namespace offline_sbs::wire {
         if (!sbs.enabled || sbs.frame_count != source.frame_count ||
             sbs.width != runtime.output_sbs_width ||
             sbs.height != runtime.output_sbs_height ||
-            sbs.frame_format != (raw_transport ?
-              (source.color_mode == "sdr" ? "bgra8" : "rgba16f") :
-              runtime.output_frame_format) ||
+            sbs.frame_format != (sdr ? "bgra8" : "rgba16f") ||
             sbs.transfer != runtime.output_transfer ||
             sbs.primaries != runtime.output_primaries ||
             sbs.row_order != runtime.output_row_order ||
-            (raw_transport &&
-              (runtime.output_frame_format != (source.color_mode == "sdr" ? "sRGB-BGRA8-raw" : "linear-scRGB-f16-raw") ||
-               runtime.output_ffmpeg_pixel_format != (source.color_mode == "sdr" ? "bgra" : "gbrpf32le") ||
-               sbs.ffmpeg_pixel_format != runtime.output_ffmpeg_pixel_format)) ||
+            runtime.output_frame_format != (sdr ? "sRGB-BGRA8-raw" : "linear-scRGB-f16-raw") ||
+            runtime.output_ffmpeg_pixel_format != (sdr ? "bgra" : "gbrpf32le") ||
+            sbs.ffmpeg_pixel_format != runtime.output_ffmpeg_pixel_format ||
             !sbs.atomic_publication || !runtime.follow_atomic_sbs_publication) {
           throw contract_error(
             "worker direct SBS attestation disagrees with the causal pass"
@@ -1639,7 +1628,8 @@ namespace offline_sbs::wire {
       {"output_location", value.output_location ? json(*value.output_location) : json(nullptr)},
       {"codec", value.codec},
       {"scene_cache_max_bytes", value.scene_cache_max_bytes},
-      {"cache_budget_policy", value.cache_budget_policy},
+      // Schema 1 keeps this field. Direct causal conversion has one behavior: fail.
+      {"cache_budget_policy", "fail"},
       {"progress", {
         {"phase", value.progress.phase},
         {"processed_frames", value.progress.processed_frames},
@@ -1728,7 +1718,14 @@ namespace offline_sbs::wire {
     }
     result.codec = required_string(normalized, "codec", "job snapshot");
     result.scene_cache_max_bytes = unsigned_integer<std::uint64_t>(normalized, "scene_cache_max_bytes", "job snapshot");
-    result.cache_budget_policy = required_string(normalized, "cache_budget_policy", "job snapshot");
+    // A job retained by a release that still admitted the retired scene split may record
+    // "split". It is read as the only remaining behavior and never written.
+    const auto cache_budget_policy =
+      required_string(normalized, "cache_budget_policy", "job snapshot");
+    if (cache_budget_policy != "fail" &&
+        !(persisted_document && cache_budget_policy == "split")) {
+      throw contract_error("job snapshot cache budget policy is unsupported");
+    }
     const auto &progress = normalized.at("progress");
     result.progress.phase = required_string(progress, "phase", "job progress");
     result.progress.processed_frames = unsigned_integer<std::uint64_t>(progress, "processed_frames", "job progress");

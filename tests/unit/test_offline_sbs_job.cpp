@@ -2022,7 +2022,7 @@ TEST(OfflineSbsJob, RestartRecoveryNeverResumesAnUnfinishedGpuJob) {
     {"output_path", nullptr},
     {"codec", "hevc_nvenc"},
     {"scene_cache_max_bytes", 4ull * 1024ull * 1024ull * 1024ull},
-    {"cache_budget_policy", "fail"},
+    {"cache_budget_policy", "split"},
     {"progress", {
       {"phase", "analysis"},
       {"processed_frames", 19},
@@ -2099,7 +2099,8 @@ TEST(OfflineSbsJob, RestartKeepsACompletedJobThatStillNamesItsSceneAudit) {
   }
 
   // Rewrite the durable record and result directory into the shape a release with the
-  // diagnostic scene audit left behind for a completed conversion.
+  // diagnostic scene audit and the retired split budget policy left behind for a completed
+  // conversion.
   const auto result_directory = config.worker_root / "jobs" / id / "result";
   const auto audit_manifest = result_directory / "scene-audit.json";
   const auto audit_page = result_directory / "scene-audit-page-0.json";
@@ -2108,6 +2109,8 @@ TEST(OfflineSbsJob, RestartKeepsACompletedJobThatStillNamesItsSceneAudit) {
   const auto state_path = config.state_root / "jobs" / id / "job.json";
   auto persisted = nlohmann::json::parse(std::ifstream(state_path));
   ASSERT_TRUE(persisted.at("worker_result").is_object());
+  EXPECT_EQ(persisted.at("cache_budget_policy"), "fail");
+  persisted["cache_budget_policy"] = "split";
   persisted["scene_decisions"] = nlohmann::json::array({
     {
       {"scene_id", 2},
@@ -2148,6 +2151,7 @@ TEST(OfflineSbsJob, RestartKeepsACompletedJobThatStillNamesItsSceneAudit) {
     EXPECT_FALSE(snapshot.job->worker_result.contains(retired)) << retired;
   }
   const auto served = snapshot.job->json();
+  EXPECT_EQ(served.at("cache_budget_policy"), "fail");
   EXPECT_FALSE(served.contains("scene_decisions"));
   EXPECT_FALSE(served.at("progress").contains("scene_count"));
   EXPECT_FALSE(served.at("progress").contains("current_scene"));
