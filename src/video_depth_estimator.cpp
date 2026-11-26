@@ -6794,23 +6794,43 @@ namespace models {
                                              subtitle_contour_source) &&
              ensure_subtitle_contour_texture(native_width, native_height, native_float_format,
                                              subtitle_contour_source_snapshot) &&
-             ensure_subtitle_contour_texture(native_width, native_height, native_float_format,
-                                             subtitle_contour_previous_features) &&
-             ensure_subtitle_contour_texture(native_width, native_height, native_float_format,
-                                             subtitle_contour_next_features) &&
-             ensure_subtitle_contour_texture(native_width, native_height, DXGI_FORMAT_R32_UINT,
-                                             subtitle_contour_support) &&
              (!subtitle_legacy_matte_required() ||
               ensure_subtitle_contour_texture(native_width, native_height, DXGI_FORMAT_R32_UINT,
                                               subtitle_glyph_matte));
     }
 
     bool ensure_subtitle_dump_matte() {
-      // Admission has already sized support for this source, including ineligible placeholders.
-      D3D11_TEXTURE2D_DESC support {};
-      subtitle_contour_support.texture->GetDesc(&support);
-      return ensure_subtitle_contour_texture(support.Width, support.Height, DXGI_FORMAT_R32_UINT,
+      // Admission has already sized the source band, including ineligible placeholders.
+      D3D11_TEXTURE2D_DESC band {};
+      subtitle_contour_source.texture->GetDesc(&band);
+      return ensure_subtitle_contour_texture(band.Width, band.Height, DXGI_FORMAT_R32_UINT,
                                              subtitle_glyph_matte);
+    }
+
+    // temporal_main publishes native support and the RGB feature history. Only the dense legacy
+    // matte, the conditioned-field diagnostics (including every Dump 3D), the non-adaptive Direct
+    // Glyph variant and evaluation exports read them. Allocate them with the current source band
+    // on the first observation that needs them and release them once one does not, so a later
+    // request starts its history at count one instead of reading stale features.
+    [[nodiscard]] bool subtitle_contour_history_required(const bool legacy_matte) const noexcept {
+      return legacy_matte || (subtitle_direct_glyph_enabled && !subtitle_direct_glyph_adaptive_context);
+    }
+
+    bool ensure_subtitle_contour_history() {
+      D3D11_TEXTURE2D_DESC band {};
+      subtitle_contour_source.texture->GetDesc(&band);
+      return ensure_subtitle_contour_texture(band.Width, band.Height, band.Format,
+                                             subtitle_contour_previous_features) &&
+             ensure_subtitle_contour_texture(band.Width, band.Height, band.Format,
+                                             subtitle_contour_next_features) &&
+             ensure_subtitle_contour_texture(band.Width, band.Height, DXGI_FORMAT_R32_UINT,
+                                             subtitle_contour_support);
+    }
+
+    void release_subtitle_contour_history() {
+      subtitle_contour_previous_features.reset();
+      subtitle_contour_next_features.reset();
+      subtitle_contour_support.reset();
     }
 
     bool reset_subtitle_state() {
@@ -7626,11 +7646,15 @@ namespace models {
           !subtitle_contour_temporal_cs || !subtitle_contour_history_cs ||
           !subtitle_contour_history_identity_cs ||
           !subtitle_contour_snapshot_cs || !subtitle_contour_cbuffer || !subtitle_contour_identity.ready() ||
-          !subtitle_contour_source.ready() || !subtitle_contour_previous_features.ready() ||
-          !subtitle_contour_next_features.ready() ||
-          !subtitle_contour_support.ready() ||
+          !subtitle_contour_source.ready() ||
           (legacy_matte && (!subtitle_glyph_matte_cs || !subtitle_glyph_matte.ready())) ||
           !subtitle_contour_source_snapshot.ready() || !subtitle_contour_probability_snapshot.ready()) {
+        return false;
+      }
+      const bool contour_history = subtitle_contour_history_required(legacy_matte);
+      if (!contour_history) {
+        release_subtitle_contour_history();
+      } else if (!ensure_subtitle_contour_history()) {
         return false;
       }
       const auto content = live_field_content(pending_root->input_region)
@@ -7667,7 +7691,7 @@ namespace models {
       ID3D11ShaderResourceView *srvs[13] {
         subtitle_contour_source.srv.Get(), ocr_output_srv.Get(),
         subtitle_locator_state_srv.Get(), subtitle_condition_params_srv.Get(),
-        nullptr, nullptr, subtitle_contour_previous_features.srv.Get(),
+        nullptr, nullptr, contour_history ? subtitle_contour_previous_features.srv.Get() : nullptr,
         subtitle_contour_identity.srv.Get(), depth_health_state_srv.Get(), ocr_box_record_srv.Get(),
         depth_coordinate_v2_state_srv.Get(), nullptr, nullptr
       };
@@ -7683,20 +7707,23 @@ namespace models {
       context->CSSetUnorderedAccessViews(7u, 1u, &null_uav, nullptr);
       ID3D11ShaderResourceView *observation_input = subtitle_contour_observation.srv.Get();
       context->CSSetShaderResources(12u, 1u, &observation_input);
-      // Reuse submits zero groups for every pass. Do not clear or copy the published support
-      // unconditionally: its backing holds the previous complete tuple until fresh completion.
-      ID3D11UnorderedAccessView *output = subtitle_contour_support.uav.Get();
-      context->CSSetUnorderedAccessViews(0u, 1u, &output, nullptr);
-      ID3D11UnorderedAccessView *next_features = subtitle_contour_next_features.uav.Get();
-      context->CSSetUnorderedAccessViews(2u, 1u, &next_features, nullptr);
-      context->CSSetShader(subtitle_contour_temporal_cs.Get(), nullptr, 0u);
-      context->DispatchIndirect(near_identical_transaction.dispatch.Get(),
-                               near_identical_gpu_subtitle_condition_grid16_byte_offset);
-      context->CSSetUnorderedAccessViews(0u, 1u, &null_uav, nullptr);
-      context->CSSetUnorderedAccessViews(2u, 1u, &null_uav, nullptr);
+      ID3D11UnorderedAccessView *output = nullptr;
+      if (contour_history) {
+        // Reuse submits zero groups for every pass. Do not clear or copy the published support
+        // unconditionally: its backing holds the previous complete tuple until fresh completion.
+        output = subtitle_contour_support.uav.Get();
+        context->CSSetUnorderedAccessViews(0u, 1u, &output, nullptr);
+        ID3D11UnorderedAccessView *next_features = subtitle_contour_next_features.uav.Get();
+        context->CSSetUnorderedAccessViews(2u, 1u, &next_features, nullptr);
+        context->CSSetShader(subtitle_contour_temporal_cs.Get(), nullptr, 0u);
+        context->DispatchIndirect(near_identical_transaction.dispatch.Get(),
+                                 near_identical_gpu_subtitle_condition_grid16_byte_offset);
+        context->CSSetUnorderedAccessViews(0u, 1u, &null_uav, nullptr);
+        context->CSSetUnorderedAccessViews(2u, 1u, &null_uav, nullptr);
 
-      srvs[5] = subtitle_contour_support.srv.Get();
-      context->CSSetShaderResources(5u, 1u, &srvs[5u]);
+        srvs[5] = subtitle_contour_support.srv.Get();
+        context->CSSetShaderResources(5u, 1u, &srvs[5u]);
+      }
       if (legacy_matte) {
         // Reuse submits zero groups and holds the previous dense output. Fresh observations
         // write the full native band, including literal zero for empty observations.
@@ -7721,24 +7748,26 @@ namespace models {
       // staged features can become history by exchanging owners after every old-feature read.
       // Receipt-gated work can issue zero groups for reuse or rejected authority, so it must keep
       // the existing GPU-conditional copy and the same history owner regardless of host guesses.
-      const bool swap_feature_history = !gpu_undecided_postprocess_pending();
+      // Without feature history only the SCT identity is published.
+      const bool copy_feature_history = contour_history && gpu_undecided_postprocess_pending();
       ID3D11ShaderResourceView *null_history[2] {};
       context->CSSetShaderResources(6u, 2u, null_history);
-      srvs[11] = subtitle_contour_next_features.srv.Get();
+      srvs[11] = contour_history ? subtitle_contour_next_features.srv.Get() : nullptr;
       context->CSSetShaderResources(11u, 1u, &srvs[11u]);
       ID3D11UnorderedAccessView *history_outputs[2] {
-        subtitle_contour_previous_features.uav.Get(), subtitle_contour_identity.uav.Get()
+        contour_history ? subtitle_contour_previous_features.uav.Get() : nullptr,
+        subtitle_contour_identity.uav.Get()
       };
       context->CSSetUnorderedAccessViews(2u, 2u, history_outputs, nullptr);
-      context->CSSetShader(swap_feature_history ? subtitle_contour_history_identity_cs.Get() :
-                                                  subtitle_contour_history_cs.Get(), nullptr, 0u);
+      context->CSSetShader(copy_feature_history ? subtitle_contour_history_cs.Get() :
+                                                  subtitle_contour_history_identity_cs.Get(), nullptr, 0u);
       context->DispatchIndirect(near_identical_transaction.dispatch.Get(),
                                near_identical_gpu_subtitle_condition_grid16_byte_offset);
       ID3D11UnorderedAccessView *null_outputs[2] {};
       context->CSSetUnorderedAccessViews(2u, 2u, null_outputs, nullptr);
       ID3D11ShaderResourceView *null_next = nullptr;
       context->CSSetShaderResources(11u, 1u, &null_next);
-      if (swap_feature_history) {
+      if (contour_history && !copy_feature_history) {
         std::swap(subtitle_contour_previous_features, subtitle_contour_next_features);
       }
       // Preserve the completed OCR source/probability before the next asynchronous admission
@@ -7873,7 +7902,7 @@ namespace models {
           !ocr_box_record_srv ||
           (pending_root->subtitle_work == cuda_conditional_graph::work_flag_e::optional_ocr &&
            !ocr_output_srv) || !subtitle_contour_identity.ready() ||
-          !subtitle_contour_probability_snapshot.ready() || !subtitle_contour_support.ready() ||
+          !subtitle_contour_probability_snapshot.ready() ||
           !depth_health_state_srv || !near_identical_transaction.dispatch) {
         return false;
       }

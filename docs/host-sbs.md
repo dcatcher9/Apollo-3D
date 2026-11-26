@@ -74,7 +74,7 @@ as one tuple; the draw-owned pin resources are not a new temporal observation.
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
 schema 135/tag `0xC932B35D`, canonical SHA-256
-`88a17065a56f8677f2c49e376b57e4af32bb6c5e2158f8e8c9bc6b830f88c520`. It binds the
+`c2a6b3724f5528d5092f6b442112cf12ce9d890288dc33b901f3cda604907d92`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups are the shared C++, Python, JSON, and documentation authority for every ordered shader set
 and source pin. The optional `parallax_v2_p010_y` group remains fail-open to the canonical
@@ -85,7 +85,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 2 | `8e2de9ed76bd64a38a0c956e75dd7a13c8883d39d0ef0050ffe5aba9f7208672` |
-| `parallax_v2_producer` | 30 | `04c861cfed510c9e074aaf430c180b66f5cf308c3df9a4c901a096af3779c744` |
+| `parallax_v2_producer` | 30 | `b1307cc6c457482c48b47daf8f900cd919e182286bfe8cddd88b1a7e34bed13b` |
 | `parallax_v2_replay_resolve` | 2 | `9a73e8a92ba55e3d99f3e37868918329c0e0d478bd7281319670dd4f2fe55347` |
 | `parallax_v2_coordinate_diagnostic` | 1 | `b895dea87363c1859c16d97c3d79121a2996d5f03ee8c8b56e20e756609e4e59` |
 | `near_identical_detector` | 3 | `c894bfb39134f169638662441024cc234a74faf4eac096a65cefe6487cb35ee5` |
@@ -1202,6 +1202,14 @@ completed eligible inference observations, not displayed frames, duplicate deliv
 or frames dropped while the single inference is busy. These counts and their feature-code low bit
 do not impose a four-observation rendering gate. The positive-count duplicate-admission rule above
 remains; the count-four feature bit does not authorize support.
+
+Native support and this history are computed only for an observation that reads them: the dense
+legacy matte, the conditioned-field diagnostics (every Dump 3D request and the evaluation harness)
+and the non-adaptive Direct Glyph variant. Live Host 3D and Convert Video draw with the adaptive
+Direct Glyph palette, so their ordinary observations publish only the SCT5 identity, the observation
+record and the joined source/probability snapshot; the support and feature textures are then
+released. The first observation that needs them starts from cleared features, so a Dump 3D taken
+after ordinary live observations shows count one where an always-on history would show two to four.
 
 The count starts at one only inside a current authenticated OCR8 cover with valid RGB and
 probability evidence. History compatibility is bound to source/crop/field/content geometry,

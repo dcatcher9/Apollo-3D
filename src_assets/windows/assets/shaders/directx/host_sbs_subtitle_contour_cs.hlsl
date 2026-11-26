@@ -1259,22 +1259,19 @@ void history_main(uint3 dispatch_id : SV_DispatchThreadID) {
     }
 }
 
-// A CPU-completed force observation has already written every staged native feature. Publish
-// the same SCT5 identity without copying that band, then let the owner exchange the two textures.
-// Receipt-gated roots retain history_main: their zero-group reuse must preserve both owners.
+// Publish the SCT5 identity alone. A CPU-completed force observation with feature history has
+// already written every staged native feature; its owner then exchanges the two textures. Without
+// feature history nothing else is bound. Receipt-gated roots with feature history retain
+// history_main: their zero-group reuse must preserve both owners. The native support and feature
+// textures share the source band's extent, which the observation gate has already matched.
 [numthreads(16, 16, 1)]
 void history_identity_main(uint3 group_id : SV_GroupID, uint group_index : SV_GroupIndex) {
     // Keep the authenticated field-grid indirect ABI. Only its first group writes identity.
     if (any(group_id != uint3(0u, 0u, 0u))) return;
     uint2 observation = ReadCurrentObservation();
-    uint width, height, native_width, native_height, words, word_stride, next_w, next_h;
-    HistoryFeaturesWrite.GetDimensions(width, height);
-    NextFeaturesRead.GetDimensions(next_w, next_h);
-    CurrentSupportRead.GetDimensions(native_width, native_height);
+    uint words, word_stride;
     HistoryIdentityWrite.GetDimensions(words, word_stride);
-    bool valid = observation.x != 0u && width == contour_source.x && height == contour_source.w &&
-        native_width == width && native_height == height && next_w == width && next_h == height &&
-        words == HISTORY_WORDS && word_stride == 4u;
+    bool valid = observation.x != 0u && words == HISTORY_WORDS && word_stride == 4u;
     [loop]
     for (uint word = group_index; word < words; word += 16u * 16u)
         HistoryIdentityWrite[word] = words == HISTORY_WORDS && word_stride == 4u ? HistoryWord(word, valid, observation.y != 0u) : 0u;

@@ -272,7 +272,9 @@ and eight current slots. Every admitted valid OCR8 paired cover participates dir
 is no secondary component winner, ownership tracker, corner filter, pending state or box-count
 history reset. Covers remain in the exact current OCR8 record. The fixed-RGB history counts
 four genuine eligible observations for diagnostics; current palette/stroke or local dark-outline
-evidence admits support immediately. Positive count preserves duplicate admission without a
+evidence admits support immediately. Live and Convert Video observations that no diagnostic reads
+keep no support or feature history, so a live Dump 3D records the count accumulated since the
+first dump-armed observation: one on its first observation instead of up to four. Positive count preserves duplicate admission without a
 four-count wait. This history is not a new stable temporal subtitle classifier. SCT5 preserves source/domain history without
 encoding OCR group identity; its reserved words24..31 are canonical zero.
 

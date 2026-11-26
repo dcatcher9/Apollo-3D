@@ -349,7 +349,11 @@ TEST_F(TensorRtOcrAvailabilityGpuTest, MissingPackagedOcrPreservesJoinedDepthAnd
     EXPECT_EQ(condition[v2::subtitle_condition_param_current_count_word], 0u);
     EXPECT_EQ(condition[v2::subtitle_condition_param_target_word], 0u);
     EXPECT_EQ(completed.observation.subtitle_glyph_matte != nullptr, diagnostics_expected);
+    // Native support and the RGB feature history exist only for an observation a diagnostic reads.
+    EXPECT_EQ(completed.observation.subtitle_contour_support != nullptr, diagnostics_expected);
+    EXPECT_EQ(completed.observation.subtitle_contour_history != nullptr, diagnostics_expected);
     for (auto *view : {completed.observation.subtitle_contour_support.Get(), completed.observation.subtitle_ocr_probability.Get(), completed.observation.subtitle_selected_matte.Get()}) {
+      if (!view && !diagnostics_expected) continue;
       std::vector<std::uint32_t> mask;
       ASSERT_TRUE(read_words(device.Get(), context.Get(), view, mask));
       EXPECT_TRUE(std::all_of(mask.begin(), mask.end(), [](auto word) {
