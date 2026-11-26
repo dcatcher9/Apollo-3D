@@ -782,21 +782,6 @@ namespace platf {
 
   void restart();
 
-  /**
-   * @brief Set an environment variable.
-   * @param name The name of the environment variable.
-   * @param value The value to set the environment variable to.
-   * @return 0 on success, non-zero on failure.
-   */
-  int set_env(const std::string &name, const std::string &value);
-
-  /**
-   * @brief Unset an environment variable.
-   * @param name The name of the environment variable.
-   * @return 0 on success, non-zero on failure.
-   */
-  int unset_env(const std::string &name);
-
   inline constexpr size_t MAX_UDP_BATCH_PACKETS = 64;
 
   // Fixed-size payloads in wire order. Each of the data and parity ranges is contiguous.
@@ -893,15 +878,6 @@ namespace platf {
   bool process_group_running(std::uintptr_t native_handle);
 
   input_t input();
-  /**
-   * @brief Get the current mouse position on screen
-   * @param input The input_t instance to use.
-   * @return Screen coordinates of the mouse.
-   * @examples
-   * auto [x, y] = get_mouse_loc(input);
-   * @examples_end
-   */
-  util::point_t get_mouse_loc(input_t &input);
   void move_mouse(input_t &input, int deltaX, int deltaY);
   void abs_mouse(input_t &input, const touch_port_t &touch_port, float x, float y);
 

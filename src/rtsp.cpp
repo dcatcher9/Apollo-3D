@@ -1066,19 +1066,6 @@ namespace rtsp_stream {
     }
   }
 
-  bool publish_client_policy(
-    std::string_view uuid,
-    std::uint64_t generation,
-    std::string name,
-    crypto::PERM permissions,
-    bool revoked
-  ) {
-    auto publication = stage_client_policy(uuid, generation, std::move(name), permissions, revoked);
-    const bool accepted = publication.accepted;
-    complete_client_policy(std::move(publication));
-    return accepted;
-  }
-
   std::optional<std::string> active_session_uuid() {
     return server.active_session_uuid();
   }

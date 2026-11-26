@@ -551,8 +551,12 @@ TEST(PairingStateTest, OlderRuntimePolicyCannotOverwriteNewerGeneration) {
   });
   ASSERT_TRUE(rtsp_stream::insert_session_for_test(session));
 
-  ASSERT_TRUE(rtsp_stream::publish_client_policy("policy-generation-order", newer_generation, "newer", crypto::PERM::_all, false));
-  EXPECT_FALSE(rtsp_stream::publish_client_policy("policy-generation-order", newer_generation - 1, "older", crypto::PERM::_default, false));
+  auto newer = rtsp_stream::stage_client_policy("policy-generation-order", newer_generation, "newer", crypto::PERM::_all, false);
+  ASSERT_TRUE(newer.accepted);
+  rtsp_stream::complete_client_policy(std::move(newer));
+  auto older = rtsp_stream::stage_client_policy("policy-generation-order", newer_generation - 1, "older", crypto::PERM::_default, false);
+  EXPECT_FALSE(older.accepted);
+  rtsp_stream::complete_client_policy(std::move(older));
 
   EXPECT_EQ(stream::session::permissions(*session), crypto::PERM::_all);
   EXPECT_EQ(stream::session::client_name(*session), "newer");

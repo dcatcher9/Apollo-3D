@@ -562,18 +562,6 @@ namespace platf {
     send_input(i);
   }
 
-  util::point_t get_mouse_loc(input_t &) {
-    POINT p {};
-    if (!GetCursorPos(&p)) {
-      return util::point_t {0.0, 0.0};
-    }
-
-    return util::point_t {
-      (double) p.x,
-      (double) p.y
-    };
-  }
-
   void button_mouse(input_t &input, int button, bool release) {
     INPUT i {};
 

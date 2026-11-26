@@ -249,18 +249,6 @@ namespace rtsp_stream {
 
   void complete_client_policy(client_policy_publication_t publication, bool graceful = true);
 
-  /**
-   * Publish the latest authorization policy for a client and apply it to the active session.
-   * Older generations are ignored, and future session insertion observes the same policy.
-   */
-  bool publish_client_policy(
-    std::string_view uuid,
-    std::uint64_t generation,
-    std::string name,
-    crypto::PERM permissions,
-    bool revoked
-  );
-
 #ifdef SUNSHINE_TESTS
   std::size_t poll_server_for_test();
   std::size_t run_server_once_for_test(std::chrono::milliseconds timeout);
