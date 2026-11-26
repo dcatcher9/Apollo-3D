@@ -9,7 +9,7 @@
     "build-clean": "vite build --debug --emptyOutDir",
     "dev": "vite build --watch",
     "serve": "serve ./tests/fixtures/http --no-port-switching",
-    "test": "node --test tests/frontend/*.test.mjs"
+    "test": "node --test tests/frontend/*.test.mjs tests/web/*.test.mjs"
   },
   "type": "module",
   "dependencies": {
