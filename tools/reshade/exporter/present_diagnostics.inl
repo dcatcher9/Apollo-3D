@@ -36,8 +36,8 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
     const bool placed = scene.ready && scene.blend > 0.f;
     output_sample out;
     out.fg = frame.diagnostics.frame_generation_active;
-    out.scene_flat = scene.owned && frame.depth_ready && !placed;
-    out.scene_fading = scene.owned && frame.depth_ready && placed && scene.blend < 1.f;
+    out.scene_flat = frame.depth_ready && !placed;
+    out.scene_fading = frame.depth_ready && placed && scene.blend < 1.f;
     out.depth_ready = frame.depth_ready;
     out.reused_depth = frame.reused_depth;
     out.gap = frame.gap;

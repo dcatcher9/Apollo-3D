@@ -8,7 +8,7 @@
   // first; shader uniforms, UI and export consume the same completed decision.
   // No borrowed textures or independently mutable copies of readiness live here.
   struct scene_parameters_t {
-    bool owned = false, ready = false;
+    bool ready = false;
     std::uint64_t generic_routing_epoch = 0;
     int basis = 0;
     float scale = 0.f, blend = 0.f;
@@ -117,7 +117,7 @@
 #endif
 
 #if defined(SUNSHINE_EXPORTER_IMPLEMENTATION)
-  void restore_reused_scene(frame_decision_t &frame, const frame_decision_t &previous, bool supported) {
+  void restore_reused_scene(frame_decision_t &frame, const frame_decision_t &previous) {
     // Only the depth source can authorize old pixels: an API provider's held
     // or pending copy, or Generic's hold of the capture it showed on the
     // previous Present. Their already resolved scene travels with the exact
@@ -127,18 +127,17 @@
     // a generated frame must look like its real frame. Dropping its depth while
     // the real frame still shows depth (range calibration after FG starts, or a
     // camera cut) flickered generated frames flat at up to four per real frame.
-    frame.scene.owned = supported;
     if (frame.reused_depth && frame.depth_ready && previous.depth_ready &&
         sunshine_game3d::depth_output::same_capture(frame.scene_source, previous.scene_source))
       frame.scene = previous.scene;
-    else if (supported) {
+    else {
       frame.scene.ui = {sunshine_game3d::automatic_phase::waiting_for_depth, true};
       if (frame.depth_ready) frame.gap = previous.depth_ready ? depth_gap::reuse_other_source : depth_gap::reuse_after_gap;
       frame.depth_ready = false;
     }
   }
 #else
-  void restore_reused_scene(frame_decision_t &frame, const frame_decision_t &previous, bool supported);
+  void restore_reused_scene(frame_decision_t &frame, const frame_decision_t &previous);
 #endif
 
   // Part declarations: functions defined in exporter/present_diagnostics.inl (included at

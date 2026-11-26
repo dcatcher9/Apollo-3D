@@ -29,9 +29,9 @@ namespace sunshine_depth {
   bool begin_native_frame(reshade::api::effect_runtime *runtime, reshade::api::command_list *commands);
   void end_native_frame(reshade::api::effect_runtime *runtime, reshade::api::command_list *commands);
 
-  // Read immediately after this module's reshade_begin_effects callback and
-  // before reshade_finish_effects. Handles are borrowed for that callback only;
-  // the selected resource is then in shader_resource state. False clears all
+  // Read inside this runtime's native frame (begin_native_frame to
+  // end_native_frame). Handles are borrowed for that frame only; the selected
+  // resource is then in shader_resource state. False clears all
   // handles; ready means safe to sample in THIS pass. reused_depth distinguishes
   // bounded FG reuse from fresh depth. The query is passive: scene selection,
   // histogram evidence and capture state remain unchanged.

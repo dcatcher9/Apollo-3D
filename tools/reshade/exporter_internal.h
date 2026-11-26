@@ -282,7 +282,6 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
     sunshine_depth::frame_depth test_depth;
     sunshine_game3d::test::last_render test_render;
 #endif
-    bool raw_supported = false;
     std::uint64_t raw_basis_epoch = 0;
     sunshine_raw_scene::pool raw_policy;
     // One retained reference per API-provided logical encoding, so FG switches
@@ -418,7 +417,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       // The protocol is named so a pairing with an older host, which ignores this mapping
       // without a log line, can be told apart from a host that is not streaming.
       char ready[192];
-      std::snprintf(ready, sizeof(ready), "Sunshine SBS: exporter ready (export protocol %u, %u export slots); waiting for native Game 3D or a reference stereo effect and consumer", wire::version, wire::slot_count);
+      std::snprintf(ready, sizeof(ready), "Sunshine SBS: exporter ready (export protocol %u, %u export slots); waiting for native Game 3D and a consumer", wire::version, wire::slot_count);
       log(reshade::log::level::info, ready);
       return true;
     }
@@ -659,7 +658,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       } finish{runtime, commands};
       {
         const sunshine_game3d::slow_step step("native depth preparation");
-        prepare_native_depth(runtime, commands, rtv);
+        prepare_native_depth(runtime);
       }
       timer.mark();
       auto &ui_session = sunshine_game3d::source_alpha_session();
@@ -931,17 +930,14 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
     }
 
     void decide_scene_frame(api::effect_runtime *runtime, runtime_t &proof, frame_decision_t &frame,
-        const frame_decision_t &previous_frame, const sunshine_depth::frame_depth &depth,
-        bool game_enabled, std::uint64_t now);
+        const frame_decision_t &previous_frame, const sunshine_depth::frame_depth &depth, std::uint64_t now);
 
-    void prepare_native_depth(api::effect_runtime *runtime, api::command_list *,
-                              api::resource_view) {
+    void prepare_native_depth(api::effect_runtime *runtime) {
       std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
       if (!lock.owns_lock()) return;
       auto &proof = runtimes_[runtime];
       const auto previous_frame = proof.frame;
       proof.frame = {};
-      proof.raw_supported = true;
       proof.frame_strength = std::isfinite(proof.frame_strength) ? std::clamp(proof.frame_strength, 0.f, 100.f) : 0.f;
       // The depth owner's native frame began first (begin_native_frame). Its
       // current capture is shader-readable now.
@@ -962,14 +958,14 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       }
       const auto now = sunshine_game3d::clock::game_now();
       frame_decision_t frame;
-      decide_scene_frame(runtime, proof, frame, previous_frame, depth, true, now);
+      decide_scene_frame(runtime, proof, frame, previous_frame, depth, now);
       const sunshine_game3d::slow_step step("frame publication");
       publish_frame(runtime, proof, std::move(frame));
     }
 
     scene_parameters_t resolve_raw_scene(api::effect_runtime *runtime, runtime_t &proof,
         const sunshine_depth::frame_depth &depth, const sunshine_game3d::depth_output::shown_depth &shown,
-        bool game_enabled, bool api_selected, std::uint64_t now);
+        bool api_selected, std::uint64_t now);
 
     void resolve_projection_scene(api::effect_runtime *runtime, runtime_t &proof,
         const sunshine_depth::frame_depth &depth, std::uint64_t now,
@@ -977,7 +973,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
 
     static void publish_frame(api::effect_runtime *runtime, runtime_t &proof, frame_decision_t frame) {
       auto ui = frame.scene.ui;
-      if (proof.addon_native && (proof.width > 3840 || proof.height > 3840))
+      if (proof.width > 3840 || proof.height > 3840)
         ui.phase = sunshine_game3d::automatic_phase::unsupported_resolution;
       publish_automatic_ui(runtime, ui);
       frame.prepared = true;
@@ -1028,7 +1024,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       }
       auto &proof = runtimes_[runtime];
       ring_.release_idle_rings(export_views{*this});
-      if (proof.raw_supported && !proof.frame.prepared) {
+      if (!proof.frame.prepared) {
         ring_.deactivate(runtime, "frame_not_prepared");
         return;
       }

@@ -1298,8 +1298,8 @@ bool sunshine_depth::get_frame_depth(effect_runtime *runtime, frame_depth &outpu
 		return false;
 	output = data->selected_capture;
 	output.orientation = output.detected_orientation;
-	// The runtime owns this view until finish_effects; the lookup cannot outlive
-	// that callback. Do not hold the resource map lock while calling the device.
+	// The view stays valid until the native frame ends; the lookup cannot outlive
+	// that frame. Do not hold the resource map lock while calling the device.
 	output.shader_resource = data->selected_shader_resource;
 	uint32_t color_width = 0, color_height = 0;
 	runtime->get_screenshot_width_and_height(&color_width, &color_height);

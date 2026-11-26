@@ -32,8 +32,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
   }
 
   inline void publisher_t::decide_scene_frame(api::effect_runtime *runtime, runtime_t &proof, frame_decision_t &frame,
-      const frame_decision_t &previous_frame, const sunshine_depth::frame_depth &depth,
-      bool game_enabled, std::uint64_t now) {
+      const frame_decision_t &previous_frame, const sunshine_depth::frame_depth &depth, std::uint64_t now) {
     frame.decided_ms = now;
     frame.present_ordinal = proof.presentation_ordinal;
     frame.depth_ready = depth.ready;
@@ -46,36 +45,34 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
     frame.scene_source = shown.scene_source;
     // Source choice and bounded reuse are resolved once by the depth provider.
     // Another fallible metadata query here could contradict this same frame.
-    frame.diagnostics.frame_generation_active = game_enabled && depth.frame_generation_active;
+    frame.diagnostics.frame_generation_active = depth.frame_generation_active;
     if (depth.reused_depth) {
       // The depth source owns the short, invalidation-aware depth reuse window.
       // Render current color with those pixels and their previously resolved
       // geometry, without advancing calibration, samples or readiness ramps.
       // Strength reductions remain immediate; increases wait until the next
       // real-depth frame re-evaluates this scene's disparity interval.
-      restore_reused_scene(frame, previous_frame, proof.raw_supported);
+      restore_reused_scene(frame, previous_frame);
       // Its real frame's scene as that frame left it: the ramp heard that
       // frame, and this Present neither adds to nor ends its exposure.
-      proof.reentry_heard = proof.reentry_heard || (proof.raw_supported && frame.depth_ready);
+      proof.reentry_heard = proof.reentry_heard || frame.depth_ready;
     } else {
       const bool provided = sunshine_game3d::depth_input::provider_selected(runtime);
       const sunshine_game3d::slow_step step("scene placement");
-      if (provided && proof.raw_supported && game_enabled && hold_projection_scene(frame, previous_frame, depth, now)) {
+      if (provided && hold_projection_scene(frame, previous_frame, depth, now)) {
         ++proof.camera_missing_holds;
         proof.reentry_heard = true; // The held scene, as for reused depth.
-      } else frame.scene = resolve_raw_scene(runtime, proof, depth, shown, game_enabled, provided, now);
+      } else frame.scene = resolve_raw_scene(runtime, proof, depth, shown, provided, now);
     }
     frame.ui_source = resolve_ui_observation(shown, previous_frame.ui_source, frame.scene, proof.raw_basis_epoch, now);
   }
 
   inline scene_parameters_t publisher_t::resolve_raw_scene(api::effect_runtime *runtime, runtime_t &proof,
       const sunshine_depth::frame_depth &depth, const sunshine_game3d::depth_output::shown_depth &shown,
-      bool game_enabled, bool api_selected, std::uint64_t now) {
+      bool api_selected, std::uint64_t now) {
     scene_parameters_t scene;
     scene.admitted_strength = proof.frame_strength;
-    scene.owned = proof.raw_supported;
-    const bool enabled = proof.raw_supported && game_enabled;
-    const bool provided = enabled && api_selected;
+    const bool provided = api_selected;
     const bool projection_provided = provided && (depth.projection.supplied ||
       depth.projection.encoding == sunshine_scene_depth::depth_encoding::linear_distance);
     const auto restart_reference = [&proof, now] {
@@ -111,16 +108,13 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       }
     }
 #endif
-    if (enabled && !proof.raw_basis_epoch)
+    if (!proof.raw_basis_epoch)
       restart_reference();
     const auto budget = sunshine_scene_gain::render_limits(proof.frame_strength, proof.width, proof.height);
     proof.raw_policy.configure(budget);
     proof.provided_raw_policy.configure(budget);
-    sunshine_depth::set_raw_scene_request(runtime, proof.raw_basis_epoch, enabled && !provided);
+    sunshine_depth::set_raw_scene_request(runtime, proof.raw_basis_epoch, !provided);
     using phase = sunshine_game3d::automatic_phase;
-    if (!proof.raw_supported) {
-      return scene; // No competing camera-uniform writer.
-    }
     // The render constants always carry the active rectangle.
     if (depth.ready && depth.width && depth.height) {
       scene.rect = {float(depth.x) / depth.width, float(depth.y) / depth.height,
@@ -133,7 +127,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
       return scene;
     }
     proof.projection_policy.suspend();
-    if (!enabled || !proof.raw_basis_epoch) {
+    if (!proof.raw_basis_epoch) {
       proof.raw_policy.scene_cut(now);
       proof.provided_raw_policy.scene_cut(now);
       reentry_update(proof, false, now);
