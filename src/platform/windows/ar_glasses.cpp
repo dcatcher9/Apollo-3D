@@ -423,8 +423,7 @@ namespace ar_glasses {
 #endif
       const auto state = platf::display_config::query_advanced_color(
         adapter_id,
-        target_id,
-        platf::display_config::legacy_fallback_e::any_modern_failure
+        target_id
 #ifdef SUNSHINE_TESTS
         ,
         discovery_info_api_for_test()
@@ -437,20 +436,10 @@ namespace ar_glasses {
         true,
         state->hdr_supported,
         state->hdr_user_enabled,
-        state->api == platf::display_config::advanced_color_api_e::modern ?
-          state->active_mode == DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR :
-          state->advanced_color_enabled,
+        state->active_mode == DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR,
         state->limited_by_policy,
         state->bits_per_color_channel,
       };
-    }
-
-    bool set_hdr_state(const LUID &adapter_id, UINT32 target_id, bool enabled) {
-      return platf::display_config::set_hdr_state_with_legacy_fallback(
-        adapter_id,
-        target_id,
-        enabled
-      );
     }
 
     std::optional<float> query_sdr_white_nits(const LUID &adapter_id, UINT32 target_id) {
@@ -3383,7 +3372,7 @@ namespace ar_glasses {
           // complete update with display reconciliation; extended sessions keep their row journal.
           auto physical_hdr = active_target.hdr;
           if (physical_hdr.supported && !physical_hdr.limited_by_policy && !physical_hdr.active) {
-            if (set_hdr_state(active_target.adapter_id, active_target.target_id, true)) {
+            if (platf::display_config::set_hdr_state(active_target.adapter_id, active_target.target_id, true)) {
               // HDR activation can renumber the target or change its mode. Wait for the stable PnP
               // target rather than polling the now-stale source/target IDs from the original path.
               const auto deadline = std::chrono::steady_clock::now() + 10s;

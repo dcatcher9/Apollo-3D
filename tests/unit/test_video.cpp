@@ -9341,7 +9341,7 @@ TEST(CaptureBackendFailoverTest, HostAppliedHdrChangeExplainsTheRestart) {
   EXPECT_FALSE(attempt([] {}));
   // The second early restart would latch, but a host HDR toggle during it explains it.
   EXPECT_FALSE(attempt([&] {
-    EXPECT_TRUE(platf::display_config::set_hdr_state_with_legacy_fallback(LUID {}, 1, true, api));
+    EXPECT_TRUE(platf::display_config::set_hdr_state(LUID {}, 1, true, api));
   }));
   EXPECT_FALSE(attempt([&] {
     EXPECT_TRUE(platf::display_config::set_wcg_state(LUID {}, 1, false, api));

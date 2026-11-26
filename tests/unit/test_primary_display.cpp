@@ -57,7 +57,7 @@ namespace {
       result.modes.push_back(source);
       result.modes.push_back(target);
       result.device_paths.push_back(positions[i].device_path);
-      result.colors.push_back(platf::display_config::advanced_color_state_t {platf::display_config::advanced_color_api_e::modern, false, true, false, false, false, false, 8, DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR});
+      result.colors.push_back(platf::display_config::advanced_color_state_t {true, false, false, false, false, 8, DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR});
     }
     return result;
   }
@@ -104,7 +104,7 @@ namespace {
             current = std::move(next);
             if (reset_colors_on_apply) {
               for (auto &color : current.colors) {
-                color = platf::display_config::advanced_color_state_t {platf::display_config::advanced_color_api_e::modern, false, true, false, false, false, false, 8, DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR};
+                color = platf::display_config::advanced_color_state_t {true, false, false, false, false, 8, DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR};
               }
             }
             if (applied_mutation) {
@@ -910,7 +910,7 @@ TEST(PrimaryDisplayExclusive, GraceRecheckDetachesReappearedTargetAndKeepsCurren
   fake.display.current = make_snapshot({{L"physical-primary", 0, 0}, {L"physical-left", 2560, 100}, {L"virtual", -1920, 0}});
   set_display_mode(fake.display.current, L"physical-primary", 2560, 1440, 120);
   auto &color = *fake.display.current.colors[named_index(fake.display.current, L"physical-primary")];
-  color.hdr_user_enabled = color.advanced_color_active = color.advanced_color_enabled = true;
+  color.hdr_user_enabled = color.advanced_color_active = true;
   color.active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
   const auto wanted_color = color;
   fake.cursor = POINT {100, 100};
@@ -958,7 +958,7 @@ TEST(PrimaryDisplayExclusive, GraceRecheckRecoversInactivePrimaryBesideAReattach
   set_display_mode(fake.current, L"physical-primary", 5120, 2160, 165);
   set_display_mode(fake.current, L"physical-left", 3840, 2160, 120);
   auto &hdr = *fake.current.colors[named_index(fake.current, L"physical-primary")];
-  hdr.hdr_user_enabled = hdr.advanced_color_active = hdr.advanced_color_enabled = true;
+  hdr.hdr_user_enabled = hdr.advanced_color_active = true;
   hdr.active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
   fake.catalog = fake.current;
   manager_t manager(fake.io());
@@ -1177,7 +1177,7 @@ TEST(PrimaryDisplayExclusive, GraceRecheckRestoresRememberedPhysicalDesktopAfter
   fake.display.current = make_snapshot({{L"physical-primary", 0, 0}, {L"virtual", 5120, 0}});
   set_display_mode(fake.display.current, L"physical-primary", 5120, 2160, 165);
   auto &color = *fake.display.current.colors[0];
-  color.hdr_user_enabled = color.advanced_color_active = color.advanced_color_enabled = true;
+  color.hdr_user_enabled = color.advanced_color_active = true;
   color.active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
   fake.display.catalog = fake.display.current;
   manager_t manager(fake.io());
@@ -1276,7 +1276,7 @@ TEST(PrimaryDisplayExclusive, GraceRecoveryUsesPhysicalEditsObservedWhileVirtual
   fake.current = make_snapshot({{L"physical-primary", 0, 0}, {L"physical-left", 2560, 100}});
   set_display_mode(fake.current, L"physical-primary", 2560, 1440, 120);
   auto &color = *fake.current.colors[0];
-  color.hdr_user_enabled = color.advanced_color_active = color.advanced_color_enabled = true;
+  color.hdr_user_enabled = color.advanced_color_active = true;
   color.active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
   const auto applies = std::ranges::count(fake.events, "apply");
   ASSERT_TRUE(manager.pause(L"virtual", retained));
@@ -2585,6 +2585,54 @@ TEST(PrimaryDisplayExclusive, CapturesAndRestoresHdrAfterReactivationAndRetriesC
   EXPECT_FALSE(fake.journal);
 }
 
+TEST(PrimaryDisplayExclusive, CrashJournalWithRemovedLegacyColorKeysStillRestoresHdr) {
+  // Releases with the pre-24H2 Advanced Color fallback wrote "legacy" and "enabled" in every
+  // saved color. A crash journal from them must still restore the displays and their HDR state.
+  // "legacy": false is what every such release wrote on Windows 11 24H2. A "legacy": true entry
+  // held its HDR on/off state in "hdr" and "active" with WCG off; the same setters restore it.
+  for (const bool legacy : {false, true}) {
+    SCOPED_TRACE(legacy);
+    fake_io_t fake;
+    auto &hdr = *fake.current.colors[named_index(fake.current, L"physical-primary")];
+    hdr.hdr_user_enabled = true;
+    hdr.advanced_color_active = true;
+    hdr.active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
+    fake.reset_colors_on_apply = true;
+    start_exclusive(fake);
+    ASSERT_TRUE(fake.journal);
+
+    auto record = nlohmann::json::parse(serialize(*fake.journal));
+    size_t rewritten = 0;
+    for (const auto *snapshot : {"original_topology", "before_exclusive", "pending_restore", "exclusive_topology"}) {
+      if (!record.contains(snapshot) || record[snapshot].is_null()) {
+        continue;
+      }
+      for (auto &color : record[snapshot]["colors"]) {
+        if (!color.is_null()) {
+          color["legacy"] = legacy;
+          color["enabled"] = color.at("active");
+          ++rewritten;
+        }
+      }
+    }
+    ASSERT_GE(rewritten, 3u);
+    const auto loaded = deserialize(record.dump());
+    ASSERT_TRUE(loaded);
+    fake.journal = *loaded;
+
+    manager_t manager(fake.io());
+    ASSERT_TRUE(manager.restore());
+    expect_positions(fake.current, baseline);
+    EXPECT_GE(std::ranges::count(fake.events, "set_color"), 1);
+    const auto &restored = *fake.current.colors[named_index(fake.current, L"physical-primary")];
+    EXPECT_TRUE(restored.hdr_user_enabled);
+    EXPECT_FALSE(restored.wcg_user_enabled);
+    EXPECT_TRUE(restored.advanced_color_active);
+    EXPECT_EQ(restored.active_mode, DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR);
+    EXPECT_FALSE(fake.journal);
+  }
+}
+
 TEST(PrimaryDisplayExclusive, UnknownOriginalColorStateFailsBeforeDisablingPhysicalDisplays) {
   fake_io_t fake;
   fake.current.colors[0] = std::nullopt;
@@ -2623,8 +2671,6 @@ TEST(PrimaryDisplayExclusive, TopologyTransitionsPreserveCurrentVirtualHdrState)
 namespace {
   platf::display_config::advanced_color_state_t hdr_state(bool enabled) {
     return {
-      platf::display_config::advanced_color_api_e::modern,
-      false,
       true,
       enabled,
       false,
@@ -3939,7 +3985,7 @@ namespace {
     set_display_mode(fake.current, L"UltraGear", 5120, 2160, 165);
     set_display_mode(fake.current, L"TV", 3840, 2160, 120);
     auto &color = *fake.current.colors[named_index(fake.current, L"TV")];
-    color.advanced_color_enabled = color.hdr_user_enabled = color.advanced_color_active = true;
+    color.hdr_user_enabled = color.advanced_color_active = true;
     color.active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
     color.bits_per_color_channel = 12;
     fake.catalog = make_snapshot({{L"UltraGear", 0, 0}, {L"TV", -3840, 0}, {L"virtual", 5120, 0}});
@@ -4055,7 +4101,7 @@ TEST(PrimaryDisplayMonitorReplacement, ReadOnlyVerificationRejectsTopologyOrColo
   verify_rejected();
 
   auto &live_source_color = *fake.current.colors[source];
-  live_source_color.advanced_color_enabled = live_source_color.hdr_user_enabled = live_source_color.advanced_color_active = true;
+  live_source_color.hdr_user_enabled = live_source_color.advanced_color_active = true;
   live_source_color.active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
   verify_rejected();
 
@@ -4139,7 +4185,7 @@ TEST(PrimaryDisplayMonitorReplacement, InactiveTvRecoveryPreservesConvergedSourc
   set_display_mode(fake.current, L"virtual", 3840, 2160, 120);
   fake.current.colors[named_index(fake.current, L"UltraGear")] = primary_color;
   auto &source_color = *fake.current.colors[named_index(fake.current, L"virtual")];
-  source_color.advanced_color_enabled = source_color.hdr_user_enabled = source_color.advanced_color_active = true;
+  source_color.hdr_user_enabled = source_color.advanced_color_active = true;
   source_color.active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
   source_color.bits_per_color_channel = 10;
   // Exercise explicit color restoration too: a topology apply may reset every output to SDR.
@@ -4160,7 +4206,6 @@ TEST(PrimaryDisplayMonitorReplacement, InactiveTvRecoveryPreservesConvergedSourc
     const auto &color = *fake.current.colors[index];
     EXPECT_EQ(color.hdr_user_enabled, !primary);
     EXPECT_FALSE(color.wcg_user_enabled);
-    EXPECT_EQ(color.advanced_color_enabled, !primary);
     EXPECT_EQ(color.advanced_color_active, !primary);
     EXPECT_EQ(color.active_mode, primary ? DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR : DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR);
     // Link bit depth is reported by the driver, not set by the Advanced Color API. Keep the
@@ -4441,7 +4486,7 @@ TEST(PrimaryDisplayMonitorReplacement, FailedApplyThenNeighborModeHdrAndHotplugC
   set_display_mode(fake.current, L"virtual", 2560, 1440, 165);
   set_display_mode(fake.current, L"other", 1920, 1200, 144);
   auto &color = *fake.current.colors[named_index(fake.current, L"other")];
-  color.advanced_color_enabled = color.hdr_user_enabled = color.advanced_color_active = true;
+  color.hdr_user_enabled = color.advanced_color_active = true;
   color.active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
   ASSERT_TRUE(manager.promote(L"virtual", true));
   expect_positions(fake.current, {{L"virtual", 0, 0}, {L"other", 2560, 0}, {L"left", -1920, 0}, {L"hotplug", 0, -1080}, {L"monitor", 4480, -1439}});
@@ -4457,7 +4502,7 @@ TEST(PrimaryDisplayMonitorReplacement, FailedColorSetupKeepsRecordedHdrIntentFor
   monitor_baseline(fake, true);
   for (auto *snapshot : {&fake.current, &fake.catalog}) {
     auto &color = *snapshot->colors[named_index(*snapshot, L"other")];
-    color.advanced_color_enabled = color.hdr_user_enabled = color.advanced_color_active = true;
+    color.hdr_user_enabled = color.advanced_color_active = true;
     color.active_mode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
   }
   manager_t manager(fake.io());

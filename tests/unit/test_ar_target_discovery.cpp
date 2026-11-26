@@ -11,6 +11,7 @@
   #include <filesystem>
   #include <fstream>
   #include <gtest/gtest.h>
+  #include <initializer_list>
   #include <iterator>
   #include <limits>
   #include <memory>
@@ -39,8 +40,7 @@ namespace {
     UINT32 height = 1080;
     UINT32 refresh_numerator = 60000;
     UINT32 refresh_denominator = 1000;
-    LONG modern_status = ERROR_SUCCESS;
-    LONG legacy_status = ERROR_SUCCESS;
+    LONG color_status = ERROR_SUCCESS;
     bool hdr_supported = true;
     bool hdr_user_enabled = true;
     bool hdr_active = true;
@@ -230,9 +230,9 @@ namespace {
           }
           if (header->type == DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO_2) {
             EXPECT_EQ(header->size, sizeof(DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2));
-            ++modern_queries_;
-            if (row->modern_status != ERROR_SUCCESS) {
-              return row->modern_status;
+            ++color_queries_;
+            if (row->color_status != ERROR_SUCCESS) {
+              return row->color_status;
             }
             auto *info = reinterpret_cast<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2 *>(header);
             info->highDynamicRangeSupported = row->hdr_supported;
@@ -241,19 +241,6 @@ namespace {
             info->advancedColorLimitedByPolicy = row->hdr_limited;
             info->bitsPerColorChannel = row->bits;
             info->activeColorMode = row->hdr_active ? DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR : DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR;
-            return ERROR_SUCCESS;
-          }
-          if (header->type == DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO) {
-            EXPECT_EQ(header->size, sizeof(DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO));
-            ++legacy_queries_;
-            if (row->legacy_status != ERROR_SUCCESS) {
-              return row->legacy_status;
-            }
-            auto *info = reinterpret_cast<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO *>(header);
-            info->advancedColorSupported = row->hdr_supported;
-            info->advancedColorEnabled = row->hdr_active;
-            info->advancedColorForceDisabled = row->hdr_limited;
-            info->bitsPerColorChannel = row->bits;
             return ERROR_SUCCESS;
           }
           ADD_FAILURE() << "Unexpected native request type " << header->type;
@@ -317,8 +304,7 @@ namespace {
     unsigned source_name_queries_ = 0;
     unsigned target_name_queries_ = 0;
     unsigned enum_devices_queries_ = 0;
-    unsigned modern_queries_ = 0;
-    unsigned legacy_queries_ = 0;
+    unsigned color_queries_ = 0;
     bool accept_notification_ = true;
     std::vector<std::string> notifications_;
     // Destroy the facade before every callback capture, owned path and native-input container.
@@ -519,26 +505,27 @@ TEST_F(ArTargetDiscoveryTest, CompleteSnapshotFailuresNeverPublishPartialConnect
   record_costs();
 }
 
-TEST_F(ArTargetDiscoveryTest, ModernHdrFailureRetainsLegacyFallbackAndUnknownIsNotTopologyFailure) {
+TEST_F(ArTargetDiscoveryTest, FailedHdrQueryIsUnknownAndNotTopologyFailure) {
   rows_ = {monitor(L"TCL03D4", 1)};
-  rows_[0].modern_status = ERROR_ACCESS_DENIED;
   rows_[0].bits = 8;
   start();
-  const auto legacy = find();
-  ASSERT_TRUE(legacy.selected);
-  EXPECT_TRUE(legacy.query_succeeded);
-  EXPECT_TRUE(legacy.selected->hdr.known);
-  EXPECT_TRUE(legacy.selected->hdr.active);
-  EXPECT_TRUE(legacy.selected->hdr.user_enabled);
-  EXPECT_EQ(legacy.selected->hdr.bits_per_color, 8u);
-  EXPECT_EQ(modern_queries_, 1u);
-  EXPECT_EQ(legacy_queries_, 1u);
-  rows_[0].legacy_status = ERROR_GEN_FAILURE;
-  const auto unknown = find();
-  ASSERT_TRUE(unknown.selected);
-  EXPECT_TRUE(unknown.query_succeeded);
-  EXPECT_EQ(target_json(*unknown.selected).at("hdr"), (json {{"known", false}, {"supported", false}, {"user_enabled", false}, {"active", false}, {"limited_by_policy", false}, {"bits_per_color", 0}}));
-  EXPECT_EQ(legacy_queries_, 2u);
+  const auto known = find();
+  ASSERT_TRUE(known.selected);
+  EXPECT_TRUE(known.selected->hdr.known);
+  EXPECT_TRUE(known.selected->hdr.active);
+  EXPECT_EQ(known.selected->hdr.bits_per_color, 8u);
+  // The 24H2 query is the only color source: errors that once selected the pre-24H2 query, and
+  // any other error, leave the target selected with an unknown HDR state.
+  for (const LONG status : std::initializer_list<LONG> {ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED}) {
+    SCOPED_TRACE(status);
+    rows_[0].color_status = status;
+    const auto queries_before = color_queries_;
+    const auto unknown = find();
+    ASSERT_TRUE(unknown.selected);
+    EXPECT_TRUE(unknown.query_succeeded);
+    EXPECT_EQ(target_json(*unknown.selected).at("hdr"), (json {{"known", false}, {"supported", false}, {"user_enabled", false}, {"active", false}, {"limited_by_policy", false}, {"bits_per_color", 0}}));
+    EXPECT_EQ(color_queries_, queries_before + 1u);
+  }
   record_costs();
 }
 
@@ -718,8 +705,7 @@ TEST_F(ArTargetDiscoveryTest, WatchdogRectRefreshesExactGeometryWithoutDiscovery
     const auto source_names = source_name_queries_;
     const auto virtual_matches = match_display_queries_;
     const auto primary_queries = enum_devices_queries_;
-    const auto modern_hdr_queries = modern_queries_;
-    const auto legacy_hdr_queries = legacy_queries_;
+    const auto color_queries = color_queries_;
     const auto rect = session_->watchdog_rect(selected_path);
     ASSERT_TRUE(rect);
     EXPECT_EQ(rect->left, rows_[1].x);
@@ -733,8 +719,7 @@ TEST_F(ArTargetDiscoveryTest, WatchdogRectRefreshesExactGeometryWithoutDiscovery
     EXPECT_EQ(source_name_queries_, source_names);
     EXPECT_EQ(match_display_queries_, virtual_matches);
     EXPECT_EQ(enum_devices_queries_, primary_queries);
-    EXPECT_EQ(modern_queries_, modern_hdr_queries);
-    EXPECT_EQ(legacy_queries_, legacy_hdr_queries);
+    EXPECT_EQ(color_queries_, color_queries);
     EXPECT_EQ(session_->costs().hdr_queries, costs.hdr_queries);
     EXPECT_EQ(session_->costs().fingerprints, costs.fingerprints);
 

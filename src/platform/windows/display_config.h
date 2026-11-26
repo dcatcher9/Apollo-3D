@@ -71,19 +71,7 @@ namespace platf::display_config {
     query_policy_t policy = {}
   );
 
-  enum class advanced_color_api_e {
-    modern,
-    legacy,
-  };
-
-  enum class legacy_fallback_e {
-    unsupported_modern_api,
-    any_modern_failure,
-  };
-
   struct advanced_color_state_t {
-    advanced_color_api_e api = advanced_color_api_e::legacy;
-    bool advanced_color_enabled = false;
     bool hdr_supported = false;
     bool hdr_user_enabled = false;
     bool wcg_user_enabled = false;
@@ -120,21 +108,20 @@ namespace platf::display_config {
     std::wstring_view display_name = {}
   );
 
+  /** Query the Windows 11 24H2 Advanced Color state; a failed query reports no state. */
   std::optional<advanced_color_state_t> query_advanced_color(
     const LUID &adapter_id,
     UINT32 target_id,
-    legacy_fallback_e fallback,
     const device_info_api_t &api
   );
 
   std::optional<advanced_color_state_t> query_advanced_color(
     const LUID &adapter_id,
-    UINT32 target_id,
-    legacy_fallback_e fallback = legacy_fallback_e::unsupported_modern_api
+    UINT32 target_id
   );
 
-  // Every HDR, WCG, and legacy Advanced Color request below advances platf::display_change_epoch()
-  // before and after the call, because the change restarts Desktop Duplication.
+  // Every HDR and WCG request below advances platf::display_change_epoch() before and after the
+  // call, because the change restarts Desktop Duplication.
   bool set_hdr_state(
     const LUID &adapter_id,
     UINT32 target_id,
@@ -150,23 +137,5 @@ namespace platf::display_config {
     const device_info_api_t &api
   );
   bool set_wcg_state(const LUID &adapter_id, UINT32 target_id, bool enabled);
-
-  bool set_legacy_advanced_color_state(
-    const LUID &adapter_id,
-    UINT32 target_id,
-    bool enabled,
-    const device_info_api_t &api
-  );
-  bool set_hdr_state_with_legacy_fallback(
-    const LUID &adapter_id,
-    UINT32 target_id,
-    bool enabled,
-    const device_info_api_t &api
-  );
-  bool set_hdr_state_with_legacy_fallback(
-    const LUID &adapter_id,
-    UINT32 target_id,
-    bool enabled
-  );
 
 }  // namespace platf::display_config

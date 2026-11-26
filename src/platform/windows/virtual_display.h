@@ -153,7 +153,6 @@ namespace VDISPLAY {
   enum class color_reconcile_action_e {
     settled,
     wait_for_active_mode,
-    set_legacy_advanced_color,
     set_hdr_user_state,
     set_wcg_user_state,
   };
@@ -206,9 +205,6 @@ namespace VDISPLAY {
     std::chrono::milliseconds continuouslyInactiveFor
   );
   color_reconcile_action_e colorReconcileActionForTest(
-    bool legacyApi,
-    bool currentLegacyEnabled,
-    bool expectedLegacyEnabled,
     bool currentHdrUserEnabled,
     bool expectedHdrUserEnabled,
     bool currentWcgUserEnabled,

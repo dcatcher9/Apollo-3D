@@ -138,69 +138,36 @@ namespace platf::display_config {
   std::optional<advanced_color_state_t> query_advanced_color(
     const LUID &adapter_id,
     const UINT32 target_id,
-    const legacy_fallback_e fallback,
     const device_info_api_t &api
   ) {
     if (!api.get) {
       return std::nullopt;
     }
 
-    DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2 modern {};
-    modern.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO_2;
-    modern.header.size = sizeof(modern);
-    modern.header.adapterId = adapter_id;
-    modern.header.id = target_id;
-    const auto modern_status = api.get(&modern.header);
-    if (modern_status == ERROR_SUCCESS) {
-      return advanced_color_state_t {
-        advanced_color_api_e::modern,
-        modern.advancedColorActive != 0,
-        modern.highDynamicRangeSupported != 0,
-        modern.highDynamicRangeUserEnabled != 0,
-        modern.wideColorUserEnabled != 0,
-        modern.advancedColorActive != 0,
-        modern.advancedColorLimitedByPolicy != 0,
-        modern.bitsPerColorChannel,
-        modern.activeColorMode,
-      };
-    }
-
-    const bool modern_api_unsupported =
-      modern_status == ERROR_INVALID_PARAMETER || modern_status == ERROR_NOT_SUPPORTED;
-    if (fallback == legacy_fallback_e::unsupported_modern_api && !modern_api_unsupported) {
+    DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2 info {};
+    info.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO_2;
+    info.header.size = sizeof(info);
+    info.header.adapterId = adapter_id;
+    info.header.id = target_id;
+    if (api.get(&info.header) != ERROR_SUCCESS) {
       return std::nullopt;
     }
-
-    DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO legacy {};
-    legacy.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO;
-    legacy.header.size = sizeof(legacy);
-    legacy.header.adapterId = adapter_id;
-    legacy.header.id = target_id;
-    if (api.get(&legacy.header) != ERROR_SUCCESS) {
-      return std::nullopt;
-    }
-
-    const bool enabled = legacy.advancedColorEnabled != 0;
     return advanced_color_state_t {
-      advanced_color_api_e::legacy,
-      enabled,
-      legacy.advancedColorSupported != 0,
-      enabled,
-      false,
-      enabled,
-      legacy.advancedColorForceDisabled != 0,
-      legacy.bitsPerColorChannel,
-      enabled ? DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR :
-                DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR,
+      info.highDynamicRangeSupported != 0,
+      info.highDynamicRangeUserEnabled != 0,
+      info.wideColorUserEnabled != 0,
+      info.advancedColorActive != 0,
+      info.advancedColorLimitedByPolicy != 0,
+      info.bitsPerColorChannel,
+      info.activeColorMode,
     };
   }
 
   std::optional<advanced_color_state_t> query_advanced_color(
     const LUID &adapter_id,
-    const UINT32 target_id,
-    const legacy_fallback_e fallback
+    const UINT32 target_id
   ) {
-    return query_advanced_color(adapter_id, target_id, fallback, device_info_api_t {});
+    return query_advanced_color(adapter_id, target_id, device_info_api_t {});
   }
 
   bool set_hdr_state(
@@ -253,47 +220,6 @@ namespace platf::display_config {
     const bool enabled
   ) {
     return set_wcg_state(adapter_id, target_id, enabled, device_info_api_t {});
-  }
-
-  bool set_legacy_advanced_color_state(
-    const LUID &adapter_id,
-    const UINT32 target_id,
-    const bool enabled,
-    const device_info_api_t &api
-  ) {
-    if (!api.set) {
-      return false;
-    }
-    DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE state {};
-    state.header.type = DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE;
-    state.header.size = sizeof(state);
-    state.header.adapterId = adapter_id;
-    state.header.id = target_id;
-    state.enableAdvancedColor = enabled;
-    return set_color_device_info(api, state.header);
-  }
-
-  bool set_hdr_state_with_legacy_fallback(
-    const LUID &adapter_id,
-    const UINT32 target_id,
-    const bool enabled,
-    const device_info_api_t &api
-  ) {
-    return set_hdr_state(adapter_id, target_id, enabled, api) ||
-           set_legacy_advanced_color_state(adapter_id, target_id, enabled, api);
-  }
-
-  bool set_hdr_state_with_legacy_fallback(
-    const LUID &adapter_id,
-    const UINT32 target_id,
-    const bool enabled
-  ) {
-    return set_hdr_state_with_legacy_fallback(
-      adapter_id,
-      target_id,
-      enabled,
-      device_info_api_t {}
-    );
   }
 
 }  // namespace platf::display_config

@@ -834,9 +834,6 @@ TEST(VirtualDisplayDetach, RequiresRepeatedAbsenceAndShellSettleTime) {
 TEST(VirtualDisplayColorRestore, DoesNotReassertMatchingUserStateForActiveModeLag) {
   EXPECT_EQ(
     VDISPLAY::colorReconcileActionForTest(
-      false,
-      false,
-      false,
       true,
       true,
       false,
@@ -851,9 +848,6 @@ TEST(VirtualDisplayColorRestore, DoesNotReassertMatchingUserStateForActiveModeLa
 
   EXPECT_EQ(
     VDISPLAY::colorReconcileActionForTest(
-      false,
-      false,
-      false,
       true,
       true,
       false,
@@ -903,25 +897,6 @@ TEST(VirtualDisplayColorRestore, ActiveModeOnlyLagStopsBlockingAfterBoundedEvide
 TEST(VirtualDisplayColorRestore, SelectsOnlyMismatchedUserStateSetters) {
   EXPECT_EQ(
     VDISPLAY::colorReconcileActionForTest(
-      true,
-      false,
-      true,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR,
-      DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR
-    ),
-    VDISPLAY::color_reconcile_action_e::set_legacy_advanced_color
-  );
-  EXPECT_EQ(
-    VDISPLAY::colorReconcileActionForTest(
-      false,
-      false,
-      false,
       false,
       true,
       false,
@@ -935,9 +910,6 @@ TEST(VirtualDisplayColorRestore, SelectsOnlyMismatchedUserStateSetters) {
   );
   EXPECT_EQ(
     VDISPLAY::colorReconcileActionForTest(
-      false,
-      false,
-      false,
       true,
       true,
       false,
@@ -979,13 +951,6 @@ TEST(VirtualDisplayColorRestore, TriesTheOtherUserBitAfterOneSetterWasAccepted) 
 TEST(VirtualDisplayColorRestore, AcceptedSetterIsNeverRepeatedDuringOneDetach) {
   EXPECT_EQ(
     VDISPLAY::repeatedColorSetterAttemptCountForTest(
-      VDISPLAY::color_reconcile_action_e::set_legacy_advanced_color,
-      20
-    ),
-    1u
-  );
-  EXPECT_EQ(
-    VDISPLAY::repeatedColorSetterAttemptCountForTest(
       VDISPLAY::color_reconcile_action_e::set_hdr_user_state,
       20
     ),
@@ -1015,13 +980,6 @@ TEST(VirtualDisplayColorRestore, AcceptedSetterIsNeverRepeatedDuringOneDetach) {
 }
 
 TEST(VirtualDisplayColorRestore, NoSetterIsConsumedWithoutAPollIteration) {
-  EXPECT_EQ(
-    VDISPLAY::repeatedColorSetterAttemptCountForTest(
-      VDISPLAY::color_reconcile_action_e::set_legacy_advanced_color,
-      0
-    ),
-    0u
-  );
   EXPECT_EQ(
     VDISPLAY::repeatedColorSetterAttemptCountForTest(
       VDISPLAY::color_reconcile_action_e::set_hdr_user_state,

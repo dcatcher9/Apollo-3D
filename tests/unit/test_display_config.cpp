@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <cwchar>
+#include <initializer_list>
 #include <vector>
 
 namespace {
@@ -92,21 +93,18 @@ namespace {
   }
 
   struct fake_color_state_t {
-    LONG modern_get_status = ERROR_SUCCESS;
-    LONG legacy_get_status = ERROR_SUCCESS;
-    LONG modern_set_status = ERROR_SUCCESS;
-    LONG legacy_set_status = ERROR_SUCCESS;
-    unsigned int modern_get_calls = 0;
-    unsigned int legacy_get_calls = 0;
+    LONG get_status = ERROR_SUCCESS;
+    LONG set_status = ERROR_SUCCESS;
+    std::vector<DISPLAYCONFIG_DEVICE_INFO_TYPE> get_types;
     std::vector<DISPLAYCONFIG_DEVICE_INFO_TYPE> set_types;
     std::vector<std::uint64_t> set_epochs;
   } fake_color_state;
 
   LONG WINAPI fake_get_device_info(DISPLAYCONFIG_DEVICE_INFO_HEADER *header) {
+    fake_color_state.get_types.push_back(header->type);
     if (header->type == DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO_2) {
-      ++fake_color_state.modern_get_calls;
-      if (fake_color_state.modern_get_status != ERROR_SUCCESS) {
-        return fake_color_state.modern_get_status;
+      if (fake_color_state.get_status != ERROR_SUCCESS) {
+        return fake_color_state.get_status;
       }
       auto *info = reinterpret_cast<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2 *>(header);
       info->advancedColorSupported = 1;
@@ -119,18 +117,6 @@ namespace {
       info->activeColorMode = DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
       return ERROR_SUCCESS;
     }
-    if (header->type == DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO) {
-      ++fake_color_state.legacy_get_calls;
-      if (fake_color_state.legacy_get_status != ERROR_SUCCESS) {
-        return fake_color_state.legacy_get_status;
-      }
-      auto *info = reinterpret_cast<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO *>(header);
-      info->advancedColorSupported = 1;
-      info->advancedColorEnabled = 1;
-      info->advancedColorForceDisabled = 0;
-      info->bitsPerColorChannel = 8;
-      return ERROR_SUCCESS;
-    }
     return ERROR_INVALID_PARAMETER;
   }
 
@@ -138,10 +124,7 @@ namespace {
     fake_color_state.set_types.push_back(header->type);
     fake_color_state.set_epochs.push_back(platf::display_change_epoch());
     if (header->type == DISPLAYCONFIG_DEVICE_INFO_SET_HDR_STATE || header->type == DISPLAYCONFIG_DEVICE_INFO_SET_WCG_STATE) {
-      return fake_color_state.modern_set_status;
-    }
-    if (header->type == DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE) {
-      return fake_color_state.legacy_set_status;
+      return fake_color_state.set_status;
     }
     return ERROR_INVALID_PARAMETER;
   }
@@ -244,76 +227,57 @@ TEST(DisplayConfigQueryTest, ImmediatePolicyPreservesCallerRetryCadence) {
   EXPECT_TRUE(fake_query_state.sleeps.empty());
 }
 
-TEST(DisplayConfigColorTest, FallsBackToLegacyOnlyForTheSelectedFailurePolicy) {
-  fake_color_state = {};
-  fake_color_state.modern_get_status = ERROR_GEN_FAILURE;
-  const LUID adapter {};
-
-  EXPECT_FALSE(platf::display_config::query_advanced_color(adapter, 7, platf::display_config::legacy_fallback_e::unsupported_modern_api, fake_device_info_api()));
-  EXPECT_EQ(fake_color_state.legacy_get_calls, 0u);
-
-  const auto state = platf::display_config::query_advanced_color(
-    adapter,
-    7,
-    platf::display_config::legacy_fallback_e::any_modern_failure,
-    fake_device_info_api()
-  );
-  ASSERT_TRUE(state);
-  EXPECT_EQ(state->api, platf::display_config::advanced_color_api_e::legacy);
-  EXPECT_TRUE(state->advanced_color_enabled);
-  EXPECT_TRUE(state->hdr_user_enabled);
-  EXPECT_EQ(fake_color_state.legacy_get_calls, 1u);
+TEST(DisplayConfigColorTest, FailedQueryReportsNoStateAndTriesNoOtherApi) {
+  // Windows 11 24H2 is the minimum: a failed query has no older API to fall back to. Errors that
+  // once selected the pre-24H2 query report no state, as every other failure does.
+  for (const LONG status : std::initializer_list<LONG> {ERROR_GEN_FAILURE, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED}) {
+    SCOPED_TRACE(status);
+    fake_color_state = {};
+    fake_color_state.get_status = status;
+    EXPECT_FALSE(platf::display_config::query_advanced_color(LUID {}, 7, fake_device_info_api()));
+    EXPECT_EQ(fake_color_state.get_types, (std::vector<DISPLAYCONFIG_DEVICE_INFO_TYPE> {DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO_2}));
+  }
 }
 
-TEST(DisplayConfigColorTest, ReportsModernHdrAndWcgFieldsWithoutLegacyQuery) {
+TEST(DisplayConfigColorTest, ReportsHdrAndWcgFields) {
   fake_color_state = {};
-  const auto state = platf::display_config::query_advanced_color(
-    LUID {},
-    9,
-    platf::display_config::legacy_fallback_e::unsupported_modern_api,
-    fake_device_info_api()
-  );
+  const auto state = platf::display_config::query_advanced_color(LUID {}, 9, fake_device_info_api());
 
   ASSERT_TRUE(state);
-  EXPECT_EQ(state->api, platf::display_config::advanced_color_api_e::modern);
   EXPECT_TRUE(state->hdr_supported);
   EXPECT_TRUE(state->hdr_user_enabled);
   EXPECT_FALSE(state->wcg_user_enabled);
+  EXPECT_TRUE(state->advanced_color_active);
+  EXPECT_EQ(state->bits_per_color_channel, 10u);
   EXPECT_EQ(state->active_mode, DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR);
-  EXPECT_EQ(fake_color_state.legacy_get_calls, 0u);
+  EXPECT_EQ(fake_color_state.get_types, (std::vector<DISPLAYCONFIG_DEVICE_INFO_TYPE> {DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO_2}));
 }
 
-TEST(DisplayConfigColorTest, HdrSetterFallsBackToLegacyAfterModernFailure) {
+TEST(DisplayConfigColorTest, RejectedHdrRequestFailsWithoutAnotherRequest) {
   fake_color_state = {};
-  fake_color_state.modern_set_status = ERROR_NOT_SUPPORTED;
+  fake_color_state.set_status = ERROR_NOT_SUPPORTED;
 
-  EXPECT_TRUE(platf::display_config::set_hdr_state_with_legacy_fallback(LUID {}, 11, true, fake_device_info_api()));
-  ASSERT_EQ(fake_color_state.set_types.size(), 2u);
-  EXPECT_EQ(fake_color_state.set_types[0], DISPLAYCONFIG_DEVICE_INFO_SET_HDR_STATE);
-  EXPECT_EQ(
-    fake_color_state.set_types[1],
-    DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE
-  );
+  EXPECT_FALSE(platf::display_config::set_hdr_state(LUID {}, 11, true, fake_device_info_api()));
+  EXPECT_EQ(fake_color_state.set_types, (std::vector<DISPLAYCONFIG_DEVICE_INFO_TYPE> {DISPLAYCONFIG_DEVICE_INFO_SET_HDR_STATE}));
 }
 
 TEST(DisplayConfigColorTest, ColorRequestsRecordADisplayChangeBeforeAndAfterTheCall) {
   // Advanced Color changes restart Desktop Duplication; capture failover reads this epoch.
   fake_color_state = {};
-  fake_color_state.modern_set_status = ERROR_NOT_SUPPORTED;
   const auto before = platf::display_change_epoch();
-  EXPECT_TRUE(platf::display_config::set_hdr_state_with_legacy_fallback(LUID {}, 11, true, fake_device_info_api()));
-  ASSERT_EQ(fake_color_state.set_epochs.size(), 2u);
+  EXPECT_TRUE(platf::display_config::set_hdr_state(LUID {}, 11, true, fake_device_info_api()));
+  ASSERT_EQ(fake_color_state.set_epochs.size(), 1u);
   // Each request, accepted or rejected, is bracketed by its own changes.
   EXPECT_GT(fake_color_state.set_epochs[0], before);
-  EXPECT_GT(fake_color_state.set_epochs[1], fake_color_state.set_epochs[0]);
-  EXPECT_GT(platf::display_change_epoch(), fake_color_state.set_epochs[1]);
+  EXPECT_GT(platf::display_change_epoch(), fake_color_state.set_epochs[0]);
 
   // A rejected WCG request is bracketed too: Windows may have applied part of it.
+  fake_color_state.set_status = ERROR_NOT_SUPPORTED;
   const auto before_wcg = platf::display_change_epoch();
   EXPECT_FALSE(platf::display_config::set_wcg_state(LUID {}, 11, false, fake_device_info_api()));
-  ASSERT_EQ(fake_color_state.set_epochs.size(), 3u);
-  EXPECT_GT(fake_color_state.set_epochs[2], before_wcg);
-  EXPECT_GT(platf::display_change_epoch(), fake_color_state.set_epochs[2]);
+  ASSERT_EQ(fake_color_state.set_epochs.size(), 2u);
+  EXPECT_GT(fake_color_state.set_epochs[1], before_wcg);
+  EXPECT_GT(platf::display_change_epoch(), fake_color_state.set_epochs[1]);
 
   // Without a setter no request is made, so no change is recorded.
   const auto unchanged = platf::display_change_epoch();

@@ -697,25 +697,15 @@ std::optional<bool> queryDisplayHDR(const LUID &adapterLuid, uint32_t targetId) 
   // Query the display configuration state directly. A virtual HDR desktop is represented as
   // linear scRGB to desktop applications, so its DXGI output color space is not required to be
   // the physical-output PQ/Rec.2020 space and is not a reliable HDR-enabled test.
-  const auto state = platf::display_config::query_advanced_color(
-    adapterLuid,
-    targetId,
-    platf::display_config::legacy_fallback_e::any_modern_failure
-  );
+  const auto state = platf::display_config::query_advanced_color(adapterLuid, targetId);
   if (!state) {
     return std::nullopt;
   }
-  return state->api == platf::display_config::advanced_color_api_e::modern ?
-           state->active_mode == DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR :
-           state->advanced_color_enabled;
+  return state->active_mode == DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR;
 }
 
 bool setDisplayHDR(const LUID& adapterId, const uint32_t& targetId, bool enableAdvancedColor) {
-  return platf::display_config::set_hdr_state_with_legacy_fallback(
-    adapterId,
-    targetId,
-    enableAdvancedColor
-  );
+  return platf::display_config::set_hdr_state(adapterId, targetId, enableAdvancedColor);
 }
 
 std::optional<bool> queryDisplayHDRByName(const wchar_t* displayName) {
@@ -878,14 +868,7 @@ bool queryActiveDisplayConfig(
 }
 
 namespace {
-  enum class color_contract_api_e {
-    modern,
-    legacy,
-  };
-
   struct display_color_contract_t {
-    color_contract_api_e api {color_contract_api_e::legacy};
-    bool legacy_advanced_color_enabled = false;
     bool hdr_user_enabled = false;
     bool wcg_user_enabled = false;
     bool advanced_color_active = false;
@@ -895,16 +878,13 @@ namespace {
   enum class color_reconcile_action_internal_e {
     settled,
     wait_for_active_mode,
-    set_legacy_advanced_color,
     set_hdr_user_state,
     set_wcg_user_state,
   };
 
   struct color_setter_attempts_t {
-    bool legacy = false;
     bool hdr = false;
     bool wcg = false;
-    std::chrono::steady_clock::time_point legacy_retry_not_before {};
     std::chrono::steady_clock::time_point hdr_retry_not_before {};
     std::chrono::steady_clock::time_point wcg_retry_not_before {};
   };
@@ -919,13 +899,6 @@ namespace {
     const display_color_contract_t &current,
     const display_color_contract_t &expected
   ) {
-    if (current.api != expected.api) {
-      return false;
-    }
-    if (expected.api == color_contract_api_e::legacy) {
-      return current.legacy_advanced_color_enabled ==
-             expected.legacy_advanced_color_enabled;
-    }
     return current.hdr_user_enabled == expected.hdr_user_enabled &&
            current.wcg_user_enabled == expected.wcg_user_enabled;
   }
@@ -950,9 +923,6 @@ namespace {
   ) {
     bool *attempted = nullptr;
     switch (action) {
-      case color_reconcile_action_internal_e::set_legacy_advanced_color:
-        attempted = &attempts.legacy;
-        break;
       case color_reconcile_action_internal_e::set_hdr_user_state:
         attempted = &attempts.hdr;
         break;
@@ -975,8 +945,6 @@ namespace {
     const color_setter_attempts_t &attempts
   ) {
     switch (action) {
-      case color_reconcile_action_internal_e::set_legacy_advanced_color:
-        return attempts.legacy;
       case color_reconcile_action_internal_e::set_hdr_user_state:
         return attempts.hdr;
       case color_reconcile_action_internal_e::set_wcg_user_state:
@@ -993,8 +961,6 @@ namespace {
     color_setter_attempts_t &attempts
   ) {
     switch (action) {
-      case color_reconcile_action_internal_e::set_legacy_advanced_color:
-        return attempts.legacy_retry_not_before;
       case color_reconcile_action_internal_e::set_hdr_user_state:
         return attempts.hdr_retry_not_before;
       case color_reconcile_action_internal_e::set_wcg_user_state:
@@ -1030,18 +996,6 @@ namespace {
     const display_color_contract_t &expected,
     const color_setter_attempts_t *attempts = nullptr
   ) {
-    if (current.api != expected.api) {
-      return color_reconcile_action_internal_e::wait_for_active_mode;
-    }
-    if (expected.api == color_contract_api_e::legacy) {
-      if (current.legacy_advanced_color_enabled !=
-          expected.legacy_advanced_color_enabled) {
-        return !attempts || !attempts->legacy ?
-                 color_reconcile_action_internal_e::set_legacy_advanced_color :
-                 color_reconcile_action_internal_e::wait_for_active_mode;
-      }
-      return color_reconcile_action_internal_e::settled;
-    }
     const bool hdr_mismatch =
       current.hdr_user_enabled != expected.hdr_user_enabled;
     const bool wcg_mismatch =
@@ -1072,16 +1026,6 @@ namespace {
     std::chrono::steady_clock::time_point now
   ) {
     auto action = colorReconcileAction(current, expected, &attempts);
-    if (action == color_reconcile_action_internal_e::set_legacy_advanced_color) {
-      return colorSetterRetryAvailable(action, attempts, now) ?
-               action :
-               color_reconcile_action_internal_e::wait_for_active_mode;
-    }
-    if (expected.api != color_contract_api_e::modern ||
-        current.api != color_contract_api_e::modern) {
-      return action;
-    }
-
     const bool hdr_mismatch =
       current.hdr_user_enabled != expected.hdr_user_enabled;
     const bool wcg_mismatch =
@@ -1112,27 +1056,15 @@ namespace {
     const LUID &adapter_id,
     UINT32 target_id
   ) {
-    const auto state = platf::display_config::query_advanced_color(
-      adapter_id,
-      target_id,
-      platf::display_config::legacy_fallback_e::unsupported_modern_api
-    );
+    const auto state = platf::display_config::query_advanced_color(adapter_id, target_id);
     if (!state) {
       return std::nullopt;
     }
-    if (state->api == platf::display_config::advanced_color_api_e::modern) {
-      return display_color_contract_t {
-        color_contract_api_e::modern,
-        false,
-        state->hdr_user_enabled,
-        state->wcg_user_enabled,
-        state->advanced_color_active,
-        state->active_mode,
-      };
-    }
     return display_color_contract_t {
-      color_contract_api_e::legacy,
-      state->advanced_color_enabled,
+      state->hdr_user_enabled,
+      state->wcg_user_enabled,
+      state->advanced_color_active,
+      state->active_mode,
     };
   }
 
@@ -1154,20 +1086,6 @@ namespace {
       case color_reconcile_action_internal_e::settled:
         active_mode_settle = {};
         return true;
-      case color_reconcile_action_internal_e::set_legacy_advanced_color:
-        active_mode_settle = {};
-        if (colorSetterRetryAvailable(action, attempts, now)) {
-          if (setDisplayHDR(
-                adapter_id,
-                target_id,
-                expected.legacy_advanced_color_enabled
-              )) {
-            consumeColorSetterAttempt(action, attempts);
-          } else {
-            deferRejectedColorSetter(action, attempts, now);
-          }
-        }
-        break;
       case color_reconcile_action_internal_e::set_hdr_user_state:
         active_mode_settle = {};
         if (colorSetterRetryAvailable(action, attempts, now)) {
@@ -1970,9 +1888,6 @@ desktop_detach_evidence_t desktopDetachEvidenceForTest(
 }
 
 color_reconcile_action_e colorReconcileActionForTest(
-  bool legacyApi,
-  bool currentLegacyEnabled,
-  bool expectedLegacyEnabled,
   bool currentHdrUserEnabled,
   bool expectedHdrUserEnabled,
   bool currentWcgUserEnabled,
@@ -1983,16 +1898,12 @@ color_reconcile_action_e colorReconcileActionForTest(
   DISPLAYCONFIG_ADVANCED_COLOR_MODE expectedActiveMode
 ) {
   const display_color_contract_t current {
-    legacyApi ? color_contract_api_e::legacy : color_contract_api_e::modern,
-    currentLegacyEnabled,
     currentHdrUserEnabled,
     currentWcgUserEnabled,
     currentAdvancedColorActive,
     currentActiveMode,
   };
   const display_color_contract_t expected {
-    legacyApi ? color_contract_api_e::legacy : color_contract_api_e::modern,
-    expectedLegacyEnabled,
     expectedHdrUserEnabled,
     expectedWcgUserEnabled,
     expectedAdvancedColorActive,
@@ -2003,8 +1914,6 @@ color_reconcile_action_e colorReconcileActionForTest(
       return color_reconcile_action_e::settled;
     case color_reconcile_action_internal_e::wait_for_active_mode:
       return color_reconcile_action_e::wait_for_active_mode;
-    case color_reconcile_action_internal_e::set_legacy_advanced_color:
-      return color_reconcile_action_e::set_legacy_advanced_color;
     case color_reconcile_action_internal_e::set_hdr_user_state:
       return color_reconcile_action_e::set_hdr_user_state;
     case color_reconcile_action_internal_e::set_wcg_user_state:
@@ -2022,19 +1931,14 @@ color_reconcile_action_e colorReconcileActionAfterAcceptedSettersForTest(
   bool wcgSetterAccepted
 ) {
   const display_color_contract_t current {
-    color_contract_api_e::modern,
-    false,
     currentHdrUserEnabled,
     currentWcgUserEnabled,
   };
   const display_color_contract_t expected {
-    color_contract_api_e::modern,
-    false,
     expectedHdrUserEnabled,
     expectedWcgUserEnabled,
   };
   const color_setter_attempts_t attempts {
-    false,
     hdrSetterAccepted,
     wcgSetterAccepted,
   };
@@ -2043,8 +1947,6 @@ color_reconcile_action_e colorReconcileActionAfterAcceptedSettersForTest(
       return color_reconcile_action_e::settled;
     case color_reconcile_action_internal_e::wait_for_active_mode:
       return color_reconcile_action_e::wait_for_active_mode;
-    case color_reconcile_action_internal_e::set_legacy_advanced_color:
-      return color_reconcile_action_e::set_legacy_advanced_color;
     case color_reconcile_action_internal_e::set_hdr_user_state:
       return color_reconcile_action_e::set_hdr_user_state;
     case color_reconcile_action_internal_e::set_wcg_user_state:
@@ -2064,9 +1966,6 @@ unsigned int repeatedColorSetterAttemptCountForTest(
       break;
     case color_reconcile_action_e::wait_for_active_mode:
       internal_action = color_reconcile_action_internal_e::wait_for_active_mode;
-      break;
-    case color_reconcile_action_e::set_legacy_advanced_color:
-      internal_action = color_reconcile_action_internal_e::set_legacy_advanced_color;
       break;
     case color_reconcile_action_e::set_hdr_user_state:
       internal_action = color_reconcile_action_internal_e::set_hdr_user_state;
@@ -2159,7 +2058,6 @@ bool rejectedColorSetterRetryAllowedForTest(
 bool colorSurvivorContractMergePreservesExistingForTest() {
   survivor_color_state_t original;
   original.device_path = LR"(\\?\DISPLAY#PHYSICAL#original)";
-  original.contract.api = color_contract_api_e::modern;
   original.contract.hdr_user_enabled = true;
 
   auto changed_original = original;
@@ -2176,14 +2074,10 @@ bool colorSurvivorContractMergePreservesExistingForTest() {
 
 bool wcgSetterSelectedDuringHdrBackoffForTest() {
   const display_color_contract_t current {
-    color_contract_api_e::modern,
-    false,
     false,
     false,
   };
   const display_color_contract_t expected {
-    color_contract_api_e::modern,
-    false,
     true,
     true,
   };

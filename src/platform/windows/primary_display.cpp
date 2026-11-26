@@ -905,12 +905,6 @@ namespace platf::primary_display {
     }
 
     bool color_matches(const display_config::advanced_color_state_t &a, const display_config::advanced_color_state_t &b) {
-      if (a.api != b.api) {
-        return false;
-      }
-      if (a.api == display_config::advanced_color_api_e::legacy) {
-        return a.advanced_color_enabled == b.advanced_color_enabled;
-      }
       return a.hdr_user_enabled == b.hdr_user_enabled && a.wcg_user_enabled == b.wcg_user_enabled && a.advanced_color_active == b.advanced_color_active && a.active_mode == b.active_mode;
     }
 
@@ -984,7 +978,7 @@ namespace platf::primary_display {
         if (!color) {
           result["colors"].push_back(nullptr);
         } else {
-          result["colors"].push_back({{"legacy", color->api == display_config::advanced_color_api_e::legacy}, {"enabled", color->advanced_color_enabled}, {"hdr_supported", color->hdr_supported}, {"hdr", color->hdr_user_enabled}, {"wcg", color->wcg_user_enabled}, {"active", color->advanced_color_active}, {"limited", color->limited_by_policy}, {"bits", color->bits_per_color_channel}, {"mode", static_cast<int>(color->active_mode)}});
+          result["colors"].push_back({{"hdr_supported", color->hdr_supported}, {"hdr", color->hdr_user_enabled}, {"wcg", color->wcg_user_enabled}, {"active", color->advanced_color_active}, {"limited", color->limited_by_policy}, {"bits", color->bits_per_color_channel}, {"mode", static_cast<int>(color->active_mode)}});
         }
       }
       return result;
@@ -1013,7 +1007,10 @@ namespace platf::primary_display {
         if (mode < DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR || mode > DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR) {
           throw std::runtime_error("invalid saved display color mode");
         }
-        result.colors.push_back(display_config::advanced_color_state_t {entry.at("legacy").get<bool>() ? display_config::advanced_color_api_e::legacy : display_config::advanced_color_api_e::modern, entry.at("enabled").get<bool>(), entry.at("hdr_supported").get<bool>(), entry.at("hdr").get<bool>(), entry.at("wcg").get<bool>(), entry.at("active").get<bool>(), entry.at("limited").get<bool>(), entry.at("bits").get<UINT32>(), static_cast<DISPLAYCONFIG_ADVANCED_COLOR_MODE>(mode)});
+        // Records written before the pre-24H2 query was removed also carry "legacy" and "enabled".
+        // Both are ignored: the fields below hold the HDR/WCG state either way (a "legacy": true
+        // entry recorded HDR on or off with WCG off), so every entry restores through those setters.
+        result.colors.push_back(display_config::advanced_color_state_t {entry.at("hdr_supported").get<bool>(), entry.at("hdr").get<bool>(), entry.at("wcg").get<bool>(), entry.at("active").get<bool>(), entry.at("limited").get<bool>(), entry.at("bits").get<UINT32>(), static_cast<DISPLAYCONFIG_ADVANCED_COLOR_MODE>(mode)});
       }
       const bool empty = result.paths.empty() && result.modes.empty() && result.device_paths.empty() && result.colors.empty();
       if (!empty && !detail::inspect(result)) {
@@ -1080,11 +1077,8 @@ namespace platf::primary_display {
     }
 
     bool apply_color(const DISPLAYCONFIG_PATH_INFO &path, const display_config::advanced_color_state_t &color) {
-      if (color.api == display_config::advanced_color_api_e::legacy) {
-        return display_config::set_legacy_advanced_color_state(path.targetInfo.adapterId, path.targetInfo.id, color.advanced_color_enabled, {});
-      }
       const auto current = display_config::query_advanced_color(path.targetInfo.adapterId, path.targetInfo.id);
-      if (!current || current->api != color.api) {
+      if (!current) {
         return false;
       }
       bool success = true;
@@ -1165,9 +1159,8 @@ namespace platf::primary_display {
         text << " refresh=" << path.targetInfo.refreshRate.Numerator << '/' << path.targetInfo.refreshRate.Denominator;
         if (i < snapshot.colors.size() && snapshot.colors[i]) {
           const auto &color = *snapshot.colors[i];
-          text << " color_api=" << (color.api == display_config::advanced_color_api_e::modern ? "modern" : "legacy")
-               << " color_mode=" << static_cast<int>(color.active_mode)
-               << " color_enabled=" << color.advanced_color_enabled
+          text << " color_mode=" << static_cast<int>(color.active_mode)
+               << " color_enabled=" << color.advanced_color_active
                << " hdr_enabled=" << color.hdr_user_enabled << " bits=" << color.bits_per_color_channel;
         }
         text << ']';
