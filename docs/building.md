@@ -126,7 +126,7 @@ GPU-dependent Host SBS and offline-worker checks require a compatible NVIDIA hos
 substitutes for the ordinary unit suite. Follow [CLAUDE.md](../CLAUDE.md) and
 [sbsbench](../tools/sbsbench/README.md) for their controlled evaluation loop.
 The [joint workflow gate](joint-workflow-tests.md) runs the focused host/client boundary suites
-and documents the portable CI subset separately from GPU and device checks.
+separately from GPU and device checks.
 
 ## Offline media tools
 

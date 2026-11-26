@@ -197,5 +197,5 @@ deterministic fixture. It checks raw transport, causal state, frame order, times
 streams, attachment bytes, output identity, and failed-job publication. Its PQ fixture carries
 HDR10 mastering-display and content-light metadata, which every output frame must keep.
 Run SDR, PQ, and HLG with HEVC/AV1 as appropriate after the installed host releases its ports/GPU.
-GPU smoke, throughput comparisons, and physical XR presentation are separate evidence; portable
-CI does not claim to validate the headset compositor or display hardware.
+GPU smoke, throughput comparisons, and physical XR presentation are separate evidence; unit
+tests do not validate the headset compositor or display hardware.

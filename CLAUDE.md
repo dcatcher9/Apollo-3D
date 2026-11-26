@@ -63,8 +63,8 @@ cmake-build-relwithdebinfo/tests/test_sunshine.exe --gtest_filter=SuiteName.Test
 
 Unit tests are under `tests/unit`, integration tests under `tests/integration`, and shared fixtures
 under `tests/fixtures`. The [joint workflow gate](docs/joint-workflow-tests.md) runs focused native,
-evaluator, client packet/FEC and JVM boundary tests from both checkouts. It also documents the portable CI
-subset and the GPU/device evidence it cannot replace.
+evaluator, client packet/FEC and JVM boundary tests from both checkouts. It also documents the GPU/device
+evidence it cannot replace.
 Run native tests with the build directory as the working directory when they need relative `assets/`.
 
 For evaluator commands, first select the one validated interpreter as `$SbsbenchPython` using the

@@ -61,19 +61,6 @@ Each run writes logs, native XML, both checkout commits, runtime identity and st
 `app/build/test-results/testNonRoot_gameDebugUnitTest/` directory. Uncommitted changes are included
 in a local run, so commit identities alone are not a source-integrity attestation.
 
-The `Portable workflow boundaries` GitHub Actions workflow compiles the same clock, shared
-presentation-runtime ownership, retained presentation scheduling, shared session grace lifecycle,
-and raw-frame transport tests
-against the pinned GoogleTest submodule, and checks generated source contracts using the Python
-standard library. It can also be run
-without the complete host build:
-
-```text
-cmake -S tools/joint-workflow -B cmake-build-portable -DCMAKE_BUILD_TYPE=Release
-cmake --build cmake-build-portable
-ctest --test-dir cmake-build-portable --output-on-failure
-```
-
 The optional shared-client feature check compiles the production host PCM encoder
 with the actual shared common-C parser from an explicitly selected checkout. It
 checks versioned capability negotiation, all stream flags, empty and maximum-size
@@ -95,7 +82,7 @@ use the existing UCRT64 compilers and keep their runtime directory on the child
 `PATH` as described in [the build guide](building.md). This source-level check does not
 replace the microphone or physical DualSense acceptance procedure.
 
-The companion Moonlight 3D repository also runs two portable jobs:
+The companion Moonlight 3D repository runs two portable jobs:
 
 - [Transport contracts](https://github.com/dcatcher9/moonlight-android/blob/moonlight-noir/.github/workflows/transport-contracts.yml)
   compiles the production ANNOUNCE/FEC/depacketizer fixture using a C compiler and OpenSSL.
@@ -106,8 +93,7 @@ The companion Moonlight 3D repository also runs two portable jobs:
   [standalone project](https://github.com/dcatcher9/moonlight-android/blob/moonlight-noir/tools/workflow-tests/README.md).
   This build does not configure Android plugins or require Android SDK, model assets, or native libraries.
 
-The host portable job needs a C++20 compiler, CMake and the checked-out GoogleTest submodule. It does not
-download model assets or claim to exercise Windows capture, TensorRT, NVENC, an Android compositor,
+These boundary suites do not exercise Windows capture, TensorRT, NVENC, an Android compositor,
 packet loss on a real network, or physical input/display transitions. Use the canonical
 [Host SBS evaluation loop](../tools/sbsbench/README.md#required-evaluation-loop) and the explicit
 [offline worker smoke](../tests/integration/Invoke-OfflineSbsWorkerSmoke.ps1) when those paths change;
