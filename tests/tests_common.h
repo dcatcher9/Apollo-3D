@@ -108,23 +108,7 @@ namespace test_utils {
   } while (0)
 
 // Platform detection macros for convenience
-#ifdef _WIN32
-  #define IS_WINDOWS true
-#else
-  #define IS_WINDOWS false
-#endif
-
-#ifdef __linux__
-  #define IS_LINUX true
-#else
-  #define IS_LINUX false
-#endif
-
-#ifdef __APPLE__
-  #define IS_MACOS true
-#else
-  #define IS_MACOS false
-#endif
+#define IS_WINDOWS true
 
 struct PlatformTestSuite: testing::Test {
   static void SetUpTestSuite() {

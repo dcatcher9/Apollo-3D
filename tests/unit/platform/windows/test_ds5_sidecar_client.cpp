@@ -2,21 +2,20 @@
  * @file tests/unit/platform/windows/test_ds5_sidecar_client.cpp
  * @brief Regression coverage for cancellable DS5 Core pipe shutdown.
  */
-#ifdef _WIN32
 
-  #define WIN32_LEAN_AND_MEAN
-  #include "src/config.h"
-  #include "src/platform/windows/ds5/ds5_controller_slot.h"
-  #include "src/platform/windows/ds5/ds5_sidecar_client.h"
-  #include "src/platform/windows/virtual_device_host/protocol.h"
-  #include "src/utility.h"
+#define WIN32_LEAN_AND_MEAN
+#include "src/config.h"
+#include "src/platform/windows/ds5/ds5_controller_slot.h"
+#include "src/platform/windows/ds5/ds5_sidecar_client.h"
+#include "src/platform/windows/virtual_device_host/protocol.h"
+#include "src/utility.h"
 
-  #include <chrono>
-  #include <future>
-  #include <gtest/gtest-spi.h>
-  #include <gtest/gtest.h>
-  #include <set>
-  #include <windows.h>
+#include <chrono>
+#include <future>
+#include <gtest/gtest-spi.h>
+#include <gtest/gtest.h>
+#include <set>
+#include <windows.h>
 
 namespace {
   using get_environment_fn_t = DWORD(WINAPI *)(LPCWSTR, LPWSTR, DWORD);
@@ -939,5 +938,3 @@ TEST(Ds5ControllerSlotTests, ResetDuringRecoveryPreventsFallbackIntoReplacementS
   EXPECT_EQ(fallback_calls, 0);
   slot.reset();
 }
-
-#endif

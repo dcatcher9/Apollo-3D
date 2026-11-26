@@ -4,14 +4,13 @@
  */
 #include <gtest/gtest.h>
 
-#ifdef _WIN32
-  #include "src/platform/windows/misc.h"
-  #include "src/platform/windows/process_environment.h"
+#include "src/platform/windows/misc.h"
+#include "src/platform/windows/process_environment.h"
 
-  #include <boost/process/v1/environment.hpp>
-  #include <cstring>
-  #include <iterator>
-  #include <string>
+#include <boost/process/v1/environment.hpp>
+#include <cstring>
+#include <iterator>
+#include <string>
 
 namespace {
   namespace bp = boost::process::v1;
@@ -88,4 +87,3 @@ namespace {
     EXPECT_EQ(block.data()[block.size()], L'\0');
   }
 }  // namespace
-#endif

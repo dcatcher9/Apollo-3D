@@ -1,12 +1,11 @@
-#ifdef _WIN32
-  #include "src/platform/windows/audio_endpoint_match.h"
+#include "src/platform/windows/audio_endpoint_match.h"
 
-  #include <array>
-  #include <gtest/gtest.h>
-  #include <optional>
-  #include <string>
-  #include <utility>
-  #include <vector>
+#include <array>
+#include <gtest/gtest.h>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace {
   namespace lookup = platf::audio::detail;
@@ -229,4 +228,3 @@ TEST(WindowsAudioEndpointMatch, ConfiguredNamesRetainCStringTermination) {
   EXPECT_EQ(find(endpoints, lookup::match_all_fields(requested)), L"wanted-id");
   EXPECT_EQ(endpoints[0].property_store_opens, 0u);
 }
-#endif  // _WIN32

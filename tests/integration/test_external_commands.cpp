@@ -42,10 +42,6 @@ protected:
   void SetUp() override {
     if constexpr (IS_WINDOWS) {
       current_platform = "windows";
-    } else if constexpr (IS_MACOS) {
-      current_platform = "macos";
-    } else if constexpr (IS_LINUX) {
-      current_platform = "linux";
     }
   }
 

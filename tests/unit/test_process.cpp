@@ -20,11 +20,9 @@
 #include <boost/process/v1/environment.hpp>
 #include <boost/program_options/parsers.hpp>
 #include <boost/token_functions.hpp>
-#ifdef _WIN32
-  #include <boost/process/v1/io.hpp>
-  #include <boost/process/v1/pipe.hpp>
-  #include <boost/process/v1/windows.hpp>
-#endif
+#include <boost/process/v1/io.hpp>
+#include <boost/process/v1/pipe.hpp>
+#include <boost/process/v1/windows.hpp>
 
 // local includes
 #include "src/apps_store.h"
@@ -45,13 +43,10 @@ namespace proc {
       process._host_session_id = 1234;
       process._display_context = launch->display_context;
       process._active_launch_session_id = launch->id;
-#ifdef _WIN32
       process._virtual_display_only = launch->display_context->virtual_display_only;
       process._display_session.commit_resume();
       process._display_session.set_exclusive(launch->display_context->virtual_display_only);
-#endif
     }
-#ifdef _WIN32
     static void mark_virtual(
       proc_t &process, bool enabled, bool with_identity = false,
       std::function<VDISPLAY::display_identity_query_t()> identity_query = {}
@@ -252,18 +247,15 @@ namespace proc {
         process._process.wait(error);
       }
     }
-#endif
     static void clear(proc_t &process) {
       process._app_id = 0;
       process._host_session_id = 0;
       process._active_launch_session_id = 0;
       process._display_context.reset();
-#ifdef _WIN32
       process._display_topology_test_hook = {};
       mark_virtual(process, false);
       process._virtual_display_only = false;
       process._display_session.commit_resume();
-#endif
     }
   };
 }  // namespace proc
@@ -336,7 +328,6 @@ TEST(ProcessTest, ResumePublishesNewLiveTransportWithoutChangingRetainedToken) {
   EXPECT_EQ(process.reconfigure_retained_session(resumed->display_context, resumed->id), 0);
   EXPECT_EQ(process.get_host_session_id(), 1234U);
   EXPECT_EQ(original->id, 11U);
-#ifdef _WIN32
   proc::process_test_access::mark_virtual(process, true);
   EXPECT_EQ(process.apply_live_video_mode(1920, 1080, 60000, 22), proc::live_video_mode_result_e::unchanged);
   EXPECT_EQ(process.apply_live_video_mode(1920, 1080, 60000, 11), proc::live_video_mode_result_e::needs_reconnect);
@@ -344,21 +335,17 @@ TEST(ProcessTest, ResumePublishesNewLiveTransportWithoutChangingRetainedToken) {
   EXPECT_TRUE(process.live_video_mode_needs_display_change(1280, 720, 60000));
   EXPECT_FALSE(process.live_video_mode_needs_display_change(1920, 1080, 60000));
   proc::process_test_access::mark_virtual(process, false);
-#endif
   auto invalid = std::make_shared<rtsp_stream::launch_session_t>();
   invalid->id = 33;
   invalid->display_context->width = 1;
   invalid->display_context->height = 1;
   invalid->display_context->scale_factor = 20;
   EXPECT_EQ(process.reconfigure_retained_session(invalid->display_context, invalid->id), 400);
-#ifdef _WIN32
   proc::process_test_access::mark_virtual(process, true);
   EXPECT_EQ(process.apply_live_video_mode(1920, 1080, 60000, 22), proc::live_video_mode_result_e::unchanged);
   EXPECT_EQ(process.apply_live_video_mode(1920, 1080, 60000, 33), proc::live_video_mode_result_e::needs_reconnect);
-#endif
 }
 
-#ifdef _WIN32
 TEST(ProcessTest, RepeatedLiveRequestLeavesAnApplicationChosenDisplayModeAlone) {
   proc::proc_t process {boost::this_process::environment(), std::vector<proc::ctx_t> {}};
   auto launch = std::make_shared<rtsp_stream::launch_session_t>();
@@ -2223,7 +2210,6 @@ TEST(ProcessTest, RejectedNewLaunchClearsPreviousClientDisplayPolicy) {
   EXPECT_FALSE(proc::process_test_access::virtual_display_only(process));
   EXPECT_EQ(process.get_host_session_id(), 0U);
 }
-#endif
 
 TEST(ProcessTest, ExplorerRepairIsOptInByDefault) {
   EXPECT_FALSE(config::default_virtual_display_restart_explorer);
@@ -2298,7 +2284,6 @@ TEST(ProcessTest, LiveVideoModeFailureIsRetryableOnlyAfterProvenRollback) {
   );
 }
 
-#ifdef _WIN32
 TEST(ProcessTest, DriverRemovalRequiresConfirmedDetachWhenDesktopDeactivationWasRequested) {
   EXPECT_FALSE(proc::retiredVirtualDisplayRemovalAllowedForTest(true, false));
   EXPECT_TRUE(proc::retiredVirtualDisplayRemovalAllowedForTest(true, true));
@@ -2320,26 +2305,16 @@ TEST(ProcessTest, ExplorerRepairRequiresEveryFinalRetirementProof) {
   EXPECT_FALSE(proc::explorerRepairAllowedForRetirementForTest(true, false, true)) << "The opt-in config must remain suppressible";
   EXPECT_FALSE(proc::explorerRepairAllowedForRetirementForTest(true, true, false)) << "Cleanup of a path that was never active creates no repair debt";
 }
-#endif
 
 TEST(ProcessTest, MalformedCommandDoesNotEscapeWorkingDirectoryResolution) {
   const std::string malformed_command {"command\\"};
   const auto env = boost::this_process::environment();
 
-#ifdef _WIN32
   // split_winmain intentionally accepts a trailing backslash using Windows command-line rules.
   EXPECT_NO_THROW((void) boost::program_options::split_winmain(malformed_command));
   EXPECT_NO_THROW((void) proc::find_working_directory(malformed_command, env));
-#else
-  EXPECT_THROW(boost::program_options::split_unix(malformed_command), boost::escaped_list_error);
-  EXPECT_NO_THROW({
-    const auto working_directory = proc::find_working_directory(malformed_command, env);
-    EXPECT_TRUE(working_directory.empty());
-  });
-#endif
 }
 
-#ifdef _WIN32
 TEST(ProcessTest, PlatformLaunchDoesNotReuseStaleErrorCode) {
   const auto env = boost::this_process::environment();
   boost::filesystem::path working_directory;
@@ -2414,7 +2389,6 @@ TEST(ProcessTest, AddsCanonicalVirtualDisplayTileWhenDriverIsReady) {
   EXPECT_FALSE(desktop_app->synthetic_virtual_display);
   EXPECT_NE(desktop_app->id, virtual_app->id);
 }
-#endif
 
 namespace {
   proc::ctx_t lookup_app(int id, std::string uuid, std::string name) {

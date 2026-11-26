@@ -2,28 +2,25 @@
  * @file tests/unit/test_process_display_context.cpp
  * @brief Actual process/RTSP retained-display alias and transport boundaries.
  */
-#ifdef _WIN32
-  // Keep Winsock2 ahead of every Windows include, including the shared test declarations.
-  #include <boost/asio.hpp>
-#endif
+// Keep Winsock2 ahead of every Windows include, including the shared test declarations.
+#include <boost/asio.hpp>
 
 #include "../tests_common.h"
 
-#ifdef _WIN32
-  #include "src/process_display_context_test.h"
-  #include "src/uuid.h"
-  #include "src/video.h"
+#include "src/process_display_context_test.h"
+#include "src/uuid.h"
+#include "src/video.h"
 
-  #include <boost/process/v1/environment.hpp>
+#include <boost/process/v1/environment.hpp>
 
-  #include <algorithm>
-  #include <array>
-  #include <cstring>
-  #include <filesystem>
-  #include <fstream>
-  #include <stdexcept>
-  #include <utility>
-  #include <vector>
+#include <algorithm>
+#include <array>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <stdexcept>
+#include <utility>
+#include <vector>
 
 using namespace std::chrono_literals;
 
@@ -676,4 +673,3 @@ namespace {
     EXPECT_TRUE(context.expired());
   }
 }  // namespace
-#endif

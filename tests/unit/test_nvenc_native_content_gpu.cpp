@@ -4,22 +4,21 @@
  */
 #include "../tests_common.h"
 
-#ifdef _WIN32
-  #include "src/nvenc/nvenc_d3d11_native.h"
-  #include "src/platform/windows/misc.h"
+#include "src/nvenc/nvenc_d3d11_native.h"
+#include "src/platform/windows/misc.h"
 
-  #include <algorithm>
-  #include <array>
-  #include <cstdlib>
-  #include <cstring>
-  #include <deque>
-  #include <dxgi1_2.h>
-  #include <filesystem>
-  #include <fstream>
-  #include <nlohmann/json.hpp>
-  #include <optional>
-  #include <stdexcept>
-  #include <wrl/client.h>
+#include <algorithm>
+#include <array>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <dxgi1_2.h>
+#include <filesystem>
+#include <fstream>
+#include <nlohmann/json.hpp>
+#include <optional>
+#include <stdexcept>
+#include <wrl/client.h>
 
 namespace {
   using Microsoft::WRL::ComPtr;
@@ -456,4 +455,3 @@ namespace {
     run_profile({"Av1P010Depth2", 2, true, 2});
   }
 }  // namespace
-#endif

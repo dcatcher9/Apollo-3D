@@ -4,29 +4,28 @@
  */
 #include "../../tests_common.h"
 
-#ifdef _WIN32
-  #include <algorithm>
-  #include <array>
-  #include <boost/filesystem/path.hpp>
-  #include <boost/process/v1/child.hpp>
-  #include <boost/process/v1/environment.hpp>
-  #include <boost/process/v1/group.hpp>
-  #include <cstdint>
-  #include <cstdio>
-  #include <filesystem>
-  #include <optional>
+#include <algorithm>
+#include <array>
+#include <boost/filesystem/path.hpp>
+#include <boost/process/v1/child.hpp>
+#include <boost/process/v1/environment.hpp>
+#include <boost/process/v1/group.hpp>
+#include <cstdint>
+#include <cstdio>
+#include <filesystem>
+#include <optional>
   // display.h declares the small D3DKMT function table without depending on the WDK headers.
   // Match display_base.cpp's prerequisite after boost/process has selected its Windows headers.
   typedef long NTSTATUS;
-  #include <src/host_sbs_resolution.h>
-  #include <src/platform/windows/display.h>
-  #include <src/platform/windows/misc.h>
-  #include <src/video_depth_estimator.h>
-  #include <sddl.h>
-  #include <ShlObj.h>
-  #include <string>
-  #include <thread>
-  #include <vector>
+#include <src/host_sbs_resolution.h>
+#include <src/platform/windows/display.h>
+#include <src/platform/windows/misc.h>
+#include <src/video_depth_estimator.h>
+#include <sddl.h>
+#include <ShlObj.h>
+#include <string>
+#include <thread>
+#include <vector>
 
 namespace {
   struct fake_keyed_mutex_t {
@@ -2438,4 +2437,3 @@ TEST(RunCommandUnelevatedTest, SuspendedJobLaunchCleansUpResumeFailure) {
     })
   );
 }
-#endif

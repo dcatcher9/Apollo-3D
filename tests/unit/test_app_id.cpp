@@ -175,7 +175,6 @@ TEST_F(AppIdTest, IndexFormattingKeepsTheStreamsGlobalLocale) {
   }
 }
 
-#ifdef _WIN32
 TEST_F(AppIdTest, ParsingDuplicateNamesKeepsFirstIdAndIndexedFallbackOrder) {
   const auto previous_status = proc::vDisplayDriverStatus.exchange(VDISPLAY::DRIVER_STATUS::UNKNOWN);
   const auto restore_status = util::fail_guard([previous_status]() {
@@ -199,4 +198,3 @@ TEST_F(AppIdTest, ParsingDuplicateNamesKeepsFirstIdAndIndexedFallbackOrder) {
     EXPECT_EQ(listing[index].id, expected[index]);
   }
 }
-#endif

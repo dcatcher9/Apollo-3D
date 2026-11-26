@@ -613,12 +613,10 @@ TEST(AtomicPresentationWireTests, RejectsEveryNonExactBodyAndUnsupportedVersion)
 TEST(AtomicPresentationNegotiationTests, PublishesMatchingHostAndClientFeatureBits) {
   EXPECT_EQ(stream::CLIENT_FEATURE_ATOMIC_PRESENTATION_V2, 0x08u);
   EXPECT_EQ(platf::platform_caps::atomic_presentation_v2, 0x20000000u);
-#ifdef _WIN32
   EXPECT_NE(
     platf::get_capabilities() & platf::platform_caps::atomic_presentation_v2,
     0u
   );
-#endif
 }
 
 TEST(LiveVideoModeAckTests, MapsEveryDisplayOutcomeToItsWireStatus) {
