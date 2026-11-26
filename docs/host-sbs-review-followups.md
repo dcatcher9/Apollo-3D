@@ -426,9 +426,8 @@ removed. The original dense matte still used by maintained diagnostics remains.
 
 Follow conversion now records the actual shared draw, with ordinary Base fallback. Its normal
 path records one SBS draw and performs no qualification observer or diagnostic readback. Ordinary
-evaluation and retained scene-cache replay use Base. Coordinate contract 128, selected-map 2,
-Dump 3D 51, actual-draw evidence 2, qualification 7 and scene-cache contract 5 explicitly describe
-these roles; the six-payload tuple format remains 1. Historical captures are not retagged.
+evaluation uses Base. Coordinate contract 128, selected-map 2, Dump 3D 51, actual-draw evidence 2
+and qualification 7 explicitly describe these roles. Historical captures are not retagged.
 
 On the same nine source sequences and clocks, all 54 actual selected RGBA images and selected
 masks are byte-identical to the preceding e3495a54 build. The six-frame follow conversion also

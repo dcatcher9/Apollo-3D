@@ -1770,7 +1770,6 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn('"mapping_ps"', harness)
         self.assertIn('"warp_map_%s.f32"', harness)
         self.assertIn('fs::path(o.out) / "warp_map_shape.json"', harness)
-        self.assertIn('result.final_parallax(), "final.f32"', harness)
         self.assertIn('raw_reproject_source_u_normalized', harness)
         self.assertIn('live_sample_transform', harness)
         self.assertIn('\\"warp_mapping\\"', harness)

@@ -113,44 +113,6 @@ namespace {
     };
   }
 
-  offline_sbs::wire::scene_cache_contract_t scene_cache() {
-    return {
-      .status = "complete",
-      .source = {
-        .width = 1920,
-        .height = 1080,
-        .frame_format = "sRGB-PNG-WIC",
-        .texture_format = "B8G8R8A8_UNORM",
-        .color_space = "sRGB-SDR",
-      },
-      .depth_width = 518,
-      .depth_height = 294,
-      .render = {
-        .model = "DepthAnythingV2Small-hf",
-        .model_url = "https://example.invalid/model.onnx",
-        .pop_strength = 1.0,
-        .simulate_hdr = false,
-        .hdr_scale = 1.0,
-        .depth_reuse_interval = 1,
-        .requested_eye_width = 0,
-        .requested_eye_height = 0,
-        .output_scale = 1.0,
-        .resolved_max_output_width = 8192,
-      },
-      .packed_sbs = {
-        .eye_width = 1920,
-        .eye_height = 1080,
-        .width = 3840,
-        .height = 1080,
-        .texture_format = "B8G8R8A8_UNORM",
-        .frame_format = "sRGB-BGRA8-PNG",
-        .file_extension = "png",
-      },
-      .processed_count = 2,
-      .frame_count = 2,
-    };
-  }
-
   offline_sbs::wire::worker_spec_contract_t worker_spec() {
     return {
       .job_id = "11111111-2222-3333-4444-555555555555",
@@ -512,81 +474,6 @@ TEST(OfflineSbsWireContractTest, WorkerResultRejectsCrossContractMismatches) {
     encoded["analysis_contract"]["source_frame_count"] = 3;
     encoded["analysis_contract"]["adaptive_state"]["frame_count"] = 3;
   });
-}
-
-TEST(OfflineSbsWireContractTest, ScenePlanRoundTripsAndRejectsMissingFields) {
-  const offline_sbs::wire::scene_plan_contract_t original {
-    .scenes = {{1, 3}},
-  };
-  const auto encoded = offline_sbs::wire::to_json(original);
-  EXPECT_EQ(
-    offline_sbs::wire::to_json(
-      offline_sbs::wire::parse_scene_plan_contract(encoded)
-    ),
-    encoded
-  );
-  auto missing = encoded;
-  missing.erase("version");
-  EXPECT_THROW(
-    offline_sbs::wire::parse_scene_plan_contract(missing),
-    offline_sbs::wire::contract_error
-  );
-}
-
-TEST(OfflineSbsWireContractTest, SceneCacheRoundTripsThroughOneExactCodec) {
-  const auto encoded = offline_sbs::wire::to_json(scene_cache());
-  const auto parsed = offline_sbs::wire::parse_scene_cache_contract(encoded);
-  EXPECT_EQ(parsed.processed_count, 2u);
-  EXPECT_EQ(offline_sbs::wire::to_json(parsed), encoded);
-}
-
-TEST(OfflineSbsWireContractTest, SceneCacheRejectsUnknownAndOverflowGeometry) {
-  auto unknown = offline_sbs::wire::to_json(scene_cache());
-  unknown["legacy_preview"] = true;
-  EXPECT_THROW(
-    offline_sbs::wire::parse_scene_cache_contract(unknown),
-    offline_sbs::wire::contract_error
-  );
-
-  auto packed_overflow = offline_sbs::wire::to_json(scene_cache());
-  packed_overflow["packed_sbs"]["eye_width"] =
-    static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max());
-  packed_overflow["packed_sbs"]["width"] =
-    static_cast<std::uint32_t>(
-      2ull * std::numeric_limits<std::uint32_t>::max()
-    );
-  EXPECT_THROW(
-    offline_sbs::wire::parse_scene_cache_contract(packed_overflow),
-    offline_sbs::wire::contract_error
-  );
-
-  auto depth_overflow = offline_sbs::wire::to_json(scene_cache());
-  depth_overflow["depth"]["width"] =
-    std::numeric_limits<std::uint32_t>::max();
-  depth_overflow["depth"]["height"] =
-    std::numeric_limits<std::uint32_t>::max();
-  EXPECT_THROW(
-    offline_sbs::wire::parse_scene_cache_contract(depth_overflow),
-    offline_sbs::wire::contract_error
-  );
-}
-
-TEST(OfflineSbsWireContractTest, SceneCacheRequiresCompleteRetainedGlyphTuple) {
-  const auto valid = offline_sbs::wire::to_json(scene_cache());
-  EXPECT_EQ(valid.at("schema"), 5u);
-  EXPECT_EQ(valid.at("subtitle_tuple").at("schema"), 1u);
-  EXPECT_EQ(valid.at("subtitle_tuple").at("renderer"), "ordinary-base-inverse-renderer-v1");
-  EXPECT_EQ(valid.at("depth").at("semantics"), "depth-coordinate-v2-signed-base-parallax-source-u");
-  for (unsigned mutation = 0u; mutation < 5u; ++mutation) {
-    auto invalid = valid;
-    if (mutation == 0u) invalid["schema"] = 4u;
-    if (mutation == 1u) invalid.erase("subtitle_tuple");
-    if (mutation == 2u) invalid["subtitle_tuple"]["payload_suffixes"].erase(3u);
-    if (mutation == 3u) invalid["subtitle_tuple"]["renderer"] = "final-field-only";
-    if (mutation == 4u) invalid["subtitle_tuple"]["renderer"] = "base-inverse-and-analytic-ui-glyph-selector";
-    EXPECT_THROW(offline_sbs::wire::parse_scene_cache_contract(invalid),
-                 offline_sbs::wire::contract_error) << mutation;
-  }
 }
 
 TEST(OfflineSbsWireContractTest, WholeClipRoundTripsAndRejectsNestedUnknownField) {

@@ -10737,46 +10737,6 @@ namespace models {
     return pimpl && pimpl->publication_is_current(publication);
   }
 
-  std::optional<ocr_working_research_views_t>
-  video_depth_estimator::ocr_working_views_for_evaluation(
-    const std::uint64_t expected_completed_frame_id
-  ) const noexcept {
-    if (!pimpl || !pimpl->is_operational() || pimpl->pending_root ||
-        pimpl->pending_depth_inference_event_recorded || expected_completed_frame_id == 0u ||
-        !host_sbs_gpu_completion_receipt::valid_expected(pimpl->current_publication) ||
-        pimpl->current_publication.frame_id != expected_completed_frame_id ||
-        pimpl->completed_input.frame_id != expected_completed_frame_id ||
-        !pimpl->completed_input.region.valid() ||
-        pimpl->current_publication.analysis_generation !=
-          pimpl->completed_input.region.analysis_generation ||
-        !pimpl->ocr_output_srv || !pimpl->ocr_cell_stats_srv ||
-        !pimpl->subtitle_contour_source.ready() || !pimpl->near_identical_transaction.ready() ||
-        !pimpl->ocr_resolve_cbuffer || pimpl->field_w <= 0 || pimpl->field_h <= 0) {
-      return std::nullopt;
-    }
-    const auto content = pimpl->live_field_content(pimpl->completed_input.region);
-    if (!content || !content->valid(pimpl->live_field_shape())) {
-      return std::nullopt;
-    }
-    return ocr_working_research_views_t {
-      .completed_frame_id = pimpl->current_publication.frame_id,
-      .observation_timestamp_us = pimpl->current_publication.observation_timestamp_us,
-      .input_region = pimpl->completed_input.region,
-      .field_width = static_cast<std::uint32_t>(pimpl->field_w),
-      .field_height = static_cast<std::uint32_t>(pimpl->field_h),
-      .field_content = *content,
-      .working_probability = pimpl->ocr_output_srv,
-      .source_band = pimpl->subtitle_contour_source.srv,
-      .cell_stats = pimpl->ocr_cell_stats_srv,
-      .transaction = pimpl->near_identical_transaction.buffer,
-      .dispatch_arguments = pimpl->near_identical_transaction.dispatch,
-      .resolve_constants = pimpl->ocr_resolve_cbuffer,
-    };
-  }
-
-
-
-
   std::optional<subtitle_direct_glyph_diagnostic_views_t>
   video_depth_estimator::subtitle_direct_glyph_diagnostic_views_for_evaluation(std::uint64_t frame, std::uint64_t observation) const noexcept {
     if (!pimpl || !pimpl->is_operational() || !pimpl->subtitle_direct_glyph_enabled || !pimpl->subtitle_selected_matte_commands ||

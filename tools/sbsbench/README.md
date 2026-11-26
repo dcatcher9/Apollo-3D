@@ -15,7 +15,6 @@ owns evaluation commands and evidence formats, organized as follows:
 | [Optional oracles](ORACLES.md) | FLIP, RAFT-Stereo, SEA-RAFT, and iSQoE diagnostics |
 
 The native harness and offline manager/worker share typed diagnostic and whole-clip wire codecs.
-Compatibility names such as `scene-cache` and `scene-plan` remain evaluator/harness contracts.
 Current production conversion is the causal one-pass
 pipeline owned by [Offline Host 3D conversion](../../docs/whole-clip-sbs-pipeline.md). Fixed-schema
 JSON is published atomically, duplicate keys and unknown fields fail closed on read, and raster
@@ -98,8 +97,7 @@ cmake-build-relwithdebinfo/sunshine.exe <conf> --sbs-bench `
 
 Build first and retain the build/test DLL `PATH` documented in [AGENTS.md](../../AGENTS.md).
 Inputs must be 1..64 immutable SDR PNGs. The run requires an explicit observation timeline,
-ordinary evaluation artifacts and `--output-every 1`. It rejects follow mode, scene or render
-caches, replay inputs and the other subtitle diagnostic protocols. `<out-dir>` must not already contain a `direct-glyph` directory.
+ordinary evaluation artifacts and `--output-every 1`. It rejects follow mode and replay inputs. `<out-dir>` must not already contain a `direct-glyph` directory.
 
 The flags select the variant and the manifest schema:
 
@@ -168,28 +166,6 @@ in model coordinates, then samples it at every native pixel center before
 quantization. The host's adaptive scale is recorded separately in the capture
 manifest. The regression tests run with
 `-m unittest tools.sbsbench.test_direct_glyph_normalization` from the repository root.
-
-For bounded subtitle research, ordinary evaluation can use
-`--subtitle-plane-diagnostics --subtitle-plane-diagnostic-frames 61-78,111-121,143-146`
-with an explicit observation timeline. The ordered, disjoint ranges select one-based input
-observations independently of `--output-every`; every input still advances the real estimator.
-The selected diagnostic manifest records processed observations, captured snapshots and rendered
-outputs separately. The current manifest is schema2 and per-frame metadata schema3. These synchronous
-internal snapshots are research evidence, not live timing
-or a complete per-frame render capture. Without the range selector, subtitle diagnostics retain
-their full-cadence output contract.
-
-Add `--subtitle-plane-diagnostic-render-selected` to save actual stereo output for every
-selected observation as well as the regular output cadence. This option requires the range
-selector and records `diagnostic_render_selected` in the manifest. It increases stored outputs;
-it does not change estimator processing or live rendering. Keep the selection bounded.
-
-To diagnose an unavailable OCR record, add `--ocr-working-diagnostics`. This requires subtitle
-diagnostics and an explicit observation timeline, and writes a separate `ocr-working` directory.
-The probability, cell, native source-band, transaction and resolve-constant resources are mutable
-working data copied synchronously after the exact joined completion. They are research inputs;
-the raw transaction must prove current optional OCR execution before interpreting P/cells/RGB.
-They do not replace the completed subtitle snapshots or authorize rendering.
 
 ### Adaptive infer/reuse A/B without a headset
 

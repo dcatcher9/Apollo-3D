@@ -160,11 +160,6 @@ timestamps and durations exactly against the source. Success requires exactly on
 scheduled/enqueued TensorRT update per source frame, selected-input/full-frame scope, the live V2
 renderer, complete immutable SBS publication, and zero cache/replay use.
 
-The separate evaluator scene-cache contract is version 5 and labels its renderer
-`ordinary-base-inverse-renderer-v1`. It retains the unchanged schema-1 six-payload tuple for
-authenticated diagnostics and replay, without an analytic subtitle selector. Current readers
-reject older cache versions and analytic renderer labels; retained evidence is never retagged.
-
 ## Job ownership and recovery
 
 The native manager owns production conversion; Python and tools/sbsbench own evaluation only.

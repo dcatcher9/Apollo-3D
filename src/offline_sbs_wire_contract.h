@@ -238,63 +238,6 @@ namespace offline_sbs::wire {
     std::string_view error
   );
 
-  struct scene_range_t {
-    std::uint64_t start_sequence = 0;
-    std::uint64_t end_sequence_exclusive = 0;
-  };
-
-  struct scene_plan_contract_t {
-    std::vector<scene_range_t> scenes;
-  };
-
-  nlohmann::json to_json(const scene_plan_contract_t &value);
-  scene_plan_contract_t parse_scene_plan_contract(const nlohmann::json &value);
-
-  struct scene_cache_source_t {
-    std::uint32_t width = 0;
-    std::uint32_t height = 0;
-    std::string frame_format;
-    std::string texture_format;
-    std::string color_space;
-  };
-
-  struct scene_cache_render_t {
-    std::string model;
-    std::string model_url;
-    double pop_strength = 1.0;
-    bool simulate_hdr = false;
-    double hdr_scale = 1.0;
-    int depth_reuse_interval = 1;
-    int requested_eye_width = 0;
-    int requested_eye_height = 0;
-    double output_scale = 1.0;
-    int resolved_max_output_width = 0;
-  };
-
-  struct scene_cache_packed_sbs_t {
-    std::uint32_t eye_width = 0;
-    std::uint32_t eye_height = 0;
-    std::uint32_t width = 0;
-    std::uint32_t height = 0;
-    std::string texture_format;
-    std::string frame_format;
-    std::string file_extension;
-  };
-
-  struct scene_cache_contract_t {
-    std::string status;
-    scene_cache_source_t source;
-    std::uint32_t depth_width = 0;
-    std::uint32_t depth_height = 0;
-    scene_cache_render_t render;
-    scene_cache_packed_sbs_t packed_sbs;
-    std::uint64_t processed_count = 0;
-    std::optional<std::uint64_t> frame_count;
-  };
-
-  nlohmann::json to_json(const scene_cache_contract_t &value);
-  scene_cache_contract_t parse_scene_cache_contract(const nlohmann::json &value);
-
   struct job_progress_contract_t {
     std::string phase;
     std::uint64_t processed_frames = 0;

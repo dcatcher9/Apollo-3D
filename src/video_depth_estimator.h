@@ -1230,27 +1230,6 @@ namespace models {
     bool failed = false;
   };
 
-  /** Research-only aliases of existing OCR working resources after one joined completion.
-   * These are not completed snapshots or rendering authority. ComPtr retains their lifetime,
-   * not their contents: the owning evaluation thread must synchronously copy them before its
-   * next estimator input. The raw transaction/resolve constants must establish whether optional
-   * OCR actually ran; a completed depth owner alone does not authenticate working P/cells/RGB.
-   */
-  struct ocr_working_research_views_t {
-    std::uint64_t completed_frame_id = 0u;
-    std::uint64_t observation_timestamp_us = 0u;
-    depth_input_region_t input_region {};
-    std::uint32_t field_width = 0u;
-    std::uint32_t field_height = 0u;
-    depth_tensor_content_rect_t field_content {};
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> working_probability;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> source_band;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> cell_stats;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> transaction;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> dispatch_arguments;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> resolve_constants;
-  };
-
   /** Direct Glyph subtitle publication, configured once before the first input. */
   struct subtitle_direct_glyph_configuration_t {
     std::string shader_root;
@@ -1439,15 +1418,6 @@ namespace models {
      */
     [[nodiscard]] bool publication_is_current(
       const host_sbs_gpu_completion_receipt::expected_t &publication
-    ) const noexcept;
-
-    /** Borrow existing working OCR resources for an offline, synchronous research copy only.
-     * Call after consuming this exact completion and before submitting another input, on the
-     * estimator's owning thread. Rejects pending/unavailable/terminal or mismatched publications;
-     * does not allocate, dispatch, poll, read back, or alter the completed rendering tuple.
-     */
-    [[nodiscard]] std::optional<ocr_working_research_views_t> ocr_working_views_for_evaluation(
-      std::uint64_t expected_completed_frame_id
     ) const noexcept;
 
   private:

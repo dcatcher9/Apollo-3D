@@ -664,8 +664,7 @@ diagnostics. When subtitle work was suppressed, the dump stages Final from Base,
 `shadow_final_parallax.f32`, pins, distance and Gaussian artifacts keep their meaning.
 Renderer presence gates and cached-geometry reuse test Base, not Final. The harness accepts
 `--subtitle-conditioning-live-policy` only as a parity probe of the live policy; its Final then
-equals Base and is not evaluator evidence. Subtitle-plane exports from that probe carry Base and
-the current live subtitle tuple.
+equals Base and is not evaluator evidence.
 
 
 Live subtitle detection and protection run only in Host AI 3D with authenticated video context.
@@ -2012,8 +2011,7 @@ exact `render_source.bin`
 preserves native SDR/HDR color for pointwise revocation audits. The required boolean
 `selected_map.render_enabled` records exact b3 draw permission separately from retained OCR/SCP
 authority. Live and whole-clip rendering share
-the shared subtitle policy. Offline scene-cache schema 5 commits Base/state/matte/SCT/SCP/source as one
-hashed six-payload tuple through a per-frame atomic `.tuple.json` record; partial tuples fail closed.
+the shared subtitle policy.
 
 The schema-52 root `matched_observation_timestamp_us` records the completed source transaction's
 clock. A fresh publication must bind that clock to the full sealed geometry state before UI

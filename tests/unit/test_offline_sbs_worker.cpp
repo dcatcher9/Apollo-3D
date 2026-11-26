@@ -323,8 +323,6 @@ TEST(OfflineSbsWorker, ConversionUsesOneDirectCausalPass) {
     direct.find("remove_transient_file_checked(sbs)"),
     std::string::npos
   ) << "The asynchronous encoder owns an enqueued SBS artifact";
-  EXPECT_EQ(direct.find("--scene-cache"), std::string::npos);
-  EXPECT_EQ(direct.find("--render-cache"), std::string::npos);
   EXPECT_EQ(direct.find("render_decoder"), std::string::npos);
   EXPECT_EQ(direct.find("render_scenes"), std::string::npos);
   EXPECT_EQ(direct.find("\"replay\""), std::string::npos);
@@ -648,7 +646,7 @@ TEST(OfflineSbsWorker, ConversionMapsAdaptiveStateBeforePostRenderHandoff) {
   ASSERT_NE(tail_begin, std::string::npos);
   ASSERT_NE(tail_end, std::string::npos);
   const auto conversion_tail = frame_loop.substr(tail_begin, tail_end - tail_begin);
-  const auto policy = frame_loop.find("!replay_mode && o.artifacts == artifact_mode_e::conversion");
+  const auto policy = frame_loop.find("defer_adaptive_state_readback = o.artifacts == artifact_mode_e::conversion");
   const auto queued = frame_loop.find("queue_adaptive_state_readback(", policy);
   const auto sbs_map = frame_loop.find("ctx->Map(sbs_stage.Get(), 0, D3D11_MAP_READ", queued);
   ASSERT_NE(policy, std::string::npos);
