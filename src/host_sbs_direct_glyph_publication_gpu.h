@@ -3,6 +3,7 @@
 
 #ifdef _WIN32
   #include "generated/depth_coordinate_v2_contract.h"
+  #include "host_sbs_compute_state_guard.h"
   #include "host_sbs_direct_glyph_tiles.h"
   #include "host_sbs_display_snapshot_rgb8_analysis_gpu.h"
   #include "host_sbs_shader_cache.h"
@@ -51,6 +52,9 @@ namespace models::host_sbs_direct_glyph_publication {
     ComPtr<ID3D11Buffer> work;
   };
 
+  // The compute slots the publication passes bind, restored around each queue.
+  using compute_state_t = host_sbs_compute_state::guard_t<25u, 8u, 3u>;
+
   class resources_t {
     struct texture_t {
       ComPtr<ID3D11ShaderResourceView> srv;
@@ -65,43 +69,6 @@ namespace models::host_sbs_direct_glyph_publication {
 
     using srvs_t = std::array<ID3D11ShaderResourceView *, 25u>;
     using uavs_t = std::array<ID3D11UnorderedAccessView *, 8u>;
-
-    struct saved_cs_t {
-      ID3D11DeviceContext *context;
-      srvs_t srvs {};
-      uavs_t uavs {};
-      std::array<ID3D11Buffer *, 3u> constants {};
-      std::array<ID3D11ClassInstance *, 256u> instances {};
-      ID3D11ComputeShader *shader = nullptr;
-      ID3D11Predicate *predicate = nullptr;
-      BOOL predicate_value = FALSE;
-      UINT instance_count = instances.size();
-
-      explicit saved_cs_t(ID3D11DeviceContext *c): context(c) {
-        context->CSGetShaderResources(0u, UINT(srvs.size()), srvs.data());
-        context->CSGetUnorderedAccessViews(0u, UINT(uavs.size()), uavs.data());
-        context->CSGetConstantBuffers(0u, UINT(constants.size()), constants.data());
-        context->CSGetShader(&shader, instances.data(), &instance_count);
-        context->GetPredication(&predicate, &predicate_value);
-        context->SetPredication(nullptr, FALSE);
-      }
-      saved_cs_t(const saved_cs_t &) = delete;
-      saved_cs_t &operator=(const saved_cs_t &) = delete;
-
-      ~saved_cs_t() {
-        context->CSSetShaderResources(0u, UINT(srvs.size()), srvs.data());
-        context->CSSetUnorderedAccessViews(0u, UINT(uavs.size()), uavs.data(), nullptr);
-        context->CSSetConstantBuffers(0u, UINT(constants.size()), constants.data());
-        context->CSSetShader(shader, instance_count == 0u ? nullptr : instances.data(), instance_count);
-        context->SetPredication(predicate, predicate_value);
-        for (auto *p : srvs) if (p) p->Release();
-        for (auto *p : uavs) if (p) p->Release();
-        for (auto *p : constants) if (p) p->Release();
-        for (UINT i = 0u; i < instance_count; ++i) if (instances[i]) instances[i]->Release();
-        if (shader) shader->Release();
-        if (predicate) predicate->Release();
-      }
-    };
 
     ComPtr<ID3D11Device> device_;
     std::array<ComPtr<ID3D11ComputeShader>, shader_cache::direct_glyph_plan_specs.size()> plan_shaders_;
@@ -346,7 +313,7 @@ namespace models::host_sbs_direct_glyph_publication {
       }
 
       const auto parameters = early_parameters(r, r.postprocess_mode, r.expected_work);
-      const saved_cs_t saved(context);
+      const compute_state_t saved(context);
       unbind(context);
       context->UpdateSubresource(request_.data.Get(), 0u, nullptr, parameters.data(), 0u, 0u);
       ID3D11Buffer *const constants[3] {matches_c24(r.current_constants) ? r.current_constants : nullptr,
@@ -389,7 +356,7 @@ namespace models::host_sbs_direct_glyph_publication {
                          (detector_caps ? 64u : (evidence_.uav ? direct_fringe_flag : 0u)) |
                          (r.postprocess_mode << 8u) | (r.expected_work << 16u);
       const auto parameters = early_parameters(r, cutoff_alpha8, flags);
-      const saved_cs_t saved(context);
+      const compute_state_t saved(context);
       unbind(context);
       context->UpdateSubresource(request_.data.Get(), 0u, nullptr, parameters.data(), 0u, 0u);
       ID3D11Buffer *const constants[2] {request_.data.Get(), matches_c24(r.current_constants) ? r.current_constants : nullptr};
@@ -421,7 +388,7 @@ namespace models::host_sbs_direct_glyph_publication {
                         ID3D11ShaderResourceView *completed_placement) {
       if (!direct_pending_ || !same_device(context)) return false;
       direct_pending_ = false;
-      const saved_cs_t saved(context);
+      const compute_state_t saved(context);
       unbind(context);
       const bool alpha8_available = matches_texture(alpha8, DXGI_FORMAT_R32_UINT, r.width, r.height);
       if (!alpha8_available) {

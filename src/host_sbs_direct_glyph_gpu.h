@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "host_sbs_compute_state_guard.h"
 #include "host_sbs_direct_glyph_conditional_graph.h"
 #include "host_sbs_direct_glyph_tiles.h"
 #include "host_sbs_shader_cache.h"
@@ -93,43 +94,9 @@ namespace models::host_sbs_direct_glyph_gpu {
       bool changed_ = false;
     };
 
-    template<std::size_t Sources = 3, std::size_t Targets = 3>
-    class compute_state_t {
-     public:
-      explicit compute_state_t(ID3D11DeviceContext *context): context_(context) {
-        context_->CSGetShaderResources(0u, UINT(srvs_.size()), srvs_.data());
-        context_->CSGetUnorderedAccessViews(0u, UINT(uavs_.size()), uavs_.data());
-        context_->CSGetConstantBuffers(0u, 1u, constants_.GetAddressOf());
-        context_->CSGetShader(shader_.GetAddressOf(), instances_.data(), &instance_count_);
-        context_->GetPredication(predicate_.GetAddressOf(), &predicate_value_);
-        context_->SetPredication(nullptr, FALSE);
-      }
-
-      ~compute_state_t() {
-        context_->CSSetShaderResources(0u, UINT(srvs_.size()), srvs_.data());
-        context_->CSSetUnorderedAccessViews(0u, UINT(uavs_.size()), uavs_.data(), nullptr);
-        context_->CSSetConstantBuffers(0u, 1u, constants_.GetAddressOf());
-        context_->CSSetShader(shader_.Get(), instances_.data(), instance_count_);
-        context_->SetPredication(predicate_.Get(), predicate_value_);
-        for (auto *srv : srvs_) if (srv) srv->Release();
-        for (auto *uav : uavs_) if (uav) uav->Release();
-        for (UINT i = 0u; i < instance_count_; ++i) if (instances_[i]) instances_[i]->Release();
-      }
-
-      compute_state_t(const compute_state_t &) = delete;
-      compute_state_t &operator=(const compute_state_t &) = delete;
-
-     private:
-      ID3D11DeviceContext *context_;
-      std::array<ID3D11ShaderResourceView *, Sources> srvs_ {};
-      std::array<ID3D11UnorderedAccessView *, Targets> uavs_ {};
-      std::array<ID3D11ClassInstance *, 256> instances_ {};
-      ComPtr<ID3D11ComputeShader> shader_;
-      ComPtr<ID3D11Buffer> constants_;
-      ComPtr<ID3D11Predicate> predicate_;
-      UINT instance_count_ = UINT(instances_.size());
-      BOOL predicate_value_ = FALSE;
-    };
+    // The compute slots each pass family binds, restored around each queue.
+    using transport_state_t = host_sbs_compute_state::guard_t<3u, 3u, 1u>;
+    using palette_state_t = host_sbs_compute_state::guard_t<16u, 5u, 1u>;
 
     class transport_t {
       static constexpr UINT cutoff = 38u;
@@ -394,7 +361,7 @@ namespace models::host_sbs_direct_glyph_gpu {
         submitted_work_ = request.work;
         submitted_rgb_ = request.source_rgb;
         {
-          const compute_state_t saved(context_.Get());
+          const transport_state_t saved(context_.Get());
           context_->CopyResource(work_.Get(), submitted_work_.Get());
           const std::array<UINT, 8> shape {request.width, request.band_height, request.crop_top, cutoff,
                                           tile.width, tile.height, request.adaptive_context ? 1u : 0u, 0u};
@@ -442,7 +409,7 @@ namespace models::host_sbs_direct_glyph_gpu {
           return poll_status_e::discarded;
         }
         {
-          const compute_state_t saved(context_.Get());
+          const transport_state_t saved(context_.Get());
           context_->CSSetConstantBuffers(0u, 1u, constants_.GetAddressOf());
           dispatch(resolve_matte, {output_.srv.Get(), nullptr, nullptr}, {alpha8_uav_.Get(), placement_.uav.Get()},
                    tile_dispatch_.Get());

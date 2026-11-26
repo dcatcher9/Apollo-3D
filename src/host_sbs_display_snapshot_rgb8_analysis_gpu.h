@@ -4,6 +4,7 @@
 // Only its current lower band is written; no OCR, UI, EMPTY or renderer authority.
 #ifdef _WIN32
   #include "host_sbs_compute_program_lease.h"
+  #include "host_sbs_compute_state_guard.h"
   #include <array>
   #include <cstdint>
   #include <d3d11.h>
@@ -54,6 +55,9 @@ namespace models::display_snapshot_rgb8_analysis_gpu_v1 {
     [[nodiscard]] ID3D11ShaderResourceView *uip_envelope() const noexcept { return uip_envelope_.Get(); }
   };
 
+  // The compute slots the capture and envelope passes bind, restored around each queue.
+  using compute_state_t = host_sbs_compute_state::guard_t<16u, 8u, 3u>;
+
   class resources_t {
     enum class storage_e { materialized, direct_audit };
     storage_e storage_ = storage_e::materialized;
@@ -68,75 +72,6 @@ namespace models::display_snapshot_rgb8_analysis_gpu_v1 {
     UINT width_ = 0u, full_height_ = 0u, crop_top_ = 0u, band_height_ = 0u;
     host_sbs_compute_program_lease::group_t<3u> capture_program_lease_;
     host_sbs_compute_program_lease::group_t<1u> envelope_program_lease_;
-
-    struct saved_t {
-      ID3D11DeviceContext *context;
-      std::array<ComPtr<ID3D11ShaderResourceView>, 16u> srvs;
-      std::array<ComPtr<ID3D11UnorderedAccessView>, 8u> uavs;
-      std::array<ComPtr<ID3D11Buffer>, 3u> cbs;
-      ComPtr<ID3D11ComputeShader> shader;
-      std::array<ComPtr<ID3D11ClassInstance>, 256u> instances;
-      UINT instance_count = 256u;
-
-      explicit saved_t(ID3D11DeviceContext *c):
-          context(c) {
-        ID3D11ShaderResourceView *s[16] {};
-        ID3D11UnorderedAccessView *u[8] {};
-        ID3D11Buffer *b[3] {};
-        ID3D11ComputeShader *sh = nullptr;
-        ID3D11ClassInstance *ci[256] {};
-        c->CSGetShaderResources(0u, 16u, s);
-        c->CSGetUnorderedAccessViews(0u, 8u, u);
-        c->CSGetConstantBuffers(0u, 3u, b);
-        c->CSGetShader(&sh, ci, &instance_count);
-        for (UINT i = 0u; i < 16u; ++i) {
-          srvs[i].Attach(s[i]);
-        }
-        for (UINT i = 0u; i < 8u; ++i) {
-          uavs[i].Attach(u[i]);
-        }
-        for (UINT i = 0u; i < 3u; ++i) {
-          cbs[i].Attach(b[i]);
-        }
-        for (UINT i = 0u; i < instance_count; ++i) {
-          instances[i].Attach(ci[i]);
-        }
-        shader.Attach(sh);
-      }
-
-      static void unbind(ID3D11DeviceContext *c) {
-        ID3D11ShaderResourceView *s[16] {};
-        ID3D11UnorderedAccessView *u[8] {};
-        ID3D11Buffer *b[3] {};
-        c->CSSetShaderResources(0u, 16u, s);
-        c->CSSetUnorderedAccessViews(0u, 8u, u, nullptr);
-        c->CSSetConstantBuffers(0u, 3u, b);
-      }
-
-      ~saved_t() {
-        unbind(context);
-        ID3D11ShaderResourceView *s[16] {};
-        ID3D11UnorderedAccessView *u[8] {};
-        ID3D11Buffer *b[3] {};
-        ID3D11ClassInstance *ci[256] {};
-        for (UINT i = 0u; i < 16u; ++i) {
-          s[i] = srvs[i].Get();
-        }
-        for (UINT i = 0u; i < 8u; ++i) {
-          u[i] = uavs[i].Get();
-        }
-        for (UINT i = 0u; i < 3u; ++i) {
-          b[i] = cbs[i].Get();
-        }
-        for (UINT i = 0u; i < instance_count; ++i) {
-          ci[i] = instances[i].Get();
-        }
-        context->CSSetShaderResources(0u, 16u, s);
-        context->CSSetUnorderedAccessViews(0u, 8u, u, nullptr);
-        context->CSSetConstantBuffers(0u, 3u, b);
-        context->CSSetShader(shader.Get(), ci, instance_count);
-      }
-    };
 
     bool same_device(ID3D11DeviceChild *child) const {
       if (!child || !device_) {
@@ -435,8 +370,8 @@ namespace models::display_snapshot_rgb8_analysis_gpu_v1 {
       if (!request_words(request, cb, error)) {
         return false;
       }
-      saved_t saved(context);
-      saved_t::unbind(context);
+      const compute_state_t saved(context);
+      compute_state_t::unbind(context);
       emit_capture(context, program, request, cb);
       return true;
     }
@@ -454,8 +389,8 @@ namespace models::display_snapshot_rgb8_analysis_gpu_v1 {
         error = "Display-snapshot pending tuple or source lease mismatch";
         return false;
       }
-      saved_t saved(context);
-      saved_t::unbind(context);
+      const compute_state_t saved(context);
+      compute_state_t::unbind(context);
       emit_envelope(context, program, actual_uip40, accepted_pending, cb, true);
       return true;
     }
@@ -486,10 +421,10 @@ namespace models::display_snapshot_rgb8_analysis_gpu_v1 {
       }
       std::array<UINT, request_words_count> cb{};
       if (!request_words(request, cb, error)) return false;
-      saved_t saved(context);
-      saved_t::unbind(context);
+      const compute_state_t saved(context);
+      compute_state_t::unbind(context);
       emit_capture(context, program, request, cb, work_root);
-      saved_t::unbind(context); // proof changes from UAV producer to SRV consumer.
+      compute_state_t::unbind(context); // proof changes from UAV producer to SRV consumer.
       emit_envelope(context, program, actual_uip40, request, cb, false, work_root);
       return true;
     }

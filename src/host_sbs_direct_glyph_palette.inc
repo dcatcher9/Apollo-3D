@@ -241,7 +241,7 @@ class palette_transport_t {
 
   void score_chunk() {
     const current_cuda_context_t guard(cuda_, primary_);
-    const compute_state_t<16, 5> saved(ctx_.Get());
+    const palette_state_t saved(ctx_.Get());
     while (slot_ < plan_.lines.size()) {
       const auto [w, h] = plan_.lines[slot_];
       if (!w) {
@@ -396,7 +396,7 @@ public:
     slot_ = 0;
     tile_start_ = 0;
     has_lines_ = false;
-    const compute_state_t<16, 5> saved(ctx_.Get());
+    const palette_state_t saved(ctx_.Get());
     ctx_->CopyResource(work_.buffer.Get(), submitted_work_.Get());
     const std::array<UINT, 4> zero {};
     ctx_->ClearUnorderedAccessViewUint(protection_uav_.Get(), zero.data());
