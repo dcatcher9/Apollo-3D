@@ -227,12 +227,12 @@ def sha256_json(value):
 def scored_artifact_digests(directory):
     """Hash authenticated and numeric-only artifact sets in one file traversal."""
     scored_fixed = {
-        "contract.json", "sbs_perf.json", "warp_map_shape.json", "hdr_output_stats.json",
+        "contract.json", "sbs_perf.json", "warp_map_shape.json",
         "observation.timeline",
         "direct_parallax_manifest.json",
         convex2x_diagnostics.SIDECAR_FILENAME,
     }
-    numeric_fixed = {"warp_map_shape.json", "hdr_output_stats.json"}
+    numeric_fixed = {"warp_map_shape.json"}
     frame_pattern = re.compile(
         r"^(?:sbs|depth|structure|parallax|warp_map|warp_mask)_\d+\.(?:png|f32)$")
     # Schema 2 has one high input (model_input_) and reuses raw_ as its sole output. Retain the

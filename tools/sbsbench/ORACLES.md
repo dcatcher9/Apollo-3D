@@ -74,8 +74,8 @@ with `--save-raft-fields`, `--save-sea-evidence`, and `--save-flip-evidence`.
 `--flip-ppd` must describe the target viewing density; the default 67 pixels/degree remains
 diagnostic until calibrated for the actual headset.
 
-FLIP abstains before loading its package when `hdr_output_stats.json` identifies an HDR/scRGB
-preview. An 8-bit tone-mapped PNG is never valid raw HDR evidence.
+FLIP and iSQoE score the harness's 8-bit sRGB PNG eyes only. An 8-bit tone-mapped PNG is never
+valid raw HDR evidence.
 
 ## Results
 

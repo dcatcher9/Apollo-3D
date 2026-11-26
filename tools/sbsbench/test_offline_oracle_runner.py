@@ -238,29 +238,6 @@ class OfflineOracleRunnerTests(unittest.TestCase):
         reason = root["oracles"]["raft-stereo"]["reason"]
         self.assertIn("checkpoint ABI mismatch", reason)
 
-    def test_flip_hdr_preview_abstains_without_loading_dependency(self):
-        for clip in ("clip_a", "clip_b"):
-            (self.run_dir / clip / "hdr_output_stats.json").write_text(json.dumps({
-                "format": "linear-scRGB-fp16",
-                "hdr_source_kind": "native-pq-in-windows-hdr",
-                "png_is_preview": True,
-            }), encoding="utf-8")
-        args = self.arguments("--oracles", "nvidia-flip")
-        with mock.patch.object(
-                runner.flip_appearance_oracle, "load_official_flip",
-                side_effect=AssertionError("HDR must abstain before dependency load")):
-            root, exit_code = runner.run(args)
-        self.assertEqual(exit_code, 0)
-        self.assertEqual(root["status"], "complete")
-        self.assertEqual(root["oracles"]["nvidia-flip"]["status"], "abstained")
-        payload = json.loads((
-            self.run_dir / "clip_a" / "offline_oracles" /
-            "nvidia_flip_appearance.json"
-        ).read_text(encoding="utf-8"))
-        self.assertEqual(payload["status"], "abstained")
-        self.assertEqual(payload["summary"]["frames_abstained"], 1)
-        self.assertIn("preview", payload["frames"][0]["reason"].lower())
-
     def test_flip_missing_dependency_fails_closed_unless_allowed(self):
         args = self.arguments("--oracles", "nvidia-flip")
         with mock.patch.object(
@@ -279,60 +256,6 @@ class OfflineOracleRunnerTests(unittest.TestCase):
         self.assertEqual(exit_code, 2)
         self.assertEqual(root["status"], "unavailable")
         self.assertEqual(root["oracles"]["apple-isqoe"]["status"], "unavailable")
-
-    def test_isqoe_hdr_preview_abstains_before_dependency_or_model_load(self):
-        for clip in ("clip_a", "clip_b"):
-            (self.run_dir / clip / "hdr_output_stats.json").write_text(json.dumps({
-                "format": "linear-scRGB-fp16",
-                "hdr_source_kind": "native-pq-in-windows-hdr",
-                "png_is_preview": True,
-            }), encoding="utf-8")
-        args = self.arguments("--oracles", "apple-isqoe")
-        args.isqoe_repo = None
-        args.isqoe_checkpoint = None
-        with mock.patch.dict("os.environ", {}, clear=True), mock.patch.object(
-                runner.isqoe_oracle, "IsqoeModel",
-                side_effect=AssertionError("HDR must abstain before model loading")):
-            root, exit_code = runner.run(args)
-        self.assertEqual(exit_code, 0)
-        self.assertEqual(root["status"], "complete")
-        self.assertEqual(root["oracles"]["apple-isqoe"]["status"], "abstained")
-        payload = json.loads((
-            self.run_dir / "clip_a" / "offline_oracles" / "apple_isqoe.json"
-        ).read_text(encoding="utf-8"))
-        self.assertEqual(payload["summary"]["frames_abstained"], 1)
-        self.assertFalse(payload["training_label_eligible"])
-
-    def test_isqoe_mixed_hdr_preserves_abstention_when_ldr_dependency_is_missing(self):
-        (self.run_dir / "clip_a" / "hdr_output_stats.json").write_text(json.dumps({
-            "format": "linear-scRGB-fp16",
-            "hdr_source_kind": "native-pq-in-windows-hdr",
-            "png_is_preview": True,
-        }), encoding="utf-8")
-        args = self.arguments("--oracles", "apple-isqoe", "--allow-unavailable")
-        args.isqoe_repo = None
-        args.isqoe_checkpoint = None
-        with mock.patch.dict("os.environ", {}, clear=True), mock.patch.object(
-                runner.isqoe_oracle, "IsqoeModel",
-                side_effect=AssertionError("missing dependency must not load a model")):
-            root, exit_code = runner.run(args)
-        self.assertEqual(exit_code, 0)
-        self.assertEqual(root["status"], "unavailable")
-        self.assertEqual(root["oracles"]["apple-isqoe"]["status"], "unavailable")
-        self.assertEqual(
-            root["clips"]["clip_a"]["apple-isqoe"]["status"], "abstained")
-        self.assertEqual(
-            root["clips"]["clip_b"]["apple-isqoe"]["status"], "unavailable")
-        hdr_payload = json.loads((
-            self.run_dir / "clip_a" / "offline_oracles" / "apple_isqoe.json"
-        ).read_text(encoding="utf-8"))
-        ldr_payload = json.loads((
-            self.run_dir / "clip_b" / "offline_oracles" / "apple_isqoe.json"
-        ).read_text(encoding="utf-8"))
-        self.assertEqual(hdr_payload["summary"]["frames_abstained"], 1)
-        self.assertEqual(ldr_payload["summary"]["frames_unavailable"], 1)
-        self.assertFalse(hdr_payload["frames"][0]["training_label_eligible"])
-        self.assertFalse(ldr_payload["frames"][0]["training_label_eligible"])
 
     def test_flip_requires_same_id_exact_map_without_hiding_other_clip(self):
         (self.run_dir / "clip_a" / "warp_map_00000.f32").unlink()

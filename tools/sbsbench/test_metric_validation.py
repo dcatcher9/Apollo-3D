@@ -752,44 +752,6 @@ class EvidenceSemanticsTests(unittest.TestCase):
         self.assertGreater(support, 0.9)
         self.assertLess(temporal, 1e-4)
 
-    def test_hdr_exact_source_uses_production_linear_half_float_preview_contract(self):
-        shape = mapping_shape(16, 8)
-        x = np.linspace(0.0, 1.0, shape["eye_width"], dtype=np.float32)
-        y = np.linspace(0.0, 1.0, shape["height"], dtype=np.float32)[:, None]
-        source_rgb = np.stack((
-            np.broadcast_to(0.05 + 0.85 * x, (shape["height"], shape["eye_width"])),
-            np.broadcast_to(0.1 + 0.65 * y, (shape["height"], shape["eye_width"])),
-            np.broadcast_to(0.9 - 0.55 * x, (shape["height"], shape["eye_width"])),
-        ), axis=-1).astype(np.float32)
-        hdr_scale = 4.0
-
-        # Independent transcription of the harness contract: sRGB decode, scRGB scale, FP16
-        # source storage, luminance-preserving preview tone map, then sRGB encode.
-        linear = np.where(
-            source_rgb <= 0.04045, source_rgb / 12.92,
-            ((source_rgb + 0.055) / 1.055) ** 2.4)
-        linear = (linear * hdr_scale).astype(np.float16).astype(np.float32)
-        luminance = (linear[..., 0] * 0.2126 + linear[..., 1] * 0.7152
-                     + linear[..., 2] * 0.0722)
-        preview_linear = linear / (1.0 + luminance[..., None])
-        preview_linear /= np.maximum(1.0, np.max(preview_linear, axis=-1))[..., None]
-        preview_rgb = np.where(
-            preview_linear <= 0.0031308, 12.92 * preview_linear,
-            1.055 * preview_linear ** (1.0 / 2.4) - 0.055).astype(np.float32)
-
-        sampled_u = identity_mapping(shape)[:, :shape["eye_width"]]
-        metrics = sbsbench.exact_source_relative_metrics(
-            sbsbench.rgb_luma(preview_rgb), sbsbench.rgb_luma(source_rgb),
-            sampled_u, shape, eye_rgb=preview_rgb, src_rgb=source_rgb,
-            hdr_scale=hdr_scale)
-        wrong_transfer = sbsbench.exact_source_relative_metrics(
-            sbsbench.rgb_luma(preview_rgb), sbsbench.rgb_luma(source_rgb),
-            sampled_u, shape, eye_rgb=preview_rgb, src_rgb=source_rgb)
-
-        self.assertLess(metrics["source_residual_p95"], 1e-3)
-        self.assertLess(metrics["source_color_residual_p95"], 1e-3)
-        self.assertGreater(wrong_transfer["source_color_residual_p95"], 5.0)
-
     def test_compact_exact_source_skips_only_discarded_residual_diagnostics(self):
         shape = mapping_shape(96, 48)
         rng = np.random.default_rng(41)

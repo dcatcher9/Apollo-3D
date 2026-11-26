@@ -209,27 +209,6 @@ class FlipAppearanceQualificationTests(unittest.TestCase):
 
 
 class FlipAppearanceFailClosedTests(unittest.TestCase):
-    def test_hdr_preview_abstains_before_loading_optional_dependency(self):
-        tiny = np.zeros((32, 64, 3), dtype=np.uint8)
-        mapping = np.broadcast_to(
-            (np.arange(64, dtype=np.float32) + 0.5)[None, :] / 64.0,
-            (32, 64),
-        ).copy()
-        with mock.patch.object(
-                oracle, "load_official_flip", side_effect=AssertionError("must not load")):
-            result = oracle.measure_flip_appearance(
-                tiny, tiny, tiny, mapping, mapping,
-                {"content_scale_x": 1.0, "content_scale_y": 1.0},
-                hdr_output_stats={
-                    "format": "linear-scRGB-fp16",
-                    "hdr_source_kind": "native-pq-in-windows-hdr",
-                },
-            )
-        self.assertEqual("abstained", result["status"])
-        self.assertFalse(result["training_label_eligible"])
-        self.assertIn("preview", result["reason"].lower())
-        self.assertIsNone(result["metrics"][P99])
-
     def test_missing_package_is_explicitly_unavailable(self):
         tiny = np.zeros((32, 64, 3), dtype=np.uint8)
         mapping = np.broadcast_to(

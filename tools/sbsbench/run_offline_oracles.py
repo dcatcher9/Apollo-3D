@@ -235,11 +235,8 @@ def _run_flip(run_dir: Path, clips_root: Path, clips: list[str], ppd: float,
         sbs_frames = _indexed_paths(output_dir, "sbs_", (".png",))
         warp_maps = _indexed_paths(output_dir, "warp_map_", (".f32",))
         shape_path = output_dir / "warp_map_shape.json"
-        hdr_path = output_dir / "hdr_output_stats.json"
         shape = (_load_json_object(shape_path, "warp-map shape contract")
                  if shape_path.is_file() else None)
-        hdr_stats = (_load_json_object(hdr_path, "HDR preview contract")
-                     if hdr_path.is_file() else None)
         frames: list[dict] = []
         clip_summary = {key: 0 for key in totals}
 
@@ -264,8 +261,6 @@ def _run_flip(run_dir: Path, clips_root: Path, clips: list[str], ppd: float,
                 "warp_map": _relative(map_path, run_dir) if map_path else "",
                 "warp_shape": _relative(shape_path, run_dir) if shape is not None else "",
             }
-            if hdr_path.is_file():
-                inputs["hdr_stats"] = _relative(hdr_path, run_dir)
             failure = clip_level_reason
             if source_path is None:
                 failure = f"source frame_{frame_id:05d} is missing from {source_dir}"
@@ -291,7 +286,7 @@ def _run_flip(run_dir: Path, clips_root: Path, clips: list[str], ppd: float,
                     measured = flip_appearance_oracle.measure_flip_appearance(
                         source, sbs[:, :eye_width], sbs[:, eye_width:],
                         packed[:, :eye_width], packed[:, eye_width:], shape,
-                        hdr_output_stats=hdr_stats, ppd=ppd,
+                        ppd=ppd,
                         area_threshold=area_threshold,
                         return_maps=save_evidence,
                     )
@@ -359,7 +354,7 @@ def _run_flip(run_dir: Path, clips_root: Path, clips: list[str], ppd: float,
         "pixels_per_degree": ppd,
         "area_threshold": area_threshold,
         "registration": "production exact source-U maps; unique mutual source support",
-        "hdr_contract": "HDR preview PNGs abstain; raw calibrated HDR is required",
+        "hdr_contract": "LDR sRGB PNGs only; HDR needs raw calibrated evidence",
         "training_label_eligible": False,
     }
     return root, records
@@ -550,40 +545,26 @@ def _run_isqoe(
     paths: dict[str, Path | None],
     device: str | None,
 ) -> tuple[dict, dict[str, dict]]:
-    """Run Apple's headset-preference model once per LDR SBS frame.
-
-    iSQoE was trained on display-ready stereo images, not Apollo's tone-mapped debug preview of a
-    linear HDR surface.  HDR clips therefore abstain before model or dependency loading.
-    """
+    """Run Apple's headset-preference model once per LDR SBS frame."""
     inputs: dict[str, list[tuple[int, Path]]] = {}
-    hdr_reasons: dict[str, str] = {}
     for clip in clips:
         clip_dir = run_dir / clip
         frames = _indexed_paths(clip_dir, "sbs_", (".png",))
         if not frames:
             raise OracleRunnerError(f"{clip}: no sbs_*.png artifacts in {clip_dir}")
-        hdr_path = clip_dir / "hdr_output_stats.json"
-        hdr_stats = (_load_json_object(hdr_path, "HDR preview contract")
-                     if hdr_path.is_file() else None)
-        reason = flip_appearance_oracle._hdr_preview_reason(hdr_stats)
-        if reason:
-            hdr_reasons[clip] = reason
         inputs[clip] = sorted(frames.items())
 
-    ldr_clips = [clip for clip in clips if clip not in hdr_reasons]
     model = None
-    dependency_issue = None
     model_failure = None
-    if ldr_clips:
-        dependency_issue = _dependency_issue(
-            paths, ("isqoe_repo", "isqoe_checkpoint"))
-        if dependency_issue is None:
-            try:
-                # One model instance is shared across every LDR frame and clip in this run.
-                model = isqoe_oracle.IsqoeModel(
-                    paths["isqoe_repo"], paths["isqoe_checkpoint"], device)
-            except Exception as error:
-                model_failure = f"{type(error).__name__}: {error}"
+    dependency_issue = _dependency_issue(
+        paths, ("isqoe_repo", "isqoe_checkpoint"))
+    if dependency_issue is None:
+        try:
+            # One model instance is shared across every frame and clip in this run.
+            model = isqoe_oracle.IsqoeModel(
+                paths["isqoe_repo"], paths["isqoe_checkpoint"], device)
+        except Exception as error:
+            model_failure = f"{type(error).__name__}: {error}"
 
     totals = {
         "frames_total": 0,
@@ -595,12 +576,8 @@ def _run_isqoe(
     records: dict[str, dict] = {}
     for clip in clips:
         frames = []
-        hdr_reason = hdr_reasons.get(clip)
         for frame_id, path in inputs[clip]:
-            if hdr_reason:
-                frame = _isqoe_status_frame(
-                    frame_id, path, "abstained", hdr_reason)
-            elif dependency_issue:
+            if dependency_issue:
                 frame = _isqoe_status_frame(
                     frame_id, path, "unavailable", dependency_issue)
             elif model_failure:

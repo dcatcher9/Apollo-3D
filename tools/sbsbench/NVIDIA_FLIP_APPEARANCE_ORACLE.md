@@ -45,11 +45,9 @@ No FLIP mean, fused quality score, or automatic accept/reject threshold is compu
 
 ## HDR limitation
 
-The current harness writes linear-scRGB statistics but saves an 8-bit display-preview PNG. That
-PNG is not the lossless linear input required by FLIP-HDR. Passing an `hdr_output_stats.json` with
-an HDR/scRGB/FP16 contract therefore returns `status=abstained`. Do not remove this abstention or
-silently run LDR-FLIP on the preview. A future HDR oracle needs the raw FP16 eye buffers plus
-calibrated display/viewing conditions.
+The oracle runs LDR-FLIP on the harness's 8-bit sRGB eye PNGs only. The harness writes no HDR
+evaluation output; a future HDR oracle needs the raw FP16 eye buffers plus calibrated
+display/viewing conditions, not a tone-mapped PNG.
 
 ## One-frame command
 
@@ -59,13 +57,12 @@ python tools/sbsbench/flip_appearance_oracle.py `
   --sbs E:/path/to/run/clip/sbs_00001.png `
   --warp-map E:/path/to/run/clip/warp_map_00001.f32 `
   --warp-shape E:/path/to/run/clip/warp_map_shape.json `
-  --hdr-stats E:/path/to/run/clip/hdr_output_stats.json `
   --output E:/path/to/flip_00001.json `
   --evidence-npz E:/path/to/flip_00001_maps.npz
 ```
 
-`--hdr-stats` is optional only for a known native-SDR run. `--evidence-npz` stores registered
-references, actual eyes, support, and error maps for visual audit.
+`--evidence-npz` stores registered references, actual eyes, support, and error maps for visual
+audit.
 
 ## Existing-run command
 
@@ -80,7 +77,7 @@ python tools/sbsbench/run_offline_oracles.py `
 The runner pairs frames strictly by numeric ID and requires the exact production map for every
 SBS frame. Missing sources, maps, or a shape contract produce `failed`, not approximate image
 registration. A missing official package produces `unavailable` and a nonzero exit unless
-`--allow-unavailable` is explicit. HDR preview input remains a legitimate `abstained` result.
+`--allow-unavailable` is explicit.
 Per-clip output is written to `offline_oracles/nvidia_flip_appearance.json`; the normal report
 builder renders it only in the collapsed, non-decisive offline-oracle appendix.
 
@@ -94,7 +91,7 @@ python -m unittest tools.sbsbench.test_flip_appearance_oracle -v
 
 It checks blur, thin-line deletion, ringing, halo, jagged edges, and double edges; monotonic
 severity ladders; one-eye versus symmetric defects; clean fractional geometry; hostile bars;
-invalid-map masking; flat content; HDR abstention; and missing-dependency behavior.
+invalid-map masking; flat content; and missing-dependency behavior.
 
 The authenticated-source falsification pass uses only clips accepted by the shared dataset
 provenance contract:

@@ -338,7 +338,7 @@ def disparity_field(left, right, tile=192, stride=128, min_var=1e-3):
 
 
 def _exact_expected_source_luma(eye_shape, src_gray, sampled_source_u, shape,
-                                src_rgb=None, hdr_scale=None):
+                                src_rgb=None):
     """Reconstruct the luma sampled by one production eye and its content mask.
 
     The warp-map sidecar records the horizontal source coordinate consumed by the shader.  The
@@ -370,18 +370,10 @@ def _exact_expected_source_luma(eye_shape, src_gray, sampled_source_u, shape,
     live_sampled_u = np.clip(sampled_source_u, 0.0, 1.0)
 
     expected_rgb = None
-    if hdr_scale is not None and src_rgb is None:
-        raise ValueError("HDR preview fidelity requires RGB source evidence")
     if src_rgb is None:
         expected = _sample_scalar_uv(src_gray, live_sampled_u, source_v)
-    elif hdr_scale is None:
-        expected_rgb = _sample_rgb_uv(src_rgb, live_sampled_u, source_v)
-        expected = rgb_luma(expected_rgb)
     else:
-        linear_source = (_srgb_to_linear(src_rgb) * float(hdr_scale)).astype(
-            np.float16).astype(np.float32)
-        expected_rgb = _hdr_preview_rgb(
-            _sample_rgb_uv(linear_source, live_sampled_u, source_v))
+        expected_rgb = _sample_rgb_uv(src_rgb, live_sampled_u, source_v)
         expected = rgb_luma(expected_rgb)
     return expected, expected_rgb, valid
 
@@ -513,7 +505,7 @@ def _local_vertical_offsets(eye, expected, valid, max_height=540,
 
 
 def exact_vertical_misalignment(left, right, src_gray, map_left, map_right, shape,
-                                src_rgb=None, hdr_scale=None, expected_evidence=None):
+                                src_rgb=None, expected_evidence=None):
     """Localized vertical disparity using exact production source correspondences.
 
     Returns ``(native_p99_px, normalized_p99_pct, support_pct)``.  The first two values are
@@ -529,9 +521,9 @@ def exact_vertical_misalignment(left, right, src_gray, map_left, map_right, shap
         raise ValueError(f"eye geometry differs: {left.shape} != {right.shape}")
     if expected_evidence is None:
         left_evidence = _exact_expected_source_luma(
-            left.shape, src_gray, map_left, shape, src_rgb=src_rgb, hdr_scale=hdr_scale)
+            left.shape, src_gray, map_left, shape, src_rgb=src_rgb)
         right_evidence = _exact_expected_source_luma(
-            right.shape, src_gray, map_right, shape, src_rgb=src_rgb, hdr_scale=hdr_scale)
+            right.shape, src_gray, map_right, shape, src_rgb=src_rgb)
     else:
         left_evidence, right_evidence = expected_evidence
     left_expected, _, left_valid = left_evidence
@@ -645,7 +637,7 @@ def _linear_to_srgb(rgb):
 
 
 def _hdr_preview_rgb(linear_rgb):
-    """Match the harness's deterministic scRGB-to-PNG diagnostic preview."""
+    """Tone-map linear scRGB to an sRGB preview (used by the HDR stereo-window validator)."""
     rgb = np.maximum(np.asarray(linear_rgb, dtype=np.float32), 0.0)
     luminance = (rgb[..., 0] * 0.2126 + rgb[..., 1] * 0.7152
                  + rgb[..., 2] * 0.0722)
@@ -1514,7 +1506,7 @@ def worst_local_bad_fraction(bad, support, radius=None, min_support_fraction=0.2
 
 def exact_source_relative_metrics(eye, src_gray, sampled_source_u, shape,
                                   coverage_error=4.0 / 255.0, eye_rgb=None, src_rgb=None,
-                                  hdr_scale=None, expected_evidence=None, compact=False):
+                                  expected_evidence=None, compact=False):
     """Source fidelity using the exact source coordinate consumed by the production shader.
 
     The former matcher selected whichever nearby source patch best explained each candidate
@@ -1529,8 +1521,7 @@ def exact_source_relative_metrics(eye, src_gray, sampled_source_u, shape,
         raise ValueError("exact source RGB evidence requires both output and source RGB")
     if expected_evidence is None:
         expected, expected_rgb, valid = _exact_expected_source_luma(
-            eye.shape, src_gray, sampled_source_u, shape,
-            src_rgb=src_rgb, hdr_scale=hdr_scale)
+            eye.shape, src_gray, sampled_source_u, shape, src_rgb=src_rgb)
     else:
         expected, expected_rgb, valid = expected_evidence
     if eye_rgb is not None:
@@ -2046,7 +2037,7 @@ def measure(dump_dir):
 def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_kind="disparity",
                       gt_depth_valid=None,
                       warp_mask=None, warp_mapping=None, warp_mapping_shape=None,
-                      src_rgb=None, hdr_scale=None, compact=False, depth_semantics=None,
+                      src_rgb=None, compact=False, depth_semantics=None,
                       structure_field=None, subtitle_region=None,
                       subtitle_overlay_mask=None):
     """Spatial metrics for one harness SBS frame and its authenticated sidecars."""
@@ -2081,23 +2072,20 @@ def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_k
                     f"warp map {warp_mapping.shape} does not match SBS {sbs.shape}")
             map_left, map_right = split_eyes(warp_mapping)
             expected_left = _exact_expected_source_luma(
-                left.shape, src_gray, map_left, warp_mapping_shape,
-                src_rgb=src_rgb, hdr_scale=hdr_scale)
+                left.shape, src_gray, map_left, warp_mapping_shape, src_rgb=src_rgb)
             expected_right = _exact_expected_source_luma(
-                right.shape, src_gray, map_right, warp_mapping_shape,
-                src_rgb=src_rgb, hdr_scale=hdr_scale)
+                right.shape, src_gray, map_right, warp_mapping_shape, src_rgb=src_rgb)
             lm = exact_source_relative_metrics(
                 left, src_gray, map_left, warp_mapping_shape,
                 eye_rgb=left_rgb if src_rgb is not None else None, src_rgb=src_rgb,
-                hdr_scale=hdr_scale, expected_evidence=expected_left, compact=compact)
+                expected_evidence=expected_left, compact=compact)
             rm = exact_source_relative_metrics(
                 right, src_gray, map_right, warp_mapping_shape,
                 eye_rgb=right_rgb if src_rgb is not None else None, src_rgb=src_rgb,
-                hdr_scale=hdr_scale, expected_evidence=expected_right, compact=compact)
+                expected_evidence=expected_right, compact=compact)
             vertical_px, vertical_pct, vertical_support = exact_vertical_misalignment(
                 left, right, src_gray, map_left, map_right, warp_mapping_shape,
-                src_rgb=src_rgb, hdr_scale=hdr_scale,
-                expected_evidence=(expected_left, expected_right))
+                src_rgb=src_rgb, expected_evidence=(expected_left, expected_right))
             out["vmisalign_support_pct"] = vertical_support
             if vertical_px is not None:
                 out["vmisalign_p99_px"] = vertical_px
@@ -2130,15 +2118,8 @@ def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_k
         if subtitle_region is not None:
             if src_gray is None:
                 raise ValueError("subtitle-region metrics require the authenticated source frame")
-            subtitle_source = src_gray
-            if hdr_scale is not None:
-                if src_rgb is None:
-                    raise ValueError("HDR subtitle metrics require RGB source evidence")
-                subtitle_source = rgb_luma(_hdr_preview_rgb(
-                    (_srgb_to_linear(src_rgb) * float(hdr_scale)).astype(
-                        np.float16).astype(np.float32)))
             out.update(sbs_subtitle_metrics.measure_subtitle_region(
-                left, right, subtitle_source, subtitle_region, warp_mapping_shape,
+                left, right, src_gray, subtitle_region, warp_mapping_shape,
                 binocular_geometry, overlay_mask=subtitle_overlay_mask))
         if structure_field is not None:
             # V2-live evaluation: score structural diagnostics against the production
@@ -2164,19 +2145,10 @@ def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_k
             out.update({key: float(value) for key, value in shear.items()
                         if value is not None})
             if src_rgb is not None:
-                perceptual_source = src_rgb
-                perceptual_transform = None
-                if hdr_scale is not None:
-                    perceptual_source = (
-                        _srgb_to_linear(src_rgb) * float(hdr_scale)
-                    ).astype(np.float16).astype(np.float32)
-                    perceptual_transform = _hdr_preview_rgb
-
                 interocular_evidence = (
                     sbs_interocular_phase_chroma.prepare_interocular_evidence(
-                        perceptual_source, left_rgb, right_rgb, map_left, map_right,
-                        warp_mapping_shape, warp_mask=warp_mask,
-                        source_sample_transform=perceptual_transform))
+                        src_rgb, left_rgb, right_rgb, map_left, map_right,
+                        warp_mapping_shape, warp_mask=warp_mask))
                 phase_chroma = (
                     sbs_interocular_phase_chroma
                     .measure_interocular_phase_chroma_prepared(interocular_evidence))
@@ -2189,29 +2161,21 @@ def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_k
                 out.update({key: float(value) for key, value in phase_chroma.items()
                             if key in retained_conflict and value is not None})
 
-                if hdr_scale is None:
-                    photometric = (
-                        sbs_interocular_photometric_rivalry
-                        .measure_interocular_photometric_rivalry_prepared(
-                            interocular_evidence))
-                    retained_photometric = {
-                        "interocular_exposure_rivalry_burden_pct",
-                        "interocular_exposure_rivalry_support_pct",
-                        "interocular_exposure_rivalry_support_count",
-                        "interocular_exposure_rivalry_evidence_sufficient",
-                        "interocular_color_gain_rivalry_burden_pct",
-                        "interocular_color_gain_rivalry_support_pct",
-                        "interocular_color_gain_rivalry_support_count",
-                        "interocular_color_gain_rivalry_evidence_sufficient",
-                    }
-                    out.update({key: float(value) for key, value in photometric.items()
-                                if key in retained_photometric and value is not None})
-                else:
-                    # The PNG is a diagnostic tone-mapped preview. It cannot authenticate
-                    # absolute HDR luminance/gamut rivalry; abstain until raw FP16 eyes plus a
-                    # calibrated display transform are saved by the harness.
-                    out["interocular_exposure_rivalry_evidence_sufficient"] = 0.0
-                    out["interocular_color_gain_rivalry_evidence_sufficient"] = 0.0
+                photometric = (
+                    sbs_interocular_photometric_rivalry
+                    .measure_interocular_photometric_rivalry_prepared(interocular_evidence))
+                retained_photometric = {
+                    "interocular_exposure_rivalry_burden_pct",
+                    "interocular_exposure_rivalry_support_pct",
+                    "interocular_exposure_rivalry_support_count",
+                    "interocular_exposure_rivalry_evidence_sufficient",
+                    "interocular_color_gain_rivalry_burden_pct",
+                    "interocular_color_gain_rivalry_support_pct",
+                    "interocular_color_gain_rivalry_support_count",
+                    "interocular_color_gain_rivalry_evidence_sufficient",
+                }
+                out.update({key: float(value) for key, value in photometric.items()
+                            if key in retained_photometric and value is not None})
 
                 window_depth = structure_depth
                 if window_depth is not None:
@@ -2219,9 +2183,8 @@ def measure_seq_frame(path, depth=None, src_gray=None, gt_depth=None, gt_depth_k
                         window_depth, int(warp_mapping_shape["source_width"]),
                         int(warp_mapping_shape["source_height"]))
                 window = sbs_stereo_window_metrics.measure_stereo_window_violation(
-                    warp_mapping, warp_mapping_shape, perceptual_source,
-                    depth=window_depth, coverage_mask=coverage_map,
-                    source_sample_transform=perceptual_transform, compact=True)
+                    warp_mapping, warp_mapping_shape, src_rgb,
+                    depth=window_depth, coverage_mask=coverage_map, compact=True)
                 retained_window = {
                     "experimental_stereo_window_support_count",
                     "experimental_stereo_window_support_pct",
@@ -2325,7 +2288,7 @@ def _measure_sequence_spatial_job(job):
             job["sbs_path"], depth, src, gt_depth, job["gt_kind"],
             gt_depth_valid=gt_valid, warp_mask=warp_mask,
             warp_mapping=warp_mapping, warp_mapping_shape=job["mapping_shape"],
-            src_rgb=src_rgb, hdr_scale=job["hdr_scale"], compact=job["compact"],
+            src_rgb=src_rgb, compact=job["compact"],
             depth_semantics=job.get("depth_semantics"),
             structure_field=structure_field, subtitle_region=subtitle_region,
             subtitle_overlay_mask=subtitle_overlay_mask)
@@ -2485,17 +2448,6 @@ def measure_sequence(seq_dir, frames_dir=None, compact=False):
             raise ValueError(f"invalid warp-map shape contract {shape_path}: {exc}") from exc
     elif os.path.exists(os.path.join(seq_dir, "warp_map_shape.json")):
         raise ValueError("warp-map shape contract exists without frame maps")
-    hdr_scale = None
-    hdr_stats_path = os.path.join(seq_dir, "hdr_output_stats.json")
-    if os.path.exists(hdr_stats_path):
-        try:
-            with open(hdr_stats_path, encoding="utf-8") as hdr_file:
-                hdr_stats = json.load(hdr_file)
-            hdr_scale = float(hdr_stats["input_scale"])
-            if not np.isfinite(hdr_scale) or hdr_scale <= 0.0:
-                raise ValueError("input_scale must be positive and finite")
-        except (OSError, KeyError, TypeError, ValueError) as exc:
-            raise ValueError(f"invalid HDR preview contract {hdr_stats_path}: {exc}") from exc
     gt_by_id = indexed_files(
         os.path.join(frames_dir, "gt_depth", "frame_*.*"), "frame_") if frames_dir else {}
     if gt_by_id and set(gt_by_id) != set(frame_ids):
@@ -2615,7 +2567,6 @@ def measure_sequence(seq_dir, frames_dir=None, compact=False):
         "warp_mapping_path": mapping_by_id.get(frame_id),
         "mapping_shape": mapping_shape,
         "gt_kind": gt_kind,
-        "hdr_scale": hdr_scale,
         "compact": compact,
     } for frame_id in frame_ids]
     rows = _measure_sequence_spatial_rows(spatial_jobs)

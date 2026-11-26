@@ -528,10 +528,6 @@ def _exact_source_evidence_for_run(run, clip, idx):
     if output.shape[:2] != mapping.shape:
         raise ValueError(f"report warp map {mapping.shape} != output {output.shape[:2]}")
     source_rgb = sbsbench.load_rgb(source)
-    hdr_scale = None
-    hdr_path = os.path.join(run, clip, "hdr_output_stats.json")
-    if os.path.exists(hdr_path):
-        hdr_scale = float(json.load(open(hdr_path, encoding="utf-8"))["input_scale"])
     eye_outputs = sbsbench.split_eyes(output)
     eye_maps = sbsbench.split_eyes(mapping)
     height, eye_width = eye_outputs[0].shape[:2]
@@ -540,20 +536,13 @@ def _exact_source_evidence_for_run(run, clip, idx):
     lo_y = 0.5 * (1.0 - scale_y)
     source_v = np.broadcast_to(
         np.clip((output_v - lo_y) / scale_y, 0.0, 1.0)[:, None], (height, eye_width))
-    if hdr_scale is None:
-        sample_source = source_rgb
-    else:
-        sample_source = (sbsbench._srgb_to_linear(source_rgb) * hdr_scale).astype(
-            np.float16).astype(np.float32)
     expected, residuals, topology = [], [], []
     baseline_step = float(shape["source_width"]) / max(scale_x * eye_width, 1.0)
     for eye, sampled_u in zip(eye_outputs, eye_maps):
         # The sidecar preserves raw Reproject U for geometry. Displayed color and topology both
         # consume main_ps's saturated coordinate; raw U remains available to comfort metrics.
         live_sampled_u = np.clip(sampled_u, 0.0, 1.0)
-        mapped = sbsbench._sample_rgb_uv(sample_source, live_sampled_u, source_v)
-        if hdr_scale is not None:
-            mapped = sbsbench._hdr_preview_rgb(mapped)
+        mapped = sbsbench._sample_rgb_uv(source_rgb, live_sampled_u, source_v)
         expected.append(mapped)
         residuals.append(np.abs(sbsbench.rgb_luma(eye) - sbsbench.rgb_luma(mapped)))
         source_step = np.diff(live_sampled_u * float(shape["source_width"]), axis=1,
@@ -583,23 +572,12 @@ def _detector_inputs_for_run(run, clip, idx):
     mask = np.asarray(Image.open(mask_path).convert("RGB"), np.float32) / 255.0
     if output.shape[:2] != mapping.shape or mask.shape[:2] != mapping.shape:
         raise ValueError("detector output/map/mask geometry mismatch")
-    metric_source = source
-    sample_transform = None
-    hdr_path = os.path.join(run, clip, "hdr_output_stats.json")
-    if os.path.exists(hdr_path):
-        hdr_scale = float(json.load(open(hdr_path, encoding="utf-8"))["input_scale"])
-        metric_source = (
-            sbsbench._srgb_to_linear(source) * hdr_scale
-        ).astype(np.float16).astype(np.float32)
-        sample_transform = sbsbench._hdr_preview_rgb
     return {
         "shape": shape,
         "mapping": mapping,
         "mask": mask,
         "depth": depth,
-        "source": metric_source,
-        "source_preview": source,
-        "sample_transform": sample_transform,
+        "source": source,
         "eyes": sbsbench.split_eyes(output),
     }
 
@@ -639,9 +617,7 @@ def interocular_conflict_evidence(clip, idx, metric):
         left_map, right_map = sbsbench.split_eyes(data["mapping"])
         metrics, maps = sbs_interocular_phase_chroma.measure_interocular_phase_chroma(
             data["source"], data["eyes"][0], data["eyes"][1], left_map, right_map,
-            data["shape"], warp_mask=data["mask"],
-            source_sample_transform=data["sample_transform"],
-            return_maps=True)
+            data["shape"], warp_mask=data["mask"], return_maps=True)
         measured.append((metrics, maps))
     ranked = [(float(item[0][metric]), run_index)
               for run_index, item in enumerate(measured)
@@ -702,7 +678,7 @@ def interocular_photometric_evidence(clip, idx, metric):
             .measure_interocular_photometric_rivalry(
                 data["source"], data["eyes"][0], data["eyes"][1],
                 left_map, right_map, data["shape"], warp_mask=data["mask"],
-                source_sample_transform=data["sample_transform"], return_maps=True))
+                return_maps=True))
         measured.append((metrics, maps))
     ranked = [(float(item[0][metric]), run_index)
               for run_index, item in enumerate(measured)
@@ -767,8 +743,7 @@ def stereo_window_evidence(clip, idx, metric):
         coverage = data["mask"][..., 0] < 0.5
         metrics, maps = sbs_stereo_window_metrics.measure_stereo_window_violation(
             data["mapping"], shape, data["source"], depth=depth,
-            coverage_mask=coverage, source_sample_transform=data["sample_transform"],
-            return_maps=True)
+            coverage_mask=coverage, return_maps=True)
         measured.append((metrics, maps))
     ranked = [(float(item[0][metric]), run_index)
               for run_index, item in enumerate(measured)

@@ -7,10 +7,9 @@ map.  Actual and clean eyes are then inverted onto one common source raster.  On
 that are uniquely visible in *both* eyes may vote, so disparity, bars, clamps, folds, and holes do
 not masquerade as appearance defects.
 
-The official ``flip-evaluator`` package is imported lazily.  Missing or incompatible packages,
-insufficient support, and HDR preview PNGs produce explicit unavailable/abstained payloads.  This
-module deliberately runs LDR-FLIP only: Apollo's current HDR PNG artifact is a display preview of
-linear scRGB, not the lossless HDR buffer FLIP-HDR requires.
+The official ``flip-evaluator`` package is imported lazily.  Missing or incompatible packages and
+insufficient support produce explicit unavailable/abstained payloads.  This module deliberately
+runs LDR-FLIP only on the harness's sRGB PNG eyes; FLIP-HDR would need lossless HDR buffers.
 
 No global mean is computed or reported.  The diagnostic pools localized worst-eye p99 and error
 area, plus an interocular error-map imbalance.  Every result is experimental and stamped
@@ -173,28 +172,6 @@ def _as_ldr_rgb(image: np.ndarray, name: str) -> np.ndarray:
     return np.clip(value, 0.0, 1.0)
 
 
-def _hdr_preview_reason(stats: dict[str, Any] | None) -> str | None:
-    if not stats:
-        return None
-    format_name = str(stats.get("format", "")).strip().lower()
-    source_kind = str(stats.get("hdr_source_kind", "")).strip().lower()
-    explicit_preview = any(
-        stats.get(key) is True
-        for key in ("preview", "preview_only", "png_is_preview", "hdr_preview")
-    )
-    if explicit_preview:
-        return "hdr_output_stats marks the PNG as an HDR preview"
-    if "scrgb" in format_name or "fp16" in format_name or "hdr" in format_name:
-        return (
-            f"hdr_output_stats format {format_name!r} requires lossless linear HDR evidence; "
-            "the current PNG is only a preview")
-    if source_kind and source_kind not in ("sdr", "native-sdr", "sdr-srgb-8bit"):
-        return (
-            f"hdr_output_stats source kind {source_kind!r} is HDR; preview PNGs are not "
-            "valid FLIP-HDR inputs")
-    return None
-
-
 def _erode(mask: np.ndarray, radius: int) -> np.ndarray:
     mask = np.asarray(mask, dtype=bool)
     if radius <= 0:
@@ -230,7 +207,7 @@ def _empty_metrics(area_threshold: float) -> dict[str, Any]:
 def measure_flip_appearance(
         source_rgb: np.ndarray, left_rgb: np.ndarray, right_rgb: np.ndarray,
         map_left: np.ndarray, map_right: np.ndarray, shape: dict[str, Any], *,
-        hdr_output_stats: dict[str, Any] | None = None, ppd: float = DEFAULT_PPD,
+        ppd: float = DEFAULT_PPD,
         area_threshold: float = DEFAULT_AREA_THRESHOLD,
         min_support_pixels: int = DEFAULT_MIN_SUPPORT_PIXELS,
         min_support_pct: float = DEFAULT_MIN_SUPPORT_PCT,
@@ -246,15 +223,6 @@ def measure_flip_appearance(
         raise ValueError("area_threshold must be in (0,1)")
     if min_support_pixels < 1 or not 0.0 <= min_support_pct <= 100.0:
         raise ValueError("invalid support floor")
-    preview_reason = _hdr_preview_reason(hdr_output_stats)
-    if preview_reason:
-        payload = _base_payload("abstained", preview_reason)
-        payload.update({
-            "dynamic_range": "HDR-preview-abstained",
-            "metrics": _empty_metrics(area_threshold),
-        })
-        return (payload, {}) if return_maps else payload
-
     try:
         evaluate, version = dependency or load_official_flip()
     except FlipUnavailable as error:
@@ -381,9 +349,7 @@ def measure_flip_appearance(
     return (payload, maps) if return_maps else payload
 
 
-def _load_json(path: Path | None) -> dict[str, Any] | None:
-    if path is None:
-        return None
+def _load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -393,7 +359,6 @@ def _main() -> int:
     parser.add_argument("--sbs", type=Path, required=True)
     parser.add_argument("--warp-map", type=Path, required=True)
     parser.add_argument("--warp-shape", type=Path, required=True)
-    parser.add_argument("--hdr-stats", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--evidence-npz", type=Path)
     parser.add_argument("--ppd", type=float, default=DEFAULT_PPD)
@@ -418,7 +383,7 @@ def _main() -> int:
     packed = packed.reshape(sbs.shape[:2])
     result = measure_flip_appearance(
         source, left, right, packed[:, :eye_width], packed[:, eye_width:], shape,
-        hdr_output_stats=_load_json(args.hdr_stats), ppd=args.ppd,
+        ppd=args.ppd,
         return_maps=args.evidence_npz is not None,
     )
     if args.evidence_npz is not None:
