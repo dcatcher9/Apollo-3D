@@ -1327,21 +1327,6 @@ namespace confighttp {
   }
 
   /**
-   * @brief Save the configuration settings.
-   * @param response The HTTP response object.
-   * @param request The HTTP request object.
-   * The body for the post request should be JSON serialized in the following format:
-   * @code{.json}
-   * {
-   *   "key": "value"
-   * }
-   * @endcode
-   *
-   * @attention{It is recommended to ONLY save the config settings that differ from the default behavior.}
-   *
-   * @api_examples{/api/config| POST| {"key":"value"}}
-   */
-  /**
    * @brief List the applications Host 3D may protect subtitles in.
    * @param response The HTTP response object.
    * @param request The HTTP request object.
@@ -1398,6 +1383,21 @@ namespace confighttp {
     }
   }
 
+  /**
+   * @brief Save the configuration settings.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   * The body for the post request should be JSON serialized in the following format:
+   * @code{.json}
+   * {
+   *   "key": "value"
+   * }
+   * @endcode
+   *
+   * @attention{It is recommended to ONLY save the config settings that differ from the default behavior.}
+   *
+   * @api_examples{/api/config| POST| {"key":"value"}}
+   */
   void saveConfig(resp_https_t response, req_https_t request) {
     try {
       // TODO: Input Validation

@@ -47,6 +47,9 @@ response fields and should never write configuration files behind Sunshine 3D's 
 | `POST` | `/api/clients/unpair` | Remove one paired client |
 | `POST` | `/api/clients/unpair-all` | Remove every paired client |
 | `GET`, `POST` | `/api/ar-glasses` | Inspect or select the Windows local-AR display |
+| `GET`, `POST` | `/api/local-monitor` | Read the local display state, or start, stop or switch the 3D source of local 3D |
+| `GET` | `/api/game3d/setup` | Read the Game 3D setup offer for the current game |
+| `POST` | `/api/game3d/setup/decision` | Record the install or never choice for an offered game |
 
 Changing an active client's input permissions takes effect at the input dispatch boundary. Losing
 keyboard, mouse, controller, touch, or pen permission discards queued input for that category and
@@ -61,6 +64,7 @@ stream and releases every category.
 |---|---|---|
 | `GET`, `POST` | `/api/config` | Read or save host configuration |
 | `GET` | `/api/configLocale` | Read locale metadata |
+| `GET`, `POST` | `/api/host3d/subtitle-apps` | List the applications Host 3D may protect subtitles in, or turn protection on or off for one |
 
 The field-level contract is documented in [Configuration](configuration.md).
 
@@ -73,6 +77,7 @@ The field-level contract is documented in [Configuration](configuration.md).
 | `GET`, `POST` | `/api/offline-sbs/jobs` | List jobs or create a conversion |
 | `GET` | `/api/offline-sbs/jobs/{id}` | Read one job |
 | `POST` | `/api/offline-sbs/jobs/{id}/cancel` | Cancel one job |
+| `DELETE` | `/api/offline-sbs/jobs/{id}` | Clear one finished job; its converted video is kept |
 
 The job schema, path restrictions, media behavior, and GPU lease are owned by
 [Offline Host 3D conversion](whole-clip-sbs-pipeline.md). Do not infer them from this route index.
