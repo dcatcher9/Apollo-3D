@@ -565,6 +565,11 @@ namespace models::host_sbs_direct_glyph_gpu {
     [[nodiscard]] ID3D11Buffer *native_lines_for_evaluation() const noexcept {
       return palette_ ? palette_->committed_lines() : nullptr;
     }
+#ifdef SUNSHINE_TESTS
+    [[nodiscard]] std::uint64_t native_fences_for_tests() const noexcept {
+      return palette_ ? palette_->submitted_fences_for_tests() : 0u;
+    }
+#endif
 
     bool release() noexcept {
       if (palette_ && !palette_->release()) return false;

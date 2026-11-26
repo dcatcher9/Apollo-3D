@@ -54,6 +54,9 @@ class palette_transport_t {
   ComPtr<ID3D11Fence> completion_;
   UINT64 submitted_fence_value_ = 0;
   field_t work_, sizes_, input_, logits_, roles_, low_, fine_, peak_, mean_;
+  // Views of the shared encoder tensors that begin at each tile of the batch.
+  std::array<uav_ptr, tile_capacity> input_tiles_;
+  std::array<srv_ptr, tile_capacity> logits_tiles_;
   field_t hist_, lut_, temp_, palette_, winner_, moment_, squared_, h1_, h2_, near_, far_, parts_, proto_, alpha_;
   std::array<history_t, 2> history_;
   unsigned previous_ = 0;
@@ -157,8 +160,12 @@ class palette_transport_t {
     return {width_, height_, UINT(job_.token), UINT(job_.token >> 32u), source_flags, UINT(history_valid_), slot_, job_.line_center_twice_source};
   }
 
-  void stage(stage_e entry, UINT arg, UINT gx, UINT gy, std::initializer_list<binding_t> inputs, field_t &destination, field_t *second = nullptr, UINT tiles = 1) {
-    dispatch(entry, {slot_, encoder_width_, detail_width_, arg, hist_scale_, 0, 0, encoder_rows_}, gx, gy, inputs, {destination.uav.Get(), second ? second->uav.Get() : nullptr}, tiles);
+  std::array<UINT, 8> line_constants(UINT arg) const {
+    return {slot_, encoder_width_, detail_width_, arg, hist_scale_, 0, 0, encoder_rows_};
+  }
+
+  void stage(stage_e entry, UINT arg, UINT gx, UINT gy, std::initializer_list<binding_t> inputs, field_t &destination, field_t *second = nullptr) {
+    dispatch(entry, line_constants(arg), gx, gy, inputs, {destination.uav.Get(), second ? second->uav.Get() : nullptr});
   }
 
   void fence() {
@@ -183,16 +190,41 @@ class palette_transport_t {
     check_cuda(cuda_.cuGraphicsUnmapResources(count, interop_.data(), stream_), "Return native glyph tensors to D3D");
   }
 
-  void begin_line(UINT w, UINT h) {
-    const UINT reference_height = plan_.reference[slot_][0];
+  // The OCR work height samples 28 encoder rows. A taller detector cover adds rows up to the tile's.
+  UINT encoder_rows(UINT slot) const {
+    const UINT h = plan_.lines[slot][1], reference_height = plan_.reference[slot][0];
     require(reference_height && reference_height <= h, "Invalid native glyph scale reference");
-    encoder_rows_ = std::clamp((28u * h + reference_height / 2u) / reference_height, 28u, palette_tile.height);
+    return std::clamp((28u * h + reference_height / 2u) / reference_height, 28u, palette_tile.height);
+  }
+
+  UINT planned_tiles() const {
+    UINT tiles = 0;
+    for (UINT slot = 0; slot < plan_.lines.size(); ++slot) {
+      tiles += line_tiles(slot);
+    }
+    return tiles;
+  }
+
+  UINT line_tiles(UINT slot) const {
+    const auto [w, h] = plan_.lines[slot];
+    return w ? div_up(div_up(w * encoder_rows(slot), h), 440u) : 0u;
+  }
+
+  void select_line(UINT slot) {
+    slot_ = slot;
+    const auto [w, h] = plan_.lines[slot];
+    encoder_rows_ = encoder_rows(slot);
     detail_rows_ = 3u * encoder_rows_;
     encoder_width_ = div_up(w * encoder_rows_, h);
     detail_width_ = div_up(w * detail_rows_, h);
     // Match the reference's ties-to-even integer sampling step.
     step_ = std::max(1u, UINT(std::nearbyint(double(h) / 96.0)));
     hist_scale_ = std::min(65536u, 0x7fffffffu / (div_up(w, step_) * div_up(h, step_)));
+  }
+
+  // Sizes the selected line's scratch and samples its encoder lattice.
+  void begin_line() {
+    const auto [w, h] = plan_.lines[slot_];
     const UINT n = detail_width_ * detail_rows_;
     ensure(low_, encoder_width_ * encoder_rows_, 4);
     ensure(roles_, encoder_width_ * encoder_rows_, 16);
@@ -204,13 +236,24 @@ class palette_transport_t {
     }
     ensure(parts_, 2u * div_up(n, 128), 16);
     ensure(alpha_, w * h, 4);
-    const std::array<UINT, 4> zero {};
-    ctx_->ClearUnorderedAccessViewUint(hist_.uav.Get(), zero.data());
     stage(pack_rgb, encoder_rows_, div_up(encoder_width_, 16), div_up(encoder_rows_, 8), {{0, source_.Get()}}, low_);
-    stage(pack_rgb, detail_rows_, div_up(detail_width_, 16), div_up(detail_rows_, 8), {{0, source_.Get()}}, fine_);
   }
 
-  void finish_line(UINT w, UINT h) {
+  // Packs the selected line's tiles from an encoder column into the batch from batch_tile.
+  void pack_tiles(UINT column, UINT batch_tile, UINT tiles) {
+    dispatch(pack_tile, line_constants(column), div_up(palette_tile.width, 16), div_up(palette_tile.height, 8), {{7, low_.srv.Get()}}, {input_tiles_[batch_tile].Get()}, tiles);
+  }
+
+  // Reads the same tiles' logits back into the selected line's encoder roles.
+  void export_tiles(UINT column, UINT batch_tile, UINT tiles) {
+    dispatch(export_roles, line_constants(column), div_up(std::min(440u, encoder_width_ - column), 16), div_up(encoder_rows_, 8), {{12, logits_tiles_[batch_tile].Get()}}, {roles_.uav.Get()}, tiles);
+  }
+
+  void finish_line() {
+    const auto [w, h] = plan_.lines[slot_];
+    const std::array<UINT, 4> zero {};
+    ctx_->ClearUnorderedAccessViewUint(hist_.uav.Get(), zero.data());
+    stage(pack_rgb, detail_rows_, div_up(detail_width_, 16), div_up(detail_rows_, 8), {{0, source_.Get()}}, fine_);
     // Use the same sampled pixel centers for the color counts and their areas.
     const UINT pad = std::max(1u, UINT(std::nearbyint(double(h) / 8.0)));
     const auto interior_extent = [&](UINT length) {
@@ -239,29 +282,56 @@ class palette_transport_t {
     dispatch(publish_line, schedule(), div_up(w, 16), div_up(h, 8), {{1, old.lines.srv.Get()}, {2, old_rgb_srv_.Get()}, {3, source_.Get()}, {4, old.opacity.srv.Get()}, {5, alpha_.srv.Get()}, {6, next().lines.srv.Get()}}, {work_.uav.Get(), nullptr, nullptr, next().opacity.uav.Get(), protection_uav_.Get()});
   }
 
+  // Scores every planned line in one encoder batch, each from its own batch position.
+  void score_lines() {
+    UINT tiles = 0;
+    for (UINT slot = 0; slot < plan_.lines.size(); ++slot) {
+      if (const UINT count = line_tiles(slot)) {
+        select_line(slot);
+        begin_line();
+        pack_tiles(0, tiles, count);
+        tiles += count;
+      }
+    }
+    encode(tiles);
+    for (UINT slot = 0, batch_tile = 0; slot < plan_.lines.size(); ++slot) {
+      if (const UINT count = line_tiles(slot)) {
+        select_line(slot);
+        export_tiles(0, batch_tile, count);
+        finish_line();
+        batch_tile += count;
+      }
+    }
+    slot_ = UINT(plan_.lines.size());
+  }
+
   void score_chunk() {
     const current_cuda_context_t guard(cuda_, primary_);
     const palette_state_t saved(ctx_.Get());
+    // When every planned tile fits one batch, the lines share it and leave no chunk below.
+    if (phase_ == phase_e::plan && planned_tiles() <= tile_capacity) {
+      score_lines();
+    }
     while (slot_ < plan_.lines.size()) {
-      const auto [w, h] = plan_.lines[slot_];
-      if (!w) {
+      if (!plan_.lines[slot_][0]) {
         ++slot_;
         continue;
       }
       if (tile_start_ == 0) {
-        begin_line(w, h);
+        select_line(slot_);
+        begin_line();
       }
       const UINT remaining = encoder_width_ - tile_start_;
       // Balance the tiles across the fewest submissions to avoid a small final batch.
       const UINT remaining_tiles = div_up(remaining, 440u);
       const UINT batches = div_up(remaining_tiles, tile_capacity);
       const UINT tiles = div_up(remaining_tiles, batches);
-      stage(pack_tile, tile_start_, div_up(palette_tile.width, 16), div_up(palette_tile.height, 8), {{7, low_.srv.Get()}}, input_, nullptr, tiles);
+      pack_tiles(tile_start_, 0, tiles);
       encode(tiles);
-      stage(export_roles, tile_start_, div_up(std::min(440u, remaining), 16), div_up(encoder_rows_, 8), {{12, logits_.srv.Get()}}, roles_, nullptr, tiles);
+      export_tiles(tile_start_, 0, tiles);
       tile_start_ += tiles * 440u;
       if (tile_start_ >= encoder_width_) {
-        finish_line(w, h);
+        finish_line();
         ++slot_;
         tile_start_ = 0;
       }
@@ -332,6 +402,19 @@ public:
     check_cuda(cuda_.cuStreamCreate(&stream_, CU_STREAM_NON_BLOCKING), "Create bounded native glyph stream");
     ensure(input_, palette_input_words, 4);
     ensure(logits_, palette_output_words, 4);
+    for (UINT tile = 0; tile < tile_capacity; ++tile) {
+      D3D11_UNORDERED_ACCESS_VIEW_DESC rgb {};
+      rgb.Format = DXGI_FORMAT_UNKNOWN;
+      rgb.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+      rgb.Buffer.FirstElement = tile * palette_tile.input_words();
+      rgb.Buffer.NumElements = (tile_capacity - tile) * palette_tile.input_words();
+      D3D11_SHADER_RESOURCE_VIEW_DESC scores {};
+      scores.Format = DXGI_FORMAT_UNKNOWN;
+      scores.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+      scores.Buffer.FirstElement = tile * palette_tile.output_words();
+      scores.Buffer.NumElements = (tile_capacity - tile) * palette_tile.output_words();
+      require(SUCCEEDED(device->CreateUnorderedAccessView(input_.buffer.Get(), &rgb, &input_tiles_[tile])) && SUCCEEDED(device->CreateShaderResourceView(logits_.buffer.Get(), &scores, &logits_tiles_[tile])), "Create native glyph batch tile views");
+    }
     check_cuda(cuda_.cuGraphicsD3D11RegisterResource(&interop_[0], input_.buffer.Get(), 0), "Register native glyph RGB");
     check_cuda(cuda_.cuGraphicsD3D11RegisterResource(&interop_[1], logits_.buffer.Get(), 0), "Register native glyph logits");
     constants_ = make_buffer({32, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0});
@@ -364,6 +447,12 @@ public:
   ID3D11Buffer *committed_lines() const noexcept {
     return history_[previous_].lines.buffer.Get();
   }
+
+#ifdef SUNSHINE_TESTS
+  UINT64 submitted_fences_for_tests() const noexcept {
+    return submitted_fence_value_;
+  }
+#endif
 
   void submit(const request_t &request) {
     require(!busy() && request.work && request.detector_caps && request.token && request.width && request.width <= 5120u && request.band_height && request.band_height <= 5120u, "Native glyph request requires current OCR Work and detector caps");

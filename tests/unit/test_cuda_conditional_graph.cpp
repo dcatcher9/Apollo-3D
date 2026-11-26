@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -13,6 +14,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <future>
 #include <gtest/gtest.h>
 #include <iostream>
@@ -20,7 +22,10 @@
 #include <limits>
 #include <NvInfer.h>
 #include <NvInferPlugin.h>
+#include <NvOnnxParser.h>
+#include <numeric>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -2614,6 +2619,251 @@ TEST(DirectGlyphHardware, HoldsClearsOwnerChangesAndWorkerRetirement) {
   EXPECT_EQ(ready, std::future_status::ready) << "Worker needed the render thread's immediate context";
   EXPECT_EQ(discarded.get(), glyph::poll_status_e::discarded) << error;
   EXPECT_TRUE(score.release());
+}
+
+// One observation's lines share one encoder batch and one scoring fence when their tiles fit it.
+// Each line matches scoring it alone; a plan over the batch limit keeps one fence per chunk.
+TEST(DirectGlyphHardware, ScoresTheLinesThatFitOneBatchUnderOneFence) {
+  namespace glyph = models::host_sbs_direct_glyph_gpu;
+  using Microsoft::WRL::ComPtr;
+  const auto *enabled = std::getenv("APOLLO_RUN_TENSORRT_TESTS");
+  if (!enabled || std::string_view {enabled} != "1") {
+    GTEST_SKIP() << "Set APOLLO_RUN_TENSORRT_TESTS=1 for the local NVIDIA/TensorRT integration check.";
+  }
+  ComPtr<ID3D11Device> device;
+  ComPtr<ID3D11DeviceContext> context;
+  ASSERT_HRESULT_SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0,
+                                             D3D11_SDK_VERSION, &device, nullptr, &context));
+  ComPtr<IDXGIDevice> dx;
+  ComPtr<IDXGIAdapter> adapter;
+  ASSERT_HRESULT_SUCCEEDED(device.As(&dx));
+  ASSERT_HRESULT_SUCCEEDED(dx->GetAdapter(&adapter));
+  auto &cuda = cuda_driver_api::get();
+  ASSERT_TRUE(cuda.is_valid() && cuda.cuD3D11GetDevice);
+  ASSERT_EQ(cuda.cuInit(0), CUDA_SUCCESS);
+  CUdevice ordinal {};
+  CUcontext primary = nullptr;
+  ASSERT_EQ(cuda.cuD3D11GetDevice(&ordinal, adapter.Get()), CUDA_SUCCESS);
+  ASSERT_EQ(cuda.cuDevicePrimaryCtxRetain(&primary, ordinal), CUDA_SUCCESS);
+  const auto release_primary = util::fail_guard([&] { cuda.cuDevicePrimaryCtxRelease(ordinal); });
+  glyph::detail::current_cuda_context_t current(cuda, primary);
+  topology_test_logger_t logger;
+  auto *runtime = nvinfer1::createInferRuntime(logger);
+  ASSERT_NE(runtime, nullptr);
+  nvinfer1::IHostMemory *serialized = nullptr;
+  {
+    // Build the packaged encoder with the production batch profile of one to six tiles.
+    const auto preset = models::direct_glyph_model_preset(glyph::tile_profile_e::common, true);
+    const auto onnx = std::filesystem::path {SUNSHINE_TEST_BIN_DIR}.parent_path() / "assets" / std::filesystem::path {preset.asset_path};
+    ASSERT_EQ(models::file_sha256_hex(onnx), preset.onnx_sha256) << onnx;
+    auto *builder = nvinfer1::createInferBuilder(logger);
+    ASSERT_NE(builder, nullptr);
+#if NV_TENSORRT_MAJOR < 11
+    constexpr auto network_flags = 1u << static_cast<std::uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kSTRONGLY_TYPED);
+#else
+    constexpr auto network_flags = 0u;
+#endif
+    auto *network = builder->createNetworkV2(network_flags);
+    auto *config = builder->createBuilderConfig();
+    auto *parser = network ? nvonnxparser::createParser(*network, logger) : nullptr;
+    const auto release_builder = util::fail_guard([&] {
+      release_trt_test_interface(parser);
+      release_trt_test_interface(config);
+      release_trt_test_interface(network);
+      release_trt_test_interface(builder);
+    });
+    ASSERT_TRUE(network && config && parser);
+    config->clearFlag(nvinfer1::BuilderFlag::kTF32);
+    ASSERT_TRUE(parser->parseFromFile(onnx.string().c_str(), static_cast<int>(nvinfer1::ILogger::Severity::kWARNING)));
+    const auto shape = [](int tiles) {
+      return nvinfer1::Dims4 {tiles, 3, int(glyph::palette_tile.height), int(glyph::palette_tile.width)};
+    };
+    auto *profile = builder->createOptimizationProfile();
+    using point = nvinfer1::OptProfileSelector;
+    ASSERT_TRUE(profile && profile->setDimensions("rgb", point::kMIN, shape(1)) && profile->setDimensions("rgb", point::kOPT, shape(4)) &&
+                profile->setDimensions("rgb", point::kMAX, shape(int(glyph::tile_capacity))) && config->addOptimizationProfile(profile) >= 0);
+    serialized = builder->buildSerializedNetwork(*network, *config);
+    ASSERT_NE(serialized, nullptr);
+  }
+  auto *engine = runtime->deserializeCudaEngine(serialized->data(), serialized->size());
+  release_trt_test_interface(serialized);
+  ASSERT_NE(engine, nullptr);
+  auto *execution = engine->createExecutionContext();
+  ASSERT_NE(execution, nullptr);
+  std::string error;
+  glyph::resources_t transport;
+  const auto cleanup = util::fail_guard([&] {
+    if (transport.release()) {
+      release_trt_test_interface(execution);
+      release_trt_test_interface(engine);
+      release_trt_test_interface(runtime);
+    }
+  });
+  ASSERT_TRUE(transport.prepare(device.Get(), context.Get(), SUNSHINE_SHADERS_DIR, primary, {execution, nullptr}, error, true)) << error;
+
+  // Light strokes with dark outlines on a textured backdrop, in three caption rows.
+  constexpr UINT width = 2560, height = 160, scale = 4, advance = 6 * scale;
+  constexpr std::array<std::array<std::uint8_t, 7>, 4> font {{
+    {{14, 17, 17, 31, 17, 17, 17}},
+    {{30, 17, 17, 30, 17, 17, 30}},
+    {{14, 17, 16, 16, 16, 17, 14}},
+    {{31, 16, 16, 30, 16, 16, 31}},
+  }};
+  struct line_t {
+    UINT left, top, characters;
+  };
+  // Each short line has one encoder tile; the long lines have four and three.
+  constexpr std::array<line_t, 5> lines {{{40, 10, 10}, {40, 62, 10}, {40, 114, 10}, {400, 10, 80}, {400, 62, 56}}};
+  const auto half = [](float value) {
+    const auto bits = std::bit_cast<std::uint32_t>(value);
+    return std::uint16_t((((bits >> 23) & 0xffu) - 112u) << 10 | ((bits >> 13) & 0x3ffu));
+  };
+  std::vector<std::array<float, 3>> rgb(std::size_t(width) * height);
+  for (UINT y = 0; y < height; ++y) {
+    for (UINT x = 0; x < width; ++x) {
+      const float shade = 0.22f + 0.12f * float((x / 16 + y / 8) % 2) + 0.1f * float(x) / width;
+      rgb[std::size_t(y) * width + x] = {shade, shade * 0.9f + 0.05f, shade * 0.8f + 0.1f};
+    }
+  }
+  for (const auto &line : lines) {
+    for (const UINT radius : {2u, 0u}) {
+      for (UINT c = 0; c < line.characters; ++c) {
+        const auto &rows = font[(c * 7 + c / 3) % font.size()];
+        for (UINT row = 0; row < 7; ++row) {
+          for (UINT column = 0; column < 5; ++column) {
+            if (!(rows[row] & (16u >> column))) continue;
+            const UINT x0 = line.left + c * advance + column * scale, y0 = line.top + row * scale;
+            for (UINT y = y0 - radius; y < y0 + scale + radius; ++y) {
+              for (UINT x = x0 - radius; x < x0 + scale + radius; ++x) {
+                rgb[std::size_t(y) * width + x] = radius ? std::array {0.03f, 0.03f, 0.03f} : std::array {0.96f, 0.94f, 0.9f};
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  std::vector<std::uint16_t> pixels(rgb.size() * 4);
+  for (std::size_t i = 0; i < rgb.size(); ++i) {
+    pixels[4 * i] = half(rgb[i][0]);
+    pixels[4 * i + 1] = half(rgb[i][1]);
+    pixels[4 * i + 2] = half(rgb[i][2]);
+    pixels[4 * i + 3] = half(1.0f);
+  }
+  D3D11_TEXTURE2D_DESC texture {width, height, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, {1, 0}, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE};
+  const D3D11_SUBRESOURCE_DATA initial {pixels.data(), width * 8, 0};
+  ComPtr<ID3D11Texture2D> source;
+  ComPtr<ID3D11ShaderResourceView> source_view, cap_view;
+  ASSERT_HRESULT_SUCCEEDED(device->CreateTexture2D(&texture, &initial, &source));
+  ASSERT_HRESULT_SUCCEEDED(device->CreateShaderResourceView(source.Get(), nullptr, &source_view));
+  D3D11_BUFFER_DESC raw {glyph::work_bytes, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
+                         0, D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS};
+  ComPtr<ID3D11Buffer> work, caps;
+  ASSERT_HRESULT_SUCCEEDED(device->CreateBuffer(&raw, nullptr, &work));
+  ASSERT_HRESULT_SUCCEEDED(device->CreateBuffer(&raw, nullptr, &caps));
+  D3D11_SHADER_RESOURCE_VIEW_DESC view {};
+  view.Format = DXGI_FORMAT_R32_TYPELESS;
+  view.ViewDimension = D3D11_SRV_DIMENSION_BUFFEREX;
+  view.BufferEx.NumElements = glyph::work_bytes / sizeof(UINT);
+  view.BufferEx.Flags = D3D11_BUFFEREX_SRV_FLAG_RAW;
+  ASSERT_HRESULT_SUCCEEDED(device->CreateShaderResourceView(caps.Get(), &view, &cap_view));
+
+  const auto read = [&](ID3D11Resource *resource, D3D11_TEXTURE2D_DESC desc, std::vector<UINT> &words) {
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Texture2D> staging;
+    ASSERT_HRESULT_SUCCEEDED(device->CreateTexture2D(&desc, nullptr, &staging));
+    context->CopyResource(staging.Get(), resource);
+    D3D11_MAPPED_SUBRESOURCE map {};
+    ASSERT_HRESULT_SUCCEEDED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &map));
+    words.resize(std::size_t(desc.Width) * desc.Height);
+    for (UINT y = 0; y < desc.Height; ++y) {
+      std::memcpy(words.data() + std::size_t(y) * desc.Width, static_cast<const char *>(map.pData) + std::size_t(y) * map.RowPitch, desc.Width * sizeof(UINT));
+    }
+    context->Unmap(staging.Get(), 0);
+  };
+  struct scored_t {
+    unsigned scoring_fences = 0;
+    std::vector<UINT> alpha;
+  };
+  glyph::request_t job {.source_rgb = source_view.Get(), .work = work.Get(), .width = width, .band_height = height,
+                        .detector_caps = cap_view.Get(), .generation = 1, .reset_history = true};
+  const auto score = [&](std::initializer_list<line_t> planned, scored_t &scored) {
+    job.frame = ++job.token;
+    std::array<UINT, glyph::work_bytes / sizeof(UINT)> plan {2, UINT(planned.size())};
+    std::array<UINT, glyph::work_bytes / sizeof(UINT)> covers {1, UINT(planned.size()), UINT(job.token), UINT(job.token >> 32)};
+    UINT slot = 0;
+    for (const auto &line : planned) {
+      const UINT right = line.left - 2 + line.characters * advance, bottom = line.top + 7 * scale + 2;
+      const std::array box {line.left - 2, line.top - 2, right, bottom};
+      const std::array cover {line.left - 8, line.top - 8, right + 8, bottom + 6};
+      std::copy(box.begin(), box.end(), plan.begin() + 4 + 4 * slot);
+      std::copy(cover.begin(), cover.end(), covers.begin() + 4 + 4 * slot);
+      ++slot;
+    }
+    context->UpdateSubresource(work.Get(), 0, nullptr, plan.data(), 0, 0);
+    context->UpdateSubresource(caps.Get(), 0, nullptr, covers.data(), 0, 0);
+    const auto submitted = transport.native_fences_for_tests();
+    ASSERT_EQ(transport.try_submit(job, error), glyph::submit_status_e::accepted) << error;
+    glyph::result_t result;
+    glyph::poll_status_e status;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    do {
+      status = transport.poll(&job, result, error);
+      std::this_thread::yield();
+    } while (status == glyph::poll_status_e::pending && std::chrono::steady_clock::now() < deadline);
+    ASSERT_EQ(status, glyph::poll_status_e::ready) << error;
+    // The first fence covers planning.
+    scored.scoring_fences = unsigned(transport.native_fences_for_tests() - submitted - 1u);
+    ComPtr<ID3D11Resource> alpha;
+    result.alpha8->GetResource(&alpha);
+    ASSERT_NO_FATAL_FAILURE(read(alpha.Get(), {width, height, 1, 1, DXGI_FORMAT_R32_UINT, {1, 0}}, scored.alpha));
+    D3D11_BUFFER_DESC staged {glyph::work_bytes, D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ};
+    ComPtr<ID3D11Buffer> staging;
+    ASSERT_HRESULT_SUCCEEDED(device->CreateBuffer(&staged, nullptr, &staging));
+    context->CopyResource(staging.Get(), work.Get());
+    D3D11_MAPPED_SUBRESOURCE map {};
+    ASSERT_HRESULT_SUCCEEDED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &map));
+    const auto *words = static_cast<const UINT *>(map.pData);
+    EXPECT_EQ(words[1], planned.size());
+    EXPECT_EQ(words[3], 1u) << "Every planned line must publish a valid score";
+    context->Unmap(staging.Get(), 0);
+    transport.retire();
+  };
+  const auto expect_ink = [&](const scored_t &scored, const line_t &line) {
+    UINT ink = 0;
+    for (UINT y = line.top; y < line.top + 7 * scale; ++y) {
+      for (UINT x = line.left; x < line.left + line.characters * advance; ++x) {
+        ink += scored.alpha[std::size_t(y) * width + x] >= 38u;
+      }
+    }
+    EXPECT_GT(ink, 0u) << line.left << "," << line.top;
+  };
+  const auto expect_lines = [&](std::initializer_list<line_t> planned, unsigned scoring_fences) {
+    std::vector<UINT> expected(std::size_t(width) * height);
+    for (const auto &line : planned) {
+      SCOPED_TRACE(line.characters);
+      scored_t alone;
+      ASSERT_NO_FATAL_FAILURE(score({line}, alone));
+      EXPECT_EQ(alone.scoring_fences, 1u);
+      expect_ink(alone, line);
+      std::transform(expected.begin(), expected.end(), alone.alpha.begin(), expected.begin(), [](UINT a, UINT b) {
+        return std::max(a, b);
+      });
+    }
+    scored_t together;
+    ASSERT_NO_FATAL_FAILURE(score(planned, together));
+    EXPECT_EQ(together.scoring_fences, scoring_fences);
+    const auto mismatched = std::inner_product(expected.begin(), expected.end(), together.alpha.begin(), std::size_t {0},
+                                               std::plus<> {}, std::not_equal_to<> {});
+    EXPECT_EQ(mismatched, 0u);
+  };
+  // Three one-tile lines fit one batch: planning plus one scoring fence.
+  ASSERT_NO_FATAL_FAILURE(expect_lines({lines[0], lines[1], lines[2]}, 1u));
+  // Seven tiles exceed the six-tile batch, so each line keeps its own chunk and fence.
+  ASSERT_NO_FATAL_FAILURE(expect_lines({lines[3], lines[4]}, 2u));
+  EXPECT_TRUE(transport.release());
 }
 
 // Opt-in hardware evidence for a real serialized OCR plan. The environment variable keeps this

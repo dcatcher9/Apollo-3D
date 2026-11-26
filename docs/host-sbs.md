@@ -471,8 +471,11 @@ covers fit those 52 rows at a coarser scale. Any remaining rows
 are filled by replicating the boundary pixels. The decoder uses a detail lattice three
 times the encoder density and publishes only inside the rectangle read by the encoder.
 The 512-column tile owns 440 columns and retains horizontal context. The ONNX
-export declares a symbolic batch axis. The scheduler divides each line evenly across the fewest
-TensorRT batches that fit up to six windows each. A nine-window line runs in batches of five and four.
+export declares a symbolic batch axis, bounded at six windows. When all of an observation's lines
+need at most six windows together, they share one TensorRT batch: each line writes its windows
+from its own batch position and reads its scores back from the same position. Otherwise the
+scheduler divides each line evenly across the fewest batches that fit up to six windows each.
+A nine-window line runs in batches of five and four.
 Each observation owns its execution context until the GPU has consumed the
 batch and exported its scores. The 36-column horizontal context on each side stays
 outside the window's owned output. Aligned RGB on the detail lattice supplies local background color
@@ -534,11 +537,14 @@ subtitle owner invalidates the history even when the input geometry stays the sa
 An estimator reserves one observation until its GPU work completes. It polls a D3D
 fence without waiting. The render thread signals each submission. The teardown worker
 can check that fence while the renderer continues using its immediate context.
-A 72-byte scheduling record supplies eight width/height pairs and the hold flag.
-Locations, image tensors, cue evidence and raw
+A 136-byte scheduling record supplies eight width/height pairs, the hold flag and each
+line's scale reference height. Locations, image tensors, cue evidence and raw
 opacity stay on the GPU. Each submission processes at most six encoder tiles before
-checking completion. Long lines continue in subsequent submissions under the same
-observation token. Only the completed observation can publish its native mask.
+checking completion, and the batch shape changes only after the previous batch's fence.
+An observation whose lines fit one batch therefore needs two fences, planning and scoring,
+for any number of lines. A larger plan scores each line, or each part of a long line, in its
+own submission under the same observation token. Only the completed observation can publish
+its native mask.
 
 #### Text-game pin
 
