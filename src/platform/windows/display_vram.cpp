@@ -3530,8 +3530,9 @@ namespace platf::dxgi {
         return false;
       }
 
-      // Kick construction on a background thread. The D3D device/context are free-threaded for the
-      // resource creation the constructor does (it makes no immediate-context calls). Capture
+      // Kick construction on a background thread. The device is free-threaded for the resource
+      // creation the build does. The build makes no immediate-context calls and leaves CUDA's
+      // D3D11 registration, which reaches the immediate context, to this drawing thread. Capture
       // owning ComPtrs so a presentation-session teardown never has to wait for construction.
       auto sbs_cfg = sbs_config;
       // Every estimator consumer uses the authenticated Host SBS tensor shapes and private

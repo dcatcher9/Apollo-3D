@@ -370,6 +370,23 @@ class palette_transport_t {
   }
 
 public:
+  // CUDA's D3D11 registration reaches the device's immediate context, so it runs on the thread
+  // that draws with that context (early as depth starts, else at the first submission), never
+  // in prepare() on the background build worker: registering there, beside the drawing thread,
+  // deadlocked inside NVIDIA's driver.
+  void register_interop() {
+    if (interop_[0] && interop_[1]) {
+      return;
+    }
+    const current_cuda_context_t guard(cuda_, primary_);
+    if (!interop_[0]) {
+      check_cuda(cuda_.cuGraphicsD3D11RegisterResource(&interop_[0], input_.buffer.Get(), 0), "Register native glyph RGB");
+    }
+    if (!interop_[1]) {
+      check_cuda(cuda_.cuGraphicsD3D11RegisterResource(&interop_[1], logits_.buffer.Get(), 0), "Register native glyph logits");
+    }
+  }
+
   void prepare(ID3D11Device *device, ID3D11DeviceContext *context, const std::filesystem::path &root, CUcontext primary, nvinfer1::IExecutionContext *execution) {
     require(device && context && primary && execution, "Native glyph transport requires an execution lease");
     device_ = device;
@@ -415,8 +432,6 @@ public:
       scores.Buffer.NumElements = (tile_capacity - tile) * palette_tile.output_words();
       require(SUCCEEDED(device->CreateUnorderedAccessView(input_.buffer.Get(), &rgb, &input_tiles_[tile])) && SUCCEEDED(device->CreateShaderResourceView(logits_.buffer.Get(), &scores, &logits_tiles_[tile])), "Create native glyph batch tile views");
     }
-    check_cuda(cuda_.cuGraphicsD3D11RegisterResource(&interop_[0], input_.buffer.Get(), 0), "Register native glyph RGB");
-    check_cuda(cuda_.cuGraphicsD3D11RegisterResource(&interop_[1], logits_.buffer.Get(), 0), "Register native glyph logits");
     constants_ = make_buffer({32, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0});
     staged_sizes_ = make_buffer({sizeof(schedule_readback_t), D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ, 0, 0});
     work_.buffer = make_buffer({work_bytes, D3D11_USAGE_DEFAULT, D3D11_BIND_UNORDERED_ACCESS, 0, D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS, 0});
@@ -452,10 +467,15 @@ public:
   UINT64 submitted_fences_for_tests() const noexcept {
     return submitted_fence_value_;
   }
+
+  bool interop_registered_for_tests() const noexcept {
+    return interop_[0] && interop_[1];
+  }
 #endif
 
   void submit(const request_t &request) {
     require(!busy() && request.work && request.detector_caps && request.token && request.width && request.width <= 5120u && request.band_height && request.band_height <= 5120u, "Native glyph request requires current OCR Work and detector caps");
+    register_interop();
     D3D11_BUFFER_DESC work_desc {};
     ComPtr<ID3D11Device> owner;
     request.work->GetDesc(&work_desc);

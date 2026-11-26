@@ -2700,6 +2700,9 @@ TEST(DirectGlyphHardware, ScoresTheLinesThatFitOneBatchUnderOneFence) {
     }
   });
   ASSERT_TRUE(transport.prepare(device.Get(), context.Get(), SUNSHINE_SHADERS_DIR, primary, {execution, nullptr}, error, true)) << error;
+  // Live preparation runs on the background build worker, which must leave CUDA's D3D11
+  // registration to the thread that submits (and draws).
+  EXPECT_FALSE(transport.native_interop_registered_for_tests());
 
   // Light strokes with dark outlines on a textured backdrop, in three caption rows.
   constexpr UINT width = 2560, height = 160, scale = 4, advance = 6 * scale;
@@ -2806,6 +2809,7 @@ TEST(DirectGlyphHardware, ScoresTheLinesThatFitOneBatchUnderOneFence) {
     context->UpdateSubresource(caps.Get(), 0, nullptr, covers.data(), 0, 0);
     const auto submitted = transport.native_fences_for_tests();
     ASSERT_EQ(transport.try_submit(job, error), glyph::submit_status_e::accepted) << error;
+    EXPECT_TRUE(transport.native_interop_registered_for_tests());
     glyph::result_t result;
     glyph::poll_status_e status;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);

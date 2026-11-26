@@ -503,6 +503,16 @@ namespace models::host_sbs_direct_glyph_gpu {
       }
     }
 
+    /** Register the native score buffers with CUDA ahead of the first submission, on the thread
+     *  that draws. A failure is left to that submission, which retries and reports it. */
+    void register_interop_early() noexcept {
+      if (!palette_ || failed_) return;
+      try {
+        palette_->register_interop();
+      } catch (const std::exception &) {
+      }
+    }
+
     submit_status_e try_submit(const request_t &request, std::string &error) {
       if ((!transport_ && !palette_) || failed_) {
         error = "Direct glyph score transport is unavailable";
@@ -568,6 +578,10 @@ namespace models::host_sbs_direct_glyph_gpu {
 #ifdef SUNSHINE_TESTS
     [[nodiscard]] std::uint64_t native_fences_for_tests() const noexcept {
       return palette_ ? palette_->submitted_fences_for_tests() : 0u;
+    }
+
+    [[nodiscard]] bool native_interop_registered_for_tests() const noexcept {
+      return palette_ && palette_->interop_registered_for_tests();
     }
 #endif
 

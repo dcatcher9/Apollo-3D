@@ -1991,6 +1991,11 @@ optional OCR preparation has completed or enable it later in an already construc
 Live Direct Glyph and shared-warp device programs prepare on the tracked per-device
 background build worker before its future becomes ready; the encode thread only adopts the
 prepared handles.
+That worker makes no immediate-context calls, and CUDA's D3D11 registration reaches the
+immediate context, so every registration runs on the thread that draws with the device: the
+estimator and Direct Glyph register as the first estimate starts depth (Direct Glyph, at the
+latest, at its first score submission). A Direct Glyph registration on the worker beside the
+drawing thread deadlocked inside NVIDIA's driver and froze the stream and its stop.
 The Windows build embeds Direct Glyph, completed shared UI, and Game 3D text-game bytecode.
 The producer inventory and shader compiler policy are shared with the runtime. The device build
 authenticates the installed source closures before selecting bytecode keyed to those closures.

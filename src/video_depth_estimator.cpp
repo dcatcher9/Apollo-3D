@@ -9708,6 +9708,11 @@ namespace models {
           );
           return {};
         }
+        // Direct Glyph's score buffers register on this drawing thread as depth starts, like the
+        // tensors above, so the first caption does not pay for it.
+        if (subtitle_direct_glyph_enabled) {
+          subtitle_direct_glyph_score.register_interop_early();
+        }
       }
 
       // Keep the pending transfer and crop constants through its publication and Dump copies.
