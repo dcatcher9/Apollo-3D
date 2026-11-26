@@ -1,6 +1,7 @@
 <script setup>
 import { computed, inject } from 'vue'
 import Host3dSubtitleApps from './Host3dSubtitleApps.vue'
+import { virtualDisplayStatus } from '../../virtual-display-status'
 
 const $t = inject('i18n').t
 
@@ -17,17 +18,7 @@ const props = defineProps({
 
 const resumeWindows = [0, 30000, 60000, 300000]
 
-const driverState = computed(() => {
-  const states = {
-    0: { label: 'Ready', tone: 'success', detail: 'Virtual display is available for private sessions.' },
-    1: { label: 'Checking', tone: 'neutral', detail: 'Sunshine 3D has not reported virtual display health yet.' },
-    '-1': { label: 'Not initialized', tone: 'warning', detail: 'The virtual display driver is not initialized.' },
-    '-2': { label: 'Update required', tone: 'danger', detail: 'The installed virtual display driver is incompatible.' },
-    '-3': { label: 'Needs attention', tone: 'danger', detail: 'The virtual display watchdog is not responding.' },
-  }
-
-  return states[String(props.vdisplay)] || states[1]
-})
+const driverState = computed(() => virtualDisplayStatus(props.vdisplay))
 
 const webAccess = computed(() => {
   const access = props.config.origin_web_ui_allowed || 'lan'

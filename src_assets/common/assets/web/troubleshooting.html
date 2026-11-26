@@ -428,6 +428,7 @@
     import Navbar from './Navbar.vue'
     import { startVisibilityPolling } from './visibility-polling'
     import { ApiError, apiFetch, getJson, postJson } from './api'
+    import { virtualDisplayStatus } from './virtual-display-status'
 
     const app = createApp({
       components: {
@@ -454,17 +455,10 @@
           return Boolean(this.currentApp);
         },
         virtualDisplayReady() {
-          return String(this.vdisplayStatus) === '0';
+          return virtualDisplayStatus(this.vdisplayStatus).tone === 'success';
         },
         virtualDisplayLabel() {
-          const states = {
-            0: 'Ready',
-            1: 'Checking',
-            '-1': 'Not initialized',
-            '-2': 'Update required',
-            '-3': 'Needs attention',
-          };
-          return states[String(this.vdisplayStatus)] || 'Unknown';
+          return virtualDisplayStatus(this.vdisplayStatus).label;
         },
         actualLogs() {
           if (!this.logFilter) return this.logs;

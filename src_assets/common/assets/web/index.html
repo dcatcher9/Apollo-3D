@@ -194,6 +194,7 @@
   import LocalMonitorSession from './LocalMonitorSession.vue'
   import { startVisibilityPolling } from './visibility-polling'
   import { getJson, getText, postJson } from './api'
+  import { virtualDisplayStatus } from './virtual-display-status'
 
   const app = createApp({
     components: { Navbar, Game3dSetup, LocalMonitorSession },
@@ -279,11 +280,8 @@
         if (!this.config) {
           return { status: this.loading ? 'Checking' : 'Automatic', tone: 'neutral', description: 'Sunshine 3D will use the best available display for the device.' }
         }
-        const status = Number(this.config.vdisplayStatus)
-        if (status === 0) return { status: 'Ready', tone: 'success', description: 'A private display is available when an app requests it.' }
-        if (status === 1 || Number.isNaN(status)) return { status: 'Checking', tone: 'neutral', description: 'Sunshine 3D is checking the private-display driver.' }
-        if (status === -2) return { status: 'Update needed', tone: 'warning', description: 'Update the private-display driver before using isolated streaming sessions.' }
-        return { status: 'Needs attention', tone: 'danger', description: 'The private-display driver is not available.' }
+        const { label, tone, detail } = virtualDisplayStatus(this.config.vdisplayStatus)
+        return { status: label, tone, description: detail }
       },
       overallState() {
         if (this.apiError || this.latestFatal) return { label: 'Needs attention', tone: 'danger' }

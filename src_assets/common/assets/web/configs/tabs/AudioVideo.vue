@@ -4,6 +4,7 @@ import AdapterNameSelector from './audiovideo/AdapterNameSelector.vue'
 import DisplayOutputSelector from './audiovideo/DisplayOutputSelector.vue'
 import DisplayModesSettings from "./audiovideo/DisplayModesSettings.vue";
 import Checkbox from "../../Checkbox.vue";
+import { virtualDisplayStatus } from '../../virtual-display-status'
 
 const $t = inject('i18n').t;
 
@@ -12,15 +13,7 @@ const props = defineProps([
   'vdisplay',
 ])
 
-const sudovdaStatus = {
-  '1': 'Unknown',
-  '0': 'Ready',
-  '-1': 'Uninitialized',
-  '-2': 'Version Incompatible',
-  '-3': 'Watchdog Failed'
-}
-
-const currentDriverStatus = computed(() => sudovdaStatus[props.vdisplay])
+const driverState = computed(() => virtualDisplayStatus(props.vdisplay))
 
 const config = ref(props.config)
 
@@ -75,10 +68,10 @@ const config = ref(props.config)
     />
 
     <!-- SudoVDA Driver Status -->
-    <div class="alert" :class="[vdisplay ? 'alert-warning' : 'alert-success']">
-      <i class="fa-solid fa-xl fa-circle-info"></i> SudoVDA Driver status: {{currentDriverStatus}}
+    <div class="alert" :class="[driverState.tone === 'success' ? 'alert-success' : 'alert-warning']">
+      <i class="fa-solid fa-xl fa-circle-info"></i> SudoVDA Driver status: {{driverState.label}}
     </div>
-    <div class="form-text" v-if="vdisplay">Please ensure SudoVDA driver is installed to the latest version and enabled properly.</div>
+    <div class="form-text" v-if="driverState.tone !== 'success'">Please ensure SudoVDA driver is installed to the latest version and enabled properly.</div>
 
   </div>
 </template>
