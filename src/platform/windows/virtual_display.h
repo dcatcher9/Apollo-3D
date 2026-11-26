@@ -128,18 +128,13 @@ namespace VDISPLAY {
   display_identity_query_t queryDisplayIdentity(const LUID &adapterLuid, uint32_t targetId);
   display_identity_query_t queryVirtualDisplayIdentity(
     const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
-    std::wstring_view devicePath,
-    std::wstring_view displayName
+    std::wstring_view devicePath
   );
   display_identity_state_e queryVirtualDisplayRetirementState(
     const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
-    std::wstring_view devicePath,
-    std::wstring_view displayName
+    std::wstring_view devicePath
   );
-  bool isDriverRemovalSafeAfterDesktopDetach(
-    bool requiresActivePathAbsence,
-    display_identity_state_e activePathState
-  );
+  bool isDriverRemovalSafeAfterDesktopDetach(display_identity_state_e activePathState);
   desktop_detach_result_t deactivateVirtualDisplay(
     const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
     std::wstring_view devicePath,
@@ -239,8 +234,7 @@ namespace VDISPLAY {
   bool retiredColorSurvivorReactivatesForTest();
   bool detachRetryCapturesColorContractForTest(
     bool hasContext,
-    bool contextHasCapturedColorContract,
-    bool pathNeedsDetach
+    bool contextHasCapturedColorContract
   );
   bool activeColorModeObservationSettledForTest(
     bool userStatesMatch,

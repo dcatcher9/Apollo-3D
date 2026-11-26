@@ -1219,7 +1219,6 @@ namespace {
 
   struct detach_snapshot_t {
     detach_plan_e state {detach_plan_e::ambiguous_identity};
-    UINT32 set_display_config_awareness_flags = 0;
     std::vector<DISPLAYCONFIG_PATH_INFO> paths;
     std::vector<DISPLAYCONFIG_MODE_INFO> modes;
     std::vector<survivor_color_state_t> survivor_color_states;
@@ -1320,8 +1319,6 @@ namespace {
     detach_snapshot_t snapshot;
     snapshot.paths = std::move(topology.paths);
     snapshot.modes = std::move(topology.modes);
-    snapshot.set_display_config_awareness_flags =
-      SDC_VIRTUAL_MODE_AWARE | SDC_VIRTUAL_REFRESH_RATE_AWARE;
     const auto &candidate_device_paths = topology.device_paths;
 
     const auto plan = prepareVirtualDisplayDetachPaths(
@@ -1366,7 +1363,6 @@ namespace {
   // Whether SetDisplayConfig would be given the same configuration for both snapshots.
   bool sameDetachConfiguration(const detach_snapshot_t &left, const detach_snapshot_t &right) {
     return left.state == right.state &&
-           left.set_display_config_awareness_flags == right.set_display_config_awareness_flags &&
            left.paths.size() == right.paths.size() && left.modes.size() == right.modes.size() &&
            std::memcmp(left.paths.data(), right.paths.data(), left.paths.size() * sizeof(DISPLAYCONFIG_PATH_INFO)) == 0 &&
            std::memcmp(left.modes.data(), right.modes.data(), left.modes.size() * sizeof(DISPLAYCONFIG_MODE_INFO)) == 0;
@@ -1452,11 +1448,9 @@ struct desktop_detach_context_t {
 namespace {
   bool detachRetryMustCaptureColorContract(
     bool has_context,
-    bool context_has_captured_color_contract,
-    bool path_needs_detach
+    bool context_has_captured_color_contract
   ) {
-    return path_needs_detach &&
-           (!has_context || !context_has_captured_color_contract);
+    return !has_context || !context_has_captured_color_contract;
   }
 }
 
@@ -1469,8 +1463,10 @@ desktop_detach_result_t deactivateVirtualDisplay(
 ) {
   const auto deadline =
     std::chrono::steady_clock::now() + std::max(timeout, std::chrono::milliseconds::zero());
-  constexpr UINT32 validate_flags = SDC_VALIDATE | SDC_USE_SUPPLIED_DISPLAY_CONFIG;
-  constexpr UINT32 apply_flags = SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG;
+  // The detach snapshot is queried virtual-mode and virtual-refresh aware.
+  constexpr UINT32 awareness_flags = SDC_VIRTUAL_MODE_AWARE | SDC_VIRTUAL_REFRESH_RATE_AWARE;
+  constexpr UINT32 validate_flags = SDC_VALIDATE | SDC_USE_SUPPLIED_DISPLAY_CONFIG | awareness_flags;
+  constexpr UINT32 apply_flags = SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | awareness_flags;
   const bool continuing_transition = static_cast<bool>(context);
   const auto build_snapshot = [&]() -> std::optional<detach_snapshot_t> {
     auto topology = queryDetachTopology(api);
@@ -1482,7 +1478,7 @@ desktop_detach_result_t deactivateVirtualDisplay(
       supplied.paths.data(),
       static_cast<UINT32>(supplied.modes.size()),
       supplied.modes.data(),
-      flags | supplied.set_display_config_awareness_flags
+      flags
     );
   };
   auto snapshot = build_snapshot();
@@ -1534,8 +1530,7 @@ desktop_detach_result_t deactivateVirtualDisplay(
 
       const bool capture_color_contract = detachRetryMustCaptureColorContract(
         static_cast<bool>(context),
-        context && context->has_captured_color_contract,
-        true
+        context && context->has_captured_color_contract
       );
       if (!context) {
         context = std::make_shared<desktop_detach_context_t>();
@@ -1681,8 +1676,7 @@ display_identity_query_t queryDisplayIdentity(const LUID &adapterLuid, uint32_t 
 
 display_identity_query_t queryVirtualDisplayIdentity(
   const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
-  std::wstring_view devicePath,
-  std::wstring_view /*displayName*/
+  std::wstring_view devicePath
 ) {
   std::vector<DISPLAYCONFIG_PATH_INFO> paths;
   std::vector<DISPLAYCONFIG_MODE_INFO> modes;
@@ -1728,10 +1722,9 @@ display_identity_query_t queryVirtualDisplayIdentity(
 
 display_identity_state_e queryVirtualDisplayRetirementState(
   const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
-  std::wstring_view devicePath,
-  std::wstring_view displayName
+  std::wstring_view devicePath
 ) {
-  const auto active = queryVirtualDisplayIdentity(identity, devicePath, displayName);
+  const auto active = queryVirtualDisplayIdentity(identity, devicePath);
   if (active.state != display_identity_state_e::absent) {
     return active.state;
   }
@@ -1778,15 +1771,11 @@ display_identity_state_e queryVirtualDisplayRetirementState(
   return classifyVirtualDisplayRetirementState(identity, devicePath, candidates);
 }
 
-bool isDriverRemovalSafeAfterDesktopDetach(
-  bool requiresActivePathAbsence,
-  display_identity_state_e activePathState
-) {
-  // The only intentional exception is a sole active virtual output: no surviving desktop or
-  // multi-monitor shell state exists to preserve. Every normal detach requires an authoritative
-  // exact active-topology absence observation immediately before driver removal.
-  return !requiresActivePathAbsence ||
-         activePathState == display_identity_state_e::absent;
+bool isDriverRemovalSafeAfterDesktopDetach(display_identity_state_e activePathState) {
+  // Every detach requires an authoritative exact active-topology absence observation
+  // immediately before driver removal. Callers skip this check only for a sole active virtual
+  // output, which has no surviving desktop or multi-monitor shell state to preserve.
+  return activePathState == display_identity_state_e::absent;
 }
 
 #ifdef SUNSHINE_TESTS
@@ -2014,13 +2003,11 @@ bool retiredColorSurvivorReactivatesForTest() {
 
 bool detachRetryCapturesColorContractForTest(
   bool hasContext,
-  bool contextHasCapturedColorContract,
-  bool pathNeedsDetach
+  bool contextHasCapturedColorContract
 ) {
   return detachRetryMustCaptureColorContract(
     hasContext,
-    contextHasCapturedColorContract,
-    pathNeedsDetach
+    contextHasCapturedColorContract
   );
 }
 

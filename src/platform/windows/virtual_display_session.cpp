@@ -38,10 +38,10 @@ namespace VDISPLAY {
         .pause = [](std::wstring_view path, auto &retained, std::wstring_view sink) { return platf::primary_display::pause(path, retained, sink); },
         .reactivate = [](const auto &retained, bool exclusive) { return platf::primary_display::reactivate(retained, exclusive); },
         .query = [](const creation_result_t &binding) {
-          return binding.identity ? queryVirtualDisplayIdentity(*binding.identity, binding.device_path, binding.display_name) : display_identity_query_t {};
+          return binding.identity ? queryVirtualDisplayIdentity(*binding.identity, binding.device_path) : display_identity_query_t {};
         },
         .query_retirement = [](const creation_result_t &binding) {
-          return binding.identity ? queryVirtualDisplayRetirementState(*binding.identity, binding.device_path, binding.display_name) : display_identity_state_e::indeterminate;
+          return binding.identity ? queryVirtualDisplayRetirementState(*binding.identity, binding.device_path) : display_identity_state_e::indeterminate;
         },
         .remove = [](const GUID &guid) { return removeVirtualDisplay(guid); },
         .now = []() { return std::chrono::steady_clock::now(); },
@@ -401,10 +401,10 @@ namespace VDISPLAY {
           return deactivateVirtualDisplay(*binding.identity, binding.device_path, timeout, context);
         },
         .query_active = [](const creation_result_t &binding) {
-          return queryVirtualDisplayIdentity(*binding.identity, binding.device_path, binding.display_name).state;
+          return queryVirtualDisplayIdentity(*binding.identity, binding.device_path).state;
         },
         .query_retirement = [](const creation_result_t &binding) {
-          return queryVirtualDisplayRetirementState(*binding.identity, binding.device_path, binding.display_name);
+          return queryVirtualDisplayRetirementState(*binding.identity, binding.device_path);
         },
         .remove = [](const GUID &guid) {
           return removeVirtualDisplay(guid);
@@ -494,7 +494,7 @@ namespace VDISPLAY {
           }
           if (requires_active_path_absence) {
             const auto active = io.query_active(retiring.binding());
-            if (!isDriverRemovalSafeAfterDesktopDetach(true, active)) {
+            if (!isDriverRemovalSafeAfterDesktopDetach(active)) {
               requires_active_path_absence = false;
               detach_context.reset();
               return false;

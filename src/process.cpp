@@ -1098,13 +1098,8 @@ namespace proc {
             // Windows can reattach the exact target between bounded worker slices. A sole
             // remaining desktop intentionally bypasses this two-phase detach check.
             const auto &binding = retired.binding();
-            const auto active_state = VDISPLAY::queryVirtualDisplayIdentity(
-                                        *binding.identity,
-                                        binding.device_path,
-                                        binding.display_name
-            )
-                                        .state;
-            if (!VDISPLAY::isDriverRemovalSafeAfterDesktopDetach(true, active_state)) {
+            const auto active_state = VDISPLAY::queryVirtualDisplayIdentity(*binding.identity, binding.device_path).state;
+            if (!VDISPLAY::isDriverRemovalSafeAfterDesktopDetach(active_state)) {
               retired_virtual_display_remove_ready = false;
               retired_virtual_display_requires_device_absence = false;
               retired_virtual_display_detach_context.reset();
@@ -1122,18 +1117,9 @@ namespace proc {
           }
           if (retired_virtual_display_requires_device_absence) {
             // Desktop detach removes the active path before the driver monitor disappears.
-            return VDISPLAY::queryVirtualDisplayRetirementState(
-              *binding.identity,
-              binding.device_path,
-              binding.display_name
-            );
+            return VDISPLAY::queryVirtualDisplayRetirementState(*binding.identity, binding.device_path);
           }
-          return VDISPLAY::queryVirtualDisplayIdentity(
-                   *binding.identity,
-                   binding.device_path,
-                   binding.display_name
-          )
-            .state;
+          return VDISPLAY::queryVirtualDisplayIdentity(*binding.identity, binding.device_path).state;
         },
       };
       retired_virtual_display_session->begin_retirement(

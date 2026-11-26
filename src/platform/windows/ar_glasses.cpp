@@ -359,11 +359,7 @@ namespace ar_glasses {
       }
       // A retained source is deliberately absent from the active desktop before Remove runs.
       // Keep the shared identity barrier until Windows also retires its available driver target.
-      return VDISPLAY::queryVirtualDisplayRetirementState(
-        *retiring.identity,
-        retiring.device_path,
-        retiring.display_name
-      );
+      return VDISPLAY::queryVirtualDisplayRetirementState(*retiring.identity, retiring.device_path);
     }
 
     bool wait_for_local_virtual_display_retirement_impl(

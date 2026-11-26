@@ -1219,15 +1219,10 @@ TEST(VirtualDisplayColorRestore, RetiresOnlyAStablyMissingSurvivorAndRearmsOnRet
 }
 
 TEST(VirtualDisplayColorRestore, RetryCapturesOnlyWhenADetachNeedsAnUncapturedContract) {
-  EXPECT_FALSE(VDISPLAY::detachRetryCapturesColorContractForTest(false, false, false));
-  EXPECT_FALSE(VDISPLAY::detachRetryCapturesColorContractForTest(false, true, false));
-  EXPECT_FALSE(VDISPLAY::detachRetryCapturesColorContractForTest(true, false, false));
-  EXPECT_FALSE(VDISPLAY::detachRetryCapturesColorContractForTest(true, true, false));
-
-  EXPECT_TRUE(VDISPLAY::detachRetryCapturesColorContractForTest(false, false, true));
-  EXPECT_TRUE(VDISPLAY::detachRetryCapturesColorContractForTest(false, true, true));
-  EXPECT_TRUE(VDISPLAY::detachRetryCapturesColorContractForTest(true, false, true));
-  EXPECT_FALSE(VDISPLAY::detachRetryCapturesColorContractForTest(true, true, true));
+  EXPECT_TRUE(VDISPLAY::detachRetryCapturesColorContractForTest(false, false));
+  EXPECT_TRUE(VDISPLAY::detachRetryCapturesColorContractForTest(false, true));
+  EXPECT_TRUE(VDISPLAY::detachRetryCapturesColorContractForTest(true, false));
+  EXPECT_FALSE(VDISPLAY::detachRetryCapturesColorContractForTest(true, true));
 }
 
 TEST(VirtualDisplayColorRestore, RetryAddsNewSurvivorsWithoutOverwritingOriginalContracts) {
@@ -1268,25 +1263,9 @@ TEST(VirtualDisplayRetirement, CoalescingKeepsTheAdapterAsPartOfTheTargetIdentit
 }
 
 TEST(VirtualDisplayRetirement, DriverRemovalRequiresAuthoritativeActivePathAbsence) {
-  EXPECT_TRUE(VDISPLAY::isDriverRemovalSafeAfterDesktopDetach(
-    true,
-    VDISPLAY::display_identity_state_e::absent
-  ));
-  EXPECT_FALSE(VDISPLAY::isDriverRemovalSafeAfterDesktopDetach(
-    true,
-    VDISPLAY::display_identity_state_e::present
-  ));
-  EXPECT_FALSE(VDISPLAY::isDriverRemovalSafeAfterDesktopDetach(
-    true,
-    VDISPLAY::display_identity_state_e::indeterminate
-  ));
-
-  // The sole-output path cannot be detached while retaining a desktop and is the only explicit
-  // exception. There is no surviving multi-monitor Explorer state to protect in that case.
-  EXPECT_TRUE(VDISPLAY::isDriverRemovalSafeAfterDesktopDetach(
-    false,
-    VDISPLAY::display_identity_state_e::present
-  ));
+  EXPECT_TRUE(VDISPLAY::isDriverRemovalSafeAfterDesktopDetach(VDISPLAY::display_identity_state_e::absent));
+  EXPECT_FALSE(VDISPLAY::isDriverRemovalSafeAfterDesktopDetach(VDISPLAY::display_identity_state_e::present));
+  EXPECT_FALSE(VDISPLAY::isDriverRemovalSafeAfterDesktopDetach(VDISPLAY::display_identity_state_e::indeterminate));
 }
 
 TEST(VirtualDisplaySessionMode, SavesOnlyResolutionAndRefreshWithoutApplyingAnything) {
