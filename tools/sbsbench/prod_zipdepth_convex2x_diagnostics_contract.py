@@ -4,9 +4,6 @@ Schema 2 describes the active single-high model: one high-resolution ``pixel_val
 one same-size ``refined_depth`` output. The harness writes one input snapshot and reuses the
 ordinary ``raw_<frame>.f32`` artifact as the output record; the estimator's retired guidance and
 refined snapshot fields are compatibility aliases to those two primary GPU resources.
-
-Schema 1 remains readable so already-captured two-input/two-output evidence can still be audited.
-New manifests always follow the schema advertised by their harness sidecar.
 """
 
 from __future__ import annotations
@@ -32,9 +29,6 @@ HARNESS_CONTRACT_SCHEMA = 22
 SIDECAR_SCHEMA = 2
 MANIFEST_SCHEMA = 2
 BINDING = "schema-38-results-to-schema-22-prod-zipdepth-convex2x-diagnostics-v2"
-LEGACY_SIDECAR_SCHEMA = 1
-LEGACY_MANIFEST_SCHEMA = 1
-LEGACY_BINDING = "schema-37-results-to-schema-22-prod-zipdepth-convex2x-diagnostics-v1"
 RESULTS_META_KEY = "prod_zipdepth_convex2x_diagnostic_artifacts"
 SIDECAR_FILENAME = "prod_zipdepth_convex2x_diagnostics.json"
 
@@ -44,12 +38,6 @@ _ACTIVE_AUTHORITY = {
     "live_geometry_source": "refined_depth",
     "scoring_depth_source": "raw_<frame-id>.f32",
     "coarse_dav2_public_binding": False,
-}
-_LEGACY_AUTHORITY = {
-    "role": "diagnostic-only-stage-1",
-    "live_geometry_authority": False,
-    "scoring_depth_authority": False,
-    "coarse_dav2_remains_live_authority": True,
 }
 _ACTIVE_ALIASES = {
     "model_input_primary": "model_input_snapshot",
@@ -63,16 +51,8 @@ _ACTIVE_FILES = {
     "input": ("model_input_", re.compile(r"model_input_(\d{5,})\.f32")),
     "output": ("raw_", re.compile(r"raw_(\d{5,})\.f32")),
 }
-_LEGACY_FILES = {
-    "raw": ("raw_", re.compile(r"raw_(\d{5,})\.f32")),
-    "guidance": ("zip_model_input_", re.compile(r"zip_model_input_(\d{5,})\.f32")),
-    "refined": ("refined_", re.compile(r"refined_(\d{5,})\.f32")),
-}
 _TENSOR_KEYS = {
     "width", "height", "tensor_shape_nchw", "dtype", "layout", "file_pattern", "stage",
-}
-_LEGACY_COARSE_KEYS = {
-    "width", "height", "tensor_shape_nchw", "raw_file_pattern", "role",
 }
 _COMPOSITE_KEYS = {
     "model", "onnx_sha256", "embedded_dav2_onnx_sha256",
@@ -86,10 +66,10 @@ _RAW_PROVENANCE_KEYS = {
 _CONTRACT_RAW_PROVENANCE_KEYS = {
     "schema", *_RAW_PROVENANCE_KEYS, "raw_width", "raw_height",
 }
-_COMMON_MANIFEST_KEYS = {
+_MANIFEST_KEYS = {
     "schema", "binding", "evaluator_schema", "harness_contract_schema",
     "contract_json_sha256", "sidecar", "sidecar_sha256", "authority", "frame_count",
-    "tensor_shapes", "composite_runtime_provenance", "frames",
+    "tensor_shapes", "composite_runtime_provenance", "embedded_dav2_provenance", "frames",
 }
 _FILE_RECORD_KEYS = {"file", "bytes", "sha256"}
 _TENSOR_SHAPE_KEYS = {"width", "height", "channels"}
@@ -240,35 +220,6 @@ def _validate_active_sidecar(sidecar: Dict[str, Any]) -> Dict[str, Any]:
     return sidecar
 
 
-def _validate_legacy_sidecar(sidecar: Dict[str, Any]) -> Dict[str, Any]:
-    expected_keys = {
-        "schema", "authority", "same_frame_binding", "frame_count", "coarse_dav2",
-        "zip_model_input", "refined_depth", "composite_runtime_provenance",
-        "raw_dav2_provenance",
-    }
-    if set(sidecar) != expected_keys or sidecar.get("authority") != _LEGACY_AUTHORITY:
-        raise ValueError("fused diagnostic sidecar has missing or unknown schema-1 semantics")
-    coarse = sidecar.get("coarse_dav2")
-    if (not isinstance(coarse, dict) or set(coarse) != _LEGACY_COARSE_KEYS or
-            not _positive_int(coarse.get("width")) or
-            not _positive_int(coarse.get("height")) or
-            coarse.get("tensor_shape_nchw") !=
-            [1, 1, coarse.get("height"), coarse.get("width")] or
-            coarse.get("raw_file_pattern") != "raw_<frame-id>.f32" or
-            coarse.get("role") != "existing-prod-raw-output-and-only-live-depth-authority"):
-        raise ValueError("fused diagnostic sidecar has invalid legacy coarse DAV2 semantics")
-    width, height = 2 * coarse["width"], 2 * coarse["height"]
-    _validate_tensor(
-        sidecar.get("zip_model_input"), width, height, 3,
-        "zip_model_input_<frame-id>.f32",
-        "matched native RGB independently preprocessed on the exact 2x grid")
-    _validate_tensor(
-        sidecar.get("refined_depth"), width, height, 1,
-        "refined_<frame-id>.f32",
-        "fused ONNX refined_depth after frozen ZipDepth convex2x")
-    return sidecar
-
-
 def _validated_sidecar(
         path: Path,
         expected_frame_count: Optional[int] = None,
@@ -276,66 +227,35 @@ def _validated_sidecar(
 ) -> Dict[str, Any]:
     sidecar = _json_object(path, "fused diagnostic sidecar")
     schema = sidecar.get("schema")
-    if (type(schema) is not int or
-            schema not in {SIDECAR_SCHEMA, LEGACY_SIDECAR_SCHEMA} or
+    if (type(schema) is not int or schema != SIDECAR_SCHEMA or
             sidecar.get("same_frame_binding") !=
             "completed_frame_id-to-decimal-frame-id" or
             not _positive_int(sidecar.get("frame_count")) or
             (expected_frame_count is not None and
              sidecar.get("frame_count") != expected_frame_count)):
         raise ValueError("fused diagnostic sidecar has missing or unknown schema semantics")
-    if schema == SIDECAR_SCHEMA:
-        _validate_active_sidecar(sidecar)
-        embedded = _validate_raw_provenance(sidecar.get("embedded_dav2_provenance"))
-    else:
-        _validate_legacy_sidecar(sidecar)
-        embedded = _validate_raw_provenance(sidecar.get("raw_dav2_provenance"))
+    _validate_active_sidecar(sidecar)
+    embedded = _validate_raw_provenance(sidecar.get("embedded_dav2_provenance"))
     composite = _validate_composite_provenance(sidecar.get("composite_runtime_provenance"))
     if (embedded["onnx_sha256"] != composite["embedded_dav2_onnx_sha256"] or
             embedded["preprocess_source_closure_sha256"] !=
             composite["guidance_preprocess_source_closure_sha256"]):
         raise ValueError("fused diagnostic sidecar embedded/composite provenance is inconsistent")
-    if schema == SIDECAR_SCHEMA:
-        _validate_active_grid_calibration(
-            sidecar["model_input"]["width"], sidecar["model_input"]["height"], embedded)
+    _validate_active_grid_calibration(
+        sidecar["model_input"]["width"], sidecar["model_input"]["height"], embedded)
     _validate_expected_runtime(composite, expected_composite_runtime)
     return sidecar
 
 
 def _tensor_shapes(sidecar: Mapping[str, Any]) -> Dict[str, Dict[str, int]]:
-    if sidecar["schema"] == SIDECAR_SCHEMA:
-        model_input = sidecar["model_input"]
-        output = sidecar["refined_depth"]
-        return {
-            "input": {
-                "width": model_input["width"], "height": model_input["height"], "channels": 3,
-            },
-            "output": {"width": output["width"], "height": output["height"], "channels": 1},
-        }
-    coarse = sidecar["coarse_dav2"]
-    guidance = sidecar["zip_model_input"]
-    refined = sidecar["refined_depth"]
+    model_input = sidecar["model_input"]
+    output = sidecar["refined_depth"]
     return {
-        "raw": {"width": coarse["width"], "height": coarse["height"], "channels": 1},
-        "guidance": {"width": guidance["width"], "height": guidance["height"], "channels": 3},
-        "refined": {"width": refined["width"], "height": refined["height"], "channels": 1},
+        "input": {
+            "width": model_input["width"], "height": model_input["height"], "channels": 3,
+        },
+        "output": {"width": output["width"], "height": output["height"], "channels": 1},
     }
-
-
-def _schema_properties(schema: int):
-    if type(schema) is not int:
-        raise ValueError("fused diagnostic artifact manifest has unsupported schema")
-    if schema == MANIFEST_SCHEMA:
-        return {
-            "binding": BINDING, "authority": _ACTIVE_AUTHORITY,
-            "files": _ACTIVE_FILES, "provenance_key": "embedded_dav2_provenance",
-        }
-    if schema == LEGACY_MANIFEST_SCHEMA:
-        return {
-            "binding": LEGACY_BINDING, "authority": _LEGACY_AUTHORITY,
-            "files": _LEGACY_FILES, "provenance_key": "raw_dav2_provenance",
-        }
-    raise ValueError("fused diagnostic artifact manifest has unsupported schema")
 
 
 def _expected_bytes(shape: Mapping[str, int]) -> int:
@@ -375,29 +295,19 @@ def _actual_tensor_files(artifact_dir: Path, prefix: str, pattern: re.Pattern[st
     return files
 
 
-def _validate_shapes(schema: int, shapes: Any, files: Mapping[str, Any]) -> None:
-    if not isinstance(shapes, dict) or set(shapes) != set(files):
+def _validate_shapes(shapes: Any) -> None:
+    if not isinstance(shapes, dict) or set(shapes) != set(_ACTIVE_FILES):
         raise ValueError("fused diagnostic artifact manifest has invalid tensor shapes")
-    channels = ({"input": 3, "output": 1} if schema == MANIFEST_SCHEMA else
-                {"raw": 1, "guidance": 3, "refined": 1})
-    for kind, expected_channels in channels.items():
+    for kind, expected_channels in {"input": 3, "output": 1}.items():
         shape = shapes.get(kind)
         if (not isinstance(shape, dict) or set(shape) != _TENSOR_SHAPE_KEYS or
                 not _positive_int(shape.get("width")) or
                 not _positive_int(shape.get("height")) or
                 shape.get("channels") != expected_channels):
             raise ValueError("fused diagnostic artifact manifest has invalid tensor shapes")
-    if schema == MANIFEST_SCHEMA:
-        if (shapes["input"]["width"] != shapes["output"]["width"] or
-                shapes["input"]["height"] != shapes["output"]["height"]):
-            raise ValueError("fused diagnostic artifact violates the single-high shape identity")
-    elif (shapes["guidance"]["width"] != 2 * shapes["raw"]["width"] or
-          shapes["guidance"]["height"] != 2 * shapes["raw"]["height"] or
-          shapes["refined"] != {
-              "width": shapes["guidance"]["width"],
-              "height": shapes["guidance"]["height"], "channels": 1,
-          }):
-        raise ValueError("fused diagnostic artifact violates the legacy exact 2x relation")
+    if (shapes["input"]["width"] != shapes["output"]["width"] or
+            shapes["input"]["height"] != shapes["output"]["height"]):
+        raise ValueError("fused diagnostic artifact violates the single-high shape identity")
 
 
 def validate_manifest(
@@ -405,42 +315,39 @@ def validate_manifest(
         expected_frame_ids: Optional[Iterable[int]] = None,
         expected_composite_runtime: Optional[Mapping[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """Validate active or historical manifest semantics and return ordered frame records."""
+    """Validate manifest semantics and return ordered frame records."""
 
     if not isinstance(manifest, dict):
         raise ValueError("fused diagnostic artifact manifest must be an object")
     schema = manifest.get("schema")
-    props = _schema_properties(schema)
-    provenance_key = props["provenance_key"]
-    expected_keys = _COMMON_MANIFEST_KEYS | {provenance_key}
-    if (set(manifest) != expected_keys or manifest.get("binding") != props["binding"] or
+    if type(schema) is not int or schema != MANIFEST_SCHEMA:
+        raise ValueError("fused diagnostic artifact manifest has unsupported schema")
+    if (set(manifest) != _MANIFEST_KEYS or manifest.get("binding") != BINDING or
             manifest.get("evaluator_schema") != EVALUATOR_SCHEMA or
             manifest.get("harness_contract_schema") != HARNESS_CONTRACT_SCHEMA or
             manifest.get("sidecar") != SIDECAR_FILENAME or
             not _valid_sha(manifest.get("contract_json_sha256")) or
             not _valid_sha(manifest.get("sidecar_sha256")) or
-            manifest.get("authority") != props["authority"] or
+            manifest.get("authority") != _ACTIVE_AUTHORITY or
             not _positive_int(manifest.get("frame_count"))):
         raise ValueError("fused diagnostic artifact manifest has missing or unknown semantics")
     shapes = manifest.get("tensor_shapes")
-    files = props["files"]
-    _validate_shapes(schema, shapes, files)
+    _validate_shapes(shapes)
     composite = _validate_composite_provenance(manifest.get("composite_runtime_provenance"))
-    embedded = _validate_raw_provenance(manifest.get(provenance_key))
+    embedded = _validate_raw_provenance(manifest.get("embedded_dav2_provenance"))
     if (embedded["onnx_sha256"] != composite["embedded_dav2_onnx_sha256"] or
             embedded["preprocess_source_closure_sha256"] !=
             composite["guidance_preprocess_source_closure_sha256"]):
         raise ValueError("fused diagnostic artifact manifest provenance is inconsistent")
-    if schema == MANIFEST_SCHEMA:
-        _validate_active_grid_calibration(
-            shapes["input"]["width"], shapes["input"]["height"], embedded)
+    _validate_active_grid_calibration(
+        shapes["input"]["width"], shapes["input"]["height"], embedded)
     _validate_expected_runtime(composite, expected_composite_runtime)
 
     frames = manifest.get("frames")
     if not isinstance(frames, list) or len(frames) != manifest["frame_count"]:
         raise ValueError("fused diagnostic artifact manifest has invalid frame coverage")
     observed_ids: List[int] = []
-    expected_frame_keys = {"frame_id", *files}
+    expected_frame_keys = {"frame_id", *_ACTIVE_FILES}
     for index, row in enumerate(frames):
         if (not isinstance(row, dict) or set(row) != expected_frame_keys or
                 not isinstance(row.get("frame_id"), str) or
@@ -450,7 +357,7 @@ def validate_manifest(
         if row["frame_id"] != f"{frame_id:05d}":
             raise ValueError(f"fused diagnostic artifact manifest frame {index} is non-canonical")
         observed_ids.append(frame_id)
-        for kind, (prefix, _) in files.items():
+        for kind, (prefix, _) in _ACTIVE_FILES.items():
             record = row.get(kind)
             expected_file = f"{prefix}{row['frame_id']}.f32"
             if (not isinstance(record, dict) or set(record) != _FILE_RECORD_KEYS or
@@ -467,33 +374,14 @@ def validate_manifest(
     return frames
 
 
-def _expected_contract_reference(schema: int, sidecar_sha: str, frame_count: int) -> Dict[str, Any]:
-    common = {
-        "schema": schema, "sidecar": SIDECAR_FILENAME, "sidecar_sha256": sidecar_sha,
-        "frame_count": frame_count,
-    }
-    if schema == SIDECAR_SCHEMA:
-        return {
-            **common,
-            "input_file_pattern": "model_input_<frame-id>.f32",
-            "output_file_pattern": "raw_<frame-id>.f32",
-            "authority": "single-high-input-output-boundary",
-        }
+def _expected_contract_reference(sidecar_sha: str, frame_count: int) -> Dict[str, Any]:
     return {
-        **common,
-        "refined_file_pattern": "refined_<frame-id>.f32",
-        "guidance_file_pattern": "zip_model_input_<frame-id>.f32",
-        "authority": "diagnostic-only-never-live-or-scoring-depth",
+        "schema": SIDECAR_SCHEMA, "sidecar": SIDECAR_FILENAME, "sidecar_sha256": sidecar_sha,
+        "frame_count": frame_count,
+        "input_file_pattern": "model_input_<frame-id>.f32",
+        "output_file_pattern": "raw_<frame-id>.f32",
+        "authority": "single-high-input-output-boundary",
     }
-
-
-def _sidecar_provenance(sidecar: Mapping[str, Any]) -> Mapping[str, Any]:
-    return (sidecar["embedded_dav2_provenance"] if sidecar["schema"] == SIDECAR_SCHEMA else
-            sidecar["raw_dav2_provenance"])
-
-
-def _raw_shape_for_contract(schema: int, shapes: Mapping[str, Mapping[str, int]]):
-    return shapes["output"] if schema == MANIFEST_SCHEMA else shapes["raw"]
 
 
 def authenticate_manifest_files(
@@ -505,8 +393,6 @@ def authenticate_manifest_files(
     """Revalidate the sidecar and rehash every declared finite model-boundary tensor."""
 
     frames = validate_manifest(manifest, expected_frame_ids, expected_composite_runtime)
-    schema = manifest["schema"]
-    props = _schema_properties(schema)
     contract_path = artifact_dir / "contract.json"
     contract = _json_object(contract_path, "fused diagnostic harness contract")
     if contract.get("schema") != HARNESS_CONTRACT_SCHEMA:
@@ -518,47 +404,43 @@ def authenticate_manifest_files(
     sidecar_path = artifact_dir / SIDECAR_FILENAME
     sidecar = _validated_sidecar(
         sidecar_path, manifest["frame_count"], expected_composite_runtime)
-    if sidecar["schema"] != schema:
-        raise ValueError("fused diagnostic sidecar/manifest schema mismatch")
     if file_sha256(sidecar_path) != manifest["sidecar_sha256"]:
         raise ValueError("fused diagnostic sidecar changed after evaluator capture")
     expected_reference = _expected_contract_reference(
-        schema, manifest["sidecar_sha256"], manifest["frame_count"])
+        manifest["sidecar_sha256"], manifest["frame_count"])
     if contract.get("prod_zipdepth_convex2x_diagnostics") != expected_reference:
         raise ValueError("fused diagnostic harness contract has an invalid sidecar reference")
-    shape = _raw_shape_for_contract(schema, manifest["tensor_shapes"])
+    shape = manifest["tensor_shapes"]["output"]
     contract_raw = _validate_contract_raw_provenance(
         contract.get("raw_model_provenance"), shape["width"], shape["height"],
-        _sidecar_provenance(sidecar))
-    provenance_key = props["provenance_key"]
+        sidecar["embedded_dav2_provenance"])
     if (manifest["tensor_shapes"] != _tensor_shapes(sidecar) or
             manifest["authority"] != sidecar["authority"] or
             manifest["composite_runtime_provenance"] !=
             sidecar["composite_runtime_provenance"] or
-            manifest[provenance_key] != _sidecar_provenance(sidecar) or
+            manifest["embedded_dav2_provenance"] != sidecar["embedded_dav2_provenance"] or
             contract_raw["onnx_sha256"] !=
             manifest["composite_runtime_provenance"]["embedded_dav2_onnx_sha256"]):
         raise ValueError("fused diagnostic manifest disagrees with its harness sidecar")
 
     declared = {
         kind: {row[kind]["file"] for row in frames}
-        for kind in props["files"]
+        for kind in _ACTIVE_FILES
     }
-    if schema == MANIFEST_SCHEMA:
-        stale_split = sorted({
-            path.name
-            for prefix in ("zip_model_input_", "refined_")
-            for path in artifact_dir.glob(prefix + "*.f32")
-        })
-        if stale_split:
-            raise ValueError(
-                "fused diagnostic schema-2 artifact directory contains stale split tensors: "
-                + ", ".join(stale_split))
-    for kind, (prefix, pattern) in props["files"].items():
+    stale_split = sorted({
+        path.name
+        for prefix in ("zip_model_input_", "refined_")
+        for path in artifact_dir.glob(prefix + "*.f32")
+    })
+    if stale_split:
+        raise ValueError(
+            "fused diagnostic schema-2 artifact directory contains stale split tensors: "
+            + ", ".join(stale_split))
+    for kind, (prefix, pattern) in _ACTIVE_FILES.items():
         if _actual_tensor_files(artifact_dir, prefix, pattern) != declared[kind]:
             raise ValueError(f"fused diagnostic {kind} files disagree with their run manifest")
     for row in frames:
-        for kind in props["files"]:
+        for kind in _ACTIVE_FILES:
             observed = _inspect_float_file(
                 artifact_dir / row[kind]["file"],
                 _expected_bytes(manifest["tensor_shapes"][kind]))
@@ -573,7 +455,7 @@ def build_manifest(
         frame_ids: Iterable[int],
         expected_composite_runtime: Mapping[str, Any],
 ) -> Dict[str, Any]:
-    """Build and immediately self-verify one clip's active or historical manifest."""
+    """Build and immediately self-verify one clip's manifest."""
 
     ids = _canonical_frame_ids(frame_ids)
     contract_path = artifact_dir / "contract.json"
@@ -584,17 +466,14 @@ def build_manifest(
             f"{contract.get('schema')!r}")
     sidecar_path = artifact_dir / SIDECAR_FILENAME
     sidecar = _validated_sidecar(sidecar_path, len(ids), expected_composite_runtime)
-    schema = sidecar["schema"]
-    props = _schema_properties(schema)
     sidecar_sha = file_sha256(sidecar_path)
     if contract.get("prod_zipdepth_convex2x_diagnostics") != _expected_contract_reference(
-            schema, sidecar_sha, len(ids)):
+            sidecar_sha, len(ids)):
         raise ValueError("fused diagnostic harness contract has an invalid sidecar reference")
     shapes = _tensor_shapes(sidecar)
-    shape = _raw_shape_for_contract(schema, shapes)
     _validate_contract_raw_provenance(
-        contract.get("raw_model_provenance"), shape["width"], shape["height"],
-        _sidecar_provenance(sidecar))
+        contract.get("raw_model_provenance"), shapes["output"]["width"],
+        shapes["output"]["height"], sidecar["embedded_dav2_provenance"])
     frames = []
     for frame_id in ids:
         identity = f"{frame_id:05d}"
@@ -603,13 +482,12 @@ def build_manifest(
             **{
                 kind: _inspect_float_file(
                     artifact_dir / f"{prefix}{identity}.f32", _expected_bytes(shapes[kind]))
-                for kind, (prefix, _) in props["files"].items()
+                for kind, (prefix, _) in _ACTIVE_FILES.items()
             },
         })
-    provenance_key = props["provenance_key"]
     manifest: Dict[str, Any] = {
-        "schema": schema,
-        "binding": props["binding"],
+        "schema": MANIFEST_SCHEMA,
+        "binding": BINDING,
         "evaluator_schema": EVALUATOR_SCHEMA,
         "harness_contract_schema": HARNESS_CONTRACT_SCHEMA,
         "contract_json_sha256": file_sha256(contract_path),
@@ -619,7 +497,7 @@ def build_manifest(
         "frame_count": len(ids),
         "tensor_shapes": shapes,
         "composite_runtime_provenance": sidecar["composite_runtime_provenance"],
-        provenance_key: _sidecar_provenance(sidecar),
+        "embedded_dav2_provenance": sidecar["embedded_dav2_provenance"],
         "frames": frames,
     }
     authenticate_manifest_files(artifact_dir, manifest, ids, expected_composite_runtime)
@@ -627,8 +505,7 @@ def build_manifest(
 
 
 __all__ = [
-    "BINDING", "EVALUATOR_SCHEMA", "HARNESS_CONTRACT_SCHEMA", "LEGACY_BINDING",
-    "LEGACY_MANIFEST_SCHEMA", "LEGACY_SIDECAR_SCHEMA", "MANIFEST_SCHEMA", "RESULTS_META_KEY",
-    "SIDECAR_FILENAME", "SIDECAR_SCHEMA", "authenticate_manifest_files", "build_manifest",
-    "file_sha256", "validate_manifest",
+    "BINDING", "EVALUATOR_SCHEMA", "HARNESS_CONTRACT_SCHEMA", "MANIFEST_SCHEMA",
+    "RESULTS_META_KEY", "SIDECAR_FILENAME", "SIDECAR_SCHEMA", "authenticate_manifest_files",
+    "build_manifest", "file_sha256", "validate_manifest",
 ]

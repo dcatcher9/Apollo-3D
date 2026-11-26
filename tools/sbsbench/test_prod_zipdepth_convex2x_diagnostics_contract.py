@@ -141,65 +141,6 @@ class ProdZipDepthConvex2xDiagnosticContractTests(unittest.TestCase):
             (root / f"raw_{identity}.f32").write_bytes(
                 np.linspace(0.0, 1.0, 8, dtype="<f4").tobytes())
 
-    def make_legacy_artifacts(self, root: Path, frame_ids=(1,)) -> None:
-        legacy_provenance = dict(self.embedded_provenance)
-        legacy_provenance["raw_width"] = 2
-        legacy_provenance["raw_height"] = 1
-        sidecar = {
-            "schema": diagnostics.LEGACY_SIDECAR_SCHEMA,
-            "authority": {
-                "role": "diagnostic-only-stage-1",
-                "live_geometry_authority": False,
-                "scoring_depth_authority": False,
-                "coarse_dav2_remains_live_authority": True,
-            },
-            "same_frame_binding": "completed_frame_id-to-decimal-frame-id",
-            "frame_count": len(frame_ids),
-            "coarse_dav2": {
-                "width": 2, "height": 1, "tensor_shape_nchw": [1, 1, 1, 2],
-                "raw_file_pattern": "raw_<frame-id>.f32",
-                "role": "existing-prod-raw-output-and-only-live-depth-authority",
-            },
-            "zip_model_input": {
-                "width": 4, "height": 2, "tensor_shape_nchw": [1, 3, 2, 4],
-                "dtype": "float32-le", "layout": "nchw-contiguous",
-                "file_pattern": "zip_model_input_<frame-id>.f32",
-                "stage": "matched native RGB independently preprocessed on the exact 2x grid",
-            },
-            "refined_depth": {
-                "width": 4, "height": 2, "tensor_shape_nchw": [1, 1, 2, 4],
-                "dtype": "float32-le", "layout": "nchw-contiguous",
-                "file_pattern": "refined_<frame-id>.f32",
-                "stage": "fused ONNX refined_depth after frozen ZipDepth convex2x",
-            },
-            "composite_runtime_provenance": dict(self.composite_sidecar),
-            "raw_dav2_provenance": dict(self.sidecar_embedded_provenance),
-        }
-        sidecar_path = root / diagnostics.SIDECAR_FILENAME
-        self.write_json(sidecar_path, sidecar)
-        contract = {
-            "schema": diagnostics.HARNESS_CONTRACT_SCHEMA,
-            "raw_model_provenance": legacy_provenance,
-            "prod_zipdepth_convex2x_diagnostics": {
-                "schema": diagnostics.LEGACY_SIDECAR_SCHEMA,
-                "sidecar": diagnostics.SIDECAR_FILENAME,
-                "sidecar_sha256": diagnostics.file_sha256(sidecar_path),
-                "frame_count": len(frame_ids),
-                "refined_file_pattern": "refined_<frame-id>.f32",
-                "guidance_file_pattern": "zip_model_input_<frame-id>.f32",
-                "authority": "diagnostic-only-never-live-or-scoring-depth",
-            },
-        }
-        self.write_json(root / "contract.json", contract)
-        for frame_id in frame_ids:
-            identity = f"{frame_id:05d}"
-            (root / f"raw_{identity}.f32").write_bytes(
-                np.asarray([frame_id, frame_id + 0.25], dtype="<f4").tobytes())
-            (root / f"zip_model_input_{identity}.f32").write_bytes(
-                np.linspace(-1.0, 1.0, 24, dtype="<f4").tobytes())
-            (root / f"refined_{identity}.f32").write_bytes(
-                np.linspace(0.0, 1.0, 8, dtype="<f4").tobytes())
-
     def test_builds_single_high_manifest_without_duplicate_output_artifact(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -216,18 +157,6 @@ class ProdZipDepthConvex2xDiagnosticContractTests(unittest.TestCase):
                 diagnostics.authenticate_manifest_files(
                     root, manifest, [1, 2], self.expected_runtime()),
                 manifest["frames"])
-
-    def test_historical_schema_one_artifacts_remain_authenticatable(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            self.make_legacy_artifacts(root)
-            manifest = diagnostics.build_manifest(root, [1], self.expected_runtime())
-
-            self.assertEqual(manifest["schema"], diagnostics.LEGACY_MANIFEST_SCHEMA)
-            self.assertEqual(manifest["binding"], diagnostics.LEGACY_BINDING)
-            self.assertEqual(set(manifest["tensor_shapes"]), {"raw", "guidance", "refined"})
-            diagnostics.authenticate_manifest_files(
-                root, manifest, [1], self.expected_runtime())
 
     def test_production_schema_two_gate_accepts_only_24_calibrated_high_profiles(self):
         calibration = diagnostics.coordinate_contract.MODEL_CALIBRATIONS[0]

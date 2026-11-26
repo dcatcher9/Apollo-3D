@@ -661,9 +661,7 @@ class EvalContractTests(unittest.TestCase):
                     "run",
                 )
 
-            stale = {
-                "schema": run_eval.convex2x_diagnostics.LEGACY_MANIFEST_SCHEMA,
-            }
+            stale = {"schema": 1}
             with self.assertRaisesRegex(ValueError, "schema-2 fused diagnostics"):
                 run_eval.authenticate_whole_clip_model_artifacts(
                     {

@@ -235,10 +235,8 @@ def scored_artifact_digests(directory):
     numeric_fixed = {"warp_map_shape.json"}
     frame_pattern = re.compile(
         r"^(?:sbs|depth|structure|parallax|warp_map|warp_mask)_\d+\.(?:png|f32)$")
-    # Schema 2 has one high input (model_input_) and reuses raw_ as its sole output. Retain the
-    # schema-1 names so historical two-binding evidence remains content-authenticated.
-    diagnostic_frame_pattern = re.compile(
-        r"^(?:raw|model_input|refined|zip_model_input)_\d+\.f32$")
+    # Schema 2 has one high input (model_input_) and reuses raw_ as its sole output.
+    diagnostic_frame_pattern = re.compile(r"^(?:raw|model_input)_\d+\.f32$")
     diagnostic_sidecar_present = os.path.isfile(
         os.path.join(directory, convex2x_diagnostics.SIDECAR_FILENAME))
     paths = sorted(
