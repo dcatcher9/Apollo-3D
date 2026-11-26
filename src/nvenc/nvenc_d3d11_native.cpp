@@ -14,7 +14,7 @@
 namespace nvenc {
 
   nvenc_d3d11_native::nvenc_d3d11_native(ID3D11Device *d3d_device, bool allow_p010_chroma_store):
-      nvenc_d3d11(NV_ENC_DEVICE_TYPE_DIRECTX),
+      nvenc_d3d11(),
       d3d_device(d3d_device),
       allow_p010_chroma_store(allow_p010_chroma_store) {
     device = d3d_device;

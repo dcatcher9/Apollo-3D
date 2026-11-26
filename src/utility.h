@@ -21,81 +21,15 @@
 
 #include <nlohmann/json.hpp>
 
-#define KITTY_WHILE_LOOP(x, y, z) \
-  { \
-    x; \
-    while (y) z \
-  }
-
-template<typename T>
-struct argument_type;
-
-template<typename T, typename U>
-struct argument_type<T(U)> {
-  typedef U type;
-};
-
-#define KITTY_USING_MOVE_T(move_t, t, init_val, z) \
-  class move_t { \
-  public: \
-    using element_type = typename argument_type<void(t)>::type; \
-\
-    move_t(): \
-        el {init_val} { \
-    } \
-    template<class... Args> \
-    move_t(Args &&...args): \
-        el {std::forward<Args>(args)...} { \
-    } \
-    move_t(const move_t &) = delete; \
-\
-    move_t(move_t &&other) noexcept: \
-        el {std::move(other.el)} { \
-      other.el = element_type {init_val}; \
-    } \
-\
-    move_t &operator=(const move_t &) = delete; \
-\
-    move_t &operator=(move_t &&other) { \
-      std::swap(el, other.el); \
-      return *this; \
-    } \
-    element_type *operator->() { \
-      return &el; \
-    } \
-    const element_type *operator->() const { \
-      return &el; \
-    } \
-\
-    inline element_type release() { \
-      element_type val = std::move(el); \
-      el = element_type {init_val}; \
-      return val; \
-    } \
-\
-    ~move_t() z \
-\
-      element_type el; \
-  }
-
 #define KITTY_DECL_CONSTR(x) \
   x(x &&) noexcept = default; \
   x &operator=(x &&) noexcept = default; \
   x();
 
-#define KITTY_DEFAULT_CONSTR_MOVE(x) \
-  x(x &&) noexcept = default; \
-  x &operator=(x &&) noexcept = default;
-
 #define KITTY_DEFAULT_CONSTR_MOVE_THROW(x) \
   x(x &&) = default; \
   x &operator=(x &&) = default; \
   x() = default;
-
-#define KITTY_DEFAULT_CONSTR(x) \
-  KITTY_DEFAULT_CONSTR_MOVE(x) \
-  x(const x &) noexcept = default; \
-  x &operator=(const x &) = default;
 
 #define TUPLE_2D(a, b, expr) \
   decltype(expr) a##_##b = expr; \
@@ -106,18 +40,6 @@ struct argument_type<T(U)> {
   auto &a##_##b = expr; \
   auto &a = std::get<0>(a##_##b); \
   auto &b = std::get<1>(a##_##b)
-
-#define TUPLE_3D(a, b, c, expr) \
-  decltype(expr) a##_##b##_##c = expr; \
-  auto &a = std::get<0>(a##_##b##_##c); \
-  auto &b = std::get<1>(a##_##b##_##c); \
-  auto &c = std::get<2>(a##_##b##_##c)
-
-#define TUPLE_3D_REF(a, b, c, expr) \
-  auto &a##_##b##_##c = expr; \
-  auto &a = std::get<0>(a##_##b##_##c); \
-  auto &b = std::get<1>(a##_##b##_##c); \
-  auto &c = std::get<2>(a##_##b##_##c)
 
 #define TUPLE_EL(a, b, expr) \
   decltype(expr) a##_ = expr; \
@@ -152,13 +74,6 @@ namespace util {
 
   template<bool V, class X, class Y>
   using either_t = typename __either<V, X, Y>::type;
-
-  template<class... Ts>
-  struct overloaded: Ts... {
-    using Ts::operator()...;
-  };
-  template<class... Ts>
-  overloaded(Ts...) -> overloaded<Ts...>;
 
   template<class T>
   class FailGuard {
@@ -468,28 +383,6 @@ namespace util {
     return default_value;
   }
 
-  template<class T>
-  class hash {
-  public:
-    using value_type = T;
-
-    std::size_t operator()(const value_type &value) const {
-      const auto *p = reinterpret_cast<const char *>(&value);
-
-      return std::hash<std::string_view> {}(std::string_view {p, sizeof(value_type)});
-    }
-  };
-
-  template<class T>
-  auto enm(const T &val) -> const std::underlying_type_t<T> & {
-    return *reinterpret_cast<const std::underlying_type_t<T> *>(&val);
-  }
-
-  template<class T>
-  auto enm(T &val) -> std::underlying_type_t<T> & {
-    return *reinterpret_cast<std::underlying_type_t<T> *>(&val);
-  }
-
   inline std::int64_t from_chars(const char *begin, const char *end) {
     if (begin == end) {
       return 0;
@@ -727,14 +620,6 @@ namespace util {
     return (bool) y;
   }
 
-  template<class P>
-  using shared_t = std::shared_ptr<typename P::element_type>;
-
-  template<class P, class T>
-  shared_t<P> make_shared(T *pointer) {
-    return shared_t<P>(reinterpret_cast<typename P::pointer>(pointer), typename P::deleter_type());
-  }
-
   template<class T>
   constexpr bool is_pointer_v =
     instantiation_of_v<std::unique_ptr, T> ||
@@ -842,15 +727,6 @@ namespace util {
     std::unique_ptr<T[]> _buf;
   };
 
-  template<class T>
-  T either(std::optional<T> &&l, T &&r) {
-    if (l) {
-      return std::move(*l);
-    }
-
-    return std::forward<T>(r);
-  }
-
   template<class ReturnType, class... Args>
   struct Function {
     typedef ReturnType (*type)(Args...);
@@ -877,17 +753,6 @@ namespace util {
     free(p);
   }
 
-  template<class T, class ReturnType, ReturnType (**function)(T *)>
-  void dynamic(T *p) {
-    (*function)(p);
-  }
-
-  template<class T, void (**function)(T *)>
-  using dyn_safe_ptr = safe_ptr<T, dynamic<T, void, function>>;
-
-  template<class T, class ReturnType, ReturnType (**function)(T *)>
-  using dyn_safe_ptr_v2 = safe_ptr<T, dynamic<T, ReturnType, function>>;
-
   template<class T>
   using c_ptr = safe_ptr<T, c_free<T>>;
 
@@ -900,15 +765,6 @@ namespace util {
   std::string_view view(const T &data) {
     return std::string_view((const char *) &data, sizeof(T));
   }
-
-  struct point_t {
-    double x;
-    double y;
-
-    friend std::ostream &operator<<(std::ostream &os, const point_t &p) {
-      return (os << "Point(x: " << p.x << ", y: " << p.y << ")");
-    }
-  };
 
   namespace endian {
     template<class T = void>

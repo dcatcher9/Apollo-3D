@@ -24,11 +24,11 @@ namespace nvenc {
 
   /**
    * @brief Abstract Direct3D11 NVENC encoder.
-   *        Encapsulates common code used by native and interop implementations.
+   *        Encapsulates the Direct3D11 device code of the native implementation.
    */
   class nvenc_d3d11: public nvenc_base {
   public:
-    explicit nvenc_d3d11(NV_ENC_DEVICE_TYPE device_type);
+    nvenc_d3d11();
     ~nvenc_d3d11();
 
     /**

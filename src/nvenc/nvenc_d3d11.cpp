@@ -11,8 +11,8 @@
 
 namespace nvenc {
 
-  nvenc_d3d11::nvenc_d3d11(NV_ENC_DEVICE_TYPE device_type):
-      nvenc_base(device_type) {
+  nvenc_d3d11::nvenc_d3d11():
+      nvenc_base(NV_ENC_DEVICE_TYPE_DIRECTX) {
     owned_async_event.reset(CreateEvent(nullptr, FALSE, FALSE, nullptr));
     async_event_handle = owned_async_event.get();
   }
@@ -97,7 +97,7 @@ namespace nvenc {
     } else {
       result.status = nvenc_event_wait_status::failed;
     }
-    if (result.status != nvenc_event_wait_status::ready && device && device_type == NV_ENC_DEVICE_TYPE_DIRECTX) {
+    if (result.status != nvenc_event_wait_status::ready && device) {
       result.device_removed_reason = static_cast<int32_t>(static_cast<ID3D11Device *>(device)->GetDeviceRemovedReason());
     }
     return result;
@@ -142,7 +142,7 @@ namespace nvenc {
       return;
     }
     producer_marks[slot] = 0;
-    if (producer_fence_unavailable || !device || device_type != NV_ENC_DEVICE_TYPE_DIRECTX) {
+    if (producer_fence_unavailable || !device) {
       return;
     }
     if (!producer_fence) {
@@ -172,7 +172,7 @@ namespace nvenc {
   }
 
   std::string nvenc_d3d11::video_memory_diagnostics() const {
-    if (!device || device_type != NV_ENC_DEVICE_TYPE_DIRECTX) {
+    if (!device) {
       return {};
     }
     // DXGI adapter queries are free-threaded; the device is only asked for its adapter.

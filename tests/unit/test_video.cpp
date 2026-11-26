@@ -8918,9 +8918,7 @@ namespace {
 
   class nvenc_d3d11_async_event_probe final: public nvenc::nvenc_d3d11 {
   public:
-    nvenc_d3d11_async_event_probe():
-        nvenc_d3d11(NV_ENC_DEVICE_TYPE_DIRECTX) {
-    }
+    nvenc_d3d11_async_event_probe() = default;
 
     ID3D11Texture2D *get_input_texture() override {
       return nullptr;

@@ -423,8 +423,8 @@ namespace platf {
     std::optional<null_t> null;
   };
 
-  struct encode_device_t {
-    virtual ~encode_device_t() = default;
+  struct nvenc_encode_device_t {
+    virtual ~nvenc_encode_device_t() = default;
 
     virtual int convert(platf::img_t &img) = 0;
 
@@ -511,12 +511,9 @@ namespace platf {
       return false;
     }
 
-    video::sunshine_colorspace_t colorspace;
-  };
-
-  struct nvenc_encode_device_t: encode_device_t {
     virtual nvenc::nvenc_base &encoder() = 0;
 
+    video::sunshine_colorspace_t colorspace;
     std::optional<SS_HDR_METADATA> hdr_metadata;
   };
 
