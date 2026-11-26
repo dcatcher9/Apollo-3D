@@ -809,8 +809,7 @@ namespace config {
 
     // Explicit SBS controls shared by live V2 and offline conversion. The removed legacy
     // evaluator's analysis/geometry keys (profiles, zero plane, subject shaping, adaptive pop,
-    // EMA levers, dynamic depth sizing) no longer exist. The joint-plane switch selects one
-    // authenticated experimental policy; defaults retain V2 calibration. Reload resets options.
+    // EMA levers, dynamic depth sizing) no longer exist. Reload resets options.
     video.sbs = {};
     bool_f(vars, "sbs_reshade", video.sbs.reshade);
     double_between_f(vars, "sbs_3d_pop_strength", video.sbs.pop_strength, {0.25, 2.0});
