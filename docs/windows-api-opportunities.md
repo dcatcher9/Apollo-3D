@@ -86,7 +86,7 @@ deliberate.
 
 `host_sbs_v2_source_resolution_rejection_reason()` gates a source resolution by **fitting a depth
 tensor shape and then authenticating that shape**, not by checking the resolution directly
-([src/host_sbs_resolution.h:151](../src/host_sbs_resolution.h:151)). The fitter takes the source
+([src/host_sbs_resolution.h](../src/host_sbs_resolution.h)). The fitter takes the source
 aspect ratio plus a fixed short side and snaps to a patch-14 grid.
 
 The practical consequences:
@@ -94,7 +94,8 @@ The practical consequences:
 - The gate is effectively **on aspect ratio, not absolute size**. A 640×360 region and a 1920×1080
   region fit the same tensor and both pass.
 - The only size limits are upper bounds: long side ≤ 5120 and area ≤ 5120×2160
-  ([src/host_sbs_resolution.h:19](../src/host_sbs_resolution.h:19)). There is no lower bound beyond
+  (`host_sbs_v2_max_source_long_side` and `host_sbs_v2_max_source_pixels` in
+  [src/host_sbs_resolution.h](../src/host_sbs_resolution.h)). There is no lower bound beyond
   non-empty.
 - An **arbitrary** aspect ratio (an ROI of, say, 1123×649) will usually fit a shape that is not in
   the shipped calibration and cannot be submitted directly.
@@ -239,8 +240,9 @@ Two consequences for an implementer:
   safeguard, not a presentation feature.
 
 Note that the render pass already excludes subtitles with `-sn`
-([offline_sbs_worker.cpp:3991](../src/offline_sbs_worker.cpp:3991), alongside `-an` and `-dn`). That
-is correct and should stay — it just has no effect on subtitles that are already pixels.
+(`build_whole_clip_encode_command()` in [offline_sbs_worker.cpp](../src/offline_sbs_worker.cpp),
+alongside `-an` and `-dn`). That is correct and should stay — it just has no effect on subtitles
+that are already pixels.
 
 #### W2a. Burned-in subtitles — adaptive constant-plane mask
 
@@ -552,9 +554,9 @@ default theme recommendation.
 **Approach.** The Galaxy XR client has eye tracking. Send gaze to the host and drive a per-region QP
 map so the foveal region is encoded at higher quality than the periphery.
 
-**Current state.** No QP map exists. The encoder configures spatial AQ only — `enableAQ` at
-[nvenc_base.cpp:369](../src/nvenc/nvenc_base.cpp:369) — and lookahead is explicitly disabled at
-[nvenc_base.cpp:363](../src/nvenc/nvenc_base.cpp:363). NVENC exposes a QP delta map / emphasis map
+**Current state.** No QP map exists. The encoder configures spatial AQ only — `enableAQ` in
+`nvenc_base::create_encoder()` ([nvenc_base.cpp](../src/nvenc/nvenc_base.cpp)) — and the same
+function explicitly disables lookahead. NVENC exposes a QP delta map / emphasis map
 for this purpose; wiring it is new but localised work in a file the project already owns.
 
 **Value.** At 3840×1080 SBS and roughly 200 Mbps, foveation can either recover substantial bitrate or
@@ -578,8 +580,8 @@ multiple independently placed surfaces.
 
 **Route A: per-window capture.** The infrastructure largely exists. `display_wgc.cpp` already uses
 Windows.Graphics.Capture through `IGraphicsCaptureItemInterop`, but only ever calls
-`CreateForMonitor` ([display_wgc.cpp:140](../src/platform/windows/display_wgc.cpp:140), also
-[:78](../src/platform/windows/display_wgc.cpp:78)). `CreateForWindow` on that same factory is
+`CreateForMonitor` (`wgc_capture_t::init()` and `test_wgc_capture()` in
+[display_wgc.cpp](../src/platform/windows/display_wgc.cpp)). `CreateForWindow` on that same factory is
 single-window capture, and it works even when the window is occluded.
 
 **Route B: multiple virtual displays.** The project already ships a virtual display driver. Letting
@@ -751,9 +753,9 @@ These were identified during analysis but not confirmed against code. Verify bef
 
 1. **Does the offline conversion output declare container-level stereo metadata** (for example
    Matroska `StereoMode`)? Note the mux pass strips metadata with `-map_metadata -1`
-   ([offline_sbs_worker.cpp:5028](../src/offline_sbs_worker.cpp:5028)), so any stereo signalling must
-   be added deliberately. This is worth settling independently of subtitles: it is what lets any
-   player recognise the file as side-by-side rather than as a very wide 2D video.
+   (`build_mux_command()` in [offline_sbs_worker.cpp](../src/offline_sbs_worker.cpp)), so any stereo
+   signalling must be added deliberately. This is worth settling independently of subtitles: it is
+   what lets any player recognise the file as side-by-side rather than as a very wide 2D video.
 2. **How often do sources carry a soft subtitle stream alongside burned-in subtitles?** The
    disposition safeguard in [W2](#w2-subtitles-burned-into-the-picture) is unconditional either way;
    this question now measures how often it prevents disposition-driven broken auto-rendering.
@@ -771,32 +773,33 @@ These were identified during analysis but not confirmed against code. Verify bef
 
 ## Verified code locations referenced here
 
-Every location below was confirmed against the current working tree on August 12, 2026.
+Every location below was confirmed against the working tree on November 25, 2026. Locations are
+named by function or symbol, not by line, because these files change often: search the linked file
+for the name.
 
 | Location | What it shows |
 |---|---|
-| [display_vram.cpp:514](../src/platform/windows/display_vram.cpp:514) | `convert()` — where the SBS depth pipeline runs |
-| [display_vram.cpp:4456](../src/platform/windows/display_vram.cpp:4456) | `display_ddup_vram_t::snapshot()` — capture, and where the cursor is blended |
-| [display_vram.cpp:4518](../src/platform/windows/display_vram.cpp:4518) | `blend_mouse_cursor_flag` |
-| [display_vram.cpp:4813](../src/platform/windows/display_vram.cpp:4813) | cursor blend state — the pre-warp blend (W1) |
-| [display_vram.cpp:4975](../src/platform/windows/display_vram.cpp:4975) | `display_wgc_vram_t::snapshot()` — the second capture backend |
-| [video_dom_probe/main.cpp:425](../tools/video_dom_probe/main.cpp:425) | bounded Chromium IA2 tree scan and exact `tag:video` discovery |
-| [video_dom_probe/main.cpp:1249](../tools/video_dom_probe/main.cpp:1249) | cached machine-mode validation, coalesced WinEvent audits, and strict heartbeat protocol |
-| [video_dom_client.cpp:317](../src/platform/windows/video_dom_client.cpp:317) | supervised unelevated helper lifecycle and atomic host snapshots |
-| [video_dom_client.cpp:668](../src/platform/windows/video_dom_client.cpp:668) | one-pixel-tolerant physical-screen to capture mapping |
-| [foreground_window_region.cpp:138](../src/platform/windows/foreground_window_region.cpp:138) | fail-closed foreground root/client admission policy |
-| [foreground_window_region.cpp:319](../src/platform/windows/foreground_window_region.cpp:319) | exact-geometry continuity and content-time authorization |
-| [foreground_window_region.cpp:399](../src/platform/windows/foreground_window_region.cpp:399) | same-output raw-screen-coordinate mapping without partial clipping |
-| [display_vram.cpp:1995](../src/platform/windows/display_vram.cpp:1995) | matched color slot owns optional generic window-region provenance |
-| [display_vram.cpp:2299](../src/platform/windows/display_vram.cpp:2299) | causally-prior Chromium geometry is validated and bound to the matched frame |
-| [display_vram.cpp:2427](../src/platform/windows/display_vram.cpp:2427) | lower-priority foreground-client capture and mapping |
-| [sbs_debug_dump.cpp:3144](../src/platform/windows/sbs_debug_dump.cpp:3144) | Dump 3D fails closed on invalid optional window-region evidence |
-| [display_wgc.cpp:140](../src/platform/windows/display_wgc.cpp:140) | WGC uses `CreateForMonitor` only; `CreateForWindow` unused (W9) |
-| [nvenc_base.cpp:363](../src/nvenc/nvenc_base.cpp:363) | lookahead explicitly disabled |
-| [nvenc_base.cpp:369](../src/nvenc/nvenc_base.cpp:369) | `enableAQ` is the only adaptive quantisation; no QP map (W8) |
-| [offline_sbs_worker.cpp:3991](../src/offline_sbs_worker.cpp:3991) | render pass drops subtitle streams with `-sn`; no effect on burned-in text (W2) |
-| [offline_sbs_worker.cpp:5018](../src/offline_sbs_worker.cpp:5018) | mux pass copies subtitle streams with `-map 1:s?` and clears their dispositions (W2) |
-| [host_sbs_resolution.h:19](../src/host_sbs_resolution.h:19) | source upper bounds: 5120 long side, 5120×2160 area |
-| [host_sbs_resolution.h:151](../src/host_sbs_resolution.h:151) | the gate authenticates the **fitted tensor shape**, so it is aspect-driven |
-| [DATASETS.md:18](../tools/sbsbench/DATASETS.md:18) | `flat_page` targets flat-content depth hallucination |
-| [make_synth_clips.py:8](../tools/sbsbench/make_synth_clips.py:8) | `flat_page` expects near-flat depth from the model |
+| `d3d_base_encode_device::convert()` in [display_vram.cpp](../src/platform/windows/display_vram.cpp) | conversion entry; the Host SBS depth pipeline runs from here |
+| `display_ddup_vram_t::snapshot()` in [display_vram.cpp](../src/platform/windows/display_vram.cpp) | Desktop Duplication capture, and where the cursor is blended |
+| `blend_mouse_cursor` in `display_ddup_vram_t::snapshot()` | whether that capture blends the cursor |
+| `display_ddup_vram_t::cursor_alpha` and `cursor_xor` in [display.h](../src/platform/windows/display.h) | cursor blend state — the pre-warp blend (W1) |
+| `display_wgc_vram_t::snapshot()` in [display_vram.cpp](../src/platform/windows/display_vram.cpp) | the second capture backend |
+| `scan_foreground()` in [video_dom_probe/main.cpp](../tools/video_dom_probe/main.cpp) | bounded Chromium IA2 tree scan and exact `tag:video` discovery |
+| `refresh_cached_selection()` and `run_machine()` in [video_dom_probe/main.cpp](../tools/video_dom_probe/main.cpp) | cached machine-mode validation, coalesced WinEvent audits, and strict heartbeat protocol |
+| `controller_t` in [video_dom_client.cpp](../src/platform/windows/video_dom_client.cpp) | supervised unelevated helper lifecycle and atomic host snapshots |
+| `map_screen_rect_to_capture()` in [video_dom_client.cpp](../src/platform/windows/video_dom_client.cpp) | one-pixel-tolerant physical-screen to capture mapping |
+| `detail::classify()` in [foreground_window_region.cpp](../src/platform/windows/foreground_window_region.cpp) | fail-closed foreground root/client admission policy |
+| `continuity_tracker_t::update()` and `usable_for_content()` in [foreground_window_region.cpp](../src/platform/windows/foreground_window_region.cpp) | exact-geometry continuity and content-time authorization |
+| `map_to_capture()` in [foreground_window_region.cpp](../src/platform/windows/foreground_window_region.cpp) | same-output raw-screen-coordinate mapping without partial clipping |
+| `matched_frame_attribution_t::window_region` in [display_vram.cpp](../src/platform/windows/display_vram.cpp) | matched color slot owns optional generic window-region provenance |
+| `capture_browser_window_region()` in [display_vram.cpp](../src/platform/windows/display_vram.cpp) | causally-prior Chromium geometry is validated and bound to the matched frame |
+| `capture_foreground_window_region()` in [display_vram.cpp](../src/platform/windows/display_vram.cpp) | lower-priority foreground-client capture and mapping |
+| `publish_captured_dump()` in [sbs_debug_dump.cpp](../src/platform/windows/sbs_debug_dump.cpp), with `validate_window_region()` in [sbs_debug_dump_border.h](../src/platform/windows/sbs_debug_dump_border.h) | Dump 3D fails closed on invalid optional window-region evidence |
+| `wgc_capture_t::init()` in [display_wgc.cpp](../src/platform/windows/display_wgc.cpp) | WGC uses `CreateForMonitor` only; `CreateForWindow` unused (W9) |
+| `nvenc_base::create_encoder()` in [nvenc_base.cpp](../src/nvenc/nvenc_base.cpp) | lookahead explicitly disabled; `enableAQ` is the only adaptive quantisation; no QP map (W8) |
+| `build_whole_clip_encode_command()` in [offline_sbs_worker.cpp](../src/offline_sbs_worker.cpp) | render pass drops subtitle streams with `-sn`; no effect on burned-in text (W2) |
+| `build_mux_command()` in [offline_sbs_worker.cpp](../src/offline_sbs_worker.cpp) | mux pass copies subtitle streams with `-map 1:s?` and clears their dispositions (W2) |
+| `host_sbs_v2_max_source_long_side` and `host_sbs_v2_max_source_pixels` in [host_sbs_resolution.h](../src/host_sbs_resolution.h) | source upper bounds: 5120 long side, 5120×2160 area |
+| `host_sbs_v2_source_resolution_rejection_reason()` in [host_sbs_resolution.h](../src/host_sbs_resolution.h) | the gate authenticates the **fitted tensor shape**, so it is aspect-driven |
+| Core suite table in [DATASETS.md](../tools/sbsbench/DATASETS.md#core-suite) | `flat_page` targets flat-content depth hallucination |
+| module docstring of [make_synth_clips.py](../tools/sbsbench/make_synth_clips.py) | `flat_page` expects near-flat depth from the model |
