@@ -819,10 +819,9 @@ and addresses with placeholders and keeps only the session's host lines. The mac
 computer names are replaced only in that scrub, so the golden test and `--rescrub` give the same
 result on any machine. The golden test fails on anything left to scrub; the raw logs are not
 kept, so a new scrub rule reaches the committed fixtures through `scrub_game3d_log.py --rescrub`,
-and their goldens should not move. Since the report reads only logs of add-ons built since 10-31, a
-fixture from an older add-on is replaced by a newer recording of its game or deleted: on 11-25
-Assassin's Creed Shadows, Battlefield 6, Dead Space, Hogwarts Legacy and Resident Evil Requiem lost
-theirs and need a new recording.
+and their goldens should not move. The report reads only logs of add-ons built since 10-31, so a
+fixture from an older add-on is deleted; a game gets a fixture again only when a new log of it is
+worth keeping.
 
 UI decision changes have two offline gates; [UI protection](../../docs/reshade-sbs.md#setup)
 owns their contracts. The first is the single-frame replay of the labelled dumps. Run it from
