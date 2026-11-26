@@ -120,8 +120,9 @@ namespace offline_sbs {
     const nlohmann::json &value
   ) noexcept;
 
+#ifdef SUNSHINE_TESTS
   /**
-   * Parse an already-materialized FFprobe stream/frame document.
+   * Parse an already-materialized FFprobe stream/frame document (tests only).
    *
    * This is intentionally strict.  Rotation, transformed dimensions, dynamic HDR,
    * Dolby Vision, ambiguous high-bit-depth SDR, and missing/inconsistent HDR metadata are
@@ -134,14 +135,15 @@ namespace offline_sbs {
   );
 
   /**
-   * Verify that a decoded/encoded presentation timeline covers the source without drift.
-   * `actual` may use a different time base. Every absolute PTS, duration, and the total
-   * presentation duration must remain within one `actual` time-base tick.
+   * Verify that a decoded/encoded presentation timeline covers the source without drift
+   * (tests only). `actual` may use a different time base. Every absolute PTS, duration, and
+   * the total presentation duration must remain within one `actual` time-base tick.
    */
   void validate_timeline_equivalence(
     const media_contract_t &source,
     const media_contract_t &actual
   );
+#endif
 
   /**
    * Verify an intermediate encoded stream exactly against the source timeline, without

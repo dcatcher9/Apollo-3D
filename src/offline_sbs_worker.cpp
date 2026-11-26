@@ -5683,6 +5683,7 @@ namespace offline_sbs {
 #endif
   }  // namespace
 
+#ifdef SUNSHINE_TESTS
   media_contract_t parse_ffprobe_contract(
     const nlohmann::json &value,
     const bool require_source_packet_durations
@@ -5709,6 +5710,7 @@ namespace offline_sbs {
     }
     return builder.finish();
   }
+#endif
 
   bool offline_full_frame_source_scope_is_valid(
     const nlohmann::json &value
@@ -5763,12 +5765,14 @@ namespace offline_sbs {
     }
   }
 
+#ifdef SUNSHINE_TESTS
   void validate_timeline_equivalence(
     const media_contract_t &source,
     const media_contract_t &actual
   ) {
     validate_timeline_contract(source, actual, 1);
   }
+#endif
 
   void validate_encoded_packet_timeline(
     const media_contract_t &source,
