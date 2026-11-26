@@ -126,7 +126,7 @@ bool SelectedMatteAuthorized() {
     if(n!=64u||s!=4u||SelectedMatteReceipt[0u]!=0x31534d53u||SelectedMatteReceipt[1u]!=1u||
        SelectedMatteReceipt[3u]!=0u||SelectedMatteReceipt[63u]!=0u)return false;
     uint kind=SelectedMatteReceipt[2u],algorithm=SelectedMatteReceipt[62u];
-    bool ordinary=kind>=1u&&kind<=3u&&(algorithm==1u||(algorithm==2u&&kind==3u));
+    bool ordinary=kind>=1u&&kind<=3u&&algorithm==1u;
     if(!ordinary) {
 #if defined(HOST_SBS_DIRECT_GLYPH_SELECTED_MATTE)
         if(kind!=4u||(algorithm!=3u&&algorithm!=4u))return false;
@@ -139,7 +139,7 @@ bool SelectedMatteAuthorized() {
 #else
     if(n!=64u||s!=4u||SelectedMatteReceipt[0u]!=0x31534d53u||SelectedMatteReceipt[1u]!=1u||
        SelectedMatteReceipt[2u]<1u||SelectedMatteReceipt[2u]>3u||SelectedMatteReceipt[3u]!=0u||
-       !((SelectedMatteReceipt[62u]==1u)||(SelectedMatteReceipt[62u]==2u&&SelectedMatteReceipt[2u]==3u))||SelectedMatteReceipt[63u]!=0u)return false;
+       SelectedMatteReceipt[62u]!=1u||SelectedMatteReceipt[63u]!=0u)return false;
 #endif
     [loop]for(uint i=0u;i<32u;++i)if(SelectedMatteReceipt[28u+i]!=ContourIdentity[i])return false;
     // Exact current contourCB geometry/model/clock mirrors; receipt itself grants no presence.

@@ -29,13 +29,13 @@ namespace models::host_sbs_shared_ui_warp {
     {"host_sbs_shared_ui_warp.hlsl", "prepare_main", "cs_5_0"},
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_main_ps", "ps_5_0"},
   }};
-  inline constexpr std::string_view completed_closure = "335324ad6aa88630fac07d44ce9f2a8aa38f5644740878ff1556d55c9a7696aa";
+  inline constexpr std::string_view completed_closure = "4599bc3315822d9b79501c04b758480cf385870777c3f25072a3b57e1972d239";
   inline constexpr std::array<cache::shader_spec, 3u> completed_diagnostic_specs {{
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_mapping_ps", "ps_5_0"},
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_coverage_ps", "ps_5_0"},
     {"host_sbs_shared_ui_warp.hlsl", "shared_pin_boundary_ps", "ps_5_0"},
   }};
-  inline constexpr std::string_view completed_diagnostic_closure = "42a1b7a4fa327c08d036a60b7b710062d2c70bc3037787569132b87217a2c9b0";
+  inline constexpr std::string_view completed_diagnostic_closure = "03e696a44ff054541e6d73ce3f4a35390cfb6b0988189bf6c4b6f8b86e192c7c";
   inline constexpr std::string_view renderer_kind = "shared-ui-pin-completed-v2";
 
   // The Game 3D text-game route. Its pin weight is the text coverage a game's own helper reports,
@@ -47,7 +47,7 @@ namespace models::host_sbs_shared_ui_warp {
     {"host_sbs_text_game_ui_warp.hlsl", "text_game_verify_main", "cs_5_0"},
     {"host_sbs_text_game_ui_warp.hlsl", "text_game_columns_main", "cs_5_0"},
   }};
-  inline constexpr std::string_view text_game_closure = "fa2cd3067cf624bed22666dd2b624ba2ab2a182a99cc0fa1077be94191b767a9";
+  inline constexpr std::string_view text_game_closure = "d5212214515453c8a38f3872f34353ad9d4b31279df036938dd5627c127e229c";
 
   struct program_t {
     ID3D11ComputeShader *initialize = nullptr, *pin = nullptr, *prepare = nullptr;

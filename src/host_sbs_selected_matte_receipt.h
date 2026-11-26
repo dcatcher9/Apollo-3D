@@ -1,6 +1,6 @@
 /**
  * @file src/host_sbs_selected_matte_receipt.h
- * @brief CPU storage layout of the selected-matte receipt shared by both selector algorithms.
+ * @brief CPU storage layout of the selected-matte receipt.
  */
 #pragma once
 
@@ -15,7 +15,6 @@ namespace models::selected_matte_receipt_v1 {
   inline constexpr std::uint32_t tag = 0x31534d53u;
   inline constexpr std::uint32_t schema = 1u;
   inline constexpr std::uint32_t legacy_algorithm = 1u;
-  inline constexpr std::uint32_t current_outline_algorithm = 2u;
 
   using contour_constants_t = std::array<std::uint32_t, 24u>;
   using contour_identity_t = std::array<std::uint32_t, depth_coordinate_v2::subtitle_contour_history_word_count>;

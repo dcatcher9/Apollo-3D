@@ -1890,8 +1890,8 @@ namespace {
 
   selected_warp_inputs_t make_selected_warp_inputs(const subtitle_inputs_t &subtitle) {
     // This is the published selected-matte receipt ABI consumed by the production shared warp,
-    // not a substitute renderer. The authored receipt uses the algorithm word the completed
-    // prepare shader still accepts beside the Direct Glyph one.
+    // not a substitute renderer. The authored receipt uses the legacy algorithm word, the one the
+    // completed prepare shader accepts beside the Direct Glyph ones.
     selected_warp_inputs_t input;
     input.matte = subtitle.matte;
     auto &receipt = input.receipt;
@@ -1906,7 +1906,7 @@ namespace {
     std::copy(subtitle.identity.begin(), subtitle.identity.end(), receipt.begin() + 28u);
     receipt[60u] = 71u;
     receipt[61u] = 9u;
-    receipt[62u] = models::selected_matte_receipt_v1::current_outline_algorithm;
+    receipt[62u] = models::selected_matte_receipt_v1::legacy_algorithm;
     return input;
   }
 
@@ -4995,8 +4995,9 @@ TEST(HostSbsV2LiveWarpGpuTest, SharedUiPinProductionRetainsAuthorityAndClearsReu
   }
   for (const bool zero_token : {false, true}) {
     auto operands = selected;
+    // The retired rule-route algorithm word 2 is never accepted.
     if (zero_token) operands.receipt[60u] = operands.receipt[61u] = 0u;
-    else operands.receipt[2u] = 1u;
+    else operands.receipt[62u] = 2u;
     EXPECT_EQ(render(ui, operands), base_output);
   }
   std::vector<std::byte> absent_receipt;

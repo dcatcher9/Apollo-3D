@@ -473,7 +473,7 @@ namespace {
           std::copy_n(subtitle->identity.begin() + 20u, 2u, receipt.begin() + 20u);
           receipt[24u] = 1u;receipt[25u] = models::depth_coordinate_v2::subtitle_contour_recipe;
           std::copy(subtitle->identity.begin(), subtitle->identity.end(), receipt.begin() + 28u);
-          receipt[60u] = 71u;receipt[61u] = 9u;receipt[62u] = selected::current_outline_algorithm;
+          receipt[60u] = 71u;receipt[61u] = 9u;receipt[62u] = selected::legacy_algorithm;
           if (!words_srv(receipt, receipt_buffer, receipt_srv)) {
             error = "could not create authored current selected-mask receipt";return false;
           }

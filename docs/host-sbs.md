@@ -97,7 +97,7 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | `direct_glyph_plan` | 2 | `3c1df1656492065c62c519ceffd49f3d1bc1d3a4e26c50ba0b8a2eead4dc2844` |
 | `direct_glyph_transport` | 4 | `2df402561c88d7e2b2672660e2f9d5f42b06d9815c87b48511adb05af6226b30` |
 | `direct_glyph_palette` | 17 | `c955485dc93ba40eccb88dad2ac66b512876265326fcc83c903cd089ae1c0941` |
-| `direct_glyph_prepare` | 1 | `4924cc2ac2e0ab9a785772bcf3f82d709e21d8d557dec3ea9a58f3e77571e0aa` |
+| `direct_glyph_prepare` | 1 | `0c90dd7091de6b575eb0fa4157b3ca3174bb9bba4bfdce8c306a33a2d602f434` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->
 
 The contract admits the following production calibration:
@@ -382,10 +382,8 @@ The depth-contract generator checks a separate source-closure pin for the route'
 diagnostic programs. Each closure authenticates its own entry points and their transitive
 includes. Actual-map capture prepares the completed route's diagnostic programs on demand. Completed draws of a Direct Glyph matte use the
 separately pinned one-root `direct_glyph_prepare` group, which wraps the completed prepare stage
-and accepts the Direct Glyph receipt. The completed
-prepare stage itself still authenticates algorithm-1 and algorithm-2 receipts. Nothing produces
-an algorithm-2 receipt any more; that check stays because the file belongs to the pinned closure
-of the live programs.
+and accepts the Direct Glyph receipt. The completed prepare stage itself accepts algorithm-1
+receipts of kinds 1 to 3 and refuses the retired algorithm-2 Current Outline receipt.
 
 #### Direct Glyph subtitle mask
 
@@ -405,8 +403,7 @@ and publishes the matte, alpha8 and receipt. `src/host_sbs_direct_glyph_gpu.h` r
 `shaders/directx/direct_glyph_source/`. The plan shader includes `host_sbs_bench_raw_matte_cs.hlsl`
 and `host_sbs_raw_matte_early_cs.hlsl`, and the publisher uses
 `host_sbs_raw_matte_empty_gate_cs.hlsl` as its empty gate. These three files keep their historical
-names because they belong to the pinned Direct Glyph closures. The receipt ABI constant for
-algorithm 2 is still named `current_outline_algorithm`. The estimator result fields are
+names because they belong to the pinned Direct Glyph closures. The estimator result fields are
 `subtitle_selected_matte` and `subtitle_selected_matte_receipt`.
 
 For a fresh authenticated OCR8 empty, the empty gate joins the actual transaction with C24, SCT5,
