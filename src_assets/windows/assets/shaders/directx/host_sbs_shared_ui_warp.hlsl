@@ -199,7 +199,7 @@ float SharedOriginalParallax(float2 uv, uint eye) {
     if (!WarpAuthorized()) return 0.0f;
 #else
     // Preparation and initialization share immutable draw operands. Pixel shaders still
-    // evaluate their independent live authorization, including the queued transaction.
+    // evaluate their independent live authorization.
     if (SharedPinGroupWarpAuthorized == 0u) return 0.0f;
 #endif
     if (video_roi_active == 0.0f) return SharedNativeBaseSample(uv, eye);
@@ -391,7 +391,7 @@ bool SharedPinRowContributes(float source_v) {
     return fraction > 0.0f && b >= first && b < end && SharedPinRows.Load(int3(0,b-first,0)) != 0u;
 }
 float2 SharedPinSourceUV(float2 destination_uv, float eye_sign) {
-    // The queued transaction/state remains a draw-time gate as well as a preparation gate.
+    // The authorized state remains a draw-time gate as well as a preparation gate.
     if (!WarpAuthorized()) return destination_uv;
     if (SharedPinRows.Load(int3(0,PinSourceShape.w,0)) == 0u) return ReprojectIfAuthorized(destination_uv,eye_sign);
     // Empty rows and missing/stale/revoked masks retain the exact ordinary inverse.

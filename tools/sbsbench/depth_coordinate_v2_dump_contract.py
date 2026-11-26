@@ -1125,8 +1125,7 @@ def _single_band_capture(manifest: dict) -> bool:
             LIVE_RENDERER_SOURCE_CLOSURE_SHA256, DIAGNOSTIC_SOURCE_CLOSURE_SHA256):
         raise ValueError("dump_manifest.json has unknown V2 conditioner attribution")
     draw = renderer.get("actual_draw_renderer")
-    if isinstance(draw, dict) and draw.get("kind") in (
-            shared_ui_pin_dump.COMPLETED_KIND, shared_ui_pin_dump.QUEUED_KIND):
+    if isinstance(draw, dict) and draw.get("kind") == shared_ui_pin_dump.COMPLETED_KIND:
         if archived != shared_ui_pin_dump.is_single_band_split_draw(draw):
             raise ValueError("dump_manifest.json mixes shared draw and Base renderer generations")
     if archived:

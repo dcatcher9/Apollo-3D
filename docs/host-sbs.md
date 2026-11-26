@@ -88,16 +88,16 @@ RGB-to-P010 path; diagnostic groups remain dump-only.
 | `parallax_v2_producer` | 30 | `b1307cc6c457482c48b47daf8f900cd919e182286bfe8cddd88b1a7e34bed13b` |
 | `parallax_v2_replay_resolve` | 2 | `9a73e8a92ba55e3d99f3e37868918329c0e0d478bd7281319670dd4f2fe55347` |
 | `parallax_v2_coordinate_diagnostic` | 1 | `b895dea87363c1859c16d97c3d79121a2996d5f03ee8c8b56e20e756609e4e59` |
-| `near_identical_detector` | 3 | `c894bfb39134f169638662441024cc234a74faf4eac096a65cefe6487cb35ee5` |
+| `near_identical_detector` | 3 | `6af2c82046dd2d0ba4d74882440113d77ccd0605e7aa9304fa029fe914f9ac0c` |
 | `gpu_trace` | 1 | `bcfab2a5da6361c9142c82b05d47503b27acbfcac010d25bd012cf30051ce3ef` |
-| `parallax_v2_live_renderer` | 2 | `5f0b627588a7886bb557e5aab87a56934b587aa501d80437326bd6805ac440ac` |
-| `parallax_v2_p010_y` | 1 | `af9ce2210c86f8072b2e21d2d9da42a3b6ac381be34ee459b9debd9ddb24610c` |
+| `parallax_v2_live_renderer` | 2 | `7092c821696d20987e56ba65d74bf4c586601c43daaaac5a5db2c690864a567b` |
+| `parallax_v2_p010_y` | 1 | `ff5dfa9ced2e7dfa3d75f7a322fbe57eac53f4b8e84a99e68b7267b9c1bf88ee` |
 | `sbs_flat_fallback` | 2 | `7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4` |
-| `parallax_v2_live_diagnostic` | 2 | `9755c6c32eb928a0743aac49bd3829eb504eb24977e5ae6398d385f623a75051` |
+| `parallax_v2_live_diagnostic` | 2 | `2e71502f9d1c64a32e6c088246afd02e4a9619f35466b2b611d4d35feb7a79f6` |
 | `direct_glyph_plan` | 2 | `3c1df1656492065c62c519ceffd49f3d1bc1d3a4e26c50ba0b8a2eead4dc2844` |
 | `direct_glyph_transport` | 4 | `2df402561c88d7e2b2672660e2f9d5f42b06d9815c87b48511adb05af6226b30` |
 | `direct_glyph_palette` | 17 | `c955485dc93ba40eccb88dad2ac66b512876265326fcc83c903cd089ae1c0941` |
-| `direct_glyph_prepare` | 1 | `f3a07c98df39323c896c20f7801cc4e79867995dd3af844e426e2c3f9505302d` |
+| `direct_glyph_prepare` | 1 | `4924cc2ac2e0ab9a785772bcf3f82d709e21d8d557dec3ea9a58f3e77571e0aa` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->
 
 The contract admits the following production calibration:
@@ -377,13 +377,10 @@ weights, row/header storage and draw geometry. The shared runtime derives the ba
 submitted analysis rectangle and the actual color and matte textures. It uses those same texture
 identities to reject inputs that alias its writable planes. These resources belong to the current immutable
 draw only, are unbound between compute and sampling, and are rebuilt before reuse.
-`src/host_sbs_shared_ui_warp_runtime.h` owns the ordered completed and queued shader specifications.
-The depth-contract generator checks a separate source-closure pin for each route's production and
-diagnostic programs. Each closure authenticates its own three entry points and their transitive
-includes. The queued wrapper includes the common source and retains an exact-source GPU guard
-independently of subtitle authorisation; no converter path prepares or draws it since the queued
-converter research was removed. Actual-map capture prepares the completed route's diagnostic
-programs on demand. Completed draws of a Direct Glyph matte use the
+`src/host_sbs_shared_ui_warp_runtime.h` owns the ordered completed shader specifications.
+The depth-contract generator checks a separate source-closure pin for the route's production and
+diagnostic programs. Each closure authenticates its own entry points and their transitive
+includes. Actual-map capture prepares the completed route's diagnostic programs on demand. Completed draws of a Direct Glyph matte use the
 separately pinned one-root `direct_glyph_prepare` group, which wraps the completed prepare stage
 and accepts the Direct Glyph receipt. The completed
 prepare stage itself still authenticates algorithm-1 and algorithm-2 receipts. Nothing produces
@@ -1766,9 +1763,8 @@ authority holds depth and subtitle temporal and ownership state. When the evalua
 normalized-depth diagnostics, the retained-depth copy restores the previous field into the
 rotated diagnostic target.
 
-The detector shader still accepts a queued-force postprocess request (`request_flags = 4`)
-that requires the current post-child receipt for both depth and subtitle indirect shapes. It
-belonged to the removed same-source continuation experiment; the host issues only flags `1` and `2`.
+The detector accepts only the two postprocess requests the host issues: flag `1` for a
+GPU-undecided root and flag `2` for force inference.
 
 The conditional executable has one setter followed by two sibling conditional nodes and their
 common receipt-commit kernel. The first conditional

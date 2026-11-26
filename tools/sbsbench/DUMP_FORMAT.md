@@ -105,10 +105,9 @@ and inactive SCP4 immediately. No extra observation wait is added.
 ### Actual shared UI warp observation
 
 Schema 52 requires version 2 of `renderer.actual_draw_renderer`. Its `ordinary-base-v1`
-kind names the authenticated ordinary Base diagnostic. The kinds `shared-ui-pin-completed-v2`
-and `shared-ui-pin-queued-v2` bind their respective production shader closures. When
-`actual_draw_evidence.json` captures the draw, its schema-2 `program` repeats the kind and its
-`queued_geometry` is the JSON boolean for the selected route. The older `shared-ui-pin-v1`
+kind names the authenticated ordinary Base diagnostic. The kind `shared-ui-pin-completed-v2`
+binds its production shader closure. When `actual_draw_evidence.json` captures the draw, its
+schema-2 `program` repeats the kind. The older `shared-ui-pin-v1`
 kind continues to bind its historical combined closure. For schema-52 captures from before the
 per-eye limiter, the reader recognizes the recorded Base and diagnostic shaders, split draw
 shader, and composite ONNX together. Those draws carry one displacement band. The per-eye

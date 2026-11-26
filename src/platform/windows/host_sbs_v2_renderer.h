@@ -46,12 +46,6 @@ namespace platf::dxgi {
     ID3D11Buffer *geometry_constants = nullptr;
     /** Optional HostSbsSubtitleRender constants at b3; null disables glyph selection. */
     ID3D11Buffer *subtitle_constants = nullptr;
-    // Optional b5/t10 override. Without shared_pin it restores caller-owned private bindings.
-    // True requires both pointers and unpredicated immediate context, or returns false before Draw.
-    // With shared_pin these two slots instead belong to the recorded draw and its cleanup.
-    bool queued_guard_override = false;
-    ID3D11Buffer *queued_guard_constants = nullptr;
-    ID3D11ShaderResourceView *queued_guard_transaction = nullptr;
     /** Own t0..t14 and b3..b6 for this draw; require an unpredicated immediate context.
      * The caller has already validated the prepared resources and their device ownership.
      */

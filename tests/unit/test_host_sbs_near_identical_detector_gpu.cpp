@@ -3655,92 +3655,58 @@ TEST(HostSbsNearIdenticalDetectorGpuTest,
   EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::observation_one_x)], 0u);
 }
 
-TEST(HostSbsNearIdenticalDetectorGpuTest, QueuedForceRequiresPostChildReceiptForDepthAndSubtitle) {
+TEST(HostSbsNearIdenticalDetectorGpuTest, OnlyIssuedPostprocessRequestsAuthorizeAJointRefresh) {
+  // The host issues request flag 1 (GPU-undecided) or 2 (force inference). A current post-child
+  // receipt cannot make any other value, including the retired queued-force flag 4, advance
+  // depth or subtitle state.
   near_identical_gpu_fixture_t fixture;
   std::string error;
-  const char *hardware_setting = std::getenv("APOLLO_QUEUED_FORCE_GATE_HARDWARE");
-  const bool hardware = hardware_setting && std::string_view {hardware_setting} == "1";
-  const auto initialized = fixture.initialize(error, hardware);
+  const auto initialized = initialize_fixture(fixture, error);
   if (initialized == near_identical_gpu_fixture_t::initialize_result_e::d3d_unavailable) {
     GTEST_SKIP() << error;
   }
   ASSERT_EQ(initialized, near_identical_gpu_fixture_t::initialize_result_e::ready) << error;
-  RecordProperty("driver", hardware ? "hardware" : "WARP");
 
   constexpr std::uint32_t poison = 0xa5a5a5a5u;
-  constexpr std::uint32_t queued_mode = 4u;
-  using branch_e = models::near_identical_gpu_branch_e;
-
-  struct scenario_t {
-    const char *name;
-    std::uint32_t magic;
-    std::uint32_t mode;
-    branch_e branch;
-    bool optional;
-    std::uint64_t constants_token;
-    std::uint32_t work;
-    std::uint32_t reduce_groups;
-    bool valid_ocr_shape;
-    bool infer;
-  };
-
-  const std::array scenarios {
-    scenario_t {"joined-current-abstention", models::near_identical_receipt_magic, queued_mode, branch_e::infer, false, request_token, models::near_identical_work_subtitle_observation, subtitle_reduction_group_count, true, true},
-    scenario_t {"joined-current-optional", models::near_identical_receipt_magic, queued_mode, branch_e::infer, true, request_token, models::near_identical_work_optional_ocr, subtitle_reduction_group_count, true, true},
-    scenario_t {"missing-post-child-commit", 0u, queued_mode, branch_e::infer, false, request_token, models::near_identical_work_subtitle_observation, subtitle_reduction_group_count, true, false},
-    scenario_t {"proposal-is-not-completion", models::near_identical_proposal_magic, queued_mode, branch_e::infer, false, request_token, models::near_identical_work_subtitle_observation, subtitle_reduction_group_count, true, false},
-    scenario_t {"stale-completion", models::near_identical_receipt_magic, queued_mode, branch_e::infer, false, request_token + 1u, models::near_identical_work_subtitle_observation, subtitle_reduction_group_count, true, false},
-    scenario_t {"reuse-is-not-force-infer", models::near_identical_receipt_magic, queued_mode, branch_e::reuse, false, request_token, models::near_identical_work_subtitle_observation, subtitle_reduction_group_count, true, false},
-    scenario_t {"wrong-depth-shape", models::near_identical_receipt_magic, queued_mode, branch_e::infer, false, request_token, models::near_identical_work_subtitle_observation, subtitle_reduction_group_count - 1u, true, false},
-    scenario_t {"wrong-ocr-shape", models::near_identical_receipt_magic, queued_mode, branch_e::infer, false, request_token, models::near_identical_work_subtitle_observation, subtitle_reduction_group_count, false, false},
-    scenario_t {"mixed-completion-modes", models::near_identical_receipt_magic, 3u, branch_e::infer, false, request_token, models::near_identical_work_subtitle_observation, subtitle_reduction_group_count, true, false},
-    scenario_t {"retired-work-is-not-queued-mode", models::near_identical_receipt_magic, queued_mode, branch_e::infer, false, request_token, 4u, subtitle_reduction_group_count, true, false},
-  };
-  for (const auto &scenario : scenarios) {
-    SCOPED_TRACE(scenario.name);
+  for (const std::uint32_t mode : {3u, 4u}) {
+    SCOPED_TRACE(mode);
     decision_words_t decision {};
-    ASSERT_TRUE(fixture.initialize_and_read_transaction(scenario.work, decision, error)) << error;
+    ASSERT_TRUE(fixture.initialize_and_read_transaction(
+      models::near_identical_work_subtitle_observation, decision, error)) << error;
     fixture.seed_ocr_record(poison);
     ASSERT_TRUE(fixture.finalize_subtitle_receipt(
-      scenario.branch,
+      models::near_identical_gpu_branch_e::infer,
       true,
-      scenario.optional,
+      false,
       false,
       decision,
       error,
       request_token,
-      scenario.constants_token,
-      scenario.work,
+      request_token,
+      models::near_identical_work_subtitle_observation,
       true,
-      scenario.work,
-      scenario.reduce_groups,
-      scenario.valid_ocr_shape,
-      scenario.mode,
-      scenario.magic
+      models::near_identical_work_subtitle_observation,
+      subtitle_reduction_group_count,
+      true,
+      mode,
+      models::near_identical_receipt_magic
     )) << error;
-    const auto expected_one = scenario.infer ? 1u : 0u;
-    EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_one_x)], expected_one);
-    EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_reduce_x)], scenario.infer ? subtitle_reduction_group_count : 0u);
-    EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_grid16_x)], scenario.infer ? subtitle_tile_group_width : 0u);
-    EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_grid16_y)], scenario.infer ? subtitle_tile_group_height : scenario.mode == queued_mode ? 1u :
-                                                                                                                                                                       0u);
-    EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::observation_one_x)], expected_one);
-    EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::optional_preprocess_x)], scenario.infer ? subtitle_tile_group_width : 0u);
-    EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::optional_one_x)], scenario.infer && scenario.optional ? 1u : 0u);
-    EXPECT_EQ(decision[word(models::near_identical_gpu_decision_word_e::infer_without_optional_one_x)], scenario.infer && !scenario.optional ? 1u : 0u);
+    for (const auto field : {
+           models::near_identical_gpu_decision_word_e::infer_one_x,
+           models::near_identical_gpu_decision_word_e::infer_reduce_x,
+           models::near_identical_gpu_decision_word_e::infer_grid16_x,
+           models::near_identical_gpu_decision_word_e::infer_grid16_y,
+           models::near_identical_gpu_decision_word_e::observation_one_x,
+           models::near_identical_gpu_decision_word_e::optional_preprocess_x,
+           models::near_identical_gpu_decision_word_e::optional_one_x,
+           models::near_identical_gpu_decision_word_e::infer_without_optional_one_x,
+         }) {
+      EXPECT_EQ(decision[word(field)], 0u) << static_cast<std::uint32_t>(field);
+    }
     ocr_record_words_t record {};
     ASSERT_TRUE(fixture.read_ocr_record(record, error)) << error;
-    if (scenario.infer && !scenario.optional) {
-      EXPECT_EQ(record[0], models::depth_coordinate_v2::subtitle_ocr_record_schema);
-      EXPECT_EQ(record[1], models::depth_coordinate_v2::subtitle_ocr_record_tag);
-      EXPECT_EQ(record[5], static_cast<std::uint32_t>(current_frame_id));
-      EXPECT_EQ(record[6], static_cast<std::uint32_t>(current_frame_id >> 32u));
-      EXPECT_EQ(record[7], 0x50607080u);
-      EXPECT_EQ(record[8], 0x10203040u);
-    } else {
-      for (std::size_t index = 0u; index < record.size(); ++index) {
-        EXPECT_EQ(record[index], poison) << "Rejected or optional receipt changed OCR word " << index;
-      }
+    for (std::size_t index = 0u; index < record.size(); ++index) {
+      EXPECT_EQ(record[index], poison) << "A rejected request changed OCR word " << index;
     }
   }
 }

@@ -11,7 +11,7 @@ namespace platf::dxgi::detail {
   public:
     using clock_t = std::chrono::steady_clock;
     using source_stamp_t = std::optional<clock_t::time_point>;
-    enum class output_e { flat, packed, completed, queued };
+    enum class output_e { flat, packed, completed };
     enum class timeout_event_e { none, expired, recovered };
 
     void invalidate() noexcept {
@@ -62,7 +62,7 @@ namespace platf::dxgi::detail {
         timeout_active_ = true;
         return timeout_event_e::expired;
       }
-      // A packed/queued draw does not prove a completed depth owner recovered.
+      // A packed draw does not prove a completed depth owner recovered.
       if (!showing_expired_flat && timeout_active_ && output == output_e::completed) {
         timeout_active_ = false;
         return timeout_event_e::recovered;

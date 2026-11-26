@@ -44,11 +44,7 @@ namespace platf::dxgi {
         }
       }
     }
-    if (command.queued_guard_override && (!command.queued_guard_constants || !command.queued_guard_transaction)) {
-      // Missing b5 must never read as a disabled/legacy gate for a queued draw.
-      return false;
-    }
-    if (command.shared_pin || command.queued_guard_override) {
+    if (command.shared_pin) {
       if (context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE) {
         return false;
       }
@@ -58,33 +54,6 @@ namespace platf::dxgi {
       if (predicate) {
         return false;
       }
-    }
-
-    // Generic calls preserve caller-owned b5/t10 bindings. Shared-pin calls own these slots,
-    // including their cleanup, and need no snapshot of the previous context state.
-    struct guard_scope_t {
-      ID3D11DeviceContext *context = nullptr;
-      Microsoft::WRL::ComPtr<ID3D11Buffer> cb;
-      Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
-
-      ~guard_scope_t() {
-        if (context) {
-          auto *old_cb = cb.Get();
-          auto *old_srv = srv.Get();
-          context->PSSetShaderResources(10u, 1u, &old_srv);
-          context->PSSetConstantBuffers(5u, 1u, &old_cb);
-        }
-      }
-    } guard_scope;
-
-    if (command.queued_guard_override && !command.shared_pin) {
-      context->PSGetConstantBuffers(5u, 1u, guard_scope.cb.GetAddressOf());
-      context->PSGetShaderResources(10u, 1u, guard_scope.srv.GetAddressOf());
-      guard_scope.context = context;
-      auto *cb = command.queued_guard_constants;
-      auto *srv = command.queued_guard_transaction;
-      context->PSSetConstantBuffers(5u, 1u, &cb);
-      context->PSSetShaderResources(10u, 1u, &srv);
     }
 
     context->OMSetRenderTargets(
@@ -107,9 +76,7 @@ namespace platf::dxgi {
     if (const auto &pin = command.shared_pin) {
       std::copy(command.shader_resources.begin(), command.shader_resources.end(), shared_resources.begin());
       shared_resources[7u] = pin->selected_receipt;
-      shared_resources[10u] = command.queued_guard_override ? command.queued_guard_transaction : nullptr;
       std::copy(pin->planes.begin(), pin->planes.end(), shared_resources.begin() + 12u);
-      constants[3u] = command.queued_guard_override ? command.queued_guard_constants : nullptr;
       constants[4u] = pin->geometry_constants;
       resources = shared_resources.data();
       resource_count = static_cast<UINT>(shared_resources.size());

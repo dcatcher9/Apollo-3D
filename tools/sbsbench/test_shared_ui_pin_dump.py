@@ -5,11 +5,9 @@ import hashlib
 import json
 from pathlib import Path
 import re
-import shutil
 import struct
 import tempfile
 import unittest
-from unittest import mock
 
 import numpy as np
 
@@ -101,7 +99,7 @@ class SharedUiPinDumpTests(unittest.TestCase):
             "mapping_role": pin.SHARED_ROLE, "evidence_artifact": pin.EVIDENCE}
         self.evidence["schema"] = 2
         self.evidence["binding_roles"] = {"t3": "actual_draw_M.u32"}
-        self.evidence.update(program=kind, pixel_shader_closure=closure, queued_geometry=kind == pin.QUEUED_KIND)
+        self.evidence.update(program=kind, pixel_shader_closure=closure)
         self.evidence["shared_pin"]["source_closure_sha256"] = closure
         self.seal()
 
@@ -159,25 +157,8 @@ class SharedUiPinDumpTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "unknown source or route"):
                         pin.verify(self.root, self.manifest)
 
-    def test_queued_draw_binds_the_field_layout_and_own_shader_in_each_generation(self):
-        for closures, eyes in ((pin.SINGLE_BAND_SPLIT_CLOSURES, 1), (pin.FIRST_PER_EYE_CLOSURES, 2), (None, 2)):
-            with self.subTest(closures=closures):
-                self.current_attribution(pin.QUEUED_KIND, archived_closures=closures)
-                self.assertEqual(pin.verify(self.root, self.manifest)["eye_copies"], eyes)
-                for name in pin.ARTIFACTS[:2]:
-                    band = (self.root / name).read_bytes()[:2 * 8 * 4]
-                    wrong_eyes = 2 if eyes == 1 else 1
-                    self.save(name, band * wrong_eyes, (8, 2 * wrong_eyes, 41))
-                self.seal()
-                with self.assertRaisesRegex(ValueError, "exact texture layout"):
-                    pin.verify(self.root, self.manifest)
-                draw = self.manifest["renderer"]["actual_draw_renderer"]
-                draw["source_closure_sha256"] = pin.SINGLE_BAND_SPLIT_CLOSURES[pin.COMPLETED_KIND]
-                with self.assertRaisesRegex(ValueError, "unknown source or map"):
-                    pin.verify(self.root, self.manifest)
-
     def test_model_prepare_rejects_another_route_or_another_receipt_kind(self):
-        self.current_attribution(pin.QUEUED_KIND)
+        self.current_attribution(pin.KIND)
         self.use_model_prepare()
         with self.assertRaisesRegex(ValueError, "model prepare has an unknown source or route"):
             pin.verify(self.root, self.manifest)
@@ -195,7 +176,7 @@ class SharedUiPinDumpTests(unittest.TestCase):
             pin.verify(self.root, self.manifest)
 
     def test_split_routes_keep_their_own_closures_and_retained_combined_identity(self):
-        for kind in (pin.COMPLETED_KIND, pin.QUEUED_KIND, pin.KIND):
+        for kind in (pin.COMPLETED_KIND, pin.KIND):
             with self.subTest(kind=kind):
                 self.current_attribution(kind)
                 summary = pin.verify(self.root, self.manifest)
@@ -203,14 +184,14 @@ class SharedUiPinDumpTests(unittest.TestCase):
                 self.assertEqual(summary["kind"], kind)
                 attribution = self.manifest["renderer"]["actual_draw_renderer"]
                 previous_kind = attribution["kind"]
-                attribution["kind"] = pin.QUEUED_KIND if kind == pin.COMPLETED_KIND else pin.COMPLETED_KIND
+                attribution["kind"] = pin.KIND if kind == pin.COMPLETED_KIND else pin.COMPLETED_KIND
                 with self.assertRaisesRegex(ValueError, "unknown source or map"):
                     pin.verify(self.root, self.manifest)
                 attribution["kind"] = previous_kind
 
     def test_split_route_cannot_certify_draw_with_inconsistent_route_metadata(self):
         self.current_attribution(pin.COMPLETED_KIND)
-        for key, invalid_value in (("program", pin.QUEUED_KIND), ("queued_geometry", True), ("queued_geometry", 0)):
+        for key, invalid_value in (("program", pin.KIND), ("program", "ordinary-base-v1")):
             with self.subTest(key=key, value=invalid_value):
                 previous = self.evidence[key]
                 self.evidence[key] = invalid_value
@@ -372,24 +353,11 @@ class SharedUiPinDumpTests(unittest.TestCase):
 class SharedUiPinDumpOwnerTests(unittest.TestCase):
     def test_unmocked_route_closures_match_actual_runtime_owner(self):
         source = generator.CURRENT_SHARED_UI_WARP_RUNTIME_HEADER.read_text(encoding="utf-8")
-        for kind, name in ((pin.COMPLETED_KIND, "completed_closure"), (pin.QUEUED_KIND, "queued_closure")):
+        for kind, name in ((pin.COMPLETED_KIND, "completed_closure"),):
             with self.subTest(kind=kind):
                 expected = re.search(rf'inline constexpr std::string_view {name}\s*=\s*"([0-9a-f]{{64}})"', source)
                 self.assertIsNotNone(expected)
                 self.assertEqual(pin._expected_closure(kind), expected.group(1))
-
-    def test_completed_source_identity_survives_missing_queued_shader(self):
-        completed = pin._expected_closure(pin.COMPLETED_KIND)
-        calculate = generator.shared_ui_warp_runtime_closures
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary) / "shaders"
-            shutil.copytree(generator.SHADER_ROOT, root,
-                            ignore=shutil.ignore_patterns("host_sbs_shared_ui_warp_queued.hlsl"))
-            with mock.patch.object(generator, "shared_ui_warp_runtime_closures",
-                                   side_effect=lambda **kwargs: calculate(root, **kwargs)):
-                self.assertEqual(pin._expected_closure(pin.COMPLETED_KIND), completed)
-                with self.assertRaises(FileNotFoundError):
-                    pin._expected_closure(pin.QUEUED_KIND)
 
 
 if __name__ == "__main__":

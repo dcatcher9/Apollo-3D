@@ -7,9 +7,7 @@ text line boxes, and the Direct Glyph model decides which pixels inside them are
 Host 3D and Convert Video use the same configuration. There is no rule-based fallback; when
 Direct Glyph is unavailable or fails, the picture is ordinary Base stereo.
 Browser admission distinguishes an ordinary full-client video from a full-monitor client and maps
-semantic video independently of a spanning browser's nearest monitor. Completed subtitle rendering
-does not require the optional queued shader route; its source authentication and current draw guards
-remain unchanged. These fixes do not establish complete decoration recovery or semantic rejection
+semantic video independently of a spanning browser's nearest monitor. These fixes do not establish complete decoration recovery or semantic rejection
 of every scene object. Asymmetric video clipping still needs separately authenticated full-element
 reference geometry to preserve the original caption-centering prior.
 
@@ -273,7 +271,8 @@ required for the current policy.
 The private subtitle research that preceded Direct Glyph has been removed from the host: the
 inner-fill, cohort and matte-guard masks, the temporal source census, the current-RGB cue and
 current-source snapshot helpers, the joined-completion, pending-current-colour and queued
-same-source presentation probes, and the disabled queued converter route. None of them reached
+same-source presentation probes, and the disabled queued converter route with its shared UI warp
+shader. None of them reached
 live streaming or Convert Video. Their recorded outcomes remain in the repository history. Every
 rule-based mask variant either left background inside the fixed margin or lost required thin-font
 and startup inner fill, and presenting current colour under an old mask lingered after text changed

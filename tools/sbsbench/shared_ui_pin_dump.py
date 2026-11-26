@@ -20,20 +20,17 @@ except ImportError:
 
 KIND = "shared-ui-pin-v1"
 COMPLETED_KIND = "shared-ui-pin-completed-v2"
-QUEUED_KIND = "shared-ui-pin-queued-v2"
 LEGACY_COMBINED_CLOSURE = "326bf2defe8021e1930f46279fea27ceac12effad2ad9d2a17127d647bcdddef"
-_ROUTE_CLOSURE_KEYS = {COMPLETED_KIND: "completed_closure", QUEUED_KIND: "queued_closure"}
+_ROUTE_CLOSURE_KEYS = {COMPLETED_KIND: "completed_closure"}
 # Recorded by the last producer with one displacement band shared by both eyes (23a4d95e).
 SINGLE_BAND_SPLIT_CLOSURES = {
     COMPLETED_KIND: "50db509da2b32216404aba41fc70095ca7b82e36bc86b0417a98cd32948a1d4f",
-    QUEUED_KIND: "813e5680174a7d4aeffcf434cde666f61774e2329bbc6753d52062f8dbada412",
 }
 SINGLE_BAND_RAW_PREPARE = "b254eba72ffaca96d899fb48ec44596d217cb8312334bea7544080cf07a4c3ad"
 SINGLE_BAND_DIRECT_PREPARE = "219a6a305c05ca3ac1744286a4e87b83b61128c10e05c61ec517337f279ec940"
 # The first per-eye producer, before the text-game shader changed the shared source (5efb1954).
 FIRST_PER_EYE_CLOSURES = {
     COMPLETED_KIND: "87edbb3b36c27c32e6d8d684c72984a8c5e5764335f38f72911687965119a458",
-    QUEUED_KIND: "ee3fb0365f85b910ee828f16a385c142259730ca55815f8864381397833b391f",
 }
 FIRST_PER_EYE_PREPARES = (
     "c216566913f8ddbde702699d2387502c43aea9a7187fce2dc7f234985c2eeb98",
@@ -65,7 +62,7 @@ def _expected_closure(kind: str = KIND) -> str:
 
 def _matches_split_draw(draw: dict, closures: dict) -> bool:
     kind = draw.get("kind")
-    return (kind in (COMPLETED_KIND, QUEUED_KIND) and
+    return (kind == COMPLETED_KIND and
             draw.get("source_closure_sha256") == closures[kind])
 
 
@@ -101,7 +98,7 @@ def validate_attribution(manifest: dict[str, Any]) -> dict[str, Any]:
             (current_dump and not current)):
         raise ValueError("actual draw renderer attribution has an unknown schema")
     kind = value["kind"]
-    shared_kinds = (KIND, COMPLETED_KIND, QUEUED_KIND) if current else (KIND,)
+    shared_kinds = (KIND, COMPLETED_KIND) if current else (KIND,)
     shared = kind in shared_kinds
     role = SHARED_ROLE if shared else BASE_ROLE
     if not current:
@@ -205,8 +202,7 @@ def _verify(root: Any, manifest: dict[str, Any]) -> tuple[dict[str, Any], Any]:
         return {**attribution, "actual_map_verified": False,
                 "unavailable_reason": "actual draw binding observation was unavailable"}, None
     kind = attribution["kind"]
-    if kind in _ROUTE_CLOSURE_KEYS and (
-            evidence.get("program") != kind or evidence.get("queued_geometry") is not (kind == QUEUED_KIND)):
+    if kind in _ROUTE_CLOSURE_KEYS and evidence.get("program") != kind:
         raise ValueError("actual draw evidence does not identify its attributed shared pin route")
     shared = evidence.get("shared_pin")
     if (not isinstance(shared, dict) or shared.get("selected") is not True or

@@ -130,13 +130,11 @@ TEST(HostSbsPackedPresentationClockTest, TimeoutReportsActualFlatOnceAndOnlyComp
   // Rejecting a stale completion does not mean flat was shown: a valid packed/queued route may
   // still have been selected. Those choices must not arm the timeout or emit a false recovery.
   EXPECT_EQ(clock.observe_timeout(true, output_e::packed), event_e::none);
-  EXPECT_EQ(clock.observe_timeout(true, output_e::queued), event_e::none);
   EXPECT_EQ(clock.observe_timeout(true, output_e::flat), event_e::expired);
   EXPECT_EQ(clock.observe_timeout(true, output_e::flat), event_e::none);
   clock.invalidate();
   EXPECT_EQ(clock.observe_timeout(true, output_e::flat), event_e::none);
   EXPECT_EQ(clock.observe_timeout(false, output_e::packed), event_e::none);
-  EXPECT_EQ(clock.observe_timeout(false, output_e::queued), event_e::none);
   EXPECT_EQ(clock.observe_timeout(false, output_e::completed), event_e::recovered);
   EXPECT_EQ(clock.observe_timeout(false, output_e::completed), event_e::none);
 

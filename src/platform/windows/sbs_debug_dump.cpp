@@ -1955,7 +1955,7 @@ namespace platf::sbs_debug {
         {"observation_point", "PSGet bindings inside recorder immediately before Draw and cleanup, inside selected/shared scopes"},
         {"snapshot_order", "same immediate-context conversion; copies precede terminal dump event and next live reuse"},
         {"conversion_frame", e.conversion_frame}, {"model_frame", e.model_frame}, {"observation_us", e.observation_us},
-        {"program", e.program}, {"selected_shader", e.selected_shader}, {"queued_geometry", e.queued_geometry},
+        {"program", e.program}, {"selected_shader", e.selected_shader},
         {"pixel_shader_address", e.pixel_shader_address}, {"pixel_shader_closure", e.pixel_shader_closure},
         {"pixel_route_map", e.shared_pin_selected ? "actual_shared_pin_map.rgba32f" : "not_exported"},
         {"shared_pin", {

@@ -40,7 +40,7 @@ namespace platf::sbs_debug {
 
   /** Optional requested-dump observation of one successful draw, not UI authority. */
   struct actual_draw_evidence {
-    bool requested = false, captured = false, selected_shader = false, queued_geometry = false;
+    bool requested = false, captured = false, selected_shader = false;
     bool background_queue_issued = false, background_role_matched = false, background_bound = false;
     bool shared_pin_selected = false;
     std::uint64_t conversion_frame = 0, model_frame = 0, observation_us = 0;

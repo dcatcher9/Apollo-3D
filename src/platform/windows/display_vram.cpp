@@ -2716,8 +2716,8 @@ namespace platf::dxgi {
                   e.shared_pin_selected = e.selected_shader && shared_warp_selected;
                   e.pixel_shader_address = reinterpret_cast<std::uintptr_t>(actual_shader.Get());
                   if (e.shared_pin_selected) {
-                    e.program = shared_warp::renderer_kind(e.queued_geometry);
-                    e.pixel_shader_closure = shared_warp::source_closure(e.queued_geometry);
+                    e.program = shared_warp::renderer_kind;
+                    e.pixel_shader_closure = shared_warp::completed_closure;
                   } else if (actual_shader.Get() == sbs_reprojection_v2_live_ps.get()) {
                     e.program = "ordinary-v2";
                     e.pixel_shader_closure = sbs_reprojection_v2_live_source_closure_sha256;
@@ -6238,7 +6238,7 @@ namespace platf::dxgi {
       sbs_debug::actual_draw_evidence &evidence
     ) {
       std::string error;
-      if (!evidence.shared_pin_selected || !sbs_intermediate_texture || !selected_shared_warp_programs.load_diagnostics(device.get(), selected_shared_warp_root, error, actual_draw.queued_guard_override)) {
+      if (!evidence.shared_pin_selected || !sbs_intermediate_texture || !selected_shared_warp_programs.load_diagnostics(device.get(), selected_shared_warp_root, error)) {
         return false;
       }
       D3D11_TEXTURE2D_DESC desc {};
@@ -6262,8 +6262,8 @@ namespace platf::dxgi {
       draw.observe_bound_draw = nullptr;
       device_ctx->OMSetBlendState(blend_disable.get(), nullptr, 0xFFFFFFFFu);
       const std::array<ID3D11PixelShader *, 2u> shaders {
-        selected_shared_warp_programs.mapping(actual_draw.queued_guard_override),
-        selected_shared_warp_programs.boundary(actual_draw.queued_guard_override)
+        selected_shared_warp_programs.mapping(),
+        selected_shared_warp_programs.boundary()
       };
       for (std::size_t i = 0u; i < targets.size(); ++i) {
         draw.render_targets[0] = targets[i].Get();

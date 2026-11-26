@@ -118,7 +118,7 @@ bool CurrentGlyphContributor(int2 full_pixel) {
         all(abs(display - reference.rgb) <= V2_SUBTITLE_CONTOUR_HISTORY_RGB_DISTANCE);
 }
 
-// Exact current selected receipt, source identity and optional queued token guard.
+// Exact current selected receipt and source identity.
 StructuredBuffer<uint> SelectedMatteReceipt : register(t7);
 bool SelectedMatteAuthorized() {
     uint n,s;SelectedMatteReceipt.GetDimensions(n,s);
@@ -149,10 +149,6 @@ bool SelectedMatteAuthorized() {
        SelectedMatteReceipt[22u]>1u||SelectedMatteReceipt[23u]!=0u||
        any(uint4(SelectedMatteReceipt[24u],SelectedMatteReceipt[25u],SelectedMatteReceipt[26u],SelectedMatteReceipt[27u])!=uint4(1u,27u,0u,0u))||
        all(uint2(SelectedMatteReceipt[60u],SelectedMatteReceipt[61u])==0u))return false;
-#if defined(HOST_SBS_SHARED_PIN_QUEUED)
-    // Existing QRG separately proves post-child completion/order, work, token and owner clock.
-    if(queued_control.x!=1u||any(uint2(SelectedMatteReceipt[60u],SelectedMatteReceipt[61u])!=queued_root.xy))return false;
-#endif
     return true;
 }
 

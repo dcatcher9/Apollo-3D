@@ -2196,7 +2196,7 @@ def shared_ui_warp_runtime_closures(
         *, names: tuple[str, ...] | None = None) -> dict[str, str]:
     """Calculate the selected route pins from their runtime specification owner."""
     source = header.read_text(encoding="utf-8")
-    routes = ("completed", "queued", "completed_diagnostic", "queued_diagnostic", "text_game")
+    routes = ("completed", "completed_diagnostic", "text_game")
     spec_names = {f"{route}_closure": f"{route}_specs" for route in routes}
     result = {}
     for name in spec_names if names is None else names:
