@@ -6832,6 +6832,14 @@ namespace models {
       subtitle_contour_support.reset();
     }
 
+    // A new estimator and every hard-excluded admission publish initialized one-pixel native-band
+    // placeholders, native support and feature history included. Replacing an eligible band
+    // releases its backing at the admitted context boundary; the next observation that reads the
+    // history resizes and clears it, so its count starts at one.
+    bool ensure_subtitle_contour_placeholders() {
+      return ensure_subtitle_contour_textures(1u, 1u) && ensure_subtitle_contour_history();
+    }
+
     bool reset_subtitle_state() {
       invalidate_publication();
       subtitle_selected_matte_commands = false;
@@ -6959,7 +6967,7 @@ namespace models {
                                      subtitle_contour_observation.buffer,
                                      subtitle_contour_observation.srv,
                                      subtitle_contour_observation.uav, 4u)) &&
-        ensure_subtitle_contour_textures(1u, 1u);
+        ensure_subtitle_contour_placeholders();
       if (!resources_ok) {
         return false;
       }
@@ -9815,7 +9823,7 @@ namespace models {
       const bool contour_resources_ready =
         accepted_optional_work == depth_optional_work_mode_e::suppress_subtitle ||
         (subtitle_context.disabled ?
-           ensure_subtitle_contour_textures(1u, 1u) :
+           ensure_subtitle_contour_placeholders() :
            ensure_subtitle_contour_textures(input_region.width(), input_region.height()));
       if (!contour_resources_ready) {
         mark_terminal_failure();

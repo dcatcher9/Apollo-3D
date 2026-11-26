@@ -924,10 +924,11 @@ Outside eligible live video context, hard disable submits no OCR preprocessing, 
 UIP4 or subtitle conditioning. A valid depth inference publishes the fresh post-limit Base through
 the existing final-field publication texture. Dump 3D cannot override this exclusion or serialize
 frozen subtitle resources as current evidence.
-Hard exclusion uses initialized one-pixel native-band placeholders, releasing an earlier
-eligible context's native-band backing at the admitted context boundary. Ordinary observations
-allocate their exact source crop. Temporary same-context suppression retains the existing backing
-and pixels instead of reallocating that frozen history.
+Hard exclusion uses initialized one-pixel native-band placeholders, native support and feature
+history included, releasing an earlier eligible context's native-band backing at the admitted
+context boundary. Ordinary observations allocate their exact source crop and size support and
+feature history to it only for an observation that reads them. Temporary same-context suppression
+retains the existing backing and pixels instead of reallocating that frozen history.
 
 During a native USER32 interactive move/size
 observation, the accepted full-source depth frame explicitly suppresses the optional subtitle

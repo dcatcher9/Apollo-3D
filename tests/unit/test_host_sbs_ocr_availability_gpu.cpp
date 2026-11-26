@@ -249,6 +249,21 @@ TEST_F(TensorRtOcrAvailabilityGpuTest, MissingPackagedOcrPreservesJoinedDepthAnd
   };
   estimator.set_subtitle_conditioning_diagnostics_always(false);
   EXPECT_FALSE(estimator.subtitle_conditioning_diagnostics_allocated_for_tests());
+  // Before any ordinary observation and after hard exclusion, native support and feature history
+  // are initialized one-pixel placeholders, never absent or an earlier band's backing.
+  const auto expect_history_placeholders = [](const models::depth_observation_views_t &observation) {
+    for (auto *view : {observation.subtitle_contour_support.Get(), observation.subtitle_contour_history.Get()}) {
+      ASSERT_TRUE(view);
+      ComPtr<ID3D11Resource> resource;
+      view->GetResource(&resource);
+      ComPtr<ID3D11Texture2D> texture;
+      ASSERT_TRUE(SUCCEEDED(resource.As(&texture)));
+      D3D11_TEXTURE2D_DESC desc {};
+      texture->GetDesc(&desc);
+      EXPECT_EQ(desc.Width, 1u);
+      EXPECT_EQ(desc.Height, 1u);
+    }
+  };
 
   // A session may start during USER32 movement, before any ordinary observation allocated
   // a native band. Suppression must use initialized placeholders and still publish real depth.
@@ -267,6 +282,7 @@ TEST_F(TensorRtOcrAvailabilityGpuTest, MissingPackagedOcrPreservesJoinedDepthAnd
   EXPECT_FALSE(estimator.subtitle_conditioning_diagnostics_allocated_for_tests());
   EXPECT_EQ(initial_completed.observation.final_parallax(), initial_completed.observation.shadow_base_final_parallax.Get());
   EXPECT_FALSE(initial_completed.observation.subtitle_glyph_matte);
+  expect_history_placeholders(initial_completed.observation);
 
   // Ordinary live work leaves the diagnostic scratch absent until the first late dump.
   for (std::uint64_t observation = 1u; observation <= 3u; ++observation) {
@@ -409,6 +425,8 @@ TEST_F(TensorRtOcrAvailabilityGpuTest, MissingPackagedOcrPreservesJoinedDepthAnd
     if (!subtitle_disabled) {
       ASSERT_TRUE(read_words(device.Get(), context.Get(), completed.observation.subtitle_selected_matte.Get(), matte));
       EXPECT_TRUE(std::all_of(matte.begin(), matte.end(), [](auto word) {return word == 0u;}));
+    } else {
+      expect_history_placeholders(completed.observation);
     }
     if (diagnostics_expected) {
       ASSERT_TRUE(read_words(device.Get(), context.Get(), completed.observation.subtitle_glyph_matte.Get(), matte));
