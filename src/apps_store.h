@@ -7,6 +7,7 @@
 // standard includes
 #include <optional>
 #include <string>
+#include <string_view>
 #include <tuple>
 
 // lib includes
@@ -17,6 +18,12 @@
 
 namespace proc {
   class proc_t;
+
+  /**
+   * @brief Find the ')' that closes the '(' at `begin` in a `$(VAR)` reference.
+   * @throws std::out_of_range when the bracket is not closed before `end`.
+   */
+  std::string_view::iterator find_match(std::string_view::iterator begin, std::string_view::iterator end);
 
   /**
    * @brief Calculate a stable id based on name and image data

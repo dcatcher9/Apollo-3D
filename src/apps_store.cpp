@@ -43,9 +43,7 @@ namespace proc {
   std::string_view::iterator find_match(std::string_view::iterator begin, std::string_view::iterator end) {
     int stack = 0;
 
-    --begin;
-    do {
-      ++begin;
+    for (; begin != end; ++begin) {
       switch (*begin) {
         case '(':
           ++stack;
@@ -53,12 +51,12 @@ namespace proc {
         case ')':
           --stack;
       }
-    } while (begin != end && stack != 0);
-
-    if (begin == end) {
-      throw std::out_of_range("Missing closing bracket \')\'");
+      if (stack == 0) {
+        return begin;
+      }
     }
-    return begin;
+
+    throw std::out_of_range("Missing closing bracket \')\'");
   }
 
   std::string parse_env_val(boost::process::v1::native_environment &env, const std::string_view &val_raw) {
@@ -121,8 +119,17 @@ namespace proc {
       return DEFAULT_APP_IMAGE_PATH;
     }
 
+    // A name the filesystem library cannot convert, such as one that is not UTF-8, is an image that cannot be found
+    std::filesystem::path image_path;
+    try {
+      image_path = std::filesystem::path(app_image_path);
+    } catch (const std::filesystem::filesystem_error &) {
+      BOOST_LOG(warning) << "Couldn't find app image at path ["sv << app_image_path << ']';
+      return DEFAULT_APP_IMAGE_PATH;
+    }
+
     // get the image extension and convert it to lowercase
-    auto image_extension = std::filesystem::path(app_image_path).extension().string();
+    auto image_extension = image_path.extension().string();
     boost::to_lower(image_extension);
 
     // return the default box image if extension is not "png"
@@ -130,9 +137,10 @@ namespace proc {
       return DEFAULT_APP_IMAGE_PATH;
     }
 
-    // check if image is in assets directory
-    auto full_image_path = std::filesystem::path(SUNSHINE_ASSETS_DIR) / app_image_path;
-    if (std::filesystem::exists(full_image_path)) {
+    // check if image is in assets directory; an error checking a path counts as a missing image
+    std::error_code code;
+    auto full_image_path = std::filesystem::path(SUNSHINE_ASSETS_DIR) / image_path;
+    if (std::filesystem::exists(full_image_path, code)) {
       return full_image_path.string();
     } else if (app_image_path == "./assets/steam.png") {
       // handle old default steam image definition
@@ -140,8 +148,7 @@ namespace proc {
     }
 
     // check if specified image exists
-    std::error_code code;
-    if (!std::filesystem::exists(app_image_path, code)) {
+    if (!std::filesystem::exists(image_path, code)) {
       // return default box image if image does not exist
       BOOST_LOG(warning) << "Couldn't find app image at path ["sv << app_image_path << ']';
       return DEFAULT_APP_IMAGE_PATH;
