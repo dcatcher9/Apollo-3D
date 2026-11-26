@@ -155,11 +155,10 @@ namespace models {
      */
     std::string ocr_engine_filename(std::string_view compatibility_tag = {});
 
-    /** Ensure the ONNX source exists locally, downloading it atomically when necessary. */
+    /** The packaged ONNX source of the model, or an empty path when it is missing. */
     std::filesystem::path ensure_onnx_available(
         const std::filesystem::path& assets_dir,
-        const std::string& model_name,
-        const std::string& model_url);
+        const std::string& model_name);
 
     /** Full SHA-256 of a file, as lowercase hexadecimal. Empty means the file could not be read. */
     std::string file_sha256_hex(const std::filesystem::path& path);

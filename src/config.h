@@ -39,7 +39,7 @@ namespace config {
   // from the generated Depth Coordinate V2 calibration contract.
   struct depth_model_info {
     std::string name;  ///< ONNX file stem and logical model key; TensorRT engines add a build-recipe suffix.
-    std::string url;  ///< Download source for <name>.onnx if absent. Empty = local-only.
+    std::string url;  ///< Public source of the model; part of its calibration identity. Nothing is downloaded.
   };
 
   struct video_t {

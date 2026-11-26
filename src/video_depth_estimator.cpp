@@ -1311,7 +1311,7 @@ namespace models {
   ) {
     std::lock_guard<std::mutex> lock(g_tensorrt_compile_mutex);
 
-    artifact.source_path = ensure_onnx_available(assets_dir, model.name, model.url);
+    artifact.source_path = ensure_onnx_available(assets_dir, model.name);
     if (artifact.source_path.empty()) {
       BOOST_LOG(warning) << "ONNX source not found. TensorRT compilation aborted.";
       return false;
