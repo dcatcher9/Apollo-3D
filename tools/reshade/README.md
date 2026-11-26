@@ -1380,11 +1380,14 @@ checks also cannot conclusively identify the semantic role of every plausible de
 
 The CPU policy test runs under CTest. The opt-in runtime build also retains a D3D12 selector
 reference fixture using the separately supplied legacy shader. It draws real depth targets
-through the official runtime, without injecting `DEPTH`:
+through the official runtime, without injecting `DEPTH`, and loads the test add-on, whose record of
+Generic's selection (`SunshineDepthTestGenericSelection`) it reads after every Present: the
+selected allocation, the backup copy its depth was captured into and whether that copy is shown,
+current or held. It never reads the effects' `DEPTH` binding, except in `--depth-binding-only`:
 
 ```powershell
 .\cmake-build-reshade\reshade_depth_selection_runtime_test.exe C:\test\ReShade64.dll `
-  E:\Git\Repo\Depth3D\Shaders .\cmake-build-reshade\SunshineSBS.addon64 `
+  E:\Git\Repo\Depth3D\Shaders .\cmake-build-reshade\SunshineSBSTest.addon64 `
   .\cmake-build-reshade\scene-depth-dx12 1280 720
 ```
 
@@ -1395,19 +1398,19 @@ ahead on the content score) cannot challenge it, and after both pause for 12 Pre
 that draws only flat depth, recovery must bind the native source and keep it
 ([recovery rule](../../docs/reshade-sbs.md#selecting-scene-depth)).
 
-`--reload-only` checks coverage over presents through native-resource recreation with the
-production add-on. A lower-resolution scene target draws every present while recreated native
-depth draws every second, then every third present: the every-present source must stay bound
-with Automatic readiness on every present. Once native depth draws every present it must promote
+`--reload-only` checks coverage over presents through native-resource recreation. A
+lower-resolution scene target draws every present while recreated native depth draws every second,
+then every third present: the every-present source must stay selected and ready on every present.
+Once native depth draws every present it must promote
 without leaving a present flat through the handover; when it returns to every other present,
 the every-present source must reclaim those presents, and until it does each of them holds
 native depth's last frame (within the source age), so no present is flat. Each replaced native
 allocation stays allocated and is never drawn again, as a game that keeps its old depth target
-alive; it must never be bound or ready (the D32 and D32S8 backups are told apart by format).
-After every converged selection, all fixture modes also check the binding and readiness on each
-of the next 90 Presents. The binding and readiness are
-checked after every present, never periodically, because a periodic check can share the
-cadence's phase. Both reloads run, the second with a D32S8 target. The rule itself
+alive; it must never be selected or ready (the D32 and D32S8 allocations are told apart by their
+typeless formats). After every converged selection, all fixture modes also check the selection and
+its readiness on each of the next 90 Presents. They are checked after every present, never
+periodically, because a periodic check can share the cadence's phase. Both reloads run, the second
+with a D32S8 target. The rule itself
 is in the [scene-depth contract](../../docs/reshade-sbs.md#selecting-scene-depth) and the CPU
 policy test covers its 1-in-2/1-in-3, A/B/C capture-set, single-miss and completeness cases.
 The current reference-policy fixture below covers continuous sources and isolated replacements, not
@@ -1430,8 +1433,15 @@ Histogram cases compare equally complete, equal-size buffers with narrow and bro
 distributions, retain useful native-resolution depth against an equally complete broader scaled
 source, and verify narrow-range validity and both normal/reversed depth conventions. The earlier resolution
 comparison uses mirrored gradients with identical histograms to isolate the resolution preference.
-It reads the actual shader depth texture as well as the
-chosen binding, comparing linear depth with the independently projected input gradient.
+It reads the selected backup copy itself between Presents and compares its depth, linearized by
+the effect's projection, with the independently projected input gradient.
+
+`--depth-binding-only` is the one check of the `DEPTH` binding, the product feature that lets other
+effects read the selected depth: after the first selection and again after a native source is
+promoted, on each of 90 Presents the frozen effect's `DEPTH` texture must be the selected backup
+copy with `Sunshine_DepthReady` set, and the effect's own linearized depth must show the selected
+scene's projected gradient.
+
 The opt-in `reshade_depth_sampler_d3d11_test.exe` needs no arguments and checks the production
 native sampler across D16, D24S8, D32 and D32S8 backups, full and padded viewports, and preservation
 of the caller's compute state. It also checks immutable program reuse, shared-runtime retirement,
@@ -1639,7 +1649,7 @@ device with no queue, swapchain or frame (as Assassin's Creed Shadows creates) t
 destroyed with frames in flight. It is the lifecycle test of
 [Session-level tests](#session-level-tests).
 
-Shared native-depth, uniform and HDR mono observations of the depth fixtures live in
+Shared uniform and HDR mono observations of the depth fixtures live in
 `test_raw_runtime_fixture.h`. The shared shader/transport fixtures retain their own contracts.
 
 ### Test builds
@@ -1920,7 +1930,7 @@ Docs: [Depth output](../../docs/reshade-sbs.md#depth-output).
 - [`projection_depth_controller.h`](projection_depth_controller.h), [`projection_depth_scale.h`](projection_depth_scale.h), [`scene_gain.h`](scene_gain.h), [`scene_feedback.h`](scene_feedback.h): the stereo gain and zero plane from camera coefficients or depth moments, and the frozen feedback of one provider input. Docs: [Scene placement](../../docs/reshade-sbs.md#scene-placement).
 - [`raw_scene_policy.h`](raw_scene_policy.h), [`raw_scene_pool.h`](raw_scene_pool.h), [`provided_raw_scene.h`](provided_raw_scene.h): the relative controls of a raw depth/color pair and its encoding identity across rotating resources. Docs: [Experimental raw-depth automation](../../docs/reshade-sbs.md#experimental-raw-depth-automation).
 - [`depth_encoding.h`](depth_encoding.h), [`depth_jitter.h`](depth_jitter.h): the affine depth decode and the jitter registration of depth samples. Docs: [Depth jitter registration](../../docs/reshade-sbs.md#depth-jitter-registration).
-- [`game3d_test_render.h`](game3d_test_render.h), [`game3d_test_teardown.h`](game3d_test_teardown.h), [`game3d_test_depth_events.h`](game3d_test_depth_events.h), [`game3d_test_event_ring.h`](game3d_test_event_ring.h): test add-on only records (last render, teardown order, DEPTH binding events) and their event ring. Docs: [Test builds](#test-builds).
+- [`game3d_test_render.h`](game3d_test_render.h), [`game3d_test_teardown.h`](game3d_test_teardown.h), [`game3d_test_depth_events.h`](game3d_test_depth_events.h), [`game3d_test_event_ring.h`](game3d_test_event_ring.h): test add-on only records (last render, Generic hold and selection, teardown order, DEPTH binding events) and their event ring. Docs: [Test builds](#test-builds).
 
 #### UI
 

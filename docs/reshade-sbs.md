@@ -7000,8 +7000,9 @@ another depth target pauses an already tracked, live eligible probe instead of r
 backup and restarting qualification. Only the candidate's next current rendered frame may supply
 another sample; inactivity never makes an old backup current. Destruction, filtering and the
 original two-second probe deadline still cancel it. The official-runtime `--reload-only` regression checks coverage
-over Presents through resource recreation (the second recreation as D32S8), verifying the binding
-and readiness after every present; the main run adds a one-third-resolution D32S8 end-of-frame
+over Presents through resource recreation (the second recreation as D32S8), verifying the selection
+and its readiness (the test add-on's record) after every present; the main run adds a
+one-third-resolution D32S8 end-of-frame
 capture and keeps a lone scene cleared after drawing unready (mono).
 
 A probe chosen during backup retirement owns its pending visit before allocation. An unrelated

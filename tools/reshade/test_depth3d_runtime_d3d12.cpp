@@ -426,9 +426,13 @@ namespace {
       require(fs::is_regular_file(shader_root / effect_file), "Missing separately supplied Depth3D shader");
       const char *addon_filename = "SunshineSBS.addon64";
       bool automatic_performance = false;
+#ifdef SUNSHINE_DEPTH_SELECTION_RUNTIME
+      // The selection fixture and the fixtures built on it set this flag: they
+      // read the test add-on's records (test_depth_selection_runtime.cpp).
+      if (sunshine_camera_fixture::flag("SUNSHINE_GAME3D_AUTOMATIC_ACTIONS_TEST")) addon_filename = "SunshineSBSTest.addon64";
+#endif
 #ifdef SUNSHINE_RAW_SCENE_RUNTIME
       automatic_performance = sunshine_camera_fixture::flag("SUNSHINE_GAME3D_AUTOMATIC_PERFORMANCE");
-      if (sunshine_camera_fixture::flag("SUNSHINE_GAME3D_AUTOMATIC_ACTIONS_TEST")) addon_filename = "SunshineSBSTest.addon64";
 #endif
       fs::create_directories(directory / "effects");
       fs::create_directories(directory / "addons");

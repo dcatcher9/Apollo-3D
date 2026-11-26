@@ -20,24 +20,6 @@ namespace {
       require(clock.bind(GetModuleHandleW(L"SunshineSBSTest.addon64")), "The test add-on lacks its game clock exports");
       clock.engage();
     }
-    std::vector<std::uint8_t> selected_native_depth() {
-      ID3D12Resource *selected = nullptr;
-      observed.runtime->enumerate_texture_variables(effect_file, [&](api::effect_runtime *runtime, api::effect_texture_variable variable) {
-        char name[256] {};
-        runtime->get_texture_variable_name(variable, name);
-        if (!named(name, "DepthBufferTex")) return;
-        api::resource_view view {};
-        runtime->get_texture_binding(variable, &view, nullptr);
-        require(view.handle, "Reference oracle lost the real selected DEPTH binding");
-        selected = reinterpret_cast<ID3D12Resource *>(runtime->get_device()->get_resource_from_view(view).handle);
-      });
-      require(selected, "Reference oracle cannot read selected native depth");
-      const auto desc = selected->GetDesc();
-      require(desc.Width == scene->width && desc.Height == scene->height &&
-        (desc.Format == DXGI_FORMAT_R32_FLOAT || desc.Format == DXGI_FORMAT_R32_TYPELESS),
-        "Reference oracle selected unexpected geometry/format or the decoy");
-      return read(selected);
-    }
     float scalar(const char *name) {
       float value = 0;
       observed.runtime->get_uniform_value_float(uniform(name), &value, 1);

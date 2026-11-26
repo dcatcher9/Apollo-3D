@@ -51,4 +51,21 @@ namespace sunshine_game3d::test {
     std::uint8_t verdict{};
     std::uint64_t shown_identity{};
   };
+
+  // TEST add-on only (SunshineDepthTestGenericSelection): Generic's selection
+  // as a runtime's last Present left it (depth_addon.cpp generic_depth_data),
+  // for the selection fixture, which observes the selector through it rather
+  // than through the effects' DEPTH binding: the Present whose depth frame
+  // made it (the device's native Present index; 0 before the first), the
+  // selected depth-stencil and its allocation's description (typeless
+  // format), the backup texture its depth was captured into (the texture
+  // native Game 3D samples), and whether that copy is shown on the Present,
+  // current or held. Without a selection every field after present is 0. The
+  // handles are identities; a fixture reads the backup only between Presents,
+  // when it rests in the copy-destination state.
+  struct generic_selection {
+    std::uint64_t present{}, source{}, backup{};
+    std::uint32_t width{}, height{}, format{};
+    bool ready{}, held{};
+  };
 }

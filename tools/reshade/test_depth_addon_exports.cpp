@@ -1099,6 +1099,31 @@ extern "C" __declspec(dllexport) BOOL SunshineDepthTestGenericHold(effect_runtim
 	return TRUE;
 }
 
+// Generic's selection as this runtime's last Present left it
+// (game3d_test_render.h generic_selection): the selection fixture's per-Present
+// observation of the selector. Its readiness is the selection's own, the
+// readiness bind_generic publishes without the effects' stable copy of a
+// rotating source. Read on the Present thread after the Present, which alone
+// writes these fields; nothing in the add-on reads this copy.
+extern "C" __declspec(dllexport) BOOL SunshineDepthTestGenericSelection(effect_runtime *runtime,
+	sunshine_game3d::test::generic_selection *output)
+{
+	if (!s_registered || runtime == nullptr || output == nullptr) return FALSE;
+	const auto *data = runtime->get_private_data<generic_depth_data>();
+	if (data == nullptr) return FALSE;
+	*output = {};
+	output->present = data->native_access_present;
+	if (data->selected_shader_resource == 0) return TRUE;
+	output->source = data->selected_depth_stencil.handle;
+	output->backup = runtime->get_device()->get_resource_from_view(data->selected_shader_resource).handle;
+	output->width = data->selected_desc.texture.width;
+	output->height = data->selected_desc.texture.height;
+	output->format = static_cast<uint32_t>(data->selected_desc.texture.format);
+	output->ready = data->capture_ready || data->held;
+	output->held = data->held;
+	return TRUE;
+}
+
 // The capture owner's newest depth_choice for this runtime's presenting
 // queue, the consumer queue the provider acquires on, for the per-Present
 // trace. False before that queue's first acquisition reached the selection.

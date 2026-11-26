@@ -3,6 +3,7 @@
 #define SUNSHINE_DEPTH_SELECTION_RUNTIME
 #include "test_depth3d_runtime_d3d12.cpp"
 #include "../../src/reshade_bridge_protocol.h"
+#include "game3d_test_render.h"
 #include "test_game3d_present_trace.h"
 #include <d3dcompiler.h>
 #include <memory>
@@ -24,52 +25,56 @@ namespace {
     std::unique_ptr<target_t> scene, decoy, shadow;
     com_ptr<ID3D12RootSignature> root;
     com_ptr<ID3D12PipelineState> depth32_pipeline, depth32s8_pipeline;
-    // The per-Present trace (test_game3d_present_trace.h) of this fixture's
-    // own run, which its main turns on: after each Present it drives, the
-    // DEPTH binding it observes (the bound resource's rank, size and format)
-    // and the effect's Sunshine_DepthReady. The fixtures built on this one
-    // trace through the test add-on instead (test_game3d_native_observation.h).
-    bool trace_presents = false;
+    // This fixture's own run (run_selection turns it on) observes the selector
+    // after each Present through the test add-on's record of Generic's
+    // selection (SunshineDepthTestGenericSelection, game3d_test_render.h): the
+    // selected allocation, its backup copy and that copy's readiness. Only
+    // check_depth_binding reads the effects' DEPTH binding. The fixtures built
+    // on this one observe native Game 3D renders instead
+    // (test_game3d_native_observation.h).
+    bool observe_selection = false;
+    sunshine_game3d::test::generic_selection selection {};
+    BOOL (*query_selection)(api::effect_runtime *, sunshine_game3d::test::generic_selection *) = nullptr;
+    // The per-Present trace (test_game3d_present_trace.h) of that run: after
+    // each Present, the selection it observes (the selected resource's rank,
+    // its size and format) and its readiness.
     std::uint64_t traced_presents = 0;
 
     void step() {
       fixture_t::step();
-      if (trace_presents) trace_present();
+      if (observe_selection) observe_present();
     }
 
-    void trace_present() {
+    // The record of the Present just made. Once the selector has run, each
+    // Present must have run it again: every observation is that Present's.
+    void observe_present() {
+      sunshine_game3d::test::generic_selection current {};
+      require(observed.runtime && query_selection(observed.runtime, &current), "The test add-on's Generic selection query failed");
+      require(!selection.present || current.present > selection.present, "A Present left no depth selection of its own to observe");
+      selection = current;
       auto &out = game3d_present_trace::out;
-      // From the first Present the effect rendered: shader compilation adds no line.
-      if (!out.active() || !observed.runtime || !observed.renders) return;
-      std::uint64_t resource = 0;
-      D3D12_RESOURCE_DESC desc {};
-      const auto view = selected_binding();
-      if (view.handle) {
-        resource = observed.runtime->get_device()->get_resource_from_view(view).handle;
-        if (resource) desc = reinterpret_cast<ID3D12Resource *>(resource)->GetDesc();
-      }
-      const auto ready_variable = uniform("Sunshine_DepthReady", false);
-      bool ready = false;
-      if (ready_variable.handle) observed.runtime->get_uniform_value_bool(ready_variable, &ready, 1);
+      if (!out.active() || !selection.present) return;
       out.begin();
-      out.add("p=%lld bind=%u geo=%llux%u fmt=%u rdy=%s", out.present(++traced_presents),
-        out.rank(game3d_present_trace::resource, resource), static_cast<unsigned long long>(desc.Width), unsigned(desc.Height),
-        unsigned(desc.Format), ready_variable.handle ? (ready ? "1" : "0") : "-");
+      out.add("p=%lld sel=%u geo=%ux%u fmt=%u rdy=%u held=%u", out.present(++traced_presents),
+        out.rank(game3d_present_trace::resource, selection.source), unsigned(selection.width), unsigned(selection.height),
+        unsigned(selection.format), unsigned(selection.ready), unsigned(selection.held));
       out.end();
     }
 
+    // The selected allocation has this size and the selection shows its copy on this Present.
+    bool selected_ready(unsigned expected_width, unsigned expected_height) const {
+      return selection.ready && selection.width == expected_width && selection.height == expected_height;
+    }
+
     void check_unified_addon() {
-      bool actions_test = false;
-#ifdef SUNSHINE_RAW_SCENE_RUNTIME
-      actions_test = sunshine_camera_fixture::flag("SUNSHINE_GAME3D_AUTOMATIC_ACTIONS_TEST");
-#endif
-      const HMODULE module = GetModuleHandleW(actions_test ? L"SunshineSBSTest.addon64" : L"SunshineSBS.addon64");
-      require(module != nullptr, "Unified SunshineSBS addon was not loaded by the official runtime");
+      // Every fixture built on this one reads the test add-on's records, so it
+      // loads the test-only DLL (test_depth3d_runtime_d3d12.cpp initialize).
+      const HMODULE module = GetModuleHandleW(L"SunshineSBSTest.addon64");
+      require(module != nullptr, "Unified SunshineSBSTest addon was not loaded by the official runtime");
       const auto name = reinterpret_cast<const char *const *>(GetProcAddress(module, "NAME"));
-      require(name && *name && std::strcmp(*name, actions_test ? "Sunshine SBS TEST ONLY" : "Sunshine 3D") == 0,
-        actions_test ? "Explicit action fixture requires the test-only SunshineSBSTest DLL" : "Selection fixture requires the production unified Sunshine 3D addon");
-      require(!actions_test || GetModuleHandleW(L"SunshineSBS.addon64") == nullptr,
-        "Test-only action fixture also loaded a production addon");
+      require(name && *name && std::strcmp(*name, "Sunshine SBS TEST ONLY") == 0,
+        "Selection fixture requires the test-only SunshineSBSTest DLL");
+      require(GetModuleHandleW(L"SunshineSBS.addon64") == nullptr, "Test-only selection fixture also loaded a production addon");
       require(GetModuleHandleW(L"SunshineDepth.addon64") == nullptr && GetModuleHandleW(L"SunshineDepthProbe.addon64") == nullptr,
               "A legacy depth addon or temporary probe is loaded alongside the unified addon");
       char disabled[256] {};
@@ -88,9 +93,7 @@ namespace {
       require(valid, "Unified addon producer mapping has an invalid identity or protocol layout");
       // This hidden-window fixture validates registration and depth data. The
       // controlled-foreground Present fixture validates shared frame delivery.
-      std::puts(actions_test ?
-        "PASS explicitly selected Sunshine SBS TEST ONLY addon initializes selector/exporter for action validation; no production, legacy or probe addon loaded" :
-        "PASS one production Sunshine 3D addon initializes both selector and exporter; Generic Depth disabled and no legacy/probe addon loaded");
+      std::puts("PASS one Sunshine SBS TEST ONLY addon initializes both selector and exporter; Generic Depth disabled and no production, legacy or probe addon loaded");
     }
 
     void create_pipeline() {
@@ -246,31 +249,98 @@ float ps(float4 position : SV_Position) : SV_Depth {
       if (unbind) commands->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
     }
 
-    api::resource_view selected_binding() {
-      api::resource_view selected {};
-      if (!observed.runtime) return selected;
+    // The independently projected input gradient at uv: the linear depth of
+    // the known reversed-Z DSV pattern (DMA=40: near/far .125/40). Patterns
+    // 7/8 store normal-Z depth; this is the projection of their complement.
+    static float projected_pattern(unsigned pattern, float u, float v) {
+      float raw = (pattern == 3 || pattern == 8) ? .04f + .008f * u + .004f * v : .01f + .02f * u + .015f * v;
+      if (pattern == 6 || pattern == 7) raw = float(std::exp2(-10.0 + 8.0 * (.7 * u + .3 * v)));
+      if (pattern == 9) raw = .01f + .02f * (1 - u) + .015f * v;
+      if ((pattern == 4 && (u < .35f || u > .65f || v < .1f || v > .9f)) || (pattern == 5 && v < .35f) || (pattern == 20 && v < .25f)) raw = 0;
+      return 1.f / (1.f + 319.f * raw);
+    }
+
+    // Twelve points of a linear-depth image (read at a texel of a
+    // width x height image) against projected_pattern: each within .002 and
+    // spread over more than .001.
+    template<class DepthAt> static bool varied_depth(unsigned pattern, float viewport_fraction, unsigned image_width, unsigned image_height,
+        DepthAt depth_at) {
+      float low = 1, high = 0;
+      for (unsigned y = 1; y <= 3; ++y) for (unsigned x = 1; x <= 4; ++x) {
+        const auto tx = unsigned(double(image_width) * viewport_fraction * x / 5);
+        const auto ty = unsigned(image_height * viewport_fraction * y / 4);
+        const float depth = depth_at(tx, ty);
+        if (!std::isfinite(depth) || depth <= 0 || depth > 1) return false;
+        const float u = (tx + .5f) / (float(image_width) * viewport_fraction), v = (ty + .5f) / (image_height * viewport_fraction);
+        if (std::abs(depth - projected_pattern(pattern, u, v)) > .002f) return false;
+        low = std::min(low, depth); high = std::max(high, depth);
+      }
+      return high - low > .001f;
+    }
+
+    // The selected depth itself: the backup copy the add-on captured for the
+    // latest Present (the texture native Game 3D samples), read between
+    // Presents, with the projection and bounds that check_depth_binding
+    // holds the effect's own linearized DEPTH to (effect_linear_depth).
+    bool selected_depth_matches(unsigned pattern = 1, float viewport_fraction = 1.f) {
+      if (!selection.ready || !selection.backup) return false;
+      auto *backup = reinterpret_cast<ID3D12Resource *>(selection.backup);
+      const auto desc = backup->GetDesc();
+      require(desc.Width == selection.width && desc.Height == selection.height, "The selected backup copy differs from its allocation");
+      // A Generic backup rests in the copy-destination state between Presents
+      // (depth_addon.cpp set_generic_sampling_state). A D32S8 copy reads its depth plane.
+      const auto pixels = read(backup, D3D12_RESOURCE_STATE_COPY_DEST);
+      require(pixels.size() == size_t(desc.Width) * desc.Height * sizeof(float), "Unexpected selected-depth readback size");
+      return varied_depth(pattern, viewport_fraction, unsigned(desc.Width), desc.Height, [&](unsigned tx, unsigned ty) {
+        float stored = 0;
+        std::memcpy(&stored, pixels.data() + (size_t(ty) * size_t(desc.Width) + tx) * sizeof(float), sizeof(float));
+        const float raw = pattern == 7 || pattern == 8 ? 1.f - stored : stored;
+        return 1.f / (1.f + 319.f * raw);
+      });
+    }
+
+    void wait_for_scene(const char *label, unsigned expected_width, unsigned expected_height, unsigned pattern = 1, float viewport_fraction = 1.f) {
+      const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(14);
+      unsigned consecutive = 0, frames = 0;
+      while (std::chrono::steady_clock::now() < until) {
+        step();
+        if (++frames % 8) continue;
+        if (selected_ready(expected_width, expected_height) && selected_depth_matches(pattern, viewport_fraction)) {
+          if (++consecutive == 3) {
+            // Sampled checks share a cadence's phase (every eighth Present):
+            // once converged, the selection and its readiness hold on every Present.
+            for (unsigned present = 0; present != 90; ++present) {
+              step();
+              require(selected_ready(expected_width, expected_height), "Converged scene depth lost its selection or readiness on a Present");
+            }
+            std::printf("PASS %s: selected depth=%ux%u with spatially varying scene depth in its copy, selected and ready on the next 90 Presents\n",
+              label, expected_width, expected_height);
+            return;
+          }
+        } else consecutive = 0;
+      }
+      std::fprintf(stderr, "Selection timeout: %s expected=%ux%u actual=%ux%u ready=%u\n", label, expected_width, expected_height,
+        unsigned(selection.width), unsigned(selection.height), unsigned(selection.ready));
+      throw std::runtime_error("Automatic scene-depth selection did not converge");
+    }
+
+    // The effects' DEPTH binding (the frozen effect's DepthBufferTex), which
+    // only check_depth_binding reads.
+    api::resource_view effect_depth_binding() {
+      api::resource_view bound {};
       observed.runtime->enumerate_texture_variables(effect_file, [&](api::effect_runtime *runtime, api::effect_texture_variable variable) {
         char name[256] {};
         runtime->get_texture_variable_name(variable, name);
         if (!named(name, "DepthBufferTex")) return;
-        runtime->get_texture_binding(variable, &selected, nullptr);
+        runtime->get_texture_binding(variable, &bound, nullptr);
       });
-      return selected;
+      return bound;
     }
 
-    D3D12_RESOURCE_DESC selected_description() {
-      D3D12_RESOURCE_DESC desc {};
-      const auto view = selected_binding();
-      if (view.handle) {
-        const auto resource = observed.runtime->get_device()->get_resource_from_view(view);
-        if (resource.handle) desc = reinterpret_cast<ID3D12Resource *>(resource.handle)->GetDesc();
-      }
-      return desc;
-    }
-
-    bool varied_linear_depth(unsigned pattern = 1, float viewport_fraction = 1.f) {
+    // The effect's own linearized DEPTH (texzBufferN_P, RG16F; point-sampled
+    // and FP16-rounded within the bounds) against the projected gradient.
+    bool effect_linear_depth(unsigned pattern) {
       com_ptr<ID3D12Resource> linear;
-      if (!observed.runtime) return false;
       observed.runtime->enumerate_texture_variables(effect_file, [&](api::effect_runtime *runtime, api::effect_texture_variable variable) {
         char name[256] {};
         runtime->get_texture_variable_name(variable, name);
@@ -287,57 +357,35 @@ float ps(float4 position : SV_Position) : SV_Depth {
       require(desc.Format == DXGI_FORMAT_R16G16_FLOAT, "Scene-depth oracle expects RG16F linear depth");
       const auto pixels = read(linear.p);
       require(pixels.size() == size_t(desc.Width) * desc.Height * 4, "Unexpected linear-depth readback size");
-      float low = 1, high = 0;
-      for (unsigned y = 1; y <= 3; ++y) for (unsigned x = 1; x <= 4; ++x) {
-        const auto tx = unsigned(double(desc.Width) * viewport_fraction * x / 5);
-        const auto ty = unsigned(desc.Height * viewport_fraction * y / 4);
-        const size_t offset = (size_t(ty) * size_t(desc.Width) + tx) * 4 + 2;
+      return varied_depth(pattern, 1.f, unsigned(desc.Width), desc.Height, [&](unsigned tx, unsigned ty) {
         std::uint16_t value = 0;
-        std::memcpy(&value, pixels.data() + offset, 2);
-        const float depth = half_float(value);
-        if (!std::isfinite(depth) || depth <= 0 || depth > 1) return false;
-        // Independent projection oracle for the known reversed-Z DSV gradient.
-        // DMA=40 gives near/far=.125/40; tolerate point-sampling and FP16 rounding.
-        const float u = (tx + .5f) / (float(desc.Width) * viewport_fraction), v = (ty + .5f) / (desc.Height * viewport_fraction);
-        float raw = (pattern == 3 || pattern == 8) ? .04f + .008f * u + .004f * v : .01f + .02f * u + .015f * v;
-        if (pattern == 6 || pattern == 7) raw = float(std::exp2(-10.0 + 8.0 * (.7 * u + .3 * v)));
-        if (pattern == 9) raw = .01f + .02f * (1 - u) + .015f * v;
-        // Patterns 7/8 use normal-Z with Depth_Map=0; the same projection of
-        // their complementary raw depth supplies an independent pixel oracle.
-        if ((pattern == 4 && (u < .35f || u > .65f || v < .1f || v > .9f)) || (pattern == 5 && v < .35f) || (pattern == 20 && v < .25f)) raw = 0;
-        const float expected = 1.f / (1.f + 319.f * raw);
-        if (std::abs(depth - expected) > .002f) return false;
-        low = std::min(low, depth); high = std::max(high, depth);
-      }
-      return high - low > .001f;
+        std::memcpy(&value, pixels.data() + (size_t(ty) * size_t(desc.Width) + tx) * 4 + 2, 2);
+        return half_float(value);
+      });
     }
 
-    void wait_for_scene(const char *label, unsigned expected_width, unsigned expected_height, unsigned pattern = 1, float viewport_fraction = 1.f) {
-      const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(14);
-      unsigned consecutive = 0, frames = 0;
-      while (std::chrono::steady_clock::now() < until) {
+    bool effect_depth_ready() {
+      bool value = false;
+      observed.runtime->get_uniform_value_bool(uniform("Sunshine_DepthReady"), &value, 1);
+      return value;
+    }
+
+    // The DEPTH binding for other effects, a product feature the selection
+    // checks above no longer observe: on each of 90 Presents the frozen
+    // effect's DEPTH texture is the add-on's selected copy with
+    // Sunshine_DepthReady its readiness, and the effect's own linearized
+    // depth shows the selected scene's projected gradient.
+    void check_depth_binding(const char *label, unsigned pattern) {
+      for (unsigned present = 0; present != 90; ++present) {
         step();
-        if (++frames % 8) continue;
-        const auto selected = selected_description();
-        if (selected.Width == expected_width && selected.Height == expected_height && varied_linear_depth(pattern, viewport_fraction)) {
-          if (++consecutive == 3) {
-            // Sampled checks share a cadence's phase (every eighth Present):
-            // once converged, the binding and readiness hold on every Present.
-            for (unsigned present = 0; present != 90; ++present) {
-              step();
-              const auto bound = selected_description();
-              require(bound.Width == expected_width && bound.Height == expected_height && depth_ready(),
-                "Converged scene depth lost its binding or readiness on a Present");
-            }
-            std::printf("PASS %s: actual DEPTH=%ux%u with spatially varying shader-visible scene depth, bound and ready on the next 90 Presents\n",
-              label, expected_width, expected_height);
-            return;
-          }
-        } else consecutive = 0;
+        const auto view = effect_depth_binding();
+        const auto bound = view.handle ? observed.runtime->get_device()->get_resource_from_view(view).handle : 0;
+        require(selection.ready && bound == selection.backup && effect_depth_ready(),
+          "The DEPTH binding did not deliver the add-on's selected depth and its readiness to the effect");
       }
-      const auto selected = selected_description();
-      std::fprintf(stderr, "Selection timeout: %s expected=%ux%u actual=%llux%u\n", label, expected_width, expected_height, static_cast<unsigned long long>(selected.Width), selected.Height);
-      throw std::runtime_error("Automatic scene-depth selection did not converge");
+      require(effect_linear_depth(pattern), "The effect's linearized DEPTH differs from the selected scene's projected gradient");
+      std::printf("PASS DEPTH binding, %s: the effect's DEPTH is the selected %ux%u copy and ready on 90 Presents, its linearized depth the scene's\n",
+        label, unsigned(selection.width), unsigned(selection.height));
     }
 
     void check_multiple_viewports() {
@@ -362,7 +410,7 @@ float ps(float4 position : SV_Position) : SV_Depth {
       wait_for_scene("scene including clear sky remains usable", width, height, 5);
       const auto stable_until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
       while (std::chrono::steady_clock::now() < stable_until) step();
-      require(varied_linear_depth(5), "Clear sky made the selector return to foreground-only depth");
+      require(selected_depth_matches(5), "Clear sky made the selector return to foreground-only depth");
       scene = target(width / 2, height / 2, 1, 1);
       wait_for_scene("lower-resolution full scene outranks native foreground-only depth", scene->width, scene->height);
       scene->pattern = 5;
@@ -370,10 +418,9 @@ float ps(float4 position : SV_Position) : SV_Depth {
       const auto scaled_sky_until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
       while (std::chrono::steady_clock::now() < scaled_sky_until) {
         step();
-        const auto selected = selected_description();
-        require(selected.Width == scene->width && selected.Height == scene->height, "Sky made native foreground depth replace the fuller scaled scene");
+        require(selection.width == scene->width && selection.height == scene->height, "Sky made native foreground depth replace the fuller scaled scene");
       }
-      require(varied_linear_depth(5), "Scaled sky scene lost its shader-visible background depth");
+      require(selected_depth_matches(5), "Scaled sky scene lost its selected background depth");
     }
 
     // Recovery ranks confirmed sources by the content score; the completeness
@@ -394,8 +441,7 @@ float ps(float4 position : SV_Position) : SV_Depth {
       const auto qualify_until = std::chrono::steady_clock::now() + std::chrono::seconds(4);
       while (std::chrono::steady_clock::now() < qualify_until) {
         step();
-        const auto selected = selected_description();
-        require(selected.Width == scene->width && selected.Height == scene->height,
+        require(selection.width == scene->width && selection.height == scene->height,
           "Native depth one completeness class lower challenged the quarter-resolution anchor");
       }
       auto menu = target(width, height, 1, 0);
@@ -407,7 +453,7 @@ float ps(float4 position : SV_Position) : SV_Depth {
       const auto stable_until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
       while (std::chrono::steady_clock::now() < stable_until) {
         step();
-        require(selected_description().Width == width, "The quarter-resolution scene reclaimed the recovered native source");
+        require(selection.width == width, "The quarter-resolution scene reclaimed the recovered native source");
       }
       std::puts("PASS recovery across a completeness class boundary: the content score ranks sources without Present-coverage gaps");
     }
@@ -425,7 +471,7 @@ float ps(float4 position : SV_Position) : SV_Depth {
       wait_for_scene("broader histogram replaces equally complete same-size narrow depth", width, height, 6);
       const auto stable_until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
       while (std::chrono::steady_clock::now() < stable_until) step();
-      require(varied_linear_depth(6), "Histogram promotion oscillated between equally sized candidates");
+      require(selected_depth_matches(6), "Histogram promotion oscillated between equally sized candidates");
       scene = target(width / 2, height / 2, 1, 6);
       // Histogram breadth breaks ties at equal active-resolution coverage. A
       // similarly complete smaller source must not displace useful native depth.
@@ -433,9 +479,9 @@ float ps(float4 position : SV_Position) : SV_Depth {
       const auto scaled_until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
       while (std::chrono::steady_clock::now() < scaled_until) {
         step();
-        require(selected_description().Width == width, "Broader lower-resolution depth displaced useful native depth");
+        require(selection.width == width, "Broader lower-resolution depth displaced useful native depth");
       }
-      require(varied_linear_depth(3), "Native winner lost its expected narrow-range depth contents");
+      require(selected_depth_matches(3), "Native winner lost its expected narrow-range depth contents");
       scene.reset();
       wait_for_scene("native narrow depth remains selected when the smaller candidate disappears", width, height, 3);
       decoy->pattern = 8;
@@ -452,7 +498,7 @@ float ps(float4 position : SV_Position) : SV_Depth {
       // The lower-resolution scene target draws every present. Recreated native
       // depth first draws only every second, then every third present. Coverage
       // over presents outranks resolution: the every-present source must stay
-      // bound with Automatic readiness on every present, native depth promotes
+      // selected with its readiness on every present, native depth promotes
       // once it draws every present, and the every-present source reclaims the
       // presents native depth leaves flat when it returns to every other
       // present. Checks run after every present, because a periodic check can
@@ -463,16 +509,15 @@ float ps(float4 position : SV_Position) : SV_Depth {
         draw(*scene);
         if (decoy && ++present % cadence == 0) draw(*decoy);
       };
-      // The backup bound as DEPTH has the source's typeless format, so the
-      // D32 and D32S8 natives of the two reloads are told apart.
-      const auto bound = [&](const target_t &expected) {
-        const auto selected = selected_description();
-        return selected.Width == expected.width && selected.Height == expected.height &&
-          selected.Format == (expected.format == DXGI_FORMAT_D32_FLOAT ? DXGI_FORMAT_R32_TYPELESS : DXGI_FORMAT_R32G8X24_TYPELESS);
+      // The selected allocation's typeless format tells the D32 and D32S8
+      // natives of the two reloads apart.
+      const auto selected = [&](const target_t &expected) {
+        return selection.width == expected.width && selection.height == expected.height &&
+          selection.format == unsigned(expected.format == DXGI_FORMAT_D32_FLOAT ? DXGI_FORMAT_R32_TYPELESS : DXGI_FORMAT_R32G8X24_TYPELESS);
       };
       // Each replaced native allocation stays allocated and is never drawn
       // again, as a game that keeps its old depth target alive after a
-      // resolution change: it must never stay bound or ready.
+      // resolution change: it must never stay selected or ready.
       std::vector<std::unique_ptr<target_t>> idle;
       const auto hold = [&](const target_t &expected, const char *failure) {
         unsigned presents = 0;
@@ -480,7 +525,7 @@ float ps(float4 position : SV_Position) : SV_Depth {
         do {
           step();
           ++presents;
-          require(bound(expected) && depth_ready(), failure);
+          require(selected(expected) && selection.ready, failure);
         } while (GetTickCount64() < until);
         return presents;
       };
@@ -491,8 +536,8 @@ float ps(float4 position : SV_Position) : SV_Depth {
         decoy = target(width, height, 1, 9, reload != 0);
         for (cadence = 2; cadence <= 3; ++cadence) {
           const auto presents = hold(*scene, "Depth drawn on only some presents displaced depth drawn on every present, leaving presents without depth");
-          require(varied_linear_depth(1), "Every-present lower-resolution depth lost its scene contents");
-          std::printf("PASS reload %u: every-present lower-resolution depth stays bound and ready on all %u presents while native depth draws 1 in %u\n",
+          require(selected_depth_matches(1), "Every-present lower-resolution depth lost its scene contents");
+          std::printf("PASS reload %u: every-present lower-resolution depth stays selected and ready on all %u presents while native depth draws 1 in %u\n",
                       reload + 1, presents, cadence);
         }
         cadence = 1;
@@ -503,12 +548,12 @@ float ps(float4 position : SV_Position) : SV_Depth {
           require(GetTickCount64() < limit, "Native depth drawing every present did not promote");
           step();
           ++presents;
-          require(depth_ready() && (bound(*scene) || bound(*decoy)), "Native promotion left a present without current depth");
-          consecutive = bound(*decoy) ? consecutive + 1 : 0;
+          require(selection.ready && (selected(*scene) || selected(*decoy)), "Native promotion left a present without current depth");
+          consecutive = selected(*decoy) ? consecutive + 1 : 0;
         }
-        presents += hold(*decoy, "Promoted native depth lost its binding or readiness on a present");
-        require(varied_linear_depth(9), "Promoted native depth lost its scene contents");
-        std::printf("PASS native depth recovery after reload %u: promotes once it draws every present, bound and ready on all %u presents through the handover\n",
+        presents += hold(*decoy, "Promoted native depth lost its selection or readiness on a present");
+        require(selected_depth_matches(9), "Promoted native depth lost its scene contents");
+        std::printf("PASS native depth recovery after reload %u: promotes once it draws every present, selected and ready on all %u presents through the handover\n",
                     reload + 1, presents);
 
         // Native depth drawing every other present again leaves its other
@@ -522,28 +567,22 @@ float ps(float4 position : SV_Position) : SV_Depth {
           require(GetTickCount64() < reclaim_limit, "Every-present depth did not reclaim presents that native depth left without current depth");
           step();
           ++presents;
-          const bool every = bound(*scene);
-          require(depth_ready() && (every || bound(*decoy)), "A present had no depth while every-present depth reclaimed native depth's presents");
+          const bool every = selected(*scene);
+          require(selection.ready && (every || selected(*decoy)), "A present had no depth while every-present depth reclaimed native depth's presents");
           consecutive = every ? consecutive + 1 : 0;
         }
-        presents += hold(*scene, "Reclaimed every-present depth lost its binding or readiness on a present");
-        require(varied_linear_depth(1), "Reclaimed every-present depth lost its scene contents");
-        std::printf("PASS reload %u: every-present lower-resolution depth reclaims native depth's skipped presents with none flat, then bound and ready on all %u presents\n",
+        presents += hold(*scene, "Reclaimed every-present depth lost its selection or readiness on a present");
+        require(selected_depth_matches(1), "Reclaimed every-present depth lost its scene contents");
+        std::printf("PASS reload %u: every-present lower-resolution depth reclaims native depth's skipped presents with none flat, then selected and ready on all %u presents\n",
                     reload + 1, presents);
       }
       render_tracked_depth = {};
       std::printf("PASS reloads with %zu replaced native allocations kept alive and never drawn\n", idle.size());
     }
 
-    bool depth_ready() {
-      bool value = false;
-      observed.runtime->get_uniform_value_bool(uniform("Sunshine_DepthReady"), &value, 1);
-      return value;
-    }
-
     // Negative control: a lone scene cleared after its draws leaves only flat
     // cleared depth for the end-of-frame copy, Generic depth's only copy
-    // point. DEPTH must stay unready, so the effect shows mono, on every
+    // point. Its selection must stay unready, so Game 3D shows mono, on every
     // frame. The same allocation drawn without its trailing clear then becomes
     // ready, so the control is not vacuous.
     void check_cleared_scene_unready() {
@@ -555,16 +594,16 @@ float ps(float4 position : SV_Position) : SV_Depth {
       // the last scene, so every ready Present below is the cleared scene's.
       const auto drained = std::chrono::steady_clock::now() + std::chrono::milliseconds(400);
       while (std::chrono::steady_clock::now() < drained) step();
-      require(!depth_ready(), "Depth was held beyond the source age without any depth");
+      require(!selection.ready, "Depth was held beyond the source age without any depth");
       scene = target(width, height, 1, 1, false, true);
       const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(4);
       unsigned frames = 0;
       while (std::chrono::steady_clock::now() < until) {
         step();
         ++frames;
-        require(!depth_ready(), "Flat depth cleared after the scene was shown as ready scene depth");
+        require(!selection.ready, "Flat depth cleared after the scene was shown as ready scene depth");
       }
-      std::printf("PASS lone scene cleared after drawing keeps DEPTH unready (mono) for %u frames\n", frames);
+      std::printf("PASS lone scene cleared after drawing keeps its selected depth unready (mono) for %u frames\n", frames);
       // The same trailing clear as a render pass whose depth access is CLEAR
       // (ReShade reports it as a clear).
       scene->render_pass_clear = true;
@@ -573,9 +612,9 @@ float ps(float4 position : SV_Position) : SV_Depth {
       while (std::chrono::steady_clock::now() < pass_until) {
         step();
         ++frames;
-        require(!depth_ready(), "Flat depth cleared by a render pass after the scene was shown as ready scene depth");
+        require(!selection.ready, "Flat depth cleared by a render pass after the scene was shown as ready scene depth");
       }
-      std::printf("PASS lone scene cleared by a render pass after drawing keeps DEPTH unready (mono) for %u frames\n", frames);
+      std::printf("PASS lone scene cleared by a render pass after drawing keeps its selected depth unready (mono) for %u frames\n", frames);
       scene->render_pass_clear = false;
       scene->clear_after = false;
       wait_for_scene("the same scene without its trailing clear becomes ready", width, height);
@@ -592,6 +631,10 @@ float ps(float4 position : SV_Position) : SV_Depth {
       require(observed.runtime && observed.renders, "Depth3D fixture did not compile");
       check_unified_addon();
       require(!observed.inject, "Automatic selection fixture must not inject DEPTH");
+      query_selection = reinterpret_cast<decltype(query_selection)>(
+        GetProcAddress(GetModuleHandleW(L"SunshineSBSTest.addon64"), "SunshineDepthTestGenericSelection"));
+      require(query_selection, "The test add-on lacks its Generic selection query");
+      observe_selection = true;
       set_int("Depth_Map", 1);
       set_float("Depth_Map_Adjust", 40);
       set_float("Depth_Adjustment", 50);
@@ -606,6 +649,14 @@ float ps(float4 position : SV_Position) : SV_Depth {
         if (only == "--viewport-only") check_multiple_viewports();
         else if (only == "--coverage-only") { check_scene_completeness(); check_recovery_class_boundary(); }
         else if (only == "--reload-only") check_reload_interleaved();
+        else if (only == "--depth-binding-only") {
+          // The one check of the DEPTH binding: it follows a selection change.
+          check_depth_binding("half-resolution scene", 1);
+          decoy->draws = 1;
+          decoy->pattern = 9;
+          wait_for_scene("qualified native source replaces confirmed smaller source", width, height, 9);
+          check_depth_binding("promoted native source", 9);
+        }
         else check_histogram_breadth();
         render_tracked_depth = {};
         return;
@@ -621,10 +672,9 @@ float ps(float4 position : SV_Position) : SV_Depth {
       const auto stable_until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
       while (std::chrono::steady_clock::now() < stable_until) {
         step();
-        const auto selected = selected_description();
-        require(selected.Width == width && selected.Height == height, "Qualified candidates oscillated after native-source promotion");
+        require(selection.width == width && selection.height == height, "Qualified candidates oscillated after native-source promotion");
       }
-      require(varied_linear_depth(9), "Promoted native source changed to another plausible pattern");
+      require(selected_depth_matches(9), "Promoted native source changed to another plausible pattern");
       std::puts("PASS qualified native selection remains stable while smaller source stays useful");
       decoy->pattern = 0;
       wait_for_scene("useful lower-resolution source recovers after native source becomes flat", scene->width, scene->height);
@@ -659,20 +709,22 @@ float ps(float4 position : SV_Position) : SV_Depth {
 int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   if (argc != 5 && argc != 7 && argc != 8) {
-    std::fputs("usage: depth_selection_runtime <official-ReShade64.dll> <Depth3D-Shaders> <SunshineSBS.addon64> <isolated-output> [width height [--viewport-only|--coverage-only|--histogram-only|--reload-only]]\n", stderr);
+    std::fputs("usage: depth_selection_runtime <official-ReShade64.dll> <Depth3D-Shaders> <SunshineSBSTest.addon64> <isolated-output> [width height [--viewport-only|--coverage-only|--histogram-only|--reload-only|--depth-binding-only]]\n", stderr);
     return 2;
   }
   std::thread([] { Sleep(150000); std::fputs("FAIL selection runtime watchdog\n", stderr); TerminateProcess(GetCurrentProcess(), 124); }).detach();
   try {
     width = argc >= 7 ? unsigned(std::stoul(argv[5])) : 1280;
     height = argc >= 7 ? unsigned(std::stoul(argv[6])) : 720;
-    require(argc != 8 || std::string(argv[7]) == "--viewport-only" || std::string(argv[7]) == "--coverage-only" || std::string(argv[7]) == "--histogram-only" || std::string(argv[7]) == "--reload-only", "Unknown fixture option");
+    require(argc != 8 || std::string(argv[7]) == "--viewport-only" || std::string(argv[7]) == "--coverage-only" || std::string(argv[7]) == "--histogram-only" ||
+      std::string(argv[7]) == "--reload-only" || std::string(argv[7]) == "--depth-binding-only", "Unknown fixture option");
     require(width >= 640 && width <= 3840 && height >= 360 && height <= 2160 && width % 2 == 0 && height % 2 == 0, "Invalid fixture size");
+    // The test add-on: the fixture reads its record of Generic's selection.
+    require(_putenv_s("SUNSHINE_GAME3D_AUTOMATIC_ACTIONS_TEST", "1") == 0, "Could not select the test add-on");
     selection_fixture_t fixture;
     fixture.initialize(fs::absolute(argv[1]), fs::absolute(argv[2]), fs::absolute(argv[4]), 2, 0, fs::absolute(argv[3]));
     // The fixture's per-Present trace, written when the run ends.
     game3d_present_trace::out.open(fs::absolute(argv[4]) / "trace.txt", "selection");
-    fixture.trace_presents = true;
     fixture.run_selection(argc == 8 ? argv[7] : "");
     game3d_present_trace::out.close();
     return 0;
