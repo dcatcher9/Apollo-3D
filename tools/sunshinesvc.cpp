@@ -117,17 +117,44 @@ HANDLE DuplicateTokenForSession(DWORD console_session_id) {
 }
 
 HANDLE OpenLogFileHandle() {
-  WCHAR log_file_name[MAX_PATH];
-
-  // Create sunshine.log in the Temp folder (usually %SYSTEMROOT%\Temp)
-  GetTempPathW(_countof(log_file_name), log_file_name);
-  wcscat_s(log_file_name, L"sunshine.log");
+  // Create sunshine.log in SYSTEM's own temp folder (%SYSTEMROOT%\SystemTemp), which other accounts cannot write.
+  // GetTempPathW would return %SYSTEMROOT%\Temp, where any user can create the log name first.
+  WCHAR temp_path[MAX_PATH + 1];
+  const auto temp_path_length = GetTempPath2W(_countof(temp_path), temp_path);
+  if (temp_path_length == 0 || temp_path_length >= _countof(temp_path)) {
+    if (temp_path_length != 0) {
+      SetLastError(ERROR_BUFFER_OVERFLOW);
+    }
+    return INVALID_HANDLE_VALUE;
+  }
+  const auto log_file_name = std::wstring {temp_path, temp_path_length} + L"sunshine.log";
 
   // The file handle must be inheritable for our child process to use it
   SECURITY_ATTRIBUTES security_attributes = {sizeof(security_attributes), nullptr, TRUE};
 
-  // Overwrite the old sunshine.log
-  return CreateFileW(log_file_name, GENERIC_WRITE, FILE_SHARE_READ, &security_attributes, CREATE_ALWAYS, 0, nullptr);
+  // Open a reparse point at the log name itself rather than its target, so it is refused before anything is written
+  const auto log_file_handle = CreateFileW(log_file_name.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &security_attributes, OPEN_ALWAYS, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+  if (log_file_handle == INVALID_HANDLE_VALUE) {
+    return INVALID_HANDLE_VALUE;
+  }
+
+  // Overwrite the old sunshine.log only when it is a plain file
+  FILE_ATTRIBUTE_TAG_INFO attributes;
+  DWORD error = NO_ERROR;
+  if (!GetFileInformationByHandleEx(log_file_handle, FileAttributeTagInfo, &attributes, sizeof(attributes))) {
+    error = GetLastError();
+  } else if (attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+    error = ERROR_REPARSE_POINT_ENCOUNTERED;
+  } else if (!SetEndOfFile(log_file_handle)) {
+    error = GetLastError();
+  }
+  if (error != NO_ERROR) {
+    CloseHandle(log_file_handle);
+    SetLastError(error);
+    return INVALID_HANDLE_VALUE;
+  }
+
+  return log_file_handle;
 }
 
 bool RunTerminationHelper(HANDLE console_token, DWORD pid) {
