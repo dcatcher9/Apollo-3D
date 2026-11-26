@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Real DSV drawing through the official runtime. DEPTH is never injected.
-#define SUNSHINE_DEPTH_SELECTION_RUNTIME
 #include "test_depth3d_runtime_d3d12.cpp"
 #include "../../src/reshade_bridge_protocol.h"
 #include "game3d_test_render.h"

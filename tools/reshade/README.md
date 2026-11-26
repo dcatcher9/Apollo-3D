@@ -3881,8 +3881,9 @@ ReShade's add-on entry points. Do not install the test add-on into a game.
 ### Isolated comparison with the current Host warp
 
 `test_host_warp_comparison.cpp` is an opt-in hardware D3D11 experiment. It consumes
-the exact FP16 linear scRGB color and R32 raw-depth inputs retained by the Game3D
-parity fixture. It runs the current production Host V2 vertical/horizontal
+the exact FP16 linear scRGB color and R32 raw-depth inputs that the Game3D parity
+fixture retained (that fixture was removed on 11-25 with the FX comparison path;
+its earlier outputs remain the inputs). It runs the current production Host V2 vertical/horizontal
 conditioning and live inverse shaders, using a small native-depth adapter to
 retain Game3D's scale, zero plane and strength. It does not run DAV2, test camera
 calibration, or establish live producer authorization. Its explicit renderer
@@ -3903,12 +3904,6 @@ fixture is not a full-resolution 4K integration. Inputs outside the Host paralla
 container fail instead of being silently clipped. GPU intermediates, compiled
 shaders, complete shader-source closure, output images and hashes are retained.
 Verify that closure against the production sources when reporting a run.
-
-`SUNSHINE_STEREO_PARITY_FRINGE_WIDTH=1..8` optionally widens the parity fixture's
-50% mixed-color source fringe (default remains two source pixels). The explicit
-width contract must match both sides. The existing edge diagnostic's four-pixel
-exclusion margin does not cover every wider-fringe case; measure the actual mixed
-strip separately rather than treating that metric as hidden-background truth.
 
 The [2026-09-18 experiment](../../cmake-build-reshade/sunshine-warp-game3d-20260918/RESULTS.md)
 records matched native-depth GPU comparisons and the distortion tradeoff. It is

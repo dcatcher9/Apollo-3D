@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // D3D11 companion to the native no-FX parity test. The old full-effect fixture
 // supplies only the official runtime, wrapped device and readback helpers.
-#define main sunshine_legacy_d3d11_fixture_main
 #include "test_depth3d_runtime.cpp"
-#undef main
 #include "test_game3d_render_input.h"
 #include "test_game3d_debug_dump_runtime.h"
 #include "test_game3d_budget.h"

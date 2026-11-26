@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Actual ReShade D3D12 parity: capture the frozen FX oracle, unload every effect,
 // then exercise the production add-on renderer on the same inputs with no FX.
-#define SUNSHINE_DEPTH_SELECTION_RUNTIME
 #include "test_depth3d_runtime_d3d12.cpp"
 #include "test_game3d_render_input.h"
 #include "test_game3d_debug_dump_runtime.h"
