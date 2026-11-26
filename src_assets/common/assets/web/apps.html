@@ -1042,6 +1042,7 @@
   import Navbar from './Navbar.vue'
   import Checkbox from './Checkbox.vue'
   import { Dropdown } from 'bootstrap/dist/js/bootstrap'
+  import { getJson, postJson } from './api'
   import desktopCover from '../desktop.png'
   import desktopAltCover from '../desktop-alt.png'
   import steamCover from '../steam.png'
@@ -1205,19 +1206,9 @@
           return reordered
         }, [])
 
-        fetch("./api/apps/reorder", {
-          credentials: 'include',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          method: 'POST',
-          body: JSON.stringify({order: reorderedUUIDs})
-        })
-        .then(r => r.json())
-        .then((r) => {
-          if (!r.status) {
-            alert(this.$t("apps.reorder_failed") + r.error);
-          }
+        postJson("./api/apps/reorder", {order: reorderedUUIDs})
+        .catch((error) => {
+          alert(this.$t("apps.reorder_failed") + error.message);
         })
         .finally(() => {
           return this.loadApps();
@@ -1228,10 +1219,7 @@
 
       },
       loadApps() {
-        return fetch("./api/apps", {
-          credentials: 'include'
-        })
-        .then(r => r.json())
+        return getJson("./api/apps")
         .then(r => {
           const builtinApps = (Array.isArray(r.builtin_apps) ? r.builtin_apps : [])
             .filter(i => i.uuid)
@@ -1245,7 +1233,8 @@
           this.hostName = r.host_name;
           this.hostUUID = r.host_uuid;
           this.listReordered = false;
-        });
+        })
+        .catch(error => console.error("Could not load the app list", error));
       },
       newApp() {
         this.editForm = JSON.parse(JSON.stringify(newApp));
@@ -1261,18 +1250,9 @@
       closeApp() {
         if (confirm(this.$t('apps.close_warning'))) {
           this.actionDisabled = true;
-          fetch("./api/apps/close", {
-            credentials: 'include',
-            headers: {
-              'Content-Type': 'application/json'
-            },
-            method: 'POST',
-          })
-          .then((r) => r.json())
-          .then((r) => {
-            if (!r.status) {
-              alert("apps.close_failed")
-            }
+          postJson("./api/apps/close")
+          .catch(() => {
+            alert(this.$t('apps.close_failed'))
           })
           .finally(() => {
             this.actionDisabled = false;
@@ -1352,18 +1332,9 @@
         );
         if (resp) {
           this.actionDisabled = true;
-          fetch("./api/apps/delete", {
-            credentials: 'include',
-            headers: {
-              'Content-Type': 'application/json'
-            },
-            method: 'POST',
-            body: JSON.stringify({ uuid: app.uuid })
-          }).then((r) => r.json())
-          .then((r) => {
-            if (!r.status) {
-              alert("Delete failed! " + r.error);
-            }
+          postJson("./api/apps/delete", { uuid: app.uuid })
+          .catch((error) => {
+            alert("Delete failed! " + error.message);
           })
           .finally(() => {
             this.actionDisabled = false;
@@ -1467,24 +1438,15 @@
       },
       useCover(cover) {
         this.coverFinderBusy = true;
-        fetch("./api/covers/upload", {
-          credentials: 'include',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          method: 'POST',
-          body: JSON.stringify({
-            key: cover.key,
-            url: cover.saveUrl,
-          })
-        }).then(r => {
-          if (!r.ok) throw new Error("Failed to download covers");
-          return r.json();
+        postJson("./api/covers/upload", {
+          key: cover.key,
+          url: cover.saveUrl,
         }).then(body => {
           this.editForm["image-path"] = body.path;
           this.editCoverPreview = cover.url;
         })
           .then(() => this.closeCoverFinder())
+          .catch(error => console.error("Failed to download covers", error))
           .finally(() => this.coverFinderBusy = false);
       },
       save() {
@@ -1502,25 +1464,15 @@
         delete this.editForm.launching;
         delete this.editForm.dragover;
         this.actionDisabled = true;
-        fetch("./api/apps", {
-          credentials: 'include',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          method: 'POST',
-          body: JSON.stringify(this.editForm),
-        }).then((r) => r.json())
-        .then((r) => {
-          if (!r.status) {
-            alert(this.$t('apps.save_failed') + r.error);
-            throw new Error(`App save failed: ${r.error}`);
-          }
-        })
+        postJson("./api/apps", this.editForm)
         .then(() => {
           this.showEditForm = false;
           this.editForm = null;
           this.editCoverPreview = "";
           return this.loadApps();
+        })
+        .catch((error) => {
+          alert(this.$t('apps.save_failed') + error.message);
         })
         .finally(() => this.actionDisabled = false);
       },

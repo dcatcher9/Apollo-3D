@@ -413,6 +413,7 @@
   import LocalDisplay from './configs/tabs/LocalDisplay.vue'
   import {localMonitorFingerprint, migrateLocalDisplaySurface, rememberLocalMonitorDevices, rememberLocalMonitorTimingLimits, shutterMonitorSelected, validateLocalMonitorConfig} from './configs/localMonitorConfig'
   import ContainerEncoders from './configs/tabs/ContainerEncoders.vue'
+  import { ApiError, getJson, postJson } from './api'
 
   const app = createApp({
     components: {
@@ -581,13 +582,7 @@
       },
     },
     created() {
-      fetch("./api/config", {
-        credentials: 'include'
-      })
-        .then((r) => {
-          if (!r.ok) throw new Error(`HTTP ${r.status}`);
-          return r.json();
-        })
+      getJson("./api/config")
         .then((r) => {
           // Build the settings object completely before publishing it, so a failure below
           // shows the error instead of a half-populated form.
@@ -705,9 +700,7 @@
           try {
             // Save must validate the running target/profile even when the monitor tab has never
             // mounted, and a Windows mode change must not leave it using a stale cached interval.
-            const response = await fetch('./api/local-monitor?inventory=1', {credentials: 'include'});
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            const context = await response.json();
+            const context = await getJson('./api/local-monitor?inventory=1');
             rememberLocalMonitorDevices(context.devices || []);
             rememberLocalMonitorTimingLimits(context.timing_limits || []);
           } catch (reason) {
@@ -743,25 +736,10 @@
           });
         });
 
-        return fetch("./api/config", {
-          credentials: 'include',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          method: 'POST',
-          body: JSON.stringify(config),
-        }).then((r) => {
-          if (r.status === 200) {
-            this.saved = true
-            this.dirty = false
-            return this.saved
-          }
-          else {
-            return r.json().catch(() => ({})).then((body) => {
-              this.configError = `Settings were not saved: ${body.error || `HTTP ${r.status}`}.`
-              return false
-            })
-          }
+        return postJson("./api/config", config).then(() => {
+          this.saved = true
+          this.dirty = false
+          return this.saved
         }).catch((e) => {
           console.error(e)
           this.configError = `Settings were not saved: ${e.message || e}.`
@@ -780,24 +758,18 @@
             setTimeout(() => {
               this.saved = this.restarted = false;
             }, 5000);
-            fetch("./api/restart", {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json'
-              }
-            })
-            .then((resp) => {
-              if (resp.status !== 200) {
-                location.reload();
-                return
-              }
-            })
+            // The host restarts instead of answering. Reload at once when it refused the request,
+            // and a second after the connection dropped.
+            postJson("./api/restart")
             .catch((e) => {
+              if (e instanceof ApiError) {
+                location.reload();
+                return;
+              }
               console.error(e);
               setTimeout(() => {
                 location.reload();
               }, 1000);
-              return;
             });
           }
         });

@@ -50,6 +50,7 @@
   import { createApp, ref } from "vue"
   import { loadAutoTheme } from './theme'
   import { initApp } from './init'
+  import { ApiError, postJson } from './api'
 
   let app = createApp({
     setup() {
@@ -98,36 +99,27 @@
         if (!this.rememberUsername) {
           localStorage.removeItem('login_username')
         }
-        fetch("./api/login", {
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          method: 'POST',
-          body: JSON.stringify(this.passwordData),
-        }).then((res) => {
+        postJson("./api/login", this.passwordData).then(() => {
           this.loading = false;
-          if (res.status === 200) {
-            this.success = true;
-            if (this.rememberUsername) {
-              localStorage.setItem('login_username', this.passwordData.username);
-            }
-            const url = new URL(window.location);
-            const redirectUrl = url.searchParams.get('redir');
-            const hash = url.hash;
-            if (redirectUrl && redirectUrl.startsWith('.')) {
-              location.href = redirectUrl + hash;
-            } else {
-              location.href = './' + hash;
-            }
+          this.success = true;
+          if (this.rememberUsername) {
+            localStorage.setItem('login_username', this.passwordData.username);
+          }
+          const url = new URL(window.location);
+          const redirectUrl = url.searchParams.get('redir');
+          const hash = url.hash;
+          if (redirectUrl && redirectUrl.startsWith('.')) {
+            location.href = redirectUrl + hash;
           } else {
-            if (res.status === 401) {
-              throw new Error('Please check your username and password')
-            } else {
-              throw new Error(`Server returned ${res.status}`);
-            }
+            location.href = './' + hash;
           }
         }).catch((e) => {
-          this.error = `Login failed: ${e.message}`;
+          this.loading = false;
+          let reason = e.message;
+          if (e instanceof ApiError) {
+            reason = e.status === 401 ? 'Please check your username and password' : `Server returned ${e.status}`;
+          }
+          this.error = `Login failed: ${reason}`;
         });
       },
     },

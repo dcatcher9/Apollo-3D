@@ -59,6 +59,7 @@
   import ResourceCard from './ResourceCard.vue'
   import { initApp } from './init'
   import { loadAutoTheme } from './theme'
+  import { ApiError, postJson } from './api'
 
   let app = createApp({
     components: {
@@ -85,34 +86,20 @@
         };
         this.error = null;
         this.loading = true;
-        fetch("./api/password", {
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          method: 'POST',
-          body: JSON.stringify(this.passwordData),
-        }).then((r) => {
-          this.loading = false;
-          if (r.status === 200) {
-            r.json().then((rj) => {
-              this.success = rj.status;
-              if (this.success === true) {
-                setTimeout(() => {
-                  document.location.reload();
-                }, 5000);
-              } else {
-                this.error = rj.error;
-              }
-            });
+        postJson("./api/password", this.passwordData).then((rj) => {
+          this.success = rj.status;
+          if (this.success === true) {
+            setTimeout(() => {
+              document.location.reload();
+            }, 5000);
           } else {
-            // Validation failures arrive as HTTP 400 with the reason in `error`.
-            r.json().catch(() => ({})).then((rj) => {
-              this.error = rj.error || `Request failed (HTTP ${r.status})`;
-            });
+            this.error = rj.error;
           }
         }).catch((e) => {
+          // Validation failures arrive as HTTP 400 with the reason in `error`.
+          this.error = e instanceof ApiError ? e.message : `Could not reach Sunshine 3D: ${e.message || e}`;
+        }).finally(() => {
           this.loading = false;
-          this.error = `Could not reach Sunshine 3D: ${e.message || e}`;
         });
       },
     },

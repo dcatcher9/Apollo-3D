@@ -427,6 +427,7 @@
     import { initApp } from './init'
     import Navbar from './Navbar.vue'
     import { startVisibilityPolling } from './visibility-polling'
+    import { ApiError, apiFetch, getJson, postJson } from './api'
 
     const app = createApp({
       components: {
@@ -485,8 +486,8 @@
       methods: {
         refreshHostState() {
           return Promise.all([
-            fetch('/api/config', { credentials: 'include' }).then((r) => r.json()),
-            fetch('./api/apps', { credentials: 'include' }).then((r) => r.json()),
+            getJson('/api/config'),
+            getJson('./api/apps'),
           ])
             .then(([config, apps]) => {
               this.platform = config.platform;
@@ -496,9 +497,7 @@
             .catch((error) => console.error('Error fetching host state:', error));
         },
         refreshLogs() {
-          return fetch("./api/logs", {
-            credentials: 'include'
-          })
+          return apiFetch("./api/logs")
             .then(response => {
               // Retrieve the Content-Type header
               const contentType = response.headers.get("Content-Type") || "";
@@ -519,25 +518,18 @@
         },
         closeApp() {
           this.closeAppPressed = true;
-          fetch("./api/apps/close", {
-            credentials: 'include',
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json'
-            }
-          })
-            .then((r) => r.json())
-            .then((r) => {
+          postJson("./api/apps/close")
+            .then((r) => r.status, (e) => {
+              console.error(e);
+              return false;
+            })
+            .then((status) => {
               this.closeAppPressed = false;
-              this.closeAppStatus = r.status;
-              if (r.status) this.currentApp = '';
+              this.closeAppStatus = status;
+              if (status) this.currentApp = '';
               setTimeout(() => {
                 this.closeAppStatus = null;
               }, 5000);
-            })
-            .catch((e) => {
-              console.error(e);
-              this.closeAppPressed = false;
             });
         },
         copyLogs() {
@@ -548,51 +540,33 @@
           setTimeout(() => {
             this.serverRestarting = false;
           }, 5000);
-          fetch("./api/restart", {
-            credentials: 'include',
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json'
-            }
-          })
-          .then((resp) => {
-            if (resp.status !== 200) {
-              setTimeout(() => {
-                location.reload();
-              }, 1000);
-              return;
-            }
-          })
+          postJson("./api/restart")
           .catch((e) => {
-            this.serverRestarting = false
-            console.error(e);
+            if (!(e instanceof ApiError)) {
+              this.serverRestarting = false
+              console.error(e);
+            }
             setTimeout(() => {
               location.reload();
             }, 1000);
-            return;
           });
         },
         quit() {
           if (window.confirm(this.i18n.t('troubleshooting.quit_apollo_confirm'))) {
             this.serverQuitting = true;
-            fetch("./api/quit", {
-              credentials: 'include',
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json'
-              }
-            })
-            .then((r) => {
-              // The host answers before it exits, so a 200 here is the success case.
-              this.serverQuitting = false;
-              this.serverQuit = r.ok;
-              if (!r.ok) {
-                alert("Exit failed!");
-              }
-            })
-            .catch(() => {
+            // The host answers before it exits, so a 200 here is the success case; a dropped
+            // connection means it already exited.
+            postJson("./api/quit")
+            .then(() => {
               this.serverQuitting = false;
               this.serverQuit = true;
+            })
+            .catch((e) => {
+              this.serverQuitting = false;
+              this.serverQuit = !(e instanceof ApiError);
+              if (e instanceof ApiError) {
+                alert("Exit failed!");
+              }
             });
           }
         },

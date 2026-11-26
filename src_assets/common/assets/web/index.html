@@ -193,6 +193,7 @@
   import Game3dSetup from './Game3dSetup.vue'
   import LocalMonitorSession from './LocalMonitorSession.vue'
   import { startVisibilityPolling } from './visibility-polling'
+  import { getJson, getText, postJson } from './api'
 
   const app = createApp({
     components: { Navbar, Game3dSetup, LocalMonitorSession },
@@ -397,11 +398,6 @@
       },
     },
     methods: {
-      async fetchJson(url) {
-        const response = await fetch(url, { credentials: 'include' })
-        if (!response.ok) throw new Error(`Sunshine 3D returned HTTP ${response.status}`)
-        return response.json()
-      },
       showGame3dSetup() {
         document.getElementById('game3d-setup')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
       },
@@ -409,11 +405,8 @@
         if (this.refreshing) return
         this.refreshing = true
         try {
-          const requests = [this.fetchJson('./api/config'), this.fetchJson('./api/clients/list'), this.fetchJson('./api/apps'), this.fetchJson('./api/game3d/setup').catch(() => ({ state: 'unavailable' }))]
-          if (includeDiagnostics) requests.push(fetch('./api/logs', { credentials: 'include' }).then(response => {
-            if (!response.ok) throw new Error(`Sunshine 3D returned HTTP ${response.status}`)
-            return response.text()
-          }))
+          const requests = [getJson('./api/config'), getJson('./api/clients/list'), getJson('./api/apps'), getJson('./api/game3d/setup').catch(() => ({ state: 'unavailable' }))]
+          if (includeDiagnostics) requests.push(getText('./api/logs'))
           const [config, clients, apps, game3dSetup, logs] = await Promise.all(requests)
           this.config = config
           this.pairedClients = Array.isArray(clients.named_certs) ? clients.named_certs : []
@@ -432,21 +425,13 @@
       },
       async loadDiagnostics() {
         try {
-          const response = await fetch('./api/logs', { credentials: 'include' })
-          if (response.ok) this.logs = await response.text()
+          this.logs = await getText('./api/logs')
         } catch (error) {
           console.debug('Sunshine 3D diagnostics are unavailable', error)
         }
       },
-      async postJson(url, body) {
-        const response = await fetch(url, {
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
-          method: 'POST',
-          body: body === undefined ? undefined : JSON.stringify(body),
-        })
-        if (!response.ok) throw new Error(`Sunshine 3D returned HTTP ${response.status}`)
-        const result = await response.json()
+      async postAction(url, body) {
+        const result = await postJson(url, body)
         if (result.status === false) throw new Error(result.error || 'Sunshine 3D could not complete the action')
         return result
       },
@@ -455,7 +440,7 @@
         this.actionBusy = 'disconnect'
         this.actionError = ''
         try {
-          await this.postJson('./api/clients/disconnect', { uuid: this.activeClient.uuid })
+          await this.postAction('./api/clients/disconnect', { uuid: this.activeClient.uuid })
           window.setTimeout(() => this.loadOverview(false), 750)
         } catch (error) {
           this.actionError = error.message
@@ -471,8 +456,8 @@
         try {
           // Closing the app ends its session and disconnects the device, so a disconnect
           // after it finds nobody and reports a failure. Disconnect only without an app.
-          if (this.currentApp) await this.postJson('./api/apps/close')
-          else if (this.activeClient) await this.postJson('./api/clients/disconnect', { uuid: this.activeClient.uuid })
+          if (this.currentApp) await this.postAction('./api/apps/close')
+          else if (this.activeClient) await this.postAction('./api/clients/disconnect', { uuid: this.activeClient.uuid })
           window.setTimeout(() => this.loadOverview(false), 750)
         } catch (error) {
           this.actionError = error.message

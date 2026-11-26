@@ -946,6 +946,7 @@
   import { initApp } from './init'
   import Navbar from './Navbar.vue'
   import ArGlasses from './configs/tabs/ArGlasses.vue'
+  import { ApiError, getJson, postJson } from './api'
 
   let pairingCountdownTimer = null;
   let pairingPollTimer = null;
@@ -1103,16 +1104,7 @@
           this.pairingInitialClientIds = this.clients.map(client => client.uuid);
           this.passphrase = generatePairingSecret();
 
-          const response = await fetch('./api/otp', {
-            credentials: 'include',
-            headers: {'Content-Type': 'application/json'},
-            method: 'POST',
-            body: JSON.stringify({passphrase: this.passphrase, deviceName: ''})
-          });
-          const body = await response.json().catch(() => ({}));
-          if (!response.ok || !body.status) {
-            throw new Error(body.error || body.message ||`Pairing request failed (HTTP ${response.status})`);
-          }
+          const body = await postJson('./api/otp', {passphrase: this.passphrase, deviceName: ''});
 
           this.otp = body.otp;
           this.hostName = body.name;
@@ -1166,16 +1158,12 @@
         const payload = this.clientPayload(client);
         payload.perm = permissionMapping._all_actions | permissionMapping._all_inputs;
 
-        const response = await fetch('./api/clients/update', {
-          credentials: 'include',
-          headers: {'Content-Type': 'application/json'},
-          method: 'POST',
-          body: JSON.stringify(payload)
-        });
-        const body = await response.json().catch(() => ({}));
-        if (!response.ok || !body.status) {
-          throw new Error(body.error || body.message ||`HTTP ${response.status}`);
-        }
+        await this.updateClient(payload);
+      },
+      async updateClient(payload) {
+        // An unknown device is a successful reply whose status is false.
+        const body = await postJson('./api/clients/update', payload);
+        if (!body.status) throw new Error(body.error || body.message || 'Sunshine 3D could not complete the action');
       },
       async pairWithPin() {
         if (this.pinPairingPending) return;
@@ -1183,14 +1171,8 @@
         this.pinMessage = '';
 
         try {
-          const response = await fetch('./api/pin', {
-            credentials: 'include',
-            headers: {'Content-Type': 'application/json'},
-            method: 'POST',
-            body: JSON.stringify({pin: this.pairingPin, name: this.pairingDeviceName})
-          });
-          const body = await response.json().catch(() => ({}));
-          if (!response.ok || !body.status) throw new Error(this.i18n.t('pin.pair_failure'));
+          const body = await postJson('./api/pin', {pin: this.pairingPin, name: this.pairingDeviceName});
+          if (!body.status) throw new Error(this.i18n.t('pin.pair_failure'));
 
           this.pinStatus = 'success';
           this.pinMessage = this.i18n.t('pin.pair_success');
@@ -1199,7 +1181,7 @@
           setTimeout(() => this.refreshClients(), 1000);
         } catch (error) {
           this.pinStatus = 'danger';
-          this.pinMessage = error.message || String(error);
+          this.pinMessage = error instanceof ApiError ? this.i18n.t('pin.pair_failure') : error.message || String(error);
         } finally {
           this.pinPairingPending = false;
         }
@@ -1235,14 +1217,7 @@
         client.saveError = '';
 
         try {
-          const response = await fetch('./api/clients/update', {
-            credentials: 'include',
-            headers: {'Content-Type': 'application/json'},
-            method: 'POST',
-            body: JSON.stringify(this.clientPayload(client))
-          });
-          const body = await response.json().catch(() => ({}));
-          if (!response.ok || !body.status) throw new Error(body.error || body.message ||`HTTP ${response.status}`);
+          await this.updateClient(this.clientPayload(client));
 
           currentEditingClient = null;
           client.editing = false;
@@ -1305,23 +1280,15 @@
         client.editAccessPreset = this.accessPresetFor(client.editPerm);
       },
       disconnectClient(uuid) {
-        fetch('./api/clients/disconnect', {
-          credentials: 'include',
-          headers: {'Content-Type': 'application/json'},
-          method: 'POST',
-          body: JSON.stringify({uuid})
-        }).finally(() => setTimeout(() => this.refreshClients(), 1000));
+        postJson('./api/clients/disconnect', {uuid})
+          .catch(error => console.error('Could not disconnect the device', error))
+          .finally(() => setTimeout(() => this.refreshClients(), 1000));
       },
       async unpairAll() {
         if (!window.confirm('Remove every paired device? All devices will need to be paired again.')) return;
         this.unpairAllPressed = true;
         try {
-          const response = await fetch('./api/clients/unpair-all', {
-            credentials: 'include',
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'}
-          });
-          const body = await response.json();
+          const body = await postJson('./api/clients/unpair-all');
           this.unpairAllStatus = body.status;
           await this.refreshClients();
         } catch (_) {
@@ -1336,14 +1303,8 @@
         if (!window.confirm(`Remove ${name}? This device will need to be paired again.`)) return;
 
         try {
-          const response = await fetch('./api/clients/unpair', {
-            credentials: 'include',
-            headers: {'Content-Type': 'application/json'},
-            method: 'POST',
-            body: JSON.stringify({uuid: client.uuid})
-          });
-          const body = await response.json().catch(() => ({}));
-          if (!response.ok || body.status === false) throw new Error(body.error || body.message ||`HTTP ${response.status}`);
+          const body = await postJson('./api/clients/unpair', {uuid: client.uuid});
+          if (body.status === false) throw new Error(body.error || body.message || 'Sunshine 3D could not complete the action');
           this.showApplyMessage = true;
           await this.refreshClients();
         } catch (error) {
@@ -1352,10 +1313,7 @@
       },
       async refreshClients(detectPairing = false) {
         try {
-          const response = await fetch('./api/clients/list', {credentials: 'include'});
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          const body = await response.json();
-          if (!body.status) throw new Error(body.error || body.message ||'Sunshine 3D did not return a device list.');
+          const body = await getJson('./api/clients/list');
 
           this.platform = body.platform || this.platform;
           // The pairing poll calls this every two seconds. Keep the entry the user is editing

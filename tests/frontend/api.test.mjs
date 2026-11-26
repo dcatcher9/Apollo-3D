@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
+import { readdirSync, readFileSync } from 'node:fs'
+import { join, relative } from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 import {
   ApiError,
   apiFetch,
@@ -8,6 +11,8 @@ import {
   postJson,
   requestJson,
 } from '../../src_assets/common/assets/web/api.js'
+
+const webRoot = fileURLToPath(new URL('../../src_assets/common/assets/web/', import.meta.url))
 
 function reply(status, body, contentType = 'application/json') {
   return new Response(body, { status, headers: { 'Content-Type': contentType } })
@@ -170,4 +175,26 @@ test('network and abort failures reach the caller unchanged', async t => {
   })
   await assert.rejects(getJson('./api/config'), error => error === aborted)
   await assert.rejects(postJson('./api/restart'), error => error === offline)
+})
+
+function webSources(directory) {
+  return readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
+    const path = join(directory, entry.name)
+    if (entry.isDirectory()) return entry.name === 'public' ? [] : webSources(path)
+    return /\.(html|js|vue)$/.test(entry.name) ? [path] : []
+  })
+}
+
+test('pages reach the host API only through the shared helper', () => {
+  // The only other requests: the public cover database and the bundled translation files.
+  const notTheApi = [/^`\$\{dbUrl\}\//, /^`\.\/assets\/locale\//]
+  const offenders = []
+  for (const path of webSources(webRoot)) {
+    const name = relative(webRoot, path).replaceAll('\\', '/')
+    if (name === 'api.js') continue
+    for (const [, target] of readFileSync(path, 'utf8').matchAll(/\bfetch\(\s*([^,)]*)/g)) {
+      if (!notTheApi.some(pattern => pattern.test(target))) offenders.push(`${name}: fetch(${target}`)
+    }
+  }
+  assert.deepEqual(offenders, [])
 })
