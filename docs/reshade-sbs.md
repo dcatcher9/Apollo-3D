@@ -673,16 +673,35 @@ summed wait is 1% or more of wall time, or the present thread's p99 wait is 0.5 
 dominant holder sites are present-thread sections that perf items 1 and 2 do not remove. Below a
 p99 of 0.05 ms and a largest wait of 0.5 ms it stays parked; in between, the named holder is
 shortened first. The readiness report's `Capture lock` check applies these thresholds to each logged
-window (WARN at the trigger with the window's holders, PASS parked, INFO in between, 11-01), reading
-each printed percentile as its bucket's exclusive upper bound: a p99 of 0.25 ms or more is a bound
-above 250 us (game), 0.5 ms or more one above 500 us (present), and parked a bound of at most 50 us
-(until the 11-01 fix review the triggers took the bound itself as the wait, one bucket early, F34); the
-60 s steady window and whether the holders are present-thread sections stay the owner's call.
+window, except the summed wait's share of wall time, which it reads over each stretch of 60 s of
+contiguous logged windows (11-25; until then per window, so one wait of about 150 ms during an E33
+load put a 10 s window over 1%, and over 60 s no live log of 11-04 to 11-25 reached 0.7%). Two
+windows are contiguous when the time between their lines differs from the later window's length by
+less than 5 s, half the shortest window, so a window that went unlogged breaks the stretch; a
+fixture on the virtual game clock prints game-time windows, which never match its lines' times. It
+warns at a trigger with the window's holders, or the stretch's printed holders summed (PASS parked,
+INFO in between, 11-01), reading each printed percentile as its bucket's exclusive upper bound: a
+p99 of 0.25 ms or more is a bound above 250 us (game), 0.5 ms or more one above 500 us (present),
+and parked a bound of at most 50 us (until the 11-01 fix review the triggers took the bound itself as
+the wait, one bucket early, F34); whether the window or stretch was steady and whether the holders
+are present-thread sections stay the owner's call.
 Two limits of these triggers (design audit of the logged windows, 11-25): a p99 is taken over all
 acquisitions, so it moves only when more than 1% of them wait that long, and in practice only the
 1 ms-per-second and 1%-of-wall-time triggers can fire; and the rare long waits seen so far had
 game-thread holders, which the present-thread condition does not count. Without Diagnostics a
 window is logged only when it had a 1 ms wait, so such logs over-represent bad windows.
+**The largest single wait** (owner-approved 11-25; not a split trigger): the report's `Capture lock
+longest wait` check names, for each logged window whose `game_max_ms` is 4 ms or more or whose
+`present_max_ms` is 2 ms or more, the holder site that held the lock through that wait: the only
+printed holder whose summed wait can contain it, else ambiguous. It warns only when that holder is
+a present-role (`p+`) site in a window without a transition: an export pause or start, the ReShade
+overlay open, an FG mode change (which can move Present to DLSS-G's thread; the log names no present
+thread, since the add-on's log writer writes every line on a pool thread) or a Present gap of 250 ms
+or more, within the window or 0.5 s of it. Otherwise it is INFO, naming the game-role holders to
+shorten (`g+0x0` names no site: the holder released the lock as the wait began). In the live E33
+and Stellar Blade logs of 11-04 to 11-25 every such wait fell in a load, a menu, an FG change or the
+overlay, with game-role holders; the submission hook's section (`submitted`, `observed_submission`)
+held 46% of E33's summed wait and the two waits of about 150 ms and one of 19 ms.
 
 ### Frame record
 

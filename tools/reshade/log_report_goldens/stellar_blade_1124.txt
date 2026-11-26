@@ -22,8 +22,7 @@ Game 3D readiness: SB-Win64-Shipping.exe  14:17:01 to 14:21:45 (4m43s, exited (t
 [PASS] Observation losses: lifecycle 1
 [INFO] Depth losses: 2 episodes, 0.6 per streamed minute, 2.5 s without depth in the logged ones; retained_depth_expired 2
 [PASS] Queue order: 3 queues, 13 fences (11 settled), 465513 signals, 246324 waits; 58422 ordered verdicts, proofs inflight 29209; poisoned shared 1, unobserved 1; refused pending_hooks 20, unsettled 2
-[WARN] Capture lock: 1 of 27 windows met the capture-lock split trigger (owner ruling Q5): game waits 1.03% of wall time at 14:18:05, holders g+0x103cda:7539/96.015,g+0x0:718/7.226,g+0x1056a9:150/0.120,p+0x1056a9:24/0.097; the split needs it over a 60 s steady window and dominant holders that perf items 1 and 2 do not remove (map the offsets with the add-on symbols); 27 windows (270 s): game p99 up to 50 us, largest game wait 1.096 ms, 1 game waits of 1 ms or more, present p99 up to 0 us
-         14:18:05
+[INFO] Capture lock: 27 windows (270 s): game p99 up to 50 us, largest game wait 1.096 ms, 1 game waits of 1 ms or more, present p99 up to 0 us: between parked and the split trigger, so the named holder is shortened first: holders g+0x103cda:7539/96.015,g+0x0:718/7.226,g+0x1056a9:150/0.120,p+0x1056a9:24/0.097 at 14:18:05
 [PASS] Export: not_foreground 2, runtime_reset 1
 [PASS] Present hitches: 1 at resets, FG switches or overlay opening
 [INFO] Diagnostics: Diagnostics=1: per-pass GPU timing is recorded
@@ -39,5 +38,5 @@ Game 3D readiness: SB-Win64-Shipping.exe  14:17:01 to 14:21:45 (4m43s, exited (t
 [PASS] Host link: ReShade SBS connected 3 time(s)
 [PASS] Encoder stalls: none
 [INFO] Host video memory: host local usage peaked at 1402 MiB; its headroom was as low as 10077 MiB (1402/11479 MiB at 14:18:14)
-Overall: WARN (0 fail, 1 warn)
+Overall: PASS (0 fail, 0 warn)
 Exit code: 0

@@ -217,9 +217,25 @@ CAPTURE_LOCK = re.compile(r'Sunshine depth capture lock: window_ms=(\d+) game_lo
 # more, or their summed wait 1% or more of wall time, or the present thread's p99 wait is 0.5 ms or more, and the
 # dominant holder sites are present-thread sections that perf items 1 and 2 do not remove. Below a p99 of 0.05 ms and
 # a largest wait of 0.5 ms it stays parked; in between, the named holder is shortened first. The report applies the
-# thresholds to each logged window; the 60 s and the holder sites stay the owner's call.
+# thresholds to each logged window, the wall-time share over Q5_WALL_S of contiguous windows (since 11-25: per window,
+# one wait of about 150 ms put a 10 s window over 1%); the steady window and the holder sites stay the owner's call.
 Q5_LONG_WAITS_PER_S, Q5_GAME_P99_US, Q5_GAME_WAIT_PCT, Q5_PRESENT_P99_US = 1.0, 250, 1.0, 500
 Q5_PARKED_P99_US, Q5_PARKED_MAX_MS = 50, 0.5
+Q5_WALL_S = 60.0
+# Two logged windows are contiguous when the time between their lines differs from the later window's length by less
+# than this: half the shortest window (capture_lock_report: every window, logged or not, lasts 10 s or more), so a
+# window that went unlogged always breaks a run and the log writer's delay does not (live logs 11-04 to 11-25 differed
+# by at most 0.52 s). Fixtures on the virtual game clock print game-time windows, which never match the lines' times.
+CAPTURE_LOCK_CONTIGUOUS_S = 5.0
+# The largest single wait (11-25, not a split trigger): a window whose game_max_ms or present_max_ms reaches these names
+# the holder that can account for it.
+LONG_WAIT_GAME_MS, LONG_WAIT_PRESENT_MS = 4.0, 2.0
+# A long wait is excused by a transition in its window, or this close to it (the add-on writes its lines on a pool
+# thread, async_log.h, so lines of one moment may be written out of order): an export pause or start, the ReShade
+# overlay open, an FG mode change (which can move Present to DLSS-G's thread; the log names no present thread, since
+# the thread an add-on line shows is its log writer's) or a Present gap of LONG_WAIT_GAP_MS or more.
+LONG_WAIT_MARK_SLACK_S, LONG_WAIT_GAP_MS = 0.5, 250.0
+CAPTURE_LOCK_HOLDER = re.compile(r'(?:([gp])\+0x([0-9a-f]+)|other):(\d+)/([0-9.]+)')
 TIMING = re.compile(r'Sunshine Game 3D timing: presents=(\d+) cpu_ms=\{mean=([0-9.]+) max=([0-9.]+)\}'
                     r'.*?gpu_frames=(\d+)'
                     r' gpu_ms mean/max=\{total=([0-9.]+)/([0-9.]+)')
@@ -433,6 +449,13 @@ def counter_fields(text: str) -> dict[str, int]:
         elif value.isdigit() and key != 'runtime':
             values[key] = int(value)
     return values
+
+
+def capture_lock_sites(text: str) -> list[tuple[str, int, float]]:
+    """A capture-lock line's printed holders (holders=, at most four by summed wait): each site as printed (its role,
+    p or g, and offset in the add-on module, or other), its waits and their summed ms."""
+    return [(f'{role}+0x{offset}' if role else 'other', int(waits), float(ms))
+            for role, offset, waits, ms in CAPTURE_LOCK_HOLDER.findall(text)]
 
 
 def layer_group(text: str) -> tuple[dict[str, str], dict[str, dict[str, str]], str] | None:
@@ -793,6 +816,8 @@ class Session:
     # switch is no longer excused (the Depth check and Depth at FG switches list it).
     settle_resets: list[float] = field(default_factory=list)
     overlay: list[float] = field(default_factory=list)
+    overlay_closed: list[float] = field(default_factory=list)
+    generations: list[float] = field(default_factory=list)  # Each export start (a new generation).
     fg_switches: list[tuple[float, int]] = field(default_factory=list)
     # The add-on's own line per FG mode change (FG_SWITCH_LINE): time, viewport, from, to, Presents, first fresh ms
     # (None: none within 1 s), held, oldest held ms, mono, first reason, its selection, and whether another runtime's
@@ -935,6 +960,8 @@ def parse(lines) -> Session:
             s.teardown = t
         if 'ReShade overlay opened' in text:
             s.overlay.append(t)
+        if 'ReShade overlay closed' in text:
+            s.overlay_closed.append(t)
         if 'Registered add-on "Sunshine 3D"' in text:
             s.addon = True
         if 'add-on GPU renderer ready' in text:
@@ -942,6 +969,7 @@ def parse(lines) -> Session:
         if found := GENERATION.search(text):
             width, height, api, color = found.group(2), found.group(3), found.group(5), found.group(6)
             s.generation = f'{width}x{height} {color} {api} (generation {found.group(1)})'
+            s.generations.append(t)
             s.settle.append(t)
             s.settle_resets.append(t)
             if not s.streamed or s.streamed[-1][1] is not None:
@@ -1078,10 +1106,11 @@ def parse(lines) -> Session:
                                             'second': g[4], 'second_type': g[5], 'callers': g[6]}))
         if found := CAPTURE_LOCK.search(text):
             g = found.groups()
-            s.capture_lock.append((t, {'window_ms': int(g[0]), 'game_waits': int(g[2]), 'game_wait_pct': float(g[4]),
-                                       'game_p99_us': int(g[6]), 'game_max_ms': float(g[7]),
-                                       'game_waits_1ms': int(g[8]), 'present_p99_us': int(g[12]),
-                                       'present_max_ms': float(g[13]), 'holders': g[14]}))
+            s.capture_lock.append((t, {'window_ms': int(g[0]), 'game_waits': int(g[2]), 'game_wait_ms': float(g[3]),
+                                       'game_wait_pct': float(g[4]), 'game_p99_us': int(g[6]),
+                                       'game_max_ms': float(g[7]), 'game_waits_1ms': int(g[8]),
+                                       'present_p99_us': int(g[12]), 'present_max_ms': float(g[13]),
+                                       'holders': g[14], 'sites': capture_lock_sites(g[14])}))
         if found := HITCH.search(text):
             s.hitches.append((t, found.group(1), float(found.group(2)), float(found.group(3))))
         if found := PRESENT_GAP.search(text):
@@ -1545,6 +1574,7 @@ def evaluate(s: Session) -> list[Check]:
     queue_order_checks(s, add)
     second_signaller_checks(s, add)
     capture_lock_checks(s, add)
+    capture_lock_wait_checks(s, add)
     coverage_checks(s, add)
     if s.render_sizes:
         # Dynamic resolution keeps depth (since 10-23): a render-size change of one source is no depth gap. Before,
@@ -1778,14 +1808,40 @@ def second_signaller_checks(s: Session, add) -> None:
               + '; '.join(parts), [clock(t) for t, _ in s.second_signallers]))
 
 
+def capture_lock_runs(windows: list[tuple[float, dict]]) -> list[list[tuple[float, dict]]]:
+    """The logged capture-lock windows in runs of contiguous ones: each starts where the run's previous one ended
+    (CAPTURE_LOCK_CONTIGUOUS_S)."""
+    runs: list[list[tuple[float, dict]]] = []
+    for t, w in windows:
+        if runs and abs(t - runs[-1][-1][0] - w['window_ms'] / 1000) < CAPTURE_LOCK_CONTIGUOUS_S:
+            runs[-1].append((t, w))
+        else:
+            runs.append([(t, w)])
+    return runs
+
+
+def summed_sites(windows: list[tuple[float, dict]]) -> str:
+    """The printed holders of several windows summed per site, the four largest by summed wait, as a line prints
+    them (each window prints only its own four largest, so a sum is a lower bound)."""
+    waits: Counter = Counter()
+    ms: Counter = Counter()
+    for _, w in windows:
+        for site, count, total in w['sites']:
+            waits[site] += count
+            ms[site] += total
+    return ','.join(f'{site}:{waits[site]}/{total:.3f}' for site, total in ms.most_common(4)) or 'none'
+
+
 def capture_lock_checks(s: Session, add) -> None:
     """'Capture lock' (since 11-01): the capture-lock counter's windows against owner ruling Q5. WARN when a window met
-    the split trigger, naming its holder sites (the 60 s steady window and whether the holders are present-thread
-    sections that perf items 1 and 2 do not remove stay the owner's call); PASS when every window stayed parked; INFO
-    in between (the named holder is shortened first). No line means no check: without Diagnostics a line comes only
-    for a window with a game thread's wait of a millisecond or more, so such a session is never parked. A printed
-    percentile is its histogram bucket's exclusive upper bound (capture_lock_stats.h quantile_us): 250 means a wait
-    below 0.25 ms, so a p99 trigger of 0.25 ms or more needs a bound above 250 (500: 0.25 to 0.5 ms), and parked a
+    the split trigger, or, for the summed wait's share of wall time, a stretch of Q5_WALL_S of contiguous windows did
+    (since 11-25; per window until then, so one wait of about 150 ms put a 10 s window over 1%), naming its holder
+    sites (whether the stretch was steady and whether the holders are present-thread sections that perf items 1 and 2
+    do not remove stay the owner's call); PASS when every window stayed parked; INFO in between (the named holder is
+    shortened first). No line means no check: without Diagnostics a line comes only for a window with a game thread's
+    wait of a millisecond or more, so such a session is never parked, and an unlogged window breaks a stretch. A
+    printed percentile is its histogram bucket's exclusive upper bound (capture_lock_stats.h quantile_us): 250 means a
+    wait below 0.25 ms, so a p99 trigger of 0.25 ms or more needs a bound above 250 (500: 0.25 to 0.5 ms), and parked a
     bound of at most 50 (below 0.05 ms). Until 11-01 the triggers compared the bound with >=, one bucket early.
     A p99 is over all acquisitions, so its triggers fire only when more than 1% of acquisitions wait that long."""
     if not s.capture_lock:
@@ -1797,11 +1853,12 @@ def capture_lock_checks(s: Session, add) -> None:
             reasons.append(f"{w['game_waits_1ms']} game waits of 1 ms or more in {w['window_ms'] / 1000:.1f} s")
         if w['game_p99_us'] > Q5_GAME_P99_US:
             reasons.append(f"game p99 {w['game_p99_us']} us")
-        if w['game_wait_pct'] >= Q5_GAME_WAIT_PCT:
-            reasons.append(f"game waits {w['game_wait_pct']:.2f}% of wall time")
         if w['present_p99_us'] > Q5_PRESENT_P99_US:
             reasons.append(f"present p99 {w['present_p99_us']} us")
         return reasons
+
+    def wall_share(stretch: list[tuple[float, dict]]) -> float:
+        return sum(w['game_wait_ms'] for _, w in stretch) * 100 / sum(w['window_ms'] for _, w in stretch)
 
     windows = s.capture_lock
     summary = (f"{len(windows)} windows ({sum(w['window_ms'] for _, w in windows) / 1000:.0f} s): game p99 up to "
@@ -1810,12 +1867,38 @@ def capture_lock_checks(s: Session, add) -> None:
                f"{sum(w['game_waits_1ms'] for _, w in windows)} game waits of 1 ms or more, present p99 up to "
                f"{max(w['present_p99_us'] for _, w in windows)} us")
     met = [(t, w, reasons) for t, w in windows if (reasons := trigger(w))]
-    if met:
-        t, w, reasons = max(met, key=lambda m: (len(m[2]), m[1]['game_wait_pct']))
-        add(Check('WARN', 'Capture lock', f'{len(met)} of {len(windows)} windows met the capture-lock split trigger '
-                  f"(owner ruling Q5): {', '.join(reasons)} at {clock(t)}, holders {w['holders']}; the split needs it "
-                  'over a 60 s steady window and dominant holders that perf items 1 and 2 do not remove (map the '
-                  f'offsets with the add-on symbols); {summary}', [clock(m[0]) for m in met]))
+    # Each run's stretches of Q5_WALL_S, one from each of its windows on (sliding), and per run the one with the
+    # largest share among those that met the wall-time trigger.
+    stretches = []
+    for run in capture_lock_runs(windows):
+        best = None
+        for i in range(len(run)):
+            j, total = i, 0
+            while j < len(run) and total < Q5_WALL_S * 1000:
+                total += run[j][1]['window_ms']
+                j += 1
+            if total >= Q5_WALL_S * 1000 and wall_share(run[i:j]) >= Q5_GAME_WAIT_PCT and \
+                    (best is None or wall_share(run[i:j]) > wall_share(best)):
+                best = run[i:j]
+        if best:
+            stretches.append(best)
+    if met or stretches:
+        parts, times = [], [clock(m[0]) for m in met]
+        if met:
+            t, w, reasons = max(met, key=lambda m: (len(m[2]), m[1]['game_wait_pct']))
+            parts.append(f'{len(met)} of {len(windows)} windows met the capture-lock split trigger (owner ruling Q5): '
+                         f"{', '.join(reasons)} at {clock(t)}, holders {w['holders']}")
+        if stretches:
+            worst = max(stretches, key=wall_share)
+            start, end = worst[0][0] - worst[0][1]['window_ms'] / 1000, worst[-1][0]
+            parts.append(f'{len(stretches)} stretch{"es" if len(stretches) != 1 else ""} of {Q5_WALL_S:.0f} s of '
+                         'contiguous windows met its wall-time trigger (owner ruling Q5): game waits '
+                         f'{wall_share(worst):.2f}% of wall time over {span(start, end)}, '
+                         f'holders {summed_sites(worst)}')
+            times += [span(stretch[0][0] - stretch[0][1]['window_ms'] / 1000, stretch[-1][0]) for stretch in stretches]
+        add(Check('WARN', 'Capture lock', '; '.join(parts) + f'; the split needs it over a {Q5_WALL_S:.0f} s steady '
+                  'window and dominant holders that perf items 1 and 2 do not remove (map the offsets with the add-on '
+                  f'symbols); {summary}', times))
         return
     if all(w['game_p99_us'] <= Q5_PARKED_P99_US and w['game_max_ms'] < Q5_PARKED_MAX_MS for _, w in windows):
         add(Check('PASS', 'Capture lock', f'{summary}: the split stays parked'))
@@ -1823,6 +1906,76 @@ def capture_lock_checks(s: Session, add) -> None:
     t, w = max(windows, key=lambda tw: (tw[1]['game_p99_us'], tw[1]['game_max_ms']))
     add(Check('INFO', 'Capture lock', f'{summary}: between parked and the split trigger, so the named holder is '
               f"shortened first: holders {w['holders']} at {clock(t)}"))
+
+
+def transition_marks(s: Session, start: float, end: float) -> list[str]:
+    """The transitions the log shows from start to end, or within LONG_WAIT_MARK_SLACK_S of them: an export pause or
+    start, the ReShade overlay open, an FG mode change, or a Present gap of LONG_WAIT_GAP_MS or more."""
+    lo, hi = start - LONG_WAIT_MARK_SLACK_S, end + LONG_WAIT_MARK_SLACK_S
+    marks = []
+    if any(lo <= t <= hi for t, _, _ in s.pauses):
+        marks.append('export pause')
+    if any(lo <= t <= hi for t in s.generations):
+        marks.append('export start')
+    # The overlay is open from its opening to the next closing, or to the end of the log.
+    for opened in s.overlay:
+        closed = min((t for t in s.overlay_closed if t >= opened), default=s.last)
+        if opened <= hi and closed >= lo:
+            marks.append('overlay')
+            break
+    if any(lo <= t <= hi for t, _ in s.fg_switches):
+        marks.append('FG mode change')
+    gaps = [ms for t, ms, _, _ in s.present_gaps if ms >= LONG_WAIT_GAP_MS and t - ms / 1000 <= hi and t >= lo]
+    if gaps:
+        marks.append(f'present gap {max(gaps):.0f} ms')
+    return marks
+
+
+def capture_lock_wait_checks(s: Session, add) -> None:
+    """'Capture lock longest wait' (since 11-25; not a split trigger): each capture-lock window whose largest game wait
+    is LONG_WAIT_GAME_MS or more, or whose largest present wait is LONG_WAIT_PRESENT_MS or more, names the holder site
+    that held the lock through it: the only printed holder whose summed wait can contain that wait (rounding both to
+    the line's 3 decimals keeps their order), else ambiguous. Live 11-04 to 11-25 every such wait fell in a load, a
+    menu, an FG change or the overlay, held by game-role sections. WARN when the holder is a present-role (p+) site in
+    a window without a transition (transition_marks): a present-thread section held the lock through a long wait in
+    steady play. Otherwise INFO, naming the game-role holders to shorten (g+0x0 is no site: the holder released the
+    lock as the wait began, and other is every site past the named 63)."""
+    entries = []  # time, role, longest wait (ms), holder (None: ambiguous), candidates, transitions
+    for t, w in s.capture_lock:
+        for role, longest, bound in (('game', w['game_max_ms'], LONG_WAIT_GAME_MS),
+                                     ('present', w['present_max_ms'], LONG_WAIT_PRESENT_MS)):
+            if longest < bound:
+                continue
+            candidates = [site for site, _, ms in w['sites'] if ms >= longest]
+            entries.append((t, role, longest, candidates[0] if len(candidates) == 1 else None, candidates,
+                            transition_marks(s, t - w['window_ms'] / 1000, t)))
+    if not entries:
+        return
+
+    def counted(n: int) -> str:
+        return f'{n} long single wait{"s" if n != 1 else ""}'
+
+    def described(entry: tuple) -> str:
+        t, role, longest, holder, candidates, marks = entry
+        held = (f'held by {holder}' if holder else
+                f"holder ambiguous ({', '.join(candidates)})" if candidates else 'holder not printed')
+        during = f"during {', '.join(marks)}" if marks else 'no transition'
+        return f'{clock(t)} {role} {longest:.3f} ms {held}, {during}'
+    rule = (f'game {LONG_WAIT_GAME_MS:g} ms or more, present {LONG_WAIT_PRESENT_MS:g} ms or more; transitions: export '
+            f'pause or start, overlay, FG mode change, present gap of {LONG_WAIT_GAP_MS:.0f} ms or more')
+    steady = [e for e in entries if e[3] and e[3].startswith('p+') and not e[5]]
+    shown = steady or entries
+    listed = '; '.join(described(e) for e in shown[:6]) + (f'; {len(shown) - 6} more' if len(shown) > 6 else '')
+    if steady:
+        add(Check('WARN', 'Capture lock longest wait', f'{len(steady)} of {counted(len(entries))} ({rule}) were held '
+                  f'by a present-thread section without a transition: {listed}; not a split trigger, the '
+                  'present-thread holder is shortened (map the offsets with the add-on symbols)',
+                  [clock(e[0]) for e in steady]))
+        return
+    game = Counter(e[3] for e in entries if e[3] and e[3].startswith('g+') and e[3] != 'g+0x0')
+    names = ', '.join(f'{site} ({n})' for site, n in game.most_common()) or 'no single holder named'
+    add(Check('INFO', 'Capture lock longest wait', f'{counted(len(entries))} ({rule}), no split trigger: {listed}; '
+              f'game-role holders to shorten: {names}', [clock(e[0]) for e in entries]))
 
 
 def export_checks(s: Session, add) -> None:

@@ -34,6 +34,8 @@ Game 3D readiness: SandFall-Win64-Shipping.exe  10:37:15 to 10:39:25 (2m10s, exi
 [INFO] Depth losses: 13 episodes (1 counted but not logged), 7.5 per streamed minute, 13.7 s without depth in the logged ones; retained_depth_expired 12
 [PASS] Queue order: 10 queues, 39 fences (17 settled), 535350 signals, 338523 waits; 0 ordered verdicts, proofs inflight 0; poisoned shared 5, unobserved 1; refused poisoned 19105, pending_hooks 78, unsettled 6, uncovered 2
 [INFO] Capture lock: 11 windows (114 s): game p99 up to 10 us, largest game wait 4.449 ms, 3 game waits of 1 ms or more, present p99 up to 10 us: between parked and the split trigger, so the named holder is shortened first: holders g+0x133023:306/8.816,g+0x13e40a:203/4.492,g+0x12be1a:332/2.135,g+0x0:109/0.518 at 10:38:13
+[INFO] Capture lock longest wait: 1 long single wait (game 4 ms or more, present 2 ms or more; transitions: export pause or start, overlay, FG mode change, present gap of 250 ms or more), no split trigger: 10:38:13 game 4.449 ms holder ambiguous (g+0x133023, g+0x13e40a), no transition; game-role holders to shorten: no single holder named
+         10:38:13
 [INFO] Barrier coverage: lists no barrier hook covered (their executions count as uncovered): module table D3D12Core.dll+0x306040, ResourceBarrier in D3D12Core.dll, Barrier in D3D12Core.dll
          10:37:46 module table D3D12Core.dll+0x306040, ResourceBarrier in D3D12Core.dll, Barrier in D3D12Core.dll
 [WARN] Export: renderer_unavailable 4, runtime_reset 4, no_consumer 2; faults: renderer_unavailable

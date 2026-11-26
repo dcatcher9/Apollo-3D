@@ -806,9 +806,9 @@ class ReadinessReport(unittest.TestCase):
 
     def test_capture_lock_applies_the_split_trigger(self):
         def window(at='10:00:10', waits_1ms=0, p99=50, pct=0.01, max_ms=0.42, present_p99=50, holds=True):
-            # The line as the add-on prints it (depth_capture/lock_stats.inl, capture_lock_report).
+            # The line as the add-on prints it (depth_capture/lock_stats.inl, capture_lock_report), a 10 s window.
             return line(at, '[Sunshine 3D] Sunshine depth capture lock: window_ms=10000 game_locks=14208 '
-                            f'game_waits=667 game_wait_ms=1.000 game_wait_pct={pct:.3f} game_p50_us=0 '
+                            f'game_waits=667 game_wait_ms={pct * 100:.3f} game_wait_pct={pct:.3f} game_p50_us=0 '
                             f'game_p99_us={p99} game_max_ms={max_ms:.3f} game_waits_1ms={waits_1ms} '
                             'present_locks=19536 present_waits=120 present_wait_ms=0.900 '
                             f'present_p99_us={present_p99} present_max_ms=0.300'
@@ -827,7 +827,6 @@ class ReadinessReport(unittest.TestCase):
         # or more.
         for kwargs, reason in (({'waits_1ms': 10, 'max_ms': 1.5}, '10 game waits of 1 ms or more in 10.0 s'),
                                ({'p99': 500}, 'game p99 500 us'),
-                               ({'pct': 1.0}, 'game waits 1.00% of wall time'),
                                ({'present_p99': 1000}, 'present p99 1000 us')):
             met = run(BASE + [window(), window('10:00:20', **kwargs)])
             self.assertEqual(met['Capture lock'].status, 'WARN', reason)
@@ -841,6 +840,84 @@ class ReadinessReport(unittest.TestCase):
         for kwargs, status in (({'p99': 250}, 'INFO'), ({'present_p99': 500}, 'PASS')):
             self.assertEqual(run(BASE + [window(), window('10:00:20', **kwargs)])['Capture lock'].status, status, kwargs)
         self.assertNotIn('Capture lock', run(BASE))
+        # The summed wait's share of wall time is read over 60 s of contiguous windows (since 11-25): one window over
+        # 1% (E33 11-18: one wait of 155 ms in a 10 s window) is no trigger, six contiguous windows at 1% are.
+        ends = [f'10:0{n // 6}:{n % 6}0' for n in range(1, 8)]  # 10:00:10 to 10:01:10, each 10 s after the last.
+        self.assertEqual(run(BASE + [window(), window('10:00:20', pct=1.8)])['Capture lock'].status, 'PASS')
+        stretch = run(BASE + [window(at, pct=1.0) for at in ends[:6]])['Capture lock']
+        self.assertEqual(stretch.status, 'WARN')
+        self.assertIn('1 stretch of 60 s of contiguous windows met its wall-time trigger (owner ruling Q5): game waits '
+                      '1.00% of wall time over 10:00:00-10:01:00, holders p+0x1099e4:2400/3.600,g+0xf4926:1200/1.800,'
+                      'other:30/0.060; the split needs it over a 60 s steady window', stretch.detail)
+        self.assertEqual(stretch.times, ['10:00:00-10:01:00'])
+        # A stretch is read wherever it starts (sliding): the windows from 10:00:20 on reach 1%.
+        sliding = run(BASE + [window(ends[0], pct=0.1)] + [window(at, pct=1.0) for at in ends[1:]])['Capture lock']
+        self.assertEqual(sliding.times, ['10:00:10-10:01:10'])
+        # Five windows (50 s) are too short, a window that went unlogged (20 s between two lines of 10 s windows)
+        # breaks the run, and one window at 3% among five at 0.5% stays below 1% over the 60 s.
+        for lines in ([window(at, pct=1.0) for at in ends[:5]],
+                      [window(at, pct=1.0) for at in ends[:3] + ends[4:7]],
+                      [window(at, pct=3.0 if at == ends[2] else 0.5) for at in ends[:6]]):
+            self.assertEqual(run(BASE + lines)['Capture lock'].status, 'PASS')
+
+    def test_capture_lock_longest_wait_names_its_holder(self):
+        def window(at='10:00:30', game_max=0.4, present_max=0.3, holders='g+0xf4926:200/5.100,p+0x1099e4:400/0.600'):
+            # A 10 s window ending at at (depth_capture/lock_stats.inl, capture_lock_report).
+            return line(at, '[Sunshine 3D] Sunshine depth capture lock: window_ms=10000 game_locks=14208 '
+                            'game_waits=667 game_wait_ms=6.000 game_wait_pct=0.060 game_p50_us=0 game_p99_us=10 '
+                            f'game_max_ms={game_max:.3f} game_waits_1ms=1 present_locks=19536 present_waits=120 '
+                            f'present_wait_ms=0.900 present_p99_us=10 present_max_ms={present_max:.3f} '
+                            f'holders={holders}')
+        self.assertNotIn('Capture lock longest wait', run(BASE + [window(game_max=3.9, present_max=1.9)]))
+        # A game wait of 4 ms or more, held by the only printed site whose summed wait can contain it: INFO, the
+        # game-role holder to shorten.
+        game = run(BASE + [window(game_max=4.5)])['Capture lock longest wait']
+        self.assertEqual(game.status, 'INFO')
+        self.assertIn('1 long single wait (game 4 ms or more, present 2 ms or more; transitions: export pause or '
+                      'start, overlay, FG mode change, present gap of 250 ms or more), no split trigger: 10:00:30 '
+                      'game 4.500 ms held by g+0xf4926, no transition; game-role holders to shorten: g+0xf4926 (1)',
+                      game.detail)
+        self.assertEqual(game.times, ['10:00:30'])
+        # Two sites whose sums can each contain it: ambiguous.
+        ambiguous = run(BASE + [window(game_max=4.5, holders='g+0xf4926:200/5.100,g+0xe1234:90/4.500')])
+        self.assertIn('10:00:30 game 4.500 ms holder ambiguous (g+0xf4926, g+0xe1234), no transition; game-role '
+                      'holders to shorten: no single holder named', ambiguous['Capture lock longest wait'].detail)
+        # A present wait of 2 ms or more held by a present-thread section in a window without a transition: WARN.
+        present = 'p+0x1099e4:400/2.600,g+0xf4926:200/0.300'
+        steady = run(BASE + [window(present_max=2.5, holders=present)])['Capture lock longest wait']
+        self.assertEqual(steady.status, 'WARN')
+        self.assertIn('1 of 1 long single wait (game 4 ms or more', steady.detail)
+        self.assertIn('were held by a present-thread section without a transition: 10:00:30 present 2.500 ms held by '
+                      'p+0x1099e4, no transition; not a split trigger', steady.detail)
+        self.assertEqual(steady.times, ['10:00:30'])
+        # A transition in the window, or within 0.5 s of it, excuses it (INFO); the ones outside do not.
+        pause = ('[Sunshine 3D] Sunshine SBS: export inactive (no_consumer, routine); waiting for a valid focused '
+                 'technique')
+        start = '[Sunshine 3D] Sunshine SBS: generation 2, 7680x2160 full SBS, DXGI 10, D3D12, scRGB (source color 3)'
+        opened = '[Sunshine 3D] Sunshine SBS: ReShade overlay opened; composing controls over both stereo eyes'
+        closed = '[Sunshine 3D] Sunshine SBS: ReShade overlay closed'
+        fg = '[Sunshine 3D] Sunshine Streamline frame generation: viewport=1 mode=1 generated_frames=1 supported=1'
+
+        def gap(ms):
+            return f'[Sunshine 3D] Sunshine Game 3D present gap: {ms} ms since the previous Present; fg=0 foreground=1'
+        for before, after, mark in (([line('10:00:25', pause)], [], 'export pause'),
+                                    ([line('10:00:25', start)], [], 'export start'),
+                                    ([line('10:00:15', opened)], [], 'overlay'),
+                                    ([line('10:00:15', opened)], [line('10:00:40', closed)], 'overlay'),
+                                    ([line('10:00:25', fg)], [], 'FG mode change'),
+                                    ([line('10:00:28', gap(300))], [], 'present gap 300 ms'),
+                                    ([], [line('10:00:31', gap(800))], 'present gap 800 ms'),
+                                    ([f'10:00:19:600 [ 1234] | INFO  | {pause}'], [], 'export pause')):
+            checks = run(BASE + before + [window(present_max=2.5, holders=present)] + after)
+            self.assertEqual(checks['Capture lock longest wait'].status, 'INFO', mark)
+            self.assertIn(f'10:00:30 present 2.500 ms held by p+0x1099e4, during {mark}; game-role holders to shorten: '
+                          'no single holder named', checks['Capture lock longest wait'].detail)
+        for before, after in (([line('10:00:15', opened), line('10:00:17', closed)], []),
+                              ([line('10:00:28', gap(249))], []),
+                              ([line('10:00:15', pause)], []),
+                              ([], [line('10:00:31', pause)])):
+            checks = run(BASE + before + [window(present_max=2.5, holders=present)] + after)
+            self.assertEqual(checks['Capture lock longest wait'].status, 'WARN', before + after)
 
     def test_dlssg_inputs_name_copies_and_refusals(self):
         def ngx(depth, ui, evaluations=300):
