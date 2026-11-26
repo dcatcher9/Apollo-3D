@@ -125,7 +125,6 @@ namespace VDISPLAY {
     std::vector<DISPLAYCONFIG_PATH_INFO> &paths,
     std::vector<DISPLAYCONFIG_MODE_INFO> &modes
   );
-  display_identity_query_t queryDisplayIdentity(const LUID &adapterLuid, uint32_t targetId);
   display_identity_query_t queryVirtualDisplayIdentity(
     const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
     std::wstring_view devicePath
@@ -252,40 +251,19 @@ namespace VDISPLAY {
     const std::vector<retirement_path_candidate_t> &candidates
   );
 #endif
-	creation_result_t createVirtualDisplay(
-    const char *s_client_uid,
-    const char *s_client_name,
-    uint32_t width,
-    uint32_t height,
-    uint32_t fps,
-    const GUID &guid
-  );
-  creation_result_t createVirtualDisplayWithRenderAdapter(
-    const char *s_client_uid,
-    const char *s_client_name,
-    uint32_t width,
-    uint32_t height,
-    uint32_t fps,
-    const GUID &guid,
-    const std::optional<LUID> &adapterLuid
-  );
-  creation_result_t createVirtualDisplayOnAdapter(
+  /**
+   * Add one virtual display rendered by the explicit adapter LUID, else by the adapter named
+   * adapterName, else by the primary display's adapter. An unknown adapter name adds nothing.
+   */
+  creation_result_t createVirtualDisplay(
     const char *s_client_uid,
     const char *s_client_name,
     uint32_t width,
     uint32_t height,
     uint32_t fps,
     const GUID &guid,
-    const LUID &adapterLuid
-  );
-  creation_result_t createVirtualDisplayOnAdapter(
-    const char *s_client_uid,
-    const char *s_client_name,
-    uint32_t width,
-    uint32_t height,
-    uint32_t fps,
-    const GUID &guid,
-    const std::wstring &adapterName
+    const std::optional<LUID> &adapterLuid = std::nullopt,
+    const std::wstring &adapterName = {}
   );
   bool removeVirtualDisplay(const GUID &guid);
 

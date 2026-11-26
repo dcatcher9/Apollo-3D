@@ -742,27 +742,16 @@ int main(int argc, char *argv[]) {
 
       BOOST_LOG(info) << "Creating a temporary virtual display to probe for encoders..."sv;
 
-      VDISPLAY::creation_result_t probe_display;
-      if (!config::video.adapter_name.empty()) {
-        probe_display = VDISPLAY::createVirtualDisplayOnAdapter(
-          probe_uuid_str.c_str(),
-          "Probe",
-          800,
-          600,
-          60,
-          *probe_guid,
-          platf::from_utf8(config::video.adapter_name)
-        );
-      } else {
-        probe_display = VDISPLAY::createVirtualDisplay(
-          probe_uuid_str.c_str(),
-          "Probe",
-          800,
-          600,
-          60,
-          *probe_guid
-        );
-      }
+      auto probe_display = VDISPLAY::createVirtualDisplay(
+        probe_uuid_str.c_str(),
+        "Probe",
+        800,
+        600,
+        60,
+        *probe_guid,
+        std::nullopt,
+        platf::from_utf8(config::video.adapter_name)
+      );
 
       std::this_thread::sleep_for(500ms);
 

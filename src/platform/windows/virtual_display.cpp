@@ -1628,6 +1628,7 @@ desktop_detach_result_t deactivateVirtualDisplay(
   }
 }
 
+namespace {
 display_identity_query_t queryDisplayIdentity(const LUID &adapterLuid, uint32_t targetId) {
   std::vector<DISPLAYCONFIG_PATH_INFO> paths;
   std::vector<DISPLAYCONFIG_MODE_INFO> modes;
@@ -1673,6 +1674,7 @@ display_identity_query_t queryDisplayIdentity(const LUID &adapterLuid, uint32_t 
   // adapter/target match.
   return {display_identity_state_e::absent, {}, {}, {}};
 }
+}  // namespace
 
 display_identity_query_t queryVirtualDisplayIdentity(
   const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
@@ -2217,72 +2219,17 @@ creation_result_t createVirtualDisplay(
   uint32_t width,
   uint32_t height,
   uint32_t fps,
-  const GUID &guid
-) {
-  return createVirtualDisplayWithRenderAdapter(
-    s_client_uid,
-    s_client_name,
-    width,
-    height,
-    fps,
-    guid,
-    primaryDisplayAdapterLuid()
-  );
-}
-
-creation_result_t createVirtualDisplayWithRenderAdapter(
-  const char *s_client_uid,
-  const char *s_client_name,
-  uint32_t width,
-  uint32_t height,
-  uint32_t fps,
   const GUID &guid,
-  const std::optional<LUID> &adapterLuid
-) {
-  return createVirtualDisplayImpl(
-    s_client_uid,
-    s_client_name,
-    width,
-    height,
-    fps,
-    guid,
-    adapterLuid
-  );
-}
-
-creation_result_t createVirtualDisplayOnAdapter(
-  const char *s_client_uid,
-  const char *s_client_name,
-  uint32_t width,
-  uint32_t height,
-  uint32_t fps,
-  const GUID &guid,
-  const LUID &adapterLuid
-) {
-  return createVirtualDisplayImpl(
-    s_client_uid,
-    s_client_name,
-    width,
-    height,
-    fps,
-    guid,
-    adapterLuid
-  );
-}
-
-creation_result_t createVirtualDisplayOnAdapter(
-  const char *s_client_uid,
-  const char *s_client_name,
-  uint32_t width,
-  uint32_t height,
-  uint32_t fps,
-  const GUID &guid,
+  const std::optional<LUID> &adapterLuid,
   const std::wstring &adapterName
 ) {
-  const auto adapterLuid = adapterLuidByName(adapterName);
-  if (!adapterLuid) {
-    BOOST_LOG(error) << "[SUDOVDA] Cannot find requested render adapter.";
-    return {};
+  std::optional<LUID> renderAdapter = adapterLuid;
+  if (!renderAdapter && !adapterName.empty()) {
+    renderAdapter = adapterLuidByName(adapterName);
+    if (!renderAdapter) {
+      BOOST_LOG(error) << "[SUDOVDA] Cannot find requested render adapter.";
+      return {};
+    }
   }
   return createVirtualDisplayImpl(
     s_client_uid,
@@ -2291,7 +2238,7 @@ creation_result_t createVirtualDisplayOnAdapter(
     height,
     fps,
     guid,
-    *adapterLuid
+    renderAdapter ? renderAdapter : primaryDisplayAdapterLuid()
   );
 }
 

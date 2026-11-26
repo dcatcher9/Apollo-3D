@@ -24,13 +24,7 @@ namespace VDISPLAY {
                    platf::primary_display::prepare(spec.exclusive);
         },
         .create = [](const display_spec_t &spec) {
-          if (spec.render_adapter_luid) {
-            return createVirtualDisplayOnAdapter(spec.client_uid.c_str(), spec.client_name.c_str(), spec.width, spec.height, spec.refresh_millihz, spec.guid, *spec.render_adapter_luid);
-          }
-          if (!spec.adapter_name.empty()) {
-            return createVirtualDisplayOnAdapter(spec.client_uid.c_str(), spec.client_name.c_str(), spec.width, spec.height, spec.refresh_millihz, spec.guid, spec.adapter_name);
-          }
-          return createVirtualDisplay(spec.client_uid.c_str(), spec.client_name.c_str(), spec.width, spec.height, spec.refresh_millihz, spec.guid);
+          return createVirtualDisplay(spec.client_uid.c_str(), spec.client_name.c_str(), spec.width, spec.height, spec.refresh_millihz, spec.guid, spec.render_adapter_luid, spec.adapter_name);
         },
         .bind = [](std::wstring_view path) { return platf::primary_display::bind_pending(path); },
         .promote = [](std::wstring_view path, bool exclusive) { return platf::primary_display::promote(path, exclusive); },
