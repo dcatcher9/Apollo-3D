@@ -38,7 +38,7 @@ From a UCRT64 shell:
 
 ```bash
 export PATH="/ucrt64/bin:/c/Program Files/nodejs:$PATH"
-cmake -B cmake-build-relwithdebinfo -G Ninja -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake -B cmake-build-relwithdebinfo -G Ninja -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTS=ON
 ninja -C cmake-build-relwithdebinfo
 ```
 
@@ -141,7 +141,6 @@ The Vue 3/Vite sources are under `src_assets/common/assets/web`. The normal CMak
 ```bash
 npm run build
 npm run dev
-npm run serve
 ```
 
 Use a scoped localhost HTTP server for rendered testing. Do not ask browser automation to open

@@ -73,7 +73,7 @@ From an MSYS2 UCRT64 shell:
 export PATH="/ucrt64/bin:/c/Program Files/nodejs:$PATH"
 export TENSORRT_DIR="/c/path/to/TensorRT"
 cmake -B cmake-build-relwithdebinfo -G Ninja -S . \
-  -DCMAKE_BUILD_TYPE=RelWithDebInfo
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTS=ON
 ninja -C cmake-build-relwithdebinfo
 ```
 
@@ -83,7 +83,7 @@ From PowerShell, invoke the same shell explicitly:
 $env:MSYSTEM = "UCRT64"
 $env:MSYS2_PATH_TYPE = "inherit"
 C:\msys64\usr\bin\bash.exe -lc `
-  'export PATH="/ucrt64/bin:/c/Program Files/nodejs:$PATH"; export TENSORRT_DIR="/c/path/to/TensorRT"; cd /e/Git/Repo/Apollo-3D; cmake -B cmake-build-relwithdebinfo -G Ninja -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo; /ucrt64/bin/ninja -C cmake-build-relwithdebinfo'
+  'export PATH="/ucrt64/bin:/c/Program Files/nodejs:$PATH"; export TENSORRT_DIR="/c/path/to/TensorRT"; cd /e/Git/Repo/Apollo-3D; cmake -B cmake-build-relwithdebinfo -G Ninja -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTS=ON; /ucrt64/bin/ninja -C cmake-build-relwithdebinfo'
 ```
 
 The `/ucrt64/bin` entry must be present in the environment inherited by Ninja, compiler, and test
