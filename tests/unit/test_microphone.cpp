@@ -14,13 +14,12 @@
 #include <thread>
 
 namespace {
-  microphone::options_t options(bool encrypted = false) {
+  microphone::options_t options() {
     microphone::options_t value;
     value.bind_address = "127.0.0.1";
     value.remote_address = "127.0.0.1";
     value.sink_endpoint = "injected-test-cable";
     value.key_id = 0x01020304;
-    value.encrypted = encrypted;
     for (unsigned index = 0; index < 16; ++index) {
       value.ping_payload[index] = static_cast<std::uint8_t>('A' + index);
       value.aes_key[index] = static_cast<std::uint8_t>(index);
@@ -56,31 +55,27 @@ namespace {
 
   std::vector<std::uint8_t> packet(const microphone::options_t &value, std::uint16_t sequence, std::vector<std::uint8_t> payload) {
     std::vector<std::uint8_t> result {0, 0x61, static_cast<std::uint8_t>(sequence), static_cast<std::uint8_t>(sequence >> 8), 0x12, 0x34, 0x56, 0x78, 0x78, 0x56, 0x34, 0x12};
-    if (value.encrypted) {
-      const auto rounded = (payload.size() + 15) / 16 * 16;
-      if (rounded != payload.size()) {
-        const auto padding = static_cast<std::uint8_t>(rounded - payload.size());
-        payload.resize(rounded, padding);
-      }
-      std::array<std::uint8_t, 16> iv {};
-      const auto iv_sequence = value.key_id + sequence;
-      for (unsigned index = 0; index < 4; ++index) {
-        iv[index] = static_cast<std::uint8_t>(iv_sequence >> (24 - index * 8));
-      }
-      std::vector<std::uint8_t> encrypted(payload.size() + 16);
-      auto *cipher = EVP_CIPHER_CTX_new();
-      int first = 0;
-      int final = 0;
-      if (!cipher || EVP_EncryptInit_ex(cipher, EVP_aes_128_cbc(), nullptr, value.aes_key.data(), iv.data()) != 1 || EVP_EncryptUpdate(cipher, encrypted.data(), &first, payload.data(), static_cast<int>(payload.size())) != 1 || EVP_EncryptFinal_ex(cipher, encrypted.data() + first, &final) != 1) {
-        EVP_CIPHER_CTX_free(cipher);
-        return {};
-      }
-      EVP_CIPHER_CTX_free(cipher);
-      encrypted.resize(first + final);
-      result.insert(result.end(), encrypted.begin(), encrypted.end());
-    } else {
-      result.insert(result.end(), payload.begin(), payload.end());
+    const auto rounded = (payload.size() + 15) / 16 * 16;
+    if (rounded != payload.size()) {
+      const auto padding = static_cast<std::uint8_t>(rounded - payload.size());
+      payload.resize(rounded, padding);
     }
+    std::array<std::uint8_t, 16> iv {};
+    const auto iv_sequence = value.key_id + sequence;
+    for (unsigned index = 0; index < 4; ++index) {
+      iv[index] = static_cast<std::uint8_t>(iv_sequence >> (24 - index * 8));
+    }
+    std::vector<std::uint8_t> encrypted(payload.size() + 16);
+    auto *cipher = EVP_CIPHER_CTX_new();
+    int first = 0;
+    int final = 0;
+    if (!cipher || EVP_EncryptInit_ex(cipher, EVP_aes_128_cbc(), nullptr, value.aes_key.data(), iv.data()) != 1 || EVP_EncryptUpdate(cipher, encrypted.data(), &first, payload.data(), static_cast<int>(payload.size())) != 1 || EVP_EncryptFinal_ex(cipher, encrypted.data() + first, &final) != 1) {
+      EVP_CIPHER_CTX_free(cipher);
+      return {};
+    }
+    EVP_CIPHER_CTX_free(cipher);
+    encrypted.resize(first + final);
+    result.insert(result.end(), encrypted.begin(), encrypted.end());
     return result;
   }
 
@@ -117,35 +112,33 @@ namespace {
   }
 
   TEST(Microphone, DecodesActualOpusAndRetainsLegacyEncryptedPaddingBehavior) {
-    for (const bool encrypted : {false, true}) {
-      const auto value = options(encrypted);
-      microphone::packet_decoder_t decoder(value);
-      ASSERT_TRUE(decoder.receive(ping(value), value.remote_address, 1234));
-      auto encoded = opus_packet();
-      ASSERT_FALSE(encoded.empty());
-      ASSERT_TRUE(decoder.receive(packet(value, 0, encoded), value.remote_address, 1234));
-      EXPECT_TRUE(decoder.playout().empty());
-      EXPECT_TRUE(decoder.playout().empty());
-      auto pcm = decoder.playout();
-      ASSERT_EQ(pcm.size(), microphone::frame_samples);
-      if (encrypted && encoded.size() % 16 != 0) {
-        encoded.resize((encoded.size() + 15) / 16 * 16, static_cast<std::uint8_t>(16 - encoded.size() % 16));
-      }
-      int error;
-      auto *reference_decoder = opus_decoder_create(microphone::sample_rate, 1, &error);
-      ASSERT_EQ(error, OPUS_OK);
-      std::vector<std::int16_t> reference(microphone::frame_samples);
-      ASSERT_EQ(opus_decode(reference_decoder, encoded.data(), static_cast<opus_int32>(encoded.size()), reference.data(), microphone::frame_samples, 0), static_cast<int>(microphone::frame_samples));
-      opus_decoder_destroy(reference_decoder);
-      EXPECT_EQ(pcm, reference);
-      EXPECT_TRUE(std::any_of(pcm.begin(), pcm.end(), [](auto sample) {
-        return sample != 0;
-      }));
+    const auto value = options();
+    microphone::packet_decoder_t decoder(value);
+    ASSERT_TRUE(decoder.receive(ping(value), value.remote_address, 1234));
+    auto encoded = opus_packet();
+    ASSERT_FALSE(encoded.empty());
+    ASSERT_TRUE(decoder.receive(packet(value, 0, encoded), value.remote_address, 1234));
+    EXPECT_TRUE(decoder.playout().empty());
+    EXPECT_TRUE(decoder.playout().empty());
+    auto pcm = decoder.playout();
+    ASSERT_EQ(pcm.size(), microphone::frame_samples);
+    if (encoded.size() % 16 != 0) {
+      encoded.resize((encoded.size() + 15) / 16 * 16, static_cast<std::uint8_t>(16 - encoded.size() % 16));
     }
+    int error;
+    auto *reference_decoder = opus_decoder_create(microphone::sample_rate, 1, &error);
+    ASSERT_EQ(error, OPUS_OK);
+    std::vector<std::int16_t> reference(microphone::frame_samples);
+    ASSERT_EQ(opus_decode(reference_decoder, encoded.data(), static_cast<opus_int32>(encoded.size()), reference.data(), microphone::frame_samples, 0), static_cast<int>(microphone::frame_samples));
+    opus_decoder_destroy(reference_decoder);
+    EXPECT_EQ(pcm, reference);
+    EXPECT_TRUE(std::any_of(pcm.begin(), pcm.end(), [](auto sample) {
+      return sample != 0;
+    }));
   }
 
   TEST(Microphone, RejectsMalformedHeaderCiphertextAndWrongOpusDuration) {
-    const auto value = options(true);
+    const auto value = options();
     microphone::packet_decoder_t decoder(value);
     ASSERT_TRUE(decoder.receive(ping(value), value.remote_address, 1234));
     const auto audio = packet(value, 0, opus_packet());
@@ -256,7 +249,7 @@ namespace {
   };
 
   TEST(Microphone, RealUdpRoutesDecodedAudioOnlyAfterActivationAndJoinsOnStop) {
-    auto value = options(true);
+    auto value = options();
     auto state = std::make_shared<sink_state_t>();
     std::string error;
     auto session = microphone::session_t::start(value, error, [state] {
@@ -308,7 +301,7 @@ namespace {
   }
 
   TEST(Microphone, RealUdpRejectsWrongAddressBeforeNonceAndPortBinding) {
-    const auto value = options(true);
+    const auto value = options();
     auto state = std::make_shared<sink_state_t>();
     std::string error;
     auto session = microphone::session_t::start(value, error, [state] {
@@ -374,7 +367,7 @@ namespace {
   }
 
   TEST(Microphone, RealUdpMaintainsCaptureCadenceAcrossSchedulerLateness) {
-    const auto value = options(true);
+    const auto value = options();
     auto state = std::make_shared<sink_state_t>();
     std::string error;
     auto session = microphone::session_t::start(value, error, [state] {
@@ -452,7 +445,7 @@ namespace {
            {"127.0.0.1", "::ffff:127.0.0.1", "127.0.0.1"}
          }) {
       SCOPED_TRACE(addresses.bind + " -> " + addresses.remote);
-      auto value = options(true);
+      auto value = options();
       value.bind_address = addresses.bind;
       value.remote_address = addresses.remote;
       auto state = std::make_shared<sink_state_t>();

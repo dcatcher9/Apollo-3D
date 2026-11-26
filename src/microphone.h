@@ -28,7 +28,6 @@ namespace microphone {
     std::array<std::uint8_t, 16> ping_payload {};
     std::array<std::uint8_t, 16> aes_key {};
     std::uint32_t key_id {};
-    bool encrypted {};
   };
 
   /** All methods, including destruction, run on the microphone worker thread. */

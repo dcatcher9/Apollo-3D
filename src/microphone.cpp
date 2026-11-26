@@ -69,9 +69,7 @@ namespace microphone {
       if (error != OPUS_OK) {
         decoder = nullptr;
       }
-      if (options.encrypted) {
-        cipher = EVP_CIPHER_CTX_new();
-      }
+      cipher = EVP_CIPHER_CTX_new();
     }
 
     ~impl_t() {
@@ -81,10 +79,6 @@ namespace microphone {
     }
 
     bool decrypt(std::span<const std::uint8_t> input, std::uint16_t sequence, std::vector<std::uint8_t> &output) {
-      if (!options.encrypted) {
-        output.assign(input.begin(), input.end());
-        return true;
-      }
       // Shared common-C deliberately preserves the reference's manual rounding
       // followed by EVP PKCS7 finalization. Remove the final PKCS7 layer only:
       // remaining bytes are passed to Opus exactly as the legacy host does.
@@ -114,7 +108,7 @@ namespace microphone {
   packet_decoder_t::~packet_decoder_t() = default;
 
   bool packet_decoder_t::valid() const {
-    return impl_->decoder && (!impl_->options.encrypted || impl_->cipher) && impl_->options.ping_payload[0] != 0;
+    return impl_->decoder && impl_->cipher && impl_->options.ping_payload[0] != 0;
   }
 
   bool packet_decoder_t::receive(std::span<const std::uint8_t> packet, const std::string &remote_address, std::uint16_t remote_port) {

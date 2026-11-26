@@ -1353,7 +1353,6 @@ namespace rtsp_stream {
         options.remote_address = remote.address().to_string();
         options.sink_endpoint = config::audio.microphone_sink;
         options.port = net::map_port(stream::MICROPHONE_STREAM_PORT);
-        options.encrypted = true;
         std::copy_n(session.av_ping_payload.begin(), 16, options.ping_payload.begin());
         std::copy_n(session.gcm_key.begin(), 16, options.aes_key.begin());
         for (unsigned i = 0; i < 4; ++i) {

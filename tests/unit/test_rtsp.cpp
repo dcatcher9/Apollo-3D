@@ -73,7 +73,6 @@ namespace {
     options.remote_address = "127.0.0.1";
     options.sink_endpoint = "injected-lifecycle-test-sink";
     options.port = port;
-    options.encrypted = true;
     std::copy_n(launch.av_ping_payload.begin(), 16, options.ping_payload.begin());
     std::string error;
     auto receiver = microphone::session_t::start(options, error, [destroyed] {
