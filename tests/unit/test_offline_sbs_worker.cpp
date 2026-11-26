@@ -17,6 +17,7 @@
 #include <gtest/gtest.h>
 #include <iterator>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -1246,6 +1247,31 @@ TEST(OfflineSbsWorker, ComparesCommonVideoTimeBasesAsExactRationals) {
     offline_sbs::validate_timeline_equivalence(source, equivalent),
     std::runtime_error
   );
+}
+
+TEST(OfflineSbsWorker, ProvesTheEncodedPacketTimelineExactlyWithoutDecoding) {
+  auto source = offline_sbs::parse_ffprobe_contract(sdr_probe());
+  source.time_base = {1, 24000};
+  source.frames = {
+    {1, 0, 1001},
+    {2, 1001, 1001},
+    {3, 2002, 1001},
+  };
+  const auto validate = [&](const std::string &packets, const offline_sbs::rational_t time_base) {
+    std::istringstream stream(packets);
+    offline_sbs::validate_encoded_packet_timeline(source, time_base, stream);
+  };
+  // FFprobe on Windows ends lines with CRLF; fields after pts and duration are ignored.
+  EXPECT_NO_THROW(validate("0,10010\r\n10010,10010\r\n20020,10010,extra\r\n", {1, 240000}));
+  EXPECT_NO_THROW(validate("0,1001\n1001,1001\n2002,1001", {1, 24000}));
+  // One tick of a finer time base hides inside Matroska's millisecond tolerance; not here.
+  EXPECT_THROW(validate("0,10010\n10011,10010\n20020,10010\n", {1, 240000}), std::runtime_error);
+  EXPECT_THROW(validate("0,10010\n10010,10010\n20020,10011\n", {1, 240000}), std::runtime_error);
+  EXPECT_THROW(validate("0,1001\n1001,1001\n", {1, 24000}), std::runtime_error);
+  EXPECT_THROW(validate("0,1001\n1001,1001\n2002,1001\n3003,1001\n", {1, 24000}), std::runtime_error);
+  EXPECT_THROW(validate("0,1001\nN/A,1001\n2002,1001\n", {1, 24000}), std::runtime_error);
+  EXPECT_THROW(validate("0,1001\n1001\n2002,1001\n", {1, 24000}), std::runtime_error);
+  EXPECT_THROW(validate(std::string(5000, '1'), {1, 24000}), std::runtime_error);
 }
 
 TEST(OfflineSbsWorker, AcceptsStaticBt2020PqAndBuildsLinearScRgbDecode) {

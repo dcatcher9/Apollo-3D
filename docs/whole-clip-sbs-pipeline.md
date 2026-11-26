@@ -108,11 +108,13 @@ scene replay, per-scene encoder, or second inference pass.
 
 SDR encoding does not decode the source again. Static HDR keeps a second aligned source decode
 solely to donate per-frame mastering-display and content-light metadata, because the raw pipe
-carries no frame side data. Every encoded pixel comes from the packed raw stream. The donor was
-chosen against the bundled FFmpeg build, whose frame-loop filters do not keep that side data on
-cloned frames; it is a cost to revisit, not a format requirement. Replacing it requires
-equivalent HEVC/AV1 metadata at every random-access keyframe; a looped single donor frame does
-not establish that equivalence.
+carries no frame side data. Every encoded pixel comes from the packed raw stream: the donor is
+only resized, nearest-neighbour, to the packed raster and float format that FFmpeg's `blend`
+requires of both inputs, and the zero-opacity blend copies every SBS plane unchanged while its
+output frame keeps the donor's side data. The donor was chosen against the bundled FFmpeg build,
+whose frame-loop filters do not keep that side data on cloned frames; it is a cost to revisit,
+not a format requirement. Replacing it requires equivalent HEVC/AV1 metadata at every
+random-access keyframe; a looped single donor frame does not establish that equivalence.
 
 ## Retained job documents
 
@@ -149,9 +151,12 @@ or pruned.
 
 Analyze Only emits source, progress, and terminal attestations without encoding. Convert
 Video additionally verifies compressed video, muxed streams, timing, HDR/color, staging identity,
-and complete output before publication. Success requires exactly one scheduled/enqueued TensorRT
-update per source frame, selected-input/full-frame scope, the live V2 renderer, complete immutable
-SBS publication, and zero cache/replay use.
+and complete output before publication. The decoded probe of the stream-copied final output is
+that gate; the intermediate encoder stream is not decoded. Because Matroska's millisecond
+timestamps allow one output tick, a Matroska job also checks the intermediate's packet
+timestamps and durations exactly against the source. Success requires exactly one
+scheduled/enqueued TensorRT update per source frame, selected-input/full-frame scope, the live V2
+renderer, complete immutable SBS publication, and zero cache/replay use.
 
 The separate evaluator scene-cache contract is version 5 and labels its renderer
 `ordinary-base-inverse-renderer-v1`. It retains the unchanged schema-1 six-payload tuple for
@@ -192,7 +197,8 @@ client HTTP/presentation transactions.
 
 The opt-in `tests/integration/Invoke-OfflineSbsWorkerSmoke.ps1` runs the actual worker on a small
 deterministic fixture. It checks raw transport, causal state, frame order, timestamps, auxiliary
-streams, attachment bytes, output identity, and failed-job publication.
+streams, attachment bytes, output identity, and failed-job publication. Its PQ fixture carries
+HDR10 mastering-display and content-light metadata, which every output frame must keep.
 Run SDR, PQ, and HLG with HEVC/AV1 as appropriate after the installed host releases its ports/GPU.
 GPU smoke, throughput comparisons, and physical XR presentation are separate evidence; portable
 CI does not claim to validate the headset compositor or display hardware.

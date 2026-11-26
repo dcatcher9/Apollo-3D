@@ -8,7 +8,8 @@ This is an opt-in GPU integration smoke test. It creates all artifacts below the
 the same sunshine.exe --offline-sbs-worker entry point used by the job manager, and verifies the
 worker result, compressed Matroska output, stream preservation, timestamps, attachment bytes,
 color tags, bit depth, and failed-job cleanup. The default fixture is SDR. Use -FixtureColor pq or -FixtureColor hlg to opt
-into a tagged 10-bit BT.2020 HDR fixture; both HEVC and AV1 remain selectable with -Codec.
+into a tagged 10-bit BT.2020 HDR fixture; both HEVC and AV1 remain selectable with -Codec. The PQ
+fixture also carries HDR10 mastering-display and content-light metadata on every frame.
 
 No Python runtime or PATH-discovered media tool is used. Stop live streaming before running this
 test because the worker and NVENC preflights intentionally use the production D3D11/TensorRT/NVENC
@@ -264,7 +265,7 @@ function Invoke-VideoFrameProbe {
       '-v', 'error',
       '-select_streams', 'v:0',
       '-show_frames',
-      '-show_entries', 'frame=pts,duration',
+      '-show_entries', 'frame=pts,duration:frame_side_data=side_data_type',
       '-of', 'json',
       $MediaPath
     ) `
@@ -274,6 +275,30 @@ function Invoke-VideoFrameProbe {
     return $run.Text | ConvertFrom-Json
   } catch {
     throw "FFprobe returned malformed frame JSON for $MediaPath`: $($_.Exception.Message)"
+  }
+}
+
+function Assert-StaticMetadataOnEveryFrame {
+  param(
+    [Parameter(Mandatory = $true)]
+    [object] $Frames,
+
+    [Parameter(Mandatory = $true)]
+    [string] $Description
+  )
+
+  $frameList = @($Frames.frames)
+  Assert-Contract ($frameList.Count -gt 0) "$Description has no frames"
+  for ($index = 0; $index -lt $frameList.Count; ++$index) {
+    $sideData = $frameList[$index].PSObject.Properties['side_data_list']
+    $types = @()
+    if ($null -ne $sideData) {
+      $types = @($sideData.Value | ForEach-Object { $_.side_data_type })
+    }
+    Assert-Contract (
+      $types -contains 'Mastering display metadata' -and
+      $types -contains 'Content light level metadata'
+    ) "$Description frame $index lacks HDR10 static metadata"
   }
 }
 
@@ -363,6 +388,11 @@ function Get-FixtureColorContract {
         Matrix = 'bt2020nc'
         Transfer = 'smpte2084'
         Primaries = 'bt2020'
+        # HDR10 static metadata exercises the worker's per-frame HDR side-data donor.
+        StaticMetadata = (
+          'master-display=G(13250,34500)B(7500,3000)R(34000,16000)' +
+          'WP(15635,16450)L(10000000,1):max-cll=1000,400'
+        )
         Filter = (
           'format=gbrp,' +
           'zscale=rangein=full:primariesin=bt709:' +
@@ -379,6 +409,7 @@ function Get-FixtureColorContract {
         Matrix = 'bt2020nc'
         Transfer = 'arib-std-b67'
         Primaries = 'bt2020'
+        StaticMetadata = $null
         Filter = (
           'format=gbrp,' +
           'zscale=rangein=full:primariesin=bt709:' +
@@ -395,6 +426,7 @@ function Get-FixtureColorContract {
         Matrix = 'bt709'
         Transfer = 'iec61966-2-1'
         Primaries = 'bt709'
+        StaticMetadata = $null
         Filter = (
           'format=gbrp,' +
           'zscale=rangein=full:primariesin=bt709:' +
@@ -875,6 +907,38 @@ title=Smoke chapter
     ) `
     -WorkingDirectory $runRoot `
     -Description 'flash-and-real-cut video fixture generation' | Out-Null
+  if ($null -ne $fixtureColorContract.StaticMetadata) {
+    # FFV1 has no HDR10 SEI. A lossless x265 pass attaches the static metadata, and the FFV1
+    # re-encode keeps it as Matroska stream side data that decoding presents on every frame.
+    $staticMetadataPath = Join-Path $runRoot 'fixture-video-hdr10.mkv'
+    Invoke-RequiredNative `
+      -Executable $script:FfmpegPath `
+      -Arguments @(
+        '-hide_banner', '-loglevel', 'error', '-y',
+        '-i', $videoPath,
+        '-c:v', 'libx265',
+        '-x265-params', "lossless=1:log-level=error:$($fixtureColorContract.StaticMetadata)",
+        $staticMetadataPath
+      ) `
+      -WorkingDirectory $runRoot `
+      -Description 'HDR10 static metadata attachment' | Out-Null
+    Invoke-RequiredNative `
+      -Executable $script:FfmpegPath `
+      -Arguments @(
+        '-hide_banner', '-loglevel', 'error', '-y',
+        '-i', $staticMetadataPath,
+        '-c:v', 'ffv1',
+        '-level', '3',
+        '-g', '1',
+        '-color_range', $fixtureColorContract.Range,
+        '-colorspace', $fixtureColorContract.Matrix,
+        '-color_trc', $fixtureColorContract.Transfer,
+        '-color_primaries', $fixtureColorContract.Primaries,
+        $videoPath
+      ) `
+      -WorkingDirectory $runRoot `
+      -Description 'HDR10 FFV1 video fixture generation' | Out-Null
+  }
   Invoke-RequiredNative `
     -Executable $script:FfmpegPath `
     -Arguments @(
@@ -919,6 +983,9 @@ title=Smoke chapter
     -ExpectedColor $fixtureColorContract `
     -RequireTenBit $fixtureIsHdr
   Assert-Contract (@($sourceFrames.frames).Count -eq 16) 'fixture frame count differs from packet count'
+  if ($null -ne $fixtureColorContract.StaticMetadata) {
+    Assert-StaticMetadataOnEveryFrame -Frames $sourceFrames -Description 'fixture video'
+  }
   $frameMd5Run = Invoke-RequiredNative `
     -Executable $script:FfmpegPath `
     -Arguments @(
@@ -1296,6 +1363,9 @@ title=Smoke chapter
     -SourceFrames $sourceFrames `
     -OutputFrames $outputFrames `
     -OutputVideoStream $outputVideo
+  if ($null -ne $fixtureColorContract.StaticMetadata) {
+    Assert-StaticMetadataOnEveryFrame -Frames $outputFrames -Description 'output video'
+  }
 
   $extractedAttachment = Join-Path $runRoot 'output-attachment.ttf'
   Invoke-RequiredNative `

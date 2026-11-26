@@ -2791,16 +2791,20 @@ namespace offline_sbs {
           // HDR10 static side data cannot travel on the raw planar-float pipe. Keep the authenticated
           // source stream aligned one-for-one as a metadata donor; FFmpeg's frame-loop filters
           // do not preserve mastering-display/content-light side data on cloned frames.
-          // Pixel values still come exclusively from the direct SBS stream below.
+          // Pixel values come exclusively from the direct SBS stream below, so the donor needs
+          // only the raster and pixel format blend requires of both inputs: one nearest-neighbour
+          // swscale pass, with no transfer or primaries conversion.
           << "[0:v:0]trim=end_frame=" << media.frames.size() << ','
-          << timing_filter << ',' << hdr_decode_filter(media)
+          << timing_filter
           << ",scale=" << sbs_width << ':' << sbs_height
           // Scaling the source to the packed SBS width would otherwise preserve
           // its original display aspect by changing the donor SAR to 1:2.
-          << ":flags=bilinear,setsar=1/1[donor];\n"
+          << ":flags=neighbor,format=gbrpf32le,setsar=1/1[donor];\n"
           << "[1:v:0]" << timing_filter
           << ",format=gbrpf32le[sbs];\n"
-          << "[donor][sbs]blend=all_expr=B:shortest=1,"
+          // Normal mode at zero opacity copies every plane of the second (SBS) input unchanged;
+          // the output frame keeps the first (donor) input's side data.
+          << "[donor][sbs]blend=all_mode=normal:all_opacity=0:shortest=1,"
           << hdr_encode_filter(media) << "[vout]\n";
       } else {
         graph << "[0:v:0]" << timing_filter << "[vout]\n";
@@ -2840,7 +2844,7 @@ namespace offline_sbs {
       };
       if (hdr) {
         // HDR static side data must accompany every donor frame. Pixel values always come from
-        // the direct causal raw stream (`blend ... =B`).
+        // the direct causal raw stream (the blend copies its planes).
         command.insert(command.end(), {
                                         "-protocol_whitelist",
                                         "file",
@@ -3313,6 +3317,81 @@ namespace offline_sbs {
         remove_temporary_probe_best_effort(json_path);
         throw;
       }
+    }
+
+    // A Matroska output stores millisecond timestamps, so its final probe allows one output
+    // tick per frame. The intermediate MP4 keeps the source time base: its packets prove the
+    // encoder timeline exactly without decoding the stream that the final probe decodes.
+    void probe_encoded_packet_timeline(
+      const worker_spec_t &spec,
+      const media_contract_t &source,
+      const fs::path &encoded_video,
+      const fs::path &log_path
+    ) {
+      auto metadata_log = log_path;
+      metadata_log.replace_filename(
+        log_path.stem().string() + "-metadata" + log_path.extension().string()
+      );
+      const auto metadata = run_logged_json_bounded(
+        build_ffprobe_metadata_command(spec, encoded_video),
+        spec.sunshine_executable.parent_path(),
+        metadata_log,
+        max_video_metadata_probe_bytes,
+        "FFprobe encoded video metadata"
+      );
+      if (
+        !metadata.is_object() ||
+        !metadata.contains("streams") ||
+        !metadata["streams"].is_array() ||
+        metadata["streams"].size() != 1 ||
+        !metadata["streams"][0].is_object() ||
+        !metadata["streams"][0].contains("time_base")
+      ) {
+        throw worker_error(
+          "FFprobe must return exactly one encoded video stream descriptor"
+        );
+      }
+      const auto time_base =
+        parse_rational(metadata["streams"][0]["time_base"], "encoded time_base");
+      const auto deadline = std::chrono::steady_clock::now() + child_timeout;
+      auto child = child_process_t::launch(
+        {
+          path_utf8(spec.ffprobe_executable),
+          "-v",
+          "error",
+          "-select_streams",
+          "v:0",
+          "-show_entries",
+          "packet=pts,duration",
+          "-of",
+          "csv=p=0",
+          "-protocol_whitelist",
+          "file",
+          path_utf8(encoded_video),
+        },
+        spec.sunshine_executable.parent_path(),
+        log_path,
+        std::nullopt,
+        true
+      );
+      child_stdout_streambuf_t stdout_buffer(child, deadline);
+      std::istream stdout_stream(&stdout_buffer);
+      stdout_stream.exceptions(std::ios::badbit);
+      validate_encoded_packet_timeline(source, time_base, stdout_stream);
+      const auto now = std::chrono::steady_clock::now();
+      const auto remaining = now < deadline ?
+                               std::chrono::duration_cast<
+                                 std::chrono::milliseconds
+                               >(deadline - now) :
+                               std::chrono::milliseconds {0};
+      const int code = child.wait(remaining);
+      if (code != 0) {
+        throw worker_error(
+          "child process exited " + std::to_string(code) +
+          "; see " + path_utf8(log_path)
+        );
+      }
+      child.terminate();
     }
 
     struct packet_timing_t {
@@ -5691,6 +5770,61 @@ namespace offline_sbs {
     validate_timeline_contract(source, actual, 1);
   }
 
+  void validate_encoded_packet_timeline(
+    const media_contract_t &source,
+    const rational_t time_base,
+    std::istream &packets
+  ) {
+    constexpr std::size_t max_packet_line_bytes = 4096;
+    const auto parse_field = [](const std::string_view text) {
+      std::int64_t value = 0;
+      const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
+      if (parsed.ec != std::errc {} || parsed.ptr != text.data() + text.size()) {
+        throw worker_error("FFprobe encoded packet lacks an exact timestamp or duration");
+      }
+      return value;
+    };
+    std::size_t index = 0;
+    std::string line;
+    for (auto character = packets.get(); character != std::char_traits<char>::eof();) {
+      line.clear();
+      while (character != std::char_traits<char>::eof() && character != '\n') {
+        if (line.size() == max_packet_line_bytes) {
+          throw worker_error("FFprobe encoded packet line exceeds its bounded contract");
+        }
+        line.push_back(static_cast<char>(character));
+        character = packets.get();
+      }
+      if (character == '\n') {
+        character = packets.get();
+      }
+      if (!line.empty() && line.back() == '\r') {
+        line.pop_back();
+      }
+      const auto pts_end = line.find(',');
+      if (pts_end == std::string::npos) {
+        throw worker_error("FFprobe encoded packet line is malformed");
+      }
+      const auto duration_end = std::min(line.find(',', pts_end + 1), line.size());
+      const std::string_view fields {line};
+      const auto pts = parse_field(fields.substr(0, pts_end));
+      const auto duration =
+        parse_field(fields.substr(pts_end + 1, duration_end - pts_end - 1));
+      if (index == source.frames.size()) {
+        throw worker_error("encoded frame count differs from the source timeline");
+      }
+      const auto &wanted = source.frames[index++];
+      if (!rational_ticks_within_actual_ticks(wanted.pts, source.time_base, pts, time_base, 0) || !rational_ticks_within_actual_ticks(wanted.duration, source.time_base, duration, time_base, 0)) {
+        throw worker_error(
+          "encoded presentation timeline differs at frame " + std::to_string(index)
+        );
+      }
+    }
+    if (index != source.frames.size()) {
+      throw worker_error("encoded frame count differs from the source timeline");
+    }
+  }
+
   std::string select_av1_level(
     const media_contract_t &media,
     const std::uint32_t encoded_width,
@@ -6346,28 +6480,17 @@ namespace offline_sbs {
           media.frames.size(),
           &media
         );
-        {
-          // Release the pre-mux timing vector before probing the final container. The source
-          // timeline remains the sole long-lived compact vector; verification never retains
-          // source + encoded + output frame inventories simultaneously.
-          const auto encoded_media = probe_media(
+        // The stream-copied final output is the gate for codec, raster, color, side data, and
+        // timeline. Only Matroska's millisecond timestamps hide an inexact encoder timeline.
+        const bool matroska_output =
+          output_container(*spec.staging_output) == "matroska";
+        if (matroska_output) {
+          probe_encoded_packet_timeline(
             spec,
+            media,
             conversion_encoder->encoded_video(),
-            work / "encoded-video-probe.json",
-            work / "logs" / "encoded-video-probe.log",
-            false
+            work / "logs" / "encoded-video-packets.log"
           );
-          validate_timeline_contract(media, encoded_media, 0);
-          if (encoded_media.codec_name != codec_name_for_request(spec.codec) || encoded_media.width != sbs_width || encoded_media.height != sbs_height) {
-            throw worker_error(
-              "whole-clip compressed video codec/raster mismatch"
-            );
-          }
-          if (media.color != media_color_e::sdr) {
-            validate_hdr_equivalence(media, encoded_media);
-          } else {
-            validate_sdr_color_equivalence(media, encoded_media);
-          }
         }
         mux_encoded_video(
           spec,
@@ -6376,8 +6499,6 @@ namespace offline_sbs {
           conversion_encoder->encoded_video(),
           work / "logs" / "final-mux.log"
         );
-        const bool matroska_output =
-          output_container(*spec.staging_output) == "matroska";
         {
           const auto output_media = probe_media(
             spec,

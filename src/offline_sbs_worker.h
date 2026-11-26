@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <iosfwd>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
@@ -140,6 +141,18 @@ namespace offline_sbs {
   void validate_timeline_equivalence(
     const media_contract_t &source,
     const media_contract_t &actual
+  );
+
+  /**
+   * Verify an intermediate encoded stream exactly against the source timeline, without
+   * decoding it, from FFprobe `-show_entries packet=pts,duration -of csv=p=0` lines in
+   * `time_base` ticks. B-frames are disabled, so packet order is presentation order. Fields
+   * after a line's first two are ignored.
+   */
+  void validate_encoded_packet_timeline(
+    const media_contract_t &source,
+    rational_t time_base,
+    std::istream &packets
   );
 
   /**
