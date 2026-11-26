@@ -77,7 +77,7 @@ Every estimator clip receives an authenticated source-observation timeline. An e
 its frame count must match every selected clip. Otherwise `meta.json`'s `fps` declares the
 cadence, or the evaluator explicitly authors 30 Hz when it is absent. Neither path uses wall time
 or inference speed. These authored stimuli do not recover original video timing or qualify
-long-form temporal behavior. Native raw/field/cache replay uses its own existing timing contract.
+long-form temporal behavior. Native raw/field replay uses its own existing timing contract.
 Host SBS has one adaptive zero/scale and subtitle UI-plane pipeline; the former experiment/mode
 selectors are rejected before launch.
 
@@ -282,7 +282,7 @@ captures directly with:
 
 See [Dump and replay format](DUMP_FORMAT.md) before generating or interpreting preview PNGs. The
 reader accepts only the current UIP4/OCR8 dump schema; older experimental captures are
-intentionally unsupported. An active schema-49 package authenticates the OCR8/UIP4/contour tuple for the
+intentionally unsupported. An active package authenticates the OCR8/UIP4/contour tuple for the
 atomic final field's publication frame, ordinary Base, conditioned final field, and the resolver's
 current-cover conflict histogram and source-time plane controller. It independently validates
 current native glyph support, its projection and minimum slope-budget extension into `shadow_final_parallax.f32`, which is authenticated once as both the atomic final field and warp
@@ -308,13 +308,13 @@ There is no provisional whole-cover protection. This overlay-color/stroke hypoth
 fallible on unrepresented colors, low-contrast strokes and matching scene texture; it is not
 semantic text identification. Current quality requires actual full-glyph, negative and live checks.
 
-Current schema-49 window-region packages preserve the complete authorized source rectangle at any
+Current window-region packages preserve the complete authorized source rectangle at any
 aspect ratio. `depth_input_region.json` schema 4 records the centered integer content rectangle in
 the fixed DAV2 tensor and its edge-replicated excluded padding. Quantitative consumers must use
 that content width for limiter and UI-plane steps and must project current OCR cover geometry only into that
 content rectangle; treating the whole tensor as real source pixels is rejected.
 
-Schema 49 packages no scalar/heat preview PNGs or redundant per-field shape sidecars. Generate a
+The current schema packages no scalar/heat preview PNGs or redundant per-field shape sidecars. Generate a
 verified diagnostic view from any retained authenticated `.f32` artifact outside the package:
 
 ```powershell

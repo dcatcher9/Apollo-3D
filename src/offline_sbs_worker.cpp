@@ -51,11 +51,7 @@
 #include <thread>
 #include <utility>
 
-// clang-format off
-  #include <winsock2.h>
-  #include <ws2tcpip.h>
-  #include <windows.h>
-// clang-format on
+#include <windows.h>
 
 namespace offline_sbs {
   namespace fs = std::filesystem;
@@ -5264,8 +5260,8 @@ namespace offline_sbs {
             *pending_->reported_duration != presentation_delta
           ) {
             throw worker_error(
-              "source contains a presentation gap/overlap which cannot be "
-              "proven through image-sequence replay"
+              "source contains a presentation gap/overlap which the re-encoded "
+              "output cannot reproduce exactly"
             );
           }
           const auto duration =
@@ -5334,7 +5330,7 @@ namespace offline_sbs {
           !result_.static_side_data_types.empty()
         ) {
           throw worker_error(
-            "SDR video side data cannot be preserved through raster replay"
+            "SDR video side data cannot be preserved through the raw frame pipe"
           );
         }
         positive_tick_difference(

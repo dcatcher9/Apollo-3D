@@ -4763,8 +4763,8 @@ namespace sbs_bench {
                            fs::path(o.out) / mask_name, warp_mask_stage);
       }
 
-      // Preserve real HDR conversion as linear scRGB float interchange. SDR and the
-      // synthetic-HDR compatibility mode retain their PNG artifact behavior.
+      // Preserve real HDR conversion as linear scRGB float interchange. SDR retains its PNG
+      // artifact behavior.
       ctx->CopyResource(sbs_stage.Get(), final_sbs_tex);
       D3D11_MAPPED_SUBRESOURCE m = {};
       bool output_completed = false;
@@ -5722,7 +5722,7 @@ namespace sbs_bench {
       }
 
       // Adaptive-only runs deliberately skip allocating/compositing the packed render target, but
-      // they attest the same early-authenticated geometry used by conversion and scene caching.
+      // they attest the same early-authenticated geometry used by conversion.
       const auto &contract_geometry = *resolved_output_geometry;
       const std::string &input_frame_format =
         discovered_input_frame_format;
