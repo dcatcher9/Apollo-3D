@@ -989,22 +989,6 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
                         self.assertTrue(generator._write_hlsl_outputs(hlsl, assertions, False))
                         self.assertTrue(generator._write_hlsl_outputs(hlsl, assertions, True))
 
-    def test_direct_glyph_source_pin_covers_its_own_shader_root(self):
-        self.assertTrue(generator._write_direct_glyph_source_pin(True))
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary) / "directx"
-            audit_root = root / "direct_glyph_source"
-            shutil.copytree(generator.SHADER_ROOT / "direct_glyph_source", audit_root)
-            header = Path(temporary) / generator.DIRECT_GLYPH_SOURCE_HEADER.name
-            header.write_bytes(generator.DIRECT_GLYPH_SOURCE_HEADER.read_bytes())
-            self.assertTrue(generator._write_direct_glyph_source_pin(True, root, header))
-            source = audit_root / "direct_source_audit.hlsl"
-            source.write_bytes(source.read_bytes() + b"\n// simulated source audit drift\n")
-            with mock.patch("sys.stderr"):
-                self.assertFalse(generator._write_direct_glyph_source_pin(True, root, header))
-            self.assertTrue(generator._write_direct_glyph_source_pin(False, root, header))
-            self.assertTrue(generator._write_direct_glyph_source_pin(True, root, header))
-
     def test_host_sbs_identity_paragraph_matches_generated_contract(self):
         contract = generator.load_contract()
         renderer_pins = generator.validate_renderer_source_closure_pins()
@@ -1032,14 +1016,6 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             f"`{renderer_pins['parallax_v2_live_renderer_source_closure_sha256']}`",
             documentation,
         )
-        self.assertIn(
-            f"`{renderer_pins['parallax_v2_p010_y_source_closure_sha256']}`",
-            documentation,
-        )
-        self.assertIn(
-            f"`{renderer_pins['parallax_v2_diagnostic_source_closure_sha256']}`",
-            documentation,
-        )
 
     def test_renderer_closure_pins_cover_generated_contract_include(self):
         closure_manifest = generator.SHADER_MANIFEST
@@ -1054,15 +1030,11 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             {
                 "parallax_v2_live_renderer_source_closure_sha256":
                     closure_pin("parallax_v2_live_renderer"),
-                "parallax_v2_p010_y_source_closure_sha256":
-                    closure_pin("parallax_v2_p010_y"),
-                "parallax_v2_diagnostic_source_closure_sha256":
-                    closure_pin("parallax_v2_live_diagnostic"),
             },
         )
 
         # Producer and renderer roots reach this generated include. Prove a DVC regeneration
-        # cannot pass while any named cross-language closure group still names the old bytes.
+        # cannot pass while a checked-in closure pin still names the old bytes.
         with tempfile.TemporaryDirectory() as temporary:
             shader_root = Path(temporary) / "directx"
             shutil.copytree(generator.PREPROCESS_SHADER_ROOT, shader_root)
@@ -1352,8 +1324,6 @@ class GeneratedContractWriteTests(unittest.TestCase):
             replacements = {
                 "CPP_TARGET": cpp, "HLSL_TARGET": hlsl, "HLSL_OCR_ASSERT_TARGET": assertions,
                 "SHADER_MANIFEST": copy.deepcopy(generator.SHADER_MANIFEST),
-                "_write_direct_glyph_source_pin": lambda check: True,
-                "_write_shared_ui_warp_runtime_pin": lambda check: True,
                 "validate_renderer_source_closure_pins": lambda: None,
                 "load_contract": lambda *args, **kwargs: {},
                 "render_cpp": lambda contract: "// C++ caf\u00e9\n",
@@ -1404,14 +1374,10 @@ class GeneratedContractWriteTests(unittest.TestCase):
             def staged(path):
                 return root / path.relative_to(REPO)
 
-            runtime_headers = (
-                generator.DIRECT_GLYPH_SOURCE_HEADER,
-                generator.CURRENT_SHARED_UI_WARP_RUNTIME_HEADER,
-            )
             for path in (
                     Path(generator.__file__), Path(shader_generator.__file__),
                     generator.MANIFEST, shader_generator.MANIFEST,
-                    shader_generator.DOC_TARGET, *runtime_headers):
+                    shader_generator.DOC_TARGET):
                 target = staged(path)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(path, target)
@@ -1435,7 +1401,7 @@ class GeneratedContractWriteTests(unittest.TestCase):
             outputs = tuple(map(staged, (
                 generator.MANIFEST, shader_generator.MANIFEST, generator.CPP_TARGET,
                 shader_generator.CPP_TARGET, shader_generator.PYTHON_TARGET, shader_generator.DOC_TARGET,
-                *runtime_headers, generator.HLSL_TARGET, generator.HLSL_OCR_ASSERT_TARGET,
+                generator.HLSL_TARGET, generator.HLSL_OCR_ASSERT_TARGET,
             )))
             timestamp = 1600000000000000000
             for path in outputs:

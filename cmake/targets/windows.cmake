@@ -15,7 +15,7 @@ target_link_options(embed-host-sbs-shaders PRIVATE -municode)
 target_link_libraries(embed-host-sbs-shaders PRIVATE
         Boost::log Boost::format libdisplaydevice::display_device D3DCompiler
         libcrypto.a crypt32 bcrypt ws2_32 z)
-add_dependencies(embed-host-sbs-shaders verify_depth_coordinate_v2_contract)
+add_dependencies(embed-host-sbs-shaders verify_depth_coordinate_v2_contract host_sbs_shader_build_identity)
 
 set(HOST_SBS_SHADER_RESOURCE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/host-sbs-shaders")
 set(HOST_SBS_SHADER_RESOURCE "${HOST_SBS_SHADER_RESOURCE_DIR}/bytecode.rc")

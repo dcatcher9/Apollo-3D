@@ -419,14 +419,9 @@ TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, ShapeTransitionRetainsOldStorageAndWri
 }
 
 TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, DirectAuditUsesOriginalSnapshotAndPreservesSourceValidity) {
-  constexpr std::array audit_specs {
-    cache::shader_spec {"direct_source_audit.hlsl", "prepare_main", "cs_5_0"},
-    cache::shader_spec {"direct_source_audit.hlsl", "copy_main", "cs_5_0"},
-    cache::shader_spec {"direct_source_audit.hlsl", "finalize_main", "cs_5_0"},
-    cache::shader_spec {"direct_source_audit.hlsl", "envelope_main", "cs_5_0"}
-  };
+  constexpr auto &audit_specs = cache::direct_glyph_source_audit_specs;
   const auto sources = cache::snapshot_sources(std::getenv("SUNSHINE_TEST_DISPLAY_RGB8_SHADER_ROOT"), audit_specs);
-  ASSERT_EQ(cache::source_closure_sha256(sources), "a5145b7de00d113a135b1c852e4a244735d08b9211bafad5bc08f4bc70e47261");
+  ASSERT_EQ(cache::source_closure_sha256(sources), cache::direct_glyph_source_audit_source_closure_sha256);
   std::array<ComPtr<ID3D11ComputeShader>, audit_specs.size()> audit_shaders;
   for (std::size_t i = 0u; i < audit_specs.size(); ++i) {
     const auto bytecode = cache::get(sources, audit_specs[i]);

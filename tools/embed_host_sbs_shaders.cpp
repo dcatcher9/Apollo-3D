@@ -1,8 +1,6 @@
 /** @file Build the resources for Windows display and production Host SBS shaders. */
 
 #include "src/host_sbs_bytecode_groups.h"
-#include "src/host_sbs_direct_glyph_publication_gpu.h"
-#include "src/host_sbs_shared_ui_warp_runtime.h"
 #include "src/logging.h"
 #include "src/platform/windows/display_shader_manifest.h"
 
@@ -22,8 +20,6 @@ namespace {
   namespace fs = std::filesystem;
   namespace cache = models::host_sbs_shader_cache;
   namespace groups = models::host_sbs_bytecode_groups;
-  namespace shared_ui = models::host_sbs_shared_ui_warp;
-  namespace glyph_publication = models::host_sbs_direct_glyph_publication;
 
   void finish_output(std::ofstream &output, const fs::path &temporary, const fs::path &destination) {
     output.close();
@@ -98,13 +94,13 @@ namespace {
     groups::authenticate_group(
       "completed shared UI",
       shader_root,
-      shared_ui::completed_specs,
-      shared_ui::completed_closure,
+      cache::shared_ui_warp_completed_specs,
+      cache::shared_ui_warp_completed_source_closure_sha256,
       bytecodes
     );
     groups::authenticate_group(
-      "subtitle empty gate", shader_root, glyph_publication::empty_gate_shader_specs,
-      glyph_publication::empty_gate_shader_source_closure_sha256, bytecodes
+      "subtitle empty gate", shader_root, cache::direct_glyph_empty_gate_specs,
+      cache::direct_glyph_empty_gate_source_closure_sha256, bytecodes
     );
     groups::authenticate_group(
       "direct subtitle publication", shader_root, cache::direct_glyph_plan_specs,
@@ -125,8 +121,8 @@ namespace {
     groups::authenticate_group(
       "Game 3D text UI",
       shader_root,
-      shared_ui::text_game_specs,
-      shared_ui::text_game_closure,
+      cache::text_game_ui_warp_specs,
+      cache::text_game_ui_warp_source_closure_sha256,
       bytecodes
     );
     // Display shaders use the build's source closure as their resource key. Runtime can

@@ -70,7 +70,6 @@
   #include "platform/windows/host_sbs_v2_renderer.h"
   #include "prod_zipdepth_convex2x.h"
   #include "host_sbs_direct_glyph_publication_gpu.h"
-  #include "host_sbs_direct_glyph_source_programs.h"
   #include "sbs_bench_subtitle_qualification.h"
   #include "sbs_bench_depth_coordinate_v2.h"
   #include "sbs_perf.h"
@@ -5253,7 +5252,7 @@ namespace sbs_bench {
                    {"transport", o.direct_glyph_palette ? shader::direct_glyph_palette_source_closure_sha256 :
                                   shader::direct_glyph_transport_source_closure_sha256},
                    {"prepare", shader::direct_glyph_prepare_source_closure_sha256},
-                   {"source_audit", models::host_sbs_direct_glyph_source::direct_source_audit_closure}}},
+                   {"source_audit", shader::direct_glyph_source_audit_source_closure_sha256}}},
               {"frames", qualified_direct_glyph_frames}
             })) {
           BOOST_LOG(error) << "sbs-bench: cannot publish complete direct glyph evidence";

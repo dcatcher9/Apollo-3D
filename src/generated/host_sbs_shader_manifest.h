@@ -85,6 +85,23 @@ namespace models::host_sbs_shader_cache {
   inline constexpr shader_spec host_sbs_direct_glyph_publish_line {"host_sbs_direct_glyph_history_cs.hlsl", "publish_line", "cs_5_0"};
   inline constexpr shader_spec host_sbs_direct_glyph_finish_history {"host_sbs_direct_glyph_history_cs.hlsl", "finish_history", "cs_5_0"};
   inline constexpr shader_spec host_sbs_direct_glyph_prepare {"host_sbs_shared_ui_warp_direct_glyph.hlsl", "prepare_direct_glyph_main", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_shared_ui_warp_initialize {"host_sbs_shared_ui_warp.hlsl", "initialize_main", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_shared_ui_warp_pin {"host_sbs_shared_ui_warp.hlsl", "HostBinaryPinCS", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_shared_ui_warp_prepare {"host_sbs_shared_ui_warp.hlsl", "prepare_main", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_shared_ui_warp_draw {"host_sbs_shared_ui_warp.hlsl", "shared_pin_main_ps", "ps_5_0"};
+  inline constexpr shader_spec host_sbs_shared_ui_warp_mapping {"host_sbs_shared_ui_warp.hlsl", "shared_pin_mapping_ps", "ps_5_0"};
+  inline constexpr shader_spec host_sbs_shared_ui_warp_coverage {"host_sbs_shared_ui_warp.hlsl", "shared_pin_coverage_ps", "ps_5_0"};
+  inline constexpr shader_spec host_sbs_shared_ui_warp_boundary {"host_sbs_shared_ui_warp.hlsl", "shared_pin_boundary_ps", "ps_5_0"};
+  inline constexpr shader_spec host_sbs_text_game_ui_warp_initialize {"host_sbs_text_game_ui_warp.hlsl", "initialize_main", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_text_game_ui_warp_apply {"host_sbs_text_game_ui_warp.hlsl", "SunshineApplyUICS", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_text_game_ui_warp_draw {"host_sbs_text_game_ui_warp.hlsl", "shared_pin_main_ps", "ps_5_0"};
+  inline constexpr shader_spec host_sbs_text_game_ui_warp_verify {"host_sbs_text_game_ui_warp.hlsl", "text_game_verify_main", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_text_game_ui_warp_columns {"host_sbs_text_game_ui_warp.hlsl", "text_game_columns_main", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_direct_glyph_empty_gate {"host_sbs_raw_matte_empty_gate_cs.hlsl", "prepare_empty_main", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_direct_glyph_source_audit_prepare {"direct_source_audit.hlsl", "prepare_main", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_direct_glyph_source_audit_copy {"direct_source_audit.hlsl", "copy_main", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_direct_glyph_source_audit_finalize {"direct_source_audit.hlsl", "finalize_main", "cs_5_0"};
+  inline constexpr shader_spec host_sbs_direct_glyph_source_audit_envelope {"direct_source_audit.hlsl", "envelope_main", "cs_5_0"};
 
   inline constexpr std::array preprocess_specs {
     host_sbs_near_identical_fused_preprocess,
@@ -132,28 +149,20 @@ namespace models::host_sbs_shader_cache {
     depth_coordinate_v2_quantiles,
     depth_coordinate_v2_state_resolve,
   };
-  inline constexpr std::string_view parallax_v2_replay_resolve_source_closure_sha256 =
-    "9a73e8a92ba55e3d99f3e37868918329c0e0d478bd7281319670dd4f2fe55347";
 
   inline constexpr std::array parallax_v2_coordinate_diagnostic_specs {
     depth_coordinate_v2_coordinate_diagnostic,
   };
-  inline constexpr std::string_view parallax_v2_coordinate_diagnostic_source_closure_sha256 =
-    "b895dea87363c1859c16d97c3d79121a2996d5f03ee8c8b56e20e756609e4e59";
 
   inline constexpr std::array near_identical_detector_specs {
     host_sbs_near_identical_resolve,
     host_sbs_near_identical_finalize,
     host_sbs_near_identical_reuse_depth,
   };
-  inline constexpr std::string_view near_identical_detector_source_closure_sha256 =
-    "6af2c82046dd2d0ba4d74882440113d77ccd0605e7aa9304fa029fe914f9ac0c";
 
   inline constexpr std::array gpu_trace_specs {
     host_sbs_gpu_trace,
   };
-  inline constexpr std::string_view gpu_trace_source_closure_sha256 =
-    "bcfab2a5da6361c9142c82b05d47503b27acbfcac010d25bd012cf30051ce3ef";
 
   inline constexpr std::array parallax_v2_live_renderer_specs {
     parallax_v2_live_renderer,
@@ -165,29 +174,21 @@ namespace models::host_sbs_shader_cache {
   inline constexpr std::array parallax_v2_p010_y_specs {
     parallax_v2_p010_y_renderer,
   };
-  inline constexpr std::string_view parallax_v2_p010_y_source_closure_sha256 =
-    "ff5dfa9ced2e7dfa3d75f7a322fbe57eac53f4b8e84a99e68b7267b9c1bf88ee";
 
   inline constexpr std::array sbs_flat_fallback_specs {
     sbs_flat_identity,
     sbs_reprojection_vertex,
   };
-  inline constexpr std::string_view sbs_flat_fallback_source_closure_sha256 =
-    "7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4";
 
   inline constexpr std::array parallax_v2_live_diagnostic_specs {
     parallax_v2_live_mapping,
     parallax_v2_live_mask,
   };
-  inline constexpr std::string_view parallax_v2_live_diagnostic_source_closure_sha256 =
-    "2e71502f9d1c64a32e6c088246afd02e4a9619f35466b2b611d4d35feb7a79f6";
 
   inline constexpr std::array direct_glyph_plan_specs {
     host_sbs_direct_glyph_plan,
     host_sbs_direct_glyph_publish,
   };
-  inline constexpr std::string_view direct_glyph_plan_source_closure_sha256 =
-    "3c1df1656492065c62c519ceffd49f3d1bc1d3a4e26c50ba0b8a2eead4dc2844";
 
   inline constexpr std::array direct_glyph_transport_specs {
     host_sbs_direct_glyph_plan_tile,
@@ -195,8 +196,6 @@ namespace models::host_sbs_shader_cache {
     host_sbs_direct_glyph_resolve_matte,
     host_sbs_direct_glyph_finish_score,
   };
-  inline constexpr std::string_view direct_glyph_transport_source_closure_sha256 =
-    "2df402561c88d7e2b2672660e2f9d5f42b06d9815c87b48511adb05af6226b30";
 
   inline constexpr std::array direct_glyph_palette_specs {
     host_sbs_direct_glyph_palette_pack_rgb,
@@ -217,13 +216,45 @@ namespace models::host_sbs_shader_cache {
     host_sbs_direct_glyph_publish_line,
     host_sbs_direct_glyph_finish_history,
   };
-  inline constexpr std::string_view direct_glyph_palette_source_closure_sha256 =
-    "c955485dc93ba40eccb88dad2ac66b512876265326fcc83c903cd089ae1c0941";
 
   inline constexpr std::array direct_glyph_prepare_specs {
     host_sbs_direct_glyph_prepare,
   };
-  inline constexpr std::string_view direct_glyph_prepare_source_closure_sha256 =
-    "0c90dd7091de6b575eb0fa4157b3ca3174bb9bba4bfdce8c306a33a2d602f434";
+
+  inline constexpr std::array shared_ui_warp_completed_specs {
+    host_sbs_shared_ui_warp_initialize,
+    host_sbs_shared_ui_warp_pin,
+    host_sbs_shared_ui_warp_prepare,
+    host_sbs_shared_ui_warp_draw,
+  };
+
+  inline constexpr std::array shared_ui_warp_completed_diagnostic_specs {
+    host_sbs_shared_ui_warp_mapping,
+    host_sbs_shared_ui_warp_coverage,
+    host_sbs_shared_ui_warp_boundary,
+  };
+
+  inline constexpr std::array text_game_ui_warp_specs {
+    host_sbs_text_game_ui_warp_initialize,
+    host_sbs_text_game_ui_warp_apply,
+    host_sbs_text_game_ui_warp_draw,
+    host_sbs_text_game_ui_warp_verify,
+    host_sbs_text_game_ui_warp_columns,
+  };
+
+  inline constexpr std::array direct_glyph_empty_gate_specs {
+    host_sbs_direct_glyph_empty_gate,
+  };
+
+  inline constexpr std::array direct_glyph_source_audit_specs {
+    host_sbs_direct_glyph_source_audit_prepare,
+    host_sbs_direct_glyph_source_audit_copy,
+    host_sbs_direct_glyph_source_audit_finalize,
+    host_sbs_direct_glyph_source_audit_envelope,
+  };
+  inline constexpr std::string_view direct_glyph_source_audit_root = "direct_glyph_source";
 
 }  // namespace models::host_sbs_shader_cache
+
+// The build derives every other group's closure from the shader sources.
+#include "host_sbs_shader_build_identity.h"

@@ -110,9 +110,12 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             dump_contract.LIVE_RENDERER_SOURCE_CLOSURE_SHA256,
             pins["parallax_v2_live_renderer_source_closure_sha256"],
         )
+        shader_generator = generator.shader_manifest_generator
         self.assertEqual(
             dump_contract.DIAGNOSTIC_SOURCE_CLOSURE_SHA256,
-            pins["parallax_v2_diagnostic_source_closure_sha256"],
+            shader_generator.computed_group_pins(
+                generator.SHADER_MANIFEST, names=("parallax_v2_live_diagnostic",)
+            )["parallax_v2_live_diagnostic"],
         )
 
     @staticmethod

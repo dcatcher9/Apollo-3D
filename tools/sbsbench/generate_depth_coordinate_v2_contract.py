@@ -34,8 +34,6 @@ HLSL_OCR_ASSERT_TARGET = (
     "include" / "depth_coordinate_v2_ocr_assert.generated.hlsl"
 )
 SHADER_ROOT = HLSL_TARGET.parent.parent
-DIRECT_GLYPH_SOURCE_HEADER = ROOT / "src" / "host_sbs_direct_glyph_source_programs.h"
-CURRENT_SHARED_UI_WARP_RUNTIME_HEADER = ROOT / "src" / "host_sbs_shared_ui_warp_runtime.h"
 # Lines of LIMITER_SERIAL_MAX_LINES cells or fewer keep the serial float recurrence. Longer
 # lines are scanned in LIMITER_LINE_CHUNKS Q30 chunks, LIMITER_GROUP_LINES adjacent lines per
 # group, so neighboring threads read and write neighboring texels.
@@ -461,17 +459,10 @@ def validate_renderer_source_closure_pins(
     """Validate and expose the renderer projection from the named closure manifest."""
 
     shader_manifest_generator.validate_group_pins(SHADER_MANIFEST, shader_root)
-    groups = {
-        group["name"]: group["source_closure_sha256"]
-        for group in SHADER_MANIFEST["groups"]
-    }
     return {
         "parallax_v2_live_renderer_source_closure_sha256":
-            groups["parallax_v2_live_renderer"],
-        "parallax_v2_p010_y_source_closure_sha256":
-            groups["parallax_v2_p010_y"],
-        "parallax_v2_diagnostic_source_closure_sha256":
-            groups["parallax_v2_live_diagnostic"],
+            shader_manifest_generator.closure_group(
+                SHADER_MANIFEST, "parallax_v2_live_renderer")["source_closure_sha256"],
     }
 
 
@@ -2172,63 +2163,6 @@ def _write_hlsl_outputs(hlsl: str, ocr_assertions: str, check: bool) -> bool:
     return valid
 
 
-def _write_direct_glyph_source_pin(
-        check: bool, shader_root: Path = SHADER_ROOT,
-        header: Path = DIRECT_GLYPH_SOURCE_HEADER) -> bool:
-    source = header.read_text(encoding="utf-8")
-    array = re.search(
-        r"inline constexpr std::array<cache::shader_spec,\s*(\d+)u>\s+direct_source_audit_specs\s*"
-        r"\{\{(.*?)\}\};", source, re.DOTALL)
-    pin = r'(inline constexpr std::string_view direct_source_audit_closure=")[0-9a-f]{64}(";)'
-    if array is None or len(re.findall(pin, source)) != 1:
-        raise ValueError("Direct Glyph source audit shader group or pin is missing or duplicated")
-    specs = tuple(re.findall(r'cache::shader_spec\{"([^"]+)","([^"]+)","([^"]+)"\}', array[2]))
-    if len(specs) != int(array[1]):
-        raise ValueError("Direct Glyph source audit shader specification is malformed")
-    digest = shader_source_closure_sha256(
-        shader_root / "direct_glyph_source", specs, shader_compile_flags=SHADER_COMPILE_FLAGS)
-    return _write_or_check(header, re.sub(pin, rf'\g<1>{digest}\g<2>', source), check)
-
-
-def shared_ui_warp_runtime_closures(
-        shader_root: Path = SHADER_ROOT,
-        header: Path = CURRENT_SHARED_UI_WARP_RUNTIME_HEADER,
-        *, names: tuple[str, ...] | None = None) -> dict[str, str]:
-    """Calculate the selected route pins from their runtime specification owner."""
-    source = header.read_text(encoding="utf-8")
-    routes = ("completed", "completed_diagnostic", "text_game")
-    spec_names = {f"{route}_closure": f"{route}_specs" for route in routes}
-    result = {}
-    for name in spec_names if names is None else names:
-        if name not in spec_names:
-            raise ValueError(f"unknown shared UI warp pin {name}")
-        array_name = spec_names[name]
-        array = re.search(
-            rf"inline constexpr std::array<cache::shader_spec,\s*(\d+)u>\s+{array_name}\s*\{{\{{(.*?)\}}\}};",
-            source, re.DOTALL)
-        if array is None:
-            raise ValueError(f"shared UI warp {array_name} is missing")
-        specs = tuple(re.findall(r'\{"([^"]+)",\s*"([^"]+)",\s*"([^"]+)"\}', array[2]))
-        if len(specs) != int(array[1]):
-            raise ValueError(f"shared UI warp {array_name} specification is malformed")
-        result[name] = shader_source_closure_sha256(
-            shader_root, specs, shader_compile_flags=SHADER_COMPILE_FLAGS)
-    return result
-
-
-def _write_shared_ui_warp_runtime_pin(
-        check: bool, shader_root: Path = SHADER_ROOT,
-        header: Path = CURRENT_SHARED_UI_WARP_RUNTIME_HEADER,
-        *, names: tuple[str, ...] | None = None) -> bool:
-    source = header.read_text(encoding="utf-8")
-    for name, digest in shared_ui_warp_runtime_closures(shader_root, header, names=names).items():
-        pattern = rf'(inline constexpr std::string_view {name}\s*=\s*")[0-9a-f]{{64}}(";)'
-        if len(re.findall(pattern, source)) != 1:
-            raise ValueError(f"shared UI warp {name} pin is missing or duplicated")
-        source = re.sub(pattern, rf'\g<1>{digest}\g<2>', source)
-    return _write_or_check(header, source, check)
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -2248,7 +2182,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--check and --refresh-shader-identity are mutually exclusive")
     if args.refresh_shader_identity:
         # First discard any hand-edited shader projection. The named closure manifest owns every
-        # ordered root and pin; the DVC JSON stores only its generated semantic projection. Do not
+        # ordered root and checked-in pin; the DVC JSON stores only its generated projection. Do not
         # validate the old pins yet: this is the command used precisely after a shader edit makes
         # one or more of them stale.
         shader_manifest = shader_manifest_generator.load_manifest()
@@ -2275,13 +2209,11 @@ def main(argv: list[str] | None = None) -> int:
             verify_preprocess_source_closure=False,
         )
         # The GPU tag deliberately excludes only the shader-body digest, so this first HLSL
-        # generation is final. Refresh every named closure against that exact generated include;
-        # the manifest generator then reprojects producer/preprocess identity into DVC.
+        # generation is final. Refresh the checked-in closure pins against that exact generated
+        # include; the manifest generator then reprojects producer/preprocess identity into DVC.
         first_hlsl = render_hlsl(contract)
         first_ocr_assertions = render_hlsl_ocr_assertions()
         _write_hlsl_outputs(first_hlsl, first_ocr_assertions, False)
-        _write_direct_glyph_source_pin(False)
-        _write_shared_ui_warp_runtime_pin(False)
         if not shader_manifest_generator.generate(False, True):
             raise RuntimeError("could not refresh the named Host SBS shader closures")
         # generate() rewrites the closure manifest in this same process. Refresh the mutable
@@ -2307,8 +2239,6 @@ def main(argv: list[str] | None = None) -> int:
     valid = _write_or_check(CPP_TARGET, render_cpp(contract), args.check)
     valid &= _write_hlsl_outputs(
         render_hlsl(contract), render_hlsl_ocr_assertions(), args.check)
-    valid &= _write_direct_glyph_source_pin(True)
-    valid &= _write_shared_ui_warp_runtime_pin(True)
     try:
         validate_renderer_source_closure_pins()
     except ValueError as exc:

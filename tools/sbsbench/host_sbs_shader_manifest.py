@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from functools import lru_cache
+from typing import Dict, Optional, Tuple
 
 MANIFEST_SCHEMA = 1
 SOURCE_CLOSURE_SCHEMA = 2
@@ -23,7 +24,29 @@ class ClosureGroup:
     name: str
     description: str
     specs: Tuple[ShaderSpec, ...]
-    source_closure_sha256: str
+    root: str
+    pinned_source_closure_sha256: Optional[str]
+
+    @property
+    def source_closure_sha256(self) -> str:
+        """The checked-in pin, or the closure of the current shader sources."""
+        if self.pinned_source_closure_sha256 is not None:
+            return self.pinned_source_closure_sha256
+        return _source_closure(self)
+
+
+@lru_cache(maxsize=None)
+def _source_closure(group: ClosureGroup) -> str:
+    try:
+        from . import generate_host_sbs_shader_manifest as generator
+    except ImportError:
+        import generate_host_sbs_shader_manifest as generator
+    return generator.shader_source_closure_sha256(
+        generator.SHADER_ROOT / group.root,
+        tuple((spec.source_file, spec.source_entrypoint, spec.source_target)
+              for spec in group.specs),
+        shader_compile_flags=SHADER_COMPILE_FLAGS,
+    )
 
 
 BUFFER_TO_TEX = ShaderSpec(
@@ -361,6 +384,91 @@ HOST_SBS_DIRECT_GLYPH_PREPARE = ShaderSpec(
     source_entrypoint="prepare_direct_glyph_main",
     source_target="cs_5_0",
 )
+HOST_SBS_SHARED_UI_WARP_INITIALIZE = ShaderSpec(
+    source_file="host_sbs_shared_ui_warp.hlsl",
+    source_entrypoint="initialize_main",
+    source_target="cs_5_0",
+)
+HOST_SBS_SHARED_UI_WARP_PIN = ShaderSpec(
+    source_file="host_sbs_shared_ui_warp.hlsl",
+    source_entrypoint="HostBinaryPinCS",
+    source_target="cs_5_0",
+)
+HOST_SBS_SHARED_UI_WARP_PREPARE = ShaderSpec(
+    source_file="host_sbs_shared_ui_warp.hlsl",
+    source_entrypoint="prepare_main",
+    source_target="cs_5_0",
+)
+HOST_SBS_SHARED_UI_WARP_DRAW = ShaderSpec(
+    source_file="host_sbs_shared_ui_warp.hlsl",
+    source_entrypoint="shared_pin_main_ps",
+    source_target="ps_5_0",
+)
+HOST_SBS_SHARED_UI_WARP_MAPPING = ShaderSpec(
+    source_file="host_sbs_shared_ui_warp.hlsl",
+    source_entrypoint="shared_pin_mapping_ps",
+    source_target="ps_5_0",
+)
+HOST_SBS_SHARED_UI_WARP_COVERAGE = ShaderSpec(
+    source_file="host_sbs_shared_ui_warp.hlsl",
+    source_entrypoint="shared_pin_coverage_ps",
+    source_target="ps_5_0",
+)
+HOST_SBS_SHARED_UI_WARP_BOUNDARY = ShaderSpec(
+    source_file="host_sbs_shared_ui_warp.hlsl",
+    source_entrypoint="shared_pin_boundary_ps",
+    source_target="ps_5_0",
+)
+HOST_SBS_TEXT_GAME_UI_WARP_INITIALIZE = ShaderSpec(
+    source_file="host_sbs_text_game_ui_warp.hlsl",
+    source_entrypoint="initialize_main",
+    source_target="cs_5_0",
+)
+HOST_SBS_TEXT_GAME_UI_WARP_APPLY = ShaderSpec(
+    source_file="host_sbs_text_game_ui_warp.hlsl",
+    source_entrypoint="SunshineApplyUICS",
+    source_target="cs_5_0",
+)
+HOST_SBS_TEXT_GAME_UI_WARP_DRAW = ShaderSpec(
+    source_file="host_sbs_text_game_ui_warp.hlsl",
+    source_entrypoint="shared_pin_main_ps",
+    source_target="ps_5_0",
+)
+HOST_SBS_TEXT_GAME_UI_WARP_VERIFY = ShaderSpec(
+    source_file="host_sbs_text_game_ui_warp.hlsl",
+    source_entrypoint="text_game_verify_main",
+    source_target="cs_5_0",
+)
+HOST_SBS_TEXT_GAME_UI_WARP_COLUMNS = ShaderSpec(
+    source_file="host_sbs_text_game_ui_warp.hlsl",
+    source_entrypoint="text_game_columns_main",
+    source_target="cs_5_0",
+)
+HOST_SBS_DIRECT_GLYPH_EMPTY_GATE = ShaderSpec(
+    source_file="host_sbs_raw_matte_empty_gate_cs.hlsl",
+    source_entrypoint="prepare_empty_main",
+    source_target="cs_5_0",
+)
+HOST_SBS_DIRECT_GLYPH_SOURCE_AUDIT_PREPARE = ShaderSpec(
+    source_file="direct_source_audit.hlsl",
+    source_entrypoint="prepare_main",
+    source_target="cs_5_0",
+)
+HOST_SBS_DIRECT_GLYPH_SOURCE_AUDIT_COPY = ShaderSpec(
+    source_file="direct_source_audit.hlsl",
+    source_entrypoint="copy_main",
+    source_target="cs_5_0",
+)
+HOST_SBS_DIRECT_GLYPH_SOURCE_AUDIT_FINALIZE = ShaderSpec(
+    source_file="direct_source_audit.hlsl",
+    source_entrypoint="finalize_main",
+    source_target="cs_5_0",
+)
+HOST_SBS_DIRECT_GLYPH_SOURCE_AUDIT_ENVELOPE = ShaderSpec(
+    source_file="direct_source_audit.hlsl",
+    source_entrypoint="envelope_main",
+    source_target="cs_5_0",
+)
 
 SHADER_SPECS: Dict[str, ShaderSpec] = {
     "buffer_to_tex": BUFFER_TO_TEX,
@@ -430,6 +538,23 @@ SHADER_SPECS: Dict[str, ShaderSpec] = {
     "host_sbs_direct_glyph_publish_line": HOST_SBS_DIRECT_GLYPH_PUBLISH_LINE,
     "host_sbs_direct_glyph_finish_history": HOST_SBS_DIRECT_GLYPH_FINISH_HISTORY,
     "host_sbs_direct_glyph_prepare": HOST_SBS_DIRECT_GLYPH_PREPARE,
+    "host_sbs_shared_ui_warp_initialize": HOST_SBS_SHARED_UI_WARP_INITIALIZE,
+    "host_sbs_shared_ui_warp_pin": HOST_SBS_SHARED_UI_WARP_PIN,
+    "host_sbs_shared_ui_warp_prepare": HOST_SBS_SHARED_UI_WARP_PREPARE,
+    "host_sbs_shared_ui_warp_draw": HOST_SBS_SHARED_UI_WARP_DRAW,
+    "host_sbs_shared_ui_warp_mapping": HOST_SBS_SHARED_UI_WARP_MAPPING,
+    "host_sbs_shared_ui_warp_coverage": HOST_SBS_SHARED_UI_WARP_COVERAGE,
+    "host_sbs_shared_ui_warp_boundary": HOST_SBS_SHARED_UI_WARP_BOUNDARY,
+    "host_sbs_text_game_ui_warp_initialize": HOST_SBS_TEXT_GAME_UI_WARP_INITIALIZE,
+    "host_sbs_text_game_ui_warp_apply": HOST_SBS_TEXT_GAME_UI_WARP_APPLY,
+    "host_sbs_text_game_ui_warp_draw": HOST_SBS_TEXT_GAME_UI_WARP_DRAW,
+    "host_sbs_text_game_ui_warp_verify": HOST_SBS_TEXT_GAME_UI_WARP_VERIFY,
+    "host_sbs_text_game_ui_warp_columns": HOST_SBS_TEXT_GAME_UI_WARP_COLUMNS,
+    "host_sbs_direct_glyph_empty_gate": HOST_SBS_DIRECT_GLYPH_EMPTY_GATE,
+    "host_sbs_direct_glyph_source_audit_prepare": HOST_SBS_DIRECT_GLYPH_SOURCE_AUDIT_PREPARE,
+    "host_sbs_direct_glyph_source_audit_copy": HOST_SBS_DIRECT_GLYPH_SOURCE_AUDIT_COPY,
+    "host_sbs_direct_glyph_source_audit_finalize": HOST_SBS_DIRECT_GLYPH_SOURCE_AUDIT_FINALIZE,
+    "host_sbs_direct_glyph_source_audit_envelope": HOST_SBS_DIRECT_GLYPH_SOURCE_AUDIT_ENVELOPE,
 }
 
 PREPROCESS_GROUP = ClosureGroup(
@@ -441,7 +566,8 @@ PREPROCESS_GROUP = ClosureGroup(
         HOST_SBS_NEAR_IDENTICAL_FUSED_PREPROCESS,
         HOST_SBS_NEAR_IDENTICAL_TILED_PREPROCESS,
     ),
-    source_closure_sha256="8e2de9ed76bd64a38a0c956e75dd7a13c8883d39d0ef0050ffe5aba9f7208672",
+    root="",
+    pinned_source_closure_sha256="8e2de9ed76bd64a38a0c956e75dd7a13c8883d39d0ef0050ffe5aba9f7208672",
 )
 
 PARALLAX_V2_PRODUCER_GROUP = ClosureGroup(
@@ -481,7 +607,8 @@ PARALLAX_V2_PRODUCER_GROUP = ClosureGroup(
         HOST_SBS_SUBTITLE_GAUSSIAN_VERTICAL_LIMIT,
         HOST_SBS_SUBTITLE_GAUSSIAN_HORIZONTAL_LIMIT,
     ),
-    source_closure_sha256="b1307cc6c457482c48b47daf8f900cd919e182286bfe8cddd88b1a7e34bed13b",
+    root="",
+    pinned_source_closure_sha256="b1307cc6c457482c48b47daf8f900cd919e182286bfe8cddd88b1a7e34bed13b",
 )
 
 PARALLAX_V2_REPLAY_RESOLVE_GROUP = ClosureGroup(
@@ -493,7 +620,8 @@ PARALLAX_V2_REPLAY_RESOLVE_GROUP = ClosureGroup(
         DEPTH_COORDINATE_V2_QUANTILES,
         DEPTH_COORDINATE_V2_STATE_RESOLVE,
     ),
-    source_closure_sha256="9a73e8a92ba55e3d99f3e37868918329c0e0d478bd7281319670dd4f2fe55347",
+    root="",
+    pinned_source_closure_sha256=None,
 )
 
 PARALLAX_V2_COORDINATE_DIAGNOSTIC_GROUP = ClosureGroup(
@@ -504,7 +632,8 @@ PARALLAX_V2_COORDINATE_DIAGNOSTIC_GROUP = ClosureGroup(
     specs=(
         DEPTH_COORDINATE_V2_COORDINATE_DIAGNOSTIC,
     ),
-    source_closure_sha256="b895dea87363c1859c16d97c3d79121a2996d5f03ee8c8b56e20e756609e4e59",
+    root="",
+    pinned_source_closure_sha256=None,
 )
 
 NEAR_IDENTICAL_DETECTOR_GROUP = ClosureGroup(
@@ -517,7 +646,8 @@ NEAR_IDENTICAL_DETECTOR_GROUP = ClosureGroup(
         HOST_SBS_NEAR_IDENTICAL_FINALIZE,
         HOST_SBS_NEAR_IDENTICAL_REUSE_DEPTH,
     ),
-    source_closure_sha256="6af2c82046dd2d0ba4d74882440113d77ccd0605e7aa9304fa029fe914f9ac0c",
+    root="",
+    pinned_source_closure_sha256=None,
 )
 
 GPU_TRACE_GROUP = ClosureGroup(
@@ -528,7 +658,8 @@ GPU_TRACE_GROUP = ClosureGroup(
     specs=(
         HOST_SBS_GPU_TRACE,
     ),
-    source_closure_sha256="bcfab2a5da6361c9142c82b05d47503b27acbfcac010d25bd012cf30051ce3ef",
+    root="",
+    pinned_source_closure_sha256=None,
 )
 
 PARALLAX_V2_LIVE_RENDERER_GROUP = ClosureGroup(
@@ -540,7 +671,8 @@ PARALLAX_V2_LIVE_RENDERER_GROUP = ClosureGroup(
         PARALLAX_V2_LIVE_RENDERER,
         SBS_REPROJECTION_VERTEX,
     ),
-    source_closure_sha256="7092c821696d20987e56ba65d74bf4c586601c43daaaac5a5db2c690864a567b",
+    root="",
+    pinned_source_closure_sha256="7092c821696d20987e56ba65d74bf4c586601c43daaaac5a5db2c690864a567b",
 )
 
 PARALLAX_V2_P010_Y_GROUP = ClosureGroup(
@@ -551,7 +683,8 @@ PARALLAX_V2_P010_Y_GROUP = ClosureGroup(
     specs=(
         PARALLAX_V2_P010_Y_RENDERER,
     ),
-    source_closure_sha256="ff5dfa9ced2e7dfa3d75f7a322fbe57eac53f4b8e84a99e68b7267b9c1bf88ee",
+    root="",
+    pinned_source_closure_sha256=None,
 )
 
 SBS_FLAT_FALLBACK_GROUP = ClosureGroup(
@@ -563,7 +696,8 @@ SBS_FLAT_FALLBACK_GROUP = ClosureGroup(
         SBS_FLAT_IDENTITY,
         SBS_REPROJECTION_VERTEX,
     ),
-    source_closure_sha256="7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4",
+    root="",
+    pinned_source_closure_sha256=None,
 )
 
 PARALLAX_V2_LIVE_DIAGNOSTIC_GROUP = ClosureGroup(
@@ -575,7 +709,8 @@ PARALLAX_V2_LIVE_DIAGNOSTIC_GROUP = ClosureGroup(
         PARALLAX_V2_LIVE_MAPPING,
         PARALLAX_V2_LIVE_MASK,
     ),
-    source_closure_sha256="2e71502f9d1c64a32e6c088246afd02e4a9619f35466b2b611d4d35feb7a79f6",
+    root="",
+    pinned_source_closure_sha256=None,
 )
 
 DIRECT_GLYPH_PLAN_GROUP = ClosureGroup(
@@ -587,7 +722,8 @@ DIRECT_GLYPH_PLAN_GROUP = ClosureGroup(
         HOST_SBS_DIRECT_GLYPH_PLAN,
         HOST_SBS_DIRECT_GLYPH_PUBLISH,
     ),
-    source_closure_sha256="3c1df1656492065c62c519ceffd49f3d1bc1d3a4e26c50ba0b8a2eead4dc2844",
+    root="",
+    pinned_source_closure_sha256=None,
 )
 
 DIRECT_GLYPH_TRANSPORT_GROUP = ClosureGroup(
@@ -601,7 +737,8 @@ DIRECT_GLYPH_TRANSPORT_GROUP = ClosureGroup(
         HOST_SBS_DIRECT_GLYPH_RESOLVE_MATTE,
         HOST_SBS_DIRECT_GLYPH_FINISH_SCORE,
     ),
-    source_closure_sha256="2df402561c88d7e2b2672660e2f9d5f42b06d9815c87b48511adb05af6226b30",
+    root="",
+    pinned_source_closure_sha256=None,
 )
 
 DIRECT_GLYPH_PALETTE_GROUP = ClosureGroup(
@@ -628,7 +765,8 @@ DIRECT_GLYPH_PALETTE_GROUP = ClosureGroup(
         HOST_SBS_DIRECT_GLYPH_PUBLISH_LINE,
         HOST_SBS_DIRECT_GLYPH_FINISH_HISTORY,
     ),
-    source_closure_sha256="c955485dc93ba40eccb88dad2ac66b512876265326fcc83c903cd089ae1c0941",
+    root="",
+    pinned_source_closure_sha256=None,
 )
 
 DIRECT_GLYPH_PREPARE_GROUP = ClosureGroup(
@@ -639,7 +777,80 @@ DIRECT_GLYPH_PREPARE_GROUP = ClosureGroup(
     specs=(
         HOST_SBS_DIRECT_GLYPH_PREPARE,
     ),
-    source_closure_sha256="0c90dd7091de6b575eb0fa4157b3ca3174bb9bba4bfdce8c306a33a2d602f434",
+    root="",
+    pinned_source_closure_sha256=None,
+)
+
+SHARED_UI_WARP_COMPLETED_GROUP = ClosureGroup(
+    name="shared_ui_warp_completed",
+    description=(
+        "Completed shared UI warp: pin weights, pin field, draw preparation and the pinned draw."
+    ),
+    specs=(
+        HOST_SBS_SHARED_UI_WARP_INITIALIZE,
+        HOST_SBS_SHARED_UI_WARP_PIN,
+        HOST_SBS_SHARED_UI_WARP_PREPARE,
+        HOST_SBS_SHARED_UI_WARP_DRAW,
+    ),
+    root="",
+    pinned_source_closure_sha256=None,
+)
+
+SHARED_UI_WARP_COMPLETED_DIAGNOSTIC_GROUP = ClosureGroup(
+    name="shared_ui_warp_completed_diagnostic",
+    description=(
+        "Dump-only actual-map, coverage and boundary readback of the completed shared UI warp."
+    ),
+    specs=(
+        HOST_SBS_SHARED_UI_WARP_MAPPING,
+        HOST_SBS_SHARED_UI_WARP_COVERAGE,
+        HOST_SBS_SHARED_UI_WARP_BOUNDARY,
+    ),
+    root="",
+    pinned_source_closure_sha256=None,
+)
+
+TEXT_GAME_UI_WARP_GROUP = ClosureGroup(
+    name="text_game_ui_warp",
+    description=(
+        "Game 3D text-game route: pins the coverage a game's text helper reports through the shared warp."
+    ),
+    specs=(
+        HOST_SBS_TEXT_GAME_UI_WARP_INITIALIZE,
+        HOST_SBS_TEXT_GAME_UI_WARP_APPLY,
+        HOST_SBS_TEXT_GAME_UI_WARP_DRAW,
+        HOST_SBS_TEXT_GAME_UI_WARP_VERIFY,
+        HOST_SBS_TEXT_GAME_UI_WARP_COLUMNS,
+    ),
+    root="",
+    pinned_source_closure_sha256=None,
+)
+
+DIRECT_GLYPH_EMPTY_GATE_GROUP = ClosureGroup(
+    name="direct_glyph_empty_gate",
+    description=(
+        "Publishes the current zero Direct Glyph matte for an authenticated empty OCR observation."
+    ),
+    specs=(
+        HOST_SBS_DIRECT_GLYPH_EMPTY_GATE,
+    ),
+    root="",
+    pinned_source_closure_sha256=None,
+)
+
+DIRECT_GLYPH_SOURCE_AUDIT_GROUP = ClosureGroup(
+    name="direct_glyph_source_audit",
+    description=(
+        "Audits the source snapshot the Direct Glyph scores read; its sources keep their own narrow root."
+    ),
+    specs=(
+        HOST_SBS_DIRECT_GLYPH_SOURCE_AUDIT_PREPARE,
+        HOST_SBS_DIRECT_GLYPH_SOURCE_AUDIT_COPY,
+        HOST_SBS_DIRECT_GLYPH_SOURCE_AUDIT_FINALIZE,
+        HOST_SBS_DIRECT_GLYPH_SOURCE_AUDIT_ENVELOPE,
+    ),
+    root="direct_glyph_source",
+    pinned_source_closure_sha256=None,
 )
 
 CLOSURE_GROUPS: Dict[str, ClosureGroup] = {
@@ -657,4 +868,9 @@ CLOSURE_GROUPS: Dict[str, ClosureGroup] = {
     "direct_glyph_transport": DIRECT_GLYPH_TRANSPORT_GROUP,
     "direct_glyph_palette": DIRECT_GLYPH_PALETTE_GROUP,
     "direct_glyph_prepare": DIRECT_GLYPH_PREPARE_GROUP,
+    "shared_ui_warp_completed": SHARED_UI_WARP_COMPLETED_GROUP,
+    "shared_ui_warp_completed_diagnostic": SHARED_UI_WARP_COMPLETED_DIAGNOSTIC_GROUP,
+    "text_game_ui_warp": TEXT_GAME_UI_WARP_GROUP,
+    "direct_glyph_empty_gate": DIRECT_GLYPH_EMPTY_GATE_GROUP,
+    "direct_glyph_source_audit": DIRECT_GLYPH_SOURCE_AUDIT_GROUP,
 }

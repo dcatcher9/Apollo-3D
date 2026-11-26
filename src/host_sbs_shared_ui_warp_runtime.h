@@ -23,31 +23,11 @@ namespace models::host_sbs_shared_ui_warp {
   namespace cache = host_sbs_shader_cache;
   using Microsoft::WRL::ComPtr;
 
-  inline constexpr std::array<cache::shader_spec, 4u> completed_specs {{
-    {"host_sbs_shared_ui_warp.hlsl", "initialize_main", "cs_5_0"},
-    {"host_sbs_shared_ui_warp.hlsl", "HostBinaryPinCS", "cs_5_0"},
-    {"host_sbs_shared_ui_warp.hlsl", "prepare_main", "cs_5_0"},
-    {"host_sbs_shared_ui_warp.hlsl", "shared_pin_main_ps", "ps_5_0"},
-  }};
-  inline constexpr std::string_view completed_closure = "4599bc3315822d9b79501c04b758480cf385870777c3f25072a3b57e1972d239";
-  inline constexpr std::array<cache::shader_spec, 3u> completed_diagnostic_specs {{
-    {"host_sbs_shared_ui_warp.hlsl", "shared_pin_mapping_ps", "ps_5_0"},
-    {"host_sbs_shared_ui_warp.hlsl", "shared_pin_coverage_ps", "ps_5_0"},
-    {"host_sbs_shared_ui_warp.hlsl", "shared_pin_boundary_ps", "ps_5_0"},
-  }};
-  inline constexpr std::string_view completed_diagnostic_closure = "03e696a44ff054541e6d73ce3f4a35390cfb6b0988189bf6c4b6f8b86e192c7c";
+  // The completed, diagnostic and text-game route programs are the `shared_ui_warp_completed`,
+  // `shared_ui_warp_completed_diagnostic` and `text_game_ui_warp` registry closure groups.
+  // The text-game route's pin weight is the text coverage a game's own helper reports, so it
+  // reads no subtitle matte, receipt or condition; everything after the weight is shared.
   inline constexpr std::string_view renderer_kind = "shared-ui-pin-completed-v2";
-
-  // The Game 3D text-game route. Its pin weight is the text coverage a game's own helper reports,
-  // so it reads no subtitle matte, receipt or condition; everything after the weight is shared.
-  inline constexpr std::array<cache::shader_spec, 5u> text_game_specs {{
-    {"host_sbs_text_game_ui_warp.hlsl", "initialize_main", "cs_5_0"},
-    {"host_sbs_text_game_ui_warp.hlsl", "SunshineApplyUICS", "cs_5_0"},
-    {"host_sbs_text_game_ui_warp.hlsl", "shared_pin_main_ps", "ps_5_0"},
-    {"host_sbs_text_game_ui_warp.hlsl", "text_game_verify_main", "cs_5_0"},
-    {"host_sbs_text_game_ui_warp.hlsl", "text_game_columns_main", "cs_5_0"},
-  }};
-  inline constexpr std::string_view text_game_closure = "d5212214515453c8a38f3872f34353ad9d4b31279df036938dd5627c127e229c";
 
   struct program_t {
     ID3D11ComputeShader *initialize = nullptr, *pin = nullptr, *prepare = nullptr;
@@ -87,8 +67,8 @@ namespace models::host_sbs_shared_ui_warp {
     std::string route_error_;
 
     static bool create_route(ID3D11Device *device, const cache::source_snapshot_t &source, route_t &output, std::string &error) {
-      for (std::size_t stage = 0u; stage < completed_specs.size(); ++stage) {
-        const auto code = cache::get(source, completed_specs[stage]);
+      for (std::size_t stage = 0u; stage < cache::shared_ui_warp_completed_specs.size(); ++stage) {
+        const auto code = cache::get(source, cache::shared_ui_warp_completed_specs[stage]);
         if (!code || code->empty() || (stage < output.compute.size() ?
             FAILED(device->CreateComputeShader(code->data(), code->size(), nullptr, &output.compute[stage])) :
             FAILED(device->CreatePixelShader(code->data(), code->size(), nullptr, &output.pixel)))) {
@@ -103,8 +83,8 @@ namespace models::host_sbs_shared_ui_warp {
     bool load(ID3D11Device *device, const std::filesystem::path &root, std::string &error) {
       error.clear();
       try {
-        const auto source = cache::snapshot_sources(root, completed_specs);
-        if (!device || !source || cache::source_closure_sha256(source) != completed_closure) {
+        const auto source = cache::snapshot_sources(root, cache::shared_ui_warp_completed_specs);
+        if (!device || !source || cache::source_closure_sha256(source) != cache::shared_ui_warp_completed_source_closure_sha256) {
           error = route_error_ = "Shared UI warp shader source mismatch";
           return false;
         }
@@ -158,14 +138,14 @@ namespace models::host_sbs_shared_ui_warp {
     bool load_text_game(ID3D11Device *device, const std::filesystem::path &root, std::string &error) {
       error.clear();
       try {
-        const auto source = cache::snapshot_sources(root, text_game_specs);
-        if (!device || !source || cache::source_closure_sha256(source) != text_game_closure) {
+        const auto source = cache::snapshot_sources(root, cache::text_game_ui_warp_specs);
+        if (!device || !source || cache::source_closure_sha256(source) != cache::text_game_ui_warp_source_closure_sha256) {
           error = "Text-game UI warp shader source mismatch";
           return false;
         }
         route_t next;
         for (std::size_t stage = 0u; stage < 3u; ++stage) {
-          const auto code = cache::get(source, text_game_specs[stage]);
+          const auto code = cache::get(source, cache::text_game_ui_warp_specs[stage]);
           if (!code || code->empty() || (stage < 2u ?
               FAILED(device->CreateComputeShader(code->data(), code->size(), nullptr, &next.compute[stage])) :
               FAILED(device->CreatePixelShader(code->data(), code->size(), nullptr, &next.pixel)))) {
@@ -174,8 +154,8 @@ namespace models::host_sbs_shared_ui_warp {
           }
         }
         ComPtr<ID3D11ComputeShader> verify, columns;
-        const auto verify_code = cache::get(source, text_game_specs[3u]);
-        const auto columns_code = cache::get(source, text_game_specs[4u]);
+        const auto verify_code = cache::get(source, cache::text_game_ui_warp_specs[3u]);
+        const auto columns_code = cache::get(source, cache::text_game_ui_warp_specs[4u]);
         if (!verify_code || verify_code->empty() || FAILED(device->CreateComputeShader(verify_code->data(), verify_code->size(), nullptr, &verify)) ||
             !columns_code || columns_code->empty() || FAILED(device->CreateComputeShader(columns_code->data(), columns_code->size(), nullptr, &columns))) {
           error = "Text-game UI warp shader creation failed";
@@ -212,14 +192,14 @@ namespace models::host_sbs_shared_ui_warp {
         return true;
       }
       try {
-        const auto source = cache::snapshot_sources(root, completed_diagnostic_specs);
-        if (!source || cache::source_closure_sha256(source) != completed_diagnostic_closure) {
+        const auto source = cache::snapshot_sources(root, cache::shared_ui_warp_completed_diagnostic_specs);
+        if (!source || cache::source_closure_sha256(source) != cache::shared_ui_warp_completed_diagnostic_source_closure_sha256) {
           error = "Shared UI warp diagnostic source mismatch";
           return false;
         }
         std::array<ComPtr<ID3D11PixelShader>, 3u> next;
         for (std::size_t i = 0u; i < next.size(); ++i) {
-          const auto code = cache::get(source, completed_diagnostic_specs[i]);
+          const auto code = cache::get(source, cache::shared_ui_warp_completed_diagnostic_specs[i]);
           if (!code || code->empty() || FAILED(device->CreatePixelShader(code->data(), code->size(), nullptr, &next[i]))) {
             error = "Shared UI warp diagnostic shader creation failed";
             return false;

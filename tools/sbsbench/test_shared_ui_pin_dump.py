@@ -4,7 +4,6 @@ import copy
 import hashlib
 import json
 from pathlib import Path
-import re
 import struct
 import tempfile
 import unittest
@@ -351,13 +350,12 @@ class SharedUiPinDumpTests(unittest.TestCase):
 
 
 class SharedUiPinDumpOwnerTests(unittest.TestCase):
-    def test_unmocked_route_closures_match_actual_runtime_owner(self):
-        source = generator.CURRENT_SHARED_UI_WARP_RUNTIME_HEADER.read_text(encoding="utf-8")
-        for kind, name in ((pin.COMPLETED_KIND, "completed_closure"),):
-            with self.subTest(kind=kind):
-                expected = re.search(rf'inline constexpr std::string_view {name}\s*=\s*"([0-9a-f]{{64}})"', source)
-                self.assertIsNotNone(expected)
-                self.assertEqual(pin._expected_closure(kind), expected.group(1))
+    def test_completed_route_closure_is_its_registry_group_source_closure(self):
+        shader_generator = generator.shader_manifest_generator
+        expected = shader_generator.computed_group_pins(
+            generator.SHADER_MANIFEST, names=("shared_ui_warp_completed",)
+        )["shared_ui_warp_completed"]
+        self.assertEqual(pin._expected_closure(pin.COMPLETED_KIND), expected)
 
 
 if __name__ == "__main__":

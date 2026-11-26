@@ -13,15 +13,15 @@ import struct
 from typing import Any
 
 try:
-    from .host_sbs_shader_manifest import DIRECT_GLYPH_PREPARE_GROUP
+    from .host_sbs_shader_manifest import DIRECT_GLYPH_PREPARE_GROUP, SHARED_UI_WARP_COMPLETED_GROUP
 except ImportError:
-    from host_sbs_shader_manifest import DIRECT_GLYPH_PREPARE_GROUP
+    from host_sbs_shader_manifest import DIRECT_GLYPH_PREPARE_GROUP, SHARED_UI_WARP_COMPLETED_GROUP
 
 
 KIND = "shared-ui-pin-v1"
 COMPLETED_KIND = "shared-ui-pin-completed-v2"
 LEGACY_COMBINED_CLOSURE = "326bf2defe8021e1930f46279fea27ceac12effad2ad9d2a17127d647bcdddef"
-_ROUTE_CLOSURE_KEYS = {COMPLETED_KIND: "completed_closure"}
+_ROUTE_CLOSURE_GROUPS = {COMPLETED_KIND: SHARED_UI_WARP_COMPLETED_GROUP}
 # Recorded by the last producer with one displacement band shared by both eyes (23a4d95e).
 SINGLE_BAND_SPLIT_CLOSURES = {
     COMPLETED_KIND: "50db509da2b32216404aba41fc70095ca7b82e36bc86b0417a98cd32948a1d4f",
@@ -48,16 +48,10 @@ SHARED_ROLE = "independent Base diagnostic; does not describe rendered shared wa
 BASE_ROLE = "authenticated Base inverse diagnostic"
 
 
-def _runtime_closure(name: str) -> str:
-    try:
-        from . import generate_depth_coordinate_v2_contract as shader_generator
-    except ImportError:
-        import generate_depth_coordinate_v2_contract as shader_generator
-    return shader_generator.shared_ui_warp_runtime_closures(names=(name,))[name]
-
-
 def _expected_closure(kind: str = KIND) -> str:
-    return LEGACY_COMBINED_CLOSURE if kind == KIND else _runtime_closure(_ROUTE_CLOSURE_KEYS[kind])
+    if kind == KIND:
+        return LEGACY_COMBINED_CLOSURE
+    return _ROUTE_CLOSURE_GROUPS[kind].source_closure_sha256
 
 
 def _matches_split_draw(draw: dict, closures: dict) -> bool:
@@ -202,7 +196,7 @@ def _verify(root: Any, manifest: dict[str, Any]) -> tuple[dict[str, Any], Any]:
         return {**attribution, "actual_map_verified": False,
                 "unavailable_reason": "actual draw binding observation was unavailable"}, None
     kind = attribution["kind"]
-    if kind in _ROUTE_CLOSURE_KEYS and evidence.get("program") != kind:
+    if kind in _ROUTE_CLOSURE_GROUPS and evidence.get("program") != kind:
         raise ValueError("actual draw evidence does not identify its attributed shared pin route")
     shared = evidence.get("shared_pin")
     if (not isinstance(shared, dict) or shared.get("selected") is not True or

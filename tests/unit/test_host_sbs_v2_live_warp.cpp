@@ -3973,8 +3973,8 @@ TEST(HostSbsV2LiveWarpGpuTest, SavedGlyphTupleReplay) {
       {"coordinate_contract_sha256", v2::contract_canonical_sha256},
       {"live_renderer_source_closure_sha256", cache::parallax_v2_live_renderer_source_closure_sha256},
       {"live_diagnostic_source_closure_sha256", cache::parallax_v2_live_diagnostic_source_closure_sha256},
-      {"shared_renderer_source_closure_sha256", models::host_sbs_shared_ui_warp::completed_closure},
-      {"shared_diagnostic_source_closure_sha256", models::host_sbs_shared_ui_warp::completed_diagnostic_closure},
+      {"shared_renderer_source_closure_sha256", models::host_sbs_shader_cache::shared_ui_warp_completed_source_closure_sha256},
+      {"shared_diagnostic_source_closure_sha256", models::host_sbs_shader_cache::shared_ui_warp_completed_diagnostic_source_closure_sha256},
       {"scope", "Literal saved current matte/receipt and source tuple, actual shared D3D11 renderer; no CPU inverse or color warp"},
       {"route_definitions", {
         {"base", "Saved Base/state/b2 and all saved subtitle resources; only b3.enabled set to zero"},
@@ -4289,8 +4289,8 @@ TEST(HostSbsV2LiveWarpGpuTest, PrivateNativeMatteLayerReplay) {
       {"live_diagnostic_source_closure_sha256", cache::parallax_v2_live_diagnostic_source_closure_sha256},
       {"scope", "PRIVATE saved-input old/new native-M rendering through the actual shared warp; supplied receipt is context for counterfactual masks; authored GPU layer reference; no live/producer qualification"},
       {"production_tuple_claim_for_candidate", false},
-      {"shared_renderer_source_closure_sha256", models::host_sbs_shared_ui_warp::completed_closure},
-      {"shared_diagnostic_source_closure_sha256", models::host_sbs_shared_ui_warp::completed_diagnostic_closure},
+      {"shared_renderer_source_closure_sha256", models::host_sbs_shader_cache::shared_ui_warp_completed_source_closure_sha256},
+      {"shared_diagnostic_source_closure_sha256", models::host_sbs_shader_cache::shared_ui_warp_completed_diagnostic_source_closure_sha256},
       {"private_layer_shader_root", specification.at("private_layer_shader_root")},
       {"private_layer_source_closure_sha256", specification.at("private_layer_source_closure_sha256")},
       {"cases", json::array()}};

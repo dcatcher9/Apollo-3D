@@ -405,6 +405,108 @@
       "source_file": "host_sbs_shared_ui_warp_direct_glyph.hlsl",
       "source_entrypoint": "prepare_direct_glyph_main",
       "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_shared_ui_warp_initialize",
+      "source_file": "host_sbs_shared_ui_warp.hlsl",
+      "source_entrypoint": "initialize_main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_shared_ui_warp_pin",
+      "source_file": "host_sbs_shared_ui_warp.hlsl",
+      "source_entrypoint": "HostBinaryPinCS",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_shared_ui_warp_prepare",
+      "source_file": "host_sbs_shared_ui_warp.hlsl",
+      "source_entrypoint": "prepare_main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_shared_ui_warp_draw",
+      "source_file": "host_sbs_shared_ui_warp.hlsl",
+      "source_entrypoint": "shared_pin_main_ps",
+      "source_target": "ps_5_0"
+    },
+    {
+      "name": "host_sbs_shared_ui_warp_mapping",
+      "source_file": "host_sbs_shared_ui_warp.hlsl",
+      "source_entrypoint": "shared_pin_mapping_ps",
+      "source_target": "ps_5_0"
+    },
+    {
+      "name": "host_sbs_shared_ui_warp_coverage",
+      "source_file": "host_sbs_shared_ui_warp.hlsl",
+      "source_entrypoint": "shared_pin_coverage_ps",
+      "source_target": "ps_5_0"
+    },
+    {
+      "name": "host_sbs_shared_ui_warp_boundary",
+      "source_file": "host_sbs_shared_ui_warp.hlsl",
+      "source_entrypoint": "shared_pin_boundary_ps",
+      "source_target": "ps_5_0"
+    },
+    {
+      "name": "host_sbs_text_game_ui_warp_initialize",
+      "source_file": "host_sbs_text_game_ui_warp.hlsl",
+      "source_entrypoint": "initialize_main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_text_game_ui_warp_apply",
+      "source_file": "host_sbs_text_game_ui_warp.hlsl",
+      "source_entrypoint": "SunshineApplyUICS",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_text_game_ui_warp_draw",
+      "source_file": "host_sbs_text_game_ui_warp.hlsl",
+      "source_entrypoint": "shared_pin_main_ps",
+      "source_target": "ps_5_0"
+    },
+    {
+      "name": "host_sbs_text_game_ui_warp_verify",
+      "source_file": "host_sbs_text_game_ui_warp.hlsl",
+      "source_entrypoint": "text_game_verify_main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_text_game_ui_warp_columns",
+      "source_file": "host_sbs_text_game_ui_warp.hlsl",
+      "source_entrypoint": "text_game_columns_main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_direct_glyph_empty_gate",
+      "source_file": "host_sbs_raw_matte_empty_gate_cs.hlsl",
+      "source_entrypoint": "prepare_empty_main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_direct_glyph_source_audit_prepare",
+      "source_file": "direct_source_audit.hlsl",
+      "source_entrypoint": "prepare_main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_direct_glyph_source_audit_copy",
+      "source_file": "direct_source_audit.hlsl",
+      "source_entrypoint": "copy_main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_direct_glyph_source_audit_finalize",
+      "source_file": "direct_source_audit.hlsl",
+      "source_entrypoint": "finalize_main",
+      "source_target": "cs_5_0"
+    },
+    {
+      "name": "host_sbs_direct_glyph_source_audit_envelope",
+      "source_file": "direct_source_audit.hlsl",
+      "source_entrypoint": "envelope_main",
+      "source_target": "cs_5_0"
     }
   ],
   "groups": [
@@ -460,16 +562,14 @@
       "specs": [
         "depth_coordinate_v2_quantiles",
         "depth_coordinate_v2_state_resolve"
-      ],
-      "source_closure_sha256": "9a73e8a92ba55e3d99f3e37868918329c0e0d478bd7281319670dd4f2fe55347"
+      ]
     },
     {
       "name": "parallax_v2_coordinate_diagnostic",
       "description": "Dump-only canonical-coordinate producer entry point.",
       "specs": [
         "depth_coordinate_v2_coordinate_diagnostic"
-      ],
-      "source_closure_sha256": "b895dea87363c1859c16d97c3d79121a2996d5f03ee8c8b56e20e756609e4e59"
+      ]
     },
     {
       "name": "near_identical_detector",
@@ -478,16 +578,14 @@
         "host_sbs_near_identical_resolve",
         "host_sbs_near_identical_finalize",
         "host_sbs_near_identical_reuse_depth"
-      ],
-      "source_closure_sha256": "6af2c82046dd2d0ba4d74882440113d77ccd0605e7aa9304fa029fe914f9ac0c"
+      ]
     },
     {
       "name": "gpu_trace",
       "description": "Optional diagnostic GPU completion trace.",
       "specs": [
         "host_sbs_gpu_trace"
-      ],
-      "source_closure_sha256": "bcfab2a5da6361c9142c82b05d47503b27acbfcac010d25bd012cf30051ce3ef"
+      ]
     },
     {
       "name": "parallax_v2_live_renderer",
@@ -503,8 +601,7 @@
       "description": "Optional fail-open P010 luma MRT renderer.",
       "specs": [
         "parallax_v2_p010_y_renderer"
-      ],
-      "source_closure_sha256": "ff5dfa9ced2e7dfa3d75f7a322fbe57eac53f4b8e84a99e68b7267b9c1bf88ee"
+      ]
     },
     {
       "name": "sbs_flat_fallback",
@@ -512,8 +609,7 @@
       "specs": [
         "sbs_flat_identity",
         "sbs_reprojection_vertex"
-      ],
-      "source_closure_sha256": "7e45f7ca78b170c2d6c33ab5c5e20d9f45cece71a5c84e6e7fc4f0f42cfde8d4"
+      ]
     },
     {
       "name": "parallax_v2_live_diagnostic",
@@ -521,8 +617,7 @@
       "specs": [
         "parallax_v2_live_mapping",
         "parallax_v2_live_mask"
-      ],
-      "source_closure_sha256": "2e71502f9d1c64a32e6c088246afd02e4a9619f35466b2b611d4d35feb7a79f6"
+      ]
     },
     {
       "name": "direct_glyph_plan",
@@ -530,8 +625,7 @@
       "specs": [
         "host_sbs_direct_glyph_plan",
         "host_sbs_direct_glyph_publish"
-      ],
-      "source_closure_sha256": "3c1df1656492065c62c519ceffd49f3d1bc1d3a4e26c50ba0b8a2eead4dc2844"
+      ]
     },
     {
       "name": "direct_glyph_transport",
@@ -541,8 +635,7 @@
         "host_sbs_direct_glyph_pack_rgb",
         "host_sbs_direct_glyph_resolve_matte",
         "host_sbs_direct_glyph_finish_score"
-      ],
-      "source_closure_sha256": "2df402561c88d7e2b2672660e2f9d5f42b06d9815c87b48511adb05af6226b30"
+      ]
     },
     {
       "name": "direct_glyph_palette",
@@ -565,16 +658,62 @@
         "host_sbs_direct_glyph_confirm_mask_history",
         "host_sbs_direct_glyph_publish_line",
         "host_sbs_direct_glyph_finish_history"
-      ],
-      "source_closure_sha256": "c955485dc93ba40eccb88dad2ac66b512876265326fcc83c903cd089ae1c0941"
+      ]
     },
     {
       "name": "direct_glyph_prepare",
       "description": "Completed shared-warp preparation for the direct glyph matte receipt.",
       "specs": [
         "host_sbs_direct_glyph_prepare"
+      ]
+    },
+    {
+      "name": "shared_ui_warp_completed",
+      "description": "Completed shared UI warp: pin weights, pin field, draw preparation and the pinned draw.",
+      "specs": [
+        "host_sbs_shared_ui_warp_initialize",
+        "host_sbs_shared_ui_warp_pin",
+        "host_sbs_shared_ui_warp_prepare",
+        "host_sbs_shared_ui_warp_draw"
+      ]
+    },
+    {
+      "name": "shared_ui_warp_completed_diagnostic",
+      "description": "Dump-only actual-map, coverage and boundary readback of the completed shared UI warp.",
+      "specs": [
+        "host_sbs_shared_ui_warp_mapping",
+        "host_sbs_shared_ui_warp_coverage",
+        "host_sbs_shared_ui_warp_boundary"
+      ]
+    },
+    {
+      "name": "text_game_ui_warp",
+      "description": "Game 3D text-game route: pins the coverage a game's text helper reports through the shared warp.",
+      "specs": [
+        "host_sbs_text_game_ui_warp_initialize",
+        "host_sbs_text_game_ui_warp_apply",
+        "host_sbs_text_game_ui_warp_draw",
+        "host_sbs_text_game_ui_warp_verify",
+        "host_sbs_text_game_ui_warp_columns"
+      ]
+    },
+    {
+      "name": "direct_glyph_empty_gate",
+      "description": "Publishes the current zero Direct Glyph matte for an authenticated empty OCR observation.",
+      "specs": [
+        "host_sbs_direct_glyph_empty_gate"
+      ]
+    },
+    {
+      "name": "direct_glyph_source_audit",
+      "description": "Audits the source snapshot the Direct Glyph scores read; its sources keep their own narrow root.",
+      "specs": [
+        "host_sbs_direct_glyph_source_audit_prepare",
+        "host_sbs_direct_glyph_source_audit_copy",
+        "host_sbs_direct_glyph_source_audit_finalize",
+        "host_sbs_direct_glyph_source_audit_envelope"
       ],
-      "source_closure_sha256": "0c90dd7091de6b575eb0fa4157b3ca3174bb9bba4bfdce8c306a33a2d602f434"
+      "root": "direct_glyph_source"
     }
   ]
 }

@@ -37,9 +37,8 @@ EXPECTED_TOP_LEVEL_KEYS = {
 EXPECTED_SPEC_KEYS = {
     "name", "source_file", "source_entrypoint", "source_target",
 }
-EXPECTED_GROUP_KEYS = {
-    "name", "description", "specs", "source_closure_sha256",
-}
+EXPECTED_GROUP_KEYS = {"name", "description", "specs"}
+OPTIONAL_GROUP_KEYS = {"root"}
 EXPECTED_GROUP_NAMES = (
     "preprocess",
     "parallax_v2_producer",
@@ -55,7 +54,22 @@ EXPECTED_GROUP_NAMES = (
     "direct_glyph_transport",
     "direct_glyph_palette",
     "direct_glyph_prepare",
+    "shared_ui_warp_completed",
+    "shared_ui_warp_completed_diagnostic",
+    "text_game_ui_warp",
+    "direct_glyph_empty_gate",
+    "direct_glyph_source_audit",
 )
+# Only these closures bind stored provenance: the model calibration (preprocess), the DVC
+# contract and its dumps (producer), and the evaluator's renderer contract and baselines. Their
+# pins stay checked in, so a source change to them is a deliberate re-pin. Every other group's
+# identity is derived from the shader sources at build time.
+PINNED_GROUP_NAMES = (
+    "preprocess",
+    "parallax_v2_producer",
+    "parallax_v2_live_renderer",
+)
+BUILD_IDENTITY_HEADER = "host_sbs_shader_build_identity.h"
 ANY_INCLUDE = re.compile(rb"^\s*#\s*include\b")
 QUOTED_INCLUDE = re.compile(rb'^\s*#\s*include\s*"([^"]+)"')
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -112,7 +126,7 @@ def _validate_emitted_identifier_names(
     cpp_group_spec_names = {f"{name}_specs" for name in group_names}
     cpp_group_pin_names = {
         f"{name}_source_closure_sha256" for name in group_names
-    }
+    } | {f"{name}_root" for name in group_names}
     cpp_reserved_names = {
         "source_closure_schema", "shader_compile_flags", "source_macro_count",
         "shader_spec",
@@ -192,7 +206,12 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     for index, group in enumerate(groups):
         if not isinstance(group, dict):
             raise ValueError(f"manifest.groups[{index}] must be an object")
-        _require_exact_keys(group, EXPECTED_GROUP_KEYS, f"manifest.groups[{index}]")
+        pinned = group.get("name") in PINNED_GROUP_NAMES
+        expected_keys = (
+            EXPECTED_GROUP_KEYS | (OPTIONAL_GROUP_KEYS & set(group)) |
+            ({"source_closure_sha256"} if pinned else set())
+        )
+        _require_exact_keys(group, expected_keys, f"manifest.groups[{index}]")
         name = group["name"]
         if not isinstance(name, str):
             raise ValueError(f"manifest.groups[{index}].name must be a string")
@@ -209,8 +228,15 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         if unknown:
             raise ValueError(f"manifest.groups[{index}] references unknown specs: {sorted(unknown)}")
         referenced_specs.update(members)
-        if not isinstance(group["source_closure_sha256"], str) or \
-                SHA256.fullmatch(group["source_closure_sha256"]) is None:
+        if "root" in group:
+            root = group["root"]
+            if not isinstance(root, str) or not root or Path(root).is_absolute() or \
+                    ".." in Path(root).parts:
+                raise ValueError(
+                    f"manifest.groups[{index}].root must be a shader-root subdirectory"
+                )
+        if pinned and (not isinstance(group["source_closure_sha256"], str) or
+                       SHA256.fullmatch(group["source_closure_sha256"]) is None):
             raise ValueError(
                 f"manifest.groups[{index}].source_closure_sha256 must be lowercase SHA-256"
             )
@@ -233,6 +259,16 @@ def closure_group(manifest: dict[str, Any], name: str) -> dict[str, Any]:
     if len(matches) != 1:
         raise ValueError(f"closure group {name!r} must appear exactly once")
     return matches[0]
+
+
+def is_pinned(group: dict[str, Any]) -> bool:
+    return group["name"] in PINNED_GROUP_NAMES
+
+
+def group_root(
+        manifest: dict[str, Any], name: str, shader_root: Path = SHADER_ROOT) -> Path:
+    group = closure_group(manifest, name)
+    return shader_root / group["root"] if "root" in group else shader_root
 
 
 def group_specs(
@@ -259,6 +295,16 @@ def shader_source_closure_sha256(
         *,
         shader_compile_flags: int = 0x00008800) -> str:
     """Hash ordered roots plus the exact reachable quoted-include source closure."""
+
+    return shader_source_closure(root, specs, shader_compile_flags=shader_compile_flags)[0]
+
+
+def shader_source_closure(
+        root: Path = SHADER_ROOT,
+        specs: tuple[tuple[str, str, str], ...] | None = None,
+        *,
+        shader_compile_flags: int = 0x00008800) -> tuple[str, tuple[Path, ...]]:
+    """Return the source-closure digest and every source file it read."""
 
     if specs is None:
         specs = group_specs(load_manifest(), "preprocess")
@@ -325,30 +371,34 @@ def shader_source_closure_sha256(
         _append_length_prefixed(canonical, path.encode("utf-8"))
         normalized = sources[path].replace(b"\r\n", b"\n").replace(b"\r", b"\n")
         _append_length_prefixed(canonical, normalized)
-    return hashlib.sha256(canonical).hexdigest()
+    return hashlib.sha256(canonical).hexdigest(), tuple(sorted(visited))
 
 
 def computed_group_pins(
-        manifest: dict[str, Any], shader_root: Path = SHADER_ROOT) -> dict[str, str]:
+        manifest: dict[str, Any], shader_root: Path = SHADER_ROOT,
+        names: Iterable[str] | None = None) -> dict[str, str]:
+    """Closures of the named groups, or of every group, computed from the shader sources."""
+
+    selected = None if names is None else set(names)
     return {
         group["name"]: shader_source_closure_sha256(
-            shader_root,
+            group_root(manifest, group["name"], shader_root),
             group_specs(manifest, group["name"]),
             shader_compile_flags=manifest["shader_compile_flags"],
         )
         for group in manifest["groups"]
+        if selected is None or group["name"] in selected
     }
 
 
 def validate_group_pins(
         manifest: dict[str, Any], shader_root: Path = SHADER_ROOT) -> dict[str, str]:
-    computed = computed_group_pins(manifest, shader_root)
-    for group in manifest["groups"]:
-        expected = computed[group["name"]]
-        if group["source_closure_sha256"] != expected:
+    computed = computed_group_pins(manifest, shader_root, PINNED_GROUP_NAMES)
+    for name, expected in computed.items():
+        pin = closure_group(manifest, name)["source_closure_sha256"]
+        if pin != expected:
             raise ValueError(
-                f"{group['name']} source closure pin is stale: expected {expected}, "
-                f"found {group['source_closure_sha256']}"
+                f"{name} source closure pin is stale: expected {expected}, found {pin}"
             )
     return computed
 
@@ -387,17 +437,81 @@ def render_cpp(manifest: dict[str, Any]) -> str:
     for group in manifest["groups"]:
         lines.append(f"  inline constexpr std::array {group['name']}_specs {{")
         lines.extend(f"    {member}," for member in group["specs"])
-        lines.extend([
-            "  };",
-            f"  inline constexpr std::string_view {group['name']}_source_closure_sha256 =",
-            f"    {json.dumps(group['source_closure_sha256'])};",
-            "",
-        ])
+        lines.append("  };")
+        if "root" in group:
+            lines.append(
+                f"  inline constexpr std::string_view {group['name']}_root = "
+                f"{json.dumps(group['root'])};"
+            )
+        if is_pinned(group):
+            lines.extend([
+                f"  inline constexpr std::string_view {group['name']}_source_closure_sha256 =",
+                f"    {json.dumps(group['source_closure_sha256'])};",
+            ])
+        lines.append("")
+    lines.extend([
+        "}  // namespace models::host_sbs_shader_cache",
+        "",
+        "// The build derives every other group's closure from the shader sources.",
+        f'#include "{BUILD_IDENTITY_HEADER}"',
+        "",
+    ])
+    return "\n".join(lines)
+
+
+def render_build_identity(manifest: dict[str, Any], closures: dict[str, str]) -> str:
+    lines = [
+        "// Generated at build time by tools/sbsbench/generate_host_sbs_shader_manifest.py",
+        "// from the shader sources of the closure groups that have no checked-in pin.",
+        "#pragma once",
+        "",
+        "#include <string_view>",
+        "",
+        "namespace models::host_sbs_shader_cache {",
+    ]
+    for group in manifest["groups"]:
+        if not is_pinned(group):
+            lines.extend([
+                f"  inline constexpr std::string_view {group['name']}_source_closure_sha256 =",
+                f"    {json.dumps(closures[group['name']])};",
+            ])
     lines.extend([
         "}  // namespace models::host_sbs_shader_cache",
         "",
     ])
     return "\n".join(lines)
+
+
+def _depfile_path(path: Path) -> str:
+    return path.as_posix().replace("$", "$$").replace("#", "\\#").replace(" ", "\\ ")
+
+
+def render_depfile(target: Path, sources: Iterable[Path]) -> str:
+    return "".join(
+        [f"{_depfile_path(target)}:"] +
+        [f" \\\n  {_depfile_path(source)}" for source in sources] +
+        ["\n"]
+    )
+
+
+def write_build_identity(
+        header: Path, depfile: Path, shader_root: Path = SHADER_ROOT) -> None:
+    """Write the unpinned group closures and the shader sources they read."""
+
+    manifest = load_manifest()
+    closures: dict[str, str] = {}
+    sources: set[Path] = set()
+    for group in manifest["groups"]:
+        if is_pinned(group):
+            continue
+        closures[group["name"]], paths = shader_source_closure(
+            group_root(manifest, group["name"], shader_root),
+            group_specs(manifest, group["name"]),
+            shader_compile_flags=manifest["shader_compile_flags"],
+        )
+        sources.update(paths)
+    _write_utf8_if_changed(header, render_build_identity(manifest, closures))
+    _write_utf8_if_changed(depfile, render_depfile(header, sorted(sources)))
 
 
 def render_python(manifest: dict[str, Any]) -> str:
@@ -407,7 +521,8 @@ def render_python(manifest: dict[str, Any]) -> str:
         "from __future__ import annotations",
         "",
         "from dataclasses import dataclass",
-        "from typing import Dict, Tuple",
+        "from functools import lru_cache",
+        "from typing import Dict, Optional, Tuple",
         "",
         f"MANIFEST_SCHEMA = {manifest['schema']}",
         f"SOURCE_CLOSURE_SCHEMA = {manifest['source_closure_schema']}",
@@ -427,7 +542,29 @@ def render_python(manifest: dict[str, Any]) -> str:
         "    name: str",
         "    description: str",
         "    specs: Tuple[ShaderSpec, ...]",
-        "    source_closure_sha256: str",
+        "    root: str",
+        "    pinned_source_closure_sha256: Optional[str]",
+        "",
+        "    @property",
+        "    def source_closure_sha256(self) -> str:",
+        '        """The checked-in pin, or the closure of the current shader sources."""',
+        "        if self.pinned_source_closure_sha256 is not None:",
+        "            return self.pinned_source_closure_sha256",
+        "        return _source_closure(self)",
+        "",
+        "",
+        "@lru_cache(maxsize=None)",
+        "def _source_closure(group: ClosureGroup) -> str:",
+        "    try:",
+        "        from . import generate_host_sbs_shader_manifest as generator",
+        "    except ImportError:",
+        "        import generate_host_sbs_shader_manifest as generator",
+        "    return generator.shader_source_closure_sha256(",
+        "        generator.SHADER_ROOT / group.root,",
+        "        tuple((spec.source_file, spec.source_entrypoint, spec.source_target)",
+        "              for spec in group.specs),",
+        "        shader_compile_flags=SHADER_COMPILE_FLAGS,",
+        "    )",
         "",
         "",
     ]
@@ -456,9 +593,11 @@ def render_python(manifest: dict[str, Any]) -> str:
             "    specs=(",
         ])
         lines.extend(f"        {_upper_identifier(member)}," for member in group["specs"])
+        pin = json.dumps(group["source_closure_sha256"]) if is_pinned(group) else "None"
         lines.extend([
             "    ),",
-            f"    source_closure_sha256={json.dumps(group['source_closure_sha256'])},",
+            f"    root={json.dumps(group.get('root', ''))},",
+            f"    pinned_source_closure_sha256={pin},",
             ")",
             "",
         ])
@@ -481,7 +620,7 @@ def render_doc_block(manifest: dict[str, Any]) -> str:
     lines.extend(
         f"| `{group['name']}` | {len(group['specs'])} | "
         f"`{group['source_closure_sha256']}` |"
-        for group in manifest["groups"]
+        for group in manifest["groups"] if is_pinned(group)
     )
     lines.append(DOC_END)
     return "\n".join(lines)
@@ -564,9 +703,8 @@ def _write_or_check(path: Path, rendered: str, check: bool) -> bool:
 
 
 def _update_pins(manifest: dict[str, Any]) -> None:
-    computed = computed_group_pins(manifest)
-    for group in manifest["groups"]:
-        group["source_closure_sha256"] = computed[group["name"]]
+    for name, digest in computed_group_pins(manifest, names=PINNED_GROUP_NAMES).items():
+        closure_group(manifest, name)["source_closure_sha256"] = digest
     _write_utf8_if_changed(MANIFEST, json.dumps(manifest, indent=2, ensure_ascii=True) + "\n")
 
 
@@ -599,12 +737,29 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument(
         "--update-source-closure-pins",
         action="store_true",
-        help="refresh every closure pin from the current shader source graph",
+        help="refresh the checked-in closure pins from the current shader source graph",
+    )
+    parser.add_argument(
+        "--build-identity",
+        type=Path,
+        metavar="HEADER",
+        help="write the build's closure header for the groups without a checked-in pin",
+    )
+    parser.add_argument(
+        "--depfile",
+        type=Path,
+        help="with --build-identity, list the shader sources it read for Ninja",
     )
     args = parser.parse_args(argv)
     if args.check and args.update_source_closure_pins:
         parser.error("--check and --update-source-closure-pins are mutually exclusive")
+    if (args.build_identity is None) != (args.depfile is None) or (
+            args.build_identity is not None and (args.check or args.update_source_closure_pins)):
+        parser.error("--build-identity needs --depfile and excludes the other modes")
     try:
+        if args.build_identity is not None:
+            write_build_identity(args.build_identity, args.depfile)
+            return 0
         return 0 if generate(args.check, args.update_source_closure_pins) else 1
     except ValueError as exc:
         print(f"Host SBS shader manifest error: {exc}", file=sys.stderr)

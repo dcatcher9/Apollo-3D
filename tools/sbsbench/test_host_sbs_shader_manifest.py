@@ -2,6 +2,7 @@
 import copy
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -131,11 +132,83 @@ class HostSbsShaderManifestTests(unittest.TestCase):
             generator.validate_group_pins(reordered)
 
         stale_pin = copy.deepcopy(manifest)
-        generator.closure_group(stale_pin, "gpu_trace")[
+        generator.closure_group(stale_pin, "parallax_v2_live_renderer")[
             "source_closure_sha256"
         ] = "0" * 64
         with self.assertRaisesRegex(ValueError, "source closure pin is stale"):
             generator.validate_group_pins(stale_pin)
+
+    def test_only_provenance_groups_carry_checked_in_pins(self):
+        manifest = generator.load_manifest()
+        self.assertEqual(
+            tuple(group["name"] for group in manifest["groups"]
+                  if "source_closure_sha256" in group),
+            generator.PINNED_GROUP_NAMES,
+        )
+        unpinned_with_pin = copy.deepcopy(manifest)
+        generator.closure_group(unpinned_with_pin, "gpu_trace")["source_closure_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "keys differ"):
+            generator.validate_manifest(unpinned_with_pin)
+        pinned_without_pin = copy.deepcopy(manifest)
+        del generator.closure_group(
+            pinned_without_pin, "parallax_v2_live_renderer")["source_closure_sha256"]
+        with self.assertRaisesRegex(ValueError, "keys differ"):
+            generator.validate_manifest(pinned_without_pin)
+
+    def test_python_view_derives_unpinned_closures_from_sources(self):
+        import host_sbs_shader_manifest as view
+
+        computed = generator.computed_group_pins(generator.load_manifest())
+        self.assertEqual(set(view.CLOSURE_GROUPS), set(computed))
+        for name, group in view.CLOSURE_GROUPS.items():
+            with self.subTest(group=name):
+                self.assertEqual(group.source_closure_sha256, computed[name])
+                self.assertEqual(
+                    group.pinned_source_closure_sha256 is not None,
+                    name in generator.PINNED_GROUP_NAMES,
+                )
+
+    def test_unpinned_edit_changes_only_build_identity_and_pinned_edit_needs_a_pin(self):
+        manifest = generator.load_manifest()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "directx"
+            shutil.copytree(generator.SHADER_ROOT, root)
+            header = Path(temporary) / "identity.h"
+            depfile = Path(temporary) / "identity.d"
+            generator.write_build_identity(header, depfile, root)
+            identity = header.read_text(encoding="utf-8")
+            self.assertEqual(
+                identity,
+                generator.render_build_identity(manifest, generator.computed_group_pins(manifest)),
+            )
+            for group in manifest["groups"]:
+                self.assertEqual(
+                    f" {group['name']}_source_closure_sha256 =" in identity,
+                    not generator.is_pinned(group),
+                )
+            dependencies = depfile.read_text(encoding="utf-8")
+            self.assertTrue(dependencies.startswith(f"{header.as_posix()}:"))
+            for edited, groups in (
+                    ("host_sbs_gpu_trace_cs.hlsl", {"gpu_trace"}),
+                    ("direct_glyph_source/direct_source_audit.hlsl",
+                     {"direct_glyph_source_audit"})):
+                with self.subTest(source=edited):
+                    source = root / edited
+                    self.assertIn(f" \\\n  {source.resolve().as_posix()}", dependencies)
+                    before = generator.computed_group_pins(manifest, root)
+                    source.write_bytes(source.read_bytes() + b"\n// one-line edit\n")
+                    after = generator.computed_group_pins(manifest, root)
+                    self.assertEqual({name for name in before if before[name] != after[name]}, groups)
+                    # No checked-in pin covers it: only the build-time header changes.
+                    generator.validate_group_pins(manifest, root)
+                    generator.write_build_identity(header, depfile, root)
+                    self.assertNotEqual(header.read_text(encoding="utf-8"), identity)
+                    identity = header.read_text(encoding="utf-8")
+            renderer = root / "sbs_reprojection_v2_live_ps.hlsl"
+            renderer.write_bytes(renderer.read_bytes() + b"\n// one-line edit\n")
+            with self.assertRaisesRegex(
+                    ValueError, "parallax_v2_live_renderer source closure pin is stale"):
+                generator.validate_group_pins(manifest, root)
 
 
 class HostSbsShaderManifestWriteTests(unittest.TestCase):
@@ -199,7 +272,8 @@ class HostSbsShaderManifestWriteTests(unittest.TestCase):
                 generator, "load_manifest", side_effect=lambda: loader(paths["MANIFEST"])))
             # This IO regression uses the supplied authenticated pins; source-closure validation
             # has independent tests and must not make this test refresh active repository pins.
-            pins = {group["name"]: group["source_closure_sha256"] for group in original["groups"]}
+            pins = {group["name"]: group["source_closure_sha256"]
+                    for group in original["groups"] if "source_closure_sha256" in group}
             patches.enter_context(mock.patch.object(generator, "computed_group_pins", return_value=pins))
             self.assertTrue(generator.generate(False, True))
             expected = {path: path.read_bytes() for path in paths.values()}

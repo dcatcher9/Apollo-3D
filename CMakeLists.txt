@@ -103,9 +103,10 @@ add_custom_target(verify_sbs_adaptive_state_contract ALL
         VERBATIM)
 list(APPEND SUNSHINE_TARGET_DEPENDENCIES verify_sbs_adaptive_state_contract)
 
-# Every Host SBS shader root, entry point, target, and closure pin is generated from one named
-# JSON registry. C++, Python, the DVC projection, and the owning documentation consume its views;
-# refusing stale views prevents a hand-updated pin from authenticating a different root order.
+# Every Host SBS shader root, entry point and target, and the closure pins of the provenance
+# groups, are generated from one named JSON registry. C++, Python, the DVC projection, and the
+# owning documentation consume its views; refusing stale views prevents a hand-updated pin from
+# authenticating a different root order.
 set(HOST_SBS_SHADER_MANIFEST_GENERATOR
         "${CMAKE_SOURCE_DIR}/tools/sbsbench/generate_host_sbs_shader_manifest.py")
 set(HOST_SBS_SHADER_MANIFEST
@@ -127,6 +128,27 @@ add_custom_target(verify_host_sbs_shader_manifest ALL
         COMMENT "Verifying generated Host SBS shader closure registry"
         VERBATIM)
 list(APPEND SUNSHINE_TARGET_DEPENDENCIES verify_host_sbs_shader_manifest)
+
+# Closure groups without a checked-in pin take their identity from the shader sources at build
+# time, so editing one of their shaders changes no checked-in file. The dependency file lists
+# every source those closures read.
+set(HOST_SBS_SHADER_IDENTITY_DIR "${CMAKE_BINARY_DIR}/generated/host-sbs-shader-identity")
+set(HOST_SBS_SHADER_IDENTITY "${HOST_SBS_SHADER_IDENTITY_DIR}/host_sbs_shader_build_identity.h")
+add_custom_command(
+        OUTPUT "${HOST_SBS_SHADER_IDENTITY}"
+        COMMAND "${Python3_EXECUTABLE}" "${HOST_SBS_SHADER_MANIFEST_GENERATOR}"
+                --build-identity "${HOST_SBS_SHADER_IDENTITY}"
+                --depfile "${HOST_SBS_SHADER_IDENTITY}.d"
+        DEPENDS
+            "${HOST_SBS_SHADER_MANIFEST_GENERATOR}"
+            "${HOST_SBS_SHADER_MANIFEST}"
+        DEPFILE "${HOST_SBS_SHADER_IDENTITY}.d"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Deriving Host SBS shader closure identities from their sources"
+        VERBATIM)
+add_custom_target(host_sbs_shader_build_identity DEPENDS "${HOST_SBS_SHADER_IDENTITY}")
+include_directories("${HOST_SBS_SHADER_IDENTITY_DIR}")
+list(APPEND SUNSHINE_TARGET_DEPENDENCIES host_sbs_shader_build_identity)
 
 # The complete depth-coordinate-v2 experimental ABI is generated from one manifest. Its semantic
 # tag catches same-sized reorders and meaning/default changes in native, GPU, and diagnostic code.

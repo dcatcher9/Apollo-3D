@@ -16,7 +16,6 @@
 #include "host_sbs_shader_cache.h"
 #include "host_sbs_direct_glyph_gpu.h"
 #include "host_sbs_direct_glyph_publication_gpu.h"
-#include "host_sbs_direct_glyph_source_programs.h"
 #include "host_sbs_subtitle_publication.h"
 #include "host_sbs_v2_gpu_executor.h"
 #include "logging.h"
@@ -3497,7 +3496,7 @@ namespace models {
     host_sbs_direct_glyph_gpu::resources_t subtitle_direct_glyph_score;
     display_snapshot_rgb8_analysis_gpu_v1::resources_t subtitle_direct_glyph_source;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_direct_glyph_source_audit;
-    std::array<Microsoft::WRL::ComPtr<ID3D11ComputeShader>, host_sbs_direct_glyph_source::direct_source_audit_specs.size()>
+    std::array<Microsoft::WRL::ComPtr<ID3D11ComputeShader>, host_sbs_shader_cache::direct_glyph_source_audit_specs.size()>
       subtitle_direct_glyph_source_shaders;
     std::array<nvinfer1::IExecutionContext *, host_sbs_direct_glyph_gpu::tile_profile_count> subtitle_direct_glyph_contexts {};
     std::array<std::string, host_sbs_direct_glyph_gpu::tile_profile_count> subtitle_direct_glyph_engine_keys;
@@ -6690,15 +6689,15 @@ namespace models {
         error = "Direct glyph fringe requires adaptive context";
         return false;
       }
-      namespace audit = host_sbs_direct_glyph_source;
+      namespace audit = host_sbs_shader_cache;
       const std::filesystem::path model_shaders(cfg.shader_root);
-      const auto sources = host_sbs_shader_cache::snapshot_sources(audit::root(model_shaders), audit::direct_source_audit_specs);
-      if (!sources || host_sbs_shader_cache::source_closure_sha256(sources) != audit::direct_source_audit_closure) {
+      const auto sources = audit::snapshot_sources(model_shaders / audit::direct_glyph_source_audit_root, audit::direct_glyph_source_audit_specs);
+      if (!sources || audit::source_closure_sha256(sources) != audit::direct_glyph_source_audit_source_closure_sha256) {
         error = "Direct glyph source audit closure mismatch";
         return false;
       }
       for (std::size_t i = 0; i < subtitle_direct_glyph_source_shaders.size(); ++i) {
-        if (!create_shader(sources, audit::direct_source_audit_specs[i], subtitle_direct_glyph_source_shaders[i])) {
+        if (!create_shader(sources, audit::direct_glyph_source_audit_specs[i], subtitle_direct_glyph_source_shaders[i])) {
           error = "Direct glyph source audit shader creation failed";
           return false;
         }

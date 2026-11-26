@@ -26,11 +26,6 @@ namespace models::host_sbs_direct_glyph_publication {
   inline constexpr UINT direct_work_word_count = 36u;
   inline constexpr UINT direct_fringe_request_bytes = 144u;
   inline constexpr UINT direct_fringe_flag = 32u;
-  inline constexpr std::string_view empty_gate_shader_source_closure_sha256 =
-    "f4e4ce4d14378bca175db941f5b216ebfc806dca8effaa2007f016a7df9ffdb2";
-  inline constexpr std::array<shader_cache::shader_spec, 1u> empty_gate_shader_specs {{
-    {"host_sbs_raw_matte_empty_gate_cs.hlsl", "prepare_empty_main", "cs_5_0"},
-  }};
 
   // All views must belong to the same ordered observation as the actual C24 and Root.
   struct request_t {
@@ -274,10 +269,10 @@ namespace models::host_sbs_direct_glyph_publication {
         if (!code || FAILED(device->CreateComputeShader(code->data(), code->size(), nullptr, &next.plan_shaders_[i])))
           return fail(error, "Direct glyph plan shader package unavailable");
       }
-      auto gate_snapshot = shader_cache::snapshot_sources(shader_root, empty_gate_shader_specs);
-      if (!gate_snapshot || shader_cache::source_closure_sha256(gate_snapshot) != empty_gate_shader_source_closure_sha256)
+      auto gate_snapshot = shader_cache::snapshot_sources(shader_root, shader_cache::direct_glyph_empty_gate_specs);
+      if (!gate_snapshot || shader_cache::source_closure_sha256(gate_snapshot) != shader_cache::direct_glyph_empty_gate_source_closure_sha256)
         return fail(error, "Subtitle empty gate shader package identity differs");
-      const auto gate = shader_cache::get(gate_snapshot, empty_gate_shader_specs[0]);
+      const auto gate = shader_cache::get(gate_snapshot, shader_cache::direct_glyph_empty_gate_specs[0]);
       if (!gate || FAILED(device->CreateComputeShader(gate->data(), gate->size(), nullptr, &next.empty_gate_shader_)))
         return fail(error, "Subtitle empty gate shader creation failed");
       const UINT indirect = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS | D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS;

@@ -2717,7 +2717,7 @@ namespace platf::dxgi {
                   e.pixel_shader_address = reinterpret_cast<std::uintptr_t>(actual_shader.Get());
                   if (e.shared_pin_selected) {
                     e.program = shared_warp::renderer_kind;
-                    e.pixel_shader_closure = shared_warp::completed_closure;
+                    e.pixel_shader_closure = models::host_sbs_shader_cache::shared_ui_warp_completed_source_closure_sha256;
                   } else if (actual_shader.Get() == sbs_reprojection_v2_live_ps.get()) {
                     e.program = "ordinary-v2";
                     e.pixel_shader_closure = sbs_reprojection_v2_live_source_closure_sha256;
