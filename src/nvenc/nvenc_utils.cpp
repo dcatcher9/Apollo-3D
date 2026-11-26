@@ -10,7 +10,6 @@
 
 namespace nvenc {
 
-#ifdef _WIN32
   DXGI_FORMAT dxgi_format_from_nvenc_format(NV_ENC_BUFFER_FORMAT format) {
     switch (format) {
       case NV_ENC_BUFFER_FORMAT_YUV420_10BIT:
@@ -23,7 +22,6 @@ namespace nvenc {
         return DXGI_FORMAT_UNKNOWN;
     }
   }
-#endif
 
   NV_ENC_BUFFER_FORMAT nvenc_format_from_sunshine_format(platf::pix_fmt_e format) {
     switch (format) {

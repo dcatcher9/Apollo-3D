@@ -39,10 +39,8 @@
   #include <stdexcept>
 #endif
 
-#ifdef _WIN32
-  #include "platform/windows/exclusive_display_reconcile_retry.h"
-  #include "platform/windows/virtual_display.h"
-#endif
+#include "platform/windows/exclusive_display_reconcile_retry.h"
+#include "platform/windows/virtual_display.h"
 
 using namespace std::literals;
 
@@ -364,12 +362,10 @@ namespace video {
     const auto devices {display_device::enumerate_devices()};
 
     if (devices.empty()) {
-#ifdef _WIN32
       // We'll create a temporary virtual display for probing anyways.
       if (proc::vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK) {
         return false;
       }
-#endif
       return true;
     }
 
@@ -737,10 +733,6 @@ namespace video {
   }  // namespace detail
 #endif
 
-#ifndef _WIN32
-  #error Apollo requires Windows with native NVIDIA NVENC support
-#endif
-
   namespace {
     constexpr std::string_view h264_encoder_name = "h264_nvenc"sv;
     constexpr std::string_view hevc_encoder_name = "hevc_nvenc"sv;
@@ -890,7 +882,6 @@ namespace video {
       return platf::display_change_epoch();
     };
     platform.reconcile_topology = [](const std::function<bool()> &still_wanted) {
-#ifdef _WIN32
       const auto topology_generation = platf::primary_display::exclusive_session_generation();
       const auto topology = platf::primary_display::detail::reconcile_before_capture(
         [topology_generation]() {
@@ -913,9 +904,6 @@ namespace video {
       if (topology == platf::primary_display::detail::capture_reconcile_result_e::exhausted) {
         BOOST_LOG(warning) << "Exclusive display topology is still settling; continuing normal capture recovery."sv;
       }
-#else
-      (void) still_wanted;
-#endif
       return true;
     };
     return platform;

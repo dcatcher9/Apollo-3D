@@ -4,7 +4,7 @@
  */
 #pragma once
 
-#if defined(SUNSHINE_TESTS) && defined(_WIN32)
+#ifdef SUNSHINE_TESTS
   // Winsock2 must precede the Windows headers pulled in by the process/RTSP declarations.
   #include <boost/asio/ip/tcp.hpp>
 

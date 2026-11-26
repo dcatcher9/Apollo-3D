@@ -1676,7 +1676,7 @@ namespace rtsp_stream {
     respond(sock, session, &option, 200, "OK", req->sequenceNumber, {});
   }
 
-#if defined(SUNSHINE_TESTS) && defined(_WIN32)
+#ifdef SUNSHINE_TESTS
   void invoke_stale_announce_for_test(tcp::socket &socket, launch_session_t &launch, std::string_view payload) {
     // A revoked record cannot pass the real claim below, even if a caller still owns a socket.
     // Refuse every other state before parsing so this fixture can never allocate/start a stream.

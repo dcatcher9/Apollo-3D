@@ -2225,7 +2225,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("struct process_status_t", header)
         self.assertIn("process_status_t get_status()", header)
         status_start = implementation.index("process_status_t proc_t::get_status()")
-        status_end = implementation.index("#ifdef _WIN32", status_start)
+        status_end = implementation.index("#ifdef SUNSHINE_TESTS", status_start)
         status_implementation = implementation[status_start:status_end]
         self.assertIn("std::lock_guard lock(process_state_mutex);", status_implementation)
         self.assertIn("return {\n      _app_id,\n      _app.name,", status_implementation)

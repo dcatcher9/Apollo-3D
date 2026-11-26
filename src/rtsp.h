@@ -25,9 +25,7 @@
 #include "stream_gamma.h"
 #include "thread_safe.h"
 
-#ifdef _WIN32
-  #include <windows.h>
-#endif
+#include <windows.h>
 
 // Resolve circular dependencies
 namespace stream {

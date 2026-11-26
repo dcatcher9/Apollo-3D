@@ -33,11 +33,9 @@
 #include "utility.h"
 #include "video.h"
 
-#ifdef _WIN32
-  #include "platform/windows/utils.h"
+#include "platform/windows/utils.h"
 
-  #include <shellapi.h>
-#endif
+#include <shellapi.h>
 
 namespace fs = std::filesystem;
 using namespace std::literals;
@@ -48,9 +46,7 @@ using namespace std::literals;
 
 #define APPS_JSON_PATH platf::appdata().string() + "/apps.json"
 
-#ifdef _WIN32
-  #include "platform/windows/host3d_subtitle_apps.h"
-#endif
+#include "platform/windows/host3d_subtitle_apps.h"
 
 namespace config {
 
@@ -788,11 +784,7 @@ namespace config {
     });
 
     for (auto &[name, val] : vars) {
-#ifdef _WIN32
       BOOST_LOG(info) << "config: ["sv << name << "] -- ["sv << utf8ToAcp(val) << ']';
-#else
-      BOOST_LOG(info) << "config: ["sv << name << "] -- ["sv << val << ']';
-#endif
       modified_config_settings[name] = val;
     }
 
@@ -822,14 +814,12 @@ namespace config {
     video.sbs = {};
     bool_f(vars, "sbs_reshade", video.sbs.reshade);
     double_between_f(vars, "sbs_3d_pop_strength", video.sbs.pop_strength, {0.25, 2.0});
-#ifdef _WIN32
     {
       // Per-application Host 3D subtitle protection. Off for every application by default.
       std::string subtitle_apps;
       string_f(vars, std::string {platf::host3d_subtitle_apps::config_key}, subtitle_apps);
       platf::host3d_subtitle_apps::load(subtitle_apps);
     }
-#endif
     int_between_f(vars, "sbs_3d_max_encode_width", video.sbs.max_encode_width, {256, 16384});
     video.sbs.max_encode_width &= ~3;
 
@@ -878,8 +868,6 @@ namespace config {
     }
 
     path_f(vars, "file_apps", stream.file_apps);
-#ifndef __ANDROID__
-    // TODO: Android can possibly support this
     if (!fs::exists(stream.file_apps.c_str())) {
       fs::copy_file(SUNSHINE_ASSETS_DIR "/apps.json", stream.file_apps);
       fs::permissions(
@@ -888,7 +876,6 @@ namespace config {
         fs::perm_options::add
       );
     }
-#endif
 
     int_between_f(vars, "fec_percentage", stream.fec_percentage, {1, 255});
 
@@ -1033,10 +1020,8 @@ namespace config {
 
   int parse(int argc, char *argv[]) {
     std::unordered_map<std::string, std::string> cmd_vars;
-#ifdef _WIN32
     bool shortcut_launch = false;
     bool service_admin_launch = false;
-#endif
 
     for (auto x = 1; x < argc; ++x) {
       auto line = argv[x];
@@ -1044,15 +1029,11 @@ namespace config {
       if (line == "--help"sv) {
         logging::print_help(*argv);
         return 1;
-      }
-#ifdef _WIN32
-      else if (line == "--shortcut"sv) {
+      } else if (line == "--shortcut"sv) {
         shortcut_launch = true;
       } else if (line == "--shortcut-admin"sv) {
         service_admin_launch = true;
-      }
-#endif
-      else if (*line == '-') {
+      } else if (*line == '-') {
         if (*(line + 1) == '-') {
           sunshine.cmd.name = line + 2;
           sunshine.cmd.argc = argc - x - 1;
@@ -1117,7 +1098,6 @@ namespace config {
       BOOST_LOG(fatal) << "Failed to apply config: "sv << err.what();
     }
 
-#ifdef _WIN32
     // UCRT64 raises an access denied exception if launching from the shortcut
     // as non-admin and the config folder is not yet present; we can defer
     // so that service instance will do the work instead.
@@ -1125,13 +1105,9 @@ namespace config {
     if (!config_loaded && !shortcut_launch) {
       BOOST_LOG(fatal) << "To relaunch Sunshine 3D successfully, use the shortcut in the Start Menu. Do not run sunshine.exe manually."sv;
       std::this_thread::sleep_for(10s);
-#else
-    if (!config_loaded) {
-#endif
       return -1;
     }
 
-#ifdef _WIN32
     // We have to wait until the config is loaded to handle these launches,
     // because we need to have the correct base port loaded in our config.
     // Exception: UCRT64 shortcut_launch instances may have no config loaded due to
@@ -1176,7 +1152,6 @@ namespace config {
       // Always return 1 to ensure Sunshine doesn't start normally
       return 1;
     }
-#endif
 
     return 0;
   }

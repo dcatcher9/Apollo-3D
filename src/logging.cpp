@@ -21,12 +21,7 @@
 // local includes
 #include "logging.h"
 
-// conditional includes
-#ifdef __ANDROID__
-  #include <android/log.h>
-#else
-  #include <display_device/logging.h>
-#endif
+#include <display_device/logging.h>
 
 using namespace std::literals;
 
@@ -101,48 +96,6 @@ namespace logging {
     os << "["sv << std::put_time(&lt, "%Y-%m-%d %H:%M:%S.") << boost::format("%03u") % ms.count() << "]: "sv
        << log_type << view.attribute_values()[message].extract<std::string>();
   }
-#ifdef __ANDROID__
-  namespace sinks = boost::log::sinks;
-  namespace expr = boost::log::expressions;
-
-  void android_log(const std::string &message, int severity) {
-    android_LogPriority android_priority;
-    switch (severity) {
-      case 0:
-        android_priority = ANDROID_LOG_VERBOSE;
-        break;
-      case 1:
-        android_priority = ANDROID_LOG_DEBUG;
-        break;
-      case 2:
-        android_priority = ANDROID_LOG_INFO;
-        break;
-      case 3:
-        android_priority = ANDROID_LOG_WARN;
-        break;
-      case 4:
-        android_priority = ANDROID_LOG_ERROR;
-        break;
-      case 5:
-        android_priority = ANDROID_LOG_FATAL;
-        break;
-      default:
-        android_priority = ANDROID_LOG_UNKNOWN;
-        break;
-    }
-    __android_log_print(android_priority, "Sunshine", "%s", message.c_str());
-  }
-
-  // custom sink backend for android
-  struct android_sink_backend: public sinks::basic_sink_backend<sinks::concurrent_feeding> {
-    void consume(const bl::record_view &rec) {
-      int log_sev = rec[severity].get();
-      const std::string log_msg = rec[expr::smessage].get();
-      // log to android
-      android_log(log_msg, log_sev);
-    }
-  };
-#endif
 
   [[nodiscard]] std::unique_ptr<deinit_t> init(int min_log_level, const std::string &log_file) {
     if (sink) {
@@ -169,9 +122,7 @@ namespace logging {
       }
     }
 
-#ifndef __ANDROID__
     setup_libdisplaydevice_logging(min_log_level);
-#endif
 
     sink = boost::make_shared<text_sink>();
 
@@ -196,14 +147,9 @@ namespace logging {
 
     bl::core::get()->add_sink(sink);
 
-#ifdef __ANDROID__
-    auto android_sink = boost::make_shared<sinks::synchronous_sink<android_sink_backend>>();
-    bl::core::get()->add_sink(android_sink);
-#endif
     return std::make_unique<deinit_t>();
   }
 
-#ifndef __ANDROID__
   void setup_libdisplaydevice_logging(int min_log_level) {
     constexpr int min_level {static_cast<int>(display_device::Logger::LogLevel::verbose)};
     constexpr int max_level {static_cast<int>(display_device::Logger::LogLevel::fatal)};
@@ -233,7 +179,6 @@ namespace logging {
       }
     });
   }
-#endif
 
   void log_flush() {
     if (sink) {

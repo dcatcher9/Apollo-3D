@@ -2,15 +2,14 @@
  * @file src/nvenc/nvenc_d3d11_native.cpp
  * @brief Definitions for native Direct3D11 NVENC encoder.
  */
-#ifdef _WIN32
-  // this include
-  #include "nvenc_d3d11_native.h"
+// this include
+#include "nvenc_d3d11_native.h"
 
-  // local includes
-  #include "nvenc_utils.h"
+// local includes
+#include "nvenc_utils.h"
 
-  #include <algorithm>
-  #include <cassert>
+#include <algorithm>
+#include <cassert>
 
 namespace nvenc {
 
@@ -139,7 +138,7 @@ namespace nvenc {
     return release_input_registration(input) ? input : nullptr;
   }
 
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
   std::optional<unsigned> nvenc_d3d11_native::input_surface_for_picture_for_test(unsigned slot) const noexcept {
     const auto input = mapped_input_registration_for_test(slot);
     if (input) {
@@ -150,7 +149,6 @@ namespace nvenc {
     }
     return std::nullopt;
   }
-  #endif
+#endif
 
 }  // namespace nvenc
-#endif

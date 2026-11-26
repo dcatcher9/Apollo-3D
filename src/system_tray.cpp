@@ -5,14 +5,12 @@
 // macros
 #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
 
-  #if defined(_WIN32)
-    #define WIN32_LEAN_AND_MEAN
-    #include <accctrl.h>
-    #include <aclapi.h>
-    #define TRAY_ICON WEB_DIR "images/sunshine3d.ico"
-    #define TRAY_ICON_PLAYING WEB_DIR "images/sunshine3d-playing.ico"
-    #define TRAY_ICON_LOCKED WEB_DIR "images/sunshine3d-locked.ico"
-  #endif
+  #define WIN32_LEAN_AND_MEAN
+  #include <accctrl.h>
+  #include <aclapi.h>
+  #define TRAY_ICON WEB_DIR "images/sunshine3d.ico"
+  #define TRAY_ICON_PLAYING WEB_DIR "images/sunshine3d-playing.ico"
+  #define TRAY_ICON_LOCKED WEB_DIR "images/sunshine3d-locked.ico"
 
   #define TRAY_MSG_NO_APP_RUNNING "Reload Apps"
 
@@ -40,9 +38,7 @@
   #include "nvhttp.h"
   #include "platform/common.h"
   #include "src/entry_handler.h"
-  #ifdef _WIN32
-    #include "platform/windows/ar_glasses.h"
-  #endif
+  #include "platform/windows/ar_glasses.h"
 
 using namespace std::literals;
 
@@ -88,19 +84,16 @@ namespace system_tray {
   void tray_quit_cb([[maybe_unused]] struct tray_menu *item) {
     BOOST_LOG(info) << "Quitting from system tray"sv;
 
-  #ifdef _WIN32
     // If we're running in a service, return a special status to
     // tell it to terminate too, otherwise it will just respawn us.
     if (GetConsoleWindow() == nullptr) {
       lifetime::exit_sunshine(ERROR_SHUTDOWN_IN_PROGRESS, true);
       return;
     }
-  #endif
 
     lifetime::exit_sunshine(0, true);
   }
 
-  #ifdef _WIN32
   void tray_monitor_toggle_cb([[maybe_unused]] struct tray_menu *item) {
     if (!ar_glasses::request_local_session(!ar_glasses::local_session_requested())) {
       launch_ui("/config#local-display");
@@ -110,7 +103,6 @@ namespace system_tray {
   void tray_monitor_stop_cb([[maybe_unused]] struct tray_menu *item) {
     ar_glasses::request_local_session(false);
   }
-  #endif
 
   // Tray menu
   static struct tray tray = {
@@ -132,10 +124,8 @@ namespace system_tray {
         //   { .text = nullptr } } },
         // { .text = "-" },
         {.text = TRAY_MSG_NO_APP_RUNNING, .cb = tray_force_stop_cb},
-        #ifdef _WIN32
         {.text = "Toggle local 3D", .cb = tray_monitor_toggle_cb},
         {.text = "Return local display to 2D", .cb = tray_monitor_stop_cb},
-        #endif
         {.text = "Restart", .cb = tray_restart_cb},
         {.text = "Quit", .cb = tray_quit_cb},
         {.text = nullptr}
@@ -145,7 +135,6 @@ namespace system_tray {
   };
 
   int init_tray() {
-  #ifdef _WIN32
     // If we're running as SYSTEM, Explorer.exe will not have permission to open our thread handle
     // to monitor for thread termination. If Explorer fails to open our thread, our tray icon
     // will persist forever if we terminate unexpectedly. To avoid this, we will modify our thread
@@ -208,7 +197,6 @@ namespace system_tray {
       }
       Sleep(250);
     }
-  #endif
 
     {
       auto lock = std::lock_guard(tray_lifecycle_mutex);
@@ -231,13 +219,8 @@ namespace system_tray {
       return 1;
     }
 
-  #ifdef _WIN32
     // The Windows tray owns a dedicated thread, so block until an event or tray_exit().
     constexpr int blocking = 1;
-  #else
-    // Other platforms share the main loop and must remain non-blocking.
-    constexpr int blocking = 0;
-  #endif
     if (const int result = tray_loop(blocking); result != 0) {
       if (!tray_thread_should_exit) {
         BOOST_LOG(warning) << "System tray loop failed"sv;
@@ -483,9 +466,7 @@ namespace system_tray {
   // Threading functions available on all platforms
   static void tray_thread_worker() {
     BOOST_LOG(info) << "System tray thread started"sv;
-  #ifdef _WIN32
     tray_thread_id = GetCurrentThreadId();
-  #endif
 
     // Initialize the tray in this thread
     if (init_tray() != 0) {
@@ -535,7 +516,6 @@ namespace system_tray {
     BOOST_LOG(info) << "Stopping system tray thread"sv;
     tray_thread_should_exit = true;
 
-  #ifdef _WIN32
     // A tray menu that is still open keeps the tray thread inside the menu's own message loop.
     // Close it first, by asking each of that thread's windows to leave any modal state.
     EnumThreadWindows(
@@ -546,7 +526,6 @@ namespace system_tray {
       },
       0
     );
-  #endif
 
     // Closing the tray sends a message to its thread and waits for the answer, and the thread
     // itself may be inside a menu or a callback. The host is exiting or restarting, so neither

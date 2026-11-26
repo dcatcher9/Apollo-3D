@@ -37,16 +37,14 @@
 #include "process_display_context.h"
 #include "utility.h"
 
-#ifdef _WIN32
-  #include "platform/windows/virtual_display_session.h"
+#include "platform/windows/virtual_display_session.h"
 
 namespace platf::primary_display {
   struct retained_display_t;
 }
-#endif
 
 namespace proc {
-#if defined(SUNSHINE_TESTS) && defined(_WIN32)
+#ifdef SUNSHINE_TESTS
   namespace testing {
     struct native_edges_t;
   }
@@ -60,7 +58,6 @@ namespace proc {
     int surround_info;
   };
 
-#ifdef _WIN32
   extern std::atomic<VDISPLAY::DRIVER_STATUS> vDisplayDriverStatus;
 
   struct hdr_worker_state_t;
@@ -71,7 +68,7 @@ namespace proc {
     cleanup_timeout,
   };
 
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
   enum class display_topology_test_operation_e {
     refresh_binding,
     request_hdr,
@@ -99,7 +96,6 @@ namespace proc {
     bool restartEnabled,
     bool activeDesktopRemovalDebt
   );
-  #endif
 #endif
 
   typedef config::prep_cmd_t cmd_t;
@@ -311,7 +307,6 @@ namespace proc {
     std::string get_display_name() const;
     void set_display_name(std::string name);
 
-#ifdef _WIN32
     /**
      * Release an inactive remote virtual desktop before local AR creates its own source.
      * Active or connecting remote sessions are never terminated.
@@ -324,16 +319,13 @@ namespace proc {
     static bool drain_retired_virtual_display_for_shutdown(
       std::chrono::milliseconds timeout
     );
-#endif
 
   private:
     friend void refresh(const std::string &file_name, bool needs_terminate, bool wait_for_display_driver);
 #ifdef SUNSHINE_TESTS
     friend struct process_test_access;
     friend struct launch_transaction_test_access;
-  #ifdef _WIN32
     friend struct process_display_context_test_access;
-  #endif
 #endif
     int running_locked();
     bool stream_process_exited_locked();
@@ -348,7 +340,6 @@ namespace proc {
     boost::process::v1::environment _env;
 
     std::shared_ptr<process_display_context_t> _display_context;
-#ifdef _WIN32
     VDISPLAY::session_t _display_session;
     // Adapter notification only: a later failed topology check must not repeat the wake request.
     bool _pause_wake_attempted = false;
@@ -359,7 +350,7 @@ namespace proc {
     // the client to reconnect. Every live request then requires a reconnect until a resume or a new
     // launch proves the display again. It is never inferred from the observed display mode.
     bool _live_display_unproven = false;
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
     const testing::native_edges_t *_display_context_test_edges = nullptr;
     // Process tests replace display/HDR side effects while preserving resume/teardown control flow.
     display_topology_test_hook_t _display_topology_test_hook;
@@ -368,7 +359,7 @@ namespace proc {
     std::function<LONG(std::wstring_view, const VDISPLAY::session_mode_record_t &)> _display_mode_record_test_hook;
     std::function<bool(std::wstring_view)> _display_baseline_test_hook;
     std::function<bool()> _display_settings_unavailable_test_hook;
-  #endif
+#endif
     struct session_display_mode_t {
       int width;
       int height;
@@ -434,7 +425,6 @@ namespace proc {
 
     std::shared_ptr<hdr_worker_state_t> _hdr_worker_state;
     std::jthread _hdr_worker;
-#endif
 
     std::string display_name;
 

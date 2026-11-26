@@ -54,7 +54,6 @@ namespace args {
    */
   int version();
 
-#ifdef _WIN32
   /**
    * @brief Restore global NVIDIA control panel settings.
    * If Sunshine was improperly terminated, this function restores
@@ -65,7 +64,6 @@ namespace args {
    * @examples_end
    */
   int restore_nvprefs_undo();
-#endif
 }  // namespace args
 
 /**
@@ -98,7 +96,6 @@ namespace lifetime {
  */
 void log_publisher_data();
 
-#ifdef _WIN32
 /**
  * @brief Namespace for controlling the Sunshine service model on Windows.
  */
@@ -127,4 +124,3 @@ namespace service_ctrl {
    */
   bool wait_for_ui_ready();
 }  // namespace service_ctrl
-#endif

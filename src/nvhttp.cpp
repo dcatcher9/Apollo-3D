@@ -55,10 +55,8 @@
   #include <stdexcept>
 #endif
 
-#ifdef _WIN32
-  #include "platform/windows/ar_glasses.h"
-  #include "platform/windows/virtual_display.h"
-#endif
+#include "platform/windows/ar_glasses.h"
+#include "platform/windows/virtual_display.h"
 
 using namespace std::literals;
 
@@ -1343,7 +1341,6 @@ namespace nvhttp {
       }
       tree.put("root.Permission", std::to_string((uint32_t) named_cert_p->perm));
 
-#ifdef _WIN32
       tree.put("root.VirtualDisplayCapable", true);
       tree.put("root.VirtualDisplayOnlySupported", 1);
       tree.put("root.GameProviderV1Supported", 1);
@@ -1353,7 +1350,6 @@ namespace nvhttp {
       } else {
         tree.put("root.VirtualDisplayDriverReady", true);
       }
-#endif
     } else {
       tree.put("root.mac", "00:00:00:00:00:00");
       tree.put("root.Permission", "0");
@@ -1541,16 +1537,14 @@ namespace nvhttp {
         // unwind order: primary restoration and GPU release under the lifecycle lock, then
         // unlock, and only then release the temporary remote-display reservation.
         platform_.reset();
-#ifdef _WIN32
         if (phase_ != phase_e::published && remote_display_reserved_) {
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
           if (launch_native_hooks) {
             launch_native_hooks->remote_ended(launch_->id);
           } else
-  #endif
+#endif
             ar_glasses::remote_virtual_display_ended(launch_->id);
         }
-#endif
       }
 
       remote_launch_attempt_t(const remote_launch_attempt_t &) = delete;
@@ -1609,16 +1603,15 @@ namespace nvhttp {
             return error_t {failure_e::encoder_probe, 503};
           }
         }
-#ifdef _WIN32
         if (retained_virtual_display) {
           if (
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
             launch_native_hooks ? !launch_native_hooks->remote_starting(
                                     launch_->id,
                                     config::stream.ping_timeout,
                                     true
                                   ) :
-  #endif
+#endif
                                   !ar_glasses::remote_virtual_display_starting(
                                     launch_->id,
                                     config::stream.ping_timeout,
@@ -1629,7 +1622,6 @@ namespace nvhttp {
           }
           remote_display_reserved_ = true;
         }
-#endif
         // Arm primary rollback before entering the fallible retained-session operation. An
         // inner failure may already restore or terminate; the guarded retry policy stays intact.
         phase_ = phase_e::resume_reconfiguring;
@@ -1640,21 +1632,19 @@ namespace nvhttp {
                                     proc::proc.reconfigure_retained_session(launch_->display_context, launch_->id)) {
           return error_t {failure_e::retained_reconfiguration, error};
         }
-#ifdef _WIN32
         if (retained_virtual_display) {
           // Reconfiguration can outlast the ordinary connect reservation. Start the fresh
           // client-connect window only after the retained display is ready for capture.
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
           if (launch_native_hooks) {
             launch_native_hooks->remote_awaiting(launch_->id, config::stream.ping_timeout);
           } else
-  #endif
+#endif
             ar_glasses::remote_virtual_display_awaiting_client(
               launch_->id,
               config::stream.ping_timeout
             );
         }
-#endif
         phase_ = phase_e::prepared;
         return std::nullopt;
       }
@@ -1683,9 +1673,7 @@ namespace nvhttp {
       std::shared_ptr<rtsp_stream::launch_session_t> launch_;
       std::optional<stream::session::platform_launch_guard_t> platform_;
       phase_e phase_ = phase_e::validating;
-#ifdef _WIN32
       bool remote_display_reserved_ = false;
-#endif
     };
   }  // namespace
 
@@ -2260,11 +2248,7 @@ namespace nvhttp {
     // Verify certificates after establishing connection
     https_server.verify = [](req_https_t req, SSL *ssl) {
       crypto::x509_t x509 {
-#if OPENSSL_VERSION_MAJOR >= 3
         SSL_get1_peer_certificate(ssl)
-#else
-        SSL_get_peer_certificate(ssl)
-#endif
       };
       if (!x509) {
         BOOST_LOG(info) << "unknown -- denied"sv;

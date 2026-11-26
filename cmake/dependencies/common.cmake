@@ -40,7 +40,7 @@ add_subdirectory("${CMAKE_SOURCE_DIR}/third-party/libdisplaydevice")
 
 # common dependencies
 include("${CMAKE_MODULE_PATH}/dependencies/nlohmann_json.cmake")
-find_package(OpenSSL REQUIRED)
+find_package(OpenSSL 3.0 REQUIRED)
 find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
 pkg_check_modules(CURL REQUIRED libcurl)

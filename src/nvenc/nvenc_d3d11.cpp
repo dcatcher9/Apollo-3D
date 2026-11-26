@@ -5,10 +5,9 @@
 // local includes
 #include "src/logging.h"
 
-#ifdef _WIN32
-  #include "nvenc_d3d11.h"
+#include "nvenc_d3d11.h"
 
-  #include <dxgi1_4.h>
+#include <dxgi1_4.h>
 
 namespace nvenc {
 
@@ -31,11 +30,11 @@ namespace nvenc {
       return true;
     }
 
-  #ifdef _WIN64
+#ifdef _WIN64
     constexpr auto dll_name = "nvEncodeAPI64.dll";
-  #else
+#else
     constexpr auto dll_name = "nvEncodeAPI.dll";
-  #endif
+#endif
 
     auto unload_library = [this] {
       if (dll) {
@@ -206,4 +205,3 @@ namespace nvenc {
   }
 
 }  // namespace nvenc
-#endif

@@ -7,9 +7,7 @@
 #include <cstdint>
 #include <string>
 
-#ifdef _WIN32
-  #include <guiddef.h>
-#endif
+#include <guiddef.h>
 
 namespace proc {
   /**
@@ -28,8 +26,6 @@ namespace proc {
     bool virtual_display_only = false;
     std::uint32_t scale_factor;
     int sbs_mode = 0;
-#ifdef _WIN32
     GUID display_guid {};
-#endif
   };
 }  // namespace proc

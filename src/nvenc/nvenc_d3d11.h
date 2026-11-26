@@ -3,16 +3,15 @@
  * @brief Declarations for abstract Direct3D11 NVENC encoder.
  */
 #pragma once
-#ifdef _WIN32
 
-  // standard includes
-  #include <array>
-  #include <comdef.h>
-  #include <d3d11_4.h>
+// standard includes
+#include <array>
+#include <comdef.h>
+#include <d3d11_4.h>
 
-  // local includes
-  #include "nvenc_base.h"
-  #include "src/utility.h"
+// local includes
+#include "nvenc_base.h"
+#include "src/utility.h"
 
 namespace nvenc {
 
@@ -69,4 +68,3 @@ namespace nvenc {
   };
 
 }  // namespace nvenc
-#endif

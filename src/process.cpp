@@ -46,16 +46,14 @@
   #include <stdexcept>
 #endif
 
-#ifdef _WIN32
-  #include "platform/windows/ar_glasses.h"
-  // from_utf8() string conversion function
-  #include "platform/windows/misc.h"
-  #include "platform/windows/primary_display.h"
-  #include "platform/windows/utils.h"
+#include "platform/windows/ar_glasses.h"
+// from_utf8() string conversion function
+#include "platform/windows/misc.h"
+#include "platform/windows/primary_display.h"
+#include "platform/windows/utils.h"
 
-  // _SH constants for _wfsopen()
-  #include <share.h>
-#endif
+// _SH constants for _wfsopen()
+#include <share.h>
 
 namespace proc {
   using namespace std::literals;
@@ -68,7 +66,6 @@ namespace proc {
     // local-AR topology controller. A recursive mutex is required because running() can perform
     // the same authoritative cleanup as terminate().
     std::recursive_mutex process_state_mutex;
-#ifdef _WIN32
     bool live_display_mode_matches(const DEVMODEW &mode, int width, int height, int fps_millihz) {
       // GDI reports integer Hz; use the same tolerance for live changes and retained resumes.
       return width > 0 && height > 0 && fps_millihz > 0 &&
@@ -189,10 +186,9 @@ namespace proc {
         explorer_repair_worker.join();
       }
     }
-#endif
   }  // namespace
 
-#if defined(_WIN32) && defined(SUNSHINE_TESTS)
+#ifdef SUNSHINE_TESTS
   bool retiredVirtualDisplayRemovalAllowedForTest(
     bool desktopDeactivationRequested,
     bool detachConfirmedReady
@@ -226,7 +222,6 @@ namespace proc {
   }
 #endif
 
-#ifdef _WIN32
   struct hdr_worker_state_t {
     std::mutex mutex;
     std::condition_variable_any display_changed;
@@ -238,9 +233,7 @@ namespace proc {
     bool completion_succeeded {};
     std::unordered_map<std::wstring, bool> original_hdr_states;
   };
-#endif
 
-#ifdef _WIN32
   std::atomic<VDISPLAY::DRIVER_STATUS> vDisplayDriverStatus {VDISPLAY::DRIVER_STATUS::UNKNOWN};
 
   void onVDisplayWatchdogFailed() {
@@ -257,13 +250,11 @@ namespace proc {
       }
     }
   }
-#endif
 
   class deinit_t: public platf::deinit_t {
   public:
     ~deinit_t() {
       proc.terminate(false, false);
-#ifdef _WIN32
       // terminate() gives the first retirement slice to the normal session teardown. If Windows
       // needed longer, the autonomous worker still owns the stable display identity; drain that
       // owner (and any scheduled Explorer repair) before stopping its threads. Stopping first can
@@ -274,7 +265,6 @@ namespace proc {
       // The controller logs and calls Windows display APIs. Stop it while the proc/platform/log
       // guards are still alive rather than relying on cross-translation-unit static destruction.
       stopRetiredVirtualDisplayCleanupWorker();
-#endif
     }
   };
 
@@ -324,11 +314,7 @@ namespace proc {
     // Parse the raw command string into parts to get the actual command portion
     std::vector<std::string> parts;
     try {
-#ifdef _WIN32
       parts = boost::program_options::split_winmain(cmd);
-#else
-      parts = boost::program_options::split_unix(cmd);
-#endif
     } catch (const boost::escaped_list_error &err) {
       BOOST_LOG(error) << "Boost failed to parse command ["sv << cmd << "]: "sv << err.what();
       return {};
@@ -399,7 +385,6 @@ namespace proc {
 
   void proc_t::set_display_name_locked(std::string name) {
     display_name = std::move(name);
-#ifdef _WIN32
     if (_hdr_worker_state) {
       bool changed = false;
       {
@@ -415,7 +400,6 @@ namespace proc {
         _hdr_worker_state->display_changed.notify_all();
       }
     }
-#endif
   }
 
   process_status_t proc_t::get_status() {
@@ -446,14 +430,12 @@ namespace proc {
     process._display_context.reset();
     process._virtual_display = false;
     process.display_name.clear();
-  #ifdef _WIN32
     // These fixtures never acquire a real monitor, process, HDR worker or remote AR lease.
     auto discarded = std::move(process._display_session);
     process._display_session = VDISPLAY::session_t {};
     process._display_topology_test_hook = {};
     process._virtual_display_only = false;
     process._pause_wake_attempted = false;
-  #endif
   }
 
   void launch_transaction_test_access::seed(
@@ -473,7 +455,6 @@ namespace proc {
     process._display_context = launch->display_context;
     process.placebo = true;
     process._virtual_display = virtual_display;
-  #ifdef _WIN32
     process._virtual_display_only = process._display_context->virtual_display_only;
     if (virtual_display) {
       VDISPLAY::session_io_t io;
@@ -538,7 +519,6 @@ namespace proc {
         return true;
       };
     }
-  #endif
   }
 
   void launch_transaction_test_access::publish_resume(proc_t &process, const rtsp_stream::launch_session_t &launch) {
@@ -553,11 +533,9 @@ namespace proc {
     retained.scale_factor = launch.display_context->scale_factor;
     retained.sbs_mode = launch.display_context->sbs_mode;
     process._active_launch_session_id = launch.id;
-  #ifdef _WIN32
     process._virtual_display_only = launch.display_context->virtual_display_only;
     process._display_session.set_exclusive(launch.display_context->virtual_display_only);
     process._display_session.commit_resume();
-  #endif
   }
 
   std::shared_ptr<process_display_context_t> launch_transaction_test_access::retained_display_context(const proc_t &process) {
@@ -569,7 +547,6 @@ namespace proc {
     std::lock_guard lock(process_state_mutex);
     return process._active_launch_session_id;
   }
-  #ifdef _WIN32
   void process_display_context_test_access::configure(proc_t &process, const testing::native_edges_t &edges) {
     std::lock_guard lock(process_state_mutex);
     const auto &io = edges.display_io;
@@ -655,10 +632,8 @@ namespace proc {
     std::lock_guard lock(process_state_mutex);
     return process._active_launch_session_id;
   }
-  #endif
 #endif
 
-#ifdef _WIN32
   void proc_t::stop_hdr_worker() {
     _hdr_worker.request_stop();
     if (_hdr_worker_state) {
@@ -670,12 +645,12 @@ namespace proc {
   }
 
   void proc_t::start_hdr_worker(bool enable_hdr) {
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
     if (_display_context_test_edges) {
       _display_context_test_edges->start_hdr_worker(enable_hdr);
       return;
     }
-  #endif
+#endif
     stop_hdr_worker();
 
     auto state = std::make_shared<hdr_worker_state_t>();
@@ -825,14 +800,14 @@ namespace proc {
   }
 
   bool proc_t::request_hdr_state(bool enable_hdr, std::chrono::milliseconds timeout) {
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
     if (_display_topology_test_hook) {
       return _display_topology_test_hook(
         display_topology_test_operation_e::request_hdr,
         enable_hdr
       );
     }
-  #endif
+#endif
     if (!_hdr_worker_state || !_hdr_worker.joinable()) {
       // Disconnect stops virtual HDR work before restoring the original primary. A warm resume
       // restarts it only after resolving the exact monitor's current GDI name.
@@ -865,11 +840,11 @@ namespace proc {
     const std::optional<LUID> &render_adapter
   ) {
     VDISPLAY::session_t owner;
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
     if (_display_context_test_edges) {
       owner = VDISPLAY::session_t {_display_context_test_edges->display_io};
     }
-  #endif
+#endif
     if (_display_context) {
       VDISPLAY::display_spec_t spec;
       spec.client_uid = _display_context->unique_id;
@@ -1051,7 +1026,7 @@ namespace proc {
     bool final_teardown,
     bool restart_explorer_after_removal
   ) {
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
     if (_display_topology_test_hook) {
       const bool completed = _display_topology_test_hook(
         display_topology_test_operation_e::retire,
@@ -1063,7 +1038,7 @@ namespace proc {
       }
       return completed;
     }
-  #endif
+#endif
     if (!owner.owns_display() && !owner.prepared()) {
       return true;
     }
@@ -1198,19 +1173,19 @@ namespace proc {
     for (int attempt = 0; attempt < 20; ++attempt) {
       if (_display_session.refresh() && !_display_session.binding().display_name.empty()) {
         set_display_name_locked(platf::to_utf8(_display_session.binding().display_name));
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
         if (_display_topology_test_hook) {
           return true;  // Tests publish the binding but never map a test name to an output.
         }
-  #endif
+#endif
         config::video.output_name = display_device::map_display_name(display_name);
         return !config::video.output_name.empty();
       }
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
       if (_display_topology_test_hook) {
         break;
       }
-  #endif
+#endif
       std::this_thread::sleep_for(50ms);
     }
     _display_session.invalidate_gdi();
@@ -1269,11 +1244,11 @@ namespace proc {
       }
       // The next attempt repeats this pause when it could not be verified yet.
       pause_display_for_resume();
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
       const bool wait_for_settle = !_display_topology_test_hook;
-  #else
+#else
       const bool wait_for_settle = true;
-  #endif
+#endif
       if (wait_for_settle) {
         std::this_thread::sleep_for(settle_delay);
       }
@@ -1282,11 +1257,11 @@ namespace proc {
                         << retry_count << " topology-settle retry attempt(s)."sv;
         return true;
       }
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
       if (_display_topology_test_hook && retry_count >= 3) {
         return false;  // Tests do not wait, so they bound the retries by count.
       }
-  #endif
+#endif
       if (std::chrono::steady_clock::now() + settle_delay >= deadline) {
         return false;
       }
@@ -1301,14 +1276,14 @@ namespace proc {
     stop_hdr_worker();
     _hdr_worker_state.reset();
     const auto promote_once = [&]() {
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
       if (_display_topology_test_hook) {
         return _display_topology_test_hook(
           display_topology_test_operation_e::promote,
           _virtual_display_only
         );
       }
-  #endif
+#endif
       _display_session.set_exclusive(_virtual_display_only);
       return _display_session.promote();
     };
@@ -1350,15 +1325,14 @@ namespace proc {
     _virtual_display_retirement_handed_off = false;
     _virtual_display = true;
     set_display_name_locked(platf::to_utf8(_display_session.binding().display_name));
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
     if (_display_context_test_edges) {
       config::video.output_name = _display_context_test_edges->map_display_name(display_name);
     } else
-  #endif
+#endif
       config::video.output_name = display_device::map_display_name(display_name);
     start_hdr_worker(enable_hdr);
   }
-#endif
 
   int proc_t::execute(
     ctx_t &&app,
@@ -1369,12 +1343,10 @@ namespace proc {
     std::lock_guard lock(process_state_mutex);
     // Ensure starting from a clean slate.
     terminate(false, false);
-#ifdef _WIN32
     if (_display_session.owns_display() || _display_session.prepared()) {
       BOOST_LOG(error) << "The previous virtual display still owns unresolved cleanup; deferring a new launch."sv;
       return 503;
     }
-#endif
 
     const uint32_t client_width = display_context->width ? display_context->width : 1920;
     const uint32_t client_height = display_context->height ? display_context->height : 1080;
@@ -1394,9 +1366,7 @@ namespace proc {
     _app_id = util::from_view(_app.id);
     _display_context = display_context;
     _active_launch_session_id = launch_options.launch_session_id;
-#ifdef _WIN32
     _virtual_display_only = display_context->virtual_display_only;
-#endif
 
     display_context->width = render_width;
     display_context->height = render_height;
@@ -1407,39 +1377,36 @@ namespace proc {
       // Restore to user defined output name
       config::video.output_name = this->initial_display;
       terminate();
-#ifdef _WIN32
       // Also cancel a pre-creation journal when Add never published an identity.
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
       if (_display_context_test_edges) {
         _display_context_test_edges->recover_primary();
       } else
-  #endif
-        platf::primary_display::recover();
 #endif
+        platf::primary_display::recover();
     });
 
-#ifdef _WIN32
     const bool needs_virtual_display =
       display_context->virtual_display  // User requested virtual display
       || _app.synthetic_virtual_display  // Apollo's generated Virtual Display tile
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
       || !(_display_context_test_edges ? _display_context_test_edges->encoder_probing_allowed() : video::allow_encoder_probing());
-  #else
+#else
       || !video::allow_encoder_probing();  // No active display presents
-  #endif
+#endif
     if (needs_virtual_display) {
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
       const bool remote_started = _display_context_test_edges ?
                                     _display_context_test_edges->remote_starting(launch_options.launch_session_id, config::stream.ping_timeout, true) :
                                     ar_glasses::remote_virtual_display_starting(launch_options.launch_session_id, config::stream.ping_timeout, true);
       if (!remote_started) {
-  #else
+#else
       if (!ar_glasses::remote_virtual_display_starting(
             launch_options.launch_session_id,
             config::stream.ping_timeout,
             true
           )) {
-  #endif
+#endif
         BOOST_LOG(error) << "Timed out waiting for local AR to release virtual-display ownership."sv;
         display_context->virtual_display = false;
         return 503;
@@ -1450,11 +1417,11 @@ namespace proc {
         display_context->virtual_display = false;
         return 503;
       }
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
       if (!(_display_context_test_edges ? _display_context_test_edges->recover_primary() : platf::primary_display::recover())) {
-  #else
+#else
       if (!platf::primary_display::recover()) {
-  #endif
+#endif
         BOOST_LOG(error) << "Cannot start a virtual display while the previous display-configuration restoration is unresolved."sv;
         display_context->virtual_display = false;
         return 503;
@@ -1482,11 +1449,11 @@ namespace proc {
         spec.exclusive = _virtual_display_only;
         // The owner saves the baseline before Add, and records Add identity before binding.
         _saved_virtual_display_mode.reset();
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
         if (_display_context_test_edges) {
           _display_session = VDISPLAY::session_t {_display_context_test_edges->display_io};
         }
-  #endif
+#endif
         const bool acquired = _display_session.acquire(std::move(spec));
         const auto &created_display = _display_session.binding();
         display_context->virtual_display = _display_session.owns_display();
@@ -1502,14 +1469,14 @@ namespace proc {
           // Don't change display settings when no params are given
           if (display_context->width && display_context->height && display_context->fps) {
             // Apply display settings
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
             if (_display_context_test_edges) {
               if (_display_context_test_edges->change_mode(created_display.display_name, render_width, render_height, target_fps, false) != DISP_CHANGE_SUCCESSFUL) {
                 BOOST_LOG(error) << "Windows did not accept the requested virtual-display mode."sv;
                 return 503;
               }
             } else
-  #endif
+#endif
               if (VDISPLAY::changeDisplaySettings(created_display.display_name.c_str(), render_width, render_height, target_fps, false) != DISP_CHANGE_SUCCESSFUL) {
               BOOST_LOG(error) << "Windows did not accept the requested virtual-display mode."sv;
               return 503;
@@ -1525,11 +1492,11 @@ namespace proc {
           // So we always set output_name to the newly created virtual display as a workaround for
           // empty name when probing graphics cards.
 
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
           if (_display_context_test_edges) {
             config::video.output_name = _display_context_test_edges->map_display_name(this->display_name);
           } else
-  #endif
+#endif
             config::video.output_name = display_device::map_display_name(this->display_name);
           if (!promote_virtual_display(display_context->enable_hdr)) {
             BOOST_LOG(error) << "Could not apply the requested virtual-display topology; rolling back the launch."sv;
@@ -1537,11 +1504,11 @@ namespace proc {
           }
         } else {
           BOOST_LOG(error) << (created_display.added() ? "Virtual display was added, but Windows did not publish its display name in time." : "Virtual display creation failed.");
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
           if (_display_context_test_edges) {
             _display_context_test_edges->remote_ended(*_remote_virtual_display_lease);
           } else
-  #endif
+#endif
             ar_glasses::remote_virtual_display_ended(*_remote_virtual_display_lease);
           _remote_virtual_display_lease.reset();
           return 503;
@@ -1549,27 +1516,25 @@ namespace proc {
       } else {
         BOOST_LOG(error) << "A virtual display is required, but the SudoVDA driver is unavailable."sv;
         display_context->virtual_display = false;
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
         if (_display_context_test_edges) {
           _display_context_test_edges->remote_ended(*_remote_virtual_display_lease);
         } else
-  #endif
+#endif
           ar_glasses::remote_virtual_display_ended(*_remote_virtual_display_lease);
         _remote_virtual_display_lease.reset();
         return 503;
       }
       if (!_virtual_display) {
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
         if (_display_context_test_edges) {
           _display_context_test_edges->remote_ended(*_remote_virtual_display_lease);
         } else
-  #endif
+#endif
           ar_glasses::remote_virtual_display_ended(*_remote_virtual_display_lease);
         _remote_virtual_display_lease.reset();
       }
     }
-
-#endif
 
     // Probe encoders again before streaming to ensure our chosen
     // encoder matches the active GPU (which could have changed
@@ -1614,7 +1579,6 @@ namespace proc {
     }
 
     if (!_app.output.empty() && _app.output != "null"sv) {
-#ifdef _WIN32
       // fopen() interprets the filename as an ANSI string on Windows, so we must convert it
       // to UTF-16 and use the wchar_t variants for proper Unicode log file path support.
       auto woutput = platf::from_utf8(_app.output);
@@ -1623,9 +1587,6 @@ namespace proc {
       // still open from a previous execution. This is required to handle the case of a
       // detached process executing again while the previous process is still running.
       _pipe.reset(_wfsopen(woutput.c_str(), L"a", _SH_DENYNO));
-#else
-      _pipe.reset(fopen(_app.output.c_str(), "a"));
-#endif
     }
 
     std::error_code ec;
@@ -1714,7 +1675,6 @@ namespace proc {
       }
     } while (_host_session_id == 0);
 
-#ifdef _WIN32
     start_hdr_worker(display_context->enable_hdr);
     if (_virtual_display && !request_hdr_state(display_context->enable_hdr, 6s)) {
       BOOST_LOG(error) << "The virtual display did not reach the requested HDR state."sv;
@@ -1724,17 +1684,16 @@ namespace proc {
       // Virtual-display creation, encoder probing, and application prep can take longer than the
       // original client-connect reservation. Renew it while process_state_mutex is still held so
       // local AR cannot claim and destroy this display in the gap before RTSP calls resume().
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
       if (_display_context_test_edges) {
         _display_context_test_edges->remote_awaiting(*_remote_virtual_display_lease, config::stream.ping_timeout);
       } else
-  #endif
+#endif
         ar_glasses::remote_virtual_display_awaiting_client(
           *_remote_virtual_display_lease,
           config::stream.ping_timeout
         );
     }
-#endif
 
     fg.disable();
 
@@ -1816,7 +1775,6 @@ namespace proc {
       return 400;
     }
 
-#ifdef _WIN32
     const bool previous_virtual_display_only = _virtual_display_only;
     _virtual_display_only = display_context->virtual_display_only;
     auto virtual_display_policy_rollback = util::fail_guard([&]() {
@@ -1825,7 +1783,6 @@ namespace proc {
         _display_session.set_exclusive(previous_virtual_display_only);
       }
     });
-#endif
 
     // A retained physical-desktop process cannot be converted into a virtual-display process
     // without changing desktop ownership. A process whose virtual display was forced because no
@@ -1836,10 +1793,8 @@ namespace proc {
     }
 
     auto primary_rollback = util::fail_guard([&]() {
-#ifdef _WIN32
       _virtual_display_only = previous_virtual_display_only;
       _display_session.set_exclusive(previous_virtual_display_only);
-#endif
       pause_display_for_resume();
     });
 
@@ -1850,7 +1805,6 @@ namespace proc {
     bool display_mode_changed = _virtual_display &&
                                 (old_width != render_size->width || old_height != render_size->height || old_fps != display_context->fps);
 
-#ifdef _WIN32
     auto configure_display_mode = [&](const wchar_t *name, int width, int height, int fps, bool probe) {
       return configure_virtual_display_mode(name, width, height, fps, probe);
     };
@@ -2007,13 +1961,13 @@ namespace proc {
             const auto candidate_display_name = platf::to_utf8(candidate.binding().display_name);
             bool capture_ready = false;
             for (int attempt = 0; attempt < 3 && !capture_ready; ++attempt) {
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
               const auto capturable_displays = _display_context_test_edges ?
                                                  _display_context_test_edges->capture_display_names() :
                                                  platf::display_names();
-  #else
+#else
               const auto capturable_displays = platf::display_names();
-  #endif
+#endif
               capture_ready = std::find(
                                 capturable_displays.begin(),
                                 capturable_displays.end(),
@@ -2147,7 +2101,6 @@ namespace proc {
       }
       return 503;
     }
-#endif
 
     // Commit only after every fallible display operation succeeds. The new object keeps its own
     // RTSP encryption and transport lease, while the process-owned launch record retains its
@@ -2155,9 +2108,7 @@ namespace proc {
     display_context->width = render_size->width;
     display_context->height = render_size->height;
     display_context->virtual_display = _virtual_display;
-#ifdef _WIN32
     display_context->display_guid = _display_context->display_guid;
-#endif
     _display_context->width = display_context->width;
     _display_context->height = display_context->height;
     _display_context->fps = display_context->fps;
@@ -2166,7 +2117,6 @@ namespace proc {
     _display_context->scale_factor = display_context->scale_factor;
     _display_context->sbs_mode = display_context->sbs_mode;
     _active_launch_session_id = launch_session_id;
-#ifdef _WIN32
     if (_virtual_display) {
       _display_session.update_mode(display_context->width, display_context->height, display_context->fps);
       _display_session.commit_resume();
@@ -2174,34 +2124,32 @@ namespace proc {
     // A resume is a new start that has proven the display's mode, HDR state, and topology again.
     _live_display_unproven = false;
     virtual_display_policy_rollback.disable();
-#endif
     primary_rollback.disable();
     return 0;
   }
 
-#ifdef _WIN32
   std::optional<DEVMODEW> proc_t::query_virtual_display_mode() {
     // DISPLAYn is reusable. Resolve it from this session's exact driver identity
     // before reading a mode; a successful query of a stale name proves nothing.
     if (!_display_session.refresh()) {
       return std::nullopt;
     }
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
     if (_display_mode_query_test_hook) {
       return _display_mode_query_test_hook(_display_session.binding().display_name);
     }
-  #endif
+#endif
     DEVMODEW mode {};
     return VDISPLAY::getDeviceSettings(_display_session.binding().display_name.c_str(), mode) ?
              std::optional<DEVMODEW> {mode} : std::nullopt;
   }
 
   LONG proc_t::configure_virtual_display_mode(const wchar_t *name, int width, int height, int fps_millihz, bool probe) {
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
     if (_display_mode_change_test_hook) {
       return _display_mode_change_test_hook(name, width, height, fps_millihz, probe);
     }
-  #endif
+#endif
     if (probe) {
       return VDISPLAY::testDisplaySettings(name, width, height, fps_millihz);
     }
@@ -2214,21 +2162,21 @@ namespace proc {
   }
 
   bool proc_t::display_settings_unavailable() {
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
     if (_display_settings_unavailable_test_hook) {
       return _display_settings_unavailable_test_hook();
     }
-  #endif
+#endif
     return is_changing_settings_going_to_fail();
   }
 
   bool proc_t::virtual_display_baseline_topology_active() {
     const auto &device_path = _display_session.binding().device_path;
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
     if (_display_baseline_test_hook) {
       return _display_baseline_test_hook(device_path);
     }
-  #endif
+#endif
     return !device_path.empty() && platf::primary_display::baseline_topology_active(device_path);
   }
 
@@ -2260,11 +2208,11 @@ namespace proc {
 
     const auto &name = _display_session.binding().display_name;
     LONG status;
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
     if (_display_mode_record_test_hook) {
       status = _display_mode_record_test_hook(name, *record);
     } else
-  #endif
+#endif
     {
       status = VDISPLAY::saveSessionModeRecord(name.c_str(), *record);
     }
@@ -2282,8 +2230,6 @@ namespace proc {
     return true;
   }
 
-#endif
-
   bool proc_t::live_video_mode_needs_display_change(int width, int height, int fps_millihz) {
     std::unique_lock lock(process_state_mutex, std::try_to_lock);
     if (!lock.owns_lock()) {
@@ -2292,7 +2238,6 @@ namespace proc {
       return true;
     }
 
-#ifdef _WIN32
     if (!_virtual_display || !_display_context) {
       return false;
     }
@@ -2309,9 +2254,6 @@ namespace proc {
     // A capture target that differs from the exact owned binding, because Windows renamed the
     // display or the binding is unresolved, still needs the apply path to publish it.
     return !_display_session.refresh() || platf::to_utf8(_display_session.binding().display_name) != display_name;
-#else
-    return false;
-#endif
   }
 
   live_video_mode_result_e proc_t::apply_live_video_mode(
@@ -2328,7 +2270,6 @@ namespace proc {
       return live_video_mode_result_e::needs_reconnect;
     }
 
-#ifdef _WIN32
     // Only a display this host created can be resized under the user's feet. A physical desktop
     // belongs to the person sitting at it.
     if (!_virtual_display || !_display_session.owns_display()) {
@@ -2424,17 +2365,17 @@ namespace proc {
     // actually carries the mode, then bring the HDR worker back up on that name.
     auto republish_display = [&]() {
       set_display_name_locked(platf::to_utf8(_display_session.binding().display_name));
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
       if (_display_context_test_edges) {
         config::video.output_name = _display_context_test_edges->map_display_name(display_name);
       } else
-  #endif
+#endif
         config::video.output_name = display_device::map_display_name(display_name);
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
       if (_display_topology_test_hook) {
         return;  // The test owns HDR state through request_hdr_state().
       }
-  #endif
+#endif
       start_hdr_worker(enable_hdr);
     };
 
@@ -2510,14 +2451,10 @@ namespace proc {
                     << " @ "sv << (static_cast<double>(fps_millihz) / 1000.0) << " Hz."sv;
     // The display is promoted for the whole live session, so its mode stays temporary here.
     return live_video_mode_result_e::applied;
-#else
-    return live_video_mode_result_e::needs_reconnect;
-#endif
   }
 
   bool proc_t::activate_remote_virtual_display_lease(std::uint64_t lease) {
     std::lock_guard lock(process_state_mutex);
-#ifdef _WIN32
     if (_display_context && _display_context->virtual_display) {
       if (lease == 0 || !ar_glasses::remote_virtual_display_active(lease)) {
         BOOST_LOG(error) << "Remote virtual-display activation did not match its ownership lease."sv;
@@ -2527,46 +2464,42 @@ namespace proc {
       if ((_display_session.pause_requested() && !prepare_retained_display_for_resume()) || !promote_virtual_display(_display_context->enable_hdr)) {
         BOOST_LOG(error) << "Remote virtual display does not match its required Windows display topology."sv;
         pause_display_for_resume();
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
         if (_display_context_test_edges) {
           _display_context_test_edges->remote_ended(lease);
         } else
-  #endif
+#endif
           ar_glasses::remote_virtual_display_ended(lease);
         _remote_virtual_display_lease.reset();
         return false;
       }
       _display_session.commit_resume();
     }
-#endif
     return true;
   }
 
   bool proc_t::restore_primary_display() {
     std::lock_guard lock(process_state_mutex);
-#ifdef _WIN32
     if (!_display_session.binding().device_path.empty()) {
       stop_hdr_worker();
       _hdr_worker_state.reset();
       const bool restored =
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
         _display_topology_test_hook ?
           _display_topology_test_hook(
             display_topology_test_operation_e::restore,
             _virtual_display_only
           ) :
-  #endif
+#endif
           _display_session.restore();
       refresh_virtual_display_binding();
       return restored;
     }
-#endif
     return true;
   }
 
   bool proc_t::pause_display_for_resume() {
     std::lock_guard lock(process_state_mutex);
-#ifdef _WIN32
     if (_virtual_display && _display_session.owns_display()) {
       stop_hdr_worker();
       _hdr_worker_state.reset();
@@ -2582,10 +2515,10 @@ namespace proc {
           // Capture has released its display-awake requirement before topology recovery. Reset
           // the display idle timer once without retaining a requirement on this thread.
           const bool wake_requested =
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
             _display_topology_test_hook ?
               _display_topology_test_hook(display_topology_test_operation_e::wake, _virtual_display_only) :
-  #endif
+#endif
               SetThreadExecutionState(ES_DISPLAY_REQUIRED) != 0;
           if (wake_requested) {
             BOOST_LOG(info) << "Physical-display wake requested after restoring the desktop topology."sv;
@@ -2599,13 +2532,11 @@ namespace proc {
       }
       return paused;
     }
-#endif
     return restore_primary_display();
   }
 
   void proc_t::terminate(bool immediate, bool needs_refresh) {
     std::lock_guard lock(process_state_mutex);
-#ifdef _WIN32
     // The worker never takes process_state_mutex, so it is safe to join while holding the process
     // state lock. This prevents an old launch from touching a display after teardown or refresh.
     stop_hdr_worker();
@@ -2620,7 +2551,6 @@ namespace proc {
     if (_app_id > 0) {
       pause_display_for_resume();
     }
-#endif
     std::error_code ec;
     placebo = false;
 
@@ -2662,7 +2592,6 @@ namespace proc {
       }
 
       bool completed = false;
-#ifdef _WIN32
       const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(undo_deadline - std::chrono::steady_clock::now());
       const auto wait_ms = static_cast<DWORD>(std::clamp<std::int64_t>(remaining.count(), 0, INFINITE - 1));
       const auto waited = WaitForSingleObject(child.native_handle(), wait_ms);
@@ -2672,15 +2601,6 @@ namespace proc {
       } else if (waited == WAIT_FAILED) {
         ec = std::error_code(GetLastError(), std::system_category());
       }
-#else
-      while (std::chrono::steady_clock::now() < undo_deadline && child.running(ec) && !ec) {
-        std::this_thread::sleep_for(10ms);
-      }
-      if (!ec && !child.running(ec)) {
-        child.wait(ec);
-        completed = !ec;
-      }
-#endif
       if (!completed || ec) {
         BOOST_LOG(warning) << "Undo command did not complete within its cleanup budget: " << cmd.undo_cmd;
         terminate_process_group(child, undo_group, 0s);
@@ -2699,13 +2619,12 @@ namespace proc {
 
     bool has_run = _app_id > 0;
 
-#ifdef _WIN32
     if (_remote_virtual_display_lease) {
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
       if (_display_context_test_edges) {
         _display_context_test_edges->remote_ended(*_remote_virtual_display_lease);
       } else
-  #endif
+#endif
         ar_glasses::remote_virtual_display_ended(*_remote_virtual_display_lease);
       _remote_virtual_display_lease.reset();
     }
@@ -2797,7 +2716,6 @@ namespace proc {
         BOOST_LOG(info) << "Virtual Display removal is already owned by deferred cleanup."sv;
       }
     }
-#endif
 
     // Only show the Stopped notification if we actually have an app to stop
     // Since terminate() is always run when a new app has started
@@ -2824,7 +2742,6 @@ namespace proc {
     display_name.clear();
     initial_display.clear();
     _display_context.reset();
-#ifdef _WIN32
     // An unresolved owner stays in its deferred retirement slot across process refresh.
     if (!_display_session.owns_display() && !_display_session.prepared()) {
       _display_session = VDISPLAY::session_t {};
@@ -2834,7 +2751,6 @@ namespace proc {
     _virtual_display_only = false;
     _live_display_unproven = false;  // A new launch creates and proves its own display.
     _hdr_worker_state.reset();
-#endif
     _virtual_display = false;
 
     if (needs_refresh) {
@@ -2842,7 +2758,6 @@ namespace proc {
     }
   }
 
-#ifdef _WIN32
   bool proc_t::drain_retired_virtual_display_for_shutdown(
     std::chrono::milliseconds timeout
   ) {
@@ -3024,7 +2939,6 @@ namespace proc {
     release_claim.disable();
     return local_ar_handoff_e::ready;
   }
-#endif
 
   std::vector<app_list_entry_t> proc_t::get_app_list() const {
     std::lock_guard lock(process_state_mutex);
@@ -3106,9 +3020,7 @@ namespace proc {
     // Once we reach this point here, termination must have already happened.
     assert(!placebo);
     assert(!_process.running());
-#ifdef _WIN32
     assert(!_hdr_worker.joinable());
-#endif
   }
 
   void refresh(const std::string &file_name, bool needs_terminate, bool wait_for_display_driver) {
@@ -3117,7 +3029,6 @@ namespace proc {
       proc.terminate(false, false);
     }
 
-#ifdef _WIN32
     // A failed handoff must retain its resource even if the deferred slot is occupied.
     // Replacing proc here would otherwise discard the only owner of that display.
     if (proc._display_session.owns_display() || proc._display_session.prepared()) {
@@ -3139,7 +3050,6 @@ namespace proc {
         std::this_thread::sleep_for(1s);
       }
     }
-#endif
 
     auto proc_opt = proc::parse(file_name);
 

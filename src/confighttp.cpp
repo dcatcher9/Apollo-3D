@@ -51,13 +51,11 @@
 #include "utility.h"
 #include "uuid.h"
 
-#ifdef _WIN32
-  #include "platform/windows/ar_glasses.h"
-  #include "platform/windows/game3d_setup.h"
-  #include "platform/windows/host3d_subtitle_apps.h"
-  #include "platform/windows/open3d_emitter.h"
-  #include "platform/windows/utils.h"
-#endif
+#include "platform/windows/ar_glasses.h"
+#include "platform/windows/game3d_setup.h"
+#include "platform/windows/host3d_subtitle_apps.h"
+#include "platform/windows/open3d_emitter.h"
+#include "platform/windows/utils.h"
 
 using namespace std::literals;
 
@@ -1055,9 +1053,7 @@ namespace confighttp {
   void getClients(resp_https_t response, req_https_t request) {
     nlohmann::json output_tree;
     output_tree["named_certs"] = nvhttp::get_all_clients();
-#ifdef _WIN32
     output_tree["platform"] = "windows";
-#endif
     output_tree["status"] = true;
     send_response(response, output_tree);
   }
@@ -1138,7 +1134,6 @@ namespace confighttp {
     send_response(response, output_tree);
   }
 
-#ifdef _WIN32
   void getGame3dSetup(resp_https_t response, req_https_t request) {
     send_response(response, platf::game3d::setup_status());
   }
@@ -1298,7 +1293,6 @@ namespace confighttp {
       bad_request(response, request, error.what());
     }
   }
-#endif
 
   /**
    * @brief Get the configuration settings.
@@ -1310,9 +1304,7 @@ namespace confighttp {
     output_tree["status"] = true;
     output_tree["platform"] = SUNSHINE_PLATFORM;
     output_tree["version"] = PROJECT_VERSION;
-#ifdef _WIN32
     output_tree["vdisplayStatus"] = (int) proc::vDisplayDriverStatus.load();
-#endif
     auto vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
     for (auto &[name, value] : vars) {
       output_tree[name] = value;
@@ -1351,7 +1343,6 @@ namespace confighttp {
    *
    * @api_examples{/api/config| POST| {"key":"value"}}
    */
-#ifdef _WIN32
   /**
    * @brief List the applications Host 3D may protect subtitles in.
    * @param response The HTTP response object.
@@ -1408,7 +1399,6 @@ namespace confighttp {
       bad_request(response, request, error.what());
     }
   }
-#endif
 
   void saveConfig(resp_https_t response, req_https_t request) {
     try {
@@ -1419,7 +1409,6 @@ namespace confighttp {
       erase_retired_config_options(input_tree);
       // This option is live-managed by the AR display decision API rather than the general form.
       input_tree.erase("ar_glass_devices");
-#ifdef _WIN32
       // The per-application subtitle selection is live-managed by its own API as well. Write the
       // current selection so a general save cannot drop or revive an entry.
       // The 3D source of each local surface is switched live next to Start 3D. Write the
@@ -1431,7 +1420,6 @@ namespace confighttp {
           !subtitle_apps.empty()) {
         input_tree[std::string {platf::host3d_subtitle_apps::config_key}] = subtitle_apps;
       }
-#endif
       for (const auto &[k, v] : input_tree.items()) {
         if (v.is_null() || (v.is_string() && v.get<std::string>().empty())) {
           continue;
@@ -1441,13 +1429,9 @@ namespace confighttp {
         // we should migrate the config file to straight json and get rid of all this nonsense
         config_stream << k << " = " << (v.is_string() ? v.get<std::string>() : v.dump()) << std::endl;
       }
-#ifdef _WIN32
       if (!ar_glasses::write_config_with_devices(config_stream.str())) {
         throw std::runtime_error("Could not atomically save the configuration file");
       }
-#else
-      file_handler::write_file(config::sunshine.config_file.c_str(), config_stream.str());
-#endif
       output_tree["status"] = true;
       send_response(response, output_tree);
     } catch (std::exception &e) {
@@ -1516,10 +1500,8 @@ namespace confighttp {
     std::string content = file_handler::read_file(config::sunshine.log_file.c_str());
     SimpleWeb::CaseInsensitiveMultimap headers;
     std::string contentType = "text/plain";
-#ifdef _WIN32
     contentType += "; charset=";
     contentType += currentCodePageToCharset();
-#endif
     headers.emplace("Content-Type", contentType);
     add_frame_guard(headers);
     response->write(SimpleWeb::StatusCode::success_ok, content, headers);
@@ -1687,12 +1669,9 @@ namespace confighttp {
     // the handler would retain a deleter that references the local HTTPS server after it stops.
     response->write();
 
-#ifdef _WIN32
     if (GetConsoleWindow() == NULL) {
       lifetime::exit_sunshine(ERROR_SHUTDOWN_IN_PROGRESS, true);
-    } else
-#endif
-    {
+    } else {
       lifetime::exit_sunshine(0, true);
     }
   }
@@ -2098,7 +2077,6 @@ namespace confighttp {
       guarded(access_e::api, getOfflineSbsJob);
     server.resource["^/api/config$"]["GET"] = guarded(access_e::api, getConfig);
     server.resource["^/api/config$"]["POST"] = guarded(access_e::json_api, saveConfig);
-#ifdef _WIN32
     server.resource["^/api/game3d/setup$"]["GET"] = guarded(access_e::api, getGame3dSetup);
     server.resource["^/api/game3d/setup/decision$"]["POST"] = guarded(access_e::json_api, decideGame3dSetup);
     server.resource["^/api/ar-glasses$"]["GET"] = guarded(access_e::api, getArGlassDevices);
@@ -2107,7 +2085,6 @@ namespace confighttp {
     server.resource["^/api/local-monitor$"]["POST"] = guarded(access_e::json_api, setLocalMonitor);
     server.resource["^/api/host3d/subtitle-apps$"]["GET"] = guarded(access_e::api, getHost3dSubtitleApps);
     server.resource["^/api/host3d/subtitle-apps$"]["POST"] = guarded(access_e::json_api, setHost3dSubtitleApp);
-#endif
     server.resource["^/api/configLocale$"]["GET"] = getLocale;
     server.resource["^/api/restart$"]["POST"] = guarded(access_e::json_api, restart);
     server.resource["^/api/quit$"]["POST"] = guarded(access_e::api, quit);

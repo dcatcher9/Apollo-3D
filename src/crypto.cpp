@@ -509,10 +509,6 @@ namespace crypto {
     BN_to_ASN1_INTEGER(serial.get(), X509_get_serialNumber(x509.get()));
 
     constexpr auto year = 60 * 60 * 24 * 365;
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
-    X509_gmtime_adj(X509_get_notBefore(x509.get()), 0);
-    X509_gmtime_adj(X509_get_notAfter(x509.get()), 20 * year);
-#else
     asn1_string_t not_before {ASN1_STRING_dup(X509_get0_notBefore(x509.get()))};
     asn1_string_t not_after {ASN1_STRING_dup(X509_get0_notAfter(x509.get()))};
 
@@ -521,7 +517,6 @@ namespace crypto {
 
     X509_set1_notBefore(x509.get(), not_before.get());
     X509_set1_notAfter(x509.get(), not_after.get());
-#endif
 
     X509_set_pubkey(x509.get(), pkey.get());
 

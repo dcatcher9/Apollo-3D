@@ -19,12 +19,6 @@
 
 // lib includes
 #include <boost/core/noncopyable.hpp>
-#ifndef _WIN32
-  #include <boost/asio/ip/address.hpp>
-  #include <boost/process/v1/child.hpp>
-  #include <boost/process/v1/environment.hpp>
-  #include <boost/process/v1/group.hpp>
-#endif
 
 // local includes
 #include "src/config.h"
@@ -43,7 +37,6 @@ using namespace std::literals;
 
 struct sockaddr;
 
-#ifdef _WIN32
 // Forward declarations of boost classes to avoid having to include boost headers
 // here, which results in issues with Windows.h and WinSock2.h include order.
 namespace boost {
@@ -65,7 +58,6 @@ namespace boost {
     typedef basic_environment<char> environment;
   }  // namespace process::inline v1
 }  // namespace boost
-#endif
 namespace video {
   struct config_t;
 }  // namespace video

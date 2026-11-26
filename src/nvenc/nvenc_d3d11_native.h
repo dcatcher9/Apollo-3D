@@ -3,11 +3,10 @@
  * @brief Declarations for native Direct3D11 NVENC encoder.
  */
 #pragma once
-#ifdef _WIN32
-  // local includes
-  #include "nvenc_d3d11.h"
+// local includes
+#include "nvenc_d3d11.h"
 
-  #include <optional>
+#include <optional>
 
 namespace nvenc {
 
@@ -34,9 +33,9 @@ namespace nvenc {
     void set_converted_input(unsigned surface) noexcept;
     bool input_waits_for_retirement() const noexcept override;
 
-  #ifdef SUNSHINE_TESTS
+#ifdef SUNSHINE_TESTS
     std::optional<unsigned> input_surface_for_picture_for_test(unsigned slot) const noexcept;
-  #endif
+#endif
 
   private:
     bool create_and_register_input_buffer() override;
@@ -50,4 +49,3 @@ namespace nvenc {
   };
 
 }  // namespace nvenc
-#endif

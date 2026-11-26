@@ -37,15 +37,13 @@
 #include "uuid.h"
 #include "video.h"
 #include "video_depth_estimator.h"
-#ifdef _WIN32
-  #include "platform/windows/ar_glasses.h"
-  #include "platform/windows/game3d_setup.h"
-  #include "platform/windows/exclusive_display_reconcile_retry.h"
-  #include "platform/windows/misc.h"
-  #include "platform/windows/primary_display.h"
-  #include "platform/windows/virtual_display.h"
-  #include "platform/windows/virtual_display_session.h"
-#endif
+#include "platform/windows/ar_glasses.h"
+#include "platform/windows/game3d_setup.h"
+#include "platform/windows/exclusive_display_reconcile_retry.h"
+#include "platform/windows/misc.h"
+#include "platform/windows/primary_display.h"
+#include "platform/windows/virtual_display.h"
+#include "platform/windows/virtual_display_session.h"
 
 #define PROBE_DISPLAY_UUID "38F72B96-B00C-4F21-8B6C-E1BFF1602B0E"
 
@@ -80,14 +78,11 @@ std::map<std::string_view, std::function<int(const char *name, int argc, char **
   {"version"sv, [](const char *name, int argc, char **argv) {
      return args::version();
    }},
-#ifdef _WIN32
   {"restore-nvprefs-undo"sv, [](const char *name, int argc, char **argv) {
      return args::restore_nvprefs_undo();
    }},
-#endif
 };
 
-#ifdef _WIN32
 namespace {
   constexpr UINT WM_REFRESH_EXCLUSIVE_CURSOR_CLIP = WM_APP + 1;
   constexpr UINT WM_RECONCILE_EXCLUSIVE_DISPLAY = WM_APP + 2;
@@ -418,7 +413,6 @@ WINAPI BOOL ConsoleCtrlHandler(DWORD type) {
   }
   return FALSE;
 }
-#endif
 
 #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
 constexpr bool tray_is_enabled = true;
@@ -426,51 +420,16 @@ constexpr bool tray_is_enabled = true;
 constexpr bool tray_is_enabled = false;
 #endif
 
-void mainThreadLoop(const std::shared_ptr<safe::event_t<bool>> &shutdown_event) {
-  bool run_loop = false;
-
-  // Conditions that would require the main thread event loop
-#ifndef _WIN32
-  run_loop = tray_is_enabled;  // On Windows, tray runs in separate thread, so no main loop needed for tray
-#endif
-
-  if (!run_loop) {
-    BOOST_LOG(info) << "No main thread features enabled, skipping event loop"sv;
-    return;
-  }
-
-  // Main thread event loop
-  BOOST_LOG(info) << "Starting main loop"sv;
-  while (true) {
-    if (shutdown_event->peek()) {
-      BOOST_LOG(info) << "Shutdown event detected, breaking main loop"sv;
-      if (tray_is_enabled && config::sunshine.system_tray) {
-        system_tray::end_tray();
-      }
-      break;
-    }
-
-    if (tray_is_enabled) {
-      system_tray::process_tray_events();
-    }
-
-    // Sleep to avoid busy waiting
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-  }
-}
-
 int main(int argc, char *argv[]) {
   lifetime::argv = argv;
 
   task_pool_util::TaskPool::task_id_t force_shutdown = nullptr;
 
-#ifdef _WIN32
   // Avoid searching the PATH in case a user has configured their system insecurely
   // by placing a user-writable directory in the system-wide PATH variable.
   SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
 
   setlocale(LC_ALL, "C");
-#endif
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
@@ -525,7 +484,6 @@ int main(int argc, char *argv[]) {
   }
   config::modified_config_settings.clear();
 
-#ifdef _WIN32
   // Configure authenticated bytecode persistence before command dispatch as well as live workers.
   // Benchmark and conversion commands share the executable-owned appdata cache; an arbitrary
   // config-file path must never become a high-privilege DXBC input. Commands still skip the
@@ -533,7 +491,6 @@ int main(int argc, char *argv[]) {
   models::host_sbs_shader_cache::configure_persistent_cache(
     platf::appdata() / "shader-cache" / "host-sbs-v1"
   );
-#endif
 
   if (!config::sunshine.cmd.name.empty()) {
     auto fn = cmd_to_func.find(config::sunshine.cmd.name);
@@ -551,7 +508,6 @@ int main(int argc, char *argv[]) {
     return fn->second(argv[0], config::sunshine.cmd.argc, config::sunshine.cmd.argv);
   }
 
-#ifdef _WIN32
   // Restore a saved display transaction before GPU preparation or platform initialization can
   // fail. Command-only invocations returned above and must not recover a running host's lease.
   // The installed service restarts the host after a crash; standalone hosts recover on relaunch.
@@ -559,7 +515,6 @@ int main(int argc, char *argv[]) {
   if (!platf::primary_display::recover()) {
     BOOST_LOG(error) << "Display-configuration recovery is pending; virtual-display launches will wait for restoration."sv;
   }
-#endif
 
   // Keep CPU shader prewarm at startup; GPU model work begins only at a real live AI request.
   // Command modes such as --sbs-bench own their TensorRT lifecycle and must not race this work.
@@ -582,7 +537,6 @@ int main(int argc, char *argv[]) {
   reed_solomon_release(rs_probe);
   BOOST_LOG(debug) << "Reed-Solomon FEC initialized with "sv << rs_alignment << "-byte SIMD alignment"sv;
 
-#ifdef _WIN32
   // Modify relevant NVIDIA control panel settings if the system has corresponding gpu
   if (nvprefs_instance.load()) {
     // Restore global settings to the undo file left by improper termination of sunshine.exe
@@ -706,8 +660,6 @@ int main(int argc, char *argv[]) {
   };
   auto session_monitor_join_thread_guard = util::fail_guard(stop_session_monitor);
 
-#endif
-
   task_pool.start(1);
 
   // Create signal handler after logging has been initialized
@@ -739,10 +691,8 @@ int main(int argc, char *argv[]) {
     shutdown_event->raise(true);
   });
 
-#ifdef _WIN32
   // Terminate gracefully on Windows when console window is closed
   SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
-#endif
 
   proc::refresh(config::stream.file_apps);
 
@@ -783,7 +733,6 @@ int main(int argc, char *argv[]) {
   });
 
   if (video::probe_encoders()) {
-#ifdef _WIN32
     bool allow_probing = video::allow_encoder_probing();
     // Driver initialization may have made saved outputs available since the early recovery.
     // Do not introduce another display while a previous transaction still needs restoration.
@@ -842,27 +791,20 @@ int main(int argc, char *argv[]) {
     } else if (!allow_probing) {
       BOOST_LOG(error) << "Video failed to find working encoder: probe failed and virtual display driver isn't initialized"sv;
     }
-#else
-    BOOST_LOG(error) << "Video failed to find working encoder: probing failed."sv;
-#endif
   }
 
-#ifdef _WIN32
   // An approved AR-display hotplug owns a local virtual desktop and local D3D presenter. The guard is
   // created after platform/shader and encoder initialization, and is destroyed before either.
   auto game_setup_shutdown_guard = util::fail_guard([]() {
     platf::game3d::shutdown_setup();
   });
   auto ar_glasses_deinit_guard = ar_glasses::init();
-#endif
 
   if (http::init()) {
     BOOST_LOG(fatal) << "HTTP interface failed to initialize"sv;
 
-#ifdef _WIN32
     BOOST_LOG(fatal) << "To relaunch Sunshine 3D successfully, use the shortcut in the Start Menu. Do not run sunshine.exe manually."sv;
     std::this_thread::sleep_for(10s);
-#endif
 
     return -1;
   }
@@ -891,21 +833,15 @@ int main(int argc, char *argv[]) {
 
   if (tray_is_enabled && config::sunshine.system_tray) {
     BOOST_LOG(info) << "Starting system tray"sv;
-#ifdef _WIN32
     // TODO: Windows has a weird bug where when running as a service and on the first Windows boot,
     // he tray icon would not appear even though Sunshine is running correctly otherwise.
     // Restarting the service would allow the icon to appear normally.
     // For now we will keep the Windows tray icon on a separate thread.
     // Ideally, we would run the system tray on the main thread for all platforms.
     system_tray::init_tray_threaded();
-#else
-    system_tray::init_tray();
-#endif
   }
 
-  mainThreadLoop(shutdown_event);
-
-  // Wait for shutdown, this is not necessary when we're using the main event loop
+  // Wait for shutdown
   shutdown_event->view();
 
   httpThread.join();
@@ -936,7 +872,6 @@ int main(int argc, char *argv[]) {
   // now is it safe to undo prep commands, restore HDR, and remove the stream-owned display.
   proc::proc.terminate(false, false);
 
-#ifdef _WIN32
   // Stop/join the local presenter before draining its estimator build/retire workers.
   ar_glasses_deinit_guard.reset();
   platf::game3d::shutdown_setup();
@@ -945,7 +880,6 @@ int main(int argc, char *argv[]) {
   // The hidden monitor still owns Win32 and logging state. Join it under the live watchdog before
   // process-wide workers and the task pool that carries the watchdog are drained.
   stop_session_monitor();
-#endif
 
   video::drain_async_teardown_workers();
   async_teardown_drain_guard.disable();
@@ -953,7 +887,6 @@ int main(int argc, char *argv[]) {
   task_pool.stop();
   task_pool.join();
 
-#ifdef _WIN32
   // Restore global NVIDIA control panel settings
   if (nvprefs_instance.owning_undo_file() && nvprefs_instance.load()) {
     nvprefs_instance.restore_global_profile();
@@ -964,7 +897,6 @@ int main(int argc, char *argv[]) {
   if (tray_is_enabled && config::sunshine.system_tray) {
     system_tray::end_tray_threaded();
   }
-#endif
 
   return lifetime::desired_exit_code;
 }
