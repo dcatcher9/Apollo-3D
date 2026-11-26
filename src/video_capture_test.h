@@ -50,6 +50,9 @@ namespace video::detail {
     const native_encode_loop_test_hooks_t &hooks = {}
   );
 
+  /** Join every per-device teardown handed off so far, without sealing the worker service. */
+  void drain_async_teardown_workers_for_test() noexcept;
+
   struct capture_worker_test_access;
 
   /** Borrowed for one inert worker callback; no platform capture calls have run. */

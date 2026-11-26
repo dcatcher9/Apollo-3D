@@ -79,6 +79,14 @@ namespace platf::dxgi::testing {
     /** Convert into an owned RGB target within the presenter's render-budget deadline. */
     bool convert(platf::img_t &image, std::chrono::steady_clock::time_point presentation_target);
 
+    /** Take the depth pipeline's terminal flat fallback, as a failed estimator does. */
+    void fail_depth_pipeline_flat();
+    bool estimator_present() const;
+    /** Failed estimators kept until this converter's device is destroyed. */
+    std::size_t parked_failed_estimators() const;
+    /** The converter's own D3D11 device (not owned). */
+    ID3D11Device *device() const;
+
   private:
     class impl_t;
     std::unique_ptr<impl_t> impl_;

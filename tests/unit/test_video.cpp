@@ -8365,18 +8365,29 @@ TEST(AsyncTeardownLifecycleSourceTests, DrainsTrackedOwnersBeforeProcessGlobals)
   EXPECT_LT(retirement_guard, retrieval_pipeline);
   EXPECT_EQ(encode_scope.find(".detach()"), std::string::npos);
 
-  const auto base_destructor = display.find("~d3d_base_encode_device()");
+  // The device destructor hands its estimators and build to the member destroyed last, which
+  // gives them to one tracked worker that flushes the device after releasing them.
+  const auto retirement_member = display.find("} pipeline_retirement;");
+  const auto base_destructor = display.find("~d3d_base_encode_device()", retirement_member);
   const auto retire_active = display.find(
-    "retire_depth_estimator(std::move(depth_estimator));",
+    "pipeline_retirement.estimators.push_back(std::move(depth_estimator));",
     base_destructor
   );
   const auto retire_build = display.find(
-    "retire_depth_estimator_build(std::move(depth_estimator_build));",
+    "pipeline_retirement.build = std::move(depth_estimator_build);",
     retire_active
   );
+  const auto retire_worker = display.find("void retire_depth_pipeline(");
+  const auto retire_flush = display.find("context->Flush();", retire_worker);
+  const auto retire_launch = display.find("::video::launch_async_teardown_worker(std::move(worker));", retire_flush);
+  ASSERT_NE(retirement_member, std::string::npos);
   ASSERT_NE(base_destructor, std::string::npos);
   ASSERT_NE(retire_active, std::string::npos);
   ASSERT_NE(retire_build, std::string::npos);
+  ASSERT_NE(retire_worker, std::string::npos);
+  ASSERT_NE(retire_flush, std::string::npos);
+  ASSERT_NE(retire_launch, std::string::npos);
+  EXPECT_LT(retire_worker, retirement_member);
   EXPECT_LT(retire_active, retire_build);
   EXPECT_NE(display.find("busy_retries="), std::string::npos);
   EXPECT_EQ(display.find("busy_drops="), std::string::npos)

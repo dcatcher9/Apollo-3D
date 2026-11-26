@@ -428,35 +428,34 @@ namespace platf::dxgi {
     ::video::launch_async_teardown_worker(std::move(worker));
   }
 
-  // CUDA/TensorRT teardown can wait for device quiescence and return a large execution context to
-  // the pool. Never perform that work on the encode/local-presenter thread.
-  void retire_depth_estimator(std::unique_ptr<models::video_depth_estimator> estimator) {
-    if (!estimator) {
-      return;
-    }
-    std::packaged_task<void()> worker([estimator = std::move(estimator)]() mutable {
-      estimator.reset();
-    });
-    ::video::launch_async_teardown_worker(std::move(worker));
-  }
-
-  // A ready-but-unconsumed future owns its estimator result. Move that shared state to a worker so
-  // abandoning a local/encode device never runs the estimator destructor on its owner thread.
-  void retire_depth_estimator_build(
-    std::future<depth_pipeline_build_result_t> build
+  // Retire everything a device's depth pipeline owned once nothing draws with the device. CUDA and
+  // TensorRT teardown can wait for device quiescence and return a large execution context to the
+  // pool, and a build future owns its estimator result, so this never runs on the encode or
+  // local-presenter thread. One worker releases them all and then clears and flushes the device's
+  // immediate context: D3D11 destroys a device only after its bound state is cleared and its
+  // deferred destruction flushed, and without that every Host 3D session kept its device, VRAM
+  // and driver threads.
+  void retire_depth_pipeline(
+    std::vector<std::unique_ptr<models::video_depth_estimator>> estimators,
+    std::future<depth_pipeline_build_result_t> build,
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext> context
   ) {
-    if (!build.valid()) {
-      return;
-    }
-    std::packaged_task<void()> worker([build = std::move(build)]() mutable {
-      try {
-        auto pipeline = build.get();
-        pipeline.estimator.reset();
-        // The prepared device programs are destroyed on this same retirement worker.
-      } catch (const std::exception &e) {
-        BOOST_LOG(warning) << "Retired Host SBS pipeline build failed: "sv << e.what();
-      } catch (...) {
-        BOOST_LOG(warning) << "Retired Host SBS pipeline build failed with an unknown exception."sv;
+    std::packaged_task<void()> worker([estimators = std::move(estimators), build = std::move(build), context = std::move(context)]() mutable {
+      estimators.clear();
+      if (build.valid()) {
+        try {
+          auto pipeline = build.get();
+          pipeline.estimator.reset();
+          // The prepared device programs are destroyed with `pipeline`, before the flush.
+        } catch (const std::exception &e) {
+          BOOST_LOG(warning) << "Retired Host SBS pipeline build failed: "sv << e.what();
+        } catch (...) {
+          BOOST_LOG(warning) << "Retired Host SBS pipeline build failed with an unknown exception."sv;
+        }
+      }
+      if (context) {
+        context->ClearState();
+        context->Flush();
       }
     });
     ::video::launch_async_teardown_worker(std::move(worker));
@@ -509,6 +508,22 @@ namespace platf::dxgi {
 #endif
   class d3d_base_encode_device final {
   public:
+    // Declared first, so destroyed last: the destructor hands the depth pipeline over here, and it
+    // goes to its retirement worker only after every other member has released its D3D11
+    // objects, so that worker's final flush follows every release on this device.
+    struct pipeline_retirement_t {
+      std::vector<std::unique_ptr<models::video_depth_estimator>> estimators;
+      std::future<depth_pipeline_build_result_t> build;
+      Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
+
+      ~pipeline_retirement_t() {
+        // A device that never built a depth pipeline leaves nothing bound that keeps it alive.
+        if (!estimators.empty() || build.valid()) {
+          retire_depth_pipeline(std::move(estimators), std::move(build), std::move(context));
+        }
+      }
+    } pipeline_retirement;
+
     ~d3d_base_encode_device() {
       claim_capture_pixels(false);
       capture_damage_observer.reset();
@@ -520,8 +535,12 @@ namespace platf::dxgi {
       // The background task owns D3D references and its packaged-task future does not block here.
       // If this device is torn down while construction is in flight, the process-lifetime tracked
       // worker service lets it finish independently and destroys the unused result there.
-      retire_depth_estimator(std::move(depth_estimator));
-      retire_depth_estimator_build(std::move(depth_estimator_build));
+      pipeline_retirement.estimators = std::move(failed_depth_estimators);
+      if (depth_estimator) {
+        pipeline_retirement.estimators.push_back(std::move(depth_estimator));
+      }
+      pipeline_retirement.build = std::move(depth_estimator_build);
+      pipeline_retirement.context = device_ctx.get();
     }
 
     void release_capture_display() noexcept {
@@ -3428,7 +3447,9 @@ namespace platf::dxgi {
         );
       }
       host_sbs_renderer = models::fail_host_sbs_renderer_flat(host_sbs_renderer);
-      retire_depth_estimator(std::move(depth_estimator));
+      if (depth_estimator) {
+        failed_depth_estimators.push_back(std::move(depth_estimator));
+      }
       selected_matte_ready = false;
       pending_matched_frame = nullptr;
       for (auto &slot : matched_frame_slots) {
@@ -7286,6 +7307,10 @@ namespace platf::dxgi {
     D3D11_VIEWPORT rgb_present_viewport {};
 
     std::unique_ptr<models::video_depth_estimator> depth_estimator;
+    // Estimators that failed while this device keeps drawing flat. Their teardown unregisters
+    // CUDA's D3D11 interop, which must not run beside this drawing thread, so they retire with
+    // the device, once nothing draws with it.
+    std::vector<std::unique_ptr<models::video_depth_estimator>> failed_depth_estimators;
     // The per-device D3D estimator is built on a background thread and borrows the startup-warmed
     // TensorRT context. The process-lifetime tracked worker service owns and joins the worker; the
     // task itself captures owning D3D references, so retiring this future during teardown is safe.
@@ -7629,6 +7654,22 @@ namespace platf::dxgi {
                d3d_base_encode_device::rgb_conversion_e::converted;
       }
 
+      void fail_depth_pipeline_flat() {
+        converter_.fail_depth_pipeline_flat();
+      }
+
+      bool estimator_present() const {
+        return static_cast<bool>(converter_.depth_estimator);
+      }
+
+      std::size_t parked_failed_estimators() const {
+        return converter_.failed_depth_estimators.size();
+      }
+
+      ID3D11Device *device() const {
+        return const_cast<ID3D11Device *>(converter_.device.get());
+      }
+
     private:
       std::shared_ptr<safe::event_t<bool>> ready_event_ = std::make_shared<safe::event_t<bool>>();
       d3d_base_encode_device converter_;
@@ -7650,6 +7691,22 @@ namespace platf::dxgi {
       const std::chrono::steady_clock::time_point presentation_target
     ) {
       return impl_->convert(image, presentation_target);
+    }
+
+    void native_pacing_local_converter_t::fail_depth_pipeline_flat() {
+      impl_->fail_depth_pipeline_flat();
+    }
+
+    bool native_pacing_local_converter_t::estimator_present() const {
+      return impl_->estimator_present();
+    }
+
+    std::size_t native_pacing_local_converter_t::parked_failed_estimators() const {
+      return impl_->parked_failed_estimators();
+    }
+
+    ID3D11Device *native_pacing_local_converter_t::device() const {
+      return impl_->device();
     }
 
     model_preparation_memory_t query_model_preparation_memory(const model_preparation_adapter_t &required) {

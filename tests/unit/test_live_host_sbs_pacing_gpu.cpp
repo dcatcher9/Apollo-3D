@@ -855,6 +855,8 @@ namespace {
       }
     });
     owner.join();
+    // The presenter's device is gone: let its pipeline retire before the next test runs.
+    video::detail::drain_async_teardown_workers_for_test();
     if (owner_error) {
       std::rethrow_exception(owner_error);
     }
@@ -912,6 +914,86 @@ namespace {
               << " callback_pending_polls=" << notification_pending_polls
               << " same_frame_queries=" << same_frame->query_count << " same_frame_wait_us="
               << std::chrono::duration_cast<std::chrono::microseconds>(same_frame->wait_duration).count() << '\n';
+  }
+
+  TEST(LiveHostSbsFlatFallbackGpuTest, FailedEstimatorRetiresWithItsDeviceWhichIsThenReleased) {
+    const auto *enabled = std::getenv("APOLLO_RUN_TENSORRT_TESTS");
+    if (!enabled || std::string_view {enabled} != "1") {
+      GTEST_SKIP() << "Set APOLLO_RUN_TENSORRT_TESTS=1 for the local NVIDIA/TensorRT integration check.";
+    }
+    const auto adapter = nvidia_adapter();
+    ASSERT_TRUE(adapter);
+    constexpr unsigned width = 1280, height = 720;
+    local_depth_wait_t observed;
+    fixture::native_pacing_fixture_t binding;
+    binding.held_source_stamp_ticks = &observed.held_source;
+    binding.converter_observer = {&observed, local_depth_wait_t::record};
+    auto display = fixture::make_native_pacing_display(*adapter, width, height, binding);
+    std::vector<std::uint32_t> pixels(std::size_t(width) * height);
+    for (unsigned y = 0; y < height; ++y) {
+      for (unsigned x = 0; x < width; ++x) {
+        pixels[std::size_t(y) * width + x] = (x / 64 + y / 48) % 2 ? 0xff3853a0u : 0xffa48b45u;
+      }
+    }
+    auto image = fixture::upload_native_pacing_image(*display, pixels);
+    ASSERT_TRUE(image);
+    models::live_model_preparation_t preparation(video::host_sbs_v2_depth_model(), {});
+
+    std::exception_ptr owner_error;
+    bool warm = false, present_before = false, present_after = true, drew_flat = false;
+    std::size_t parked_at_failure = 0, parked_while_drawing = 0;
+    Microsoft::WRL::ComPtr<ID3D11Device> device;
+    std::jthread owner([&]() {
+      try {
+        fixture::native_pacing_local_converter_t converter(display, video::SBS_AI);
+        device = converter.device();
+        platf::dxgi::detail::local_presenter_schedule_t schedule {60000};
+        const auto present = [&]() {
+          const auto target = schedule.begin_frame(clock_t::now());
+          const bool converted = converter.convert(*image, target);
+          schedule.record_presented();
+          std::this_thread::sleep_until(target);
+          return converted;
+        };
+        const auto captured = clock_t::now();
+        image->frame_timestamp = image->content_timestamp = captured;
+        const auto ticks = captured.time_since_epoch().count();
+        const auto warm_limit = clock_t::now() + 30s;
+        while (!(warm = observed.drew_depth(ticks)) && clock_t::now() < warm_limit) {
+          if (!present()) {
+            throw std::runtime_error("Local pacing conversion failed");
+          }
+        }
+        if (!warm) {
+          return;
+        }
+        present_before = converter.estimator_present();
+        converter.fail_depth_pipeline_flat();
+        present_after = converter.estimator_present();
+        parked_at_failure = converter.parked_failed_estimators();
+        drew_flat = present();
+        parked_while_drawing = converter.parked_failed_estimators();
+      } catch (...) {
+        owner_error = std::current_exception();
+      }
+    });
+    owner.join();
+    // The device is gone, so nothing draws with it: its parked estimator's teardown may run.
+    video::detail::drain_async_teardown_workers_for_test();
+    if (owner_error) {
+      std::rethrow_exception(owner_error);
+    }
+    ASSERT_TRUE(warm) << "The estimator must draw depth before the fallback.";
+    EXPECT_TRUE(present_before);
+    EXPECT_FALSE(present_after);
+    EXPECT_EQ(parked_at_failure, 1u) << "A failed estimator must not retire while its device draws.";
+    EXPECT_TRUE(drew_flat) << "The device keeps drawing flat after the fallback.";
+    EXPECT_EQ(parked_while_drawing, 1u);
+    // Its pipeline retired and its immediate context was cleared and flushed: nothing but this
+    // test holds the device, so D3D11 destroys it (with its VRAM and driver threads) on release.
+    ASSERT_TRUE(device);
+    device->AddRef();
+    EXPECT_EQ(device->Release(), 1u) << "A retired drawing device must not stay alive.";
   }
 
   INSTANTIATE_TEST_SUITE_P(

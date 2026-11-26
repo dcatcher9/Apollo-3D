@@ -2273,6 +2273,10 @@ namespace video {
       return result;
     }
 
+    void drain_async_teardown_workers_for_test() noexcept {
+      async_teardown_workers().drain_for_test();
+    }
+
     std::unique_ptr<nvenc_encode_session_t> make_native_encode_session_for_test(
       platf::display_t &display,
       const config_t &config,

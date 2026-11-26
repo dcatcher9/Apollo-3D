@@ -1995,7 +1995,13 @@ That worker makes no immediate-context calls, and CUDA's D3D11 registration reac
 immediate context, so every registration runs on the thread that draws with the device: the
 estimator and Direct Glyph register as the first estimate starts depth (Direct Glyph, at the
 latest, at its first score submission). A Direct Glyph registration on the worker beside the
-drawing thread deadlocked inside NVIDIA's driver and froze the stream and its stop.
+drawing thread deadlocked inside NVIDIA's driver and froze the stream and its stop. Teardown
+unregisters, so an estimator that fails while its device keeps drawing flat stays with that
+device and retires with it; its GPU memory stays allocated until the stream ends. When the
+device retires, one worker releases its whole pipeline and then clears and flushes the
+immediate context. D3D11 destroys a device only after its bound state is cleared and its
+deferred destruction flushed; without that every Host 3D session kept its device, VRAM and
+about thirty driver threads.
 The Windows build embeds Direct Glyph, completed shared UI, and Game 3D text-game bytecode.
 The producer inventory and shader compiler policy are shared with the runtime. The device build
 authenticates the installed source closures before selecting bytecode keyed to those closures.
