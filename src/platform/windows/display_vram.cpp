@@ -4359,11 +4359,13 @@ namespace platf::dxgi {
         event.publication_current=depth_estimator && depth_estimator->publication_is_current(result->publication);
         if (event.kind!=converter_test_observer::event_e::draw || !event.flat) event.ema_motion_mask=result->ema_motion_mask;
       }
+#ifdef SUNSHINE_TESTS
       if (depth_estimator) if (const auto q=depth_estimator->joined_completion_gate_status_for_benchmark()) {
         event.query_observed=q->actual_event_queries!=0u; event.literal_last_query_result=q->last_actual_event_query;
         event.literal_query_target_frame=q->configuration.target_frame_id;
         event.gate_entered=q->callback_entered; event.gate_released=q->released;
       }
+#endif
       test_observer.emit(event);
     }
 

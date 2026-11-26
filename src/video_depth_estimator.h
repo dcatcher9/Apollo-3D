@@ -7,7 +7,9 @@
 #include "host_sbs_gpu_completion_receipt.h"
 #include "host_sbs_resolution.h"
 #include "host_sbs_telemetry_perf.h"
-#include "host_sbs_joined_completion_test_gate.h"
+#ifdef SUNSHINE_TESTS
+  #include "host_sbs_joined_completion_test_gate.h"
+#endif
 
 #include <array>
 #include <chrono>
@@ -1301,10 +1303,10 @@ namespace models {
     bool configure_joined_completion_gate_for_native_pacing_test(
       const joined_completion_test_gate::configuration_t &configuration
     );
-#endif
     /** Pure CPU gate/query diagnostics for the converter test observer, never a source clock. */
     [[nodiscard]] std::optional<joined_completion_test_gate::snapshot_t>
       joined_completion_gate_status_for_benchmark() const noexcept;
+#endif
 
     /** True only when every mandatory engine, shader, and session resource initialized. */
     bool is_valid() const;

@@ -3669,8 +3669,10 @@ namespace models {
     CUevent depth_inference_done_event = nullptr;
     inference_completion_notification_t root_completion_notification;
     bool completion_notification_disabled = false;
+#ifdef SUNSHINE_TESTS
     std::unique_ptr<joined_completion_test_gate::controller_t> completion_test_gate;
     bool benchmark_joined_completion_gate_configuration_seen = false;
+#endif
     bool near_identical_detector_available = false;
     bool near_identical_detector_error_logged = false;
     bool pending_depth_inference_event_recorded = false;
@@ -3824,6 +3826,7 @@ namespace models {
       return resolved;
     }
 
+#ifdef SUNSHINE_TESTS
     bool install_joined_completion_test_gate(
       const joined_completion_test_gate::configuration_t &configuration
     ) {
@@ -3846,6 +3849,7 @@ namespace models {
       completion_test_gate = std::move(gate);
       return true;
     }
+#endif
 
     void clear_pending_inference_event_state() noexcept {
       pending_depth_inference_event_recorded = false;
@@ -4317,9 +4321,11 @@ namespace models {
       }
 
       const CUresult root_query = cuda.cuEventQuery(depth_inference_done_event);
+#ifdef SUNSHINE_TESTS
       if (completion_test_gate) {
         completion_test_gate->note_actual_event_query(pending_root->frame_id, root_query);
       }
+#endif
       switch (normalized_cuda_readiness(root_query)) {
         case detail::async_stream_readiness_e::ready:
           return pending_execution_readiness_e::ready;
@@ -6146,9 +6152,11 @@ namespace models {
     }
 
     ~impl() {
+#ifdef SUNSHINE_TESTS
       // Release private callback before any existing bounded CUDA teardown query.
       // Queued userdata owns its state even if the old quarantine/retain path is taken.
       if (completion_test_gate) completion_test_gate->cancel_and_release();
+#endif
       release_subtitle_direct_glyph();
       auto &cuda = cuda_driver_api::get();
       bool cleanup_execution_ok = cuda.is_valid() && cuda_ctx;
@@ -10502,6 +10510,7 @@ namespace models {
         ocr_armed = false;
       }
 
+#ifdef SUNSHINE_TESTS
       // Native pacing test gate: actual CUDA ordering after the unmap tail, before the actual
       // root completion event. Does not change source, observation or Base/SCT clocks.
       if (enqueued && !is_terminal() && completion_test_gate &&
@@ -10516,6 +10525,7 @@ namespace models {
           ocr_armed = false;
         }
       }
+#endif
 
       // Record completion after every interop unmap tail. Event polling and the stream-query
       // fallback now prove the same joined depth/OCR transaction and all of its resource release.
@@ -10667,13 +10677,13 @@ namespace models {
     return pimpl && !pimpl->pending_root && !pimpl->pending_depth_inference_event_recorded &&
            pimpl->install_joined_completion_test_gate(configuration);
   }
-#endif
 
   std::optional<joined_completion_test_gate::snapshot_t>
   video_depth_estimator::joined_completion_gate_status_for_benchmark() const noexcept {
     if (!pimpl || !pimpl->completion_test_gate) return std::nullopt;
     return pimpl->completion_test_gate->snapshot();
   }
+#endif
 
   bool video_depth_estimator::can_accept_frame() {
     return pimpl && pimpl->can_accept();
