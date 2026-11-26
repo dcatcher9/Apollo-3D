@@ -1697,9 +1697,7 @@ namespace proc {
 
     fg.disable();
 
-#if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
     system_tray::update_tray_playing(_app.name);
-#endif
 
     return 0;
   }
@@ -1729,11 +1727,9 @@ namespace proc {
       BOOST_LOG(info) << "Adjust this behavior in the Applications tab or apps.json if this is not what you want."sv;
       placebo = true;
 
-#if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
       if (_process.native_exit_code() != 0) {
         system_tray::update_tray_launch_error(proc::proc.get_last_run_app_name(), _process.native_exit_code());
       }
-#endif
 
       return false;
     }
@@ -2720,9 +2716,7 @@ namespace proc {
     // Only show the Stopped notification if we actually have an app to stop
     // Since terminate() is always run when a new app has started
     if (proc::proc.get_last_run_app_name().length() > 0 && has_run) {
-#if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
       system_tray::update_tray_stopped(proc::proc.get_last_run_app_name());
-#endif
     }
 
     // Load the configured output_name first

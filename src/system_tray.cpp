@@ -3,42 +3,40 @@
  * @brief Definitions for the system tray icon and notification system.
  */
 // macros
-#if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
+#define WIN32_LEAN_AND_MEAN
+#include <accctrl.h>
+#include <aclapi.h>
+#define TRAY_ICON WEB_DIR "images/sunshine3d.ico"
+#define TRAY_ICON_PLAYING WEB_DIR "images/sunshine3d-playing.ico"
+#define TRAY_ICON_LOCKED WEB_DIR "images/sunshine3d-locked.ico"
 
-  #define WIN32_LEAN_AND_MEAN
-  #include <accctrl.h>
-  #include <aclapi.h>
-  #define TRAY_ICON WEB_DIR "images/sunshine3d.ico"
-  #define TRAY_ICON_PLAYING WEB_DIR "images/sunshine3d-playing.ico"
-  #define TRAY_ICON_LOCKED WEB_DIR "images/sunshine3d-locked.ico"
+#define TRAY_MSG_NO_APP_RUNNING "Reload Apps"
 
-  #define TRAY_MSG_NO_APP_RUNNING "Reload Apps"
+#ifndef BOOST_PROCESS_VERSION
+  #define BOOST_PROCESS_VERSION 1
+#endif
 
-  #ifndef BOOST_PROCESS_VERSION
-    #define BOOST_PROCESS_VERSION 1
-  #endif
+// standard includes
+#include <atomic>
+#include <chrono>
+#include <future>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
 
-  // standard includes
-  #include <atomic>
-  #include <chrono>
-  #include <future>
-  #include <memory>
-  #include <mutex>
-  #include <string>
-  #include <thread>
+// lib includes
+#include <tray/src/tray.h>
 
-  // lib includes
-  #include <tray/src/tray.h>
-
-  // local includes
-  #include "config.h"
-  #include "confighttp.h"
-  #include "logging.h"
-  #include "network.h"
-  #include "nvhttp.h"
-  #include "platform/common.h"
-  #include "src/entry_handler.h"
-  #include "platform/windows/ar_glasses.h"
+// local includes
+#include "config.h"
+#include "confighttp.h"
+#include "logging.h"
+#include "network.h"
+#include "nvhttp.h"
+#include "platform/common.h"
+#include "src/entry_handler.h"
+#include "platform/windows/ar_glasses.h"
 
 using namespace std::literals;
 
@@ -566,8 +564,6 @@ namespace system_tray {
 
 }  // namespace system_tray
 
-  #ifdef BOOST_PROCESS_VERSION
-    #undef BOOST_PROCESS_VERSION
-  #endif
-
+#ifdef BOOST_PROCESS_VERSION
+  #undef BOOST_PROCESS_VERSION
 #endif

@@ -510,9 +510,7 @@ namespace nvhttp {
     }
     rtsp_stream::complete_client_policy(std::move(policy_publication));
 
-#if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
     system_tray::update_tray_paired(named_cert_p->name);
-#endif
 
     if (!config::sunshine.flags[config::flag::FRESH_STATE]) {
       save_state();
@@ -1179,9 +1177,7 @@ namespace nvhttp {
           return;
         }
 
-#if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
         system_tray::update_tray_require_pin();
-#endif
         fg.disable();
         return;
       } else if (it->second == "pairchallenge"sv) {
@@ -2000,9 +1996,7 @@ namespace nvhttp {
     tree.put("root.resume", 1);
     tree.put("root.hostsessionid", process_status.host_session_id);
 
-#if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
     system_tray::update_tray_client_connected(named_cert_p->name);
-#endif
   }
 
 #ifdef SUNSHINE_TESTS

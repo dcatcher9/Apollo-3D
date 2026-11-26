@@ -414,12 +414,6 @@ WINAPI BOOL ConsoleCtrlHandler(DWORD type) {
   return FALSE;
 }
 
-#if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
-constexpr bool tray_is_enabled = true;
-#else
-constexpr bool tray_is_enabled = false;
-#endif
-
 int main(int argc, char *argv[]) {
   lifetime::argv = argv;
 
@@ -831,7 +825,7 @@ int main(int argc, char *argv[]) {
   std::thread configThread {confighttp::start};
   std::thread rtspThread {rtsp_stream::start};
 
-  if (tray_is_enabled && config::sunshine.system_tray) {
+  if (config::sunshine.system_tray) {
     BOOST_LOG(info) << "Starting system tray"sv;
     // TODO: Windows has a weird bug where when running as a service and on the first Windows boot,
     // he tray icon would not appear even though Sunshine is running correctly otherwise.
@@ -894,7 +888,7 @@ int main(int argc, char *argv[]) {
   }
 
   // Stop the threaded tray if it was started
-  if (tray_is_enabled && config::sunshine.system_tray) {
+  if (config::sunshine.system_tray) {
     system_tray::end_tray_threaded();
   }
 

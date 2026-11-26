@@ -13,6 +13,4 @@ option(NPM_OFFLINE "Use offline npm packages. You must ensure packages are in yo
 
 option(BUILD_WERROR "Enable -Werror flag." OFF)
 
-option(SUNSHINE_ENABLE_TRAY "Enable system tray icon." ON)
-
 option(BOOST_USE_STATIC "Use static Boost libraries." ON)

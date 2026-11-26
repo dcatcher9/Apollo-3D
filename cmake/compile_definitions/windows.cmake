@@ -157,10 +157,8 @@ list(PREPEND PLATFORM_LIBRARIES
         z
 )
 
-if(SUNSHINE_ENABLE_TRAY)
-    list(APPEND PLATFORM_TARGET_FILES
-            "${CMAKE_SOURCE_DIR}/third-party/tray/src/tray_windows.c")
-endif()
+list(APPEND PLATFORM_TARGET_FILES
+        "${CMAKE_SOURCE_DIR}/third-party/tray/src/tray_windows.c")
 
 # Same CPU-only preview publisher as live Game 3D dumps, for previously captured packages.
 add_executable(preview_game3d_dump EXCLUDE_FROM_ALL

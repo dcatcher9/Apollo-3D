@@ -609,14 +609,12 @@ namespace platf::game3d {
         announced_.emplace(notification_key, true);
         BOOST_LOG(info) << "Game 3D setup: " << game.name << " [" << state_name << "] executable=\"" << executable
                         << "\" pid=" << game.process_id << " creation_time=" << game.creation_time << ": " << installation.detail;
-#if defined(SUNSHINE_TRAY) && SUNSHINE_TRAY >= 1
         // The tray only points at the Web UI, where the user confirms; a notification click
         // never installs. Declined and anti-cheat states have nothing to act on.
         if (installation.state != installation_state_e::current && installation.state != installation_state_e::anti_cheat && state != published_state_e::declined) {
           const auto target_name = game.name + " (" + utf8(game.executable.parent_path().filename()) + ")";
           system_tray::update_tray_game3d_setup(target_name, state == published_state_e::ready_to_install ? "Game 3D can be set up for this game; confirm or decline it in Sunshine 3D." : installation.detail);
         }
-#endif
       }
 
       detail::setup_outcome apply(const detected_game &game, bool publish_progress) {
