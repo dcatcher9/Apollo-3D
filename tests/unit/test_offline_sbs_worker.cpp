@@ -116,8 +116,6 @@ namespace {
       {"pipeline", {
                       {"implementation", "native-causal-single-pass"},
                       {"lookahead", false},
-                      {"scene_cache", false},
-                      {"replay", false},
                     }},
       {"python_dependency", false},
     };

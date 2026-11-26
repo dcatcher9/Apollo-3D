@@ -2599,12 +2599,7 @@ namespace offline_sbs {
           error = "worker result artifact paths are invalid";
           return false;
         }
-        const auto &cache = typed_result.cache;
-        if (
-          cache.hard_cap_bytes != context.scene_cache_max_bytes ||
-          cache.remaining_bytes != 0 ||
-          cache.peak_bytes > context.scene_cache_max_bytes
-        ) {
+        if (typed_result.cache.hard_cap_bytes != context.scene_cache_max_bytes) {
           error = "worker transient-raster attestation is invalid";
           return false;
         }
@@ -2629,8 +2624,7 @@ namespace offline_sbs {
             error = "worker direct conversion output attestation is invalid";
             return false;
           }
-        } else if (typed_result.output_path || typed_result.staging_identity ||
-                   !typed_result.replay_contracts.empty()) {
+        } else if (typed_result.output_path || typed_result.staging_identity) {
           error = "evaluation worker unexpectedly reported rendered output";
           return false;
         }
@@ -2708,14 +2702,7 @@ namespace offline_sbs {
           "contract"sv,
         }
       );
-      copy_summary_object(
-        "cache",
-        std::array {
-          "hard_cap_bytes"sv,
-          "peak_bytes"sv,
-          "remaining_bytes"sv,
-        }
-      );
+      copy_summary_object("cache", std::array {"hard_cap_bytes"sv});
       compact["full_result_contract"] = path_to_utf8(context.worker_result);
       compact["details_storage"] = "worker-artifacts";
       return compact;

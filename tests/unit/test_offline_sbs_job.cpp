@@ -213,7 +213,7 @@ namespace {
       summaries.front().error.assign(256, 'e');
       summaries.front().worker_result = {{"caller", "summary-only"}};
       detail.job->worker_result["source"]["width"] = 1;
-      detail.job->worker_result["cache"]["peak_bytes"] = 1;
+      detail.job->worker_result["cache"]["hard_cap_bytes"] = 1;
     }
     // Both returned containers have been mutated and destroyed. Neither operation can alter
     // the canonical metadata or the compact nested result retained for the selected job.
@@ -269,7 +269,7 @@ TEST(OfflineSbsJob, CompletesThroughStagingAndPersistsAtomicTerminalState) {
                        {"color_mode", "sdr"},
                        {"contract", "source-contract.json"},
                      }},
-          {"cache", {{"hard_cap_bytes", 4096}, {"peak_bytes", 1024}, {"remaining_bytes", 3072}}},
+          {"cache", {{"hard_cap_bytes", 4096}, {"peak_live_raster_bytes", 1024}}},
         },
       };
     }
@@ -299,7 +299,10 @@ TEST(OfflineSbsJob, CompletesThroughStagingAndPersistsAtomicTerminalState) {
   EXPECT_FALSE(terminal.worker_result.contains("scene_decisions_contract"));
   EXPECT_FALSE(terminal.worker_result.contains("scene_audit_sha256"));
   EXPECT_EQ(terminal.worker_result.at("source").at("width"), 1920);
-  EXPECT_EQ(terminal.worker_result.at("cache").at("peak_bytes"), 1024);
+  EXPECT_EQ(
+    terminal.worker_result.at("cache"),
+    (nlohmann::json {{"hard_cap_bytes", 4096}})
+  );
   expect_owned_job_list_summary(service, terminal);
 
   const auto state_path =
@@ -922,7 +925,7 @@ TEST(OfflineSbsJob, ExactHandlePublicationNeverOverwritesALateDestination) {
                        {"color_mode", "sdr"},
                        {"contract", "source-contract.json"},
                      }},
-          {"cache", {{"hard_cap_bytes", 4096}, {"peak_bytes", 1024}, {"remaining_bytes", 3072}}},
+          {"cache", {{"hard_cap_bytes", 4096}, {"peak_live_raster_bytes", 1024}}},
         },
       };
     }
@@ -939,7 +942,7 @@ TEST(OfflineSbsJob, ExactHandlePublicationNeverOverwritesALateDestination) {
   EXPECT_EQ(terminal.state, offline_sbs::job_state_e::failed);
   EXPECT_NE(terminal.error.find("refusing to overwrite"), std::string::npos);
   EXPECT_EQ(terminal.worker_result.at("source").at("width"), 1920);
-  EXPECT_EQ(terminal.worker_result.at("cache").at("peak_bytes"), 1024);
+  EXPECT_EQ(terminal.worker_result.at("cache").at("hard_cap_bytes"), 4096);
   expect_persisted_snapshot(tree.path / "state" / "jobs" / terminal.id / "job.json", terminal);
   EXPECT_FALSE(fs::exists(tree.path / "worker" / "jobs" / terminal.id / "result" / "publication-contract.json"));
   EXPECT_EQ(terminal.worker_result.at("publish_identity"), staged_identity);

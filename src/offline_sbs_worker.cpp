@@ -6401,8 +6401,8 @@ namespace offline_sbs {
           "causal pass did not attest exactly one TensorRT enqueue per source frame"
         );
       }
-      // Offline conversion runs the production V2 pipeline directly: the harness must attest
-      // the same live signed-parallax renderer and no scene-cache write/replay state.
+      // Offline conversion runs the production pipeline directly: the harness must attest the
+      // raw-memory causal pass this worker drove.
       const auto &analysis_runtime = typed_analysis_contract.resolved_runtime;
       const auto expected_follow_format = analysis_decoder.format();
       const auto expected_input_frame_format =
@@ -6410,8 +6410,6 @@ namespace offline_sbs {
           std::string_view {"sRGB-BGRA8-raw"} :
           std::string_view {"linear-scRGB-f32-planar"};
       if (
-        !analysis_runtime.parallax_v2_render ||
-        !analysis_runtime.parallax_v2_live ||
         analysis_runtime.follow_format.value_or("") !=
           expected_follow_format ||
         analysis_runtime.frame_transport.value_or("") != raw_frame_transport::name ||
@@ -6419,13 +6417,9 @@ namespace offline_sbs {
         analysis_runtime.follow_done_sentinel.has_value() ||
         analysis_runtime.follow_failed_sentinel.has_value() ||
         analysis_runtime.follow_progress_file.has_value() ||
-        analysis_runtime.input_frame_format != expected_input_frame_format ||
-        analysis_runtime.scene_cache_write ||
-        analysis_runtime.scene_cache_replay
+        analysis_runtime.input_frame_format != expected_input_frame_format
       ) {
-        throw worker_error(
-          "analysis did not attest the depth-coordinate V2 live signed-parallax render"
-        );
+        throw worker_error("analysis did not attest the native raw-memory causal pass");
       }
       const auto &direct_sbs = typed_analysis_contract.sbs;
       if (converting) {
@@ -6462,8 +6456,8 @@ namespace offline_sbs {
         analysis_state.frame_file.has_value() ||
         analysis_state.file.has_value() ||
         analysis_state.retained_history ||
-        analysis_state.schema.value_or(0) != sbs_adaptive_state::schema_version ||
-        analysis_state.capture.value_or("") != sbs_adaptive_state::capture ||
+        analysis_state.schema != sbs_adaptive_state::schema_version ||
+        analysis_state.capture != sbs_adaptive_state::capture ||
         analysis_state.frame_count != media.frames.size()
       ) {
         throw worker_error(
@@ -6576,14 +6570,10 @@ namespace offline_sbs {
           .contract_path = path_utf8(spec.result_directory / "source-contract.json"),
         },
         .analysis_contract = typed_analysis_contract,
-        .replay_contracts = {},
         .cache = {
           .hard_cap_bytes = spec.transient_raster_hard_cap_bytes,
-          .peak_bytes = 0,
           .analysis_source_raster_bytes = analysis_source_raster_bytes.value_or(0),
           .peak_live_raster_bytes = peak_live_raster_bytes,
-          .peak_cache_plus_raster_bytes = peak_live_raster_bytes,
-          .remaining_bytes = 0,
         },
         .timeline_contract = timeline_contract,
         .staging_identity = staging_identity.is_null() ?

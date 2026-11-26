@@ -40,12 +40,7 @@ namespace {
         .depth_height = 294,
         .depth_reuse_interval = 1,
         .cuda_graph = true,
-        .parallax_v2_shadow = false,
-        .parallax_v2_render = true,
-        .parallax_v2_live = true,
         .cuda_graph_captured = true,
-        .simulate_hdr = false,
-        .hdr_scale = 1.0,
         .input_color_space = "sRGB-SDR",
         .input_frame_format = "sRGB-BMP-WIC",
         .input_texture_format = "B8G8R8A8_UNORM",
@@ -59,9 +54,6 @@ namespace {
         .output_transfer = "sRGB",
         .output_primaries = "sRGB/BT.709",
         .output_row_order = "top-down",
-        .output_scale = 1.0,
-        .requested_eye_width = 0,
-        .requested_eye_height = 0,
         .configured_max_encode_width = 8192,
         .resolved_max_output_width = 8192,
         .input_limit = 0,
@@ -84,8 +76,6 @@ namespace {
         .output_sbs_height = 1080,
         .content_scale_x = 1.0,
         .content_scale_y = 1.0,
-        .scene_cache_write = false,
-        .scene_cache_replay = false,
       },
       .adaptive_state = {
         .transport = "atomic-latest-v1",
@@ -177,14 +167,10 @@ namespace {
         .contract_path = "C:/state/jobs/one/result/source-contract.json",
       },
       .analysis_contract = memory_whole_clip(conversion),
-      .replay_contracts = {},
       .cache = {
         .hard_cap_bytes = 64 * 1024 * 1024,
-        .peak_bytes = 0,
         .analysis_source_raster_bytes = 512,
         .peak_live_raster_bytes = 1280,
-        .peak_cache_plus_raster_bytes = 1280,
-        .remaining_bytes = 0,
       },
       .timeline_contract = {
         {"mode", "bounded-output-timebase"},
@@ -319,7 +305,6 @@ TEST(OfflineSbsWireContractTest, WorkerResultRoundTripsThroughOneExactCodec) {
 
   EXPECT_EQ(parsed.worker_spec_sha256, original.worker_spec_sha256);
   EXPECT_EQ(parsed.source.frame_count, original.source.frame_count);
-  EXPECT_TRUE(parsed.replay_contracts.empty());
   EXPECT_EQ(parsed.analysis_contract.artifact_mode, "conversion");
   EXPECT_TRUE(parsed.analysis_contract.sbs.enabled);
   EXPECT_EQ(offline_sbs::wire::to_json(parsed), encoded);
@@ -420,9 +405,6 @@ TEST(OfflineSbsWireContractTest, WorkerResultRejectsCrossContractMismatches) {
     encoded["analysis_contract"]["sbs"]["frame_count"] = 1;
   });
   expect_rejected([](auto &encoded) {
-    encoded["analysis_contract"]["resolved_runtime"]["scene_cache_write"] = true;
-  });
-  expect_rejected([](auto &encoded) {
     encoded["analysis_contract"]["resolved_runtime"]["follow_poll_interval_ms"] = 10;
   });
   expect_rejected([](auto &encoded) {
@@ -435,9 +417,6 @@ TEST(OfflineSbsWireContractTest, WorkerResultRejectsCrossContractMismatches) {
   expect_rejected([](auto &encoded) {
     encoded["analysis_contract"]["resolved_runtime"]["input_frame_format"] =
       "sRGB-PNG-WIC";
-  });
-  expect_rejected([](auto &encoded) {
-    encoded["analysis_contract"]["resolved_runtime"]["parallax_v2_live"] = false;
   });
   expect_rejected([](auto &encoded) {
     // File-transport evidence is a valid evaluator contract but never comes from a worker.
@@ -455,10 +434,10 @@ TEST(OfflineSbsWireContractTest, WorkerResultRejectsCrossContractMismatches) {
     };
   });
   expect_rejected([](auto &encoded) {
-    encoded["cache"]["peak_bytes"] = 1;
+    encoded["cache"]["peak_live_raster_bytes"] = 511;
   });
   expect_rejected([](auto &encoded) {
-    encoded["cache"]["peak_cache_plus_raster_bytes"] = 1279;
+    encoded["cache"]["peak_live_raster_bytes"] = 64 * 1024 * 1024 + 1;
   });
   expect_rejected([](auto &encoded) {
     encoded["timeline_contract"]["max_output_ticks"] = 0;
@@ -655,7 +634,6 @@ TEST(OfflineSbsWireContractTest, MemoryCompletionEvaluationKeepsTheSameCausalEvi
   const auto parsed = offline_sbs::wire::parse_worker_result_contract(encoded);
   EXPECT_EQ(parsed.operation, "evaluate");
   EXPECT_EQ(parsed.analysis_contract.artifact_mode, "adaptive");
-  EXPECT_TRUE(parsed.replay_contracts.empty());
   EXPECT_EQ(parsed.analysis_contract.adaptive_state.transport, "bounded-completion-memory-v1");
   EXPECT_FALSE(parsed.analysis_contract.sbs.enabled);
   EXPECT_EQ(parsed.analysis_contract.sbs.frame_count, 0u);
@@ -749,14 +727,6 @@ TEST(OfflineSbsWireContractTest, LegacyAdaptiveFileVariantsKeepTheirOriginalSche
   EXPECT_EQ(offline_sbs::wire::to_json(offline_sbs::wire::parse_whole_clip_contract(jsonl)), jsonl);
   auto mixed = jsonl;
   mixed["adaptive_state"]["header_file"] = "header.json";
-  EXPECT_THROW(offline_sbs::wire::parse_whole_clip_contract(mixed), offline_sbs::wire::contract_error);
-
-  value.adaptive_state = {.transport = "none", .frame_count = 0};
-  const auto none = offline_sbs::wire::to_json(value);
-  EXPECT_EQ(none.at("adaptive_state"), (nlohmann::json {{"transport", "none"}, {"retained_history", false}, {"frame_count", 0}}));
-  EXPECT_EQ(offline_sbs::wire::to_json(offline_sbs::wire::parse_whole_clip_contract(none)), none);
-  mixed = none;
-  mixed["adaptive_state"]["schema"] = 1;
   EXPECT_THROW(offline_sbs::wire::parse_whole_clip_contract(mixed), offline_sbs::wire::contract_error);
 }
 

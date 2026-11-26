@@ -10,7 +10,6 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -66,12 +65,7 @@ namespace offline_sbs::wire {
     int depth_height = 0;
     int depth_reuse_interval = 0;
     bool cuda_graph = false;
-    bool parallax_v2_shadow = false;
-    bool parallax_v2_render = false;
-    bool parallax_v2_live = false;
     bool cuda_graph_captured = false;
-    bool simulate_hdr = false;
-    double hdr_scale = 1.0;
     std::string input_color_space;
     std::string input_frame_format;
     std::string input_texture_format;
@@ -89,9 +83,6 @@ namespace offline_sbs::wire {
     std::optional<double> output_reference_white_nits;
     std::string output_row_order;
     std::optional<std::string> output_ffmpeg_pixel_format;
-    double output_scale = 1.0;
-    int requested_eye_width = 0;
-    int requested_eye_height = 0;
     int configured_max_encode_width = 0;
     int resolved_max_output_width = 0;
     int input_limit = 0;
@@ -114,15 +105,6 @@ namespace offline_sbs::wire {
     std::uint32_t output_sbs_height = 0;
     double content_scale_x = 0.0;
     double content_scale_y = 0.0;
-    bool scene_cache_write = false;
-    bool scene_cache_replay = false;
-    std::optional<std::uint32_t> scene_cache_contract_schema;
-    std::optional<std::uint32_t> scene_plan_schema;
-    std::optional<std::string> scene_plan_version;
-    std::optional<std::uint64_t> scene_start_sequence;
-    std::optional<std::uint64_t> scene_end_sequence_exclusive;
-    std::optional<std::string> scene_cache_status_at_replay_start;
-    std::optional<std::uint64_t> scene_cache_processed_count_at_replay_start;
   };
 
   struct whole_clip_adaptive_state_t {
@@ -131,8 +113,8 @@ namespace offline_sbs::wire {
     std::optional<std::string> frame_file;
     std::optional<std::string> file;
     bool retained_history = false;
-    std::optional<std::uint32_t> schema;
-    std::optional<std::string> capture;
+    std::uint32_t schema = 0;
+    std::string capture;
     std::uint64_t frame_count = 0;
   };
 
@@ -177,22 +159,6 @@ namespace offline_sbs::wire {
   nlohmann::json to_json(const whole_clip_contract_t &value);
   whole_clip_contract_t parse_whole_clip_contract(const nlohmann::json &value);
 
-  struct replay_result_contract_t {
-    std::uint64_t scene_id = 0;
-    std::uint64_t start_sequence = 0;
-    std::uint64_t end_sequence_exclusive = 0;
-    std::string inference_mode;
-    bool depth_inference_enabled = false;
-    std::uint64_t scheduled_depth_update_count = 0;
-    std::uint64_t tensorrt_enqueue_count = 0;
-    whole_clip_sbs_t sbs;
-  };
-
-  nlohmann::json to_json(const replay_result_contract_t &value);
-  replay_result_contract_t parse_replay_result_contract(
-    const nlohmann::json &value
-  );
-
   struct worker_result_source_t {
     std::uint32_t width = 0;
     std::uint32_t height = 0;
@@ -205,11 +171,8 @@ namespace offline_sbs::wire {
 
   struct worker_result_cache_t {
     std::uint64_t hard_cap_bytes = 0;
-    std::uint64_t peak_bytes = 0;
     std::uint64_t analysis_source_raster_bytes = 0;
     std::uint64_t peak_live_raster_bytes = 0;
-    std::uint64_t peak_cache_plus_raster_bytes = 0;
-    std::uint64_t remaining_bytes = 0;
   };
 
   /**
@@ -223,7 +186,6 @@ namespace offline_sbs::wire {
     std::string worker_spec_sha256;
     worker_result_source_t source;
     whole_clip_contract_t analysis_contract;
-    std::vector<replay_result_contract_t> replay_contracts;
     worker_result_cache_t cache;
     nlohmann::json timeline_contract;
     std::optional<nlohmann::json> staging_identity;

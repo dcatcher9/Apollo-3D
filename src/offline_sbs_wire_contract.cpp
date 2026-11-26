@@ -341,8 +341,6 @@ namespace offline_sbs::wire {
       {"pipeline", {
         {"implementation", "native-causal-single-pass"},
         {"lookahead", false},
-        {"scene_cache", false},
-        {"replay", false},
       }},
       {"python_dependency", false},
     };
@@ -383,8 +381,7 @@ namespace offline_sbs::wire {
     );
     require_exact_keys(
       value.at("pipeline"),
-      std::array {"implementation"sv, "lookahead"sv, "scene_cache"sv,
-                  "replay"sv},
+      std::array {"implementation"sv, "lookahead"sv},
       "worker specification causal pipeline"
     );
 
@@ -437,71 +434,8 @@ namespace offline_sbs::wire {
     }
     if (value.at("pipeline") != json {
           {"implementation", "native-causal-single-pass"},
-          {"lookahead", false},
-          {"scene_cache", false},
-          {"replay", false}}) {
+          {"lookahead", false}}) {
       throw contract_error("worker causal pipeline contract is unsupported");
-    }
-    return result;
-  }
-
-  nlohmann::json to_json(const replay_result_contract_t &value) {
-    return {
-      {"scene_id", value.scene_id},
-      {"start_sequence", value.start_sequence},
-      {"end_sequence_exclusive", value.end_sequence_exclusive},
-      {"inference_mode", value.inference_mode},
-      {"depth_inference_enabled", value.depth_inference_enabled},
-      {"scheduled_depth_update_count", value.scheduled_depth_update_count},
-      {"tensorrt_enqueue_count", value.tensorrt_enqueue_count},
-      {"sbs", to_json(value.sbs)},
-    };
-  }
-
-  replay_result_contract_t parse_replay_result_contract(
-    const nlohmann::json &value
-  ) {
-    require_exact_keys(
-      value,
-      std::array {
-        "scene_id"sv, "start_sequence"sv, "end_sequence_exclusive"sv,
-        "inference_mode"sv, "depth_inference_enabled"sv,
-        "scheduled_depth_update_count"sv, "tensorrt_enqueue_count"sv,
-        "sbs"sv,
-      },
-      "worker replay result"
-    );
-    replay_result_contract_t result {
-      .scene_id = unsigned_integer<std::uint64_t>(
-        value, "scene_id", "worker replay result"
-      ),
-      .start_sequence = unsigned_integer<std::uint64_t>(
-        value, "start_sequence", "worker replay result"
-      ),
-      .end_sequence_exclusive = unsigned_integer<std::uint64_t>(
-        value, "end_sequence_exclusive", "worker replay result"
-      ),
-      .inference_mode = required_string(
-        value, "inference_mode", "worker replay result"
-      ),
-      .depth_inference_enabled = required_boolean(
-        value, "depth_inference_enabled", "worker replay result"
-      ),
-      .scheduled_depth_update_count = unsigned_integer<std::uint64_t>(
-        value, "scheduled_depth_update_count", "worker replay result"
-      ),
-      .tensorrt_enqueue_count = unsigned_integer<std::uint64_t>(
-        value, "tensorrt_enqueue_count", "worker replay result"
-      ),
-      .sbs = parse_whole_clip_sbs(value.at("sbs")),
-    };
-    if (result.scene_id == 0 || result.start_sequence == 0 ||
-        result.end_sequence_exclusive <= result.start_sequence ||
-        result.inference_mode != "scene-cache-replay" ||
-        result.depth_inference_enabled ||
-        result.scheduled_depth_update_count != 0 ||
-        result.tensorrt_enqueue_count != 0 || !result.sbs.enabled) {
-      throw contract_error("worker replay result is not zero-inference cache replay");
     }
     return result;
   }
@@ -531,7 +465,6 @@ namespace offline_sbs::wire {
         analysis.adaptive_state.transport != completion_channel_t::name ||
         analysis.adaptive_state.retained_history ||
         analysis.adaptive_state.frame_count != source.frame_count ||
-        !runtime.parallax_v2_render || !runtime.parallax_v2_live ||
         !runtime.follow_mode ||
         runtime.follow_count_bound.value_or(0) != source.frame_count ||
         runtime.follow_producer_frame_count.value_or(0) != source.frame_count ||
@@ -543,19 +476,9 @@ namespace offline_sbs::wire {
         runtime.follow_format.value_or("") != (sdr ? "bgra8" : "gbrpf32le") ||
         runtime.follow_frame_pattern.has_value() ||
         runtime.input_frame_format != (sdr ? "sRGB-BGRA8-raw" : "linear-scRGB-f32-planar") ||
-        runtime.scene_cache_write || runtime.scene_cache_replay ||
-        runtime.scene_cache_contract_schema || runtime.scene_plan_schema ||
-        runtime.scene_plan_version || runtime.scene_start_sequence ||
-        runtime.scene_end_sequence_exclusive ||
-        runtime.scene_cache_status_at_replay_start ||
-        runtime.scene_cache_processed_count_at_replay_start ||
-        !result.replay_contracts.empty() || result.cache.peak_bytes != 0 ||
-        result.cache.remaining_bytes != 0 ||
         result.cache.analysis_source_raster_bytes == 0 ||
         result.cache.peak_live_raster_bytes <
-          result.cache.analysis_source_raster_bytes ||
-        result.cache.peak_cache_plus_raster_bytes !=
-          result.cache.peak_live_raster_bytes
+          result.cache.analysis_source_raster_bytes
       ) {
         throw contract_error(
           "worker causal-pass attestation disagrees with the source or one-pass contract"
@@ -626,10 +549,6 @@ namespace offline_sbs::wire {
   }  // namespace
 
   nlohmann::json to_json(const worker_result_contract_t &value) {
-    json replays = json::array();
-    for (const auto &replay : value.replay_contracts) {
-      replays.push_back(to_json(replay));
-    }
     json result {
       {"schema", 4},
       {"job_id", value.job_id},
@@ -648,14 +567,10 @@ namespace offline_sbs::wire {
         {"contract", value.source.contract_path},
       }},
       {"analysis_contract", to_json(value.analysis_contract)},
-      {"replay_contracts", std::move(replays)},
       {"cache", {
         {"hard_cap_bytes", value.cache.hard_cap_bytes},
-        {"peak_bytes", value.cache.peak_bytes},
         {"analysis_source_raster_bytes", value.cache.analysis_source_raster_bytes},
         {"peak_live_raster_bytes", value.cache.peak_live_raster_bytes},
-        {"peak_cache_plus_raster_bytes", value.cache.peak_cache_plus_raster_bytes},
-        {"remaining_bytes", value.cache.remaining_bytes},
       }},
       {"timeline_contract", value.timeline_contract},
       {"staging_identity", value.staging_identity ? *value.staging_identity : json(nullptr)},
@@ -669,8 +584,8 @@ namespace offline_sbs::wire {
     static constexpr std::array keys {
       "schema"sv, "job_id"sv, "status"sv, "operation"sv, "codec"sv,
       "worker_spec_sha256"sv, "python_dependency"sv, "source"sv,
-      "analysis_contract"sv, "replay_contracts"sv, "cache"sv,
-      "timeline_contract"sv, "staging_identity"sv, "output"sv,
+      "analysis_contract"sv, "cache"sv, "timeline_contract"sv,
+      "staging_identity"sv, "output"sv,
     };
     require_exact_keys(value, keys, "worker result");
     if (value.at("schema") != 4 || value.at("status") != "complete" ||
@@ -688,9 +603,8 @@ namespace offline_sbs::wire {
     require_exact_keys(
       value.at("cache"),
       std::array {
-        "hard_cap_bytes"sv, "peak_bytes"sv, "analysis_source_raster_bytes"sv,
-        "peak_live_raster_bytes"sv, "peak_cache_plus_raster_bytes"sv,
-        "remaining_bytes"sv,
+        "hard_cap_bytes"sv, "analysis_source_raster_bytes"sv,
+        "peak_live_raster_bytes"sv,
       },
       "worker result cache"
     );
@@ -737,7 +651,6 @@ namespace offline_sbs::wire {
     }
 
     if (!value.at("analysis_contract").is_object() ||
-        !value.at("replay_contracts").is_array() ||
         !value.at("timeline_contract").is_object()) {
       throw contract_error("worker result nested attestations have invalid types");
     }
@@ -745,16 +658,10 @@ namespace offline_sbs::wire {
       value.at("analysis_contract")
     );
     result.timeline_contract = value.at("timeline_contract");
-    for (const auto &replay : value.at("replay_contracts")) {
-      result.replay_contracts.push_back(parse_replay_result_contract(replay));
-    }
 
     const auto &cache = value.at("cache");
     result.cache.hard_cap_bytes = unsigned_integer<std::uint64_t>(
       cache, "hard_cap_bytes", "worker result cache"
-    );
-    result.cache.peak_bytes = unsigned_integer<std::uint64_t>(
-      cache, "peak_bytes", "worker result cache"
     );
     result.cache.analysis_source_raster_bytes = unsigned_integer<std::uint64_t>(
       cache, "analysis_source_raster_bytes", "worker result cache"
@@ -762,15 +669,8 @@ namespace offline_sbs::wire {
     result.cache.peak_live_raster_bytes = unsigned_integer<std::uint64_t>(
       cache, "peak_live_raster_bytes", "worker result cache"
     );
-    result.cache.peak_cache_plus_raster_bytes = unsigned_integer<std::uint64_t>(
-      cache, "peak_cache_plus_raster_bytes", "worker result cache"
-    );
-    result.cache.remaining_bytes = unsigned_integer<std::uint64_t>(
-      cache, "remaining_bytes", "worker result cache"
-    );
     if (result.cache.hard_cap_bytes == 0 ||
-        result.cache.peak_bytes > result.cache.hard_cap_bytes ||
-        result.cache.peak_cache_plus_raster_bytes > result.cache.hard_cap_bytes) {
+        result.cache.peak_live_raster_bytes > result.cache.hard_cap_bytes) {
       throw contract_error("worker result cache summary is invalid");
     }
 
@@ -787,8 +687,7 @@ namespace offline_sbs::wire {
       if (!result.staging_identity || !result.output_path) {
         throw contract_error("conversion result lacks exact output attestations");
       }
-    } else if (result.staging_identity || result.output_path ||
-               !result.replay_contracts.empty()) {
+    } else if (result.staging_identity || result.output_path) {
       throw contract_error("evaluation result unexpectedly reports conversion output");
     }
     validate_worker_result_relations(result);
@@ -893,12 +792,7 @@ namespace offline_sbs::wire {
       {"depth_height", runtime.depth_height},
       {"depth_reuse_interval", runtime.depth_reuse_interval},
       {"cuda_graph", runtime.cuda_graph},
-      {"parallax_v2_shadow", runtime.parallax_v2_shadow},
-      {"parallax_v2_render", runtime.parallax_v2_render},
-      {"parallax_v2_live", runtime.parallax_v2_live},
       {"cuda_graph_captured", runtime.cuda_graph_captured},
-      {"simulate_hdr", runtime.simulate_hdr},
-      {"hdr_scale", runtime.hdr_scale},
       {"input_color_space", runtime.input_color_space},
       {"input_frame_format", runtime.input_frame_format},
       {"input_texture_format", runtime.input_texture_format},
@@ -916,9 +810,6 @@ namespace offline_sbs::wire {
       {"output_reference_white_nits", optional_json(runtime.output_reference_white_nits)},
       {"output_row_order", runtime.output_row_order},
       {"output_ffmpeg_pixel_format", optional_json(runtime.output_ffmpeg_pixel_format)},
-      {"output_scale", runtime.output_scale},
-      {"requested_eye_width", runtime.requested_eye_width},
-      {"requested_eye_height", runtime.requested_eye_height},
       {"configured_max_encode_width", runtime.configured_max_encode_width},
       {"resolved_max_output_width", runtime.resolved_max_output_width},
       {"input_limit", runtime.input_limit},
@@ -941,17 +832,6 @@ namespace offline_sbs::wire {
       {"output_sbs_height", runtime.output_sbs_height},
       {"content_scale_x", runtime.content_scale_x},
       {"content_scale_y", runtime.content_scale_y},
-      {"scene_cache_write", runtime.scene_cache_write},
-      {"scene_cache_replay", runtime.scene_cache_replay},
-      {"scene_cache_contract_schema", optional_json(runtime.scene_cache_contract_schema)},
-      {"scene_plan_schema", optional_json(runtime.scene_plan_schema)},
-      {"scene_plan_version", optional_json(runtime.scene_plan_version)},
-      {"scene_start_sequence", optional_json(runtime.scene_start_sequence)},
-      {"scene_end_sequence_exclusive", optional_json(runtime.scene_end_sequence_exclusive)},
-      {"scene_cache_status_at_replay_start",
-       optional_json(runtime.scene_cache_status_at_replay_start)},
-      {"scene_cache_processed_count_at_replay_start",
-       optional_json(runtime.scene_cache_processed_count_at_replay_start)},
     };
     if (runtime.frame_transport) {
       resolved_runtime["frame_transport"] = *runtime.frame_transport;
@@ -964,6 +844,8 @@ namespace offline_sbs::wire {
     json adaptive_state {
       {"transport", adaptive.transport},
       {"retained_history", adaptive.retained_history},
+      {"schema", adaptive.schema},
+      {"capture", adaptive.capture},
       {"frame_count", adaptive.frame_count},
     };
     if (adaptive.transport == "atomic-latest-v1") {
@@ -971,10 +853,6 @@ namespace offline_sbs::wire {
       adaptive_state["frame_file"] = optional_json(adaptive.frame_file);
     } else if (adaptive.transport == "jsonl-v1") {
       adaptive_state["file"] = optional_json(adaptive.file);
-    }
-    if (adaptive.transport != "none") {
-      adaptive_state["schema"] = optional_json(adaptive.schema);
-      adaptive_state["capture"] = optional_json(adaptive.capture);
     }
     json observation = nullptr;
     if (value.observation_timeline) {
@@ -1090,18 +968,15 @@ namespace offline_sbs::wire {
       std::array {
         "model"sv, "model_url"sv, "pop_strength"sv, "depth_width"sv,
         "depth_height"sv, "depth_reuse_interval"sv, "cuda_graph"sv,
-        "parallax_v2_shadow"sv, "parallax_v2_render"sv,
-        "parallax_v2_live"sv, "cuda_graph_captured"sv, "simulate_hdr"sv,
-        "hdr_scale"sv, "input_color_space"sv, "input_frame_format"sv,
+        "cuda_graph_captured"sv, "input_color_space"sv, "input_frame_format"sv,
         "input_texture_format"sv, "input_transfer"sv, "input_primaries"sv,
         "input_reference_white_nits"sv, "packed_texture_format"sv,
         "packed_color_space"sv, "packed_transfer"sv, "packed_primaries"sv,
         "packed_reference_white_nits"sv, "output_frame_format"sv,
         "output_transfer"sv, "output_primaries"sv,
         "output_reference_white_nits"sv, "output_row_order"sv,
-        "output_ffmpeg_pixel_format"sv, "output_scale"sv,
-        "requested_eye_width"sv, "requested_eye_height"sv,
-        "configured_max_encode_width"sv, "resolved_max_output_width"sv,
+        "output_ffmpeg_pixel_format"sv, "configured_max_encode_width"sv,
+        "resolved_max_output_width"sv,
         "input_limit"sv, "output_every"sv, "follow_mode"sv,
         "follow_format"sv, "follow_count_bound"sv,
         "follow_producer_frame_count"sv, "follow_frame_pattern"sv,
@@ -1110,12 +985,7 @@ namespace offline_sbs::wire {
         "follow_progress_file"sv, "follow_native_input_deletion"sv,
         "follow_atomic_sbs_publication"sv, "output_eye_width"sv,
         "output_eye_height"sv, "output_sbs_width"sv, "output_sbs_height"sv,
-        "content_scale_x"sv, "content_scale_y"sv, "scene_cache_write"sv,
-        "scene_cache_replay"sv, "scene_cache_contract_schema"sv,
-        "scene_plan_schema"sv, "scene_plan_version"sv,
-        "scene_start_sequence"sv, "scene_end_sequence_exclusive"sv,
-        "scene_cache_status_at_replay_start"sv,
-        "scene_cache_processed_count_at_replay_start"sv,
+        "content_scale_x"sv, "content_scale_y"sv,
       },
       "frame_transport",
       "whole-clip resolved runtime"
@@ -1134,12 +1004,7 @@ namespace offline_sbs::wire {
     typed_runtime.depth_height = signed_integer<int>(runtime, "depth_height", "whole-clip resolved runtime");
     typed_runtime.depth_reuse_interval = signed_integer<int>(runtime, "depth_reuse_interval", "whole-clip resolved runtime");
     typed_runtime.cuda_graph = required_boolean(runtime, "cuda_graph", "whole-clip resolved runtime");
-    typed_runtime.parallax_v2_shadow = required_boolean(runtime, "parallax_v2_shadow", "whole-clip resolved runtime");
-    typed_runtime.parallax_v2_render = required_boolean(runtime, "parallax_v2_render", "whole-clip resolved runtime");
-    typed_runtime.parallax_v2_live = required_boolean(runtime, "parallax_v2_live", "whole-clip resolved runtime");
     typed_runtime.cuda_graph_captured = required_boolean(runtime, "cuda_graph_captured", "whole-clip resolved runtime");
-    typed_runtime.simulate_hdr = required_boolean(runtime, "simulate_hdr", "whole-clip resolved runtime");
-    typed_runtime.hdr_scale = finite_number(runtime, "hdr_scale", "whole-clip resolved runtime");
     typed_runtime.input_color_space = required_string(runtime, "input_color_space", "whole-clip resolved runtime");
     typed_runtime.input_frame_format = required_string(runtime, "input_frame_format", "whole-clip resolved runtime");
     typed_runtime.input_texture_format = required_string(runtime, "input_texture_format", "whole-clip resolved runtime");
@@ -1153,9 +1018,6 @@ namespace offline_sbs::wire {
     typed_runtime.output_transfer = required_string(runtime, "output_transfer", "whole-clip resolved runtime");
     typed_runtime.output_primaries = required_string(runtime, "output_primaries", "whole-clip resolved runtime");
     typed_runtime.output_row_order = required_string(runtime, "output_row_order", "whole-clip resolved runtime");
-    typed_runtime.output_scale = finite_number(runtime, "output_scale", "whole-clip resolved runtime");
-    typed_runtime.requested_eye_width = signed_integer<int>(runtime, "requested_eye_width", "whole-clip resolved runtime");
-    typed_runtime.requested_eye_height = signed_integer<int>(runtime, "requested_eye_height", "whole-clip resolved runtime");
     typed_runtime.configured_max_encode_width = signed_integer<int>(runtime, "configured_max_encode_width", "whole-clip resolved runtime");
     typed_runtime.resolved_max_output_width = signed_integer<int>(runtime, "resolved_max_output_width", "whole-clip resolved runtime");
     typed_runtime.input_limit = signed_integer<int>(
@@ -1171,8 +1033,6 @@ namespace offline_sbs::wire {
     typed_runtime.output_sbs_height = unsigned_integer<std::uint32_t>(runtime, "output_sbs_height", "whole-clip resolved runtime");
     typed_runtime.content_scale_x = finite_number(runtime, "content_scale_x", "whole-clip resolved runtime");
     typed_runtime.content_scale_y = finite_number(runtime, "content_scale_y", "whole-clip resolved runtime");
-    typed_runtime.scene_cache_write = required_boolean(runtime, "scene_cache_write", "whole-clip resolved runtime");
-    typed_runtime.scene_cache_replay = required_boolean(runtime, "scene_cache_replay", "whole-clip resolved runtime");
     const auto optional_string = [&](const std::string_view key) {
       return optional_value<std::string>(runtime, key, [&]() {
         return required_string(runtime, key, "whole-clip resolved runtime");
@@ -1206,13 +1066,6 @@ namespace offline_sbs::wire {
     typed_runtime.follow_done_sentinel = optional_string("follow_done_sentinel");
     typed_runtime.follow_failed_sentinel = optional_string("follow_failed_sentinel");
     typed_runtime.follow_progress_file = optional_string("follow_progress_file");
-    typed_runtime.scene_cache_contract_schema = optional_u32("scene_cache_contract_schema");
-    typed_runtime.scene_plan_schema = optional_u32("scene_plan_schema");
-    typed_runtime.scene_plan_version = optional_string("scene_plan_version");
-    typed_runtime.scene_start_sequence = optional_u64("scene_start_sequence");
-    typed_runtime.scene_end_sequence_exclusive = optional_u64("scene_end_sequence_exclusive");
-    typed_runtime.scene_cache_status_at_replay_start = optional_string("scene_cache_status_at_replay_start");
-    typed_runtime.scene_cache_processed_count_at_replay_start = optional_u64("scene_cache_processed_count_at_replay_start");
 
     const auto &adaptive = value.at("adaptive_state");
     auto &typed_adaptive = result.adaptive_state;
@@ -1221,9 +1074,7 @@ namespace offline_sbs::wire {
       throw contract_error("whole-clip adaptive state has no transport");
     }
     typed_adaptive.transport = adaptive.at("transport").get<std::string>();
-    if (typed_adaptive.transport == "none") {
-      require_exact_keys(adaptive, std::array {"transport"sv, "retained_history"sv, "frame_count"sv}, "whole-clip adaptive state");
-    } else if (typed_adaptive.transport == completion_channel_t::name) {
+    if (typed_adaptive.transport == completion_channel_t::name) {
       require_exact_keys(adaptive, std::array {"transport"sv, "retained_history"sv, "schema"sv, "capture"sv, "frame_count"sv}, "whole-clip adaptive state");
     } else if (typed_adaptive.transport == "atomic-latest-v1") {
       require_exact_keys(adaptive, std::array {"transport"sv, "header_file"sv, "frame_file"sv, "retained_history"sv, "schema"sv, "capture"sv, "frame_count"sv}, "whole-clip adaptive state");
@@ -1237,10 +1088,8 @@ namespace offline_sbs::wire {
     }
     typed_adaptive.retained_history = required_boolean(adaptive, "retained_history", "whole-clip adaptive state");
     typed_adaptive.frame_count = unsigned_integer<std::uint64_t>(adaptive, "frame_count", "whole-clip adaptive state");
-    if (typed_adaptive.transport != "none") {
-      typed_adaptive.schema = unsigned_integer<std::uint32_t>(adaptive, "schema", "whole-clip adaptive state");
-      typed_adaptive.capture = required_string(adaptive, "capture", "whole-clip adaptive state");
-    }
+    typed_adaptive.schema = unsigned_integer<std::uint32_t>(adaptive, "schema", "whole-clip adaptive state");
+    typed_adaptive.capture = required_string(adaptive, "capture", "whole-clip adaptive state");
     if (typed_adaptive.transport == completion_channel_t::name &&
         (typed_runtime.frame_transport != raw_frame_transport::name ||
          !typed_runtime.follow_mode || typed_runtime.follow_frame_pattern ||
@@ -1266,7 +1115,7 @@ namespace offline_sbs::wire {
         result.depth_reuse_interval <= 0 ||
         typed_runtime.model != result.model ||
         typed_runtime.depth_reuse_interval != result.depth_reuse_interval ||
-        typed_runtime.output_every == 0 || typed_runtime.output_scale <= 0.0 ||
+        typed_runtime.output_every == 0 ||
         typed_runtime.resolved_max_output_width <= 0 ||
         typed_runtime.output_eye_width == 0 || typed_runtime.output_eye_height == 0 ||
         static_cast<std::uint64_t>(typed_runtime.output_sbs_width) !=

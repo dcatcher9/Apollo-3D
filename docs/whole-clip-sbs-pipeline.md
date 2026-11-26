@@ -157,8 +157,8 @@ and complete output before publication. The decoded probe of the stream-copied f
 that gate; the intermediate encoder stream is not decoded. Because Matroska's millisecond
 timestamps allow one output tick, a Matroska job also checks the intermediate's packet
 timestamps and durations exactly against the source. Success requires exactly one
-scheduled/enqueued TensorRT update per source frame, selected-input/full-frame scope, the live V2
-renderer, complete immutable SBS publication, and zero cache/replay use.
+scheduled/enqueued TensorRT update per source frame, selected-input/full-frame scope, the raw
+memory transport, and complete immutable SBS publication.
 
 ## Job ownership and recovery
 

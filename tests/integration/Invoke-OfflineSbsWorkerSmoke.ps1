@@ -538,8 +538,6 @@ function New-WorkerSpec {
     pipeline = [ordered] @{
       implementation = 'native-causal-single-pass'
       lookahead = $false
-      scene_cache = $false
-      replay = $false
     }
     python_dependency = $false
   }
@@ -1179,11 +1177,8 @@ title=Smoke chapter
       $result.PSObject.Properties.Name -notcontains $retiredField
     ) "worker result still carries the retired '$retiredField' field"
   }
-  Assert-Contract (@($result.replay_contracts).Count -eq 0) 'direct conversion unexpectedly published replay contracts'
-  Assert-Contract ([long] $result.cache.peak_bytes -eq 0) 'direct conversion unexpectedly wrote a scene cache'
-  Assert-Contract ([long] $result.cache.remaining_bytes -eq 0) 'direct conversion retained cached frame bytes'
   Assert-Contract (
-    [long] $result.cache.peak_cache_plus_raster_bytes -le
+    [long] $result.cache.peak_live_raster_bytes -le
     [long] $result.cache.hard_cap_bytes
   ) 'worker exceeded the exact transient-raster hard cap'
 
@@ -1223,17 +1218,6 @@ title=Smoke chapter
     $runtimeContract.frame_transport -eq 'bounded-raw-memory-v1' -and
     $runtimeContract.input_frame_format -eq $expectedInputFrameFormat
   ) 'direct conversion follow raster contract disagrees with the source color mode'
-  Assert-Contract (
-    $runtimeContract.scene_cache_write -eq $false -and
-    $runtimeContract.scene_cache_replay -eq $false -and
-    $null -eq $runtimeContract.scene_cache_contract_schema -and
-    $null -eq $runtimeContract.scene_plan_schema -and
-    $null -eq $runtimeContract.scene_plan_version -and
-    $null -eq $runtimeContract.scene_start_sequence -and
-    $null -eq $runtimeContract.scene_end_sequence_exclusive -and
-    $null -eq $runtimeContract.scene_cache_status_at_replay_start -and
-    $null -eq $runtimeContract.scene_cache_processed_count_at_replay_start
-  ) 'direct conversion unexpectedly enabled a cache, plan, or replay runtime'
   Assert-Contract (
     $sbsContract.enabled -eq $true -and
     [long] $sbsContract.frame_count -eq 16 -and
@@ -1437,11 +1421,7 @@ title=Smoke chapter
     $null -eq $evaluationRuntime.follow_done_sentinel -and
     $null -eq $evaluationRuntime.follow_failed_sentinel -and
     $evaluationRuntime.input_frame_format -eq $expectedInputFrameFormat -and
-    [long] $evaluationRuntime.follow_poll_interval_ms -eq 0 -and
-    $evaluationRuntime.parallax_v2_render -eq $true -and
-    $evaluationRuntime.parallax_v2_live -eq $true -and
-    $evaluationRuntime.scene_cache_write -eq $false -and
-    $evaluationRuntime.scene_cache_replay -eq $false
+    [long] $evaluationRuntime.follow_poll_interval_ms -eq 0
   ) 'evaluation does not share the direct causal online runtime contract'
   Assert-Contract (
     $evaluationAnalysis.adaptive_state.transport -eq 'bounded-completion-memory-v1' -and
@@ -1455,11 +1435,8 @@ title=Smoke chapter
     [long] $evaluationAnalysis.sbs.width -eq 0 -and
     [long] $evaluationAnalysis.sbs.height -eq 0 -and
     $evaluationAnalysis.sbs.atomic_publication -eq $false -and
-    $evaluationRuntime.follow_atomic_sbs_publication -eq $false -and
-    @($evaluation.replay_contracts).Count -eq 0 -and
-    [long] $evaluation.cache.peak_bytes -eq 0 -and
-    [long] $evaluation.cache.remaining_bytes -eq 0
-  ) 'evaluation unexpectedly produced SBS, cache, or replay artifacts'
+    $evaluationRuntime.follow_atomic_sbs_publication -eq $false
+  ) 'evaluation unexpectedly produced SBS artifacts'
   Assert-Contract (
     $evaluation.timeline_contract.mode -eq 'evaluation-only' -and
     $null -eq $evaluation.timeline_contract.max_output_ticks -and
@@ -1478,7 +1455,7 @@ title=Smoke chapter
   Write-Host (
     "[offline-sbs-smoke] PASS: conversion + evaluation, 16 frames each, " +
     "$Codec, $($FixtureColor.ToUpperInvariant()), " +
-    'no lookahead/cache/replay, exact authenticated worker contracts'
+    'no lookahead, exact authenticated worker contracts'
   )
 } catch {
   $scriptExitCode = 1
