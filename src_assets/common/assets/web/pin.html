@@ -937,7 +937,7 @@
       </details>
     </section>
 
-    <ar-glasses v-if="platform === 'windows'" class="ar-device-host" embedded></ar-glasses>
+    <ar-glasses class="ar-device-host" embedded></ar-glasses>
   </main>
 </body>
 
@@ -1032,7 +1032,6 @@
   let currentEditingClient = null;
 
   const data = () => ({
-    platform: '',
     otp: '',
     passphrase: '',
     hostAddr: '',
@@ -1315,7 +1314,6 @@
         try {
           const body = await getJson('./api/clients/list');
 
-          this.platform = body.platform || this.platform;
           // The pairing poll calls this every two seconds. Keep the entry the user is editing
           // or saving, so a refresh does not discard an open device editor.
           const inProgress = new Map(

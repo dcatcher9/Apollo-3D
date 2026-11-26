@@ -276,7 +276,7 @@
         return /(?:Fatal|Error):.*(?:depth model|TensorRT).*(?:failed|unavailable|could not|error)/i.test(this.logs)
       },
       virtualDisplayStatus() {
-        if (!this.config || this.config.platform !== 'windows') {
+        if (!this.config) {
           return { status: this.loading ? 'Checking' : 'Automatic', tone: 'neutral', description: 'Sunshine 3D will use the best available display for the device.' }
         }
         const status = Number(this.config.vdisplayStatus)

@@ -9,10 +9,6 @@ const props = defineProps({
     type: Object,
     required: true,
   },
-  platform: {
-    type: String,
-    default: '',
-  },
   vdisplay: {
     type: [String, Number],
     default: '1',
@@ -141,7 +137,7 @@ function setOnOff(key, event) {
         <small>Controls Sunshine-generated 3D separation and the base strength for new offline conversions. Game 3D strength is set in ReShade's Sunshine 3D add-on panel.</small>
       </label>
 
-      <Host3dSubtitleApps v-if="platform === 'windows'" />
+      <Host3dSubtitleApps />
     </section>
 
     <section class="settings-card">
@@ -196,7 +192,7 @@ function setOnOff(key, event) {
           />
         </label>
       </div>
-      <div v-if="platform === 'windows'" class="simple-toggle-row tray-taskbar-repair">
+      <div class="simple-toggle-row tray-taskbar-repair">
         <div>
           <strong>{{ $t('config.virtual_display_restart_explorer') }}</strong>
           <span>{{ $t('config.virtual_display_restart_explorer_desc') }}</span>

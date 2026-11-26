@@ -342,7 +342,7 @@
         <div class="health-icon" :class="{ idle: !sessionActive }"><i class="fas fa-satellite-dish"></i></div>
         <div><span>Streaming session</span><strong>{{ sessionActive ? 'Active' : 'Idle' }}</strong></div>
       </div>
-      <div v-if="platform === 'windows'" class="health-item">
+      <div class="health-item">
         <div class="health-icon" :class="{ warning: !virtualDisplayReady }"><i class="fas fa-vr-cardboard"></i></div>
         <div><span>Virtual display</span><strong>{{ virtualDisplayLabel }}</strong></div>
       </div>
@@ -444,7 +444,6 @@
           serverRestarting: false,
           serverQuitting: false,
           serverQuit: false,
-          platform: "",
           currentApp: "",
           vdisplayStatus: "1",
           advancedRecoveryOpen: location.hash === '#quit',
@@ -490,7 +489,6 @@
             getJson('./api/apps'),
           ])
             .then(([config, apps]) => {
-              this.platform = config.platform;
               this.vdisplayStatus = config.vdisplayStatus;
               this.currentApp = apps.current_app || '';
             })

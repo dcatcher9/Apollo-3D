@@ -319,7 +319,6 @@
         <essentials
           v-if="currentTab === 'essential'"
           :config="config"
-          :platform="platform"
           :vdisplay="vdisplayStatus"
         ></essentials>
 
@@ -440,7 +439,6 @@
         configError: '',
         loadedLocalMonitorFingerprint: '',
         currentTab: "essential",
-        platform: "",
         vdisplayStatus: "1",
         global_prep_cmd: [],
         tabs: [ // TODO: Move the options to each Component instead, encapsulate.
@@ -587,10 +585,8 @@
           // Build the settings object completely before publishing it, so a failure below
           // shows the error instead of a half-populated form.
           const config = r;
-          this.platform = r.platform || "";
 
           // remove values we don't want in the config file
-          delete config.platform;
           delete config.status;
           delete config.version;
           migrateLocalDisplaySurface(config);

@@ -1053,7 +1053,6 @@ namespace confighttp {
   void getClients(resp_https_t response, req_https_t request) {
     nlohmann::json output_tree;
     output_tree["named_certs"] = nvhttp::get_all_clients();
-    output_tree["platform"] = "windows";
     output_tree["status"] = true;
     send_response(response, output_tree);
   }
@@ -1302,7 +1301,6 @@ namespace confighttp {
   void getConfig(resp_https_t response, req_https_t request) {
     nlohmann::json output_tree;
     output_tree["status"] = true;
-    output_tree["platform"] = SUNSHINE_PLATFORM;
     output_tree["version"] = PROJECT_VERSION;
     output_tree["vdisplayStatus"] = (int) proc::vDisplayDriverStatus.load();
     auto vars = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
