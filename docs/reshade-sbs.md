@@ -2764,10 +2764,13 @@ past the buffer height reads the mask row of its eye), and the pack binds the st
 height tells the pack to read each eye's own rows. The scene field itself, the adaptive probe and
 the Dump 3D artifacts are unchanged, and an exact repeat that keeps the scene field keeps the
 store. The store is not a dump artifact; a replay recomputes it. The renderer requires the marker
-(**Shader capability markers**). `reshade_game3d_native_runtime_test` checks the production
-render's eye fields against their one-sided slopes and the frames it shows without stereo against
-the frozen FX (the FX has the scene field alone); until 11-25 it also rendered the production
-shader without the marker against the frozen FX. The pin band below keeps its 0.5 ramp in both eyes; with a partly
+(**Shader capability markers**). The native runtime tests (D3D12 and D3D11) compare every case
+with the frozen FX, which has the scene field alone, through a second renderer of the same shader
+whose eye limiter a test build turns off (`renderer::set_eye_limiter`, compiled only under
+`SUNSHINE_GAME3D_RENDERER_TEST`): it builds no store and its pack reads the scene field for both
+eyes. The production render's eye fields are checked against their one-sided slopes, and the frames
+it shows without stereo must equal that parity render byte for byte. The pin band below keeps its
+0.5 ramp in both eyes; with a partly
 transparent mask on a covered-side ramp the forward scan can pin slightly more than the closed form
 `b`, never less.
 

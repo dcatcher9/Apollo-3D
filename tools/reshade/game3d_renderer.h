@@ -178,7 +178,8 @@ namespace sunshine_game3d {
   struct diagnostic_resources {
     reshade::api::resource source{}, candidate{}, vertical_majorant{}, vertical_field{}, final_field{}, sbs{}, ui_source{};
     // Both eyes' horizontal fields, twice the field height (left-eye rows, then
-    // right-eye rows), up to 3840 pixels per side; not a dump artifact.
+    // right-eye rows), up to 3840 pixels per side; not a dump artifact. Empty
+    // while a test turned the eye limiter off (renderer::set_eye_limiter).
     reshade::api::resource eye_field{};
     // sbs holds 10-bit PQ code values (renderer::set_pq_output: Rec.2020,
     // ST 2084, R10G10B10A2_UNORM) instead of FP16 scRGB.
@@ -295,6 +296,14 @@ namespace sunshine_game3d {
     // render.
     bool first_render_prepared() const;
     bool last_detection_used_compact_tiles() const;
+    // The configured renderer's eye limiter (SUNSHINE_EYE_LIMITER), on until
+    // turned off here, for this renderer only (a configure that builds
+    // another starts with it on). Off, conditioning builds no eye field
+    // (diagnostics().eye_field stays empty) and the pack warps both eyes with
+    // the symmetric scene field, as the frozen SunshineGame3D.fx does: the
+    // native runtime tests' scene-field parity render. The shader is
+    // unchanged; false without a configured renderer.
+    bool set_eye_limiter(bool enabled);
 #endif
     static std::string_view shader_source();
     std::string_view active_shader_source() const;

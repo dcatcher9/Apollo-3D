@@ -116,32 +116,30 @@ namespace {
     const api::resource backbuffer{reinterpret_cast<std::uint64_t>(fixture.backbuffer.p)};
     require(renderer.configure(observed.runtime, backbuffer, static_cast<api::color_space>(fixture.color)), "D3D11 native renderer configure failed");
     std::ofstream report(directory / "native-parity.txt");
-    // The frozen FX warps both eyes with the scene field alone: a frame the
-    // production pack shows without stereo (no depth, zero strength or the
-    // depth preview) matches it; a stereo frame keeps every other check.
+    // The frozen FX warps both eyes with the scene field alone. Before each
+    // production render, a second renderer with its eye limiter off (the
+    // renderer view's renderer::set_eye_limiter) renders the case so, and
+    // every case is compared with the FX; a frame the production pack shows
+    // without stereo (no depth, zero strength or the depth preview) is that
+    // parity frame byte for byte, and a stereo frame keeps every other check.
+    sunshine_game3d::renderer parity;
     unsigned index = 0, fx_matched = 0;
     for (const auto &test : native11_cases) {
       p.strength = test.strength; p.depth_view = test.view; p.depth_ready = test.ready;
       fixture.context->CopyResource(fixture.backbuffer.p, fixture.source_pattern.p);
-      require(sunshine_game3d::test::render_frame(renderer, queue->get_immediate_command_list(), backbuffer, test.ready ? observed.depth_view : api::resource_view{}, p), "D3D11 native renderer rejected frame");
-      const bool dump_case = std::strcmp(test.name,"strength50")==0 || std::strcmp(test.name,"depth-unavailable")==0;
-      if (dump_case) dump.begin(observed.runtime,renderer,p,test.ready ? observed.depth_view : api::resource_view{},false,
-        static_cast<api::color_space>(fixture.color));
-      queue->flush_immediate_command_list(); renderer.finish_present();
-      if (dump_case) dump.submitted(observed.runtime);
+      require(parity.configure(observed.runtime, backbuffer, static_cast<api::color_space>(fixture.color)) && parity.set_eye_limiter(false),
+        "D3D11 native renderer cannot configure the scene-field parity render");
+      require(sunshine_game3d::test::render_frame(parity, queue->get_immediate_command_list(), backbuffer, test.ready ? observed.depth_view : api::resource_view{}, p),
+        "D3D11 native renderer rejected the scene-field parity frame");
+      queue->flush_immediate_command_list(); parity.finish_present();
       queue->wait_idle();
-      if (dump_case) dump.verify(observed.runtime,[&](api::resource texture,bool) {
-        return fixture.read(reinterpret_cast<ID3D11Texture2D *>(texture.handle));
-      }, directory / (std::string("dump-") + test.name));
-      const auto output = renderer.output();
-      require(output.handle != 0, "D3D11 native renderer output missing");
-      com_ptr<ID3D11Texture2D> texture;
-      checked(reinterpret_cast<ID3D11Resource *>(output.handle)->QueryInterface(IID_PPV_ARGS(texture.put())), "D3D11 native export is not a texture");
-      const auto production_pixels = fixture.read(texture.p);
-      require(renderer.diagnostics().eye_field.handle != 0, "The D3D11 production shader built no eye field");
-      const bool mono = !p.depth_ready || !p.camera_ready || p.depth_view == 2 || !(p.strength > 0.f) || !(p.strength_blend > 0.f);
-      if (mono) {
-        const auto &pixels = production_pixels;
+      require(parity.output().handle != 0 && parity.diagnostics().eye_field.handle == 0, "The D3D11 scene-field parity render built an eye field");
+      com_ptr<ID3D11Texture2D> scene_texture;
+      checked(reinterpret_cast<ID3D11Resource *>(parity.output().handle)->QueryInterface(IID_PPV_ARGS(scene_texture.put())), "D3D11 scene-field export is not a texture");
+      const auto scene_pixels = fixture.read(scene_texture.p);
+      scene_texture = {};
+      {
+        const auto &pixels = scene_pixels;
         require(pixels.size() == reference[index].size(), "D3D11 native/FX export sizes differ");
         double maximum = 0;
         for (size_t pixel = 0; pixel < size_t(width) * height * 2; ++pixel) for (unsigned channel = 0; channel < 4; ++channel) {
@@ -164,6 +162,25 @@ namespace {
         require(maximum <= (fixture.color == 1 ? 1.01 / 1023 : .002), "D3D11 native/FX parity exceeded export quantization");
         ++fx_matched;
       }
+      fixture.context->CopyResource(fixture.backbuffer.p, fixture.source_pattern.p);
+      require(sunshine_game3d::test::render_frame(renderer, queue->get_immediate_command_list(), backbuffer, test.ready ? observed.depth_view : api::resource_view{}, p), "D3D11 native renderer rejected frame");
+      const bool dump_case = std::strcmp(test.name,"strength50")==0 || std::strcmp(test.name,"depth-unavailable")==0;
+      if (dump_case) dump.begin(observed.runtime,renderer,p,test.ready ? observed.depth_view : api::resource_view{},false,
+        static_cast<api::color_space>(fixture.color));
+      queue->flush_immediate_command_list(); renderer.finish_present();
+      if (dump_case) dump.submitted(observed.runtime);
+      queue->wait_idle();
+      if (dump_case) dump.verify(observed.runtime,[&](api::resource texture,bool) {
+        return fixture.read(reinterpret_cast<ID3D11Texture2D *>(texture.handle));
+      }, directory / (std::string("dump-") + test.name));
+      const auto output = renderer.output();
+      require(output.handle != 0, "D3D11 native renderer output missing");
+      com_ptr<ID3D11Texture2D> texture;
+      checked(reinterpret_cast<ID3D11Resource *>(output.handle)->QueryInterface(IID_PPV_ARGS(texture.put())), "D3D11 native export is not a texture");
+      const auto production_pixels = fixture.read(texture.p);
+      require(renderer.diagnostics().eye_field.handle != 0, "The D3D11 production shader built no eye field");
+      const bool mono = !p.depth_ready || !p.camera_ready || p.depth_view == 2 || !(p.strength > 0.f) || !(p.strength_blend > 0.f);
+      if (mono) require(production_pixels == scene_pixels, "A D3D11 frame without stereo differs between the scene-field parity and production renders");
       require(fixture.read(fixture.backbuffer.p) == source, "D3D11 native renderer changed mono game color");
       {
         // Owed conditioning (C2): with the pack owed, pack() records the
@@ -330,7 +347,8 @@ namespace {
     require(observed.renders == effects, "An FX technique ran during native D3D11 phase");
     queue->wait_idle(); renderer.reset_after_runtime_drain();
     require(report.good(), "Cannot write native D3D11 parity report");
-    std::printf("PASS D3D11 native renderer: six cases, %u without stereo frozen-FX-matched, no installed/loaded FX, exact native mono preservation\n", fx_matched);
+    require(fx_matched == std::size(native11_cases), "A D3D11 native case was not compared with the frozen FX");
+    std::printf("PASS D3D11 native renderer: %u of six cases frozen-FX-matched (scene-field parity render), frames without stereo byte-identical in production, no installed/loaded FX, exact native mono preservation\n", fx_matched);
   }
 }
 

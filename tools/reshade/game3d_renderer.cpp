@@ -216,6 +216,11 @@ namespace sunshine_game3d {
     uint64_t scene_evidence_runs{};
 #ifdef SUNSHINE_GAME3D_RENDERER_TEST
     bool compact_tiles_used = false;
+    // renderer::set_eye_limiter: off, the pack warps both eyes with the scene
+    // field, as the frozen FX does. The shipping renderer has it always on.
+    bool eye_limiter = true;
+#else
+    static constexpr bool eye_limiter = true;
 #endif
     // The constants of the last detection run, and the run this render's mask
     // came from (fresh, or held on a generated Present).
@@ -789,7 +794,7 @@ namespace sunshine_game3d {
         // needs this render's passes).
         // The packed eyes only need their own fields. Keep the symmetric
         // field for diagnostic and explicit render callers.
-        const bool eye_only = owed_pack && !c.final_field_required && !c.armed && !c.probe;
+        const bool eye_only = eye_limiter && owed_pack && !c.final_field_required && !c.armed && !c.probe;
         const bool keep_field = reuse && field_memo_valid && (eye_only || symmetric_field_ready) && !c.probe &&
           ui_words == field_memo_words && (!c.apply_ui || (c.ui_alpha.handle == t[detected_mask].srv.handle &&
             c.ui_alpha.handle == field_memo_view && mask_epoch == field_memo_epoch));
@@ -803,9 +808,11 @@ namespace sunshine_game3d {
           // One field per eye from the same vertical field, then the same UI
           // pin on both halves: the store takes the scene field's slot, and
           // an exact repeat keeps it with the scene field.
-          dispatch_as(cmd, eye_limit, (height + 7) / 8, p, field_inputs, eye_field, field);
-          if (c.apply_ui)
-            dispatch_as(cmd, ui_apply, (2 * height + pin_lines - 1) / pin_lines, p, field_inputs, eye_field, field);
+          if (eye_limiter) {
+            dispatch_as(cmd, eye_limit, (height + 7) / 8, p, field_inputs, eye_field, field);
+            if (c.apply_ui)
+              dispatch_as(cmd, ui_apply, (2 * height + pin_lines - 1) / pin_lines, p, field_inputs, eye_field, field);
+          }
         }
         field_memo_valid = memo_valid && !c.armed && !c.probe;
         field_memo_words = ui_words;
@@ -820,7 +827,7 @@ namespace sunshine_game3d {
       cmd->barrier(target, resting, api::resource_usage::render_target);
       cmd->bind_pipeline(api::pipeline_stage::all_graphics, pipelines[pq_output ? pack_pq : pack]);
       bindings(cmd, api::shader_stage::all_graphics, pack_parameters,
-        {textures[source].srv, pack_depth, {}, {}, {}, textures[eye_field].srv});
+        {textures[source].srv, pack_depth, {}, {}, {}, textures[eye_limiter ? eye_field : field].srv});
       const api::viewport viewport{0, 0, float(width * 2), float(height), 0, 1};
       const api::rect scissor{0, 0, int32_t(width * 2), int32_t(height)};
       cmd->bind_viewports(0, 1, &viewport); cmd->bind_scissor_rects(0, 1, &scissor);
@@ -1587,6 +1594,13 @@ namespace sunshine_game3d {
       (!pq || d.textures[impl::packed_pq].resource.handle);
   }
   bool renderer::last_detection_used_compact_tiles() const { return data_ && data_->compact_tiles_used; }
+  bool renderer::set_eye_limiter(bool enabled) {
+    if (!data_) return false;
+    data_->eye_limiter = enabled;
+    // A kept final field could be one the other setting left.
+    data_->field_memo_valid = false;
+    return true;
+  }
 #endif
   std::string_view renderer::shader_source() { return {game3d_shader_source, sizeof(game3d_shader_source) - 1}; }
   std::string_view renderer::active_shader_source() const { return data_ ? data_->shader_source() : shader_source(); }
@@ -2205,7 +2219,8 @@ namespace sunshine_game3d {
     diagnostic_resources result{t[impl::source].resource, t[impl::raw].resource,
       t[impl::vertical_majorant].resource, t[impl::vertical_field].resource,
       data_->symmetric_field_ready ? t[impl::field].resource : api::resource{},
-      t[data_->packed_texture()].resource, data_->consumed_ui_source, t[impl::eye_field].resource};
+      t[data_->packed_texture()].resource, data_->consumed_ui_source,
+      data_->eye_limiter ? t[impl::eye_field].resource : api::resource{}};
     result.sbs_pq = data_->pq_output;
     return result;
   }

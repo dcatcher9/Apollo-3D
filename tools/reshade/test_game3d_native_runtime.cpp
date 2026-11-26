@@ -1821,6 +1821,11 @@ namespace {
     sunshine_game3d_test::check_background_build(observed.runtime, fixture.color, "D3D12");
 
     sunshine_game3d::renderer renderer;
+    // The frozen FX warps both eyes with the scene field alone. Before each production render, a
+    // second renderer of the same shader with its eye limiter off (the renderer view's
+    // renderer::set_eye_limiter) renders the case so, and every case is compared with the FX;
+    // the production renderer's own state never sees that render.
+    sunshine_game3d::renderer parity;
     sunshine_game3d_test::dump_fixture dump;
     auto *owner_queue = observed.runtime->get_command_queue();
     std::size_t fx_matched = 0;
@@ -1829,6 +1834,17 @@ namespace {
       auto *backbuffer = fixture.backbuffers[fixture.swapchain->GetCurrentBackBufferIndex()].p;
       write_native_source(fixture, backbuffer);
       const api::resource source{reinterpret_cast<std::uint64_t>(backbuffer)};
+      require(parity.configure(observed.runtime, source, static_cast<api::color_space>(fixture.color)) && parity.set_eye_limiter(false),
+        "Native renderer cannot configure the scene-field parity render");
+      require(sunshine_game3d::test::render_frame(parity, owner_queue->get_immediate_command_list(), source,
+        test.parameters.depth_ready ? fixture.depth_view : api::resource_view{}, test.parameters), "Native renderer rejected the scene-field parity frame");
+      owner_queue->flush_immediate_command_list();
+      parity.finish_present();
+      owner_queue->wait_idle();
+      require(parity.output().handle != 0 && parity.diagnostics().eye_field.handle == 0, "The scene-field parity render built an eye field");
+      const auto scene_pixels = fixture.read(reinterpret_cast<ID3D12Resource *>(parity.output().handle));
+      compare_pixels(test, fixture.color, load_pixels(results / (test.name + ".fx.bin")), scene_pixels, report);
+      ++fx_matched;
       require(renderer.configure(observed.runtime, source, static_cast<api::color_space>(fixture.color)), "Native renderer configure failed");
       require(sunshine_game3d::test::render_frame(renderer, owner_queue->get_immediate_command_list(), source,
         test.parameters.depth_ready ? fixture.depth_view : api::resource_view{}, test.parameters), "Native renderer rejected ready parity frame");
@@ -1854,16 +1870,14 @@ namespace {
       sunshine_parity::write_bytes(results / (test.name + ".native.bin"), pixels.data(), pixels.size());
       {
         // The production render: each eye is warped with its own field. A frame that shows the
-        // source (no depth, zero strength) or the depth preview matches the frozen FX, which warps
-        // both eyes with the scene field alone; a stereo frame is checked on its own terms.
+        // source (no depth, zero strength) or the depth preview reads no field, so it is the
+        // FX-matched parity frame byte for byte; a stereo frame is also checked on its own terms.
         const auto fields = renderer.diagnostics();
         const bool shows_source = !test.parameters.depth_ready || !test.parameters.camera_ready || test.parameters.depth_view == 2 ||
           !(test.parameters.strength > 0.f) || !(test.parameters.strength_blend > 0.f);
         require(fields.eye_field.handle != 0, "The production shader built no eye field");
-        if (shows_source) {
-          compare_pixels(test, fixture.color, load_pixels(results / (test.name + ".fx.bin")), pixels, report);
-          ++fx_matched;
-        } else check_eye_fields(test.name,
+        if (shows_source) require(pixels == scene_pixels, "A frame without stereo differs between the scene-field parity and production renders");
+        else check_eye_fields(test.name,
           fixture.read(reinterpret_cast<ID3D12Resource *>(fields.vertical_field.handle)),
           fixture.read(reinterpret_cast<ID3D12Resource *>(fields.final_field.handle)),
           fixture.read(reinterpret_cast<ID3D12Resource *>(fields.eye_field.handle)), test.name == "raw-cliffs-strength50");
@@ -2403,7 +2417,8 @@ namespace {
       std::puts("PASS completion claim D3D12: signalled without a render, and on release after a missed finish_present");
     }
     require(report.good(), "Could not write native parity report");
-    std::printf("PASS native D3D12 renderer: %zu cases, %zu without stereo FX-matched; no installed FX; HDR/SDR, depth loss, both diagnostics, camera/raw modes, jitter/crop and full-resolution recovery\n", tests.size(), fx_matched);
+    require(fx_matched == tests.size(), "A native case was not compared with the frozen FX");
+    std::printf("PASS native D3D12 renderer: %zu of %zu cases FX-matched (scene-field parity render), stereo eye fields and frames without stereo checked in production; no installed FX; HDR/SDR, depth loss, both diagnostics, camera/raw modes, jitter/crop and full-resolution recovery\n", fx_matched, tests.size());
   }
 }
 

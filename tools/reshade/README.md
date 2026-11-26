@@ -1653,10 +1653,10 @@ every file of a binary sees the same declarations; a binary links one view.
 | View | Seam defines | Linked by |
 |---|---|---|
 | `sunshine_game3d_core` | none | `SunshineSBS`, `replay_game3d_dump`, and the tests without a seam (UI mask, UI capture, UI layer, camera data, queue-cycle and source-alpha) |
-| `sunshine_game3d_core_runtime_test` | `SUNSHINE_SBS_RUNTIME_TEST_ADDON`, `SUNSHINE_GAME3D_RENDERER_TEST` (the renderer's build hooks, inert until the lifecycle test sets them), `SUNSHINE_GAME3D_TEST_CLOCK` (the test clock's seams: the virtual game clock, inert until a fixture engages it, and the pool work count) | `SunshineSBSTest` |
+| `sunshine_game3d_core_runtime_test` | `SUNSHINE_SBS_RUNTIME_TEST_ADDON`, `SUNSHINE_GAME3D_RENDERER_TEST` (the renderer's build hooks, inert until the lifecycle test sets them, and its eye-limiter switch, which the add-on never turns off), `SUNSHINE_GAME3D_TEST_CLOCK` (the test clock's seams: the virtual game clock, inert until a fixture engages it, and the pool work count) | `SunshineSBSTest` |
 | `sunshine_game3d_core_sbs_test` | `SUNSHINE_SBS_TEST` | `reshade_exporter_tests`, whose test file includes `exporter_internal.h` and links this view's one compiled `exporter.cpp` |
 | `sunshine_game3d_core_probe_test` | Streamline probe, NGX call trace, native observers, synchronous log | the probe, contract matrix (pure, hook and device layers), seam characterization, call trace, native observer and diagnostic-texture tests |
-| `sunshine_game3d_core_renderer_test` | `SUNSHINE_GAME3D_RENDERER_TEST` | the native runtime tests |
+| `sunshine_game3d_core_renderer_test` | `SUNSHINE_GAME3D_RENDERER_TEST` (also the renderer's eye-limiter switch, `renderer::set_eye_limiter`, on unless a native runtime test turns it off for its frozen-FX parity render) | the native runtime tests |
 
 Production files hold no tests. A white-box test reaches a file's internals through that file's
 `*_test_access.h`: the capture owner's regressions are in
