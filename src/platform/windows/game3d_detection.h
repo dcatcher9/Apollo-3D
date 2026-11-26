@@ -51,18 +51,15 @@ namespace platf::game3d {
 
   // Worker-thread observation of the foreground application on the captured display. General
   // rules, without store-library or engine-layout lists, for a verified, live process outside the
-  // Windows directory and the non-game suppression list. An add-on game is a native x64 process
-  // with D3D11/12 loaded whose foreground client exactly covers the captured output. A text game
-  // is one the rules of detail::is_text_game_candidate describe; a 64-bit process that fits both
-  // is a text game unless the add-on is already loaded in it. A candidate only selects what
-  // setup may offer; this never injects into the process or changes presentation mode.
-  // Process access/enumeration failure and a changing foreground identity return no candidate.
-  [[nodiscard]] std::optional<detected_game> detect_game(RECT capture_rect) noexcept;
-
-  // The same observation, also of an application no rule describes. Such an application is one
-  // its owner may choose for conversion: a verified, live process outside the Windows directory
-  // and the non-game suppression list whose whole client area is on the captured output. No
-  // candidate where even that does not hold.
+  // Windows directory and the non-game suppression list whose whole client area is on the
+  // captured output. An add-on game is a native x64 process with D3D11/12 loaded whose foreground
+  // client exactly covers the captured output. A text game is one the rules of
+  // detail::is_text_game_candidate describe; a 64-bit process that fits both is a text game
+  // unless the add-on is already loaded in it. An application no rule describes is one its owner
+  // may choose for conversion. A candidate only selects what setup may offer; this never injects
+  // into the process or changes presentation mode. Process access/enumeration failure and a
+  // changing foreground identity return no candidate, as does an application where even the
+  // general rules do not hold.
   [[nodiscard]] std::optional<foreground_application> observe_foreground(RECT capture_rect) noexcept;
 
   // The text game an application is once its owner has chosen it.
@@ -88,7 +85,7 @@ namespace platf::game3d {
 
   namespace detail {
     // Pure admission policy, shared with focused tests. Native process lifetime, x64, Windows
-    // directory and module census checks are performed before calling this in detect_game().
+    // directory and module census checks are performed before calling this in observe_foreground().
     [[nodiscard]] bool is_game_candidate(
       const std::filesystem::path &executable,
       std::span<const std::filesystem::path> loaded_modules,

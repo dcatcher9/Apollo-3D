@@ -488,11 +488,6 @@ namespace platf::game3d {
     last_seen_ = {};
   }
 
-  std::optional<detected_game> detect_game(const RECT capture_rect) noexcept {
-    const auto application = observe_foreground(capture_rect);
-    return application && application->recognised ? std::optional(application->game) : std::nullopt;
-  }
-
   detected_game as_chosen(const foreground_application &application) {
     auto game = application.game;
     game.kind = game_kind_e::text_hook;
