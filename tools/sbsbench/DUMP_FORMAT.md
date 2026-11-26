@@ -131,6 +131,10 @@ exports and their unversioned analytic attribution. The canonical reader require
 dump schema.
 
 Schema-2 draw evidence removes the unused `t8` role and `actual_original_legacy_M.u32` artifact.
+Current schema-2 evidence also omits the retired `t9`/`t11`/`b4` background roles, their
+`actual_background*` artifacts and `background_*` fields, the never-bound `actual_source_C24.u32`
+copy with its `source_C24_*` comparison, and `transport_serial`. No draw shader reads those slots.
+Readers ignore these keys in older schema-2 captures.
 The original dense matte required by independent diagnostics remains available.
 Failure to prepare shared subtitles, or invalid selected authority, preserves usable ordinary Base
 with subtitle permission disabled. Invalid or unavailable depth retains the independent flat path.

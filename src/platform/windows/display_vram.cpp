@@ -2740,8 +2740,6 @@ namespace platf::dxgi {
                   }
                   e.matte = actual[3];
                   e.selected_receipt = actual[7];
-                  e.background = actual[9];
-                  e.background_proof = actual[11];
                   if (e.shared_pin_selected) {
                     e.shared_pin_weights = actual[12];
                     e.shared_pin_field = actual[13];
@@ -2754,9 +2752,6 @@ namespace platf::dxgi {
                   }
                   e.geometry_constants = constants[0];
                   e.subtitle_constants = constants[1];
-                  e.expected = constants[2];
-                  // Retired repair ownership fields retain their unavailable defaults. The
-                  // unused repair slots above remain observed so diagnostics cannot invent absence.
                   e.owner_serial = e.shared_pin_selected ? current_shared_warp.serial : 0u;
                   e.colour_key = {frame_id, draw_source_attribution ? draw_source_attribution->frame_id : 0u, draw_source_attribution ? static_cast<std::uint64_t>(draw_colour.captured_at.time_since_epoch().count()) : 0u, static_cast<std::uint64_t>(subtitle_constants.color_mode)};
                   e.analysis_source_rect = {subtitle_constants.source_left, subtitle_constants.source_top, subtitle_constants.source_width, subtitle_constants.source_height};
