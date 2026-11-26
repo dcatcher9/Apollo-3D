@@ -2501,13 +2501,6 @@ def expected_shared_number(conf, key, default, extra, cli_key, cast=float):
         fail(f"invalid numeric value for {key}: {value!r}")
 
 
-def validate_unified_policy_options(extra):
-    """Reject removed selectors before GPU work instead of admitting another pipeline."""
-    for token in extra:
-        if token.split("=", 1)[0] in {"--joint-plane-experiment", "--joint-plane-mode"}:
-            raise ValueError(f"{token} was removed; Host SBS has one adaptive pipeline")
-
-
 def observation_timeline_override(extra):
     """Take a single caller timeline out of harness extras for per-clip authentication."""
     indices = [index for index, token in enumerate(extra) if token == "--observation-timeline"]
@@ -2709,17 +2702,12 @@ def _composite_engine_filename_matches(engine_name, spec):
 
 
 def _selected_depth_runtime(build_dir, model):
-    """Mirror the host's fail-closed optional-composite selection from local assets."""
+    """Authenticate the fused depth model the host requires from local assets."""
 
     assets = os.path.join(build_dir, "assets")
     composite_onnx_path = os.path.join(assets, COMPOSITE_DEPTH_MODEL + ".onnx")
     if not os.path.lexists(composite_onnx_path):
-        return {
-            "kind": "legacy",
-            "model": model,
-            "onnx_path": os.path.join(assets, model + ".onnx"),
-            "manifest_path": os.path.join(assets, model + ".active-engine.json"),
-        }
+        raise ValueError(f"composite ONNX is missing: {composite_onnx_path}")
     try:
         composite_mode = os.lstat(composite_onnx_path).st_mode
     except OSError as exc:
@@ -2733,7 +2721,6 @@ def _selected_depth_runtime(build_dir, model):
         raise ValueError(
             "composite ONNX SHA-256 does not match the frozen production artifact")
     return {
-        "kind": "composite",
         "model": COMPOSITE_DEPTH_MODEL,
         "onnx_path": composite_onnx_path,
         "onnx_sha256": actual_sha256,
@@ -2764,45 +2751,29 @@ def _inspect_depth_engine(build_dir, model):
     if not isinstance(manifest, dict):
         return selected, [f"{os.path.basename(manifest_path)}: manifest must be an object"]
 
-    if selected["kind"] == "legacy":
-        if manifest.get("schema") != 1:
-            issues.append(f"manifest schema {manifest.get('schema')!r} != 1")
-        if manifest.get("model") != model:
-            issues.append(f"manifest model {manifest.get('model')!r} != {model!r}")
-        try:
-            actual_onnx_sha = file_sha256(selected["onnx_path"])
-        except OSError as exc:
-            issues.append(f"ONNX source unavailable: {exc}")
-            actual_onnx_sha = None
-        else:
-            if manifest.get("onnx_sha256") != actual_onnx_sha:
-                issues.append("manifest ONNX SHA-256 does not match current source")
-        selected["onnx_sha256"] = actual_onnx_sha
-    else:
-        spec = selected["spec"]
-        expected_fields = {
-            "schema": 2,
-            "runtime": spec["runtime"],
-            "model": spec["model"],
-            "engine_recipe": spec["engine_recipe"],
-            "composite_onnx_sha256": selected["onnx_sha256"],
-            "embedded_dav2_onnx_sha256": spec["embedded_dav2_onnx_sha256"],
-            "zipdepth_checkpoint_sha256": spec["zipdepth_checkpoint_sha256"],
-            "guidance_preprocess_source_closure_sha256":
-                spec["guidance_preprocess_source_closure_sha256"],
-        }
-        for key, expected in expected_fields.items():
-            if manifest.get(key) != expected:
-                issues.append(
-                    f"composite manifest {key} {manifest.get(key)!r} != {expected!r}")
+    spec = selected["spec"]
+    expected_fields = {
+        "schema": 2,
+        "runtime": spec["runtime"],
+        "model": spec["model"],
+        "engine_recipe": spec["engine_recipe"],
+        "composite_onnx_sha256": selected["onnx_sha256"],
+        "embedded_dav2_onnx_sha256": spec["embedded_dav2_onnx_sha256"],
+        "zipdepth_checkpoint_sha256": spec["zipdepth_checkpoint_sha256"],
+        "guidance_preprocess_source_closure_sha256":
+            spec["guidance_preprocess_source_closure_sha256"],
+    }
+    for key, expected in expected_fields.items():
+        if manifest.get(key) != expected:
+            issues.append(
+                f"composite manifest {key} {manifest.get(key)!r} != {expected!r}")
 
     engine_name = manifest.get("engine")
     if (not isinstance(engine_name, str) or not engine_name or
             os.path.basename(engine_name) != engine_name):
         issues.append("manifest engine must be one filename")
         engine_name = None
-    if engine_name and selected["kind"] == "composite":
-        spec = selected["spec"]
+    if engine_name:
         if not _composite_engine_filename_matches(engine_name, spec):
             issues.append(
                 "composite manifest engine artifact does not match the exact "
@@ -2838,13 +2809,6 @@ def engine_provenance(build_dir, model):
     if issues:
         raise ValueError("active engine manifest changed after validation: " + "; ".join(issues))
     engine_sha256 = file_sha256(selected["engine_path"])
-    if selected["kind"] == "legacy":
-        return {
-            "engine_name": selected["engine_name"],
-            "engine_sha256": engine_sha256,
-            "onnx_sha256": selected["onnx_sha256"],
-        }
-
     spec = selected["spec"]
     manifest_path = selected["manifest_path"]
     return {
@@ -2987,8 +2951,6 @@ def main():
                          "clips and metrics must still match")
     ap.add_argument("--report-allow-model-diff", action="store_true",
                     help="allow an explicit depth-model A/B report; clips and metrics must match")
-    ap.add_argument("--report-allow-depth-step-diff", action="store_true",
-                    help="allow an explicit current-depth versus reused-depth cadence report")
     ap.add_argument("--report-allow-executable-diff", action="store_true",
                     help="allow an explicit old-code versus new-code report (binary and HLSL)")
     ap.add_argument("--allow-build", action="store_true", help="proceed even if engines are missing")
@@ -3033,9 +2995,6 @@ def main():
     evaluator_owned = sorted({"--frames", "--out", "--capabilities"} & set(args.extra))
     if evaluator_owned:
         fail(f"--extra may not override evaluator-owned harness arguments: {', '.join(evaluator_owned)}")
-    if "--cuda-graph" in args.extra:
-        fail("--cuda-graph was removed; inference-producing runs always require the joined "
-             "DAV2/OCR conditional wrapper")
 
     exe = os.path.join(args.build_dir, "sunshine.exe")
     default_clips, default_baselines = suite_defaults(args.suite)
@@ -3107,7 +3066,6 @@ def main():
     expected_pop = expected_shared_number(
         args.conf, "pop_strength", 1.75, args.extra, "--pop-strength")
     try:
-        validate_unified_policy_options(args.extra)
         timeline_override, harness_extra = observation_timeline_override(args.extra)
     except ValueError as exc:
         fail(str(exc))
@@ -3778,8 +3736,6 @@ def main():
             report_argv.append("--allow-config-diff")
         if args.report_allow_model_diff:
             report_argv.append("--allow-model-diff")
-        if args.report_allow_depth_step_diff:
-            report_argv.append("--allow-depth-step-diff")
         if args.report_allow_executable_diff:
             report_argv.append("--allow-executable-diff")
         # Scoring is complete. Do not retain the evaluator's 24 idle workers while the report

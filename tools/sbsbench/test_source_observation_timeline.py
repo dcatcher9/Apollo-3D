@@ -91,10 +91,7 @@ class SourceObservationTimelineTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "count differs"):
                 run_eval.prepare_clip_observation_timeline(path, 3, {}, source)
 
-    def test_removed_selectors_and_ambiguous_clock_overrides_are_rejected(self):
-        for token in ("--joint-plane-mode=3", "--joint-plane-experiment=on"):
-            with self.subTest(token=token), self.assertRaisesRegex(ValueError, "removed"):
-                run_eval.validate_unified_policy_options([token])
+    def test_ambiguous_clock_overrides_are_rejected(self):
         for extra in (["--observation-timeline"],
                       ["--observation-timeline", "a", "--observation-timeline", "b"]):
             with self.subTest(extra=extra), self.assertRaises(ValueError):

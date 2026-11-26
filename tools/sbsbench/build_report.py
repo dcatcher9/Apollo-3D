@@ -58,7 +58,6 @@ def _report_scoring_jobs(argv, environ):
 ctrl_dir, treat_dir, out_html = sys.argv[1], sys.argv[2], sys.argv[3]
 allow_config_diff = "--allow-config-diff" in sys.argv[4:]
 allow_model_diff = "--allow-model-diff" in sys.argv[4:]
-allow_depth_step_diff = "--allow-depth-step-diff" in sys.argv[4:]
 allow_executable_diff = "--allow-executable-diff" in sys.argv[4:]
 REPORT_SCORING_JOBS = _report_scoring_jobs(sys.argv[4:], os.environ)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -112,8 +111,6 @@ if not allow_model_diff:
     _SAME_CONTEXT.extend(["model", "engine_sha256", "onnx_sha256"])
 if not allow_config_diff:
     _SAME_CONTEXT.append("conf_sha256")
-if allow_depth_step_diff:
-    _SAME_CONTEXT.remove("depth_step")
 if allow_executable_diff:
     _SAME_CONTEXT.remove("executable_sha256")
     _SAME_CONTEXT.remove("runtime_shader_sha256")
