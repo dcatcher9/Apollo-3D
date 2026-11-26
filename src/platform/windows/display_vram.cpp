@@ -825,8 +825,8 @@ namespace platf::dxgi {
         std::optional<::video::game_source_identity_t> game_source;
         if (reshade_receiver) {
           const RECT source_rect = display->screen_rect();
-          const int export_width = ::video::is_game_mode(sbs_mode) ? game_source_width * 2 : display->width * 2;
-          const int export_height = ::video::is_game_mode(sbs_mode) ? game_source_height : display->height;
+          const int export_width = game_source_width * 2;
+          const int export_height = game_source_height;
           if (::video::is_packed_mode(sbs_mode)) {
             // The export is scaled or fitted into this converter's own packed raster, so the
             // receiver places it for exactly that raster (Game SBS: the export size above; Local
@@ -1085,42 +1085,40 @@ namespace platf::dxgi {
             const auto placement = ::reshade_bridge::place_output(packed_desc.Width, packed_desc.Height, output_width, output_height);
             const auto fit_passes = platf::packed_output::resample_passes(placement, output_width, output_height);
             const bool resample = placement.fit != ::reshade_bridge::output_fit::exact;
-            if (external_cursor) {
-              // The patch must hold the footprint of the most minified pass that reads the
-              // export: the resample, the Local AR presentation, or the half-size chroma plane.
-              const auto scale = [&](const D3D11_VIEWPORT &viewport) {
-                return std::min(viewport.Width / float(packed_desc.Width), viewport.Height / float(packed_desc.Height));
-              };
-              const float minimum_scale = resample           ? platf::packed_output::minimum_scale(fit_passes, packed_desc.Width, packed_desc.Height) :
-                                          rgb ? scale(rgb_present_viewport) :
-                                                               std::min(scale(out_Y_or_YUV_viewport), scale(out_UV_viewport));
-              auto transfer = packed_linear ? sbs_cursor::source_transfer_e::scrgb : sbs_cursor::source_transfer_e::srgb;
-              if (packed_pq) {
-                transfer = sbs_cursor::source_transfer_e::pq;
-              }
-              const auto composited = external_cursor->compose(
-                packed_texture,
-                packed_view,
-                img.cursor,
-                transfer,
-                external_cursor_white_multiplier,
-                external->ui_parallax_uv,
-                sbs_cursor::patch_margin(minimum_scale)
-              );
-              if (!composited) {
-                BOOST_LOG(error) << "Failed to composite the Windows cursor over external Game 3D."sv;
-                return -1;
-              }
-              if (composited->regions) {
-                cursor_patch = composited;
-                if (!external_cursor_logged) {
-                  const char *blend = packed_linear ? "linear HDR" : "SDR";
-                  if (packed_pq) {
-                    blend = "PQ HDR10, blended in linear light";
-                  }
-                  BOOST_LOG(info) << "Game 3D: compositing the Windows cursor into both eyes (" << blend << ").";
-                  external_cursor_logged = true;
+            // The patch must hold the footprint of the most minified pass that reads the
+            // export: the resample, the Local AR presentation, or the half-size chroma plane.
+            const auto scale = [&](const D3D11_VIEWPORT &viewport) {
+              return std::min(viewport.Width / float(packed_desc.Width), viewport.Height / float(packed_desc.Height));
+            };
+            const float minimum_scale = resample           ? platf::packed_output::minimum_scale(fit_passes, packed_desc.Width, packed_desc.Height) :
+                                        rgb ? scale(rgb_present_viewport) :
+                                                             std::min(scale(out_Y_or_YUV_viewport), scale(out_UV_viewport));
+            auto transfer = packed_linear ? sbs_cursor::source_transfer_e::scrgb : sbs_cursor::source_transfer_e::srgb;
+            if (packed_pq) {
+              transfer = sbs_cursor::source_transfer_e::pq;
+            }
+            const auto composited = external_cursor->compose(
+              packed_texture,
+              packed_view,
+              img.cursor,
+              transfer,
+              external_cursor_white_multiplier,
+              external->ui_parallax_uv,
+              sbs_cursor::patch_margin(minimum_scale)
+            );
+            if (!composited) {
+              BOOST_LOG(error) << "Failed to composite the Windows cursor over external Game 3D."sv;
+              return -1;
+            }
+            if (composited->regions) {
+              cursor_patch = composited;
+              if (!external_cursor_logged) {
+                const char *blend = packed_linear ? "linear HDR" : "SDR";
+                if (packed_pq) {
+                  blend = "PQ HDR10, blended in linear light";
                 }
+                BOOST_LOG(info) << "Game 3D: compositing the Windows cursor into both eyes (" << blend << ").";
+                external_cursor_logged = true;
               }
             }
             if (resample) {
@@ -6562,15 +6560,11 @@ namespace platf::dxgi {
     return -1; \
   }
       const bool sbs_on = ::video::is_packed_mode(sbs_mode);
-      const bool ai_on = sbs_mode == ::video::SBS_AI && !reshade_receiver;
+      const bool ai_on = sbs_mode == ::video::SBS_AI;
       if (sbs_mode == ::video::SBS_GAME_SBS &&
           (!game_source_supported ||
            !::video::external_sbs_dimensions_match(setup.game_width, setup.game_height, setup.width, setup.height))) {
         BOOST_LOG(error) << "Game 3D requires an unrotated source and supported exact full-SBS output raster."sv;
-        return -1;
-      }
-      if (reshade_receiver && sbs_on && !::video::is_game_mode(sbs_mode) && !::video::external_sbs_dimensions_match(display->width, display->height, setup.width, setup.height)) {
-        BOOST_LOG(error) << "ReShade Host 3D requires exact full-SBS output at twice the source width; refusing resizing."sv;
         return -1;
       }
 #if !defined(SUNSHINE_TESTS)
