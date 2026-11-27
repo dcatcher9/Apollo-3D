@@ -8205,7 +8205,7 @@ TEST(EncodeWakeLifecycleSourceTests, LoopStatsCountEncodesByContentIdentity) {
 TEST(EncodeWakeLifecycleSourceTests, KeptInputGammaConversionAdvancesTheProviderSchedule) {
   const auto scope = encode_run_source_scope();
   ASSERT_FALSE(scope.empty());
-  const auto gamma = scope.find("if (!conversion_ran && pending_gamma && last_img) {");
+  const auto gamma = scope.find("if (!conversion_ran && stream_gamma.pending() && last_img) {");
   const auto failure = scope.find("Could not convert the retained source with stream gamma", gamma);
   const auto kept = scope.find("if (provider_paced && !converted_frame) {", failure);
   const auto advance = scope.find("encode_frame_timestamp = schedule.next_encode_target;", kept);

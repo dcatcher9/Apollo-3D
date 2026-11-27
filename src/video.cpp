@@ -1317,6 +1317,133 @@ namespace video {
     std::chrono::steady_clock::time_point next_log = std::chrono::steady_clock::now();
   };
 
+  /**
+   * One encode loop's stream gamma requests (0x300C) and acknowledgements (0x300D). Only the
+   * encode thread mutates the converter, and a setting is acknowledged only after a real
+   * conversion and successful encode prove it. A request still pending when the loop ends is
+   * answered as failed.
+   */
+  class stream_gamma_tracker_t {
+  public:
+    stream_gamma_tracker_t(
+      const safe::mail_t &mail,
+      const config_t &config,
+      nvenc_encode_session_t &session,
+      const safe::mail_raw_t::event_t<bool> &shutdown_event
+    ):
+        config_ {config},
+        shutdown_event_ {shutdown_event},
+        requests_ {mail->queue<stream_gamma_request_t>(mail::stream_gamma, stream_gamma_queue_limit)},
+        acks_ {mail->queue<stream_gamma_ack_t>(mail::stream_gamma_ack, 2 * stream_gamma_queue_limit)} {
+      // SDR bypass must not replace the user's selection. Retry that selection when a rebuilt
+      // capture/encoder becomes HDR again, while keeping its applied proof separate.
+      const auto initial_gamma = config.stream_gamma_state ? config.stream_gamma_state->requested_mode() : config.stream_gamma;
+      const bool initial_gamma_accepted = session.set_stream_gamma(initial_gamma);
+      // The black startup dummy does not prove that real source pixels used the new transform.
+      pending_ = stream_gamma_request_t {initial_gamma, 0};
+      pending_status_ = initial_gamma_accepted ? stream_gamma_status_e::applied : rejection_status(session, initial_gamma);
+    }
+
+    ~stream_gamma_tracker_t() {
+      if (pending_ && pending_->request_id != 0 && config_.stream_gamma_supported) {
+        queue_ack({
+          stream_gamma_status_e::failed,
+          pending_->mode,
+          pending_->request_id,
+          config_.stream_gamma_state->current(),
+        });
+      }
+    }
+
+    stream_gamma_tracker_t(const stream_gamma_tracker_t &) = delete;
+    stream_gamma_tracker_t &operator=(const stream_gamma_tracker_t &) = delete;
+
+    /** Whether a setting still waits for the encoded picture that proves it. */
+    [[nodiscard]] bool pending() const noexcept {
+      return pending_.has_value();
+    }
+
+    /** Apply the next client request, once the previous one has been answered. */
+    void poll(nvenc_encode_session_t &session) {
+      if (pending_) {
+        return;
+      }
+      if (auto request = requests_->pop(0ms)) {
+        // The control decoder admits only valid modes. Retain even an unsupported/failed
+        // choice so a later capable encoder can apply it; an explicit default replaces it.
+        if (config_.stream_gamma_state) {
+          config_.stream_gamma_state->set_requested_mode(request->mode);
+        }
+        const bool accepted = session.set_stream_gamma(request->mode);
+        if (!accepted) {
+          queue_ack({
+            rejection_status(session, request->mode),
+            request->mode,
+            request->request_id,
+            config_.stream_gamma_state->current(),
+          });
+        } else {
+          pending_ = *request;
+          pending_status_ = stream_gamma_status_e::applied;
+        }
+      }
+    }
+
+    /**
+     * Publish the transform a submitted real picture used, answering any pending request. The
+     * caller checks that the picture was converted and the session owns a gamma publisher.
+     */
+    void prove(nvenc_encode_session_t &session) {
+      const auto actual_mode = session.stream_gamma_mode();
+      const auto actual_white = session.stream_gamma_white_nits();
+      const auto proven = config_.stream_gamma_state->current();
+      if (pending_ || proven.generation == 0 || actual_mode != proven.mode || actual_white != proven.white_nits) {
+        const auto applied = config_.stream_gamma_state->publish(actual_mode, actual_white);
+        const auto requested_mode = config_.stream_gamma_state->requested_mode();
+        const auto status = pending_ ? pending_status_ :
+                            actual_mode == requested_mode ? stream_gamma_status_e::applied :
+                                                            rejection_status(session, requested_mode);
+        BOOST_LOG(info) << "Stream gamma encoder proof: requested="sv
+                        << static_cast<int>(requested_mode)
+                        << " applied="sv << static_cast<int>(actual_mode)
+                        << " white="sv << actual_white << " nits generation="sv
+                        << applied.generation << " request="sv
+                        << (pending_ ? pending_->request_id : 0);
+        if (config_.stream_gamma_supported) {
+          queue_ack({
+            status,
+            requested_mode,
+            pending_ ? pending_->request_id : 0,
+            applied,
+          });
+        }
+        pending_.reset();
+      }
+    }
+
+  private:
+    static stream_gamma_status_e rejection_status(nvenc_encode_session_t &session, stream_gamma_mode_e requested) {
+      return !session.stream_is_hdr() && requested != stream_gamma_mode_e::windows_default ?
+               stream_gamma_status_e::rejected_unsupported :
+               stream_gamma_status_e::failed;
+    }
+
+    void queue_ack(const stream_gamma_ack_t &ack) {
+      const auto result = acks_->raise_with_overflow_policy(false, ack);
+      if (result.dropped != 0) {
+        BOOST_LOG(error) << "Stream gamma acknowledgement queue exceeded its session bound"sv;
+        shutdown_event_->raise(true);
+      }
+    }
+
+    const config_t &config_;
+    const safe::mail_raw_t::event_t<bool> &shutdown_event_;
+    safe::mail_raw_t::queue_t<stream_gamma_request_t> requests_;
+    safe::mail_raw_t::queue_t<stream_gamma_ack_t> acks_;
+    std::optional<stream_gamma_request_t> pending_;
+    stream_gamma_status_e pending_status_ {};
+  };
+
   void refresh_mouse_keys_if_due(std::chrono::steady_clock::time_point &next_refresh) {
     const auto now = std::chrono::steady_clock::now();
     if (now < next_refresh) {
@@ -1370,37 +1497,7 @@ namespace video {
     // Atomic client-requested mode/geometry/cadence/bitrate changes arrive on one queue.
     auto video_mode_event = mail->queue<video_mode_change_t>(mail::video_mode);
     auto depth_pipeline_ready_event = config.sbs_depth_pipeline_ready_event;
-    auto stream_gamma_requests = mail->queue<stream_gamma_request_t>(mail::stream_gamma, stream_gamma_queue_limit);
-    auto stream_gamma_acks = mail->queue<stream_gamma_ack_t>(mail::stream_gamma_ack, 2 * stream_gamma_queue_limit);
-    const auto queue_gamma_ack = [&](const stream_gamma_ack_t &ack) {
-      const auto result = stream_gamma_acks->raise_with_overflow_policy(false, ack);
-      if (result.dropped != 0) {
-        BOOST_LOG(error) << "Stream gamma acknowledgement queue exceeded its session bound"sv;
-        shutdown_event->raise(true);
-      }
-    };
-    // SDR bypass must not replace the user's selection. Retry that selection when a rebuilt
-    // capture/encoder becomes HDR again, while keeping its applied proof separate.
-    const auto initial_gamma = config.stream_gamma_state ? config.stream_gamma_state->requested_mode() : config.stream_gamma;
-    const bool initial_gamma_accepted = session->set_stream_gamma(initial_gamma);
-    const auto gamma_rejection_status = [&](stream_gamma_mode_e requested) {
-      return !session->stream_is_hdr() && requested != stream_gamma_mode_e::windows_default ?
-               stream_gamma_status_e::rejected_unsupported :
-               stream_gamma_status_e::failed;
-    };
-    // The black startup dummy does not prove that real source pixels used the new transform.
-    std::optional<stream_gamma_request_t> pending_gamma {stream_gamma_request_t {initial_gamma, 0}};
-    auto pending_gamma_status = initial_gamma_accepted ? stream_gamma_status_e::applied : gamma_rejection_status(initial_gamma);
-    auto fail_pending_gamma = util::fail_guard([&] {
-      if (pending_gamma && pending_gamma->request_id != 0 && config.stream_gamma_supported) {
-        queue_gamma_ack({
-          stream_gamma_status_e::failed,
-          pending_gamma->mode,
-          pending_gamma->request_id,
-          config.stream_gamma_state->current(),
-        });
-      }
-    });
+    stream_gamma_tracker_t stream_gamma {mail, config, *session, shutdown_event};
 
     {
       // Load a dummy image into the encoder input to ensure we have something to encode
@@ -1705,25 +1802,7 @@ namespace video {
 
       // Only this encode thread mutates the converter. A setting is acknowledged after a real
       // conversion and successful encode, including retained-source conversion on a static desktop.
-      if (!pending_gamma) {
-        if (auto request = stream_gamma_requests->pop(0ms)) {
-          // The control decoder admits only valid modes. Retain even an unsupported/failed
-          // choice so a later capable encoder can apply it; an explicit default replaces it.
-          if (config.stream_gamma_state) {
-            config.stream_gamma_state->set_requested_mode(request->mode);
-          }
-          const bool accepted = session->set_stream_gamma(request->mode);
-          if (!accepted) {
-            queue_gamma_ack({
-              gamma_rejection_status(request->mode), request->mode, request->request_id,
-              config.stream_gamma_state->current(),
-            });
-          } else {
-            pending_gamma = *request;
-            pending_gamma_status = stream_gamma_status_e::applied;
-          }
-        }
-      }
+      stream_gamma.poll(*session);
 
       while (auto frames = invalidate_ref_frames_events->pop(0ms)) {
         // Only an actual invalidation waits for pictures in flight that may reference the lost
@@ -1808,7 +1887,7 @@ namespace video {
       // While the black startup input is held, even a recovery request waits for capture first.
       const bool hold_startup_input = startup_input_hold.active(std::chrono::steady_clock::now());
       if (!recovery_frame_requested || images->peek() || hold_startup_input) {
-        const bool conversion_poll_pending = last_img && (pending_gamma || session->needs_conversion_poll());
+        const bool conversion_poll_pending = last_img && (stream_gamma.pending() || session->needs_conversion_poll());
         const bool depth_pipeline_ready = depth_pipeline_ready_event && depth_pipeline_ready_event->peek();
         const auto wait_started = std::chrono::steady_clock::now();
         const auto keepalive_wait = detail::encode_keepalive_wait(wait_started, last_encode_at, keepalive_interval);
@@ -1929,7 +2008,7 @@ namespace video {
         }
       }
 
-      if (!conversion_ran && pending_gamma && last_img) {
+      if (!conversion_ran && stream_gamma.pending() && last_img) {
         if (lifecycle_change_requested()) {
           break;
         }
@@ -1941,8 +2020,8 @@ namespace video {
         }
         finish_conversion();
         if (provider_paced && !converted_frame) {
-          // Kept input: pending_gamma stays armed for the next real source. Poll for it at stream
-          // cadence; with the past target left as it was, the next wait would be zero.
+          // Kept input: the gamma request stays pending for the next real source. Poll for it at
+          // stream cadence; with the past target left as it was, the next wait would be zero.
           const auto schedule = detail::select_encode_frame_schedule(
             now, encode_frame_timestamp, encode_frame_threshold, frame_variation_threshold
           );
@@ -2028,7 +2107,7 @@ namespace video {
         // while that picture retires. Recovery, gamma proof and due keepalives still deliver.
         if (
           !first_encoder_output && !requested_idr_frame && !invalidated_ref_frames &&
-          !(pending_gamma && config.stream_gamma_state) &&
+          !(stream_gamma.pending() && config.stream_gamma_state) &&
           std::chrono::steady_clock::now() < last_encode_at + keepalive_interval
         ) {
           session->retire_input_reads();
@@ -2099,31 +2178,7 @@ namespace video {
       // delivered unless the encoder fails, which rebuilds the session and reapplies the request.
       last_encode_at = std::chrono::steady_clock::now();
       if (converted_frame && session->rendered_content_timestamp() && config.stream_gamma_state) {
-        const auto actual_mode = session->stream_gamma_mode();
-        const auto actual_white = session->stream_gamma_white_nits();
-        const auto proven = config.stream_gamma_state->current();
-        if (pending_gamma || proven.generation == 0 || actual_mode != proven.mode || actual_white != proven.white_nits) {
-          const auto applied = config.stream_gamma_state->publish(actual_mode, actual_white);
-          const auto requested_mode = config.stream_gamma_state->requested_mode();
-          const auto status = pending_gamma ? pending_gamma_status :
-                              actual_mode == requested_mode ? stream_gamma_status_e::applied :
-                                                              gamma_rejection_status(requested_mode);
-          BOOST_LOG(info) << "Stream gamma encoder proof: requested="sv
-                          << static_cast<int>(requested_mode)
-                          << " applied="sv << static_cast<int>(actual_mode)
-                          << " white="sv << actual_white << " nits generation="sv
-                          << applied.generation << " request="sv
-                          << (pending_gamma ? pending_gamma->request_id : 0);
-          if (config.stream_gamma_supported) {
-            queue_gamma_ack({
-              status,
-              requested_mode,
-              pending_gamma ? pending_gamma->request_id : 0,
-              applied,
-            });
-          }
-          pending_gamma.reset();
-        }
+        stream_gamma.prove(*session);
       }
       first_encoder_output = false;
 
