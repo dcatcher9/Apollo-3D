@@ -66,6 +66,8 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/local_presenter_window.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/local_rgb_converter.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/local_shutter_frame_ring.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/local_shutter_session.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/local_shutter_session.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/local_shutter_slot_timing.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/text_game_pin_controller.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/text_game_pin_controller.cpp"
