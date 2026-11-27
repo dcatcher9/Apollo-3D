@@ -13,7 +13,6 @@ var pipeName = "sunshine-ds5-v1";
 var probe = false;
 var probeHost = false;
 var selfCheck = false;
-var enableCompositeMicrophonePrototype = false;
 string? selfTestProfile = null;
 string? resultPath = null;
 string? audioWriterPath = null;
@@ -27,8 +26,6 @@ for (var i = 0; i < args.Length; i++)
         probeHost = true;
     else if (args[i] == "--self-check")
         selfCheck = true;
-    else if (args[i] == "--enable-composite-microphone-prototype")
-        enableCompositeMicrophonePrototype = true;
     else if (args[i] == "--self-test" && i + 1 < args.Length)
         selfTestProfile = args[++i];
     else if (args[i] == "--result" && i + 1 < args.Length)
@@ -51,9 +48,6 @@ if (selfCheck)
         driver_setup_contract = true,
         protocol_abi = true,
         host_protocol = true,
-        microphone_pcm_queue = true,
-        hidmaestro_microphone_contract = true,
-        virtual_microphone_session = true,
         default_endpoint_classification = true,
         genshin_compatibility_identity = true,
         audio_policy_violation = true,
@@ -79,14 +73,13 @@ if (probe || probeHost)
         audio_policy_violation = true,
         driver_installed = context.IsDriverInstalled,
         usbip_available = HMContext.IsUsbipBackendAvailable,
-        pinned_microphone_runtime = DeviceRegistry.HasPinnedMicrophoneRuntime,
-        composite_microphone_prototype_requested = enableCompositeMicrophonePrototype,
+        pinned_runtime = DeviceRegistry.HasPinnedRuntime,
     }));
     if (!probeHost)
         return 0;
     // Exit status is a readiness bitmask for the native host, not an install
     // request: HID=1, authored audio=2. No devices are created by this probe.
-    if (!IsElevated() || !DeviceRegistry.HasPinnedMicrophoneRuntime)
+    if (!IsElevated() || !DeviceRegistry.HasPinnedRuntime)
         return 0;
     var ready = (standard is not null && context.IsDriverInstalled ? 1 : 0) |
                 (composite is not null && HMContext.IsUsbipBackendAvailable ? 2 : 0);
@@ -99,13 +92,10 @@ if (selfTestProfile is not null)
 {
     if (!IsElevated())
         return Fail("sunshine-ds5-sidecar protocol self-test must run elevated");
-    if (selfTestProfile is not ("standard" or "composite" or "microphone-prototype" or "microphone-capture"))
-        return Fail("--self-test must be 'standard', 'composite', 'microphone-prototype', or 'microphone-capture'");
+    if (selfTestProfile is not ("standard" or "composite"))
+        return Fail("--self-test must be 'standard' or 'composite'");
     try
     {
-        if (selfTestProfile is "microphone-prototype" or "microphone-capture")
-            return await ProtocolSelfTest.RunMicrophonePrototypeAsync(
-                resultPath, requireHostCapture: selfTestProfile == "microphone-capture");
         return await ProtocolSelfTest.RunAsync(selfTestProfile == "composite", resultPath, audioWriterPath);
     }
     catch (Exception ex)
@@ -126,8 +116,7 @@ Console.CancelKeyPress += (_, eventArgs) =>
     shutdown.Cancel();
 };
 
-await using var server = new VirtualDeviceHostServer(
-    pipeName, enableCompositeMicrophonePrototype);
+await using var server = new VirtualDeviceHostServer(pipeName);
 try
 {
     await server.RunAsync(shutdown.Token);

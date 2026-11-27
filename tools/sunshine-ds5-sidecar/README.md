@@ -143,7 +143,4 @@ its [donationware terms](https://vb-audio.com/Services/licensing.htm) allow test
 before payment and specify payment for professional use. Install it separately
 using the vendor's administrator instructions and reboot requirement. The host
 does not download or install it, and does not change the system default microphone.
-
-The inherited helper's composite microphone prototype remains explicitly opt-in
-for developer tests. Its presence is not a claim that Sunshine's production
-microphone sink uses the helper. It is not advertised during ordinary helper startup.
+The DualSense helper does not create a microphone.

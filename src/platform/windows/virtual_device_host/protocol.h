@@ -24,20 +24,8 @@ namespace platf::virtual_device_host::protocol {
   inline constexpr std::uint32_t CAP_ADAPTIVE_TRIGGERS = 1u << 7;
   inline constexpr std::uint32_t CAP_GENSHIN_COMPATIBILITY_IDENTITY = 1u << 8;
   inline constexpr std::uint32_t CAP_AUDIO_POLICY_VIOLATION = 1u << 9;
-  inline constexpr std::uint32_t CAP_VIRTUAL_MICROPHONE = 1u << 10;
-  inline constexpr std::uint32_t CAP_PERSISTENT_DEVICE_HOST = 1u << 11;
-  inline constexpr std::uint32_t CAP_MICROPHONE_STATUS = 1u << 12;
 
   inline constexpr std::uint8_t ATTACH_FLAG_GENSHIN_COMPATIBILITY = 1u << 0;
-  inline constexpr std::uint32_t MICROPHONE_SAMPLE_RATE_HZ = 48'000;
-  inline constexpr std::uint8_t MICROPHONE_CHANNELS = 1;
-  inline constexpr std::uint8_t MICROPHONE_BITS_PER_SAMPLE = 16;
-  inline constexpr std::uint16_t MAX_MIC_PCM_FRAMES = 960;
-  inline constexpr std::size_t MIC_CREATE_PAYLOAD_SIZE = 8;
-  inline constexpr std::size_t MIC_CREATE_REPLY_PAYLOAD_SIZE = 16;
-  inline constexpr std::size_t MIC_OPERATION_REPLY_PAYLOAD_SIZE = 8;
-  inline constexpr std::size_t MIC_PCM_HEADER_SIZE = 20;
-  inline constexpr std::size_t MIC_STATUS_PAYLOAD_SIZE = 28;
 
   enum class message_e : std::uint16_t {
     hello = 1,
@@ -51,37 +39,12 @@ namespace platf::virtual_device_host::protocol {
     motion = 9,
     battery = 10,
     shutdown = 11,
-    mic_create = 12,
-    mic_create_reply = 13,
-    mic_pcm = 14,
-    mic_flush = 15,
-    mic_flush_reply = 16,
-    mic_destroy = 17,
-    mic_destroy_reply = 18,
-    status = 100,
     rumble = 101,
     adaptive_triggers = 102,
     led = 103,
     haptics_pcm = 104,
     audio_policy_violation = 105,
-    host_status = 106,
-    mic_status = 107,
     error = 255,
-  };
-
-  enum mic_pcm_flag_e : std::uint16_t {
-    mic_stream_start = 1u << 0,
-    mic_stream_end = 1u << 1,
-    mic_discontinuity = 1u << 2,
-    mic_silence = 1u << 3,
-  };
-
-  enum class mic_result_e : std::int32_t {
-    success = 0,
-    invalid_format = -1001,
-    transport_unavailable = -1002,
-    device_creation_failed = -1003,
-    device_not_created = -1004,
   };
 
   constexpr void write_u16(std::uint8_t *destination, std::uint16_t value) {
@@ -110,22 +73,22 @@ namespace platf::virtual_device_host::protocol {
     return header;
   }
 
-  static_assert(encode_header(message_e::mic_create, 8, 0x11223344) == std::array<std::uint8_t, HEADER_SIZE> {
-                                                                         0x53,
-                                                                         0x44,
-                                                                         0x53,
-                                                                         0x35,
-                                                                         0x01,
-                                                                         0x00,
-                                                                         0x0c,
-                                                                         0x00,
-                                                                         0x08,
-                                                                         0x00,
-                                                                         0x00,
-                                                                         0x00,
-                                                                         0x44,
-                                                                         0x33,
-                                                                         0x22,
-                                                                         0x11,
-                                                                       });
+  static_assert(encode_header(message_e::attach, 4, 0x11223344) == std::array<std::uint8_t, HEADER_SIZE> {
+                                                                     0x53,
+                                                                     0x44,
+                                                                     0x53,
+                                                                     0x35,
+                                                                     0x01,
+                                                                     0x00,
+                                                                     0x03,
+                                                                     0x00,
+                                                                     0x04,
+                                                                     0x00,
+                                                                     0x00,
+                                                                     0x00,
+                                                                     0x44,
+                                                                     0x33,
+                                                                     0x22,
+                                                                     0x11,
+                                                                   });
 }  // namespace platf::virtual_device_host::protocol

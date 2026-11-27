@@ -20,11 +20,8 @@ internal sealed class DeviceRegistry : IDisposable
     private readonly Action<Protocol.Message> _emit;
     private readonly bool _authoredHapticsAvailable;
     private readonly bool _genshinCompatibilityAvailable;
-    private readonly bool _microphonePrototypeAvailable;
-    private VirtualMicrophoneSession? _microphone;
-    private uint _nextMicrophoneGeneration = 1;
 
-    internal DeviceRegistry(Action<Protocol.Message> emit, bool enableCompositeMicrophonePrototype = false)
+    internal DeviceRegistry(Action<Protocol.Message> emit)
     {
         _emit = emit;
         var compositeProfileValidated = LoadPatchedProfiles();
@@ -37,9 +34,6 @@ internal sealed class DeviceRegistry : IDisposable
         _genshinCompatibilityAvailable = _authoredHapticsAvailable &&
                                          _context.GetProfile(
                                              DualSenseHapticsAudio.GenshinCompatibilityProfileId) is not null;
-        _microphonePrototypeAvailable = enableCompositeMicrophonePrototype &&
-                                        _authoredHapticsAvailable &&
-                                        HasPinnedMicrophoneRuntime;
     }
 
     internal Protocol.Capability Capabilities =>
@@ -49,14 +43,9 @@ internal sealed class DeviceRegistry : IDisposable
             : 0) |
         (_authoredHapticsAvailable
             ? Protocol.Capability.AudioFourChannel | Protocol.Capability.AuthoredHapticsPcm
-            : 0) |
-        (_microphonePrototypeAvailable
-            ? Protocol.Capability.VirtualMicrophone |
-              Protocol.Capability.PersistentDeviceHost |
-              Protocol.Capability.MicrophoneStatus
             : 0);
 
-    internal static bool HasPinnedMicrophoneRuntime
+    internal static bool HasPinnedRuntime
     {
         get
         {
@@ -147,108 +136,6 @@ internal sealed class DeviceRegistry : IDisposable
         if (payload.IsEmpty || !_controllers.TryGetValue(payload[0], out var controller))
             throw new InvalidOperationException("The requested DS5 device is not attached");
         return controller;
-    }
-
-    internal void CreateMicrophone(uint requestId, ReadOnlySpan<byte> payload)
-    {
-        var request = Protocol.DecodeMicCreate(payload);
-        if (request.SampleRateHz != Protocol.MicrophoneSampleRateHz ||
-            request.Channels != Protocol.MicrophoneChannels ||
-            request.BitsPerSample != Protocol.MicrophoneBitsPerSample || request.Flags != 0)
-        {
-            EmitMicCreateReply(requestId, Protocol.MicrophoneResult.InvalidFormat, 0);
-            return;
-        }
-        if (!_microphonePrototypeAvailable)
-        {
-            EmitMicCreateReply(requestId, Protocol.MicrophoneResult.TransportUnavailable, 0);
-            return;
-        }
-        if (_microphone is not null)
-        {
-            EmitMicCreateReply(requestId, Protocol.MicrophoneResult.Success, _microphone.Generation);
-            _microphone.PublishStatus();
-            return;
-        }
-
-        HMController? controller = null;
-        try
-        {
-            var profile = _context.GetProfile(DualSenseHapticsAudio.CompositeProfileId)
-                          ?? throw new InvalidOperationException("Composite microphone prototype profile is missing");
-            controller = _context.CreateController(profile);
-            controller = ApplyDefaultAudioEndpointPolicy(controller, profile);
-            var generation = _nextMicrophoneGeneration;
-            _nextMicrophoneGeneration = generation == uint.MaxValue ? 1 : generation + 1;
-            _microphone = new VirtualMicrophoneSession(controller, generation, _emit);
-            controller = null; // Session owns the controller after successful construction.
-            EmitMicCreateReply(requestId, Protocol.MicrophoneResult.Success, generation);
-            _microphone.PublishStatus();
-        }
-        catch (Exception error)
-        {
-            controller?.Dispose();
-            Console.Error.WriteLine($"Unable to create the composite microphone prototype: {error.Message}");
-            EmitMicCreateReply(requestId, Protocol.MicrophoneResult.DeviceCreationFailed, 0);
-        }
-    }
-
-    internal void SubmitMicrophonePcm(byte[] payload)
-    {
-        var packet = Protocol.DecodeMicPcm(payload);
-        if (_microphone is null)
-            return;
-        _microphone.Enqueue(packet);
-    }
-
-    internal void FlushMicrophone(uint requestId, ReadOnlySpan<byte> payload)
-    {
-        if (!payload.IsEmpty)
-            throw new InvalidDataException("Invalid microphone flush payload");
-        if (_microphone is null)
-        {
-            _emit(new Protocol.Message(
-                Protocol.MessageType.MicFlushReply, requestId,
-                Protocol.EncodeMicOperationReply(Protocol.MicrophoneResult.DeviceNotCreated, 0)));
-            return;
-        }
-        _microphone.Flush();
-        _emit(new Protocol.Message(
-            Protocol.MessageType.MicFlushReply, requestId,
-            Protocol.EncodeMicOperationReply(
-                Protocol.MicrophoneResult.Success, _microphone.Generation)));
-    }
-
-    internal void DestroyMicrophone(uint requestId, ReadOnlySpan<byte> payload)
-    {
-        if (!payload.IsEmpty)
-            throw new InvalidDataException("Invalid microphone destroy payload");
-        var generation = _microphone?.Generation ?? 0;
-        var result = _microphone is null
-            ? Protocol.MicrophoneResult.DeviceNotCreated
-            : Protocol.MicrophoneResult.Success;
-        var microphone = _microphone;
-        _microphone = null;
-        microphone?.Dispose();
-        _emit(new Protocol.Message(
-            Protocol.MessageType.MicDestroyReply, requestId,
-            Protocol.EncodeMicOperationReply(result, generation)));
-        if (result == Protocol.MicrophoneResult.Success)
-        {
-            _emit(new Protocol.Message(
-                Protocol.MessageType.MicStatus, 0,
-                Protocol.EncodeMicStatus(new Protocol.MicrophoneStatus(
-                    generation, Protocol.MicrophoneState.Absent, false,
-                    0, 0, 0, 0, 0))));
-        }
-    }
-
-    private void EmitMicCreateReply(
-        uint requestId, Protocol.MicrophoneResult result, uint generation)
-    {
-        _emit(new Protocol.Message(
-            Protocol.MessageType.MicCreateReply, requestId,
-            Protocol.EncodeMicCreateReply((int)result, generation)));
     }
 
     internal static string SelectProfileId(
@@ -382,18 +269,6 @@ internal sealed class DeviceRegistry : IDisposable
     internal void ReleaseAllDevices()
     {
         Exception? cleanupError = null;
-        try
-        {
-            _microphone?.Dispose();
-        }
-        catch (Exception error)
-        {
-            cleanupError = error;
-        }
-        finally
-        {
-            _microphone = null;
-        }
         foreach (var controller in _controllers.Values)
         {
             try

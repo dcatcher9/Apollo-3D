@@ -14,7 +14,6 @@ internal static class DriverSetupSelfTest
             new[] { "--self-check", "--install-drivers" },
             new[] { "--install-drivers", "--self-test", "standard" },
             new[] { "--pipe", "test-pipe", "--install-drivers" },
-            new[] { "--install-drivers", "--enable-composite-microphone-prototype" },
             new[] { "--install-drivers", "--result", "result.json" },
         })
         {

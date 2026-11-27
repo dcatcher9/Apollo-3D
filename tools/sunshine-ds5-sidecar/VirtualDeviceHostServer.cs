@@ -14,9 +14,7 @@ internal sealed class VirtualDeviceHostServer : IAsyncDisposable
     private NamedPipeServerStream? _pipe;
     private CancellationTokenSource? _sessionCancellation;
 
-    internal VirtualDeviceHostServer(
-        string pipeName, bool enableCompositeMicrophonePrototype = false,
-        bool skipOwnerVerificationForTests = false)
+    internal VirtualDeviceHostServer(string pipeName, bool skipOwnerVerificationForTests = false)
     {
         _pipeName = pipeName;
         _skipOwnerVerificationForTests = skipOwnerVerificationForTests;
@@ -31,7 +29,7 @@ internal sealed class VirtualDeviceHostServer : IAsyncDisposable
             SingleWriter = false,
             FullMode = BoundedChannelFullMode.DropOldest,
         });
-        _devices = new DeviceRegistry(Emit, enableCompositeMicrophonePrototype);
+        _devices = new DeviceRegistry(Emit);
     }
 
     internal async Task RunAsync(CancellationToken stoppingToken)
@@ -155,22 +153,6 @@ internal sealed class VirtualDeviceHostServer : IAsyncDisposable
                     case Protocol.MessageType.Battery:
                         _devices.GetController(payload).SubmitBattery(payload);
                         break;
-                    case Protocol.MessageType.MicCreate:
-                        RequireRequestId(header.RequestId, required: true);
-                        _devices.CreateMicrophone(header.RequestId, payload);
-                        break;
-                    case Protocol.MessageType.MicPcm:
-                        RequireRequestId(header.RequestId, required: false);
-                        _devices.SubmitMicrophonePcm(payload);
-                        break;
-                    case Protocol.MessageType.MicFlush:
-                        RequireRequestId(header.RequestId, required: true);
-                        _devices.FlushMicrophone(header.RequestId, payload);
-                        break;
-                    case Protocol.MessageType.MicDestroy:
-                        RequireRequestId(header.RequestId, required: true);
-                        _devices.DestroyMicrophone(header.RequestId, payload);
-                        break;
                     case Protocol.MessageType.Shutdown:
                         _sessionCancellation?.Cancel();
                         return;
@@ -198,14 +180,6 @@ internal sealed class VirtualDeviceHostServer : IAsyncDisposable
             try { _outgoingSignal.Release(); }
             catch (SemaphoreFullException) { /* One wakeup drains the complete bounded queue. */ }
         }
-    }
-
-    private static void RequireRequestId(uint requestId, bool required)
-    {
-        if ((required && requestId == 0) || (!required && requestId != 0))
-            throw new InvalidDataException(required
-                ? "Microphone control messages require a non-zero request id"
-                : "Microphone PCM messages require request id zero");
     }
 
     private async Task WriteLoopAsync(Stream pipe, CancellationToken cancellationToken)
