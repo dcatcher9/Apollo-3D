@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <iterator>
 #include <string>
 #include <utility>
 #include <vector>
@@ -398,6 +399,49 @@ TEST(OfflineSbsFilesystem, RootJunctionFailsMeasurementAndRemovesOnlyLink) {
   EXPECT_FALSE(fs::exists(junction));
   EXPECT_TRUE(fs::is_regular_file(target / "sentinel.bin"));
   EXPECT_EQ(fs::file_size(target / "sentinel.bin"), 29u);
+}
+
+TEST(OfflineSbsFilesystem, AtomicPublicationReplacesTheWholeFileThroughItsSiblingTemporary) {
+  temporary_tree_t tree;
+  const auto path = tree.path / "state.json";
+  const auto temporary = fs::path {path.wstring() + L".part"};
+  const auto read = [](const fs::path &file) {
+    std::ifstream input(file, std::ios::binary);
+    return std::string {std::istreambuf_iterator<char> {input}, std::istreambuf_iterator<char> {}};
+  };
+  std::string error;
+  for (const auto publication : {safe_fs::publication_e::durable, safe_fs::publication_e::transient}) {
+    write_bytes(path, 64, 'o');
+    write_bytes(temporary, 3, 's');  // A stale temporary from an interrupted writer.
+    const std::string contents = publication == safe_fs::publication_e::durable ? "durable" : "transient";
+    ASSERT_TRUE(safe_fs::publish_bytes_atomically(path, contents, publication, error)) << error;
+    EXPECT_TRUE(error.empty());
+    EXPECT_EQ(read(path), contents);
+    EXPECT_FALSE(fs::exists(temporary));
+  }
+
+  // A writer that fails leaves the published file untouched and no temporary behind.
+  EXPECT_FALSE(safe_fs::publish_file_atomically(path, [](const fs::path &partial) {
+    std::ofstream(partial, std::ios::binary) << "partial";
+    return false;
+  }, safe_fs::publication_e::durable, error));
+  EXPECT_FALSE(error.empty());
+  EXPECT_EQ(read(path), "transient");
+  EXPECT_FALSE(fs::exists(temporary));
+
+  // A directory occupying the temporary name is never removed with its contents.
+  write_bytes(temporary / "owned-sentinel", 4, 'k');
+  EXPECT_FALSE(safe_fs::publish_bytes_atomically(path, "blocked", safe_fs::publication_e::durable, error));
+  EXPECT_EQ(read(path), "transient");
+  EXPECT_TRUE(fs::is_regular_file(temporary / "owned-sentinel"));
+  fs::remove_all(temporary);
+
+  // A directory at the destination refuses the rename; the temporary is removed.
+  const auto occupied = tree.path / "occupied";
+  write_bytes(occupied / "keep.bin", 2, 'k');
+  EXPECT_FALSE(safe_fs::publish_bytes_atomically(occupied, "file", safe_fs::publication_e::transient, error));
+  EXPECT_TRUE(fs::is_regular_file(occupied / "keep.bin"));
+  EXPECT_FALSE(fs::exists(fs::path {occupied.wstring() + L".part"}));
 }
 
 TEST(OfflineSbsFilesystem, DirectChildJunctionRemovalKeepsTargetAndRoot) {

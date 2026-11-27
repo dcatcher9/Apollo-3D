@@ -51,7 +51,6 @@
 
 // local includes
 #include "config.h"
-#include "crypto.h"
 #include "depth_coordinate_v2.h"
 #include "generated/sbs_adaptive_state_contract.h"
 #include "host_sbs_display_snapshot_rgb8_analysis_gpu.h"
@@ -61,6 +60,8 @@
 #include "host_sbs_subtitle_render.h"
 #include "host_sbs_v2_geometry.h"
 #include "logging.h"
+#include "offline_sbs_digest.h"
+#include "offline_sbs_filesystem.h"
 #include "offline_sbs_wire_contract.h"
 #include "offline_sbs_worker.h"
 #include "platform/windows/host_sbs_v2_renderer.h"
@@ -151,17 +152,7 @@ namespace sbs_bench {
       return escaped;
     }
 
-    std::string sha256_hex(std::string_view bytes) {
-      static constexpr char hex[] = "0123456789abcdef";
-      const auto digest = crypto::hash(bytes);
-      std::string encoded;
-      encoded.reserve(digest.size() * 2u);
-      for (const std::uint8_t byte : digest) {
-        encoded.push_back(hex[byte >> 4u]);
-        encoded.push_back(hex[byte & 0x0fu]);
-      }
-      return encoded;
-    }
+    using offline_sbs::sha256_hex;
 
     std::string sha256_file_hex(const fs::path &path) {
       std::ifstream stream(path, std::ios::binary);
@@ -232,97 +223,25 @@ namespace sbs_bench {
       return (uint16_t) (sign | ((uint32_t) exp << 10) | (mant >> 13));
     }
 
-    // Every published file is durable: written through and renamed with write-through.
+    // Every file the harness publishes is durable.
     template<class Writer>
     bool publish_file_atomically(const fs::path &final_path, Writer &&writer) {
-      fs::path temporary_path = final_path;
-      temporary_path += ".part";
-      std::error_code ec;
-      fs::remove(temporary_path, ec);
-      if (!writer(temporary_path)) {
-        fs::remove(temporary_path, ec);
-        return false;
-      }
-      // The temporary name is a sibling of the final name, guaranteeing the same volume.
-      // MOVEFILE_REPLACE_EXISTING keeps progress replacement and reruns atomic on Windows.
-      // A polling reader or filesystem filter can transiently deny replacement after the writer
-      // has already closed the complete .part file. Retry only Windows sharing/locking failures;
-      // permanent path, ACL, and volume errors still fail immediately.
-      constexpr int atomic_replace_attempts = 50;
-      for (int attempt = 0; attempt < atomic_replace_attempts; ++attempt) {
-        const DWORD move_flags = MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH;
-        if (MoveFileExW(
-              temporary_path.wstring().c_str(),
-              final_path.wstring().c_str(),
-              move_flags
-            )) {
-          return true;
-        }
-        const auto move_error = GetLastError();
-        if (
-          move_error != ERROR_SHARING_VIOLATION &&
-          move_error != ERROR_LOCK_VIOLATION &&
-          move_error != ERROR_ACCESS_DENIED
-        ) {
-          break;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
-      }
-      fs::remove(temporary_path, ec);
-      return false;
+      std::string error;
+      return offline_sbs::safe_filesystem::publish_file_atomically(
+        final_path, std::forward<Writer>(writer), offline_sbs::safe_filesystem::publication_e::durable, error
+      );
     }
 
-    bool write_bytes(const fs::path &path, const void *data, const std::size_t size) {
-      HANDLE handle = CreateFileW(
-        path.wstring().c_str(),
-        GENERIC_WRITE,
-        0,
-        nullptr,
-        CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
-        nullptr
+    bool publish_bytes_atomically(const fs::path &path, const std::string_view bytes) {
+      std::string error;
+      return offline_sbs::safe_filesystem::publish_bytes_atomically(
+        path, bytes, offline_sbs::safe_filesystem::publication_e::durable, error
       );
-      if (handle == INVALID_HANDLE_VALUE) {
-        return false;
-      }
-      const auto *bytes = static_cast<const std::uint8_t *>(data);
-      std::size_t offset = 0;
-      bool succeeded = true;
-      while (offset < size) {
-        const DWORD chunk = static_cast<DWORD>(
-          std::min<std::size_t>(size - offset, std::numeric_limits<DWORD>::max())
-        );
-        DWORD written = 0;
-        if (!WriteFile(handle, bytes + offset, chunk, &written, nullptr) ||
-            written != chunk) {
-          succeeded = false;
-          break;
-        }
-        offset += written;
-      }
-      if (succeeded) {
-        succeeded = FlushFileBuffers(handle);
-      }
-      if (!CloseHandle(handle)) {
-        succeeded = false;
-      }
-      if (!succeeded) {
-        std::error_code ec;
-        fs::remove(path, ec);
-      }
-      return succeeded;
     }
 
     bool publish_json_atomically(const fs::path &path,
                                  const nlohmann::ordered_json &value) {
-      const std::string serialized = value.dump(2) + "\n";
-      return publish_file_atomically(path, [&](const fs::path &temporary_path) {
-        return write_bytes(
-          temporary_path,
-          serialized.data(),
-          serialized.size()
-        );
-      });
+      return publish_bytes_atomically(path, value.dump(2) + "\n");
     }
 
     constexpr std::uint64_t follow_max_sequence = 9999999999ull;
@@ -1272,13 +1191,10 @@ namespace sbs_bench {
       if (values.empty()) {
         return false;
       }
-      return publish_file_atomically(path, [&](const fs::path &temporary_path) {
-        return write_bytes(
-          temporary_path,
-          values.data(),
-          values.size() * sizeof(float)
-        );
-      });
+      return publish_bytes_atomically(
+        path,
+        std::string_view(reinterpret_cast<const char *>(values.data()), values.size() * sizeof(float))
+      );
     }
 
     // Whole-clip modes consume the complete append-only state. Slots 16..19 are uint bit

@@ -375,27 +375,13 @@ TEST(OfflineSbsWorker, UiProgressUsesTransientWritesAndHarnessFilesStayDurable) 
   ASSERT_FALSE(worker.empty());
   ASSERT_FALSE(harness.empty());
 
-  const auto worker_writer = source_section(
-    worker,
-    "enum class atomic_write_mode_e",
-    "void write_json_atomic_bounded("
-  );
-  const auto harness_writer = source_section(
-    harness,
-    "bool publish_file_atomically(",
-    "bool publish_json_atomically("
-  );
-  ASSERT_FALSE(worker_writer.empty());
-  ASSERT_FALSE(harness_writer.empty());
-  EXPECT_NE(worker_writer.find("mode = atomic_write_mode_e::durable"), std::string::npos);
-  EXPECT_NE(worker_writer.find("FILE_FLAG_WRITE_THROUGH : 0"), std::string::npos);
-  EXPECT_NE(worker_writer.find("if (ok && durable)"), std::string::npos);
-  EXPECT_NE(worker_writer.find("MOVEFILE_WRITE_THROUGH : 0"), std::string::npos);
-  EXPECT_EQ(count_text(worker, "atomic_write_mode_e::transient"), 1u);
-  // Every file the harness publishes is durable.
-  EXPECT_NE(harness_writer.find("MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH"), std::string::npos);
-  EXPECT_NE(harness_writer.find("FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH"), std::string::npos);
-  EXPECT_NE(harness_writer.find("succeeded = FlushFileBuffers(handle)"), std::string::npos);
+  // One shared publisher owns the write-through, flush and rename policy. Only the worker's live
+  // UI progress handoff opts out of durability; every file the harness publishes is durable.
+  EXPECT_EQ(count_text(worker, "publication_e::transient"), 1u);
+  EXPECT_EQ(count_text(harness, "publication_e::transient"), 0u);
+  EXPECT_EQ(count_text(harness, "publication_e::durable"), 2u);
+  EXPECT_EQ(count_text(worker, "MoveFileExW"), 0u);
+  EXPECT_EQ(count_text(harness, "MoveFileExW"), 0u);
 }
 
 TEST(OfflineSbsWorker, ReplayHashesTheExactSnapshotItDecodes) {

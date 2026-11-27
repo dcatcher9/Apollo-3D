@@ -1502,53 +1502,9 @@ namespace offline_sbs {
       const std::string &contents,
       std::string &error
     ) {
-      auto temporary = path;
-      temporary += L".part";
-      std::error_code ignored;
-      fs::remove(temporary, ignored);
-      HANDLE handle = CreateFileW(
-        temporary.c_str(),
-        GENERIC_WRITE,
-        0,
-        nullptr,
-        CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
-        nullptr
+      return safe_filesystem::publish_bytes_atomically(
+        path, contents, safe_filesystem::publication_e::durable, error
       );
-      if (handle == INVALID_HANDLE_VALUE) {
-        error = "cannot create atomic state temporary file";
-        return false;
-      }
-      bool ok = true;
-      std::size_t offset = 0;
-      while (offset < contents.size()) {
-        const auto chunk = static_cast<DWORD>(std::min<std::size_t>(
-          contents.size() - offset,
-          std::numeric_limits<DWORD>::max()
-        ));
-        DWORD written = 0;
-        if (!WriteFile(handle, contents.data() + offset, chunk, &written, nullptr) ||
-            written != chunk) {
-          ok = false;
-          break;
-        }
-        offset += written;
-      }
-      ok = ok && FlushFileBuffers(handle);
-      CloseHandle(handle);
-      if (
-        !ok ||
-        !MoveFileExW(
-          temporary.c_str(),
-          path.c_str(),
-          MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
-        )
-      ) {
-        fs::remove(temporary, ignored);
-        error = "cannot atomically replace durable job state";
-        return false;
-      }
-      return true;
     }
 
     bool write_json_atomically(

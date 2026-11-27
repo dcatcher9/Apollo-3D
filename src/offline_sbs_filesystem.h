@@ -1,14 +1,16 @@
 /**
  * @file src/offline_sbs_filesystem.h
- * @brief No-follow filesystem traversal for offline SBS retained artifacts.
+ * @brief No-follow filesystem traversal and atomic publication for offline SBS artifacts.
  */
 #pragma once
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace offline_sbs::safe_filesystem {
   /**
@@ -148,6 +150,35 @@ namespace offline_sbs::safe_filesystem {
    */
   [[nodiscard]] bool remove_tree_no_follow(
     const std::filesystem::path &root,
+    std::string &error
+  );
+
+  /** How a published file reaches the disk. */
+  enum class publication_e {
+    durable,  ///< Written through, flushed and renamed with write-through: retained documents.
+    transient,  ///< Ordinary cached write and rename: replaceable UI progress.
+  };
+
+  /**
+   * Replace `path` through its sibling `<path>.part`.
+   *
+   * `write` fills the temporary file it is given. A stale temporary is removed first and a failed
+   * one afterwards. A polling reader or filesystem filter can briefly refuse the rename after the
+   * writer has closed the complete file, so sharing, lock and access denials are retried for about
+   * 100 ms; permanent path, ACL and volume errors fail immediately.
+   */
+  [[nodiscard]] bool publish_file_atomically(
+    const std::filesystem::path &path,
+    const std::function<bool(const std::filesystem::path &temporary)> &write,
+    publication_e publication,
+    std::string &error
+  );
+
+  /** Publish exactly `bytes` through publish_file_atomically. */
+  [[nodiscard]] bool publish_bytes_atomically(
+    const std::filesystem::path &path,
+    std::string_view bytes,
+    publication_e publication,
     std::string &error
   );
 }  // namespace offline_sbs::safe_filesystem

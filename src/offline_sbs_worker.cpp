@@ -12,6 +12,7 @@
 #include "offline_sbs_contract.h"
 #include "offline_sbs_runner.h"
 #include "offline_sbs_digest.h"
+#include "offline_sbs_filesystem.h"
 #include "offline_sbs_wire_contract.h"
 #include "offline_sbs_worker.h"
 #ifdef SUNSHINE_TESTS
@@ -147,8 +148,6 @@ namespace offline_sbs {
     constexpr auto child_poll = 20ms;
     constexpr auto child_timeout = std::chrono::hours(12);
     constexpr auto frame_io_timeout = std::chrono::minutes(5);
-    constexpr int transient_file_io_attempts = 50;
-    constexpr auto transient_file_io_retry_delay = 2ms;
     constexpr std::size_t offline_source_pipeline_capacity = 2;
     constexpr std::size_t offline_encoder_pipeline_capacity = 1;
 
@@ -371,106 +370,39 @@ namespace offline_sbs {
       return found == object.end() ? nullptr : &*found;
     }
 
-    bool write_all(HANDLE handle, const void *data, std::size_t size) {
-      const auto *bytes = static_cast<const std::uint8_t *>(data);
-      std::size_t offset = 0;
-      while (offset < size) {
-        const DWORD chunk = static_cast<DWORD>(
-          std::min<std::size_t>(
-            size - offset,
-            std::numeric_limits<DWORD>::max()
-          )
-        );
-        DWORD written = 0;
-        if (!WriteFile(handle, bytes + offset, chunk, &written, nullptr) || written != chunk) {
-          return false;
-        }
-        offset += written;
-      }
-      return true;
-    }
-
-    enum class atomic_write_mode_e {
-      durable,
-      transient,
-    };
+    using safe_filesystem::publication_e;
 
     void write_bytes_atomic(
       const fs::path &path,
       const std::vector<std::uint8_t> &bytes,
-      const atomic_write_mode_e mode = atomic_write_mode_e::durable
+      const publication_e publication = publication_e::durable
     ) {
       std::error_code ec;
       fs::create_directories(path.parent_path(), ec);
       if (ec) {
         throw worker_error("cannot create contract directory: " + ec.message());
       }
-      auto temporary = path;
-      temporary += L".tmp";
-      const bool durable = mode == atomic_write_mode_e::durable;
-      const HANDLE handle = CreateFileW(
-        temporary.c_str(),
-        GENERIC_WRITE,
-        0,
-        nullptr,
-        CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL | (durable ? FILE_FLAG_WRITE_THROUGH : 0),
-        nullptr
-      );
-      if (handle == INVALID_HANDLE_VALUE) {
-        throw worker_error("cannot create atomic temporary file: " + path_utf8(temporary));
-      }
-      bool ok = write_all(handle, bytes.data(), bytes.size());
-      if (ok && durable) {
-        ok = FlushFileBuffers(handle);
-      }
-      const bool closed = CloseHandle(handle);
-      ok = ok && closed;
-      if (!ok) {
-        fs::remove(temporary, ec);
-        throw worker_error("cannot write atomic temporary file: " + path_utf8(path));
-      }
-      bool published = false;
-      for (int attempt = 0;
-           attempt < (durable ? 1 : transient_file_io_attempts);
-           ++attempt) {
-        if (MoveFileExW(
-              temporary.c_str(),
-              path.c_str(),
-              MOVEFILE_REPLACE_EXISTING |
-                (durable ? MOVEFILE_WRITE_THROUGH : 0)
-            )) {
-          published = true;
-          break;
-        }
-        const auto move_error = GetLastError();
-        if (
-          move_error != ERROR_SHARING_VIOLATION &&
-          move_error != ERROR_LOCK_VIOLATION &&
-          move_error != ERROR_ACCESS_DENIED
-        ) {
-          break;
-        }
-        if (!durable && attempt + 1 < transient_file_io_attempts) {
-          std::this_thread::sleep_for(transient_file_io_retry_delay);
-        }
-      }
-      if (!published) {
-        fs::remove(temporary, ec);
-        throw worker_error("cannot atomically publish: " + path_utf8(path));
+      std::string error;
+      if (!safe_filesystem::publish_bytes_atomically(
+            path,
+            std::string_view(reinterpret_cast<const char *>(bytes.data()), bytes.size()),
+            publication,
+            error
+          )) {
+        throw worker_error(error);
       }
     }
 
     void write_json_atomic(
       const fs::path &path,
       const nlohmann::json &value,
-      const atomic_write_mode_e mode = atomic_write_mode_e::durable
+      const publication_e publication = publication_e::durable
     ) {
       const auto text = value.dump(2) + "\n";
       write_bytes_atomic(
         path,
         std::vector<std::uint8_t>(text.begin(), text.end()),
-        mode
+        publication
       );
     }
 
@@ -2299,7 +2231,7 @@ namespace offline_sbs {
       write_json_atomic(
         spec.progress_path,
         value,
-        atomic_write_mode_e::transient
+        publication_e::transient
       );
     }
 

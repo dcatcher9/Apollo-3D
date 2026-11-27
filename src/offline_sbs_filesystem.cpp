@@ -1,18 +1,21 @@
 /**
  * @file src/offline_sbs_filesystem.cpp
- * @brief No-follow filesystem traversal for offline SBS retained artifacts.
+ * @brief No-follow filesystem traversal and atomic publication for offline SBS artifacts.
  */
 
 
 #include "offline_sbs_filesystem.h"
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstring>
 #include <limits>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -1145,5 +1148,78 @@ namespace offline_sbs::safe_filesystem {
       return false;
     }
     return pin->remove(error);
+  }
+
+  bool publish_file_atomically(
+    const fs::path &path,
+    const std::function<bool(const fs::path &temporary)> &write,
+    const publication_e publication,
+    std::string &error
+  ) {
+    error.clear();
+    auto temporary = path;
+    temporary += L".part";
+    std::error_code ignored;
+    fs::remove(temporary, ignored);
+    if (!write(temporary)) {
+      fs::remove(temporary, ignored);
+      error = "cannot write the atomic temporary file for " + path_text(path);
+      return false;
+    }
+    // The temporary is a sibling of the final name, so the rename stays on one volume, and
+    // MOVEFILE_REPLACE_EXISTING keeps a replacement atomic.
+    const DWORD flags = MOVEFILE_REPLACE_EXISTING |
+                        (publication == publication_e::durable ? MOVEFILE_WRITE_THROUGH : 0);
+    constexpr int attempts = 50;
+    for (int attempt = 0; attempt < attempts; ++attempt) {
+      if (MoveFileExW(temporary.c_str(), path.c_str(), flags)) {
+        return true;
+      }
+      const auto move_error = GetLastError();
+      if (move_error != ERROR_SHARING_VIOLATION && move_error != ERROR_LOCK_VIOLATION &&
+          move_error != ERROR_ACCESS_DENIED) {
+        break;
+      }
+      if (attempt + 1 < attempts) {
+        std::this_thread::sleep_for(std::chrono::milliseconds {2});
+      }
+    }
+    fs::remove(temporary, ignored);
+    error = "cannot atomically publish " + path_text(path);
+    return false;
+  }
+
+  bool publish_bytes_atomically(
+    const fs::path &path,
+    const std::string_view bytes,
+    const publication_e publication,
+    std::string &error
+  ) {
+    const bool durable = publication == publication_e::durable;
+    return publish_file_atomically(path, [&](const fs::path &temporary) {
+      const HANDLE handle = CreateFileW(
+        temporary.c_str(),
+        GENERIC_WRITE,
+        0,
+        nullptr,
+        CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL | (durable ? FILE_FLAG_WRITE_THROUGH : 0),
+        nullptr
+      );
+      if (handle == INVALID_HANDLE_VALUE) {
+        return false;
+      }
+      bool written = true;
+      for (std::size_t offset = 0; written && offset < bytes.size();) {
+        const auto chunk = static_cast<DWORD>(
+          std::min<std::size_t>(bytes.size() - offset, std::numeric_limits<DWORD>::max())
+        );
+        DWORD count = 0;
+        written = WriteFile(handle, bytes.data() + offset, chunk, &count, nullptr) && count == chunk;
+        offset += count;
+      }
+      written = written && (!durable || FlushFileBuffers(handle));
+      return CloseHandle(handle) && written;
+    }, publication, error);
   }
 }  // namespace offline_sbs::safe_filesystem

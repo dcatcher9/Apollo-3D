@@ -31,7 +31,7 @@ namespace {
       }
       progress = root / fs::path {u8"progress-\u96ea.json"};
       temporary = progress;
-      temporary += L".tmp";
+      temporary += L".part";
     }
 
     ~progress_files_t() {
