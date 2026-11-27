@@ -227,7 +227,6 @@ namespace platf::display_config {
     return {ERROR_INSUFFICIENT_BUFFER};
   }
 
-
   std::optional<advanced_color_state_t> query_advanced_color(
     const LUID &adapter_id,
     const UINT32 target_id,

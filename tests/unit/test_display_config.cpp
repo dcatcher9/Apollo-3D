@@ -6,10 +6,10 @@
 #include "src/platform/common.h"
 #include "src/platform/windows/display_config.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cwchar>
-#include <algorithm>
 #include <initializer_list>
 #include <iterator>
 #include <limits>
@@ -323,10 +323,11 @@ TEST(DisplayConfigSuppliedApply, ValidatesThenAppliesWithTheCallersFlags) {
   const auto result = validate_and_apply(topology, SDC_VIRTUAL_MODE_AWARE, SDC_NO_OPTIMIZATION, {}, fake_set_display_config);
   EXPECT_EQ(result.state, supplied_apply_e::applied);
   EXPECT_EQ(result.status, ERROR_SUCCESS);
-  EXPECT_EQ(fake_set_config_state.flags, (std::vector<UINT32> {
+  const std::vector<UINT32> expected_flags {
     SDC_VALIDATE | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_VIRTUAL_MODE_AWARE,
     SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_VIRTUAL_MODE_AWARE | SDC_NO_OPTIMIZATION,
-  }));
+  };
+  EXPECT_EQ(fake_set_config_state.flags, expected_flags);
   EXPECT_EQ(fake_set_config_state.path_counts, (std::vector<UINT32> {2, 2}));
 }
 
@@ -336,10 +337,11 @@ TEST(DisplayConfigSuppliedApply, AnInvalidTopologyIsNeitherRequeriedNorApplied) 
   fake_set_config_state.validate_status = ERROR_INVALID_PARAMETER;
   topology_t topology;
   bool requeried = false;
-  const auto result = validate_and_apply(topology, 0, 0, [&](topology_t &) {
+  const auto requery = [&](topology_t &) {
     requeried = true;
     return true;
-  }, fake_set_display_config);
+  };
+  const auto result = validate_and_apply(topology, 0, 0, requery, fake_set_display_config);
   EXPECT_EQ(result.state, supplied_apply_e::invalid);
   EXPECT_EQ(result.status, ERROR_INVALID_PARAMETER);
   EXPECT_FALSE(requeried);
@@ -351,18 +353,20 @@ TEST(DisplayConfigSuppliedApply, TheRequeryReplacesTheTopologyOrStopsTheApply) {
   fake_set_config_state = {};
   topology_t topology;
   topology.paths.resize(1);
-  const auto stale = validate_and_apply(topology, 0, 0, [](topology_t &) {
+  const auto changed_desktop = [](topology_t &) {
     return false;
-  }, fake_set_display_config);
+  };
+  const auto stale = validate_and_apply(topology, 0, 0, changed_desktop, fake_set_display_config);
   EXPECT_EQ(stale.state, supplied_apply_e::stale);
   EXPECT_EQ(fake_set_config_state.flags.size(), 1u);
 
   fake_set_config_state = {};
   fake_set_config_state.apply_status = ERROR_GEN_FAILURE;
-  const auto failed = validate_and_apply(topology, 0, 0, [](topology_t &fresh) {
+  const auto fresh_observation = [](topology_t &fresh) {
     fresh.paths.resize(3);
     return true;
-  }, fake_set_display_config);
+  };
+  const auto failed = validate_and_apply(topology, 0, 0, fresh_observation, fake_set_display_config);
   EXPECT_EQ(failed.state, supplied_apply_e::failed);
   EXPECT_EQ(failed.status, ERROR_GEN_FAILURE);
   EXPECT_EQ(fake_set_config_state.path_counts, (std::vector<UINT32> {1, 3}));
