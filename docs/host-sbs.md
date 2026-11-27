@@ -563,11 +563,15 @@ a sixteenth of each kind that has at least 16 is shown, so text the game has dra
 revealed, or has hidden, does not, and neither a bright nor a dark scene alone passes for text.
 The same pass counts, per tile of a 16-by-16 grid of the game's picture, the glyph texels and
 those with scene in front of each plane level. The host reads these words back without waiting.
-They feed the plane policy, and they select the route of the following draws: while the text is
-not shown, a draw only makes this observation and keeps its ordinary geometry, with the subtitle
-pin where that is in force, which it is again after three seconds of findings that the text is
-not shown ([Fallback](reshade-sbs.md#text-games)); while it is shown, the draw is pinned, and its own observation
-decides once more for that very frame. A frame taken for a Dump 3D package is never pinned.
+They feed the plane policy, and they select the route of the following draws. A draw on the
+pinned route decides from its own observation whether that very frame is pinned; a frame it
+refuses is the ordinary draw, bit for bit. The route is taken while the latest words read back
+show the text, and kept through findings that they do not for as long as the helper serves the
+game, which is three seconds ([Fallback](reshade-sbs.md#text-games)): the words are a frame or
+two old, so a route chosen from them alone would unpin the frames that follow each hidden one
+and bring the text back as late again. Otherwise a draw only makes this observation and keeps
+its ordinary geometry. Where the subtitle pin is in force for the draw it keeps its place until
+the words show the text. A frame taken for a Dump 3D package is never pinned.
 
 Two more compute passes precede the shared pin pass on a pinned draw:
 

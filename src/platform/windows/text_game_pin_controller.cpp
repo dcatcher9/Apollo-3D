@@ -289,7 +289,9 @@ namespace platf::dxgi {
       service_verdict(device, context);
     }
     if (diagnostics) {
-      ++(result.selected ? pin_draws_ : queued && observe_only ? pin_probes_ : pin_misses_);
+      // A draw on the pinned route whose text the picture did not show at the latest finding
+      // counts as observed: the GPU leaves such a frame unpinned.
+      ++(result.selected && text_shown_ ? pin_draws_ : queued ? pin_probes_ : pin_misses_);
       const auto log_now = std::chrono::steady_clock::now();
       if (log_now - logged_at_ >= std::chrono::seconds(5)) {
         logged_at_ = log_now;

@@ -94,6 +94,18 @@ namespace platf::dxgi {
       return text_shown_;
     }
 
+    /**
+     * Whether a draw takes the pinned route. That route decides on the GPU, from its own
+     * picture, whether this very frame is pinned; text_shown() is the answer of a draw a frame
+     * or two older. While the helper serves the game the route is therefore kept through a
+     * finding that the text is not shown: chosen from the older answer alone, each frame that
+     * hid the text would unpin the frames that follow it as well, and the text would come back
+     * as late again.
+     */
+    [[nodiscard]] bool pin_route(const time_point_t now) const {
+      return text_shown_ || helper_serves(now);
+    }
+
     /** The pass of one prepared draw, and the pin planes when the draw uses them. */
     struct pin_draw_t {
       bool selected = false;  ///< The draw uses the pin.

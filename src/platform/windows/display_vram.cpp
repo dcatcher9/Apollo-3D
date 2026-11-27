@@ -2471,9 +2471,15 @@ namespace platf::dxgi {
                 text_pin_prepared = text_game_pin.prepare(device.get(), device_ctx.get(), colour_desc, default_source_sdr_white_scrgb, text_pin_shape);
               }
             }
-            bool text_pin_selected = text_pin_prepared && text_game_pin.text_shown();
+            // The pinned route decides for its own frame whether the picture shows the text. It
+            // is kept while the helper serves the game, unless the subtitle pin is in force for
+            // this draw: that one keeps its place until the text is known to be shown.
+            const auto text_pin_now = std::chrono::steady_clock::now();
+            const bool subtitle_pin_in_force = subtitle_pin_candidate && subtitle_constants.enabled == 1u;
+            bool text_pin_selected = text_pin_prepared &&
+                                     (subtitle_pin_in_force ? text_game_pin.text_shown() : text_game_pin.pin_route(text_pin_now));
             if (text_game_ai_active && !predicate) {
-              text_game_pin.note_protection(text_pin_candidate, text_pin_prepared, text_pin_selected, std::chrono::steady_clock::now());
+              text_game_pin.note_protection(text_pin_candidate, text_pin_prepared, text_pin_selected, text_pin_now);
             }
             // The shared pin is prepared only for an enabled subtitle band (below). Without one
             // this is the ordinary draw from the start, so it keeps the fused P010 luma target

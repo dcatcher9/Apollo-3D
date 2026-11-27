@@ -4842,6 +4842,9 @@ TEST(HostSbsV2LiveWarpGpuTest, TextGamePinFollowsTheGlyphsOnlyWhileThePictureSho
   operands.text_game = nullptr;
   EXPECT_EQ(observed, render(8u, 8u, grey));
   EXPECT_NE(observed, shown);
+  // A draw on the pinned route that the picture refuses is the ordinary draw, bit for bit: the
+  // route may be kept through frames that hide the text.
+  EXPECT_EQ(hidden, render(0u, 0u, grey));
 }
 
 TEST(HostSbsV2LiveWarpGpuTest, TextGamePinComparesAnHdrCaptureAtTheDesktopsSdrWhite) {
