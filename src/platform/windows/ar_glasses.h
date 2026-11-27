@@ -389,12 +389,6 @@ namespace ar_glasses {
       const virtual_display_identity_contract_t &observed
     );
 
-    /** Match a retiring Apollo source without trusting a possibly reused numeric target ID. */
-    bool retirement_identity_matches_for_test(
-      const virtual_display_identity_contract_t &retiring,
-      const virtual_display_identity_contract_t &observed
-    );
-
     struct local_retirement_transfer_result_t {
       bool transferred = false;
       bool source_released = false;

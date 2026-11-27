@@ -1835,50 +1835,6 @@ TEST(ArGlassesModeTransition, SwitchingTheSourceOnRunningGlassesRebuildsThePrese
   EXPECT_TRUE(ar_glasses::detail::local_session_can_re_isolate_for_test(game, game, false));
 }
 
-TEST(ArGlassesModeTransition, RetirementDoesNotFollowAReusedPhysicalTargetId) {
-  ar_glasses::detail::virtual_display_identity_contract_t retiring;
-  retiring.adapter_id.LowPart = 42;
-  retiring.target_id = 7;
-  retiring.device_path = LR"(\\?\DISPLAY#SUDOVDA#retiring)";
-  retiring.gdi_name = LR"(\\.\DISPLAY5)";
-
-  auto reused_physical = retiring;
-  reused_physical.device_path = LR"(\\?\DISPLAY#TCL03D4#physical)";
-  reused_physical.gdi_name = LR"(\\.\DISPLAY2)";
-  reused_physical.friendly_name = L"SmartGlasses";
-  EXPECT_FALSE(ar_glasses::detail::retirement_identity_matches_for_test(
-    retiring,
-    reused_physical
-  ));
-
-  auto renumbered_virtual = reused_physical;
-  renumbered_virtual.adapter_id.LowPart = 43;
-  renumbered_virtual.target_id = 9;
-  renumbered_virtual.friendly_name = L"Apollo AR Desktop";
-  EXPECT_FALSE(ar_glasses::detail::retirement_identity_matches_for_test(
-    retiring,
-    renumbered_virtual
-  ));
-
-  auto exact_sudo_identity = reused_physical;
-  exact_sudo_identity.device_path = LR"(\\?\DISPLAY#SMKD1CE#replacement-path)";
-  EXPECT_TRUE(ar_glasses::detail::retirement_identity_matches_for_test(
-    retiring,
-    exact_sudo_identity
-  ));
-
-  auto exact_apollo_identity = reused_physical;
-  exact_apollo_identity.friendly_name = L"Apollo AR Desktop";
-  EXPECT_TRUE(ar_glasses::detail::retirement_identity_matches_for_test(
-    retiring,
-    exact_apollo_identity
-  ));
-
-  auto learned_path = reused_physical;
-  learned_path.device_path = retiring.device_path;
-  EXPECT_TRUE(ar_glasses::detail::retirement_identity_matches_for_test(retiring, learned_path));
-}
-
 TEST(ArGlassesModeTransition, RetirementMovesTheOwnerAndLatchesCleanupAcrossWaiters) {
   const auto result = ar_glasses::detail::local_retirement_transfer_for_test();
   EXPECT_TRUE(result.transferred);

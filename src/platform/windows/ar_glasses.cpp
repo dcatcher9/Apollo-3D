@@ -281,28 +281,6 @@ namespace ar_glasses {
              );
     }
 
-    bool contains_case_insensitive(std::wstring_view haystack, std::wstring_view needle);
-
-    bool matches_retiring_local_virtual_display(
-      const VDISPLAY::creation_result_t &retiring,
-      const LUID &adapter_id,
-      UINT32 target_id,
-      std::wstring_view device_path,
-      std::wstring_view friendly_name
-    ) {
-      const bool local_friendly_name = is_apollo_ar_virtual_name(friendly_name);
-      const bool sudo_hardware_path = contains_case_insensitive(device_path, L"SMKD1CE") ||
-                                      contains_case_insensitive(device_path, L"SUDOVDA");
-      const bool learned_path = same_device_path(retiring.device_path, device_path);
-      const bool exact_local_identity = retiring.identity && same_luid(retiring.identity->AdapterLuid, adapter_id) &&
-                                        retiring.identity->TargetId == target_id &&
-                                        (local_friendly_name || sudo_hardware_path);
-      // DISPLAY numbers and friendly names are recyclable. Only the exact learned device path, or
-      // the driver's exact adapter/target identity plus Apollo/Sudo evidence, can keep this
-      // retirement barrier attached to a candidate.
-      return learned_path || exact_local_identity;
-    }
-
     void release_local_virtual_display_claim_impl() {
       std::lock_guard lock(ownership_mutex);
       local_session_present = false;
@@ -330,38 +308,6 @@ namespace ar_glasses {
       retired_local_virtual_display.emplace(std::move(session));
       ownership_changed.notify_all();
       return true;
-    }
-
-    VDISPLAY::display_identity_state_e query_retiring_local_virtual_display(
-      const VDISPLAY::session_t &session
-    ) {
-      const auto &retiring = session.binding();
-      if (!retiring.identity) {
-        return VDISPLAY::display_identity_state_e::absent;
-      }
-      std::vector<DISPLAYCONFIG_PATH_INFO> paths;
-      std::vector<DISPLAYCONFIG_MODE_INFO> modes;
-      if (!VDISPLAY::queryActiveDisplayConfig(paths, modes)) {
-        return VDISPLAY::display_identity_state_e::indeterminate;
-      }
-
-      for (const auto &path : paths) {
-        DISPLAYCONFIG_TARGET_DEVICE_NAME target_name {};
-        target_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
-        target_name.header.size = sizeof(target_name);
-        target_name.header.adapterId = path.targetInfo.adapterId;
-        target_name.header.id = path.targetInfo.id;
-        if (DisplayConfigGetDeviceInfo(&target_name.header) != ERROR_SUCCESS) {
-          return VDISPLAY::display_identity_state_e::indeterminate;
-        }
-
-        if (matches_retiring_local_virtual_display(retiring, path.targetInfo.adapterId, path.targetInfo.id, target_name.monitorDevicePath, target_name.monitorFriendlyDeviceName)) {
-          return VDISPLAY::display_identity_state_e::present;
-        }
-      }
-      // A retained source is deliberately absent from the active desktop before Remove runs.
-      // Keep the shared identity barrier until Windows also retires its available driver target.
-      return VDISPLAY::queryVirtualDisplayRetirementState(*retiring.identity, retiring.device_path);
     }
 
     bool wait_for_local_virtual_display_retirement_impl(
@@ -4046,7 +3992,6 @@ namespace ar_glasses {
                 }
                 return paused || topology_cleanup->prepare_removal();
               },
-              .query = query_retiring_local_virtual_display,
               .finish = finish_topology_cleanup,
             }
           );
@@ -4387,7 +4332,6 @@ namespace ar_glasses {
                                                                                      if (!session.restore()) return false;
                                                                                      return restore_monitor_desktop(handoff, path, original);
                                                                                    },
-                                                                                   .query = query_retiring_local_virtual_display,
                                                                                    .finish = [](VDISPLAY::session_t &session) {
                                                                                      return session.restore();
                                                                                    },
@@ -6007,23 +5951,6 @@ namespace ar_glasses {
       {owned.adapter_id, owned.target_id},
       owned.device_path,
       source
-    );
-  }
-
-  bool detail::retirement_identity_matches_for_test(
-    const virtual_display_identity_contract_t &retiring,
-    const virtual_display_identity_contract_t &observed
-  ) {
-    VDISPLAY::creation_result_t record;
-    record.identity = SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT {retiring.adapter_id, retiring.target_id};
-    record.device_path = retiring.device_path;
-    record.display_name = retiring.gdi_name;
-    return matches_retiring_local_virtual_display(
-      record,
-      observed.adapter_id,
-      observed.target_id,
-      observed.device_path,
-      observed.friendly_name
     );
   }
 
