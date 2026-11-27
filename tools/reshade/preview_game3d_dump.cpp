@@ -40,10 +40,7 @@ int main(int argc, char **argv) {
     std::set<std::string> files;
     for (const auto &artifact : artifacts) {
       const auto kind = artifact.at("kind").get<std::string>();
-      constexpr const char *primary[] {"source_color", "raw_depth", "candidate", "vertical_majorant",
-        "vertical_field", "final_field", "sbs", "linear_color", "ui_source_color"};
-      const bool optional = std::none_of(std::begin(primary), std::end(primary),
-        [&](const char *name) { return kind == name; });
+      const bool optional = !game3d_debug::primary_artifact_named(kind);
       try {
         const auto file = artifact.at("file").get<std::string>();
         if (!preview::detail::safe_artifact_filename(file) || !files.insert(file).second) {

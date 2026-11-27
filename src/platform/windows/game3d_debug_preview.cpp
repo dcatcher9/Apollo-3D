@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "game3d_debug_preview.h"
+#include "src/game3d_debug_formats.h"
 #include "src/game3d_debug_protocol.h"
 #include "src/game3d_debug_ui_resources.h"
 
@@ -119,10 +120,7 @@ namespace platf::game3d_debug::preview {
     }
 
     bool primary_resource(const std::string &kind) {
-      for (const auto *name : {"source_color", "raw_depth", "candidate", "vertical_majorant",
-             "vertical_field", "final_field", "sbs", "linear_color", "ui_source_color"})
-        if (kind == name) return true;
-      return false;
+      return ::game3d_debug::primary_artifact_named(kind) != nullptr;
     }
 
     unsigned channel_count(unsigned format) {
@@ -193,27 +191,24 @@ namespace platf::game3d_debug::preview {
   }  // namespace
 
   namespace detail {
+    // The formats sample() decodes, at the dump's own storage widths; zero for any other.
     std::uint32_t bytes_per_pixel(std::uint32_t format) {
       switch (format) {
         case 2:
-          return 16;
         case 10:
         case 16:
-          return 8;
         case 24:
         case 28:
         case 29:
         case 34:
         case 41:
-        case 87:
-        case 91:
-          return 4;
         case 54:
         case 56:
-          return 2;
         case 61:
         case 62:
-          return 1;
+        case 87:
+        case 91:
+          return ::game3d_debug::pixel_bytes(format);
         default:
           return 0;
       }

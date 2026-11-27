@@ -49,11 +49,7 @@ namespace sunshine_game3d::replay {
   static_assert(static_cast<unsigned>(game3d_debug::artifact::ui_layer_0) + game3d_debug::ui_layer_count == retired_artifact_first);
 
   inline unsigned artifact_id(const std::string &kind) {
-    if (kind == "ui_source_color") return static_cast<unsigned>(game3d_debug::artifact::ui_source_color);
-    constexpr std::array<const char *, 8> primary {
-      "source_color", "raw_depth", "candidate", "vertical_majorant", "vertical_field", "final_field", "sbs", "linear_color"};
-    for (unsigned i = 0; i < primary.size(); ++i)
-      if (kind == primary[i]) return i + 1;
+    if (const auto *primary = game3d_debug::primary_artifact_named(kind)) return static_cast<unsigned>(primary->id);
     for (const auto &entry : ui_resources::catalog)
       if (kind == entry.file_stem) return entry.artifact_id;
     for (unsigned i = 0; i < game3d_debug::ui_layer_count; ++i)

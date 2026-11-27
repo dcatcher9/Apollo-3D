@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 #include <type_traits>
 
 // Optional, independent of the streaming SBS ABI. One immutable diagnostic batch may
@@ -43,6 +44,47 @@ namespace game3d_debug {
     // fix 3's pre-UI change-set artifacts, removed by user decision) are
     // reserved and never reused; a host drops them as unknown optional IDs.
   };
+  // The primary artifacts, which every package carries or lists as not captured, and the kind
+  // (file stem) each is written as: the one list the host's dump and preview and the offline
+  // tools read. Every other id is optional: the UI resource catalog
+  // (game3d_debug_ui_resources.h) and the UI layer candidates below.
+  struct primary_artifact_t {
+    artifact id;
+    const char *kind;
+  };
+
+  inline constexpr primary_artifact_t primary_artifacts[] {
+    {artifact::source_color, "source_color"},
+    {artifact::raw_depth, "raw_depth"},
+    {artifact::candidate, "candidate"},
+    {artifact::vertical_majorant, "vertical_majorant"},
+    {artifact::vertical_field, "vertical_field"},
+    {artifact::final_field, "final_field"},
+    {artifact::sbs, "sbs"},
+    {artifact::linear_color, "linear_color"},
+    {artifact::ui_source_color, "ui_source_color"},
+  };
+
+  // A primary artifact's kind, or null for any other id.
+  inline constexpr const char *primary_artifact_kind(artifact id) noexcept {
+    for (const auto &primary : primary_artifacts) {
+      if (primary.id == id) {
+        return primary.kind;
+      }
+    }
+    return nullptr;
+  }
+
+  // The primary artifact written as kind, if any.
+  inline constexpr const primary_artifact_t *primary_artifact_named(std::string_view kind) noexcept {
+    for (const auto &primary : primary_artifacts) {
+      if (kind == primary.kind) {
+        return &primary;
+      }
+    }
+    return nullptr;
+  }
+
   inline constexpr unsigned ui_layer_count = 3;
   inline constexpr const char *ui_layer_names[ui_layer_count] {"ui_layer_candidate_0", "ui_layer_candidate_1", "ui_layer_candidate_2"};
   inline constexpr bool ui_layer_artifact(unsigned id) noexcept {

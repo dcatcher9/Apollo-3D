@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 #include <iterator>
 #include <nlohmann/json.hpp>
+#include <string>
 #include <thread>
 #include <vector>
 #include <wrl/client.h>
@@ -152,6 +153,29 @@ TEST(Game3DDumpProtocol, MissingDepthIsUnavailableRatherThanAnEmptySuccessfulCap
   EXPECT_EQ(dump::detail::bytes_per_pixel(DXGI_FORMAT_R32G32B32A32_SINT), 16u);
   EXPECT_EQ(dump::detail::bytes_per_pixel(DXGI_FORMAT_R9G9B9E5_SHAREDEXP), 4u);
   EXPECT_EQ(dump::detail::bytes_per_pixel(DXGI_FORMAT_BC1_UNORM), 0u);
+}
+
+TEST(Game3DDumpProtocol, PrimaryArtifactsAreOneListApartFromTheOptionalIds) {
+  std::vector<std::string> kinds;
+  for (const auto &primary : wire::primary_artifacts) {
+    ASSERT_NE(primary.kind, nullptr);
+    EXPECT_STREQ(wire::primary_artifact_kind(primary.id), primary.kind);
+    ASSERT_NE(wire::primary_artifact_named(primary.kind), nullptr);
+    EXPECT_EQ(wire::primary_artifact_named(primary.kind)->id, primary.id);
+    kinds.emplace_back(primary.kind);
+  }
+  std::sort(kinds.begin(), kinds.end());
+  EXPECT_EQ(std::adjacent_find(kinds.begin(), kinds.end()), kinds.end());
+  EXPECT_EQ(std::size(wire::primary_artifacts), 9u);
+  EXPECT_STREQ(wire::primary_artifact_kind(wire::artifact::ui_source_color), "ui_source_color");
+  EXPECT_EQ(wire::primary_artifact_kind(static_cast<wire::artifact>(0)), nullptr);
+  EXPECT_EQ(wire::primary_artifact_kind(wire::artifact::ui_layer_0), nullptr);
+  EXPECT_EQ(wire::primary_artifact_named(wire::ui_layer_names[0]), nullptr);
+  EXPECT_EQ(wire::primary_artifact_named("source_colour"), nullptr);
+  for (const auto &entry : sunshine_game3d::ui_resources::catalog) {
+    EXPECT_EQ(wire::primary_artifact_kind(static_cast<wire::artifact>(entry.artifact_id)), nullptr) << entry.file_stem;
+    EXPECT_EQ(wire::primary_artifact_named(entry.file_stem), nullptr) << entry.file_stem;
+  }
 }
 
 TEST(Game3DDumpProtocol, OptionalCatalogCannotInvalidatePrimaryReplayDescriptors) {

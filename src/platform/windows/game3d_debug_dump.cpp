@@ -49,33 +49,14 @@ namespace platf::game3d_debug {
     using game3d::win32::handle_t;
 
     const char *artifact_name(wire::artifact kind) {
-      switch (kind) {
-        case wire::artifact::source_color:
-          return "source_color";
-        case wire::artifact::raw_depth:
-          return "raw_depth";
-        case wire::artifact::candidate:
-          return "candidate";
-        case wire::artifact::vertical_majorant:
-          return "vertical_majorant";
-        case wire::artifact::vertical_field:
-          return "vertical_field";
-        case wire::artifact::final_field:
-          return "final_field";
-        case wire::artifact::sbs:
-          return "sbs";
-        case wire::artifact::linear_color:
-          return "linear_color";
-        case wire::artifact::ui_source_color:
-          return "ui_source_color";
-        default:
-          if (const auto *layer = wire::ui_layer_name(static_cast<unsigned>(kind))) return layer;
-          return sunshine_game3d::ui_resources::artifact_name(static_cast<unsigned>(kind));
-      }
+      if (const auto *primary = wire::primary_artifact_kind(kind)) return primary;
+      if (const auto *layer = wire::ui_layer_name(static_cast<unsigned>(kind))) return layer;
+      return sunshine_game3d::ui_resources::artifact_name(static_cast<unsigned>(kind));
     }
 
+    // Every artifact but the primary ones is optional; id 0 names none and is refused with them.
     bool optional_artifact(wire::artifact kind) {
-      return static_cast<unsigned>(kind) >= 9 && kind != wire::artifact::ui_source_color;
+      return static_cast<unsigned>(kind) != 0 && !wire::primary_artifact_kind(kind);
     }
 
     std::filesystem::path output_directory() {
@@ -161,8 +142,8 @@ namespace platf::game3d_debug {
             manifest["not_captured"].push_back(artifact_name(kind));
           }
         };
-        for (const auto kind : {wire::artifact::source_color, wire::artifact::raw_depth, wire::artifact::candidate, wire::artifact::vertical_majorant, wire::artifact::vertical_field, wire::artifact::final_field, wire::artifact::sbs, wire::artifact::linear_color, wire::artifact::ui_source_color}) {
-          missing(kind);
+        for (const auto &primary : wire::primary_artifacts) {
+          missing(primary.id);
         }
         for (const auto &entry : sunshine_game3d::ui_resources::catalog) {
           missing(static_cast<wire::artifact>(entry.artifact_id));
