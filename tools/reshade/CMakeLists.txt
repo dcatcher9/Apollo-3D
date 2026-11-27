@@ -222,7 +222,7 @@ configure_file(game3d_shader_source.h.in "${CMAKE_CURRENT_BINARY_DIR}/game3d_sha
 # are public, so that every file of a binary sees the same view.
 set(sunshine_game3d_core_libraries d3d11 d3d12 dxgi dxguid d3dcompiler sunshine_min_hook version sunshine_game3d_diagnostics
   sunshine_game3d_ui_policy)
-set(sunshine_game3d_core_sources exporter.cpp game3d_depth_input.cpp hook_host.cpp game3d_ui_input_provider.cpp game3d_debug_dump.cpp game3d_ui_layer.cpp game3d_ui_capture.cpp game3d_renderer.cpp game3d_ui_decision.cpp overlay_compositor.cpp depth_addon.cpp game3d_controls.cpp depth_content_sampler.cpp streamline_camera_probe.cpp addon_config.cpp game3d_ui_mask.cpp streamline_camera_data.cpp streamline_depth_capture.cpp streamline_native_observer.cpp streamline_depth_provider.cpp depth_output.cpp upscaler_call_trace.cpp ngx_hooks.cpp ngx_depth_source.cpp)
+set(sunshine_game3d_core_sources exporter.cpp exporter/export_source.cpp exporter/present_diagnostics.cpp exporter/scene_placement.cpp exporter/ui_status.cpp game3d_depth_input.cpp hook_host.cpp game3d_ui_input_provider.cpp game3d_debug_dump.cpp game3d_ui_layer.cpp game3d_ui_capture.cpp game3d_renderer.cpp game3d_ui_decision.cpp overlay_compositor.cpp depth_addon.cpp game3d_controls.cpp depth_content_sampler.cpp streamline_camera_probe.cpp addon_config.cpp game3d_ui_mask.cpp streamline_camera_data.cpp streamline_depth_capture.cpp streamline_native_observer.cpp streamline_depth_provider.cpp depth_output.cpp upscaler_call_trace.cpp ngx_hooks.cpp ngx_depth_source.cpp)
 function(sunshine_game3d_core_view view)
   cmake_parse_arguments(PARSE_ARGV 1 sunshine_view "" "" "SEAMS;EXCLUDE")
   set(view_sources ${sunshine_game3d_core_sources})
@@ -325,7 +325,7 @@ if(BUILD_TESTING)
       target_link_options(${target} PRIVATE -Wl,--wrap=MH_CreateHook)
     endif()
   endfunction()
-  # Test views. Exporter tests share exporter_internal.h with one compiled exporter.cpp,
+  # Test views. Exporter tests share exporter_internal.h with the view's compiled exporter objects,
   # and check the frame record's writers (SUNSHINE_GAME3D_FRAME_RECORD).
   sunshine_game3d_core_view(sunshine_game3d_core_sbs_test SEAMS SUNSHINE_SBS_TEST SUNSHINE_GAME3D_FRAME_RECORD)
   # The Streamline probe, NGX call trace and native observer seams, and the

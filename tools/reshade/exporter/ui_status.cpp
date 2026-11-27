@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Part of exporter.cpp, included at the end of the same translation unit.
-// UI and scene status publication. Session types and dynamically initialized
-// automatic_ui references stay in the shell at their original positions.
-namespace SUNSHINE_EXPORTER_INTERNAL {
+// UI and scene status publication (docs/reshade-sbs.md, UI decision
+// framework): automatic scene status and source-alpha UI publication, the
+// public queries, UI counter logging and controlled recalibration. The session
+// types are declared in exporter_base.h; exporter.cpp defines the session and
+// its dynamically initialized automatic_ui references.
+#include "../exporter_internal.h"
+
+namespace sunshine_exporter {
   // Returns the session whose UI counters the runtime had logged, if any.
   sunshine_game3d::alpha_auto_policy *clear_automatic_ui(api::effect_runtime *runtime) {
     std::lock_guard<std::mutex> lock(automatic_ui_mutex);
@@ -122,7 +126,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
   }
 #endif
 
-}  // namespace
+}  // namespace sunshine_exporter
 
 namespace sunshine_game3d {
   source_alpha_ui_decision query_source_alpha_ui(reshade::api::effect_runtime *runtime) {

@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
-#define SUNSHINE_EXPORTER_IMPLEMENTATION
 #include "exporter_internal.h"
 #include "addon_win32.h"
-namespace SUNSHINE_EXPORTER_INTERNAL {
+// The test add-on's overlay patch defines its exports, so one translation unit includes it.
+#include "test_overlay_patch.h"
+namespace sunshine_exporter {
   std::atomic<std::uint64_t> next_raw_basis {1};
 
   // No ReShade/GPU calls while holding this mutex. UI readers and requests never
@@ -217,7 +218,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
     // Observe this advisory transition without cancelling ReShade's UI operation.
     return false;
   }
-}  // namespace
+}  // namespace sunshine_exporter
 
 
 extern "C" {
@@ -299,7 +300,3 @@ extern "C" {
     teardown_addon(addon, reshade);
   }
 }
-
-#include "exporter/ui_status.inl"
-
-#undef SUNSHINE_EXPORTER_IMPLEMENTATION

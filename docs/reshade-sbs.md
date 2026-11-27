@@ -6719,26 +6719,30 @@ and types remain in the shell, and the GPU calls keep their original sequence.
 
 ### Scene placement
 
-`exporter/scene_placement.inl` defines the scene/frame value types, placement
-reports and exact-source reuse helpers at their original exporter position.
-`exporter/scene_placement_impl.inl` holds the same-TU frame-decision, raw and
-projection calibration, and stereo-reentry member bodies. Their runtime fields
-stay in the exporter shell in their original order. Preparation's try-lock,
+`exporter/scene_placement.h` defines the scene/frame value types, placement
+reports and exact-source reuse helpers; `exporter/scene_placement.cpp` defines
+those helpers and the publisher's frame-decision, raw and projection
+calibration, and stereo-reentry members. Their runtime fields stay in the
+exporter's `runtime_t` in their original order. Preparation's try-lock,
 clock reads, resource calls and publication remain at their original call sites;
 held scenes keep their source identity and previously resolved calibration.
 
 ### Exporter test boundary
 
 The publisher and its types are shared with the lifecycle fixture through
-`tools/reshade/exporter_internal.h`, which `exporter.cpp` includes once. The
-source TU supplies the one session, UI aliases, callbacks and noninline free
-definitions; shipping and the runtime-test add-on keep the anonymous namespace.
-The SBS unit view uses one named test namespace, preserves the friend fixture,
-and shares the existing constexpr classifier definitions and three constant
-objects between its TUs. This packaging has no source behavior or fixture-oracle
+`tools/reshade/exporter_internal.h`, which every exporter translation unit
+includes. `exporter.cpp` supplies the one session, UI aliases and callbacks;
+`exporter/` supplies the present diagnostics, scene placement, export source and
+UI status publication, each in its own translation unit. Every view, shipping
+and the runtime-test add-on included, uses one top-level namespace,
+`sunshine_exporter`, which looks names up as the anonymous namespace it replaced
+did; the SBS unit view preserves the friend fixture, and the constexpr
+classifier definitions and three `inline` constant objects are shared between
+the TUs of every view. This packaging has no source behavior or fixture-oracle
 change. Until 11-01 the header was `exporter_test_access.h`, included in seven
 stages that kept the refactor's original definition order for its identity
-proof.
+proof; until 11-27 the exporter was one translation unit whose parts were
+`.inl` files.
 
 ### Selecting scene depth
 

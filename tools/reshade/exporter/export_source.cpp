@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Function-only part at the end of exporter.cpp; original anonymous namespace.
-// The export source of a Present: the native renderer's packed SBS output.
-namespace SUNSHINE_EXPORTER_INTERNAL {
-  inline bool publisher_t::describe(api::effect_runtime *runtime, runtime_t &proof, source_t &source) {
+// The export source of a Present: the native renderer's packed SBS output
+// (publisher_t::describe).
+#include "../exporter_internal.h"
+
+namespace sunshine_exporter {
+  bool publisher_t::describe(api::effect_runtime *runtime, runtime_t &proof, source_t &source) {
     std::uint32_t width = 0, height = 0;
     runtime->get_screenshot_width_and_height(&width, &height);
     if (width != proof.width || height != proof.height) {
@@ -53,5 +55,4 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
     source.adapter = proof.adapter_luid;
     return wire::supported_format(static_cast<std::uint32_t>(source.format), source.color.output);
   }
-
-} // namespace
+}  // namespace sunshine_exporter

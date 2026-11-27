@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Part of exporter.cpp, the same translation unit (tools/reshade/README.md, Source map),
-// included at the end of the file: the present diagnostics. The process's video memory
-// (query_vram) and a published frame's output sample (classify_output), and publisher_t's
-// present timing window (finish_present_timing, close_timing_window), present gaps
-// (measure_present_gap, log_present_gap), VRAM adapter (vram_adapter) and SBS output
-// line (log_output). The members were in-class bodies of publisher_t and stay inline;
-// publisher_t declares them and keeps the present-gap constants and present_gap_t, and
-// the shell's part declarations name the two free functions.
-namespace SUNSHINE_EXPORTER_INTERNAL {
+// The present diagnostics (docs/reshade-sbs.md, Diagnostics switch and
+// per-Present cost): the process's video memory (query_vram) and a published
+// frame's output sample (classify_output), and publisher_t's present timing
+// window (finish_present_timing, close_timing_window), present gaps
+// (measure_present_gap, log_present_gap), VRAM adapter (vram_adapter) and SBS
+// output line (log_output). publisher_t declares the members and keeps the
+// present-gap constants and present_gap_t; exporter_internal.h declares the two
+// free functions.
+#include "../exporter_internal.h"
+
+namespace sunshine_exporter {
   // This process's video memory on the adapter (game3d_vram.h): two CPU-only
   // DXGI queries, made at most every vram::sample_period_ms.
-#if defined(SUNSHINE_EXPORTER_IMPLEMENTATION)
   sunshine_game3d::vram::reading query_vram(IDXGIAdapter3 *adapter) {
     using sunshine_game3d::vram::to_mib;
     sunshine_game3d::vram::reading out;
@@ -26,11 +27,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
     out.valid = true;
     return out;
   }
-#else
-  sunshine_game3d::vram::reading query_vram(IDXGIAdapter3 *adapter);
-#endif
 
-#if defined(SUNSHINE_EXPORTER_IMPLEMENTATION)
   output_sample classify_output(const frame_decision_t &frame) {
     const auto &scene = frame.scene;
     const bool placed = scene.ready && scene.blend > 0.f;
@@ -43,11 +40,8 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
     out.gap = frame.gap;
     return out;
   }
-#else
-  output_sample classify_output(const frame_decision_t &frame);
-#endif
 
-  inline void publisher_t::finish_present_timing(api::effect_runtime *runtime, const std::array<LARGE_INTEGER, 5> &marks, unsigned count) {
+  void publisher_t::finish_present_timing(api::effect_runtime *runtime, const std::array<LARGE_INTEGER, 5> &marks, unsigned count) {
     if (!count) return;
     LARGE_INTEGER end{}, frequency{};
     QueryPerformanceCounter(&end);
@@ -87,7 +81,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
 
   // Requires mutex_. Every Present of the runtime counts, Game 3D enabled
   // or not; fg is the frame-generation state of the Present before the gap.
-  inline publisher_t::present_gap_t publisher_t::measure_present_gap(runtime_t &proof, std::int64_t qpc, std::uint64_t now) {
+  publisher_t::present_gap_t publisher_t::measure_present_gap(runtime_t &proof, std::int64_t qpc, std::uint64_t now) {
     present_gap_t gap;
     if (proof.last_present_qpc && qpc > proof.last_present_qpc) {
       LARGE_INTEGER frequency {};
@@ -112,7 +106,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
   }
 
   // Enabled Presents only: a disabled Present touches no window or device.
-  inline void publisher_t::log_present_gap(api::effect_runtime *runtime, const present_gap_t &gap) {
+  void publisher_t::log_present_gap(api::effect_runtime *runtime, const present_gap_t &gap) {
     const sunshine_game3d::vram::latest_suffix memory;
     const bool foreground = owns_foreground(runtime, static_cast<HWND>(runtime->get_hwnd()));
     char message[256];
@@ -125,7 +119,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
   // Requires mutex_. The adapter of the runtime's device, opened once (a
   // failure is not retried); the caller adds its own reference to use it
   // outside the lock.
-  inline IDXGIAdapter3 *publisher_t::vram_adapter(runtime_t &proof, api::device *device, IDXGISwapChain *swapchain) {
+  IDXGIAdapter3 *publisher_t::vram_adapter(runtime_t &proof, api::device *device, IDXGISwapChain *swapchain) {
     if (proof.vram_adapter_checked) return proof.vram_adapter.get();
     proof.vram_adapter_checked = true;
     com_ptr<IDXGIAdapter> adapter;
@@ -151,7 +145,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
   // reset (invalidate), which closes it early so its counts (the UI layer's
   // skipped copies among them) are logged rather than lost or carried into
   // the next runtime's first line.
-  inline void publisher_t::close_timing_window(runtime_t &proof, std::uint64_t now, char (&message)[1024]) {
+  void publisher_t::close_timing_window(runtime_t &proof, std::uint64_t now, char (&message)[1024]) {
     auto &timing = proof.timing;
     sunshine_game3d::gpu_timing gpu;
     if (proof.renderer) proof.renderer->take_gpu_timing(gpu);
@@ -200,7 +194,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
     timing.next_log = now + 10000;
   }
 
-  inline void publisher_t::log_output(api::effect_runtime *runtime, runtime_t &proof, std::uint64_t now) {
+  void publisher_t::log_output(api::effect_runtime *runtime, runtime_t &proof, std::uint64_t now) {
     auto &counts = proof.output;
     if (now < counts.next_log) return;
     char text[896]{};
@@ -217,4 +211,4 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
     log(reshade::log::level::info, text);
     counts.next_log = now + 5000;
   }
-}  // namespace
+}  // namespace sunshine_exporter

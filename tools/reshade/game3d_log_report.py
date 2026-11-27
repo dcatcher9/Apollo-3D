@@ -52,13 +52,13 @@ COVERAGE = re.compile(
     r'not_open=\{unknown=(\d+) closed=(\d+) pass=(\d+)')
 GENERATION = re.compile(r'Sunshine SBS: generation (\d+), (\d+)x(\d+) full SBS, DXGI (\d+), (\w+), (\w+)')
 # Each export pause names its class after its reason (routine or fault, export_pause_class in
-# exporter/export_ring.inl).
+# exporter/export_ring.h).
 INACTIVE = re.compile(r'Sunshine SBS: export inactive \((\w+), (\w+)\)')
 FG_MODE = re.compile(r'Sunshine Streamline frame generation: viewport=\d+ mode=(\d+)')
 SCALE = re.compile(r'Sunshine 3D Streamline scale: (\w+);')
 RAW = re.compile(r'Sunshine 3D raw automation: (\w+);.*?stereo_scale=([0-9.e+-]+)')
 CAMERA = re.compile(r'Sunshine Streamline camera availability: .*recent_valid_projection=(\d+)')
-# A 'Sunshine UI protection' line (exporter/ui_status.inl): the presentation state; the sampled decision, its
+# A 'Sunshine UI protection' line (exporter/ui_status.cpp): the presentation state; the sampled decision, its
 # candidate bits (ui_detection::candidate) and the covered and invalid pixels of UIAlpha, the UI colour tag, Backbuffer
 # and current alpha; the accepted candidate bits and the offscreen UI layer's own counts; the one-way judgment counts of
 # Backbuffer and current alpha (A2), the sample's own-decision reason, the candidate it refused and whether the T1

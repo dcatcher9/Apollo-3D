@@ -1,15 +1,96 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Function-only part of exporter.cpp, included at the end of
-// exporter_internal.h. Former in-class member bodies retain inline;
-// declarations/defaults and all runtime fields are in exporter_internal.h.
-// exporter/scene_placement.inl supplies the
-// decision types and free helpers at their original position.
-// Docs: docs/reshade-sbs.md, Scene placement.
-namespace SUNSHINE_EXPORTER_INTERNAL {
+// Scene placement (docs/reshade-sbs.md, Scene placement): the scene values'
+// helpers (exporter/scene_placement.h), and publisher_t's frame decision, raw
+// and projection calibration and stereo reentry. The decision types are in
+// scene_placement.h; runtime calibration fields stay in runtime_t
+// (exporter_internal.h).
+#include "../exporter_internal.h"
+
+namespace sunshine_exporter {
+  sunshine_game3d::ui_adaptive::source resolve_ui_observation(const sunshine_game3d::depth_output::shown_depth &shown,
+      const sunshine_game3d::ui_adaptive::source &previous, const scene_parameters_t &scene,
+      std::uint64_t raw_basis_epoch, std::uint64_t now) {
+    return sunshine_game3d::depth_output::ui_observation(shown, previous, scene.ready,
+      scene.generic_routing_epoch, raw_basis_epoch, now);
+  }
+
+  placement_report report(const sunshine_raw_scene::output &state) {
+    return {state.H, state.t0, state.ui_midpoint_q, state.target_H, state.target_t0, state.target_ui_midpoint_q,
+      state.ready, state.calibrated, state.limited, state.has_depth_statistics, state.depth_statistics};
+  }
+
+  placement_report report(const sunshine_projection_depth::center_output &center) {
+    return {center.K, center.q0, center.ui_midpoint_q, center.target_K, center.target_q0, center.target_ui_midpoint_q,
+      center.ready, center.initialized, center.limited, center.has_depth_statistics, center.depth_statistics};
+  }
+
+  sunshine_game3d::automatic_scale describe_scale(sunshine_game3d::automatic_scale_basis basis,
+      const placement_report &placement, double normalization) {
+    sunshine_game3d::automatic_scale scale{basis, placement.gain, placement.ready, static_cast<float>(placement.target_gain)};
+    const auto &statistics = placement.statistics;
+    scale.zero_inverse = placement.zero;
+    scale.has_zero = placement.placed;
+    scale.target_zero_inverse = placement.target_zero;
+    scale.zero_target_available = placement.has_statistics;
+    scale.ui_midpoint_inverse = placement.ui_midpoint;
+    scale.target_ui_midpoint_inverse = placement.target_ui_midpoint;
+    scale.has_ui_midpoint = placement.placed;
+    scale.ui_midpoint_target_available = placement.has_statistics;
+    scale.gain_below_target = placement.limited;
+    scale.reference_inverse = statistics.maximum;
+    scale.mean_inverse = statistics.mean;
+    scale.normalization = normalization;
+    scale.minimum_inverse = statistics.minimum;
+    scale.maximum_inverse = statistics.maximum;
+    scale.has_depth_statistics = placement.has_statistics;
+    scale.mean_square_inverse = statistics.mean_square;
+    scale.has_centered_depth_statistics = statistics.has_centered_moments;
+    scale.mean_contrast_inverse = statistics.mean_contrast;
+    scale.mean_contrast_square_inverse = statistics.mean_contrast_square;
+    scale.depth_pixel_count = statistics.pixel_count;
+    scale.depth_tiles_x = statistics.tiles_x;
+    scale.depth_tiles_y = statistics.tiles_y;
+    return scale;
+  }
+
+  void restore_reused_scene(frame_decision_t &frame, const frame_decision_t &previous) {
+    // Only the depth source can authorize old pixels: an API provider's held
+    // or pending copy, or Generic's hold of the capture it showed on the
+    // previous Present. Their already resolved scene travels with the exact
+    // real capture, for NGX pending copies as well as FG and Generic holds.
+    // This path never evaluates calibration or advances its motion clock.
+    // The scene is copied as the real frame left it, placed or still calibrating:
+    // a generated frame must look like its real frame. Dropping its depth while
+    // the real frame still shows depth (range calibration after FG starts, or a
+    // camera cut) flickered generated frames flat at up to four per real frame.
+    if (frame.reused_depth && frame.depth_ready && previous.depth_ready &&
+        sunshine_game3d::depth_output::same_capture(frame.scene_source, previous.scene_source))
+      frame.scene = previous.scene;
+    else {
+      frame.scene.ui = {sunshine_game3d::automatic_phase::waiting_for_depth, true};
+      if (frame.depth_ready) frame.gap = previous.depth_ready ? depth_gap::reuse_other_source : depth_gap::reuse_after_gap;
+      frame.depth_ready = false;
+    }
+  }
+
+  bool hold_projection_scene(frame_decision_t &frame, const frame_decision_t &previous,
+      const sunshine_depth::frame_depth &depth, std::uint64_t now) {
+    const bool own_camera = depth.projection.supplied ||
+      depth.projection.encoding == sunshine_scene_depth::depth_encoding::linear_distance;
+    const auto held = previous.scene.projection_ms;
+    const bool next_present = previous.present_ordinal && frame.present_ordinal == previous.present_ordinal + 1;
+    const auto shown_until = next_present && previous.decided_ms <= now ? previous.decided_ms : now;
+    if (own_camera || !depth.ready || !previous.depth_ready || !held ||
+        !sunshine_freshness::fresh_le(held, shown_until, sunshine_freshness::source_age_ms) || !frame.scene_source[0] ||
+        !sunshine_game3d::depth_output::same_source_except_sequence(previous.scene_source, frame.scene_source)) return false;
+    frame.scene = previous.scene;
+    return true;
+  }
+
   // Every scene the stereo reentry ramp places tells it this Present's
   // readiness (reentry_update), and a reused or held scene repeats its real
   // frame's as that frame left it.
-  inline float publisher_t::reentry_update(runtime_t &proof, bool ready, std::uint64_t now,
+  float publisher_t::reentry_update(runtime_t &proof, bool ready, std::uint64_t now,
       sunshine_raw_scene::stereo_basis basis) {
     proof.reentry_heard = true;
     return proof.raw_reentry.update(ready, now, basis);
@@ -25,13 +106,13 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
   // Present at all tells it nothing. Until the 10-27 review those exits
   // returned before the ramp heard of them, so stereo came back at full
   // strength after seconds of Game 3D disabled.
-  inline void publisher_t::note_shown_present(runtime_t &proof, std::uint64_t now) {
+  void publisher_t::note_shown_present(runtime_t &proof, std::uint64_t now) {
     if (!std::exchange(proof.reentry_heard, false) && proof.reentry_present_ms)
       proof.raw_reentry.shown_without_depth(proof.reentry_present_ms);
     proof.reentry_present_ms = now;
   }
 
-  inline void publisher_t::decide_scene_frame(api::effect_runtime *runtime, runtime_t &proof, frame_decision_t &frame,
+  void publisher_t::decide_scene_frame(api::effect_runtime *runtime, runtime_t &proof, frame_decision_t &frame,
       const frame_decision_t &previous_frame, const sunshine_depth::frame_depth &depth, std::uint64_t now) {
     frame.decided_ms = now;
     frame.present_ordinal = proof.presentation_ordinal;
@@ -67,7 +148,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
     frame.ui_source = resolve_ui_observation(shown, previous_frame.ui_source, frame.scene, proof.raw_basis_epoch, now);
   }
 
-  inline scene_parameters_t publisher_t::resolve_raw_scene(api::effect_runtime *runtime, runtime_t &proof,
+  scene_parameters_t publisher_t::resolve_raw_scene(api::effect_runtime *runtime, runtime_t &proof,
       const sunshine_depth::frame_depth &depth, const sunshine_game3d::depth_output::shown_depth &shown,
       bool api_selected, std::uint64_t now) {
     scene_parameters_t scene;
@@ -219,7 +300,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
     return scene;
   }
 
-  inline void publisher_t::resolve_projection_scene(api::effect_runtime *runtime, runtime_t &proof,
+  void publisher_t::resolve_projection_scene(api::effect_runtime *runtime, runtime_t &proof,
       const sunshine_depth::frame_depth &depth, std::uint64_t now,
       const sunshine_scene_gain::limits &budget, scene_parameters_t &scene) {
     namespace projection = sunshine_projection_depth;
@@ -310,5 +391,4 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
     scene.raw_range = {coefficients.raw_min, coefficients.raw_max};
     scene.scale = center.K;
   }
-
-}
+}  // namespace sunshine_exporter

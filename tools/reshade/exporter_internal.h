@@ -1,214 +1,37 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// The exporter's internal view: the publisher and its types, with the
-// declarations of exporter.cpp's session, UI aliases, callbacks and noninline
-// free definitions. exporter.cpp includes it once (with
-// SUNSHINE_EXPORTER_IMPLEMENTATION, so its parts define their bodies); the SBS
-// unit tests (SUNSHINE_SBS_TEST) include it from their own TU, where the parts'
-// free bodies are declarations of the same entities. The constexpr classifier
-// helpers and three constants are shared only by that named test view.
+// The exporter's internal view: the publisher (publisher_t) and its runtime
+// state, on top of the base declarations (exporter_base.h), the export ring
+// (exporter/export_ring.h) and the scene values (exporter/scene_placement.h).
+// exporter.cpp defines the session, UI aliases, callbacks and ReShade events;
+// exporter/ defines the publisher's present diagnostics, scene placement and
+// export source and the UI status publication, each in its own translation
+// unit. The SBS unit tests (SUNSHINE_SBS_TEST) include it from their own TU and
+// link those objects of their view.
 #pragma once
-#include "addon_lifetime.h"
-// Original Sunshine exporter. ReShade's SDK headers are BSD-3-Clause OR MIT.
-#include "overlay_compositor.h"
-#include "depth_addon.h"
-#include "depth_output.h"
-#include "depth_jitter.h"
-#include "projection_depth_controller.h"
-#include "raw_scene_pool.h"
-#include "provided_raw_scene.h"
-#include "automatic_scene_transition.h"
-#include "game3d_controls.h"
-#include "presentation_scope.h"
-#include "game3d_display_scale.h"
-#include "game3d_renderer.h"
-#include "game3d_depth_input.h"
-#include "hook_host.h"
-#include "game3d_ui_input_provider.h"
-#include "game3d_ui_counters.h"
-#include "game3d_ui_selection.h"
-#include "game3d_debug_dump.h"
-#include "game3d_test_render.h"
-#include "diagnostic_log_gate.h"
-#include "freshness.h"
-#include "streamline_camera_probe.h"
-#include "streamline_depth_capture.h"
-#include "streamline_native_observer.h"
-#include "src/reshade_bridge_protocol.h"
-#include "src/reshade_bridge_window.h"
+#include "exporter_base.h"
+#include "exporter/export_ring.h"
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <chrono>
-#include <cmath>
-#include <cstdio>
-#include <cstring>
-#include <d3d11_4.h>
-#include <d3d12.h>
-#include <dxgi1_4.h>
-#include <imgui.h>
-#include <memory>
-#include <mutex>
-#include <reshade.hpp>
-#include "async_log.h"
-#include "depth_content_sampler.h"
-#include <string>
-#include <string_view>
-#include <unordered_map>
-#include <optional>
-#include <utility>
-#include <vector>
-#include <windows.h>
-#include "com_ptr.h"
-#include "game3d_slow_step.h"
-#include "game3d_ui_layer.h"
-#include "game3d_vram.h"
-#include "game3d_diagnostics.h"
-#include "game3d_clock.h"
-
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-  #include "game3d_test_depth_events.h"
-  #include "game3d_test_teardown.h"
-  #include "test_overlay_patch.h"
-
-  #include <atomic>
-#endif
-
-static_assert(RESHADE_API_VERSION == 20, "Build against the pinned ReShade 6.8.0 SDK");
-static_assert(sizeof(void *) == 8, "Only 64-bit games are supported");
-
-
-#ifdef SUNSHINE_SBS_TEST
-#define SUNSHINE_EXPORTER_INTERNAL sunshine_game3d::exporter_test_access
-#define SUNSHINE_EXPORTER_CONSTANT inline
-namespace sunshine_game3d::exporter_test_access {}
-using namespace sunshine_game3d::exporter_test_access;
-#else
-#define SUNSHINE_EXPORTER_INTERNAL
-#define SUNSHINE_EXPORTER_CONSTANT
-#endif
-
-namespace SUNSHINE_EXPORTER_INTERNAL {
-  namespace api = reshade::api;
-  namespace wire = reshade_bridge;
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-  namespace depth_events = sunshine_game3d::test::depth_events;
-#endif
-
-  struct automatic_ui_entry {
-    sunshine_game3d::automatic_status status {};
-    sunshine_game3d::source_alpha_ui_decision source_alpha;
-    sunshine_game3d::source_alpha_ui_decision logged_source_alpha;
-    sunshine_diagnostics::log_gate source_alpha_log;
-    // The game session whose UI counters this runtime's lines carry, known
-    // once a render acquired it; counters_logged once a line carried them, so
-    // the runtime's reset or destruction ends the log with the session totals.
-    sunshine_game3d::alpha_auto_policy *ui_session = nullptr;
-    bool counters_logged = false;
-#if defined(SUNSHINE_SBS_TEST) || defined(SUNSHINE_SBS_RUNTIME_TEST_ADDON)
-    // Explicit resets exist only for controlled regression fixtures.
-    bool recalibrate = false;
-#endif
-  };
-  class publisher_t;
-  struct addon_session_t {
-    addon_session_t();
-    ~addon_session_t();
-    std::mutex ui_mutex;
-    std::unordered_map<api::effect_runtime *, automatic_ui_entry> ui;
-    std::unique_ptr<publisher_t> publisher;
-    enum class phase { inactive, active, stopping };
-    std::atomic<phase> lifecycle{phase::inactive};
-    bool begin() {
-      auto expected = phase::inactive;
-      return lifecycle.compare_exchange_strong(expected, phase::active, std::memory_order_acq_rel);
-    }
-    template<class Cleanup> bool end(Cleanup &&cleanup) {
-      auto expected = phase::active;
-      if (!lifecycle.compare_exchange_strong(expected, phase::stopping, std::memory_order_acq_rel)) return false;
-      struct finish {
-        std::atomic<phase> &state;
-        ~finish() { state.store(phase::inactive, std::memory_order_release); }
-      } finish_teardown{lifecycle};
-      // Remove the public owner before invoking anything that can reenter.
-      // This local owner alone disposes the publisher after dependent shutdown.
-      auto owned_publisher = std::move(publisher);
-      std::forward<Cleanup>(cleanup)();
-      owned_publisher.reset();
-      return true;
-    }
-  };
-  extern std::atomic<std::uint64_t> next_raw_basis;
-  void log(reshade::log::level level, const char *message);
-  addon_session_t &addon_session();
-  // No ReShade/GPU calls while holding this mutex. UI readers and requests never
-  // acquire the publisher mutex, including synchronous uniform-set callbacks.
-  extern decltype(addon_session_t::ui_mutex) &automatic_ui_mutex;
-  extern decltype(addon_session_t::ui) &automatic_ui;
-
-  // Part declarations: UI status publication bodies live in exporter/ui_status.inl.
-  sunshine_game3d::alpha_auto_policy *clear_automatic_ui(api::effect_runtime *runtime);
-  void log_ui_counters(api::effect_runtime *runtime, sunshine_game3d::alpha_auto_policy &session);
-  void publish_automatic_ui(api::effect_runtime *runtime, sunshine_game3d::automatic_status status);
-  void publish_source_alpha_ui(api::effect_runtime *runtime, sunshine_game3d::source_alpha_ui_decision value,
-      bool game3d_enabled = true, sunshine_game3d::alpha_auto_policy *ui_session = nullptr);
-#if defined(SUNSHINE_SBS_TEST) || defined(SUNSHINE_SBS_RUNTIME_TEST_ADDON)
-  bool take_recalibration(api::effect_runtime *runtime);
-#endif
-
-#if defined(SUNSHINE_SBS_RUNTIME_TEST_ADDON) || defined(SUNSHINE_SBS_TEST)
-  extern std::atomic<HWND> test_foreground_window;
-#endif
-  HWND observed_foreground_window();
-  reshade_bridge::window_owner::verdict child_window_verdict(HWND window, HWND foreground);
-  void log_hr(const char *operation, HRESULT hr);
-
-  using sunshine_game3d::com_ptr;
-
-  class handle_t {
-  public:
-    handle_t() = default;
-
-    ~handle_t() {
-#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
-      sunshine_game3d::test::teardown::handle_destroyed(this, value_ != nullptr);
-#endif
-      if (value_) {
-        CloseHandle(value_);
-      }
-    }
-
-    handle_t(const handle_t &) = delete;
-    handle_t &operator=(const handle_t &) = delete;
-
-    HANDLE get() const {
-      return value_;
-    }
-
-    HANDLE *put() {
-      return &value_;
-    }
-
-  private:
-    HANDLE value_ = nullptr;
-  };
-
-#include "exporter/export_ring.inl"
-
+namespace sunshine_exporter {
   // A child swapchain window's verdicts (report_window_owner) that the player
   // or the game's own window changes explain, as a top-level window's
   // not_foreground pause is routine: the owner, a root out of focus, a hidden
   // child and one being resized. They are logged at info; a sibling overlap,
   // another process's window in the chain, an incomplete query, two
   // qualifying swapchains and any new verdict are warnings.
-  SUNSHINE_EXPORTER_CONSTANT constexpr std::array<std::string_view, 4> routine_window_verdicts{"owner", "not_foreground", "not_visible", "partial"};
+  inline constexpr std::array<std::string_view, 4> routine_window_verdicts{"owner", "not_foreground", "not_visible", "partial"};
   constexpr bool routine_window_verdict(std::string_view verdict) {
     for (const auto routine : routine_window_verdicts)
       if (routine == verdict) return true;
     return false;
   }
+}  // namespace sunshine_exporter
 
-#include "exporter/scene_placement.inl"
+#include "exporter/scene_placement.h"
+
+namespace sunshine_exporter {
+  // The present diagnostics' free functions, defined in exporter/present_diagnostics.cpp.
+  sunshine_game3d::vram::reading query_vram(IDXGIAdapter3 *adapter);
+  output_sample classify_output(const frame_decision_t &frame);
 
   struct runtime_t {
     bool addon_native = false;
@@ -309,8 +132,6 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
     } output;
   };
   std::uint64_t depth_identity(const runtime_t &proof);
-
-#include "exporter/export_ring_class.inl"
 
   class publisher_t {
   public:
@@ -429,7 +250,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
 #endif
 
     // Present timing, present gaps, the VRAM adapter and the SBS output line are defined in
-    // exporter/present_diagnostics.inl.
+    // exporter/present_diagnostics.cpp.
     void finish_present_timing(api::effect_runtime *runtime, const std::array<LARGE_INTEGER, 5> &marks, unsigned count);
 
     // A gap between two Presents of one runtime long enough to freeze the
@@ -450,7 +271,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
     IDXGIAdapter3 *vram_adapter(runtime_t &proof, api::device *device, IDXGISwapChain *swapchain);
     void close_timing_window(runtime_t &proof, std::uint64_t now, char (&message)[1024]);
 
-    // Scene placement and reentry bodies are in exporter/scene_placement_impl.inl.
+    // Scene placement and reentry bodies are in exporter/scene_placement.cpp.
     float reentry_update(runtime_t &proof, bool ready, std::uint64_t now,
         sunshine_raw_scene::stereo_basis basis = sunshine_raw_scene::stereo_basis::raw);
     void note_shown_present(runtime_t &proof, std::uint64_t now);
@@ -1223,7 +1044,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
 
     void log_output(api::effect_runtime *runtime, runtime_t &proof, std::uint64_t now);
 
-    // What export_ring needs of this publisher (export_ring_class.inl), called
+    // What export_ring needs of this publisher (exporter/export_ring.h), called
     // under mutex_. export_views: renderers drop the views they cached of a
     // released ring's slot texture (renderer::pack). output_counts: a published
     // slot's sample joins its runtime's SBS output counters (log_output).
@@ -1281,12 +1102,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
   extern decltype(addon_session_t::publisher) &publisher;
   void on_destroy(api::effect_runtime *runtime);
 
-} // namespace SUNSHINE_EXPORTER_INTERNAL
-// The parts' bodies: definitions in exporter.cpp. The test TU reaches their
-// explicit-inline member bodies; their free bodies are declarations there.
-#include "exporter/present_diagnostics.inl"
-#include "exporter/scene_placement_impl.inl"
-#include "exporter/export_source.inl"
+}  // namespace sunshine_exporter
 #ifdef SUNSHINE_SBS_TEST
-using sunshine_game3d::exporter_test_access::publisher;
+using sunshine_exporter::publisher;
 #endif

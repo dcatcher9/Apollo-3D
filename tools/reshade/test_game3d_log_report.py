@@ -37,7 +37,7 @@ def ui(t, source, covered, alpha, candidates, accepted, pixels=1000, hudless=(0,
        claims=0, h1=0, winner=None, pre_ui=('none', 0.0, 0), guard=(0, 0, 0, 0), ran=1, pre_ui_pixels=(0, 0),
        declared=((0, 0), (0, 0)), detection=None, availability=None, mode='auto', rendered=1, fg=0,
        runtime='0000000000000001'):
-    """A 'Sunshine UI protection' line as exporter/ui_status.inl writes it: candidate bits with the layer as 0x40,
+    """A 'Sunshine UI protection' line as exporter/ui_status.cpp writes it: candidate bits with the layer as 0x40,
     accepted candidates, the layer's (covered, invalid) pixels, the one-way counts of Backbuffer and current alpha
     (strong, contradicted), the own decision's reason, the refused candidate and the T1 reuse, the HUD-less counts with
     matching tiles and lit pixels, the hidden-scene evidence (scene: the presented frame's (d, verdict), or None for no
@@ -1738,7 +1738,7 @@ class ReadinessReport(unittest.TestCase):
             self.assertFalse(sample.change_set_valid())
 
     def test_the_ui_line_as_the_add_on_writes_it(self):
-        # The line exporter/ui_status.inl writes: sampled_one_way holds Backbuffer and current alpha, and
+        # The line exporter/ui_status.cpp writes: sampled_one_way holds Backbuffer and current alpha, and
         # sampled_declared_one_way UIAlpha and the UI colour tag.
         def flat(t):
             return line(t, '[Sunshine 3D] Sunshine UI protection: runtime=0000000000000001 mode=auto rendered=1 '
@@ -2739,13 +2739,13 @@ def source(name):
     return (Path(__file__).resolve().parent / name).read_text(encoding='utf-8')
 
 
-# exporter.cpp and its parts (tools/reshade/exporter/), one translation unit. Each exporter move that creates a part
-# adds it here.
-EXPORTER_PARTS = ('exporter/export_ring.inl', 'exporter/export_ring_class.inl', 'exporter/present_diagnostics.inl', 'exporter/ui_status.inl', 'exporter/scene_placement.inl', 'exporter/scene_placement_impl.inl', 'exporter/export_source.inl')
+# The exporter's other sources beside exporter.cpp and exporter_internal.h: its base header and its parts
+# (tools/reshade/exporter/). Each exporter move that creates a file adds it here.
+EXPORTER_PARTS = ('exporter_base.h', 'exporter/export_ring.h', 'exporter/present_diagnostics.cpp', 'exporter/ui_status.cpp', 'exporter/scene_placement.h', 'exporter/scene_placement.cpp', 'exporter/export_source.cpp')
 
 
 def exporter_sources():
-    """exporter.cpp and its parts, as one text."""
+    """exporter.cpp, exporter_internal.h and the other exporter sources, as one text."""
     return ''.join(source(name) for name in ('exporter.cpp', 'exporter_internal.h') + EXPORTER_PARTS)
 
 

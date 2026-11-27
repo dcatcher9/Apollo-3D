@@ -22,7 +22,7 @@ namespace sunshine_streamline::provider {
     const sunshine_depth::frame_depth &, reshade::api::resource, reshade::api::resource_view, std::uint64_t);
 }
 
-namespace SUNSHINE_EXPORTER_INTERNAL {
+namespace sunshine_exporter {
   void require(bool result, const char *message) {
     if (!result) {
       throw std::runtime_error(message);
