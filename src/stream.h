@@ -619,6 +619,8 @@ namespace stream {
      *
      * @param next Returns the next queued acknowledgement, or an empty optional when none is left.
      * @param current_proof Returns the type's current proven state (generation zero before proof).
+     *                      A caller that cannot deliver now, with no client connected, returns
+     *                      generation zero too, so the waiting refusals keep waiting.
      * @param send Puts one acknowledgement on the wire. Returns `false` only when it does not fit
      *             the wire format; a lost transport is the connection's business.
      * @param close Logs the given reason and closes the session.

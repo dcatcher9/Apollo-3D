@@ -1219,8 +1219,9 @@ namespace stream {
             session->control.deferred_live_video_mode_acks.drain(
               next_queued_ack(*server, session->control.live_video_mode_ack_queue),
               [&] {
+                // Waiting refusals are released only to a connected client.
                 const auto &effective_mode = session->config.monitor.effective_mode;
-                return effective_mode ? effective_mode->current() : video::effective_video_mode_t {};
+                return server->_session->peer && effective_mode ? effective_mode->current() : video::effective_video_mode_t {};
               },
               [&](const live_video_mode_ack_t &ack) {
                 return send_live_video_mode_ack(session, ack);
@@ -1231,7 +1232,7 @@ namespace stream {
               next_queued_ack(*server, session->control.stream_gamma_ack_queue),
               [&] {
                 const auto &gamma_state = session->config.monitor.stream_gamma_state;
-                return gamma_state ? gamma_state->current() : video::stream_gamma_snapshot_t {};
+                return server->_session->peer && gamma_state ? gamma_state->current() : video::stream_gamma_snapshot_t {};
               },
               [&](const video::stream_gamma_ack_t &ack) {
                 return send_stream_gamma_ack(*session, ack);
