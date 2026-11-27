@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <reshade.hpp>
 #include "async_log.h"
+#include "diagnostic_log_gate.h"
 #include "game3d_vram.h"
 #include "game3d_clock.h"
 
@@ -18,7 +19,7 @@ namespace sunshine_game3d {
     // shares its last entry.
     struct throttle {
       std::atomic<const char *> name{nullptr};
-      std::atomic<unsigned long long> next_log{0};
+      std::atomic<std::uint64_t> next_log{0};
     };
     inline constexpr unsigned throttle_count = 64;
     inline throttle *table() {
@@ -61,9 +62,7 @@ namespace sunshine_game3d {
       const double ms = double(end.QuadPart - start_.QuadPart) * 1000.0 / double(frequency.QuadPart);
       if (ms < threshold_ms_) return;
       auto &throttle = slow_step_detail::find(name_);
-      const auto now = sunshine_game3d::clock::game_now();
-      auto due = throttle.next_log.load(std::memory_order_relaxed);
-      if (now < due || !throttle.next_log.compare_exchange_strong(due, now + 1000)) return;
+      if (!sunshine_diagnostics::claim_line(throttle.next_log, sunshine_game3d::clock::game_now(), 1000)) return;
       // The game process's latest video-memory sample (game3d_vram.h) follows.
       const vram::latest_suffix memory;
       char message[224];

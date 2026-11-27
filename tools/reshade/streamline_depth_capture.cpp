@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "streamline_depth_capture.h"
 #include "capture_state_policy.h"
+#include "diagnostic_log_gate.h"
 #include "streamline_native_observer.h"
 #include "native_command_storage.h"
 #include "native_resource_identity.h"

@@ -60,8 +60,7 @@ namespace sunshine_streamline::depth_capture {
 
   bool list_coverage_report(std::uint64_t now_ms, char *out, std::size_t size) {
     static std::atomic<std::uint64_t> next_log{}, logged_admissions{};
-    auto next = next_log.load(std::memory_order_relaxed);
-    if (now_ms < next || !next_log.compare_exchange_strong(next, now_ms + 5000, std::memory_order_relaxed)) return false;
+    if (!sunshine_diagnostics::claim_line(next_log, now_ms, 5000)) return false;
     const auto c = list_coverage();
     const auto admissions = c.covered + c.unknown + c.closed + c.pass;
     if (admissions == logged_admissions.exchange(admissions, std::memory_order_relaxed)) return false;

@@ -5,6 +5,7 @@
 #include "addon_config.h"
 #include "hook_host.h"
 #include "api_contract.h"
+#include "diagnostic_log_gate.h"
 #include "streamline_camera_data.h"
 #include "streamline_camera_version.h"
 #include "streamline_buffer_contract.h"

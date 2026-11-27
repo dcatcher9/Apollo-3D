@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "diagnostic_log_gate.h"
 
+#include <atomic>
 #include <iostream>
 #include <stdexcept>
 
@@ -41,7 +42,21 @@ int main() {
     require(!ready.due(10002, false), "Unchanged state was repeated");
     require(ready.due(10003, true, true), "Binding failure with a source change was delayed");
     require(ready.due(1, true), "Clock rollback suppressed future logs");
-    std::cout << "Startup log bound, recovery, adaptive snapshots, immediate events passed\n";
+
+    // A line shared across threads: the first call claims it, then at most
+    // one per interval, whoever asks.
+    std::atomic<std::uint64_t> next{};
+    require(sunshine_diagnostics::claim_line(next, 0, 5000), "The first shared line was refused");
+    require(!sunshine_diagnostics::claim_line(next, 4999, 5000), "A shared line came before its interval");
+    require(sunshine_diagnostics::claim_line(next, 5000, 5000) && next.load() == 10000,
+      "A shared line due at its interval was refused or did not move its slot");
+    unsigned claimed = 0;
+    for (std::uint64_t ms = 5000; ms != 20000; ++ms) claimed += sunshine_diagnostics::claim_line(next, ms, 5000);
+    require(claimed == 2, "A shared line was claimed more than once per interval");
+    std::atomic<std::uint64_t> late{7000};
+    require(!sunshine_diagnostics::claim_line(late, 6999, 1000) && sunshine_diagnostics::claim_line(late, 7000, 1000),
+      "A shared line was not due exactly at its slot");
+    std::cout << "Startup log bound, recovery, adaptive snapshots, immediate events, shared line rate passed\n";
     return 0;
   } catch (const std::exception &error) {
     std::cerr << error.what() << '\n';

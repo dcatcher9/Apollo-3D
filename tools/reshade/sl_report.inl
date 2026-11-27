@@ -47,8 +47,7 @@ namespace sunshine_streamline {
         bool supplied) {
       const auto count = fg_refusals.fetch_add(1, std::memory_order_relaxed) + 1;
       const auto now = sunshine_game3d::clock::game_now();
-      auto next = next_fg_refusal_report.load(std::memory_order_relaxed);
-      if (now < next || !next_fg_refusal_report.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) return;
+      if (!sunshine_diagnostics::claim_line(next_fg_refusal_report, now, 5000)) return;
       static const evaluated_depth_tag none;
       const auto *tag = &none;
       for (const unsigned index : depth_priority) if (snapshot.tags[index].present) { tag = &snapshot.tags[index]; break; }
@@ -86,8 +85,7 @@ namespace sunshine_streamline {
       if (!over) return;
       const auto over_total = tag_call_copies.recorded_over_declared.fetch_add(1, std::memory_order_relaxed) + 1;
       const auto now = sunshine_game3d::clock::game_now();
-      auto next = next_tag_call_report.load(std::memory_order_relaxed);
-      if (now < next || !next_tag_call_report.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) return;
+      if (!sunshine_diagnostics::claim_line(next_tag_call_report, now, 5000)) return;
       char text[480]{};
       std::snprintf(text, sizeof(text),
         "Sunshine Streamline FG tag-call copies: copied=%llu recorded_over_declared=%llu state=0x%x declared=0x%x; a "
@@ -103,9 +101,8 @@ namespace sunshine_streamline {
       const auto activity = deferrals.depth.load(std::memory_order_relaxed) + deferrals.ui.load(std::memory_order_relaxed) +
         deferrals.cancelled.load(std::memory_order_relaxed) + deferrals.lapsed.load(std::memory_order_relaxed);
       const auto now = sunshine_game3d::clock::game_now();
-      auto next = next_deferral_report.load(std::memory_order_relaxed);
-      if (activity == reported_deferrals.load(std::memory_order_relaxed) || now < next ||
-          !next_deferral_report.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) return;
+      if (activity == reported_deferrals.load(std::memory_order_relaxed) ||
+          !sunshine_diagnostics::claim_line(next_deferral_report, now, 5000)) return;
       reported_deferrals.store(activity, std::memory_order_relaxed);
       char text[640]{};
       std::snprintf(text, sizeof(text),
@@ -133,8 +130,7 @@ namespace sunshine_streamline {
       // the compatibility layout. An untag is reported on its own line.
       if (value.supported && zero_resource_header && index < 3 && tag.resource_ptr && value.value.native_resource) {
         const auto now = sunshine_game3d::clock::game_now();
-        auto next = next_compatibility_report.load(std::memory_order_relaxed);
-        if (now >= next && next_compatibility_report.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) {
+        if (sunshine_diagnostics::claim_line(next_compatibility_report, now, 5000)) {
           char text[384]{};
           std::snprintf(text, sizeof(text),
             "Sunshine Streamline zero-base resource compatibility: tag_type=%u viewport=%u native=0x%llx type=%u state=0x%x state_proof=%s declared_extent=%ux%u native_retained=%u",
@@ -147,8 +143,7 @@ namespace sunshine_streamline {
       if (value.supported && index < 3 && !value.value.native_resource) {
         const auto count = depth_untags.fetch_add(1, std::memory_order_relaxed) + 1;
         const auto now = sunshine_game3d::clock::game_now();
-        auto next = next_untag_report.load(std::memory_order_relaxed);
-        if (now >= next && next_untag_report.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) {
+        if (sunshine_diagnostics::claim_line(next_untag_report, now, 5000)) {
           char text[320]{};
           std::snprintf(text, sizeof(text),
             "Sunshine Streamline depth untag: tag_type=%u viewport=%u scope=%s lifecycle=%u resource=%s untags=%llu; "
@@ -162,8 +157,7 @@ namespace sunshine_streamline {
     void report_rejected_tag(const batch &out, const abi_v2::resource_tag &tag, const tag_record &value,
         const abi_v2::resource &resource, bool precision_ok, bool resource_ok, std::atomic<std::uint64_t> &next_tag_report) {
         const auto now = sunshine_game3d::clock::game_now();
-        auto next = next_tag_report.load(std::memory_order_relaxed);
-        if (now >= next && next_tag_report.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) {
+        if (sunshine_diagnostics::claim_line(next_tag_report, now, 5000)) {
           char text[700]{};
           std::snprintf(text, sizeof(text),
             "Sunshine Streamline rejected depth tag: refusal=%s tag_type=%u viewport=%u tag_guid=%08x tag_version=%llu tag_extension=0x%llx precision_supported=%u lifecycle=%u resource_read=%u resource_guid=%08x resource_version=%llu resource_type=%u resource_extension=0x%llx declared_native=0x%llx state=0x%x declared_extent=%ux%u",
@@ -179,8 +173,7 @@ namespace sunshine_streamline {
         const depth_capture::input &value, const v1_resource_state::read_details &state_details,
         std::atomic<std::uint64_t> &next_state_report) {
           const auto now = sunshine_game3d::clock::game_now();
-          auto next = next_state_report.load(std::memory_order_relaxed);
-          if (now >= next && next_state_report.compare_exchange_strong(next, now + 5000, std::memory_order_relaxed)) {
+          if (sunshine_diagnostics::claim_line(next_state_report, now, 5000)) {
             char text[640]{};
             std::snprintf(text, sizeof(text),
               "Sunshine Streamline V1 state lookup: %s; resource=0x%llx tag=%u viewport=%u sequence=%llu; %llux%u format=%u mips=%u layers=%u samples=%u; hr=0x%08lx bytes=%u chi=0x%x; tagged=0x%x; requires observed state",
