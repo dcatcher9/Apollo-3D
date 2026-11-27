@@ -200,7 +200,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
             # Compact live limiters preserve exact Base on horizontally padded observations.
             # The compact Map writes only the admitted candidate columns on the same live route.
             # The horizontal limiter writes each texel once using exact Q30 checkpoints.
-            135: "c2a6b3724f5528d5092f6b442112cf12ce9d890288dc33b901f3cda604907d92",
+            135: "c6d4d0b71b3e5e550d5fa9b5bb70c81be9ae97842baf15090bed579e727af356",
         }
         contract = generator.load_contract()
         self.assertEqual(
@@ -215,7 +215,7 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         )
         self.assertEqual(
             contract["shader_implementation"]["source_closure_sha256"],
-            "b1307cc6c457482c48b47daf8f900cd919e182286bfe8cddd88b1a7e34bed13b",
+            "e02a43748406bbd4a3e51745c00d594b1991d7e827e077fa024cd74e042469ce",
         )
         self.assertTrue(generator.tag_is_finite_normal(generator.contract_tag(contract)))
         self.assertEqual(

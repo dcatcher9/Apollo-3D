@@ -15,8 +15,6 @@ StructuredBuffer<uint> ConditionParams : register(t4);
 Texture2D<float> ContourDistance : register(t5);
 StructuredBuffer<uint> ContourIdentity : register(t6);
 StructuredBuffer<uint> OcrRecord : register(t7);
-StructuredBuffer<float> CurrentProbability : register(t8);
-StructuredBuffer<float> PreviousProbability : register(t9);
 RWStructuredBuffer<uint> LocatorState : register(u2);
 RWTexture2D<float> ConditionedField : register(u3);
 RWStructuredBuffer<uint> ConditionParamsOut : register(u4);

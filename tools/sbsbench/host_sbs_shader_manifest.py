@@ -584,7 +584,7 @@ PARALLAX_V2_PRODUCER_GROUP = ClosureGroup(
         HOST_SBS_SUBTITLE_GAUSSIAN_HORIZONTAL_LIMIT,
     ),
     root="",
-    pinned_source_closure_sha256="b1307cc6c457482c48b47daf8f900cd919e182286bfe8cddd88b1a7e34bed13b",
+    pinned_source_closure_sha256="e02a43748406bbd4a3e51745c00d594b1991d7e827e077fa024cd74e042469ce",
 )
 
 PARALLAX_V2_REPLAY_RESOLVE_GROUP = ClosureGroup(

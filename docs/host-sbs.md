@@ -74,7 +74,7 @@ as one tuple; the draw-owned pin resources are not a new temporal observation.
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is
 schema 135/tag `0xC932B35D`, canonical SHA-256
-`c2a6b3724f5528d5092f6b442112cf12ce9d890288dc33b901f3cda604907d92`. It binds the
+`c6d4d0b71b3e5e550d5fa9b5bb70c81be9ae97842baf15090bed579e727af356`. It binds the
 complete policy below, including all subtitle field/ROI semantics. The generated named closure
 groups in `tools/sbsbench/contracts/host-sbs-shader-closures-v1.json` are the shared C++, Python,
 JSON, and documentation authority for every ordered shader set. Only the groups that bind stored
@@ -93,7 +93,7 @@ path; diagnostic groups remain dump-only.
 | Closure group | Ordered roots | Source-closure SHA-256 |
 | --- | ---: | --- |
 | `preprocess` | 2 | `8e2de9ed76bd64a38a0c956e75dd7a13c8883d39d0ef0050ffe5aba9f7208672` |
-| `parallax_v2_producer` | 30 | `b1307cc6c457482c48b47daf8f900cd919e182286bfe8cddd88b1a7e34bed13b` |
+| `parallax_v2_producer` | 30 | `e02a43748406bbd4a3e51745c00d594b1991d7e827e077fa024cd74e042469ce` |
 | `parallax_v2_live_renderer` | 2 | `7092c821696d20987e56ba65d74bf4c586601c43daaaac5a5db2c690864a567b` |
 <!-- END GENERATED HOST SBS SHADER CLOSURES -->
 
