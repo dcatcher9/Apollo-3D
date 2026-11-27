@@ -1206,9 +1206,13 @@ TEST_F(RetainedDisplayPauseTest, UnverifiedSessionModeIsNeverSaved) {
 }
 
 TEST(ProcessDisplayModeContract, SessionModeIsSavedOnlyBeforePromotionAndModeSetsStayTemporary) {
-  std::ifstream input(SUNSHINE_SOURCE_DIR "/src/process.cpp", std::ios::binary);
-  ASSERT_TRUE(input.is_open());
-  const std::string source {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+  // The process's virtual-display steps live in their own file; the contract spans both files.
+  std::string source;
+  for (const auto *file : {SUNSHINE_SOURCE_DIR "/src/process.cpp", SUNSHINE_SOURCE_DIR "/src/virtual_display_lifecycle.cpp"}) {
+    std::ifstream input(file, std::ios::binary);
+    ASSERT_TRUE(input.is_open()) << file;
+    source.append(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+  }
   constexpr std::string_view save_call = "save_virtual_display_session_mode(";
 
   // Creation saves the verified session mode right after applying it, before topology promotion.
