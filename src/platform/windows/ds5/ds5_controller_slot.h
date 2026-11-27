@@ -19,7 +19,7 @@ namespace platf::ds5 {
     int alloc(const gamepad_id_t &id, const gamepad_arrival_t &metadata, feedback_queue_t feedback, bool audio_haptics) {
       reset();
       _sidecar = std::make_unique<sidecar_client_t>();
-      if (_sidecar->alloc(id, feedback, audio_haptics, false, metadata.haptics_feedback_queue) != 0) {
+      if (_sidecar->alloc(id, feedback, audio_haptics, metadata.haptics_feedback_queue) != 0) {
         reset();
         return -1;
       }

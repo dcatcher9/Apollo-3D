@@ -49,7 +49,6 @@ if (selfCheck)
         protocol_abi = true,
         host_protocol = true,
         default_endpoint_classification = true,
-        genshin_compatibility_identity = true,
         audio_policy_violation = true,
     }));
     return 0;
@@ -69,7 +68,6 @@ if (probe || probeHost)
         elevated = IsElevated(),
         standard = standard is not null,
         composite = composite is not null,
-        genshin_compatibility_identity = true,
         audio_policy_violation = true,
         driver_installed = context.IsDriverInstalled,
         usbip_available = HMContext.IsUsbipBackendAvailable,

@@ -45,7 +45,7 @@ namespace platf::ds5 {
 
     bool configured() const;
     bool owns(int global_index) const;
-    int alloc(const gamepad_id_t &id, feedback_queue_t feedback_queue, bool audio_haptics, bool genshin_compatibility = false, feedback_queue_t haptics_queue = {});
+    int alloc(const gamepad_id_t &id, feedback_queue_t feedback_queue, bool audio_haptics, feedback_queue_t haptics_queue = {});
     void free(int global_index);
     void submit_input(int global_index, const gamepad_state_t &state);
     void submit_touch(const gamepad_touch_t &touch);

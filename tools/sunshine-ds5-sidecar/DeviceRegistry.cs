@@ -19,7 +19,6 @@ internal sealed class DeviceRegistry : IDisposable
     private readonly Dictionary<byte, ControllerSession> _controllers = new();
     private readonly Action<Protocol.Message> _emit;
     private readonly bool _authoredHapticsAvailable;
-    private readonly bool _genshinCompatibilityAvailable;
 
     internal DeviceRegistry(Action<Protocol.Message> emit)
     {
@@ -31,16 +30,10 @@ internal sealed class DeviceRegistry : IDisposable
         _authoredHapticsAvailable = compositeProfileValidated &&
                                     _context.GetProfile(DualSenseHapticsAudio.CompositeProfileId) is not null &&
                                     HMContext.IsUsbipBackendAvailable;
-        _genshinCompatibilityAvailable = _authoredHapticsAvailable &&
-                                         _context.GetProfile(
-                                             DualSenseHapticsAudio.GenshinCompatibilityProfileId) is not null;
     }
 
     internal Protocol.Capability Capabilities =>
         BaseCapabilities |
-        (_genshinCompatibilityAvailable
-            ? Protocol.Capability.GenshinCompatibilityIdentity
-            : 0) |
         (_authoredHapticsAvailable
             ? Protocol.Capability.AudioFourChannel | Protocol.Capability.AuthoredHapticsPcm
             : 0);
@@ -64,9 +57,7 @@ internal sealed class DeviceRegistry : IDisposable
         if (_controllers.ContainsKey(deviceId))
             throw new InvalidOperationException("The requested DS5 device already exists");
 
-        var profileId = SelectProfileId(
-            payload[2], (Protocol.AttachFlags)payload[3],
-            _authoredHapticsAvailable, _genshinCompatibilityAvailable);
+        var profileId = SelectProfileId(payload[2], payload[3], _authoredHapticsAvailable);
         var profile = _context.GetProfile(profileId)
                       ?? throw new InvalidOperationException($"HIDMaestro profile '{profileId}' is missing");
         if (!profile.RequiresUsbipBackend && !_context.IsDriverInstalled)
@@ -112,9 +103,6 @@ internal sealed class DeviceRegistry : IDisposable
                    Protocol.Capability.Motion |
                    Protocol.Capability.Battery |
                    Protocol.Capability.AdaptiveTriggers |
-                   (_genshinCompatibilityAvailable
-                       ? Protocol.Capability.GenshinCompatibilityIdentity
-                       : 0) |
                    (session.HasAudio
                        ? Protocol.Capability.AudioFourChannel | Protocol.Capability.AuthoredHapticsPcm
                        : 0)));
@@ -139,23 +127,14 @@ internal sealed class DeviceRegistry : IDisposable
     }
 
     internal static string SelectProfileId(
-        byte profileMode, Protocol.AttachFlags flags,
-        bool authoredHapticsAvailable, bool genshinCompatibilityAvailable)
+        byte profileMode, byte flags, bool authoredHapticsAvailable)
     {
-        if ((flags & ~Protocol.AttachFlags.GenshinCompatibilityIdentity) != 0)
+        if (flags != 0)
             throw new InvalidDataException("Unsupported DS5 attach flags");
-        var genshinCompatibility = flags.HasFlag(
-            Protocol.AttachFlags.GenshinCompatibilityIdentity);
-        if (genshinCompatibility && profileMode != 1)
-            throw new InvalidDataException("Genshin compatibility requires the composite profile");
 
         return profileMode switch
         {
             0 => "dualsense",
-            1 when genshinCompatibility && genshinCompatibilityAvailable =>
-                DualSenseHapticsAudio.GenshinCompatibilityProfileId,
-            1 when genshinCompatibility =>
-                throw new InvalidOperationException("Genshin compatibility identity is unavailable"),
             1 when authoredHapticsAvailable => DualSenseHapticsAudio.CompositeProfileId,
             1 => throw new InvalidOperationException("Validated DualSense four-channel audio is unavailable"),
             _ => throw new InvalidDataException("Unsupported DS5 profile mode"),
@@ -246,16 +225,8 @@ internal sealed class DeviceRegistry : IDisposable
                 if (id == DualSenseHapticsAudio.CompositeProfileId)
                     profileBytes = DualSenseHapticsAudio.CreateRuntimeCompositeProfile(profileBytes);
                 File.WriteAllBytes(Path.Combine(directory, id + ".json"), profileBytes);
-                if (id == DualSenseHapticsAudio.CompositeProfileId)
-                {
-                    var compatibilityProfile =
-                        DualSenseHapticsAudio.CreateGenshinCompatibilityProfile(profileBytes);
-                    File.WriteAllBytes(
-                        Path.Combine(directory, DualSenseHapticsAudio.GenshinCompatibilityProfileId + ".json"),
-                        compatibilityProfile);
-                }
             }
-            if (_context.LoadProfilesFromDirectory(directory) < 3)
+            if (_context.LoadProfilesFromDirectory(directory) < 2)
                 throw new InvalidOperationException("Patched DualSense profiles did not fully register");
             return true;
         }

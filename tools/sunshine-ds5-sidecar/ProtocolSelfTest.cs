@@ -58,8 +58,6 @@ internal static class ProtocolSelfTest
         var helloCapabilities = (Protocol.Capability)BinaryPrimitives.ReadUInt32LittleEndian(hello.Payload);
         Require(helloCapabilities.HasFlag(Protocol.Capability.Hid), "hello HID capability");
         Require(helloCapabilities.HasFlag(Protocol.Capability.AdaptiveTriggers), "hello adaptive trigger capability");
-        Require(!composite || helloCapabilities.HasFlag(Protocol.Capability.GenshinCompatibilityIdentity),
-            "hello Genshin compatibility identity capability");
         Require(helloCapabilities.HasFlag(Protocol.Capability.AudioPolicyViolation),
             "hello audio endpoint policy capability");
 
@@ -257,24 +255,12 @@ internal static class ProtocolSelfTest
 
     private static void VerifyProfileSelection()
     {
-        Require(DeviceRegistry.SelectProfileId(
-                1, Protocol.AttachFlags.GenshinCompatibilityIdentity, true, true) ==
-                DualSenseHapticsAudio.GenshinCompatibilityProfileId,
-            "Genshin compatibility attach profile selection");
-        Require(DeviceRegistry.SelectProfileId(
-                1, Protocol.AttachFlags.None, true, true) ==
-                DualSenseHapticsAudio.CompositeProfileId,
-            "standard composite attach profile selection");
-        try
-        {
-            DeviceRegistry.SelectProfileId(
-                0, Protocol.AttachFlags.GenshinCompatibilityIdentity, true, true);
-            Require(false, "Genshin compatibility HID attach rejection");
-        }
-        catch (InvalidDataException)
-        {
-            // Expected.
-        }
+        Require(DeviceRegistry.SelectProfileId(1, 0, true) == DualSenseHapticsAudio.CompositeProfileId,
+            "composite attach profile selection");
+        Require(DeviceRegistry.SelectProfileId(0, 0, true) == "dualsense",
+            "HID attach profile selection");
+        // Bit 0 once selected a removed compatibility identity; no attach flag is defined now.
+        RequireInvalidData(() => DeviceRegistry.SelectProfileId(1, 1, true), "attach flag rejection");
     }
 
     private static void VerifyControllerStateSubmissionPolicy()
@@ -343,20 +329,6 @@ internal static class ProtocolSelfTest
         stream.CopyTo(memory);
         var profileJson = DualSenseHapticsAudio.CreateRuntimeCompositeProfile(memory.ToArray());
         DualSenseHapticsAudio.ValidateCompositeProfile(profileJson);
-        var compatibilityProfile = DualSenseHapticsAudio.CreateGenshinCompatibilityProfile(profileJson);
-        using (var compatibilityDocument = JsonDocument.Parse(compatibilityProfile))
-        {
-            var root = compatibilityDocument.RootElement;
-            Require(root.GetProperty("id").GetString() ==
-                    DualSenseHapticsAudio.GenshinCompatibilityProfileId,
-                "Genshin compatibility profile id");
-            Require(root.GetProperty("productString").GetString() ==
-                    DualSenseHapticsAudio.GenshinCompatibilityProductString,
-                "Genshin compatibility product string");
-            Require(root.GetProperty("vid").GetString() == "0x054C" &&
-                    root.GetProperty("pid").GetString() == "0x0CE6",
-                "Genshin compatibility profile preserves Sony identity");
-        }
 
         var profileText = System.Text.Encoding.UTF8.GetString(profileJson);
         RequireProfileRejected(profileText.Replace("\"channels\":4", "\"channels\":2", StringComparison.Ordinal),

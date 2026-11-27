@@ -22,10 +22,7 @@ namespace platf::virtual_device_host::protocol {
   inline constexpr std::uint32_t CAP_MOTION = 1u << 5;
   inline constexpr std::uint32_t CAP_BATTERY = 1u << 6;
   inline constexpr std::uint32_t CAP_ADAPTIVE_TRIGGERS = 1u << 7;
-  inline constexpr std::uint32_t CAP_GENSHIN_COMPATIBILITY_IDENTITY = 1u << 8;
   inline constexpr std::uint32_t CAP_AUDIO_POLICY_VIOLATION = 1u << 9;
-
-  inline constexpr std::uint8_t ATTACH_FLAG_GENSHIN_COMPATIBILITY = 1u << 0;
 
   enum class message_e : std::uint16_t {
     hello = 1,
