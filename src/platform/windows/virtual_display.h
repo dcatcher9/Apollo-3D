@@ -120,10 +120,6 @@ namespace VDISPLAY {
 	void closeVDisplayDevice();
 	DRIVER_STATUS openVDisplayDevice();
 	bool startPingThread(std::function<void()> failCb);
-  bool queryActiveDisplayConfig(
-    std::vector<DISPLAYCONFIG_PATH_INFO> &paths,
-    std::vector<DISPLAYCONFIG_MODE_INFO> &modes
-  );
   /** Whether a CCD monitor device path names a SudoVDA target: its hardware ID, or the legacy
    * driver-name marker, appears in the path in any case.
    */

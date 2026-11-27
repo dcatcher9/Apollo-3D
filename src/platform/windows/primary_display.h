@@ -207,10 +207,8 @@ namespace platf::primary_display {
 
     using layout_t = std::vector<position_t>;
 
-    struct snapshot_t {
-      std::vector<DISPLAYCONFIG_PATH_INFO> paths;
-      std::vector<DISPLAYCONFIG_MODE_INFO> modes;
-      std::vector<std::wstring> device_paths;  // In the same order as paths.
+    /** A named CCD observation and each active target's color state, in path order. */
+    struct snapshot_t: display_config::named_topology_t {
       std::vector<std::optional<display_config::advanced_color_state_t>> colors;
     };
 

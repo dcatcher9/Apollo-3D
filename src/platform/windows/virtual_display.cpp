@@ -565,30 +565,24 @@ LONG changeBaselineDisplaySettings(
 }
 
 LONG applyDisplaySettings(const wchar_t *deviceName, int width, int height, int refresh_rate, bool persist_settings) {
-  std::vector<DISPLAYCONFIG_PATH_INFO> pathArray;
-  std::vector<DISPLAYCONFIG_MODE_INFO> modeArray;
-
-  if (!queryActiveDisplayConfig(pathArray, modeArray)) {
+  platf::display_config::topology_t topology;
+  if (!platf::display_config::query_topology(QDC_ONLY_ACTIVE_PATHS, topology)) {
     BOOST_LOG(error) << "[SUDOVDA] Failed to query display configuration.";
     return ERROR_INVALID_PARAMETER;
   }
+  auto &pathArray = topology.paths;
+  auto &modeArray = topology.modes;
   const UINT32 pathCount = (UINT32) pathArray.size();
   const UINT32 modeCount = (UINT32) modeArray.size();
   for (UINT32 i = 0; i < pathCount; i++) {
-    DISPLAYCONFIG_SOURCE_DEVICE_NAME sourceName = {};
-    sourceName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
-    sourceName.header.size = sizeof(sourceName);
-    sourceName.header.adapterId = pathArray[i].sourceInfo.adapterId;
-    sourceName.header.id = pathArray[i].sourceInfo.id;
-
-    if (DisplayConfigGetDeviceInfo(&sourceName.header) != ERROR_SUCCESS) {
+    auto *sourceInfo = &pathArray[i].sourceInfo;
+    auto *targetInfo = &pathArray[i].targetInfo;
+    const auto sourceName = platf::display_config::query_source_name(sourceInfo->adapterId, sourceInfo->id);
+    if (!sourceName) {
       continue;
     }
 
-    auto *sourceInfo = &pathArray[i].sourceInfo;
-    auto *targetInfo = &pathArray[i].targetInfo;
-
-    if (platf::display_config::same_device_path(sourceName.viewGdiDeviceName, deviceName)) {
+    if (platf::display_config::same_device_path(*sourceName, deviceName)) {
       BOOST_LOG(debug) << "[SUDOVDA] Display found: " << platf::to_utf8(deviceName);
       for (UINT32 j = 0; j < modeCount; j++) {
         if (
@@ -832,31 +826,6 @@ uint32_t watchdogPingIntervalMsForTest(uint32_t timeoutSeconds) {
   return static_cast<uint32_t>(watchdogPingInterval(timeoutSeconds).count());
 }
 #endif
-
-namespace {
-  bool queryDisplayConfig(
-    UINT32 flags,
-    std::vector<DISPLAYCONFIG_PATH_INFO> &paths,
-    std::vector<DISPLAYCONFIG_MODE_INFO> &modes
-  ) {
-    return static_cast<bool>(platf::display_config::query_display_config(
-      flags,
-      paths,
-      modes,
-      {
-        8,
-        platf::display_config::retry_delay_e::exponential_milliseconds,
-      }
-    ));
-  }
-}  // namespace
-
-bool queryActiveDisplayConfig(
-  std::vector<DISPLAYCONFIG_PATH_INFO> &paths,
-  std::vector<DISPLAYCONFIG_MODE_INFO> &modes
-) {
-  return queryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, paths, modes);
-}
 
 namespace {
   struct display_color_contract_t {
@@ -1257,42 +1226,33 @@ namespace {
   }
 
   // One active-topology observation: a single CCD query and the monitor path of each target.
-  struct detach_topology_t {
-    std::vector<DISPLAYCONFIG_PATH_INFO> paths;
-    std::vector<DISPLAYCONFIG_MODE_INFO> modes;
-    std::vector<std::wstring> device_paths;  // In the same order as paths.
-  };
+  using detach_topology_t = platf::display_config::named_topology_t;
 
   std::optional<detach_topology_t> queryDetachTopology(const desktop_detach_api_t &api) {
     detach_topology_t topology;
     constexpr UINT32 query_flags =
       QDC_ONLY_ACTIVE_PATHS | QDC_VIRTUAL_MODE_AWARE | QDC_VIRTUAL_REFRESH_RATE_AWARE;
-    const auto query = platf::display_config::query_display_config(query_flags, topology.paths, topology.modes, api.ccd);
+    // A failed target query could be the retiring display after a topology renumber. Treat the
+    // whole snapshot as indeterminate instead of detaching a merely similar monitor.
+    const auto query = platf::display_config::query_named_topology(
+      query_flags,
+      topology,
+      platf::display_config::unnamed_target_e::rejected,
+      {},
+      api.ccd,
+      api.device_info
+    );
+    if (query.unnamed_target) {
+      BOOST_LOG(warning) << "Virtual-display detach snapshot: target identity lookup failed (adapter "
+                         << query.unnamed_target->adapterId.HighPart << ':'
+                         << query.unnamed_target->adapterId.LowPart << ", target "
+                         << query.unnamed_target->id << ", status " << query.status << ").";
+      return std::nullopt;
+    }
     if (!query) {
       BOOST_LOG(warning) << "Virtual-display detach snapshot: CCD query failed (flags "
                          << query_flags << ", status " << query.status << ").";
       return std::nullopt;
-    }
-    topology.device_paths.reserve(topology.paths.size());
-    for (const auto &path : topology.paths) {
-      DISPLAYCONFIG_TARGET_DEVICE_NAME target_name {};
-      target_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
-      target_name.header.size = sizeof(target_name);
-      target_name.header.adapterId = path.targetInfo.adapterId;
-      target_name.header.id = path.targetInfo.id;
-      const auto target_name_status = api.device_info.get(&target_name.header);
-      if (target_name_status != ERROR_SUCCESS || target_name.monitorDevicePath[0] == L'\0') {
-        // A failed target query could be the retiring display after a topology renumber. Treat the
-        // whole snapshot as indeterminate instead of detaching a merely similar monitor.
-        BOOST_LOG(warning) << "Virtual-display detach snapshot: target identity lookup failed (adapter "
-                           << path.targetInfo.adapterId.HighPart << ':'
-                           << path.targetInfo.adapterId.LowPart << ", target "
-                           << path.targetInfo.id << ", status " << target_name_status
-                           << ", empty device path "
-                           << (target_name.monitorDevicePath[0] == L'\0') << ").";
-        return std::nullopt;
-      }
-      topology.device_paths.emplace_back(target_name.monitorDevicePath);
     }
     return topology;
   }
@@ -1627,38 +1587,25 @@ desktop_detach_result_t deactivateVirtualDisplay(
 
 namespace {
 display_identity_query_t queryDisplayIdentity(const LUID &adapterLuid, uint32_t targetId) {
-  std::vector<DISPLAYCONFIG_PATH_INFO> paths;
-  std::vector<DISPLAYCONFIG_MODE_INFO> modes;
-  if (!queryActiveDisplayConfig(paths, modes)) {
+  platf::display_config::topology_t topology;
+  if (!platf::display_config::query_topology(QDC_ONLY_ACTIVE_PATHS, topology)) {
     return {};
   }
 
-  for (const auto &path : paths) {
+  for (const auto &path : topology.paths) {
     if (path.targetInfo.id != targetId || !platf::display_config::same_luid(path.targetInfo.adapterId, adapterLuid)) {
       continue;
     }
 
-    DISPLAYCONFIG_SOURCE_DEVICE_NAME sourceName = {};
-    sourceName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
-    sourceName.header.size = sizeof(sourceName);
-    sourceName.header.adapterId = path.sourceInfo.adapterId;
-    sourceName.header.id = path.sourceInfo.id;
-    DISPLAYCONFIG_TARGET_DEVICE_NAME targetName {};
-    targetName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
-    targetName.header.size = sizeof(targetName);
-    targetName.header.adapterId = path.targetInfo.adapterId;
-    targetName.header.id = path.targetInfo.id;
-    if (DisplayConfigGetDeviceInfo(&sourceName.header) == ERROR_SUCCESS &&
-        DisplayConfigGetDeviceInfo(&targetName.header) == ERROR_SUCCESS) {
-      std::wstring display_name = sourceName.viewGdiDeviceName;
-      if (!display_name.empty()) {
-        return {
-          display_identity_state_e::present,
-          std::move(display_name),
-          targetName.monitorDevicePath,
-          targetName.monitorFriendlyDeviceName,
-        };
-      }
+    auto sourceName = platf::display_config::query_source_name(path.sourceInfo.adapterId, path.sourceInfo.id);
+    auto targetName = platf::display_config::query_target_name(path.targetInfo.adapterId, path.targetInfo.id);
+    if (sourceName && targetName && !sourceName->empty()) {
+      return {
+        display_identity_state_e::present,
+        std::move(*sourceName),
+        std::move(targetName.device_path),
+        std::move(targetName.friendly_name),
+      };
     }
 
     // The exact stable adapter/target identity is still in the active topology, but Windows could
@@ -1677,42 +1624,30 @@ display_identity_query_t queryVirtualDisplayIdentity(
   const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
   std::wstring_view devicePath
 ) {
-  std::vector<DISPLAYCONFIG_PATH_INFO> paths;
-  std::vector<DISPLAYCONFIG_MODE_INFO> modes;
-  if (!queryActiveDisplayConfig(paths, modes)) {
+  platf::display_config::topology_t topology;
+  if (!platf::display_config::query_topology(QDC_ONLY_ACTIVE_PATHS, topology)) {
     return {};
   }
 
-  for (const auto &path : paths) {
-    DISPLAYCONFIG_SOURCE_DEVICE_NAME sourceName {};
-    sourceName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
-    sourceName.header.size = sizeof(sourceName);
-    sourceName.header.adapterId = path.sourceInfo.adapterId;
-    sourceName.header.id = path.sourceInfo.id;
-
-    DISPLAYCONFIG_TARGET_DEVICE_NAME targetName {};
-    targetName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
-    targetName.header.size = sizeof(targetName);
-    targetName.header.adapterId = path.targetInfo.adapterId;
-    targetName.header.id = path.targetInfo.id;
-    if (DisplayConfigGetDeviceInfo(&sourceName.header) != ERROR_SUCCESS ||
-        DisplayConfigGetDeviceInfo(&targetName.header) != ERROR_SUCCESS) {
+  for (const auto &path : topology.paths) {
+    auto sourceName = platf::display_config::query_source_name(path.sourceInfo.adapterId, path.sourceInfo.id);
+    auto targetName = platf::display_config::query_target_name(path.targetInfo.adapterId, path.targetInfo.id);
+    if (!sourceName || !targetName) {
       return {};
     }
 
-    const std::wstring_view candidatePath = targetName.monitorDevicePath;
     if (matchesVirtualDisplayIdentity(
           identity,
           devicePath,
           path.targetInfo.adapterId,
           path.targetInfo.id,
-          candidatePath
+          targetName.device_path
         )) {
       return {
         display_identity_state_e::present,
-        sourceName.viewGdiDeviceName,
-        targetName.monitorDevicePath,
-        targetName.monitorFriendlyDeviceName,
+        std::move(*sourceName),
+        std::move(targetName.device_path),
+        std::move(targetName.friendly_name),
       };
     }
   }
@@ -1731,15 +1666,14 @@ display_identity_state_e queryVirtualDisplayRetirementState(
   // A desktop detach intentionally removes the target from QDC_ONLY_ACTIVE_PATHS while the IddCx
   // monitor object is still alive. Keep the retirement barrier until Windows stops advertising
   // that exact target as available in the complete path set.
-  std::vector<DISPLAYCONFIG_PATH_INFO> paths;
-  std::vector<DISPLAYCONFIG_MODE_INFO> modes;
-  if (!queryDisplayConfig(QDC_ALL_PATHS, paths, modes)) {
+  platf::display_config::topology_t topology;
+  if (!platf::display_config::query_topology(QDC_ALL_PATHS, topology)) {
     return display_identity_state_e::indeterminate;
   }
 
   std::vector<retirement_candidate_t> raw_candidates;
-  raw_candidates.reserve(paths.size());
-  for (const auto &path : paths) {
+  raw_candidates.reserve(topology.paths.size());
+  for (const auto &path : topology.paths) {
     raw_candidates.push_back({
       {path.targetInfo.adapterId, path.targetInfo.id},
       {},
@@ -1754,13 +1688,9 @@ display_identity_state_e queryVirtualDisplayRetirementState(
   auto candidates = coalesceRetirementCandidates(raw_candidates);
   for (auto &candidate : candidates) {
     if (candidate.target_available) {
-      DISPLAYCONFIG_TARGET_DEVICE_NAME target_name {};
-      target_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
-      target_name.header.size = sizeof(target_name);
-      target_name.header.adapterId = candidate.identity.AdapterLuid;
-      target_name.header.id = candidate.identity.TargetId;
-      if (DisplayConfigGetDeviceInfo(&target_name.header) == ERROR_SUCCESS) {
-        candidate.device_path = target_name.monitorDevicePath;
+      auto target_name = platf::display_config::query_target_name(candidate.identity.AdapterLuid, candidate.identity.TargetId);
+      if (target_name) {
+        candidate.device_path = std::move(target_name.device_path);
       } else {
         candidate.device_info_available = false;
       }
@@ -2131,18 +2061,13 @@ namespace {
       return std::nullopt;
     }
 
-    std::vector<DISPLAYCONFIG_PATH_INFO> paths;
-    std::vector<DISPLAYCONFIG_MODE_INFO> modes;
-    if (!queryActiveDisplayConfig(paths, modes)) {
+    platf::display_config::topology_t topology;
+    if (!platf::display_config::query_topology(QDC_ONLY_ACTIVE_PATHS, topology)) {
       return std::nullopt;
     }
-    for (const auto &path : paths) {
-      DISPLAYCONFIG_SOURCE_DEVICE_NAME sourceName {};
-      sourceName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
-      sourceName.header.size = sizeof(sourceName);
-      sourceName.header.adapterId = path.sourceInfo.adapterId;
-      sourceName.header.id = path.sourceInfo.id;
-      if (DisplayConfigGetDeviceInfo(&sourceName.header) == ERROR_SUCCESS && platf::display_config::same_device_path(sourceName.viewGdiDeviceName, primaryDisplay)) {
+    for (const auto &path : topology.paths) {
+      const auto sourceName = platf::display_config::query_source_name(path.sourceInfo.adapterId, path.sourceInfo.id);
+      if (sourceName && platf::display_config::same_device_path(*sourceName, primaryDisplay)) {
         return path.sourceInfo.adapterId;
       }
     }

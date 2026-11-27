@@ -1298,7 +1298,13 @@ namespace ar_glasses {
         return active_discovery_test->hooks.query_active(paths, modes);
       }
 #endif
-      return VDISPLAY::queryActiveDisplayConfig(paths, modes);
+      platf::display_config::topology_t topology;
+      if (!platf::display_config::query_topology(QDC_ONLY_ACTIVE_PATHS, topology)) {
+        return false;
+      }
+      paths = std::move(topology.paths);
+      modes = std::move(topology.modes);
+      return true;
     }
 
     std::optional<DISPLAYCONFIG_TARGET_DEVICE_NAME> discovery_target_name(const DISPLAYCONFIG_PATH_INFO &path) {
@@ -1761,9 +1767,7 @@ namespace ar_glasses {
       RECT rect {};
     };
 
-    struct topology_snapshot_t {
-      std::vector<DISPLAYCONFIG_PATH_INFO> paths;
-      std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+    struct topology_snapshot_t: platf::display_config::topology_t {
       std::vector<active_source_t> sources;
     };
 
@@ -1781,7 +1785,7 @@ namespace ar_glasses {
 
     std::optional<topology_snapshot_t> query_complete_topology_snapshot() {
       topology_snapshot_t snapshot;
-      if (!VDISPLAY::queryActiveDisplayConfig(snapshot.paths, snapshot.modes)) {
+      if (!platf::display_config::query_topology(QDC_ONLY_ACTIVE_PATHS, snapshot)) {
         return std::nullopt;
       }
 
@@ -1792,21 +1796,12 @@ namespace ar_glasses {
           return std::nullopt;
         }
 
-        DISPLAYCONFIG_SOURCE_DEVICE_NAME source_name {};
-        source_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
-        source_name.header.size = sizeof(source_name);
-        source_name.header.adapterId = path.sourceInfo.adapterId;
-        source_name.header.id = path.sourceInfo.id;
-        if (DisplayConfigGetDeviceInfo(&source_name.header) != ERROR_SUCCESS) {
+        auto gdi_name = platf::display_config::query_source_name(path.sourceInfo.adapterId, path.sourceInfo.id);
+        if (!gdi_name) {
           return std::nullopt;
         }
-
-        DISPLAYCONFIG_TARGET_DEVICE_NAME target_name {};
-        target_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
-        target_name.header.size = sizeof(target_name);
-        target_name.header.adapterId = path.targetInfo.adapterId;
-        target_name.header.id = path.targetInfo.id;
-        if (DisplayConfigGetDeviceInfo(&target_name.header) != ERROR_SUCCESS) {
+        auto target_name = platf::display_config::query_target_name(path.targetInfo.adapterId, path.targetInfo.id);
+        if (!target_name) {
           return std::nullopt;
         }
 
@@ -1817,9 +1812,9 @@ namespace ar_glasses {
         source.source_adapter_id = path.sourceInfo.adapterId;
         source.source_id = path.sourceInfo.id;
         source.target = {path.targetInfo.adapterId, path.targetInfo.id};
-        source.gdi_name = source_name.viewGdiDeviceName;
-        source.device_path = target_name.monitorDevicePath;
-        source.friendly_name = target_name.monitorFriendlyDeviceName;
+        source.gdi_name = std::move(*gdi_name);
+        source.device_path = std::move(target_name.device_path);
+        source.friendly_name = std::move(target_name.friendly_name);
         source.rect = {
           mode.position.x,
           mode.position.y,

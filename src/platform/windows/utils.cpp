@@ -115,40 +115,22 @@ namespace {
 	return error.str();
   }
 
-  bool query_display_config(
-    std::vector<DISPLAYCONFIG_PATH_INFO> &paths,
-    std::vector<DISPLAYCONFIG_MODE_INFO> &modes,
-    const bool active_only
-  ) {
-    const UINT32 flags =
-      (active_only ? QDC_ONLY_ACTIVE_PATHS : QDC_ALL_PATHS) |
-      QDC_VIRTUAL_MODE_AWARE;
-    const auto result =
-      platf::display_config::query_display_config(
-        flags,
-        paths,
-        modes,
-        {
-          // The former loop retried this race without sleeping or an upper bound. Eight immediate
-          // attempts retain its transient-topology tolerance without permitting an infinite stall.
-          8,
-          platf::display_config::retry_delay_e::none,
-        }
-      );
-    if (!result) {
-      BOOST_LOG(error) << get_error_string(result.status)
-                       << " failed to query display paths and modes!";
-    }
-    return static_cast<bool>(result);
-  }
-
   bool test_no_access_to_ccd_api() {
-	std::vector<DISPLAYCONFIG_PATH_INFO> paths;
-	std::vector<DISPLAYCONFIG_MODE_INFO> modes;
-	if (!query_display_config(paths, modes, true)) {
-		BOOST_LOG(debug) << "test_no_access_to_ccd_api failed in query_display_config.";
-		return true;
-	}
+    platf::display_config::topology_t topology;
+    // The former loop retried this race without sleeping or an upper bound. Eight immediate
+    // attempts retain its transient-topology tolerance without permitting an infinite stall.
+    const auto query = platf::display_config::query_topology(
+      QDC_ONLY_ACTIVE_PATHS | QDC_VIRTUAL_MODE_AWARE,
+      topology,
+      {8, platf::display_config::retry_delay_e::none}
+    );
+    if (!query) {
+      BOOST_LOG(error) << get_error_string(query.status) << " failed to query display paths and modes!";
+      BOOST_LOG(debug) << "test_no_access_to_ccd_api failed to query the display topology.";
+      return true;
+    }
+    auto &paths = topology.paths;
+    auto &modes = topology.modes;
 
 	// Here we are supplying the retrieved display data back to SetDisplayConfig (with VALIDATE flag only, so that we make no actual changes).
 	// Unless something is really broken on Windows, this call should never fail under normal circumstances - the configuration is 100% correct, since it was

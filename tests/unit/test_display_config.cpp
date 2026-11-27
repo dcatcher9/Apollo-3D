@@ -9,7 +9,9 @@
 #include <chrono>
 #include <cstdint>
 #include <cwchar>
+#include <algorithm>
 #include <initializer_list>
+#include <iterator>
 #include <limits>
 #include <vector>
 
@@ -50,6 +52,40 @@ namespace {
       paths.push_back(path);
     }
     return paths;
+  }
+
+  LONG WINAPI named_buffer_sizes(UINT32, UINT32 *path_count, UINT32 *mode_count) {
+    *path_count = static_cast<UINT32>(target_names.size());
+    *mode_count = 0;
+    return ERROR_SUCCESS;
+  }
+
+  LONG WINAPI named_query(
+    UINT32,
+    UINT32 *path_count,
+    DISPLAYCONFIG_PATH_INFO *paths,
+    UINT32 *mode_count,
+    DISPLAYCONFIG_MODE_INFO *,
+    DISPLAYCONFIG_TOPOLOGY_ID *
+  ) {
+    const auto active = target_paths();
+    std::copy(active.begin(), active.end(), paths);
+    *path_count = static_cast<UINT32>(active.size());
+    *mode_count = 0;
+    return ERROR_SUCCESS;
+  }
+
+  void WINAPI no_sleep(DWORD) {
+  }
+
+  LONG WINAPI denied_device_info(DISPLAYCONFIG_DEVICE_INFO_HEADER *) {
+    return ERROR_ACCESS_DENIED;
+  }
+
+  LONG WINAPI unterminated_target_name(DISPLAYCONFIG_DEVICE_INFO_HEADER *header) {
+    auto *name = reinterpret_cast<DISPLAYCONFIG_TARGET_DEVICE_NAME *>(header);
+    std::fill(std::begin(name->monitorDevicePath), std::end(name->monitorDevicePath), L'x');
+    return ERROR_SUCCESS;
   }
 
   struct fake_query_state_t {
@@ -214,59 +250,108 @@ TEST(DisplayConfigTarget, AmbiguousInitialNameOrLearnedIdentityIsRejected) {
   EXPECT_FALSE(find_display_target(target_paths(), L"monitor-a", {}, {get_target_name, nullptr}));
 }
 
+TEST(DisplayConfigNamedTopology, ListsEachTargetsMonitorPathInPathOrder) {
+  using namespace platf::display_config;
+  target_names = {{1, L"monitor-a", L"DISPLAY1"}, {2, L"monitor-b", L"DISPLAY2"}};
+  named_topology_t topology;
+  const auto result = query_named_topology(QDC_ONLY_ACTIVE_PATHS, topology, unnamed_target_e::rejected, {}, {named_buffer_sizes, named_query, no_sleep}, {get_target_name, nullptr});
+  ASSERT_TRUE(result);
+  EXPECT_FALSE(result.unnamed_target);
+  ASSERT_EQ(topology.paths.size(), 2u);
+  EXPECT_EQ(topology.device_paths, (std::vector<std::wstring> {L"monitor-a", L"monitor-b"}));
+}
+
+TEST(DisplayConfigNamedTopology, ATargetWithoutAMonitorPathFailsTheQueryUnlessAllowed) {
+  using namespace platf::display_config;
+  target_names = {{1, L"monitor-a", L"DISPLAY1"}, {2, L"", L"DISPLAY2"}};
+  const query_api_t api {named_buffer_sizes, named_query, no_sleep};
+  named_topology_t topology;
+  const auto rejected = query_named_topology(QDC_ONLY_ACTIVE_PATHS, topology, unnamed_target_e::rejected, {}, api, {get_target_name, nullptr});
+  EXPECT_FALSE(rejected);
+  EXPECT_EQ(rejected.status, ERROR_NOT_FOUND);
+  ASSERT_TRUE(rejected.unnamed_target);
+  EXPECT_EQ(rejected.unnamed_target->id, 2u);
+  EXPECT_TRUE(topology.paths.empty());
+  EXPECT_TRUE(topology.device_paths.empty());
+
+  const auto allowed = query_named_topology(QDC_ALL_PATHS, topology, unnamed_target_e::allowed, {}, api, {get_target_name, nullptr});
+  ASSERT_TRUE(allowed);
+  EXPECT_EQ(topology.device_paths, (std::vector<std::wstring> {L"monitor-a", L""}));
+}
+
+TEST(DisplayConfigNamedTopology, AFailedLookupReportsItsStatusOrLeavesAnAllowedTargetUnnamed) {
+  using namespace platf::display_config;
+  target_names = {{1, L"monitor-a", L"DISPLAY1"}};
+  const query_api_t api {named_buffer_sizes, named_query, no_sleep};
+  named_topology_t topology;
+  const auto rejected = query_named_topology(QDC_ONLY_ACTIVE_PATHS, topology, unnamed_target_e::rejected, {}, api, {denied_device_info, nullptr});
+  EXPECT_EQ(rejected.status, ERROR_ACCESS_DENIED);
+  ASSERT_TRUE(rejected.unnamed_target);
+  EXPECT_EQ(rejected.unnamed_target->id, 1u);
+
+  const auto allowed = query_named_topology(QDC_ALL_PATHS, topology, unnamed_target_e::allowed, {}, api, {denied_device_info, nullptr});
+  ASSERT_TRUE(allowed);
+  EXPECT_EQ(topology.device_paths, (std::vector<std::wstring> {L""}));
+}
+
+TEST(DisplayConfigNamedTopology, ANameWithoutItsTerminatorIsAFailedLookup) {
+  using namespace platf::display_config;
+  const auto name = query_target_name({}, 1, {unterminated_target_name, nullptr});
+  EXPECT_FALSE(name);
+  EXPECT_EQ(name.status, ERROR_INVALID_DATA);
+  EXPECT_TRUE(name.device_path.empty());
+}
+
 TEST(DisplayConfigQueryTest, RetriesSizeAndDataRacesWithBoundedBackoff) {
   fake_query_state = {};
-  std::vector<DISPLAYCONFIG_PATH_INFO> paths;
-  std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+  platf::display_config::topology_t topology;
 
-  const auto result = platf::display_config::query_display_config(
+  const auto result = platf::display_config::query_topology(
     QDC_ONLY_ACTIVE_PATHS,
-    paths,
-    modes,
+    topology,
+    {},
     fake_query_api()
   );
 
   ASSERT_TRUE(result);
   EXPECT_EQ(fake_query_state.size_calls, 3u);
   EXPECT_EQ(fake_query_state.query_calls, 2u);
-  EXPECT_EQ(paths.size(), 1u);
-  EXPECT_EQ(modes.size(), 2u);
+  EXPECT_EQ(topology.paths.size(), 1u);
+  EXPECT_EQ(topology.modes.size(), 2u);
   EXPECT_EQ(fake_query_state.sleeps, (std::vector<DWORD> {1, 2}));
 }
 
 TEST(DisplayConfigQueryTest, StopsAfterTheConfiguredAttemptBudget) {
   fake_query_state = {};
   fake_query_state.never_settles = true;
-  std::vector<DISPLAYCONFIG_PATH_INFO> paths(1);
-  std::vector<DISPLAYCONFIG_MODE_INFO> modes(1);
+  platf::display_config::topology_t topology;
+  topology.paths.resize(1);
+  topology.modes.resize(1);
 
-  const auto result = platf::display_config::query_display_config(
+  const auto result = platf::display_config::query_topology(
     QDC_ONLY_ACTIVE_PATHS,
-    paths,
-    modes,
-    fake_query_api(),
-    {3, platf::display_config::retry_delay_e::exponential_milliseconds}
+    topology,
+    {3, platf::display_config::retry_delay_e::exponential_milliseconds},
+    fake_query_api()
   );
 
   EXPECT_FALSE(result);
   EXPECT_EQ(result.status, ERROR_INSUFFICIENT_BUFFER);
   EXPECT_EQ(fake_query_state.size_calls, 3u);
-  EXPECT_TRUE(paths.empty());
-  EXPECT_TRUE(modes.empty());
+  EXPECT_TRUE(topology.paths.empty());
+  EXPECT_TRUE(topology.modes.empty());
 }
 
 TEST(DisplayConfigQueryTest, ImmediatePolicyPreservesCallerRetryCadence) {
   fake_query_state = {};
   fake_query_state.never_settles = true;
-  std::vector<DISPLAYCONFIG_PATH_INFO> paths;
-  std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+  platf::display_config::topology_t topology;
 
-  const auto result = platf::display_config::query_display_config(
+  const auto result = platf::display_config::query_topology(
     QDC_ONLY_ACTIVE_PATHS,
-    paths,
-    modes,
-    fake_query_api(),
-    {4, platf::display_config::retry_delay_e::none}
+    topology,
+    {4, platf::display_config::retry_delay_e::none},
+    fake_query_api()
   );
 
   EXPECT_FALSE(result);

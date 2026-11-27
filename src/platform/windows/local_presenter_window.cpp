@@ -216,43 +216,26 @@ namespace platf::dxgi {
       if (display_name.empty()) {
         return std::nullopt;
       }
-      std::vector<DISPLAYCONFIG_PATH_INFO> paths;
-      std::vector<DISPLAYCONFIG_MODE_INFO> modes;
-      if (!platf::display_config::query_display_config(
-            QDC_ONLY_ACTIVE_PATHS,
-            paths,
-            modes,
-            {
-              4,
-              platf::display_config::retry_delay_e::none,
-            }
-          )) {
+      platf::display_config::topology_t topology;
+      if (!platf::display_config::query_topology(QDC_ONLY_ACTIVE_PATHS, topology, {4, platf::display_config::retry_delay_e::none})) {
         return std::nullopt;
       }
-      for (const auto &path : paths) {
-        DISPLAYCONFIG_SOURCE_DEVICE_NAME source_name {};
-        source_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
-        source_name.header.size = sizeof(source_name);
-        source_name.header.adapterId = path.sourceInfo.adapterId;
-        source_name.header.id = path.sourceInfo.id;
-        if (DisplayConfigGetDeviceInfo(&source_name.header) != ERROR_SUCCESS || !platf::display_config::equal_device_paths(display_name, source_name.viewGdiDeviceName)) {
+      for (const auto &path : topology.paths) {
+        auto source_name = platf::display_config::query_source_name(path.sourceInfo.adapterId, path.sourceInfo.id);
+        if (!source_name || !platf::display_config::equal_device_paths(display_name, *source_name)) {
           continue;
         }
 
-        DISPLAYCONFIG_TARGET_DEVICE_NAME target_name {};
-        target_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
-        target_name.header.size = sizeof(target_name);
-        target_name.header.adapterId = path.targetInfo.adapterId;
-        target_name.header.id = path.targetInfo.id;
-        if (DisplayConfigGetDeviceInfo(&target_name.header) != ERROR_SUCCESS || !target_name.monitorDevicePath[0]) {
+        auto target_name = platf::display_config::query_target_name(path.targetInfo.adapterId, path.targetInfo.id);
+        if (!target_name || target_name.device_path.empty()) {
           return std::nullopt;
         }
         return local_presenter_display_identity_t {
           path.targetInfo.adapterId,
           path.targetInfo.id,
-          source_name.viewGdiDeviceName,
-          target_name.monitorDevicePath,
-          target_name.monitorFriendlyDeviceName,
+          std::move(*source_name),
+          std::move(target_name.device_path),
+          std::move(target_name.friendly_name),
         };
       }
       return std::nullopt;

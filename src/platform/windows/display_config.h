@@ -79,23 +79,74 @@ namespace platf::display_config {
     retry_delay_e retry_delay = retry_delay_e::exponential_milliseconds;
   };
 
+  /** One CCD observation: the paths and modes that a single QueryDisplayConfig reported. */
+  struct topology_t {
+    std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+    std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+  };
+
+  /** One CCD observation and the monitor device path of each path's target, in path order. */
+  struct named_topology_t: topology_t {
+    std::vector<std::wstring> device_paths;
+  };
+
   /**
-   * Query one CCD topology snapshot, retrying the documented size/query race.
-   * The injected overload exists so the retry state machine can be tested without mutating CCD.
+   * Query one CCD topology, retrying the documented size/query race. The flags choose the
+   * paths and how their mode indices are laid out, so each caller passes its own. A failed query
+   * leaves the topology empty. The api is injected so tests can drive the retry state machine
+   * without mutating CCD.
    */
-  query_result_t query_display_config(
+  query_result_t query_topology(
     UINT32 flags,
-    std::vector<DISPLAYCONFIG_PATH_INFO> &paths,
-    std::vector<DISPLAYCONFIG_MODE_INFO> &modes,
-    const query_api_t &api,
-    query_policy_t policy = {}
+    topology_t &topology,
+    query_policy_t policy = {},
+    const query_api_t &api = {}
   );
 
-  query_result_t query_display_config(
+  struct device_info_api_t {
+    decltype(&::DisplayConfigGetDeviceInfo) get = &::DisplayConfigGetDeviceInfo;
+    decltype(&::DisplayConfigSetDeviceInfo) set = &::DisplayConfigSetDeviceInfo;
+  };
+
+  /** What Windows reports for one target's monitor. */
+  struct target_name_t {
+    LONG status = ERROR_INVALID_PARAMETER;
+    std::wstring device_path;  ///< May be empty when Windows names no monitor interface.
+    std::wstring friendly_name;
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+      return status == ERROR_SUCCESS;
+    }
+  };
+
+  /** Look up a target's monitor names. A name without its terminator is a failed lookup. */
+  target_name_t query_target_name(const LUID &adapter_id, UINT32 target_id, const device_info_api_t &api = {});
+
+  /** Look up a source's GDI device name (`\\.\DISPLAYn`); nothing when the lookup fails. */
+  std::optional<std::wstring> query_source_name(const LUID &adapter_id, UINT32 source_id, const device_info_api_t &api = {});
+
+  enum class unnamed_target_e {
+    rejected,  ///< A target without a monitor device path fails the whole query.
+    allowed,  ///< Such a target gets an empty device path.
+  };
+
+  struct named_query_result_t: query_result_t {
+    /** The target that failed the query because it could not be named. */
+    std::optional<DISPLAYCONFIG_PATH_TARGET_INFO> unnamed_target;
+  };
+
+  /**
+   * Query one CCD topology and name every path's target. When a name lookup fails, or finds no
+   * monitor device path while unnamed targets are rejected, the query fails with that lookup's
+   * status (ERROR_NOT_FOUND for a missing path) and reports the target.
+   */
+  named_query_result_t query_named_topology(
     UINT32 flags,
-    std::vector<DISPLAYCONFIG_PATH_INFO> &paths,
-    std::vector<DISPLAYCONFIG_MODE_INFO> &modes,
-    query_policy_t policy = {}
+    named_topology_t &topology,
+    unnamed_target_e unnamed,
+    query_policy_t policy = {},
+    const query_api_t &api = {},
+    const device_info_api_t &device_info = {}
   );
 
   struct advanced_color_state_t {
@@ -107,11 +158,6 @@ namespace platf::display_config {
     UINT32 bits_per_color_channel = 0;
     DISPLAYCONFIG_ADVANCED_COLOR_MODE active_mode =
       DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR;
-  };
-
-  struct device_info_api_t {
-    decltype(&::DisplayConfigGetDeviceInfo) get = &::DisplayConfigGetDeviceInfo;
-    decltype(&::DisplayConfigSetDeviceInfo) set = &::DisplayConfigSetDeviceInfo;
   };
 
   struct display_target_t {

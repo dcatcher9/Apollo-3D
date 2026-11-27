@@ -1378,19 +1378,14 @@ namespace platf::dxgi {
       return std::nullopt;
     }
 
-    std::vector<DISPLAYCONFIG_PATH_INFO> paths;
-    std::vector<DISPLAYCONFIG_MODE_INFO> modes;
-    if (!VDISPLAY::queryActiveDisplayConfig(paths, modes)) {
+    display_config::topology_t topology;
+    if (!display_config::query_topology(QDC_ONLY_ACTIVE_PATHS, topology)) {
       return std::nullopt;
     }
 
-    for (const auto &path : paths) {
-      DISPLAYCONFIG_SOURCE_DEVICE_NAME source_name {};
-      source_name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
-      source_name.header.size = sizeof(source_name);
-      source_name.header.adapterId = path.sourceInfo.adapterId;
-      source_name.header.id = path.sourceInfo.id;
-      if (DisplayConfigGetDeviceInfo(&source_name.header) != ERROR_SUCCESS || !display_config::equal_device_paths(source_name.viewGdiDeviceName, output_desc.DeviceName)) {
+    for (const auto &path : topology.paths) {
+      const auto source_name = display_config::query_source_name(path.sourceInfo.adapterId, path.sourceInfo.id);
+      if (!source_name || !display_config::equal_device_paths(*source_name, output_desc.DeviceName)) {
         continue;
       }
 

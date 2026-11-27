@@ -20,7 +20,49 @@ namespace platf::display_config {
       platf::note_display_change();
       return accepted;
     }
+
+    /** The name in a fixed-size CCD field, or nothing when the field holds no terminator. */
+    template<std::size_t size>
+    std::optional<std::wstring> terminated_name(const wchar_t (&name)[size]) {
+      const auto end = std::find(std::begin(name), std::end(name), L'\0');
+      if (end == std::end(name)) {
+        return std::nullopt;
+      }
+      return std::wstring(std::begin(name), end);
+    }
   }  // namespace
+
+  target_name_t query_target_name(const LUID &adapter_id, const UINT32 target_id, const device_info_api_t &api) {
+    if (!api.get) {
+      return {};
+    }
+    DISPLAYCONFIG_TARGET_DEVICE_NAME target {};
+    target.header = {DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, sizeof(target), adapter_id, target_id};
+    target_name_t result {api.get(&target.header)};
+    if (!result) {
+      return result;
+    }
+    auto device_path = terminated_name(target.monitorDevicePath);
+    auto friendly_name = terminated_name(target.monitorFriendlyDeviceName);
+    if (!device_path || !friendly_name) {
+      return {ERROR_INVALID_DATA};
+    }
+    result.device_path = std::move(*device_path);
+    result.friendly_name = std::move(*friendly_name);
+    return result;
+  }
+
+  std::optional<std::wstring> query_source_name(const LUID &adapter_id, const UINT32 source_id, const device_info_api_t &api) {
+    if (!api.get) {
+      return std::nullopt;
+    }
+    DISPLAYCONFIG_SOURCE_DEVICE_NAME source {};
+    source.header = {DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, sizeof(source), adapter_id, source_id};
+    if (api.get(&source.header) != ERROR_SUCCESS) {
+      return std::nullopt;
+    }
+    return terminated_name(source.viewGdiDeviceName);
+  }
 
   std::optional<display_target_t> find_display_target(
     const std::vector<DISPLAYCONFIG_PATH_INFO> &paths,
@@ -36,22 +78,23 @@ namespace platf::display_config {
       if (!(path.flags & DISPLAYCONFIG_PATH_ACTIVE)) {
         continue;
       }
-      DISPLAYCONFIG_TARGET_DEVICE_NAME target {};
-      target.header = {DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, sizeof(target), path.targetInfo.adapterId, path.targetInfo.id};
-      DISPLAYCONFIG_SOURCE_DEVICE_NAME source {};
-      source.header = {DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, sizeof(source), path.sourceInfo.adapterId, path.sourceInfo.id};
-      if (api.get(&target.header) != ERROR_SUCCESS || api.get(&source.header) != ERROR_SUCCESS || !target.monitorDevicePath[0]) {
-        // An unresolved active path can make a GDI-name match ambiguous (cloning).
+      // An unresolved active path can make a GDI-name match ambiguous (cloning).
+      auto target = query_target_name(path.targetInfo.adapterId, path.targetInfo.id, api);
+      if (!target) {
         return std::nullopt;
       }
-      if (!(device_path.empty() ? same_device_path(display_name, source.viewGdiDeviceName) :
-                                  same_device_path(device_path, target.monitorDevicePath))) {
+      auto source = query_source_name(path.sourceInfo.adapterId, path.sourceInfo.id, api);
+      if (!source || target.device_path.empty()) {
+        return std::nullopt;
+      }
+      if (!(device_path.empty() ? same_device_path(display_name, *source) :
+                                  same_device_path(device_path, target.device_path))) {
         continue;
       }
       if (found) {
         return std::nullopt;
       }
-      found = display_target_t {path.targetInfo.adapterId, path.targetInfo.id, target.monitorDevicePath, source.viewGdiDeviceName};
+      found = display_target_t {path.targetInfo.adapterId, path.targetInfo.id, std::move(target.device_path), std::move(*source)};
     }
     return found;
   }
@@ -60,21 +103,54 @@ namespace platf::display_config {
     std::wstring_view device_path,
     std::wstring_view display_name
   ) {
-    std::vector<DISPLAYCONFIG_PATH_INFO> paths;
-    std::vector<DISPLAYCONFIG_MODE_INFO> modes;
-    if (!query_display_config(QDC_ONLY_ACTIVE_PATHS, paths, modes)) {
+    topology_t topology;
+    if (!query_topology(QDC_ONLY_ACTIVE_PATHS, topology)) {
       return std::nullopt;
     }
-    return find_display_target(paths, device_path, display_name, device_info_api_t {});
+    return find_display_target(topology.paths, device_path, display_name, device_info_api_t {});
   }
 
-  query_result_t query_display_config(
+  named_query_result_t query_named_topology(
     const UINT32 flags,
-    std::vector<DISPLAYCONFIG_PATH_INFO> &paths,
-    std::vector<DISPLAYCONFIG_MODE_INFO> &modes,
+    named_topology_t &topology,
+    const unnamed_target_e unnamed,
+    const query_policy_t policy,
     const query_api_t &api,
-    const query_policy_t policy
+    const device_info_api_t &device_info
   ) {
+    topology.device_paths.clear();
+    named_query_result_t result;
+    result.status = query_topology(flags, topology, policy, api).status;
+    if (!result) {
+      return result;
+    }
+    topology.device_paths.reserve(topology.paths.size());
+    for (const auto &path : topology.paths) {
+      auto target = query_target_name(path.targetInfo.adapterId, path.targetInfo.id, device_info);
+      if (target && target.device_path.empty() && unnamed == unnamed_target_e::rejected) {
+        target.status = ERROR_NOT_FOUND;
+      }
+      if (!target && unnamed == unnamed_target_e::rejected) {
+        result.status = target.status;
+        result.unnamed_target = path.targetInfo;
+        topology.paths.clear();
+        topology.modes.clear();
+        topology.device_paths.clear();
+        return result;
+      }
+      topology.device_paths.emplace_back(target ? std::move(target.device_path) : std::wstring {});
+    }
+    return result;
+  }
+
+  query_result_t query_topology(
+    const UINT32 flags,
+    topology_t &topology,
+    const query_policy_t policy,
+    const query_api_t &api
+  ) {
+    auto &paths = topology.paths;
+    auto &modes = topology.modes;
     if (!api.get_buffer_sizes || !api.query || !api.sleep || policy.max_attempts == 0) {
       paths.clear();
       modes.clear();
@@ -123,14 +199,6 @@ namespace platf::display_config {
     return {ERROR_INSUFFICIENT_BUFFER};
   }
 
-  query_result_t query_display_config(
-    const UINT32 flags,
-    std::vector<DISPLAYCONFIG_PATH_INFO> &paths,
-    std::vector<DISPLAYCONFIG_MODE_INFO> &modes,
-    const query_policy_t policy
-  ) {
-    return query_display_config(flags, paths, modes, query_api_t {}, policy);
-  }
 
   std::optional<advanced_color_state_t> query_advanced_color(
     const LUID &adapter_id,

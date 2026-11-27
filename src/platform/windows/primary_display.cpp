@@ -1033,26 +1033,20 @@ namespace platf::primary_display {
 
     std::optional<detail::snapshot_t> query_snapshot_flags(UINT32 flags) {
       detail::snapshot_t result;
-      const auto status = display_config::query_display_config(flags | QDC_VIRTUAL_MODE_AWARE | QDC_VIRTUAL_REFRESH_RATE_AWARE, result.paths, result.modes);
+      // Every available target is listed, named or not; an active target must be named.
+      const auto status = display_config::query_named_topology(
+        flags | QDC_VIRTUAL_MODE_AWARE | QDC_VIRTUAL_REFRESH_RATE_AWARE,
+        result,
+        flags == QDC_ALL_PATHS ? display_config::unnamed_target_e::allowed : display_config::unnamed_target_e::rejected
+      );
+      if (status.unnamed_target) {
+        return std::nullopt;
+      }
       if (!status || result.paths.size() > (flags == QDC_ALL_PATHS ? max_available_paths : max_displays)) {
         BOOST_LOG(warning) << "Could not query displays for temporary primary-display change: " << status.status;
         return std::nullopt;
       }
       for (const auto &path : result.paths) {
-        DISPLAYCONFIG_TARGET_DEVICE_NAME name {};
-        name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
-        name.header.size = sizeof(name);
-        name.header.adapterId = path.targetInfo.adapterId;
-        name.header.id = path.targetInfo.id;
-        const bool named = DisplayConfigGetDeviceInfo(&name.header) == ERROR_SUCCESS && name.monitorDevicePath[0];
-        if (!named && flags != QDC_ALL_PATHS) {
-          return std::nullopt;
-        }
-        const auto end = std::find(std::begin(name.monitorDevicePath), std::end(name.monitorDevicePath), L'\0');
-        if (end == std::end(name.monitorDevicePath)) {
-          return std::nullopt;
-        }
-        result.device_paths.emplace_back(named ? std::wstring(name.monitorDevicePath, end) : std::wstring());
         result.colors.push_back(path.flags & DISPLAYCONFIG_PATH_ACTIVE ? display_config::query_advanced_color(path.targetInfo.adapterId, path.targetInfo.id) : std::nullopt);
       }
       return result;
