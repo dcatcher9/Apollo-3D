@@ -146,7 +146,7 @@ namespace sunshine_game3d::ui_layer {
       copy_order order;
       // The entry's copy is being allocated outside the lock (capture_live).
       bool allocating{};
-      bool free() const { return !order.pending && !allocating && readers[0].completed() && readers[1].completed(); }
+      bool free() const { return !order.pending() && !allocating && readers[0].completed() && readers[1].completed(); }
     };
 
     // A Dump 3D census target: its row, its copy's queue order (copy_order,
@@ -604,7 +604,7 @@ namespace sunshine_game3d::ui_layer {
     // list may run late (at most max_candidates such copies per census).
     void retire_census(state_t &s, const census_entry &e, std::uint64_t now) {
       if (!e.c.copy.handle) return;
-      s.graveyard.push_back({s.device, e.c.copy, now, {}, e.order.pending || e.order.carried() ? live_release_ms : 0});
+      s.graveyard.push_back({s.device, e.c.copy, now, {}, e.order.pending() || e.order.carried() ? live_release_ms : 0});
       s.holding.store(true, std::memory_order_relaxed);
     }
 
@@ -721,12 +721,7 @@ namespace sunshine_game3d::ui_layer {
         // submission hook never came, is abandoned (never offered). One whose
         // fence signal is recorded stays held until its fence reached it: its
         // queue may still write it.
-        if (entry.order.pending && !entry.order.signalled && now - entry.tick >= retire_delay_ms) {
-          entry.order.pending = false;
-          entry.order.carriers = {};
-          entry.order.owed = 0;
-          abandoned = true;
-        }
+        if (now - entry.tick >= retire_delay_ms && order_abandoned(entry.order)) abandoned = true;
         free[i] = entry.free();
         // An entry whose allocation failed is taken last: it is allocated
         // again only when no entry with a copy is free (the ring's growth).
@@ -1113,7 +1108,7 @@ namespace sunshine_game3d::ui_layer {
     // all describe the offered entry. An offered entry whose list executes
     // again is held until the submission hook (and, on another queue, its
     // fence) again.
-    if (!device || device != s.device || !entry || entry->order.pending || !entry->copy.handle || !entry->capture_id ||
+    if (!device || device != s.device || !entry || entry->order.pending() || !entry->copy.handle || !entry->capture_id ||
         !live.tracker.active() || !recent_copy(now_ms, live.tick, entry->tick)) return false;
     // Pinned until bound() registers this Present as its reader.
     live.reading = live.newest;
@@ -1139,7 +1134,7 @@ namespace sunshine_game3d::ui_layer {
     std::uint32_t bit = log_fenced;
     if (out.order == read_order::unordered) {
       if (entry->order.queue == mixed_queue) { bit = log_mixed; reason = "it ran on more than one queue"; }
-      else if (entry->order.unobserved) { bit = log_unobserved; reason = "its submission was not observed by the add-on's submission hook"; }
+      else if (entry->order.unobserved()) { bit = log_unobserved; reason = "its submission was not observed by the add-on's submission hook"; }
       else { bit = log_no_fence; reason = "no fence value was signalled after its submission"; }
     }
     if (first(s, bit)) {
@@ -1573,8 +1568,8 @@ extern "C" __declspec(dllexport) BOOL SunshineUILayerTestLive(sunshine_game3d::u
     out->census_awaiting += e.order.awaiting();
   }
   if (const auto *entry = live.latest()) {
-    out->offered_id = entry->order.pending ? 0 : entry->capture_id;
-    out->offered_copy = entry->order.pending ? 0 : entry->copy.handle;
+    out->offered_id = entry->order.pending() ? 0 : entry->capture_id;
+    out->offered_copy = entry->order.pending() ? 0 : entry->copy.handle;
     out->presents_since_copy = live.tracker.presents_since(entry->frame);
     out->executed_queue = entry->order.queue;
     // As latest() orders it.

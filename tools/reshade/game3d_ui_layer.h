@@ -245,28 +245,42 @@ namespace sunshine_game3d::ui_layer {
     !held_for_submission(true, mixed_queue, true) && !held_for_submission(true, 0, true) && fence_pending(3, 2) &&
     !fence_pending(3, 3) && !fence_pending(3, 4) && !fence_pending(3, UINT64_MAX) && !fence_pending(0, 0));
 
+  // Where one add-on copy is in its queue order (copy_order). The pending
+  // phases (recorded, owed, fenced) hold a live copy: it is neither offered
+  // nor written again. The readable phases name what proves its order.
+  enum class order_phase : std::uint8_t {
+    idle,       // Nothing recorded, or no list wrote it before every carrier was reset.
+    recorded,   // Recorded; no carrier executed yet.
+    owed,       // Executed; held for the submission hook after the native call (owed: that native list).
+    fenced,     // The hook ran and signalled its queue's fence; the CPU has not seen the fence reach it.
+    executed,   // Readable; no hook ran after the latest execution and none was owed or awaited.
+    unobserved, // Readable; the owed hook or fence signal never came (its list was reset first, or no listener was heard).
+    observed,   // Readable; the submission hook ran after the latest execution's native call.
+  };
   // The queue order of one add-on copy recorded into a game list: a live ring
   // entry's or a Dump 3D census copy's, both moved by the transitions below
   // (pure). carriers: the game lists carrying the copy (0: none). queue: the
-  // queue that executed it (merge_queue; 0 not yet). pending: recorded but no
-  // carrier executed yet, or executed but the submission hook has not run
-  // after the native call (owed: that native list), or its fence signal is
-  // recorded (fence, fence_generation: the queue fence's slot and generation;
-  // signalled: the value) but the CPU has not seen the fence reach it
-  // (awaiting). A pending live copy is neither offered nor written again.
-  // unobserved: the owed fence signal never came (its list was reset first, or
-  // no listener was heard). observed: the submission hook ran after the latest
-  // execution's native call, the proof a D3D12 census copy needs (a live copy
-  // never reads it).
+  // queue that executed it (merge_queue; 0 not yet). owed: the native list
+  // whose submission hook it is held for (phase owed only). fence,
+  // fence_generation: the queue fence's slot and generation, signalled: the
+  // value signalled after it (phase fenced, and observed after it). observed()
+  // is the proof a D3D12 census copy needs (a live copy never reads it).
   struct copy_order {
     std::array<std::uint64_t, 2> carriers{};
     std::uint64_t queue{}, owed{};
     int fence = -1;
     std::uint64_t fence_generation{}, signalled{};
-    bool pending{}, unobserved{}, observed{};
+    order_phase phase = order_phase::idle;
     constexpr bool carries(std::uint64_t list) const { return list && (carriers[0] == list || carriers[1] == list); }
     constexpr bool carried() const { return carriers[0] || carriers[1]; }
-    constexpr bool awaiting() const { return pending && signalled; }
+    constexpr bool pending() const {
+      return phase == order_phase::recorded || phase == order_phase::owed || phase == order_phase::fenced;
+    }
+    // Held for its fence (fenced).
+    constexpr bool awaiting() const { return phase == order_phase::fenced; }
+    // The submission hook ran after the latest execution's native call.
+    constexpr bool observed() const { return phase == order_phase::fenced || phase == order_phase::observed; }
+    constexpr bool unobserved() const { return phase == order_phase::unobserved; }
   };
   // Recorded into a list (list: ReShade's command list; native: its native
   // handle). One recorded on the presenting queue itself (D3D11's immediate
@@ -276,10 +290,11 @@ namespace sunshine_game3d::ui_layer {
     c = {};
     if (native && native == presenting) {
       c.queue = native;
+      c.phase = order_phase::executed;
       return true;
     }
     c.carriers[0] = list;
-    c.pending = true;
+    c.phase = order_phase::recorded;
     return false;
   }
   // A carrying list executed on queue (native_list: its native handle; 0 for
@@ -296,35 +311,32 @@ namespace sunshine_game3d::ui_layer {
     c.fence = -1;
     c.fence_generation = c.signalled = 0;
     const bool owes = native_list && owes_signal(d3d12, c.queue, presenting);
-    c.unobserved = owes && !listening;
     c.owed = native_list && held_for_submission(d3d12, c.queue, listening) ? native_list : 0;
-    c.pending = c.owed != 0;
-    c.observed = false;
-    return !c.pending;
+    c.phase = c.owed ? order_phase::owed : owes && !listening ? order_phase::unobserved : order_phase::executed;
+    return !c.pending();
   }
   // The submission hook ran after the owed native call returned, for a copy
-  // run on the presenting queue: true when it is readable now (queue order).
+  // held for it (owed) run on the presenting queue: true when it is readable
+  // now (queue order).
   constexpr bool order_submitted(copy_order &c) {
+    if (c.phase != order_phase::owed) return false;
     c.owed = 0;
-    c.observed = true;
-    if (!c.pending) return false;
-    c.pending = false;
+    c.phase = order_phase::observed;
     return true;
   }
   // The submission hook ran after the owed native call returned, for a copy
-  // run on another queue, and signalled that queue's fence (slot, generation)
-  // with value after it (0: none could be signalled). The copy stays held
-  // until the CPU sees the fence reach value; true when it is readable now,
-  // without one (unordered).
+  // held for it (owed) run on another queue, and signalled that queue's fence
+  // (slot, generation) with value after it (0: none could be signalled). The
+  // copy stays held until the CPU sees the fence reach value; true when it is
+  // readable now, without one (unordered).
   constexpr bool order_signalled(copy_order &c, int slot, std::uint64_t generation, std::uint64_t value) {
+    if (c.phase != order_phase::owed) return false;
     c.owed = 0;
     c.fence = slot;
     c.fence_generation = generation;
     c.signalled = value;
-    c.observed = true;
-    if (!c.pending || value) return false;
-    c.pending = false;
-    return true;
+    c.phase = value ? order_phase::fenced : order_phase::observed;
+    return !value;
   }
   // A carrying list was reset (native_list: its native handle): it carries the
   // copy no more. A copy no executed list wrote drops back (pending no more,
@@ -334,23 +346,15 @@ namespace sunshine_game3d::ui_layer {
   // stays held for its fence (a list may be reset as soon as it was submitted,
   // while its work still runs).
   constexpr bool order_reset(copy_order &c, std::uint64_t list, std::uint64_t native_list) {
-    bool unsigned_execution = false;
-    if (native_list && c.owed == native_list) {
-      c.owed = 0;
-      unsigned_execution = c.pending;
-    }
+    bool unsigned_execution = native_list && c.owed == native_list;
     if (c.carries(list)) {
       for (auto &k : c.carriers) if (k == list) k = 0;
-      if (!c.carried() && c.pending && !c.signalled) {
-        if (c.owed) {
-          c.owed = 0;
-          unsigned_execution = true;
-        } else c.pending = false;
-      }
+      if (!c.carried() && c.phase == order_phase::recorded) c.phase = order_phase::idle;
+      else if (!c.carried() && c.phase == order_phase::owed) unsigned_execution = true;
     }
     if (!unsigned_execution) return false;
-    c.pending = false;
-    c.unobserved = true;
+    c.owed = 0;
+    c.phase = order_phase::unobserved;
     return true;
   }
   // The CPU read the fence of a copy held for it (fence_alive: its record
@@ -360,11 +364,22 @@ namespace sunshine_game3d::ui_layer {
   // released, never readable through that fence.
   constexpr bool order_settled(copy_order &c, bool fence_alive, std::uint64_t completed) {
     if (!c.awaiting() || (fence_alive && fence_pending(c.signalled, completed))) return false;
-    c.pending = false;
+    c.phase = order_phase::observed;
     if (fence_alive) return true;
     c.fence = -1;
     c.fence_generation = c.signalled = 0;
     return false;
+  }
+  // A held live copy no carrying list executed or reset for too long, or
+  // whose submission hook never came, is abandoned: it holds nothing any
+  // more and is never offered. One whose fence signal is recorded is not
+  // abandoned (its queue may still write it). True when it was abandoned.
+  constexpr bool order_abandoned(copy_order &c) {
+    if (c.phase != order_phase::recorded && c.phase != order_phase::owed) return false;
+    c.carriers = {};
+    c.owed = 0;
+    c.phase = c.queue ? order_phase::executed : order_phase::idle;
+    return true;
   }
   static_assert([] {
     constexpr std::uint64_t list = 0x100, native = 0x200, presenting = 0x10, other = 0x20;
@@ -374,28 +389,38 @@ namespace sunshine_game3d::ui_layer {
     // A cross-queue D3D12 copy: held for the hook, then for its fence, then
     // readable; a reset after its submission keeps it held.
     copy_order b;
-    const bool cross = !order_recorded(b, list, native, presenting) && b.pending && b.carries(list) &&
+    const bool cross = !order_recorded(b, list, native, presenting) && b.pending() && b.carries(list) &&
       !order_executed(b, native, other, true, true, presenting) && b.owed == native &&
-      !order_signalled(b, 2, 7, 3) && b.awaiting() && b.observed && !order_reset(b, list, native) && b.awaiting() &&
-      !order_settled(b, true, 2) && b.pending && order_settled(b, true, 3) && !b.pending && b.signalled == 3;
+      !order_signalled(b, 2, 7, 3) && b.awaiting() && b.observed() && !order_reset(b, list, native) && b.awaiting() &&
+      !order_settled(b, true, 2) && b.pending() && order_settled(b, true, 3) && !b.pending() && b.signalled == 3;
     // Executed again: the earlier proof and fence value no longer cover it.
-    const bool again = !order_executed(b, native, other, true, true, presenting) && !b.observed && !b.signalled;
+    const bool again = !order_executed(b, native, other, true, true, presenting) && !b.observed() && !b.signalled;
     // A reset before the hook: readable, unobserved.
     copy_order c;
     order_recorded(c, list, native, presenting);
     order_executed(c, native, other, true, true, presenting);
-    const bool unsigned_reset = order_reset(c, list, native) && c.unobserved && !c.pending && !c.observed;
+    const bool unsigned_reset = order_reset(c, list, native) && c.unobserved() && !c.pending() && !c.observed();
     // Reset unexecuted: drops back, never readable.
     copy_order d;
     order_recorded(d, list, native, presenting);
-    const bool dropped = !order_reset(d, list, native) && !d.pending && !d.queue;
+    const bool dropped = !order_reset(d, list, native) && !d.pending() && !d.queue;
     // A record gone: released without being readable.
     copy_order e;
     order_recorded(e, list, native, presenting);
     order_executed(e, native, other, true, true, presenting);
     order_signalled(e, 1, 4, 9);
-    const bool lost = !order_settled(e, false, 0) && !e.pending && !e.signalled && e.fence < 0;
-    return immediate && cross && again && unsigned_reset && dropped && lost;
+    const bool lost = !order_settled(e, false, 0) && !e.pending() && !e.signalled && e.fence < 0;
+    // Abandoned while recorded or owed, never once fenced.
+    copy_order f, g, h;
+    order_recorded(f, list, native, presenting);
+    order_recorded(g, list, native, presenting);
+    order_executed(g, native, other, true, true, presenting);
+    order_recorded(h, list, native, presenting);
+    order_executed(h, native, other, true, true, presenting);
+    order_signalled(h, 1, 4, 9);
+    const bool abandoned = order_abandoned(f) && f.phase == order_phase::idle && !f.carried() && order_abandoned(g) &&
+      !g.pending() && !g.owed && !g.carried() && g.queue == other && !order_abandoned(h) && h.awaiting();
+    return immediate && cross && again && unsigned_reset && dropped && lost && abandoned;
   }());
 
   // A Dump 3D census copy is read only with CPU proof that its write completed
@@ -431,10 +456,10 @@ namespace sunshine_game3d::ui_layer {
   };
   constexpr census_result census_verdict(const copy_order &c, bool d3d12, std::uint64_t reading_queue) {
     using status = census_status;
-    if (!c.queue) return {c.pending ? status::not_executed : status::reset_unexecuted};
+    if (!c.queue) return {c.pending() ? status::not_executed : status::reset_unexecuted};
     if (c.queue == mixed_queue) return {status::unordered, read_order::unordered, "mixed_queue"};
-    if (c.pending) return {c.signalled ? status::awaiting_fence : status::awaiting_submission};
-    if (c.unobserved || (d3d12 && !c.observed))
+    if (c.pending()) return {c.awaiting() ? status::awaiting_fence : status::awaiting_submission};
+    if (c.unobserved() || (d3d12 && !c.observed()))
       return {status::unordered, read_order::unordered, "submission_not_observed"};
     const bool same = presented_in_order(c.queue, reading_queue);
     if (!same && !c.signalled) return {status::unordered, read_order::unordered, "no_fence"};

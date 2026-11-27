@@ -423,14 +423,14 @@ int main() {
     {
       constexpr std::uint64_t list = 0x100, native = 0x200, presenting = 0x10, other = 0x20;
       layer::copy_order live;
-      require(!layer::order_recorded(live, list, native, presenting) && live.pending && live.carries(list),
+      require(!layer::order_recorded(live, list, native, presenting) && live.pending() && live.carries(list),
         "A recorded live copy was readable before a list carrying it executed");
       require(!layer::order_executed(live, native, presenting, true, true, presenting) && live.owed == native &&
-          live.pending && !live.unobserved,
+          live.pending() && !live.unobserved(),
         "A D3D12 live copy on the presenting queue was readable before its submission hook");
-      require(layer::order_submitted(live) && !live.pending && !live.owed && live.queue == presenting,
+      require(layer::order_submitted(live) && !live.pending() && !live.owed && live.queue == presenting,
         "The submission hook did not offer a live copy run on the presenting queue");
-      require(!layer::order_reset(live, list, native) && !live.carried() && !live.pending,
+      require(!layer::order_reset(live, list, native) && !live.carried() && !live.pending(),
         "Resetting the list of an offered live copy offered it again or held it");
       // Another queue: owed, then signalled, held until the fence reached it.
       layer::order_recorded(live, list, native, presenting);
@@ -438,24 +438,24 @@ int main() {
         "A cross-queue live copy was not held for its submission hook");
       require(!layer::order_signalled(live, 1, 9, 3) && live.awaiting() && live.fence == 1 && live.fence_generation == 9,
         "A cross-queue live copy with a fence value was readable before its fence reached it");
-      require(!layer::order_settled(live, true, 2) && live.awaiting() && layer::order_settled(live, true, 3) && !live.pending,
+      require(!layer::order_settled(live, true, 2) && live.awaiting() && layer::order_settled(live, true, 3) && !live.pending(),
         "A cross-queue live copy was not offered exactly once its fence reached its value");
       // Without a value it is offered at once, unordered.
       layer::order_recorded(live, list, native, presenting);
       layer::order_executed(live, native, other, true, true, presenting);
-      require(layer::order_signalled(live, -1, 0, 0) && !live.pending && !live.signalled,
+      require(layer::order_signalled(live, -1, 0, 0) && !live.pending() && !live.signalled,
         "A cross-queue live copy no value could be signalled for was not offered unordered");
       // Without a listener a copy owing a signal is offered at the execution, unobserved.
       layer::order_recorded(live, list, native, presenting);
-      require(layer::order_executed(live, native, other, true, false, presenting) && live.unobserved && !live.owed,
+      require(layer::order_executed(live, native, other, true, false, presenting) && live.unobserved() && !live.owed,
         "A cross-queue live copy without a listener was not offered at once, unobserved");
       // A reset before the hook offers it, unobserved; one unexecuted drops back.
       layer::order_recorded(live, list, native, presenting);
       layer::order_executed(live, native, other, true, true, presenting);
-      require(layer::order_reset(live, list, native) && live.unobserved && !live.pending,
+      require(layer::order_reset(live, list, native) && live.unobserved() && !live.pending(),
         "A live copy whose hook can no longer come was not offered unobserved");
       layer::order_recorded(live, list, native, presenting);
-      require(!layer::order_reset(live, list, native) && !live.pending && !live.queue,
+      require(!layer::order_reset(live, list, native) && !live.pending() && !live.queue,
         "A live copy reset unexecuted was offered or stayed held");
     }
     std::puts("PASS UI layer copy transitions: a live copy is offered after its submission hook on the presenting queue, "
@@ -521,7 +521,7 @@ int main() {
       layer::order_executed(same, native, reading, true, true, reading);
       layer::order_submitted(same);
       layer::order_executed(same, native, reading, true, true, reading);
-      require(verdict(same, true).status == status::awaiting_submission && !same.observed,
+      require(verdict(same, true).status == status::awaiting_submission && !same.observed(),
         "A census copy executed again kept the proof of its earlier execution");
       // D3D11: the immediate context is the reading queue (captured at once);
       // a deferred list is captured once the immediate context ran it.
