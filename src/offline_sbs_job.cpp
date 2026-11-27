@@ -107,8 +107,6 @@ namespace offline_sbs {
 
     const char *to_string(output_location_e value) {
       switch (value) {
-        case output_location_e::legacy_managed_exports:
-          return "legacy-managed-exports";
         case output_location_e::input_directory:
           return "input-directory";
       }
@@ -172,9 +170,6 @@ namespace offline_sbs {
     std::optional<output_location_e> parse_output_location(
       const std::string_view value
     ) {
-      if (value == "legacy-managed-exports") {
-        return output_location_e::legacy_managed_exports;
-      }
       if (value == "input-directory") {
         return output_location_e::input_directory;
       }
@@ -1186,66 +1181,6 @@ namespace offline_sbs {
         purpose,
         error
       );
-    }
-
-    std::optional<pinned_handle_t> pin_ephemeral_root_child(
-      const fs::path &root,
-      const std::string_view purpose,
-      std::string &error
-    ) {
-      for (int attempt = 0; attempt < 32; ++attempt) {
-        const auto path =
-          root /
-          (
-            ".sunshine3d-root-" +
-            uuid_util::uuid_t::generate().string() +
-            ".lock"
-          );
-        const HANDLE handle = CreateFileW(
-          path.c_str(),
-          GENERIC_READ | DELETE,
-          FILE_SHARE_READ,
-          nullptr,
-          CREATE_NEW,
-          FILE_ATTRIBUTE_HIDDEN |
-            FILE_ATTRIBUTE_TEMPORARY |
-            FILE_FLAG_DELETE_ON_CLOSE,
-          nullptr
-        );
-        if (handle == INVALID_HANDLE_VALUE) {
-          const auto open_error = GetLastError();
-          if (
-            open_error == ERROR_FILE_EXISTS ||
-            open_error == ERROR_ALREADY_EXISTS
-          ) {
-            continue;
-          }
-          error =
-            "cannot create " + std::string {purpose} +
-            " child identity lock (Windows error " +
-            std::to_string(open_error) + ")";
-          return std::nullopt;
-        }
-        BY_HANDLE_FILE_INFORMATION information {};
-        if (
-          !GetFileInformationByHandle(handle, &information) ||
-          (information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
-          (information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
-        ) {
-          const auto inspect_error = GetLastError();
-          CloseHandle(handle);
-          error =
-            "cannot inspect " + std::string {purpose} +
-            " child identity lock (Windows error " +
-            std::to_string(inspect_error) + ")";
-          return std::nullopt;
-        }
-        return pinned_handle_t {handle, path, information};
-      }
-      error =
-        "cannot reserve a unique " + std::string {purpose} +
-        " child identity lock";
-      return std::nullopt;
     }
 
     std::optional<pinned_handle_t> pin_managed_directory(
@@ -2559,7 +2494,7 @@ namespace offline_sbs {
         .ffprobe_path = path_to_utf8(context.ffprobe_executable),
         .ffprobe_version = context.ffprobe_version,
         .codec = context.codec,
-        .transient_raster_hard_cap_bytes = context.scene_cache_max_bytes,
+        .transient_raster_hard_cap_bytes = context.transient_raster_hard_cap_bytes,
       });
     }
 
@@ -2599,7 +2534,7 @@ namespace offline_sbs {
           error = "worker result artifact paths are invalid";
           return false;
         }
-        if (typed_result.cache.hard_cap_bytes != context.scene_cache_max_bytes) {
+        if (typed_result.cache.hard_cap_bytes != context.transient_raster_hard_cap_bytes) {
           error = "worker transient-raster attestation is invalid";
           return false;
         }
@@ -2778,7 +2713,7 @@ namespace offline_sbs {
                            } :
                            std::nullopt,
       .codec = snapshot.codec,
-      .scene_cache_max_bytes = snapshot.scene_cache_max_bytes,
+      .transient_raster_hard_cap_bytes = snapshot.transient_raster_hard_cap_bytes,
       .progress = {
         .phase = snapshot.progress.phase,
         .processed_frames = snapshot.progress.processed_frames,
@@ -2973,29 +2908,20 @@ namespace offline_sbs {
         if (contract.output_path) {
           const auto persisted_output = path_from_utf8(*contract.output_path);
           const auto output_name = path_to_utf8(persisted_output.filename());
-          auto output_location = output_location_e::legacy_managed_exports;
-          if (contract.output_location) {
-            const auto parsed_location = parse_output_location(*contract.output_location);
-            if (!parsed_location) {
-              error = "persisted output location is unsupported";
-              return std::nullopt;
-            }
-            output_location = *parsed_location;
+          const auto output_location = contract.output_location ?
+                                         parse_output_location(*contract.output_location) :
+                                         std::nullopt;
+          if (!output_location) {
+            error = "persisted output location is unsupported";
+            return std::nullopt;
           }
           const auto expected_output =
-            (
-              output_location == output_location_e::input_directory ?
-                snapshot.input_path.parent_path() / path_from_utf8(output_name) :
-                config.exports_root / path_from_utf8(output_name)
-            ).lexically_normal();
+            (snapshot.input_path.parent_path() / path_from_utf8(output_name)).lexically_normal();
           if (
             !valid_output_name(output_name) ||
             persisted_output.lexically_normal() != expected_output
           ) {
-            error =
-              output_location == output_location_e::input_directory ?
-                "persisted output escaped the input directory" :
-                "persisted output escaped the legacy managed exports root";
+            error = "persisted output escaped the input directory";
             return std::nullopt;
           }
           snapshot.output_path = expected_output;
@@ -3005,26 +2931,13 @@ namespace offline_sbs {
           return std::nullopt;
         }
         snapshot.codec = contract.codec;
-        snapshot.scene_cache_max_bytes = contract.scene_cache_max_bytes;
+        snapshot.transient_raster_hard_cap_bytes = contract.transient_raster_hard_cap_bytes;
         snapshot.created_at_unix_ms = contract.created_at_unix_ms;
         snapshot.started_at_unix_ms = contract.started_at_unix_ms;
         snapshot.ended_at_unix_ms = contract.ended_at_unix_ms;
         snapshot.error = contract.error.value_or("");
         if (contract.worker_result) {
           snapshot.worker_result = *contract.worker_result;
-          // A job retained by a release that published the diagnostic scene audit still
-          // names it here. Those references are dropped on read and never written back;
-          // the audit files themselves stay in the job's result directory until the job
-          // is cleared or pruned.
-          for (const auto retired : {
-                 "scene_count",
-                 "scene_audit",
-                 "scene_audit_manifest_sha256",
-                 "scene_audit_sha256",
-                 "scene_decisions_contract",
-               }) {
-            snapshot.worker_result.erase(retired);
-          }
         }
         snapshot.progress.phase = contract.progress.phase;
         snapshot.progress.processed_frames = contract.progress.processed_frames;
@@ -3063,7 +2976,7 @@ namespace offline_sbs {
         .ffprobe_executable = ffprobe,
         .ffprobe_version = ffprobe_version,
         .codec = snapshot.codec,
-        .scene_cache_max_bytes = snapshot.scene_cache_max_bytes,
+        .transient_raster_hard_cap_bytes = snapshot.transient_raster_hard_cap_bytes,
       };
     }
 
@@ -3121,67 +3034,8 @@ namespace offline_sbs {
               throw std::runtime_error(error);
             }
 
-            std::error_code ec;
-            for (const auto &entry :
-                 fs::directory_iterator(config.exports_root, ec)) {
-              if (ec) {
-                throw std::runtime_error(ec.message());
-              }
-              if (!is_managed_staging_filename(entry.path().filename())) {
-                continue;
-              }
-              std::string staging_error;
-              auto measurement =
-                safe_filesystem::measure_tree_no_follow(
-                  entry.path(),
-                  staging_error
-                );
-              if (!measurement) {
-                throw std::runtime_error(
-                  "cannot safely measure retained staging artifact [" +
-                  path_to_utf8(entry.path()) + "]: " + staging_error
-                );
-              }
-              // A directory entry can disappear after enumeration. That is a
-              // harmless concurrent cleanup; every other shape fails closed so a
-              // junction or directory cannot evade or redirect quota accounting.
-              if (!measurement->root_exists) {
-                continue;
-              }
-              if (
-                measurement->regular_file_count != 1 ||
-                measurement->directory_count != 0 ||
-                measurement->reparse_point_count != 0
-              ) {
-                throw std::runtime_error(
-                  "retained staging artifact is not one regular file [" +
-                  path_to_utf8(entry.path()) + "]"
-                );
-              }
-              const auto staging_charge = std::max(
-                measurement->regular_file_bytes,
-                retained_staging_minimum_charge_bytes
-              );
-              if (
-                total >
-                std::numeric_limits<std::uint64_t>::max() - staging_charge
-              ) {
-                throw std::runtime_error(
-                  "retained staging artifact quota charge overflowed"
-                );
-              }
-              total += staging_charge;
-            }
-            if (ec) {
-              throw std::runtime_error(ec.message());
-            }
-
             for (const auto &[id, record] : jobs) {
-              if (
-                record->snapshot.output_location !=
-                  output_location_e::input_directory ||
-                !record->worker.staging_output
-              ) {
+              if (!record->worker.staging_output) {
                 continue;
               }
               std::string staging_error;
@@ -3252,26 +3106,21 @@ namespace offline_sbs {
             break;
           }
 
-          if (
-            record->snapshot.output_location ==
-              output_location_e::input_directory
-          ) {
-            output_directory_pins = pin_publication_directory(
-              record->worker.final_output->parent_path(),
-              cleanup_error
-            );
-            if (!output_directory_pins) {
-              break;
-            }
-            if (!file_matches_publish_identity(
-                  *record->worker.staging_output,
-                  staged_file->identity()
-                )) {
-              cleanup_error =
-                "retained staging output changed while its directory was "
-                "being pinned";
-              break;
-            }
+          output_directory_pins = pin_publication_directory(
+            record->worker.final_output->parent_path(),
+            cleanup_error
+          );
+          if (!output_directory_pins) {
+            break;
+          }
+          if (!file_matches_publish_identity(
+                *record->worker.staging_output,
+                staged_file->identity()
+              )) {
+            cleanup_error =
+              "retained staging output changed while its directory was "
+              "being pinned";
+            break;
           }
 
           try {
@@ -3352,11 +3201,7 @@ namespace offline_sbs {
           return false;
         }
       }
-      if (
-        record->snapshot.output_location ==
-          output_location_e::input_directory &&
-        record->worker.staging_output
-      ) {
+      if (record->worker.staging_output) {
         std::optional<std::uint64_t> staging_charge;
         std::string staging_error;
         const bool staging_inspected = run_user_filesystem_action([&]() {
@@ -3376,7 +3221,7 @@ namespace offline_sbs {
         }
         if (*staging_charge != 0) {
           // The protected record is the only durable map to a staging name
-          // outside the legacy managed exports root. Preserve it until the
+          // beside the input. Preserve it until the
           // exact path disappears; the manager never deletes an unattested
           // or possibly replaced user-writable leaf by pathname.
           error =
@@ -3720,23 +3565,17 @@ namespace offline_sbs {
           std::optional<publication_outcome_t> publication_outcome;
           std::string publish_error;
           if (!run_user_filesystem_action([&]() {
-                std::optional<std::vector<pinned_handle_t>> output_directory_pins;
-                if (
-                  record->snapshot.output_location ==
-                    output_location_e::input_directory
-                ) {
-                  if (!record->worker.final_output) {
-                    publish_error =
-                      "persisted publishing contract has no final output";
-                    return;
-                  }
-                  output_directory_pins = pin_publication_directory(
-                    record->worker.final_output->parent_path(),
-                    publish_error
-                  );
-                  if (!output_directory_pins) {
-                    return;
-                  }
+                if (!record->worker.final_output) {
+                  publish_error =
+                    "persisted publishing contract has no final output";
+                  return;
+                }
+                const auto output_directory_pins = pin_publication_directory(
+                  record->worker.final_output->parent_path(),
+                  publish_error
+                );
+                if (!output_directory_pins) {
+                  return;
                 }
                 try {
                   const auto &identity = transaction.identity();
@@ -4565,7 +4404,6 @@ namespace offline_sbs {
     if (
       impl_->config.state_root.empty() ||
       impl_->config.worker_root.empty() ||
-      impl_->config.exports_root.empty() ||
       impl_->config.sunshine_executable.empty() ||
       impl_->config.sunshine_config.empty() ||
       impl_->config.max_retained_jobs == 0 ||
@@ -4585,25 +4423,14 @@ namespace offline_sbs {
         impl_->config.worker_root,
         "offline SBS worker root",
         error
-      ) ||
-      !validate_local_path_syntax(
-        impl_->config.exports_root,
-        "offline SBS exports root",
-        error
       )
     ) {
       return false;
     }
     const auto lexical_state_root = impl_->config.state_root.lexically_normal();
     const auto lexical_worker_root = impl_->config.worker_root.lexically_normal();
-    const auto lexical_exports_root = impl_->config.exports_root.lexically_normal();
-    if (
-      managed_roots_overlap(lexical_state_root, lexical_worker_root) ||
-      managed_roots_overlap(lexical_state_root, lexical_exports_root) ||
-      managed_roots_overlap(lexical_worker_root, lexical_exports_root)
-    ) {
-      error =
-        "offline SBS state, worker, and export roots must be disjoint";
+    if (managed_roots_overlap(lexical_state_root, lexical_worker_root)) {
+      error = "offline SBS state and worker roots must be disjoint";
       return false;
     }
 
@@ -4622,8 +4449,6 @@ namespace offline_sbs {
     std::optional<std::vector<pinned_handle_t>> state_jobs_pins;
     std::optional<std::vector<pinned_handle_t>> worker_root_pins;
     std::optional<std::vector<pinned_handle_t>> worker_jobs_pins;
-    std::optional<std::vector<pinned_handle_t>> exports_root_pins;
-    std::optional<pinned_handle_t> exports_root_child_pin;
     std::string state_pin_error;
     state_root_pins = pin_managed_root_components(
       impl_->config.state_root,
@@ -4651,10 +4476,6 @@ namespace offline_sbs {
             impl_->config.worker_root / "jobs",
             "offline SBS worker root"
           );
-          auto exports_creation_pins = create_user_directory(
-            impl_->config.exports_root,
-            "offline SBS exports root"
-          );
           std::string pin_error;
           worker_root_pins = pin_managed_root_components(
             impl_->config.worker_root,
@@ -4672,35 +4493,11 @@ namespace offline_sbs {
           if (!worker_jobs_pins) {
             throw std::runtime_error(pin_error);
           }
-          exports_root_pins = pin_managed_root_components(
-            impl_->config.exports_root,
-            "offline exports root",
-            pin_error
-          );
-          if (!exports_root_pins) {
-            throw std::runtime_error(pin_error);
-          }
-          exports_root_child_pin = pin_ephemeral_root_child(
-            impl_->config.exports_root,
-            "offline exports root",
-            pin_error
-          );
-          if (!exports_root_child_pin) {
-            throw std::runtime_error(pin_error);
-          }
           impl_->config.worker_root =
             fs::canonical(impl_->config.worker_root, user_ec);
           if (user_ec) {
             throw std::runtime_error(
               "cannot canonicalize offline SBS worker root: " +
-              user_ec.message()
-            );
-          }
-          impl_->config.exports_root =
-            fs::canonical(impl_->config.exports_root, user_ec);
-          if (user_ec) {
-            throw std::runtime_error(
-              "cannot canonicalize offline SBS exports root: " +
               user_ec.message()
             );
           }
@@ -4712,9 +4509,7 @@ namespace offline_sbs {
       state_root_pins->size() +
       state_jobs_pins->size() +
       worker_root_pins->size() +
-      worker_jobs_pins->size() +
-      exports_root_pins->size() +
-      1
+      worker_jobs_pins->size()
     );
     std::ranges::move(
       *state_root_pins,
@@ -4732,34 +4527,13 @@ namespace offline_sbs {
       *worker_jobs_pins,
       std::back_inserter(impl_->managed_root_pins)
     );
-    std::ranges::move(
-      *exports_root_pins,
-      std::back_inserter(impl_->managed_root_pins)
-    );
-    impl_->managed_root_pins.emplace_back(
-      std::move(*exports_root_child_pin)
-    );
     impl_->config.state_root = fs::canonical(impl_->config.state_root, ec);
     if (ec) {
       error = "cannot canonicalize offline SBS state root: " + ec.message();
       return false;
     }
-    if (
-      managed_roots_overlap(
-        impl_->config.state_root,
-        impl_->config.worker_root
-      ) ||
-      managed_roots_overlap(
-        impl_->config.state_root,
-        impl_->config.exports_root
-      ) ||
-      managed_roots_overlap(
-        impl_->config.worker_root,
-        impl_->config.exports_root
-      )
-    ) {
-      error =
-        "offline SBS state, worker, and export roots must be disjoint";
+    if (managed_roots_overlap(impl_->config.state_root, impl_->config.worker_root)) {
+      error = "offline SBS state and worker roots must be disjoint";
       return false;
     }
     auto executable = canonical_regular_file(
@@ -5121,7 +4895,7 @@ namespace offline_sbs {
     // persisted worker schema without making NVENC availability an admission
     // requirement for evaluate-only jobs.
     snapshot.codec = effective_codec;
-    snapshot.scene_cache_max_bytes = transient_raster_hard_cap_bytes;
+    snapshot.transient_raster_hard_cap_bytes = transient_raster_hard_cap_bytes;
     snapshot.progress.phase = "queued";
     snapshot.created_at_unix_ms = unix_time_ms();
     if (request.operation == operation_e::convert) {
@@ -5814,7 +5588,7 @@ namespace offline_sbs {
         .output_path = snapshot.output_path,
         .output_location = snapshot.output_location,
         .codec = snapshot.codec,
-        .scene_cache_max_bytes = snapshot.scene_cache_max_bytes,
+        .transient_raster_hard_cap_bytes = snapshot.transient_raster_hard_cap_bytes,
         .progress = snapshot.progress,
         .created_at_unix_ms = snapshot.created_at_unix_ms,
         .started_at_unix_ms = snapshot.started_at_unix_ms,
@@ -5904,7 +5678,6 @@ namespace offline_sbs {
       {"output_security", {
         {"location", "input-directory"},
         {"destination_derived_from_input", true},
-        {"legacy_root", path_to_utf8(impl_->config.exports_root)},
         {"request_accepts_basename_only", true},
         {"overwrite", false},
         {"atomic_publish", true},
@@ -5949,7 +5722,6 @@ namespace offline_sbs {
     return {
       .state_root = state_root,
       .worker_root = user_root.empty() ? fs::path {} : user_root / "worker",
-      .exports_root = user_root.empty() ? fs::path {} : user_root / "exports",
       .sunshine_executable = std::move(executable),
       .sunshine_config = path_from_utf8(config::sunshine.config_file),
       .expected_user_id = valid_user_id ? active_user : std::nullopt,

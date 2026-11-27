@@ -30,8 +30,6 @@ namespace offline_sbs {
   };
 
   enum class output_location_e {
-    // Compatibility scope for jobs persisted before outputs followed the source.
-    legacy_managed_exports,
     input_directory,
   };
 
@@ -82,9 +80,6 @@ namespace offline_sbs {
   struct service_config_t {
     std::filesystem::path state_root;
     std::filesystem::path worker_root;
-    // Retained for schema-1 publication recovery and quota accounting. New jobs
-    // publish beside their canonical input and never use this as a destination.
-    std::filesystem::path exports_root;
     std::filesystem::path sunshine_executable;
     std::filesystem::path sunshine_config;
 
@@ -130,7 +125,7 @@ namespace offline_sbs {
     std::optional<std::filesystem::path> output_path;
     std::optional<output_location_e> output_location;
     std::string codec;
-    std::uint64_t scene_cache_max_bytes = 0;
+    std::uint64_t transient_raster_hard_cap_bytes = 0;
     progress_t progress;
     std::int64_t created_at_unix_ms = 0;
     std::optional<std::int64_t> started_at_unix_ms;
@@ -192,7 +187,7 @@ namespace offline_sbs {
     std::filesystem::path ffprobe_executable;
     std::string ffprobe_version;
     std::string codec;
-    std::uint64_t scene_cache_max_bytes = 0;
+    std::uint64_t transient_raster_hard_cap_bytes = 0;
   };
 
   struct worker_outcome_t {

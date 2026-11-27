@@ -88,7 +88,6 @@ namespace {
     return {
       .state_root = root / "state",
       .worker_root = root / "worker",
-      .exports_root = root / "exports",
       .sunshine_executable = executable,
       .sunshine_config = config,
       .ffmpeg_executable = ffmpeg,
@@ -191,7 +190,6 @@ TEST(OfflineSbsServiceLifecycleTest, StartedOwnerUsesTheCapturedConfigurationDes
   temporary_tree_t tree;
   auto config = service_config(tree.path / "original");
   const auto expected_ffmpeg = fs::canonical(*config.ffmpeg_executable);
-  const auto expected_exports = config.exports_root;
   stage_counts_t counts;
   stage_gate_t gate;
   auto owner = access_t::start(config, observing(counts, gate, stage_t::worker_enter));
@@ -202,7 +200,6 @@ TEST(OfflineSbsServiceLifecycleTest, StartedOwnerUsesTheCapturedConfigurationDes
   // Mutation is after configuration capture and before actual start reads its owned value.
   config.state_root = tree.path / "changed-state";
   config.worker_root = tree.path / "changed-worker";
-  config.exports_root = tree.path / "changed-exports";
   config.expected_user_id = "not-the-captured-user";
   config.ffmpeg_executable = tree.path / "missing-ffmpeg.exe";
   config.max_retained_jobs = 1;
@@ -215,10 +212,8 @@ TEST(OfflineSbsServiceLifecycleTest, StartedOwnerUsesTheCapturedConfigurationDes
   EXPECT_EQ(capabilities.at("retention").at("max_jobs"), 13);
   EXPECT_EQ(capabilities.at("retention").at("max_artifact_bytes"), 3 * 1024 * 1024);
   EXPECT_EQ(path_from_utf8(capabilities.at("ffmpeg").at("path").get<std::string>()), expected_ffmpeg);
-  EXPECT_EQ(path_from_utf8(capabilities.at("output_security").at("legacy_root").get<std::string>()), fs::canonical(expected_exports));
   EXPECT_FALSE(fs::exists(config.state_root));
   EXPECT_FALSE(fs::exists(config.worker_root));
-  EXPECT_FALSE(fs::exists(config.exports_root));
   EXPECT_EQ(counts.entered.load(), 1);
   EXPECT_EQ(counts.started.load(), 1);
   EXPECT_EQ(counts.exited.load(), 1);
@@ -368,7 +363,7 @@ TEST(OfflineSbsServiceLifecycleTest, ActualRecoveryFinishesBeforeTheCatalogBecom
   write_nonempty(input, "source");
   constexpr auto id = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE";
   const auto state_file = config.state_root / "jobs" / id / "job.json";
-  // This accepted legacy running record is also exercised by the direct service recovery suite.
+  // This interrupted running record is also exercised by the direct service recovery suite.
   const nlohmann::json interrupted_source {
     {"schema", 1},
     {"id", id},
@@ -376,16 +371,16 @@ TEST(OfflineSbsServiceLifecycleTest, ActualRecoveryFinishesBeforeTheCatalogBecom
     {"operation", "evaluate"},
     {"input_path", input.generic_string()},
     {"output_path", nullptr},
+    {"output_location", nullptr},
     {"codec", "hevc_nvenc"},
     {"scene_cache_max_bytes", 4ull * 1024ull * 1024ull * 1024ull},
-    {"cache_budget_policy", "split"},
+    {"cache_budget_policy", "fail"},
     {"progress", {
                    {"phase", "analysis"},
                    {"processed_frames", 19},
                    {"total_frames", 100},
                    {"source_time_seconds", nullptr},
                    {"source_duration_seconds", nullptr},
-                   {"scene_count", 1},
                  }},
     {"created_at_unix_ms", 1},
     {"started_at_unix_ms", 2},
@@ -459,7 +454,6 @@ TEST(OfflineSbsServiceLifecycleTest, DormantFacadeReadsLeaveTheWorkspaceUntouche
   EXPECT_FALSE(owner->ready_service());
   EXPECT_FALSE(fs::exists(config.state_root));
   EXPECT_FALSE(fs::exists(config.worker_root));
-  EXPECT_FALSE(fs::exists(config.exports_root));
   EXPECT_EQ(counts.entered.load(), 0);
   EXPECT_EQ(counts.started.load(), 0);
   EXPECT_EQ(counts.exited.load(), 0);
@@ -469,7 +463,6 @@ TEST(OfflineSbsServiceLifecycleTest, DormantFacadeReadsLeaveTheWorkspaceUntouche
   ASSERT_TRUE(offline_sbs::capabilities().at("available").get<bool>());
   EXPECT_TRUE(fs::is_directory(config.state_root));
   EXPECT_TRUE(fs::is_directory(config.worker_root));
-  EXPECT_TRUE(fs::is_directory(config.exports_root));
   EXPECT_TRUE(offline_sbs::list().empty());
   EXPECT_EQ(counts.entered.load(), 1);
   EXPECT_EQ(counts.started.load(), 1);
@@ -503,7 +496,6 @@ TEST(OfflineSbsServiceLifecycleTest, ShutdownBeforeDemandPermanentlyPreventsInit
   EXPECT_FALSE(owner->ready_service());
   EXPECT_FALSE(fs::exists(config.state_root));
   EXPECT_FALSE(fs::exists(config.worker_root));
-  EXPECT_FALSE(fs::exists(config.exports_root));
   EXPECT_EQ(counts.entered.load(), 0);
   EXPECT_EQ(counts.started.load(), 0);
   EXPECT_EQ(counts.exited.load(), 0);
@@ -555,7 +547,6 @@ TEST(OfflineSbsServiceLifecycleTest, ConcurrentFirstDemandPublishesOnlyOneInitia
   EXPECT_FALSE(owner->ready_service());
   EXPECT_FALSE(fs::exists(config.state_root));
   EXPECT_FALSE(fs::exists(config.worker_root));
-  EXPECT_FALSE(fs::exists(config.exports_root));
 
   worker_gate.release();
   access_t::join(*owner);
@@ -598,7 +589,6 @@ TEST(OfflineSbsServiceLifecycleTest, ThreadLaunchFailureIsCaughtAndRemainsSticky
   EXPECT_FALSE(owner->ready_service());
   EXPECT_FALSE(fs::exists(config.state_root));
   EXPECT_FALSE(fs::exists(config.worker_root));
-  EXPECT_FALSE(fs::exists(config.exports_root));
   EXPECT_EQ(launch_attempts.load(), 1);
   EXPECT_EQ(counts.entered.load(), 0);
   EXPECT_EQ(counts.started.load(), 0);
@@ -636,7 +626,6 @@ TEST(OfflineSbsServiceLifecycleTest, ServiceAllocationFailureIsCaughtAndNeverPub
   EXPECT_FALSE(owner->ready_service());
   EXPECT_FALSE(fs::exists(config.state_root));
   EXPECT_FALSE(fs::exists(config.worker_root));
-  EXPECT_FALSE(fs::exists(config.exports_root));
   EXPECT_EQ(allocation_attempts.load(), 1);
   EXPECT_EQ(counts.entered.load(), 1);
   EXPECT_EQ(counts.started.load(), 0);

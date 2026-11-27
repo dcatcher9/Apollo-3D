@@ -128,14 +128,12 @@ New production contracts identify the typed runner, its condition-variable evide
 its memory transport without snapshot filenames. Retained file-transport contracts remain
 readable under their original labels; they are never retagged as native memory evidence.
 
-The durable job record `job.json` is schema 1. A retained record may still carry the retired
-`scene_decisions`, `progress.scene_count`, and `progress.current_scene` fields and scene-audit
-references in its compact worker result. They are accepted and discarded when the record is
-read and are never written, so such a job stays listed, readable, and clearable. Its
-`scene-audit.json` and `scene-audit-page-*.json` files are not read or served; they stay in the
-job's result directory, counted against the retained-artifact quota, until the job is cleared
-or pruned. A record from a release that still admitted the retired scene split may say
-`"cache_budget_policy": "split"`; it is read as `fail`, the only value written.
+The durable job record `job.json` is schema 1. Every published output is beside its input and
+the record names that as `"output_location": "input-directory"`. Its `scene_cache_max_bytes` key
+keeps its historical name; it holds the job's transient raster hard cap. A record written before
+08-14 (one without an output location, published into the retired managed exports root, or
+carrying the retired scene summary or the `split` budget policy) no longer loads; the service
+drops the record with a warning and leaves any published file in place.
 
 ## Media and publication
 

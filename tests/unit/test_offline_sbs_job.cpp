@@ -148,7 +148,6 @@ namespace {
     return {
       .state_root = root / "state",
       .worker_root = root / "worker",
-      .exports_root = root / "exports",
       .sunshine_executable = executable,
       .sunshine_config = config,
       .ffmpeg_executable = ffmpeg,
@@ -336,7 +335,6 @@ TEST(OfflineSbsJob, CompletesThroughStagingAndPersistsAtomicTerminalState) {
     capabilities["output_security"]["destination_derived_from_input"]
       .get<bool>()
   );
-  EXPECT_TRUE(capabilities["output_security"]["legacy_root"].is_string());
 
   const auto worker_path = tree.path / "worker" / "jobs" / terminal.id;
   ASSERT_TRUE(fs::is_directory(worker_path));
@@ -643,7 +641,6 @@ TEST(OfflineSbsJob, AcceptsExistingUserWorkspaceDirectories) {
   temporary_tree_t tree;
   auto config = service_config(tree.path);
   fs::create_directories(config.worker_root / "jobs");
-  fs::create_directories(config.exports_root);
 
   offline_sbs::job_service_t service {
     config,
@@ -664,7 +661,6 @@ TEST(OfflineSbsJob, CreatesACompletelyAbsentNestedUserWorkspace) {
   const auto user_workspace =
     tree.path / "new-user-root" / "Sunshine 3D" / "offline-sbs";
   config.worker_root = user_workspace / "worker";
-  config.exports_root = user_workspace / "exports";
 
   ASSERT_FALSE(fs::exists(user_workspace));
   offline_sbs::job_service_t service {
@@ -678,7 +674,6 @@ TEST(OfflineSbsJob, CreatesACompletelyAbsentNestedUserWorkspace) {
   std::string error;
   ASSERT_TRUE(service.start(error)) << error;
   EXPECT_TRUE(fs::is_directory(config.worker_root / "jobs"));
-  EXPECT_TRUE(fs::is_directory(config.exports_root));
   service.shutdown();
 }
 
@@ -752,29 +747,6 @@ TEST(OfflineSbsJob, RejectsAnIntermediateProtectedStateFileBeforeMutation) {
     error.find(
       "offline SBS state root path already exists but is not a real directory"
     ),
-    std::string::npos
-  ) << error;
-  EXPECT_NE(error.find(conflict.generic_string()), std::string::npos) << error;
-}
-
-TEST(OfflineSbsJob, ReportsExactExportsWorkspaceFileConflict) {
-  temporary_tree_t tree;
-  auto config = service_config(tree.path);
-  const auto conflict = config.exports_root;
-  write_nonempty(conflict, "not-a-directory");
-
-  offline_sbs::job_service_t service {
-    config,
-    [](const offline_sbs::worker_context_t &,
-       std::stop_token,
-       const offline_sbs::progress_callback_t &) {
-      return offline_sbs::worker_outcome_t {.completed = true};
-    }
-  };
-  std::string error;
-  EXPECT_FALSE(service.start(error));
-  EXPECT_NE(
-    error.find("offline SBS exports root path already exists but is not a real directory"),
     std::string::npos
   ) << error;
   EXPECT_NE(error.find(conflict.generic_string()), std::string::npos) << error;
@@ -1209,101 +1181,6 @@ TEST(OfflineSbsJob, RestartRetiresStagingAfterCrashFollowingFinalHardLink) {
   EXPECT_EQ(read_json(state_path).at("retention_sequence"), persisted.at("retention_sequence"));
   EXPECT_EQ(windows_file_identity(final_output), final_identity);
   EXPECT_EQ(read_bytes(final_output), "encoded-video");
-  recovered.shutdown();
-}
-
-TEST(OfflineSbsJob, RecoversLegacyUnmarkedPublicationInManagedExports) {
-  temporary_tree_t tree;
-  auto config = service_config(tree.path);
-  const auto input = tree.path / "media" / "source.mkv";
-  write_nonempty(input, "source");
-
-  offline_sbs::job_service_t service {
-    config,
-    [](const offline_sbs::worker_context_t &context,
-       std::stop_token,
-       const offline_sbs::progress_callback_t &) {
-      write_nonempty(*context.staging_output, "encoded-video");
-      return offline_sbs::worker_outcome_t {
-        .completed = true,
-        .result = {
-          {"schema", 1},
-          {"job_id", context.job_id},
-          {"status", "complete"},
-        },
-      };
-    }
-  };
-  std::string error;
-  ASSERT_TRUE(service.start(error)) << error;
-  const auto created = service.create({
-    .input_path = input,
-    .operation = offline_sbs::operation_e::convert,
-    .output_name = "legacy-recovery.mkv",
-  });
-  ASSERT_TRUE(created.ok) << created.error;
-  ASSERT_EQ(
-    wait_for_terminal(service, created.job->id).state,
-    offline_sbs::job_state_e::complete
-  );
-  service.shutdown();
-
-  const auto current_final = input.parent_path() / "legacy-recovery.mkv";
-  const auto legacy_final = config.exports_root / "legacy-recovery.mkv";
-  const auto legacy_staging =
-    config.exports_root /
-    (
-      "legacy-recovery.sunshine3d-" + created.job->id + ".part.mkv"
-    );
-  fs::rename(current_final, legacy_final);
-  const auto final_identity = windows_file_identity(legacy_final);
-  ASSERT_TRUE(CreateHardLinkW(
-    legacy_staging.c_str(),
-    legacy_final.c_str(),
-    nullptr
-  ));
-
-  const auto state_path =
-    config.state_root / "jobs" / created.job->id / "job.json";
-  auto persisted = nlohmann::json::parse(std::ifstream(state_path));
-  persisted["output_path"] = legacy_final.generic_string();
-  persisted.erase("output_location");
-  persisted["state"] = "publishing";
-  persisted["progress"]["phase"] = "publishing";
-  persisted["ended_at_unix_ms"] = nullptr;
-  write_nonempty(state_path, persisted.dump(2));
-
-  offline_sbs::job_service_t recovered {
-    config,
-    [](const offline_sbs::worker_context_t &,
-       std::stop_token,
-       const offline_sbs::progress_callback_t &) {
-      return offline_sbs::worker_outcome_t {.completed = true};
-    }
-  };
-  ASSERT_TRUE(recovered.start(error)) << error;
-  const auto snapshot = recovered.get(created.job->id);
-  ASSERT_TRUE(snapshot.ok) << snapshot.error;
-  ASSERT_TRUE(snapshot.job);
-  EXPECT_EQ(snapshot.job->state, offline_sbs::job_state_e::complete);
-  ASSERT_TRUE(snapshot.job->output_path);
-  EXPECT_EQ(*snapshot.job->output_path, legacy_final);
-  EXPECT_EQ(
-    snapshot.job->output_location,
-    offline_sbs::output_location_e::legacy_managed_exports
-  );
-  EXPECT_FALSE(fs::exists(legacy_staging));
-  EXPECT_TRUE(fs::is_regular_file(legacy_final));
-  expect_persisted_snapshot(state_path, *snapshot.job);
-  const auto publication_path = config.worker_root / "jobs" / created.job->id / "result" / "publication-contract.json";
-  EXPECT_EQ(read_json(publication_path), snapshot.job->worker_result);
-  EXPECT_EQ(snapshot.job->worker_result.at("output"), legacy_final.generic_string());
-  EXPECT_EQ(snapshot.job->worker_result.at("publish_identity"), final_identity);
-  EXPECT_EQ(snapshot.job->worker_result.at("published"), true);
-  EXPECT_EQ(snapshot.job->worker_result.at("staging_cleanup_pending"), false);
-  EXPECT_EQ(read_json(state_path).at("retention_sequence"), persisted.at("retention_sequence"));
-  EXPECT_EQ(windows_file_identity(legacy_final), final_identity);
-  EXPECT_EQ(read_bytes(legacy_final), "encoded-video");
   recovered.shutdown();
 }
 
@@ -1894,7 +1771,7 @@ TEST(OfflineSbsJob, RejectsPersistedInputDirectoryOutputThatWasRedirected) {
   );
   service.shutdown();
 
-  const auto outside = config.exports_root / "redirected.mkv";
+  const auto outside = tree.path / "elsewhere" / "redirected.mkv";
   write_nonempty(outside, "unrelated-user-file");
   const auto outside_identity = windows_file_identity(outside);
   const auto final_output = input.parent_path() / "redirected.mkv";
@@ -1928,6 +1805,56 @@ TEST(OfflineSbsJob, RejectsPersistedInputDirectoryOutputThatWasRedirected) {
   EXPECT_EQ(windows_file_identity(final_output), final_identity);
   EXPECT_EQ(read_bytes(final_output), "encoded-video");
   EXPECT_EQ(read_bytes(publication_path), original_publication);
+  EXPECT_FALSE(fs::exists(state_path.parent_path()));
+  recovered.shutdown();
+}
+
+TEST(OfflineSbsJob, IgnoresAPersistedOutputWithoutItsInputDirectoryLocation) {
+  // A pre-08-14 record published into the retired managed exports root and named no location.
+  temporary_tree_t tree;
+  const auto config = service_config(tree.path);
+  const auto input = tree.path / "media" / "source.mkv";
+  write_nonempty(input, "source");
+  const auto complete = [](const offline_sbs::worker_context_t &context,
+                           std::stop_token,
+                           const offline_sbs::progress_callback_t &) {
+    write_nonempty(*context.staging_output, "encoded-video");
+    return offline_sbs::worker_outcome_t {
+      .completed = true,
+      .result = {
+        {"schema", 1},
+        {"job_id", context.job_id},
+        {"status", "complete"},
+      },
+    };
+  };
+  offline_sbs::job_service_t service {config, complete};
+  std::string error;
+  ASSERT_TRUE(service.start(error)) << error;
+  const auto created = service.create({
+    .input_path = input,
+    .operation = offline_sbs::operation_e::convert,
+    .output_name = "unlocated.mkv",
+  });
+  ASSERT_TRUE(created.ok) << created.error;
+  ASSERT_EQ(
+    wait_for_terminal(service, created.job->id).state,
+    offline_sbs::job_state_e::complete
+  );
+  service.shutdown();
+
+  const auto final_output = input.parent_path() / "unlocated.mkv";
+  const auto state_path =
+    config.state_root / "jobs" / created.job->id / "job.json";
+  auto persisted = nlohmann::json::parse(std::ifstream(state_path));
+  ASSERT_EQ(persisted["output_location"], "input-directory");
+  persisted["output_location"] = nullptr;
+  write_nonempty(state_path, persisted.dump(2));
+
+  offline_sbs::job_service_t recovered {config, complete};
+  ASSERT_TRUE(recovered.start(error)) << error;
+  EXPECT_FALSE(recovered.get(created.job->id).ok);
+  EXPECT_EQ(read_bytes(final_output), "encoded-video");
   EXPECT_FALSE(fs::exists(state_path.parent_path()));
   recovered.shutdown();
 }
@@ -2001,16 +1928,16 @@ TEST(OfflineSbsJob, RestartRecoveryNeverResumesAnUnfinishedGpuJob) {
     {"operation", "evaluate"},
     {"input_path", input.generic_string()},
     {"output_path", nullptr},
+    {"output_location", nullptr},
     {"codec", "hevc_nvenc"},
     {"scene_cache_max_bytes", 4ull * 1024ull * 1024ull * 1024ull},
-    {"cache_budget_policy", "split"},
+    {"cache_budget_policy", "fail"},
     {"progress", {
       {"phase", "analysis"},
       {"processed_frames", 19},
       {"total_frames", 100},
       {"source_time_seconds", nullptr},
       {"source_duration_seconds", nullptr},
-      {"scene_count", 1},
     }},
     {"created_at_unix_ms", 1},
     {"started_at_unix_ms", 2},
@@ -2040,114 +1967,6 @@ TEST(OfflineSbsJob, RestartRecoveryNeverResumesAnUnfinishedGpuJob) {
   EXPECT_FALSE(runner_called);
   EXPECT_FALSE(service.has_active_job());
   service.shutdown();
-}
-
-TEST(OfflineSbsJob, RestartKeepsACompletedJobThatStillNamesItsSceneAudit) {
-  temporary_tree_t tree;
-  const auto config = service_config(tree.path);
-  const auto input = tree.path / "media" / "source.mkv";
-  write_nonempty(input, "source");
-  const auto runner = [](const offline_sbs::worker_context_t &context,
-                         std::stop_token,
-                         const offline_sbs::progress_callback_t &) {
-    write_nonempty(*context.staging_output, "encoded-video");
-    return offline_sbs::worker_outcome_t {
-      .completed = true,
-      .result = {
-        {"schema", 1},
-        {"job_id", context.job_id},
-        {"status", "complete"},
-      },
-    };
-  };
-  std::string error;
-  std::string id;
-  {
-    offline_sbs::job_service_t service {config, runner};
-    ASSERT_TRUE(service.start(error)) << error;
-    const auto created = service.create({
-      .input_path = input,
-      .operation = offline_sbs::operation_e::convert,
-      .output_name = "converted.mkv",
-    });
-    ASSERT_TRUE(created.ok) << created.error;
-    id = created.job->id;
-    ASSERT_EQ(
-      wait_for_terminal(service, id).state,
-      offline_sbs::job_state_e::complete
-    );
-    service.shutdown();
-  }
-
-  // Rewrite the durable record and result directory into the shape a release with the
-  // diagnostic scene audit and the retired split budget policy left behind for a completed
-  // conversion.
-  const auto result_directory = config.worker_root / "jobs" / id / "result";
-  const auto audit_manifest = result_directory / "scene-audit.json";
-  const auto audit_page = result_directory / "scene-audit-page-0.json";
-  write_nonempty(audit_manifest, R"({"schema":4,"version":"whole-clip-scene-audit-v4"})");
-  write_nonempty(audit_page, R"({"schema":1,"version":"whole-clip-scene-audit-page-v1"})");
-  const auto state_path = config.state_root / "jobs" / id / "job.json";
-  auto persisted = nlohmann::json::parse(std::ifstream(state_path));
-  ASSERT_TRUE(persisted.at("worker_result").is_object());
-  EXPECT_EQ(persisted.at("cache_budget_policy"), "fail");
-  persisted["cache_budget_policy"] = "split";
-  persisted["scene_decisions"] = nlohmann::json::array({
-    {
-      {"scene_id", 2},
-      {"start_sequence", 7},
-      {"end_sequence_exclusive", 13},
-      {"boundary", {{"decision", "end_of_stream"}}},
-    },
-  });
-  persisted["progress"]["scene_count"] = 2;
-  persisted["progress"]["current_scene"] = nullptr;
-  persisted["worker_result"]["schema"] = 3;
-  persisted["worker_result"]["scene_count"] = 2;
-  persisted["worker_result"]["scene_audit"] = audit_manifest.generic_string();
-  persisted["worker_result"]["scene_audit_manifest_sha256"] = std::string(64, 'a');
-  persisted["worker_result"]["scene_audit_sha256"] = std::string(64, 'a');
-  persisted["worker_result"]["scene_decisions_contract"] =
-    audit_manifest.generic_string();
-  write_nonempty(state_path, persisted.dump(2));
-
-  offline_sbs::job_service_t recovered {config, runner};
-  ASSERT_TRUE(recovered.start(error)) << error;
-  const auto snapshot = recovered.get(id);
-  ASSERT_TRUE(snapshot.ok) << snapshot.error;
-  ASSERT_TRUE(snapshot.job);
-  EXPECT_EQ(snapshot.job->state, offline_sbs::job_state_e::complete);
-  EXPECT_EQ(snapshot.job->progress.phase, "complete");
-  ASSERT_TRUE(snapshot.job->output_path);
-  EXPECT_TRUE(fs::is_regular_file(*snapshot.job->output_path));
-  EXPECT_EQ(snapshot.job->worker_result["status"], "complete");
-  EXPECT_TRUE(snapshot.job->worker_result.value("published", false));
-  for (const auto retired : {
-         "scene_count",
-         "scene_audit",
-         "scene_audit_manifest_sha256",
-         "scene_audit_sha256",
-         "scene_decisions_contract",
-       }) {
-    EXPECT_FALSE(snapshot.job->worker_result.contains(retired)) << retired;
-  }
-  const auto served = snapshot.job->json();
-  EXPECT_EQ(served.at("cache_budget_policy"), "fail");
-  EXPECT_FALSE(served.contains("scene_decisions"));
-  EXPECT_FALSE(served.at("progress").contains("scene_count"));
-  EXPECT_FALSE(served.at("progress").contains("current_scene"));
-  ASSERT_EQ(recovered.list().size(), 1u);
-  // The retained audit files are user data owned by the job: untouched until it is cleared.
-  EXPECT_TRUE(fs::is_regular_file(audit_manifest));
-  EXPECT_TRUE(fs::is_regular_file(audit_page));
-  EXPECT_TRUE(fs::is_directory(config.state_root / "jobs" / id));
-
-  const auto cleared = recovered.clear(id);
-  EXPECT_TRUE(cleared.ok) << cleared.error;
-  EXPECT_FALSE(recovered.get(id).ok);
-  EXPECT_FALSE(fs::exists(audit_manifest));
-  EXPECT_TRUE(fs::is_regular_file(input.parent_path() / "converted.mkv"));
-  recovered.shutdown();
 }
 
 TEST(OfflineSbsJob, RestartNeverDeletesAWorkerTreeWithoutValidProtectedState) {
@@ -2668,11 +2487,6 @@ TEST(OfflineSbsJob, PinsManagedRootsAndRetainedJobDirectoriesByIdentity) {
     (tree.path / "worker-swapped").c_str(),
     MOVEFILE_WRITE_THROUGH
   ));
-  EXPECT_FALSE(MoveFileExW(
-    config.exports_root.c_str(),
-    (tree.path / "exports-swapped").c_str(),
-    MOVEFILE_WRITE_THROUGH
-  ));
 
   const auto created = service.create({
     .input_path = input,
@@ -2958,7 +2772,7 @@ TEST(OfflineSbsJob, PublishedFilenameThatOnlyResemblesStagingDoesNotUseQuota) {
   const auto input = tree.path / "source.mkv";
   write_nonempty(input, "source");
   write_nonempty(
-    config.exports_root / "movie.sunshine3d-note.part.mkv",
+    tree.path / "movie.sunshine3d-note.part.mkv",
     std::string(256ull * 1024ull, 'p')
   );
 
@@ -2989,7 +2803,7 @@ TEST(OfflineSbsJob, PublishedFilenameThatOnlyResemblesStagingDoesNotUseQuota) {
     offline_sbs::job_state_e::complete
   );
   EXPECT_TRUE(fs::is_regular_file(
-    config.exports_root / "movie.sunshine3d-note.part.mkv"
+    tree.path / "movie.sunshine3d-note.part.mkv"
   ));
   service.shutdown();
 }
@@ -2997,7 +2811,7 @@ TEST(OfflineSbsJob, PublishedFilenameThatOnlyResemblesStagingDoesNotUseQuota) {
 TEST(OfflineSbsJob, RejectsOverlappingManagedRoots) {
   temporary_tree_t tree;
   auto config = service_config(tree.path);
-  config.exports_root = config.worker_root;
+  config.worker_root = config.state_root;
   offline_sbs::job_service_t service {
     config,
     [](const offline_sbs::worker_context_t &,
@@ -3013,17 +2827,15 @@ TEST(OfflineSbsJob, RejectsOverlappingManagedRoots) {
 
 TEST(OfflineSbsJob, RejectsRemoteOrDeviceManagedRootsBeforeFilesystemAccess) {
   temporary_tree_t tree;
-  for (int root_index = 0; root_index < 3; ++root_index) {
+  for (int root_index = 0; root_index < 2; ++root_index) {
     auto config = service_config(tree.path / std::to_string(root_index));
     const fs::path unsupported {
       LR"(\\offline-invalid.example\share\Sunshine 3D\offline-sbs)"
     };
     if (root_index == 0) {
       config.state_root = unsupported / "state";
-    } else if (root_index == 1) {
-      config.worker_root = unsupported / "worker";
     } else {
-      config.exports_root = unsupported / "exports";
+      config.worker_root = unsupported / "worker";
     }
     offline_sbs::job_service_t service {
       config,

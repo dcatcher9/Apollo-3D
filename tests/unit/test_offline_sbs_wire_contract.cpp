@@ -193,7 +193,7 @@ namespace {
       .output_path = "C:/media/output.mkv",
       .output_location = "input-directory",
       .codec = "hevc_nvenc",
-      .scene_cache_max_bytes = 64 * 1024 * 1024,
+      .transient_raster_hard_cap_bytes = 64 * 1024 * 1024,
       .progress = {
         .phase = "analysis",
         .processed_frames = 1,
@@ -483,27 +483,24 @@ TEST(OfflineSbsWireContractTest, PersistedJobRoundTripsCurrentWireShape) {
 
 TEST(OfflineSbsWireContractTest, PersistedJobSupportsOnlyExplicitLegacyOmissions) {
   auto legacy = offline_sbs::wire::to_json(persisted_job());
-  legacy.erase("output_location");
   legacy.erase("retention_sequence");
   legacy.erase("worker");
   const auto parsed = offline_sbs::wire::parse_persisted_job_contract(legacy);
-  EXPECT_FALSE(parsed.snapshot.output_location);
   EXPECT_FALSE(parsed.retention_sequence);
   EXPECT_FALSE(parsed.worker);
+
+  auto without_location = legacy;
+  without_location.erase("output_location");
+  EXPECT_THROW(
+    offline_sbs::wire::parse_persisted_job_contract(without_location),
+    offline_sbs::wire::contract_error
+  );
 
   legacy["unsupported_legacy_field"] = true;
   EXPECT_THROW(
     offline_sbs::wire::parse_persisted_job_contract(legacy),
     offline_sbs::wire::contract_error
   );
-}
-
-TEST(OfflineSbsWireContractTest, PersistedJobAcceptsNullLegacyOutputLocation) {
-  auto legacy = offline_sbs::wire::to_json(persisted_job());
-  legacy["output_location"] = nullptr;
-  const auto parsed = offline_sbs::wire::parse_persisted_job_contract(legacy);
-  ASSERT_TRUE(parsed.snapshot.output_path);
-  EXPECT_FALSE(parsed.snapshot.output_location);
 }
 
 TEST(OfflineSbsWireContractTest, JobSnapshotRejectsNumericOverflow) {
@@ -515,70 +512,28 @@ TEST(OfflineSbsWireContractTest, JobSnapshotRejectsNumericOverflow) {
   );
 }
 
-TEST(OfflineSbsWireContractTest, PersistedJobAcceptsAndDiscardsRetiredSceneSummary) {
-  // The shape job.json had while the diagnostic scene list existed.
+TEST(OfflineSbsWireContractTest, PersistedJobRejectsTheRetiredSceneSummaryAndSplitPolicy) {
+  // job.json written before 08-14 carried these; such a record no longer loads.
   const auto current = offline_sbs::wire::to_json(persisted_job());
-  auto retained = current;
-  retained["scene_decisions"] = nlohmann::json::array({
-    {{"scene_id", 1}, {"boundary", {{"decision", "confirmed"}}}},
-  });
-  retained["progress"]["scene_count"] = 1;
-  retained["progress"]["current_scene"] = {{"scene_id", 2}};
-  retained["worker_result"] = {
-    {"schema", 3},
-    {"scene_count", 2},
-    {"scene_audit", "C:/state/jobs/one/result/scene-audit.json"},
-    {"scene_audit_manifest_sha256", std::string(64, 'b')},
-    {"scene_audit_sha256", std::string(64, 'b')},
-    {"scene_decisions_contract", "C:/state/jobs/one/result/scene-audit.json"},
+  EXPECT_EQ(current.at("cache_budget_policy"), "fail");
+  const auto rejects = [](const nlohmann::json &retired) {
+    EXPECT_THROW(
+      offline_sbs::wire::parse_persisted_job_contract(retired),
+      offline_sbs::wire::contract_error
+    ) << retired.dump();
   };
-
-  const auto parsed = offline_sbs::wire::parse_persisted_job_contract(retained);
-  EXPECT_EQ(parsed.snapshot.progress.processed_frames, 1u);
-  ASSERT_TRUE(parsed.snapshot.worker_result);
-  const auto rewritten = offline_sbs::wire::to_json(parsed);
-  EXPECT_FALSE(rewritten.contains("scene_decisions"));
-  EXPECT_FALSE(rewritten.at("progress").contains("scene_count"));
-  EXPECT_FALSE(rewritten.at("progress").contains("current_scene"));
-
-  // The older variants with a null or absent summary stay readable too.
-  retained["progress"]["scene_count"] = nullptr;
-  retained["progress"]["current_scene"] = nullptr;
-  retained.erase("scene_decisions");
-  EXPECT_NO_THROW(offline_sbs::wire::parse_persisted_job_contract(retained));
-
-  // The API snapshot is not a durable document and has no retired variant.
-  auto snapshot = offline_sbs::wire::to_json(job_snapshot());
-  EXPECT_FALSE(snapshot.contains("scene_decisions"));
-  EXPECT_FALSE(snapshot.at("progress").contains("scene_count"));
-  EXPECT_FALSE(snapshot.at("progress").contains("current_scene"));
-  snapshot["progress"]["current_scene"] = nullptr;
-  EXPECT_THROW(
-    offline_sbs::wire::parse_job_snapshot_contract(snapshot, false),
-    offline_sbs::wire::contract_error
-  );
-}
-
-TEST(OfflineSbsWireContractTest, PersistedJobReadsTheRetiredSplitBudgetPolicyAsFail) {
-  auto retained = offline_sbs::wire::to_json(persisted_job());
-  EXPECT_EQ(retained.at("cache_budget_policy"), "fail");
-  retained["cache_budget_policy"] = "split";
-  const auto parsed = offline_sbs::wire::parse_persisted_job_contract(retained);
-  EXPECT_EQ(offline_sbs::wire::to_json(parsed).at("cache_budget_policy"), "fail");
-
-  retained["cache_budget_policy"] = "unknown";
-  EXPECT_THROW(
-    offline_sbs::wire::parse_persisted_job_contract(retained),
-    offline_sbs::wire::contract_error
-  );
-
-  // The API snapshot is not a durable document and has no retired variant.
-  auto snapshot = offline_sbs::wire::to_json(job_snapshot());
-  snapshot["cache_budget_policy"] = "split";
-  EXPECT_THROW(
-    offline_sbs::wire::parse_job_snapshot_contract(snapshot, false),
-    offline_sbs::wire::contract_error
-  );
+  auto retired = current;
+  retired["scene_decisions"] = nlohmann::json::array();
+  rejects(retired);
+  retired = current;
+  retired["progress"]["scene_count"] = 1;
+  rejects(retired);
+  retired = current;
+  retired["progress"]["current_scene"] = nullptr;
+  rejects(retired);
+  retired = current;
+  retired["cache_budget_policy"] = "split";
+  rejects(retired);
 }
 
 TEST(OfflineSbsWireContractTest, RawTransportRoundTripsWithoutRasterFilenames) {

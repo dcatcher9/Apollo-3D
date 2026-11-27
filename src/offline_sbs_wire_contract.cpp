@@ -1131,7 +1131,7 @@ namespace offline_sbs::wire {
       {"output_path", value.output_path ? json(*value.output_path) : json(nullptr)},
       {"output_location", value.output_location ? json(*value.output_location) : json(nullptr)},
       {"codec", value.codec},
-      {"scene_cache_max_bytes", value.scene_cache_max_bytes},
+      {"scene_cache_max_bytes", value.transient_raster_hard_cap_bytes},
       // Schema 1 keeps this field. Direct causal conversion has one behavior: fail.
       {"cache_budget_policy", "fail"},
       {"progress", {
@@ -1171,7 +1171,7 @@ namespace offline_sbs::wire {
         "schema"sv, "id"sv, "state"sv, "operation"sv, "input_path"sv,
         "output_path"sv, "output_location"sv, "codec"sv,
         "scene_cache_max_bytes"sv, "cache_budget_policy"sv, "progress"sv,
-        "scene_decisions"sv, "created_at_unix_ms"sv, "started_at_unix_ms"sv,
+        "created_at_unix_ms"sv, "started_at_unix_ms"sv,
         "ended_at_unix_ms"sv, "error"sv, "worker_result"sv,
         "retention_sequence"sv, "worker"sv,
       };
@@ -1186,18 +1186,6 @@ namespace offline_sbs::wire {
       }
       normalized.erase("retention_sequence");
       normalized.erase("worker");
-      // These are the only explicitly supported schema-1 durable variants. One predates
-      // beside-input publication. The others carry the retired diagnostic scene summary
-      // (scene_decisions, progress.scene_count, progress.current_scene), which is accepted
-      // and discarded so a retained job stays readable; it is never written.
-      if (!normalized.contains("output_location")) {
-        normalized["output_location"] = nullptr;
-      }
-      normalized.erase("scene_decisions");
-      if (normalized.contains("progress") && normalized.at("progress").is_object()) {
-        normalized["progress"].erase("scene_count");
-        normalized["progress"].erase("current_scene");
-      }
     }
     require_exact_keys(normalized, base_keys, "job snapshot");
     require_exact_keys(
@@ -1221,13 +1209,8 @@ namespace offline_sbs::wire {
       result.output_location = required_string(normalized, "output_location", "job snapshot");
     }
     result.codec = required_string(normalized, "codec", "job snapshot");
-    result.scene_cache_max_bytes = unsigned_integer<std::uint64_t>(normalized, "scene_cache_max_bytes", "job snapshot");
-    // A job retained by a release that still admitted the retired scene split may record
-    // "split". It is read as the only remaining behavior and never written.
-    const auto cache_budget_policy =
-      required_string(normalized, "cache_budget_policy", "job snapshot");
-    if (cache_budget_policy != "fail" &&
-        !(persisted_document && cache_budget_policy == "split")) {
+    result.transient_raster_hard_cap_bytes = unsigned_integer<std::uint64_t>(normalized, "scene_cache_max_bytes", "job snapshot");
+    if (required_string(normalized, "cache_budget_policy", "job snapshot") != "fail") {
       throw contract_error("job snapshot cache budget policy is unsupported");
     }
     const auto &progress = normalized.at("progress");

@@ -244,7 +244,6 @@ namespace {
     return {
       .state_root = root / "state",
       .worker_root = root / "worker",
-      .exports_root = root / "exports",
       .sunshine_executable = root / "sunshine.exe",
       .sunshine_config = root / "sunshine.conf",
       .ffmpeg_executable = root / "ffmpeg.exe",
@@ -316,7 +315,6 @@ namespace {
       EXPECT_FALSE(owner->ready_service());
       EXPECT_FALSE(fs::exists(config.state_root));
       EXPECT_FALSE(fs::exists(config.worker_root));
-      EXPECT_FALSE(fs::exists(config.exports_root));
     }
 
     void release_and_join() {

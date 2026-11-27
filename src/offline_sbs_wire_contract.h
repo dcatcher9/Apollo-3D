@@ -209,7 +209,8 @@ namespace offline_sbs::wire {
     std::optional<std::string> output_path;
     std::optional<std::string> output_location;
     std::string codec;
-    std::uint64_t scene_cache_max_bytes = 0;
+    // Persisted under its historical key, scene_cache_max_bytes.
+    std::uint64_t transient_raster_hard_cap_bytes = 0;
     job_progress_contract_t progress;
     std::int64_t created_at_unix_ms = 0;
     std::optional<std::int64_t> started_at_unix_ms;
