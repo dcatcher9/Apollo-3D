@@ -2,9 +2,7 @@
 #pragma once
 
 #ifdef _WIN32
-  #include "generated/depth_coordinate_v2_contract.h"
   #include "host_sbs_compute_state_guard.h"
-  #include "host_sbs_direct_glyph_tiles.h"
   #include "host_sbs_display_snapshot_rgb8_analysis_gpu.h"
   #include "host_sbs_shader_cache.h"
 
@@ -24,8 +22,8 @@ namespace models::host_sbs_direct_glyph_publication {
 
   inline constexpr UINT cutoff_alpha8 = 38u;
   inline constexpr UINT direct_work_word_count = 36u;
-  inline constexpr UINT direct_fringe_request_bytes = 144u;
-  inline constexpr UINT direct_fringe_flag = 32u;
+  // The header and eight band-clipped OCR covers the native palette decoder treats as its caps.
+  inline constexpr UINT direct_detector_caps_bytes = 144u;
 
   // All views must belong to the same ordered observation as the actual C24 and Root.
   struct request_t {
@@ -34,9 +32,6 @@ namespace models::host_sbs_direct_glyph_publication {
     ID3D11Buffer *current_constants = nullptr;
     ID3D11ShaderResourceView *ocr = nullptr, *sct = nullptr, *condition = nullptr, *root = nullptr;
     UINT postprocess_mode = 0u, expected_work = 0u;
-    // Pass the authenticated contour producer's dense_main and its actual t0/t5/t12.
-    ID3D11ComputeShader *legacy_dense_shader = nullptr;
-    ID3D11ShaderResourceView *legacy_rgb = nullptr, *legacy_support = nullptr, *legacy_observation = nullptr;
     ID3D11ShaderResourceView *uip = nullptr; // Actual current UIP40, before the source envelope.
     bool use_empty_gate = false;
   };
@@ -48,7 +43,7 @@ namespace models::host_sbs_direct_glyph_publication {
   };
 
   // The compute slots the publication passes bind, restored around each queue.
-  using compute_state_t = host_sbs_compute_state::guard_t<25u, 8u, 3u>;
+  using compute_state_t = host_sbs_compute_state::guard_t<22u, 8u, 3u>;
 
   class resources_t {
     struct texture_t {
@@ -62,13 +57,13 @@ namespace models::host_sbs_direct_glyph_publication {
       ComPtr<ID3D11UnorderedAccessView> uav;
     };
 
-    using srvs_t = std::array<ID3D11ShaderResourceView *, 25u>;
+    using srvs_t = std::array<ID3D11ShaderResourceView *, 22u>;
     using uavs_t = std::array<ID3D11UnorderedAccessView *, 8u>;
 
     ComPtr<ID3D11Device> device_;
     std::array<ComPtr<ID3D11ComputeShader>, shader_cache::direct_glyph_plan_specs.size()> plan_shaders_;
     ComPtr<ID3D11ComputeShader> empty_gate_shader_;
-    buffer_t request_, work_, evidence_, receipt_, publish_args_, legacy_args_;
+    buffer_t request_, work_, evidence_, receipt_, publish_args_;
     buffer_t producer_schedule_, empty_witness_;
     texture_t matte_, alpha8_;
     UINT width_ = 0u, height_ = 0u;
@@ -151,16 +146,6 @@ namespace models::host_sbs_direct_glyph_publication {
       return desc.ByteWidth == 96u && (desc.BindFlags & D3D11_BIND_CONSTANT_BUFFER) != 0u;
     }
 
-    bool matches_lazy_legacy(const request_t &r) const {
-      constexpr UINT observation_records = 1u + models::depth_coordinate_v2::subtitle_plane_cover_capacity *
-        (4u + models::depth_coordinate_v2::subtitle_contour_palette_max_modes);
-      return matches_c24(r.current_constants) && matches_structured(r.sct, 32u) &&
-             same_device(r.legacy_dense_shader) &&
-             matches_texture(r.legacy_rgb, DXGI_FORMAT_R16G16B16A16_FLOAT, r.width, r.height) &&
-             matches_texture(r.legacy_support, DXGI_FORMAT_R32_UINT, r.width, r.height) &&
-             matches_structured(r.legacy_observation, observation_records, 16u);
-    }
-
     bool make_texture(texture_t &target, UINT width, UINT height) const {
       const D3D11_TEXTURE2D_DESC desc {
         width, height, 1u, 1u, DXGI_FORMAT_R32_UINT, {1u, 0u}, D3D11_USAGE_DEFAULT,
@@ -236,24 +221,8 @@ namespace models::host_sbs_direct_glyph_publication {
       unbind(context);
     }
 
-    void run_legacy_dense(ID3D11DeviceContext *context, const request_t &r) const {
-      srvs_t inputs {};
-      inputs[0u] = r.legacy_rgb;
-      inputs[5u] = r.legacy_support;
-      inputs[12u] = r.legacy_observation;
-      ID3D11Buffer *const constants[2] {r.current_constants, nullptr};
-      auto *output = matte_.uav.Get();
-      context->CSSetShader(r.legacy_dense_shader, nullptr, 0u);
-      context->CSSetConstantBuffers(0u, 2u, constants);
-      context->CSSetShaderResources(0u, UINT(inputs.size()), inputs.data());
-      context->CSSetUnorderedAccessViews(6u, 1u, &output, nullptr);
-      context->DispatchIndirect(legacy_args_.data.Get(), 0u);
-      unbind(context);
-    }
-
   public:
-    bool load_direct(ID3D11Device *device, const std::filesystem::path &shader_root, std::string &error,
-                     bool resolved_fringe) {
+    bool load_direct(ID3D11Device *device, const std::filesystem::path &shader_root, std::string &error) {
       error.clear();
       static_assert(std::endian::native == std::endian::little);
       if (!device) return fail(error, "Direct glyph publication device unavailable");
@@ -277,7 +246,6 @@ namespace models::host_sbs_direct_glyph_publication {
         return fail(error, "Subtitle empty gate shader creation failed");
       const UINT indirect = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS | D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS;
       if (!next.make_buffer(next.publish_args_, 16u, D3D11_BIND_UNORDERED_ACCESS, indirect) ||
-          !next.make_buffer(next.legacy_args_, 16u, D3D11_BIND_UNORDERED_ACCESS, indirect) ||
           !next.make_buffer(next.producer_schedule_, 256u, D3D11_BIND_UNORDERED_ACCESS, indirect) ||
           !next.make_buffer(next.empty_witness_, 128u, su, D3D11_RESOURCE_MISC_BUFFER_STRUCTURED))
         return fail(error, "Direct glyph publication arguments allocation failed");
@@ -286,8 +254,7 @@ namespace models::host_sbs_direct_glyph_publication {
       if (!next.make_buffer(next.request_, 48u, D3D11_BIND_CONSTANT_BUFFER, 0u) ||
           !next.make_buffer(next.work_, direct_work_word_count * 4u, su,
                             D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS | D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS) ||
-          (resolved_fringe && !next.make_buffer(next.evidence_, direct_fringe_request_bytes, su,
-                                               D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS)) ||
+          !next.make_buffer(next.evidence_, direct_detector_caps_bytes, su, D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS) ||
           !next.make_buffer(next.receipt_, 256u, su, D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, unavailable_receipt.data()))
         return fail(error, "Direct glyph publication buffer allocation failed");
       *this = std::move(next);
@@ -333,8 +300,7 @@ namespace models::host_sbs_direct_glyph_publication {
     // Opens one observation. Keep its inputs and Work bound to that owner until publish_direct.
     [[nodiscard]] ID3D11Buffer *plan_direct(
       ID3D11DeviceContext *context, const request_t &r,
-      const models::display_snapshot_rgb8_analysis_gpu_v1::direct_audit_submission_t *audit,
-      bool adaptive_context, std::string &error, bool detector_caps = false
+      const models::display_snapshot_rgb8_analysis_gpu_v1::direct_audit_submission_t *audit, std::string &error
     ) {
       error.clear();
       const bool gate_queued = std::exchange(empty_gate_pending_, false);
@@ -345,10 +311,7 @@ namespace models::host_sbs_direct_glyph_publication {
         return nullptr;
       }
       published_ = false;
-      const bool lazy_legacy = matches_lazy_legacy(r);
-      const UINT flags = (lazy_legacy ? 4u : 0u) | (r.use_empty_gate && gate_queued ? 8u : 0u) |
-                         (adaptive_context ? 16u : 0u) |
-                         (detector_caps ? 64u : (evidence_.uav ? direct_fringe_flag : 0u)) |
+      const UINT flags = (r.use_empty_gate && gate_queued ? 8u : 0u) |
                          (r.postprocess_mode << 8u) | (r.expected_work << 16u);
       const auto parameters = early_parameters(r, cutoff_alpha8, flags);
       const compute_state_t saved(context);
@@ -356,10 +319,6 @@ namespace models::host_sbs_direct_glyph_publication {
       context->UpdateSubresource(request_.data.Get(), 0u, nullptr, parameters.data(), 0u, 0u);
       ID3D11Buffer *const constants[2] {request_.data.Get(), matches_c24(r.current_constants) ? r.current_constants : nullptr};
       context->CSSetConstantBuffers(0u, 2u, constants);
-      if (!lazy_legacy) {
-        constexpr std::array<UINT, 4u> zero {};
-        context->ClearUnorderedAccessViewUint(legacy_args_.uav.Get(), zero.data());
-      }
 
       srvs_t inputs {};
       inputs[12u] = matches_structured(r.ocr, 256u) ? r.ocr : nullptr;
@@ -369,7 +328,7 @@ namespace models::host_sbs_direct_glyph_publication {
       auto *envelope = audit ? audit->uip_envelope() : nullptr;
       inputs[17u] = matches_structured(envelope, models::display_snapshot_rgb8_analysis_gpu_v1::envelope_words) ? envelope : nullptr;
       inputs[21u] = r.use_empty_gate && gate_queued ? empty_witness_.srv.Get() : nullptr;
-      run_plan(context, 0u, inputs, {nullptr, legacy_args_.uav.Get(), work_.uav.Get(), nullptr,
+      run_plan(context, 0u, inputs, {nullptr, nullptr, work_.uav.Get(), nullptr,
                                      nullptr, nullptr, evidence_.uav.Get(), publish_args_.uav.Get()});
       direct_pending_ = true;
       return work_.data.Get();
@@ -379,8 +338,7 @@ namespace models::host_sbs_direct_glyph_publication {
       return direct_pending_ ? evidence_.srv.Get() : nullptr;
     }
 
-    bool publish_direct(ID3D11DeviceContext *context, const request_t &r, ID3D11ShaderResourceView *alpha8,
-                        ID3D11ShaderResourceView *completed_placement) {
+    bool publish_direct(ID3D11DeviceContext *context, const request_t &r, ID3D11ShaderResourceView *alpha8) {
       if (!direct_pending_ || !same_device(context)) return false;
       direct_pending_ = false;
       const compute_state_t saved(context);
@@ -400,14 +358,8 @@ namespace models::host_sbs_direct_glyph_publication {
       inputs[14u] = matches_structured(r.condition, 6u) ? r.condition : nullptr;
       inputs[15u] = alpha8_available ? alpha8 : nullptr;
       inputs[16u] = r.root;
-      if (evidence_.srv && alpha8_available &&
-          matches_structured(completed_placement, models::host_sbs_direct_glyph_gpu::placement_words)) {
-        inputs[22u] = evidence_.srv.Get();
-        inputs[23u] = completed_placement;
-      }
-      run_plan(context, 1u, inputs, {matte_.uav.Get(), legacy_args_.uav.Get(), nullptr, alpha8_.uav.Get(),
+      run_plan(context, 1u, inputs, {matte_.uav.Get(), nullptr, nullptr, alpha8_.uav.Get(),
                                      nullptr, receipt_.uav.Get()});
-      if (matches_lazy_legacy(r)) run_legacy_dense(context, r);
       published_ = true;
       return true;
     }
@@ -415,10 +367,6 @@ namespace models::host_sbs_direct_glyph_publication {
     [[nodiscard]] views_t views() const {
       if (!published_) return {};
       return {matte_.srv, receipt_.srv, alpha8_.srv, work_.data};
-    }
-
-    [[nodiscard]] ID3D11Buffer *direct_legacy_dispatch_for_evaluation() const noexcept {
-      return published_ ? legacy_args_.data.Get() : nullptr;
     }
   };
 }

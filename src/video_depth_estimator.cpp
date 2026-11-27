@@ -6503,8 +6503,7 @@ namespace models {
     }
 
     [[nodiscard]] host_sbs_direct_glyph_publication::request_t make_subtitle_direct_glyph_publication_request(
-      const display_snapshot_rgb8_analysis_gpu_v1::request_t &source, UINT width, UINT crop,
-      bool allow_lazy_legacy
+      const display_snapshot_rgb8_analysis_gpu_v1::request_t &source, UINT width, UINT crop
     ) const {
       host_sbs_direct_glyph_publication::request_t model;
       model.width = width;
@@ -6523,12 +6522,6 @@ namespace models {
       model.postprocess_mode = pending_near_identical_postprocess_mode();
       model.expected_work = cuda_conditional_graph::work_flags_value(pending_root->subtitle_work);
       model.use_empty_gate = true;
-      if (allow_lazy_legacy) {
-        model.legacy_dense_shader = subtitle_glyph_matte_cs.Get();
-        model.legacy_rgb = subtitle_contour_source.srv.Get();
-        model.legacy_support = subtitle_contour_support.srv.Get();
-        model.legacy_observation = subtitle_contour_observation.srv.Get();
-      }
       return model;
     }
 
@@ -6549,7 +6542,7 @@ namespace models {
       const auto crop = subtitle_ocr_source_crop_height(width, height);
       if (!crop || crop > height) return;
       const auto source_request = make_subtitle_direct_glyph_source_request();
-      auto publication = make_subtitle_direct_glyph_publication_request(source_request, width, crop, false);
+      auto publication = make_subtitle_direct_glyph_publication_request(source_request, width, crop);
       std::string error;
       if (subtitle_direct_glyph_late_score) {
         glyph::result_t discarded;
@@ -6572,7 +6565,7 @@ namespace models {
         }
       }
       auto *work = subtitle_direct_glyph_publication.plan_direct(context.Get(), publication,
-                                                                  audit ? &*audit : nullptr, true, error, true);
+                                                                  audit ? &*audit : nullptr, error);
       if (!work) {
         report_subtitle_direct_glyph_failure(error);
         return;
@@ -6603,7 +6596,7 @@ namespace models {
         subtitle_direct_glyph_score_failed = status == glyph::submit_status_e::failed;
       }
       if (!error.empty()) report_subtitle_direct_glyph_failure(error);
-      subtitle_selected_matte_commands = subtitle_direct_glyph_publication.publish_direct(context.Get(), publication, nullptr, nullptr);
+      subtitle_selected_matte_commands = subtitle_direct_glyph_publication.publish_direct(context.Get(), publication, nullptr);
     }
 
     bool retire_subtitle_direct_glyph(const bool evaluation_wait) {
@@ -6641,7 +6634,7 @@ namespace models {
       if (ready) subtitle_direct_glyph_error.clear();
       else if (!error.empty()) report_subtitle_direct_glyph_failure(error);
       subtitle_selected_matte_commands = subtitle_direct_glyph_publication.publish_direct(
-        context.Get(), job.publication, ready ? result.alpha8.Get() : nullptr, nullptr);
+        context.Get(), job.publication, ready ? result.alpha8.Get() : nullptr);
       subtitle_direct_glyph_score.retire();
       subtitle_direct_glyph_job.reset();
       return true;
@@ -6684,7 +6677,7 @@ namespace models {
           return false;
         }
       }
-      if (!subtitle_direct_glyph_publication.load_direct(device.Get(), model_shaders, error, true)) return false;
+      if (!subtitle_direct_glyph_publication.load_direct(device.Get(), model_shaders, error)) return false;
       auto &cuda = cuda_driver_api::get();
       nvinfer1::ICudaEngine *engine = nullptr;  // The global engine cache owns its lifetime.
       if (!acquire_direct_glyph_context(shader_root.parent_path().parent_path(), cuda, cuda_device, engine,
@@ -10767,7 +10760,6 @@ namespace models {
     result.alpha8 = direct.alpha8;
     result.work = direct.work;
     result.source_audit = pimpl->subtitle_direct_glyph_source_audit;
-    result.legacy_dispatch = pimpl->subtitle_direct_glyph_publication.direct_legacy_dispatch_for_evaluation();
     if (pimpl->subtitle_direct_glyph_capture_plan && pimpl->subtitle_direct_glyph_score_retired) {
       result.native_lines = pimpl->subtitle_direct_glyph_score.native_lines_for_evaluation();
     }

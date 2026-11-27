@@ -4543,30 +4543,25 @@ namespace sbs_bench {
             });
           };
           const auto work_path = evidence_directory / "work.u32";
-          const auto dispatch_path = evidence_directory / "legacy-dispatch.u32";
           const auto ocr_path = evidence_directory / "ocr.u32";
           constexpr subtitle_qualification::producer_stage_spec_t ocr_spec {
             0u, "ocr", "completed-current-ocr8", 256u, false
           };
           ComPtr<ID3D11Buffer> ocr;
           std::array<std::uint32_t, models::host_sbs_direct_glyph_publication::direct_work_word_count> work {};
-          std::array<std::uint32_t, 4u> legacy_dispatch {};
           if (!dump_buffer(stages->work.Get(), sizeof(work), work_path) ||
               !read_exact_file(fs::path(o.out) / work_path, work.data(), sizeof(work)) || work[1u] > 8u ||
-              !dump_buffer(stages->legacy_dispatch.Get(), sizeof(legacy_dispatch), dispatch_path) ||
-              !read_exact_file(fs::path(o.out) / dispatch_path, legacy_dispatch.data(), sizeof(legacy_dispatch)) ||
               !subtitle_qualification::producer_stage_buffer(dev.Get(), stages->ocr_record.Get(), ocr_spec, ocr) ||
               !dump_buffer(ocr.Get(), 1024u, ocr_path)) {
-            BOOST_LOG(error) << "sbs-bench: direct glyph literal Work, fallback dispatch or OCR is unavailable";
+            BOOST_LOG(error) << "sbs-bench: direct glyph literal Work or OCR is unavailable";
             return 6;
           }
           const auto &selected = evidence.selected;
           const bool model = selected[2u] == 4u && selected[62u] == 4u;
-          const bool legacy = selected[2u] == 1u && selected[62u] == 1u;
           const bool active = model && work[0u] == 2u && work[1u] != 0u && work[2u] == 0u && work[3u] == 1u;
           const bool empty = model && work[0u] == 1u && work[1u] == 0u && work[2u] == 0u && work[3u] == 0u;
-          if (selected[3u] != 0u || evidence.shared_warp_selected_receipt_header != 1u || (!active && !empty && !legacy)) {
-            BOOST_LOG(error) << "sbs-bench: direct glyph draw did not bind a current model or legacy receipt";
+          if (selected[3u] != 0u || evidence.shared_warp_selected_receipt_header != 1u || (!active && !empty)) {
+            BOOST_LOG(error) << "sbs-bench: direct glyph draw did not bind a current model receipt";
             return 6;
           }
           const std::array<UINT, 4u> rect {0u, frame_height - mask_height, frame_width, frame_height};
@@ -4623,9 +4618,7 @@ namespace sbs_bench {
           {
             const auto path = evidence_directory / "native-lines.u32";
             std::array<std::array<UINT,16>,8> records {};
-            if ((!active && !empty) || work[3] != (active ? 1u : 0u) ||
-                legacy_dispatch != std::array<UINT,4>{} ||
-                !dump_buffer(stages->native_lines.Get(),sizeof(records),path) ||
+            if (!dump_buffer(stages->native_lines.Get(),sizeof(records),path) ||
                 !read_exact_file(fs::path(o.out)/path,records.data(),sizeof(records))) {
               BOOST_LOG(error) << "sbs-bench: native glyph selection lacks its current line records";
               return 6;
@@ -4652,9 +4645,8 @@ namespace sbs_bench {
             {"transaction_token", publication.transaction_token}, {"analysis_generation", publication.analysis_generation},
             {"bindings_observed", evidence.bindings_observed}, {"selected_receipt", selected},
             {"contour_identity", evidence.contour}, {"condition_params", evidence.condition},
-            {"branch", active ? "active" : empty ? "empty" : "legacy"}, {"execution", work}, {"work_boxes_ltrb", work_boxes},
-            {"work_buffer", binding(work_path, sizeof(work))}, {"legacy_dispatch", legacy_dispatch},
-            {"legacy_dispatch_buffer", binding(dispatch_path, sizeof(legacy_dispatch))}, {"ocr", binding(ocr_path, 1024u)},
+            {"branch", active ? "active" : "empty"}, {"execution", work}, {"work_boxes_ltrb", work_boxes},
+            {"work_buffer", binding(work_path, sizeof(work))}, {"ocr", binding(ocr_path, 1024u)},
             {"source_audit", source_audit_binding},
             {"selected_mask", {{"file", relative_mask.generic_string()}, {"sha256", mask_digest},
                 {"size", {frame_width, mask_height}}, {"source_rect", rect},

@@ -144,7 +144,7 @@ TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, EmptyGatePreservesSourceAndPublishesCu
   namespace model = models::host_sbs_direct_glyph_publication;
   namespace v2 = models::depth_coordinate_v2;
   model::resources_t matte;
-  ASSERT_TRUE(matte.load_direct(device.Get(), SUNSHINE_SHADERS_DIR, error, false)) << error;
+  ASSERT_TRUE(matte.load_direct(device.Get(), SUNSHINE_SHADERS_DIR, error)) << error;
   H = 65u;
   B = models::subtitle_ocr_source_crop_height(W, H);
   crop = H - B;
@@ -194,8 +194,8 @@ TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, EmptyGatePreservesSourceAndPublishesCu
   };
   const auto prepare = [&] { return matte.prepare_empty_gate(context.Get(), input, error); };
   const auto publish = [&] {
-    return matte.plan_direct(context.Get(), input, nullptr, false, error) &&
-           matte.publish_direct(context.Get(), input, nullptr, nullptr);
+    return matte.plan_direct(context.Get(), input, nullptr, error) &&
+           matte.publish_direct(context.Get(), input, nullptr);
   };
   const auto source_contents = [&] {
     const auto views = owner.views();
@@ -369,7 +369,7 @@ TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, DirectAuditUsesOriginalSnapshotAndPres
   EXPECT_EQ(recovered, expected_envelope());
   EXPECT_NE(recovered, positive);
 }
-TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, DirectPublishesScaledScoresOnlyInCurrentNativeWork) {
+TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, DirectPublishesNativeScoresOnlyInCurrentWork) {
   const auto &specs = cache::direct_glyph_plan_specs;
   const auto sources = cache::snapshot_sources(SUNSHINE_SHADERS_DIR, specs);
   ASSERT_TRUE(sources);
@@ -384,27 +384,19 @@ TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, DirectPublishesScaledScoresOnlyInCurre
   const auto contour_constants = constants(std::array<UINT, 24u> {width, height, 0u, height});
   const auto current_sct = buffer(32u);
   const auto receipt = buffer(64u, false, false, true);
-  constexpr std::array<UINT, 4u> parked_dispatch {};
-  const auto legacy_dispatch = buffer(parked_dispatch.size(), true, true, true, parked_dispatch.data());
   const auto matte = texture(width, height, DXGI_FORMAT_R32_UINT, true);
   const auto output = texture(width, height, DXGI_FORMAT_R32_UINT, true);
-
-  for (const UINT scale : {1u, 2u, 4u, 3u}) {
-    SCOPED_TRACE(scale);
-    const UINT storage_scale = scale == 3u ? 2u : scale;
-    const UINT scaled_width = (width + storage_scale - 1u) / storage_scale;
-    const UINT scaled_height = (height + storage_scale - 1u) / storage_scale;
-    const auto probability = [](auto x, auto y) {
-      return float(1 + x + 2 * y) / 16.0f;
-    };
-    // Only the upper-left score lattice is current. The remaining texels carry poison.
-    std::vector<UINT> codes(width * height, 0xffffffffu);
-    for (UINT y = 0u; y < scaled_height; ++y) {
-      for (UINT x = 0u; x < scaled_width; ++x) {
-        codes[y * width + x] = scale == 1u ? 30u + x + y : std::bit_cast<UINT>(probability(x, y));
-      }
+  std::vector<UINT> codes(width * height);
+  for (UINT y = 0u; y < height; ++y) {
+    for (UINT x = 0u; x < width; ++x) {
+      codes[y * width + x] = 30u + x + y;
     }
-    const auto candidate = texture(width, height, DXGI_FORMAT_R32_UINT, false, codes.data(), width * 4u);
+  }
+  const auto candidate = texture(width, height, DXGI_FORMAT_R32_UINT, false, codes.data(), width * 4u);
+
+  // Only the palette decoder's native score proof (1) is current; any other lattice word is stale.
+  for (const UINT scale : {1u, 0u, 2u, 4u}) {
+    SCOPED_TRACE(scale);
     const std::array<UINT, 36u> work_words {2u, 1u, 0u, scale, 1u, 0u, width, height - 1u};
     const auto work = buffer(work_words.size(), true, false, false, work_words.data());
     ID3D11Buffer *const cbuffers[] {model_request.Get(), contour_constants.Get()};
@@ -412,7 +404,7 @@ TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, DirectPublishesScaledScoresOnlyInCurre
     in[7u] = work.srv.Get();
     in[13u] = current_sct.srv.Get();
     in[15u] = candidate.srv.Get();
-    ID3D11UnorderedAccessView *const out[] {matte.uav.Get(), legacy_dispatch.uav.Get(), nullptr,
+    ID3D11UnorderedAccessView *const out[] {matte.uav.Get(), nullptr, nullptr,
                                           output.uav.Get(), nullptr, receipt.uav.Get()};
     context->CSSetShader(shader.Get(), nullptr, 0u);
     context->CSSetConstantBuffers(0u, 2u, cbuffers);
@@ -424,22 +416,12 @@ TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, DirectPublishesScaledScoresOnlyInCurre
     const auto alpha = words(read(output.texture.Get()));
     const auto selected = words(read(matte.texture.Get()));
     const auto receipt_words = words(read(receipt.buffer.Get()));
-    EXPECT_EQ(receipt_words[2u], scale == 3u ? 1u : 4u);
-    EXPECT_EQ(receipt_words[3u], scale == 3u ? 1u : 0u);
+    EXPECT_EQ(receipt_words[2u], scale == 1u ? 4u : 1u);
+    EXPECT_EQ(receipt_words[3u], scale == 1u ? 0u : 1u);
     EXPECT_EQ(receipt_words[62u], 4u);
-    EXPECT_EQ(words(read(legacy_dispatch.buffer.Get())), (std::vector<UINT> {0u, 0u, 0u, 0u}));
     for (UINT y = 0u; y < height; ++y) {
       for (UINT x = 0u; x < width; ++x) {
-        UINT expected = 0u;
-        if (scale != 3u && x >= 1u && y < height - 1u) {
-          if (scale == 1u) {
-            expected = codes[y * width + x];
-          } else {
-            const auto mx = std::clamp((x + 0.5f) / scale - 0.5f, 0.0f, float(scaled_width - 1u));
-            const auto my = std::clamp((y + 0.5f) / scale - 0.5f, 0.0f, float(scaled_height - 1u));
-            expected = UINT(std::nearbyint(255.0f * probability(mx, my)));
-          }
-        }
+        const UINT expected = scale == 1u && x >= 1u && y < height - 1u ? codes[y * width + x] : 0u;
         EXPECT_EQ(alpha[y * width + x], expected) << x << "," << y;
         EXPECT_EQ(selected[y * width + x], expected >= 38u ? 1u : 0u) << x << "," << y;
       }
@@ -628,118 +610,6 @@ TEST_F(HostSbsDirectGlyphPublishGpuTest, WeakLineCanBeConfirmedByInkAnywhereInIt
   EXPECT_EQ(classify(true, 0.19f), 0xffffffffu);
   EXPECT_EQ(classify(true, 0.20f), 0u);
   EXPECT_EQ(classify(false, 0.19f), 0u);
-}
-
-TEST_F(HostSbsDirectGlyphPublishGpuTest, ResolvedFringeRequiresCurrentCompletedTapsAndQ64) {
-  const auto &specs = cache::direct_glyph_plan_specs;
-  const auto sources = cache::snapshot_sources(SUNSHINE_SHADERS_DIR, specs);
-  ASSERT_TRUE(sources);
-  ASSERT_EQ(cache::source_closure_sha256(sources), cache::direct_glyph_plan_source_closure_sha256);
-  const auto bytecode = cache::get(sources, specs[1u]);
-  ASSERT_TRUE(bytecode);
-  ComPtr<ID3D11ComputeShader> shader;
-  hr(device->CreateComputeShader(bytecode->data(), bytecode->size(), nullptr, &shader));
-
-  constexpr UINT width = 32u, height = 16u;
-  constexpr UINT fringe_flag = 32u, token_low = 13u, token_high = 29u;
-  const auto contour_constants = constants(std::array<UINT, 24u> {width, height, 0u, height});
-  constexpr std::array<UINT, 32u> sct_words {};
-  const auto current_sct = buffer(sct_words.size(), false, false, false, sct_words.data());
-  const auto receipt = buffer(64u, false, false, true);
-  const auto matte = texture(width, height, DXGI_FORMAT_R32_UINT, true);
-  const auto alpha = texture(width, height, DXGI_FORMAT_R32_UINT, true);
-
-  for (const UINT scale : {2u, 4u}) {
-    SCOPED_TRACE(scale);
-    const UINT cells_w = width / scale, cells_h = height / scale;
-    // One coarse column is left unowned but retains a high, finite scratch value.
-    const std::array<UINT, 52u> placement_words {
-      2u, 3u, 0u, 0u,
-      0u, 0u, 0u, 0u, 5u, cells_h, scale, 144u,
-      0u, 0u, 6u, 0u, cells_w, cells_h, 0u, 144u
-    };
-    auto partial_words = placement_words;
-    partial_words[1u] = 1u;
-    const auto placement = buffer(placement_words.size(), false, false, false, placement_words.data());
-    const auto partial = buffer(partial_words.size(), false, false, false, partial_words.data());
-
-    const std::array<UINT, 36u> work_words {2u, 1u, 0u, scale, 2u * scale, scale, 3u * scale, 2u * scale};
-    const std::array<UINT, 36u> empty_words {1u};
-    const std::array<UINT, 36u> fringe_words {1u, 1u, token_low, token_high, 2u * scale, 0u, 6u * scale, 3u * scale};
-    auto stale_words = fringe_words;
-    --stale_words[3u];
-    const auto fringe = buffer(fringe_words.size(), true, false, false, fringe_words.data());
-    const auto stale = buffer(stale_words.size(), true, false, false, stale_words.data());
-
-    std::vector<UINT> score_words(width * height, 0xffffffffu);
-    for (UINT y = 0u; y < cells_h; ++y) {
-      for (UINT x = 0u; x < cells_w; ++x) {
-        const UINT q = x == 1u || x == 2u ? 63u : x == 3u || x == 4u ? 64u : 128u;
-        score_words[y * width + x] = std::bit_cast<UINT>(float(q) / 255.0f);
-      }
-    }
-    const auto candidate = texture(width, height, DXGI_FORMAT_R32_UINT, false, score_words.data(), width * 4u);
-
-    const auto publish = [&](UINT flags, const auto &work_record,
-                             ID3D11ShaderResourceView *fringe_bounds, ID3D11ShaderResourceView *completed) {
-      const auto work = buffer(work_record.size(), true, false, false, work_record.data());
-      const auto request = constants(std::array<UINT, 12u> {width, height, 38u, flags, 0u, 0u, 0u, 0u,
-                                                           0u, 0u, token_low, token_high});
-      ID3D11Buffer *const cbuffers[] {request.Get(), contour_constants.Get()};
-      std::array<ID3D11ShaderResourceView *, 24u> in {};
-      in[7u] = work.srv.Get();
-      in[13u] = current_sct.srv.Get();
-      in[15u] = candidate.srv.Get();
-      in[22u] = fringe_bounds;
-      in[23u] = completed;
-      ID3D11UnorderedAccessView *const out[] {matte.uav.Get(), nullptr, nullptr, alpha.uav.Get(), nullptr, receipt.uav.Get()};
-      context->CSSetShader(shader.Get(), nullptr, 0u);
-      context->CSSetConstantBuffers(0u, 2u, cbuffers);
-      context->CSSetShaderResources(0u, in.size(), in.data());
-      context->CSSetUnorderedAccessViews(0u, std::size(out), out, nullptr);
-      context->Dispatch(width / 16u, height / 8u, 1u);
-      context->ClearState();
-      return std::array {words(read(alpha.texture.Get())), words(read(matte.texture.Get())), words(read(receipt.buffer.Get()))};
-    };
-
-    const auto base = publish(0u, work_words, fringe.srv.Get(), placement.srv.Get());
-    const auto accepted = publish(fringe_flag, work_words, fringe.srv.Get(), placement.srv.Get());
-    ASSERT_EQ(base[0].size(), width * height);
-    ASSERT_EQ(accepted[0].size(), width * height);
-    ASSERT_EQ(accepted[1].size(), width * height);
-    ASSERT_EQ(accepted[2].size(), 64u);
-    EXPECT_EQ(accepted[2][2u], 4u);
-    EXPECT_EQ(accepted[2][3u], 0u);
-    EXPECT_EQ(accepted[2][60u], token_low);
-    EXPECT_EQ(accepted[2][61u], token_high);
-    const auto pixel = [](UINT x, UINT y) { return y * width + x; };
-    EXPECT_EQ(base[0][pixel(2u * scale, scale)], 63u);
-    EXPECT_EQ(accepted[0][pixel(2u * scale, 0u)], 0u);
-    EXPECT_EQ(accepted[0][pixel(4u * scale - 1u, 0u)], 64u);
-    EXPECT_EQ(accepted[0][pixel(5u * scale, 0u)], 0u) << "Unowned bilinear tap";
-    EXPECT_EQ(accepted[0][pixel(7u * scale, 0u)], 0u) << "Owned high score outside authorized bounds";
-    EXPECT_EQ(accepted[0][pixel(4u * scale - 1u, 3u * scale)], 0u) << "Half-open bottom edge";
-    EXPECT_EQ(accepted[2], base[2]);
-    for (UINT y = 0u; y < height; ++y) {
-      for (UINT x = 0u; x < width; ++x) {
-        const auto i = pixel(x, y);
-        EXPECT_EQ(accepted[1][i], accepted[0][i] >= 38u ? 1u : 0u) << x << ',' << y;
-        if (x < 2u * scale || x >= 6u * scale || y >= 3u * scale ||
-            (x < 3u * scale && y >= scale && y < 2u * scale)) {
-          EXPECT_EQ(accepted[0][i], base[0][i]) << x << ',' << y;
-        }
-      }
-    }
-
-    EXPECT_EQ(publish(fringe_flag, work_words, stale.srv.Get(), placement.srv.Get()), base);
-    EXPECT_EQ(publish(fringe_flag, work_words, fringe.srv.Get(), partial.srv.Get()), base);
-    EXPECT_EQ(publish(fringe_flag, work_words, fringe.srv.Get(), nullptr), base);
-    const auto empty = publish(fringe_flag, empty_words, fringe.srv.Get(), placement.srv.Get());
-    const std::vector<UINT> zeros(width * height, 0u);
-    EXPECT_EQ(empty[0], zeros);
-    EXPECT_EQ(empty[1], zeros);
-    EXPECT_EQ(empty[2], base[2]);
-  }
 }
 
 TEST_F(HostSbsDirectGlyphPublishGpuTest, NativeHistoryRequiresOneMatchingCueInsideTheCurrentDetectorCap) {

@@ -14,5 +14,4 @@ namespace models::host_sbs_direct_glyph_gpu {
   inline constexpr unsigned int tile_capacity = 6u;
   inline constexpr unsigned int palette_input_words = tile_capacity * palette_tile.input_words();
   inline constexpr unsigned int palette_output_words = tile_capacity * palette_tile.output_words();
-  inline constexpr unsigned int placement_words = 4u + 8u * tile_capacity;
 }

@@ -63,10 +63,9 @@ bool OcrCurrent(uint count) {
 ByteAddressBuffer ActualRoot : register(t16);
 StructuredBuffer<uint> SourceEnvelope : register(t17);
 StructuredBuffer<uint> EmptyWitness : register(t21);
-RWByteAddressBuffer LegacyArgs : register(u1);
 RWByteAddressBuffer PublishArgs : register(u7);
 
-static const uint HasLazyLegacy = 4u, HasEmptyWitness = 8u;
+static const uint HasEmptyWitness = 8u;
 
 uint4 SourceWord(uint i) {
     return uint4(SourceEnvelope[i],SourceEnvelope[i+1u],SourceEnvelope[i+2u],SourceEnvelope[i+3u]);
@@ -124,13 +123,13 @@ bool SourceCurrent(uint proof_tag, uint features, uint4 formats) {
            all(SourceWord(100u)==formats);
 }
 
-uint4 LegacyFieldGrid() { return uint4((Field.xy+15u)/16u,1u,0u); }
+uint4 FieldGrid() { return uint4((Field.xy+15u)/16u,1u,0u); }
 
 // Rejoin the GPU classifier's receipt against the original Root/C24/SCT and owner.
 // Called only after EarlyContextCurrent and EarlyRootCurrent have verified that tuple.
 bool EmptyWitnessCurrent(uint mode, uint expectedWork) {
     if ((Shape.w&HasEmptyWitness)==0u||expectedWork!=1u||SCT[2u]!=0u||SCT[3u]!=0u||
-        ActualRoot.Load(28u)!=0x52434f4fu||any(ActualRoot.Load4(176u)!=LegacyFieldGrid())||
+        ActualRoot.Load(28u)!=0x52434f4fu||any(ActualRoot.Load4(176u)!=FieldGrid())||
         any(ActualRoot.Load4(224u)!=uint4(0u,1u,1u,0u))) return false;
     uint words, stride; EmptyWitness.GetDimensions(words,stride);
     if (words!=32u||stride!=4u||

@@ -1241,7 +1241,7 @@ namespace models {
     std::uint64_t model_frame = 0u, model_observation_us = 0u;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> selected_matte, selected_receipt;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ocr_record, alpha8, source_audit;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> work, legacy_dispatch, native_lines;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> work, native_lines;
   };
   class video_depth_estimator {
   public:

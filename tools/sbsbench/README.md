@@ -109,7 +109,7 @@ The run writes `direct_glyph_qualification.json` atomically, with role
 shape and tiles per submission, and the plan, palette transport, prepare and source-audit shader
 closures. Each frame record
 binds its exact source snapshot, observation clock, transaction token, selected receipt, SCT and
-SCP words, the branch (`active`, `empty` or `legacy`), the work boxes, and the shared-warp draw
+SCP words, the branch (`active` or `empty`), the work boxes, and the shared-warp draw
 record. Per-frame evidence lives under `direct-glyph/frame_<id>/`:
 
 | File | Content |
@@ -118,7 +118,6 @@ record. Per-frame evidence lives under `direct-glyph/frame_<id>/`:
 | `selected.u32` | The literal selected matte bound at t3, little-endian R32_UINT, native source crop |
 | `alpha8.u32` | The published alpha8 plane |
 | `work.u32` | The Direct Glyph Work header and line boxes |
-| `legacy-dispatch.u32` | The four-word fallback dispatch |
 | `ocr.u32` | The completed OCR8 record |
 | `source-audit.u32` | The source audit envelope of an active model observation |
 | `native-lines.u32` | Eight 16-word native line records |
@@ -131,9 +130,8 @@ Ordinary metric PNGs, schemas and scores remain separate.
 Each active model observation binds the selected draw's `source-audit.u32` file. An empty
 observation has a null `source_audit` binding.
 
-Every frame is `active` or `empty`, `execution[3]` is `1` for an active draw, and
-the fallback dispatch is all zero. Each used line record repeats its work box and stays inside
-the native band.
+Every frame is `active` or `empty`, and `execution[3]` is `1` for an active draw. Each used line
+record repeats its work box and stays inside the native band.
 
 ## Subtitle diagnostics
 
