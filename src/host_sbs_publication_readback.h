@@ -25,9 +25,9 @@ namespace models::host_sbs_publication_readback {
   namespace publication_receipt = host_sbs_gpu_completion_receipt;
 
   class inference_completion_notification_t {
-    using host_function_t = void (__stdcall *)(void *);
-    using launch_host_function_t = CUresult (__stdcall *)(CUstream, host_function_t, void *);
-    using stream_wait_event_t = CUresult (__stdcall *)(CUstream, CUevent, unsigned);
+    using host_function_t = void(__stdcall *)(void *);
+    using launch_host_function_t = CUresult(__stdcall *)(CUstream, host_function_t, void *);
+    using stream_wait_event_t = CUresult(__stdcall *)(CUstream, CUevent, unsigned);
 
     struct callback_state_t {
       std::weak_ptr<safe::deadline_waiter_t> waiter;
@@ -93,6 +93,7 @@ namespace models::host_sbs_publication_readback {
     publication_receipt_poll_result poll(const std::uint64_t estimator_generation);
 
     [[nodiscard]] std::size_t pending_count() const noexcept;
+
   private:
     bool ensure_resources();
 
@@ -106,6 +107,7 @@ namespace models::host_sbs_publication_readback {
       bool depth_health_present = false;
       bool outcomes_present = false;
     };
+
     ID3D11Device *device_;
     ID3D11DeviceContext *context_;
     std::array<slot_t, publication_receipt::slot_count> slots_;
