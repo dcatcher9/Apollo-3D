@@ -2180,7 +2180,7 @@ class EvalContractTests(unittest.TestCase):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         with open(os.path.join(repo, "src", "process.cpp"), encoding="utf-8") as fh:
             process = fh.read()
-        with open(os.path.join(repo, "src", "platform", "windows", "ar_glasses.cpp"),
+        with open(os.path.join(repo, "src", "platform", "windows", "ar_glasses_arbiter.cpp"),
                   encoding="utf-8") as fh:
             ownership = fh.read()
         hdr_ready_check = process.index("!request_hdr_state(display_context->enable_hdr, 6s)")

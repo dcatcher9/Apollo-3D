@@ -8000,8 +8000,9 @@ TEST(AsyncTeardownWorkerTests, ExplicitDrainTracksWorkersAndSealsLateLaunches) {
 }
 
 TEST(LocalPresenterLifecycleSourceTests, RetainsFinalSourceAndDoesNotSwallowLateReadyEvent) {
+  // The local presenter moved out of display_vram.cpp and reaches the converter through a handle.
   const auto display = read_source_file(
-    SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp"
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/local_presenter.cpp"
   );
   ASSERT_FALSE(display.empty());
 
@@ -8018,7 +8019,7 @@ TEST(LocalPresenterLifecycleSourceTests, RetainsFinalSourceAndDoesNotSwallowLate
   const auto latency_wait = callback.find("WaitForSingleObject(frame_latency_waitable, 0)", process_decision);
   const auto ready_pop = callback.find("depth_pipeline_ready_event->pop(0ms);", latency_wait);
   const auto schedule = callback.find("presenter_schedule.begin_frame(std::chrono::steady_clock::now())", latency_wait);
-  const auto convert = callback.find("converter->convert_rgb(", ready_pop);
+  const auto convert = callback.find("converter.convert_rgb(", ready_pop);
   const auto converted = callback.find("presenter_retry.record_converted();", convert);
   const auto present = callback.find("swapchain->Present1(", converted);
   const auto busy = callback.find("status == DXGI_ERROR_WAS_STILL_DRAWING", present);
@@ -8045,12 +8046,16 @@ TEST(LocalPresenterLifecycleSourceTests, RetainsFinalSourceAndDoesNotSwallowLate
   EXPECT_LT(schedule, convert);
   EXPECT_NE(callback.substr(convert, converted - convert).find("presentation_target"), std::string::npos)
     << "Local 3D must pass its owner cadence deadline to conversion.";
-  const auto rgb_begin = display.find(" convert_rgb(");
-  const auto rgb_end = display.find("bool needs_conversion_poll()", rgb_begin);
+  // The converter's RGB wrapper stays with the converter in display_vram.cpp.
+  const auto converter_source = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp"
+  );
+  const auto rgb_begin = converter_source.find(" convert_rgb(");
+  const auto rgb_end = converter_source.find("bool needs_conversion_poll()", rgb_begin);
   ASSERT_NE(rgb_begin, std::string::npos);
   ASSERT_NE(rgb_end, std::string::npos);
   EXPECT_NE(
-    display.substr(rgb_begin, rgb_end - rgb_begin).find("convert(img, presentation_target, &output)"),
+    converter_source.substr(rgb_begin, rgb_end - rgb_begin).find("convert(img, presentation_target, &output)"),
     std::string::npos
   ) << "The RGB wrapper must forward the presentation deadline to conversion.";
   EXPECT_LT(ready_pop, convert);
@@ -8361,7 +8366,7 @@ TEST(AsyncTeardownLifecycleSourceTests, DrainsTrackedOwnersBeforeProcessGlobals)
   ASSERT_NE(retire_launch, std::string::npos);
   EXPECT_LT(retire_worker, retirement_member);
   EXPECT_LT(retire_active, retire_build);
-  EXPECT_NE(display.find("busy_retries="), std::string::npos);
+  EXPECT_NE(read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/local_presenter.cpp").find("busy_retries="), std::string::npos);
 
   const auto normal_shutdown = main_source.find(
     "UI/API shutdown does not necessarily pass through the signal handler"
@@ -9331,7 +9336,7 @@ TEST(CaptureBackendFailoverTest, CaptureLoopsBracketEachAttemptWithDisplayChange
   EXPECT_LT(reopen_epoch_assignment, reopen_epoch);
   EXPECT_LT(reopen_epoch, reopen);
 
-  const auto display_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp");
+  const auto display_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/platform/windows/local_presenter.cpp");
   const auto local_epoch = display_source.find("const auto display_epoch_at_open = platf::display_change_epoch();");
   const auto local_open = display_source.find("auto display = platf::display(", local_epoch);
   const auto local_note = display_source.find("config.capture_failover->note_capture_result(", local_open);
