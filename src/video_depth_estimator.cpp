@@ -490,21 +490,11 @@ namespace models {
     unsigned throughput_stats_subtitle_suppressed = 0;
     unsigned throughput_stats_ocr_armed = 0;
 
-    // GPU-stream timing of the async TensorRT enqueues (diagnostics only).
-    // A small ring of CUDA event pairs per engine lets several inferences be in flight; the
-    // elapsed time is resolved lazily once the stop event completes and pushed to sbs_perf.
-    // All CUDA calls here run on the estimator thread with cuda_ctx current, like the rest
-    // of estimate(); no-ops entirely when diagnostics are off.
-    struct perf_evt_ring {
-      static constexpr int N = 4;
-      CUevent start[N] {};
-      CUevent stop[N] {};
-      bool busy[N] {};
-      int head = 0;
-      const char *stage = nullptr;
-    };
-
-    perf_evt_ring perf_depth_conditional;  // GPU arbitration plus either infer or reuse
+    // GPU-stream timing of the async TensorRT enqueues (diagnostics only), resolved lazily and
+    // pushed to sbs_perf. The ring's CUDA calls run on the estimator thread with cuda_ctx
+    // current, like the rest of estimate(); each failure it returns goes through
+    // observe_timing_event_failure. No-ops entirely when diagnostics are off.
+    host_sbs_depth_gpu_timing::cuda_event_ring_t perf_depth_conditional;  // GPU arbitration plus either infer or reuse
     cuda_conditional_graph::branch_timing_pending_t pending_branch_timing;
     std::shared_ptr<host_sbs_telemetry::collector> telemetry_performance;
 
@@ -586,37 +576,25 @@ namespace models {
       return true;
     }
 
-    void perf_try_resolve(perf_evt_ring &r, int slot, cuda_driver_api &cuda) {
-      if (!r.busy[slot] || !cuda.cuEventQuery) {
+    // Optional timing calls get the joined CUDA failure policy of the stream they measure.
+    void observe_timing_event_failure(const host_sbs_depth_gpu_timing::cuda_event_failure_t &failure) {
+      (void) observe_joined_cuda_failure(failure.operation, failure.result, false);
+    }
+
+    void perf_try_resolve(int slot, cuda_driver_api &cuda) {
+      const auto resolved = perf_depth_conditional.try_resolve(slot, cuda);
+      if (resolved.failure) {
+        observe_timing_event_failure(*resolved.failure);
         return;
       }
-      const CUresult query = cuda.cuEventQuery(r.stop[slot]);
-      if (query == CUDA_ERROR_NOT_READY) {
+      if (!resolved.elapsed_ms) {
         return;
       }
-      if (query != CUDA_SUCCESS) {
-        (void) observe_joined_cuda_failure(
-          "diagnostic timing-event query", query, false
-        );
-        return;
-      }
-      float ms = 0.0f;
-      const CUresult elapsed = cuda.cuEventElapsedTime ?
-                                 cuda.cuEventElapsedTime(
-                                   &ms, r.start[slot], r.stop[slot]
-                                 ) :
-                                 static_cast<CUresult>(-1);
-      if (elapsed != CUDA_SUCCESS) {
-        (void) observe_joined_cuda_failure(
-          "diagnostic timing-event elapsed query", elapsed, false
-        );
-        return;
-      }
-      sbs_perf::add_sample_ms(r.stage, ms);
-      if (telemetry_performance && &r == &perf_depth_conditional) {
+      const float ms = *resolved.elapsed_ms;
+      sbs_perf::add_sample_ms("depth_conditional_transaction", ms);
+      if (telemetry_performance) {
         telemetry_performance->record(host_sbs_telemetry::stage::conditional_transaction, ms, std::chrono::steady_clock::now());
       }
-      r.busy[slot] = false;
     }
 
     void resolve_completed_branch_timing() {
@@ -648,10 +626,10 @@ namespace models {
       }
     }
 
-    void perf_drain(perf_evt_ring &r) {
+    void perf_drain() {
       auto &cuda = cuda_driver_api::get();
-      for (int i = 0; i < perf_evt_ring::N; i++) {
-        perf_try_resolve(r, i, cuda);
+      for (int i = 0; i < host_sbs_depth_gpu_timing::cuda_event_ring_t::slot_count; i++) {
+        perf_try_resolve(i, cuda);
         if (is_terminal()) {
           break;
         }
@@ -659,104 +637,34 @@ namespace models {
     }
 
     // Record a start event before an enqueue; returns the ring slot (or -1 to skip timing).
-    int perf_begin(perf_evt_ring &r, CUstream stream) {
+    int perf_begin(CUstream stream) {
       if (!diagnostics_enabled) {
         return -1;
       }
       auto &cuda = cuda_driver_api::get();
-      if (!cuda.cuEventCreate || !cuda.cuEventRecord) {
+      if (!host_sbs_depth_gpu_timing::cuda_event_ring_t::recording_available(cuda)) {
         return -1;
       }
-      int slot = r.head;
-      perf_try_resolve(r, slot, cuda);  // reclaim the slot if its prior sample is ready
-      if (is_terminal() || r.busy[slot]) {
+      const int slot = perf_depth_conditional.next_slot();
+      perf_try_resolve(slot, cuda);  // reclaim the slot if its prior sample is ready
+      if (is_terminal() || perf_depth_conditional.in_flight(slot)) {
         return -1;  // terminal, or still in flight: do not start another measurement
       }
-      if (!r.start[slot]) {
-        const CUresult created = cuda.cuEventCreate(
-          &r.start[slot], CU_EVENT_DEFAULT
-        );
-        if (created != CUDA_SUCCESS) {
-          (void) observe_joined_cuda_failure(
-            "diagnostic timing-event creation", created, false
-          );
-          return -1;
-        }
-      }
-      if (!r.stop[slot]) {
-        const CUresult created = cuda.cuEventCreate(
-          &r.stop[slot], CU_EVENT_DEFAULT
-        );
-        if (created != CUDA_SUCCESS) {
-          (void) observe_joined_cuda_failure(
-            "diagnostic timing-event creation", created, false
-          );
-          return -1;
-        }
-      }
-      const CUresult recorded = cuda.cuEventRecord(r.start[slot], stream);
-      if (recorded != CUDA_SUCCESS) {
-        (void) observe_joined_cuda_failure(
-          "diagnostic timing-event start record", recorded, false
-        );
+      if (const auto failure = perf_depth_conditional.record_start(slot, stream, cuda)) {
+        observe_timing_event_failure(*failure);
         return -1;
       }
       return slot;
     }
 
     // Record the stop event after the enqueue and mark the slot pending.
-    void perf_end(perf_evt_ring &r, int slot, CUstream stream) {
+    void perf_end(int slot, CUstream stream) {
       if (slot < 0) {
         return;
       }
-      auto &cuda = cuda_driver_api::get();
-      const CUresult recorded = cuda.cuEventRecord ?
-                                  cuda.cuEventRecord(r.stop[slot], stream) :
-                                  static_cast<CUresult>(-1);
-      if (recorded != CUDA_SUCCESS) {
-        (void) observe_joined_cuda_failure(
-          "diagnostic timing-event stop record", recorded, false
-        );
-        return;
+      if (const auto failure = perf_depth_conditional.record_stop(slot, stream, cuda_driver_api::get())) {
+        observe_timing_event_failure(*failure);
       }
-      r.busy[slot] = true;
-      r.head = (r.head + 1) % perf_evt_ring::N;
-    }
-
-    [[nodiscard]] bool perf_destroy_events(cuda_driver_api &cuda) {
-      for (auto *r : {&perf_depth_conditional}) {
-        for (int i = 0; i < perf_evt_ring::N; i++) {
-          for (auto event : {
-                 std::pair<CUevent *, const char *> {&r->start[i], "start"},
-                 std::pair<CUevent *, const char *> {&r->stop[i], "stop"},
-               }) {
-            if (!*event.first) {
-              continue;
-            }
-            const bool destroy_api_available = cuda.cuEventDestroy != nullptr;
-            const CUresult destroyed = destroy_api_available ?
-                                         cuda.cuEventDestroy(*event.first) :
-                                         static_cast<CUresult>(-1);
-            if (detail::teardown_cuda_handle_may_be_forgotten(
-                  true,
-                  destroy_api_available,
-                  destroyed == CUDA_SUCCESS
-                )) {
-              *event.first = nullptr;
-              continue;
-            }
-            // Keep the failed raw handle non-null. CUevent has no value destructor, so estimator
-            // destruction deliberately leaks this and every later event together with retained
-            // operands. Do not issue another CUDA teardown call after a possibly deferred fault.
-            BOOST_LOG(warning)
-              << "Depth-estimator diagnostic " << event.second << " event " << i
-              << " destroy failed: result=" << destroyed
-              << "; retaining CUDA operands and quarantining participating contexts.";
-            return false;
-          }
-        }
-      }
-      return true;
     }
 
     [[nodiscard]] bool reset_depth_conditional_graph() noexcept {
@@ -3203,7 +3111,6 @@ namespace models {
       // Enable the process-wide rolling collector for diagnostic runs. Do not reset it here:
       // Galaxy XR and local-AR estimators may coexist, and one session must not invalidate the
       // other session's pending D3D query generation. The offline harness resets explicitly.
-      perf_depth_conditional.stage = "depth_conditional_transaction";
       sbs_perf::set_enabled(diagnostics_enabled);
       initialize_d3d_perf();
 
@@ -3906,7 +3813,7 @@ namespace models {
             );
             if (cuda_teardown_may_continue) {
               observe_teardown(
-                perf_destroy_events(cuda),
+                perf_depth_conditional.destroy_events(cuda),
                 "diagnostic event destruction"
               );
             }
@@ -6387,7 +6294,7 @@ namespace models {
       }
       if (diagnostics_enabled) {
         resolve_completed_branch_timing();
-        perf_drain(perf_depth_conditional);
+        perf_drain();
         if (is_terminal()) {
           return make_result();
         }
@@ -7084,7 +6991,7 @@ namespace models {
 
       // Resolve completed inference-timing events only for diagnostic runs.
       if (diagnostics_enabled) {
-        perf_drain(perf_depth_conditional);
+        perf_drain();
         if (is_terminal()) {
           return {};
         }
@@ -8056,7 +7963,7 @@ namespace models {
               );
             }
             const int depth_perf_slot = wrapper_ready ?
-                                          perf_begin(perf_depth_conditional, cu_stream) :
+                                          perf_begin(cu_stream) :
                                           -1;
             if (wrapper_ready && !is_terminal()) {
               const bool launch_ocr_may_participate =
@@ -8092,7 +7999,7 @@ namespace models {
               }
               ocr_armed = enqueued && launch_ocr_may_participate;
             }
-            perf_end(perf_depth_conditional, depth_perf_slot, cu_stream);
+            perf_end(depth_perf_slot, cu_stream);
           }
           if (!enqueued && !is_terminal()) {
             mark_terminal_failure(true);

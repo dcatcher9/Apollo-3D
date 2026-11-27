@@ -1,9 +1,10 @@
 /**
  * @file src/host_sbs_depth_gpu_timing.h
- * @brief Nonblocking D3D11 timestamp ring for the depth estimator's diagnostics.
+ * @brief Nonblocking D3D11 timestamp and CUDA event rings for the depth estimator's diagnostics.
  */
 #pragma once
 
+#include "cuda_driver_api.h"
 #include "host_sbs_telemetry_perf.h"
 
 #include <array>
@@ -11,6 +12,8 @@
 #include <cstdint>
 #include <d3d11.h>
 #include <memory>
+#include <optional>
+#include <string_view>
 #include <wrl/client.h>
 
 namespace models::host_sbs_depth_gpu_timing {
@@ -66,5 +69,61 @@ namespace models::host_sbs_depth_gpu_timing {
     std::array<d3d_slot_t, d3d_perf_ring_size> d3d_perf_slots;
     std::size_t d3d_perf_next = 0;
     bool d3d_perf_ready = false;
+  };
+
+  // One failed CUDA call of the event ring. The ring only abandons the measurement it was
+  // making; its owner decides what the failure means for the stream.
+  struct cuda_event_failure_t {
+    std::string_view operation;
+    CUresult result;
+  };
+
+  // GPU-stream timing of an async enqueue (diagnostics only). A small ring of CUDA event pairs
+  // lets several enqueues be in flight; each elapsed time is read back lazily once its stop
+  // event completes. Every call runs on the owner's thread with the owner's CUDA context
+  // current. The ring owns its events, their recording and their readback, and returns every
+  // CUDA failure instead of applying a policy to it.
+  class cuda_event_ring_t {
+  public:
+    static constexpr int slot_count = 4;
+
+    struct resolution_t {
+      std::optional<float> elapsed_ms;  // The slot's sample; the slot is free again.
+      std::optional<cuda_event_failure_t> failure;  // The slot stays in flight.
+    };
+
+    // Reads back the slot's sample once its stop event has completed. An idle slot, a slot
+    // still in flight and a driver without event queries return neither.
+    resolution_t try_resolve(int slot, cuda_driver_api &cuda);
+
+    // The slot the next measurement uses.
+    [[nodiscard]] int next_slot() const noexcept {
+      return head;
+    }
+
+    [[nodiscard]] bool in_flight(int slot) const noexcept {
+      return busy[slot];
+    }
+
+    // Whether the driver exports the calls record_start makes.
+    [[nodiscard]] static bool recording_available(const cuda_driver_api &cuda) noexcept {
+      return cuda.cuEventCreate && cuda.cuEventRecord;
+    }
+
+    // Creates the slot's events on first use, then records its start event.
+    std::optional<cuda_event_failure_t> record_start(int slot, CUstream stream, cuda_driver_api &cuda);
+
+    // Records the slot's stop event, marks the slot in flight and advances the ring.
+    std::optional<cuda_event_failure_t> record_stop(int slot, CUstream stream, cuda_driver_api &cuda);
+
+    // Destroys every created event. Returns false at the first failed destroy and keeps that
+    // and every later handle, so no other CUDA teardown call follows a possibly deferred fault.
+    [[nodiscard]] bool destroy_events(cuda_driver_api &cuda);
+
+  private:
+    CUevent start[slot_count] {};
+    CUevent stop[slot_count] {};
+    bool busy[slot_count] {};
+    int head = 0;
   };
 }  // namespace models::host_sbs_depth_gpu_timing

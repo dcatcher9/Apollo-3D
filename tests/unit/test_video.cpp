@@ -1459,7 +1459,7 @@ TEST(TensorRtContextLifecycleTest, EstimatorDestructorUsesOnlyBoundedNonblocking
     "!gpu_conditional_bridge_context_failed",
     chain_begin
   );
-  const auto event_destroy = destructor.find("perf_destroy_events(cuda)");
+  const auto event_destroy = destructor.find("perf_depth_conditional.destroy_events(cuda)");
   const auto inference_event_destroy = destructor.find(
     "destroy_inference_done_events(cuda)",
     event_destroy
@@ -1615,16 +1615,20 @@ TEST(TensorRtContextLifecycleTest, EstimatorDestructorUsesOnlyBoundedNonblocking
   }
   EXPECT_EQ(failure_report_count, 2u);
 
-  const auto perf_begin = source.find(
-    "[[nodiscard]] bool perf_destroy_events(cuda_driver_api &cuda)"
+  const auto timing_source = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/host_sbs_depth_gpu_timing.cpp"
   );
-  const auto perf_end = source.find(
-    "[[nodiscard]] bool reset_depth_conditional_graph()",
+  ASSERT_FALSE(timing_source.empty());
+  const auto perf_begin = timing_source.find(
+    "bool cuda_event_ring_t::destroy_events(cuda_driver_api &cuda)"
+  );
+  const auto perf_end = timing_source.find(
+    "}  // namespace models::host_sbs_depth_gpu_timing",
     perf_begin
   );
   ASSERT_NE(perf_begin, std::string::npos);
   ASSERT_NE(perf_end, std::string::npos);
-  const auto perf_destroy = source.substr(perf_begin, perf_end - perf_begin);
+  const auto perf_destroy = timing_source.substr(perf_begin, perf_end - perf_begin);
   const auto destroy_policy = perf_destroy.find(
     "teardown_cuda_handle_may_be_forgotten("
   );

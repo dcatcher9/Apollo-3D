@@ -1,13 +1,16 @@
 /**
  * @file src/host_sbs_depth_gpu_timing.cpp
- * @brief Nonblocking D3D11 timestamp ring for the depth estimator's diagnostics.
+ * @brief Nonblocking D3D11 timestamp and CUDA event rings for the depth estimator's diagnostics.
  */
 #include "host_sbs_depth_gpu_timing.h"
 
 #include "logging.h"
 #include "sbs_perf.h"
+#include "video_depth_estimator.h"
 
 #include <chrono>
+#include <initializer_list>
+#include <utility>
 
 namespace models::host_sbs_depth_gpu_timing {
   void d3d_ring_t::initialize(ID3D11Device *device, bool diagnostics_enabled) {
@@ -294,5 +297,107 @@ namespace models::host_sbs_depth_gpu_timing {
       return &slot;
     }
     return nullptr;  // Never stall the encode thread merely to collect telemetry.
+  }
+
+  cuda_event_ring_t::resolution_t cuda_event_ring_t::try_resolve(const int slot, cuda_driver_api &cuda) {
+    if (!busy[slot] || !cuda.cuEventQuery) {
+      return {};
+    }
+    const CUresult query = cuda.cuEventQuery(stop[slot]);
+    if (query == CUDA_ERROR_NOT_READY) {
+      return {};
+    }
+    if (query != CUDA_SUCCESS) {
+      return {.failure = cuda_event_failure_t {"diagnostic timing-event query", query}};
+    }
+    float ms = 0.0f;
+    const CUresult elapsed = cuda.cuEventElapsedTime ?
+                               cuda.cuEventElapsedTime(
+                                 &ms, start[slot], stop[slot]
+                               ) :
+                               static_cast<CUresult>(-1);
+    if (elapsed != CUDA_SUCCESS) {
+      return {.failure = cuda_event_failure_t {"diagnostic timing-event elapsed query", elapsed}};
+    }
+    busy[slot] = false;
+    return {.elapsed_ms = ms};
+  }
+
+  std::optional<cuda_event_failure_t> cuda_event_ring_t::record_start(
+    const int slot,
+    CUstream stream,
+    cuda_driver_api &cuda
+  ) {
+    if (!start[slot]) {
+      const CUresult created = cuda.cuEventCreate(
+        &start[slot], CU_EVENT_DEFAULT
+      );
+      if (created != CUDA_SUCCESS) {
+        return cuda_event_failure_t {"diagnostic timing-event creation", created};
+      }
+    }
+    if (!stop[slot]) {
+      const CUresult created = cuda.cuEventCreate(
+        &stop[slot], CU_EVENT_DEFAULT
+      );
+      if (created != CUDA_SUCCESS) {
+        return cuda_event_failure_t {"diagnostic timing-event creation", created};
+      }
+    }
+    const CUresult recorded = cuda.cuEventRecord(start[slot], stream);
+    if (recorded != CUDA_SUCCESS) {
+      return cuda_event_failure_t {"diagnostic timing-event start record", recorded};
+    }
+    return std::nullopt;
+  }
+
+  std::optional<cuda_event_failure_t> cuda_event_ring_t::record_stop(
+    const int slot,
+    CUstream stream,
+    cuda_driver_api &cuda
+  ) {
+    const CUresult recorded = cuda.cuEventRecord ?
+                                cuda.cuEventRecord(stop[slot], stream) :
+                                static_cast<CUresult>(-1);
+    if (recorded != CUDA_SUCCESS) {
+      return cuda_event_failure_t {"diagnostic timing-event stop record", recorded};
+    }
+    busy[slot] = true;
+    head = (head + 1) % slot_count;
+    return std::nullopt;
+  }
+
+  bool cuda_event_ring_t::destroy_events(cuda_driver_api &cuda) {
+    for (int i = 0; i < slot_count; i++) {
+      for (auto event : {
+             std::pair<CUevent *, const char *> {&start[i], "start"},
+             std::pair<CUevent *, const char *> {&stop[i], "stop"},
+           }) {
+        if (!*event.first) {
+          continue;
+        }
+        const bool destroy_api_available = cuda.cuEventDestroy != nullptr;
+        const CUresult destroyed = destroy_api_available ?
+                                     cuda.cuEventDestroy(*event.first) :
+                                     static_cast<CUresult>(-1);
+        if (detail::teardown_cuda_handle_may_be_forgotten(
+              true,
+              destroy_api_available,
+              destroyed == CUDA_SUCCESS
+            )) {
+          *event.first = nullptr;
+          continue;
+        }
+        // Keep the failed raw handle non-null. CUevent has no value destructor, so estimator
+        // destruction deliberately leaks this and every later event together with retained
+        // operands. Do not issue another CUDA teardown call after a possibly deferred fault.
+        BOOST_LOG(warning)
+          << "Depth-estimator diagnostic " << event.second << " event " << i
+          << " destroy failed: result=" << destroyed
+          << "; retaining CUDA operands and quarantining participating contexts.";
+        return false;
+      }
+    }
+    return true;
   }
 }  // namespace models::host_sbs_depth_gpu_timing
