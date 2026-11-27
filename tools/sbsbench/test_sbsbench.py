@@ -1673,7 +1673,10 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("tensor_previous_input_uav", estimator)
         self.assertIn("dispatch_parallax_v2_frame_publication(perf_slot)", estimator)
         self.assertIn("static_cast<std::size_t>(reduce_groups) * 3u", estimator)
-        self.assertIn("parallax_frame_stats_end -", estimator)
+        with open(os.path.join(repo, "src", "host_sbs_depth_gpu_timing.cpp"),
+                  encoding="utf-8") as fh:
+            timing = fh.read()
+        self.assertIn("parallax_frame_stats_end -", timing)
 
         with open(os.path.join(repo, "src", "host_sbs_v2_gpu_executor.cpp"),
                   encoding="utf-8") as fh:
