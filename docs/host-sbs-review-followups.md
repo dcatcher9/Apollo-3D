@@ -232,7 +232,7 @@ The shared adapter uses about 15.0 MiB of logical native-band working storage on
 3840-wide cases, versus about 66.45 MiB for the push/pull owner of the compared compositor, excluding common inputs,
 diagnostic outputs and driver overhead. Balanced warm preparation-plus-draw timestamps are a
 private component comparison. They include submission gaps and fresh fixture resources; the
-test executable is coverage-instrumented. They establish no live FPS or headset-latency gain.
+test executable was coverage-instrumented. They establish no live FPS or headset-latency gain.
 
 The optimized native test build passes the separately selected saved-input comparisons and the
 48 colour/ROI/signed-displacement/fractional-sampling combinations. The renderer regression

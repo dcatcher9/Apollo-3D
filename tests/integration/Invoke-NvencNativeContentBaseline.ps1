@@ -282,12 +282,6 @@ Assert-That (($relativeOutput -split '[/\\]')[0] -like 'cmake-build-*') 'OutputR
 $null = Get-ScopedPath $repo $relativeOutput
 Assert-That (!(Test-Path -LiteralPath $OutputRoot)) 'OutputRoot must be new; existing evidence is never overwritten'
 $null = [IO.Directory]::CreateDirectory($OutputRoot)
-# Keep instrumented GCC paths short. Strip six components, as in the native CPU qualifier;
-# retaining the entire source tree under each long case directory can exceed Windows MAX_PATH.
-$buildTree = Get-ScopedPath $repo (($relativeOutput -split '[/\\]')[0])
-$coverageRoot = Join-Path $buildTree ('gcov-nvenc-' + [Guid]::NewGuid().ToString('N').Substring(0, 12))
-Assert-That (!(Test-Path -LiteralPath $coverageRoot)) 'Coverage root must be new'
-$null = [IO.Directory]::CreateDirectory($coverageRoot)
 $frozenBinary = Join-Path $OutputRoot 'native-tests.exe'
 Copy-Item -LiteralPath $TestBinary -Destination $frozenBinary
 Assert-Hash $frozenBinary $ExpectedTestBinarySha256
@@ -300,18 +294,14 @@ $caseSpecs = @(
     @{name='Av1P010Depth1';codec='av1';ten=$true;depth=1}, @{name='Av1P010Depth2';codec='av1';ten=$true;depth=2}
 )
 $cases = [Collections.Generic.List[object]]::new()
-$coverageIndex = 0
 foreach ($caseSpec in $caseSpecs) {
     $caseRoot = Get-ScopedPath $OutputRoot $caseSpec.name
     $null = [IO.Directory]::CreateDirectory($caseRoot)
     $nativeRoot = Join-Path $caseRoot 'native'
     $xmlPath = Join-Path $caseRoot 'native.xml'
-    $coverage = Join-Path $coverageRoot ([string]$coverageIndex)
-    $coverageIndex = $coverageIndex + 1
-    $null = [IO.Directory]::CreateDirectory($coverage)
     Assert-Hash $frozenBinary $ExpectedTestBinarySha256
     $null = Invoke-OwnedChild $frozenBinary @("--gtest_filter=NativeNvencContentGpuTest.$($caseSpec.name)", "--gtest_output=xml:$xmlPath") (Join-Path $caseRoot 'native-run') $NativeTimeoutSeconds @{
-        SUNSHINE_RUN_NATIVE_NVENC_TESTS='1';SUNSHINE_NATIVE_NVENC_OUTPUT_DIR=$nativeRoot;GCOV_PREFIX=$coverage.Replace('\','/');GCOV_PREFIX_STRIP='6';SUNSHINE_TEST_HOST_SBS_SHADER_CACHE=''
+        SUNSHINE_RUN_NATIVE_NVENC_TESTS='1';SUNSHINE_NATIVE_NVENC_OUTPUT_DIR=$nativeRoot;SUNSHINE_TEST_HOST_SBS_SHADER_CACHE=''
     }
     [xml]$xml = Get-Content -LiteralPath $xmlPath -Raw
     $testcases = @($xml.testsuites.testsuite.testcase)
@@ -355,7 +345,7 @@ foreach ($caseSpec in $caseSpecs) {
         $owners.Add($ownerFacts)
     }
     Assert-Hash $manifestPath $nativeHash
-    $cases.Add([ordered]@{name=$caseSpec.name;codec=$caseSpec.codec;pixel_format=$pixelFormat;requested_depth=$caseSpec.depth;coverage_directory=$coverage;adapter=$native.adapter;settings=$native.settings;nvenc_api=$native.nvenc_api;native_schema=$native.schema;native_manifest=[IO.Path]::GetRelativePath($OutputRoot,$manifestPath);native_manifest_sha256=$nativeHash;owners=$owners.ToArray()})
+    $cases.Add([ordered]@{name=$caseSpec.name;codec=$caseSpec.codec;pixel_format=$pixelFormat;requested_depth=$caseSpec.depth;adapter=$native.adapter;settings=$native.settings;nvenc_api=$native.nvenc_api;native_schema=$native.schema;native_manifest=[IO.Path]::GetRelativePath($OutputRoot,$manifestPath);native_manifest_sha256=$nativeHash;owners=$owners.ToArray()})
 }
 Assert-Pins $SourcePins
 Assert-Hash $TestBinary $ExpectedTestBinarySha256
@@ -383,7 +373,7 @@ foreach ($caseResult in $cases) {
     }
 }
 $result = [ordered]@{
-    schema=1;qualified=$true;output_root=$OutputRoot;coverage_root=$coverageRoot;native_binary_sha256=$ExpectedTestBinarySha256.ToUpperInvariant();ffmpeg_sha256=$ExpectedFFmpegSha256.ToUpperInvariant();ffprobe_sha256=$ExpectedFFprobeSha256.ToUpperInvariant()
+    schema=1;qualified=$true;output_root=$OutputRoot;native_binary_sha256=$ExpectedTestBinarySha256.ToUpperInvariant();ffmpeg_sha256=$ExpectedFFmpegSha256.ToUpperInvariant();ffprobe_sha256=$ExpectedFFprobeSha256.ToUpperInvariant()
     source_pins_sha256=(Get-Hash (Join-Path $OutputRoot 'source-pins.json'));qualifier_sha256=(Get-Hash (Join-Path $OutputRoot 'qualifier-source.ps1'));cases=$cases.ToArray();artifacts=$artifacts.ToArray()
     boundary='Functional authored native NVENC content only. Logical pictures in flight do not establish GPU overlap; no performance or cancellation claim.'
 }
