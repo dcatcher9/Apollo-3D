@@ -3,7 +3,7 @@
  * @brief Draws one eye of a packed pair for the local shutter monitor and takes out the other
  *        eye's picture where the lens is open while the screen is being redrawn.
  *
- * This is an experiment that is off unless a settings file is named (see display_vram.cpp).
+ * This is an experiment that is off unless a settings file is named (see local_presenter.cpp).
  * The arithmetic and its reason are in local_shutter_eye_ps.hlsl.
  */
 #pragma once

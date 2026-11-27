@@ -170,9 +170,12 @@ Use a scoped localhost HTTP server for rendered testing. Do not ask browser auto
 - Windows capture, input, audio, local AR, and virtual display: `src/platform/windows/`; process
   launch, user tokens and scheduling in `process_launch.cpp`, `user_token.cpp`,
   `explorer_restart.cpp`, `network_win32.cpp` and `scheduling_win32.cpp` (shared `misc.h`); Local
-  AR in `ar_glasses*.cpp`; the local presenter in `local_presenter.cpp`; Dump 3D in
-  `sbs_debug_dump*.cpp`.
-- Host SBS model, state, shaders, and harness: `src/video_depth_estimator.*` with
+  AR in `ar_glasses*.cpp`; the local presenter in `local_presenter.cpp` with its shutter thread in
+  `local_shutter_session.cpp`; Dump 3D in `sbs_debug_dump*.cpp` and the dumps' shared PNG writer in
+  `debug_dump_png.h`.
+- Host SBS model, state, shaders, and harness: the pass shared by live Host 3D and the offline
+  native pass in `src/platform/windows/host_sbs_pipeline.*`, Host 3D's authority decisions in
+  `src/platform/windows/host_sbs_authority_tracker.*`, and `src/video_depth_estimator.*` with
   `src/tensorrt_engine_pool.*`, `src/host_sbs_direct_glyph_*`, `src/host_sbs_publication_readback.*`
   and `src/host_sbs_depth_gpu_timing.*`; `src_assets/windows/assets/shaders/directx/`, and
   `src/sbs_bench_harness.*`.
