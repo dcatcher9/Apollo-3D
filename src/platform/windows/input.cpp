@@ -193,21 +193,20 @@ namespace platf {
 
   class vigem_t {
   public:
-    int init() {
-      // Probe ViGEm during startup to see if we can successfully attach gamepads. This will allow us to
-      // immediately display the error message in the web UI even before the user tries to stream.
+    void init() {
+      // Probe ViGEm during startup so the log and the startup gamepad report say at once that
+      // gamepads will not work. Each gamepad still connects on its own (alloc_gamepad_internal),
+      // so a driver installed later works without restarting the host.
       client_t client {vigem_alloc()};
       VIGEM_ERROR status = vigem_connect(client.get());
-      if (!VIGEM_SUCCESS(status)) {
-        // Log a special fatal message for this case to show the error in the web UI
+      driver_found_at_startup = VIGEM_SUCCESS(status);
+      if (!driver_found_at_startup) {
         BOOST_LOG(fatal) << "ViGEmBus is not installed or running. You must install ViGEmBus for gamepad support!"sv;
       } else {
         vigem_disconnect(client.get());
       }
 
       gamepads.resize(MAX_GAMEPADS);
-
-      return 0;
     }
 
     /**
@@ -397,6 +396,9 @@ namespace platf {
     std::vector<gamepad_context_t> gamepads;
 
     client_t client;
+
+    // The startup probe's result; what the startup gamepad report says.
+    bool driver_found_at_startup {};
   };
 
 #ifdef SUNSHINE_TESTS
@@ -484,9 +486,7 @@ namespace platf {
     auto &raw = *(input_raw_t *) result.get();
 
     raw.vigem = std::make_unique<vigem_t>();
-    if (raw.vigem->init()) {
-      raw.vigem.reset();
-    }
+    raw.vigem->init();
 
     return result;
   }
@@ -1159,10 +1159,6 @@ namespace platf {
   }
 
   static int alloc_vigem_gamepad(input_raw_t *raw, const gamepad_id_t &id, const gamepad_arrival_t &metadata, feedback_queue_t feedback_queue) {
-    if (!raw->vigem) {
-      return -1;
-    }
-
     VIGEM_TARGET_TYPE selectedGamepadType;
 
     if (config::input.gamepad == "x360"sv) {
@@ -1259,7 +1255,7 @@ namespace platf {
     }
     raw->ds5_sidecars[nr].reset();
 
-    if (!raw->vigem || !raw->vigem->gamepads[nr].gp) {
+    if (!raw->vigem->gamepads[nr].gp) {
       return;
     }
 
@@ -1527,10 +1523,6 @@ namespace platf {
     }
     auto *vigem = ((input_raw_t *) input.get())->vigem.get();
 
-    // If there is no gamepad support
-    if (!vigem) {
-      return;
-    }
 
     auto &gamepad = vigem->gamepads[nr];
     if (!gamepad.gp) {
@@ -1567,10 +1559,6 @@ namespace platf {
     }
     auto *vigem = ((input_raw_t *) input.get())->vigem.get();
 
-    // If there is no gamepad support
-    if (!vigem) {
-      return;
-    }
 
     auto &gamepad = vigem->gamepads[touch.id.globalIndex];
     if (!gamepad.gp) {
@@ -1680,10 +1668,6 @@ namespace platf {
     }
     auto *vigem = ((input_raw_t *) input.get())->vigem.get();
 
-    // If there is no gamepad support
-    if (!vigem) {
-      return;
-    }
 
     auto &gamepad = vigem->gamepads[motion.id.globalIndex];
     if (!gamepad.gp) {
@@ -1715,10 +1699,6 @@ namespace platf {
     }
     auto *vigem = ((input_raw_t *) input.get())->vigem.get();
 
-    // If there is no gamepad support
-    if (!vigem) {
-      return;
-    }
 
     auto &gamepad = vigem->gamepads[battery.id.globalIndex];
     if (!gamepad.gp) {
@@ -1819,7 +1799,7 @@ namespace platf {
     thread_local std::vector<supported_gamepad_t> gamepads;
     gamepads = make_supported_gamepads(
       true,
-      ((input_raw_t *) input)->vigem != nullptr
+      ((input_raw_t *) input)->vigem->driver_found_at_startup
     );
     const auto ds5_available = ds5::refresh_component_availability();
     gamepads.push_back({"ds5", ds5_available, ds5_available ? "" : "gamepads.ds5-sidecar-not-available"});
