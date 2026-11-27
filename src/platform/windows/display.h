@@ -1226,6 +1226,9 @@ namespace platf::dxgi {
     // AR outputs consume the packed raster directly. A physical shutter monitor consumes one
     // native-size eye per scanout, driven independently from capture/conversion.
     bool frame_sequential = false;
+    // Windows runs the target at a desktop refresh rate below its signal's own. The driver
+    // then needs this program's pictures left to variable refresh; see nvprefs.
+    bool target_desktop_refresh_rate = false;
     std::function<void(std::string)> on_failure;
     // The session owner checks its security/desktop policy before and after a quiet clock
     // recovery. An absent check cannot authorize recovery of a shutter presentation.

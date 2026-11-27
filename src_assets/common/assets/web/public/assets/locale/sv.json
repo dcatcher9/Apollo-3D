@@ -254,7 +254,7 @@
     "local_monitor_ir_protocol": "Glasögonens IR-protokoll",
     "local_monitor_ir_protocol_desc": "Begränsade slutarfönster stöder NVIDIA 3D Vision (2), Sony (4), Panasonic (5) och anpassad Panasonic-firmware (6).",
     "local_monitor_frame_delay_us": "Slutarfördröjning (µs)",
-    "local_monitor_frame_delay_us_desc": "Ge sändaren tid att schemalägga sin IR-puls. Fördröjning plus varaktighet måste rymmas både i sändarens timer och i det valda ögonintervallet.",
+    "local_monitor_frame_delay_us_desc": "Tid från ett ögas uppdatering till att dess lins öppnas. Ge sändaren tid att schemalägga sin IR-puls. Fördröjning plus varaktighet måste rymmas i sändarens timer. Med ett visningsläge med lång vertikal släckning får fönstret sträcka sig in i nästa ögas intervall med upp till ett halvt intervall.",
     "local_monitor_frame_duration_us": "Slutarens varaktighet (µs)",
     "local_monitor_frame_duration_us_desc": "Lämna utrymme för protokollets öppningspuls och IR-avstånd. Slutarfönstret och marginalen för stängningspulsen måste rymmas i det valda ögonintervallet.",
     "local_monitor_signal_spacing_us": "Avstånd mellan IR-signaler (µs)",

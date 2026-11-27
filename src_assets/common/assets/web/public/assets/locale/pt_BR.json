@@ -254,7 +254,7 @@
     "local_monitor_ir_protocol": "Protocolo IR dos óculos",
     "local_monitor_ir_protocol_desc": "Janelas finitas de obturador suportam NVIDIA 3D Vision (2), Sony (4), Panasonic (5) e firmware personalizado da Panasonic (6).",
     "local_monitor_frame_delay_us": "Atraso do obturador (µs)",
-    "local_monitor_frame_delay_us_desc": "Deixe tempo para o emissor agendar seu pulso IR. O atraso mais a duração devem caber tanto no temporizador do emissor quanto no intervalo de olho selecionado.",
+    "local_monitor_frame_delay_us_desc": "Tempo desde a atualização de um olho até a abertura de sua lente. Deixe tempo para o emissor agendar seu pulso IR. O atraso mais a duração devem caber no temporizador do emissor. Com um modo de tela de apagamento vertical longo, a janela pode avançar no intervalo do olho seguinte em até meio intervalo.",
     "local_monitor_frame_duration_us": "Duração do obturador (µs)",
     "local_monitor_frame_duration_us_desc": "Deixe espaço para o pulso de abertura do protocolo e o espaçamento IR. A janela do obturador e a margem do pulso de fechamento devem caber no intervalo de olho selecionado.",
     "local_monitor_signal_spacing_us": "Espaçamento dos sinais IR (µs)",

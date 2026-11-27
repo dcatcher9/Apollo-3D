@@ -254,7 +254,7 @@
     "local_monitor_ir_protocol": "Protokół IR okularów",
     "local_monitor_ir_protocol_desc": "Skończone okna migawki obsługują NVIDIA 3D Vision (2), Sony (4), Panasonic (5) i niestandardowe oprogramowanie układowe Panasonic (6).",
     "local_monitor_frame_delay_us": "Opóźnienie migawki (µs)",
-    "local_monitor_frame_delay_us_desc": "Zostaw nadajnikowi czas na zaplanowanie impulsu IR. Opóźnienie wraz z czasem trwania musi zmieścić się zarówno w timerze nadajnika, jak i w wybranym interwale oka.",
+    "local_monitor_frame_delay_us_desc": "Czas od odświeżenia oka do otwarcia jego soczewki. Zostaw nadajnikowi czas na zaplanowanie impulsu IR. Opóźnienie plus czas trwania muszą zmieścić się w liczniku nadajnika. W trybie wyświetlania z długim wygaszaniem pionowym okno może sięgać w interwał następnego oka maksymalnie o pół interwału.",
     "local_monitor_frame_duration_us": "Czas trwania migawki (µs)",
     "local_monitor_frame_duration_us_desc": "Zostaw miejsce na impuls otwarcia protokołu i odstęp IR. Okno migawki i margines impulsu zamknięcia muszą zmieścić się w wybranym interwale oka.",
     "local_monitor_signal_spacing_us": "Odstęp sygnałów IR (µs)",

@@ -184,6 +184,31 @@ less delay, so the commands are evenly spaced and the configured delay is measur
 itself. A confirmation that arrives later than the hold is sent at once. A configured delay
 within 700 µs of the protocol minimum shortens the hold accordingly.
 
+A display mode with long vertical blanking draws each picture quickly and then holds it complete
+until the next one starts. That hold begins a whole eye interval after the picture's refresh
+boundary, so a lens window for it has to reach into the following eye interval. When delay,
+duration, spacing and close margin no longer fit the eye's own interval, the emitter is given
+the longest delay that still ends its signals 1000 µs before its next command, and the host holds
+the command for the remainder. The next eye is handed to Windows only after that command, so
+the hold is limited to half an eye interval. Such a window is accepted only with one of these
+long-blanking modes in mind: in an ordinary mode the panel is already drawing the next eye then.
+
+Windows 11 offers such modes by itself on a variable-refresh monitor: a refresh rate below the
+monitor's fastest is a desktop rate carried by the fastest signal's line timing with a longer
+vertical blanking. Attaching the virtual source can leave the monitor at the signal's own rate, so
+the host asks Windows for the selected rate again before it builds the replacement topology, and
+reads and writes the display configuration with virtual-refresh awareness until the session ends.
+A session always runs at the rate the monitor was selected at. This applies only to a monitor
+session that starts on a desktop rate; every other session, a monitor on its signal's own rate
+included, changes displays exactly as before.
+
+The host's NVIDIA driver profile normally asks for a fixed refresh rate, so that a Sunshine window
+that comes to the foreground cannot pull the monitor into windowed G-SYNC. On a desktop rate the
+driver would then show the presenter's pictures at the fastest signal's own rate. A monitor session
+on a desktop rate therefore leaves variable refresh to the driver for as long as its presenter
+runs, set before the presenter creates its graphics device, and asks for a fixed refresh again
+when the presenter ends.
+
 The presenter retains one stereo tuple for its complete left/right cycle. Host AI 3D and Game 3D
 keep their existing source, frame-attribution, fallback, HDR, and geometry rules. Monitor mode,
 device identity, and emitter configuration belong to this output surface; they do not alter those
@@ -198,10 +223,12 @@ Invalid mode, boolean, timing, protocol, or repeat values disable the monitor ca
 configuration loading. An enabled configuration also requires both a physical monitor selection
 and an emitter port. Configuration loading never starts a 3D session by itself.
 
-Delay plus duration must not exceed `32767` µs and must fit the assigned eye interval: the monitor's
-physical refresh period multiplied by **Refreshes per eye**. Delay, duration, signal spacing, and the
-protocol's close-pulse margin together must leave positive time for host presentation feedback in
-that interval. These limits leave room for the emitter's IR pulse and scheduling.
+Delay plus duration must not exceed `32767` µs. The eye interval is the monitor's physical refresh
+period multiplied by **Refreshes per eye**. Duration, signal spacing, and the protocol's close-pulse
+margin must fit that interval. Together with the delay they either leave positive time for host
+presentation feedback in the eye's own interval, or the delay exceeds that by no more than the host
+can hold a command back, as described under the presentation clock. These limits leave room for the
+emitter's IR pulse and scheduling.
 The UI receives the native protocol limits and checks the interval when the selected monitor is
 connected; Start 3D and the presenter share the native feedback-budget check before preparing a
 display session or sending eye commands.
@@ -266,6 +293,16 @@ commands active, including unsignalled acquisition and quiet recovery. It identi
 assignment and crosstalk; judge brightness with normal content. The environment flag is sampled
 once per presenter initialization and only affects shutter monitors. Stop the session and
 launch the usual host without the flag to return to normal content.
+
+An experimental ghost correction for a lens window longer than the time the whole screen holds one
+picture is off unless `SUNSHINE_LOCAL_MONITOR_GHOST_SETTINGS` names a settings file before the
+host starts. The host reads the file again whenever it is saved. Each line is `name = value`, and
+`#` starts a comment: `top_peak` and `bottom_peak` are the share of the other eye at the edge line
+(at most 0.45), `top_extent` and `bottom_extent` the part of the height after which that share
+reaches zero, `black_raise` (0 to 1) lifts black enough to cancel white beside it, `white_nits` is
+the brightness of white in HDR, `pattern` is 0 for the picture, 1 for a balance pattern and 2 for
+bars, and `view` is `left` or `right` for the eye that judges the balance pattern. Without the
+variable the presenter draws exactly as it does without this experiment.
 
 For per-slot host timing measurements, additionally set
 `SUNSHINE_LOCAL_MONITOR_SLOT_TIMING=1` before launching the host. This diagnostic leaves the

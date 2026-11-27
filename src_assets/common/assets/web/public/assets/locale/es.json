@@ -254,7 +254,7 @@
     "local_monitor_ir_protocol": "Protocolo IR de las gafas",
     "local_monitor_ir_protocol_desc": "Las ventanas de obturación de duración limitada admiten NVIDIA 3D Vision (2), Sony (4), Panasonic (5) y Panasonic con firmware personalizado (6).",
     "local_monitor_frame_delay_us": "Retardo del obturador (µs)",
-    "local_monitor_frame_delay_us_desc": "Deje tiempo para que el emisor programe su pulso IR. El retardo más la duración deben caber tanto en el temporizador del emisor como en el intervalo por ojo seleccionado.",
+    "local_monitor_frame_delay_us_desc": "Tiempo desde el refresco de un ojo hasta la apertura de su lente. Deje tiempo para que el emisor programe su pulso IR. El retardo más la duración deben caber en el temporizador del emisor. Con un modo de pantalla de borrado vertical largo, la ventana puede extenderse hasta medio intervalo en el intervalo del ojo siguiente.",
     "local_monitor_frame_duration_us": "Duración del obturador (µs)",
     "local_monitor_frame_duration_us_desc": "Deje margen para el pulso de apertura del protocolo y el espaciado IR. La ventana de obturación y el margen del pulso de cierre deben caber en el intervalo por ojo seleccionado.",
     "local_monitor_signal_spacing_us": "Espaciado de señales IR (µs)",

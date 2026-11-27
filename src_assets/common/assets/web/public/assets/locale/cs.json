@@ -256,7 +256,7 @@
     "local_monitor_ir_protocol": "Protokol IR brýlí",
     "local_monitor_ir_protocol_desc": "Konečná okna závěrky podporují NVIDIA 3D Vision (2), Sony (4), Panasonic (5) a vlastní firmware Panasonic (6).",
     "local_monitor_frame_delay_us": "Zpoždění závěrky (µs)",
-    "local_monitor_frame_delay_us_desc": "Ponechte vysílači čas na naplánování impulzu IR. Zpoždění plus doba trvání se musí vejít do časovače vysílače i do zvoleného intervalu oka.",
+    "local_monitor_frame_delay_us_desc": "Doba od obnovení oka do otevření jeho čočky. Ponechte vysílači čas na naplánování IR pulzu. Zpoždění plus doba trvání se musí vejít do časovače vysílače. U režimu zobrazení s dlouhým zatemňovacím intervalem může okno zasahovat do intervalu dalšího oka až o polovinu intervalu.",
     "local_monitor_frame_duration_us": "Doba trvání závěrky (µs)",
     "local_monitor_frame_duration_us_desc": "Ponechte prostor pro otevírací impulz protokolu a rozestup IR. Okno závěrky a rezerva zavíracího impulzu se musí vejít do zvoleného intervalu oka.",
     "local_monitor_signal_spacing_us": "Rozestup signálů IR (µs)",

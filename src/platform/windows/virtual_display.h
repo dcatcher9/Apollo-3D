@@ -124,6 +124,31 @@ namespace VDISPLAY {
    * driver-name marker, appears in the path in any case.
    */
   bool isSudoVirtualDisplayPath(std::wstring_view devicePath);
+  // Windows 11 gives a variable-refresh monitor its lower refresh rates as a desktop ("virtual")
+  // rate on top of the monitor's fastest signal: the path keeps the selected rate while the
+  // signal description keeps the fast mode. True when an active physical path, as a query
+  // without virtual-refresh awareness reports it, is in that state.
+  bool displayConfigUsesVirtualRefreshRate(
+    const std::vector<DISPLAYCONFIG_PATH_INFO> &paths,
+    const std::vector<DISPLAYCONFIG_MODE_INFO> &modes
+  );
+  // Whether this active physical target runs at such a desktop refresh rate.
+  bool targetUsesDesktopRefreshRate(const LUID &adapterId, uint32_t targetId);
+  // Asks Windows for a desktop refresh rate on one active target and leaves its signal as it is.
+  // On a variable-refresh monitor a rate below the signal's own is then sent with the signal's
+  // line timing and a longer vertical blanking.
+  LONG setTargetDesktopRefreshRate(const LUID &adapterId, uint32_t targetId, int refreshMillihz);
+  // While one of these exists, the host's own display changes read and write the configuration
+  // with virtual-refresh awareness and ask Windows again for any desktop refresh rate a display
+  // lost on the way. A local shutter session on a desktop rate holds one for its whole life;
+  // without one, display changes are made exactly as they always were.
+  class desktop_refresh_rate_keeper_t {
+  public:
+    desktop_refresh_rate_keeper_t();
+    ~desktop_refresh_rate_keeper_t();
+    desktop_refresh_rate_keeper_t(const desktop_refresh_rate_keeper_t &) = delete;
+    desktop_refresh_rate_keeper_t &operator=(const desktop_refresh_rate_keeper_t &) = delete;
+  };
   display_identity_query_t queryVirtualDisplayIdentity(
     const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
     std::wstring_view devicePath

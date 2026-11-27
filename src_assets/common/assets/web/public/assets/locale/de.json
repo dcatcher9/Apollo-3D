@@ -254,7 +254,7 @@
     "local_monitor_ir_protocol": "IR-Protokoll der Brille",
     "local_monitor_ir_protocol_desc": "Zeitlich begrenzte Shutter-Fenster unterstützen NVIDIA 3D Vision (2), Sony (4), Panasonic (5) und Panasonic mit angepasster Firmware (6).",
     "local_monitor_frame_delay_us": "Shutter-Verzögerung (µs)",
-    "local_monitor_frame_delay_us_desc": "Lassen Sie dem Emitter Zeit, seinen IR-Impuls zu planen. Verzögerung plus Dauer müssen sowohl in den Timer des Emitters als auch in das gewählte Augenintervall passen.",
+    "local_monitor_frame_delay_us_desc": "Zeit vom Bildwechsel eines Auges bis zum Öffnen seiner Linse. Lassen Sie dem Emitter Zeit, seinen IR-Impuls zu planen. Verzögerung plus Dauer müssen in den Timer des Emitters passen. Bei einem Anzeigemodus mit langer Austastlücke darf das Fenster bis zu einem halben Intervall in das nächste Augenintervall reichen.",
     "local_monitor_frame_duration_us": "Shutter-Dauer (µs)",
     "local_monitor_frame_duration_us_desc": "Lassen Sie Raum für den Öffnungsimpuls des Protokolls und den IR-Abstand. Das Shutter-Fenster und die Reserve für den Schließimpuls müssen in das gewählte Augenintervall passen.",
     "local_monitor_signal_spacing_us": "IR-Signalabstand (µs)",

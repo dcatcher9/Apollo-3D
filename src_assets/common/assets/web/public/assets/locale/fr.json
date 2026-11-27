@@ -254,7 +254,7 @@
     "local_monitor_ir_protocol": "Protocole IR des lunettes",
     "local_monitor_ir_protocol_desc": "Les fenêtres d'obturation de durée limitée prennent en charge NVIDIA 3D Vision (2), Sony (4), Panasonic (5) et Panasonic avec firmware personnalisé (6).",
     "local_monitor_frame_delay_us": "Délai de l'obturateur (µs)",
-    "local_monitor_frame_delay_us_desc": "Laissez à l'émetteur le temps de programmer son impulsion IR. Le délai plus la durée doivent tenir à la fois dans la minuterie de l'émetteur et dans l'intervalle par œil sélectionné.",
+    "local_monitor_frame_delay_us_desc": "Temps entre le rafraîchissement d'un œil et l'ouverture de son verre. Laissez à l'émetteur le temps de programmer son impulsion IR. Le délai plus la durée doivent tenir dans la minuterie de l'émetteur. Avec un mode d'affichage à long intervalle de suppression, la fenêtre peut empiéter sur l'intervalle de l'œil suivant d'au plus un demi-intervalle.",
     "local_monitor_frame_duration_us": "Durée de l'obturateur (µs)",
     "local_monitor_frame_duration_us_desc": "Laissez de la marge pour l'impulsion d'ouverture du protocole et l'espacement IR. La fenêtre d'obturation et la marge de l'impulsion de fermeture doivent tenir dans l'intervalle par œil sélectionné.",
     "local_monitor_signal_spacing_us": "Espacement des signaux IR (µs)",

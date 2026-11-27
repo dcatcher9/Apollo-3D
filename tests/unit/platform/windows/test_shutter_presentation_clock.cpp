@@ -908,3 +908,69 @@ TEST(ShutterPresentationClock, CommandHoldNeverTakesTheEmitterBelowItsMinimumDel
   EXPECT_EQ(shutter_command_hold(100, 100), 0);
   EXPECT_EQ(shutter_command_hold(50, 100), 0);
 }
+
+TEST(ShutterPresentationClock, CommandPlanKeepsAWindowInsideItsOwnIntervalAsBefore) {
+  using platf::dxgi::detail::plan_shutter_command;
+  using platf::dxgi::detail::shutter_command_hold_us;
+  // 165 Hz, two refreshes per eye; spacing 30 plus protocol close margin 320.
+  const auto plan = plan_shutter_command(2000, 3600, 350, 100, 12118);
+  ASSERT_TRUE(plan);
+  EXPECT_FALSE(plan->late_window);
+  EXPECT_EQ(plan->hold_us, shutter_command_hold_us);
+  EXPECT_EQ(plan->emitter_delay_us, 1300);
+  // What the emitter's own interval leaves after its delay, duration and close signal.
+  EXPECT_EQ(plan->host_age_budget_us, 12118 - 1300 - 3600 - 350);
+  // A delay near the protocol minimum shortens the hold, never the emitter's minimum delay.
+  const auto short_delay = plan_shutter_command(500, 2000, 350, 100, 8333);
+  ASSERT_TRUE(short_delay);
+  EXPECT_EQ(short_delay->hold_us, 400);
+  EXPECT_EQ(short_delay->emitter_delay_us, 100);
+  // One microsecond of spare time in the own interval is still the ordinary plan.
+  const auto last = plan_shutter_command(500, 7482, 350, 100, 8333);
+  ASSERT_TRUE(last);
+  EXPECT_FALSE(last->late_window);
+  EXPECT_EQ(last->host_age_budget_us, 1 + 400);
+}
+
+TEST(ShutterPresentationClock, CommandPlanHoldsTheCommandForAWindowInTheNextInterval) {
+  using platf::dxgi::detail::latest_shutter_delay_us;
+  using platf::dxgi::detail::plan_shutter_command;
+  using platf::dxgi::detail::shutter_late_window_slack_us;
+  // 120 Hz with long blanking: the lens opens 7770 us after the eye's boundary for 2300 us.
+  const auto plan = plan_shutter_command(7770, 2300, 350, 100, 8333);
+  ASSERT_TRUE(plan);
+  EXPECT_TRUE(plan->late_window);
+  EXPECT_EQ(plan->emitter_delay_us, 8333 - 2300 - 350 - shutter_late_window_slack_us);
+  EXPECT_EQ(plan->hold_us + plan->emitter_delay_us, 7770);
+  EXPECT_EQ(plan->host_age_budget_us, plan->hold_us + shutter_late_window_slack_us);
+  // The emitter finishes this eye before its next command, which leaves one interval later.
+  EXPECT_LE(plan->emitter_delay_us + 2300 + 350 + shutter_late_window_slack_us, 8333);
+
+  // The first delay that no longer fits its own interval is held a little longer than usual.
+  const auto first = plan_shutter_command(5683, 2300, 350, 100, 8333);
+  ASSERT_TRUE(first);
+  EXPECT_TRUE(first->late_window);
+  EXPECT_EQ(first->hold_us, 1000);
+  EXPECT_EQ(first->emitter_delay_us, 4683);
+
+  // The host holds a command for at most half an eye interval.
+  const int latest = latest_shutter_delay_us(2300, 350, 8333);
+  EXPECT_EQ(latest, 4683 + 4166);
+  const auto at_limit = plan_shutter_command(latest, 2300, 350, 100, 8333);
+  ASSERT_TRUE(at_limit);
+  EXPECT_EQ(at_limit->hold_us, 4166);
+  EXPECT_FALSE(plan_shutter_command(latest + 1, 2300, 350, 100, 8333));
+}
+
+TEST(ShutterPresentationClock, CommandPlanRejectsWhatNeitherHostNorEmitterCanTime) {
+  using platf::dxgi::detail::plan_shutter_command;
+  // A window so long that the emitter has no delay left cannot be moved by the host either.
+  EXPECT_FALSE(plan_shutter_command(500, 7483, 350, 100, 8333));
+  EXPECT_FALSE(plan_shutter_command(500, 7800, 350, 100, 8333));
+  EXPECT_FALSE(plan_shutter_command(900, 7700, 350, 100, 8333));
+  // Below the protocol's minimum delay, or without a known interval.
+  EXPECT_FALSE(plan_shutter_command(50, 2000, 350, 100, 8333));
+  EXPECT_FALSE(plan_shutter_command(500, 2000, 350, 100, 0));
+  EXPECT_FALSE(plan_shutter_command(500, 0, 350, 100, 8333));
+  EXPECT_FALSE(plan_shutter_command(500, 2000, -1, 100, 8333));
+}

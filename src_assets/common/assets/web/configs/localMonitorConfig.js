@@ -49,6 +49,21 @@ export const rememberLocalMonitorTimingLimits = profiles => {
   }
 }
 
+// A display mode with long vertical blanking holds each finished picture into the next eye
+// interval, so the lens window may reach into it. The host then holds the eye command back and
+// the emitter counts the rest of the delay. Same rule as the native plan_shutter_command().
+const lateWindowSlackUs = 1000
+const commandHoldUs = 700
+const lateWindowFits = (delay, duration, timing, spacing, interval) => {
+  if (!timing || spacing === undefined) return false
+  const tail = timing.min_period_tail_base_us + spacing
+  if (delay + duration + tail < interval) return false // Inside its own interval: the ordinary checks apply.
+  const longestEmitterDelay = interval - duration - tail - lateWindowSlackUs
+  if (longestEmitterDelay < timing.min_delay_us) return false
+  const hold = Math.max(commandHoldUs, delay - longestEmitterDelay)
+  return delay - hold >= timing.min_delay_us && hold <= Math.floor(interval / 2)
+}
+
 // Each problem is a message descriptor { key, params } under config.local_monitor_error_*;
 // the page renders it with $t(error.key, error.params).
 export const validateLocalMonitorConfig = (config, refreshMillihz = monitorRefreshRates.get(config?.local_monitor_display_id), timing = monitorTimingLimits.get(Number(config?.local_monitor_ir_protocol))) => {
@@ -93,7 +108,8 @@ export const validateLocalMonitorConfig = (config, refreshMillihz = monitorRefre
     const maxWindow = timing?.max_window_us ?? 32767
     if (combined > maxWindow) {
       errors.push({key: 'config.local_monitor_error_window', params: {max: maxWindow}})
-    } else if (repeats !== undefined && Number.isFinite(rate) && rate > 0) {
+    } else if (repeats !== undefined && Number.isFinite(rate) && rate > 0 &&
+        !lateWindowFits(delay, duration, timing, parsed.get('local_monitor_signal_spacing_us'), Math.round(1000000000 * repeats / rate))) {
       const interval = Math.round(1000000000 * repeats / rate)
       if (combined > interval) {
         errors.push({key: 'config.local_monitor_error_eye_interval', params: {combined, interval}})

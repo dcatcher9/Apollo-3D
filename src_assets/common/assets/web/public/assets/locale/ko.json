@@ -254,7 +254,7 @@
     "local_monitor_ir_protocol": "안경 IR 프로토콜",
     "local_monitor_ir_protocol_desc": "유한한 셔터 구간은 NVIDIA 3D Vision (2), Sony (4), Panasonic (5), Panasonic 커스텀 펌웨어 (6)에서 지원됩니다.",
     "local_monitor_frame_delay_us": "셔터 지연 (µs)",
-    "local_monitor_frame_delay_us_desc": "이미터가 IR 펄스를 예약할 시간을 확보하세요. 지연과 지속 시간의 합은 이미터 타이머와 선택한 눈당 간격 모두에 맞아야 합니다.",
+    "local_monitor_frame_delay_us_desc": "한쪽 눈의 새로 고침부터 해당 렌즈가 열릴 때까지의 시간입니다. 이미터가 IR 펄스를 예약할 시간을 남겨 두세요. 지연과 지속 시간의 합은 이미터 타이머에 맞아야 합니다. 수직 블랭킹이 긴 디스플레이 모드에서는 창이 다음 눈 간격으로 최대 반 간격까지 넘어갈 수 있습니다.",
     "local_monitor_frame_duration_us": "셔터 지속 시간 (µs)",
     "local_monitor_frame_duration_us_desc": "프로토콜의 열림 펄스와 IR 간격을 위한 여유를 남기세요. 셔터 구간과 닫힘 펄스 여유는 선택한 눈당 간격에 맞아야 합니다.",
     "local_monitor_signal_spacing_us": "IR 신호 간격 (µs)",

@@ -46,6 +46,7 @@
 #include "local_presenter_window.h"
 #include "local_shutter_slot_timing.h"
 #include "open3d_emitter.h"
+#include "shutter_eye_pass.h"
 #include "shutter_presentation_clock.h"
 #include "shutter_slot_timing.h"
 #include "packed_output_fit.h"
@@ -9032,6 +9033,21 @@ namespace platf::dxgi {
                          "requesting a complete presentation-session rebuild."sv;
       return local_presenter_result_e::error;
     }
+    // The driver reads its variable-refresh setting for this program when a graphics device is
+    // created. A shutter presenter on a Windows desktop refresh rate allows variable refresh
+    // before it creates its device and asks for a fixed refresh again when it ends. Every other
+    // presenter leaves the profile as start-up wrote it, with a fixed refresh.
+    const bool variable_refresh = config.frame_sequential && config.target_desktop_refresh_rate;
+    const auto fixed_refresh_again = util::fail_guard([variable_refresh]() {
+      if (variable_refresh) {
+        platf::set_presentation_variable_refresh(false);
+      }
+    });
+    if (variable_refresh) {
+      const bool written = platf::set_presentation_variable_refresh(true);
+      BOOST_LOG(info) << "Local shutter monitor refresh: Windows desktop rate; the driver keeps its variable refresh for this presenter"sv
+                      << (written ? "."sv : " (the driver profile could not be written)."sv);
+    }
     if (config.frame_sequential) {
       const D3D_FEATURE_LEVEL levels[] {D3D_FEATURE_LEVEL_11_0};
       status = D3D11CreateDevice(
@@ -9276,9 +9292,43 @@ namespace platf::dxgi {
           }
         }
       }
-      BOOST_LOG(info) << "Local shutter calibration pattern enabled: left=red L, right=blue R; RGB values are 0/1, "sv
+      BOOST_LOG(info) << "Local shutter calibration pattern enabled: left=red L, right=blue R; RGB values are 0 and 1 (0 and 6, 480 nits, in HDR), "sv
                          "production packet ownership, clock and USB emitter remain active; emitter_flip_eyes="sv
                       << config.monitor_config.flip_eyes << '.';
+    }
+
+    // Experiment: a lens window longer than the time the whole screen shows one picture, with
+    // the other eye's picture taken out of the lines that are redrawn meanwhile. It is off
+    // unless this names a settings file, which is read again whenever it is saved. Both objects
+    // outlive the shutter thread declared below.
+    detail::shutter_eye_pass_t ghost_pass;
+    std::optional<detail::shutter_ghost_settings_file_t> ghost_settings_file;
+    if (config.frame_sequential) {
+      std::array<wchar_t, 512> ghost_settings_path {};
+      const auto length = GetEnvironmentVariableW(L"SUNSHINE_LOCAL_MONITOR_GHOST_SETTINGS", ghost_settings_path.data(), static_cast<DWORD>(ghost_settings_path.size()));
+      if (length > 0 && length < ghost_settings_path.size()) {
+        auto vertex_code = compile_vertex_shader(SUNSHINE_SHADERS_DIR "/local_shutter_eye_vs.hlsl");
+        auto pixel_code = compile_pixel_shader(SUNSHINE_SHADERS_DIR "/local_shutter_eye_ps.hlsl");
+        if (!vertex_code || !pixel_code ||
+            !ghost_pass.init(shutter_device.Get(), vertex_code->GetBufferPointer(), vertex_code->GetBufferSize(), pixel_code->GetBufferPointer(), pixel_code->GetBufferSize())) {
+          BOOST_LOG(error) << "Local shutter ghost correction could not prepare its shaders."sv;
+          return local_presenter_result_e::error;
+        }
+        ghost_settings_file.emplace(
+          std::filesystem::path {ghost_settings_path.data()},
+          [](const std::filesystem::path &path, const detail::shutter_ghost_settings_t &settings, const std::vector<std::string> &problems) {
+            BOOST_LOG(info) << "Local shutter ghost correction settings from "sv << path.string()
+                            << ": top "sv << settings.top_peak << " over "sv << settings.top_extent
+                            << " of the height, bottom "sv << settings.bottom_peak << " over "sv << settings.bottom_extent
+                            << ", black_raise "sv << settings.black_raise << ", white_nits "sv << settings.white_nits
+                            << ", pattern "sv << settings.pattern << ", view "sv << (settings.view_left ? "left"sv : "right"sv) << '.';
+            for (const auto &problem : problems) {
+              BOOST_LOG(warning) << "Local shutter ghost correction settings: "sv << problem;
+            }
+          }
+        );
+        BOOST_LOG(info) << "Local shutter ghost correction is available and follows its settings file."sv;
+      }
     }
 
     const auto open_shutter_source = [&](ID3D11Device *device, std::shared_ptr<switch_request_t> request = {}) -> std::shared_ptr<local_shutter_source_t> {
@@ -9333,13 +9383,26 @@ namespace platf::dxgi {
           return;
         }
         const auto emitter_limits = platf::open3d::timing_limits(config.monitor_config.ir_protocol, config.monitor_config.signal_spacing_us);
-        const int command_hold_us = emitter_limits ?
-                                      detail::shutter_command_hold(config.monitor_config.frame_delay_us, emitter_limits->min_delay_us) :
-                                      0;
+        // The configured delay runs from the eye's refresh boundary to the lens opening. The
+        // host holds the command for part of it and the emitter counts the rest.
+        const auto command_plan = emitter_limits ?
+                                    detail::plan_shutter_command(
+                                      config.monitor_config.frame_delay_us,
+                                      config.monitor_config.frame_duration_us,
+                                      config.monitor_config.signal_spacing_us + emitter_limits->min_period_tail_base_us,
+                                      emitter_limits->min_delay_us,
+                                      *emitter_eye_period
+                                    ) :
+                                    std::nullopt;
+        if (!command_plan) {
+          fail("the shutter delay and duration do not fit the selected display refresh");
+          return;
+        }
+        const int command_hold_us = command_plan->hold_us;
         platf::open3d::settings_t emitter_settings {
           .port = config.monitor_config.emitter_port,
           .protocol = config.monitor_config.ir_protocol,
-          .frame_delay_us = config.monitor_config.frame_delay_us - command_hold_us,
+          .frame_delay_us = command_plan->emitter_delay_us,
           .frame_duration_us = config.monitor_config.frame_duration_us,
           .signal_spacing_us = config.monitor_config.signal_spacing_us,
           .flip_eyes = config.monitor_config.flip_eyes,
@@ -9356,7 +9419,16 @@ namespace platf::dxgi {
         // command, so a long window does not shorten the time the host has to confirm an eye.
         // Half the eye interval stays well short of the lateness the firmware would mistake
         // for a dropped frame, which is a whole interval less a millisecond.
-        const auto host_age_budget_us = emitter_settings.averaging ? std::max(*feedback_budget, *emitter_eye_period / 2) : *feedback_budget;
+        // A window that reaches into the next eye interval is held back by the host first, so
+        // the eye is older when its command leaves; the plan's budget includes that hold.
+        const auto host_age_budget_us = emitter_settings.averaging ? std::max(command_plan->host_age_budget_us, *emitter_eye_period / 2) :
+                                                                     command_plan->host_age_budget_us;
+        BOOST_LOG(info) << "Local shutter command timing: lens opens "sv << config.monitor_config.frame_delay_us
+                        << " us after the eye's refresh boundary for "sv << config.monitor_config.frame_duration_us
+                        << " us; host holds the command "sv << command_hold_us << " us, emitter delay "sv
+                        << emitter_settings.frame_delay_us << " us, eye interval "sv << *emitter_eye_period
+                        << " us, window "sv << (command_plan->late_window ? "reaches into the next eye interval"sv : "inside the eye's own interval"sv)
+                        << '.';
         if (!emitter.connect(emitter_settings, emitter_setup_stop.get_token())) {
           if (!stopped()) {
             fail("could not configure and verify the selected USB emitter");
@@ -9476,11 +9548,34 @@ namespace platf::dxgi {
           std::int64_t present_begin_qpc = 0, present_end_qpc = 0;
           HRESULT result = S_FALSE, count_result = S_FALSE;
         };
+        detail::shutter_ghost_settings_t ghost_settings;
         const auto draw_eye = [&](bool left_eye) {
+          if (ghost_settings_file) {
+            ghost_settings_file->take(ghost_settings);
+          }
+          // The settings file's own patterns replace the red and blue one. A picture is
+          // corrected only when there is a pair to take the other eye from; if the pass cannot
+          // draw, the plain copy below still shows the eye.
+          if ((ghost_settings.pattern != 0 || (!shutter_test_pattern && ghost_settings.corrects() && pair)) &&
+              ghost_pass.draw(
+                shutter_context.Get(),
+                backbuffer_rtv.Get(),
+                pair,
+                left_eye,
+                static_cast<std::uint32_t>(output_width),
+                static_cast<std::uint32_t>(output_height),
+                config.hdr,
+                ghost_settings
+              )) {
+            return;
+          }
           if (shutter_test_pattern) {
-            constexpr FLOAT red[4] {1.0f, 0.0f, 0.0f, 1.0f};
-            constexpr FLOAT blue[4] {0.0f, 0.0f, 1.0f, 1.0f};
-            constexpr FLOAT white[4] {1.0f, 1.0f, 1.0f, 1.0f};
+            // In an HDR swapchain 1.0 is only 80 nits, too dim to judge through a lens that is
+            // open for a small part of the time; 6.0 is 480 nits.
+            const FLOAT level = config.hdr ? 6.0f : 1.0f;
+            const FLOAT red[4] {level, 0.0f, 0.0f, 1.0f};
+            const FLOAT blue[4] {0.0f, 0.0f, level, 1.0f};
+            const FLOAT white[4] {level, level, level, 1.0f};
             const auto &glyph = test_pattern_glyphs[left_eye ? 0 : 1];
             test_pattern_context->ClearView(backbuffer_rtv.Get(), left_eye ? red : blue, nullptr, 0);
             test_pattern_context->ClearView(backbuffer_rtv.Get(), white, glyph.rectangles.data(), glyph.count);
@@ -9916,8 +10011,17 @@ namespace platf::dxgi {
           previous_displayed_refresh = confirmation.feedback.refresh_count;
           set_timing_outcome(local_shutter_slot_timing_t::outcome_e::expired_before_emit);
           if (const auto boundary = feedback_tracker.last_present_qpc(); boundary && command_hold_us > 0) {
-            // Too short to sleep: the scheduler's granularity is longer than the whole hold.
             const auto send_at = *boundary + command_hold_us * qpc_frequency.QuadPart / 1000000;
+            // The usual hold is too short to sleep: the scheduler's granularity is longer than
+            // the whole of it. A hold of milliseconds, for a window that reaches into the next
+            // eye interval, sleeps on the high-resolution timer and spins only at the end.
+            const auto spin_from = send_at - 1000 * qpc_frequency.QuadPart / 1000000;
+            while (!stopped()) {
+              const auto remaining = std::chrono::microseconds {(spin_from - qpc_now()) * 1000000 / qpc_frequency.QuadPart};
+              if (remaining < 300us || !feedback_waiter->wait_until(std::chrono::steady_clock::now() + remaining)) {
+                break;
+              }
+            }
             while (qpc_now() < send_at) {
               YieldProcessor();
             }

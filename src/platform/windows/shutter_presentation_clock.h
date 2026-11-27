@@ -48,6 +48,63 @@ namespace platf::dxgi::detail {
     return spare <= 0 ? 0 : (spare < shutter_command_hold_us ? spare : shutter_command_hold_us);
   }
 
+  // A display mode with long vertical blanking draws a picture quickly and then holds it
+  // complete until the next one starts. That hold lies after the picture's own refresh
+  // boundary plus a whole eye interval, so the lens window for an eye may reach into the
+  // following interval. The emitter cannot be given more delay than its own command interval
+  // leaves room for; the host holds the command back for the rest. The next eye's first
+  // present is handed over only after that, so the hold is limited to half an eye interval. A hold of milliseconds ends on a timer, which
+  // can wake late, so the emitter is left a millisecond of slack before its next command.
+  inline constexpr int shutter_late_window_slack_us = 1000;
+
+  struct shutter_command_plan_t {
+    int hold_us = 0;  ///< From the eye's refresh boundary to its command leaving the host.
+    int emitter_delay_us = 0;  ///< From the command to the lens opening.
+    int host_age_budget_us = 0;  ///< Oldest the eye may be when its command leaves.
+    bool late_window = false;  ///< The lens window ends after the eye's own interval.
+  };
+
+  // close_tail_us: the signal spacing plus the protocol's close margin.
+  [[nodiscard]] constexpr std::optional<shutter_command_plan_t> plan_shutter_command(
+    int configured_delay_us,
+    int duration_us,
+    int close_tail_us,
+    int minimum_emitter_delay_us,
+    int eye_period_us
+  ) noexcept {
+    if (configured_delay_us < minimum_emitter_delay_us || duration_us <= 0 || close_tail_us < 0 || minimum_emitter_delay_us < 0 ||
+        eye_period_us <= 0 || configured_delay_us > std::numeric_limits<int>::max() / 4 ||
+        duration_us > std::numeric_limits<int>::max() / 4 || close_tail_us > std::numeric_limits<int>::max() / 4) {
+      return std::nullopt;
+    }
+    // Whole window, close signal included, inside the eye's own interval: the command leaves
+    // after the usual short hold and may be as late as that interval allows.
+    if (const std::int64_t own_interval_spare = static_cast<std::int64_t>(eye_period_us) - configured_delay_us - duration_us - close_tail_us;
+        own_interval_spare > 0) {
+      const int hold = shutter_command_hold(configured_delay_us, minimum_emitter_delay_us);
+      return shutter_command_plan_t {hold, configured_delay_us - hold, static_cast<int>(own_interval_spare) + hold, false};
+    }
+    // Otherwise the emitter gets the longest delay that still finishes this eye's signals, with
+    // some slack, before the next command arrives one eye interval later.
+    const std::int64_t longest_emitter_delay = static_cast<std::int64_t>(eye_period_us) - duration_us - close_tail_us - shutter_late_window_slack_us;
+    if (longest_emitter_delay < minimum_emitter_delay_us) {
+      return std::nullopt;
+    }
+    const std::int64_t hold = std::max<std::int64_t>(shutter_command_hold_us, configured_delay_us - longest_emitter_delay);
+    const std::int64_t emitter_delay = configured_delay_us - hold;
+    if (emitter_delay < minimum_emitter_delay_us || hold > eye_period_us / 2) {
+      return std::nullopt;
+    }
+    const std::int64_t spare = static_cast<std::int64_t>(eye_period_us) - emitter_delay - duration_us - close_tail_us;
+    return shutter_command_plan_t {static_cast<int>(hold), static_cast<int>(emitter_delay), static_cast<int>(hold + spare), true};
+  }
+
+  // The longest configured delay plan_shutter_command() accepts, for messages.
+  [[nodiscard]] constexpr int latest_shutter_delay_us(int duration_us, int close_tail_us, int eye_period_us) noexcept {
+    const std::int64_t latest = static_cast<std::int64_t>(eye_period_us) - duration_us - close_tail_us - shutter_late_window_slack_us + eye_period_us / 2;
+    return latest > 0 && latest <= std::numeric_limits<int>::max() ? static_cast<int>(latest) : 0;
+  }
+
   enum class shutter_feedback_status_e {
     available,
     disjoint,

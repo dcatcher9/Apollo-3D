@@ -254,7 +254,7 @@
     "local_monitor_ir_protocol": "Protocollo IR degli occhiali",
     "local_monitor_ir_protocol_desc": "Le finestre dell'otturatore a durata limitata supportano NVIDIA 3D Vision (2), Sony (4), Panasonic (5) e Panasonic con firmware personalizzato (6).",
     "local_monitor_frame_delay_us": "Ritardo dell'otturatore (µs)",
-    "local_monitor_frame_delay_us_desc": "Lascia all'emettitore il tempo di programmare il suo impulso IR. Ritardo più durata devono rientrare sia nel timer dell'emettitore sia nell'intervallo per occhio selezionato.",
+    "local_monitor_frame_delay_us_desc": "Tempo dal refresh di un occhio all'apertura della sua lente. Lascia all'emettitore il tempo di programmare il suo impulso IR. Ritardo più durata devono rientrare nel timer dell'emettitore. Con una modalità di visualizzazione a lungo intervallo di blanking, la finestra può estendersi nell'intervallo dell'occhio successivo fino a mezzo intervallo.",
     "local_monitor_frame_duration_us": "Durata dell'otturatore (µs)",
     "local_monitor_frame_duration_us_desc": "Lascia spazio per l'impulso di apertura del protocollo e la spaziatura IR. La finestra dell'otturatore e il margine dell'impulso di chiusura devono rientrare nell'intervallo per occhio selezionato.",
     "local_monitor_signal_spacing_us": "Spaziatura dei segnali IR (µs)",

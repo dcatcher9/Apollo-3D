@@ -1045,7 +1045,7 @@ scanout; other monitors stay usable. See
 
 | Default | Description |
 |---|---|
-| `500` | Delay from frame sync to the shutter window. Minimum `150` µs for protocol `2`, `100` µs for `4`/`5`/`6`; maximum `32767` µs. Delay plus duration must fit the emitter timer and selected eye interval. |
+| `500` | Delay from frame sync to the shutter window. Minimum `150` µs for protocol `2`, `100` µs for `4`/`5`/`6`; maximum `32767` µs. Delay plus duration must fit the emitter timer. A window that ends after the selected eye interval is accepted only within the limit in [Local monitor 3D](sbs-local-monitor.md). |
 
 ### local_monitor_frame_duration_us
 

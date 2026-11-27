@@ -256,7 +256,7 @@
     "local_monitor_ir_protocol": "A szemüveg IR-protokollja",
     "local_monitor_ir_protocol_desc": "Véges zárablakokat az NVIDIA 3D Vision (2), a Sony (4), a Panasonic (5) és az egyedi Panasonic firmware (6) támogat.",
     "local_monitor_frame_delay_us": "Zár késleltetése (µs)",
-    "local_monitor_frame_delay_us_desc": "Hagyjon időt az adónak az IR-impulzus ütemezésére. A késleltetés és az időtartam összegének bele kell férnie az adó időzítőjébe és a kiválasztott szemintervallumba is.",
+    "local_monitor_frame_delay_us_desc": "Az idő egy szem frissítésétől a lencséje kinyílásáig. Hagyjon időt az adónak az IR-impulzus ütemezésére. A késleltetés és az időtartam összegének bele kell férnie az adó időzítőjébe. Hosszú függőleges kioltású megjelenítési módban az ablak legfeljebb fél intervallummal benyúlhat a következő szem intervallumába.",
     "local_monitor_frame_duration_us": "Zár időtartama (µs)",
     "local_monitor_frame_duration_us_desc": "Hagyjon helyet a protokoll nyitóimpulzusának és az IR-térköznek. A zárablaknak és a záróimpulzus ráhagyásának bele kell férnie a kiválasztott szemintervallumba.",
     "local_monitor_signal_spacing_us": "IR-jelek térköze (µs)",

@@ -254,7 +254,7 @@
     "local_monitor_ir_protocol": "グラスの IR プロトコル",
     "local_monitor_ir_protocol_desc": "有限のシャッターウィンドウは NVIDIA 3D Vision (2)、Sony (4)、Panasonic (5)、Panasonic カスタムファームウェア (6) に対応しています。",
     "local_monitor_frame_delay_us": "シャッター遅延 (µs)",
-    "local_monitor_frame_delay_us_desc": "エミッターが IR パルスをスケジュールする時間を確保してください。遅延と持続時間の合計は、エミッターのタイマーと選択した片目あたりの間隔の両方に収まる必要があります。",
+    "local_monitor_frame_delay_us_desc": "片目のリフレッシュからそのレンズが開くまでの時間です。エミッターが IR パルスを予約する時間を残してください。遅延と持続時間の合計はエミッターのタイマーに収まる必要があります。垂直ブランキングの長い表示モードでは、ウィンドウが次の目の間隔に最大で半間隔まで入り込めます。",
     "local_monitor_frame_duration_us": "シャッター持続時間 (µs)",
     "local_monitor_frame_duration_us_desc": "プロトコルの開放パルスと IR 間隔のための余裕を残してください。シャッターウィンドウと閉鎖パルスのマージンは、選択した片目あたりの間隔に収まる必要があります。",
     "local_monitor_signal_spacing_us": "IR 信号間隔 (µs)",

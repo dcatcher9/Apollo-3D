@@ -256,7 +256,7 @@
     "local_monitor_ir_protocol": "Giao thức IR của kính",
     "local_monitor_ir_protocol_desc": "Khoảng mở màn trập hữu hạn được hỗ trợ trên NVIDIA 3D Vision (2), Sony (4), Panasonic (5) và firmware tùy chỉnh Panasonic (6).",
     "local_monitor_frame_delay_us": "Độ trễ màn trập (µs)",
-    "local_monitor_frame_delay_us_desc": "Chừa thời gian để bộ phát lên lịch xung IR. Tổng độ trễ và thời lượng phải nằm trong cả bộ hẹn giờ của bộ phát lẫn khoảng thời gian mỗi mắt đã chọn.",
+    "local_monitor_frame_delay_us_desc": "Thời gian từ lúc làm mới của một mắt đến khi tròng kính của mắt đó mở. Hãy chừa thời gian để bộ phát lên lịch xung IR. Độ trễ cộng thời lượng phải nằm trong bộ hẹn giờ của bộ phát. Với chế độ hiển thị có khoảng xóa dọc dài, cửa sổ có thể lấn sang khoảng của mắt kế tiếp tối đa nửa khoảng.",
     "local_monitor_frame_duration_us": "Thời lượng màn trập (µs)",
     "local_monitor_frame_duration_us_desc": "Chừa chỗ cho xung mở của giao thức và khoảng cách IR. Khoảng mở màn trập và biên của xung đóng phải nằm trong khoảng thời gian mỗi mắt đã chọn.",
     "local_monitor_signal_spacing_us": "Khoảng cách tín hiệu IR (µs)",

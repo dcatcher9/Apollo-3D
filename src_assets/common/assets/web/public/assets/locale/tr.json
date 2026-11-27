@@ -254,7 +254,7 @@
     "local_monitor_ir_protocol": "Gözlük IR protokolü",
     "local_monitor_ir_protocol_desc": "Süresi sınırlı deklanşör pencereleri NVIDIA 3D Vision (2), Sony (4), Panasonic (5) ve özel üretici yazılımlı Panasonic (6) için desteklenir.",
     "local_monitor_frame_delay_us": "Deklanşör gecikmesi (µs)",
-    "local_monitor_frame_delay_us_desc": "Vericinin IR darbesini zamanlaması için süre bırakın. Gecikme ile sürenin toplamı hem verici zamanlayıcısına hem de seçilen göz aralığına sığmalıdır.",
+    "local_monitor_frame_delay_us_desc": "Bir gözün yenilenmesinden merceğinin açılmasına kadar geçen süre. Vericiye IR darbesini planlaması için zaman bırakın. Gecikme ile sürenin toplamı vericinin zamanlayıcısına sığmalıdır. Uzun dikey karartmalı bir görüntü modunda pencere, sonraki gözün aralığına en fazla yarım aralık kadar uzanabilir.",
     "local_monitor_frame_duration_us": "Deklanşör süresi (µs)",
     "local_monitor_frame_duration_us_desc": "Protokolün açma darbesi ve IR aralığı için pay bırakın. Deklanşör penceresi ile kapama darbesi payı seçilen göz aralığına sığmalıdır.",
     "local_monitor_signal_spacing_us": "IR sinyal aralığı (µs)",

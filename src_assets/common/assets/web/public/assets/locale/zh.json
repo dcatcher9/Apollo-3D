@@ -256,7 +256,7 @@
     "local_monitor_ir_protocol": "眼镜 IR 协议",
     "local_monitor_ir_protocol_desc": "有限快门时间窗支持 NVIDIA 3D Vision (2)、Sony (4)、Panasonic (5) 和 Panasonic 自定义固件 (6)。",
     "local_monitor_frame_delay_us": "快门延迟 (µs)",
-    "local_monitor_frame_delay_us_desc": "为发射器预留安排 IR 脉冲的时间。延迟与持续时间之和必须同时符合发射器计时器和所选的单眼间隔。",
+    "local_monitor_frame_delay_us_desc": "从一只眼的刷新到其镜片打开的时间。请为发射器留出安排红外脉冲的时间。延迟加持续时间必须在发射器的计时器范围内。在垂直消隐较长的显示模式下，窗口最多可延伸到下一只眼的间隔中半个间隔。",
     "local_monitor_frame_duration_us": "快门持续时间 (µs)",
     "local_monitor_frame_duration_us_desc": "为协议的开启脉冲和 IR 间隔预留空间。快门时间窗与关闭脉冲余量必须符合所选的单眼间隔。",
     "local_monitor_signal_spacing_us": "IR 信号间隔 (µs)",

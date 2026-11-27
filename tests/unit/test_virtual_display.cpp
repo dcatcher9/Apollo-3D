@@ -6,6 +6,7 @@
 #include <functional>
 #include <limits>
 #include <string_view>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -1303,4 +1304,63 @@ TEST(VirtualDisplaySessionMode, RejectsIncompleteOrHardwareDefaultModes) {
   active.dmPelsWidth = 3840;
   active.dmPelsHeight = 0;
   EXPECT_FALSE(VDISPLAY::sessionModeRecord(active));
+}
+
+namespace {
+  // One active path with its signal description, as a query without virtual-refresh awareness
+  // returns it.
+  struct signal_fixture_t {
+    std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+    std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+  };
+
+  signal_fixture_t signalFixture(UINT32 desktopMillihz, UINT64 pixelRate, UINT32 totalWidth, UINT32 totalHeight) {
+    signal_fixture_t fixture;
+    DISPLAYCONFIG_PATH_INFO path {};
+    path.flags = DISPLAYCONFIG_PATH_ACTIVE;
+    path.targetInfo.modeInfoIdx = 0;
+    path.targetInfo.outputTechnology = DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EXTERNAL;
+    path.targetInfo.refreshRate = {desktopMillihz, 1000};
+    DISPLAYCONFIG_MODE_INFO mode {};
+    mode.infoType = DISPLAYCONFIG_MODE_INFO_TYPE_TARGET;
+    auto &signal = mode.targetMode.targetVideoSignalInfo;
+    signal.pixelRate = pixelRate;
+    signal.totalSize = {totalWidth, totalHeight};
+    signal.scanLineOrdering = DISPLAYCONFIG_SCANLINE_ORDERING_PROGRESSIVE;
+    fixture.paths.push_back(path);
+    fixture.modes.push_back(mode);
+    return fixture;
+  }
+}  // namespace
+
+TEST(VirtualRefreshRate, RecognisesADesktopRateBelowTheSignalRate) {
+  // Measured on a 5120x2160 165 Hz monitor with 120 Hz selected in Windows: the path runs at
+  // 120 Hz while the signal description still gives 2037.58 MHz over 5280x2338 lines.
+  const auto selected = signalFixture(120000, 2037580000ull, 5280, 2338);
+  EXPECT_TRUE(VDISPLAY::displayConfigUsesVirtualRefreshRate(selected.paths, selected.modes));
+  // The same monitor at its own 165.058 Hz.
+  const auto native = signalFixture(165058, 2037580000ull, 5280, 2338);
+  EXPECT_FALSE(VDISPLAY::displayConfigUsesVirtualRefreshRate(native.paths, native.modes));
+  // A real 120 Hz signal with long vertical blanking is not a desktop rate either.
+  const auto longBlanking = signalFixture(119995, 2037580000ull, 5280, 3216);
+  EXPECT_FALSE(VDISPLAY::displayConfigUsesVirtualRefreshRate(longBlanking.paths, longBlanking.modes));
+}
+
+TEST(VirtualRefreshRate, IgnoresPathsThatCannotShowOne) {
+  auto fixture = signalFixture(120000, 2037580000ull, 5280, 2338);
+  // An indirect display's signal description is its driver's own.
+  fixture.paths[0].targetInfo.outputTechnology = DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INDIRECT_WIRED;
+  EXPECT_FALSE(VDISPLAY::displayConfigUsesVirtualRefreshRate(fixture.paths, fixture.modes));
+  fixture.paths[0].targetInfo.outputTechnology = DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EXTERNAL;
+  fixture.paths[0].flags = 0;
+  EXPECT_FALSE(VDISPLAY::displayConfigUsesVirtualRefreshRate(fixture.paths, fixture.modes));
+  fixture.paths[0].flags = DISPLAYCONFIG_PATH_ACTIVE;
+  fixture.paths[0].targetInfo.modeInfoIdx = 7;
+  EXPECT_FALSE(VDISPLAY::displayConfigUsesVirtualRefreshRate(fixture.paths, fixture.modes));
+  fixture.paths[0].targetInfo.modeInfoIdx = 0;
+  fixture.modes[0].targetMode.targetVideoSignalInfo.totalSize = {0, 0};
+  EXPECT_FALSE(VDISPLAY::displayConfigUsesVirtualRefreshRate(fixture.paths, fixture.modes));
+  // Windows marks a path it boosts between a desktop rate and the signal rate.
+  fixture.paths[0].flags = DISPLAYCONFIG_PATH_ACTIVE | DISPLAYCONFIG_PATH_BOOST_REFRESH_RATE;
+  EXPECT_TRUE(VDISPLAY::displayConfigUsesVirtualRefreshRate(fixture.paths, fixture.modes));
 }
