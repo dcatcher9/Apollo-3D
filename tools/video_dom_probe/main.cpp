@@ -298,6 +298,22 @@ namespace {
     return monitor && GetMonitorInfoW(monitor, &info) && probe::client_fills_monitor(client, {info.rcMonitor.left, info.rcMonitor.top, info.rcMonitor.right, info.rcMonitor.bottom});
   }
 
+  /**
+   * Whether `window` is still the available root foreground window of `process_id`, with the
+   * client rectangle it was observed with. A census and a cached-selection refresh both keep
+   * their authority only while this holds.
+   */
+  [[nodiscard]] bool foreground_unchanged(HWND window, DWORD process_id, const probe::rect_t &client_rect) {
+    const HWND foreground = GetForegroundWindow();
+    if (!foreground || GetAncestor(foreground, GA_ROOT) != window || !window_available(window)) {
+      return false;
+    }
+    DWORD current_process_id = 0;
+    GetWindowThreadProcessId(window, &current_process_id);
+    const auto client = foreground_client_rect(window);
+    return current_process_id == process_id && client && *client == client_rect;
+  }
+
   template<typename T>
   struct interface_query_t {
     HRESULT status {E_POINTER};
@@ -498,11 +514,7 @@ namespace {
     auto last_service = started;
     const auto foreground_current = [&]() {
       pump_messages();
-      DWORD current_process_id = 0;
-      const HWND current_foreground = GetAncestor(GetForegroundWindow(), GA_ROOT);
-      GetWindowThreadProcessId(current_foreground, &current_process_id);
-      const auto current_client = foreground_client_rect(current_foreground);
-      if (foreground_change_generation.load(std::memory_order_relaxed) != initial_foreground_generation || current_foreground != foreground || current_process_id != result.process_id || !current_client || *current_client != result.client_rect || !window_available(foreground) || client_fills_monitor(current_foreground, *current_client) != result.client_fills_monitor) {
+      if (foreground_change_generation.load(std::memory_order_relaxed) != initial_foreground_generation || !foreground_unchanged(foreground, result.process_id, result.client_rect) || client_fills_monitor(foreground, result.client_rect) != result.client_fills_monitor) {
         foreground_changed = true;
         aborted = true;
         return false;
@@ -794,14 +806,9 @@ namespace {
     if (std::chrono::steady_clock::now() - started >= maximum_scan_work_time) {
       complete = false;
     }
-    const HWND foreground_after = GetAncestor(GetForegroundWindow(), GA_ROOT);
     DWORD process_id_after = 0;
-    const auto process_name_after = process_name_for_window(
-      foreground_after,
-      process_id_after
-    );
-    const auto client_rect_after = foreground_client_rect(foreground_after);
-    if (foreground_changed || foreground_after != foreground || process_id_after != result.process_id || process_name_after != result.process_name || !client_rect_after || *client_rect_after != result.client_rect || !window_available(foreground_after) || client_fills_monitor(foreground_after, *client_rect_after) != result.client_fills_monitor) {
+    const auto process_name_after = process_name_for_window(foreground, process_id_after);
+    if (foreground_changed || !foreground_unchanged(foreground, result.process_id, result.client_rect) || process_name_after != result.process_name || client_fills_monitor(foreground, result.client_rect) != result.client_fills_monitor) {
       result.status = scan_status_e::foreground_changed;
       result.candidates.clear();
     } else if (!complete) {
@@ -957,15 +964,8 @@ namespace {
       if (events.invalidate_semantic_state) {
         return false;
       }
-      const HWND foreground = GetForegroundWindow();
-      if (!foreground || GetAncestor(foreground, GA_ROOT) != cached.window || !window_available(cached.window)) {
-        return false;
-      }
-      DWORD process_id = 0;
-      GetWindowThreadProcessId(cached.window, &process_id);
-      const auto client = foreground_client_rect(cached.window);
-      return process_id == cached.process_id && client && *client == cached.client_rect &&
-             (!cached.fullscreen || !cached.client_fills_monitor || client_fills_monitor(cached.window, *client));
+      return foreground_unchanged(cached.window, cached.process_id, cached.client_rect) &&
+             (!cached.fullscreen || !cached.client_fills_monitor || client_fills_monitor(cached.window, cached.client_rect));
     };
     if (!foreground_current()) {
       return false;
