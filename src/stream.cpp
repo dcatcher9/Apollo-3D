@@ -965,12 +965,12 @@ namespace stream {
       safe::mail_raw_t::queue_t<video::video_mode_change_t> video_mode_queue;
       safe::mail_raw_t::queue_t<video::stream_gamma_request_t> stream_gamma_queue;
       safe::mail_raw_t::queue_t<video::stream_gamma_ack_t> stream_gamma_ack_queue;
-      std::vector<video::stream_gamma_ack_t> deferred_stream_gamma_acks;
+      proof_deferred_acks_t<video::stream_gamma_ack_t, STREAM_GAMMA_QUEUE_LIMIT> deferred_stream_gamma_acks;
       unsigned outstanding_stream_gamma_requests = 0;
       // A syntactically valid v2 control message can arrive just before the initial encoder has
       // published generation 1. Preserve any immediate validation refusal and correlate it once
       // a complete applied state exists; v2 never emits an unproven generation-zero ACK.
-      std::vector<live_video_mode_ack_t> deferred_live_video_mode_acks;
+      proof_deferred_acks_t<live_video_mode_ack_t, LIVE_VIDEO_MODE_ACK_QUEUE_LIMIT> deferred_live_video_mode_acks;
       safe::mail_raw_t::event_t<video::sbs_telemetry_snapshot_t> sbs_telemetry_event;
       safe::mail_raw_t::event_t<video::game_source_state_t> game_source_status_event;
       std::optional<video::sbs_telemetry_snapshot_t> latest_sbs_telemetry;
@@ -2603,6 +2603,7 @@ namespace stream {
               enet_peer_disconnect_now(server->_session->peer, 0);
             }
             session->control.deferred_live_video_mode_acks.clear();
+            session->control.deferred_stream_gamma_acks.clear();
             session->control.peer = nullptr;
             server->_session->peer = nullptr;
             server->_session->session = nullptr;
@@ -2685,9 +2686,7 @@ namespace stream {
                     send_live_video_mode_ack(session, *ack);
                     break;
                   case live_video_mode_ack_delivery_e::defer_until_initial_proof:
-                    if (session->control.deferred_live_video_mode_acks.size() < LIVE_VIDEO_MODE_ACK_QUEUE_LIMIT) {
-                      session->control.deferred_live_video_mode_acks.push_back(*ack);
-                    } else {
+                    if (!session->control.deferred_live_video_mode_acks.defer(*ack)) {
                       BOOST_LOG(error) << "Atomic-presentation pre-proof ACK queue exceeded its session bound; closing the session"sv;
                       session::stop(*session);
                     }
@@ -2702,7 +2701,7 @@ namespace stream {
             if (server->_session->peer && !session->control.deferred_live_video_mode_acks.empty() && session->config.monitor.effective_mode) {
               const auto proven = session->config.monitor.effective_mode->current();
               if (proven.generation != 0) {
-                for (const auto &deferred : session->control.deferred_live_video_mode_acks) {
+                session->control.deferred_live_video_mode_acks.answer_all([&](const live_video_mode_ack_t &deferred) {
                   send_live_video_mode_ack(
                     session,
                     make_live_video_mode_ack(
@@ -2711,12 +2710,17 @@ namespace stream {
                       proven
                     )
                   );
-                }
-                session->control.deferred_live_video_mode_acks.clear();
+                });
               }
             }
             // Stream gamma requests (0x300D) follow the same rule: each is answered exactly once.
             // An acknowledgement without encoder proof waits here for that proof.
+            const auto answer_stream_gamma = [&](const video::stream_gamma_ack_t &ack) {
+              send_stream_gamma_ack(*session, ack);
+              if (ack.request_id != 0 && session->control.outstanding_stream_gamma_requests > 0) {
+                --session->control.outstanding_stream_gamma_requests;
+              }
+            };
             auto &gamma_acks = session->control.stream_gamma_ack_queue;
             while (server->_session->peer && gamma_acks->peek()) {
               if (auto ack = gamma_acks->pop(0ms)) {
@@ -2726,30 +2730,22 @@ namespace stream {
                     session::stop(*session);
                     break;
                   }
-                  if (session->control.deferred_stream_gamma_acks.size() >= STREAM_GAMMA_QUEUE_LIMIT) {
+                  if (!session->control.deferred_stream_gamma_acks.defer(*ack)) {
                     BOOST_LOG(error) << "Stream gamma acknowledgements waiting for encoder proof exceeded their session bound; closing the session"sv;
                     session::stop(*session);
                     break;
                   }
-                  session->control.deferred_stream_gamma_acks.push_back(*ack);
                 } else {
-                  send_stream_gamma_ack(*session, *ack);
-                  if (ack->request_id != 0 && session->control.outstanding_stream_gamma_requests > 0) {
-                    --session->control.outstanding_stream_gamma_requests;
-                  }
+                  answer_stream_gamma(*ack);
                 }
               }
             }
             const auto gamma_proven = session->config.monitor.stream_gamma_state->current();
             if (server->_session->peer && gamma_proven.generation != 0) {
-              for (auto &ack : session->control.deferred_stream_gamma_acks) {
+              session->control.deferred_stream_gamma_acks.answer_all([&](video::stream_gamma_ack_t &ack) {
                 ack.applied = gamma_proven;
-                send_stream_gamma_ack(*session, ack);
-                if (ack.request_id != 0 && session->control.outstanding_stream_gamma_requests > 0) {
-                  --session->control.outstanding_stream_gamma_requests;
-                }
-              }
-              session->control.deferred_stream_gamma_acks.clear();
+                answer_stream_gamma(ack);
+              });
             }
             // Readiness describes the encoder-proven generation, after any queued mode ACK.
             send_game_source_status(*session);
@@ -2773,6 +2769,7 @@ namespace stream {
       session->video->wake_encoder();
       session->controlEnd.raise(true);
       session->control.deferred_live_video_mode_acks.clear();
+      session->control.deferred_stream_gamma_acks.clear();
       session->control.peer = nullptr;
       server->_session->peer = nullptr;
       server->_session->session = nullptr;

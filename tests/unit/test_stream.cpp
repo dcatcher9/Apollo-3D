@@ -781,6 +781,33 @@ TEST(AtomicPresentationAckTests, DefersOnlyPreProofRefusalsAndFailsClosedOnImpos
   );
 }
 
+TEST(AtomicPresentationAckTests, ProofDeferredAcksAreBoundedAndAnsweredOnceInArrivalOrder) {
+  stream::proof_deferred_acks_t<std::uint32_t, 3> deferred;
+  EXPECT_TRUE(deferred.empty());
+  EXPECT_TRUE(deferred.defer(11u));
+  EXPECT_TRUE(deferred.defer(12u));
+  EXPECT_TRUE(deferred.defer(13u));
+  EXPECT_FALSE(deferred.defer(14u)) << "the session bound holds nothing past its limit";
+  std::vector<std::uint32_t> answered;
+  deferred.answer_all([&](const std::uint32_t id) {
+    answered.push_back(id);
+  });
+  EXPECT_EQ(answered, (std::vector<std::uint32_t> {11u, 12u, 13u}));
+  EXPECT_TRUE(deferred.empty());
+  deferred.answer_all([&](const std::uint32_t id) {
+    answered.push_back(id);
+  });
+  EXPECT_EQ(answered.size(), 3u) << "an answered acknowledgement is never answered again";
+
+  // Answering frees the bound; clearing forgets what waits without answering it.
+  EXPECT_TRUE(deferred.defer(21u));
+  deferred.clear();
+  EXPECT_TRUE(deferred.empty());
+  for (std::uint32_t id = 31u; id < 34u; ++id) {
+    EXPECT_TRUE(deferred.defer(id));
+  }
+}
+
 TEST(AtomicPresentationAckTests, ReportsAClampedApplyWithExactSourceAndEncodedGeometry) {
   // The whole point of the applied_* fields: a per-eye 5120x2160 SBS request packs to 10240, which
   // exceeds the 8192 codec ceiling, so the host installs 4096 per eye with an aspect-scaled height.

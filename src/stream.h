@@ -14,6 +14,7 @@
 #include <optional>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 // lib includes
 #include <boost/asio.hpp>
@@ -472,6 +473,47 @@ namespace stream {
              live_video_mode_ack_delivery_e::fail_closed :
              live_video_mode_ack_delivery_e::defer_until_initial_proof;
   }
+
+  /**
+   * Acknowledgements owed exactly once that wait for the encoder's first proven state.
+   *
+   * The control thread holds at most `Limit` of them per session and, once the encoder has proven
+   * a state, answers each one once, in arrival order. Live video-mode (0x3008) and stream gamma
+   * (0x300D) refusals that arrive before that proof both wait here.
+   */
+  template<class Ack, std::size_t Limit>
+  class proof_deferred_acks_t {
+  public:
+    /** @return `false`, holding nothing, when the session bound is already reached. */
+    [[nodiscard]] bool defer(const Ack &ack) {
+      if (waiting_.size() >= Limit) {
+        return false;
+      }
+      waiting_.push_back(ack);
+      return true;
+    }
+
+    /** Pass every waiting acknowledgement to `answer` once, in arrival order, then forget it. */
+    template<class Answer>
+    void answer_all(Answer &&answer) {
+      auto waiting = std::move(waiting_);
+      waiting_.clear();
+      for (auto &ack : waiting) {
+        answer(ack);
+      }
+    }
+
+    [[nodiscard]] bool empty() const noexcept {
+      return waiting_.empty();
+    }
+
+    void clear() noexcept {
+      waiting_.clear();
+    }
+
+  private:
+    std::vector<Ack> waiting_;
+  };
 
   /** Build an atomic v2 ACK from one coherent encoder-published state snapshot. */
   [[nodiscard]] live_video_mode_ack_t make_live_video_mode_ack(
