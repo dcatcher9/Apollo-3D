@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "game3d_debug_preview.h"
+#include "debug_dump_png.h"
 #include "src/game3d_debug_formats.h"
 #include "src/game3d_debug_protocol.h"
 #include "src/game3d_debug_ui_resources.h"
@@ -14,63 +15,27 @@
 #include <sstream>
 #include <stdexcept>
 #include <vector>
-#include <wincodec.h>
-#include <windows.h>
-#include <wrl/client.h>
 
 namespace platf::game3d_debug::preview {
   namespace {
     using json = nlohmann::json;
     using detail::rgb;
-    using Microsoft::WRL::ComPtr;
     constexpr rgb invalid_color {255, 0, 255};
     constexpr std::uint64_t max_bytes = ::game3d_debug::max_capture_bytes;
 
-    void check(HRESULT result, const char *operation) {
-      if (FAILED(result)) {
-        throw std::runtime_error(std::string(operation) + " failed: " + std::to_string(static_cast<unsigned long>(result)));
-      }
-    }
-
-    struct com_scope {
-      HRESULT result = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-
-      ~com_scope() {
-        if (SUCCEEDED(result)) {
-          CoUninitialize();
-        }
-      }
-    };
-
-    void png(IWICImagingFactory *factory, const std::filesystem::path &path, unsigned width, unsigned height, const std::function<rgb(unsigned, unsigned)> &pixel) {
-      ComPtr<IWICStream> stream;
-      check(factory->CreateStream(&stream), "Create PNG stream");
-      check(stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE), "Open PNG");
-      ComPtr<IWICBitmapEncoder> encoder;
-      check(factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder), "Create PNG encoder");
-      check(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache), "Initialize PNG encoder");
-      ComPtr<IWICBitmapFrameEncode> frame;
-      ComPtr<IPropertyBag2> properties;
-      check(encoder->CreateNewFrame(&frame, &properties), "Create PNG frame");
-      check(frame->Initialize(properties.Get()), "Initialize PNG frame");
-      check(frame->SetSize(width, height), "Set PNG dimensions");
-      WICPixelFormatGUID format = GUID_WICPixelFormat24bppBGR;
-      check(frame->SetPixelFormat(&format), "Set PNG format");
-      if (!IsEqualGUID(format, GUID_WICPixelFormat24bppBGR)) {
-        throw std::runtime_error("PNG encoder changed pixel format");
-      }
-      std::vector<std::uint8_t> row(width * 3);
-      for (unsigned y = 0; y < height; ++y) {
+    // The same encoder as Dump 3D's previews: 8-bit RGB, deterministic bytes, no COM.
+    void png(const std::filesystem::path &path, unsigned width, unsigned height, const std::function<rgb(unsigned, unsigned)> &pixel) {
+      const bool written = debug_dump::write_png(path, width, height, [&](std::uint32_t y, std::uint8_t *row) {
         for (unsigned x = 0; x < width; ++x) {
           const auto value = pixel(x, y);
-          row[x * 3] = value[2];
+          row[x * 3] = value[0];
           row[x * 3 + 1] = value[1];
-          row[x * 3 + 2] = value[0];
+          row[x * 3 + 2] = value[2];
         }
-        check(frame->WritePixels(1, static_cast<UINT>(row.size()), static_cast<UINT>(row.size()), row.data()), "Write PNG row");
+      });
+      if (!written) {
+        throw std::runtime_error("Write PNG failed");
       }
-      check(frame->Commit(), "Commit PNG frame");
-      check(encoder->Commit(), "Commit PNG");
     }
 
     struct range {
@@ -377,12 +342,6 @@ namespace platf::game3d_debug::preview {
       }
     }
     const std::span<const image_view> images(accepted);
-    com_scope com;
-    if (FAILED(com.result) && com.result != RPC_E_CHANGED_MODE) {
-      check(com.result, "Initialize preview COM");
-    }
-    ComPtr<IWICImagingFactory> factory;
-    check(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)), "Create preview WIC factory");
     std::filesystem::create_directories(directory);
     const auto metadata = manifest.value("producer_metadata", json::object());
     const auto parameters = metadata.value("render_parameters", json::object());
@@ -403,7 +362,7 @@ namespace platf::game3d_debug::preview {
       return nullptr;
     };
     auto add = [&](const char *file, const std::string &title, unsigned width, unsigned height, const std::string &caption, const std::function<rgb(unsigned, unsigned)> &pixel, json extra = json::object()) {
-      png(factory.Get(), directory / file, width, height, pixel);
+      png(directory / file, width, height, pixel);
       extra.update({{"file", file}, {"title", title}, {"width", width}, {"height", height}, {"caption", caption}});
       report["images"].push_back(std::move(extra));
     };

@@ -207,4 +207,4 @@ add_executable(preview_game3d_dump EXCLUDE_FROM_ALL
         "${CMAKE_SOURCE_DIR}/src/platform/windows/game3d_debug_preview.cpp")
 set_target_properties(preview_game3d_dump PROPERTIES CXX_STANDARD 23 LINK_SEARCH_START_STATIC 1)
 target_include_directories(preview_game3d_dump PRIVATE "${CMAKE_SOURCE_DIR}")
-target_link_libraries(preview_game3d_dump PRIVATE nlohmann_json::nlohmann_json ole32 windowscodecs)
+target_link_libraries(preview_game3d_dump PRIVATE nlohmann_json::nlohmann_json z)

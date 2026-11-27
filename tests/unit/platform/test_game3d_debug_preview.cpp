@@ -7,8 +7,10 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <gtest/gtest.h>
 #include <limits>
+#include <random>
 #include <wincodec.h>
 #include <windows.h>
 #include <wrl/client.h>
@@ -56,6 +58,50 @@ namespace {
     if (SUCCEEDED(initialized)) CoUninitialize();
     if (!copied) throw std::runtime_error("Cannot decode test preview PNG");
     return pixels;
+  }
+
+  // Random native pixels; float formats mix ordinary values with NaN and both infinities,
+  // and FP16 takes every bit pattern, its NaN, infinities and denormals included.
+  std::vector<std::uint8_t> random_pixels(unsigned format, std::size_t count, std::mt19937 &random) {
+    std::vector<std::uint8_t> out(count * preview::detail::bytes_per_pixel(format));
+    if (format == 2 || format == 16 || format == 41) {
+      std::uniform_real_distribution<float> value(-0.25f, 2.5f);
+      std::vector<float> floats(out.size() / sizeof(float));
+      for (auto &entry : floats) {
+        entry = value(random);
+      }
+      floats[1] = NAN;
+      floats[floats.size() / 2] = -INFINITY;
+      floats.back() = INFINITY;
+      std::memcpy(out.data(), floats.data(), out.size());
+    } else {
+      for (auto &entry : out) {
+        entry = static_cast<std::uint8_t>(random());
+      }
+    }
+    return out;
+  }
+
+  // Every pixel of a decoded preview PNG against the expected display color.
+  void expect_png_pixels(const std::filesystem::path &path, unsigned width, unsigned height, const std::function<rgb(unsigned, unsigned)> &expected) {
+    const auto decoded = read_png(path);
+    ASSERT_EQ(decoded.size(), std::size_t(width) * height * 3) << path.filename();
+    for (unsigned y = 0; y < height; ++y) {
+      for (unsigned x = 0; x < width; ++x) {
+        const auto value = expected(x, y);
+        for (unsigned c = 0; c < 3; ++c) {
+          ASSERT_EQ(decoded[(std::size_t(y) * width + x) * 3 + c], value[c]) << path.filename() << " x " << x << " y " << y << " channel " << c;
+        }
+      }
+    }
+  }
+
+  // Every PNG the report lists decodes at its listed size.
+  void expect_listed_pngs_decode(const std::filesystem::path &directory, const json &report) {
+    for (const auto &entry : report.at("images")) {
+      const auto file = entry.at("file").get<std::string>();
+      EXPECT_EQ(read_png(directory / file).size(), entry.at("width").get<std::size_t>() * entry.at("height").get<std::size_t>() * 3) << file;
+    }
   }
 }  // namespace
 
@@ -302,4 +348,64 @@ TEST(Game3dDebugPreview, SourceAlphaKeepsConstantsAndDoesNotInventMissingCompone
   const std::array<preview::image_view, 2> inputs {{{"source_color", 1, 1, 16, source}, {"sbs", 2, 1, 28, sbs}}};
   preview::generate(output.path, json::object(), inputs);
   EXPECT_FALSE(std::filesystem::exists(output.path / "source_alpha.png"));
+}
+
+TEST(Game3dDebugPreview, EveryPngPixelIsTheDisplayMappingOfEachColorFormatAndTransfer) {
+  // SDR, unknown, scRGB and PQ color (with both SBS transfers) from every RGBA format.
+  constexpr unsigned width = 7, height = 3;
+  constexpr std::array<std::array<unsigned, 2>, 5> transfers {{{0, 0}, {1, 1}, {2, 2}, {3, 2}, {3, 3}}};
+  std::mt19937 random(20261127);
+  for (const unsigned format : {28u, 29u, 87u, 91u, 24u, 10u, 2u}) {
+    for (const auto &[color_space, sbs_transfer] : transfers) {
+      SCOPED_TRACE("format " + std::to_string(format) + " color_space " + std::to_string(color_space) + " sbs_transfer " + std::to_string(sbs_transfer));
+      preview_directory output;
+      const auto color = random_pixels(format, width * height, random);
+      const auto sbs = random_pixels(format, 2 * width * height, random);
+      const std::array<preview::image_view, 2> inputs {{{"source_color", width, height, format, color}, {"sbs", 2 * width, height, format, sbs}}};
+      const auto report = preview::generate(output.path, {{"producer_metadata", {{"color_space", color_space}, {"sbs_transfer", sbs_transfer}}}}, inputs);
+      expect_listed_pngs_decode(output.path, report);
+      expect_png_pixels(output.path / "color.png", width, height, [&](unsigned x, unsigned y) {
+        return preview::detail::display_color(preview::detail::sample(inputs[0], x, y), color_space);
+      });
+      expect_png_pixels(output.path / "source_alpha.png", width, height, [&](unsigned x, unsigned y) {
+        return preview::detail::scalar_color(preview::detail::sample(inputs[0], x, y)[3], 0, 1);
+      });
+      expect_png_pixels(output.path / "final_sbs.png", 2 * width, height, [&](unsigned x, unsigned y) {
+        return preview::detail::display_color(preview::detail::sample(inputs[1], x, y), sbs_transfer);
+      });
+    }
+  }
+}
+
+TEST(Game3dDebugPreview, EveryPngPixelIsTheDisplayMappingOfEachScalarFormat) {
+  // Raw depth uses the full finite range; the signed field uses its largest finite magnitude.
+  constexpr unsigned width = 7, height = 3;
+  std::mt19937 random(20261128);
+  for (const unsigned format : {41u, 54u, 56u, 61u, 62u, 16u, 34u}) {
+    SCOPED_TRACE("format " + std::to_string(format));
+    preview_directory output;
+    const auto depth = random_pixels(format, width * height, random);
+    const auto field = random_pixels(format, width * height, random);
+    const std::array<preview::image_view, 2> inputs {{{"raw_depth", width, height, format, depth}, {"final_field", width, height, format, field}}};
+    const auto report = preview::generate(output.path, json::object(), inputs);
+    expect_listed_pngs_decode(output.path, report);
+    float low = std::numeric_limits<float>::infinity(), high = -std::numeric_limits<float>::infinity(), limit = 0;
+    for (unsigned y = 0; y < height; ++y) {
+      for (unsigned x = 0; x < width; ++x) {
+        if (const float value = preview::detail::sample(inputs[0], x, y)[0]; std::isfinite(value)) {
+          low = std::min(low, value);
+          high = std::max(high, value);
+        }
+        if (const float value = preview::detail::sample(inputs[1], x, y)[0]; std::isfinite(value)) {
+          limit = std::max(limit, std::abs(value));
+        }
+      }
+    }
+    expect_png_pixels(output.path / "raw_depth.png", width, height, [&](unsigned x, unsigned y) {
+      return preview::detail::scalar_color(preview::detail::sample(inputs[0], x, y)[0], low, high);
+    });
+    expect_png_pixels(output.path / "signed_parallax.png", width, height, [&](unsigned x, unsigned y) {
+      return preview::detail::signed_color(preview::detail::sample(inputs[1], x, y)[0], limit);
+    });
+  }
 }
