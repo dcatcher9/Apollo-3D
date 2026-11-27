@@ -8,8 +8,6 @@
  */
 #include "../tests_common.h"
 
-#ifdef _WIN32
-
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -2706,5 +2704,3 @@ TEST(DepthCoordinateV2GpuTest, JointPlaneModeTamperingRecoversAndUnknownModesAre
     EXPECT_EQ(rejected, nullptr) << mode;
   }
 }
-
-#endif  // _WIN32

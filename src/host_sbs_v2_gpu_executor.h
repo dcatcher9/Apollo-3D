@@ -4,17 +4,15 @@
  */
 #pragma once
 
-#ifdef _WIN32
+// standard includes
+#include <cstdint>
+#include <optional>
 
-  // standard includes
-  #include <cstdint>
-  #include <optional>
+// platform includes
+#include <d3d11.h>
 
-  // platform includes
-  #include <d3d11.h>
-
-  // local includes
-  #include "generated/depth_coordinate_v2_contract.h"
+// local includes
+#include "generated/depth_coordinate_v2_contract.h"
 
 namespace models::host_sbs_v2_gpu {
 
@@ -183,5 +181,3 @@ namespace models::host_sbs_v2_gpu {
   ) noexcept;
 
 }  // namespace models::host_sbs_v2_gpu
-
-#endif  // _WIN32

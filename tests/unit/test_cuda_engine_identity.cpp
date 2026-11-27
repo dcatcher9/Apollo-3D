@@ -1,6 +1,5 @@
 #include "../tests_common.h"
 
-#ifdef _WIN32
 #include <src/cuda_engine_identity.h>
 #include <src/model_manager.h>
 #include <cstring>
@@ -129,4 +128,3 @@ TEST(CudaEngineIdentityTest, InvalidDeviceValuesFailInsteadOfBecomingSharedCache
   fake_device.driver_api = 0;
   EXPECT_TRUE(models::detail::cuda_engine_device_identity(api, 0, error).empty());
 }
-#endif

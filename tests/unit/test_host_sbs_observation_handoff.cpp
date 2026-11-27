@@ -4,12 +4,11 @@
  */
 #include <gtest/gtest.h>
 
-#ifdef _WIN32
-  #include "src/host_sbs_observation_handoff.h"
+#include "src/host_sbs_observation_handoff.h"
 
-  #include <memory>
-  #include <type_traits>
-  #include <utility>
+#include <memory>
+#include <type_traits>
+#include <utility>
 
 namespace {
   using handoff_t = host_sbs::observation_handoff_t;
@@ -234,4 +233,3 @@ namespace {
     expect_no_submission(handoff.step().submission);
   }
 }  // namespace
-#endif

@@ -4,20 +4,18 @@
  */
 #include "../tests_common.h"
 
-#ifdef _WIN32
-
-  #include <array>
-  #include <bit>
-  #include <cmath>
-  #include <cstdint>
-  #include <cstring>
-  #include <d3d11.h>
-  #include <d3dcompiler.h>
-  #include <filesystem>
-  #include <limits>
-  #include <string>
-  #include <vector>
-  #include <wrl/client.h>
+#include <array>
+#include <bit>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <d3d11.h>
+#include <d3dcompiler.h>
+#include <filesystem>
+#include <limits>
+#include <string>
+#include <vector>
+#include <wrl/client.h>
 
 namespace {
   using Microsoft::WRL::ComPtr;
@@ -581,5 +579,3 @@ TEST(StreamGammaShaderCompileTest, AllProductionConverterEntryPointsCompile) {
     EXPECT_TRUE(bytecode) << file;
   }
 }
-
-#endif

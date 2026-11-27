@@ -1,6 +1,5 @@
 #pragma once
 
-#ifdef _WIN32
 #include "host_sbs_eye_field.h"
 #include <array>
 #include <cstddef>
@@ -110,4 +109,3 @@ namespace models::subtitle_publication {
     }
   };
 }
-#endif

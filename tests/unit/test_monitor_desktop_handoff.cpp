@@ -1,9 +1,8 @@
-#ifdef _WIN32
 
-  #include "src/platform/windows/monitor_desktop_handoff.h"
+#include "src/platform/windows/monitor_desktop_handoff.h"
 
-  #include <gtest/gtest.h>
-  #include <limits>
+#include <gtest/gtest.h>
+#include <limits>
 
 namespace {
   using namespace platf::monitor_desktop_detail;
@@ -161,5 +160,3 @@ namespace {
     EXPECT_TRUE(handoff.restore({0, 0, 100, 100}));
   }
 }  // namespace
-
-#endif

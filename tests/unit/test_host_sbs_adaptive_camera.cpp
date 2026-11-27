@@ -15,7 +15,6 @@
 #include <src/host_sbs_v2_gpu_executor.h>
 #include <src/generated/sbs_adaptive_state_contract.h>
 
-#ifdef _WIN32
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <wrl/client.h>
@@ -631,4 +630,3 @@ TEST_F(HostSbsAdaptiveCameraGpuTest, NativeHostQuantilesFailClosedOnNonfiniteCon
   EXPECT_FLOAT_EQ(measured[v2::frame_stat_percentile_high], 0.0f);
   EXPECT_FLOAT_EQ(measured[v2::frame_stat_percentile_bin_width], 0.0f);
 }
-#endif

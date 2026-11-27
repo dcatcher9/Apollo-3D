@@ -1,26 +1,25 @@
 /** Actual demand-owner orchestration and admission. Every GPU operation is a CPU substitute. */
 #include <gtest/gtest.h>
 
-#if defined(_WIN32) && defined(SUNSHINE_TESTS)
-  #include "src/config.h"
-  #include "src/gpu_workload_arbiter.h"
-  #include "src/live_model_preparation.h"
-  #include "src/live_model_preparation_test.h"
-  #include "src/video_depth_estimator.h"
+#include "src/config.h"
+#include "src/gpu_workload_arbiter.h"
+#include "src/live_model_preparation.h"
+#include "src/live_model_preparation_test.h"
+#include "src/video_depth_estimator.h"
 
-  #include <array>
-  #include <atomic>
-  #include <chrono>
-  #include <condition_variable>
-  #include <functional>
-  #include <future>
-  #include <mutex>
-  #include <stdexcept>
-  #include <string>
-  #include <system_error>
-  #include <thread>
-  #include <utility>
-  #include <vector>
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <functional>
+#include <future>
+#include <mutex>
+#include <stdexcept>
+#include <string>
+#include <system_error>
+#include <thread>
+#include <utility>
+#include <vector>
 
 namespace {
   using namespace std::chrono_literals;
@@ -476,5 +475,3 @@ TEST(LiveModelPreparationDemandTest, OcrExceptionCannotDemoteAnInjectedOwnerComp
   EXPECT_EQ(calls.launches.load(), 1u);
   EXPECT_FALSE(gpu_workload::live_stream_active());
 }
-
-#endif

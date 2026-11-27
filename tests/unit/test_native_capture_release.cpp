@@ -4,8 +4,7 @@
  */
 #include "../tests_common.h"
 
-#ifdef _WIN32
-  #include "src/platform/windows/display.h"
+#include "src/platform/windows/display.h"
 
 namespace {
   void expect_capture_released_while_native_teardown_is_held(const platf::dxgi::native_capture_release_report_t &report) {
@@ -35,4 +34,3 @@ TEST(NativeCaptureReleaseTest, PreservesAnotherConvertersClaimUntilThatConverter
   EXPECT_NE(report.foreign_token, report.own_token);
   EXPECT_EQ(report.claim_after_capture_release, report.foreign_token);
 }
-#endif

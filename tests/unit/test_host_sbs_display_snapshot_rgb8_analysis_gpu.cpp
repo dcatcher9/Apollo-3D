@@ -1,7 +1,6 @@
 // PRIVATE RECIPE5 SOURCE-AVAILABILITY FIXTURE. External draft; no live/capture authority.
 // Synthetic typed final/SCT/CB/UIP inputs are fixture stimuli, never model-completion certificates.
 #include <gtest/gtest.h>
-#ifdef _WIN32
 #include "subtitle_helper_source_pins.h"
 #include <algorithm>
 #include <array>
@@ -754,4 +753,3 @@ TEST_F(HostSbsDisplaySnapshotRgb8GpuTest, EpochAndEmptyAreSourceFactsNotUiAuthor
  uips[3]=256;upload();queue();prefix();EXPECT_EQ(words(readView(owner.views().uip_envelope.Get()))[43],0u);
 }
 } // namespace
-#endif

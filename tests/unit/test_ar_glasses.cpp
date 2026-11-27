@@ -1,17 +1,16 @@
-#ifdef _WIN32
 
-  #include "src/platform/windows/ar_glasses.h"
-  #include "src/platform/windows/rayneo_wear_monitor.h"
-  #include "src/platform/windows/virtual_display.h"
+#include "src/platform/windows/ar_glasses.h"
+#include "src/platform/windows/rayneo_wear_monitor.h"
+#include "src/platform/windows/virtual_display.h"
 
-  #include <array>
-  #include <chrono>
-  #include <cstring>
-  #include <gtest/gtest.h>
-  #include <limits>
-  #include <nlohmann/json.hpp>
-  #include <pbt.h>
-  #include <thread>
+#include <array>
+#include <chrono>
+#include <cstring>
+#include <gtest/gtest.h>
+#include <limits>
+#include <nlohmann/json.hpp>
+#include <pbt.h>
+#include <thread>
 
 using namespace std::chrono_literals;
 
@@ -2003,5 +2002,3 @@ TEST(ArGlassesModeTransition, DoesNotClaimAUserMovedRectDuringModeChange) {
     user_moved_expanded
   ));
 }
-
-#endif

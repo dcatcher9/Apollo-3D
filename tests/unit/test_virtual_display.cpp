@@ -1,14 +1,13 @@
-#ifdef _WIN32
 
-  #include "src/platform/windows/virtual_display.h"
+#include "src/platform/windows/virtual_display.h"
 
-  #include <algorithm>
-  #include <cstring>
-  #include <functional>
-  #include <limits>
-  #include <string_view>
+#include <algorithm>
+#include <cstring>
+#include <functional>
+#include <limits>
+#include <string_view>
 
-  #include <gtest/gtest.h>
+#include <gtest/gtest.h>
 
 namespace {
   SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT identity(uint32_t lowPart, LONG highPart, UINT targetId) {
@@ -1305,5 +1304,3 @@ TEST(VirtualDisplaySessionMode, RejectsIncompleteOrHardwareDefaultModes) {
   active.dmPelsHeight = 0;
   EXPECT_FALSE(VDISPLAY::sessionModeRecord(active));
 }
-
-#endif

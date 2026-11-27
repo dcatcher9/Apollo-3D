@@ -1,8 +1,7 @@
 #include <gtest/gtest.h>
-#ifdef _WIN32
-  #include "src/platform/windows/capture_gpu_scheduling.h"
+#include "src/platform/windows/capture_gpu_scheduling.h"
 
-  #include <vector>
+#include <vector>
 
 namespace {
   namespace d = platf::dxgi::detail;
@@ -171,4 +170,3 @@ namespace {
     EXPECT_EQ(requested_priority, d::D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH);
   }
 }  // namespace
-#endif

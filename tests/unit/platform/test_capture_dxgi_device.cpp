@@ -1,10 +1,9 @@
 #include <gtest/gtest.h>
-#ifdef _WIN32
-  #include "src/platform/windows/capture_dxgi_device.h"
+#include "src/platform/windows/capture_dxgi_device.h"
 
-  #include <dxgi.h>
-  #include <utility>
-  #include <vector>
+#include <dxgi.h>
+#include <utility>
+#include <vector>
 
 namespace {
   namespace d = platf::dxgi::detail;
@@ -155,4 +154,3 @@ TEST(CaptureDxgiDeviceTest, SetterFailuresContinueAndReleaseTheInterface) {
     expect_configured_and_released(device);
   }
 }
-#endif

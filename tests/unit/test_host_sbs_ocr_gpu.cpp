@@ -4,40 +4,38 @@
  */
 #include <gtest/gtest.h>
 
-#ifdef _WIN32
+#include "src/crypto.h"
+#include "src/depth_coordinate_v2.h"
+#include "src/generated/sbs_adaptive_state_contract.h"
+#include "src/host_sbs_resolution.h"
+#include "src/host_sbs_shader_cache.h"
+#include "src/platform/windows/sbs_debug_dump.h"
+#include "src/platform/windows/sbs_debug_dump_validate.h"
 
-  #include "src/crypto.h"
-  #include "src/depth_coordinate_v2.h"
-  #include "src/generated/sbs_adaptive_state_contract.h"
-  #include "src/host_sbs_resolution.h"
-  #include "src/host_sbs_shader_cache.h"
-  #include "src/platform/windows/sbs_debug_dump.h"
-  #include "src/platform/windows/sbs_debug_dump_validate.h"
-
-  #include <algorithm>
-  #include <array>
-  #include <bit>
-  #include <cmath>
-  #include <cstddef>
-  #include <cstdint>
-  #include <cstdlib>
-  #include <cstring>
-  #include <d3d11.h>
-  #include <d3dcompiler.h>
-  #include <filesystem>
-  #include <fstream>
-  #include <iterator>
-  #include <limits>
-  #include <map>
-  #include <mutex>
-  #include <numeric>
-  #include <nlohmann/json.hpp>
-  #include <optional>
-  #include <stdexcept>
-  #include <string>
-  #include <tuple>
-  #include <vector>
-  #include <wrl/client.h>
+#include <algorithm>
+#include <array>
+#include <bit>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <d3d11.h>
+#include <d3dcompiler.h>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <limits>
+#include <map>
+#include <mutex>
+#include <numeric>
+#include <nlohmann/json.hpp>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <tuple>
+#include <vector>
+#include <wrl/client.h>
 
 namespace {
   using Microsoft::WRL::ComPtr;
@@ -4392,11 +4390,3 @@ namespace {
     EXPECT_EQ(fixture.smoothing_enabled(), 0u);
   }
 }  // namespace
-
-#else
-
-TEST(HostSbsOcrGpuTest, WindowsOnly) {
-  GTEST_SKIP() << "D3D11 WARP is Windows-only";
-}
-
-#endif

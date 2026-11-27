@@ -1,22 +1,21 @@
 /** Actual converter poll wiring and its existing owner-loop consumers, without D3D startup. */
 #include <gtest/gtest.h>
 
-#if defined(_WIN32) && defined(SUNSHINE_TESTS)
-  #include "src/config.h"
-  #include "src/platform/windows/capture_timing.h"
-  #include "src/platform/windows/conversion_poll_test.h"
-  #include "src/thread_safe.h"
-  #include "src/video_encode_pacing.h"
+#include "src/config.h"
+#include "src/platform/windows/capture_timing.h"
+#include "src/platform/windows/conversion_poll_test.h"
+#include "src/thread_safe.h"
+#include "src/video_encode_pacing.h"
 
-  #include <array>
-  #include <chrono>
-  #include <cstdlib>
-  #include <future>
-  #include <memory>
-  #include <optional>
-  #include <stdexcept>
-  #include <string>
-  #include <vector>
+#include <array>
+#include <chrono>
+#include <cstdlib>
+#include <future>
+#include <memory>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <vector>
 
 namespace {
   using namespace std::chrono_literals;
@@ -238,9 +237,7 @@ namespace {
     }
   }
 }  // namespace
-#endif
 
-#if defined(_WIN32) && defined(SUNSHINE_TESTS)
 namespace {
   TEST_F(ConversionPollActualMethodTest, ReadyRegistryWithoutEstimatorDoesNotConvertDuringUnknownOrBuilding) {
     probe_t probe {ready_registry()};
@@ -296,4 +293,3 @@ namespace {
     }
   }
 }  // namespace
-#endif

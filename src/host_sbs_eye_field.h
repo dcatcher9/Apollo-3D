@@ -9,14 +9,12 @@
  */
 #pragma once
 
-#ifdef _WIN32
+// standard includes
+#include <cstdint>
 
-  // standard includes
-  #include <cstdint>
-
-  // platform includes
-  #include <d3d11.h>
-  #include <wrl/client.h>
+// platform includes
+#include <d3d11.h>
+#include <wrl/client.h>
 
 namespace models::host_sbs_eye_field {
 
@@ -75,5 +73,3 @@ namespace models::host_sbs_eye_field {
   }
 
 }  // namespace models::host_sbs_eye_field
-
-#endif  // _WIN32

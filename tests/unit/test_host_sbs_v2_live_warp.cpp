@@ -4,44 +4,42 @@
  */
 #include "../tests_common.h"
 
-#ifdef _WIN32
-
-  #include <algorithm>
-  #include <array>
-  #include <bit>
-  #include <cmath>
-  #include <cstddef>
-  #include <cstdint>
-  #include <cstdlib>
-  #include <cstring>
-  #include <d3d11.h>
-  #include <d3dcompiler.h>
-  #include <d3d11shader.h>
-  #include <filesystem>
-  #include <fstream>
-  #include <iterator>
-  #include <limits>
-  #include <map>
-  #include <nlohmann/json.hpp>
-  #include <src/crypto.h>
-  #include <src/depth_coordinate_v2.h>
-  #include <src/host_sbs_eye_field.h>
-  #include <src/host_sbs_selected_matte_receipt.h>
-  #include <src/host_sbs_shared_ui_warp_runtime.h>
+#include <algorithm>
+#include <array>
+#include <bit>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <d3d11.h>
+#include <d3dcompiler.h>
+#include <d3d11shader.h>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <limits>
+#include <map>
+#include <nlohmann/json.hpp>
+#include <src/crypto.h>
+#include <src/depth_coordinate_v2.h>
+#include <src/host_sbs_eye_field.h>
+#include <src/host_sbs_selected_matte_receipt.h>
+#include <src/host_sbs_shared_ui_warp_runtime.h>
 #include <src/host_sbs_subtitle_publication.h>
-  #include <src/host_sbs_shader_cache.h>
-  #include <src/host_sbs_subtitle_render.h>
-  #include <src/host_sbs_v2_geometry.h>
-  #include <src/platform/windows/host_sbs_v2_renderer.h>
-  #include <sstream>
-  #include <stdexcept>
-  #include <string>
-  #include <string_view>
-  #include <type_traits>
-  #include <tests/fixtures/host_sbs_adaptive_camera_state.h>
-  #include <utility>
-  #include <vector>
-  #include <wrl/client.h>
+#include <src/host_sbs_shader_cache.h>
+#include <src/host_sbs_subtitle_render.h>
+#include <src/host_sbs_v2_geometry.h>
+#include <src/platform/windows/host_sbs_v2_renderer.h>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <tests/fixtures/host_sbs_adaptive_camera_state.h>
+#include <utility>
+#include <vector>
+#include <wrl/client.h>
 
 class HostSbsV2LiveWarpGpuTest_SharedUiPinProductionOwnerRestoresContextAndRejectsMissingInputs_Test;
 class HostSbsV2LiveWarpGpuTest_SharedUiPinProductionRejectsInvalidRowExtentAndDiagnosticDevice_Test;
@@ -6011,5 +6009,3 @@ TEST(HostSbsV2LiveWarpGpuTest, PrivateNativeMatteTwoSidedSelectorReplay) {
     FAIL() << failure.what();
   }
 }
-
-#endif  // _WIN32

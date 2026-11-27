@@ -133,14 +133,10 @@ namespace models {
 
     bool engine_cache_path_fits_native_limit(const std::filesystem::path& path) {
         if (path.empty()) return false;
-#ifdef _WIN32
         std::error_code ec;
         const auto absolute = std::filesystem::absolute(path, ec);
         // The native builder's file APIs do not opt into extended-length paths.
         return !ec && absolute.native().size() + std::string_view(".part").size() < 260u;
-#else
-        return true;
-#endif
     }
 
     std::filesystem::path ensure_onnx_available(const std::filesystem::path& assets_dir, const std::string& model_name) {

@@ -57,11 +57,9 @@ TEST(ModelManagerTest, CurrentDepthFilenameRejectsTruncatedHashesAndPaths) {
   EXPECT_LT((build_assets / (filename + ".part")).native().size(), 260u);
   EXPECT_TRUE(models::engine_cache_path_fits_native_limit(build_assets / filename));
   EXPECT_FALSE(models::engine_cache_path_fits_native_limit({}));
-#ifdef _WIN32
   const std::filesystem::path prefix {"C:/"};
   EXPECT_TRUE(models::engine_cache_path_fits_native_limit(prefix / std::string(251u, 'a')));
   EXPECT_FALSE(models::engine_cache_path_fits_native_limit(prefix / std::string(252u, 'a')));
-#endif
 }
 
 TEST(ModelManagerTest, OcrEngineFilenameIsBoundedAndCommitsTheCompleteIdentity) {

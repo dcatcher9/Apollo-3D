@@ -4,21 +4,19 @@
  */
 #include "../tests_common.h"
 
-#ifdef _WIN32
-
-  #include <algorithm>
-  #include <array>
-  #include <bit>
-  #include <cmath>
-  #include <cstdint>
-  #include <cstring>
-  #include <d3d11.h>
-  #include <d3dcompiler.h>
-  #include <filesystem>
-  #include <src/video_colorspace.h>
-  #include <string>
-  #include <vector>
-  #include <wrl/client.h>
+#include <algorithm>
+#include <array>
+#include <bit>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <d3d11.h>
+#include <d3dcompiler.h>
+#include <filesystem>
+#include <src/video_colorspace.h>
+#include <string>
+#include <vector>
+#include <wrl/client.h>
 
 namespace {
   using Microsoft::WRL::ComPtr;
@@ -502,5 +500,3 @@ namespace {
     }
   }
 }  // namespace
-
-#endif

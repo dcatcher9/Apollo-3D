@@ -2,16 +2,15 @@
 
 // Private recipe5 audit of the real, already tone-mapped display snapshot band. It writes only
 // the source proof and the UIP envelope; no pixels, OCR, UI, EMPTY or renderer authority.
-#ifdef _WIN32
-  #include "host_sbs_compute_program_lease.h"
-  #include "host_sbs_compute_state_guard.h"
-  #include <array>
-  #include <cstdint>
-  #include <d3d11.h>
-  #include <optional>
-  #include <string>
-  #include <utility>
-  #include <wrl/client.h>
+#include "host_sbs_compute_program_lease.h"
+#include "host_sbs_compute_state_guard.h"
+#include <array>
+#include <cstdint>
+#include <d3d11.h>
+#include <optional>
+#include <string>
+#include <utility>
+#include <wrl/client.h>
 
 namespace models::display_snapshot_rgb8_analysis_gpu_v1 {
   using Microsoft::WRL::ComPtr;
@@ -355,4 +354,3 @@ namespace models::display_snapshot_rgb8_analysis_gpu_v1 {
     }
   };
 }  // namespace models::display_snapshot_rgb8_analysis_gpu_v1
-#endif

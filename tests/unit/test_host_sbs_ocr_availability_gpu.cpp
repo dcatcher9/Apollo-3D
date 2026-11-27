@@ -1,29 +1,28 @@
 /** Production joined-inference regression for an absent optional OCR model. */
 #include <gtest/gtest.h>
 
-#ifdef _WIN32
-  #include "host_sbs_limiter_oracle.h"
-  #include <algorithm>
-  #include <bit>
-  #include <chrono>
-  #include <cstddef>
-  #include <cstdint>
-  #include <cstdlib>
-  #include <cstring>
-  #include <filesystem>
-  #include <memory>
-  #include <optional>
-  #include <src/depth_coordinate_v2.h>
-  #include <src/host_sbs_completed_subtitle_programs.h>
-  #include <src/host_sbs_shader_cache.h>
-  #include <src/model_manager.h>
-  #include <src/prod_zipdepth_convex2x.h>
-  #include <src/video_depth_estimator.h>
-  #include <tests/fixtures/d3d11_device_release.h>
-  #include <string>
-  #include <string_view>
-  #include <thread>
-  #include <vector>
+#include "host_sbs_limiter_oracle.h"
+#include <algorithm>
+#include <bit>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <memory>
+#include <optional>
+#include <src/depth_coordinate_v2.h>
+#include <src/host_sbs_completed_subtitle_programs.h>
+#include <src/host_sbs_shader_cache.h>
+#include <src/model_manager.h>
+#include <src/prod_zipdepth_convex2x.h>
+#include <src/video_depth_estimator.h>
+#include <tests/fixtures/d3d11_device_release.h>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <vector>
 
 namespace {
   using Microsoft::WRL::ComPtr;
@@ -573,4 +572,3 @@ TEST_F(TensorRtOcrAvailabilityGpuTest, PaddedLiveBaseRestoresFullDiagnosticsForL
     }
   }
 }
-#endif

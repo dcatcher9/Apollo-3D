@@ -1,33 +1,32 @@
 /** Opt-in fresh-process evidence for the actual live preparation owner and shared converter. */
 #include <gtest/gtest.h>
 
-#if defined(_WIN32) && defined(SUNSHINE_TESTS)
-  #include "src/config.h"
-  #include "src/gpu_workload_arbiter.h"
-  #include "src/live_model_preparation.h"
-  #include "src/live_model_preparation_test.h"
-  #include "src/model_manager.h"
-  #include "src/platform/windows/model_preparation_converter_test.h"
-  #include "src/video.h"
-  #include "src/video_depth_estimator.h"
+#include "src/config.h"
+#include "src/gpu_workload_arbiter.h"
+#include "src/live_model_preparation.h"
+#include "src/live_model_preparation_test.h"
+#include "src/model_manager.h"
+#include "src/platform/windows/model_preparation_converter_test.h"
+#include "src/video.h"
+#include "src/video_depth_estimator.h"
 
-  #include <array>
-  #include <chrono>
-  #include <condition_variable>
-  #include <cstdint>
-  #include <cstdlib>
-  #include <exception>
-  #include <filesystem>
-  #include <fstream>
-  #include <mutex>
-  #include <nlohmann/json.hpp>
-  #include <optional>
-  #include <stdexcept>
-  #include <string>
-  #include <string_view>
-  #include <thread>
-  #include <utility>
-  #include <vector>
+#include <array>
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
+#include <cstdlib>
+#include <exception>
+#include <filesystem>
+#include <fstream>
+#include <mutex>
+#include <nlohmann/json.hpp>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <utility>
+#include <vector>
 
 namespace {
   using namespace std::chrono_literals;
@@ -666,5 +665,3 @@ TEST(LiveModelPreparationGpuTest, ChangedHardDisabledSourceReusesDepthAndDrawsCu
   owner.reset();
   drain.finish();
 }
-
-#endif

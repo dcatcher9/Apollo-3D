@@ -15,9 +15,7 @@
 #include <string_view>
 #include <vector>
 
-#ifdef _WIN32
-  #include <windows.h>
-#endif
+#include <windows.h>
 
 namespace ar_glasses {
   using remote_virtual_display_lease_t = std::uint64_t;

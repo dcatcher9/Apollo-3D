@@ -374,15 +374,13 @@ TEST(ReShadeBridgeProtocol, RejectsMalformedPlaneExtensionsAndUnknownVersions) {
   }
 }
 
-#ifdef _WIN32
+#include "src/platform/windows/reshade_bridge.h"
+#include "tests/tests_log_checker.h"
 
-  #include "src/platform/windows/reshade_bridge.h"
-  #include "tests/tests_log_checker.h"
-
-  #include <d3d11_4.h>
-  #include <d3d12.h>
-  #include <dxgi1_2.h>
-  #include <wrl/client.h>
+#include <d3d11_4.h>
+#include <d3d12.h>
+#include <dxgi1_2.h>
+#include <wrl/client.h>
 
 namespace {
   using Microsoft::WRL::ComPtr;
@@ -1832,5 +1830,3 @@ TEST_F(ReShadeBridgeGpu, ImportsD3D12Rgb10A2BothEyesWithoutWaitingForProducerFen
   EXPECT_EQ(protocol::control_state(slot.control), protocol::slot_state::reading);
   expect_pixels(frame->texture, DXGI_FORMAT_R10G10B10A2_UNORM, 0xC00003FF, 0xFFF00000);
 }
-
-#endif

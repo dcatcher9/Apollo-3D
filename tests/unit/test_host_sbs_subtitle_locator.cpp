@@ -4,36 +4,34 @@
  */
 #include <gtest/gtest.h>
 
-#ifdef _WIN32
+#include "src/depth_coordinate_v2.h"
+#include "src/generated/sbs_adaptive_state_contract.h"
+#include "src/host_sbs_shader_cache.h"
+#include "src/host_sbs_subtitle_plane.h"
+#include "src/platform/windows/sbs_debug_dump.h"
+#include "src/platform/windows/sbs_debug_dump_validate.h"
 
-  #include "src/depth_coordinate_v2.h"
-  #include "src/generated/sbs_adaptive_state_contract.h"
-  #include "src/host_sbs_shader_cache.h"
-  #include "src/host_sbs_subtitle_plane.h"
-  #include "src/platform/windows/sbs_debug_dump.h"
-  #include "src/platform/windows/sbs_debug_dump_validate.h"
-
-  #include <algorithm>
-  #include <array>
-  #include <bit>
-  #include <cmath>
-  #include <cstddef>
-  #include <cstdint>
-  #include <cstdlib>
-  #include <cstring>
-  #include <d3d11.h>
-  #include <d3dcompiler.h>
-  #include <filesystem>
-  #include <fstream>
-  #include <iterator>
-  #include <limits>
-  #include <iostream>
-  #include <numeric>
-  #include <optional>
-  #include <string>
-  #include <utility>
-  #include <vector>
-  #include <wrl/client.h>
+#include <algorithm>
+#include <array>
+#include <bit>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <d3d11.h>
+#include <d3dcompiler.h>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <limits>
+#include <iostream>
+#include <numeric>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+#include <wrl/client.h>
 
 namespace {
   using Microsoft::WRL::ComPtr;
@@ -2864,11 +2862,3 @@ namespace {
   }
 
 }  // namespace
-
-#else
-
-TEST(HostSbsSubtitleSlr13GpuTest, WindowsOnly) {
-  GTEST_SKIP() << "Direct OCR/UI plane GPU tests require Windows D3D11";
-}
-
-#endif

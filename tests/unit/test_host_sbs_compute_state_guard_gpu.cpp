@@ -2,16 +2,15 @@
  * @file tests/unit/test_host_sbs_compute_state_guard_gpu.cpp
  * @brief Sentinel tests for the compute-state guard of each Host SBS pass family.
  */
-#ifdef _WIN32
-  #include "src/host_sbs_compute_state_guard.h"
-  #include "src/host_sbs_direct_glyph_gpu.h"
-  #include "src/host_sbs_direct_glyph_publication_gpu.h"
-  #include "src/host_sbs_display_snapshot_rgb8_analysis_gpu.h"
+#include "src/host_sbs_compute_state_guard.h"
+#include "src/host_sbs_direct_glyph_gpu.h"
+#include "src/host_sbs_direct_glyph_publication_gpu.h"
+#include "src/host_sbs_display_snapshot_rgb8_analysis_gpu.h"
 
-  #include <d3dcompiler.h>
-  #include <gtest/gtest.h>
-  #include <type_traits>
-  #include <vector>
+#include <d3dcompiler.h>
+#include <gtest/gtest.h>
+#include <type_traits>
+#include <vector>
 
 namespace {
   using Microsoft::WRL::ComPtr;
@@ -194,4 +193,3 @@ namespace {
     expect_exact_restore<models::display_snapshot_rgb8_analysis_gpu_v1::compute_state_t>();
   }
 }  // namespace
-#endif

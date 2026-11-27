@@ -1,22 +1,21 @@
 /** Actual eager preparation-owner orchestration, with only the two GPU operations replaced. */
 #include <gtest/gtest.h>
 
-#if defined(_WIN32) && defined(SUNSHINE_TESTS)
-  #include "src/config.h"
-  #include "src/live_model_preparation.h"
-  #include "src/live_model_preparation_test.h"
+#include "src/config.h"
+#include "src/live_model_preparation.h"
+#include "src/live_model_preparation_test.h"
 
-  #include <array>
-  #include <atomic>
-  #include <chrono>
-  #include <condition_variable>
-  #include <filesystem>
-  #include <future>
-  #include <mutex>
-  #include <string>
-  #include <thread>
-  #include <utility>
-  #include <vector>
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <filesystem>
+#include <future>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
 
 namespace {
   using namespace std::chrono_literals;
@@ -281,5 +280,3 @@ TEST(LiveModelPreparationTest, SequentialOwnersDoNotRetainPriorOperationsOrObser
   EXPECT_EQ(first_stages, (std::vector<stage_t>(expected_stages.begin(), expected_stages.end())));
   EXPECT_FALSE(first_gate.timed_out);
 }
-
-#endif

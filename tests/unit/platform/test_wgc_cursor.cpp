@@ -5,15 +5,14 @@
 
 #include <gtest/gtest.h>
 
-#ifdef _WIN32
-  #include "src/platform/windows/display.h"
+#include "src/platform/windows/display.h"
 
-  #include <cstdint>
-  #include <memory>
-  #include <string>
-  #include <utility>
-  #include <winrt/Windows.Foundation.h>
-  #include <winrt/Windows.Graphics.Capture.h>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <utility>
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Graphics.Capture.h>
 
 namespace platf::dxgi {
   struct wgc_capture_test_access {
@@ -303,4 +302,3 @@ namespace {
     EXPECT_EQ(stats->starts, 0u);
   }
 }  // namespace
-#endif

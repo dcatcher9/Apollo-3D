@@ -2,24 +2,23 @@
 #include "src/capture_display_retirement.h"
 #include "src/video_capture_test.h"
 
-#ifdef _WIN32
-  #include "src/platform/windows/display.h"
-  #include "src/tracked_async_worker.h"
+#include "src/platform/windows/display.h"
+#include "src/tracked_async_worker.h"
 
-  #include <array>
-  #include <atomic>
-  #include <chrono>
-  #include <condition_variable>
-  #include <functional>
-  #include <future>
-  #include <gtest/gtest.h>
-  #include <limits>
-  #include <memory>
-  #include <mutex>
-  #include <string>
-  #include <thread>
-  #include <utility>
-  #include <vector>
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <functional>
+#include <future>
+#include <gtest/gtest.h>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
 
 namespace {
   using namespace std::chrono_literals;
@@ -589,4 +588,3 @@ TEST(VideoCaptureReinitTest, StopDuringTopologyReconciliationJoinsAfterTheHookRe
   EXPECT_EQ(fixture.state->opens(), 1u);
   EXPECT_FALSE(fixture.state->generations[1].entered.wait(0ms));
 }
-#endif

@@ -259,8 +259,7 @@ namespace {
   }
 }  // namespace
 
-#ifdef _WIN32
-  #include "src/platform/windows/subtitle_context_policy.h"
+#include "src/platform/windows/subtitle_context_policy.h"
 
 namespace {
   namespace foreground = platf::foreground_window;
@@ -797,4 +796,3 @@ namespace {
     EXPECT_EQ(rejected.browser_key.kind, context::kind_e::disabled);
   }
 }  // namespace
-#endif

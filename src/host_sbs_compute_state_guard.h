@@ -3,10 +3,9 @@
  * @brief Scoped save and restore of the compute-stage bindings a Host SBS pass touches.
  */
 #pragma once
-#ifdef _WIN32
-  #include <array>
-  #include <d3d11.h>
-  #include <wrl/client.h>
+#include <array>
+#include <d3d11.h>
+#include <wrl/client.h>
 
 namespace models::host_sbs_compute_state {
   /**
@@ -89,4 +88,3 @@ namespace models::host_sbs_compute_state {
     BOOL predicate_value_ = FALSE;
   };
 }  // namespace models::host_sbs_compute_state
-#endif

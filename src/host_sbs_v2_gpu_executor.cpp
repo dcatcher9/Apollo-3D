@@ -4,8 +4,6 @@
  */
 #include "host_sbs_v2_gpu_executor.h"
 
-#ifdef _WIN32
-
 namespace models::host_sbs_v2_gpu {
 
   namespace {
@@ -303,5 +301,3 @@ namespace models::host_sbs_v2_gpu {
   }
 
 }  // namespace models::host_sbs_v2_gpu
-
-#endif  // _WIN32

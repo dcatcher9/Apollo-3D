@@ -4,14 +4,12 @@
  */
 #pragma once
 
-#ifdef _WIN32
+// standard includes
+#include <array>
+#include <optional>
 
-  // standard includes
-  #include <array>
-  #include <optional>
-
-  // platform includes
-  #include <d3d11.h>
+// platform includes
+#include <d3d11.h>
 
 namespace platf::dxgi {
 
@@ -64,5 +62,3 @@ namespace platf::dxgi {
   ) noexcept;
 
 }  // namespace platf::dxgi
-
-#endif  // _WIN32

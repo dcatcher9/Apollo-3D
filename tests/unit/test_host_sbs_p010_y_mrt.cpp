@@ -4,8 +4,6 @@
  */
 #include "../tests_common.h"
 
-#ifdef _WIN32
-
 #include <array>
 #include <bit>
 #include <cstddef>
@@ -1175,5 +1173,3 @@ TEST(HostSbsP010YMrtGpuTest, ActualP010YPlaneMatchesAtProductionPackedWidth) {
   EXPECT_TRUE(observed_nonzero_luma);
   EXPECT_TRUE(observed_multiple_luma_codes);
 }
-
-#endif  // _WIN32

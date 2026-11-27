@@ -1,11 +1,10 @@
 #pragma once
 // Observer and synthetic scheduling context for the converter test fixtures
 // (model_preparation_converter_test.h). Ordinary streaming sets neither.
-#ifdef _WIN32
-  #include "src/video_depth_estimator.h"
-  #include <array>
-  #include <cstdint>
-  #include <wrl/client.h>
+#include "src/video_depth_estimator.h"
+#include <array>
+#include <cstdint>
+#include <wrl/client.h>
 
 namespace platf::dxgi::converter_test_observer {
   struct context_t {
@@ -45,4 +44,3 @@ namespace platf::dxgi::converter_test_observer {
     void emit(const event_t &event) const noexcept { if (record) record(state, event); }
   };
 }
-#endif

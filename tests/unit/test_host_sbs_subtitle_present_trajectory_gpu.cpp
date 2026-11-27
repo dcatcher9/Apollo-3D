@@ -7,8 +7,6 @@
 #include <tests/tests_common.h>
 #include <src/video_depth_estimator.h>
 
-#ifdef _WIN32
-
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -897,5 +895,3 @@ TEST(HostSbsSubtitlePresentTrajectoryGpuTest, ExactUnchangedSourceMayKeepItsGpu3
   EXPECT_TRUE(models::host_sbs_should_repeat_packed_presentation(
     models::host_sbs_renderer_e::parallax_v2, false, true, true, 1h, true));
 }
-
-#endif  // _WIN32

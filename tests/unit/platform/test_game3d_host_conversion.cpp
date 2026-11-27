@@ -4,27 +4,26 @@
  * @brief WARP checks of the Game 3D host conversion: the PQ wire transfer against the legacy
  *        FP16 scRGB path, and the cursor patch against full-frame cursor composition.
  */
-#ifdef _WIN32
-  #include "src/platform/windows/packed_output_fit.h"
-  #include "src/platform/windows/sbs_cursor.h"
+#include "src/platform/windows/packed_output_fit.h"
+#include "src/platform/windows/sbs_cursor.h"
 
-  #include <algorithm>
-  #include <array>
-  #include <bit>
-  #include <cmath>
-  #include <cstdint>
-  #include <cstring>
-  #include <d3d11_1.h>
-  #include <d3dcompiler.h>
-  #include <filesystem>
-  #include <functional>
-  #include <gtest/gtest.h>
-  #include <map>
-  #include <optional>
-  #include <string>
-  #include <tuple>
-  #include <vector>
-  #include <wrl/client.h>
+#include <algorithm>
+#include <array>
+#include <bit>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <d3d11_1.h>
+#include <d3dcompiler.h>
+#include <filesystem>
+#include <functional>
+#include <gtest/gtest.h>
+#include <map>
+#include <optional>
+#include <string>
+#include <tuple>
+#include <vector>
+#include <wrl/client.h>
 
 namespace {
   using Microsoft::WRL::ComPtr;
@@ -856,4 +855,3 @@ TEST_F(Game3DHostConversion, PqCursorPatchBlendsInLinearLight) {
     }
   }
 }
-#endif

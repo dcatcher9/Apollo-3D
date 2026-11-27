@@ -1,6 +1,6 @@
 #pragma once
 
-#if defined(_WIN32) && defined(SUNSHINE_TESTS)
+#ifdef SUNSHINE_TESTS
   #include "src/video.h"
   #include "src/video_depth_estimator.h"
 

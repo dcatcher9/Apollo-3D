@@ -1,20 +1,19 @@
 /** @file Direct Glyph planning and selected-matte publication on the GPU. */
 #pragma once
 
-#ifdef _WIN32
-  #include "host_sbs_compute_state_guard.h"
-  #include "host_sbs_display_snapshot_rgb8_analysis_gpu.h"
-  #include "host_sbs_shader_cache.h"
+#include "host_sbs_compute_state_guard.h"
+#include "host_sbs_display_snapshot_rgb8_analysis_gpu.h"
+#include "host_sbs_shader_cache.h"
 
-  #include <array>
-  #include <bit>
-  #include <cstdint>
-  #include <d3d11.h>
-  #include <filesystem>
-  #include <string>
-  #include <string_view>
-  #include <utility>
-  #include <wrl/client.h>
+#include <array>
+#include <bit>
+#include <cstdint>
+#include <d3d11.h>
+#include <filesystem>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <wrl/client.h>
 
 namespace models::host_sbs_direct_glyph_publication {
   using Microsoft::WRL::ComPtr;
@@ -370,4 +369,3 @@ namespace models::host_sbs_direct_glyph_publication {
     }
   };
 }
-#endif

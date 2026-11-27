@@ -6,9 +6,8 @@
 
 #include "src/host_sbs_eye_field.h"
 
-#ifdef _WIN32
-  #include <algorithm>
-  #include <wrl/client.h>
+#include <algorithm>
+#include <wrl/client.h>
 
 namespace platf::dxgi {
 
@@ -107,5 +106,3 @@ namespace platf::dxgi {
   }
 
 }  // namespace platf::dxgi
-
-#endif  // _WIN32

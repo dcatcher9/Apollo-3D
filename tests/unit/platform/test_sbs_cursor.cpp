@@ -1,20 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-only
-#ifdef _WIN32
-  #include "src/platform/windows/sbs_cursor.h"
+#include "src/platform/windows/sbs_cursor.h"
 
-  #include <algorithm>
-  #include <array>
-  #include <cmath>
-  #include <cstring>
-  #include <d3d11_1.h>
-  #include <d3dcompiler.h>
-  #include <filesystem>
-  #include <fstream>
-  #include <gtest/gtest.h>
-  #include <iterator>
-  #include <limits>
-  #include <string>
-  #include <wrl/client.h>
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstring>
+#include <d3d11_1.h>
+#include <d3dcompiler.h>
+#include <filesystem>
+#include <fstream>
+#include <gtest/gtest.h>
+#include <iterator>
+#include <limits>
+#include <string>
+#include <wrl/client.h>
 
 namespace {
   namespace cursor = platf::sbs_cursor;
@@ -748,4 +747,3 @@ TEST_F(SbsCursorGpu, RestoresCallerPipelineStateAndRejectsMalformedVisibleShape)
   s.shape = malformed;
   EXPECT_FALSE(compositor->compose(source.Get(), source_view.Get(), s, false, 1));
 }
-#endif

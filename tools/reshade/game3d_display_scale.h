@@ -2,9 +2,7 @@
 
 #include <cstdint>
 
-#ifdef _WIN32
-  #include <Windows.h>
-#endif
+#include <Windows.h>
 
 // A game that is not DPI aware sees its monitor at the logical size, the
 // physical mode divided by the Windows display scaling: at 150% a 3840x2160
@@ -42,7 +40,6 @@ namespace sunshine_game3d::display_scale {
   static_assert(classify(1536, 864, 1536, 864, 1920, 1080).limited &&
     classify(1536, 864, 1536, 864, 1920, 1080).scale_percent == 125);
 
-#ifdef _WIN32
   // Monitor geometry as this (game) thread sees it against the monitor's
   // physical mode. EnumDisplaySettings reports the real mode; GetMonitorInfo
   // reports logical coordinates to a DPI-unaware process.
@@ -58,5 +55,4 @@ namespace sunshine_game3d::display_scale {
     const auto logical_height = static_cast<std::uint32_t>(info.rcMonitor.bottom - info.rcMonitor.top);
     return classify(game_width, game_height, logical_width, logical_height, mode.dmPelsWidth, mode.dmPelsHeight);
   }
-#endif
 }

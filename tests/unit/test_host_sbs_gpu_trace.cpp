@@ -1,23 +1,22 @@
 #include <gtest/gtest.h>
 
-#ifdef _WIN32
-  #include <d3d11.h>
-  #include <d3dcompiler.h>
-  #include <wrl/client.h>
+#include <d3d11.h>
+#include <d3dcompiler.h>
+#include <wrl/client.h>
 
-  #include <array>
-  #include <cstdint>
-  #include <cstring>
-  #include <filesystem>
-  #include <fstream>
-  #include <string>
-  #include <vector>
+#include <array>
+#include <cstdint>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <string>
+#include <vector>
 
-  #include <src/cuda_conditional_graph.h>
-  #include <src/generated/depth_coordinate_v2_contract.h>
-  #include <src/host_sbs_gpu_outcomes.h>
-  #include <src/host_sbs_gpu_trace.h>
-  #include <src/host_sbs_shader_cache.h>
+#include <src/cuda_conditional_graph.h>
+#include <src/generated/depth_coordinate_v2_contract.h>
+#include <src/host_sbs_gpu_outcomes.h>
+#include <src/host_sbs_gpu_trace.h>
+#include <src/host_sbs_shader_cache.h>
 
 namespace {
   using Microsoft::WRL::ComPtr;
@@ -793,11 +792,3 @@ namespace {
     EXPECT_EQ(read_outcomes(), seeded);
   }
 }  // namespace
-
-#else
-
-TEST(HostSbsGpuTraceWarpTest, WindowsOnly) {
-  GTEST_SKIP() << "D3D11 WARP is Windows-only";
-}
-
-#endif

@@ -1,10 +1,9 @@
 #pragma once
-#ifdef _WIN32
-  #include <array>
-  #include <cstddef>
-  #include <d3d11.h>
-  #include <utility>
-  #include <wrl/client.h>
+#include <array>
+#include <cstddef>
+#include <d3d11.h>
+#include <utility>
+#include <wrl/client.h>
 
 namespace models::host_sbs_compute_program_lease {
   // Shader objects and their device are immutable. Retain a validated tuple so
@@ -35,4 +34,3 @@ namespace models::host_sbs_compute_program_lease {
     }
   };
 }
-#endif

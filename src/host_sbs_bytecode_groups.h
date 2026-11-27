@@ -1,6 +1,5 @@
 /** @file Authenticated Host SBS shader groups and bounded parallel bytecode resolution. */
 #pragma once
-#ifdef _WIN32
 #include "host_sbs_shader_cache.h"
 #include <array>
 #include <atomic>
@@ -114,4 +113,3 @@ namespace models::host_sbs_bytecode_groups {
     return request.code;
   }
 }  // namespace models::host_sbs_bytecode_groups
-#endif

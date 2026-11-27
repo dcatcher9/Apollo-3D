@@ -1,5 +1,4 @@
 #include <gtest/gtest.h>
-#ifdef _WIN32
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -1458,5 +1457,3 @@ TEST_F(WindowsDdupSnapshotTest, FailedDesktopCopiesNeverAdvanceIdentityAndNextSu
   EXPECT_EQ(d::query_ddup_damage_between(first_damage, display.last_ddup_damage, RECT {1, 0, 2, 1}),
     d::ddup_damage_intersection_e::unknown);
 }
-
-#endif // _WIN32

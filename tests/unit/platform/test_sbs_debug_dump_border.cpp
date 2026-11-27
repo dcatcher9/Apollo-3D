@@ -4,8 +4,7 @@
  */
 #include "../../tests_common.h"
 
-#ifdef _WIN32
-  #include <src/platform/windows/sbs_debug_dump_border.h>
+#include <src/platform/windows/sbs_debug_dump_border.h>
 
 namespace {
   using platf::sbs_debug::validate_window_region;
@@ -117,4 +116,3 @@ namespace {
     );
   }
 }  // namespace
-#endif

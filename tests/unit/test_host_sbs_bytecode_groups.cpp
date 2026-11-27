@@ -1,19 +1,18 @@
 /** Authenticated Host SBS shader groups and bounded bytecode preparation. */
 #include <gtest/gtest.h>
 
-#ifdef _WIN32
-  #include "src/host_sbs_bytecode_groups.h"
+#include "src/host_sbs_bytecode_groups.h"
 
-  #include <atomic>
-  #include <chrono>
-  #include <condition_variable>
-  #include <filesystem>
-  #include <fstream>
-  #include <mutex>
-  #include <stdexcept>
-  #include <string>
-  #include <vector>
-  #include <windows.h>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <filesystem>
+#include <fstream>
+#include <mutex>
+#include <stdexcept>
+#include <string>
+#include <vector>
+#include <windows.h>
 
 namespace {
   namespace groups = models::host_sbs_bytecode_groups;
@@ -227,4 +226,3 @@ namespace {
     }
   }
 }  // namespace
-#endif

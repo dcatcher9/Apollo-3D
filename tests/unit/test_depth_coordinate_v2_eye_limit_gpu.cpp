@@ -4,21 +4,19 @@
  */
 #include "../tests_common.h"
 
-#ifdef _WIN32
-
-  #include <algorithm>
-  #include <array>
-  #include <cmath>
-  #include <cstdint>
-  #include <d3d11.h>
-  #include <d3dcompiler.h>
-  #include <filesystem>
-  #include <limits>
-  #include <src/depth_coordinate_v2.h>
-  #include <src/host_sbs_eye_field.h>
-  #include <src/host_sbs_subtitle_publication.h>
-  #include <vector>
-  #include <wrl/client.h>
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdint>
+#include <d3d11.h>
+#include <d3dcompiler.h>
+#include <filesystem>
+#include <limits>
+#include <src/depth_coordinate_v2.h>
+#include <src/host_sbs_eye_field.h>
+#include <src/host_sbs_subtitle_publication.h>
+#include <vector>
+#include <wrl/client.h>
 
 namespace {
   using Microsoft::WRL::ComPtr;
@@ -500,5 +498,3 @@ TEST(DepthCoordinateV2EyeLimitGpuTest, CompanionTravelsWithTheBaseViewAndCanBeDe
   ASSERT_TRUE(recycled);
   EXPECT_FALSE(field::companion(recycled->srv[publication::base].Get()));
 }
-
-#endif  // _WIN32

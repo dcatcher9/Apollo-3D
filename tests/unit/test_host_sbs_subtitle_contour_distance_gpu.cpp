@@ -4,24 +4,22 @@
  */
 #include <gtest/gtest.h>
 
-#ifdef _WIN32
+#include "src/depth_coordinate_v2.h"
+#include "src/generated/depth_coordinate_v2_contract.h"
+#include "src/host_sbs_shader_cache.h"
 
-  #include "src/depth_coordinate_v2.h"
-  #include "src/generated/depth_coordinate_v2_contract.h"
-  #include "src/host_sbs_shader_cache.h"
-
-  #include <algorithm>
-  #include <array>
-  #include <cmath>
-  #include <cstdint>
-  #include <cstring>
-  #include <d3d11.h>
-  #include <limits>
-  #include <set>
-  #include <string>
-  #include <utility>
-  #include <vector>
-  #include <wrl/client.h>
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <d3d11.h>
+#include <limits>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+#include <wrl/client.h>
 
 namespace {
   using Microsoft::WRL::ComPtr;
@@ -824,5 +822,3 @@ namespace {
   }
 
 }  // namespace
-
-#endif

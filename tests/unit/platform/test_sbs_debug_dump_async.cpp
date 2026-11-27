@@ -2,44 +2,41 @@
  * @file tests/unit/platform/test_sbs_debug_dump_async.cpp
  * @brief Behavioral tests for Dump 3D publication lifetime and request ordering.
  */
-#ifdef _WIN32
-  // Boost.Asio must precede Windows headers included by the test and D3D helpers.
-  #include <src/stream.h>
-#endif
+// Boost.Asio must precede Windows headers included by the test and D3D helpers.
+#include <src/stream.h>
 
 #include "../../tests_common.h"
 
-#ifdef _WIN32
-  #include <algorithm>
-  #include <atomic>
-  #include <array>
-  #include <bit>
-  #include <chrono>
-  #include <cmath>
-  #include <cstdlib>
-  #include <cstring>
-  #include <filesystem>
-  #include <fstream>
-  #include <future>
-  #include <iterator>
-  #include <limits>
-  #include <memory>
-  #include <optional>
-  #include <string>
-  #include <utility>
-  #include <vector>
+#include <algorithm>
+#include <atomic>
+#include <array>
+#include <bit>
+#include <chrono>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <future>
+#include <iterator>
+#include <limits>
+#include <memory>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
 
-  #include <nlohmann/json.hpp>
+#include <nlohmann/json.hpp>
 
-  #include <src/generated/depth_coordinate_v2_contract.h>
-  #include <src/depth_coordinate_v2.h>
-  #include <src/host_sbs_gpu_trace.h>
-  #include <src/host_sbs_subtitle_plane.h>
-  #include <src/host_sbs_shader_cache.h>
-  #include <src/platform/windows/sbs_debug_dump.h>
-  #include <src/platform/windows/sbs_debug_dump_async.h>
-  #include <src/platform/windows/sbs_debug_dump_validate.h>
-  #include <src/prod_zipdepth_convex2x.h>
+#include <src/generated/depth_coordinate_v2_contract.h>
+#include <src/depth_coordinate_v2.h>
+#include <src/host_sbs_gpu_trace.h>
+#include <src/host_sbs_subtitle_plane.h>
+#include <src/host_sbs_shader_cache.h>
+#include <src/platform/windows/sbs_debug_dump.h>
+#include <src/platform/windows/sbs_debug_dump_async.h>
+#include <src/platform/windows/sbs_debug_dump_validate.h>
+#include <src/prod_zipdepth_convex2x.h>
 
 namespace {
   using namespace std::chrono_literals;
@@ -2731,4 +2728,3 @@ namespace {
   }
 
 }  // namespace
-#endif

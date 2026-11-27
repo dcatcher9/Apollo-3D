@@ -1,10 +1,9 @@
-#ifdef _WIN32
 
-  #include "src/platform/windows/local_monitor_pointer_geometry.h"
+#include "src/platform/windows/local_monitor_pointer_geometry.h"
 
-  #include <array>
-  #include <gtest/gtest.h>
-  #include <limits>
+#include <array>
+#include <gtest/gtest.h>
+#include <limits>
 
 namespace {
   using platf::dxgi::detail::nearest_interactive_pointer_point;
@@ -53,5 +52,3 @@ namespace {
     expect_point(nearest_interactive_pointer_point({highest - 1, highest - 1}, sink, monitors), highest - 101, highest - 1);
   }
 }  // namespace
-
-#endif

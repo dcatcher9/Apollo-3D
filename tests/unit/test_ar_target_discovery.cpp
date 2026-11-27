@@ -1,25 +1,24 @@
-#ifdef _WIN32
-  #include "src/platform/windows/ar_glasses_discovery_test.h"
-  #include "src/platform/windows/misc.h"
-  #include "src/config.h"
+#include "src/platform/windows/ar_glasses_discovery_test.h"
+#include "src/platform/windows/misc.h"
+#include "src/config.h"
 
-  #include <algorithm>
-  #include <array>
-  #include <atomic>
-  #include <chrono>
-  #include <cwchar>
-  #include <filesystem>
-  #include <fstream>
-  #include <gtest/gtest.h>
-  #include <initializer_list>
-  #include <iterator>
-  #include <limits>
-  #include <memory>
-  #include <nlohmann/json.hpp>
-  #include <optional>
-  #include <stdexcept>
-  #include <string>
-  #include <vector>
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cwchar>
+#include <filesystem>
+#include <fstream>
+#include <gtest/gtest.h>
+#include <initializer_list>
+#include <iterator>
+#include <limits>
+#include <memory>
+#include <nlohmann/json.hpp>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <vector>
 
 namespace {
   namespace fs = std::filesystem;
@@ -812,5 +811,3 @@ TEST_F(ArTargetDiscoveryTest, WatchdogRectPreservesLegacyVirtualSourceFallback) 
   virtual_sources_.clear();
   EXPECT_FALSE(session_->watchdog_rect(rows_[0].path));
 }
-
-#endif

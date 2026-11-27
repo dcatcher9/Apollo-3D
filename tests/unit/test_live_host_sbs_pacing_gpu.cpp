@@ -1,34 +1,33 @@
 #include <gtest/gtest.h>
 
-#if defined(_WIN32) && defined(SUNSHINE_TESTS)
-  #include "src/config.h"
-  #include "src/globals.h"
-  #include "src/live_model_preparation.h"
-  #include "src/platform/common.h"
-  #include "src/platform/windows/capture_timing.h"
-  #include "src/platform/windows/display.h"
-  #include "src/platform/windows/host_sbs_converter_test_observer.h"
-  #include "src/platform/windows/misc.h"
-  #include "src/platform/windows/model_preparation_converter_test.h"
-  #include "src/utility.h"
-  #include "src/video_capture_test.h"
+#include "src/config.h"
+#include "src/globals.h"
+#include "src/live_model_preparation.h"
+#include "src/platform/common.h"
+#include "src/platform/windows/capture_timing.h"
+#include "src/platform/windows/display.h"
+#include "src/platform/windows/host_sbs_converter_test_observer.h"
+#include "src/platform/windows/misc.h"
+#include "src/platform/windows/model_preparation_converter_test.h"
+#include "src/utility.h"
+#include "src/video_capture_test.h"
 
-  #include <algorithm>
-  #include <atomic>
-  #include <chrono>
-  #include <condition_variable>
-  #include <cstdint>
-  #include <cstdlib>
-  #include <exception>
-  #include <iostream>
-  #include <mutex>
-  #include <optional>
-  #include <stdexcept>
-  #include <string>
-  #include <string_view>
-  #include <thread>
-  #include <vector>
-  #include <wrl/client.h>
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
+#include <cstdlib>
+#include <exception>
+#include <iostream>
+#include <mutex>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <vector>
+#include <wrl/client.h>
 
 namespace {
   using namespace std::chrono_literals;
@@ -1360,4 +1359,3 @@ namespace {
     ::testing::Test::RecordProperty("held_native_frame", observed.held_frame);
   }
 }  // namespace
-#endif

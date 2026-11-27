@@ -35,16 +35,15 @@
 #include <tuple>
 #include <vector>
 
-#ifdef _WIN32
-  #include <d3d11.h>
-  #include <d3dcompiler.h>
-  #include <src/host_sbs_observation_handoff.h>
-  #include <src/nvenc/nvenc_d3d11.h>
-  #include <src/platform/windows/display.h>
-  #include <src/platform/windows/display_config.h>
-  #include <src/platform/windows/display_shader_manifest.h>
-  #include <wrl/client.h>
-  #include <wincodec.h>
+#include <d3d11.h>
+#include <d3dcompiler.h>
+#include <src/host_sbs_observation_handoff.h>
+#include <src/nvenc/nvenc_d3d11.h>
+#include <src/platform/windows/display.h>
+#include <src/platform/windows/display_config.h>
+#include <src/platform/windows/display_shader_manifest.h>
+#include <wrl/client.h>
+#include <wincodec.h>
 #include <tests/fixtures/host_sbs_adaptive_camera_state.h>
 #include <tests/fixtures/d3d11_device_release.h>
 
@@ -52,7 +51,6 @@ namespace platf::dxgi {
   int init();
   blob_t compile_shader(LPCSTR file, LPCSTR entrypoint, LPCSTR shader_model);
 }
-#endif
 
 namespace {
 
@@ -360,7 +358,6 @@ namespace {
 
 }  // namespace
 
-#ifdef _WIN32
 TEST(DirectxShaderTest, CompilesAllColorShaderVariants) {
   // D3DCompileFromFile does not require a D3D device. This covers BGRA8, FP16 SDR, PQ,
   // planar luma, both chroma sitings, and the HDR cursor shader in one focused check.
@@ -1702,7 +1699,6 @@ TEST(TensorRtContextLifecycleTest, ReleasesWarmupOperandsOnlyAfterProvenQuiescen
   EXPECT_FALSE(releasable(true, true, readiness_e::failed));
 }
 
-#ifdef _WIN32
 namespace {
   void expect_empty_depth_observation(const models::depth_observation_views_t &observation) {
     EXPECT_FALSE(observation.completed_frame_valid);
@@ -3830,7 +3826,6 @@ TEST(TensorRtConditionalWrapperGpuTest, AllAuthenticatedShapesBuildAndExecute) {
     }
   }
 }
-#endif
 
 TEST(TensorRtContextLifecycleTest, AccountingBoundsQuarantinedAndReusableContextsTogether) {
   models::detail::execution_context_accounting_t accounting;
@@ -4180,7 +4175,6 @@ TEST(DepthInputRegionTest, DomainTransitionDecisionResetsExactlyOncePerStableCha
   EXPECT_FALSE(domain_tracker.update(roi, models::input_color_space::linear_sdr));
 }
 
-  #ifdef _WIN32
 TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   using Microsoft::WRL::ComPtr;
   namespace v2 = models::depth_coordinate_v2;
@@ -4772,7 +4766,6 @@ TEST(ParallaxV2RendererTest, AuthenticationRejectsMissingOrTamperedIdentity) {
   wrong_gain.parallax_v2_requested_gain *= 2.0f;
   EXPECT_FALSE(models::parallax_v2_result_is_authenticated(wrong_gain));
 }
-  #endif
 
 TEST(HostSbsGpuTraceContractTest, ProductionTraceWorkIsDiagnosticsOnly) {
   const auto source = read_source_file(
@@ -6828,7 +6821,6 @@ TEST(DirectxShaderTest, RgbToNchwAreaSamplingMatchesExactFootprints) {
     }
   }
 }
-#endif
 
 TEST(DirectxShaderSourceTest, HostSbsLatestV2LineageIsNotCurrentRenderAuthorization) {
   const auto display =
@@ -8839,7 +8831,6 @@ TEST(NvencConfigTest, RejectsInvalidOrOverflowingRateControl) {
   ));
 }
 
-#ifdef _WIN32
 namespace {
 
   class nvenc_d3d11_async_event_probe final: public nvenc::nvenc_d3d11 {
@@ -8980,7 +8971,6 @@ TEST(NvencAsyncEventWaitTest, FlushUsesTheSameFailureTimeoutAndAutoResetClassifi
   EXPECT_EQ(ready.native_error, ERROR_SUCCESS);
   EXPECT_EQ(encoder.wait_flush().status, nvenc::nvenc_event_wait_status::timeout);
 }
-#endif
 
 TEST(NvencBitrateReconfigureTest, AdmitsOnlyExactGeometryAndCadence) {
   const video::video_mode_change_t active {
@@ -9261,7 +9251,6 @@ TEST(CaptureBackendFailoverTest, LocalArSharedFailoverReadsTheProcessDisplayChan
   EXPECT_EQ(failover->preferred_backend(), platf::capture_backend_e::wgc);
 }
 
-#ifdef _WIN32
 namespace {
   LONG WINAPI accept_color_request(DISPLAYCONFIG_DEVICE_INFO_HEADER *) {
     return ERROR_SUCCESS;
@@ -9300,7 +9289,6 @@ TEST(CaptureBackendFailoverTest, HostAppliedHdrChangeExplainsTheRestart) {
   EXPECT_TRUE(attempt([] {}));
   EXPECT_EQ(failover.preferred_backend(), platf::capture_backend_e::wgc);
 }
-#endif
 
 TEST(CaptureBackendFailoverTest, CaptureLoopsBracketEachAttemptWithDisplayChangeEvidence) {
   // Both capture owners sample before opening the display and after capture returns; host mode

@@ -1,14 +1,13 @@
 /** @file Shared pre-input setup for the completed Host SBS subtitle renderer. */
 #pragma once
 
-#ifdef _WIN32
-  #include "host_sbs_shared_ui_warp_runtime.h"
-  #include "video_depth_estimator.h"
+#include "host_sbs_shared_ui_warp_runtime.h"
+#include "video_depth_estimator.h"
 
-  #include <exception>
-  #include <filesystem>
-  #include <string>
-  #include <utility>
+#include <exception>
+#include <filesystem>
+#include <string>
+#include <utility>
 
 namespace models::host_sbs_completed_subtitle_programs {
   /** The live and Convert Video route: adaptive OCR work with the native palette decoder. */
@@ -43,4 +42,3 @@ namespace models::host_sbs_completed_subtitle_programs {
     }
   }
 }  // namespace models::host_sbs_completed_subtitle_programs
-#endif

@@ -1,23 +1,22 @@
 /** @file Shared Game 3D pinning and one-source-sample Host subtitle renderer. */
 #pragma once
 
-#ifdef _WIN32
-  #include "host_sbs_compute_program_lease.h"
-  #include "host_sbs_eye_field.h"
-  #include "host_sbs_shader_cache.h"
+#include "host_sbs_compute_program_lease.h"
+#include "host_sbs_eye_field.h"
+#include "host_sbs_shader_cache.h"
 
-  #include <algorithm>
-  #include <array>
-  #include <cstdint>
-  #include <exception>
-  #include <filesystem>
-  #include <limits>
-  #include <optional>
-  #include <string>
-  #include <string_view>
-  #include <utility>
-  #include <d3d11.h>
-  #include <wrl/client.h>
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <exception>
+#include <filesystem>
+#include <limits>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <d3d11.h>
+#include <wrl/client.h>
 
 namespace models::host_sbs_shared_ui_warp {
   namespace cache = host_sbs_shader_cache;
@@ -740,4 +739,3 @@ namespace models::host_sbs_shared_ui_warp {
     }
   };
 } // namespace models::host_sbs_shared_ui_warp
-#endif

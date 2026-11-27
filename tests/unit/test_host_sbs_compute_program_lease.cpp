@@ -1,8 +1,7 @@
-#ifdef _WIN32
-  #include "src/host_sbs_compute_program_lease.h"
+#include "src/host_sbs_compute_program_lease.h"
 
-  #include <d3dcompiler.h>
-  #include <gtest/gtest.h>
+#include <d3dcompiler.h>
+#include <gtest/gtest.h>
 
 namespace {
   using Microsoft::WRL::ComPtr;
@@ -38,4 +37,3 @@ namespace {
     EXPECT_FALSE(lease.acquire(nullptr, {original[0u], replacement.Get()}));
   }
 }
-#endif

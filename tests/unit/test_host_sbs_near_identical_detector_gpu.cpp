@@ -914,22 +914,20 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
   EXPECT_EQ(shader.find("NearIdenticalResolveHottestStrong"), std::string::npos);
 }
 
-#ifdef _WIN32
-
-  #include <d3d11.h>
-  #include <d3dcompiler.h>
-  #include <src/generated/sbs_adaptive_state_contract.h>
-  #include <algorithm>
-  #include <bit>
-  #include <cmath>
-  #include <cstring>
-  #include <filesystem>
-  #include <limits>
-  #include <span>
-  #include <string>
-  #include <type_traits>
-  #include <vector>
-  #include <wrl/client.h>
+#include <d3d11.h>
+#include <d3dcompiler.h>
+#include <src/generated/sbs_adaptive_state_contract.h>
+#include <algorithm>
+#include <bit>
+#include <cmath>
+#include <cstring>
+#include <filesystem>
+#include <limits>
+#include <span>
+#include <string>
+#include <type_traits>
+#include <vector>
+#include <wrl/client.h>
 
 namespace {
   using Microsoft::WRL::ComPtr;
@@ -4350,11 +4348,3 @@ TEST(HostSbsNearIdenticalDetectorGpuTest, CompactPreprocessDomainPreservesForceR
       EXPECT_EQ(tile, (tile_evidence_t {0xa5a5a5a5u, 0x5a5a5a5au, 0xdeadbeefu, 0xffffffffu}));
   }
 }
-
-#else
-
-TEST(HostSbsNearIdenticalDetectorGpuTest, WindowsOnly) {
-  GTEST_SKIP() << "D3D11 WARP is Windows-only";
-}
-
-#endif

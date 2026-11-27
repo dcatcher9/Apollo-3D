@@ -1,7 +1,6 @@
-#ifdef _WIN32
-  #include "src/platform/windows/display.h"
+#include "src/platform/windows/display.h"
 
-  #include <gtest/gtest.h>
+#include <gtest/gtest.h>
 
 TEST(LocalShutterPresentationGpu, BoundsPublicationAndRetainsAnExactStereoPair) {
   const auto result = platf::dxgi::probe_local_shutter_frame_ring();
@@ -27,4 +26,3 @@ TEST(LocalShutterPresentationGpu, SwitchesOnlyToAnAuthorizedCompletePairFromAnot
   EXPECT_TRUE(result.denied_retained);
   EXPECT_TRUE(result.adopted_exact_pair);
 }
-#endif

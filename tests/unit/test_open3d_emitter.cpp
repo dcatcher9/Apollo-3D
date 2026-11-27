@@ -1,9 +1,8 @@
-#ifdef _WIN32
 
-  #include "src/platform/windows/open3d_emitter.h"
+#include "src/platform/windows/open3d_emitter.h"
 
-  #include <gtest/gtest.h>
-  #include <utility>
+#include <gtest/gtest.h>
+#include <utility>
 
 namespace {
   using namespace platf::open3d;
@@ -487,5 +486,3 @@ namespace {
     EXPECT_TRUE(detail::valid_settings(settings));
   }
 }  // namespace
-
-#endif
