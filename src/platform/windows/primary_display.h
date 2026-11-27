@@ -6,6 +6,7 @@
 
 #include "display_config.h"
 #include "exclusive_cursor_clip.h"
+#include "primary_display_topology.h"
 
 #include <chrono>
 #include <cstdint>
@@ -198,20 +199,6 @@ namespace platf::primary_display {
       std::filesystem::path path_;
     };
 
-    // The transaction adapter is deliberately injectable: tests never change real displays.
-    struct position_t {
-      std::wstring device_path;
-      LONG x = 0;
-      LONG y = 0;
-    };
-
-    using layout_t = std::vector<position_t>;
-
-    /** A named CCD observation and each active target's color state, in path order. */
-    struct snapshot_t: display_config::named_topology_t {
-      std::vector<std::optional<display_config::advanced_color_state_t>> colors;
-    };
-
     /** Process-local suppression of repeated mode sets which reached the same failed state.
      * The durable journal owns recovery intent; this cache only defers another identical
      * mutation until fresh active, available-target or desired observations change.
@@ -253,6 +240,7 @@ namespace platf::primary_display {
       std::optional<journal_t> journal;
     };
 
+    // The transaction adapter is deliberately injectable: tests never change real displays.
     struct io_t {
       std::function<std::optional<snapshot_t>()> query;
       std::function<bool(snapshot_t)> apply;
@@ -273,7 +261,6 @@ namespace platf::primary_display {
       std::function<void(std::chrono::milliseconds)> sleep;
     };
 
-    std::optional<layout_t> inspect(const snapshot_t &snapshot);
     std::string serialize(const journal_t &journal);
     std::optional<journal_t> deserialize(std::string_view contents);
 

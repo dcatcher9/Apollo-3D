@@ -11,9 +11,6 @@
 
 namespace platf::primary_display::detail {
 
-  /** The most displays one recorded layout or topology may hold. */
-  inline constexpr size_t max_displays = 128;
-
   /** Whether a journal is consistent enough to save or to recover from. The codec refuses any
    * other; the rules belong to the transactions in primary_display.cpp.
    */
