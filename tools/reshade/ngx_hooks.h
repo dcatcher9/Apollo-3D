@@ -1,0 +1,64 @@
+// SPDX-License-Identifier: GPL-3.0-only
+#pragma once
+#include <Windows.h>
+#include <cstdint>
+
+namespace sunshine_ngx_hooks {
+  // The add-on's one NGX hook host: the NGX entry hooks (CreateFeature,
+  // EvaluateFeature, ReleaseFeature), which carry production NGX depth
+  // capture (ngx_depth_source.h, `capture`) and feed the call trace
+  // (upscaler_call_trace.h, `trace`), switched independently. Owner
+  // serializes initialize/poll/shutdown outside loader lock. Hooks are
+  // additive and process-pinned, never removed while a game can be inside an
+  // original. Shutdown makes them pure pass-through.
+  void initialize(HMODULE addon, bool trace, bool capture = false);
+  void shutdown();
+  bool capture_enabled();
+  void poll();
+
+  // A Streamline evaluation the NGX hooks nest in: the trace's nesting and
+  // the capture's claim.
+  class streamline_scope {
+  public:
+    // Caller must be captured at the actual SL detour, not in a helper.
+    streamline_scope(std::uint32_t feature, std::uintptr_t caller);
+    // Trace nesting alone does not establish an SL depth source. Claim only
+    // after its adapter validates capture authority, including a pending copy.
+    void claim_depth_capture(bool owns);
+    ~streamline_scope();
+    void finish(bool success);
+    streamline_scope(const streamline_scope &) = delete;
+    streamline_scope &operator=(const streamline_scope &) = delete;
+  private:
+    std::uint64_t epoch_{}, previous_epoch_{};
+    std::uint32_t feature_{}, previous_depth_{}, previous_capture_depth_{};
+    std::uintptr_t caller_{};
+    bool finished_{}, capture_claimed_{};
+  };
+
+#ifdef SUNSHINE_UPSCALER_TRACE_TEST
+  namespace testing {
+    enum class operation : unsigned { create, evaluate, release };
+    struct summary {
+      std::uint64_t epoch{}, ngx_create{}, ngx_evaluate{}, ngx_release{}, streamline{},
+        inside_streamline{}, outside_streamline{}, succeeded{}, failed{},
+        unknown_feature{}, dropped{}, stale{}, reports{};
+      unsigned installed{}, discovered{}, rejected{}, modules{}, truncations{};
+      std::uint64_t scans{};
+      bool truncated{};
+      bool enabled{}, streamline_covered{}, load_notifications{};
+    };
+    summary counts();
+    // Same native validation/pinning/install route as discovered exports.
+    bool install(void *target, operation op, bool d3d11 = false);
+    void report_now();
+    // Discovery scheduled by poll() completes on a pool thread.
+    void wait_discovery();
+    // Enumeration entries that are not modules, examined ahead of the real
+    // ones by every later scan (the module-count bound).
+    void set_synthetic_modules(unsigned count);
+    // Modules discovery never patches: DLSS Frame Generation refuses a patched module.
+    bool frame_generation_module(const wchar_t *path);
+  }
+#endif
+}

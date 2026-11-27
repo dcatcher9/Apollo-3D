@@ -1,12 +1,153 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// The add-on's one NGX hook host, included at the end of upscaler_call_trace.cpp.
-// Production NGX depth capture runs in these hooks, beside the optional call
-// trace, and both share their thread-local nesting counters; the file and
-// namespace names are historical.
-// Targets, detour table initialization, locks and TLS retain their shell positions.
+// The add-on's one NGX hook host (ngx_hooks.h): the NGX entry detours, which
+// run production NGX depth capture (ngx_depth_source.h) and feed the call
+// trace (upscaler_call_trace.h), their discovery and installation, loader
+// notifications, and the Streamline scope both nest in.
+#include "ngx_hooks.h"
+#include "upscaler_call_trace.h"
+#include "addon_lifetime.h"
+#include "game3d_pool_submit.h"
+#include "hook_host.h"
+#include "ngx_depth_source.h"
 
-namespace sunshine_upscaler_trace {
+#include <MinHook.h>
+#include <TlHelp32.h>
+#include <array>
+#include <atomic>
+#include <cstdio>
+#include <cstring>
+#include <cwchar>
+#include <cwctype>
+#include <string>
+#include <utility>
+#include "game3d_clock.h"
+#if defined(_MSC_VER)
+#include <intrin.h>
+#define SUNSHINE_TRACE_CALLER reinterpret_cast<std::uintptr_t>(_ReturnAddress())
+#define SUNSHINE_TRACE_NOINLINE __declspec(noinline)
+#else
+#define SUNSHINE_TRACE_CALLER reinterpret_cast<std::uintptr_t>(__builtin_return_address(0))
+#define SUNSHINE_TRACE_NOINLINE __attribute__((noinline))
+#endif
+
+namespace sunshine_ngx_hooks {
   namespace {
+    using namespace sunshine_upscaler_trace::feed;
+    // ABI authority: NVIDIA/DLSS include/nvsdk_ngx.h (CreateFeature,
+    // EvaluateFeature, ReleaseFeature) and nvsdk_ngx_defs.h, inspected 2026-09-16:
+    // https://github.com/NVIDIA/DLSS/blob/main/include/nvsdk_ngx.h
+    // https://github.com/NVIDIA/DLSS/blob/main/include/nvsdk_ngx_defs.h
+    // Win64 C ABI; enum/result are 32 bits, all other arguments are opaque
+    // pointers. The SDK/core and snippet variants differ only in constness for
+    // these three functions. We never inspect the parameter object's C++ ABI.
+    using result = std::uint32_t;
+    using create_function = result (__cdecl *)(void *, std::uint32_t, void *, void **);
+    using progress_function = void (__cdecl *)(float, bool &);
+    using evaluate_function = result (__cdecl *)(void *, const void *, const void *, progress_function);
+    using release_function = result (__cdecl *)(void *);
+    struct target {
+      void *entry{};
+      HMODULE owner{};
+      operation op{};
+      bool d3d11{};
+      sunshine_ngx::parameter_api parameters;
+      std::atomic<void *> original{};
+      std::atomic<unsigned> state{}; // 1 created, 2 enabled, 3 rejected; never removed.
+    };
+    struct last_error_guard {
+      DWORD value{GetLastError()};
+      ~last_error_guard() { SetLastError(value); }
+    };
+    // No destructible locks/containers or workers: detours stay valid after the
+    // add-on's normal shutdown and continue calling their immutable originals.
+    SRWLOCK poll_lock = SRWLOCK_INIT;
+    std::array<target, target_limit> targets;
+    std::atomic<HMODULE> addon_module{};
+    std::uint64_t next_poll{}, next_report{};
+    unsigned target_count{}, rejected{}, found_modules{}, found_exports{}, skipped_frame_generation{};
+    bool minhook_ready{};
+    // A full export scan of ~200 game modules costs a few ms, so rescan only
+    // after the loader reports a new module. The notification only counts
+    // loads; poll schedules discovery, which runs outside the loader lock.
+    // Without notifications, keep the periodic rescan.
+    using loader_notification = void (NTAPI *)(ULONG reason, const void *data, void *context);
+    using loader_register = LONG (NTAPI *)(ULONG flags, loader_notification callback, void *context, void **cookie);
+    using loader_unregister = LONG (NTAPI *)(void *cookie);
+    constexpr ULONG module_loaded_reason = 1; // LDR_DLL_NOTIFICATION_REASON_LOADED
+    std::atomic<std::uint64_t> module_loads{1};
+    std::uint64_t scanned_loads{}, scans{}; // poll-owned
+    // One scan examines at most this many modules: a bound against a
+    // pathological enumeration, not a module count any game reaches. A scan
+    // that hits it reports truncated=1 and the next poll rescans from the
+    // first module it did not examine. Written by discovery under poll_lock.
+    constexpr unsigned module_scan_limit = 65536;
+    std::atomic<bool> scan_truncated{};
+    unsigned scan_resume{}, scan_truncations{};
+#ifdef SUNSHINE_UPSCALER_TRACE_TEST
+    unsigned synthetic_modules{}; // Enumeration entries ahead of the real modules (no module).
+#endif
+    std::atomic<void *> loader_cookie{}; // Written by initialize/shutdown; poll reads it.
+    void NTAPI module_loaded(ULONG reason, const void *, void *);
+    void watch_modules();
+    void unwatch_modules();
+    // The calling thread's Streamline evaluation (streamline_scope): its trace
+    // epoch and nesting, and whether it claimed depth capture.
+    thread_local std::uint64_t tls_epoch{};
+    thread_local unsigned tls_depth{};
+    thread_local unsigned tls_capture_depth{};
+    thread_local unsigned ngx_capture_depth{};
+    thread_local unsigned ngx_diagnostic_depth{};
+
+    bool succeeded(result value) { return (value & 0xfff00000u) != 0xbad00000u; }
+    template<unsigned Index> SUNSHINE_TRACE_NOINLINE result __cdecl create_hook(void *commands,
+        std::uint32_t feature, void *parameters, void **output);
+    template<unsigned Index> SUNSHINE_TRACE_NOINLINE result __cdecl evaluate_hook(void *commands,
+        const void *handle, const void *parameters, progress_function callback);
+    template<unsigned Index> SUNSHINE_TRACE_NOINLINE result __cdecl release_hook(void *handle);
+    template<std::size_t... Indices> auto create_entries(std::index_sequence<Indices...>) {
+      return std::array<void *, sizeof...(Indices)>{reinterpret_cast<void *>(&create_hook<Indices>)...};
+    }
+    template<std::size_t... Indices> auto evaluate_entries(std::index_sequence<Indices...>) {
+      return std::array<void *, sizeof...(Indices)>{reinterpret_cast<void *>(&evaluate_hook<Indices>)...};
+    }
+    template<std::size_t... Indices> auto release_entries(std::index_sequence<Indices...>) {
+      return std::array<void *, sizeof...(Indices)>{reinterpret_cast<void *>(&release_hook<Indices>)...};
+    }
+    const auto create_detours = create_entries(std::make_index_sequence<target_limit>{});
+    const auto evaluate_detours = evaluate_entries(std::make_index_sequence<target_limit>{});
+    const auto release_detours = release_entries(std::make_index_sequence<target_limit>{});
+
+    bool queue(void *entry, operation op, bool d3d11);
+    void apply_queued(unsigned first);
+    bool frame_generation_module(const wchar_t *path);
+    void discover();
+    // Discovery runs on a pool thread, so the present thread neither scans
+    // modules nor waits for MinHook's system-wide thread snapshot; it is
+    // suspended only while new hooks are written. The pool thread holds
+    // poll_lock, and a present-path poll meanwhile skips as on contention.
+    // The add-on is pinned, so a pending callback never outlives its code.
+    std::atomic<bool> discovery_pending{};
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+    // TEST add-on only: the add-on lifecycle fixture holds the next pool
+    // discovery, before it scans or hooks anything, across ReShade's unload
+    // (SunshineSbsTestHoldDiscovery).
+    std::atomic<HANDLE> discovery_gate_entered {}, discovery_gate_release {};
+#endif
+    void CALLBACK discover_on_pool(PTP_CALLBACK_INSTANCE, void *);
+    // The targets and discovery as the trace's report reads them.
+    coverage hook_coverage() {
+      coverage out;
+      out.count = target_count;
+      out.rejected = rejected;
+      out.modules = found_modules;
+      out.exports = found_exports;
+      out.skipped_frame_generation = skipped_frame_generation;
+      out.truncated = scan_truncated.load(std::memory_order_acquire);
+      out.truncations = scan_truncations;
+      for (unsigned i = 0; i != target_count; ++i)
+        out.targets[i] = {targets[i].entry, targets[i].op, targets[i].d3d11, targets[i].state.load()};
+      return out;
+    }
     class capture_scope {
     public:
       sunshine_ngx::evaluation value;
@@ -59,7 +200,7 @@ namespace sunshine_upscaler_trace {
     template<unsigned Index> SUNSHINE_TRACE_NOINLINE result __cdecl create_hook(void *commands,
         std::uint32_t feature, void *parameters, void **output) {
       const DWORD incoming = GetLastError();
-      const auto call = begin(Index, SUNSHINE_TRACE_CALLER);
+      const auto call = begin(Index, SUNSHINE_TRACE_CALLER, tls_epoch, tls_depth);
       const auto creation = targets[Index].d3d11 ? sunshine_ngx::creation{} :
         sunshine_ngx::before_create(targets[Index].parameters, feature, parameters);
       const auto original = reinterpret_cast<create_function>(targets[Index].original.load(std::memory_order_acquire));
@@ -72,34 +213,34 @@ namespace sunshine_upscaler_trace {
           (!ReadProcessMemory(GetCurrentProcess(), output, &handle, sizeof(handle), &copied) || copied != sizeof(handle)))
         handle = nullptr;
       sunshine_ngx::after_create(targets[Index].owner, handle, creation, succeeded(value));
-      record(Index, operation::create, call, feature, handle, succeeded(value), value);
+      record(Index, targets[Index].owner, targets[Index].d3d11, operation::create, call, feature, handle, succeeded(value), value);
       return value;
     }
 
     template<unsigned Index> SUNSHINE_TRACE_NOINLINE result __cdecl evaluate_hook(void *commands,
         const void *handle, const void *parameters, progress_function callback) {
       const DWORD incoming = GetLastError();
-      const auto call = begin(Index, SUNSHINE_TRACE_CALLER);
+      const auto call = begin(Index, SUNSHINE_TRACE_CALLER, tls_epoch, tls_depth);
       capture_scope capture(targets[Index], reinterpret_cast<std::uint64_t>(commands), handle, parameters);
       const auto original = reinterpret_cast<evaluate_function>(targets[Index].original.load(std::memory_order_acquire));
       SetLastError(incoming);
       const result value = original(commands, handle, parameters, callback);
       last_error_guard outgoing;
       capture.finish(succeeded(value));
-      record(Index, operation::evaluate, call, unknown_feature, handle, succeeded(value), value);
+      record(Index, targets[Index].owner, targets[Index].d3d11, operation::evaluate, call, unknown_feature, handle, succeeded(value), value);
       return value;
     }
 
     template<unsigned Index> SUNSHINE_TRACE_NOINLINE result __cdecl release_hook(void *handle) {
       const DWORD incoming = GetLastError();
-      const auto call = begin(Index, SUNSHINE_TRACE_CALLER);
+      const auto call = begin(Index, SUNSHINE_TRACE_CALLER, tls_epoch, tls_depth);
       const auto capture_epoch = targets[Index].d3d11 ? 0 : sunshine_ngx::epoch();
       const auto original = reinterpret_cast<release_function>(targets[Index].original.load(std::memory_order_acquire));
       SetLastError(incoming);
       const result value = original(handle);
       last_error_guard outgoing;
       sunshine_ngx::after_release(targets[Index].owner, handle, capture_epoch, succeeded(value));
-      record(Index, operation::release, call, unknown_feature, handle, succeeded(value), value);
+      record(Index, targets[Index].owner, targets[Index].d3d11, operation::release, call, unknown_feature, handle, succeeded(value), value);
       return value;
     }
 
@@ -214,7 +355,7 @@ namespace sunshine_upscaler_trace {
             reinterpret_cast<LPCWSTR>(value.hModule), &retained)) continue;
         ++found_modules;
         // D3D11 NGX supplies no depth capture; its calls only feed the trace.
-        const unsigned apis = active_epoch.load(std::memory_order_acquire) ? 2 : 1;
+        const unsigned apis = epoch() ? 2 : 1;
         for (unsigned api = 0; api != apis; ++api) {
           for (unsigned op = 0; op != 4; ++op) {
             char name[80]{};
@@ -253,43 +394,100 @@ namespace sunshine_upscaler_trace {
     }
   }
 
+#ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
+  // TEST add-on only: the next pool discovery signals entered, then waits for
+  // release (at most 60 s) before it scans modules or installs a hook, which
+  // pins the add-on as a hook's owner. The add-on lifecycle fixture arms it
+  // as ReShade initializes a startup device, so that device's unload comes
+  // while its discovery is certainly in flight and unpinned by any hook
+  // (Assassin's Creed Shadows' crash in discover(), fixed by 5148a6da).
+  extern "C" __declspec(dllexport) BOOL SunshineSbsTestHoldDiscovery(HANDLE entered, HANDLE release) {
+    if (!entered || !release) {
+      return FALSE;
+    }
+    discovery_gate_release.store(release, std::memory_order_release);
+    discovery_gate_entered.store(entered, std::memory_order_release);
+    return TRUE;
+  }
+#endif
+
+#ifdef SUNSHINE_UPSCALER_TRACE_TEST
+  namespace testing {
+    bool frame_generation_module(const wchar_t *path) { return sunshine_ngx_hooks::frame_generation_module(path); }
+    summary counts() {
+      const auto trace = sunshine_upscaler_trace::feed::test_counts();
+      summary out;
+      out.epoch = trace.epoch;
+      out.enabled = out.epoch != 0;
+      out.streamline_covered = trace.streamline_covered;
+      out.dropped = trace.dropped;
+      out.stale = trace.stale;
+      out.reports = trace.reports;
+      out.discovered = target_count;
+      out.rejected = rejected;
+      out.scans = scans;
+      out.modules = found_modules;
+      out.truncated = scan_truncated.load();
+      out.truncations = scan_truncations;
+      out.load_notifications = loader_cookie.load() != nullptr;
+      for (unsigned i = 0; i != target_count; ++i) out.installed += targets[i].state.load() == 2;
+      out.ngx_create = trace.ngx_create;
+      out.ngx_evaluate = trace.ngx_evaluate;
+      out.ngx_release = trace.ngx_release;
+      out.streamline = trace.streamline;
+      out.succeeded = trace.succeeded;
+      out.failed = trace.failed;
+      out.inside_streamline = trace.inside_streamline;
+      out.outside_streamline = trace.outside_streamline;
+      out.unknown_feature = trace.unknown_feature;
+      return out;
+    }
+    bool install(void *target, operation op, bool d3d11) {
+      last_error_guard error;
+      const auto kind = static_cast<sunshine_upscaler_trace::feed::operation>(op);
+      const unsigned first = target_count;
+      queue(target, kind, d3d11);
+      apply_queued(first);
+      for (unsigned i = 0; i != target_count; ++i)
+        if (targets[i].entry == target) return targets[i].op == kind && targets[i].d3d11 == d3d11 && targets[i].state.load() == 2;
+      return false;
+    }
+    void report_now() { last_error_guard error; sunshine_upscaler_trace::feed::report(hook_coverage()); }
+    void wait_discovery() {
+      while (discovery_pending.load(std::memory_order_acquire)) Sleep(1);
+      AcquireSRWLockExclusive(&poll_lock); // The pool thread releases it after clearing pending.
+      ReleaseSRWLockExclusive(&poll_lock);
+    }
+    void set_synthetic_modules(unsigned count) {
+      AcquireSRWLockExclusive(&poll_lock);
+      synthetic_modules = count;
+      ReleaseSRWLockExclusive(&poll_lock);
+    }
+  }
+#endif
+
   void initialize(HMODULE addon, bool requested, bool capture) {
     if (sunshine_addon_lifetime::stopping()) return;
     last_error_guard error;
-    active_epoch.store(0, std::memory_order_release);
-    AcquireSRWLockExclusive(&records_lock);
-    events = {};
-    reported_events = {};
-    reported_coverage = {};
-    handles = {};
-    handle_observation_gap.store(false);
-    dropped = stale = 0;
-    reports = 0;
     next_poll = next_report = 0;
     scanned_loads = 0;
-    began = sunshine_game3d::clock::game_now();
     addon_module.store(addon);
-    if (requested) active_epoch.store(++next_epoch, std::memory_order_release);
-    ReleaseSRWLockExclusive(&records_lock);
+    sunshine_upscaler_trace::feed::restart(requested);
     sunshine_ngx::initialize(capture);
     if (requested || capture) watch_modules();
   }
 
   void shutdown() {
-    active_epoch.store(0, std::memory_order_release);
+    sunshine_upscaler_trace::feed::stop();
     sunshine_ngx::shutdown();
     unwatch_modules();
   }
 
-  bool enabled() { return !sunshine_addon_lifetime::stopping() && active_epoch.load(std::memory_order_acquire) != 0; }
-
   bool capture_enabled() { return sunshine_ngx::enabled(); }
-
-  void set_streamline_coverage(bool installed) { streamline_covered.store(installed, std::memory_order_release); }
 
   void poll() {
     last_error_guard error;
-    if ((!enabled() && !capture_enabled()) || !TryAcquireSRWLockExclusive(&poll_lock)) return;
+    if ((!sunshine_upscaler_trace::enabled() && !capture_enabled()) || !TryAcquireSRWLockExclusive(&poll_lock)) return;
     const auto now = sunshine_game3d::clock::game_now();
     const auto loads = module_loads.load(std::memory_order_acquire);
     const bool notified = loader_cookie.load(std::memory_order_acquire) != nullptr;
@@ -306,16 +504,16 @@ namespace sunshine_upscaler_trace {
       }
     }
     // Coverage is reported after a scan completes, never from its starting state.
-    if (enabled() && now >= next_report && !discovery_pending.load(std::memory_order_acquire)) {
+    if (sunshine_upscaler_trace::enabled() && now >= next_report && !discovery_pending.load(std::memory_order_acquire)) {
       next_report = now + 5000;
-      report();
+      sunshine_upscaler_trace::feed::report(hook_coverage());
     }
     sunshine_ngx::poll();
     ReleaseSRWLockExclusive(&poll_lock);
   }
 
   streamline_scope::streamline_scope(std::uint32_t feature, std::uintptr_t caller) :
-      epoch_(sunshine_addon_lifetime::stopping() ? 0 : active_epoch.load(std::memory_order_acquire)), previous_epoch_(tls_epoch),
+      epoch_(sunshine_addon_lifetime::stopping() ? 0 : sunshine_upscaler_trace::feed::epoch()), previous_epoch_(tls_epoch),
       feature_(feature), previous_depth_(tls_depth), previous_capture_depth_(tls_capture_depth), caller_(caller) {
     tls_depth = tls_depth + 1;
     tls_epoch = epoch_;
@@ -332,10 +530,11 @@ namespace sunshine_upscaler_trace {
     last_error_guard error;
     if (finished_) return;
     finished_ = true;
-    invocation call;
+    sunshine_upscaler_trace::feed::invocation call;
     call.epoch = epoch_;
     call.caller = caller_;
-    record(no_target, operation::streamline, call, feature_, nullptr, success);
+    sunshine_upscaler_trace::feed::record(sunshine_upscaler_trace::feed::no_target, nullptr, false,
+      sunshine_upscaler_trace::feed::operation::streamline, call, feature_, nullptr, success);
   }
 
   streamline_scope::~streamline_scope() {

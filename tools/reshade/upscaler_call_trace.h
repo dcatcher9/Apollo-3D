@@ -1,63 +1,68 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 #include <Windows.h>
+#include <array>
 #include <cstdint>
 
 namespace sunshine_upscaler_trace {
-  // The add-on's NGX entry hooks. Despite the name they also carry production
-  // NGX depth capture (`capture`); the call trace (`enabled`) is switched
-  // independently. Owner serializes initialize/poll/shutdown outside loader lock.
-  // Hooks are additive and process-pinned, never removed while a game can be
-  // inside an original. Shutdown makes them pure pass-through.
-  void initialize(HMODULE addon, bool enabled, bool capture = false);
-  void shutdown();
+  // The default-off upscaler call-route diagnostic. The NGX hook host
+  // (ngx_hooks.h), which owns the hooks and production NGX depth capture,
+  // feeds it each hooked call and the Streamline evaluations it nests in; the
+  // trace owns only its records and report lines. No destructible locks,
+  // containers or workers: detours stay valid after the add-on's normal
+  // shutdown.
   bool enabled();
-  bool capture_enabled();
-  void poll();
   // Report actual SL evaluation-hook coverage, separately from call counts.
   void set_streamline_coverage(bool installed);
 
-  class streamline_scope {
-  public:
-    // Caller must be captured at the actual SL detour, not in a helper.
-    streamline_scope(std::uint32_t feature, std::uintptr_t caller);
-    // Trace nesting alone does not establish an SL depth source. Claim only
-    // after its adapter validates capture authority, including a pending copy.
-    void claim_depth_capture(bool owns);
-    ~streamline_scope();
-    void finish(bool success);
-    streamline_scope(const streamline_scope &) = delete;
-    streamline_scope &operator=(const streamline_scope &) = delete;
-  private:
-    std::uint64_t epoch_{}, previous_epoch_{};
-    std::uint32_t feature_{}, previous_depth_{}, previous_capture_depth_{};
-    std::uintptr_t caller_{};
-    bool finished_{}, capture_claimed_{};
-  };
-
+  // The hook host's feed (ngx_hooks.cpp); nothing else calls it.
+  namespace feed {
+    enum class operation : unsigned { create, evaluate, release, streamline };
+    // The hook host's target bound: a hooked call names its target's index
+    // (below target_limit); a Streamline evaluation names no_target.
+    inline constexpr unsigned target_limit = 64, no_target = target_limit, stack_limit = 8;
+    inline constexpr std::uint32_t unknown_feature = 0xffffffffu;
+    struct invocation {
+      std::uint64_t epoch{};
+      std::uintptr_t caller{};
+      bool inside_sl{};
+      unsigned stack_count{};
+      std::array<void *, stack_limit> stack{};
+    };
+    // The trace epoch: zero while the trace is off.
+    std::uint64_t epoch();
+    // Off, then its records cleared and, when enabled, a new epoch begun.
+    void restart(bool enabled);
+    void stop();
+    // A hooked call's entry. sl_epoch, sl_depth: the calling thread's
+    // Streamline evaluation nesting (its scope's epoch and depth).
+    invocation begin(unsigned target, std::uintptr_t caller, std::uint64_t sl_epoch, unsigned sl_depth);
+    // A call's outcome. owner, d3d11: the hooked export's module and API,
+    // the namespace of its feature handles (a core and snippet may reuse
+    // pointers).
+    void record(unsigned target, HMODULE owner, bool d3d11, operation op, const invocation &call,
+      std::uint32_t feature, const void *handle, bool success, std::uint32_t failure = 0);
+    // The hook host's discovery and hooks, as one report reads them.
+    struct target_coverage {
+      const void *entry{};
+      operation op{};
+      bool d3d11{};
+      unsigned state{}; // 1 created, 2 enabled, 3 rejected.
+    };
+    struct coverage {
+      std::array<target_coverage, target_limit> targets{};
+      unsigned count{}, rejected{}, modules{}, exports{}, skipped_frame_generation{}, truncations{};
+      bool truncated{};
+    };
+    void report(const coverage &hooks);
 #ifdef SUNSHINE_UPSCALER_TRACE_TEST
-  namespace testing {
-    enum class operation : unsigned { create, evaluate, release };
-    struct summary {
+    struct counts {
       std::uint64_t epoch{}, ngx_create{}, ngx_evaluate{}, ngx_release{}, streamline{},
         inside_streamline{}, outside_streamline{}, succeeded{}, failed{},
         unknown_feature{}, dropped{}, stale{}, reports{};
-      unsigned installed{}, discovered{}, rejected{}, modules{}, truncations{};
-      std::uint64_t scans{};
-      bool truncated{};
-      bool enabled{}, streamline_covered{}, load_notifications{};
+      bool streamline_covered{};
     };
-    summary counts();
-    // Same native validation/pinning/install route as discovered exports.
-    bool install(void *target, operation op, bool d3d11 = false);
-    void report_now();
-    // Discovery scheduled by poll() completes on a pool thread.
-    void wait_discovery();
-    // Enumeration entries that are not modules, examined ahead of the real
-    // ones by every later scan (the module-count bound).
-    void set_synthetic_modules(unsigned count);
-    // Modules discovery never patches: DLSS Frame Generation refuses a patched module.
-    bool frame_generation_module(const wchar_t *path);
-  }
+    counts test_counts();
 #endif
+  }
 }

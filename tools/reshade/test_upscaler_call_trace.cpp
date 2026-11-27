@@ -3,6 +3,7 @@
 // Game time is the probe view's test clock (test_game3d_clock.h), engaged in
 // main and moved only by hitch(): discovery's 250 ms and 1000 ms poll
 // cadences run in game time. --wall-clock runs it on the real clock.
+#include "ngx_hooks.h"
 #include "upscaler_call_trace.h"
 #include "ngx_depth_source.h"
 #include "streamline_depth_capture.h"
@@ -32,6 +33,7 @@
 #endif
 
 namespace {
+  using namespace sunshine_ngx_hooks;
   using namespace sunshine_upscaler_trace;
   using result = std::uint32_t;
   using callback_type = void (__cdecl *)(float, bool &);
@@ -1717,7 +1719,7 @@ int main(int argc, char **argv) {
     sunshine_game3d_fixture::take_wall_clock_option(argc, argv);
     require(clock.bind(GetModuleHandleW(nullptr)), "the probe view's test clock exports are missing");
     clock.engage();
-    using sunshine_upscaler_trace::testing::frame_generation_module;
+    using sunshine_ngx_hooks::testing::frame_generation_module;
     require(frame_generation_module(LR"(D:\Games\Game\bin\NVNGX_DLSSG.DLL)") &&
         frame_generation_module(LR"(C:\ProgramData\NVIDIA\NGX\models\dlssg\versions\1\files\160_E1.bin)") &&
         !frame_generation_module(LR"(D:\Games\Game\bin\nvngx_dlss.dll)") &&

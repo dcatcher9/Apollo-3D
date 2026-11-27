@@ -502,7 +502,7 @@ namespace sunshine_streamline {
     }
     bool hook_evaluate_v1(void *commands, std::uint32_t feature, std::uint32_t frame, std::uint32_t viewport) {
       const DWORD incoming = GetLastError();
-      sunshine_upscaler_trace::streamline_scope call_trace(feature, SUNSHINE_UPSCALER_CALLER);
+      sunshine_ngx_hooks::streamline_scope call_trace(feature, SUNSHINE_UPSCALER_CALLER);
       const auto ticket = observation_ticket();
       // Reflex's fourth argument is a timing marker, not a viewport. Other
       // unknown legacy features need commands and an exact observed numeric
@@ -542,7 +542,7 @@ namespace sunshine_streamline {
     std::int32_t hook_evaluate_v2(std::uint32_t feature, const abi_v2::frame_token &frame,
         const base_structure **inputs, std::uint32_t count, void *commands) {
       const DWORD incoming = GetLastError();
-      sunshine_upscaler_trace::streamline_scope call_trace(feature, SUNSHINE_UPSCALER_CALLER);
+      sunshine_ngx_hooks::streamline_scope call_trace(feature, SUNSHINE_UPSCALER_CALLER);
       const auto ticket = observation_ticket();
       // Known renderer profiles retain their fail-closed malformed-input
       // behavior. Other features are admitted by a validated typed depth tuple,

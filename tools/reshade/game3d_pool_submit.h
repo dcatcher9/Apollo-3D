@@ -24,7 +24,7 @@ namespace sunshine_game3d::pool {
     display_release, // depth_display.inl: provider display textures released off the present thread
     renderer_build,  // game3d_renderer.cpp: a background renderer build
     shader_prepare,  // game3d_shader_cache.h: one shader entry's compile
-    ngx_discover,    // ngx_hooks.inl: NGX module discovery
+    ngx_discover,    // ngx_hooks.cpp: NGX module discovery
     overlay_warm,    // overlay_compositor.cpp: the overlay's shader compile
     sl_install,      // sl_hooks.inl: Streamline hook installation
     test_held,       // TEST add-on only: SunshineSbsTestHoldPoolWork's held callback

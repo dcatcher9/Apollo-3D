@@ -1827,8 +1827,8 @@ unit. The contracts live in [docs/reshade-sbs.md](../../docs/reshade-sbs.md), no
 
 #### NGX
 
-- [`upscaler_call_trace.cpp`](upscaler_call_trace.cpp), [`upscaler_call_trace.h`](upscaler_call_trace.h): the live NGX hook host (CreateFeature, EvaluateFeature, ReleaseFeature) shared by NGX depth capture and the default-off call-route diagnostic. Docs: [Upscaler call-route diagnostic](../../docs/reshade-sbs.md#upscaler-call-route-diagnostic).
-- [`ngx_hooks.inl`](ngx_hooks.inl): part of `upscaler_call_trace.cpp` (end of the shell): live NGX detours and capture scope, module discovery and loader notifications, hook lifecycle and Streamline scope entry points. Docs: [Upscaler call-route diagnostic](../../docs/reshade-sbs.md#upscaler-call-route-diagnostic).
+- [`ngx_hooks.cpp`](ngx_hooks.cpp), [`ngx_hooks.h`](ngx_hooks.h): the add-on's one live NGX hook host (CreateFeature, EvaluateFeature, ReleaseFeature): the detours, which run NGX depth capture's capture scope and feed the call trace, module discovery and loader notifications, the hook lifecycle (`initialize`, `poll`, `shutdown`) and the Streamline scope the NGX hooks nest in. Docs: [Direct NGX depth selection](../../docs/reshade-sbs.md#direct-ngx-depth-selection).
+- [`upscaler_call_trace.cpp`](upscaler_call_trace.cpp), [`upscaler_call_trace.h`](upscaler_call_trace.h): the default-off call-route diagnostic: its call and handle records and its report lines, fed by the NGX hook host (`feed`), which passes it each hooked call and its hooks' coverage. Docs: [Upscaler call-route diagnostic](../../docs/reshade-sbs.md#upscaler-call-route-diagnostic).
 - [`ngx_depth_source.cpp`](ngx_depth_source.cpp), [`ngx_depth_source.h`](ngx_depth_source.h): the minimal NGX parameter adapter that nominates DLSS and DLSS-G depth. Docs: [Direct NGX depth selection](../../docs/reshade-sbs.md#direct-ngx-depth-selection).
 
 #### Presentation scope

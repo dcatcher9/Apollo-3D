@@ -43,7 +43,7 @@
 #include <limits>
 #include <string>
 #include <type_traits>
-#include "upscaler_call_trace.h"
+#include "ngx_hooks.h"
 #include "depth_addon.h"
 #include "depth_content_sampler.h"
 #include "depth_selection_policy.h"

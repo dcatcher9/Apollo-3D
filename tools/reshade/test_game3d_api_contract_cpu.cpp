@@ -2259,7 +2259,7 @@ namespace {
         out = {};
       }
       // A Streamline evaluation that holds capture authority encloses a
-      // nested NGX call (upscaler_call_trace.h streamline_scope).
+      // nested NGX call (ngx_hooks.h streamline_scope).
       const auto attempt = sunshine_ngx::before_evaluate(owner, api, command, handle, &parameters, value.lifetime != matrix::ngx_lifetime::nested_in_streamline);
       sunshine_ngx::after_evaluate(attempt, value.result == matrix::ngx_result::success);
       out.suppressed = value.lifetime == matrix::ngx_lifetime::nested_in_streamline;

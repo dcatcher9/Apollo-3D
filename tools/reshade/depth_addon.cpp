@@ -31,7 +31,7 @@
 #include <limits>
 #include <string>
 #include <type_traits>
-#include "upscaler_call_trace.h"
+#include "ngx_hooks.h"
 #include "depth_addon.h"
 #include "depth_output.h"
 #include "depth_content_sampler.h"
@@ -327,7 +327,7 @@ static void on_init_device(device *device)
 	// Before the first DLSS feature is created, outside DLL loader lock. This
 	// catches the game's linked NGX exports even if the runtime DLL loads later.
 	if (device->get_api() == device_api::d3d12)
-		sunshine_upscaler_trace::poll();
+		sunshine_ngx_hooks::poll();
 	// The content sampler's shader compiles off the first sample's Present.
 	sunshine_depth::warm();
 }
@@ -1164,7 +1164,7 @@ static void finish_sampler_present(command_queue *queue, swapchain *swapchain)
 
 static void register_depth_events()
 {
-	s_streamline_source_events = sunshine_streamline::source_enabled() || sunshine_upscaler_trace::capture_enabled();
+	s_streamline_source_events = sunshine_streamline::source_enabled() || sunshine_ngx_hooks::capture_enabled();
 	sunshine_streamline::depth_capture::initialize(true); // Shared D3D12 capture also serves Generic fallback.
 	// reshade_reloaded_effects: the texture binding must be set again after a reload.
 #define SUNSHINE_REGISTER_DEPTH_EVENT(event, handler) \

@@ -10,6 +10,7 @@
 #include "streamline_camera_version.h"
 #include "streamline_buffer_contract.h"
 #include "streamline_v1_resource_state.h"
+#include "ngx_hooks.h"
 #include "upscaler_call_trace.h"
 #include "game3d_diagnostic_metadata.h"
 #include "game3d_ui_mask.h"
@@ -613,7 +614,7 @@ namespace sunshine_streamline {
     const bool ngx_source_enabled = sunshine_game3d::addon_config::ngx_depth_source();
     const bool queue_fence_order = sunshine_game3d::addon_config::queue_fence_order();
     native_observer::set_queue_order(queue_fence_order);
-    sunshine_upscaler_trace::initialize(addon, call_trace_enabled, ngx_source_enabled);
+    sunshine_ngx_hooks::initialize(addon, call_trace_enabled, ngx_source_enabled);
     // A pool install may still be discovering after device recreation; wait
     // for it before resetting the state it reads and writes.
     AcquireSRWLockExclusive(&poll_lock);
@@ -639,7 +640,7 @@ namespace sunshine_streamline {
     return loss_journal.query(revision, out);
   }
   void shutdown() {
-    sunshine_upscaler_trace::shutdown();
+    sunshine_ngx_hooks::shutdown();
     source_requested.store(false, std::memory_order_release);
     observing.store(false, std::memory_order_release);
     observation_generation.fetch_add(1, std::memory_order_acq_rel);

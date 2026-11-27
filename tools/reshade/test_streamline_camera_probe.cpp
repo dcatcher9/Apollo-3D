@@ -10,6 +10,7 @@
 #include "streamline_buffer_contract.h"
 #include "streamline_depth_provider.h"
 #include "streamline_camera_version.h"
+#include "ngx_hooks.h"
 #include "upscaler_call_trace.h"
 #include "game3d_diagnostics.h"
 #include "game3d_ui_mask.h"
@@ -4722,7 +4723,7 @@ static void test_call_trace_only(bool modern) {
     "Call trace enabled source selection or full camera diagnostics");
   require(testing::install(modern ? testing::abi::v2_7_30 : testing::abi::v1_1_1,
     modern ? v2_targets : v1_targets), "Trace-only SL hook install failed");
-  const auto before = sunshine_upscaler_trace::testing::counts();
+  const auto before = sunshine_ngx_hooks::testing::counts();
   opaque_token token;
   for (bool success : {true, false}) {
     result_v1 = success;
@@ -4735,16 +4736,16 @@ static void test_call_trace_only(bool modern) {
     require(GetLastError() == outgoing_error && evaluate_call.incoming_error == incoming_error,
       "Trace scope changed incoming or outgoing LastError");
   }
-  const auto after = sunshine_upscaler_trace::testing::counts();
+  const auto after = sunshine_ngx_hooks::testing::counts();
   require(after.streamline == before.streamline + 2 && after.streamline_covered,
     "Trace-only SL evaluations or coverage missing");
   require(testing::counts().evaluations == 0,
     "Trace-only calls entered source or content diagnostics");
   shutdown();
-  const auto stopped = sunshine_upscaler_trace::testing::counts().streamline;
+  const auto stopped = sunshine_ngx_hooks::testing::counts().streamline;
   if (modern) call_v2_evaluate(0, token.ref(), nullptr, 0, nullptr);
   else call_v1_evaluate(nullptr, 0, 1, 0);
-  require(sunshine_upscaler_trace::testing::counts().streamline == stopped,
+  require(sunshine_ngx_hooks::testing::counts().streamline == stopped,
     "Disabled call trace observed retained pass-through hook");
   call_trace_setting = nullptr;
   source_setting = "1";

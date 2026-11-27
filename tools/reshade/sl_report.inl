@@ -188,7 +188,7 @@ namespace sunshine_streamline {
   }
   namespace {
     void report_camera_availability(std::uint64_t now) {
-      if (!sunshine_upscaler_trace::capture_enabled() || !hooks_installed) return;
+      if (!sunshine_ngx_hooks::capture_enabled() || !hooks_installed) return;
       static std::uint64_t camera_report_at{}, camera_report_count{UINT64_MAX};
       auto camera_pin = now >= camera_report_at ? read_metadata() : metadata_owner::read_pin{};
       if (camera_pin) {
