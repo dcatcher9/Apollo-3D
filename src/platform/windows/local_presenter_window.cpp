@@ -219,10 +219,6 @@ namespace platf::dxgi {
       clip.retry_after = {};
     }
 
-    bool same_local_presenter_luid(const LUID &left, const LUID &right) {
-      return left.HighPart == right.HighPart && left.LowPart == right.LowPart;
-    }
-
     std::optional<local_presenter_display_identity_t> query_local_presenter_display_identity(
       std::wstring_view display_name
     ) {
@@ -248,7 +244,7 @@ namespace platf::dxgi {
         source_name.header.size = sizeof(source_name);
         source_name.header.adapterId = path.sourceInfo.adapterId;
         source_name.header.id = path.sourceInfo.id;
-        if (DisplayConfigGetDeviceInfo(&source_name.header) != ERROR_SUCCESS || display_name != source_name.viewGdiDeviceName) {
+        if (DisplayConfigGetDeviceInfo(&source_name.header) != ERROR_SUCCESS || !platf::display_config::equal_device_paths(display_name, source_name.viewGdiDeviceName)) {
           continue;
         }
 
@@ -280,14 +276,14 @@ namespace platf::dxgi {
       // The source is a SudoVDA output: its CCD path lives on the IddCx adapter, whose LUID is
       // not the render GPU's. Only the physical sink is required to stay on the expected adapter;
       // the source is pinned by its driver-learned device path and Apollo-owned friendly name.
-      if (!live_target || source.device_path.empty() || target.device_path.empty() || source.device_path == target.device_path || !same_local_presenter_luid(target.adapter_id, expected_adapter) || !boost::algorithm::istarts_with(source.friendly_name, std::wstring(L"Apollo AR Des"))) {
+      if (!live_target || source.device_path.empty() || target.device_path.empty() || platf::display_config::equal_device_paths(source.device_path, target.device_path) || !platf::display_config::same_luid(target.adapter_id, expected_adapter) || !boost::algorithm::istarts_with(source.friendly_name, std::wstring(L"Apollo AR Des"))) {
         return false;
       }
       std::lock_guard lock(live_target->mutex);
       return !live_target->source_device_path.empty() &&
              !live_target->target_device_path.empty() &&
-             live_target->source_device_path == source.device_path &&
-             live_target->target_device_path == target.device_path;
+             platf::display_config::equal_device_paths(live_target->source_device_path, source.device_path) &&
+             platf::display_config::equal_device_paths(live_target->target_device_path, target.device_path);
     }
 
     std::optional<RECT> query_local_presenter_display_rect(std::wstring_view display_name) {

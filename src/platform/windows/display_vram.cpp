@@ -8867,7 +8867,7 @@ namespace platf::dxgi {
     DXGI_ADAPTER_DESC1 source_adapter_desc {};
     // DXGI attributes the SudoVDA output to its render GPU, while CCD reports the IddCx adapter.
     // The zero-copy contract is that capture opened on the same GPU that presents to the sink.
-    if (!source_identity_after_open || source_identity_after_open->device_path != source_identity_at_start->device_path || !dxgi_display->adapter || FAILED(dxgi_display->adapter->GetDesc1(&source_adapter_desc)) || !same_local_presenter_luid(source_adapter_desc.AdapterLuid, config.target_adapter_id)) {
+    if (!source_identity_after_open || !display_config::equal_device_paths(source_identity_after_open->device_path, source_identity_at_start->device_path) || !dxgi_display->adapter || FAILED(dxgi_display->adapter->GetDesc1(&source_adapter_desc)) || !display_config::same_luid(source_adapter_desc.AdapterLuid, config.target_adapter_id)) {
       BOOST_LOG(info) << "Local AR virtual source identity changed while DXGI capture was opening; reinitializing."sv;
       return local_presenter_result_e::reinit;
     }
@@ -9036,7 +9036,7 @@ namespace platf::dxgi {
                        << util::log_hex(status);
       return local_presenter_result_e::error;
     }
-    if (presenter_adapter_desc.AdapterLuid.HighPart != config.target_adapter_id.HighPart || presenter_adapter_desc.AdapterLuid.LowPart != config.target_adapter_id.LowPart) {
+    if (!display_config::same_luid(presenter_adapter_desc.AdapterLuid, config.target_adapter_id)) {
       BOOST_LOG(info) << "Local AR physical output migrated to another graphics adapter; "sv
                          "requesting a complete presentation-session rebuild."sv;
       return local_presenter_result_e::error;
@@ -9089,7 +9089,7 @@ namespace platf::dxgi {
       if (FAILED(enum_status) || FAILED(candidate->GetDesc(&target_output_desc))) {
         continue;
       }
-      if (std::wstring_view(target_output_desc.DeviceName) == target_display_name_wide) {
+      if (display_config::equal_device_paths(target_output_desc.DeviceName, target_display_name_wide)) {
         target_output = std::move(candidate);
         break;
       }
@@ -9101,7 +9101,7 @@ namespace platf::dxgi {
     }
     const auto source_identity_before_present = query_local_presenter_display_identity(source_name_wide);
     const auto target_identity_before_present = query_local_presenter_display_identity(target_display_name_wide);
-    if (!source_identity_before_present || !target_identity_before_present || source_identity_before_present->device_path != source_identity_at_start->device_path || target_identity_before_present->device_path != target_identity_at_start->device_path || !local_presenter_identity_is_coherent(config.live_target, *source_identity_before_present, *target_identity_before_present, config.target_adapter_id)) {
+    if (!source_identity_before_present || !target_identity_before_present || !display_config::equal_device_paths(source_identity_before_present->device_path, source_identity_at_start->device_path) || !display_config::equal_device_paths(target_identity_before_present->device_path, target_identity_at_start->device_path) || !local_presenter_identity_is_coherent(config.live_target, *source_identity_before_present, *target_identity_before_present, config.target_adapter_id)) {
       BOOST_LOG(info) << "Local AR source/sink identity changed while presentation resources were opening; reinitializing."sv;
       return local_presenter_result_e::reinit;
     }
@@ -9574,8 +9574,8 @@ namespace platf::dxgi {
           DXGI_OUTPUT_DESC output {};
           Microsoft::WRL::ComPtr<IDXGIOutput6> output6;
           DXGI_OUTPUT_DESC1 color {};
-          if (!source || !target || source->device_path != source_identity_at_start->device_path ||
-              target->device_path != target_identity_at_start->device_path ||
+          if (!source || !target || !display_config::equal_device_paths(source->device_path, source_identity_at_start->device_path) ||
+              !display_config::equal_device_paths(target->device_path, target_identity_at_start->device_path) ||
               !local_presenter_identity_is_coherent(config.live_target, *source, *target, config.target_adapter_id) ||
               FAILED(target_output->GetDesc(&output)) || output.Monitor != target_output_desc.Monitor ||
               !EqualRect(&output.DesktopCoordinates, &target_output_desc.DesktopCoordinates) ||

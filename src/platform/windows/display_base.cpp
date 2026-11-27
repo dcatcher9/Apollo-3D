@@ -1114,7 +1114,7 @@ namespace platf::dxgi {
             continue;
           }
 
-          if (!output_name.empty() && desc.DeviceName != output_name) {
+          if (!output_name.empty() && !display_config::equal_device_paths(desc.DeviceName, output_name)) {
             continue;
           }
 
@@ -1390,7 +1390,7 @@ namespace platf::dxgi {
       source_name.header.size = sizeof(source_name);
       source_name.header.adapterId = path.sourceInfo.adapterId;
       source_name.header.id = path.sourceInfo.id;
-      if (DisplayConfigGetDeviceInfo(&source_name.header) != ERROR_SUCCESS || std::wstring_view(source_name.viewGdiDeviceName) != std::wstring_view(output_desc.DeviceName)) {
+      if (DisplayConfigGetDeviceInfo(&source_name.header) != ERROR_SUCCESS || !display_config::equal_device_paths(source_name.viewGdiDeviceName, output_desc.DeviceName)) {
         continue;
       }
 

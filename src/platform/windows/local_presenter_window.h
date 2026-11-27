@@ -152,7 +152,6 @@ namespace platf::dxgi {
       std::wstring friendly_name;
     };
 
-    bool same_local_presenter_luid(const LUID &left, const LUID &right);
     std::optional<local_presenter_display_identity_t> query_local_presenter_display_identity(
       std::wstring_view display_name
     );
