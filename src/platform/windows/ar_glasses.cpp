@@ -1007,18 +1007,6 @@ namespace ar_glasses {
 
     using monitor_source_switch_t = platf::dxgi::local_monitor_source_switch_t;
 
-    bool contains_case_insensitive(std::wstring_view haystack, std::wstring_view needle) {
-      return std::search(
-               haystack.begin(),
-               haystack.end(),
-               needle.begin(),
-               needle.end(),
-               [](wchar_t left, wchar_t right) {
-                 return std::towupper(left) == std::towupper(right);
-               }
-             ) != haystack.end();
-    }
-
     std::string lowercase(std::string_view value) {
       std::string result(value);
       std::transform(result.begin(), result.end(), result.begin(), [](unsigned char ch) {
@@ -1027,9 +1015,10 @@ namespace ar_glasses {
       return result;
     }
 
+    // Saved AR decisions name a monitor by its model ID, the SudoVDA hardware ID for the
+    // driver's targets, and by its friendly name.
     bool is_internal_virtual_display(std::string_view device_id, std::string_view friendly_name) {
-      const auto name = lowercase(friendly_name);
-      return device_id == "DISPLAY:SMKD1CE"sv || name.starts_with("apollo ar des"sv);
+      return device_id == "DISPLAY:SMKD1CE"sv || is_apollo_ar_virtual_name(platf::from_utf8(friendly_name));
     }
 
     const char *decision_name(device_decision_e decision) {
@@ -1388,7 +1377,7 @@ namespace ar_glasses {
           return std::nullopt;
         }
         const auto &target_name = *target;
-        if (contains_case_insensitive(target_name.monitorDevicePath, L"SUDOVDA")) {
+        if (VDISPLAY::isSudoVirtualDisplayPath(target_name.monitorDevicePath)) {
           continue;
         }
         const auto device_id = stable_model_id(target_name);
@@ -2051,7 +2040,7 @@ namespace ar_glasses {
       }
 
       auto is_local_virtual_source = [](const active_source_t &source) {
-        return lowercase(platf::to_utf8(source.friendly_name)).starts_with("apollo ar des"sv);
+        return is_apollo_ar_virtual_name(source.friendly_name);
       };
       auto select = [&](auto predicate) {
         std::vector<const active_source_t *> matches;

@@ -1860,13 +1860,13 @@ TEST(ArGlassesModeTransition, PauseRestoresAfterCaptureStopsBeforeWaitingForClea
 }
 
 TEST(ArGlassesModeTransition, RecognizesTheProductionSudoVirtualDisplayHardwarePath) {
-  EXPECT_TRUE(VDISPLAY::isSudoVirtualDisplayPathForTest(
+  EXPECT_TRUE(VDISPLAY::isSudoVirtualDisplayPath(
     LR"(\\?\DISPLAY#SMKD1CE#5&production&0&UID4352)"
   ));
-  EXPECT_TRUE(VDISPLAY::isSudoVirtualDisplayPathForTest(
+  EXPECT_TRUE(VDISPLAY::isSudoVirtualDisplayPath(
     LR"(\\?\DISPLAY#SUDOVDA#legacy)"
   ));
-  EXPECT_FALSE(VDISPLAY::isSudoVirtualDisplayPathForTest(
+  EXPECT_FALSE(VDISPLAY::isSudoVirtualDisplayPath(
     LR"(\\?\DISPLAY#TCL03D4#physical)"
   ));
 }

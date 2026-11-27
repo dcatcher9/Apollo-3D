@@ -28,6 +28,8 @@
 using namespace SUDOVDA;
 
 namespace VDISPLAY {
+  bool isSudoVirtualDisplayPath(std::wstring_view devicePath);
+
   namespace {
     HANDLE sudovdaDriverHandle = INVALID_HANDLE_VALUE;
     std::mutex virtualDisplayMutationMutex;
@@ -82,13 +84,6 @@ namespace VDISPLAY {
                  return std::towlower(left) == std::towlower(right);
                }
              ) != value.end();
-    }
-
-    bool isSudoVirtualDisplayPath(std::wstring_view devicePath) {
-      // Current SudoVDA/IddCx targets publish the SMKD1CE hardware ID. Keep the legacy driver-name
-      // marker as well for already deployed variants.
-      return containsCaseInsensitive(devicePath, L"SMKD1CE") ||
-             containsCaseInsensitive(devicePath, L"SUDOVDA");
     }
 
     bool matchesVirtualDisplayIdentity(
@@ -506,6 +501,13 @@ namespace VDISPLAY {
       return std::nullopt;
     }
   }  // namespace
+
+  bool isSudoVirtualDisplayPath(std::wstring_view devicePath) {
+    // Current SudoVDA/IddCx targets publish the SMKD1CE hardware ID. Keep the legacy driver-name
+    // marker as well for already deployed variants.
+    return containsCaseInsensitive(devicePath, L"SMKD1CE") ||
+           containsCaseInsensitive(devicePath, L"SUDOVDA");
+  }
 
   LONG getDeviceSettings(const wchar_t* deviceName, DEVMODEW& devMode) {
 	devMode.dmSize = sizeof(DEVMODEW);
@@ -1776,10 +1778,6 @@ bool isDriverRemovalSafeAfterDesktopDetach(display_identity_state_e activePathSt
 }
 
 #ifdef SUNSHINE_TESTS
-bool isSudoVirtualDisplayPathForTest(std::wstring_view devicePath) {
-  return isSudoVirtualDisplayPath(devicePath);
-}
-
 display_identity_query_t waitForDisplayIdentityForTest(
   const LUID &adapterLuid,
   uint32_t targetId,

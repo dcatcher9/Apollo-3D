@@ -124,6 +124,10 @@ namespace VDISPLAY {
     std::vector<DISPLAYCONFIG_PATH_INFO> &paths,
     std::vector<DISPLAYCONFIG_MODE_INFO> &modes
   );
+  /** Whether a CCD monitor device path names a SudoVDA target: its hardware ID, or the legacy
+   * driver-name marker, appears in the path in any case.
+   */
+  bool isSudoVirtualDisplayPath(std::wstring_view devicePath);
   display_identity_query_t queryVirtualDisplayIdentity(
     const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
     std::wstring_view devicePath
@@ -167,7 +171,6 @@ namespace VDISPLAY {
     bool device_info_available = true;
   };
 
-  bool isSudoVirtualDisplayPathForTest(std::wstring_view devicePath);
   display_identity_query_t waitForDisplayIdentityForTest(
     const LUID &adapterLuid,
     uint32_t targetId,
