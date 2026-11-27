@@ -44,6 +44,7 @@
 #include "misc.h"
 #include "local_monitor_pointer_geometry.h"
 #include "open3d_emitter.h"
+#include "shutter_eye_pass.h"
 #include "shutter_presentation_clock.h"
 #include "shutter_slot_timing.h"
 #include "packed_output_fit.h"
@@ -11134,6 +11135,40 @@ namespace platf::dxgi {
                       << config.monitor_config.flip_eyes << '.';
     }
 
+    // Experiment: a lens window longer than the time the whole screen shows one picture, with
+    // the other eye's picture taken out of the lines that are redrawn meanwhile. It is off
+    // unless this names a settings file, which is read again whenever it is saved. Both objects
+    // outlive the shutter thread declared below.
+    detail::shutter_eye_pass_t ghost_pass;
+    std::optional<detail::shutter_ghost_settings_file_t> ghost_settings_file;
+    if (config.frame_sequential) {
+      std::array<wchar_t, 512> ghost_settings_path {};
+      const auto length = GetEnvironmentVariableW(L"SUNSHINE_LOCAL_MONITOR_GHOST_SETTINGS", ghost_settings_path.data(), static_cast<DWORD>(ghost_settings_path.size()));
+      if (length > 0 && length < ghost_settings_path.size()) {
+        auto vertex_code = compile_vertex_shader(SUNSHINE_SHADERS_DIR "/local_shutter_eye_vs.hlsl");
+        auto pixel_code = compile_pixel_shader(SUNSHINE_SHADERS_DIR "/local_shutter_eye_ps.hlsl");
+        if (!vertex_code || !pixel_code ||
+            !ghost_pass.init(shutter_device.Get(), vertex_code->GetBufferPointer(), vertex_code->GetBufferSize(), pixel_code->GetBufferPointer(), pixel_code->GetBufferSize())) {
+          BOOST_LOG(error) << "Local shutter ghost correction could not prepare its shaders."sv;
+          return local_presenter_result_e::error;
+        }
+        ghost_settings_file.emplace(
+          std::filesystem::path {ghost_settings_path.data()},
+          [](const std::filesystem::path &path, const detail::shutter_ghost_settings_t &settings, const std::vector<std::string> &problems) {
+            BOOST_LOG(info) << "Local shutter ghost correction settings from "sv << path.string()
+                            << ": top "sv << settings.top_peak << " over "sv << settings.top_extent
+                            << " of the height, bottom "sv << settings.bottom_peak << " over "sv << settings.bottom_extent
+                            << ", black_raise "sv << settings.black_raise << ", white_nits "sv << settings.white_nits
+                            << ", pattern "sv << settings.pattern << ", view "sv << (settings.view_left ? "left"sv : "right"sv) << '.';
+            for (const auto &problem : problems) {
+              BOOST_LOG(warning) << "Local shutter ghost correction settings: "sv << problem;
+            }
+          }
+        );
+        BOOST_LOG(info) << "Local shutter ghost correction is available and follows its settings file."sv;
+      }
+    }
+
     const auto open_shutter_source = [&](ID3D11Device *device, std::shared_ptr<switch_request_t> request = {}) -> std::shared_ptr<local_shutter_source_t> {
       auto source = std::make_shared<local_shutter_source_t>();
       source->request = std::move(request);
@@ -11351,7 +11386,27 @@ namespace platf::dxgi {
           std::int64_t present_begin_qpc = 0, present_end_qpc = 0;
           HRESULT result = S_FALSE, count_result = S_FALSE;
         };
+        detail::shutter_ghost_settings_t ghost_settings;
         const auto draw_eye = [&](bool left_eye) {
+          if (ghost_settings_file) {
+            ghost_settings_file->take(ghost_settings);
+          }
+          // The settings file's own patterns replace the red and blue one. A picture is
+          // corrected only when there is a pair to take the other eye from; if the pass cannot
+          // draw, the plain copy below still shows the eye.
+          if ((ghost_settings.pattern != 0 || (!shutter_test_pattern && ghost_settings.corrects() && pair)) &&
+              ghost_pass.draw(
+                shutter_context.Get(),
+                backbuffer_rtv.Get(),
+                pair,
+                left_eye,
+                static_cast<std::uint32_t>(output_width),
+                static_cast<std::uint32_t>(output_height),
+                config.hdr,
+                ghost_settings
+              )) {
+            return;
+          }
           if (shutter_test_pattern) {
             // In an HDR swapchain 1.0 is only 80 nits, too dim to judge through a lens that is
             // open for a small part of the time; 6.0 is 480 nits.
