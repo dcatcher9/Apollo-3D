@@ -11,6 +11,8 @@
 
 #include <nlohmann/json.hpp>
 #include <src/confighttp.h>
+#include <src/confighttp_routes.h>
+#include <src/platform/windows/game3d_setup.h>
 
 #include "../tests_common.h"
 
@@ -197,4 +199,78 @@ TEST(ConfigHttpRequestBoundary, AppliesOfflineLimitBeforeRouteDispatch) {
     ),
     confighttp::WEB_UI_REQUEST_STREAM_MAX_BYTES
   );
+}
+
+namespace {
+  using setup_status_t = platf::game3d::setup_status_t;
+
+  setup_status_t::card_t addon_offer() {
+    return {
+      .game_name = "Example",
+      .executable = "C:/Games/Example/game.exe",
+      .kind = platf::game3d::game_kind_e::addon,
+      .text_helper = false,
+      .chosen = false,
+      .state = "ready_to_install",
+      .detail = "Confirm this game.",
+      .reshade_present = true,
+      .install_script = "C:/Host/tools/reshade/install.ps1",
+      .runtime_install_script = "C:/Host/tools/reshade/install-runtime.ps1",
+      .identity = "0011",
+    };
+  }
+}  // namespace
+
+TEST(ConfigHttpGame3dSetup, UndetectedCardCarriesOnlyActivityAndChoosableApplications) {
+  setup_status_t status;
+  EXPECT_EQ(confighttp::game3d_setup_json(status).dump(), R"({"active":false,"choosable":[],"detected":false})");
+
+  status.active = true;
+  status.choosable.push_back({"Visual Novel", "C:/Games/Novel/novel.exe", "00aa", true});
+  EXPECT_EQ(
+    confighttp::game3d_setup_json(status).dump(),
+    R"({"active":true,"choosable":[{"executable":"C:/Games/Novel/novel.exe","game_name":"Visual Novel","identity":"00aa","text_helper":true}],"detected":false})"
+  );
+}
+
+TEST(ConfigHttpGame3dSetup, DetectedCardNamesItsFieldsAndAnOfferIdentityOnly) {
+  setup_status_t status;
+  status.card = addon_offer();
+  EXPECT_EQ(
+    confighttp::game3d_setup_json(status).dump(),
+    R"({"active":false,"choosable":[],"chosen":false,"detail":"Confirm this game.","detected":true,"executable":"C:/Games/Example/game.exe","game_name":"Example","identity":"0011","install_script":"C:/Host/tools/reshade/install.ps1","kind":"addon","reshade_present":true,"runtime_install_script":"C:/Host/tools/reshade/install-runtime.ps1","state":"ready_to_install","text_helper":false})"
+  );
+
+  // A card that shows no offer has nothing to confirm, so it names no identity.
+  status.card->identity.reset();
+  status.card->state = "current";
+  const auto settled = confighttp::game3d_setup_json(status);
+  EXPECT_FALSE(settled.contains("identity"));
+  EXPECT_EQ(settled.at("state"), "current");
+}
+
+TEST(ConfigHttpGame3dSetup, TextProtectionNamesTheGameTextTheFallbackOrNothing) {
+  using platf::game3d::text_hook::protection_e;
+  setup_status_t status;
+  status.card = addon_offer();
+  status.card->kind = platf::game3d::game_kind_e::text_hook;
+  status.card->text_helper = true;
+  status.card->chosen = true;
+  status.card->state = "converting";
+  EXPECT_EQ(confighttp::game3d_setup_json(status).at("kind"), "text_hook");
+  EXPECT_FALSE(confighttp::game3d_setup_json(status).contains("text_protection"));
+
+  for (const auto &[protection, name] : std::array<std::pair<protection_e, std::string_view>, 3> {{
+         {protection_e::game_text, "game"},
+         {protection_e::picture, "fallback"},
+         {protection_e::unknown, ""},
+       }}) {
+    SCOPED_TRACE(name);
+    status.text_protection = setup_status_t::text_protection_t {protection, "why"};
+    const auto json = confighttp::game3d_setup_json(status);
+    EXPECT_EQ(json.at("text_protection"), name);
+    EXPECT_EQ(json.at("text_protection_detail"), "why");
+    EXPECT_EQ(json.at("chosen"), true);
+    EXPECT_EQ(json.at("text_helper"), true);
+  }
 }

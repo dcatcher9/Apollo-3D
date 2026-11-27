@@ -412,32 +412,29 @@ namespace platf::game3d {
         wake_.notify_one();
       }
 
-      nlohmann::json status() {
-        nlohmann::json result;
+      setup_status_t status() {
+        setup_status_t result;
         std::vector<detail::choosable_applications::entry_t> choosable;
         {
           std::lock_guard lock(mutex_);
-          result = status_;
-          result["active"] = !watches_.empty();
+          result.card = status_;
+          result.active = !watches_.empty();
           // What keeps the converted game's text readable, as the capture path found it within
-          // the last seconds: the game's own text, or the fallback and why. Empty when the game
+          // the last seconds: the game's own text, or the fallback and why. Unknown when the game
           // is not being converted now.
           if (status_game_) {
             const auto state = text_hook::protection(status_game_->first, status_game_->second);
-            result["text_protection"] = state.protection == text_hook::protection_e::game_text ? "game" : state.protection == text_hook::protection_e::picture ? "fallback" :
-                                                                                                                                                                 "";
-            result["text_protection_detail"] = text_hook::describe(state);
+            result.text_protection = setup_status_t::text_protection_t {state.protection, text_hook::describe(state)};
           }
           choosable = choosable_.entries();
         }
         // The applications the owner may choose for conversion, as long as they run. The worker
         // drops the closed ones only while a stream is watched. A text game the card itself
         // shows, as one that was stopped is, is chosen again there.
-        const bool shown_as_text_game = result.value("detected", false) && result.value("kind", std::string {}) == "text_hook";
-        result["choosable"] = nlohmann::json::array();
+        const bool shown_as_text_game = result.card && result.card->kind == game_kind_e::text_hook;
         for (const auto &entry : choosable) {
-          if (!(shown_as_text_game && result.value("executable", std::string {}) == entry.executable) && text_hook::running(entry.game.process_id, entry.game.creation_time)) {
-            result["choosable"].push_back({{"game_name", entry.game.name}, {"executable", entry.executable}, {"identity", entry.identity}, {"text_helper", entry.game.text_helper}});
+          if (!(shown_as_text_game && result.card->executable == entry.executable) && text_hook::running(entry.game.process_id, entry.game.creation_time)) {
+            result.choosable.push_back({entry.game.name, entry.executable, entry.identity, entry.game.text_helper});
           }
         }
         return result;
@@ -567,22 +564,21 @@ namespace platf::game3d {
         {
           std::lock_guard lock(mutex_);
           status_game_ = converting_ ? std::optional(std::pair {game.process_id, game.creation_time}) : std::nullopt;
-          status_ = {
-            {"detected", true},
-            {"game_name", game.name},
-            {"executable", executable},
-            {"kind", game.kind == game_kind_e::text_hook ? "text_hook" : "addon"},
-            {"text_helper", game.text_helper},
-            {"chosen", game.chosen},
-            {"state", state_name},
-            {"detail", installation.detail},
-            {"reshade_present", installation.reshade_present},
-            {"install_script", utf8(bundled_addon_directory() / "install.ps1")},
-            {"runtime_install_script", utf8(bundled_addon_directory() / "install-runtime.ps1")},
+          status_ = setup_status_t::card_t {
+            .game_name = game.name,
+            .executable = executable,
+            .kind = game.kind,
+            .text_helper = game.text_helper,
+            .chosen = game.chosen,
+            .state = state_name,
+            .detail = installation.detail,
+            .reshade_present = installation.reshade_present,
+            .install_script = utf8(bundled_addon_directory() / "install.ps1"),
+            .runtime_install_script = utf8(bundled_addon_directory() / "install-runtime.ps1"),
           };
           // Only the offer on display can be confirmed.
           if (offer) {
-            status_["identity"] = outcome.identity;
+            status_->identity = outcome.identity;
             offered_ = offer_t {game, executable, installation.executable, outcome.identity};
           } else {
             offered_.reset();
@@ -803,7 +799,7 @@ namespace platf::game3d {
       std::vector<detected_game> requests_;
       std::optional<offer_t> offered_;
       detail::choosable_applications choosable_;  ///< Guarded by mutex_.
-      nlohmann::json status_ {{"detected", false}};
+      std::optional<setup_status_t::card_t> status_;  ///< Empty until a game was detected.
       std::optional<std::pair<std::uint32_t, std::uint64_t>> status_game_;  ///< The text game `status_` shows as converted.
       // Thread-safe; written by the request thread (choices) and the worker (completion).
       detail::setup_decisions decisions_ {decisions_file()};
@@ -830,7 +826,7 @@ namespace platf::game3d {
     });
   }
 
-  nlohmann::json setup_status() {
+  setup_status_t setup_status() {
     return service().status();
   }
 

@@ -9,7 +9,6 @@
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <nlohmann/json_fwd.hpp>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -21,9 +20,46 @@ namespace platf::game3d {
   // separate worker; retiring an encoder never waits for an add-on file operation.
   [[nodiscard]] std::shared_ptr<void> watch_game_setup(RECT capture_rect);
 
-  // Read-only, authenticated Web UI status. Retains the most recently detected
-  // game so opening the browser does not discard the setup instructions.
-  [[nodiscard]] nlohmann::json setup_status();
+  // What the Game 3D setup card shows. The Web UI's setup routes serialize it.
+  struct setup_status_t {
+    // The game the card shows: the most recently detected one, retained so that opening the
+    // browser does not discard the setup instructions.
+    struct card_t {
+      std::string game_name;
+      std::string executable;  ///< UTF-8. A choice must name exactly this path.
+      game_kind_e kind {};
+      bool text_helper {};
+      bool chosen {};
+      std::string state;  ///< detail::published_state_name of the outcome shown.
+      std::string detail;
+      bool reshade_present {};
+      std::string install_script;  ///< UTF-8 path of the bundled add-on installer.
+      std::string runtime_install_script;  ///< UTF-8 path of the bundled ReShade installer.
+      std::optional<std::string> identity;  ///< Only while the card shows an offer to answer.
+    };
+
+    // How the card's text game keeps its text readable, as the capture path found it lately.
+    struct text_protection_t {
+      text_hook::protection_e protection {};
+      std::string detail;  ///< text_hook::describe of that state.
+    };
+
+    // An application lately in front on the streamed display that the owner may choose.
+    struct choosable_t {
+      std::string game_name;
+      std::string executable;  ///< UTF-8, as a choice names it.
+      std::string identity;
+      bool text_helper {};
+    };
+
+    std::optional<card_t> card;  ///< Empty until a game was detected.
+    bool active {};  ///< A live presentation is watching for games.
+    std::optional<text_protection_t> text_protection;  ///< Only while the card's text game is converted.
+    std::vector<choosable_t> choosable;  ///< Still running, and not the text game the card shows.
+  };
+
+  // Read-only, authenticated Web UI status.
+  [[nodiscard]] setup_status_t setup_status();
 
   // Authenticated Web UI choice for the executable the status currently offers: "install"
   // or "never". The executable path and identity must match that offer exactly. The choice

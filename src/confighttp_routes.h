@@ -4,8 +4,15 @@
  */
 #pragma once
 
+// lib includes
+#include <nlohmann/json_fwd.hpp>
+
 // local includes
 #include "confighttp_common.h"
+
+namespace platf::game3d {
+  struct setup_status_t;
+}  // namespace platf::game3d
 
 namespace confighttp {
   // Pages and static assets: confighttp_pages.cpp
@@ -64,6 +71,8 @@ namespace confighttp {
   // Game 3D setup: confighttp_game3d.cpp
   void getGame3dSetup(resp_https_t response, req_https_t request);
   void decideGame3dSetup(resp_https_t response, req_https_t request);
+  /** The setup card as the Web UI reads it. */
+  nlohmann::json game3d_setup_json(const platf::game3d::setup_status_t &status);
 
   // Local 3D displays: confighttp_local_display.cpp
   void getArGlassDevices(resp_https_t response, req_https_t request);
