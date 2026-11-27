@@ -71,6 +71,10 @@ endif()
 add_compile_definitions(SUNSHINE_GAME3D_SHADER_SHA256="${SUNSHINE_GAME3D_SHADER_SHA256}")
 set_property(SOURCE game3d_debug_dump.cpp APPEND PROPERTY COMPILE_DEFINITIONS
   SUNSHINE_GAME3D_BUILD_REVISION="${SUNSHINE_GAME3D_BUILD_REVISION}")
+# The UI decision framework's pure CPU policy (game3d_ui_policy.cpp): the add-on,
+# the replays and the policy tests link the same bodies.
+add_library(sunshine_game3d_ui_policy STATIC game3d_ui_policy.cpp)
+target_compile_features(sunshine_game3d_ui_policy PUBLIC cxx_std_17)
 add_library(sunshine_game3d_diagnostics STATIC game3d_diagnostic_metadata.cpp)
 target_compile_features(sunshine_game3d_diagnostics PUBLIC cxx_std_17)
 target_link_libraries(sunshine_game3d_diagnostics PUBLIC nlohmann_json::nlohmann_json version)
@@ -216,7 +220,8 @@ configure_file(game3d_shader_source.h.in "${CMAKE_CURRENT_BINARY_DIR}/game3d_sha
 # an add-on DLL links whole, and <view>_archive, the same objects as a static
 # library from which an executable links only what it uses. The seam defines
 # are public, so that every file of a binary sees the same view.
-set(sunshine_game3d_core_libraries d3d11 d3d12 dxgi dxguid d3dcompiler sunshine_min_hook version sunshine_game3d_diagnostics)
+set(sunshine_game3d_core_libraries d3d11 d3d12 dxgi dxguid d3dcompiler sunshine_min_hook version sunshine_game3d_diagnostics
+  sunshine_game3d_ui_policy)
 set(sunshine_game3d_core_sources exporter.cpp game3d_depth_input.cpp hook_host.cpp game3d_ui_input_provider.cpp game3d_debug_dump.cpp game3d_ui_layer.cpp game3d_ui_capture.cpp game3d_renderer.cpp game3d_ui_decision.cpp overlay_compositor.cpp depth_addon.cpp game3d_controls.cpp depth_content_sampler.cpp streamline_camera_probe.cpp addon_config.cpp game3d_ui_mask.cpp streamline_camera_data.cpp streamline_depth_capture.cpp streamline_native_observer.cpp streamline_depth_provider.cpp depth_output.cpp upscaler_call_trace.cpp ngx_hooks.cpp ngx_depth_source.cpp)
 function(sunshine_game3d_core_view view)
   cmake_parse_arguments(PARSE_ARGV 1 sunshine_view "" "" "SEAMS;EXCLUDE")
@@ -307,7 +312,7 @@ if(MINGW)
 endif()
 add_executable(ui_detection_replay ui_detection_replay.cpp)
 target_compile_features(ui_detection_replay PRIVATE cxx_std_17)
-target_link_libraries(ui_detection_replay PRIVATE nlohmann_json::nlohmann_json d3d11 d3dcompiler)
+target_link_libraries(ui_detection_replay PRIVATE sunshine_game3d_ui_policy nlohmann_json::nlohmann_json d3d11 d3dcompiler)
 if(MINGW)
   target_link_options(ui_detection_replay PRIVATE -static)
 endif()
@@ -383,6 +388,7 @@ if(BUILD_TESTING)
   foreach(policy IN ITEMS depth_jitter scene_gain contrast_zero provided_raw_scene camera_sample_binding raw_scene_policy raw_scene_pool depth_capture_policy depth_probe_policy automatic_scene_transition matched_disparity diagnostic_log_gate observation_loss_journal observer_snapshot projection_depth_scale projection_depth_controller depth_ready_uniform_cache depth_presentation_stats game3d_alpha_auto game3d_ui_sequence game3d_ui_adaptive game3d_ui_qualification capture_state_policy game3d_vram scene_depth_source freshness api_contract proven_state queue_order game3d_continuity fixture_files)
     add_executable(reshade_${policy}_tests test_${policy}.cpp)
     target_compile_features(reshade_${policy}_tests PRIVATE cxx_std_17)
+    target_link_libraries(reshade_${policy}_tests PRIVATE sunshine_game3d_ui_policy)
     if(MINGW)
       target_link_options(reshade_${policy}_tests PRIVATE -static)
     endif()
@@ -522,6 +528,7 @@ if(BUILD_TESTING)
 
   add_executable(reshade_game3d_controls_tests test_game3d_controls.cpp)
   target_compile_features(reshade_game3d_controls_tests PRIVATE cxx_std_17)
+  target_link_libraries(reshade_game3d_controls_tests PRIVATE sunshine_game3d_ui_policy)
   if(MINGW)
     target_link_options(reshade_game3d_controls_tests PRIVATE -static)
   endif()

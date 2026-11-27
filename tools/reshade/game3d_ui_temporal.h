@@ -101,26 +101,20 @@ namespace sunshine_game3d::ui_temporal {
 
   // The inputs that identify a detection's scope: a sample or a decision
   // from another epoch, revision or viewport is no evidence for this one.
-  inline bool scope_changed(const alpha_auto_source &a, const alpha_auto_source &b) {
-    return a.epoch != b.epoch || a.revision != b.revision || a.viewport != b.viewport;
-  }
+  bool scope_changed(const alpha_auto_source &a, const alpha_auto_source &b);
   // The identity part of that scope (M1: a recreated swapchain or device, or
   // another viewport), which clears T1 holds. An observation revision alone
   // (a depth observation loss) is a missing input, not another identity: the
   // last real decision still describes the same output, so a generated
   // Present holds it and the next real frame without a decision of its own
   // reuses it once.
-  inline bool hold_scope_changed(const alpha_auto_source &a, const alpha_auto_source &b) {
-    return a.epoch != b.epoch || a.viewport != b.viewport;
-  }
+  bool hold_scope_changed(const alpha_auto_source &a, const alpha_auto_source &b);
   // A completed sample is discarded unread only when its scope no longer
   // matches, or when it is stale on arrival (F1). A change of accepted or
   // offered candidates does not discard it: every sample in scope is
   // evidence for the ledger, and the status shows it only under the winner
   // it was taken for (detection_state::status_fresh).
-  inline bool sample_discarded(const alpha_auto_source &input, const alpha_auto_source &pending) {
-    return scope_changed(input, pending) || input.now_ms < pending.now_ms || input.now_ms - pending.now_ms > sample_fresh_ms;
-  }
+  bool sample_discarded(const alpha_auto_source &input, const alpha_auto_source &pending);
 
   // The status sample poll_detection reads from the current revision's
   // decision texels `words` (4 per texel, ui_detection::decision_texels of
@@ -131,131 +125,22 @@ namespace sunshine_game3d::ui_temporal {
   // and .w), the refused candidate and the frame reason, the H1 texel 10 and
   // the pre-UI pixel counts of texel 11. sequence numbers the submitted
   // samples.
-  inline alpha_auto_decision decode_detection_sample(const std::uint32_t *words, std::size_t count,
-      std::uint64_t tick_ms, std::uint64_t sequence) {
-    namespace word = ui_detection::decision_word;
-    alpha_auto_decision sample;
-    if (count < 4 * ui_detection::decision_texels) return sample;
-    sample.source_kind = words[word::source];
-    sample.enabled = words[word::source] != 0;
-    sample.state = words[word::source] ? alpha_auto_state::automatic_on : alpha_auto_state::automatic_off;
-    // The pixel counts are the ones the shader's CPU oracle decides from
-    // (ui_selection::counts_from_words): one reading of the words serves both,
-    // so the shipped decoder and the oracle cannot come to read them differently.
-    const auto counts = ui_selection::counts_from_words(words, count);
-    using ui_selection::alpha_index;
-    using ui_selection::kind;
-    // The evidence keeps the four presented-frame alphas in judged_kinds order.
-    const auto alpha_kinds = [](const std::array<std::uint32_t, 5> &by_kind) {
-      std::array<std::uint32_t, 4> result{};
-      for (std::size_t i = 0; i != result.size(); ++i) result[i] = by_kind[alpha_index(ui_selection::judged_kinds[i])];
-      return result;
-    };
-    sample.covered = words[word::covered]; sample.pixels = counts.pixels;
-    sample.sample_sequence = sequence;
-    sample.sample_tick_ms = tick_ms;
-    auto &evidence = sample.evidence;
-    evidence.matching_tiles = counts.matching_tiles;
-    evidence.candidates = words[word::candidates]; evidence.hudless_changed = counts.changed;
-    evidence.hudless_unchanged = counts.unchanged; evidence.hudless_invalid = counts.nonfinite;
-    evidence.alpha_covered = alpha_kinds(counts.covered);
-    evidence.alpha_invalid = alpha_kinds(counts.invalid);
-    evidence.hudless_lit = counts.lit;
-    evidence.accepted = words[word::accepted];
-    const auto opaque = alpha_kinds(counts.opaque);
-    evidence.alpha_opaque = {opaque[0], opaque[1]};
-    evidence.layer_covered = counts.covered[alpha_index(kind::ui_layer)];
-    evidence.layer_invalid = counts.invalid[alpha_index(kind::ui_layer)];
-    evidence.layer_opaque = counts.opaque[alpha_index(kind::ui_layer)];
-    evidence.valid_bits = words[word::valid_bits];
-    evidence.strong = counts.strong;
-    evidence.contradicted = counts.contradicted;
-    evidence.refused = words[word::refused];
-    evidence.frame_reason = words[word::frame_reason] & ui_detection::frame_reason_reason_mask;
-    evidence.reused = (words[word::frame_reason] & ui_detection::frame_reason_reused) != 0;
-    evidence.inferred_opaque = {opaque[2], opaque[3]};
-    evidence.claims = words[word::claims];
-    evidence.s1_source = words[word::h1] & ui_detection::h1_winner_mask;
-    evidence.h1_applied = (words[word::h1] & ui_detection::h1_applied) != 0;
-    evidence.pre_ui_match = counts.pre_ui_match;
-    evidence.pre_ui_image_lit = counts.pre_ui_lit;
-    const auto decode = [&](std::size_t n, std::size_t d, std::size_t state) {
-      alpha_auto_decision::scene_evidence result;
-      result.n = words[n];
-      std::memcpy(&result.d, &words[d], sizeof(result.d));
-      result.valid = ui_detection::scene_state_valid(words[state]);
-      result.ran = ui_detection::scene_state_ran(words[state]);
-      result.verdict = ui_detection::scene_state_verdict(words[state]);
-      return result;
-    };
-    evidence.scene = decode(word::scene_n, word::scene_d, word::scene_state);
-    evidence.scene.decided = words[word::scene_decided];
-    // The pre-UI image's texel carries no verdict: the CPU reads it from D.
-    evidence.pre_ui_scene = decode(word::pre_ui_scene_n, word::pre_ui_scene_d, word::pre_ui_scene_state);
-    evidence.pre_ui_scene.verdict = evidence.pre_ui_scene.valid ?
-      ui_detection::scene_verdict_of(evidence.pre_ui_scene.d) : ui_detection::scene_verdict::none;
-    evidence.pre_ui_image = words[word::pre_ui_scene_image];
-    return sample;
-  }
+  alpha_auto_decision decode_detection_sample(const std::uint32_t *words, std::size_t count,
+      std::uint64_t tick_ms, std::uint64_t sequence);
 
   // The hidden-scene guard's view of a decoded status sample
   // (game3d_scene_guard.h) at its tick.
-  inline scene_guard::sample guard_sample(const alpha_auto_decision &decoded) {
-    const auto &evidence = decoded.evidence;
-    scene_guard::sample s;
-    s.tick = decoded.sample_tick_ms;
-    s.pixels = decoded.pixels;
-    s.offered = evidence.candidates;
-    s.valid_bits = evidence.valid_bits;
-    s.source = decoded.source_kind;
-    s.claims = evidence.claims;
-    using ui_selection::alpha_index;
-    using ui_selection::kind;
-    s.opaque[alpha_index(kind::ui_alpha)] = evidence.alpha_opaque[0];
-    s.opaque[alpha_index(kind::ui_color)] = evidence.alpha_opaque[1];
-    s.opaque[alpha_index(kind::ui_layer)] = evidence.layer_opaque;
-    s.opaque[alpha_index(kind::backbuffer)] = evidence.inferred_opaque[0];
-    s.opaque[alpha_index(kind::current)] = evidence.inferred_opaque[1];
-    const auto image = [](const alpha_auto_decision::scene_evidence &e) {
-      scene_guard::image_evidence result;
-      result.d = e.d;
-      result.valid = e.valid;
-      result.verdict = e.verdict;
-      return result;
-    };
-    s.presented = image(evidence.scene);
-    s.pre_ui = image(evidence.pre_ui_scene);
-    s.pre_ui_image = evidence.pre_ui_image;
-    return s;
-  }
+  scene_guard::sample guard_sample(const alpha_auto_decision &decoded);
 
   // The counts a completed sample commits (game3d_ui_counters.h): the CPU
   // counts snapshotted when it was submitted and the GPU words copied under
   // its fence, each as the change since the previous commit; when it decided
   // H1 (source 8), the hidden-scene verdict that same sample measured; and
   // what the hidden-scene guard's observation of it did (scene).
-  inline ui_counters sample_counters(const alpha_auto_decision &sample, const ui_counters &cpu,
+  ui_counters sample_counters(const alpha_auto_decision &sample, const ui_counters &cpu,
       const ui_counters &committed_cpu, const std::array<std::uint32_t, ui_counter_word::count> &words,
       const std::array<std::uint32_t, ui_counter_word::count> &committed_words, std::uint64_t through_ms,
-      const scene_guard::observation &observed = {}) {
-    auto delta = cpu - committed_cpu;
-    delta.add_gpu_delta(words, committed_words);
-    if (sample.source_kind == 8) {
-      using ui_detection::scene_verdict;
-      const auto &scene = sample.evidence.scene;
-      const auto verdict = scene.valid ? scene.verdict : scene_verdict::none;
-      ++delta[ui_counter::full_d_hidden + (verdict == scene_verdict::hidden ? 0 : verdict == scene_verdict::ambiguous ? 1 :
-        verdict == scene_verdict::visible ? 2 : 3)];
-    }
-    static_assert(ui_counter::full_d_ambiguous == ui_counter::full_d_hidden + 1 &&
-      ui_counter::full_d_visible == ui_counter::full_d_hidden + 2 && ui_counter::full_d_invalid == ui_counter::full_d_hidden + 3);
-    delta[ui_counter::scene_entered] = observed.entered;
-    delta[ui_counter::scene_released] = observed.released;
-    delta[ui_counter::scene_refuted] = observed.refuted;
-    delta[ui_counter::samples] = 1;
-    delta.through_ms = through_ms;
-    return delta;
-  }
+      const scene_guard::observation &observed = {});
 
   // T1 identity of one Present (M6): whether it is generated (hold_previous),
   // by depth's window (ui_evidence::generated_in_window: no input offered
@@ -273,13 +158,7 @@ namespace sunshine_game3d::ui_temporal {
   // held.generated) or, when no such decision exists in its scope, has no
   // mask (unavailable, counted held.none).
   enum class hold_kind : std::uint8_t { none, generated, unavailable };
-  inline const char *name(hold_kind value) {
-    switch (value) {
-      case hold_kind::generated: return "generated";
-      case hold_kind::unavailable: return "unavailable";
-      default: return "none";
-    }
-  }
+  const char *name(hold_kind value);
   struct hold_decision {
     hold_kind kind = hold_kind::none;
     // A real Present: it runs detection. A generated Present showing a real
@@ -336,29 +215,12 @@ namespace sunshine_game3d::ui_temporal {
     // frame adopts nothing. After an observation loss the previous
     // revision's captures are refused until the game tags again, so that
     // real frame is flagged too.
-    hold_decision arbitrate(const present_identity &identity, const alpha_auto_source &scope, std::uint32_t offered) const {
-      hold_decision result;
-      const bool same_scope = have_decision && !hold_scope_changed(scope, decision_scope);
-      if (identity.generated) {
-        result.hold = same_scope;
-        result.kind = result.hold ? hold_kind::generated : hold_kind::unavailable;
-        return result;
-      }
-      result.detect = true;
-      if (!same_scope) result.per_frame |= ui_detection::per_frame_hold_reset;
-      else if (bits & accepted & ui_selection::candidate_bits & ~offered)
-        result.per_frame |= ui_detection::per_frame_accepted_missing;
-      result.adopt = !(result.per_frame & ui_detection::per_frame_accepted_missing);
-      return result;
-    }
+    hold_decision arbitrate(const present_identity &identity, const alpha_auto_source &scope, std::uint32_t offered) const;
 
     // Adopts a real frame's inputs. A change of them does not discard the
     // status sample (F1: status_fresh compares the winner), and never clears
     // the hidden-scene guard (identity only, game3d_scene_guard.h).
-    void adopt(std::uint32_t new_bits, std::uint32_t new_accepted) {
-      bits = new_bits;
-      accepted = new_accepted;
-    }
+    void adopt(std::uint32_t new_bits, std::uint32_t new_accepted);
 
     // F1: the status key, the winner of the adopted inputs: the first offered
     // and accepted candidate bit in draw order (alpha kinds, then HUD-less),
@@ -366,29 +228,17 @@ namespace sunshine_game3d::ui_temporal {
     std::uint32_t status_key() const { return ui_selection::first_in_draw_order(bits & accepted & ui_selection::candidate_bits); }
     // The latest sample describes this frame: fresh, taken under the current
     // winner and in this scope.
-    bool status_fresh(const alpha_auto_source &observation) const {
-      return !sample_stale(latest.sample_tick_ms, observation.now_ms) && latest_key == status_key() &&
-        !scope_changed(observation, latest_source);
-    }
+    bool status_fresh(const alpha_auto_source &observation) const;
 
     // An active detection under another scope discards the sample.
-    void enter_scope(const alpha_auto_source &observation) {
-      if (scope_changed(observation, latest_source)) latest = {};
-    }
+    void enter_scope(const alpha_auto_source &observation);
 
     // A generated Present that applied the detected mask.
     void held() { ++holds; }
     // A real Present that detected: its decision is the chain's.
-    void detected(const alpha_auto_source &scope) {
-      have_decision = true;
-      decision_scope = scope;
-      holds = 0;
-    }
+    void detected(const alpha_auto_source &scope);
     // A generated Present without a mask ends the chain.
-    void unavailable() {
-      have_decision = false;
-      holds = 0;
-    }
+    void unavailable();
     // A render without detection keeps no real decision (T1). The
     // hidden-scene guard keeps its state.
     void inactive() { unavailable(); }

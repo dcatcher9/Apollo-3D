@@ -193,56 +193,29 @@ namespace sunshine_game3d {
   // as the gate of that proof's reconfirm clock.
   class alpha_auto_policy {
   public:
-    void set_manual(bool enabled) {
-      std::lock_guard<std::mutex> lock(mutex_);
-      manual_ = enabled;
-    }
+    void set_manual(bool enabled);
 
-    void set_automatic() {
-      std::lock_guard<std::mutex> lock(mutex_);
-      manual_.reset();
-    }
+    void set_automatic();
 
     // The mode alone: manual On or Off, or Auto before a rendered frame
     // reports its current-frame detection.
-    alpha_auto_decision decision() {
-      std::lock_guard<std::mutex> lock(mutex_);
-      alpha_auto_decision result;
-      if (manual_) {
-        result.enabled = *manual_;
-        result.state = *manual_ ? alpha_auto_state::manual_on : alpha_auto_state::manual_off;
-      }
-      return result;
-    }
+    alpha_auto_decision decision();
 
     // The offered candidates (ui_detection::candidate bits) this session
     // accepts, in candidate-bit positions: in Auto those whose signature the
     // ledger accepts, provisional ones included; manual On accepts every
     // offered candidate for this session only (S2) and manual Off none,
     // without touching the ledger.
-    std::uint32_t accepted(std::uint32_t offered, const candidate_signatures &signatures) {
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (manual_) return *manual_ ? offered & ui_selection::candidate_bits : 0u;
-      std::uint32_t result = 0;
-      for (const auto k : ui_selection::draw_order)
-        if ((offered & ui_selection::bit(k)) && accepts_locked(signatures.of(k))) result |= ui_selection::bit(k);
-      return result;
-    }
+    std::uint32_t accepted(std::uint32_t offered, const candidate_signatures &signatures);
 
     // Whether the ledger accepts this signature (provisional included).
-    bool accepts(const ui_selection::signature &signature) {
-      std::lock_guard<std::mutex> lock(mutex_);
-      return accepts_locked(signature);
-    }
+    bool accepts(const ui_selection::signature &signature);
 
     // H1 (d): whether an offscreen layer of this signature is proven the
     // pre-UI scene image (its key ui_selection::pre_ui_key is accepted,
     // provisional included). Manual modes neither earn nor lapse the proof
     // but honour it.
-    bool pre_ui_proven(const ui_selection::signature &layer) {
-      std::lock_guard<std::mutex> lock(mutex_);
-      return accepts_locked(ui_selection::pre_ui_key(layer));
-    }
+    bool pre_ui_proven(const ui_selection::signature &layer);
 
     // One completed GPU detection sample over `pixels` pixels, taken for
     // candidates of these signatures (those at submission). Manual modes
@@ -313,24 +286,7 @@ namespace sunshine_game3d {
     // presented frame's evidence is valid and visible), so it lapses after
     // alpha_trust_reconfirm_ms of testable time without a match.
     void observe(const alpha_auto_decision::detection_evidence &evidence, std::uint32_t pixels, std::uint64_t tick_ms,
-        const candidate_signatures &signatures) {
-      if (!pixels) return;
-      std::string changed_to;
-      std::function<void(const std::string &)> listener;
-      {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (manual_) return;
-        // accept() and revoke() mark a change of the accepted set, so a sample
-        // that changes nothing builds no key list.
-        accepted_changed_ = false;
-        observe_locked(evidence, pixels, tick_ms, signatures);
-        if (!accepted_changed_ || !change_listener_) return;
-        changed_to = stored_locked();
-        listener = change_listener_;
-      }
-      // Outside the lock: the owner may persist the new set.
-      listener(changed_to);
-    }
+        const candidate_signatures &signatures);
 
     // Acceptance an earlier session of this game earned, as stored() wrote it
     // (a TrustedUISources value): keys separated by ',' or '\0', at most
@@ -341,46 +297,17 @@ namespace sunshine_game3d {
     struct restore_result {
       std::size_t restored{};
     };
-    restore_result restore(std::string_view stored) {
-      std::lock_guard<std::mutex> lock(mutex_);
-      restore_result result;
-      std::size_t seen = 0;
-      while (!stored.empty()) {
-        const auto end = stored.find_first_of(std::string_view(",\0", 2));
-        const auto text = stored.substr(0, end);
-        stored.remove_prefix(end == std::string_view::npos ? stored.size() : end + 1);
-        const auto parsed = ui_selection::signature::parse(text);
-        if (!parsed) continue;
-        if (seen == max_stored_ui_sources) break;
-        ++seen;
-        auto &entry = at(*parsed);
-        if (entry.accepted) continue;
-        entry.accepted = entry.provisional = true;
-        entry.last_testable = entry.testable_ms = 0;
-        ++result.restored;
-        ++counters_[ui_counter::trust_restored];
-      }
-      return result;
-    }
+    restore_result restore(std::string_view stored);
 
     // The accepted signatures (provisional included) as their keys, ','
     // separated in signature order: the TrustedUISources value.
-    std::string stored() {
-      std::lock_guard<std::mutex> lock(mutex_);
-      return stored_locked();
-    }
+    std::string stored();
     // Whether stored() names any signature, without building the value.
-    bool has_stored() {
-      std::lock_guard<std::mutex> lock(mutex_);
-      return std::any_of(entries_.begin(), entries_.end(), [](const entry &e) { return e.accepted; });
-    }
+    bool has_stored();
 
     // Called with stored() whenever samples earn or revoke acceptance (never
     // in a manual mode) or forget() clears it; never for a restore.
-    void on_change(std::function<void(const std::string &)> listener) {
-      std::lock_guard<std::mutex> lock(mutex_);
-      change_listener_ = std::move(listener);
-    }
+    void on_change(std::function<void(const std::string &)> listener);
 
     // Forget (A3, the overlay's 'Forget learned UI sources'): clears every
     // entry of this game, accepted, provisional, earning and in doubt, counts
@@ -389,21 +316,7 @@ namespace sunshine_game3d {
     // changed stored(), the listener hears "" outside the lock, so the owner
     // persists an empty TrustedUISources. Each source is then accepted again
     // by its own evidence. The mode and the counters are unchanged.
-    std::string forget() {
-      std::string cleared;
-      std::function<void(const std::string &)> listener;
-      {
-        std::lock_guard<std::mutex> lock(mutex_);
-        cleared = stored_locked();
-        for (const auto &e : entries_)
-          if (e.accepted) ++counters_[ui_counter::trust_forgotten];
-        entries_.clear();
-        if (cleared.empty() || !change_listener_) return cleared;
-        listener = change_listener_;
-      }
-      listener(std::string());
-      return cleared;
-    }
+    std::string forget();
 
     // Exact UI protection counters (game3d_ui_counters.h). Renderers commit
     // each completed sample's counts, at most ten times a second each; the
@@ -411,14 +324,8 @@ namespace sunshine_game3d {
     // restored one confirmed) by this session's samples, revoked (A2) by an
     // exact change set's one-way test or by a declared alpha's coverage,
     // lapsed while provisional, restored, and accepted signatures forgotten.
-    void add_counters(const ui_counters &delta) {
-      std::lock_guard<std::mutex> lock(mutex_);
-      counters_ += delta;
-    }
-    ui_counters counters() {
-      std::lock_guard<std::mutex> lock(mutex_);
-      return counters_;
-    }
+    void add_counters(const ui_counters &delta);
+    ui_counters counters();
 
   private:
     // Consecutive samples of one kind of evidence about one signature.
@@ -476,172 +383,24 @@ namespace sunshine_game3d {
       bool revoked_by_exact{};
     };
 
-    bool accepts_locked(const ui_selection::signature &signature) const {
-      for (const auto &e : entries_)
-        if (e.signature == signature) return e.accepted;
-      return false;
-    }
-    entry *find(const ui_selection::signature &signature) {
-      for (auto &e : entries_)
-        if (e.signature == signature) return &e;
-      return nullptr;
-    }
-    entry &at(const ui_selection::signature &signature) {
-      if (auto *e = find(signature)) return *e;
-      entries_.emplace_back();
-      entries_.back().signature = signature;
-      return entries_.back();
-    }
-    std::string stored_locked() const {
-      std::vector<ui_selection::signature> keys;
-      for (const auto &e : entries_)
-        if (e.accepted) keys.push_back(e.signature);
-      std::sort(keys.begin(), keys.end());
-      std::string text;
-      for (const auto &key : keys) {
-        if (!text.empty()) text += ',';
-        text += key.key();
-      }
-      return text;
-    }
+    bool accepts_locked(const ui_selection::signature &signature) const;
+    entry *find(const ui_selection::signature &signature);
+    entry &at(const ui_selection::signature &signature);
+    std::string stored_locked() const;
 
-    void accept(entry &e) {
-      if (!e.accepted || e.provisional) ++counters_[ui_counter::trust_earned];
-      if (!e.accepted) accepted_changed_ = true;
-      e.accepted = true;
-      e.provisional = false;
-    }
-    void revoke(entry &e, std::size_t event) {
-      if (e.accepted) accepted_changed_ = true;
-      e.accepted = e.provisional = false;
-      e.last_testable = e.testable_ms = 0;
-      e.doubt = {};
-      if (event == ui_counter::trust_revoked_exact) e.revoked_by_exact = true;
-      ++counters_[event];
-    }
+    void accept(entry &e);
+    void revoke(entry &e, std::size_t event);
     // A3: a testable sample of a provisional entry counts the time since the
     // entry's previous testable sample, capped at alpha_trust_reconfirm_gap_ms.
     // Nothing else touches the clock, so time without testable samples never
     // counts beyond one capped gap.
-    static void reconfirm_tested(entry &e, std::uint64_t tick_ms) {
-      if (!e.provisional) return;
-      if (e.last_testable && tick_ms > e.last_testable)
-        e.testable_ms += std::min(tick_ms - e.last_testable, alpha_trust_reconfirm_gap_ms);
-      e.last_testable = tick_ms;
-    }
+    static void reconfirm_tested(entry &e, std::uint64_t tick_ms);
     // Revokes a provisional entry whose testable time reached
     // alpha_trust_reconfirm_ms, after the sample had its chance to earn.
-    void lapse_if_due(entry &e) {
-      if (e.provisional && e.testable_ms >= alpha_trust_reconfirm_ms) {
-        e.earned = {};
-        revoke(e, ui_counter::trust_lapsed);
-      }
-    }
+    void lapse_if_due(entry &e);
 
     void observe_locked(const alpha_auto_decision::detection_evidence &evidence, std::uint32_t pixels, std::uint64_t tick_ms,
-        const candidate_signatures &signatures) {
-      using ui_selection::kind;
-      namespace candidate = ui_detection::candidate;
-      const auto offered = evidence.candidates;
-      // V1 as the GPU judged it: the offered alpha candidates outside the
-      // sample's valid bits (decision texel 7 .w).
-      const auto invalid = offered & ui_selection::alpha_bits & ~evidence.valid_bits;
-      // A void sample: an offered declared alpha is V1-invalid, so the
-      // declared-coverage judge of Backbuffer and current alpha is missing.
-      // It voids only those two kinds (voided below); every other source
-      // meets the same judges as on any sample and earns as usual.
-      const bool void_sample = (offered & invalid & ui_selection::declared_alpha_bits) != 0;
-      // A2 judges of this sample: a V2-valid exact change set, and the
-      // coverage of every offered, accepted, V1-valid declared alpha.
-      const bool exact_judge = ui_selection::exact_judge(offered, evidence.valid_bits);
-      std::array<std::uint32_t, 2> declared{};
-      std::size_t declared_count = 0;
-      for (const auto k : {kind::ui_alpha, kind::ui_color})
-        if ((offered & ui_selection::bit(k)) && !(invalid & ui_selection::bit(k)) && accepts_locked(signatures.of(k)))
-          declared[declared_count++] = alpha_counts_of(evidence, k).covered;
-      for (const auto k : ui_selection::draw_order) {
-        if (!ui_selection::alpha_kind(k) || !(offered & ui_selection::bit(k))) continue;
-        // A3: an alpha offered but invalid can neither earn nor be refuted,
-        // so it is not testable and its reconfirm clock does not count.
-        if (invalid & ui_selection::bit(k)) continue;
-        auto &e = at(signatures.of(k));
-        const auto covered = alpha_counts_of(evidence, k).covered;
-        // A2: every judged kind (all alpha but the one-frame-late layer copy,
-        // E2) meets the one-way test, with strong pixels to test; inferred
-        // alpha also the declared alphas' coverage.
-        const bool judged = ui_selection::judged(k);
-        // A void sample leaves Backbuffer and current alpha as they are: no
-        // run advances or restarts, and since it cannot earn them it is not
-        // testable for them either (A3).
-        const bool voided = void_sample && judged && !ui_selection::declared(k);
-        // A3: neither can a sample opaque almost everywhere (a full menu).
-        if (!voided && !ui_selection::full(covered, pixels)) reconfirm_tested(e, tick_ms);
-        const auto [strong, contradicted] = one_way_of(evidence, k);
-        const bool exact_basis = judged && exact_judge && strong != 0;
-        const bool declared_basis = judged && !ui_selection::declared(k) && declared_count != 0;
-        if (exact_basis || declared_basis) {
-          const bool by_exact = exact_basis && ui_selection::one_way_contradicted(strong, contradicted);
-          bool by_declared = declared_basis;
-          for (std::size_t j = 0; j != declared_count; ++j)
-            by_declared = by_declared && ui_selection::coverage_disagrees(declared[j], covered, pixels);
-          if (by_exact || by_declared) {
-            // Not UI coverage: it earns nothing, and repeated contradiction
-            // revokes it.
-            if (!voided) e.earned = {};
-            if (e.accepted && e.doubt.add(tick_ms))
-              revoke(e, by_exact ? ui_counter::trust_revoked_exact : ui_counter::trust_revoked_declared);
-            lapse_if_due(e);
-            continue;
-          }
-        }
-        if (k == kind::ui_layer && ui_selection::selective(covered, pixels) &&
-            ui_selection::layer_uncovered_color(evidence.pre_ui_image_lit, covered, evidence.layer_opaque)) {
-          // A layer whose colour without coverage outnumbers its opaque
-          // pixels is a scene image in the cleared target, not UI: it earns
-          // nothing and restarts the run, as a full sample does.
-          e.earned = {};
-          ++counters_[ui_counter::trust_uncovered_color];
-        } else if (ui_selection::selective(covered, pixels)) {
-          // An inferred run is consecutive and bounded: a selective sample
-          // more than alpha_trust_span_ms after the run's last one restarts it.
-          // A declared alpha the one-way test revoked earns again only from a
-          // sample that judged it (exact_basis, not contradicted: above).
-          if (!voided && (ui_selection::declared(k) ? !e.revoked_by_exact || exact_basis :
-                e.earned.add(tick_ms, covered, alpha_trust_span_ms)))
-            accept(e);
-        } else if (ui_selection::full(covered, pixels)) {
-          if (!voided) e.earned = {};
-        }
-        lapse_if_due(e);
-      }
-      // H1 (d): the offered layer's pre-UI proof, testable while the
-      // presented frame's evidence is valid and visible.
-      if ((offered & candidate::layer) && !evidence.layer_covered) {
-        auto &e = at(ui_selection::pre_ui_key(signatures.of(kind::ui_layer)));
-        if (evidence.scene.valid && evidence.scene.verdict == ui_detection::scene_verdict::visible) reconfirm_tested(e, tick_ms);
-        if (ui_selection::pre_ui_match(evidence.pre_ui_match, evidence.pre_ui_image_lit, pixels) && e.earned.add(tick_ms))
-          accept(e);
-        lapse_if_due(e);
-      }
-      // A HUD-less change set is declared: it earns from its first V2-valid
-      // partial change set, exact or not, since V2's tile test is the proof of
-      // its pixels (a game may tag only HUDLessColor, whose pairs are then all
-      // counted and inexact: Hogwarts Legacy 10-05). Only an exact pair judges
-      // (A2). A3: its testable samples are those that could earn or refute
-      // it, offered V2-valid and not full (a partial or empty change set), as
-      // an alpha's are; a full menu or a mispaired (V2-invalid) sample is not.
-      if (offered & candidate::hudless) {
-        auto &e = at(signatures.of(kind::hudless));
-        // The GPU's V2 verdict (valid bits): a valid set is partial (some
-        // changed pixels, fewer than a quarter), empty or, only from an exact
-        // pair, full (98%), so a valid selective one is the partial change
-        // set (ui_selection::change_set_selective).
-        const bool valid = (evidence.valid_bits & candidate::hudless) != 0u;
-        if (valid && !ui_selection::full(evidence.hudless_changed, pixels)) reconfirm_tested(e, tick_ms);
-        if (valid && ui_selection::selective(evidence.hudless_changed, pixels)) accept(e);
-        lapse_if_due(e);
-      }
-    }
+        const candidate_signatures &signatures);
 
     std::mutex mutex_;
     std::optional<bool> manual_; // Empty in Auto.

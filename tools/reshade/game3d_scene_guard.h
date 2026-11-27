@@ -99,16 +99,7 @@ namespace sunshine_game3d::scene_guard {
     bool held(std::uint64_t now) const { return until && now <= until; }
     // A hit: renews a hold held at tick, else enters one when the previous
     // hit is within hold_ms. Returns whether it entered.
-    bool hit(std::uint64_t tick) {
-      bool entered = false;
-      if (held(tick)) until = tick + ui_detection::scene::hold_ms;
-      else if (last && tick >= last && tick - last <= ui_detection::scene::hold_ms) {
-        until = tick + ui_detection::scene::hold_ms;
-        entered = true;
-      }
-      last = tick;
-      return entered;
-    }
+    bool hit(std::uint64_t tick);
     // Breaks the entry run only; a held hold lasts until it expires.
     void miss() { last = 0; }
     void release() { last = until = 0; }
@@ -143,26 +134,11 @@ namespace sunshine_game3d::scene_guard {
     bool scoped{};
 
     // Only an identity change clears the guard.
-    void enter_scope(std::uint64_t new_epoch, std::uint32_t new_viewport) {
-      if (scoped && new_epoch == epoch && new_viewport == viewport) return;
-      *this = state{};
-      scoped = true;
-      epoch = new_epoch;
-      viewport = new_viewport;
-    }
+    void enter_scope(std::uint64_t new_epoch, std::uint32_t new_viewport);
 
-    bool refuted(const ui_selection::signature &signature) const {
-      for (std::size_t i = 0; i != refuted_count; ++i)
-        if (refutations[i] == signature) return true;
-      return false;
-    }
+    bool refuted(const ui_selection::signature &signature) const;
     // The offered candidate bits whose signatures are refuted.
-    std::uint32_t refuted_bits(std::uint32_t offered, const kind_signatures &signatures) const {
-      std::uint32_t bits = 0;
-      for (const auto k : ui_selection::draw_order)
-        if ((offered & ui_selection::bit(k)) && refuted(signatures[std::size_t(k)])) bits |= ui_selection::bit(k);
-      return bits;
-    }
+    std::uint32_t refuted_bits(std::uint32_t offered, const kind_signatures &signatures) const;
 
     // The per-frame bits of a detection at now: the held verdicts (the
     // pre-UI image's only while the offer's image is the HUD-less image or a
@@ -170,82 +146,18 @@ namespace sunshine_game3d::scene_guard {
     // per_frame_pre_ui_proven while the offered layer is proven
     // (layer_proven, the acceptance ledger's answer for its signature).
     std::uint32_t per_frame(std::uint64_t now, std::uint32_t offered, const kind_signatures &signatures,
-        bool layer_proven) const {
-      const bool layer_offered = (offered & ui_detection::candidate::layer) != 0u;
-      const bool proven = layer_offered && layer_proven;
-      const bool layer_image = ui_selection::pre_ui_image_of(offered) == ui_detection::pre_ui_image::layer;
-      const bool pre_ui_visible = pre_ui.held(now) && (!layer_image || proven);
-      return (hidden.held(now) ? ui_detection::per_frame_scene_hidden : 0u) |
-        (pre_ui_visible ? ui_detection::per_frame_pre_ui_visible : 0u) |
-        (refuted_bits(offered, signatures) << ui_detection::per_frame_refuted_shift) |
-        (proven ? ui_detection::per_frame_pre_ui_proven : 0u);
-    }
+        bool layer_proven) const;
 
     // A sample frame runs the evidence passes only when what they measure is
     // actionable: the latest sample had an acting-capable claim, a hold is
     // active or a proven layer is the offer's pre-UI image (proven_image).
-    bool measure(std::uint64_t now, bool proven_image) const {
-      return gate_open || hidden.held(now) || pre_ui.held(now) || proven_image;
-    }
+    bool measure(std::uint64_t now, bool proven_image) const;
 
-    observation observe(const sample &s, bool actionable, const kind_signatures &signatures) {
-      observation result;
-      // A refuted candidate offered, valid and below 99% opaque (or an exact
-      // pair without a full change set) is an overlay again.
-      for (const auto k : ui_selection::draw_order) {
-        const auto b = ui_selection::bit(k);
-        if (!(s.offered & s.valid_bits & b)) continue;
-        const bool overlay = ui_selection::alpha_kind(k) ?
-          !ui_selection::opaque_full(s.opaque[ui_selection::alpha_index(k)], s.pixels) :
-          (s.offered & ui_detection::candidate::exact) && !(s.claims & b);
-        if (overlay) restore(signatures[std::size_t(k)]);
-      }
-      const auto &presented = s.presented;
-      if (actionable && presented.valid) {
-        if (presented.verdict == scene_verdict::visible) {
-          result.released = hidden.held(s.tick) || pre_ui.held(s.tick) || s.source == 8u;
-          hidden.release();
-          pre_ui.release();
-          for (const auto k : ui_selection::draw_order)
-            if ((s.claims & ui_selection::bit(k)) && refute(signatures[std::size_t(k)])) ++result.refuted;
-        } else if (presented.verdict == scene_verdict::hidden) {
-          result.entered = hidden.hit(s.tick);
-          // The pre-UI image's own evidence, read only for the image the
-          // claim names (a layer's claim exists only while it is proven);
-          // invalid evidence changes nothing.
-          if ((s.claims & ui_detection::claim_pre_ui) && s.pre_ui_image &&
-              s.pre_ui_image == ui_selection::pre_ui_image_of(s.offered) && s.pre_ui.valid) {
-            if (ui_detection::scene_visible(s.pre_ui.d)) pre_ui.hit(s.tick);
-            else pre_ui.release();
-          }
-        } else {
-          hidden.miss();
-          pre_ui.miss();
-        }
-      }
-      gate_open = (s.claims & ui_selection::candidate_bits & ~refuted_bits(s.offered, signatures)) != 0u ||
-        (s.claims & ui_detection::claim_pre_ui) != 0u;
-      return result;
-    }
+    observation observe(const sample &s, bool actionable, const kind_signatures &signatures);
 
   private:
     // Adds a refutation; false when it was already refuted.
-    bool refute(const ui_selection::signature &signature) {
-      if (refuted(signature)) return false;
-      if (refuted_count == max_refuted) {
-        for (std::size_t i = 1; i != max_refuted; ++i) refutations[i - 1] = refutations[i];
-        --refuted_count;
-      }
-      refutations[refuted_count++] = signature;
-      return true;
-    }
-    void restore(const ui_selection::signature &signature) {
-      for (std::size_t i = 0; i != refuted_count; ++i)
-        if (refutations[i] == signature) {
-          for (std::size_t j = i + 1; j != refuted_count; ++j) refutations[j - 1] = refutations[j];
-          --refuted_count;
-          return;
-        }
-    }
+    bool refute(const ui_selection::signature &signature);
+    void restore(const ui_selection::signature &signature);
   };
 }
