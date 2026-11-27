@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <windows.h>
@@ -80,10 +81,38 @@ namespace platf::game3d::win32 {
     return name.size() >= suffix.size() && same_name(name.substr(name.size() - suffix.size()), suffix);
   }
 
-  /** A path as UTF-8 text, as JSON, logs and the Web UI carry it. */
+  namespace detail {
+    [[nodiscard]] inline std::optional<std::string> utf8_text(std::wstring_view text, const DWORD flags) {
+      if (text.empty()) {
+        return std::string {};
+      }
+      const auto size = static_cast<int>(text.size());
+      const auto length = WideCharToMultiByte(CP_UTF8, flags, text.data(), size, nullptr, 0, nullptr, nullptr);
+      if (length <= 0) {
+        return std::nullopt;
+      }
+      std::string result(static_cast<std::size_t>(length), '\0');
+      if (WideCharToMultiByte(CP_UTF8, flags, text.data(), size, result.data(), length, nullptr, nullptr) != length) {
+        return std::nullopt;
+      }
+      return result;
+    }
+  }  // namespace detail
+
+  /**
+   * A path's exact UTF-8 text, or nothing when its name holds UTF-16 that UTF-8 cannot carry
+   * (an unpaired surrogate, which Windows file names allow). Only such text names the path again.
+   */
+  [[nodiscard]] inline std::optional<std::string> exact_utf8(const std::filesystem::path &path) {
+    return detail::utf8_text(path.native(), WC_ERR_INVALID_CHARS);
+  }
+
+  /**
+   * A path as UTF-8 text, as JSON, logs and the Web UI carry it. It never throws: a unit UTF-8
+   * cannot carry reads as U+FFFD, so the text names the path only when exact_utf8 has a value.
+   */
   [[nodiscard]] inline std::string utf8(const std::filesystem::path &path) {
-    const auto value = path.u8string();
-    return {value.begin(), value.end()};
+    return detail::utf8_text(path.native(), 0).value_or(std::string {});
   }
 
   /** The path that UTF-8 text names. */

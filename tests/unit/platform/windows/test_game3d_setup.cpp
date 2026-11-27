@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "src/platform/windows/game3d_setup.h"
+#include "src/platform/windows/game3d_win32_util.h"
 
 #include <algorithm>
 #include <atomic>
@@ -566,5 +567,26 @@ namespace {
     for (const auto &[installation_state, expected] : installation_names) {
       EXPECT_EQ(name(published::installation, installation_state), expected);
     }
+  }
+
+  TEST(Game3DWin32Util, Utf8NeverThrowsAndOnlyExactTextNamesThePathAgain) {
+    namespace win32 = game3d::win32;
+    const fs::path valid {L"C:\\Games\\Caf\u00e9 \u30b2\u30fc\u30e0\\game.exe"};
+    const auto exact = win32::exact_utf8(valid);
+    ASSERT_TRUE(exact);
+    EXPECT_EQ(*exact, win32::utf8(valid));
+    EXPECT_EQ(win32::path_from_utf8(*exact), valid);
+
+    // Windows file names may hold an unpaired surrogate, which UTF-8 cannot carry.
+    const fs::path unpaired {std::wstring {L"C:\\Games\\a"} + static_cast<wchar_t>(0xD800) + L"b.exe"};
+    EXPECT_FALSE(win32::exact_utf8(unpaired));
+    std::string shown;
+    EXPECT_NO_THROW(shown = win32::utf8(unpaired));
+    EXPECT_EQ(shown, "C:\\Games\\a\xEF\xBF\xBD"
+                     "b.exe");
+
+    ASSERT_TRUE(win32::exact_utf8(fs::path {}));
+    EXPECT_TRUE(win32::exact_utf8(fs::path {})->empty());
+    EXPECT_TRUE(win32::utf8(fs::path {}).empty());
   }
 }  // namespace

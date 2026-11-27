@@ -2,8 +2,11 @@
 #include "game3d_win32_util.h"
 #include "game3d_detection.h"
 
+#include "src/logging.h"
+
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstring>
 #include <string_view>
 #include <mutex>
@@ -194,16 +197,23 @@ namespace platf::game3d {
     }
 
     [[nodiscard]] std::string display_name(const std::filesystem::path &executable) {
-      const auto name = executable.stem().wstring();
-      const auto length = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, name.data(), static_cast<int>(name.size()), nullptr, 0, nullptr, nullptr);
-      if (length <= 0) {
-        return "Game";
+      const auto name = win32::exact_utf8(executable.stem());
+      return name && !name->empty() ? *name : "Game";
+    }
+
+    // Setup stores, offers and matches an executable by its UTF-8 path, so a path UTF-8 cannot
+    // carry exactly is never detected. Logged once per process.
+    [[nodiscard]] bool representable(const std::filesystem::path &executable, const std::uint32_t process_id) {
+      if (win32::exact_utf8(executable)) {
+        return true;
       }
-      std::string result(static_cast<std::size_t>(length), '\0');
-      if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, name.data(), static_cast<int>(name.size()), result.data(), length, nullptr, nullptr)) {
-        return "Game";
+      static std::atomic<std::uint32_t> logged_process {0};
+      if (logged_process.exchange(process_id) != process_id) {
+        BOOST_LOG(info) << "Game 3D detection: skipping process " << process_id
+                        << ", whose executable path holds characters UTF-8 cannot carry ("
+                        << win32::utf8(executable) << ')';
       }
-      return result;
+      return false;
     }
   }  // namespace
 
@@ -512,7 +522,8 @@ namespace platf::game3d {
       }
       const auto creation_time = process_creation_time(process.get());
       const auto executable = process_executable(process.get());
-      if (!creation_time || !executable || in_windows_directory(*executable) || excluded_executable(*executable)) {
+      if (!creation_time || !executable || in_windows_directory(*executable) || excluded_executable(*executable) ||
+          !representable(*executable, foreground.process_id)) {
         return std::nullopt;
       }
       // A module snapshot reads the other process's loader data, so the running game is not
