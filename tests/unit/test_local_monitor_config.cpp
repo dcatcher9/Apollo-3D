@@ -148,6 +148,30 @@ TEST(LocalMonitorConfig, RequiresBothExactMonitorSelectionAndEmitterPort) {
   }
 }
 
+TEST(LocalArMode, DefaultsToHostAndReadsTheEarlierSwitch) {
+  std::unordered_map<std::string, std::string> empty;
+  EXPECT_EQ(config::parse_local_ar_mode(empty), "host");
+
+  std::unordered_map<std::string, std::string> earlier {{"sbs_reshade", "enabled"}};
+  EXPECT_EQ(config::parse_local_ar_mode(earlier), "game");
+  EXPECT_TRUE(earlier.empty());
+
+  std::unordered_map<std::string, std::string> earlier_off {{"sbs_reshade", "disabled"}};
+  EXPECT_EQ(config::parse_local_ar_mode(earlier_off), "host");
+}
+
+TEST(LocalArMode, TheChoiceDecidesOverTheEarlierSwitchAndAnInvalidOneFallsBack) {
+  std::unordered_map<std::string, std::string> both {{"sbs_reshade", "enabled"}, {"local_ar_mode", "host"}};
+  EXPECT_EQ(config::parse_local_ar_mode(both), "host");
+  EXPECT_TRUE(both.empty());
+
+  std::unordered_map<std::string, std::string> game {{"local_ar_mode", "game"}};
+  EXPECT_EQ(config::parse_local_ar_mode(game), "game");
+
+  std::unordered_map<std::string, std::string> invalid {{"sbs_reshade", "enabled"}, {"local_ar_mode", "projector"}};
+  EXPECT_EQ(config::parse_local_ar_mode(invalid), "game");
+}
+
 TEST(LocalDisplaySurface, DefaultsToGlassesAndReadsTheEarlierMonitorSwitch) {
   using surface_e = config::video_t::local_surface_e;
   std::unordered_map<std::string, std::string> empty;

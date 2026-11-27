@@ -76,6 +76,7 @@ namespace config {
     {},  // adapter_name
     {},  // output_name
     default_local_ar_virtual_display_only,  // local_ar_virtual_display_only
+    "host",  // local_ar_mode
     {},  // local_monitor
     video_t::local_surface_e::ar_glasses,  // local_surface
 
@@ -676,6 +677,26 @@ namespace config {
     }
   }
 
+  std::string parse_local_ar_mode(std::unordered_map<std::string, std::string> &vars) {
+    // local_ar_mode chooses the glasses' 3D source, as local_monitor_mode does for the shutter
+    // monitor. sbs_reshade is the older switch for it and decides only when local_ar_mode is
+    // absent.
+    bool legacy_game = false;
+    if (const auto legacy = vars.find("sbs_reshade"); legacy != vars.end()) {
+      const auto &text = legacy->second;
+      legacy_game = text == "enabled" || text == "on" || text == "true" || text == "1";
+      vars.erase(legacy);
+    }
+    const std::string fallback = legacy_game ? "game" : "host";
+    std::string mode = fallback;
+    string_f(vars, "local_ar_mode", mode);
+    if (mode != "host" && mode != "game") {
+      BOOST_LOG(warning) << "config: local_ar_mode must be host or game; using "sv << fallback;
+      return fallback;
+    }
+    return mode;
+  }
+
   video_t::local_monitor_t parse_local_monitor_config(std::unordered_map<std::string, std::string> &vars, video_t::local_surface_e *surface) {
     video_t::local_monitor_t result;
     bool valid = true;
@@ -801,6 +822,7 @@ namespace config {
     string_f(vars, "adapter_name", video.adapter_name);
     string_f(vars, "output_name", video.output_name);
     bool_f(vars, "local_ar_virtual_display_only", video.local_ar_virtual_display_only);
+    video.local_ar_mode = parse_local_ar_mode(vars);
 
     video.local_monitor = parse_local_monitor_config(vars, &video.local_surface);
 
@@ -811,7 +833,6 @@ namespace config {
     // evaluator's analysis/geometry keys (profiles, zero plane, subject shaping, adaptive pop,
     // EMA levers, dynamic depth sizing) no longer exist. Reload resets options.
     video.sbs = {};
-    bool_f(vars, "sbs_reshade", video.sbs.reshade);
     double_between_f(vars, "sbs_3d_pop_strength", video.sbs.pop_strength, {0.25, 2.0});
     {
       // Per-application Host 3D subtitle protection. Off for every application by default.

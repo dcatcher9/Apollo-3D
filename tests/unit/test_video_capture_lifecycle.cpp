@@ -259,7 +259,6 @@ TEST(VideoCaptureLifecycleTest, CopiesConfigAndRetainsExactImagesAndWakeDespiteC
   config.framerateX100 = 5994;
   config.sbs_mode = video::SBS_AI;
   config.sbs_config = {
-    .reshade = true,
     .pop_strength = 1.25,
     .max_encode_width = 7680,
   };
@@ -293,7 +292,6 @@ TEST(VideoCaptureLifecycleTest, CopiesConfigAndRetainsExactImagesAndWakeDespiteC
   EXPECT_EQ(actual.videoFormat, expected.videoFormat);
   EXPECT_EQ(actual.dynamicRange, expected.dynamicRange);
   EXPECT_EQ(actual.sbs_mode, expected.sbs_mode);
-  EXPECT_EQ(actual.sbs_config.reshade, expected.sbs_config.reshade);
   EXPECT_EQ(actual.sbs_config.pop_strength, expected.sbs_config.pop_strength);
   EXPECT_EQ(actual.sbs_config.max_encode_width, expected.sbs_config.max_encode_width);
   EXPECT_EQ(actual.encode_wake, expected.encode_wake);

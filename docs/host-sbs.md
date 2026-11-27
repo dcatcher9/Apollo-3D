@@ -11,14 +11,14 @@ conversion uses the same V2 geometry and is described in
 Streamed **Game 3D** receives a [ReShade stereo source](reshade-sbs.md) separately from **Host AI 3D**.
 Game 3D starts with normal mono encoding and enters exact full SBS only after source readiness
 and a confirmed stream transition. Once packed, its unavailable-source fallback duplicates the
-current desktop without resizing the stream. The `sbs_reshade` setting selects this source only
+current desktop without resizing the stream. The `local_ar_mode` setting selects this source only
 for locally connected AR glasses; streamed Host AI 3D always uses Sunshine's AI pipeline. Sunshine
 owns the normal-size virtual display and final presentation or encoding. The ReShade handoff has
 its own source, resource and color contract; the V2 contracts below continue to govern
 Sunshine-generated geometry.
 
 [Local shutter-monitor presentation](sbs-local-monitor.md) selects Host 3D or Game 3D explicitly.
-Host 3D always uses this AI converter, independently of the local-AR `sbs_reshade` setting; Game 3D
+Host 3D always uses this AI converter, independently of the local-AR `local_ar_mode` setting; Game 3D
 uses the existing Game 3D stereo-source path. Its final adapter unpacks the resulting matched SBS
 pair into alternating physical-monitor eye images without changing the geometry contract.
 

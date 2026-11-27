@@ -177,7 +177,9 @@ namespace confighttp {
       // The 3D source of each local surface is switched live next to Start 3D. Write the
       // current choice so a general save cannot bring back the one the form was loaded with.
       input_tree["local_monitor_mode"] = ar_glasses::monitor_source_is_game() ? "game" : "host";
-      input_tree["sbs_reshade"] = ar_glasses::ar_source_is_game() ? "enabled" : "disabled";
+      input_tree["local_ar_mode"] = ar_glasses::ar_source_is_game() ? "game" : "host";
+      // The older name of the glasses' choice; local_ar_mode replaces it.
+      input_tree.erase("sbs_reshade");
       input_tree.erase(std::string {platf::host3d_subtitle_apps::config_key});
       if (const auto subtitle_apps = nlohmann::json::parse(platf::host3d_subtitle_apps::serialize());
           !subtitle_apps.empty()) {

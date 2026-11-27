@@ -878,10 +878,10 @@ Manual setup and presentation requirements:
    Both host and client must support the negotiated Game provider v1 extension. Select HEVC
    or AV1 for 4K per eye and use a client capable of decoding the resulting 7680 × 2160 stream.
 5. For locally connected glasses, retain the usual Sunshine local AR setup and the glasses'
-   hardware 3D display mode. In Sunshine's Web UI, open **Configuration → Essentials**, enable
-   **Use ReShade for local AR 3D**, save and restart Sunshine. The equivalent configuration is
-   `sbs_reshade = enabled`; it defaults to disabled. This setting selects only the local AR
-   provider. Streamed **Host AI 3D** always uses Sunshine's AI conversion.
+   hardware 3D display mode. In Sunshine's Web UI, choose **Game 3D** with the switch beside
+   **Start 3D**; it takes effect at once and is saved as `local_ar_mode = game` (default `host`).
+   This setting selects only the glasses' source. Streamed **Host AI 3D** always uses Sunshine's
+   AI conversion.
 6. In **ReShade → Add-ons → Sunshine 3D**, the **Game 3D** panel keeps **Enable Game 3D**,
    **3D strength**, and **UI protection** in fixed rows above the live diagnostics.
    Strength defaults to **50%**. **Reset** buttons keep their space and are disabled at the

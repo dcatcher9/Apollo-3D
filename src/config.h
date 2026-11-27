@@ -53,6 +53,7 @@ namespace config {
     // Keep a local AR session's private source as the only interactive display while preserving
     // the glasses output required for scanout.
     bool local_ar_virtual_display_only;
+    std::string local_ar_mode = "host";  ///< The glasses' 3D source: host = Host 3D, game = Game 3D stereo.
 
     struct local_monitor_t {
       bool enabled = false;
@@ -82,10 +83,9 @@ namespace config {
     int max_bitrate;  // Maximum bitrate, sets ceiling in kbps for bitrate requested from client
     double minimum_fps_target;  ///< Lowest framerate used when streaming. Range 0-1000; 0 = max(one fifth of the requested rate, 10 FPS). Never above the requested rate.
 
-    // Live Host 3D can receive authored ReShade stereo. Sunshine-generated live/offline geometry
-    // uses the Depth Coordinate V2 pipeline with its fixed calibration.
+    // Sunshine-generated live/offline geometry uses the Depth Coordinate V2 pipeline with its
+    // fixed calibration. A session's Game 3D route is its sbs_mode, not a setting here.
     struct sbs_t {
-      bool reshade = false;  ///< Receive live final SBS from the ReShade add-on; offline conversion remains V2.
       double pop_strength = 1.75;  ///< Literal live V2 stereo strength (0.25-2) and offline conversion base strength.
       int max_encode_width = 8192;  ///< Configured packed Host SBS width cap. Output also respects both runtime NVENC axes (RTX 5080: H.264 4096x4096, HEVC/AV1 8192x8192) with aspect-preserving scaling.
     };
@@ -97,6 +97,8 @@ namespace config {
   // local_display_surface chooses the local surface; the monitor is enabled only when it is chosen
   // and its settings are valid. The effective choice is written to surface when it is given.
   video_t::local_monitor_t parse_local_monitor_config(std::unordered_map<std::string, std::string> &vars, video_t::local_surface_e *surface = nullptr);
+  /** The glasses' saved 3D source, host or game, from local_ar_mode or its older name sbs_reshade. */
+  std::string parse_local_ar_mode(std::unordered_map<std::string, std::string> &vars);
   std::string_view local_surface_name(video_t::local_surface_e surface);
 
   struct audio_t {

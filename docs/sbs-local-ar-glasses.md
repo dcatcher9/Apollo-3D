@@ -46,9 +46,10 @@ Other resolutions are rejected. Resolution alone never identifies a monitor as A
 
 A local surface is only where the picture is shown; each one has its own **3D source**, Host 3D or
 Game 3D, chosen with the switch beside **Start 3D** and changeable while 3D is running. For glasses
-it is saved as `sbs_reshade`.
+it is saved as `local_ar_mode` (`host` or `game`; the older `sbs_reshade = enabled` still reads as
+`game` when `local_ar_mode` is absent).
 
-The default provider is Sunshine's AI renderer. With `sbs_reshade = enabled`, the presenter is
+The default provider is Sunshine's AI renderer. With `local_ar_mode = game`, the presenter is
 started in the Game 3D mode that the shutter monitor and a remote stream use (`SBS_GAME_SBS`):
 it receives the game's final stereo texture, watches Game 3D setup for the display, converts an
 approved 2D text game, and retains the normal 1920x1080 virtual source. The saved switch only

@@ -7503,7 +7503,6 @@ namespace platf::dxgi {
         const auto width = mode == ::video::SBS_AI ? 2 * display->width : display->width;
         const auto height = display->height;
         config::video_t::sbs_t settings;
-        settings.reshade = false;
         // The local presenter's own production RGB converter initialization.
         preparation_fixture_require(
           converter_.init(display, display->adapter.get(), pix_fmt_e::nv12) == 0 &&
@@ -7682,7 +7681,6 @@ namespace platf::dxgi {
         // Only synchronous initialization sees this finite external factory edge. The real
         // Game branch still runs; unsupported transport creates no ReShade receiver/provider.
         config::video_t::sbs_t settings;
-        settings.reshade = false;
         {
           auto *previous = std::exchange(active_model_preparation_watch_probe, &watch_probe_);
           auto restore_watch = util::fail_guard([previous]() { active_model_preparation_watch_probe = previous; });

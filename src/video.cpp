@@ -2490,8 +2490,7 @@ namespace video {
         std::make_shared<safe::event_t<bool>>();
       session_config.sbs_config = config::video.sbs;
       // Remote provider selection is explicit and immutable within this presentation request.
-      // The legacy global ReShade switch continues to configure the independent local AR path.
-      session_config.sbs_config.reshade = is_game_mode(current_sbs_mode);
+      const bool game_provider = is_game_mode(current_sbs_mode);
       session_config.game_source_status_event = is_game_mode(current_sbs_mode) ? game_source_status_event : nullptr;
       session_config.game_source_width = base_width;
       session_config.game_source_height = config.height;
@@ -2535,7 +2534,7 @@ namespace video {
         session_config.width = dimensions.width;
         session_config.height = dimensions.height;
         const std::int64_t packed_width = static_cast<std::int64_t>(base_width) * 2;
-        if (!session_config.sbs_config.reshade && (session_config.width != packed_width || session_config.height != config.height)) {
+        if (!game_provider && (session_config.width != packed_width || session_config.height != config.height)) {
           BOOST_LOG(info) << "Host SBS: requested packed dimensions "sv << packed_width
                           << 'x' << config.height
                           << " exceed the effective encoder limits; capping to "sv
@@ -2566,7 +2565,7 @@ namespace video {
       BOOST_LOG(info) << "Encode session: Host SBS mode "sv
                       << current_sbs_mode << ", strength "sv
                       << session_config.sbs_config.pop_strength
-                      << ", provider '"sv << (session_config.sbs_config.reshade ? "ReShade" : host_sbs_v2_depth_model().name) << "', output "sv
+                      << ", provider '"sv << (game_provider ? "ReShade" : host_sbs_v2_depth_model().name) << "', output "sv
                       << session_config.width << 'x' << session_config.height;
 
       auto recover_failed_sbs_session = [&]() {

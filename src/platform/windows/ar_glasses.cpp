@@ -57,7 +57,7 @@ namespace ar_glasses {
 
     bool ar_uses_game_source() {
       const int switched = ar_source_game.load();
-      return switched < 0 ? config::video.sbs.reshade : switched != 0;
+      return switched < 0 ? config::video.local_ar_mode == "game" : switched != 0;
     }
 
     bool monitor_uses_game_source() {
@@ -1050,7 +1050,7 @@ namespace ar_glasses {
       return true;
     }
     const auto updated = monitor ? replace_config_value(std::move(*contents), "local_monitor_mode", game ? "game" : "host") :
-                                   replace_config_value(std::move(*contents), "sbs_reshade", game ? "enabled" : "disabled");
+                                   replace_config_value(std::move(*contents), "local_ar_mode", game ? "game" : "host");
     if (!write_config_atomically(updated)) {
       BOOST_LOG(warning) << "Could not save the 3D source to the configuration file."sv;
     }
