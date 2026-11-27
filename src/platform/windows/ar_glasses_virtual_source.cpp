@@ -1,3 +1,7 @@
+/**
+ * @file src/platform/windows/ar_glasses_virtual_source.cpp
+ * @brief Resolving the owned SudoVDA source and settling its mode, refresh and color.
+ */
 #include "ar_glasses_virtual_source.h"
 
 #include "ar_glasses.h"

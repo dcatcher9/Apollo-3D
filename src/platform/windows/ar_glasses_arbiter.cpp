@@ -1,3 +1,7 @@
+/**
+ * @file src/platform/windows/ar_glasses_arbiter.cpp
+ * @brief Local and remote virtual-display ownership and the local retirement barrier.
+ */
 #include "ar_glasses_arbiter.h"
 
 #include "ar_glasses_topology_journal.h"

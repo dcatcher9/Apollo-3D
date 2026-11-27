@@ -1,3 +1,7 @@
+/**
+ * @file src/platform/windows/ar_glasses_security.cpp
+ * @brief The desktop guard that returns Monitor 3D to 2D for a lock, sign-in or permission screen.
+ */
 #include "ar_glasses_security.h"
 
 #include "ar_glasses.h"

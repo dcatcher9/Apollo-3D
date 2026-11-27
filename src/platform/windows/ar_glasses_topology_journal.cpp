@@ -1,3 +1,8 @@
+/**
+ * @file src/platform/windows/ar_glasses_topology_journal.cpp
+ * @brief The extended-mode topology journal, the journaled source/sink isolation and recovery of
+ * saved moves.
+ */
 #include "ar_glasses_topology_journal.h"
 
 #include "ar_glasses.h"

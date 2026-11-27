@@ -1,3 +1,8 @@
+/**
+ * @file src/platform/windows/ar_glasses_ccd.cpp
+ * @brief CCD snapshots, source refresh readback, the planned source/sink row and one output's
+ * position restore.
+ */
 #include "ar_glasses_ccd.h"
 
 #include "ar_glasses.h"

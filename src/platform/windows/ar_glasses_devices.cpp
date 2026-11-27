@@ -1,3 +1,8 @@
+/**
+ * @file src/platform/windows/ar_glasses_devices.cpp
+ * @brief The AR device registry: saved monitor decisions, target discovery and the approved-target
+ * selection.
+ */
 #include "ar_glasses_devices.h"
 
 #ifdef SUNSHINE_TESTS

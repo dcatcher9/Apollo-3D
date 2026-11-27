@@ -1,3 +1,8 @@
+/**
+ * @file src/platform/windows/ar_glasses_session.cpp
+ * @brief One local presentation session (local_session_t) and the target contracts its controller
+ * uses.
+ */
 #include "ar_glasses_session.h"
 
 #include "ar_glasses_arbiter.h"

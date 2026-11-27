@@ -1,3 +1,7 @@
+/**
+ * @file src/platform/windows/ar_glasses.cpp
+ * @brief Local 3D requests, the topology controller thread and the remaining public Local AR API.
+ */
 // Boost.Asio in stream.h requires Winsock 2 before the Windows display declarations.
 // clang-format off
 #include <winsock2.h>

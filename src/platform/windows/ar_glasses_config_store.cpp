@@ -1,3 +1,7 @@
+/**
+ * @file src/platform/windows/ar_glasses_config_store.cpp
+ * @brief Strict reads, one-line replacement and atomic writes of the configuration file.
+ */
 #include "ar_glasses_config_store.h"
 
 #include "ar_glasses.h"
