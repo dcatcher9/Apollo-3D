@@ -60,7 +60,9 @@ namespace platf::primary_display::detail {
   std::optional<LONG> subtract(LONG value, LONG offset);
   /** Every position moved so that (x, y) becomes the origin, or nothing on overflow. */
   std::optional<layout_t> translated(const layout_t &layout, LONG x, LONG y);
-  /** The recorded layout for the current outputs. Only the virtual display may be missing. */
+  /** The recorded layout of the current outputs, or nothing when any output other than the
+   * virtual display was added or removed.
+   */
   std::optional<layout_t> restrict_layout(const layout_t &recorded, const layout_t &current, std::wstring_view virtual_identity);
 
   // Snapshots: comparisons and ownership tests of CCD observations.
@@ -71,7 +73,9 @@ namespace platf::primary_display::detail {
   UINT32 source_index(const DISPLAYCONFIG_PATH_INFO &path);
   /** The index of the path with this device path. */
   std::optional<size_t> find_path(const snapshot_t &snapshot, std::wstring_view identity);
-  /** The same outputs with the same source, target-signal and desktop-image modes. */
+  /** The same outputs with the same source, target-signal and desktop-image modes. Positions
+   * are not compared.
+   */
   bool same_modes(const snapshot_t &left, const snapshot_t &right);
   /** The same layout and modes. Two empty snapshots match. */
   bool same_topology(const snapshot_t &a, const snapshot_t &b);
@@ -81,9 +85,11 @@ namespace platf::primary_display::detail {
   bool same_colors(const snapshot_t &left, const snapshot_t &right);
   bool same_layout_and_physical_modes(const snapshot_t &current, const snapshot_t &reference, std::wstring_view virtual_identity);
   bool resume_layout_replaced_by_windows(const snapshot_t &current, const snapshot_t &reference, std::wstring_view virtual_identity);
-  /** Every current output is a reference one with its modes, all moved by one offset. */
+  /** Every current output is a reference one with its modes, all moved by one offset. An empty
+   * observation is owned.
+   */
   bool owned_subset(const snapshot_t &current, const snapshot_t &reference);
-  /** The virtual display at the origin with the preserved outputs packed to its left. */
+  /** The virtual display at the origin with the preserved outputs packed to its left in order. */
   bool owned_exclusive_state(
     const snapshot_t &current,
     std::wstring_view virtual_identity,
@@ -108,12 +114,14 @@ namespace platf::primary_display::detail {
   /** Right of the rightmost desktop output, aligned with its top edge. */
   bool park_beside_desktop(display_spec_t &parked, const std::vector<display_spec_t> &desktop);
   bool park_sink_at_desktop_corner(display_spec_t &sink, const std::vector<display_spec_t> &desktop);
-  /** Move the output at the origin, else the preferred one, else the first, to the origin. */
+  /** Translate the outputs so the one at the origin, else the preferred one, else the first, is
+   * at the origin.
+   */
   bool normalize_monitor_desktop(std::vector<display_spec_t> &wanted, std::wstring_view preferred);
   bool sources_overlap(const display_spec_t &first, const display_spec_t &second);
   bool any_sources_overlap(const std::vector<display_spec_t> &wanted);
   bool sources_edge_connected(const std::vector<display_spec_t> &wanted);
-  /** No two outputs overlap and every one shares an edge path with the first. */
+  /** No two outputs overlap and every one is reachable from the first through shared edges. */
   bool monitor_desktop_connected(const std::vector<display_spec_t> &wanted);
 
 }  // namespace platf::primary_display::detail
