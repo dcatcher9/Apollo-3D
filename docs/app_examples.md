@@ -1,12 +1,12 @@
 # Windows application examples
 
-Applications appear in Moonlight 3D after they are configured on Sunshine 3D's **Applications**
+Applications appear in Moonlight 3D after they are configured on Sunshine 3D's **Library**
 page. This host supports Windows only. Leave fields not shown below empty unless the application
 needs them.
 
 > [!TIP]
 > Use the built-in **Virtual Display** entry for the complete XR desktop workflow. It lets the
-> client negotiate landscape or portrait resolution, refresh rate, HDR, and Raw SBS state without
+> client negotiate landscape or portrait resolution, refresh rate, HDR state, and scale without
 > application-specific display scripts.
 
 ## Desktop
@@ -119,14 +119,9 @@ baseline.
 
 ## Choosing a 3D mode
 
-Application entries launch content; the client chooses how it is presented:
-
-| Client mode | Use it for |
-|---|---|
-| **2D** | Ordinary mono desktop, text, or the lowest processing cost |
-| **Client 3D** | Mono content converted on the Android XR device |
-| **Raw SBS** | Authored packed stereo inside a Virtual Display-backed session |
-| **Host 3D** | Mono content converted by the Windows NVIDIA GPU |
+Application entries launch content; the client chooses how it is presented. The modes (2D, Host
+AI 3D, Client AI 3D, Game 3D and Movie 3D) are described in
+[Conversion and passthrough modes](../README.md#conversion-and-passthrough-modes).
 
 See [Configuration](configuration.md) for host settings and [Host SBS pipeline](host-sbs.md) for
-the Host 3D geometry contract.
+the Host AI 3D geometry contract.
