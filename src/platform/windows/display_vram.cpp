@@ -1963,8 +1963,23 @@ namespace platf::dxgi {
                   if (diagnostics_enabled) {
                     ++matched_stats_same_frame_poll_submissions;
                   }
+                  // A frame this conversion has just retired, and can still draw, has not been
+                  // shown. It is delivered first, and the frame admitted after it gets its one
+                  // immediate query only: waiting for that one too would hold the older frame
+                  // back, and whenever the newer one finished in time the older one would never
+                  // be shown at all, a picture repeated and then a picture lost. Delivered in
+                  // order, every frame is shown once, one frame interval late, until the source
+                  // next pauses and the idle re-check catches up.
+                  const auto *retired_here = completion_finalized_before_admission ? render_attribution() : nullptr;
+                  const bool deliver_retired_first =
+                    retired_here &&
+                    !same_source(retired_here->source_timestamp, current_source_timestamp) &&
+                    retired_here->depth_input_region.same_analysis_domain(matched_candidate_slot->attribution.depth_input_region) &&
+                    retired_here->color_space == matched_candidate_slot->attribution.color_space &&
+                    drawn_source_order.permits(retired_here->frame_id) &&
+                    models::host_sbs_matched_completion_is_current(false, poll_started - retired_here->captured_at);
                   const auto poll_plan = detail::host_sbs_same_frame_poll_plan(
-                    true,
+                    !deliver_retired_first,
                     false,
                     next_encode_target,
                     poll_started,

@@ -2154,7 +2154,11 @@ frame's attribution, including its rolling ROI proof, and draws from the current
 uses the completed physical slot for the exact source and any diagnostic ROI crop. A prior root B
 and a newly submitted C in one conversion share the first poll plan's absolute deadline: C can use
 only its remaining budget, with no second wait cap. An expired or sub-minimum remainder gets one
-nonblocking query. If B remains busy, returns no valid completed frame or reports an unknown
+nonblocking query. So does C whenever the conversion has just retired a B that it can still draw:
+B has not been shown, and it is delivered first. Waiting for C as well would hold B back, and
+whenever C finished in time B would never be shown, which is one picture repeated and then one
+picture lost. Delivered in order every frame is shown once, one frame interval late, until the
+source next pauses and the idle re-check catches up. Such a C counts as cadence-ineligible busy. If B remains busy, returns no valid completed frame or reports an unknown
 identity, the conversion retains its pending owner or fails closed; it cannot admit C using stale proof. Root
 readiness still grants no reusable D3D receipt. The query budget bounds polling, not all completion
 postprocess, draw or encoder time; live onset/removal latency remains separately measured.
