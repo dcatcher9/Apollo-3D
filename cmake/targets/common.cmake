@@ -101,14 +101,18 @@ set_source_files_properties("${CMAKE_SOURCE_DIR}/third-party/ViGEmClient/src/ViG
         COMPILE_FLAGS ${VIGEM_COMPILE_FLAGS})
 
 # src/nvhttp
+set(NVHTTP_SOURCES
+        "${CMAKE_SOURCE_DIR}/src/nvhttp.cpp"
+        "${CMAKE_SOURCE_DIR}/src/nvhttp_client_store.cpp"
+        "${CMAKE_SOURCE_DIR}/src/nvhttp_pairing.cpp")
 string(TOUPPER "x${CMAKE_BUILD_TYPE}" BUILD_TYPE)
 if("${BUILD_TYPE}" STREQUAL "XDEBUG")
     if (NOT BUILD_TESTS)
-        set_source_files_properties("${CMAKE_SOURCE_DIR}/src/nvhttp.cpp"
+        set_source_files_properties(${NVHTTP_SOURCES}
                 DIRECTORY "${CMAKE_SOURCE_DIR}"
                 PROPERTIES COMPILE_FLAGS -O2)
     else()
-        set_source_files_properties("${CMAKE_SOURCE_DIR}/src/nvhttp.cpp"
+        set_source_files_properties(${NVHTTP_SOURCES}
                 DIRECTORY "${CMAKE_SOURCE_DIR}" "${CMAKE_SOURCE_DIR}/tests"
                 PROPERTIES COMPILE_FLAGS -O2)
     endif()

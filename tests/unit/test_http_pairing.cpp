@@ -1,6 +1,6 @@
 /**
  * @file tests/unit/test_http_pairing.cpp
- * @brief Test src/nvhttp.cpp HTTP pairing process
+ * @brief Test src/nvhttp_pairing.cpp HTTP pairing process
  */
 
 #include "../tests_common.h"
