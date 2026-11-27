@@ -45,7 +45,7 @@ namespace confighttp {
     if (status.text_protection) {
       const auto protection = status.text_protection->protection;
       result["text_protection"] = protection == protection_e::game_text ? "game" : protection == protection_e::picture ? "fallback" :
-                                                                                                                          "";
+                                                                                                                         "";
       result["text_protection_detail"] = status.text_protection->detail;
     }
     result["choosable"] = nlohmann::json::array();
