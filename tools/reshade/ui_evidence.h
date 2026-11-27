@@ -97,6 +97,15 @@ namespace sunshine_game3d::ui_evidence {
     !generated_in_window(11, 10, true, 3, 8, 7) && !generated_in_window(11, 10, true, 3, 0, 7) &&
     !generated_in_window(11, 10, false, 3, 7, 7) && !generated_in_window(10, 10, true, 3, 7, 7) &&
     generated_in_window(13, 10, true, 3, 8, 0) && !generated_in_window(14, 10, true, 3, 8, 0));
+  // A capturing render without an available input holds the previous real
+  // decision at a generated Present (generated_in_window). depth_frame,
+  // input_frame: the frame depth presents at this Present and at the last
+  // one that offered a UI tag.
+  constexpr bool generated_hold(bool capturing, bool available, std::uint64_t frame_sequence, std::uint64_t input_present,
+      bool fg_active, std::uint32_t generated_frames, std::uint64_t depth_frame, std::uint64_t input_frame) {
+    return capturing && !available &&
+      generated_in_window(frame_sequence, input_present, fg_active, generated_frames, depth_frame, input_frame);
+  }
   // T1 by snapshot identity. The capture owner offers each kind's newest ready
   // snapshot on every Present while it is recent, and the layer its newest
   // copy, so under frame generation a generated Present re-offers the real
@@ -125,6 +134,13 @@ namespace sunshine_game3d::ui_evidence {
     !same_snapshot_inputs({0, 0, 8, 0, 9}, {0, 0, 7, 0, 9}, true, false) &&
     !same_snapshot_inputs({0, 0, 7, 0, 0}, {0, 0, 7, 0, 9}, true, false) &&
     !same_snapshot_inputs({}, {}, true, false));
+  // A capturing render with available inputs, not already holding, holds the
+  // last detecting Present's decision when it offers exactly its snapshot
+  // identities (same_snapshot_inputs).
+  constexpr bool snapshot_hold(bool capturing, bool available, bool hold_previous, const snapshot_inputs &offered_inputs,
+      const snapshot_inputs &detected_before, bool fg_active, bool own_input) {
+    return capturing && available && !hold_previous && same_snapshot_inputs(offered_inputs, detected_before, fg_active, own_input);
+  }
   // Two captures belong to one tag batch (one game frame) when both were made
   // in the same Present interval. Each source keeps its own Present counter, so
   // compare Presents since each tag rather than the raw counter values.

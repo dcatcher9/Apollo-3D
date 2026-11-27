@@ -537,7 +537,7 @@ namespace sunshine_game3d::ui_input {
     // matter: an accepted, valid one decides the frame itself, and one that is
     // unaccepted or invalid cannot.
     result.detection.hudless_reoffer = hudless_reoffered_now;
-    if (ui_decision::generated_hold(capturing, available, frame_sequence, input_present, fg_active, status.fg.generated_frames,
+    if (ui_evidence::generated_hold(capturing, available, frame_sequence, input_present, fg_active, status.fg.generated_frames,
           depth_frame, input_frame)) {
       if (diagnostic) candidates.push_back({{"source", "none"}, {"held_for_generated_present", true},
         {"association", input_frame ? "depth_window_of_last_ui_tag" : "present_count_after_last_ui_tag"},
@@ -565,7 +565,7 @@ namespace sunshine_game3d::ui_input {
     // inputs the last detecting Present offered shows that real frame and
     // holds its decision, with no tiles, reduce, mask or sample pass. It never
     // advances Present counting's input_present.
-    const bool same_inputs = ui_decision::snapshot_hold(capturing, available, result.detection.hold_previous,
+    const bool same_inputs = ui_evidence::snapshot_hold(capturing, available, result.detection.hold_previous,
       offered_inputs, detected_before, fg_active,
       result.detection.current_color || (result.detection.hudless.handle && !result.detection.hudless_exact));
     if (same_inputs) {
