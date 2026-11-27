@@ -2,6 +2,8 @@
 #include "game3d_win32_util.h"
 #include "game3d_setup.h"
 
+#include "game3d_anti_cheat.h"
+
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/system_tray.h"

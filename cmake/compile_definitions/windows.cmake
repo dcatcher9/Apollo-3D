@@ -62,6 +62,8 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/text_game_pin_controller.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/reshade_bridge.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/reshade_bridge.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/game3d_anti_cheat.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/game3d_anti_cheat.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/game3d_installation.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/game3d_installation.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/game3d_detection.h"

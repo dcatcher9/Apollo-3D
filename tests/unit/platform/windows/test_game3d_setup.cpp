@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+#include "src/platform/windows/game3d_anti_cheat.h"
 #include "src/platform/windows/game3d_setup.h"
 #include "src/platform/windows/game3d_win32_util.h"
 
