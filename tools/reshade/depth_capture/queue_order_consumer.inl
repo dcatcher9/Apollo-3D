@@ -67,7 +67,8 @@ namespace sunshine_streamline::depth_capture {
   }
   bool read_conflicted(std::uint64_t capture) { return native_observer::queue_order_conflicted(capture); }
   bool queue_order_line(std::uint64_t now, char *out, std::size_t size) {
-    static std::uint64_t logged_at{}, logged_total{UINT64_MAX}, checked_at{};
+    // When the next counts line and the next model snapshot are due (zero: now).
+    static std::uint64_t log_due{}, logged_total{UINT64_MAX}, check_due{};
     static bool disabled_logged{};
     if (!native_observer::queue_order_enabled()) {
       if (disabled_logged) return false;
@@ -82,8 +83,7 @@ namespace sunshine_streamline::depth_capture {
     // At most one model snapshot a second, from the present thread (each
     // Present until 10-27, waiting for the order lock if a game thread held
     // it); one the lock is busy for is taken at a later Present.
-    if ((logged_at && now - logged_at < 10000) || (checked_at && now - checked_at < 1000)) return false;
-    checked_at = now;
+    if (now < log_due || !sunshine_diagnostics::claim_line(check_due, now, 1000)) return false;
     const auto s = native_observer::queue_order_counts();
     if (s.busy) return false;
     const auto inflight = order_inflight_reads.load(std::memory_order_relaxed);
@@ -91,8 +91,8 @@ namespace sunshine_streamline::depth_capture {
       s.model.late_conflict + s.model.reset_conflicts + s.model.evicted_reads + s.signal_hooks + s.wait_hooks + s.fence_signal_hooks + s.pending + s.contention;
     for (const auto value : s.refused) total += value;
     for (const auto value : s.model.poisoned) total += value;
-    if (total == logged_total || (logged_at && now - logged_at < 10000)) return false;
-    logged_at = now; logged_total = total;
+    if (total == logged_total) return false;
+    log_due = now + 10000; logged_total = total;
     using sunshine_queue_order::poison;
     using sunshine_queue_order::refusal;
     const auto p = [&](poison why) { return static_cast<unsigned long long>(s.model.poisoned[static_cast<unsigned>(why)]); };

@@ -14,6 +14,7 @@
 #include <new>
 #include <type_traits>
 #include "game3d_clock.h"
+#include "diagnostic_log_gate.h"
 
 namespace sunshine_streamline::native_observer {
   namespace {
@@ -780,7 +781,7 @@ namespace sunshine_streamline::native_observer {
       std::array<report, limit> reports{};
       unsigned count{}, read{};
       // coverage_line's count of written hooks: the last logged, and when.
-      std::uint64_t logged_written{}, logged_at{};
+      std::uint64_t logged_written{}, log_due{};  // log_due: when the next count line is due (zero: now).
       SRWLOCK lock = SRWLOCK_INIT;
     }
     // The module and offset of address ("none" outside every module).
@@ -932,8 +933,8 @@ namespace sunshine_streamline::native_observer {
     const auto value = pending ? uncovered::reports[uncovered::read++] : uncovered::report{};
     bool count_due = false;
     const auto total = written.load(std::memory_order_relaxed);
-    if (!pending && total != uncovered::logged_written && (!uncovered::logged_at || now_ms - uncovered::logged_at >= 10000)) {
-      uncovered::logged_written = total; uncovered::logged_at = now_ms; count_due = true;
+    if (!pending && total != uncovered::logged_written && sunshine_diagnostics::claim_line(uncovered::log_due, now_ms, 10000)) {
+      uncovered::logged_written = total; count_due = true;
     }
     ReleaseSRWLockExclusive(&uncovered::lock);
     if (count_due) {
@@ -1080,7 +1081,7 @@ namespace sunshine_streamline::native_observer {
     invalidation_pending = false;
     forget_enhanced_barrier_use();
     uncovered::reports = {}; uncovered::count = uncovered::read = 0;
-    uncovered::logged_written = uncovered::logged_at = 0;
+    uncovered::logged_written = uncovered::log_due = 0;
     barrier_callback = nullptr; submitted_callback = nullptr; invalidated_callback = nullptr;
     enhanced_textures_callback = nullptr; associate_recording_callback = nullptr; listener_callback = nullptr;
   }

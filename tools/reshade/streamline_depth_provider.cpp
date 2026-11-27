@@ -81,7 +81,7 @@ namespace sunshine_streamline::provider {
       // The required FG scope was silent at the last Present. Its turns are
       // counted; the line comes at most every 5 s, naming the newest state.
       bool fg_scope_silent{};
-      std::uint64_t fg_scope_changes{}, fg_scope_logged_changes{}, fg_scope_line_tick{};
+      std::uint64_t fg_scope_changes{}, fg_scope_logged_changes{}, fg_scope_line_due{};
       // The game's newest FG mode as this runtime's Presents saw it (0 before
       // any options call) and the Presents after its last change
       // (track_fg_switch). A runtime starts from the mode its options stand
@@ -478,12 +478,11 @@ namespace sunshine_streamline::provider {
     if (!policy.require_frame_generation) data->fg_scope_logged_changes = data->fg_scope_changes;
     if (data->fg_scope_changes != data->fg_scope_logged_changes) {
       const auto now = sunshine_game3d::clock::game_now();
-      if (!data->fg_scope_line_tick || now - data->fg_scope_line_tick >= 5000) {
+      if (sunshine_diagnostics::claim_line(data->fg_scope_line_due, now, 5000)) {
         char text[384]{};
         format_frame_generation_scope(text, sizeof(text), fg_silent, policy.viewport, policy.epoch, data->fg_scope_changes);
         sunshine_log::message(reshade::log::level::info, text);
         data->fg_scope_logged_changes = data->fg_scope_changes;
-        data->fg_scope_line_tick = now;
       }
     }
     evidence.fg = fg_source;
