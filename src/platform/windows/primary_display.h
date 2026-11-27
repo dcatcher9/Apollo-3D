@@ -6,11 +6,10 @@
 
 #include "display_config.h"
 #include "exclusive_cursor_clip.h"
-#include "primary_display_topology.h"
+#include "primary_display_journal.h"
 
 #include <chrono>
 #include <cstdint>
-#include <filesystem>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -185,20 +184,6 @@ namespace platf::primary_display {
       std::uint64_t generation_ = 0;
     };
 
-    /** A process-lifetime file handle prevents a second host from recovering a live journal. */
-    class ownership_t {
-    public:
-      ownership_t() = default;
-      ~ownership_t();
-      ownership_t(const ownership_t &) = delete;
-      ownership_t &operator=(const ownership_t &) = delete;
-      bool acquire(const std::filesystem::path &path);
-
-    private:
-      HANDLE handle_ = INVALID_HANDLE_VALUE;
-      std::filesystem::path path_;
-    };
-
     /** Process-local suppression of repeated mode sets which reached the same failed state.
      * The durable journal owns recovery intent; this cache only defers another identical
      * mutation until fresh active, available-target or desired observations change.
@@ -216,28 +201,6 @@ namespace platf::primary_display {
         snapshot_t available;
       };
       std::optional<failure_t> failure_;
-    };
-
-    struct journal_t {
-      std::wstring original_primary;
-      std::wstring promoted_primary;
-      layout_t original;
-      layout_t promoted;
-      bool prepared = false;
-      bool exclusive = false;
-      bool exclusive_started = false;
-      std::optional<snapshot_t> original_topology;
-      std::optional<snapshot_t> before_exclusive;
-      std::optional<snapshot_t> pending_restore;
-      std::vector<std::wstring> exclusive_preserved;
-      std::optional<snapshot_t> exclusive_topology;
-      std::wstring local_sink;
-      bool monitor_replacement = false;
-    };
-
-    struct load_result_t {
-      bool success = false;
-      std::optional<journal_t> journal;
     };
 
     // The transaction adapter is deliberately injectable: tests never change real displays.
@@ -260,9 +223,6 @@ namespace platf::primary_display {
       // the looks follow each other at once, which only an in-memory adapter wants.
       std::function<void(std::chrono::milliseconds)> sleep;
     };
-
-    std::string serialize(const journal_t &journal);
-    std::optional<journal_t> deserialize(std::string_view contents);
 
     class manager_t {
     public:

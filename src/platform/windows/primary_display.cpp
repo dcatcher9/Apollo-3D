@@ -688,37 +688,6 @@ namespace platf::primary_display {
       return generation_;
     }
 
-    ownership_t::~ownership_t() {
-      if (handle_ != INVALID_HANDLE_VALUE) {
-        CloseHandle(handle_);
-      }
-    }
-
-    bool ownership_t::acquire(const std::filesystem::path &path) {
-      std::error_code error;
-      const auto absolute = std::filesystem::absolute(path, error);
-      if (error) {
-        return false;
-      }
-      const auto parent = std::filesystem::weakly_canonical(absolute.parent_path(), error);
-      if (error) {
-        return false;
-      }
-      const auto canonical = parent / absolute.filename();
-      if (handle_ != INVALID_HANDLE_VALUE) {
-        return same_device_path(path_.wstring(), canonical.wstring());
-      }
-      // File sharing is enforced across processes and is not tied to the calling thread.
-      // Windows closes this handle after a crash; delete-on-close leaves no stale lock file.
-      path_ = canonical;
-      const auto handle = CreateFileW(canonical.c_str(), GENERIC_READ | GENERIC_WRITE | DELETE, 0, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
-      if (handle == INVALID_HANDLE_VALUE) {
-        return false;
-      }
-      handle_ = handle;
-      return true;
-    }
-
     bool restore_observation_cache_t::unchanged_failure(
       const snapshot_t &current,
       const snapshot_t &desired,
