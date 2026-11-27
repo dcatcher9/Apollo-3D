@@ -221,18 +221,28 @@ TEST(HostSbsNearIdenticalPolicyTest, CompositeRuntimeUsesSingleHighTensorBoundar
     std::istreambuf_iterator<char> {detector_stream},
     std::istreambuf_iterator<char> {}
   };
+  std::ifstream pool_stream(
+    std::string {SUNSHINE_SOURCE_DIR} + "/src/tensorrt_engine_pool.cpp",
+    std::ios::binary
+  );
+  std::string pool {
+    std::istreambuf_iterator<char> {pool_stream},
+    std::istreambuf_iterator<char> {}
+  };
   ASSERT_FALSE(estimator.empty());
   ASSERT_FALSE(detector.empty());
+  ASSERT_FALSE(pool.empty());
   estimator.erase(
     std::remove(estimator.begin(), estimator.end(), '\r'),
     estimator.end()
   );
+  pool.erase(std::remove(pool.begin(), pool.end(), '\r'), pool.end());
 
-  const auto resolver_begin = estimator.find("static bool resolve_depth_runtime(");
-  const auto resolver_end = estimator.find("static bool publish_serialized_engine(", resolver_begin);
+  const auto resolver_begin = pool.find("bool resolve_depth_runtime(");
+  const auto resolver_end = pool.find("bool publish_serialized_engine(", resolver_begin);
   ASSERT_NE(resolver_begin, std::string::npos);
   ASSERT_NE(resolver_end, std::string::npos);
-  const auto resolver = estimator.substr(resolver_begin, resolver_end - resolver_begin);
+  const auto resolver = pool.substr(resolver_begin, resolver_end - resolver_begin);
   EXPECT_NE(resolver.find("raw_model.name != embedded_dav2.depth_model"), std::string::npos);
   EXPECT_NE(resolver.find("raw_model.url != embedded_dav2.depth_model_url"), std::string::npos);
   EXPECT_NE(resolver.find("prod_zipdepth_convex2x::logical_model"), std::string::npos);

@@ -2217,15 +2217,15 @@ class EvalContractTests(unittest.TestCase):
         with open(os.path.join(repo, "src", "prod_zipdepth_convex2x.h"),
                   encoding="utf-8") as fh:
             composite = fh.read()
-        with open(os.path.join(repo, "src", "video_depth_estimator.cpp"),
+        with open(os.path.join(repo, "src", "tensorrt_engine_pool.cpp"),
                   encoding="utf-8") as fh:
-            estimator = fh.read()
+            engine_pool = fh.read()
         self.assertIn("depth_engine_builder_level = 5", manager)
         self.assertIn("trt-24high-point-l5-v3", composite)
         self.assertIn("prod_zipdepth_convex2x::engine_recipe", manager_impl)
         # The bound still owns source-aspect fitting before the exact 2x high profile is selected.
         self.assertIn("depth_engine_max_dim = 1036", manager)
-        self.assertIn("setBuilderOptimizationLevel(depth_engine_builder_level)", estimator)
+        self.assertIn("setBuilderOptimizationLevel(depth_engine_builder_level)", engine_pool)
 
     def test_live_and_eval_shaders_use_level3_optimization(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
