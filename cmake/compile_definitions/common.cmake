@@ -139,6 +139,8 @@ set(SUNSHINE_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/host_sbs_direct_glyph_engine.h"
         "${CMAKE_SOURCE_DIR}/src/host_sbs_direct_glyph_gpu.cpp"
         "${CMAKE_SOURCE_DIR}/src/host_sbs_direct_glyph_gpu.h"
+        "${CMAKE_SOURCE_DIR}/src/host_sbs_publication_readback.cpp"
+        "${CMAKE_SOURCE_DIR}/src/host_sbs_publication_readback.h"
         "${CMAKE_SOURCE_DIR}/src/live_model_preparation.cpp"
         "${CMAKE_SOURCE_DIR}/src/live_model_preparation.h"
         "${CMAKE_SOURCE_DIR}/src/live_model_preparation_test.h"
