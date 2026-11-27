@@ -601,11 +601,8 @@ LONG applyDisplaySettings(const wchar_t *deviceName, int width, int height, int 
           targetInfo->refreshRate = {(UINT32) refresh_rate, 1000};
 
           // Apply the changes
-          LONG status = SetDisplayConfig(
-            pathCount,
-            pathArray.data(),
-            modeCount,
-            modeArray.data(),
+          LONG status = platf::display_config::set_display_config(
+            topology,
             SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | (persist_settings ? SDC_SAVE_TO_DATABASE : 0)
           );
           if (status != ERROR_SUCCESS) {

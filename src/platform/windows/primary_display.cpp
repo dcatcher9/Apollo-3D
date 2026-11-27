@@ -1105,20 +1105,16 @@ namespace platf::primary_display {
       // their saved modes and currently available source/target identities.
       // This Windows 11 host preserves virtual/physical refresh-rate distinctions in
       // both the query and apply directions, including BOOST_REFRESH_RATE/divider data.
-      constexpr UINT32 flags = SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_VIRTUAL_MODE_AWARE | SDC_VIRTUAL_REFRESH_RATE_AWARE;
-      const auto validate = SetDisplayConfig(static_cast<UINT32>(snapshot.paths.size()), snapshot.paths.data(), static_cast<UINT32>(snapshot.modes.size()), snapshot.modes.data(), flags | SDC_VALIDATE);
-      if (validate != ERROR_SUCCESS) {
-        BOOST_LOG(warning) << "Temporary primary-display configuration is not valid: " << validate;
-        return false;
-      }
+      constexpr UINT32 flags = SDC_VIRTUAL_MODE_AWARE | SDC_VIRTUAL_REFRESH_RATE_AWARE;
       // NO_OPTIMIZATION is valid only for APPLY. A topology-only transition can otherwise
       // leave an already-active physical target's driver mode untouched after monitor wake.
-      const auto apply_flags = flags | SDC_APPLY | (force_driver_mode_set ? SDC_NO_OPTIMIZATION : 0);
-      const auto applied = SetDisplayConfig(static_cast<UINT32>(snapshot.paths.size()), snapshot.paths.data(), static_cast<UINT32>(snapshot.modes.size()), snapshot.modes.data(), apply_flags);
-      if (applied != ERROR_SUCCESS) {
-        BOOST_LOG(warning) << "Temporary primary-display configuration failed: " << applied;
+      const auto result = display_config::validate_and_apply(snapshot, flags, force_driver_mode_set ? SDC_NO_OPTIMIZATION : 0);
+      if (result.state == display_config::supplied_apply_e::invalid) {
+        BOOST_LOG(warning) << "Temporary primary-display configuration is not valid: " << result.status;
+      } else if (result.state == display_config::supplied_apply_e::failed) {
+        BOOST_LOG(warning) << "Temporary primary-display configuration failed: " << result.status;
       }
-      return applied == ERROR_SUCCESS;
+      return result.state == display_config::supplied_apply_e::applied;
     }
 
     std::mutex transaction_mutex;

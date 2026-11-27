@@ -129,14 +129,11 @@ namespace {
       BOOST_LOG(debug) << "test_no_access_to_ccd_api failed to query the display topology.";
       return true;
     }
-    auto &paths = topology.paths;
-    auto &modes = topology.modes;
 
 	// Here we are supplying the retrieved display data back to SetDisplayConfig (with VALIDATE flag only, so that we make no actual changes).
 	// Unless something is really broken on Windows, this call should never fail under normal circumstances - the configuration is 100% correct, since it was
 	// provided by Windows.
-	const UINT32 flags { SDC_VALIDATE | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_VIRTUAL_MODE_AWARE };
-	const LONG result { SetDisplayConfig(paths.size(), paths.data(), modes.size(), modes.data(), flags) };
+	const LONG result = platf::display_config::set_display_config(topology, SDC_VALIDATE | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_VIRTUAL_MODE_AWARE);
 
 	BOOST_LOG(debug) << "test_no_access_to_ccd_api result: " << get_error_string(result);
 	return result == ERROR_ACCESS_DENIED;

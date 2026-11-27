@@ -64,6 +64,34 @@ namespace platf::display_config {
     return terminated_name(source.viewGdiDeviceName);
   }
 
+  LONG set_display_config(topology_t &topology, const UINT32 flags, const set_display_config_t set) {
+    return set(
+      static_cast<UINT32>(topology.paths.size()),
+      topology.paths.data(),
+      static_cast<UINT32>(topology.modes.size()),
+      topology.modes.data(),
+      flags
+    );
+  }
+
+  supplied_apply_result_t validate_and_apply(
+    topology_t &topology,
+    const UINT32 flags,
+    const UINT32 apply_flags,
+    const std::function<bool(topology_t &)> &requery,
+    const set_display_config_t set
+  ) {
+    const UINT32 supplied = flags | SDC_USE_SUPPLIED_DISPLAY_CONFIG;
+    if (const auto status = set_display_config(topology, supplied | SDC_VALIDATE, set); status != ERROR_SUCCESS) {
+      return {supplied_apply_e::invalid, status};
+    }
+    if (requery && !requery(topology)) {
+      return {supplied_apply_e::stale, ERROR_SUCCESS};
+    }
+    const auto status = set_display_config(topology, supplied | SDC_APPLY | apply_flags, set);
+    return {status == ERROR_SUCCESS ? supplied_apply_e::applied : supplied_apply_e::failed, status};
+  }
+
   std::optional<display_target_t> find_display_target(
     const std::vector<DISPLAYCONFIG_PATH_INFO> &paths,
     std::wstring_view device_path,

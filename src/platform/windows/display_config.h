@@ -160,6 +160,39 @@ namespace platf::display_config {
       DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR;
   };
 
+  using set_display_config_t = decltype(&::SetDisplayConfig);
+
+  /** Pass a supplied topology to SetDisplayConfig with the caller's flags. */
+  LONG set_display_config(topology_t &topology, UINT32 flags, set_display_config_t set = &::SetDisplayConfig);
+
+  enum class supplied_apply_e {
+    invalid,  ///< SDC_VALIDATE rejected the supplied topology.
+    stale,  ///< The re-query between validation and apply found a changed desktop.
+    failed,  ///< SDC_APPLY failed.
+    applied,
+  };
+
+  struct supplied_apply_result_t {
+    supplied_apply_e state = supplied_apply_e::invalid;
+    LONG status = ERROR_SUCCESS;  ///< The status of the failed call, or of the apply.
+  };
+
+  /**
+   * Validate a supplied topology, then apply it. SDC_VALIDATE does not reserve the desktop
+   * topology, so a caller that must not overwrite a change made in between passes `requery`. It
+   * runs after a successful validation and either replaces the topology with a fresh observation
+   * carrying the same edit, or returns false when the desktop is no longer the validated one;
+   * nothing is applied then. Both calls use `flags` with SDC_USE_SUPPLIED_DISPLAY_CONFIG, and
+   * `apply_flags` are added to the apply only.
+   */
+  supplied_apply_result_t validate_and_apply(
+    topology_t &topology,
+    UINT32 flags,
+    UINT32 apply_flags = 0,
+    const std::function<bool(topology_t &)> &requery = {},
+    set_display_config_t set = &::SetDisplayConfig
+  );
+
   struct display_target_t {
     LUID adapter_id {};
     UINT32 target_id = 0;

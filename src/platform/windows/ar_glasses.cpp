@@ -2553,54 +2553,40 @@ namespace ar_glasses {
       }
 
       const auto validated_baseline = plan->snapshot;
-      auto &virtual_mode = plan->snapshot.modes[plan->snapshot.sources[plan->virtual_index].mode_index].sourceMode;
-      auto &physical_mode = plan->snapshot.modes[plan->snapshot.sources[plan->physical_index].mode_index].sourceMode;
-      virtual_mode.position.x = requested_layout.virtual_rect.left;
-      virtual_mode.position.y = requested_layout.virtual_rect.top;
-      physical_mode.position.x = requested_layout.physical_rect.left;
-      physical_mode.position.y = requested_layout.physical_rect.top;
+      const auto place_rows = [&](isolation_plan_t &placed) {
+        auto &virtual_mode = placed.snapshot.modes[placed.snapshot.sources[placed.virtual_index].mode_index].sourceMode;
+        auto &physical_mode = placed.snapshot.modes[placed.snapshot.sources[placed.physical_index].mode_index].sourceMode;
+        virtual_mode.position.x = requested_layout.virtual_rect.left;
+        virtual_mode.position.y = requested_layout.virtual_rect.top;
+        physical_mode.position.x = requested_layout.physical_rect.left;
+        physical_mode.position.y = requested_layout.physical_rect.top;
+      };
+      place_rows(*plan);
 
-      const auto validate_status = SetDisplayConfig(
-        (UINT32) plan->snapshot.paths.size(),
-        plan->snapshot.paths.data(),
-        (UINT32) plan->snapshot.modes.size(),
-        plan->snapshot.modes.data(),
-        SDC_VALIDATE | SDC_USE_SUPPLIED_DISPLAY_CONFIG
-      );
-      if (validate_status != ERROR_SUCCESS) {
-        BOOST_LOG(warning) << "Could not validate AR presentation-output isolation: "sv << validate_status;
-        if (!cancel_topology_recovery_move(target_device_path)) {
-          BOOST_LOG(error) << "Could not cancel the failed AR topology transaction; retaining conservative recovery state."sv;
+      // Apply only a semantically identical complete snapshot, re-queried after validation, so a
+      // user change to any active output is never overwritten by the supplied full CCD image.
+      const auto isolation = platf::display_config::validate_and_apply(plan->snapshot, 0, 0, [&](platf::display_config::topology_t &supplied) {
+        auto fresh_plan = build_isolation_plan({}, virtual_identity, target_device_path);
+        if (!fresh_plan || !same_topology_snapshot(validated_baseline, fresh_plan->snapshot) || !same_rect(fresh_plan->layout.virtual_rect, requested_layout.virtual_rect) || !same_rect(fresh_plan->layout.physical_rect, requested_layout.physical_rect)) {
+          return false;
         }
-        return std::nullopt;
-      }
-
-      // SDC_VALIDATE does not reserve the display topology. Re-query after validation and apply
-      // only a semantically identical complete snapshot, so a user change to any active output is
-      // never overwritten by the supplied full CCD image.
-      auto fresh_plan = build_isolation_plan({}, virtual_identity, target_device_path);
-      if (!fresh_plan || !same_topology_snapshot(validated_baseline, fresh_plan->snapshot) || !same_rect(fresh_plan->layout.virtual_rect, requested_layout.virtual_rect) || !same_rect(fresh_plan->layout.physical_rect, requested_layout.physical_rect)) {
+        place_rows(*fresh_plan);
+        supplied = std::move(fresh_plan->snapshot);
+        return true;
+      });
+      if (isolation.state == platf::display_config::supplied_apply_e::stale) {
         BOOST_LOG(info) << "Desktop topology changed after AR isolation validation; deferring the move."sv;
         if (!cancel_topology_recovery_move(target_device_path)) {
           BOOST_LOG(error) << "Could not cancel the stale AR topology transaction."sv;
         }
         return std::nullopt;
       }
-      auto &fresh_virtual_mode = fresh_plan->snapshot.modes[fresh_plan->snapshot.sources[fresh_plan->virtual_index].mode_index].sourceMode;
-      auto &fresh_physical_mode = fresh_plan->snapshot.modes[fresh_plan->snapshot.sources[fresh_plan->physical_index].mode_index].sourceMode;
-      fresh_virtual_mode.position.x = requested_layout.virtual_rect.left;
-      fresh_virtual_mode.position.y = requested_layout.virtual_rect.top;
-      fresh_physical_mode.position.x = requested_layout.physical_rect.left;
-      fresh_physical_mode.position.y = requested_layout.physical_rect.top;
-      const auto status = SetDisplayConfig(
-        (UINT32) fresh_plan->snapshot.paths.size(),
-        fresh_plan->snapshot.paths.data(),
-        (UINT32) fresh_plan->snapshot.modes.size(),
-        fresh_plan->snapshot.modes.data(),
-        SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG
-      );
-      if (status != ERROR_SUCCESS) {
-        BOOST_LOG(warning) << "Could not isolate the AR presentation output: "sv << status;
+      if (isolation.state != platf::display_config::supplied_apply_e::applied) {
+        if (isolation.state == platf::display_config::supplied_apply_e::invalid) {
+          BOOST_LOG(warning) << "Could not validate AR presentation-output isolation: "sv << isolation.status;
+        } else {
+          BOOST_LOG(warning) << "Could not isolate the AR presentation output: "sv << isolation.status;
+        }
         if (!cancel_topology_recovery_move(target_device_path)) {
           BOOST_LOG(error) << "Could not cancel the failed AR topology transaction; retaining conservative recovery state."sv;
         }
@@ -2704,43 +2690,40 @@ namespace ar_glasses {
       source_mode.position.x = original_rect.left;
       source_mode.position.y = original_rect.top;
 
-      const auto validate_status = SetDisplayConfig(
-        (UINT32) snapshot->paths.size(),
-        snapshot->paths.data(),
-        (UINT32) snapshot->modes.size(),
-        snapshot->modes.data(),
-        SDC_VALIDATE | SDC_USE_SUPPLIED_DISPLAY_CONFIG
-      );
-      if (validate_status != ERROR_SUCCESS) {
-        BOOST_LOG(warning) << "Validating the AR display-position restore failed with status "sv
-                           << validate_status << '.';
-        return false;
-      }
-
-      auto fresh_snapshot = query_complete_topology_snapshot();
-      if (!fresh_snapshot || !same_topology_snapshot(validated_baseline, *fresh_snapshot)) {
-        BOOST_LOG(info) << "Desktop topology changed after AR restore validation; preserving the newer layout."sv;
-        return false;
-      }
-      const auto fresh_physical = std::ranges::find_if(fresh_snapshot->sources, [&](const auto &source) {
-        return equal_device_paths(source.device_path, target_device_path);
+      bool fresh_physical_found = true;
+      const auto restore = platf::display_config::validate_and_apply(*snapshot, 0, 0, [&](platf::display_config::topology_t &supplied) {
+        auto fresh_snapshot = query_complete_topology_snapshot();
+        if (!fresh_snapshot || !same_topology_snapshot(validated_baseline, *fresh_snapshot)) {
+          return false;
+        }
+        const auto fresh_physical = std::ranges::find_if(fresh_snapshot->sources, [&](const auto &source) {
+          return equal_device_paths(source.device_path, target_device_path);
+        });
+        if (fresh_physical == fresh_snapshot->sources.end() || source_is_cloned(fresh_snapshot->sources, *fresh_physical)) {
+          fresh_physical_found = false;
+          return false;
+        }
+        auto &fresh_source_mode = fresh_snapshot->modes[fresh_physical->mode_index].sourceMode;
+        fresh_source_mode.position.x = original_rect.left;
+        fresh_source_mode.position.y = original_rect.top;
+        supplied = std::move(*fresh_snapshot);
+        return true;
       });
-      if (fresh_physical == fresh_snapshot->sources.end() || source_is_cloned(fresh_snapshot->sources, *fresh_physical)) {
-        return false;
-      }
-      auto &fresh_source_mode = fresh_snapshot->modes[fresh_physical->mode_index].sourceMode;
-      fresh_source_mode.position.x = original_rect.left;
-      fresh_source_mode.position.y = original_rect.top;
-      const auto status = SetDisplayConfig(
-        (UINT32) fresh_snapshot->paths.size(),
-        fresh_snapshot->paths.data(),
-        (UINT32) fresh_snapshot->modes.size(),
-        fresh_snapshot->modes.data(),
-        SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG
-      );
-      if (status != ERROR_SUCCESS) {
-        BOOST_LOG(warning) << "Restoring the AR display position failed with status "sv << status << '.';
-        return false;
+      switch (restore.state) {
+        case platf::display_config::supplied_apply_e::invalid:
+          BOOST_LOG(warning) << "Validating the AR display-position restore failed with status "sv
+                             << restore.status << '.';
+          return false;
+        case platf::display_config::supplied_apply_e::stale:
+          if (fresh_physical_found) {
+            BOOST_LOG(info) << "Desktop topology changed after AR restore validation; preserving the newer layout."sv;
+          }
+          return false;
+        case platf::display_config::supplied_apply_e::failed:
+          BOOST_LOG(warning) << "Restoring the AR display position failed with status "sv << restore.status << '.';
+          return false;
+        case platf::display_config::supplied_apply_e::applied:
+          break;
       }
       for (int attempt = 0; attempt < 10; ++attempt) {
         if (const auto actual = find_target(target_device_path)) {

@@ -88,6 +88,19 @@ namespace {
     return ERROR_SUCCESS;
   }
 
+  struct fake_set_config_state_t {
+    std::vector<UINT32> flags;
+    std::vector<UINT32> path_counts;
+    LONG validate_status = ERROR_SUCCESS;
+    LONG apply_status = ERROR_SUCCESS;
+  } fake_set_config_state;
+
+  LONG WINAPI fake_set_display_config(UINT32 path_count, DISPLAYCONFIG_PATH_INFO *, UINT32, DISPLAYCONFIG_MODE_INFO *, UINT32 flags) {
+    fake_set_config_state.flags.push_back(flags);
+    fake_set_config_state.path_counts.push_back(path_count);
+    return flags & SDC_VALIDATE ? fake_set_config_state.validate_status : fake_set_config_state.apply_status;
+  }
+
   struct fake_query_state_t {
     unsigned int size_calls = 0;
     unsigned int query_calls = 0;
@@ -300,6 +313,59 @@ TEST(DisplayConfigNamedTopology, ANameWithoutItsTerminatorIsAFailedLookup) {
   EXPECT_FALSE(name);
   EXPECT_EQ(name.status, ERROR_INVALID_DATA);
   EXPECT_TRUE(name.device_path.empty());
+}
+
+TEST(DisplayConfigSuppliedApply, ValidatesThenAppliesWithTheCallersFlags) {
+  using namespace platf::display_config;
+  fake_set_config_state = {};
+  topology_t topology;
+  topology.paths.resize(2);
+  const auto result = validate_and_apply(topology, SDC_VIRTUAL_MODE_AWARE, SDC_NO_OPTIMIZATION, {}, fake_set_display_config);
+  EXPECT_EQ(result.state, supplied_apply_e::applied);
+  EXPECT_EQ(result.status, ERROR_SUCCESS);
+  EXPECT_EQ(fake_set_config_state.flags, (std::vector<UINT32> {
+    SDC_VALIDATE | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_VIRTUAL_MODE_AWARE,
+    SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_VIRTUAL_MODE_AWARE | SDC_NO_OPTIMIZATION,
+  }));
+  EXPECT_EQ(fake_set_config_state.path_counts, (std::vector<UINT32> {2, 2}));
+}
+
+TEST(DisplayConfigSuppliedApply, AnInvalidTopologyIsNeitherRequeriedNorApplied) {
+  using namespace platf::display_config;
+  fake_set_config_state = {};
+  fake_set_config_state.validate_status = ERROR_INVALID_PARAMETER;
+  topology_t topology;
+  bool requeried = false;
+  const auto result = validate_and_apply(topology, 0, 0, [&](topology_t &) {
+    requeried = true;
+    return true;
+  }, fake_set_display_config);
+  EXPECT_EQ(result.state, supplied_apply_e::invalid);
+  EXPECT_EQ(result.status, ERROR_INVALID_PARAMETER);
+  EXPECT_FALSE(requeried);
+  EXPECT_EQ(fake_set_config_state.flags.size(), 1u);
+}
+
+TEST(DisplayConfigSuppliedApply, TheRequeryReplacesTheTopologyOrStopsTheApply) {
+  using namespace platf::display_config;
+  fake_set_config_state = {};
+  topology_t topology;
+  topology.paths.resize(1);
+  const auto stale = validate_and_apply(topology, 0, 0, [](topology_t &) {
+    return false;
+  }, fake_set_display_config);
+  EXPECT_EQ(stale.state, supplied_apply_e::stale);
+  EXPECT_EQ(fake_set_config_state.flags.size(), 1u);
+
+  fake_set_config_state = {};
+  fake_set_config_state.apply_status = ERROR_GEN_FAILURE;
+  const auto failed = validate_and_apply(topology, 0, 0, [](topology_t &fresh) {
+    fresh.paths.resize(3);
+    return true;
+  }, fake_set_display_config);
+  EXPECT_EQ(failed.state, supplied_apply_e::failed);
+  EXPECT_EQ(failed.status, ERROR_GEN_FAILURE);
+  EXPECT_EQ(fake_set_config_state.path_counts, (std::vector<UINT32> {1, 3}));
 }
 
 TEST(DisplayConfigQueryTest, RetriesSizeAndDataRacesWithBoundedBackoff) {
