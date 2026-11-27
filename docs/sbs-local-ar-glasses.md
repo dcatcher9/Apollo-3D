@@ -87,6 +87,33 @@ recorded display identities, makes the same virtual source primary again, disabl
 and refreshes cursor confinement without recreating the virtual desktop. GDI display names are
 resolved again after promotion before any source mode changes.
 
+### Session states
+
+The topology controller thread owns one session at a time and keeps it in one of four phases:
+
+- **none**: there is no session.
+- **active**: a presenter was started for the applied display generation. It may have stopped on
+  its own since, which the controller reads from the session.
+- **paused**: the controller stopped the presenter for a display transition. The virtual desktop
+  stays attached, and the next stable display generation restarts presentation in place.
+- **retained**: presentation is no longer requested (a stop request or off-head) or the glasses'
+  display has gone. The desktop is restored, or its restoration is retried every 2 s, and the
+  source is kept until `session_resume_grace` ends. A retained session resumes only after its
+  restoration has completed.
+
+A new session starts active. Pauses and in-place restarts move it between active and paused; an
+inactive active or paused session becomes retained; resume returns it to active; teardown, grace
+expiry, a replacement display, a lost virtual desktop, or a remote launch return it to none. Each
+start, in-place restart, and resume begins a new presenter generation. Sustained scanout (60 frames
+presented in one presenter attempt) of the current generation resets the failure backoff once.
+That also holds while the generation is paused and not yet due to restart, because pausing keeps
+its frame count.
+
+State with other owners stays outside these phases: the presenter thread's running and failure
+flags, the start and stop requests from the web UI, tray, and shortcuts, local display ownership
+shared with remote launches, the request edges from wear and connection observations, the retry
+schedule, and the deferral while a remote session owns the display.
+
 ### Color settling
 
 One rule settles every Advanced Color change in a local session, on the private source and when

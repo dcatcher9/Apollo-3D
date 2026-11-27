@@ -1147,6 +1147,112 @@ TEST(ArGlassesSessionRequest, SensorRecoveryWithoutDisplayDisconnectDoesNotCreat
   EXPECT_FALSE(request.fresh());
 }
 
+namespace {
+  using lifecycle_t = ar_glasses::detail::local_session_lifecycle_t;
+  using lifecycle_phase_e = lifecycle_t::phase_e;
+  constexpr lifecycle_t::clock_t::time_point lifecycle_origin {};
+}  // namespace
+
+TEST(LocalSessionLifecycle, StartsActiveWithAnUnconfirmedPresenterGeneration) {
+  lifecycle_t lifecycle;
+  EXPECT_EQ(lifecycle.phase(), lifecycle_phase_e::none);
+  lifecycle.start();
+  EXPECT_EQ(lifecycle.phase(), lifecycle_phase_e::active);
+  EXPECT_FALSE(lifecycle.stability_confirmed());
+  EXPECT_FALSE(lifecycle.desktop_restored());
+  EXPECT_FALSE(lifecycle.resume_expired(lifecycle_origin + 24h));
+}
+
+TEST(LocalSessionLifecycle, APausedGenerationCanStillConfirmStabilityUntilItRestarts) {
+  lifecycle_t lifecycle;
+  lifecycle.start();
+  lifecycle.pause();
+  EXPECT_EQ(lifecycle.phase(), lifecycle_phase_e::paused);
+  // A presenter paused before the controller saw its sustained scanout keeps that proof.
+  lifecycle.confirm_stability();
+  EXPECT_EQ(lifecycle.phase(), lifecycle_phase_e::paused);
+  EXPECT_TRUE(lifecycle.stability_confirmed());
+  lifecycle.pause();
+  EXPECT_TRUE(lifecycle.stability_confirmed());
+  lifecycle.restart();
+  EXPECT_EQ(lifecycle.phase(), lifecycle_phase_e::active);
+  EXPECT_FALSE(lifecycle.stability_confirmed());
+}
+
+TEST(LocalSessionLifecycle, PresenterTransitionsChangeNothingWithoutAnAttachedSession) {
+  lifecycle_t none;
+  none.pause();
+  none.restart();
+  none.confirm_stability();
+  none.restoration_attempted(true);
+  none.resume();
+  EXPECT_EQ(none.phase(), lifecycle_phase_e::none);
+  EXPECT_FALSE(none.stability_confirmed());
+  EXPECT_FALSE(none.desktop_restored());
+
+  lifecycle_t retained;
+  retained.start();
+  retained.suspend(lifecycle_origin, 10s, false);
+  retained.pause();
+  retained.restart();
+  retained.confirm_stability();
+  EXPECT_EQ(retained.phase(), lifecycle_phase_e::retained);
+  EXPECT_FALSE(retained.stability_confirmed());
+}
+
+TEST(LocalSessionLifecycle, ARetainedSessionKeepsOneGraceAndTracksItsDesktopRestoration) {
+  for (const auto from_paused : {false, true}) {
+    lifecycle_t lifecycle;
+    lifecycle.start();
+    if (from_paused) {
+      lifecycle.pause();
+    }
+    lifecycle.suspend(lifecycle_origin, 10s, false);
+    EXPECT_EQ(lifecycle.phase(), lifecycle_phase_e::retained);
+    EXPECT_FALSE(lifecycle.paused());
+    EXPECT_FALSE(lifecycle.desktop_restored());
+    lifecycle.restoration_attempted(false);
+    EXPECT_FALSE(lifecycle.desktop_restored());
+    lifecycle.restoration_attempted(true);
+    EXPECT_TRUE(lifecycle.desktop_restored());
+    // Another inactive observation neither renews the grace nor forgets the restoration.
+    lifecycle.suspend(lifecycle_origin + 5s, 10s, false);
+    EXPECT_TRUE(lifecycle.desktop_restored());
+    EXPECT_FALSE(lifecycle.resume_expired(lifecycle_origin + 9s));
+    EXPECT_TRUE(lifecycle.resume_expired(lifecycle_origin + 10s));
+  }
+}
+
+TEST(LocalSessionLifecycle, ResumeStartsANewPresenterGenerationWithoutAGrace) {
+  lifecycle_t lifecycle;
+  lifecycle.start();
+  lifecycle.confirm_stability();
+  lifecycle.suspend(lifecycle_origin, 10s, true);
+  lifecycle.resume();
+  EXPECT_EQ(lifecycle.phase(), lifecycle_phase_e::active);
+  EXPECT_FALSE(lifecycle.stability_confirmed());
+  EXPECT_FALSE(lifecycle.desktop_restored());
+  EXPECT_FALSE(lifecycle.resume_expired(lifecycle_origin + 24h));
+}
+
+TEST(LocalSessionLifecycle, StopEndsEveryPhase) {
+  for (int phase = 0; phase < 3; ++phase) {
+    lifecycle_t lifecycle;
+    lifecycle.start();
+    lifecycle.confirm_stability();
+    if (phase == 1) {
+      lifecycle.pause();
+    } else if (phase == 2) {
+      lifecycle.suspend(lifecycle_origin, 10s, true);
+    }
+    lifecycle.stop();
+    EXPECT_EQ(lifecycle.phase(), lifecycle_phase_e::none);
+    EXPECT_FALSE(lifecycle.stability_confirmed());
+    EXPECT_FALSE(lifecycle.desktop_restored());
+    EXPECT_FALSE(lifecycle.resume_expired(lifecycle_origin + 24h));
+  }
+}
+
 class ArGlassesWearActivation: public testing::Test {
 protected:
   using policy_t = ar_glasses::detail::local_session_activation_t;

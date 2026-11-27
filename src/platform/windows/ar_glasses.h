@@ -2,6 +2,7 @@
 
 #include "rayneo_wear_monitor.h"
 #include "src/platform/common.h"
+#include "src/session_resume_lifecycle.h"
 
 #include <algorithm>
 #include <chrono>
@@ -178,6 +179,153 @@ namespace ar_glasses {
       bool requested_ = false;
       bool fresh_ = false;
       bool reconnect_pending_ = false;
+    };
+
+    /**
+     * The controller's view of its one local session. Only the topology controller thread reads
+     * or changes it, and every change is one of the named transitions below:
+     *
+     *     none --start--> active --pause--> paused --restart--> active
+     *     active or paused --suspend--> retained --resume--> active
+     *     any phase --stop--> none
+     *
+     * - none: no session exists.
+     * - active: a presenter was started for the applied display generation. It may have stopped
+     *   on its own since; the controller reads that from the session, whose presenter thread
+     *   owns it.
+     * - paused: the controller stopped the presenter for a display transition. The virtual
+     *   desktop stays attached and the next stable display generation restarts presentation in
+     *   place.
+     * - retained: presentation is no longer requested (a stop request or off-head) or the display
+     *   has gone. The desktop is restored, or its restoration is still being retried, and the
+     *   source is kept for resume until the shared resume grace ends. desktop_restored() means
+     *   something only here.
+     *
+     * Stability belongs to the presenter generation started last (start, restart or resume), not
+     * to the phase. A paused generation that showed sustained scanout before it was paused can
+     * still confirm stability and reset the failure backoff, because pausing keeps its frame
+     * count. A transition from a phase it does not start from changes nothing.
+     *
+     * State with other owners stays outside this class: the presenter's running and failed flags
+     * (presenter thread), the start requests and monitor activity (web UI, shortcut and presenter
+     * threads), local ownership (ownership_mutex, shared with remote launches), request edges
+     * (local_session_request_t), and the controller's own retry timers, remote deferral and
+     * observation tracking, none of which depends on the phase.
+     */
+    class local_session_lifecycle_t {
+    public:
+      using clock_t = std::chrono::steady_clock;
+
+      enum class phase_e {
+        none,
+        active,
+        paused,
+        retained,
+      };
+
+      [[nodiscard]] phase_e phase() const {
+        return phase_;
+      }
+
+      [[nodiscard]] bool active() const {
+        return phase_ == phase_e::active;
+      }
+
+      [[nodiscard]] bool paused() const {
+        return phase_ == phase_e::paused;
+      }
+
+      [[nodiscard]] bool retained() const {
+        return phase_ == phase_e::retained;
+      }
+
+      /** Whether a retained session's desktop restoration has completed, so it may resume. */
+      [[nodiscard]] bool desktop_restored() const {
+        return retained() && desktop_restored_;
+      }
+
+      /** Whether the presenter generation started last has shown sustained scanout. */
+      [[nodiscard]] bool stability_confirmed() const {
+        return phase_ != phase_e::none && stability_confirmed_;
+      }
+
+      [[nodiscard]] bool resume_expired(clock_t::time_point now) const {
+        return retained() && resume_.expired(now);
+      }
+
+      /** A new session was admitted and its presenter started. It replaces any earlier state. */
+      void start() {
+        begin_presenter_generation();
+        resume_.activate();
+      }
+
+      /** The controller stopped the presenter for a display transition. */
+      void pause() {
+        if (active() || paused()) {
+          phase_ = phase_e::paused;
+        }
+      }
+
+      /** Presentation restarted in place on the attached desktop: a new presenter generation. */
+      void restart() {
+        if (active() || paused()) {
+          begin_presenter_generation();
+        }
+      }
+
+      /** The current presenter generation showed sustained scanout, paused or not. */
+      void confirm_stability() {
+        if (active() || paused()) {
+          stability_confirmed_ = true;
+        }
+      }
+
+      /** Presentation became inactive. The resume grace starts at `now`; repeated retained
+       * observations never renew it.
+       */
+      void suspend(clock_t::time_point now, clock_t::duration grace, bool desktop_restored) {
+        if (active() || paused()) {
+          phase_ = phase_e::retained;
+          desktop_restored_ = desktop_restored;
+          resume_.disconnect(now, grace);
+        }
+      }
+
+      /** A retained session tried to restore its desktop again, or a failed resume restored it. */
+      void restoration_attempted(bool desktop_restored) {
+        if (retained()) {
+          desktop_restored_ = desktop_restored;
+        }
+      }
+
+      /** A retained session reactivated its source and started a new presenter generation. */
+      void resume() {
+        if (retained()) {
+          begin_presenter_generation();
+          resume_.activate();
+        }
+      }
+
+      /** The session is gone: removed, retired after its grace, or replaced. */
+      void stop() {
+        phase_ = phase_e::none;
+        desktop_restored_ = false;
+        stability_confirmed_ = false;
+        resume_.clear();
+      }
+
+    private:
+      void begin_presenter_generation() {
+        phase_ = phase_e::active;
+        desktop_restored_ = false;
+        stability_confirmed_ = false;
+      }
+
+      phase_e phase_ = phase_e::none;
+      // The shared retention deadline; its phase mirrors this class's.
+      session_lifecycle::resume_state_t resume_;
+      bool desktop_restored_ = false;
+      bool stability_confirmed_ = false;
     };
 
     /** Remote ownership lasts for the configured client-connect window plus scheduling grace. */
