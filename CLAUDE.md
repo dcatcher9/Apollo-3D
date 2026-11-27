@@ -148,8 +148,10 @@ Use a scoped localhost HTTP server for rendered testing. Do not ask browser auto
 
 ## Code layout
 
-- Streaming data planes: `src/stream.cpp`, `src/rtsp.cpp`, `src/video.cpp`, `src/audio.cpp`, and
-  `src/input.cpp`.
+- Streaming data planes: `src/stream.cpp` (sessions and capture threads) with
+  `src/stream_wire.cpp`, `src/stream_control.cpp` (ENet control), `src/stream_live_mode.cpp`,
+  `src/stream_media.cpp` (FEC and UDP senders) and `src/stream_platform_lifecycle.cpp`;
+  `src/rtsp.cpp`, `src/video.cpp`, `src/audio.cpp`, and `src/input.cpp`.
 - HTTP, pairing, and configuration: `src/confighttp.cpp` (Web UI route table) with one
   `src/confighttp_*.cpp` per route domain and shared helpers in `src/confighttp_common.*`;
   `src/nvhttp.cpp` (GameStream endpoints) with `src/nvhttp_pairing.cpp` and
@@ -157,16 +159,23 @@ Use a scoped localhost HTTP server for rendered testing. Do not ask browser auto
 - NVIDIA encoding: `src/nvenc/`.
 - App library (`apps.json` parsing, validation and migration): `src/apps_store.cpp`.
 - App and display lifecycle: `src/process.cpp`, `src/virtual_display_lifecycle.cpp`,
-  `src/display_device.cpp`, `src/platform/windows/virtual_display.cpp`, and the primary-display
+  `src/display_device.cpp`, `src/platform/windows/virtual_display*.cpp` (modes, HDR and desktop
+  refresh rates; detach planning) with `sudovda_driver.cpp`, and the primary-display
   transaction in `src/platform/windows/primary_display*.cpp` (entry points, topology solver,
   policy manager, Win32 adapter, and recovery journal).
 - Convert Video: `src/offline_sbs_job*.cpp` (job manager, its filesystem access, and worker
   supervision) and `src/offline_sbs_worker*.cpp` (worker entry, I/O, FFprobe, and FFmpeg).
 - Web UI pages: `src_assets/common/assets/web/*.html` entries; Library, Devices, and Convert Video
   mount `AppsPage.vue`, `PinPage.vue`, and `OfflineConversionPage.vue`.
-- Windows capture, input, audio, local AR, and virtual display: `src/platform/windows/`.
-- Host SBS model, state, shaders, and harness: `src/video_depth_estimator.*`,
-  `src_assets/windows/assets/shaders/directx/`, and `src/sbs_bench_harness.*`.
+- Windows capture, input, audio, local AR, and virtual display: `src/platform/windows/`; process
+  launch, user tokens and scheduling in `process_launch.cpp`, `user_token.cpp`,
+  `explorer_restart.cpp`, `network_win32.cpp` and `scheduling_win32.cpp` (shared `misc.h`); Local
+  AR in `ar_glasses*.cpp`; the local presenter in `local_presenter.cpp`; Dump 3D in
+  `sbs_debug_dump*.cpp`.
+- Host SBS model, state, shaders, and harness: `src/video_depth_estimator.*` with
+  `src/tensorrt_engine_pool.*`, `src/host_sbs_direct_glyph_*`, `src/host_sbs_publication_readback.*`
+  and `src/host_sbs_depth_gpu_timing.*`; `src_assets/windows/assets/shaders/directx/`, and
+  `src/sbs_bench_harness.*`.
 
 There is no non-Windows source; CMake rejects non-Windows builds. Vendored dependencies are
 submodules under `third-party/`; clone recursively.

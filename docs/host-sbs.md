@@ -2285,7 +2285,7 @@ Offsets 44..47 and 64..75 are reserved and always zero. Validity bits 3, 8 and 9
 bits 4, 5 and 8 are reserved and never set; protocol 13 clients still parse those offsets and
 bits. Runtime bit 0 (`profile_initialized`) is set once depth is ready.
 
-Bytes 0â€“87 retain the health/configuration fields serialized by `stream.cpp`. The performance
+Bytes 0â€“87 retain the health/configuration fields serialized by `stream_wire.cpp`. The performance
 fields are:
 
 | Offset | Value |
