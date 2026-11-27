@@ -205,7 +205,7 @@ TEST(WebUiDesign, EveryApolloVariableUseHasADeclaration) {
 
 TEST(WebUiDesign, PageChromeUsesSemanticColorTypeAndRadiusRoles) {
   const std::map<std::string, std::set<std::string>> allowed_artwork_colors {
-    {"apps.html", {"#111", "#fff"}},
+    {"public/assets/css/apps.css", {"#111", "#fff"}},
     {"pin.html", {"#fff"}},  // QR code quiet zone.
     {"troubleshooting.html", {"#10141b", "#d9e1ee"}},  // Log terminal.
   };
@@ -214,11 +214,11 @@ TEST(WebUiDesign, PageChromeUsesSemanticColorTypeAndRadiusRoles) {
   static const std::regex radius_pattern(R"(border-radius\s*:\s*([^;]+);)");
 
   for (const auto &path : styled_sources()) {
-    if (path.extension() == ".css") {
+    const auto relative = fs::relative(path, web_root).generic_string();
+    if (relative == "public/assets/css/apollo.css") {
       continue;  // The central token layer owns the literal declarations.
     }
 
-    const auto relative = fs::relative(path, web_root).generic_string();
     for (const auto &style : style_blocks(path)) {
       for (std::sregex_iterator it(style.begin(), style.end(), color_pattern), end;
            it != end;
@@ -235,7 +235,7 @@ TEST(WebUiDesign, PageChromeUsesSemanticColorTypeAndRadiusRoles) {
            ++it) {
         const auto value = (*it)[1].str();
         const bool artwork_scale =
-          relative == "apps.html" && value.starts_with("clamp(");
+          relative == "public/assets/css/apps.css" && value.starts_with("clamp(");
         EXPECT_TRUE(value.find("var(--apollo-text-") != std::string::npos || artwork_scale)
           << relative << " introduces a raw type step: " << value;
       }
