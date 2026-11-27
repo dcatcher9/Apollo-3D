@@ -93,6 +93,8 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_wgc.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/foreground_window_region.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/foreground_window_region.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/host_sbs_authority_tracker.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/host_sbs_authority_tracker.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/host_sbs_pipeline.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/host_sbs_pipeline.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/host_sbs_v2_renderer.h"

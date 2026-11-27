@@ -791,9 +791,9 @@ for the name.
 | `detail::classify()` in [foreground_window_region.cpp](../src/platform/windows/foreground_window_region.cpp) | fail-closed foreground root/client admission policy |
 | `continuity_tracker_t::update()` and `usable_for_content()` in [foreground_window_region.cpp](../src/platform/windows/foreground_window_region.cpp) | exact-geometry continuity and content-time authorization |
 | `map_to_capture()` in [foreground_window_region.cpp](../src/platform/windows/foreground_window_region.cpp) | same-output raw-screen-coordinate mapping without partial clipping |
-| `matched_frame_attribution_t::window_region` in [display_vram.cpp](../src/platform/windows/display_vram.cpp) | matched color slot owns optional generic window-region provenance |
-| `capture_browser_window_region()` in [display_vram.cpp](../src/platform/windows/display_vram.cpp) | causally-prior Chromium geometry is validated and bound to the matched frame |
-| `capture_foreground_window_region()` in [display_vram.cpp](../src/platform/windows/display_vram.cpp) | lower-priority foreground-client capture and mapping |
+| `host_sbs_region_attribution_t::window_region` in [host_sbs_authority_tracker.h](../src/platform/windows/host_sbs_authority_tracker.h) | matched color slot owns optional generic window-region provenance |
+| `capture_browser_window_region()` in [host_sbs_authority_tracker.cpp](../src/platform/windows/host_sbs_authority_tracker.cpp) | causally-prior Chromium geometry is validated and bound to the matched frame |
+| `capture_foreground_window_region()` in [host_sbs_authority_tracker.cpp](../src/platform/windows/host_sbs_authority_tracker.cpp) | lower-priority foreground-client capture and mapping |
 | `publish_captured_dump()` in [sbs_debug_dump_package.cpp](../src/platform/windows/sbs_debug_dump_package.cpp), with `validate_window_region()` in [sbs_debug_dump_border.h](../src/platform/windows/sbs_debug_dump_border.h) | Dump 3D fails closed on invalid optional window-region evidence |
 | `wgc_capture_t::init()` in [display_wgc.cpp](../src/platform/windows/display_wgc.cpp) | WGC uses `CreateForMonitor` only; `CreateForWindow` unused (W9) |
 | `nvenc_base::create_encoder()` in [nvenc_base.cpp](../src/nvenc/nvenc_base.cpp) | lookahead explicitly disabled; `enableAQ` is the only adaptive quantisation; no QP map (W8) |

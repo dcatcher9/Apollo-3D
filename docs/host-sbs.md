@@ -2419,6 +2419,12 @@ synchronize its private quality transaction before scoring it.
 
 ## Foreground window-region ROI
 
+`host_sbs_authority_tracker_t` (`src/platform/windows/host_sbs_authority_tracker.h`) owns this
+decision for live Host 3D: foreground-window tracking, the per-application subtitle context, the
+browser video lease and the analysis region of each matched frame. It holds no depth-pipeline
+state. An observation reports its consequences (a depth reprocess request, packed output to
+revoke, a new subtitle context), and the converter applies them to its completions and caches.
+
 Windows Host SBS selects at most one optional analysis region for a matched Desktop Duplication
 frame. A causally authenticated Chromium `<video>` has first priority. When no Chromium video route
 is eligible, the root client of `GetForegroundWindow()` may authorize the same ROI-local V2 path.

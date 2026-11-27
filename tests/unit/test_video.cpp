@@ -7421,11 +7421,22 @@ TEST(DirectxShaderSourceTest, PackedPresentationCannotSeedSemanticLineage) {
        }) {
     EXPECT_NE(route_body.find(required_gate), std::string::npos) << required_gate;
   }
-  const auto authority_begin = display.find("presentation_authority_t live_presentation_authority()");
-  const auto authority_end = display.find("bool matched_route_matches_current(", authority_begin);
+  const auto forward_begin = display.find("presentation_authority_t live_presentation_authority()");
+  const auto forward_end = display.find("bool matched_route_matches_current(", forward_begin);
+  ASSERT_NE(forward_begin, std::string::npos);
+  ASSERT_NE(forward_end, std::string::npos);
+  EXPECT_NE(display.substr(forward_begin, forward_end - forward_begin).find("return authority.presentation_authority();"),
+            std::string::npos);
+  // The authority tracker owns the live route epoch the converter compares.
+  const auto tracker = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/host_sbs_authority_tracker.cpp"
+  );
+  ASSERT_FALSE(tracker.empty());
+  const auto authority_begin = tracker.find("presentation_authority_t host_sbs_authority_tracker_t::presentation_authority() const noexcept");
+  const auto authority_end = tracker.find("presentation_authority_t host_sbs_authority_tracker_t::presentation_authority(\n", authority_begin);
   ASSERT_NE(authority_begin, std::string::npos);
   ASSERT_NE(authority_end, std::string::npos);
-  const auto authority = display.substr(authority_begin, authority_end - authority_begin);
+  const auto authority = tracker.substr(authority_begin, authority_end - authority_begin);
   for (const auto *field : {
          "authority_generation(live_window_authority)",
          "authority_generation(live_foreground_region)",
@@ -7439,7 +7450,7 @@ TEST(DirectxShaderSourceTest, PackedPresentationCannotSeedSemanticLineage) {
     std::string::npos
   );
   const auto cache_begin = display.find("class matched_presentation_cache_t {");
-  const auto cache_end = display.find("struct matched_frame_attribution_t {", cache_begin);
+  const auto cache_end = display.find("struct matched_frame_attribution_t: host_sbs_region_attribution_t {", cache_begin);
   ASSERT_NE(cache_end, std::string::npos);
   const auto cache_body = display.substr(cache_begin, cache_end - cache_begin);
   for (const auto *operation : {
