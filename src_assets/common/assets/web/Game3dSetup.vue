@@ -35,7 +35,7 @@
             {{ busy === 'never' ? $t('game3d_setup.saving') : textGameApproved ? $t('game3d_setup.stop_for_game') : $t('game3d_setup.never_for_game') }}
           </button>
         </div>
-        <p v-if="setup.state === 'current'" class="game3d-hint">
+        <p v-if="setup.state === 'converting'" class="game3d-hint">
           {{ usesTextHelper ? $t('game3d_setup.stop_hint_helper') : $t('game3d_setup.stop_hint') }}
         </p>
         <p v-if="error" class="game3d-error" role="alert">{{ error }}</p>
@@ -129,13 +129,13 @@ export default {
     },
     textProtection() {
       // Reported only while the game is in front on a stream and being converted.
-      return this.isTextGame && this.setup.state === 'current' ? this.setup.text_protection || '' : ''
+      return this.isTextGame && this.setup.state === 'converting' ? this.setup.text_protection || '' : ''
     },
     usesTextHelper() {
       return this.setup?.text_helper !== false
     },
     textGameApproved() {
-      return this.isTextGame && ['current', 'installed'].includes(this.setup.state)
+      return this.isTextGame && ['converting', 'approved'].includes(this.setup.state)
     },
     needsReShade() {
       return this.setup?.detected && ['ready_to_install', 'declined'].includes(this.setup.state) && !this.setup.reshade_present
@@ -145,7 +145,7 @@ export default {
     },
     canDecide() {
       // A text game's confirmation stands for every start, so its active state can still be withdrawn.
-      const states = this.isTextGame ? ['ready_to_install', 'declined', 'current', 'installed'] : ['ready_to_install', 'declined']
+      const states = this.isTextGame ? ['ready_to_install', 'declined', 'converting', 'approved'] : ['ready_to_install', 'declined']
       return this.setup?.detected && states.includes(this.setup.state) && Boolean(this.setup.identity)
     },
     showManualSetup() {
@@ -201,8 +201,8 @@ export default {
           ready_to_install: { label: $t('game3d_setup.status_ready_to_install'), tone: 'warning', description: $t('game3d_setup.text_ready_to_install_desc') },
           declined: { label: $t('game3d_setup.status_declined'), tone: 'neutral', description: $t('game3d_setup.text_declined_desc') },
           anti_cheat: { label: $t('game3d_setup.status_anti_cheat'), tone: 'neutral', description: $t('game3d_setup.text_anti_cheat_desc') },
-          current: { label: $t('game3d_setup.status_converting'), tone: 'success', description: $t('game3d_setup.text_current_desc') },
-          installed: { label: $t('game3d_setup.status_approved'), tone: 'success', description: $t('game3d_setup.text_installed_desc') },
+          converting: { label: $t('game3d_setup.status_converting'), tone: 'success', description: $t('game3d_setup.text_current_desc') },
+          approved: { label: $t('game3d_setup.status_approved'), tone: 'success', description: $t('game3d_setup.text_installed_desc') },
         })
       }
       const status = states[this.setup.state] || { label: $t('game3d_setup.status_checking'), tone: 'neutral', description: $t('game3d_setup.checking_detected_desc') }

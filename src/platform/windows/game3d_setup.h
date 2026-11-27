@@ -113,15 +113,22 @@ namespace platf::game3d {
     };
 
     // What the setup card shows for a game: the installation's own state, the user's open
-    // choice about it, or a confirmed installation in progress.
+    // choice about it, a confirmed installation in progress, or a text game's own state. A text
+    // game installs nothing: it shares only the refusals (anti_cheat, unavailable) with the
+    // installation states.
     enum class published_state_e {
       installation,  ///< The installation state, published under its own name.
       ready_to_install,  ///< Waits for the user's confirmation; nothing is written before it.
       declined,  ///< The user chose "never" for this executable.
       installing,  ///< A confirmed installation is running.
+      converting,  ///< Text game: approved and running, so it is converted.
+      approved,  ///< Text game: approved; it is converted from its next start.
     };
 
     struct setup_outcome {
+      // Its state is read only while the outcome publishes it (published_state_e::installation);
+      // otherwise it carries the detail, the executable and whether the add-on or text helper is
+      // present.
       installation_status installation;
       published_state_e state {published_state_e::installation};
       // Identity of the executable a ready_to_install or declined state offers.

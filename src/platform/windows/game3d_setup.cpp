@@ -305,13 +305,11 @@ namespace platf::game3d {
       }
       const auto decision = decisions.lookup(executable, outcome.identity);
       if (decision == setup_decision_e::never) {
-        status.state = installation_state_e::missing_addon;
         outcome.state = published_state_e::declined;
         status.detail = "You chose not to convert this game, so Sunshine 3D does not load anything into it. Choose Convert this game to change that.";
         return outcome;
       }
       if (decision != setup_decision_e::install) {
-        status.state = installation_state_e::missing_addon;
         outcome.state = published_state_e::ready_to_install;
         status.detail = helper ? "This looks like a 2D text game. Sunshine 3D can convert its picture to 3D itself and load a small text helper into the game while it runs, so the game's own text stays readable. Nothing is written to the game's folder, and nothing is loaded until you confirm this game." :
                                  "This looks like a 2D text game that composes its text itself. Sunshine 3D can convert its picture to 3D itself and keep the text readable from the picture alone. Nothing is loaded into the game or written to its folder, and nothing is converted until you confirm this game.";
@@ -321,12 +319,12 @@ namespace platf::game3d {
       status.detail = loaded.detail;
       status.addon_present = loaded.state == text_hook::load_state_e::loaded;
       if (loaded.state == text_hook::load_state_e::not_running) {
-        status.state = installation_state_e::installed;
+        outcome.state = published_state_e::approved;
         return outcome;
       }
       // The approval is for converting the game. The helper is how the game's own text is found
       // exactly; without it the host still finds text in the picture.
-      status.state = installation_state_e::current;
+      outcome.state = published_state_e::converting;
       outcome.convert = true;
       if (!status.addon_present) {
         outcome.retry_load = helper && loaded.state == text_hook::load_state_e::failed;
@@ -345,6 +343,10 @@ namespace platf::game3d {
           return "declined";
         case published_state_e::installing:
           return "installing";
+        case published_state_e::converting:
+          return "converting";
+        case published_state_e::approved:
+          return "approved";
       }
       switch (outcome.installation.state) {
         case installation_state_e::missing_reshade:
@@ -554,14 +556,12 @@ namespace platf::game3d {
         const auto executable = utf8(game.executable);
         const auto state = outcome.state;
         const std::string state_name {detail::published_state_name(outcome)};
-        const bool text_game = game.kind == game_kind_e::text_hook;
-        const bool text_game_current = text_game && state == published_state_e::installation && installation.state == installation_state_e::current;
-        const bool text_game_installed = text_game && state == published_state_e::installation && installation.state == installation_state_e::installed;
+        const bool converting = state == published_state_e::converting;
         // An add-on installation consumes its confirmation. A text game's confirmation stands
         // for every later start, so its active state stays an offer the user can withdraw.
-        const bool offer = state == published_state_e::ready_to_install || state == published_state_e::declined || text_game_current || text_game_installed;
+        const bool offer = state == published_state_e::ready_to_install || state == published_state_e::declined || converting || state == published_state_e::approved;
         // Worker-owned. Only a running text game is shown as being converted.
-        converting_ = text_game_current ? std::optional(game) : std::nullopt;
+        converting_ = converting ? std::optional(game) : std::nullopt;
         {
           std::lock_guard lock(mutex_);
           status_game_ = converting_ ? std::optional(std::pair {game.process_id, game.creation_time}) : std::nullopt;
@@ -598,8 +598,9 @@ namespace platf::game3d {
         BOOST_LOG(info) << "Game 3D setup: " << game.name << " [" << state_name << "] executable=\"" << executable
                         << "\" pid=" << game.process_id << " creation_time=" << game.creation_time << ": " << installation.detail;
         // The tray only points at the Web UI, where the user confirms; a notification click
-        // never installs. Declined and anti-cheat states have nothing to act on.
-        if (installation.state != installation_state_e::current && installation.state != installation_state_e::anti_cheat && state != published_state_e::declined) {
+        // never installs. Declined, anti-cheat, current and converting states have nothing to act on.
+        const bool settled = state == published_state_e::installation && (installation.state == installation_state_e::current || installation.state == installation_state_e::anti_cheat);
+        if (!settled && state != published_state_e::declined && !converting) {
           const auto target_name = game.name + " (" + utf8(game.executable.parent_path().filename()) + ")";
           system_tray::update_tray_game3d_setup(target_name, state == published_state_e::ready_to_install ? "Game 3D can be set up for this game; confirm or decline it in Sunshine 3D." : installation.detail);
         }

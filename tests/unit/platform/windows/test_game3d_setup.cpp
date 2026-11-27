@@ -422,8 +422,7 @@ namespace {
     for (int start = 1; start <= 2; ++start) {
       // Every start of the game loads the helper again without asking again.
       const auto active = game3d::detail::apply_text_hook_setup(game, decisions, no_anti_cheat, load);
-      EXPECT_EQ(active.state, published::installation);
-      EXPECT_EQ(active.installation.state, state::current);
+      EXPECT_EQ(active.state, published::converting);
       EXPECT_TRUE(active.convert);
       EXPECT_TRUE(active.installation.addon_present);
       EXPECT_FALSE(active.retry_load);
@@ -459,6 +458,7 @@ namespace {
     const auto refused = game3d::detail::apply_text_hook_setup(game, decisions, [](const fs::path &) {
       return std::string {"anti-cheat here"};
     }, load);
+    EXPECT_EQ(refused.state, published::installation);
     EXPECT_EQ(refused.installation.state, state::anti_cheat);
     EXPECT_EQ(refused.installation.detail, "anti-cheat here");
     EXPECT_FALSE(refused.convert);
@@ -466,7 +466,7 @@ namespace {
     // The approval is for converting the game: a helper that does not come up is tried again,
     // and the game is converted meanwhile with the text the picture shows.
     const auto failed = game3d::detail::apply_text_hook_setup(game, decisions, clear, load);
-    EXPECT_EQ(failed.installation.state, state::current);
+    EXPECT_EQ(failed.state, published::converting);
     EXPECT_TRUE(failed.convert);
     EXPECT_TRUE(failed.retry_load);
     EXPECT_FALSE(failed.installation.addon_present);
@@ -475,13 +475,13 @@ namespace {
     // A build without a helper for this kind of game converts it too, with nothing to retry.
     outcome_of_load = load_state::unavailable;
     const auto without = game3d::detail::apply_text_hook_setup(game, decisions, clear, load);
-    EXPECT_EQ(without.installation.state, state::current);
+    EXPECT_EQ(without.state, published::converting);
     EXPECT_TRUE(without.convert);
     EXPECT_FALSE(without.retry_load);
     // A game that was closed before its approval is converted from its next start.
     outcome_of_load = load_state::not_running;
     const auto closed = game3d::detail::apply_text_hook_setup(game, decisions, clear, load);
-    EXPECT_EQ(closed.installation.state, state::installed);
+    EXPECT_EQ(closed.state, published::approved);
     EXPECT_FALSE(closed.convert);
     EXPECT_FALSE(closed.retry_load);
     EXPECT_EQ(loads, 3);
@@ -515,7 +515,7 @@ namespace {
 
     ASSERT_TRUE(decisions.record(game, offered.identity, decision::install));
     const auto active = game3d::detail::apply_text_hook_setup(game, decisions, refusal, state_of, false);
-    EXPECT_EQ(active.installation.state, state::current);
+    EXPECT_EQ(active.state, published::converting);
     EXPECT_TRUE(active.convert);
     EXPECT_FALSE(active.retry_load);
     EXPECT_FALSE(active.installation.addon_present);
@@ -523,7 +523,7 @@ namespace {
     // Once the game has closed it is no longer converted, and the approval stands.
     running = load_state::not_running;
     const auto closed = game3d::detail::apply_text_hook_setup(game, decisions, refusal, state_of, false);
-    EXPECT_EQ(closed.installation.state, state::installed);
+    EXPECT_EQ(closed.state, published::approved);
     EXPECT_FALSE(closed.convert);
     EXPECT_EQ(decisions.lookup(game, offered.identity), decision::install);
     EXPECT_EQ(refusals, 0);
@@ -549,6 +549,9 @@ namespace {
     EXPECT_EQ(name(published::ready_to_install, state::missing_addon), "ready_to_install");
     EXPECT_EQ(name(published::declined, state::missing_reshade), "declined");
     EXPECT_EQ(name(published::installing, state::current), "installing");
+    // A text game's own states, whatever its installation status holds.
+    EXPECT_EQ(name(published::converting, state::unavailable), "converting");
+    EXPECT_EQ(name(published::approved, state::unavailable), "approved");
     const std::vector<std::pair<state, std::string>> installation_names {
       {state::missing_reshade, "missing_reshade"},
       {state::missing_addon, "missing_addon"},
