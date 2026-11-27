@@ -51,7 +51,6 @@ EXPECTED_GROUP_NAMES = (
     "sbs_flat_fallback",
     "parallax_v2_live_diagnostic",
     "direct_glyph_plan",
-    "direct_glyph_transport",
     "direct_glyph_palette",
     "direct_glyph_prepare",
     "shared_ui_warp_completed",

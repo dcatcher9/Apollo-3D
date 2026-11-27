@@ -63,10 +63,6 @@ namespace models::host_sbs_shader_cache {
   inline constexpr shader_spec sbs_flat_identity {"sbs_flat_identity_ps.hlsl", "main_ps", "ps_5_0"};
   inline constexpr shader_spec host_sbs_direct_glyph_plan {"host_sbs_subtitle_direct_glyph_cs.hlsl", "plan_direct_main", "cs_5_0"};
   inline constexpr shader_spec host_sbs_direct_glyph_publish {"host_sbs_subtitle_direct_glyph_cs.hlsl", "publish_direct_main", "cs_5_0"};
-  inline constexpr shader_spec host_sbs_direct_glyph_plan_tile {"host_sbs_subtitle_direct_glyph_transport_cs.hlsl", "plan_tile", "cs_5_0"};
-  inline constexpr shader_spec host_sbs_direct_glyph_pack_rgb {"host_sbs_subtitle_direct_glyph_transport_cs.hlsl", "pack_rgb", "cs_5_0"};
-  inline constexpr shader_spec host_sbs_direct_glyph_resolve_matte {"host_sbs_subtitle_direct_glyph_transport_cs.hlsl", "resolve_matte", "cs_5_0"};
-  inline constexpr shader_spec host_sbs_direct_glyph_finish_score {"host_sbs_subtitle_direct_glyph_transport_cs.hlsl", "finish_score", "cs_5_0"};
   inline constexpr shader_spec host_sbs_direct_glyph_palette_pack_rgb {"host_sbs_direct_glyph_palette_cs.hlsl", "pack_rgb", "cs_5_0"};
   inline constexpr shader_spec host_sbs_direct_glyph_palette_pack_tile {"host_sbs_direct_glyph_palette_cs.hlsl", "pack_tile", "cs_5_0"};
   inline constexpr shader_spec host_sbs_direct_glyph_palette_export_roles {"host_sbs_direct_glyph_palette_cs.hlsl", "export_roles", "cs_5_0"};
@@ -188,13 +184,6 @@ namespace models::host_sbs_shader_cache {
   inline constexpr std::array direct_glyph_plan_specs {
     host_sbs_direct_glyph_plan,
     host_sbs_direct_glyph_publish,
-  };
-
-  inline constexpr std::array direct_glyph_transport_specs {
-    host_sbs_direct_glyph_plan_tile,
-    host_sbs_direct_glyph_pack_rgb,
-    host_sbs_direct_glyph_resolve_matte,
-    host_sbs_direct_glyph_finish_score,
   };
 
   inline constexpr std::array direct_glyph_palette_specs {

@@ -2539,7 +2539,7 @@ TEST(DirectGlyphHardware, HoldsClearsOwnerChangesAndWorkerRetirement) {
     }
   });
   std::string error;
-  ASSERT_TRUE(score.prepare(device.Get(), context.Get(), SUNSHINE_SHADERS_DIR, primary, {execution, nullptr}, error, true)) << error;
+  ASSERT_TRUE(score.prepare(device.Get(), context.Get(), SUNSHINE_SHADERS_DIR, primary, execution, error)) << error;
 
   constexpr UINT w = 64, h = 32;
   const std::array<std::uint16_t, w * h * 4> rgb {};
@@ -2653,9 +2653,9 @@ TEST(DirectGlyphHardware, ScoresTheLinesThatFitOneBatchUnderOneFence) {
   nvinfer1::IHostMemory *serialized = nullptr;
   {
     // Build the packaged encoder with the production batch profile of one to six tiles.
-    const auto preset = models::direct_glyph_model_preset(glyph::tile_profile_e::common, true);
-    const auto onnx = std::filesystem::path {SUNSHINE_TEST_BIN_DIR}.parent_path() / "assets" / std::filesystem::path {preset.asset_path};
-    ASSERT_EQ(models::file_sha256_hex(onnx), preset.onnx_sha256) << onnx;
+    const auto onnx = std::filesystem::path {SUNSHINE_TEST_BIN_DIR}.parent_path() / "assets" /
+                      std::filesystem::path {models::direct_glyph_model_asset_path};
+    ASSERT_EQ(models::file_sha256_hex(onnx), models::direct_glyph_onnx_sha256) << onnx;
     auto *builder = nvinfer1::createInferBuilder(logger);
     ASSERT_NE(builder, nullptr);
 #if NV_TENSORRT_MAJOR < 11
@@ -2699,7 +2699,7 @@ TEST(DirectGlyphHardware, ScoresTheLinesThatFitOneBatchUnderOneFence) {
       release_trt_test_interface(runtime);
     }
   });
-  ASSERT_TRUE(transport.prepare(device.Get(), context.Get(), SUNSHINE_SHADERS_DIR, primary, {execution, nullptr}, error, true)) << error;
+  ASSERT_TRUE(transport.prepare(device.Get(), context.Get(), SUNSHINE_SHADERS_DIR, primary, execution, error)) << error;
   // Live preparation runs on the background build worker, which must leave CUDA's D3D11
   // registration to the thread that submits (and draws).
   EXPECT_FALSE(transport.native_interop_registered_for_tests());

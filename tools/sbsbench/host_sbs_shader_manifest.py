@@ -274,26 +274,6 @@ HOST_SBS_DIRECT_GLYPH_PUBLISH = ShaderSpec(
     source_entrypoint="publish_direct_main",
     source_target="cs_5_0",
 )
-HOST_SBS_DIRECT_GLYPH_PLAN_TILE = ShaderSpec(
-    source_file="host_sbs_subtitle_direct_glyph_transport_cs.hlsl",
-    source_entrypoint="plan_tile",
-    source_target="cs_5_0",
-)
-HOST_SBS_DIRECT_GLYPH_PACK_RGB = ShaderSpec(
-    source_file="host_sbs_subtitle_direct_glyph_transport_cs.hlsl",
-    source_entrypoint="pack_rgb",
-    source_target="cs_5_0",
-)
-HOST_SBS_DIRECT_GLYPH_RESOLVE_MATTE = ShaderSpec(
-    source_file="host_sbs_subtitle_direct_glyph_transport_cs.hlsl",
-    source_entrypoint="resolve_matte",
-    source_target="cs_5_0",
-)
-HOST_SBS_DIRECT_GLYPH_FINISH_SCORE = ShaderSpec(
-    source_file="host_sbs_subtitle_direct_glyph_transport_cs.hlsl",
-    source_entrypoint="finish_score",
-    source_target="cs_5_0",
-)
 HOST_SBS_DIRECT_GLYPH_PALETTE_PACK_RGB = ShaderSpec(
     source_file="host_sbs_direct_glyph_palette_cs.hlsl",
     source_entrypoint="pack_rgb",
@@ -516,10 +496,6 @@ SHADER_SPECS: Dict[str, ShaderSpec] = {
     "sbs_flat_identity": SBS_FLAT_IDENTITY,
     "host_sbs_direct_glyph_plan": HOST_SBS_DIRECT_GLYPH_PLAN,
     "host_sbs_direct_glyph_publish": HOST_SBS_DIRECT_GLYPH_PUBLISH,
-    "host_sbs_direct_glyph_plan_tile": HOST_SBS_DIRECT_GLYPH_PLAN_TILE,
-    "host_sbs_direct_glyph_pack_rgb": HOST_SBS_DIRECT_GLYPH_PACK_RGB,
-    "host_sbs_direct_glyph_resolve_matte": HOST_SBS_DIRECT_GLYPH_RESOLVE_MATTE,
-    "host_sbs_direct_glyph_finish_score": HOST_SBS_DIRECT_GLYPH_FINISH_SCORE,
     "host_sbs_direct_glyph_palette_pack_rgb": HOST_SBS_DIRECT_GLYPH_PALETTE_PACK_RGB,
     "host_sbs_direct_glyph_palette_pack_tile": HOST_SBS_DIRECT_GLYPH_PALETTE_PACK_TILE,
     "host_sbs_direct_glyph_palette_export_roles": HOST_SBS_DIRECT_GLYPH_PALETTE_EXPORT_ROLES,
@@ -726,21 +702,6 @@ DIRECT_GLYPH_PLAN_GROUP = ClosureGroup(
     pinned_source_closure_sha256=None,
 )
 
-DIRECT_GLYPH_TRANSPORT_GROUP = ClosureGroup(
-    name="direct_glyph_transport",
-    description=(
-        "Plans bounded, phase-aligned RGB input, packs the fixed TensorRT tensor and resolves current model scores into alpha8."
-    ),
-    specs=(
-        HOST_SBS_DIRECT_GLYPH_PLAN_TILE,
-        HOST_SBS_DIRECT_GLYPH_PACK_RGB,
-        HOST_SBS_DIRECT_GLYPH_RESOLVE_MATTE,
-        HOST_SBS_DIRECT_GLYPH_FINISH_SCORE,
-    ),
-    root="",
-    pinned_source_closure_sha256=None,
-)
-
 DIRECT_GLYPH_PALETTE_GROUP = ClosureGroup(
     name="direct_glyph_palette",
     description=(
@@ -865,7 +826,6 @@ CLOSURE_GROUPS: Dict[str, ClosureGroup] = {
     "sbs_flat_fallback": SBS_FLAT_FALLBACK_GROUP,
     "parallax_v2_live_diagnostic": PARALLAX_V2_LIVE_DIAGNOSTIC_GROUP,
     "direct_glyph_plan": DIRECT_GLYPH_PLAN_GROUP,
-    "direct_glyph_transport": DIRECT_GLYPH_TRANSPORT_GROUP,
     "direct_glyph_palette": DIRECT_GLYPH_PALETTE_GROUP,
     "direct_glyph_prepare": DIRECT_GLYPH_PREPARE_GROUP,
     "shared_ui_warp_completed": SHARED_UI_WARP_COMPLETED_GROUP,

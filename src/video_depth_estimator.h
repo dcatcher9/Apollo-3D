@@ -3,7 +3,6 @@
 #include "config.h"
 #include "host_sbs_adaptive_submission.h"
 #include "host_sbs_conversion_work.h"
-#include "host_sbs_direct_glyph_tiles.h"
 #include "host_sbs_gpu_completion_receipt.h"
 #include "host_sbs_resolution.h"
 #include "host_sbs_telemetry_perf.h"
@@ -1231,20 +1230,18 @@ namespace models {
     bool failed = false;
   };
 
-  /** Direct Glyph subtitle publication, configured once before the first input. */
+  /** Direct Glyph subtitle publication, configured once before the first input: adaptive OCR
+   *  work with the native palette decoder. capture_plan keeps the evaluation evidence. */
   struct subtitle_direct_glyph_configuration_t {
     std::string shader_root;
     bool capture_plan = false;
-    bool adaptive_context = false;
-    bool resolved_fringe = false;
-    bool line_palette = false;
   };
   /** Evaluation aliases of the completed Direct Glyph observation; never drawing authority. */
   struct subtitle_direct_glyph_diagnostic_views_t {
     std::uint64_t model_frame = 0u, model_observation_us = 0u;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> selected_matte, selected_receipt;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> ocr_record, alpha8, source_audit;
-    Microsoft::WRL::ComPtr<ID3D11Buffer> work, legacy_dispatch, placement, post_plan_work, native_lines;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> work, legacy_dispatch, native_lines;
   };
   class video_depth_estimator {
   public:
@@ -1292,7 +1289,6 @@ namespace models {
 
     bool configure_subtitle_direct_glyph(const subtitle_direct_glyph_configuration_t &, std::string &error);
     [[nodiscard]] std::filesystem::path direct_glyph_engine_path_for_evaluation() const;
-    [[nodiscard]] std::optional<host_sbs_direct_glyph_gpu::tile_profile_e> direct_glyph_profile_for_evaluation() const;
     std::optional<subtitle_direct_glyph_diagnostic_views_t> subtitle_direct_glyph_diagnostic_views_for_evaluation(std::uint64_t frame, std::uint64_t observation) const noexcept;
 
 #ifdef SUNSHINE_TESTS

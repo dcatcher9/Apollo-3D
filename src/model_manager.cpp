@@ -96,21 +96,19 @@ namespace models {
     }
 
     std::optional<direct_glyph_artifact_t> get_direct_glyph_artifact(
-        const std::filesystem::path& assets_dir, std::string_view compatibility_tag,
-        host_sbs_direct_glyph_gpu::tile_profile_e profile, bool batched_tiles) {
-        const auto preset = direct_glyph_model_preset(profile, batched_tiles);
-        if (assets_dir.empty() || compatibility_tag.empty() || preset.asset_path.empty()) {
+        const std::filesystem::path& assets_dir, std::string_view compatibility_tag) {
+        if (assets_dir.empty() || compatibility_tag.empty()) {
             return std::nullopt;
         }
         direct_glyph_artifact_t artifact;
-        artifact.source_path = assets_dir / std::filesystem::path {preset.asset_path};
+        artifact.source_path = assets_dir / std::filesystem::path {direct_glyph_model_asset_path};
         std::error_code error;
         if (!std::filesystem::is_regular_file(artifact.source_path, error) || error) {
             BOOST_LOG(warning) << "Packaged direct glyph ONNX is unavailable at " << artifact.source_path;
             return std::nullopt;
         }
         artifact.source_sha256 = file_sha256_hex(artifact.source_path);
-        if (artifact.source_sha256 != preset.onnx_sha256) {
+        if (artifact.source_sha256 != direct_glyph_onnx_sha256) {
             BOOST_LOG(warning) << "Packaged direct glyph ONNX failed SHA-256 validation at "
                                << artifact.source_path;
             return std::nullopt;
@@ -118,7 +116,7 @@ namespace models {
 
         const auto cache_digest = engine_identity_digest(
             "sunshine3d/direct-glyph-tensorrt-engine-cache/v1", direct_glyph_model_name,
-            preset.engine_recipe,
+            direct_glyph_engine_recipe,
             std::string(compatibility_tag) + "-onnx" + artifact.source_sha256);
         if (cache_digest.empty()) {
             return std::nullopt;

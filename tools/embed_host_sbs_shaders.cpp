@@ -107,10 +107,6 @@ namespace {
       cache::direct_glyph_plan_source_closure_sha256, bytecodes
     );
     groups::authenticate_group(
-      "direct subtitle score transport", shader_root, cache::direct_glyph_transport_specs,
-      cache::direct_glyph_transport_source_closure_sha256, bytecodes
-    );
-    groups::authenticate_group(
       "native subtitle palette", shader_root, cache::direct_glyph_palette_specs,
       cache::direct_glyph_palette_source_closure_sha256, bytecodes
     );

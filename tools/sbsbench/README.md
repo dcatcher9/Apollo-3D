@@ -92,30 +92,22 @@ harness directly:
 ```powershell
 cmake-build-relwithdebinfo/sunshine.exe <conf> --sbs-bench `
   --frames <frames-dir> --out <out-dir> --observation-timeline <timeline> `
-  --direct-glyph-qualification --direct-glyph-adaptive-context --direct-glyph-palette
+  --direct-glyph-qualification
 ```
 
 Build first and retain the build/test DLL `PATH` documented in [AGENTS.md](../../AGENTS.md).
 Inputs must be 1..64 immutable SDR PNGs. The run requires an explicit observation timeline,
 ordinary evaluation artifacts and `--output-every 1`. It rejects follow mode and replay inputs. `<out-dir>` must not already contain a `direct-glyph` directory.
 
-The flags select the variant and the manifest schema:
-
-| Flags after `--direct-glyph-qualification` | Schema | Variant |
-|---|---:|---|
-| none | 3 | Native tiles with the fixed OCR-core expansion |
-| `--direct-glyph-adaptive-context` | 4 | Adaptive context on large caption boxes |
-| `--direct-glyph-adaptive-context --direct-glyph-resolved-fringe` | 5 | Adaptive context with the resolved fringe strip |
-| `--direct-glyph-adaptive-context --direct-glyph-palette` | 6 | Live Host 3D and Convert Video: adaptive OCR work with the native palette decoder |
-
-`--direct-glyph-palette` cannot be combined with `--direct-glyph-resolved-fringe`, and the fringe
-requires adaptive context. Harness `--follow` conversion always uses the live configuration and
-takes none of these flags.
+The qualification runs the live configuration of Host 3D and Convert Video, adaptive OCR work
+with the native palette decoder, and writes manifest schema 6. There is no variant flag. Harness
+`--follow` conversion uses the same configuration without the qualification evidence.
 
 The run writes `direct_glyph_qualification.json` atomically, with role
 `file-fed-actual-completed-direct-glyph`. It binds the executable, the copied
 `direct-glyph/observation.timeline`, the model checkpoint, ONNX and engine digests, the tile
-profile, and the plan, transport, prepare and source-audit shader closures. Each frame record
+shape and tiles per submission, and the plan, palette transport, prepare and source-audit shader
+closures. Each frame record
 binds its exact source snapshot, observation clock, transaction token, selected receipt, SCT and
 SCP words, the branch (`active`, `empty` or `legacy`), the work boxes, and the shared-warp draw
 record. Per-frame evidence lives under `direct-glyph/frame_<id>/`:
@@ -129,30 +121,17 @@ record. Per-frame evidence lives under `direct-glyph/frame_<id>/`:
 | `legacy-dispatch.u32` | The four-word fallback dispatch |
 | `ocr.u32` | The completed OCR8 record |
 | `source-audit.u32` | The source audit envelope of an active model observation |
-| `placement.u32`, `post-plan-work.u32` | Plan evidence, when the variant produces it |
-| `native-lines.u32` | Schema 6 only: eight 16-word native line records |
+| `native-lines.u32` | Eight 16-word native line records |
 
 This file-fed full-source check establishes renderer wiring and provenance. It does
 not establish live capture eligibility, window-region behavior, visual quality or live timing.
 No maintained script scores these masks against authored truth.
 Ordinary metric PNGs, schemas and scores remain separate.
 
-Schema 3 binds the selected draw's `source-audit.u32` file for each active model observation.
-Empty and legacy observations have a null `source_audit` binding. Only this variant offers the
-original dense matte as the `legacy` fallback.
+Each active model observation binds the selected draw's `source-audit.u32` file. An empty
+observation has a null `source_audit` binding.
 
-In schema 4, `execution[3]` of an active draw records the selected scale factor.
-`placement[10]` records
-zero for native tiles or the same factor for scaled tiles. The
-placement coordinates are on the selected model lattice, while the work boxes,
-selected mask, alpha and stereo output use their original native coordinates.
-
-In schema 5, Work and
-Placement retain their schema 4 meanings. Outside Work, the selected mask and
-alpha can include pixels with alpha8 of at least 64 inside the bounded OCR strip,
-with every interpolation tap covered by the completed Placement.
-
-In schema 6, every frame is `active` or `empty`, `execution[3]` is `1` for an active draw, and
+Every frame is `active` or `empty`, `execution[3]` is `1` for an active draw, and
 the fallback dispatch is all zero. Each used line record repeats its work box and stays inside
 the native band.
 

@@ -275,30 +275,6 @@
       "source_target": "cs_5_0"
     },
     {
-      "name": "host_sbs_direct_glyph_plan_tile",
-      "source_file": "host_sbs_subtitle_direct_glyph_transport_cs.hlsl",
-      "source_entrypoint": "plan_tile",
-      "source_target": "cs_5_0"
-    },
-    {
-      "name": "host_sbs_direct_glyph_pack_rgb",
-      "source_file": "host_sbs_subtitle_direct_glyph_transport_cs.hlsl",
-      "source_entrypoint": "pack_rgb",
-      "source_target": "cs_5_0"
-    },
-    {
-      "name": "host_sbs_direct_glyph_resolve_matte",
-      "source_file": "host_sbs_subtitle_direct_glyph_transport_cs.hlsl",
-      "source_entrypoint": "resolve_matte",
-      "source_target": "cs_5_0"
-    },
-    {
-      "name": "host_sbs_direct_glyph_finish_score",
-      "source_file": "host_sbs_subtitle_direct_glyph_transport_cs.hlsl",
-      "source_entrypoint": "finish_score",
-      "source_target": "cs_5_0"
-    },
-    {
       "name": "host_sbs_direct_glyph_palette_pack_rgb",
       "source_file": "host_sbs_direct_glyph_palette_cs.hlsl",
       "source_entrypoint": "pack_rgb",
@@ -625,16 +601,6 @@
       "specs": [
         "host_sbs_direct_glyph_plan",
         "host_sbs_direct_glyph_publish"
-      ]
-    },
-    {
-      "name": "direct_glyph_transport",
-      "description": "Plans bounded, phase-aligned RGB input, packs the fixed TensorRT tensor and resolves current model scores into alpha8.",
-      "specs": [
-        "host_sbs_direct_glyph_plan_tile",
-        "host_sbs_direct_glyph_pack_rgb",
-        "host_sbs_direct_glyph_resolve_matte",
-        "host_sbs_direct_glyph_finish_score"
       ]
     },
     {

@@ -15,8 +15,6 @@ namespace models::host_sbs_completed_subtitle_programs {
   inline subtitle_direct_glyph_configuration_t canonical_configuration(const std::filesystem::path &shader_root) {
     subtitle_direct_glyph_configuration_t configuration;
     configuration.shader_root = shader_root.string();
-    configuration.adaptive_context = true;
-    configuration.line_palette = true;
     return configuration;
   }
 

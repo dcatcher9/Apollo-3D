@@ -6,7 +6,6 @@
 
 #include "config.h"
 #include "generated/depth_coordinate_v2_contract.h"
-#include "host_sbs_direct_glyph_tiles.h"
 #include "prod_zipdepth_convex2x.h"
 
 namespace models {
@@ -77,53 +76,18 @@ namespace models {
     inline constexpr std::string_view ocr_engine_recipe =
         depth_coordinate_v2::subtitle_ocr_engine_recipe;
 
-    // The encoder uses FP16 convolutions and exposes FP32 RGB and log scores.
+    // The batched native palette encoder uses FP16 convolutions and exposes FP32 RGB and log scores.
     inline constexpr std::string_view direct_glyph_model_name = "direct_glyph";
     inline constexpr std::string_view direct_glyph_checkpoint_sha256 =
         "bdbeb15730ffe0c7a9d0cdac67ec6baa691156cf4a0ed20e38772a760c2ee4b8";
     inline constexpr std::string_view direct_glyph_model_asset_path =
-        "models/direct_glyph_stroke_h144_w512_mixed.onnx";
-    inline constexpr std::string_view direct_glyph_model_onnx_sha256 =
-        "40f6b99cc3748014c1965875835bced2a1220ebf071a27305b2c3f9aa61e92f1";
+        "models/direct_glyph_stroke_h52_w512_mixed_batch.onnx";
+    inline constexpr std::string_view direct_glyph_onnx_sha256 =
+        "1a6eaa2ce6ce73e4dd0366a81221e9694deb1882e3a79d62761b4aa945cbd2af";
     inline constexpr std::string_view direct_glyph_engine_recipe =
-        "stroke-h144-w512-fp16conv-fp32scores-notf32-v1";
+        "stroke-h52-w512-fp16conv-fp32scores-notf32-batch1-4-6-v1";
     inline constexpr std::string_view direct_glyph_engine_input_name = "rgb";
     inline constexpr std::string_view direct_glyph_engine_output_name = "logits";
-
-    struct direct_glyph_model_preset_t {
-        std::string_view asset_path;
-        std::string_view onnx_sha256;
-        std::string_view engine_recipe;
-    };
-
-    inline constexpr direct_glyph_model_preset_t direct_glyph_model_preset(
-        host_sbs_direct_glyph_gpu::tile_profile_e profile, bool batched_tiles = false) noexcept {
-        using host_sbs_direct_glyph_gpu::tile_profile_e;
-        if (batched_tiles) {
-            if (profile != tile_profile_e::common) return {};
-            return {
-                "models/direct_glyph_stroke_h52_w512_mixed_batch.onnx",
-                "1a6eaa2ce6ce73e4dd0366a81221e9694deb1882e3a79d62761b4aa945cbd2af",
-                "stroke-h52-w512-fp16conv-fp32scores-notf32-batch1-4-6-v1",
-            };
-        }
-        switch (profile) {
-            case tile_profile_e::common:
-                return {direct_glyph_model_asset_path, direct_glyph_model_onnx_sha256, direct_glyph_engine_recipe};
-            case tile_profile_e::small:
-                return {
-                    "models/direct_glyph_stroke_h104_w384_mixed.onnx",
-                    "13880f4ecf5438421881272192dce7692568393c1ceb29a14c3fecf8dadbdfd5",
-                    "stroke-h104-w384-fp16conv-fp32scores-notf32-v1",
-                };
-        }
-        return {};
-    }
-
-    inline constexpr std::string_view direct_glyph_onnx_sha256(
-        host_sbs_direct_glyph_gpu::tile_profile_e profile, bool batched_tiles = false) noexcept {
-        return direct_glyph_model_preset(profile, batched_tiles).onnx_sha256;
-    }
 
     struct direct_glyph_artifact_t {
         std::filesystem::path source_path;
@@ -134,9 +98,7 @@ namespace models {
 
     /** Authenticate the packaged ONNX and derive its device/runtime-specific cache path. */
     std::optional<direct_glyph_artifact_t> get_direct_glyph_artifact(
-        const std::filesystem::path& assets_dir, std::string_view compatibility_tag,
-        host_sbs_direct_glyph_gpu::tile_profile_e profile = host_sbs_direct_glyph_gpu::tile_profile_e::common,
-        bool batched_tiles = false);
+        const std::filesystem::path& assets_dir, std::string_view compatibility_tag);
 
     /**
      * @brief Bounded cached depth filename binding recipe, runtime, device and ONNX identity.

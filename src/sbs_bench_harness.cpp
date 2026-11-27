@@ -2525,9 +2525,6 @@ namespace sbs_bench {
       // Separate actual Direct Glyph subtitle sidecars; ordinary metric images retain the Base
       // renderer and its attestation.
       bool direct_glyph_qualification = false;
-      bool direct_glyph_adaptive_context = false;
-      bool direct_glyph_resolved_fringe = false;
-      bool direct_glyph_palette = false;
       // Parity probe: use live streaming's policy, where the conditioned-field diagnostics run
       // only for Dump 3D. Final then equals Base, so this is not an evaluator configuration.
       bool subtitle_conditioning_live_policy = false;
@@ -2582,15 +2579,6 @@ namespace sbs_bench {
         } else if (a == "--direct-glyph-qualification") {
           if (o.direct_glyph_qualification) return false;
           o.direct_glyph_qualification = true;
-        } else if (a == "--direct-glyph-adaptive-context") {
-          if (o.direct_glyph_adaptive_context) return false;
-          o.direct_glyph_adaptive_context = true;
-        } else if (a == "--direct-glyph-resolved-fringe") {
-          if (o.direct_glyph_resolved_fringe) return false;
-          o.direct_glyph_resolved_fringe = true;
-        } else if (a == "--direct-glyph-palette") {
-          if (o.direct_glyph_palette) return false;
-          o.direct_glyph_palette = true;
         } else if (a == "--subtitle-conditioning-live-policy") {
           o.subtitle_conditioning_live_policy = true;
         } else if (a == "--follow-format") {
@@ -2655,18 +2643,6 @@ namespace sbs_bench {
     }
 
     bool validate_opts(const opts &o) {
-      if (o.direct_glyph_palette && (!o.direct_glyph_qualification || o.direct_glyph_resolved_fringe)) {
-        BOOST_LOG(error) << "sbs-bench: native palette qualification requires --direct-glyph-qualification and the original detector caps";
-        return false;
-      }
-      if (o.direct_glyph_adaptive_context && !o.direct_glyph_qualification) {
-        BOOST_LOG(error) << "sbs-bench: adaptive glyph context requires --direct-glyph-qualification";
-        return false;
-      }
-      if (o.direct_glyph_resolved_fringe && !o.direct_glyph_adaptive_context) {
-        BOOST_LOG(error) << "sbs-bench: glyph fringe requires --direct-glyph-adaptive-context";
-        return false;
-      }
       if (!o.capabilities.empty()) {
         if (!o.frames.empty() || !o.out.empty() || o.direct_glyph_qualification) {
           BOOST_LOG(error) << "sbs-bench: --capabilities is a standalone query";
@@ -3302,15 +3278,10 @@ namespace sbs_bench {
     bool follow_subtitle_fallback_logged = false;
     if (o.follow || o.direct_glyph_qualification) {
       std::string qualification_error;
-      // Follow conversion takes the live route. Qualification selects its own Direct Glyph variant
-      // and captures the plan evidence.
+      // Follow conversion and qualification both take the live route; qualification also
+      // captures the plan evidence.
       auto configuration = models::host_sbs_completed_subtitle_programs::canonical_configuration(fs::path(SUNSHINE_SHADERS_DIR));
-      if (o.direct_glyph_qualification) {
-        configuration.capture_plan = true;
-        configuration.line_palette = o.direct_glyph_palette;
-        configuration.adaptive_context = o.direct_glyph_adaptive_context || o.direct_glyph_palette;
-        configuration.resolved_fringe = o.direct_glyph_resolved_fringe;
-      }
+      configuration.capture_plan = o.direct_glyph_qualification;
       subtitle_draw_ready = estimator && subtitle_draw.prepare(dev.Get(), *estimator, configuration, qualification_error);
       if (subtitle_draw_ready && conversion_subtitle_model) {
         BOOST_LOG(info) << "Offline conversion uses the mixed H28 native subtitle glyph model";
@@ -3334,7 +3305,6 @@ namespace sbs_bench {
     ComPtr<ID3D11Texture2D> evidence_field_stage;
     ComPtr<ID3D11Buffer> evidence_buffer_stage;
     nlohmann::json qualified_direct_glyph_frames = nlohmann::json::array();
-    std::optional<models::host_sbs_direct_glyph_gpu::tile_profile_e> qualified_direct_glyph_profile;
     ComPtr<ID3D11Texture2D> warp_mask_tex, warp_mask_stage;
     ComPtr<ID3D11RenderTargetView> warp_mask_rtv;
     ComPtr<ID3D11Texture2D> warp_mapping_tex, warp_mapping_stage;
@@ -4567,12 +4537,6 @@ namespace sbs_bench {
           return 6;
         }
         {
-          const auto profile = estimator->direct_glyph_profile_for_evaluation();
-          if (!profile || (qualified_direct_glyph_profile && profile != qualified_direct_glyph_profile)) {
-            BOOST_LOG(error) << "sbs-bench: direct glyph profile changed within the fixed-source capture";
-            return 6;
-          }
-          qualified_direct_glyph_profile = profile;
           const auto dump_buffer = [&](ID3D11Buffer *buffer, UINT bytes, const fs::path &file) {
             return buffer && publish_file_atomically(fs::path(o.out) / file, [&](const fs::path &temporary) {
               return dump_ocr_working_buffer(dev.Get(), ctx.Get(), buffer, bytes, temporary, evidence_buffer_stage);
@@ -4599,9 +4563,7 @@ namespace sbs_bench {
           const auto &selected = evidence.selected;
           const bool model = selected[2u] == 4u && selected[62u] == 4u;
           const bool legacy = selected[2u] == 1u && selected[62u] == 1u;
-          const bool ready = work[3u] == 1u || (o.direct_glyph_adaptive_context &&
-                                              (work[3u] == 2u || work[3u] == 4u));
-          const bool active = model && work[0u] == 2u && work[1u] != 0u && work[2u] == 0u && ready;
+          const bool active = model && work[0u] == 2u && work[1u] != 0u && work[2u] == 0u && work[3u] == 1u;
           const bool empty = model && work[0u] == 1u && work[1u] == 0u && work[2u] == 0u && work[3u] == 0u;
           if (selected[3u] != 0u || evidence.shared_warp_selected_receipt_header != 1u || (!active && !empty && !legacy)) {
             BOOST_LOG(error) << "sbs-bench: direct glyph draw did not bind a current model or legacy receipt";
@@ -4651,30 +4613,6 @@ namespace sbs_bench {
               return 6;
             }
           }
-          nlohmann::json placement, placement_binding, post_plan, post_plan_binding;
-          if (stages->placement || stages->post_plan_work) {
-            const auto placement_path = evidence_directory / "placement.u32";
-            const auto post_plan_path = evidence_directory / "post-plan-work.u32";
-            std::array<std::int32_t, models::host_sbs_direct_glyph_gpu::placement_words> placement_words {};
-            std::array<std::uint32_t, models::host_sbs_direct_glyph_publication::direct_work_word_count> post_plan_words {};
-            if (!dump_buffer(stages->placement.Get(), sizeof(placement_words), placement_path) ||
-                !read_exact_file(fs::path(o.out) / placement_path, placement_words.data(), sizeof(placement_words)) ||
-                !dump_buffer(stages->post_plan_work.Get(), sizeof(post_plan_words), post_plan_path) ||
-                !read_exact_file(fs::path(o.out) / post_plan_path, post_plan_words.data(), sizeof(post_plan_words))) {
-              BOOST_LOG(error) << "sbs-bench: direct glyph plan evidence readback failed";
-              return 6;
-            }
-            placement = placement_words;
-            placement_binding = binding(placement_path, sizeof(placement_words));
-            post_plan = post_plan_words;
-            post_plan_binding = binding(post_plan_path, sizeof(post_plan_words));
-          }
-          if (active && o.direct_glyph_adaptive_context && !o.direct_glyph_palette &&
-              (placement.is_null() ||
-               placement[models::host_sbs_direct_glyph_gpu::placement_scale_word] != (work[3u] == 1u ? 0u : work[3u]))) {
-            BOOST_LOG(error) << "sbs-bench: adaptive placement and published score lattice disagree";
-            return 6;
-          }
           std::vector<std::array<UINT, 4u>> work_boxes;
           for (UINT slot = 0u; slot < work[1u]; ++slot) {
             const auto offset = 4u + 4u * slot;
@@ -4682,7 +4620,7 @@ namespace sbs_bench {
           }
           const auto &publication = est.publication;
           nlohmann::json native_lines;
-          if (o.direct_glyph_palette) {
+          {
             const auto path = evidence_directory / "native-lines.u32";
             std::array<std::array<UINT,16>,8> records {};
             if ((!active && !empty) || work[3] != (active ? 1u : 0u) ||
@@ -4717,8 +4655,6 @@ namespace sbs_bench {
             {"branch", active ? "active" : empty ? "empty" : "legacy"}, {"execution", work}, {"work_boxes_ltrb", work_boxes},
             {"work_buffer", binding(work_path, sizeof(work))}, {"legacy_dispatch", legacy_dispatch},
             {"legacy_dispatch_buffer", binding(dispatch_path, sizeof(legacy_dispatch))}, {"ocr", binding(ocr_path, 1024u)},
-            {"placement", placement}, {"placement_buffer", placement_binding},
-            {"post_plan_work", post_plan}, {"post_plan_work_buffer", post_plan_binding},
             {"source_audit", source_audit_binding},
             {"selected_mask", {{"file", relative_mask.generic_string()}, {"sha256", mask_digest},
                 {"size", {frame_width, mask_height}}, {"source_rect", rect},
@@ -4727,9 +4663,9 @@ namespace sbs_bench {
             {"output_size", {sbs_w, sbs_h}},
             {"shared_warp", {{"renderer", "shared-ui-pin-band"}, {"shape", evidence.shared_warp_shape},
                 {"draw_serial", evidence.shared_warp_serial}, {"selected_receipt_header", evidence.shared_warp_selected_receipt_header},
-                {"active_rows", evidence.shared_warp_rows}}}
+                {"active_rows", evidence.shared_warp_rows}}},
+            {"native_lines", native_lines}
           });
-          if (o.direct_glyph_palette) qualified_direct_glyph_frames.back()["native_lines"] = native_lines;
         }
       }
 
@@ -5228,26 +5164,19 @@ namespace sbs_bench {
       }
       {
         namespace shader = models::host_sbs_shader_cache;
-        if (!qualified_direct_glyph_profile) return 8;
-        const auto profile = *qualified_direct_glyph_profile;
-        const auto tile = o.direct_glyph_palette ? models::host_sbs_direct_glyph_gpu::palette_tile :
-                          models::host_sbs_direct_glyph_gpu::tile_shape(profile);
+        const auto tile = models::host_sbs_direct_glyph_gpu::palette_tile;
         const auto engine_digest = sha256_file_hex(estimator->direct_glyph_engine_path_for_evaluation());
-        const UINT schema = o.direct_glyph_palette ? 6u : o.direct_glyph_resolved_fringe ? 5u :
-          o.direct_glyph_adaptive_context ? 4u : 3u;
         if (engine_digest.empty() || !publish_json_atomically(fs::path(o.out) / "direct_glyph_qualification.json", {
-              {"schema", schema}, {"status", "COMPLETE"},
+              {"schema", 6u}, {"status", "COMPLETE"},
               {"role", "file-fed-actual-completed-direct-glyph"},
               {"source_transfer", "encoded-srgb"}, {"frame_count", completed_frame_count}, {"executable_sha256", executable_digest},
               {"observation_timeline", {"direct-glyph/observation.timeline", observation_timeline_sha256}},
-              {"model", {{"checkpoint", models::direct_glyph_checkpoint_sha256}, {"onnx", models::direct_glyph_onnx_sha256(profile, o.direct_glyph_palette)},
+              {"model", {{"checkpoint", models::direct_glyph_checkpoint_sha256}, {"onnx", models::direct_glyph_onnx_sha256},
                          {"engine", engine_digest}, {"cutoff_alpha8", models::host_sbs_direct_glyph_publication::cutoff_alpha8}}},
               {"profile_width_height", {tile.width, tile.height}},
-              {o.direct_glyph_palette ? "tiles_per_submission" : "tile_capacity",
-               models::host_sbs_direct_glyph_gpu::tile_capacity},
+              {"tiles_per_submission", models::host_sbs_direct_glyph_gpu::tile_capacity},
               {"shader_source_closures", {{"plan", shader::direct_glyph_plan_source_closure_sha256},
-                   {"transport", o.direct_glyph_palette ? shader::direct_glyph_palette_source_closure_sha256 :
-                                  shader::direct_glyph_transport_source_closure_sha256},
+                   {"transport", shader::direct_glyph_palette_source_closure_sha256},
                    {"prepare", shader::direct_glyph_prepare_source_closure_sha256},
                    {"source_audit", shader::direct_glyph_source_audit_source_closure_sha256}}},
               {"frames", qualified_direct_glyph_frames}

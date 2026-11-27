@@ -410,16 +410,6 @@ Direct Glyph audits the entire current FP16 display-snapshot band before packing
 tiles. The audit couples that snapshot with its same-observation source proof. Fresh
 authenticated EMPTY parks the audit and publishes zero protection.
 
-The harness can also qualify earlier variants of the route. Without adaptive context, Direct
-Glyph publishes inside each OCR core expanded by 12 pixels
-and intersected with the original padded OCR cover. The model reads 512×144 RGB tiles from the
-subtitle band or uses 384×104 tiles when only the smaller shape fits the aligned band. Both
-shapes use the same weights and native source pixels. Tile placement reserves at least 36 pixels
-of context around its output windows where the band extends that far and follows the model's
-four-pixel pooling grid. The context covers the model's full input dependency. Published
-protection is zero outside the OCR boxes. Only this variant can fall back to the original dense
-matte with a kind-1, algorithm-1 receipt.
-
 Live Host 3D and Convert Video use the mixed H28 Direct Glyph encoder and native
 palette decoder for subtitle protection. Convolutions run in FP16. The RGB
 interface, log probabilities and native decoder use FP32.
@@ -442,21 +432,8 @@ reuse that set while the next observation is being scored. Each draw still compa
 current source color with the retained display band before applying protection.
 The shared OCR planner expands each native core by three-eighths of the core height, rounded up
 and bounded to 12–64 pixels, while staying inside the original padded OCR cover.
-The earlier adaptive qualification control uses the largest resulting rectangle's native height to select a
-starting context scale of 1, 2 or 4 at heights below 80, from 80 through 151, or
-from 152 pixels. It reduces that scale until the profile fits the analysis band.
-For normal-size glyphs, the planner can pad the read lattice to keep native resolution.
-If tile capacity is exceeded, it tries a coarser scale, with a final padded quarter-scale
-attempt. Padding extends only the model input and uses edge-clamped source pixels.
-The pack stage averages encoded RGB8 in band-aligned blocks.
-The publisher interpolates the resulting probabilities at native pixel centers,
-quantizes once, and uses alpha8 values of at least 38 inside the native OCR work
-rectangles. Scale 1 retains the original quantized transport.
-The adaptive publisher can also check a strip up to one-eighth of the native
-OCR core height, rounded up, past each side of the work rectangle. The original
-padded OCR cover bounds the strip. A pixel in the strip must have every needed
-sample in the current completed tile windows and an alpha8 value of at least
-64. These pixels reuse the original tile plan and scores.
+The native decoder below adjusts these work rectangles. The publisher selects alpha8 values of at
+least 38 inside the final rectangles, and published protection is zero outside them.
 
 The native decoder expands each side of the working rectangle by one sixteenth of its
 height, rounded up and clipped to the original detector cover. When an accepted video
@@ -1201,9 +1178,9 @@ do not impose a four-observation rendering gate. The positive-count duplicate-ad
 remains; the count-four feature bit does not authorize support.
 
 Native support and this history are computed only for an observation that reads them: the dense
-legacy matte, the conditioned-field diagnostics (every Dump 3D request and the evaluation harness)
-and the non-adaptive Direct Glyph variant. Live Host 3D and Convert Video draw with the adaptive
-Direct Glyph palette, so their ordinary observations publish only the SCT5 identity, the observation
+legacy matte and the conditioned-field diagnostics (every Dump 3D request and the evaluation
+harness). Live Host 3D and Convert Video draw with the Direct Glyph palette, so their ordinary
+observations publish only the SCT5 identity, the observation
 record and the joined source/probability snapshot; the support and feature textures are then
 released. The first observation that needs them starts from cleared features, so a Dump 3D taken
 after ordinary live observations shows count one where an always-on history would show two to four.

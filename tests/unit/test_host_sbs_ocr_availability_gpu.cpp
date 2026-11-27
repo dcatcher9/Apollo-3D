@@ -91,7 +91,7 @@ namespace {
         error = "Missing packaged fused depth model";
         return false;
       }
-      const std::filesystem::path glyph_model {models::direct_glyph_model_preset(models::host_sbs_direct_glyph_gpu::tile_profile_e::common, true).asset_path};
+      const std::filesystem::path glyph_model {models::direct_glyph_model_asset_path};
       std::filesystem::create_directory(path / glyph_model.parent_path(), ec);
       if (!ec) {
         std::filesystem::create_hard_link(source / glyph_model, path / glyph_model, ec);

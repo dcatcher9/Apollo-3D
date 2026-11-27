@@ -3496,9 +3496,8 @@ namespace models {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_direct_glyph_source_audit;
     std::array<Microsoft::WRL::ComPtr<ID3D11ComputeShader>, host_sbs_shader_cache::direct_glyph_source_audit_specs.size()>
       subtitle_direct_glyph_source_shaders;
-    std::array<nvinfer1::IExecutionContext *, host_sbs_direct_glyph_gpu::tile_profile_count> subtitle_direct_glyph_contexts {};
-    std::array<std::string, host_sbs_direct_glyph_gpu::tile_profile_count> subtitle_direct_glyph_engine_keys;
-    std::optional<host_sbs_direct_glyph_gpu::tile_profile_e> subtitle_direct_glyph_profile;
+    nvinfer1::IExecutionContext *subtitle_direct_glyph_context = nullptr;
+    std::string subtitle_direct_glyph_engine_key;
     struct subtitle_direct_glyph_job_t {
       host_sbs_direct_glyph_publication::request_t publication;
       host_sbs_direct_glyph_gpu::request_t score;
@@ -3516,8 +3515,6 @@ namespace models {
     bool subtitle_direct_glyph_late_score = false;
     bool subtitle_direct_glyph_score_failed = false;
     bool subtitle_direct_glyph_capture_plan = false;
-    bool subtitle_direct_glyph_adaptive_context = false;
-    bool subtitle_direct_glyph_line_palette = false;
     bool subtitle_direct_glyph_score_retired = false;
     std::string subtitle_direct_glyph_error;
     // Set by the first estimate_depth(); configuration accepted only before the first input.
@@ -6552,8 +6549,7 @@ namespace models {
       const auto crop = subtitle_ocr_source_crop_height(width, height);
       if (!crop || crop > height) return;
       const auto source_request = make_subtitle_direct_glyph_source_request();
-      auto publication = make_subtitle_direct_glyph_publication_request(
-        source_request, width, crop, !subtitle_direct_glyph_adaptive_context);
+      auto publication = make_subtitle_direct_glyph_publication_request(source_request, width, crop, false);
       std::string error;
       if (subtitle_direct_glyph_late_score) {
         glyph::result_t discarded;
@@ -6576,26 +6572,19 @@ namespace models {
         }
       }
       auto *work = subtitle_direct_glyph_publication.plan_direct(context.Get(), publication,
-                                                                  audit ? &*audit : nullptr,
-                                                                  subtitle_direct_glyph_adaptive_context, error,
-                                                                  subtitle_direct_glyph_line_palette);
+                                                                  audit ? &*audit : nullptr, true, error, true);
       if (!work) {
         report_subtitle_direct_glyph_failure(error);
         return;
       }
-      const auto profile = subtitle_direct_glyph_line_palette ? glyph::tile_profile_e::common :
-                           glyph::tile_profile_for_band(width, crop, height - crop);
-      subtitle_direct_glyph_profile = profile;
       const auto &region = pending_root->input_region;
-      const auto line_reference = subtitle_direct_glyph_line_palette && pending_root->subtitle_line_policy == subtitle_line_policy_e::video_caption ?
+      const auto line_reference = pending_root->subtitle_line_policy == subtitle_line_policy_e::video_caption ?
         subtitle_ocr_line_reference(width, height, region.source_width, region.source_height, region.left, region.top, region.is_video_region()) :
         std::nullopt;
       const glyph::request_t score {
         .source_rgb = audit ? audit->display_snapshot_band() : nullptr, .work = work, .width = width, .band_height = crop,
-        .crop_top = height - crop, .token = publication.token, .capture_plan = subtitle_direct_glyph_capture_plan,
-        .adaptive_context = subtitle_direct_glyph_adaptive_context,
-        .profile = profile,
-        .detector_caps = subtitle_direct_glyph_line_palette ? subtitle_direct_glyph_publication.direct_detector_caps() : nullptr,
+        .crop_top = height - crop, .token = publication.token,
+        .detector_caps = subtitle_direct_glyph_publication.direct_detector_caps(),
         .video_caption_ocr = line_reference ? publication.ocr : nullptr,
         .line_center_twice_source = line_reference ? static_cast<UINT>(std::max(0, line_reference->center_twice_source)) : 0u,
         .generation = publication.analysis_generation, .frame = publication.frame,
@@ -6652,14 +6641,14 @@ namespace models {
       if (ready) subtitle_direct_glyph_error.clear();
       else if (!error.empty()) report_subtitle_direct_glyph_failure(error);
       subtitle_selected_matte_commands = subtitle_direct_glyph_publication.publish_direct(
-        context.Get(), job.publication, ready ? result.alpha8.Get() : nullptr, ready ? result.completed_placement.Get() : nullptr);
+        context.Get(), job.publication, ready ? result.alpha8.Get() : nullptr, nullptr);
       subtitle_direct_glyph_score.retire();
       subtitle_direct_glyph_job.reset();
       return true;
     }
 
     void release_subtitle_direct_glyph() noexcept {
-      if (std::ranges::none_of(subtitle_direct_glyph_contexts, [](auto *execution) { return execution != nullptr; })) return;
+      if (!subtitle_direct_glyph_context) return;
       host_sbs_direct_glyph_gpu::result_t discarded;
       std::string error;
       const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds {250};
@@ -6672,27 +6661,14 @@ namespace models {
       }
       const bool released = subtitle_direct_glyph_score.release();
       std::lock_guard lock(g_trt_mutex);
-      for (std::size_t i = 0; i < subtitle_direct_glyph_contexts.size(); ++i) {
-        auto &execution = subtitle_direct_glyph_contexts[i];
-        if (execution) {
-          auto &engine_key = subtitle_direct_glyph_engine_keys[i];
-          recycle_or_quarantine_execution_context_locked(engine_key, execution, true, !released);
-          engine_key.clear();
-        }
-      }
+      recycle_or_quarantine_execution_context_locked(
+        subtitle_direct_glyph_engine_key, subtitle_direct_glyph_context, true, !released);
+      subtitle_direct_glyph_engine_key.clear();
     }
 
     bool prepare_subtitle_direct_glyph(const subtitle_direct_glyph_configuration_t &cfg, std::string &error) {
       if (cfg.shader_root.empty()) {
         error = "Direct glyph shader root missing";
-        return false;
-      }
-      if (cfg.line_palette && (!cfg.adaptive_context || cfg.resolved_fringe)) {
-        error = "Native glyph decoding requires the adaptive OCR work and original detector caps";
-        return false;
-      }
-      if (cfg.resolved_fringe && !cfg.adaptive_context) {
-        error = "Direct glyph fringe requires adaptive context";
         return false;
       }
       namespace audit = host_sbs_shader_cache;
@@ -6708,30 +6684,22 @@ namespace models {
           return false;
         }
       }
-      if (!subtitle_direct_glyph_publication.load_direct(device.Get(), model_shaders, error,
-                                                         cfg.resolved_fringe || cfg.line_palette)) return false;
+      if (!subtitle_direct_glyph_publication.load_direct(device.Get(), model_shaders, error, true)) return false;
       auto &cuda = cuda_driver_api::get();
-      const std::size_t profiles = cfg.line_palette ? 1u : subtitle_direct_glyph_contexts.size();
-      for (std::size_t i = 0; i < profiles; ++i) {
-        const auto profile = static_cast<host_sbs_direct_glyph_gpu::tile_profile_e>(i);
-        nvinfer1::ICudaEngine *engine = nullptr;  // The global engine cache owns its lifetime.
-        if (!acquire_direct_glyph_context(shader_root.parent_path().parent_path(), cuda, cuda_device, engine,
-                                         subtitle_direct_glyph_contexts[i], subtitle_direct_glyph_engine_keys[i], profile,
-                                         cfg.line_palette)) {
-          release_subtitle_direct_glyph();
-          error = "Direct glyph TensorRT asset or execution context unavailable";
-          return false;
-        }
+      nvinfer1::ICudaEngine *engine = nullptr;  // The global engine cache owns its lifetime.
+      if (!acquire_direct_glyph_context(shader_root.parent_path().parent_path(), cuda, cuda_device, engine,
+                                       subtitle_direct_glyph_context, subtitle_direct_glyph_engine_key)) {
+        release_subtitle_direct_glyph();
+        error = "Direct glyph TensorRT asset or execution context unavailable";
+        return false;
       }
       if (!subtitle_direct_glyph_score.prepare(device.Get(), context.Get(), model_shaders, cuda_ctx,
-                                              subtitle_direct_glyph_contexts, error, cfg.line_palette)) {
+                                              subtitle_direct_glyph_context, error)) {
         release_subtitle_direct_glyph();
         return false;
       }
       subtitle_direct_glyph_enabled = true;
       subtitle_direct_glyph_capture_plan = cfg.capture_plan;
-      subtitle_direct_glyph_adaptive_context = cfg.adaptive_context;
-      subtitle_direct_glyph_line_palette = cfg.line_palette;
       return true;
     }
 
@@ -6813,12 +6781,12 @@ namespace models {
     }
 
     // temporal_main publishes native support and the RGB feature history. Only the dense legacy
-    // matte, the conditioned-field diagnostics (including every Dump 3D), the non-adaptive Direct
-    // Glyph variant and evaluation exports read them. Allocate them with the current source band
-    // on the first observation that needs them and release them once one does not, so a later
-    // request starts its history at count one instead of reading stale features.
+    // matte, the conditioned-field diagnostics (including every Dump 3D) and evaluation exports
+    // read them. Allocate them with the current source band on the first observation that needs
+    // them and release them once one does not, so a later request starts its history at count one
+    // instead of reading stale features.
     [[nodiscard]] bool subtitle_contour_history_required(const bool legacy_matte) const noexcept {
-      return legacy_matte || (subtitle_direct_glyph_enabled && !subtitle_direct_glyph_adaptive_context);
+      return legacy_matte;
     }
 
     bool ensure_subtitle_contour_history() {
@@ -10801,24 +10769,17 @@ namespace models {
     result.source_audit = pimpl->subtitle_direct_glyph_source_audit;
     result.legacy_dispatch = pimpl->subtitle_direct_glyph_publication.direct_legacy_dispatch_for_evaluation();
     if (pimpl->subtitle_direct_glyph_capture_plan && pimpl->subtitle_direct_glyph_score_retired) {
-      result.placement = pimpl->subtitle_direct_glyph_score.placement_for_evaluation();
-      result.post_plan_work = pimpl->subtitle_direct_glyph_score.post_plan_work_for_evaluation();
       result.native_lines = pimpl->subtitle_direct_glyph_score.native_lines_for_evaluation();
     }
     return result;
   }
 
   std::filesystem::path video_depth_estimator::direct_glyph_engine_path_for_evaluation() const {
-    const auto profile = direct_glyph_profile_for_evaluation();
-    if (!profile) return {};
-    const auto &key = pimpl->subtitle_direct_glyph_engine_keys[static_cast<std::size_t>(*profile)];
+    if (!pimpl || !pimpl->subtitle_direct_glyph_enabled) return {};
+    const auto &key = pimpl->subtitle_direct_glyph_engine_key;
     const auto delimiter = key.find(':');
     if (delimiter == std::string::npos) return {};
     return pimpl->shader_root.parent_path().parent_path() / key.substr(delimiter + 1);
-  }
-
-  std::optional<host_sbs_direct_glyph_gpu::tile_profile_e> video_depth_estimator::direct_glyph_profile_for_evaluation() const {
-    return pimpl && pimpl->subtitle_direct_glyph_enabled ? pimpl->subtitle_direct_glyph_profile : std::nullopt;
   }
 
   depth_telemetry_poll_result video_depth_estimator::latest_depth_telemetry() const {

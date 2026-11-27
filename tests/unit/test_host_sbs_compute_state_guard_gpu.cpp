@@ -18,7 +18,6 @@ namespace {
   namespace guard = models::host_sbs_compute_state;
 
   // Each pass family restores exactly the slots it binds.
-  static_assert(std::is_same_v<models::host_sbs_direct_glyph_gpu::detail::transport_state_t, guard::guard_t<3u, 3u, 1u>>);
   static_assert(std::is_same_v<models::host_sbs_direct_glyph_gpu::detail::palette_state_t, guard::guard_t<16u, 5u, 1u>>);
   static_assert(std::is_same_v<models::host_sbs_direct_glyph_publication::compute_state_t, guard::guard_t<25u, 8u, 3u>>);
   static_assert(std::is_same_v<models::display_snapshot_rgb8_analysis_gpu_v1::compute_state_t, guard::guard_t<16u, 8u, 3u>>);
@@ -181,10 +180,6 @@ namespace {
         bound_cbs[i]->Release();
       }
     }
-  }
-
-  TEST(HostSbsComputeStateGuardGpuTest, DirectGlyphTransportRestoresExactlyItsSlots) {
-    expect_exact_restore<models::host_sbs_direct_glyph_gpu::detail::transport_state_t>();
   }
 
   TEST(HostSbsComputeStateGuardGpuTest, DirectGlyphPaletteRestoresExactlyItsSlots) {
