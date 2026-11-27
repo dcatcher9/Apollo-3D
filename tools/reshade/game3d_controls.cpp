@@ -551,6 +551,98 @@ namespace sunshine_game3d {
     if (!registered) return;
     calibration_status(query_automatic(runtime), get_state(runtime)->values.strength);
   }
+
+  namespace {
+    void draw_depth_panel(api::effect_runtime *runtime, const depth_panel_status &status, bool troubleshooting) {
+      using state = depth_panel_status::state;
+      if (status.availability == state::not_registered) {
+        ImGui::TextWrapped("%s", status.message);
+        return;
+      }
+      if (status.availability == state::unsupported_api) {
+        ImGui::TextWrapped("Depth: unavailable. This game does not render with Direct3D 11 or Direct3D 12, which Game 3D needs.");
+        return;
+      }
+      if (status.availability != state::ready) {
+        ImGui::TextWrapped("Waiting for the game to create a depth selection runtime.");
+        return;
+      }
+      const bool game_provided = status.game_provided;
+      const char *provider_name = status.ngx ? "NGX" : "Streamline";
+      if (!troubleshooting) {
+        if (game_provided) {
+          // Ownership survives capture gaps. The dimensions describe the last valid
+          // source, not a claim that the current presentation has usable depth.
+          if (status.provided_last_valid)
+            ImGui::TextWrapped("Depth: %s | %ux%u | game provided", provider_name,
+              status.provided_width, status.provided_height);
+          else
+            ImGui::TextWrapped("Depth: %s | waiting for first depth", provider_name);
+          ImGui::SetItemTooltip("The game-provided source remains selected through capture gaps. Dimensions are from its last valid capture. Current availability and depth freshness are shown in the status rows.");
+        } else if (status.generic_buffer)
+          ImGui::TextWrapped("Depth: Generic | %ux%u | %s",
+            status.generic_width, status.generic_height, status.generic_format);
+        else
+          ImGui::TextWrapped("Depth: Generic | waiting for a usable buffer");
+        if (!game_provided && status.generic_current) {
+          ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
+          ImGui::TextWrapped("Generic depth fallback is in use. Game-provided depth and camera data are not used.");
+          ImGui::PopStyleColor();
+        }
+
+        if (!game_provided && !status.binding_ready)
+          ImGui::TextWrapped("%s", status.binding_detail);
+        if (game_provided) {
+          // Report freshness over a completed window instead of alternating
+          // Ready/Previous on every frame-generation presentation.
+          const auto &stats = status.presentations;
+          if (const auto total = stats.total()) {
+            const double percent = 100.0 / static_cast<double>(total);
+            ImGui::TextWrapped("Fresh: %.1f%% | Previous: %.1f%% | Unavailable: %.1f%%",
+              stats.fresh * percent, stats.reused * percent, stats.unavailable * percent);
+            ImGui::TextDisabled("Last %.0f s | %llu presentations", stats.window_ms / 1000.0,
+              static_cast<unsigned long long>(total));
+          } else
+            ImGui::TextDisabled("Depth freshness: collecting samples (5-second window)");
+          if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Updates once per second. Fresh = newly copied depth; Previous = reused depth; Unavailable = no usable depth.\n"
+              "All observed presentations are counted. This does not identify rendered or generated color frames.");
+        }
+        return;
+      }
+      draw_diagnostics(runtime);
+    }
+  }  // namespace
+
+  void draw_settings_panel(api::effect_runtime *runtime, depth_panel_status_reader depth_status, int selected_tab) {
+    if (!draw(runtime))
+      return;
+    // All live prose is below the controls and tab bar. Tabs keep source and
+    // preview controls stationary even when status messages wrap or disappear.
+    if (!ImGui::BeginTabBar("Game3DDetails"))
+      return;
+    if (ImGui::BeginTabItem("Status", nullptr, selected_tab == 0 ? ImGuiTabItemFlags_SetSelected : 0)) {
+      if (ImGui::BeginChild("StatusContent")) {
+        draw_status(runtime);
+        draw_depth_panel(runtime, depth_status(runtime), false);
+      }
+      ImGui::EndChild();
+      ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem("Troubleshooting", nullptr, selected_tab == 1 ? ImGuiTabItemFlags_SetSelected : 0)) {
+      if (ImGui::BeginChild("TroubleshootingContent", ImVec2(0, 0), 0, ImGuiWindowFlags_AlwaysVerticalScrollbar))
+        draw_depth_panel(runtime, depth_status(runtime), true);
+      ImGui::EndChild();
+      ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem("Calibration", nullptr, selected_tab == 2 ? ImGuiTabItemFlags_SetSelected : 0)) {
+      if (ImGui::BeginChild("CalibrationContent"))
+        draw_calibration(runtime);
+      ImGui::EndChild();
+      ImGui::EndTabItem();
+    }
+    ImGui::EndTabBar();
+  }
 #ifdef SUNSHINE_SBS_RUNTIME_TEST_ADDON
   // Scalar-only adapters retain the existing test ABI while exercising native
   // config ownership. No test path reflects, modifies or saves shader presets.

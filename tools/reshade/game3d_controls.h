@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
+#include "depth_presentation_stats.h"
 #include "game3d_alpha_auto.h"
 #include "game3d_ui_qualification.h"
 #include <algorithm>
@@ -288,4 +289,32 @@ namespace sunshine_game3d {
   // Preview and source overrides, ahead of live diagnostics. Does not request
   // candidate enumeration.
   bool draw_diagnostics(reshade::api::effect_runtime *runtime);
+
+  // The depth rows of the overlay's settings panel: a read-only copy of the
+  // depth selector's state (depth_addon.cpp, depth_status.inl), taken when
+  // the panel draws them. Values only; no borrowed GPU objects.
+  struct depth_panel_status {
+    enum class state { not_registered, unsupported_api, waiting_for_runtime, ready };
+    state availability = state::waiting_for_runtime;
+    // not_registered: the selector's setup message.
+    const char *message = "";
+    // Game-provided (API) depth owns the source; ngx names NGX, else Streamline.
+    // The dimensions are its last valid source's.
+    bool game_provided = false, ngx = false, provided_last_valid = false;
+    std::uint32_t provided_width = 0, provided_height = 0;
+    sunshine_depth_stats::presentation_statistics presentations;
+    // Generic: a bound buffer, its size and format name, and whether its depth
+    // is this Present's.
+    bool generic_buffer = false, generic_current = false;
+    std::uint32_t generic_width = 0, generic_height = 0;
+    const char *generic_format = "";
+    bool binding_ready = false;
+    const char *binding_detail = "";
+  };
+  using depth_panel_status_reader = depth_panel_status (*)(reshade::api::effect_runtime *runtime);
+  // The overlay's settings panel: the primary controls, then the Status,
+  // Troubleshooting and Calibration tabs. depth_status is read where the tabs
+  // draw depth rows. selected_tab (0 to 2) selects a tab (the test add-on).
+  void draw_settings_panel(reshade::api::effect_runtime *runtime, depth_panel_status_reader depth_status,
+    int selected_tab = -1);
 }  // namespace sunshine_game3d

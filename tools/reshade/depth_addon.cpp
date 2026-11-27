@@ -15,7 +15,6 @@
 #include <TlHelp32.h>
 #include <Unknwn.h>
 #include <d3d12.h>
-#include <imgui.h>
 #include <reshade.hpp>
 #include "async_log.h"
 #include <mutex>
@@ -159,9 +158,9 @@ static const char *binding_state_name(depth_binding_state state)
 	}
 }
 
-// Generic depth's status reporting, defined in depth_panel.inl (included at
+// Generic depth's status reporting, defined in depth_status.inl (included at
 // the end of this file): the depth-format names, begin_depth_frame's status
-// line and the overlay's settings panel.
+// line and the overlay's entry to the settings panel (game3d_controls.cpp).
 static const char *const format_to_string(format value);
 static void log_depth_status(generic_depth_data &data);
 static void draw_settings_overlay(effect_runtime *runtime);
@@ -1042,7 +1041,7 @@ static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)
 	bind_generic(runtime);
 	if (prev_shader_resource != data.selected_shader_resource && !owns_member_view(data, prev_shader_resource))
 		device->destroy_resource_view(prev_shader_resource);
-	log_depth_status(data); // The status line (depth_panel.inl).
+	log_depth_status(data); // The status line (depth_status.inl).
 	prepare_probe_target(runtime, cmd_list, data, *device_data);
 	data.native_access_present = native_present_index;
 	data.native_access_open = true;
@@ -1328,5 +1327,5 @@ bool sunshine_depth::get_frame_depth(effect_runtime *runtime, frame_depth &outpu
 #include "generic_recording.inl"
 #include "generic_probe.inl"
 #include "generic_selection.inl"
-#include "depth_panel.inl"
+#include "depth_status.inl"
 #include "generic_raw_evidence.inl"
