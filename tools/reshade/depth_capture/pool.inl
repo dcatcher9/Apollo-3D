@@ -131,7 +131,16 @@ namespace sunshine_streamline::depth_capture {
 
     // Leaves the count last: a waiter may then release the device.
     void release_storage_job(storage_job &job, bool pooled) {
-#include "report_storage_release.inl"
+      const sunshine_game3d::stopwatch watch;
+      std::uint64_t bytes = 0;
+      const auto count = static_cast<unsigned>(job.values.size());
+      for (const auto &value : job.values) if (value.use_count() == 1) bytes += value->allocation_bytes;
+      // During the add-on's detach, devices may be gone: nothing is released
+      // then (the process is ending or the add-on is unloading for good).
+      if (sunshine_addon_lifetime::stopping()) (void) new (std::nothrow) storage_list(std::move(job.values));
+      job.values.clear();
+      static std::atomic<std::uint64_t> next_line{};
+      sunshine_game3d::report_slow_release(next_line, "depth capture storage release", pooled, watch.ms(), count, bytes);
       {
         std::lock_guard lock(storage_jobs.mutex);
         --storage_jobs.outstanding;

@@ -43,6 +43,28 @@ namespace sunshine_game3d {
     }
   }  // namespace slow_step_detail
 
+  // One QueryPerformanceCounter interval, from construction to ms().
+  class stopwatch {
+  public:
+    stopwatch() { QueryPerformanceCounter(&start_); }
+    // Milliseconds since construction.
+    double ms() const {
+      LARGE_INTEGER end{};
+      QueryPerformanceCounter(&end);
+      return double(end.QuadPart - start_.QuadPart) * 1000.0 / frequency();
+    }
+    // When it started, in QueryPerformanceCounter milliseconds.
+    double began_ms() const { return double(start_.QuadPart) * 1000.0 / frequency(); }
+
+  private:
+    static double frequency() {
+      LARGE_INTEGER value{};
+      QueryPerformanceFrequency(&value);
+      return double(value.QuadPart);
+    }
+    LARGE_INTEGER start_{};
+  };
+
   // Names a present-thread step that took long enough to be a visible hitch.
   // Quiet on the normal path: one QueryPerformanceCounter pair per step, and at
   // most one log line per second for each step name. Every scope over its
@@ -52,23 +74,17 @@ namespace sunshine_game3d {
   // the async log writer stamped them.
   class slow_step {
   public:
-    explicit slow_step(const char *name, double threshold_ms = 8.0) : name_(name), threshold_ms_(threshold_ms) {
-      QueryPerformanceCounter(&start_);
-    }
+    explicit slow_step(const char *name, double threshold_ms = 8.0) : name_(name), threshold_ms_(threshold_ms) {}
     ~slow_step() {
-      LARGE_INTEGER end{}, frequency{};
-      QueryPerformanceCounter(&end);
-      QueryPerformanceFrequency(&frequency);
-      const double ms = double(end.QuadPart - start_.QuadPart) * 1000.0 / double(frequency.QuadPart);
+      const double ms = watch_.ms();
       if (ms < threshold_ms_) return;
       auto &throttle = slow_step_detail::find(name_);
       if (!sunshine_diagnostics::claim_line(throttle.next_log, sunshine_game3d::clock::game_now(), 1000)) return;
       // The game process's latest video-memory sample (game3d_vram.h) follows.
       const vram::latest_suffix memory;
       char message[224];
-      const double began = double(start_.QuadPart) * 1000.0 / double(frequency.QuadPart);
       std::snprintf(message, sizeof(message), "Sunshine Game 3D hitch: %s took %.1f ms on the present thread (began %.1f ms)%s",
-        name_, ms, began, memory.text);
+        name_, ms, watch_.began_ms(), memory.text);
       sunshine_log::message(reshade::log::level::warning, message);
     }
     slow_step(const slow_step &) = delete;
@@ -77,6 +93,21 @@ namespace sunshine_game3d {
   private:
     const char *name_;
     double threshold_ms_;
-    LARGE_INTEGER start_{};
+    stopwatch watch_;
   };
+
+  // A release of GPU objects that took ms: on a pool thread (pooled), one of
+  // 8 ms or more is logged, at most once a second per kind of release (next,
+  // the caller's own throttle), with what it released (what, textures,
+  // bytes) and the game process's latest video-memory sample. On the present
+  // thread the caller's slow_step names the step instead.
+  inline void report_slow_release(std::atomic<std::uint64_t> &next, const char *what, bool pooled, double ms,
+      unsigned textures, std::uint64_t bytes) {
+    if (!pooled || ms < 8.0 || !sunshine_diagnostics::claim_line(next, clock::game_now(), 1000)) return;
+    const vram::latest_suffix memory;
+    char text[256];
+    std::snprintf(text, sizeof(text), "Sunshine Game 3D: %s took %.1f ms off the present thread (%u textures, %.1f MiB)%s",
+      what, ms, textures, double(bytes) / 1048576.0, memory.text);
+    sunshine_log::message(reshade::log::level::info, text);
+  }
 }
