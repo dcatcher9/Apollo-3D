@@ -109,7 +109,7 @@ for (const [status, body, contentType] of [
 }
 
 test('an expired session is a 401 error, and the page is not navigated', async t => {
-  // confighttp.cpp send_unauthorized() reply for an `api` or `json_api` route.
+  // confighttp_common.cpp send_unauthorized() reply for an `api` or `json_api` route.
   const payload = { status_code: 401, status: false, error: 'Unauthorized' }
   capture(t, reply(401, JSON.stringify(payload)))
   const location = { href: 'https://host:47990/config' }

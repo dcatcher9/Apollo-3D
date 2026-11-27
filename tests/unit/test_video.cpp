@@ -8287,7 +8287,7 @@ TEST(AsyncTeardownLifecycleSourceTests, DrainsTrackedOwnersBeforeProcessGlobals)
     SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp"
   );
   const auto main_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/main.cpp");
-  const auto config_http = read_source_file(SUNSHINE_SOURCE_DIR "/src/confighttp.cpp");
+  const auto config_http = read_source_file(SUNSHINE_SOURCE_DIR "/src/confighttp_config.cpp");
   ASSERT_FALSE(video_source.empty());
   ASSERT_FALSE(display.empty());
   ASSERT_FALSE(main_source.empty());
@@ -8399,7 +8399,7 @@ TEST(AsyncTeardownLifecycleSourceTests, DrainsTrackedOwnersBeforeProcessGlobals)
     << "The monitor owns references to main-thread state and may never outlive it.";
 
   const auto quit_begin = config_http.find("void quit(resp_https_t response");
-  const auto quit_end = config_http.find("void disconnect(", quit_begin);
+  const auto quit_end = config_http.find("}  // namespace confighttp", quit_begin);
   ASSERT_NE(quit_begin, std::string::npos);
   ASSERT_NE(quit_end, std::string::npos);
   const auto quit_scope = config_http.substr(quit_begin, quit_end - quit_begin);

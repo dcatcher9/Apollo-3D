@@ -4,7 +4,7 @@ export const settingEnabled = value => value === true || value === 1 || ['enable
 // local_monitor_enabled switch is not part of it; local_display_surface replaced it. Neither
 // is local_monitor_mode: the 3D source is switched live while 3D runs, so the running value
 // differs from the page's copy without anything left to save. Save writes the live choice in
-// its place (confighttp.cpp), so the form neither shows nor validates it.
+// its place (confighttp_config.cpp), so the form neither shows nor validates it.
 export const localMonitorFingerprint = config => JSON.stringify(Object.keys(config || {})
   .filter(key => key === 'local_display_surface' ||
     (key.startsWith('local_monitor_') && key !== 'local_monitor_enabled' && key !== 'local_monitor_mode')).sort().map(key => [key,

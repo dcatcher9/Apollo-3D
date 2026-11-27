@@ -458,7 +458,11 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolated) {
   const auto shared_api = read_source(web_root / "api.js");
   const auto navbar = read_source(web_root / "Navbar.vue");
   const auto vite = read_source(fs::path(SUNSHINE_SOURCE_DIR) / "vite.config.js");
+  // The route table and server are in confighttp.cpp; the Convert Video handlers in their own file.
   const auto http = read_source(fs::path(SUNSHINE_SOURCE_DIR) / "src/confighttp.cpp");
+  const auto offline_http =
+    read_source(fs::path(SUNSHINE_SOURCE_DIR) / "src/confighttp_offline_sbs.cpp");
+  const auto http_guards = read_source(fs::path(SUNSHINE_SOURCE_DIR) / "src/confighttp_common.cpp");
   const auto jobs =
     read_source(fs::path(SUNSHINE_SOURCE_DIR) / "src/offline_sbs_job.cpp");
 
@@ -617,12 +621,12 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolated) {
     http.find("server.resource[\"^/api/offline-sbs/browse$\"][\"POST\"]"),
     std::string::npos
   );
-  const auto browse_handler = http.find("void browseOfflineSbsFilesystem");
-  const auto list_handler = http.find("void listOfflineSbsJobs", browse_handler);
+  const auto browse_handler = offline_http.find("void browseOfflineSbsFilesystem");
+  const auto list_handler = offline_http.find("void listOfflineSbsJobs", browse_handler);
   ASSERT_NE(browse_handler, std::string::npos);
   ASSERT_NE(list_handler, std::string::npos);
   const auto browse_handler_source =
-    http.substr(browse_handler, list_handler - browse_handler);
+    offline_http.substr(browse_handler, list_handler - browse_handler);
   EXPECT_NE(
     http.find("guarded(access_e::api, browseOfflineSbsFilesystem)"),
     std::string::npos
@@ -648,7 +652,8 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolated) {
     std::string::npos
   );
   EXPECT_EQ(http.find("scene-audit"), std::string::npos);
-  EXPECT_NE(http.find("void clearOfflineSbsJob"), std::string::npos);
+  EXPECT_EQ(offline_http.find("scene-audit"), std::string::npos);
+  EXPECT_NE(offline_http.find("void clearOfflineSbsJob"), std::string::npos);
   EXPECT_NE(
     http.find(
       "server.resource[\"^/api/offline-sbs/jobs/([0-9A-Fa-f-]+)$\"][\"DELETE\"]"
@@ -679,9 +684,11 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolated) {
     http.find("authenticate(response, request, access == access_e::page)"),
     std::string::npos
   );
-  EXPECT_EQ(http.find("authenticateOfflineSbs"), std::string::npos);
+  for (const auto *source : {&http, &offline_http, &http_guards}) {
+    EXPECT_EQ(source->find("authenticateOfflineSbs"), std::string::npos);
+  }
   EXPECT_NE(
-    http.find("!validateOfflineSbsRequestSize(response, request)"),
+    offline_http.find("!validateOfflineSbsRequestSize(response, request)"),
     std::string::npos
   );
   EXPECT_NE(
