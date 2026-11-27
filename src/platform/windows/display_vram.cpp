@@ -2623,7 +2623,6 @@ namespace platf::dxgi {
             // One fresh pin field uses the current actual draw source. The immutable draw
             // keeps the selected receipt/current RGB checks and performs no RGB reconstruction.
             namespace shared_warp = models::host_sbs_shared_ui_warp;
-            constexpr auto pin_bindings = shared_warp::resources_t::binding_policy_e::converter_owned;
             shared_warp::views_t current_shared_warp;
             bool shared_warp_selected = false;
             // Preparation and the pre-Draw observer derive the same literal request from
@@ -2645,7 +2644,7 @@ namespace platf::dxgi {
               if (selected_shared_warp.prepare_subtitle(
                     device.get(), device_ctx.get(), program, request,
                     {subtitle_constants.source_width, subtitle_constants.source_height, subtitle_constants.source_top},
-                    shared_error, pin_bindings
+                    shared_error
                   ) && selected_shared_warp.matches(device_ctx.get(), request)) {
                 current_shared_warp = selected_shared_warp.views();
                 shared_warp_selected = true;

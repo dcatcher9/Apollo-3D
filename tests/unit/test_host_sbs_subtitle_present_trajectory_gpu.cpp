@@ -541,7 +541,7 @@ namespace {
         context->PSSetConstantBuffers(4, 1, direct_constants);
       }
       const bool shared_draw = shared_subtitle_route && subtitle;
-      const platf::dxgi::host_sbs_v2_draw_command_t draw_command {
+      platf::dxgi::host_sbs_v2_draw_command_t draw_command {
         .render_targets = {output_rtv.Get(), nullptr},
         .render_target_count = 1u,
         .vertex_shader = vertex_shader.Get(),
@@ -578,17 +578,13 @@ namespace {
             !shared_owner.queue(context.Get(), shared_programs.program(), request, error) ||
             !shared_owner.matches(context.Get(), request)) return false;
         shared_views = shared_owner.views();
+        draw_command.shared_pin = platf::dxgi::host_sbs_v2_shared_pin_bindings_t {
+          {shared_views.weights.Get(), shared_views.field.Get(), shared_views.rows.Get()},
+          shared_views.geometry.Get(),
+          receipt_srv.Get(),
+        };
       }
-      bool submitted = false;
-      {
-        models::host_sbs_shared_ui_warp::scoped_receipt_t receipt_scope;
-        models::host_sbs_shared_ui_warp::scoped_binding_t shared_scope;
-        if (shared_draw && (!receipt_scope.bind(context.Get(), receipt_srv.Get()) ||
-            !shared_scope.bind(context.Get(), &shared_views))) {
-          error = "trajectory shared draw operand binding failed";return false;
-        }
-        submitted = platf::dxgi::record_host_sbs_v2_draw(context.Get(), draw_command);
-      }
+      const bool submitted = platf::dxgi::record_host_sbs_v2_draw(context.Get(), draw_command);
       ID3D11Buffer *null_constants = nullptr;
       context->PSSetConstantBuffers(4u, 1u, &null_constants);
       if (!submitted) {

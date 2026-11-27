@@ -259,13 +259,15 @@ namespace sbs_bench::subtitle_qualification {
         draw.bound_draw_observer_state = &observer;
         draw.observe_bound_draw = &observer_t::observe;
       }
-      {
-        shared_warp::scoped_receipt_t selected;
-        shared_warp::scoped_binding_t shared;
-        if (!selected.bind(context, receipt) || !shared.bind(context, &views) || !platf::dxgi::record_host_sbs_v2_draw(context, draw) || (evidence && !observer.matched)) {
-          error = "subtitle qualification did not observe exact selected/shared-warp draw bindings";
-          return false;
-        }
+      // Bind exactly as the live converter does: the recorder owns t0..t14 and b2..b6.
+      draw.shared_pin = platf::dxgi::host_sbs_v2_shared_pin_bindings_t {
+        {views.weights.Get(), views.field.Get(), views.rows.Get()},
+        views.geometry.Get(),
+        receipt,
+      };
+      if (!platf::dxgi::record_host_sbs_v2_draw(context, draw) || (evidence && !observer.matched)) {
+        error = "subtitle qualification did not observe exact selected/shared-warp draw bindings";
+        return false;
       }
       if (!evidence) return true; // Follow conversion adds no observer or diagnostic readback.
       evidence->bindings_observed = observer.matched;

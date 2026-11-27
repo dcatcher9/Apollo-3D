@@ -271,8 +271,6 @@ namespace platf::dxgi {
     const bool selected,
     const bool diagnostics
   ) {
-    namespace shared_warp = models::host_sbs_shared_ui_warp;
-    constexpr auto pin_bindings = shared_warp::resources_t::binding_policy_e::converter_owned;
     pin_draw_t result;
     request.text_game = true;
     request.text_game_coverage = coverage_srv_.get();
@@ -282,7 +280,7 @@ namespace platf::dxgi {
     request.text_game_observe_only = observe_only;
     std::string error;
     const bool queued = shared_warp_.ensure(device, shape, error) &&
-                        shared_warp_.queue(context, program, request, error, pin_bindings);
+                        shared_warp_.queue(context, program, request, error);
     result.selected = selected && queued && shared_warp_.matches(context, request);
     if (result.selected) {
       result.views = shared_warp_.views();

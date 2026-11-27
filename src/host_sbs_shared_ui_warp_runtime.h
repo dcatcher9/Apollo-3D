@@ -329,14 +329,16 @@ namespace models::host_sbs_shared_ui_warp {
       context->CSSetUnorderedAccessViews(0u, 4u, uavs, nullptr);
     }
 
-    // The pin planes are reserved PS12..14 outputs. Both policies unbind them before writes.
+    // The pin planes are reserved PS12..14 outputs. Preparation unbinds them before writes.
     static void unbind_preparation_resources(ID3D11DeviceContext *context) {
       unbind_compute_resources(context);
       ID3D11ShaderResourceView *pixel[3] {};
       context->PSSetShaderResources(12u, 3u, pixel);
     }
 
-    static void clear_converter_bindings(ID3D11DeviceContext *context, const bool text_game) {
+    // The converter owns its compute bindings: preparation leaves every slot it touched clear
+    // for the converter's next pass, and the draw command binds the planes itself.
+    static void clear_preparation_bindings(ID3D11DeviceContext *context, const bool text_game) {
       unbind_compute_resources(context);
       ID3D11Buffer *constants[3] {};
       context->CSSetConstantBuffers(2u, 2u, constants);
@@ -345,50 +347,6 @@ namespace models::host_sbs_shared_ui_warp {
       context->CSSetSamplers(0u, 1u, &sampler);
       context->CSSetShader(nullptr, nullptr, 0u);
     }
-
-    // Standalone preparation restores every touched slot, sampler, shader and class instance.
-    struct saved_t {
-      ID3D11DeviceContext *context;
-      std::array<ComPtr<ID3D11ShaderResourceView>, compute_srv_count> srvs;
-      std::array<ComPtr<ID3D11UnorderedAccessView>, 4u> uavs;
-      std::array<ComPtr<ID3D11Buffer>, 8u> constants;
-      std::array<ComPtr<ID3D11ShaderResourceView>, 3u> pixel;
-      ComPtr<ID3D11SamplerState> sampler;
-      ComPtr<ID3D11ComputeShader> shader;
-      std::array<ComPtr<ID3D11ClassInstance>, 256u> instances;
-      UINT count = 256u;
-
-      explicit saved_t(ID3D11DeviceContext *c): context(c) {
-        ID3D11ShaderResourceView *s[compute_srv_count] {}, *p[3] {};
-        ID3D11UnorderedAccessView *u[4] {};
-        ID3D11Buffer *b[8] {};
-        ID3D11ClassInstance *ci[256] {};
-        c->CSGetShaderResources(0u, compute_srv_count, s); c->CSGetUnorderedAccessViews(0u, 4u, u);
-        c->CSGetConstantBuffers(0u, 8u, b); c->CSGetSamplers(0u, 1u, &sampler);
-        c->CSGetShader(&shader, ci, &count); c->PSGetShaderResources(12u, 3u, p);
-        for (std::size_t i = 0u; i < srvs.size(); ++i) srvs[i].Attach(s[i]);
-        for (std::size_t i = 0u; i < uavs.size(); ++i) uavs[i].Attach(u[i]);
-        for (std::size_t i = 0u; i < constants.size(); ++i) constants[i].Attach(b[i]);
-        for (std::size_t i = 0u; i < pixel.size(); ++i) pixel[i].Attach(p[i]);
-        for (UINT i = 0u; i < count; ++i) instances[i].Attach(ci[i]);
-      }
-      ~saved_t() {
-        unbind_preparation_resources(context);
-        ID3D11ShaderResourceView *s[compute_srv_count] {}, *p[3] {};
-        ID3D11UnorderedAccessView *u[4] {};
-        ID3D11Buffer *b[8] {};
-        ID3D11ClassInstance *ci[256] {};
-        for (std::size_t i = 0u; i < srvs.size(); ++i) s[i] = srvs[i].Get();
-        for (std::size_t i = 0u; i < uavs.size(); ++i) u[i] = uavs[i].Get();
-        for (std::size_t i = 0u; i < constants.size(); ++i) b[i] = constants[i].Get();
-        for (std::size_t i = 0u; i < pixel.size(); ++i) p[i] = pixel[i].Get();
-        for (UINT i = 0u; i < count; ++i) ci[i] = instances[i].Get();
-        context->CSSetShaderResources(0u, compute_srv_count, s); context->CSSetUnorderedAccessViews(0u, 4u, u, nullptr);
-        context->CSSetConstantBuffers(0u, 8u, b);
-        auto *old_sampler = sampler.Get(); context->CSSetSamplers(0u, 1u, &old_sampler);
-        context->CSSetShader(shader.Get(), ci, count); context->PSSetShaderResources(12u, 3u, p);
-      }
-    };
 
     bool create_verdict() {
       if (verdict_uav_) return true;
@@ -426,8 +384,6 @@ namespace models::host_sbs_shared_ui_warp {
     }
 
   public:
-    enum class binding_policy_e { restore, converter_owned };
-
     resources_t() = default;
     resources_t(const resources_t &) = delete;
     resources_t &operator=(const resources_t &) = delete;
@@ -472,8 +428,7 @@ namespace models::host_sbs_shared_ui_warp {
     // The supplied domain is the one uploaded to the subtitle constants for this draw.
     // Inspect the literal color and matte once to place the full-width pin band.
     bool prepare_subtitle(ID3D11Device *device, ID3D11DeviceContext *context, const program_t &program,
-                          const request_t &request, const subtitle_domain_t domain, std::string &error,
-                          const binding_policy_e binding_policy = binding_policy_e::restore) {
+                          const request_t &request, const subtitle_domain_t domain, std::string &error) {
       issued_ = false;
       if (request.text_game || !request.draw_srvs[0] || !request.draw_srvs[3]) {
         error = "Shared UI warp source or subtitle matte unavailable";
@@ -507,21 +462,20 @@ namespace models::host_sbs_shared_ui_warp {
       const std::array<UINT, 4u> shape {
         source.Width, source.Height, padded_top, std::min(source.Height, band_end + 1u) - padded_top,
       };
-      return ensure(device, shape, error) && queue_draw(context, program, request, error, binding_policy, &inputs);
+      return ensure(device, shape, error) && queue_draw(context, program, request, error, &inputs);
     }
 
-    bool queue(ID3D11DeviceContext *context, const program_t &program, const request_t &request, std::string &error,
-               const binding_policy_e binding_policy = binding_policy_e::restore) {
-      return queue_draw(context, program, request, error, binding_policy, nullptr);
+    bool queue(ID3D11DeviceContext *context, const program_t &program, const request_t &request, std::string &error) {
+      return queue_draw(context, program, request, error, nullptr);
     }
 
   private:
     // Serial immediate-context submission only. CPU shape/resource checks grant no mask
     // authority; the GPU validates the current SCT/SCP/state/receipt/RGB for this draw.
     // Keep all operands immutable until the matching draw, before any subsequent queue.
-    // The converter-owned policy leaves preparation bindings clear for its next draw.
+    // Preparation leaves its compute bindings clear; the draw command binds the planes.
     bool queue_draw(ID3D11DeviceContext *context, const program_t &program, const request_t &request, std::string &error,
-                    const binding_policy_e binding_policy, const subtitle_inputs_t *subtitle_inputs) {
+                    const subtitle_inputs_t *subtitle_inputs) {
       issued_ = false; error.clear();
       if (!geometry_ || request.text_game != program.text_game || !context || context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE || !same_device(context) ||
           !programs_.acquire(device_.Get(), {program.initialize, program.pin}) || !same_device(program.pixel) ||
@@ -569,8 +523,6 @@ namespace models::host_sbs_shared_ui_warp {
       if (request.text_game ? !create_verdict() : !create_preparation()) {
         error = "Shared UI warp preparation allocation failed"; return false;
       }
-      std::optional<saved_t> saved;
-      if (binding_policy != binding_policy_e::converter_owned) saved.emplace(context);
       unbind_preparation_resources(context);
       const UINT clear[4] {}; context->ClearUnorderedAccessViewUint(rows_.uav.Get(), clear);
       ID3D11ShaderResourceView *srvs[compute_srv_count] {};
@@ -600,7 +552,7 @@ namespace models::host_sbs_shared_ui_warp {
         context->Dispatch((shape_[0] + 15u) / 16u, (shape_[3] + 15u) / 16u, 1u);
         context->CSSetUnorderedAccessViews(3u, 1u, &null_view, nullptr);
         if (request.text_game_observe_only) {
-          if (binding_policy == binding_policy_e::converter_owned) clear_converter_bindings(context, true);
+          clear_preparation_bindings(context, true);
           return true;
         }
         auto *verdict_input = verdict_srv_.Get();
@@ -647,7 +599,7 @@ namespace models::host_sbs_shared_ui_warp {
       text_game_constants_ = request.text_game_constants; text_game_coverage_ = request.text_game_coverage; text_game_ = request.text_game;
       materialize_inactive_ = request.materialize_inactive;
       context_ = context; ++serial_; issued_ = true;
-      if (binding_policy == binding_policy_e::converter_owned) clear_converter_bindings(context, request.text_game);
+      clear_preparation_bindings(context, request.text_game);
       return true;
     }
 
@@ -666,76 +618,4 @@ namespace models::host_sbs_shared_ui_warp {
     [[nodiscard]] views_t views() const { return issued_ ? views_t {weights_.srv, field_.srv, rows_.srv, geometry_, shape_, serial_} : views_t {}; }
   };
 
-  class scoped_binding_t {
-    ID3D11DeviceContext *context_ = nullptr;
-    std::array<ComPtr<ID3D11ShaderResourceView>, 3u> prior_;
-    ComPtr<ID3D11Buffer> geometry_;
-    ComPtr<ID3D11ShaderResourceView> background_, background_proof_;
-    ComPtr<ID3D11Buffer> background_constants_;
-
-  public:
-    scoped_binding_t() = default;
-    scoped_binding_t(const scoped_binding_t &) = delete;
-    scoped_binding_t &operator=(const scoped_binding_t &) = delete;
-
-    bool bind(ID3D11DeviceContext *context, const views_t *views) {
-      if (!context || context_) return false;
-      ID3D11ShaderResourceView *prior[3] {}; context->PSGetShaderResources(12u, 3u, prior);
-      for (std::size_t i = 0u; i < prior_.size(); ++i) prior_[i].Attach(prior[i]);
-      context->PSGetConstantBuffers(6u, 1u, &geometry_); context_ = context;
-      context->PSGetShaderResources(9u, 1u, &background_); context->PSGetShaderResources(11u, 1u, &background_proof_);
-      context->PSGetConstantBuffers(4u, 1u, &background_constants_);
-      ID3D11ShaderResourceView *null_view = nullptr; ID3D11Buffer *null_constants = nullptr;
-      context->PSSetShaderResources(9u, 1u, &null_view); context->PSSetShaderResources(11u, 1u, &null_view);
-      context->PSSetConstantBuffers(4u, 1u, &null_constants);
-      ID3D11ShaderResourceView *current[3] {views ? views->weights.Get() : nullptr, views ? views->field.Get() : nullptr, views ? views->rows.Get() : nullptr};
-      auto *geometry = views ? views->geometry.Get() : nullptr;
-      context->PSSetShaderResources(12u, 3u, current); context->PSSetConstantBuffers(6u, 1u, &geometry); return true;
-    }
-    ~scoped_binding_t() {
-      if (!context_) return;
-      ID3D11ShaderResourceView *prior[3] {prior_[0].Get(), prior_[1].Get(), prior_[2].Get()}; auto *geometry = geometry_.Get();
-      context_->PSSetShaderResources(12u, 3u, prior); context_->PSSetConstantBuffers(6u, 1u, &geometry);
-      auto *background = background_.Get(), *proof = background_proof_.Get(); auto *constants = background_constants_.Get();
-      context_->PSSetShaderResources(9u, 1u, &background); context_->PSSetShaderResources(11u, 1u, &proof);
-      context_->PSSetConstantBuffers(4u, 1u, &constants);
-    }
-  };
-
-  // One private readonly PS slot7 for the selected receipt; the normal recorder owns literal
-  // t0..6/b2/b3. Scope ends before any next estimator mutation. No readback, predicate change
-  // or completed-authority grant.
-  class scoped_receipt_t {
-    ID3D11DeviceContext *context_ = nullptr;
-    ComPtr<ID3D11ShaderResourceView> previous_;
-
-  public:
-    scoped_receipt_t() = default;
-    scoped_receipt_t(const scoped_receipt_t &) = delete;
-    scoped_receipt_t &operator=(const scoped_receipt_t &) = delete;
-
-    bool bind(ID3D11DeviceContext *context, ID3D11ShaderResourceView *receipt) {
-      if (!context || !receipt || context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE) return false;
-      ComPtr<ID3D11Device> context_device, receipt_device;
-      context->GetDevice(&context_device);
-      receipt->GetDevice(&receipt_device);
-      if (context_device.Get() != receipt_device.Get()) return false;
-      ComPtr<ID3D11Predicate> predicate;
-      BOOL predicate_value = FALSE;
-      context->GetPredication(&predicate, &predicate_value);
-      if (predicate) return false;
-      ID3D11ShaderResourceView *old = nullptr;
-      context->PSGetShaderResources(7u, 1u, &old);
-      previous_.Attach(old);
-      context_ = context;
-      context->PSSetShaderResources(7u, 1u, &receipt);
-      return true;
-    }
-    ~scoped_receipt_t() {
-      if (context_) {
-        auto *previous = previous_.Get();
-        context_->PSSetShaderResources(7u, 1u, &previous);
-      }
-    }
-  };
 } // namespace models::host_sbs_shared_ui_warp
