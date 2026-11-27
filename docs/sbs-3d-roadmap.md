@@ -107,13 +107,15 @@ OCR authority, although the fused map copies the complete raw padded tuple with 
 ### Foreground window-region ROI boundary
 
 The ROI is intentionally narrow in geometry and timing: Desktop Duplication, one current foreground
-root, full containment on the currently captured identity-oriented output, and an exact causally
+root, a client on the currently captured identity-oriented output, and an exact causally
 matched frame. A valid Chromium semantic `<video>` wins; otherwise the whole foreground client is
 eligible without application classification. Paused Chromium video is supported because selection
 follows DOM identity rather than playback activity. Desktop or shell focus, hidden/minimized/cloaked
-or excluded windows, stale geometry, WGC, unauthenticated tensor geometry, and partially off-monitor,
-spanning, or other-monitor rectangles use full-frame V2. The route does not crop an intersection or
-switch outputs.
+or excluded windows, stale geometry, WGC, unauthenticated tensor geometry, and spanning or
+other-monitor rectangles use full-frame V2, as does a client more than slightly off the monitor.
+The route does not switch outputs. The small overhang whose visible part is still analysed, and
+the owner that stays the root under its own dialog, are defined in
+[Foreground window-region ROI](host-sbs.md#foreground-window-region-roi).
 
 Independently, a semantic Chromium video covering the complete foreground client can authorize true
 fullscreen even with overscan, document clipping, or duplicate full-cover clones. The host accepts

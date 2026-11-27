@@ -96,7 +96,7 @@ namespace {
     std::uint8_t *pixels_ = nullptr;
   };
 
-  /** The foreground as foreground_window::sample() reports it. */
+  /** The foreground as foreground_window::sample_picture_root() reports it. */
   foreground_window::observation_t in_front(
     const std::uint32_t process_id,
     const foreground_window::status_e status = foreground_window::status_e::ok,
@@ -358,6 +358,84 @@ namespace {
     pin.reset();
     EXPECT_FALSE(pin.text_shown());
     EXPECT_FALSE(pin.helper_serves(now + 600ms));
+  }
+
+  TEST_F(TextGamePinController, APictureReachingSlightlyPastTheDisplayStaysInFrontAndPinned) {
+    const auto process = approve(0x7ffffe08u);
+    fake_helper_t helper(process);
+    ASSERT_TRUE(helper.ready());
+    helper.publish(400u, 440u);
+    controller_t pin;
+    const auto now = std::chrono::steady_clock::now();
+    const auto ok = foreground_window::status_e::ok;
+    // 12 of the picture's 640 columns are past the right edge of the display: the game is still
+    // the one in front, and its text is pinned on the same rows as on the display.
+    ASSERT_TRUE(observe(pin, now, in_front(process, ok, {1292, 50, 1932, 530})));
+    std::array<UINT, 4u> shape {};
+    ASSERT_TRUE(prepare(pin, shape));
+    EXPECT_EQ(shape[0], 1920u);
+    EXPECT_EQ(shape[1], 1080u);
+    EXPECT_EQ(shape[2] % 16u, 0u);
+    EXPECT_GE(shape[2], 48u);
+    EXPECT_LE(shape[2], 450u);
+    EXPECT_GE(shape[2] + shape[3], 489u);
+    EXPECT_LE(shape[2] + shape[3], 544u);
+    pin.take_verdict(shown, now);
+    EXPECT_TRUE(pinned(pin));
+
+    // 9 of its 480 rows are above the display. The helper's rows 400 to 439 are then the
+    // source rows 391 to 430, placed by the whole picture, and the band starts on the source.
+    ASSERT_TRUE(observe(pin, now + 300ms, in_front(process, ok, {100, -9, 740, 471})));
+    ASSERT_TRUE(prepare(pin, shape));
+    EXPECT_EQ(shape[2] % 16u, 0u);
+    EXPECT_LE(shape[2], 391u);
+    EXPECT_GE(shape[2] + shape[3], 431u);
+    EXPECT_LE(shape[2] + shape[3], 480u);
+
+    // 9 rows below the display: text on rows that are on the source is pinned, and text that
+    // reaches the rows past it is not.
+    ASSERT_TRUE(observe(pin, now + 600ms, in_front(process, ok, {100, 609, 740, 1089})));
+    ASSERT_TRUE(prepare(pin, shape));
+    EXPECT_LE(shape[2] + shape[3], 1080u);
+    helper.publish(450u, 479u);
+    EXPECT_FALSE(prepare(pin, shape));
+
+    // More than a fiftieth of the picture past the display: not in front on it.
+    EXPECT_FALSE(observe(pin, now + 900ms, in_front(process, ok, {1293, 50, 1933, 530})));
+  }
+
+  TEST_F(TextGamePinController, TheGamesOwnDialogKeepsThePinOnlyWhileTheGameStaysTheRoot) {
+    const auto process = approve(0x7ffffe09u);
+    fake_helper_t helper(process);
+    ASSERT_TRUE(helper.ready());
+    helper.publish(400u, 440u);
+    controller_t pin;
+    const auto now = std::chrono::steady_clock::now();
+    ASSERT_TRUE(observe(pin, now, in_front(process)));
+    std::array<UINT, 4u> shape {};
+    ASSERT_TRUE(prepare(pin, shape));
+    pin.take_verdict(shown, now);
+    ASSERT_TRUE(pinned(pin));
+
+    // A dialog of the game lies on its picture: the game's window stays the one in front, with
+    // its own picture, and the text stays pinned.
+    auto owner = in_front(process);
+    owner.owner_window = game_window;
+    ASSERT_TRUE(observe(pin, now + 300ms, owner));
+    EXPECT_TRUE(pinned(pin));
+
+    // A dialog that reaches past the picture is in front itself. The game is still converted,
+    // but the dialog's client is not the picture the text was drawn on.
+    auto dialog = in_front(process, foreground_window::status_e::ok, {300, 200, 546, 344});
+    dialog.window = game_window + 1u;
+    dialog.owner_window = game_window;
+    ASSERT_TRUE(observe(pin, now + 600ms, dialog));
+    EXPECT_FALSE(pinned(pin));
+
+    // The game's window is in front again.
+    ASSERT_TRUE(observe(pin, now + 900ms, in_front(process)));
+    pin.take_verdict(shown, now + 900ms);
+    EXPECT_TRUE(pinned(pin));
   }
 
   TEST_F(TextGamePinController, TheRouteSwitchesOncePerChange) {

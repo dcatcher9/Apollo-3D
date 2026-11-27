@@ -354,9 +354,11 @@ unoccluded reconstruction, and multiple simultaneous 3D regions remain out of sc
 root and maps `GetClientRect()` into physical screen coordinates, using DWM extended-frame geometry
 as a sanity bound rather than including title bars and borders in the ROI. It rejects null, shell,
 desktop, Sunshine-owned, hidden, minimized, cloaked, tool/no-activate/layered, and invalid roots. The
-client must be wholly contained by the currently captured identity-oriented output. Disjoint
-other-monitor and partially intersecting or spanning clients all fall back to full-frame V2; the
-host neither crops an intersection nor switches capture output. There is no application allowlist,
+client must lie on the currently captured identity-oriented output; of a client that reaches
+slightly past it, the visible part is analysed. Disjoint other-monitor, spanning and further
+hidden clients all fall back to full-frame V2; the host does not switch capture output. The exact
+bound, and the owner that stays the root under its own dialog, are in
+[Foreground window-region ROI](host-sbs.md#foreground-window-region-roi). There is no application allowlist,
 media/game classification, Z-order model, or occlusion reconstruction.
 
 The observer tracks an uninterrupted exact `{HWND, process, client rectangle}` run. Desktop
@@ -508,8 +510,8 @@ external DOM rectangle that Sunshine can query.
   comparison/authority, or OCR evidence, although the fused map copies its raw excluded tuple.
 - **Motion is exact-frame attributed.** Rendering consumes only the rectangle attached to the same
   private color/depth slot. Analysis-domain changes reset temporal/camera state, while a pure
-  position change of the same-sized ROI retains it. Stale or partially off-monitor geometry uses
-  full-frame V2 rather than warping the old rectangle.
+  position change of the same-sized ROI retains it. Stale geometry, and a client more than
+  slightly off the monitor, use full-frame V2 rather than warping the old rectangle.
 - **Exact full-capture clients are canonical full source.** Chromium can prove this through a
   semantic video covering the complete foreground client; the generic route can prove it from the
   causally continuous client rectangle itself. In both cases the ordinary full-frame domain
@@ -790,7 +792,7 @@ for the name.
 | `map_screen_rect_to_capture()` in [video_dom_client.cpp](../src/platform/windows/video_dom_client.cpp) | one-pixel-tolerant physical-screen to capture mapping |
 | `detail::classify()` in [foreground_window_region.cpp](../src/platform/windows/foreground_window_region.cpp) | fail-closed foreground root/client admission policy |
 | `continuity_tracker_t::update()` and `usable_for_content()` in [foreground_window_region.cpp](../src/platform/windows/foreground_window_region.cpp) | exact-geometry continuity and content-time authorization |
-| `map_to_capture()` in [foreground_window_region.cpp](../src/platform/windows/foreground_window_region.cpp) | same-output raw-screen-coordinate mapping without partial clipping |
+| `map_to_capture()` in [foreground_window_region.cpp](../src/platform/windows/foreground_window_region.cpp) | same-output raw-screen-coordinate mapping; only a small overhang is cut to the output |
 | `host_sbs_region_attribution_t::window_region` in [host_sbs_authority_tracker.h](../src/platform/windows/host_sbs_authority_tracker.h) | matched color slot owns optional generic window-region provenance |
 | `capture_browser_window_region()` in [host_sbs_authority_tracker.cpp](../src/platform/windows/host_sbs_authority_tracker.cpp) | causally-prior Chromium geometry is validated and bound to the matched frame |
 | `capture_foreground_window_region()` in [host_sbs_authority_tracker.cpp](../src/platform/windows/host_sbs_authority_tracker.cpp) | lower-priority foreground-client capture and mapping |

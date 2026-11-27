@@ -2468,12 +2468,28 @@ invalid/hidden/minimized/cloaked root, an excluded tool/no-activate style, or in
 layered root is admitted only when `GetLayeredWindowAttributes` positively proves uniform alpha
 255 with no color key; unknown, partially transparent, color-keyed, and per-pixel-alpha layered
 windows select ordinary full-frame V2. A
-client must be wholly contained by the current identity-oriented capture output. A disjoint client
-on another monitor and a client that partially intersects or spans outputs both select full-frame
-V2; Host SBS never switches the capture monitor or crops the intersection. When no child is selected,
-a client that exactly covers the capture canonicalizes to the ordinary full-source domain.
+client must lie on the current identity-oriented capture output. When at most one fiftieth of its
+width and of its height reaches past that output, the part on the output is the analysis
+rectangle (`visible_on_output`); the complete client remains the identity and continuity
+evidence. Half the hidden span is how far the visible centre moves, so this bound keeps it within
+one percent of the width, half of what a centred caption line is allowed. A client hidden
+further, whether past the desktop or on a neighbouring output, and a disjoint client on another
+monitor all select full-frame V2; Host SBS never switches the capture monitor. When no child is selected,
+a client whose part on the output is the whole capture canonicalizes to the ordinary full-source
+domain.
 
-The root HWND, process, complete client, and output containment remain the foreground authority. A
+A dialog is a top-level window of its own, drawn on the picture of the window that owns it. The
+foreground root is therefore that owner (`GetAncestor(GA_ROOTOWNER)`) while the window in front
+belongs to the same process and is hidden or lies wholly inside the owner's client, and the owner
+is visible and not minimized (`select_picture_root`). The owner's client then contains the whole
+dialog, so the analysis rectangle, the continuity run and the subtitle context are those of the
+owner and do not change when the dialog opens or closes. A window whose owner is hidden,
+minimized or of another process, an unowned window and an owned window that reaches past its
+owner's client are their own roots, as before. No window class, style or size takes part. The
+Chromium route still requires the browser root itself in front. The Game 3D add-on receiver and
+setup detection share their foreground rule with the game and keep the plain top-level root.
+
+The root HWND, process, complete client, and its place on the output remain the foreground authority. A
 census of at most 32 direct children may select a separate analysis source only when one visible
 same-process child is wholly contained by the client, covers its center, occupies at least half its
 area, and is at least twice the area of every other eligible visible sibling. A separate eligible
@@ -2536,7 +2552,8 @@ An authenticated semantic video may lie wholly inside the captured output while 
 browser belongs mostly to another monitor. The browser route maps that video independently after
 validating the capture extent, handle and identity orientation; the root's nearest-monitor mismatch
 alone does not revoke subtitle permission. Native-player and generic foreground routes retain
-their existing monitor and whole-client containment requirements.
+their monitor requirement and need their whole client on the output, up to the small overhang
+described above.
 The host never accepts an
 `ok-fullscreen` subrectangle as a windowed ROI; it is eligible only after mapping exactly to the
 capture. A transition between the two positive status classes starts a new live-detector source
@@ -2588,7 +2605,8 @@ true-fullscreen authority only when its foreground-client rectangle maps exactly
 that case is canonical full-frame V2. The generic foreground-client route follows the same
 canonicalization whenever its selected analysis source equals the capture, without claiming
 Chromium semantic authority. Missing, stale or ambiguous selection, non-identity rotation, spanning,
-partially off-monitor, mismatched geometry, or unauthenticated tensor/source-region geometry selects
+off-monitor beyond the small overhang described above, mismatched geometry, or unauthenticated
+tensor/source-region geometry selects
 ordinary full-frame V2 rather than a guessed ROI; an internal V2 authentication failure
 remains fail-closed flat.
 
@@ -2699,8 +2717,10 @@ transpose.
   foreground-client route analyzes either its high-confidence structural content child or the
   complete client. Single-surface/custom-drawn chrome, overlays inside the selected content child,
   and ambiguous layouts remain included. It does not classify applications or reconstruct pixels
-  hidden by other windows. Shell, desktop, invalid, stale, spanning, partially off-monitor, and
-  background-window rectangles do not authorize an ROI.
+  hidden by other windows. Shell, desktop, invalid, stale, spanning and background-window
+  rectangles, and one more than a fiftieth of whose width or height is off the monitor, do not
+  authorize an ROI. A window that owns the dialog in front of it keeps its ROI only while that
+  dialog lies wholly on its client; an unowned window of the same application is its own root.
 - The automatic subtitle path accepts all six authenticated logical DAV2 fields (`770x434`,
   `1022x434`, `1036x434`, and their portrait transposes) and all six corresponding exact-2x fused
   public fields. Every admitted current OCR8 pair can authorize search, up to eight covers. Any other

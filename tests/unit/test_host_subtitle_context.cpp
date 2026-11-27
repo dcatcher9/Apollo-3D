@@ -358,6 +358,17 @@ namespace {
       {0, 0, 1920, 1080}, 1920, 1080, content, now);
     EXPECT_TRUE(clipped_native.foreground_usable);
     EXPECT_FALSE(clipped_native.registered_player_candidate);
+    // A client that reaches past the output by no more than a fiftieth of its width keeps its
+    // region, mapped to its visible part, and with it the native candidate.
+    root.client_screen_rect.left = -30;
+    root.frame_screen_rect.left = -40;
+    const auto overhanging = foreground::map_to_capture(root, target);
+    ASSERT_TRUE(overhanging);
+    EXPECT_EQ(overhanging.capture_pixels, (foreground::rect_t {0, 50, 1850, 1040}));
+    const auto overhanging_native = policy::evaluate(&root, true, overhanging, nullptr, 0u, {0, 0, 1920, 1080}, 1920, 1080, content, now);
+    EXPECT_TRUE(overhanging_native.foreground_usable);
+    EXPECT_TRUE(overhanging_native.foreground_target_usable);
+    EXPECT_TRUE(overhanging_native.registered_player_candidate);
   }
 
   TEST_F(BrowserSubtitleContextPolicyTest, CausalGeometryRunsKeepSemanticVideoContext) {

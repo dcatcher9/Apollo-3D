@@ -33,7 +33,9 @@ namespace platf::dxgi {
     const time_point_t now,
     const foreground_window::rect_t &screen
   ) {
-    return observe(now, screen, foreground_window::sample, process_creation_time);
+    // The same foreground rule as the Host path's window region: the game stays the window in
+    // front, with its own picture, while a dialog of its own lies on that picture.
+    return observe(now, screen, foreground_window::sample_picture_root, process_creation_time);
   }
 
   std::optional<text_game_pin_controller_t::identity_t> text_game_pin_controller_t::observe(
@@ -62,9 +64,10 @@ namespace platf::dxgi {
       return source_;
     }
     std::uint64_t creation_time = 0u;
-    if (foreground_window::carries_geometry(foreground.status) && foreground.process_id && client.valid() &&
-        client.left >= screen.left && client.top >= screen.top &&
-        client.right <= screen.right && client.bottom <= screen.bottom) {
+    // Its picture is on this display, or reaches past it by no more than the Host path's own
+    // window region allows.
+    if (foreground_window::carries_geometry(foreground.status) && foreground.process_id &&
+        foreground_window::visible_on_output(client, screen).valid()) {
       creation_time = creation_time_of(foreground.process_id);
     }
     // The owner's approval for this very process decides. Its helper adds the game's own text
@@ -75,6 +78,8 @@ namespace platf::dxgi {
       coverage_uploaded_ = false;
       return std::nullopt;
     }
+    // The whole picture, also where it reaches past the display: the helper's surface is that
+    // whole picture, and prepare() places its rows by this rectangle.
     client_ = {client.left - screen.left, client.top - screen.top, client.right - screen.left, client.bottom - screen.top};
     window_ = foreground.window;
     const identity_t identity {foreground.process_id, creation_time, 0u};
@@ -117,8 +122,10 @@ namespace platf::dxgi {
     namespace hook = platf::game3d::text_hook;
     // Any refusal from here on that names no reason of its own is the host's.
     fallback_ = hook::fallback_e::unavailable;
-    // A helper that knows its window reports for that one only: the game's own dialog in front
-    // is not the picture its text was drawn on. Window handles are 32 bits in either process.
+    // A helper that knows its window reports for that one only. A dialog of the game that lies
+    // on its picture leaves the game's window the one in front; one that reaches past it, or
+    // another window of the game, is in front itself and is not the picture the text was drawn
+    // on. Window handles are 32 bits in either process.
     if (!answered || text.unsure || text.top >= text.bottom || (text.window != 0u && static_cast<std::uint32_t>(text.window) != static_cast<std::uint32_t>(window_))) {
       fallback_ = !answered ? hook::fallback_e::no_helper : text.unsure ? hook::fallback_e::unsure :
                                                                          hook::fallback_e::no_text;
@@ -145,8 +152,11 @@ namespace platf::dxgi {
   ) {
     namespace hook = platf::game3d::text_hook;
     const auto &client = client_;
-    if (!source_ || !client.valid() || client.left < 0 || client.top < 0 ||
-        client.right > static_cast<LONG>(colour.Width) || client.bottom > static_cast<LONG>(colour.Height)) {
+    // The game's picture lies on the source, or reaches past it as far as observe() admits. The
+    // rectangle is never cut to the source: the helper's surface maps onto the whole of it.
+    const foreground_window::rect_t source_rect {0, 0, static_cast<std::int32_t>(colour.Width), static_cast<std::int32_t>(colour.Height)};
+    const auto on_source = foreground_window::visible_on_output(client, source_rect);
+    if (!source_ || !on_source.valid()) {
       return false;
     }
     hook::text_t text;
@@ -194,7 +204,8 @@ namespace platf::dxgi {
     // sample lies wholly inside the rows that were read, at any scale of the picture.
     const float text_first = std::ceil(static_cast<float>(client.top) + (static_cast<float>(text.top) + 0.5f) * scale_y - 0.5f);
     const float text_end = std::ceil(static_cast<float>(client.top) + (static_cast<float>(text.bottom) - 0.5f) * scale_y - 0.5f);
-    if (!(text_end > text_first) || text_first < 0.0f) {
+    // Text on rows of the picture that are past the source is not pinned.
+    if (!(text_end > text_first) || text_first < 0.0f || text_end > static_cast<float>(colour.Height)) {
       return false;
     }
     constants.text_top = static_cast<std::uint32_t>(text_first);
@@ -210,8 +221,9 @@ namespace platf::dxgi {
     const float reach = 2.0f * (constants.front_cap + sunshine_game3d::ui_adaptive::comfort_cap_uv) * static_cast<float>(colour.Width) + 2.0f;
     const auto first = static_cast<LONG>(std::floor(text_first - reach)) - 1;
     const auto last = static_cast<LONG>(std::ceil(text_end + reach)) + 1;
-    UINT band_top = static_cast<UINT>(std::clamp<LONG>(first, client.top, client.bottom)) / 16u * 16u;
-    UINT band_end = std::min<UINT>(colour.Height, (static_cast<UINT>(std::clamp<LONG>(last, client.top, client.bottom)) + 15u) / 16u * 16u);
+    // The band stays on the rows of the picture that are on the source, which are never negative.
+    UINT band_top = static_cast<UINT>(std::clamp<LONG>(first, on_source.top, on_source.bottom)) / 16u * 16u;
+    UINT band_end = std::min<UINT>(colour.Height, (static_cast<UINT>(std::clamp<LONG>(last, on_source.top, on_source.bottom)) + 15u) / 16u * 16u);
     if (band_top >= band_end) {
       return false;
     }

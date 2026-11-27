@@ -45,7 +45,9 @@ namespace platf::dxgi {
     /**
      * The text game in front on this display, as a game source identity: an application its
      * owner approved for conversion. The foreground is sampled a few times a second; the stream
-     * converts at up to its frame rate.
+     * converts at up to its frame rate. The game is in front also while a dialog of its own lies
+     * on its picture, and while its picture reaches slightly past this display
+     * (foreground_window::sample_picture_root, foreground_window::visible_on_output).
      *
      * @param screen Where this display is on the Windows desktop.
      */
@@ -186,7 +188,8 @@ namespace platf::dxgi {
     time_point_t checked_at_ {};
     route_e route_ = route_e::none;
     // Where the text game's picture is in the captured source, and the text its helper reports.
-    // The rectangle is empty while the game is in front but its place is not known.
+    // The rectangle is empty while the game is in front but its place is not known. It is the
+    // whole picture: it may reach slightly past the source and is never cut to it.
     foreground_window::rect_t client_ {};
     std::uintptr_t window_ = 0u;  ///< The game's window in front.
     band_t band_;  ///< The pinned rows used so far for this picture.

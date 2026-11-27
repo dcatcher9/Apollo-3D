@@ -7845,7 +7845,12 @@ returns the session to the flat fallback. Earlier depth work is retired on each 
 While the text game is in front the stream is paced as a Host 3D stream is: every captured frame
 and every completed depth is served at once. The Game stream's own pacing, which polls an add-on
 game's export at stream cadence, would hold each captured frame for several stream intervals.
-While the game's window is dragged or resized it stays converted, without its text pin. A game
+While the game's window is dragged or resized it stays converted, without its text pin. A dialog
+of the game that lies on its picture, and a picture that reaches slightly past the display, leave
+conversion and pin as they are. A dialog that reaches past the picture, or that the game's
+window does not own, is in front itself: the Host path's window region is then the dialog's, and
+the game's text is not pinned
+([Foreground window-region ROI](host-sbs.md#foreground-window-region-roi)). A game
 whose helper could not be loaded, or sees no text, is converted all the same. Dump 3D follows the
 route: with a text game in front the button produces the Host package, whose frame is drawn
 without the text pin. The pin itself is described under

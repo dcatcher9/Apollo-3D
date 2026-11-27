@@ -50,8 +50,9 @@ namespace platf::foreground_window {
   /** One synchronous Win32/DWM observation. Native handles are transported as integers. */
   struct observation_t {
     status_e status {status_e::no_foreground};
-    // `window` remains the foreground top-level root. A structurally proven direct child may
-    // narrow only the analysis source; it never replaces foreground identity authority.
+    // `window` remains the foreground top-level root, or from sample_picture_root() the root
+    // owner that stands in for its dialog. A structurally proven direct child may narrow only
+    // the analysis source; it never replaces foreground identity authority.
     std::uintptr_t window {};
     std::uint32_t process_id {};
     std::uintptr_t monitor {};
@@ -66,6 +67,10 @@ namespace platf::foreground_window {
     rect_t content_screen_rect {};
     rect_t frame_screen_rect {};
     std::chrono::steady_clock::time_point observed_at {};
+    // Diagnostic only, and filled only by sample_picture_root(): the root owner of the top-level
+    // window in front when that is another window. It equals `window` while the owner stands in
+    // for its dialog, and is zero for an unowned window. It is no part of identity or continuity.
+    std::uintptr_t owner_window {};
 
     [[nodiscard]] constexpr bool has_content_source() const noexcept {
       return content_window != 0 && content_screen_rect.valid();
@@ -102,6 +107,7 @@ namespace platf::foreground_window {
     rect_t frame_screen_rect {};
     std::chrono::steady_clock::time_point observed_at {};
     std::chrono::steady_clock::time_point geometry_valid_since {};
+    std::uintptr_t owner_window {};  ///< As observation_t::owner_window: diagnostic only.
 
     [[nodiscard]] constexpr bool has_content_source() const noexcept {
       return content_window != 0 && content_screen_rect.valid();
@@ -120,11 +126,20 @@ namespace platf::foreground_window {
   [[nodiscard]] observation_t sample() noexcept;
 
   /**
-   * Close the race after a matched-frame GPU copy. Whole-client authority takes the exact
-   * identity/geometry revalidation fast path; structural-child authority performs an ordinary
-   * complete sample so sibling uniqueness is reproven.
+   * sample(), for the Host path: the window whose client is the picture in front. That is the
+   * foreground root, or its root owner while the foreground root is a dialog of the same
+   * process drawn on the owner's client (`detail::select_picture_root`). The Game 3D add-on
+   * receiver and setup detection share their foreground rule with the game and use sample().
    */
-  [[nodiscard]] observation_t sample_after_copy(
+  [[nodiscard]] observation_t sample_picture_root() noexcept;
+
+  /**
+   * Close the race after a matched-frame GPU copy, for a snapshot of sample_picture_root().
+   * Whole-client authority takes the exact identity/geometry revalidation fast path;
+   * structural-child authority performs an ordinary complete sample so sibling uniqueness is
+   * reproven.
+   */
+  [[nodiscard]] observation_t sample_picture_root_after_copy(
     const snapshot_t &expected
   ) noexcept;
 
@@ -229,8 +244,19 @@ namespace platf::foreground_window {
   };
 
   /**
-   * Map an available client rectangle only when it is wholly contained by the exact selected
-   * output in raw virtual-screen coordinates. Spanning/partial windows are never clipped.
+   * The part of `rect` that lies on `bounds`, when at most one fiftieth of its width and of its
+   * height lies outside; otherwise an invalid rectangle.
+   *
+   * A window may reach a few pixels past its output and still show its whole picture for every
+   * purpose here. The visible centre moves by half the hidden span, so the bound keeps it within
+   * one percent of the width: half of what a centred caption line is allowed.
+   */
+  [[nodiscard]] rect_t visible_on_output(rect_t rect, rect_t bounds) noexcept;
+
+  /**
+   * Map an available client rectangle on the exact selected output, in raw virtual-screen
+   * coordinates. A client that reaches slightly past the output maps its visible part
+   * (`visible_on_output`); one hidden further, spanning outputs or lying elsewhere is refused.
    * `monitor_mismatch` is returned only after the capture target's handle, extent and identity
    * orientation validate; it does not invalidate an independently mapped semantic video source.
    */
@@ -306,6 +332,33 @@ namespace platf::foreground_window {
       bool enumeration_complete = true
     ) noexcept;
 
+    /** One top-level window as the picture-root policy sees it. */
+    struct top_level_observation_t {
+      std::uintptr_t window {};
+      std::uint32_t process_id {};
+      // The window in front: its whole window rectangle. Its root owner: the owner's client.
+      // Both in physical screen coordinates.
+      rect_t screen_rect {};
+      bool query_succeeded {};
+      bool visible {};
+      bool minimized {};
+    };
+
+    /**
+     * The window whose client is the picture in front.
+     *
+     * A dialog is a top-level window of its own, drawn on the picture of the window that owns
+     * it. The root owner therefore stays the root while the window in front belongs to the same
+     * process and is hidden or lies wholly inside the owner's client, and the owner itself is
+     * visible and not minimized. The owner's client then contains the whole dialog, so the
+     * analysis rectangle is never cut through it. Any other window in front, and any failed
+     * query, returns that window itself. No window class, style or size is known.
+     */
+    [[nodiscard]] std::uintptr_t select_picture_root(
+      const top_level_observation_t &in_front,
+      const top_level_observation_t &root_owner
+    ) noexcept;
+
     /**
      * Injectable result of native queries. Production `sample()` fills this record, while unit
      * tests exercise policy without creating or manipulating desktop windows.
@@ -345,6 +398,7 @@ namespace platf::foreground_window {
       bool gui_thread_query_succeeded {};
       bool gui_in_move_size {};
       std::uintptr_t move_size_root {};
+      std::uintptr_t owner_window {};  ///< Carried to observation_t::owner_window unjudged.
     };
 
     /** Apply the foreground-window admission policy to injected native-query results. */

@@ -284,11 +284,13 @@ namespace platf::dxgi {
     effects_t effects;
     foreground_window::snapshot_t observed;
     if (content_timestamp) {
+      // The picture in front: the game or player stays the root while its own dialog is in
+      // front of it, as it does for the text-game pin.
       const auto observation = revalidate_expected ?
-                                 foreground_window::sample_after_copy(
+                                 foreground_window::sample_picture_root_after_copy(
                                    *revalidate_expected
                                  ) :
-                                 foreground_window::sample();
+                                 foreground_window::sample_picture_root();
       observed = foreground_window_tracker.update(observation);
     } else {
       const bool interactive_move_size =
@@ -432,6 +434,9 @@ namespace platf::dxgi {
           << source_rect.right << ':' << source_rect.bottom << " root_hwnd=0x"sv
           << util::hex(next_root->window).to_string_view() << " content_hwnd=0x"sv
           << util::hex(next_root->source_window()).to_string_view()
+          // The root owner of the window in front: zero for an unowned window, the root itself
+          // while it stands in for its dialog, another window for a dialog that is its own root.
+          << " owner_hwnd=0x"sv << util::hex(next_root->owner_window).to_string_view()
           << " generation="sv << next_root->generation << '.';
       }
     }

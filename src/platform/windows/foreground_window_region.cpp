@@ -347,6 +347,20 @@ namespace platf::foreground_window {
       observed_at_ = {};
     }
 
+    std::uintptr_t select_picture_root(
+      const top_level_observation_t &in_front,
+      const top_level_observation_t &root_owner
+    ) noexcept {
+      const bool owner_shows_the_picture =
+        in_front.query_succeeded && root_owner.query_succeeded &&
+        root_owner.window != 0 && root_owner.window != in_front.window &&
+        root_owner.process_id != 0 && root_owner.process_id == in_front.process_id &&
+        root_owner.visible && !root_owner.minimized &&
+        // A dialog not yet shown has changed nothing in the picture.
+        (!in_front.visible || contains(root_owner.screen_rect, in_front.screen_rect));
+      return owner_shows_the_picture ? root_owner.window : in_front.window;
+    }
+
     observation_t classify(
       const raw_observation_t &raw,
       const std::chrono::steady_clock::time_point observed_at
@@ -368,6 +382,7 @@ namespace platf::foreground_window {
           .content_screen_rect = content_screen_rect,
           .frame_screen_rect = raw.frame_screen_rect,
           .observed_at = observed_at,
+          .owner_window = raw.owner_window,
         };
       };
 
@@ -477,7 +492,56 @@ namespace platf::foreground_window {
     }
   }  // namespace detail
 
-  static observation_t sample_impl(const snapshot_t *expected) noexcept {
+  namespace {
+    struct foreground_root_t {
+      HWND window {};  ///< The root that is sampled.
+      HWND owner {};  ///< The root owner of the top-level window in front, when another window.
+    };
+
+    /**
+     * The top-level root of a foreground window. With `picture_root`, its root owner takes its
+     * place while detail::select_picture_root finds the window in front to be the owner's dialog.
+     * Only USER32 queries that send no window message are made, under the caller's DPI scope.
+     */
+    foreground_root_t resolve_foreground_root(const HWND foreground, const bool picture_root) noexcept {
+      const HWND in_front = foreground ? GetAncestor(foreground, GA_ROOT) : nullptr;
+      if (!in_front || !picture_root) {
+        return {.window = in_front};
+      }
+      const HWND owner = GetAncestor(in_front, GA_ROOTOWNER);
+      if (!owner || owner == in_front) {
+        return {.window = in_front};
+      }
+      const auto observe = [](const HWND window, const bool client) noexcept {
+        detail::top_level_observation_t result;
+        result.window = reinterpret_cast<std::uintptr_t>(window);
+        DWORD process_id = 0;
+        const bool identified = IsWindow(window) != FALSE &&
+                                GetWindowThreadProcessId(window, &process_id) != 0 && process_id != 0;
+        result.process_id = process_id;
+        result.visible = IsWindowVisible(window) != FALSE;
+        result.minimized = IsIconic(window) != FALSE;
+        RECT rect {};
+        bool measured = false;
+        if (!client) {
+          measured = GetWindowRect(window, &rect) != FALSE;
+        } else if (GetClientRect(window, &rect) != FALSE) {
+          SetLastError(ERROR_SUCCESS);
+          measured = MapWindowPoints(window, nullptr, reinterpret_cast<POINT *>(&rect), 2) != 0 ||
+                     GetLastError() == ERROR_SUCCESS;
+        }
+        if (measured) {
+          result.screen_rect = {rect.left, rect.top, rect.right, rect.bottom};
+        }
+        result.query_succeeded = identified && measured;
+        return result;
+      };
+      const auto selected = detail::select_picture_root(observe(in_front, false), observe(owner, true));
+      return {.window = reinterpret_cast<HWND>(selected), .owner = owner};
+    }
+  }  // namespace
+
+  static observation_t sample_impl(const snapshot_t *expected, const bool picture_root) noexcept {
     const auto observed_at = std::chrono::steady_clock::now();
     if (expected && !detail::post_copy_revalidation_allowed(*expected)) {
       return {.status = status_e::foreground_changed, .observed_at = observed_at};
@@ -493,13 +557,15 @@ namespace platf::foreground_window {
     if (!foreground) {
       return detail::classify(raw, observed_at);
     }
-    const HWND window = GetAncestor(foreground, GA_ROOT);
+    const auto root = resolve_foreground_root(foreground, picture_root);
+    const HWND window = root.window;
     if (!window) {
       raw.window = reinterpret_cast<std::uintptr_t>(foreground);
       return detail::classify(raw, observed_at);
     }
 
     raw.window = reinterpret_cast<std::uintptr_t>(window);
+    raw.owner_window = reinterpret_cast<std::uintptr_t>(root.owner);
     raw.shell_window = reinterpret_cast<std::uintptr_t>(GetShellWindow());
     raw.desktop_window = reinterpret_cast<std::uintptr_t>(GetDesktopWindow());
     raw.is_window = IsWindow(window) != FALSE;
@@ -523,9 +589,8 @@ namespace platf::foreground_window {
       raw.move_size_root = reinterpret_cast<std::uintptr_t>(move_size_root);
     }
     const auto recheck_foreground = [&]() {
-      const HWND foreground_after = GetForegroundWindow();
-      const HWND window_after =
-        foreground_after ? GetAncestor(foreground_after, GA_ROOT) : nullptr;
+      // The same root rule as above: a dialog still in front of its owner is no change.
+      const HWND window_after = resolve_foreground_root(GetForegroundWindow(), picture_root).window;
       raw.window_after = reinterpret_cast<std::uintptr_t>(window_after);
       raw.is_window_after = window_after && IsWindow(window_after) != FALSE;
       DWORD process_id_after = 0;
@@ -791,12 +856,16 @@ namespace platf::foreground_window {
   }
 
   observation_t sample() noexcept {
-    return sample_impl(nullptr);
+    return sample_impl(nullptr, false);
   }
 
-  observation_t sample_after_copy(const snapshot_t &expected) noexcept {
+  observation_t sample_picture_root() noexcept {
+    return sample_impl(nullptr, true);
+  }
+
+  observation_t sample_picture_root_after_copy(const snapshot_t &expected) noexcept {
     return detail::post_copy_revalidation_allowed(expected) ?
-             sample_impl(&expected) : sample_impl(nullptr);
+             sample_impl(&expected, true) : sample_impl(nullptr, true);
   }
 
   std::optional<std::wstring> process_image_path(const std::uint32_t process_id) noexcept {
@@ -922,6 +991,7 @@ namespace platf::foreground_window {
       .frame_screen_rect = observation.frame_screen_rect,
       .observed_at = observation.observed_at,
       .geometry_valid_since = geometry_valid_since_,
+      .owner_window = observation.owner_window,
     };
   }
 
@@ -986,6 +1056,23 @@ namespace platf::foreground_window {
     return "unknown";
   }
 
+  rect_t visible_on_output(const rect_t rect, const rect_t bounds) noexcept {
+    const rect_t visible {
+      std::max(rect.left, bounds.left),
+      std::max(rect.top, bounds.top),
+      std::min(rect.right, bounds.right),
+      std::min(rect.bottom, bounds.bottom),
+    };
+    if (!rect.valid() || !bounds.valid() || !visible.valid()) {
+      return {};
+    }
+    const auto hidden_width = span_width(rect) - span_width(visible);
+    const auto hidden_height = span_height(rect) - span_height(visible);
+    return hidden_width * 50u <= span_width(rect) && hidden_height * 50u <= span_height(rect) ?
+             visible :
+             rect_t {};
+  }
+
   mapping_result_t map_to_capture(
     const snapshot_t &snapshot,
     const capture_target_t &target
@@ -1020,9 +1107,9 @@ namespace platf::foreground_window {
       return {.status = mapping_status_e::monitor_mismatch};
     }
     // The root client remains the foreground authority even when a child content pane narrows
-    // analysis. Preserve the established no-clipping rule: a spanning or partially off-output
-    // root must not gain ROI authority merely because one descendant happens to fit.
-    if (!contains(target.screen_rect, snapshot.client_screen_rect)) {
+    // analysis: a spanning root, or one hidden beyond the small overhang visible_on_output
+    // allows, must not gain ROI authority merely because one descendant happens to fit.
+    if (!visible_on_output(snapshot.client_screen_rect, target.screen_rect).valid()) {
       return {
         .status = intersects(target.screen_rect, snapshot.client_screen_rect) ?
                     mapping_status_e::partially_outside_capture :
@@ -1030,7 +1117,12 @@ namespace platf::foreground_window {
       };
     }
 
-    const auto source_screen_rect = snapshot.source_screen_rect();
+    // What is analysed is the part of the selected source that is on the output. The snapshot
+    // keeps the complete rectangles, which remain the identity and continuity evidence.
+    const auto source_screen_rect = visible_on_output(snapshot.source_screen_rect(), target.screen_rect);
+    if (!source_screen_rect.valid()) {
+      return {.status = mapping_status_e::partially_outside_capture};
+    }
 
     const rect_t capture_pixels {
       source_screen_rect.left - target.screen_rect.left,

@@ -997,4 +997,178 @@ namespace {
     target.identity_orientation = false;
     EXPECT_EQ(foreground::map_to_capture(snapshot, target).status, foreground::mapping_status_e::unsupported_orientation);
   }
+
+  TEST(ForegroundWindowMapping, VisiblePartIsKeptOnlyForAFiftiethOfEachExtent) {
+    const foreground::rect_t output {0, 0, 1920, 1080};
+    // A rectangle on the output is itself.
+    EXPECT_EQ(foreground::visible_on_output({100, 100, 900, 600}, output), (foreground::rect_t {100, 100, 900, 600}));
+    EXPECT_EQ(foreground::visible_on_output(output, output), output);
+    // 20 of 1000 columns hidden is the bound; one more is past it.
+    EXPECT_EQ(foreground::visible_on_output({940, 100, 1940, 900}, output), (foreground::rect_t {940, 100, 1920, 900}));
+    EXPECT_FALSE(foreground::visible_on_output({941, 100, 1941, 900}, output).valid());
+    // 16 of 800 rows likewise.
+    EXPECT_EQ(foreground::visible_on_output({100, 296, 900, 1096}, output), (foreground::rect_t {100, 296, 900, 1080}));
+    EXPECT_FALSE(foreground::visible_on_output({100, 297, 900, 1097}, output).valid());
+    // The hidden columns of both sides count together, and each extent is judged on its own.
+    EXPECT_EQ(foreground::visible_on_output({-10, -8, 990, 792}, output), (foreground::rect_t {0, 0, 990, 792}));
+    EXPECT_EQ(foreground::visible_on_output({-19, 0, 1940, 1080}, output), output);
+    EXPECT_FALSE(foreground::visible_on_output({-20, 0, 1940, 1080}, output).valid());
+    // Nothing on the output, and nothing to judge.
+    EXPECT_FALSE(foreground::visible_on_output({1920, 100, 2720, 600}, output).valid());
+    EXPECT_FALSE(foreground::visible_on_output({}, output).valid());
+    EXPECT_FALSE(foreground::visible_on_output({100, 100, 900, 600}, {}).valid());
+  }
+
+  TEST(ForegroundWindowMapping, MapsTheVisiblePartOfAClientReachingSlightlyPastTheOutput) {
+    const foreground::capture_target_t target {
+      .screen_rect = {0, 0, 3840, 2160},
+      .width = 3840,
+      .height = 2160,
+      .monitor = 0x200u,
+    };
+    // A browser window opened from one snapped to the right half: 15 columns past the output.
+    auto snapshot = available_snapshot();
+    snapshot.monitor_screen_rect = target.screen_rect;
+    snapshot.client_screen_rect = {1938, 17, 3855, 2104};
+    snapshot.frame_screen_rect = {1930, 17, 3863, 2112};
+    const auto mapped = foreground::map_to_capture(snapshot, target);
+    ASSERT_TRUE(mapped);
+    EXPECT_EQ(mapped.status, foreground::mapping_status_e::ok);
+    EXPECT_EQ(mapped.route, foreground::route_e::roi);
+    EXPECT_EQ(mapped.capture_pixels, (foreground::rect_t {1938, 17, 3840, 2104}));
+
+    // One column more than a fiftieth of its 1917 is hidden: refused as before.
+    snapshot.client_screen_rect = {1962, 17, 3879, 2104};
+    snapshot.frame_screen_rect = {1954, 17, 3887, 2112};
+    EXPECT_EQ(
+      foreground::map_to_capture(snapshot, target).status,
+      foreground::mapping_status_e::partially_outside_capture
+    );
+    snapshot.client_screen_rect = {1961, 17, 3878, 2104};
+    EXPECT_TRUE(foreground::map_to_capture(snapshot, target));
+  }
+
+  TEST(ForegroundWindowMapping, ClientReachingPastEveryEdgeOfTheOutputIsTheFullCapture) {
+    const foreground::capture_target_t target {
+      .screen_rect = {0, 0, 3840, 2160},
+      .width = 3840,
+      .height = 2160,
+      .monitor = 0x200u,
+    };
+    // A maximized window that draws its own frame keeps the hidden resize border in its client.
+    auto snapshot = available_snapshot();
+    snapshot.monitor_screen_rect = target.screen_rect;
+    snapshot.client_screen_rect = {-8, -8, 3848, 2168};
+    snapshot.frame_screen_rect = snapshot.client_screen_rect;
+    const auto mapped = foreground::map_to_capture(snapshot, target);
+    ASSERT_TRUE(mapped);
+    EXPECT_EQ(mapped.route, foreground::route_e::full_capture);
+    EXPECT_EQ(mapped.capture_pixels, (foreground::rect_t {0, 0, 3840, 2160}));
+  }
+
+  TEST(ForegroundWindowMapping, SelectedContentIsJudgedByItsOwnVisiblePart) {
+    const foreground::capture_target_t target {
+      .screen_rect = {0, 0, 1920, 1080},
+      .width = 1920,
+      .height = 1080,
+      .monitor = 0x200u,
+    };
+    auto snapshot = available_snapshot();
+    snapshot.monitor_screen_rect = target.screen_rect;
+    snapshot.client_screen_rect = {940, 100, 1940, 900};
+    snapshot.frame_screen_rect = {930, 70, 1950, 910};
+    snapshot.content_window = 0x101u;
+    // 10 of the child's 980 columns are hidden.
+    snapshot.content_screen_rect = {950, 140, 1930, 860};
+    const auto mapped = foreground::map_to_capture(snapshot, target);
+    ASSERT_TRUE(mapped);
+    EXPECT_EQ(mapped.route, foreground::route_e::roi);
+    EXPECT_EQ(mapped.capture_pixels, (foreground::rect_t {950, 140, 1920, 860}));
+    // 20 of 980 are more than its fiftieth, though the client itself is within its own.
+    snapshot.content_screen_rect = {960, 140, 1940, 860};
+    const auto refused = foreground::map_to_capture(snapshot, target);
+    EXPECT_EQ(refused.status, foreground::mapping_status_e::partially_outside_capture);
+    EXPECT_EQ(refused.route, foreground::route_e::none);
+  }
+
+  foreground::detail::top_level_observation_t top_level_window(
+    const std::uintptr_t window,
+    const foreground::rect_t rect,
+    const std::uint32_t process_id = 42u
+  ) {
+    return {
+      .window = window,
+      .process_id = process_id,
+      .screen_rect = rect,
+      .query_succeeded = true,
+      .visible = true,
+    };
+  }
+
+  TEST(ForegroundWindowPictureRoot, OwnerStaysTheRootWhileItsDialogLiesOnItsClient) {
+    // A game's 1920x1080 client and the small dialog it owns.
+    const auto owner = top_level_window(0x100u, {1255, 561, 3175, 1641});
+    const auto dialog = top_level_window(0x101u, {2020, 930, 2411, 1203});
+    EXPECT_EQ(foreground::detail::select_picture_root(dialog, owner), 0x100u);
+    // A dialog that exactly fills the client is still on it.
+    auto filling = dialog;
+    filling.screen_rect = owner.screen_rect;
+    EXPECT_EQ(foreground::detail::select_picture_root(filling, owner), 0x100u);
+    // A dialog in front that is not shown yet has changed nothing in the picture.
+    auto hidden = dialog;
+    hidden.visible = false;
+    hidden.screen_rect = {};
+    EXPECT_EQ(foreground::detail::select_picture_root(hidden, owner), 0x100u);
+  }
+
+  TEST(ForegroundWindowPictureRoot, AnyOtherWindowInFrontIsItsOwnRoot) {
+    const auto owner = top_level_window(0x100u, {1255, 561, 3175, 1641});
+    const auto dialog = top_level_window(0x101u, {2020, 930, 2411, 1203});
+    // The root owner of an unowned window is the window itself.
+    EXPECT_EQ(foreground::detail::select_picture_root(dialog, dialog), 0x101u);
+    EXPECT_EQ(foreground::detail::select_picture_root(dialog, {}), 0x101u);
+    // Another process's window.
+    EXPECT_EQ(foreground::detail::select_picture_root(top_level_window(0x101u, dialog.screen_rect, 43u), owner), 0x101u);
+    // A dialog reaching past the owner's client, as a file dialog larger than its owner does.
+    auto reaching = dialog;
+    reaching.screen_rect.right = 3176;
+    EXPECT_EQ(foreground::detail::select_picture_root(reaching, owner), 0x101u);
+    reaching.screen_rect = {1200, 500, 3300, 1700};
+    EXPECT_EQ(foreground::detail::select_picture_root(reaching, owner), 0x101u);
+    // An owner that shows no picture: hidden, as an application's hidden owner window is,
+    // minimized, or without a client.
+    auto unseen = owner;
+    unseen.visible = false;
+    EXPECT_EQ(foreground::detail::select_picture_root(dialog, unseen), 0x101u);
+    unseen = owner;
+    unseen.minimized = true;
+    EXPECT_EQ(foreground::detail::select_picture_root(dialog, unseen), 0x101u);
+    unseen = owner;
+    unseen.screen_rect = {};
+    EXPECT_EQ(foreground::detail::select_picture_root(dialog, unseen), 0x101u);
+    // A failed query of either window.
+    auto failed = owner;
+    failed.query_succeeded = false;
+    EXPECT_EQ(foreground::detail::select_picture_root(dialog, failed), 0x101u);
+    failed = dialog;
+    failed.query_succeeded = false;
+    EXPECT_EQ(foreground::detail::select_picture_root(failed, owner), 0x101u);
+  }
+
+  TEST(ForegroundWindowPictureRoot, TheRootOwnerIsReportedButIsNoContinuityEvidence) {
+    const auto observed_at = std::chrono::steady_clock::time_point {10s};
+    foreground::continuity_tracker_t tracker;
+    auto raw = available_window();
+    const auto alone = tracker.update(foreground::detail::classify(raw, observed_at));
+    ASSERT_EQ(alone.status, foreground::status_e::ok);
+    EXPECT_EQ(alone.owner_window, 0u);
+    // Its dialog comes in front: the same root, the same client, the same uninterrupted run.
+    raw.owner_window = raw.window;
+    const auto with_dialog = tracker.update(foreground::detail::classify(raw, observed_at + 16ms));
+    ASSERT_EQ(with_dialog.status, foreground::status_e::ok);
+    EXPECT_EQ(with_dialog.owner_window, raw.window);
+    EXPECT_EQ(with_dialog.window, alone.window);
+    EXPECT_EQ(with_dialog.generation, alone.generation);
+    EXPECT_EQ(with_dialog.geometry_valid_since, alone.geometry_valid_since);
+  }
 }  // namespace
