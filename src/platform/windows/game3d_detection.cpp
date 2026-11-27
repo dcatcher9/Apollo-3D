@@ -14,10 +14,7 @@ namespace platf::game3d {
   namespace {
     using win32::handle_t;
 
-    [[nodiscard]] bool equal_name(std::wstring_view left, std::wstring_view right) noexcept {
-      return left.size() == right.size() &&
-             CompareStringOrdinal(left.data(), static_cast<int>(left.size()), right.data(), static_cast<int>(right.size()), TRUE) == CSTR_EQUAL;
-    }
+    using win32::same_name;
 
     [[nodiscard]] bool excluded_executable(const std::filesystem::path &executable) {
       // Non-game applications that commonly present a fullscreen Direct3D client: browsers and
@@ -137,7 +134,7 @@ namespace platf::game3d {
       };
       const auto name = executable.filename().wstring();
       return std::any_of(excluded.begin(), excluded.end(), [&](const auto candidate) {
-        return equal_name(name, candidate);
+        return same_name(name, candidate);
       });
     }
 
@@ -160,7 +157,7 @@ namespace platf::game3d {
       }
       const auto path = executable.wstring();
       return path.size() > length && (path[length] == L'\\' || path[length] == L'/') &&
-             equal_name(std::wstring_view {path}.substr(0, length), std::wstring_view {buffer.data(), length});
+             same_name(std::wstring_view {path}.substr(0, length), std::wstring_view {buffer.data(), length});
     }
 
     [[nodiscard]] std::optional<std::vector<std::filesystem::path>> process_modules(DWORD process_id) {
@@ -219,7 +216,7 @@ namespace platf::game3d {
       const foreground_window::observation_t &foreground,
       const RECT capture_rect
     ) {
-      if (!foreground_window::carries_geometry(foreground.status) || !foreground.window || !foreground.process_id || !executable.is_absolute() || !equal_name(executable.extension().wstring(), L".exe") || excluded_executable(executable)) {
+      if (!foreground_window::carries_geometry(foreground.status) || !foreground.window || !foreground.process_id || !executable.is_absolute() || !same_name(executable.extension().wstring(), L".exe") || excluded_executable(executable)) {
         return false;
       }
       const auto client = foreground.client_screen_rect;
@@ -231,7 +228,7 @@ namespace platf::game3d {
 
     [[nodiscard]] bool module_loaded(const std::span<const std::filesystem::path> loaded_modules, const std::wstring_view name) {
       return std::any_of(loaded_modules.begin(), loaded_modules.end(), [&](const auto &module) {
-        return equal_name(module.filename().wstring(), name);
+        return same_name(module.filename().wstring(), name);
       });
     }
   }  // namespace
@@ -346,9 +343,7 @@ namespace platf::game3d {
       return {direct2d && directwrite, gdi, glyphs};
     }
 
-    [[nodiscard]] bool name_starts_with(const std::wstring_view name, const std::wstring_view prefix) noexcept {
-      return name.size() >= prefix.size() && equal_name(name.substr(0, prefix.size()), prefix);
-    }
+    using win32::starts_with_name;
   }  // namespace
 
   detail::executable_imports_t detail::inspect_imports(const std::filesystem::path &executable) noexcept {
@@ -385,9 +380,9 @@ namespace platf::game3d {
     return std::any_of(loaded_modules.begin(), loaded_modules.end(), [&](const auto &module) {
       const auto name = module.filename().wstring();
       return std::any_of(exact.begin(), exact.end(), [&](const auto candidate) {
-        return equal_name(name, candidate);
+        return same_name(name, candidate);
       }) || std::any_of(prefixes.begin(), prefixes.end(), [&](const auto prefix) {
-        return name_starts_with(name, prefix);
+        return starts_with_name(name, prefix);
       });
     });
   }
@@ -450,7 +445,7 @@ namespace platf::game3d {
     }
     return std::any_of(loaded_modules.begin(), loaded_modules.end(), [](const auto &module) {
       const auto name = module.filename().wstring();
-      return equal_name(name, L"d3d11.dll") || equal_name(name, L"d3d12.dll");
+      return same_name(name, L"d3d11.dll") || same_name(name, L"d3d12.dll");
     });
   }
 
@@ -469,7 +464,7 @@ namespace platf::game3d {
       return std::nullopt;
     }
     const bool same_capture = capture_rect.left == capture_rect_.left && capture_rect.top == capture_rect_.top && capture_rect.right == capture_rect_.right && capture_rect.bottom == capture_rect_.bottom;
-    const bool same_process = provisional_ && provisional_->process_id == candidate->process_id && provisional_->creation_time == candidate->creation_time && provisional_->window == candidate->window && provisional_->kind == candidate->kind && equal_name(provisional_->executable.wstring(), candidate->executable.wstring());
+    const bool same_process = provisional_ && provisional_->process_id == candidate->process_id && provisional_->creation_time == candidate->creation_time && provisional_->window == candidate->window && provisional_->kind == candidate->kind && same_name(provisional_->executable.wstring(), candidate->executable.wstring());
     if (!same_capture || !same_process || now < last_seen_ || now - last_seen_ > 5s) {
       provisional_ = candidate;
       capture_rect_ = capture_rect;
@@ -573,7 +568,7 @@ namespace platf::game3d {
       }
       const auto after = foreground_window::sample();
       const auto executable_after = process_executable(process.get());
-      if (!foreground_window::carries_geometry(after.status) || after.window != foreground.window || after.process_id != foreground.process_id || after.client_screen_rect != foreground.client_screen_rect || !executable_after || !equal_name(executable->wstring(), executable_after->wstring()) || process_creation_time(process.get()) != creation_time || WaitForSingleObject(process.get(), 0) != WAIT_TIMEOUT) {
+      if (!foreground_window::carries_geometry(after.status) || after.window != foreground.window || after.process_id != foreground.process_id || after.client_screen_rect != foreground.client_screen_rect || !executable_after || !same_name(executable->wstring(), executable_after->wstring()) || process_creation_time(process.get()) != creation_time || WaitForSingleObject(process.get(), 0) != WAIT_TIMEOUT) {
         return std::nullopt;
       }
       const bool serves = detail::text_helper_serves(*modules, native, imports);

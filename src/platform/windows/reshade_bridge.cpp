@@ -53,15 +53,6 @@ namespace platf::reshade_bridge {
 
     using game3d::win32::process_creation_time;
 
-    std::uint64_t new_nonce() {
-      static std::atomic<std::uint64_t> counter {[] {
-        LARGE_INTEGER now {};
-        QueryPerformanceCounter(&now);
-        return static_cast<std::uint64_t>(now.QuadPart) ^ (static_cast<std::uint64_t>(GetCurrentProcessId()) << 32);
-      }()};
-      const auto value = counter.fetch_add(1);
-      return value ? value : counter.fetch_add(1);
-    }
 
     // The swapchain window's chain in physical pixels, the coordinates of
     // foreground_window::sample(). Empty when the thread cannot become DPI aware or the window
@@ -356,7 +347,7 @@ namespace platf::reshade_bridge {
         if (nonce_) {
           reset_resources();
         }
-        nonce_ = new_nonce();
+        nonce_ = game3d::win32::unique_id();
         // Capabilities and protocol first, then their nonce, then the request itself (full
         // barriers). A producer trusts them only for the nonce they name, so it never applies
         // them to another consumer's request, and answers only a consumer of its own protocol.

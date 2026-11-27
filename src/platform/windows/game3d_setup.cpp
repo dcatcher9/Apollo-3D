@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+#include "game3d_win32_util.h"
 #include "game3d_setup.h"
 
 #include "src/config.h"
@@ -19,19 +20,10 @@
 namespace platf::game3d {
   namespace detail {
     namespace {
-      std::string utf8(const std::filesystem::path &path) {
-        const auto value = path.u8string();
-        return {value.begin(), value.end()};
-      }
-
-      std::filesystem::path from_utf8(const std::string &value) {
-        return std::filesystem::path {std::u8string(value.begin(), value.end())};
-      }
+      using win32::utf8;
 
       bool same_executable(const std::filesystem::path &a, const std::filesystem::path &b) {
-        const auto left = a.lexically_normal().wstring();
-        const auto right = b.lexically_normal().wstring();
-        return CompareStringOrdinal(left.c_str(), static_cast<int>(left.size()), right.c_str(), static_cast<int>(right.size()), TRUE) == CSTR_EQUAL;
+        return win32::same_name(a.lexically_normal().native(), b.lexically_normal().native());
       }
 
       constexpr std::size_t max_decisions = 4096;
@@ -75,7 +67,7 @@ namespace platf::game3d {
         std::vector<entry_t> entries;
         for (const auto &item : document.at("executables")) {
           const auto decision = item.at("decision").get<std::string>();
-          entry_t entry {from_utf8(item.at("path").get<std::string>()), item.value("identity", std::string {})};
+          entry_t entry {win32::path_from_utf8(item.at("path").get<std::string>()), item.value("identity", std::string {})};
           entry.chosen = item.value("chosen", false);
           if (decision == "install") {
             entry.decision = setup_decision_e::install;
@@ -382,14 +374,10 @@ namespace platf::game3d {
     using namespace std::chrono_literals;
     using detail::published_state_e;
 
-    std::string utf8(const std::filesystem::path &path) {
-      const auto value = path.u8string();
-      return {value.begin(), value.end()};
-    }
+    using win32::utf8;
 
     std::filesystem::path decisions_file() {
-      const auto &config_file = config::sunshine.config_file;
-      return std::filesystem::path {std::u8string(config_file.begin(), config_file.end())}.parent_path() / "game3d_setup.json";
+      return win32::path_from_utf8(config::sunshine.config_file).parent_path() / "game3d_setup.json";
     }
 
     class setup_service {

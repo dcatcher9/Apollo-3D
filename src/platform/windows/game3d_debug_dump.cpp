@@ -44,15 +44,7 @@ namespace platf::game3d_debug {
 
     using game3d::win32::process_creation_time;
 
-    std::uint64_t unique_id() {
-      static std::atomic<std::uint64_t> next {[] {
-        LARGE_INTEGER now {};
-        QueryPerformanceCounter(&now);
-        return static_cast<std::uint64_t>(now.QuadPart) ^ (static_cast<std::uint64_t>(GetCurrentProcessId()) << 32);
-      }()};
-      const auto id = next.fetch_add(1, std::memory_order_relaxed);
-      return id ? id : next.fetch_add(1, std::memory_order_relaxed);
-    }
+    using game3d::win32::unique_id;
 
     using game3d::win32::handle_t;
 

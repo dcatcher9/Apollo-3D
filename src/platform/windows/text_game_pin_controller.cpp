@@ -4,6 +4,7 @@
  *        the helper's text in the Host warp.
  */
 #include "text_game_pin_controller.h"
+#include "game3d_win32_util.h"
 
 // standard includes
 #include <algorithm>
@@ -24,15 +25,7 @@ namespace platf::dxgi {
   namespace {
     /** When the process with this id was created, or zero when it cannot be opened. */
     std::uint64_t process_creation_time(const std::uint32_t process_id) {
-      std::uint64_t creation_time = 0u;
-      if (HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id)) {
-        FILETIME created {}, exited {}, kernel {}, user {};
-        if (GetProcessTimes(process, &created, &exited, &kernel, &user)) {
-          creation_time = (static_cast<std::uint64_t>(created.dwHighDateTime) << 32u) | created.dwLowDateTime;
-        }
-        CloseHandle(process);
-      }
-      return creation_time;
+      return platf::game3d::win32::process_id_creation_time(process_id);
     }
   }  // namespace
 

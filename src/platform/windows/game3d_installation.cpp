@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+#include "game3d_win32_util.h"
 #include "game3d_installation.h"
 
 #include <algorithm>
@@ -20,20 +21,8 @@ namespace platf::game3d {
     namespace fs = std::filesystem;
     std::atomic_bool installation_cancelled {false};
 
-    struct handle_t {
-      HANDLE value {INVALID_HANDLE_VALUE};
-
-      ~handle_t() {
-        if (value != INVALID_HANDLE_VALUE && value != nullptr) {
-          CloseHandle(value);
-        }
-      }
-    };
-
-    std::string utf8(const fs::path &path) {
-      const auto value = path.u8string();
-      return {value.begin(), value.end()};
-    }
+    using win32::handle_t;
+    using win32::utf8;
 
     std::string trim(std::string value) {
       const auto first = value.find_first_not_of(" \t\r\n");
@@ -110,7 +99,7 @@ namespace platf::game3d {
       if (value.find('%') != std::string::npos) {
         return std::nullopt;
       }
-      const auto path = fs::path(std::u8string(value.begin(), value.end()));
+      const auto path = win32::path_from_utf8(value);
       return (path.is_absolute() ? path : ini.parent_path() / path).lexically_normal();
     }
 
@@ -132,16 +121,11 @@ namespace platf::game3d {
     }
 
     bool same_path(const fs::path &a, const fs::path &b) {
-      return CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_EQUAL;
+      return win32::same_name(a.native(), b.native());
     }
 
-    bool starts_with_name(std::wstring_view name, std::wstring_view prefix) {
-      return name.size() >= prefix.size() && CompareStringOrdinal(name.data(), static_cast<int>(prefix.size()), prefix.data(), static_cast<int>(prefix.size()), TRUE) == CSTR_EQUAL;
-    }
-
-    bool ends_with_name(std::wstring_view name, std::wstring_view suffix) {
-      return name.size() >= suffix.size() && CompareStringOrdinal(name.data() + name.size() - suffix.size(), static_cast<int>(suffix.size()), suffix.data(), static_cast<int>(suffix.size()), TRUE) == CSTR_EQUAL;
-    }
+    using win32::ends_with_name;
+    using win32::starts_with_name;
 
     // Files and folders that kernel-level anti-cheat systems install inside a game's folder.
     // tools/reshade/install-runtime.ps1 applies the same markers and walk independently.
@@ -244,7 +228,7 @@ namespace platf::game3d {
           swprintf(key.data(), key.size(), L"\\StringFileInfo\\%04x%04x\\ProductName", translations[i].language, translations[i].codepage);
           wchar_t *product = nullptr;
           UINT characters = 0;
-          if (VerQueryValueW(version.data(), key.data(), reinterpret_cast<void **>(&product), &characters) && characters == 8 && CompareStringOrdinal(product, 7, L"ReShade", 7, TRUE) == CSTR_EQUAL) {
+          if (VerQueryValueW(version.data(), key.data(), reinterpret_cast<void **>(&product), &characters) && characters == 8 && win32::same_name({product, 7}, L"ReShade")) {
             return true;
           }
         }
@@ -256,12 +240,12 @@ namespace platf::game3d {
     // unrelated names do not block updates; inaccessible matching names do.
     bool game_running_or_unknown(const fs::path &executable) {
       handle_t snapshot {CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)};
-      if (snapshot.value == INVALID_HANDLE_VALUE) {
+      if (snapshot.get() == INVALID_HANDLE_VALUE) {
         return true;
       }
       PROCESSENTRY32W entry {};
       entry.dwSize = sizeof(entry);
-      if (!Process32FirstW(snapshot.value, &entry)) {
+      if (!Process32FirstW(snapshot.get(), &entry)) {
         return true;
       }
       do {
@@ -269,7 +253,7 @@ namespace platf::game3d {
           continue;
         }
         handle_t process {OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID)};
-        if (!process.value) {
+        if (!process.get()) {
           // A process may have exited between the snapshot and OpenProcess.
           if (GetLastError() == ERROR_INVALID_PARAMETER) {
             continue;
@@ -278,14 +262,14 @@ namespace platf::game3d {
         }
         std::wstring path(32768, L'\0');
         DWORD length = static_cast<DWORD>(path.size());
-        if (!QueryFullProcessImageNameW(process.value, 0, path.data(), &length)) {
+        if (!QueryFullProcessImageNameW(process.get(), 0, path.data(), &length)) {
           return true;
         }
         path.resize(length);
         if (same_path(fs::path(path).lexically_normal(), executable)) {
           return true;
         }
-      } while (Process32NextW(snapshot.value, &entry));
+      } while (Process32NextW(snapshot.get(), &entry));
       return GetLastError() != ERROR_NO_MORE_FILES;
     }
 
@@ -457,7 +441,7 @@ namespace platf::game3d {
       }
       std::vector<std::wstring> environment_entries;
       for (auto entry = inherited_environment; *entry; entry += wcslen(entry) + 1) {
-        if (wcslen(entry) < 13 || CompareStringOrdinal(entry, 13, L"PSModulePath=", 13, TRUE) != CSTR_EQUAL) {
+        if (!starts_with_name(entry, L"PSModulePath=")) {
           environment_entries.emplace_back(entry);
         }
       }
@@ -477,17 +461,17 @@ namespace platf::game3d {
       handle_t job {CreateJobObjectW(nullptr, nullptr)};
       JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits {};
       limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-      if (!job.value || !SetInformationJobObject(job.value, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
+      if (!job.get() || !SetInformationJobObject(job.get(), JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
         return "The installer could not be started safely.";
       }
       SECURITY_ATTRIBUTES security {sizeof(security), nullptr, TRUE};
       handle_t output_read;
       handle_t output_write;
-      if (!CreatePipe(&output_read.value, &output_write.value, &security, 0) || !SetHandleInformation(output_read.value, HANDLE_FLAG_INHERIT, 0)) {
+      if (!CreatePipe(output_read.put(), output_write.put(), &security, 0) || !SetHandleInformation(output_read.get(), HANDLE_FLAG_INHERIT, 0)) {
         return "The installer output could not be captured.";
       }
       handle_t input {CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &security, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
-      if (input.value == INVALID_HANDLE_VALUE) {
+      if (input.get() == INVALID_HANDLE_VALUE) {
         return "The installer input could not be initialized.";
       }
       SIZE_T attribute_bytes = 0;
@@ -506,7 +490,7 @@ namespace platf::game3d {
         }
       } attribute_cleanup {attribute_list};
 
-      HANDLE inherited[] {input.value, output_write.value};
+      HANDLE inherited[] {input.get(), output_write.get()};
       if (!UpdateProcThreadAttribute(attribute_list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited, sizeof(inherited), nullptr, nullptr)) {
         return "The installer handle list could not be configured.";
       }
@@ -514,9 +498,9 @@ namespace platf::game3d {
       startup.StartupInfo.cb = sizeof(startup);
       startup.StartupInfo.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
       startup.StartupInfo.wShowWindow = SW_HIDE;
-      startup.StartupInfo.hStdInput = input.value;
-      startup.StartupInfo.hStdOutput = output_write.value;
-      startup.StartupInfo.hStdError = output_write.value;
+      startup.StartupInfo.hStdInput = input.get();
+      startup.StartupInfo.hStdOutput = output_write.get();
+      startup.StartupInfo.hStdError = output_write.get();
       startup.lpAttributeList = attribute_list;
       PROCESS_INFORMATION created {};
       if (!CreateProcessW(powershell.c_str(), command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT, environment.data(), script.parent_path().c_str(), &startup.StartupInfo, &created)) {
@@ -524,18 +508,18 @@ namespace platf::game3d {
       }
       handle_t process {created.hProcess};
       handle_t thread {created.hThread};
-      if (!AssignProcessToJobObject(job.value, process.value) || ResumeThread(thread.value) == static_cast<DWORD>(-1)) {
-        TerminateProcess(process.value, 1);
+      if (!AssignProcessToJobObject(job.get(), process.get()) || ResumeThread(thread.get()) == static_cast<DWORD>(-1)) {
+        TerminateProcess(process.get(), 1);
         return "The bundled installer could not be started safely.";
       }
       std::string output;
       const auto deadline = GetTickCount64() + timeout_ms;
       const auto drain_output = [&] {
         DWORD available = 0;
-        while (PeekNamedPipe(output_read.value, nullptr, 0, nullptr, &available, nullptr) && available) {
+        while (PeekNamedPipe(output_read.get(), nullptr, 0, nullptr, &available, nullptr) && available) {
           std::array<char, 4096> bytes {};
           DWORD read = 0;
-          if (!ReadFile(output_read.value, bytes.data(), std::min<DWORD>(available, bytes.size()), &read, nullptr) || !read) {
+          if (!ReadFile(output_read.get(), bytes.data(), std::min<DWORD>(available, bytes.size()), &read, nullptr) || !read) {
             break;
           }
           if (output.size() < 4096) {
@@ -546,19 +530,19 @@ namespace platf::game3d {
       DWORD wait_result;
       do {
         if (installation_cancelled.load()) {
-          TerminateJobObject(job.value, 1);
+          TerminateJobObject(job.get(), 1);
           return "Installation was cancelled because the host is shutting down.";
         }
         drain_output();
-        wait_result = WaitForSingleObject(process.value, 50);
+        wait_result = WaitForSingleObject(process.get(), 50);
       } while (wait_result == WAIT_TIMEOUT && GetTickCount64() < deadline);
       if (wait_result != WAIT_OBJECT_0) {
-        TerminateJobObject(job.value, 1);
+        TerminateJobObject(job.get(), 1);
         return "The installer timed out. Inspect the game's Sunshine3D-backups folder before retrying manually.";
       }
       drain_output();
       DWORD exit_code = 1;
-      if (!GetExitCodeProcess(process.value, &exit_code) || exit_code != 0) {
+      if (!GetExitCodeProcess(process.get(), &exit_code) || exit_code != 0) {
         return "The bundled installer failed. " + trim(valid_utf8(output));
       }
       return std::nullopt;
@@ -584,7 +568,7 @@ namespace platf::game3d {
     FILE_ID_INFO id {};
     FILE_BASIC_INFO basic {};
     FILE_STANDARD_INFO standard {};
-    if (file.value == INVALID_HANDLE_VALUE || !GetFileInformationByHandleEx(file.value, FileIdInfo, &id, sizeof(id)) || !GetFileInformationByHandleEx(file.value, FileBasicInfo, &basic, sizeof(basic)) || !GetFileInformationByHandleEx(file.value, FileStandardInfo, &standard, sizeof(standard)) || standard.Directory) {
+    if (file.get() == INVALID_HANDLE_VALUE || !GetFileInformationByHandleEx(file.get(), FileIdInfo, &id, sizeof(id)) || !GetFileInformationByHandleEx(file.get(), FileBasicInfo, &basic, sizeof(basic)) || !GetFileInformationByHandleEx(file.get(), FileStandardInfo, &standard, sizeof(standard)) || standard.Directory) {
       return {};
     }
     std::string result;
@@ -715,7 +699,7 @@ namespace platf::game3d {
       // externally locked DLLs are left untouched, even when their owner differs.
       {
         handle_t probe {CreateFileW(status.addon.c_str(), GENERIC_READ | GENERIC_WRITE | DELETE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
-        if (probe.value == INVALID_HANDLE_VALUE) {
+        if (probe.get() == INVALID_HANDLE_VALUE) {
           return pending("The add-on is in use or cannot be replaced. Close the game to retry automatically.");
         }
       }
