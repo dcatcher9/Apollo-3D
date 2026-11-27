@@ -1,5 +1,4 @@
 # common macros
-include(${CMAKE_MODULE_PATH}/macros/windows.cmake)
 
 # override find_package function
 macro(find_package)  # cmake-lint: disable=C0103

@@ -164,4 +164,3 @@ set(CPACK_COMPONENT_GAMEPAD_GROUP "Scripts")
 # include specific packaging
 include(${CMAKE_MODULE_PATH}/packaging/windows_client_drivers.cmake)
 include(${CMAKE_MODULE_PATH}/packaging/windows_nsis.cmake)
-include(${CMAKE_MODULE_PATH}/packaging/windows_wix.cmake)
