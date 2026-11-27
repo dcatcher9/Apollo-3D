@@ -2992,7 +2992,7 @@ def main():
         fail(f"--direct-parallax-root is not a directory: {direct_parallax_root}")
     # The harness takes the last occurrence of a flag. These inputs are the evaluator's own:
     # overriding them would score a different source or location than the one hashed here.
-    evaluator_owned = sorted({"--frames", "--out", "--capabilities"} & set(args.extra))
+    evaluator_owned = sorted({"--frames", "--out"} & set(args.extra))
     if evaluator_owned:
         fail(f"--extra may not override evaluator-owned harness arguments: {', '.join(evaluator_owned)}")
 

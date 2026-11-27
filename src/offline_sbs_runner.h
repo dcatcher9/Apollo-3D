@@ -26,7 +26,4 @@ namespace offline_sbs {
 
   /** One GPU owner thread calls this with the worker's already initialized config. */
   int run_native_pass(const native_pass_settings &settings, raw_frame_transport &transport);
-
-  /** Publish the same build's production capability profile without spawning the CLI. */
-  int write_native_capabilities(const std::string &destination);
 }  // namespace offline_sbs

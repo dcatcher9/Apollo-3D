@@ -206,19 +206,6 @@ function Assert-NativeMemoryInterface {
   Assert-Contract ($forbiddenEvidence.Count -eq 0) (
     "$($Worker.Operation) unexpectedly wrote internal per-frame state/progress files"
   )
-  $capabilities = Read-JsonFile -Path (
-    Join-Path $Worker.ResultDirectory 'native-capabilities.json'
-  )
-  $native = $capabilities.native_whole_clip
-  Assert-Contract (
-    $native.production_runner -eq 'typed-native-pass-v1' -and
-    $native.native_evidence_transport -eq 'bounded-completion-memory-v1' -and
-    $native.native_evidence_wakeup -eq 'condition-variable' -and
-    [long] $native.native_evidence_protocol_schema -eq 1 -and
-    $native.native_evidence_float_representation -eq 'finite-native-float32' -and
-    $native.PSObject.Properties.Name -notcontains 'follow_wakeup' -and
-    $native.PSObject.Properties.Name -notcontains 'follow_protocol_schema'
-  ) "$($Worker.Operation) capabilities do not attest the actual native interface"
 }
 
 function Invoke-JsonProbe {

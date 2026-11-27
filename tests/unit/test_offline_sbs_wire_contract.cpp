@@ -454,6 +454,32 @@ TEST(OfflineSbsWireContractTest, WholeClipRoundTripsAndRejectsNestedUnknownField
   );
 }
 
+// Offline evaluation and conversion observe only the selected file's full frames: never the active
+// window and neither live window-region ROI authority.
+TEST(OfflineSbsWireContractTest, WholeClipRequiresSelectedInputFullFrameSourceScope) {
+  const auto encoded = offline_sbs::wire::to_json(memory_whole_clip(true));
+  EXPECT_NO_THROW((void) offline_sbs::wire::parse_whole_clip_contract(encoded));
+  const auto expect_rejected = [&](const char *key, const nlohmann::json &value) {
+    auto changed = encoded;
+    changed["source_scope"][key] = value;
+    EXPECT_THROW(
+      offline_sbs::wire::parse_whole_clip_contract(changed),
+      offline_sbs::wire::contract_error
+    ) << key;
+  };
+  expect_rejected("active_window_dependency", true);
+  expect_rejected("window_region_roi", true);
+  expect_rejected("analysis_region", "window-region");
+  expect_rejected("frame_source", "desktop-capture");
+  expect_rejected("fallback", "active-window");
+  auto missing = encoded;
+  missing.erase("source_scope");
+  EXPECT_THROW(
+    offline_sbs::wire::parse_whole_clip_contract(missing),
+    offline_sbs::wire::contract_error
+  );
+}
+
 TEST(OfflineSbsWireContractTest, PersistedJobRoundTripsCurrentWireShape) {
   const auto original = persisted_job();
   const auto encoded = offline_sbs::wire::to_json(original);

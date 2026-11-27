@@ -118,14 +118,13 @@ random-access keyframe; a looped single donor frame does not establish that equi
 ## Retained job documents
 
 A job retains its worker specification (schema 3), its worker result (schema 4, at most 16 MiB),
-and the contracts in its result directory: source, native capabilities, and, for a conversion,
-output, timeline, and publication. The specification and result are exact-key documents
+and the contracts in its result directory: source and, for a conversion, output, timeline, and
+publication. The specification and result are exact-key documents
 exchanged only between the manager and the worker of the same build; the manager reads a worker
 result once, when that worker exits, and accepts only the raw memory transport and completion
 evidence that worker produces. No scene list or scene-audit file is produced.
 
-New production contracts identify the typed runner, its condition-variable evidence wakeup, and
-its memory transport without snapshot filenames. Retained file-transport contracts remain
+New production contracts identify their memory transport without snapshot filenames. Retained file-transport contracts remain
 readable under their original labels; they are never retagged as native memory evidence.
 
 The durable job record `job.json` is schema 1. Every published output is beside its input and

@@ -398,38 +398,6 @@ TEST(OfflineSbsWorker, UiProgressUsesTransientWritesAndHarnessFilesStayDurable) 
   EXPECT_NE(harness_writer.find("succeeded = FlushFileBuffers(handle)"), std::string::npos);
 }
 
-TEST(OfflineSbsWorker, RequiresSelectedInputFullFrameSourceScope) {
-  nlohmann::json scope {
-    {"frame_source", std::string {offline_sbs::whole_clip_frame_source}},
-    {"analysis_region", std::string {offline_sbs::whole_clip_analysis_region}},
-    {"active_window_dependency", false},
-    {"window_region_roi", false},
-  };
-  EXPECT_TRUE(offline_sbs::offline_full_frame_source_scope_is_valid(scope));
-
-  auto active_window = scope;
-  active_window["active_window_dependency"] = true;
-  EXPECT_FALSE(
-    offline_sbs::offline_full_frame_source_scope_is_valid(active_window)
-  );
-
-  auto roi = scope;
-  roi["window_region_roi"] = true;
-  EXPECT_FALSE(offline_sbs::offline_full_frame_source_scope_is_valid(roi));
-
-  auto cropped = scope;
-  cropped["analysis_region"] = "window-region";
-  EXPECT_FALSE(offline_sbs::offline_full_frame_source_scope_is_valid(cropped));
-
-  auto desktop = scope;
-  desktop["frame_source"] = "desktop-capture";
-  EXPECT_FALSE(offline_sbs::offline_full_frame_source_scope_is_valid(desktop));
-
-  auto extended = scope;
-  extended["fallback"] = "active-window";
-  EXPECT_FALSE(offline_sbs::offline_full_frame_source_scope_is_valid(extended));
-}
-
 TEST(OfflineSbsWorker, ReplayHashesTheExactSnapshotItDecodes) {
   const auto harness = read_source_text("src/sbs_bench_harness.cpp");
   ASSERT_FALSE(harness.empty());

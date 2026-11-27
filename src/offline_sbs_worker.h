@@ -96,17 +96,6 @@ namespace offline_sbs {
     std::string_view expected_sha256
   );
 
-  /**
-   * Validate the native harness's selected-file/full-frame source-scope attestation.
-   *
-   * Offline evaluation and conversion must not observe the active window or use either live
-   * window-region ROI authority. The worker rejects missing, extended, or contradictory
-   * attestations before it can publish a conversion.
-   */
-  bool offline_full_frame_source_scope_is_valid(
-    const nlohmann::json &value
-  ) noexcept;
-
 #ifdef SUNSHINE_TESTS
   /**
    * Parse an already-materialized FFprobe stream/frame document (tests only).

@@ -5564,22 +5564,6 @@ namespace offline_sbs {
   }
 #endif
 
-  bool offline_full_frame_source_scope_is_valid(
-    const nlohmann::json &value
-  ) noexcept {
-    try {
-      return
-        value.is_object() &&
-        value.size() == 4u &&
-        value.value("frame_source", std::string {}) == whole_clip_frame_source &&
-        value.value("analysis_region", std::string {}) == whole_clip_analysis_region &&
-        !value.value("active_window_dependency", true) &&
-        !value.value("window_region_roi", true);
-    } catch (const nlohmann::json::exception &) {
-      return false;
-    }
-  }
-
   void validate_avexpr_timeline_exactness(const media_contract_t &media) {
     using boost::multiprecision::cpp_int;
     static const cpp_int max_exact_avexpr_integer {
@@ -5928,28 +5912,9 @@ namespace offline_sbs {
         media_contract_json(media)
       );
 
-      // Refuse to start TensorRT unless the native runner can publish each production SBS frame
-      // directly from the same causal estimator/renderer pass. Offline conversion deliberately
-      // removes wall-clock pacing; it does not replace the online camera, OCR, conditioning,
-      // or renderer state machines with an offline replay implementation.
-      const auto capabilities_path = spec.result_directory / "native-capabilities.json";
-      if (write_native_capabilities(path_utf8(capabilities_path)) != 0) {
-        throw worker_error("cannot publish native SBS production capabilities");
-      }
-      const auto capabilities = read_json(capabilities_path);
-      const auto &native = capabilities.at("native_whole_clip");
-      if (capabilities.value("schema", 0) != 1 || native.value("production_runner", "") != "typed-native-pass-v1" || native.value("native_evidence_transport", "") != completion_channel_t::name || native.value("native_evidence_wakeup", "") != "condition-variable" || native.value("native_evidence_protocol_schema", 0) != 1 || native.value("native_evidence_float_representation", "") != "finite-native-float32" || native.value("frame_transport", "") != raw_frame_transport::name || native.value("adaptive_state_schema", 0u) != sbs_adaptive_state::schema_version || native.value("adaptive_state_contract_canonical_sha256", "") != sbs_adaptive_state::contract_canonical_sha256 || native.value("renderer", "") != "depth-coordinate-v2-live-signed-parallax" || !native.value("direct_conversion_follow", false) || !native.value("direct_conversion_single_pass", false) || !native.value("atomic_sbs_publication", false) || !native.value("transient_raster_cap_preflight", false)) {
-        throw worker_error("native SBS runner lacks the required direct conversion contract");
-      }
-      if (
-        !native.contains("source_scope") ||
-        !offline_full_frame_source_scope_is_valid(native["source_scope"])
-      ) {
-        throw worker_error(
-          "native SBS runner is not isolated to selected-input full-frame processing"
-        );
-      }
-
+      // The same build's causal estimator/renderer pass runs in this process. Offline conversion
+      // removes wall-clock pacing; it does not replace the online camera, OCR, conditioning, or
+      // renderer state machines with an offline replay implementation.
       const auto analysis_input = work / "analysis-input";
       // These directories retain source identity and the causal pass's bounded final contracts.
       // Per-frame pixels and completion evidence travel only through owned memory channels.

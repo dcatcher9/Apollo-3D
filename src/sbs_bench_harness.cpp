@@ -61,7 +61,6 @@
 #include "host_sbs_subtitle_render.h"
 #include "host_sbs_v2_geometry.h"
 #include "logging.h"
-#include "offline_sbs_contract.h"
 #include "offline_sbs_wire_contract.h"
 #include "offline_sbs_worker.h"
 #include "platform/windows/host_sbs_v2_renderer.h"
@@ -1911,61 +1910,6 @@ namespace sbs_bench {
       std::uint64_t adaptive = 0;
       std::uint64_t sbs = 0;
     };
-
-    nlohmann::ordered_json build_native_capabilities() {
-      nlohmann::ordered_json capabilities = {
-        {"schema", 1},
-        {"native_whole_clip", {
-          {"artifact_modes", {"adaptive", "conversion"}},
-          {"source_formats", {"bgra8", "gbrpf32le"}},
-          {"source_scope", {
-            {"frame_source", std::string {offline_sbs::whole_clip_frame_source}},
-            {"analysis_region", std::string {offline_sbs::whole_clip_analysis_region}},
-            {"active_window_dependency", false},
-            {"window_region_roi", false},
-          }},
-          {"frame_transport", offline_sbs::raw_frame_transport::name},
-          {"follow_global_first_sequence", true},
-          {"observation_timeline_schema", models::host_sbs_observation_timeline::schema},
-          {"observation_timeline_unit", "monotonic-source-us-plus-one"},
-          {"adaptive_state_schema", sbs_adaptive_state::schema_version},
-          {"adaptive_state_contract_tag", sbs_adaptive_state::contract_tag},
-          {"adaptive_state_contract_canonical_sha256",
-           sbs_adaptive_state::contract_canonical_sha256},
-          {"renderer", "depth-coordinate-v2-live-signed-parallax"},
-          {"parallax_v2_contract_schema",
-           models::depth_coordinate_v2::contract_schema},
-          {"direct_conversion_follow", true},
-          {"direct_conversion_single_pass", true},
-          {"transient_raster_cap_preflight", true},
-          {"whole_clip_inference_attestation", {
-            {"depth_inference_enabled", true},
-            {"scheduled_depth_update_count", true},
-            {"tensorrt_enqueue_count", true},
-          }},
-          {"atomic_sbs_publication", true},
-          {"production_runner", "typed-native-pass-v1"},
-          {"native_evidence_transport", offline_sbs::completion_channel_t::name},
-          {"native_evidence_wakeup", "condition-variable"},
-          {"native_evidence_protocol_schema", 1},
-          {"native_evidence_float_representation", "finite-native-float32"},
-        }},
-      };
-      return capabilities;
-    }
-
-    int publish_native_capabilities(const std::string &destination) {
-      std::error_code ec;
-      const fs::path path = destination;
-      if (!path.parent_path().empty()) {
-        fs::create_directories(path.parent_path(), ec);
-      }
-      if (ec || !publish_json_atomically(path, build_native_capabilities())) {
-        BOOST_LOG(error) << "sbs-bench: cannot publish capabilities document";
-        return 2;
-      }
-      return 0;
-    }
 
   }  // namespace
 
@@ -4677,9 +4621,5 @@ namespace sbs_bench {
 namespace offline_sbs {
   int run_native_pass(const native_pass_settings &settings, raw_frame_transport &transport) {
     return sbs_bench::run_native_pass_impl(settings, transport);
-  }
-
-  int write_native_capabilities(const std::string &destination) {
-    return sbs_bench::publish_native_capabilities(destination);
   }
 }  // namespace offline_sbs
