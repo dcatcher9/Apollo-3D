@@ -72,7 +72,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
             dump_contract.validate_v2_dump_manifest_document(changed)
 
     def test_live_dump_resolver_lists_the_canonical_producer_stages(self):
-        source = (REPO / "src/platform/windows/sbs_debug_dump.cpp").read_text()
+        source = (REPO / "src/platform/windows/sbs_debug_dump_package.cpp").read_text()
         resolver = source.split("nlohmann::json subtitle_plane_resolver_contract_json(", 1)[1]
         resolver = resolver.split("bool subtitle_target_is_representable(", 1)[0]
         native_specs = tuple(re.findall(
@@ -82,7 +82,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         self.assertEqual(native_specs, dump_contract._SUBTITLE_PLANE_SHADER_SPECS)
 
     def test_live_dump_resolver_step_metadata_matches_canonical_reader(self):
-        source = (REPO / "src/platform/windows/sbs_debug_dump.cpp").read_text()
+        source = (REPO / "src/platform/windows/sbs_debug_dump_package.cpp").read_text()
         resolver = source.split("nlohmann::json subtitle_plane_resolver_contract_json(", 1)[1]
         resolver = resolver.split("bool subtitle_target_is_representable(", 1)[0]
         expected = dump_contract._subtitle_plane_resolver_contract()
@@ -3120,7 +3120,7 @@ class DepthCoordinateV2DumpContractTests(unittest.TestCase):
         self.assertTrue(value["available"])
         self.assertEqual((value["width"], value["height"]), (7680, 2160))
         self.assertIn(current["warp_map_contract"]["validity"]["inverse"],
-                      (REPO / "src/platform/windows/sbs_debug_dump.cpp").read_text())
+                      (REPO / "src/platform/windows/sbs_debug_dump_package.cpp").read_text())
         mutations = {
             "retired-pure-inverse": lambda c: c["validity"].update({"inverse":
                 "11-step contractive fixed-point solution of crop-local q embedded by "

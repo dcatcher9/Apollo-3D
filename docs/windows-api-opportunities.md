@@ -794,7 +794,7 @@ for the name.
 | `matched_frame_attribution_t::window_region` in [display_vram.cpp](../src/platform/windows/display_vram.cpp) | matched color slot owns optional generic window-region provenance |
 | `capture_browser_window_region()` in [display_vram.cpp](../src/platform/windows/display_vram.cpp) | causally-prior Chromium geometry is validated and bound to the matched frame |
 | `capture_foreground_window_region()` in [display_vram.cpp](../src/platform/windows/display_vram.cpp) | lower-priority foreground-client capture and mapping |
-| `publish_captured_dump()` in [sbs_debug_dump.cpp](../src/platform/windows/sbs_debug_dump.cpp), with `validate_window_region()` in [sbs_debug_dump_border.h](../src/platform/windows/sbs_debug_dump_border.h) | Dump 3D fails closed on invalid optional window-region evidence |
+| `publish_captured_dump()` in [sbs_debug_dump_package.cpp](../src/platform/windows/sbs_debug_dump_package.cpp), with `validate_window_region()` in [sbs_debug_dump_border.h](../src/platform/windows/sbs_debug_dump_border.h) | Dump 3D fails closed on invalid optional window-region evidence |
 | `wgc_capture_t::init()` in [display_wgc.cpp](../src/platform/windows/display_wgc.cpp) | WGC uses `CreateForMonitor` only; `CreateForWindow` unused (W9) |
 | `nvenc_base::create_encoder()` in [nvenc_base.cpp](../src/nvenc/nvenc_base.cpp) | lookahead explicitly disabled; `enableAQ` is the only adaptive quantisation; no QP map (W8) |
 | `build_whole_clip_encode_command()` in [offline_sbs_worker_ffmpeg.cpp](../src/offline_sbs_worker_ffmpeg.cpp) | render pass drops subtitle streams with `-sn`; no effect on burned-in text (W2) |

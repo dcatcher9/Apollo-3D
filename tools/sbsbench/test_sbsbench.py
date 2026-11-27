@@ -2024,7 +2024,7 @@ class EvalContractTests(unittest.TestCase):
 
     def test_hdr_debug_preview_preserves_hue(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        path = os.path.join(repo, "src", "platform", "windows", "sbs_debug_dump.cpp")
+        path = os.path.join(repo, "src", "platform", "windows", "sbs_debug_dump_package.cpp")
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
         self.assertIn("0.2126f * r + 0.7152f * g", text)

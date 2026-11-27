@@ -20,6 +20,8 @@
 #include "src/depth_coordinate_v2.h"
 #include "src/host_sbs_contour_history_readback.h"
 #include "src/host_sbs_gpu_trace.h"
+#include "src/host_sbs_resolution.h"
+#include "src/host_sbs_shader_cache.h"
 #include "src/host_sbs_subtitle_glyph.h"
 #include "src/host_sbs_subtitle_plane.h"
 #include "src/model_manager.h"
@@ -1401,5 +1403,229 @@ namespace platf::sbs_debug {
               ));
     }
 
+
+    bool parallax_v2_shader_identity_matches_contract(
+      const std::shared_ptr<const models::parallax_v2_shader_provenance_t> &identity
+    ) {
+      return identity &&
+             models::parallax_v2_shader_provenance_matches_current_contract(*identity);
+    }
+
+    bool gpu_trace_shader_identity_matches_contract(
+      const std::shared_ptr<const models::host_sbs_gpu_trace_provenance_t> &identity
+    ) {
+      return identity &&
+             identity->source_closure_schema ==
+               models::host_sbs_shader_cache::source_closure_schema &&
+             identity->source_compile_flags ==
+               models::host_sbs_shader_cache::shader_compile_flags &&
+             identity->source_macro_count == 0u &&
+             identity->source_closure_sha256 ==
+               models::host_sbs_shader_cache::gpu_trace_source_closure_sha256;
+    }
+
+    // Capture compact history in its physical format and authenticate the matching RGBA32F
+    // dimensions for export.
+    bool contour_texture_capture_layout_is_authenticated(
+      const detail::subtitle_contour_texture_e role,
+      const DXGI_FORMAT format,
+      const std::uint32_t width,
+      const std::uint32_t height,
+      const std::size_t row_bytes,
+      const std::size_t byte_count,
+      const frame &completed
+    ) {
+      if (role != detail::subtitle_contour_texture_e::history ||
+          format != DXGI_FORMAT_R16G16B16A16_FLOAT) {
+        return detail::subtitle_contour_texture_layout_is_authenticated(
+          role, format, width, height, row_bytes, byte_count, completed
+        );
+      }
+      constexpr std::size_t physical_pixel_bytes = 4u * sizeof(std::uint16_t);
+      constexpr std::size_t logical_pixel_bytes = 4u * sizeof(float);
+      if (width == 0u || height == 0u ||
+          width > std::numeric_limits<std::size_t>::max() / logical_pixel_bytes) return false;
+      const auto physical_row_bytes = static_cast<std::size_t>(width) * physical_pixel_bytes;
+      const auto logical_row_bytes = static_cast<std::size_t>(width) * logical_pixel_bytes;
+      if (height > std::numeric_limits<std::size_t>::max() / logical_row_bytes ||
+          row_bytes != physical_row_bytes || byte_count != physical_row_bytes * height) return false;
+      return detail::subtitle_contour_texture_layout_is_authenticated(
+        role, DXGI_FORMAT_R32G32B32A32_FLOAT, width, height,
+        logical_row_bytes, logical_row_bytes * height, completed
+      );
+    }
+
+    depth_dumpability decode_normalization_state(
+      const std::vector<std::uint8_t> &bytes,
+      normalization_state &state
+    ) {
+      if (bytes.size() != 4u * sizeof(float)) {
+        return depth_dumpability::unreadable;
+      }
+      std::array<float, 4> values {};
+      std::memcpy(values.data(), bytes.data(), bytes.size());
+      for (const float value : values) {
+        if (!std::isfinite(value)) {
+          return depth_dumpability::unreadable;
+        }
+      }
+      state = {values[0], values[1], values[2], values[3]};
+      return state.frame_state >= 0.5f ?
+               depth_dumpability::valid :
+               depth_dumpability::invalid;
+    }
+
+    bool shadow_state_is_dumpable(
+      const std::vector<float> &state,
+      const float raw_coordinate_scale
+    ) {
+      using namespace models::depth_coordinate_v2;
+      if (state.size() != state_float_count) {
+        return false;
+      }
+      state_words_t words {};
+      std::memcpy(words.data(), state.data(), sizeof(words));
+      return words[frame_valid] == std::bit_cast<std::uint32_t>(1.0f) &&
+             parallax_state_words_are_authenticated(words, raw_coordinate_scale);
+    }
+
+    std::optional<models::depth_tensor_shape_t> calibrated_dav2_shape_for_dump(
+      const frame &completed
+    ) noexcept {
+      const auto &region = completed.depth_input_region;
+      if (region.source_width == 0u || region.source_height == 0u ||
+          completed.model_width <= 0 || completed.model_height <= 0 ||
+          !models::host_sbs_v2_source_resolution_is_supported(
+            region.source_width,
+            region.source_height
+          )) {
+        return std::nullopt;
+      }
+
+      const auto dav2_shape = models::fit_host_sbs_v2_depth_tensor_shape(
+        region.source_width,
+        region.source_height
+      );
+      if (!models::host_sbs_v2_depth_shape_is_authenticated(dav2_shape)) {
+        return std::nullopt;
+      }
+
+      const models::depth_tensor_shape_t capture_shape {
+        completed.model_width,
+        completed.model_height,
+      };
+      const auto high_shape = models::host_sbs_convex2x_field_shape(dav2_shape);
+      if (!high_shape || capture_shape != *high_shape ||
+          !models::prod_zipdepth_convex2x::live_geometry_shape_relation(
+            static_cast<std::uint32_t>(dav2_shape.width),
+            static_cast<std::uint32_t>(dav2_shape.height),
+            static_cast<std::uint32_t>(capture_shape.width),
+            static_cast<std::uint32_t>(capture_shape.height)
+          )) {
+        return std::nullopt;
+      }
+      return dav2_shape;
+    }
+
+    std::string depth_input_region_error(const frame &completed) {
+      const auto &region = completed.depth_input_region;
+      if (!region.valid()) {
+        return "invalid full-source/ROI analysis rectangle";
+      }
+      if (region.source_width == 0u || region.source_height == 0u ||
+          completed.matched_frame_id == 0u) {
+        return "missing matched-frame or source identity";
+      }
+      const auto calibrated_dav2_shape = calibrated_dav2_shape_for_dump(completed);
+      if (!calibrated_dav2_shape) {
+        return "single-high fused tensor is not the exact authenticated convex-2x realization";
+      }
+      const models::depth_tensor_shape_t capture_shape {
+        completed.model_width,
+        completed.model_height,
+      };
+      if (!region.is_video_region()) {
+        if (completed.depth_video_plan) {
+          return "full-source completion carries an ROI planner result";
+        }
+        if (!region.tensor_content.full(capture_shape)) {
+          return "full-source tensor content does not cover the authenticated capture grid";
+        }
+        return {};
+      }
+      if (!completed.depth_video_plan || !completed.window_region) {
+        return "ROI completion is missing its planner result or window-region provenance";
+      }
+      if (completed.window_region_observer_status != "ok" ||
+          completed.window_region_mapping_status != "ok") {
+        return "ROI completion is not backed by an accepted observer/mapping state";
+      }
+      const auto &provenance = *completed.window_region;
+      const auto expected_authority =
+        provenance.authority_kind == window_region_authority_kind_e::chromium_video ?
+          models::depth_analysis_authority_e::chromium_video :
+          models::depth_analysis_authority_e::foreground_client;
+      if (region.authority != expected_authority) {
+        return "ROI estimator authority kind does not match window-region provenance";
+      }
+      const auto provenance_validation = validate_window_region(
+        provenance,
+        completed.matched_frame_id,
+        region.source_width,
+        region.source_height
+      );
+      if (provenance_validation != window_region_error::none) {
+        return std::string {"ROI window-region provenance failed validation: "} +
+               window_region_error_name(provenance_validation);
+      }
+
+      const models::depth_source_rect_t semantic_rect {
+          static_cast<std::uint32_t>(provenance.left),
+          static_cast<std::uint32_t>(provenance.top),
+          static_cast<std::uint32_t>(provenance.right),
+          static_cast<std::uint32_t>(provenance.bottom),
+      };
+      const auto expected_plan = models::plan_host_sbs_v2_video_region(
+        semantic_rect,
+        region.source_width,
+        region.source_height,
+        *calibrated_dav2_shape
+      );
+      if (!expected_plan || *expected_plan != *completed.depth_video_plan) {
+        return "ROI planner result is not the deterministic authenticated integer contain fit";
+      }
+      const auto &input_rect = completed.depth_video_plan->source_rect;
+      if (region.left != input_rect.left || region.top != input_rect.top ||
+          region.right != input_rect.right || region.bottom != input_rect.bottom) {
+        return "ROI estimator domain does not match its planner input rectangle";
+      }
+      if (completed.depth_video_plan->tensor_shape != *calibrated_dav2_shape) {
+        return "ROI planner tensor does not match the embedded DAV2 calibration grid";
+      }
+      const auto expected_capture_content = models::host_sbs_convex2x_content_rect(
+        completed.depth_video_plan->tensor_content,
+        *calibrated_dav2_shape
+      );
+      if (!expected_capture_content || !region.tensor_content.valid(capture_shape) ||
+          region.tensor_content != *expected_capture_content) {
+        return "ROI tensor content is not the exact convex-2x realization of its authenticated DAV2 plan";
+      }
+      return {};
+    }
+
+    bool capture_tensor_grid_is_authenticated(const frame &completed) noexcept {
+      try {
+        return completed.model_width > 0 && completed.model_height > 0 &&
+               completed.raw_width == completed.model_width &&
+               completed.raw_height == completed.model_height &&
+               completed.field_width == completed.raw_width &&
+               completed.field_height == completed.raw_height &&
+               completed.field_content == completed.depth_input_region.tensor_content &&
+               calibrated_dav2_shape_for_dump(completed).has_value() &&
+               depth_input_region_error(completed).empty();
+      } catch (...) {
+        return false;
+      }
+    }
   }  // namespace detail
 }  // namespace platf::sbs_debug

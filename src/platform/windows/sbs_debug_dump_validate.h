@@ -10,7 +10,18 @@
 // standard includes
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
 #include <vector>
+
+// local includes
+#include "src/host_sbs_resolution.h"
+
+namespace models {
+  struct parallax_v2_shader_provenance_t;
+  struct host_sbs_gpu_trace_provenance_t;
+}  // namespace models
 
 namespace platf::sbs_debug {
 
@@ -129,5 +140,59 @@ namespace platf::sbs_debug {
 
     /** Authenticate the optional OCR8/UIP4 and complete contour resource set. */
     bool subtitle_capture_resources_are_authenticated(const frame &completed) noexcept;
+
+    /** Bind the producer shader identity to the current Depth Coordinate contract. */
+    bool parallax_v2_shader_identity_matches_contract(
+      const std::shared_ptr<const models::parallax_v2_shader_provenance_t> &identity
+    );
+
+    /** Bind the optional GPU-trace shader identity to its pinned source closure. */
+    bool gpu_trace_shader_identity_matches_contract(
+      const std::shared_ptr<const models::host_sbs_gpu_trace_provenance_t> &identity
+    );
+
+    /** Contour texture ABI as captured; compact RGBA16F history authenticates as RGBA32F. */
+    bool contour_texture_capture_layout_is_authenticated(
+      subtitle_contour_texture_e role,
+      DXGI_FORMAT format,
+      std::uint32_t width,
+      std::uint32_t height,
+      std::size_t row_bytes,
+      std::size_t byte_count,
+      const frame &completed
+    );
+
+    struct normalization_state {
+      float lower = 0.0f;
+      float upper = 0.0f;
+      float initialized = 0.0f;
+      float frame_state = 0.0f;
+    };
+
+    enum class depth_dumpability {
+      valid,
+      invalid,
+      unreadable,
+    };
+
+    /** Decode the captured comparison-only depth normalization state. */
+    depth_dumpability decode_normalization_state(
+      const std::vector<std::uint8_t> &bytes,
+      normalization_state &state
+    );
+
+    /** True when the captured ParallaxState is a valid, authenticated camera state. */
+    bool shadow_state_is_dumpable(
+      const std::vector<float> &state,
+      float raw_coordinate_scale
+    );
+
+    /** The DAV2 grid whose exact convex-2x realization is the completed capture grid. */
+    std::optional<models::depth_tensor_shape_t> calibrated_dav2_shape_for_dump(
+      const frame &completed
+    ) noexcept;
+
+    /** Empty when the full-source/ROI analysis domain is authenticated, else the reason. */
+    std::string depth_input_region_error(const frame &completed);
   }  // namespace detail
 }  // namespace platf::sbs_debug

@@ -4796,10 +4796,19 @@ TEST(ParallaxV2ContractTest, DebugDumpUsesNonblockingGpuStagingBeforeCpuPublicat
   const auto async_source = read_source_file(
     SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump_async.h"
   );
+  const auto package_source = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump_package.cpp"
+  );
+  const auto staging_source = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump_staging.cpp"
+  );
   ASSERT_FALSE(source.empty());
   ASSERT_FALSE(async_source.empty());
+  ASSERT_FALSE(package_source.empty());
+  ASSERT_FALSE(staging_source.empty());
 
-  const auto publisher = source.rfind(
+  // The package writer is the last definition of its own translation unit.
+  const auto publisher = package_source.rfind(
     "dump_publish_result publish_captured_dump(const captured_dump_job &job)"
   );
   const auto poll = source.find("void dumper::poll_pending_readback(");
@@ -4807,10 +4816,9 @@ TEST(ParallaxV2ContractTest, DebugDumpUsesNonblockingGpuStagingBeforeCpuPublicat
   ASSERT_NE(publisher, std::string::npos);
   ASSERT_NE(poll, std::string::npos);
   ASSERT_NE(capture, std::string::npos);
-  ASSERT_LT(publisher, poll);
   ASSERT_LT(poll, capture);
 
-  const auto publisher_body = source.substr(publisher, poll - publisher);
+  const auto publisher_body = package_source.substr(publisher);
   const auto poll_body = source.substr(poll, capture - poll);
   const auto capture_body = source.substr(capture);
   EXPECT_NE(publisher_body.find("write_color_preview("), std::string::npos);
@@ -4821,11 +4829,12 @@ TEST(ParallaxV2ContractTest, DebugDumpUsesNonblockingGpuStagingBeforeCpuPublicat
   );
   EXPECT_EQ(publisher_body.find("read_texture(device"), std::string::npos);
   EXPECT_EQ(publisher_body.find("ID3D11DeviceContext"), std::string::npos);
+  EXPECT_EQ(package_source.find("ID3D11DeviceContext"), std::string::npos);
 
   const auto enqueue = poll_body.find("worker_state->enqueue(");
   ASSERT_NE(enqueue, std::string::npos);
   EXPECT_NE(source.find("D3D11_ASYNC_GETDATA_DONOTFLUSH"), std::string::npos);
-  EXPECT_NE(source.find("D3D11_MAP_FLAG_DO_NOT_WAIT"), std::string::npos);
+  EXPECT_NE(staging_source.find("D3D11_MAP_FLAG_DO_NOT_WAIT"), std::string::npos);
   EXPECT_NE(capture_body.find("stage_texture("), std::string::npos);
   EXPECT_NE(capture_body.find("stage_buffer("), std::string::npos);
   EXPECT_NE(capture_body.find("ctx->End(pending->completion.Get())"), std::string::npos);
@@ -5030,9 +5039,16 @@ TEST(ParallaxV2ContractTest, GpuTimerKeepsEveryNotReadyTimestampPending) {
 }
 
 TEST(ParallaxV2ContractTest, DebugDumpAcceptsAdvertisedWindowsCaptureColorFormats) {
-  const auto dump = read_source_file(
-    SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump.cpp"
+  // Staging admits the formats; the package names and previews them.
+  const auto staging = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump_staging.cpp"
   );
+  const auto package = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/sbs_debug_dump_package.cpp"
+  );
+  ASSERT_FALSE(staging.empty());
+  ASSERT_FALSE(package.empty());
+  const auto dump = staging + package;
   const auto display = read_source_file(
     SUNSHINE_SOURCE_DIR "/src/platform/windows/display_vram.cpp"
   );
