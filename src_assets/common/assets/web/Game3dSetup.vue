@@ -210,6 +210,7 @@ export default {
         ready_to_install: { label: 'Ready to set up', tone: 'warning', description: 'Sunshine 3D can set up Game 3D for this executable. Nothing is written until you confirm.' },
         declined: { label: 'Not set up', tone: 'neutral', description: 'You chose not to set up this game. Sunshine 3D does not change its folder.' },
         anti_cheat: { label: 'Not offered', tone: 'neutral', description: 'Anti-cheat detected, so Sunshine 3D does not install ReShade for this game.' },
+        missing_reshade: { label: 'ReShade missing', tone: 'warning', description: 'ReShade with full add-on support is not installed for this game.' },
         missing_addon: { label: 'Add-on missing', tone: 'warning', description: 'ReShade is installed without the Sunshine 3D add-on.' },
         installing: { label: 'Installing', tone: 'active', description: 'Installing the confirmed components beside this game.' },
         installed: { label: 'Installed for next launch', tone: 'success', description: 'ReShade and the Sunshine 3D add-on are installed. They will activate the next time you launch the game.' },
