@@ -1905,10 +1905,13 @@ namespace sbs_bench {
       return true;
     }
 
-    struct native_pass_counts_t {
+    // What the in-process pass hands its worker: the frames it consumed and, on success, its
+    // validated whole-clip contract.
+    struct native_pass_output_t {
       std::uint64_t source = 0;
       std::uint64_t adaptive = 0;
       std::uint64_t sbs = 0;
+      std::optional<offline_sbs::wire::whole_clip_contract_t> contract;
     };
 
   }  // namespace
@@ -1916,10 +1919,10 @@ namespace sbs_bench {
   static int run_core(
     opts o,
     offline_sbs::raw_frame_transport *transport,
-    native_pass_counts_t *native_counts = nullptr
+    native_pass_output_t *native_output = nullptr
   ) {
     // Only the native pass follows a producer, and always through its raw memory transport.
-    if ((transport != nullptr) != o.follow) {
+    if ((transport != nullptr) != o.follow || (transport != nullptr) != (native_output != nullptr)) {
       BOOST_LOG(error) << "sbs-bench: raw transport requires bounded causal whole-clip input";
       return 2;
     }
@@ -2410,10 +2413,10 @@ namespace sbs_bench {
     std::size_t processed_frame_count = 0;
     // Declared before the post-render owner: its destructor joins before these counts are read.
     auto native_counts_guard = util::fail_guard([&]() {
-      if (native_counts) {
-        native_counts->source = processed_frame_count;
-        native_counts->adaptive = adaptive_state_frame_count;
-        native_counts->sbs = static_cast<std::uint64_t>(written);
+      if (native_output) {
+        native_output->source = processed_frame_count;
+        native_output->adaptive = adaptive_state_frame_count;
+        native_output->sbs = static_cast<std::uint64_t>(written);
       }
     });
     // Convert Video hands each packed frame and its evidence to the worker on one ordered
@@ -4497,34 +4500,28 @@ namespace sbs_bench {
         };
       }
       try {
-        const auto whole_clip_contract = offline_sbs::wire::to_json(
-          offline_sbs::wire::whole_clip_contract_t {
-            .observation_timeline = std::move(observation_timeline),
-            .artifact_mode = std::string {artifact_mode_name(o.artifacts)},
-            .inference_mode = "single-pass-tensorrt",
-            .depth_inference_enabled = true,
-            .scheduled_depth_update_count = tensorrt_enqueue_count,
-            .tensorrt_enqueue_count = tensorrt_enqueue_count,
-            .depth_provenance = "video_depth_estimator",
-            .pipeline_state_provenance = "video_depth_estimator:depth-health-state",
-            .model = model.name,
-            .source_frame_count = completed_frame_count,
-            .source_width = source_width,
-            .source_height = source_height,
-            .source_first_sequence = follow_first_sequence,
-            .depth_reuse_interval = effective_depth_every,
-            .resolved_runtime = std::move(resolved_runtime),
-            .adaptive_state = std::move(adaptive_state),
-            .sbs = sbs_contract,
-          }
-        );
-        if (!publish_json_atomically(
-              fs::path(o.out) / "whole_clip_contract.json",
-              nlohmann::ordered_json(whole_clip_contract)
-            )) {
-          BOOST_LOG(error) << "sbs-bench: failed publishing whole_clip_contract.json";
-          return 8;
-        }
+        offline_sbs::wire::whole_clip_contract_t whole_clip_contract {
+          .observation_timeline = std::move(observation_timeline),
+          .artifact_mode = std::string {artifact_mode_name(o.artifacts)},
+          .inference_mode = "single-pass-tensorrt",
+          .depth_inference_enabled = true,
+          .scheduled_depth_update_count = tensorrt_enqueue_count,
+          .tensorrt_enqueue_count = tensorrt_enqueue_count,
+          .depth_provenance = "video_depth_estimator",
+          .pipeline_state_provenance = "video_depth_estimator:depth-health-state",
+          .model = model.name,
+          .source_frame_count = completed_frame_count,
+          .source_width = source_width,
+          .source_height = source_height,
+          .source_first_sequence = follow_first_sequence,
+          .depth_reuse_interval = effective_depth_every,
+          .resolved_runtime = std::move(resolved_runtime),
+          .adaptive_state = std::move(adaptive_state),
+          .sbs = sbs_contract,
+        };
+        // Serializing validates the contract; the worker receives it in memory.
+        (void) offline_sbs::wire::to_json(whole_clip_contract);
+        native_output->contract = std::move(whole_clip_contract);
       } catch (const offline_sbs::wire::contract_error &exception) {
         BOOST_LOG(error) << "sbs-bench: invalid whole-clip wire contract: "
                          << exception.what();
@@ -4545,9 +4542,10 @@ namespace sbs_bench {
 
   static int run_native_pass_impl(
     const offline_sbs::native_pass_settings &settings,
-    offline_sbs::raw_frame_transport &transport
+    offline_sbs::raw_frame_transport &transport,
+    offline_sbs::wire::whole_clip_contract_t &contract
   ) {
-    native_pass_counts_t counts;
+    native_pass_output_t output;
     offline_sbs::completion_terminal_t terminal;
     int code = 2;
     try {
@@ -4572,7 +4570,11 @@ namespace sbs_bench {
           converting ? settings.transient_raster_hard_cap_bytes : 0;
         // All replay, diagnostic and research selectors remain inaccessible to this entry.
         if (validate_opts(o)) {
-          code = run_core(std::move(o), &transport, &counts);
+          code = run_core(std::move(o), &transport, &output);
+        }
+        if (code == 0 && !output.contract) {
+          terminal.error = "native pass completed without its whole-clip contract";
+          code = 8;
         }
       }
     } catch (const std::exception &exception) {
@@ -4583,9 +4585,9 @@ namespace sbs_bench {
       code = 10;
     }
     terminal.exit_code = code;
-    terminal.source_frame_count = counts.source;
-    terminal.adaptive_frame_count = counts.adaptive;
-    terminal.sbs_frame_count = counts.sbs;
+    terminal.source_frame_count = output.source;
+    terminal.adaptive_frame_count = output.adaptive;
+    terminal.sbs_frame_count = output.sbs;
     if (code != 0 && terminal.error.empty()) {
       terminal.error = "native pass failed with exit code " + std::to_string(code);
     }
@@ -4599,9 +4601,9 @@ namespace sbs_bench {
       try {
         offline_sbs::completion_terminal_t failure;
         failure.exit_code = code;
-        failure.source_frame_count = counts.source;
-        failure.adaptive_frame_count = counts.adaptive;
-        failure.sbs_frame_count = counts.sbs;
+        failure.source_frame_count = output.source;
+        failure.adaptive_frame_count = output.adaptive;
+        failure.sbs_frame_count = output.sbs;
         failure.error = "native completion publication failed";
         transport.completion.finish(std::move(failure));
       } catch (...) {
@@ -4612,6 +4614,8 @@ namespace sbs_bench {
       // Keep the sticky failure terminal readable while releasing blocked pixel transfers.
       transport.source.cancel();
       transport.sbs.cancel();
+    } else {
+      contract = std::move(*output.contract);
     }
     return code;
   }
@@ -4619,7 +4623,11 @@ namespace sbs_bench {
 }  // namespace sbs_bench
 
 namespace offline_sbs {
-  int run_native_pass(const native_pass_settings &settings, raw_frame_transport &transport) {
-    return sbs_bench::run_native_pass_impl(settings, transport);
+  int run_native_pass(
+    const native_pass_settings &settings,
+    raw_frame_transport &transport,
+    wire::whole_clip_contract_t &contract
+  ) {
+    return sbs_bench::run_native_pass_impl(settings, transport, contract);
   }
 }  // namespace offline_sbs

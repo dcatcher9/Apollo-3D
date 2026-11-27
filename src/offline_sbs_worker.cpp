@@ -76,7 +76,7 @@ namespace offline_sbs {
           transport_(transport) {
         thread_ = std::thread([this, settings = std::move(settings)]() {
           try {
-            code_.store(run_native_pass(settings, transport_));
+            code_.store(run_native_pass(settings, transport_, contract_));
           } catch (...) {
             // The typed entry normally publishes even a failed terminal. An exceptional escape
             // cannot leave a consumer waiting for evidence that will never be notified.
@@ -100,6 +100,8 @@ namespace offline_sbs {
         return running_.load(std::memory_order_acquire);
       }
       int exit_code() const { return code_.load(); }
+      // The successful pass's whole-clip contract; read only after wait() has joined its thread.
+      const wire::whole_clip_contract_t &contract() const { return contract_; }
       int wait(std::chrono::milliseconds timeout) {
         const auto deadline = std::chrono::steady_clock::now() + timeout;
         while (running()) {
@@ -115,6 +117,7 @@ namespace offline_sbs {
       }
     private:
       raw_frame_transport &transport_;
+      wire::whole_clip_contract_t contract_;
       std::atomic_bool running_ {true};
       std::atomic_int code_ {-1};
       std::thread thread_;
@@ -122,7 +125,6 @@ namespace offline_sbs {
 
     constexpr std::uint64_t max_sequence = 9999999999ull;
     constexpr std::uintmax_t max_spec_bytes = 4ull * 1024ull * 1024ull;
-    constexpr std::uintmax_t max_small_contract_bytes = 64ull * 1024ull * 1024ull;
     constexpr std::uintmax_t max_video_metadata_probe_bytes =
       4ull * 1024ull * 1024ull;
     constexpr std::uintmax_t max_stream_inventory_probe_bytes =
@@ -367,49 +369,6 @@ namespace offline_sbs {
       }
       const auto found = object.find(name);
       return found == object.end() ? nullptr : &*found;
-    }
-
-    nlohmann::json read_json(
-      const fs::path &path,
-      const std::uintmax_t max_bytes = max_small_contract_bytes
-    ) {
-      std::error_code ec;
-      if (!fs::is_regular_file(path, ec) || ec) {
-        throw worker_error("JSON contract is missing: " + path_utf8(path));
-      }
-      const auto bytes = fs::file_size(path, ec);
-      if (ec || bytes == 0 || bytes > max_bytes) {
-        throw worker_error("JSON contract has an invalid size: " + path_utf8(path));
-      }
-      std::ifstream stream(path, std::ios::binary);
-      if (!stream) {
-        throw worker_error("cannot open JSON contract: " + path_utf8(path));
-      }
-      std::string serialized(static_cast<std::size_t>(bytes), '\0');
-      stream.read(
-        serialized.data(),
-        static_cast<std::streamsize>(serialized.size())
-      );
-      if (stream.gcount() != static_cast<std::streamsize>(serialized.size()) ||
-          stream.bad()) {
-        throw worker_error(
-          "JSON contract changed while being read: " + path_utf8(path)
-        );
-      }
-      char trailing = 0;
-      if (stream.get(trailing)) {
-        throw worker_error(
-          "JSON contract grew beyond its admitted size: " + path_utf8(path)
-        );
-      }
-      try {
-        return wire::parse_json_without_duplicate_keys(serialized);
-      } catch (const std::exception &exception) {
-        throw worker_error(
-          "cannot parse JSON contract " + path_utf8(path) + ": " +
-          exception.what()
-        );
-      }
     }
 
     bool write_all(HANDLE handle, const void *data, std::size_t size) {
@@ -5916,8 +5875,9 @@ namespace offline_sbs {
       // removes wall-clock pacing; it does not replace the online camera, OCR, conditioning, or
       // renderer state machines with an offline replay implementation.
       const auto analysis_input = work / "analysis-input";
-      // These directories retain source identity and the causal pass's bounded final contracts.
-      // Per-frame pixels and completion evidence travel only through owned memory channels.
+      // These directories retain source identity and the causal pass's bounded diagnostics.
+      // Per-frame pixels, completion evidence and the pass's whole-clip contract travel only
+      // through owned memory.
       // The manager's identity-pinned cleanup still owns all transient native-work artifacts.
       const auto analysis_output = work / "analysis-output";
       fs::create_directories(analysis_input, ec);
@@ -6198,17 +6158,8 @@ namespace offline_sbs {
         throw;
       }
 
-      const auto analysis_contract =
-        read_json(analysis_output / "whole_clip_contract.json");
-      wire::whole_clip_contract_t typed_analysis_contract;
-      try {
-        typed_analysis_contract =
-          wire::parse_whole_clip_contract(analysis_contract);
-      } catch (const wire::contract_error &exception) {
-        throw worker_error(
-          std::string {"invalid analysis whole-clip contract: "} + exception.what()
-        );
-      }
+      // The in-process pass validated this contract before handing it over in memory.
+      const auto &typed_analysis_contract = analysis.contract();
       const bool converting = spec.operation == "convert";
       if (typed_analysis_contract.artifact_mode !=
             (converting ? "conversion" : "adaptive") ||

@@ -1,6 +1,7 @@
 /** Admission failures must notify the native consumer before any GPU work. */
 #include "src/offline_frame_transport.h"
 #include "src/offline_sbs_runner.h"
+#include "src/offline_sbs_wire_contract.h"
 
 #include <chrono>
 #include <gtest/gtest.h>
@@ -56,7 +57,9 @@ TEST(NativeSbsRunnerTest, InvalidRequestsPublishAFailedTerminalWithoutAHeader) {
   for (std::size_t index = 0; index < rejected.size(); ++index) {
     SCOPED_TRACE(index);
     raw_frame_transport transport(valid_shape.transient_raster_hard_cap_bytes);
-    EXPECT_EQ(run_native_pass(rejected[index], transport), 2);
+    wire::whole_clip_contract_t contract;
+    EXPECT_EQ(run_native_pass(rejected[index], transport, contract), 2);
+    EXPECT_TRUE(contract.model.empty()) << "a refused pass hands over no contract";
     const auto terminal = transport.completion.wait_finished(0ms);
     EXPECT_EQ(terminal.exit_code, 2);
     EXPECT_FALSE(terminal.error.empty());
