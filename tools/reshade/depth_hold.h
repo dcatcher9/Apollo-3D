@@ -3,11 +3,9 @@
 
 // API lineage/storage and Generic content/anchor holds remain distinct.
 // docs/reshade-sbs.md, depth_hold, owns their contract.
-// The capture API header remains a transitive dependency through depth_addon.h
-// and streamline_camera_probe.h; this move does not widen the include cut.
 #include "depth_capture_types.h"
 #include "presentation_scope.h"
-#include "depth_addon.h"
+#include "depth_frame.h"
 #include "depth_capture_policy.h"
 #include "freshness.h"
 #include <algorithm>

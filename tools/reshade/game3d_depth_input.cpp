@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "game3d_depth_input.h"
 
+#include "depth_addon.h"
 #include "streamline_depth_provider.h"
 
 namespace sunshine_game3d::depth_input {
