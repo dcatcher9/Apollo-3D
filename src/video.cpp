@@ -1444,6 +1444,212 @@ namespace video {
     stream_gamma_status_e pending_status_ {};
   };
 
+  /**
+   * capture_async's live video-mode (0x3007) state: the client's per-eye source width, the Host
+   * SBS mode the next encode session runs, the last mode that produced a working encoder, whether
+   * the mode in hand came from a live request, and the requests still owed an answer.
+   *
+   * These change only together with the session config, the capture worker's live mode, the
+   * session's requested SBS mode and the depth-status event, so each transition below takes the
+   * collaborators it updates and changes them in one fixed order. Only the encode thread uses it.
+   */
+  class live_mode_state_t {
+  public:
+    explicit live_mode_state_t(const config_t &config):
+        base_width_ {config.width},
+        sbs_mode_ {config.sbs_mode} {
+    }
+
+    /** Per-eye source width; SBS doubling is applied on top of it. */
+    [[nodiscard]] int base_width() const noexcept {
+      return base_width_;
+    }
+
+    /** The Host SBS mode the next encode session is built with. */
+    [[nodiscard]] int sbs_mode() const noexcept {
+      return sbs_mode_;
+    }
+
+    /** Install one drained client request before the reinitialization gate sees the config. */
+    void apply_request(
+      const video_mode_change_t &mode,
+      config_t &config,
+      capture_session_t &capture_session,
+      const safe::mail_raw_t::event_t<int> &depth_status_event
+    ) {
+      install(mode, config);
+      if (sbs_mode_ != SBS_AI) {
+        if (config.sbs_debug_dump_pending) {
+          config.sbs_debug_dump_pending->store(false, std::memory_order_release);
+        }
+        depth_status_event->raise(0);
+      }
+      capture_session.set_live_video_mode(std::optional<video_mode_change_t> {mode});
+      config_from_live_video_mode_ = true;
+      if (active_ack_request_) {
+        superseded_ack_requests_.push_back(*active_ack_request_);
+      }
+      active_ack_request_ = video_mode_request_ref_t {
+        mode.request_id,
+        mode.transaction_id,
+      };
+      BOOST_LOG(info) << "Applying live video mode "sv << config.width << 'x' << config.height
+                      << '@' << (config.framerateX100 > 0 ? config.framerateX100 / 100.0 : (double) config.framerate)
+                      << "Hz, "sv << config.bitrate << "kbps"sv;
+    }
+
+    /** Run without Host SBS when its V2 model refuses this source geometry (@p rejection). */
+    void refuse_unsupported_host_sbs(
+      std::string_view rejection,
+      config_t &config,
+      const safe::mail_raw_t::event_t<int> &depth_status_event
+    ) {
+      if (sbs_mode_ != SBS_AI || rejection.empty()) {
+        return;
+      }
+      // Launch state is checked here too, and a live request is rechecked at the final encoder
+      // construction boundary. Never construct an unauthenticated Host SBS geometry.
+      BOOST_LOG(warning)
+        << "Rejecting Host SBS V2 encode-session construction at "sv
+        << base_width_ << 'x' << config.height << ": "sv
+        << rejection << '.';
+      set_sbs_mode(SBS_OFF, config);
+      depth_status_event->raise(0);
+    }
+
+    /**
+     * A live mode arrives from the client mid-stream, so an unencodable request must not be
+     * fatal. Fall back to the last geometry that actually produced an encoder; the stream then
+     * continues at the previous mode instead of dropping.
+     * @return `false` when there is no live request to revert or no proven mode to revert to.
+     */
+    bool revert_failed_request(
+      config_t &config,
+      capture_session_t &capture_session,
+      const safe::mail_raw_t::event_t<int> &depth_status_event
+    ) {
+      if (!config_from_live_video_mode_ || !proven_video_mode_) {
+        return false;
+      }
+
+      BOOST_LOG(warning) << "The client's live video mode "sv << config.width << 'x' << config.height
+                         << " could not be encoded; reverting to "sv
+                         << proven_video_mode_->width << 'x' << proven_video_mode_->height << '.';
+      install(*proven_video_mode_, config);
+      if (sbs_mode_ != SBS_AI) {
+        depth_status_event->raise(0);
+      }
+      capture_session.set_live_video_mode(proven_video_mode_);
+      config_from_live_video_mode_ = false;
+      // The request never made it into an encode session, so it must not be reported as applied.
+      // It is answered once the fallback session comes up and its real mode is known.
+      if (active_ack_request_) {
+        superseded_ack_requests_.push_back(*active_ack_request_);
+        active_ack_request_.reset();
+      }
+      return true;
+    }
+
+    /** A fully initialized encode session makes the config in hand the safe fallback. */
+    void prove_encoder(const config_t &config) {
+      proven_video_mode_ = video_mode_change_t {
+        config.width,
+        config.height,
+        config.framerate,
+        config.framerateX100,
+        config.encodingFramerate,
+        config.bitrate,
+        active_ack_request_ ? active_ack_request_->request_id : 0,
+        active_ack_request_ ? active_ack_request_->transaction_id : 0,
+      };
+      proven_video_mode_->requested_sbs_mode = sbs_mode_;
+      config_from_live_video_mode_ = false;
+    }
+
+    /**
+     * Answer the live requests this session resolves. Superseded ones are reported as not
+     * applied so the client can drop them and resynchronize on the mode that is really running.
+     */
+    void complete_requests(
+      const std::shared_ptr<stream::detail::atomic_presentation_t> &atomic_presentation,
+      const effective_video_mode_t &effective_mode,
+      const desktop_video_mode_t &desktop_mode
+    ) {
+      if (!superseded_ack_requests_.empty()) {
+        if (atomic_presentation) {
+          (void) atomic_presentation->complete(video_mode_applied_t {
+            std::move(superseded_ack_requests_),
+            false,
+            effective_mode,
+            desktop_mode,
+          });
+        }
+        superseded_ack_requests_.clear();
+      }
+      if (active_ack_request_) {
+        if (atomic_presentation) {
+          (void) atomic_presentation->complete(video_mode_applied_t {
+            {*active_ack_request_},
+            true,
+            effective_mode,
+            desktop_mode,
+          });
+        }
+        active_ack_request_.reset();
+      }
+    }
+
+    /**
+     * Keep every rebuild/fallback owner on the bitrate NVENC actually accepted. Without this, a
+     * later SBS toggle or display reinitialization would reconstruct the session from the
+     * pre-reconfigure bitrate even though the client was told otherwise.
+     */
+    void accept_reconfigured_bitrate(
+      const video_mode_change_t &mode,
+      config_t &config,
+      capture_session_t &capture_session
+    ) {
+      config.bitrate = mode.bitrate;
+      capture_session.set_live_video_mode(std::optional<video_mode_change_t> {mode});
+      proven_video_mode_ = mode;
+      config_from_live_video_mode_ = false;
+    }
+
+  private:
+    /** Copy one mode's geometry, cadence, bitrate and Host SBS mode into the config. */
+    void install(const video_mode_change_t &mode, config_t &config) {
+      base_width_ = mode.width;
+      config.width = mode.width;
+      config.height = mode.height;
+      config.framerate = mode.framerate;
+      config.framerateX100 = mode.framerateX100;
+      config.encodingFramerate = mode.encodingFramerate;
+      config.bitrate = mode.bitrate;
+      // Atomic presentation applies its immutable desired mode from this same mode entry.
+      set_sbs_mode(mode.requested_sbs_mode, config);
+    }
+
+    void set_sbs_mode(int mode, const config_t &config) {
+      sbs_mode_ = mode;
+      if (config.requested_sbs_mode) {
+        config.requested_sbs_mode->store(sbs_mode_, std::memory_order_release);
+      }
+    }
+
+    int base_width_;
+    int sbs_mode_;
+    // Geometry/cadence that has already produced a working encoder for this session, plus whether
+    // the config currently in hand came from a live client request. A client-requested mode that
+    // NVENC ultimately refuses must fall back to the proven one rather than end the session.
+    std::optional<video_mode_change_t> proven_video_mode_;
+    bool config_from_live_video_mode_ = false;
+    // Every live request owes the client exactly one answer, and only this loop knows the geometry
+    // that actually gets installed. The host-generated transaction id (unlike the opaque client
+    // request id) lets the serialized stream worker match this completion unambiguously.
+    std::optional<video_mode_request_ref_t> active_ack_request_;
+    std::vector<video_mode_request_ref_t> superseded_ack_requests_;
+  };
+
   void refresh_mouse_keys_if_due(std::chrono::steady_clock::time_point &next_refresh) {
     const auto now = std::chrono::steady_clock::now();
     if (now < next_refresh) {
@@ -2369,18 +2575,7 @@ namespace video {
     // rather than a single-slot event: every request owes the client an acknowledgement, so a
     // burst arriving inside one frame must not silently overwrite the earlier requests' ids.
     auto video_mode_event = mail->queue<video_mode_change_t>(mail::video_mode);
-    int base_width = config.width;
-    int current_sbs_mode = config.sbs_mode;
-    // Geometry/cadence that has already produced a working encoder for this session, plus whether
-    // the config currently in hand came from a live client request. A client-requested mode that
-    // NVENC ultimately refuses must fall back to the proven one rather than end the session.
-    std::optional<video_mode_change_t> proven_video_mode;
-    bool config_from_live_video_mode = false;
-    // Every live request owes the client exactly one answer, and only this loop knows the geometry
-    // that actually gets installed. The host-generated transaction id (unlike the opaque client
-    // request id) lets the serialized stream worker match this completion unambiguously.
-    std::optional<video_mode_request_ref_t> active_ack_request;
-    std::vector<video_mode_request_ref_t> superseded_ack_requests;
+    live_mode_state_t live_mode {config};
 
     // Encoding takes place on this thread
     platf::adjust_thread_priority(platf::thread_priority_e::high);
@@ -2390,36 +2585,7 @@ namespace video {
       // rebuilding its display, and it has to see the new mode before it does so.
       while (video_mode_event->peek()) {
         if (auto mode = video_mode_event->pop(0ms)) {
-          base_width = mode->width;
-          config.width = mode->width;
-          config.height = mode->height;
-          config.framerate = mode->framerate;
-          config.framerateX100 = mode->framerateX100;
-          config.encodingFramerate = mode->encodingFramerate;
-          config.bitrate = mode->bitrate;
-          // Atomic presentation applies its immutable desired mode from this same queue entry.
-          current_sbs_mode = mode->requested_sbs_mode;
-          if (config.requested_sbs_mode) {
-            config.requested_sbs_mode->store(current_sbs_mode, std::memory_order_release);
-          }
-          if (current_sbs_mode != SBS_AI) {
-            if (config.sbs_debug_dump_pending) {
-              config.sbs_debug_dump_pending->store(false, std::memory_order_release);
-            }
-            sbs_depth_status_event->raise(0);
-          }
-          capture_session.set_live_video_mode(std::optional<video_mode_change_t> {*mode});
-          config_from_live_video_mode = true;
-          if (active_ack_request) {
-            superseded_ack_requests.push_back(*active_ack_request);
-          }
-          active_ack_request = video_mode_request_ref_t {
-            mode->request_id,
-            mode->transaction_id,
-          };
-          BOOST_LOG(info) << "Applying live video mode "sv << config.width << 'x' << config.height
-                          << '@' << (config.framerateX100 > 0 ? config.framerateX100 / 100.0 : (double) config.framerate)
-                          << "Hz, "sv << config.bitrate << "kbps"sv;
+          live_mode.apply_request(*mode, config, capture_session, sbs_depth_status_event);
         }
       }
 
@@ -2462,22 +2628,14 @@ namespace video {
 
       const auto host_sbs_rejection =
         models::host_sbs_v2_source_resolution_rejection_reason(
-          static_cast<std::uint32_t>(base_width),
+          static_cast<std::uint32_t>(live_mode.base_width()),
           static_cast<std::uint32_t>(config.height)
         );
-      if (current_sbs_mode == SBS_AI && !host_sbs_rejection.empty()) {
-        // Launch state is checked here too, and a live request is rechecked at the final encoder
-        // construction boundary. Never construct an unauthenticated Host SBS geometry.
-        BOOST_LOG(warning)
-          << "Rejecting Host SBS V2 encode-session construction at "sv
-          << base_width << 'x' << config.height << ": "sv
-          << host_sbs_rejection << '.';
-        current_sbs_mode = SBS_OFF;
-        if (config.requested_sbs_mode) {
-          config.requested_sbs_mode->store(SBS_OFF, std::memory_order_release);
-        }
-        sbs_depth_status_event->raise(0);
-      }
+      live_mode.refuse_unsupported_host_sbs(host_sbs_rejection, config, sbs_depth_status_event);
+      // This iteration's encode session is built from one live mode. Only a revert changes it,
+      // and every revert starts the next iteration.
+      const int base_width = live_mode.base_width();
+      const int current_sbs_mode = live_mode.sbs_mode();
       // Build the effective config for this encode session. SBS doubles the output width to
       // 2*base. If that exceeds the encoder's max width, cap the packed width and scale the
       // height proportionally to preserve the per-eye aspect. The SBS pipeline then renders
@@ -2596,47 +2754,11 @@ namespace video {
         return false;
       };
 
-      // A live mode arrives from the client mid-stream, so an unencodable request must not be
-      // fatal. Fall back to the last geometry that actually produced an encoder; the stream then
-      // continues at the previous mode instead of dropping.
-      auto revert_failed_live_video_mode = [&]() {
-        if (!config_from_live_video_mode || !proven_video_mode) {
-          return false;
-        }
-
-        BOOST_LOG(warning) << "The client's live video mode "sv << config.width << 'x' << config.height
-                           << " could not be encoded; reverting to "sv
-                           << proven_video_mode->width << 'x' << proven_video_mode->height << '.';
-        base_width = proven_video_mode->width;
-        config.width = proven_video_mode->width;
-        config.height = proven_video_mode->height;
-        config.framerate = proven_video_mode->framerate;
-        config.framerateX100 = proven_video_mode->framerateX100;
-        config.encodingFramerate = proven_video_mode->encodingFramerate;
-        config.bitrate = proven_video_mode->bitrate;
-        current_sbs_mode = proven_video_mode->requested_sbs_mode;
-        if (config.requested_sbs_mode) {
-          config.requested_sbs_mode->store(current_sbs_mode, std::memory_order_release);
-        }
-        if (current_sbs_mode != SBS_AI) {
-          sbs_depth_status_event->raise(0);
-        }
-        capture_session.set_live_video_mode(proven_video_mode);
-        config_from_live_video_mode = false;
-        // The request never made it into an encode session, so it must not be reported as applied.
-        // It is answered once the fallback session comes up and its real mode is known.
-        if (active_ack_request) {
-          superseded_ack_requests.push_back(*active_ack_request);
-          active_ack_request.reset();
-        }
-        return true;
-      };
-
       if (current_sbs_mode == SBS_GAME_SBS && !external_sbs_dimensions_match(base_width, config.height, session_config.width, session_config.height)) {
         BOOST_LOG(error) << "ReShade Host 3D cannot encode the exact final-SBS raster "sv
                          << static_cast<std::int64_t>(base_width) * 2 << 'x' << config.height
                          << "; refusing to resize authored stereo."sv;
-        if (revert_failed_live_video_mode()) {
+        if (live_mode.revert_failed_request(config, capture_session, sbs_depth_status_event)) {
           continue;
         }
         return;
@@ -2647,7 +2769,7 @@ namespace video {
         if (recover_failed_sbs_session()) {
           continue;
         }
-        if (revert_failed_live_video_mode()) {
+        if (live_mode.revert_failed_request(config, capture_session, sbs_depth_status_event)) {
           continue;
         }
         return;
@@ -2656,18 +2778,7 @@ namespace video {
       // Only the fully initialized session may publish HDR, become the safe mode fallback,
       // or complete a live mode acknowledgement.
       auto hdr_info = encode_session->hdr_info();
-      proven_video_mode = video_mode_change_t {
-        config.width,
-        config.height,
-        config.framerate,
-        config.framerateX100,
-        config.encodingFramerate,
-        config.bitrate,
-        active_ack_request ? active_ack_request->request_id : 0,
-        active_ack_request ? active_ack_request->transaction_id : 0,
-      };
-      proven_video_mode->requested_sbs_mode = current_sbs_mode;
-      config_from_live_video_mode = false;
+      live_mode.prove_encoder(config);
 
       // Publish what this session really runs. SBS packs two eyes into one encoded frame, so the
       // base per-eye width is half the encoded width; both are reported after the codec-width cap,
@@ -2704,30 +2815,7 @@ namespace video {
         config.encodingFramerate,
       };
 
-      // Answer the live requests this session resolves. Superseded ones are reported as not
-      // applied so the client can drop them and resynchronize on the mode that is really running.
-      if (!superseded_ack_requests.empty()) {
-        if (config.atomic_presentation) {
-          (void) config.atomic_presentation->complete(video_mode_applied_t {
-            std::move(superseded_ack_requests),
-            false,
-            effective_mode,
-            desktop_mode,
-          });
-        }
-        superseded_ack_requests.clear();
-      }
-      if (active_ack_request) {
-        if (config.atomic_presentation) {
-          (void) config.atomic_presentation->complete(video_mode_applied_t {
-            {*active_ack_request},
-            true,
-            effective_mode,
-            desktop_mode,
-          });
-        }
-        active_ack_request.reset();
-      }
+      live_mode.complete_requests(config.atomic_presentation, effective_mode, desktop_mode);
 
       // absolute mouse coordinates require that the dimensions of the screen are known
       // Host SBS changes only the encoded frame geometry. Absolute input remains addressed in
@@ -2749,13 +2837,7 @@ namespace video {
         recovery,
         packets,
         [&](const video_mode_change_t &mode) {
-          // Keep every rebuild/fallback owner on the bitrate NVENC actually accepted. Without
-          // this callback, a later SBS toggle or display reinitialization would reconstruct the
-          // session from the pre-reconfigure bitrate even though the client was told otherwise.
-          config.bitrate = mode.bitrate;
-          capture_session.set_live_video_mode(std::optional<video_mode_change_t> {mode});
-          proven_video_mode = mode;
-          config_from_live_video_mode = false;
+          live_mode.accept_reconfigured_bitrate(mode, config, capture_session);
         }
       );
     }

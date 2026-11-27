@@ -7871,7 +7871,9 @@ TEST(EffectiveVideoModePublisherTests, ProductionPublishesAfterEncoderInitializa
   const auto reject_failed_session = capture.find("if (!encode_session) {", encoder_init);
   const auto hdr_snapshot = capture.find("auto hdr_info = encode_session->hdr_info();", reject_failed_session);
   const auto effective_publish = capture.find("config.effective_mode->publish(effective_mode);", hdr_snapshot);
-  const auto completion_publish = capture.find("config.atomic_presentation->complete(video_mode_applied_t", effective_publish);
+  // live_mode_state_t::complete_requests() answers through the atomic transaction; the ordering
+  // test below pins that body.
+  const auto completion_publish = capture.find("live_mode.complete_requests(config.atomic_presentation, effective_mode, desktop_mode);", effective_publish);
   const auto hdr_publish = capture.find("hdr_event->raise(std::move(hdr_info));", hdr_snapshot);
   ASSERT_NE(hdr_snapshot, std::string::npos);
   ASSERT_NE(encoder_init, std::string::npos);
@@ -7892,12 +7894,39 @@ TEST(AtomicPresentationOrderingTests, AppliesImmutableModeBeforeEncoderAndAcksAf
   ASSERT_FALSE(video_source.empty());
   ASSERT_FALSE(stream_source.empty());
 
+  // live_mode_state_t owns the transitions. A drained request installs the desired Host SBS mode
+  // from its own immutable queue entry, and completion answers through the atomic transaction.
+  const auto state_begin = video_source.find("class live_mode_state_t {");
+  const auto state_end = video_source.find("\n  };\n", state_begin);
+  ASSERT_NE(state_begin, std::string::npos);
+  ASSERT_NE(state_end, std::string::npos);
+  const auto state = video_source.substr(state_begin, state_end - state_begin);
+  const auto apply_request = state.find("void apply_request(");
+  const auto apply_install = state.find("install(mode, config);", apply_request);
+  const auto apply_end = state.find("void refuse_unsupported_host_sbs(", apply_request);
+  const auto install = state.find("void install(const video_mode_change_t &mode, config_t &config) {");
+  const auto immutable_mode = state.find("set_sbs_mode(mode.requested_sbs_mode, config);", install);
+  const auto complete_requests = state.find("void complete_requests(");
+  const auto complete_transaction = state.find(
+    "atomic_presentation->complete(video_mode_applied_t",
+    complete_requests
+  );
+  ASSERT_NE(apply_request, std::string::npos);
+  ASSERT_NE(apply_install, std::string::npos);
+  ASSERT_NE(apply_end, std::string::npos);
+  ASSERT_NE(install, std::string::npos);
+  ASSERT_NE(immutable_mode, std::string::npos);
+  ASSERT_NE(complete_requests, std::string::npos);
+  ASSERT_NE(complete_transaction, std::string::npos);
+  EXPECT_LT(apply_install, apply_end);
+
+  // capture_async runs those transitions as named steps, in this order.
   const auto request_drain = video_source.find("while (video_mode_event->peek())");
-  const auto immutable_mode = video_source.find(
-    "current_sbs_mode = mode->requested_sbs_mode;",
+  const auto apply_step = video_source.find(
+    "live_mode.apply_request(*mode, config, capture_session, sbs_depth_status_event);",
     request_drain
   );
-  const auto session_config = video_source.find("config_t session_config = config;", immutable_mode);
+  const auto session_config = video_source.find("config_t session_config = config;", apply_step);
   const auto encoder_success = video_source.find("auto encode_session = make_encode_session(", session_config);
   const auto reject_failed_session = video_source.find("if (!encode_session) {", encoder_success);
   const auto state_publish = video_source.find(
@@ -7905,17 +7934,17 @@ TEST(AtomicPresentationOrderingTests, AppliesImmutableModeBeforeEncoderAndAcksAf
     reject_failed_session
   );
   const auto completion = video_source.find(
-    "config.atomic_presentation->complete(video_mode_applied_t",
+    "live_mode.complete_requests(config.atomic_presentation, effective_mode, desktop_mode);",
     state_publish
   );
   ASSERT_NE(request_drain, std::string::npos);
-  ASSERT_NE(immutable_mode, std::string::npos);
+  ASSERT_NE(apply_step, std::string::npos);
   ASSERT_NE(session_config, std::string::npos);
   ASSERT_NE(encoder_success, std::string::npos);
   ASSERT_NE(reject_failed_session, std::string::npos);
   ASSERT_NE(state_publish, std::string::npos);
   ASSERT_NE(completion, std::string::npos);
-  EXPECT_LT(immutable_mode, session_config);
+  EXPECT_LT(apply_step, session_config);
   EXPECT_LT(session_config, encoder_success);
   EXPECT_LT(encoder_success, reject_failed_session);
   EXPECT_LT(reject_failed_session, state_publish);
