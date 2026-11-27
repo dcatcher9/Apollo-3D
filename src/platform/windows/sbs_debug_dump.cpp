@@ -9,7 +9,6 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
-#include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <functional>
@@ -32,6 +31,7 @@
 #include "src/host_sbs_shader_cache.h"
 #include "src/logging.h"
 #include "src/video_depth_estimator.h"
+#include "debug_dump_common.h"
 #include "sbs_debug_dump_async.h"
 #include "sbs_debug_dump_package.h"
 #include "sbs_debug_dump_staging.h"
@@ -188,16 +188,10 @@ namespace platf::sbs_debug {
   dumper::dumper():
       async_(detail::publication_state::create()),
       diagnostic_roi_crop_(std::make_unique<detail::diagnostic_roi_crop>()) {
-    if (const char *override_dir = std::getenv("APOLLO_SBS_DUMP"); override_dir && *override_dir) {
-      dir_ = override_dir;
-      file_trigger_enabled_ = config::sunshine.diagnostics_enabled;
-    } else if (!config::sunshine.log_file.empty()) {
-      dir_ =
-        std::filesystem::path(config::sunshine.log_file).parent_path() /
-        "sbs_dump";
-    } else {
-      dir_ = "sbs_dump";
-    }
+    auto root = debug_dump::output_root();
+    dir_ = std::move(root.path);
+    // Only an explicit APOLLO_SBS_DUMP directory is polled for a diagnostic dump.trigger file.
+    file_trigger_enabled_ = root.from_environment && config::sunshine.diagnostics_enabled;
   }
 
   dumper::~dumper() {

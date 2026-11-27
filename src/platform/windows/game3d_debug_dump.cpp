@@ -2,16 +2,15 @@
 #include "game3d_win32_util.h"
 #include "game3d_debug_dump.h"
 
+#include "debug_dump_common.h"
 #include "game3d_debug_preview.h"
 #include "src/game3d_debug_ui_resources.h"
 #include "src/game3d_debug_formats.h"
 #include "sbs_debug_dump_async.h"
-#include "src/config.h"
 #include "src/logging.h"
 
 #include <algorithm>
 #include <chrono>
-#include <cstdlib>
 #include <cstring>
 #include <d3d11_1.h>
 #include <fstream>
@@ -57,14 +56,6 @@ namespace platf::game3d_debug {
     // Every artifact but the primary ones is optional; id 0 names none and is refused with them.
     bool optional_artifact(wire::artifact kind) {
       return static_cast<unsigned>(kind) != 0 && !wire::primary_artifact_kind(kind);
-    }
-
-    std::filesystem::path output_directory() {
-      if (const char *value = std::getenv("APOLLO_SBS_DUMP"); value && *value) {
-        return value;
-      }
-      return config::sunshine.log_file.empty() ? std::filesystem::path("sbs_dump") :
-                                                 std::filesystem::path(config::sunshine.log_file).parent_path() / "sbs_dump";
     }
 
     struct image_t {
@@ -250,7 +241,7 @@ namespace platf::game3d_debug {
   public:
     impl_t(observer_t observe, std::filesystem::path directory):
         observe_(std::move(observe)),
-        directory_(directory.empty() ? output_directory() : std::move(directory)),
+        directory_(directory.empty() ? debug_dump::output_root().path : std::move(directory)),
         publication_(publication_owner()) {}
 
     ~impl_t() {
@@ -508,12 +499,9 @@ namespace platf::game3d_debug {
             if (rejected("shared texture does not match snapshot descriptor")) continue;
             return;
           }
-          desc.Usage = D3D11_USAGE_STAGING;
-          desc.BindFlags = 0;
-          desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-          desc.MiscFlags = 0;
+          const auto staging_desc = debug_dump::readback_staging_desc(desc);
           ComPtr<ID3D11Texture2D> staging;
-          if (FAILED(device_->CreateTexture2D(&desc, nullptr, &staging))) {
+          if (FAILED(device_->CreateTexture2D(&staging_desc, nullptr, &staging))) {
             if (rejected("cannot allocate snapshot staging texture")) continue;
             return;
           }
@@ -581,10 +569,7 @@ namespace platf::game3d_debug {
           if (image.bytes.empty()) {
             image.bytes.reserve(static_cast<std::size_t>(row_bytes) * image.descriptor.height);
           }
-          for (std::size_t i = 0; i < rows; ++i) {
-            const auto *source = static_cast<const std::uint8_t *>(mapped.pData) + (row_ + i) * mapped.RowPitch;
-            image.bytes.insert(image.bytes.end(), source, source + row_bytes);
-          }
+          debug_dump::append_mapped_rows(image.bytes, mapped, row_, rows, row_bytes);
         } catch (...) {
           context_->Unmap(staging_[image_index_].Get(), 0);
           if (skip_optional_readback("cannot allocate optional snapshot bytes")) continue;

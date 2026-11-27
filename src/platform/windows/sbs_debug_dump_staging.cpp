@@ -19,6 +19,7 @@
 // local includes
 #include "src/depth_coordinate_v2.h"
 #include "src/host_sbs_contour_history_readback.h"
+#include "debug_dump_common.h"
 
 namespace platf::sbs_debug {
 
@@ -208,11 +209,7 @@ namespace platf::sbs_debug {
         return false;
       }
 
-      D3D11_TEXTURE2D_DESC staging_desc = staging.desc;
-      staging_desc.Usage = D3D11_USAGE_STAGING;
-      staging_desc.BindFlags = 0;
-      staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-      staging_desc.MiscFlags = 0;
+      const auto staging_desc = debug_dump::readback_staging_desc(staging.desc);
       if (FAILED(device->CreateTexture2D(&staging_desc, nullptr, &staging.resource))) {
         return false;
       }
@@ -403,18 +400,9 @@ namespace platf::sbs_debug {
       const std::size_t first_row = snapshot.bytes.size() / snapshot.row_bytes;
       const std::size_t row_count = copy_bytes / snapshot.row_bytes;
       try {
-        const auto *source = static_cast<const std::uint8_t *>(mapped.pData) +
-                             first_row * mapped.RowPitch;
-        if (mapped.RowPitch == snapshot.row_bytes) {
-          snapshot.bytes.insert(snapshot.bytes.end(), source, source + copy_bytes);
-        } else {
-          for (std::size_t y = 0; y < row_count; ++y) {
-            const auto *row = source + y * mapped.RowPitch;
-            snapshot.bytes.insert(
-              snapshot.bytes.end(), row, row + snapshot.row_bytes
-            );
-          }
-        }
+        debug_dump::append_mapped_rows(
+          snapshot.bytes, mapped, first_row, row_count, snapshot.row_bytes
+        );
       } catch (...) {
         ctx->Unmap(staging.resource.Get(), 0);
         throw;
