@@ -29,6 +29,9 @@ namespace platf {
   /** The string SID of the token's user, or nullopt. */
   std::optional<std::string> token_user_id(HANDLE token);
 
+  /** Whether the token's enabled groups include Administrators, or nullopt when Windows cannot say. Accepts a primary token. */
+  std::optional<bool> token_is_admin(HANDLE user_token);
+
   /** Whether this process runs as the local system account. */
   bool is_running_as_system();
 

@@ -37,34 +37,48 @@ namespace {
 using namespace std::literals;
 
 namespace platf {
-  bool IsUserAdmin(HANDLE user_token) {
-    WINBOOL ret;
+  std::optional<bool> token_is_admin(HANDLE user_token) {
     SID_IDENTIFIER_AUTHORITY NtAuthority = SECURITY_NT_AUTHORITY;
     PSID AdministratorsGroup;
-    ret = AllocateAndInitializeSid(
-      &NtAuthority,
-      2,
-      SECURITY_BUILTIN_DOMAIN_RID,
-      DOMAIN_ALIAS_RID_ADMINS,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      &AdministratorsGroup
-    );
-    if (ret) {
-      if (!CheckTokenMembership(user_token, AdministratorsGroup, &ret)) {
-        ret = false;
-        BOOST_LOG(error) << "Failed to verify token membership for administrative access: " << GetLastError();
-      }
-      FreeSid(AdministratorsGroup);
-    } else {
+    if (!AllocateAndInitializeSid(
+          &NtAuthority,
+          2,
+          SECURITY_BUILTIN_DOMAIN_RID,
+          DOMAIN_ALIAS_RID_ADMINS,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          &AdministratorsGroup
+        )) {
       BOOST_LOG(error) << "Unable to allocate SID to check administrative access: " << GetLastError();
+      return std::nullopt;
     }
+    auto sid_guard = util::fail_guard([&]() {
+      FreeSid(AdministratorsGroup);
+    });
+    // CheckTokenMembership() accepts only an impersonation token, and the callers hold primary
+    // tokens. An identification-level duplicate is enough to read the groups.
+    HANDLE identification_token = nullptr;
+    if (!DuplicateToken(user_token, SecurityIdentification, &identification_token)) {
+      BOOST_LOG(error) << "Failed to duplicate the token to verify administrative access: " << GetLastError();
+      return std::nullopt;
+    }
+    auto token_guard = util::fail_guard([&]() {
+      CloseHandle(identification_token);
+    });
+    BOOL member = FALSE;
+    if (!CheckTokenMembership(identification_token, AdministratorsGroup, &member)) {
+      BOOST_LOG(error) << "Failed to verify token membership for administrative access: " << GetLastError();
+      return std::nullopt;
+    }
+    return member != FALSE;
+  }
 
-    return ret;
+  bool IsUserAdmin(HANDLE user_token) {
+    return token_is_admin(user_token).value_or(false);
   }
 
   /**
