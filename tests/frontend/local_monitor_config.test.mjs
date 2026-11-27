@@ -35,6 +35,11 @@ const validate = (draft = {}, rate = 120000, profile = timing) =>
   validateLocalMonitorConfig({...config, ...draft}, rate, profile)
 const feedbackError = errors => errors.some(error => error.includes('no time for current-eye presentation feedback'))
 
+test('does not block Save on the 3D source, which Save replaces with the live choice', () => {
+  assert.deepEqual(validate({local_monitor_mode: 'hand-edited'}), [])
+  assert.deepEqual(validate({local_monitor_mode: undefined}), [])
+})
+
 test('rejects the profile that previously passed both firmware interval checks', () => {
   const errors = validate({local_monitor_frame_duration_us: 7800})
   assert.equal(errors.length, 1)

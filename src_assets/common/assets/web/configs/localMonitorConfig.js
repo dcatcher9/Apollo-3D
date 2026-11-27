@@ -3,7 +3,8 @@ export const settingEnabled = value => value === true || value === 1 || ['enable
 // The local surface choice and the monitor's settings, compared by meaning. The retired
 // local_monitor_enabled switch is not part of it; local_display_surface replaced it. Neither
 // is local_monitor_mode: the 3D source is switched live while 3D runs, so the running value
-// differs from the page's copy without anything left to save.
+// differs from the page's copy without anything left to save. Save writes the live choice in
+// its place (confighttp.cpp), so the form neither shows nor validates it.
 export const localMonitorFingerprint = config => JSON.stringify(Object.keys(config || {})
   .filter(key => key === 'local_display_surface' ||
     (key.startsWith('local_monitor_') && key !== 'local_monitor_enabled' && key !== 'local_monitor_mode')).sort().map(key => [key,
@@ -54,7 +55,6 @@ export const validateLocalMonitorConfig = (config, refreshMillihz = monitorRefre
   if (!config.local_monitor_display_id) errors.push('Select a physical monitor.')
   if (!config.local_monitor_emitter_port?.trim()) errors.push('Select the emitter COM port.')
   else if (!validLocalMonitorPort(config.local_monitor_emitter_port)) errors.push('The emitter port must be a COM port such as COM4.')
-  if (!['host', 'game'].includes(config.local_monitor_mode)) errors.push('Select Host 3D or Game 3D.')
   const protocolText = String(config.local_monitor_ir_protocol ?? '')
   if (!/^\d+$/.test(protocolText) || ![2, 4, 5, 6].includes(Number(protocolText))) {
     errors.push('Glasses IR protocol must be NVIDIA 3D Vision (2), Sony (4), Panasonic (5), or Panasonic custom firmware (6).')
