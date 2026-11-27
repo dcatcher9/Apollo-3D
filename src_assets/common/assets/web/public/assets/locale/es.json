@@ -171,14 +171,6 @@
     "virtual_sink_desc": "Especifique manualmente un dispositivo de audio virtual a utilizar. Si no está activado, el dispositivo se elige automáticamente. ¡Recomendamos encarecidamente dejar este campo en blanco para usar la selección automática de dispositivos!",
     "virtual_sink_placeholder": "Altavoces de Steam Streaming"
   },
-  "password": {
-    "confirm_password": "Confirmar contraseña",
-    "current_creds": "Credenciales actuales",
-    "new_creds": "Nuevas credenciales",
-    "new_username_desc": "Si no se especifica, el nombre de usuario no cambiará",
-    "password_change": "Cambio de contraseña",
-    "success_msg": "¡La contraseña se ha cambiado con éxito! Esta página se recargará pronto, su navegador le pedirá las nuevas credenciales."
-  },
   "pin": {
     "device_name": "Nombre del dispositivo",
     "pair_failure": "Falló el emparejamiento: Compruebe si el PIN está escrito correctamente",

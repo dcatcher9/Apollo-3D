@@ -60,7 +60,6 @@ export default defineConfig({
                 config: resolve(assetsSrcPath, 'config.html'),
                 index: resolve(assetsSrcPath, 'index.html'),
                 offlineConversion: resolve(assetsSrcPath, 'offline-conversion.html'),
-                password: resolve(assetsSrcPath, 'password.html'),
                 pin: resolve(assetsSrcPath, 'pin.html'),
                 troubleshooting: resolve(assetsSrcPath, 'troubleshooting.html'),
                 welcome: resolve(assetsSrcPath, 'welcome.html'),

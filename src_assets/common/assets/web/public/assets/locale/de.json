@@ -165,14 +165,6 @@
     "virtual_sink_desc": "Legen Sie ein virtuelles Audiogerät manuell fest. Wenn nicht gesetzt, wird das Gerät automatisch ausgewählt. Wir empfehlen dringend, dieses Feld leer zu lassen, um die automatische Geräteauswahl zu verwenden!",
     "virtual_sink_placeholder": "Steam Streaming Lautsprecher"
   },
-  "password": {
-    "confirm_password": "Passwort wiederholen",
-    "current_creds": "Aktuelle Zugangsdaten",
-    "new_creds": "Neue Zugangsdaten",
-    "new_username_desc": "Wenn nicht angegeben, wird der Benutzername nicht geändert",
-    "password_change": "Passwortänderung",
-    "success_msg": "Passwort wurde erfolgreich geändert! Diese Seite wird bald neu geladen, Ihr Browser wird Sie nach den neuen Zugangsdaten fragen."
-  },
   "pin": {
     "device_name": "Gerätename",
     "pair_failure": "Paarung fehlgeschlagen: Prüfen Sie, ob die PIN korrekt eingegeben wurde",

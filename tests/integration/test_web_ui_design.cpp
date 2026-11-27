@@ -219,11 +219,9 @@ TEST(WebUiDesign, PairingKeepsPinPrimaryAndQrSecondary) {
 TEST(WebUiDesign, AuthenticationEntriesUseSharedLayouts) {
   const auto login = read_source(web_root / "login.html");
   const auto welcome = read_source(web_root / "welcome.html");
-  const auto password = read_source(web_root / "password.html");
 
   EXPECT_NE(login.find("apollo-auth-shell is-compact"), std::string::npos);
   EXPECT_NE(welcome.find("apollo-auth-shell"), std::string::npos);
-  EXPECT_NE(password.find("apollo-password-grid"), std::string::npos);
 }
 
 TEST(WebUiDesign, PresentsSunshineAndMoonlightBrandPair) {

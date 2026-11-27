@@ -165,14 +165,6 @@
     "virtual_sink_desc": "Manually specify a virtual audio device to use. If unset, the device is chosen automatically. We strongly recommend leaving this field blank to use automatic device selection!",
     "virtual_sink_placeholder": "Steam Streaming Speakers"
   },
-  "password": {
-    "confirm_password": "Confirm Password",
-    "current_creds": "Current Credentials",
-    "new_creds": "New Credentials",
-    "new_username_desc": "If not specified, the username will not change",
-    "password_change": "Password Change",
-    "success_msg": "Password has been changed successfully! This page will reload soon, your browser will ask you for the new credentials."
-  },
   "pin": {
     "device_name": "Device Name",
     "pair_failure": "Pairing Failed: Check if the PIN is typed correctly",

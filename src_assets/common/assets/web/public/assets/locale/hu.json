@@ -181,14 +181,6 @@
     "virtual_sink_desc": "Kézzel adja meg a használni kívánt virtuális audioeszközt. Ha nincs megadva, az eszköz automatikusan kiválasztásra kerül. Az automatikus eszközkiválasztás használatához erősen ajánlott üresen hagyni ezt a mezőt!",
     "virtual_sink_placeholder": "Steam streaming hangszórók"
   },
-  "password": {
-    "confirm_password": "Jelszó megerősítése",
-    "current_creds": "Jelenlegi megbízólevelek",
-    "new_creds": "Új megbízólevelek",
-    "new_username_desc": "Ha nincs megadva, a felhasználónév nem fog változni.",
-    "password_change": "Jelszó módosítása",
-    "success_msg": "A jelszó módosítása sikeresen megtörtént! Ez az oldal hamarosan újratöltődik, a böngésző kérni fogja az új hitelesítő adatokat."
-  },
   "pin": {
     "device_name": "Eszköz neve",
     "pair_failure": "A párosítás sikertelen: Ellenőrizze, hogy a PIN kód helyesen lett-e beírva",

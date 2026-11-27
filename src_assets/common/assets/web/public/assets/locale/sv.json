@@ -177,14 +177,6 @@
     "virtual_sink_desc": "Ljudenheten som ska användas när ljudutmatning inte tillåts på värden av klienten.\nOm ej inställd väljs enheten automatiskt.\nVi rekommenderar starkt att lämna detta fält tomt för att använda automatiskt enhetsval!",
     "virtual_sink_placeholder": "Steam Streaming Högtalare"
   },
-  "password": {
-    "confirm_password": "Bekräfta lösenord",
-    "current_creds": "Nuvarande uppgifter",
-    "new_creds": "Nya inloggningsuppgifter",
-    "new_username_desc": "Om det inte anges kommer användarnamnet inte att ändras",
-    "password_change": "Ändra lösenord",
-    "success_msg": "Lösenordet har ändrats! Den här sidan kommer att laddas om snart, din webbläsare kommer att be dig om de nya uppgifterna."
-  },
   "permissions": {
     "input_controller": "Kontrollerinmatning",
     "input_touch": "Touchinmatning",

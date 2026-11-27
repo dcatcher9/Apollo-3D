@@ -165,14 +165,6 @@
     "virtual_sink_desc": "Ręczne określenie używanego wirtualnego urządzenia audio. Jeśli nie jest ustawione, urządzenie zostanie wybrane automatycznie. Zdecydowanie zalecamy pozostawienie tego pola pustego, aby korzystać z automatycznego wyboru urządzenia!",
     "virtual_sink_placeholder": "Głośniki do strumieniowania Steam"
   },
-  "password": {
-    "confirm_password": "Potwierdź hasło",
-    "current_creds": "Aktualne dane logowania",
-    "new_creds": "Nowe dane logowania",
-    "new_username_desc": "Jeśli nie zostanie podane, nazwa użytkownika nie ulegnie zmianie",
-    "password_change": "Zmiana hasła",
-    "success_msg": "Hasło zostało pomyślnie zmienione! Strona zostanie wkrótce przeładowana, a przeglądarka poprosi o podanie nowych danych uwierzytelniających."
-  },
   "pin": {
     "device_name": "Nazwa urządzenia",
     "pair_failure": "Parowanie nie powiodło się: Sprawdź, czy kod PIN został wpisany poprawnie",

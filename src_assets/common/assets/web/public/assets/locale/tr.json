@@ -165,14 +165,6 @@
     "virtual_sink_desc": "Kullanılacak sanal ses cihazını manuel olarak belirleyin. Ayarlanmamışsa, cihaz otomatik olarak seçilir. Otomatik cihaz seçimini kullanmak için bu alanı boş bırakmanızı şiddetle tavsiye ederiz!",
     "virtual_sink_placeholder": "Steam Akış Hoparlörleri"
   },
-  "password": {
-    "confirm_password": "Şifreyi Onayla",
-    "current_creds": "Güncel Kimlik Bilgileri",
-    "new_creds": "Yeni Kimlik Bilgileri",
-    "new_username_desc": "Belirtilmezse, kullanıcı adı değişmez",
-    "password_change": "Şifre Değişikliği",
-    "success_msg": "Şifre başarıyla değiştirildi! Bu sayfa yakında yeniden yüklenecek, tarayıcınız sizden yeni kimlik bilgilerinizi isteyecektir."
-  },
   "pin": {
     "device_name": "Cihaz Adı",
     "pair_failure": "Eşleştirme Başarısız: PIN'in doğru yazılıp yazılmadığını kontrol edin",

@@ -181,14 +181,6 @@
     "virtual_sink_desc": "手動指定要使用的虛擬音訊裝置。如果未設定，則會自動選擇裝置。我們強烈建議將此欄位留空，以使用自動裝置選擇！",
     "virtual_sink_placeholder": "Steam 串流喇叭"
   },
-  "password": {
-    "confirm_password": "確認密碼",
-    "current_creds": "目前的憑證",
-    "new_creds": "新憑證",
-    "new_username_desc": "如果未指定，使用者名稱不會變更",
-    "password_change": "密碼變更",
-    "success_msg": "密碼已成功變更！此頁面將很快重新載入，您的瀏覽器將要求輸入新的憑證。"
-  },
   "pin": {
     "device_name": "裝置名稱",
     "pair_failure": "配對失敗：請確認 PIN 碼是否輸入正確",

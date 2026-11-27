@@ -1717,29 +1717,17 @@ body .progress-bar {
   margin: 0;
 }
 
-.apollo-auth-form .form-label,
-.apollo-password-grid .form-label {
+.apollo-auth-form .form-label {
   color: var(--apollo-text-secondary);
   font-size: var(--apollo-text-caption);
   font-weight: 700;
 }
 
-.apollo-auth-actions,
 .apollo-resource-actions {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: var(--apollo-space-sm);
-}
-
-.apollo-auth-actions {
-  margin-top: var(--apollo-space-xl);
-}
-
-.apollo-password-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--apollo-space-xl);
 }
 
 .apollo-resource-stack {
@@ -1913,8 +1901,7 @@ body .progress-bar {
     place-items: start center;
   }
 
-  .apollo-auth-shell,
-  .apollo-password-grid {
+  .apollo-auth-shell {
     grid-template-columns: 1fr;
   }
 
@@ -1927,13 +1914,11 @@ body .progress-bar {
     border-radius: var(--apollo-radius-card);
   }
 
-  .apollo-auth-actions,
   .apollo-resource-actions {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .apollo-auth-actions .btn,
   .apollo-resource-actions .btn {
     width: 100%;
   }

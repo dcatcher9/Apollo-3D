@@ -177,14 +177,6 @@
     "virtual_sink_desc": "Especificar manualmente um dispositivo de áudio virtual a ser usado. Se não for definido, o dispositivo será escolhido automaticamente. É altamente recomendável deixar esse campo em branco para usar a seleção automática de dispositivos!",
     "virtual_sink_placeholder": "Steam Streaming Speakers"
   },
-  "password": {
-    "confirm_password": "Confirmar senha",
-    "current_creds": "Credenciais atuais",
-    "new_creds": "Novas credenciais",
-    "new_username_desc": "Se não for especificado, o nome de usuário não será alterado",
-    "password_change": "Alteração de senha",
-    "success_msg": "A senha foi alterada com sucesso! Esta página será recarregada em breve e seu navegador solicitará as novas credenciais."
-  },
   "permissions": {
     "input_controller": "Entrada de controle",
     "input_touch": "Entrada de toque",

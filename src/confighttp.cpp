@@ -602,19 +602,6 @@ namespace confighttp {
   }
 
   /**
-   * @brief Get the password page.
-   * @param response The HTTP response object.
-   * @param request The HTTP request object.
-   */
-  void getPasswordPage(resp_https_t response, req_https_t request) {
-    std::string content = file_handler::read_file(WEB_DIR "password.html");
-    SimpleWeb::CaseInsensitiveMultimap headers;
-    headers.emplace("Content-Type", "text/html; charset=utf-8");
-    add_frame_guard(headers);
-    response->write(content, headers);
-  }
-
-  /**
    * @brief Get the login page.
    * @param response The HTTP response object.
    * @param request The HTTP request object.
@@ -2047,7 +2034,6 @@ namespace confighttp {
     server.resource["^/pin/?$"]["GET"] = guarded(access_e::page, getPinPage);
     server.resource["^/apps/?$"]["GET"] = guarded(access_e::page, getAppsPage);
     server.resource["^/config/?$"]["GET"] = guarded(access_e::page, getConfigPage);
-    server.resource["^/password/?$"]["GET"] = guarded(access_e::page, getPasswordPage);
     server.resource["^/welcome/?$"]["GET"] = getWelcomePage;
     server.resource["^/login/?$"]["GET"] = getLoginPage;
     server.resource["^/troubleshooting/?$"]["GET"] = guarded(access_e::page, getTroubleshootingPage);

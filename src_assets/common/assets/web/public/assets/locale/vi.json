@@ -181,14 +181,6 @@
     "virtual_sink_desc": "Chỉ định thủ công thiết bị âm thanh ảo để sử dụng. Nếu không được thiết lập, thiết bị sẽ được chọn tự động. Chúng tôi khuyến nghị mạnh mẽ để để trống trường này để sử dụng tính năng chọn thiết bị tự động!",
     "virtual_sink_placeholder": "Loa phát trực tuyến Steam"
   },
-  "password": {
-    "confirm_password": "Xác nhận mật khẩu",
-    "current_creds": "Chứng chỉ hiện tại",
-    "new_creds": "Chứng chỉ mới",
-    "new_username_desc": "Nếu không được chỉ định, tên người dùng sẽ không thay đổi.",
-    "password_change": "Thay đổi mật khẩu",
-    "success_msg": "Mật khẩu đã được thay đổi thành công! Trang này sẽ được tải lại trong giây lát, trình duyệt của bạn sẽ yêu cầu bạn nhập thông tin đăng nhập mới."
-  },
   "pin": {
     "device_name": "Tên thiết bị",
     "pair_failure": "Kết nối không thành công: Vui lòng kiểm tra xem mã PIN đã được nhập chính xác chưa.",

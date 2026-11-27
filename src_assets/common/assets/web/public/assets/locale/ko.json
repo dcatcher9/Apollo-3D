@@ -165,14 +165,6 @@
     "virtual_sink_desc": "사용할 가상 오디오 장치를 수동으로 지정합니다. 설정하지 않으면 자동으로 장치가 선택됩니다. 자동으로 장치를 선택할려면 이 칸을 비우는 것을 권장드립니다.",
     "virtual_sink_placeholder": "Steam Streaming Speakers"
   },
-  "password": {
-    "confirm_password": "비밀번호 확인",
-    "current_creds": "현재 자격 증명",
-    "new_creds": "새 자격 증명",
-    "new_username_desc": "지정하지 않으면 사용자 아이디가 변경되지 않습니다.",
-    "password_change": "비밀번호 변경",
-    "success_msg": "비밀번호가 성공적으로 변경되었습니다! 이 페이지가 곧 다시 로드되며 브라우저에서 새 자격 증명을 입력하라는 메시지가 표시됩니다."
-  },
   "pin": {
     "device_name": "장치 이름",
     "pair_failure": "페어링에 실패했습니다: PIN이 올바르게 입력되었는지 확인하세요.",

@@ -181,14 +181,6 @@
     "virtual_sink_desc": "Ručně zadejte virtuální zvukové zařízení, které chcete použít. Pokud není nastaveno, je zařízení vybráno automaticky. Důrazně doporučujeme ponechat toto pole prázdné, chcete-li použít automatický výběr zařízení!",
     "virtual_sink_placeholder": "Streamovací reproduktory služby Steam"
   },
-  "password": {
-    "confirm_password": "Potvrzení hesla",
-    "current_creds": "Aktuální přihlašovací údaje",
-    "new_creds": "Nové přihlašovací údaje",
-    "new_username_desc": "Pokud není zadáno, uživatelské jméno se nezmění",
-    "password_change": "Změna hesla",
-    "success_msg": "Heslo bylo úspěšně změněno! Tato stránka se brzy znovu načte a prohlížeč vás požádá o zadání nových přihlašovacích údajů."
-  },
   "pin": {
     "device_name": "Název zařízení",
     "pair_failure": "Spárování se nezdařilo: Zkontrolujte, zda je PIN správně zadán",
