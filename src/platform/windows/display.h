@@ -1213,9 +1213,11 @@ namespace platf::dxgi {
     std::function<bool(int)> mode_is_requested;
   };
 
+  // Local AR's session owner is the only caller. It always supplies live_target,
+  // presented_frames, capture_failover and on_quiesced; the other callbacks and the cursor clip
+  // and source switch are optional.
   struct local_presenter_config_t {
     std::string source_display_name;
-    RECT target_rect {};
     LUID target_adapter_id {};
     int target_refresh_millihz = 60000;
     bool hdr = false;

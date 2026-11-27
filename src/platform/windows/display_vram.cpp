@@ -8767,16 +8767,10 @@ namespace platf::dxgi {
       }
     }
     auto read_target_rect = [&]() {
-      if (!config.live_target) {
-        return config.target_rect;
-      }
       std::lock_guard lock(config.live_target->mutex);
       return config.live_target->rect;
     };
     auto read_target_display_name = [&]() {
-      if (!config.live_target) {
-        return std::string {};
-      }
       std::lock_guard lock(config.live_target->mutex);
       return config.live_target->display_name;
     };
@@ -8828,9 +8822,7 @@ namespace platf::dxgi {
     capture_config.dynamicRange = config.hdr ? 1 : 0;
     capture_config.encodingFramerate = capture_refresh_millihz;
 
-    const auto preferred_capture_backend = config.capture_failover ?
-                                             config.capture_failover->preferred_backend() :
-                                             capture_backend_e::ddup;
+    const auto preferred_capture_backend = config.capture_failover->preferred_backend();
     // A display-mode change after this point invalidates the duplication opened below.
     const auto display_epoch_at_open = platf::display_change_epoch();
     const auto switch_is_current = [&](const std::shared_ptr<switch_request_t> &request) {
@@ -8846,7 +8838,7 @@ namespace platf::dxgi {
       capture_config,
       preferred_capture_backend
     );
-    if (display && config.capture_failover) {
+    if (display) {
       config.capture_failover->note_backend_opened(display->capture_backend());
     }
     auto dxgi_display = std::dynamic_pointer_cast<display_base_t>(display);
@@ -9998,9 +9990,7 @@ namespace platf::dxgi {
           }
           has_displayed = true;
           previous_eye_presents = eye_presents;
-          if (config.presented_frames) {
-            config.presented_frames->fetch_add(eye_presents, std::memory_order_relaxed);
-          }
+          config.presented_frames->fetch_add(eye_presents, std::memory_order_relaxed);
           // A late image moves every later eye by whole refreshes. An averaging emitter keeps
           // its earlier rhythm and its firmware ignores so large a correction, so the lenses
           // would stay out of step with the picture. Repay the refreshes by shortening the
@@ -10354,9 +10344,7 @@ namespace platf::dxgi {
         ++presented_frames;
         log_present_stats();
       }
-      if (config.presented_frames) {
-        config.presented_frames->fetch_add(1, std::memory_order_relaxed);
-      }
+      config.presented_frames->fetch_add(1, std::memory_order_relaxed);
       presenter_retry.record_presented();
       presenter_schedule.record_presented();
       return true;
@@ -10388,13 +10376,11 @@ namespace platf::dxgi {
     // same stopped proof for every completed capture attempt, before those destructors run.
     close_window();
     destroy_window.disable();
-    if (config.on_quiesced) {
-      config.on_quiesced();
-    }
+    config.on_quiesced();
     if (config.frame_sequential && (shutter_failed.load(std::memory_order_acquire) || shutter_pairs.failed())) {
       return local_presenter_result_e::error;
     }
-    if (config.capture_failover && config.capture_failover->note_capture_result({
+    if (config.capture_failover->note_capture_result({
                                      capture_backend,
                                      capture_status,
                                      capture_attempt_frames,

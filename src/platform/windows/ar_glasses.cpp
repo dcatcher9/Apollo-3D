@@ -4508,7 +4508,6 @@ namespace ar_glasses {
 
         platf::dxgi::local_presenter_config_t presenter_config;
         presenter_config.source_display_name = std::move(source_display_name);
-        presenter_config.target_rect = presentation_target.rect;
         presenter_config.target_adapter_id = presentation_target.adapter_id;
         presenter_config.target_refresh_millihz = presentation_target.refresh_millihz;
         presenter_config.frame_sequential = monitor_surface_;
