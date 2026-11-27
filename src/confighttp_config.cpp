@@ -78,6 +78,20 @@ namespace confighttp {
   }
 
   /**
+   * @brief Get the host's version, which every page's navigation bar shows.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   *
+   * @api_examples{/api/version| GET| null}
+   */
+  void getVersion(resp_https_t response, req_https_t request) {
+    nlohmann::json output_tree;
+    output_tree["status"] = true;
+    output_tree["version"] = PROJECT_VERSION;
+    send_response(response, output_tree);
+  }
+
+  /**
    * @brief List the applications Host 3D may protect subtitles in.
    * @param response The HTTP response object.
    * @param request The HTTP request object.

@@ -52,6 +52,7 @@ namespace confighttp {
   // Configuration, logs and the host's lifetime: confighttp_config.cpp
   void getConfig(resp_https_t response, req_https_t request);
   void getLocale(resp_https_t response, req_https_t request);
+  void getVersion(resp_https_t response, req_https_t request);
   void getHost3dSubtitleApps(resp_https_t response, req_https_t request);
   void setHost3dSubtitleApp(resp_https_t response, req_https_t request);
   void saveConfig(resp_https_t response, req_https_t request);

@@ -163,6 +163,7 @@ namespace confighttp {
     server.resource["^/api/host3d/subtitle-apps$"]["GET"] = guarded(access_e::api, getHost3dSubtitleApps);
     server.resource["^/api/host3d/subtitle-apps$"]["POST"] = guarded(access_e::json_api, setHost3dSubtitleApp);
     server.resource["^/api/configLocale$"]["GET"] = getLocale;
+    server.resource["^/api/version$"]["GET"] = guarded(access_e::api, getVersion);
     server.resource["^/api/restart$"]["POST"] = guarded(access_e::json_api, restart);
     server.resource["^/api/quit$"]["POST"] = guarded(access_e::api, quit);
     server.resource["^/api/password$"]["POST"] = savePassword;

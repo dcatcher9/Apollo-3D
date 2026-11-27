@@ -64,6 +64,7 @@ stream and releases every category.
 |---|---|---|
 | `GET`, `POST` | `/api/config` | Read or save host configuration |
 | `GET` | `/api/configLocale` | Read locale metadata |
+| `GET` | `/api/version` | Read the host version the navigation bar shows |
 | `GET`, `POST` | `/api/host3d/subtitle-apps` | List the applications Host 3D may protect subtitles in, or turn protection on or off for one |
 
 The field-level contract is documented in [Configuration](configuration.md).

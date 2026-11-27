@@ -27,8 +27,8 @@ const currentPage = computed(() => {
 
 onMounted(async () => {
   try {
-    const config = await getJson('./api/config')
-    version.value = config.version || ''
+    const host = await getJson('./api/version')
+    version.value = host.version || ''
   } catch (error) {
     console.debug('Sunshine 3D version is unavailable', error)
   }

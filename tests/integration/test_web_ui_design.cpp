@@ -288,6 +288,16 @@ TEST(WebUiDesign, PresentsSunshineAndMoonlightBrandPair) {
   EXPECT_EQ(find_shown(pairing, "Pair Artemis"), std::string::npos);
 }
 
+TEST(WebUiDesign, NavbarReadsOnlyTheSignedInHostVersion) {
+  const auto navbar = read_source(web_root / "Navbar.vue");
+  const auto http = read_source(fs::path(SUNSHINE_SOURCE_DIR) / "src/confighttp.cpp");
+
+  // Every page shows the version; none needs the whole configuration file for it.
+  EXPECT_NE(navbar.find("getJson('./api/version')"), std::string::npos);
+  EXPECT_EQ(navbar.find("./api/config"), std::string::npos);
+  EXPECT_NE(http.find(R"(server.resource["^/api/version$"]["GET"] = guarded(access_e::api, getVersion);)"), std::string::npos);
+}
+
 TEST(WebUiDesign, UsesDeviceNeutralAndThreeDimensionalStatusLanguage) {
   const auto overview = read_source(web_root / "index.html");
   const auto pairing = read_source(web_root / "PinPage.vue");
