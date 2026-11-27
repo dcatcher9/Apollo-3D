@@ -39,7 +39,7 @@ namespace platf::primary_display::detail {
   };
 
   /** Whether a journal is consistent enough to save or to recover from. The codec refuses any
-   * other; the rules belong to the transactions in primary_display.cpp.
+   * other; the rules belong to the transactions in primary_display_manager.cpp.
    */
   bool valid_journal(const journal_t &journal);
 

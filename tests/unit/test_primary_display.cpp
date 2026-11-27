@@ -4,7 +4,7 @@
  */
 #include "../tests_common.h"
 #include "src/platform/windows/exclusive_display_reconcile_retry.h"
-#include "src/platform/windows/primary_display.h"
+#include "src/platform/windows/primary_display_manager.h"
 
 #include <algorithm>
 #include <array>
