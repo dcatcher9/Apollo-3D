@@ -814,7 +814,7 @@
               <div class="device-fact">
                 <span class="device-fact-label">Access</span>
                 <span class="device-fact-value">
-                  {{ accessPresetLabel(accessPresetFor(client.perm)) }}
+                  {{ accessLabel(client.perm) }}
                 </span>
               </div>
               <div class="device-fact">
@@ -1232,6 +1232,11 @@
         if ((actions & permissionMapping.launch) && inputs === permissionMapping._all_inputs) return 'stream_control';
         if (!(actions & permissionMapping.launch) && (actions & permissionMapping._allow_view) && inputs === 0) return 'view_only';
         return 'custom';
+      },
+      accessLabel(perm) {
+        // A client loaded without a permission word has none until the owner grants them.
+        if ((perm & permissionMapping._all) === 0) return 'No access';
+        return this.accessPresetLabel(this.accessPresetFor(perm));
       },
       accessPresetLabel(preset) {
         if (preset === 'stream_control') return 'Stream & control';

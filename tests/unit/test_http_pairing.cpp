@@ -752,6 +752,7 @@ namespace {
     first["perm"] = static_cast<std::uint32_t>(crypto::PERM::_default) | 0x80000000u;
     auto second = client_record(second_certificate, base_name + " (9)");
     second["uuid"] = "persistence-client-b";
+    second["perm"] = static_cast<std::uint32_t>(crypto::PERM::_all);
     const json foreign {{"nested", json::array({1, "kept", nullptr})}, {"note", "unrelated state"}};
     write_state({
       {"foreign", foreign},
@@ -794,6 +795,46 @@ namespace {
     EXPECT_EQ(listing[1].at("connected"), false);
     ASSERT_NO_THROW(save_state());
     EXPECT_EQ(json::parse(read_raw()), saved);
+  }
+
+  TEST_F(PairingPersistenceTest, ClientWithoutANumericPermissionWordLoadsWithNoRights) {
+    const auto &certificates = distinct_test_certificates();
+    auto missing = client_record(certificates[0], "missing");
+    missing["uuid"] = "permission-missing";
+    auto text = client_record(certificates[1], "text");
+    text["uuid"] = "permission-text";
+    text["perm"] = std::to_string(static_cast<std::uint32_t>(crypto::PERM::_all));
+    auto negative = client_record(certificates[2], "negative");
+    negative["uuid"] = "permission-negative";
+    negative["perm"] = -1;
+    auto fraction = client_record(certificates[3], "fraction");
+    fraction["uuid"] = "permission-fraction";
+    fraction["perm"] = 117638912.0;
+    auto numeric = client_record(certificates[4], "numeric");
+    numeric["uuid"] = "permission-numeric";
+    numeric["perm"] = static_cast<std::uint32_t>(crypto::PERM::_default);
+    write_state({{"root", {{"uniqueid", loaded_host_id}, {"named_devices", json::array({missing, text, negative, fraction, numeric})}}}});
+
+    ASSERT_NO_THROW(load_state());
+    ASSERT_EQ(get_all_clients().size(), 5u);
+    for (std::size_t index = 0; index < 4; ++index) {
+      SCOPED_TRACE(index);
+      const auto client = get_authorized_client_for_test(certificates[index]);
+      ASSERT_TRUE(client);
+      EXPECT_EQ(client->perm, crypto::PERM::_no);
+    }
+    const auto granted = get_authorized_client_for_test(certificates[4]);
+    ASSERT_TRUE(granted);
+    EXPECT_EQ(granted->perm, crypto::PERM::_default);
+
+    // The clients stay paired with no rights, and saving writes that as an explicit word.
+    ASSERT_NO_THROW(save_state());
+    const auto saved_state = json::parse(read_raw());
+    const auto &saved = saved_state.at("root").at("named_devices");
+    ASSERT_EQ(saved.size(), 5u);
+    EXPECT_EQ(saved[0].at("perm"), static_cast<std::uint32_t>(crypto::PERM::_no));
+    EXPECT_EQ(saved[1].at("perm"), static_cast<std::uint32_t>(crypto::PERM::_no));
+    EXPECT_EQ(saved[4].at("perm"), static_cast<std::uint32_t>(crypto::PERM::_default));
   }
 
   TEST_F(PairingPersistenceTest, OptionalAndLegacyDeviceContainersKeepTheirExistingLoadBehavior) {

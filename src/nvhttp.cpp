@@ -462,7 +462,12 @@ namespace nvhttp {
         named_cert_p->name = el.value("name", "");
         named_cert_p->cert = std::move(certificate);
         named_cert_p->uuid = el.value("uuid", "");
-        named_cert_p->perm = (PERM) (util::get_non_string_json_value<uint32_t>(el, "perm", (uint32_t) PERM::_all)) & PERM::_all;
+        // A record without an unsigned permission word, from an old or hand-edited state file,
+        // stays paired with no rights until the owner grants them on the devices page.
+        const auto perm = el.find("perm");
+        named_cert_p->perm = perm != el.end() && perm->is_number_unsigned() ?
+                               static_cast<PERM>(perm->get<std::uint32_t>()) & PERM::_all :
+                               PERM::_no;
         client.named_devices.emplace_back(named_cert_p);
       }
     }

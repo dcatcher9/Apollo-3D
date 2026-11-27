@@ -32,7 +32,9 @@ Local trusted access does not require a sign-in. WAN access does when it is expl
 Use the four-digit PIN shown by Moonlight 3D in Sunshine 3D's **Enter PIN** card. PIN is the
 primary flow; QR/OTP is secondary. Verify that the PC and headset can reach one another and that
 the client is using the modern encrypted protocol. The first successfully paired client receives
-full permissions; later clients may need launch/input permissions granted in the Web UI.
+full permissions; later clients may need launch/input permissions granted in the Web UI. A paired
+client whose saved record has no numeric permission value, as in an old or hand-edited state file,
+stays paired with no access until its permissions are granted there.
 
 ### Reset WAN credentials
 
