@@ -683,6 +683,18 @@ if(BUILD_TESTING)
   add_test(NAME reshade_exporter_lifecycle COMMAND reshade_exporter_tests)
   set_tests_properties(reshade_exporter_lifecycle PROPERTIES TIMEOUT 15)
 
+  # install.ps1 on isolated fixture folders, in Windows PowerShell 5.1 as users run it; it never
+  # starts a game or loads ReShade. The script refuses an output folder that already exists.
+  find_program(SUNSHINE_WINDOWS_POWERSHELL powershell.exe
+    PATHS "$ENV{SystemRoot}/System32/WindowsPowerShell/v1.0" NO_DEFAULT_PATH REQUIRED)
+  set(install_test_output "${CMAKE_CURRENT_BINARY_DIR}/install_test")
+  add_test(NAME reshade_install_output COMMAND "${CMAKE_COMMAND}" -E rm -rf "${install_test_output}")
+  set_tests_properties(reshade_install_output PROPERTIES FIXTURES_SETUP install_test_output)
+  add_test(NAME reshade_install COMMAND "${SUNSHINE_WINDOWS_POWERSHELL}" -NoProfile -ExecutionPolicy Bypass
+    -File "${CMAKE_CURRENT_SOURCE_DIR}/test_install.ps1"
+    -PackageDirectory "${CMAKE_CURRENT_BINARY_DIR}/package" -OutputDirectory "${install_test_output}")
+  set_tests_properties(reshade_install PROPERTIES FIXTURES_REQUIRED install_test_output TIMEOUT 300)
+
   # Opt-in execution: this opens a short-lived synthetic window and needs an official
   # ReShade runtime supplied by the operator. Do not make it an automatic desktop test.
   add_executable(reshade_runtime_test test_runtime.cpp)
