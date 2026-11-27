@@ -143,31 +143,27 @@ namespace sunshine_game3d {
   struct alpha_counts {
     std::uint32_t covered{}, invalid{};
   };
+  // The layer's are its own; the other alpha kinds' are in judged_kinds order.
   inline alpha_counts alpha_counts_of(const alpha_auto_decision::detection_evidence &evidence, ui_selection::kind k) {
-    using ui_selection::kind;
-    switch (k) {
-      case kind::ui_alpha: return {evidence.alpha_covered[0], evidence.alpha_invalid[0]};
-      case kind::ui_color: return {evidence.alpha_covered[1], evidence.alpha_invalid[1]};
-      case kind::backbuffer: return {evidence.alpha_covered[2], evidence.alpha_invalid[2]};
-      case kind::current: return {evidence.alpha_covered[3], evidence.alpha_invalid[3]};
-      case kind::ui_layer: return {evidence.layer_covered, evidence.layer_invalid};
-      default: return {};
-    }
+    if (k == ui_selection::kind::ui_layer) return {evidence.layer_covered, evidence.layer_invalid};
+    if (!ui_selection::judged(k)) return {};
+    const auto i = ui_selection::judged_index(k);
+    return {evidence.alpha_covered[i], evidence.alpha_invalid[i]};
   }
   // One judged alpha kind's one-way counts (A2) in a sample: strong and
   // contradicted pixels; zero for a kind that is not judged.
   inline std::pair<std::uint32_t, std::uint32_t> one_way_of(const alpha_auto_decision::detection_evidence &evidence,
       ui_selection::kind k) {
-    for (std::size_t i = 0; i != ui_selection::judged_kinds.size(); ++i)
-      if (ui_selection::judged_kinds[i] == k) return {evidence.strong[i], evidence.contradicted[i]};
-    return {};
+    if (!ui_selection::judged(k)) return {};
+    const auto i = ui_selection::judged_index(k);
+    return {evidence.strong[i], evidence.contradicted[i]};
   }
 
   // The acceptance signature of every candidate kind a detection offers
   // (A1): each kind's typed DXGI format and the swapchain color space. FG
   // mode is not part of it. Only offered kinds are read.
   struct candidate_signatures {
-    std::array<std::uint32_t, ui_selection::kind_names.size()> format{}; // ui_selection::kind order.
+    std::array<std::uint32_t, ui_selection::kinds.size()> format{}; // ui_selection::kind order.
     std::uint32_t color_space{};
 
     ui_selection::signature of(ui_selection::kind k) const { return {k, format[std::size_t(k)], color_space}; }
@@ -573,8 +569,7 @@ namespace sunshine_game3d {
         // A2: every judged kind (all alpha but the one-frame-late layer copy,
         // E2) meets the one-way test, with strong pixels to test; inferred
         // alpha also the declared alphas' coverage.
-        const bool judged = std::find(ui_selection::judged_kinds.begin(), ui_selection::judged_kinds.end(), k) !=
-          ui_selection::judged_kinds.end();
+        const bool judged = ui_selection::judged(k);
         // A void sample leaves Backbuffer and current alpha as they are: no
         // run advances or restarts, and since it cannot earn them it is not
         // testable for them either (A3).

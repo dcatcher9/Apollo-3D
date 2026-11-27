@@ -383,7 +383,7 @@ HUDLESS = 0x10  # The HUD-less candidate bit; 0x20 marks the pair exact.
 # whose declared kinds the line logs as sampled_declared_one_way): Backbuffer and current alpha, by their index in
 # ALPHA_NAMES. The UI layer, the one-frame-late copy, is never judged (E2).
 JUDGED = (2, 3)
-# Candidate kind names of sampled_refused (ui_selection::kind_names) and how the report names them.
+# Candidate kind names of sampled_refused (ui_selection::kinds) and how the report names them.
 KIND_NAMES = dict(zip(ALPHA_KINDS, ALPHA_NAMES)) | {'hudless': 'HUD-less difference'}
 # Unprotected time shorter than this is counted, not listed: alpha_trust_span_ms (game3d_alpha_auto.h), the span over
 # which detection itself earns or loses confidence.

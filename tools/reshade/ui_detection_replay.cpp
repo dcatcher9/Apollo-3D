@@ -81,25 +81,20 @@ namespace {
   // alpha (the presented colour's, t6 A), t14 HUD-less, and an offscreen UI layer from the census
   // (ui_layer_candidate_N) at t7 with the renderer's layer flags. The same
   // bits name the accepted kinds in b2 word 2.
-  const std::map<std::string, unsigned> candidate_bits{{"sl_ui_alpha", candidate::ui_alpha},
-    {"sl_ui_color_alpha", candidate::ui_color}, {"sl_backbuffer", candidate::backbuffer}, {"current", candidate::current},
-    {"sl_hudless_color", candidate::hudless}};
+  const std::map<std::string, selection::kind> candidate_kinds{{"sl_ui_alpha", selection::kind::ui_alpha},
+    {"sl_ui_color_alpha", selection::kind::ui_color}, {"sl_backbuffer", selection::kind::backbuffer},
+    {"current", selection::kind::current}, {"sl_hudless_color", selection::kind::hudless}};
   bool ui_layer_kind(const std::string &name) { return name.rfind("ui_layer_candidate_", 0) == 0; }
-  // A candidate name's bit; zero when unknown.
-  unsigned candidate_bit(const std::string &name) {
-    if (ui_layer_kind(name)) return candidate::layer;
-    const auto found = candidate_bits.find(name);
-    return found == candidate_bits.end() ? 0u : found->second;
-  }
-  // A candidate name's kind (candidate layout 2), for its signature.
+  // A candidate name's kind (candidate layout 2), for its bit and signature.
   std::optional<selection::kind> candidate_kind(const std::string &name) {
     if (ui_layer_kind(name)) return selection::kind::ui_layer;
-    if (name == "sl_ui_alpha") return selection::kind::ui_alpha;
-    if (name == "sl_ui_color_alpha") return selection::kind::ui_color;
-    if (name == "sl_backbuffer") return selection::kind::backbuffer;
-    if (name == "current") return selection::kind::current;
-    if (name == "sl_hudless_color") return selection::kind::hudless;
-    return std::nullopt;
+    const auto found = candidate_kinds.find(name);
+    return found == candidate_kinds.end() ? std::nullopt : std::optional<selection::kind>(found->second);
+  }
+  // A candidate name's bit; zero when unknown.
+  unsigned candidate_bit(const std::string &name) {
+    const auto k = candidate_kind(name);
+    return k ? selection::bit(*k) : 0u;
   }
 
   struct device_t {

@@ -145,9 +145,11 @@ namespace sunshine_game3d::ui_temporal {
     const auto counts = ui_selection::counts_from_words(words, count);
     using ui_selection::alpha_index;
     using ui_selection::kind;
+    // The evidence keeps the four presented-frame alphas in judged_kinds order.
     const auto alpha_kinds = [](const std::array<std::uint32_t, 5> &by_kind) {
-      return std::array<std::uint32_t, 4> {by_kind[alpha_index(kind::ui_alpha)], by_kind[alpha_index(kind::ui_color)],
-        by_kind[alpha_index(kind::backbuffer)], by_kind[alpha_index(kind::current)]};
+      std::array<std::uint32_t, 4> result{};
+      for (std::size_t i = 0; i != result.size(); ++i) result[i] = by_kind[alpha_index(ui_selection::judged_kinds[i])];
+      return result;
     };
     sample.covered = words[word::covered]; sample.pixels = counts.pixels;
     sample.sample_sequence = sequence;
@@ -160,17 +162,18 @@ namespace sunshine_game3d::ui_temporal {
     evidence.alpha_invalid = alpha_kinds(counts.invalid);
     evidence.hudless_lit = counts.lit;
     evidence.accepted = words[word::accepted];
-    evidence.alpha_opaque = {counts.opaque_ui_alpha, counts.opaque_ui_color};
+    const auto opaque = alpha_kinds(counts.opaque);
+    evidence.alpha_opaque = {opaque[0], opaque[1]};
     evidence.layer_covered = counts.covered[alpha_index(kind::ui_layer)];
     evidence.layer_invalid = counts.invalid[alpha_index(kind::ui_layer)];
-    evidence.layer_opaque = counts.opaque_layer;
+    evidence.layer_opaque = counts.opaque[alpha_index(kind::ui_layer)];
     evidence.valid_bits = words[word::valid_bits];
     evidence.strong = counts.strong;
     evidence.contradicted = counts.contradicted;
     evidence.refused = words[word::refused];
     evidence.frame_reason = words[word::frame_reason] & ui_detection::frame_reason_reason_mask;
     evidence.reused = (words[word::frame_reason] & ui_detection::frame_reason_reused) != 0;
-    evidence.inferred_opaque = {counts.opaque_backbuffer, counts.opaque_current};
+    evidence.inferred_opaque = {opaque[2], opaque[3]};
     evidence.claims = words[word::claims];
     evidence.s1_source = words[word::h1] & ui_detection::h1_winner_mask;
     evidence.h1_applied = (words[word::h1] & ui_detection::h1_applied) != 0;

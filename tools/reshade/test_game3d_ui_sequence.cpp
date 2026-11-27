@@ -503,23 +503,7 @@ namespace {
     // Pixels of an alpha kind with alpha of at least 254/255 (H1's
     // opaque-full claims need 99%).
     synthetic &opaque(kind k, std::uint32_t pixels) {
-      switch (k) {
-        case kind::ui_alpha:
-          c.opaque_ui_alpha = pixels;
-          break;
-        case kind::ui_color:
-          c.opaque_ui_color = pixels;
-          break;
-        case kind::ui_layer:
-          c.opaque_layer = pixels;
-          break;
-        case kind::backbuffer:
-          c.opaque_backbuffer = pixels;
-          break;
-        default:
-          c.opaque_current = pixels;
-          break;
-      }
+      c.opaque[ui_selection::alpha_index(k)] = pixels;
       return *this;
     }
 
@@ -579,11 +563,11 @@ namespace {
       }
       t[word::layer_covered] = c.covered[ui_selection::alpha_index(kind::ui_layer)];
       t[word::layer_invalid] = c.invalid[ui_selection::alpha_index(kind::ui_layer)];
-      t[word::alpha_opaque] = c.opaque_ui_alpha;
-      t[word::alpha_opaque + 1] = c.opaque_ui_color;
-      t[word::layer_opaque] = c.opaque_layer;
-      t[word::opaque_backbuffer] = c.opaque_backbuffer;
-      t[word::opaque_current] = c.opaque_current;
+      t[word::alpha_opaque] = c.opaque[ui_selection::alpha_index(kind::ui_alpha)];
+      t[word::alpha_opaque + 1] = c.opaque[ui_selection::alpha_index(kind::ui_color)];
+      t[word::layer_opaque] = c.opaque[ui_selection::alpha_index(kind::ui_layer)];
+      t[word::opaque_backbuffer] = c.opaque[ui_selection::alpha_index(kind::backbuffer)];
+      t[word::opaque_current] = c.opaque[ui_selection::alpha_index(kind::current)];
       t[word::scene_n] = n;
       t[word::scene_d] = float_bits(d);
       t[word::scene_state] = scene_state(scene_valid, verdict);

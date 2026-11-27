@@ -71,63 +71,78 @@ namespace sunshine_game3d::ui_selection {
     kind::current, kind::hudless};
 
   namespace candidate = ui_detection::candidate;
-  inline constexpr std::uint32_t alpha_bits = candidate::ui_alpha | candidate::ui_color | candidate::backbuffer |
-    candidate::current | candidate::layer;
-  inline constexpr std::uint32_t declared_alpha_bits = candidate::ui_alpha | candidate::ui_color;
+  // The one trait table of the kinds, in kind order: the name (the acceptance
+  // key's kind), the candidate bit, the decision source the kind decides as
+  // (a full change set from an exact HUD-less pair decides the full-frame
+  // source 6 instead), whether it is declared (the game's own UI contract),
+  // and its slots in the per-kind count arrays: alpha in counts::covered,
+  // invalid and opaque (alpha kinds only), judged in judged_kinds order (A2's
+  // counts::strong and contradicted, and the decision words of the four
+  // presented-frame alphas). pre_ui has no bit, source or slot.
+  inline constexpr std::size_t no_slot = ~std::size_t{};
+  struct kind_traits {
+    std::string_view name;
+    std::uint32_t bit, source;
+    bool declared;
+    std::size_t alpha, judged;
+  };
+  inline constexpr std::array<kind_traits, 7> kinds{{
+    {"ui_alpha", candidate::ui_alpha, 1u, true, 0, 0},
+    {"ui_color", candidate::ui_color, 2u, true, 1, 1},
+    {"ui_layer", candidate::layer, ui_detection::source_layer, false, 2, no_slot},
+    {"backbuffer", candidate::backbuffer, 3u, false, 3, 2},
+    {"current", candidate::current, 4u, false, 4, 3},
+    {"hudless", candidate::hudless, 5u, true, no_slot, no_slot},
+    {"pre_ui", 0u, 0u, false, no_slot, no_slot},
+  }};
+  constexpr const kind_traits &traits(kind k) { return kinds[std::size_t(k)]; }
+  constexpr std::uint32_t bit(kind k) { return traits(k).bit; }
+  constexpr std::uint32_t source_id(kind k) { return traits(k).source; }
+  constexpr bool declared(kind k) { return traits(k).declared; }
+  constexpr bool alpha_kind(kind k) { return traits(k).alpha != no_slot; }
+  // Index in counts::covered, invalid and opaque (alpha kinds only).
+  constexpr std::size_t alpha_index(kind k) { return traits(k).alpha; }
+  constexpr std::string_view name(kind k) { return traits(k).name; }
+  constexpr std::optional<kind> kind_named(std::string_view text) {
+    for (std::size_t i = 0; i != kinds.size(); ++i)
+      if (kinds[i].name == text) return kind(i);
+    return std::nullopt;
+  }
+  // The kind that decides as source, none for 0, 6, 8 and unknown sources.
+  constexpr std::optional<kind> kind_of_source(std::uint32_t source) {
+    for (std::size_t i = 0; source && i != kinds.size(); ++i)
+      if (kinds[i].source == source) return kind(i);
+    return std::nullopt;
+  }
+  // Candidate bits of the kinds that pass pred.
+  template <class Pred> constexpr std::uint32_t bits_where(Pred pred) {
+    std::uint32_t bits = 0u;
+    for (std::size_t i = 0; i != kinds.size(); ++i)
+      if (pred(kind(i))) bits |= kinds[i].bit;
+    return bits;
+  }
+  inline constexpr std::uint32_t alpha_bits = bits_where(alpha_kind);
+  inline constexpr std::uint32_t declared_alpha_bits = bits_where([](kind k) { return alpha_kind(k) && declared(k); });
   inline constexpr std::uint32_t inferred_alpha_bits = alpha_bits & ~declared_alpha_bits;
   // Every candidate bit; candidate::exact marks the HUD-less pair, not a candidate.
   inline constexpr std::uint32_t candidate_bits = alpha_bits | candidate::hudless;
-  static_assert(alpha_bits == 0x4fu && inferred_alpha_bits == 0x4cu && candidate_bits == 0x5fu);
-
-  constexpr std::uint32_t bit(kind k) {
-    switch (k) {
-      case kind::ui_alpha: return candidate::ui_alpha;
-      case kind::ui_color: return candidate::ui_color;
-      case kind::ui_layer: return candidate::layer;
-      case kind::backbuffer: return candidate::backbuffer;
-      case kind::current: return candidate::current;
-      case kind::hudless: return candidate::hudless;
-      default: return 0u; // pre_ui: not a candidate.
-    }
-  }
-  // The decision source a kind decides as; a full change set from an exact
-  // HUD-less pair decides the full-frame source 6.
-  constexpr std::uint32_t source_id(kind k) {
-    switch (k) {
-      case kind::ui_alpha: return 1u;
-      case kind::ui_color: return 2u;
-      case kind::ui_layer: return ui_detection::source_layer;
-      case kind::backbuffer: return 3u;
-      case kind::current: return 4u;
-      case kind::hudless: return 5u;
-      default: return 0u; // pre_ui: decides nothing.
-    }
-  }
-  constexpr bool declared(kind k) { return k == kind::ui_alpha || k == kind::ui_color || k == kind::hudless; }
-  constexpr bool alpha_kind(kind k) { return k != kind::hudless && k != kind::pre_ui; }
-  // Index in counts::covered and counts::invalid (alpha kinds only).
-  constexpr std::size_t alpha_index(kind k) {
-    switch (k) {
-      case kind::ui_alpha: return 0;
-      case kind::ui_color: return 1;
-      case kind::ui_layer: return 2;
-      case kind::backbuffer: return 3;
-      default: return 4;
-    }
-  }
-  inline constexpr std::array<std::string_view, 7> kind_names{"ui_alpha", "ui_color", "ui_layer", "backbuffer", "current",
-    "hudless", "pre_ui"};
-  constexpr std::string_view name(kind k) { return kind_names[std::size_t(k)]; }
-  constexpr std::optional<kind> kind_named(std::string_view text) {
-    for (std::size_t i = 0; i != kind_names.size(); ++i)
-      if (kind_names[i] == text) return kind(i);
-    return std::nullopt;
-  }
+  static_assert(alpha_bits == 0x4fu && declared_alpha_bits == (candidate::ui_alpha | candidate::ui_color) &&
+    inferred_alpha_bits == 0x4cu && candidate_bits == 0x5fu);
   static_assert(bit(kind::ui_layer) == 0x40u && source_id(kind::ui_layer) == 10u && declared(kind::hudless) &&
     !declared(kind::ui_layer) && alpha_index(kind::current) == 4 && kind_named("ui_color") == kind::ui_color);
   static_assert(bit(kind::hudless) == 0x10u && source_id(kind::hudless) == 5u && !bit(kind::pre_ui) && !source_id(kind::pre_ui) &&
-    !alpha_kind(kind::pre_ui) && !declared(kind::pre_ui) && kind_named("pre_ui") == kind::pre_ui &&
-    std::size_t(kind::pre_ui) == draw_order.size() && kind_names.size() == draw_order.size() + 1);
+    !alpha_kind(kind::pre_ui) && !alpha_kind(kind::hudless) && !declared(kind::pre_ui) && kind_named("pre_ui") == kind::pre_ui &&
+    std::size_t(kind::pre_ui) == draw_order.size() && kinds.size() == draw_order.size() + 1);
+  static_assert(kind_of_source(3u) == kind::backbuffer && kind_of_source(10u) == kind::ui_layer && !kind_of_source(0u) &&
+    !kind_of_source(6u) && !kind_of_source(8u));
+  static_assert([] {
+    // Every candidate kind is drawn once; the alpha slots are 0-4 once each.
+    std::uint32_t drawn = 0u, slots = 0u;
+    for (const auto k : draw_order) drawn |= bit(k);
+    for (const auto &t : kinds)
+      if (t.alpha != no_slot) slots |= 1u << t.alpha;
+    return drawn == candidate_bits && slots == 0x1fu;
+  }());
 
   // The first candidate of a bit set in draw order, zero when none.
   constexpr std::uint32_t first_in_draw_order(std::uint32_t bits) {
@@ -152,6 +167,16 @@ namespace sunshine_game3d::ui_selection {
   // exact pair (per_frame_unaligned_shift) counts no strong pixel on that
   // frame, so it is not judged there.
   inline constexpr std::array<kind, 4> judged_kinds{kind::ui_alpha, kind::ui_color, kind::backbuffer, kind::current};
+  constexpr bool judged(kind k) { return traits(k).judged != no_slot; }
+  // Index in judged_kinds order (judged kinds only).
+  constexpr std::size_t judged_index(kind k) { return traits(k).judged; }
+  static_assert([] {
+    std::size_t count = 0;
+    for (std::size_t i = 0; i != kinds.size(); ++i) count += judged(kind(i));
+    for (std::size_t i = 0; i != judged_kinds.size(); ++i)
+      if (judged_index(judged_kinds[i]) != i || !alpha_kind(judged_kinds[i])) return false;
+    return count == judged_kinds.size() && !judged(kind::ui_layer);
+  }());
   // A2 judge (a): an exact change set, valid this frame (V2), partial or full;
   // acceptance is not required. offered and valid_bits in candidate bits.
   constexpr bool exact_judge(std::uint32_t offered, std::uint32_t valid_bits) {
@@ -186,8 +211,8 @@ namespace sunshine_game3d::ui_selection {
     // Alpha kinds in alpha_index order: UIAlpha, UI color tag, UI layer,
     // Backbuffer, current.
     std::array<std::uint32_t, 5> covered{}, invalid{};
-    // Pixels with alpha of at least 254/255.
-    std::uint32_t opaque_ui_alpha{}, opaque_ui_color{}, opaque_layer{}, opaque_backbuffer{}, opaque_current{};
+    // Pixels with alpha of at least 254/255, in alpha_index order too.
+    std::array<std::uint32_t, 5> opaque{};
     // The HUD-less pair: changed, unchanged (within half the threshold) and
     // non-finite pixels, lit HUD-less pixels, tiles at least 99% matching.
     std::uint32_t changed{}, unchanged{}, nonfinite{}, lit{}, matching_tiles{};
@@ -220,28 +245,15 @@ namespace sunshine_game3d::ui_selection {
       words[word::alpha_covered + 2], words[word::alpha_covered + 3]};
     c.invalid = {words[word::alpha_invalid], words[word::alpha_invalid + 1], words[word::layer_invalid],
       words[word::alpha_invalid + 2], words[word::alpha_invalid + 3]};
-    c.opaque_ui_alpha = words[word::alpha_opaque];
-    c.opaque_ui_color = words[word::alpha_opaque + 1];
-    c.opaque_layer = words[word::layer_opaque];
+    c.opaque = {words[word::alpha_opaque], words[word::alpha_opaque + 1], words[word::layer_opaque],
+      words[word::opaque_backbuffer], words[word::opaque_current]};
     c.strong = {words[word::strong_ui_alpha], words[word::strong_ui_color], words[word::strong_backbuffer],
       words[word::strong_current]};
     c.contradicted = {words[word::contradicted_ui_alpha], words[word::contradicted_ui_color],
       words[word::contradicted_backbuffer], words[word::contradicted_current]};
-    c.opaque_backbuffer = words[word::opaque_backbuffer];
-    c.opaque_current = words[word::opaque_current];
     c.pre_ui_match = words[word::pre_ui_match];
     c.pre_ui_lit = words[word::pre_ui_image_lit];
     return c;
-  }
-  // Pixels with alpha of at least 254/255 of one alpha kind.
-  constexpr std::uint32_t opaque_of(const counts &c, kind k) {
-    switch (k) {
-      case kind::ui_alpha: return c.opaque_ui_alpha;
-      case kind::ui_color: return c.opaque_ui_color;
-      case kind::ui_layer: return c.opaque_layer;
-      case kind::backbuffer: return c.opaque_backbuffer;
-      default: return c.opaque_current;
-    }
   }
   // H1: opaque-full, alpha of at least 254/255 on at least
   // scene::opaque_percent (99%) of the pixels.
@@ -465,7 +477,7 @@ namespace sunshine_game3d::ui_selection {
     const std::uint32_t s1_source = source;
     std::uint32_t claims = 0u;
     for (const auto k : draw_order) {
-      if (!alpha_kind(k) || !(valid & bit(k)) || !opaque_full(opaque_of(c, k), pixels)) continue;
+      if (!alpha_kind(k) || !(valid & bit(k)) || !opaque_full(c.opaque[alpha_index(k)], pixels)) continue;
       if ((eligible & bit(k)) || k == kind::ui_layer) claims |= bit(k);
     }
     if (full_set && (valid & candidate::hudless)) claims |= candidate::hudless;
@@ -570,15 +582,20 @@ namespace sunshine_game3d::ui_selection {
   // S1's invariants, zero by construction and asserted by the selection
   // contract and sequence tests: no unaccepted inferred alpha decides, and no
   // inferred alpha decides while an accepted declared alpha is offered.
+  // The inferred alpha candidate bit that decides as source, zero for any other source.
+  constexpr std::uint32_t inferred_alpha_of(std::uint32_t source) {
+    const auto k = kind_of_source(source);
+    return k ? bit(*k) & inferred_alpha_bits : 0u;
+  }
   constexpr bool untrusted_inferred(const decision &d, std::uint32_t accepted) {
-    const std::uint32_t own = d.own_source == 3u ? candidate::backbuffer : d.own_source == 4u ? candidate::current :
-      d.own_source == ui_detection::source_layer ? candidate::layer : 0u;
+    const std::uint32_t own = inferred_alpha_of(d.own_source);
     return own && !(accepted & own);
   }
   constexpr bool inferred_over_declared(const decision &d, std::uint32_t offered, std::uint32_t accepted) {
-    const bool inferred = d.own_source == 3u || d.own_source == 4u || d.own_source == ui_detection::source_layer;
-    return inferred && (offered & accepted & declared_alpha_bits);
+    return inferred_alpha_of(d.own_source) && (offered & accepted & declared_alpha_bits);
   }
+  static_assert(inferred_alpha_of(3u) == candidate::backbuffer && inferred_alpha_of(10u) == candidate::layer &&
+    !inferred_alpha_of(1u) && !inferred_alpha_of(5u) && !inferred_alpha_of(8u));
 
   // V2 comparability of two snapshots from their own encodings: the typed
   // DXGI format and the swapchain color space (1 sRGB, 2 scRGB, 3 PQ, 4 HLG).

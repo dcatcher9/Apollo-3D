@@ -109,15 +109,11 @@ namespace {
     c.nonfinite = difference[1];
     c.unchanged = difference[2];
     c.lit = lit[0];
-    c.opaque_ui_alpha = lit[1];
-    c.opaque_ui_color = lit[2];
     const bool scene_like = std::uint64_t(beyond) * 100u > c.pixels && (std::uint64_t(beyond) * 20u > c.pixels || beyond > layer[2]);
     const std::uint32_t layer_invalid = layer[1] + (scene_like ? beyond : 0u);
     c.covered = {coverage[0], coverage[1], layer[0], coverage[2], coverage[3]};
     c.invalid = {invalid[0], invalid[1], layer_invalid, invalid[2], invalid[3]};
-    c.opaque_layer = layer[2];
-    c.opaque_backbuffer = lit[3];
-    c.opaque_current = layer[3];
+    c.opaque = {lit[1], lit[2], layer[2], lit[3], layer[3]};
     const bool counted = sample && (offered & candidate::layer);
     c.pre_ui_match = counted && pre_ui_threshold > 0.f ? pre_ui[0] : 0u;
     c.pre_ui_lit = counted ? pre_ui[1] : 0u;
@@ -371,11 +367,11 @@ namespace {
     want[word::alpha_invalid + 3] = c.invalid[4];
     want[word::hudless_lit] = c.lit;
     want[word::accepted] = test.accepted;
-    want[word::alpha_opaque] = c.opaque_ui_alpha;
-    want[word::alpha_opaque + 1] = c.opaque_ui_color;
+    want[word::alpha_opaque] = c.opaque[0];
+    want[word::alpha_opaque + 1] = c.opaque[1];
     want[word::layer_covered] = c.covered[2];
     want[word::layer_invalid] = c.invalid[2];
-    want[word::layer_opaque] = c.opaque_layer;
+    want[word::layer_opaque] = c.opaque[2];
     want[word::valid_bits] = d.valid_bits;
     // The one-way counts in judged_kinds order: texels 8 and 9 .x and texel
     // 11 .z and .w for the declared alphas, texels 8 and 9 .y and .z for
@@ -391,8 +387,8 @@ namespace {
     want[word::refused] = d.refused;
     want[word::frame_reason] = selection::frame_reason_word(d);
     // Texel 10 (H1); the reduce zeroes the scene evidence texels 5 and 6.
-    want[word::opaque_backbuffer] = c.opaque_backbuffer;
-    want[word::opaque_current] = c.opaque_current;
+    want[word::opaque_backbuffer] = c.opaque[3];
+    want[word::opaque_current] = c.opaque[4];
     want[word::claims] = d.claims;
     want[word::h1] = selection::h1_word(d);
     // Texel 11 (H1 d): the layer's pre-UI pixel counts, zero without a layer,
@@ -404,10 +400,8 @@ namespace {
     // decide() reads its counts back from the words it is compared with.
     const auto back = selection::counts_from_words(want.data(), want.size());
     require(back.covered == c.covered && back.invalid == c.invalid && back.pixels == c.pixels &&
-        back.matching_tiles == c.matching_tiles && back.opaque_layer == c.opaque_layer && back.strong == c.strong &&
-        back.contradicted == c.contradicted && back.opaque_ui_alpha == c.opaque_ui_alpha &&
-        back.opaque_ui_color == c.opaque_ui_color && back.opaque_backbuffer == c.opaque_backbuffer &&
-        back.opaque_current == c.opaque_current && back.pre_ui_match == c.pre_ui_match && back.pre_ui_lit == c.pre_ui_lit,
+        back.matching_tiles == c.matching_tiles && back.opaque == c.opaque && back.strong == c.strong &&
+        back.contradicted == c.contradicted && back.pre_ui_match == c.pre_ui_match && back.pre_ui_lit == c.pre_ui_lit,
       test.name + ": counts_from_words does not invert the decision words");
     for (std::size_t i = 0; i != want.size(); ++i)
       if (words[i] != want[i]) {
@@ -1440,13 +1434,13 @@ int main() {
       // in draw order; an unaccepted opaque UIAlpha never claims.
       c.invalid = {};
       c.covered = {1000, 0, 1000, 0, 0};
-      c.opaque_ui_alpha = c.opaque_layer = 1000;
+      c.opaque = {1000, 0, 1000, 0, 0};
       refusal(0x41, 0x00, sunshine_game3d::ui_no_mask::gate_no_hold, candidate::layer, "layer claim beside UIAlpha");
       refusal(0x40, 0x00, sunshine_game3d::ui_no_mask::gate_no_hold, candidate::layer, "layer claim");
       require(selection::decide(c, 0x01, 0x00, 0).none_reason == sunshine_game3d::ui_no_mask::ambiguous,
         "F1: an unaccepted opaque UIAlpha must not be an H1 claim");
       c.covered = {};
-      c.opaque_ui_alpha = c.opaque_layer = 0;
+      c.opaque = {};
       c.changed = 950;
       // A pre-UI HUD-less claim acts only under the pre-UI hold.
       refusal(0x10, 0x00, sunshine_game3d::ui_no_mask::difference_failed, candidate::hudless, "pre-UI claim without its hold");
@@ -1595,14 +1589,14 @@ int main() {
       // (a) An accepted opaque-full UI color tag beside an accepted partial
       // UIAlpha winner (a 0.25% HUD over a full menu): overridden.
       c.covered = {3, 1000, 0, 0, 0};
-      c.opaque_ui_color = 990;
+      c.opaque[1] = 990;
       auto d = selection::decide(c, 0x03, 0x03, hidden);
       require(flat(d) && d.s1_source == 1u && d.claims == candidate::ui_color &&
           selection::h1_word(d) == (1u | detection::h1_applied) && d.next.source == 8u,
         "H1 (a): an accepted opaque-full UI color tag did not override the partial UIAlpha winner");
       require(selection::decide(c, 0x03, 0x03, 0).source == 1u, "H1: without a hidden verdict S1 must decide");
       require(selection::decide(c, 0x03, 0x01, hidden).source == 1u, "H1: an unaccepted UI color tag must never claim");
-      c.opaque_ui_color = 989;
+      c.opaque[1] = 989;
       require(selection::decide(c, 0x03, 0x03, hidden).source == 1u, "H1: a UI color tag below 99% opaque claimed");
       // (a) only for alpha S1 may select: an accepted opaque-full Backbuffer
       // or current alpha that an accepted declared alpha keeps out of S1
@@ -1610,7 +1604,7 @@ int main() {
       c = {};
       c.pixels = 1000;
       c.covered = {0, 3, 0, 1000, 1000};
-      c.opaque_backbuffer = c.opaque_current = 995;
+      c.opaque = {0, 0, 0, 995, 995};
       d = selection::decide(c, 0x0e, 0x0e, hidden);
       require(d.source == 2u && !d.h1 && !d.claims, "H1 (a): a blocked accepted opaque-full inferred alpha claimed");
       d = selection::decide(c, 0x0c, 0x0c, hidden);
@@ -1622,11 +1616,11 @@ int main() {
       c = {};
       c.pixels = 1000;
       c.covered = {0, 0, 0, 1000, 0};
-      c.opaque_backbuffer = 1000;
+      c.opaque[3] = 1000;
       d = selection::decide(c, 0x04, 0x04, hidden);
       require(flat(d) && d.s1_source == 3u && d.claims == candidate::backbuffer,
         "H1: an accepted winner opaque everywhere was not relabelled 8");
-      c.opaque_backbuffer = 999;
+      c.opaque[3] = 999;
       d = selection::decide(c, 0x04, 0x04, hidden);
       require(flat(d) && d.s1_source == 3u && d.claims == candidate::backbuffer,
         "H1: an accepted winner with transparent pixels was not shown flat");
@@ -1636,8 +1630,7 @@ int main() {
       c = {};
       c.pixels = 1000;
       c.covered = {0, 0, 1000, 0, 1000};
-      c.opaque_layer = 990;
-      c.opaque_current = 1000;
+      c.opaque = {0, 0, 990, 0, 1000};
       require(flat(selection::decide(c, 0x48, 0x00, hidden)), "H1 (b): an unaccepted opaque layer did not flatten");
       d = selection::decide(c, 0x48, 0x00, hidden | refuted(candidate::layer));
       require(!d.source && d.claims == candidate::layer && d.none_reason != sunshine_game3d::ui_no_mask::gate_no_hold,
@@ -1651,7 +1644,7 @@ int main() {
       c = {};
       c.pixels = 1000;
       c.covered = {1000, 1000, 0, 0, 0};
-      c.opaque_ui_alpha = c.opaque_ui_color = 1000;
+      c.opaque = {1000, 1000, 0, 0, 0};
       d = selection::decide(c, 0x03, 0x00, hidden | pre_ui);
       require(!d.source && !d.claims, "H1: an unaccepted opaque UIAlpha or UI color tag claimed");
       require(flat(selection::decide(c, 0x01, 0x01, hidden)) && selection::decide(c, 0x01, 0x01, hidden).s1_source == 1u &&

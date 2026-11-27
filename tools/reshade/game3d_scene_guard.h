@@ -124,7 +124,7 @@ namespace sunshine_game3d::scene_guard {
 
   // The acceptance signature of every candidate kind, in ui_selection::kind
   // order; only offered kinds are read.
-  using kind_signatures = std::array<ui_selection::signature, ui_selection::kind_names.size()>;
+  using kind_signatures = std::array<ui_selection::signature, ui_selection::kinds.size()>;
 
   struct state {
     // The hidden verdict of D on the presented frame, and D reading the
