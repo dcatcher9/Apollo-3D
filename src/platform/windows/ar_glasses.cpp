@@ -3808,25 +3808,32 @@ namespace ar_glasses {
           if (!current_virtual_hdr) {
             return false;
           }
-          auto wait_for_source_color = [&](bool expected_hdr) {
-            for (int attempt = 0; attempt < 20 && !cancelled(); ++attempt) {
-              std::this_thread::sleep_for(50ms);
-              if (!refresh_virtual_display_reference()) {
-                continue;
-              }
-              const auto observed_hdr = query_source_hdr();
-              if (observed_hdr && *observed_hdr == expected_hdr) {
+          using platf::display_config::color_change_result_e;
+          // Request the source color and look for it for up to a second.
+          const auto change_source_color = [&](bool expected_hdr) {
+            return platf::display_config::change_color_and_settle(
+              [&]() {
+                return set_source_hdr(expected_hdr);
+              },
+              [&]() {
+                const auto observed_hdr = refresh_virtual_display_reference() ? query_source_hdr() : std::nullopt;
+                return observed_hdr && *observed_hdr == expected_hdr ? platf::display_config::color_observation_e::matched :
+                                                                       platf::display_config::color_observation_e::pending;
+              },
+              {1000ms, 50ms},
+              [&](std::chrono::milliseconds poll) {
+                if (cancelled()) {
+                  return false;
+                }
+                std::this_thread::sleep_for(poll);
                 return true;
               }
-            }
-            return false;
+            );
           };
 
           bool configured_virtual_hdr = *current_virtual_hdr;
           if (configured_virtual_hdr != desired_virtual_hdr) {
-            const bool setting_accepted = set_source_hdr(desired_virtual_hdr
-            );
-            if (setting_accepted && wait_for_source_color(desired_virtual_hdr)) {
+            if (change_source_color(desired_virtual_hdr) == color_change_result_e::verified) {
               configured_virtual_hdr = desired_virtual_hdr;
             } else if (desired_virtual_hdr) {
               // Match initial startup: an HDR physical sink may consume a color-managed SDR
@@ -3836,13 +3843,12 @@ namespace ar_glasses {
               const auto fallback_state = query_source_hdr();
               bool fallback_ready = fallback_state && !*fallback_state;
               if (!fallback_ready) {
-                const bool fallback_accepted = set_source_hdr(false
-                );
-                if (fallback_accepted) {
-                  fallback_ready = wait_for_source_color(false);
-                } else {
+                const auto fallback = change_source_color(false);
+                if (fallback == color_change_result_e::rejected) {
                   const auto observed_fallback = query_source_hdr();
                   fallback_ready = observed_fallback && !*observed_fallback;
+                } else {
+                  fallback_ready = fallback == color_change_result_e::verified;
                 }
               }
               if (!fallback_ready) {
