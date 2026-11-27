@@ -40,6 +40,7 @@
 #include "game3d_setup.h"
 #include "game3d_text_hook.h"
 #include "tools/reshade/game3d_ui_adaptive.h"
+#include "host_sbs_pipeline.h"
 #include "host_sbs_v2_renderer.h"
 #include "misc.h"
 #include "local_rgb_converter.h"
@@ -363,31 +364,11 @@ namespace platf::dxgi {
     return compile_shader(file, "main_vs", "vs_5_0");
   }
 
-  struct selected_matte_programs_t {
-    models::host_sbs_shared_ui_warp::programs_t shared_warp;
-    models::subtitle_direct_glyph_configuration_t configuration;
-    std::string error;
-    bool ready = false;
-  };
-
-  // Device-object preparation only, before the estimator's first input. The
-  // shared subtitle warp is the only renderer of the Direct Glyph matte.
-  // Historical selector receipt ABIs do not authorize this renderer.
-  selected_matte_programs_t prepare_selected_matte_programs(
-    models::video_depth_estimator &estimator,
-    ID3D11Device *device,
-    const models::subtitle_direct_glyph_configuration_t &configuration
-  ) {
-    selected_matte_programs_t result;
-    result.configuration = configuration;
-    result.ready = models::host_sbs_completed_subtitle_programs::prepare(
-      device, estimator, configuration, result.shared_warp, result.error);
-    return result;
-  }
-
+  // The estimator and the subtitle programs the shared pass adopts before its first input.
+  // Historical selector receipt ABIs do not authorize the shared subtitle renderer.
   struct depth_pipeline_build_result_t {
     std::unique_ptr<models::video_depth_estimator> estimator;
-    selected_matte_programs_t selected_matte;
+    host_sbs_pipeline::subtitle_programs_t selected_matte;
   };
 
   using depth_estimator_build_task_t =
@@ -1052,7 +1033,7 @@ namespace platf::dxgi {
                   .viewport = pass.viewport,
                   .sampler = sampler_linear.get(),
                   .shader_resources = {source},
-                  .geometry_constants = sbs_reprojection_cbuffer.get(),
+                  .geometry_constants = host_sbs_pass.geometry_buffer(),
                 };
                 return record_host_sbs_v2_draw(device_ctx.get(), resample_draw);
               };
@@ -1105,7 +1086,7 @@ namespace platf::dxgi {
               .viewport = sbs_viewport,
               .sampler = sampler_linear.get(),
               .shader_resources = {img_ctx->encoder_input_res.get()},
-              .geometry_constants = sbs_reprojection_cbuffer.get(),
+              .geometry_constants = host_sbs_pass.geometry_buffer(),
             };
             if (!record_host_sbs_v2_draw(device_ctx.get(), flat_draw)) {
               return -1;
@@ -2450,29 +2431,23 @@ namespace platf::dxgi {
             }
             models::host_sbs_subtitle_render_constants_t subtitle_constants;
             if (geometry.region) {
-              const auto &region = *geometry.region;
-              subtitle_constants.enabled = draw_source_attribution->subtitle_context_eligible &&
-                                               subtitle_context.matches(draw_source_attribution->subtitle_context_generation) &&
-                                               !current_authority.interactive_move_size && geometry.has_subtitle_inputs() ?
-                                             1u :
-                                             0u;
-              subtitle_constants.color_mode = static_cast<std::uint32_t>(draw_colour.color_space);
-              subtitle_constants.analysis_generation_low = static_cast<std::uint32_t>(region.analysis_generation);
-              subtitle_constants.analysis_generation_high = static_cast<std::uint32_t>(region.analysis_generation >> 32u);
-              subtitle_constants.source_left = region.left;
-              subtitle_constants.source_top = region.top;
-              subtitle_constants.source_width = region.width();
-              subtitle_constants.source_height = region.height();
+              subtitle_constants = host_sbs_pipeline::subtitle_constants(
+                draw_source_attribution->subtitle_context_eligible &&
+                  subtitle_context.matches(draw_source_attribution->subtitle_context_generation) &&
+                  !current_authority.interactive_move_size && geometry.has_subtitle_inputs(),
+                draw_colour.color_space,
+                *geometry.region
+              );
             }
             if (!update_sbs_subtitle_constant_buffer(subtitle_constants)) {
               return -1;
             }
 
-            const bool subtitle_pin_candidate = selected_matte_ready && geometry.selected_matte &&
-              geometry.selected_receipt && selected_shared_warp_programs.direct_glyph_completed_ready();
+            const bool subtitle_pin_candidate = host_sbs_pass.subtitles_ready() && geometry.subtitles.selected_matte &&
+              geometry.subtitles.selected_receipt && host_sbs_pass.programs().direct_glyph_completed_ready();
             // A frame taken for a Dump 3D package is drawn without the text pin: the package
             // describes the Host geometry, and its format has no place for this route.
-            const bool text_pin_candidate = text_game_ai_active && selected_shared_warp_programs.text_game_ready() &&
+            const bool text_pin_candidate = text_game_ai_active && host_sbs_pass.programs().text_game_ready() &&
               v2_live_warp_selected && draw_colour.srv && !dump_actual_draw;
             Microsoft::WRL::ComPtr<ID3D11Predicate> predicate;
             if (subtitle_pin_candidate || text_pin_candidate) {
@@ -2504,7 +2479,7 @@ namespace platf::dxgi {
             // instead of giving it up for a pin that is then never prepared.
             auto *selected_receipt = subtitle_pin_candidate && subtitle_constants.enabled == 1u &&
                                          !text_pin_selected && !predicate ?
-                                       geometry.selected_receipt : nullptr;
+                                       geometry.subtitles.selected_receipt : nullptr;
             bool selected_draw = selected_receipt != nullptr;
             // Only an authenticated V2 stream selects the production warp. Awaiting, stale, and
             // terminal failure states use the independent current-frame identity shader, so V2
@@ -2531,68 +2506,40 @@ namespace platf::dxgi {
               ID3D11Buffer *matrix = color_matrix.get();
               device_ctx->PSSetConstantBuffers(0, 1, &matrix);
             }
-            host_sbs_v2_draw_command_t draw_command {
-              .render_targets = {
-                rendered_directly_to_rgb ? rgb->target : sbs_intermediate_rtv.get(),
-                p010_y_mrt_selected ? native_luma : nullptr,
+            // The production operands, Direct Glyph pin and its ordinary-Base fallback are the
+            // shared pass's, exactly as the offline native pass records them.
+            auto draw_command = host_sbs_pass.command(
+              {
+                .target = rendered_directly_to_rgb ? rgb->target : sbs_intermediate_rtv.get(),
+                .vertex_shader = sbs_reprojection_vs.get(),
+                .pixel_shader = p010_y_mrt_selected ? sbs_reprojection_v2_p010_y_ps.get() : geometry.pixel_shader,
+                .viewport = sbs_viewport,
+                .sampler = sampler_linear.get(),
               },
-              .render_target_count = p010_y_mrt_selected ? 2u : 1u,
-              .vertex_shader = sbs_reprojection_vs.get(),
-              .pixel_shader = p010_y_mrt_selected ? sbs_reprojection_v2_p010_y_ps.get() : geometry.pixel_shader,
-              .viewport = sbs_viewport,
-              .sampler = sampler_linear.get(),
-              .shader_resources = {
-                draw_colour.srv, geometry.base, geometry.state, selected_draw ? geometry.selected_matte : nullptr,
-                geometry.display_band, geometry.condition_params, geometry.contour_identity,
-              },
-              .geometry_constants = sbs_reprojection_cbuffer.get(),
-              .subtitle_constants = sbs_subtitle_render_cbuffer.get(),
-            };
-            // One fresh pin field uses the current actual draw source. The immutable draw
-            // keeps the selected receipt/current RGB checks and performs no RGB reconstruction.
+              {draw_colour.srv, geometry.base, geometry.state},
+              &geometry.subtitles
+            );
+            if (p010_y_mrt_selected) {
+              draw_command.render_targets[1u] = native_luma;
+              draw_command.render_target_count = 2u;
+            }
             namespace shared_warp = models::host_sbs_shared_ui_warp;
-            shared_warp::views_t current_shared_warp;
-            bool shared_warp_selected = false;
-            // Preparation and the pre-Draw observer derive the same literal request from
-            // the recorder command, rather than maintaining a second copy of its operands.
-            const auto shared_request_for_draw = [&] {
-              shared_warp::request_t request;
-              std::copy(draw_command.shader_resources.begin(), draw_command.shader_resources.end(), request.draw_srvs.begin());
-              request.draw_srvs[7u] = selected_receipt;
-              request.geometry_constants = draw_command.geometry_constants;
-              request.subtitle_constants = draw_command.subtitle_constants;
-              request.sampler = draw_command.sampler;
-              request.materialize_inactive = snapshot_debug_inputs;
-              return request;
-            };
-            if (selected_draw && subtitle_constants.enabled == 1u) {
-              const auto request = shared_request_for_draw();
-              const auto program = selected_shared_warp_programs.direct_glyph_completed_program();
+            host_sbs_pipeline::subtitle_pin_t subtitle_pin;
+            {
               std::string shared_error;
-              if (selected_shared_warp.prepare_subtitle(
-                    device.get(), device_ctx.get(), program, request,
-                    {subtitle_constants.source_width, subtitle_constants.source_height, subtitle_constants.source_top},
-                    shared_error
-                  ) && selected_shared_warp.matches(device_ctx.get(), request)) {
-                current_shared_warp = selected_shared_warp.views();
-                shared_warp_selected = true;
-                draw_command.pixel_shader = program.pixel;
+              if (!host_sbs_pass.select_subtitle_pin(
+                    device.get(), device_ctx.get(), draw_command, geometry.subtitles.selected_matte,
+                    selected_receipt, subtitle_constants, snapshot_debug_inputs, subtitle_pin, shared_error
+                  )) {
+                return -1;
               }
             }
+            const bool shared_warp_selected = subtitle_pin.selected;
+            const auto &current_shared_warp = subtitle_pin.views;
             if (!shared_warp_selected) {
-              // Shared programs being ready does not guarantee THIS frame's
-              // preparation. This draw uses ordinary authenticated Base geometry
-              // and current RGB, with no native render mask or subtitle permission.
               // Finalize before receipt scopes, recorder binding and evidence.
-              draw_command.shader_resources[3u] = nullptr;
               selected_receipt = nullptr;
               selected_draw = false;
-              if (subtitle_constants.enabled != 0u) {
-                subtitle_constants.enabled = 0u;
-                if (!update_sbs_subtitle_constant_buffer(subtitle_constants)) {
-                  return -1;
-                }
-              }
             }
             shared_warp::views_t text_pin_views;
             if (text_pin_prepared) {
@@ -2603,7 +2550,7 @@ namespace platf::dxgi {
               request.geometry_constants = draw_command.geometry_constants;
               request.subtitle_constants = draw_command.subtitle_constants;
               request.sampler = draw_command.sampler;
-              const auto program = selected_shared_warp_programs.text_game_program();
+              const auto program = host_sbs_pass.programs().text_game_program();
               auto text_pin_draw = text_game_pin.queue(device.get(), device_ctx.get(), program, request, text_pin_shape, text_pin_selected, diagnostics_enabled);
               text_pin_selected = text_pin_draw.selected;
               if (text_pin_selected) {
@@ -2611,11 +2558,11 @@ namespace platf::dxgi {
                 draw_command.pixel_shader = program.pixel;
               }
             }
-            if (shared_warp_selected || text_pin_selected) {
-              const auto &pin = shared_warp_selected ? current_shared_warp : text_pin_views;
+            // A selected subtitle pin already bound its planes; the text pin binds its own.
+            if (!shared_warp_selected && text_pin_selected) {
               draw_command.shared_pin = host_sbs_v2_shared_pin_bindings_t {
-                {pin.weights.Get(), pin.field.Get(), pin.rows.Get()},
-                pin.geometry.Get(),
+                {text_pin_views.weights.Get(), text_pin_views.field.Get(), text_pin_views.rows.Get()},
+                text_pin_views.geometry.Get(),
                 selected_receipt,
               };
             }
@@ -2669,7 +2616,7 @@ namespace platf::dxgi {
                     e.shared_pin_rows = actual[14];
                     e.shared_pin_geometry = constants[4];
                     e.shared_pin_source_closure = e.pixel_shader_closure;
-                    e.shared_pin_model_prepare_closure = selected_shared_warp_programs.model_prepare_closure();
+                    e.shared_pin_model_prepare_closure = host_sbs_pass.programs().model_prepare_closure();
                   }
                   e.geometry_constants = constants[0];
                   e.subtitle_constants = constants[1];
@@ -2907,7 +2854,7 @@ namespace platf::dxgi {
               sbs_dumper.prepare_requested_v2_frame(est.completed_frame_id);
             if (dump_frame_valid) {
               const auto &dump_attribution = matched_render_capture->attribution;
-              ID3D11Buffer *completed_constants = sbs_reprojection_cbuffer.get();
+              ID3D11Buffer *completed_constants = host_sbs_pass.geometry_buffer();
               bool geometry_available = false;
               try {
                 geometry_available = render_sbs_debug_geometry(
@@ -3349,7 +3296,7 @@ namespace platf::dxgi {
       if (depth_estimator) {
         failed_depth_estimators.push_back(std::move(depth_estimator));
       }
-      selected_matte_ready = false;
+      host_sbs_pass.disable_subtitles();
       pending_matched_frame = nullptr;
       for (auto &slot : matched_frame_slots) {
         slot.attribution.gpu_undecided_transaction = false;
@@ -3494,7 +3441,7 @@ namespace platf::dxgi {
             !result.estimator->has_terminal_failure()) {
           namespace completed_subtitles = models::host_sbs_completed_subtitle_programs;
           const std::filesystem::path root(SUNSHINE_SHADERS_DIR);
-          result.selected_matte = prepare_selected_matte_programs(
+          result.selected_matte = host_sbs_pipeline::prepare_subtitle_programs(
             *result.estimator, dev.Get(), completed_subtitles::canonical_configuration(root)
           );
           // Keep the optional program creation on the background worker for packed Game 3D,
@@ -3531,56 +3478,21 @@ namespace platf::dxgi {
       const models::depth_input_region_t *input_region = nullptr,
       const models::depth_tensor_content_rect_t *field_content = nullptr
     ) {
-      auto geometry = models::make_host_sbs_v2_full_frame_geometry(
+      // The shared pass owns the values, including the exact video ROI and its tensor content.
+      const auto geometry = host_sbs_pipeline::geometry_constants(
         content_scale_x,
-        content_scale_y
+        content_scale_y,
+        input_region,
+        field_content
       );
-      if (input_region && input_region->is_video_region() && input_region->valid()) {
-        const auto &renderer_content = field_content ?
-                                         *field_content :
-                                         input_region->tensor_content;
-        if (!renderer_content.valid()) {
-          return false;
-        }
-        const auto source_width = static_cast<float>(input_region->source_width);
-        const auto source_height = static_cast<float>(input_region->source_height);
-        geometry.video_roi_active = 1.0f;
-        geometry.video_roi_left = static_cast<float>(input_region->left) / source_width;
-        geometry.video_roi_top = static_cast<float>(input_region->top) / source_height;
-        geometry.video_roi_right = static_cast<float>(input_region->right) / source_width;
-        geometry.video_roi_bottom = static_cast<float>(input_region->bottom) / source_height;
-        geometry.tensor_content_left = renderer_content.left;
-        geometry.tensor_content_top = renderer_content.top;
-        geometry.tensor_content_right = renderer_content.right;
-        geometry.tensor_content_bottom = renderer_content.bottom;
+      if (!geometry) {
+        return false;
       }
-
-      if (!sbs_reprojection_cbuffer) {
-        D3D11_BUFFER_DESC desc {};
-        desc.ByteWidth = sizeof(geometry);
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        D3D11_SUBRESOURCE_DATA initial {};
-        initial.pSysMem = &geometry;
-        buf_t::pointer buffer = nullptr;
-        const auto status = device->CreateBuffer(&desc, &initial, &buffer);
-        if (FAILED(status)) {
-          BOOST_LOG(error) << "Failed to create Host SBS V2 geometry constants [0x"sv
-                           << util::hex(status).to_string_view() << ']';
-          return false;
-        }
-        sbs_reprojection_cbuffer = buf_t {buffer};
-        sbs_reprojection_constants.commit(geometry);
-      } else if (!sbs_reprojection_constants.is_current(geometry)) {
-        device_ctx->UpdateSubresource(
-          sbs_reprojection_cbuffer.get(),
-          0,
-          nullptr,
-          &geometry,
-          0,
-          0
-        );
-        sbs_reprojection_constants.commit(geometry);
+      const auto status = host_sbs_pass.upload_geometry(device.get(), device_ctx.get(), *geometry);
+      if (FAILED(status)) {
+        BOOST_LOG(error) << "Failed to create Host SBS V2 geometry constants [0x"sv
+                         << util::hex(status).to_string_view() << ']';
+        return false;
       }
       return true;
     }
@@ -3588,25 +3500,7 @@ namespace platf::dxgi {
     bool update_sbs_subtitle_constant_buffer(
       const models::host_sbs_subtitle_render_constants_t &constants
     ) {
-      if (!sbs_subtitle_render_cbuffer) {
-        D3D11_BUFFER_DESC desc {};
-        desc.ByteWidth = sizeof(constants);
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        D3D11_SUBRESOURCE_DATA initial {};
-        initial.pSysMem = &constants;
-        buf_t::pointer buffer = nullptr;
-        if (FAILED(device->CreateBuffer(&desc, &initial, &buffer))) {
-          return false;
-        }
-        sbs_subtitle_render_cbuffer = buf_t {buffer};
-        sbs_subtitle_render_constants.commit(constants);
-      } else if (!sbs_subtitle_render_constants.is_current(constants)) {
-        device_ctx->UpdateSubresource(sbs_subtitle_render_cbuffer.get(), 0u, nullptr,
-                                     &constants, 0u, 0u);
-        sbs_subtitle_render_constants.commit(constants);
-      }
-      return true;
+      return SUCCEEDED(host_sbs_pass.upload_subtitle_constants(device.get(), device_ctx.get(), constants));
     }
 
     std::uint32_t next_sbs_telemetry_sequence() {
@@ -4182,17 +4076,13 @@ namespace platf::dxgi {
       const models::depth_tensor_content_rect_t *field_content = nullptr;
       ID3D11ShaderResourceView *base = nullptr;
       ID3D11ShaderResourceView *state = nullptr;
-      ID3D11ShaderResourceView *display_band = nullptr;
-      ID3D11ShaderResourceView *condition_params = nullptr;
-      ID3D11ShaderResourceView *contour_identity = nullptr;
-      ID3D11ShaderResourceView *selected_matte = nullptr;
-      ID3D11ShaderResourceView *selected_receipt = nullptr;
+      host_sbs_pipeline::subtitle_inputs_t subtitles {};
       std::uint64_t frame_id = 0u;
       int field_width = 0, field_height = 0;
       bool subtitle_suppressed = false;
 
       [[nodiscard]] bool has_subtitle_inputs() const noexcept {
-        return !subtitle_suppressed && display_band && condition_params && contour_identity;
+        return !subtitle_suppressed && subtitles.complete();
       }
     };
 
@@ -4211,11 +4101,7 @@ namespace platf::dxgi {
           .field_content = &completed->field_content,
           .base = completed->shadow_base_final_parallax.Get(),
           .state = completed->shadow_state.Get(),
-          .display_band = completed->subtitle_contour_source.Get(),
-          .condition_params = completed->subtitle_condition_params.Get(),
-          .contour_identity = completed->subtitle_contour_identity.Get(),
-          .selected_matte = completed->subtitle_selected_matte.Get(),
-          .selected_receipt = completed->subtitle_selected_matte_receipt.Get(),
+          .subtitles = host_sbs_pipeline::subtitle_inputs(*completed),
           .frame_id = completed->completed_frame_id,
           .field_width = completed->field_width,
           .field_height = completed->field_height,
@@ -4325,13 +4211,11 @@ namespace platf::dxgi {
     }
 
     // Shared subtitle warp activation for Direct Glyph, before the first input.
-    void adopt_selected_matte_programs(selected_matte_programs_t programs) {
-      selected_shared_warp_programs = std::move(programs.shared_warp);
-      selected_shared_warp_root = std::filesystem::path(programs.configuration.shader_root);
-      selected_matte_ready = programs.ready;
-      if (selected_matte_ready && selected_shared_warp_programs.direct_glyph_completed_ready()) {
+    void adopt_selected_matte_programs(host_sbs_pipeline::subtitle_programs_t programs) {
+      host_sbs_pass.adopt(std::move(programs));
+      if (host_sbs_pass.subtitles_ready() && host_sbs_pass.programs().direct_glyph_completed_ready()) {
         BOOST_LOG(info) << "Host SBS Direct Glyph prepare source closure "
-                        << selected_shared_warp_programs.model_prepare_closure();
+                        << host_sbs_pass.programs().model_prepare_closure();
       }
     }
 
@@ -6162,7 +6046,7 @@ namespace platf::dxgi {
       sbs_debug::actual_draw_evidence &evidence
     ) {
       std::string error;
-      if (!evidence.shared_pin_selected || !sbs_intermediate_texture || !selected_shared_warp_programs.load_diagnostics(device.get(), selected_shared_warp_root, error)) {
+      if (!evidence.shared_pin_selected || !sbs_intermediate_texture || !host_sbs_pass.programs().load_diagnostics(device.get(), host_sbs_pass.shader_root(), error)) {
         return false;
       }
       D3D11_TEXTURE2D_DESC desc {};
@@ -6186,8 +6070,8 @@ namespace platf::dxgi {
       draw.observe_bound_draw = nullptr;
       device_ctx->OMSetBlendState(blend_disable.get(), nullptr, 0xFFFFFFFFu);
       const std::array<ID3D11PixelShader *, 2u> shaders {
-        selected_shared_warp_programs.mapping(),
-        selected_shared_warp_programs.boundary()
+        host_sbs_pass.programs().mapping(),
+        host_sbs_pass.programs().boundary()
       };
       for (std::size_t i = 0u; i < targets.size(); ++i) {
         draw.render_targets[0] = targets[i].Get();
@@ -6382,7 +6266,7 @@ namespace platf::dxgi {
       game_export.resample_pq_ps.reset();
       cursor_scissor_raster.Reset();
       sbs_reprojection_v2_live_ps.reset();
-      selected_shared_warp={};
+      host_sbs_pass.reset_warp();
       text_game_pin.reset();
       sbs_reprojection_v2_p010_y_ps.reset();
       sbs_debug_v2_mapping_ps.Reset();
@@ -7020,15 +6904,7 @@ namespace platf::dxgi {
         return -1;
       }
 
-      D3D11_SAMPLER_DESC sampler_desc {};
-      sampler_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-      sampler_desc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
-      sampler_desc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
-      sampler_desc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
-      sampler_desc.ComparisonFunc = D3D11_COMPARISON_NEVER;
-      sampler_desc.MinLOD = 0;
-      sampler_desc.MaxLOD = D3D11_FLOAT32_MAX;
-
+      const D3D11_SAMPLER_DESC sampler_desc = host_sbs_pipeline::sampler_desc();
       status = device->CreateSamplerState(&sampler_desc, &sampler_linear);
       if (FAILED(status)) {
         BOOST_LOG(error) << "Failed to create point sampler state [0x"sv << util::hex(status).to_string_view() << ']';
@@ -7248,16 +7124,10 @@ namespace platf::dxgi {
       models::host_sbs_renderer_e::awaiting_v2;
     bool v2_live_warp_seen = false;
     bool v2_live_warp_loss_logged = false;
-    buf_t sbs_reprojection_cbuffer;
-    buf_t sbs_subtitle_render_cbuffer;
-    bool selected_matte_ready = false;
+    // The production V2 pass: b2/b3, Direct Glyph programs and the shared pin storage.
+    host_sbs_pipeline::pass_t host_sbs_pass;
     bool flat_fallback_notified = false;
-    models::host_sbs_shared_ui_warp::programs_t selected_shared_warp_programs;
-    models::host_sbs_shared_ui_warp::resources_t selected_shared_warp;
-    std::filesystem::path selected_shared_warp_root;
     detail::host_sbs_drawn_source_order_t drawn_source_order;
-    detail::uploaded_value_state_t<models::host_sbs_subtitle_render_constants_t>
-      sbs_subtitle_render_constants;
     float sbs_content_scale_x = 1.0f;
     float sbs_content_scale_y = 1.0f;
     texture2d_t sbs_intermediate_texture;
@@ -7266,8 +7136,6 @@ namespace platf::dxgi {
     bool sbs_intermediate_is_linear = false;
     bool packed_output_in_shutter_pair = false;
     detail::host_sbs_encoder_input_state_t host_sbs_encoder_input_state;
-    detail::uploaded_value_state_t<models::host_sbs_v2_geometry_t>
-      sbs_reprojection_constants;
     // Lazily created only for an explicit Dump 3D. These repeat the exact production inverse map
     // after its timing window without allocating the removed V1 forward-coverage resources.
     Microsoft::WRL::ComPtr<ID3D11PixelShader> sbs_debug_v2_mapping_ps;
@@ -7723,8 +7591,8 @@ namespace platf::dxgi {
         result.estimator_present = static_cast<bool>(converter_->depth_estimator);
         result.estimator_valid = result.estimator_present && converter_->depth_estimator->is_valid();
         result.estimator_terminal = result.estimator_present && converter_->depth_estimator->has_terminal_failure();
-        result.subtitle_warp_ready =converter_->selected_matte_ready;
-        result.text_game_warp_ready = converter_->selected_shared_warp_programs.text_game_ready();
+        result.subtitle_warp_ready = converter_->host_sbs_pass.subtitles_ready();
+        result.text_game_warp_ready = converter_->host_sbs_pass.programs().text_game_ready();
         result.v2_live_warp_seen = converter_->v2_live_warp_seen;
         result.latest_lineage_authenticated = converter_->latest_v2_lineage.authenticated();
         result.latest_lineage_known_depth = converter_->latest_v2_lineage.known_depth();
@@ -9117,25 +8985,10 @@ namespace platf::dxgi {
     {
       // Host AI remains available independently of the local-AR provider selection. Game
       // converters never instantiate this renderer, but a later Host AI session may need it.
-      const auto renderer_sources = cache::snapshot_sources(
-        SUNSHINE_SHADERS_DIR,
-        cache::parallax_v2_live_renderer_specs
-      );
-      sbs_reprojection_v2_live_source_closure_sha256 =
-        cache::source_closure_sha256(renderer_sources);
-      const bool renderer_authenticated = renderer_sources &&
-                                          sbs_reprojection_v2_live_source_closure_sha256 ==
-                                            cache::parallax_v2_live_renderer_source_closure_sha256;
-      if (renderer_authenticated) {
-        sbs_reprojection_v2_live_ps_hlsl = cache::get(
-          renderer_sources,
-          cache::parallax_v2_live_renderer
-        );
-        sbs_reprojection_vs_hlsl = cache::get(
-          renderer_sources,
-          cache::sbs_reprojection_vertex
-        );
-      }
+      auto renderer = host_sbs_pipeline::load_renderer(SUNSHINE_SHADERS_DIR);
+      sbs_reprojection_v2_live_source_closure_sha256 = std::move(renderer.observed_closure);
+      sbs_reprojection_v2_live_ps_hlsl = std::move(renderer.pixel);
+      sbs_reprojection_vs_hlsl = std::move(renderer.vertex);
       if (!sbs_reprojection_v2_live_ps_hlsl) {
         BOOST_LOG(warning)
           << "Host SBS V2 renderer authentication or compilation failed; Host SBS will stream "sv

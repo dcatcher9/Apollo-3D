@@ -70,6 +70,14 @@ Protected Final remains an independently authenticated diagnostic, not this draw
 Reuse retains Base, ParallaxState, native matte, SCT5, SCP4, joined source snapshot, and diagnostics
 as one tuple; the draw-owned pin resources are not a new temporal observation.
 
+One owner, `pass_t` in `src/platform/windows/host_sbs_pipeline.h`, holds this pass for live Host 3D
+and for the offline native pass that the evaluator and Convert Video run. Both callers authenticate
+the renderer closure, prepare the Direct Glyph and shared-warp programs, upload b2 and b3, assemble
+the draw operands, and select the Direct Glyph pin or its ordinary-Base fallback through it, in the
+same order. The converter keeps capture, pacing, presentation authority, the Game 3D text-game pin,
+the fused P010 luma target and NVENC. The harness keeps file I/O, timelines, qualification evidence
+and timing.
+
 ## Authenticated production contract
 
 The generated Depth Coordinate contract is the machine-readable authority. The current identity is

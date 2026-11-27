@@ -31,7 +31,8 @@ research, or diagnostic modes. Every
 source frame runs one authenticated TensorRT update and consumes its source-derived observation
 timestamp. All D3D/TensorRT work stays on this single owner.
 
-Follow conversion prepares the same current-glyph shared subtitle warp used by live rendering.
+Follow conversion prepares the same current-glyph shared subtitle warp used by live rendering,
+through the [shared Host SBS pass](host-sbs.md#pipeline).
 Each valid shared draw samples the original source once; unavailable subtitle programs or
 authority retain authenticated ordinary Base. Optional subtitles never disable usable depth.
 Production follow draws add no qualification observer or diagnostic readback.

@@ -53,6 +53,7 @@
 #include "config.h"
 #include "depth_coordinate_v2.h"
 #include "generated/sbs_adaptive_state_contract.h"
+#include "host_sbs_completed_subtitle_programs.h"
 #include "host_sbs_display_snapshot_rgb8_analysis_gpu.h"
 #include "host_sbs_gpu_trace.h"
 #include "host_sbs_observation_timeline.h"
@@ -64,6 +65,7 @@
 #include "offline_sbs_filesystem.h"
 #include "offline_sbs_wire_contract.h"
 #include "offline_sbs_worker.h"
+#include "platform/windows/host_sbs_pipeline.h"
 #include "platform/windows/host_sbs_v2_renderer.h"
 #include "prod_zipdepth_convex2x.h"
 #include "host_sbs_direct_glyph_publication_gpu.h"
@@ -83,6 +85,7 @@ using namespace std::literals;
 namespace sbs_bench {
 
   namespace fs = std::filesystem;
+  namespace host_pass = platf::dxgi::host_sbs_pipeline;
 
   namespace {
 
@@ -2076,26 +2079,14 @@ namespace sbs_bench {
           return 6;
         }
       } else {
-        const auto live_sources =
-          models::host_sbs_shader_cache::snapshot_sources(
-            fs::path {SUNSHINE_SHADERS_DIR},
-            models::host_sbs_shader_cache::parallax_v2_live_renderer_specs
-          );
-        const auto closure =
-          models::host_sbs_shader_cache::source_closure_sha256(live_sources);
-        if (!live_sources ||
-            closure != models::host_sbs_shader_cache::
-                         parallax_v2_live_renderer_source_closure_sha256) {
+        const auto renderer = host_pass::load_renderer(fs::path {SUNSHINE_SHADERS_DIR});
+        if (!renderer.authenticated) {
           BOOST_LOG(error)
             << "sbs-bench: production V2 renderer source closure is unauthenticated";
           return 6;
         }
-        const auto vs_bytecode = models::host_sbs_shader_cache::get(
-          live_sources, models::host_sbs_shader_cache::sbs_reprojection_vertex
-        );
-        const auto ps_bytecode = models::host_sbs_shader_cache::get(
-          live_sources, models::host_sbs_shader_cache::parallax_v2_live_renderer
-        );
+        const auto &vs_bytecode = renderer.vertex;
+        const auto &ps_bytecode = renderer.pixel;
         if (!vs_bytecode || !ps_bytecode ||
             FAILED(dev->CreateVertexShader(
               vs_bytecode->data(), vs_bytecode->size(), nullptr, &vs)) ||
@@ -2127,16 +2118,14 @@ namespace sbs_bench {
 
     ComPtr<ID3D11SamplerState> sampler;
     {
-      D3D11_SAMPLER_DESC sd = {};
-      sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-      sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-      sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
-      sd.MaxLOD = D3D11_FLOAT32_MAX;
+      const auto sd = host_pass::sampler_desc();
       dev->CreateSamplerState(&sd, &sampler);
     }
 
-    // Built after the first source frame reveals the source/output aspect relationship.
-    ComPtr<ID3D11Buffer> repro_cb;
+    // The production V2 pass shared with live Host 3D: b2/b3, the Direct Glyph programs and the
+    // shared pin storage. b2 is uploaded after the first source frame reveals the source/output
+    // aspect relationship.
+    host_pass::pass_t production_pass;
 
     std::unique_ptr<depth_coordinate_v2_gpu_replay> depth_coordinate_v2_gpu;
     if (depth_coordinate_v2_gpu_mode) {
@@ -2198,7 +2187,12 @@ namespace sbs_bench {
       // captures the plan evidence.
       auto configuration = models::host_sbs_completed_subtitle_programs::canonical_configuration(fs::path(SUNSHINE_SHADERS_DIR));
       configuration.capture_plan = o.direct_glyph_qualification;
-      subtitle_draw_ready = estimator && subtitle_draw.prepare(dev.Get(), *estimator, configuration, qualification_error);
+      if (estimator) {
+        auto programs = host_pass::prepare_subtitle_programs(*estimator, dev.Get(), configuration);
+        qualification_error = programs.error;
+        production_pass.adopt(std::move(programs));
+        subtitle_draw_ready = production_pass.subtitles_ready();
+      }
       if (subtitle_draw_ready && conversion_subtitle_model) {
         BOOST_LOG(info) << "Offline conversion uses the mixed H28 native subtitle glyph model";
       }
@@ -2569,12 +2563,12 @@ namespace sbs_bench {
         sbs_h = geometry.sbs_height;
         // Bench/replay stays full-frame, so ROI is disabled. Upload the exact shared 48-byte
         // production b2 ABI, including its dormant tensor-content register.
-        const auto repro_geometry = models::make_host_sbs_v2_full_frame_geometry(
+        const auto repro_geometry = host_pass::geometry_constants(
           geometry.content_scale_x,
           geometry.content_scale_y
         );
-        repro_cb = const_buffer(dev.Get(), repro_geometry);
-        if (!repro_cb) {
+        if (!repro_geometry ||
+            FAILED(production_pass.upload_geometry(dev.Get(), ctx.Get(), *repro_geometry))) {
           BOOST_LOG(error) << "sbs-bench: reprojection constant-buffer creation failed";
           return 6;
         }
@@ -3106,49 +3100,41 @@ namespace sbs_bench {
                                est.shadow_base_final_parallax.Get();
       ID3D11ShaderResourceView *warp_state =
         direct_parallax_mode ? est.depth_health_state.Get() : est.shadow_state.Get();
-      ID3D11Buffer *cb = repro_cb.Get();
       if (direct_parallax_cb) {
         ctx->PSSetConstantBuffers(4, 1, direct_parallax_cb.GetAddressOf());
       }
-      const models::host_sbs_subtitle_render_constants_t subtitle_render {
-        .enabled = !direct_parallax_mode && !est.subtitle_work_suppressed ? 1u : 0u,
-        .color_mode = static_cast<std::uint32_t>(input_color),
-        .analysis_generation_low = static_cast<std::uint32_t>(est.input_region.analysis_generation),
-        .analysis_generation_high = static_cast<std::uint32_t>(est.input_region.analysis_generation >> 32u),
-        .source_left = 0u, .source_top = 0u,
-        .source_width = frame_width, .source_height = frame_height,
-      };
-      Microsoft::WRL::ComPtr<ID3D11Buffer> subtitle_render_cb;
+      // The offline source is always the complete raster, so b3 covers the full-source region.
+      auto subtitle_render = host_pass::subtitle_constants(
+        !direct_parallax_mode && !est.subtitle_work_suppressed, input_color, est.input_region
+      );
+      bool subtitle_render_ready = false;
       if (subtitle_draw_ready) {
-        subtitle_render_cb = const_buffer(dev.Get(), subtitle_render);
-        if (!subtitle_render_cb && o.direct_glyph_qualification) return 6;
+        subtitle_render_ready = SUCCEEDED(production_pass.upload_subtitle_constants(dev.Get(), ctx.Get(), subtitle_render));
+        if (!subtitle_render_ready && o.direct_glyph_qualification) return 6;
       }
-      const platf::dxgi::host_sbs_v2_draw_command_t draw_command {
-        .render_targets = {sbs_rtv.Get(), nullptr},
-        .render_target_count = 1u,
-        .vertex_shader = vs.Get(),
-        .pixel_shader = ps.Get(),
-        .viewport = vp,
-        .sampler = sampler.Get(),
-        .shader_resources = {
-          in_srv.Get(),
-          warp_depth,
-          warp_state,
-          nullptr, nullptr, nullptr, nullptr,
-        },
-        .geometry_constants = cb,
-        .subtitle_constants = nullptr,
-      };
-      bool follow_shared_draw = false;
-      if (o.follow && subtitle_draw_ready && subtitle_render_cb) {
+      const host_pass::frame_t production_frame {in_srv.Get(), warp_depth, warp_state};
+      const auto production_subtitles = host_pass::subtitle_inputs(est);
+      // Ordinary evaluation draws Base only; follow conversion carries the completed subtitle
+      // operands and takes the live Direct Glyph route.
+      const bool follow_subtitles = o.follow && subtitle_draw_ready && subtitle_render_ready;
+      auto draw_command = production_pass.command(
+        {sbs_rtv.Get(), vs.Get(), ps.Get(), vp, sampler.Get()},
+        production_frame,
+        follow_subtitles ? &production_subtitles : nullptr
+      );
+      const auto ordinary_command = draw_command;
+      if (follow_subtitles) {
         std::string shared_error;
-        follow_shared_draw = subtitle_draw.record(ctx.Get(), draw_command, sbs_rtv.Get(), est, subtitle_render_cb.Get(), nullptr, shared_error);
+        host_pass::subtitle_pin_t pin;
+        const bool follow_shared_draw = subtitle_qualification::select_completed_pin(
+          dev.Get(), ctx.Get(), production_pass, draw_command, est, subtitle_render, pin, shared_error
+        );
         if (!follow_shared_draw && !follow_subtitle_fallback_logged) {
           BOOST_LOG(warning) << "sbs-bench: follow subtitle authority unavailable; retaining ordinary Base: " << shared_error;
           follow_subtitle_fallback_logged = true;
         }
       }
-      if (!follow_shared_draw && !platf::dxgi::record_host_sbs_v2_draw(ctx.Get(), draw_command)) {
+      if (!platf::dxgi::record_host_sbs_v2_draw(ctx.Get(), draw_command)) {
         BOOST_LOG(error) << "sbs-bench: production V2 draw operands are incomplete";
         return 6;
       }
@@ -3223,8 +3209,9 @@ namespace sbs_bench {
         }
         subtitle_qualification::evidence_t evidence;
         std::string qualification_error;
-        const bool rendered = subtitle_draw.record(ctx.Get(), draw_command, qualified_sbs_rtv.Get(), est,
-          subtitle_render_cb.Get(), &evidence, qualification_error);
+        const bool rendered = subtitle_draw.record(dev.Get(), ctx.Get(), production_pass,
+          production_pass.command({qualified_sbs_rtv.Get(), vs.Get(), ps.Get(), vp, sampler.Get()}, production_frame, &production_subtitles),
+          est, subtitle_render, &evidence, qualification_error);
         if (!rendered) {
           BOOST_LOG(error) << "sbs-bench: selected-compositor draw qualification failed: " << qualification_error;
           return 6;
@@ -3407,7 +3394,7 @@ namespace sbs_bench {
       if (o.artifacts == artifact_mode_e::evaluation) {
         // Offline-only mask pass, deliberately outside the production warp timestamp/CPU sample.
         // Red marks finite-boundary extrapolation of the actual selected Base/UI source U.
-        auto diagnostic_draw = draw_command;
+        auto diagnostic_draw = ordinary_command;
         diagnostic_draw.render_targets[0] = warp_mask_rtv.Get();
         diagnostic_draw.pixel_shader = mask_ps.Get();
         if (!platf::dxgi::record_host_sbs_v2_draw(ctx.Get(), diagnostic_draw)) return 6;

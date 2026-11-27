@@ -7114,14 +7114,29 @@ TEST(DirectxShaderSourceTest, Convex2xRoiRendererUsesTheAuthenticatedFieldConten
   const auto binding = convert.substr(bind, bind_end - bind);
   EXPECT_NE(binding.find("geometry.region,\n                  geometry.field_content"),
             std::string::npos);
-  const auto update_begin = display.find("    bool update_sbs_constant_buffer(");
-  const auto update_end = display.find(
+  const auto forward_begin = display.find("    bool update_sbs_constant_buffer(");
+  const auto forward_end = display.find(
     "    bool update_sbs_subtitle_constant_buffer(",
-    update_begin
+    forward_begin
   );
+  ASSERT_NE(forward_begin, std::string::npos);
+  ASSERT_NE(forward_end, std::string::npos);
+  const auto forward = display.substr(forward_begin, forward_end - forward_begin);
+  EXPECT_NE(
+    forward.find("const models::depth_tensor_content_rect_t *field_content"),
+    std::string::npos
+  );
+  EXPECT_NE(forward.find("host_sbs_pipeline::geometry_constants(\n        content_scale_x,\n        content_scale_y,\n        input_region,\n        field_content"), std::string::npos);
+  // The live converter and the offline native pass share one b2 value owner.
+  const auto pipeline = read_source_file(
+    SUNSHINE_SOURCE_DIR "/src/platform/windows/host_sbs_pipeline.cpp"
+  );
+  ASSERT_FALSE(pipeline.empty());
+  const auto update_begin = pipeline.find("std::optional<models::host_sbs_v2_geometry_t> geometry_constants(");
+  const auto update_end = pipeline.find("models::host_sbs_subtitle_render_constants_t subtitle_constants(", update_begin);
   ASSERT_NE(update_begin, std::string::npos);
   ASSERT_NE(update_end, std::string::npos);
-  const auto update = display.substr(update_begin, update_end - update_begin);
+  const auto update = pipeline.substr(update_begin, update_end - update_begin);
   EXPECT_NE(
     update.find("const models::depth_tensor_content_rect_t *field_content"),
     std::string::npos

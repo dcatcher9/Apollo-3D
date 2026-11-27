@@ -1,10 +1,10 @@
 /** @file File-fed qualification of the actual completed Direct Glyph subtitle draw. */
 #pragma once
 
-#include "host_sbs_completed_subtitle_programs.h"
 #include "host_sbs_resolution.h"
 #include "host_sbs_selected_matte_receipt.h"
 #include "host_sbs_shared_ui_warp_runtime.h"
+#include "platform/windows/host_sbs_pipeline.h"
 #include "platform/windows/host_sbs_v2_renderer.h"
 #include "video_depth_estimator.h"
 
@@ -17,6 +17,7 @@
 namespace sbs_bench::subtitle_qualification {
   using Microsoft::WRL::ComPtr;
   namespace shared_warp = models::host_sbs_shared_ui_warp;
+  namespace host_pass = platf::dxgi::host_sbs_pipeline;
 
   struct producer_stage_spec_t {
     std::size_t slot;
@@ -78,11 +79,33 @@ namespace sbs_bench::subtitle_qualification {
     ComPtr<ID3D11ShaderResourceView> shared_warp_field;
   };
 
-  /** Keeps actual production owners alive through the exact serialized file-fed draw. */
+  /**
+   * The shared pass's Direct Glyph pin for one completed full-source offline observation.
+   * Without that tuple the draw is the ordinary Base draw, with subtitles disabled in b3.
+   * Returns whether the pin is selected; `error` names why it is not.
+   */
+  inline bool select_completed_pin(ID3D11Device *device, ID3D11DeviceContext *context, host_pass::pass_t &pass,
+                                   platf::dxgi::host_sbs_v2_draw_command_t &draw, const models::depth_observation_views_t &result,
+                                   models::host_sbs_subtitle_render_constants_t &constants, host_pass::subtitle_pin_t &pin, std::string &error) {
+    auto *matte = result.subtitle_selected_matte.Get();
+    auto *receipt = result.subtitle_selected_matte_receipt.Get();
+    const bool complete = device && context && draw.subtitle_constants && matte && receipt && result.completed_frame_valid &&
+                          models::parallax_v2_result_is_authenticated(result) && !result.input_region.is_video_region() &&
+                          !result.subtitle_work_suppressed;
+    // Qualification reads rows and rendered pixels; follow conversion has no inactive consumer.
+    if (!pass.select_subtitle_pin(device, context, draw, matte, complete ? receipt : nullptr, constants, false, pin, error)) {
+      error = "shared subtitle constants cannot be rewritten";
+      return false;
+    }
+    if (!complete) {
+      error = "shared subtitle draw lacks its current completed full-source tuple";
+    }
+    return pin.selected;
+  }
+
+  /** Records the qualified draw through the shared pass and reads its exact post-draw evidence. */
   class draw_t {
     ComPtr<ID3D11Device> device_;
-    shared_warp::programs_t programs_;
-    shared_warp::resources_t shared_warp_;
 
     template<std::size_t N>
     bool read_words(ID3D11DeviceContext *context, ID3D11Buffer *source, std::array<std::uint32_t, N> &words) const {
@@ -189,62 +212,17 @@ namespace sbs_bench::subtitle_qualification {
     };
 
   public:
-    bool prepare(ID3D11Device *device, models::video_depth_estimator &estimator,
-                 const models::subtitle_direct_glyph_configuration_t &configuration, std::string &error) {
-      if (!models::host_sbs_completed_subtitle_programs::prepare(device, estimator, configuration, programs_, error)) {
-        return false;
-      }
+    /** `draw` is the shared pass's command for the qualified target, carrying the completed subtitle operands. */
+    bool record(ID3D11Device *device, ID3D11DeviceContext *context, host_pass::pass_t &pass, platf::dxgi::host_sbs_v2_draw_command_t draw,
+                const models::depth_observation_views_t &result, models::host_sbs_subtitle_render_constants_t &constants,
+                evidence_t *evidence, std::string &error) {
       device_ = device;
-      return true;
-    }
-
-    bool record(ID3D11DeviceContext *context, const platf::dxgi::host_sbs_v2_draw_command_t &ordinary, ID3D11RenderTargetView *output, const models::depth_observation_views_t &result, ID3D11Buffer *subtitle_constants, evidence_t *evidence, std::string &error) {
-      return record_draw(context, ordinary, output, result, subtitle_constants, result.subtitle_selected_matte.Get(),
-                         result.subtitle_selected_matte_receipt.Get(), shared_warp_, programs_.direct_glyph_completed_program(),
-                         evidence, error);
-    }
-
-  private:
-    bool record_draw(ID3D11DeviceContext *context, const platf::dxgi::host_sbs_v2_draw_command_t &ordinary,
-                     ID3D11RenderTargetView *output, const models::depth_observation_views_t &result,
-                     ID3D11Buffer *subtitle_constants, ID3D11ShaderResourceView *matte, ID3D11ShaderResourceView *receipt,
-                     shared_warp::resources_t &warp, const shared_warp::program_t &program,
-                     evidence_t *evidence, std::string &error) {
-      error.clear();
-      if (!device_ || !context || !output || !subtitle_constants || !matte || !receipt || !result.completed_frame_valid || !models::parallax_v2_result_is_authenticated(result) || result.input_region.is_video_region() || result.subtitle_work_suppressed) {
-        error = "shared subtitle draw lacks its current completed full-source tuple";
+      host_pass::subtitle_pin_t pin;
+      if (!select_completed_pin(device, context, pass, draw, result, constants, pin, error)) {
         return false;
       }
-      auto draw = ordinary;
-      draw.render_targets = {output, nullptr};
-      draw.render_target_count = 1u;
-      draw.pixel_shader = program.pixel;
-      draw.subtitle_constants = subtitle_constants;
-      draw.bound_draw_observer_state = nullptr;
-      draw.observe_bound_draw = nullptr;
-      draw.shader_resources[3u] = matte;
-      draw.shader_resources[4u] = result.subtitle_contour_source.Get();
-      draw.shader_resources[5u] = result.subtitle_condition_params.Get();
-      draw.shader_resources[6u] = result.subtitle_contour_identity.Get();
-      const UINT width = result.input_region.width(), height = result.input_region.height();
-      const UINT band = models::subtitle_ocr_source_crop_height(width, height);
-      const UINT band_top = height - band;
-      const UINT padded_top = band_top > 0u ? band_top - 1u : 0u;
-      const std::array<UINT, 4u> shape {width, height, padded_top, height - padded_top};
-      if (!warp.ensure(device_.Get(), shape, error)) {
-        return false;
-      }
-      shared_warp::request_t request;
-      std::copy(draw.shader_resources.begin(), draw.shader_resources.end(), request.draw_srvs.begin());
-      request.draw_srvs[7u] = receipt;
-      request.geometry_constants = draw.geometry_constants;
-      request.subtitle_constants = draw.subtitle_constants;
-      request.sampler = draw.sampler;
-      request.materialize_inactive = false; // Qualification reads rows and rendered pixels.
-      if (!warp.queue(context, program, request, error) || !warp.matches(context, request)) {
-        return false;
-      }
-      const auto views = warp.views();
+      auto *receipt = result.subtitle_selected_matte_receipt.Get();
+      const auto &views = pin.views;
       observer_t observer;
       if (evidence) {
         observer.pixel = draw.pixel_shader;
@@ -259,17 +237,13 @@ namespace sbs_bench::subtitle_qualification {
         draw.bound_draw_observer_state = &observer;
         draw.observe_bound_draw = &observer_t::observe;
       }
-      // Bind exactly as the live converter does: the recorder owns t0..t14 and b2..b6.
-      draw.shared_pin = platf::dxgi::host_sbs_v2_shared_pin_bindings_t {
-        {views.weights.Get(), views.field.Get(), views.rows.Get()},
-        views.geometry.Get(),
-        receipt,
-      };
+      // The shared pass bound the pin exactly as the live converter does: the recorder owns
+      // t0..t14 and b2..b6.
       if (!platf::dxgi::record_host_sbs_v2_draw(context, draw) || (evidence && !observer.matched)) {
         error = "subtitle qualification did not observe exact selected/shared-warp draw bindings";
         return false;
       }
-      if (!evidence) return true; // Follow conversion adds no observer or diagnostic readback.
+      if (!evidence) return true;
       evidence->bindings_observed = observer.matched;
       if (!read_words(context, receipt, evidence->selected) || !read_words(context, result.subtitle_contour_identity.Get(), evidence->contour) || !read_words(context, result.subtitle_condition_params.Get(), evidence->condition) || !read_words(context, result.shadow_state.Get(), evidence->state) || !read_words(context, draw.subtitle_constants, evidence->subtitle_constants) || !read_rows(context, views, *evidence)) {
         error = "subtitle qualification cannot read its exact post-draw evidence";
