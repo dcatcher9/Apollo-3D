@@ -2,6 +2,7 @@
 import { computed, inject } from 'vue'
 import Host3dSubtitleApps from './Host3dSubtitleApps.vue'
 import { virtualDisplayStatus } from '../../virtual-display-status'
+import { settingEnabled } from '../settingEnabled'
 
 const $t = inject('i18n').t
 
@@ -30,7 +31,7 @@ const webAccess = computed(() => {
 function isEnabled(key, defaultValue = false) {
   const value = props.config[key]
   if (value === undefined || value === null || value === '') return defaultValue
-  return value === true || value === 1 || value === '1' || value === 'enabled' || value === 'on' || value === 'true'
+  return settingEnabled(value)
 }
 
 function setEnabled(key, event) {

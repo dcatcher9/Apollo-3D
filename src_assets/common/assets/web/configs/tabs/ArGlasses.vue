@@ -2,6 +2,7 @@
 import {computed, inject, onMounted, onUnmounted, ref} from 'vue'
 import { getJson, postJson } from '../../api'
 import { startVisibilityPolling } from '../../visibility-polling'
+import { settingEnabled } from '../settingEnabled'
 
 const $t = inject('i18n').t
 
@@ -24,7 +25,7 @@ let stopPolling = null
 const virtualDisplayOnlyEnabled = computed(() => {
   const value = props.config?.local_ar_virtual_display_only
   if (value === undefined || value === null || value === '') return true
-  return value === true || value === 1 || value === '1' || value === 'enabled' || value === 'on' || value === 'true'
+  return settingEnabled(value)
 })
 
 const setVirtualDisplayOnly = event => {

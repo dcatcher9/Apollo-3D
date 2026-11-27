@@ -1,4 +1,4 @@
-export const settingEnabled = value => value === true || value === 1 || ['enabled', 'on', 'true', '1'].includes(value)
+import {settingEnabled} from './settingEnabled.js'
 
 // The local surface choice and the monitor's settings, compared by meaning. The retired
 // local_monitor_enabled switch is not part of it; local_display_surface replaced it. Neither

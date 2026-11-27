@@ -1,6 +1,7 @@
 <script setup>
 import {computed, inject} from 'vue'
-import {settingEnabled, validLocalMonitorTimingLimits, validateLocalMonitorConfig} from '../localMonitorConfig'
+import {settingEnabled} from '../settingEnabled'
+import {validLocalMonitorTimingLimits, validateLocalMonitorConfig} from '../localMonitorConfig'
 
 // status is the host's latest /api/local-monitor reply, read by the Local display page.
 const props = defineProps({config: {type: Object, required: true}, status: {type: Object, default: null}})
