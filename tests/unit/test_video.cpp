@@ -8144,7 +8144,7 @@ TEST(EncodeReadyEventLifecycleSourceTests, ConsumesOnlyReadinessSampledBeforeCon
     flag
   );
   const auto ready_peek = encode_scope.find("depth_pipeline_ready_event->peek();", sample);
-  const auto convert = encode_scope.find("convert_frame(*last_img, next_encode_target)", ready_peek);
+  const auto convert = encode_scope.find("convert_frame(*last_img, next_encode_target ? next_encode_target : completion_wait_target)", ready_peek);
   // Any completed conversion consumes it, including one that kept the encoder input.
   const auto consume = encode_scope.find(
     "conversion_ran && consume_sampled_depth_pipeline_ready && depth_pipeline_ready_event",
