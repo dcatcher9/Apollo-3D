@@ -36,7 +36,7 @@ class AdaptiveStateContractTests(unittest.TestCase):
                 sys.executable,
                 "-c",
                 (
-                    "import tools.sbsbench.adaptive_clip_report;"
+                    "import tools.sbsbench.adaptive_state_contract;"
                     "import tools.sbsbench.run_eval"
                 ),
             ],
