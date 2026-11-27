@@ -3122,7 +3122,7 @@ says "2D: Game 3D is disabled". The exporter no longer accepts a ReShade effect'
 
 ### UI decision framework
 
-`game3d_ui_decision.{h,cpp}` owns one renderer's CPU decisions and feeds completed samples to the session's acceptance and counter ledgers. Its object has the renderer's lifetime; GPU resources and calls stay in `game3d_renderer.cpp`, and `game3d_ui_input_provider.cpp` calls its generated-Present predicates at acquisition.
+`game3d_ui_decision.{h,cpp}` owns one renderer's CPU decisions and feeds completed samples to the session's acceptance and counter ledgers. Its object has the renderer's lifetime and keeps its state private: the renderer reads the consumed decision, the layer proof and the hold count through accessors and changes the state only through the decision's steps. GPU resources and calls stay in `game3d_renderer.cpp`, and `game3d_ui_input_provider.cpp` calls its generated-Present predicates at acquisition.
 
 The target model for automatic UI protection, and the staged roadmap toward it. Replay `xfail`
 labels, `KNOWN_TODAY` sequence cases and readiness-report checks name the stage that changes an

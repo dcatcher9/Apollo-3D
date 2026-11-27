@@ -281,13 +281,10 @@ namespace sunshine_game3d {
       direct_views = {};
       memo_valid = field_memo_valid = symmetric_field_ready = false;
       decision.resume_scope();
-      detection_pending = detection_awaiting_signal = decision.detection_pending_actionable = false;
+      detection_pending = detection_awaiting_signal = false;
       detection_fence = detection_last_submit = 0;
       counters_pending = false;
-      decision.scene_bits = 0;
-      decision.scene_layer_proven = false;
       detection_run = consumed_detection = {};
-      decision.consumed_auto = {};
       retention_wanted = false;
       retained_present.fill(0);
       adaptive_policy.reset();
@@ -1012,11 +1009,10 @@ namespace sunshine_game3d {
         }
       }
       detection_pending = false;
-      auto &latest = decision.temporal.latest;
-      latest = {};
+      decision.clear_sample();
       if (!read) { counters_pending = false; return; }
       const auto observed = decision.observe_sample(counts.data(), count, detection_submitted, input.session);
-      commit_counters(latest, input.session, observed);
+      commit_counters(decision.latest_sample(), input.session, observed);
       counters_pending = false;
     }
     // One real frame's detection, from its own offered candidates, accepted
@@ -1134,12 +1130,10 @@ namespace sunshine_game3d {
       // (t14) when offered, else the offscreen UI layer's colour (t7), both
       // still bound from the detection passes above, beside the presented
       // color (t6).
-      const bool proven_image = decision.scene_layer_proven && ui_selection::pre_ui_image_of(bits) == ui_detection::pre_ui_image::layer;
-      decision.detection_pending_actionable = false;
-      if (scene_evidence_supported() && !(per_frame & ui_detection::per_frame_depth_not_current) &&
-          decision.measure_scene(observation.now_ms, proven_image)) {
+      const bool proven_image = decision.layer_proven() && ui_selection::pre_ui_image_of(bits) == ui_detection::pre_ui_image::layer;
+      if (decision.measure_scene(scene_evidence_supported() && !(per_frame & ui_detection::per_frame_depth_not_current),
+            observation.now_ms, proven_image)) {
         namespace scene = ui_detection::scene;
-        decision.detection_pending_actionable = true;
         views[1] = depth;
         views[10] = {};
         dispatch_stage(scene_cells, scene_cell_sums, 6, scene::cells_x / 16, scene::cells_y);
@@ -1181,10 +1175,9 @@ namespace sunshine_game3d {
           reinterpret_cast<ID3D12GraphicsCommandList *>(cmd->get_native())->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
         }
         cmd->barrier(counter_texture.resource, api::resource_usage::copy_source, api::resource_usage::shader_resource);
-        decision.pending_counts = decision.cpu_counts;
+        decision.pend_counts();
       }
-      decision.detection_pending_source = observation; decision.detection_pending_status_key = decision.temporal.status_key();
-      decision.detection_pending_signatures = input.signatures;
+      decision.pend_sample(observation, input.signatures);
       detection_pending = detection_awaiting_signal = true;
       detection_last_submit = observation.now_ms; ++detection_submitted;
     }
@@ -1994,7 +1987,7 @@ namespace sunshine_game3d {
         d.decision.held();
         d.consumed_detection = d.detection_run;
         d.consumed_detection.state = ui_detection_snapshot::run_state::held;
-        d.consumed_detection.held_presents = d.decision.temporal.holds;
+        d.consumed_detection.held_presents = d.decision.held_presents();
       } else {
         d.decision.enter_scope(observation);
         d.poll_detection(observation);
@@ -2201,7 +2194,7 @@ namespace sunshine_game3d {
   render_parameters renderer::consumed_parameters() const { return data_ ? data_->consumed : render_parameters{}; }
   bool renderer::consumed_source_alpha_ui() const { return data_ && data_->source_alpha_ui; }
   ui_mask_channel renderer::consumed_ui_channel() const { return data_ ? data_->consumed_channel : ui_mask_channel::alpha; }
-  alpha_auto_decision renderer::consumed_alpha_auto() const { return data_ ? data_->decision.consumed_auto : alpha_auto_decision{}; }
+  alpha_auto_decision renderer::consumed_alpha_auto() const { return data_ ? data_->decision.consumed() : alpha_auto_decision{}; }
   ui_detection_snapshot renderer::consumed_detection() const { return data_ ? data_->consumed_detection : ui_detection_snapshot{}; }
   alpha_probe_counters renderer::alpha_probe_activity() const {
     return data_ ? alpha_probe_counters{data_->detection_submitted, data_->detection_mapped, data_->scene_evidence_runs} :

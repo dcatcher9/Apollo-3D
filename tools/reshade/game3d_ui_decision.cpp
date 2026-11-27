@@ -30,6 +30,10 @@ namespace sunshine_game3d {
   void ui_decision::resume_scope() {
     temporal = {};
     guard = {};
+    detection_pending_actionable = false;
+    scene_bits = 0;
+    scene_layer_proven = false;
+    consumed_auto = {};
   }
   void ui_decision::begin_frame(bool detection_requested) {
     scene_bits = 0;
@@ -96,7 +100,15 @@ namespace sunshine_game3d {
       committed_words = words;
       if (session) session->add_counters(delta);
   }
-  bool ui_decision::measure_scene(uint64_t now, bool proven_image) { return guard.measure(now, proven_image); }
+  bool ui_decision::measure_scene(bool measurable, uint64_t now, bool proven_image) {
+    detection_pending_actionable = measurable && guard.measure(now, proven_image);
+    return detection_pending_actionable;
+  }
+  void ui_decision::pend_sample(const alpha_auto_source &observation, const candidate_signatures &signatures) {
+    detection_pending_source = observation;
+    detection_pending_status_key = temporal.status_key();
+    detection_pending_signatures = signatures;
+  }
   void ui_decision::update_alpha_auto(bool eligible, const alpha_auto_source *automatic,
     bool detection_active, bool &source_alpha_ui) {
     consumed_auto = {};
