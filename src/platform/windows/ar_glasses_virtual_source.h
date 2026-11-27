@@ -153,6 +153,13 @@ namespace ar_glasses {
     }
 
     /**
+     * The time a source that was just created has to show SDR. Windows publishes a new indirect
+     * display's mode late; the set-up before the one settle rule waited for it twice, 5 s each,
+     * before it gave up.
+     */
+    inline constexpr std::chrono::milliseconds new_source_sdr_budget = 10s;
+
+    /**
      * The one color settle rule of local presentation, for the owned source and the physical
      * output alike. The display is looked at at once and then every 50 ms until the budget ends:
      * - a look that cannot see the display, or sees the wrong mode or color, restarts the count of
@@ -251,22 +258,27 @@ namespace ar_glasses {
      * created Windows often ignores an HDR request, so a new source first settles in SDR. A source
      * that may present color-managed SDR on an HDR output (glasses, not a shutter monitor) settles
      * back in SDR when it does not reach HDR, unless its output is gone or the request ended.
-     * `settle(hdr)` runs the rule for one color. Returns the color the source reached, or nothing
-     * when it reached neither the request nor its fallback.
+     * `settle(hdr, budget)` runs the rule for one color within that budget. Returns the color the
+     * source reached, or nothing when it reached neither the request nor its fallback.
      */
     template<class Settle>
     std::optional<bool> establish_source_color_with_io(bool expected_hdr, bool after_creation, bool sdr_fallback, Settle settle) {
-      if (after_creation && expected_hdr && settle(false).outcome != color_settle_e::settled) {
-        return std::nullopt;
+      if (after_creation) {
+        if (settle(false, new_source_sdr_budget).outcome != color_settle_e::settled) {
+          return std::nullopt;
+        }
+        if (!expected_hdr) {
+          return false;
+        }
       }
-      const auto requested = settle(expected_hdr).outcome;
+      const auto requested = settle(expected_hdr, source_color_budget(expected_hdr)).outcome;
       if (requested == color_settle_e::settled) {
         return expected_hdr;
       }
       if (!expected_hdr || !sdr_fallback || requested == color_settle_e::disconnected || requested == color_settle_e::cancelled) {
         return std::nullopt;
       }
-      return settle(false).outcome == color_settle_e::settled ? std::make_optional(false) : std::nullopt;
+      return settle(false, source_color_budget(false)).outcome == color_settle_e::settled ? std::make_optional(false) : std::nullopt;
     }
 
     /** Log a settled, rejected or timed-out outcome. The caller logs what ended a disconnected

@@ -126,8 +126,9 @@ it is seen, and a refused one does not stop a display that shows the color anywa
 
 - **settled**;
 - **rejected**, when Windows refused all three requests;
-- **timed out**, when the color was not seen within its budget: 5 s for SDR and 15 s for HDR on the
-  private source, 10 s for HDR on the physical glasses;
+- **timed out**, when the color was not seen within its budget: 5 s for SDR (10 s for the first SDR
+  settle of a source that was just created, whose mode Windows publishes late) and 15 s for HDR on
+  the private source, 10 s for HDR on the physical glasses;
 - **disconnected**, when the glasses leave the desktop, or, while their own HDR is enabled, change
   mode, which is a new display generation for the topology controller.
 

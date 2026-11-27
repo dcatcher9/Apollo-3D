@@ -99,7 +99,7 @@ namespace ar_glasses {
 #endif
       bool activate_monitor_desktop();
       bool enable_physical_hdr(target_state_t &target, const std::function<bool()> &cancelled);
-      color_settle_result_t settle_source_color(bool hdr, int requested_millihz, const std::function<bool()> &cancelled);
+      color_settle_result_t settle_source_color(bool hdr, std::chrono::milliseconds budget, int requested_millihz, const std::function<bool()> &cancelled);
       std::optional<bool> configure_source_color(
         bool expected_hdr,
         bool after_creation,

@@ -1182,11 +1182,11 @@ namespace ar_glasses {
       return false;
     }
 
-    color_settle_result_t local_session_t::settle_source_color(bool hdr, int requested_millihz, const std::function<bool()> &cancelled) {
+    color_settle_result_t local_session_t::settle_source_color(bool hdr, std::chrono::milliseconds budget, int requested_millihz, const std::function<bool()> &cancelled) {
       std::optional<resolved_virtual_display_t> seen;
       // A monitor's source may have Windows' remembered raster or rate restored by HDR, so an
       // exact owned identity is set back to its native mode. Glasses keep their verified cadence.
-      const color_settle_request_t request {.hdr = hdr, .budget = source_color_budget(hdr), .repair_mode = monitor_surface_};
+      const color_settle_request_t request {.hdr = hdr, .budget = budget, .repair_mode = monitor_surface_};
       const auto result = settle_color_with_io(
         request,
         [&]() -> color_observation_t {
@@ -1265,8 +1265,8 @@ namespace ar_glasses {
     ) {
       // Glasses may present a color-managed SDR source on an HDR output. A shutter monitor's
       // presentation requires its source and output colors to match, so it has no fallback.
-      const auto color = establish_source_color_with_io(expected_hdr, after_creation, !monitor_surface_, [&](bool hdr) {
-        return settle_source_color(hdr, requested_millihz, cancelled);
+      const auto color = establish_source_color_with_io(expected_hdr, after_creation, !monitor_surface_, [&](bool hdr, std::chrono::milliseconds budget) {
+        return settle_source_color(hdr, budget, requested_millihz, cancelled);
       });
       if (color && *color != expected_hdr) {
         BOOST_LOG(warning) << "Local AR source HDR is unavailable; using color-managed SDR presentation."sv;

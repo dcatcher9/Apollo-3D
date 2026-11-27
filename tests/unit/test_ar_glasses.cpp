@@ -684,13 +684,15 @@ TEST(LocalColorSettle, UnknownLooksTimeOutAndAnEndedRequestIsCancelled) {
 namespace {
   struct source_color_setup_probe_t {
     std::vector<bool> settles;
+    std::vector<std::chrono::milliseconds> budgets;
     std::function<color_settle_e(bool)> outcome = [](bool) {
       return color_settle_e::settled;
     };
 
     std::optional<bool> run(bool expected_hdr, bool after_creation, bool sdr_fallback) {
-      return ar_glasses::internal::establish_source_color_with_io(expected_hdr, after_creation, sdr_fallback, [&](bool hdr) {
+      return ar_glasses::internal::establish_source_color_with_io(expected_hdr, after_creation, sdr_fallback, [&](bool hdr, std::chrono::milliseconds budget) {
         settles.push_back(hdr);
+        budgets.push_back(budget);
         return ar_glasses::internal::color_settle_result_t {.outcome = outcome(hdr)};
       });
     }
@@ -701,12 +703,16 @@ TEST(LocalSourceColorSetup, ANewSourceSettlesInSdrBeforeItsHdrRequest) {
   source_color_setup_probe_t probe;
   EXPECT_EQ(probe.run(true, true, true), std::optional<bool>(true));
   EXPECT_EQ(probe.settles, (std::vector<bool> {false, true}));
+  // A new source's late mode gets the two SDR waits it had before; HDR keeps its own budget.
+  EXPECT_EQ(probe.budgets, (std::vector<std::chrono::milliseconds> {ar_glasses::internal::new_source_sdr_budget, ar_glasses::internal::source_color_budget(true)}));
+  EXPECT_EQ(ar_glasses::internal::new_source_sdr_budget, 2 * ar_glasses::internal::source_color_budget(false));
 }
 
 TEST(LocalSourceColorSetup, AnSdrRequestOrAnExistingSourceGoesStraightToTheRequestedColor) {
   source_color_setup_probe_t sdr;
   EXPECT_EQ(sdr.run(false, true, true), std::optional<bool>(false));
   EXPECT_EQ(sdr.settles, (std::vector<bool> {false}));
+  EXPECT_EQ(sdr.budgets, (std::vector<std::chrono::milliseconds> {ar_glasses::internal::new_source_sdr_budget}));
 
   source_color_setup_probe_t existing;
   EXPECT_EQ(existing.run(true, false, true), std::optional<bool>(true));
