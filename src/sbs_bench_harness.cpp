@@ -54,7 +54,6 @@
 #include "crypto.h"
 #include "depth_coordinate_v2.h"
 #include "generated/sbs_adaptive_state_contract.h"
-#include "host_sbs_contour_history_readback.h"
 #include "host_sbs_display_snapshot_rgb8_analysis_gpu.h"
 #include "host_sbs_gpu_trace.h"
 #include "host_sbs_observation_timeline.h"
@@ -234,192 +233,9 @@ namespace sbs_bench {
       return (uint16_t) (sign | ((uint32_t) exp << 10) | (mant >> 13));
     }
 
-    using models::contour_history_readback::half_to_float;
-
-    // Strict HDR interchange for offline whole-clip conversion. FFmpeg's image2 PFM codec writes
-    // this exact standard form reliably: RGB float32, little-endian (negative scale), with rows
-    // stored bottom-to-top. Values are linear scRGB where 1.0 is the 80-nit reference white.
-    //
-    // Deliberately reject comments, grayscale Pf, alternate endianness/scales, trailing bytes,
-    // non-finite values, and values outside the finite FP16 domain used by the live host path.
-    bool load_pfm_stream(std::istream &stream, scrgb_image &out) {
-      static_assert(std::endian::native == std::endian::little,
-                    "PFM interchange requires a little-endian host");
-      auto read_header_line = [&](std::string &line) {
-        if (!std::getline(stream, line) || line.size() > 128u) {
-          return false;
-        }
-        if (!line.empty() && line.back() == '\r') {
-          line.pop_back();
-        }
-        return true;
-      };
-
-      std::string magic;
-      std::string dimensions;
-      std::string scale_line;
-      if (!read_header_line(magic) || magic != "PF" ||
-          !read_header_line(dimensions) ||
-          !read_header_line(scale_line)) {
-        return false;
-      }
-
-      std::uint64_t width64 = 0;
-      std::uint64_t height64 = 0;
-      {
-        std::istringstream values(dimensions);
-        values.imbue(std::locale::classic());
-        std::string extra;
-        if (!(values >> width64 >> height64) || (values >> extra) ||
-            width64 == 0u || height64 == 0u ||
-            width64 > std::numeric_limits<UINT>::max() ||
-            height64 > std::numeric_limits<UINT>::max() ||
-            width64 > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
-            height64 > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION) {
-          return false;
-        }
-      }
-      {
-        std::istringstream values(scale_line);
-        values.imbue(std::locale::classic());
-        double scale = 0.0;
-        std::string extra;
-        if (!(values >> scale) || (values >> extra) || scale != -1.0) {
-          return false;
-        }
-      }
-
-      const size_t width = static_cast<size_t>(width64);
-      const size_t height = static_cast<size_t>(height64);
-      if (width > std::numeric_limits<size_t>::max() / height ||
-          width * height > std::numeric_limits<size_t>::max() / 4u ||
-          width > std::numeric_limits<std::streamsize>::max() /
-                    (3u * sizeof(float))) {
-        return false;
-      }
-
-      scrgb_image decoded;
-      decoded.w = static_cast<UINT>(width64);
-      decoded.h = static_cast<UINT>(height64);
-      decoded.rgba16.resize(width * height * 4u);
-      std::vector<float> row(width * 3u);
-      const auto row_bytes =
-        static_cast<std::streamsize>(row.size() * sizeof(float));
-      for (size_t stored_y = 0; stored_y < height; ++stored_y) {
-        if (!stream.read(reinterpret_cast<char *>(row.data()), row_bytes)) {
-          return false;
-        }
-        const size_t top_down_y = height - 1u - stored_y;
-        uint16_t *dst = decoded.rgba16.data() + top_down_y * width * 4u;
-        for (size_t x = 0; x < width; ++x) {
-          for (size_t channel = 0; channel < 3u; ++channel) {
-            const float value = row[x * 3u + channel];
-            if (!std::isfinite(value) || std::abs(value) > 65504.0f) {
-              return false;
-            }
-            dst[x * 4u + channel] = float_to_half(value);
-          }
-          dst[x * 4u + 3u] = float_to_half(1.0f);
-        }
-      }
-
-      char trailing = 0;
-      if (stream.read(&trailing, 1) || !stream.eof()) {
-        return false;
-      }
-      out = std::move(decoded);
-      return true;
-    }
-
-    bool load_pfm(const fs::path &path, scrgb_image &out) {
-      std::ifstream stream(path, std::ios::binary);
-      return stream && load_pfm_stream(stream, out);
-    }
-
-    bool load_pfm(std::string_view bytes, scrgb_image &out) {
-      class readonly_memory_streambuf_t final: public std::streambuf {
-      public:
-        explicit readonly_memory_streambuf_t(const std::string_view source) {
-          auto *begin = source.empty() ?
-                          &empty_ : const_cast<char *>(source.data());
-          setg(begin, begin, begin + source.size());
-        }
-
-      private:
-        char empty_ = 0;
-      } buffer {bytes};
-      std::istream stream {&buffer};
-      return load_pfm_stream(stream, out);
-    }
-
-    bool save_pfm(const fs::path &path, UINT width, UINT height,
-                  const std::vector<uint16_t> &rgba16) {
-      static_assert(std::endian::native == std::endian::little,
-                    "PFM interchange requires a little-endian host");
-      const auto pixels = static_cast<std::uint64_t>(width) * height;
-      if (width == 0u || height == 0u ||
-          pixels > std::numeric_limits<std::size_t>::max() / 4u ||
-          rgba16.size() != static_cast<std::size_t>(pixels) * 4u) {
-        return false;
-      }
-
-      std::ofstream stream(path, std::ios::binary | std::ios::trunc);
-      if (!stream) {
-        return false;
-      }
-      stream.imbue(std::locale::classic());
-      stream << "PF\n" << width << ' ' << height << "\n-1.000000\n";
-      if (!stream.good()) {
-        stream.close();
-        fs::remove(path);
-        return false;
-      }
-
-      std::vector<float> row(static_cast<size_t>(width) * 3u);
-      for (UINT stored_y = 0; stored_y < height; ++stored_y) {
-        const UINT top_down_y = height - 1u - stored_y;
-        const auto *src = rgba16.data() +
-                          static_cast<size_t>(top_down_y) * width * 4u;
-        for (UINT x = 0; x < width; ++x) {
-          for (size_t channel = 0; channel < 3u; ++channel) {
-            const float value = half_to_float(src[static_cast<size_t>(x) * 4u + channel]);
-            if (!std::isfinite(value)) {
-              stream.close();
-              fs::remove(path);
-              return false;
-            }
-            row[static_cast<size_t>(x) * 3u + channel] = value;
-          }
-        }
-        stream.write(
-          reinterpret_cast<const char *>(row.data()),
-          static_cast<std::streamsize>(row.size() * sizeof(float))
-        );
-        if (!stream.good()) {
-          stream.close();
-          fs::remove(path);
-          return false;
-        }
-      }
-      stream.close();
-      if (!stream.good()) {
-        fs::remove(path);
-        return false;
-      }
-      return true;
-    }
-
-    enum class atomic_write_mode_e {
-      durable,
-      transient,
-    };
-
+    // Every published file is durable: written through and renamed with write-through.
     template<class Writer>
-    bool publish_file_atomically(
-      const fs::path &final_path,
-      Writer &&writer,
-      const atomic_write_mode_e mode = atomic_write_mode_e::durable
-    ) {
+    bool publish_file_atomically(const fs::path &final_path, Writer &&writer) {
       fs::path temporary_path = final_path;
       temporary_path += ".part";
       std::error_code ec;
@@ -435,8 +251,7 @@ namespace sbs_bench {
       // permanent path, ACL, and volume errors still fail immediately.
       constexpr int atomic_replace_attempts = 50;
       for (int attempt = 0; attempt < atomic_replace_attempts; ++attempt) {
-        const DWORD move_flags = MOVEFILE_REPLACE_EXISTING |
-          (mode == atomic_write_mode_e::durable ? MOVEFILE_WRITE_THROUGH : 0);
+        const DWORD move_flags = MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH;
         if (MoveFileExW(
               temporary_path.wstring().c_str(),
               final_path.wstring().c_str(),
@@ -458,20 +273,14 @@ namespace sbs_bench {
       return false;
     }
 
-    bool write_bytes(
-      const fs::path &path,
-      const void *data,
-      const std::size_t size,
-      const atomic_write_mode_e mode = atomic_write_mode_e::durable
-    ) {
-      const bool durable = mode == atomic_write_mode_e::durable;
+    bool write_bytes(const fs::path &path, const void *data, const std::size_t size) {
       HANDLE handle = CreateFileW(
         path.wstring().c_str(),
         GENERIC_WRITE,
         0,
         nullptr,
         CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL | (durable ? FILE_FLAG_WRITE_THROUGH : 0),
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
         nullptr
       );
       if (handle == INVALID_HANDLE_VALUE) {
@@ -492,7 +301,7 @@ namespace sbs_bench {
         }
         offset += written;
       }
-      if (succeeded && durable) {
+      if (succeeded) {
         succeeded = FlushFileBuffers(handle);
       }
       if (!CloseHandle(handle)) {
@@ -528,147 +337,6 @@ namespace sbs_bench {
     std::string follow_frame_filename(std::size_t sequence, std::string_view format) {
       return "frame_" + follow_frame_id(sequence) + "." + std::string(format);
     }
-
-    bool parse_follow_frame_filename(std::string_view filename,
-                                     std::string_view format,
-                                     std::size_t &sequence) {
-      const std::string suffix = "." + std::string(format);
-      constexpr std::string_view prefix = "frame_";
-      constexpr std::size_t digits = 10;
-      if (filename.size() != prefix.size() + digits + suffix.size() ||
-          !filename.starts_with(prefix) ||
-          !filename.ends_with(suffix)) {
-        return false;
-      }
-      std::size_t value = 0;
-      for (std::size_t index = prefix.size();
-           index < prefix.size() + digits;
-           ++index) {
-        const unsigned char c = static_cast<unsigned char>(filename[index]);
-        if (!std::isdigit(c)) {
-          return false;
-        }
-        value = value * 10u + static_cast<std::size_t>(c - '0');
-      }
-      if (value == 0u) {
-        return false;
-      }
-      sequence = value;
-      return true;
-    }
-
-    struct producer_done_t {
-      std::size_t frame_count = 0;
-    };
-
-    bool read_producer_done(const fs::path &path, producer_done_t &result,
-                            std::string &error) {
-      try {
-        std::ifstream stream(path);
-        nlohmann::json value;
-        if (!stream || !(stream >> value) || !value.is_object() ||
-            value.value("schema", 0) != 1 ||
-            value.value("status", std::string()) != "complete" ||
-            !value.contains("frame_count") ||
-            !value["frame_count"].is_number_integer()) {
-          error = "malformed .producer-done.json";
-          return false;
-        }
-        const auto count = value["frame_count"].get<std::int64_t>();
-        if (count <= 0 ||
-            static_cast<std::uint64_t>(count) > follow_max_sequence ||
-            static_cast<std::uint64_t>(count) >
-              static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
-          error = ".producer-done.json frame_count must fit the positive 10-digit sequence";
-          return false;
-        }
-        result.frame_count = static_cast<std::size_t>(count);
-        return true;
-      } catch (const std::exception &) {
-        error = "malformed .producer-done.json";
-        return false;
-      }
-    }
-
-    bool read_producer_failure(const fs::path &path, std::string &error) {
-      try {
-        std::ifstream stream(path);
-        nlohmann::json value;
-        if (!stream || !(stream >> value) || !value.is_object() ||
-            value.value("schema", 0) != 1 ||
-            value.value("status", std::string()) != "failed" ||
-            !value.contains("error") || !value["error"].is_string()) {
-          error = "malformed .producer-failed.json";
-          return false;
-        }
-        error = value["error"].get<std::string>();
-        if (error.empty() || error.size() > 1024u) {
-          error = ".producer-failed.json error must contain 1..1024 characters";
-          return false;
-        }
-        return true;
-      } catch (const std::exception &) {
-        error = "malformed .producer-failed.json";
-        return false;
-      }
-    }
-
-    enum class follow_wait_status_e {
-      ready,
-      complete,
-      error,
-    };
-
-    struct follow_wait_result_t {
-      follow_wait_status_e status = follow_wait_status_e::error;
-      fs::path frame;
-      std::optional<std::size_t> producer_frame_count;
-      std::string error;
-    };
-
-    class follow_directory_watcher_t {
-    public:
-      explicit follow_directory_watcher_t(const fs::path &directory) {
-        handle_ = FindFirstChangeNotificationW(
-          directory.c_str(),
-          FALSE,
-          FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_SIZE |
-            FILE_NOTIFY_CHANGE_LAST_WRITE
-        );
-        if (handle_ == INVALID_HANDLE_VALUE) {
-          throw std::runtime_error(
-            "cannot watch the follow input directory"
-          );
-        }
-      }
-
-      follow_directory_watcher_t(const follow_directory_watcher_t &) = delete;
-      follow_directory_watcher_t &operator=(
-        const follow_directory_watcher_t &
-      ) = delete;
-
-      ~follow_directory_watcher_t() {
-        if (handle_ != INVALID_HANDLE_VALUE) {
-          FindCloseChangeNotification(handle_);
-        }
-      }
-
-      bool wait(std::string &error) {
-        const auto status = WaitForSingleObject(handle_, 1000);
-        if (status == WAIT_TIMEOUT) {
-          return true;
-        }
-        if (status != WAIT_OBJECT_0 ||
-            !FindNextChangeNotification(handle_)) {
-          error = "follow input directory notification failed";
-          return false;
-        }
-        return true;
-      }
-
-    private:
-      HANDLE handle_ = INVALID_HANDLE_VALUE;
-    };
 
     template<class Item>
     class ordered_single_slot_pipeline_t {
@@ -805,271 +473,6 @@ namespace sbs_bench {
       bool input_finished_ = false;
     };
 
-    follow_wait_result_t wait_for_follow_frame(const fs::path &directory,
-                                               std::string_view format,
-                                               std::size_t sequence,
-                                               std::size_t first_sequence,
-                                               std::size_t processed_count,
-                                               std::size_t count_bound,
-                                               follow_directory_watcher_t &watcher) {
-      const fs::path expected =
-        directory / follow_frame_filename(sequence, format);
-      const fs::path done_path = directory / ".producer-done.json";
-      const fs::path failed_path = directory / ".producer-failed.json";
-      const std::string selected_extension = "." + std::string(format);
-
-      for (;;) {
-        std::error_code ec;
-        const bool done_exists = fs::exists(done_path, ec);
-        if (ec ||
-            (done_exists && !fs::is_regular_file(done_path, ec)) ||
-            ec) {
-          return {follow_wait_status_e::error, {}, {},
-                  "cannot inspect producer done sentinel"};
-        }
-        ec.clear();
-        const bool failed_exists = fs::exists(failed_path, ec);
-        if (ec ||
-            (failed_exists && !fs::is_regular_file(failed_path, ec)) ||
-            ec) {
-          return {follow_wait_status_e::error, {}, {},
-                  "cannot inspect producer failed sentinel"};
-        }
-        if (done_exists && failed_exists) {
-          return {follow_wait_status_e::error, {}, {},
-                  "conflicting producer done and failed sentinels"};
-        }
-        if (failed_exists) {
-          std::string producer_error;
-          if (!read_producer_failure(failed_path, producer_error)) {
-            return {follow_wait_status_e::error, {}, {}, producer_error};
-          }
-          return {follow_wait_status_e::error, {}, {},
-                  "producer failed: " + producer_error};
-        }
-
-        std::optional<std::size_t> done_count;
-        if (done_exists) {
-          producer_done_t done;
-          std::string parse_error;
-          if (!read_producer_done(done_path, done, parse_error)) {
-            return {follow_wait_status_e::error, {}, {}, parse_error};
-          }
-          if (count_bound > 0u && done.frame_count > count_bound) {
-            return {follow_wait_status_e::error, {}, {},
-                    "producer frame_count exceeds --follow-count bound"};
-          }
-          if (done.frame_count < processed_count) {
-            return {follow_wait_status_e::error, {}, {},
-                    "producer frame_count is below already processed count"};
-          }
-          done_count = done.frame_count;
-        }
-
-        bool expected_exists = false;
-        bool future_exists = false;
-        std::error_code iter_ec;
-        fs::directory_iterator iterator(directory, iter_ec);
-        const fs::directory_iterator end;
-        for (; !iter_ec && iterator != end; iterator.increment(iter_ec)) {
-          const auto &entry = *iterator;
-          std::error_code entry_ec;
-          if (!entry.is_regular_file(entry_ec)) {
-            if (entry_ec) {
-              // The wrapper may delete an already acknowledged file while this scan is in
-              // progress. It never deletes the current/future identity, so a vanished entry is
-              // safe to ignore and the exact expected-name test below still protects ordering.
-              continue;
-            }
-            continue;
-          }
-          const std::string filename = entry.path().filename().string();
-          std::string extension = entry.path().extension().string();
-          for (char &c : extension) {
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-          }
-          const bool image_extension =
-            extension == ".png" || extension == ".jpg" ||
-            extension == ".jpeg" || extension == ".pfm" ||
-            extension == ".bmp" || extension == ".tif" ||
-            extension == ".tiff" || extension == ".exr" ||
-            extension == ".webp";
-          if (!image_extension) {
-            const bool frame_like =
-              filename.size() > 16u && filename.starts_with("frame_") &&
-              std::all_of(
-                filename.begin() + 6,
-                filename.begin() + 16,
-                [](unsigned char c) {
-                  return std::isdigit(c);
-                }
-              );
-            if (frame_like && extension != ".part" && extension != ".tmp") {
-              return {follow_wait_status_e::error, {}, done_count,
-                      "unexpected frame artifact in follow directory: " + filename};
-            }
-            continue;  // Producer temporary names and JSON sentinels are not ready frames.
-          }
-          if (extension != selected_extension) {
-            return {follow_wait_status_e::error, {}, done_count,
-                    "mixed image format in follow directory: " + filename};
-          }
-          std::size_t found_sequence = 0;
-          if (!parse_follow_frame_filename(filename, format, found_sequence)) {
-            return {follow_wait_status_e::error, {}, done_count,
-                    "unexpected final image identity in follow directory: " + filename};
-          }
-          if (found_sequence < first_sequence ||
-              (count_bound > 0u &&
-               found_sequence - first_sequence >= count_bound)) {
-            return {follow_wait_status_e::error, {}, done_count,
-                    "frame identity is outside the requested follow range: " + filename};
-          }
-          if (done_count &&
-              found_sequence - first_sequence >= *done_count) {
-            return {follow_wait_status_e::error, {}, done_count,
-                    "frame identity exceeds producer frame_count: " + filename};
-          }
-          expected_exists = expected_exists || found_sequence == sequence;
-          future_exists = future_exists || found_sequence > sequence;
-        }
-        if (iter_ec) {
-          return {follow_wait_status_e::error, {}, done_count,
-                  "cannot enumerate follow directory"};
-        }
-
-        if (expected_exists) {
-          return {follow_wait_status_e::ready, expected, done_count, {}};
-        }
-        if (future_exists) {
-          return {follow_wait_status_e::error, {}, done_count,
-                  "follow queue skipped expected " + expected.filename().string()};
-        }
-        if (done_count) {
-          if (*done_count == processed_count) {
-            return {follow_wait_status_e::complete, {}, done_count, {}};
-          }
-          return {follow_wait_status_e::error, {}, done_count,
-                  "producer completed before publishing expected " +
-                    expected.filename().string()};
-        }
-        std::string watch_error;
-        if (!watcher.wait(watch_error)) {
-          return {follow_wait_status_e::error, {}, done_count, watch_error};
-        }
-      }
-    }
-
-    bool wait_for_consumed_follow_source(
-      const fs::path &source,
-      const fs::path &producer_failure,
-      follow_directory_watcher_t &watcher,
-      const std::atomic_bool &stopping,
-      std::string &error
-    ) {
-      for (;;) {
-        if (stopping.load(std::memory_order_acquire)) {
-          error = "post-render pipeline was stopped";
-          return false;
-        }
-        std::error_code ec;
-        const bool source_exists = fs::exists(source, ec);
-        if (ec) {
-          error = "cannot inspect acknowledged follow source";
-          return false;
-        }
-        if (!source_exists) {
-          return true;
-        }
-        if (!fs::is_regular_file(source, ec) || ec) {
-          error = "acknowledged follow source changed identity";
-          return false;
-        }
-        ec.clear();
-        if (fs::exists(producer_failure, ec)) {
-          if (ec) {
-            error = "cannot inspect producer failure sentinel";
-            return false;
-          }
-          std::string producer_error;
-          if (!read_producer_failure(producer_failure, producer_error)) {
-            error = producer_error;
-            return false;
-          }
-          error = "producer failed: " + producer_error;
-          return false;
-        }
-        if (ec) {
-          error = "cannot inspect producer failure sentinel";
-          return false;
-        }
-        if (!watcher.wait(error)) {
-          return false;
-        }
-      }
-    }
-
-    bool publish_follow_progress(const fs::path &path,
-                                 std::string_view status,
-                                 std::string_view input_format,
-                                 std::string_view artifact_mode,
-                                 std::size_t first_sequence,
-                                 std::size_t processed_count,
-                                 int sbs_frame_count,
-                                 std::uint32_t sbs_width,
-                                 std::uint32_t sbs_height,
-                                 std::optional<std::size_t> producer_frame_count) {
-      return publish_file_atomically(
-        path,
-        [&](const fs::path &temporary_path) {
-          std::ofstream stream(temporary_path);
-          if (!stream) {
-            return false;
-          }
-          stream << "{\n"
-               << "  \"schema\": 2,\n"
-               << "  \"status\": " << json_string(status) << ",\n"
-               << "  \"input_format\": " << json_string(input_format) << ",\n"
-               << "  \"artifact_mode\": " << json_string(artifact_mode) << ",\n"
-               << "  \"processed_count\": " << processed_count << ",\n"
-               << "  \"first_sequence\": " << first_sequence << ",\n"
-               << "  \"last_completed_sequence\": "
-               << (processed_count > 0u ?
-                     std::to_string(first_sequence + processed_count - 1u) :
-                     "null")
-               << ",\n"
-               << "  \"last_frame_id\": "
-               << (processed_count > 0u ?
-                     json_string(follow_frame_id(
-                       first_sequence + processed_count - 1u
-                     )) :
-                     "null")
-               << ",\n"
-               << "  \"last_completed_frame_id\": "
-               << (processed_count > 0u ?
-                     json_string(follow_frame_id(
-                       first_sequence + processed_count - 1u
-                     )) :
-                     "null")
-               << ",\n"
-               << "  \"source_frame_count\": " << processed_count << ",\n"
-               << "  \"sbs_frame_count\": " << sbs_frame_count << ",\n"
-               << "  \"sbs_width\": " << sbs_width << ",\n"
-               << "  \"sbs_height\": " << sbs_height << ",\n"
-               << "  \"producer_frame_count\": ";
-          if (producer_frame_count) {
-            stream << *producer_frame_count;
-          } else {
-            stream << "null";
-          }
-          stream << "\n}\n";
-          stream.flush();
-          return stream.good();
-        },
-        atomic_write_mode_e::transient
-      );
-    }
-
     // ---- WIC PNG load/save (32bpp BGRA, matching the SDR B8G8R8A8_UNORM pipeline) ----
 
     ComPtr<IWICImagingFactory> g_wic;
@@ -1158,25 +561,6 @@ namespace sbs_bench {
         return false;
       }
       return decode_wic_bgra(dec.Get(), out);
-    }
-
-    bool read_follow_source_snapshot(const fs::path &path,
-                                     std::string &snapshot) {
-      // A directory-change notification can wake this process while the producer's successful
-      // rename is still returning, and filesystem filters can briefly hold the new final name.
-      // Retry only this already-published immutable filename; never wait before the first attempt
-      // and never advance to a future sequence. A successfully read but malformed snapshot is
-      // immutable producer corruption, so the caller parses it exactly once and fails normally.
-      constexpr int follow_snapshot_attempts = 50;
-      for (int attempt = 0; attempt < follow_snapshot_attempts; ++attempt) {
-        if (read_file_snapshot(path, snapshot)) {
-          return true;
-        }
-        if (attempt + 1 < follow_snapshot_attempts) {
-          std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        }
-      }
-      return false;
     }
 
     bool save_png(IWICImagingFactory *factory, const fs::path &path,
@@ -1667,57 +1051,16 @@ namespace sbs_bench {
 
     using adaptive_state_words_t = sbs_adaptive_state::words_t;
 
-    class serializer_wic_context_t {
-    public:
-      serializer_wic_context_t():
-          apartment_(CoInitializeEx(nullptr, COINIT_MULTITHREADED)) {
-        if (SUCCEEDED(apartment_)) {
-          CoCreateInstance(
-            CLSID_WICImagingFactory,
-            nullptr,
-            CLSCTX_INPROC_SERVER,
-            IID_PPV_ARGS(&factory_)
-          );
-        }
-      }
-
-      serializer_wic_context_t(const serializer_wic_context_t &) = delete;
-      serializer_wic_context_t &operator=(
-        const serializer_wic_context_t &
-      ) = delete;
-
-      ~serializer_wic_context_t() {
-        // Release every apartment-owned interface before balancing the
-        // successful CoInitializeEx on the persistent serializer thread.
-        factory_.Reset();
-        if (SUCCEEDED(apartment_)) {
-          CoUninitialize();
-        }
-      }
-
-      IWICImagingFactory *factory() const noexcept {
-        return factory_.Get();
-      }
-
-    private:
-      HRESULT apartment_ = E_FAIL;
-      ComPtr<IWICImagingFactory> factory_;
-    };
-
     struct post_render_frame_t {
       offline_sbs::raw_frame_header raw_header;
       std::size_t processed_count = 0;
-      std::size_t source_index = 0;
       std::string output_id;
-      fs::path previous_source;
-      fs::path output_path;
       UINT width = 0;
       UINT height = 0;
-      bool pfm = false;
+      bool hdr = false;
       std::vector<std::uint8_t> bgra;
       std::vector<std::uint16_t> rgba16;
       adaptive_state_words_t adaptive_state {};
-      std::optional<std::size_t> producer_frame_count;
     };
 
     bool valid_adaptive_state_words(const adaptive_state_words_t &words) {
@@ -1982,28 +1325,6 @@ namespace sbs_bench {
       }
       ctx->CopyResource(stage_cache.Get(), buffer.Get());
       return true;
-    }
-
-    bool save_pfm(const fs::path &path, UINT width, UINT height,
-                  const D3D11_MAPPED_SUBRESOURCE &mapped) {
-      if (!mapped.pData ||
-          mapped.RowPitch < static_cast<size_t>(width) * 4u * sizeof(uint16_t)) {
-        return false;
-      }
-      const auto pixels = static_cast<std::uint64_t>(width) * height;
-      if (pixels > std::numeric_limits<std::size_t>::max() / 4u) {
-        return false;
-      }
-      std::vector<uint16_t> rgba16(static_cast<std::size_t>(pixels) * 4u);
-      for (UINT y = 0; y < height; ++y) {
-        std::memcpy(
-          rgba16.data() + static_cast<std::size_t>(y) * width * 4u,
-          static_cast<const std::uint8_t *>(mapped.pData) +
-            static_cast<std::size_t>(y) * mapped.RowPitch,
-          static_cast<std::size_t>(width) * 4u * sizeof(std::uint16_t)
-        );
-      }
-      return save_pfm(path, width, height, rgba16);
     }
 
     bool map_adaptive_state_readback(ID3D11DeviceContext *ctx,
@@ -2383,32 +1704,6 @@ namespace sbs_bench {
       return out.good();
     }
 
-    template<class Writer>
-    bool publish_adaptive_state_snapshot(
-      const fs::path &path,
-      Writer &&writer
-    ) {
-      std::ostringstream text;
-      text.imbue(std::locale::classic());
-      text << std::setprecision(std::numeric_limits<float>::max_digits10);
-      if (!writer(text) || !text.good()) {
-        return false;
-      }
-      const auto bytes = text.str();
-      return publish_file_atomically(
-        path,
-        [&](const fs::path &temporary) {
-          return write_bytes(
-            temporary,
-            bytes.data(),
-            bytes.size(),
-            atomic_write_mode_e::transient
-          );
-        },
-        atomic_write_mode_e::transient
-      );
-    }
-
     // Keep output identities tied to source identities. Positional renumbering made a dropped
     // source frame silently shift every depth/SBS/source comparison by one.
     std::string source_frame_id(const fs::path &path) {
@@ -2506,14 +1801,11 @@ namespace sbs_bench {
 
     struct opts {
       std::string frames, out, direct_parallax_root;
-      std::string depth_coordinate_v2_manifest, capabilities;
+      std::string depth_coordinate_v2_manifest;
       std::string observation_timeline;
       artifact_mode_e artifacts = artifact_mode_e::evaluation;
+      // Set only by the native pass: its frames arrive through the worker's raw memory transport.
       bool follow = false;
-      // Offline worker transport: publish one atomic header and one replace-in-place frame
-      // snapshot. The consumer ACKs each frame before the producer can advance, so retaining
-      // an ever-growing JSONL history is unnecessary.
-      bool bounded_adaptive_state = false;
       // Maintained replay of the live estimator's device-owned infer/reuse branch. The shared
       // transaction policy is production code; only unavailable DDup/window/cadence admission is
       // replaced by the ordered offline corpus. run_adaptive_replay.py owns its A/B gate.
@@ -2528,13 +1820,13 @@ namespace sbs_bench {
       // Parity probe: use live streaming's policy, where the conditioned-field diagnostics run
       // only for Dump 3D. Final then equals Base, so this is not an evaluator configuration.
       bool subtitle_conditioning_live_policy = false;
-      std::string follow_format;
-      std::size_t follow_count = 0;  // optional producer frame-count upper bound
+      std::string follow_format;  // bgra8 or gbrpf32le, the raw transport's source format
+      std::size_t follow_count = 0;  // the raw transport's exact source frame count
       double pop_strength = -1.0;  // final shared stereo-parallax multiplier; <0 = conf
       int max_width = 0;  // 0 -> use config max_encode_width
       int limit = 0;  // 0 -> all
       int output_every = 1;  // process every input for temporal state; dump only every Nth
-      // Worker-owned safety cap. Zero is reserved for standalone/non-conversion runs.
+      // Worker-owned safety cap for Convert Video. Zero for every other run.
       std::uint64_t transient_raster_hard_cap_bytes = 0;
     };
 
@@ -2564,12 +1856,6 @@ namespace sbs_bench {
         };
         if (a == "--frames") {
           o.frames = next("--frames");
-        } else if (a == "--capabilities") {
-          o.capabilities = next("--capabilities");
-        } else if (a == "--follow") {
-          o.follow = true;
-        } else if (a == "--bounded-adaptive-state") {
-          o.bounded_adaptive_state = true;
         } else if (a == "--observation-timeline") {
           o.observation_timeline = next("--observation-timeline");
         } else if (a == "--device-conditional-replay") {
@@ -2581,18 +1867,6 @@ namespace sbs_bench {
           o.direct_glyph_qualification = true;
         } else if (a == "--subtitle-conditioning-live-policy") {
           o.subtitle_conditioning_live_policy = true;
-        } else if (a == "--follow-format") {
-          o.follow_format = next("--follow-format");
-        } else if (a == "--follow-count") {
-          const auto value = std::stoull(next("--follow-count"));
-          if (value == 0u ||
-              value > follow_max_sequence ||
-              value > static_cast<unsigned long long>(
-                        std::numeric_limits<std::size_t>::max())) {
-            BOOST_LOG(error) << "sbs-bench: --follow-count must fit the positive 10-digit sequence";
-            return false;
-          }
-          o.follow_count = static_cast<std::size_t>(value);
         } else if (a == "--out") {
           o.out = next("--out");
         } else if (a == "--artifacts") {
@@ -2601,10 +1875,8 @@ namespace sbs_bench {
             o.artifacts = artifact_mode_e::evaluation;
           } else if (value == "adaptive") {
             o.artifacts = artifact_mode_e::adaptive;
-          } else if (value == "conversion") {
-            o.artifacts = artifact_mode_e::conversion;
           } else {
-            BOOST_LOG(error) << "sbs-bench: --artifacts must be evaluation, adaptive, or conversion";
+            BOOST_LOG(error) << "sbs-bench: --artifacts must be evaluation or adaptive";
             return false;
           }
         } else if (a == "--pop-strength") {
@@ -2615,21 +1887,6 @@ namespace sbs_bench {
           o.limit = std::stoi(next("--limit"));
         } else if (a == "--output-every") {
           o.output_every = std::max(1, std::stoi(next("--output-every")));
-        } else if (a == "--transient-raster-hard-cap-bytes") {
-          const auto text = next("--transient-raster-hard-cap-bytes");
-          const auto *begin = text.data();
-          const auto *end = begin + text.size();
-          const auto parsed = std::from_chars(
-            begin,
-            end,
-            o.transient_raster_hard_cap_bytes
-          );
-          if (begin == end || parsed.ec != std::errc {} || parsed.ptr != end ||
-              o.transient_raster_hard_cap_bytes == 0) {
-            BOOST_LOG(error)
-              << "sbs-bench: --transient-raster-hard-cap-bytes must be a positive uint64";
-            return false;
-          }
         } else if (a == "--direct-parallax-root") {
           o.direct_parallax_root = next("--direct-parallax-root");
         } else if (a == "--depth-coordinate-v2-manifest") {
@@ -2643,13 +1900,6 @@ namespace sbs_bench {
     }
 
     bool validate_opts(const opts &o) {
-      if (!o.capabilities.empty()) {
-        if (!o.frames.empty() || !o.out.empty() || o.direct_glyph_qualification) {
-          BOOST_LOG(error) << "sbs-bench: --capabilities is a standalone query";
-          return false;
-        }
-        return true;
-      }
       if (o.frames.empty() || o.out.empty()) {
         BOOST_LOG(error) << "sbs-bench: --frames DIR and --out DIR are required";
         return false;
@@ -2701,40 +1951,19 @@ namespace sbs_bench {
         return false;
       }
       if (o.follow) {
-        if (o.artifacts == artifact_mode_e::evaluation) {
-          BOOST_LOG(error) << "sbs-bench: --follow supports adaptive or conversion artifacts only";
+        if (o.artifacts == artifact_mode_e::evaluation ||
+            (o.follow_format != "bgra8" && o.follow_format != "gbrpf32le") ||
+            o.follow_count == 0u || o.limit != 0 || o.output_every != 1) {
+          BOOST_LOG(error) << "sbs-bench: invalid raw transport whole-clip settings";
           return false;
         }
-        if (o.follow_format != "png" &&
-            o.follow_format != "bmp" &&
-            o.follow_format != "pfm" && o.follow_format != "bgra8" &&
-            o.follow_format != "gbrpf32le") {
-          BOOST_LOG(error) << "sbs-bench: --follow-format must be png, bmp, or pfm";
-          return false;
-        }
-        if (o.limit != 0 || o.output_every != 1) {
-          BOOST_LOG(error) << "sbs-bench: --follow forbids --limit and --output-every != 1";
-          return false;
-        }
-      } else if (!o.follow_format.empty() || o.follow_count != 0u) {
-        BOOST_LOG(error) << "sbs-bench: --follow-format/--follow-count require --follow";
+      } else if (o.artifacts == artifact_mode_e::conversion) {
+        BOOST_LOG(error) << "sbs-bench: conversion requires the raw memory transport";
         return false;
       }
-      if (
-        o.bounded_adaptive_state &&
-        (!o.follow || o.artifacts == artifact_mode_e::evaluation)
-      ) {
-        BOOST_LOG(error)
-          << "sbs-bench: --bounded-adaptive-state requires adaptive/conversion --follow";
-        return false;
-      }
-      if (
-        o.transient_raster_hard_cap_bytes != 0 &&
-        (!o.follow || o.artifacts != artifact_mode_e::conversion ||
-         !o.bounded_adaptive_state)
-      ) {
-        BOOST_LOG(error)
-          << "sbs-bench: --transient-raster-hard-cap-bytes requires bounded conversion --follow";
+      if (o.transient_raster_hard_cap_bytes != 0 &&
+          (!o.follow || o.artifacts != artifact_mode_e::conversion)) {
+        BOOST_LOG(error) << "sbs-bench: the transient-raster hard cap requires raw transport conversion";
         return false;
       }
       if (o.pop_strength >= 0.0 && !(o.pop_strength >= 0.25 && o.pop_strength <= 2.0)) {
@@ -2763,12 +1992,12 @@ namespace sbs_bench {
       std::uint64_t sbs = 0;
     };
 
-    nlohmann::ordered_json build_native_capabilities(bool production) {
+    nlohmann::ordered_json build_native_capabilities() {
       nlohmann::ordered_json capabilities = {
         {"schema", 1},
         {"native_whole_clip", {
           {"artifact_modes", {"adaptive", "conversion"}},
-          {"source_formats", {"png", "bmp", "pfm"}},
+          {"source_formats", {"bgra8", "gbrpf32le"}},
           {"source_scope", {
             {"frame_source", std::string {offline_sbs::whole_clip_frame_source}},
             {"analysis_region", std::string {offline_sbs::whole_clip_analysis_region}},
@@ -2776,9 +2005,7 @@ namespace sbs_bench {
             {"window_region_roi", false},
           }},
           {"frame_transport", offline_sbs::raw_frame_transport::name},
-          {"follow_protocol_schema", 2},
           {"follow_global_first_sequence", true},
-          {"follow_wakeup", "windows-directory-change-notification"},
           {"observation_timeline_schema", models::host_sbs_observation_timeline::schema},
           {"observation_timeline_unit", "monotonic-source-us-plus-one"},
           {"adaptive_state_schema", sbs_adaptive_state::schema_version},
@@ -2797,30 +2024,23 @@ namespace sbs_bench {
             {"tensorrt_enqueue_count", true},
           }},
           {"atomic_sbs_publication", true},
+          {"production_runner", "typed-native-pass-v1"},
+          {"native_evidence_transport", offline_sbs::completion_channel_t::name},
+          {"native_evidence_wakeup", "condition-variable"},
+          {"native_evidence_protocol_schema", 1},
+          {"native_evidence_float_representation", "finite-native-float32"},
         }},
       };
-
-      if (production) {
-        auto &native = capabilities["native_whole_clip"];
-        native.erase("follow_protocol_schema");
-        native.erase("follow_wakeup");
-        native["source_formats"] = {"bgra8", "gbrpf32le"};
-        native["production_runner"] = "typed-native-pass-v1";
-        native["native_evidence_transport"] = offline_sbs::completion_channel_t::name;
-        native["native_evidence_wakeup"] = "condition-variable";
-        native["native_evidence_protocol_schema"] = 1;
-        native["native_evidence_float_representation"] = "finite-native-float32";
-      }
       return capabilities;
     }
 
-    int publish_native_capabilities(const std::string &destination, bool production) {
+    int publish_native_capabilities(const std::string &destination) {
       std::error_code ec;
       const fs::path path = destination;
       if (!path.parent_path().empty()) {
         fs::create_directories(path.parent_path(), ec);
       }
-      if (ec || !publish_json_atomically(path, build_native_capabilities(production))) {
+      if (ec || !publish_json_atomically(path, build_native_capabilities())) {
         BOOST_LOG(error) << "sbs-bench: cannot publish capabilities document";
         return 2;
       }
@@ -2834,13 +2054,9 @@ namespace sbs_bench {
     offline_sbs::raw_frame_transport *transport,
     native_pass_counts_t *native_counts = nullptr
   ) {
-    if (transport && (!o.follow || !o.bounded_adaptive_state || o.follow_count == 0 ||
-                      o.artifacts == artifact_mode_e::evaluation)) {
+    // Only the native pass follows a producer, and always through its raw memory transport.
+    if ((transport != nullptr) != o.follow) {
       BOOST_LOG(error) << "sbs-bench: raw transport requires bounded causal whole-clip input";
-      return 2;
-    }
-    if (!transport && (o.follow_format == "bgra8" || o.follow_format == "gbrpf32le")) {
-      BOOST_LOG(error) << "sbs-bench: raw frames require the worker-owned memory transport";
       return 2;
     }
     if (!transport && !wic_init()) {
@@ -2848,13 +2064,10 @@ namespace sbs_bench {
       return 3;
     }
 
-    // Evaluation keeps its established WIC raster contract. Whole-clip adaptive/conversion modes
-    // additionally accept strict linear-scRGB PFM frames. A clip is one format family throughout:
-    // silently mixing SDR raster and HDR float interchange would corrupt both color semantics and
-    // timeline identity.
+    // A directory clip is SDR PNG or JPEG frames read through WIC. A whole clip is one format
+    // throughout: mixing formats would corrupt its timeline identity. The raw transport carries
+    // SDR BGRA8 or linear-scRGB planar float frames.
     std::vector<fs::path> frames;
-    bool found_sdr_raster = false;
-    bool found_hdr_pfm = false;
     bool found_mixed_sdr_formats = false;
     std::string sdr_raster_format;
     std::error_code ec;
@@ -2862,12 +2075,7 @@ namespace sbs_bench {
       BOOST_LOG(error) << "sbs-bench: --frames is not a readable directory: " << o.frames;
       return 4;
     }
-    if (o.follow) {
-      found_hdr_pfm = o.follow_format == "pfm" || o.follow_format == "gbrpf32le";
-      found_sdr_raster =
-        o.follow_format == "png" || o.follow_format == "bmp" || o.follow_format == "bgra8";
-      sdr_raster_format = found_sdr_raster ? o.follow_format : "";
-    } else {
+    if (!o.follow) {
       for (auto &e : fs::directory_iterator(o.frames, ec)) {
         if (!e.is_regular_file()) {
           continue;
@@ -2882,20 +2090,15 @@ namespace sbs_bench {
             found_mixed_sdr_formats = true;
           }
           sdr_raster_format = format;
-          found_sdr_raster = true;
-          frames.push_back(e.path());
-        } else if (ext == ".pfm" && o.artifacts != artifact_mode_e::evaluation) {
-          found_hdr_pfm = true;
           frames.push_back(e.path());
         }
       }
     }
-    if (o.artifacts != artifact_mode_e::evaluation &&
-        ((found_sdr_raster && found_hdr_pfm) || found_mixed_sdr_formats)) {
+    if (o.artifacts != artifact_mode_e::evaluation && found_mixed_sdr_formats) {
       BOOST_LOG(error) << "sbs-bench: mixed source image formats are not a valid whole clip";
       return 4;
     }
-    const bool pfm_input = found_hdr_pfm;
+    const bool hdr_source = o.follow_format == "gbrpf32le";
     if (!o.follow) {
       std::sort(frames.begin(), frames.end(), numeric_frame_less);
       if (o.limit > 0 && (int) frames.size() > o.limit) {
@@ -2913,14 +2116,10 @@ namespace sbs_bench {
       return 4;
     }
     if (!o.follow && frames.empty()) {
-      BOOST_LOG(error) << "sbs-bench: no supported "
-                       << (o.artifacts == artifact_mode_e::evaluation ?
-                             "png/jpg" :
-                             "png/jpg/PFM")
-                       << " frames in " << o.frames;
+      BOOST_LOG(error) << "sbs-bench: no supported png/jpg frames in " << o.frames;
       return 4;
     }
-    if (o.direct_glyph_qualification && (frames.empty() || frames.size() > 64u || pfm_input || sdr_raster_format != "png")) {
+    if (o.direct_glyph_qualification && (frames.empty() || frames.size() > 64u || sdr_raster_format != "png")) {
       BOOST_LOG(error) << "sbs-bench: Direct Glyph qualification requires 1..64 immutable SDR PNG sources";
       return 4;
     }
@@ -2962,9 +2161,6 @@ namespace sbs_bench {
         return 4;
       }
     }
-    const fs::path follow_progress_path =
-      fs::path(o.out) / "follow_progress.json";
-    std::optional<std::size_t> producer_frame_count;
 
     // Inherit the loaded config, then pin one depth update per source frame. The benchmark is
     // frame-driven rather than wall-clock-driven, so cadence throttling would make the result
@@ -3013,28 +2209,16 @@ namespace sbs_bench {
     const bool device_conditional_replay_evidence =
       o.device_conditional_replay || o.device_conditional_replay_control;
     const std::string discovered_input_frame_format =
-      transport ? (pfm_input ? "linear-scRGB-f32-planar" : "sRGB-BGRA8-raw") :
-      pfm_input ?
-        "linear-scRGB-f32-pfm" :
-        (sdr_raster_format == "jpeg" ?
-           "sRGB-JPEG-WIC" :
-           (sdr_raster_format == "bmp" ? "sRGB-BMP-WIC" : "sRGB-PNG-WIC"));
+      transport ? (hdr_source ? "linear-scRGB-f32-planar" : "sRGB-BGRA8-raw") :
+      (sdr_raster_format == "jpeg" ? "sRGB-JPEG-WIC" : "sRGB-PNG-WIC");
     // The V2 camera and depth history are stateful per frame, so depth cadence is always one
     // inference per source frame.
     constexpr int effective_depth_every = 1;
     const int max_width =
       o.max_width > 0 ? o.max_width : config::video.sbs.max_encode_width;
     constexpr std::size_t follow_first_sequence = 1u;
-    if (o.follow && !transport && !publish_follow_progress(follow_progress_path, "running", o.follow_format, artifact_mode_name(o.artifacts), follow_first_sequence, 0u, 0, 0u, 0u, {})) {
-      BOOST_LOG(error) << "sbs-bench: cannot initialize atomic follow progress";
-      return 4;
-    }
     std::ofstream adaptive_state_stream;
     std::size_t adaptive_state_frame_count = 0;
-    const fs::path adaptive_state_header_path =
-      fs::path(o.out) / "adaptive_state_header.json";
-    const fs::path adaptive_state_frame_path =
-      fs::path(o.out) / "adaptive_state_frame.json";
     if (whole_clip_mode) {
       if (transport) {
         offline_sbs::completion_header_t header;
@@ -3056,25 +2240,6 @@ namespace sbs_bench {
         header.first_sequence = follow_first_sequence;
         header.sbs_enabled = o.artifacts == artifact_mode_e::conversion;
         transport->completion.publish_header(std::move(header));
-      } else if (o.bounded_adaptive_state) {
-        std::error_code cleanup_error;
-        fs::remove(adaptive_state_header_path, cleanup_error);
-        fs::remove(adaptive_state_frame_path, cleanup_error);
-        if (!publish_adaptive_state_snapshot(
-              adaptive_state_header_path,
-              [&](std::ostream &out) {
-                return write_adaptive_state_header(
-                  out,
-                  model.name,
-                  sbs_cfg.pop_strength,
-                  effective_depth_every
-                );
-              }
-            )) {
-          BOOST_LOG(error)
-            << "sbs-bench: failed publishing bounded adaptive-state header";
-          return 6;
-        }
       } else {
         adaptive_state_stream.open(fs::path(o.out) / "adaptive_state.jsonl");
         if (!adaptive_state_stream) {
@@ -3419,139 +2584,44 @@ namespace sbs_bench {
         native_counts->sbs = static_cast<std::uint64_t>(written);
       }
     });
-    std::optional<follow_directory_watcher_t> follow_watcher;
-    if (o.follow && !transport) {
-      try {
-        follow_watcher.emplace(o.frames);
-      } catch (const std::exception &exception) {
-        BOOST_LOG(error) << "sbs-bench: " << exception.what();
-        return 10;
-      }
-    }
+    // Convert Video hands each packed frame and its evidence to the worker on one ordered
+    // thread, so the next frame's inference overlaps the previous frame's encoder handoff.
     const bool asynchronous_follow_conversion =
-      o.follow && o.artifacts == artifact_mode_e::conversion &&
-      o.bounded_adaptive_state;
-    std::unique_ptr<follow_directory_watcher_t> consumption_watcher;
+      transport && o.artifacts == artifact_mode_e::conversion;
     std::unique_ptr<ordered_single_slot_pipeline_t<post_render_frame_t>>
       post_render_pipeline;
     if (asynchronous_follow_conversion) {
       try {
-        if (!transport) consumption_watcher =
-          std::make_unique<follow_directory_watcher_t>(o.frames);
         post_render_pipeline = std::make_unique<
           ordered_single_slot_pipeline_t<post_render_frame_t>
         >([&](post_render_frame_t &&frame, const std::atomic_bool &stopping) {
-          if (transport && frame.processed_count > 1) {
+          if (frame.processed_count > 1) {
             transport->source.wait_acknowledged(frame.processed_count - 1);
           }
-          if (!transport && !frame.previous_source.empty()) {
-            std::string release_error;
-            if (!wait_for_consumed_follow_source(
-                  frame.previous_source,
-                  fs::path(o.frames) / ".producer-failed.json",
-                  *consumption_watcher,
-                  stopping,
-                  release_error
-                )) {
-              throw std::runtime_error(release_error);
-            }
+          if (stopping.load(std::memory_order_acquire)) {
+            throw std::runtime_error("post-render pipeline was stopped");
           }
+          const auto format = frame.hdr ? offline_sbs::raw_pixel_format::rgba16f :
+                                          offline_sbs::raw_pixel_format::bgra8;
+          offline_sbs::raw_frame raw;
+          raw.header = frame.raw_header;
+          raw.header.width = frame.width;
+          raw.header.height = frame.height;
+          raw.header.format = format;
+          raw.bgra = std::move(frame.bgra);
+          raw.rgba16 = std::move(frame.rgba16);
+          transport->sbs.publish(std::move(raw));
           if (stopping.load(std::memory_order_acquire)) {
             throw std::runtime_error("post-render pipeline was stopped");
           }
 
-          bool frame_written = false;
-          if (transport) {
-            offline_sbs::raw_frame raw;
-            raw.header = frame.raw_header;
-            raw.header.width = frame.width;
-            raw.header.height = frame.height;
-            raw.header.format = frame.pfm ? offline_sbs::raw_pixel_format::rgba16f : offline_sbs::raw_pixel_format::bgra8;
-            raw.bgra = std::move(frame.bgra);
-            raw.rgba16 = std::move(frame.rgba16);
-            transport->sbs.publish(std::move(raw));
-            frame_written = true;
-          } else if (frame.pfm) {
-            frame_written = publish_file_atomically(
-              frame.output_path,
-              [&](const fs::path &temporary_path) {
-                return save_pfm(
-                  temporary_path,
-                  frame.width,
-                  frame.height,
-                  frame.rgba16
-                );
-              },
-              atomic_write_mode_e::transient
-            );
-          } else {
-            // This callback always runs on the persistent ordered serializer
-            // thread. Initialize that apartment and its WIC factory once, then
-            // reuse both for every SDR frame until the thread exits.
-            thread_local serializer_wic_context_t writer_wic;
-            if (writer_wic.factory()) {
-              frame_written = publish_file_atomically(
-                frame.output_path,
-                [&](const fs::path &temporary_path) {
-                  return save_png(
-                    writer_wic.factory(),
-                    temporary_path,
-                    frame.width,
-                    frame.height,
-                    frame.bgra
-                  );
-                },
-                atomic_write_mode_e::transient
-              );
-            }
-          }
-          if (!frame_written) {
-            throw std::runtime_error(
-              "cannot serialize required SBS frame " + frame.output_id
-            );
-          }
-          if (stopping.load(std::memory_order_acquire)) {
-            throw std::runtime_error("post-render pipeline was stopped");
-          }
-
-          if (transport) {
-            offline_sbs::completion_frame_t completed;
-            completed.source = frame.raw_header;
-            completed.adaptive_state = frame.adaptive_state;
-            completed.depth_updated = true;
-            completed.sbs = offline_sbs::completion_sbs_info_t {
-              frame.width,
-              frame.height,
-              frame.pfm ? offline_sbs::raw_pixel_format::rgba16f :
-                          offline_sbs::raw_pixel_format::bgra8,
-            };
-            transport->completion.publish_frame(std::move(completed));
-          } else {
-            const auto write_state = [&](std::ostream &out) {
-              return write_adaptive_state_frame(
-                out,
-                frame.output_id,
-                frame.source_index,
-                true,
-                frame.adaptive_state
-              );
-            };
-            if (!publish_adaptive_state_snapshot(
-                  adaptive_state_frame_path,
-                  write_state
-                )) {
-              throw std::runtime_error(
-                "cannot publish adaptive state for frame " + frame.output_id
-              );
-            }
-          }
+          offline_sbs::completion_frame_t completed;
+          completed.source = frame.raw_header;
+          completed.adaptive_state = frame.adaptive_state;
+          completed.depth_updated = true;
+          completed.sbs = offline_sbs::completion_sbs_info_t {frame.width, frame.height, format};
+          transport->completion.publish_frame(std::move(completed));
           ++adaptive_state_frame_count;
-          if (!transport && !publish_follow_progress(follow_progress_path, "running", o.follow_format, artifact_mode_name(o.artifacts), follow_first_sequence, frame.processed_count, static_cast<int>(frame.processed_count), frame.width, frame.height, frame.producer_frame_count)) {
-            throw std::runtime_error(
-              "cannot acknowledge conversion follow frame " +
-              frame.output_id
-            );
-          }
         });
       } catch (const std::exception &exception) {
         BOOST_LOG(error) << "sbs-bench: cannot start bounded post-render pipeline: "
@@ -3580,29 +2650,7 @@ namespace sbs_bench {
         if (global_sequence > 1 && !asynchronous_follow_conversion)
           transport->source.wait_acknowledged(global_sequence - 1);
         raw_source = transport->source.receive(global_sequence);
-        producer_frame_count = o.follow_count;
         current_frame = fs::path(o.frames) / follow_frame_filename(global_sequence, o.follow_format);
-      } else if (o.follow) {
-        const auto next = wait_for_follow_frame(
-          o.frames,
-          o.follow_format,
-          global_sequence,
-          follow_first_sequence,
-          fi,
-          o.follow_count,
-          *follow_watcher
-        );
-        if (next.status == follow_wait_status_e::error) {
-          BOOST_LOG(error) << "sbs-bench: follow queue failed: " << next.error;
-          return 10;
-        }
-        if (next.producer_frame_count) {
-          producer_frame_count = next.producer_frame_count;
-        }
-        if (next.status == follow_wait_status_e::complete) {
-          break;
-        }
-        current_frame = next.frame;
       } else if (fi >= frames.size()) {
         break;
       } else {
@@ -3614,13 +2662,13 @@ namespace sbs_bench {
       std::string exact_source_sha256;
       std::uint64_t source_raster_bytes = 0;
       bool loaded = false;
-      const bool snapshot_source = o.follow || depth_coordinate_v2_gpu_mode || o.direct_glyph_qualification;
+      const bool snapshot_source = depth_coordinate_v2_gpu_mode || o.direct_glyph_qualification;
       if (transport) {
         const auto &header = raw_source->header;
         source_raster_bytes = raw_source->bytes();
-        if (offline_sbs::raw_source_byte_bound(source_raster_bytes, pfm_input) > transport->byte_limit)
+        if (offline_sbs::raw_source_byte_bound(source_raster_bytes, hdr_source) > transport->byte_limit)
           throw std::runtime_error("raw source plus HDR upload exceeds the transient raster hard cap");
-        if (pfm_input) {
+        if (hdr_source) {
           if (header.format != offline_sbs::raw_pixel_format::gbrpf32le)
             throw std::runtime_error("raw HDR source format changed");
           hdr_img.w = header.width;
@@ -3648,49 +2696,32 @@ namespace sbs_bench {
         }
         loaded = true;
       } else if (snapshot_source) {
-        // Follow frames are atomically published and immutable. Decode the same in-memory
-        // snapshot for both SDR and HDR instead of asking WIC to reopen the pathname: filename
-        // decoding can intermittently fail after a directory-change wakeup even though the
-        // complete BMP is already readable. Direct replay additionally hashes this exact byte
-        // snapshot so authentication and the uploaded SRV cannot diverge.
+        // Direct replay and qualification hash the exact byte snapshot they decode, so
+        // authentication and the uploaded SRV cannot diverge.
         std::string exact_source_snapshot;
-        if (o.follow) {
-          loaded = read_follow_source_snapshot(
-            current_frame,
-            exact_source_snapshot
-          );
-        } else {
-          loaded = read_file_snapshot(current_frame, exact_source_snapshot);
-        }
+        loaded = read_file_snapshot(current_frame, exact_source_snapshot);
         source_raster_bytes = static_cast<std::uint64_t>(
           exact_source_snapshot.size()
         );
         if (loaded) {
-          loaded = pfm_input ?
-                     load_pfm(std::string_view(exact_source_snapshot), hdr_img) :
-                     load_png(std::string_view(exact_source_snapshot), img);
+          loaded = load_png(std::string_view(exact_source_snapshot), img);
         }
-        if (loaded && (depth_coordinate_v2_gpu_mode || o.direct_glyph_qualification)) {
+        if (loaded) {
           exact_source_sha256 = sha256_hex(exact_source_snapshot);
         }
       } else {
-        loaded = pfm_input ?
-                   load_pfm(current_frame, hdr_img) :
-                   load_png(current_frame, img);
+        loaded = load_png(current_frame, img);
       }
       if (!loaded) {
         if (whole_clip_mode) {
-          BOOST_LOG(error) << "sbs-bench: invalid source frame " << current_frame
-                           << (pfm_input ?
-                                 " (expected strict finite FP16-range linear-scRGB PF little-endian PFM)" :
-                                 "");
+          BOOST_LOG(error) << "sbs-bench: invalid source frame " << current_frame;
           return 9;
         }
         BOOST_LOG(warning) << "sbs-bench: skip " << current_frame;
         continue;
       }
-      const UINT frame_width = pfm_input ? hdr_img.w : img.w;
-      const UINT frame_height = pfm_input ? hdr_img.h : img.h;
+      const UINT frame_width = hdr_source ? hdr_img.w : img.w;
+      const UINT frame_height = hdr_source ? hdr_img.h : img.h;
       if (!frame_width || !frame_height ||
           frame_width > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
           frame_height > D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION) {
@@ -3728,13 +2759,8 @@ namespace sbs_bench {
         const auto &geometry = *resolved_output_geometry;
         std::uint64_t required_bytes = 0;
         try {
-          required_bytes = transport ? offline_sbs::raw_raster_byte_bound(
-            source_raster_bytes, geometry.sbs_width, geometry.sbs_height, pfm_input, false
-          ) : offline_sbs::offline_single_slot_raster_bound(
-            source_raster_bytes,
-            geometry.sbs_width,
-            geometry.sbs_height,
-            pfm_input
+          required_bytes = offline_sbs::raw_raster_byte_bound(
+            source_raster_bytes, geometry.sbs_width, geometry.sbs_height, hdr_source, false
           );
         } catch (const std::exception &exception) {
           BOOST_LOG(error)
@@ -3755,11 +2781,11 @@ namespace sbs_bench {
       const std::string output_id = frame_id(current_frame, fi);
 
       // Input texture + SRV.
-      const void *input_pixels = pfm_input ?
+      const void *input_pixels = hdr_source ?
                                    static_cast<const void *>(hdr_img.rgba16.data()) :
                                    static_cast<const void *>(img.bgra.data());
-      const UINT input_pitch = frame_width * (pfm_input ? 8u : 4u);
-      const auto input_format = pfm_input ?
+      const UINT input_pitch = frame_width * (hdr_source ? 8u : 4u);
+      const auto input_format = hdr_source ?
                                   DXGI_FORMAT_R16G16B16A16_FLOAT :
                                   DXGI_FORMAT_B8G8R8A8_UNORM;
       if (!in_tex) {
@@ -3806,7 +2832,7 @@ namespace sbs_bench {
         td.Height = sbs_h;
         td.MipLevels = 1;
         td.ArraySize = 1;
-        td.Format = pfm_input ?
+        td.Format = hdr_source ?
                       DXGI_FORMAT_R16G16B16A16_FLOAT :
                       DXGI_FORMAT_B8G8R8A8_UNORM;
         td.SampleDesc.Count = 1;
@@ -3884,11 +2910,11 @@ namespace sbs_bench {
         }
         BOOST_LOG(info) << "sbs-bench: input " << frame_width << "x" << frame_height << " -> SBS "
                         << sbs_w << "x" << sbs_h
-                        << (pfm_input ? " (linear scRGB PFM -> FP16)" : " (sRGB SDR)");
+                        << (hdr_source ? " (linear scRGB -> FP16)" : " (sRGB SDR)");
       }
 
       // Submit and consume exactly one inference for this source frame.
-      const auto input_color = pfm_input ?
+      const auto input_color = hdr_source ?
                                  models::input_color_space::scrgb_hdr :
                                  models::input_color_space::srgb;
       // Depth cadence is fixed at one inference per source frame, so every frame is a depth update.
@@ -3909,10 +2935,7 @@ namespace sbs_bench {
             words
           );
         };
-        const bool state_written = o.bounded_adaptive_state ?
-          publish_adaptive_state_snapshot(adaptive_state_frame_path, write_frame) :
-          write_frame(adaptive_state_stream);
-        if (!state_written) {
+        if (!write_frame(adaptive_state_stream)) {
           BOOST_LOG(error)
             << "sbs-bench: cannot write adaptive state for frame " << output_id;
           return false;
@@ -4329,11 +3352,6 @@ namespace sbs_bench {
           completed.depth_updated = depth_updated;
           transport->completion.publish_frame(std::move(completed));
         }
-        if (o.follow && !transport && !publish_follow_progress(follow_progress_path, "running", o.follow_format, artifact_mode_name(o.artifacts), follow_first_sequence, fi + 1u, written, sbs_w, sbs_h, producer_frame_count)) {
-          BOOST_LOG(error) << "sbs-bench: cannot acknowledge adaptive follow frame "
-                           << output_id;
-          return 10;
-        }
         processed_frame_count = fi + 1u;
         if (((fi + 1) % 20) == 0) {
           BOOST_LOG(info) << "sbs-bench: processed " << (fi + 1)
@@ -4690,105 +3708,62 @@ namespace sbs_bench {
                            fs::path(o.out) / mask_name, warp_mask_stage);
       }
 
-      // Preserve real HDR conversion as linear scRGB float interchange. SDR retains its PNG
-      // artifact behavior.
+      // Convert Video hands the packed frame to the worker, HDR as linear scRGB FP16. Evaluation
+      // writes SDR PNG.
       ctx->CopyResource(sbs_stage.Get(), final_sbs_tex);
       D3D11_MAPPED_SUBRESOURCE m = {};
       bool output_completed = false;
       std::optional<post_render_frame_t> asynchronous_output;
       if (SUCCEEDED(ctx->Map(sbs_stage.Get(), 0, D3D11_MAP_READ, 0, &m))) {
         bool frame_written = false;
-        if (pfm_input) {
-          char name[64];
-          snprintf(name, sizeof(name), "sbs_%s.pfm", output_id.c_str());
-          const fs::path output_path = fs::path(o.out) / name;
-          if (asynchronous_follow_conversion) {
-            const auto pixels = static_cast<std::uint64_t>(sbs_w) * sbs_h;
-            if (pixels > std::numeric_limits<std::size_t>::max() / 4u ||
-                m.RowPitch < static_cast<std::size_t>(sbs_w) * 4u *
-                               sizeof(std::uint16_t)) {
-              ctx->Unmap(sbs_stage.Get(), 0);
-              BOOST_LOG(error) << "sbs-bench: invalid HDR SBS staging layout";
-              return 6;
-            }
-            post_render_frame_t frame;
-            frame.processed_count = fi + 1u;
-            frame.source_index = fi;
-            frame.output_id = output_id;
-            frame.output_path = output_path;
-            frame.width = sbs_w;
-            frame.height = sbs_h;
-            frame.pfm = true;
-            frame.producer_frame_count = producer_frame_count;
-            frame.rgba16.resize(static_cast<std::size_t>(pixels) * 4u);
-            for (UINT y = 0; y < sbs_h; ++y) {
-              std::memcpy(
-                frame.rgba16.data() +
-                  static_cast<std::size_t>(y) * sbs_w * 4u,
-                static_cast<const std::uint8_t *>(m.pData) +
-                  static_cast<std::size_t>(y) * m.RowPitch,
-                static_cast<std::size_t>(sbs_w) * 4u *
-                  sizeof(std::uint16_t)
-              );
-            }
-            asynchronous_output.emplace(std::move(frame));
-            frame_written = true;
-          } else {
-            frame_written = o.follow ?
-                              publish_file_atomically(
-                                output_path,
-                                [&](const fs::path &temporary_path) {
-                                  return save_pfm(temporary_path, sbs_w, sbs_h, m);
-                                },
-                                o.follow ? atomic_write_mode_e::transient :
-                                           atomic_write_mode_e::durable
-                              ) :
-                              save_pfm(output_path, sbs_w, sbs_h, m);
-          }
-          ctx->Unmap(sbs_stage.Get(), 0);
-          if (!frame_written) {
-            BOOST_LOG(error) << "sbs-bench: non-finite or unwritable HDR SBS frame "
-                             << output_path;
+        if (hdr_source) {
+          const auto pixels = static_cast<std::uint64_t>(sbs_w) * sbs_h;
+          if (pixels > std::numeric_limits<std::size_t>::max() / 4u ||
+              m.RowPitch < static_cast<std::size_t>(sbs_w) * 4u *
+                             sizeof(std::uint16_t)) {
+            ctx->Unmap(sbs_stage.Get(), 0);
+            BOOST_LOG(error) << "sbs-bench: invalid HDR SBS staging layout";
             return 6;
           }
+          post_render_frame_t frame;
+          frame.processed_count = fi + 1u;
+          frame.output_id = output_id;
+          frame.width = sbs_w;
+          frame.height = sbs_h;
+          frame.hdr = true;
+          frame.rgba16.resize(static_cast<std::size_t>(pixels) * 4u);
+          for (UINT y = 0; y < sbs_h; ++y) {
+            std::memcpy(
+              frame.rgba16.data() +
+                static_cast<std::size_t>(y) * sbs_w * 4u,
+              static_cast<const std::uint8_t *>(m.pData) +
+                static_cast<std::size_t>(y) * m.RowPitch,
+              static_cast<std::size_t>(sbs_w) * 4u *
+                sizeof(std::uint16_t)
+            );
+          }
+          asynchronous_output.emplace(std::move(frame));
+          frame_written = true;
+          ctx->Unmap(sbs_stage.Get(), 0);
         } else {
           std::vector<uint8_t> buf((size_t) sbs_w * sbs_h * 4);
           for (UINT y = 0; y < sbs_h; y++) {
             memcpy(&buf[(size_t) y * sbs_w * 4], (uint8_t *) m.pData + (size_t) y * m.RowPitch, sbs_w * 4);
           }
           ctx->Unmap(sbs_stage.Get(), 0);
-          char name[64];
-          snprintf(name, sizeof(name), "sbs_%s.png", output_id.c_str());
-          const fs::path output_path = fs::path(o.out) / name;
           if (asynchronous_follow_conversion) {
             post_render_frame_t frame;
             frame.processed_count = fi + 1u;
-            frame.source_index = fi;
             frame.output_id = output_id;
-            frame.output_path = output_path;
             frame.width = sbs_w;
             frame.height = sbs_h;
-            frame.pfm = false;
             frame.bgra = std::move(buf);
-            frame.producer_frame_count = producer_frame_count;
             asynchronous_output.emplace(std::move(frame));
             frame_written = true;
           } else {
-            frame_written = o.follow ?
-                              publish_file_atomically(
-                                output_path,
-                                [&](const fs::path &temporary_path) {
-                                  return save_png(temporary_path, sbs_w, sbs_h, buf);
-                                },
-                                o.follow ? atomic_write_mode_e::transient :
-                                           atomic_write_mode_e::durable
-                              ) :
-                              save_png(output_path, sbs_w, sbs_h, buf);
-          }
-          if (whole_clip_mode && !frame_written) {
-            BOOST_LOG(error) << "sbs-bench: failed writing required SBS frame "
-                             << output_path;
-            return 6;
+            char name[64];
+            snprintf(name, sizeof(name), "sbs_%s.png", output_id.c_str());
+            frame_written = save_png(fs::path(o.out) / name, sbs_w, sbs_h, buf);
           }
         }
         if (frame_written) {
@@ -4944,12 +3919,7 @@ namespace sbs_bench {
             return 6;
           }
           asynchronous_output->adaptive_state = words;
-          if (transport) asynchronous_output->raw_header = raw_source->header;
-          if (!transport && global_sequence > follow_first_sequence) {
-            asynchronous_output->previous_source =
-              fs::path(o.frames) /
-              follow_frame_filename(global_sequence - 1u, o.follow_format);
-          }
+          asynchronous_output->raw_header = raw_source->header;
           try {
             post_render_pipeline->submit(std::move(*asynchronous_output));
           } catch (const std::exception &exception) {
@@ -4959,31 +3929,6 @@ namespace sbs_bench {
           }
         } else if (!persist_adaptive_state()) {
           return 6;
-        }
-      }
-      if (o.follow && !asynchronous_follow_conversion) {
-        if (!output_completed) {
-          BOOST_LOG(error) << "sbs-bench: follow conversion did not finalize SBS frame "
-                           << output_id;
-          return 10;
-        }
-        if (transport) {
-          offline_sbs::completion_frame_t completed;
-          completed.source = raw_source->header;
-          completed.adaptive_state = words;
-          completed.depth_updated = depth_updated;
-          completed.sbs = offline_sbs::completion_sbs_info_t {
-            sbs_w,
-            sbs_h,
-            pfm_input ? offline_sbs::raw_pixel_format::rgba16f :
-                        offline_sbs::raw_pixel_format::bgra8,
-          };
-          transport->completion.publish_frame(std::move(completed));
-        }
-        if (!transport && !publish_follow_progress(follow_progress_path, "running", o.follow_format, artifact_mode_name(o.artifacts), follow_first_sequence, fi + 1u, written, sbs_w, sbs_h, producer_frame_count)) {
-          BOOST_LOG(error) << "sbs-bench: cannot acknowledge conversion follow frame "
-                           << output_id;
-          return 10;
         }
       }
       processed_frame_count = fi + 1u;
@@ -5134,9 +4079,7 @@ namespace sbs_bench {
       }
     }
 
-    if (o.follow &&
-        (!producer_frame_count || processed_frame_count == 0u ||
-         processed_frame_count != *producer_frame_count)) {
+    if (o.follow && processed_frame_count != o.follow_count) {
       BOOST_LOG(error) << "sbs-bench: follow sequence did not finish at the producer frame_count";
       return 10;
     }
@@ -5617,17 +4560,17 @@ namespace sbs_bench {
                  << "}\n";
       }
     } else {
-      if (!o.bounded_adaptive_state) {
+      if (!transport) {
         adaptive_state_stream.flush();
       }
       if (
-        (!o.bounded_adaptive_state && !adaptive_state_stream.good()) ||
+        (!transport && !adaptive_state_stream.good()) ||
         adaptive_state_frame_count != completed_frame_count
       ) {
         BOOST_LOG(error) << "sbs-bench: adaptive-state trace is incomplete";
         return 8;
       }
-      if (!o.bounded_adaptive_state) {
+      if (!transport) {
         adaptive_state_stream.close();
       }
       if (o.artifacts == artifact_mode_e::conversion &&
@@ -5647,16 +4590,15 @@ namespace sbs_bench {
       const std::string &input_frame_format =
         discovered_input_frame_format;
       const std::string input_texture_format =
-        pfm_input ? "R16G16B16A16_FLOAT" : "B8G8R8A8_UNORM";
+        hdr_source ? "R16G16B16A16_FLOAT" : "B8G8R8A8_UNORM";
       const std::string pipeline_color_space =
-        pfm_input ? "linear-scRGB" : "sRGB-SDR";
+        hdr_source ? "linear-scRGB" : "sRGB-SDR";
       const std::string packed_texture_format =
-        pfm_input ? "R16G16B16A16_FLOAT" : "B8G8R8A8_UNORM";
+        hdr_source ? "R16G16B16A16_FLOAT" : "B8G8R8A8_UNORM";
       const std::string output_frame_format =
-        transport ? (pfm_input ? "linear-scRGB-f16-raw" : "sRGB-BGRA8-raw") :
-        pfm_input ? "linear-scRGB-f32-pfm" : "sRGB-BGRA8-PNG";
-      const std::string output_transfer = pfm_input ? "linear" : "sRGB";
-      const std::string output_row_order = !transport && pfm_input ? "bottom-up" : "top-down";
+        transport ? (hdr_source ? "linear-scRGB-f16-raw" : "sRGB-BGRA8-raw") : "sRGB-BGRA8-PNG";
+      const std::string output_transfer = hdr_source ? "linear" : "sRGB";
+      const std::string output_row_order = "top-down";
 
       offline_sbs::wire::whole_clip_resolved_runtime_t resolved_runtime {
         .model = model.name,
@@ -5670,26 +4612,26 @@ namespace sbs_bench {
         .input_color_space = pipeline_color_space,
         .input_frame_format = input_frame_format,
         .input_texture_format = input_texture_format,
-        .input_transfer = pfm_input ? "linear" : "sRGB",
-        .input_primaries = pfm_input ? "scRGB/BT.709" : "sRGB/BT.709",
-        .input_reference_white_nits = pfm_input ?
+        .input_transfer = hdr_source ? "linear" : "sRGB",
+        .input_primaries = hdr_source ? "scRGB/BT.709" : "sRGB/BT.709",
+        .input_reference_white_nits = hdr_source ?
                                         std::optional<double> {80.0} :
                                         std::nullopt,
         .packed_texture_format = packed_texture_format,
         .packed_color_space = pipeline_color_space,
-        .packed_transfer = pfm_input ? "linear" : "sRGB",
-        .packed_primaries = pfm_input ? "scRGB/BT.709" : "sRGB/BT.709",
-        .packed_reference_white_nits = pfm_input ?
+        .packed_transfer = hdr_source ? "linear" : "sRGB",
+        .packed_primaries = hdr_source ? "scRGB/BT.709" : "sRGB/BT.709",
+        .packed_reference_white_nits = hdr_source ?
                                          std::optional<double> {80.0} :
                                          std::nullopt,
         .output_frame_format = output_frame_format,
         .output_transfer = output_transfer,
-        .output_primaries = pfm_input ? "scRGB/BT.709" : "sRGB/BT.709",
-        .output_reference_white_nits = pfm_input ?
+        .output_primaries = hdr_source ? "scRGB/BT.709" : "sRGB/BT.709",
+        .output_reference_white_nits = hdr_source ?
                                          std::optional<double> {80.0} :
                                          std::nullopt,
         .output_row_order = output_row_order,
-        .output_ffmpeg_pixel_format = pfm_input ?
+        .output_ffmpeg_pixel_format = hdr_source ?
                                         std::optional<std::string> {"gbrpf32le"} :
                                         (transport ? std::optional<std::string> {"bgra"} : std::nullopt),
         .configured_max_encode_width = sbs_cfg.max_encode_width,
@@ -5703,12 +4645,9 @@ namespace sbs_bench {
         .follow_count_bound = o.follow_count > 0u ?
                                 std::optional<std::uint64_t> {o.follow_count} :
                                 std::nullopt,
-        .follow_producer_frame_count = producer_frame_count,
-        .follow_frame_pattern = o.follow && !transport ?
-                                  std::optional<std::string> {
-                                    "frame_%010d." + o.follow_format
-                                  } :
-                                  std::nullopt,
+        .follow_producer_frame_count = o.follow ?
+                                         std::optional<std::uint64_t> {o.follow_count} :
+                                         std::nullopt,
         .follow_first_sequence = o.follow ?
                                    std::optional<std::uint64_t> {
                                      follow_first_sequence
@@ -5717,15 +4656,6 @@ namespace sbs_bench {
         .follow_poll_interval_ms = o.follow ?
                                      std::optional<std::uint32_t> {0u} :
                                      std::nullopt,
-        .follow_done_sentinel = o.follow && !transport ?
-                                  std::optional<std::string> {".producer-done.json"} :
-                                  std::nullopt,
-        .follow_failed_sentinel = o.follow && !transport ?
-                                    std::optional<std::string> {".producer-failed.json"} :
-                                    std::nullopt,
-        .follow_progress_file = o.follow && !transport ?
-                                  std::optional<std::string> {"follow_progress.json"} :
-                                  std::nullopt,
         .follow_native_input_deletion = false,
         .follow_atomic_sbs_publication =
           o.follow && o.artifacts == artifact_mode_e::conversion,
@@ -5746,16 +4676,6 @@ namespace sbs_bench {
           .capture = std::string {sbs_adaptive_state::capture},
           .frame_count = adaptive_state_frame_count,
         };
-      } else if (o.bounded_adaptive_state) {
-        adaptive_state = {
-          .transport = "atomic-latest-v1",
-          .header_file = "adaptive_state_header.json",
-          .frame_file = "adaptive_state_frame.json",
-          .retained_history = false,
-          .schema = sbs_adaptive_state::schema_version,
-          .capture = std::string {sbs_adaptive_state::capture},
-          .frame_count = adaptive_state_frame_count,
-        };
       } else {
         adaptive_state = {
           .transport = "jsonl-v1",
@@ -5768,20 +4688,16 @@ namespace sbs_bench {
       }
       const offline_sbs::wire::whole_clip_sbs_t sbs_contract {
         .enabled = o.artifacts == artifact_mode_e::conversion,
-        .file_pattern = !transport && o.artifacts == artifact_mode_e::conversion ?
-                           std::optional<std::string> {pfm_input ?
-                             "sbs_<frame-id>.pfm" : "sbs_<frame-id>.png"} :
-                           std::nullopt,
         .frame_count = static_cast<std::uint64_t>(written),
         .width = sbs_w,
         .height = sbs_h,
-        .frame_format = transport ? (pfm_input ? "rgba16f" : "bgra8") : output_frame_format,
+        .frame_format = transport ? (hdr_source ? "rgba16f" : "bgra8") : output_frame_format,
         .transfer = output_transfer,
-        .primaries = pfm_input ? "scRGB/BT.709" : "sRGB/BT.709",
-        .reference_white_nits = pfm_input ?
+        .primaries = hdr_source ? "scRGB/BT.709" : "sRGB/BT.709",
+        .reference_white_nits = hdr_source ?
                                    std::optional<double> {80.0} : std::nullopt,
         .row_order = output_row_order,
-        .ffmpeg_pixel_format = pfm_input ?
+        .ffmpeg_pixel_format = hdr_source ?
                                   std::optional<std::string> {"gbrpf32le"} :
                                   (transport ? std::optional<std::string> {"bgra"} : std::nullopt),
         .atomic_publication =
@@ -5831,10 +4747,6 @@ namespace sbs_bench {
                          << exception.what();
         return 8;
       }
-      if (o.follow && !transport && !publish_follow_progress(follow_progress_path, "complete", o.follow_format, artifact_mode_name(o.artifacts), follow_first_sequence, completed_frame_count, written, sbs_w, sbs_h, producer_frame_count)) {
-        BOOST_LOG(error) << "sbs-bench: cannot publish terminal follow progress";
-        return 10;
-      }
     }
     BOOST_LOG(info) << "sbs-bench: wrote " << written << " SBS frames + sbs_perf.json to " << o.out;
     return o.artifacts == artifact_mode_e::adaptive || written > 0 ? 0 : 8;
@@ -5844,9 +4756,6 @@ namespace sbs_bench {
     opts o;
     if (!parse_opts(argc, argv, o)) {
       return 2;
-    }
-    if (!o.capabilities.empty()) {
-      return publish_native_capabilities(o.capabilities, false);
     }
     return run_core(std::move(o), nullptr);
   }
@@ -5869,7 +4778,6 @@ namespace sbs_bench {
         o.out = settings.transient_output_directory;
         o.observation_timeline = settings.observation_timeline;
         o.follow = true;
-        o.bounded_adaptive_state = true;
         o.follow_count = static_cast<std::size_t>(settings.frame_count);
         o.follow_format = settings.source_format == offline_sbs::raw_pixel_format::bgra8 ?
                             "bgra8" :
@@ -5933,6 +4841,6 @@ namespace offline_sbs {
   }
 
   int write_native_capabilities(const std::string &destination) {
-    return sbs_bench::publish_native_capabilities(destination, true);
+    return sbs_bench::publish_native_capabilities(destination);
   }
 }  // namespace offline_sbs

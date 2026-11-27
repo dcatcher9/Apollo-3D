@@ -9,9 +9,8 @@
 #include <gtest/gtest.h>
 
 namespace {
-  offline_sbs::wire::whole_clip_contract_t whole_clip(
-    const bool conversion
-  ) {
+  // The CLI adaptive trace: a directory clip and its retained JSONL history.
+  offline_sbs::wire::whole_clip_contract_t trace_whole_clip() {
     return {
       .observation_timeline = offline_sbs::wire::observation_timeline_contract_t {
         .schema = 1,
@@ -19,7 +18,7 @@ namespace {
         .count = 2,
         .sha256 = std::string(64, 'b'),
       },
-      .artifact_mode = conversion ? "conversion" : "adaptive",
+      .artifact_mode = "adaptive",
       .inference_mode = "single-pass-tensorrt",
       .depth_inference_enabled = true,
       .scheduled_depth_update_count = 2,
@@ -42,7 +41,7 @@ namespace {
         .cuda_graph = true,
         .cuda_graph_captured = true,
         .input_color_space = "sRGB-SDR",
-        .input_frame_format = "sRGB-BMP-WIC",
+        .input_frame_format = "sRGB-PNG-WIC",
         .input_texture_format = "B8G8R8A8_UNORM",
         .input_transfer = "sRGB",
         .input_primaries = "sRGB/BT.709",
@@ -58,18 +57,9 @@ namespace {
         .resolved_max_output_width = 8192,
         .input_limit = 0,
         .output_every = 1,
-        .follow_mode = true,
-        .follow_format = "bmp",
-        .follow_count_bound = 2,
-        .follow_producer_frame_count = 2,
-        .follow_frame_pattern = "frame_%010d.bmp",
-        .follow_first_sequence = 1,
-        .follow_poll_interval_ms = 0,
-        .follow_done_sentinel = ".producer-done.json",
-        .follow_failed_sentinel = ".producer-failed.json",
-        .follow_progress_file = "follow_progress.json",
+        .follow_mode = false,
         .follow_native_input_deletion = false,
-        .follow_atomic_sbs_publication = conversion,
+        .follow_atomic_sbs_publication = false,
         .output_eye_width = 1920,
         .output_eye_height = 1080,
         .output_sbs_width = 3840,
@@ -78,27 +68,19 @@ namespace {
         .content_scale_y = 1.0,
       },
       .adaptive_state = {
-        .transport = "atomic-latest-v1",
-        .header_file = "adaptive_state_header.json",
-        .frame_file = "adaptive_state_frame.json",
-        .retained_history = false,
+        .transport = "jsonl-v1",
+        .file = "adaptive_state.jsonl",
+        .retained_history = true,
         .schema = 1,
         .capture = "depth-health-state",
         .frame_count = 2,
       },
       .sbs = {
-        .enabled = conversion,
-        .file_pattern = conversion ?
-                          std::optional<std::string> {"sbs_<frame-id>.png"} :
-                          std::nullopt,
-        .frame_count = conversion ? 2u : 0u,
-        .width = conversion ? 3840u : 0u,
-        .height = conversion ? 1080u : 0u,
+        .enabled = false,
         .frame_format = "sRGB-BGRA8-PNG",
         .transfer = "sRGB",
         .primaries = "sRGB/BT.709",
         .row_order = "top-down",
-        .atomic_publication = conversion,
       },
     };
   }
@@ -126,28 +108,34 @@ namespace {
 
   // The worker's raw-memory transport with its in-memory completion evidence.
   offline_sbs::wire::whole_clip_contract_t memory_whole_clip(const bool conversion) {
-    auto contract = whole_clip(conversion);
+    auto contract = trace_whole_clip();
+    contract.artifact_mode = conversion ? "conversion" : "adaptive";
     auto &runtime = contract.resolved_runtime;
     runtime.frame_transport = offline_sbs::raw_frame_transport::name;
     runtime.input_frame_format = "sRGB-BGRA8-raw";
     runtime.output_frame_format = "sRGB-BGRA8-raw";
     runtime.output_ffmpeg_pixel_format = "bgra";
+    runtime.follow_mode = true;
     runtime.follow_format = "bgra8";
-    runtime.follow_frame_pattern.reset();
-    runtime.follow_done_sentinel.reset();
-    runtime.follow_failed_sentinel.reset();
-    runtime.follow_progress_file.reset();
+    runtime.follow_count_bound = 2;
+    runtime.follow_producer_frame_count = 2;
+    runtime.follow_first_sequence = 1;
+    runtime.follow_poll_interval_ms = 0;
+    runtime.follow_atomic_sbs_publication = conversion;
     auto &adaptive = contract.adaptive_state;
     adaptive.transport = offline_sbs::completion_channel_t::name;
-    adaptive.header_file.reset();
-    adaptive.frame_file.reset();
     adaptive.file.reset();
+    adaptive.retained_history = false;
     adaptive.schema = sbs_adaptive_state::schema_version;
     adaptive.capture = sbs_adaptive_state::capture;
     auto &sbs = contract.sbs;
-    sbs.file_pattern.reset();
+    sbs.enabled = conversion;
+    sbs.frame_count = conversion ? 2u : 0u;
+    sbs.width = conversion ? 3840u : 0u;
+    sbs.height = conversion ? 1080u : 0u;
     sbs.frame_format = "bgra8";
     sbs.ffmpeg_pixel_format = "bgra";
+    sbs.atomic_publication = conversion;
     return contract;
   }
 
@@ -411,23 +399,18 @@ TEST(OfflineSbsWireContractTest, WorkerResultRejectsCrossContractMismatches) {
     encoded["analysis_contract"]["resolved_runtime"]["follow_format"] = "png";
   });
   expect_rejected([](auto &encoded) {
-    encoded["analysis_contract"]["resolved_runtime"]["follow_frame_pattern"] =
-      "frame_%010d.png";
-  });
-  expect_rejected([](auto &encoded) {
     encoded["analysis_contract"]["resolved_runtime"]["input_frame_format"] =
       "sRGB-PNG-WIC";
   });
   expect_rejected([](auto &encoded) {
-    // File-transport evidence is a valid evaluator contract but never comes from a worker.
-    encoded["analysis_contract"] = offline_sbs::wire::to_json(whole_clip(true));
+    // The CLI adaptive trace is a valid contract but never comes from a worker.
+    encoded["analysis_contract"] = offline_sbs::wire::to_json(trace_whole_clip());
   });
   expect_rejected([](auto &encoded) {
     encoded["analysis_contract"]["adaptive_state"] = {
-      {"transport", "atomic-latest-v1"},
-      {"header_file", "adaptive_state_header.json"},
-      {"frame_file", "adaptive_state_frame.json"},
-      {"retained_history", false},
+      {"transport", "jsonl-v1"},
+      {"file", "adaptive_state.jsonl"},
+      {"retained_history", true},
       {"schema", 1},
       {"capture", "depth-health-state"},
       {"frame_count", 2},
@@ -456,7 +439,7 @@ TEST(OfflineSbsWireContractTest, WorkerResultRejectsCrossContractMismatches) {
 }
 
 TEST(OfflineSbsWireContractTest, WholeClipRoundTripsAndRejectsNestedUnknownField) {
-  const auto encoded = offline_sbs::wire::to_json(whole_clip(false));
+  const auto encoded = offline_sbs::wire::to_json(trace_whole_clip());
   const auto parsed = offline_sbs::wire::parse_whole_clip_contract(encoded);
   EXPECT_EQ(parsed.resolved_runtime.model, parsed.model);
   EXPECT_FALSE(parsed.sbs.enabled);
@@ -604,8 +587,6 @@ TEST(OfflineSbsWireContractTest, RawTransportRoundTripsWithoutRasterFilenames) {
   EXPECT_EQ(offline_sbs::wire::parse_worker_result_contract(encoded).analysis_contract.sbs.frame_format, "bgra8");
   encoded["analysis_contract"]["resolved_runtime"].erase("frame_transport");
   EXPECT_THROW(offline_sbs::wire::parse_worker_result_contract(encoded), offline_sbs::wire::contract_error);
-  value.analysis_contract.sbs.file_pattern = "frame_%010d.png";
-  EXPECT_THROW(offline_sbs::wire::to_json(value), offline_sbs::wire::contract_error);
 }
 
 TEST(OfflineSbsWireContractTest, MemoryCompletionConversionRoundTripsWithoutEvidencePaths) {
@@ -621,9 +602,6 @@ TEST(OfflineSbsWireContractTest, MemoryCompletionConversionRoundTripsWithoutEvid
                                            }));
   const auto &runtime = analysis.at("resolved_runtime");
   EXPECT_EQ(runtime.at("frame_transport"), "bounded-raw-memory-v1");
-  for (const auto *key : {"follow_frame_pattern", "follow_done_sentinel", "follow_failed_sentinel", "follow_progress_file"}) {
-    EXPECT_TRUE(runtime.at(key).is_null()) << key;
-  }
   EXPECT_EQ(runtime.at("follow_mode"), true);
   EXPECT_EQ(runtime.at("follow_poll_interval_ms"), 0);
   EXPECT_EQ(offline_sbs::wire::to_json(offline_sbs::wire::parse_worker_result_contract(encoded)), encoded);
@@ -645,7 +623,7 @@ TEST(OfflineSbsWireContractTest, MemoryCompletionEvaluationKeepsTheSameCausalEvi
 
 TEST(OfflineSbsWireContractTest, MemoryCompletionRejectsUnknownAndFileKeysEvenWhenNull) {
   const auto valid = offline_sbs::wire::to_json(worker_result().analysis_contract);
-  for (const auto *key : {"header_file", "frame_file", "file", "unknown_evidence_field"}) {
+  for (const auto *key : {"file", "unknown_evidence_field"}) {
     auto invalid = valid;
     invalid["adaptive_state"][key] = nullptr;
     EXPECT_THROW(offline_sbs::wire::parse_whole_clip_contract(invalid), offline_sbs::wire::contract_error) << key;
@@ -659,12 +637,6 @@ TEST(OfflineSbsWireContractTest, MemoryCompletionRejectsUnknownAndFileKeysEvenWh
 
 TEST(OfflineSbsWireContractTest, MemoryCompletionSerializerRejectsContradictoryTypedFilePaths) {
   auto value = worker_result().analysis_contract;
-  value.adaptive_state.header_file = "header.json";
-  EXPECT_THROW(offline_sbs::wire::to_json(value), offline_sbs::wire::contract_error);
-  value.adaptive_state.header_file.reset();
-  value.adaptive_state.frame_file = "frame.json";
-  EXPECT_THROW(offline_sbs::wire::to_json(value), offline_sbs::wire::contract_error);
-  value.adaptive_state.frame_file.reset();
   value.adaptive_state.file = "frames.jsonl";
   EXPECT_THROW(offline_sbs::wire::to_json(value), offline_sbs::wire::contract_error);
 }
@@ -677,10 +649,6 @@ TEST(OfflineSbsWireContractTest, MemoryCompletionRequiresNativeRawCausalTranspor
   const nlohmann::json contradictions {
     {"frame_transport", "future-raw-memory-v2"},
     {"follow_mode", false},
-    {"follow_frame_pattern", "frame_%010d.bmp"},
-    {"follow_done_sentinel", ".done.json"},
-    {"follow_failed_sentinel", ".failed.json"},
-    {"follow_progress_file", "progress.json"},
     {"follow_poll_interval_ms", 1},
     {"follow_native_input_deletion", true},
   };
@@ -710,24 +678,15 @@ TEST(OfflineSbsWireContractTest, MemoryCompletionRequiresCurrentGeneratedEvidenc
   }
 }
 
-TEST(OfflineSbsWireContractTest, LegacyAdaptiveFileVariantsKeepTheirOriginalSchemaAndPaths) {
-  auto value = whole_clip(false);
-  const auto atomic = offline_sbs::wire::to_json(value);
-  EXPECT_EQ(atomic.at("adaptive_state").at("schema"), 1);
-  EXPECT_EQ(atomic.at("adaptive_state").at("capture"), "depth-health-state");
-  EXPECT_EQ(offline_sbs::wire::to_json(offline_sbs::wire::parse_whole_clip_contract(atomic)), atomic);
-
-  value.adaptive_state.transport = "jsonl-v1";
-  value.adaptive_state.header_file.reset();
-  value.adaptive_state.frame_file.reset();
-  value.adaptive_state.file = "adaptive_state.jsonl";
-  value.adaptive_state.retained_history = true;
-  const auto jsonl = offline_sbs::wire::to_json(value);
+TEST(OfflineSbsWireContractTest, AdaptiveTraceKeepsItsSchemaAndFile) {
+  const auto jsonl = offline_sbs::wire::to_json(trace_whole_clip());
+  EXPECT_EQ(jsonl.at("adaptive_state").at("schema"), 1);
+  EXPECT_EQ(jsonl.at("adaptive_state").at("capture"), "depth-health-state");
   EXPECT_EQ(jsonl.at("adaptive_state").at("file"), "adaptive_state.jsonl");
   EXPECT_EQ(offline_sbs::wire::to_json(offline_sbs::wire::parse_whole_clip_contract(jsonl)), jsonl);
-  auto mixed = jsonl;
-  mixed["adaptive_state"]["header_file"] = "header.json";
-  EXPECT_THROW(offline_sbs::wire::parse_whole_clip_contract(mixed), offline_sbs::wire::contract_error);
+  auto unknown = jsonl;
+  unknown["adaptive_state"]["header_file"] = "header.json";
+  EXPECT_THROW(offline_sbs::wire::parse_whole_clip_contract(unknown), offline_sbs::wire::contract_error);
 }
 
 TEST(OfflineSbsWireContractTest, PersistedWorkerEvidencePreservesLegacyAndNativeBodiesWithoutRetagging) {
@@ -739,7 +698,7 @@ TEST(OfflineSbsWireContractTest, PersistedWorkerEvidencePreservesLegacyAndNative
   const auto native_result = offline_sbs::wire::to_json(worker_result());
   // A file-transport worker result retained by an earlier release; no current worker emits it.
   auto legacy_file_result = native_result;
-  legacy_file_result["analysis_contract"] = offline_sbs::wire::to_json(whole_clip(true));
+  legacy_file_result["analysis_contract"] = offline_sbs::wire::to_json(trace_whole_clip());
   for (const auto &body : {old_result, legacy_file_result, native_result}) {
     auto retained = persisted_job();
     retained.snapshot.worker_result = body;

@@ -97,19 +97,6 @@ namespace offline_sbs {
   );
 
   /**
-   * Conservative residency for the non-overlapped conversion handoff: one decoded source
-   * artifact plus one tightly packed SBS CPU snapshot, serializer scratch reservation, and
-   * worst-case serialized SBS artifact. The harness uses this before allocating its first SBS
-   * output snapshot so a low transient-raster cap fails closed before conversion begins.
-   */
-  std::uint64_t offline_single_slot_raster_bound(
-    std::uint64_t source_raster_bytes,
-    std::uint32_t sbs_width,
-    std::uint32_t sbs_height,
-    bool hdr
-  );
-
-  /**
    * Validate the native harness's selected-file/full-frame source-scope attestation.
    *
    * Offline evaluation and conversion must not observe the active window or use either live

@@ -1211,10 +1211,6 @@ title=Smoke chapter
   }
   Assert-Contract (
     $runtimeContract.follow_format -eq $expectedFollowFormat -and
-    $null -eq $runtimeContract.follow_frame_pattern -and
-    $null -eq $runtimeContract.follow_progress_file -and
-    $null -eq $runtimeContract.follow_done_sentinel -and
-    $null -eq $runtimeContract.follow_failed_sentinel -and
     $runtimeContract.frame_transport -eq 'bounded-raw-memory-v1' -and
     $runtimeContract.input_frame_format -eq $expectedInputFrameFormat
   ) 'direct conversion follow raster contract disagrees with the source color mode'
@@ -1261,7 +1257,6 @@ title=Smoke chapter
   ) 'worker did not attest the selected serial or overlapping raw-memory reservation'
   Assert-Contract (
     $sbsContract.frame_format -eq $expectedSbsFormat -and
-    $null -eq $sbsContract.file_pattern -and
     $sbsContract.row_order -eq 'top-down' -and
     $sbsContract.transfer -eq $runtimeContract.output_transfer -and
     $sbsContract.primaries -eq $runtimeContract.output_primaries -and
@@ -1303,7 +1298,7 @@ title=Smoke chapter
     $adaptiveContract.retained_history -eq $false -and
     [long] $adaptiveContract.frame_count -eq 16 -and
     @($adaptiveContract.PSObject.Properties.Name | Where-Object {
-      $_ -in @('header_file', 'frame_file', 'file')
+      $_ -eq 'file'
     }).Count -eq 0
   ) 'offline analysis did not attest its bounded adaptive-state transport'
   Assert-NativeMemoryInterface -Worker $successWorker
@@ -1416,10 +1411,6 @@ title=Smoke chapter
     $evaluationRuntime.follow_mode -eq $true -and
     $evaluationRuntime.follow_format -eq $expectedFollowFormat -and
     $evaluationRuntime.frame_transport -eq 'bounded-raw-memory-v1' -and
-    $null -eq $evaluationRuntime.follow_frame_pattern -and
-    $null -eq $evaluationRuntime.follow_progress_file -and
-    $null -eq $evaluationRuntime.follow_done_sentinel -and
-    $null -eq $evaluationRuntime.follow_failed_sentinel -and
     $evaluationRuntime.input_frame_format -eq $expectedInputFrameFormat -and
     [long] $evaluationRuntime.follow_poll_interval_ms -eq 0
   ) 'evaluation does not share the direct causal online runtime contract'

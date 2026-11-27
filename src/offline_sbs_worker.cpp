@@ -855,136 +855,6 @@ namespace offline_sbs {
       return left + right;
     }
 
-    std::uint64_t checked_byte_product(
-      const std::uint64_t left,
-      const std::uint64_t right,
-      const std::string_view description
-    ) {
-      if (left != 0 &&
-          right > std::numeric_limits<std::uint64_t>::max() / left) {
-        throw worker_error(std::string(description) + " byte count overflows");
-      }
-      return left * right;
-    }
-
-    std::uint64_t sbs_artifact_upper_bound(
-      const std::uint32_t width,
-      const std::uint32_t height,
-      const bool hdr
-    ) {
-      if (width == 0 || height == 0) {
-        throw worker_error("cannot bound an empty SBS raster");
-      }
-      const auto pixels = checked_byte_product(
-        width,
-        height,
-        "SBS raster"
-      );
-      if (hdr) {
-        // PFM is three float32 channels plus a short ASCII header.
-        return checked_byte_sum(
-          checked_byte_product(pixels, 3u * sizeof(float), "HDR SBS raster"),
-          128u,
-          "HDR SBS raster"
-        );
-      }
-      // PNG's filtered DEFLATE stream is bounded very closely by the BGRA source.
-      // Twice the raw payload plus one MiB deliberately over-reserves WIC/zlib and
-      // chunk overhead so the producer can decide whether two live slots fit before
-      // it creates the next source artifact.
-      return checked_byte_sum(
-        checked_byte_product(pixels, 8u, "SDR SBS raster"),
-        1u * 1024u * 1024u,
-        "SDR SBS raster"
-      );
-    }
-
-    std::uint64_t sbs_cpu_snapshot_upper_bound(
-      const std::uint32_t width,
-      const std::uint32_t height,
-      const bool hdr
-    ) {
-      if (width == 0 || height == 0) {
-        throw worker_error("cannot bound an empty SBS CPU snapshot");
-      }
-      const auto pixels = checked_byte_product(
-        width,
-        height,
-        "SBS CPU snapshot"
-      );
-      // The asynchronous writer owns a tightly packed CPU copy: BGRA8 for SDR
-      // or R16G16B16A16_FLOAT for HDR. The main thread can map the following
-      // frame before its one-slot submit observes backpressure, so reserve two
-      // complete snapshot-plus-scratch-plus-file slots rather than counting
-      // files alone.
-      return checked_byte_product(
-        pixels,
-        hdr ? 4u * sizeof(std::uint16_t) : 4u,
-        "SBS CPU snapshot"
-      );
-    }
-
-    std::uint64_t sbs_serializer_scratch_upper_bound(
-      const std::uint32_t width,
-      const std::uint32_t height,
-      const bool hdr
-    ) {
-      if (width == 0 || height == 0) {
-        throw worker_error("cannot bound empty SBS serializer scratch");
-      }
-      if (hdr) {
-        // save_pfm converts one scanline at a time from RGBA16F to RGB32F.
-        return checked_byte_product(
-          width,
-          3u * sizeof(float),
-          "HDR SBS serializer scratch"
-        );
-      }
-      // WIC owns its codec workspace. Reserve a complete additional BGRA
-      // surface plus one MiB rather than assuming it streams scanlines without
-      // buffering. This is deliberately conservative and independent of the
-      // separately reserved encoded PNG file.
-      const auto pixels = checked_byte_product(
-        width,
-        height,
-        "SDR SBS serializer scratch"
-      );
-      return checked_byte_sum(
-        checked_byte_product(pixels, 4u, "SDR SBS serializer scratch"),
-        1u * 1024u * 1024u,
-        "SDR SBS serializer scratch"
-      );
-    }
-
-    std::uint64_t sbs_pipeline_slot_upper_bound(
-      const std::uint32_t sbs_width,
-      const std::uint32_t sbs_height,
-      const bool hdr
-    ) {
-      return checked_byte_sum(
-        checked_byte_sum(
-          sbs_cpu_snapshot_upper_bound(sbs_width, sbs_height, hdr),
-          sbs_serializer_scratch_upper_bound(sbs_width, sbs_height, hdr),
-          "offline SBS pipeline slot"
-        ),
-        sbs_artifact_upper_bound(sbs_width, sbs_height, hdr),
-        "offline SBS pipeline slot"
-      );
-    }
-
-    std::uint64_t single_slot_raster_upper_bound(
-      const std::uint64_t source_raster_bytes,
-      const std::uint32_t sbs_width,
-      const std::uint32_t sbs_height,
-      const bool hdr
-    ) {
-      return checked_byte_sum(
-        source_raster_bytes,
-        sbs_pipeline_slot_upper_bound(sbs_width, sbs_height, hdr),
-        "offline single-slot raster pipeline"
-      );
-    }
-
     bool rational_ticks_within_actual_ticks(
       const std::int64_t source_ticks,
       const rational_t source_time_base,
@@ -4305,20 +4175,6 @@ namespace offline_sbs {
     );
   }
 
-  std::uint64_t offline_single_slot_raster_bound(
-    const std::uint64_t source_raster_bytes,
-    const std::uint32_t sbs_width,
-    const std::uint32_t sbs_height,
-    const bool hdr
-  ) {
-    return single_slot_raster_upper_bound(
-      source_raster_bytes,
-      sbs_width,
-      sbs_height,
-      hdr
-    );
-  }
-
 #ifdef SUNSHINE_TESTS
   struct worker_progress_test_publisher_t::impl_t {
     worker_spec_t spec;
@@ -6413,10 +6269,6 @@ namespace offline_sbs {
         analysis_runtime.follow_format.value_or("") !=
           expected_follow_format ||
         analysis_runtime.frame_transport.value_or("") != raw_frame_transport::name ||
-        analysis_runtime.follow_frame_pattern.has_value() ||
-        analysis_runtime.follow_done_sentinel.has_value() ||
-        analysis_runtime.follow_failed_sentinel.has_value() ||
-        analysis_runtime.follow_progress_file.has_value() ||
         analysis_runtime.input_frame_format != expected_input_frame_format
       ) {
         throw worker_error("analysis did not attest the native raw-memory causal pass");
@@ -6429,7 +6281,6 @@ namespace offline_sbs {
             direct_sbs.height != sbs_height ||
             direct_sbs.width != analysis_runtime.output_sbs_width ||
             direct_sbs.height != analysis_runtime.output_sbs_height ||
-            direct_sbs.file_pattern.has_value() ||
             !direct_sbs.atomic_publication ||
             !analysis_runtime.follow_atomic_sbs_publication) {
           throw worker_error(
@@ -6452,8 +6303,6 @@ namespace offline_sbs {
       const auto &analysis_state = typed_analysis_contract.adaptive_state;
       if (
         analysis_state.transport != completion_channel_t::name ||
-        analysis_state.header_file.has_value() ||
-        analysis_state.frame_file.has_value() ||
         analysis_state.file.has_value() ||
         analysis_state.retained_history ||
         analysis_state.schema != sbs_adaptive_state::schema_version ||

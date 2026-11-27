@@ -20,8 +20,8 @@ pipeline owned by [Offline Host 3D conversion](../../docs/whole-clip-sbs-pipelin
 JSON is published atomically, duplicate keys and unknown fields fail closed on read, and raster
 dimensions are checked before byte-count arithmetic or GPU allocation. The Python evaluators
 consume those current documents without a second native-contract compatibility translator.
-Evaluator file-follow and raster artifacts remain available for reproducible scoring. Production
-conversion's raw frame transport is owned by the linked conversion document.
+The harness scores a directory of PNG or JPEG frames; it has no file-following or conversion
+mode. Production conversion's raw frame transport is owned by the linked conversion document.
 
 ## Required evaluation loop
 
@@ -97,11 +97,10 @@ cmake-build-relwithdebinfo/sunshine.exe <conf> --sbs-bench `
 
 Build first and retain the build/test DLL `PATH` documented in [AGENTS.md](../../AGENTS.md).
 Inputs must be 1..64 immutable SDR PNGs. The run requires an explicit observation timeline,
-ordinary evaluation artifacts and `--output-every 1`. It rejects follow mode and replay inputs. `<out-dir>` must not already contain a `direct-glyph` directory.
+ordinary evaluation artifacts and `--output-every 1`. It rejects replay inputs. `<out-dir>` must not already contain a `direct-glyph` directory.
 
 The qualification runs the live configuration of Host 3D and Convert Video, adaptive OCR work
-with the native palette decoder, and writes manifest schema 6. There is no variant flag. Harness
-`--follow` conversion uses the same configuration without the qualification evidence.
+with the native palette decoder, and writes manifest schema 6. There is no variant flag.
 
 The run writes `direct_glyph_qualification.json` atomically, with role
 `file-fed-actual-completed-direct-glyph`. It binds the executable, the copied

@@ -91,12 +91,8 @@ namespace offline_sbs::wire {
     std::optional<std::string> follow_format;
     std::optional<std::uint64_t> follow_count_bound;
     std::optional<std::uint64_t> follow_producer_frame_count;
-    std::optional<std::string> follow_frame_pattern;
     std::optional<std::uint64_t> follow_first_sequence;
     std::optional<std::uint32_t> follow_poll_interval_ms;
-    std::optional<std::string> follow_done_sentinel;
-    std::optional<std::string> follow_failed_sentinel;
-    std::optional<std::string> follow_progress_file;
     bool follow_native_input_deletion = false;
     bool follow_atomic_sbs_publication = false;
     std::uint32_t output_eye_width = 0;
@@ -109,8 +105,6 @@ namespace offline_sbs::wire {
 
   struct whole_clip_adaptive_state_t {
     std::string transport;
-    std::optional<std::string> header_file;
-    std::optional<std::string> frame_file;
     std::optional<std::string> file;
     bool retained_history = false;
     std::uint32_t schema = 0;
@@ -120,7 +114,6 @@ namespace offline_sbs::wire {
 
   struct whole_clip_sbs_t {
     bool enabled = false;
-    std::optional<std::string> file_pattern;
     std::uint64_t frame_count = 0;
     std::uint32_t width = 0;
     std::uint32_t height = 0;

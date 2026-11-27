@@ -474,7 +474,6 @@ namespace offline_sbs::wire {
         ) != 0 ||
         runtime.follow_native_input_deletion ||
         runtime.follow_format.value_or("") != (sdr ? "bgra8" : "gbrpf32le") ||
-        runtime.follow_frame_pattern.has_value() ||
         runtime.input_frame_format != (sdr ? "sRGB-BGRA8-raw" : "linear-scRGB-f32-planar") ||
         result.cache.analysis_source_raster_bytes == 0 ||
         result.cache.peak_live_raster_bytes <
@@ -710,7 +709,6 @@ namespace offline_sbs::wire {
   nlohmann::json to_json(const whole_clip_sbs_t &value) {
     return {
       {"enabled", value.enabled},
-      {"file_pattern", optional_json(value.file_pattern)},
       {"frame_count", value.frame_count},
       {"width", value.width},
       {"height", value.height},
@@ -728,7 +726,7 @@ namespace offline_sbs::wire {
     require_exact_keys(
       value,
       std::array {
-        "enabled"sv, "file_pattern"sv, "frame_count"sv, "width"sv,
+        "enabled"sv, "frame_count"sv, "width"sv,
         "height"sv, "frame_format"sv, "transfer"sv, "primaries"sv,
         "reference_white_nits"sv, "row_order"sv,
         "ffmpeg_pixel_format"sv, "atomic_publication"sv,
@@ -750,9 +748,6 @@ namespace offline_sbs::wire {
         value, "atomic_publication", "whole-clip SBS"
       ),
     };
-    result.file_pattern = optional_value<std::string>(value, "file_pattern", [&]() {
-      return required_string(value, "file_pattern", "whole-clip SBS");
-    });
     result.reference_white_nits = optional_value<double>(
       value, "reference_white_nits", [&]() {
         return finite_number(value, "reference_white_nits", "whole-clip SBS");
@@ -772,9 +767,9 @@ namespace offline_sbs::wire {
       );
     }
     if (result.enabled ?
-          ((!result.file_pattern && result.frame_format != "bgra8" && result.frame_format != "rgba16f") || result.frame_count == 0 ||
+          ((result.frame_format != "bgra8" && result.frame_format != "rgba16f") || result.frame_count == 0 ||
            result.width == 0 || result.height == 0) :
-          (result.file_pattern || result.frame_count != 0 ||
+          (result.frame_count != 0 ||
            result.width != 0 || result.height != 0 ||
            result.atomic_publication)) {
       throw contract_error("whole-clip SBS enablement disagrees with its raster evidence");
@@ -818,12 +813,8 @@ namespace offline_sbs::wire {
       {"follow_format", optional_json(runtime.follow_format)},
       {"follow_count_bound", optional_json(runtime.follow_count_bound)},
       {"follow_producer_frame_count", optional_json(runtime.follow_producer_frame_count)},
-      {"follow_frame_pattern", optional_json(runtime.follow_frame_pattern)},
       {"follow_first_sequence", optional_json(runtime.follow_first_sequence)},
       {"follow_poll_interval_ms", optional_json(runtime.follow_poll_interval_ms)},
-      {"follow_done_sentinel", optional_json(runtime.follow_done_sentinel)},
-      {"follow_failed_sentinel", optional_json(runtime.follow_failed_sentinel)},
-      {"follow_progress_file", optional_json(runtime.follow_progress_file)},
       {"follow_native_input_deletion", runtime.follow_native_input_deletion},
       {"follow_atomic_sbs_publication", runtime.follow_atomic_sbs_publication},
       {"output_eye_width", runtime.output_eye_width},
@@ -837,8 +828,7 @@ namespace offline_sbs::wire {
       resolved_runtime["frame_transport"] = *runtime.frame_transport;
     }
     const auto &adaptive = value.adaptive_state;
-    if (adaptive.transport == completion_channel_t::name &&
-        (adaptive.header_file || adaptive.frame_file || adaptive.file)) {
+    if (adaptive.transport == completion_channel_t::name && adaptive.file) {
       throw contract_error("whole-clip in-memory adaptive state cannot advertise files");
     }
     json adaptive_state {
@@ -848,10 +838,7 @@ namespace offline_sbs::wire {
       {"capture", adaptive.capture},
       {"frame_count", adaptive.frame_count},
     };
-    if (adaptive.transport == "atomic-latest-v1") {
-      adaptive_state["header_file"] = optional_json(adaptive.header_file);
-      adaptive_state["frame_file"] = optional_json(adaptive.frame_file);
-    } else if (adaptive.transport == "jsonl-v1") {
+    if (adaptive.transport == "jsonl-v1") {
       adaptive_state["file"] = optional_json(adaptive.file);
     }
     json observation = nullptr;
@@ -979,10 +966,9 @@ namespace offline_sbs::wire {
         "resolved_max_output_width"sv,
         "input_limit"sv, "output_every"sv, "follow_mode"sv,
         "follow_format"sv, "follow_count_bound"sv,
-        "follow_producer_frame_count"sv, "follow_frame_pattern"sv,
+        "follow_producer_frame_count"sv,
         "follow_first_sequence"sv, "follow_poll_interval_ms"sv,
-        "follow_done_sentinel"sv, "follow_failed_sentinel"sv,
-        "follow_progress_file"sv, "follow_native_input_deletion"sv,
+        "follow_native_input_deletion"sv,
         "follow_atomic_sbs_publication"sv, "output_eye_width"sv,
         "output_eye_height"sv, "output_sbs_width"sv, "output_sbs_height"sv,
         "content_scale_x"sv, "content_scale_y"sv,
@@ -1060,12 +1046,8 @@ namespace offline_sbs::wire {
     typed_runtime.follow_format = optional_string("follow_format");
     typed_runtime.follow_count_bound = optional_u64("follow_count_bound");
     typed_runtime.follow_producer_frame_count = optional_u64("follow_producer_frame_count");
-    typed_runtime.follow_frame_pattern = optional_string("follow_frame_pattern");
     typed_runtime.follow_first_sequence = optional_u64("follow_first_sequence");
     typed_runtime.follow_poll_interval_ms = optional_u32("follow_poll_interval_ms");
-    typed_runtime.follow_done_sentinel = optional_string("follow_done_sentinel");
-    typed_runtime.follow_failed_sentinel = optional_string("follow_failed_sentinel");
-    typed_runtime.follow_progress_file = optional_string("follow_progress_file");
 
     const auto &adaptive = value.at("adaptive_state");
     auto &typed_adaptive = result.adaptive_state;
@@ -1076,10 +1058,6 @@ namespace offline_sbs::wire {
     typed_adaptive.transport = adaptive.at("transport").get<std::string>();
     if (typed_adaptive.transport == completion_channel_t::name) {
       require_exact_keys(adaptive, std::array {"transport"sv, "retained_history"sv, "schema"sv, "capture"sv, "frame_count"sv}, "whole-clip adaptive state");
-    } else if (typed_adaptive.transport == "atomic-latest-v1") {
-      require_exact_keys(adaptive, std::array {"transport"sv, "header_file"sv, "frame_file"sv, "retained_history"sv, "schema"sv, "capture"sv, "frame_count"sv}, "whole-clip adaptive state");
-      typed_adaptive.header_file = required_string(adaptive, "header_file", "whole-clip adaptive state");
-      typed_adaptive.frame_file = required_string(adaptive, "frame_file", "whole-clip adaptive state");
     } else if (typed_adaptive.transport == "jsonl-v1") {
       require_exact_keys(adaptive, std::array {"transport"sv, "file"sv, "retained_history"sv, "schema"sv, "capture"sv, "frame_count"sv}, "whole-clip adaptive state");
       typed_adaptive.file = required_string(adaptive, "file", "whole-clip adaptive state");
@@ -1092,9 +1070,7 @@ namespace offline_sbs::wire {
     typed_adaptive.capture = required_string(adaptive, "capture", "whole-clip adaptive state");
     if (typed_adaptive.transport == completion_channel_t::name &&
         (typed_runtime.frame_transport != raw_frame_transport::name ||
-         !typed_runtime.follow_mode || typed_runtime.follow_frame_pattern ||
-         typed_runtime.follow_done_sentinel || typed_runtime.follow_failed_sentinel ||
-         typed_runtime.follow_progress_file ||
+         !typed_runtime.follow_mode ||
          typed_runtime.follow_poll_interval_ms != 0 ||
          typed_runtime.follow_native_input_deletion || typed_adaptive.retained_history ||
          typed_adaptive.schema != sbs_adaptive_state::schema_version ||
@@ -1106,7 +1082,7 @@ namespace offline_sbs::wire {
     const bool raw_sbs = result.sbs.frame_format == "bgra8" || result.sbs.frame_format == "rgba16f";
     if (result.sbs.enabled &&
         (typed_runtime.frame_transport.has_value() != raw_sbs ||
-         (raw_sbs && (result.sbs.file_pattern || !result.sbs.atomic_publication ||
+         (raw_sbs && (!result.sbs.atomic_publication ||
                       result.sbs.row_order != "top-down")))) {
       throw contract_error("whole-clip SBS publication disagrees with its frame transport");
     }

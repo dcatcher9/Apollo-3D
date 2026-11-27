@@ -25,8 +25,9 @@ selected video
 
 The manager launches an authenticated isolated worker process. That worker calls the typed native
 production entry once on its GPU thread, selecting Convert Video or Analyze Only. The evaluator
-CLI adapts to the same causal estimator and rendering engine. Production does not construct or
-parse evaluator arguments and cannot select its replay, research, or diagnostic modes. Every
+CLI runs the same causal estimator and rendering engine on a directory of PNG or JPEG frames.
+Production does not construct or parse evaluator arguments and cannot select its replay,
+research, or diagnostic modes. Every
 source frame runs one authenticated TensorRT update and consumes its source-derived observation
 timestamp. All D3D/TensorRT work stays on this single owner.
 
@@ -48,8 +49,8 @@ transfers ownership of its allocation.
 | Worker to FFmpeg | Raw BGRA8 | Planar GBR float32, expanded in one 64 KiB buffer |
 
 HDR reference white and primaries remain owned by Host SBS. Production conversion does not write
-source BMP/PFM or rendered PNG/PFM files, run WIC codecs, or serve pixels over HTTP. The standalone
-evaluator keeps its established file-based harness inputs and outputs.
+source or rendered image files, run WIC codecs, or serve pixels over HTTP. The bench harness has
+no file-following or conversion mode: a whole clip reaches it only through this raw transport.
 
 The source channel has capacity two and the packed-output channel has capacity one. The separate
 `bounded-completion-memory-v1` handoff owns one resolved header, one frame-evidence slot, and a
@@ -72,8 +73,6 @@ every 200 ms, with immediate first, phase-change, and final-source-frame updates
 publication advances the deadline. Suppressed snapshots perform no JSON or file work; filesystem
 errors are reported when publication is due. The manager coalesces durable job updates. Source,
 runtime, timeline, result, and publication contracts remain on disk.
-Evaluator JSONL and file-follow adapters retain their existing atomic snapshots and
-directory-change notifications.
 
 The decoder pipe uses bounded overlapped reads, so each available chunk wakes its owner without
 a polling delay. The persistent encoder has one outstanding handoff. Its private inherited pipe

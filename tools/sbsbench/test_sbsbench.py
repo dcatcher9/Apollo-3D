@@ -1797,13 +1797,11 @@ class EvalContractTests(unittest.TestCase):
             stream = fh.read()
         self.assertNotIn("SBS_PRESENTATION_FIXED_HEIGHT", stream)
 
-    def test_evaluator_file_follow_adaptive_trace_transport_is_bounded(self):
+    def test_harness_publishes_the_whole_clip_contract_through_its_typed_codec(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"),
                   encoding="utf-8") as fh:
             harness = fh.read()
-        self.assertIn('a == "--bounded-adaptive-state"', harness)
-        self.assertIn('.transport = "atomic-latest-v1"', harness)
         self.assertIn('.retained_history = false', harness)
         self.assertIn('offline_sbs::wire::whole_clip_contract_t', harness)
         self.assertIn('offline_sbs::wire::to_json(', harness)
