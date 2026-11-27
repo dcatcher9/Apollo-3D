@@ -150,12 +150,20 @@ Use a scoped localhost HTTP server for rendered testing. Do not ask browser auto
 
 - Streaming data planes: `src/stream.cpp`, `src/rtsp.cpp`, `src/video.cpp`, `src/audio.cpp`, and
   `src/input.cpp`.
-- HTTP, pairing, and configuration: `src/nvhttp.cpp`, `src/confighttp.cpp`,
-  `src/httpcommon.cpp`, `src/config.cpp`, and `src/crypto.cpp`.
+- HTTP, pairing, and configuration: `src/confighttp.cpp` (Web UI route table) with one
+  `src/confighttp_*.cpp` per route domain and shared helpers in `src/confighttp_common.*`;
+  `src/nvhttp.cpp` (GameStream endpoints) with `src/nvhttp_pairing.cpp` and
+  `src/nvhttp_client_store.cpp`; `src/httpcommon.cpp`, `src/config.cpp`, and `src/crypto.cpp`.
 - NVIDIA encoding: `src/nvenc/`.
 - App library (`apps.json` parsing, validation and migration): `src/apps_store.cpp`.
-- App and display lifecycle: `src/process.cpp`, `src/display_device.cpp`, and
-  `src/platform/windows/virtual_display.cpp`.
+- App and display lifecycle: `src/process.cpp`, `src/virtual_display_lifecycle.cpp`,
+  `src/display_device.cpp`, `src/platform/windows/virtual_display.cpp`, and the primary-display
+  transaction in `src/platform/windows/primary_display*.cpp` (entry points, topology solver,
+  policy manager, Win32 adapter, and recovery journal).
+- Convert Video: `src/offline_sbs_job*.cpp` (job manager, its filesystem access, and worker
+  supervision) and `src/offline_sbs_worker*.cpp` (worker entry, I/O, FFprobe, and FFmpeg).
+- Web UI pages: `src_assets/common/assets/web/*.html` entries; Library, Devices, and Convert Video
+  mount `AppsPage.vue`, `PinPage.vue`, and `OfflineConversionPage.vue`.
 - Windows capture, input, audio, local AR, and virtual display: `src/platform/windows/`.
 - Host SBS model, state, shaders, and harness: `src/video_depth_estimator.*`,
   `src_assets/windows/assets/shaders/directx/`, and `src/sbs_bench_harness.*`.
