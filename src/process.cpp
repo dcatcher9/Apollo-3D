@@ -433,7 +433,7 @@ namespace proc {
     // These fixtures never acquire a real monitor, process, HDR worker or remote AR lease.
     auto discarded = std::move(process._display_session);
     process._display_session = VDISPLAY::session_t {};
-    process._display_topology_test_hook = {};
+    process._test_edges.topology = {};
     process._virtual_display_only = false;
     process._pause_wake_attempted = false;
   }
@@ -515,7 +515,7 @@ namespace proc {
       VDISPLAY::display_spec_t spec;
       spec.exclusive = process._virtual_display_only;
       process._display_session.adopt(std::move(spec), std::move(binding));
-      process._display_topology_test_hook = [](auto, bool) {
+      process._test_edges.topology = [](auto, bool) {
         return true;
       };
     }
@@ -553,13 +553,7 @@ namespace proc {
     if (!edges.encoder_probing_allowed || !edges.recover_primary || !edges.remote_starting || !edges.remote_awaiting || !edges.remote_ended || !edges.map_display_name || !edges.capture_display_names || !edges.start_hdr_worker || !edges.topology || !edges.query_mode || !edges.change_mode || !edges.record_mode || !edges.baseline_active || !edges.settings_unavailable || !io.prepare || !io.create || !io.bind || !io.promote || !io.restore || !io.pause || !io.reactivate || !io.query || !io.query_retirement || !io.remove || !io.now || !io.sleep || !io.restore_cursor) {
       throw std::invalid_argument("A process display fixture must replace every native edge");
     }
-    process._display_context_test_edges = &edges;
-    process._display_topology_test_hook = edges.topology;
-    process._display_mode_query_test_hook = edges.query_mode;
-    process._display_mode_change_test_hook = edges.change_mode;
-    process._display_mode_record_test_hook = edges.record_mode;
-    process._display_baseline_test_hook = edges.baseline_active;
-    process._display_settings_unavailable_test_hook = edges.settings_unavailable;
+    process._test_edges = edges;
   }
 
   int process_display_context_test_access::execute(proc_t &process, ctx_t app, const std::shared_ptr<rtsp_stream::launch_session_t> &launch) {
@@ -646,8 +640,8 @@ namespace proc {
 
   void proc_t::start_hdr_worker(bool enable_hdr) {
 #ifdef SUNSHINE_TESTS
-    if (_display_context_test_edges) {
-      _display_context_test_edges->start_hdr_worker(enable_hdr);
+    if (_test_edges.start_hdr_worker) {
+      _test_edges.start_hdr_worker(enable_hdr);
       return;
     }
 #endif
@@ -801,8 +795,8 @@ namespace proc {
 
   bool proc_t::request_hdr_state(bool enable_hdr, std::chrono::milliseconds timeout) {
 #ifdef SUNSHINE_TESTS
-    if (_display_topology_test_hook) {
-      return _display_topology_test_hook(
+    if (_test_edges.topology) {
+      return _test_edges.topology(
         display_topology_test_operation_e::request_hdr,
         enable_hdr
       );
@@ -841,8 +835,8 @@ namespace proc {
   ) {
     VDISPLAY::session_t owner;
 #ifdef SUNSHINE_TESTS
-    if (_display_context_test_edges) {
-      owner = VDISPLAY::session_t {_display_context_test_edges->display_io};
+    if (_test_edges.replaces_display_io()) {
+      owner = VDISPLAY::session_t {_test_edges.display_io};
     }
 #endif
     if (_display_context) {
@@ -1027,8 +1021,8 @@ namespace proc {
     bool restart_explorer_after_removal
   ) {
 #ifdef SUNSHINE_TESTS
-    if (_display_topology_test_hook) {
-      const bool completed = _display_topology_test_hook(
+    if (_test_edges.topology) {
+      const bool completed = _test_edges.topology(
         display_topology_test_operation_e::retire,
         final_teardown
       );
@@ -1160,7 +1154,7 @@ namespace proc {
       if (_display_session.refresh() && !_display_session.binding().display_name.empty()) {
         set_display_name_locked(platf::to_utf8(_display_session.binding().display_name));
 #ifdef SUNSHINE_TESTS
-        if (_display_topology_test_hook) {
+        if (_test_edges.topology) {
           return true;  // Tests publish the binding but never map a test name to an output.
         }
 #endif
@@ -1168,7 +1162,7 @@ namespace proc {
         return !config::video.output_name.empty();
       }
 #ifdef SUNSHINE_TESTS
-      if (_display_topology_test_hook) {
+      if (_test_edges.topology) {
         break;
       }
 #endif
@@ -1231,7 +1225,7 @@ namespace proc {
       // The next attempt repeats this pause when it could not be verified yet.
       pause_display_for_resume();
 #ifdef SUNSHINE_TESTS
-      const bool wait_for_settle = !_display_topology_test_hook;
+      const bool wait_for_settle = !_test_edges.topology;
 #else
       const bool wait_for_settle = true;
 #endif
@@ -1244,7 +1238,7 @@ namespace proc {
         return true;
       }
 #ifdef SUNSHINE_TESTS
-      if (_display_topology_test_hook && retry_count >= 3) {
+      if (_test_edges.topology && retry_count >= 3) {
         return false;  // Tests do not wait, so they bound the retries by count.
       }
 #endif
@@ -1263,8 +1257,8 @@ namespace proc {
     _hdr_worker_state.reset();
     const auto promote_once = [&]() {
 #ifdef SUNSHINE_TESTS
-      if (_display_topology_test_hook) {
-        return _display_topology_test_hook(
+      if (_test_edges.topology) {
+        return _test_edges.topology(
           display_topology_test_operation_e::promote,
           _virtual_display_only
         );
@@ -1312,8 +1306,8 @@ namespace proc {
     _virtual_display = true;
     set_display_name_locked(platf::to_utf8(_display_session.binding().display_name));
 #ifdef SUNSHINE_TESTS
-    if (_display_context_test_edges) {
-      config::video.output_name = _display_context_test_edges->map_display_name(display_name);
+    if (_test_edges.map_display_name) {
+      config::video.output_name = _test_edges.map_display_name(display_name);
     } else
 #endif
       config::video.output_name = display_device::map_display_name(display_name);
@@ -1365,8 +1359,8 @@ namespace proc {
       terminate();
       // Also cancel a pre-creation journal when Add never published an identity.
 #ifdef SUNSHINE_TESTS
-      if (_display_context_test_edges) {
-        _display_context_test_edges->recover_primary();
+      if (_test_edges.recover_primary) {
+        _test_edges.recover_primary();
       } else
 #endif
         platf::primary_display::recover();
@@ -1376,14 +1370,14 @@ namespace proc {
       display_context->virtual_display  // User requested virtual display
       || _app.synthetic_virtual_display  // Apollo's generated Virtual Display tile
 #ifdef SUNSHINE_TESTS
-      || !(_display_context_test_edges ? _display_context_test_edges->encoder_probing_allowed() : video::allow_encoder_probing());
+      || !(_test_edges.encoder_probing_allowed ? _test_edges.encoder_probing_allowed() : video::allow_encoder_probing());
 #else
       || !video::allow_encoder_probing();  // No active display presents
 #endif
     if (needs_virtual_display) {
 #ifdef SUNSHINE_TESTS
-      const bool remote_started = _display_context_test_edges ?
-                                    _display_context_test_edges->remote_starting(launch_options.launch_session_id, config::stream.ping_timeout, true) :
+      const bool remote_started = _test_edges.remote_starting ?
+                                    _test_edges.remote_starting(launch_options.launch_session_id, config::stream.ping_timeout, true) :
                                     ar_glasses::remote_virtual_display_starting(launch_options.launch_session_id, config::stream.ping_timeout, true);
       if (!remote_started) {
 #else
@@ -1404,7 +1398,7 @@ namespace proc {
         return 503;
       }
 #ifdef SUNSHINE_TESTS
-      if (!(_display_context_test_edges ? _display_context_test_edges->recover_primary() : platf::primary_display::recover())) {
+      if (!(_test_edges.recover_primary ? _test_edges.recover_primary() : platf::primary_display::recover())) {
 #else
       if (!platf::primary_display::recover()) {
 #endif
@@ -1436,8 +1430,8 @@ namespace proc {
         // The owner saves the baseline before Add, and records Add identity before binding.
         _saved_virtual_display_mode.reset();
 #ifdef SUNSHINE_TESTS
-        if (_display_context_test_edges) {
-          _display_session = VDISPLAY::session_t {_display_context_test_edges->display_io};
+        if (_test_edges.replaces_display_io()) {
+          _display_session = VDISPLAY::session_t {_test_edges.display_io};
         }
 #endif
         const bool acquired = _display_session.acquire(std::move(spec));
@@ -1456,8 +1450,8 @@ namespace proc {
           if (display_context->width && display_context->height && display_context->fps) {
             // Apply display settings
 #ifdef SUNSHINE_TESTS
-            if (_display_context_test_edges) {
-              if (_display_context_test_edges->change_mode(created_display.display_name, render_width, render_height, target_fps, false) != DISP_CHANGE_SUCCESSFUL) {
+            if (_test_edges.change_mode) {
+              if (_test_edges.change_mode(created_display.display_name, render_width, render_height, target_fps, false) != DISP_CHANGE_SUCCESSFUL) {
                 BOOST_LOG(error) << "Windows did not accept the requested virtual-display mode."sv;
                 return 503;
               }
@@ -1479,8 +1473,8 @@ namespace proc {
           // empty name when probing graphics cards.
 
 #ifdef SUNSHINE_TESTS
-          if (_display_context_test_edges) {
-            config::video.output_name = _display_context_test_edges->map_display_name(this->display_name);
+          if (_test_edges.map_display_name) {
+            config::video.output_name = _test_edges.map_display_name(this->display_name);
           } else
 #endif
             config::video.output_name = display_device::map_display_name(this->display_name);
@@ -1491,8 +1485,8 @@ namespace proc {
         } else {
           BOOST_LOG(error) << (created_display.added() ? "Virtual display was added, but Windows did not publish its display name in time." : "Virtual display creation failed.");
 #ifdef SUNSHINE_TESTS
-          if (_display_context_test_edges) {
-            _display_context_test_edges->remote_ended(*_remote_virtual_display_lease);
+          if (_test_edges.remote_ended) {
+            _test_edges.remote_ended(*_remote_virtual_display_lease);
           } else
 #endif
             ar_glasses::remote_virtual_display_ended(*_remote_virtual_display_lease);
@@ -1503,8 +1497,8 @@ namespace proc {
         BOOST_LOG(error) << "A virtual display is required, but the SudoVDA driver is unavailable."sv;
         display_context->virtual_display = false;
 #ifdef SUNSHINE_TESTS
-        if (_display_context_test_edges) {
-          _display_context_test_edges->remote_ended(*_remote_virtual_display_lease);
+        if (_test_edges.remote_ended) {
+          _test_edges.remote_ended(*_remote_virtual_display_lease);
         } else
 #endif
           ar_glasses::remote_virtual_display_ended(*_remote_virtual_display_lease);
@@ -1513,8 +1507,8 @@ namespace proc {
       }
       if (!_virtual_display) {
 #ifdef SUNSHINE_TESTS
-        if (_display_context_test_edges) {
-          _display_context_test_edges->remote_ended(*_remote_virtual_display_lease);
+        if (_test_edges.remote_ended) {
+          _test_edges.remote_ended(*_remote_virtual_display_lease);
         } else
 #endif
           ar_glasses::remote_virtual_display_ended(*_remote_virtual_display_lease);
@@ -1671,8 +1665,8 @@ namespace proc {
       // original client-connect reservation. Renew it while process_state_mutex is still held so
       // local AR cannot claim and destroy this display in the gap before RTSP calls resume().
 #ifdef SUNSHINE_TESTS
-      if (_display_context_test_edges) {
-        _display_context_test_edges->remote_awaiting(*_remote_virtual_display_lease, config::stream.ping_timeout);
+      if (_test_edges.remote_awaiting) {
+        _test_edges.remote_awaiting(*_remote_virtual_display_lease, config::stream.ping_timeout);
       } else
 #endif
         ar_glasses::remote_virtual_display_awaiting_client(
@@ -1944,8 +1938,8 @@ namespace proc {
             bool capture_ready = false;
             for (int attempt = 0; attempt < 3 && !capture_ready; ++attempt) {
 #ifdef SUNSHINE_TESTS
-              const auto capturable_displays = _display_context_test_edges ?
-                                                 _display_context_test_edges->capture_display_names() :
+              const auto capturable_displays = _test_edges.capture_display_names ?
+                                                 _test_edges.capture_display_names() :
                                                  platf::display_names();
 #else
               const auto capturable_displays = platf::display_names();
@@ -2117,8 +2111,8 @@ namespace proc {
       return std::nullopt;
     }
 #ifdef SUNSHINE_TESTS
-    if (_display_mode_query_test_hook) {
-      return _display_mode_query_test_hook(_display_session.binding().display_name);
+    if (_test_edges.query_mode) {
+      return _test_edges.query_mode(_display_session.binding().display_name);
     }
 #endif
     DEVMODEW mode {};
@@ -2128,8 +2122,8 @@ namespace proc {
 
   LONG proc_t::configure_virtual_display_mode(const wchar_t *name, int width, int height, int fps_millihz, bool probe) {
 #ifdef SUNSHINE_TESTS
-    if (_display_mode_change_test_hook) {
-      return _display_mode_change_test_hook(name, width, height, fps_millihz, probe);
+    if (_test_edges.change_mode) {
+      return _test_edges.change_mode(name, width, height, fps_millihz, probe);
     }
 #endif
     if (probe) {
@@ -2145,8 +2139,8 @@ namespace proc {
 
   bool proc_t::display_settings_unavailable() {
 #ifdef SUNSHINE_TESTS
-    if (_display_settings_unavailable_test_hook) {
-      return _display_settings_unavailable_test_hook();
+    if (_test_edges.settings_unavailable) {
+      return _test_edges.settings_unavailable();
     }
 #endif
     return is_changing_settings_going_to_fail();
@@ -2155,8 +2149,8 @@ namespace proc {
   bool proc_t::virtual_display_baseline_topology_active() {
     const auto &device_path = _display_session.binding().device_path;
 #ifdef SUNSHINE_TESTS
-    if (_display_baseline_test_hook) {
-      return _display_baseline_test_hook(device_path);
+    if (_test_edges.baseline_active) {
+      return _test_edges.baseline_active(device_path);
     }
 #endif
     return !device_path.empty() && platf::primary_display::baseline_topology_active(device_path);
@@ -2191,8 +2185,8 @@ namespace proc {
     const auto &name = _display_session.binding().display_name;
     LONG status;
 #ifdef SUNSHINE_TESTS
-    if (_display_mode_record_test_hook) {
-      status = _display_mode_record_test_hook(name, *record);
+    if (_test_edges.record_mode) {
+      status = _test_edges.record_mode(name, *record);
     } else
 #endif
     {
@@ -2348,13 +2342,13 @@ namespace proc {
     auto republish_display = [&]() {
       set_display_name_locked(platf::to_utf8(_display_session.binding().display_name));
 #ifdef SUNSHINE_TESTS
-      if (_display_context_test_edges) {
-        config::video.output_name = _display_context_test_edges->map_display_name(display_name);
+      if (_test_edges.map_display_name) {
+        config::video.output_name = _test_edges.map_display_name(display_name);
       } else
 #endif
         config::video.output_name = display_device::map_display_name(display_name);
 #ifdef SUNSHINE_TESTS
-      if (_display_topology_test_hook) {
+      if (_test_edges.topology) {
         return;  // The test owns HDR state through request_hdr_state().
       }
 #endif
@@ -2447,8 +2441,8 @@ namespace proc {
         BOOST_LOG(error) << "Remote virtual display does not match its required Windows display topology."sv;
         pause_display_for_resume();
 #ifdef SUNSHINE_TESTS
-        if (_display_context_test_edges) {
-          _display_context_test_edges->remote_ended(lease);
+        if (_test_edges.remote_ended) {
+          _test_edges.remote_ended(lease);
         } else
 #endif
           ar_glasses::remote_virtual_display_ended(lease);
@@ -2467,8 +2461,8 @@ namespace proc {
       _hdr_worker_state.reset();
       const bool restored =
 #ifdef SUNSHINE_TESTS
-        _display_topology_test_hook ?
-          _display_topology_test_hook(
+        _test_edges.topology ?
+          _test_edges.topology(
             display_topology_test_operation_e::restore,
             _virtual_display_only
           ) :
@@ -2498,8 +2492,8 @@ namespace proc {
           // the display idle timer once without retaining a requirement on this thread.
           const bool wake_requested =
 #ifdef SUNSHINE_TESTS
-            _display_topology_test_hook ?
-              _display_topology_test_hook(display_topology_test_operation_e::wake, _virtual_display_only) :
+            _test_edges.topology ?
+              _test_edges.topology(display_topology_test_operation_e::wake, _virtual_display_only) :
 #endif
               SetThreadExecutionState(ES_DISPLAY_REQUIRED) != 0;
           if (wake_requested) {
@@ -2603,8 +2597,8 @@ namespace proc {
 
     if (_remote_virtual_display_lease) {
 #ifdef SUNSHINE_TESTS
-      if (_display_context_test_edges) {
-        _display_context_test_edges->remote_ended(*_remote_virtual_display_lease);
+      if (_test_edges.remote_ended) {
+        _test_edges.remote_ended(*_remote_virtual_display_lease);
       } else
 #endif
         ar_glasses::remote_virtual_display_ended(*_remote_virtual_display_lease);

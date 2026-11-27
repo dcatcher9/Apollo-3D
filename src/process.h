@@ -44,11 +44,6 @@ namespace platf::primary_display {
 }
 
 namespace proc {
-#ifdef SUNSHINE_TESTS
-  namespace testing {
-    struct native_edges_t;
-  }
-#endif
   using file_t = util::safe_ptr_v2<FILE, int, fclose>;
 
   /** Transport-derived startup values consumed once; the retained display record owns none. */
@@ -82,6 +77,34 @@ namespace proc {
 
   using display_topology_test_hook_t =
     std::function<bool(display_topology_test_operation_e, bool)>;
+
+  namespace testing {
+    /**
+     * Native side effects a test can replace. An unset edge keeps the production call, so a test
+     * sets only the edges it observes; a display-context fixture sets every one.
+     */
+    struct native_edges_t {
+      std::function<bool()> encoder_probing_allowed;
+      std::function<bool()> recover_primary;
+      std::function<bool(std::uint64_t, std::chrono::milliseconds, bool)> remote_starting;
+      std::function<void(std::uint64_t, std::chrono::milliseconds)> remote_awaiting;
+      std::function<void(std::uint64_t)> remote_ended;
+      std::function<std::string(const std::string &)> map_display_name;
+      std::function<std::vector<std::string>()> capture_display_names;
+      std::function<void(bool)> start_hdr_worker;
+      VDISPLAY::session_io_t display_io;
+      display_topology_test_hook_t topology;
+      std::function<std::optional<DEVMODEW>(std::wstring_view)> query_mode;
+      std::function<LONG(std::wstring_view, int, int, int, bool)> change_mode;
+      std::function<LONG(std::wstring_view, const VDISPLAY::session_mode_record_t &)> record_mode;
+      std::function<bool(std::wstring_view)> baseline_active;
+      std::function<bool()> settings_unavailable;
+
+      [[nodiscard]] bool replaces_display_io() const noexcept {
+        return static_cast<bool>(display_io.create);
+      }
+    };
+  }  // namespace testing
 
   bool retiredVirtualDisplayRemovalAllowedForTest(
     bool desktopDeactivationRequested,
@@ -351,14 +374,9 @@ namespace proc {
     // launch proves the display again. It is never inferred from the observed display mode.
     bool _live_display_unproven = false;
 #ifdef SUNSHINE_TESTS
-    const testing::native_edges_t *_display_context_test_edges = nullptr;
-    // Process tests replace display/HDR side effects while preserving resume/teardown control flow.
-    display_topology_test_hook_t _display_topology_test_hook;
-    std::function<std::optional<DEVMODEW>(std::wstring_view)> _display_mode_query_test_hook;
-    std::function<LONG(std::wstring_view, int, int, int, bool)> _display_mode_change_test_hook;
-    std::function<LONG(std::wstring_view, const VDISPLAY::session_mode_record_t &)> _display_mode_record_test_hook;
-    std::function<bool(std::wstring_view)> _display_baseline_test_hook;
-    std::function<bool()> _display_settings_unavailable_test_hook;
+    // Process tests replace display, HDR and remote-lease side effects through this one seam
+    // while preserving resume/teardown control flow.
+    testing::native_edges_t _test_edges;
 #endif
     struct session_display_mode_t {
       int width;

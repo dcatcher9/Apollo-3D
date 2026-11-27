@@ -26,23 +26,6 @@ namespace proc::testing {
     GUID display_guid;
   };
 
-  struct native_edges_t {
-    std::function<bool()> encoder_probing_allowed;
-    std::function<bool()> recover_primary;
-    std::function<bool(std::uint64_t, std::chrono::milliseconds, bool)> remote_starting;
-    std::function<void(std::uint64_t, std::chrono::milliseconds)> remote_awaiting;
-    std::function<void(std::uint64_t)> remote_ended;
-    std::function<std::string(const std::string &)> map_display_name;
-    std::function<std::vector<std::string>()> capture_display_names;
-    std::function<void(bool)> start_hdr_worker;
-    VDISPLAY::session_io_t display_io;
-    display_topology_test_hook_t topology;
-    std::function<std::optional<DEVMODEW>(std::wstring_view)> query_mode;
-    std::function<LONG(std::wstring_view, int, int, int, bool)> change_mode;
-    std::function<LONG(std::wstring_view, const VDISPLAY::session_mode_record_t &)> record_mode;
-    std::function<bool(std::wstring_view)> baseline_active;
-    std::function<bool()> settings_unavailable;
-  };
 }  // namespace proc::testing
 
 namespace proc {

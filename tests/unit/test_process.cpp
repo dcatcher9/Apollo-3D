@@ -61,13 +61,13 @@ namespace proc {
           storage,
           reinterpret_cast<platf::primary_display::retained_display_t *>(storage.get())
         );
-        return !process._display_topology_test_hook || process._display_topology_test_hook(
+        return !process._test_edges.topology || process._test_edges.topology(
                                                          display_topology_test_operation_e::pause,
                                                          process._virtual_display_only
                                                        );
       };
       io.reactivate = [&process](const auto &, bool exclusive) {
-        return !process._display_topology_test_hook || process._display_topology_test_hook(
+        return !process._test_edges.topology || process._test_edges.topology(
                                                          display_topology_test_operation_e::reactivate,
                                                          exclusive
                                                        );
@@ -76,7 +76,7 @@ namespace proc {
         if (identity_query) {
           return identity_query();
         }
-        const bool present = !process._display_topology_test_hook || process._display_topology_test_hook(
+        const bool present = !process._test_edges.topology || process._test_edges.topology(
                                                                        display_topology_test_operation_e::refresh_binding,
                                                                        process._virtual_display_only
                                                                      );
@@ -91,27 +91,27 @@ namespace proc {
       process._display_session = VDISPLAY::session_t {std::move(io)};
       process._virtual_display = enabled;
       process.display_name.clear();
-      process._display_mode_query_test_hook = {};
-      process._display_mode_change_test_hook = {};
-      process._display_mode_record_test_hook = {};
-      process._display_baseline_test_hook = {};
-      process._display_settings_unavailable_test_hook = {};
+      process._test_edges.query_mode = {};
+      process._test_edges.change_mode = {};
+      process._test_edges.record_mode = {};
+      process._test_edges.baseline_active = {};
+      process._test_edges.settings_unavailable = {};
       process._saved_virtual_display_mode.reset();
       if (enabled) {
-        if (!process._display_topology_test_hook) {
-          process._display_topology_test_hook = [](auto, bool) { return true; };
+        if (!process._test_edges.topology) {
+          process._test_edges.topology = [](auto, bool) { return true; };
         }
         // Fixtures never read or write Windows display settings; tests inspect saves explicitly.
-        process._display_mode_record_test_hook = [](std::wstring_view, const auto &) {
+        process._test_edges.record_mode = [](std::wstring_view, const auto &) {
           return DISP_CHANGE_SUCCESSFUL;
         };
-        process._display_baseline_test_hook = [](std::wstring_view) {
+        process._test_edges.baseline_active = [](std::wstring_view) {
           return true;
         };
-        process._display_settings_unavailable_test_hook = [] {
+        process._test_edges.settings_unavailable = [] {
           return false;
         };
-        process._display_mode_query_test_hook = [&process](std::wstring_view) -> std::optional<DEVMODEW> {
+        process._test_edges.query_mode = [&process](std::wstring_view) -> std::optional<DEVMODEW> {
           if (!process._display_context) {
             return std::nullopt;
           }
@@ -162,34 +162,34 @@ namespace proc {
     }
 
     static void observe_display_mode(proc_t &process, std::optional<DEVMODEW> mode) {
-      process._display_mode_query_test_hook = [mode](std::wstring_view) { return mode; };
+      process._test_edges.query_mode = [mode](std::wstring_view) { return mode; };
     }
 
     static void observe_display_mode(
       proc_t &process, std::function<std::optional<DEVMODEW>(std::wstring_view)> query
     ) {
-      process._display_mode_query_test_hook = std::move(query);
+      process._test_edges.query_mode = std::move(query);
     }
 
     static void configure_display_mode(
       proc_t &process, std::function<LONG(std::wstring_view, int, int, int, bool)> configure
     ) {
-      process._display_mode_change_test_hook = std::move(configure);
+      process._test_edges.change_mode = std::move(configure);
     }
 
     static void record_session_mode(
       proc_t &process,
       std::function<LONG(std::wstring_view, const VDISPLAY::session_mode_record_t &)> record
     ) {
-      process._display_mode_record_test_hook = std::move(record);
+      process._test_edges.record_mode = std::move(record);
     }
 
     static void observe_baseline_topology(proc_t &process, std::function<bool(std::wstring_view)> query) {
-      process._display_baseline_test_hook = std::move(query);
+      process._test_edges.baseline_active = std::move(query);
     }
 
     static void observe_display_settings_unavailable(proc_t &process, std::function<bool()> query) {
-      process._display_settings_unavailable_test_hook = std::move(query);
+      process._test_edges.settings_unavailable = std::move(query);
     }
 
     static bool save_session_mode(proc_t &process, int width, int height, int fps_millihz) {
@@ -208,7 +208,7 @@ namespace proc {
       proc_t &process,
       display_topology_test_hook_t hook
     ) {
-      process._display_topology_test_hook = std::move(hook);
+      process._test_edges.topology = std::move(hook);
     }
 
     static void set_child(proc_t &process, boost::process::v1::child child, bool auto_detach = false) {
@@ -252,7 +252,7 @@ namespace proc {
       process._host_session_id = 0;
       process._active_launch_session_id = 0;
       process._display_context.reset();
-      process._display_topology_test_hook = {};
+      process._test_edges.topology = {};
       mark_virtual(process, false);
       process._virtual_display_only = false;
       process._display_session.commit_resume();
