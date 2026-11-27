@@ -83,11 +83,13 @@ namespace sunshine_streamline::depth_capture {
       for (std::size_t i = 0; i != lock_stats::buckets; ++i) out.histogram[i] = role.histogram[i].load(std::memory_order_relaxed);
       return out;
     }
+#if defined(SUNSHINE_STREAMLINE_PROBE_TEST) || defined(SUNSHINE_SBS_RUNTIME_TEST_ADDON)
     void reset_lock_role(lock_stats::role_counters &role) {
       for (auto *value : {&role.locks, &role.waits, &role.wait_ns, &role.long_waits, &role.max_ns, &role.window_max_ns})
         value->store(0, std::memory_order_relaxed);
       for (auto &value : role.histogram) value.store(0, std::memory_order_relaxed);
     }
+#endif
     // A window's role values: counts since the previous window, and the
     // window's own maximum.
     lock_stats::role_values lock_window(const lock_stats::role_values &now, const lock_stats::role_values &before,
@@ -157,6 +159,7 @@ namespace sunshine_streamline::depth_capture {
     return out;
   }
 
+#if defined(SUNSHINE_STREAMLINE_PROBE_TEST) || defined(SUNSHINE_SBS_RUNTIME_TEST_ADDON)
   void reset_capture_lock_values() {
     // Fixtures only: waits for a report in progress.
     while (report_window.busy.exchange(true, std::memory_order_acquire)) SwitchToThread();
@@ -171,6 +174,7 @@ namespace sunshine_streamline::depth_capture {
     report_window.next.store(0, std::memory_order_relaxed);
     report_window.busy.store(false, std::memory_order_release);
   }
+#endif
 
   bool capture_lock_report(std::uint64_t now_ms, bool always, char *out, std::size_t size) {
     // Diagnostics times the present thread's holds (a store only on a change).

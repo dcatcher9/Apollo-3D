@@ -113,10 +113,12 @@ namespace sunshine_streamline::depth_capture {
     std::uint64_t held_at_{};
   };
 
-  // The counters (cumulative), and a reset (fixtures only), which also makes
-  // the next capture_lock_report call take a new window baseline.
+  // The counters (cumulative), and in the test views a reset, which also
+  // makes the next capture_lock_report call take a new window baseline.
   lock_stats::values capture_lock_values();
+#if defined(SUNSHINE_STREAMLINE_PROBE_TEST) || defined(SUNSHINE_SBS_RUNTIME_TEST_ADDON)
   void reset_capture_lock_values();
+#endif
   // The bounded "Sunshine depth capture lock:" line: at most every 10 s,
   // only for a window in which a game thread waited a millisecond or more,
   // or every window when always is set (Diagnostics). The first call (and

@@ -6588,8 +6588,8 @@ Present's consumers on its thread read it (`present_frame_generation`):
 `present_deferred` (each viewport's generating and generated counts), the UI
 (`ui_input::observe`) and the provider (`begin`); depth's `finish_present` drops
 it. A consumer that finds no snapshot taken for its swapchain's Present takes its
-own for that call only and counts it (`present_fg_fallbacks`; the session
-timelines' rows with an options call during a Present require none). Until 11-01
+own for that call only; the test builds count it (`present_fg_fallbacks`; the
+session timelines' rows with an options call during a Present require none). Until 11-01
 that read became the thread's snapshot, so where depth's present events frame no
 Present (depth not registered) every later Present of the swapchain on that
 thread read the first one (lane L-fg, F68; probe row

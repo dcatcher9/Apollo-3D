@@ -510,7 +510,9 @@ namespace sunshine_streamline {
       const bool known_contract = feature == 0;
       const bool inspect = ticket && feature != 3 && (known_contract || commands);
       const loss_context_scope loss_scope(0, inspect ? viewport : UINT32_MAX, feature);
+#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
       if (ticket) ++evaluation_calls;
+#endif
       evaluation_snapshot snapshot;
       if (inspect) {
         const auto serial = ++call_sequence;
@@ -546,7 +548,9 @@ namespace sunshine_streamline {
       // behavior. Other features are admitted by a validated typed depth tuple,
       // never by a feature-ID whitelist; opaque/non-renderer inputs pass through.
       const bool known_contract = known_renderer_contract(feature);
+#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
       if (ticket) ++evaluation_calls;
+#endif
       const auto serial = ticket ? ++call_sequence : 0;
       const loss_context_scope loss_scope(serial, UINT32_MAX, feature);
       const auto loss = loss_revision.load(std::memory_order_acquire);

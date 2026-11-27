@@ -172,7 +172,12 @@ namespace sunshine_streamline {
     std::atomic<bool> observing{};
     std::atomic<bool> source_requested{};
     std::atomic<std::uint64_t> observation_generation{};
-    std::atomic<std::uint64_t> constant_calls{}, tag_calls{}, evaluation_calls{}, dropped{}, invalid{};
+    std::atomic<std::uint64_t> constant_calls{};
+#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
+    // Tag and evaluation calls, and dropped and invalid observations: the
+    // probe tests' counts (testing::counts); the shipped add-on keeps none.
+    std::atomic<std::uint64_t> tag_calls{}, evaluation_calls{}, dropped{}, invalid{};
+#endif
     // Depth tags naming no resource (Streamline's untag): a null Resource
     // pointer, or a Resource whose native is null.
     std::atomic<std::uint64_t> depth_untags{};
@@ -375,7 +380,9 @@ namespace sunshine_streamline {
       const bool resource_has_state = installed_abi != abi::legacy_no_state;
       if (sample && diagnostic.session) dump_metadata::observe_sl_tag_v1(diagnostic, resource, type, area, resource_has_state);
       if (sample) {
+#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
         ++tag_calls;
+#endif
         out.viewport = viewport;
         out.valid_viewport = true;
         const auto canonical_type = buffers::canonical(installed_contract, type);

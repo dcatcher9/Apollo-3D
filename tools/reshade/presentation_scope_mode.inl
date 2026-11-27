@@ -105,8 +105,11 @@
     SRWLOCK fg_view_lock = SRWLOCK_INIT;
     presentation_scope::fg_view fg_state;
     thread_local presentation_scope::present_fg present_snapshot;
-    // Consumers that found no snapshot taken for their Present and took
-    // their own (present_frame_generation, present_fg_fallbacks), and the
-    // newest such read on this thread, which no later call reuses.
+    // The newest read of a consumer that found no snapshot taken for its
+    // Present and took its own (present_frame_generation) on this thread,
+    // which no later call reuses, and in the test builds the count of such
+    // reads (present_fg_fallbacks).
     thread_local presentation_scope::present_fg fallback_snapshot;
+#if defined(SUNSHINE_STREAMLINE_PROBE_TEST) || defined(SUNSHINE_SBS_RUNTIME_TEST_ADDON)
     std::atomic<std::uint64_t> fg_snapshot_fallbacks{};
+#endif

@@ -60,11 +60,17 @@ namespace sunshine_streamline {
       return previous;
     }
     void invalid_observation(loss_diagnostics::reason cause, const char *site, std::uint32_t line) {
-      ++invalid; lose(cause, site, line);
+#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
+      ++invalid;
+#endif
+      lose(cause, site, line);
     }
     void dropped_observation(loss_diagnostics::reason cause, const char *site, std::uint32_t line,
         loss_diagnostics::context details) {
-      ++dropped; lose(cause, site, line, details);
+#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
+      ++dropped;
+#endif
+      lose(cause, site, line, details);
     }
     std::uint64_t observation_ticket() {
       const auto ticket = observation_generation.load(std::memory_order_acquire);
@@ -774,7 +780,10 @@ namespace sunshine_streamline {
         frame ? dump_metadata::tag_scope::frame : dump_metadata::tag_scope::global);
       batch out;
       if (sample) {
-        ++tag_calls; out = read_tags(viewport, tags, count, frame ? origin::frame : origin::global, token);
+#ifdef SUNSHINE_STREAMLINE_PROBE_TEST
+        ++tag_calls;
+#endif
+        out = read_tags(viewport, tags, count, frame ? origin::frame : origin::global, token);
         for (auto &tag : out.tags) tag.commanded = commands != nullptr;
       }
       out.observation = ticket;

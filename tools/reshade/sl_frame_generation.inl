@@ -303,12 +303,16 @@ namespace sunshine_streamline {
     // asks for a restart, a legacy add-on) every later Present of that
     // swapchain on the thread read the first one, and the fallback counter
     // rose once (F68).
+#if defined(SUNSHINE_STREAMLINE_PROBE_TEST) || defined(SUNSHINE_SBS_RUNTIME_TEST_ADDON)
     fg_snapshot_fallbacks.fetch_add(1, std::memory_order_relaxed);
+#endif
     fallback_snapshot = take_fg(swapchain);
     return fallback_snapshot;
   }
 
+#if defined(SUNSHINE_STREAMLINE_PROBE_TEST) || defined(SUNSHINE_SBS_RUNTIME_TEST_ADDON)
   std::uint64_t present_fg_fallbacks() { return fg_snapshot_fallbacks.load(std::memory_order_relaxed); }
+#endif
 
   void present_depth_frame(std::uint64_t swapchain, std::uint64_t frame) {
     if (swapchain && present_snapshot.swapchain == swapchain) present_snapshot.depth_frame = frame;
