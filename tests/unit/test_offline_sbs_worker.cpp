@@ -63,6 +63,27 @@ namespace {
     return source;
   }
 
+  // Every source file of the worker process, for assertions about the worker as a whole.
+  std::string read_worker_sources_text() {
+    std::string sources;
+    for (const auto *relative : {
+           "src/offline_sbs_worker.cpp",
+           "src/offline_sbs_worker_ffmpeg.cpp",
+           "src/offline_sbs_worker_ffmpeg.h",
+           "src/offline_sbs_worker_io.cpp",
+           "src/offline_sbs_worker_io.h",
+           "src/offline_sbs_worker_probe.cpp",
+           "src/offline_sbs_worker_probe.h",
+         }) {
+      const auto source = read_source_text(relative);
+      if (source.empty()) {
+        return {};
+      }
+      sources += source;
+    }
+    return sources;
+  }
+
   std::string_view source_section(const std::string &source,
                                   const std::string_view begin_marker,
                                   const std::string_view end_marker) {
@@ -370,7 +391,7 @@ TEST(OfflineSbsWorker, LowCapFailsBeforeFirstSbsOutputSnapshot) {
 }
 
 TEST(OfflineSbsWorker, UiProgressUsesTransientWritesAndHarnessFilesStayDurable) {
-  const auto worker = read_source_text("src/offline_sbs_worker.cpp");
+  const auto worker = read_worker_sources_text();
   const auto harness = read_source_text("src/sbs_bench_harness.cpp");
   ASSERT_FALSE(worker.empty());
   ASSERT_FALSE(harness.empty());

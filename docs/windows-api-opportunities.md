@@ -240,7 +240,7 @@ Two consequences for an implementer:
   safeguard, not a presentation feature.
 
 Note that the render pass already excludes subtitles with `-sn`
-(`build_whole_clip_encode_command()` in [offline_sbs_worker.cpp](../src/offline_sbs_worker.cpp),
+(`build_whole_clip_encode_command()` in [offline_sbs_worker_ffmpeg.cpp](../src/offline_sbs_worker_ffmpeg.cpp),
 alongside `-an` and `-dn`). That is correct and should stay — it just has no effect on subtitles
 that are already pixels.
 
@@ -753,7 +753,7 @@ These were identified during analysis but not confirmed against code. Verify bef
 
 1. **Does the offline conversion output declare container-level stereo metadata** (for example
    Matroska `StereoMode`)? Note the mux pass strips metadata with `-map_metadata -1`
-   (`build_mux_command()` in [offline_sbs_worker.cpp](../src/offline_sbs_worker.cpp)), so any stereo
+   (`build_mux_command()` in [offline_sbs_worker_ffmpeg.cpp](../src/offline_sbs_worker_ffmpeg.cpp)), so any stereo
    signalling must be added deliberately. This is worth settling independently of subtitles: it is
    what lets any player recognise the file as side-by-side rather than as a very wide 2D video.
 2. **How often do sources carry a soft subtitle stream alongside burned-in subtitles?** The
@@ -797,8 +797,8 @@ for the name.
 | `publish_captured_dump()` in [sbs_debug_dump.cpp](../src/platform/windows/sbs_debug_dump.cpp), with `validate_window_region()` in [sbs_debug_dump_border.h](../src/platform/windows/sbs_debug_dump_border.h) | Dump 3D fails closed on invalid optional window-region evidence |
 | `wgc_capture_t::init()` in [display_wgc.cpp](../src/platform/windows/display_wgc.cpp) | WGC uses `CreateForMonitor` only; `CreateForWindow` unused (W9) |
 | `nvenc_base::create_encoder()` in [nvenc_base.cpp](../src/nvenc/nvenc_base.cpp) | lookahead explicitly disabled; `enableAQ` is the only adaptive quantisation; no QP map (W8) |
-| `build_whole_clip_encode_command()` in [offline_sbs_worker.cpp](../src/offline_sbs_worker.cpp) | render pass drops subtitle streams with `-sn`; no effect on burned-in text (W2) |
-| `build_mux_command()` in [offline_sbs_worker.cpp](../src/offline_sbs_worker.cpp) | mux pass copies subtitle streams with `-map 1:s?` and clears their dispositions (W2) |
+| `build_whole_clip_encode_command()` in [offline_sbs_worker_ffmpeg.cpp](../src/offline_sbs_worker_ffmpeg.cpp) | render pass drops subtitle streams with `-sn`; no effect on burned-in text (W2) |
+| `build_mux_command()` in [offline_sbs_worker_ffmpeg.cpp](../src/offline_sbs_worker_ffmpeg.cpp) | mux pass copies subtitle streams with `-map 1:s?` and clears their dispositions (W2) |
 | `host_sbs_v2_max_source_long_side` and `host_sbs_v2_max_source_pixels` in [host_sbs_resolution.h](../src/host_sbs_resolution.h) | source upper bounds: 5120 long side, 5120×2160 area |
 | `host_sbs_v2_source_resolution_rejection_reason()` in [host_sbs_resolution.h](../src/host_sbs_resolution.h) | the gate authenticates the **fitted tensor shape**, so it is aspect-driven |
 | Core suite table in [DATASETS.md](../tools/sbsbench/DATASETS.md#core-suite) | `flat_page` targets flat-content depth hallucination |
