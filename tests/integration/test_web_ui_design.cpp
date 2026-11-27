@@ -5,6 +5,8 @@
 #include "../tests_common.h"
 #include "src/config.h"
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
@@ -29,6 +31,52 @@ namespace {
     std::ifstream stream(path, std::ios::binary);
     EXPECT_TRUE(stream.is_open()) << "Unable to read " << path;
     return {std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>()};
+  }
+
+  // The pages show their own text through vue-i18n keys in public/assets/locale/en.json, so a
+  // design assertion about visible text accepts the literal or a reference to a key whose
+  // English text contains it.
+  std::vector<std::string> english_keys_containing(std::string_view text, const bool whole = false) {
+    static const auto messages = nlohmann::json::parse(read_source(web_root / "public/assets/locale/en.json"));
+    std::vector<std::string> keys;
+    for (const auto &[section, entries] : messages.items()) {
+      if (!entries.is_object()) {
+        continue;
+      }
+      for (const auto &[name, value] : entries.items()) {
+        const auto *english = value.is_string() ? &value.get_ref<const std::string &>() : nullptr;
+        if (english && (whole ? *english == text : english->find(text) != std::string::npos)) {
+          keys.push_back(section + "." + name);
+        }
+      }
+    }
+    return keys;
+  }
+
+  std::size_t find_shown(const std::string &source, std::string_view text, std::size_t from = 0) {
+    auto found = source.find(text, from);
+    for (const auto &key : english_keys_containing(text)) {
+      found = std::min({found, source.find("'" + key + "'", from), source.find("\"" + key + "\"", from)});
+    }
+    return found;
+  }
+
+  // The text as an attribute's value: attribute="text" or :attribute="$t('key')".
+  std::size_t find_shown_attribute(const std::string &source, std::string_view attribute, std::string_view text) {
+    auto found = source.find(std::string(attribute) + "=\"" + std::string(text) + "\"");
+    for (const auto &key : english_keys_containing(text, true)) {
+      found = std::min(found, source.find(":" + std::string(attribute) + "=\"$t('" + key + "')\""));
+    }
+    return found;
+  }
+
+  // The text as an element's whole content: >text</tag> or {{ $t('key') }}</tag>.
+  std::size_t find_shown_element(const std::string &source, std::string_view text, std::string_view closing) {
+    auto found = source.find(">" + std::string(text) + std::string(closing));
+    for (const auto &key : english_keys_containing(text, true)) {
+      found = std::min(found, source.find("$t('" + key + "') }}" + std::string(closing)));
+    }
+    return found;
   }
 
   std::vector<fs::path> styled_sources() {
@@ -207,7 +255,7 @@ TEST(WebUiDesign, PageChromeUsesSemanticColorTypeAndRadiusRoles) {
 TEST(WebUiDesign, PairingKeepsPinPrimaryAndQrSecondary) {
   const auto source = read_source(web_root / "pin.html");
   const auto pin = source.find("id=\"PIN\"");
-  const auto qr = source.find("Scan QR code");
+  const auto qr = find_shown(source, "Scan QR code");
 
   ASSERT_NE(pin, std::string::npos);
   ASSERT_NE(qr, std::string::npos);
@@ -232,12 +280,12 @@ TEST(WebUiDesign, PresentsSunshineAndMoonlightBrandPair) {
   EXPECT_NE(navbar.find("logo-sunshine3d-45.png"), std::string::npos);
   EXPECT_NE(header.find("<title>Sunshine 3D</title>"), std::string::npos);
   EXPECT_NE(header.find("images/sunshine3d.ico"), std::string::npos);
-  EXPECT_NE(pairing.find("Pair Moonlight 3D"), std::string::npos);
+  EXPECT_NE(find_shown(pairing, "Pair Moonlight 3D"), std::string::npos);
 
   EXPECT_TRUE(fs::exists(web_root / "public/images/logo-sunshine3d-45.png"));
   EXPECT_TRUE(fs::exists(web_root / "public/images/sunshine3d.ico"));
-  EXPECT_EQ(navbar.find("Apollo XR"), std::string::npos);
-  EXPECT_EQ(pairing.find("Pair Artemis"), std::string::npos);
+  EXPECT_EQ(find_shown(navbar, "Apollo XR"), std::string::npos);
+  EXPECT_EQ(find_shown(pairing, "Pair Artemis"), std::string::npos);
 }
 
 TEST(WebUiDesign, UsesDeviceNeutralAndThreeDimensionalStatusLanguage) {
@@ -246,16 +294,16 @@ TEST(WebUiDesign, UsesDeviceNeutralAndThreeDimensionalStatusLanguage) {
   const auto essentials =
     read_source(web_root / "configs/tabs/Essentials.vue");
 
-  EXPECT_NE(overview.find("Ready for 3D"), std::string::npos);
-  EXPECT_NE(overview.find("3D readiness"), std::string::npos);
-  EXPECT_NE(pairing.find(">Remote devices</h2>"), std::string::npos);
-  EXPECT_NE(essentials.find(">3D readiness</p>"), std::string::npos);
+  EXPECT_NE(find_shown(overview, "Ready for 3D"), std::string::npos);
+  EXPECT_NE(find_shown(overview, "3D readiness"), std::string::npos);
+  EXPECT_NE(find_shown_element(pairing, "Remote devices", "</h2>"), std::string::npos);
+  EXPECT_NE(find_shown_element(essentials, "3D readiness", "</p>"), std::string::npos);
 
-  EXPECT_EQ(overview.find("Ready for XR"), std::string::npos);
-  EXPECT_EQ(overview.find("XR readiness"), std::string::npos);
-  EXPECT_EQ(overview.find("XR device"), std::string::npos);
-  EXPECT_EQ(pairing.find("Remote XR devices"), std::string::npos);
-  EXPECT_EQ(pairing.find("use XR"), std::string::npos);
+  EXPECT_EQ(find_shown(overview, "Ready for XR"), std::string::npos);
+  EXPECT_EQ(find_shown(overview, "XR readiness"), std::string::npos);
+  EXPECT_EQ(find_shown(overview, "XR device"), std::string::npos);
+  EXPECT_EQ(find_shown(pairing, "Remote XR devices"), std::string::npos);
+  EXPECT_EQ(find_shown(pairing, "use XR"), std::string::npos);
 }
 
 TEST(WebUiDesign, DevicesPageOnlyEmbedsApprovedArGlasses) {
@@ -310,7 +358,7 @@ TEST(WebUiDesign, KeepsTaskbarRepairDirectlyUnderTheTraySetting) {
     "<section class=\"settings-card settings-card-wide tray-setting\">"
   );
   const auto keep_tray =
-    essentials.find("Keep Sunshine 3D in the system tray", tray_section);
+    find_shown(essentials, "Keep Sunshine 3D in the system tray", tray_section);
   const auto repair =
     essentials.find("config.virtual_display_restart_explorer", keep_tray);
   const auto tray_section_end = essentials.find("</section>", tray_section);
@@ -323,7 +371,7 @@ TEST(WebUiDesign, KeepsTaskbarRepairDirectlyUnderTheTraySetting) {
   EXPECT_LT(keep_tray, repair);
   EXPECT_LT(repair, tray_section_end);
 
-  const auto virtual_display = essentials.find("<h2>Virtual display</h2>");
+  const auto virtual_display = find_shown_element(essentials, "Virtual display", "</h2>");
   const auto virtual_display_end =
     essentials.find("</section>", virtual_display);
   ASSERT_NE(virtual_display, std::string::npos);
@@ -414,14 +462,14 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolated) {
 
   EXPECT_NE(page.find("v-model.trim=\"form.inputPath\""), std::string::npos);
   EXPECT_NE(page.find("v-model.trim=\"form.outputName\""), std::string::npos);
-  EXPECT_NE(page.find("aria-label=\"Browse for an input video\""), std::string::npos);
+  EXPECT_NE(find_shown_attribute(page, "aria-label", "Browse for an input video"), std::string::npos);
   EXPECT_NE(page.find("@click=\"openInputPicker\""), std::string::npos);
   EXPECT_NE(
-    page.find("aria-label=\"Choose the output video file name\""),
+    find_shown_attribute(page, "aria-label", "Choose the output video file name"),
     std::string::npos
   );
   EXPECT_NE(page.find("@click=\"openOutputPicker\""), std::string::npos);
-  EXPECT_NE(page.find("Output folder (same as input)"), std::string::npos);
+  EXPECT_NE(find_shown(page, "Output folder (same as input)"), std::string::npos);
   EXPECT_NE(page.find("inputDirectory()"), std::string::npos);
   EXPECT_NE(page.find("'form.inputPath'(inputPath)"), std::string::npos);
   EXPECT_NE(page.find("suggestOutputName(inputPath)"), std::string::npos);
@@ -458,15 +506,15 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolated) {
   EXPECT_NE(page.find("v-model=\"form.operation\""), std::string::npos);
   EXPECT_NE(page.find("value=\"convert\""), std::string::npos);
   EXPECT_NE(page.find("value=\"evaluate\""), std::string::npos);
-  EXPECT_NE(page.find("Analyze only"), std::string::npos);
+  EXPECT_NE(find_shown(page, "Analyze only"), std::string::npos);
   EXPECT_NE(
     page.find("if (this.form.operation === 'convert')"),
     std::string::npos
   );
   EXPECT_NE(page.find("request.output_name ="), std::string::npos);
   EXPECT_NE(page.find("const operation = settings.operation"), std::string::npos);
-  EXPECT_NE(page.find("one non-empty regular video file"), std::string::npos);
-  EXPECT_EQ(page.find("numbered frame directory"), std::string::npos);
+  EXPECT_NE(find_shown(page, "one non-empty regular video file"), std::string::npos);
+  EXPECT_EQ(find_shown(page, "numbered frame directory"), std::string::npos);
   EXPECT_NE(page.find("value=\"hevc_nvenc\""), std::string::npos);
   EXPECT_NE(page.find("value=\"av1_nvenc\""), std::string::npos);
   EXPECT_NE(page.find("<strong>H.265 / HEVC</strong>"), std::string::npos);
@@ -474,20 +522,20 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolated) {
   EXPECT_EQ(page.find("<strong>10-bit H.265 / HEVC</strong>"), std::string::npos);
   EXPECT_EQ(page.find("<strong>10-bit AV1</strong>"), std::string::npos);
   EXPECT_NE(
-    page.find("Static HDR uses 10-bit output; SDR uses 8-bit output."),
+    find_shown(page, "Static HDR uses 10-bit output; SDR uses 8-bit output."),
     std::string::npos
   );
   EXPECT_EQ(page.find("scene_cache_max_bytes"), std::string::npos);
   EXPECT_EQ(page.find("cache_budget_policy"), std::string::npos);
   EXPECT_NE(page.find("operation: this.form.operation"), std::string::npos);
-  EXPECT_NE(page.find("same causal Host SBS estimator"), std::string::npos);
-  EXPECT_NE(page.find("as fast as the decoder, GPU, and encoder permit"), std::string::npos);
-  EXPECT_EQ(page.find("lookahead"), std::string::npos);
+  EXPECT_NE(find_shown(page, "same causal Host SBS estimator"), std::string::npos);
+  EXPECT_NE(find_shown(page, "as fast as the decoder, GPU, and encoder permit"), std::string::npos);
+  EXPECT_EQ(find_shown(page, "lookahead"), std::string::npos);
   EXPECT_NE(page.find("@click=\"cancelJob(selectedJob)\""), std::string::npos);
   EXPECT_NE(page.find("v-if=\"isClearable(selectedJob)\""), std::string::npos);
   EXPECT_NE(page.find("@click=\"clearJob(selectedJob)\""), std::string::npos);
-  EXPECT_NE(page.find("Clear job"), std::string::npos);
-  EXPECT_NE(page.find("The converted video will be kept."), std::string::npos);
+  EXPECT_NE(find_shown(page, "Clear job"), std::string::npos);
+  EXPECT_NE(find_shown(page, "The converted video will be kept."), std::string::npos);
   EXPECT_NE(
     page.find("const preferred = jobs.find(job => this.isActive(job)) || jobs[0]"),
     std::string::npos
@@ -496,19 +544,19 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolated) {
     page.find("error instanceof ApiError && error.status === 404"),
     std::string::npos
   );
-  EXPECT_NE(page.find("Interrupted — not resumable in version 1"), std::string::npos);
+  EXPECT_NE(find_shown(page, "Interrupted — not resumable in version 1"), std::string::npos);
   EXPECT_NE(page.find("@click=\"restartJob(selectedJob)\""), std::string::npos);
-  EXPECT_NE(page.find("Windows and NVIDIA only"), std::string::npos);
-  EXPECT_NE(page.find("Static HDR is supported"), std::string::npos);
-  EXPECT_NE(page.find("Dolby Vision and dynamic"), std::string::npos);
+  EXPECT_NE(find_shown(page, "Windows and NVIDIA only"), std::string::npos);
+  EXPECT_NE(find_shown(page, "Static HDR is supported"), std::string::npos);
+  EXPECT_NE(find_shown(page, "Dolby Vision and dynamic"), std::string::npos);
   EXPECT_NE(page.find("'publishing'"), std::string::npos);
   EXPECT_NE(
-    page.find("live stream before starting an offline job"),
+    find_shown(page, "live stream before starting an offline job"),
     std::string::npos
   );
-  EXPECT_NE(page.find("built-in job manager"), std::string::npos);
-  EXPECT_EQ(page.find("native service"), std::string::npos);
-  EXPECT_EQ(api.find("job service"), std::string::npos);
+  EXPECT_NE(find_shown(page, "built-in job manager"), std::string::npos);
+  EXPECT_EQ(find_shown(page, "native service"), std::string::npos);
+  EXPECT_EQ(find_shown(api, "job service"), std::string::npos);
 
   // HTTP details belong to one browser boundary, not the page component.
   EXPECT_EQ(page.find("fetch("), std::string::npos);
@@ -544,15 +592,15 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolated) {
   EXPECT_NE(page.find("capabilities?.codecs"), std::string::npos);
   EXPECT_NE(page.find("live_stream_active"), std::string::npos);
   EXPECT_NE(page.find(":disabled=\"!codecAvailable('hevc_nvenc')\""), std::string::npos);
-  EXPECT_NE(page.find("End the current stream before starting"), std::string::npos);
-  EXPECT_NE(page.find("Live updates are delayed"), std::string::npos);
+  EXPECT_NE(find_shown(page, "End the current stream before starting"), std::string::npos);
+  EXPECT_NE(find_shown(page, "Live updates are delayed"), std::string::npos);
   EXPECT_NE(page.find("this.pollWarning = message"), std::string::npos);
-  EXPECT_NE(page.find("retrying automatically"), std::string::npos);
+  EXPECT_NE(find_shown(page, "retrying automatically"), std::string::npos);
   EXPECT_NE(
     page.find(":aria-label=\"jobProgressLabel(selectedJob)\""),
     std::string::npos
   );
-  EXPECT_NE(page.find("Offline analysis progress"), std::string::npos);
+  EXPECT_NE(find_shown(page, "Offline analysis progress"), std::string::npos);
   EXPECT_NE(
     page.find("aria-describedby=\"offlineInputPathHelp\""),
     std::string::npos
