@@ -121,9 +121,17 @@ namespace platf::dxgi {
 
       bool finish_producer(slot_t &slot, bool publish_pair, ID3D11DeviceContext *producer_context) {
         if (publish_pair) {
-          Microsoft::WRL::ComPtr<ID3D11DeviceContext4> producer_context4;
-          if (FAILED(producer_context->QueryInterface(IID_PPV_ARGS(&producer_context4))) ||
-              FAILED(producer_context4->Signal(completion_fence_.Get(), completion_ + 1))) {
+          // The fence interface is asked for once per producer context, not on every pair.
+          if (producer_context != producer_context_) {
+            producer_context4_.Reset();
+            producer_context_ = nullptr;
+            if (FAILED(producer_context->QueryInterface(IID_PPV_ARGS(&producer_context4_)))) {
+              failed_ = true;
+              return false;
+            }
+            producer_context_ = producer_context;
+          }
+          if (FAILED(producer_context4_->Signal(completion_fence_.Get(), completion_ + 1))) {
             failed_ = true;
             return false;
           }
@@ -221,6 +229,9 @@ namespace platf::dxgi {
 
       std::array<slot_t, 2> slots_;
       Microsoft::WRL::ComPtr<ID3D11Fence> completion_fence_;
+      // The context that signals the fence, and its ID3D11DeviceContext4 interface.
+      ID3D11DeviceContext *producer_context_ = nullptr;
+      Microsoft::WRL::ComPtr<ID3D11DeviceContext4> producer_context4_;
       std::uint64_t completion_ = 0;
       slot_t *current_ = nullptr;
       std::atomic<bool> failed_ = false;
