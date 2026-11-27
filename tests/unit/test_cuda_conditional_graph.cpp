@@ -843,7 +843,10 @@ probe_sample:
         return initialize_result_e::unavailable;
       }
       retained_ = true;
-      if (cuda_->cuCtxSetCurrent(context_) != CUDA_SUCCESS || cuda_->cuStreamCreate(&stream_, CU_STREAM_NON_BLOCKING) != CUDA_SUCCESS || cuda_->cuMemAlloc(&records_, sizeof(decision_record_t) + sizeof(request_record_t)) != CUDA_SUCCESS || cuda_->cuMemAlloc(&output_, sizeof(std::uint32_t)) != CUDA_SUCCESS || (with_optional_child && cuda_->cuMemAlloc(&optional_output_, sizeof(std::uint32_t)) != CUDA_SUCCESS) || (with_receipt_probe && cuda_->cuMemAlloc(&receipt_probe_, 2u * sizeof(std::uint32_t)) != CUDA_SUCCESS) || cuda_->cuGraphCreate(&child_, 0u) != CUDA_SUCCESS || cuda_->cuModuleLoadDataEx(&scalar_module_, scalar_prefix_consumer_ptx, 0u, nullptr, nullptr) != CUDA_SUCCESS || cuda_->cuModuleGetFunction(&marker_writer_, scalar_module_, "write_inference_marker") != CUDA_SUCCESS || !marker_writer_) {
+      // The fixture writes its records with cuMemcpyHtoD from pageable memory, which returns
+      // once the bytes are staged; the DMA to the device can still be queued on the legacy
+      // stream. A blocking stream waits for it, so a launch never reads the previous records.
+      if (cuda_->cuCtxSetCurrent(context_) != CUDA_SUCCESS || cuda_->cuStreamCreate(&stream_, CU_STREAM_DEFAULT) != CUDA_SUCCESS || cuda_->cuMemAlloc(&records_, sizeof(decision_record_t) + sizeof(request_record_t)) != CUDA_SUCCESS || cuda_->cuMemAlloc(&output_, sizeof(std::uint32_t)) != CUDA_SUCCESS || (with_optional_child && cuda_->cuMemAlloc(&optional_output_, sizeof(std::uint32_t)) != CUDA_SUCCESS) || (with_receipt_probe && cuda_->cuMemAlloc(&receipt_probe_, 2u * sizeof(std::uint32_t)) != CUDA_SUCCESS) || cuda_->cuGraphCreate(&child_, 0u) != CUDA_SUCCESS || cuda_->cuModuleLoadDataEx(&scalar_module_, scalar_prefix_consumer_ptx, 0u, nullptr, nullptr) != CUDA_SUCCESS || cuda_->cuModuleGetFunction(&marker_writer_, scalar_module_, "write_inference_marker") != CUDA_SUCCESS || !marker_writer_) {
         return initialize_result_e::failed;
       }
 

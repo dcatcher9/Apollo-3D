@@ -47,6 +47,7 @@ typedef CUresult(__stdcall* PFN_cuMemcpyDtoH)(void* dstHost, CUdeviceptr srcDevi
 
 // D3D11 Interop
 typedef struct CUstream_st* CUstream;
+#define CU_STREAM_DEFAULT 0x0
 #define CU_STREAM_NON_BLOCKING 0x1
 typedef CUresult(__stdcall* PFN_cuStreamCreate)(CUstream* phStream, unsigned int Flags);
 typedef CUresult(__stdcall* PFN_cuStreamDestroy)(CUstream hStream);
