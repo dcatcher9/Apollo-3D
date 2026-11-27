@@ -71,23 +71,6 @@ namespace offline_sbs::wire {
     }
 
     template<std::size_t Size>
-    void require_keys_with_optional(
-      const json &value,
-      const std::array<std::string_view, Size> &expected,
-      const std::string_view optional,
-      const std::string_view context
-    ) {
-      if (!value.is_object() || value.size() != expected.size() + value.contains(optional)) {
-        throw contract_error(std::string {context} + " has missing or unknown fields");
-      }
-      for (const auto key : expected) {
-        if (!value.contains(key)) {
-          throw contract_error(std::string {context} + " is missing field '" + std::string {key} + "'");
-        }
-      }
-    }
-
-    template<std::size_t Size>
     void require_allowed_keys(
       const json &value,
       const std::array<std::string_view, Size> &allowed,
@@ -465,15 +448,6 @@ namespace offline_sbs::wire {
         analysis.adaptive_state.transport != completion_channel_t::name ||
         analysis.adaptive_state.retained_history ||
         analysis.adaptive_state.frame_count != source.frame_count ||
-        !runtime.follow_mode ||
-        runtime.follow_count_bound.value_or(0) != source.frame_count ||
-        runtime.follow_producer_frame_count.value_or(0) != source.frame_count ||
-        runtime.follow_first_sequence.value_or(0) != 1 ||
-        runtime.follow_poll_interval_ms.value_or(
-          std::numeric_limits<std::uint32_t>::max()
-        ) != 0 ||
-        runtime.follow_native_input_deletion ||
-        runtime.follow_format.value_or("") != (sdr ? "bgra8" : "gbrpf32le") ||
         runtime.input_frame_format != (sdr ? "sRGB-BGRA8-raw" : "linear-scRGB-f32-planar") ||
         result.cache.analysis_source_raster_bytes == 0 ||
         result.cache.peak_live_raster_bytes <
@@ -494,16 +468,13 @@ namespace offline_sbs::wire {
             sbs.row_order != runtime.output_row_order ||
             runtime.output_frame_format != (sdr ? "sRGB-BGRA8-raw" : "linear-scRGB-f16-raw") ||
             runtime.output_ffmpeg_pixel_format != (sdr ? "bgra" : "gbrpf32le") ||
-            sbs.ffmpeg_pixel_format != runtime.output_ffmpeg_pixel_format ||
-            !sbs.atomic_publication || !runtime.follow_atomic_sbs_publication) {
+            sbs.ffmpeg_pixel_format != runtime.output_ffmpeg_pixel_format) {
           throw contract_error(
             "worker direct SBS attestation disagrees with the causal pass"
           );
         }
       } else if (analysis.sbs.enabled || analysis.sbs.frame_count != 0 ||
-                 analysis.sbs.width != 0 || analysis.sbs.height != 0 ||
-                 analysis.sbs.atomic_publication ||
-                 runtime.follow_atomic_sbs_publication) {
+                 analysis.sbs.width != 0 || analysis.sbs.height != 0) {
         throw contract_error("analysis-only worker unexpectedly attests SBS output");
       }
 
@@ -717,8 +688,7 @@ namespace offline_sbs::wire {
       {"primaries", value.primaries},
       {"reference_white_nits", optional_json(value.reference_white_nits)},
       {"row_order", value.row_order},
-      {"ffmpeg_pixel_format", optional_json(value.ffmpeg_pixel_format)},
-      {"atomic_publication", value.atomic_publication},
+      {"ffmpeg_pixel_format", value.ffmpeg_pixel_format},
     };
   }
 
@@ -729,7 +699,7 @@ namespace offline_sbs::wire {
         "enabled"sv, "frame_count"sv, "width"sv,
         "height"sv, "frame_format"sv, "transfer"sv, "primaries"sv,
         "reference_white_nits"sv, "row_order"sv,
-        "ffmpeg_pixel_format"sv, "atomic_publication"sv,
+        "ffmpeg_pixel_format"sv,
       },
       "whole-clip SBS"
     );
@@ -744,18 +714,13 @@ namespace offline_sbs::wire {
       .transfer = required_string(value, "transfer", "whole-clip SBS"),
       .primaries = required_string(value, "primaries", "whole-clip SBS"),
       .row_order = required_string(value, "row_order", "whole-clip SBS"),
-      .atomic_publication = required_boolean(
-        value, "atomic_publication", "whole-clip SBS"
+      .ffmpeg_pixel_format = required_string(
+        value, "ffmpeg_pixel_format", "whole-clip SBS"
       ),
     };
     result.reference_white_nits = optional_value<double>(
       value, "reference_white_nits", [&]() {
         return finite_number(value, "reference_white_nits", "whole-clip SBS");
-      }
-    );
-    result.ffmpeg_pixel_format = optional_value<std::string>(
-      value, "ffmpeg_pixel_format", [&]() {
-        return required_string(value, "ffmpeg_pixel_format", "whole-clip SBS");
       }
     );
     if ((result.width == 0) != (result.height == 0)) {
@@ -770,8 +735,7 @@ namespace offline_sbs::wire {
           ((result.frame_format != "bgra8" && result.frame_format != "rgba16f") || result.frame_count == 0 ||
            result.width == 0 || result.height == 0) :
           (result.frame_count != 0 ||
-           result.width != 0 || result.height != 0 ||
-           result.atomic_publication)) {
+           result.width != 0 || result.height != 0)) {
       throw contract_error("whole-clip SBS enablement disagrees with its raster evidence");
     }
     return result;
@@ -781,6 +745,7 @@ namespace offline_sbs::wire {
     const auto &runtime = value.resolved_runtime;
     json resolved_runtime {
       {"model", runtime.model},
+      {"frame_transport", runtime.frame_transport},
       {"model_url", runtime.model_url},
       {"pop_strength", runtime.pop_strength},
       {"depth_width", runtime.depth_width},
@@ -804,19 +769,9 @@ namespace offline_sbs::wire {
       {"output_primaries", runtime.output_primaries},
       {"output_reference_white_nits", optional_json(runtime.output_reference_white_nits)},
       {"output_row_order", runtime.output_row_order},
-      {"output_ffmpeg_pixel_format", optional_json(runtime.output_ffmpeg_pixel_format)},
+      {"output_ffmpeg_pixel_format", runtime.output_ffmpeg_pixel_format},
       {"configured_max_encode_width", runtime.configured_max_encode_width},
       {"resolved_max_output_width", runtime.resolved_max_output_width},
-      {"input_limit", runtime.input_limit},
-      {"output_every", runtime.output_every},
-      {"follow_mode", runtime.follow_mode},
-      {"follow_format", optional_json(runtime.follow_format)},
-      {"follow_count_bound", optional_json(runtime.follow_count_bound)},
-      {"follow_producer_frame_count", optional_json(runtime.follow_producer_frame_count)},
-      {"follow_first_sequence", optional_json(runtime.follow_first_sequence)},
-      {"follow_poll_interval_ms", optional_json(runtime.follow_poll_interval_ms)},
-      {"follow_native_input_deletion", runtime.follow_native_input_deletion},
-      {"follow_atomic_sbs_publication", runtime.follow_atomic_sbs_publication},
       {"output_eye_width", runtime.output_eye_width},
       {"output_eye_height", runtime.output_eye_height},
       {"output_sbs_width", runtime.output_sbs_width},
@@ -824,9 +779,6 @@ namespace offline_sbs::wire {
       {"content_scale_x", runtime.content_scale_x},
       {"content_scale_y", runtime.content_scale_y},
     };
-    if (runtime.frame_transport) {
-      resolved_runtime["frame_transport"] = *runtime.frame_transport;
-    }
     const auto &adaptive = value.adaptive_state;
     json adaptive_state {
       {"transport", adaptive.transport},
@@ -944,10 +896,10 @@ namespace offline_sbs::wire {
     result.depth_reuse_interval = signed_integer<int>(value, "depth_reuse_interval", "whole-clip contract");
 
     const auto &runtime = value.at("resolved_runtime");
-    require_keys_with_optional(
+    require_exact_keys(
       runtime,
       std::array {
-        "model"sv, "model_url"sv, "pop_strength"sv, "depth_width"sv,
+        "model"sv, "frame_transport"sv, "model_url"sv, "pop_strength"sv, "depth_width"sv,
         "depth_height"sv, "depth_reuse_interval"sv, "cuda_graph"sv,
         "cuda_graph_captured"sv, "input_color_space"sv, "input_frame_format"sv,
         "input_texture_format"sv, "input_transfer"sv, "input_primaries"sv,
@@ -957,25 +909,16 @@ namespace offline_sbs::wire {
         "output_transfer"sv, "output_primaries"sv,
         "output_reference_white_nits"sv, "output_row_order"sv,
         "output_ffmpeg_pixel_format"sv, "configured_max_encode_width"sv,
-        "resolved_max_output_width"sv,
-        "input_limit"sv, "output_every"sv, "follow_mode"sv,
-        "follow_format"sv, "follow_count_bound"sv,
-        "follow_producer_frame_count"sv,
-        "follow_first_sequence"sv, "follow_poll_interval_ms"sv,
-        "follow_native_input_deletion"sv,
-        "follow_atomic_sbs_publication"sv, "output_eye_width"sv,
+        "resolved_max_output_width"sv, "output_eye_width"sv,
         "output_eye_height"sv, "output_sbs_width"sv, "output_sbs_height"sv,
         "content_scale_x"sv, "content_scale_y"sv,
       },
-      "frame_transport",
       "whole-clip resolved runtime"
     );
     auto &typed_runtime = result.resolved_runtime;
-    if (runtime.contains("frame_transport")) {
-      typed_runtime.frame_transport = required_string(runtime, "frame_transport", "whole-clip resolved runtime");
-      if (*typed_runtime.frame_transport != raw_frame_transport::name) {
-        throw contract_error("whole-clip frame transport is unsupported");
-      }
+    typed_runtime.frame_transport = required_string(runtime, "frame_transport", "whole-clip resolved runtime");
+    if (typed_runtime.frame_transport != raw_frame_transport::name) {
+      throw contract_error("whole-clip frame transport is unsupported");
     }
     typed_runtime.model = required_string(runtime, "model", "whole-clip resolved runtime");
     typed_runtime.model_url = required_string(runtime, "model_url", "whole-clip resolved runtime");
@@ -1000,34 +943,13 @@ namespace offline_sbs::wire {
     typed_runtime.output_row_order = required_string(runtime, "output_row_order", "whole-clip resolved runtime");
     typed_runtime.configured_max_encode_width = signed_integer<int>(runtime, "configured_max_encode_width", "whole-clip resolved runtime");
     typed_runtime.resolved_max_output_width = signed_integer<int>(runtime, "resolved_max_output_width", "whole-clip resolved runtime");
-    typed_runtime.input_limit = signed_integer<int>(
-      runtime, "input_limit", "whole-clip resolved runtime"
-    );
-    typed_runtime.output_every = unsigned_integer<std::uint64_t>(runtime, "output_every", "whole-clip resolved runtime");
-    typed_runtime.follow_mode = required_boolean(runtime, "follow_mode", "whole-clip resolved runtime");
-    typed_runtime.follow_native_input_deletion = required_boolean(runtime, "follow_native_input_deletion", "whole-clip resolved runtime");
-    typed_runtime.follow_atomic_sbs_publication = required_boolean(runtime, "follow_atomic_sbs_publication", "whole-clip resolved runtime");
+    typed_runtime.output_ffmpeg_pixel_format = required_string(runtime, "output_ffmpeg_pixel_format", "whole-clip resolved runtime");
     typed_runtime.output_eye_width = unsigned_integer<std::uint32_t>(runtime, "output_eye_width", "whole-clip resolved runtime");
     typed_runtime.output_eye_height = unsigned_integer<std::uint32_t>(runtime, "output_eye_height", "whole-clip resolved runtime");
     typed_runtime.output_sbs_width = unsigned_integer<std::uint32_t>(runtime, "output_sbs_width", "whole-clip resolved runtime");
     typed_runtime.output_sbs_height = unsigned_integer<std::uint32_t>(runtime, "output_sbs_height", "whole-clip resolved runtime");
     typed_runtime.content_scale_x = finite_number(runtime, "content_scale_x", "whole-clip resolved runtime");
     typed_runtime.content_scale_y = finite_number(runtime, "content_scale_y", "whole-clip resolved runtime");
-    const auto optional_string = [&](const std::string_view key) {
-      return optional_value<std::string>(runtime, key, [&]() {
-        return required_string(runtime, key, "whole-clip resolved runtime");
-      });
-    };
-    const auto optional_u64 = [&](const std::string_view key) {
-      return optional_value<std::uint64_t>(runtime, key, [&]() {
-        return unsigned_integer<std::uint64_t>(runtime, key, "whole-clip resolved runtime");
-      });
-    };
-    const auto optional_u32 = [&](const std::string_view key) {
-      return optional_value<std::uint32_t>(runtime, key, [&]() {
-        return unsigned_integer<std::uint32_t>(runtime, key, "whole-clip resolved runtime");
-      });
-    };
     const auto optional_number = [&](const std::string_view key) {
       return optional_value<double>(runtime, key, [&]() {
         return finite_number(runtime, key, "whole-clip resolved runtime");
@@ -1036,12 +958,6 @@ namespace offline_sbs::wire {
     typed_runtime.input_reference_white_nits = optional_number("input_reference_white_nits");
     typed_runtime.packed_reference_white_nits = optional_number("packed_reference_white_nits");
     typed_runtime.output_reference_white_nits = optional_number("output_reference_white_nits");
-    typed_runtime.output_ffmpeg_pixel_format = optional_string("output_ffmpeg_pixel_format");
-    typed_runtime.follow_format = optional_string("follow_format");
-    typed_runtime.follow_count_bound = optional_u64("follow_count_bound");
-    typed_runtime.follow_producer_frame_count = optional_u64("follow_producer_frame_count");
-    typed_runtime.follow_first_sequence = optional_u64("follow_first_sequence");
-    typed_runtime.follow_poll_interval_ms = optional_u32("follow_poll_interval_ms");
 
     const auto &adaptive = value.at("adaptive_state");
     auto &typed_adaptive = result.adaptive_state;
@@ -1058,21 +974,14 @@ namespace offline_sbs::wire {
     typed_adaptive.frame_count = unsigned_integer<std::uint64_t>(adaptive, "frame_count", "whole-clip adaptive state");
     typed_adaptive.schema = unsigned_integer<std::uint32_t>(adaptive, "schema", "whole-clip adaptive state");
     typed_adaptive.capture = required_string(adaptive, "capture", "whole-clip adaptive state");
-    if (typed_runtime.frame_transport != raw_frame_transport::name ||
-        !typed_runtime.follow_mode ||
-        typed_runtime.follow_poll_interval_ms != 0 ||
-        typed_runtime.follow_native_input_deletion || typed_adaptive.retained_history ||
+    if (typed_adaptive.retained_history ||
         typed_adaptive.schema != sbs_adaptive_state::schema_version ||
         typed_adaptive.capture != sbs_adaptive_state::capture ||
         typed_adaptive.frame_count != result.source_frame_count) {
       throw contract_error("whole-clip in-memory adaptive state disagrees with its native raw transport");
     }
     result.sbs = parse_whole_clip_sbs(value.at("sbs"));
-    const bool raw_sbs = result.sbs.frame_format == "bgra8" || result.sbs.frame_format == "rgba16f";
-    if (result.sbs.enabled &&
-        (typed_runtime.frame_transport.has_value() != raw_sbs ||
-         (raw_sbs && (!result.sbs.atomic_publication ||
-                      result.sbs.row_order != "top-down")))) {
+    if (result.sbs.enabled && result.sbs.row_order != "top-down") {
       throw contract_error("whole-clip SBS publication disagrees with its frame transport");
     }
     if (result.source_frame_count == 0 || result.source_width == 0 ||
@@ -1080,7 +989,6 @@ namespace offline_sbs::wire {
         result.depth_reuse_interval <= 0 ||
         typed_runtime.model != result.model ||
         typed_runtime.depth_reuse_interval != result.depth_reuse_interval ||
-        typed_runtime.output_every == 0 ||
         typed_runtime.resolved_max_output_width <= 0 ||
         typed_runtime.output_eye_width == 0 || typed_runtime.output_eye_height == 0 ||
         static_cast<std::uint64_t>(typed_runtime.output_sbs_width) !=

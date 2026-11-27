@@ -1181,30 +1181,27 @@ title=Smoke chapter
     [long] $analysisContract.scheduled_depth_update_count -eq 16
   ) 'conversion did not schedule one online depth update per source frame'
   Assert-Contract ([long] $analysisContract.source_frame_count -eq 16) 'conversion contract source count changed'
+  $retiredFollowFields = @(
+    $runtimeContract.PSObject.Properties.Name |
+      Where-Object { $_ -like 'follow_*' -or $_ -in @('input_limit', 'output_every') }
+  )
   Assert-Contract (
-    $runtimeContract.follow_mode -eq $true -and
-    [long] $runtimeContract.follow_poll_interval_ms -eq 0 -and
-    [long] $runtimeContract.follow_count_bound -eq 16 -and
-    [long] $runtimeContract.follow_producer_frame_count -eq 16 -and
-    [long] $runtimeContract.follow_first_sequence -eq 1 -and
-    $runtimeContract.follow_native_input_deletion -eq $false
-  ) 'direct conversion is not using the event-driven unpaced follow path'
-  $expectedFollowFormat = 'bgra8'
+    [long] $analysisContract.source_first_sequence -eq 1 -and
+    $retiredFollowFields.Count -eq 0 -and
+    $sbsContract.PSObject.Properties.Name -notcontains 'atomic_publication'
+  ) 'direct conversion contract still carries the retired file-follow fields'
   $expectedInputFrameFormat = 'sRGB-BGRA8-raw'
   if ($fixtureIsHdr) {
-    $expectedFollowFormat = 'gbrpf32le'
     $expectedInputFrameFormat = 'linear-scRGB-f32-planar'
   }
   Assert-Contract (
-    $runtimeContract.follow_format -eq $expectedFollowFormat -and
     $runtimeContract.frame_transport -eq 'bounded-raw-memory-v1' -and
     $runtimeContract.input_frame_format -eq $expectedInputFrameFormat
-  ) 'direct conversion follow raster contract disagrees with the source color mode'
+  ) 'direct conversion raw raster contract disagrees with the source color mode'
   Assert-Contract (
     $sbsContract.enabled -eq $true -and
-    [long] $sbsContract.frame_count -eq 16 -and
-    $sbsContract.atomic_publication -eq $true
-  ) 'direct conversion SBS count or atomic-publication contract changed'
+    [long] $sbsContract.frame_count -eq 16
+  ) 'direct conversion SBS count contract changed'
   Assert-Contract (
     [long] $sbsContract.width -gt 0 -and
     [long] $sbsContract.height -gt 0 -and
@@ -1246,8 +1243,7 @@ title=Smoke chapter
     $sbsContract.row_order -eq 'top-down' -and
     $sbsContract.transfer -eq $runtimeContract.output_transfer -and
     $sbsContract.primaries -eq $runtimeContract.output_primaries -and
-    $sbsContract.row_order -eq $runtimeContract.output_row_order -and
-    $runtimeContract.follow_atomic_sbs_publication -eq $true
+    $sbsContract.row_order -eq $runtimeContract.output_row_order
   ) 'direct conversion SBS media contract disagrees with its native runtime'
 
   $nativeWork = Join-Path $successWorker.JobDirectory 'native-work'
@@ -1394,11 +1390,8 @@ title=Smoke chapter
       $analysisContract.observation_timeline.sha256
   ) 'evaluation did not run the same frame-driven online estimator pass'
   Assert-Contract (
-    $evaluationRuntime.follow_mode -eq $true -and
-    $evaluationRuntime.follow_format -eq $expectedFollowFormat -and
     $evaluationRuntime.frame_transport -eq 'bounded-raw-memory-v1' -and
-    $evaluationRuntime.input_frame_format -eq $expectedInputFrameFormat -and
-    [long] $evaluationRuntime.follow_poll_interval_ms -eq 0
+    $evaluationRuntime.input_frame_format -eq $expectedInputFrameFormat
   ) 'evaluation does not share the direct causal online runtime contract'
   Assert-Contract (
     $evaluationAnalysis.adaptive_state.transport -eq 'bounded-completion-memory-v1' -and
@@ -1410,9 +1403,7 @@ title=Smoke chapter
     $evaluationAnalysis.sbs.enabled -eq $false -and
     [long] $evaluationAnalysis.sbs.frame_count -eq 0 -and
     [long] $evaluationAnalysis.sbs.width -eq 0 -and
-    [long] $evaluationAnalysis.sbs.height -eq 0 -and
-    $evaluationAnalysis.sbs.atomic_publication -eq $false -and
-    $evaluationRuntime.follow_atomic_sbs_publication -eq $false
+    [long] $evaluationAnalysis.sbs.height -eq 0
   ) 'evaluation unexpectedly produced SBS artifacts'
   Assert-Contract (
     $evaluation.timeline_contract.mode -eq 'evaluation-only' -and

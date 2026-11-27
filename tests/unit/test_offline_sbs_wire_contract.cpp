@@ -33,6 +33,7 @@ namespace {
       .depth_reuse_interval = 1,
       .resolved_runtime = {
         .model = "DepthAnythingV2Small-hf",
+        .frame_transport = offline_sbs::raw_frame_transport::name,
         .model_url = "https://example.invalid/model.onnx",
         .pop_strength = 1.0,
         .depth_width = 518,
@@ -41,7 +42,7 @@ namespace {
         .cuda_graph = true,
         .cuda_graph_captured = true,
         .input_color_space = "sRGB-SDR",
-        .input_frame_format = "sRGB-PNG-WIC",
+        .input_frame_format = "sRGB-BGRA8-raw",
         .input_texture_format = "B8G8R8A8_UNORM",
         .input_transfer = "sRGB",
         .input_primaries = "sRGB/BT.709",
@@ -49,17 +50,13 @@ namespace {
         .packed_color_space = "sRGB-SDR",
         .packed_transfer = "sRGB",
         .packed_primaries = "sRGB/BT.709",
-        .output_frame_format = "sRGB-BGRA8-PNG",
+        .output_frame_format = "sRGB-BGRA8-raw",
         .output_transfer = "sRGB",
         .output_primaries = "sRGB/BT.709",
         .output_row_order = "top-down",
+        .output_ffmpeg_pixel_format = "bgra",
         .configured_max_encode_width = 8192,
         .resolved_max_output_width = 8192,
-        .input_limit = 0,
-        .output_every = 1,
-        .follow_mode = false,
-        .follow_native_input_deletion = false,
-        .follow_atomic_sbs_publication = false,
         .output_eye_width = 1920,
         .output_eye_height = 1080,
         .output_sbs_width = 3840,
@@ -76,33 +73,19 @@ namespace {
       },
       .sbs = {
         .enabled = false,
-        .frame_format = "sRGB-BGRA8-PNG",
+        .frame_format = "bgra8",
         .transfer = "sRGB",
         .primaries = "sRGB/BT.709",
         .row_order = "top-down",
+        .ffmpeg_pixel_format = "bgra",
       },
     };
     contract.artifact_mode = conversion ? "conversion" : "adaptive";
-    auto &runtime = contract.resolved_runtime;
-    runtime.frame_transport = offline_sbs::raw_frame_transport::name;
-    runtime.input_frame_format = "sRGB-BGRA8-raw";
-    runtime.output_frame_format = "sRGB-BGRA8-raw";
-    runtime.output_ffmpeg_pixel_format = "bgra";
-    runtime.follow_mode = true;
-    runtime.follow_format = "bgra8";
-    runtime.follow_count_bound = 2;
-    runtime.follow_producer_frame_count = 2;
-    runtime.follow_first_sequence = 1;
-    runtime.follow_poll_interval_ms = 0;
-    runtime.follow_atomic_sbs_publication = conversion;
     auto &sbs = contract.sbs;
     sbs.enabled = conversion;
     sbs.frame_count = conversion ? 2u : 0u;
     sbs.width = conversion ? 3840u : 0u;
     sbs.height = conversion ? 1080u : 0u;
-    sbs.frame_format = "bgra8";
-    sbs.ffmpeg_pixel_format = "bgra";
-    sbs.atomic_publication = conversion;
     return contract;
   }
 
@@ -316,10 +299,10 @@ TEST(OfflineSbsWireContractTest, EvaluationRejectsAnySbsAttestation) {
     offline_sbs::wire::contract_error
   );
 
-  auto atomic_publication = encoded_evaluation;
-  atomic_publication["analysis_contract"]["sbs"]["atomic_publication"] = true;
+  auto sbs_frames = encoded_evaluation;
+  sbs_frames["analysis_contract"]["sbs"]["frame_count"] = 2;
   EXPECT_THROW(
-    offline_sbs::wire::parse_worker_result_contract(atomic_publication),
+    offline_sbs::wire::parse_worker_result_contract(sbs_frames),
     offline_sbs::wire::contract_error
   );
 }
@@ -381,12 +364,6 @@ TEST(OfflineSbsWireContractTest, WorkerResultRejectsCrossContractMismatches) {
     encoded["analysis_contract"]["sbs"]["frame_count"] = 1;
   });
   expect_rejected([](auto &encoded) {
-    encoded["analysis_contract"]["resolved_runtime"]["follow_poll_interval_ms"] = 10;
-  });
-  expect_rejected([](auto &encoded) {
-    encoded["analysis_contract"]["resolved_runtime"]["follow_format"] = "png";
-  });
-  expect_rejected([](auto &encoded) {
     encoded["analysis_contract"]["resolved_runtime"]["input_frame_format"] =
       "sRGB-PNG-WIC";
   });
@@ -443,13 +420,6 @@ TEST(OfflineSbsWireContractTest, WholeClipRoundTripsAndRejectsNestedUnknownField
   disabled_geometry["sbs"]["width"] = 3840;
   EXPECT_THROW(
     offline_sbs::wire::parse_whole_clip_contract(disabled_geometry),
-    offline_sbs::wire::contract_error
-  );
-
-  auto disabled_atomic_publication = encoded;
-  disabled_atomic_publication["sbs"]["atomic_publication"] = true;
-  EXPECT_THROW(
-    offline_sbs::wire::parse_whole_clip_contract(disabled_atomic_publication),
     offline_sbs::wire::contract_error
   );
 }
@@ -567,8 +537,6 @@ TEST(OfflineSbsWireContractTest, MemoryCompletionConversionRoundTripsWithoutEvid
                                            }));
   const auto &runtime = analysis.at("resolved_runtime");
   EXPECT_EQ(runtime.at("frame_transport"), "bounded-raw-memory-v1");
-  EXPECT_EQ(runtime.at("follow_mode"), true);
-  EXPECT_EQ(runtime.at("follow_poll_interval_ms"), 0);
   EXPECT_EQ(offline_sbs::wire::to_json(offline_sbs::wire::parse_worker_result_contract(encoded)), encoded);
 }
 
@@ -605,20 +573,38 @@ TEST(OfflineSbsWireContractTest, MemoryCompletionRequiresNativeRawCausalTranspor
   auto no_raw_transport = valid;
   no_raw_transport["resolved_runtime"].erase("frame_transport");
   EXPECT_THROW(offline_sbs::wire::parse_whole_clip_contract(no_raw_transport), offline_sbs::wire::contract_error);
-  const nlohmann::json contradictions {
-    {"frame_transport", "future-raw-memory-v2"},
-    {"follow_mode", false},
-    {"follow_poll_interval_ms", 1},
-    {"follow_native_input_deletion", true},
-  };
-  for (const auto &[key, value] : contradictions.items()) {
+  auto future_transport = valid;
+  future_transport["resolved_runtime"]["frame_transport"] = "future-raw-memory-v2";
+  EXPECT_THROW(offline_sbs::wire::parse_whole_clip_contract(future_transport), offline_sbs::wire::contract_error);
+}
+
+// The retired file-follow producer's settings and its atomic SBS file publication flag are no
+// longer part of the contract: neither side writes them and the parser rejects them, even null.
+TEST(OfflineSbsWireContractTest, WholeClipRejectsRetiredFileFollowFields) {
+  for (const bool conversion : {false, true}) {
+    const auto valid = offline_sbs::wire::to_json(worker_result(conversion).analysis_contract);
+    for (const auto *key : {
+           "input_limit",
+           "output_every",
+           "follow_mode",
+           "follow_format",
+           "follow_count_bound",
+           "follow_producer_frame_count",
+           "follow_first_sequence",
+           "follow_poll_interval_ms",
+           "follow_native_input_deletion",
+           "follow_atomic_sbs_publication",
+         }) {
+      EXPECT_FALSE(valid.at("resolved_runtime").contains(key)) << key;
+      auto invalid = valid;
+      invalid["resolved_runtime"][key] = nullptr;
+      EXPECT_THROW(offline_sbs::wire::parse_whole_clip_contract(invalid), offline_sbs::wire::contract_error) << key;
+    }
+    EXPECT_FALSE(valid.at("sbs").contains("atomic_publication"));
     auto invalid = valid;
-    invalid["resolved_runtime"][key] = value;
-    EXPECT_THROW(offline_sbs::wire::parse_whole_clip_contract(invalid), offline_sbs::wire::contract_error) << key;
+    invalid["sbs"]["atomic_publication"] = conversion;
+    EXPECT_THROW(offline_sbs::wire::parse_whole_clip_contract(invalid), offline_sbs::wire::contract_error);
   }
-  auto no_poll_contract = valid;
-  no_poll_contract["resolved_runtime"]["follow_poll_interval_ms"] = nullptr;
-  EXPECT_THROW(offline_sbs::wire::parse_whole_clip_contract(no_poll_contract), offline_sbs::wire::contract_error);
 }
 
 TEST(OfflineSbsWireContractTest, MemoryCompletionRequiresCurrentGeneratedEvidenceForEverySourceFrame) {

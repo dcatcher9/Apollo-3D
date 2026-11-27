@@ -31,14 +31,12 @@ namespace offline_sbs::worker_detail {
       const media_contract_t &media,
       const fs::path &log_path
     );
-    [[nodiscard]] const std::string &format() const;
     raw_frame read_next(const frame_timing_t &timing);
     void finish();
     void abort() noexcept;
 
   private:
     const media_contract_t &media_;
-    std::string format_;
     child_process_t process_;
     std::uint64_t next_sequence_ = 1;
   };

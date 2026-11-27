@@ -410,15 +410,10 @@ namespace offline_sbs {
       const fs::path &log_path
     ):
         media_(media),
-        format_(media.color == media_color_e::sdr ? "bgra8" : "gbrpf32le"),
         process_(child_process_t::launch(build_decoder_command(spec, media), spec.sunshine_executable.parent_path(), log_path, std::nullopt, true)) {
       const auto source_bytes = std::uint64_t(media.width) * media.height * (media.color == media_color_e::sdr ? 4 : 12);
       if (source_bytes > spec.transient_raster_hard_cap_bytes)
         throw worker_error("raw source frame exceeds the transient raster hard cap before allocation");
-    }
-
-    const std::string &streaming_decoder_t::format() const {
-      return format_;
     }
 
     raw_frame streaming_decoder_t::read_next(const frame_timing_t &timing) {

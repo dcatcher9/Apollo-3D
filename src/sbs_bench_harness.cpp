@@ -4310,12 +4310,13 @@ namespace sbs_bench {
       const std::string packed_texture_format =
         hdr_source ? "R16G16B16A16_FLOAT" : "B8G8R8A8_UNORM";
       const std::string output_frame_format =
-        transport ? (hdr_source ? "linear-scRGB-f16-raw" : "sRGB-BGRA8-raw") : "sRGB-BGRA8-PNG";
+        hdr_source ? "linear-scRGB-f16-raw" : "sRGB-BGRA8-raw";
       const std::string output_transfer = hdr_source ? "linear" : "sRGB";
       const std::string output_row_order = "top-down";
 
       offline_sbs::wire::whole_clip_resolved_runtime_t resolved_runtime {
         .model = model.name,
+        .frame_transport = offline_sbs::raw_frame_transport::name,
         .model_url = model.url,
         .pop_strength = sbs_cfg.pop_strength,
         .depth_width = est.field_width,
@@ -4345,34 +4346,9 @@ namespace sbs_bench {
                                          std::optional<double> {80.0} :
                                          std::nullopt,
         .output_row_order = output_row_order,
-        .output_ffmpeg_pixel_format = hdr_source ?
-                                        std::optional<std::string> {"gbrpf32le"} :
-                                        (transport ? std::optional<std::string> {"bgra"} : std::nullopt),
+        .output_ffmpeg_pixel_format = hdr_source ? "gbrpf32le" : "bgra",
         .configured_max_encode_width = sbs_cfg.max_encode_width,
         .resolved_max_output_width = max_width,
-        .input_limit = o.limit,
-        .output_every = static_cast<std::uint64_t>(o.output_every),
-        .follow_mode = o.follow,
-        .follow_format = o.follow ?
-                           std::optional<std::string> {o.follow_format} :
-                           std::nullopt,
-        .follow_count_bound = o.follow_count > 0u ?
-                                std::optional<std::uint64_t> {o.follow_count} :
-                                std::nullopt,
-        .follow_producer_frame_count = o.follow ?
-                                         std::optional<std::uint64_t> {o.follow_count} :
-                                         std::nullopt,
-        .follow_first_sequence = o.follow ?
-                                   std::optional<std::uint64_t> {
-                                     follow_first_sequence
-                                   } :
-                                   std::nullopt,
-        .follow_poll_interval_ms = o.follow ?
-                                     std::optional<std::uint32_t> {0u} :
-                                     std::nullopt,
-        .follow_native_input_deletion = false,
-        .follow_atomic_sbs_publication =
-          o.follow && o.artifacts == artifact_mode_e::conversion,
         .output_eye_width = contract_geometry.eye_width,
         .output_eye_height = contract_geometry.eye_height,
         .output_sbs_width = contract_geometry.sbs_width,
@@ -4380,7 +4356,6 @@ namespace sbs_bench {
         .content_scale_x = contract_geometry.content_scale_x,
         .content_scale_y = contract_geometry.content_scale_y,
       };
-      if (transport) resolved_runtime.frame_transport = offline_sbs::raw_frame_transport::name;
       const offline_sbs::wire::whole_clip_adaptive_state_t adaptive_state {
         .transport = offline_sbs::completion_channel_t::name,
         .retained_history = false,
@@ -4393,17 +4368,13 @@ namespace sbs_bench {
         .frame_count = static_cast<std::uint64_t>(written),
         .width = sbs_w,
         .height = sbs_h,
-        .frame_format = transport ? (hdr_source ? "rgba16f" : "bgra8") : output_frame_format,
+        .frame_format = hdr_source ? "rgba16f" : "bgra8",
         .transfer = output_transfer,
         .primaries = hdr_source ? "scRGB/BT.709" : "sRGB/BT.709",
         .reference_white_nits = hdr_source ?
                                    std::optional<double> {80.0} : std::nullopt,
         .row_order = output_row_order,
-        .ffmpeg_pixel_format = hdr_source ?
-                                  std::optional<std::string> {"gbrpf32le"} :
-                                  (transport ? std::optional<std::string> {"bgra"} : std::nullopt),
-        .atomic_publication =
-          o.follow && o.artifacts == artifact_mode_e::conversion,
+        .ffmpeg_pixel_format = hdr_source ? "gbrpf32le" : "bgra",
       };
       std::optional<offline_sbs::wire::observation_timeline_contract_t>
         observation_timeline;

@@ -58,7 +58,7 @@ namespace offline_sbs::wire {
 
   struct whole_clip_resolved_runtime_t {
     std::string model;
-    std::optional<std::string> frame_transport;
+    std::string frame_transport;
     std::string model_url;
     double pop_strength = 1.0;
     int depth_width = 0;
@@ -82,19 +82,9 @@ namespace offline_sbs::wire {
     std::string output_primaries;
     std::optional<double> output_reference_white_nits;
     std::string output_row_order;
-    std::optional<std::string> output_ffmpeg_pixel_format;
+    std::string output_ffmpeg_pixel_format;
     int configured_max_encode_width = 0;
     int resolved_max_output_width = 0;
-    int input_limit = 0;
-    std::uint64_t output_every = 0;
-    bool follow_mode = false;
-    std::optional<std::string> follow_format;
-    std::optional<std::uint64_t> follow_count_bound;
-    std::optional<std::uint64_t> follow_producer_frame_count;
-    std::optional<std::uint64_t> follow_first_sequence;
-    std::optional<std::uint32_t> follow_poll_interval_ms;
-    bool follow_native_input_deletion = false;
-    bool follow_atomic_sbs_publication = false;
     std::uint32_t output_eye_width = 0;
     std::uint32_t output_eye_height = 0;
     std::uint32_t output_sbs_width = 0;
@@ -121,8 +111,7 @@ namespace offline_sbs::wire {
     std::string primaries;
     std::optional<double> reference_white_nits;
     std::string row_order;
-    std::optional<std::string> ffmpeg_pixel_format;
-    bool atomic_publication = false;
+    std::string ffmpeg_pixel_format;
   };
 
   nlohmann::json to_json(const whole_clip_sbs_t &value);

@@ -124,8 +124,9 @@ exchanged only between the manager and the worker of the same build; the manager
 result once, when that worker exits, and accepts only the raw memory transport and completion
 evidence that worker produces. No scene list or scene-audit file is produced.
 
-New production contracts identify their memory transport without snapshot filenames. Retained file-transport contracts remain
-readable under their original labels; they are never retagged as native memory evidence.
+Production contracts identify their raw memory transport without snapshot filenames. The causal
+pass's whole-clip contract carries no file-follow, frame-sampling, or file-publication fields, and
+a contract without the raw memory transport is rejected.
 
 The durable job record `job.json` is schema 1. Every published output is beside its input and
 the record names that as `"output_location": "input-directory"`. Its `scene_cache_max_bytes` key

@@ -964,15 +964,12 @@ namespace offline_sbs {
       // Offline conversion runs the production pipeline directly: the harness must attest the
       // raw-memory causal pass this worker drove.
       const auto &analysis_runtime = typed_analysis_contract.resolved_runtime;
-      const auto expected_follow_format = analysis_decoder.format();
       const auto expected_input_frame_format =
         media.color == media_color_e::sdr ?
           std::string_view {"sRGB-BGRA8-raw"} :
           std::string_view {"linear-scRGB-f32-planar"};
       if (
-        analysis_runtime.follow_format.value_or("") !=
-          expected_follow_format ||
-        analysis_runtime.frame_transport.value_or("") != raw_frame_transport::name ||
+        analysis_runtime.frame_transport != raw_frame_transport::name ||
         analysis_runtime.input_frame_format != expected_input_frame_format
       ) {
         throw worker_error("analysis did not attest the native raw-memory causal pass");
@@ -984,14 +981,12 @@ namespace offline_sbs {
             direct_sbs.width != sbs_width ||
             direct_sbs.height != sbs_height ||
             direct_sbs.width != analysis_runtime.output_sbs_width ||
-            direct_sbs.height != analysis_runtime.output_sbs_height ||
-            !direct_sbs.atomic_publication ||
-            !analysis_runtime.follow_atomic_sbs_publication) {
+            direct_sbs.height != analysis_runtime.output_sbs_height) {
           throw worker_error(
             "causal conversion did not attest its complete direct SBS stream"
           );
         }
-      } else if (direct_sbs.enabled || direct_sbs.frame_count != 0 || direct_sbs.width != 0 || direct_sbs.height != 0 || direct_sbs.atomic_publication || analysis_runtime.follow_atomic_sbs_publication) {
+      } else if (direct_sbs.enabled || direct_sbs.frame_count != 0 || direct_sbs.width != 0 || direct_sbs.height != 0) {
         throw worker_error("analysis-only pass unexpectedly attested SBS output");
       }
       if (
