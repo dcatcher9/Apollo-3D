@@ -277,7 +277,6 @@
     "packetsize_invalid": "Dùng 0 cho MTU tự động, hoặc một giá trị từ 200 đến 65459 byte.",
     "session_resume_grace": "Thời gian ân hạn tiếp tục phiên",
     "session_resume_grace_desc": "Thời gian (tính bằng mili giây) giữ ứng dụng, màn hình ảo và thiết lập streaming của máy chủ ở trạng thái sẵn sàng sau khi client ngắt kết nối. Kết nối lại trong khoảng thời gian này sẽ tiếp tục ngay lập tức. Dùng 0 để kết thúc ngay, trừ khi một client thay thế đã được chấp nhận vẫn đang hoàn tất quá trình bắt tay; tối đa 600000 (10 phút).",
-    "sbs_reshade": "Dùng ReShade cho 3D AR cục bộ",
     "sbs_3d_pop_strength": "Cường độ Host 3D",
     "microphone_enabled": "Cho phép chuyển tiếp micro của client",
     "microphone_enabled_desc": "Nhận âm thanh micro từ các client tương thích. Đồng thời cấp quyền “Đầu vào micro” cho client đã ghép nối. Bị tắt trừ khi có một cáp ảo đang hoạt động được cấu hình bên dưới.",

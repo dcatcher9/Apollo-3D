@@ -277,7 +277,6 @@
     "packetsize_invalid": "设 0 使用自动 MTU，或设为 200 到 65459 字节之间的值。",
     "session_resume_grace": "会话恢复宽限期",
     "session_resume_grace_desc": "客户端断开连接后，保持应用、虚拟显示器和主机串流设置就绪的时长（毫秒）。在此期间重新连接会立即恢复。设为 0 时将立即终止，除非已接受的替代客户端仍在完成握手；最大值 600000（10 分钟）。",
-    "sbs_reshade": "本地 AR 3D 使用 ReShade",
     "sbs_3d_pop_strength": "Host 3D 强度",
     "microphone_enabled": "允许转发客户端麦克风",
     "microphone_enabled_desc": "接收来自兼容客户端的麦克风音频。还需为已配对的客户端授予“麦克风输入”权限。除非在下方配置了有效的虚拟音频线，否则此功能处于禁用状态。",

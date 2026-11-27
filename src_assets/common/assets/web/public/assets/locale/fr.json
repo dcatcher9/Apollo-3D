@@ -275,7 +275,6 @@
     "packetsize_invalid": "Utilisez 0 pour la MTU automatique, ou une valeur de 200 à 65459 octets.",
     "session_resume_grace": "Délai de grâce pour la reprise de session",
     "session_resume_grace_desc": "Durée, en millisecondes, pendant laquelle l'application, l'écran virtuel et la configuration de streaming de l'hôte restent prêts après la déconnexion du client. Une reconnexion pendant ce délai reprend immédiatement. Utilisez 0 pour arrêter immédiatement, sauf si un client de remplacement accepté termine encore sa négociation de connexion ; maximum 600000 (10 minutes).",
-    "sbs_reshade": "Utiliser ReShade pour la 3D AR locale",
     "sbs_3d_pop_strength": "Intensité de Host 3D",
     "system_tray": "Activer l'icône dans la zone de notification",
     "system_tray_desc": "Afficher ou non l'icône de Sunshine 3D dans la zone de notification",

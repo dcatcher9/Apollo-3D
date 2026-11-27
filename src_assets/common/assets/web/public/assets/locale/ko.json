@@ -275,7 +275,6 @@
     "packetsize_invalid": "자동 MTU에는 0을, 그 외에는 200부터 65459바이트까지의 값을 사용하세요.",
     "session_resume_grace": "세션 재개 유예 시간",
     "session_resume_grace_desc": "클라이언트 연결이 끊긴 후 앱, 가상 디스플레이, 호스트 스트리밍 설정을 준비 상태로 유지하는 시간(밀리초)입니다. 이 시간 내에 다시 연결하면 즉시 재개됩니다. 0으로 설정하면 승인된 대체 클라이언트가 아직 핸드셰이크를 완료하는 중이 아닌 한 즉시 종료합니다. 최대 600000(10분).",
-    "sbs_reshade": "로컬 AR 3D에 ReShade 사용",
     "sbs_3d_pop_strength": "Host 3D 강도",
     "system_tray": "시스템 트레이 사용",
     "system_tray_desc": "시스템 트레이에 Sunshine 3D 아이콘을 표시할지 여부",

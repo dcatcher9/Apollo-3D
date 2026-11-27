@@ -275,7 +275,6 @@
     "packetsize_invalid": "Use 0 for the automatic MTU, or a value from 200 through 65459 bytes.",
     "session_resume_grace": "Session Resume Grace",
     "session_resume_grace_desc": "How long, in milliseconds, to keep the app, virtual display, and host streaming setup ready after the client disconnects. Reconnecting during this window resumes immediately. Use 0 to terminate immediately unless an accepted replacement client is still completing its handshake; maximum 600000 (10 minutes).",
-    "sbs_reshade": "Use ReShade for local AR 3D",
     "sbs_3d_pop_strength": "Host 3D strength",
     "system_tray": "Enable System Tray",
     "system_tray_desc": "Whether to show Sunshine 3D icon in the system tray",

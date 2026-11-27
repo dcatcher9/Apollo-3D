@@ -277,7 +277,6 @@
     "packetsize_invalid": "設為 0 以使用自動 MTU，或設為 200 到 65459 位元組之間的值。",
     "session_resume_grace": "工作階段恢復寬限時間",
     "session_resume_grace_desc": "用戶端中斷連線後，讓應用程式、虛擬顯示器與主機串流設定保持就緒的時間（毫秒）。在此期間重新連線會立即恢復。設為 0 會立即終止，除非已接受的替代用戶端仍在完成交握；最大值為 600000（10 分鐘）。",
-    "sbs_reshade": "本機 AR 3D 使用 ReShade",
     "sbs_3d_pop_strength": "Host 3D 強度",
     "microphone_enabled": "允許轉送用戶端麥克風",
     "microphone_enabled_desc": "接收來自相容用戶端的麥克風音訊。另外也需為已配對的用戶端授予「麥克風輸入」權限。除非在下方設定了作用中的虛擬音訊線，否則此功能會停用。",

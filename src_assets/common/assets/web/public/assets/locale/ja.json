@@ -275,7 +275,6 @@
     "packetsize_invalid": "自動 MTU には 0 を、それ以外は 200 から 65459 バイトまでの値を使用してください。",
     "session_resume_grace": "セッション再開の猶予時間",
     "session_resume_grace_desc": "クライアントの切断後、アプリ、仮想ディスプレイ、ホストのストリーミング設定を準備したまま保持する時間 (ミリ秒)。この間に再接続すると、すぐに再開します。0 にすると、承認済みの代替クライアントがハンドシェイクを完了中でない限り、直ちに終了します。最大 600000 (10 分)。",
-    "sbs_reshade": "ローカル AR 3D に ReShade を使用",
     "sbs_3d_pop_strength": "Host 3D の強度",
     "system_tray": "システム トレイを有効にする",
     "system_tray_desc": "システム トレイに Sunshine 3D のアイコンを表示するかどうか",

@@ -277,7 +277,6 @@
     "packetsize_invalid": "Použijte 0 pro automatické MTU nebo hodnotu od 200 do 65459 bajtů.",
     "session_resume_grace": "Lhůta pro obnovení relace",
     "session_resume_grace_desc": "Jak dlouho v milisekundách po odpojení klienta udržovat aplikaci, virtuální displej a streamovací nastavení hostitele připravené. Opětovné připojení během této doby relaci okamžitě obnoví. Hodnota 0 znamená okamžité ukončení, pokud právě nějaký přijatý náhradní klient nedokončuje handshake; maximum je 600000 (10 minut).",
-    "sbs_reshade": "Použít ReShade pro místní AR 3D",
     "sbs_3d_pop_strength": "Síla Host 3D",
     "microphone_enabled": "Povolit přeposílání mikrofonu klienta",
     "microphone_enabled_desc": "Přijímat zvuk mikrofonu z kompatibilních klientů. Spárovanému klientovi také udělte oprávnění Vstup mikrofonu. Vypnuto, dokud níže není nastaven aktivní virtuální kabel.",

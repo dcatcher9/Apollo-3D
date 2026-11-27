@@ -275,7 +275,6 @@
     "packetsize_invalid": "Verwenden Sie 0 für die automatische MTU oder einen Wert von 200 bis 65459 Byte.",
     "session_resume_grace": "Karenzzeit für Sitzungsfortsetzung",
     "session_resume_grace_desc": "Wie lange (in Millisekunden) die App, die virtuelle Anzeige und die Streaming-Einrichtung des Hosts nach dem Trennen des Clients bereitgehalten werden. Eine erneute Verbindung in diesem Zeitraum wird sofort fortgesetzt. Mit 0 wird sofort beendet, außer ein akzeptierter Ersatz-Client schließt seinen Handshake noch ab; maximal 600000 (10 Minuten).",
-    "sbs_reshade": "ReShade für lokales AR-3D verwenden",
     "sbs_3d_pop_strength": "Stärke von Host 3D",
     "system_tray": "Symbol im Infobereich aktivieren",
     "system_tray_desc": "Ob das Sunshine 3D-Symbol im Infobereich angezeigt werden soll",

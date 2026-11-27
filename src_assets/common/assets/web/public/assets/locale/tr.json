@@ -275,7 +275,6 @@
     "packetsize_invalid": "Otomatik MTU için 0 ya da 200 ile 65459 bayt arasında bir değer kullanın.",
     "session_resume_grace": "Oturum Sürdürme Bekleme Süresi",
     "session_resume_grace_desc": "İstemcinin bağlantısı kesildikten sonra uygulamanın, sanal ekranın ve ana bilgisayardaki akış kurulumunun milisaniye cinsinden ne kadar süre hazır tutulacağı. Bu süre içinde yeniden bağlanmak oturumu hemen sürdürür. Kabul edilmiş yeni bir istemcinin el sıkışması hâlâ sürmüyorsa hemen sonlandırmak için 0 kullanın; en fazla 600000 (10 dakika).",
-    "sbs_reshade": "Yerel AR 3D için ReShade kullan",
     "sbs_3d_pop_strength": "Host 3D efekt gücü",
     "system_tray": "Sistem Tepsisini Etkinleştir",
     "system_tray_desc": "Sunshine 3D simgesinin sistem tepsisinde gösterilip gösterilmeyeceği",

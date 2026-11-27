@@ -277,7 +277,6 @@
     "packetsize_invalid": "Az automatikus MTU-hoz használjon 0-t, vagy egy 200 és 65459 bájt közötti értéket.",
     "session_resume_grace": "Munkamenet-folytatási türelmi idő",
     "session_resume_grace_desc": "Mennyi ideig (milliszekundumban) maradjon készenlétben az alkalmazás, a virtuális kijelző és a gazdagép streamelési beállítása a kliens bontása után. Ha ezen időn belül újracsatlakozik, a munkamenet azonnal folytatódik. A 0 azonnali leállítást jelent, kivéve ha egy elfogadott helyettesítő kliens még befejezi a kézfogást; legfeljebb 600000 (10 perc).",
-    "sbs_reshade": "ReShade használata helyi AR 3D-hez",
     "sbs_3d_pop_strength": "Host 3D erőssége",
     "microphone_enabled": "Kliens mikrofontovábbításának engedélyezése",
     "microphone_enabled_desc": "Mikrofonhang fogadása a kompatibilis kliensektől. A párosított kliensnek adja meg a Mikrofonbemenet engedélyt is. Letiltva marad, amíg alább nincs beállítva aktív virtuális kábel.",
