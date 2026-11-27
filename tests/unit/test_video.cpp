@@ -270,7 +270,7 @@ namespace {
 
   TEST(VideoProcessingLatencyTest, PacketPipelineKeepsSourceAgeAndProcessingDistinct) {
     const auto video_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/video.cpp");
-    const auto stream_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/stream.cpp");
+    const auto stream_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/stream_media.cpp");
     ASSERT_FALSE(video_source.empty());
     ASSERT_FALSE(stream_source.empty());
     // Captured with the picture's submission and carried to its packet, on whichever thread retrieves it.
@@ -7872,7 +7872,7 @@ TEST(EffectiveVideoModePublisherTests, ProductionPublishesAfterEncoderInitializa
 
 TEST(AtomicPresentationOrderingTests, AppliesImmutableModeBeforeEncoderAndAcksAfterRollback) {
   const auto video_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/video.cpp");
-  const auto stream_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/stream.cpp");
+  const auto stream_source = read_source_file(SUNSHINE_SOURCE_DIR "/src/stream_live_mode.cpp");
   ASSERT_FALSE(video_source.empty());
   ASSERT_FALSE(stream_source.empty());
 

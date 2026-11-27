@@ -1872,7 +1872,7 @@ class EvalContractTests(unittest.TestCase):
 
     def test_live_debug_dump_is_session_scoped_and_host_sbs_only(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        with open(os.path.join(repo, "src", "stream.cpp"), encoding="utf-8") as fh:
+        with open(os.path.join(repo, "src", "stream_control.cpp"), encoding="utf-8") as fh:
             stream = fh.read()
         with open(os.path.join(repo, "src", "video.cpp"), encoding="utf-8") as fh:
             video = fh.read()
