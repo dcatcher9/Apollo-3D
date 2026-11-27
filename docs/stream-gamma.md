@@ -104,6 +104,12 @@ or rebuilt encoder state or a reference-white update. A nonzero generation ident
 converted and successfully encoded frame, not merely receipt of a request. The client shows
 the applied state after validating the acknowledgement and keeps desired settings separate
 from host proof. Late replies from a retired connection cannot change the current session.
+Each nonzero request is answered exactly once. A refusal decided before the encoder's first proof
+waits for that proof and then reports it; acknowledgements that already carry proof are sent
+first, so the generations a client receives never decrease. The host admits at most eight
+unanswered requests. A ninth, an applied acknowledgement without proof, or an acknowledgement
+that does not fit the body above closes the session, and no further `0x300D` is sent before the
+disconnect.
 An ID-zero state update retains the session's requested mode even when the applied mode is
 temporarily default because the source is SDR. Recovery to HDR can then acknowledge the requested
 gamma without another user selection.

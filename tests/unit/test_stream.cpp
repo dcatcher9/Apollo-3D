@@ -7,14 +7,17 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <future>
 #include <limits>
+#include <optional>
 #include <src/process.h>
 #include <src/session_join_watchdog.h>
 #include <src/stream.h>
 #include <src/utility.h>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "../tests_common.h"
@@ -752,60 +755,340 @@ TEST(AtomicPresentationAckTests, RequiresACompleteProvenGeneration) {
   EXPECT_EQ(payload[8], 7);  // unchanged current generation on rejection
 }
 
-TEST(AtomicPresentationAckTests, DefersOnlyPreProofRefusalsAndFailsClosedOnImpossibleApply) {
-  stream::live_video_mode_ack_t ack {
-    7,
-    stream::live_video_mode_ack_e::failed,
-    6000,
-    20000,
-    video::SBS_OFF,
-    1920,
-    1080,
-    1920,
-    1080,
-    0,
+namespace {
+  /**
+   * Sample live video-mode (0x3008) acknowledgements. Every proof generation reports a distinct
+   * geometry, so a test can tell which proof an acknowledgement carries.
+   */
+  struct live_video_mode_ack_samples_t {
+    using kind_t = stream::live_video_mode_ack_kind_t;
+    using ack_t = kind_t::ack_t;
+    static constexpr const char *name = "LiveVideoMode";
+
+    static video::effective_video_mode_t proof(std::uint32_t generation) {
+      const int width = 1280 + 64 * static_cast<int>(generation);
+      return {width, 720, 6000, 20000, width, 720, width, 720, video::SBS_OFF, generation};
+    }
+
+    static ack_t applied(std::uint32_t request_id, std::uint32_t generation) {
+      return stream::make_live_video_mode_ack(request_id, stream::live_video_mode_ack_e::applied, proof(generation));
+    }
+
+    static ack_t refused(std::uint32_t request_id, std::uint32_t generation) {
+      return stream::make_live_video_mode_ack(request_id, stream::live_video_mode_ack_e::rejected_invalid, proof(generation));
+    }
+
+    /** Proven, but its source width does not fit the 16-bit wire field. */
+    static ack_t unencodable(std::uint32_t request_id, std::uint32_t generation) {
+      auto ack = applied(request_id, generation);
+      ack.applied_source_width = 65536;
+      return ack;
+    }
+
+    static bool fits(const ack_t &ack) {
+      std::uint8_t payload[stream::ATOMIC_PRESENTATION_V2_ACK_PAYLOAD_SIZE];
+      return stream::encode_atomic_presentation_ack_payload(ack, payload);
+    }
+
+    static std::uint32_t request_id(const ack_t &ack) {
+      return static_cast<std::uint32_t>(ack.request_id);
+    }
+
+    static bool same_outcome(const ack_t &sent, const ack_t &original) {
+      return sent.request_id == original.request_id && sent.status == original.status;
+    }
+
+    static bool reports(const ack_t &ack, std::uint32_t generation) {
+      const auto expected = proof(generation);
+      return ack.applied_generation == generation && ack.applied_source_width == expected.source_width &&
+             ack.applied_encoded_width == expected.encoded_width && ack.applied_framerate_x100 == expected.framerateX100 &&
+             ack.applied_bitrate_kbps == expected.bitrate && ack.applied_sbs_mode == expected.sbs_mode;
+    }
   };
+
+  /** Sample stream gamma (0x300D) acknowledgements, with a distinct white level per proof. */
+  struct stream_gamma_ack_samples_t {
+    using kind_t = stream::stream_gamma_ack_kind_t;
+    using ack_t = kind_t::ack_t;
+    static constexpr const char *name = "StreamGamma";
+
+    static video::stream_gamma_snapshot_t proof(std::uint32_t generation) {
+      return {video::stream_gamma_mode_e::gamma_2_2, generation, 200.0f + static_cast<float>(generation)};
+    }
+
+    static ack_t applied(std::uint32_t request_id, std::uint32_t generation) {
+      return {video::stream_gamma_status_e::applied, video::stream_gamma_mode_e::gamma_2_2, request_id, proof(generation)};
+    }
+
+    static ack_t refused(std::uint32_t request_id, std::uint32_t generation) {
+      return {video::stream_gamma_status_e::rejected_unsupported, video::stream_gamma_mode_e::gamma_2_4, request_id, proof(generation)};
+    }
+
+    /** Proven, but its reference white is not a finite wire value. */
+    static ack_t unencodable(std::uint32_t request_id, std::uint32_t generation) {
+      auto ack = applied(request_id, generation);
+      ack.applied.white_nits = std::numeric_limits<float>::quiet_NaN();
+      return ack;
+    }
+
+    static bool fits(const ack_t &ack) {
+      std::uint8_t payload[stream::STREAM_GAMMA_ACK_PAYLOAD_SIZE];
+      return stream::encode_stream_gamma_ack_payload(ack, payload);
+    }
+
+    static std::uint32_t request_id(const ack_t &ack) {
+      return ack.request_id;
+    }
+
+    static bool same_outcome(const ack_t &sent, const ack_t &original) {
+      return sent.request_id == original.request_id && sent.status == original.status &&
+             sent.requested_mode == original.requested_mode;
+    }
+
+    static bool reports(const ack_t &ack, std::uint32_t generation) {
+      const auto expected = proof(generation);
+      return ack.applied.generation == generation && ack.applied.mode == expected.mode &&
+             ack.applied.white_nits == expected.white_nits;
+    }
+  };
+
+  /** Drives proof_deferred_acks_t the way the control thread does, recording what it sends. */
+  template<class Samples>
+  struct proof_deferred_ack_drain_t {
+    using kind_t = typename Samples::kind_t;
+    using ack_t = typename kind_t::ack_t;
+
+    stream::proof_deferred_acks_t<kind_t> acks;
+    std::deque<ack_t> queued;
+    std::uint32_t proven_generation = 0;
+    std::vector<ack_t> sent;
+    std::vector<std::string> closed;
+
+    bool drain() {
+      return acks.drain(
+        [&]() -> std::optional<ack_t> {
+          if (queued.empty()) {
+            return std::nullopt;
+          }
+          auto ack = queued.front();
+          queued.pop_front();
+          return ack;
+        },
+        [&] {
+          return Samples::proof(proven_generation);
+        },
+        [&](const ack_t &ack) {
+          if (!Samples::fits(ack)) {
+            return false;
+          }
+          sent.push_back(ack);
+          return true;
+        },
+        [&](std::string_view reason) {
+          closed.emplace_back(reason);
+        }
+      );
+    }
+
+    [[nodiscard]] std::vector<std::uint32_t> sent_ids() const {
+      std::vector<std::uint32_t> ids;
+      for (const auto &ack : sent) {
+        ids.push_back(Samples::request_id(ack));
+      }
+      return ids;
+    }
+  };
+
+  struct proof_deferred_ack_type_names_t {
+    template<class Samples>
+    static std::string GetName(int) {
+      return Samples::name;
+    }
+  };
+}  // namespace
+
+// Live video mode (0x3008) and stream gamma (0x300D) share one delivery rule; every case runs for
+// both types.
+template<class Samples>
+class ProofDeferredAckDeliveryTest: public ::testing::Test {};
+
+using proof_deferred_ack_types_t = ::testing::Types<live_video_mode_ack_samples_t, stream_gamma_ack_samples_t>;
+TYPED_TEST_SUITE(ProofDeferredAckDeliveryTest, proof_deferred_ack_types_t, proof_deferred_ack_type_names_t);
+
+TYPED_TEST(ProofDeferredAckDeliveryTest, DefersOnlyPreProofRefusalsAndFailsClosedOnAnUnprovenApply) {
+  using kind_t = typename TypeParam::kind_t;
   EXPECT_EQ(
-    stream::classify_live_video_mode_ack_delivery(ack),
-    stream::live_video_mode_ack_delivery_e::defer_until_initial_proof
+    stream::classify_proof_deferred_ack<kind_t>(TypeParam::refused(7, 0)),
+    stream::proof_deferred_ack_delivery_e::defer_until_initial_proof
   );
-  ack.status = stream::live_video_mode_ack_e::applied;
   EXPECT_EQ(
-    stream::classify_live_video_mode_ack_delivery(ack),
-    stream::live_video_mode_ack_delivery_e::fail_closed
+    stream::classify_proof_deferred_ack<kind_t>(TypeParam::applied(7, 0)),
+    stream::proof_deferred_ack_delivery_e::fail_closed
   );
-  ack.applied_generation = 1;
   EXPECT_EQ(
-    stream::classify_live_video_mode_ack_delivery(ack),
-    stream::live_video_mode_ack_delivery_e::send
+    stream::classify_proof_deferred_ack<kind_t>(TypeParam::applied(7, 1)),
+    stream::proof_deferred_ack_delivery_e::send
+  );
+  EXPECT_EQ(
+    stream::classify_proof_deferred_ack<kind_t>(TypeParam::refused(7, 1)),
+    stream::proof_deferred_ack_delivery_e::send
   );
 }
 
-TEST(AtomicPresentationAckTests, ProofDeferredAcksAreBoundedAndAnsweredOnceInArrivalOrder) {
-  stream::proof_deferred_acks_t<std::uint32_t, 3> deferred;
-  EXPECT_TRUE(deferred.empty());
-  EXPECT_TRUE(deferred.defer(11u));
-  EXPECT_TRUE(deferred.defer(12u));
-  EXPECT_TRUE(deferred.defer(13u));
-  EXPECT_FALSE(deferred.defer(14u)) << "the session bound holds nothing past its limit";
-  std::vector<std::uint32_t> answered;
-  deferred.answer_all([&](const std::uint32_t id) {
-    answered.push_back(id);
-  });
-  EXPECT_EQ(answered, (std::vector<std::uint32_t> {11u, 12u, 13u}));
-  EXPECT_TRUE(deferred.empty());
-  deferred.answer_all([&](const std::uint32_t id) {
-    answered.push_back(id);
-  });
-  EXPECT_EQ(answered.size(), 3u) << "an answered acknowledgement is never answered again";
+TYPED_TEST(ProofDeferredAckDeliveryTest, SendsProvenAcknowledgementsUnchangedInQueueOrder) {
+  proof_deferred_ack_drain_t<TypeParam> drain;
+  drain.proven_generation = 3;
+  drain.queued = {TypeParam::applied(1, 1), TypeParam::refused(2, 2), TypeParam::applied(3, 3)};
+  EXPECT_TRUE(drain.drain());
+  EXPECT_EQ(drain.sent_ids(), (std::vector<std::uint32_t> {1, 2, 3}));
+  ASSERT_EQ(drain.sent.size(), 3u);
+  EXPECT_TRUE(TypeParam::reports(drain.sent[0], 1)) << "a proven acknowledgement keeps its own proof";
+  EXPECT_TRUE(TypeParam::reports(drain.sent[1], 2));
+  EXPECT_TRUE(TypeParam::reports(drain.sent[2], 3));
+  EXPECT_TRUE(drain.closed.empty());
 
-  // Answering frees the bound; clearing forgets what waits without answering it.
-  EXPECT_TRUE(deferred.defer(21u));
-  deferred.clear();
-  EXPECT_TRUE(deferred.empty());
-  for (std::uint32_t id = 31u; id < 34u; ++id) {
-    EXPECT_TRUE(deferred.defer(id));
+  EXPECT_TRUE(drain.drain());
+  EXPECT_EQ(drain.sent.size(), 3u) << "an answered acknowledgement is never answered again";
+}
+
+TYPED_TEST(ProofDeferredAckDeliveryTest, ARefusalBeforeTheFirstProofWaitsForALateProofAndIsAnsweredOnce) {
+  proof_deferred_ack_drain_t<TypeParam> drain;
+  const auto first = TypeParam::refused(5, 0);
+  const auto second = TypeParam::refused(6, 0);
+  drain.queued = {first, second};
+  EXPECT_TRUE(drain.drain());
+  EXPECT_TRUE(drain.sent.empty());
+  EXPECT_EQ(drain.acks.waiting(), 2u);
+
+  EXPECT_TRUE(drain.drain()) << "a missing first proof is not a failure";
+  EXPECT_TRUE(drain.sent.empty());
+  EXPECT_TRUE(drain.closed.empty());
+
+  drain.proven_generation = 4;
+  EXPECT_TRUE(drain.drain());
+  EXPECT_EQ(drain.sent_ids(), (std::vector<std::uint32_t> {5, 6}));
+  ASSERT_EQ(drain.sent.size(), 2u);
+  EXPECT_TRUE(TypeParam::same_outcome(drain.sent[0], first));
+  EXPECT_TRUE(TypeParam::same_outcome(drain.sent[1], second));
+  EXPECT_TRUE(TypeParam::reports(drain.sent[0], 4)) << "the late proof replaces the missing one";
+  EXPECT_TRUE(TypeParam::reports(drain.sent[1], 4));
+  EXPECT_EQ(drain.acks.waiting(), 0u);
+
+  EXPECT_TRUE(drain.drain());
+  EXPECT_EQ(drain.sent.size(), 2u);
+}
+
+TYPED_TEST(ProofDeferredAckDeliveryTest, OverlappingRequestsNeverReportAnOlderGenerationAfterANewerOne) {
+  // Request 1 is refused before the first proof. Request 2 is applied by generation 1, and a
+  // later rebuild has published generation 2 by the time the control thread drains, when
+  // request 3 is refused with a snapshot taken before any proof.
+  proof_deferred_ack_drain_t<TypeParam> drain;
+  drain.queued = {TypeParam::refused(1, 0)};
+  EXPECT_TRUE(drain.drain());
+  drain.queued = {TypeParam::applied(2, 1), TypeParam::refused(3, 0)};
+  drain.proven_generation = 2;
+  EXPECT_TRUE(drain.drain());
+
+  EXPECT_EQ(drain.sent_ids(), (std::vector<std::uint32_t> {2, 1, 3}));
+  ASSERT_EQ(drain.sent.size(), 3u);
+  EXPECT_TRUE(TypeParam::reports(drain.sent[0], 1));
+  EXPECT_TRUE(TypeParam::reports(drain.sent[1], 2));
+  EXPECT_TRUE(TypeParam::reports(drain.sent[2], 2));
+  EXPECT_TRUE(drain.closed.empty());
+}
+
+TYPED_TEST(ProofDeferredAckDeliveryTest, AnAppliedAcknowledgementWithoutProofClosesTheSessionAndSendsNothingMore) {
+  using kind_t = typename TypeParam::kind_t;
+  proof_deferred_ack_drain_t<TypeParam> drain;
+  drain.queued = {TypeParam::refused(1, 0)};
+  EXPECT_TRUE(drain.drain());
+
+  drain.proven_generation = 1;
+  drain.queued = {TypeParam::applied(2, 1), TypeParam::applied(3, 0), TypeParam::applied(4, 1)};
+  EXPECT_FALSE(drain.drain());
+  EXPECT_EQ(drain.sent_ids(), (std::vector<std::uint32_t> {2}));
+  EXPECT_EQ(drain.closed, (std::vector<std::string> {std::string {kind_t::applied_without_proof_log}}));
+  EXPECT_EQ(drain.queued.size(), 1u) << "the closing session stops draining its queue";
+  EXPECT_EQ(drain.acks.waiting(), 1u) << "the closing session does not answer what still waits";
+}
+
+TYPED_TEST(ProofDeferredAckDeliveryTest, PreProofRefusalsPastTheSessionBoundCloseTheSessionOnce) {
+  using kind_t = typename TypeParam::kind_t;
+  proof_deferred_ack_drain_t<TypeParam> drain;
+  for (std::uint32_t id = 1; id <= kind_t::pre_proof_limit; ++id) {
+    drain.queued.push_back(TypeParam::refused(id, 0));
   }
+  drain.queued.push_back(TypeParam::refused(100, 0));
+  drain.queued.push_back(TypeParam::refused(101, 0));
+  EXPECT_FALSE(drain.drain());
+  EXPECT_TRUE(drain.sent.empty());
+  EXPECT_EQ(drain.closed, (std::vector<std::string> {std::string {kind_t::pre_proof_overflow_log}}));
+  EXPECT_EQ(drain.queued.size(), 1u);
+  EXPECT_EQ(drain.acks.waiting(), kind_t::pre_proof_limit);
+}
+
+TYPED_TEST(ProofDeferredAckDeliveryTest, AnAcknowledgementThatDoesNotFitItsWireFormatClosesTheSession) {
+  using kind_t = typename TypeParam::kind_t;
+  proof_deferred_ack_drain_t<TypeParam> drain;
+  drain.proven_generation = 1;
+  drain.queued = {TypeParam::applied(1, 1), TypeParam::unencodable(2, 1), TypeParam::applied(3, 1)};
+  EXPECT_FALSE(drain.drain());
+  EXPECT_EQ(drain.sent_ids(), (std::vector<std::uint32_t> {1}));
+  EXPECT_EQ(drain.closed, (std::vector<std::string> {std::string {kind_t::unencodable_log}}));
+  EXPECT_EQ(drain.queued.size(), 1u);
+}
+
+TYPED_TEST(ProofDeferredAckDeliveryTest, TeardownForgetsWaitingAcknowledgementsWithoutAnsweringThem) {
+  using kind_t = typename TypeParam::kind_t;
+  proof_deferred_ack_drain_t<TypeParam> drain;
+  drain.queued = {TypeParam::refused(1, 0), TypeParam::refused(2, 0)};
+  EXPECT_TRUE(drain.drain());
+  drain.acks.clear();
+  EXPECT_EQ(drain.acks.waiting(), 0u);
+
+  drain.proven_generation = 1;
+  EXPECT_TRUE(drain.drain());
+  EXPECT_TRUE(drain.sent.empty());
+  EXPECT_TRUE(drain.closed.empty());
+
+  // Clearing frees the whole pre-proof bound.
+  drain.proven_generation = 0;
+  for (std::uint32_t id = 1; id <= kind_t::pre_proof_limit; ++id) {
+    drain.queued.push_back(TypeParam::refused(id, 0));
+  }
+  EXPECT_TRUE(drain.drain());
+  EXPECT_EQ(drain.acks.waiting(), kind_t::pre_proof_limit);
+}
+
+TEST(StreamGammaAckDeliveryTests, CountsEachUnansweredRequestUntilItIsAnswered) {
+  // Live requests coalesce in the presentation worker and are not counted.
+  static_assert(stream::live_video_mode_ack_kind_t::owed_request_limit == 0);
+  static_assert(stream::stream_gamma_ack_kind_t::owed_request_limit == stream::STREAM_GAMMA_QUEUE_LIMIT);
+
+  proof_deferred_ack_drain_t<stream_gamma_ack_samples_t> drain;
+  for (std::uint32_t i = 0; i < stream::STREAM_GAMMA_QUEUE_LIMIT; ++i) {
+    EXPECT_TRUE(drain.acks.admit_request());
+  }
+  EXPECT_FALSE(drain.acks.admit_request()) << "the 0x300C handler closes the session on this request";
+
+  drain.queued = {stream_gamma_ack_samples_t::refused(11, 0)};
+  EXPECT_TRUE(drain.drain());
+  EXPECT_FALSE(drain.acks.admit_request()) << "a refusal waiting for proof is still owed";
+
+  // The first proof is announced with request ID zero, which answers no request; the waiting
+  // refusal is then answered and frees exactly one admission.
+  drain.proven_generation = 1;
+  drain.queued = {stream_gamma_ack_samples_t::applied(0, 1)};
+  EXPECT_TRUE(drain.drain());
+  EXPECT_EQ(drain.sent_ids(), (std::vector<std::uint32_t> {0, 11}));
+  EXPECT_TRUE(drain.acks.admit_request());
+  EXPECT_FALSE(drain.acks.admit_request());
+
+  drain.acks.clear();
+  for (std::uint32_t i = 0; i < stream::STREAM_GAMMA_QUEUE_LIMIT; ++i) {
+    EXPECT_TRUE(drain.acks.admit_request()) << "teardown forgets admitted requests";
+  }
+  EXPECT_FALSE(drain.acks.admit_request());
 }
 
 TEST(AtomicPresentationAckTests, ReportsAClampedApplyWithExactSourceAndEncodedGeometry) {

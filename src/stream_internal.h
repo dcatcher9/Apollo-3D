@@ -369,12 +369,12 @@ namespace stream {
       safe::mail_raw_t::queue_t<video::video_mode_change_t> video_mode_queue;
       safe::mail_raw_t::queue_t<video::stream_gamma_request_t> stream_gamma_queue;
       safe::mail_raw_t::queue_t<video::stream_gamma_ack_t> stream_gamma_ack_queue;
-      proof_deferred_acks_t<video::stream_gamma_ack_t, STREAM_GAMMA_QUEUE_LIMIT> deferred_stream_gamma_acks;
-      unsigned outstanding_stream_gamma_requests = 0;
+      // Also counts the 0x300C requests still owed an answer.
+      proof_deferred_acks_t<stream_gamma_ack_kind_t> deferred_stream_gamma_acks;
       // A syntactically valid v2 control message can arrive just before the initial encoder has
       // published generation 1. Preserve any immediate validation refusal and correlate it once
       // a complete applied state exists; v2 never emits an unproven generation-zero ACK.
-      proof_deferred_acks_t<live_video_mode_ack_t, LIVE_VIDEO_MODE_ACK_QUEUE_LIMIT> deferred_live_video_mode_acks;
+      proof_deferred_acks_t<live_video_mode_ack_kind_t> deferred_live_video_mode_acks;
       safe::mail_raw_t::event_t<video::sbs_telemetry_snapshot_t> sbs_telemetry_event;
       safe::mail_raw_t::event_t<video::game_source_state_t> game_source_status_event;
       std::optional<video::sbs_telemetry_snapshot_t> latest_sbs_telemetry;

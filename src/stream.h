@@ -429,7 +429,7 @@ namespace stream {
 
   /**
    * One acknowledgement, queued by whichever component decided the outcome and sent by the control
-   * thread.
+   * thread under the delivery rule of proof_deferred_acks_t.
    *
    * `request_id` is the client's opaque correlation token, echoed verbatim. The applied fields
    * always come from the last encoder-proven mode, never the unproven request:
@@ -456,65 +456,6 @@ namespace stream {
     std::uint32_t applied_generation = 0;
   };
 
-  enum class live_video_mode_ack_delivery_e {
-    send,
-    defer_until_initial_proof,
-    fail_closed,
-  };
-
-  /** Generation zero is deferrable only for an immediate v2 refusal, never for APPLIED. */
-  [[nodiscard]] constexpr live_video_mode_ack_delivery_e classify_live_video_mode_ack_delivery(
-    const live_video_mode_ack_t &ack
-  ) noexcept {
-    if (ack.applied_generation != 0) {
-      return live_video_mode_ack_delivery_e::send;
-    }
-    return ack.status == live_video_mode_ack_e::applied ?
-             live_video_mode_ack_delivery_e::fail_closed :
-             live_video_mode_ack_delivery_e::defer_until_initial_proof;
-  }
-
-  /**
-   * Acknowledgements owed exactly once that wait for the encoder's first proven state.
-   *
-   * The control thread holds at most `Limit` of them per session and, once the encoder has proven
-   * a state, answers each one once, in arrival order. Live video-mode (0x3008) and stream gamma
-   * (0x300D) refusals that arrive before that proof both wait here.
-   */
-  template<class Ack, std::size_t Limit>
-  class proof_deferred_acks_t {
-  public:
-    /** @return `false`, holding nothing, when the session bound is already reached. */
-    [[nodiscard]] bool defer(const Ack &ack) {
-      if (waiting_.size() >= Limit) {
-        return false;
-      }
-      waiting_.push_back(ack);
-      return true;
-    }
-
-    /** Pass every waiting acknowledgement to `answer` once, in arrival order, then forget it. */
-    template<class Answer>
-    void answer_all(Answer &&answer) {
-      auto waiting = std::move(waiting_);
-      waiting_.clear();
-      for (auto &ack : waiting) {
-        answer(ack);
-      }
-    }
-
-    [[nodiscard]] bool empty() const noexcept {
-      return waiting_.empty();
-    }
-
-    void clear() noexcept {
-      waiting_.clear();
-    }
-
-  private:
-    std::vector<Ack> waiting_;
-  };
-
   /** Build an atomic v2 ACK from one coherent encoder-published state snapshot. */
   [[nodiscard]] live_video_mode_ack_t make_live_video_mode_ack(
     std::uint32_t request_id,
@@ -534,6 +475,223 @@ namespace stream {
     const live_video_mode_ack_t &ack,
     std::uint8_t (&out)[ATOMIC_PRESENTATION_V2_ACK_PAYLOAD_SIZE]
   );
+
+  /**
+   * What one message type that is answered only with encoder proof needs from the shared delivery
+   * rule in proof_deferred_acks_t: where an acknowledgement carries its proof, how a waiting one
+   * takes on a later proof, its session bounds and its log lines. Both live video-mode (0x3008)
+   * and stream gamma (0x300D) acknowledgements report a generation that only the encoder assigns,
+   * zero meaning "nothing proven yet".
+   */
+  struct live_video_mode_ack_kind_t {
+    using ack_t = live_video_mode_ack_t;
+    using proof_t = video::effective_video_mode_t;
+
+    static constexpr std::size_t pre_proof_limit = LIVE_VIDEO_MODE_ACK_QUEUE_LIMIT;
+    // Not counted: the presentation worker holds one active and one pending request and answers a
+    // superseded one at once, so live requests never queue up behind encoder proof.
+    static constexpr std::uint32_t owed_request_limit = 0;
+
+    static constexpr std::string_view applied_without_proof_log =
+      "An APPLIED atomic-presentation ACK reached the control thread without a proven generation; closing the session";
+    static constexpr std::string_view pre_proof_overflow_log =
+      "Atomic-presentation pre-proof ACK queue exceeded its session bound; closing the session";
+    static constexpr std::string_view unencodable_log =
+      "Refusing to send an atomic-presentation acknowledgement that does not fit the v2 wire format";
+
+    [[nodiscard]] static std::uint32_t generation(const ack_t &ack) noexcept {
+      return ack.applied_generation;
+    }
+
+    [[nodiscard]] static bool applied(const ack_t &ack) noexcept {
+      return ack.status == live_video_mode_ack_e::applied;
+    }
+
+    [[nodiscard]] static std::uint32_t proof_generation(const proof_t &proof) noexcept {
+      return proof.generation;
+    }
+
+    /** Keep the correlation and outcome; report every applied field from @p proof. */
+    [[nodiscard]] static ack_t with_proof(const ack_t &ack, const proof_t &proof) noexcept {
+      return make_live_video_mode_ack(static_cast<std::uint32_t>(ack.request_id), ack.status, proof);
+    }
+  };
+
+  struct stream_gamma_ack_kind_t {
+    using ack_t = video::stream_gamma_ack_t;
+    using proof_t = video::stream_gamma_snapshot_t;
+
+    static constexpr std::size_t pre_proof_limit = STREAM_GAMMA_QUEUE_LIMIT;
+    // Counted: the encoder takes one request at a time and holds it until a converted and encoded
+    // frame proves it, which a static desktop may not produce for a long time. Every later request
+    // waits in a mail queue that discards everything it holds on overflow, so the 0x300C handler
+    // admits only this many unanswered requests and closes the session on the next one.
+    static constexpr std::uint32_t owed_request_limit = STREAM_GAMMA_QUEUE_LIMIT;
+
+    static constexpr std::string_view applied_without_proof_log =
+      "An applied stream gamma acknowledgement has no encoder proof";
+    static constexpr std::string_view pre_proof_overflow_log =
+      "Stream gamma acknowledgements waiting for encoder proof exceeded their session bound; closing the session";
+    static constexpr std::string_view unencodable_log = "Refusing unproven stream gamma acknowledgement";
+
+    [[nodiscard]] static std::uint32_t generation(const ack_t &ack) noexcept {
+      return ack.applied.generation;
+    }
+
+    [[nodiscard]] static bool applied(const ack_t &ack) noexcept {
+      return ack.status == video::stream_gamma_status_e::applied;
+    }
+
+    [[nodiscard]] static std::uint32_t proof_generation(const proof_t &proof) noexcept {
+      return proof.generation;
+    }
+
+    /** Keep the correlation, outcome and requested mode; report the applied state from @p proof. */
+    [[nodiscard]] static ack_t with_proof(const ack_t &ack, const proof_t &proof) noexcept {
+      auto proven = ack;
+      proven.applied = proof;
+      return proven;
+    }
+
+    /** Request ID zero announces encoder state; it answers no request. */
+    [[nodiscard]] static bool answers_request(const ack_t &ack) noexcept {
+      return ack.request_id != 0;
+    }
+  };
+
+  enum class proof_deferred_ack_delivery_e {
+    send,
+    defer_until_initial_proof,
+    fail_closed,
+  };
+
+  /** Generation zero is deferrable only for a refusal, never for an applied acknowledgement. */
+  template<class Kind>
+  [[nodiscard]] proof_deferred_ack_delivery_e classify_proof_deferred_ack(
+    const typename Kind::ack_t &ack
+  ) noexcept {
+    if (Kind::generation(ack) != 0) {
+      return proof_deferred_ack_delivery_e::send;
+    }
+    return Kind::applied(ack) ?
+             proof_deferred_ack_delivery_e::fail_closed :
+             proof_deferred_ack_delivery_e::defer_until_initial_proof;
+  }
+
+  /**
+   * One session's delivery of acknowledgements that are owed exactly once and may only report
+   * encoder-proven state: live video mode (0x3008) and stream gamma (0x300D) share this rule.
+   *
+   * The control thread drains a type's queue every iteration:
+   *  - an acknowledgement that carries proof is sent as it is, in queue order;
+   *  - a refusal decided before the encoder's first proof waits, at most `Kind::pre_proof_limit`
+   *    of them, until a proof exists. They are then answered once, in arrival order, with that
+   *    type's current proof in place of the missing one. This happens after the queue drain, so a
+   *    waiting refusal never reports an older generation than an acknowledgement sent before it;
+   *  - an applied acknowledgement without proof, a waiting refusal past the bound, or an
+   *    acknowledgement that does not fit its wire format closes the session. Nothing more of that
+   *    type is sent: the disconnect ends every outstanding request at once, and reconnect is
+   *    authoritative.
+   * A type whose requests can wait for proof without being coalesced also counts its unanswered
+   * requests (`Kind::owed_request_limit`, zero for an uncounted type). Teardown answers nothing.
+   */
+  template<class Kind>
+  class proof_deferred_acks_t {
+  public:
+    using ack_t = typename Kind::ack_t;
+    using proof_t = typename Kind::proof_t;
+
+    /**
+     * Admit one client request that this type will answer.
+     * @return `false`, admitting nothing, when the session's unanswered-request bound is reached.
+     */
+    [[nodiscard]] bool admit_request() noexcept {
+      static_assert(Kind::owed_request_limit != 0, "this acknowledgement type does not count requests");
+      if (owed_requests_ >= Kind::owed_request_limit) {
+        return false;
+      }
+      ++owed_requests_;
+      return true;
+    }
+
+    /**
+     * Deliver this type's queued acknowledgements under the rule above.
+     *
+     * @param next Returns the next queued acknowledgement, or an empty optional when none is left.
+     * @param current_proof Returns the type's current proven state (generation zero before proof).
+     * @param send Puts one acknowledgement on the wire. Returns `false` only when it does not fit
+     *             the wire format; a lost transport is the connection's business.
+     * @param close Logs the given reason and closes the session.
+     * @return `false` when this drain closed the session.
+     */
+    template<class Next, class CurrentProof, class Send, class Close>
+    bool drain(Next &&next, CurrentProof &&current_proof, Send &&send, Close &&close) {
+      while (auto ack = next()) {
+        switch (classify_proof_deferred_ack<Kind>(*ack)) {
+          case proof_deferred_ack_delivery_e::send:
+            if (!answer(*ack, send, close)) {
+              return false;
+            }
+            break;
+          case proof_deferred_ack_delivery_e::defer_until_initial_proof:
+            if (waiting_.size() >= Kind::pre_proof_limit) {
+              close(Kind::pre_proof_overflow_log);
+              return false;
+            }
+            waiting_.push_back(*ack);
+            break;
+          case proof_deferred_ack_delivery_e::fail_closed:
+            close(Kind::applied_without_proof_log);
+            return false;
+        }
+      }
+      if (waiting_.empty()) {
+        return true;
+      }
+      const proof_t proof = current_proof();
+      if (Kind::proof_generation(proof) == 0) {
+        return true;
+      }
+      auto waiting = std::move(waiting_);
+      waiting_.clear();
+      for (const auto &deferred : waiting) {
+        if (!answer(Kind::with_proof(deferred, proof), send, close)) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    /** Number of refusals still waiting for the encoder's first proof. */
+    [[nodiscard]] std::size_t waiting() const noexcept {
+      return waiting_.size();
+    }
+
+    /** Teardown: forget waiting refusals and admitted requests without answering them. */
+    void clear() noexcept {
+      waiting_.clear();
+      owed_requests_ = 0;
+    }
+
+  private:
+    template<class Send, class Close>
+    bool answer(const ack_t &ack, Send &send, Close &close) {
+      const bool fits = send(ack);
+      if constexpr (Kind::owed_request_limit != 0) {
+        if (Kind::answers_request(ack) && owed_requests_ > 0) {
+          --owed_requests_;
+        }
+      }
+      if (!fits) {
+        close(Kind::unencodable_log);
+        return false;
+      }
+      return true;
+    }
+
+    std::vector<ack_t> waiting_;
+    std::uint32_t owed_requests_ = 0;
+  };
 
   // Artemis host-SBS telemetry control extension:
   //   0x3009 client -> host subscription (8-byte body)

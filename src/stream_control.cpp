@@ -549,12 +549,15 @@ namespace stream {
    * and which is also the thread that clears session_t::control.peer. Callers that decided the
    * outcome elsewhere queue a plain value through mail::live_video_mode_ack instead of touching
    * the peer or the cipher themselves.
+   *
+   * @return `false` only when the acknowledgement does not fit the v2 wire format, which
+   * proof_deferred_acks_t treats as a reason to close the session.
    */
-  int send_live_video_mode_ack(session_t *session, const live_video_mode_ack_t &ack) {
+  bool send_live_video_mode_ack(session_t *session, const live_video_mode_ack_t &ack) {
     if (!session->control.peer) {
       // Still waiting for PING from Artemis, or the peer is already gone. There is nothing to
       // answer; the client's own request timeout covers the missing reply.
-      return -1;
+      return true;
     }
 
     control_live_video_mode_ack_v2_t plaintext {};
@@ -562,8 +565,7 @@ namespace stream {
     plaintext.header.payloadLength =
       sizeof(control_live_video_mode_ack_v2_t) - sizeof(control_header_v2);
     if (!encode_atomic_presentation_ack_payload(ack, plaintext.body)) {
-      BOOST_LOG(error) << "Refusing to send an atomic-presentation acknowledgement that does not fit the v2 wire format"sv;
-      return -1;
+      return false;
     }
     const int send_result = send_control_packet(
       session,
@@ -574,7 +576,7 @@ namespace stream {
     if (send_result != 0) {
       TUPLE_2D(port, addr, platf::from_sockaddr_ex((sockaddr *) &session->control.peer->address.address));
       BOOST_LOG(warning) << "Couldn't send live video-mode acknowledgement to ["sv << addr << ':' << port << ']';
-      return -1;
+      return true;
     }
 
     BOOST_LOG(debug) << "Sent atomic-presentation v2 ack: request "sv << ack.request_id
@@ -582,22 +584,35 @@ namespace stream {
                      << ack.applied_encoded_width << 'x' << ack.applied_encoded_height
                      << '@' << (ack.applied_framerate_x100 / 100.0) << "Hz "sv
                      << ack.applied_bitrate_kbps << "kbps"sv;
-    return 0;
+    return true;
   }
 
-  int send_stream_gamma_ack(session_t &session, const video::stream_gamma_ack_t &ack) {
+  /** Answer one stream gamma request (0x300D); the same return contract as above. */
+  bool send_stream_gamma_ack(session_t &session, const video::stream_gamma_ack_t &ack) {
     if (!session.control.peer) {
-      return -1;
+      return true;
     }
     control_stream_gamma_ack_t plaintext {};
     plaintext.header.type = control_packet::stream_gamma_ack;
     plaintext.header.payloadLength = STREAM_GAMMA_ACK_PAYLOAD_SIZE;
     if (!encode_stream_gamma_ack_payload(ack, plaintext.body)) {
-      BOOST_LOG(error) << "Refusing unproven stream gamma acknowledgement"sv;
-      session::stop(session);
-      return -1;
+      return false;
     }
-    return send_control_packet(&session, session.broadcast_ref->control_server, plaintext);
+    (void) send_control_packet(&session, session.broadcast_ref->control_server, plaintext);
+    return true;
+  }
+
+  /** The next acknowledgement queued for an ENet peer that is still connected. */
+  template<class Ack>
+  auto next_queued_ack(control_server_t &server, safe::mail_raw_t::queue_t<Ack> &queue) {
+    return [&server, &queue]() -> std::optional<Ack> {
+      while (server._session->peer && queue->peek()) {
+        if (auto ack = queue->pop(0ms)) {
+          return std::move(*ack);
+        }
+      }
+      return std::nullopt;
+    };
   }
 
   void send_game_source_status(session_t &session) {
@@ -721,12 +736,11 @@ namespace stream {
         BOOST_LOG(warning) << "Dropping malformed stream gamma request"sv;
         return;
       }
-      if (session->control.outstanding_stream_gamma_requests >= STREAM_GAMMA_QUEUE_LIMIT) {
+      if (!session->control.deferred_stream_gamma_acks.admit_request()) {
         BOOST_LOG(error) << "Stream gamma request queue exceeded its session bound"sv;
         session::stop(*session);
         return;
       }
-      ++session->control.outstanding_stream_gamma_requests;
       if (decoded != stream_gamma_request_decode_e::ok) {
         session->control.stream_gamma_ack_queue->raise(video::stream_gamma_ack_t {
           decoded == stream_gamma_request_decode_e::unsupported_version ?
@@ -1193,79 +1207,37 @@ namespace stream {
               }
             }
 
-            // Answer every live video-mode request (0x3007) exactly once. Unlike the depth phase
-            // these must not coalesce, so they arrive on a real queue: a client that sends two
-            // requests is owed two replies. The joined presentation worker only queues plain
-            // outcomes, leaving the peer, the cipher and ENet to this thread.
-            auto &ack_queue = session->control.live_video_mode_ack_queue;
-            while (server->_session->peer && ack_queue->peek()) {
-              if (auto ack = ack_queue->pop(0ms)) {
-                switch (classify_live_video_mode_ack_delivery(*ack)) {
-                  case live_video_mode_ack_delivery_e::send:
-                    send_live_video_mode_ack(session, *ack);
-                    break;
-                  case live_video_mode_ack_delivery_e::defer_until_initial_proof:
-                    if (!session->control.deferred_live_video_mode_acks.defer(*ack)) {
-                      BOOST_LOG(error) << "Atomic-presentation pre-proof ACK queue exceeded its session bound; closing the session"sv;
-                      session::stop(*session);
-                    }
-                    break;
-                  case live_video_mode_ack_delivery_e::fail_closed:
-                    BOOST_LOG(error) << "An APPLIED atomic-presentation ACK reached the control thread without a proven generation; closing the session"sv;
-                    session::stop(*session);
-                    break;
-                }
-              }
-            }
-            if (server->_session->peer && !session->control.deferred_live_video_mode_acks.empty() && session->config.monitor.effective_mode) {
-              const auto proven = session->config.monitor.effective_mode->current();
-              if (proven.generation != 0) {
-                session->control.deferred_live_video_mode_acks.answer_all([&](const live_video_mode_ack_t &deferred) {
-                  send_live_video_mode_ack(
-                    session,
-                    make_live_video_mode_ack(
-                      static_cast<std::uint32_t>(deferred.request_id),
-                      deferred.status,
-                      proven
-                    )
-                  );
-                });
-              }
-            }
-            // Stream gamma requests (0x300D) follow the same rule: each is answered exactly once.
-            // An acknowledgement without encoder proof waits here for that proof.
-            const auto answer_stream_gamma = [&](const video::stream_gamma_ack_t &ack) {
-              send_stream_gamma_ack(*session, ack);
-              if (ack.request_id != 0 && session->control.outstanding_stream_gamma_requests > 0) {
-                --session->control.outstanding_stream_gamma_requests;
-              }
+            // Answer every live video-mode request (0x3007) and stream gamma request (0x300C)
+            // exactly once, under the one rule of proof_deferred_acks_t. Unlike the depth phase
+            // these must not coalesce, so they arrive on real queues: a client that sends two
+            // requests is owed two replies. The joined presentation worker and the encode loop
+            // only queue plain outcomes, leaving the peer, the cipher and ENet to this thread.
+            const auto close_session = [&](std::string_view reason) {
+              BOOST_LOG(error) << reason;
+              session::stop(*session);
             };
-            auto &gamma_acks = session->control.stream_gamma_ack_queue;
-            while (server->_session->peer && gamma_acks->peek()) {
-              if (auto ack = gamma_acks->pop(0ms)) {
-                if (ack->applied.generation == 0) {
-                  if (ack->status == video::stream_gamma_status_e::applied) {
-                    BOOST_LOG(error) << "An applied stream gamma acknowledgement has no encoder proof"sv;
-                    session::stop(*session);
-                    break;
-                  }
-                  if (!session->control.deferred_stream_gamma_acks.defer(*ack)) {
-                    BOOST_LOG(error) << "Stream gamma acknowledgements waiting for encoder proof exceeded their session bound; closing the session"sv;
-                    session::stop(*session);
-                    break;
-                  }
-                } else {
-                  answer_stream_gamma(*ack);
-                }
-              }
-            }
-            const auto gamma_proven = session->config.monitor.stream_gamma_state->current();
-            if (server->_session->peer && gamma_proven.generation != 0) {
-              session->control.deferred_stream_gamma_acks.answer_all([&](video::stream_gamma_ack_t &ack) {
-                ack.applied = gamma_proven;
-                answer_stream_gamma(ack);
-              });
-            }
+            session->control.deferred_live_video_mode_acks.drain(
+              next_queued_ack(*server, session->control.live_video_mode_ack_queue),
+              [&] {
+                const auto &effective_mode = session->config.monitor.effective_mode;
+                return effective_mode ? effective_mode->current() : video::effective_video_mode_t {};
+              },
+              [&](const live_video_mode_ack_t &ack) {
+                return send_live_video_mode_ack(session, ack);
+              },
+              close_session
+            );
+            session->control.deferred_stream_gamma_acks.drain(
+              next_queued_ack(*server, session->control.stream_gamma_ack_queue),
+              [&] {
+                const auto &gamma_state = session->config.monitor.stream_gamma_state;
+                return gamma_state ? gamma_state->current() : video::stream_gamma_snapshot_t {};
+              },
+              [&](const video::stream_gamma_ack_t &ack) {
+                return send_stream_gamma_ack(*session, ack);
+              },
+              close_session
+            );
             // Readiness describes the encoder-proven generation, after any queued mode ACK.
             send_game_source_status(*session);
           }
