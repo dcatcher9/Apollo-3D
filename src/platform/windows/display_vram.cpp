@@ -36,7 +36,7 @@
 #include "display_shader_manifest.h"
 #include "foreground_window_region.h"
 #include "subtitle_context_policy.h"
-#include "game3d_debug_dump.h"
+#include "game_export_pipeline.h"
 #include "game3d_setup.h"
 #include "game3d_text_hook.h"
 #include "tools/reshade/game3d_ui_adaptive.h"
@@ -51,7 +51,6 @@
 #include "src/capture_image_pool.h"
 #include "src/config.h"
 #include "src/depth_coordinate_v2.h"
-#include "src/game_source_tracker.h"
 #include "src/generated/sbs_adaptive_state_contract.h"
 #include "src/host_sbs_drawn_source_order.h"
 #include "src/host_sbs_observation_handoff.h"
@@ -536,7 +535,7 @@ namespace platf::dxgi {
       // Encoder teardown may remain blocked inside the NVIDIA driver. The shared capture-display
       // owner is not a D3D/NVENC operand, so release it before derived member destruction to let
       // Desktop Duplication reinitialize while device/context resources remain alive.
-      game_setup_watch.reset();
+      game_export.setup_watch.reset();
       display.reset();
     }
 
@@ -550,8 +549,8 @@ namespace platf::dxgi {
         // converts next, including a replacement encoder on this display.
         claim_capture_pixels(false);
       }
-      if (reshade_receiver && ::video::is_packed_mode(sbs_mode)) {
-        reshade_receiver->set_frame_wake(external_frame_wake);
+      if (game_export.receiver && ::video::is_packed_mode(sbs_mode)) {
+        game_export.receiver->set_frame_wake(external_frame_wake);
       }
     }
 
@@ -561,7 +560,7 @@ namespace platf::dxgi {
 
     // The streaming loop converts a held live export, whose next frame it re-checks for.
     bool external_frame_held() const {
-      return reshade_receiver && ::video::is_packed_mode(sbs_mode) && external_frame_wake && reshade_receiver->frame_held();
+      return game_export.receiver && ::video::is_packed_mode(sbs_mode) && external_frame_wake && game_export.receiver->frame_held();
     }
 
     // A text game in front is converted from its captured picture by the Host AI path.
@@ -573,38 +572,12 @@ namespace platf::dxgi {
       // A replaced export slot returns to the producer when the GPU completes the conversion's
       // reads of it (the receiver's read-fence wait), which with pictures in flight can come after
       // the next claim. This is the owner's fallback check, should that wait not be armed.
-      if (reshade_receiver) {
-        reshade_receiver->retire();
+      if (game_export.receiver) {
+        game_export.receiver->retire();
         if (diagnostics_enabled && ::video::is_packed_mode(sbs_mode)) {
-          log_export_wakes();
+          game_export.log_wakes();
         }
       }
-    }
-
-    // Whether the export's completion wake reaches the encode loop: every 20 s while diagnostics
-    // are enabled, the frames claimed and the claims that found their frame complete first.
-    void log_export_wakes() {
-      constexpr auto interval = std::chrono::seconds(20);
-      const auto now = std::chrono::steady_clock::now();
-      if (now < next_export_wake_log) {
-        return;
-      }
-      const auto counts = reshade_receiver->take_wake_counts();
-      if (next_export_wake_log != std::chrono::steady_clock::time_point {} && counts.claims) {
-        const auto ms = [](std::chrono::nanoseconds value) {
-          return std::chrono::duration<double, std::milli>(value).count();
-        };
-        BOOST_LOG(info) << "Game 3D export: " << counts.claims << " new frames claimed and " << counts.wakes
-                        << " fence wakes in " << interval.count() << " s; " << counts.claims_before_wake
-                        << " claims found their frame complete before its wake (late or missing wake); "
-                        << std::format(
-                             "fence wake to claim avg {:.2f} ms, max {:.2f} ms over {} claims.",
-                             counts.claims_after_wake ? ms(counts.wake_to_claim_total) / static_cast<double>(counts.claims_after_wake) : 0.0,
-                             ms(counts.wake_to_claim_max),
-                             counts.claims_after_wake
-                           );
-      }
-      next_export_wake_log = now + interval;
     }
 
     // Tells capture whether this encoder currently reads its desktop pixels.
@@ -672,11 +645,11 @@ namespace platf::dxgi {
       // without a live export, captures and the minimum-FPS keepalive refresh the flat fallback,
       // never a repeat of a static desktop at stream cadence. Each of those conversions also runs a
       // due white-level query, so the query never forces a repeat of its own.
-      if (reshade_receiver && ::video::is_packed_mode(sbs_mode)) {
-        if (!external_frame_wake || game_dumper.needs_conversion_poll()) {
+      if (game_export.receiver && ::video::is_packed_mode(sbs_mode)) {
+        if (!external_frame_wake || game_export.dumper.needs_conversion_poll()) {
           return true;
         }
-        if ((reshade_receiver->frame_held() && !reshade_receiver->frame_wake_active()) || reshade_receiver->frame_pending()) {
+        if ((game_export.receiver->frame_held() && !game_export.receiver->frame_wake_active()) || game_export.receiver->frame_pending()) {
           return true;
         }
         // A text game is converted by the Host AI path, whose completed depth must be drawn even
@@ -693,7 +666,7 @@ namespace platf::dxgi {
       if (::video::is_game_mode(sbs_mode)) {
         // Game mono encodes the desktop and only reports whether an export is available. The
         // streaming loop refreshes that on captures and keepalives; Local AR keeps polling.
-        return !external_frame_wake || game_dumper.needs_conversion_poll();
+        return !external_frame_wake || game_export.dumper.needs_conversion_poll();
       }
       return depth_work_needs_service();
     }
@@ -735,28 +708,6 @@ namespace platf::dxgi {
       return rendered_content_timestamp_;
     }
 
-    void publish_game_source_status(const std::optional<::video::game_source_identity_t> &source) {
-      if (!::video::is_game_mode(sbs_mode) || !game_source_status_event || !game_effective_mode || game_source_width < 2 || game_source_width > 32767 || game_source_height < 2 || game_source_height > 65535) {
-        return;
-      }
-      const auto applied = game_effective_mode->current();
-      if (applied.sbs_mode != sbs_mode || applied.source_width != game_source_width || applied.source_height != game_source_height || applied.encoded_width != game_output_width || applied.encoded_height != game_output_height) {
-        return;
-      }
-      ::video::game_source_state_t state {};
-      state.state = !game_source_supported ? ::video::GAME_SOURCE_UNSUPPORTED :
-                                            (source ? ::video::GAME_SOURCE_READY : ::video::GAME_SOURCE_WAITING);
-      state.provider = source ? ::video::GAME_PROVIDER_RESHADE : ::video::GAME_PROVIDER_NONE;
-      state.presentation_generation = applied.generation;
-      state.source_width = static_cast<std::uint16_t>(game_source_width);
-      state.source_height = static_cast<std::uint16_t>(game_source_height);
-      state.packed_width = static_cast<std::uint16_t>(game_source_width * 2);
-      state.packed_height = state.source_height;
-      if (const auto update = game_source_tracker.observe(state, source.value_or(::video::game_source_identity_t {}), std::chrono::steady_clock::now())) {
-        game_source_status_event->raise(*update);
-      }
-    }
-
     int convert(
       platf::img_t &img_base,
       const std::optional<std::chrono::steady_clock::time_point> next_encode_target = std::nullopt,
@@ -792,9 +743,9 @@ namespace platf::dxgi {
       if (::video::is_game_mode(sbs_mode)) {
         // Missing depth/exports are diagnostic use cases too. Poll before the blank-image
         // guard and without sharing the AI dumper's request/retry ownership.
-        game_dumper.poll(device.get(), device_ctx.get(),
+        game_export.dumper.poll(device.get(), device_ctx.get(),
           display->screen_rect(),
-          game_source_width, game_source_height, sbs_mode);
+          game_export.source_width, game_export.source_height, sbs_mode);
       }
       auto converted_content_timestamp =
         ::video::detail::select_rendered_content_timestamp(
@@ -809,26 +760,8 @@ namespace platf::dxgi {
       if (!img.blank) {
         std::optional<platf::reshade_bridge::frame_t> external;
         std::optional<::video::game_source_identity_t> game_source;
-        if (reshade_receiver) {
-          const RECT source_rect = display->screen_rect();
-          const int export_width = game_source_width * 2;
-          const int export_height = game_source_height;
-          if (::video::is_packed_mode(sbs_mode)) {
-            // The export is scaled or fitted into this converter's own packed raster, so the
-            // receiver places it for exactly that raster (Game SBS: the export size above; Local
-            // AR: its presentation target) and refuses what the resample below could not place.
-            // A returned frame's texture always has the packed size poll() placed for this raster.
-            const auto output_width = static_cast<std::uint32_t>(std::lround(sbs_viewport.Width));
-            const auto output_height = static_cast<std::uint32_t>(std::lround(sbs_viewport.Height));
-            external = reshade_receiver->poll(source_rect, static_cast<int>(output_width), static_cast<int>(output_height));
-            if (external) {
-              game_source = ::video::game_source_identity_t {external->producer_process_id, external->producer_creation_time, external->resource_generation};
-            }
-          } else if (const auto status = reshade_receiver->status(source_rect, export_width, export_height)) {
-            // Game mono never shows the export: observe it without becoming its consumer, so the
-            // game neither allocates the shared ring nor packs stereo that would go unread.
-            game_source = ::video::game_source_identity_t {status->producer_process_id, status->producer_creation_time, status->resource_generation};
-          }
+        if (game_export.receiver) {
+          game_source = game_export.observe(sbs_mode, display->screen_rect(), sbs_viewport, external);
         }
         // Without an add-on export, the game in front may be a text game. It is reported ready
         // only while this session can really convert it, so the client never widens for nothing.
@@ -863,16 +796,16 @@ namespace platf::dxgi {
             subtitle_context_reprocess_pending = true;
             // Dump 3D follows the route: a text game is converted by the Host path, so its dump
             // is the Host package; an add-on game's is the add-on's own.
-            game_dumper.set_button_request(text_game_ai_active ? nullptr : dump_button_request);
+            game_export.dumper.set_button_request(text_game_ai_active ? nullptr : dump_button_request);
             sbs_dumper.set_button_request(text_game_ai_active ? dump_button_request : nullptr);
           }
         }
-        publish_game_source_status(game_source);
+        game_export.publish_status(sbs_mode, game_source);
         // Every read of the export is recorded on this context before convert() returns, on every
         // path; the claim that replaces the frame can then return its slot without waiting.
         auto export_reads_recorded = util::fail_guard([&]() {
           if (external) {
-            reshade_receiver->reads_recorded();
+            game_export.receiver->reads_recorded();
           }
         });
 
@@ -1043,7 +976,7 @@ namespace platf::dxgi {
           return recorded;
         };
 
-        if (reshade_receiver && ::video::is_packed_mode(sbs_mode) && !text_game_ai_active) {
+        if (game_export.receiver && ::video::is_packed_mode(sbs_mode) && !text_game_ai_active) {
           ID3D11Texture2D *packed_texture = nullptr;
           ID3D11ShaderResourceView *packed_view = nullptr;
           bool packed_linear = false;
@@ -1083,12 +1016,12 @@ namespace platf::dxgi {
             if (packed_pq) {
               transfer = sbs_cursor::source_transfer_e::pq;
             }
-            const auto composited = external_cursor->compose(
+            const auto composited = game_export.cursor->compose(
               packed_texture,
               packed_view,
               img.cursor,
               transfer,
-              external_cursor_white_multiplier,
+              game_export.cursor_white_multiplier,
               external->ui_parallax_uv,
               sbs_cursor::patch_margin(minimum_scale)
             );
@@ -1098,13 +1031,13 @@ namespace platf::dxgi {
             }
             if (composited->regions) {
               cursor_patch = composited;
-              if (!external_cursor_logged) {
+              if (!game_export.cursor_logged) {
                 const char *blend = packed_linear ? "linear HDR" : "SDR";
                 if (packed_pq) {
                   blend = "PQ HDR10, blended in linear light";
                 }
                 BOOST_LOG(info) << "Game 3D: compositing the Windows cursor into both eyes (" << blend << ").";
-                external_cursor_logged = true;
+                game_export.cursor_logged = true;
               }
             }
             if (resample) {
@@ -1132,7 +1065,7 @@ namespace platf::dxgi {
               // A PQ export is decoded per tap, so the intermediate is FP16 scRGB filtered in
               // linear light. The cursor patch of a PQ export is already scRGB. A fitted eye's
               // pass and its cursor regions stay inside that eye's rectangle (its scissor).
-              auto *const resample_shader = packed_pq ? sbs_packed_resample_pq_ps.get() : sbs_packed_resample_ps.get();
+              auto *const resample_shader = packed_pq ? game_export.resample_pq_ps.get() : game_export.resample_ps.get();
               for (std::uint32_t pass_index = 0; pass_index < fit_passes.count; ++pass_index) {
                 const auto &pass = fit_passes.passes[pass_index];
                 const auto draw_export = [&]() {
@@ -1144,7 +1077,7 @@ namespace platf::dxgi {
                 for (std::uint32_t i = 0; cursor_patch && i < cursor_patch->regions; ++i) {
                   const auto region = platf::packed_output::pass_region(pass, cursor_patch->changed[i], packed_desc.Width, packed_desc.Height);
                   if (region && !with_scissor(*region, [&]() {
-                        return resample_from(pass, cursor_patch->view, sbs_packed_resample_ps.get());
+                        return resample_from(pass, cursor_patch->view, game_export.resample_ps.get());
                       })) {
                     return -1;
                   }
@@ -6380,22 +6313,22 @@ namespace platf::dxgi {
       sbs_mode = setup.sbs_mode_param;
       sbs_config = setup.settings;
       local_presentation = setup.rgb_only;
-      game_source_status_event = std::move(setup.game_status_event);
-      game_effective_mode = std::move(setup.effective_mode);
-      game_source_width = setup.game_width;
-      game_source_height = setup.game_height;
-      game_output_width = setup.width;
-      game_output_height = setup.height;
-      game_source_tracker = {};
-      game_source_supported = setup.game_transport_supported &&
+      game_export.status_event = std::move(setup.game_status_event);
+      game_export.effective_mode = std::move(setup.effective_mode);
+      game_export.source_width = setup.game_width;
+      game_export.source_height = setup.game_height;
+      game_export.output_width = setup.width;
+      game_export.output_height = setup.height;
+      game_export.source_tracker = {};
+      game_export.source_supported = setup.game_transport_supported &&
                               (display->display_rotation == DXGI_MODE_ROTATION_UNSPECIFIED ||
                                display->display_rotation == DXGI_MODE_ROTATION_IDENTITY);
 #ifdef SUNSHINE_TESTS
-      game_setup_watch = ::video::is_game_mode(sbs_mode) ?
+      game_export.setup_watch = ::video::is_game_mode(sbs_mode) ?
                            model_preparation_watch_for_test({display->offset_x, display->offset_y, display->offset_x + display->width, display->offset_y + display->height}) :
                            nullptr;
 #else
-      game_setup_watch = ::video::is_game_mode(sbs_mode) ?
+      game_export.setup_watch = ::video::is_game_mode(sbs_mode) ?
                            platf::game3d::watch_game_setup(display->screen_rect()) :
                            nullptr;
 #endif
@@ -6404,24 +6337,24 @@ namespace platf::dxgi {
       // A fullscreen game may render at the negotiated resolution while Windows presents it at
       // another desktop resolution. The receiver checks fullscreen ownership independently from
       // the exact authored stereo raster; missing exports retain the packed flat fallback.
-      reshade_receiver = ::video::is_game_mode(sbs_mode) && game_source_supported ?
+      game_export.receiver = ::video::is_game_mode(sbs_mode) && game_export.source_supported ?
                            std::make_unique<platf::reshade_bridge::receiver_t>(device.get(), device_ctx.get()) :
                            nullptr;
-      if (reshade_receiver) {
+      if (game_export.receiver) {
         // An HDR stream is encoded as HDR10 PQ, so the producer may pack an scRGB game in that
         // format directly. Local presentation keeps the producer's own choice.
-        reshade_receiver->set_stream_pq(!setup.rgb_only && output_is_hdr);
+        game_export.receiver->set_stream_pq(!setup.rgb_only && output_is_hdr);
       }
-      if (reshade_receiver && ::video::is_packed_mode(sbs_mode) && external_frame_wake) {
-        reshade_receiver->set_frame_wake(external_frame_wake);
+      if (game_export.receiver && ::video::is_packed_mode(sbs_mode) && external_frame_wake) {
+        game_export.receiver->set_frame_wake(external_frame_wake);
       }
       // One encoder converts this display at a time. A token left by a predecessor whose teardown
       // has not run yet must not keep this one from receiving desktop pixels.
       display->external_pixels_owner.store(0, std::memory_order_release);
-      external_cursor.reset();
-      external_cursor_logged = false;
-      if (reshade_receiver) {
-        external_cursor = std::make_unique<sbs_cursor::compositor_t>(
+      game_export.cursor.reset();
+      game_export.cursor_logged = false;
+      if (game_export.receiver) {
+        game_export.cursor = std::make_unique<sbs_cursor::compositor_t>(
           device.get(),
           device_ctx.get(),
           cursor_vs_hlsl.get(),
@@ -6430,7 +6363,7 @@ namespace platf::dxgi {
           pq_input_to_scrgb_ps_hlsl.get()
         );
         const auto white_nits = display->get_sdr_white_nits();
-        external_cursor_white_multiplier = white_nits && *white_nits > 0.0f ? *white_nits / 80.0f : 203.0f / 80.0f;
+        game_export.cursor_white_multiplier = white_nits && *white_nits > 0.0f ? *white_nits / 80.0f : 203.0f / 80.0f;
       }
       host_sbs_renderer = models::host_sbs_renderer_e::awaiting_v2;
       v2_live_warp_seen = false;
@@ -6441,12 +6374,12 @@ namespace platf::dxgi {
       sbs_telemetry_event = std::move(setup.telemetry_event);
       sbs_telemetry_subscription = std::move(setup.telemetry_subscription);
       sbs_telemetry_performance = diagnostics_enabled ? std::move(setup.telemetry_performance) : nullptr;
-      game_dumper.set_button_request(::video::is_game_mode(sbs_mode) ? setup.sbs_debug_dump_request : nullptr);
+      game_export.dumper.set_button_request(::video::is_game_mode(sbs_mode) ? setup.sbs_debug_dump_request : nullptr);
       sbs_dumper.set_button_request(::video::is_game_mode(sbs_mode) ? nullptr : setup.sbs_debug_dump_request);
       dump_button_request = std::move(setup.sbs_debug_dump_request);
       sbs_flat_identity_ps.reset();
-      sbs_packed_resample_ps.reset();
-      sbs_packed_resample_pq_ps.reset();
+      game_export.resample_ps.reset();
+      game_export.resample_pq_ps.reset();
       cursor_scissor_raster.Reset();
       sbs_reprojection_v2_live_ps.reset();
       selected_shared_warp={};
@@ -6526,7 +6459,7 @@ namespace platf::dxgi {
       const bool sbs_on = ::video::is_packed_mode(sbs_mode);
       const bool ai_on = sbs_mode == ::video::SBS_AI;
       if (sbs_mode == ::video::SBS_GAME_SBS &&
-          (!game_source_supported ||
+          (!game_export.source_supported ||
            !::video::external_sbs_dimensions_match(setup.game_width, setup.game_height, setup.width, setup.height))) {
         BOOST_LOG(error) << "Game 3D requires an unrotated source and supported exact full-SBS output raster."sv;
         return -1;
@@ -6559,7 +6492,7 @@ namespace platf::dxgi {
           std::string_view {"source extent is empty"};
       // A text game needs the same depth path as Host AI. A surface that path rejects simply
       // makes this Game 3D session unable to convert one; it stays valid for add-on games.
-      text_game_eligible = ::video::is_game_mode(sbs_mode) && game_source_supported && host_sbs_rejection.empty() && !test_context;
+      text_game_eligible = ::video::is_game_mode(sbs_mode) && game_export.source_supported && host_sbs_rejection.empty() && !test_context;
       text_game_ai_active = false;
       text_game_pin.restart_session();
       const bool depth_path_on = ai_on || (sbs_mode == ::video::SBS_GAME_SBS && text_game_eligible);
@@ -6651,8 +6584,8 @@ namespace platf::dxgi {
           BOOST_LOG(error) << "Host SBS flat-identity safety renderer is unavailable."sv;
           return -1;
         }
-        create_pixel_shader_helper(sbs_packed_resample_ps_hlsl, sbs_packed_resample_ps);
-        create_pixel_shader_helper(sbs_packed_resample_pq_input_ps_hlsl, sbs_packed_resample_pq_ps);
+        create_pixel_shader_helper(sbs_packed_resample_ps_hlsl, game_export.resample_ps);
+        create_pixel_shader_helper(sbs_packed_resample_pq_input_ps_hlsl, game_export.resample_pq_ps);
         // Re-runs a conversion pass from the Game 3D cursor patch over the cursor's pixels only.
         // Otherwise identical to the default rasterizer state the conversion passes use.
         D3D11_RASTERIZER_DESC scissor_desc {};
@@ -7276,19 +7209,10 @@ namespace platf::dxgi {
     unsigned engine_poll_counter = 0;  ///< Rate-limits the startup model-preparation wait warning.
     int sbs_mode = ::video::SBS_OFF;  ///< Host SBS mode for this encode device (set in init_output).
     config::video_t::sbs_t sbs_config {};  ///< Immutable Host SBS settings for this device.
-    std::unique_ptr<platf::reshade_bridge::receiver_t> reshade_receiver;
-    std::shared_ptr<void> game_setup_watch;
+    game_export_pipeline_t game_export;  ///< The Game 3D add-on export, its cursor and its source state.
     std::function<void()> external_frame_wake;  ///< See set_external_frame_wake().
     std::uint64_t capture_pixels_token = 0;  ///< This encoder's display->external_pixels_owner value.
     bool conversion_missing_source = false;  ///< Skipped capture pixels have no external replacement.
-    std::chrono::steady_clock::time_point next_export_wake_log {};  ///< See log_export_wakes().
-    std::unique_ptr<sbs_cursor::compositor_t> external_cursor;
-    float external_cursor_white_multiplier = 203.0f / 80.0f;
-    bool external_cursor_logged = false;
-    safe::mail_raw_t::event_t<::video::game_source_state_t> game_source_status_event;
-    std::shared_ptr<::video::effective_video_mode_publisher_t> game_effective_mode;
-    ::video::game_source_tracker_t game_source_tracker;
-    bool game_source_supported = false;
     // A Game 3D text game has no depth and publishes no stereo of its own. It supplies where its
     // text is, through the text helper loaded into it, and the host supplies the rest: while such
     // a game is in front, packed Game 3D converts the captured picture with the Host AI path.
@@ -7299,10 +7223,6 @@ namespace platf::dxgi {
     /// The latest conversion that looked at which window is in front; see needs_conversion_poll().
     std::chrono::steady_clock::time_point text_game_serviced_at {};
     text_game_pin_controller_t text_game_pin;  ///< The game in front, its helper's text and its pin.
-    int game_source_width = 0;
-    int game_source_height = 0;
-    int game_output_width = 0;
-    int game_output_height = 0;
     bool diagnostics_enabled = false;  ///< Cached once per device; the disabled hot path only branches.
     safe::mail_raw_t::event_t<int> sbs_depth_status_event;
     std::shared_ptr<safe::event_t<bool>> sbs_depth_pipeline_ready_event;
@@ -7321,9 +7241,6 @@ namespace platf::dxgi {
     std::chrono::steady_clock::time_point sbs_telemetry_last_publish_attempt {};
     vs_t sbs_reprojection_vs;
     ps_t sbs_flat_identity_ps;
-    // Resizes same-aspect external full-SBS eyes to the packed output before YUV conversion.
-    ps_t sbs_packed_resample_ps;
-    ps_t sbs_packed_resample_pq_ps;  ///< Decodes PQ taps to FP16 scRGB while resizing.
     Microsoft::WRL::ComPtr<ID3D11RasterizerState> cursor_scissor_raster;
     ps_t sbs_reprojection_v2_live_ps;
     ps_t sbs_reprojection_v2_p010_y_ps;
@@ -7456,7 +7373,6 @@ namespace platf::dxgi {
     bool sbs_gpu_timing_ready = false;
 
     platf::sbs_debug::dumper sbs_dumper;  ///< Debug: dumps SBS frames on the client button (see sbs_debug_dump.h).
-    platf::game3d_debug::dumper game_dumper;  ///< Exact add-on inputs and provider observations, independent of AI dumps.
     std::optional<std::chrono::steady_clock::time_point> rendered_content_timestamp_;
   };
 
@@ -7773,7 +7689,7 @@ namespace platf::dxgi {
           preparation_fixture_require(converter_->init_rgb_output(static_cast<int>(output_width), static_cast<int>(request_.height),
             mode, settings, ready_event_) == 0, "Preparation actual RGB mode initialization failed");
         }
-        preparation_fixture_require(!converter_->reshade_receiver, "Preparation probe unexpectedly constructed a provider receiver");
+        preparation_fixture_require(!converter_->game_export.receiver, "Preparation probe unexpectedly constructed a provider receiver");
         target_.Reset();
         target_rtv_.Reset();
         D3D11_TEXTURE2D_DESC description {};
@@ -7828,8 +7744,8 @@ namespace platf::dxgi {
         result.setup_watch_factory_calls = watch_probe_.calls;
         result.setup_watch_tokens_alive = watch_probe_.token.use_count();
         result.setup_watch_rect = watch_probe_.last_rect;
-        result.setup_watch_present = static_cast<bool>(converter_->game_setup_watch);
-        result.receiver_present = static_cast<bool>(converter_->reshade_receiver);
+        result.setup_watch_present = static_cast<bool>(converter_->game_export.setup_watch);
+        result.receiver_present = static_cast<bool>(converter_->game_export.receiver);
         result.production_observer_path = converter_->test_context == nullptr;
         result.registry_present = static_cast<bool>(converter_->video_player_registry);
         result.registry_ready = result.registry_present && converter_->video_player_registry->ready();

@@ -87,6 +87,7 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/game3d_debug_dump.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/game3d_debug_preview.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/game3d_debug_preview.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/game_export_pipeline.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/display_wgc.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/foreground_window_region.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/foreground_window_region.cpp"
