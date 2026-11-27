@@ -206,7 +206,7 @@ TEST(WebUiDesign, EveryApolloVariableUseHasADeclaration) {
 TEST(WebUiDesign, PageChromeUsesSemanticColorTypeAndRadiusRoles) {
   const std::map<std::string, std::set<std::string>> allowed_artwork_colors {
     {"public/assets/css/apps.css", {"#111", "#fff"}},
-    {"pin.html", {"#fff"}},  // QR code quiet zone.
+    {"public/assets/css/pin.css", {"#fff"}},  // QR code quiet zone.
     {"troubleshooting.html", {"#10141b", "#d9e1ee"}},  // Log terminal.
   };
   static const std::regex color_pattern(R"(#[0-9a-fA-F]{3,8}\b)");
@@ -253,7 +253,7 @@ TEST(WebUiDesign, PageChromeUsesSemanticColorTypeAndRadiusRoles) {
 }
 
 TEST(WebUiDesign, PairingKeepsPinPrimaryAndQrSecondary) {
-  const auto source = read_source(web_root / "pin.html");
+  const auto source = read_source(web_root / "PinPage.vue");
   const auto pin = source.find("id=\"PIN\"");
   const auto qr = find_shown(source, "Scan QR code");
 
@@ -274,7 +274,7 @@ TEST(WebUiDesign, AuthenticationEntriesUseSharedLayouts) {
 TEST(WebUiDesign, PresentsSunshineAndMoonlightBrandPair) {
   const auto navbar = read_source(web_root / "Navbar.vue");
   const auto header = read_source(web_root / "template_header.html");
-  const auto pairing = read_source(web_root / "pin.html");
+  const auto pairing = read_source(web_root / "PinPage.vue");
 
   EXPECT_NE(navbar.find("<strong>Sunshine 3D</strong>"), std::string::npos);
   EXPECT_NE(navbar.find("logo-sunshine3d-45.png"), std::string::npos);
@@ -290,7 +290,7 @@ TEST(WebUiDesign, PresentsSunshineAndMoonlightBrandPair) {
 
 TEST(WebUiDesign, UsesDeviceNeutralAndThreeDimensionalStatusLanguage) {
   const auto overview = read_source(web_root / "index.html");
-  const auto pairing = read_source(web_root / "pin.html");
+  const auto pairing = read_source(web_root / "PinPage.vue");
   const auto essentials =
     read_source(web_root / "configs/tabs/Essentials.vue");
 
