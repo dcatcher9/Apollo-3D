@@ -1057,6 +1057,12 @@ namespace models {
       bool snapshot_requested;
     };
     std::optional<subtitle_direct_glyph_tail_t> subtitle_direct_glyph_tail;
+    // Until when a completion may work its Direct Glyph score through its GPU steps: nothing
+    // for a call that must not wait.
+    using subtitle_direct_glyph_wait_t = std::optional<std::chrono::steady_clock::time_point>;
+    // A retirement since try_finish_pending() last cleared this waited for the score.
+    bool subtitle_direct_glyph_waited = false;
+    std::chrono::steady_clock::time_point subtitle_direct_glyph_dispatched_at {};
     bool subtitle_direct_glyph_requested = false;
     // Set by the first estimate_depth(); configuration accepted only before the first input.
     bool configuration_locked = false;
@@ -4056,10 +4062,19 @@ namespace models {
           )) {
         subtitle_selected_matte_commands = *published;
       }
+      subtitle_direct_glyph_dispatched_at = std::chrono::steady_clock::now();
     }
 
-    bool retire_subtitle_direct_glyph(const bool evaluation_wait) {
-      const auto retirement = subtitle_direct_glyph.retire(context.Get(), evaluation_wait);
+    bool retire_subtitle_direct_glyph(const subtitle_direct_glyph_wait_t wait_until) {
+      const auto retirement = subtitle_direct_glyph.retire(context.Get(), wait_until);
+      subtitle_direct_glyph_waited = subtitle_direct_glyph_waited || retirement.waited;
+      if (retirement.retired && diagnostics_enabled) {
+        // From the root's completion to the mask's: what the mask adds to the geometry's delivery.
+        sbs_perf::add_sample_ms(
+          "direct_glyph_retire",
+          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - subtitle_direct_glyph_dispatched_at).count()
+        );
+      }
       if (retirement.selected_matte_commands) {
         subtitle_selected_matte_commands = *retirement.selected_matte_commands;
       }
@@ -6014,7 +6029,7 @@ namespace models {
     completed_depth_metadata_t complete_ready_pending(
       d3d_perf_slot *d3d_timer,
       const bool request_snapshot,
-      const bool evaluation_wait = false
+      const subtitle_direct_glyph_wait_t glyph_wait_until = std::nullopt
     ) {
       const bool snapshot_requested = subtitle_direct_glyph_tail ? subtitle_direct_glyph_tail->snapshot_requested : request_snapshot;
       bool input_domain_reset;
@@ -6031,7 +6046,7 @@ namespace models {
         if (subtitle_direct_glyph_requested) dispatch_subtitle_direct_glyph(input_domain_reset);
       }
       if (subtitle_direct_glyph_requested) {
-        if (!retire_subtitle_direct_glyph(evaluation_wait)) {
+        if (!retire_subtitle_direct_glyph(glyph_wait_until)) {
           subtitle_direct_glyph_tail.emplace(subtitle_direct_glyph_tail_t {input_domain_reset, snapshot_requested});
           mark_d3d_post_end(d3d_timer);
           return {};
@@ -6086,7 +6101,8 @@ namespace models {
     depth_step_result_t finish_pending(
       input_color_space color_space,
       const bool snapshot_debug_inputs = false,
-      const bool root_completion_proven = false
+      const bool root_completion_proven = false,
+      const subtitle_direct_glyph_wait_t live_glyph_wait_until = std::nullopt
     ) {
       // A caller may first prove nonblocking readiness with can_accept(). Consuming instead of
       // enqueueing must retire that admission token so a later estimate cannot skip its own query.
@@ -6127,8 +6143,13 @@ namespace models {
         return make_result();
       }
       auto *d3d_timer = diagnostics_enabled ? begin_d3d_perf(true, false) : nullptr;
+      // The file-fed evaluation entry gives the score its whole deadline. A live completion has
+      // only what its caller's bounded wait has left.
       const auto completed = complete_ready_pending(
-        d3d_timer, snapshot_debug_inputs && !gpu_undecided_postprocess_pending(), !root_completion_proven
+        d3d_timer,
+        snapshot_debug_inputs && !gpu_undecided_postprocess_pending(),
+        root_completion_proven ? live_glyph_wait_until :
+                                 subtitle_direct_glyph_wait_t {std::chrono::steady_clock::time_point::max()}
       );
       mark_d3d_pre_start(d3d_timer);
       end_d3d_perf(d3d_timer);
@@ -6253,12 +6274,26 @@ namespace models {
       if (source_access.acquire && !source_access.acquire(source_access.owner)) {
         return polled;
       }
+      // The Direct Glyph score of this observation is on the path to its geometry. The rest of
+      // the same bounded wait carries it through its GPU steps, so that it retires in this
+      // conversion whenever the GPU finishes it in time, and not one step to a conversion.
+      const auto finish_started = std::chrono::steady_clock::now();
+      const bool glyph_wait_allowed = allow_wait && finish_started < deadline;
+      subtitle_direct_glyph_waited = false;
       polled.result = finish_pending(
         color_space,
         snapshot_debug_inputs,
-        true
+        true,
+        glyph_wait_allowed ? subtitle_direct_glyph_wait_t {deadline} : std::nullopt
       );
       polled.ready = !subtitle_direct_glyph_tail || is_terminal();
+      if (subtitle_direct_glyph_waited) {
+        // The caller's wait went on past the root: it is a repeated wait, and as long as both.
+        polled.wait_attempted = true;
+        polled.wait_duration = std::chrono::steady_clock::now() - started;
+      }
+      // A score that outlasted the wait is the same outcome as a root still busy at the deadline.
+      polled.timed_out = !polled.ready && allow_wait;
       return polled;
     }
 

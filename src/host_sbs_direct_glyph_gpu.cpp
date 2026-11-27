@@ -4,8 +4,10 @@
  */
 #include "host_sbs_direct_glyph_gpu.h"
 
+#include <chrono>
 #include <climits>
 #include <initializer_list>
+#include <thread>
 #include <utility>
 
 namespace models::host_sbs_direct_glyph_gpu {
@@ -96,6 +98,8 @@ namespace models::host_sbs_direct_glyph_gpu {
       nvinfer1::IExecutionContext *execution_ = nullptr;
       std::array<CUgraphicsResource, 2> interop_ {};
       bool cuda_outstanding_ = false;
+      // The bounded wait for the submitted fence: its completion event and the deadline's timer.
+      HANDLE fence_event_ = nullptr, fence_timer_ = nullptr;
 
       static UINT div_up(UINT n, UINT d) {
         return (n + d - 1u) / d;
@@ -463,8 +467,67 @@ namespace models::host_sbs_direct_glyph_gpu {
         ensure(proto_, 2, 16);
       }
 
+      palette_transport_t() = default;
+      palette_transport_t(const palette_transport_t &) = delete;
+      palette_transport_t &operator=(const palette_transport_t &) = delete;
+
+      ~palette_transport_t() {
+        if (fence_event_) {
+          CloseHandle(fence_event_);
+        }
+        if (fence_timer_) {
+          CloseHandle(fence_timer_);
+        }
+      }
+
       bool busy() const noexcept {
         return phase_ != phase_e::idle;
+      }
+
+      // Waits until the submitted fence has completed or `deadline` has come, whichever is first.
+      // It queues nothing and reads nothing: the caller's next poll() takes the step that became
+      // possible. Without its event or timer it yields between looks at the fence instead.
+      void wait(const std::chrono::steady_clock::time_point deadline) noexcept {
+        const auto completed = [this] {
+          // A removed device reports every value complete, which the next poll() then refuses.
+          return phase_ == phase_e::idle || phase_ == phase_e::leased ||
+                 completion_->GetCompletedValue() >= submitted_fence_value_;
+        };
+        if (completed()) {
+          return;
+        }
+        if (!fence_event_) {
+          fence_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        }
+        if (!fence_timer_) {
+          // A waitable timer of the ordinary kind ends at the scheduler's tick, not at its deadline.
+          fence_timer_ = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_MODIFY_STATE | SYNCHRONIZE);
+        }
+        // An earlier wait that ended at its deadline leaves its signal behind for a later fence.
+        const bool armed = fence_event_ && fence_timer_ && ResetEvent(fence_event_) &&
+                           SUCCEEDED(completion_->SetEventOnCompletion(submitted_fence_value_, fence_event_));
+        while (!completed()) {
+          const auto left = deadline - std::chrono::steady_clock::now();
+          if (left <= std::chrono::steady_clock::duration::zero()) {
+            return;
+          }
+          if (!armed) {
+            std::this_thread::yield();
+            continue;
+          }
+          // Relative, in whole 100 ns units rounded up: the timer never ends before the deadline.
+          using timer_unit_t = std::chrono::duration<LONGLONG, std::ratio<1, 10'000'000>>;
+          LARGE_INTEGER due;
+          due.QuadPart = -std::chrono::ceil<timer_unit_t>(left).count();
+          const HANDLE handles[] {fence_event_, fence_timer_};
+          if (!SetWaitableTimer(fence_timer_, &due, 0, nullptr, nullptr, FALSE) ||
+              WaitForMultipleObjects(2, handles, FALSE, INFINITE) == WAIT_FAILED) {
+            return;
+          }
+        }
+        if (armed) {
+          CancelWaitableTimer(fence_timer_);
+        }
       }
 
       ID3D11Buffer *committed_lines() const noexcept {
@@ -679,6 +742,10 @@ namespace models::host_sbs_direct_glyph_gpu {
       error = why.what();
       return poll_status_e::failed;
     }
+  }
+
+  void resources_t::wait_until(const std::chrono::steady_clock::time_point deadline) noexcept {
+    if (palette_ && !failed_) palette_->wait(deadline);
   }
 
   void resources_t::retire() noexcept {

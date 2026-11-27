@@ -1044,7 +1044,7 @@ namespace models {
     bool wait_attempted = false;  ///< At least one repeat was attempted after the initial query.
     bool timed_out = false;  ///< The exact pending unit remained busy at the deadline/query fuse.
     std::uint32_t query_count = 0;  ///< Joined DAV2/OCR readiness queries issued by this call.
-    std::chrono::steady_clock::duration wait_duration {};  ///< Query time only; excludes completed-depth postprocess.
+    std::chrono::steady_clock::duration wait_duration {};  ///< Query time; with a Direct Glyph score waited for, the time to its retirement or the deadline.
 #ifdef SUNSHINE_TESTS
     bool notification_armed = false;
     bool notification_waited = false;

@@ -428,7 +428,16 @@ Setup or scoring failure uses ordinary Base stereo without glyph protection.
 On a fresh observation, depth inference and eligible OCR detection are sibling CUDA graph nodes.
 The estimator waits for their joint completion and prepares the Base geometry and OCR work boxes
 before submitting Direct Glyph. The glyph model uses the source RGB inside those boxes.
-Its mask publication is on the path to delivering the new stereo geometry.
+Its mask publication is on the path to delivering the new stereo geometry. A score takes two GPU
+steps or more: the plan, one scoring batch for the lines that fit one, or one batch per chunk
+otherwise, and the finish. Each step is queued by the poll that finds the one before it finished.
+A live completion works the score through those steps inside the remainder of its own
+[bounded same-frame wait](#gpu-owned-near-identical-transaction), waiting on the score's D3D11
+fence between them, so the mask retires in the conversion that completed its depth whenever the
+GPU finishes it in time. A score that outlasts the wait stays reserved, and the next conversion's
+poll goes on from the step it has reached; a poll without a wait budget takes at most one step.
+The diagnostic sample `direct_glyph_retire` is the time from the score's submission to its
+retirement as the conversion owner saw it.
 For an ordinary video caption with an OCR8 mean score below 0.90, the palette
 pass checks the current line's encoder output. At least one owned encoder cell
 must assign a combined probability of 0.40 to glyph fill and outline. A line
@@ -2107,8 +2116,9 @@ signals the owner after the joined event. The wait targets the start of the fina
 budget, which uses the yielded query cadence. A signal left by an earlier callback is consumed
 and the notifier continues waiting to its current cutoff. An owner without these conditions uses
 the yielded cadence for the full wait. A failed or over-budget Windows wait disables notification
-waiting for that estimator. Only a joined query within the same cadence deadline and query fuse
-proves completion.
+waiting for that estimator; a wait that merely ends at its cutoff does not. Only a joined query
+within the same cadence deadline and query fuse proves completion. What is left of the wait after
+the root is proven belongs to the observation's [Direct Glyph](#direct-glyph-subtitle-mask) score.
 
 Capture and content timestamps identify pixels. Force-infer and GPU-undecided work both record
 the joined non-timing CUDA event after the conditional root and every unmap tail. The event
@@ -2117,7 +2127,8 @@ An event-ready finish submits D3D11 postprocess behind the already-issued unmaps
 synchronizing a whole stream. Each transaction records exactly one root-completion event.
 This CUDA readiness polling adds no inference kernels, shader passes, replacement work, payload
 readback, busy-stream synchronization, or flush. The later completed-publication receipt has its
-own nonblocking D3D event and is never awaited by this loop. If readiness-event setup is unavailable before any enqueue,
+own nonblocking D3D event and is never awaited by this loop. The Direct Glyph score is the one
+D3D completion the wait does follow, on the score's own fence and never past the same deadline. If readiness-event setup is unavailable before any enqueue,
 same-frame completion safely downgrades to one full-stream nonblocking status query and does not
 spend the bounded-wait budget.
 
@@ -2159,7 +2170,12 @@ at the requested frame interval (with a `1 ms` floor), or the configured idle he
 if that is shorter. A capture ends the wait at once; otherwise it ends at that bound on a
 high-resolution timer, a fraction of a millisecond late rather than at the next 15.6 ms scheduler
 tick ([GPU handoff contract](reshade-sbs.md#gpu-handoff-contract)). The retained source is then reconverted on the same encoder owner to check
-completion. Once pending conversion is retired, the ordinary idle heartbeat resumes. This prevents
+completion. That conversion leaves the encode schedule as it is, and bounds its wait for the
+pending work as a conversion of a new capture one frame interval ahead would: the work has had a
+whole interval by then, and no newer capture can be admitted before it retires. A capture that
+arrived meanwhile is admitted in the same conversion and may finish in what is left of that wait,
+in which case it is drawn and the older completion is not. Once pending conversion is retired,
+the ordinary idle heartbeat resumes. This prevents
 a final update from waiting for the default one-fifth-rate heartbeat without spinning or encoding
 repeated frames faster than the requested cadence. Pipeline initialization readiness may bypass
 the wait entirely, but only after a real captured source has been retained.
@@ -2217,7 +2233,8 @@ Diagnostics retain interval counts for repeated-wait hits at `<= 2 ms`, `(2, 2.5
 reports planned-budget average/maximum and splits hard-`8 ms`-cap timeouts from cadence-limited
 timeouts. An exact outcome partition counts every submitted same-frame query as one of immediate
 hit, repeated-wait hit, cadence/budget-ineligible busy, eligible timeout, ready failure, or the rare
-event-unavailable busy fallback. These counters expose the true success denominator and how much
+event-unavailable busy fallback. A Direct Glyph score that outlasts the wait is an eligible
+timeout, and a hit's wait time runs to the score's retirement. These counters expose the true success denominator and how much
 real cadence headroom the policy spent without changing frame ownership or implying a guaranteed
 hit rate.
 The same cadence line labels its denominator as `conversions` (not encoded packets) and partitions

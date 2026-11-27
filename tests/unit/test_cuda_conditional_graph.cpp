@@ -2791,6 +2791,8 @@ TEST(DirectGlyphHardware, ScoresTheLinesThatFitOneBatchUnderOneFence) {
   };
   struct scored_t {
     unsigned scoring_fences = 0;
+    unsigned polls = 0;
+    double milliseconds = 0.0;
     std::vector<UINT> alpha;
   };
   glyph::request_t job {.source_rgb = source_view.Get(), .work = work.Get(), .width = width, .band_height = height,
@@ -2815,14 +2817,26 @@ TEST(DirectGlyphHardware, ScoresTheLinesThatFitOneBatchUnderOneFence) {
     EXPECT_TRUE(transport.native_interop_registered_for_tests());
     glyph::result_t result;
     glyph::poll_status_e status;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    const auto started = std::chrono::steady_clock::now();
+    const auto deadline = started + std::chrono::seconds(5);
+    // A deadline already past ends the wait at once and leaves the score as it is.
+    transport.wait_until(started);
+    EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::milliseconds(50));
+    scored.polls = 0;
     do {
       status = transport.poll(&job, result, error);
-      std::this_thread::yield();
-    } while (status == glyph::poll_status_e::pending && std::chrono::steady_clock::now() < deadline);
+      ++scored.polls;
+      if (status != glyph::poll_status_e::pending) break;
+      // As a live completion does within its budget: wait for the step, then take the next.
+      transport.wait_until(deadline);
+    } while (std::chrono::steady_clock::now() < deadline);
+    scored.milliseconds = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
     ASSERT_EQ(status, glyph::poll_status_e::ready) << error;
     // The first fence covers planning.
     scored.scoring_fences = unsigned(transport.native_fences_for_tests() - submitted - 1u);
+    // Each wait ends on a finished step, so the polls are counted by the steps and not by time:
+    // one that finds the plan pending, one for each fence, and one spare for a late readback.
+    EXPECT_LE(scored.polls, scored.scoring_fences + 3u);
     ComPtr<ID3D11Resource> alpha;
     result.alpha8->GetResource(&alpha);
     ASSERT_NO_FATAL_FAILURE(read(alpha.Get(), {width, height, 1, 1, DXGI_FORMAT_R32_UINT, {1, 0}}, scored.alpha));
@@ -2862,6 +2876,8 @@ TEST(DirectGlyphHardware, ScoresTheLinesThatFitOneBatchUnderOneFence) {
     scored_t together;
     ASSERT_NO_FATAL_FAILURE(score(planned, together));
     EXPECT_EQ(together.scoring_fences, scoring_fences);
+    std::cout << "[direct glyph] " << planned.size() << " line(s), " << together.scoring_fences << " scoring fence(s): "
+              << together.milliseconds << " ms in " << together.polls << " poll(s)" << std::endl;
     const auto mismatched = std::inner_product(expected.begin(), expected.end(), together.alpha.begin(), std::size_t {0},
                                                std::plus<> {}, std::not_equal_to<> {});
     EXPECT_EQ(mismatched, 0u);

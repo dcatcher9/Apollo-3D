@@ -2064,13 +2064,16 @@ namespace video {
       bool consume_sampled_depth_pipeline_ready = false;
       // One delivery owns the retained source and its schedule through conversion. Sample the
       // readiness event before converting, and commit cadence only after the converter returns.
+      // `completion_wait_target` bounds the converter's wait for pending work, as the encode
+      // target does, for a delivery that leaves the encode schedule as it is.
       const auto convert_delivery = [&](
         std::chrono::steady_clock::time_point presentation_timestamp,
-        std::optional<std::chrono::steady_clock::time_point> next_encode_target = std::nullopt
+        std::optional<std::chrono::steady_clock::time_point> next_encode_target = std::nullopt,
+        std::optional<std::chrono::steady_clock::time_point> completion_wait_target = std::nullopt
       ) {
         consume_sampled_depth_pipeline_ready =
           depth_pipeline_ready_event && depth_pipeline_ready_event->peek();
-        if (convert_frame(*last_img, next_encode_target)) {
+        if (convert_frame(*last_img, next_encode_target ? next_encode_target : completion_wait_target)) {
           return false;
         }
         finish_conversion();
@@ -2259,7 +2262,10 @@ namespace video {
         const auto now = std::chrono::steady_clock::now();
         // A faster minimum-FPS heartbeat may encode retained output before this deadline,
         // but must not advance an independent provider's schedule ahead of actual time.
-        // Host AI completion retains its existing immediate timeout service.
+        // Host AI completion is served at once, on a schedule left as it is. Its work has had a
+        // whole frame interval by now: the converter may wait for what is left of it for as
+        // long as a conversion of a new capture would, since no newer capture can be admitted
+        // before this one's work retires.
         if (!provider_paced || source.due(now, provider_poll_target, recovery_frame_requested, true)) {
           if (lifecycle_change_requested()) {
             break;
@@ -2271,7 +2277,8 @@ namespace video {
                                   std::nullopt;
           if (!convert_delivery(
                 schedule ? schedule->presentation_timestamp : now,
-                schedule ? std::optional {schedule->next_encode_target} : std::nullopt
+                schedule ? std::optional {schedule->next_encode_target} : std::nullopt,
+                schedule ? std::nullopt : std::optional {now + encode_frame_threshold}
               )) {
             BOOST_LOG(error) << "Could not consume pending Host SBS depth for retained source"sv;
             break;

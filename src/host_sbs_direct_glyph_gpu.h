@@ -15,6 +15,7 @@
 
 #include <array>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <cstdint>
@@ -119,6 +120,10 @@ namespace models::host_sbs_direct_glyph_gpu {
     // Returns a score lease only for this exact request. GPU Work separately attests
     // EMPTY, valid score, or unavailable. A ready event alone is never matte authority.
     poll_status_e poll(const request_t *current, result_t &result, std::string &error);
+
+    // Waits for the GPU work of a pending poll() to finish, or for `deadline`. The next poll()
+    // then takes the score's next step; one score takes two such steps or more.
+    void wait_until(std::chrono::steady_clock::time_point deadline) noexcept;
 
     // Call after recording every same-context consumer of alpha8 and updated Work.
     void retire() noexcept;

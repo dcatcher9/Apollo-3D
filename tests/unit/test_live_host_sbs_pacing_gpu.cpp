@@ -673,9 +673,17 @@ namespace {
       });
       EXPECT_EQ(b_packet, b_drawn);
       if (!b_drawn && ack != observed.events.end()) {
-        EXPECT_TRUE(std::any_of(observed.events.begin(), ack, [&](const auto &event) {
+        // Either C was drawn flat before B retired, or the conversion that retired B went on to
+        // admit C and to finish it within the same bounded wait, and so drew C itself.
+        const bool flat_c_first = std::any_of(observed.events.begin(), ack, [&](const auto &event) {
           return event.current == observed.next_stamp && event.flat && event.actual_pixels > held.target;
-        })) << "A newer C draw, rather than a stale B delivery, must explain skipping B.";
+        });
+        const bool matched_c_with_ack = std::any_of(ack, observed.events.end(), [&](const auto &event) {
+          return event.conversion == ack->conversion && event.current == observed.next_stamp &&
+                 !event.flat && !event.repeat && event.actual_pixels > held.target;
+        });
+        EXPECT_TRUE(flat_c_first || matched_c_with_ack)
+          << "A newer C draw, rather than a stale B delivery, must explain skipping B.";
       }
       EXPECT_TRUE(std::any_of(received.begin(), received.end(), [&](const auto &packet) {
         return observed.is_matched_packet(packet, observed.next_stamp);

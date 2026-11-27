@@ -7,7 +7,6 @@
 #include "host_sbs_direct_glyph_engine.h"
 #include "host_sbs_resolution.h"
 #include "logging.h"
-#include "platform/common.h"
 #include "tensorrt_engine_pool.h"
 
 #include <algorithm>
@@ -135,30 +134,32 @@ namespace models::host_sbs_direct_glyph_route {
     return publication_.publish_direct(context, publication, nullptr);
   }
 
-  retirement_t route_t::retire(ID3D11DeviceContext *context, const bool evaluation_wait) {
+  retirement_t route_t::retire(ID3D11DeviceContext *context, const std::optional<std::chrono::steady_clock::time_point> wait_until) {
     if (!job_) return {};
     namespace glyph = host_sbs_direct_glyph_gpu;
     auto &job = *job_;
     std::string error;
     glyph::result_t result;
     auto status = score_.poll(&job.score, result, error);
-    if (evaluation_wait && status == glyph::poll_status_e::pending) {
-      // Only the explicit file-fed evaluation entry waits. Live completion keeps the
-      // observation reserved while the next nonblocking poll proves the same lease.
-      if (!evaluation_poll_timer_) {
-        evaluation_poll_timer_ = platf::create_high_precision_timer();
-      }
-      while (status == glyph::poll_status_e::pending && std::chrono::steady_clock::now() < job.deadline) {
-        if (evaluation_poll_timer_ && *evaluation_poll_timer_) {
-          evaluation_poll_timer_->sleep_for(std::chrono::microseconds {250});
-        } else {
-          std::this_thread::sleep_for(std::chrono::milliseconds {1});
-        }
+    bool waited = false;
+    if (wait_until && status == glyph::poll_status_e::pending) {
+      // A score takes two GPU steps or more, each queued by the poll that finds the one before
+      // it finished. Within the caller's budget the steps follow one another here, at the pace
+      // of the GPU, and not one to a conversion. Past that budget the observation stays
+      // reserved and a later call goes on from the step it has reached.
+      const auto limit = std::min(*wait_until, job.deadline);
+      while (status == glyph::poll_status_e::pending && std::chrono::steady_clock::now() < limit) {
+        waited = true;
+        score_.wait_until(limit);
         status = score_.poll(&job.score, result, error);
+        if (status == glyph::poll_status_e::pending) {
+          // A finished step whose readback is not yet mapped has no fence left to wait for.
+          std::this_thread::yield();
+        }
       }
     }
     if (status == glyph::poll_status_e::pending) {
-      if (std::chrono::steady_clock::now() < job.deadline) return {.retired = false};
+      if (std::chrono::steady_clock::now() < job.deadline) return {.retired = false, .waited = waited};
       // Publish the observation as unavailable while the late score keeps its private
       // buffers until a subsequent poll can discard it without copying Work.
       late_score_ = true;
@@ -173,7 +174,7 @@ namespace models::host_sbs_direct_glyph_route {
       context, job.publication, ready ? result.alpha8.Get() : nullptr);
     score_.retire();
     job_.reset();
-    return {.retired = true, .selected_matte_commands = selected_matte_commands};
+    return {.retired = true, .waited = waited, .selected_matte_commands = selected_matte_commands};
   }
 
   void route_t::register_interop_early() noexcept {

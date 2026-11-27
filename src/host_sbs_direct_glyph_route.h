@@ -54,6 +54,8 @@ namespace models::host_sbs_direct_glyph_route {
   struct retirement_t {
     // False while the score is pending before its deadline; the observation stays reserved.
     bool retired = true;
+    // The call waited for a GPU step of the score.
+    bool waited = false;
     // The publisher's selected-matte command state, when this call published.
     std::optional<bool> selected_matte_commands;
   };
@@ -99,8 +101,10 @@ namespace models::host_sbs_direct_glyph_route {
     [[nodiscard]] std::optional<bool> dispatch(ID3D11Device *device, ID3D11DeviceContext *context, const frame_t &frame);
 
     // Publishes the submitted score's alpha, or no protection once it fails or misses its
-    // deadline. Only evaluation_wait, the file-fed evaluation entry, waits for the score.
-    [[nodiscard]] retirement_t retire(ID3D11DeviceContext *context, bool evaluation_wait);
+    // deadline. With `wait_until` it works the score through its GPU steps until that time: the
+    // file-fed evaluation entry gives the score its whole deadline, a live completion the rest of
+    // its own bounded wait. Without it the call takes at most one step and never waits.
+    [[nodiscard]] retirement_t retire(ID3D11DeviceContext *context, std::optional<std::chrono::steady_clock::time_point> wait_until);
 
     [[nodiscard]] host_sbs_direct_glyph_publication::views_t views() const {
       return publication_.views();
@@ -137,7 +141,6 @@ namespace models::host_sbs_direct_glyph_route {
     nvinfer1::IExecutionContext *execution_ = nullptr;
     std::string engine_key_;
     std::optional<job_t> job_;
-    std::unique_ptr<platf::high_precision_timer> evaluation_poll_timer_;
     bool enabled_ = false;
     bool late_score_ = false;
     bool score_failed_ = false;
