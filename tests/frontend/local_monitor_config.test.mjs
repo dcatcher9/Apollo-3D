@@ -7,6 +7,7 @@ import {
   rememberLocalMonitorTimingLimits,
   validateLocalMonitorConfig,
 } from '../../src_assets/common/assets/web/configs/localMonitorConfig.js'
+import { english } from './english_messages.mjs'
 
 // Representative /api/local-monitor profile; product validation must consume this metadata.
 const timing = Object.freeze({
@@ -31,8 +32,10 @@ const config = Object.freeze({
   local_monitor_signal_spacing_us: 30,
   local_monitor_eye_repeats: 1,
 })
+// The validator returns message descriptors; the page shows their en text the same way.
+const messages = errors => errors.map(error => english(error.key, error.params))
 const validate = (draft = {}, rate = 120000, profile = timing) =>
-  validateLocalMonitorConfig({...config, ...draft}, rate, profile)
+  messages(validateLocalMonitorConfig({...config, ...draft}, rate, profile))
 const feedbackError = errors => errors.some(error => error.includes('no time for current-eye presentation feedback'))
 
 test('does not block Save on the 3D source, which Save replaces with the live choice', () => {
@@ -83,7 +86,7 @@ test('the global Save metadata cache applies the same check without mounting the
   rememberLocalMonitorDevices([{id: config.local_monitor_display_id, refresh_millihz: 120000}])
   rememberLocalMonitorTimingLimits([timing])
   assert.deepEqual(validateLocalMonitorConfig({...config}), [])
-  assert(feedbackError(validateLocalMonitorConfig({...config, local_monitor_frame_duration_us: 7800})))
+  assert(feedbackError(messages(validateLocalMonitorConfig({...config, local_monitor_frame_duration_us: 7800}))))
   assert.deepEqual(validateLocalMonitorConfig({...config, local_monitor_frame_duration_us: 7482}), [])
 })
 
@@ -113,7 +116,8 @@ test('only a chosen shutter monitor is validated', () => {
   for (const surface of ['off', 'ar_glasses', undefined]) {
     assert.deepEqual(validateLocalMonitorConfig({...config, local_display_surface: surface, local_monitor_emitter_port: ''}, 120000, timing), [])
   }
-  assert.notDeepEqual(validateLocalMonitorConfig({...config, local_monitor_emitter_port: ''}, 120000, timing), [])
+  assert.deepEqual(messages(validateLocalMonitorConfig({...config, local_monitor_emitter_port: ''}, 120000, timing)),
+    ['Select the emitter COM port.'])
 })
 
 test('the earlier monitor switch becomes the surface choice once', () => {

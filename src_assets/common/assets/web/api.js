@@ -10,6 +10,19 @@
  * An expired session is a 401 here like any other failure. The page shows it in its own error
  * display, and the host sends the next page load to the login page.
  */
+
+// The Web UI's own error text (the `api` locale messages) in the page's language. init.js installs
+// the page's translator before the page mounts; until then a message reads as its key.
+let translate = key => key
+
+export function setApiTranslator(t) {
+  translate = t
+}
+
+export function apiText(key, params) {
+  return translate(key, params)
+}
+
 export class ApiError extends Error {
   constructor(message, { status = 0, payload = null } = {}) {
     super(message)
@@ -30,7 +43,7 @@ function parseObject(text) {
 async function errorFrom(response) {
   const payload = parseObject(await response.text())
   const message =
-    payload?.error || payload?.message || `Sunshine 3D returned HTTP ${response.status}`
+    payload?.error || payload?.message || apiText('api.http_error', { status: response.status })
   return new ApiError(message, { status: response.status, payload })
 }
 
@@ -62,7 +75,7 @@ export async function requestJson(url, { method = 'GET', body, signal } = {}) {
   try {
     return JSON.parse(text)
   } catch {
-    throw new ApiError(`Sunshine 3D returned invalid JSON (HTTP ${response.status}).`, {
+    throw new ApiError(apiText('api.invalid_json', { status: response.status }), {
       status: response.status,
     })
   }

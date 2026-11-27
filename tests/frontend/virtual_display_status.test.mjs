@@ -1,11 +1,17 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { virtualDisplayStatus } from '../../src_assets/common/assets/web/virtual-display-status.js'
+import { english } from './english_messages.mjs'
 
 test('every driver state the host reports has its own label', () => {
-  const labels = [0, 1, -1, -2, -3].map(code => virtualDisplayStatus(code).label)
+  const labels = [0, 1, -1, -2, -3].map(code => english(virtualDisplayStatus(code).labelKey))
   assert.deepEqual(labels, ['Ready', 'Checking', 'Not initialized', 'Update required', 'Needs attention'])
   assert.equal(new Set(labels).size, labels.length)
+})
+
+test('every driver state has an English detail', () => {
+  const details = [0, 1, -1, -2, -3].map(code => english(virtualDisplayStatus(code).detailKey))
+  assert.equal(new Set(details).size, details.length)
 })
 
 test('string and numeric codes read the same state', () => {
@@ -23,6 +29,6 @@ test('only the ready state is a success', () => {
 
 test('an unreported or unknown value reads as checking', () => {
   for (const code of [undefined, null, '', Number.NaN, 7, 'unknown']) {
-    assert.equal(virtualDisplayStatus(code).label, 'Checking')
+    assert.equal(english(virtualDisplayStatus(code).labelKey), 'Checking')
   }
 })

@@ -11,12 +11,10 @@
   <main id="content" class="container apollo-page offline-conversion-page">
     <header class="apollo-page-header">
       <div>
-        <p class="apollo-eyebrow">Offline Host SBS</p>
-        <h1>Offline 3D Conversion</h1>
+        <p class="apollo-eyebrow">{{ $t('offline_conversion.eyebrow') }}</p>
+        <h1>{{ $t('offline_conversion.title') }}</h1>
         <p class="apollo-page-intro">
-          Analyze or convert with the same causal Host SBS estimator, camera, conditioning,
-          and renderer used online. Offline work is not playback-paced: frames run
-          in source order as fast as the decoder, GPU, and encoder permit.
+          {{ $t('offline_conversion.intro') }}
         </p>
       </div>
       <span
@@ -29,14 +27,14 @@
       </span>
     </header>
 
-    <section class="offline-limit-grid" aria-label="Conversion requirements">
+    <section class="offline-limit-grid" :aria-label="$t('offline_conversion.requirements')">
       <article class="offline-limit-card">
         <span class="offline-limit-icon" aria-hidden="true">
           <i class="fa-brands fa-windows"></i>
         </span>
         <div>
-          <strong>Windows and NVIDIA only</strong>
-          <p>Version 1 requires the native Windows D3D11, TensorRT, and NVENC pipeline.</p>
+          <strong>{{ $t('offline_conversion.windows_nvidia_only') }}</strong>
+          <p>{{ $t('offline_conversion.windows_nvidia_only_desc') }}</p>
         </div>
       </article>
       <article class="offline-limit-card">
@@ -44,10 +42,9 @@
           <i class="fa-solid fa-sun"></i>
         </span>
         <div>
-          <strong>Static HDR is supported</strong>
+          <strong>{{ $t('offline_conversion.static_hdr_supported') }}</strong>
           <p>
-            Static PQ and HLG input stays on the 10-bit HEVC or AV1 path. Dolby Vision and dynamic
-            HDR10+ metadata fail closed until their metadata can be preserved correctly.
+            {{ $t('offline_conversion.static_hdr_supported_desc') }}
           </p>
         </div>
       </article>
@@ -62,8 +59,8 @@
         <i class="fa-solid fa-spinner fa-spin"></i>
       </span>
       <div>
-        <strong>Preparing offline conversion</strong>
-        <p>Saved jobs will appear when preparation finishes. This page updates automatically.</p>
+        <strong>{{ $t('offline_conversion.preparing') }}</strong>
+        <p>{{ $t('offline_conversion.preparing_desc') }}</p>
       </div>
     </div>
 
@@ -76,11 +73,11 @@
         <i class="fa-solid fa-circle-exclamation"></i>
       </span>
       <div>
-        <strong>Offline job manager is unavailable</strong>
+        <strong>{{ $t('offline_conversion.manager_unavailable') }}</strong>
         <p>{{ apiError }}</p>
       </div>
       <button class="btn btn-apollo-quiet" type="button" @click="loadJobs(false)">
-        Try again
+        {{ $t('offline_conversion.try_again') }}
       </button>
     </div>
 
@@ -93,14 +90,13 @@
         <i class="fa-solid fa-clock-rotate-left"></i>
       </span>
       <div>
-        <strong>Live updates are delayed</strong>
+        <strong>{{ $t('offline_conversion.updates_delayed') }}</strong>
         <p>
-          The displayed job data may be stale. Sunshine 3D is retrying automatically:
-          {{ pollWarning }}
+          {{ $t('offline_conversion.updates_delayed_desc', { error: pollWarning }) }}
         </p>
       </div>
       <button class="btn btn-apollo-quiet" type="button" @click="loadJobs(false)">
-        Refresh now
+        {{ $t('offline_conversion.refresh_now') }}
       </button>
     </div>
 
@@ -113,10 +109,9 @@
         <i class="fa-solid fa-display"></i>
       </span>
       <div>
-        <strong>End the current stream before starting an offline job</strong>
+        <strong>{{ $t('offline_conversion.live_stream_active') }}</strong>
         <p>
-          Normal Sunshine 3D streaming continues unchanged. The host prevents offline conversion
-          from sharing its GPU until the current Moonlight session ends.
+          {{ $t('offline_conversion.live_stream_active_desc') }}
         </p>
       </div>
     </div>
@@ -130,13 +125,13 @@
         <i class="fa-solid fa-triangle-exclamation"></i>
       </span>
       <div>
-        <strong>The job action did not finish</strong>
+        <strong>{{ $t('offline_conversion.action_failed') }}</strong>
         <p>{{ actionError }}</p>
       </div>
       <button
         class="offline-notice-dismiss"
         type="button"
-        aria-label="Dismiss job error"
+        :aria-label="$t('offline_conversion.dismiss_error')"
         @click="actionError = ''">
         <i class="fa-solid fa-xmark" aria-hidden="true"></i>
       </button>
@@ -146,9 +141,9 @@
       <section class="offline-panel" aria-labelledby="new-job-title">
         <div class="offline-panel-heading">
           <div>
-            <p class="apollo-kicker">New job</p>
+            <p class="apollo-kicker">{{ $t('offline_conversion.new_job') }}</p>
             <h2 id="new-job-title">
-              {{ form.operation === 'evaluate' ? 'Analysis settings' : 'Conversion settings' }}
+              {{ form.operation === 'evaluate' ? $t('offline_conversion.analysis_settings') : $t('offline_conversion.conversion_settings') }}
             </h2>
           </div>
           <span class="offline-panel-step">1</span>
@@ -156,7 +151,7 @@
 
         <form class="offline-job-form" @submit.prevent="startJob">
           <fieldset>
-            <legend class="form-label">Job type</legend>
+            <legend class="form-label">{{ $t('offline_conversion.job_type') }}</legend>
             <div class="offline-codec-grid">
               <label
                 class="offline-codec-option"
@@ -168,10 +163,10 @@
                   type="radio"
                   value="convert">
                 <span class="offline-codec-copy">
-                  <strong>Convert video</strong>
-                  <small>Run the causal production pipeline once and encode each SBS frame</small>
+                  <strong>{{ $t('offline_conversion.convert_video') }}</strong>
+                  <small>{{ $t('offline_conversion.convert_video_desc') }}</small>
                 </span>
-                <span class="badge text-bg-primary">Recommended</span>
+                <span class="badge text-bg-primary">{{ $t('offline_conversion.recommended') }}</span>
               </label>
               <label
                 class="offline-codec-option"
@@ -183,15 +178,15 @@
                   type="radio"
                   value="evaluate">
                 <span class="offline-codec-copy">
-                  <strong>Analyze only</strong>
-                  <small>Run the same causal pass and its source checks without encoding video</small>
+                  <strong>{{ $t('offline_conversion.analyze_only') }}</strong>
+                  <small>{{ $t('offline_conversion.analyze_only_desc') }}</small>
                 </span>
               </label>
             </div>
           </fieldset>
 
           <div>
-            <label class="form-label" for="offlineInputPath">Input path</label>
+            <label class="form-label" for="offlineInputPath">{{ $t('offline_conversion.input_path') }}</label>
             <div class="input-group">
               <input
                 id="offlineInputPath"
@@ -206,25 +201,25 @@
               <button
                 class="btn btn-outline-secondary offline-browse-button"
                 type="button"
-                aria-label="Browse for an input video"
+                :aria-label="$t('offline_conversion.browse_input')"
                 :disabled="initialLoading || capabilities.initializing"
                 @click="openInputPicker">
                 <i class="fa-solid fa-folder-open" aria-hidden="true"></i>
-                Browse
+                {{ $t('offline_conversion.browse') }}
               </button>
             </div>
             <div id="offlineInputPathHelp" class="form-text">
-              Choose one non-empty regular video file on this Windows PC, or enter its absolute path.
+              {{ $t('offline_conversion.input_path_desc') }}
             </div>
           </div>
 
           <div v-if="form.operation === 'convert'">
-            <label class="form-label" for="offlineOutputName">Output file name</label>
+            <label class="form-label" for="offlineOutputName">{{ $t('offline_conversion.output_name') }}</label>
             <div
               class="offline-output-location offline-output-location-inline"
               aria-live="polite">
-              <span>Output folder (same as input)</span>
-              <code>{{ inputDirectory || 'Choose an input video first' }}</code>
+              <span>{{ $t('offline_conversion.output_folder') }}</span>
+              <code>{{ inputDirectory || $t('offline_conversion.choose_input_first') }}</code>
             </div>
             <div class="input-group">
               <input
@@ -242,26 +237,29 @@
               <button
                 class="btn btn-outline-secondary offline-browse-button"
                 type="button"
-                aria-label="Choose the output video file name"
+                :aria-label="$t('offline_conversion.choose_output_label')"
                 :disabled="initialLoading || capabilities.initializing || !inputDirectory"
                 @click="openOutputPicker">
                 <i class="fa-solid fa-file-circle-plus" aria-hidden="true"></i>
-                Choose
+                {{ $t('offline_conversion.choose') }}
               </button>
             </div>
             <div id="offlineOutputNameHelp" class="form-text">
-              A safe name is filled from the selected input. The output stays beside that input;
-              existing files are never overwritten.
-              <span v-if="outputPathPreview" class="offline-output-preview">
-                The video will be saved as <code>{{ outputPathPreview }}</code>.
-              </span>
+              {{ $t('offline_conversion.output_name_desc') }}
+              <i18n-t
+                v-if="outputPathPreview"
+                keypath="offline_conversion.output_saved_as"
+                tag="span"
+                class="offline-output-preview">
+                <template v-slot:path><code>{{ outputPathPreview }}</code></template>
+              </i18n-t>
             </div>
           </div>
 
           <fieldset
             v-if="form.operation === 'convert'"
             aria-describedby="offlineCodecHelp">
-            <legend class="form-label">Video codec</legend>
+            <legend class="form-label">{{ $t('offline_conversion.video_codec') }}</legend>
             <div class="offline-codec-grid">
               <label
                 class="offline-codec-option"
@@ -280,11 +278,11 @@
                 <span class="offline-codec-copy">
                   <strong>H.265 / HEVC</strong>
                   <small v-if="codecAvailable('hevc_nvenc')">
-                    Default · 10-bit for HDR · hardware preflight runs when the job starts
+                    {{ $t('offline_conversion.hevc_desc') }}
                   </small>
-                  <small v-else>Not included in the packaged FFmpeg</small>
+                  <small v-else>{{ $t('offline_conversion.codec_not_packaged') }}</small>
                 </span>
-                <span class="badge text-bg-primary">Recommended</span>
+                <span class="badge text-bg-primary">{{ $t('offline_conversion.recommended') }}</span>
               </label>
               <label
                 class="offline-codec-option"
@@ -303,16 +301,14 @@
                 <span class="offline-codec-copy">
                   <strong>AV1</strong>
                   <small v-if="codecAvailable('av1_nvenc')">
-                    Optional · 10-bit for HDR · hardware preflight runs when the job starts
+                    {{ $t('offline_conversion.av1_desc') }}
                   </small>
-                  <small v-else>Not included in the packaged FFmpeg</small>
+                  <small v-else>{{ $t('offline_conversion.codec_not_packaged') }}</small>
                 </span>
               </label>
             </div>
             <div id="offlineCodecHelp" class="form-text">
-              Static HDR uses 10-bit output; SDR uses 8-bit output. The selected NVENC path is
-              verified only after the offline job owns the GPU. Stop live streaming before
-              conversion; startup never probes NVENC.
+              {{ $t('offline_conversion.codec_desc') }}
             </div>
           </fieldset>
 
@@ -324,8 +320,8 @@
               {{
                 startDisabledReason ||
                 (form.operation === 'evaluate' ?
-                  'Choose an input file, then start analysis. Missing fields are highlighted when you submit.' :
-                  'Choose the input and output files, then start conversion. Missing fields are highlighted when you submit.')
+                  $t('offline_conversion.start_help_evaluate') :
+                  $t('offline_conversion.start_help_convert'))
               }}
             </p>
             <button
@@ -339,8 +335,8 @@
                 aria-hidden="true"></i>
               {{
                 startBusy ?
-                  'Starting…' :
-                  (form.operation === 'evaluate' ? 'Start analysis' : 'Start conversion')
+                  $t('offline_conversion.starting') :
+                  (form.operation === 'evaluate' ? $t('offline_conversion.start_analysis') : $t('offline_conversion.start_conversion'))
               }}
             </button>
           </div>
@@ -350,20 +346,20 @@
       <section class="offline-panel" aria-labelledby="job-progress-title">
         <div class="offline-panel-heading">
           <div>
-            <p class="apollo-kicker">Native job</p>
-            <h2 id="job-progress-title">Progress</h2>
+            <p class="apollo-kicker">{{ $t('offline_conversion.native_job') }}</p>
+            <h2 id="job-progress-title">{{ $t('offline_conversion.progress') }}</h2>
           </div>
           <button
             class="apollo-refresh-button"
             type="button"
             :disabled="refreshing"
-            aria-label="Refresh offline jobs"
+            :aria-label="$t('offline_conversion.refresh_jobs')"
             @click="loadJobs(false)">
             <i
               class="fa-solid fa-rotate"
               :class="{ 'fa-spin': refreshing }"
               aria-hidden="true"></i>
-            <span>Refresh</span>
+            <span>{{ $t('offline_conversion.refresh') }}</span>
           </button>
         </div>
 
@@ -394,15 +390,15 @@
 
           <dl class="offline-job-facts">
             <div>
-              <dt>Frames</dt>
+              <dt>{{ $t('offline_conversion.frames') }}</dt>
               <dd>{{ frameProgress(selectedJob) }}</dd>
             </div>
             <div>
-              <dt>Codec</dt>
+              <dt>{{ $t('offline_conversion.codec') }}</dt>
               <dd>
                 {{
                   jobSettings(selectedJob).operation === 'evaluate' ?
-                    'Not encoded' :
+                    $t('offline_conversion.not_encoded') :
                     codecLabel(jobSettings(selectedJob).codec)
                 }}
               </dd>
@@ -411,15 +407,17 @@
 
           <div class="offline-path-summary">
             <span>
-              {{ jobSettings(selectedJob).operation === 'evaluate' ? 'Result' : 'Output' }}
+              {{ jobSettings(selectedJob).operation === 'evaluate' ? $t('offline_conversion.result') : $t('offline_conversion.output') }}
             </span>
             <code>
               {{
                 jobSettings(selectedJob).operation === 'evaluate' ?
-                  'Analysis only — no video output' :
+                  $t('offline_conversion.analysis_only_output') :
                   (
                     jobSettings(selectedJob).output_path ||
-                    `Managed export: ${jobSettings(selectedJob).output_name || 'pending'}`
+                    $t('offline_conversion.managed_export', {
+                      name: jobSettings(selectedJob).output_name || $t('offline_conversion.pending'),
+                    })
                   )
               }}
             </code>
@@ -439,20 +437,19 @@
                 <i class="fa-solid fa-plug-circle-xmark"></i>
               </span>
               <div>
-                <strong>Interrupted — not resumable in version 1</strong>
+                <strong>{{ $t('offline_conversion.interrupted_title') }}</strong>
                 <p>
-                  The Sunshine 3D job manager stopped before a verified checkpoint could be committed.
-                  Restart creates a new job with the same immutable settings.
+                  {{ $t('offline_conversion.interrupted_desc') }}
                 </p>
               </div>
             </div>
             <dl>
               <div>
-                <dt>Retained artifacts</dt>
+                <dt>{{ $t('offline_conversion.retained_artifacts') }}</dt>
                 <dd>{{ retainedArtifactsLabel(selectedJob) }}</dd>
               </div>
               <div>
-                <dt>Cleanup</dt>
+                <dt>{{ $t('offline_conversion.cleanup') }}</dt>
                 <dd>{{ cleanupLabel(selectedJob) }}</dd>
               </div>
             </dl>
@@ -462,12 +459,12 @@
               :disabled="startBusy || activeJobExists"
               @click="restartJob(selectedJob)">
               <i class="fa-solid fa-rotate-right" aria-hidden="true"></i>
-              Restart with same settings
+              {{ $t('offline_conversion.restart_same') }}
             </button>
           </div>
 
           <div class="offline-progress-actions">
-            <small class="monospace">Job {{ jobId(selectedJob) }}</small>
+            <small class="monospace">{{ $t('offline_conversion.job_id', { id: jobId(selectedJob) }) }}</small>
             <button
               v-if="isCancelable(selectedJob)"
               class="btn btn-apollo-danger"
@@ -478,7 +475,7 @@
                 class="fa-solid"
                 :class="cancelBusy ? 'fa-spinner fa-spin' : 'fa-stop'"
                 aria-hidden="true"></i>
-              {{ cancelBusy ? 'Canceling…' : 'Cancel job' }}
+              {{ cancelBusy ? $t('offline_conversion.canceling') : $t('offline_conversion.cancel_job') }}
             </button>
             <button
               v-if="isClearable(selectedJob)"
@@ -490,7 +487,7 @@
                 class="fa-solid"
                 :class="clearBusy ? 'fa-spinner fa-spin' : 'fa-trash-can'"
                 aria-hidden="true"></i>
-              {{ clearBusy ? 'Clearing…' : 'Clear job' }}
+              {{ clearBusy ? $t('offline_conversion.clearing') : $t('offline_conversion.clear_job') }}
             </button>
           </div>
         </article>
@@ -500,8 +497,8 @@
             <i class="fa-solid fa-film"></i>
           </span>
           <div>
-            <h3>{{ capabilities.initializing ? 'Preparing saved jobs…' : 'No offline jobs yet' }}</h3>
-            <p v-if="!capabilities.initializing">Choose a job type and source, then complete the settings shown for that job.</p>
+            <h3>{{ capabilities.initializing ? $t('offline_conversion.preparing_saved_jobs') : $t('offline_conversion.no_jobs') }}</h3>
+            <p v-if="!capabilities.initializing">{{ $t('offline_conversion.no_jobs_desc') }}</p>
           </div>
         </article>
       </section>
@@ -515,16 +512,16 @@
       <form class="offline-path-picker-shell" @submit.prevent="confirmPathPicker">
         <header class="offline-path-picker-header">
           <div>
-            <p class="apollo-kicker">This Windows PC</p>
+            <p class="apollo-kicker">{{ $t('offline_conversion.this_pc') }}</p>
             <h2
               :id="pickerMode === 'input' ? 'offlineInputPickerTitle' : 'offlineOutputPickerTitle'">
-              {{ pickerMode === 'input' ? 'Choose an input video' : 'Choose the output file name' }}
+              {{ pickerMode === 'input' ? $t('offline_conversion.choose_input_video') : $t('offline_conversion.choose_output_name') }}
             </h2>
           </div>
           <button
             class="offline-path-picker-close"
             type="button"
-            aria-label="Close file selection dialog"
+            :aria-label="$t('offline_conversion.close_picker')"
             @click="closePathPicker">
             <i class="fa-solid fa-xmark" aria-hidden="true"></i>
           </button>
@@ -532,7 +529,7 @@
 
         <div class="offline-path-picker-body">
           <template v-if="pickerMode === 'input'">
-            <label class="form-label" for="offlinePickerPath">Folder</label>
+            <label class="form-label" for="offlinePickerPath">{{ $t('offline_conversion.folder') }}</label>
             <div class="input-group">
               <input
                 id="offlinePickerPath"
@@ -541,14 +538,14 @@
                 type="text"
                 autocomplete="off"
                 spellcheck="false"
-                placeholder="Choose a drive or enter a local folder"
+                :placeholder="$t('offline_conversion.folder_placeholder')"
                 @keydown.enter.prevent="navigatePicker(pickerTypedPath)">
               <button
                 class="btn btn-outline-secondary"
                 type="button"
                 :disabled="pickerBusy"
                 @click="navigatePicker(pickerTypedPath)">
-                Go
+                {{ $t('offline_conversion.go') }}
               </button>
             </div>
 
@@ -559,20 +556,20 @@
                 :disabled="pickerBusy || pickerParentPath === pickerCurrentPath"
                 @click="navigatePicker(pickerParentPath)">
                 <i class="fa-solid fa-arrow-up" aria-hidden="true"></i>
-                Up
+                {{ $t('offline_conversion.up') }}
               </button>
-              <span class="monospace">{{ pickerCurrentPath || 'Local drives' }}</span>
+              <span class="monospace">{{ pickerCurrentPath || $t('offline_conversion.local_drives') }}</span>
             </div>
 
             <div
               ref="pickerEntries"
               class="offline-picker-entries"
               role="group"
-              aria-label="Files and folders"
+              :aria-label="$t('offline_conversion.files_and_folders')"
               :aria-busy="pickerBusy">
               <div v-if="pickerBusy" class="offline-picker-message" role="status">
                 <i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i>
-                Loading files…
+                {{ $t('offline_conversion.loading_files') }}
               </div>
               <template v-else>
                 <button
@@ -604,22 +601,21 @@
               <div
                 v-if="!pickerBusy && !pickerEntries.length"
                 class="offline-picker-message">
-                No files or folders are available here.
+                {{ $t('offline_conversion.no_entries') }}
               </div>
             </div>
             <p v-if="pickerTruncated" class="form-text">
-              This folder has more entries than the picker can show. Enter a more specific folder
-              path above.
+              {{ $t('offline_conversion.truncated') }}
             </p>
           </template>
 
           <template v-else>
             <div class="offline-output-location">
-              <span>Output folder (same as input)</span>
+              <span>{{ $t('offline_conversion.output_folder') }}</span>
               <code>{{ pickerCurrentPath || inputDirectory }}</code>
             </div>
             <div>
-              <label class="form-label" for="offlinePickerOutputName">New video file</label>
+              <label class="form-label" for="offlinePickerOutputName">{{ $t('offline_conversion.new_video_file') }}</label>
               <input
                 id="offlinePickerOutputName"
                 ref="pickerOutputName"
@@ -631,13 +627,13 @@
                 placeholder="movie-3d.mkv"
                 pattern="[^\x2F\x5C]+\.(?:[mM][kK][vV]|[mM][pP]4)"
                 required>
-              <div class="form-text">
-                Use a new name ending in <span class="monospace">.mkv</span> or
-                <span class="monospace">.mp4</span>. Existing videos are never overwritten.
-              </div>
+              <i18n-t keypath="offline_conversion.picker_output_name_desc" tag="div" class="form-text">
+                <template v-slot:mkv><span class="monospace">.mkv</span></template>
+                <template v-slot:mp4><span class="monospace">.mp4</span></template>
+              </i18n-t>
             </div>
             <div v-if="existingOutputNames.length" class="offline-existing-outputs">
-              <span>Existing outputs</span>
+              <span>{{ $t('offline_conversion.existing_outputs') }}</span>
               <div>
                 <code v-for="name in existingOutputNames" :key="name">{{ name }}</code>
               </div>
@@ -649,7 +645,7 @@
               <i class="fa-solid fa-circle-exclamation"></i>
             </span>
             <div>
-              <strong>The path could not be selected</strong>
+              <strong>{{ $t('offline_conversion.path_not_selected') }}</strong>
               <p>{{ pickerError }}</p>
             </div>
           </div>
@@ -661,13 +657,13 @@
           </span>
           <div>
             <button class="btn btn-apollo-quiet" type="button" @click="closePathPicker">
-              Cancel
+              {{ $t('_common.cancel') }}
             </button>
             <button
               class="btn btn-apollo-primary"
               type="submit"
               :disabled="pickerBusy || (pickerMode === 'input' && !pickerCanConfirm)">
-              {{ pickerMode === 'input' ? 'Choose video' : 'Use this path' }}
+              {{ pickerMode === 'input' ? $t('offline_conversion.choose_video') : $t('offline_conversion.use_path') }}
             </button>
           </div>
         </footer>
@@ -834,17 +830,17 @@
         )
       },
       startDisabledReason() {
-        if (this.startBusy) return 'Sunshine 3D is starting the job…'
-        if (this.initialLoading) return 'Checking offline conversion support…'
-        if (this.capabilities.initializing) return 'Preparing offline conversion…'
-        if (this.apiError) return 'Reconnect to the offline job manager before starting.'
-        if (this.activeJobExists) return 'Wait for the active offline job to finish or cancel it.'
-        if (this.liveStreamActive) return 'End the current live stream before starting an offline job.'
+        if (this.startBusy) return this.$t('offline_conversion.start_blocked_starting')
+        if (this.initialLoading) return this.$t('offline_conversion.start_blocked_checking')
+        if (this.capabilities.initializing) return this.$t('offline_conversion.start_blocked_preparing')
+        if (this.apiError) return this.$t('offline_conversion.start_blocked_reconnect')
+        if (this.activeJobExists) return this.$t('offline_conversion.start_blocked_active_job')
+        if (this.liveStreamActive) return this.$t('offline_conversion.start_blocked_live_stream')
         if (
           this.form.operation === 'convert' &&
           !this.codecAvailable(this.form.codec)
         ) {
-          return 'Choose an NVENC codec included with the packaged FFmpeg.'
+          return this.$t('offline_conversion.start_blocked_codec')
         }
         return ''
       },
@@ -961,7 +957,7 @@
       showPathPicker() {
         const dialog = this.$refs.pathPickerDialog
         if (!dialog?.showModal) {
-          this.actionError = 'This browser does not support the file selection dialog.'
+          this.actionError = this.$t('offline_conversion.picker_unsupported')
           return false
         }
         if (!dialog.open) dialog.showModal()
@@ -989,7 +985,7 @@
       },
       async openOutputPicker() {
         if (!this.inputDirectory) {
-          this.actionError = 'Choose an input video before choosing the output file name.'
+          this.actionError = this.$t('offline_conversion.choose_input_before_output')
           return
         }
         this.resetPathPicker('output')
@@ -1044,12 +1040,12 @@
             this.pickerTruncated = false
             if (error?.status === 403) {
               this.pickerError = this.pickerMode === 'input' ?
-                'For safety, browse host files from the Web UI opened on this PC. You can still enter an absolute input path manually.' :
-                'For safety, choose host files from the Web UI opened on this PC. Enter a new output filename manually in the conversion form.'
+                this.$t('offline_conversion.browse_remote_input') :
+                this.$t('offline_conversion.browse_remote_output')
             } else if (error?.status === 404) {
               this.pickerError = this.pickerMode === 'input' ?
-                'This Sunshine 3D build does not include host file browsing. Enter an absolute input path manually.' :
-                'This Sunshine 3D build does not include host file browsing. Enter a new output filename manually in the conversion form.'
+                this.$t('offline_conversion.browse_missing_input') :
+                this.$t('offline_conversion.browse_missing_output')
             } else {
               this.pickerError = this.apiMessage(error)
             }
@@ -1104,7 +1100,7 @@
               ) === 0
             )
           ) {
-            this.pickerError = 'That output file already exists. Choose a new file name.'
+            this.pickerError = this.$t('offline_conversion.output_exists')
           }
           return
         }
@@ -1123,23 +1119,23 @@
       statusLabel(job) {
         const status = normalizedStatus(job)
         const labels = {
-          queued: 'Queued',
-          starting: 'Starting',
-          analyzing: 'Analyzing',
-          rendering: 'Rendering',
-          encoding: 'Encoding',
-          running: 'Running',
-          publishing: 'Publishing',
-          canceling: 'Canceling',
-          canceled: 'Canceled',
-          completed: 'Completed',
-          complete: 'Completed',
-          failed: 'Failed',
-          interrupted: 'Interrupted',
-          abandoned: 'Interrupted',
-          orphaned: 'Interrupted',
+          queued: 'offline_conversion.status_queued',
+          starting: 'offline_conversion.status_starting',
+          analyzing: 'offline_conversion.status_analyzing',
+          rendering: 'offline_conversion.status_rendering',
+          encoding: 'offline_conversion.status_encoding',
+          running: 'offline_conversion.status_running',
+          publishing: 'offline_conversion.status_publishing',
+          canceling: 'offline_conversion.status_canceling',
+          canceled: 'offline_conversion.status_canceled',
+          completed: 'offline_conversion.status_completed',
+          complete: 'offline_conversion.status_completed',
+          failed: 'offline_conversion.status_failed',
+          interrupted: 'offline_conversion.status_interrupted',
+          abandoned: 'offline_conversion.status_interrupted',
+          orphaned: 'offline_conversion.status_interrupted',
         }
-        return labels[status] || 'Unknown'
+        return this.$t(labels[status] || 'offline_conversion.status_unknown')
       },
       phaseLabel(job) {
         const phase = job?.phase_label || job?.progress?.phase_label || job?.progress?.phase
@@ -1176,8 +1172,10 @@
           job?.progress?.total_frames,
           job?.progress?.total,
         )
-        if (processed === null && total === null) return 'Waiting for analysis'
-        if (total === null || total <= 0) return `${Math.max(processed ?? 0, 0)} processed`
+        if (processed === null && total === null) return this.$t('offline_conversion.waiting_for_analysis')
+        if (total === null || total <= 0) {
+          return this.$t('offline_conversion.frames_processed', { count: Math.max(processed ?? 0, 0) })
+        }
         return `${Math.max(processed ?? 0, 0)} / ${total}`
       },
       jobSettings(job) {
@@ -1223,13 +1221,13 @@
       },
       codecLabel(codec) {
         return String(codec || '').toLowerCase().includes('av1') ?
-          'AV1 (10-bit for HDR)' :
-          'H.265 / HEVC (10-bit for HDR)'
+          this.$t('offline_conversion.codec_av1') :
+          this.$t('offline_conversion.codec_hevc')
       },
       jobProgressLabel(job) {
         return this.jobSettings(job).operation === 'evaluate' ?
-          'Offline analysis progress' :
-          'Offline conversion progress'
+          this.$t('offline_conversion.analysis_progress') :
+          this.$t('offline_conversion.conversion_progress')
       },
       jobError(job) {
         return job?.error?.message || job?.error || job?.failure_reason || ''
@@ -1238,16 +1236,18 @@
         const retained =
           job?.recovery?.retained_artifacts ??
           job?.retained_artifacts
-        if (retained === true) return 'Retained for inspection'
-        if (retained === false) return 'None'
-        if (Array.isArray(retained)) return `${retained.length} paths retained`
-        return retained || 'Reported by the built-in job manager'
+        if (retained === true) return this.$t('offline_conversion.retained_for_inspection')
+        if (retained === false) return this.$t('offline_conversion.retained_none')
+        if (Array.isArray(retained)) {
+          return this.$t('offline_conversion.paths_retained', { count: retained.length }, retained.length)
+        }
+        return retained || this.$t('offline_conversion.retained_reported')
       },
       cleanupLabel(job) {
         return (
           job?.recovery?.cleanup_message ||
           job?.cleanup?.message ||
-          'Wait for the built-in job manager to mark retained paths safe to remove.'
+          this.$t('offline_conversion.cleanup_wait')
         )
       },
       async loadJobs(silent = false) {
@@ -1325,7 +1325,7 @@
           }
           if (!detail || this.jobId(detail) !== expectedId) {
             throw new ApiError(
-              'The offline job manager returned the wrong job detail.',
+              this.$t('offline_conversion.wrong_job_detail'),
             )
           }
           this.selectedJobDetail = detail
@@ -1348,7 +1348,7 @@
         }
       },
       apiMessage(error) {
-        return error?.message || 'The built-in offline job manager could not be reached.'
+        return error?.message || this.$t('offline_conversion.manager_unreachable')
       },
       requestFromForm() {
         const request = {
@@ -1383,14 +1383,14 @@
       async restartJob(job) {
         const settings = this.immutableSettings(job)
         if (!settings) {
-          this.actionError = 'The interrupted job did not retain a complete immutable settings record.'
+          this.actionError = this.$t('offline_conversion.restart_incomplete_settings')
           return
         }
         await this.createJob(settings)
       },
       async cancelJob(job) {
         const id = this.jobId(job)
-        if (!id || !window.confirm('Cancel this offline job? Output already written remains subject to the native cleanup contract.')) {
+        if (!id || !window.confirm(this.$t('offline_conversion.cancel_confirm'))) {
           return
         }
         this.actionError = ''
@@ -1410,7 +1410,7 @@
           !id ||
           this.clearBusy ||
           !window.confirm(
-            'Clear this finished job? Temporary job files and history will be removed. The converted video will be kept.',
+            this.$t('offline_conversion.clear_confirm'),
           )
         ) {
           return
@@ -1439,7 +1439,7 @@
         }
       },
       decisionLabel(decision) {
-        if (!decision) return 'Committed'
+        if (!decision) return this.$t('offline_conversion.decision_committed')
         return String(decision)
           .replaceAll('_', ' ')
           .replace(/\b\w/g, character => character.toUpperCase())

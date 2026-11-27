@@ -10,7 +10,12 @@ import {
   getText,
   postJson,
   requestJson,
+  setApiTranslator,
 } from '../../src_assets/common/assets/web/api.js'
+import { english } from './english_messages.mjs'
+
+// Pages install their locale's translator through init.js; these tests read the en text.
+setApiTranslator(english)
 
 const webRoot = fileURLToPath(new URL('../../src_assets/common/assets/web/', import.meta.url))
 
@@ -136,7 +141,7 @@ test('a 2xx reply that is not JSON is an error', async t => {
   await assert.rejects(getJson('./api/clients/list'), error => {
     assert.ok(error instanceof ApiError)
     assert.equal(error.status, 200)
-    assert.match(error.message, /invalid JSON/)
+    assert.equal(error.message, 'Sunshine 3D returned invalid JSON (HTTP 200).')
     return true
   })
 })

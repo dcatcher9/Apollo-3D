@@ -671,20 +671,20 @@
     <header class="devices-page-header">
       <div>
         <div class="devices-eyebrow">Sunshine 3D</div>
-        <h1 class="devices-title">Devices</h1>
-        <p class="devices-subtitle">Pair Moonlight 3D, choose what each device can do, and manage local AR glasses.</p>
+        <h1 class="devices-title">{{ $t('pin.devices_title') }}</h1>
+        <p class="devices-subtitle">{{ $t('pin.devices_subtitle') }}</p>
       </div>
     </header>
 
     <section class="surface-card pair-card" aria-labelledby="pair-artemis-heading">
       <header class="pair-intro">
         <div class="pair-intro-copy">
-          <h2 id="pair-artemis-heading">Pair a device</h2>
-          <p>Enter the PIN shown by Moonlight 3D. If the device offers QR pairing instead, create a single-use code.</p>
+          <h2 id="pair-artemis-heading">{{ $t('pin.pair_device') }}</h2>
+          <p>{{ $t('pin.pair_device_desc') }}</p>
         </div>
         <div v-if="pairedDeviceName" class="alert alert-success mb-0" role="status">
           <i class="fa-solid fa-circle-check me-2"></i>
-          {{ pairedDeviceName }} is ready to stream.
+          {{ $t('pin.device_ready', { name: pairedDeviceName }) }}
         </div>
       </header>
 
@@ -693,14 +693,14 @@
           <header class="pair-method-header">
             <div class="pair-icon"><i class="fa-solid fa-key"></i></div>
             <div>
-              <h3>Enter PIN</h3>
-              <p>Use the PIN displayed in Moonlight 3D.</p>
+              <h3>{{ $t('pin.enter_pin') }}</h3>
+              <p>{{ $t('pin.enter_pin_desc') }}</p>
             </div>
-            <span class="pair-method-step">Primary</span>
+            <span class="pair-method-step">{{ $t('pin.primary_method') }}</span>
           </header>
           <form class="pin-pairing-form" @submit.prevent="pairWithPin">
             <div>
-              <label for="pairing-pin" class="form-label">Pairing PIN</label>
+              <label for="pairing-pin" class="form-label">{{ $t('pin.pairing_pin') }}</label>
               <input id="pairing-pin" type="text" inputmode="numeric" pattern="\d*" autocomplete="one-time-code"
                 placeholder="0000" v-model.trim="pairingPin" class="form-control pin-code-input" required />
             </div>
@@ -708,12 +708,12 @@
               <label for="pairing-device-name" class="form-label">{{ $t('pin.device_name') }}</label>
               <input id="pairing-device-name" type="text" :placeholder="$t('pin.device_name')"
                 v-model.trim="pairingDeviceName" class="form-control pin-device-name" />
-              <div class="form-text">Optional. You can rename the device later.</div>
+              <div class="form-text">{{ $t('pin.device_name_note') }}</div>
             </div>
             <button class="btn btn-apollo pair-method-action" :disabled="pinPairingPending">
               <span v-if="pinPairingPending" class="spinner-border spinner-border-sm" aria-hidden="true"></span>
               <i v-else class="fa-solid fa-link"></i>
-              <span>{{ pinPairingPending ? 'Pairing…' : $t('pin.send') }}</span>
+              <span>{{ pinPairingPending ? $t('pin.pairing_pending') : $t('pin.send') }}</span>
             </button>
           </form>
           <div v-if="pinMessage" class="alert pairing-feedback mb-0" :class="'alert-' + pinStatus" role="status">
@@ -725,40 +725,39 @@
           <div v-if="!pairingActive" class="qr-method-idle">
             <div class="pair-copy">
               <div class="pair-icon"><i class="fa-solid fa-qrcode"></i></div>
-              <h3>Scan QR code</h3>
-              <p>Use this when Moonlight 3D offers camera pairing and can see the host screen.</p>
+              <h3>{{ $t('pin.scan_qr') }}</h3>
+              <p>{{ $t('pin.scan_qr_desc') }}</p>
               <div v-if="otpMessage" class="alert mb-0"
                 :class="[pairedDeviceName ? 'mt-2' : '', 'alert-' + otpStatus]" role="status">
                 {{ otpMessage }}
               </div>
               <div v-if="!pairedDeviceName && !otpMessage" class="pair-security-note">
                 <i class="fa-solid fa-shield-halved"></i>
-                The pairing code is single-use and expires after three minutes.
+                {{ $t('pin.qr_single_use') }}
               </div>
             </div>
             <button type="button" class="btn btn-apollo-quiet pair-method-action" :disabled="pairingPending"
               @click="requestOTP">
               <span v-if="pairingPending" class="spinner-border spinner-border-sm" aria-hidden="true"></span>
               <i v-else class="fa-solid fa-mobile-screen-button"></i>
-              {{ pairingPending ? 'Preparing…' : 'Show QR code' }}
+              {{ pairingPending ? $t('pin.qr_preparing') : $t('pin.show_qr') }}
             </button>
           </div>
 
           <div v-else class="pairing-layout">
-            <div id="qrRef" class="pairing-qr" aria-label="Moonlight 3D pairing QR code"></div>
+            <div id="qrRef" class="pairing-qr" :aria-label="$t('pin.qr_aria')"></div>
             <div>
-              <div class="pairing-state"><span class="pairing-state-dot"></span> QR open · {{ pairingTimeLabel }}</div>
-              <h3>Scan with Moonlight 3D</h3>
-              <p>Open Moonlight 3D on your device and scan this code. The device will appear below as
-                soon as it is paired.</p>
+              <div class="pairing-state"><span class="pairing-state-dot"></span> {{ $t('pin.qr_open_remaining', { time: pairingTimeLabel }) }}</div>
+              <h3>{{ $t('pin.scan_with_moonlight') }}</h3>
+              <p>{{ $t('pin.scan_with_moonlight_desc') }}</p>
               <div class="pairing-actions">
                 <a class="btn btn-apollo" :href="deepLink">
                   <i class="fa-solid fa-arrow-up-right-from-square"></i>
-                  Open in Moonlight 3D
+                  {{ $t('pin.open_in_moonlight') }}
                 </a>
                 <button type="button" class="btn btn-outline-secondary" @click="requestOTP">
                   <i class="fa-solid fa-rotate"></i>
-                  New code
+                  {{ $t('pin.new_code') }}
                 </button>
               </div>
               <div v-if="otpMessage" class="alert mt-3 mb-0" :class="'alert-' + otpStatus" role="status">
@@ -774,15 +773,15 @@
     <section aria-labelledby="remote-devices-heading">
       <div class="section-heading">
         <div>
-          <h2 id="remote-devices-heading">Remote devices</h2>
-          <p>Paired devices can browse Sunshine 3D, but only one device can stream at a time.</p>
+          <h2 id="remote-devices-heading">{{ $t('pin.remote_devices') }}</h2>
+          <p>{{ $t('pin.remote_devices_desc') }}</p>
         </div>
       </div>
 
       <div v-if="clientsError" class="alert alert-danger">{{ clientsError }}</div>
       <div v-if="showApplyMessage" class="alert alert-success d-flex align-items-center" role="status">
-        <span><i class="fa-solid fa-circle-check me-2"></i>Device removed.</span>
-        <button type="button" class="btn-close ms-auto" aria-label="Dismiss" @click="showApplyMessage = false"></button>
+        <span><i class="fa-solid fa-circle-check me-2"></i>{{ $t('pin.device_removed') }}</span>
+        <button type="button" class="btn-close ms-auto" :aria-label="$t('pin.dismiss')" @click="showApplyMessage = false"></button>
       </div>
 
       <div class="device-grid">
@@ -794,17 +793,17 @@
                 <h3 class="device-name">{{ displayClientName(client) }}</h3>
                 <div class="device-state">
                   <span class="status-dot" :class="{offline: !client.connected}"></span>
-                  {{ client.connected ? 'Connected' : 'Ready' }}
+                  {{ client.connected ? $t('pin.state_connected') : $t('pin.state_ready') }}
                 </div>
               </div>
               <div class="device-card-actions">
-                <button v-if="client.connected" type="button" class="btn btn-outline-warning icon-button" title="Disconnect" :aria-label="`Disconnect ${displayClientName(client)}`" @click="disconnectClient(client.uuid)">
+                <button v-if="client.connected" type="button" class="btn btn-outline-warning icon-button" :title="$t('pin.disconnect')" :aria-label="$t('pin.disconnect_device', { name: displayClientName(client) })" @click="disconnectClient(client.uuid)">
                   <i class="fa-solid fa-link-slash"></i>
                 </button>
-                <button type="button" class="btn btn-outline-secondary icon-button" title="Device settings" :aria-label="`Settings for ${displayClientName(client)}`" @click="editClient(client)">
+                <button type="button" class="btn btn-outline-secondary icon-button" :title="$t('pin.device_settings')" :aria-label="$t('pin.device_settings_for', { name: displayClientName(client) })" @click="editClient(client)">
                   <i class="fa-solid fa-gear"></i>
                 </button>
-                <button type="button" class="btn btn-outline-danger icon-button" title="Remove device" :aria-label="`Remove ${displayClientName(client)}`" @click="unpairSingle(client)">
+                <button type="button" class="btn btn-outline-danger icon-button" :title="$t('pin.remove_device')" :aria-label="$t('pin.remove_named', { name: displayClientName(client) })" @click="unpairSingle(client)">
                   <i class="fa-solid fa-trash-can"></i>
                 </button>
               </div>
@@ -812,55 +811,55 @@
 
             <div class="device-facts">
               <div class="device-fact">
-                <span class="device-fact-label">Access</span>
+                <span class="device-fact-label">{{ $t('pin.access') }}</span>
                 <span class="device-fact-value">
                   {{ accessLabel(client.perm) }}
                 </span>
               </div>
               <div class="device-fact">
-                <span class="device-fact-label">Clipboard sharing</span>
-                <span class="device-fact-value">{{ hasClipboard(client.perm) ? 'On' : 'Off' }}</span>
+                <span class="device-fact-label">{{ $t('pin.clipboard_sharing') }}</span>
+                <span class="device-fact-value">{{ hasClipboard(client.perm) ? $t('pin.on') : $t('pin.off') }}</span>
               </div>
             </div>
           </template>
 
           <form v-else @submit.prevent="saveClient(client)">
             <div class="editor-heading">
-              <h3>Device settings</h3>
-              <button type="button" class="btn-close" aria-label="Close device settings" @click="cancelEdit(client)"></button>
+              <h3>{{ $t('pin.device_settings') }}</h3>
+              <button type="button" class="btn-close" :aria-label="$t('pin.close_device_settings')" @click="cancelEdit(client)"></button>
             </div>
 
             <div class="mb-4">
-              <label class="form-label fw-semibold" :for="`device-name-${client.uuid}`">Device name</label>
+              <label class="form-label fw-semibold" :for="`device-name-${client.uuid}`">{{ $t('pin.device_name_label') }}</label>
               <input :id="`device-name-${client.uuid}`" v-model.trim="client.editName" class="form-control" type="text" :placeholder="$t('pin.device_name')">
             </div>
 
             <div class="editor-grid">
               <section class="editor-section">
-                <h4>Access</h4>
+                <h4>{{ $t('pin.access') }}</h4>
                 <div class="access-options">
                   <button type="button" class="access-option" :class="{active: client.editAccessPreset === 'stream_control'}" @click="setAccessPreset(client, 'stream_control')">
-                    <strong>Stream &amp; control</strong>
-                    <span>Browse and launch apps, stream video, and use controller, mouse, and keyboard input.</span>
+                    <strong>{{ $t('pin.access_stream_control') }}</strong>
+                    <span>{{ $t('pin.access_stream_control_desc') }}</span>
                   </button>
                   <button type="button" class="access-option" :class="{active: client.editAccessPreset === 'view_only'}" @click="setAccessPreset(client, 'view_only')">
-                    <strong>View only</strong>
-                    <span>Browse and view streams without launching apps or controlling this PC.</span>
+                    <strong>{{ $t('pin.access_view_only') }}</strong>
+                    <span>{{ $t('pin.access_view_only_desc') }}</span>
                   </button>
                   <button type="button" class="access-option" :class="{active: client.editAccessPreset === 'custom'}" @click="setAccessPreset(client, 'custom')">
-                    <strong>Custom</strong>
-                    <span>Choose individual permissions in Advanced settings.</span>
+                    <strong>{{ $t('pin.access_custom') }}</strong>
+                    <span>{{ $t('pin.access_custom_desc') }}</span>
                   </button>
                 </div>
               </section>
 
               <section class="editor-section">
-                <h4>Preferences</h4>
+                <h4>{{ $t('pin.preferences') }}</h4>
                 <div class="preference-list">
                   <div class="preference-row">
                     <div>
-                      <label :for="`clipboard-${client.uuid}`">Clipboard sharing</label>
-                      <small>Allow text to move between this PC and the device.</small>
+                      <label :for="`clipboard-${client.uuid}`">{{ $t('pin.clipboard_sharing') }}</label>
+                      <small>{{ $t('pin.clipboard_sharing_desc') }}</small>
                     </div>
                     <div class="form-check form-switch m-0">
                       <input :id="`clipboard-${client.uuid}`" class="form-check-input" type="checkbox" role="switch" v-model="client.editClipboard" @change="setClipboard(client)">
@@ -871,13 +870,13 @@
             </div>
 
             <details class="advanced-disclosure" :open="client.showAdvanced">
-              <summary>Advanced settings</summary>
+              <summary>{{ $t('pin.advanced_settings') }}</summary>
               <div class="advanced-panel">
                 <div>
-                  <h4 class="h6 mb-3">Granular permissions</h4>
+                  <h4 class="h6 mb-3">{{ $t('pin.granular_permissions') }}</h4>
                   <div class="permission-groups">
                     <div v-for="group in permissionGroups" :key="group.name" class="permission-group">
-                      <h5>{{ group.name }}</h5>
+                      <h5>{{ $t(group.labelKey) }}</h5>
                       <div v-for="perm in group.permissions" :key="perm.name" class="form-check">
                         <input
                           type="checkbox"
@@ -894,19 +893,19 @@
                 </div>
 
                 <details>
-                  <summary class="small text-secondary">Technical details</summary>
-                  <div class="font-monospace small text-secondary mt-2">Device ID: {{ client.uuid }}</div>
-                  <div class="font-monospace small text-secondary">Permission code: {{ permToStr(client.editPerm) }}</div>
+                  <summary class="small text-secondary">{{ $t('pin.technical_details') }}</summary>
+                  <div class="font-monospace small text-secondary mt-2">{{ $t('pin.device_id', { id: client.uuid }) }}</div>
+                  <div class="font-monospace small text-secondary">{{ $t('pin.permission_code', { code: permToStr(client.editPerm) }) }}</div>
                 </details>
               </div>
             </details>
 
             <div v-if="client.saveError" class="alert alert-danger mt-3 mb-0">{{ client.saveError }}</div>
             <div class="editor-actions">
-              <button type="button" class="btn btn-outline-secondary" :disabled="client.saving" @click="cancelEdit(client)">Cancel</button>
+              <button type="button" class="btn btn-outline-secondary" :disabled="client.saving" @click="cancelEdit(client)">{{ $t('_common.cancel') }}</button>
               <button type="submit" class="btn btn-apollo" :disabled="client.saving">
                 <span v-if="client.saving" class="spinner-border spinner-border-sm" aria-hidden="true"></span>
-                {{ client.saving ? 'Saving…' : 'Save device' }}
+                {{ client.saving ? $t('pin.saving') : $t('pin.save_device') }}
               </button>
             </div>
           </form>
@@ -915,21 +914,21 @@
         <div v-if="clientsLoaded && clients.length === 0" class="surface-card empty-devices">
           <i class="fa-solid fa-headset"></i>
           <div>
-            <strong>No paired devices</strong>
-            <div class="small mt-1">Pair a device running Moonlight 3D to start streaming.</div>
+            <strong>{{ $t('pin.no_devices') }}</strong>
+            <div class="small mt-1">{{ $t('pin.no_devices_desc') }}</div>
           </div>
         </div>
       </div>
 
       <details v-if="clients.length > 0" class="support-disclosure">
-        <summary>Device support</summary>
+        <summary>{{ $t('pin.device_support') }}</summary>
         <div class="support-disclosure-body">
           <div>
-            <strong>Remove all paired devices</strong>
-            <p>Every device will need to be paired again. An active stream will also be stopped.</p>
+            <strong>{{ $t('pin.remove_all_title') }}</strong>
+            <p>{{ $t('pin.remove_all_desc') }}</p>
           </div>
           <button type="button" class="btn btn-outline-danger" :disabled="unpairAllPressed" @click="unpairAll">
-            {{ unpairAllPressed ? 'Removing…' : 'Remove all devices' }}
+            {{ unpairAllPressed ? $t('pin.removing') : $t('pin.remove_all') }}
           </button>
         </div>
         <div v-if="unpairAllStatus === true" class="alert alert-success mt-3">{{ $t('pin.unpair_all_success') }}</div>
@@ -1009,16 +1008,16 @@
   };
 
   const permissionGroups = [
-    { name: 'Streaming', permissions: [
+    { name: 'Streaming', labelKey: 'pin.permission_group_streaming', permissions: [
       { name: 'list', suppressed_by: ['view', 'launch'] },
       { name: 'view', suppressed_by: ['launch'] },
       { name: 'launch', suppressed_by: [] }
     ] },
-    { name: 'Clipboard', permissions: [
+    { name: 'Clipboard', labelKey: 'pin.permission_group_clipboard', permissions: [
       { name: 'clipboard_set', suppressed_by: [] },
       { name: 'clipboard_read', suppressed_by: [] }
     ] },
-    { name: 'Input', permissions: [
+    { name: 'Input', labelKey: 'pin.permission_group_input', permissions: [
       { name: 'input_controller', suppressed_by: [] },
       { name: 'input_touch', suppressed_by: [] },
       { name: 'input_pen', suppressed_by: [] },
@@ -1076,7 +1075,7 @@
       pairingTimeLabel() {
         const minutes = Math.floor(this.pairingSecondsRemaining / 60);
         const seconds = this.pairingSecondsRemaining % 60;
-        return `${minutes}:${seconds.toString().padStart(2, '0')} remaining`;
+        return `${minutes}:${seconds.toString().padStart(2, '0')}`;
       }
     },
     created() {
@@ -1135,7 +1134,7 @@
         this.pairingActive = false;
         this.otp = '';
         this.otpStatus = 'warning';
-        this.otpMessage = 'The pairing link expired. Start pairing again to create a new one.';
+        this.otpMessage = this.i18n.t('pin.pairing_expired');
       },
       async completeArtemisPairing(client) {
         clearPairingTimers();
@@ -1149,7 +1148,7 @@
           await this.refreshClients();
         } catch (error) {
           this.otpStatus = 'warning';
-          this.otpMessage = `The device paired, but its recommended access defaults could not be saved: ${error.message || error}`;
+          this.otpMessage = this.i18n.t('pin.defaults_not_saved', { error: error.message || error });
         }
       },
       async applyArtemisDefaults(client) {
@@ -1161,7 +1160,7 @@
       async updateClient(payload) {
         // An unknown device is a successful reply whose status is false.
         const body = await postJson('./api/clients/update', payload);
-        if (!body.status) throw new Error(body.error || body.message || 'Sunshine 3D could not complete the action');
+        if (!body.status) throw new Error(body.error || body.message || this.i18n.t('pin.action_failed'));
       },
       async pairWithPin() {
         if (this.pinPairingPending) return;
@@ -1235,13 +1234,13 @@
       },
       accessLabel(perm) {
         // A client loaded without a permission word has none until the owner grants them.
-        if ((perm & permissionMapping._all) === 0) return 'No access';
+        if ((perm & permissionMapping._all) === 0) return this.i18n.t('pin.access_none');
         return this.accessPresetLabel(this.accessPresetFor(perm));
       },
       accessPresetLabel(preset) {
-        if (preset === 'stream_control') return 'Stream & control';
-        if (preset === 'view_only') return 'View only';
-        return 'Custom';
+        if (preset === 'stream_control') return this.i18n.t('pin.access_stream_control');
+        if (preset === 'view_only') return this.i18n.t('pin.access_view_only');
+        return this.i18n.t('pin.access_custom');
       },
       setAccessPreset(client, preset) {
         client.editAccessPreset = preset;
@@ -1288,7 +1287,7 @@
           .finally(() => setTimeout(() => this.refreshClients(), 1000));
       },
       async unpairAll() {
-        if (!window.confirm('Remove every paired device? All devices will need to be paired again.')) return;
+        if (!window.confirm(this.i18n.t('pin.remove_all_confirm'))) return;
         this.unpairAllPressed = true;
         try {
           const body = await postJson('./api/clients/unpair-all');
@@ -1303,15 +1302,15 @@
       },
       async unpairSingle(client) {
         const name = this.displayClientName(client);
-        if (!window.confirm(`Remove ${name}? This device will need to be paired again.`)) return;
+        if (!window.confirm(this.i18n.t('pin.remove_confirm', { name }))) return;
 
         try {
           const body = await postJson('./api/clients/unpair', {uuid: client.uuid});
-          if (body.status === false) throw new Error(body.error || body.message || 'Sunshine 3D could not complete the action');
+          if (body.status === false) throw new Error(body.error || body.message || this.i18n.t('pin.action_failed'));
           this.showApplyMessage = true;
           await this.refreshClients();
         } catch (error) {
-          this.clientsError = `Could not remove ${name}: ${error.message || error}`;
+          this.clientsError = this.i18n.t('pin.remove_failed', { name, error: error.message || error });
         }
       },
       async refreshClients(detectPairing = false) {
@@ -1358,7 +1357,7 @@
           return clients;
         } catch (error) {
           this.clientsLoaded = true;
-          this.clientsError = `Could not load paired devices: ${error.message || error}`;
+          this.clientsError = this.i18n.t('pin.load_failed', { error: error.message || error });
           return this.clients;
         }
       }

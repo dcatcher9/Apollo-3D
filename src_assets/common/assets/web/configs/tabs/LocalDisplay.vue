@@ -9,9 +9,9 @@ const props = defineProps({config: {type: Object, required: true}, settingsChang
 const $t = inject('i18n').t
 // A remote session is always the remote device. This page chooses the one surface on this PC.
 const surfaces = [
-  {value: 'off', icon: 'fa-solid fa-ban', name: 'Off', detail: 'No local 3D on this PC. Remote streaming is unaffected.'},
-  {value: 'ar_glasses', icon: 'fa-solid fa-glasses', name: 'AR glasses', detail: 'Glasses connected to this PC as a Windows display.'},
-  {value: 'shutter_monitor', icon: 'fa-solid fa-display', name: 'Shutter-glasses monitor', detail: 'A monitor with an Open3DOLED USB emitter and active shutter glasses.'},
+  {value: 'off', icon: 'fa-solid fa-ban', nameKey: 'config.local_display_off', detailKey: 'config.local_display_off_desc'},
+  {value: 'ar_glasses', icon: 'fa-solid fa-glasses', nameKey: 'config.local_display_ar_glasses', detailKey: 'config.local_display_ar_glasses_desc'},
+  {value: 'shutter_monitor', icon: 'fa-solid fa-display', nameKey: 'config.local_display_shutter_monitor', detailKey: 'config.local_display_shutter_monitor_desc'},
 ]
 const status = ref(null)
 const session = ref(null)
@@ -34,8 +34,8 @@ const receiveStatus = body => {
 <template>
   <section class="config-page local-display" aria-labelledby="local-display-heading">
     <header class="local-display-heading">
-      <h2 id="local-display-heading">Local display</h2>
-      <p>Choose the one display on this PC that Sunshine 3D presents to. 3D starts only when you choose Start 3D. A connecting or active remote session takes priority and is always shown on the remote device.</p>
+      <h2 id="local-display-heading">{{ $t('config.local_display_surface') }}</h2>
+      <p>{{ $t('config.local_display_intro') }}</p>
     </header>
 
     <fieldset class="local-display-surfaces">
@@ -43,7 +43,7 @@ const receiveStatus = body => {
       <label v-for="surface in surfaces" :key="surface.value" class="local-display-surface" :class="{selected: props.config.local_display_surface === surface.value}">
         <input v-model="props.config.local_display_surface" type="radio" name="local_display_surface" :value="surface.value" />
         <i :class="surface.icon" aria-hidden="true"></i>
-        <span><strong>{{ surface.name }}</strong><small>{{ surface.detail }}</small></span>
+        <span><strong>{{ $t(surface.nameKey) }}</strong><small>{{ $t(surface.detailKey) }}</small></span>
       </label>
       <p class="form-text">{{ $t('config.local_display_surface_desc') }}</p>
     </fieldset>

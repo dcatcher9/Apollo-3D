@@ -11,9 +11,9 @@
   <main id="content" class="container apollo-page apollo-overview">
     <header class="apollo-page-header">
       <div>
-        <p class="apollo-eyebrow">Host control</p>
+        <p class="apollo-eyebrow">{{ $t('index.host_control') }}</p>
         <h1>{{ hostName }}</h1>
-        <p class="apollo-page-intro">Your PC is the one place to pair devices, choose apps, and check 3D readiness.</p>
+        <p class="apollo-page-intro">{{ $t('index.intro') }}</p>
       </div>
       <span class="apollo-state-pill" :class="`is-${overallState.tone}`" role="status">
         <span class="apollo-state-dot" aria-hidden="true"></span>
@@ -45,7 +45,7 @@
           :disabled="Boolean(actionBusy)"
           @click="endSession">
           <i class="fa-solid fa-stop" aria-hidden="true"></i>
-          {{ actionBusy === 'end' ? 'Ending…' : hero.primaryLabel }}
+          {{ actionBusy === 'end' ? $t('index.ending') : hero.primaryLabel }}
         </button>
         <a v-if="hero.secondaryHref" class="btn btn-apollo-quiet" :href="hero.secondaryHref">
           {{ hero.secondaryLabel }}
@@ -67,16 +67,16 @@
     <div v-if="game3dSetupWaiting" class="apollo-notice is-warning" role="status">
       <span class="apollo-notice-icon" aria-hidden="true"><i class="fa-solid fa-gamepad"></i></span>
       <div>
-        <strong>{{ game3dSetup.game_name || 'A game' }} is waiting for your approval</strong>
-        <p>Game 3D found this game and does nothing with it until you choose.</p>
+        <strong>{{ game3dSetup.game_name ? $t('index.game_waiting_title', { game: game3dSetup.game_name }) : $t('index.game_waiting_title_unnamed') }}</strong>
+        <p>{{ $t('index.game_waiting_desc') }}</p>
       </div>
-      <a href="#game3d-setup" @click.prevent="showGame3dSetup">Review <i class="fa-solid fa-arrow-down" aria-hidden="true"></i></a>
+      <a href="#game3d-setup" @click.prevent="showGame3dSetup">{{ $t('index.review') }} <i class="fa-solid fa-arrow-down" aria-hidden="true"></i></a>
     </div>
 
     <div v-if="actionError" class="apollo-notice is-danger" role="alert">
       <span class="apollo-notice-icon" aria-hidden="true"><i class="fa-solid fa-circle-exclamation"></i></span>
       <div>
-        <strong>That action did not finish</strong>
+        <strong>{{ $t('index.action_failed_title') }}</strong>
         <p>{{ actionError }}</p>
       </div>
     </div>
@@ -84,12 +84,12 @@
     <section class="apollo-section" aria-labelledby="readiness-title">
       <div class="apollo-section-heading">
         <div>
-          <p class="apollo-kicker">At a glance</p>
-          <h2 id="readiness-title">3D readiness</h2>
+          <p class="apollo-kicker">{{ $t('index.at_a_glance') }}</p>
+          <h2 id="readiness-title">{{ $t('index.readiness_title') }}</h2>
         </div>
-        <button class="apollo-refresh-button" type="button" :disabled="refreshing" @click="loadOverview(true)" aria-label="Refresh host status">
+        <button class="apollo-refresh-button" type="button" :disabled="refreshing" @click="loadOverview(true)" :aria-label="$t('index.refresh_host_status')">
           <i class="fa-solid fa-rotate" :class="{ 'fa-spin': refreshing }" aria-hidden="true"></i>
-          <span>Refresh</span>
+          <span>{{ $t('index.refresh') }}</span>
         </button>
       </div>
 
@@ -111,22 +111,22 @@
     <section class="apollo-section" aria-labelledby="session-title">
       <div class="apollo-section-heading">
         <div>
-          <p class="apollo-kicker">One PC, one stream</p>
-          <h2 id="session-title">Current session</h2>
+          <p class="apollo-kicker">{{ $t('index.one_pc_one_stream') }}</p>
+          <h2 id="session-title">{{ $t('index.current_session') }}</h2>
         </div>
         <span v-if="sessionState !== 'idle'" class="apollo-session-state" :class="`is-${sessionState}`">
-          {{ sessionState === 'streaming' ? 'Streaming' : 'Waiting to reconnect' }}
+          {{ sessionState === 'streaming' ? $t('index.status_streaming') : $t('index.waiting_to_reconnect') }}
         </span>
       </div>
 
       <article v-if="sessionState === 'idle'" class="apollo-session-card is-empty">
         <span class="apollo-empty-icon" aria-hidden="true"><i class="fa-solid fa-display"></i></span>
         <div class="apollo-empty-copy">
-          <h3>No active session</h3>
-          <p>{{ pairedClients.length ? 'Sunshine 3D is ready when you open this PC in Moonlight 3D.' : 'Pair a device running Moonlight 3D to start streaming from this PC.' }}</p>
+          <h3>{{ $t('index.no_active_session') }}</h3>
+          <p>{{ pairedClients.length ? $t('index.idle_ready_desc') : $t('index.idle_pair_desc') }}</p>
         </div>
         <a class="btn btn-apollo-quiet" :href="pairedClients.length ? './apps' : './pin'">
-          {{ pairedClients.length ? 'Open Library' : 'Pair Moonlight 3D' }}
+          {{ pairedClients.length ? $t('index.open_library') : $t('index.pair_moonlight') }}
         </a>
       </article>
 
@@ -136,14 +136,14 @@
             <i class="fa-solid fa-vr-cardboard"></i>
           </span>
           <div>
-            <p class="apollo-session-label">{{ sessionState === 'streaming' ? 'Streaming to' : 'Session retained for' }}</p>
+            <p class="apollo-session-label">{{ sessionState === 'streaming' ? $t('index.streaming_to') : $t('index.session_retained_for') }}</p>
             <h3>{{ sessionDeviceName }}</h3>
-            <p v-if="sessionState === 'waiting'">Sunshine 3D is keeping {{ activeAppName }} ready for a quick reconnect.</p>
-            <p v-else>{{ activeAppName }} is running from this host.</p>
+            <p v-if="sessionState === 'waiting'">{{ $t('index.keeping_app_ready', { app: activeAppName }) }}</p>
+            <p v-else>{{ $t('index.app_running', { app: activeAppName }) }}</p>
           </div>
         </div>
 
-        <div class="apollo-session-details" aria-label="Session details">
+        <div class="apollo-session-details" :aria-label="$t('index.session_details')">
           <span><i class="fa-solid fa-window-maximize" aria-hidden="true"></i>{{ activeAppName }}</span>
         </div>
 
@@ -155,7 +155,7 @@
             :disabled="Boolean(actionBusy)"
             @click="disconnectCurrent">
             <i class="fa-solid fa-link-slash" aria-hidden="true"></i>
-            {{ actionBusy === 'disconnect' ? 'Disconnecting…' : 'Disconnect device' }}
+            {{ actionBusy === 'disconnect' ? $t('index.disconnecting') : $t('index.disconnect_device') }}
           </button>
           <button
             class="btn btn-apollo-danger"
@@ -163,7 +163,7 @@
             :disabled="Boolean(actionBusy)"
             @click="endSession">
             <i class="fa-solid fa-stop" aria-hidden="true"></i>
-            {{ actionBusy === 'end' ? 'Ending…' : 'End session' }}
+            {{ actionBusy === 'end' ? $t('index.ending') : $t('index.end_session') }}
           </button>
         </div>
       </article>
@@ -175,11 +175,11 @@
     <local-monitor-session></local-monitor-session>
 
     <footer class="apollo-overview-footer">
-      <span>{{ pairedClients.length }} {{ pairedClients.length === 1 ? 'device' : 'devices' }} paired</span>
+      <span>{{ $t('index.devices_paired', { count: pairedClients.length }, pairedClients.length) }}</span>
       <span aria-hidden="true">•</span>
-      <a href="./troubleshooting#logs">Debug log</a>
+      <a href="./troubleshooting#logs">{{ $t('index.debug_log') }}</a>
       <span aria-hidden="true">•</span>
-      <a href="./troubleshooting">Help &amp; Diagnostics</a>
+      <a href="./troubleshooting">{{ $t('index.help_diagnostics') }}</a>
       <span v-if="config && config.version" aria-hidden="true">•</span>
       <span v-if="config && config.version">Sunshine 3D {{ config.version }}</span>
     </footer>
@@ -242,11 +242,11 @@
         return this.apps.find(app => app.uuid === this.currentApp) || null
       },
       activeAppName() {
-        return this.activeApp?.name || (this.currentApp ? 'Desktop' : 'Desktop session')
+        return this.activeApp?.name || (this.currentApp ? this.$t('index.desktop') : this.$t('index.desktop_session'))
       },
       sessionDeviceName() {
-        if (this.activeClient) return this.activeClient.name || 'remote device'
-        return 'your remote device'
+        if (this.activeClient) return this.activeClient.name || this.$t('index.remote_device')
+        return this.$t('index.your_remote_device')
       },
       sessionState() {
         if (this.activeClient) return 'streaming'
@@ -275,117 +275,123 @@
       },
       virtualDisplayStatus() {
         if (!this.config) {
-          return { status: this.loading ? 'Checking' : 'Automatic', tone: 'neutral', description: 'Sunshine 3D will use the best available display for the device.' }
+          return { status: this.loading ? this.$t('index.status_checking') : this.$t('_common.auto'), tone: 'neutral', description: this.$t('index.private_display_auto_desc') }
         }
-        const { label, tone, detail } = virtualDisplayStatus(this.config.vdisplayStatus)
-        return { status: label, tone, description: detail }
+        const { labelKey, tone, detailKey } = virtualDisplayStatus(this.config.vdisplayStatus)
+        return { status: this.$t(labelKey), tone, description: this.$t(detailKey) }
       },
       overallState() {
-        if (this.apiError || this.latestFatal) return { label: 'Needs attention', tone: 'danger' }
-        if (this.activeClient) return { label: 'Streaming', tone: 'active' }
-        if (this.currentApp) return { label: 'Reconnecting', tone: 'warning' }
-        if (this.loading) return { label: 'Checking', tone: 'neutral' }
-        return { label: 'Ready', tone: 'success' }
+        if (this.apiError || this.latestFatal) return { label: this.$t('index.status_needs_attention'), tone: 'danger' }
+        if (this.activeClient) return { label: this.$t('index.status_streaming'), tone: 'active' }
+        if (this.currentApp) return { label: this.$t('index.status_reconnecting'), tone: 'warning' }
+        if (this.loading) return { label: this.$t('index.status_checking'), tone: 'neutral' }
+        return { label: this.$t('index.status_ready'), tone: 'success' }
       },
       hero() {
         if (this.apiError || this.latestFatal) {
           return {
-            kicker: 'Host attention',
-            title: 'Sunshine 3D needs a quick check',
-            description: 'Open diagnostics for a plain view of the latest host issue.',
+            kicker: this.$t('index.hero_attention_kicker'),
+            title: this.$t('index.hero_attention_title'),
+            description: this.$t('index.hero_attention_desc'),
             icon: 'fa-triangle-exclamation',
-            primaryLabel: 'View diagnostics',
+            primaryLabel: this.$t('index.view_diagnostics'),
             primaryIcon: 'fa-stethoscope',
             primaryHref: './troubleshooting',
-            secondaryLabel: 'Open settings',
+            secondaryLabel: this.$t('index.open_settings'),
             secondaryHref: './config',
           }
         }
         if (this.activeClient) {
           return {
-            kicker: 'Live now',
-            title: `${this.activeClient.name || 'Your remote device'} is streaming`,
-            description: `${this.activeAppName} is the only active session on this PC.`,
+            kicker: this.$t('index.hero_live_kicker'),
+            title: this.activeClient.name ? this.$t('index.hero_live_title', { device: this.activeClient.name }) : this.$t('index.hero_live_title_unnamed'),
+            description: this.$t('index.hero_live_desc', { app: this.activeAppName }),
             icon: 'fa-vr-cardboard',
-            primaryLabel: 'Manage device',
+            primaryLabel: this.$t('index.manage_device'),
             primaryIcon: 'fa-mobile-screen-button',
             primaryHref: './pin',
-            secondaryLabel: 'Open Library',
+            secondaryLabel: this.$t('index.open_library'),
             secondaryHref: './apps',
           }
         }
         if (this.currentApp) {
           return {
-            kicker: 'Quick resume',
-            title: 'Session is ready to reconnect',
-            description: `${this.activeAppName} is being kept ready for your remote device.`,
+            kicker: this.$t('index.hero_resume_kicker'),
+            title: this.$t('index.hero_resume_title'),
+            description: this.$t('index.hero_resume_desc', { app: this.activeAppName }),
             icon: 'fa-clock-rotate-left',
-            primaryLabel: 'End session',
+            primaryLabel: this.$t('index.end_session'),
             primaryIcon: 'fa-stop',
             primaryHref: '',
-            secondaryLabel: 'Open Library',
+            secondaryLabel: this.$t('index.open_library'),
             secondaryHref: './apps',
           }
         }
         if (!this.pairedClients.length) {
           return {
-            kicker: 'Start here',
-            title: 'Pair your first device',
-            description: 'Connect through Moonlight 3D once, then this PC will be ready whenever you return.',
+            kicker: this.$t('index.hero_pair_kicker'),
+            title: this.$t('index.hero_pair_title'),
+            description: this.$t('index.hero_pair_desc'),
             icon: 'fa-link',
-            primaryLabel: 'Pair Moonlight 3D',
+            primaryLabel: this.$t('index.pair_moonlight'),
             primaryIcon: 'fa-qrcode',
             primaryHref: './pin',
-            secondaryLabel: 'Check settings',
+            secondaryLabel: this.$t('index.check_settings'),
             secondaryHref: './config',
           }
         }
         return {
-          kicker: 'Host online',
-          title: 'Ready for 3D',
-          description: 'Open Sunshine 3D in Moonlight 3D to start this PC’s single streaming session.',
+          kicker: this.$t('index.hero_ready_kicker'),
+          title: this.$t('index.hero_ready_title'),
+          description: this.$t('index.hero_ready_desc'),
           icon: 'fa-check',
-          primaryLabel: 'Pair another device',
+          primaryLabel: this.$t('index.pair_another_device'),
           primaryIcon: 'fa-plus',
           primaryHref: './pin',
-          secondaryLabel: 'Open Library',
+          secondaryLabel: this.$t('index.open_library'),
           secondaryHref: './apps',
         }
       },
       primaryIssue() {
         if (this.apiError) {
-          return { tone: 'danger', icon: 'fa-cloud-arrow-down', title: 'Host status is unavailable', message: this.apiError, action: 'Open diagnostics', href: './troubleshooting' }
+          return { tone: 'danger', icon: 'fa-cloud-arrow-down', title: this.$t('index.issue_host_unavailable'), message: this.apiError, action: this.$t('index.open_diagnostics'), href: './troubleshooting' }
         }
         if (this.latestFatal) {
-          return { tone: 'danger', icon: 'fa-circle-exclamation', title: 'Sunshine 3D reported a startup problem', message: this.latestFatal, action: 'View logs', href: './troubleshooting#logs' }
+          return { tone: 'danger', icon: 'fa-circle-exclamation', title: this.$t('index.issue_startup_problem'), message: this.latestFatal, action: this.$t('index.view_logs'), href: './troubleshooting#logs' }
         }
         if (this.virtualDisplayStatus.tone === 'danger' || this.virtualDisplayStatus.tone === 'warning') {
-          return { tone: 'warning', icon: 'fa-display', title: 'Private display needs attention', message: this.virtualDisplayStatus.description, action: 'Open display settings', href: './config#av' }
+          return { tone: 'warning', icon: 'fa-display', title: this.$t('index.issue_private_display'), message: this.virtualDisplayStatus.description, action: this.$t('index.open_display_settings'), href: './config#av' }
         }
         if (this.depthError) {
-          return { tone: 'warning', icon: 'fa-cubes', title: 'AI 3D is not ready', message: '2D streaming is still available while the depth engine is checked.', action: 'View diagnostics', href: './troubleshooting#logs' }
+          return { tone: 'warning', icon: 'fa-cubes', title: this.$t('index.issue_ai3d_title'), message: this.$t('index.issue_ai3d_desc'), action: this.$t('index.view_diagnostics'), href: './troubleshooting#logs' }
         }
         return null
       },
       readiness() {
         const streaming = this.latestFatal
-          ? { status: 'Needs attention', tone: 'danger', description: 'Resolve the startup issue before beginning a stream.' }
+          ? { status: this.$t('index.status_needs_attention'), tone: 'danger', description: this.$t('index.streaming_fatal_desc') }
           : this.activeClient
-            ? { status: 'Streaming', tone: 'active', description: `Sending ${this.activeAppName} to ${this.activeClient.name || 'your remote device'}.` }
+            ? {
+                status: this.$t('index.status_streaming'),
+                tone: 'active',
+                description: this.activeClient.name
+                  ? this.$t('index.streaming_active_desc', { app: this.activeAppName, device: this.activeClient.name })
+                  : this.$t('index.streaming_active_desc_unnamed', { app: this.activeAppName }),
+              }
             : this.encoderReady
-              ? { status: 'Ready', tone: 'success', description: 'Hardware video encoding is available for Moonlight 3D.' }
-              : { status: this.loading ? 'Checking' : 'Automatic', tone: 'neutral', description: 'Sunshine 3D chooses the best encoder when streaming begins.' }
+              ? { status: this.$t('index.status_ready'), tone: 'success', description: this.$t('index.streaming_ready_desc') }
+              : { status: this.loading ? this.$t('index.status_checking') : this.$t('_common.auto'), tone: 'neutral', description: this.$t('index.streaming_auto_desc') }
 
         const ai3d = this.depthError
-          ? { status: 'Needs attention', tone: 'warning', description: '2D remains available while the depth engine is checked.' }
+          ? { status: this.$t('index.status_needs_attention'), tone: 'warning', description: this.$t('index.ai3d_error_desc') }
           : this.depthReady
-            ? { status: 'Ready', tone: 'success', description: 'Real-time depth is loaded for AI 3D mode in Moonlight 3D.' }
-            : { status: this.loading ? 'Checking' : 'On demand', tone: 'neutral', description: 'Sunshine 3D prepares AI 3D when Moonlight 3D requests it.' }
+            ? { status: this.$t('index.status_ready'), tone: 'success', description: this.$t('index.ai3d_ready_desc') }
+            : { status: this.loading ? this.$t('index.status_checking') : this.$t('index.status_on_demand'), tone: 'neutral', description: this.$t('index.ai3d_on_demand_desc') }
 
         return [
-          { title: '2D streaming', icon: 'fa-display', ...streaming },
-          { title: 'AI 3D', icon: 'fa-cubes', ...ai3d },
-          { title: 'Private display', icon: 'fa-user-shield', ...this.virtualDisplayStatus },
+          { title: this.$t('index.card_2d_streaming'), icon: 'fa-display', ...streaming },
+          { title: this.$t('index.card_ai3d'), icon: 'fa-cubes', ...ai3d },
+          { title: this.$t('index.card_private_display'), icon: 'fa-user-shield', ...this.virtualDisplayStatus },
         ]
       },
     },
@@ -409,7 +415,7 @@
           this.apiError = ''
         } catch (error) {
           console.error(error)
-          this.apiError = 'Sunshine 3D could not refresh this overview. Check that the host service is still running.'
+          this.apiError = this.$t('index.overview_refresh_failed')
         } finally {
           this.loading = false
           this.refreshing = false
@@ -424,7 +430,7 @@
       },
       async postAction(url, body) {
         const result = await postJson(url, body)
-        if (result.status === false) throw new Error(result.error || 'Sunshine 3D could not complete the action')
+        if (result.status === false) throw new Error(result.error || this.$t('index.action_failed_fallback'))
         return result
       },
       async disconnectCurrent() {
@@ -442,7 +448,7 @@
       },
       async endSession() {
         if (this.actionBusy) return
-        if (!window.confirm('End the current session on this PC? The connected device will be disconnected.')) return
+        if (!window.confirm(this.$t('index.end_session_confirm'))) return
         this.actionBusy = 'end'
         this.actionError = ''
         try {

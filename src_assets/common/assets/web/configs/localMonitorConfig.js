@@ -49,36 +49,38 @@ export const rememberLocalMonitorTimingLimits = profiles => {
   }
 }
 
+// Each problem is a message descriptor { key, params } under config.local_monitor_error_*;
+// the page renders it with $t(error.key, error.params).
 export const validateLocalMonitorConfig = (config, refreshMillihz = monitorRefreshRates.get(config?.local_monitor_display_id), timing = monitorTimingLimits.get(Number(config?.local_monitor_ir_protocol))) => {
   if (!shutterMonitorSelected(config)) return []
   const errors = []
-  if (!config.local_monitor_display_id) errors.push('Select a physical monitor.')
-  if (!config.local_monitor_emitter_port?.trim()) errors.push('Select the emitter COM port.')
-  else if (!validLocalMonitorPort(config.local_monitor_emitter_port)) errors.push('The emitter port must be a COM port such as COM4.')
+  if (!config.local_monitor_display_id) errors.push({key: 'config.local_monitor_error_display'})
+  if (!config.local_monitor_emitter_port?.trim()) errors.push({key: 'config.local_monitor_error_port_missing'})
+  else if (!validLocalMonitorPort(config.local_monitor_emitter_port)) errors.push({key: 'config.local_monitor_error_port_invalid'})
   const protocolText = String(config.local_monitor_ir_protocol ?? '')
   if (!/^\d+$/.test(protocolText) || ![2, 4, 5, 6].includes(Number(protocolText))) {
-    errors.push('Glasses IR protocol must be NVIDIA 3D Vision (2), Sony (4), Panasonic (5), or Panasonic custom firmware (6).')
+    errors.push({key: 'config.local_monitor_error_protocol'})
   }
   const parsed = new Map()
   timing = validLocalMonitorTimingLimits(timing) && Number(timing.protocol) === Number(config.local_monitor_ir_protocol) ? timing : undefined
   const rate = Number(refreshMillihz)
   if (/^\d+$/.test(protocolText) && [2, 4, 5, 6].includes(Number(protocolText)) && !timing) {
-    errors.push('Emitter timing limits are unavailable. Refresh displays and ports before starting 3D.')
+    errors.push({key: 'config.local_monitor_error_timing_unavailable'})
   }
   const spacing = Number(config.local_monitor_signal_spacing_us)
   const validSpacing = Number.isInteger(spacing) && spacing >= (timing?.min_signal_spacing_us ?? 1) && spacing <= (timing?.max_signal_spacing_us ?? 1023)
   const minDuration = timing ? timing.min_duration_base_us + (validSpacing ? spacing : timing.min_signal_spacing_us) : 1
   const ranges = [
-    ['local_monitor_frame_delay_us', 'Shutter delay', timing?.min_delay_us ?? 1, timing?.max_delay_us ?? 32767],
-    ['local_monitor_frame_duration_us', 'Shutter duration (leave room for the emitter pulse)', minDuration, timing?.max_duration_us ?? 32767],
-    ['local_monitor_signal_spacing_us', 'IR signal spacing', timing?.min_signal_spacing_us ?? 1, timing?.max_signal_spacing_us ?? 1023],
-    ['local_monitor_eye_repeats', 'Refreshes per eye', 1, 4],
+    ['local_monitor_frame_delay_us', 'config.local_monitor_error_delay_range', timing?.min_delay_us ?? 1, timing?.max_delay_us ?? 32767],
+    ['local_monitor_frame_duration_us', 'config.local_monitor_error_duration_range', minDuration, timing?.max_duration_us ?? 32767],
+    ['local_monitor_signal_spacing_us', 'config.local_monitor_error_spacing_range', timing?.min_signal_spacing_us ?? 1, timing?.max_signal_spacing_us ?? 1023],
+    ['local_monitor_eye_repeats', 'config.local_monitor_error_repeats_range', 1, 4],
   ]
-  for (const [key, label, min, max] of ranges) {
+  for (const [key, message, min, max] of ranges) {
     const text = String(config[key] ?? '')
     const value = /^\d+$/.test(text) ? Number(text) : NaN
     if (!Number.isInteger(value) || value < min || value > max) {
-      errors.push(`${label} must be a whole number from ${min} to ${max}.`)
+      errors.push({key: message, params: {min, max}})
     } else {
       parsed.set(key, value)
     }
@@ -90,20 +92,20 @@ export const validateLocalMonitorConfig = (config, refreshMillihz = monitorRefre
     const repeats = parsed.get('local_monitor_eye_repeats')
     const maxWindow = timing?.max_window_us ?? 32767
     if (combined > maxWindow) {
-      errors.push(`Shutter delay plus shutter duration must not exceed ${maxWindow} µs.`)
+      errors.push({key: 'config.local_monitor_error_window', params: {max: maxWindow}})
     } else if (repeats !== undefined && Number.isFinite(rate) && rate > 0) {
       const interval = Math.round(1000000000 * repeats / rate)
       if (combined > interval) {
-        errors.push(`Shutter delay plus duration (${combined} µs) exceeds the selected monitor's ${interval} µs eye interval. Shorten the shutter window or increase Refreshes per eye.`)
+        errors.push({key: 'config.local_monitor_error_eye_interval', params: {combined, interval}})
       }
       const spacing = parsed.get('local_monitor_signal_spacing_us')
       if (timing && spacing !== undefined && duration + timing.min_period_tail_base_us + spacing > interval) {
-        errors.push(`Shutter duration plus the emitter close-pulse margin (${duration + timing.min_period_tail_base_us + spacing} µs) exceeds the selected monitor's ${interval} µs eye interval. Shorten the shutter duration or increase Refreshes per eye.`)
+        errors.push({key: 'config.local_monitor_error_close_margin', params: {needed: duration + timing.min_period_tail_base_us + spacing, interval}})
       }
       if (timing && spacing !== undefined && combined <= interval && duration + timing.min_period_tail_base_us + spacing <= interval) {
         const occupied = combined + timing.min_period_tail_base_us + spacing
         if (occupied >= interval) {
-          errors.push(`Shutter delay, duration and the emitter close-pulse margin (${occupied} µs) leave no time for current-eye presentation feedback in the selected monitor's ${interval} µs eye interval. Shorten the shutter window or increase Refreshes per eye.`)
+          errors.push({key: 'config.local_monitor_error_feedback', params: {occupied, interval}})
         }
       }
     }

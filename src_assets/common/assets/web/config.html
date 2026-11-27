@@ -266,14 +266,14 @@
   <main id="content" class="container settings-page">
     <header class="settings-page-header">
       <div>
-        <span class="page-eyebrow">Host controls</span>
-        <h1>Settings</h1>
-        <p>Everyday options are collected here. Technical controls remain available when you need them.</p>
+        <span class="page-eyebrow">{{ $t('config.settings_eyebrow') }}</span>
+        <h1>{{ $t('config.settings_title') }}</h1>
+        <p>{{ $t('config.settings_intro') }}</p>
       </div>
     </header>
 
     <div v-if="config" class="settings-layout form" @change.capture="markDirty" @input.capture="markDirty">
-      <aside class="settings-nav" aria-label="Settings sections">
+      <aside class="settings-nav" :aria-label="$t('config.settings_sections_label')">
         <button
           class="settings-nav-button"
           :class="{ active: currentTab === 'essential' }"
@@ -281,13 +281,13 @@
           @click="selectTab('essential')"
         >
           <i class="fas fa-sliders-h"></i>
-          Essentials
+          {{ $t('config.tab_essentials') }}
         </button>
 
-        <div class="settings-nav-label">More control</div>
+        <div class="settings-nav-label">{{ $t('config.settings_more_control') }}</div>
         <button class="settings-nav-button" type="button" @click="advancedOpen = !advancedOpen">
           <i class="fas fa-wrench"></i>
-          Advanced settings
+          {{ $t('config.settings_advanced_settings') }}
           <i class="fas fa-chevron-down chevron" :class="{ open: advancedOpen }"></i>
         </button>
 
@@ -301,7 +301,7 @@
             @click="selectTab(tab.id)"
           >
             <i :class="tabIcon(tab.id)"></i>
-            {{ tab.name }}
+            {{ $t(tab.nameKey) }}
           </button>
         </div>
       </aside>
@@ -311,9 +311,9 @@
         <header v-if="currentTab !== 'essential'" class="settings-panel-header">
           <div>
             <h2>{{ currentTabName }}</h2>
-            <p>Advanced host configuration. Changes apply to all future sessions.</p>
+            <p>{{ $t('config.settings_advanced_desc') }}</p>
           </div>
-          <span class="badge text-bg-secondary">Advanced</span>
+          <span class="badge text-bg-secondary">{{ $t('config.settings_advanced_badge') }}</span>
         </header>
 
         <essentials
@@ -372,26 +372,26 @@
     </div>
 
     <div v-else class="settings-loading">
-      <div><span class="spinner-border spinner-border-sm me-2"></span>Loading host settings…</div>
+      <div><span class="spinner-border spinner-border-sm me-2"></span>{{ $t('config.settings_loading') }}</div>
     </div>
 
     <div v-if="config" class="settings-savebar" role="status">
       <div class="save-state">
-        <strong v-if="restarted">Sunshine 3D is restarting</strong>
-        <strong v-else-if="saved">Settings saved</strong>
-        <strong v-else-if="dirty">Unsaved changes</strong>
-        <strong v-else>Settings are current</strong>
-        <span v-if="restarted">Reconnect in a moment</span>
-        <span v-else-if="saved">Restart to apply every change</span>
-        <span v-else>Stored on this PC</span>
+        <strong v-if="restarted">{{ $t('config.save_restarting') }}</strong>
+        <strong v-else-if="saved">{{ $t('config.save_saved') }}</strong>
+        <strong v-else-if="dirty">{{ $t('config.save_unsaved') }}</strong>
+        <strong v-else>{{ $t('config.save_current') }}</strong>
+        <span v-if="restarted">{{ $t('config.save_reconnect') }}</span>
+        <span v-else-if="saved">{{ $t('config.save_restart_to_apply') }}</span>
+        <span v-else>{{ $t('config.save_stored') }}</span>
       </div>
       <button class="btn-apollo-quiet" type="button" :disabled="saving" @click="save">
-        <i class="fas fa-save me-1"></i> Save
+        <i class="fas fa-save me-1"></i> {{ $t('_common.save') }}
       </button>
       <button class="btn-apollo-primary" type="button" :disabled="saving" @click="apply">
         <span v-if="saving" class="spinner-border spinner-border-sm me-1"></span>
         <i v-else class="fas fa-redo-alt me-1"></i>
-        Save & restart
+        {{ $t('config.save_and_restart') }}
       </button>
     </div>
   </main>
@@ -444,7 +444,7 @@
         tabs: [ // TODO: Move the options to each Component instead, encapsulate.
           {
             id: "essential",
-            name: "Essentials",
+            nameKey: "config.tab_essentials",
             options: {
               "sbs_reshade": "disabled",
               "sbs_3d_pop_strength": 1.75,
@@ -452,7 +452,7 @@
           },
           {
             id: "general",
-            name: "General",
+            nameKey: "config.tab_general",
             options: {
               "locale": "en",
               "sunshine_name": "",
@@ -467,7 +467,7 @@
           },
           {
             id: "input",
-            name: "Input",
+            nameKey: "config.tab_input",
             options: {
               "gamepad": "auto",
               "ds5_audio_haptics": "enabled",
@@ -486,7 +486,7 @@
           },
           {
             id: "av",
-            name: "Audio/Video",
+            nameKey: "config.tab_av",
             options: {
               "audio_sink": "",
               "virtual_sink": "",
@@ -501,7 +501,7 @@
           },
           {
             id: "local-display",
-            name: "Local display",
+            nameKey: "config.tab_local_display",
             options: {
               "local_display_surface": "ar_glasses",
               "local_ar_virtual_display_only": "enabled",
@@ -519,7 +519,7 @@
           },
           {
             id: "network",
-            name: "Network",
+            nameKey: "config.tab_network",
             options: {
               "address_family": "ipv4",
               "bind_address": "",
@@ -532,7 +532,7 @@
           },
           {
             id: "files",
-            name: "Config Files",
+            nameKey: "config.tab_files",
             options: {
               "file_apps": "",
               "credentials_file": "",
@@ -544,7 +544,7 @@
           },
           {
             id: "advanced",
-            name: "Advanced",
+            nameKey: "config.tab_advanced",
             options: {
               "fec_percentage": 20,
               "sbs_3d_max_encode_width": 8192,
@@ -552,7 +552,7 @@
           },
           {
             id: "nv",
-            name: "NVIDIA NVENC Encoder",
+            nameKey: "config.tab_nvenc",
             options: {
               "nvenc_preset": 1,
               "nvenc_twopass": "quarter_res",
@@ -576,7 +576,7 @@
         return this.tabs.filter((tab) => tab.id !== 'essential')
       },
       currentTabName() {
-        return this.tabs.find((tab) => tab.id === this.currentTab)?.name || 'Advanced settings'
+        return this.$t(this.tabs.find((tab) => tab.id === this.currentTab)?.nameKey || 'config.settings_advanced_settings')
       },
     },
     created() {
@@ -637,7 +637,7 @@
         .catch((e) => {
           console.error(e);
           this.config = null;
-          this.configError = `Could not load host settings: ${e.message || e}. Refresh the page to try again.`;
+          this.configError = this.$t('config.settings_load_failed', { reason: String(e.message || e) });
         });
     },
     methods: {
@@ -697,14 +697,14 @@
             rememberLocalMonitorDevices(context.devices || []);
             rememberLocalMonitorTimingLimits(context.timing_limits || []);
           } catch (reason) {
-            this.configError = `Could not load emitter timing limits for saving: ${reason}. Refresh the page and try again.`;
+            this.configError = this.$t('config.save_timing_limits_failed', { reason: String(reason) });
             this.saving = false;
             return false;
           }
         }
         const monitorErrors = validateLocalMonitorConfig(this.config);
         if (monitorErrors.length) {
-          this.configError = monitorErrors.join(' ');
+          this.configError = monitorErrors.map(error => this.$t(error.key, error.params)).join(' ');
           this.saving = false;
           this.selectTab('local-display');
           return false;
@@ -735,7 +735,7 @@
           return this.saved
         }).catch((e) => {
           console.error(e)
-          this.configError = `Settings were not saved: ${e.message || e}.`
+          this.configError = this.$t('config.save_failed', { reason: String(e.message || e) })
           return false
         }).finally(() => {
           this.saving = false

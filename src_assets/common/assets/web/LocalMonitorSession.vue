@@ -1,6 +1,8 @@
 <script setup>
-import {computed, onMounted, onUnmounted, ref} from 'vue'
+import {computed, inject, onMounted, onUnmounted, ref} from 'vue'
 import {getJson, postJson} from './api'
+
+const $t = inject('i18n').t
 
 // inventory: also read the host's monitors and serial ports, on the first read and on a forced
 // refresh only. The periodic read asks for session state alone, which costs the host nothing.
@@ -18,13 +20,15 @@ let inventoryWanted = props.inventory
 // On the home page the control appears only when the chosen surface can be used now: a configured
 // monitor, or approved AR glasses that are connected.
 const visible = computed(() => props.showWhenDisabled || (status.value?.enabled && status.value?.available) || status.value?.requested || status.value?.active || status.value?.error)
-const surfaceName = computed(() => ({ar_glasses: 'AR glasses', shutter_monitor: 'Shutter-glasses monitor'})[status.value?.surface] || 'Off')
+const surfaceName = computed(() => status.value?.surface === 'ar_glasses' ? $t('local_monitor_session.surface_ar_glasses') :
+  status.value?.surface === 'shutter_monitor' ? $t('local_monitor_session.surface_shutter_monitor') : $t('local_monitor_session.surface_off'))
 const introduction = computed(() => status.value?.surface === 'ar_glasses' ?
-  'Start 3D when you want to use the glasses connected to this PC. Return to 2D to restore your ordinary desktop.' :
+  $t('local_monitor_session.intro_ar_glasses') :
   status.value?.surface === 'shutter_monitor' ?
-    'Start 3D when you want to use the shutter glasses. Return to 2D to restore your ordinary desktop.' :
-    'No local display is chosen. Choose one in Local display settings, save, and restart Sunshine 3D.')
-const label = computed(() => error.value ? 'Status unavailable' : status.value?.error ? '3D stopped' : status.value?.active ? 'Presenting' : status.value?.requested ? 'Starting or waiting' : '2D desktop')
+    $t('local_monitor_session.intro_shutter_monitor') :
+    $t('local_monitor_session.intro_none'))
+const label = computed(() => error.value ? $t('local_monitor_session.status_unavailable') : status.value?.error ? $t('local_monitor_session.status_stopped') :
+  status.value?.active ? $t('local_monitor_session.status_presenting') : status.value?.requested ? $t('local_monitor_session.status_starting') : $t('local_monitor_session.status_2d_desktop'))
 const refresh = async (force = false) => {
   if (reading) {
     // A read already in flight may predate an action; make sure one more follows it.
@@ -43,7 +47,7 @@ const refresh = async (force = false) => {
     error.value = ''
   } catch (reason) {
     inventoryWanted = inventoryWanted || withInventory
-    error.value = `Could not read local display status: ${reason}`
+    error.value = $t('local_monitor_session.read_failed', {error: String(reason)})
   } finally {
     reading = false
     if (readAgain) {
@@ -74,7 +78,7 @@ const chooseSource = async source => {
     await postJson('./api/local-monitor', {action: 'source', source})
     await refresh(true)
   } catch (reason) {
-    actionError.value = `Could not switch the 3D source: ${reason}`
+    actionError.value = $t('local_monitor_session.source_failed', {error: String(reason)})
   } finally {
     sourceBusy.value = ''
   }
@@ -86,7 +90,8 @@ const control = async action => {
     await postJson('./api/local-monitor', {action})
     await refresh(true)
   } catch (reason) {
-    actionError.value = `Could not ${action === 'start' ? 'start 3D' : 'return to 2D'}: ${reason}`
+    actionError.value = action === 'start' ? $t('local_monitor_session.start_failed', {error: String(reason)}) :
+      $t('local_monitor_session.stop_failed', {error: String(reason)})
   } finally {
     busy.value = ''
   }
@@ -106,34 +111,37 @@ defineExpose({refresh})
   <section v-if="visible" class="monitor-session" aria-labelledby="monitor-session-heading">
     <div class="monitor-session-title">
       <div>
-        <h3 id="monitor-session-heading"><i class="fa-solid" :class="status?.surface === 'ar_glasses' ? 'fa-glasses' : 'fa-display'" aria-hidden="true"></i> Local 3D · {{ surfaceName }}</h3>
+        <h3 id="monitor-session-heading"><i class="fa-solid" :class="status?.surface === 'ar_glasses' ? 'fa-glasses' : 'fa-display'" aria-hidden="true"></i> {{ $t('local_monitor_session.heading', {surface: surfaceName}) }}</h3>
         <p>{{ introduction }}</p>
       </div>
       <span class="badge" :class="status?.error ? 'text-bg-danger' : status?.active && !error ? 'text-bg-success' : 'text-bg-secondary'" role="status">{{ label }}</span>
     </div>
     <p v-if="error" class="text-danger" role="alert">{{ error }}</p>
     <p v-if="actionError" class="text-danger" role="alert">{{ actionError }}</p>
-    <p v-if="status?.error && !actionError" class="text-danger" role="alert">3D stopped: {{ status.error }}</p>
-    <p v-if="!error && !status?.error && status?.requested && !status?.active" class="text-body-secondary">{{ status?.surface === 'ar_glasses' ? 'Waiting for the glasses to be connected and worn, or for local presentation ownership.' : 'Waiting for the selected monitor, emitter, or local presentation ownership.' }}</p>
-    <p v-if="!props.canStart" class="text-body-secondary">Save and restart Sunshine 3D to apply your local display changes before starting 3D.</p>
-    <div v-if="status?.enabled" class="monitor-session-source" role="group" aria-label="3D source">
-      <span>3D source</span>
+    <p v-if="status?.error && !actionError" class="text-danger" role="alert">{{ $t('local_monitor_session.stopped_error', {error: status.error}) }}</p>
+    <p v-if="!error && !status?.error && status?.requested && !status?.active" class="text-body-secondary">{{ status?.surface === 'ar_glasses' ? $t('local_monitor_session.waiting_ar_glasses') : $t('local_monitor_session.waiting_shutter_monitor') }}</p>
+    <p v-if="!props.canStart" class="text-body-secondary">{{ $t('local_monitor_session.restart_required') }}</p>
+    <div v-if="status?.enabled" class="monitor-session-source" role="group" :aria-label="$t('local_monitor_session.source_label')">
+      <span>{{ $t('local_monitor_session.source_label') }}</span>
       <div class="btn-group" role="group">
         <button type="button" class="btn btn-sm" :class="status?.source === 'host' ? 'btn-apollo-primary' : 'btn-outline-secondary'" :aria-pressed="status?.source === 'host'" :disabled="Boolean(sourceBusy) || Boolean(error)" @click="chooseSource('host')">Host 3D</button>
         <button type="button" class="btn btn-sm" :class="status?.source === 'game' ? 'btn-apollo-primary' : 'btn-outline-secondary'" :aria-pressed="status?.source === 'game'" :disabled="Boolean(sourceBusy) || Boolean(error)" @click="chooseSource('game')">Game 3D</button>
       </div>
-      <small>{{ status?.source === 'game' ? 'Shows the game\'s own stereo through ReShade with the Sunshine 3D add-on. Without a compatible game the picture is flat.' : 'Converts whatever is on the desktop with Sunshine\'s AI pipeline.' }}</small>
+      <small>{{ status?.source === 'game' ? $t('local_monitor_session.source_game_desc') : $t('local_monitor_session.source_host_desc') }}</small>
     </div>
     <div class="monitor-session-actions">
       <button type="button" class="btn btn-apollo-primary" :disabled="Boolean(busy) || !status?.enabled || status?.requested || !props.canStart || Boolean(error)" @click="control('start')">
-        {{ busy === 'start' ? 'Starting…' : 'Start 3D' }}
+        {{ busy === 'start' ? $t('local_monitor_session.starting') : $t('local_monitor_session.start_3d') }}
       </button>
       <button type="button" class="btn btn-outline-secondary" :disabled="Boolean(busy) || (!status?.requested && !status?.active)" @click="control('stop')">
-        {{ busy === 'stop' ? 'Returning…' : 'Return to 2D' }}
+        {{ busy === 'stop' ? $t('local_monitor_session.returning') : $t('local_monitor_session.return_2d') }}
       </button>
-      <a href="./config#local-display">Local display settings</a>
+      <a href="./config#local-display">{{ $t('local_monitor_session.settings_link') }}</a>
     </div>
-    <p class="monitor-session-shortcuts"><kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>3</kbd> toggles 3D. Use <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>0</kbd> to return to 2D.</p>
+    <i18n-t keypath="local_monitor_session.shortcuts" tag="p" class="monitor-session-shortcuts">
+      <template #toggle><kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>3</kbd></template>
+      <template #stop><kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>0</kbd></template>
+    </i18n-t>
   </section>
 </template>
 

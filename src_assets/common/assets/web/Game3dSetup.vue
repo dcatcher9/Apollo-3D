@@ -2,8 +2,8 @@
   <section id="game3d-setup" class="apollo-section" aria-labelledby="game3d-setup-title">
     <div class="apollo-section-heading">
       <div>
-        <p class="apollo-kicker">Game depth stereo</p>
-        <h2 id="game3d-setup-title">Game 3D setup</h2>
+        <p class="apollo-kicker">{{ $t('game3d_setup.kicker') }}</p>
+        <h2 id="game3d-setup-title">{{ $t('game3d_setup.title') }}</h2>
       </div>
       <span class="apollo-state-pill" :class="`is-${status.tone}`" role="status">
         <span class="apollo-state-dot" aria-hidden="true"></span>
@@ -12,118 +12,92 @@
     </div>
 
     <article class="apollo-readiness-card game3d-setup-card" :class="`is-${status.tone}`">
-      <h3>{{ setup?.detected ? setup.game_name || 'Detected game' : 'Launch a game in Game 3D mode' }}</h3>
+      <h3>{{ setup?.detected ? setup.game_name || $t('game3d_setup.detected_game') : $t('game3d_setup.launch_prompt') }}</h3>
       <p v-if="setup?.detected && setup.executable" class="game3d-executable">{{ setup.executable }}</p>
-      <p v-if="gameDirectory && !isTextGame" class="game3d-executable">Setup folder: <code>{{ gameDirectory }}</code></p>
+      <p v-if="gameDirectory && !isTextGame" class="game3d-executable">{{ $t('game3d_setup.setup_folder') }} <code>{{ gameDirectory }}</code></p>
       <p>{{ status.description }}</p>
       <p v-if="textProtection" class="game3d-text-protection" :class="`is-${textProtection}`" role="status">
-        <span class="game3d-text-protection-label">{{ textProtection === 'game' ? 'Game text' : 'Fallback' }}</span>
+        <span class="game3d-text-protection-label">{{ textProtection === 'game' ? $t('game3d_setup.text_protection_game') : $t('game3d_setup.text_protection_fallback') }}</span>
         {{ setup.text_protection_detail }}
       </p>
 
       <template v-if="canDecide && isTextGame">
         <p v-if="!textGameApproved && setup.chosen" class="game3d-hint">
-          You chose this application for conversion. Sunshine 3D converts its picture with its own depth and keeps its text
-          readable{{ usesTextHelper ? ', with a small text helper loaded into it only while it runs' : ' from the picture alone' }}.
-          Nothing is written into its folder. It takes effect at once and again each time the application starts.
+          {{ usesTextHelper ? $t('game3d_setup.chosen_hint_helper') : $t('game3d_setup.chosen_hint_picture') }}
         </p>
-        <p v-else-if="!textGameApproved && usesTextHelper" class="game3d-hint">
-          This looks like a 2D text game, which has no depth of its own. Sunshine 3D converts its picture with its own depth and
-          uses a small text helper, loaded into the game only while it runs, to keep the game's text readable. Nothing is written into the
-          game's folder. Choose it only for an application you recognize as a single-player game. It takes effect at once and
-          again each time the game starts.
-        </p>
-        <p v-else-if="!textGameApproved" class="game3d-hint">
-          This looks like a 2D text game, which has no depth of its own and composes its text itself. Sunshine 3D converts its
-          picture with its own depth and keeps the text readable from the picture alone. Nothing is loaded into the game or
-          written into its folder. It takes effect at once and again each time the game starts.
-        </p>
+        <p v-else-if="!textGameApproved && usesTextHelper" class="game3d-hint">{{ $t('game3d_setup.text_game_hint_helper') }}</p>
+        <p v-else-if="!textGameApproved" class="game3d-hint">{{ $t('game3d_setup.text_game_hint_picture') }}</p>
         <div class="game3d-actions">
           <button v-if="!textGameApproved" class="btn btn-apollo-primary" type="button" :disabled="Boolean(busy)" @click="decide('install')">
-            {{ busy === 'install' ? 'Saving…' : 'Convert this game' }}
+            {{ busy === 'install' ? $t('game3d_setup.saving') : $t('game3d_setup.convert_game') }}
           </button>
           <button v-if="setup.state !== 'declined'" class="btn btn-apollo-quiet" type="button" :disabled="Boolean(busy)" @click="decide('never')">
-            {{ busy === 'never' ? 'Saving…' : textGameApproved ? 'Stop for this game' : 'Never for this game' }}
+            {{ busy === 'never' ? $t('game3d_setup.saving') : textGameApproved ? $t('game3d_setup.stop_for_game') : $t('game3d_setup.never_for_game') }}
           </button>
         </div>
         <p v-if="setup.state === 'current'" class="game3d-hint">
-          {{ usesTextHelper ? 'Stopping ends the conversion at once; a helper already loaded stays in the game until it closes.' : 'Stopping ends the conversion at once.' }}
+          {{ usesTextHelper ? $t('game3d_setup.stop_hint_helper') : $t('game3d_setup.stop_hint') }}
         </p>
         <p v-if="error" class="game3d-error" role="alert">{{ error }}</p>
       </template>
 
       <template v-else-if="canDecide">
-        <p v-if="needsReShade" class="game3d-hint">
-          Installing writes ReShade 6.8.0 with full add-on support (<code>dxgi.dll</code>, <code>ReShade.ini</code>) and the
-          Sunshine 3D add-on into the setup folder above, for this executable only. Choose it only for an application you
-          recognize as a single-player game. It takes effect the next time you launch the game.
-        </p>
-        <p v-else class="game3d-hint">
-          ReShade is already installed here. Installing the missing Sunshine 3D add-on copies it and its license into the
-          add-on folder that this game's <code>ReShade.ini</code> names, disables ReShade's Generic Depth add-on and enables
-          Game 3D there, and keeps the files it changes in <code>Sunshine3D-backups</code> in the setup folder. Once
-          installed, the add-on is updated automatically after the game exits. It takes effect the next time you launch the
-          game.
-        </p>
+        <i18n-t v-if="needsReShade" keypath="game3d_setup.install_reshade_hint" tag="p" class="game3d-hint">
+          <template #dll><code>dxgi.dll</code></template>
+          <template #ini><code>ReShade.ini</code></template>
+        </i18n-t>
+        <i18n-t v-else keypath="game3d_setup.install_addon_hint" tag="p" class="game3d-hint">
+          <template #ini><code>ReShade.ini</code></template>
+          <template #backups><code>Sunshine3D-backups</code></template>
+        </i18n-t>
         <div class="game3d-actions">
           <button class="btn btn-apollo-primary" type="button" :disabled="Boolean(busy)" @click="decide('install')">
-            {{ busy === 'install' ? 'Saving…' : setup.state === 'declined' ? 'Set up this game' : 'Install for this game' }}
+            {{ busy === 'install' ? $t('game3d_setup.saving') : setup.state === 'declined' ? $t('game3d_setup.set_up_game') : $t('game3d_setup.install_for_game') }}
           </button>
           <button v-if="setup.state === 'ready_to_install'" class="btn btn-apollo-quiet" type="button" :disabled="Boolean(busy)" @click="decide('never')">
-            {{ busy === 'never' ? 'Saving…' : 'Never for this game' }}
+            {{ busy === 'never' ? $t('game3d_setup.saving') : $t('game3d_setup.never_for_game') }}
           </button>
         </div>
         <p v-if="error" class="game3d-error" role="alert">{{ error }}</p>
       </template>
 
       <p v-if="setup?.detected && !isTextGame && !['anti_cheat', 'ready_to_install', 'declined'].includes(setup.state)" class="game3d-hint">
-        Setup leaves your running game open. New or updated components take effect the next time you launch the game.
+        {{ $t('game3d_setup.running_game_hint') }}
       </p>
 
       <details v-if="showManualSetup" class="game3d-instructions">
-        <summary>Manual setup</summary>
-        <p v-if="!needsReShade && !needsAddon">Close the game before manually repairing or updating an existing add-on.</p>
-        <p v-if="showRuntimeFallback">
-          For a fresh game folder without ReShade or another proxy DLL, install the ReShade runtime first from PowerShell:
-        </p>
+        <summary>{{ $t('game3d_setup.manual_setup') }}</summary>
+        <p v-if="!needsReShade && !needsAddon">{{ $t('game3d_setup.manual_close_game') }}</p>
+        <p v-if="showRuntimeFallback">{{ $t('game3d_setup.manual_runtime_intro') }}</p>
         <pre v-if="showRuntimeFallback"><code>{{ runtimeInstallCommand }}</code></pre>
-        <p v-if="showRuntimeFallback">
-          This runtime installer preserves existing files and stops on conflicts or anti-cheat. For an existing ReShade installation, use
-          <a href="https://reshade.me/#download" target="_blank" rel="noopener noreferrer">ReShade setup with full add-on support</a>.
-          Resolve any reported proxy conflict while preserving the existing proxy DLLs.
-        </p>
-        <p>Once ReShade with full add-on support is installed, install the bundled Sunshine 3D add-on from PowerShell:</p>
+        <i18n-t v-if="showRuntimeFallback" keypath="game3d_setup.manual_runtime_note" tag="p">
+          <template #link>
+            <a href="https://reshade.me/#download" target="_blank" rel="noopener noreferrer">{{ $t('game3d_setup.manual_reshade_setup_link') }}</a>
+          </template>
+        </i18n-t>
+        <p>{{ $t('game3d_setup.manual_addon_intro') }}</p>
         <pre><code>{{ installCommand }}</code></pre>
-        <p v-if="needsHostDirectory">Replace &lt;hostdir&gt; with your Sunshine 3D installation folder.</p>
-        <p>Launch the game again after setup. In ReShade, open Add-ons → Sunshine 3D and check Enable Game 3D if stereo remains unavailable.</p>
+        <p v-if="needsHostDirectory">{{ $t('game3d_setup.manual_replace_hostdir', { hostdir: hostDirPlaceholder }) }}</p>
+        <p>{{ $t('game3d_setup.manual_launch_again', { menu: reshadeAddonMenu, option: reshadeEnableOption }) }}</p>
       </details>
 
       <p v-else-if="setup?.detected && !isTextGame && ['current', 'updated'].includes(setup.state)" class="game3d-hint">
-        If the game remains 2D after its next launch, confirm ReShade has full add-on support and Enable Game 3D is selected under Add-ons → Sunshine 3D.
+        {{ $t('game3d_setup.still_2d_hint', { menu: reshadeAddonMenu, option: reshadeEnableOption }) }}
       </p>
     </article>
 
     <article v-if="choosable.length" class="apollo-readiness-card game3d-setup-card game3d-choosable">
-      <h3>Convert a 2D game yourself</h3>
-      <p>
-        {{ choosable.length === 1 ? 'This application was' : 'These applications were' }} in front on the streamed display, and
-        Sunshine 3D does not take {{ choosable.length === 1 ? 'it' : 'them' }} for a 2D game by itself. If you are playing a 2D game
-        there, such as a visual novel, you can have it converted all the same.
-      </p>
-      <p class="game3d-hint">
-        Sunshine 3D then converts the application's picture with its own depth while it is in front and keeps its text readable.
-        Where the text helper can follow the text, it is loaded into the application only while it runs. Nothing is written into
-        its folder. Choose only an application you recognize as a single-player game. It takes effect at once and again each
-        time the application starts, and you can stop it here at any time.
-      </p>
+      <h3>{{ $t('game3d_setup.choosable_title') }}</h3>
+      <p>{{ $t('game3d_setup.choosable_desc', { count: choosable.length }, choosable.length) }}</p>
+      <p class="game3d-hint">{{ $t('game3d_setup.choosable_hint') }}</p>
       <ul class="game3d-choosable-list">
         <li v-for="application in choosable" :key="application.executable">
           <div>
-            <strong>{{ application.game_name || 'Application' }}</strong>
+            <strong>{{ application.game_name || $t('game3d_setup.application') }}</strong>
             <p class="game3d-executable">{{ application.executable }}</p>
           </div>
           <button class="btn btn-apollo-quiet" type="button" :disabled="Boolean(busy)" @click="choose(application)">
-            {{ busy === application.executable ? 'Saving…' : 'Convert this application' }}
+            {{ busy === application.executable ? $t('game3d_setup.saving') : $t('game3d_setup.convert_application') }}
           </button>
         </li>
       </ul>
@@ -141,7 +115,9 @@ export default {
   },
   emits: ['update'],
   data() {
-    return { busy: '', error: '', chooseError: '' }
+    // ReShade's menu and option names as the add-on shows them, and the commands' folder
+    // placeholder, stay untranslated inside the translated sentences.
+    return { busy: '', error: '', chooseError: '', reshadeAddonMenu: 'Add-ons → Sunshine 3D', reshadeEnableOption: 'Enable Game 3D', hostDirPlaceholder: '<hostdir>' }
   },
   computed: {
     isTextGame() {
@@ -196,39 +172,40 @@ export default {
       return `& ${quote(script)} -GameExecutable ${quote(this.setup?.executable || '')}${allowRunning}`
     },
     status() {
-      if (!this.setup) return { label: 'Checking', tone: 'neutral', description: 'Checking Game 3D setup status.' }
+      const $t = (...args) => this.$t(...args)
+      if (!this.setup) return { label: $t('game3d_setup.status_checking'), tone: 'neutral', description: $t('game3d_setup.checking_desc') }
       if (this.setup.state === 'unavailable') {
-        return { label: this.setup.detected ? 'Setup unavailable' : 'Unavailable', tone: this.setup.detected ? 'warning' : 'neutral', description: this.setup.detail || 'Game detection or setup is unavailable. Refresh to try again.' }
+        return { label: this.setup.detected ? $t('game3d_setup.status_setup_unavailable') : $t('game3d_setup.status_unavailable'), tone: this.setup.detected ? 'warning' : 'neutral', description: this.setup.detail || $t('game3d_setup.unavailable_desc') }
       }
       if (!this.setup.active && !this.setup.detected) {
-        return { label: 'On demand', tone: 'neutral', description: 'Choose Game 3D in Moonlight 3D, then launch your game fullscreen. Sunshine 3D offers to install ReShade and its Game 3D add-on for that game, or only the add-on where ReShade is already installed; nothing is written into a game folder until you confirm it here. An installed add-on is kept matched to this host automatically.' }
+        return { label: $t('game3d_setup.status_on_demand'), tone: 'neutral', description: $t('game3d_setup.on_demand_desc') }
       }
       if (!this.setup.detected) {
-        return { label: 'Waiting for a game', tone: 'neutral', description: this.setup.detail || 'Game 3D is active. Launch your game fullscreen on the streamed display to check its setup.' }
+        return { label: $t('game3d_setup.status_waiting'), tone: 'neutral', description: this.setup.detail || $t('game3d_setup.waiting_desc') }
       }
       const states = {
-        ready_to_install: { label: 'Ready to set up', tone: 'warning', description: 'Sunshine 3D can set up Game 3D for this executable. Nothing is written until you confirm.' },
-        declined: { label: 'Not set up', tone: 'neutral', description: 'You chose not to set up this game. Sunshine 3D does not change its folder.' },
-        anti_cheat: { label: 'Not offered', tone: 'neutral', description: 'Anti-cheat detected, so Sunshine 3D does not install ReShade for this game.' },
-        missing_reshade: { label: 'ReShade missing', tone: 'warning', description: 'ReShade with full add-on support is not installed for this game.' },
-        missing_addon: { label: 'Add-on missing', tone: 'warning', description: 'ReShade is installed without the Sunshine 3D add-on.' },
-        installing: { label: 'Installing', tone: 'active', description: 'Installing the confirmed components beside this game.' },
-        installed: { label: 'Installed for next launch', tone: 'success', description: 'ReShade and the Sunshine 3D add-on are installed. They will activate the next time you launch the game.' },
-        current: { label: 'Add-on up to date', tone: 'success', description: 'The installed Sunshine 3D add-on matches this host.' },
-        update_available: { label: 'Update available', tone: 'warning', description: 'A matching bundled add-on update is available for this game.' },
-        update_pending: { label: 'Update pending', tone: 'warning', description: 'The matching bundled add-on update will be applied when its files are available. It will activate the next time you launch the game.' },
-        updated: { label: 'Add-on updated', tone: 'success', description: 'The Sunshine 3D add-on was updated from this host’s bundled copy. It will activate the next time you launch the game.' },
+        ready_to_install: { label: $t('game3d_setup.status_ready_to_install'), tone: 'warning', description: $t('game3d_setup.ready_to_install_desc') },
+        declined: { label: $t('game3d_setup.status_declined'), tone: 'neutral', description: $t('game3d_setup.declined_desc') },
+        anti_cheat: { label: $t('game3d_setup.status_anti_cheat'), tone: 'neutral', description: $t('game3d_setup.anti_cheat_desc') },
+        missing_reshade: { label: $t('game3d_setup.status_missing_reshade'), tone: 'warning', description: $t('game3d_setup.missing_reshade_desc') },
+        missing_addon: { label: $t('game3d_setup.status_missing_addon'), tone: 'warning', description: $t('game3d_setup.missing_addon_desc') },
+        installing: { label: $t('game3d_setup.status_installing'), tone: 'active', description: $t('game3d_setup.installing_desc') },
+        installed: { label: $t('game3d_setup.status_installed'), tone: 'success', description: $t('game3d_setup.installed_desc') },
+        current: { label: $t('game3d_setup.status_current'), tone: 'success', description: $t('game3d_setup.current_desc') },
+        update_available: { label: $t('game3d_setup.status_update_available'), tone: 'warning', description: $t('game3d_setup.update_available_desc') },
+        update_pending: { label: $t('game3d_setup.status_update_pending'), tone: 'warning', description: $t('game3d_setup.update_pending_desc') },
+        updated: { label: $t('game3d_setup.status_updated'), tone: 'success', description: $t('game3d_setup.updated_desc') },
       }
       if (this.isTextGame) {
         Object.assign(states, {
-          ready_to_install: { label: 'Ready to set up', tone: 'warning', description: 'Sunshine 3D can convert this game. Nothing is loaded or converted until you confirm.' },
-          declined: { label: 'Not set up', tone: 'neutral', description: 'You chose not to set up this game. Sunshine 3D loads nothing into it.' },
-          anti_cheat: { label: 'Not offered', tone: 'neutral', description: 'Anti-cheat detected, so Sunshine 3D loads nothing into this game.' },
-          current: { label: 'Converting', tone: 'success', description: 'Sunshine 3D converts this game while it is in front.' },
-          installed: { label: 'Approved', tone: 'success', description: 'The game is converted the next time it starts.' },
+          ready_to_install: { label: $t('game3d_setup.status_ready_to_install'), tone: 'warning', description: $t('game3d_setup.text_ready_to_install_desc') },
+          declined: { label: $t('game3d_setup.status_declined'), tone: 'neutral', description: $t('game3d_setup.text_declined_desc') },
+          anti_cheat: { label: $t('game3d_setup.status_anti_cheat'), tone: 'neutral', description: $t('game3d_setup.text_anti_cheat_desc') },
+          current: { label: $t('game3d_setup.status_converting'), tone: 'success', description: $t('game3d_setup.text_current_desc') },
+          installed: { label: $t('game3d_setup.status_approved'), tone: 'success', description: $t('game3d_setup.text_installed_desc') },
         })
       }
-      const status = states[this.setup.state] || { label: 'Checking', tone: 'neutral', description: 'Checking setup for the detected game.' }
+      const status = states[this.setup.state] || { label: $t('game3d_setup.status_checking'), tone: 'neutral', description: $t('game3d_setup.checking_detected_desc') }
       return { ...status, description: this.setup.detail || status.description }
     },
   },
@@ -246,7 +223,7 @@ export default {
         const body = await postJson('./api/game3d/setup/decision', { executable: this.setup.executable, identity: this.setup.identity, decision })
         if (body.setup) this.$emit('update', body.setup)
       } catch (reason) {
-        this.error = `Could not save this choice: ${reason.message || reason}`
+        this.error = this.$t('game3d_setup.save_choice_failed', { error: String(reason.message || reason) })
       } finally {
         this.busy = ''
       }
@@ -259,7 +236,7 @@ export default {
         const body = await postJson('./api/game3d/setup/decision', { executable: application.executable, identity: application.identity, decision: 'convert' })
         if (body.setup) this.$emit('update', body.setup)
       } catch (reason) {
-        this.chooseError = `Could not save this choice: ${reason.message || reason}`
+        this.chooseError = this.$t('game3d_setup.save_choice_failed', { error: String(reason.message || reason) })
       } finally {
         this.busy = ''
       }

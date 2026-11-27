@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { ApiError } from '../../src_assets/common/assets/web/api.js'
+import { ApiError, setApiTranslator } from '../../src_assets/common/assets/web/api.js'
 import {
   getOfflineSbsOverview,
   OFFLINE_SBS_JOBS_URL,
 } from '../../src_assets/common/assets/web/offline-sbs-api.js'
+import { english } from '../frontend/english_messages.mjs'
+
+// Pages install their locale's translator through init.js; these tests read the en text.
+setApiTranslator(english)
 
 function jsonResponse(status, payload) {
   return new Response(JSON.stringify(payload), {
@@ -59,7 +63,7 @@ test('overview rejects malformed JSON without treating it as preparation', { tim
   await assert.rejects(getOfflineSbsOverview(), error => {
     assert.ok(error instanceof ApiError)
     assert.equal(error.status, 200)
-    assert.match(error.message, /invalid JSON/)
+    assert.equal(error.message, english('api.invalid_json', { status: 200 }))
     return true
   })
 })

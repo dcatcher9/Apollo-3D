@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import vm from 'node:vm'
 import { getOfflineSbsOverview } from '../../src_assets/common/assets/web/offline-sbs-api.js'
+import { english } from '../frontend/english_messages.mjs'
 
 function actualPageMethod(source, beginMarker, endMarker, name, context) {
   const begin = source.indexOf(beginMarker)
@@ -36,6 +37,7 @@ test('the actual page replaces preparing metadata with terminal failure and leav
     isActive: () => false,
     jobId: job => job.id,
     apiMessage: error => error.message,
+    $t: english,
     loadSelectedJob: async () => { assert.fail('An unready catalog cannot select a job') },
   }
   const preparing = { available: false, initializing: true }

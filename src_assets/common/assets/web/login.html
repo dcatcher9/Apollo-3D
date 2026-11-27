@@ -14,7 +14,7 @@
             <img src="/images/logo-sunshine3d-45.png" alt="">
           </span>
           <div>
-            <p class="apollo-eyebrow">Sunshine 3D host</p>
+            <p class="apollo-eyebrow">{{ $t('welcome.eyebrow') }}</p>
             <h1 id="login-title">{{ $t('welcome.greeting') }}</h1>
           </div>
         </header>
@@ -30,7 +30,7 @@
               v-model="passwordData.password" required />
           </div>
           <div class="form-check">
-            <label for="rememberUsername" class="form-check-label">Remember username</label>
+            <label for="rememberUsername" class="form-check-label">{{ $t('login.remember_username') }}</label>
             <input type="checkbox" class="form-check-input" id="rememberUsername" v-model="rememberUsername"/>
           </div>
           <button type="submit" class="btn btn-apollo-primary w-100" v-bind:disabled="loading">
@@ -117,9 +117,9 @@
           this.loading = false;
           let reason = e.message;
           if (e instanceof ApiError) {
-            reason = e.status === 401 ? 'Please check your username and password' : `Server returned ${e.status}`;
+            reason = e.status === 401 ? this.$t('login.check_credentials') : this.$t('login.server_returned', { status: e.status });
           }
-          this.error = `Login failed: ${reason}`;
+          this.error = this.$t('login.failed', { reason });
         });
       },
     },

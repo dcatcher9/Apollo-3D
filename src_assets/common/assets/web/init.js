@@ -1,4 +1,5 @@
 import i18n from './locale'
+import { setApiTranslator } from './api'
 
 // must import even if not implicitly using here
 // https://github.com/aurelia/skeleton-navigation/issues/894
@@ -9,6 +10,7 @@ export function initApp(app) {
     //Wait for locale initialization, then render
     i18n().then(i18n => {
         app.use(i18n);
+        setApiTranslator(i18n.global.t);
         app.provide('i18n', i18n.global)
         app.mount('#app');
     });

@@ -6,7 +6,7 @@
  * interrupted job can only be restarted as a new job from its immutable settings after the job
  * manager reports the interruption and retained artifacts.
  */
-import { ApiError, requestJson } from './api.js'
+import { ApiError, apiText, requestJson } from './api.js'
 
 export const OFFLINE_SBS_JOBS_URL = '/api/offline-sbs/jobs'
 export const OFFLINE_SBS_BROWSE_URL = '/api/offline-sbs/browse'
@@ -14,7 +14,7 @@ export const OFFLINE_SBS_BROWSE_URL = '/api/offline-sbs/browse'
 function requireJobId(jobId) {
   const normalized = String(jobId ?? '').trim()
   if (!normalized) {
-    throw new ApiError('A conversion job id is required.')
+    throw new ApiError(apiText('offline_conversion.job_id_required'))
   }
   return encodeURIComponent(normalized)
 }
@@ -56,7 +56,7 @@ export async function browseOfflineSbsFiles(
   { path = '', type = 'file', signal } = {},
 ) {
   if (!['any', 'directory', 'file'].includes(type)) {
-    throw new ApiError('The file browser type is invalid.')
+    throw new ApiError(apiText('offline_conversion.browse_type_invalid'))
   }
   return requestJson(OFFLINE_SBS_BROWSE_URL, {
     method: 'POST',

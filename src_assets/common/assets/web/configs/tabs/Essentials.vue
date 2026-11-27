@@ -22,9 +22,9 @@ const driverState = computed(() => virtualDisplayStatus(props.vdisplay))
 
 const webAccess = computed(() => {
   const access = props.config.origin_web_ui_allowed || 'lan'
-  if (access === 'pc') return 'This PC only'
-  if (access === 'wan') return 'Local and remote networks'
-  return 'Local network'
+  if (access === 'pc') return $t('config.essentials_web_access_pc')
+  if (access === 'wan') return $t('config.essentials_web_access_wan')
+  return $t('config.essentials_web_access_lan')
 })
 
 function isEnabled(key, defaultValue = false) {
@@ -48,23 +48,23 @@ function setOnOff(key, event) {
       <div class="settings-card-heading">
         <div class="settings-icon"><i class="fas fa-desktop"></i></div>
         <div>
-          <p class="settings-eyebrow">Identity</p>
-          <h2>This PC</h2>
-          <p>How Sunshine 3D appears to paired devices.</p>
+          <p class="settings-eyebrow">{{ $t('config.essentials_identity_eyebrow') }}</p>
+          <h2>{{ $t('config.essentials_this_pc_title') }}</h2>
+          <p>{{ $t('config.essentials_this_pc_desc') }}</p>
         </div>
       </div>
 
       <label class="simple-field" for="host-name">
-        <span>Computer name</span>
+        <span>{{ $t('config.essentials_computer_name') }}</span>
         <input id="host-name" v-model="config.sunshine_name" class="form-control" type="text" placeholder="Sunshine 3D" />
       </label>
 
       <div class="simple-toggle-row">
         <div>
-          <strong>Show Sunshine 3D on the local network</strong>
-          <span>Lets Moonlight 3D find this PC automatically.</span>
+          <strong>{{ $t('config.essentials_discovery') }}</strong>
+          <span>{{ $t('config.essentials_discovery_desc') }}</span>
         </div>
-        <label class="form-switch" aria-label="Show Sunshine 3D on the local network">
+        <label class="form-switch" :aria-label="$t('config.essentials_discovery')">
           <input
             class="form-check-input"
             type="checkbox"
@@ -76,10 +76,10 @@ function setOnOff(key, event) {
 
       <div class="simple-toggle-row">
         <div>
-          <strong>Allow new devices to pair</strong>
-          <span>Turn this off when you do not want Sunshine 3D to accept pairing requests.</span>
+          <strong>{{ $t('config.essentials_pairing') }}</strong>
+          <span>{{ $t('config.essentials_pairing_desc') }}</span>
         </div>
-        <label class="form-switch" aria-label="Allow new devices to pair">
+        <label class="form-switch" :aria-label="$t('config.essentials_pairing')">
           <input
             class="form-check-input"
             type="checkbox"
@@ -94,28 +94,28 @@ function setOnOff(key, event) {
       <div class="settings-card-heading compact">
         <div class="settings-icon"><i class="fas fa-wave-square"></i></div>
         <div>
-          <p class="settings-eyebrow">Streaming</p>
-          <h2>Session behavior</h2>
+          <p class="settings-eyebrow">{{ $t('config.essentials_streaming_eyebrow') }}</p>
+          <h2>{{ $t('config.essentials_session_title') }}</h2>
         </div>
       </div>
 
       <label class="simple-field" for="resume-window">
-        <span>Reconnect window</span>
+        <span>{{ $t('config.essentials_reconnect_window') }}</span>
         <select id="resume-window" v-model.number="config.session_resume_grace" class="form-select">
           <option v-if="!resumeWindows.includes(Number(config.session_resume_grace))" :value="Number(config.session_resume_grace)">
-            Custom ({{ Math.round(Number(config.session_resume_grace) / 1000) }} seconds)
+            {{ $t('config.essentials_reconnect_custom', { seconds: Math.round(Number(config.session_resume_grace) / 1000) }) }}
           </option>
-          <option :value="0">Do not wait</option>
-          <option :value="30000">30 seconds</option>
-          <option :value="60000">1 minute</option>
-          <option :value="300000">5 minutes</option>
+          <option :value="0">{{ $t('config.essentials_reconnect_none') }}</option>
+          <option :value="30000">{{ $t('config.essentials_reconnect_30s') }}</option>
+          <option :value="60000">{{ $t('config.essentials_reconnect_1min') }}</option>
+          <option :value="300000">{{ $t('config.essentials_reconnect_5min') }}</option>
         </select>
-        <small>Keeps the single active session ready while a device reconnects.</small>
+        <small>{{ $t('config.essentials_reconnect_window_desc') }}</small>
       </label>
 
 
       <label class="simple-field" for="host-3d-strength">
-        <span>Host 3D strength</span>
+        <span>{{ $t('config.sbs_3d_pop_strength') }}</span>
         <input
           id="host-3d-strength"
           v-model.number="config.sbs_3d_pop_strength"
@@ -125,7 +125,7 @@ function setOnOff(key, event) {
           max="2"
           step="0.05"
         />
-        <small>Controls Sunshine-generated 3D separation and the base strength for new offline conversions. Game 3D strength is set in ReShade's Sunshine 3D add-on panel.</small>
+        <small>{{ $t('config.essentials_strength_desc') }}</small>
       </label>
 
       <Host3dSubtitleApps />
@@ -135,46 +135,46 @@ function setOnOff(key, event) {
       <div class="settings-card-heading compact">
         <div class="settings-icon"><i class="fas fa-shield-alt"></i></div>
         <div>
-          <p class="settings-eyebrow">Access</p>
-          <h2>Host controls</h2>
+          <p class="settings-eyebrow">{{ $t('config.essentials_access_eyebrow') }}</p>
+          <h2>{{ $t('config.essentials_host_controls_title') }}</h2>
         </div>
       </div>
 
       <div class="status-summary">
         <div>
-          <span>Web interface</span>
+          <span>{{ $t('config.essentials_web_interface') }}</span>
           <strong>{{ webAccess }}</strong>
         </div>
         <i class="fas fa-wifi" aria-hidden="true"></i>
       </div>
-      <p class="card-note">No sign-in is required on this PC or your trusted local network. WAN access still uses credentials if enabled.</p>
-      <a class="quiet-link" href="#network">Review network access <i class="fas fa-arrow-right"></i></a>
+      <p class="card-note">{{ $t('config.essentials_web_access_note') }}</p>
+      <a class="quiet-link" href="#network">{{ $t('config.essentials_review_network') }} <i class="fas fa-arrow-right"></i></a>
     </section>
 
     <section class="settings-card settings-card-wide">
       <div class="settings-card-heading compact">
         <div class="settings-icon"><i class="fas fa-vr-cardboard"></i></div>
         <div>
-          <p class="settings-eyebrow">3D readiness</p>
-          <h2>Virtual display</h2>
+          <p class="settings-eyebrow">{{ $t('config.essentials_3d_readiness_eyebrow') }}</p>
+          <h2>{{ $t('config.essentials_virtual_display_title') }}</h2>
         </div>
         <span class="status-pill" :class="`status-${driverState.tone}`">
-          <span class="status-dot"></span>{{ driverState.label }}
+          <span class="status-dot"></span>{{ $t(driverState.labelKey) }}
         </span>
       </div>
-      <p class="card-note driver-note">{{ driverState.detail }}</p>
+      <p class="card-note driver-note">{{ $t(driverState.detailKey) }}</p>
       <a v-if="driverState.tone !== 'success'" class="quiet-link" href="./troubleshooting">
-        Open diagnostics <i class="fas fa-arrow-right"></i>
+        {{ $t('config.essentials_open_diagnostics') }} <i class="fas fa-arrow-right"></i>
       </a>
     </section>
 
     <section class="settings-card settings-card-wide tray-setting">
       <div class="simple-toggle-row flush">
         <div>
-          <strong>Keep Sunshine 3D in the system tray</strong>
-          <span>Recommended for quick access and everyday background use.</span>
+          <strong>{{ $t('config.essentials_tray') }}</strong>
+          <span>{{ $t('config.essentials_tray_desc') }}</span>
         </div>
-        <label class="form-switch" aria-label="Keep Sunshine 3D in the system tray">
+        <label class="form-switch" :aria-label="$t('config.essentials_tray')">
           <input
             class="form-check-input"
             type="checkbox"

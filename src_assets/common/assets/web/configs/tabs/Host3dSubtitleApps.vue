@@ -1,6 +1,8 @@
 <script setup>
-import {onMounted, onUnmounted, ref} from 'vue'
+import {inject, onMounted, onUnmounted, ref} from 'vue'
 import {getJson, postJson} from '../../api'
+
+const $t = inject('i18n').t
 
 // Per-application Host 3D subtitle protection. The host applies a change to a running stream at
 // once and saves it itself, so this list is independent of the page's Save button.
@@ -15,7 +17,7 @@ const refresh = async () => {
     apps.value = body.apps || []
     error.value = ''
   } catch (reason) {
-    error.value = `Could not read the application list: ${reason}`
+    error.value = $t('config.subtitle_apps_read_failed', {reason: String(reason)})
   }
 }
 
@@ -25,10 +27,10 @@ const setEnabled = async (app, event) => {
   try {
     const body = await postJson('./api/host3d/subtitle-apps', {executable: app.executable, enabled})
     error.value = body.saved === false
-      ? 'The change is active now but could not be saved to the configuration file.'
+      ? $t('config.subtitle_apps_not_saved')
       : ''
   } catch (reason) {
-    error.value = `Could not change subtitle protection: ${reason}`
+    error.value = $t('config.subtitle_apps_change_failed', {reason: String(reason)})
   } finally {
     savingExecutable.value = ''
     await refresh()
@@ -48,23 +50,17 @@ onUnmounted(() => {
 <template>
   <div class="subtitle-apps">
     <div class="subtitle-apps-heading">
-      <strong>Host 3D subtitles per app</strong>
-      <span>
-        Protect the bottom text of a chosen app, such as a 2D game, during Host 3D. It is off for
-        every app until you turn it on here, and a change takes effect immediately. Browser videos
-        and registered video players are always protected.
-      </span>
+      <strong>{{ $t('config.subtitle_apps_title') }}</strong>
+      <span>{{ $t('config.subtitle_apps_desc') }}</span>
     </div>
     <div v-if="error" class="alert alert-danger">{{ error }}</div>
-    <p v-if="apps.length === 0" class="card-note">
-      No apps yet. Start a Host 3D stream and bring the app to the front; it will appear here.
-    </p>
+    <p v-if="apps.length === 0" class="card-note">{{ $t('config.subtitle_apps_empty') }}</p>
     <div v-for="app in apps" :key="app.executable" class="simple-toggle-row">
       <div>
         <strong>{{ app.name }}</strong>
         <span class="subtitle-app-path">{{ app.executable }}</span>
       </div>
-      <label class="form-switch" :aria-label="`Protect subtitles in ${app.name}`">
+      <label class="form-switch" :aria-label="$t('config.subtitle_apps_protect', {app: app.name})">
         <input
           class="form-check-input"
           type="checkbox"

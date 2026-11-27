@@ -44,7 +44,7 @@ const refresh = async () => {
     devices.value = body.devices || []
     error.value = ''
   } catch (reason) {
-    error.value = `Could not read AR display status: ${reason}`
+    error.value = $t('config.ar_status_read_failed', {reason: String(reason)})
   }
 }
 
@@ -54,7 +54,7 @@ const decide = async (device, decision) => {
     await postJson('./api/ar-glasses', {id: device.id, decision})
     await refresh()
   } catch (reason) {
-    error.value = `Could not save AR display decision: ${reason}`
+    error.value = $t('config.ar_decision_save_failed', {reason: String(reason)})
   } finally {
     savingId.value = ''
   }
@@ -78,11 +78,8 @@ onUnmounted(() => {
     aria-labelledby="ar-glasses-heading">
     <header class="ar-glasses-heading">
       <div>
-        <h2 id="ar-glasses-heading">Local AR glasses</h2>
-        <p class="text-body-secondary mb-0">
-          Sunshine 3D can present directly to glasses connected as a Windows display. Remote streaming
-          temporarily takes priority over local presentation.
-        </p>
+        <h2 id="ar-glasses-heading">{{ $t('config.ar_title') }}</h2>
+        <p class="text-body-secondary mb-0">{{ $t('config.ar_intro') }}</p>
       </div>
     </header>
 
@@ -103,7 +100,7 @@ onUnmounted(() => {
     </div>
     <div v-if="!props.embedded && devices.length === 0" class="ar-empty-state">
       <i class="fa-solid fa-glasses"></i>
-      No monitors have been discovered yet.
+      {{ $t('config.ar_empty') }}
     </div>
 
     <div class="ar-device-grid">
@@ -111,13 +108,13 @@ onUnmounted(() => {
         <div class="ar-display-header">
           <div class="ar-display-icon"><i class="fa-solid fa-glasses"></i></div>
           <div>
-            <h3>{{ device.name || 'Unknown display' }}</h3>
+            <h3>{{ device.name || $t('config.ar_unknown_display') }}</h3>
             <div class="ar-display-state">
               <span class="ar-status-dot" :class="{offline: !device.connected}"></span>
-              {{ device.connected ? 'Connected' : 'Not connected' }}
+              {{ device.connected ? $t('config.ar_connected') : $t('config.ar_not_connected') }}
             </div>
           </div>
-          <span v-if="device.autoDetected" class="badge rounded-pill text-bg-info ms-auto">Recognized</span>
+          <span v-if="device.autoDetected" class="badge rounded-pill text-bg-info ms-auto">{{ $t('config.ar_recognized') }}</span>
         </div>
 
         <div class="ar-mode-guide">
@@ -127,11 +124,11 @@ onUnmounted(() => {
           </div>
           <div>
             <strong>3840 × 1080</strong>
-            <span>AI 3D</span>
+            <span>{{ $t('config.ar_mode_ai_3d') }}</span>
           </div>
         </div>
 
-        <div class="ar-display-actions" role="group" :aria-label="`AR glasses decision for ${device.name}`">
+        <div class="ar-display-actions" role="group" :aria-label="$t('config.ar_decision_group', {name: device.name})">
           <button
             type="button"
             class="btn"
@@ -140,7 +137,7 @@ onUnmounted(() => {
             @click="decide(device, 'approved')">
             <span v-if="savingId === device.id" class="spinner-border spinner-border-sm" aria-hidden="true"></span>
             <i v-else class="fa-solid fa-check"></i>
-            Use as AR glasses
+            {{ $t('config.ar_use') }}
           </button>
           <button
             type="button"
@@ -148,15 +145,15 @@ onUnmounted(() => {
             :class="device.decision === 'rejected' ? 'btn-secondary' : 'btn-outline-secondary'"
             :disabled="savingId === device.id"
             @click="decide(device, 'rejected')">
-            Ignore
+            {{ $t('config.ar_ignore') }}
           </button>
         </div>
 
         <details class="ar-technical-details">
-          <summary>Technical details</summary>
+          <summary>{{ $t('config.ar_technical_details') }}</summary>
           <div class="font-monospace small text-body-secondary mt-2">{{ device.id }}</div>
           <div class="small text-body-secondary mt-1">
-            {{ device.autoDetected ? 'Sunshine 3D recognized this model automatically.' : 'This choice is saved for this monitor model.' }}
+            {{ device.autoDetected ? $t('config.ar_auto_detected') : $t('config.ar_choice_saved') }}
           </div>
         </details>
       </article>

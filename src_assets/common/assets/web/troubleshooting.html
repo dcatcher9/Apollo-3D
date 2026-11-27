@@ -328,32 +328,32 @@
   <Navbar></Navbar>
   <main id="content" class="container help-page">
     <header class="help-header">
-      <span class="page-eyebrow">Support</span>
-      <h1>Help &amp; debug log</h1>
-      <p>Check Sunshine 3D's health, inspect the live debug log, or recover the single active session.</p>
+      <span class="page-eyebrow">{{ $t('troubleshooting.eyebrow') }}</span>
+      <h1>{{ $t('troubleshooting.title') }}</h1>
+      <p>{{ $t('troubleshooting.intro') }}</p>
     </header>
 
-    <section class="health-strip" aria-label="Sunshine 3D health">
+    <section class="health-strip" :aria-label="$t('troubleshooting.health_label')">
       <div class="health-item">
         <div class="health-icon"><i class="fas fa-check"></i></div>
-        <div><span>Host service</span><strong>Running</strong></div>
+        <div><span>{{ $t('troubleshooting.host_service') }}</span><strong>{{ $t('troubleshooting.running') }}</strong></div>
       </div>
       <div class="health-item">
         <div class="health-icon" :class="{ idle: !sessionActive }"><i class="fas fa-satellite-dish"></i></div>
-        <div><span>Streaming session</span><strong>{{ sessionActive ? 'Active' : 'Idle' }}</strong></div>
+        <div><span>{{ $t('troubleshooting.streaming_session') }}</span><strong>{{ sessionActive ? $t('troubleshooting.session_active') : $t('troubleshooting.session_idle') }}</strong></div>
       </div>
       <div class="health-item">
         <div class="health-icon" :class="{ warning: !virtualDisplayReady }"><i class="fas fa-vr-cardboard"></i></div>
-        <div><span>Virtual display</span><strong>{{ virtualDisplayLabel }}</strong></div>
+        <div><span>{{ $t('troubleshooting.virtual_display') }}</span><strong>{{ virtualDisplayLabel }}</strong></div>
       </div>
     </section>
 
-    <h2 class="section-heading">Quick recovery</h2>
+    <h2 class="section-heading">{{ $t('troubleshooting.quick_recovery') }}</h2>
     <section class="recovery-grid">
       <article class="recovery-card" id="close_apps">
         <div class="recovery-card-icon"><i class="fas fa-stop"></i></div>
-        <h2>Stop the active session</h2>
-        <p>Ends the current stream and closes its application. Paired devices and settings are kept.</p>
+        <h2>{{ $t('troubleshooting.stop_session_title') }}</h2>
+        <p>{{ $t('troubleshooting.stop_session_desc') }}</p>
         <div class="inline-result alert-success" v-if="closeAppStatus === true">
           {{ $t('troubleshooting.force_close_success') }}
         </div>
@@ -362,20 +362,20 @@
         </div>
         <button class="btn-apollo-danger" :disabled="closeAppPressed || !sessionActive" @click="closeApp">
           <span v-if="closeAppPressed" class="spinner-border spinner-border-sm me-1"></span>
-          {{ sessionActive ? 'Stop session' : 'No active session' }}
+          {{ sessionActive ? $t('troubleshooting.stop_session') : $t('troubleshooting.no_active_session') }}
         </button>
       </article>
 
       <article class="recovery-card" id="restart">
         <div class="recovery-card-icon"><i class="fas fa-redo-alt"></i></div>
-        <h2>Restart Sunshine 3D</h2>
+        <h2>{{ $t('troubleshooting.restart_apollo') }}</h2>
         <p>{{ $t('troubleshooting.restart_apollo_desc') }}</p>
         <div class="inline-result alert-success" v-if="serverRestarting">
           {{ $t('troubleshooting.restart_apollo_success') }}
         </div>
         <button class="btn-apollo-primary" :disabled="serverQuitting || serverRestarting" @click="restart">
           <span v-if="serverRestarting" class="spinner-border spinner-border-sm me-1"></span>
-          Restart host
+          {{ $t('troubleshooting.restart_host') }}
         </button>
       </article>
     </section>
@@ -383,10 +383,10 @@
     <section class="details-card" id="logs" aria-labelledby="debug-log-heading">
       <header class="log-card-heading">
         <div>
-          <h2 id="debug-log-heading">Debug log</h2>
-          <p>Live host output refreshes automatically every five seconds.</p>
+          <h2 id="debug-log-heading">{{ $t('troubleshooting.debug_log') }}</h2>
+          <p>{{ $t('troubleshooting.debug_log_desc') }}</p>
         </div>
-        <span class="log-live-state">Auto refresh</span>
+        <span class="log-live-state">{{ $t('troubleshooting.auto_refresh') }}</span>
       </header>
       <div class="details-content">
         <div class="log-tools">
@@ -394,10 +394,10 @@
           <div class="log-actions">
             <input type="text" class="form-control form-control-sm" v-model="logFilter" :placeholder="$t('troubleshooting.logs_find')">
             <button class="btn btn-outline-secondary btn-sm" type="button" @click="refreshLogs">
-              <i class="fas fa-rotate me-1"></i> Refresh
+              <i class="fas fa-rotate me-1"></i> {{ $t('troubleshooting.refresh') }}
             </button>
             <button class="btn btn-outline-secondary btn-sm" type="button" @click="copyLogs">
-              <i class="fas fa-copy me-1"></i> Copy
+              <i class="fas fa-copy me-1"></i> {{ $t('troubleshooting.copy') }}
             </button>
           </div>
         </div>
@@ -406,7 +406,7 @@
     </section>
 
     <details class="details-card" :open="advancedRecoveryOpen" @toggle="advancedRecoveryOpen = $event.target.open">
-      <summary><i class="fas fa-tools"></i> Advanced recovery</summary>
+      <summary><i class="fas fa-tools"></i> {{ $t('troubleshooting.advanced_recovery') }}</summary>
       <div class="details-content advanced-actions">
         <article class="advanced-action" id="quit">
           <h3>{{ $t('troubleshooting.quit_apollo') }}</h3>
@@ -439,7 +439,7 @@
         return {
           closeAppPressed: false,
           closeAppStatus: null,
-          logs: 'Loading...',
+          logs: this.i18n.t('apps.loading'),
           logFilter: null,
           stopPolling: null,
           serverRestarting: false,
@@ -458,7 +458,7 @@
           return virtualDisplayStatus(this.vdisplayStatus).tone === 'success';
         },
         virtualDisplayLabel() {
-          return virtualDisplayStatus(this.vdisplayStatus).label;
+          return this.i18n.t(virtualDisplayStatus(this.vdisplayStatus).labelKey);
         },
         actualLogs() {
           if (!this.logFilter) return this.logs;
@@ -557,7 +557,7 @@
               this.serverQuitting = false;
               this.serverQuit = !(e instanceof ApiError);
               if (e instanceof ApiError) {
-                alert("Exit failed!");
+                alert(this.i18n.t('troubleshooting.quit_failed'));
               }
             });
           }

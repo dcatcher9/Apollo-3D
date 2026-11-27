@@ -14,7 +14,7 @@
             <img src="./images/logo-sunshine3d-45.png" alt="">
           </span>
           <div>
-            <p class="apollo-eyebrow">Sunshine 3D host</p>
+            <p class="apollo-eyebrow">{{ $t('welcome.eyebrow') }}</p>
             <h1 id="welcome-title">{{ $t('welcome.greeting') }}</h1>
           </div>
         </header>
@@ -47,7 +47,7 @@
           </div>
         </form>
       </div>
-      <aside class="apollo-resource-stack" aria-label="Resources">
+      <aside class="apollo-resource-stack" :aria-label="$t('resource_card.resources')">
         <Resource-Card></Resource-Card>
       </aside>
     </section>
@@ -81,7 +81,7 @@
     methods: {
       save() {
         if (this.passwordData.newPassword !== this.passwordData.confirmNewPassword) {
-          this.error = "Password mismatch";
+          this.error = this.$t('welcome.password_mismatch');
           return;
         };
         this.error = null;
@@ -97,7 +97,7 @@
           }
         }).catch((e) => {
           // Validation failures arrive as HTTP 400 with the reason in `error`.
-          this.error = e instanceof ApiError ? e.message : `Could not reach Sunshine 3D: ${e.message || e}`;
+          this.error = e instanceof ApiError ? e.message : this.$t('welcome.unreachable', { reason: String(e.message || e) });
         }).finally(() => {
           this.loading = false;
         });

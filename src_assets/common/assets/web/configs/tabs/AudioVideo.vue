@@ -69,9 +69,9 @@ const config = ref(props.config)
 
     <!-- SudoVDA Driver Status -->
     <div class="alert" :class="[driverState.tone === 'success' ? 'alert-success' : 'alert-warning']">
-      <i class="fa-solid fa-xl fa-circle-info"></i> SudoVDA Driver status: {{driverState.label}}
+      <i class="fa-solid fa-xl fa-circle-info"></i> {{ $t('config.av_driver_status', {status: $t(driverState.labelKey)}) }}
     </div>
-    <div class="form-text" v-if="driverState.tone !== 'success'">Please ensure SudoVDA driver is installed to the latest version and enabled properly.</div>
+    <div class="form-text" v-if="driverState.tone !== 'success'">{{ $t('config.av_driver_hint') }}</div>
 
   </div>
 </template>

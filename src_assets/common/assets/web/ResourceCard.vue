@@ -1,7 +1,7 @@
 <template>
     <section class="apollo-resource-card">
         <div>
-            <p class="apollo-eyebrow">Support</p>
+            <p class="apollo-eyebrow">{{ $t('resource_card.support') }}</p>
             <h2>{{ $t('resource_card.resources') }}</h2>
             <p>{{ $t('resource_card.resources_desc') }}</p>
             <div class="apollo-resource-actions">
@@ -17,7 +17,7 @@
     <!-- Legal -->
     <section class="apollo-resource-card">
         <div>
-            <p class="apollo-eyebrow">Project</p>
+            <p class="apollo-eyebrow">{{ $t('resource_card.project') }}</p>
             <h2>{{ $t('resource_card.legal') }}</h2>
             <p>{{ $t('resource_card.legal_desc') }}</p>
             <div class="apollo-resource-actions">

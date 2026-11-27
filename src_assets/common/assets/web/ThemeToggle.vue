@@ -9,9 +9,9 @@ defineProps({
 })
 
 const themes = [
-  { value: 'light', label: 'Light', icon: 'fa-sun' },
-  { value: 'dark', label: 'Dark', icon: 'fa-moon' },
-  { value: 'auto', label: 'System', icon: 'fa-circle-half-stroke' },
+  { value: 'light', labelKey: 'theme.light', icon: 'fa-sun' },
+  { value: 'dark', labelKey: 'theme.dark', icon: 'fa-moon' },
+  { value: 'auto', labelKey: 'theme.system', icon: 'fa-circle-half-stroke' },
 ]
 
 const instanceId = `apollo-theme-${getCurrentInstance().uid}`
@@ -62,10 +62,10 @@ onBeforeUnmount(() => {
       data-bs-toggle="dropdown"
       aria-expanded="false"
       :aria-controls="instanceId"
-      :aria-label="`Appearance: ${activeTheme.label}`"
-      title="Change appearance">
+      :aria-label="$t('theme.appearance_label', { theme: $t(activeTheme.labelKey) })"
+      :title="$t('theme.change_appearance')">
       <i class="fa-solid fa-fw" :class="activeTheme.icon" aria-hidden="true"></i>
-      <span v-if="!compact">Appearance</span>
+      <span v-if="!compact">{{ $t('theme.appearance') }}</span>
       <i v-if="!compact" class="fa-solid fa-chevron-down apollo-theme-chevron" aria-hidden="true"></i>
     </button>
     <ul :id="instanceId" class="dropdown-menu apollo-theme-menu">
@@ -77,7 +77,7 @@ onBeforeUnmount(() => {
           :aria-pressed="selectedTheme === theme.value"
           @click="chooseTheme(theme.value)">
           <i class="fa-solid fa-fw" :class="theme.icon" aria-hidden="true"></i>
-          <span>{{ theme.label }}</span>
+          <span>{{ $t(theme.labelKey) }}</span>
           <i v-if="selectedTheme === theme.value" class="fa-solid fa-check ms-auto" aria-hidden="true"></i>
         </button>
       </li>

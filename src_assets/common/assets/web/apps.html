@@ -581,10 +581,10 @@
     <template v-if="!showEditForm">
       <header class="library-header">
         <div>
-          <div class="library-eyebrow">Moonlight 3D library</div>
+          <div class="library-eyebrow">{{ $t('apps.library_eyebrow') }}</div>
           <h1 class="library-title">{{ $t('apps.applications_title') }}</h1>
           <p class="library-subtitle">
-            Choose what appears in Moonlight 3D and arrange your app library.
+            {{ $t('apps.library_subtitle') }}
           </p>
         </div>
         <button type="button" class="btn btn-primary btn-lg" @click="newApp" :disabled="actionDisabled">
@@ -592,19 +592,19 @@
         </button>
       </header>
 
-      <section class="library-toolbar" aria-label="Application library controls">
+      <section class="library-toolbar" :aria-label="$t('apps.library_controls')">
         <label class="library-search">
-          <span class="visually-hidden">Search applications</span>
+          <span class="visually-hidden">{{ $t('apps.search_label') }}</span>
           <i class="fas fa-magnifying-glass"></i>
           <input
             v-model.trim="searchQuery"
             class="form-control"
             type="search"
-            placeholder="Search apps"
+            :placeholder="$t('apps.search_placeholder')"
             autocomplete="off"
           />
         </label>
-        <span class="library-count">{{ filteredApps.length }} of {{ apps.length }}</span>
+        <span class="library-count">{{ $t('apps.shown_count', { shown: filteredApps.length, total: apps.length }) }}</span>
         <button
           type="button"
           class="btn btn-outline-secondary"
@@ -627,7 +627,7 @@
       </section>
 
       <p class="small text-body-secondary mb-3" v-if="!searchQuery && reorderableAppCount > 1">
-        <i class="fas fa-grip-vertical me-1"></i>Drag cards to change their order in Moonlight 3D.
+        <i class="fas fa-grip-vertical me-1"></i>{{ $t('apps.drag_hint') }}
       </p>
 
       <section class="library-grid" aria-live="polite">
@@ -655,10 +655,10 @@
             <span class="app-cover-letter" v-else>{{ appInitial(app) }}</span>
             <div class="app-card-badges">
               <span class="app-status-badge running" v-if="currentApp === app.uuid">
-                <i class="fas fa-circle fa-2xs"></i>Running
+                <i class="fas fa-circle fa-2xs"></i>{{ $t('apps.running') }}
               </span>
               <span class="app-status-badge" v-if="app.builtin">
-                <i class="fas fa-display"></i>Built in
+                <i class="fas fa-display"></i>{{ $t('apps.built_in') }}
               </span>
             </div>
             <span class="app-card-grip" v-if="!app.builtin && !searchQuery" :title="$t('apps.applications_reorder_desc')">
@@ -667,7 +667,7 @@
           </div>
           <div class="app-card-body">
             <div>
-              <h2 class="app-card-title" :title="app.name">{{ app.name || 'Untitled app' }}</h2>
+              <h2 class="app-card-title" :title="app.name">{{ app.name || $t('apps.untitled') }}</h2>
               <div class="app-card-meta" :title="app.cmd">{{ appCommandSummary(app) }}</div>
             </div>
             <div class="app-actions" @dragstart.stop.prevent>
@@ -698,7 +698,7 @@
                   data-bs-toggle="dropdown"
                   aria-expanded="false"
                   :disabled="actionDisabled"
-                  aria-label="More actions"
+                  :aria-label="$t('apps.more_actions')"
                 >
                   <i class="fas fa-ellipsis"></i>
                 </button>
@@ -726,7 +726,7 @@
           @dragover="onDragOver"
           @drop="onDropAtEnd"
         >
-          <span><i class="fas fa-arrow-down me-2"></i>Move to end</span>
+          <span><i class="fas fa-arrow-down me-2"></i>{{ $t('apps.move_to_end') }}</span>
         </div>
 
         <button
@@ -738,14 +738,14 @@
         >
           <span class="add-app-icon"><i class="fas fa-plus"></i></span>
           <strong>{{ $t('apps.add_new') }}</strong>
-          <span class="small mt-1">Add another app to Moonlight 3D</span>
+          <span class="small mt-1">{{ $t('apps.add_new_desc') }}</span>
         </button>
 
         <div class="library-empty" v-if="filteredApps.length === 0 && searchQuery">
           <i class="fas fa-magnifying-glass fa-2x mb-3"></i>
-          <strong>No applications found</strong>
-          <span class="small mt-1">Try a different name or command.</span>
-          <button type="button" class="btn btn-link mt-2" @click="searchQuery = ''">Clear search</button>
+          <strong>{{ $t('apps.no_results') }}</strong>
+          <span class="small mt-1">{{ $t('apps.no_results_desc') }}</span>
+          <button type="button" class="btn btn-link mt-2" @click="searchQuery = ''">{{ $t('apps.clear_search') }}</button>
         </div>
       </section>
     </template>
@@ -762,8 +762,8 @@
             <i class="fas fa-arrow-left"></i>
           </button>
           <div class="min-w-0">
-            <div class="library-eyebrow mb-1">{{ editForm.uuid ? 'Edit application' : 'New application' }}</div>
-            <h1 class="editor-title">{{ editForm.name || 'Untitled app' }}</h1>
+            <div class="library-eyebrow mb-1">{{ editForm.uuid ? $t('apps.edit_title') : $t('apps.new_title') }}</div>
+            <h1 class="editor-title">{{ editForm.name || $t('apps.untitled') }}</h1>
           </div>
         </div>
         <button
@@ -779,14 +779,14 @@
 
       <form @submit.prevent="save">
         <section class="editor-card">
-          <h2 class="editor-section-title">Application details</h2>
+          <h2 class="editor-section-title">{{ $t('apps.details_title') }}</h2>
           <div class="row g-4">
             <div class="col-8 col-sm-5 col-md-4 col-lg-3 mx-auto mx-md-0">
               <div class="editor-cover-preview" :style="{ '--edit-accent': appAccent(editForm) }">
                 <img v-if="editCoverPreview" :src="editCoverPreview" :alt="editForm.name" />
                 <span class="app-cover-letter" v-else>{{ appInitial(editForm) }}</span>
               </div>
-              <p class="form-text text-center mb-0 mt-2">Artwork shown in Moonlight 3D</p>
+              <p class="form-text text-center mb-0 mt-2">{{ $t('apps.artwork_desc') }}</p>
             </div>
             <div class="col-md-8 col-lg-9">
               <div class="mb-3">
@@ -803,7 +803,7 @@
               </div>
 
               <div class="mb-3 dropdown">
-                <label for="appImagePath" class="form-label">Artwork</label>
+                <label for="appImagePath" class="form-label">{{ $t('apps.artwork') }}</label>
                 <div class="input-group">
                   <input
                     type="text"
@@ -828,7 +828,7 @@
                 <div class="dropdown-menu dropdown-menu-end cover-finder overflow-hidden" aria-labelledby="findCoverToggle">
                   <div class="modal-header px-3 py-2">
                     <h3 class="h5 modal-title">{{ $t('apps.covers_found') }}</h3>
-                    <button type="button" class="btn-close" aria-label="Close" @click="closeCoverFinder"></button>
+                    <button type="button" class="btn-close" :aria-label="$t('apps.close_dialog')" @click="closeCoverFinder"></button>
                   </div>
                   <div class="modal-body cover-results px-3 pt-3" :class="{ busy: coverFinderBusy }">
                     <div class="row">
@@ -852,7 +852,7 @@
                         <span class="d-block text-nowrap text-center text-truncate mt-1">{{ cover.name }}</span>
                       </button>
                       <div class="col-12 text-center text-body-secondary py-4" v-if="!coverSearching && coverCandidates.length === 0">
-                        No covers found. Try adjusting the application name.
+                        {{ $t('apps.no_covers') }}
                       </div>
                     </div>
                   </div>
@@ -860,7 +860,7 @@
               </div>
 
               <div class="mb-3">
-                <label for="appCmd" class="form-label">Executable or command</label>
+                <label for="appCmd" class="form-label">{{ $t('apps.cmd') }}</label>
                 <input
                   type="text"
                   class="form-control monospace"
@@ -882,8 +882,8 @@
           <summary>
             <span class="advanced-summary-icon"><i class="fas fa-sliders"></i></span>
             <span>
-              <strong class="d-block">Advanced launch options</strong>
-              <small class="text-body-secondary">Process behavior and automation</small>
+              <strong class="d-block">{{ $t('apps.advanced_title') }}</strong>
+              <small class="text-body-secondary">{{ $t('apps.advanced_desc') }}</small>
             </span>
           </summary>
           <div class="advanced-content">
@@ -1055,8 +1055,8 @@
     "virtual_desktop.png": virtualDesktopCover
   }
 
+  // The page fills in the name in the page's language (appTemplate).
   const newApp = {
-    "name": "New App",
     "output": "",
     "cmd": "",
     "exclude-global-prep-cmd": false,
@@ -1236,8 +1236,11 @@
         })
         .catch(error => console.error("Could not load the app list", error));
       },
+      appTemplate() {
+        return { name: this.$t('apps.new_app_name'), ...JSON.parse(JSON.stringify(newApp)) };
+      },
       newApp() {
-        this.editForm = JSON.parse(JSON.stringify(newApp));
+        this.editForm = this.appTemplate();
         this.editCoverPreview = "";
         this.showEditForm = true;
       },
@@ -1265,7 +1268,7 @@
           return;
         }
         this.editForm = Object.assign(
-          JSON.parse(JSON.stringify(newApp)),
+          this.appTemplate(),
           JSON.parse(JSON.stringify(app))
         );
         this.editCoverPreview = this.coverPreviewUrl(app);
@@ -1295,12 +1298,12 @@
       },
       appCommandSummary(app) {
         if (app?.builtin && app?.["virtual-display"]) {
-          return "Private desktop for 3D";
+          return this.$t('apps.private_desktop_summary');
         }
 
         const command = app?.cmd?.toString().trim();
         if (!command) {
-          return "Desktop or no launch command";
+          return this.$t('apps.no_command_summary');
         }
 
         const unquoted = command.replace(/^"([^"]+)".*$/, "$1");
@@ -1328,13 +1331,13 @@
         }
 
         const resp = confirm(
-          "Are you sure to delete " + app.name + "?"
+          this.$t('apps.delete_confirm', { name: app.name })
         );
         if (resp) {
           this.actionDisabled = true;
           postJson("./api/apps/delete", { uuid: app.uuid })
           .catch((error) => {
-            alert("Delete failed! " + error.message);
+            alert(this.$t('apps.delete_failed', { error: error.message }));
           })
           .finally(() => {
             this.actionDisabled = false;

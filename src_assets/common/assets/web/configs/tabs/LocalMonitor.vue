@@ -28,25 +28,30 @@ const eyeRate = computed(() => {
 const setEnabled = (key, event) => {
   props.config[key] = event.target.checked ? 'enabled' : 'disabled'
 }
-const displayLabel = device => `${device.name || 'Physical monitor'} · ${device.width} × ${device.height} · ${(device.refresh_millihz / 1000).toFixed(2)} Hz${device.is_primary ? ' · Primary' : ''}`
+const displayLabel = device => $t(device.is_primary ? 'config.local_monitor_device_label_primary' : 'config.local_monitor_device_label', {
+  name: device.name || $t('config.local_monitor_display_id'),
+  width: device.width,
+  height: device.height,
+  refresh: (device.refresh_millihz / 1000).toFixed(2),
+})
 </script>
 
 <template>
   <section class="config-page local-monitor" aria-labelledby="local-monitor-heading">
     <header class="monitor-heading">
       <div>
-        <h2 id="local-monitor-heading">Shutter-glasses monitor</h2>
-        <p>Present Host 3D or Game 3D directly on a monitor with an Open3DOLED USB emitter and active shutter glasses.</p>
+        <h2 id="local-monitor-heading">{{ $t('config.local_display_shutter_monitor') }}</h2>
+        <p>{{ $t('config.local_monitor_intro') }}</p>
       </div>
     </header>
-    <p class="text-body-secondary">Save and restart Sunshine 3D to apply changes. Remote streaming temporarily takes priority over local presentation.</p>
-    <p class="text-body-secondary">Your selected monitor keeps its desktop position. Sunshine transfers its windows and cursor automatically for 3D and back for 2D; other monitors stay usable. Use borderless fullscreen for games that need to follow this handoff.</p>
+    <p class="text-body-secondary">{{ $t('config.local_monitor_restart_note') }}</p>
+    <p class="text-body-secondary">{{ $t('config.local_monitor_handoff_note') }}</p>
     <div class="monitor-fields">
       <div>
         <label for="local_monitor_display_id" class="form-label">{{ $t('config.local_monitor_display_id') }}</label>
         <select id="local_monitor_display_id" v-model="props.config.local_monitor_display_id" class="form-select">
-          <option value="">Select a monitor</option>
-          <option v-if="missingDevice" :value="props.config.local_monitor_display_id">Saved monitor · not connected</option>
+          <option value="">{{ $t('config.local_monitor_select') }}</option>
+          <option v-if="missingDevice" :value="props.config.local_monitor_display_id">{{ $t('config.local_monitor_saved_missing') }}</option>
           <option v-for="device in devices" :key="device.id" :value="device.id">{{ displayLabel(device) }}</option>
         </select>
         <p class="form-text">{{ $t('config.local_monitor_display_id_desc') }}</p>
@@ -60,24 +65,24 @@ const displayLabel = device => `${device.name || 'Physical monitor'} · ${device
       <div>
         <label for="local_monitor_eye_repeats" class="form-label">{{ $t('config.local_monitor_eye_repeats') }}</label>
         <select id="local_monitor_eye_repeats" v-model.number="props.config.local_monitor_eye_repeats" class="form-select">
-          <option :value="1">1 · alternate every refresh</option>
-          <option :value="2">2 · repeat each eye twice</option>
-          <option :value="3">3 · repeat each eye three times</option>
-          <option :value="4">4 · repeat each eye four times</option>
+          <option :value="1">{{ $t('config.local_monitor_repeats_1') }}</option>
+          <option :value="2">{{ $t('config.local_monitor_repeats_2') }}</option>
+          <option :value="3">{{ $t('config.local_monitor_repeats_3') }}</option>
+          <option :value="4">{{ $t('config.local_monitor_repeats_4') }}</option>
         </select>
-        <p class="form-text">{{ eyeRate ? `${eyeRate} stereo pairs per second at the selected Windows refresh rate.` : 'Each stereo pair contains one left and one right eye.' }} Repeating an eye provides a longer stable image for shutter calibration.</p>
+        <p class="form-text">{{ eyeRate ? $t('config.local_monitor_pair_rate', {rate: eyeRate}) : $t('config.local_monitor_pair_contents') }} {{ $t('config.local_monitor_eye_repeats_desc') }}</p>
       </div>
     </div>
 
     <details class="monitor-calibration">
-      <summary>Shutter-glasses calibration</summary>
-      <p class="form-text">Tune these values for your display and glasses. Timing values are in microseconds. Leave room for the emitter's IR pulse; delay and duration together must fit the assigned eye interval. Apply them with Save and restart.</p>
+      <summary>{{ $t('config.local_monitor_calibration') }}</summary>
+      <p class="form-text">{{ $t('config.local_monitor_calibration_desc') }}</p>
       <div class="monitor-fields">
         <div>
           <label for="local_monitor_ir_protocol" class="form-label">{{ $t('config.local_monitor_ir_protocol') }}</label>
           <select id="local_monitor_ir_protocol" v-model.number="props.config.local_monitor_ir_protocol" class="form-select">
-            <option v-if="![2, 4, 5, 6].includes(Number(props.config.local_monitor_ir_protocol))" :value="props.config.local_monitor_ir_protocol" disabled>Unsupported saved protocol ({{ props.config.local_monitor_ir_protocol }})</option>
-            <option :value="6">Panasonic custom firmware</option>
+            <option v-if="![2, 4, 5, 6].includes(Number(props.config.local_monitor_ir_protocol))" :value="props.config.local_monitor_ir_protocol" disabled>{{ $t('config.local_monitor_protocol_unsupported', {protocol: props.config.local_monitor_ir_protocol}) }}</option>
+            <option :value="6">{{ $t('config.local_monitor_protocol_panasonic_custom') }}</option>
             <option :value="5">Panasonic</option>
             <option :value="4">Sony</option>
             <option :value="2">NVIDIA 3D Vision</option>
@@ -87,17 +92,17 @@ const displayLabel = device => `${device.name || 'Physical monitor'} · ${device
         <div>
           <label for="local_monitor_frame_delay_us" class="form-label">{{ $t('config.local_monitor_frame_delay_us') }}</label>
           <input id="local_monitor_frame_delay_us" v-model.number="props.config.local_monitor_frame_delay_us" class="form-control" type="number" :min="timing?.min_delay_us ?? 1" :max="timing?.max_delay_us ?? 32767" step="1" />
-          <p class="form-text">{{ $t('config.local_monitor_frame_delay_us_desc') }} <span v-if="timing">Allowed: {{ timing.min_delay_us }}–{{ timing.max_delay_us }} µs.</span></p>
+          <p class="form-text">{{ $t('config.local_monitor_frame_delay_us_desc') }} <span v-if="timing">{{ $t('config.local_monitor_allowed_range', {min: timing.min_delay_us, max: timing.max_delay_us}) }}</span></p>
         </div>
         <div>
           <label for="local_monitor_frame_duration_us" class="form-label">{{ $t('config.local_monitor_frame_duration_us') }}</label>
           <input id="local_monitor_frame_duration_us" v-model.number="props.config.local_monitor_frame_duration_us" class="form-control" type="number" :min="minimumDuration" :max="timing?.max_duration_us ?? 32767" step="1" />
-          <p class="form-text">{{ $t('config.local_monitor_frame_duration_us_desc') }} <span v-if="timing">Allowed: {{ minimumDuration }}–{{ timing.max_duration_us }} µs.</span></p>
+          <p class="form-text">{{ $t('config.local_monitor_frame_duration_us_desc') }} <span v-if="timing">{{ $t('config.local_monitor_allowed_range', {min: minimumDuration, max: timing.max_duration_us}) }}</span></p>
         </div>
         <div>
           <label for="local_monitor_signal_spacing_us" class="form-label">{{ $t('config.local_monitor_signal_spacing_us') }}</label>
           <input id="local_monitor_signal_spacing_us" v-model.number="props.config.local_monitor_signal_spacing_us" class="form-control" type="number" :min="timing?.min_signal_spacing_us ?? 1" :max="timing?.max_signal_spacing_us ?? 1023" step="1" />
-          <p class="form-text">{{ $t('config.local_monitor_signal_spacing_us_desc') }} <span v-if="timing">Allowed: {{ timing.min_signal_spacing_us }}–{{ timing.max_signal_spacing_us }} µs.</span></p>
+          <p class="form-text">{{ $t('config.local_monitor_signal_spacing_us_desc') }} <span v-if="timing">{{ $t('config.local_monitor_allowed_range', {min: timing.min_signal_spacing_us, max: timing.max_signal_spacing_us}) }}</span></p>
         </div>
       </div>
       <label class="monitor-flip" for="local_monitor_flip_eyes">
@@ -112,11 +117,11 @@ const displayLabel = device => `${device.name || 'Physical monitor'} · ${device
     </details>
 
     <div v-if="validation.length" class="alert alert-warning mt-3" role="alert">
-      <ul class="mb-0"><li v-for="message in validation" :key="message">{{ message }}</li></ul>
+      <ul class="mb-0"><li v-for="error in validation" :key="error.key">{{ $t(error.key, error.params) }}</li></ul>
     </div>
-    <p class="monitor-note">Turn off G-SYNC, FreeSync and other variable-refresh settings for this monitor. The output alternates full-screen left and right images; the shared 3D pipeline supplies the stereo pair. Calibrate with the physical glasses before judging crosstalk.</p>
+    <p class="monitor-note">{{ $t('config.local_monitor_vrr_note') }}</p>
     <button type="button" class="btn btn-outline-secondary" @click="emit('refresh')">
-      <i class="fa-solid fa-rotate" aria-hidden="true"></i> Refresh displays and ports
+      <i class="fa-solid fa-rotate" aria-hidden="true"></i> {{ $t('config.local_monitor_refresh') }}
     </button>
   </section>
 </template>
