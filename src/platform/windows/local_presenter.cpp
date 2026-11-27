@@ -1743,7 +1743,10 @@ namespace platf::dxgi {
                     << " target="sv << target_display_name << " ["sv << target_rect.left << ','
                     << target_rect.top << "] "sv << output_width << 'x' << output_height << '@'
                     << capture_config.framerate << " mode="sv
-                    << (config.sbs_mode == ::video::SBS_AI ? "SBS AI"sv : "normal"sv)
+                    << (config.sbs_mode == ::video::SBS_AI       ? "SBS AI"sv :
+                        config.sbs_mode == ::video::SBS_GAME_SBS ? "Game 3D"sv :
+                        config.sbs_mode == ::video::SBS_GAME_MONO ? "Game 3D mono"sv :
+                                                                    "normal"sv)
                     << " color="sv << (config.hdr ? "HDR linear scRGB FP16"sv : "SDR Rec.709 BGRA8"sv)
                     << "; physical output is presentation-only."sv;
 
