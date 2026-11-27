@@ -13,10 +13,8 @@
 #include "host_sbs_eye_field.h"
 #include "host_sbs_gpu_trace.h"
 #include "host_sbs_shader_cache.h"
-#include "host_sbs_direct_glyph_engine.h"
-#include "host_sbs_direct_glyph_gpu.h"
 #include "host_sbs_depth_gpu_timing.h"
-#include "host_sbs_direct_glyph_publication_gpu.h"
+#include "host_sbs_direct_glyph_route.h"
 #include "host_sbs_publication_readback.h"
 #include "host_sbs_subtitle_publication.h"
 #include "host_sbs_v2_gpu_executor.h"
@@ -1052,33 +1050,14 @@ namespace models {
     bool subtitle_draw_copy_failure_logged = false;
 
     bool subtitle_selected_matte_commands = false;
-    host_sbs_direct_glyph_publication::resources_t subtitle_direct_glyph_publication;
-    host_sbs_direct_glyph_gpu::resources_t subtitle_direct_glyph_score;
-    display_snapshot_rgb8_analysis_gpu_v1::resources_t subtitle_direct_glyph_source;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> subtitle_direct_glyph_source_audit;
-    std::array<Microsoft::WRL::ComPtr<ID3D11ComputeShader>, host_sbs_shader_cache::direct_glyph_source_audit_specs.size()>
-      subtitle_direct_glyph_source_shaders;
-    nvinfer1::IExecutionContext *subtitle_direct_glyph_context = nullptr;
-    std::string subtitle_direct_glyph_engine_key;
-    struct subtitle_direct_glyph_job_t {
-      host_sbs_direct_glyph_publication::request_t publication;
-      host_sbs_direct_glyph_gpu::request_t score;
-      std::chrono::steady_clock::time_point deadline;
-    };
-    std::optional<subtitle_direct_glyph_job_t> subtitle_direct_glyph_job;
-    std::unique_ptr<platf::high_precision_timer> subtitle_file_poll_timer;
+    host_sbs_direct_glyph_route::route_t subtitle_direct_glyph;
+    // A completion whose Direct Glyph score was still pending resumes from here.
     struct subtitle_direct_glyph_tail_t {
       bool input_domain_reset;
       bool snapshot_requested;
     };
     std::optional<subtitle_direct_glyph_tail_t> subtitle_direct_glyph_tail;
-    bool subtitle_direct_glyph_enabled = false;
     bool subtitle_direct_glyph_requested = false;
-    bool subtitle_direct_glyph_late_score = false;
-    bool subtitle_direct_glyph_score_failed = false;
-    bool subtitle_direct_glyph_capture_plan = false;
-    bool subtitle_direct_glyph_score_retired = false;
-    std::string subtitle_direct_glyph_error;
     // Set by the first estimate_depth(); configuration accepted only before the first input.
     bool configuration_locked = false;
 
@@ -3713,7 +3692,7 @@ namespace models {
       // Queued userdata owns its state even if the old quarantine/retain path is taken.
       if (completion_test_gate) completion_test_gate->cancel_and_release();
 #endif
-      release_subtitle_direct_glyph();
+      subtitle_direct_glyph.release();
       auto &cuda = cuda_driver_api::get();
       bool cleanup_execution_ok = cuda.is_valid() && cuda_ctx;
       const auto retain_all_cuda_backing = [&]() noexcept {
@@ -3995,7 +3974,7 @@ namespace models {
       subtitle_conditioning_diagnostics.reset();
       completed_contour = {};
       completed_subtitle_conditioning_diagnostics = false;
-      subtitle_direct_glyph_error.clear();
+      subtitle_direct_glyph.clear_reported_failure();
       subtitle_selected_matte_commands = false;
       subtitle_contour_cbuffer.Reset();
       depth_coordinate_v2_cbuffer.Reset();
@@ -4046,215 +4025,51 @@ namespace models {
       release_parallax_v2_resources();
     }
 
-    [[nodiscard]] display_snapshot_rgb8_analysis_gpu_v1::request_t make_subtitle_direct_glyph_source_request() const {
-      display_snapshot_rgb8_analysis_gpu_v1::request_t source;
-      source.display_snapshot_band=subtitle_contour_source_snapshot.srv.Get();
-      // Descriptor-only parent reference; source pixels come from the joined snapshot above.
-      source.parent_raw_source=pending_root->submitted_source.Get();
-      source.actual_contour_constants96=subtitle_contour_cbuffer.Get();
-      source.actual_sct32=subtitle_contour_identity.srv.Get();
-      source.actual_final256=near_identical_transaction.dispatch.Get();
-      source.roi_ltrb={pending_root->input_region.left,pending_root->input_region.top,pending_root->input_region.right,pending_root->input_region.bottom};
-      source.frame=pending_root->frame_id;
-      source.observation_us=pending_root->observation_timestamp_us;
-      source.analysis_generation=pending_root->input_region.analysis_generation;
-      source.token=pending_root->transaction_token;
-      source.transfer_mode=static_cast<UINT>(pending_root->color_space);
-      return source;
-    }
-
-    [[nodiscard]] host_sbs_direct_glyph_publication::request_t make_subtitle_direct_glyph_publication_request(
-      const display_snapshot_rgb8_analysis_gpu_v1::request_t &source, UINT width, UINT crop
-    ) const {
-      host_sbs_direct_glyph_publication::request_t model;
-      model.width = width;
-      model.height = crop;
-      model.frame = source.frame;
-      model.observation_us = source.observation_us;
-      model.analysis_generation = source.analysis_generation;
-      model.token = source.token;
-      model.current_constants = source.actual_contour_constants96;
-      model.ocr = ocr_box_record_srv.Get();
-      model.sct = source.actual_sct32;
-      model.condition = subtitle_condition_params_srv.Get();
-      model.root = near_identical_transaction.srv.Get();
-      model.uip = subtitle_locator_state_srv.Get();
-      // Actual pending function result and work, never guessed from the root.
-      model.postprocess_mode = pending_near_identical_postprocess_mode();
-      model.expected_work = cuda_conditional_graph::work_flags_value(pending_root->subtitle_work);
-      model.use_empty_gate = true;
-      return model;
-    }
-
-    void report_subtitle_direct_glyph_failure(const std::string &error) {
-      if (subtitle_direct_glyph_error != error) {
-        BOOST_LOG(warning) << "Subtitle glyph protection unavailable for this observation: " << error;
-        subtitle_direct_glyph_error = error;
-      }
-    }
-
-    void dispatch_subtitle_direct_glyph(bool input_domain_reset) {
-      namespace glyph = host_sbs_direct_glyph_gpu;
-      namespace snapshot = display_snapshot_rgb8_analysis_gpu_v1;
-      subtitle_direct_glyph_score_retired = false;
-      subtitle_direct_glyph_source_audit.Reset();
-      const auto width = pending_root->input_region.width();
-      const auto height = pending_root->input_region.height();
-      const auto crop = subtitle_ocr_source_crop_height(width, height);
-      if (!crop || crop > height) return;
-      const auto source_request = make_subtitle_direct_glyph_source_request();
-      auto publication = make_subtitle_direct_glyph_publication_request(source_request, width, crop);
-      std::string error;
-      if (subtitle_direct_glyph_late_score) {
-        glyph::result_t discarded;
-        const auto status = subtitle_direct_glyph_score.poll(nullptr, discarded, error);
-        subtitle_direct_glyph_late_score = status == glyph::poll_status_e::pending;
-        subtitle_direct_glyph_score_failed = status == glyph::poll_status_e::failed;
-      }
-      const bool can_score = !subtitle_direct_glyph_late_score && !subtitle_direct_glyph_score_failed;
-      auto *schedule = subtitle_direct_glyph_publication.prepare_empty_gate(context.Get(), publication, error);
-      publication.use_empty_gate = schedule != nullptr;
-      const auto &shader = subtitle_direct_glyph_source_shaders;
-      const snapshot::program_t program {shader[0].Get(), shader[1].Get(), shader[2].Get(), shader[3].Get()};
-      std::optional<snapshot::direct_audit_submission_t> audit;
-      if (can_score && source_request.parent_raw_source && source_request.display_snapshot_band &&
-          subtitle_direct_glyph_source.ensure_direct_audit(device.Get(), width, height, height - crop, crop, error)) {
-        audit = subtitle_direct_glyph_source.queue_current_audit(context.Get(), program, source_request,
-                                                                 publication.uip, error, schedule);
-        if (audit && subtitle_direct_glyph_capture_plan) {
-          subtitle_direct_glyph_source_audit = audit->uip_envelope();
-        }
-      }
-      auto *work = subtitle_direct_glyph_publication.plan_direct(context.Get(), publication,
-                                                                  audit ? &*audit : nullptr, error);
-      if (!work) {
-        report_subtitle_direct_glyph_failure(error);
-        return;
-      }
-      const auto &region = pending_root->input_region;
-      const auto line_reference = pending_root->subtitle_line_policy == subtitle_line_policy_e::video_caption ?
-        subtitle_ocr_line_reference(width, height, region.source_width, region.source_height, region.left, region.top, region.is_video_region()) :
-        std::nullopt;
-      const glyph::request_t score {
-        .source_rgb = audit ? audit->display_snapshot_band() : nullptr, .work = work, .width = width, .band_height = crop,
-        .crop_top = height - crop, .token = publication.token,
-        .detector_caps = subtitle_direct_glyph_publication.direct_detector_caps(),
-        .video_caption_ocr = line_reference ? publication.ocr : nullptr,
-        .line_center_twice_source = line_reference ? static_cast<UINT>(std::max(0, line_reference->center_twice_source)) : 0u,
-        .generation = publication.analysis_generation, .frame = publication.frame,
+    // The pending observation's inputs to the Direct Glyph step; only dispatch reads them.
+    [[nodiscard]] host_sbs_direct_glyph_route::frame_t subtitle_direct_glyph_frame(const bool input_domain_reset) const {
+      return {
+        .region = pending_root->input_region,
+        .frame = pending_root->frame_id,
+        .observation_us = pending_root->observation_timestamp_us,
+        .token = pending_root->transaction_token,
         .subtitle_context_generation = pending_root->subtitle_context.generation,
-        .origin_x = pending_root->input_region.left, .origin_y = pending_root->input_region.top,
-        .color_domain = static_cast<UINT>(pending_root->color_space),
-        .reset_history = input_domain_reset,
+        .color_space = static_cast<UINT>(pending_root->color_space),
+        .video_caption = pending_root->subtitle_line_policy == subtitle_line_policy_e::video_caption,
+        .postprocess_mode = pending_near_identical_postprocess_mode(),
+        .expected_work = cuda_conditional_graph::work_flags_value(pending_root->subtitle_work),
+        .input_domain_reset = input_domain_reset,
+        .display_snapshot_band = subtitle_contour_source_snapshot.srv.Get(),
+        .parent_raw_source = pending_root->submitted_source.Get(),
+        .contour_constants = subtitle_contour_cbuffer.Get(),
+        .contour_identity = subtitle_contour_identity.srv.Get(),
+        .root_dispatch = near_identical_transaction.dispatch.Get(),
+        .root = near_identical_transaction.srv.Get(),
+        .ocr_box_record = ocr_box_record_srv.Get(),
+        .condition_params = subtitle_condition_params_srv.Get(),
+        .locator_state = subtitle_locator_state_srv.Get(),
       };
-      if (can_score) {
-        const auto status = subtitle_direct_glyph_score.try_submit(score, error);
-        if (status == glyph::submit_status_e::accepted) {
-          const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds {250};
-          subtitle_direct_glyph_job.emplace(subtitle_direct_glyph_job_t {publication, score, deadline});
-          return;
-        }
-        subtitle_direct_glyph_score_failed = status == glyph::submit_status_e::failed;
+    }
+
+    void dispatch_subtitle_direct_glyph(const bool input_domain_reset) {
+      if (const auto published = subtitle_direct_glyph.dispatch(
+            device.Get(), context.Get(), subtitle_direct_glyph_frame(input_domain_reset)
+          )) {
+        subtitle_selected_matte_commands = *published;
       }
-      if (!error.empty()) report_subtitle_direct_glyph_failure(error);
-      subtitle_selected_matte_commands = subtitle_direct_glyph_publication.publish_direct(context.Get(), publication, nullptr);
     }
 
     bool retire_subtitle_direct_glyph(const bool evaluation_wait) {
-      if (!subtitle_direct_glyph_job) return true;
-      namespace glyph = host_sbs_direct_glyph_gpu;
-      auto &job = *subtitle_direct_glyph_job;
-      std::string error;
-      glyph::result_t result;
-      auto status = subtitle_direct_glyph_score.poll(&job.score, result, error);
-      if (evaluation_wait && status == glyph::poll_status_e::pending) {
-        // Only the explicit file-fed evaluation entry waits. Live completion keeps the
-        // observation reserved while the next nonblocking poll proves the same lease.
-        if (!subtitle_file_poll_timer) {
-          subtitle_file_poll_timer = platf::create_high_precision_timer();
-        }
-        while (status == glyph::poll_status_e::pending && std::chrono::steady_clock::now() < job.deadline) {
-          if (subtitle_file_poll_timer && *subtitle_file_poll_timer) {
-            subtitle_file_poll_timer->sleep_for(std::chrono::microseconds {250});
-          } else {
-            std::this_thread::sleep_for(std::chrono::milliseconds {1});
-          }
-          status = subtitle_direct_glyph_score.poll(&job.score, result, error);
-        }
+      const auto retirement = subtitle_direct_glyph.retire(context.Get(), evaluation_wait);
+      if (retirement.selected_matte_commands) {
+        subtitle_selected_matte_commands = *retirement.selected_matte_commands;
       }
-      if (status == glyph::poll_status_e::pending) {
-        if (std::chrono::steady_clock::now() < job.deadline) return false;
-        // Publish the observation as unavailable while the late score keeps its private
-        // buffers until a subsequent poll can discard it without copying Work.
-        subtitle_direct_glyph_late_score = true;
-        error = "Direct glyph scoring did not retire before its deadline";
-      }
-      subtitle_direct_glyph_score_failed = status == glyph::poll_status_e::failed;
-      subtitle_direct_glyph_score_retired = status == glyph::poll_status_e::ready;
-      const bool ready = status == glyph::poll_status_e::ready;
-      if (ready) subtitle_direct_glyph_error.clear();
-      else if (!error.empty()) report_subtitle_direct_glyph_failure(error);
-      subtitle_selected_matte_commands = subtitle_direct_glyph_publication.publish_direct(
-        context.Get(), job.publication, ready ? result.alpha8.Get() : nullptr);
-      subtitle_direct_glyph_score.retire();
-      subtitle_direct_glyph_job.reset();
-      return true;
-    }
-
-    void release_subtitle_direct_glyph() noexcept {
-      if (!subtitle_direct_glyph_context) return;
-      host_sbs_direct_glyph_gpu::result_t discarded;
-      std::string error;
-      const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds {250};
-      // Retirement may run alongside flat rendering. A null request only checks the
-      // device fence (or the CUDA event) and discards the finished submission.
-      while (subtitle_direct_glyph_score.poll(nullptr, discarded, error) ==
-             host_sbs_direct_glyph_gpu::poll_status_e::pending &&
-             std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds {1});
-      }
-      const bool released = subtitle_direct_glyph_score.release();
-      std::lock_guard lock(g_trt_mutex);
-      recycle_or_quarantine_execution_context_locked(
-        subtitle_direct_glyph_engine_key, subtitle_direct_glyph_context, true, !released);
-      subtitle_direct_glyph_engine_key.clear();
+      return retirement.retired;
     }
 
     bool prepare_subtitle_direct_glyph(const subtitle_direct_glyph_configuration_t &cfg, std::string &error) {
-      if (cfg.shader_root.empty()) {
-        error = "Direct glyph shader root missing";
-        return false;
-      }
-      namespace audit = host_sbs_shader_cache;
-      const std::filesystem::path model_shaders(cfg.shader_root);
-      const auto sources = audit::snapshot_sources(model_shaders / audit::direct_glyph_source_audit_root, audit::direct_glyph_source_audit_specs);
-      if (!sources || audit::source_closure_sha256(sources) != audit::direct_glyph_source_audit_source_closure_sha256) {
-        error = "Direct glyph source audit closure mismatch";
-        return false;
-      }
-      for (std::size_t i = 0; i < subtitle_direct_glyph_source_shaders.size(); ++i) {
-        if (!create_shader(sources, audit::direct_glyph_source_audit_specs[i], subtitle_direct_glyph_source_shaders[i])) {
-          error = "Direct glyph source audit shader creation failed";
-          return false;
-        }
-      }
-      if (!subtitle_direct_glyph_publication.load_direct(device.Get(), model_shaders, error)) return false;
-      auto &cuda = cuda_driver_api::get();
-      nvinfer1::ICudaEngine *engine = nullptr;  // The global engine cache owns its lifetime.
-      if (!acquire_direct_glyph_context(shader_root.parent_path().parent_path(), cuda, cuda_device, engine,
-                                       subtitle_direct_glyph_context, subtitle_direct_glyph_engine_key)) {
-        release_subtitle_direct_glyph();
-        error = "Direct glyph TensorRT asset or execution context unavailable";
-        return false;
-      }
-      if (!subtitle_direct_glyph_score.prepare(device.Get(), context.Get(), model_shaders, cuda_ctx,
-                                              subtitle_direct_glyph_context, error)) {
-        release_subtitle_direct_glyph();
-        return false;
-      }
-      subtitle_direct_glyph_enabled = true;
-      subtitle_direct_glyph_capture_plan = cfg.capture_plan;
-      return true;
+      return subtitle_direct_glyph.prepare(
+        device.Get(), context.Get(), cfg, shader_root.parent_path().parent_path(), cuda_device, cuda_ctx, error
+      );
     }
 
     bool create_shader_texture(
@@ -5320,7 +5135,7 @@ namespace models {
 
       // Direct Glyph publishes after the contour passes, from the completion poll.
       subtitle_selected_matte_commands = false;
-      subtitle_direct_glyph_requested = subtitle_direct_glyph_enabled;
+      subtitle_direct_glyph_requested = subtitle_direct_glyph.enabled();
 
       // The native distance transform is consumed only by the diagnostic Gaussian proposal.
       if (!conditioning_diagnostics) {
@@ -5965,7 +5780,7 @@ namespace models {
       if (!completed.gpu_undecided) {
         gpu_undecided_requires_force_infer_refresh = false;
       }
-      if (subtitle_direct_glyph_enabled && !completed.subtitle_work_suppressed &&
+      if (subtitle_direct_glyph.enabled() && !completed.subtitle_work_suppressed &&
           completed_contour.subtitle_selected_matte && completed_contour.subtitle_selected_matte_receipt) {
         completed.subtitle_draw_publication = subtitle_draw_pool.publish(device.Get(), context.Get(), {
           depth_coordinate_v2_final_srv.Get(), depth_coordinate_v2_state_srv.Get(),
@@ -6063,7 +5878,7 @@ namespace models {
           r.subtitle_contour_history = completed_contour.history;
           r.subtitle_contour_source = completed_contour.source;
           r.subtitle_ocr_probability = completed_contour.probability;
-          if (subtitle_direct_glyph_enabled) {
+          if (subtitle_direct_glyph.enabled()) {
             r.subtitle_draw_publication = completed.subtitle_draw_publication;
             if (r.subtitle_draw_publication) {
               const auto &srv = r.subtitle_draw_publication->srv;
@@ -6223,7 +6038,7 @@ namespace models {
         }
         subtitle_direct_glyph_tail.reset();
         if (subtitle_selected_matte_commands) {
-          const auto selected = subtitle_direct_glyph_publication.views();
+          const auto selected = subtitle_direct_glyph.views();
           completed_contour.subtitle_selected_matte = selected.matte;
           completed_contour.subtitle_selected_matte_receipt = selected.receipt;
         }
@@ -7232,8 +7047,8 @@ namespace models {
         }
         // Direct Glyph's score buffers register on this drawing thread as depth starts, like the
         // tensors above, so the first caption does not pay for it.
-        if (subtitle_direct_glyph_enabled) {
-          subtitle_direct_glyph_score.register_interop_early();
+        if (subtitle_direct_glyph.enabled()) {
+          subtitle_direct_glyph.register_interop_early();
         }
       }
 
@@ -8093,7 +7908,7 @@ namespace models {
           .dump_forced = snapshot_raw_model_depth,
           .submitted_source = {},
         };
-        if (subtitle_direct_glyph_enabled) {
+        if (subtitle_direct_glyph.enabled()) {
           // Only the descriptor is needed after admission; immutable RGB is the OCR snapshot.
           pending_root->submitted_source = input_srv;
         }
@@ -8165,7 +7980,7 @@ namespace models {
   bool video_depth_estimator::configure_subtitle_direct_glyph(const subtitle_direct_glyph_configuration_t &cfg, std::string &error) {
     error.clear();
     if (!pimpl || !pimpl->is_operational() || pimpl->configuration_locked ||
-        pimpl->subtitle_direct_glyph_enabled) {
+        pimpl->subtitle_direct_glyph.enabled()) {
       error = "Direct glyph must configure once before first input";
       return false;
     }
@@ -8304,12 +8119,11 @@ namespace models {
 
   std::optional<subtitle_direct_glyph_diagnostic_views_t>
   video_depth_estimator::subtitle_direct_glyph_diagnostic_views_for_evaluation(std::uint64_t frame, std::uint64_t observation) const noexcept {
-    if (!pimpl || !pimpl->is_operational() || !pimpl->subtitle_direct_glyph_enabled || !pimpl->subtitle_selected_matte_commands ||
+    if (!pimpl || !pimpl->is_operational() || !pimpl->subtitle_direct_glyph.enabled() || !pimpl->subtitle_selected_matte_commands ||
         frame == 0u || observation == 0u) return std::nullopt;
     const auto &publication = pimpl->current_publication;
     if (pimpl->pending_root || publication.frame_id != frame || publication.observation_timestamp_us != observation ||
         !pimpl->publication_is_current(publication)) return std::nullopt;
-    const auto direct = pimpl->subtitle_direct_glyph_publication.views();
     const auto draw = pimpl->completed_subtitle_draw.lock();
     if (!draw) return std::nullopt;
     subtitle_direct_glyph_diagnostic_views_t result;
@@ -8318,18 +8132,13 @@ namespace models {
     result.selected_matte = draw->srv[subtitle_publication::matte];
     result.selected_receipt = draw->srv[subtitle_publication::receipt];
     result.ocr_record = pimpl->ocr_box_record_srv;
-    result.alpha8 = direct.alpha8;
-    result.work = direct.work;
-    result.source_audit = pimpl->subtitle_direct_glyph_source_audit;
-    if (pimpl->subtitle_direct_glyph_capture_plan && pimpl->subtitle_direct_glyph_score_retired) {
-      result.native_lines = pimpl->subtitle_direct_glyph_score.native_lines_for_evaluation();
-    }
+    pimpl->subtitle_direct_glyph.fill_diagnostic_views(result);
     return result;
   }
 
   std::filesystem::path video_depth_estimator::direct_glyph_engine_path_for_evaluation() const {
-    if (!pimpl || !pimpl->subtitle_direct_glyph_enabled) return {};
-    const auto &key = pimpl->subtitle_direct_glyph_engine_key;
+    if (!pimpl || !pimpl->subtitle_direct_glyph.enabled()) return {};
+    const auto &key = pimpl->subtitle_direct_glyph.engine_key();
     const auto delimiter = key.find(':');
     if (delimiter == std::string::npos) return {};
     return pimpl->shader_root.parent_path().parent_path() / key.substr(delimiter + 1);

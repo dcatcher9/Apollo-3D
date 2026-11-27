@@ -392,8 +392,10 @@ Convert Video use the same configuration, `canonical_configuration` in
 There is no rule-based fallback. If Direct Glyph cannot be prepared, or an observation's scoring
 fails or misses its deadline, that picture is ordinary Base stereo without glyph protection.
 
-The estimator owns the route in `dispatch_subtitle_direct_glyph` and
-`retire_subtitle_direct_glyph`. `src/host_sbs_direct_glyph_publication_gpu.h` plans the OCR work
+`src/host_sbs_direct_glyph_route.h` owns the route: each observation's dispatch and retirement,
+the model's context lease and the failure report. The estimator calls it from its completion tail
+through `dispatch_subtitle_direct_glyph` and `retire_subtitle_direct_glyph` and keeps the
+selected-matte command state. `src/host_sbs_direct_glyph_publication_gpu.h` plans the OCR work
 and publishes the matte, alpha8 and receipt. `src/host_sbs_direct_glyph_gpu.h` runs the model.
 The `direct_glyph_source_audit` closure group holds the source audit shaders under their own
 root, `shaders/directx/direct_glyph_source/`. The plan shader takes its bindings and source joins
