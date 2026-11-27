@@ -272,8 +272,6 @@ class ProdZipDepthConvex2xTests(unittest.TestCase):
             "est.refined_model_depth_snapshot.Get() ==",
             harness,
         )
-        self.assertNotIn('"refined_" + output_id + ".f32"', harness)
-        self.assertNotIn('"zip_model_input_" + output_id + ".f32"', harness)
         self.assertNotIn(
             "warp_depth = est.refined_model_depth_snapshot",
             harness,

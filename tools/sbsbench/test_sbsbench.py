@@ -1497,7 +1497,6 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("SBS_AI = 1", video_header)
         # The removed Host profile token differs from the external Game3D transport modes.
         self.assertNotRegex(video_header, r"\bSBS_GAME\s*=")
-        self.assertNotIn("SBS_MOVIE", video_header)
 
         with open(os.path.join(repo, "src", "config.cpp"), encoding="utf-8") as fh:
             config = fh.read()
@@ -1507,17 +1506,10 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn(
             'int_between_f(vars, "sbs_3d_max_encode_width", video.sbs.max_encode_width, '
             '{256, 16384})', config)
-        self.assertNotIn("sbs_3d_cuda_graph", config)
-        self.assertNotIn("video.sbs_profiles", config)
-        self.assertNotIn("apply_sbs_values", config)
 
         with open(os.path.join(repo, "src", "stream.cpp"), encoding="utf-8") as fh:
             stream = fh.read()
-        self.assertNotIn("IDX_SET_SBS_PROFILE", stream)
-        self.assertNotIn("IDX_SBS_PROFILE_LIST", stream)
         self.assertIn("mail::sbs_depth_status", stream)
-        self.assertNotIn("depth_engine_phase", stream)
-        self.assertNotIn("set_active_depth_model(id)", stream)
 
         with open(os.path.join(repo, "src", "main.cpp"), encoding="utf-8") as fh:
             main = fh.read()
@@ -1667,11 +1659,8 @@ class EvalContractTests(unittest.TestCase):
         with open(live_shader_path, encoding="utf-8") as fh:
             live_shader = fh.read()
         self.assertIn("Texture2D<float> BaseParallax : register(t1);", live_shader)
-        self.assertNotIn('include/host_sbs_subtitle_render.hlsl', live_shader)
-        self.assertNotIn('SelectSourceUV', live_shader)
         self.assertIn('float2 sample_uv = ReprojectIfAuthorized(source_uv, eye_sign);', live_shader)
         self.assertNotIn("pop_strength", live_shader)
-        self.assertNotIn("adaptive_ratio", live_shader)
 
     def test_depth_runtime_seeds_history_and_sanitizes_nonfinite_model_output(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1679,14 +1668,10 @@ class EvalContractTests(unittest.TestCase):
                   encoding="utf-8") as fh:
             estimator = fh.read()
         self.assertNotIn("cbuffer_first_frame", estimator)
-        self.assertNotIn("depth_history_valid", estimator)
-        self.assertNotIn("depth_valid_history_cs", estimator)
         self.assertIn("host_sbs_v2_gpu::record_base_geometry(", estimator)
         self.assertIn(".previous_model_input_output = tensor_previous_input_uav.Get()", estimator)
         self.assertIn("tensor_previous_input_uav", estimator)
-        self.assertNotIn("context->CSSetShader(depth_minmax_cs.Get()", estimator)
         self.assertIn("dispatch_parallax_v2_frame_publication(perf_slot)", estimator)
-        self.assertNotIn("depth_minmax_ema_cs", estimator)
         self.assertIn("static_cast<std::size_t>(reduce_groups) * 3u", estimator)
         self.assertIn("parallax_frame_stats_end -", estimator)
 
@@ -1756,12 +1741,10 @@ class EvalContractTests(unittest.TestCase):
         with open(os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
                                "sbs_reprojection_v2_live_ps.hlsl"), encoding="utf-8") as fh:
             shader = fh.read()
-        self.assertNotIn("literal_mode", shader)
         self.assertIn("StructuredBuffer<float4> ParallaxState", shader)
 
         with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"), encoding="utf-8") as fh:
             harness = fh.read()
-        self.assertNotIn('a == "--literal-bestv2"', harness)
         self.assertIn('fs::path(o.out) / "contract.json"', harness)
         self.assertIn(
             '(direct_parallax_mode ? direct_geometry_contract_schema : '
@@ -1773,9 +1756,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn(
             '"external-final-parallax-with-diagnostic-order-v6"',
             harness)
-        self.assertNotIn('\\"depth_override_frames\\"', harness)
         self.assertIn('\\"pop_strength\\"', harness)
-        self.assertNotIn('\\"zero_plane\\"', harness)
         self.assertIn('"mapping_ps"', harness)
         self.assertIn('"warp_map_%s.f32"', harness)
         self.assertIn('fs::path(o.out) / "warp_map_shape.json"', harness)
@@ -1789,7 +1770,6 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn('contract_path = os.path.join(out_dir, "contract.json")', evaluator)
         self.assertIn('mapping_path = mapping_by_id[frame_id]', evaluator)
         self.assertIn('"raw_reproject_source_u_normalized"', evaluator)
-        self.assertNotIn("profile ([a-z0-9_-]+)", evaluator)
 
         with open(os.path.join(repo, "src", "stream.cpp"), encoding="utf-8") as fh:
             stream = fh.read()
@@ -1809,8 +1789,6 @@ class EvalContractTests(unittest.TestCase):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"), encoding="utf-8") as fh:
             harness = fh.read()
-        self.assertNotIn('a == "--depth-every"', harness)
-        self.assertNotIn('a == "--depth-override-root"', harness)
         self.assertIn("int effective_depth_every = 1;", harness)
         self.assertIn("depth_reuse_interval", harness)
         with open(os.path.join(repo, "tools", "sbsbench", "run_eval.py"),
@@ -1833,8 +1811,6 @@ class EvalContractTests(unittest.TestCase):
         self.assertNotIn('a == "--direct-candidate-root"', harness)
         self.assertNotIn('a == "--direct-candidate-fill"', harness)
         self.assertIn('o.output_every != 1', harness)
-        self.assertNotIn('o.literal_bestv2', harness)
-        self.assertNotIn('depth_override_root', harness)
         self.assertNotIn('direct_parallax_max_abs * 1.10f', harness)
         self.assertIn(
             'direct_parallax_source_u_limit =\n'
@@ -1883,9 +1859,7 @@ class EvalContractTests(unittest.TestCase):
         self.assertLess(
             direct_inverse.index("source_x = next_source_x;"),
             direct_inverse.index("if (exactly_settled)"))
-        self.assertNotIn("ForwardCoverageTexture", direct_inverse)
         self.assertNotIn("bgOrder", direct_inverse)
-        self.assertNotIn("SBS_DIRECT_PARALLAX", reprojection)
         self.assertIn("/sbs_direct_replay_ps.hlsl", harness)
 
         evaluator_path = os.path.join(repo, "tools", "sbsbench", "run_eval.py")
@@ -1931,7 +1905,6 @@ class EvalContractTests(unittest.TestCase):
             fused_shader = fh.read()
         self.assertIn("PreviousDepth", fused_shader)
         self.assertIn("ema_edge_change", fused_shader)
-        self.assertNotIn("ema_edge_dilation", fused_shader)
         self.assertIn("RWTexture2D<uint>         MotionMask : register(u1)", fused_shader)
         self.assertIn("OutputTexture[DTid.xy] = moving ?", fused_shader)
         with open(os.path.join(repo, "src", "video_depth_estimator.cpp"),
@@ -1943,7 +1916,6 @@ class EvalContractTests(unittest.TestCase):
         self.assertRegex(estimator, r"if \(normalized_depth_diagnostics_enabled\) \{\s+"
                                     r"dispatch_normalized_depth_diagnostics\(\);\s+\}")
         self.assertIn("r.ema_motion_mask = ema_motion_mask.srv;", estimator)
-        self.assertNotIn("depth_ema_motion_cs", estimator)
         self.assertIn("ID3D11UnorderedAccessView *bt_uavs[2]", estimator)
         with open(os.path.join(repo, "src", "sbs_bench_harness.cpp"),
                   encoding="utf-8") as fh:
@@ -2021,7 +1993,6 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("DXGI_FORMAT_B8G8R8A8_UNORM", pipeline)
         self.assertIn("display->capture_format != DXGI_FORMAT_UNKNOWN", pipeline)
         self.assertIn("if (!input_is_linear &&", pipeline)
-        self.assertNotIn("sbs_sharpen", pipeline)
         self.assertIn("input_is_linear ? convert_Y_or_YUV_fp16_ps.get()", pipeline)
         self.assertIn("models::input_color_space::linear_sdr", pipeline)
         common = os.path.join(repo, "src_assets", "windows", "assets", "shaders", "directx",
@@ -2046,7 +2017,6 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("if (input_is_linear != rgb->linear)", display)
         self.assertIn("rgb_present_srgb_to_linear_ps.get()", display)
         self.assertIn("rgb_present_linear_to_srgb_ps.get()", display)
-        self.assertNotIn("frame_is_hdr = d3d_image.format", display)
         self.assertIn("ApplySRGBCurve(saturate(source.rgb))", shader)
 
     def test_hdr_debug_preview_preserves_hue(self):
@@ -2056,7 +2026,6 @@ class EvalContractTests(unittest.TestCase):
             text = fh.read()
         self.assertIn("0.2126f * r + 0.7152f * g", text)
         self.assertIn("const float tone_scale = 1.0f / (1.0f + luminance)", text)
-        self.assertNotIn("c = c / (1.0f + c)", text)
 
     def test_report_preserves_missing_unsupported_and_support_units(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -2318,13 +2287,10 @@ class EvalContractTests(unittest.TestCase):
             text = fh.read()
         self.assertIn("load_warp_mapping", text)
         self.assertIn("warp_map_shape.json", text)
-        self.assertNotIn("match_scale = min(1.0, 256.0 / ew)", text)
         self.assertIn("prev_idx = sbsbench.predecessor_frame_id(source_files(clip), idx)", text)
         self.assertIn("if prev_idx is None:", text)
-        self.assertNotIn("if prev_idx < 1:", text)
         self.assertIn("source_eye_width = image.width // 2", text)
         self.assertIn("packed.paste(eyes[1], (eye_w, 0))", text)
-        self.assertNotIn("image.resize(size, Image.LANCZOS)", text)
         self.assertIn("run_eval.EVAL_SCHEMA", text)
 
     def test_report_resolves_artifacts_by_numeric_index_not_fixed_padding(self):

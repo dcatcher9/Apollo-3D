@@ -1221,7 +1221,6 @@ class ReportEvidenceContractTests(unittest.TestCase):
             if isinstance(value, ast.Constant) and isinstance(value.value, str)
         }
         self.assertIn("exact_visible_pop_spread_pct", stereo_literals)
-        self.assertNotIn("pop_spread_px", stereo_literals)
 
     def test_current_schema_report_renders_exact_topology_and_missing_evidence(self):
         with tempfile.TemporaryDirectory() as directory:

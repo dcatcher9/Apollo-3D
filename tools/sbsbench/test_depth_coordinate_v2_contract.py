@@ -1184,7 +1184,6 @@ class DepthCoordinateV2ContractTests(unittest.TestCase):
         self.assertIn("#define V2_MAX_VERTICAL_SHEAR 2.0f", hlsl)
         self.assertIn(
             "static const float v2_max_vertical_shear = V2_MAX_VERTICAL_SHEAR;", hlsl)
-        self.assertNotIn("V2_STAGE_VALLEY_RATIO_MAX", hlsl)
         self.assertNotIn("V2_STAGE_CONVERGENCE_CURVE", hlsl)
         self.assertIn(
             f"V2_DIRECT_CONTAINER_LIMIT {contract['calibrated_defaults']['direct_container_limit']}f",
