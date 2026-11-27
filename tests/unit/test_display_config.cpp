@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cwchar>
 #include <initializer_list>
+#include <limits>
 #include <vector>
 
 namespace {
@@ -155,6 +156,25 @@ TEST(DisplayConfigDevicePath, AnEmptyNameIsEqualToAnotherButNamesNoDevice) {
   EXPECT_FALSE(same_device_path({}, {}));
   EXPECT_FALSE(same_device_path({}, LR"(\\.\DISPLAY1)"));
   EXPECT_FALSE(same_device_path(LR"(\\.\DISPLAY1)", {}));
+}
+
+TEST(DisplayConfigRect, ARectangleNeedsAPositiveWidthAndHeightThatFitAnInt) {
+  using namespace platf::display_config;
+  EXPECT_TRUE(valid_rect({-1920, -200, 0, 880}));
+  EXPECT_FALSE(valid_rect({0, 0, 0, 1080}));
+  EXPECT_FALSE(valid_rect({0, 0, 1920, 0}));
+  EXPECT_FALSE(valid_rect({1920, 0, 0, 1080}));
+  const LONG maximum = std::numeric_limits<LONG>::max();
+  EXPECT_TRUE(valid_rect({maximum - 1000, maximum - 1000, maximum, maximum}));
+  EXPECT_FALSE(valid_rect({std::numeric_limits<LONG>::min(), 0, maximum, 100}));
+  EXPECT_FALSE(valid_rect({0, std::numeric_limits<LONG>::min(), 100, maximum}));
+}
+
+TEST(DisplayConfigRect, RectanglesAreTheSameOnlyWithEveryEdgeEqual) {
+  using namespace platf::display_config;
+  EXPECT_TRUE(same_rect({-1920, 0, 0, 1080}, {-1920, 0, 0, 1080}));
+  EXPECT_FALSE(same_rect({-1920, 0, 0, 1080}, {-1920, 0, 0, 1081}));
+  EXPECT_FALSE(same_rect({-1920, 0, 0, 1080}, {-1919, 0, 0, 1080}));
 }
 
 TEST(DisplayConfigTarget, GdiNameMatchesWithoutCase) {

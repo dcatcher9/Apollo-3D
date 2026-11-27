@@ -1,5 +1,6 @@
 #include "monitor_desktop_handoff.h"
 
+#include "display_config.h"
 #include "misc.h"
 #include "src/logging.h"
 
@@ -17,6 +18,9 @@
 #include <vector>
 
 namespace platf {
+  using display_config::same_rect;
+  using display_config::valid_rect;
+
   namespace monitor_desktop_detail {
     bool is_security_surface(std::wstring_view window_class, std::wstring_view process_image) {
       const auto same_name = [](std::wstring_view left, std::wstring_view right) {
@@ -30,12 +34,6 @@ namespace platf {
       // application desktop when the secure desktop is switched off by policy.
       return same_name(window_class, L"LockScreenInputOcclusionFrame") || same_name(process_name, L"LockApp.exe") ||
              same_name(process_name, L"consent.exe") || same_name(process_name, L"CredentialUIBroker.exe");
-    }
-
-    bool valid_rect(RECT rect) {
-      const auto width = static_cast<std::int64_t>(rect.right) - rect.left;
-      const auto height = static_cast<std::int64_t>(rect.bottom) - rect.top;
-      return width > 0 && height > 0 && width <= std::numeric_limits<int>::max() && height <= std::numeric_limits<int>::max();
     }
 
     bool contains(RECT rect, POINT point) {
@@ -265,7 +263,7 @@ namespace platf {
         return std::nullopt;
       }
       result.normal_rect = translated(result.placement.rcNormalPosition, *offset);
-      if (!monitor_desktop_detail::valid_rect(result.normal_rect)) {
+      if (!valid_rect(result.normal_rect)) {
         return std::nullopt;
       }
       const auto desktop_rect = monitor_desktop_detail::window_ownership_rect(result.screen_rect, result.normal_rect, result.minimized || !result.visible);
@@ -336,10 +334,6 @@ namespace platf {
           (!current || !security_surface_window(current))) {
         SetForegroundWindow(foreground);
       }
-    }
-
-    bool same_rect(RECT left, RECT right) {
-      return left.left == right.left && left.top == right.top && left.right == right.right && left.bottom == right.bottom;
     }
 
     // Names a window by class and program only. Titles can hold private content and stay out of the log.
@@ -581,7 +575,7 @@ namespace platf {
   }
 
   bool monitor_desktop_handoff_t::capture(RECT original_monitor_rect) {
-    if (impl_->active || !monitor_desktop_detail::valid_rect(original_monitor_rect) || !attach_application_desktop()) {
+    if (impl_->active || !valid_rect(original_monitor_rect) || !attach_application_desktop()) {
       return false;
     }
     dpi_scope_t dpi;
@@ -627,7 +621,7 @@ namespace platf {
     if (impl_->active && same_rect(impl_->source, virtual_source_rect)) {
       return true;
     }
-    if (!impl_->captured || !monitor_desktop_detail::valid_rect(virtual_source_rect) || !attach_application_desktop()) {
+    if (!impl_->captured || !valid_rect(virtual_source_rect) || !attach_application_desktop()) {
       return false;
     }
     dpi_scope_t dpi;
@@ -708,8 +702,8 @@ namespace platf {
   }
 
   bool monitor_desktop_handoff_t::refresh(RECT physical_sink_rect, RECT virtual_source_rect) {
-    if (!impl_->active || impl_->restore_prepared || !monitor_desktop_detail::valid_rect(physical_sink_rect) ||
-        !monitor_desktop_detail::valid_rect(virtual_source_rect) || same_rect(physical_sink_rect, virtual_source_rect) ||
+    if (!impl_->active || impl_->restore_prepared || !valid_rect(physical_sink_rect) ||
+        !valid_rect(virtual_source_rect) || same_rect(physical_sink_rect, virtual_source_rect) ||
         !same_rect(virtual_source_rect, impl_->source) || !attach_application_desktop()) {
       return false;
     }
@@ -890,7 +884,7 @@ namespace platf {
       impl_->restore_prepared = true;
       impl_->active = true;
     }
-    if (!monitor_desktop_detail::valid_rect(restored_physical_rect) || !attach_application_desktop()) {
+    if (!valid_rect(restored_physical_rect) || !attach_application_desktop()) {
       return false;
     }
     dpi_scope_t dpi;

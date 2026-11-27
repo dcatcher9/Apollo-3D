@@ -156,15 +156,6 @@ namespace platf::dxgi {
       }
     }
 
-    bool same_local_presenter_rect(const RECT &left, const RECT &right) {
-      return left.left == right.left && left.top == right.top &&
-             left.right == right.right && left.bottom == right.bottom;
-    }
-
-    bool valid_local_presenter_rect(const RECT &rect) {
-      return rect.right > rect.left && rect.bottom > rect.top;
-    }
-
     RECT local_presenter_virtual_screen_rect() {
       const LONG left = GetSystemMetrics(SM_XVIRTUALSCREEN);
       const LONG top = GetSystemMetrics(SM_YVIRTUALSCREEN);
@@ -183,7 +174,7 @@ namespace platf::dxgi {
         std::min(left.right, right.right),
         std::min(left.bottom, right.bottom),
       };
-      if (!valid_local_presenter_rect(intersection)) {
+      if (!display_config::valid_rect(intersection)) {
         return std::nullopt;
       }
       return intersection;
@@ -304,7 +295,7 @@ namespace platf::dxgi {
         mode.dmPosition.x + static_cast<LONG>(mode.dmPelsWidth),
         mode.dmPosition.y + static_cast<LONG>(mode.dmPelsHeight),
       };
-      if (!valid_local_presenter_rect(rect)) {
+      if (!display_config::valid_rect(rect)) {
         return std::nullopt;
       }
       return rect;
@@ -426,7 +417,7 @@ namespace platf::dxgi {
     }
 
     const auto current_clip = query_local_presenter_cursor_clip(3);
-    if (current_clip && same_local_presenter_rect(*current_clip, owned_clip)) {
+    if (current_clip && display_config::same_rect(*current_clip, owned_clip)) {
       const BOOL restored = previous_clip_unbounded ? ClipCursor(nullptr) : ClipCursor(&previous_clip);
       if (!restored) {
         BOOST_LOG(warning) << "Local AR presenter could not restore the previous cursor clip: "sv

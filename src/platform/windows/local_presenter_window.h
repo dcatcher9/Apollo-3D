@@ -23,6 +23,7 @@
 
 // local includes
 #include "display.h"
+#include "display_config.h"
 #include "local_monitor_pointer_geometry.h"
 #include "misc.h"
 #include "src/logging.h"
@@ -36,8 +37,6 @@ namespace platf::dxgi {
     constexpr wchar_t local_presenter_window_class[] = L"ApolloLocalArPresenter";
 
     void log_local_shutter_window_snapshot(HWND presenter, RECT target_rect, HMONITOR expected_monitor);
-    bool same_local_presenter_rect(const RECT &left, const RECT &right);
-    bool valid_local_presenter_rect(const RECT &rect);
     RECT local_presenter_virtual_screen_rect();
     std::optional<RECT> intersect_local_presenter_rects(const RECT &left, const RECT &right);
     std::optional<RECT> query_local_presenter_cursor_clip(int attempts = 1);
@@ -69,7 +68,7 @@ namespace platf::dxgi {
 
       void defer(const deferred_cursor_restore_t &restore) {
         std::lock_guard lock(mutex_);
-        if (pending_ && !same_local_presenter_rect(pending_->owned_clip, restore.owned_clip)) {
+        if (pending_ && !display_config::same_rect(pending_->owned_clip, restore.owned_clip)) {
           BOOST_LOG(error) << "Local AR refused to overwrite an unresolved cursor-restoration record."sv;
           return;
         }
@@ -94,7 +93,7 @@ namespace platf::dxgi {
         if (!current) {
           return false;
         }
-        if (!same_local_presenter_rect(*current, pending_->owned_clip)) {
+        if (!display_config::same_rect(*current, pending_->owned_clip)) {
           // Another application replaced Apollo's clip. Its state is authoritative, so restoring
           // the older rectangle now would corrupt that application's cursor confinement.
           pending_.reset();
@@ -187,7 +186,7 @@ namespace platf::dxgi {
         const auto sink = current_target_rect();
         auto monitors = desktop_monitor_rects().value_or(std::vector<RECT> {});
         std::erase_if(monitors, [&](const RECT &monitor) {
-          return same_local_presenter_rect(monitor, sink);
+          return display_config::same_rect(monitor, sink);
         });
         std::lock_guard lock(hook_mutex);
         hook_sink = sink;
@@ -206,7 +205,7 @@ namespace platf::dxgi {
         POINT stay {};
         {
           std::lock_guard lock(hook_mutex);
-          if (!valid_local_presenter_rect(hook_sink) || hook_monitors.empty()) {
+          if (!display_config::valid_rect(hook_sink) || hook_monitors.empty()) {
             return false;
           }
           long double nearest = std::numeric_limits<long double>::max();
@@ -286,7 +285,7 @@ namespace platf::dxgi {
       clip_request_t desired_clip() const {
         const auto source_rect = current_source_rect();
         const auto target_rect = current_target_rect();
-        if (!valid_local_presenter_rect(source_rect) || !valid_local_presenter_rect(target_rect)) {
+        if (!display_config::valid_rect(source_rect) || !display_config::valid_rect(target_rect)) {
           return {};
         }
 
@@ -301,7 +300,7 @@ namespace platf::dxgi {
 
         RECT clip = local_presenter_virtual_screen_rect();
         clip.right = source_rect.right;
-        if (!valid_local_presenter_rect(clip)) {
+        if (!display_config::valid_rect(clip)) {
           return {true, std::nullopt};
         }
         return {true, clip};
@@ -325,8 +324,8 @@ namespace platf::dxgi {
                                        local_presenter_virtual_screen_rect() :
                                        cursor_clip->previous_clip;
           const auto unbounded_clip = local_presenter_virtual_screen_rect();
-          const bool released_to_unbounded = same_local_presenter_rect(*current_clip, unbounded_clip);
-          if (!same_local_presenter_rect(*current_clip, released_clip) && !released_to_unbounded) {
+          const bool released_to_unbounded = display_config::same_rect(*current_clip, unbounded_clip);
+          if (!display_config::same_rect(*current_clip, released_clip) && !released_to_unbounded) {
             cursor_clip->retry_after = std::chrono::steady_clock::now() + 250ms;
             return;  // another application still owns cursor confinement
           }
@@ -360,7 +359,7 @@ namespace platf::dxgi {
           }
           cursor_clip->previous_clip = *previous_clip;
           cursor_clip->clip_saved = true;
-          cursor_clip->previous_clip_unbounded = same_local_presenter_rect(
+          cursor_clip->previous_clip_unbounded = display_config::same_rect(
             *previous_clip,
             local_presenter_virtual_screen_rect()
           );
@@ -391,7 +390,7 @@ namespace platf::dxgi {
         cursor_clip->clip_yielded = false;
         clear_cursor_retry(*cursor_clip);
         const auto applied_clip = query_local_presenter_cursor_clip(3);
-        if (applied_clip && !same_local_presenter_rect(*applied_clip, *requested_clip)) {
+        if (applied_clip && !display_config::same_rect(*applied_clip, *requested_clip)) {
           BOOST_LOG(warning) << "Local AR cursor confinement was overridden while being applied; "sv
                                 "using event-driven edge clamping."sv;
           cursor_clip->owns_clip = false;
@@ -418,7 +417,7 @@ namespace platf::dxgi {
           defer_cursor_retry(*cursor_clip);
           return;
         }
-        if (!same_local_presenter_rect(*current_clip, cursor_clip->owned_clip)) {
+        if (!display_config::same_rect(*current_clip, cursor_clip->owned_clip)) {
           // ClipCursor is shared system state. Never fight an application that replaces Apollo's
           // clip, and never restore over that application's state during teardown.
           cursor_clip->owns_clip = false;
@@ -455,7 +454,7 @@ namespace platf::dxgi {
             return;
           }
         }
-        if (same_local_presenter_rect(*bounded_clip, cursor_clip->owned_clip)) {
+        if (display_config::same_rect(*bounded_clip, cursor_clip->owned_clip)) {
           return;
         }
         if (!ClipCursor(&*bounded_clip)) {
@@ -469,7 +468,7 @@ namespace platf::dxgi {
         cursor_clip->owns_clip = true;
         clear_cursor_retry(*cursor_clip);
         const auto applied_clip = query_local_presenter_cursor_clip(3);
-        if (applied_clip && !same_local_presenter_rect(*applied_clip, *bounded_clip)) {
+        if (applied_clip && !display_config::same_rect(*applied_clip, *bounded_clip)) {
           cursor_clip->owns_clip = false;
           cursor_clip->clip_yielded = true;
         }
@@ -492,7 +491,7 @@ namespace platf::dxgi {
           }
           const auto sink = current_target_rect();
           POINT cursor {};
-          if (!valid_local_presenter_rect(sink) || !GetCursorPos(&cursor) || !PtInRect(&sink, cursor)) {
+          if (!display_config::valid_rect(sink) || !GetCursorPos(&cursor) || !PtInRect(&sink, cursor)) {
             return false;
           }
           const auto monitors = desktop_monitor_rects();
@@ -510,7 +509,7 @@ namespace platf::dxgi {
         }
         const auto source_rect = current_source_rect();
         const auto target_rect = current_target_rect();
-        if (!valid_local_presenter_rect(source_rect) || !valid_local_presenter_rect(target_rect)) {
+        if (!display_config::valid_rect(source_rect) || !display_config::valid_rect(target_rect)) {
           return false;
         }
 

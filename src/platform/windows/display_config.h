@@ -5,7 +5,9 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -13,6 +15,21 @@
 #include <windows.h>
 
 namespace platf::display_config {
+
+  /** Whether a desktop rectangle has a positive width and height, each of which fits in an int.
+   * The widths are computed in 64 bits, so a rectangle spanning the whole LONG range is invalid
+   * rather than an overflow.
+   */
+  [[nodiscard]] inline bool valid_rect(const RECT &rect) noexcept {
+    const auto width = static_cast<std::int64_t>(rect.right) - rect.left;
+    const auto height = static_cast<std::int64_t>(rect.bottom) - rect.top;
+    return width > 0 && height > 0 && width <= std::numeric_limits<int>::max() && height <= std::numeric_limits<int>::max();
+  }
+
+  /** Whether two desktop rectangles have the same edges. */
+  [[nodiscard]] inline bool same_rect(const RECT &left, const RECT &right) noexcept {
+    return left.left == right.left && left.top == right.top && left.right == right.right && left.bottom == right.bottom;
+  }
 
   /** Whether two adapter identifiers name the same adapter. */
   [[nodiscard]] inline bool same_luid(const LUID &left, const LUID &right) noexcept {

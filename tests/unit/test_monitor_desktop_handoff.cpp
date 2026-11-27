@@ -75,7 +75,6 @@ namespace {
     EXPECT_FALSE(contains_center(monitor, {-200, 0, 200, 500}));
     const LONG maximum = std::numeric_limits<LONG>::max();
     EXPECT_TRUE(contains_center({maximum - 1000, maximum - 1000, maximum, maximum}, {maximum - 900, maximum - 900, maximum - 100, maximum - 100}));
-    EXPECT_FALSE(valid_rect({std::numeric_limits<LONG>::min(), 0, maximum, 100}));
   }
 
   TEST(MonitorDesktopHandoff, MinimizedWindowBelongsToItsNormalPlacementInsteadOfShellIconCoordinates) {

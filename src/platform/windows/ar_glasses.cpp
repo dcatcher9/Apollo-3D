@@ -258,6 +258,8 @@ namespace ar_glasses {
     using platf::display_config::equal_device_paths;
     using platf::display_config::same_device_path;
     using platf::display_config::same_luid;
+    using platf::display_config::same_rect;
+    using platf::display_config::valid_rect;
 
     bool same_virtual_display_identity(
       const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &left,
@@ -524,11 +526,6 @@ namespace ar_glasses {
       std::optional<RECT> pending_rect;
     };
 
-    bool same_rect(const RECT &left, const RECT &right) {
-      return left.left == right.left && left.top == right.top &&
-             left.right == right.right && left.bottom == right.bottom;
-    }
-
     struct linear_layout_t {
       RECT virtual_rect {};
       RECT physical_rect {};
@@ -561,10 +558,6 @@ namespace ar_glasses {
       auto path = std::filesystem::path(platf::from_utf8(config::sunshine.config_file));
       path += L".apollo-ar-topology.json";
       return path;
-    }
-
-    bool valid_rect(const RECT &rect) {
-      return rect.right > rect.left && rect.bottom > rect.top;
     }
 
     RECT parse_rect(const nlohmann::json &value) {
