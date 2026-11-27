@@ -217,10 +217,14 @@ configure_file(game3d_shader_source.h.in "${CMAKE_CURRENT_BINARY_DIR}/game3d_sha
 # library from which an executable links only what it uses. The seam defines
 # are public, so that every file of a binary sees the same view.
 set(sunshine_game3d_core_libraries d3d11 d3d12 dxgi dxguid d3dcompiler sunshine_min_hook version sunshine_game3d_diagnostics)
-set(sunshine_game3d_core_sources exporter.cpp game3d_depth_input.cpp hook_host.cpp game3d_frame_record.cpp game3d_ui_input_provider.cpp game3d_debug_dump.cpp game3d_ui_layer.cpp game3d_ui_capture.cpp game3d_renderer.cpp game3d_ui_decision.cpp overlay_compositor.cpp depth_addon.cpp game3d_controls.cpp depth_content_sampler.cpp streamline_camera_probe.cpp addon_config.cpp game3d_ui_mask.cpp streamline_camera_data.cpp streamline_depth_capture.cpp streamline_native_observer.cpp streamline_depth_provider.cpp depth_output.cpp upscaler_call_trace.cpp ngx_depth_source.cpp)
+set(sunshine_game3d_core_sources exporter.cpp game3d_depth_input.cpp hook_host.cpp game3d_ui_input_provider.cpp game3d_debug_dump.cpp game3d_ui_layer.cpp game3d_ui_capture.cpp game3d_renderer.cpp game3d_ui_decision.cpp overlay_compositor.cpp depth_addon.cpp game3d_controls.cpp depth_content_sampler.cpp streamline_camera_probe.cpp addon_config.cpp game3d_ui_mask.cpp streamline_camera_data.cpp streamline_depth_capture.cpp streamline_native_observer.cpp streamline_depth_provider.cpp depth_output.cpp upscaler_call_trace.cpp ngx_depth_source.cpp)
 function(sunshine_game3d_core_view view)
   cmake_parse_arguments(PARSE_ARGV 1 sunshine_view "" "" "SEAMS;EXCLUDE")
   set(view_sources ${sunshine_game3d_core_sources})
+  # The frame record exists only in a view with its seam (game3d_frame_record.h).
+  if(SUNSHINE_GAME3D_FRAME_RECORD IN_LIST sunshine_view_SEAMS)
+    list(APPEND view_sources game3d_frame_record.cpp)
+  endif()
   if(sunshine_view_EXCLUDE)
     list(REMOVE_ITEM view_sources ${sunshine_view_EXCLUDE})
   endif()
@@ -244,13 +248,16 @@ endfunction()
 sunshine_game3d_core_view(sunshine_game3d_core)
 set(sunshine_addon_targets SunshineSBS)
 if(SUNSHINE_SBS_RUNTIME_TESTS)
-  # The test add-on also carries the renderer's background-build hooks and the
+  # The test add-on also carries the renderer's background-build hooks, the
   # test clock's seams (SUNSHINE_GAME3D_TEST_CLOCK: the virtual game clock,
   # game3d_clock.h, and the pool work count behind SunshineGame3DTestQuiesce,
   # game3d_pool_submit.h), all inert until a fixture sets them (the add-on
   # lifecycle fixture's mid-build device destruction; a fixture that engages
-  # the clock after its setup).
-  sunshine_game3d_core_view(sunshine_game3d_core_runtime_test SEAMS SUNSHINE_SBS_RUNTIME_TEST_ADDON SUNSHINE_GAME3D_RENDERER_TEST SUNSHINE_GAME3D_TEST_CLOCK)
+  # the clock after its setup), and the frame record behind
+  # SunshineGame3DTestFrameRecord (SUNSHINE_GAME3D_FRAME_RECORD), which the
+  # shipped add-on never writes.
+  sunshine_game3d_core_view(sunshine_game3d_core_runtime_test SEAMS SUNSHINE_SBS_RUNTIME_TEST_ADDON SUNSHINE_GAME3D_RENDERER_TEST SUNSHINE_GAME3D_TEST_CLOCK
+    SUNSHINE_GAME3D_FRAME_RECORD)
   list(APPEND sunshine_addon_targets SunshineSBSTest)
 endif()
 foreach(sunshine_addon_target IN LISTS sunshine_addon_targets)
@@ -313,8 +320,9 @@ if(BUILD_TESTING)
       target_link_options(${target} PRIVATE -Wl,--wrap=MH_CreateHook)
     endif()
   endfunction()
-  # Test views. Exporter tests share exporter_internal.h with one compiled exporter.cpp.
-  sunshine_game3d_core_view(sunshine_game3d_core_sbs_test SEAMS SUNSHINE_SBS_TEST)
+  # Test views. Exporter tests share exporter_internal.h with one compiled exporter.cpp,
+  # and check the frame record's writers (SUNSHINE_GAME3D_FRAME_RECORD).
+  sunshine_game3d_core_view(sunshine_game3d_core_sbs_test SEAMS SUNSHINE_SBS_TEST SUNSHINE_GAME3D_FRAME_RECORD)
   # The Streamline probe, NGX call trace and native observer seams, and the
   # test clock's (inert until a fixture engages it: sunshine_view_clock).
   sunshine_game3d_core_view(sunshine_game3d_core_probe_test SEAMS SUNSHINE_STREAMLINE_PROBE_TEST

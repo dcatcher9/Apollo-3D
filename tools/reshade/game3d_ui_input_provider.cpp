@@ -333,7 +333,8 @@ namespace sunshine_game3d::ui_input {
       ui_selection::kind::backbuffer, ui_selection::kind::hudless};
     // The frame record's UI rows (game3d_frame_record.h): what each candidate
     // did in this render, in capture-slot order, then the UI layer and the
-    // presented color. Nothing reads them.
+    // presented color. Only test builds store them, and nothing in the add-on
+    // reads them.
     using record_state = sunshine_game3d::source_state;
     std::array<sunshine_game3d::source_status, sunshine_game3d::ui_slot_count> recorded{};
     constexpr auto ui_index = [](sunshine_game3d::source_slot row) {
@@ -683,8 +684,10 @@ namespace sunshine_game3d::ui_input {
       if ((recorded[i].state == record_state::absent || recorded[i].state == record_state::refused) &&
           manual_pick != ui_row(i))
         recorded[i].fallback_to = manual_pick;
+#ifdef SUNSHINE_GAME3D_FRAME_RECORD
     if (auto *record = sunshine_game3d::frame_record_store::writable(runtime))
       sunshine_game3d::record_ui(*record, recorded, frame_sequence, now);
+#endif
     if (log_gate) {
       const auto &gate = latest.hook_gate;
       // Where tag begin() calls stopped without an attempt (process counts per

@@ -708,7 +708,12 @@ queue](#streamline-depth-selection)); its fence, `ExecuteCommandLists` and `Sign
 ### Frame record
 
 One typed record per Present ([`game3d_frame_record.h`](../tools/reshade/game3d_frame_record.h))
-says what each depth rung and UI candidate did, and why. Its rows are the depth ladder, D1 (an FG
+says what each depth rung and UI candidate did, and why. It exists only in the test add-on
+(`SunshineSBSTest`, whose `SunshineGame3DTestFrameRecord` export the
+[session-level tests](../tools/reshade/README.md#session-level-tests) read) and the exporter tests,
+the builds that define `SUNSHINE_GAME3D_FRAME_RECORD`. The shipped add-on keeps its types, which the
+capture owner's `depth_choice` and the API provider's decision also name, but never stores or
+writes it. Its rows are the depth ladder, D1 (an FG
 scope's own depth: a Streamline FG tag or DLSS-G's evaluation), D2 (scene depth: Streamline or
 NGX SR/RR), H (API ownership kept in mono) and D3 (Generic), then the UI candidates (UIAlpha, the
 UI color tag, Backbuffer, HUD-less, the UI layer and the presented color). Each row has a key (API,
@@ -730,18 +735,18 @@ producer position while its copy may still be in flight; U-C1), with that positi
 else of the game submission); `none` for a held copy, so that a judge checks each in-flight read
 against the fixture's own fences (`unordered_read`).
 
-The present thread writes the record where the decisions are made: the API provider's `begin`
-writes D1, D2 and H from its acquisition, FG scope, association, handoff and display decision
-(`provider::describe_acquisition` and `describe_display`); the
-depth add-on writes D3 from its binding state; and the UI adapter writes the candidate rows as it
-offers them (a generated Present's hold is `held`, a candidate the session's scope or
-qualification withdrew is `refused`). The capture owner also keeps one `depth_choice` per consumer
+In the test add-on the present thread writes the record where the decisions are made: the API
+provider's `begin` writes D1, D2 and H from its acquisition, FG scope, association, handoff and
+display decision (`provider::describe_acquisition` and `describe_display`); the depth add-on
+writes D3 from its binding state; and the UI adapter writes the candidate rows as it offers them
+(a generated Present's hold is `held`, a candidate the session's scope or qualification
+withdrew is `refused`). The capture owner also keeps one `depth_choice` per consumer
 queue, frozen under its lock with each acquisition: the selection's decision, reason, status and
 failure, the role of its source, the policy it ran under and the queue's owner after it.
 
-Nothing reads either yet: no log line, decision, wire byte, report or replay changes with them.
-Writing them takes no lock beyond the capture owner's existing one and allocates nothing per
-Present. Their tests are listed under
+Nothing in the add-on reads either: no log line, decision, wire byte, report or replay changes
+with them. Writing them takes no lock beyond the capture owner's existing one and allocates
+nothing per Present. Their tests are listed under
 [source and submission validation](../tools/reshade/README.md#source-and-submission-validation);
 the [continuity invariant](../tools/reshade/README.md#session-level-tests) judges every test
 Present from the record.

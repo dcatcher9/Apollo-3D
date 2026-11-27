@@ -223,11 +223,14 @@ namespace sunshine_streamline::provider {
     void submit_release(std::unique_ptr<display_release> job);
     void collect_displays(api::effect_runtime *runtime, state &data, std::uint64_t present);
     // The frame record's API rows (game3d_frame_record.h): this Present's
-    // decision as begin() made it. Nothing reads them.
-    void record_depth(api::effect_runtime *runtime, const sunshine_game3d::api_depth_decision &decision,
-        std::uint64_t present) {
+    // decision as begin() made it. Only test builds have the record, and
+    // nothing in the add-on reads it.
+    void record_depth([[maybe_unused]] api::effect_runtime *runtime,
+        [[maybe_unused]] const sunshine_game3d::api_depth_decision &decision, [[maybe_unused]] std::uint64_t present) {
+#ifdef SUNSHINE_GAME3D_FRAME_RECORD
       if (auto *record = sunshine_game3d::frame_record_store::writable(runtime))
         sunshine_game3d::record_api_depth(*record, decision, present, sunshine_game3d::clock::game_now());
+#endif
     }
     void track_fg_switch(state &data, const readiness_evidence &e, bool ready, const char *why);
     // A runtime's teardown hands its FG mode and its FG switch line (active

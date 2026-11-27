@@ -406,7 +406,9 @@ static void on_init_effect_runtime(effect_runtime *runtime)
 		return;
 	runtime->create_private_data<generic_depth_data>();
 	set_generic_capture_enabled(runtime, *runtime->get_private_data<generic_depth_data>(), true);
+#ifdef SUNSHINE_GAME3D_FRAME_RECORD
 	sunshine_game3d::frame_record_store::initialize(runtime);
+#endif
 	sunshine_streamline::provider::initialize(runtime);
 }
 static void on_destroy_effect_runtime(effect_runtime *runtime)
@@ -442,7 +444,9 @@ static void on_destroy_effect_runtime(effect_runtime *runtime)
 
 	runtime->destroy_private_data<generic_depth_data>();
 	sunshine_streamline::provider::destroy(runtime);
+#ifdef SUNSHINE_GAME3D_FRAME_RECORD
 	sunshine_game3d::frame_record_store::destroy(runtime);
+#endif
 }
 
 static bool on_create_resource(device *device, resource_desc &desc, subresource_data *, resource_usage)
@@ -710,9 +714,12 @@ static void on_present(command_queue *presenting_queue, swapchain *swapchain, co
 }
 
 // The frame record's Generic row (game3d_frame_record.h), as this Present's
-// selection left it; nothing reads it.
-static void record_generic_row(effect_runtime *runtime, const generic_depth_data &data, uint64_t present, bool api_owner)
+// selection left it; only test builds have the record, and nothing in the
+// add-on reads it.
+static void record_generic_row([[maybe_unused]] effect_runtime *runtime, [[maybe_unused]] const generic_depth_data &data,
+	[[maybe_unused]] uint64_t present, [[maybe_unused]] bool api_owner)
 {
+#ifdef SUNSHINE_GAME3D_FRAME_RECORD
 	auto *const record = sunshine_game3d::frame_record_store::writable(runtime);
 	if (record == nullptr)
 		return;
@@ -733,6 +740,7 @@ static void record_generic_row(effect_runtime *runtime, const generic_depth_data
 		decision.identity = data.selected_identity;
 	}
 	sunshine_game3d::record_generic_depth(*record, decision, present, sunshine_game3d::clock::game_now());
+#endif
 }
 
 static void begin_depth_frame(effect_runtime *runtime, command_list *cmd_list)

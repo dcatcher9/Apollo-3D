@@ -882,9 +882,11 @@ extern "C" __declspec(dllexport) BOOL SunshineDepthTestProviderStatus(effect_run
 	return TRUE;
 }
 
-// A copy of the frame record as the present thread left it. Nothing in the
-// add-on reads the record; the provider runtime test compares it with the log
-// and judges the continuity invariant with it (test_game3d_continuity.h).
+// A copy of the frame record as the present thread left it. Only the test
+// add-on has the record (SUNSHINE_GAME3D_FRAME_RECORD) and nothing in it reads
+// the record; the provider runtime test compares it with the log and judges
+// the continuity invariant with it (test_game3d_continuity.h).
+#ifdef SUNSHINE_GAME3D_FRAME_RECORD
 extern "C" __declspec(dllexport) BOOL SunshineGame3DTestFrameRecord(effect_runtime *runtime,
 	sunshine_game3d::frame_record *output)
 {
@@ -894,6 +896,7 @@ extern "C" __declspec(dllexport) BOOL SunshineGame3DTestFrameRecord(effect_runti
 	*output = *record;
 	return TRUE;
 }
+#endif
 
 // Runs call(context) once at the next native depth frame's entry, after the
 // UI read the FG mode of that Present and before depth reads it

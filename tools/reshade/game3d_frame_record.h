@@ -12,10 +12,14 @@ namespace reshade::api {
 }
 
 // One typed record per Present of what each depth rung and UI candidate did,
-// and why (docs/reshade-sbs.md, Frame record). The present thread writes it
-// where the depth owners and the UI adapter decide; nothing reads it yet, so
-// no log line, decision, wire byte or report changes with it. It is a fixed
-// value: writing it never allocates and takes no lock.
+// and why (docs/reshade-sbs.md, Frame record). Only test builds store and
+// write it (SUNSHINE_GAME3D_FRAME_RECORD: the test add-on, whose
+// SunshineGame3DTestFrameRecord feeds the session tests' continuity judge,
+// and the exporter tests); the shipped add-on has its types alone, which the
+// depth capture and the API provider also name. The present thread writes it
+// where the depth owners and the UI adapter decide; nothing in the add-on
+// reads it, so no log line, decision, wire byte or report changes with it. It
+// is a fixed value: writing it never allocates and takes no lock.
 namespace sunshine_game3d {
   // The rows: the depth ladder (D1 an FG scope's own depth, D2 scene depth,
   // H API ownership held in mono, D3 Generic), then the UI candidates in
@@ -209,10 +213,6 @@ namespace sunshine_game3d {
     }
   }
 
-  // Writes next into row. first_ready_ms carries over while the key and epoch
-  // are unchanged, and is set by the first ready or held state.
-  void update_row(source_status &row, source_status next, std::uint64_t now);
-
   // The API provider's decision for one Present, as
   // streamline_depth_provider.cpp begin() made it.
   struct api_depth_decision {
@@ -249,8 +249,6 @@ namespace sunshine_game3d {
     std::uint64_t read_queue {}, read_ticket {};
   };
 
-  void record_api_depth(frame_record &record, const api_depth_decision &decision, std::uint64_t present, std::uint64_t now);
-
   // The Generic selector's outcome for one Present (depth_addon.cpp
   // begin_depth_frame): skipped while the API provider owns the Present.
   struct generic_depth_decision {
@@ -259,6 +257,13 @@ namespace sunshine_game3d {
     const char *reason {"not_recorded"};
     std::uint64_t identity {};
   };
+
+#ifdef SUNSHINE_GAME3D_FRAME_RECORD
+  // Writes next into row. first_ready_ms carries over while the key and epoch
+  // are unchanged, and is set by the first ready or held state.
+  void update_row(source_status &row, source_status next, std::uint64_t now);
+
+  void record_api_depth(frame_record &record, const api_depth_decision &decision, std::uint64_t present, std::uint64_t now);
 
   void record_generic_depth(frame_record &record, const generic_depth_decision &decision, std::uint64_t present, std::uint64_t now);
 
@@ -273,4 +278,5 @@ namespace sunshine_game3d {
     // Null before initialize and after destroy.
     frame_record *writable(reshade::api::effect_runtime *runtime);
   }  // namespace frame_record_store
+#endif
 }  // namespace sunshine_game3d
