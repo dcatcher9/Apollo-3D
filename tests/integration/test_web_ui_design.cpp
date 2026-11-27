@@ -464,7 +464,9 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolated) {
     read_source(fs::path(SUNSHINE_SOURCE_DIR) / "src/confighttp_offline_sbs.cpp");
   const auto http_guards = read_source(fs::path(SUNSHINE_SOURCE_DIR) / "src/confighttp_common.cpp");
   const auto jobs =
-    read_source(fs::path(SUNSHINE_SOURCE_DIR) / "src/offline_sbs_job.cpp");
+    read_source(fs::path(SUNSHINE_SOURCE_DIR) / "src/offline_sbs_job.cpp") +
+    read_source(fs::path(SUNSHINE_SOURCE_DIR) / "src/offline_sbs_job_files.cpp") +
+    read_source(fs::path(SUNSHINE_SOURCE_DIR) / "src/offline_sbs_job_worker.cpp");
 
   EXPECT_NE(page.find("v-model.trim=\"form.inputPath\""), std::string::npos);
   EXPECT_NE(page.find("v-model.trim=\"form.outputName\""), std::string::npos);

@@ -488,7 +488,7 @@ TEST(OfflineSbsJob, PublishesProgressDuringDirectConversion) {
 
 TEST(OfflineSbsJob, NativeWorkerForcesFinalProgressDrainBeforeExitStatus) {
   std::ifstream stream(
-    fs::path(SUNSHINE_SOURCE_DIR) / "src/offline_sbs_job.cpp",
+    fs::path(SUNSHINE_SOURCE_DIR) / "src/offline_sbs_job_worker.cpp",
     std::ios::binary
   );
   ASSERT_TRUE(stream);
@@ -497,7 +497,7 @@ TEST(OfflineSbsJob, NativeWorkerForcesFinalProgressDrainBeforeExitStatus) {
     std::istreambuf_iterator<char> {},
   };
   const auto runner_begin = source.find("worker_outcome_t run_native_worker(");
-  const auto runner_end = source.find("\n    void publish_progress(", runner_begin);
+  const auto runner_end = source.find("}  // namespace job_detail", runner_begin);
   ASSERT_NE(runner_begin, std::string::npos);
   ASSERT_NE(runner_end, std::string::npos);
   const auto runner = source.substr(runner_begin, runner_end - runner_begin);
@@ -552,6 +552,30 @@ TEST(OfflineSbsJob, NativeWorkerForcesFinalProgressDrainBeforeExitStatus) {
   EXPECT_LT(successful_read, retry_guard)
     << "A normal read or immutable parse failure must not take the acquisition retry";
   EXPECT_LT(retry_guard, retry_wait);
+}
+
+TEST(OfflineSbsJob, NativeWorkerLaunchFailureFailsTheJob) {
+  temporary_tree_t tree;
+  const auto input = tree.path / "source.mkv";
+  write_nonempty(input, "source");
+
+  // No injected runner: the manager's own supervisor launches the configured executable,
+  // which here is not a program. The job must fail with the launch error, not hang.
+  offline_sbs::job_service_t service {service_config(tree.path)};
+  std::string error;
+  ASSERT_TRUE(service.start(error)) << error;
+  const auto created = service.create({
+    .input_path = input,
+    .operation = offline_sbs::operation_e::evaluate,
+  });
+  ASSERT_TRUE(created.ok) << created.error;
+  const auto terminal = wait_for_terminal(service, created.job->id);
+  EXPECT_EQ(terminal.state, offline_sbs::job_state_e::failed);
+  EXPECT_NE(
+    terminal.error.find("cannot launch native offline worker"),
+    std::string::npos
+  ) << terminal.error;
+  service.shutdown();
 }
 
 TEST(OfflineSbsJob, EvaluationDoesNotRequireOrTrustAnEncoderSelection) {
