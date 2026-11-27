@@ -158,6 +158,11 @@ TEST(LocalArMode, DefaultsToHostAndReadsTheEarlierSwitch) {
 
   std::unordered_map<std::string, std::string> earlier_off {{"sbs_reshade", "disabled"}};
   EXPECT_EQ(config::parse_local_ar_mode(earlier_off), "host");
+
+  // A misspelled earlier value reads as Host 3D (with a warning) and is consumed.
+  std::unordered_map<std::string, std::string> misspelled {{"sbs_reshade", "enabeld"}};
+  EXPECT_EQ(config::parse_local_ar_mode(misspelled), "host");
+  EXPECT_TRUE(misspelled.empty());
 }
 
 TEST(LocalArMode, TheChoiceDecidesOverTheEarlierSwitchAndAnInvalidOneFallsBack) {

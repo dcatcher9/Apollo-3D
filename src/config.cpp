@@ -685,6 +685,9 @@ namespace config {
     if (const auto legacy = vars.find("sbs_reshade"); legacy != vars.end()) {
       const auto &text = legacy->second;
       legacy_game = text == "enabled" || text == "on" || text == "true" || text == "1";
+      if (!legacy_game && text != "disabled" && text != "off" && text != "false" && text != "0") {
+        BOOST_LOG(warning) << "config: sbs_reshade must be enabled or disabled; reading it as disabled"sv;
+      }
       vars.erase(legacy);
     }
     const std::string fallback = legacy_game ? "game" : "host";
