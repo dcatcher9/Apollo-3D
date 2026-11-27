@@ -4,6 +4,7 @@
 #include "overlay_shaders.h"
 
 #include "addon_lifetime.h"
+#include "com_ptr.h"
 #include "game3d_pool_submit.h"
 
 #include <array>
@@ -28,41 +29,7 @@ namespace sunshine::overlay {
   namespace api = reshade::api;
 
   namespace {
-    template<class T>
-    struct com_t {
-      T *p = nullptr;
-
-      ~com_t() {
-        reset();
-      }
-
-      com_t() = default;
-      com_t(const com_t &) = delete;
-      com_t &operator=(const com_t &) = delete;
-
-      T *operator->() const {
-        return p;
-      }
-
-      T **put() {
-        reset();
-        return &p;
-      }
-
-      void reset(T *v = nullptr) {
-        if (p) {
-          p->Release();
-        }
-        p = v;
-      }
-
-      void retain(T *v) {
-        if (v) {
-          v->AddRef();
-        }
-        reset(v);
-      }
-    };
+    using sunshine_game3d::com_ptr;
 
     DXGI_FORMAT typed(DXGI_FORMAT f) {
       switch (f) {
@@ -89,7 +56,7 @@ namespace sunshine::overlay {
     // first overlay frame neither compiles nor waits.
     struct blob_store {
       std::mutex mutex;
-      std::map<std::string, com_t<ID3DBlob>> blobs;
+      std::map<std::string, com_ptr<ID3DBlob>> blobs;
       std::array<std::atomic<bool>, mode_count> warming{};
     };
     blob_store &blobs() {
@@ -100,7 +67,7 @@ namespace sunshine::overlay {
       return std::to_string(reinterpret_cast<std::uintptr_t>(source)) + '|' + entry + '|' + std::to_string(mode);
     }
 
-    bool compile(const char *source, const char *entry, const char *target, int mode, com_t<ID3DBlob> &code) {
+    bool compile(const char *source, const char *entry, const char *target, int mode, com_ptr<ID3DBlob> &code) {
       const auto key = blob_key(source, entry, mode);
       {
         std::lock_guard<std::mutex> lock(blobs().mutex);
@@ -112,7 +79,7 @@ namespace sunshine::overlay {
       }
       const D3D_SHADER_MACRO macros[] = {{"EXPORT_HDR", mode == mode_scrgb ? "1" : "0"}, {"EXPORT_PQ", mode == mode_pq ? "1" : "0"},
         {nullptr, nullptr}};
-      com_t<ID3DBlob> errors;
+      com_ptr<ID3DBlob> errors;
       if (SUCCEEDED(D3DCompile(source, std::strlen(source), "Sunshine overlay compositor", macros, nullptr, entry, target, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, code.put(), errors.put()))) {
         std::lock_guard<std::mutex> lock(blobs().mutex);
         blobs().blobs[key].retain(code.p);
@@ -127,7 +94,7 @@ namespace sunshine::overlay {
     void CALLBACK warm_task(PTP_CALLBACK_INSTANCE, void *context) {
       const int mode = static_cast<int>(reinterpret_cast<std::intptr_t>(context));
       if (sunshine_addon_lifetime::stopping()) return;
-      com_t<ID3DBlob> code;
+      com_ptr<ID3DBlob> code;
       compile(gui_shader, "gui_vs", "vs_5_0", mode, code);
       compile(gui_shader, "gui_ps", "ps_5_0", mode, code);
       compile(composite_shader, "fullscreen_vs", "vs_5_0", mode, code);
@@ -174,25 +141,25 @@ namespace sunshine::overlay {
     int mode = mode_sdr;
     bool initialized = false, armed = false, appended = false, captured = false;
 
-    com_t<ID3D11Device1> device11;
-    com_t<ID3D11DeviceContext1> context11;
-    com_t<ID3DDeviceContextState> state11;
-    com_t<ID3D11Texture2D> layer11, source11, destination11;
-    com_t<ID3D11RenderTargetView> native_rtv11, layer_rtv11, destination_rtv11;
-    com_t<ID3D11ShaderResourceView> layer_srv11, source_srv11;
-    com_t<ID3D11PixelShader> capture_ps11, composite_ps11;
-    com_t<ID3D11VertexShader> composite_vs11;
-    com_t<ID3D11BlendState> capture_blend11;
-    com_t<ID3D11RasterizerState> raster11;
-    com_t<ID3D11DepthStencilState> depth11;
+    com_ptr<ID3D11Device1> device11;
+    com_ptr<ID3D11DeviceContext1> context11;
+    com_ptr<ID3DDeviceContextState> state11;
+    com_ptr<ID3D11Texture2D> layer11, source11, destination11;
+    com_ptr<ID3D11RenderTargetView> native_rtv11, layer_rtv11, destination_rtv11;
+    com_ptr<ID3D11ShaderResourceView> layer_srv11, source_srv11;
+    com_ptr<ID3D11PixelShader> capture_ps11, composite_ps11;
+    com_ptr<ID3D11VertexShader> composite_vs11;
+    com_ptr<ID3D11BlendState> capture_blend11;
+    com_ptr<ID3D11RasterizerState> raster11;
+    com_ptr<ID3D11DepthStencilState> depth11;
 
-    com_t<ID3D12Device> device12;
-    com_t<ID3D12GraphicsCommandList> command12;
-    com_t<ID3D12GraphicsCommandList4> command4;
-    com_t<ID3D12Resource> layer12, source12, destination12, native_target12;
-    com_t<ID3D12DescriptorHeap> rtv_heap12, srv_heap12;
-    com_t<ID3D12RootSignature> gui_root12, composite_root12;
-    com_t<ID3D12PipelineState> capture_pso12, composite_pso12;
+    com_ptr<ID3D12Device> device12;
+    com_ptr<ID3D12GraphicsCommandList> command12;
+    com_ptr<ID3D12GraphicsCommandList4> command4;
+    com_ptr<ID3D12Resource> layer12, source12, destination12, native_target12;
+    com_ptr<ID3D12DescriptorHeap> rtv_heap12, srv_heap12;
+    com_ptr<ID3D12RootSignature> gui_root12, composite_root12;
+    com_ptr<ID3D12PipelineState> capture_pso12, composite_pso12;
     D3D12_CPU_DESCRIPTOR_HANDLE rtv12[3] {};
     D3D12_GPU_DESCRIPTOR_HANDLE srv_gpu12 {};
     UINT srv_stride12 = 0;
@@ -218,7 +185,7 @@ namespace sunshine::overlay {
         return false;
       }
 
-      com_t<ID3DBlob> capture, vs, ps;
+      com_ptr<ID3DBlob> capture, vs, ps;
       if (!compile(gui_shader, "gui_ps", "ps_5_0", mode, capture) || !compile(composite_shader, "fullscreen_vs", "vs_5_0", mode, vs) || !compile(composite_shader, "composite_ps", "ps_5_0", mode, ps) || FAILED(device11->CreatePixelShader(capture->GetBufferPointer(), capture->GetBufferSize(), nullptr, capture_ps11.put())) || FAILED(device11->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, composite_vs11.put())) || FAILED(device11->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, composite_ps11.put()))) {
         return false;
       }
@@ -282,7 +249,7 @@ namespace sunshine::overlay {
         root.Desc_1_1.Flags |= D3D12_ROOT_SIGNATURE_FLAG_DENY_AMPLIFICATION_SHADER_ROOT_ACCESS |
                                D3D12_ROOT_SIGNATURE_FLAG_DENY_MESH_SHADER_ROOT_ACCESS;
       }
-      com_t<ID3DBlob> serialized, errors;
+      com_ptr<ID3DBlob> serialized, errors;
       if (FAILED(D3D12SerializeVersionedRootSignature(&root, serialized.put(), errors.put())) || FAILED(device12->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(), IID_PPV_ARGS(gui_root12.put())))) {
         return false;
       }
@@ -344,7 +311,7 @@ namespace sunshine::overlay {
         return false;
       }
 
-      com_t<ID3DBlob> capture_vs, capture_ps, vs, ps;
+      com_ptr<ID3DBlob> capture_vs, capture_ps, vs, ps;
       if (!compile(gui_shader, "gui_vs", "vs_5_0", mode, capture_vs) || !compile(gui_shader, "gui_ps", "ps_5_0", mode, capture_ps) || !compile(composite_shader, "fullscreen_vs", "vs_5_0", mode, vs) || !compile(composite_shader, "composite_ps", "ps_5_0", mode, ps)) {
         return false;
       }
@@ -467,7 +434,7 @@ namespace sunshine::overlay {
     bool finish11() {
       // Windows 11's native context-state exchange preserves ALL application
       // bindings, including class instances/UAVs/SO, rather than a partial save.
-      com_t<ID3DDeviceContextState> previous;
+      com_ptr<ID3DDeviceContextState> previous;
       context11->SwapDeviceContextState(state11.p, previous.put());
       context11->OMSetRenderTargets(1, &destination_rtv11.p, nullptr);
       context11->OMSetBlendState(nullptr, nullptr, UINT_MAX);
@@ -606,7 +573,7 @@ namespace sunshine::overlay {
       s.native_render_pass = SUCCEEDED(s.command12->QueryInterface(IID_PPV_ARGS(s.command4.put())));
       // Match the pinned runtime's VKD3D exclusion when choosing its pass type.
       constexpr GUID vkd3d_list = {0x77a86b09, 0x2bea, 0x4801, {0xb8, 0x9a, 0x37, 0x64, 0x8e, 0x10, 0x4a, 0xf1}};
-      com_t<IUnknown> extension;
+      com_ptr<IUnknown> extension;
       if (s.command12->QueryInterface(vkd3d_list, reinterpret_cast<void **>(extension.put())) == S_OK) {
         s.native_render_pass = false;
       }

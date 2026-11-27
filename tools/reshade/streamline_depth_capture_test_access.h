@@ -12,6 +12,7 @@
 // translation unit; lookup inside the capture file is unchanged.
 #include "streamline_depth_capture.h"
 #include "capture_lock_stats.h"
+#include "com_ptr.h"
 #include "capture_state_policy.h"
 #include "freshness.h"
 #include "native_command_storage.h"
@@ -37,16 +38,7 @@
 
 namespace sunshine_streamline::depth_capture {
   SUNSHINE_CAPTURE_INTERNAL {
-    template<class T> struct com_ptr {
-      T *p{};
-      ~com_ptr() { reset(); }
-      com_ptr() = default;
-      com_ptr(const com_ptr &) = delete;
-      com_ptr &operator=(const com_ptr &) = delete;
-      T *operator->() const { return p; }
-      void reset() { if (auto *owned = std::exchange(p, nullptr)) owned->Release(); }
-      T **put() { reset(); return &p; }
-    };
+    using sunshine_game3d::com_ptr;
     // One lazily allocated pool serves eight rotating source members plus
     // several recordings in flight and metadata nominations. No second pool
     // or per-source synchronization implementation belongs to Generic depth.

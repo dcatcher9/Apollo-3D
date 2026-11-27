@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "depth_content_sampler.h"
 #include "addon_lifetime.h"
+#include "com_ptr.h"
 #include "game3d_pool_submit.h"
 #include "depth_view_format.h"
 #include "async_log.h"
@@ -28,20 +29,7 @@ namespace {
   static_assert(tile_capacity == 768 && tile_capacity % storage_width == 0,
     "Keep shader record addressing synchronized with the fixed scratch layout");
 
-  template<class T> class com_ptr {
-  public:
-    com_ptr() = default;
-    ~com_ptr() { if (value_) value_->Release(); }
-    com_ptr(const com_ptr &) = delete;
-    com_ptr &operator=(const com_ptr &) = delete;
-    T *get() const { return value_; }
-    T *operator->() const { return value_; }
-    void reset() { if (value_) value_->Release(); value_ = nullptr; }
-    T **put() { reset(); return &value_; }
-    void retain(T *value) { if (value) value->AddRef(); reset(); value_ = value; }
-  private:
-    T *value_ = nullptr;
-  };
+  using sunshine_game3d::com_ptr;
 
   void warning(const char *message) {
     sunshine_log::message(reshade::log::level::warning, message);

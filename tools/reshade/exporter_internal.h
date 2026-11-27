@@ -59,6 +59,7 @@
 #include <utility>
 #include <vector>
 #include <windows.h>
+#include "com_ptr.h"
 #include "game3d_slow_step.h"
 #include "game3d_ui_layer.h"
 #include "game3d_vram.h"
@@ -162,59 +163,7 @@ namespace SUNSHINE_EXPORTER_INTERNAL {
   reshade_bridge::window_owner::verdict child_window_verdict(HWND window, HWND foreground);
   void log_hr(const char *operation, HRESULT hr);
 
-  template<class T>
-  class com_ptr {
-  public:
-    com_ptr() = default;
-
-    ~com_ptr() {
-      reset();
-    }
-
-    com_ptr(const com_ptr &) = delete;
-    com_ptr &operator=(const com_ptr &) = delete;
-
-    com_ptr(com_ptr &&other) noexcept:
-        ptr_(other.release()) {}
-
-    com_ptr &operator=(com_ptr &&other) noexcept {
-      if (this != &other) {
-        reset();
-        ptr_ = other.release();
-      }
-      return *this;
-    }
-
-    T *get() const {
-      return ptr_;
-    }
-
-    T *operator->() const {
-      return ptr_;
-    }
-
-    explicit operator bool() const {
-      return ptr_ != nullptr;
-    }
-
-    T **put() {
-      reset();
-      return &ptr_;
-    }
-
-    T *release() {
-      return std::exchange(ptr_, nullptr);
-    }
-
-    void reset() {
-      if (auto *old = release()) {
-        old->Release();
-      }
-    }
-
-  private:
-    T *ptr_ = nullptr;
-  };
+  using sunshine_game3d::com_ptr;
 
   class handle_t {
   public:
