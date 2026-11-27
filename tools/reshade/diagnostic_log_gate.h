@@ -14,6 +14,15 @@ namespace sunshine_diagnostics {
     return now_ms >= due && next.compare_exchange_strong(due, now_ms + interval_ms, std::memory_order_relaxed);
   }
 
+  // The same rate limit for a line whose timer one thread, or one lock, owns:
+  // true at most once per interval_ms (the first call included), and next
+  // holds when the line is due again.
+  inline bool claim_line(std::uint64_t &next, std::uint64_t now_ms, std::uint64_t interval_ms) noexcept {
+    if (now_ms < next) return false;
+    next = now_ms + interval_ms;
+    return true;
+  }
+
   // Only bounds log writes. Callers still update rendering and UI every frame.
   class log_gate {
   public:

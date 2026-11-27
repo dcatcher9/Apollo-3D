@@ -1915,7 +1915,7 @@ Docs: [Depth output](../../docs/reshade-sbs.md#depth-output).
 - [`depth_selection_policy.h`](depth_selection_policy.h), [`depth_capture_policy.h`](depth_capture_policy.h), [`depth_probe_policy.h`](depth_probe_policy.h): Generic's selection, capture-allocation and probe policies ("Complete scene" included). Docs: [Selecting scene depth](../../docs/reshade-sbs.md#selecting-scene-depth).
 - [`depth_moments.h`](depth_moments.h), [`depth_presentation_stats.h`](depth_presentation_stats.h): the moment tile layout and the depth-availability statistics of an effects pass. Docs: [Selecting scene depth](../../docs/reshade-sbs.md#selecting-scene-depth).
 - [`depth_orientation.h`](depth_orientation.h): projection-convention evidence from real depth clears. Docs: [Depth orientation evidence](../../docs/reshade-sbs.md#depth-orientation-evidence).
-- [`diagnostic_log_gate.h`](diagnostic_log_gate.h): when a routing family's diagnostics are logged, and `claim_line`, the rate limit of a log line several threads may write. Docs: [Selecting scene depth](../../docs/reshade-sbs.md#selecting-scene-depth).
+- [`diagnostic_log_gate.h`](diagnostic_log_gate.h): when a routing family's diagnostics are logged, and `claim_line`, the rate limit of a log line whose timer several threads share or one owner holds. Docs: [Selecting scene depth](../../docs/reshade-sbs.md#selecting-scene-depth).
 
 #### Exporter
 

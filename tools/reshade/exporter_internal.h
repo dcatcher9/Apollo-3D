@@ -1032,9 +1032,8 @@ namespace sunshine_exporter {
         window_report_.pending = true;
       }
       const auto now = sunshine_game3d::clock::game_now();
-      if (!window_report_.pending || now < window_report_.next_log) return;
+      if (!window_report_.pending || !sunshine_diagnostics::claim_line(window_report_.next_log, now, 5000)) return;
       window_report_.pending = false;
-      window_report_.next_log = now + 5000;
       char message[256];
       std::snprintf(message, sizeof(message), "Sunshine SBS: swapchain window %p %s foreground window %p: owner=%s changes=%u",
         static_cast<void *>(window), window == foreground ? "is the" : "presents under the", static_cast<void *>(foreground), reason,

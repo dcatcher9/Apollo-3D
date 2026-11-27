@@ -22,6 +22,7 @@
 #include <cstring>
 #include <string>
 #include "game3d_clock.h"
+#include "diagnostic_log_gate.h"
 
 namespace sunshine_ngx {
   namespace {
@@ -783,8 +784,7 @@ namespace sunshine_ngx {
     last_error_guard error;
     if (!enabled()) return;
     const auto now = sunshine_game3d::clock::game_now();
-    if (now < next_report) return;
-    next_report = now + 5000;
+    if (!sunshine_diagnostics::claim_line(next_report, now, 5000)) return;
     unsigned count = 0, capture_eligible = 0;
     AcquireSRWLockShared(&feature_lock);
     for (unsigned i = 0; i < features.size(); ++i) {

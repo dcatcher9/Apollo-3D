@@ -196,7 +196,7 @@ namespace sunshine_exporter {
 
   void publisher_t::log_output(api::effect_runtime *runtime, runtime_t &proof, std::uint64_t now) {
     auto &counts = proof.output;
-    if (now < counts.next_log) return;
+    if (!sunshine_diagnostics::claim_line(counts.next_log, now, 5000)) return;
     char text[896]{};
     std::snprintf(text, sizeof(text), "Sunshine SBS output: published=%llu fg=%llu scene_flat=%llu scene_fading=%llu published_fresh_depth=%llu published_reused_depth=%llu published_depth_missing=%llu (unavailable=%llu reuse_after_gap=%llu reuse_other_source=%llu) runtime=0x%llx generation=%llu dropped=%llu overwritten_unconsumed=%llu; cumulative Game 3D publications; scene_flat had depth but showed the colour frame; reused depth is bounded and does not advance calibration; unavailable reasons are in Sunshine depth readiness; dropped found no reusable export slot, overwritten_unconsumed replaced a ready slot the consumer never claimed",
       static_cast<unsigned long long>(counts.published), static_cast<unsigned long long>(counts.fg),
@@ -209,6 +209,5 @@ namespace sunshine_exporter {
       static_cast<unsigned long long>(ring_.generation_ ? ring_.generation_->id : 0),
       static_cast<unsigned long long>(counts.dropped), static_cast<unsigned long long>(counts.overwritten_unconsumed));
     log(reshade::log::level::info, text);
-    counts.next_log = now + 5000;
   }
 }  // namespace sunshine_exporter

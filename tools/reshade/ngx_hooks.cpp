@@ -22,6 +22,7 @@
 #include <string>
 #include <utility>
 #include "game3d_clock.h"
+#include "diagnostic_log_gate.h"
 #if defined(_MSC_VER)
 #include <intrin.h>
 #define SUNSHINE_TRACE_CALLER reinterpret_cast<std::uintptr_t>(_ReturnAddress())
@@ -500,10 +501,9 @@ namespace sunshine_ngx_hooks {
       }
     }
     // Coverage is reported after a scan completes, never from its starting state.
-    if (sunshine_upscaler_trace::enabled() && now >= next_report && !discovery_pending.load(std::memory_order_acquire)) {
-      next_report = now + 5000;
+    if (sunshine_upscaler_trace::enabled() && !discovery_pending.load(std::memory_order_acquire) &&
+        sunshine_diagnostics::claim_line(next_report, now, 5000))
       sunshine_upscaler_trace::feed::report(hook_coverage());
-    }
     sunshine_ngx::poll();
     ReleaseSRWLockExclusive(&poll_lock);
   }

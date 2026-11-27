@@ -21,6 +21,7 @@
 #include <unordered_map>
 #include <utility>
 #include "game3d_clock.h"
+#include "diagnostic_log_gate.h"
 
 namespace sunshine_game3d::ui_input {
   static_assert(ui_detection_inputs::max_retained_presents == ui_evidence::max_late_presents,
@@ -646,8 +647,7 @@ namespace sunshine_game3d::ui_input {
       if (found != sources.end()) {
         auto &entry = found->second;
         if (hudless_wanted) ++entry.hudless_outcomes[hudless_result];
-        if (have_diagnostic && now >= entry.next_gate_log) {
-          entry.next_gate_log = now + 5000;
+        if (have_diagnostic && sunshine_diagnostics::claim_line(entry.next_gate_log, now, 5000)) {
           outcomes = std::exchange(entry.hudless_outcomes, {});
           log_gate = true;
         }

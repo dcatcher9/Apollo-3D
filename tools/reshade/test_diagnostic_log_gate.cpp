@@ -56,7 +56,16 @@ int main() {
     std::atomic<std::uint64_t> late{7000};
     require(!sunshine_diagnostics::claim_line(late, 6999, 1000) && sunshine_diagnostics::claim_line(late, 7000, 1000),
       "A shared line was not due exactly at its slot");
-    std::cout << "Startup log bound, recovery, adaptive snapshots, immediate events, shared line rate passed\n";
+
+    // A line whose timer one owner holds follows the same rule.
+    std::uint64_t owned = 0;
+    require(sunshine_diagnostics::claim_line(owned, 0, 5000) && owned == 5000, "The first owned line was refused");
+    require(!sunshine_diagnostics::claim_line(owned, 4999, 5000) && owned == 5000,
+      "An owned line came before its interval, or a refusal moved its slot");
+    unsigned owned_claims = 0;
+    for (std::uint64_t ms = 5000; ms != 20000; ++ms) owned_claims += sunshine_diagnostics::claim_line(owned, ms, 5000);
+    require(owned_claims == 3 && owned == 20000, "An owned line was claimed more or less than once per interval");
+    std::cout << "Startup log bound, recovery, adaptive snapshots, immediate events, shared and owned line rate passed\n";
     return 0;
   } catch (const std::exception &error) {
     std::cerr << error.what() << '\n';
