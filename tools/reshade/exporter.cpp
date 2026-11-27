@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #define SUNSHINE_EXPORTER_IMPLEMENTATION
 #include "exporter_internal.h"
+#include "addon_win32.h"
 namespace SUNSHINE_EXPORTER_INTERNAL {
   std::atomic<std::uint64_t> next_raw_basis {1};
 
@@ -253,9 +254,7 @@ extern "C" {
     // threads may still be running its code and its imports (D3DCompiler).
     // Pinned, it stays mapped until process exit, and the next device
     // initializes it again through AddonInit.
-    HMODULE self{};
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-        reinterpret_cast<LPCWSTR>(&AddonInit), &self)) return false;
+    if (!sunshine_addon_win32::pin_module_of(&AddonInit)) return false;
     if (!addon_session().begin()) return false;
     if (!reshade::register_addon(addon, reshade)) {
       addon_session().lifecycle.store(addon_session_t::phase::inactive, std::memory_order_release);

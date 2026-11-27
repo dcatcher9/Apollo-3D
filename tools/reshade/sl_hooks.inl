@@ -73,11 +73,10 @@ namespace sunshine_streamline {
       // through our deferred detour. A lookup never establishes enabled state.
       // Same verdict as every 2.x call (eWarnOutOfVRAM is a success), but the
       // add-on's own lookup is not a game call, so vram_warnings ignores it.
-      const DWORD saved = GetLastError();
+      const sunshine_addon_win32::last_error_guard error;
       void *entry{};
       if (abi_v2::accepted(original_feature_function_v2(1000, "slDLSSGSetOptions", entry)) && current(ticket) && entry)
         retain_fg_target(entry, ticket);
-      SetLastError(saved);
     }
     bool frame_generation_function_wanted(std::uint64_t ticket, std::uint32_t feature, const char *function_name) {
       constexpr char fg_expected[] = "slDLSSGSetOptions";
@@ -162,9 +161,7 @@ namespace sunshine_streamline {
       dump_metadata::observe_module(module, "streamline", "1.1.1 resource-state adapter");
       auto info = module_version(module);
       const bool supported = versioning::private_state_v1_1_1(info);
-      HMODULE pinned{};
-      const bool ready = supported && GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-        reinterpret_cast<LPCWSTR>(module), &pinned);
+      const bool ready = supported && sunshine_addon_win32::pin_module_of(module);
       v1_private_state_checked = true;
       v1_private_state_ready.store(ready, std::memory_order_release);
       char text[640]{};
@@ -222,15 +219,13 @@ namespace sunshine_streamline {
         FreeLibrary(module);
         return;
       }
-      HMODULE pinned_addon{}, pinned_interposer{}, own_module{};
+      HMODULE own_module{};
       // Never pin the fixture process executable or another caller's module.
       const bool owned = addon_module && addon_module != GetModuleHandleW(nullptr) &&
         GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
           reinterpret_cast<LPCWSTR>(&discover), &own_module) && own_module == addon_module;
-      if (!owned || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-            reinterpret_cast<LPCWSTR>(&discover), &pinned_addon) ||
-          !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-            reinterpret_cast<LPCWSTR>(functions.constants), &pinned_interposer)) {
+      if (!owned || !sunshine_addon_win32::pin_module_of(&discover) ||
+          !sunshine_addon_win32::pin_module_of(functions.constants)) {
         message("Sunshine Streamline: module lifetime could not be secured; camera hooks disabled");
         permanently_rejected = true;
         FreeLibrary(module);

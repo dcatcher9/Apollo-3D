@@ -4,6 +4,7 @@
 #define CINTERFACE
 #include <d3d12.h>
 #include "native_vtable_slot.h"
+#include "addon_win32.h"
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -137,10 +138,7 @@ namespace sunshine_streamline::native_observer {
       SRWLOCK report_lock = SRWLOCK_INIT;
     }
 
-    struct restore_error {
-      DWORD value;
-      ~restore_error() { SetLastError(value); }
-    };
+    using sunshine_addon_win32::last_error_guard;
     bool enabled() {
       return !sunshine_addon_lifetime::stopping() && requested.load(std::memory_order_acquire) && active.load(std::memory_order_acquire);
     }
@@ -258,7 +256,7 @@ namespace sunshine_streamline::native_observer {
       const DWORD incoming = GetLastError();
       auto &slot = targets[static_cast<unsigned>(method::barriers)][Index];
       invocation call(method::barriers, slot.status.load(std::memory_order_acquire));
-      restore_error outgoing{incoming}; // Restore after snapshot storage is freed.
+      last_error_guard outgoing{incoming}; // Restore after snapshot storage is freed.
       batch_snapshot<D3D12_RESOURCE_BARRIER, inline_barriers> copied;
       std::uint64_t cookie{};
       bool complete = true, allocated = true;
@@ -279,7 +277,7 @@ namespace sunshine_streamline::native_observer {
       const DWORD incoming = GetLastError();
       auto &slot = targets[static_cast<unsigned>(method::execute)][Index];
       invocation call(method::execute, slot.status.load(std::memory_order_acquire));
-      restore_error outgoing{incoming}; // Restore after snapshot storage is freed.
+      last_error_guard outgoing{incoming}; // Restore after snapshot storage is freed.
       std::array<ID3D12CommandList *, command_chunk> copied;
       batch_snapshot<command_identity, command_chunk> identities;
       bool complete = true, allocated = true;
@@ -330,7 +328,7 @@ namespace sunshine_streamline::native_observer {
       if (!enhanced_used.load(std::memory_order_relaxed)) enhanced_used.store(true, std::memory_order_relaxed);
       auto &slot = targets[static_cast<unsigned>(method::enhanced)][Index];
       invocation call(method::enhanced, slot.status.load(std::memory_order_acquire));
-      restore_error outgoing{incoming}; // Restore after snapshot storage is freed.
+      last_error_guard outgoing{incoming}; // Restore after snapshot storage is freed.
       // Only texture barriers change a texture's layout. Snapshot the textures
       // they name and their new layouts before forwarding, as the legacy
       // barrier hook does.
@@ -470,7 +468,7 @@ namespace sunshine_streamline::native_observer {
     }
     void observe(std::uint64_t object, method value) {
       if (!requested.load(std::memory_order_acquire) || suppression_depth) return;
-      const restore_error incoming{GetLastError()};
+      const last_error_guard incoming{GetLastError()};
       const auto kind = static_cast<unsigned>(value);
       void **address{};
       if (!read_slot_address(object, kind, address)) { lost(kind, true); return; }
@@ -501,7 +499,7 @@ namespace sunshine_streamline::native_observer {
     }
     bool ready(std::uint64_t object, method value) {
       if (!enabled()) return false;
-      const restore_error incoming{GetLastError()};
+      const last_error_guard incoming{GetLastError()};
       const auto kind = static_cast<unsigned>(value);
       void **address{};
       if (!read_slot_address(object, kind, address) || !TryAcquireSRWLockShared(&targets_lock)) return false;
@@ -524,7 +522,7 @@ namespace sunshine_streamline::native_observer {
     // A list that supports CommandList7 can also change states with enhanced
     // Barrier, which makes the legacy states it observed unusable.
     bool enhanced_coverage(std::uint64_t command, bool discover) {
-      const restore_error incoming{GetLastError()};
+      const last_error_guard incoming{GetLastError()};
       auto *object = reinterpret_cast<ID3D12Object *>(command);
       ID3D12GraphicsCommandList7 *version7{};
       const HRESULT result7 = object->lpVtbl->QueryInterface(object, IID_ID3D12GraphicsCommandList7, reinterpret_cast<void **>(&version7));
@@ -729,7 +727,7 @@ namespace sunshine_streamline::native_observer {
     // any write here: its slots hold module hooks, or hooks written into its
     // own table before that recording began (enhanced_barrier_use).
     bool cover(std::uint64_t command, std::uint64_t cookie) {
-      const restore_error incoming{GetLastError()};
+      const last_error_guard incoming{GetLastError()};
       auto *object = live_interface<ID3D12GraphicsCommandList>(command, IID_ID3D12GraphicsCommandList);
       if (!object) return false;
       const auto normalized = reinterpret_cast<std::uintptr_t>(object);
@@ -761,7 +759,7 @@ namespace sunshine_streamline::native_observer {
     // only where installed module hooks cover its table (as apply_executed's
     // exemption of DXGI's internal Present list requires).
     bool cookieless_covered(std::uint64_t command) {
-      const restore_error incoming{GetLastError()};
+      const last_error_guard incoming{GetLastError()};
       auto *object = live_interface<ID3D12GraphicsCommandList>(command, IID_ID3D12GraphicsCommandList);
       if (!object) return false;
       const auto normalized = reinterpret_cast<std::uintptr_t>(object);
@@ -858,7 +856,7 @@ namespace sunshine_streamline::native_observer {
   }
   void observe_command(std::uint64_t command) {
     if (sunshine_addon_lifetime::stopping() || !requested.load(std::memory_order_acquire) || suppression_depth) return;
-    const restore_error incoming{GetLastError()};
+    const last_error_guard incoming{GetLastError()};
     auto *object = required_interface<ID3D12GraphicsCommandList>(command, IID_ID3D12GraphicsCommandList, true);
     if (!object) return;
     const auto normalized = reinterpret_cast<std::uintptr_t>(object);
@@ -868,7 +866,7 @@ namespace sunshine_streamline::native_observer {
   }
   void observe_queue(std::uint64_t queue) {
     if (sunshine_addon_lifetime::stopping() || !requested.load(std::memory_order_acquire) || suppression_depth) return;
-    const restore_error incoming{GetLastError()};
+    const last_error_guard incoming{GetLastError()};
     auto *object = required_interface<ID3D12CommandQueue>(queue, IID_ID3D12CommandQueue, true);
     if (!object) return;
     observe(reinterpret_cast<std::uintptr_t>(object), method::execute);
@@ -880,7 +878,7 @@ namespace sunshine_streamline::native_observer {
   }
   states_dispatch states_coverage(std::uint64_t command) {
     if (!enabled() || !command) return {};
-    const restore_error incoming{GetLastError()};
+    const last_error_guard incoming{GetLastError()};
     auto *object = live_interface<ID3D12GraphicsCommandList>(command, IID_ID3D12GraphicsCommandList);
     if (!object) return {};
     const auto normalized = reinterpret_cast<std::uintptr_t>(object);
@@ -901,7 +899,7 @@ namespace sunshine_streamline::native_observer {
   }
   void note_uncovered(std::uint64_t command) {
     if (sunshine_addon_lifetime::stopping() || !command) return;
-    const restore_error incoming{GetLastError()};
+    const last_error_guard incoming{GetLastError()};
     auto *object = required_interface<ID3D12GraphicsCommandList>(command, IID_ID3D12GraphicsCommandList, false);
     if (!object) return;
     uncovered::report value;
@@ -958,7 +956,7 @@ namespace sunshine_streamline::native_observer {
   }
   bool queue_ready(std::uint64_t queue) {
     if (!enabled()) return false;
-    const restore_error incoming{GetLastError()};
+    const last_error_guard incoming{GetLastError()};
     auto *object = required_interface<ID3D12CommandQueue>(queue, IID_ID3D12CommandQueue, false);
     if (!object) return false;
     const bool result = ready(reinterpret_cast<std::uintptr_t>(object), method::execute);
@@ -967,7 +965,7 @@ namespace sunshine_streamline::native_observer {
   }
   bool install_pending() {
     if (!enabled()) return false;
-    const restore_error incoming{GetLastError()};
+    const last_error_guard incoming{GetLastError()};
     // Caller serializes deferred installation outside event/loader callbacks.
     // The shared helper serializes page-protection changes across observers.
     if (!suppression_depth && invalidation_pending.exchange(false, std::memory_order_acq_rel)) invalidate();
@@ -1005,13 +1003,13 @@ namespace sunshine_streamline::native_observer {
   }
   bool set_recording_cookie(std::uint64_t command, std::uint64_t cookie) {
     if (sunshine_addon_lifetime::stopping() || !command) return false;
-    const restore_error incoming{GetLastError()};
+    const last_error_guard incoming{GetLastError()};
     auto *object = reinterpret_cast<ID3D12Object *>(command);
     return SUCCEEDED(object->lpVtbl->SetPrivateData(object, recording_guid, sizeof(cookie), &cookie));
   }
   std::uint64_t get_recording_cookie(std::uint64_t command) {
     if (sunshine_addon_lifetime::stopping() || !command) return 0;
-    const restore_error incoming{GetLastError()};
+    const last_error_guard incoming{GetLastError()};
     auto *object = reinterpret_cast<ID3D12Object *>(command);
     UINT size = sizeof(std::uint64_t);
     std::uint64_t cookie{};
@@ -1019,7 +1017,7 @@ namespace sunshine_streamline::native_observer {
   }
   bool recording_cookie_absent(std::uint64_t command) {
     if (sunshine_addon_lifetime::stopping() || !command) return false;
-    const restore_error incoming{GetLastError()};
+    const last_error_guard incoming{GetLastError()};
     auto *object = reinterpret_cast<ID3D12Object *>(command);
     UINT size = sizeof(std::uint64_t);
     std::uint64_t cookie{};

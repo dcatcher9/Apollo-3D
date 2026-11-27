@@ -2,6 +2,7 @@
 #pragma once
 
 #include <d3d12.h>
+#include "addon_win32.h"
 #include <atomic>
 #include <cstdint>
 #include <mutex>
@@ -16,7 +17,7 @@ namespace sunshine_native_identity {
   namespace detail {
     inline std::mutex creation_mutex;
     inline std::atomic<std::uint64_t> serial{1};
-    struct restore_error { DWORD value{GetLastError()}; ~restore_error() { SetLastError(value); } };
+    using sunshine_addon_win32::last_error_guard;
     inline std::uint64_t read(ID3D12Object *object, REFGUID key) {
       std::uint64_t value{}; UINT size = sizeof(value);
       return object && SUCCEEDED(object->GetPrivateData(key, &size, &value)) && size == sizeof(value) ? value : 0;
@@ -24,7 +25,7 @@ namespace sunshine_native_identity {
     // The caller holds a validated, live interface. Creation is serialized
     // across all users; proxy/native interfaces sharing private data share IDs.
     inline std::uint64_t cookie(ID3D12Object *object, REFGUID key, bool create) {
-      const restore_error error;
+      const last_error_guard error;
       if (!object) return 0;
       if (!create) return read(object, key);
       std::lock_guard lock(creation_mutex);
@@ -50,7 +51,7 @@ namespace sunshine_native_identity {
   // Never read resource/device methods before exact QueryInterface succeeds.
   // Result is value-only; callers retaining it must separately retain lifetime.
   inline resource_identity identify_resource(std::uint64_t native, bool create = true) {
-    const detail::restore_error error;
+    const detail::last_error_guard error;
     resource_identity out;
     if (!native) return out;
     ID3D12Resource *resource{};

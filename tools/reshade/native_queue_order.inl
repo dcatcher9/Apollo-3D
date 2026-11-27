@@ -16,7 +16,7 @@ namespace sunshine_streamline::native_observer {
       void *const caller = __builtin_return_address(0);
       auto &slot = targets[static_cast<unsigned>(method::signal)][Index];
       invocation call(method::signal, slot.status.load(std::memory_order_acquire));
-      restore_error outgoing{incoming};
+      last_error_guard outgoing{incoming};
       const bool logged = call.eligible && !(fence && order_on() && own_signal(fence));
       order_enter(call, queue, logged);
       if (logged && !call.inherited && fence && order_on()) order_signal(queue, call, fence, value, caller);
@@ -31,7 +31,7 @@ namespace sunshine_streamline::native_observer {
       const DWORD incoming = GetLastError();
       auto &slot = targets[static_cast<unsigned>(method::wait)][Index];
       invocation call(method::wait, slot.status.load(std::memory_order_acquire));
-      restore_error outgoing{incoming};
+      last_error_guard outgoing{incoming};
       order_enter(call, queue, call.eligible);
       SetLastError(incoming);
       const HRESULT result = reinterpret_cast<queue_fence_fn>(slot.original.load(std::memory_order_acquire))(queue, fence, value);
@@ -47,7 +47,7 @@ namespace sunshine_streamline::native_observer {
       const DWORD incoming = GetLastError();
       auto &slot = targets[static_cast<unsigned>(method::fence_signal)][Index];
       invocation call(method::fence_signal, slot.status.load(std::memory_order_acquire));
-      restore_error outgoing{incoming};
+      last_error_guard outgoing{incoming};
       if (call.eligible && !call.inherited && order_on()) order_cpu_signal(fence);
       SetLastError(incoming);
       const HRESULT result = reinterpret_cast<fence_signal_fn>(slot.original.load(std::memory_order_acquire))(fence, value);
@@ -127,7 +127,7 @@ namespace sunshine_streamline::native_observer {
 
     void order_enter(invocation &call, ID3D12CommandQueue *queue, bool blocking) {
       if (call.inherited || !queue || !order_on()) return;
-      const restore_error incoming{GetLastError()};
+      const last_error_guard incoming{GetLastError()};
       const auto id = queue_id(queue, blocking);
       if (auto *slot = ticket_of(id)) {
         call.order_queue = id;
@@ -166,7 +166,7 @@ namespace sunshine_streamline::native_observer {
     // each such Signal waited on the order lock, on the present thread at
     // every flush the add-on made.
     bool own_signal(ID3D12Fence *fence) {
-      const restore_error incoming{GetLastError()};
+      const last_error_guard incoming{GetLastError()};
       std::uint8_t mark{};
       if (private_bytes(fence, own_fence_guid, &mark, sizeof(mark)) && mark) {
         ++order::own_signals;
@@ -290,7 +290,7 @@ namespace sunshine_streamline::native_observer {
     }
 
     void order_signal(ID3D12CommandQueue *queue, invocation &call, ID3D12Fence *fence, UINT64 value, void *caller) {
-      const restore_error incoming{GetLastError()};
+      const last_error_guard incoming{GetLastError()};
       // The native call is not forwarded yet: a record dropped since the call
       // took its ticket is re-sighted with a fresh ticket, so a signal never
       // goes unlogged against a live fence record (a pending wait would
@@ -400,7 +400,7 @@ namespace sunshine_streamline::native_observer {
     }
 
     void order_wait(const invocation &call, ID3D12Fence *fence, UINT64 value, bool quiet) {
-      const restore_error incoming{GetLastError()};
+      const last_error_guard incoming{GetLastError()};
       const auto id = fence_id(fence, call.order_queue);
       AcquireSRWLockExclusive(&order::lock);
       apply_order_reset();
@@ -418,7 +418,7 @@ namespace sunshine_streamline::native_observer {
     }
 
     void order_cpu_signal(ID3D12Fence *fence) {
-      const restore_error incoming{GetLastError()};
+      const last_error_guard incoming{GetLastError()};
       AcquireSRWLockExclusive(&order::lock);
       apply_order_reset();
       // Read under the lock its writers hold. Never sighted: its baseline at
@@ -503,7 +503,7 @@ namespace sunshine_streamline::native_observer {
       return out;
     };
     if (!order_on() || !reader) return refuse(refusal::disabled);
-    const restore_error incoming{GetLastError()};
+    const last_error_guard incoming{GetLastError()};
     // Every installed order slot still holds its detour now, not only at the
     // last poll: a CPU Signal or a queue Signal that bypassed a replaced slot
     // since then was never logged.

@@ -2,6 +2,7 @@
 #pragma once
 
 #include <d3d12.h>
+#include "addon_win32.h"
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -54,11 +55,7 @@ namespace sunshine_native_command {
       }
     };
 
-    static bool pin_module() noexcept {
-      HMODULE module{};
-      return GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-        reinterpret_cast<LPCWSTR>(&pin_module), &module) != FALSE;
-    }
+    static bool pin_module() noexcept { return sunshine_addon_win32::pin_module_of(&pin_module); }
 
   public:
     class handle {

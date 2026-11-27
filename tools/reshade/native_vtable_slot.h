@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 #include <Windows.h>
+#include "addon_win32.h"
 #include <cstddef>
 #include <cstdint>
 
@@ -15,10 +16,7 @@ namespace sunshine_native_vtable {
     // Separate observers may edit different slots on the same read-only page.
     // Share the protection/CAS/restore critical section across translation units.
     inline SRWLOCK mutation_lock = SRWLOCK_INIT;
-    struct restore_error {
-      DWORD value{GetLastError()};
-      ~restore_error() { SetLastError(value); }
-    };
+    using sunshine_addon_win32::last_error_guard;
     inline bool read(const void *source, void *output, std::size_t size) {
       SIZE_T copied{};
       return source && ReadProcessMemory(GetCurrentProcess(), source, output, size, &copied) && copied == size;
@@ -34,8 +32,7 @@ namespace sunshine_native_vtable {
     }
     inline bool pin(const void *address, HMODULE expected = nullptr) {
       HMODULE owner{};
-      return GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-        reinterpret_cast<LPCWSTR>(address), &owner) && (!expected || owner == expected);
+      return sunshine_addon_win32::pin_module_of(address, &owner) && (!expected || owner == expected);
     }
     inline bool exchange(const slot &value, void *expected, void *replacement) {
       AcquireSRWLockExclusive(&mutation_lock);
@@ -60,7 +57,7 @@ namespace sunshine_native_vtable {
   }
 
   inline void release(slot &value) {
-    const detail::restore_error incoming;
+    const detail::last_error_guard incoming;
     if (value.table_owner) FreeLibrary(value.table_owner);
     if (value.code_owner) FreeLibrary(value.code_owner);
     value = {};
@@ -68,7 +65,7 @@ namespace sunshine_native_vtable {
   // Caller first authenticates the exact COM interface and holds its reference
   // while discovering. The output must be empty; it owns two module references.
   inline bool discover(std::uint64_t object, std::size_t index, slot &output) {
-    const detail::restore_error incoming;
+    const detail::last_error_guard incoming;
     std::uintptr_t table{};
     if (!detail::read(reinterpret_cast<const void *>(object), &table, sizeof(table)) || !table ||
         index > (UINTPTR_MAX - table) / sizeof(void *)) return false;
@@ -86,20 +83,20 @@ namespace sunshine_native_vtable {
     return true;
   }
   inline bool matches(const slot &value, void *detour) {
-    const detail::restore_error incoming;
+    const detail::last_error_guard incoming;
     void *current{};
     return value.address && detail::read(value.address, &current, sizeof(current)) && current == detour;
   }
   // Publish the callable original before install: another thread can enter the
   // detour immediately after the CAS. Installed hooks remain for process life.
   inline bool install(const slot &value, void *detour) {
-    const detail::restore_error incoming;
+    const detail::last_error_guard incoming;
     return value.address && value.original && detour && detail::pin(value.address, value.table_owner) &&
       detail::pin(value.original, value.code_owner) && detail::pin(detour) && detail::exchange(value, value.original, detour);
   }
   // Quiescent fixture teardown only. A third-party replacement is left intact.
   inline bool restore(const slot &value, void *detour) {
-    const detail::restore_error incoming;
+    const detail::last_error_guard incoming;
     return value.address && detour && detail::exchange(value, detour, value.original);
   }
 }

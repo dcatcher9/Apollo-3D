@@ -6,6 +6,7 @@
 #include "ngx_hooks.h"
 #include "upscaler_call_trace.h"
 #include "addon_lifetime.h"
+#include "addon_win32.h"
 #include "game3d_pool_submit.h"
 #include "hook_host.h"
 #include "ngx_depth_source.h"
@@ -54,10 +55,7 @@ namespace sunshine_ngx_hooks {
       std::atomic<void *> original{};
       std::atomic<unsigned> state{}; // 1 created, 2 enabled, 3 rejected; never removed.
     };
-    struct last_error_guard {
-      DWORD value{GetLastError()};
-      ~last_error_guard() { SetLastError(value); }
-    };
+    using sunshine_addon_win32::last_error_guard;
     // No destructible locks/containers or workers: detours stay valid after the
     // add-on's normal shutdown and continue calling their immutable originals.
     SRWLOCK poll_lock = SRWLOCK_INIT;
@@ -256,10 +254,8 @@ namespace sunshine_ngx_hooks {
       HMODULE owner{}, addon{};
       const auto executable = VirtualQuery(entry, &memory, sizeof(memory)) &&
         sunshine_game3d::hook_host::executable_image(memory);
-      if (!executable || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-            reinterpret_cast<LPCWSTR>(entry), &owner) ||
-          !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-            reinterpret_cast<LPCWSTR>(&initialize), &addon) || addon != addon_module.load()) {
+      if (!executable || !sunshine_addon_win32::pin_module_of(entry, &owner) ||
+          !sunshine_addon_win32::pin_module_of(&initialize, &addon) || addon != addon_module.load()) {
         ++rejected;
         return false;
       }

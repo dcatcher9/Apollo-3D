@@ -4,6 +4,7 @@
 #include "game3d_pool_submit.h"
 #include "addon_config.h"
 #include "hook_host.h"
+#include "addon_win32.h"
 #include "api_contract.h"
 #include "diagnostic_log_gate.h"
 #include "streamline_camera_data.h"

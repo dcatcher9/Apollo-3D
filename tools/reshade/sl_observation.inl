@@ -52,11 +52,10 @@ namespace sunshine_streamline {
     std::uint64_t lose(loss_diagnostics::reason cause, const char *site, std::uint32_t line,
         loss_diagnostics::context details) {
       const auto previous = loss_revision.fetch_add(1, std::memory_order_acq_rel);
-      const DWORD saved_error = GetLastError();
+      const sunshine_addon_win32::last_error_guard error;
       // A contended or overwritten diagnostic slot is simply unavailable. It
       // must never itself lose source observations or alter the revision count.
       loss_journal.publish({previous + 1, sunshine_game3d::clock::game_now(), GetCurrentThreadId(), line, cause, site, details});
-      SetLastError(saved_error);
       return previous;
     }
     void invalid_observation(loss_diagnostics::reason cause, const char *site, std::uint32_t line) {

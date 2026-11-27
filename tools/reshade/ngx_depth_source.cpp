@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "ngx_depth_source.h"
 #include "addon_lifetime.h"
+#include "addon_win32.h"
 #include "api_contract.h"
 #include "game3d_diagnostic_metadata.h"
 #include "streamline_depth_capture.h"
@@ -218,10 +219,7 @@ namespace sunshine_ngx {
 #ifdef SUNSHINE_UPSCALER_TRACE_TEST
     testing::callbacks backend;
 #endif
-    struct preserve_error {
-      DWORD value{GetLastError()};
-      ~preserve_error() { SetLastError(value); }
-    };
+    using sunshine_addon_win32::last_error_guard;
     bool success(result value) { return (value & 0xfff00000u) != 0xbad00000u; }
     sunshine_game3d::diagnostic::stamp observe_dump_parameters(const parameter_api &api, const void *parameters,
         const sunshine_scene_depth::frame &frame, const feature &selected,
@@ -367,17 +365,15 @@ namespace sunshine_ngx {
     void *export_pointer(HMODULE owner, const char *name) {
       auto *entry = reinterpret_cast<void *>(GetProcAddress(owner, name));
       MEMORY_BASIC_INFORMATION info{};
-      HMODULE pinned{};
       if (!entry || !VirtualQuery(entry, &info, sizeof(info)) || info.Type != MEM_IMAGE ||
           info.State != MEM_COMMIT || (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) ||
           !(info.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) ||
-          !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-            reinterpret_cast<LPCWSTR>(entry), &pinned)) return nullptr;
+          !sunshine_addon_win32::pin_module_of(entry)) return nullptr;
       return entry;
     }
   }
   parameter_api resolve_parameter_api(HMODULE owner) {
-    preserve_error error;
+    last_error_guard error;
     parameter_api value;
     if (sunshine_addon_lifetime::stopping() || !owner) return value;
     sunshine_game3d::diagnostic::observe_module(owner, "ngx", "named C parameter exports");
@@ -390,7 +386,7 @@ namespace sunshine_ngx {
   }
   void initialize(bool requested) {
     if (sunshine_addon_lifetime::stopping()) return;
-    preserve_error error;
+    last_error_guard error;
     active_epoch.store(0, std::memory_order_release);
     AcquireSRWLockExclusive(&feature_lock);
     features = {};
@@ -472,11 +468,11 @@ namespace sunshine_ngx {
     }
   }
   creation before_create(const parameter_api &api, std::uint32_t feature_id, const void *parameters) {
-    preserve_error error;
+    last_error_guard error;
     return parse_creation(api, feature_id, parameters, feature_id == super_sampling);
   }
   void after_create(HMODULE owner, const void *handle, const creation &value, bool successful) {
-    preserve_error error;
+    last_error_guard error;
     if (sunshine_addon_lifetime::stopping() || !value.epoch || value.epoch != active_epoch.load(std::memory_order_acquire) || !successful) return;
     // Rare lifecycle mutations cannot be dropped: one missed successful create
     // would leave the feature unavailable until the game recreates DLSS. This
@@ -492,7 +488,7 @@ namespace sunshine_ngx {
     ReleaseSRWLockExclusive(&feature_lock);
   }
   void after_release(HMODULE owner, const void *handle, std::uint64_t epoch, bool successful) {
-    preserve_error error;
+    last_error_guard error;
     if (sunshine_addon_lifetime::stopping() || !epoch || epoch != active_epoch.load(std::memory_order_acquire) || !successful) return;
     std::uint64_t generation{};
     AcquireSRWLockExclusive(&feature_lock);
@@ -516,7 +512,7 @@ namespace sunshine_ngx {
   }
   evaluation before_evaluate(HMODULE owner, const parameter_api &api, std::uint64_t command,
       const void *handle, const void *parameters, bool capture_depth, bool observe_diagnostics) {
-    preserve_error error;
+    last_error_guard error;
     evaluation attempt;
     attempt.epoch = epoch();
     if (!attempt.epoch || !api || !parameters || !command || !handle) return attempt;
@@ -747,7 +743,7 @@ namespace sunshine_ngx {
     return attempt;
   }
   void after_evaluate(const evaluation &value, bool successful) {
-    preserve_error error;
+    last_error_guard error;
     // An original vendor call can return after detach began. Its old ticket
     // must not reenter the capture owner's already destructing containers.
     if (sunshine_addon_lifetime::stopping()) return;
@@ -784,7 +780,7 @@ namespace sunshine_ngx {
 #endif
   }
   void poll() {
-    preserve_error error;
+    last_error_guard error;
     if (!enabled()) return;
     const auto now = sunshine_game3d::clock::game_now();
     if (now < next_report) return;
