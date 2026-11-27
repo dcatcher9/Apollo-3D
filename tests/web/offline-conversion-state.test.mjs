@@ -13,14 +13,14 @@ function actualPageMethod(source, beginMarker, endMarker, name, context) {
 }
 
 test('the actual page replaces preparing metadata with terminal failure and leaves actions disabled', { timeout: 3000 }, async t => {
-  const source = readFileSync(new URL('../../src_assets/common/assets/web/offline-conversion.html', import.meta.url), 'utf8')
+  const source = readFileSync(new URL('../../src_assets/common/assets/web/OfflineConversionPage.vue', import.meta.url), 'utf8')
   const context = vm.createContext({
     AbortController,
     getOfflineSbsOverview,
     overviewAbortController: null,
   })
-  const loadJobs = actualPageMethod(source, '      async loadJobs(silent = false) {', '      async loadSelectedJob(', 'loadJobs', context)
-  const disabledReason = actualPageMethod(source, '      startDisabledReason() {', '      canStart() {', 'startDisabledReason', context)
+  const loadJobs = actualPageMethod(source, '    async loadJobs(silent = false) {', '    async loadSelectedJob(', 'loadJobs', context)
+  const disabledReason = actualPageMethod(source, '    startDisabledReason() {', '    canStart() {', 'startDisabledReason', context)
   const view = {
     form: { codec: 'hevc_nvenc' },
     capabilities: {},

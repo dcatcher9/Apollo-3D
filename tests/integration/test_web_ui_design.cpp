@@ -451,7 +451,9 @@ TEST(WebUiDesign, LocalArExclusiveDesktopUiMatchesItsDefaultOnNativePolicy) {
 }
 
 TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolated) {
-  const auto page = read_source(web_root / "offline-conversion.html");
+  // The page component and its path picker.
+  const auto page =
+    read_source(web_root / "OfflineConversionPage.vue") + read_source(web_root / "OfflinePathPicker.vue");
   const auto api = read_source(web_root / "offline-sbs-api.js");
   const auto shared_api = read_source(web_root / "api.js");
   const auto navbar = read_source(web_root / "Navbar.vue");
