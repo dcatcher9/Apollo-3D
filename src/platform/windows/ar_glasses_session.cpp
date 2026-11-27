@@ -354,47 +354,13 @@ namespace ar_glasses {
 
         // Color changes follow the initial durable placement. Exclusive sessions serialize the
         // complete update with display reconciliation; extended sessions keep their row journal.
-        auto physical_hdr = active_target.hdr;
-        if (physical_hdr.supported && !physical_hdr.limited_by_policy && !physical_hdr.active) {
-          if (platf::display_config::set_hdr_state(active_target.adapter_id, active_target.target_id, true)) {
-            // HDR activation can renumber the target or change its mode. Wait for the stable PnP
-            // target rather than polling the now-stale source/target IDs from the original path.
-            const auto deadline = std::chrono::steady_clock::now() + 10s;
-            while (!cancelled() &&
-                   std::chrono::steady_clock::now() < deadline && !physical_hdr.active) {
-              for (int sleep_step = 0; sleep_step < 4 && !cancelled(); ++sleep_step) {
-                std::this_thread::sleep_for(50ms);
-              }
-              bool topology_query_succeeded = false;
-              const auto current = find_target(target_device_path_, {}, &topology_query_succeeded);
-              if (!topology_query_succeeded) {
-                continue;
-              }
-              if (!current) {
-                BOOST_LOG(info) << "AR display disconnected while enabling HDR."sv;
-                return false;
-              }
-              if (current->mode != active_target.mode || current->rect.right - current->rect.left != active_target.rect.right - active_target.rect.left || current->rect.bottom - current->rect.top != active_target.rect.bottom - active_target.rect.top) {
-                BOOST_LOG(info) << "AR output mode changed while enabling HDR; waiting for the topology controller to rebuild the session."sv;
-                return false;
-              }
-              active_target = *current;
-              presentation_target = *current;
-              physical_hdr = active_target.hdr;
-            }
-            if (cancelled()) {
-              return false;
-            }
-            if (!physical_hdr.active) {
-              // Some glasses advertise HDR before their on-device HDR10 mode is active. Treat
-              // that as a stable SDR presentation state rather than tearing down and recreating
-              // the virtual desktop every retry interval.
-              BOOST_LOG(warning) << "AR display did not enter HDR after Windows accepted the request; continuing in SDR."sv;
-            }
-          } else {
-            BOOST_LOG(warning) << "The AR display reports HDR support, but Windows rejected HDR activation."sv;
+        if (active_target.hdr.supported && !active_target.hdr.limited_by_policy && !active_target.hdr.active) {
+          if (!enable_physical_hdr(active_target, cancelled)) {
+            return false;
           }
+          presentation_target = active_target;
         }
+        const auto physical_hdr = active_target.hdr;
         if (physical_hdr.supported && physical_hdr.limited_by_policy) {
           BOOST_LOG(warning) << "HDR on the AR display is disabled by Windows policy."sv;
         }
@@ -421,27 +387,19 @@ namespace ar_glasses {
           return !cancelled();
         }
 
-        bool virtual_hdr_active = false;
-        auto source_binding = virtual_display_binding();
-        if (!configure_virtual_display_hdr(
-              source_binding.display_name,
-              *source_binding.identity,
-              target_device_path_,
-              requested_target_hdr,
-              virtual_hdr_active,
-              cancelled
-            )) {
+        // Every look at the source refreshes its binding, so the source keeps its learned identity
+        // through any renumbering the color change causes.
+        const auto source_color = configure_source_color(requested_target_hdr, true, active_target.refresh_millihz, cancelled);
+        if (!source_color) {
           if (cancelled()) {
             return false;
           }
           BOOST_LOG(error) << "Local AR virtual display color-mode configuration failed; rebuilding the session."sv;
           return false;
         }
+        const bool virtual_hdr_active = *source_color;
         BOOST_LOG(info) << "Local AR source color mode: "sv
                         << (virtual_hdr_active ? "HDR linear scRGB"sv : "SDR Rec.709"sv) << '.';
-        if (!virtual_display_.update_binding(std::move(source_binding))) {
-          return false;
-        }
         if (virtual_hdr_active) {
           const auto source = virtual_display_binding();
           const auto source_white = query_sdr_white_nits(
@@ -891,6 +849,18 @@ namespace ar_glasses {
         // actually SDR, that mismatch makes the presenter reject every target generation. SDR is
         // the safe common contract and remains color-managed when the sink later proves to be HDR.
         const bool desired_virtual_hdr = target.hdr.known && target.hdr.active;
+        // The same rule and SDR fallback as initial start-up: an HDR physical sink may consume a
+        // color-managed SDR swapchain, so the desktop is never removed merely because its source
+        // cannot activate Advanced Color in this mode. An HDR source on an SDR sink cannot be
+        // presented coherently, so a source that cannot return to SDR is retried.
+        const auto configured_virtual_hdr = configure_source_color(desired_virtual_hdr, false, target.refresh_millihz, cancelled);
+        if (!configured_virtual_hdr) {
+          if (!cancelled()) {
+            BOOST_LOG(warning) << "The persistent local AR source could not settle its color; retaining the desktop for retry."sv;
+          }
+          return false;
+        }
+        virtual_hdr_active_ = *configured_virtual_hdr;
         // Address the owned source by its stable adapter/target identity. A GDI name such as
         // DISPLAYn can be renumbered or reused by another display during a mode switch.
         const auto query_source_hdr = [&]() -> std::optional<bool> {
@@ -898,69 +868,6 @@ namespace ar_glasses {
           return binding.identity ? VDISPLAY::queryDisplayHDR(binding.identity->AdapterLuid, binding.identity->TargetId) :
                                     std::nullopt;
         };
-        const auto set_source_hdr = [&](bool enabled) {
-          const auto binding = virtual_display_binding();
-          return binding.identity && VDISPLAY::setDisplayHDR(binding.identity->AdapterLuid, binding.identity->TargetId, enabled);
-        };
-        const auto current_virtual_hdr = query_source_hdr();
-        if (!current_virtual_hdr) {
-          return false;
-        }
-        using platf::display_config::color_change_result_e;
-        // Request the source color and look for it for up to a second.
-        const auto change_source_color = [&](bool expected_hdr) {
-          return platf::display_config::change_color_and_settle(
-            [&]() {
-              return set_source_hdr(expected_hdr);
-            },
-            [&]() {
-              const auto observed_hdr = refresh_virtual_display_reference() ? query_source_hdr() : std::nullopt;
-              return observed_hdr && *observed_hdr == expected_hdr ? platf::display_config::color_observation_e::matched :
-                                                                     platf::display_config::color_observation_e::pending;
-            },
-            {1000ms, 50ms},
-            [&](std::chrono::milliseconds poll) {
-              if (cancelled()) {
-                return false;
-              }
-              std::this_thread::sleep_for(poll);
-              return true;
-            }
-          );
-        };
-
-        bool configured_virtual_hdr = *current_virtual_hdr;
-        if (configured_virtual_hdr != desired_virtual_hdr) {
-          if (change_source_color(desired_virtual_hdr) == color_change_result_e::verified) {
-            configured_virtual_hdr = desired_virtual_hdr;
-          } else if (desired_virtual_hdr) {
-            // Match initial startup: an HDR physical sink may consume a color-managed SDR
-            // swapchain when Windows/SudoVDA rejects source HDR. Never remove the desktop merely
-            // because its virtual output cannot activate Advanced Color in this mode.
-            BOOST_LOG(warning) << "Persistent local AR source HDR was unavailable after the mode switch; using color-managed SDR presentation."sv;
-            const auto fallback_state = query_source_hdr();
-            bool fallback_ready = fallback_state && !*fallback_state;
-            if (!fallback_ready) {
-              const auto fallback = change_source_color(false);
-              if (fallback == color_change_result_e::rejected) {
-                const auto observed_fallback = query_source_hdr();
-                fallback_ready = observed_fallback && !*observed_fallback;
-              } else {
-                fallback_ready = fallback == color_change_result_e::verified;
-              }
-            }
-            if (!fallback_ready) {
-              BOOST_LOG(warning) << "The persistent local AR source could not settle to its SDR fallback; retaining the desktop for retry."sv;
-              return false;
-            }
-            configured_virtual_hdr = false;
-          } else {
-            // An HDR virtual source cannot be presented coherently to an SDR physical mode.
-            BOOST_LOG(warning) << "The persistent local AR source could not return to SDR; retaining the desktop for retry."sv;
-            return false;
-          }
-        }
-        virtual_hdr_active_ = configured_virtual_hdr;
 
         presentation_target = isolate_target();
         if (!presentation_target || !same_luid(presentation_target->adapter_id, target_adapter_id_) || presentation_target->mode != target.mode || (target.hdr.known && presentation_target->hdr.active != target.hdr.active)) {
@@ -1204,58 +1111,182 @@ namespace ar_glasses {
       return true;
     }
 
+    bool local_session_t::enable_physical_hdr(target_state_t &target, const std::function<bool()> &cancelled) {
+      enum class ended_e {
+        disconnected,
+        mode_changed,
+      };
+      std::optional<ended_e> ended;
+      std::optional<target_state_t> seen;
+      const color_settle_request_t request {.hdr = true, .budget = 10s, .repair_mode = false};
+      const auto result = settle_color_with_io(
+        request,
+        [&]() -> color_observation_t {
+          // HDR activation can renumber the target or change its mode. Follow the stable PnP
+          // target rather than the now-stale source/target IDs from the original path. A new
+          // mode is a new display generation for the topology controller, not this request's.
+          bool topology_known = false;
+          const auto current = find_target(target_device_path_, {}, &topology_known);
+          if (!topology_known) {
+            return {};
+          }
+          if (!current || current->mode != target.mode || current->rect.right - current->rect.left != target.rect.right - target.rect.left || current->rect.bottom - current->rect.top != target.rect.bottom - target.rect.top) {
+            ended = current ? ended_e::mode_changed : ended_e::disconnected;
+            return {.presence = color_presence_e::gone};
+          }
+          seen = current;
+          return {
+            .presence = color_presence_e::present,
+            .mode_ready = true,
+            .hdr = current->hdr.known ? std::make_optional(current->hdr.active) : std::nullopt,
+          };
+        },
+        []() {
+        },
+        [&](bool enabled) {
+          const auto &addressed = seen ? *seen : target;
+          return platf::display_config::set_hdr_state(addressed.adapter_id, addressed.target_id, enabled);
+        },
+        [](std::chrono::milliseconds delay) {
+          std::this_thread::sleep_for(delay);
+        },
+        []() {
+          return std::chrono::steady_clock::now();
+        },
+        cancelled
+      );
+      log_color_settle("AR display"sv, request, result);
+      if (seen) {
+        target = *seen;
+      }
+      switch (result.outcome) {
+        case color_settle_e::settled:
+          return true;
+        case color_settle_e::disconnected:
+          BOOST_LOG(info) << (ended == ended_e::mode_changed ? "AR output mode changed while enabling HDR; waiting for the topology controller to rebuild the session."sv : "AR display disconnected while enabling HDR."sv);
+          return false;
+        case color_settle_e::cancelled:
+          return false;
+        case color_settle_e::rejected:
+          BOOST_LOG(warning) << "The AR display reports HDR support, but Windows rejected HDR activation."sv;
+          return true;
+        case color_settle_e::timed_out:
+          if (!target.hdr.active) {
+            // Some glasses advertise HDR before their on-device HDR10 mode is active. Treat
+            // that as a stable SDR presentation state rather than tearing down and recreating
+            // the virtual desktop every retry interval.
+            BOOST_LOG(warning) << "AR display did not enter HDR after Windows accepted the request; continuing in SDR."sv;
+          }
+          return true;
+      }
+      return false;
+    }
+
+    color_settle_result_t local_session_t::settle_source_color(bool hdr, int requested_millihz, const std::function<bool()> &cancelled) {
+      std::optional<resolved_virtual_display_t> seen;
+      // A monitor's source may have Windows' remembered raster or rate restored by HDR, so an
+      // exact owned identity is set back to its native mode. Glasses keep their verified cadence.
+      const color_settle_request_t request {.hdr = hdr, .budget = source_color_budget(hdr), .repair_mode = monitor_surface_};
+      const auto result = settle_color_with_io(
+        request,
+        [&]() -> color_observation_t {
+          if (monitor_surface_) {
+            // The learned PnP path remains authoritative while Advanced Color restores a
+            // remembered mode or renumbers the active route. The physical monitor may be
+            // deactivated meanwhile; the owner's final promotion restores it and the final
+            // contract is checked afterwards.
+            seen = refresh_virtual_display_reference(false);
+            if (!seen) {
+              return {};
+            }
+            return {
+              .presence = color_presence_e::present,
+              .mode_ready = source_mode_ready(*seen, source_width_, source_height_, requested_millihz),
+              .hdr = VDISPLAY::queryDisplayHDR(seen->identity.AdapterLuid, seen->identity.TargetId),
+            };
+          }
+          // Glasses: the source's color matters only while the glasses are connected. The source
+          // resolves only at its 1920x1080 raster.
+          bool topology_known = false;
+          const auto sink = find_target(target_device_path_, {}, &topology_known);
+          if (!topology_known) {
+            return {};
+          }
+          if (!sink) {
+            return {.presence = color_presence_e::gone};
+          }
+          seen = refresh_virtual_display_reference();
+          if (!seen) {
+            return {};
+          }
+          return {
+            .presence = color_presence_e::present,
+            .mode_ready = true,
+            .hdr = VDISPLAY::queryDisplayHDR(seen->identity.AdapterLuid, seen->identity.TargetId),
+          };
+        },
+        [&]() {
+          // Only reached for a monitor's source, after a look resolved it.
+          BOOST_LOG(info) << "Local monitor color transition: repairing owned source mode "sv
+                          << (seen->rect.right - seen->rect.left) << 'x'
+                          << (seen->rect.bottom - seen->rect.top) << '@'
+                          << (seen->refresh_millihz / 1000.0) << " -> "sv
+                          << source_width_ << 'x' << source_height_ << '@'
+                          << (requested_millihz / 1000.0) << '.';
+          VDISPLAY::changeDisplaySettings(seen->gdi_name.c_str(), source_width_, source_height_, requested_millihz, false);
+        },
+        [&](bool enabled) {
+          // Address the source by the identity the last look resolved: Windows may renumber it.
+          if (monitor_surface_) {
+            BOOST_LOG(info) << "Local monitor color transition: requesting owned source HDR="sv << enabled << '.';
+          }
+          return seen && VDISPLAY::setDisplayHDR(seen->identity.AdapterLuid, seen->identity.TargetId, enabled);
+        },
+        [](std::chrono::milliseconds delay) {
+          std::this_thread::sleep_for(delay);
+        },
+        []() {
+          return std::chrono::steady_clock::now();
+        },
+        cancelled
+      );
+      log_color_settle(monitor_surface_ ? "Local monitor source"sv : "Local AR source"sv, request, result);
+      if (result.outcome == color_settle_e::disconnected) {
+        BOOST_LOG(info) << "AR display disconnected during virtual-display color setup."sv;
+      }
+      return result;
+    }
+
+    std::optional<bool> local_session_t::configure_source_color(
+      bool expected_hdr,
+      bool after_creation,
+      int requested_millihz,
+      const std::function<bool()> &cancelled
+    ) {
+      // Glasses may present a color-managed SDR source on an HDR output. A shutter monitor's
+      // presentation requires its source and output colors to match, so it has no fallback.
+      const auto color = establish_source_color_with_io(expected_hdr, after_creation, !monitor_surface_, [&](bool hdr) {
+        return settle_source_color(hdr, requested_millihz, cancelled);
+      });
+      if (color && *color != expected_hdr) {
+        BOOST_LOG(warning) << "Local AR source HDR is unavailable; using color-managed SDR presentation."sv;
+      }
+      return color;
+    }
+
     bool local_session_t::configure_monitor_source_hdr(
       int requested_millihz,
       bool expected_hdr,
       bool reset_before_enable,
       const std::function<bool()> &cancelled
     ) {
-      auto settle = [&](bool hdr, std::chrono::milliseconds timeout) {
-        return settle_source_color_with_io(
-          source_width_,
-          source_height_,
-          requested_millihz,
-          hdr,
-          timeout,
-          [&]() -> std::optional<source_color_state_t> {
-            // The learned PnP path remains authoritative while Advanced Color restores a
-            // remembered mode or renumbers the active route. Final geometry is checked below.
-            const auto source = refresh_virtual_display_reference(false);
-            if (!source) {
-              return std::nullopt;
-            }
-            return source_color_state_t {
-              *source,
-              VDISPLAY::queryDisplayHDR(source->identity.AdapterLuid, source->identity.TargetId),
-            };
-          },
-          [&](const resolved_virtual_display_t &source) {
-            BOOST_LOG(info) << "Local monitor color transition: repairing owned source mode "sv
-                            << (source.rect.right - source.rect.left) << 'x'
-                            << (source.rect.bottom - source.rect.top) << '@'
-                            << (source.refresh_millihz / 1000.0) << " -> "sv
-                            << source_width_ << 'x' << source_height_ << '@'
-                            << (requested_millihz / 1000.0) << '.';
-            VDISPLAY::changeDisplaySettings(source.gdi_name.c_str(), source_width_, source_height_, requested_millihz, false);
-          },
-          [&](const resolved_virtual_display_t &source, bool enabled) {
-            BOOST_LOG(info) << "Local monitor color transition: requesting owned source HDR="sv << enabled << '.';
-            VDISPLAY::setDisplayHDR(source.identity.AdapterLuid, source.identity.TargetId, enabled);
-          },
-          [](std::chrono::milliseconds delay) {
-            std::this_thread::sleep_for(delay);
-          },
-          []() {
-            return std::chrono::steady_clock::now();
-          },
-          cancelled
-        );
-      };
       // Preserve the initial IddCx SDR-then-HDR workaround. Subsequent mode/color changes
       // converge directly so an already coherent HDR source need not toggle through SDR.
-      if ((reset_before_enable && expected_hdr && !settle(false, 5s)) || !settle(expected_hdr, expected_hdr ? 15s : 5s)) {
-        BOOST_LOG(error) << "Local monitor source could not establish its requested native cadence and HDR="sv
-                         << expected_hdr << "; stopping before desktop handoff."sv;
+      if (!configure_source_color(expected_hdr, reset_before_enable, requested_millihz, cancelled)) {
+        if (!cancelled()) {
+          BOOST_LOG(error) << "Local monitor source could not establish its requested native cadence and HDR="sv
+                           << expected_hdr << "; stopping before desktop handoff."sv;
+        }
         return false;
       }
       const auto source = refresh_virtual_display_reference();

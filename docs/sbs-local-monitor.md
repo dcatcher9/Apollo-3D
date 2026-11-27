@@ -52,6 +52,15 @@ physical output are transferred automatically. Windows that the user moves onto 
 remain there. Native input goes directly to the application on the virtual source; the presenter
 does not activate itself or reinject keyboard or mouse events.
 
+The private source takes the monitor's color by the same
+[color settling](sbs-local-ar-glasses.md#color-settling) rule as AR glasses, with two differences.
+Windows may restore a remembered raster or refresh when the source's color changes, so the source's
+required mode is the monitor's native raster at its exact refresh, and a source seen at another
+mode is set back to it up to three times, at least a second apart. The shutter presentation needs
+the source's and the monitor's colors to match, so there is no SDR fallback: a source that does not
+reach the monitor's color stops the start, and a mode change retries later. The monitor itself may
+go dark while its source changes color; that does not end the wait.
+
 Switching between **Host 3D** and **Game 3D** can reuse the private desktop, capture, and
 shutter presenter. Sunshine verifies the active display layout, refresh, and color against the
 committed setup before preparing a new converter. The presenter holds the last pair while the

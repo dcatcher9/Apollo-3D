@@ -87,6 +87,34 @@ recorded display identities, makes the same virtual source primary again, disabl
 and refreshes cursor confinement without recreating the virtual desktop. GDI display names are
 resolved again after promotion before any source mode changes.
 
+### Color settling
+
+One rule settles every Advanced Color change in a local session, on the private source and when
+HDR is enabled on the physical glasses. Sunshine 3D looks at the display at once and then every 50 ms.
+A look that cannot read the display, or that sees the wrong mode or color, restarts the count;
+three looks at least 200 ms apart that show the requested color at the required mode settle it.
+A display at the required mode in the wrong, known color is asked for the color at most three
+times, at least a second apart. Windows' report decides: an accepted request proves nothing until
+it is seen, and a refused one does not stop a display that shows the color anyway. A change ends as:
+
+- **settled**;
+- **rejected**, when Windows refused all three requests;
+- **timed out**, when the color was not seen within its budget: 5 s for SDR and 15 s for HDR on the
+  private source, 10 s for HDR on the physical glasses;
+- **disconnected**, when the glasses leave the desktop, or, while their own HDR is enabled, change
+  mode, which is a new display generation for the topology controller.
+
+Settled, rejected, and timed-out changes are logged with the time taken and the requests made. The
+private source's required mode is its 1920x1080 raster; its refresh keeps the cadence verified
+before. A new source first settles in SDR, because Windows often ignores an HDR request right after
+an indirect display is created; this is the delayed off-then-on workaround that remote
+virtual-display sessions also use. It then settles in the glasses' color. A source that does not
+reach HDR settles back in SDR and presents color-managed SDR. A source that cannot reach SDR stops a
+new session, or keeps the existing desktop for a retry after a mode change. HDR that the physical
+glasses reject or never show continues in SDR, as described below. A disconnect stops the set-up.
+The [shutter monitor](sbs-local-monitor.md) uses the same rule for its source with its own
+differences, described there.
+
 ### RayNeo Air 4 Pro wear state
 
 Wear detection is intentionally model-specific. Sunshine 3D enables it only when the selected
@@ -196,9 +224,9 @@ When connection or wear state permits a new local session, Sunshine 3D:
    are used. The presenter window retains its event-driven edge clamp as a fallback, and physical-sink
    input is never reinjected synthetically. If Windows cannot verify the selected topology, local
    presentation fails closed.
-4. After the selected topology is durably committed, matches the private source to the physical
-   output's active color mode. HDR uses the same proven delayed off-then-on Advanced Color workaround
-   as Sunshine 3D's remote virtual-display sessions, followed by another verified topology pass.
+4. After the selected topology is durably committed, enables HDR on the glasses when they support
+   it and matches the private source to their active color mode, both by the
+   [color settling](#color-settling) rule, followed by another verified topology pass.
 5. Captures the virtual display on the configured GPU.
 6. Re-queries the selected monitor's exact device-instance path after topology changes, matches its actual
    `IDXGIOutput`, and uses the coordinates Windows applied rather than the requested position.
@@ -262,7 +290,8 @@ If Sunshine 3D enables HDR on the physical glasses, it leaves that per-display W
 place. Reverting it during an internal 2D/SBS session rebuild would trigger another topology change
 and can make the display oscillate between modes. A policy restriction is logged and stays SDR.
 Displays that advertise HDR but do not actually enter HDR (for example, until an on-device HDR10
-setting is enabled) also continue in SDR instead of entering a create/remove retry loop.
+setting is enabled) also continue in SDR, after the 10 s budget, instead of entering a
+create/remove retry loop.
 
 While a captured source has pending pipeline construction, depth completion, conversion, or a busy final presentation,
 the local owner limits capture/pacing waits to 5 ms and yields the capture-device lock for 1 ms
@@ -315,7 +344,7 @@ calls. The shared SBS cadence statistics report matched-frame age and same-frame
 presenter output FPS alone does not measure cursor-to-display latency.
 
 The local path avoids an RGB-to-YUV encode/decode round trip. SDR uses a BGRA8 Rec.709 swapchain.
-When both outputs have stably entered HDR, Sunshine 3D captures linear FP16 scRGB and presents it through
+When the glasses are in HDR and the source has settled in HDR, Sunshine 3D captures linear FP16 scRGB and presents it through
 an FP16 scRGB swapchain; DWM performs the final device-specific HDR10/PQ conversion. Presentation
 does not start while either source or target is still changing color mode.
 

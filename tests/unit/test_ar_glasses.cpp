@@ -1,16 +1,20 @@
 
 #include "src/platform/windows/ar_glasses.h"
+#include "src/platform/windows/ar_glasses_virtual_source.h"
 #include "src/platform/windows/rayneo_wear_monitor.h"
 #include "src/platform/windows/virtual_display.h"
 
 #include <array>
 #include <chrono>
 #include <cstring>
+#include <functional>
 #include <gtest/gtest.h>
 #include <limits>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <pbt.h>
 #include <thread>
+#include <vector>
 
 using namespace std::chrono_literals;
 
@@ -361,15 +365,23 @@ namespace {
   };
 
   struct source_color_probe_t {
-    using color_t = ar_glasses::detail::local_source_color_t;
+    struct color_t {
+      ar_glasses::detail::local_source_mode_t mode;
+      std::optional<bool> hdr;
+    };
+
     std::optional<color_t> measured = color_t {{3840, 2160, 120000}, false};
     std::chrono::milliseconds elapsed {};
     std::chrono::milliseconds visible_after {};
+    std::optional<std::chrono::milliseconds> gone_after;
     unsigned queries = 0;
     unsigned mode_sets = 0;
     unsigned color_sets = 0;
     bool accept_mode = true;
     bool accept_color = true;
+    unsigned refuse_color_requests = 0;
+    bool flap_color = false;
+    std::optional<std::chrono::milliseconds> flap_until;
     bool enable_hdr_resets_mode_once = false;
     bool enable_hdr_always_resets_mode = false;
     bool mode_resets_hdr = false;
@@ -380,17 +392,34 @@ namespace {
     bool cancel_on_color = false;
     bool cancel_on_wait = false;
 
-    bool settle(bool hdr, std::chrono::milliseconds timeout = 5s) {
-      return ar_glasses::detail::settle_local_source_color_for_test(
-        3840,
-        2160,
-        120000,
-        hdr,
-        timeout,
-        [&]() -> std::optional<color_t> {
+    // The production rule with the monitor source's look: native raster at the exact requested
+    // refresh, mode repair allowed.
+    ar_glasses::internal::color_settle_result_t run(bool hdr, std::chrono::milliseconds timeout = 5s, bool repair_mode = true) {
+      using namespace ar_glasses::internal;
+      return settle_color_with_io(
+        {.hdr = hdr, .budget = timeout, .repair_mode = repair_mode},
+        [&]() -> color_observation_t {
           ++queries;
           cancelled = cancelled || cancel_on_query;
-          return elapsed >= visible_after ? measured : std::nullopt;
+          if (gone_after && elapsed >= *gone_after) {
+            return {.presence = color_presence_e::gone};
+          }
+          if (elapsed < visible_after || !measured) {
+            return {};
+          }
+          const resolved_virtual_display_t source {
+            .refresh_millihz = measured->mode.refresh_millihz,
+            .rect = {0, 0, measured->mode.width, measured->mode.height},
+          };
+          const color_observation_t seen {
+            .presence = color_presence_e::present,
+            .mode_ready = source_mode_ready(source, 3840, 2160, 120000),
+            .hdr = measured->hdr,
+          };
+          if (flap_color && measured->hdr && (!flap_until || elapsed < *flap_until)) {
+            measured->hdr = !*measured->hdr;
+          }
+          return seen;
         },
         [&]() {
           ++mode_sets;
@@ -404,6 +433,11 @@ namespace {
         },
         [&](bool enabled) {
           ++color_sets;
+          cancelled = cancelled || cancel_on_color;
+          if (refuse_color_requests > 0) {
+            --refuse_color_requests;
+            return false;
+          }
           if (accept_color && measured) {
             measured->hdr = enabled;
             if (enabled && (enable_hdr_resets_mode_once || enable_hdr_always_resets_mode)) {
@@ -412,7 +446,7 @@ namespace {
               enable_hdr_resets_mode_once = false;
             }
           }
-          cancelled = cancelled || cancel_on_color;
+          return true;
         },
         [&](std::chrono::milliseconds delay) {
           elapsed += delay;
@@ -425,6 +459,10 @@ namespace {
           return cancelled;
         }
       );
+    }
+
+    bool settle(bool hdr, std::chrono::milliseconds timeout = 5s) {
+      return run(hdr, timeout).outcome == ar_glasses::internal::color_settle_e::settled;
     }
   };
 }  // namespace
@@ -538,6 +576,194 @@ TEST(LocalMonitorSourceColor, CancellationStopsQueriesSettersAndThePublicationWa
   during_wait.cancel_on_wait = true;
   EXPECT_FALSE(during_wait.settle(true));
   EXPECT_EQ(during_wait.elapsed, 50ms);
+}
+
+namespace {
+  using color_settle_e = ar_glasses::internal::color_settle_e;
+}  // namespace
+
+TEST(LocalColorSettle, ADisplayAlreadyShowingTheColorSettlesOnThreeLooksWithoutRequests) {
+  source_color_probe_t probe;
+  const auto result = probe.run(false);
+  EXPECT_EQ(result.outcome, color_settle_e::settled);
+  EXPECT_EQ(result.elapsed, 400ms);
+  EXPECT_EQ(result.color_requests, 0);
+  EXPECT_EQ(probe.mode_sets, 0u);
+  EXPECT_EQ(probe.color_sets, 0u);
+}
+
+TEST(LocalColorSettle, AFlappingColorNeverSettlesAndItsRequestsStayBounded) {
+  source_color_probe_t probe;
+  probe.flap_color = true;
+  const auto result = probe.run(true);
+  EXPECT_EQ(result.outcome, color_settle_e::timed_out);
+  EXPECT_EQ(result.elapsed, 5s);
+  EXPECT_EQ(result.color_requests, 3);
+  EXPECT_EQ(result.refused_requests, 0);
+}
+
+TEST(LocalColorSettle, ColorThatStopsFlappingSettlesOnlyOnceItHolds) {
+  source_color_probe_t probe;
+  probe.flap_color = true;
+  probe.flap_until = 1s;
+  const auto result = probe.run(true);
+  EXPECT_EQ(result.outcome, color_settle_e::settled);
+  // The second request at 1 s sticks; three looks 200 ms apart follow from the next look.
+  EXPECT_EQ(result.elapsed, 1450ms);
+  EXPECT_EQ(result.color_requests, 2);
+}
+
+TEST(LocalColorSettle, AnAcceptedRequestThatIsNeverShownTimesOutAtTheBudget) {
+  source_color_probe_t probe;
+  probe.accept_color = false;
+  const auto result = probe.run(true, 10s);
+  EXPECT_EQ(result.outcome, color_settle_e::timed_out);
+  EXPECT_EQ(result.elapsed, 10s);
+  EXPECT_EQ(result.color_requests, 3);
+  EXPECT_EQ(result.refused_requests, 0);
+}
+
+TEST(LocalColorSettle, AGoneDisplayEndsTheWaitWithoutFurtherLooksOrRequests) {
+  source_color_probe_t probe;
+  probe.accept_color = false;
+  probe.gone_after = 1200ms;
+  const auto result = probe.run(true, 15s);
+  EXPECT_EQ(result.outcome, color_settle_e::disconnected);
+  EXPECT_EQ(result.elapsed, 1200ms);
+  EXPECT_EQ(result.color_requests, 2);
+  EXPECT_EQ(probe.queries, 25u);
+}
+
+TEST(LocalColorSettle, ThreeRefusedRequestsAreRejectedBeforeTheBudgetEnds) {
+  source_color_probe_t probe;
+  probe.refuse_color_requests = 3;
+  const auto result = probe.run(true, 15s);
+  EXPECT_EQ(result.outcome, color_settle_e::rejected);
+  EXPECT_EQ(result.elapsed, 2s);
+  EXPECT_EQ(result.color_requests, 3);
+  EXPECT_EQ(result.refused_requests, 3);
+  EXPECT_EQ(probe.measured->hdr, false);
+}
+
+TEST(LocalColorSettle, ARefusedRequestDoesNotEndTheWaitForALaterAcceptedOne) {
+  source_color_probe_t probe;
+  probe.refuse_color_requests = 1;
+  const auto result = probe.run(true, 15s);
+  EXPECT_EQ(result.outcome, color_settle_e::settled);
+  EXPECT_EQ(result.elapsed, 1450ms);
+  EXPECT_EQ(result.color_requests, 2);
+  EXPECT_EQ(result.refused_requests, 1);
+}
+
+TEST(LocalColorSettle, AModeRepairIsMadeOnlyWhereTheCallerAllowsIt) {
+  source_color_probe_t probe;
+  probe.measured->mode = {1920, 1080, 60000};
+  probe.measured->hdr = true;
+  const auto result = probe.run(true, 5s, false);
+  EXPECT_EQ(result.outcome, color_settle_e::timed_out);
+  EXPECT_EQ(result.mode_repairs, 0);
+  EXPECT_EQ(probe.mode_sets, 0u);
+  EXPECT_EQ(probe.color_sets, 0u);
+}
+
+TEST(LocalColorSettle, UnknownLooksTimeOutAndAnEndedRequestIsCancelled) {
+  source_color_probe_t missing;
+  missing.measured.reset();
+  EXPECT_EQ(missing.run(true).outcome, color_settle_e::timed_out);
+
+  source_color_probe_t during_wait;
+  during_wait.cancel_on_wait = true;
+  EXPECT_EQ(during_wait.run(true).outcome, color_settle_e::cancelled);
+
+  source_color_probe_t during_settle;
+  during_settle.measured->hdr = true;
+  during_settle.cancel_on_query = true;
+  EXPECT_EQ(during_settle.run(true).outcome, color_settle_e::cancelled);
+}
+
+namespace {
+  struct source_color_setup_probe_t {
+    std::vector<bool> settles;
+    std::function<color_settle_e(bool)> outcome = [](bool) {
+      return color_settle_e::settled;
+    };
+
+    std::optional<bool> run(bool expected_hdr, bool after_creation, bool sdr_fallback) {
+      return ar_glasses::internal::establish_source_color_with_io(expected_hdr, after_creation, sdr_fallback, [&](bool hdr) {
+        settles.push_back(hdr);
+        return ar_glasses::internal::color_settle_result_t {.outcome = outcome(hdr)};
+      });
+    }
+  };
+}  // namespace
+
+TEST(LocalSourceColorSetup, ANewSourceSettlesInSdrBeforeItsHdrRequest) {
+  source_color_setup_probe_t probe;
+  EXPECT_EQ(probe.run(true, true, true), std::optional<bool>(true));
+  EXPECT_EQ(probe.settles, (std::vector<bool> {false, true}));
+}
+
+TEST(LocalSourceColorSetup, AnSdrRequestOrAnExistingSourceGoesStraightToTheRequestedColor) {
+  source_color_setup_probe_t sdr;
+  EXPECT_EQ(sdr.run(false, true, true), std::optional<bool>(false));
+  EXPECT_EQ(sdr.settles, (std::vector<bool> {false}));
+
+  source_color_setup_probe_t existing;
+  EXPECT_EQ(existing.run(true, false, true), std::optional<bool>(true));
+  EXPECT_EQ(existing.settles, (std::vector<bool> {true}));
+}
+
+TEST(LocalSourceColorSetup, GlassesFallBackToSdrWhenHdrIsRejectedOrNeverShown) {
+  for (const auto failure : {color_settle_e::rejected, color_settle_e::timed_out}) {
+    source_color_setup_probe_t probe;
+    probe.outcome = [failure](bool hdr) {
+      return hdr ? failure : color_settle_e::settled;
+    };
+    EXPECT_EQ(probe.run(true, false, true), std::optional<bool>(false));
+    EXPECT_EQ(probe.settles, (std::vector<bool> {true, false}));
+  }
+}
+
+TEST(LocalSourceColorSetup, AMonitorSourceHasNoSdrFallback) {
+  source_color_setup_probe_t probe;
+  probe.outcome = [](bool hdr) {
+    return hdr ? color_settle_e::timed_out : color_settle_e::settled;
+  };
+  EXPECT_FALSE((probe.run(true, true, false)).has_value());
+  EXPECT_EQ(probe.settles, (std::vector<bool> {false, true}));
+}
+
+TEST(LocalSourceColorSetup, AGoneOutputOrAnEndedRequestNeverFallsBack) {
+  for (const auto ending : {color_settle_e::disconnected, color_settle_e::cancelled}) {
+    source_color_setup_probe_t probe;
+    probe.outcome = [ending](bool hdr) {
+      return hdr ? ending : color_settle_e::settled;
+    };
+    EXPECT_FALSE((probe.run(true, false, true)).has_value());
+    EXPECT_EQ(probe.settles, (std::vector<bool> {true}));
+  }
+}
+
+TEST(LocalSourceColorSetup, ASourceThatCannotReachSdrFails) {
+  const auto sdr_fails = [](bool hdr) {
+    return hdr ? color_settle_e::settled : color_settle_e::timed_out;
+  };
+  source_color_setup_probe_t sdr_request;
+  sdr_request.outcome = sdr_fails;
+  EXPECT_FALSE((sdr_request.run(false, false, true)).has_value());
+  EXPECT_EQ(sdr_request.settles, (std::vector<bool> {false}));
+
+  source_color_setup_probe_t first_sdr;
+  first_sdr.outcome = sdr_fails;
+  EXPECT_FALSE((first_sdr.run(true, true, true)).has_value());
+  EXPECT_EQ(first_sdr.settles, (std::vector<bool> {false}));
+
+  source_color_setup_probe_t fallback;
+  fallback.outcome = [](bool) {
+    return color_settle_e::timed_out;
+  };
+  EXPECT_FALSE((fallback.run(true, false, true)).has_value());
+  EXPECT_EQ(fallback.settles, (std::vector<bool> {true, false}));
 }
 
 TEST(LocalMonitorBootstrap, RepairsRememberedArGeometryBeforeRequiringNativeReadback) {

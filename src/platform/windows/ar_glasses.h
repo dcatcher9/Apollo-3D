@@ -232,25 +232,6 @@ namespace ar_glasses {
       const std::function<bool()> &cancelled
     );
 
-    struct local_source_color_t {
-      local_source_mode_t mode;
-      std::optional<bool> hdr;
-    };
-
-    bool settle_local_source_color_for_test(
-      int width,
-      int height,
-      int refresh_millihz,
-      bool expected_hdr,
-      std::chrono::milliseconds timeout,
-      const std::function<std::optional<local_source_color_t>()> &query,
-      const std::function<void()> &set_mode,
-      const std::function<void(bool)> &set_color,
-      const std::function<void(std::chrono::milliseconds)> &wait,
-      const std::function<std::chrono::steady_clock::time_point()> &now,
-      const std::function<bool()> &cancelled
-    );
-
     struct linear_layout_t {
       RECT virtual_rect {};
       RECT physical_rect {};

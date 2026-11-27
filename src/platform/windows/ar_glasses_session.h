@@ -98,6 +98,14 @@ namespace ar_glasses {
       friend detail::local_pause_order_result_t detail::local_pause_order_for_test();
 #endif
       bool activate_monitor_desktop();
+      bool enable_physical_hdr(target_state_t &target, const std::function<bool()> &cancelled);
+      color_settle_result_t settle_source_color(bool hdr, int requested_millihz, const std::function<bool()> &cancelled);
+      std::optional<bool> configure_source_color(
+        bool expected_hdr,
+        bool after_creation,
+        int requested_millihz,
+        const std::function<bool()> &cancelled
+      );
       bool configure_monitor_source_hdr(
         int requested_millihz,
         bool expected_hdr,

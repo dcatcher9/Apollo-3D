@@ -7,7 +7,6 @@
 #include "ar_glasses.h"
 #include "src/logging.h"
 
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -28,66 +27,6 @@ namespace ar_glasses {
       }
       return same_luid(source.target.adapter_id, identity.AdapterLuid) &&
              source.target.target_id == identity.TargetId && is_apollo_ar_virtual_name(source.friendly_name);
-    }
-
-    std::optional<std::wstring> refresh_virtual_display_name(
-      const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
-      int expected_width = source_width,
-      int expected_height = source_height
-    ) {
-      const auto resolved = resolve_virtual_display(identity, {}, {}, nullptr, expected_width, expected_height);
-      return resolved ? std::optional<std::wstring>(resolved->gdi_name) : std::nullopt;
-    }
-
-    bool wait_for_virtual_display_mode(
-      std::wstring &display_name,
-      const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
-      std::wstring_view physical_device_path,
-      bool expected_hdr,
-      std::chrono::milliseconds timeout,
-      const std::function<bool()> &cancelled
-    ) {
-      const auto deadline = std::chrono::steady_clock::now() + timeout;
-      int stable_observations = 0;
-      while (!cancelled() && std::chrono::steady_clock::now() < deadline) {
-        bool topology_query_succeeded = false;
-        const auto physical_target = find_target(physical_device_path, {}, &topology_query_succeeded);
-        if (!topology_query_succeeded) {
-          stable_observations = 0;
-          std::this_thread::sleep_for(50ms);
-          continue;
-        }
-        if (!physical_target) {
-          BOOST_LOG(info) << "AR display disconnected during virtual-display color setup."sv;
-          return false;
-        }
-
-        const auto refreshed = refresh_virtual_display_name(identity, target_source_width(*physical_target), target_source_height(*physical_target));
-        if (!refreshed) {
-          stable_observations = 0;
-          std::this_thread::sleep_for(50ms);
-          continue;
-        }
-        display_name = *refreshed;
-
-        DEVMODEW mode {};
-        const bool geometry_ready = VDISPLAY::getDeviceSettings(display_name.c_str(), mode) &&
-                                    mode.dmPelsWidth == target_source_width(*physical_target) &&
-                                    mode.dmPelsHeight == target_source_height(*physical_target);
-        const auto hdr_state = VDISPLAY::queryDisplayHDR(identity.AdapterLuid, identity.TargetId);
-        const bool hdr_matches = hdr_state && *hdr_state == expected_hdr;
-        if (geometry_ready && hdr_matches) {
-          if (++stable_observations >= 3) {
-            return true;
-          }
-        } else {
-          stable_observations = 0;
-        }
-        for (int sleep_step = 0; sleep_step < 4 && !cancelled(); ++sleep_step) {
-          std::this_thread::sleep_for(50ms);
-        }
-      }
-      return false;
     }
   }  // namespace
 
@@ -201,59 +140,26 @@ namespace ar_glasses {
       return std::move(probe.resolved);
     }
 
-    bool configure_virtual_display_hdr(
-      std::wstring &display_name,
-      const SUDOVDA::VIRTUAL_DISPLAY_ADD_OUT &identity,
-      std::wstring_view physical_device_path,
-      bool enable_hdr,
-      bool &configured_hdr,
-      const std::function<bool()> &cancelled
-    ) {
-      configured_hdr = false;
-      // Match the remote-stream workaround: wait for the new mode, force Advanced Color off,
-      // then enable it after the first transition has settled. Windows often ignores a direct
-      // enable immediately after IddCx output creation or a resolution/topology change.
-      if (!wait_for_virtual_display_mode(display_name, identity, physical_device_path, false, 5s, cancelled)) {
-        if (cancelled()) {
-          return false;
-        }
-        BOOST_LOG(warning) << "Local AR virtual display did not settle before HDR configuration."sv;
+    void log_color_settle(std::string_view display, const color_settle_request_t &request, const color_settle_result_t &result) {
+      const auto color = request.hdr ? "HDR"sv : "SDR"sv;
+      switch (result.outcome) {
+        case color_settle_e::settled:
+          BOOST_LOG(info) << display << " color settled: "sv << color << " after "sv << result.elapsed.count()
+                          << " ms, "sv << result.color_requests << " request(s), "sv << result.mode_repairs << " mode repair(s)."sv;
+          return;
+        case color_settle_e::rejected:
+          BOOST_LOG(warning) << display << " color rejected: Windows refused all "sv << result.refused_requests << ' '
+                             << color << " requests."sv;
+          return;
+        case color_settle_e::timed_out:
+          BOOST_LOG(warning) << display << " color did not settle: "sv << color << " was not reported within "sv
+                             << request.budget.count() << " ms, after "sv << result.color_requests << " request(s) ("sv
+                             << result.refused_requests << " refused) and "sv << result.mode_repairs << " mode repair(s)."sv;
+          return;
+        case color_settle_e::disconnected:
+        case color_settle_e::cancelled:
+          return;
       }
-      if (!VDISPLAY::setDisplayHDR(identity.AdapterLuid, identity.TargetId, false)) {
-        const auto current_hdr = VDISPLAY::queryDisplayHDR(identity.AdapterLuid, identity.TargetId);
-        if (!current_hdr || *current_hdr) {
-          BOOST_LOG(error) << "Could not authoritatively reset the local AR virtual display to SDR before HDR setup."sv;
-          return false;
-        }
-      }
-      if (!wait_for_virtual_display_mode(display_name, identity, physical_device_path, false, 5s, cancelled)) {
-        if (cancelled()) {
-          return false;
-        }
-        BOOST_LOG(error) << "Local AR virtual display did not reach a stable SDR state."sv;
-        return false;
-      }
-      if (!enable_hdr) {
-        return true;
-      }
-
-      if (!VDISPLAY::setDisplayHDR(identity.AdapterLuid, identity.TargetId, true)) {
-        BOOST_LOG(warning) << "Windows rejected HDR for the local AR virtual display; using color-managed SDR presentation."sv;
-        return true;
-      }
-      if (!wait_for_virtual_display_mode(display_name, identity, physical_device_path, true, 15s, cancelled)) {
-        if (cancelled()) {
-          return false;
-        }
-        BOOST_LOG(warning) << "Local AR virtual display did not reach a stable HDR state; using color-managed SDR presentation."sv;
-        if (!VDISPLAY::setDisplayHDR(identity.AdapterLuid, identity.TargetId, false) || !wait_for_virtual_display_mode(display_name, identity, physical_device_path, false, 5s, cancelled)) {
-          BOOST_LOG(error) << "Local AR virtual display could not recover to SDR after HDR setup failed."sv;
-          return false;
-        }
-        return true;
-      }
-      configured_hdr = true;
-      return true;
     }
   }  // namespace internal
 
@@ -306,50 +212,6 @@ namespace ar_glasses {
       },
       [&](const resolved_virtual_display_t &) {
         apply();
-      },
-      wait,
-      now,
-      cancelled
-    );
-  }
-
-  bool detail::settle_local_source_color_for_test(
-    int width,
-    int height,
-    int refresh_millihz,
-    bool expected_hdr,
-    std::chrono::milliseconds timeout,
-    const std::function<std::optional<local_source_color_t>()> &query,
-    const std::function<void()> &set_mode,
-    const std::function<void(bool)> &set_color,
-    const std::function<void(std::chrono::milliseconds)> &wait,
-    const std::function<std::chrono::steady_clock::time_point()> &now,
-    const std::function<bool()> &cancelled
-  ) {
-    return settle_source_color_with_io(
-      width,
-      height,
-      refresh_millihz,
-      expected_hdr,
-      timeout,
-      [&]() -> std::optional<source_color_state_t> {
-        const auto source = query();
-        if (!source) {
-          return std::nullopt;
-        }
-        return source_color_state_t {
-          resolved_virtual_display_t {
-            .refresh_millihz = source->mode.refresh_millihz,
-            .rect = {0, 0, source->mode.width, source->mode.height},
-          },
-          source->hdr,
-        };
-      },
-      [&](const resolved_virtual_display_t &) {
-        set_mode();
-      },
-      [&](const resolved_virtual_display_t &, bool hdr) {
-        set_color(hdr);
       },
       wait,
       now,
