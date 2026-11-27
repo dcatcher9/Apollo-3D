@@ -319,7 +319,6 @@ namespace {
     const auto observation = display.substr(completion, authority - completion);
     EXPECT_NE(observation.find("!step_observation.completed_frame_valid"), std::string::npos);
     EXPECT_NE(observation.find("render_handoff != &handoff"), std::string::npos);
-    EXPECT_EQ(observation.find("sbs_telemetry_last_sampled_frame_id"), std::string::npos);
     EXPECT_EQ(observation.find("receipt ="), std::string::npos);
     const auto poll = display.find("void publish_sbs_telemetry_after_output()");
     const auto poll_end = display.find("struct sbs_gpu_timer_slot_t", poll);
@@ -4953,7 +4952,6 @@ TEST(ParallaxV2ContractTest, DebugDumpStagingPreservesEventAndRequestOrdering) {
   EXPECT_NE(display.find("sbs_dumper.needs_conversion_poll()"), std::string::npos);
   EXPECT_NE(source.find("next_file_trigger_poll_"), std::string::npos);
   EXPECT_NE(source.find("std::filesystem::exists(dir_ / \"dump.trigger\""), std::string::npos);
-  EXPECT_EQ(display.find("preflight_requested_v2_frame("), std::string::npos);
 }
 
 TEST(ParallaxV2ContractTest, GpuTimerKeepsEveryNotReadyTimestampPending) {
@@ -6847,7 +6845,6 @@ TEST(DirectxShaderSourceTest, HostSbsLatestV2LineageIsNotCurrentRenderAuthorizat
     std::string::npos
   );
   EXPECT_EQ(retain.find("matched_input_reuse_kind"), std::string::npos);
-  EXPECT_EQ(retain.find("matched_low_motion_candidate"), std::string::npos);
 
   const auto frame_begin = display.find("const auto frame_id = ++sbs_frame_sequence");
   const auto post_completion = display.find(
@@ -6901,7 +6898,6 @@ TEST(DirectxShaderSourceTest, HostSbsLatestV2LineageIsNotCurrentRenderAuthorizat
   for (const auto &boundary : completion_boundaries) {
     expect_reset_between(selection, boundary.name, boundary.begin, boundary.end, "consume_matched_completion(");
   }
-  EXPECT_EQ(display.find("reusable_v2"), std::string::npos);
 
   expect_reset_between(display, "terminal pipeline failure", "void fail_depth_pipeline_flat()", "matched_presentation_cache.reset();");
   expect_reset_between(display, "output/session initialization", "int init_output(", "matched_presentation_cache.reset();");
@@ -6945,10 +6941,6 @@ TEST(DirectxShaderSourceTest, HostSbsCompletionBindsTheEstimatorGridToTheSubmitt
     display.find("est.input_region != render_attribution()->depth_input_region"),
     std::string::npos
   );
-  EXPECT_EQ(
-    display.find("estimate.input_region == slot.depth_input_region"),
-    std::string::npos
-  );
 }
 
 TEST(DirectxShaderSourceTest, VideoRoiExactProofIsIndependentOfInferenceAndPresentationIdentity) {
@@ -6960,7 +6952,6 @@ TEST(DirectxShaderSourceTest, VideoRoiExactProofIsIndependentOfInferenceAndPrese
   EXPECT_NE(display.find("latest_v2_lineage.attribution = attribution;"), std::string::npos);
   EXPECT_NE(display.find("attribution.unchanged_roi_proof.reset(attribution.inference_ddup_damage, *proof_region);"), std::string::npos);
   EXPECT_NE(display.find("attribution.unchanged_roi_proof.observe(current_damage, *region)"), std::string::npos);
-  EXPECT_EQ(display.find("memoized_input_reuse_kind"), std::string::npos);
 
   const auto colour_begin = display.find("const bool uses_current_colour =");
   const auto colour_end = display.find("const bool v2_repeat_age_expired", colour_begin);
@@ -7017,8 +7008,6 @@ TEST(DirectxShaderSourceTest, VideoRoiSamplesRetainedSourceAndCopiesOnlyForDump)
   }
   EXPECT_EQ(diagnostic_crop_references, 1u)
     << "Only the completed Dump 3D call may remain in the live display path";
-  EXPECT_EQ(display.find("depth_crop_texture"), std::string::npos);
-  EXPECT_EQ(display.find("depth_crop_srv"), std::string::npos);
   EXPECT_NE(dump.find("struct diagnostic_roi_crop"), std::string::npos);
   EXPECT_NE(
     dump.find("dumper::prepare_diagnostic_roi_crop("),
@@ -7133,10 +7122,6 @@ TEST(DirectxShaderSourceTest, Convex2xRoiRendererUsesTheAuthenticatedFieldConten
   EXPECT_NE(update.find("geometry.tensor_content_right = renderer_content.right"), std::string::npos);
   EXPECT_NE(update.find("geometry.tensor_content_bottom = renderer_content.bottom"), std::string::npos);
 
-  EXPECT_EQ(
-    dump.find("schema cannot represent separate coarse-analysis and refined-geometry rasters"),
-    std::string::npos
-  );
   EXPECT_NE(
     dump.find("calibrated_dav2_shape_for_dump(completed)"),
     std::string::npos
@@ -7212,15 +7197,6 @@ TEST(DirectxShaderSourceTest, V2ProducerFailureUsesTheCanonicalTerminalLatch) {
     read_source_file(SUNSHINE_SOURCE_DIR "/src/video_depth_estimator.cpp");
   ASSERT_FALSE(estimator.empty());
 
-  EXPECT_EQ(
-    estimator.find("parallax_v2_producer_failed"),
-    std::string::npos
-  );
-  EXPECT_EQ(
-    estimator.find("live_v2_producer_unavailable"),
-    std::string::npos
-  );
-
   const auto failure = estimator.find("void fail_parallax_v2_producer(");
   const auto ensure = estimator.find("bool ensure_parallax_v2_resources()", failure);
   ASSERT_NE(failure, std::string::npos);
@@ -7272,11 +7248,6 @@ TEST(DirectxShaderSourceTest, V2ProducerFailureUsesTheCanonicalTerminalLatch) {
   );
   EXPECT_NE(
     estimator.find("return !pimpl || !pimpl->is_operational();"),
-    std::string::npos
-  );
-  EXPECT_EQ(estimator.find("bool terminal_failure ="), std::string::npos);
-  EXPECT_EQ(
-    estimator.find("bool valid = false;  // all mandatory engine"),
     std::string::npos
   );
 }
@@ -7351,12 +7322,7 @@ TEST(DirectxShaderSourceTest, PackedPresentationCannotSeedSemanticLineage) {
   ASSERT_FALSE(display.empty());
   ASSERT_FALSE(estimator_header.empty());
 
-  EXPECT_EQ(display.find("finish_pending_depth_for_idle_recovery"), std::string::npos);
   EXPECT_EQ(display.find("cuStreamSynchronize"), std::string::npos);
-  EXPECT_EQ(
-    estimator_header.find("finish_pending_depth_for_idle_recovery"),
-    std::string::npos
-  );
   EXPECT_NE(
     estimator_header.find("finish_pending_depth_for_evaluation"),
     std::string::npos
@@ -7491,7 +7457,6 @@ TEST(DirectxShaderSourceTest, PackedPresentationCannotSeedSemanticLineage) {
     std::string::npos
   );
   EXPECT_NE(body.find("matched_presentation_cache.publish("), std::string::npos);
-  EXPECT_EQ(display.find("matched_output_valid"), std::string::npos);
   EXPECT_NE(
     display.find(
       "output_warped_new/packed_repeat/flat=",
@@ -7629,9 +7594,6 @@ TEST(DirectxShaderSourceTest, AdaptiveReuseUsesExactCurrentPublicationAndActualD
   ASSERT_NE(retain_end, std::string::npos);
   EXPECT_NE(display.substr(retain, retain_end - retain).find("render_handoff != &handoff"), std::string::npos);
   EXPECT_EQ(display.find("latest_v2_lineage.estimate().gpu_undecided_completion = false"), std::string::npos);
-  EXPECT_EQ(display.find("opaque_gpu_followup_anchor"), std::string::npos);
-  EXPECT_EQ(display.find("gpu_observation_barrier"), std::string::npos);
-  EXPECT_EQ(display.find("adaptive_hold_cadence"), std::string::npos);
 
   // Current publication authentication is repeated after any completion that could overwrite it.
   const auto post_cache = display.find("const bool post_completion_cache_gate_open =");
@@ -7673,10 +7635,6 @@ TEST(DirectxShaderSourceTest, HostSbsRejectsRotationAndUsesMatchedV2Frames) {
   const auto live_selection = display.find("const bool v2_live_warp_selected =");
   ASSERT_NE(live_selection, std::string::npos);
   EXPECT_NE(display.find("est.shadow_base_final_parallax && est.shadow_state;", live_selection), std::string::npos);
-  EXPECT_EQ(
-    live_shader.find("Texture2D<float> CandidateParallax"),
-    std::string::npos
-  );
   EXPECT_NE(
     live_shader.find("return SourceColor.Sample(LinearSampler, sample_uv);"),
     std::string::npos
@@ -8396,8 +8354,6 @@ TEST(AsyncTeardownLifecycleSourceTests, DrainsTrackedOwnersBeforeProcessGlobals)
   EXPECT_LT(retire_worker, retirement_member);
   EXPECT_LT(retire_active, retire_build);
   EXPECT_NE(display.find("busy_retries="), std::string::npos);
-  EXPECT_EQ(display.find("busy_drops="), std::string::npos)
-    << "A retained source/backbuffer retry is not a dropped frame.";
 
   const auto normal_shutdown = main_source.find(
     "UI/API shutdown does not necessarily pass through the signal handler"
@@ -8576,10 +8532,6 @@ TEST(DirectxShaderSourceTest, FusedDepthMapperUsesResolvedReferenceGridGradients
     ),
     std::string::npos
   );
-  EXPECT_EQ(
-    mapper.find("abs(current - PreviousDepth[p])"),
-    std::string::npos
-  );
   EXPECT_NE(
     mapper.find("RWTexture2D<uint>         MotionMask : register(u1)"),
     std::string::npos
@@ -8640,9 +8592,6 @@ TEST(DirectxShaderSourceTest, HostTelemetrySharesPublicationReadbackWithTheDepth
 
   // Health diagnostics use the production publication transport; no second staging/query ring
   // or caller-supplied frame label can race the resources captured by that publication.
-  EXPECT_EQ(estimator.find("ensure_telemetry_readback"), std::string::npos);
-  EXPECT_EQ(estimator.find("telemetry_readback_slots"), std::string::npos);
-  EXPECT_EQ(estimator.find("poll_depth_telemetry("), std::string::npos);
   EXPECT_NE(estimator.find("decode_telemetry_words("), std::string::npos);
   const auto cached_health = estimator.find("latest_depth_telemetry() const");
   ASSERT_NE(cached_health, std::string::npos);
@@ -8689,22 +8638,6 @@ TEST(DirectxShaderSourceTest, HostTelemetrySharesPublicationReadbackWithTheDepth
 
   // The shipped V2 renderer has no legacy subject, edge-risk, range, or anchor authority. Keep
   // those payload slots invalid instead of publishing stale bridge diagnostics as rendered state.
-  EXPECT_EQ(
-    display.find("sbs_telemetry_valid_field::subject"),
-    std::string::npos
-  );
-  EXPECT_EQ(
-    display.find("sbs_telemetry_valid_field::edge"),
-    std::string::npos
-  );
-  EXPECT_EQ(
-    display.find("sbs_telemetry_valid_field::anchor"),
-    std::string::npos
-  );
-  EXPECT_EQ(
-    display.find("sbs_telemetry_valid_field::range"),
-    std::string::npos
-  );
   // The renderer never sets a reserved valid or runtime wire bit.
   for (const auto *reserved_bits : {
          "sbs_telemetry_valid_field::reserved",

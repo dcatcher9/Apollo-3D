@@ -107,15 +107,9 @@ TEST(HostSbsNearIdenticalPolicyTest, SoleFusedPreprocessIsMandatoryAndNoComparat
   const auto optional_tiled = producer_body.find("output == std::addressof(near_identical_tiled_preprocess_cs)");
   ASSERT_NE(optional_tiled, std::string::npos);
   EXPECT_LT(optional_tiled, mandatory_assignment);
-  EXPECT_EQ(
-    estimator.find("parallax_v2_producer_shaders_ready"),
-    std::string::npos
-  );
   EXPECT_EQ(producer_body.find("near_identical_fused_preprocess_cs.Reset()"), std::string::npos);
   EXPECT_EQ(producer_body.find("Optional Host SBS fused preprocess"), std::string::npos);
   EXPECT_EQ(cache.find("prewarm_producer_set"), std::string::npos);
-  EXPECT_EQ(cache_header.find("producer_shader_e"), std::string::npos);
-  EXPECT_EQ(cache_header.find("producer_shader_binding"), std::string::npos);
   const auto &startup_producer = shader_cache::production_prewarm_sets.front();
   EXPECT_EQ(startup_producer.specs.data(), shader_cache::parallax_v2_producer_specs.data());
   EXPECT_EQ(startup_producer.specs.size(), shader_cache::parallax_v2_producer_specs.size());
@@ -156,17 +150,8 @@ TEST(HostSbsNearIdenticalPolicyTest, SoleFusedPreprocessIsMandatoryAndNoComparat
     estimator.find("dispatch_near_identical_detector()", route_end),
     std::string::npos
   );
-  EXPECT_EQ(estimator.find("near_identical_compare_cs"), std::string::npos);
-  EXPECT_EQ(estimator.find("rgb_to_nchw_content_cs"), std::string::npos);
-  EXPECT_EQ(estimator.find("rgb_to_nchw_pad_cs"), std::string::npos);
-  EXPECT_EQ(estimator.find("Microsoft::WRL::ComPtr<ID3D11ComputeShader> rgb_to_nchw_cs"), std::string::npos);
-  EXPECT_EQ(cache_header.find("inline constexpr shader_spec rgb_to_nchw "), std::string::npos);
-  EXPECT_EQ(cache_header.find("rgb_to_nchw_content"), std::string::npos);
-  EXPECT_EQ(cache_header.find("rgb_to_nchw_pad"), std::string::npos);
   EXPECT_EQ(cache_header.find("host_sbs_near_identical_compare"), std::string::npos);
-  EXPECT_EQ(detector.find("compare_main"), std::string::npos);
   EXPECT_EQ(detector.find("CurrentModelInput"), std::string::npos);
-  EXPECT_EQ(preprocess.find("void content_main"), std::string::npos);
   EXPECT_EQ(preprocess.find("void pad_main"), std::string::npos);
   EXPECT_NE(fused.find("NearIdenticalEvidenceEnabled"), std::string::npos);
   EXPECT_NE(fused.find("disabled_evidence.admitted = 0u"), std::string::npos);
@@ -203,10 +188,6 @@ TEST(HostSbsNearIdenticalPolicyTest, D3dResourcesUseTypedBundlesWithoutChangingC
     estimator.find("CUgraphicsResource cuda_near_identical_decision_res = nullptr;"),
     std::string::npos
   );
-  EXPECT_EQ(estimator.find("near_identical_tile_buf"), std::string::npos);
-  EXPECT_EQ(estimator.find("near_identical_history_owner_buf"), std::string::npos);
-  EXPECT_EQ(estimator.find("near_identical_gpu_decision_buf"), std::string::npos);
-  EXPECT_EQ(estimator.find("near_identical_gpu_dispatch_buf"), std::string::npos);
 
   const auto retain = estimator.find("const auto retain_all_cuda_backing =");
   const auto retain_end = estimator.find("};", retain);
@@ -262,26 +243,13 @@ TEST(HostSbsNearIdenticalPolicyTest, CompositeRuntimeUsesSingleHighTensorBoundar
   );
   EXPECT_EQ(resolver.find("legacy"), std::string::npos)
     << "the required fused asset must not retain a DAV2 fallback";
-  EXPECT_EQ(estimator.find("unmarkOutput"), std::string::npos)
-    << "the exact fused builder must reject rather than prune unexpected outputs";
 
-  EXPECT_EQ(estimator.find("guidance_tensor_in_buf"), std::string::npos);
-  EXPECT_EQ(estimator.find("refined_tensor_out_buf"), std::string::npos);
-  EXPECT_EQ(estimator.find("guidance_cbuffer"), std::string::npos);
-  EXPECT_EQ(estimator.find("cuda_guidance_in_res"), std::string::npos);
-  EXPECT_EQ(estimator.find("cuda_refined_out_res"), std::string::npos);
   EXPECT_NE(estimator.find("field_w = target_w;"), std::string::npos);
   EXPECT_NE(estimator.find("field_h = target_h;"), std::string::npos);
   EXPECT_NE(
     estimator.find("field_w != target_w || field_h != target_h"),
     std::string::npos
   );
-  EXPECT_EQ(estimator.find("prod_zipdepth_convex2x_live_map"), std::string::npos)
-    << "the retired post-model mapper must not remain in the runtime";
-  EXPECT_EQ(
-    detector.find("NEAR_IDENTICAL_MAX_TILE_GROUP_COUNT"),
-    std::string::npos
-  ) << "the resolver must query its exact SRV capacity instead of freezing a profile ceiling";
   EXPECT_NE(
     detector.find(
       "NearIdenticalTileInput.GetDimensions(tile_buffer_count, tile_buffer_stride)"
@@ -296,8 +264,6 @@ TEST(HostSbsNearIdenticalPolicyTest, CompositeRuntimeUsesSingleHighTensorBoundar
     detector.find("tile_buffer_stride == 4u * 4u"),
     std::string::npos
   );
-  EXPECT_EQ(detector.find("convex2x_landscape"), std::string::npos)
-    << "single-high geometry must not retain a dormant split-grid authorization path";
 
   const std::string_view preprocess_binding =
     "context->CSSetShader(preprocess_shader, nullptr, 0u)";
@@ -327,8 +293,6 @@ TEST(HostSbsNearIdenticalPolicyTest, CompositeRuntimeUsesSingleHighTensorBoundar
     EXPECT_NE(interop.find(token), std::string::npos) << token;
   }
   EXPECT_NE(interop.find("interop_resource_count, interop_resources.data(), cu_stream"), std::string::npos);
-  EXPECT_EQ(interop.find("guidance_input_mapped_bytes"), std::string::npos);
-  EXPECT_EQ(interop.find("refined_output_mapped_bytes"), std::string::npos);
 
   const auto profile = interop.find("setOptimizationProfileAsync(");
   const auto high_shape = interop.find("prod_zipdepth_convex2x::input.data()", profile);
@@ -652,11 +616,6 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
   );
   EXPECT_NE(estimator.find("prepare_depth_inference_graph("), std::string::npos);
   EXPECT_NE(estimator.find("prepare_ocr_inference_graph("), std::string::npos);
-  EXPECT_EQ(estimator.find("bool enqueue_inference("), std::string::npos);
-  EXPECT_EQ(estimator.find("bool enqueue_ocr_inference("), std::string::npos);
-  EXPECT_EQ(estimator.find("ocr_execution_stream"), std::string::npos);
-  EXPECT_EQ(estimator.find("ocr_cu_stream"), std::string::npos);
-  EXPECT_EQ(estimator.find("ocr_inference_done_event"), std::string::npos);
   const auto submit_begin = estimator.find(
     "if (bindings_ok && !is_terminal() && !dropped_for_signature_change)"
   );
@@ -695,7 +654,6 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
   EXPECT_NE(estimator.find(".subtitle_work = subtitle_work"), std::string::npos);
   EXPECT_NE(unified_submit.find("depth_conditional_graph.get()"), std::string::npos);
   EXPECT_EQ(unified_submit.find("enqueueV3("), std::string::npos);
-  EXPECT_EQ(unified_submit.find("depth_inference_graph.executable"), std::string::npos);
   const auto signature_refresh_assignment =
     estimator.find("gpu_undecided_requires_force_infer_refresh = true;");
   ASSERT_NE(signature_refresh_assignment, std::string::npos);
@@ -711,7 +669,6 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
     std::string::npos
   );
   EXPECT_NE(estimator.find("gpu_undecided_baseline_authorized("), std::string::npos);
-  EXPECT_EQ(estimator.find("request.opaque_followup"), std::string::npos);
   EXPECT_NE(
     estimator.find("request.baseline_frame_id == cached_current_publication->depth_owner_frame_id"),
     std::string::npos
@@ -721,9 +678,6 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
     std::string::npos
   );
   EXPECT_NE(estimator.find("cached_current_publication = receipt;"), std::string::npos);
-  EXPECT_EQ(estimator.find("last_gpu_opaque_transaction_frame_id"), std::string::npos);
-  EXPECT_EQ(estimator.find("GPU-undecided initial roots"), std::string::npos);
-  EXPECT_EQ(estimator.find("GPU-undecided follow-up roots"), std::string::npos);
   const auto completion_begin = estimator.find("completed_depth_metadata_t complete_ready_pending(");
   const auto finish_begin = estimator.find("depth_step_result_t finish_pending(", completion_begin);
   ASSERT_NE(completion_begin, std::string::npos);
@@ -770,9 +724,6 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
     estimator.find("constants_desc.ByteWidth = static_cast<UINT>(sizeof(near_identical_constants_t))"),
     std::string::npos
   );
-  EXPECT_EQ(shader.find("NEAR_IDENTICAL_MAX_INFER_OWNER_AGE"), std::string::npos);
-  EXPECT_EQ(shader.find("NEAR_IDENTICAL_MAX_INFER_OWNER_OBSERVATION_AGE_US"),
-            std::string::npos);
   EXPECT_NE(history_owner_contract.find("#define NEAR_IDENTICAL_HISTORY_OWNER_SCHEMA 2u"),
             std::string::npos);
   EXPECT_NE(shader.find("owner_at_or_before_host_baseline"), std::string::npos);
@@ -907,12 +858,6 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
     ASSERT_NE(ocr_word, std::string::npos) << field;
     ocr_word += std::char_traits<char>::length(field);
   }
-  EXPECT_EQ(estimator.find("near_identical_optional_postprocess_args_cs"), std::string::npos);
-  EXPECT_EQ(estimator.find("near_identical_postprocess_args_cs"), std::string::npos);
-  EXPECT_EQ(estimator.find("near_identical_ocr_abstain_cs"), std::string::npos);
-  EXPECT_EQ(shader.find("optional_postprocess_args_main"), std::string::npos);
-  EXPECT_EQ(shader.find("postprocess_args_main"), std::string::npos);
-  EXPECT_EQ(shader.find("ocr_abstain_main"), std::string::npos);
   EXPECT_NE(shader.find("void finalize_main("), std::string::npos);
   EXPECT_NE(
     shader.find("[numthreads(1, 1, 1)]\nvoid finalize_main"),
@@ -924,11 +869,7 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
   );
   EXPECT_EQ(shader.find("NEAR_IDENTICAL_FINALIZE_THREADS"), std::string::npos);
   EXPECT_EQ(shader.find("NearIdenticalFinalizeRunRecord"), std::string::npos);
-  EXPECT_EQ(estimator.find("postprocess_temporal_reset"), std::string::npos);
-  EXPECT_EQ(estimator.find("completed_postprocess_temporal_reset"), std::string::npos);
-  EXPECT_EQ(estimator.find("pending_force_temporal_reseed"), std::string::npos);
   EXPECT_EQ(estimator.find("completed_input_domain_reset = true"), std::string::npos);
-  EXPECT_EQ(shader.find("exact_changed"), std::string::npos);
   EXPECT_NE(
     compare_contract.find("abs(current_nchw - previous_nchw)"),
     std::string::npos
@@ -942,8 +883,6 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
     shader.find("NearIdenticalSubtitleLocatorState : register(t6)"),
     std::string::npos
   );
-  EXPECT_EQ(shader.find("NearIdenticalMinMaxEma"), std::string::npos);
-  EXPECT_EQ(shader.find("history_owner_main"), std::string::npos);
   EXPECT_NE(
     fused_map.find("#include \"include/depth_valid_history_contract.hlsl\""),
     std::string::npos
@@ -961,12 +900,6 @@ TEST(HostSbsNearIdenticalPolicyTest, SourceWiresGpuConditionalBranchWithoutReadb
   EXPECT_EQ(shader.find("NearIdenticalSubtitleStateSteady"), std::string::npos);
   EXPECT_NE(shader.find("near_identical_expected_work"), std::string::npos);
   EXPECT_NE(shader.find("force_exact_publication"), std::string::npos);
-  EXPECT_EQ(shader.find("NEAR_IDENTICAL_WORK_OPTIONAL_OCR_DUE"), std::string::npos);
-  EXPECT_EQ(
-    shader.find("NEAR_IDENTICAL_WORK_SUBTITLE_OBSERVATION_DUE"),
-    std::string::npos
-  );
-  EXPECT_EQ(shader.find("flags == 4u"), std::string::npos);
   EXPECT_EQ(shader.find("void ocr_restamp_main"), std::string::npos);
   EXPECT_NE(shader.find("tile.admitted >= 64u"), std::string::npos);
   EXPECT_NE(

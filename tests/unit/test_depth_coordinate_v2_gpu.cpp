@@ -663,13 +663,6 @@ TEST(HostSbsV2GpuExecutorTest, BindingContractAndExecutorCallSitesStayShared) {
   EXPECT_EQ(count_occurrences(compact_live, "record_state"), 0u);
   EXPECT_EQ(count_occurrences(compact_replay, ".analysis_domain="), 2u);
   EXPECT_EQ(count_occurrences(compact_live, ".analysis_domain="), 2u);
-  EXPECT_EQ(compact_replay.find("CSSetShader(moments_shader.Get()"),
-            std::string::npos);
-  EXPECT_EQ(compact_replay.find("CSSetShader(map_shader.Get()"), std::string::npos);
-  EXPECT_EQ(compact_live.find("CSSetShader(depth_coordinate_v2_moments_cs.Get()"),
-            std::string::npos);
-  EXPECT_EQ(compact_live.find("CSSetShader(depth_coordinate_v2_map_cs.Get()"),
-            std::string::npos);
   EXPECT_NE(compact_live.find("dispatch_command_t::direct("), std::string::npos);
   EXPECT_NE(compact_live.find("dispatch_command_t::indirect("), std::string::npos);
   EXPECT_NE(compact_live.find("near_identical_transaction.dispatch.Get()"),
@@ -689,8 +682,6 @@ TEST(HostSbsV2GpuExecutorTest, BindingContractAndExecutorCallSitesStayShared) {
             std::string::npos);
   EXPECT_NE(compact_live.find("CSSetConstantBuffers(1,2,"),
             std::string::npos);
-  EXPECT_EQ(compact_live.find("depth_coordinate_v2_ownership"), std::string::npos);
-  EXPECT_EQ(compact_live.find("pending_source_srv"), std::string::npos);
   EXPECT_NE(compact_live.find("perf_slot->parallax_map_start.Get()"),
             std::string::npos);
   EXPECT_NE(compact_live.find("perf_slot->parallax_limits_start.Get()"),

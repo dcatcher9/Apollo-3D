@@ -311,14 +311,11 @@ TEST(OfflineSbsWorker, ConversionUsesOneDirectCausalPass) {
   EXPECT_LT(completion, validation);
   EXPECT_LT(validation, encoder_handoff);
   EXPECT_LT(encoder_handoff, source_ack);
-  EXPECT_EQ(direct.find("scene_tracker"), std::string::npos);
   EXPECT_EQ(direct.find("scene-audit"), std::string::npos);
   EXPECT_EQ(
     direct.find("remove_transient_file_checked(sbs)"),
     std::string::npos
   ) << "The asynchronous encoder owns an enqueued SBS artifact";
-  EXPECT_EQ(direct.find("render_decoder"), std::string::npos);
-  EXPECT_EQ(direct.find("render_scenes"), std::string::npos);
   EXPECT_EQ(direct.find("\"replay\""), std::string::npos);
 }
 

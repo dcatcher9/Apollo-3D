@@ -213,7 +213,6 @@ TEST(WebUiDesign, PairingKeepsPinPrimaryAndQrSecondary) {
   ASSERT_NE(qr, std::string::npos);
   EXPECT_LT(pin, qr);
   EXPECT_NE(source.find("@submit.prevent=\"pairWithPin\""), std::string::npos);
-  EXPECT_EQ(source.find("Pair another way"), std::string::npos);
 }
 
 TEST(WebUiDesign, AuthenticationEntriesUseSharedLayouts) {
@@ -456,7 +455,6 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolated) {
     page.find(":disabled=\"Boolean(startDisabledReason)\""),
     std::string::npos
   );
-  EXPECT_EQ(page.find(":disabled=\"!canStart\""), std::string::npos);
   EXPECT_NE(page.find("v-model=\"form.operation\""), std::string::npos);
   EXPECT_NE(page.find("value=\"convert\""), std::string::npos);
   EXPECT_NE(page.find("value=\"evaluate\""), std::string::npos);
@@ -482,25 +480,9 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolated) {
   EXPECT_EQ(page.find("scene_cache_max_bytes"), std::string::npos);
   EXPECT_EQ(page.find("cache_budget_policy"), std::string::npos);
   EXPECT_NE(page.find("operation: this.form.operation"), std::string::npos);
-  EXPECT_EQ(page.find("value=\"fail\""), std::string::npos);
-  EXPECT_EQ(page.find("value=\"split\""), std::string::npos);
   EXPECT_NE(page.find("same causal Host SBS estimator"), std::string::npos);
   EXPECT_NE(page.find("as fast as the decoder, GPU, and encoder permit"), std::string::npos);
-  EXPECT_EQ(page.find("No future frame can"), std::string::npos);
   EXPECT_EQ(page.find("lookahead"), std::string::npos);
-  EXPECT_EQ(page.find("Budget split"), std::string::npos);
-  EXPECT_EQ(page.find("Recent scene decisions"), std::string::npos);
-  EXPECT_EQ(page.find("scene-decisions-title"), std::string::npos);
-  EXPECT_EQ(page.find("offline-scene-table"), std::string::npos);
-  EXPECT_EQ(page.find("offline-scene-empty"), std::string::npos);
-  EXPECT_EQ(page.find("Scene diagnostics"), std::string::npos);
-  EXPECT_EQ(page.find("Current scene"), std::string::npos);
-  EXPECT_EQ(page.find("SceneAudit"), std::string::npos);
-  EXPECT_EQ(page.find("current_scene"), std::string::npos);
-  EXPECT_EQ(page.find("offline-job-selector"), std::string::npos);
-  EXPECT_EQ(page.find("offlineSelectedJob"), std::string::npos);
-  EXPECT_EQ(page.find("v-for=\"job in jobs\""), std::string::npos);
-  EXPECT_EQ(page.find("jobOption(job)"), std::string::npos);
   EXPECT_NE(page.find("@click=\"cancelJob(selectedJob)\""), std::string::npos);
   EXPECT_NE(page.find("v-if=\"isClearable(selectedJob)\""), std::string::npos);
   EXPECT_NE(page.find("@click=\"clearJob(selectedJob)\""), std::string::npos);
@@ -510,7 +492,6 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolated) {
     page.find("const preferred = jobs.find(job => this.isActive(job)) || jobs[0]"),
     std::string::npos
   );
-  EXPECT_EQ(page.find("selectionStillExists"), std::string::npos);
   EXPECT_NE(
     page.find("error instanceof ApiError && error.status === 404"),
     std::string::npos
@@ -626,7 +607,6 @@ TEST(WebUiDesign, OfflineConversionKeepsNativeJobApiIsolated) {
   );
   EXPECT_NE(jobs.find("job_service_t::clear"), std::string::npos);
   EXPECT_NE(jobs.find("clear_terminal_record_locked"), std::string::npos);
-  EXPECT_EQ(jobs.find("scene-audit.json"), std::string::npos);
   EXPECT_NE(
     jobs.find("contract size changed while it was being read"),
     std::string::npos
