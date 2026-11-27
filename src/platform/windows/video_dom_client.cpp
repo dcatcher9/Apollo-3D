@@ -524,11 +524,18 @@ namespace platf::video_dom {
             {
               // Boost's group is a job without this limit: a host that ends without running
               // the cleanup below would leave the helper behind.
+              // Without the limit the helper could outlive the host, so do not launch it.
               JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits {};
               const auto job = group.native_handle();
-              if (QueryInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits), nullptr)) {
+              bool limited = QueryInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits), nullptr);
+              if (limited) {
                 limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-                SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
+                limited = SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
+              }
+              if (!limited) {
+                publish(status_e::launch_failed);
+                stop_aware_sleep(stop, restart_delay);
+                continue;
               }
             }
             auto environment = boost::this_process::environment();
