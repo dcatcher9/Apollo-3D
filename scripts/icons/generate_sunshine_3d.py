@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the Sunshine 3D Windows, tray, and web icon family."""
+"""Generate the Sunshine 3D Windows, tray, and web icons the host and its pages use."""
 
 from __future__ import annotations
 
@@ -23,7 +23,6 @@ ACCENT = "#8AB4F8"
 ACCENT_BRIGHT = "#D7E5FF"
 GOLD = "#E0B020"
 STATUS_OK = "#5CD65C"
-STATUS_WARN = "#E0B020"
 DANGER = "#FFB4AB"
 DANGER_CONTAINER = "#6D3A3E"
 ON_STATUS = "#0C0F14"
@@ -80,10 +79,6 @@ def draw_master(state="idle"):
         draw.ellipse((678, 678, 918, 918), fill=DANGER_CONTAINER)
         draw.rounded_rectangle((746, 784, 850, 864), radius=20, fill=DANGER)
         draw.arc((760, 716, 836, 812), start=180, end=360, fill=DANGER, width=24)
-    elif state == "pausing":
-        draw.ellipse((678, 678, 918, 918), fill=STATUS_WARN)
-        draw.rounded_rectangle((752, 744, 790, 852), radius=12, fill=ON_STATUS)
-        draw.rounded_rectangle((806, 744, 844, 852), radius=12, fill=ON_STATUS)
 
     visible_box = (VISIBLE_INSET, VISIBLE_INSET,
                    CANVAS - VISIBLE_INSET, CANVAS - VISIBLE_INSET)
@@ -92,23 +87,7 @@ def draw_master(state="idle"):
     )
 
 
-def svg_for(state="idle"):
-    state_markup = ""
-    if state == "playing":
-        state_markup = """
-  <circle cx="798" cy="798" r="120" fill="#5CD65C"/>
-  <path d="M766 740V856L862 798Z" fill="#0C0F14"/>"""
-    elif state == "locked":
-        state_markup = """
-  <circle cx="798" cy="798" r="120" fill="#6D3A3E"/>
-  <rect x="746" y="784" width="104" height="80" rx="20" fill="#FFB4AB"/>
-  <path d="M772 784V760A26 26 0 0 1 824 760V784" fill="none" stroke="#FFB4AB" stroke-width="24" stroke-linecap="round"/>"""
-    elif state == "pausing":
-        state_markup = """
-  <circle cx="798" cy="798" r="120" fill="#E0B020"/>
-  <rect x="752" y="744" width="38" height="108" rx="12" fill="#0C0F14"/>
-  <rect x="806" y="744" width="38" height="108" rx="12" fill="#0C0F14"/>"""
-
+def svg_for():
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="{VISIBLE_INSET} {VISIBLE_INSET} {CANVAS - 2 * VISIBLE_INSET} {CANVAS - 2 * VISIBLE_INSET}" role="img" aria-label="Sunshine 3D">
   <g fill="none" stroke="#E0B020" stroke-width="52" stroke-linecap="round">
@@ -120,7 +99,7 @@ def svg_for(state="idle"):
   </g>
   <circle cx="512" cy="424" r="180" fill="#E0B020"/>
   <path d="M188 704C342 582 682 582 836 704" fill="none" stroke="#D7E5FF" stroke-width="104" stroke-linecap="round"/>
-  <path d="M164 810C338 650 686 650 860 810" fill="none" stroke="#8AB4F8" stroke-width="112" stroke-linecap="round"/>{state_markup}
+  <path d="M164 810C338 650 686 650 860 810" fill="none" stroke="#8AB4F8" stroke-width="112" stroke-linecap="round"/>
 </svg>
 """
 
@@ -167,47 +146,31 @@ def main():
     idle = draw_master("idle")
     playing = draw_master("playing")
     locked = draw_master("locked")
-    pausing = draw_master("pausing")
     for label, master in (
         ("idle", idle),
         ("playing", playing),
         ("locked", locked),
-        ("pausing", pausing),
     ):
         require_transparent_canvas(master, label)
 
-    (ROOT / "sunshine3d.svg").write_text(svg_for("idle"), encoding="utf-8", newline="\n")
-    (WEB_IMAGES / "logo-sunshine3d.svg").write_text(svg_for("idle"), encoding="utf-8", newline="\n")
-    (WEB_IMAGES / "sunshine3d-playing.svg").write_text(svg_for("playing"), encoding="utf-8", newline="\n")
-    (WEB_IMAGES / "sunshine3d-locked.svg").write_text(svg_for("locked"), encoding="utf-8", newline="\n")
-    (WEB_IMAGES / "sunshine3d-pausing.svg").write_text(svg_for("pausing"), encoding="utf-8", newline="\n")
-
+    # README, packaging and Doxygen use the root files; the pages show the 45 px logo and the
+    # favicon; the tray loads the three ICO files (system_tray.cpp).
+    (ROOT / "sunshine3d.svg").write_text(svg_for(), encoding="utf-8", newline="\n")
     save_png(idle, ROOT / "sunshine3d.png", 1024)
-    save_png(idle, WEB_IMAGES / "logo-sunshine3d-16.png", 16)
     save_png(idle, WEB_IMAGES / "logo-sunshine3d-45.png", 45)
     save_ico(idle, ROOT / "sunshine3d.ico")
     shutil.copyfile(ROOT / "sunshine3d.ico", WEB_IMAGES / "sunshine3d.ico")
-
-    for name, master in (
-        ("sunshine3d-playing", playing),
-        ("sunshine3d-locked", locked),
-        ("sunshine3d-pausing", pausing),
-    ):
-        save_png(master, WEB_IMAGES / f"{name}.png", 1024)
-        save_png(master, WEB_IMAGES / f"{name}-16.png", 16)
-        save_png(master, WEB_IMAGES / f"{name}-45.png", 45)
-        save_ico(master, WEB_IMAGES / f"{name}.ico")
+    save_ico(playing, WEB_IMAGES / "sunshine3d-playing.ico")
+    save_ico(locked, WEB_IMAGES / "sunshine3d-locked.ico")
 
     for path in (
         ROOT / "sunshine3d.ico",
-        WEB_IMAGES / "logo-sunshine3d-16.png",
         WEB_IMAGES / "sunshine3d-playing.ico",
         WEB_IMAGES / "sunshine3d-locked.ico",
-        WEB_IMAGES / "sunshine3d-pausing.ico",
     ):
         require_saved_icon_transparency(path)
 
-    print("Generated Sunshine 3D icon family.")
+    print("Generated Sunshine 3D icons.")
 
 
 if __name__ == "__main__":
