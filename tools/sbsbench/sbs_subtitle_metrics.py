@@ -2,8 +2,8 @@
 
 The loose region and optional tight glyph/outline mask are authenticated ground truth in
 source-frame coordinates. This module never detects text. Tight canonical visibility is the hard
-authority. Independent vertical-band soft-plane conformance is a synthetic qualification diagnostic
-pending bottom-ROI-scoped real-video positive evidence. Loose-region support and global plane
+authority. Independent vertical-band soft-plane conformance is a diagnostic of the scored output;
+run_eval scores Base, which carries no subtitle protection. Loose-region support and global plane
 statistics remain compatibility diagnostics.
 """
 

@@ -293,7 +293,7 @@ class SubtitleMetricTests(unittest.TestCase):
         self.assertEqual(measured["subtitle_glyph_soft_plane_inlier_pct"], 100.0)
         self.assertGreater(measured["subtitle_constant_plane_rms_error_pct"], 0.0)
 
-    def test_soft_plane_five_pixel_reference_warns_on_more_than_two_percent_tail(self):
+    def test_soft_plane_measures_the_five_pixel_tail_without_raising_an_issue(self):
         width, height = 64, 64
         source = stripe_frame(width, height)
         tight = np.zeros(source.shape, dtype=bool)
@@ -315,11 +315,7 @@ class SubtitleMetricTests(unittest.TestCase):
             {"required_gt_subtitle_region": True,
              "required_gt_subtitle_tight_mask": True})
         self.assertEqual(spec["role"], "diagnostic")
-        self.assertEqual(spec["trigger_min"], 98.0)
-        self.assertNotIn("hard_min", spec)
-        self.assertEqual(
-            [issue["metric"] for issue in issues],
-            ["subtitle_glyph_soft_plane_inlier_pct"])
+        self.assertEqual(issues, [])
         self.assertEqual(
             worst["subtitle_glyph_soft_plane_inlier_pct"]["worst_value"], 96.875)
         self.assertEqual(

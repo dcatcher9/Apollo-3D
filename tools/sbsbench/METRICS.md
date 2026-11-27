@@ -147,13 +147,12 @@ Current subtitle clips additionally declare `required_gt_subtitle_tight_mask: tr
 `gt_subtitle_overlay_mask`. This binary mask contains only the visible glyph plus outline; character
 gaps and surrounding rectangle space remain ordinary scene geometry. Older fixtures that declare
 neither authority retain loose-region measurements for report compatibility, but cannot provide the
-current glyph-local evidence. Tight glyph visibility is hard; the soft-plane score is a synthetic
-qualification diagnostic pending real-video positive evidence.
+current glyph-local evidence. Tight glyph visibility is hard; the soft-plane score is a diagnostic.
 
 | Metric | Meaning | Preferred direction |
 |---|---|---|
 | `subtitle_glyph_sample_visibility_pct` | Mutually valid canonical-sample survival over the tight glyph mask | Hard minimum 95% |
-| `subtitle_glyph_soft_plane_inlier_pct` | Worst vertical glyph band's output-area-weighted fraction within five binocular eye pixels of its weighted-median disparity | Synthetic qualification warning below the frozen 98% reference; not a release hard gate |
+| `subtitle_glyph_soft_plane_inlier_pct` | Worst vertical glyph band's output-area-weighted fraction within five binocular eye pixels of its weighted-median disparity | Diagnostic of the scored Base output; no warning or gate |
 | `subtitle_plane_abs_disparity_pct` | Absolute fitted subtitle disparity in reference-aspect disparity percent | Diagnostic |
 | `subtitle_region_output_area_coverage_pct` | Rendered output-area coverage over the loose region | Diagnostic |
 | `subtitle_glyph_output_area_coverage_pct` | Rendered output-area coverage over tight glyph support | Diagnostic |
@@ -170,16 +169,17 @@ map samples do not vote, and the clip aggregate keeps the minimum visibility ove
 The soft-plane diagnostic makes no assumption about subtitle line count. It projects tight-mask row
 occupancy into the 434-row locator domain, joins nearby occupied rows into bands, and scores every
 remaining connected vertical band independently. Each band fits an output-area-weighted median
-disparity. Falling below the frozen 98% reference within five binocular eye pixels produces a
-**synthetic qualification warning**, not a universal hard failure. Using binocular eye-pixel units
-and then converting through the reference-aspect disparity function keeps the reference resolution
-independent; taking the worst band prevents a large dialogue row from hiding a damaged shorter row.
+disparity within five binocular eye pixels. Using binocular eye-pixel units and then converting
+through the reference-aspect disparity function keeps the score resolution independent; taking the
+worst band prevents a large dialogue row from hiding a damaged shorter row.
 
-The current diagnostic deliberately reports every authored band, including the top note in
-`subtitle_top_bottom_disjoint`. It therefore cannot define production release policy. Any future
-hard promotion must first define bottom-ROI-scoped positive evidence, then qualify the unchanged
-reference on continuous real-video subtitles. Until that evidence exists, **real positive
-qualification is pending**.
+`run_eval.py` scores Base only and renders no subtitle route (see the
+[README](README.md#direct-glyph-qualification)), so this score shows how burned-in glyphs follow
+scene depth without subtitle protection. A cue over a depth edge, such as the near table leg behind
+cue D in `subtitle_cjk_highres_transitions`, therefore scores low by construction. The score raises
+no warning and is no qualification of subtitle protection; the live route is exercised by the
+harness's Direct Glyph qualification. It reports every authored band, including the top note in
+`subtitle_top_bottom_disjoint`.
 
 The cleanup build does not authenticate subtitle authority or pre/post conditioning artifacts.
 Glyph visibility and soft-plane metrics score the final renderer output only. Authority/effect
@@ -209,10 +209,7 @@ Evidence minima are part of the contract:
 - vertical alignment requires at least 2% overlapping texture-tile support.
 - each non-empty tight subtitle mask must retain at least 95% mutually visible canonical glyph
   samples; loose- and tight-region output-area coverage remains diagnostic;
-- each tight vertical glyph band requires 16 supported samples; values below the frozen 98%
-  soft-plane reference are synthetic qualification warnings, not release hard failures;
-- soft-plane warnings cannot replace bottom-ROI-scoped continuous real-video positive subtitles,
-  a real-video negative holdout, and a live authority/effect trace release gate; and
+- each tight vertical glyph band requires 16 supported samples for the soft-plane diagnostic; and
 - subtitle geometry and sharpness require at least 16 mutually visible samples (and 16 horizontal
   pairs for sharpness); empty authored masks abstain from glyph geometry.
 

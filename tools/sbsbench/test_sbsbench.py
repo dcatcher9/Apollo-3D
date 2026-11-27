@@ -2145,48 +2145,6 @@ class EvalContractTests(unittest.TestCase):
         self.assertIn("exact_local_polarity_component_pct", supporting)
         self.assertIn("flow_temporal_p95", supporting)
 
-    def test_soft_plane_policy_is_a_visible_bottom_roi_qualification_warning(self):
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        with open(os.path.join(repo, "tools", "sbsbench", "thresholds.json"),
-                  encoding="utf-8") as stream:
-            spec = json.load(stream)["metrics"][
-                "subtitle_glyph_soft_plane_inlier_pct"]
-        self.assertEqual(spec["role"], "diagnostic")
-        self.assertEqual(spec["trigger_min"], 98.0)
-        self.assertNotIn("hard_min", spec)
-
-        report_path = os.path.join(repo, "tools", "sbsbench", "build_report.py")
-        with open(report_path, encoding="utf-8") as stream:
-            tree = ast.parse(stream.read(), filename=report_path)
-        function = next(node for node in tree.body
-                        if isinstance(node, ast.FunctionDef)
-                        and node.name == "subtitle_qualification_strip")
-        metric = "subtitle_glyph_soft_plane_inlier_pct"
-        namespace = {
-            "THR": {metric: spec},
-            "CLIPS": ["synthetic"],
-            "TREAT": {"clips": {"synthetic": {"aggregate": {metric: 97.0}}}},
-            "_metric_value": lambda run, clip, key: run["clips"][clip]["aggregate"].get(key),
-            "html": html,
-            "name": lambda clip: clip,
-        }
-        exec(compile(ast.Module(body=[function], type_ignores=[]), report_path, "exec"),
-             namespace)
-
-        warning = namespace["subtitle_qualification_strip"]()
-        self.assertIn("SYNTHETIC QUALIFICATION WARNING", warning)
-        self.assertIn("98.00%", warning)
-        self.assertIn("Real positive qualification pending", warning)
-        self.assertIn("scores final rendered glyphs only", warning)
-        self.assertIn("replacement OCR-box trace", warning)
-
-        for document in ("METRICS.md", "DATASETS.md"):
-            with open(os.path.join(repo, "tools", "sbsbench", document),
-                      encoding="utf-8") as stream:
-                policy = " ".join(stream.read().split())
-            self.assertIn("bottom-roi-scoped", policy.lower())
-            self.assertIn("real positive qualification is pending", policy.lower())
-
     def test_nvhttp_reads_coherent_locked_process_status(self):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         with open(os.path.join(repo, "src", "process.h"), encoding="utf-8") as fh:

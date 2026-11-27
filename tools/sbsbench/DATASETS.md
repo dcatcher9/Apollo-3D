@@ -43,16 +43,13 @@ python tools/sbsbench/make_synth_clips.py subtitle_cjk_dense `
 
 These four subtitle clips are deterministic synthetic contract counterexamples. They pin geometry,
 transition, replay, and no-op invariants; they are not a sample of real-video subtitle or negative
-distributions. The 95% glyph-visibility floor is a frozen hard quality contract. The unchanged 98%
-soft-plane value is a synthetic qualification reference: falling below it emits a warning but does
-not become a universal release failure or a fitted classifier threshold. A production semantic
+distributions. The 95% glyph-visibility floor is a frozen hard quality contract. The soft-plane
+score is a diagnostic of the scored Base output (see [Metrics](METRICS.md)). A production semantic
 release additionally requires bottom-ROI-scoped continuous real-video positive subtitles, a
 separate real-video negative holdout, and a live signed-authority/effect trace gate.
 
 The top note in `subtitle_top_bottom_disjoint` is deliberately outside the selected subtitle
-authority used by the existing qualification fixture and must remain an exact no-op. The current all-authored-band
-soft-plane diagnostic remains useful as a stress warning, but real positive qualification is
-pending until an ROI-scoped real-video corpus and policy are authenticated.
+authority used by the existing qualification fixture and must remain an exact no-op.
 
 `subtitle_cjk_highres_transitions` is a lossless `2560x1440` probe with authored three-pixel CJK
 strokes and a two-pixel dark outline. Scaling it to the `770x434` detector canvas is approximately
@@ -212,8 +209,7 @@ fixtures declaring neither authority retain loose-region scoring but are not tig
 evidence. No fixture authors a target disparity:
 the runtime selects a frame-local plane from the post-limiter field at the deterministic primary
 loose-rectangle center. Evaluation reports fitted-plane residual and target-free absolute magnitude
-as diagnostics. The per-band five-eye-pixel score uses the frozen 98% synthetic qualification
-reference described above; it is not a release hard gate.
+as diagnostics, as is the per-band five-eye-pixel soft-plane score.
 
 Every declared appearance, subtitle-only replacement, and disappearance is rechecked on the
 subtitle-free oracle after excluding the union of the previous and current tight masks. At most 5%

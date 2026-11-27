@@ -907,7 +907,7 @@ class FrameLabelContractTests(unittest.TestCase):
             {"exact_polarity_support_pct": 0.0}, thresholds, {})
         self.assertEqual(unsupported, [])
 
-    def test_soft_plane_reference_emits_qualification_issue_not_hard_failure(self):
+    def test_low_soft_plane_score_raises_no_issue_or_hard_failure(self):
         with open(os.path.join(SCRIPT_DIR, "thresholds.json"),
                   encoding="utf-8") as stream:
             spec = json.load(stream)["metrics"][
@@ -928,18 +928,9 @@ class FrameLabelContractTests(unittest.TestCase):
             [row], dict(row), thresholds, metadata)
 
         self.assertEqual(spec["role"], "diagnostic")
-        self.assertEqual(spec["trigger_min"], 98.0)
-        self.assertNotIn("hard_min", spec)
         self.assertEqual(worst[metric]["worst_value"], 97.0)
-        self.assertEqual([item["metric"] for item in issues], [metric])
+        self.assertEqual(issues, [])
         self.assertEqual(hard_failures, [])
-
-        at_reference = dict(row)
-        at_reference[metric] = spec["trigger_min"]
-        _, reference_issues, reference_hard = run_eval.score_clip_gates(
-            [at_reference], at_reference, thresholds, metadata)
-        self.assertEqual(reference_issues, [])
-        self.assertEqual(reference_hard, [])
 
     def test_temporal_primary_evidence_checks_transitions_not_aggregate_keys(self):
         thresholds = {"metrics": {
@@ -1663,9 +1654,6 @@ class ReportEvidenceContractTests(unittest.TestCase):
             self.assertIn("mapping_stretch", report)
             self.assertIn("delta: red worse / blue better", report)
             self.assertIn("not applicable", report)
-            self.assertIn("Real positive qualification pending", report)
-            self.assertIn("scores final rendered glyphs only", report)
-            self.assertIn("replacement OCR-box trace", report)
             self.assertNotIn("9876.54", report)
             self.assertIn("render_integrity", report)
             self.assertIn("depth conditional transaction", report)

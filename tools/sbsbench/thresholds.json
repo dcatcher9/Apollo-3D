@@ -330,8 +330,7 @@
       "better": "higher",
       "rel_tol": 0.0,
       "abs_floor": 0.5,
-      "trigger_min": 98.0,
-      "note": "Synthetic qualification warning below the frozen 98% reference, not a universal release gate. The current diagnostic includes all authored bands; hard promotion requires replacement-authority-scoped real-video positive qualification. The 2% reference tail admits antialiased weak tips without becoming classifier calibration."
+      "note": "Diagnostic of the scored Base output. run_eval renders no subtitle route, so this measures how burned-in glyphs follow scene depth without subtitle protection and raises no warning. The live route is exercised by the harness's Direct Glyph qualification."
     },
     "subtitle_constant_plane_rms_error_pct": {
       "scope": "gt-only",

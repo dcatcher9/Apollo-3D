@@ -1296,7 +1296,7 @@ SUPPORTING_HEATMAP_AXES = (
     ("subtitle_region_binocular_support_pct", "legacy subtitle region support"),
     ("subtitle_region_output_area_coverage_pct", "subtitle region output area"),
     ("subtitle_glyph_output_area_coverage_pct", "subtitle glyph output area"),
-    ("subtitle_glyph_soft_plane_inlier_pct", "synthetic soft-plane qualification"),
+    ("subtitle_glyph_soft_plane_inlier_pct", "subtitle soft-plane (Base)"),
     ("subtitle_constant_plane_rms_error_pct", "legacy subtitle plane residual"),
     ("subtitle_plane_abs_disparity_pct", "subtitle plane magnitude"),
     ("subtitle_disparity_variance_pct2", "subtitle disparity variance"),
@@ -1763,7 +1763,7 @@ METRIC_DEFS = [
     ("subtitle_glyph_soft_plane_inlier_pct",
          "subtitle_soft_plane_inliers",
          "Worst independently authored vertical band's output-area-weighted glyph fraction within five binocular eye pixels of its weighted-median disparity.",
-         "synthetic qualification warning below the frozen 98% reference; real positive qualification pending"),
+         "diagnostic of the Base output; run_eval renders no subtitle route"),
     ("subtitle_region_binocular_support_pct",
          "subtitle_legacy_region_support",
          "Legacy conservative minimum of canonical visibility and output-area coverage over the loose authored subtitle rectangle.",
@@ -1870,39 +1870,6 @@ def metrics_section():
             f'</div></div></details>')
 
 
-def subtitle_qualification_strip():
-    """Keep synthetic soft-plane warnings visible without promoting them to release gates."""
-    metric = "subtitle_glyph_soft_plane_inlier_pct"
-    spec = THR.get(metric, {})
-    reference = spec.get("trigger_min")
-    if spec.get("role") != "diagnostic" or reference is None:
-        return ""
-    reference = float(reference)
-    observed = []
-    for clip in CLIPS:
-        value = _metric_value(TREAT, clip, metric)
-        if value is not None:
-            observed.append((clip, float(value)))
-    below = [(clip, value) for clip, value in observed if value < reference]
-    if below:
-        items = "".join(
-            f'<li><code>{html.escape(name(clip))}</code> = {value:.3f}% '
-            f'(&lt; {reference:.2f}% reference)</li>'
-            for clip, value in sorted(below, key=lambda item: item[1]))
-        status = (f'<b>Subtitle: SYNTHETIC QUALIFICATION WARNING</b> — the frozen '
-                  f'{reference:.2f}% soft-plane reference was missed.<ul>{items}</ul>')
-    elif observed:
-        status = (f'<b>Subtitle: synthetic qualification reference met</b> — all applicable '
-                  f'committed synthetic bands remain at or above {reference:.2f}%.')
-    else:
-        status = ('<b>Subtitle: synthetic qualification evidence unavailable</b> — this report '
-                  'does not contain an applicable tight-mask soft-plane score.')
-    pending = (' <b>Real positive qualification pending.</b> The current diagnostic includes all '
-               'authored bands and scores final rendered glyphs only. Authority/effect '
-               'qualification awaits the replacement OCR-box trace.')
-    return f'<div class="gate gate-info">{status}{pending}</div>'
-
-
 def conclusion_section():
     """Auto-derived verdict using per-clip metric gates; means summarize but never decide."""
     wins, costs = [], []
@@ -1986,8 +1953,7 @@ def conclusion_section():
             f'<p class="sub" style="margin-bottom:12px">{head} — decision over '
             f'{len(DECISION_CLIPS)} non-flat clip(s); expected-flat diagnostics remain below. '
             f'<b>{scope_note}</b> Qualified training labels: <b>{qualified_labels}</b>.</p>'
-            f'<ul class="concl">{li}<li>{verdict}</li></ul>{gate_strip()}'
-            f'{subtitle_qualification_strip()}</section>')
+            f'<ul class="concl">{li}<li>{verdict}</li></ul>{gate_strip()}</section>')
 
 
 def gate_strip():
