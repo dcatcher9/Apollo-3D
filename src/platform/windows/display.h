@@ -77,6 +77,10 @@ namespace platf::dxgi {
   using blob_t = util::safe_ptr<ID3DBlob, Release<ID3DBlob>>;
   using keyed_mutex_t = util::safe_ptr<IDXGIKeyedMutex, Release<IDXGIKeyedMutex>>;
 
+  /** Compile one HLSL shader file with entry point main_ps or main_vs; null, and logged, on failure. */
+  blob_t compile_pixel_shader(LPCSTR file);
+  blob_t compile_vertex_shader(LPCSTR file);
+
   namespace detail {
     /** One external health publication per captured sample; control owns repeated heartbeats. */
     class host_sbs_telemetry_sample_gate_t {

@@ -30,7 +30,7 @@
 #include "src/utility.h"
 
 namespace platf::dxgi {
-  /** Internals of run_local_presenter(), for display_vram.cpp only. */
+  /** Internals of run_local_presenter(), for local_presenter.cpp only. */
   namespace local_presenter {
     using namespace std::literals;
 
