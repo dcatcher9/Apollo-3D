@@ -6303,7 +6303,6 @@ namespace offline_sbs {
       const auto &analysis_state = typed_analysis_contract.adaptive_state;
       if (
         analysis_state.transport != completion_channel_t::name ||
-        analysis_state.file.has_value() ||
         analysis_state.retained_history ||
         analysis_state.schema != sbs_adaptive_state::schema_version ||
         analysis_state.capture != sbs_adaptive_state::capture ||

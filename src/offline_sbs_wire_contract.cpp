@@ -828,9 +828,6 @@ namespace offline_sbs::wire {
       resolved_runtime["frame_transport"] = *runtime.frame_transport;
     }
     const auto &adaptive = value.adaptive_state;
-    if (adaptive.transport == completion_channel_t::name && adaptive.file) {
-      throw contract_error("whole-clip in-memory adaptive state cannot advertise files");
-    }
     json adaptive_state {
       {"transport", adaptive.transport},
       {"retained_history", adaptive.retained_history},
@@ -838,9 +835,6 @@ namespace offline_sbs::wire {
       {"capture", adaptive.capture},
       {"frame_count", adaptive.frame_count},
     };
-    if (adaptive.transport == "jsonl-v1") {
-      adaptive_state["file"] = optional_json(adaptive.file);
-    }
     json observation = nullptr;
     if (value.observation_timeline) {
       observation = {
@@ -1056,26 +1050,21 @@ namespace offline_sbs::wire {
       throw contract_error("whole-clip adaptive state has no transport");
     }
     typed_adaptive.transport = adaptive.at("transport").get<std::string>();
-    if (typed_adaptive.transport == completion_channel_t::name) {
-      require_exact_keys(adaptive, std::array {"transport"sv, "retained_history"sv, "schema"sv, "capture"sv, "frame_count"sv}, "whole-clip adaptive state");
-    } else if (typed_adaptive.transport == "jsonl-v1") {
-      require_exact_keys(adaptive, std::array {"transport"sv, "file"sv, "retained_history"sv, "schema"sv, "capture"sv, "frame_count"sv}, "whole-clip adaptive state");
-      typed_adaptive.file = required_string(adaptive, "file", "whole-clip adaptive state");
-    } else {
+    if (typed_adaptive.transport != completion_channel_t::name) {
       throw contract_error("whole-clip adaptive state transport is unsupported");
     }
+    require_exact_keys(adaptive, std::array {"transport"sv, "retained_history"sv, "schema"sv, "capture"sv, "frame_count"sv}, "whole-clip adaptive state");
     typed_adaptive.retained_history = required_boolean(adaptive, "retained_history", "whole-clip adaptive state");
     typed_adaptive.frame_count = unsigned_integer<std::uint64_t>(adaptive, "frame_count", "whole-clip adaptive state");
     typed_adaptive.schema = unsigned_integer<std::uint32_t>(adaptive, "schema", "whole-clip adaptive state");
     typed_adaptive.capture = required_string(adaptive, "capture", "whole-clip adaptive state");
-    if (typed_adaptive.transport == completion_channel_t::name &&
-        (typed_runtime.frame_transport != raw_frame_transport::name ||
-         !typed_runtime.follow_mode ||
-         typed_runtime.follow_poll_interval_ms != 0 ||
-         typed_runtime.follow_native_input_deletion || typed_adaptive.retained_history ||
-         typed_adaptive.schema != sbs_adaptive_state::schema_version ||
-         typed_adaptive.capture != sbs_adaptive_state::capture ||
-         typed_adaptive.frame_count != result.source_frame_count)) {
+    if (typed_runtime.frame_transport != raw_frame_transport::name ||
+        !typed_runtime.follow_mode ||
+        typed_runtime.follow_poll_interval_ms != 0 ||
+        typed_runtime.follow_native_input_deletion || typed_adaptive.retained_history ||
+        typed_adaptive.schema != sbs_adaptive_state::schema_version ||
+        typed_adaptive.capture != sbs_adaptive_state::capture ||
+        typed_adaptive.frame_count != result.source_frame_count) {
       throw contract_error("whole-clip in-memory adaptive state disagrees with its native raw transport");
     }
     result.sbs = parse_whole_clip_sbs(value.at("sbs"));

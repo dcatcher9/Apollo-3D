@@ -105,7 +105,6 @@ namespace offline_sbs::wire {
 
   struct whole_clip_adaptive_state_t {
     std::string transport;
-    std::optional<std::string> file;
     bool retained_history = false;
     std::uint32_t schema = 0;
     std::string capture;

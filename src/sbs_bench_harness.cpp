@@ -1634,76 +1634,6 @@ namespace sbs_bench {
              summary.newest_input_domain_reset == expected_newest_input_domain_reset;
     }
 
-    bool write_adaptive_state_header(
-      std::ostream &out,
-      const std::string_view model_name,
-      const double pop_strength,
-      const int depth_reuse_interval
-    ) {
-      nlohmann::json fields = nlohmann::json::array();
-      for (const auto &field : sbs_adaptive_state::fields) {
-        fields.push_back({
-          {"name", field.name},
-          {"type", field.json_type},
-        });
-      }
-      const nlohmann::json header {
-        {"record", "header"},
-        {"schema", sbs_adaptive_state::schema_version},
-        {"source", sbs_adaptive_state::source},
-        {"capture", sbs_adaptive_state::capture},
-        {"fields", std::move(fields)},
-        {"config", {
-          {"model", model_name},
-          {"pop_strength", pop_strength},
-          {"depth_reuse_interval", depth_reuse_interval},
-        }},
-      };
-      out << header.dump() << '\n';
-      out.flush();
-      return out.good();
-    }
-
-    bool write_adaptive_state_frame(
-      std::ostream &out,
-      std::string_view frame_id,
-      std::size_t source_index,
-      bool depth_updated,
-      const adaptive_state_words_t &words
-    ) {
-      using sbs_adaptive_state::word_e;
-      const auto scalar = [&](const word_e word) {
-        return std::bit_cast<float>(words[sbs_adaptive_state::index(word)]);
-      };
-      out << "{\"record\":\"frame\",\"frame_id\":" << json_string(frame_id)
-          << ",\"source_index\":" << source_index
-          << ",\"depth_updated\":" << (depth_updated ? "true" : "false")
-          << ",\"empty_raw_count\":"
-          << words[sbs_adaptive_state::index(word_e::empty_raw_count)]
-          << ",\"collapsed_raw_count\":"
-          << words[sbs_adaptive_state::index(word_e::collapsed_raw_count)]
-          << ",\"values\":[";
-      for (const auto &field : sbs_adaptive_state::fields) {
-        const auto index = sbs_adaptive_state::index(field.word);
-        if (index != 0u) {
-          out << ',';
-        }
-        if (field.gpu_encoding == sbs_adaptive_state::gpu_encoding_e::uint_bits) {
-          out << words[index];
-        } else if (
-          field.gpu_encoding ==
-          sbs_adaptive_state::gpu_encoding_e::uint_valued_float
-        ) {
-          out << static_cast<std::uint32_t>(scalar(field.word));
-        } else {
-          out << scalar(field.word);
-        }
-      }
-      out << "]}\n";
-      out.flush();
-      return out.good();
-    }
-
     // Keep output identities tied to source identities. Positional renumbering made a dropped
     // source frame silently shift every depth/SBS/source comparison by one.
     std::string source_frame_id(const fs::path &path) {
@@ -1803,6 +1733,7 @@ namespace sbs_bench {
       std::string frames, out, direct_parallax_root;
       std::string depth_coordinate_v2_manifest;
       std::string observation_timeline;
+      // The CLI always evaluates; the native pass selects adaptive or conversion artifacts.
       artifact_mode_e artifacts = artifact_mode_e::evaluation;
       // Set only by the native pass: its frames arrive through the worker's raw memory transport.
       bool follow = false;
@@ -1869,16 +1800,6 @@ namespace sbs_bench {
           o.subtitle_conditioning_live_policy = true;
         } else if (a == "--out") {
           o.out = next("--out");
-        } else if (a == "--artifacts") {
-          const auto value = next("--artifacts");
-          if (value == "evaluation") {
-            o.artifacts = artifact_mode_e::evaluation;
-          } else if (value == "adaptive") {
-            o.artifacts = artifact_mode_e::adaptive;
-          } else {
-            BOOST_LOG(error) << "sbs-bench: --artifacts must be evaluation or adaptive";
-            return false;
-          }
         } else if (a == "--pop-strength") {
           o.pop_strength = std::stod(next("--pop-strength"));
         } else if (a == "--max-width") {
@@ -1950,15 +1871,14 @@ namespace sbs_bench {
              "output cadence 1, and forbids follow and direct replay";
         return false;
       }
-      if (o.follow) {
-        if (o.artifacts == artifact_mode_e::evaluation ||
-            (o.follow_format != "bgra8" && o.follow_format != "gbrpf32le") ||
-            o.follow_count == 0u || o.limit != 0 || o.output_every != 1) {
-          BOOST_LOG(error) << "sbs-bench: invalid raw transport whole-clip settings";
-          return false;
-        }
-      } else if (o.artifacts == artifact_mode_e::conversion) {
-        BOOST_LOG(error) << "sbs-bench: conversion requires the raw memory transport";
+      if (o.follow != (o.artifacts != artifact_mode_e::evaluation)) {
+        BOOST_LOG(error) << "sbs-bench: whole-clip artifacts require the raw memory transport";
+        return false;
+      }
+      if (o.follow &&
+          ((o.follow_format != "bgra8" && o.follow_format != "gbrpf32le") ||
+           o.follow_count == 0u || o.limit != 0 || o.output_every != 1)) {
+        BOOST_LOG(error) << "sbs-bench: invalid raw transport whole-clip settings";
         return false;
       }
       if (o.transient_raster_hard_cap_bytes != 0 &&
@@ -2064,11 +1984,9 @@ namespace sbs_bench {
       return 3;
     }
 
-    // A directory clip is SDR PNG or JPEG frames read through WIC. A whole clip is one format
-    // throughout: mixing formats would corrupt its timeline identity. The raw transport carries
+    // A directory clip is SDR PNG or JPEG frames read through WIC. The raw transport carries
     // SDR BGRA8 or linear-scRGB planar float frames.
     std::vector<fs::path> frames;
-    bool found_mixed_sdr_formats = false;
     std::string sdr_raster_format;
     std::error_code ec;
     if (!fs::is_directory(o.frames, ec) || ec) {
@@ -2085,18 +2003,10 @@ namespace sbs_bench {
           ch = (char) tolower((unsigned char) ch);
         }
         if (ext == ".png" || ext == ".jpg" || ext == ".jpeg") {
-          const std::string format = ext == ".png" ? "png" : "jpeg";
-          if (!sdr_raster_format.empty() && sdr_raster_format != format) {
-            found_mixed_sdr_formats = true;
-          }
-          sdr_raster_format = format;
+          sdr_raster_format = ext == ".png" ? "png" : "jpeg";
           frames.push_back(e.path());
         }
       }
-    }
-    if (o.artifacts != artifact_mode_e::evaluation && found_mixed_sdr_formats) {
-      BOOST_LOG(error) << "sbs-bench: mixed source image formats are not a valid whole clip";
-      return 4;
     }
     const bool hdr_source = o.follow_format == "gbrpf32le";
     if (!o.follow) {
@@ -2217,49 +2127,27 @@ namespace sbs_bench {
     const int max_width =
       o.max_width > 0 ? o.max_width : config::video.sbs.max_encode_width;
     constexpr std::size_t follow_first_sequence = 1u;
-    std::ofstream adaptive_state_stream;
     std::size_t adaptive_state_frame_count = 0;
     if (whole_clip_mode) {
-      if (transport) {
-        offline_sbs::completion_header_t header;
-        header.adaptive_schema = sbs_adaptive_state::schema_version;
-        header.adaptive_contract_sha256 = sbs_adaptive_state::contract_canonical_sha256;
-        header.source = sbs_adaptive_state::source;
-        header.capture = sbs_adaptive_state::capture;
-        for (std::size_t index = 0; index < sbs_adaptive_state::fields.size(); ++index) {
-          header.fields[index].name = sbs_adaptive_state::fields[index].name;
-          header.fields[index].type = sbs_adaptive_state::fields[index].json_type;
-        }
-        header.model = model.name;
-        header.pop_strength = sbs_cfg.pop_strength;
-        header.depth_reuse_interval = effective_depth_every;
-        header.source_format = o.follow_format == "bgra8" ?
-                                 offline_sbs::raw_pixel_format::bgra8 :
-                                 offline_sbs::raw_pixel_format::gbrpf32le;
-        header.source_frame_count = o.follow_count;
-        header.first_sequence = follow_first_sequence;
-        header.sbs_enabled = o.artifacts == artifact_mode_e::conversion;
-        transport->completion.publish_header(std::move(header));
-      } else {
-        adaptive_state_stream.open(fs::path(o.out) / "adaptive_state.jsonl");
-        if (!adaptive_state_stream) {
-          BOOST_LOG(error) << "sbs-bench: cannot create adaptive_state.jsonl";
-          return 6;
-        }
-        adaptive_state_stream.imbue(std::locale::classic());
-        adaptive_state_stream
-          << std::setprecision(std::numeric_limits<float>::max_digits10);
-        if (!write_adaptive_state_header(
-              adaptive_state_stream,
-              model.name,
-              sbs_cfg.pop_strength,
-              effective_depth_every
-            )) {
-          BOOST_LOG(error)
-            << "sbs-bench: failed writing adaptive_state.jsonl header";
-          return 6;
-        }
+      offline_sbs::completion_header_t header;
+      header.adaptive_schema = sbs_adaptive_state::schema_version;
+      header.adaptive_contract_sha256 = sbs_adaptive_state::contract_canonical_sha256;
+      header.source = sbs_adaptive_state::source;
+      header.capture = sbs_adaptive_state::capture;
+      for (std::size_t index = 0; index < sbs_adaptive_state::fields.size(); ++index) {
+        header.fields[index].name = sbs_adaptive_state::fields[index].name;
+        header.fields[index].type = sbs_adaptive_state::fields[index].json_type;
       }
+      header.model = model.name;
+      header.pop_strength = sbs_cfg.pop_strength;
+      header.depth_reuse_interval = effective_depth_every;
+      header.source_format = o.follow_format == "bgra8" ?
+                               offline_sbs::raw_pixel_format::bgra8 :
+                               offline_sbs::raw_pixel_format::gbrpf32le;
+      header.source_frame_count = o.follow_count;
+      header.first_sequence = follow_first_sequence;
+      header.sbs_enabled = o.artifacts == artifact_mode_e::conversion;
+      transport->completion.publish_header(std::move(header));
     }
 
     BOOST_LOG(info) << "sbs-bench: "
@@ -2921,28 +2809,6 @@ namespace sbs_bench {
       const bool depth_updated = true;
       adaptive_state_words_t words {};
       const bool defer_adaptive_state_readback = o.artifacts == artifact_mode_e::conversion;
-      const auto persist_adaptive_state = [&]() {
-        if (transport) {
-          ++adaptive_state_frame_count;
-          return true;
-        }
-        const auto write_frame = [&](std::ostream &out) {
-          return write_adaptive_state_frame(
-            out,
-            output_id,
-            fi,
-            depth_updated,
-            words
-          );
-        };
-        if (!write_frame(adaptive_state_stream)) {
-          BOOST_LOG(error)
-            << "sbs-bench: cannot write adaptive state for frame " << output_id;
-          return false;
-        }
-        ++adaptive_state_frame_count;
-        return true;
-      };
       depth_coordinate_v2_gpu_frame v2_gpu_frame;
       if (depth_coordinate_v2_gpu_mode) {
         std::string gpu_replay_error;
@@ -3330,8 +3196,8 @@ namespace sbs_bench {
           BOOST_LOG(error) << "sbs-bench: cannot read adaptive state for frame " << output_id;
           return 6;
         }
-        if (!defer_adaptive_state_readback && !persist_adaptive_state()) {
-          return 6;
+        if (!defer_adaptive_state_readback) {
+          ++adaptive_state_frame_count;
         }
       } else {
         adaptive_state_words_t health_words {};
@@ -3345,18 +3211,14 @@ namespace sbs_bench {
 
       if (o.artifacts == artifact_mode_e::adaptive) {
         sbs_perf::tick();
-        if (transport) {
-          offline_sbs::completion_frame_t completed;
-          completed.source = raw_source->header;
-          completed.adaptive_state = words;
-          completed.depth_updated = depth_updated;
-          transport->completion.publish_frame(std::move(completed));
-        }
+        offline_sbs::completion_frame_t completed;
+        completed.source = raw_source->header;
+        completed.adaptive_state = words;
+        completed.depth_updated = depth_updated;
+        transport->completion.publish_frame(std::move(completed));
         processed_frame_count = fi + 1u;
         if (((fi + 1) % 20) == 0) {
-          BOOST_LOG(info) << "sbs-bench: processed " << (fi + 1)
-                          << (o.follow ? " follow frames" :
-                                         "/" + std::to_string(frames.size()));
+          BOOST_LOG(info) << "sbs-bench: processed " << (fi + 1) << " follow frames";
         }
         continue;
       }
@@ -3927,8 +3789,6 @@ namespace sbs_bench {
                              << exception.what();
             return 10;
           }
-        } else if (!persist_adaptive_state()) {
-          return 6;
         }
       }
       processed_frame_count = fi + 1u;
@@ -4560,18 +4420,9 @@ namespace sbs_bench {
                  << "}\n";
       }
     } else {
-      if (!transport) {
-        adaptive_state_stream.flush();
-      }
-      if (
-        (!transport && !adaptive_state_stream.good()) ||
-        adaptive_state_frame_count != completed_frame_count
-      ) {
+      if (adaptive_state_frame_count != completed_frame_count) {
         BOOST_LOG(error) << "sbs-bench: adaptive-state trace is incomplete";
         return 8;
-      }
-      if (!transport) {
-        adaptive_state_stream.close();
       }
       if (o.artifacts == artifact_mode_e::conversion &&
           written != static_cast<int>(completed_frame_count)) {
@@ -4667,25 +4518,13 @@ namespace sbs_bench {
         .content_scale_y = contract_geometry.content_scale_y,
       };
       if (transport) resolved_runtime.frame_transport = offline_sbs::raw_frame_transport::name;
-      offline_sbs::wire::whole_clip_adaptive_state_t adaptive_state;
-      if (transport) {
-        adaptive_state = {
-          .transport = offline_sbs::completion_channel_t::name,
-          .retained_history = false,
-          .schema = sbs_adaptive_state::schema_version,
-          .capture = std::string {sbs_adaptive_state::capture},
-          .frame_count = adaptive_state_frame_count,
-        };
-      } else {
-        adaptive_state = {
-          .transport = "jsonl-v1",
-          .file = "adaptive_state.jsonl",
-          .retained_history = true,
-          .schema = sbs_adaptive_state::schema_version,
-          .capture = std::string {sbs_adaptive_state::capture},
-          .frame_count = adaptive_state_frame_count,
-        };
-      }
+      const offline_sbs::wire::whole_clip_adaptive_state_t adaptive_state {
+        .transport = offline_sbs::completion_channel_t::name,
+        .retained_history = false,
+        .schema = sbs_adaptive_state::schema_version,
+        .capture = std::string {sbs_adaptive_state::capture},
+        .frame_count = adaptive_state_frame_count,
+      };
       const offline_sbs::wire::whole_clip_sbs_t sbs_contract {
         .enabled = o.artifacts == artifact_mode_e::conversion,
         .frame_count = static_cast<std::uint64_t>(written),

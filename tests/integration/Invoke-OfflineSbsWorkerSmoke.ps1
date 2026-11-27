@@ -1128,7 +1128,6 @@ title=Smoke chapter
       '--frames', $preflightFrames,
       '--out', $preflightOutput,
       '--limit', '1',
-      '--artifacts', 'adaptive',
       '--observation-timeline', $preflightTimeline
     ) `
     -WorkingDirectory (Split-Path -Parent $script:SunshinePath)

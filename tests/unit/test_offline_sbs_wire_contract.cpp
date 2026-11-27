@@ -9,9 +9,9 @@
 #include <gtest/gtest.h>
 
 namespace {
-  // The CLI adaptive trace: a directory clip and its retained JSONL history.
-  offline_sbs::wire::whole_clip_contract_t trace_whole_clip() {
-    return {
+  // The worker's raw-memory transport with its in-memory completion evidence.
+  offline_sbs::wire::whole_clip_contract_t memory_whole_clip(const bool conversion) {
+    offline_sbs::wire::whole_clip_contract_t contract {
       .observation_timeline = offline_sbs::wire::observation_timeline_contract_t {
         .schema = 1,
         .timestamp_unit = "monotonic-source-us-plus-one",
@@ -68,11 +68,10 @@ namespace {
         .content_scale_y = 1.0,
       },
       .adaptive_state = {
-        .transport = "jsonl-v1",
-        .file = "adaptive_state.jsonl",
-        .retained_history = true,
-        .schema = 1,
-        .capture = "depth-health-state",
+        .transport = offline_sbs::completion_channel_t::name,
+        .retained_history = false,
+        .schema = sbs_adaptive_state::schema_version,
+        .capture = std::string {sbs_adaptive_state::capture},
         .frame_count = 2,
       },
       .sbs = {
@@ -83,6 +82,28 @@ namespace {
         .row_order = "top-down",
       },
     };
+    contract.artifact_mode = conversion ? "conversion" : "adaptive";
+    auto &runtime = contract.resolved_runtime;
+    runtime.frame_transport = offline_sbs::raw_frame_transport::name;
+    runtime.input_frame_format = "sRGB-BGRA8-raw";
+    runtime.output_frame_format = "sRGB-BGRA8-raw";
+    runtime.output_ffmpeg_pixel_format = "bgra";
+    runtime.follow_mode = true;
+    runtime.follow_format = "bgra8";
+    runtime.follow_count_bound = 2;
+    runtime.follow_producer_frame_count = 2;
+    runtime.follow_first_sequence = 1;
+    runtime.follow_poll_interval_ms = 0;
+    runtime.follow_atomic_sbs_publication = conversion;
+    auto &sbs = contract.sbs;
+    sbs.enabled = conversion;
+    sbs.frame_count = conversion ? 2u : 0u;
+    sbs.width = conversion ? 3840u : 0u;
+    sbs.height = conversion ? 1080u : 0u;
+    sbs.frame_format = "bgra8";
+    sbs.ffmpeg_pixel_format = "bgra";
+    sbs.atomic_publication = conversion;
+    return contract;
   }
 
   offline_sbs::wire::worker_spec_contract_t worker_spec() {
@@ -104,39 +125,6 @@ namespace {
       .codec = "hevc_nvenc",
       .transient_raster_hard_cap_bytes = 4ull * 1024ull * 1024ull * 1024ull,
     };
-  }
-
-  // The worker's raw-memory transport with its in-memory completion evidence.
-  offline_sbs::wire::whole_clip_contract_t memory_whole_clip(const bool conversion) {
-    auto contract = trace_whole_clip();
-    contract.artifact_mode = conversion ? "conversion" : "adaptive";
-    auto &runtime = contract.resolved_runtime;
-    runtime.frame_transport = offline_sbs::raw_frame_transport::name;
-    runtime.input_frame_format = "sRGB-BGRA8-raw";
-    runtime.output_frame_format = "sRGB-BGRA8-raw";
-    runtime.output_ffmpeg_pixel_format = "bgra";
-    runtime.follow_mode = true;
-    runtime.follow_format = "bgra8";
-    runtime.follow_count_bound = 2;
-    runtime.follow_producer_frame_count = 2;
-    runtime.follow_first_sequence = 1;
-    runtime.follow_poll_interval_ms = 0;
-    runtime.follow_atomic_sbs_publication = conversion;
-    auto &adaptive = contract.adaptive_state;
-    adaptive.transport = offline_sbs::completion_channel_t::name;
-    adaptive.file.reset();
-    adaptive.retained_history = false;
-    adaptive.schema = sbs_adaptive_state::schema_version;
-    adaptive.capture = sbs_adaptive_state::capture;
-    auto &sbs = contract.sbs;
-    sbs.enabled = conversion;
-    sbs.frame_count = conversion ? 2u : 0u;
-    sbs.width = conversion ? 3840u : 0u;
-    sbs.height = conversion ? 1080u : 0u;
-    sbs.frame_format = "bgra8";
-    sbs.ffmpeg_pixel_format = "bgra";
-    sbs.atomic_publication = conversion;
-    return contract;
   }
 
   offline_sbs::wire::worker_result_contract_t worker_result(const bool conversion = true) {
@@ -403,10 +391,6 @@ TEST(OfflineSbsWireContractTest, WorkerResultRejectsCrossContractMismatches) {
       "sRGB-PNG-WIC";
   });
   expect_rejected([](auto &encoded) {
-    // The CLI adaptive trace is a valid contract but never comes from a worker.
-    encoded["analysis_contract"] = offline_sbs::wire::to_json(trace_whole_clip());
-  });
-  expect_rejected([](auto &encoded) {
     encoded["analysis_contract"]["adaptive_state"] = {
       {"transport", "jsonl-v1"},
       {"file", "adaptive_state.jsonl"},
@@ -439,7 +423,7 @@ TEST(OfflineSbsWireContractTest, WorkerResultRejectsCrossContractMismatches) {
 }
 
 TEST(OfflineSbsWireContractTest, WholeClipRoundTripsAndRejectsNestedUnknownField) {
-  const auto encoded = offline_sbs::wire::to_json(trace_whole_clip());
+  const auto encoded = offline_sbs::wire::to_json(memory_whole_clip(false));
   const auto parsed = offline_sbs::wire::parse_whole_clip_contract(encoded);
   EXPECT_EQ(parsed.resolved_runtime.model, parsed.model);
   EXPECT_FALSE(parsed.sbs.enabled);
@@ -590,12 +574,6 @@ TEST(OfflineSbsWireContractTest, MemoryCompletionRejectsUnknownAndFileKeysEvenWh
   }
 }
 
-TEST(OfflineSbsWireContractTest, MemoryCompletionSerializerRejectsContradictoryTypedFilePaths) {
-  auto value = worker_result().analysis_contract;
-  value.adaptive_state.file = "frames.jsonl";
-  EXPECT_THROW(offline_sbs::wire::to_json(value), offline_sbs::wire::contract_error);
-}
-
 TEST(OfflineSbsWireContractTest, MemoryCompletionRequiresNativeRawCausalTransportWithoutFileWakeups) {
   const auto valid = offline_sbs::wire::to_json(worker_result().analysis_contract);
   auto no_raw_transport = valid;
@@ -633,17 +611,6 @@ TEST(OfflineSbsWireContractTest, MemoryCompletionRequiresCurrentGeneratedEvidenc
   }
 }
 
-TEST(OfflineSbsWireContractTest, AdaptiveTraceKeepsItsSchemaAndFile) {
-  const auto jsonl = offline_sbs::wire::to_json(trace_whole_clip());
-  EXPECT_EQ(jsonl.at("adaptive_state").at("schema"), 1);
-  EXPECT_EQ(jsonl.at("adaptive_state").at("capture"), "depth-health-state");
-  EXPECT_EQ(jsonl.at("adaptive_state").at("file"), "adaptive_state.jsonl");
-  EXPECT_EQ(offline_sbs::wire::to_json(offline_sbs::wire::parse_whole_clip_contract(jsonl)), jsonl);
-  auto unknown = jsonl;
-  unknown["adaptive_state"]["header_file"] = "header.json";
-  EXPECT_THROW(offline_sbs::wire::parse_whole_clip_contract(unknown), offline_sbs::wire::contract_error);
-}
-
 TEST(OfflineSbsWireContractTest, PersistedWorkerEvidencePreservesLegacyAndNativeBodiesWithoutRetagging) {
   const nlohmann::json old_result {
     {"schema", 3},
@@ -653,7 +620,10 @@ TEST(OfflineSbsWireContractTest, PersistedWorkerEvidencePreservesLegacyAndNative
   const auto native_result = offline_sbs::wire::to_json(worker_result());
   // A file-transport worker result retained by an earlier release; no current worker emits it.
   auto legacy_file_result = native_result;
-  legacy_file_result["analysis_contract"] = offline_sbs::wire::to_json(trace_whole_clip());
+  legacy_file_result["analysis_contract"]["adaptive_state"] = {
+    {"transport", "jsonl-v1"},
+    {"file", "adaptive_state.jsonl"},
+  };
   for (const auto &body : {old_result, legacy_file_result, native_result}) {
     auto retained = persisted_job();
     retained.snapshot.worker_result = body;
