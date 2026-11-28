@@ -4847,6 +4847,101 @@ TEST(HostSbsV2LiveWarpGpuTest, TextGamePinFollowsTheGlyphsOnlyWhileThePictureSho
   EXPECT_EQ(hidden, render(0u, 0u, grey));
 }
 
+// A game hides its dialogue and leaves the speaker's name: the name is still the helper's text
+// and still on screen, and it must not keep the vanished line pinned over the bare scene.
+TEST(HostSbsV2LiveWarpGpuTest, TextGamePinLetsGoOfALineTheGameHasHiddenBesideOneItStillShows) {
+  constexpr UINT width = 128u, height = 64u, field_width = 24u, field_height = 10u;
+  constexpr rgba16_bits_t grey {0x3400u, 0x3400u, 0x3400u, 0x3c00u}, white {0x3c00u, 0x3c00u, 0x3c00u, 0x3c00u}, black {0u, 0u, 0u, 0x3c00u};
+  constexpr std::uint32_t fill = 0xffffffffu, outline = 0xff000000u;
+  constexpr std::array<UINT, 2u> line_top {24u, 40u};
+  const auto state = make_live_state(true, true);
+  const float scene = -1.25f / width, plane = 2.0f / width;
+  const std::vector<float> base(field_width * field_height, scene);
+  // Two lines of the current text, each a light fill on columns 44..51 inside a dark outline on
+  // columns 40..43 and 52..55: the name on rows 24..27 and the dialogue on rows 40..43.
+  text_game_pin_inputs_t text;
+  text.surface_width = width;
+  text.surface_height = height;
+  text.coverage_bgra.assign(width * height, 0u);
+  for (const UINT top : line_top) {
+    for (UINT y = top; y < top + 4u; ++y) {
+      for (UINT x = 40u; x < 56u; ++x) {
+        text.coverage_bgra[y * width + x] = x >= 44u && x < 52u ? fill : outline;
+      }
+    }
+  }
+  text.constants.inverse_width = 1.0f / width;
+  text.constants.inverse_height = 1.0f / height;
+  text.constants.enabled = 1u;
+  text.constants.plane = plane;
+  text.constants.text_top = 22u;
+  text.constants.text_bottom = 46u;
+  text.constants.front_cap = 0.04f;
+  text.shape = {width, height, 0u, height};
+  selected_warp_inputs_t operands;
+  operands.text_game = &text;
+  std::string error;
+  live_v2_warp_fixture_t fixture;
+  ASSERT_TRUE(fixture.initialize(error)) << error;
+  // For each line, how many of the fill's and the outline's columns the picture shows.
+  struct shown_t {
+    UINT light, dark;
+  };
+  const auto render = [&](const std::array<shown_t, 2u> &lines) {
+    std::vector<rgba16_bits_t> source(width * height, grey);
+    for (std::size_t line = 0u; line < lines.size(); ++line) {
+      for (UINT y = line_top[line]; y < line_top[line] + 4u; ++y) {
+        for (UINT x = 0u; x < lines[line].light; ++x) source[y * width + 44u + x] = white;
+        for (UINT x = 0u; x < lines[line].dark; ++x) source[y * width + (x < 4u ? 40u + x : 48u + x)] = black;
+      }
+    }
+    std::vector<std::byte> output;
+    EXPECT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height, source.data(), base, base,
+      state, {}, output, error, field_width, field_height, {}, nullptr, nullptr, true, &operands)) << error;
+    return output;
+  };
+  const auto expect_line = [&](const std::size_t line, const bool pinned, const char *why) {
+    for (UINT y = line_top[line]; y < line_top[line] + 4u; ++y) {
+      EXPECT_EQ(text.rows[y] != 0u, pinned) << why << " row " << y;
+      for (UINT x = 40u; x < 56u; ++x) {
+        EXPECT_EQ(text.weights[y * width + x], pinned ? 1.0f : 0.0f) << why << ' ' << x << ',' << y;
+        EXPECT_EQ(text.field[y * width + x], pinned ? plane : scene) << why << ' ' << x << ',' << y;
+      }
+    }
+  };
+
+  const auto both = render({{{8u, 8u}, {8u, 8u}}});
+  ASSERT_EQ(text.field.size(), width * height);
+  EXPECT_EQ((std::array {text.verdict[0], text.verdict[1], text.verdict[2], text.verdict[3]}), (std::array {64u, 64u, 64u, 64u}));
+  expect_line(0u, true, "both lines shown");
+  expect_line(1u, true, "both lines shown");
+
+  // The dialogue is gone and the name stays. Half of the text is still on screen, far more than
+  // the sixteenth the whole-text verdict asks for, and yet only the name is pinned.
+  const auto name_only = render({{{8u, 8u}, {0u, 0u}}});
+  EXPECT_EQ((std::array {text.verdict[0], text.verdict[1], text.verdict[2], text.verdict[3]}), (std::array {64u, 32u, 64u, 32u}));
+  EXPECT_EQ(text.rows.back(), 1u);
+  expect_line(0u, true, "the name stays");
+  expect_line(1u, false, "the dialogue has gone");
+  EXPECT_NE(name_only, both);
+
+  // The other way round.
+  (void) render({{{0u, 0u}, {8u, 8u}}});
+  expect_line(0u, false, "the name has gone");
+  expect_line(1u, true, "the dialogue stays");
+
+  // A line being revealed is pinned whole from its first glyphs, as before.
+  (void) render({{{8u, 8u}, {2u, 4u}}});
+  expect_line(0u, true, "the name stays");
+  expect_line(1u, true, "the dialogue is being revealed");
+
+  // Nothing of either line: nothing is pinned.
+  (void) render({{{0u, 0u}, {0u, 0u}}});
+  EXPECT_EQ(text.rows.back(), 0u);
+  expect_line(0u, false, "all hidden");
+  expect_line(1u, false, "all hidden");
+}
+
 TEST(HostSbsV2LiveWarpGpuTest, TextGamePinComparesAnHdrCaptureAtTheDesktopsSdrWhite) {
   constexpr UINT width = 128u, height = 64u, field_width = 24u, field_height = 10u;
   // An HDR capture of a desktop whose SDR white is 480 nits, 6.0 in scRGB: the game's mid-grey

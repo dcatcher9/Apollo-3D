@@ -87,6 +87,14 @@ RWStructuredBuffer<uint> TextGameVerdictStore : register(u3);
 // for each of the policy's five plane levels how many of those have scene in front of it. The
 // scene is the field before any pinning, so the plane never measures its own correction.
 static const uint TextGameVerdictWords = 4u + 256u * 6u;
+// The game hides one line and leaves another: a name stays while the words under it go. Judged as
+// one, the text still shown would vouch for the line that is gone, and its rows would stay pinned
+// over the bare scene. So each line also answers for itself. The observation keeps one record for
+// each row of the band: its glyph texels (coverage of a half or more), its cores and shown cores
+// of each kind as the verdict counts them for the whole text, and the row's answer.
+static const uint TextGameRowWords = 6u;
+static const uint TextGameRowLimit = 4096u;
+RWStructuredBuffer<uint> TextGameRowStore : register(u4);
 static const float TextGamePlaneLevels[5] = {0.0f, 0.001f, 0.002f, 0.003f, 0.0035f};
 float SharedOriginalParallax(float2 uv, uint eye);
 [numthreads(16,16,1)]
@@ -100,6 +108,9 @@ void text_game_verify_main(uint3 id : SV_DispatchThreadID) {
     if (any(uv < 0.0f) || any(uv >= 1.0f)) return;
     float4 text = TextGameCoverage.SampleLevel(LinearSampler, uv, 0);
     float coverage = text.a;
+    bool row_counted = id.y < TextGameRowLimit;
+    uint row_base = id.y * TextGameRowWords;
+    if (row_counted && coverage >= 0.5f) InterlockedAdd(TextGameRowStore[row_base], 1u);
     float cap = TextGameScene.x;
     if (coverage >= 0.125f && isfinite(cap) && cap >= 0.0f) {
         uint2 tile = min(uint2(uv * 16.0f), uint2(15u, 15u));
@@ -117,7 +128,11 @@ void text_game_verify_main(uint3 id : SV_DispatchThreadID) {
     float3 shown = TextGameShownColour(SourceColor.Load(int3(pixel, 0)).rgb);
     uint kind = dot(drawn, float3(0.2126f, 0.7152f, 0.0722f)) >= 0.5f ? 0u : 2u;
     InterlockedAdd(TextGameVerdictStore[kind], 1u);
-    if (all(isfinite(shown)) && all(abs(shown - drawn) <= 0.2f)) InterlockedAdd(TextGameVerdictStore[kind + 1u], 1u);
+    if (row_counted) InterlockedAdd(TextGameRowStore[row_base + 1u + kind], 1u);
+    if (all(isfinite(shown)) && all(abs(shown - drawn) <= 0.2f)) {
+        InterlockedAdd(TextGameVerdictStore[kind + 1u], 1u);
+        if (row_counted) InterlockedAdd(TextGameRowStore[row_base + 2u + kind], 1u);
+    }
 }
 // A kind too rare to judge does not count against the text. Otherwise a sixteenth of it must be
 // on screen: a line being revealed starts with its first glyphs, and all of it is pinned then.
@@ -146,15 +161,55 @@ float TextGameCoverageAt(uint2 pixel) {
     return saturate(TextGameCoverage.SampleLevel(LinearSampler, uv, 0).a);
 }
 static const float TextGameNoGlyph = 1.0e6f;
+// A line is a run of band rows that hold glyph texels. It is judged by the rule the whole text is
+// judged by. A run with too few cores to judge is left to the whole-text verdict, which every
+// pinned texel needs as well.
+groupshared uint TextGameLineBits[TextGameRowLimit / 32u];
+bool TextGameRowVisible(uint row) {
+    return row >= TextGameRowLimit || (TextGameLineBits[row >> 5u] & (1u << (row & 31u))) != 0u;
+}
+void TextGameJudgeLines(bool publish) {
+    uint rows = min(PinSourceShape.w, TextGameRowLimit);
+    [loop] for (uint word = 0u; word < TextGameRowLimit / 32u; ++word) TextGameLineBits[word] = 0u;
+    uint light = 0u, light_shown = 0u, dark = 0u, dark_shown = 0u;
+    [loop] for (uint row = 0u; row < rows; ++row) {
+        uint base = row * TextGameRowWords;
+        if (TextGameRowStore[base] != 0u) {
+            light += TextGameRowStore[base + 1u];
+            light_shown += TextGameRowStore[base + 2u];
+            dark += TextGameRowStore[base + 3u];
+            dark_shown += TextGameRowStore[base + 4u];
+            // The last row of the line carries its answer.
+            if (row + 1u >= rows || TextGameRowStore[base + TextGameRowWords] == 0u) {
+                if (light + dark < 16u || (TextGameKindShown(light, light_shown) && TextGameKindShown(dark, dark_shown)))
+                    TextGameLineBits[row >> 5u] |= 1u << (row & 31u);
+                light = 0u; light_shown = 0u; dark = 0u; dark_shown = 0u;
+            }
+        }
+    }
+    // Every other row of the line takes the answer of the row below it.
+    [loop] for (uint back = rows; back > 0u; --back) {
+        uint at = back - 1u;
+        uint base = at * TextGameRowWords;
+        bool glyphs = TextGameRowStore[base] != 0u;
+        if (glyphs && back < rows && TextGameRowStore[base + TextGameRowWords] != 0u && TextGameRowVisible(back))
+            TextGameLineBits[at >> 5u] |= 1u << (at & 31u);
+        if (publish) TextGameRowStore[base + 5u] = glyphs && TextGameRowVisible(at) ? 1u : 0u;
+    }
+}
 // One thread walks one column of the pinned rows down and back up, and leaves in the field plane
 // the number of rows from each texel to the nearest glyph texel of its column, once in each eye's
 // rows. The initializer reads its own texel's distance and replaces it with that eye's field.
+// Each group judges the lines for its own columns; the first also leaves the rows' answers in the
+// record for the initializer.
 [numthreads(64,1,1)]
-void text_game_columns_main(uint3 id : SV_DispatchThreadID) {
+void text_game_columns_main(uint3 id : SV_DispatchThreadID, uint3 lane : SV_GroupThreadID, uint3 group : SV_GroupID) {
+    if (lane.x == 0u) TextGameJudgeLines(group.x == 0u);
+    GroupMemoryBarrierWithGroupSync();
     if (id.x >= PinSourceShape.x) return;
     float distance = TextGameNoGlyph;
     [loop] for (uint row = 0u; row < PinSourceShape.w; ++row) {
-        bool glyph = TextGameCoverageAt(uint2(id.x, row + PinSourceShape.z)) >= 0.5f;
+        bool glyph = TextGameRowVisible(row) && TextGameCoverageAt(uint2(id.x, row + PinSourceShape.z)) >= 0.5f;
         distance = glyph ? 0.0f : min(distance + 1.0f, TextGameNoGlyph);
         SunshineHostFinalStore[uint2(id.x, row)] = distance;
         SunshineHostFinalStore[uint2(id.x, row + PinSourceShape.w)] = distance;
@@ -266,7 +321,9 @@ void initialize_main(uint3 id : SV_DispatchThreadID, uint3 lane : SV_GroupThread
         // A glyph texel carries its coverage, as a UI texel carries its alpha. A texel the column
         // rule moved lies exactly on its bound; the faintest weight makes that bound its slack, so
         // the pin pass carries it along the row and no texel beside it can jump past it.
-        weight = TextGameCoverageAt(pixel);
+        // Only a line the picture shows is pinned; see TextGameJudgeLines.
+        bool line_shown = band_row >= TextGameRowLimit || TextGameRowStore[band_row * TextGameRowWords + 5u] != 0u;
+        weight = line_shown ? TextGameCoverageAt(pixel) : 0.0f;
         if (weight <= 0.0f && asuint(bounded) != asuint(original)) weight = 1.0f / 1024.0f;
     }
     SunshineHostFinalStore[id.xy] = bounded;

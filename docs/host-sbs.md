@@ -564,6 +564,13 @@ picture shows within 0.2 of the drawn colour as display code values; an HDR capt
 divided by the desktop's SDR white. The text counts as shown when there are at least 16 cores and
 a sixteenth of each kind that has at least 16 is shown, so text the game has drawn but not yet
 revealed, or has hidden, does not, and neither a bright nor a dark scene alone passes for text.
+Each line of the text also answers for itself. The same pass keeps the counts row by row, a line
+is a run of band rows that hold glyph texels, and `text_game_columns_main` judges each line by
+that same rule; a line with fewer than 16 cores is left to the whole-text answer. A pinned texel
+needs both answers. A game that hides its dialogue and leaves the speaker's name therefore lets
+go of the dialogue's rows: judged as one, the name would vouch for the line that is gone and
+leave its rows pinned over the bare scene. A line being revealed is still pinned whole from its
+first glyphs.
 The same pass counts, per tile of a 16-by-16 grid of the game's picture, the glyph texels and
 those with scene in front of each plane level. The host reads these words back without waiting.
 They feed the plane policy, and they select the route of the following draws. A draw on the

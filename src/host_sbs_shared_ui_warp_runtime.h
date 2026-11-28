@@ -48,6 +48,8 @@ namespace models::host_sbs_shared_ui_warp {
   /// Verdict words: light glyph cores and those shown, dark ones and those shown, then
   /// {covered, conflicts at five levels} a tile.
   inline constexpr std::size_t text_game_verdict_words = 4u + 256u * 6u;
+  // The shader's TextGameRowWords and TextGameRowLimit: one record for each row of the band.
+  inline constexpr std::size_t text_game_row_words = 6u, text_game_row_limit = 4096u;
   static_assert(sizeof(text_game_constants_t) == 48u);
 
   // Preparation only creates device objects from one immutable authenticated source snapshot.
@@ -279,6 +281,9 @@ namespace models::host_sbs_shared_ui_warp {
     ComPtr<ID3D11Buffer> verdict_;
     ComPtr<ID3D11ShaderResourceView> verdict_srv_;
     ComPtr<ID3D11UnorderedAccessView> verdict_uav_;
+    // Text-game route only: the same observation row by row, from which each line is judged.
+    ComPtr<ID3D11Buffer> line_rows_;
+    ComPtr<ID3D11UnorderedAccessView> line_rows_uav_;
     ComPtr<ID3D11Buffer> preparation_;
     ComPtr<ID3D11ShaderResourceView> preparation_srv_;
     ComPtr<ID3D11UnorderedAccessView> preparation_uav_;
@@ -324,9 +329,9 @@ namespace models::host_sbs_shared_ui_warp {
 
     static void unbind_compute_resources(ID3D11DeviceContext *context) {
       ID3D11ShaderResourceView *srvs[compute_srv_count] {};
-      ID3D11UnorderedAccessView *uavs[4] {};
+      ID3D11UnorderedAccessView *uavs[5] {};
       context->CSSetShaderResources(0u, compute_srv_count, srvs);
-      context->CSSetUnorderedAccessViews(0u, 4u, uavs, nullptr);
+      context->CSSetUnorderedAccessViews(0u, 5u, uavs, nullptr);
     }
 
     // The pin planes are reserved PS12..14 outputs. Preparation unbinds them before writes.
@@ -349,14 +354,22 @@ namespace models::host_sbs_shared_ui_warp {
     }
 
     bool create_verdict() {
-      if (verdict_uav_) return true;
+      if (verdict_uav_ && line_rows_uav_) return true;
       D3D11_BUFFER_DESC desc {};
       desc.ByteWidth = static_cast<UINT>(text_game_verdict_words * 4u); desc.Usage = D3D11_USAGE_DEFAULT; desc.StructureByteStride = 4u;
       desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
       desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-      return SUCCEEDED(device_->CreateBuffer(&desc, nullptr, &verdict_)) &&
-             SUCCEEDED(device_->CreateShaderResourceView(verdict_.Get(), nullptr, &verdict_srv_)) &&
-             SUCCEEDED(device_->CreateUnorderedAccessView(verdict_.Get(), nullptr, &verdict_uav_));
+      if (!verdict_uav_ &&
+          (FAILED(device_->CreateBuffer(&desc, nullptr, verdict_.ReleaseAndGetAddressOf())) ||
+           FAILED(device_->CreateShaderResourceView(verdict_.Get(), nullptr, verdict_srv_.ReleaseAndGetAddressOf())) ||
+           FAILED(device_->CreateUnorderedAccessView(verdict_.Get(), nullptr, verdict_uav_.ReleaseAndGetAddressOf())))) {
+        verdict_uav_.Reset();
+        return false;
+      }
+      desc.ByteWidth = static_cast<UINT>(text_game_row_words * text_game_row_limit * 4u);
+      desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+      return SUCCEEDED(device_->CreateBuffer(&desc, nullptr, line_rows_.ReleaseAndGetAddressOf())) &&
+             SUCCEEDED(device_->CreateUnorderedAccessView(line_rows_.Get(), nullptr, line_rows_uav_.ReleaseAndGetAddressOf()));
     }
 
     bool create_preparation() {
@@ -546,8 +559,11 @@ namespace models::host_sbs_shared_ui_warp {
         // A fresh observation for this draw: whether the picture shows the text, and the scene
         // under it for the plane.
         context->ClearUnorderedAccessViewUint(verdict_uav_.Get(), clear);
-        auto *verdict = verdict_uav_.Get();
-        context->CSSetUnorderedAccessViews(3u, 1u, &verdict, nullptr);
+        context->ClearUnorderedAccessViewUint(line_rows_uav_.Get(), clear);
+        // The rows' record stays bound for the column pass, which judges each line from it, and
+        // for the initializer, which reads the rows' answers.
+        ID3D11UnorderedAccessView *observation[2] {verdict_uav_.Get(), line_rows_uav_.Get()};
+        context->CSSetUnorderedAccessViews(3u, 2u, observation, nullptr);
         context->CSSetShader(program.text_game_verify, nullptr, 0u);
         context->Dispatch((shape_[0] + 15u) / 16u, (shape_[3] + 15u) / 16u, 1u);
         context->CSSetUnorderedAccessViews(3u, 1u, &null_view, nullptr);
