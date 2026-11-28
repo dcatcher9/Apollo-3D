@@ -199,8 +199,16 @@ void confirm_history(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
         if (carry_line) {
             record.state.z=LineCarried|(old.state.z&LineAsked);
             record.state.w=old.state.w;
+        } else {
+            // Why the line is scored, for the scheduler's diagnostics; confirm_mask_history
+            // replaces these bits with the line's temporal state.
+            uint why=LineDiffers!=0u ? 6u : 5u;
+            if ((SourceFlags&1u)==0u || HasPrevious==0u) why=2u;
+            else if (record.state.x==0u) why=3u;
+            else if ((record.state.w!=0u)!=((old.state.z&LineAsked)!=0u) || old.state.w==NoGlyphInk) why=4u;
+            record.state.z=why<<8u;
         }
-        if (carry_box || carry_line) Lines[slot]=record;
+        Lines[slot]=record;
     }
 }
 
@@ -220,8 +228,11 @@ void finish_windows() {
         record.box.w = record.cover.w;
         uint2 size=record.box.zw-record.box.xy;
         Sizes[slot]=size;
-        // The second word tells the scheduler that the line is carried over and needs no tiles.
-        Sizes[9u + slot] = uint2(reference_height, (record.state.z & LineCarried) != 0u ? 1u : 0u);
+        // The second word tells the scheduler that the line is carried over and needs no tiles
+        // (1), or else why it is scored: no usable history (2), no single earlier line (3), a
+        // different glyph-confirmation request or a rejected earlier line (4), different
+        // rectangles (5), different source values (6).
+        Sizes[9u + slot] = uint2(reference_height, (record.state.z & LineCarried) != 0u ? 1u : record.state.z >> 8u);
         if (all(size>0)) {
             record.state.y=offset;
             Lines[slot]=record;

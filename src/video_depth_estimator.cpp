@@ -4078,6 +4078,15 @@ namespace models {
         const auto lines = subtitle_direct_glyph.planned_lines();
         sbs_perf::add_sample_ms("direct_glyph_lines_scored", static_cast<double>(lines.scored));
         sbs_perf::add_sample_ms("direct_glyph_lines_carried", static_cast<double>(lines.carried));
+        // Why lines were scored: no history, no single earlier line, another request, moved
+        // rectangles, changed source values.
+        static constexpr std::array why_names {
+          "direct_glyph_scored_no_history", "direct_glyph_scored_unmatched", "direct_glyph_scored_request",
+          "direct_glyph_scored_moved", "direct_glyph_scored_changed"
+        };
+        for (std::size_t why = 0; why < why_names.size(); ++why) {
+          sbs_perf::add_sample_ms(why_names[why], static_cast<double>(lines.scored_why[why]));
+        }
       }
       if (retirement.selected_matte_commands) {
         subtitle_selected_matte_commands = *retirement.selected_matte_commands;

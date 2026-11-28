@@ -216,7 +216,7 @@ namespace models::host_sbs_direct_glyph_gpu {
       // A line the plan carries over from the previous observation: its rectangles and pixels are
       // the same, so it is published from the previous opacity and never scored.
       bool line_carried(UINT slot) const {
-        return plan_.lines[slot][0] != 0u && plan_.reference[slot][1] != 0u;
+        return plan_.lines[slot][0] != 0u && plan_.reference[slot][1] == 1u;
       }
 
       UINT line_tiles(UINT slot) const {
@@ -659,7 +659,7 @@ namespace models::host_sbs_direct_glyph_gpu {
           }
           ensure(next().opacity, pixels, 2 * sizeof(float));
           has_lines_ = true;
-          lines_.scored = lines_.carried = 0u;
+          lines_ = {};
           const palette_state_t saved(ctx_.Get());
           for (UINT slot = 0; slot < plan_.lines.size(); ++slot) {
             if (line_carried(slot)) {
@@ -667,6 +667,10 @@ namespace models::host_sbs_direct_glyph_gpu {
               ++lines_.carried;
             } else if (plan_.lines[slot][0] != 0u) {
               ++lines_.scored;
+              const UINT why = plan_.reference[slot][1];
+              if (why >= 2u && why < 2u + lines_.scored_why.size()) {
+                ++lines_.scored_why[why - 2u];
+              }
             }
           }
           slot_ = 0;

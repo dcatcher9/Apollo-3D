@@ -2916,6 +2916,7 @@ TEST(DirectGlyphHardware, ScoresTheLinesThatFitOneBatchUnderOneFence) {
     ASSERT_NO_FATAL_FAILURE(score(menu, fresh));
     EXPECT_EQ(transport.planned_lines().scored, 8u);
     EXPECT_EQ(transport.planned_lines().carried, 0u) << "an observation without history scores every line";
+    EXPECT_EQ(transport.planned_lines().scored_why, (std::array {8u, 0u, 0u, 0u, 0u}));
     job.reset_history = false;
     ASSERT_NO_FATAL_FAILURE(score(menu, again));
     EXPECT_EQ(transport.planned_lines().scored, 0u);
@@ -2931,6 +2932,7 @@ TEST(DirectGlyphHardware, ScoresTheLinesThatFitOneBatchUnderOneFence) {
     ASSERT_NO_FATAL_FAILURE(score(menu, edited));
     EXPECT_EQ(transport.planned_lines().scored, 1u);
     EXPECT_EQ(transport.planned_lines().carried, 7u);
+    EXPECT_EQ(transport.planned_lines().scored_why, (std::array {0u, 0u, 0u, 0u, 1u})) << "its source values changed";
     for (const auto &line : menu) {
       if (line.left == lines[1].left && line.top == lines[1].top) continue;
       for (UINT y = line.top - 8u; y < line.top + 7u * scale + 8u; ++y) {

@@ -101,6 +101,10 @@ namespace models::host_sbs_direct_glyph_gpu {
   struct line_counts_t {
     unsigned scored = 0;
     unsigned carried = 0;
+    // Of the scored lines: those without usable history, those that continue no single earlier
+    // line, those whose glyph-confirmation request differs or whose earlier line was rejected,
+    // those whose rectangles moved, and those whose source values changed.
+    std::array<unsigned, 5> scored_why {};
   };
 
   // Serialized by the caller's immediate context. It owns publication and gives each

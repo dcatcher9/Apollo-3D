@@ -542,7 +542,9 @@ those values, and the blend adds nothing where nothing differs. A line the palet
 never continued, so it is always scored. A still screen of text therefore costs the plan and
 the finish and no encoder batch; one changed value in a line scores that line again. The
 diagnostic samples `direct_glyph_lines_scored` and `direct_glyph_lines_carried` count the lines
-of each score, as numbers and not as times.
+of each score, as numbers and not as times. Five more say why lines were scored:
+`direct_glyph_scored_no_history`, `_unmatched` (the line continues no single earlier line),
+`_request`, `_moved` (its rectangles differ) and `_changed` (its source values differ).
 
 An estimator reserves one observation until its GPU work completes. It polls a D3D
 fence without waiting. The render thread signals each submission. The teardown worker
