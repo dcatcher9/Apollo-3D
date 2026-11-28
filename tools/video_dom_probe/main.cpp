@@ -611,6 +611,10 @@ namespace {
     queue.push_back({com_ptr_t<IAccessible> {root_raw}, 0, std::nullopt});
     std::unordered_set<std::uintptr_t> visited;
     visited.reserve(4096);
+    // A node met again when its parent's children are read again does not always come back as the
+    // object it was, so its own identifier is what says it has been visited.
+    std::unordered_set<LONG> visited_ids;
+    visited_ids.reserve(4096);
     std::vector<com_ptr_t<IUnknown>> retained_identities;
     retained_identities.reserve(4096);
     std::vector<com_ptr_t<IAccessible>> retained_documents;
@@ -632,6 +636,7 @@ namespace {
       // What this visit has recorded so far, so that a node found to have left the tree is
       // taken out of the census again.
       std::optional<std::uintptr_t> identity;
+      std::optional<LONG> counted_id;
       bool counted_ia2 = false;
       bool counted_document = false;
       bool counted_tagged = false;
@@ -688,6 +693,9 @@ namespace {
           visited.erase(*identity);
           --result.visited_nodes;
         }
+        if (counted_id) {
+          visited_ids.erase(*counted_id);
+        }
         result.ia2_nodes -= counted_ia2 ? 1u : 0u;
         result.tagged_nodes -= counted_tagged ? 1u : 0u;
         if (counted_document) {
@@ -726,6 +734,13 @@ namespace {
             (void) left_the_tree(__LINE__, E_FAIL);
             continue;
           }
+          if (!visited_ids.insert(unique_id_before).second) {
+            // Visited as another object: its children were read then.
+            --result.visited_nodes;
+            --result.ia2_nodes;
+            continue;
+          }
+          counted_id = unique_id_before;
           if (role == ROLE_SYSTEM_DOCUMENT) {
             const auto state = accessible_state(node.accessible.get());
             const auto document_rect = accessible_rect(node.accessible.get());
@@ -899,11 +914,14 @@ namespace {
       // The walk is not one moment: a video element the page replaced during it was met twice,
       // as the node it was and as the node it is. A candidate that no longer answers as itself
       // has left the tree, and is not a second video.
-      result.vanished_nodes += std::erase_if(result.candidates, [](const observed_candidate_t &candidate) {
+      std::unordered_set<LONG> confirmed;
+      result.vanished_nodes += std::erase_if(result.candidates, [&](const observed_candidate_t &candidate) {
         auto ia2_query = query_ia2(candidate.accessible.get());
         LONG unique_id = 0;
         return ia2_query.status != S_OK || !ia2_query.object ||
-               ia2_query.object->get_uniqueID(&unique_id) != S_OK || unique_id != candidate.geometry.unique_id;
+               ia2_query.object->get_uniqueID(&unique_id) != S_OK || unique_id != candidate.geometry.unique_id ||
+               // One element is one video, however often the walk met it.
+               !confirmed.insert(unique_id).second;
       });
     }
     if (std::chrono::steady_clock::now() - started >= maximum_scan_work_time) {

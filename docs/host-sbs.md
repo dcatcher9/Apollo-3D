@@ -2665,9 +2665,11 @@ older reading of its parent listed, or whose parent is already queued to be read
 dropped without another reading. A parent's children are read again at most four times and a
 census does so at most 256 times; past that the step is the error that leaves the census
 incomplete, so a node that is still listed and still answers nothing fails closed as before.
-At the end of the walk every video candidate must still answer under its own identity: an
-element the page replaced during the walk was met twice, and the one that has left the tree is
-not a second video. `video-dom-info
+A node is visited once by its own IAccessible2 identifier as well as by its object: read again
+from its parent, a node does not always come back as the object it was.
+At the end of the walk every video candidate must still answer under its own identity, and one
+identifier is one video: an element the page replaced during the walk was met twice, and the one
+that has left the tree is not a second video. `video-dom-info
 --machine --trace` writes one line per census to stderr: how it ended, how many nodes had left
 the tree, and the source line and parent of each step that failed.
 Heartbeats have no separate timer thread: a blocked accessibility call still stops them and remains
