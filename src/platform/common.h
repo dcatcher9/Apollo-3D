@@ -471,6 +471,28 @@ namespace platf {
       return false;
     }
 
+    /** Lets work that the last conversion left pending go on until `deadline`, on the encode
+     * thread, between that conversion and the next.
+     *
+     * A converter whose asynchronous work advances only when it is polled would otherwise leave
+     * that work standing until the next capture arrives. The call draws and encodes nothing and
+     * hands no result to anyone: the next conversion finds the work further along. It may block
+     * until `deadline`, so the caller passes the moment by which it expects the next capture.
+     * Returns true when that work is finished and a conversion of the retained source would now
+     * deliver its picture without waiting.
+     */
+    virtual bool advance_pending_conversion(std::chrono::steady_clock::time_point deadline) {
+      return false;
+    }
+
+    /** True when the most recent convert() drew the previous picture again because the picture
+     * of its own capture is still being made. That earlier picture has already been encoded, and
+     * the pending one follows, so the encode loop sends nothing for this conversion.
+     */
+    virtual bool conversion_repeats_pending_picture() const {
+      return false;
+    }
+
     /** Install the encode loop's wake for converters with an independent external source.
      *
      * The converter may call `wake` from any thread when that source finishes a frame. The owner

@@ -6029,7 +6029,8 @@ namespace models {
     completed_depth_metadata_t complete_ready_pending(
       d3d_perf_slot *d3d_timer,
       const bool request_snapshot,
-      const subtitle_direct_glyph_wait_t glyph_wait_until = std::nullopt
+      const subtitle_direct_glyph_wait_t glyph_wait_until = std::nullopt,
+      const bool advance_only = false
     ) {
       const bool snapshot_requested = subtitle_direct_glyph_tail ? subtitle_direct_glyph_tail->snapshot_requested : request_snapshot;
       bool input_domain_reset;
@@ -6045,19 +6046,31 @@ namespace models {
         }
         if (subtitle_direct_glyph_requested) dispatch_subtitle_direct_glyph(input_domain_reset);
       }
+      if (advance_only) {
+        // Between two conversions: the postprocess is done and the score goes as far as the GPU
+        // takes it by then. The completion itself stays here for the next conversion's poll,
+        // which alone may hand it to the converter.
+        if (subtitle_direct_glyph_requested && glyph_wait_until) {
+          (void) subtitle_direct_glyph.advance(*glyph_wait_until);
+        }
+        subtitle_direct_glyph_tail.emplace(subtitle_direct_glyph_tail_t {input_domain_reset, snapshot_requested});
+        mark_d3d_post_end(d3d_timer);
+        return {};
+      }
       if (subtitle_direct_glyph_requested) {
         if (!retire_subtitle_direct_glyph(glyph_wait_until)) {
           subtitle_direct_glyph_tail.emplace(subtitle_direct_glyph_tail_t {input_domain_reset, snapshot_requested});
           mark_d3d_post_end(d3d_timer);
           return {};
         }
-        subtitle_direct_glyph_tail.reset();
         if (subtitle_selected_matte_commands) {
           const auto selected = subtitle_direct_glyph.views();
           completed_contour.subtitle_selected_matte = selected.matte;
           completed_contour.subtitle_selected_matte_receipt = selected.receipt;
         }
       }
+      // The postprocess of this observation is consumed below, with or without a score.
+      subtitle_direct_glyph_tail.reset();
 
       dispatch_pending_gpu_completion_trace();
       snapshot_pending_publication_receipt();
@@ -6102,7 +6115,8 @@ namespace models {
       input_color_space color_space,
       const bool snapshot_debug_inputs = false,
       const bool root_completion_proven = false,
-      const subtitle_direct_glyph_wait_t live_glyph_wait_until = std::nullopt
+      const subtitle_direct_glyph_wait_t live_glyph_wait_until = std::nullopt,
+      const bool advance_only = false
     ) {
       // A caller may first prove nonblocking readiness with can_accept(). Consuming instead of
       // enqueueing must retire that admission token so a later estimate cannot skip its own query.
@@ -6149,7 +6163,8 @@ namespace models {
         d3d_timer,
         snapshot_debug_inputs && !gpu_undecided_postprocess_pending(),
         root_completion_proven ? live_glyph_wait_until :
-                                 subtitle_direct_glyph_wait_t {std::chrono::steady_clock::time_point::max()}
+                                 subtitle_direct_glyph_wait_t {std::chrono::steady_clock::time_point::max()},
+        advance_only
       );
       mark_d3d_pre_start(d3d_timer);
       end_d3d_perf(d3d_timer);
@@ -6163,7 +6178,8 @@ namespace models {
       const std::chrono::steady_clock::time_point deadline,
       const std::uint32_t max_queries,
       const bool allow_completion_notification,
-      const pending_depth_source_access_t source_access
+      const pending_depth_source_access_t source_access,
+      const bool advance_only = false
     ) {
       readiness_preflighted = false;
       auto &cuda = cuda_driver_api::get();
@@ -6284,7 +6300,8 @@ namespace models {
         color_space,
         snapshot_debug_inputs,
         true,
-        glyph_wait_allowed ? subtitle_direct_glyph_wait_t {deadline} : std::nullopt
+        glyph_wait_allowed ? subtitle_direct_glyph_wait_t {deadline} : std::nullopt,
+        advance_only
       );
       polled.ready = !subtitle_direct_glyph_tail || is_terminal();
       if (subtitle_direct_glyph_waited) {
@@ -6311,6 +6328,27 @@ namespace models {
         false,
         source_access
       );
+    }
+
+    // The postprocess of the pending observation is done and its score has no step left: the
+    // next poll hands the completion over without waiting.
+    [[nodiscard]] bool pending_advanced() const {
+      return pending_root && subtitle_direct_glyph_tail &&
+             (!subtitle_direct_glyph_requested || subtitle_direct_glyph.settled());
+    }
+
+    bool advance_pending_until(
+      const std::chrono::steady_clock::time_point deadline,
+      const std::uint32_t max_queries,
+      const pending_depth_source_access_t source_access
+    ) {
+      if (!pending_root || is_terminal()) {
+        return false;
+      }
+      if (!pending_advanced()) {
+        (void) try_finish_pending(pending_root->color_space, false, true, deadline, max_queries, true, source_access, true);
+      }
+      return pending_advanced() && !is_terminal();
     }
 
     pending_depth_poll_result try_finish_pending_until(
@@ -8119,6 +8157,14 @@ namespace models {
                       source_access
                    ) :
                    pending_depth_poll_result {.ready = true};
+  }
+
+  bool video_depth_estimator::advance_pending_depth_until(
+    const std::chrono::steady_clock::time_point deadline,
+    const std::uint32_t max_queries,
+    const pending_depth_source_access_t source_access
+  ) {
+    return pimpl && pimpl->advance_pending_until(deadline, max_queries, source_access);
   }
 
   void video_depth_estimator::poll_gpu_completion() {

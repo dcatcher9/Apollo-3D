@@ -635,11 +635,22 @@ namespace {
       }
     );
     ASSERT_NE(fallback_delivery, observed.deliveries.end());
-    EXPECT_TRUE(std::any_of(received.begin(), received.end(), [&](const auto &packet) {
-      const auto expected = held.flat ? observed.held_source.load() : first_ticks;
-      return fallback_delivery->owns_packet(*packet) && packet->content_timestamp &&
-             packet->content_timestamp->time_since_epoch().count() == expected;
-    })) << "The held B delivery must publish the selected fallback as an actual native packet.";
+    if (held.repeat) {
+      // A again while B is being made is not sent a second time: A's own packet went out, and
+      // B follows as soon as it is ready.
+      EXPECT_TRUE(std::any_of(received.begin(), received.end(), [&](const auto &packet) {
+        return packet->content_timestamp && packet->content_timestamp->time_since_epoch().count() == first_ticks;
+      })) << "The picture the held B delivery repeats must have been published.";
+      EXPECT_FALSE(std::any_of(received.begin(), received.end(), [&](const auto &packet) {
+        return fallback_delivery->owns_packet(*packet);
+      })) << "A repeat of A while B is pending must not be encoded again.";
+    } else {
+      EXPECT_TRUE(std::any_of(received.begin(), received.end(), [&](const auto &packet) {
+        const auto expected = held.flat ? observed.held_source.load() : first_ticks;
+        return fallback_delivery->owns_packet(*packet) && packet->content_timestamp &&
+               packet->content_timestamp->time_since_epoch().count() == expected;
+      })) << "The held B delivery must publish the selected fallback as an actual native packet.";
+    }
     std::uint64_t watermark = 0;
     for (const auto &event : observed.events) {
       if (event.kind == probe::event_e::convert_end || event.kind == probe::event_e::packed_repeat) {

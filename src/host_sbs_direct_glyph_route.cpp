@@ -125,6 +125,7 @@ namespace models::host_sbs_direct_glyph_route {
       const auto status = score_.try_submit(score, error);
       if (status == glyph::submit_status_e::accepted) {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds {250};
+        settled_.reset();
         job_.emplace(job_t {publication, score, deadline});
         return std::nullopt;
       }
@@ -134,29 +135,53 @@ namespace models::host_sbs_direct_glyph_route {
     return publication_.publish_direct(context, publication, nullptr);
   }
 
-  retirement_t route_t::retire(ID3D11DeviceContext *context, const std::optional<std::chrono::steady_clock::time_point> wait_until) {
-    if (!job_) return {};
+  bool route_t::work_score(const std::optional<std::chrono::steady_clock::time_point> wait_until) {
     namespace glyph = host_sbs_direct_glyph_gpu;
+    if (settled_) return false;
     auto &job = *job_;
-    std::string error;
-    glyph::result_t result;
-    auto status = score_.poll(&job.score, result, error);
+    settled_t polled;
+    polled.status = score_.poll(&job.score, polled.result, polled.error);
     bool waited = false;
-    if (wait_until && status == glyph::poll_status_e::pending) {
+    if (wait_until && polled.status == glyph::poll_status_e::pending) {
       // A score takes two GPU steps or more, each queued by the poll that finds the one before
       // it finished. Within the caller's budget the steps follow one another here, at the pace
       // of the GPU, and not one to a conversion. Past that budget the observation stays
       // reserved and a later call goes on from the step it has reached.
       const auto limit = std::min(*wait_until, job.deadline);
-      while (status == glyph::poll_status_e::pending && std::chrono::steady_clock::now() < limit) {
+      while (polled.status == glyph::poll_status_e::pending && std::chrono::steady_clock::now() < limit) {
         waited = true;
         score_.wait_until(limit);
-        status = score_.poll(&job.score, result, error);
-        if (status == glyph::poll_status_e::pending) {
+        polled.status = score_.poll(&job.score, polled.result, polled.error);
+        if (polled.status == glyph::poll_status_e::pending) {
           // A finished step whose readback is not yet mapped has no fence left to wait for.
           std::this_thread::yield();
         }
       }
+    }
+    // The transport hands a finished score out once. Keep it for the call that publishes it.
+    if (polled.status != glyph::poll_status_e::pending) settled_.emplace(std::move(polled));
+    return waited;
+  }
+
+  bool route_t::advance(const std::chrono::steady_clock::time_point wait_until) {
+    if (!job_) return true;
+    (void) work_score(wait_until);
+    return settled_.has_value();
+  }
+
+  retirement_t route_t::retire(ID3D11DeviceContext *context, const std::optional<std::chrono::steady_clock::time_point> wait_until) {
+    if (!job_) return {};
+    namespace glyph = host_sbs_direct_glyph_gpu;
+    auto &job = *job_;
+    const bool waited = work_score(wait_until);
+    std::string error;
+    glyph::result_t result;
+    auto status = glyph::poll_status_e::pending;
+    if (settled_) {
+      status = settled_->status;
+      result = std::move(settled_->result);
+      error = std::move(settled_->error);
+      settled_.reset();
     }
     if (status == glyph::poll_status_e::pending) {
       if (std::chrono::steady_clock::now() < job.deadline) return {.retired = false, .waited = waited};
@@ -183,6 +208,7 @@ namespace models::host_sbs_direct_glyph_route {
 
   void route_t::release() noexcept {
     if (!execution_) return;
+    settled_.reset();
     host_sbs_direct_glyph_gpu::result_t discarded;
     std::string error;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds {250};

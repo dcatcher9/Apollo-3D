@@ -405,6 +405,14 @@ namespace video {
     return device->needs_conversion_poll();
   }
 
+  bool nvenc_encode_session_t::advance_pending_conversion(const std::chrono::steady_clock::time_point deadline) {
+    return device->advance_pending_conversion(deadline);
+  }
+
+  bool nvenc_encode_session_t::conversion_repeats_pending_picture() const {
+    return device->conversion_repeats_pending_picture();
+  }
+
   void nvenc_encode_session_t::set_external_frame_wake(std::function<void()> wake) {
     device->set_external_frame_wake(std::move(wake));
   }
@@ -1740,6 +1748,9 @@ namespace video {
     auto next_mouse_keys_refresh = std::chrono::steady_clock::now() + 1s;
     bool missing_frame_timestamp_warning_logged = false;
     bool first_encoder_output = true;
+    // The presentation time of the last conversion: one frame interval later the next capture
+    // of a source at the stream's rate is due.
+    std::optional<std::chrono::steady_clock::time_point> last_delivery_timestamp;
     detail::optional_frame_time_point_t processing_started;
     // Used by the encode thread with one picture at a time, else only by the retrieving thread.
     encoded_queue_drop_report_t drop_report;
@@ -2078,6 +2089,7 @@ namespace video {
         }
         finish_conversion();
         frame_timestamp = presentation_timestamp;
+        last_delivery_timestamp = presentation_timestamp;
         if (next_encode_target) {
           encode_frame_timestamp = *next_encode_target;
         }
@@ -2095,6 +2107,17 @@ namespace video {
       // serviced at the requested cadence instead of waiting for that slower heartbeat.
       // While the black startup input is held, even a recovery request waits for capture first.
       const bool hold_startup_input = startup_input_hold.active(std::chrono::steady_clock::now());
+      bool pending_picture_ready = false;
+      if (last_img && last_delivery_timestamp && !recovery_frame_requested && !hold_startup_input && !images->peek()) {
+        // Until the next capture can arrive this thread would only wait. Work the last conversion
+        // left pending goes on meanwhile; that conversion's own wait has already ended. A capture
+        // at the stream's rate arrives one frame interval after the last one, and the step ends
+        // a little before that, so that such a capture is not kept waiting.
+        const auto next_capture_expected = *last_delivery_timestamp + encode_frame_threshold - detail::pending_conversion_advance_margin;
+        if (std::chrono::steady_clock::now() < next_capture_expected) {
+          pending_picture_ready = session->advance_pending_conversion(next_capture_expected);
+        }
+      }
       if (!recovery_frame_requested || images->peek() || hold_startup_input) {
         const bool conversion_poll_pending = last_img && (stream_gamma.pending() || session->needs_conversion_poll());
         const bool depth_pipeline_ready = depth_pipeline_ready_event && depth_pipeline_ready_event->peek();
@@ -2123,7 +2146,12 @@ namespace video {
                                  startup_input_hold.wait(wait_started, keepalive_interval) :
                                  keepalive_wait;
         bool captured = false;
-        const auto image_wait = detail::encode_image_wait(idle_wait, encode_frame_threshold, last_img && !hold_startup_input, depth_pipeline_ready, conversion_poll_pending, pending_source_wait);
+        auto image_wait = detail::encode_image_wait(idle_wait, encode_frame_threshold, last_img && !hold_startup_input, depth_pipeline_ready, conversion_poll_pending, pending_source_wait);
+        if (pending_picture_ready) {
+          // The picture is finished: a capture already here takes it along, and without one the
+          // retained source is converted at once below. Neither waits out a frame interval.
+          image_wait = {};
+        }
 #ifdef SUNSHINE_TESTS
         if (test_hooks && test_hooks->before_image_wait) {
           test_hooks->before_image_wait(static_cast<bool>(last_img), std::chrono::duration_cast<std::chrono::nanoseconds>(image_wait));
@@ -2312,6 +2340,23 @@ namespace video {
       // flight while the session and display resources are torn down.
       if (lifecycle_change_requested()) {
         break;
+      }
+
+      if (
+        conversion_ran && session->conversion_repeats_pending_picture() &&
+        !first_encoder_output && !requested_idr_frame && !invalidated_ref_frames &&
+        !(stream_gamma.pending() && config.stream_gamma_state) &&
+        std::chrono::steady_clock::now() < last_encode_at + keepalive_interval
+      ) {
+        // The work of this capture ran past the conversion's wait, and the converter drew the
+        // previous picture again. That picture went out already. The new one is sent as soon as
+        // it is ready, so a second copy of the old one would only delay it at the client.
+#ifdef SUNSHINE_TESTS
+        if (test_hooks && test_hooks->repeat_coalesced) {
+          test_hooks->repeat_coalesced();
+        }
+#endif
+        continue;
       }
 
       const auto encode_started = detail::diagnostic_timestamp(loop_stats.has_value(), std::chrono::steady_clock::now);

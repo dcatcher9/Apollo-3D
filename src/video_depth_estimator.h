@@ -1393,6 +1393,24 @@ namespace models {
       pending_depth_source_access_t source_access = {}
     );
 
+    /** Between two conversions: takes the pending observation as far as the GPU allows before
+     * `deadline` and consumes nothing.
+     *
+     * It waits for the joined root as try_finish_pending_depth_until() does, runs the D3D11
+     * postprocess, submits the Direct Glyph score when there is one and works it through its
+     * steps. The completion stays pending: only a conversion's own poll hands it to the
+     * converter, so the caller never receives a result here. Without this the work after the
+     * root waits for the next conversion, and the time until then is lost.
+     * Returns true when the observation is ready to be handed over: the next poll then
+     * completes without waiting.
+     * The source access callback has the meaning it has for try_finish_pending_depth_until().
+     */
+    bool advance_pending_depth_until(
+      std::chrono::steady_clock::time_point deadline,
+      std::uint32_t max_queries,
+      pending_depth_source_access_t source_access = {}
+    );
+
     /** Latest cached scene telemetry from the shared completion receipt. This accessor has no
      * GPU work and never changes the original sample identity or copy-submission timestamp.
      */

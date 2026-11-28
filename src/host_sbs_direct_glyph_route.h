@@ -106,6 +106,17 @@ namespace models::host_sbs_direct_glyph_route {
     // its own bounded wait. Without it the call takes at most one step and never waits.
     [[nodiscard]] retirement_t retire(ID3D11DeviceContext *context, std::optional<std::chrono::steady_clock::time_point> wait_until);
 
+    // Works the submitted score through its GPU steps until `wait_until` and publishes nothing:
+    // the next retire() publishes whatever this reached. For the time between two conversions,
+    // when the score would otherwise wait for the next one to take its next step. Returns true
+    // once the score has no step left to wait for.
+    bool advance(std::chrono::steady_clock::time_point wait_until);
+
+    // True when no submitted score has a step left to wait for.
+    [[nodiscard]] bool settled() const noexcept {
+      return !job_ || settled_.has_value();
+    }
+
     [[nodiscard]] host_sbs_direct_glyph_publication::views_t views() const {
       return publication_.views();
     }
@@ -140,7 +151,17 @@ namespace models::host_sbs_direct_glyph_route {
       source_shaders_;
     nvinfer1::IExecutionContext *execution_ = nullptr;
     std::string engine_key_;
+    // Takes the job's score through its steps until `wait_until`; returns whether it waited.
+    bool work_score(std::optional<std::chrono::steady_clock::time_point> wait_until);
+
+    struct settled_t {
+      host_sbs_direct_glyph_gpu::poll_status_e status = host_sbs_direct_glyph_gpu::poll_status_e::pending;
+      host_sbs_direct_glyph_gpu::result_t result;
+      std::string error;
+    };
     std::optional<job_t> job_;
+    // What the poll that took the score past its last step returned, until retire() publishes it.
+    std::optional<settled_t> settled_;
     bool enabled_ = false;
     bool late_score_ = false;
     bool score_failed_ = false;

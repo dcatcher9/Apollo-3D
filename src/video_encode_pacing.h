@@ -208,6 +208,11 @@ namespace video::detail {
     );
   }
 
+  /** How long before the next capture is expected the encode loop stops advancing pending
+   * conversion work, so that a capture arriving on time is taken at once.
+   */
+  inline constexpr std::chrono::milliseconds pending_conversion_advance_margin {1};
+
   /** The bound of the encode loop's image wait, without hiding pending conversion behind the idle
    * heartbeat.
    *

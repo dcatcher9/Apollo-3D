@@ -434,8 +434,10 @@ the score. Each step is queued by the poll that finds the one before it finished
 A live completion works the score through those steps inside the remainder of its own
 [bounded same-frame wait](#gpu-owned-near-identical-transaction), waiting on the score's D3D11
 fence between them, so the mask retires in the conversion that completed its depth whenever the
-GPU finishes it in time. A score that outlasts the wait stays reserved, and the next conversion's
-poll goes on from the step it has reached; a poll without a wait budget takes at most one step.
+GPU finishes it in time. A score that outlasts the wait stays reserved. The remote encode loop
+then takes it on [between conversions](#pending-work-between-conversions), and the next
+conversion's poll goes on from the step it has reached; a poll without a wait budget takes at
+most one step.
 The diagnostic sample `direct_glyph_retire` is the time from the score's submission to its
 retirement as the conversion owner saw it.
 For an ordinary video caption with an OCR8 mean score below 0.90, the palette
@@ -2173,6 +2175,30 @@ pixel delivery rather than the older model owner. The successful draw command's 
 owns that identity. Packed repeats
 check their stored pixel-source identity and never advance the watermark. Only the converter's
 explicit source-namespace reset resets it. This adds no mask history or confirmation wait.
+
+#### Pending work between conversions
+
+A conversion's wait ends well before the next capture arrives, and pending work advances only
+when its owner polls it. The remote encode loop therefore lets that work go on while it would
+otherwise only wait for a capture. Until the next capture of a source at the stream's rate is
+due, which is one frame interval after the last delivery's presentation time less `1 ms`,
+`advance_pending_conversion()` waits for the pending root as a conversion's poll does, runs its
+D3D11 postprocess, submits the Direct Glyph score when there is one and works it through its
+steps. It consumes nothing: the completion stays pending, and only a conversion's own poll hands
+it to the converter. A Dump 3D request leaves the step to that conversion. A capture that
+arrives during the step waits until it ends, as it would wait through the same work in its own
+conversion's prior poll.
+
+Once the observation is ready to hand over, the loop does not wait out a frame interval. A
+capture already queued takes the finished picture along; without one the retained source is
+converted at once and delivers it. The picture of a capture whose work outlasted its conversion
+therefore goes out when it is ready, and not one frame interval later.
+
+A conversion that draws the previous packed picture again because the picture of its own
+capture is still pending is not encoded. That earlier picture has gone out, and a second copy
+would only stand in the client's decoder ahead of the picture that follows. A recovery or IDR
+request, a pending stream-gamma proof, the first output of an encoder and a due keepalive still
+encode it. Local AR and the shutter presenter poll on their own threads and use neither rule.
 
 When remote capture goes idle with conversion still pending, the encoder's image wait is capped
 at the requested frame interval (with a `1 ms` floor), or the configured idle heartbeat interval

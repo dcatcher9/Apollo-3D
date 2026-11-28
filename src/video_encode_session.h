@@ -25,6 +25,8 @@ namespace video {
     int convert(platf::img_t &img);
     int convert_with_encode_target(platf::img_t &img, const std::chrono::steady_clock::time_point next_encode_target);
     bool needs_conversion_poll() const;
+    bool advance_pending_conversion(std::chrono::steady_clock::time_point deadline);
+    bool conversion_repeats_pending_picture() const;
     void set_external_frame_wake(std::function<void()> wake);
     bool conversion_kept_input() const;
     bool external_frame_held() const;

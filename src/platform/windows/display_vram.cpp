@@ -540,6 +540,8 @@ namespace platf::dxgi {
       return conversion_missing_source;
     }
 
+    bool conversion_repeats_pending_picture_ = false;
+
     // The streaming loop converts a held live export, whose next frame it re-checks for.
     bool external_frame_held() const {
       return game_export.receiver && ::video::is_packed_mode(sbs_mode) && external_frame_wake && game_export.receiver->frame_held();
@@ -614,6 +616,39 @@ namespace platf::dxgi {
         return rgb_conversion_e::failed;
       }
       return output.retained_pair ? rgb_conversion_e::retained : rgb_conversion_e::converted;
+    }
+
+    /// See platf::nvenc_encode_device_t::advance_pending_conversion().
+    bool advance_pending_conversion(const std::chrono::steady_clock::time_point deadline) {
+      // A Dump 3D request belongs to the conversion that completes the observation.
+      if (!depth_estimator || !pending_matched_frame || sbs_mode == ::video::SBS_OFF ||
+          !models::host_sbs_renderer_uses_depth_pipeline(host_sbs_renderer) ||
+          sbs_dumper.snapshot_requested()) {
+        return false;
+      }
+      // The postprocess reads the pending capture as a conversion's poll does. A capture that is
+      // busy right now leaves the step for the next conversion.
+      std::optional<detail::keyed_mutex_lock_t<IDXGIKeyedMutex>> capture_lock;
+      HRESULT capture_status = S_OK;
+      const auto acquire_pending_capture = [&]() {
+        if (pending_matched_frame->capture_mutex && !capture_lock) {
+          capture_lock.emplace(pending_matched_frame->capture_mutex);
+          capture_status = capture_lock->lock(0, 0);
+        }
+        return capture_status == S_OK;
+      };
+      const models::pending_depth_source_access_t pending_source_access {
+        &acquire_pending_capture,
+        [](const void *owner) { return (*static_cast<decltype(acquire_pending_capture) *>(owner))(); },
+      };
+      return depth_estimator->advance_pending_depth_until(
+        deadline, detail::host_sbs_same_frame_poll_max_queries, pending_source_access
+      );
+    }
+
+    /// See platf::nvenc_encode_device_t::conversion_repeats_pending_picture().
+    bool conversion_repeats_pending_picture() const {
+      return conversion_repeats_pending_picture_;
     }
 
     bool needs_conversion_poll() const {
@@ -697,6 +732,7 @@ namespace platf::dxgi {
     ) {
       auto &img = (img_d3d_t &) img_base;
       conversion_missing_source = false;
+      conversion_repeats_pending_picture_ = false;
       std::optional<unsigned> converted_input_surface;
       // Select only when this call will write native planes. A packed repeat, skipped capture,
       // or blank image keeps the last converted surface, even when every other input is busy.
@@ -2278,6 +2314,8 @@ namespace platf::dxgi {
                                                repeat_hold_age,
                                                output_source_unchanged
                                              );
+          // The previous picture again, while the picture of this capture is still being made.
+          conversion_repeats_pending_picture_ = repeat_matched_output && pending_matched_frame != nullptr;
           const bool output_conversion_required =
             host_sbs_encoder_input_state.conversion_required(
               repeat_matched_output,
@@ -7108,6 +7146,14 @@ namespace platf::dxgi {
 
     bool needs_conversion_poll() const override {
       return base.needs_conversion_poll();
+    }
+
+    bool advance_pending_conversion(const std::chrono::steady_clock::time_point deadline) override {
+      return base.advance_pending_conversion(deadline);
+    }
+
+    bool conversion_repeats_pending_picture() const override {
+      return base.conversion_repeats_pending_picture();
     }
 
     void set_external_frame_wake(std::function<void()> wake) override {
