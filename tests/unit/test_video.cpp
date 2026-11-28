@@ -4951,7 +4951,9 @@ TEST(ParallaxV2ContractTest, DebugDumpStagingPreservesEventAndRequestOrdering) {
   EXPECT_LT(event_end, publish_pending);
 
   const auto readback_poll = display.find("sbs_dumper.poll_pending_readback(");
-  const auto request_poll = display.find("sbs_dumper.snapshot_requested()");
+  // The conversion samples the request after its readback poll. The step between conversions
+  // only declines to run while a request is open.
+  const auto request_poll = display.find("const bool snapshot_debug_inputs = sbs_dumper.snapshot_requested();");
   ASSERT_NE(readback_poll, std::string::npos);
   ASSERT_NE(request_poll, std::string::npos);
   EXPECT_LT(readback_poll, request_poll);
