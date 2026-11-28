@@ -1892,6 +1892,9 @@ namespace platf::dxgi {
                   test_native_pacing_gate_configured = true;
                 }
 #endif
+                // A text game's screens of text stand still for long stretches, so its unchanged
+                // lines are carried over. Host 3D scores every line of every observation.
+                depth_estimator->set_subtitle_line_reuse(text_game_ai_active);
                 auto submitted = depth_estimator->estimate_depth(
                   matched_candidate_slot->analysis_input_srv(),
                   input_color_space,

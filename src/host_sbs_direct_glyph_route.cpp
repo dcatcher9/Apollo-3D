@@ -120,6 +120,7 @@ namespace models::host_sbs_direct_glyph_route {
       .origin_x = frame.region.left, .origin_y = frame.region.top,
       .color_domain = frame.color_space,
       .reset_history = frame.input_domain_reset,
+      .carry_unchanged_lines = frame.carry_unchanged_lines,
     };
     if (can_score) {
       const auto status = score_.try_submit(score, error);

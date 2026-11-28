@@ -532,7 +532,9 @@ of 38/255. A GPU-held observation preserves the last inferred lines, source RGB 
 opacity. Fresh empty OCR clears the mask and history and skips inference. A change of
 subtitle owner invalidates the history even when the input geometry stays the same.
 
-A line is carried over without a score when it continues exactly one earlier line, its work,
+Only a [Game 3D text game](reshade-sbs.md#text-games) carries lines over: the converter asks for
+it with `set_subtitle_line_reuse` while one is in front, and Host 3D scores every line of every
+observation. There, a line is carried over without a score when it continues exactly one earlier line, its work,
 inference and detector rectangles equal that line's, it asks for glyph confirmation exactly
 when that line did, and every source value inside the inference rectangle equals the stored
 one bit for bit. The plan decides this on the GPU before any tile is packed. A carried line

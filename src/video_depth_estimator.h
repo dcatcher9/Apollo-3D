@@ -1283,6 +1283,13 @@ namespace models {
      * them. Other observations expose the immutable Base view as their effective Final.
      */
     void set_subtitle_conditioning_diagnostics_always(bool always) noexcept;
+
+    /** Whether a subtitle line that has not changed since the previous observation is carried
+     * over without a score. The default (false) scores every line of every observation, as
+     * Host 3D does; the converter turns it on while a Game 3D text game is in front. It applies
+     * from the next observation whose mask is dispatched.
+     */
+    void set_subtitle_line_reuse(bool reuse) noexcept;
 #ifdef SUNSHINE_TESTS
     [[nodiscard]] bool subtitle_conditioning_diagnostics_allocated_for_tests() const noexcept;
 #endif

@@ -38,6 +38,7 @@ namespace models::host_sbs_direct_glyph_route {
     // The actual pending postprocess function result and work, never guessed from the root.
     UINT postprocess_mode = 0u, expected_work = 0u;
     bool input_domain_reset = false;
+    bool carry_unchanged_lines = false;  // Unchanged lines are carried over without a score.
     ID3D11ShaderResourceView *display_snapshot_band = nullptr;
     // Descriptor-only parent reference; source pixels come from the joined snapshot band.
     ID3D11ShaderResourceView *parent_raw_source = nullptr;

@@ -45,6 +45,9 @@ namespace models::host_sbs_direct_glyph_gpu {
     std::uint64_t subtitle_context_generation = 0;
     UINT origin_x = 0, origin_y = 0, color_domain = 0;
     bool reset_history = false;
+    // A line whose rectangles and source values are those of the previous observation is carried
+    // over without a score. Off, every line is scored on every observation.
+    bool carry_unchanged_lines = false;
 
     bool operator==(const request_t &) const = default;
   };

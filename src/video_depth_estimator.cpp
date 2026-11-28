@@ -1266,6 +1266,7 @@ namespace models {
     // while completing an observation that a Dump 3D request snapshots (or one a dump forced)
     // and otherwise exposes the same immutable Base view for Final.
     bool subtitle_conditioning_diagnostics_always = true;
+    bool subtitle_line_reuse = false;
     bool completion_dump_snapshot_requested = false;
     bool completed_subtitle_conditioning_diagnostics = false;
     [[nodiscard]] bool subtitle_conditioning_diagnostics_requested() const noexcept {
@@ -4044,6 +4045,7 @@ namespace models {
         .postprocess_mode = pending_near_identical_postprocess_mode(),
         .expected_work = cuda_conditional_graph::work_flags_value(pending_root->subtitle_work),
         .input_domain_reset = input_domain_reset,
+        .carry_unchanged_lines = subtitle_line_reuse,
         .display_snapshot_band = subtitle_contour_source_snapshot.srv.Get(),
         .parent_raw_source = pending_root->submitted_source.Get(),
         .contour_constants = subtitle_contour_cbuffer.Get(),
@@ -4075,17 +4077,22 @@ namespace models {
           std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - subtitle_direct_glyph_dispatched_at).count()
         );
         // Counts, not times: how many lines this score had to score and how many it carried over.
+        // Only a score that retired here and had lines counts: a retirement without a score job
+        // would repeat the previous score's numbers, and a score without lines would only dilute
+        // the averages.
         const auto lines = subtitle_direct_glyph.planned_lines();
-        sbs_perf::add_sample_ms("direct_glyph_lines_scored", static_cast<double>(lines.scored));
-        sbs_perf::add_sample_ms("direct_glyph_lines_carried", static_cast<double>(lines.carried));
-        // Why lines were scored: no history, no single earlier line, another request, moved
-        // rectangles, changed source values.
-        static constexpr std::array why_names {
-          "direct_glyph_scored_no_history", "direct_glyph_scored_unmatched", "direct_glyph_scored_request",
-          "direct_glyph_scored_moved", "direct_glyph_scored_changed"
-        };
-        for (std::size_t why = 0; why < why_names.size(); ++why) {
-          sbs_perf::add_sample_ms(why_names[why], static_cast<double>(lines.scored_why[why]));
+        if (retirement.selected_matte_commands && lines.scored + lines.carried > 0u) {
+          sbs_perf::add_sample_ms("direct_glyph_lines_scored", static_cast<double>(lines.scored));
+          sbs_perf::add_sample_ms("direct_glyph_lines_carried", static_cast<double>(lines.carried));
+          // Why lines were scored: no history, no single earlier line, another request, moved
+          // rectangles, changed source values.
+          static constexpr std::array why_names {
+            "direct_glyph_scored_no_history", "direct_glyph_scored_unmatched", "direct_glyph_scored_request",
+            "direct_glyph_scored_moved", "direct_glyph_scored_changed"
+          };
+          for (std::size_t why = 0; why < why_names.size(); ++why) {
+            sbs_perf::add_sample_ms(why_names[why], static_cast<double>(lines.scored_why[why]));
+          }
         }
       }
       if (retirement.selected_matte_commands) {
@@ -8071,6 +8078,12 @@ namespace models {
       return false;
     }
     return pimpl->prepare_subtitle_direct_glyph(cfg, error);
+  }
+
+  void video_depth_estimator::set_subtitle_line_reuse(const bool reuse) noexcept {
+    if (pimpl) {
+      pimpl->subtitle_line_reuse = reuse;
+    }
   }
 
   void video_depth_estimator::set_subtitle_conditioning_diagnostics_always(const bool always) noexcept {

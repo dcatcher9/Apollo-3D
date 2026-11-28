@@ -172,7 +172,7 @@ namespace models::host_sbs_direct_glyph_gpu {
       }
 
       std::array<UINT, 8> schedule() const {
-        const UINT source_flags = UINT(source_ != nullptr) | (job_.video_caption_ocr ? 2u : 0u);
+        const UINT source_flags = UINT(source_ != nullptr) | (job_.video_caption_ocr ? 2u : 0u) | (job_.carry_unchanged_lines ? 4u : 0u);
         return {width_, height_, UINT(job_.token), UINT(job_.token >> 32u), source_flags, UINT(history_valid_), slot_, job_.line_center_twice_source};
       }
 

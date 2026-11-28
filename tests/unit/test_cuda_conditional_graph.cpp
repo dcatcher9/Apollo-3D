@@ -2913,6 +2913,7 @@ TEST(DirectGlyphHardware, ScoresTheLinesThatFitOneBatchUnderOneFence) {
   {
     const std::initializer_list<line_t> menu {lines[0], lines[1], lines[2], lines[5], lines[6], lines[7], lines[8], lines[9]};
     scored_t fresh, again, edited;
+    job.carry_unchanged_lines = true;
     ASSERT_NO_FATAL_FAILURE(score(menu, fresh));
     EXPECT_EQ(transport.planned_lines().scored, 8u);
     EXPECT_EQ(transport.planned_lines().carried, 0u) << "an observation without history scores every line";
@@ -2942,6 +2943,35 @@ TEST(DirectGlyphHardware, ScoresTheLinesThatFitOneBatchUnderOneFence) {
       }
     }
     expect_ink(edited, lines[1]);
+
+    // The same change scored straight after the first observation, with no carried observation
+    // in between, gives the same mask: a carried line leaves the history as its score would.
+    const std::size_t changed_texel = 4u * (std::size_t(lines[1].top + 4u) * width + lines[1].left + 4u);
+    const std::array<std::uint16_t, 4u> original {pixels[changed_texel], pixels[changed_texel + 1u], pixels[changed_texel + 2u], pixels[changed_texel + 3u]};
+    context->UpdateSubresource(source.Get(), 0u, &changed, original.data(), 8u, 0u);
+    scored_t restored, direct;
+    job.reset_history = true;
+    ASSERT_NO_FATAL_FAILURE(score(menu, restored));
+    EXPECT_EQ(restored.alpha, fresh.alpha);
+    job.reset_history = false;
+    context->UpdateSubresource(source.Get(), 0u, &changed, dot.data(), 8u, 0u);
+    ASSERT_NO_FATAL_FAILURE(score(menu, direct));
+    EXPECT_EQ(transport.planned_lines().scored, 1u);
+    EXPECT_EQ(direct.alpha, edited.alpha) << "a carried observation must not change what follows it";
+    context->UpdateSubresource(source.Get(), 0u, &changed, original.data(), 8u, 0u);
+
+    // Where the caller does not ask for it, as Host 3D does not, no line is carried over, and the
+    // mask is the one the carried lines gave.
+    scored_t carried, rescored;
+    ASSERT_NO_FATAL_FAILURE(score(menu, carried));
+    ASSERT_NO_FATAL_FAILURE(score(menu, carried));
+    EXPECT_EQ(transport.planned_lines().carried, 8u);
+    job.carry_unchanged_lines = false;
+    ASSERT_NO_FATAL_FAILURE(score(menu, rescored));
+    EXPECT_EQ(transport.planned_lines().scored, 8u);
+    EXPECT_EQ(transport.planned_lines().carried, 0u);
+    EXPECT_EQ(transport.planned_lines().scored_why, (std::array {0u, 0u, 0u, 0u, 0u})) << "no reason is given where lines are never carried";
+    EXPECT_EQ(rescored.alpha, carried.alpha);
     job.reset_history = true;
   }
   EXPECT_TRUE(transport.release());

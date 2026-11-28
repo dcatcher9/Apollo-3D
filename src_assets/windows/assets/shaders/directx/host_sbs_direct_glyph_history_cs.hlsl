@@ -5,7 +5,8 @@
 cbuffer Schedule : register(b0) {
     uint2 Extent;
     uint2 Token;
-    uint SourceFlags; // Display snapshot (bit 0) and current video-caption OCR8 (bit 1).
+    uint SourceFlags; // Display snapshot (bit 0), current video-caption OCR8 (bit 1), and
+                      // unchanged lines may be carried over without a score (bit 2).
     uint HasPrevious;
     uint Slot;
     uint LineCenterTwice;
@@ -151,7 +152,7 @@ void confirm_history(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
     // `scored` is the rectangle a line is scored in when no geometry is carried into it:
     // finish_windows gives it the detector cover's rows.
     uint4 scored=uint4(record.base.x,record.cover.y,record.base.z,record.cover.w);
-    bool same_line=(SourceFlags&1u)!=0u && HasPrevious!=0u && record.state.x!=0u &&
+    bool same_line=(SourceFlags&5u)==5u && HasPrevious!=0u && record.state.x!=0u &&
                    (record.state.w!=0u)==((old.state.z&LineAsked)!=0u) &&
                    old.state.w!=NoGlyphInk && rectangle(scored) && all(old.base==record.base) &&
                    all(old.cover==record.cover) && all(old.box==scored);
@@ -195,20 +196,24 @@ void confirm_history(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
         // The two never meet: geometry is carried only into a line whose rectangle changed.
         bool carry_box=Counts[0].x>=24 && 10u*Counts[0].y>=7u*Counts[0].x;
         bool carry_line=same_line && LineDiffers==0u;
+        // A slot without a line keeps its empty record.
+        bool planned=rectangle(record.base);
         if (carry_box) record.box=carried;
         if (carry_line) {
             record.state.z=LineCarried|(old.state.z&LineAsked);
             record.state.w=old.state.w;
-        } else {
+        } else if (planned) {
             // Why the line is scored, for the scheduler's diagnostics; confirm_mask_history
             // replaces these bits with the line's temporal state.
+            // No reason is given where lines are never carried over.
             uint why=LineDiffers!=0u ? 6u : 5u;
-            if ((SourceFlags&1u)==0u || HasPrevious==0u) why=2u;
+            if ((SourceFlags&4u)==0u) why=0u;
+            else if ((SourceFlags&1u)==0u || HasPrevious==0u) why=2u;
             else if (record.state.x==0u) why=3u;
             else if ((record.state.w!=0u)!=((old.state.z&LineAsked)!=0u) || old.state.w==NoGlyphInk) why=4u;
             record.state.z=why<<8u;
         }
-        Lines[slot]=record;
+        if (carry_box || carry_line || planned) Lines[slot]=record;
     }
 }
 
