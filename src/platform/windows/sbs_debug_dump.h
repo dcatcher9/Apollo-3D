@@ -38,6 +38,22 @@ namespace platf::sbs_debug {
 
   struct frame;
 
+  /**
+   * The Game 3D text pin of a dumped draw: where the host placed the text its helper reported.
+   * The frame is drawn as every other frame is, so `sbs.png` shows the pin.
+   */
+  struct text_game_pin_evidence {
+    bool selected = false;  ///< The draw took the pinned route; its shader still judged the frame.
+    bool text_shown = false;  ///< The answer of the latest earlier observation read back.
+    std::array<std::int32_t, 4> client {};  ///< The game's picture in source pixels: left, top, right, bottom.
+    std::array<std::uint32_t, 2> text_rows {};  ///< First and end source row of the current text.
+    std::array<std::uint32_t, 2> band_rows {};  ///< First and end source row of the pin planes.
+    float plane = 0.0f;  ///< The text plane (full-source U).
+    float sdr_white = 0.0f;  ///< SDR white of an HDR capture (scRGB).
+    /// Light cores, of them shown, dark cores, of them shown: the latest earlier observation.
+    std::array<std::uint32_t, 4> verdict {};
+  };
+
   /** Optional requested-dump observation of one successful draw, not UI authority. */
   struct actual_draw_evidence {
     bool requested = false, captured = false, selected_shader = false;
@@ -56,6 +72,8 @@ namespace platf::sbs_debug {
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shared_pin_weights, shared_pin_field, shared_pin_rows;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> shared_pin_mapping, shared_pin_boundary;
     Microsoft::WRL::ComPtr<ID3D11Buffer> shared_pin_geometry;
+    /// The text pin of a Game 3D text game's draw; null for every other draw.
+    std::shared_ptr<text_game_pin_evidence> text_game_pin;
 
     void release_resources() noexcept {
       matte.Reset(); selected_receipt.Reset();

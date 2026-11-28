@@ -4821,10 +4821,23 @@ TEST(HostSbsV2LiveWarpGpuTest, TextGamePinFollowsTheGlyphsOnlyWhileThePictureSho
   EXPECT_NE(shown, hidden);
   (void) render(0u, 0u, white);
   assert_unpinned("a bright scene is not the text's fill");
-  EXPECT_EQ(text.verdict[1], 32u);
+  EXPECT_EQ(text.verdict[1], 0u) << "the fill is not shown where the outline beside it is not";
   EXPECT_EQ(text.verdict[3], 0u);
   (void) render(0u, 0u, black);
   assert_unpinned("a dark scene is not the text's outline");
+  // A scene that is bright under half of the hidden text and dark under the rest shows half of
+  // the fill's colour and half of the outline's, and still no fill beside its outline.
+  {
+    std::vector<rgba16_bits_t> source(width * height, grey);
+    for (UINT y = 0u; y < height; ++y) {
+      for (UINT x = 0u; x < width; ++x) source[y * width + x] = x < 48u ? white : black;
+    }
+    std::vector<std::byte> output;
+    EXPECT_TRUE(fixture.render(DXGI_FORMAT_R16G16B16A16_FLOAT, sizeof(rgba16_bits_t), width, height, source.data(), base, base,
+      state, {}, output, error, field_width, field_height, {}, nullptr, nullptr, true, &operands)) << error;
+    assert_unpinned("a scene bright in one place and dark in another is not the text");
+    EXPECT_EQ((std::array {text.verdict[0], text.verdict[1], text.verdict[2], text.verdict[3]}), (std::array {32u, 0u, 32u, 0u}));
+  }
   // A line being revealed: two fill columns and the left outline are on screen, and it is pinned whole.
   (void) render(2u, 4u, grey);
   EXPECT_EQ(text.rows.back(), 1u);

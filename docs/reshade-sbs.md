@@ -7853,7 +7853,7 @@ the game's text is not pinned
 ([Foreground window-region ROI](host-sbs.md#foreground-window-region-roi)). A game
 whose helper could not be loaded, or sees no text, is converted all the same. Dump 3D follows the
 route: with a text game in front the button produces the Host package, whose frame is drawn
-without the text pin. The pin itself is described under
+with the text pin like every other frame. The pin itself is described under
 [Text-game pin](host-sbs.md#text-game-pin).
 
 **Fallback.** The helper's text is used only while the picture confirms it. The picture-based

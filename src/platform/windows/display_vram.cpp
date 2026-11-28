@@ -2502,10 +2502,10 @@ namespace platf::dxgi {
 
             const bool subtitle_pin_candidate = host_sbs_pass.subtitles_ready() && geometry.subtitles.selected_matte &&
               geometry.subtitles.selected_receipt && host_sbs_pass.programs().direct_glyph_completed_ready();
-            // A frame taken for a Dump 3D package is drawn without the text pin: the package
-            // describes the Host geometry, and its format has no place for this route.
+            // A frame taken for a Dump 3D package is drawn as every other frame is, text pin
+            // included: the package's packed picture is what the owner saw.
             const bool text_pin_candidate = text_game_ai_active && host_sbs_pass.programs().text_game_ready() &&
-              v2_live_warp_selected && draw_colour.srv && !dump_actual_draw;
+              v2_live_warp_selected && draw_colour.srv;
             Microsoft::WRL::ComPtr<ID3D11Predicate> predicate;
             if (subtitle_pin_candidate || text_pin_candidate) {
               BOOL value = FALSE;
@@ -2524,7 +2524,11 @@ namespace platf::dxgi {
               if (SUCCEEDED(colour_resource.As(&colour_texture))) {
                 D3D11_TEXTURE2D_DESC colour_desc {};
                 colour_texture->GetDesc(&colour_desc);
-                text_pin_prepared = text_game_pin.prepare(device.get(), device_ctx.get(), colour_desc, default_source_sdr_white_scrgb, text_pin_shape);
+                auto text_pin_dump = dump_actual_draw ? std::make_shared<sbs_debug::text_game_pin_evidence>() : nullptr;
+                text_pin_prepared = text_game_pin.prepare(device.get(), device_ctx.get(), colour_desc, default_source_sdr_white_scrgb, text_pin_shape, text_pin_dump.get());
+                if (text_pin_prepared && dump_actual_draw) {
+                  dump_actual_draw->text_game_pin = std::move(text_pin_dump);
+                }
               }
             }
             // The pinned route decides for its own frame whether the picture shows the text. It
@@ -2620,6 +2624,9 @@ namespace platf::dxgi {
                 text_pin_views = std::move(text_pin_draw.views);
                 draw_command.pixel_shader = program.pixel;
               }
+              if (dump_actual_draw && dump_actual_draw->text_game_pin) {
+                dump_actual_draw->text_game_pin->selected = text_pin_selected;
+              }
             }
             // A selected subtitle pin already bound its planes; the text pin binds its own.
             if (!shared_warp_selected && text_pin_selected) {
@@ -2663,6 +2670,8 @@ namespace platf::dxgi {
                   if (e.shared_pin_selected) {
                     e.program = shared_warp::renderer_kind;
                     e.pixel_shader_closure = models::host_sbs_shader_cache::shared_ui_warp_completed_source_closure_sha256;
+                  } else if (text_pin_selected && actual_shader.Get() == draw_command.pixel_shader) {
+                    e.program = "text-game-pin";
                   } else if (actual_shader.Get() == sbs_reprojection_v2_live_ps.get()) {
                     e.program = "ordinary-v2";
                     e.pixel_shader_closure = sbs_reprojection_v2_live_source_closure_sha256;

@@ -78,7 +78,10 @@ float3 TextGameShownColour(float3 c) {
 // the text is trusted only while the picture shows it. The coverage picture holds the text in its
 // own colours; the verdict counts the texels at the core of the glyphs, light ones (the fill) and
 // dark ones (an outline) apart, and how many of each the picture shows in that colour. Both kinds
-// must be there: a bright scene alone looks like the fill, a dark one like the outline.
+// must be there: a bright scene alone looks like the fill, a dark one like the outline. And they
+// must be there together: a scene that is bright in one place and dark in another looks like some
+// of each. So a core with a core of the other kind beside it in its row counts as shown only when
+// the picture shows that one too: the fill next to its outline, as only the text itself has it.
 StructuredBuffer<uint> TextGameVerdict : register(t10);
 RWStructuredBuffer<uint> TextGameVerdictStore : register(u3);
 // The observation also feeds the Game 3D UI plane policy (tools/reshade/game3d_ui_adaptive.h,
@@ -97,6 +100,16 @@ static const uint TextGameRowLimit = 4096u;
 RWStructuredBuffer<uint> TextGameRowStore : register(u4);
 static const float TextGamePlaneLevels[5] = {0.0f, 0.001f, 0.002f, 0.003f, 0.0035f};
 float SharedOriginalParallax(float2 uv, uint eye);
+bool TextGameLight(float3 drawn) {
+    return dot(drawn, float3(0.2126f, 0.7152f, 0.0722f)) >= 0.5f;
+}
+// Whether the picture shows the drawn colour at a source pixel, both as display code values.
+bool TextGameShownAt(uint2 pixel, float3 drawn) {
+    float3 shown = TextGameShownColour(SourceColor.Load(int3(pixel, 0)).rgb);
+    return all(isfinite(shown)) && all(abs(shown - drawn) <= 0.2f);
+}
+// How far along the row a core looks for a core of the other kind, in texels of the coverage picture.
+static const uint TextGameNeighbourReach = 4u;
 [numthreads(16,16,1)]
 void text_game_verify_main(uint3 id : SV_DispatchThreadID) {
     if (id.x >= PinSourceShape.x || id.y >= PinSourceShape.w) return;
@@ -125,11 +138,33 @@ void text_game_verify_main(uint3 id : SV_DispatchThreadID) {
     if (coverage < 0.95f) return;
     // Both sides as display code values, whatever the capture's transfer.
     float3 drawn = saturate(text.rgb / coverage);
-    float3 shown = TextGameShownColour(SourceColor.Load(int3(pixel, 0)).rgb);
-    uint kind = dot(drawn, float3(0.2126f, 0.7152f, 0.0722f)) >= 0.5f ? 0u : 2u;
+    bool light = TextGameLight(drawn);
+    uint kind = light ? 0u : 2u;
     InterlockedAdd(TextGameVerdictStore[kind], 1u);
     if (row_counted) InterlockedAdd(TextGameRowStore[row_base + 1u + kind], 1u);
-    if (all(isfinite(shown)) && all(abs(shown - drawn) <= 0.2f)) {
+    bool shown = TextGameShownAt(pixel, drawn);
+    if (shown) {
+        // The nearest core of the other kind in the row, left before right at each distance. A
+        // core without one in reach, as in text without an outline, answers for itself.
+        uint coverage_width, coverage_height;
+        TextGameCoverage.GetDimensions(coverage_width, coverage_height);
+        float texel = max(1.0f, 1.0f / (TextGameRect.z * float(max(coverage_width, 1u))));
+        [loop] for (uint probe = 0u; probe < 2u * TextGameNeighbourReach; ++probe) {
+            float offset = round(float(probe / 2u + 1u) * texel) * ((probe & 1u) == 0u ? -1.0f : 1.0f);
+            float column = float(pixel.x) + offset;
+            if (column < 0.0f || column >= float(PinSourceShape.x)) continue;
+            uint2 beside = uint2(uint(column), pixel.y);
+            float2 beside_uv = (float2(beside) + 0.5f - TextGameRect.xy) * TextGameRect.zw;
+            if (beside_uv.x < 0.0f || beside_uv.x >= 1.0f) continue;
+            float4 other = TextGameCoverage.SampleLevel(LinearSampler, beside_uv, 0);
+            if (other.a < 0.95f) continue;
+            float3 other_drawn = saturate(other.rgb / other.a);
+            if (TextGameLight(other_drawn) == light) continue;
+            shown = TextGameShownAt(beside, other_drawn);
+            break;
+        }
+    }
+    if (shown) {
         InterlockedAdd(TextGameVerdictStore[kind + 1u], 1u);
         if (row_counted) InterlockedAdd(TextGameRowStore[row_base + 2u + kind], 1u);
     }

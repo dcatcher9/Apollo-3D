@@ -577,9 +577,15 @@ verdict readback, the band and the plane; the converter selects the route and re
 Whenever the helper reports text, `text_game_verify_main` observes the draw. It counts the
 glyph-core texels (coverage 0.95 or more), light and dark ones apart, and how many of each the
 picture shows within 0.2 of the drawn colour as display code values; an HDR capture is first
-divided by the desktop's SDR white. The text counts as shown when there are at least 16 cores and
+divided by the desktop's SDR white. A core that has a core of the other kind within four
+coverage texels along its row, the nearest one and the left before the right, is shown only when
+the picture shows that one too; a core without one answers for itself. The text counts as shown
+when there are at least 16 cores and
 a sixteenth of each kind that has at least 16 is shown, so text the game has drawn but not yet
-revealed, or has hidden, does not, and neither a bright nor a dark scene alone passes for text.
+revealed, or has hidden, does not, and neither a bright nor a dark scene alone passes for text,
+nor a scene that is bright in one place and dark in another: it shows no fill beside its outline.
+Text that has one kind only keeps the plain rule, and a hidden light text over a bright scene
+still passes for shown.
 Each line of the text also answers for itself. The same pass keeps the counts row by row, a line
 is a run of band rows that hold glyph texels, and `text_game_columns_main` judges each line by
 that same rule; a line with fewer than 16 cores is left to the whole-text answer. A pinned texel
@@ -597,7 +603,9 @@ game, which is three seconds ([Fallback](reshade-sbs.md#text-games)): the words 
 two old, so a route chosen from them alone would unpin the frames that follow each hidden one
 and bring the text back as late again. Otherwise a draw only makes this observation and keeps
 its ordinary geometry. Where the subtitle pin is in force for the draw it keeps its place until
-the words show the text. A frame taken for a Dump 3D package is never pinned.
+the words show the text. A frame taken for a Dump 3D package is drawn like any other, so the
+package's packed picture shows the pin
+([Text-game pin observation](../tools/sbsbench/DUMP_FORMAT.md#text-game-pin-observation)).
 
 Two more compute passes precede the shared pin pass on a pinned draw:
 

@@ -115,6 +115,18 @@ shaders require two bands in left-then-right order. The reader accepts recording
 before and after the 64-bit/GDI text-game update and checks each build's draw and prepare
 shader hashes as a pair.
 
+#### Text-game pin observation
+
+A package taken with a Game 3D text game in front shows the frame as it was streamed: `sbs.png`
+includes the [text-game pin](../../docs/host-sbs.md#text-game-pin) where the draw applied it,
+while `warp_map.f32` stays the ordinary Base diagnostic. When the draw prepared the pin,
+`actual_draw_evidence.json` has a `text_game_pin` object, and its `program` is `text-game-pin`
+when the draw took the pinned route. The object gives the game's picture rectangle, the source
+rows of the current text and of the pin planes, the text plane, and the counts of the latest
+earlier observation (light cores, of them shown, dark cores, of them shown); the dumped draw's
+own counts are still on the GPU when the package is taken. The package adds no file for this
+route, and the manifest's `renderer.actual_draw_renderer` does not name it.
+
 For an observed completed Direct Glyph draw, `shared_pin.model_prepare_source_closure_sha256`
 in `actual_draw_evidence.json` identifies the authenticated model prepare. The draw uses
 the ordinary completed pixel shader. The prepare must match the draw's shader generation.

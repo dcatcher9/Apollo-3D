@@ -23,6 +23,10 @@
 #include "src/host_sbs_shared_ui_warp_runtime.h"
 #include "tools/reshade/game3d_ui_adaptive.h"
 
+namespace platf::sbs_debug {
+  struct text_game_pin_evidence;
+}
+
 namespace platf::dxgi {
   /**
    * The text-game pin of one converter.
@@ -79,13 +83,16 @@ namespace platf::dxgi {
      * @param colour The source about to be drawn.
      * @param sdr_white What SDR white is in an HDR capture, in scRGB units.
      * @param shape Set to the full source size and the band of pinned rows.
+     * @param dump For a draw taken for a Dump 3D package: filled with where the text was placed
+     *        and the latest answer read back. Left as it is when this returns false.
      */
     bool prepare(
       ID3D11Device *device,
       ID3D11DeviceContext *context,
       const D3D11_TEXTURE2D_DESC &colour,
       float sdr_white,
-      std::array<UINT, 4u> &shape
+      std::array<UINT, 4u> &shape,
+      sbs_debug::text_game_pin_evidence *dump = nullptr
     );
 
     /**

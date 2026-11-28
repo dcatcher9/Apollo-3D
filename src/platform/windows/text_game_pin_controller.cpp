@@ -4,6 +4,8 @@
  *        the helper's text in the Host warp.
  */
 #include "text_game_pin_controller.h"
+
+#include "sbs_debug_dump.h"
 #include "game3d_win32_util.h"
 
 // standard includes
@@ -148,7 +150,8 @@ namespace platf::dxgi {
     ID3D11DeviceContext *context,
     const D3D11_TEXTURE2D_DESC &colour,
     const float sdr_white,
-    std::array<UINT, 4u> &shape
+    std::array<UINT, 4u> &shape,
+    sbs_debug::text_game_pin_evidence *const dump
   ) {
     namespace hook = platf::game3d::text_hook;
     const auto &client = client_;
@@ -262,6 +265,15 @@ namespace platf::dxgi {
     live.eligible = true;
     live.front_cap_uv = constants.front_cap;
     constants.plane = plane_.prepare(live).applied_uv;
+    if (dump) {
+      dump->text_shown = text_shown_;
+      dump->client = {client.left, client.top, client.right, client.bottom};
+      dump->text_rows = {constants.text_top, constants.text_bottom};
+      dump->band_rows = {band_top, band_end};
+      dump->plane = constants.plane;
+      dump->sdr_white = sdr_white;
+      dump->verdict = verdict_;
+    }
     if (!pin_cbuffer_) {
       D3D11_BUFFER_DESC desc {};
       desc.ByteWidth = sizeof(constants);

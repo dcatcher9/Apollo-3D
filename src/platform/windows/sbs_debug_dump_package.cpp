@@ -1107,6 +1107,24 @@ namespace platf::sbs_debug {
       if (!e.shared_pin_model_prepare_closure.empty()) {
         metadata["shared_pin"]["model_prepare_source_closure_sha256"] = e.shared_pin_model_prepare_closure;
       }
+      if (const auto &text = e.text_game_pin) {
+        // A Game 3D text game's draw: where the helper's text was placed. The packed picture
+        // shows the pin itself.
+        metadata["text_game_pin"] = {
+          {"selected", text->selected},
+          {"selected_meaning", "the draw took the pinned route; its shader judged from this frame's picture which lines are pinned"},
+          {"text_shown_before", text->text_shown},
+          {"verdict_before", text->verdict},
+          {"verdict_layout", "light cores, light cores shown, dark cores, dark cores shown; the latest earlier observation read back, a frame or two older than this draw"},
+          {"client_rect_px", text->client},
+          {"client_rect_layout", "left,top,right,bottom of the game's picture in full-source pixels"},
+          {"text_rows_px", text->text_rows},
+          {"band_rows_px", text->band_rows},
+          {"rows_layout", "first and end full-source row"},
+          {"plane_u", text->plane},
+          {"sdr_white_scrgb", text->sdr_white},
+        };
+      }
       const auto path = dir / "actual_draw_evidence.json";
       const bool written = write_json(path, metadata);
       const auto digest = written ? models::file_sha256_hex(path) : std::string {};
