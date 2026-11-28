@@ -273,6 +273,46 @@ TEST(VideoDomProbeLogic, AVanishedNodeIsReadAgainFromItsParentWithinBounds) {
   EXPECT_FALSE(probe::vanished_node_rewalk_allowed(0u, probe::maximum_vanished_rewalks_per_census));
 }
 
+// The player's clock: its text node is listed, replaced, and fails when the walk reaches it.
+TEST(VideoDomProbeLogic, AFailedNodeHasItsParentReadAgainOncePerReading) {
+  using enum probe::vanished_node_e;
+  const probe::vanished_node_t clock {.has_parent = true};
+  EXPECT_EQ(probe::vanished_node_policy(clock), read_parent_again);
+
+  // The rest of a part of the page torn down at once: the reading is queued, or was made.
+  auto sibling = clock;
+  sibling.reread_pending = true;
+  EXPECT_EQ(probe::vanished_node_policy(sibling), drop);
+  auto listed_earlier = clock;
+  listed_earlier.older_reading = true;
+  EXPECT_EQ(probe::vanished_node_policy(listed_earlier), drop);
+  // Nodes queued under a node that was itself taken as gone, at any bound.
+  probe::vanished_node_t orphan {.has_parent = true, .under_gone_ancestor = true};
+  orphan.parent_rewalks = probe::maximum_vanished_rewalks_per_parent;
+  orphan.census_rewalks = probe::maximum_vanished_rewalks_per_census;
+  EXPECT_EQ(probe::vanished_node_policy(orphan), drop);
+
+  // A node its parent still lists and that still answers nothing uses the bounds up: the census
+  // is incomplete, as it was for every failed node before.
+  auto stubborn = clock;
+  stubborn.parent_rewalks = probe::maximum_vanished_rewalks_per_parent;
+  EXPECT_EQ(probe::vanished_node_policy(stubborn), error);
+  auto busy_page = clock;
+  busy_page.census_rewalks = probe::maximum_vanished_rewalks_per_census;
+  EXPECT_EQ(probe::vanished_node_policy(busy_page), error);
+  // The root has no parent to read again.
+  EXPECT_EQ(probe::vanished_node_policy({}), error);
+}
+
+// A page whose geometry never rests fails the refresh of every selection staged again: the helper
+// must come back to a census and not stage the same objects again for ever.
+TEST(VideoDomProbeLogic, ASelectionThatKeepsFailingItsRefreshIsNotRememberedForEver) {
+  EXPECT_FALSE(probe::selection_worth_remembering(false, 0u)) << "never established: nothing to remember";
+  EXPECT_TRUE(probe::selection_worth_remembering(true, 0u));
+  EXPECT_TRUE(probe::selection_worth_remembering(true, probe::maximum_restages_without_establishing - 1u));
+  EXPECT_FALSE(probe::selection_worth_remembering(true, probe::maximum_restages_without_establishing));
+}
+
 TEST(VideoDomProbeLogic, ForegroundAbaDuringLongCensusCannotRefreshOrPublishAuthority) {
   using namespace std::chrono_literals;
   ASSERT_EQ(probe::census_checkpoint_policy(3s, 100ms, 1500, 20000, 15s, 100ms),

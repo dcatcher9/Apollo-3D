@@ -654,28 +654,25 @@ namespace {
           self->gone = true;
         }
         const auto up = node.read_again ? node.read_again->parent : node.parent;
-        bool dropped = false;
-        for (auto ancestor = up; ancestor && !dropped; ancestor = ancestor->parent) {
-          // Under a node that was itself taken as gone: its parent is already being read again.
-          dropped = ancestor->gone;
+        bool under_gone_ancestor = false;
+        for (auto ancestor = up; ancestor && !under_gone_ancestor; ancestor = ancestor->parent) {
+          under_gone_ancestor = ancestor->gone;
         }
-        if (!dropped && up) {
-          // A page tears a whole part down at once, and every node of it fails in turn. Only a
-          // node of the latest reading of its parent has anything new to say: one that an older
-          // reading listed was replaced by that later reading, and while a new reading is
-          // already queued it will cover this node as well.
-          const bool older_reading = !node.read_again && node.parent_reading != up->reading;
-          if (older_reading || up->reread_pending) {
-            dropped = true;
-          } else if (probe::vanished_node_rewalk_allowed(up->rewalks, census_rewalks)) {
-            ++up->rewalks;
-            ++census_rewalks;
-            up->reread_pending = true;
-            queue.push_front({retain_com(up->accessible.get()), up->depth, up->children_document, up->parent, -1, 0u, up});
-            dropped = true;
-          }
+        const auto decision = probe::vanished_node_policy({
+          .has_parent = up != nullptr,
+          .under_gone_ancestor = under_gone_ancestor,
+          .older_reading = up && !node.read_again && node.parent_reading != up->reading,
+          .reread_pending = up && up->reread_pending,
+          .parent_rewalks = up ? up->rewalks : 0u,
+          .census_rewalks = census_rewalks,
+        });
+        if (decision == probe::vanished_node_e::read_parent_again) {
+          ++up->rewalks;
+          ++census_rewalks;
+          up->reread_pending = true;
+          queue.push_front({retain_com(up->accessible.get()), up->depth, up->children_document, up->parent, -1, 0u, up});
         }
-        if (!dropped) {
+        if (decision == probe::vanished_node_e::error) {
           if (trace_nodes) {
             std::ostringstream out;
             out << "line " << line << " hr=0x" << std::hex << static_cast<unsigned long>(status) << std::dec << " depth=" << node.depth
@@ -952,6 +949,8 @@ namespace {
     // It has been established, here or in the selection it was staged again from: worth
     // remembering when it is dropped for anything but a census that found no video to select.
     bool established_once {};
+    // How often in a row it was staged again from remembered objects without being established.
+    unsigned restages {};
   };
 
   struct accessible_snapshot_t {
@@ -1577,6 +1576,7 @@ namespace {
     );
     if (staged) {
       staged->established_once = true;
+      staged->restages = old.restages + 1u;
     }
     return staged;
   }
@@ -1597,7 +1597,7 @@ namespace {
       });
     };
     const auto set_aside = [&]() {
-      if (cached && cached->established_once) {
+      if (cached && probe::selection_worth_remembering(cached->established_once, cached->restages)) {
         forget_window(cached->window);
         if (remembered.size() >= maximum_remembered_selections) {
           remembered.erase(remembered.begin());
@@ -1609,6 +1609,7 @@ namespace {
     const auto note_phase = [&]() {
       if (cached && cached->phase == probe::cached_selection_phase_e::established) {
         cached->established_once = true;
+        cached->restages = 0u;
       }
     };
     unsigned cold_warmup_scans = 0;
@@ -1633,6 +1634,12 @@ namespace {
         print_machine_record(++sequence, current);
         last_emitted = current;
         last_emit = now;
+        // The records go to the host that started this helper. Once it no longer reads them it
+        // has ended, however it ended, and a helper nobody reads has no reason to go on walking
+        // every browser page that comes to the front.
+        if (!std::cout) {
+          keep_running.store(false, std::memory_order_relaxed);
+        }
       }
     };
     publish(current, true);
@@ -1771,6 +1778,12 @@ namespace {
         std::cerr << std::endl;
         for (const auto &note : result.error_notes) {
           std::cerr << "  " << note << std::endl;
+        }
+        for (const auto &candidate : result.candidates) {
+          std::cerr << "  video id=" << candidate.geometry.unique_id << " document=" << candidate.document_unique_id
+                    << " element=" << rect_string(candidate.geometry.element_rect) << " visible=" << rect_string(candidate.geometry.visible_rect)
+                    << " available=" << candidate.geometry.available << " credible=" << candidate.geometry.credible_size
+                    << " contained=" << candidate.geometry.fully_contained << " state=0x" << std::hex << candidate.state << std::dec << std::endl;
         }
       }
       // Successful scans route events before their first checkpoint. Also clear stale routing

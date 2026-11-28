@@ -53,6 +53,49 @@ namespace video_dom_probe {
            census_rewalks < maximum_vanished_rewalks_per_census;
   }
 
+  // A selection staged again from remembered objects must pass the next tick's exact refresh.
+  // One that keeps failing it, on a page whose geometry never rests, is not staged again without
+  // end: after this many attempts in a row the census takes over, as it did before.
+  inline constexpr unsigned maximum_restages_without_establishing = 3u;
+  [[nodiscard]] inline constexpr bool selection_worth_remembering(
+    bool established_once,
+    unsigned restages_without_establishing
+  ) noexcept {
+    return established_once && restages_without_establishing < maximum_restages_without_establishing;
+  }
+
+  // What the census does with a node one of whose steps failed.
+  enum class vanished_node_e {
+    drop,  // It is covered already: nothing more to read, and no error.
+    read_parent_again,  // Its parent's children are read again and visited at once.
+    error,  // The census is incomplete.
+  };
+
+  struct vanished_node_t {
+    bool has_parent {};  // The root has none.
+    bool under_gone_ancestor {};  // Its parent, or a node above, was itself taken as gone.
+    bool older_reading {};  // A later reading of its parent's children has replaced the one that listed it.
+    bool reread_pending {};  // Its parent is already queued to have its children read again.
+    unsigned parent_rewalks {};
+    unsigned census_rewalks {};
+  };
+
+  // A page tears a whole part down at once, and every node of it fails in turn. Only a node of
+  // the latest reading of its parent has anything new to say, and only once per reading.
+  [[nodiscard]] inline constexpr vanished_node_e vanished_node_policy(const vanished_node_t &node) noexcept {
+    if (node.under_gone_ancestor) {
+      return vanished_node_e::drop;
+    }
+    if (!node.has_parent) {
+      return vanished_node_e::error;
+    }
+    if (node.older_reading || node.reread_pending) {
+      return vanished_node_e::drop;
+    }
+    return vanished_node_rewalk_allowed(node.parent_rewalks, node.census_rewalks) ?
+             vanished_node_e::read_parent_again : vanished_node_e::error;
+  }
+
   // Refresh may enter cross-process COM and deliver a foreground transition. Authenticate
   // again after it returns, immediately before publishing any tentative heartbeat record.
   template<typename Refresh, typename Validate, typename Publish>

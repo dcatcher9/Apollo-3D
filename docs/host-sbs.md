@@ -2645,7 +2645,9 @@ after the next tick's exact refresh, and followed at once by a census as its aud
 it, replaces it or revokes it by the rules above. So clicking away from the browser and back, or
 moving or resizing its window, costs two helper ticks and not a walk of the page. A census that
 finds no video to select also forgets what was remembered for its window, and objects that fail
-the question are not asked a second time.
+the question are not asked a second time. A selection staged again three times in a row without
+being established, as on a page whose geometry never rests, is not remembered again: the census
+takes over.
 
 A census retains its traversal progress for up to 15 seconds instead of restarting at a two-second
 prefix of a larger accessibility tree. Approximately every 100 ms, the same scan thread services
@@ -2669,7 +2671,9 @@ not a second video. `video-dom-info
 --machine --trace` writes one line per census to stderr: how it ended, how many nodes had left
 the tree, and the source line and parent of each step that failed.
 Heartbeats have no separate timer thread: a blocked accessibility call still stops them and remains
-subject to the host's existing watchdog.
+subject to the host's existing watchdog. The helper ends by itself when a record can no longer be
+written, which is within a heartbeat of its host ending in any way; the host's kill-on-close job
+is the other guard against a helper that outlives it.
 
 Both authority sources are currently Desktop-Duplication-only. WGC does not expose an equivalent of
 `LastPresentTime` that separates desktop content from cursor-only compositor frames, so a missing
