@@ -98,6 +98,11 @@ namespace models::host_sbs_direct_glyph_gpu {
     class palette_transport_t;
   }  // namespace detail
 
+  struct line_counts_t {
+    unsigned scored = 0;
+    unsigned carried = 0;
+  };
+
   // Serialized by the caller's immediate context. It owns publication and gives each
   // observation a unique token. Work must stay reserved until ready or discarded.
   class resources_t {
@@ -129,6 +134,10 @@ namespace models::host_sbs_direct_glyph_gpu {
     void retire() noexcept;
 
     [[nodiscard]] ID3D11Buffer *native_lines_for_evaluation() const noexcept;
+
+    // The lines of the score last planned: how many were scored, and how many were carried over
+    // from the previous observation because their rectangles and pixels had not changed.
+    [[nodiscard]] line_counts_t planned_lines() const noexcept;
 #ifdef SUNSHINE_TESTS
     [[nodiscard]] std::uint64_t native_fences_for_tests() const noexcept;
 

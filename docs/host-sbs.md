@@ -532,6 +532,18 @@ of 38/255. A GPU-held observation preserves the last inferred lines, source RGB 
 opacity. Fresh empty OCR clears the mask and history and skips inference. A change of
 subtitle owner invalidates the history even when the input geometry stays the same.
 
+A line is carried over without a score when it continues exactly one earlier line, its work,
+inference and detector rectangles equal that line's, it asks for glyph confirmation exactly
+when that line did, and every source value inside the inference rectangle equals the stored
+one bit for bit. The plan decides this on the GPU before any tile is packed. A carried line
+keeps the earlier palette and publishes the earlier measured opacity as both its measured and
+its blended opacity, which is what scoring it again would publish: the score is a function of
+those values, and the blend adds nothing where nothing differs. A line the palette rejected is
+never continued, so it is always scored. A still screen of text therefore costs the plan and
+the finish and no encoder batch; one changed value in a line scores that line again. The
+diagnostic samples `direct_glyph_lines_scored` and `direct_glyph_lines_carried` count the lines
+of each score, as numbers and not as times.
+
 An estimator reserves one observation until its GPU work completes. It polls a D3D
 fence without waiting. The render thread signals each submission. The teardown worker
 can check that fence while the renderer continues using its immediate context.

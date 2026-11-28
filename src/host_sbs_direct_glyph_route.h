@@ -121,6 +121,11 @@ namespace models::host_sbs_direct_glyph_route {
       return publication_.views();
     }
 
+    // The lines of the score last planned: scored, and carried over unchanged.
+    [[nodiscard]] host_sbs_direct_glyph_gpu::line_counts_t planned_lines() const noexcept {
+      return score_.planned_lines();
+    }
+
     // Forgets the last reported failure, so the next one logs again.
     void clear_reported_failure() noexcept {
       error_.clear();

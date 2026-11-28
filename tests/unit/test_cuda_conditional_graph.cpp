@@ -2907,6 +2907,41 @@ TEST(DirectGlyphHardware, ScoresTheLinesThatFitOneBatchUnderOneFence) {
   ASSERT_NO_FATAL_FAILURE(expect_lines({lines[0], lines[3], lines[4], lines[1], lines[5]}, 2u));
   // A line wider than a batch is scored in its own two chunks between the batches of the others.
   ASSERT_NO_FATAL_FAILURE(expect_lines({lines[0], lines[1], lines[10], lines[4]}, 4u));
+
+  // A line whose rectangle and pixels are those of the last observation is carried over: a still
+  // screen of text costs the plan and the finish, and no score.
+  {
+    const std::initializer_list<line_t> menu {lines[0], lines[1], lines[2], lines[5], lines[6], lines[7], lines[8], lines[9]};
+    scored_t fresh, again, edited;
+    ASSERT_NO_FATAL_FAILURE(score(menu, fresh));
+    EXPECT_EQ(transport.planned_lines().scored, 8u);
+    EXPECT_EQ(transport.planned_lines().carried, 0u) << "an observation without history scores every line";
+    job.reset_history = false;
+    ASSERT_NO_FATAL_FAILURE(score(menu, again));
+    EXPECT_EQ(transport.planned_lines().scored, 0u);
+    EXPECT_EQ(transport.planned_lines().carried, 8u);
+    EXPECT_EQ(again.alpha, fresh.alpha) << "a carried line publishes what its score would";
+    std::cout << "[direct glyph] 8 line(s) unchanged: " << again.milliseconds << " ms in " << again.polls << " poll(s), against "
+              << fresh.milliseconds << " ms scored" << std::endl;
+
+    // One texel of one line changes: that line is scored again and the others are still carried.
+    const std::array<std::uint16_t, 4u> dot {half(0.5f), half(0.1f), half(0.1f), half(1.0f)};
+    const D3D11_BOX changed {lines[1].left + 4u, lines[1].top + 4u, 0u, lines[1].left + 5u, lines[1].top + 5u, 1u};
+    context->UpdateSubresource(source.Get(), 0u, &changed, dot.data(), 8u, 0u);
+    ASSERT_NO_FATAL_FAILURE(score(menu, edited));
+    EXPECT_EQ(transport.planned_lines().scored, 1u);
+    EXPECT_EQ(transport.planned_lines().carried, 7u);
+    for (const auto &line : menu) {
+      if (line.left == lines[1].left && line.top == lines[1].top) continue;
+      for (UINT y = line.top - 8u; y < line.top + 7u * scale + 8u; ++y) {
+        for (UINT x = line.left - 8u; x < line.left - 2u + line.characters * advance + 8u; ++x) {
+          ASSERT_EQ(edited.alpha[std::size_t(y) * width + x], fresh.alpha[std::size_t(y) * width + x]) << x << ',' << y;
+        }
+      }
+    }
+    expect_ink(edited, lines[1]);
+    job.reset_history = true;
+  }
   EXPECT_TRUE(transport.release());
 }
 

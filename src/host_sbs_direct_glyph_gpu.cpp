@@ -100,6 +100,7 @@ namespace models::host_sbs_direct_glyph_gpu {
       bool cuda_outstanding_ = false;
       // The bounded wait for the submitted fence: its completion event and the deadline's timer.
       HANDLE fence_event_ = nullptr, fence_timer_ = nullptr;
+      line_counts_t lines_;
 
       static UINT div_up(UINT n, UINT d) {
         return (n + d - 1u) / d;
@@ -212,9 +213,24 @@ namespace models::host_sbs_direct_glyph_gpu {
         return std::clamp((28u * h + reference_height / 2u) / reference_height, 28u, palette_tile.height);
       }
 
+      // A line the plan carries over from the previous observation: its rectangles and pixels are
+      // the same, so it is published from the previous opacity and never scored.
+      bool line_carried(UINT slot) const {
+        return plan_.lines[slot][0] != 0u && plan_.reference[slot][1] != 0u;
+      }
+
       UINT line_tiles(UINT slot) const {
         const auto [w, h] = plan_.lines[slot];
-        return w ? div_up(div_up(w * encoder_rows(slot), h), 440u) : 0u;
+        return w && !line_carried(slot) ? div_up(div_up(w * encoder_rows(slot), h), 440u) : 0u;
+      }
+
+      // Publishes a carried line: the same pass a scored line ends with, reading the previous
+      // opacity where that one reads its fresh score.
+      void carry_line(UINT slot) {
+        slot_ = slot;
+        const auto [w, h] = plan_.lines[slot];
+        auto &old = history_[previous_];
+        dispatch(publish_line, schedule(), div_up(w, 16), div_up(h, 8), {{1, old.lines.srv.Get()}, {2, old_rgb_srv_.Get()}, {3, source_.Get()}, {4, old.opacity.srv.Get()}, {6, next().lines.srv.Get()}}, {work_.uav.Get(), nullptr, nullptr, next().opacity.uav.Get(), protection_uav_.Get()});
       }
 
       void select_line(UINT slot) {
@@ -331,7 +347,7 @@ namespace models::host_sbs_direct_glyph_gpu {
         const current_cuda_context_t guard(cuda_, primary_);
         const palette_state_t saved(ctx_.Get());
         while (slot_ < plan_.lines.size()) {
-          if (!plan_.lines[slot_][0]) {
+          if (line_tiles(slot_) == 0u) {
             ++slot_;
             continue;
           }
@@ -362,7 +378,7 @@ namespace models::host_sbs_direct_glyph_gpu {
           // Retire this batch's GPU fence before changing the execution context's shape.
           break;
         }
-        while (slot_ < plan_.lines.size() && plan_.lines[slot_][0] == 0) {
+        while (slot_ < plan_.lines.size() && line_tiles(slot_) == 0u) {
           ++slot_;
         }
         if (slot_ == plan_.lines.size()) {
@@ -543,6 +559,10 @@ namespace models::host_sbs_direct_glyph_gpu {
         return history_[previous_].lines.buffer.Get();
       }
 
+      line_counts_t planned_lines() const noexcept {
+        return lines_;
+      }
+
 #ifdef SUNSHINE_TESTS
       UINT64 submitted_fences_for_tests() const noexcept {
         return submitted_fence_value_;
@@ -585,6 +605,7 @@ namespace models::host_sbs_direct_glyph_gpu {
         slot_ = 0;
         tile_start_ = 0;
         has_lines_ = false;
+        lines_ = {};
         const palette_state_t saved(ctx_.Get());
         ctx_->CopyResource(work_.buffer.Get(), submitted_work_.Get());
         const std::array<UINT, 4> zero {};
@@ -638,6 +659,17 @@ namespace models::host_sbs_direct_glyph_gpu {
           }
           ensure(next().opacity, pixels, 2 * sizeof(float));
           has_lines_ = true;
+          lines_.scored = lines_.carried = 0u;
+          const palette_state_t saved(ctx_.Get());
+          for (UINT slot = 0; slot < plan_.lines.size(); ++slot) {
+            if (line_carried(slot)) {
+              carry_line(slot);
+              ++lines_.carried;
+            } else if (plan_.lines[slot][0] != 0u) {
+              ++lines_.scored;
+            }
+          }
+          slot_ = 0;
         }
         score_chunk();
         return poll_status_e::pending;
@@ -763,6 +795,10 @@ namespace models::host_sbs_direct_glyph_gpu {
 
   ID3D11Buffer *resources_t::native_lines_for_evaluation() const noexcept {
     return palette_ ? palette_->committed_lines() : nullptr;
+  }
+
+  line_counts_t resources_t::planned_lines() const noexcept {
+    return palette_ ? palette_->planned_lines() : line_counts_t {};
   }
 #ifdef SUNSHINE_TESTS
   std::uint64_t resources_t::native_fences_for_tests() const noexcept {

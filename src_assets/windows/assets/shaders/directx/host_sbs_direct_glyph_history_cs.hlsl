@@ -136,6 +136,7 @@ bool direction_agrees(int2 a,int2 b,uint oldPower) {
     return lhs.x>rhs.x || (lhs.x==rhs.x && lhs.y>=rhs.y);
 }
 groupshared uint2 Counts[128];
+groupshared uint LineDiffers;
 
 [numthreads(128,1,1)]
 void confirm_history(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
@@ -143,6 +144,29 @@ void confirm_history(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
     GlyphLine record=Lines[slot];
     GlyphLine old=(GlyphLine)0;
     if (record.state.x>0) old=PreviousLines[record.state.x-1];
+    // A line whose rectangles and source pixels are exactly those of the line it continues would
+    // be scored to the same opacity: the score is a function of those pixels and of whether the
+    // line asks for glyph confirmation. Such a line is carried over instead. Its record keeps the
+    // previous palette, and publish_line takes the previous measured opacity for it.
+    // `scored` is the rectangle a line is scored in when no geometry is carried into it:
+    // finish_windows gives it the detector cover's rows.
+    uint4 scored=uint4(record.base.x,record.cover.y,record.base.z,record.cover.w);
+    bool same_line=(SourceFlags&1u)!=0u && HasPrevious!=0u && record.state.x!=0u &&
+                   (record.state.w!=0u)==((old.state.z&LineAsked)!=0u) &&
+                   old.state.w!=NoGlyphInk && rectangle(scored) && all(old.base==record.base) &&
+                   all(old.cover==record.cover) && all(old.box==scored);
+    if (lane==0) LineDiffers=0u;
+    GroupMemoryBarrierWithGroupSync();
+    if (same_line) {
+        uint2 extent=scored.zw-scored.xy;
+        bool differs=false;
+        for (uint texel=lane; texel<extent.x*extent.y; texel+=128u) {
+            int3 at=int3(scored.xy+uint2(texel%extent.x,texel/extent.x),0);
+            // Bit for bit: the score reads these values, not their display codes.
+            differs=differs || any(asuint(CurrentSource.Load(at).rgb)!=asuint(PreviousSource.Load(at).rgb));
+        }
+        if (differs) InterlockedOr(LineDiffers,1u);
+    }
     uint4 carried=intersect_rect(uint4(min(record.base.xy,old.base.xy),max(record.base.zw,old.base.zw)),record.cover);
     // Geometry must be decided before inference. Only search when it can enlarge the crop.
     uint4 r=intersect_rect(old.box,record.base);
@@ -167,9 +191,16 @@ void confirm_history(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
         if (lane<step) Counts[lane]+=Counts[lane+step];
         GroupMemoryBarrierWithGroupSync();
     }
-    if (lane==0 && Counts[0].x>=24 && 10u*Counts[0].y>=7u*Counts[0].x) {
-        record.box=carried;
-        Lines[slot]=record;
+    if (lane==0) {
+        // The two never meet: geometry is carried only into a line whose rectangle changed.
+        bool carry_box=Counts[0].x>=24 && 10u*Counts[0].y>=7u*Counts[0].x;
+        bool carry_line=same_line && LineDiffers==0u;
+        if (carry_box) record.box=carried;
+        if (carry_line) {
+            record.state.z=LineCarried|(old.state.z&LineAsked);
+            record.state.w=old.state.w;
+        }
+        if (carry_box || carry_line) Lines[slot]=record;
     }
 }
 
@@ -189,7 +220,8 @@ void finish_windows() {
         record.box.w = record.cover.w;
         uint2 size=record.box.zw-record.box.xy;
         Sizes[slot]=size;
-        Sizes[9u + slot] = uint2(reference_height, 0u);
+        // The second word tells the scheduler that the line is carried over and needs no tiles.
+        Sizes[9u + slot] = uint2(reference_height, (record.state.z & LineCarried) != 0u ? 1u : 0u);
         if (all(size>0)) {
             record.state.y=offset;
             Lines[slot]=record;
@@ -217,16 +249,19 @@ bool ink_changed(uint4 counts, uint allowance, uint limit) {
 [numthreads(128,1,1)]
 void confirm_mask_history(uint lane : SV_GroupIndex) {
     GlyphLine record=Lines[Slot];
+    // The request leaves w below. A later observation carries the line over only under the same one.
+    uint asked=record.state.w!=0u ? LineAsked : 0u;
     uint fill=PaletteWinners[0], outline=PaletteWinners[1];
     if (fill==NoGlyphInk) {
         if (lane==0) {
             record.state.w=NoGlyphInk;
-            record.state.z=0u;
+            record.state.z=asked;
             Lines[Slot]=record;
         }
         return;
     }
     record.state.w=fill|(outline<<13);
+    record.state.z=asked;
     if (HasPrevious==0) {
         if (lane==0) Lines[Slot]=record;
         return;
@@ -277,7 +312,7 @@ void confirm_mask_history(uint lane : SV_GroupIndex) {
     }
     if (lane==0) {
         uint4 total=ChangeCounts[0];
-        record.state.z=total.x>=24u && WindowRejected==0u && !ink_changed(total,4u,40u);
+        record.state.z=asked|(total.x>=24u && WindowRejected==0u && !ink_changed(total,4u,40u) ? LineConfirmed : 0u);
         Lines[Slot]=record;
     }
 }
@@ -315,6 +350,16 @@ void publish_line(uint3 id: SV_DispatchThreadID) {
     uint2 size=record.box.zw-record.box.xy;
     if (any(id.xy>=size)) return;
     uint2 p=record.box.xy+id.xy;
+    if ((record.state.z&LineCarried)!=0u) {
+        // The same pixels in the same rectangle: what the previous score measured is this score.
+        // Scored again, the blend below would add nothing to it, since nothing differs.
+        GlyphOpacity kept;
+        kept.measured = PreviousAlpha[raw_index(PreviousLines[record.state.x-1],p)].measured;
+        kept.published = kept.measured;
+        NextAlpha[raw_index(record,p)] = kept;
+        InterlockedMax(Protection[p],uint(round(saturate(kept.measured)*255)));
+        return;
+    }
     float a=LineAlpha[id.y*size.x+id.x];
     if (!isfinite(a) || a<0 || a>1) {
         uint ignored;
@@ -323,7 +368,7 @@ void publish_line(uint3 id: SV_DispatchThreadID) {
     }
     GlyphOpacity opacity;
     opacity.measured = a;
-    if (record.state.z!=0) {
+    if ((record.state.z&LineConfirmed)!=0u) {
         GlyphLine old=PreviousLines[record.state.x-1];
         if (all(p>=old.box.xy) && all(p<old.box.zw)) {
             int3 delta=abs(rgb8(CurrentSource,p)-rgb8(PreviousSource,p));

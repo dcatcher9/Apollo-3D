@@ -4074,6 +4074,10 @@ namespace models {
           "direct_glyph_retire",
           std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - subtitle_direct_glyph_dispatched_at).count()
         );
+        // Counts, not times: how many lines this score had to score and how many it carried over.
+        const auto lines = subtitle_direct_glyph.planned_lines();
+        sbs_perf::add_sample_ms("direct_glyph_lines_scored", static_cast<double>(lines.scored));
+        sbs_perf::add_sample_ms("direct_glyph_lines_carried", static_cast<double>(lines.carried));
       }
       if (retirement.selected_matte_commands) {
         subtitle_selected_matte_commands = *retirement.selected_matte_commands;
