@@ -2192,7 +2192,10 @@ conversion's prior poll.
 Once the observation is ready to hand over, the loop does not wait out a frame interval. A
 capture already queued takes the finished picture along; without one the retained source is
 converted at once and delivers it. The picture of a capture whose work outlasted its conversion
-therefore goes out when it is ready, and not one frame interval later.
+therefore goes out when it is ready, and not one frame interval later. That delivery keeps the
+capture time of its retained source as its presentation time, which becomes the RTP timestamp:
+a client that spaces frames by the host's times places the late picture by its capture and not
+by the moment its work happened to finish.
 
 A conversion that draws the previous packed picture again because the picture of its own
 capture is still pending is not encoded. That earlier picture has gone out, and a second copy

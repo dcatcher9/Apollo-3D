@@ -2303,8 +2303,11 @@ namespace video {
                                     now, encode_frame_timestamp, encode_frame_threshold, frame_variation_threshold
                                   )} :
                                   std::nullopt;
+          // The picture delivered here is that of the retained capture, however late its work
+          // finished. Its presentation time, which becomes the packet timestamp, is the time of
+          // that capture: a client that spaces frames by it shows the picture where it belongs.
           if (!convert_delivery(
-                schedule ? schedule->presentation_timestamp : now,
+                schedule ? schedule->presentation_timestamp : last_img->frame_timestamp.value_or(now),
                 schedule ? std::optional {schedule->next_encode_target} : std::nullopt,
                 schedule ? std::nullopt : std::optional {now + encode_frame_threshold}
               )) {
