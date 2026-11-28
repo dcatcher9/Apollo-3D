@@ -15,6 +15,8 @@
 #include <chrono>
 #include <cstdint>
 #include <deque>
+#include <map>
+#include <memory>
 #include <dwmapi.h>
 #include <filesystem>
 #include <iomanip>
@@ -26,6 +28,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -43,6 +46,9 @@ namespace {
   constexpr auto machine_heartbeat_interval = 1s;
   constexpr auto periodic_full_scan_interval = 15s;
   constexpr auto event_full_scan_min_interval = 3s;
+  // How long a selection dropped for a foreground or geometry change is kept to be staged again.
+  constexpr auto remembered_selection_lifetime = 10min;
+  constexpr std::size_t maximum_remembered_selections = 4;
   constexpr unsigned maximum_cold_warmup_scans = 3;
   constexpr LONG coordinate_rounding_tolerance = 1;
 
@@ -166,11 +172,21 @@ namespace {
     std::size_t document_nodes {};
     std::size_t tagged_nodes {};
     std::size_t errors {};
+    // For --trace: the source line of each failed step, and why the walk stopped early.
+    std::map<int, std::size_t> error_lines;
+    std::vector<std::string> error_notes;
+    std::size_t vanished_nodes {};
+    const char *stopped = "";
     bool extended_properties_ready {};
     std::chrono::microseconds elapsed {};
     std::vector<observed_candidate_t> candidates;
     probe::selection_t selection;
   };
+
+  void note_error(scan_result_t &result, int line) {
+    ++result.errors;
+    ++result.error_lines[line];
+  }
 
   [[nodiscard]] const char *status_name(scan_status_e status) noexcept {
     switch (status) {
@@ -425,29 +441,73 @@ namespace {
     IAccessible *accessible {};
   };
 
+  // Set by --trace: nodes are described so that a failed step can name its node's parent.
+  bool trace_nodes = false;
+
+  [[nodiscard]] std::string narrow(std::wstring_view wide, std::size_t limit) {
+    wide = wide.substr(0, limit);
+    std::string out(wide.size() * 3u, '\0');
+    const int written = WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), out.data(), static_cast<int>(out.size()), nullptr, nullptr);
+    out.resize(written > 0 ? static_cast<std::size_t>(written) : 0u);
+    return out;
+  }
+
+  [[nodiscard]] std::shared_ptr<const std::string> describe_node(IAccessible *accessible, std::wstring_view attributes) {
+    std::ostringstream out;
+    VARIANT self;
+    VariantInit(&self);
+    self.vt = VT_I4;
+    self.lVal = CHILDID_SELF;
+    VARIANT role;
+    VariantInit(&role);
+    const HRESULT role_status = accessible->get_accRole(self, &role);
+    out << "role=" << (role_status == S_OK && role.vt == VT_I4 ? std::to_string(role.lVal) : "?");
+    VariantClear(&role);
+    BSTR name = nullptr;
+    if (accessible->get_accName(self, &name) == S_OK && name) {
+      out << " name='" << narrow(std::wstring_view(name, SysStringLen(name)), 40u) << "'";
+    }
+    SysFreeString(name);
+    out << " attrs='" << narrow(attributes, 160u) << "'";
+    return std::make_shared<const std::string>(out.str());
+  }
+
+  struct observed_candidate_t;
+  // A video element as the helper records it: where it is and whether it can be selected.
+  [[nodiscard]] observed_candidate_t observe_candidate(
+    IAccessible *accessible,
+    LONG unique_id,
+    DWORD state,
+    const probe::rect_t &element_rect,
+    const std::optional<document_context_t> &document,
+    const probe::rect_t &client_rect
+  );
+
+  // A node that has children, as the walk met it: what its children need of it, and what the walk
+  // needs to read its children again.
+  struct lineage_t {
+    com_ptr_t<IAccessible> accessible;
+    std::shared_ptr<lineage_t> parent;
+    std::size_t depth {};
+    std::optional<document_context_t> children_document;  // The document context of its children.
+    std::shared_ptr<const std::string> described;  // For --trace.
+    unsigned rewalks {};  // How often its children were read again.
+    unsigned reading {};  // Counts the readings of its children; a child knows which listed it.
+    bool reread_pending {};  // Queued to have its children read again.
+    bool gone {};  // Taken as having left the tree; its queued descendants are dropped.
+  };
+
   struct queued_node_t {
     com_ptr_t<IAccessible> accessible;
     std::size_t depth {};
     std::optional<document_context_t> document;
+    std::shared_ptr<lineage_t> parent;
+    LONG index_in_parent = -1;
+    unsigned parent_reading {};  // The reading of its parent's children that listed it.
+    // Set for a node queued again after a child of it had left the tree: only its children are
+    // read, and they are visited before anything else.
+    std::shared_ptr<lineage_t> read_again;
   };
-
-  [[nodiscard]] bool queue_dispatch(
-    std::deque<queued_node_t> &queue,
-    IDispatch *dispatch,
-    std::size_t depth,
-    const std::optional<document_context_t> &document,
-    std::size_t visited_nodes
-  ) {
-    if (queue.size() + visited_nodes >= maximum_nodes) {
-      return false;
-    }
-    auto query = accessible_from_dispatch(dispatch);
-    if (query.status != S_OK || !query.object) {
-      return false;
-    }
-    queue.push_back({std::move(query.object), depth, document});
-    return true;
-  }
 
   template<typename Service>
   scan_result_t scan_foreground(Service service) {
@@ -528,6 +588,7 @@ namespace {
         maximum_scan_work_time, scan_service_interval
       );
       if (!keep_running.load(std::memory_order_relaxed) || action == probe::census_checkpoint_e::exhausted) {
+        result.stopped = "time-or-node-limit";
         complete = false;
         aborted = true;
         return false;
@@ -538,6 +599,7 @@ namespace {
       // This runs on the scanning thread: a blocked cross-process COM call also blocks
       // heartbeats, so the host's existing watchdog can still terminate a hung helper.
       if (!foreground_current() || !service(foreground_current)) {
+        result.stopped = "foreground-or-service";
         complete = false;
         aborted = true;
         return false;
@@ -553,6 +615,7 @@ namespace {
     retained_identities.reserve(4096);
     std::vector<com_ptr_t<IAccessible>> retained_documents;
     retained_documents.reserve(16);
+    unsigned census_rewalks = 0;
 
     while (!queue.empty() && !aborted) {
       if (!checkpoint()) {
@@ -561,143 +624,173 @@ namespace {
       auto node = std::move(queue.front());
       queue.pop_front();
       if (!node.accessible) {
-        ++result.errors;
+        note_error(result, __LINE__);
         complete = false;
         continue;
       }
 
-      auto identity_query = query_com_identity(node.accessible.get());
-      if (identity_query.status != S_OK || !identity_query.object) {
-        ++result.errors;
-        complete = false;
-        continue;
+      // What this visit has recorded so far, so that a node found to have left the tree is
+      // taken out of the census again.
+      std::optional<std::uintptr_t> identity;
+      bool counted_ia2 = false;
+      bool counted_document = false;
+      bool counted_tagged = false;
+      bool added_candidate = false;
+      // The lineage this node's children refer to; made when its children are read.
+      std::shared_ptr<lineage_t> self = node.read_again;
+      if (self) {
+        self->reread_pending = false;
       }
-      const auto identity = reinterpret_cast<std::uintptr_t>(identity_query.object.get());
-      if (!visited.insert(identity).second) {
-        continue;
-      }
-      retained_identities.push_back(std::move(identity_query.object));
-      ++result.visited_nodes;
+      auto current_document = node.read_again ? node.read_again->children_document : node.document;
+      std::shared_ptr<const std::string> described = node.read_again ? node.read_again->described : nullptr;
 
-      auto current_document = node.document;
-      auto ia2_query = query_ia2(node.accessible.get());
-      if (ia2_query.status == S_OK && ia2_query.object) {
-        auto &ia2_accessible = ia2_query.object;
-        ++result.ia2_nodes;
-
-        LONG unique_id_before = 0;
-        LONG role = 0;
-        if (ia2_accessible->get_uniqueID(&unique_id_before) != S_OK || unique_id_before == 0 || ia2_accessible->role(&role) != S_OK) {
-          ++result.errors;
+      // A page replaces nodes while the walk is on its way to them, and such a node answers no
+      // query any more. A failed step is therefore first taken as the node having left the tree:
+      // everything recorded of it is withdrawn, and the children of its parent are read again and
+      // visited at once, which finds the node again if it is still there. Only when the bounds on
+      // that are used up does the step count as the error that leaves the census incomplete.
+      const auto left_the_tree = [&](int line, HRESULT status) {
+        if (self) {
+          self->gone = true;
+        }
+        const auto up = node.read_again ? node.read_again->parent : node.parent;
+        bool dropped = false;
+        for (auto ancestor = up; ancestor && !dropped; ancestor = ancestor->parent) {
+          // Under a node that was itself taken as gone: its parent is already being read again.
+          dropped = ancestor->gone;
+        }
+        if (!dropped && up) {
+          // A page tears a whole part down at once, and every node of it fails in turn. Only a
+          // node of the latest reading of its parent has anything new to say: one that an older
+          // reading listed was replaced by that later reading, and while a new reading is
+          // already queued it will cover this node as well.
+          const bool older_reading = !node.read_again && node.parent_reading != up->reading;
+          if (older_reading || up->reread_pending) {
+            dropped = true;
+          } else if (probe::vanished_node_rewalk_allowed(up->rewalks, census_rewalks)) {
+            ++up->rewalks;
+            ++census_rewalks;
+            up->reread_pending = true;
+            queue.push_front({retain_com(up->accessible.get()), up->depth, up->children_document, up->parent, -1, 0u, up});
+            dropped = true;
+          }
+        }
+        if (!dropped) {
+          if (trace_nodes) {
+            std::ostringstream out;
+            out << "line " << line << " hr=0x" << std::hex << static_cast<unsigned long>(status) << std::dec << " depth=" << node.depth
+                << " child#" << node.index_in_parent << " of {" << (up && up->described ? *up->described : std::string("?")) << "}";
+            result.error_notes.push_back(out.str());
+          }
+          note_error(result, line);
           complete = false;
-        } else {
+          return false;
+        }
+        ++result.vanished_nodes;
+        if (identity) {
+          visited.erase(*identity);
+          --result.visited_nodes;
+        }
+        result.ia2_nodes -= counted_ia2 ? 1u : 0u;
+        result.tagged_nodes -= counted_tagged ? 1u : 0u;
+        if (counted_document) {
+          // The retained object stays: children already queued under it name it as their document.
+          --result.document_nodes;
+        }
+        if (added_candidate) {
+          result.candidates.pop_back();
+        }
+        return true;
+      };
+
+      if (!node.read_again) {
+        auto identity_query = query_com_identity(node.accessible.get());
+        if (identity_query.status != S_OK || !identity_query.object) {
+          (void) left_the_tree(__LINE__, identity_query.status);
+          continue;
+        }
+        const auto identity_value = reinterpret_cast<std::uintptr_t>(identity_query.object.get());
+        if (!visited.insert(identity_value).second) {
+          continue;
+        }
+        identity = identity_value;
+        retained_identities.push_back(std::move(identity_query.object));
+        ++result.visited_nodes;
+
+        auto ia2_query = query_ia2(node.accessible.get());
+        if (ia2_query.status == S_OK && ia2_query.object) {
+          auto &ia2_accessible = ia2_query.object;
+          ++result.ia2_nodes;
+          counted_ia2 = true;
+
+          LONG unique_id_before = 0;
+          LONG role = 0;
+          if (ia2_accessible->get_uniqueID(&unique_id_before) != S_OK || unique_id_before == 0 || ia2_accessible->role(&role) != S_OK) {
+            (void) left_the_tree(__LINE__, E_FAIL);
+            continue;
+          }
           if (role == ROLE_SYSTEM_DOCUMENT) {
             const auto state = accessible_state(node.accessible.get());
             const auto document_rect = accessible_rect(node.accessible.get());
             LONG unique_id_after = 0;
             if (!state || !document_rect || ia2_accessible->get_uniqueID(&unique_id_after) != S_OK || unique_id_after == 0 || unique_id_after != unique_id_before) {
-              ++result.errors;
-              complete = false;
-            } else {
-              constexpr DWORD unavailable_states =
-                STATE_SYSTEM_UNAVAILABLE | STATE_SYSTEM_INVISIBLE | STATE_SYSTEM_OFFSCREEN;
-              const bool state_available = (*state & unavailable_states) == 0;
-              retained_documents.push_back(retain_com(node.accessible.get()));
-              current_document = document_context_t {
-                .unique_id = unique_id_before,
-                .rect = *document_rect,
-                .state_available = state_available,
-                .accessible = retained_documents.back().get(),
-              };
-              ++result.document_nodes;
+              (void) left_the_tree(__LINE__, E_FAIL);
+              continue;
             }
+            constexpr DWORD unavailable_states =
+              STATE_SYSTEM_UNAVAILABLE | STATE_SYSTEM_INVISIBLE | STATE_SYSTEM_OFFSCREEN;
+            const bool state_available = (*state & unavailable_states) == 0;
+            retained_documents.push_back(retain_com(node.accessible.get()));
+            current_document = document_context_t {
+              .unique_id = unique_id_before,
+              .rect = *document_rect,
+              .state_available = state_available,
+              .accessible = retained_documents.back().get(),
+            };
+            ++result.document_nodes;
+            counted_document = true;
           }
 
           bstr_t attributes;
           const HRESULT attributes_status = ia2_accessible->get_attributes(attributes.put());
-          if (attributes_status == S_OK) {
-            if (!attributes.get()) {
-              ++result.errors;
-              complete = false;
-            } else {
-              const auto length = static_cast<std::size_t>(SysStringLen(attributes.get()));
-              const auto match = probe::match_video_tag(
-                std::wstring_view(attributes.get(), length)
-              );
-              if (!match.valid) {
-                ++result.errors;
-                complete = false;
-              } else {
-                if (match.has_tag) {
-                  ++result.tagged_nodes;
-                }
-                if (match.is_video) {
-                  const auto state = accessible_state(node.accessible.get());
-                  const auto element_rect = accessible_rect(node.accessible.get());
-                  LONG unique_id_after = 0;
-                  if (!state || !element_rect || ia2_accessible->get_uniqueID(&unique_id_after) != S_OK || unique_id_after == 0 || unique_id_after != unique_id_before) {
-                    ++result.errors;
-                    complete = false;
-                  } else {
-                    constexpr DWORD unavailable_states =
-                      STATE_SYSTEM_UNAVAILABLE | STATE_SYSTEM_INVISIBLE |
-                      STATE_SYSTEM_OFFSCREEN;
-                    const auto visible_rect = current_document ?
-                                                probe::windowed_video_viewport(result.client_rect, current_document->rect, *element_rect) :
-                                                std::nullopt;
-                    const bool state_available =
-                      (*state & unavailable_states) == 0;
-                    observed_candidate_t candidate;
-                    candidate.geometry.unique_id = unique_id_before;
-                    candidate.geometry.element_rect = *element_rect;
-                    candidate.geometry.visible_rect = visible_rect.value_or(probe::rect_t {});
-                    candidate.geometry.available =
-                      state_available && visible_rect.has_value() &&
-                      current_document && current_document->state_available;
-                    candidate.geometry.fully_contained =
-                      current_document &&
-                      probe::clip_if_within_tolerance(
-                        result.client_rect,
-                        *element_rect,
-                        coordinate_rounding_tolerance
-                      )
-                        .has_value() &&
-                      probe::clip_if_within_tolerance(
-                        current_document->rect,
-                        *element_rect,
-                        coordinate_rounding_tolerance
-                      )
-                        .has_value();
-                    candidate.geometry.credible_size =
-                      probe::credible_video_extent(*element_rect, result.client_rect);
-                    candidate.geometry.fullscreen_available =
-                      probe::fullscreen_semantic_available(
-                        state_available,
-                        current_document.has_value(),
-                        current_document && current_document->state_available
-                      );
-                    candidate.state = *state;
-                    candidate.document_unique_id =
-                      current_document ? current_document->unique_id : 0;
-                    candidate.document_rect =
-                      current_document ? current_document->rect : probe::rect_t {};
-                    candidate.accessible = retain_com(node.accessible.get());
-                    candidate.document_accessible = retain_com(
-                      current_document ? current_document->accessible : nullptr
-                    );
-                    result.candidates.push_back(std::move(candidate));
-                  }
-                }
-              }
-            }
-          } else if (FAILED(attributes_status)) {
-            ++result.errors;
-            complete = false;
+          if (FAILED(attributes_status) || (attributes_status == S_OK && !attributes.get())) {
+            (void) left_the_tree(__LINE__, attributes_status);
+            continue;
           }
+          if (trace_nodes) {
+            described = describe_node(node.accessible.get(), attributes.get() ? std::wstring_view(attributes.get(), SysStringLen(attributes.get())) : std::wstring_view {});
+          }
+          if (attributes_status == S_OK) {
+            const auto length = static_cast<std::size_t>(SysStringLen(attributes.get()));
+            const auto match = probe::match_video_tag(
+              std::wstring_view(attributes.get(), length)
+            );
+            if (!match.valid) {
+              (void) left_the_tree(__LINE__, E_FAIL);
+              continue;
+            }
+            if (match.has_tag) {
+              ++result.tagged_nodes;
+              counted_tagged = true;
+            }
+            if (match.is_video) {
+              const auto state = accessible_state(node.accessible.get());
+              const auto element_rect = accessible_rect(node.accessible.get());
+              LONG unique_id_after = 0;
+              if (!state || !element_rect || ia2_accessible->get_uniqueID(&unique_id_after) != S_OK || unique_id_after == 0 || unique_id_after != unique_id_before) {
+                (void) left_the_tree(__LINE__, E_FAIL);
+                continue;
+              }
+              result.candidates.push_back(observe_candidate(
+                node.accessible.get(), unique_id_before, *state, *element_rect, current_document, result.client_rect
+              ));
+              added_candidate = true;
+            }
+          }
+        } else if (ia2_query.status != E_NOINTERFACE) {
+          (void) left_the_tree(__LINE__, ia2_query.status);
+          continue;
         }
-      } else if (ia2_query.status != E_NOINTERFACE) {
-        ++result.errors;
-        complete = false;
       }
 
       if (node.depth >= maximum_depth) {
@@ -710,13 +803,53 @@ namespace {
 
       LONG child_count = 0;
       const HRESULT child_count_status = node.accessible->get_accChildCount(&child_count);
-      if (child_count_status != S_OK || child_count < 0 || child_count > maximum_children_per_node) {
-        ++result.errors;
+      if (child_count_status != S_OK || child_count < 0) {
+        (void) left_the_tree(__LINE__, child_count_status);
+        continue;
+      }
+      if (child_count > maximum_children_per_node) {
+        note_error(result, __LINE__);
         complete = false;
         continue;
       }
-      for (LONG first = 0; first < child_count;) {
+      if (child_count == 0) {
+        continue;
+      }
+      if (!self) {
+        self = std::make_shared<lineage_t>();
+        self->accessible = retain_com(node.accessible.get());
+        self->parent = node.parent;
+        self->depth = node.depth;
+      }
+      self->children_document = current_document;
+      self->described = described;
+      // Read again and answering: it is in the tree.
+      self->gone = false;
+      ++self->reading;
+      // The children of a node read again are visited before anything else, while they are fresh.
+      const bool at_front = node.read_again != nullptr;
+      const auto queue_child = [&](IDispatch *dispatch, LONG index) {
+        auto query = accessible_from_dispatch(dispatch);
+        if (query.status != S_OK || !query.object) {
+          return false;
+        }
+        queued_node_t child {std::move(query.object), node.depth + 1, current_document, self, index, self->reading};
+        if (at_front) {
+          queue.push_front(std::move(child));
+        } else {
+          queue.push_back(std::move(child));
+        }
+        return true;
+      };
+      // A child list that changes while it is read is read again as a whole, by the same rule.
+      bool children_read = true;
+      for (LONG first = 0; first < child_count && children_read;) {
         if (!checkpoint()) {
+          break;
+        }
+        if (queue.size() + result.visited_nodes + 64u >= maximum_nodes) {
+          note_error(result, __LINE__);
+          complete = false;
           break;
         }
         std::array<VARIANT, 64> children;
@@ -735,74 +868,47 @@ namespace {
           children.data(),
           &obtained
         );
-        if (children_status != S_OK || obtained < 0 || obtained > requested) {
-          for (auto &child : children) {
-            VariantClear(&child);
-          }
-          ++result.errors;
-          complete = false;
-          break;
-        }
-
-        for (LONG index = 0; index < obtained; ++index) {
-          if (!checkpoint()) {
-            break;
-          }
+        children_read = children_status == S_OK && obtained > 0 && obtained <= requested;
+        for (LONG index = 0; index < obtained && children_read; ++index) {
           auto &child = children[static_cast<std::size_t>(index)];
           if (child.vt == VT_DISPATCH && child.pdispVal) {
-            if (!queue_dispatch(
-                  queue,
-                  child.pdispVal,
-                  node.depth + 1,
-                  current_document,
-                  result.visited_nodes
-                )) {
-              ++result.errors;
-              complete = false;
-            }
+            children_read = queue_child(child.pdispVal, first + index);
           } else if (child.vt == VT_I4) {
             IDispatch *dispatch = nullptr;
             const HRESULT child_status = node.accessible->get_accChild(child, &dispatch);
+            // S_FALSE names a simple element without an object of its own: nothing to visit.
             if (child_status == S_OK && dispatch) {
-              if (!queue_dispatch(
-                    queue,
-                    dispatch,
-                    node.depth + 1,
-                    current_document,
-                    result.visited_nodes
-                  )) {
-                ++result.errors;
-                complete = false;
-              }
+              children_read = queue_child(dispatch, first + index);
               dispatch->Release();
-            } else if (child_status == S_OK) {
-              ++result.errors;
-              complete = false;
-            } else if (FAILED(child_status)) {
-              ++result.errors;
-              complete = false;
+            } else if (child_status == S_OK || FAILED(child_status)) {
+              children_read = false;
             }
           } else {
-            ++result.errors;
-            complete = false;
+            children_read = false;
           }
         }
         for (auto &child : children) {
           VariantClear(&child);
         }
-        if (aborted) {
-          break;
-        }
-        if (obtained == 0) {
-          if (first < child_count) {
-            complete = false;
-          }
+        if (!children_read) {
+          (void) left_the_tree(__LINE__, children_status);
           break;
         }
         first += obtained;
       }
     }
 
+    if (!aborted) {
+      // The walk is not one moment: a video element the page replaced during it was met twice,
+      // as the node it was and as the node it is. A candidate that no longer answers as itself
+      // has left the tree, and is not a second video.
+      result.vanished_nodes += std::erase_if(result.candidates, [](const observed_candidate_t &candidate) {
+        auto ia2_query = query_ia2(candidate.accessible.get());
+        LONG unique_id = 0;
+        return ia2_query.status != S_OK || !ia2_query.object ||
+               ia2_query.object->get_uniqueID(&unique_id) != S_OK || unique_id != candidate.geometry.unique_id;
+      });
+    }
     if (std::chrono::steady_clock::now() - started >= maximum_scan_work_time) {
       complete = false;
     }
@@ -843,6 +949,9 @@ namespace {
     std::string semantic_fingerprint;
     com_ptr_t<IAccessible> accessible;
     com_ptr_t<IAccessible> document_accessible;
+    // It has been established, here or in the selection it was staged again from: worth
+    // remembering when it is dropped for anything but a census that found no video to select.
+    bool established_once {};
   };
 
   struct accessible_snapshot_t {
@@ -1175,6 +1284,7 @@ namespace {
     std::chrono::milliseconds interval {1000};
     bool all_scans {};
     bool machine {};
+    bool trace {};
     bool interval_explicit {};
   };
 
@@ -1184,6 +1294,8 @@ namespace {
       const std::string_view argument = argv[index];
       if (argument == "--all-scans") {
         options.all_scans = true;
+      } else if (argument == "--trace") {
+        options.trace = true;
       } else if (argument == "--machine") {
         options.machine = true;
       } else if (argument == "--interval-ms" && index + 1 < argc) {
@@ -1208,7 +1320,8 @@ namespace {
           << "Machine mode stages a unique selection from one complete census and authorizes it "
              "only after an exact cached-object refresh on the next tick.\n"
           << "Human diagnostics retain the two-scan semantic display filter.\n"
-          << "--machine emits only strict SUNSHINE_VIDEO_DOM_V1 TSV records on stdout.\n";
+          << "--machine emits only strict SUNSHINE_VIDEO_DOM_V1 TSV records on stdout.\n"
+          << "--trace adds one line per census on stderr: how it ended, and the source line of each failed step.\n";
         return std::nullopt;
       } else {
         std::cerr << "Unknown option: " << argument << '\n';
@@ -1379,8 +1492,125 @@ namespace {
     return 0;
   }
 
+  observed_candidate_t observe_candidate(
+    IAccessible *accessible,
+    const LONG unique_id,
+    const DWORD state,
+    const probe::rect_t &element_rect,
+    const std::optional<document_context_t> &document,
+    const probe::rect_t &client_rect
+  ) {
+    constexpr DWORD unavailable_states =
+      STATE_SYSTEM_UNAVAILABLE | STATE_SYSTEM_INVISIBLE | STATE_SYSTEM_OFFSCREEN;
+    const auto visible_rect = document ?
+                                probe::windowed_video_viewport(client_rect, document->rect, element_rect) :
+                                std::nullopt;
+    const bool state_available = (state & unavailable_states) == 0;
+    observed_candidate_t candidate;
+    candidate.geometry.unique_id = unique_id;
+    candidate.geometry.element_rect = element_rect;
+    candidate.geometry.visible_rect = visible_rect.value_or(probe::rect_t {});
+    candidate.geometry.available =
+      state_available && visible_rect.has_value() && document && document->state_available;
+    candidate.geometry.fully_contained =
+      document &&
+      probe::clip_if_within_tolerance(client_rect, element_rect, coordinate_rounding_tolerance).has_value() &&
+      probe::clip_if_within_tolerance(document->rect, element_rect, coordinate_rounding_tolerance).has_value();
+    candidate.geometry.credible_size = probe::credible_video_extent(element_rect, client_rect);
+    candidate.geometry.fullscreen_available = probe::fullscreen_semantic_available(
+      state_available,
+      document.has_value(),
+      document && document->state_available
+    );
+    candidate.state = state;
+    candidate.document_unique_id = document ? document->unique_id : 0;
+    candidate.document_rect = document ? document->rect : probe::rect_t {};
+    candidate.accessible = retain_com(accessible);
+    candidate.document_accessible = retain_com(document ? document->accessible : nullptr);
+    return candidate;
+  }
+
+  // The window the helper had a video in is in front again, or was moved or resized, and its page
+  // is most likely the one it was. The retained document and video objects are asked again: if
+  // they are the same available objects, the selection is staged from them as a census stages
+  // it, with the geometry they have now. Like every staged selection it is published only after
+  // the next tick's exact refresh, and the caller has a census follow at once as its audit, which
+  // revokes it if the page has since gained a second video.
+  [[nodiscard]] std::optional<cached_selection_t> restage_remembered_selection(const cached_selection_t &old) {
+    const HWND foreground = GetForegroundWindow();
+    if (!foreground || GetAncestor(foreground, GA_ROOT) != old.window || !window_available(old.window)) {
+      return std::nullopt;
+    }
+    DWORD process_id = 0;
+    GetWindowThreadProcessId(old.window, &process_id);
+    const auto client = foreground_client_rect(old.window);
+    if (process_id != old.process_id || !client) {
+      return std::nullopt;
+    }
+    const auto document = snapshot_accessible(old.document_accessible.get(), old.document_unique_id, true, false);
+    const auto video = snapshot_accessible(old.accessible.get(), old.video_unique_id, false, true);
+    if (!document || !video) {
+      return std::nullopt;
+    }
+    scan_result_t result;
+    result.status = scan_status_e::warming_up;
+    result.extended_properties_ready = true;
+    result.window = old.window;
+    result.process_id = process_id;
+    result.client_rect = *client;
+    result.client_fills_monitor = client_fills_monitor(old.window, *client);
+    const document_context_t context {
+      .unique_id = document->unique_id,
+      .rect = document->rect,
+      .state_available = true,  // snapshot_accessible() accepts no other.
+      .accessible = old.document_accessible.get(),
+    };
+    result.candidates.push_back(observe_candidate(
+      old.accessible.get(), video->unique_id, video->state, video->rect, context, result.client_rect
+    ));
+    const auto selection = select_video(result);
+    auto staged = cache_complete_ready_selection(
+      result,
+      selection,
+      semantic_fingerprint(result, selection),
+      probe::cached_selection_phase_e::provisional
+    );
+    if (staged) {
+      staged->established_once = true;
+    }
+    return staged;
+  }
+
   int run_machine(const options_t &options) {
     std::optional<cached_selection_t> cached;
+    // The selection last dropped for a foreground or geometry change, or a refresh that failed:
+    // staged again, without a census, when its window is in front. See
+    // restage_remembered_selection().
+    struct remembered_t {
+      cached_selection_t selection;
+      std::chrono::steady_clock::time_point at;
+    };
+    std::vector<remembered_t> remembered;  // One for each of the last few windows.
+    const auto forget_window = [&](const HWND window) {
+      std::erase_if(remembered, [&](const remembered_t &entry) {
+        return entry.selection.window == window;
+      });
+    };
+    const auto set_aside = [&]() {
+      if (cached && cached->established_once) {
+        forget_window(cached->window);
+        if (remembered.size() >= maximum_remembered_selections) {
+          remembered.erase(remembered.begin());
+        }
+        remembered.push_back({std::move(*cached), std::chrono::steady_clock::now()});
+      }
+      cached.reset();
+    };
+    const auto note_phase = [&]() {
+      if (cached && cached->phase == probe::cached_selection_phase_e::established) {
+        cached->established_once = true;
+      }
+    };
     unsigned cold_warmup_scans = 0;
     machine_record_t current = invalid_machine_record("warming");
     machine_record_t last_emitted = invalid_machine_record("changed");
@@ -1417,12 +1647,39 @@ namespace {
         observed_object_generation = object_change_generation.load(
           std::memory_order_relaxed
         );
-        cached.reset();
+        set_aside();
         cold_warmup_scans = 0;
         next_full_scan = std::chrono::steady_clock::now();
         publish(invalid_machine_record("changed"), true);
         std::this_thread::sleep_for(options.interval);
         continue;
+      }
+
+      if (!cached && !remembered.empty()) {
+        std::erase_if(remembered, [](const remembered_t &entry) {
+          return std::chrono::steady_clock::now() - entry.at > remembered_selection_lifetime;
+        });
+        const HWND foreground = GetForegroundWindow();
+        const HWND root = foreground ? GetAncestor(foreground, GA_ROOT) : nullptr;
+        const auto entry = std::find_if(remembered.begin(), remembered.end(), [&](const remembered_t &candidate) {
+          return candidate.selection.window == root;
+        });
+        if (root && entry != remembered.end()) {
+          // One attempt: objects that no longer answer are not asked again.
+          auto staged = restage_remembered_selection(entry->selection);
+          remembered.erase(entry);
+          if (staged) {
+            cached = std::move(staged);
+            // The census that audits it follows the exact refresh of the next tick.
+            next_full_scan = std::chrono::steady_clock::now();
+            if (options.trace) {
+              std::cerr << "staged again without a census" << std::endl;
+            }
+            publish(invalid_machine_record("warming"));
+            std::this_thread::sleep_for(options.interval);
+            continue;
+          }
+        }
       }
 
       const auto now = std::chrono::steady_clock::now();
@@ -1453,13 +1710,14 @@ namespace {
           tick_event_policy
         );
         if (!refresh_policy.retain_selection) {
-          cached.reset();
+          set_aside();
           next_full_scan = now;
           publish(invalid_machine_record("changed"), true);
           std::this_thread::sleep_for(options.interval);
           continue;
         }
         cached->phase = refresh_policy.next_phase;
+        note_phase();
         current = refresh_policy.publish_ok ?
                     machine_record_for_cache(*cached) :
                     invalid_machine_record("warming");
@@ -1491,16 +1749,30 @@ namespace {
               cached->phase, refresh_cached_selection(*cached), {}
             );
             if (!refresh_policy.retain_selection) {
-              cached.reset();
+              set_aside();
               return invalid_machine_record("changed");
             }
             cached->phase = refresh_policy.next_phase;
+        note_phase();
             return refresh_policy.publish_ok ? machine_record_for_cache(*cached) :
                                                invalid_machine_record("warming");
           }
           return invalid_machine_record("warming");
         }, foreground_current, [&](const auto &record) { publish(record); });
       });
+      if (options.trace) {
+        std::cerr << "census status=" << status_name(result.status) << " nodes=" << result.visited_nodes
+                  << " candidates=" << result.candidates.size() << " errors=" << result.errors
+                  << " ms=" << result.elapsed.count() / 1000 << " vanished=" << result.vanished_nodes
+                  << " stopped=" << result.stopped << " failed-steps=";
+        for (const auto &[line, count] : result.error_lines) {
+          std::cerr << line << 'x' << count << ' ';
+        }
+        std::cerr << std::endl;
+        for (const auto &note : result.error_notes) {
+          std::cerr << "  " << note << std::endl;
+        }
+      }
       // Successful scans route events before their first checkpoint. Also clear stale routing
       // when the census returned early for an unsupported foreground window.
       monitored_window_value.store(
@@ -1531,7 +1803,7 @@ namespace {
       if (scan_event_policy.discard_completed_scan) {
         observed_foreground_generation = foreground_generation_after_scan;
         observed_object_generation = object_generation_after_scan;
-        cached.reset();
+        set_aside();
         cold_warmup_scans = 0;
         current = invalid_machine_record("changed");
         publish(current, true);
@@ -1583,6 +1855,7 @@ namespace {
             result.selection = {};
           } else {
             cached = std::move(replacement);
+            note_phase();
             if (census_policy.publish_ok) {
               // The same established object was authenticated before this census. Replacing its
               // retained COM handles does not reduce its already-established authority.
@@ -1598,6 +1871,7 @@ namespace {
           // Partial or equal-largest candidates are represented as ambiguous by select_video().
           result.status = scan_status_e::ok;
           cached.reset();
+          forget_window(result.window);
         } else {
           result.status = scan_status_e::traversal_incomplete;
           result.selection = {};
@@ -1615,11 +1889,11 @@ namespace {
         retained_cache_after_inconclusive_scan =
           cached && refresh_cached_selection(*cached);
         if (!retained_cache_after_inconclusive_scan) {
-          cached.reset();
+          set_aside();
         }
       } else if (!staged_provisional && result.status != scan_status_e::ok) {
         // Foreground/window failures invalidate the old browser identity immediately.
-        cached.reset();
+        set_aside();
       }
 
       if (cached &&
@@ -1654,7 +1928,7 @@ namespace {
       if (publish_event_policy.discard_completed_scan) {
         observed_foreground_generation = foreground_generation_before_publish;
         observed_object_generation = object_generation_before_publish;
-        cached.reset();
+        set_aside();
         cold_warmup_scans = 0;
         publish(invalid_machine_record("changed"), true);
         next_full_scan = std::chrono::steady_clock::now() + options.interval;
@@ -1678,13 +1952,14 @@ namespace {
             publish_event_policy
           );
           if (!refresh_policy.retain_selection) {
-            cached.reset();
+            set_aside();
             publish(invalid_machine_record("changed"), true);
             next_full_scan = last_full_scan + options.interval;
             std::this_thread::sleep_for(options.interval);
             continue;
           }
           cached->phase = refresh_policy.next_phase;
+        note_phase();
           current = machine_record_for_cache(*cached);
         }
       }
@@ -1731,6 +2006,7 @@ namespace {
 
 int main(int argc, char **argv) {
   const auto options = parse_options(argc, argv);
+  trace_nodes = options && options->trace;
   if (!options) {
     return argc > 1 && (std::string_view(argv[1]) == "--help" ||
                         std::string_view(argv[1]) == "-h") ?

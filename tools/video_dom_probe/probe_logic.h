@@ -38,6 +38,21 @@ namespace video_dom_probe {
                                               census_checkpoint_e::continue_walk;
   }
 
+  // A page replaces nodes while the census walks it: a player's clock is a new text node every
+  // second, and its old one answers no query by the time the walk reaches it. Such a node is no
+  // part of the tree any more, so the census reads its parent's children again instead of
+  // failing. The bounds keep this fail-closed: a node its parent still lists and that still
+  // answers nothing uses them up and then counts as the error it is.
+  inline constexpr unsigned maximum_vanished_rewalks_per_parent = 4u;
+  inline constexpr unsigned maximum_vanished_rewalks_per_census = 256u;
+  [[nodiscard]] inline constexpr bool vanished_node_rewalk_allowed(
+    unsigned parent_rewalks,
+    unsigned census_rewalks
+  ) noexcept {
+    return parent_rewalks < maximum_vanished_rewalks_per_parent &&
+           census_rewalks < maximum_vanished_rewalks_per_census;
+  }
+
   // Refresh may enter cross-process COM and deliver a foreground transition. Authenticate
   // again after it returns, immediately before publishing any tentative heartbeat record.
   template<typename Refresh, typename Validate, typename Publish>

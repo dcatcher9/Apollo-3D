@@ -263,6 +263,16 @@ TEST(VideoDomProbeLogic, CensusLifetimeAndNodeLimitsTakePrecedenceOverService) {
     probe::census_checkpoint_e::exhausted);
 }
 
+// A player's clock is a new node every second: the walk reads its parent's children again and
+// does not fail. A node that keeps failing uses the bounds up and is the error it was before.
+TEST(VideoDomProbeLogic, AVanishedNodeIsReadAgainFromItsParentWithinBounds) {
+  EXPECT_TRUE(probe::vanished_node_rewalk_allowed(0u, 0u));
+  EXPECT_TRUE(probe::vanished_node_rewalk_allowed(probe::maximum_vanished_rewalks_per_parent - 1u, 0u));
+  EXPECT_FALSE(probe::vanished_node_rewalk_allowed(probe::maximum_vanished_rewalks_per_parent, 0u));
+  EXPECT_TRUE(probe::vanished_node_rewalk_allowed(0u, probe::maximum_vanished_rewalks_per_census - 1u));
+  EXPECT_FALSE(probe::vanished_node_rewalk_allowed(0u, probe::maximum_vanished_rewalks_per_census));
+}
+
 TEST(VideoDomProbeLogic, ForegroundAbaDuringLongCensusCannotRefreshOrPublishAuthority) {
   using namespace std::chrono_literals;
   ASSERT_EQ(probe::census_checkpoint_policy(3s, 100ms, 1500, 20000, 15s, 100ms),

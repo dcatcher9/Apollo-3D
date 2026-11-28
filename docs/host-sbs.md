@@ -2635,12 +2635,39 @@ changes are hard vetoes, while unrelated descendant-object churn only requests a
 three-second audit. An uncached incomplete traversal retries within one second; confirmed
 accessibility unavailability retains the 15-second backoff.
 
+A selection that had been established is not forgotten when it is dropped for a foreground or
+geometry change or a failed refresh: the helper keeps it, with its retained document and video
+objects, for each of the last four browser windows and for at most ten minutes. When such a
+window is in front and nothing is selected, the helper asks those objects again before any
+census. If they are the same available document and video, it stages the selection from them
+with the geometry they have now, exactly as a census stages one: provisional, published only
+after the next tick's exact refresh, and followed at once by a census as its audit, which keeps
+it, replaces it or revokes it by the rules above. So clicking away from the browser and back, or
+moving or resizing its window, costs two helper ticks and not a walk of the page. A census that
+finds no video to select also forgets what was remembered for its window, and objects that fail
+the question are not asked a second time.
+
 A census retains its traversal progress for up to 15 seconds instead of restarting at a two-second
 prefix of a larger accessibility tree. Approximately every 100 ms, the same scan thread services
 foreground events, revalidates the original browser root/process/client, and independently refreshes
 any established selection before sending its normal heartbeat. An uncached walk publishes only
 `warming` until the complete census and next-tick exact refresh succeed. Foreground changes abort
 the census; node, depth, child-count, provider-error and total-lifetime bounds still fail closed.
+A page replaces nodes while the walk is on its way to them: a player's clock is a new text node
+every second, and the old one answers no query once the walk reaches it. A failed step of a
+node's visit is therefore first taken as the node having left the tree. Everything the visit
+recorded of it is withdrawn, and the children of its parent are read again and visited before
+anything else, which finds the node again if it is still there; nodes queued under a node taken
+as gone are dropped the same way. A page also tears a whole part down at once: a node that an
+older reading of its parent listed, or whose parent is already queued to be read again, is
+dropped without another reading. A parent's children are read again at most four times and a
+census does so at most 256 times; past that the step is the error that leaves the census
+incomplete, so a node that is still listed and still answers nothing fails closed as before.
+At the end of the walk every video candidate must still answer under its own identity: an
+element the page replaced during the walk was met twice, and the one that has left the tree is
+not a second video. `video-dom-info
+--machine --trace` writes one line per census to stderr: how it ended, how many nodes had left
+the tree, and the source line and parent of each step that failed.
 Heartbeats have no separate timer thread: a blocked accessibility call still stops them and remains
 subject to the host's existing watchdog.
 
