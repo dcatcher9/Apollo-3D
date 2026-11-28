@@ -212,14 +212,6 @@ namespace models::host_sbs_direct_glyph_gpu {
         return std::clamp((28u * h + reference_height / 2u) / reference_height, 28u, palette_tile.height);
       }
 
-      UINT planned_tiles() const {
-        UINT tiles = 0;
-        for (UINT slot = 0; slot < plan_.lines.size(); ++slot) {
-          tiles += line_tiles(slot);
-        }
-        return tiles;
-      }
-
       UINT line_tiles(UINT slot) const {
         const auto [w, h] = plan_.lines[slot];
         return w ? div_up(div_up(w * encoder_rows(slot), h), 440u) : 0u;
@@ -297,10 +289,25 @@ namespace models::host_sbs_direct_glyph_gpu {
         dispatch(publish_line, schedule(), div_up(w, 16), div_up(h, 8), {{1, old.lines.srv.Get()}, {2, old_rgb_srv_.Get()}, {3, source_.Get()}, {4, old.opacity.srv.Get()}, {5, alpha_.srv.Get()}, {6, next().lines.srv.Get()}}, {work_.uav.Get(), nullptr, nullptr, next().opacity.uav.Get(), protection_uav_.Get()});
       }
 
-      // Scores every planned line in one encoder batch, each from its own batch position.
-      void score_lines() {
+      // The slot after the whole lines from `first` that fit one encoder batch together; `first`
+      // itself when its own line needs more than one batch.
+      UINT batch_end(UINT first) const {
+        UINT end = first;
+        for (UINT tiles = 0; end < plan_.lines.size(); ++end) {
+          tiles += line_tiles(end);
+          if (tiles > tile_capacity) {
+            break;
+          }
+        }
+        return end;
+      }
+
+      // Scores the lines from the current slot up to `end` in one encoder batch, each from its
+      // own batch position.
+      void score_lines(UINT end) {
+        const UINT first = slot_;
         UINT tiles = 0;
-        for (UINT slot = 0; slot < plan_.lines.size(); ++slot) {
+        for (UINT slot = first; slot < end; ++slot) {
           if (const UINT count = line_tiles(slot)) {
             select_line(slot);
             begin_line();
@@ -309,7 +316,7 @@ namespace models::host_sbs_direct_glyph_gpu {
           }
         }
         encode(tiles);
-        for (UINT slot = 0, batch_tile = 0; slot < plan_.lines.size(); ++slot) {
+        for (UINT slot = first, batch_tile = 0; slot < end; ++slot) {
           if (const UINT count = line_tiles(slot)) {
             select_line(slot);
             export_tiles(0, batch_tile, count);
@@ -317,22 +324,24 @@ namespace models::host_sbs_direct_glyph_gpu {
             batch_tile += count;
           }
         }
-        slot_ = UINT(plan_.lines.size());
+        slot_ = end;
       }
 
       void score_chunk() {
         const current_cuda_context_t guard(cuda_, primary_);
         const palette_state_t saved(ctx_.Get());
-        // When every planned tile fits one batch, the lines share it and leave no chunk below.
-        if (phase_ == phase_e::plan && planned_tiles() <= tile_capacity) {
-          score_lines();
-        }
         while (slot_ < plan_.lines.size()) {
           if (!plan_.lines[slot_][0]) {
             ++slot_;
             continue;
           }
           if (tile_start_ == 0) {
+            // Whole lines share one batch for as long as their tiles fit it: a screen of short
+            // lines costs one GPU step for each batch, not one for each line.
+            if (const UINT end = batch_end(slot_); end > slot_) {
+              score_lines(end);
+              break;
+            }
             select_line(slot_);
             begin_line();
           }

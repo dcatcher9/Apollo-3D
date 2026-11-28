@@ -2624,8 +2624,9 @@ TEST(DirectGlyphHardware, HoldsClearsOwnerChangesAndWorkerRetirement) {
   EXPECT_TRUE(score.release());
 }
 
-// One observation's lines share one encoder batch and one scoring fence when their tiles fit it.
-// Each line matches scoring it alone; a plan over the batch limit keeps one fence per chunk.
+// One observation's whole lines share an encoder batch, and its scoring fence, for as long as
+// their tiles fit it. Each line matches scoring it alone; a line wider than a batch keeps one
+// fence per chunk.
 TEST(DirectGlyphHardware, ScoresTheLinesThatFitOneBatchUnderOneFence) {
   namespace glyph = models::host_sbs_direct_glyph_gpu;
   using Microsoft::WRL::ComPtr;
@@ -2707,8 +2708,8 @@ TEST(DirectGlyphHardware, ScoresTheLinesThatFitOneBatchUnderOneFence) {
   // registration to the thread that submits (and draws).
   EXPECT_FALSE(transport.native_interop_registered_for_tests());
 
-  // Light strokes with dark outlines on a textured backdrop, in three caption rows.
-  constexpr UINT width = 2560, height = 160, scale = 4, advance = 6 * scale;
+  // Light strokes with dark outlines on a textured backdrop, in four caption rows.
+  constexpr UINT width = 3840, height = 212, scale = 4, advance = 6 * scale;
   constexpr std::array<std::array<std::uint8_t, 7>, 4> font {{
     {{14, 17, 17, 31, 17, 17, 17}},
     {{30, 17, 17, 30, 17, 17, 30}},
@@ -2718,8 +2719,21 @@ TEST(DirectGlyphHardware, ScoresTheLinesThatFitOneBatchUnderOneFence) {
   struct line_t {
     UINT left, top, characters;
   };
-  // Each short line has one encoder tile; the long lines have four and three.
-  constexpr std::array<line_t, 5> lines {{{40, 10, 10}, {40, 62, 10}, {40, 114, 10}, {400, 10, 80}, {400, 62, 56}}};
+  // Each short line has one encoder tile; the long lines have four and three, and the last one
+  // has more than a batch holds.
+  constexpr std::array<line_t, 11> lines {{
+    {40, 10, 10},
+    {40, 62, 10},
+    {40, 114, 10},
+    {400, 10, 80},
+    {400, 62, 56},
+    {400, 114, 10},
+    {760, 114, 10},
+    {1120, 114, 10},
+    {1480, 114, 10},
+    {1840, 114, 10},
+    {40, 166, 150},
+  }};
   const auto half = [](float value) {
     const auto bits = std::bit_cast<std::uint32_t>(value);
     return std::uint16_t((((bits >> 23) & 0xffu) - 112u) << 10 | ((bits >> 13) & 0x3ffu));
@@ -2867,7 +2881,8 @@ TEST(DirectGlyphHardware, ScoresTheLinesThatFitOneBatchUnderOneFence) {
       SCOPED_TRACE(line.characters);
       scored_t alone;
       ASSERT_NO_FATAL_FAILURE(score({line}, alone));
-      EXPECT_EQ(alone.scoring_fences, 1u);
+      // Only the line wider than a batch needs a second one.
+      EXPECT_EQ(alone.scoring_fences, line.characters == lines[10].characters ? 2u : 1u);
       expect_ink(alone, line);
       std::transform(expected.begin(), expected.end(), alone.alpha.begin(), expected.begin(), [](UINT a, UINT b) {
         return std::max(a, b);
@@ -2884,8 +2899,14 @@ TEST(DirectGlyphHardware, ScoresTheLinesThatFitOneBatchUnderOneFence) {
   };
   // Three one-tile lines fit one batch: planning plus one scoring fence.
   ASSERT_NO_FATAL_FAILURE(expect_lines({lines[0], lines[1], lines[2]}, 1u));
-  // Seven tiles exceed the six-tile batch, so each line keeps its own chunk and fence.
+  // Seven tiles exceed the six-tile batch, so each line keeps its own batch and fence.
   ASSERT_NO_FATAL_FAILURE(expect_lines({lines[3], lines[4]}, 2u));
+  // A screen of eight short lines, as a menu has: six share the first batch and two the second.
+  ASSERT_NO_FATAL_FAILURE(expect_lines({lines[0], lines[1], lines[2], lines[5], lines[6], lines[7], lines[8], lines[9]}, 2u));
+  // Short lines around long ones: one and four tiles share a batch, then three, one and one.
+  ASSERT_NO_FATAL_FAILURE(expect_lines({lines[0], lines[3], lines[4], lines[1], lines[5]}, 2u));
+  // A line wider than a batch is scored in its own two chunks between the batches of the others.
+  ASSERT_NO_FATAL_FAILURE(expect_lines({lines[0], lines[1], lines[10], lines[4]}, 4u));
   EXPECT_TRUE(transport.release());
 }
 

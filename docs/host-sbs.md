@@ -429,8 +429,8 @@ On a fresh observation, depth inference and eligible OCR detection are sibling C
 The estimator waits for their joint completion and prepares the Base geometry and OCR work boxes
 before submitting Direct Glyph. The glyph model uses the source RGB inside those boxes.
 Its mask publication is on the path to delivering the new stereo geometry. A score takes two GPU
-steps or more: the plan, one scoring batch for the lines that fit one, or one batch per chunk
-otherwise, and the finish. Each step is queued by the poll that finds the one before it finished.
+steps or more: the plan, then one step for each scoring batch, the last of which also finishes
+the score. Each step is queued by the poll that finds the one before it finished.
 A live completion works the score through those steps inside the remainder of its own
 [bounded same-frame wait](#gpu-owned-near-identical-transaction), waiting on the score's D3D11
 fence between them, so the mask retires in the conversion that completed its depth whenever the
@@ -537,10 +537,11 @@ A 136-byte scheduling record supplies eight width/height pairs, the hold flag an
 line's scale reference height. Locations, image tensors, cue evidence and raw
 opacity stay on the GPU. Each submission processes at most six encoder tiles before
 checking completion, and the batch shape changes only after the previous batch's fence.
-An observation whose lines fit one batch therefore needs two fences, planning and scoring,
-for any number of lines. A larger plan scores each line, or each part of a long line, in its
-own submission under the same observation token. Only the completed observation can publish
-its native mask.
+Whole lines share a batch, in plan order, for as long as their tiles fit it. An observation
+whose lines fit one batch therefore needs two fences, planning and scoring, for any number of
+lines, and a screen of eight one-tile lines needs three. Only a line wider than a batch is
+scored alone, one part to a submission. Every submission runs under the same observation
+token. Only the completed observation can publish its native mask.
 
 #### Text-game pin
 
