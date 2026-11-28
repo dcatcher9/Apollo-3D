@@ -119,6 +119,17 @@ namespace video::detail {
       completion_waiting_ += completion_wait;
     }
 
+    /** A conversion that only repeated the previous picture while its own was still pending,
+     *  and was therefore not encoded. */
+    void repeat_not_sent() noexcept {
+      ++repeats_not_sent_;
+    }
+
+    /** Pending work was finished between two conversions and its picture delivered at once. */
+    void delivered_when_ready() noexcept {
+      ++ready_deliveries_;
+    }
+
     /** NVENC pictures that may be in flight; kept across reset(). */
     void set_pipeline_depth(unsigned depth) noexcept {
       depth_ = depth;
@@ -146,7 +157,8 @@ namespace video::detail {
       };
       const auto busy = hold_actual_ + wait_actual_ + converting_ + encoding_;
       return std::format(
-        "Video encode loop: {} iterations in {:.1f} s; {} new-content and {} repeated-content encodes; holding {:.1f} ms in {} exact holds "
+        "Video encode loop: {} iterations in {:.1f} s; {} new-content and {} repeated-content encodes "
+        "({} repeats of a pending picture not sent, {} pending pictures delivered when ready); holding {:.1f} ms in {} exact holds "
         "(requested {:.1f} ms, overshoot avg {:.2f} max {:.2f} ms); waiting {:.1f} ms in {} image waits (requested {:.1f} ms; "
         "{} ran to their bound {}, overshoot avg {:.2f} max {:.2f} ms); converting {:.1f} ms in {} conversions; encoding {:.1f} ms "
         "(NVENC submit {:.1f} ms, completion wait {:.1f} ms; up to {} {} in flight, {} submitted behind another, submission to packet "
@@ -155,6 +167,8 @@ namespace video::detail {
         std::chrono::duration<double>(window).count(),
         new_encodes_,
         repeat_encodes_,
+        repeats_not_sent_,
+        ready_deliveries_,
         ms(hold_actual_),
         holds_,
         ms(hold_requested_),
@@ -191,6 +205,7 @@ namespace video::detail {
 
   private:
     std::uint64_t iterations_ = 0, holds_ = 0, waits_ = 0, timeouts_ = 0, conversions_ = 0, new_encodes_ = 0, repeat_encodes_ = 0;
+    std::uint64_t repeats_not_sent_ = 0, ready_deliveries_ = 0;
     duration_t hold_requested_ {}, hold_actual_ {}, hold_overshoot_max_ {};
     duration_t wait_requested_ {}, wait_actual_ {}, timeout_overshoot_ {}, timeout_overshoot_max_ {};
     duration_t converting_ {}, encoding_ {}, submitting_ {}, completion_waiting_ {};

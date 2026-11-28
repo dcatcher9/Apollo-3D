@@ -1751,8 +1751,14 @@ namespace {
     stats.pictures(0, 1, 9600us, 9600us);
     stats.encoded(false, 5ms, 200us, 4600us);
     stats.pictures(0, 1, 5ms, 5ms);
+    stats.repeat_not_sent();
+    stats.repeat_not_sent();
+    stats.delivered_when_ready();
     const auto line = stats.report(1s);
-    EXPECT_NE(line.find("2 iterations in 1.0 s; 1 new-content and 1 repeated-content encodes"), std::string::npos) << line;
+    EXPECT_NE(line.find("2 iterations in 1.0 s; 1 new-content and 1 repeated-content encodes "
+                        "(2 repeats of a pending picture not sent, 1 pending pictures delivered when ready); holding"),
+              std::string::npos)
+      << line;
     EXPECT_NE(line.find("holding 2.0 ms in 1 exact holds (requested 1.5 ms, overshoot avg 0.50 max 0.50 ms)"), std::string::npos) << line;
     EXPECT_NE(line.find("waiting 18.6 ms in 2 image waits (requested 56.0 ms; 1 ran to their bound at a scheduler tick, overshoot avg 14.60 max 14.60 ms)"), std::string::npos) << line;
     EXPECT_NE(line.find("converting 0.2 ms in 1 conversions; encoding 14.6 ms (NVENC submit 0.5 ms, completion wait 13.7 ms; "

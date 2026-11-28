@@ -2116,6 +2116,9 @@ namespace video {
         const auto next_capture_expected = *last_delivery_timestamp + encode_frame_threshold - detail::pending_conversion_advance_margin;
         if (std::chrono::steady_clock::now() < next_capture_expected) {
           pending_picture_ready = session->advance_pending_conversion(next_capture_expected);
+          if (pending_picture_ready && loop_stats) {
+            loop_stats->delivered_when_ready();
+          }
         }
       }
       if (!recovery_frame_requested || images->peek() || hold_startup_input) {
@@ -2354,6 +2357,9 @@ namespace video {
         // The work of this capture ran past the conversion's wait, and the converter drew the
         // previous picture again. That picture went out already. The new one is sent as soon as
         // it is ready, so a second copy of the old one would only delay it at the client.
+        if (loop_stats) {
+          loop_stats->repeat_not_sent();
+        }
 #ifdef SUNSHINE_TESTS
         if (test_hooks && test_hooks->repeat_coalesced) {
           test_hooks->repeat_coalesced();
